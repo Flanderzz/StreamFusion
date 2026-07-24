@@ -448,6 +448,17 @@ the native-symbol q9 profile that motivated it was dominated by the removed IPC 
 50K-event exactly-once Kafka profile loop subsequently completed 50 jobs in 60 seconds instead of
 45, **11.1% more end-to-end work**.
 
+**Paimon map-state flushes diff per entry.** The Paimon backend's map store (join state: one table
+row per stored row under PK `[kg, key, row]`) initially flushed a touched key by rewriting its
+whole bucket at the barrier, so one matched row in a hot join key rewrote every row stored under
+that key. The store now keeps the bucket image it hydrated and diffs against it at the barrier:
+only entries that differ are upserted and only vanished rows are tombstoned — the analog of
+RocksDB MapState's per-entry puts and deletes, derived from the image instead of tracked per
+mutation, so the operator still mutates a plain hydrated map. Write volume per checkpoint drops
+from O(bucket) to O(changed rows) per touched key (a unit test pins 1 row flushed from a 3-row
+bucket, and zero for a reverted mutation); no end-to-end number is claimed — the Paimon backend
+is opt-in and its benchmark pass is still pending.
+
 ## 5. Keeping the island whole
 
 The all-or-nothing gate (`196058a`) raises the stakes on every expression and operator: a single

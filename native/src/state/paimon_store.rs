@@ -1321,12 +1321,12 @@ const SUB_KEY_COLUMN: &str = "r";
 /// The per-operator half of a MAP-state store (the analog of Flink's `MapState`, and of its join
 /// state views): a key's value is a map of rows to per-row metadata, persisted as one table row
 /// per entry under PK `[kg, k, r]`, where `r` is a STABLE byte identity of the row — its Flink
-/// BinaryRow encoding, not the transient arrow-row bytes the working set keys by. A dirty key
-/// rewrites its bucket's live entries and tombstones the hydrated entries that are gone; the
-/// per-entry-dirty refinement (write only the changed rows of a hot bucket) is a later,
-/// store-internal optimization.
+/// BinaryRow encoding, not the transient arrow-row bytes the working set keys by. The flush is
+/// per-entry: a dirty key writes only the entries that differ from the hydrated image and
+/// tombstones the hydrated entries that are gone, so a hot bucket's unchanged rows cost nothing
+/// at the barrier.
 pub(crate) trait PaimonMapCodec {
-    type Entry;
+    type Entry: Clone + PartialEq;
 
     /// Whether this operator instance's row shape is persistable at all.
     fn supported(&self) -> bool;
@@ -1351,18 +1351,19 @@ enum MapSlot<E> {
     Present {
         entries: ahash::HashMap<ByteKey, E>,
         dirty: bool,
-        /// The row bytes hydrated from the table — the tombstone base: persisted rows no longer
-        /// live at the barrier are exactly `persisted − entries.keys()`.
-        persisted: StdHashSet<ByteKey>,
+        /// The (row → entry) image hydrated from the table — the flush base: a live entry is
+        /// written only if it differs from this image, and persisted rows no longer live at the
+        /// barrier (`persisted − entries.keys()`) get tombstones.
+        persisted: ahash::HashMap<ByteKey, E>,
     },
     Absent {
         dirty: bool,
-        persisted: StdHashSet<ByteKey>,
+        persisted: ahash::HashMap<ByteKey, E>,
     },
 }
 
 impl<E> MapSlot<E> {
-    fn take_persisted(&mut self) -> StdHashSet<ByteKey> {
+    fn take_persisted(&mut self) -> ahash::HashMap<ByteKey, E> {
         match self {
             MapSlot::Present { persisted, .. } | MapSlot::Absent { persisted, .. } => {
                 std::mem::take(persisted)
@@ -1413,11 +1414,11 @@ impl<C: PaimonMapCodec> KeyedStateStore<ahash::HashMap<ByteKey, C::Entry>> for P
         key: ByteKey,
         value: ahash::HashMap<ByteKey, C::Entry>,
     ) -> &mut ahash::HashMap<ByteKey, C::Entry> {
-        // An overwritten slot keeps its persisted row set: entries already in the table still
+        // An overwritten slot keeps its persisted image: entries already in the table still
         // need tombstones at the next checkpoint if the new map lacks them.
         let persisted = match self.working.get_mut(&*key.0) {
             Some(slot) => slot.take_persisted(),
-            None => StdHashSet::new(),
+            None => ahash::HashMap::default(),
         };
         let slot = self
             .working
@@ -1468,14 +1469,16 @@ impl<C: PaimonMapCodec> KeyedStateStore<ahash::HashMap<ByteKey, C::Entry>> for P
         let codec = &self.codec;
         self.working.retain(|key, slot| match slot {
             MapSlot::Present { dirty: true, .. } | MapSlot::Absent { dirty: true, .. } => true,
-            MapSlot::Present { dirty: false, entries, .. } => {
+            MapSlot::Present { dirty: false, entries, persisted } => {
                 *footprint -= (byte_key_bytes(&key.0)
                     + entries.iter().map(|(r, e)| codec.entry_bytes(&r.0, e)).sum::<usize>()
+                    + persisted.len() * Self::IMAGE_ENTRY_BYTES
                     + Self::SLOT_OVERHEAD) as isize;
                 false
             }
-            MapSlot::Absent { dirty: false, .. } => {
-                *footprint -= Self::SLOT_OVERHEAD as isize;
+            MapSlot::Absent { dirty: false, persisted } => {
+                *footprint -=
+                    (persisted.len() * Self::IMAGE_ENTRY_BYTES + Self::SLOT_OVERHEAD) as isize;
                 false
             }
         });
@@ -1490,6 +1493,10 @@ impl<C: PaimonMapCodec> KeyedStateStore<ahash::HashMap<ByteKey, C::Entry>> for P
 impl<C: PaimonMapCodec> PaimonMapStore<C> {
     const SLOT_OVERHEAD: usize =
         std::mem::size_of::<MapSlot<C::Entry>>() + GROUP_ENTRY_OVERHEAD;
+    /// One persisted-image entry: an `Arc` key clone plus the entry copy (the row bytes are
+    /// shared with the live map, so they are accounted once, by `entry_bytes`).
+    const IMAGE_ENTRY_BYTES: usize =
+        std::mem::size_of::<(ByteKey, C::Entry)>() + GROUP_ENTRY_OVERHEAD;
 
     /// Creates a fresh table under `config.table_dir` (schema document + directory skeleton).
     pub(crate) fn create(config: PaimonStoreConfig, codec: C) -> Result<Self, DataFusionError> {
@@ -1614,13 +1621,14 @@ impl<C: PaimonMapCodec> PaimonMapStore<C> {
         let mut added_bytes = 0usize;
         for (key, rows) in collected {
             let mut entries: ahash::HashMap<ByteKey, C::Entry> = ahash::HashMap::default();
-            let mut persisted: StdHashSet<ByteKey> = StdHashSet::new();
             for scalars in &rows {
                 let (row_bytes, entry) = self.codec.decode(scalars);
                 added_bytes += self.codec.entry_bytes(&row_bytes.0, &entry);
-                persisted.insert(row_bytes.clone());
                 entries.insert(row_bytes, entry);
             }
+            // The image shares the live map's key Arcs; only the entry copies are new.
+            let persisted = entries.clone();
+            added_bytes += persisted.len() * Self::IMAGE_ENTRY_BYTES;
             added_bytes += byte_key_bytes(&key.0) + Self::SLOT_OVERHEAD;
             self.working.insert(
                 key,
@@ -1630,18 +1638,19 @@ impl<C: PaimonMapCodec> PaimonMapStore<C> {
         for key in misses {
             self.working.entry(key).or_insert_with(|| {
                 added_bytes += Self::SLOT_OVERHEAD;
-                MapSlot::Absent { dirty: false, persisted: StdHashSet::new() }
+                MapSlot::Absent { dirty: false, persisted: ahash::HashMap::default() }
             });
         }
         self.footprint += added_bytes as isize;
         Ok(())
     }
 
-    /// Builds the write batch for all dirty slots: one upsert per live entry, one tombstone per
-    /// hydrated row no longer present. At most one row per `(k, r)` per checkpoint by construction
-    /// (live and vanished rows are disjoint) — required, since within one commit equal-PK rows
-    /// resolve by arrival order, which iteration here does not define.
-    fn dirty_batch(&self) -> Option<RecordBatch> {
+    /// Builds the write batch for all dirty slots: one upsert per live entry that differs from
+    /// the hydrated image (per-entry dirty — a hot bucket's untouched rows write nothing), one
+    /// tombstone per hydrated row no longer present. At most one row per `(k, r)` per checkpoint
+    /// by construction (upserts are live, tombstones are not) — required, since within one commit
+    /// equal-PK rows resolve by arrival order, which iteration here does not define.
+    pub(crate) fn dirty_batch(&self) -> Option<RecordBatch> {
         let num_value = self.value_fields.len();
         let mut kgs: Vec<i32> = Vec::new();
         let mut keys: Vec<&[u8]> = Vec::new();
@@ -1659,6 +1668,9 @@ impl<C: PaimonMapCodec> PaimonMapStore<C> {
             let kg = self.core.key_group(key);
             if let Some(entries) = entries {
                 for (row, entry) in entries.iter() {
+                    if persisted.get(&*row.0) == Some(entry) {
+                        continue; // unchanged since hydration — the table already holds it
+                    }
                     kgs.push(kg);
                     keys.push(&key.0);
                     subs.push(self.codec.sub_key(&row.0));
@@ -1669,7 +1681,7 @@ impl<C: PaimonMapCodec> PaimonMapStore<C> {
                     kinds.push(0); // +I upsert — deduplicate keeps the latest by sequence
                 }
             }
-            for row in persisted {
+            for row in persisted.keys() {
                 if entries.is_some_and(|entries| entries.contains_key(&*row.0)) {
                     continue;
                 }
@@ -1715,12 +1727,16 @@ impl<C: PaimonMapCodec> PaimonMapStore<C> {
         let codec = &self.codec;
         self.working.retain(|key, slot| {
             match slot {
-                MapSlot::Present { entries, .. } => {
+                MapSlot::Present { entries, persisted, .. } => {
                     *footprint -= (byte_key_bytes(&key.0)
                         + entries.iter().map(|(r, e)| codec.entry_bytes(&r.0, e)).sum::<usize>()
+                        + persisted.len() * Self::IMAGE_ENTRY_BYTES
                         + Self::SLOT_OVERHEAD) as isize;
                 }
-                MapSlot::Absent { .. } => *footprint -= Self::SLOT_OVERHEAD as isize,
+                MapSlot::Absent { persisted, .. } => {
+                    *footprint -=
+                        (persisted.len() * Self::IMAGE_ENTRY_BYTES + Self::SLOT_OVERHEAD) as isize;
+                }
             }
             false
         });

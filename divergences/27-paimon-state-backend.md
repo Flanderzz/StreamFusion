@@ -76,10 +76,11 @@ Top-N tie order), and a **map** store (MapState; PK `[kg, k, r]`, one row per en
 Flink BinaryRow bytes — a stable wire format, unlike arrow-row). The updating join runs two map
 tables (one per side) under one operator backend — the analog of Flink's two named join states as
 two column families in one RocksDB — carried by one incremental handle whose meta document stores
-an opaque snapshot token the native store packs both snapshot ids into. One deliberate divergence
-from RocksDB MapState remains: a dirty map key currently rewrites its whole bucket (plus
-tombstones for vanished rows) instead of per-entry writes; per-entry dirty tracking is a planned
-store-internal optimization for hot join keys with large buckets.
+an opaque snapshot token the native store packs both snapshot ids into. The map store's flush is
+per-entry, like RocksDB MapState's per-entry puts and deletes, but derived rather than tracked:
+the operator mutates a whole hydrated bucket in place, and at the barrier the store diffs it
+against the hydrated image — only entries that differ are upserted, only vanished rows are
+tombstoned, so a hot join key's untouched rows cost nothing per checkpoint.
 
 The full design record, including the verified paimon-rust API survey and the rejected
 alternatives (rust-rocksdb baseline, Tonbo, fjall, SlateDB, ForSt), is in

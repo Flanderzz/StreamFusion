@@ -213,7 +213,7 @@ pub(crate) fn data_schema(batch: &RecordBatch) -> SchemaRef {
 /// (the outer input of LEFT/RIGHT/FULL, or the probe side of SEMI/ANTI); otherwise it stays `-1` and
 /// is ignored — mirroring Flink's `OuterJoinRecordStateView` vs `JoinRecordStateView` and RisingWave's
 /// optional degree table.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub(crate) struct RowMeta {
     pub(crate) count: i64,
     pub(crate) num_assoc: i32,

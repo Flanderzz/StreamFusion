@@ -3873,4 +3873,87 @@ mod paimon_state {
         assert_eq!(right_v.value(0), 700);
         assert!(right_v.is_null(1), "the re-emitted left row must be null-padded");
     }
+
+    /// A `[k BIGINT, v BIGINT]` join-state entry decoded through the map codec, as the working
+    /// set holds it: (arrow-row byte key, RowMeta).
+    fn kv_entry(codec: &JoinStateCodec, k: i64, v: i64, cnt: i64, deg: i32) -> (ByteKey, RowMeta) {
+        crate::state::PaimonMapCodec::decode(
+            codec,
+            &[
+                ScalarValue::Int64(Some(k)),
+                ScalarValue::Int64(Some(v)),
+                ScalarValue::Int64(Some(cnt)),
+                ScalarValue::Int32(Some(deg)),
+            ],
+        )
+    }
+
+    /// Per-entry dirty flush, exercised directly: a hot bucket writes only the entries that
+    /// changed since hydration — untouched rows, and rows mutated back to their persisted value,
+    /// write nothing at the barrier.
+    #[test]
+    fn paimon_map_store_flushes_only_changed_entries() {
+        let dir = temp_dir("map-diff");
+        let codec = JoinStateCodec::new(&kv_schema());
+        let mut store =
+            PaimonJoinStore::create(config(&dir), JoinStateCodec::new(&kv_schema())).unwrap();
+        let probe = changelog_join_batch(vec![5], vec![0], vec![0]);
+        let key = {
+            let mut encoder = BinaryRowBatchEncoder::new(&probe, &[0], &[-1]);
+            ByteKey::from(encoder.encode(0))
+        };
+        let (row_a, meta_a) = kv_entry(&codec, 5, 10, 1, -1);
+        let (row_b, meta_b) = kv_entry(&codec, 5, 20, 1, -1);
+        let (row_c, meta_c) = kv_entry(&codec, 5, 30, 1, -1);
+
+        store.begin_batch(&probe, &[0], &[-1]).unwrap();
+        let mut bucket: JoinBucket = JoinBucket::default();
+        bucket.insert(row_a.clone(), meta_a);
+        bucket.insert(row_b.clone(), meta_b);
+        bucket.insert(row_c.clone(), meta_c);
+        store.insert(key.clone(), bucket);
+        assert_eq!(store.dirty_batch().unwrap().num_rows(), 3, "fresh bucket writes every row");
+        store.checkpoint(&temp_dir("map-diff-cp1")).unwrap();
+
+        // Touch one entry of the hydrated bucket: the flush is that one upsert, not the bucket.
+        store.begin_batch(&probe, &[0], &[-1]).unwrap();
+        store.get_mut(&key.0).unwrap().get_mut(&*row_b.0).unwrap().count = 2;
+        let batch = store.dirty_batch().unwrap();
+        assert_eq!(batch.num_rows(), 1, "only the touched entry may flush");
+        let kinds = batch
+            .column(batch.num_columns() - 1)
+            .as_any()
+            .downcast_ref::<Int8Array>()
+            .unwrap();
+        assert_eq!(kinds.value(0), 0, "the touched entry flushes as an upsert");
+        store.checkpoint(&temp_dir("map-diff-cp2")).unwrap();
+
+        // A mutation reverted within the interval leaves nothing to flush.
+        store.begin_batch(&probe, &[0], &[-1]).unwrap();
+        let entries = store.get_mut(&key.0).unwrap();
+        entries.get_mut(&*row_a.0).unwrap().count = 9;
+        entries.get_mut(&*row_a.0).unwrap().count = 1;
+        assert!(store.dirty_batch().is_none(), "a reverted mutation writes nothing");
+        store.checkpoint(&temp_dir("map-diff-cp3")).unwrap();
+
+        // Removing one entry tombstones just that row.
+        store.begin_batch(&probe, &[0], &[-1]).unwrap();
+        store.get_mut(&key.0).unwrap().remove(&*row_c.0);
+        let batch = store.dirty_batch().unwrap();
+        assert_eq!(batch.num_rows(), 1, "only the vanished entry may flush");
+        let kinds = batch
+            .column(batch.num_columns() - 1)
+            .as_any()
+            .downcast_ref::<Int8Array>()
+            .unwrap();
+        assert_eq!(kinds.value(0), 3, "the vanished entry flushes as a tombstone");
+        store.checkpoint(&temp_dir("map-diff-cp4")).unwrap();
+
+        // The surviving state reads back exactly: b's bumped count and c's removal stuck.
+        store.begin_batch(&probe, &[0], &[-1]).unwrap();
+        let entries = store.get(&key.0).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[&*row_a.0].count, 1);
+        assert_eq!(entries[&*row_b.0].count, 2);
+    }
 }
