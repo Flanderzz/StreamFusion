@@ -42,6 +42,18 @@ class FlinkPaimonStateBackendSqlHarnessTest {
   }
 
   @Test
+  void retractingTopNOnPaimonBackendMatchesHost() throws Exception {
+    Path input = Files.createTempDirectory("paimon-retopn-in");
+    writeInput(input);
+    // A Top-N over a GROUP BY changelog plans as the retracting ranker; both stateful operators
+    // in this job keep their state in Paimon tables.
+    NativeParity.assertChangelogParity(
+        () -> paimonEnvironment(input),
+        "SELECT k, total FROM (SELECT k, total, ROW_NUMBER() OVER (ORDER BY total DESC) AS rn"
+            + " FROM (SELECT k, SUM(v) AS total FROM t GROUP BY k)) WHERE rn <= 2");
+  }
+
+  @Test
   void unsupportedAggregatesFallBackToMemoryStateUnderPaimonBackend() throws Exception {
     Path input = Files.createTempDirectory("paimon-minmax-in");
     writeInput(input);

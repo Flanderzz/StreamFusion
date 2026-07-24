@@ -92,19 +92,17 @@ public class NativeColumnarTopNOperator extends AbstractStreamOperator<ArrowBatc
     super.initializeState(context);
     java.util.List<byte[]> snapshots = RawKeyedState.restore(context);
     memoryBudget = ManagedMemoryBudget.reserveFor(this);
-    // The Paimon list store serves the append-only ranker (its buffers are capped at N, so the
-    // whole-list rewrite per dirty key is bounded); the retracting ranker's unbounded buffers
-    // stay on memory state for now.
+    // Both rankers run on the Paimon list store: the append-only buffer is capped at N, and the
+    // retracting buffer — unbounded, like Flink's own retractable Top-N state — rewrites a
+    // touched partition once per checkpoint, strictly less than the per-record state rewrite
+    // Flink's RetractableTopNFunction pays on RocksDB.
     PaimonNativeStateSupport paimon =
-        retracting
-            ? null
-            : PaimonNativeStateSupport.resolve(
-                getKeyedStateBackend(),
-                "top-n",
-                !snapshots.isEmpty(),
-                () ->
-                    withRowSchema(address -> Native.paimonRowStateSupported(address) ? 1L : 0L)
-                        != 0);
+        PaimonNativeStateSupport.resolve(
+            getKeyedStateBackend(),
+            "top-n",
+            !snapshots.isEmpty(),
+            () ->
+                withRowSchema(address -> Native.paimonRowStateSupported(address) ? 1L : 0L) != 0);
     paimonState = paimon != null;
     if (paimonState) {
       handle =
@@ -117,8 +115,10 @@ public class NativeColumnarTopNOperator extends AbstractStreamOperator<ArrowBatc
                       sortAscending,
                       sortNullsFirst,
                       rowSchemaAddress,
+                      offset,
                       limit,
                       outputRankNumber,
+                      retracting,
                       netDiff,
                       memoryBudget.bytes(),
                       paimon.tableDirectory(),

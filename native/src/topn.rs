@@ -776,8 +776,9 @@ fn emit_changelog(
 /// without it, compared as a row multiset (rows that left → `-D`, rows that entered → `+I`). This
 /// single diff covers insert and retract and collapses to the same materialized result as Flink's
 /// per-case cascade.
-pub(crate) struct RetractableTopNRanker {
+pub(crate) struct RetractableTopNRanker<S: KeyedStateStore<Vec<TopNRow>> = MemoryTopNStore> {
     partition_columns: Vec<usize>,
+    key_timestamp_precisions: Vec<i32>,
     sort_columns: Vec<SortColumn>,
     /// Rank window: output ranks `[offset+1, limit]` (1-based), i.e. buffer indices `[offset, limit)`.
     /// `offset = rankStart - 1` (0 for the common no-`OFFSET` case); `limit = rankEnd`.
@@ -790,10 +791,10 @@ pub(crate) struct RetractableTopNRanker {
     // The append-only ranker's byte-row state (see TopNRow): partition probes by borrowed bytes,
     // rows as (memcomparable sort key, Arc-shared payload) — no per-cell `ScalarValue`, and the
     // before/after top-N snapshots the diff reads are refcount bumps, not row deep-clones.
-    groups: HashMap<ByteKey, Vec<TopNRow>>,
+    groups: S,
     staged_order: Vec<ByteKey>,
     staged_old_tops: HashMap<ByteKey, Vec<Arc<OwnedRow>>>,
-    memory: OperatorMemory,
+    pub(crate) memory: OperatorMemory,
 }
 
 impl RetractableTopNRanker {
@@ -804,8 +805,10 @@ impl RetractableTopNRanker {
         limit: i64,
         output_rank_number: bool,
     ) -> Self {
+        let key_arity = partition_columns.len();
         RetractableTopNRanker {
             partition_columns,
+            key_timestamp_precisions: vec![-1; key_arity],
             sort_columns,
             offset,
             limit,
@@ -813,16 +816,11 @@ impl RetractableTopNRanker {
             net_diff: false,
             schema: None,
             converters: None,
-            groups: HashMap::default(),
+            groups: MemoryTopNStore::default(),
             staged_order: Vec::new(),
             staged_old_tops: HashMap::default(),
             memory: OperatorMemory::unaccounted(),
         }
-    }
-
-    pub(crate) fn with_net_diff(mut self, net_diff: bool) -> Self {
-        self.net_diff = net_diff;
-        self
     }
 
     /// Bounds the full per-partition buffers by the operator's managed-memory budget (negative =
@@ -838,6 +836,65 @@ impl RetractableTopNRanker {
         self.memory.attach("retracting-top-n", budget_bytes, state)?;
         Ok(self)
     }
+}
+
+impl<S: KeyedStateStore<Vec<TopNRow>>> RetractableTopNRanker<S> {
+    pub(crate) fn with_net_diff(mut self, net_diff: bool) -> Self {
+        self.net_diff = net_diff;
+        self
+    }
+
+    /// Moves this freshly built (empty, memory-backed) ranker's configuration onto another state
+    /// backend (see the append-only ranker's `with_backend`).
+    pub(crate) fn with_backend<T: KeyedStateStore<Vec<TopNRow>>>(
+        self,
+        groups: T,
+    ) -> RetractableTopNRanker<T> {
+        RetractableTopNRanker {
+            partition_columns: self.partition_columns,
+            key_timestamp_precisions: self.key_timestamp_precisions,
+            sort_columns: self.sort_columns,
+            offset: self.offset,
+            limit: self.limit,
+            output_rank_number: self.output_rank_number,
+            net_diff: self.net_diff,
+            schema: self.schema,
+            converters: self.converters,
+            groups,
+            staged_order: self.staged_order,
+            staged_old_tops: self.staged_old_tops,
+            memory: self.memory,
+        }
+    }
+
+    /// Attaches the managed-memory budget for a backend that starts with nothing resident.
+    pub(crate) fn with_read_through_budget(
+        mut self,
+        budget_bytes: i64,
+    ) -> Result<Self, DataFusionError> {
+        self.memory.attach("retracting-top-n", budget_bytes, 0)?;
+        Ok(self)
+    }
+
+    /// The backing store, for backend-specific control paths (checkpointing a persistent store).
+    pub(crate) fn store_mut(&mut self) -> &mut S {
+        &mut self.groups
+    }
+
+    pub(crate) fn with_key_timestamp_precisions(
+        mut self,
+        key_timestamp_precisions: Vec<i32>,
+    ) -> Self {
+        self.key_timestamp_precisions = key_timestamp_precisions;
+        self
+    }
+
+    /// Pre-installs a converter set built from declared types (the Paimon path, which must share
+    /// the codec's converters); the lazy first-batch build then never runs.
+    pub(crate) fn with_converters(mut self, converters: TopNConverters) -> Self {
+        self.converters = Some(converters);
+        self
+    }
 
     pub(crate) fn push(&mut self, batch: &RecordBatch) -> Result<RecordBatch, DataFusionError> {
         if self.net_diff {
@@ -849,15 +906,19 @@ impl RetractableTopNRanker {
             self.converters =
                 Some(TopNConverters::build(batch, arity, &self.partition_columns, &self.sort_columns));
         }
+        self.groups
+            .begin_batch(batch, &self.partition_columns, &self.key_timestamp_precisions)?;
         let conv = self.converters.as_ref().expect("converters set");
-        // Encode the whole batch columnar->row in three vectorized passes (partition key, sort key,
-        // full-row payload), instead of materializing a `ScalarValue` per cell.
-        let partition_arrays: Vec<ArrayRef> =
-            self.partition_columns.iter().map(|&i| batch.column(i).clone()).collect();
+        // Encode the sort key and full-row payload columnar->row in two vectorized passes; the
+        // partition key encodes per row into the BinaryRow encoder's reused buffer.
+        let mut parts = BinaryRowBatchEncoder::new(
+            batch,
+            &self.partition_columns,
+            &self.key_timestamp_precisions,
+        );
         let sort_arrays: Vec<ArrayRef> =
             self.sort_columns.iter().map(|s| batch.column(s.index).clone()).collect();
         let data_arrays: Vec<ArrayRef> = (0..arity).map(|i| batch.column(i).clone()).collect();
-        let parts = encode_group_keys(&conv.partition, &partition_arrays, batch.num_rows());
         let keys = encode_group_keys(&conv.sort, &sort_arrays, batch.num_rows());
         let payloads = conv.payload.convert_columns(&data_arrays).expect("encode payload");
 
@@ -876,14 +937,14 @@ impl RetractableTopNRanker {
         for row in 0..batch.num_rows() {
             // Borrowed partition-key probe; the key bytes are copied only when a partition first
             // appears (a full retracting buffer never removes its partition entry).
-            let part = parts.row(row).data();
+            let part = parts.encode(row);
             let buffer = match groups.get_mut(part) {
                 Some(buffer) => buffer,
                 None => {
                     if track {
                         delta += (part.len() + GROUP_ENTRY_OVERHEAD) as isize;
                     }
-                    groups.entry(ByteKey::from(part)).or_default()
+                    groups.insert(ByteKey::from(part), Vec::new())
                 }
             };
             // The top-N window before the mutation: Arc bumps of the payloads, not row clones.
@@ -921,7 +982,8 @@ impl RetractableTopNRanker {
                 .collect();
             diff_top(rank_output, rank_base, &old_top, &new_top, &mut out_rows, &mut out_kinds, &mut out_ranks);
         }
-        self.memory.record(delta);
+        self.groups.end_bundle()?;
+        self.memory.record(delta + self.groups.footprint_delta());
         self.memory.account()?;
         Ok(emit_changelog(
             self.schema.as_ref(),
@@ -953,32 +1015,41 @@ impl RetractableTopNRanker {
             self.converters =
                 Some(TopNConverters::build(batch, arity, &self.partition_columns, &self.sort_columns));
         }
+        // The mini-batch bundle spans pushes: hydrated partitions stay resident until the flush
+        // ends the bundle, so the staged preimages' re-probes there stay truthful.
+        self.groups
+            .begin_batch(batch, &self.partition_columns, &self.key_timestamp_precisions)?;
         let conv = self.converters.as_ref().expect("converters set");
-        let partition_arrays: Vec<ArrayRef> =
-            self.partition_columns.iter().map(|&i| batch.column(i).clone()).collect();
+        let mut parts = BinaryRowBatchEncoder::new(
+            batch,
+            &self.partition_columns,
+            &self.key_timestamp_precisions,
+        );
         let sort_arrays: Vec<ArrayRef> =
             self.sort_columns.iter().map(|s| batch.column(s.index).clone()).collect();
         let data_arrays: Vec<ArrayRef> = (0..arity).map(|i| batch.column(i).clone()).collect();
-        let parts = encode_group_keys(&conv.partition, &partition_arrays, batch.num_rows());
         let keys = encode_group_keys(&conv.sort, &sort_arrays, batch.num_rows());
         let payloads = conv.payload.convert_columns(&data_arrays).expect("encode payload");
         let row_kinds = row_kind_column(batch);
         let (offset, limit) = (self.offset as usize, self.limit as usize);
         let track = self.memory.tracking();
         let mut delta = 0isize;
+        let groups = &mut self.groups;
 
+        let staged_order = &mut self.staged_order;
+        let staged_old_tops = &mut self.staged_old_tops;
         for row in 0..batch.num_rows() {
-            let part = parts.row(row).data();
-            let buffer = match self.groups.get_mut(part) {
+            let part = parts.encode(row);
+            let buffer = match groups.get_mut(part) {
                 Some(buffer) => buffer,
                 None => {
                     if track {
                         delta += (part.len() + GROUP_ENTRY_OVERHEAD) as isize;
                     }
-                    self.groups.entry(ByteKey::from(part)).or_default()
+                    groups.insert(ByteKey::from(part), Vec::new())
                 }
             };
-            if !self.staged_old_tops.contains_key(part) {
+            if !staged_old_tops.contains_key(part) {
                 let key = ByteKey::from(part);
                 let old = buffer[offset.min(buffer.len())..limit.min(buffer.len())]
                     .iter()
@@ -987,8 +1058,8 @@ impl RetractableTopNRanker {
                 if track {
                     delta += topn_staged_entry_bytes(&key, &old) as isize;
                 }
-                self.staged_order.push(key.clone());
-                self.staged_old_tops.insert(key, old);
+                staged_order.push(key.clone());
+                staged_old_tops.insert(key, old);
             }
 
             let retract = matches!(row_kinds.map(|k| k.value(row)).unwrap_or(0), 1 | 3);
@@ -1009,7 +1080,7 @@ impl RetractableTopNRanker {
                 }
             }
         }
-        self.memory.record(delta);
+        self.memory.record(delta + self.groups.footprint_delta());
         self.memory.account()?;
         Ok(emit_changelog(
             self.schema.as_ref(),
@@ -1040,7 +1111,7 @@ impl RetractableTopNRanker {
         let mut out_kinds = Vec::new();
         let mut out_ranks = Vec::new();
         for part in touched {
-            let buffer = &self.groups[&part];
+            let buffer = self.groups.get(&part.0).expect("staged partition resident");
             let new_top: Vec<Arc<OwnedRow>> = buffer
                 [offset.min(buffer.len())..limit.min(buffer.len())]
                 .iter()
@@ -1056,6 +1127,8 @@ impl RetractableTopNRanker {
                 &mut out_ranks,
             );
         }
+        self.groups.end_bundle().expect("end retracting top-n bundle");
+        self.memory.record(self.groups.footprint_delta());
         self.memory.forget(staged_bytes);
         self.memory.account_shrink();
         emit_changelog(
@@ -1067,12 +1140,17 @@ impl RetractableTopNRanker {
             out_ranks,
         )
     }
+}
 
+/// The raw keyed-state snapshot/restore surface exists only on the memory backend — a persistent
+/// store checkpoints through its own commit path instead of materializing the key space.
+impl RetractableTopNRanker {
     /// Serializes the buffered rows in per-partition buffer order (partition derivable from the row).
     fn snapshot(&self) -> Vec<u8> {
         let Some(schema) = &self.schema else { return Vec::new() };
         let Some(conv) = &self.converters else { return Vec::new() };
-        let rows: Vec<Row> = self.groups.values().flatten().map(|(_, p)| p.row()).collect();
+        let rows: Vec<Row> =
+            self.groups.iter().flat_map(|(_, buffer)| buffer.iter()).map(|(_, p)| p.row()).collect();
         if rows.is_empty() {
             return Vec::new();
         }
@@ -1080,8 +1158,10 @@ impl RetractableTopNRanker {
         write_ipc(&RecordBatch::try_new(schema.clone(), columns).expect("retract top-n snapshot"))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn restore(
         partition_columns: Vec<usize>,
+        key_timestamp_precisions: Vec<i32>,
         sort_columns: Vec<SortColumn>,
         offset: i64,
         limit: i64,
@@ -1089,7 +1169,8 @@ impl RetractableTopNRanker {
         bytes: &[u8],
     ) -> Self {
         let mut ranker =
-            RetractableTopNRanker::new(partition_columns, sort_columns, offset, limit, output_rank_number);
+            RetractableTopNRanker::new(partition_columns, sort_columns, offset, limit, output_rank_number)
+                .with_key_timestamp_precisions(key_timestamp_precisions);
         for batch in read_ipc_if_present(bytes) {
             let arity = batch.num_columns();
             ranker.schema = Some(batch.schema());
@@ -1102,20 +1183,24 @@ impl RetractableTopNRanker {
                 ));
             }
             let conv = ranker.converters.as_ref().expect("converters set");
-            let partition_arrays: Vec<ArrayRef> =
-                ranker.partition_columns.iter().map(|&i| batch.column(i).clone()).collect();
+            let mut parts = BinaryRowBatchEncoder::new(
+                &batch,
+                &ranker.partition_columns,
+                &ranker.key_timestamp_precisions,
+            );
             let sort_arrays: Vec<ArrayRef> =
                 ranker.sort_columns.iter().map(|s| batch.column(s.index).clone()).collect();
             let data_arrays: Vec<ArrayRef> = (0..arity).map(|i| batch.column(i).clone()).collect();
-            let parts = encode_group_keys(&conv.partition, &partition_arrays, batch.num_rows());
             let keys = encode_group_keys(&conv.sort, &sort_arrays, batch.num_rows());
             let payloads = conv.payload.convert_columns(&data_arrays).expect("encode payload");
             let groups = &mut ranker.groups;
             for row in 0..batch.num_rows() {
-                groups
-                    .entry(ByteKey::from(parts.row(row).data()))
-                    .or_default()
-                    .push((keys.row(row).owned(), Arc::new(payloads.row(row).owned()))); // buffer order
+                let part = parts.encode(row);
+                let buffer = match groups.get_mut(part) {
+                    Some(buffer) => buffer,
+                    None => groups.insert(ByteKey::from(part), Vec::new()),
+                };
+                buffer.push((keys.row(row).owned(), Arc::new(payloads.row(row).owned()))); // buffer order
             }
         }
         ranker
@@ -1271,6 +1356,7 @@ impl TopNHandle {
         if retracting {
             TopNHandle::Retract(RetractableTopNRanker::restore(
                 partition_columns,
+                key_timestamp_precisions,
                 sort_columns,
                 offset,
                 limit,
@@ -1893,13 +1979,17 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createTopNRan
         .collect();
     let sort = read_sort_columns(&env, &sort_indices, &sort_ascending, &sort_nulls_first);
     let handle = if retracting != 0 {
-        TopNHandle::Retract(RetractableTopNRanker::new(
-            partitions,
-            sort,
-            offset,
-            limit,
-            output_rank_number != 0,
-        ).with_net_diff(net_diff != 0))
+        TopNHandle::Retract(
+            RetractableTopNRanker::new(
+                partitions,
+                sort,
+                offset,
+                limit,
+                output_rank_number != 0,
+            )
+            .with_key_timestamp_precisions(timestamp_precisions)
+            .with_net_diff(net_diff != 0),
+        )
     } else {
         // The append-only ranker is the no-OFFSET path (offset always 0).
         TopNHandle::Append(
@@ -1994,6 +2084,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreTopNRa
     let handle = if retracting != 0 {
         TopNHandle::Retract(RetractableTopNRanker::restore(
             partitions,
+            timestamp_precisions,
             sort,
             offset,
             limit,

@@ -3729,6 +3729,38 @@ mod paimon_state {
         assert_eq!(values(&out, 1), vec![71, 1], "-D must hit the later tie arrival");
     }
 
+    /// Retracting Top-2 partitioned by column 0, ordered by column 1 ascending, rank projected.
+    fn paimon_retract_topn(dir: &str) -> RetractableTopNRanker<PaimonTopNStore> {
+        let codec = TopNStateCodec::new(vec![DataType::Int64, DataType::Int64], vec![asc(1)]);
+        let converters = TopNConverters::from_codec(&codec, &[0]);
+        let store = PaimonTopNStore::create(config(dir), codec).unwrap();
+        RetractableTopNRanker::new(vec![0], vec![asc(1)], 0, 2, true)
+            .with_converters(converters)
+            .with_backend(store)
+    }
+
+    #[test]
+    fn paimon_retracting_topn_matches_memory_across_checkpoints() {
+        let dir = temp_dir("retopn-parity");
+        let mut paimon = paimon_retract_topn(&dir);
+        let mut memory = RetractableTopNRanker::new(vec![0], vec![asc(1)], 0, 2, true);
+
+        // Accumulations, then retractions whose replacement comes from BEYOND rank N — which only
+        // works if the full buffer (not just the top N) survived the checkpoint round trips.
+        let steps: Vec<RecordBatch> = vec![
+            changelog_join_batch(vec![1, 1, 1], vec![10, 20, 30], vec![0, 0, 0]),
+            changelog_join_batch(vec![1], vec![5], vec![0]),
+            changelog_join_batch(vec![1], vec![5], vec![3]),
+            changelog_join_batch(vec![1, 1], vec![10, 20], vec![3, 3]),
+        ];
+        for (i, batch) in steps.iter().enumerate() {
+            assert_same_output(&memory.push(batch).unwrap(), &paimon.push(batch).unwrap());
+            // A checkpoint between every step forces every probe through the table.
+            let link = temp_dir(&format!("retopn-parity-cp{i}"));
+            paimon.store_mut().checkpoint(&link).unwrap();
+        }
+    }
+
     /// The list store's shrink/removal tombstones, exercised directly: positions vacated by a
     /// shorter list — or a removed key — must not resurface on rehydration.
     #[test]

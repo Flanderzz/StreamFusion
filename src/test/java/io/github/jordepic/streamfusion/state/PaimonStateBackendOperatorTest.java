@@ -320,6 +320,59 @@ class PaimonStateBackendOperatorTest {
           new LogicalType[] {new BigIntType(), new BigIntType()}, new String[] {"p", "s"});
 
   /**
+   * The retracting Top-N keeps its FULL buffer (never truncated to N) on the same list store: a
+   * retraction after restore promotes the row that sat beyond rank N, which only works if the
+   * whole buffer — not just the visible top — survived the Paimon round trip.
+   */
+  @Test
+  void retractingTopNPromotesFromBeyondNAfterRestore() throws Exception {
+    OperatorSubtaskState snapshot;
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness =
+            retractingTopNHarness()) {
+      harness.setStateBackend(new PaimonStateBackend());
+      harness.setup(new ArrowBatchSerializer());
+      harness.open();
+
+      harness.processElement(
+          new StreamRecord<>(
+              new ArrowBatch(
+                  RowDataArrowConverter.write(
+                      List.of(
+                          GenericRowData.of(9L, 1L),
+                          GenericRowData.of(9L, 2L),
+                          GenericRowData.of(9L, 3L)),
+                      TOPN_ROW,
+                      allocator))));
+      assertEquals(
+          List.of(List.of(RowKind.INSERT, 9L, 1L), List.of(RowKind.INSERT, 9L, 2L)),
+          collectDedupless(harness));
+      snapshot = harness.snapshot(1, 1);
+      paimonHandle(snapshot);
+      harness.notifyOfCompletedCheckpoint(1);
+    }
+
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness =
+            retractingTopNHarness()) {
+      harness.setStateBackend(new PaimonStateBackend());
+      harness.setup(new ArrowBatchSerializer());
+      harness.initializeState(snapshot);
+      harness.open();
+
+      // Retracting rank 1 must promote the restored rank-3 row into the top-2.
+      harness.processElement(
+          new StreamRecord<>(
+              new ArrowBatch(
+                  RowDataArrowConverter.write(
+                      List.of(rowOfKind(RowKind.DELETE, 9, 1)), TOPN_ROW, allocator, true))));
+      assertEquals(
+          List.of(List.of(RowKind.INSERT, 9L, 3L), List.of(RowKind.DELETE, 9L, 1L)),
+          collectDedupless(harness));
+    }
+  }
+
+  /**
    * The updating join rides two Paimon tables under one backend (the analog of Flink's two named
    * join states as two column families in one RocksDB): one incremental handle carries both, and a
    * restored joiner's retraction still finds the pre-restore match.
@@ -437,6 +490,27 @@ class PaimonStateBackendOperatorTest {
             2L,
             false,
             false,
+            false,
+            -1,
+            MAX_PARALLELISM);
+    return new KeyedOneInputStreamOperatorTestHarness<>(
+        operator, batch -> 0, Types.INT, MAX_PARALLELISM, 1, 0);
+  }
+
+  private static KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch>
+      retractingTopNHarness() throws Exception {
+    NativeColumnarTopNOperator operator =
+        new NativeColumnarTopNOperator(
+            new int[] {0},
+            new int[] {-1},
+            TOPN_ROW,
+            new int[] {1},
+            new int[] {1},
+            new int[] {0},
+            0L,
+            2L,
+            false,
+            true,
             false,
             -1,
             MAX_PARALLELISM);

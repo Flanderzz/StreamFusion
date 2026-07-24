@@ -623,7 +623,57 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_closePaimonCh
     }
 }
 
-type PaimonTopNRanker = TopNRanker<PaimonTopNStore>;
+/// The Paimon-backed Top-N handle: append-only (bounded buffer) or retracting (full buffer, so a
+/// retracted top row's successor can be promoted), both on the same list store and codec — the
+/// buffer shape is identical, only its growth policy differs.
+enum PaimonTopNRanker {
+    Append(TopNRanker<PaimonTopNStore>),
+    Retract(RetractableTopNRanker<PaimonTopNStore>),
+}
+
+impl PaimonTopNRanker {
+    fn push(&mut self, batch: &RecordBatch) -> Result<RecordBatch, DataFusionError> {
+        match self {
+            PaimonTopNRanker::Append(r) => r.push(batch),
+            PaimonTopNRanker::Retract(r) => r.push(batch),
+        }
+    }
+
+    fn flush(&mut self) -> RecordBatch {
+        match self {
+            PaimonTopNRanker::Append(r) => r.flush_net_diff(),
+            PaimonTopNRanker::Retract(r) => r.flush_net_diff(),
+        }
+    }
+
+    fn checkpoint(&mut self, link_dir: &str) -> Result<PaimonCheckpointManifest, DataFusionError> {
+        match self {
+            PaimonTopNRanker::Append(r) => r.store_mut().checkpoint(link_dir),
+            PaimonTopNRanker::Retract(r) => r.store_mut().checkpoint(link_dir),
+        }
+    }
+
+    fn state_bytes(&self) -> usize {
+        match self {
+            PaimonTopNRanker::Append(r) => r.memory.state_bytes,
+            PaimonTopNRanker::Retract(r) => r.memory.state_bytes,
+        }
+    }
+
+    fn staging_bytes(&self) -> usize {
+        match self {
+            PaimonTopNRanker::Append(r) => r.staging_bytes(),
+            PaimonTopNRanker::Retract(r) => r.staging_bytes(),
+        }
+    }
+
+    fn staged_partitions(&self) -> usize {
+        match self {
+            PaimonTopNRanker::Append(r) => r.staged_partitions(),
+            PaimonTopNRanker::Retract(r) => r.staged_partitions(),
+        }
+    }
+}
 
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonTopNRanker<
@@ -637,8 +687,10 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonT
     sort_ascending: JIntArray<'local>,
     sort_nulls_first: JIntArray<'local>,
     row_schema_address: jlong,
+    offset: jlong,
     limit: jlong,
     output_rank_number: jboolean,
+    retracting: jboolean,
     net_diff: jboolean,
     memory_budget_bytes: jlong,
     table_directory: JString<'local>,
@@ -693,11 +745,23 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonT
         PaimonTopNStore::open_merged(config, codec, &sources, key_group_start..=key_group_end)
     };
     let ranker = store.and_then(|store| {
-        TopNRanker::new(partitions, sort, limit, output_rank_number != 0, net_diff != 0)
-            .with_key_timestamp_precisions(timestamp_precisions)
-            .with_converters(converters)
-            .with_backend(store)
-            .with_read_through_budget(memory_budget_bytes)
+        if retracting != 0 {
+            RetractableTopNRanker::new(partitions, sort, offset, limit, output_rank_number != 0)
+                .with_key_timestamp_precisions(timestamp_precisions)
+                .with_net_diff(net_diff != 0)
+                .with_converters(converters)
+                .with_backend(store)
+                .with_read_through_budget(memory_budget_bytes)
+                .map(PaimonTopNRanker::Retract)
+        } else {
+            // The append-only ranker is the no-OFFSET path (offset always 0).
+            TopNRanker::new(partitions, sort, limit, output_rank_number != 0, net_diff != 0)
+                .with_key_timestamp_precisions(timestamp_precisions)
+                .with_converters(converters)
+                .with_backend(store)
+                .with_read_through_budget(memory_budget_bytes)
+                .map(PaimonTopNRanker::Append)
+        }
     });
     boxed_or_throw(&mut env, ranker)
 }
@@ -733,7 +797,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_flushPaimonTo
     out_schema_address: jlong,
 ) {
     let ranker = unsafe { &mut *(handle as *mut PaimonTopNRanker) };
-    let out = ranker.flush_net_diff();
+    let out = ranker.flush();
     export_record_batch(out, out_array_address, out_schema_address);
 }
 
@@ -749,7 +813,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_checkpointPai
 ) -> jobjectArray {
     let ranker = unsafe { &mut *(handle as *mut PaimonTopNRanker) };
     let link_dir = read_string(&mut env, &link_directory);
-    match ranker.store_mut().checkpoint(&link_dir) {
+    match ranker.checkpoint(&link_dir) {
         Ok(manifest) => manifest_array(&mut env, &manifest),
         Err(e) => {
             throw_runtime(&mut env, &format!("paimon state checkpoint failed: {e}"));
@@ -767,7 +831,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_paimonTopNRan
     handle: jlong,
 ) -> jlong {
     let ranker = unsafe { &*(handle as *const PaimonTopNRanker) };
-    ranker.memory.state_bytes as jlong
+    ranker.state_bytes() as jlong
 }
 
 #[no_mangle]

@@ -22,12 +22,14 @@ verified against the 1.4.2 release).
 Operator coverage (2026-07-24): the point-access ladder is DONE — the store generalized over a
 value codec and grew three shapes mirroring Flink's state primitives (single-value/ValueState,
 list/ListState with a positional key, map/MapState with a BinaryRow-content key; see
-`divergences/27`), and the keep-last dedup, changelog normalizer, append-only Top-N, and the
-updating join (two tables under one backend, opaque snapshot token, multi-table compaction
-discovery) all run on it alongside the group aggregate.
-Remaining from this doc: multiset side tables (MIN/MAX retract, DISTINCT), the retracting Top-N
-(blocked on per-entry dirty tracking in the map store — whole-list rewrite is unacceptable on its
-unbounded buffers), the watermark/timer-driven operators via range hydration (paimon-rust has the
+`divergences/27`), and the keep-last dedup, changelog normalizer, both Top-N variants
+(append-only and retracting, one list store — the retracting exclusion was reconsidered: a
+touched partition's per-checkpoint rewrite is strictly less writing than Flink's own per-record
+`SortedMap` rewrite on RocksDB), and the updating join (two tables under one backend, opaque
+snapshot token, multi-table compaction discovery) all run on it alongside the group aggregate.
+The map store's flush is per-entry (diffed against the hydrated image, 2026-07-24).
+Remaining from this doc: multiset side tables (MIN/MAX retract, DISTINCT), the
+watermark/timer-driven operators via range hydration (paimon-rust has the
 needed `less_or_equal`/`between` predicates; needs a dirty-overlay merge and buffered-batch state
 remodeled as keyed rows), TTL, object-store FileIO, upstreaming compaction/expiry + a
 sequence-preserving rewrite to paimon-rust, publishing paimon-vortex-format upstream, and the

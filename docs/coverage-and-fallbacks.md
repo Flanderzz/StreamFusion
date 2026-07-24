@@ -620,17 +620,19 @@ the operator just checkpoints its state the old way, in full):
 
 - **Operator coverage** — the non-windowed `GROUP BY` aggregate (single- and two-phase global),
   the eager deduplicator (rowtime/proctime keep-last and proctime keep-first), the changelog
-  normalizer, the **append-only Top-N** (one typed table row per buffered element under a
-  positional third key column, so buffer positions — tie order, which decides evictions — survive
-  restore exactly; the analog of Flink's `ListState`), and the **updating join** (all kinds:
-  INNER/LEFT/RIGHT/FULL/SEMI/ANTI; one table per side under the operator's backend — the analog of
-  Flink's two named join states — each stored row persisted as typed columns plus its appear-count
-  and degree under a content-addressed third key column, the analog of Flink's `MapState` join
-  views). The dedup/normalizer/Top-N/join state rows are the stored full rows as typed columns, so
-  the state tables read like the operators' own data. Every other stateful operator keeps memory
-  state under this backend, including the **retracting Top-N** (its buffer is unbounded, so the
-  list store's whole-list rewrite per dirty key is not yet acceptable there). The
-  **watermark/timer-driven operators** (keep-first
+  normalizer, **both streaming Top-N variants** — append-only and retracting — on one list store
+  (one typed table row per buffered element under a positional third key column, so buffer
+  positions — tie order, which decides evictions and promotions — survive restore exactly; the
+  analog of Flink's `ListState`; the retracting variant persists its full never-truncated buffer,
+  and its touched-partition rewrite once per checkpoint is strictly less state writing than the
+  per-record `SortedMap` rewrite Flink's own retractable Top-N pays on RocksDB), and the
+  **updating join** (all kinds: INNER/LEFT/RIGHT/FULL/SEMI/ANTI; one table per side under the
+  operator's backend — the analog of Flink's two named join states — each stored row persisted as
+  typed columns plus its appear-count and degree under a content-addressed third key column, the
+  analog of Flink's `MapState` join views, flushed per entry against the hydrated image). The
+  dedup/normalizer/Top-N/join state rows are the stored full rows as typed columns, so the state
+  tables read like the operators' own data. Every other stateful operator keeps memory state
+  under this backend. The **watermark/timer-driven operators** (keep-first
   dedup, `OVER` aggregates, window rank, interval/window/temporal joins, session/window
   aggregates) stay on memory state for now for two concrete reasons, neither a storage limit:
   firing on a watermark needs a *range* hydration ("every row with `t ≤ watermark`", a
