@@ -19,8 +19,17 @@ preserves it); without the module, tables run correct-but-unmaintained with a wa
 file format default flipped to parquet (Java-maintainable/inspectable today); vortex is opt-in
 and unmaintained until Paimon 2.0 ships the Java Vortex format (#7543 — absent from all 1.4.x,
 verified against the 1.4.2 release).
-Remaining from this doc: multiset side tables (MIN/MAX retract, DISTINCT), other operators,
-time-range shape, TTL, object-store FileIO, upstreaming compaction/expiry + a
+Operator coverage (2026-07-24): the point-access ladder is DONE — the store generalized over a
+value codec and grew three shapes mirroring Flink's state primitives (single-value/ValueState,
+list/ListState with a positional key, map/MapState with a BinaryRow-content key; see
+`divergences/27`), and the keep-last dedup, changelog normalizer, append-only Top-N, and the
+updating join (two tables under one backend, opaque snapshot token, multi-table compaction
+discovery) all run on it alongside the group aggregate.
+Remaining from this doc: multiset side tables (MIN/MAX retract, DISTINCT), the retracting Top-N
+(blocked on per-entry dirty tracking in the map store — whole-list rewrite is unacceptable on its
+unbounded buffers), the watermark/timer-driven operators via range hydration (paimon-rust has the
+needed `less_or_equal`/`between` predicates; needs a dirty-overlay merge and buffered-batch state
+remodeled as keyed rows), TTL, object-store FileIO, upstreaming compaction/expiry + a
 sequence-preserving rewrite to paimon-rust, publishing paimon-vortex-format upstream, and the
 performance measurements (the Phase 0 rocksdb comparison and a Nexmark-style A/B of memory vs
 paimon backend) which were deferred, not run.
