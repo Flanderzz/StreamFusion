@@ -137,6 +137,7 @@ public class NativeColumnarTopNOperator extends AbstractStreamOperator<ArrowBatc
         snapshots.isEmpty()
             ? Native.createTopNRanker(
                 partitionColumns,
+                keyTimestampPrecisions,
                 sortIndices,
                 sortAscending,
                 sortNullsFirst,
@@ -148,6 +149,7 @@ public class NativeColumnarTopNOperator extends AbstractStreamOperator<ArrowBatc
                 memoryBudget.bytes())
             : Native.restoreTopNRankerPartitions(
                 partitionColumns,
+                keyTimestampPrecisions,
                 sortIndices,
                 sortAscending,
                 sortNullsFirst,

@@ -1599,6 +1599,7 @@ public final class Native {
   public static native long createUpdatingJoiner(
       int[] leftKeys,
       int[] rightKeys,
+      int[] keyTimestampPrecisions,
       int joinType,
       long leftSchemaAddress,
       long rightSchemaAddress,
@@ -1636,6 +1637,7 @@ public final class Native {
   public static native long restoreUpdatingJoiner(
       int[] leftKeys,
       int[] rightKeys,
+      int[] keyTimestampPrecisions,
       int joinType,
       long leftSchemaAddress,
       long rightSchemaAddress,
@@ -1653,6 +1655,7 @@ public final class Native {
   public static native long restoreUpdatingJoinerPartitions(
       int[] leftKeys,
       int[] rightKeys,
+      int[] keyTimestampPrecisions,
       int joinType,
       long leftSchemaAddress,
       long rightSchemaAddress,
@@ -1688,6 +1691,7 @@ public final class Native {
    */
   public static native long createTopNRanker(
       int[] partitionColumns,
+      int[] keyTimestampPrecisions,
       int[] sortIndices,
       int[] sortAscending,
       int[] sortNullsFirst,
@@ -1715,6 +1719,7 @@ public final class Native {
   /** Rebuilds a Top-N ranker from a snapshot and returns a fresh handle. */
   public static native long restoreTopNRanker(
       int[] partitionColumns,
+      int[] keyTimestampPrecisions,
       int[] sortIndices,
       int[] sortAscending,
       int[] sortNullsFirst,
@@ -1733,6 +1738,7 @@ public final class Native {
   /** Restores a Top-N ranker from raw keyed-state partitions assigned to this subtask. */
   public static native long restoreTopNRankerPartitions(
       int[] partitionColumns,
+      int[] keyTimestampPrecisions,
       int[] sortIndices,
       int[] sortAscending,
       int[] sortNullsFirst,

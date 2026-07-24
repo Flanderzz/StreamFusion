@@ -1056,6 +1056,7 @@ impl UpdatingJoiner {
     pub(crate) fn restore(
         left_keys: Vec<usize>,
         right_keys: Vec<usize>,
+        key_timestamp_precisions: Vec<i32>,
         kind: JoinKind,
         left_schema: SchemaRef,
         right_schema: SchemaRef,
@@ -1063,7 +1064,8 @@ impl UpdatingJoiner {
         bytes: &[u8],
     ) -> Self {
         let mut joiner =
-            UpdatingJoiner::new(left_keys, right_keys, kind, left_schema, right_schema, predicate);
+            UpdatingJoiner::new(left_keys, right_keys, kind, left_schema, right_schema, predicate)
+                .with_key_timestamp_precisions(key_timestamp_precisions);
         if bytes.is_empty() {
             return joiner;
         }
@@ -1077,6 +1079,7 @@ impl UpdatingJoiner {
     pub(crate) fn restore_partitions(
         left_keys: Vec<usize>,
         right_keys: Vec<usize>,
+        key_timestamp_precisions: Vec<i32>,
         kind: JoinKind,
         left_schema: SchemaRef,
         right_schema: SchemaRef,
@@ -1103,6 +1106,7 @@ impl UpdatingJoiner {
         UpdatingJoiner::restore(
             left_keys,
             right_keys,
+            key_timestamp_precisions,
             kind,
             left_schema,
             right_schema,
@@ -1173,6 +1177,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createUpdatin
     _class: JClass<'local>,
     left_keys: JIntArray<'local>,
     right_keys: JIntArray<'local>,
+    key_timestamp_precisions: JIntArray<'local>,
     join_type: jint,
     left_schema_address: jlong,
     right_schema_address: jlong,
@@ -1198,6 +1203,10 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createUpdatin
         &pred_doubles,
         &pred_strings,
     );
+    let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
+        .into_iter()
+        .map(|precision| precision as i32)
+        .collect();
     let joiner = UpdatingJoiner::new(
         left,
         right,
@@ -1206,6 +1215,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createUpdatin
         right_schema,
         predicate,
     )
+    .with_key_timestamp_precisions(timestamp_precisions)
     .with_mini_batch(mini_batch != 0)
     .with_memory_budget(memory_budget_bytes);
     boxed_or_throw(&mut env, joiner)
@@ -1313,6 +1323,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreUpdati
     _class: JClass<'local>,
     left_keys: JIntArray<'local>,
     right_keys: JIntArray<'local>,
+    key_timestamp_precisions: JIntArray<'local>,
     join_type: jint,
     left_schema_address: jlong,
     right_schema_address: jlong,
@@ -1339,10 +1350,15 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreUpdati
         &pred_doubles,
         &pred_strings,
     );
+    let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
+        .into_iter()
+        .map(|precision| precision as i32)
+        .collect();
     let bytes = env.convert_byte_array(&snapshot).expect("failed to read updating-join snapshot");
     let joiner = UpdatingJoiner::restore(
         left,
         right,
+        timestamp_precisions,
         JoinKind::from_code(join_type),
         left_schema,
         right_schema,
@@ -1363,6 +1379,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreUpdati
     _class: JClass<'local>,
     left_keys: JIntArray<'local>,
     right_keys: JIntArray<'local>,
+    key_timestamp_precisions: JIntArray<'local>,
     join_type: jint,
     left_schema_address: jlong,
     right_schema_address: jlong,
@@ -1378,6 +1395,10 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreUpdati
 ) -> jlong {
     let left = read_columns(&env, &left_keys);
     let right = read_columns(&env, &right_keys);
+    let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
+        .into_iter()
+        .map(|precision| precision as i32)
+        .collect();
     let left_schema = import_schema(left_schema_address);
     let right_schema = import_schema(right_schema_address);
     let predicate = read_join_predicate(
@@ -1406,6 +1427,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreUpdati
     let joiner = UpdatingJoiner::restore_partitions(
         left,
         right,
+        timestamp_precisions,
         JoinKind::from_code(join_type),
         left_schema,
         right_schema,

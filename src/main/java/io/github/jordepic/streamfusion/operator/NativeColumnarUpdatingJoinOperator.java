@@ -161,6 +161,7 @@ public class NativeColumnarUpdatingJoinOperator extends AbstractStreamOperator<A
             Native.restoreUpdatingJoinerPartitions(
                 leftKeys,
                 rightKeys,
+                keyTimestampPrecisions,
                 joinType,
                 leftSchema.memoryAddress(),
                 rightSchema.memoryAddress(),
@@ -178,6 +179,7 @@ public class NativeColumnarUpdatingJoinOperator extends AbstractStreamOperator<A
             Native.createUpdatingJoiner(
                   leftKeys,
                   rightKeys,
+                  keyTimestampPrecisions,
                   joinType,
                   leftSchema.memoryAddress(),
                   rightSchema.memoryAddress(),

@@ -677,6 +677,7 @@ impl TopNRanker {
 
     pub(crate) fn restore(
         partition_columns: Vec<usize>,
+        key_timestamp_precisions: Vec<i32>,
         sort_columns: Vec<SortColumn>,
         limit: i64,
         output_rank_number: bool,
@@ -684,7 +685,8 @@ impl TopNRanker {
         bytes: &[u8],
     ) -> Self {
         let mut ranker =
-            TopNRanker::new(partition_columns, sort_columns, limit, output_rank_number, net_diff);
+            TopNRanker::new(partition_columns, sort_columns, limit, output_rank_number, net_diff)
+                .with_key_timestamp_precisions(key_timestamp_precisions);
         for batch in read_ipc_if_present(bytes) {
             let arity = batch.num_columns();
             ranker.schema = Some(batch.schema());
@@ -1244,6 +1246,7 @@ impl TopNHandle {
     #[allow(clippy::too_many_arguments)]
     fn restore_partitions(
         partition_columns: Vec<usize>,
+        key_timestamp_precisions: Vec<i32>,
         sort_columns: Vec<SortColumn>,
         offset: i64,
         limit: i64,
@@ -1277,6 +1280,7 @@ impl TopNHandle {
         } else {
             TopNHandle::Append(TopNRanker::restore(
                 partition_columns,
+                key_timestamp_precisions,
                 sort_columns,
                 limit,
                 output_rank_number,
@@ -1871,6 +1875,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createTopNRan
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     partition_columns: JIntArray<'local>,
+    key_timestamp_precisions: JIntArray<'local>,
     sort_indices: JIntArray<'local>,
     sort_ascending: JIntArray<'local>,
     sort_nulls_first: JIntArray<'local>,
@@ -1882,6 +1887,10 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createTopNRan
     memory_budget_bytes: jlong,
 ) -> jlong {
     let partitions = read_columns(&env, &partition_columns);
+    let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
+        .into_iter()
+        .map(|precision| precision as i32)
+        .collect();
     let sort = read_sort_columns(&env, &sort_indices, &sort_ascending, &sort_nulls_first);
     let handle = if retracting != 0 {
         TopNHandle::Retract(RetractableTopNRanker::new(
@@ -1893,13 +1902,16 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createTopNRan
         ).with_net_diff(net_diff != 0))
     } else {
         // The append-only ranker is the no-OFFSET path (offset always 0).
-        TopNHandle::Append(TopNRanker::new(
-            partitions,
-            sort,
-            limit,
-            output_rank_number != 0,
-            net_diff != 0,
-        ))
+        TopNHandle::Append(
+            TopNRanker::new(
+                partitions,
+                sort,
+                limit,
+                output_rank_number != 0,
+                net_diff != 0,
+            )
+            .with_key_timestamp_precisions(timestamp_precisions),
+        )
     };
     boxed_or_throw(&mut env, handle.with_memory_budget(memory_budget_bytes))
 }
@@ -1960,6 +1972,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreTopNRa
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     partition_columns: JIntArray<'local>,
+    key_timestamp_precisions: JIntArray<'local>,
     sort_indices: JIntArray<'local>,
     sort_ascending: JIntArray<'local>,
     sort_nulls_first: JIntArray<'local>,
@@ -1972,6 +1985,10 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreTopNRa
     memory_budget_bytes: jlong,
 ) -> jlong {
     let partitions = read_columns(&env, &partition_columns);
+    let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
+        .into_iter()
+        .map(|precision| precision as i32)
+        .collect();
     let sort = read_sort_columns(&env, &sort_indices, &sort_ascending, &sort_nulls_first);
     let bytes = env.convert_byte_array(&snapshot).expect("failed to read top-n snapshot");
     let handle = if retracting != 0 {
@@ -1986,6 +2003,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreTopNRa
     } else {
         TopNHandle::Append(TopNRanker::restore(
             partitions,
+            timestamp_precisions,
             sort,
             limit,
             output_rank_number != 0,
@@ -2025,6 +2043,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreTopNRa
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     partition_columns: JIntArray<'local>,
+    key_timestamp_precisions: JIntArray<'local>,
     sort_indices: JIntArray<'local>,
     sort_ascending: JIntArray<'local>,
     sort_nulls_first: JIntArray<'local>,
@@ -2037,6 +2056,10 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreTopNRa
     memory_budget_bytes: jlong,
 ) -> jlong {
     let partitions = read_columns(&env, &partition_columns);
+    let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
+        .into_iter()
+        .map(|precision| precision as i32)
+        .collect();
     let sort = read_sort_columns(&env, &sort_indices, &sort_ascending, &sort_nulls_first);
     let count = env
         .get_array_length(&snapshots)
@@ -2054,6 +2077,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreTopNRa
     }
     let ranker = TopNHandle::restore_partitions(
         partitions,
+        timestamp_precisions,
         sort,
         offset,
         limit,

@@ -1866,7 +1866,7 @@ fn topn_buffer_survives_snapshot_restore() {
     let mut ranker = TopNRanker::new(vec![0], vec![asc(1)], 2, false, false);
     ranker.push(&topn_batch(vec![1, 1], vec![5, 3])); // top2 = {3, 5}
     let snapshot = ranker.snapshot();
-    let mut restored = TopNRanker::restore(vec![0], vec![asc(1)], 2, false, false, &snapshot);
+    let mut restored = TopNRanker::restore(vec![0], vec![-1], vec![asc(1)], 2, false, false, &snapshot);
     // A 1 enters the restored top-2 and displaces the 5.
     let out = restored.push(&topn_batch(vec![1], vec![1])).unwrap();
     assert_eq!(row_kinds(&out), vec![3, 0]); // -D5, +I1
@@ -2008,7 +2008,7 @@ fn updating_join_state_survives_snapshot_restore() {
     joiner.push(&changelog_join_batch(vec![1], vec![100], vec![0]), false); // buffer right
     let snapshot = joiner.snapshot();
     let mut restored =
-        UpdatingJoiner::restore(vec![0], vec![0], JoinKind::Inner, kv_schema(), kv_schema(), None, &snapshot);
+        UpdatingJoiner::restore(vec![0], vec![0], vec![-1], JoinKind::Inner, kv_schema(), kv_schema(), None, &snapshot);
     let out = restored.push(&changelog_join_batch(vec![1], vec![10], vec![0]), true).unwrap();
     assert_eq!(out.num_rows(), 1);
     assert_eq!(values(&out, 1), vec![10]);
@@ -2038,6 +2038,7 @@ fn updating_join_state_partitions_and_restores_by_flink_key_group() {
     let mut restored = UpdatingJoiner::restore_partitions(
         vec![0],
         vec![0],
+        vec![-1],
         JoinKind::Inner,
         schema.clone(),
         schema,
@@ -2306,6 +2307,7 @@ fn updating_join_outer_degree_survives_snapshot_restore() {
     let mut restored = UpdatingJoiner::restore(
         vec![0],
         vec![0],
+        vec![-1],
         JoinKind::LeftOuter,
         kv_schema(),
         kv_schema(),
