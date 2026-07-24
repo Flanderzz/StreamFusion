@@ -17,6 +17,12 @@ import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
  * (~auction-count keys on the inner MAX); its interval join is watermark-driven and stays on memory
  * state under both backends, contributing equal cost to each side.
  *
+ * <p>This benchmark lives in the compactor module deliberately: only here are the state tables
+ * maintained at every barrier, the deployment shape the docs prescribe. Without the compactor one
+ * sorted run accumulates per touched bucket per checkpoint and probe cost grows without bound —
+ * a configuration worth knowing about but not the one to headline. Both gates are asserted, not
+ * assumed.
+ *
  * <p>Opt-in like the other end-to-end benchmarks: {@code SF_BENCHMARK=true} under {@code -Pbench}.
  * Before timing anything, a small run is watched for a live {@code Paimon*Store} native handle —
  * the backend's local tables are deleted on task close, so engagement is proven while the job
@@ -40,6 +46,13 @@ class PaimonStateBackendBenchmark {
 
   @Test
   void q4MemoryVersusPaimonBackend() throws Exception {
+    if (!java.util.ServiceLoader.load(
+            io.github.jordepic.streamfusion.state.StateTableCompactor.class)
+        .iterator()
+        .hasNext()) {
+      throw new IllegalStateException(
+          "no StateTableCompactor on the classpath — the A/B would measure unmaintained tables");
+    }
     assertPaimonEngages();
     double memory = bestOf(backendConfiguration(false));
     double paimon = bestOf(backendConfiguration(true));
@@ -51,6 +64,25 @@ class PaimonStateBackendBenchmark {
     System.out.printf(
         "[benchmark]   paimon backend: %6.3f s  (%,.0f events/s)  %.2fx vs memory%n",
         paimon, ROWS / paimon, memory / paimon);
+  }
+
+  /**
+   * Runs paimon-backed native q4 in a loop for {@code -Dprofile.seconds} (default 60) so an
+   * attached sampler sees the steady-state backend: read-through hydration, barrier commits, and
+   * the Java compaction at every checkpoint. Gated by {@code SF_PROFILE=true} in addition to the
+   * class-level {@code SF_BENCHMARK}; attach async-profiler to the surefire fork while it runs.
+   */
+  @Test
+  @EnabledIfEnvironmentVariable(named = "SF_PROFILE", matches = "true")
+  void q4PaimonProfileLoop() throws Exception {
+    long deadline = System.currentTimeMillis() + Long.getLong("profile.seconds", 60L) * 1000L;
+    long rows = Long.getLong("profile.rows", 200_000L);
+    long iterations = 0;
+    while (System.currentTimeMillis() < deadline) {
+      runOnce(backendConfiguration(true), rows);
+      iterations++;
+    }
+    System.out.println("[profile] paimon q4 iterations completed: " + iterations);
   }
 
   private static Configuration backendConfiguration(boolean paimon) {

@@ -1041,26 +1041,31 @@ Flink on it (see `wontdos/52-distinct-split-chain.md`).
 
 ## State backends: memory vs Paimon
 
-`PaimonStateBackendBenchmark` (opt-in like the rest: `SF_BENCHMARK=true` under `-Pbench`) runs
-native q4 twice under identical 500 ms checkpointing — once on the default memory backend (raw
-keyed-state snapshots) and once on the Paimon backend (read-through probes against local parquet
-tables, one incremental commit plus Java compaction per barrier). Engagement is proven while the
-job runs (a live `Paimon*Store` native handle must be observed), never inferred from
-configuration.
+`PaimonStateBackendBenchmark` (opt-in like the rest: `SF_BENCHMARK=true`) runs native q4 under
+identical 500 ms checkpointing on the default memory backend (raw keyed-state snapshots) and on
+the Paimon backend (read-through probes against local parquet tables, one incremental commit per
+barrier). It lives in the compactor module so the state tables are maintained exactly as a
+deployment's would be, and it asserts both gates rather than assuming them: a compactor must be
+discoverable, and a live `Paimon*Store` native handle must be observed while a verification job
+runs — engagement is never inferred from configuration.
 
-2026-07-24, 2M events, best of 2 after warmup:
+2026-07-24, 2M events, best of 2 after warmup (release build without mimalloc — the compactor
+module's classpath triggers a mimalloc SIGBUS under investigation; the memory row measured 4.14 s
+with mimalloc, so the allocator does not move these numbers materially):
 
 | backend | time | throughput |
 |---|---|---|
-| memory | 4.14 s | 484K events/s |
-| Paimon | 99.6 s | 20K events/s (**0.04×**) |
+| memory | 4.19 s | 478K events/s |
+| Paimon, compactor installed | 124.1 s | 16K events/s (**0.03×**) |
+| Paimon, compactor absent (unmaintained tables) | 99.6 s | 20K events/s (0.04×) |
 
-The 24× gap is the measured price of the backend's deliberately pure read-through design: every
-barrier drops the whole working set and commits, so q4's ~120K live aggregate keys re-hydrate
-from parquet continuously and every barrier pays a table commit plus compaction per stateful
-operator. The backend buys incremental checkpoints and bounded memory, not throughput; jobs whose
-working set fits in memory should keep the default backend. The gap is also the baseline any
-future state-backend optimization (bulk hydration, snapshot-pinned resident sets, compaction
-cadence) must be measured against.
+The ~30× gap is the measured price of the backend's deliberately pure read-through design: every
+barrier drops the whole working set, so q4's ~120K live aggregate keys re-hydrate from parquet
+continuously. Notably the compactor makes this job *slower*, not faster — a full compaction of
+the table at every 500 ms barrier costs more than the read amplification it saves at this job
+length, so compaction cadence is itself a lever. The backend buys incremental checkpoints and
+bounded memory, not throughput; jobs whose working set fits in memory should keep the default
+backend. These numbers are the baseline the state-backend rework (columnar dirty region,
+DataFusion-driven hydration, compaction cadence) is measured against.
 
 _Apple M1 Max; numbers are comparable only within a machine._

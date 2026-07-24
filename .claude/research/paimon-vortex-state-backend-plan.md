@@ -34,10 +34,15 @@ needed `less_or_equal`/`between` predicates; needs a dirty-overlay merge and buf
 remodeled as keyed rows), TTL, object-store FileIO, upstreaming compaction/expiry + a
 sequence-preserving rewrite to paimon-rust, publishing paimon-vortex-format upstream, and the
 Phase 0 rocksdb comparison (never run). The memory-vs-paimon A/B WAS run (2026-07-24,
-`PaimonStateBackendBenchmark`, native q4 at 500 ms checkpoints, 2M events): memory 4.14 s vs
-paimon 99.6 s — **0.04×**, the measured price of pure read-through (whole working set dropped and
-re-hydrated around every barrier, commit + compaction per operator per barrier). Recorded in
-`docs/benchmarks.md`; this is the baseline for any future backend optimization.
+`PaimonStateBackendBenchmark`, native q4 at 500 ms checkpoints, 2M events; corrected same day to
+run in the compactor module — the first run had NO compactor on the classpath): memory 4.19 s vs
+paimon 124.1 s compacted / 99.6 s unmaintained — **0.03×**. Pure read-through re-hydrates the
+whole working set around every barrier, and per-barrier full compaction costs more than the read
+amplification it saves at this job length. Recorded in `docs/benchmarks.md`; baseline for the
+columnar-dirty-region + DataFusion-hydration rework. Side discovery: the mimalloc release build
+SIGBUSes (BUS_ADRALN, foreign free in `mi_free_block_delayed_mt` under opendal's fs builder) when
+the compactor module's classpath (Java Paimon bundle) is present — debug and no-mimalloc release
+are clean; the A/B ran without mimalloc.
 
 ## Thesis
 

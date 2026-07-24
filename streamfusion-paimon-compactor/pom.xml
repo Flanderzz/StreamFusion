@@ -33,6 +33,17 @@
             <version>1.4.2</version>
             <scope>provided</scope>
         </dependency>
+        <!-- The runtime's test classes: the state-backend benchmark reuses the Nexmark test
+             environment, and it must run in THIS module — the state tables are only maintained
+             when the compactor is on the classpath, and a benchmark of unmaintained tables would
+             measure a configuration the docs tell deployments not to run. -->
+        <dependency>
+            <groupId>io.github.jordepic</groupId>
+            <artifactId>streamfusion-runtime</artifactId>
+            <version>${project.version}</version>
+            <type>test-jar</type>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>

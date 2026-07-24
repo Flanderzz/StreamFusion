@@ -38,6 +38,15 @@
                         <phase>process-classes</phase>
                         <goals><goal>jar</goal></goals>
                     </execution>
+                    <execution>
+                        <id>test-jar</id>
+                        <!-- The state-backend benchmark lives in the compactor module (the only
+                             module whose classpath holds both the backend and its table
+                             maintainer) and reuses this module's Nexmark test environment; publish
+                             the test classes on the same early-reactor schedule as the main JAR. -->
+                        <phase>process-test-classes</phase>
+                        <goals><goal>test-jar</goal></goals>
+                    </execution>
                 </executions>
             </plugin>
             <plugin>
