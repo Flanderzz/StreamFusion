@@ -33,8 +33,11 @@ watermark/timer-driven operators via range hydration (paimon-rust has the
 needed `less_or_equal`/`between` predicates; needs a dirty-overlay merge and buffered-batch state
 remodeled as keyed rows), TTL, object-store FileIO, upstreaming compaction/expiry + a
 sequence-preserving rewrite to paimon-rust, publishing paimon-vortex-format upstream, and the
-performance measurements (the Phase 0 rocksdb comparison and a Nexmark-style A/B of memory vs
-paimon backend) which were deferred, not run.
+Phase 0 rocksdb comparison (never run). The memory-vs-paimon A/B WAS run (2026-07-24,
+`PaimonStateBackendBenchmark`, native q4 at 500 ms checkpoints, 2M events): memory 4.14 s vs
+paimon 99.6 s — **0.04×**, the measured price of pure read-through (whole working set dropped and
+re-hydrated around every barrier, commit + compaction per operator per barrier). Recorded in
+`docs/benchmarks.md`; this is the baseline for any future backend optimization.
 
 ## Thesis
 

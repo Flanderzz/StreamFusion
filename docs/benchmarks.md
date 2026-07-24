@@ -1039,4 +1039,28 @@ day` is a single live grouping key carrying every record's bidder/auction distin
 hot-key shape `distinct-agg.split` exists to mitigate — and the native no-split plan beats tuned
 Flink on it (see `wontdos/52-distinct-split-chain.md`).
 
+## State backends: memory vs Paimon
+
+`PaimonStateBackendBenchmark` (opt-in like the rest: `SF_BENCHMARK=true` under `-Pbench`) runs
+native q4 twice under identical 500 ms checkpointing — once on the default memory backend (raw
+keyed-state snapshots) and once on the Paimon backend (read-through probes against local parquet
+tables, one incremental commit plus Java compaction per barrier). Engagement is proven while the
+job runs (a live `Paimon*Store` native handle must be observed), never inferred from
+configuration.
+
+2026-07-24, 2M events, best of 2 after warmup:
+
+| backend | time | throughput |
+|---|---|---|
+| memory | 4.14 s | 484K events/s |
+| Paimon | 99.6 s | 20K events/s (**0.04×**) |
+
+The 24× gap is the measured price of the backend's deliberately pure read-through design: every
+barrier drops the whole working set and commits, so q4's ~120K live aggregate keys re-hydrate
+from parquet continuously and every barrier pays a table commit plus compaction per stateful
+operator. The backend buys incremental checkpoints and bounded memory, not throughput; jobs whose
+working set fits in memory should keep the default backend. The gap is also the baseline any
+future state-backend optimization (bulk hydration, snapshot-pinned resident sets, compaction
+cadence) must be measured against.
+
 _Apple M1 Max; numbers are comparable only within a machine._
