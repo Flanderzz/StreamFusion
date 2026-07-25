@@ -1049,9 +1049,10 @@ deployment's would be, and it asserts both gates rather than assuming them: a co
 discoverable, and a live `Paimon*Store` native handle must be observed while a verification job
 runs — engagement is never inferred from configuration.
 
-2026-07-24, 2M events, best of 2 after warmup (release build without mimalloc — the compactor
-module's classpath triggers a mimalloc SIGBUS under investigation; the memory row measured 4.14 s
-with mimalloc, so the allocator does not move these numbers materially):
+2026-07-24, 2M events, best of 2 after warmup (release build without mimalloc — a foreign-free
+crash in the allocator aliasing blocked the standard profile here until the checked-free shims
+landed; the memory row measured 4.14 s with mimalloc, so the allocator does not move these
+numbers materially):
 
 | backend | time | throughput |
 |---|---|---|
@@ -1079,8 +1080,9 @@ ratios are quoted loosely):
 | maintenance on a background thread (RocksDB model) | 55.6–66.1 s | 30–36K events/s |
 | + bucket-granular hydration, resident until the barrier | 35.4 s | 57K events/s |
 | + custom local-fs write path (no per-write `create_dir_all`) | 9.85 s | 203K events/s (**0.44×** memory) |
+| everything + dir cache, paced maintenance, incremental links, standard `-Pbench` (mimalloc) | 8.99 s | 222K events/s (**0.54×** memory) |
 
-**12.6× so far.** Bucket count (= Flink max parallelism, since bucket = key group) was suspected
+**13.8× so far.** Bucket count (= Flink max parallelism, since bucket = key group) was suspected
 as a multiplier on the per-file costs, and the benchmark takes `SF_MAX_PARALLELISM` to test it:
 at max-parallelism 8 (8 buckets instead of 128, 16× fewer files per commit) the pre-fs-fix run
 measured 33.1 s vs 35.4 s — ~7% — so the bucket-per-key-group layout keeps its free-rescale
