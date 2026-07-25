@@ -73,18 +73,22 @@ public class PaimonStateBackend implements StateBackend {
         paimonHandles.size() == 1
             ? paimonHandles.get(0).getBackendIdentifier()
             : UUID.randomUUID();
+    StateTableCompactor compactor = discoverCompactor();
+    File tableDirectory = new File(workingDirectory, "table");
+    PaimonTableMaintenance maintenance =
+        compactor == null ? null : new PaimonTableMaintenance(compactor, tableDirectory);
     PaimonSnapshotStrategy strategy =
         new PaimonSnapshotStrategy(
             backendUID,
             parameters.getKeyGroupRange(),
             new File(workingDirectory, "checkpoints"),
-            new File(workingDirectory, "table"),
-            discoverCompactor());
+            tableDirectory,
+            maintenance == null ? null : maintenance::kick);
     if (paimonHandles.size() == 1) {
       IncrementalRemoteKeyedStateHandle restored = paimonHandles.get(0);
       strategy.seedRestored(restored.getCheckpointId(), restored.getSharedState());
     }
-    return new PaimonKeyedStateBackend<>(inner, strategy, workingDirectory, sources);
+    return new PaimonKeyedStateBackend<>(inner, strategy, workingDirectory, sources, maintenance);
   }
 
   /**

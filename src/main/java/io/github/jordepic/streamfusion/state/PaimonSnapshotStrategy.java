@@ -74,7 +74,8 @@ final class PaimonSnapshotStrategy
   private final KeyGroupRange keyGroupRange;
   private final File checkpointLinkRoot;
   private final File tableDirectory;
-  @Nullable private final StateTableCompactor compactor;
+  /** Signals the background maintenance thread that a barrier committed new sorted runs. */
+  @Nullable private final Runnable maintenanceKick;
 
   private PaimonNativeState nativeState;
 
@@ -88,12 +89,12 @@ final class PaimonSnapshotStrategy
       KeyGroupRange keyGroupRange,
       File checkpointLinkRoot,
       File tableDirectory,
-      @Nullable StateTableCompactor compactor) {
+      @Nullable Runnable maintenanceKick) {
     this.backendUID = backendUID;
     this.keyGroupRange = keyGroupRange;
     this.checkpointLinkRoot = checkpointLinkRoot;
     this.tableDirectory = tableDirectory;
-    this.compactor = compactor;
+    this.maintenanceKick = maintenanceKick;
   }
 
   void registerNativeState(PaimonNativeState nativeState) {
@@ -131,20 +132,13 @@ final class PaimonSnapshotStrategy
 
   @Override
   public PaimonSnapshotResources syncPrepareResources(long checkpointId) throws Exception {
-    if (compactor != null) {
-      // Maintenance commits its own snapshot directly beneath the checkpoint's data commit. A
-      // failure loses maintenance, not the checkpoint.
-      for (File table : discoverTables(tableDirectory)) {
-        try {
-          compactor.compact(table.getAbsolutePath(), checkpointId);
-        } catch (Exception e) {
-          LOG.warn(
-              "state-table compaction failed; continuing the checkpoint without maintenance", e);
-        }
-      }
-    }
     File linkDir = new File(checkpointLinkRoot, "chk-" + checkpointId);
     String[] manifest = nativeState.checkpoint(linkDir.getAbsolutePath());
+    if (maintenanceKick != null) {
+      // The commit just added one sorted run per touched bucket; maintenance runs off-thread
+      // (see PaimonTableMaintenance) so the barrier never waits on compaction.
+      maintenanceKick.run();
+    }
     String snapshotToken = manifest[0];
     List<String> dataFiles = new ArrayList<>();
     List<String> metaFiles = new ArrayList<>();

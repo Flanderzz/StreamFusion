@@ -656,8 +656,12 @@ the operator just checkpoints its state the old way, in full):
 
 **Table maintenance (compaction) belongs exclusively to stock Java Paimon** — the native store
 never compacts. Drop `streamfusion-paimon-compactor.jar` plus a Paimon bundle (≥ 1.4.1) into
-Flink's `lib/` and Paimon maintains the state tables at every barrier: its own compaction picks,
-its sequence-preserving rewriter, its exact deletion handling. Without the module (or with a
+Flink's `lib/` and Paimon maintains the state tables — its own compaction picks, its
+sequence-preserving rewriter, its exact deletion handling — on a **background maintenance thread
+per operator backend**, kicked after each barrier's commit (the RocksDB model: each barrier adds
+one sorted run per touched bucket, the analog of a memtable flush adding an L0 file, and
+compaction never runs on the write path). Maintenance commits race data commits safely under
+Paimon's optimistic commit retry. Without the module (or with a
 state file format the deployed Paimon cannot read), tables stay **correct but unmaintained** —
 one sorted run accumulates per touched bucket per checkpoint, growing probe cost — and the
 backend logs a warning. A side effect worth knowing: parquet state tables are ordinary Paimon

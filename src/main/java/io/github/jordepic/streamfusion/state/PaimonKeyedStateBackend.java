@@ -23,6 +23,7 @@ import org.apache.flink.runtime.state.heap.HeapPriorityQueueElement;
 import org.apache.flink.util.FileUtils;
 
 import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 
 import java.io.File;
 import java.io.IOException;
@@ -52,6 +53,7 @@ public final class PaimonKeyedStateBackend<K>
   private final File workingDirectory;
   private final File tableDirectory;
   private final List<PaimonRestoredSource> restoredSources;
+  @Nullable private final PaimonTableMaintenance maintenance;
   private final CloseableRegistry cancelStreamRegistry = new CloseableRegistry();
 
   private boolean delegateStateUsed;
@@ -60,12 +62,14 @@ public final class PaimonKeyedStateBackend<K>
       CheckpointableKeyedStateBackend<K> delegate,
       PaimonSnapshotStrategy snapshotStrategy,
       File workingDirectory,
-      List<PaimonRestoredSource> restoredSources) {
+      List<PaimonRestoredSource> restoredSources,
+      @Nullable PaimonTableMaintenance maintenance) {
     this.delegate = delegate;
     this.snapshotStrategy = snapshotStrategy;
     this.workingDirectory = workingDirectory;
     this.tableDirectory = new File(workingDirectory, "table");
     this.restoredSources = restoredSources;
+    this.maintenance = maintenance;
   }
 
   // ---- The native operator's surface -----------------------------------------------------------
@@ -146,15 +150,24 @@ public final class PaimonKeyedStateBackend<K>
 
   @Override
   public void dispose() {
+    // Maintenance first: its thread must be quiescent before the tables are deleted.
+    closeMaintenance();
     delegate.dispose();
     deleteWorkingDirectory();
   }
 
   @Override
   public void close() throws IOException {
+    closeMaintenance();
     cancelStreamRegistry.close();
     delegate.close();
     deleteWorkingDirectory();
+  }
+
+  private void closeMaintenance() {
+    if (maintenance != null) {
+      maintenance.close();
+    }
   }
 
   private void deleteWorkingDirectory() {

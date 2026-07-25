@@ -448,6 +448,16 @@ the native-symbol q9 profile that motivated it was dominated by the removed IPC 
 50K-event exactly-once Kafka profile loop subsequently completed 50 jobs in 60 seconds instead of
 45, **11.1% more end-to-end work**.
 
+**Paimon table maintenance runs behind the barrier, not on it.** The state-table compactor
+originally ran synchronously in every checkpoint's sync phase, paying a table open, scan plan,
+and writer/commit lifecycle per operator per barrier — measured *slower* than no maintenance at
+all on the q4 backend A/B (124.1 s vs 99.6 s at 500 ms checkpoints). Maintenance now runs on a
+dedicated background thread per operator backend, kicked after each barrier's data commit — the
+RocksDB model, where each barrier's new sorted run is the analog of a flushed L0 file and
+compaction never blocks the write path; Paimon's optimistic commit retry resolves races with the
+barrier's data commits. Measured on the same A/B: **124.1 s → 55.6–66.1 s** across two runs,
+roughly 2× the Paimon backend's end-to-end throughput, with tables equally maintained.
+
 **Paimon map-state flushes diff per entry.** The Paimon backend's map store (join state: one table
 row per stored row under PK `[kg, key, row]`) initially flushed a touched key by rewriting its
 whole bucket at the barrier, so one matched row in a hot join key rewrote every row stored under

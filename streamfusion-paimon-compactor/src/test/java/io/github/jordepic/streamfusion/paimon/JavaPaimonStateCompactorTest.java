@@ -101,18 +101,34 @@ class JavaPaimonStateCompactorTest {
 
       // Eight barriers wrote eight level-0 runs into one bucket. Only Java Paimon's maintenance
       // could have merged any of them (the native store never compacts), so a bounded run count
-      // is the witness that the whole delegation chain ran.
+      // is the witness that the whole delegation chain ran. Maintenance is a background thread
+      // kicked by each barrier (the RocksDB model), so the witness polls briefly.
       // (The maintenance snapshot document itself is expired by the store's local GC, so the
       // commit user cannot serve as the witness.)
-      FileStoreTable table =
-          FileStoreTableFactory.create(LocalFileIO.create(), new Path(tableDir.getAbsolutePath()));
-      for (Split split : table.newReadBuilder().newScan().plan().splits()) {
-        int files = ((DataSplit) split).dataFiles().size();
-        assertTrue(
-            files <= 5,
-            "expected Paimon maintenance to bound the bucket's runs (trigger 5), saw " + files);
-      }
+      long deadline = System.currentTimeMillis() + 30_000;
+      int worst;
+      do {
+        worst = maxRunsPerBucket(tableDir);
+      } while (worst > 5 && System.currentTimeMillis() < deadline && sleepBriefly());
+      assertTrue(
+          worst <= 5,
+          "expected Paimon maintenance to bound the bucket's runs (trigger 5), saw " + worst);
     }
+  }
+
+  private static int maxRunsPerBucket(File tableDir) throws Exception {
+    FileStoreTable table =
+        FileStoreTableFactory.create(LocalFileIO.create(), new Path(tableDir.getAbsolutePath()));
+    int worst = 0;
+    for (Split split : table.newReadBuilder().newScan().plan().splits()) {
+      worst = Math.max(worst, ((DataSplit) split).dataFiles().size());
+    }
+    return worst;
+  }
+
+  private static boolean sleepBriefly() throws InterruptedException {
+    Thread.sleep(100);
+    return true;
   }
 
   private static File findTableDirectory(File tmpWorkingDirectory) throws Exception {

@@ -47,8 +47,14 @@ Why Paimon over rust-rocksdb:
 - paimon-rust has **no LSM compaction or snapshot expiry** yet, and we deliberately carry **no
   native compaction of our own**: table maintenance belongs exclusively to the optional
   `streamfusion-paimon-compactor` module, which hands the whole operation to **stock Java
-  Paimon** at each barrier (its own picks, its sequence-preserving rewriter, its exact deletion
-  handling). Cross-implementation round trips (Rust writes → Java reads and compacts → Rust
+  Paimon** (its own picks, its sequence-preserving rewriter, its exact deletion
+  handling), running on a **background thread per operator backend** kicked after each barrier's
+  commit — the RocksDB model, where compaction never runs on the write path (running it
+  synchronously at the barrier measured slower than no maintenance at all). Maintenance commits
+  race the barrier's data commits safely under Paimon's optimistic commit retry on both sides,
+  and the local GC only deletes files it previously listed as live, so an in-flight round can
+  lose an input to GC and retry, never corrupt.
+  Cross-implementation round trips (Rust writes → Java reads and compacts → Rust
   restores and continues) are pinned by the module's tests against released Paimon. Without the
   module, tables stay correct but accumulate one sorted run per touched bucket per checkpoint
   (warned, not failed) — one maintenance implementation, zero drift, was judged worth that

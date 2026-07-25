@@ -1061,11 +1061,18 @@ with mimalloc, so the allocator does not move these numbers materially):
 
 The ~30× gap is the measured price of the backend's deliberately pure read-through design: every
 barrier drops the whole working set, so q4's ~120K live aggregate keys re-hydrate from parquet
-continuously. Notably the compactor makes this job *slower*, not faster — a full compaction of
-the table at every 500 ms barrier costs more than the read amplification it saves at this job
-length, so compaction cadence is itself a lever. The backend buys incremental checkpoints and
+continuously. Notably, running maintenance *synchronously on the barrier* made this job slower
+than no maintenance at all — the per-barrier table open, scan plan, and writer/commit lifecycle
+cost more than the read amplification they saved. The backend buys incremental checkpoints and
 bounded memory, not throughput; jobs whose working set fits in memory should keep the default
-backend. These numbers are the baseline the state-backend rework (columnar dirty region,
-DataFusion-driven hydration, compaction cadence) is measured against.
+backend.
+
+**Background maintenance (the RocksDB model) roughly halves the Paimon side.** Moving compaction
+to a per-backend background thread kicked by each barrier (never on the write path) took the same
+run from 124.1 s to 55.6–66.1 s across two runs (30–36K events/s). The memory baseline drifted
+between 4.2 and 8.5 s across the same session (sustained-load thermal variance), so the ratio is
+quoted loosely: roughly 9× remains, and the flame graph says what it is — filesystem metadata
+syscalls (per-write directory creation in the object-store layer, the per-checkpoint hard-link
+farm, per-scan file opens), the target list for the remaining backend work.
 
 _Apple M1 Max; numbers are comparable only within a machine._
