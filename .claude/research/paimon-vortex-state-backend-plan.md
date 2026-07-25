@@ -29,9 +29,10 @@ touched partition's per-checkpoint rewrite is strictly less writing than Flink's
 snapshot token, multi-table compaction discovery) all run on it alongside the group aggregate.
 The map store's flush is per-entry (diffed against the hydrated image, 2026-07-24).
 Remaining from this doc: multiset side tables (MIN/MAX retract, DISTINCT), the
-watermark/timer-driven operators via range hydration (paimon-rust has the
-needed `less_or_equal`/`between` predicates; needs a dirty-overlay merge and buffered-batch state
-remodeled as keyed rows), TTL, object-store FileIO, upstreaming compaction/expiry + a
+watermark/timer-driven operators via range hydration (design drafted in
+`paimon-phase2-range-hydration-design.md` — Arrow dirty region + DataFusion overlay +
+per-batch PruningStatistics; first consumer rowtime keep-first dedup; awaiting plan review),
+TTL, object-store FileIO, upstreaming compaction/expiry + a
 sequence-preserving rewrite to paimon-rust, publishing paimon-vortex-format upstream, and the
 Phase 0 rocksdb comparison (never run). The memory-vs-paimon A/B WAS run (2026-07-24,
 `PaimonStateBackendBenchmark`, native q4 at 500 ms checkpoints, 2M events; corrected same day to
