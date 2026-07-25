@@ -667,7 +667,10 @@ one sorted run accumulates per touched bucket per checkpoint, growing probe cost
 backend logs a warning. A side effect worth knowing: parquet state tables are ordinary Paimon
 tables, readable by any Paimon tooling for state inspection.
 
-`-Dstreamfusion.state.paimon.file-format` (default `parquet`) and
+`-Dstreamfusion.state.paimon.maintenance.min-interval-ms` (default `2000`) paces the background
+maintenance rounds: barriers kick maintenance, kicks inside the pause coalesce, and the default
+mirrors RocksDB's `level0_file_num_compaction_trigger` arithmetic (four sorted runs at 500 ms
+barriers). `-Dstreamfusion.state.paimon.file-format` (default `parquet`) and
 `-Dstreamfusion.state.paimon.file-compression` (default `uncompressed`) select the state data
 file format — deliberately the boring baseline until the state-format benchmarks (parquet vs
 lance vs vortex, compression on/off) pick a better pairing; both are stamped into the table

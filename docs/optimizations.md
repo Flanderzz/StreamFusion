@@ -458,6 +458,19 @@ compaction never blocks the write path; Paimon's optimistic commit retry resolve
 barrier's data commits. Measured on the same A/B: **124.1 s → 55.6–66.1 s** across two runs,
 roughly 2× the Paimon backend's end-to-end throughput, with tables equally maintained.
 
+**Paimon maintenance is paced and directory ensures are cached.** Two follow-ups from the
+post-fix profile, shipped on their profile evidence with the honest note that the end-to-end A/B
+moved within this machine's thermal noise (the paimon/memory ratio spanned 0.38–0.46 against
+0.44 before). First, the commit path re-ensures the same table directories on every commit
+(snapshot/manifest mkdirs — still a fifth of the remaining `mkdir` samples); the custom fs
+service now remembers directories it has ensured, with the write path's missing-parent retry as
+the staleness backstop. Second, a maintenance round per barrier over-compacts at short checkpoint
+intervals (the compactor's reads were ~14% of process CPU at 500 ms barriers); rounds now pace at
+`streamfusion.state.paimon.maintenance.min-interval-ms` (default 2000 — RocksDB's
+`level0_file_num_compaction_trigger` of 4 runs at one run per 500 ms barrier), with kicks inside
+the pause coalescing. The pacing trades compaction CPU against temporarily higher run counts for
+readers; the knob exists because the right point is workload-dependent.
+
 **Paimon state tables write through a custom local-fs backend.** The object-store layer's stock
 filesystem service calls `create_dir_all(parent)` — a `mkdir` plus its companion `stat`, each a
 blocking-pool round trip — on every file it writes, and state tables write one file per touched

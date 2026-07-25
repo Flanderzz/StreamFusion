@@ -28,13 +28,21 @@ pub(crate) fn state_fs_operator() -> Result<Operator, DataFusionError> {
         .into_parts();
     Ok(Operator::from_parts(
         ctx,
-        std::sync::Arc::new(StateFsService { inner }),
+        std::sync::Arc::new(StateFsService {
+            inner,
+            created: std::sync::Mutex::new(std::collections::HashSet::new()),
+        }),
     ))
 }
 
 #[derive(Debug)]
 struct StateFsService {
     inner: Servicer,
+    /// Directories already ensured through `create_dir`. State-table directories live for the
+    /// table's whole life, so re-ensuring them per commit (the snapshot/manifest dir mkdirs the
+    /// commit path pays) is pure syscall churn; a stale entry is harmless because the write
+    /// path's missing-parent retry recreates whatever vanished.
+    created: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 impl Service for StateFsService {
@@ -58,7 +66,12 @@ impl Service for StateFsService {
         path: &str,
         args: OpCreateDir,
     ) -> opendal::Result<RpCreateDir> {
-        self.inner.create_dir_dyn(ctx, path, args).await
+        if self.created.lock().expect("created dirs").contains(path) {
+            return Ok(RpCreateDir::default());
+        }
+        let rp = self.inner.create_dir_dyn(ctx, path, args).await?;
+        self.created.lock().expect("created dirs").insert(path.to_string());
+        Ok(rp)
     }
 
     async fn stat(

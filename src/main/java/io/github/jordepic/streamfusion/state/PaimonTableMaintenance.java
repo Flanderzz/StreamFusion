@@ -25,6 +25,7 @@ final class PaimonTableMaintenance implements AutoCloseable {
 
   private final StateTableCompactor compactor;
   private final File tableDirectory;
+  private final long minIntervalMs;
   private final Thread thread;
   private final Object lock = new Object();
   private boolean kicked;
@@ -35,6 +36,8 @@ final class PaimonTableMaintenance implements AutoCloseable {
   PaimonTableMaintenance(StateTableCompactor compactor, File tableDirectory) {
     this.compactor = compactor;
     this.tableDirectory = tableDirectory;
+    this.minIntervalMs =
+        io.github.jordepic.streamfusion.planner.NativeConfig.paimonMaintenanceMinIntervalMs();
     this.thread = new Thread(this::run, "paimon-state-maintenance");
     this.thread.setDaemon(true);
     this.thread.start();
@@ -49,6 +52,7 @@ final class PaimonTableMaintenance implements AutoCloseable {
   }
 
   private void run() {
+    long lastRound = 0;
     while (true) {
       synchronized (lock) {
         while (!kicked && !closed) {
@@ -61,8 +65,24 @@ final class PaimonTableMaintenance implements AutoCloseable {
         if (closed) {
           return;
         }
+        // Pace the rounds: a round per barrier over-compacts at short checkpoint intervals
+        // (the RocksDB analog compacts after several flushed runs, not after each). Kicks
+        // arriving inside the pause coalesce into the round that follows it.
+        long deadline = lastRound + minIntervalMs;
+        long wait;
+        while (!closed && (wait = deadline - System.currentTimeMillis()) > 0) {
+          try {
+            lock.wait(wait);
+          } catch (InterruptedException e) {
+            return;
+          }
+        }
+        if (closed) {
+          return;
+        }
         kicked = false;
       }
+      lastRound = System.currentTimeMillis();
       for (File table : PaimonSnapshotStrategy.discoverTables(tableDirectory)) {
         try {
           compactor.compact(table.getAbsolutePath(), ++round);
