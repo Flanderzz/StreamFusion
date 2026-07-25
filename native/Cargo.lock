@@ -5400,6 +5400,7 @@ dependencies = [
  "arrow-avro",
  "base64",
  "bytes",
+ "cc",
  "chrono",
  "chrono-tz",
  "criterion",

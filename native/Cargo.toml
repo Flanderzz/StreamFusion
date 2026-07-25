@@ -116,6 +116,10 @@ bytes = { version = "1", optional = true }
 # the changelog operators measurably churn the system allocator too.
 libmimalloc-sys = { version = "0.1", optional = true }
 
+[build-dependencies]
+# Compiles the checked-free shim the mimalloc feature's symbol aliases route through (build.rs).
+cc = "1"
+
 [features]
 # A core build carries no connector-specific code. Maven's development test build explicitly enables
 # Kafka, while deployable connector JARs compile and ship their own feature-specific DSO.
