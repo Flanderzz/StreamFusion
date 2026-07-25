@@ -88,6 +88,12 @@ class PaimonStateBackendBenchmark {
   private static Configuration backendConfiguration(boolean paimon) {
     Configuration configuration = new Configuration();
     configuration.setString("execution.checkpointing.interval", CHECKPOINT_INTERVAL);
+    // Bucket count equals Flink's max parallelism (bucket = key group), so this is the knob for
+    // the file-count-per-commit overhead: fewer buckets, fewer-but-larger files per barrier, at
+    // the price of a lower rescale ceiling. Applied to both backends for a fair comparison.
+    if (System.getenv("SF_MAX_PARALLELISM") != null) {
+      configuration.setString("pipeline.max-parallelism", System.getenv("SF_MAX_PARALLELISM"));
+    }
     if (paimon) {
       configuration.setString(
           "state.backend.type", "io.github.jordepic.streamfusion.state.PaimonStateBackendFactory");
