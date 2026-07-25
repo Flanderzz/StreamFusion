@@ -5,6 +5,8 @@ pub(crate) mod paimon_jni;
 #[cfg(feature = "paimon-state")]
 pub(crate) mod paimon_store;
 #[cfg(feature = "paimon-state")]
+pub(crate) mod state_fs;
+#[cfg(feature = "paimon-state")]
 pub(crate) use paimon_store::*;
 
 /// Whether this build carries the Paimon persistent state backend. Present in every build so the

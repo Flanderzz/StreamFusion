@@ -458,6 +458,19 @@ compaction never blocks the write path; Paimon's optimistic commit retry resolve
 barrier's data commits. Measured on the same A/B: **124.1 s → 55.6–66.1 s** across two runs,
 roughly 2× the Paimon backend's end-to-end throughput, with tables equally maintained.
 
+**Paimon state tables write through a custom local-fs backend.** The object-store layer's stock
+filesystem service calls `create_dir_all(parent)` — a `mkdir` plus its companion `stat`, each a
+blocking-pool round trip — on every file it writes, and state tables write one file per touched
+bucket per commit plus manifests and snapshot documents, all serialized on the barrier path. The
+state tables' directory skeleton lives for the table's whole life, so a custom opendal service
+now delegates everything to the stock fs service except `write`, which opens the file directly
+and creates a missing parent only on the rare first miss (one retry). The hook this needs —
+handing paimon-rust a prebuilt operator — did not exist upstream; the pinned fork carries a
+21-line `FileIOBuilder::with_operator` (pending upstream contribution). Measured on the q4
+backend A/B: **35.4 s → 9.85 s** — the mkdir storm cost far more than its CPU-sample share
+because commits blocked on it — bringing the profiling round's cumulative total to
+**124.1 s → 9.85 s (12.6×)**, the Paimon backend at 0.44× the memory backend end to end.
+
 **Paimon hydration is bucket-granular and resident for the interval.** The read path originally
 probed per input batch: every batch's missed keys planned a fresh key-filtered scan, re-opening
 the same bucket files over and over — the per-scan file-open storm the backend flame graph was

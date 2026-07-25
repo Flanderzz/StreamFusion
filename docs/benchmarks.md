@@ -1077,15 +1077,15 @@ ratios are quoted loosely):
 |---|---|---|
 | baseline (maintenance on the barrier) | 124.1 s | 16K events/s |
 | maintenance on a background thread (RocksDB model) | 55.6–66.1 s | 30–36K events/s |
-| + bucket-granular hydration, resident until the barrier | 35.4 s | 57K events/s (**0.13×** memory) |
+| + bucket-granular hydration, resident until the barrier | 35.4 s | 57K events/s |
+| + custom local-fs write path (no per-write `create_dir_all`) | 9.85 s | 203K events/s (**0.44×** memory) |
 
-**3.5× so far.** Bucket count (= Flink max parallelism, since bucket = key group) was suspected
+**12.6× so far.** Bucket count (= Flink max parallelism, since bucket = key group) was suspected
 as a multiplier on the per-file costs, and the benchmark takes `SF_MAX_PARALLELISM` to test it:
-at max-parallelism 8 (8 buckets instead of 128, 16× fewer files per commit) the same run measured
-33.1 s vs 35.4 s — ~7%. After the fixes above the backend is byte-bound, not file-count-bound, so
-the bucket-per-key-group layout keeps its free-rescale property at negligible cost. The remaining
-gap's decomposition is a fresh profile away; the candidates are the per-interval whole-state
-re-read (hydration decode), per-write directory creation in the object-store layer, the
-hard-link/upload farm, and the commit path.
+at max-parallelism 8 (8 buckets instead of 128, 16× fewer files per commit) the pre-fs-fix run
+measured 33.1 s vs 35.4 s — ~7% — so the bucket-per-key-group layout keeps its free-rescale
+property at negligible cost. The remaining ~2× against memory decomposes across the
+hard-link/upload farm, the commit path, hydration decode, and background-maintenance interference
+— the next profile decides which.
 
 _Apple M1 Max; numbers are comparable only within a machine._

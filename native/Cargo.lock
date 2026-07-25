@@ -3941,7 +3941,7 @@ dependencies = [
 [[package]]
 name = "paimon"
 version = "0.3.0"
-source = "git+https://github.com/apache/paimon-rust.git?rev=7b54d44c487590f4d84952533f110ba16e9346a4#7b54d44c487590f4d84952533f110ba16e9346a4"
+source = "git+https://github.com/jordepic/paimon-rust.git?rev=93296b3f5d6cdccde28e648e770fedadc590ff05#93296b3f5d6cdccde28e648e770fedadc590ff05"
 dependencies = [
  "apache-avro",
  "arrow-arith",
@@ -5411,6 +5411,8 @@ dependencies = [
  "libmimalloc-sys",
  "num-bigint",
  "num-traits",
+ "opendal-core",
+ "opendal-service-fs",
  "paimon",
  "parquet",
  "prost 0.14.4",

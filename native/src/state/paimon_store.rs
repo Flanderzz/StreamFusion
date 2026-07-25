@@ -458,7 +458,11 @@ impl PaimonTableCore {
     }
 
     fn file_io(dir: &str) -> Result<FileIO, DataFusionError> {
-        FileIO::from_path(dir).map_err(pe)?.build().map_err(pe)
+        FileIO::from_path(dir)
+            .map_err(pe)?
+            .with_operator(crate::state::state_fs::state_fs_operator()?)
+            .build()
+            .map_err(pe)
     }
 
     fn latest_schema(file_io: &FileIO, dir: &str) -> Result<TableSchema, DataFusionError> {
