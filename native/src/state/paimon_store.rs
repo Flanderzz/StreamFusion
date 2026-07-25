@@ -27,8 +27,8 @@ use arrow::array::{Array, BinaryArray, Int32Array, Int8Array};
 use paimon::catalog::Identifier;
 use paimon::io::FileIO;
 use paimon::spec::{
-    BigIntType, BooleanType, DataField, DataType as PaimonType, Datum, DateType,
-    DecimalType, DoubleType, FloatType, IntType, PredicateBuilder, Schema as PaimonSchema,
+    BigIntType, BooleanType, DataField, DataType as PaimonType, DateType,
+    DecimalType, DoubleType, FloatType, IntType, Schema as PaimonSchema,
     SmallIntType, TableSchema, TimestampType, TinyIntType, VarBinaryType, VarCharType,
     EMPTY_SERIALIZED_ROW,
 };
@@ -236,11 +236,15 @@ pub(crate) struct PaimonTableCore {
     /// The table pinned at the last committed snapshot; probes read this.
     read_table: Option<Table>,
     read_snapshot: Option<i64>,
-    fields: Vec<DataField>,
     config: PaimonStoreConfig,
     /// Relative paths reachable from the last committed snapshot — the previous set minus the
     /// current one is exactly what local GC may unlink after a commit.
     live_files: StdHashSet<String>,
+    /// Buckets whose full committed contents are resident in the working set for the current
+    /// checkpoint interval. Hydration is bucket-granular: the first miss in a bucket reads the
+    /// whole bucket once, and every later probe of it — hit or miss — is answered from memory
+    /// (the table is immutable between barriers, so residency is not a cache that can go stale).
+    hydrated_buckets: StdHashSet<i32>,
 }
 
 /// Read-through Paimon-backed store, generic over the operator's value codec (see the module
@@ -323,29 +327,10 @@ impl<C: PaimonStateCodec> KeyedStateStore<C::Value> for PaimonStore<C> {
     }
 
     fn end_bundle(&mut self) -> Result<(), DataFusionError> {
-        // Pure read-through: only the write buffer (dirty slots) survives the bundle. Clean
-        // entries are re-probed on next touch; a read cache across bundles is a later,
-        // benchmarked optimization.
-        //
-        // Accounting split: the operator's per-row tracking charges key + state bytes for entries
-        // it creates, mutates, or removes; the store charges what the operator cannot see — slot
-        // overhead for every hydrated entry, plus key + state for entries hydrated Present (which
-        // the operator never charged). Dropping an entry reverses exactly that split.
-        let footprint = &mut self.footprint;
-        let codec = &self.codec;
-        self.working.retain(|key, slot| match slot {
-            Slot::Present { dirty: true, .. } | Slot::Absent { dirty: true } => true,
-            Slot::Present { dirty: false, state } => {
-                *footprint -= (byte_key_bytes(&key.0)
-                    + codec.value_bytes(state)
-                    + Self::SLOT_OVERHEAD) as isize;
-                false
-            }
-            Slot::Absent { dirty: false } => {
-                *footprint -= Self::SLOT_OVERHEAD as isize;
-                false
-            }
-        });
+        // Hydrated state stays resident until the barrier: the pinned table is immutable between
+        // barriers, so a resident slot can never go stale, and dropping it would only force the
+        // bucket to be re-read next bundle (the memory backend holds strictly more resident).
+        // The barrier's checkpoint drops the whole working set and clears the bucket marks.
         Ok(())
     }
 
@@ -394,7 +379,6 @@ impl PaimonTableCore {
         table_schema: TableSchema,
         snapshot_id: Option<i64>,
     ) -> Result<Self, DataFusionError> {
-        let fields = table_schema.fields().to_vec();
         let table = Table::new(
             file_io,
             Identifier::new("streamfusion", "state"),
@@ -405,10 +389,10 @@ impl PaimonTableCore {
         let mut core = PaimonTableCore {
             read_table: None,
             read_snapshot: None,
-            fields,
             table,
             config,
             live_files: StdHashSet::new(),
+            hydrated_buckets: StdHashSet::new(),
         };
         if let Some(id) = snapshot_id {
             core.read_snapshot = Some(id);
@@ -520,30 +504,38 @@ impl PaimonTableCore {
         flink_key_group(hash_bytes_by_words(&key.0), self.config.max_parallelism) as i32
     }
 
-    /// Scans the pinned snapshot for every row whose key is in `misses` (bucket-filtered splits,
-    /// best-effort `is_in` pushdown — callers must re-check the key per row). Empty when no
-    /// snapshot is pinned yet.
-    fn scan_keys(&self, misses: &[ByteKey]) -> Result<Vec<RecordBatch>, DataFusionError> {
-        if self.read_table.is_none() {
+    /// The buckets among the missed keys' buckets not yet resident this interval, marking them
+    /// hydrated — the caller must absorb every row `scan_buckets` returns for them, which is what
+    /// makes the mark truthful until the barrier clears it.
+    fn take_unhydrated_buckets(&mut self, misses: &[ByteKey]) -> Vec<i32> {
+        let mut fresh: Vec<i32> = Vec::new();
+        for key in misses {
+            let kg = self.key_group(key);
+            if self.hydrated_buckets.insert(kg) {
+                fresh.push(kg);
+            }
+        }
+        fresh
+    }
+
+    /// Scans the pinned snapshot for every row of the given buckets. Hydration is one whole-bucket
+    /// read per bucket per checkpoint interval — the alternative, a key-probe scan per input
+    /// batch, re-opened the same bucket files over and over (the file-open storm the backend
+    /// profile was dominated by). Empty when no snapshot is pinned yet.
+    fn scan_buckets(&self, buckets: &[i32]) -> Result<Vec<RecordBatch>, DataFusionError> {
+        if self.read_table.is_none() || buckets.is_empty() {
             return Ok(Vec::new());
         }
-        let buckets: StdHashSet<i32> = misses.iter().map(|k| self.key_group(k)).collect();
-        let predicate = PredicateBuilder::new(&self.fields)
-            .is_in(
-                KEY_COLUMN,
-                misses.iter().map(|k| Datum::Bytes(k.0.to_vec())).collect(),
-            )
-            .map_err(pe)?;
+        let wanted: StdHashSet<i32> = buckets.iter().copied().collect();
         let read_table = self.read_table.as_ref().expect("pinned read table");
-        let mut builder = read_table.new_read_builder();
-        builder.with_filter(predicate);
+        let builder = read_table.new_read_builder();
         runtime()
             .block_on(async {
                 let plan = builder.new_scan().plan().await?;
                 let splits: Vec<_> = plan
                     .splits()
                     .iter()
-                    .filter(|split| buckets.contains(&split.bucket()))
+                    .filter(|split| wanted.contains(&split.bucket()))
                     .cloned()
                     .collect();
                 let read = builder.new_read()?;
@@ -586,6 +578,7 @@ impl PaimonTableCore {
                 meta_files: Vec::new(),
             });
         };
+        self.hydrated_buckets.clear();
         let (data_files, meta_files) = self.snapshot_file_listing(snapshot_id)?;
         for rel in data_files.iter().chain(meta_files.iter()) {
             let from = format!("{}/{}", self.config.table_dir, rel);
@@ -784,12 +777,12 @@ impl<C: PaimonStateCodec> PaimonStore<C> {
         fields
     }
 
-    /// Probes the committed snapshot for the given missing keys and records every result —
-    /// present or absent — in the working set.
+    /// Hydrates the missed keys' buckets (whole buckets, once per interval) and records every
+    /// missed key's result — present or absent — in the working set.
     fn hydrate(&mut self, misses: Vec<ByteKey>) -> Result<(), DataFusionError> {
-        let key_set: StdHashSet<&[u8]> = misses.iter().map(|k| &*k.0).collect();
-        for batch in self.core.scan_keys(&misses)? {
-            self.absorb_probe_batch(&batch, &key_set)?;
+        let fresh = self.core.take_unhydrated_buckets(&misses);
+        for batch in self.core.scan_buckets(&fresh)? {
+            self.absorb_scan_batch(&batch)?;
         }
         let mut added_bytes = 0usize;
         for key in misses {
@@ -804,13 +797,9 @@ impl<C: PaimonStateCodec> PaimonStore<C> {
         Ok(())
     }
 
-    /// Decodes probe rows into clean working-set entries, ignoring any row whose key was not
-    /// probed (predicate pushdown is best-effort, not exact, on every format).
-    fn absorb_probe_batch(
-        &mut self,
-        batch: &RecordBatch,
-        probed: &StdHashSet<&[u8]>,
-    ) -> Result<usize, DataFusionError> {
+    /// Decodes scanned rows into clean working-set entries; a key already in the working set
+    /// stays authoritative over the table.
+    fn absorb_scan_batch(&mut self, batch: &RecordBatch) -> Result<usize, DataFusionError> {
         let expected = self.arrow_fields();
         let key_index = 1;
         let keys = normalized_column(batch, key_index, &expected[key_index])?;
@@ -826,7 +815,7 @@ impl<C: PaimonStateCodec> PaimonStore<C> {
         let mut added_bytes = 0usize;
         for row in 0..batch.num_rows() {
             let key = keys.value(row);
-            if !probed.contains(key) || self.working.contains_key(key) {
+            if self.working.contains_key(key) {
                 continue;
             }
             let mut scalars: Vec<ScalarValue> = Vec::with_capacity(value_columns.len());
@@ -1054,23 +1043,7 @@ impl<C: PaimonListCodec> KeyedStateStore<Vec<C::Entry>> for PaimonListStore<C> {
     }
 
     fn end_bundle(&mut self) -> Result<(), DataFusionError> {
-        // See the single-value store: only the write buffer survives the bundle, and a dirty slot
-        // pins its WHOLE list — partial lists would need a merge-on-reprobe the design avoids.
-        let footprint = &mut self.footprint;
-        let codec = &self.codec;
-        self.working.retain(|key, slot| match slot {
-            ListSlot::Present { dirty: true, .. } | ListSlot::Absent { dirty: true, .. } => true,
-            ListSlot::Present { dirty: false, entries, .. } => {
-                *footprint -= (byte_key_bytes(&key.0)
-                    + entries.iter().map(|e| codec.entry_bytes(e)).sum::<usize>()
-                    + Self::SLOT_OVERHEAD) as isize;
-                false
-            }
-            ListSlot::Absent { dirty: false, .. } => {
-                *footprint -= Self::SLOT_OVERHEAD as isize;
-                false
-            }
-        });
+        // See the single-value store: hydrated state stays resident until the barrier.
         Ok(())
     }
 
@@ -1167,8 +1140,8 @@ impl<C: PaimonListCodec> PaimonListStore<C> {
     /// ALL probe batches before assembly — the merge reader may split one key's rows across batch
     /// boundaries — then reassembled in `ord` order.
     fn hydrate(&mut self, misses: Vec<ByteKey>) -> Result<(), DataFusionError> {
-        let batches = self.core.scan_keys(&misses)?;
-        let key_set: StdHashSet<&[u8]> = misses.iter().map(|k| &*k.0).collect();
+        let fresh = self.core.take_unhydrated_buckets(&misses);
+        let batches = self.core.scan_buckets(&fresh)?;
         let mut collected: ahash::HashMap<ByteKey, Vec<(i64, Vec<ScalarValue>)>> =
             ahash::HashMap::default();
         for batch in &batches {
@@ -1189,9 +1162,8 @@ impl<C: PaimonListCodec> PaimonListStore<C> {
             }
             for row in 0..batch.num_rows() {
                 let key = keys.value(row);
-                // Ignore unprobed rows (predicate pushdown is best-effort); a key already in the
-                // working set stays authoritative over the table.
-                if !key_set.contains(key) || self.working.contains_key(key) {
+                // A key already in the working set stays authoritative over the table.
+                if self.working.contains_key(key) {
                     continue;
                 }
                 let mut scalars: Vec<ScalarValue> = Vec::with_capacity(value_columns.len());
@@ -1463,25 +1435,7 @@ impl<C: PaimonMapCodec> KeyedStateStore<ahash::HashMap<ByteKey, C::Entry>> for P
     }
 
     fn end_bundle(&mut self) -> Result<(), DataFusionError> {
-        // See the single-value store: only the write buffer survives the bundle, and a dirty slot
-        // pins its WHOLE bucket — partial buckets would need a merge-on-reprobe the design avoids.
-        let footprint = &mut self.footprint;
-        let codec = &self.codec;
-        self.working.retain(|key, slot| match slot {
-            MapSlot::Present { dirty: true, .. } | MapSlot::Absent { dirty: true, .. } => true,
-            MapSlot::Present { dirty: false, entries, persisted } => {
-                *footprint -= (byte_key_bytes(&key.0)
-                    + entries.iter().map(|(r, e)| codec.entry_bytes(&r.0, e)).sum::<usize>()
-                    + persisted.len() * Self::IMAGE_ENTRY_BYTES
-                    + Self::SLOT_OVERHEAD) as isize;
-                false
-            }
-            MapSlot::Absent { dirty: false, persisted } => {
-                *footprint -=
-                    (persisted.len() * Self::IMAGE_ENTRY_BYTES + Self::SLOT_OVERHEAD) as isize;
-                false
-            }
-        });
+        // See the single-value store: hydrated state stays resident until the barrier.
         Ok(())
     }
 
@@ -1586,8 +1540,8 @@ impl<C: PaimonMapCodec> PaimonMapStore<C> {
     /// probe batches before assembly — the merge reader may split one key's rows across batch
     /// boundaries.
     fn hydrate(&mut self, misses: Vec<ByteKey>) -> Result<(), DataFusionError> {
-        let batches = self.core.scan_keys(&misses)?;
-        let key_set: StdHashSet<&[u8]> = misses.iter().map(|k| &*k.0).collect();
+        let fresh = self.core.take_unhydrated_buckets(&misses);
+        let batches = self.core.scan_buckets(&fresh)?;
         let mut collected: ahash::HashMap<ByteKey, Vec<Vec<ScalarValue>>> =
             ahash::HashMap::default();
         for batch in &batches {
@@ -1603,9 +1557,8 @@ impl<C: PaimonMapCodec> PaimonMapStore<C> {
             }
             for row in 0..batch.num_rows() {
                 let key = keys.value(row);
-                // Ignore unprobed rows (predicate pushdown is best-effort); a key already in the
-                // working set stays authoritative over the table.
-                if !key_set.contains(key) || self.working.contains_key(key) {
+                // A key already in the working set stays authoritative over the table.
+                if self.working.contains_key(key) {
                     continue;
                 }
                 let mut scalars: Vec<ScalarValue> = Vec::with_capacity(value_columns.len());

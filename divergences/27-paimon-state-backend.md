@@ -18,8 +18,14 @@ with the `SharedStateRegistry`.
 
 Native operator state moves into a **local Apache Paimon primary-key table** (via paimon-rust,
 Vortex file format) behind a storage seam in the Rust operators — selected with Flink's normal
-`state.backend.type` toggle, memory remaining the default. Reads are **read-through, mini-batched
-sort-merge probes** (no resident authoritative map, no cache in front); writes buffer as dirty
+`state.backend.type` toggle, memory remaining the default. Reads are **read-through at bucket
+granularity, scoped to the checkpoint interval**: the first miss in a bucket hydrates the whole
+bucket into the working set, and everything hydrated stays resident until the barrier — not a
+cache (the pinned table is immutable between barriers, so residency can never be stale; the
+barrier drops the whole working set and the next interval re-reads on demand). The original
+key-probe-per-batch design re-opened the same bucket files for every input batch, which the
+backend profile showed as a file-open storm; one bucket read per interval reads the same bytes
+once. Writes buffer as dirty
 working-set entries and commit as one typed Arrow batch per checkpoint barrier. Durability lands
 exactly at checkpoints — between barriers the write buffer is RAM, playing the role RocksDB's
 memtable+WAL play, except the "WAL" is the checkpoint itself.

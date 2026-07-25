@@ -458,6 +458,19 @@ compaction never blocks the write path; Paimon's optimistic commit retry resolve
 barrier's data commits. Measured on the same A/B: **124.1 s → 55.6–66.1 s** across two runs,
 roughly 2× the Paimon backend's end-to-end throughput, with tables equally maintained.
 
+**Paimon hydration is bucket-granular and resident for the interval.** The read path originally
+probed per input batch: every batch's missed keys planned a fresh key-filtered scan, re-opening
+the same bucket files over and over — the per-scan file-open storm the backend flame graph was
+dominated by — and clean entries were dropped at every bundle boundary, forcing the next bundle
+to read them again. The first miss in a bucket now hydrates the whole bucket, and everything
+hydrated stays resident until the barrier. This is not a cache: the pinned table is immutable
+between barriers, so a resident entry can never be stale, and the barrier still drops the entire
+working set. Each bucket's files are read once per checkpoint interval instead of once per
+batch; the memory backend holds strictly more resident, so the bound does not regress. Measured
+on the q4 backend A/B (500 ms checkpoints, 2M events): **55.6–66.1 s → 35.4 s** on top of the
+background-maintenance change — cumulatively 124.1 s → 35.4 s, 3.5× the backend's end-to-end
+throughput in one profiling round.
+
 **Paimon map-state flushes diff per entry.** The Paimon backend's map store (join state: one table
 row per stored row under PK `[kg, key, row]`) initially flushed a touched key by rewriting its
 whole bucket at the barrier, so one matched row in a hot join key rewrote every row stored under

@@ -1067,12 +1067,20 @@ cost more than the read amplification they saved. The backend buys incremental c
 bounded memory, not throughput; jobs whose working set fits in memory should keep the default
 backend.
 
-**Background maintenance (the RocksDB model) roughly halves the Paimon side.** Moving compaction
-to a per-backend background thread kicked by each barrier (never on the write path) took the same
-run from 124.1 s to 55.6–66.1 s across two runs (30–36K events/s). The memory baseline drifted
-between 4.2 and 8.5 s across the same session (sustained-load thermal variance), so the ratio is
-quoted loosely: roughly 9× remains, and the flame graph says what it is — filesystem metadata
-syscalls (per-write directory creation in the object-store layer, the per-checkpoint hard-link
-farm, per-scan file opens), the target list for the remaining backend work.
+The flame graph of that baseline said where the time was — filesystem metadata syscalls (~57% of
+samples: per-write directory creation in the object-store layer, per-scan file opens, the
+per-checkpoint hard-link farm) plus per-barrier maintenance setup, not compute — and the fixes
+tracked it (same protocol; the memory baseline drifted 4.2–8.5 s with sustained-load thermals, so
+ratios are quoted loosely):
+
+| change | Paimon q4 time | throughput |
+|---|---|---|
+| baseline (maintenance on the barrier) | 124.1 s | 16K events/s |
+| maintenance on a background thread (RocksDB model) | 55.6–66.1 s | 30–36K events/s |
+| + bucket-granular hydration, resident until the barrier | 35.4 s | 57K events/s (**0.13×** memory) |
+
+**3.5× so far.** The remaining ~8× is still mostly metadata syscalls: per-write
+`create_dir_all` in the object-store layer (a custom local-fs backend removes it), the hard-link
+farm (link only new files), and the commit/compaction file churn itself.
 
 _Apple M1 Max; numbers are comparable only within a machine._
