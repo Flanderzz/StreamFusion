@@ -74,9 +74,7 @@ class PaimonJavaCompactionSpikeTest {
       for (int round = 1; round <= 4; round++) {
         // Every round touches keys 1..3, so each bucket accumulates one run per round.
         update(allocator, handle, insertBatch(allocator, round));
-        String[] manifest =
-            Native.checkpointPaimonGroupAggregator(
-                handle, Files.createTempDirectory("spike-cp" + round).toString());
+        String[] manifest = Native.checkpointPaimonGroupAggregator(handle);
         snapshotId = Long.parseLong(manifest[0]);
       }
     } finally {

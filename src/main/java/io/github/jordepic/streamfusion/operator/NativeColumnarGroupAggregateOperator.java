@@ -109,7 +109,7 @@ public class NativeColumnarGroupAggregateOperator extends AbstractStreamOperator
               paimon.sourceDirectories(), paimon.sourceSnapshotTokens(),
               paimon.keyGroupStart(), paimon.keyGroupEnd());
       long nativeHandle = handle;
-      paimon.register(linkDir -> Native.checkpointPaimonGroupAggregator(nativeHandle, linkDir));
+      paimon.register(() -> Native.checkpointPaimonGroupAggregator(nativeHandle));
       return;
     }
     handle =

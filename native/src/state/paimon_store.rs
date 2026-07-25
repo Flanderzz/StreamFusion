@@ -214,8 +214,8 @@ pub(crate) struct PaimonStoreConfig {
 /// A checkpoint's file manifest, handed to the host for upload. `data_files` are immutable,
 /// uniquely named, and shared across checkpoints (incremental dedup by name); `meta_files` are the
 /// snapshot/manifest/schema documents pinned to this snapshot (re-uploaded each checkpoint —
-/// small). All paths are relative to the table root and hard-linked under `link_dir`, so uploads
-/// survive local compaction and GC.
+/// small). All paths are relative to the table root; the host hard-links the files its upload
+/// will read into a per-checkpoint directory, so uploads survive local compaction and GC.
 #[derive(serde::Serialize)]
 pub(crate) struct PaimonCheckpointManifest {
     pub snapshot_id: i64,
@@ -568,13 +568,11 @@ impl PaimonTableCore {
         self.refresh_after_commit()
     }
 
-    /// The checkpoint file phase, after the dirty commit: hard-link the pinned snapshot's
-    /// reachable files under `link_dir` (so uploads survive later local GC and compaction),
-    /// garbage-collect local files no longer reachable, and return the manifest for upload.
-    fn checkpoint_manifest(
-        &mut self,
-        link_dir: &str,
-    ) -> Result<PaimonCheckpointManifest, DataFusionError> {
+    /// The checkpoint file phase, after the dirty commit: garbage-collect local files no longer
+    /// reachable and return the manifest for upload. Hard-linking the files an upload will read
+    /// happens host-side, which knows which files are new against the last confirmed checkpoint —
+    /// linking every reachable file here re-linked the whole table each barrier.
+    fn checkpoint_manifest(&mut self) -> Result<PaimonCheckpointManifest, DataFusionError> {
         let Some(snapshot_id) = self.read_snapshot else {
             return Ok(PaimonCheckpointManifest {
                 snapshot_id: -1,
@@ -584,14 +582,6 @@ impl PaimonTableCore {
         };
         self.hydrated_buckets.clear();
         let (data_files, meta_files) = self.snapshot_file_listing(snapshot_id)?;
-        for rel in data_files.iter().chain(meta_files.iter()) {
-            let from = format!("{}/{}", self.config.table_dir, rel);
-            let to = format!("{link_dir}/{rel}");
-            if let Some(parent) = std::path::Path::new(&to).parent() {
-                std::fs::create_dir_all(parent).map_err(io)?;
-            }
-            std::fs::hard_link(&from, &to).map_err(io)?;
-        }
         self.gc_local(&data_files, &meta_files)?;
         Ok(PaimonCheckpointManifest { snapshot_id, data_files, meta_files })
     }
@@ -892,10 +882,7 @@ impl<C: PaimonStateCodec> PaimonStore<C> {
     /// Checkpoint sync phase, called at the barrier: commit the dirty write buffer as the
     /// checkpoint's snapshot and run the checkpoint file phase (see
     /// `PaimonTableCore::checkpoint_manifest`).
-    pub(crate) fn checkpoint(
-        &mut self,
-        link_dir: &str,
-    ) -> Result<PaimonCheckpointManifest, DataFusionError> {
+    pub(crate) fn checkpoint(&mut self) -> Result<PaimonCheckpointManifest, DataFusionError> {
         // An external compactor (the Java Paimon glue) may have committed a maintenance snapshot
         // just before this call: adopt the latest snapshot so the flush lands on top of it, the
         // manifest lists it, and local GC sees its file set.
@@ -917,7 +904,7 @@ impl<C: PaimonStateCodec> PaimonStore<C> {
             }
             false
         });
-        self.core.checkpoint_manifest(link_dir)
+        self.core.checkpoint_manifest()
     }
 }
 
@@ -1267,10 +1254,7 @@ impl<C: PaimonListCodec> PaimonListStore<C> {
     }
 
     /// Checkpoint sync phase, called at the barrier; see the single-value store's `checkpoint`.
-    pub(crate) fn checkpoint(
-        &mut self,
-        link_dir: &str,
-    ) -> Result<PaimonCheckpointManifest, DataFusionError> {
+    pub(crate) fn checkpoint(&mut self) -> Result<PaimonCheckpointManifest, DataFusionError> {
         self.core.refresh_to_latest()?;
         if let Some(batch) = self.dirty_batch() {
             self.core.commit(&batch)?;
@@ -1288,7 +1272,7 @@ impl<C: PaimonListCodec> PaimonListStore<C> {
             }
             false
         });
-        self.core.checkpoint_manifest(link_dir)
+        self.core.checkpoint_manifest()
     }
 }
 
@@ -1672,10 +1656,7 @@ impl<C: PaimonMapCodec> PaimonMapStore<C> {
     }
 
     /// Checkpoint sync phase, called at the barrier; see the single-value store's `checkpoint`.
-    pub(crate) fn checkpoint(
-        &mut self,
-        link_dir: &str,
-    ) -> Result<PaimonCheckpointManifest, DataFusionError> {
+    pub(crate) fn checkpoint(&mut self) -> Result<PaimonCheckpointManifest, DataFusionError> {
         self.core.refresh_to_latest()?;
         if let Some(batch) = self.dirty_batch() {
             self.core.commit(&batch)?;
@@ -1697,6 +1678,6 @@ impl<C: PaimonMapCodec> PaimonMapStore<C> {
             }
             false
         });
-        self.core.checkpoint_manifest(link_dir)
+        self.core.checkpoint_manifest()
     }
 }

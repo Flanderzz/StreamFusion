@@ -114,6 +114,9 @@ public final class PaimonKeyedStateBackend<K>
       throw new IllegalStateException(
           "operator holds both native Paimon state and JVM keyed state; cannot snapshot");
     }
+    // The sync phase decides per-file reuse (and links what the upload will read), so it needs
+    // the options and factory the runner interface only hands to the async phase.
+    snapshotStrategy.beforeSnapshot(checkpointOptions, streamFactory);
     return new SnapshotStrategyRunner<>(
             "Paimon incremental snapshot", snapshotStrategy, cancelStreamRegistry, ASYNCHRONOUS)
         .snapshot(checkpointId, timestamp, streamFactory, checkpointOptions);

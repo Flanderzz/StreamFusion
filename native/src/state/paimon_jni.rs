@@ -190,11 +190,9 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_checkpointPai
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
-    link_directory: JString<'local>,
 ) -> jobjectArray {
     let aggregator = unsafe { &mut *(handle as *mut PaimonGroupAggregator) };
-    let link_dir = read_string(&mut env, &link_directory);
-    match aggregator.store_mut().checkpoint(&link_dir) {
+    match aggregator.store_mut().checkpoint() {
         Ok(manifest) => manifest_array(&mut env, &manifest),
         Err(e) => {
             throw_runtime(&mut env, &format!("paimon state checkpoint failed: {e}"));
@@ -380,11 +378,9 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_checkpointPai
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
-    link_directory: JString<'local>,
 ) -> jobjectArray {
     let dedup = unsafe { &mut *(handle as *mut PaimonKeepLastDeduplicator) };
-    let link_dir = read_string(&mut env, &link_directory);
-    match dedup.store_mut().checkpoint(&link_dir) {
+    match dedup.store_mut().checkpoint() {
         Ok(manifest) => manifest_array(&mut env, &manifest),
         Err(e) => {
             throw_runtime(&mut env, &format!("paimon state checkpoint failed: {e}"));
@@ -561,11 +557,9 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_checkpointPai
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
-    link_directory: JString<'local>,
 ) -> jobjectArray {
     let normalizer = unsafe { &mut *(handle as *mut PaimonChangelogNormalizer) };
-    let link_dir = read_string(&mut env, &link_directory);
-    match normalizer.store_mut().checkpoint(&link_dir) {
+    match normalizer.store_mut().checkpoint() {
         Ok(manifest) => manifest_array(&mut env, &manifest),
         Err(e) => {
             throw_runtime(&mut env, &format!("paimon state checkpoint failed: {e}"));
@@ -646,10 +640,10 @@ impl PaimonTopNRanker {
         }
     }
 
-    fn checkpoint(&mut self, link_dir: &str) -> Result<PaimonCheckpointManifest, DataFusionError> {
+    fn checkpoint(&mut self) -> Result<PaimonCheckpointManifest, DataFusionError> {
         match self {
-            PaimonTopNRanker::Append(r) => r.store_mut().checkpoint(link_dir),
-            PaimonTopNRanker::Retract(r) => r.store_mut().checkpoint(link_dir),
+            PaimonTopNRanker::Append(r) => r.store_mut().checkpoint(),
+            PaimonTopNRanker::Retract(r) => r.store_mut().checkpoint(),
         }
     }
 
@@ -809,11 +803,9 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_checkpointPai
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
-    link_directory: JString<'local>,
 ) -> jobjectArray {
     let ranker = unsafe { &mut *(handle as *mut PaimonTopNRanker) };
-    let link_dir = read_string(&mut env, &link_directory);
-    match ranker.checkpoint(&link_dir) {
+    match ranker.checkpoint() {
         Ok(manifest) => manifest_array(&mut env, &manifest),
         Err(e) => {
             throw_runtime(&mut env, &format!("paimon state checkpoint failed: {e}"));
@@ -1064,14 +1056,12 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_checkpointPai
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
-    link_directory: JString<'local>,
 ) -> jobjectArray {
     let joiner = unsafe { &mut *(handle as *mut PaimonUpdatingJoiner) };
-    let link_dir = read_string(&mut env, &link_directory);
     let (left_store, right_store) = joiner.stores_mut();
     let manifests = left_store
-        .checkpoint(&format!("{link_dir}/left"))
-        .and_then(|left| Ok((left, right_store.checkpoint(&format!("{link_dir}/right"))?)));
+        .checkpoint()
+        .and_then(|left| Ok((left, right_store.checkpoint()?)));
     match manifests {
         Ok((left, right)) => {
             let token = if left.snapshot_id < 0 && right.snapshot_id < 0 {

@@ -153,7 +153,7 @@ public class NativeColumnarUpdatingJoinOperator extends AbstractStreamOperator<A
                 paimon.keyGroupStart(),
                 paimon.keyGroupEnd());
         long nativeHandle = handle;
-        paimon.register(linkDir -> Native.checkpointPaimonUpdatingJoiner(nativeHandle, linkDir));
+        paimon.register(() -> Native.checkpointPaimonUpdatingJoiner(nativeHandle));
         return;
       }
       if (!rawSnapshots.isEmpty()) {

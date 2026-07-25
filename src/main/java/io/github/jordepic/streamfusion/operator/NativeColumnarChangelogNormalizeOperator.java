@@ -106,8 +106,7 @@ public class NativeColumnarChangelogNormalizeOperator extends AbstractStreamOper
                       paimon.keyGroupStart(),
                       paimon.keyGroupEnd()));
       long nativeHandle = handle;
-      paimon.register(
-          linkDir -> Native.checkpointPaimonChangelogNormalizer(nativeHandle, linkDir));
+      paimon.register(() -> Native.checkpointPaimonChangelogNormalizer(nativeHandle));
       return;
     }
     handle =

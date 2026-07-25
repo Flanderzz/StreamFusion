@@ -3307,11 +3307,11 @@ mod paimon_state {
         PaimonGroupStore::open(config(dir), codec(), snapshot_id).unwrap()
     }
 
-    /// Copies exactly the files a checkpoint manifest lists from its hard-link dir into a fresh
+    /// Copies exactly the files a checkpoint manifest lists from the table dir into a fresh
     /// table dir — the restore path, and a completeness check on the listing itself.
-    fn materialize(manifest: &PaimonCheckpointManifest, link_dir: &str, target: &str) {
+    fn materialize(manifest: &PaimonCheckpointManifest, table_dir: &str, target: &str) {
         for rel in manifest.data_files.iter().chain(manifest.meta_files.iter()) {
-            let from = format!("{link_dir}/{rel}");
+            let from = format!("{table_dir}/{rel}");
             let to = format!("{target}/{rel}");
             std::fs::create_dir_all(std::path::Path::new(&to).parent().unwrap()).unwrap();
             std::fs::copy(&from, &to).unwrap();
@@ -3350,7 +3350,7 @@ mod paimon_state {
             );
             // A checkpoint between every bundle forces every probe through the table.
             let link = temp_dir(&format!("parity-cp{i}"));
-            paimon.store_mut().checkpoint(&link).unwrap();
+            paimon.store_mut().checkpoint().unwrap();
         }
     }
 
@@ -3360,16 +3360,14 @@ mod paimon_state {
         let mut agg = paimon_agg(create_store(&dir));
         agg.update(&group_batch(vec![1, 2, 3], vec![10, 20, 30])).unwrap();
         agg.flush_mini_batch().unwrap();
-        let link1 = temp_dir("restore-cp1");
-        let first = agg.store_mut().checkpoint(&link1).unwrap();
+        let first = agg.store_mut().checkpoint().unwrap();
         assert!(first.snapshot_id > 0);
         assert!(!first.data_files.is_empty());
 
         // Second checkpoint reuses unchanged data files and adds only the delta.
         agg.update(&group_changelog(vec![2], vec![Some(5)], vec![0])).unwrap();
         agg.flush_mini_batch().unwrap();
-        let link2 = temp_dir("restore-cp2");
-        let second = agg.store_mut().checkpoint(&link2).unwrap();
+        let second = agg.store_mut().checkpoint().unwrap();
         assert!(second.snapshot_id > first.snapshot_id);
         assert!(
             first.data_files.iter().all(|f| second.data_files.contains(f)),
@@ -3377,7 +3375,7 @@ mod paimon_state {
         );
 
         let restored_dir = temp_dir("restore-dst");
-        materialize(&second, &link2, &restored_dir);
+        materialize(&second, &dir, &restored_dir);
         let mut restored = paimon_agg(open_store(&restored_dir, second.snapshot_id));
 
         // The restored table must serve state: retract 10 from key 1 -> SUM drops to 0 rows? No:
@@ -3397,12 +3395,12 @@ mod paimon_state {
         let mut agg = paimon_agg(create_store(&dir));
         agg.update(&group_batch(vec![7], vec![70])).unwrap();
         agg.flush_mini_batch().unwrap();
-        agg.store_mut().checkpoint(&temp_dir("tomb-cp1")).unwrap();
+        agg.store_mut().checkpoint().unwrap();
 
         agg.update(&group_changelog(vec![7], vec![Some(70)], vec![3])).unwrap();
         let out = agg.flush_mini_batch().unwrap();
         assert_eq!(row_kinds(&out), vec![3]);
-        agg.store_mut().checkpoint(&temp_dir("tomb-cp2")).unwrap();
+        agg.store_mut().checkpoint().unwrap();
 
         // After the delete is committed, the key must probe as absent: a fresh insert is +I.
         agg.update(&group_batch(vec![7], vec![1])).unwrap();
@@ -3423,7 +3421,7 @@ mod paimon_state {
             agg.flush_mini_batch().unwrap();
             let manifest = agg
                 .store_mut()
-                .checkpoint(&temp_dir(&format!("accumulate-cp{i}")))
+                .checkpoint()
                 .unwrap();
             assert_eq!(
                 manifest.data_files.len(),
@@ -3449,15 +3447,13 @@ mod paimon_state {
         b.update(&group_batch(vec![5, 6, 7, 8], vec![50, 60, 70, 80])).unwrap();
         a.flush_mini_batch().unwrap();
         b.flush_mini_batch().unwrap();
-        let link_a = temp_dir("rescale-cpa");
-        let link_b = temp_dir("rescale-cpb");
-        let cp_a = a.store_mut().checkpoint(&link_a).unwrap();
-        let cp_b = b.store_mut().checkpoint(&link_b).unwrap();
+        let cp_a = a.store_mut().checkpoint().unwrap();
+        let cp_b = b.store_mut().checkpoint().unwrap();
 
         let src_a = temp_dir("rescale-srca");
         let src_b = temp_dir("rescale-srcb");
-        materialize(&cp_a, &link_a, &src_a);
-        materialize(&cp_b, &link_b, &src_b);
+        materialize(&cp_a, &dir_a, &src_a);
+        materialize(&cp_b, &dir_b, &src_b);
 
         let merged_dir = temp_dir("rescale-merged");
         let store = PaimonGroupStore::open_merged(
@@ -3517,7 +3513,7 @@ mod paimon_state {
             );
             // A checkpoint between every bundle forces every probe through the table.
             let link = temp_dir(&format!("dedup-parity-cp{i}"));
-            paimon.store_mut().checkpoint(&link).unwrap();
+            paimon.store_mut().checkpoint().unwrap();
         }
     }
 
@@ -3526,13 +3522,13 @@ mod paimon_state {
         let dir = temp_dir("dedup-rt");
         let mut dedup = paimon_dedup(&dir);
         dedup.push(&join_batch(vec![7], vec![70], vec![5])).unwrap();
-        dedup.store_mut().checkpoint(&temp_dir("dedup-rt-cp1")).unwrap();
+        dedup.store_mut().checkpoint().unwrap();
 
         // The working set is empty now; both probes below hydrate from the table, so the ignore
         // depends on the rowtime re-derived from the persisted row.
         let ignored = dedup.push(&join_batch(vec![7], vec![71], vec![3])).unwrap();
         assert_eq!(ignored.num_rows(), 0, "older rowtime must lose against hydrated state");
-        dedup.store_mut().checkpoint(&temp_dir("dedup-rt-cp2")).unwrap();
+        dedup.store_mut().checkpoint().unwrap();
 
         let out = dedup.push(&join_batch(vec![7], vec![72], vec![9])).unwrap();
         assert_eq!(row_kinds(&out), vec![1, 2]);
@@ -3544,13 +3540,12 @@ mod paimon_state {
         let dir = temp_dir("dedup-restore-src");
         let mut dedup = paimon_dedup(&dir);
         dedup.push(&join_batch(vec![1, 2, 3], vec![10, 20, 30], vec![1, 1, 1])).unwrap();
-        let link = temp_dir("dedup-restore-cp");
-        let manifest = dedup.store_mut().checkpoint(&link).unwrap();
+        let manifest = dedup.store_mut().checkpoint().unwrap();
         assert!(manifest.snapshot_id > 0);
 
         // Restore goes through the production path: adopt the source's in-range buckets.
         let restored_dir = temp_dir("dedup-restore-mat");
-        materialize(&manifest, &link, &restored_dir);
+        materialize(&manifest, &dir, &restored_dir);
         let merged_dir = temp_dir("dedup-restore-dst");
         let store = PaimonDedupStore::open_merged(
             config(&merged_dir),
@@ -3614,7 +3609,7 @@ mod paimon_state {
                 &paimon.flush_mini_batch().unwrap(),
             );
             let link = temp_dir(&format!("norm-parity-cp{i}"));
-            paimon.store_mut().checkpoint(&link).unwrap();
+            paimon.store_mut().checkpoint().unwrap();
         }
     }
 
@@ -3625,11 +3620,10 @@ mod paimon_state {
         normalizer
             .push(&changelog_batch(vec![1, 2], vec![10, 20], vec![0, 0]))
             .unwrap();
-        let link = temp_dir("norm-restore-cp");
-        let manifest = normalizer.store_mut().checkpoint(&link).unwrap();
+        let manifest = normalizer.store_mut().checkpoint().unwrap();
 
         let restored_dir = temp_dir("norm-restore-mat");
-        materialize(&manifest, &link, &restored_dir);
+        materialize(&manifest, &dir, &restored_dir);
         let merged_dir = temp_dir("norm-restore-dst");
         let store = PaimonNormalizerStore::open_merged(
             config(&merged_dir),
@@ -3647,7 +3641,7 @@ mod paimon_state {
             .unwrap();
         assert_eq!(row_kinds(&out), vec![1, 2, 3]);
         assert_eq!(values(&out, 1), vec![10, 11, 20]);
-        restored.store_mut().checkpoint(&temp_dir("norm-restore-cp2")).unwrap();
+        restored.store_mut().checkpoint().unwrap();
 
         // After the tombstone commits, the key probes as absent: a fresh row is +I.
         let out = restored.push(&changelog_batch(vec![2], vec![9], vec![0])).unwrap();
@@ -3692,7 +3686,7 @@ mod paimon_state {
             assert_same_output(&memory.push(batch).unwrap(), &paimon.push(batch).unwrap());
             // A checkpoint between every batch forces every probe through the table.
             let link = temp_dir(&format!("topn-parity-cp{i}"));
-            paimon.store_mut().checkpoint(&link).unwrap();
+            paimon.store_mut().checkpoint().unwrap();
         }
     }
 
@@ -3702,11 +3696,10 @@ mod paimon_state {
         let mut ranker = paimon_topn(&dir);
         // Two rows tie on the sort key; arrival order (v=70 first) decides who sits at rank 2.
         ranker.push(&join_batch(vec![9, 9], vec![70, 71], vec![7, 7])).unwrap();
-        let link = temp_dir("topn-tie-cp");
-        let manifest = ranker.store_mut().checkpoint(&link).unwrap();
+        let manifest = ranker.store_mut().checkpoint().unwrap();
 
         let restored_dir = temp_dir("topn-tie-mat");
-        materialize(&manifest, &link, &restored_dir);
+        materialize(&manifest, &dir, &restored_dir);
         let merged_dir = temp_dir("topn-tie-dst");
         let codec = topn_codec();
         let converters = TopNConverters::from_codec(&codec, &[0]);
@@ -3757,7 +3750,7 @@ mod paimon_state {
             assert_same_output(&memory.push(batch).unwrap(), &paimon.push(batch).unwrap());
             // A checkpoint between every step forces every probe through the table.
             let link = temp_dir(&format!("retopn-parity-cp{i}"));
-            paimon.store_mut().checkpoint(&link).unwrap();
+            paimon.store_mut().checkpoint().unwrap();
         }
     }
 
@@ -3784,18 +3777,18 @@ mod paimon_state {
             })
             .collect();
         store.insert(key.clone(), entries);
-        store.checkpoint(&temp_dir("list-shrink-cp1")).unwrap();
+        store.checkpoint().unwrap();
 
         // Shrink 3 -> 1: positions 1 and 2 must be tombstoned.
         store.begin_batch(&probe, &[0], &[-1]).unwrap();
         store.get_mut(&key.0).unwrap().truncate(1);
-        store.checkpoint(&temp_dir("list-shrink-cp2")).unwrap();
+        store.checkpoint().unwrap();
         store.begin_batch(&probe, &[0], &[-1]).unwrap();
         assert_eq!(store.get(&key.0).unwrap().len(), 1, "vacated positions must stay gone");
 
         // Whole-key removal tombstones every persisted position.
         store.remove(&key.0);
-        store.checkpoint(&temp_dir("list-shrink-cp3")).unwrap();
+        store.checkpoint().unwrap();
         store.begin_batch(&probe, &[0], &[-1]).unwrap();
         assert!(store.get(&key.0).is_none(), "removed key must probe as absent");
     }
@@ -3850,8 +3843,8 @@ mod paimon_state {
             );
             // A checkpoint between every step forces every probe through the tables.
             let (left, right) = paimon.stores_mut();
-            left.checkpoint(&temp_dir(&format!("join-parity-l{i}"))).unwrap();
-            right.checkpoint(&temp_dir(&format!("join-parity-r{i}"))).unwrap();
+            left.checkpoint().unwrap();
+            right.checkpoint().unwrap();
         }
     }
 
@@ -3862,15 +3855,13 @@ mod paimon_state {
         joiner.push(&changelog_join_batch(vec![7], vec![70], vec![0]), true).unwrap();
         joiner.push(&changelog_join_batch(vec![7], vec![700], vec![0]), false).unwrap();
         let (left, right) = joiner.stores_mut();
-        let link_l = temp_dir("join-restore-cpl");
-        let link_r = temp_dir("join-restore-cpr");
-        let cp_l = left.checkpoint(&link_l).unwrap();
-        let cp_r = right.checkpoint(&link_r).unwrap();
+        let cp_l = left.checkpoint().unwrap();
+        let cp_r = right.checkpoint().unwrap();
 
         let src_l = temp_dir("join-restore-matl");
         let src_r = temp_dir("join-restore-matr");
-        materialize(&cp_l, &link_l, &src_l);
-        materialize(&cp_r, &link_r, &src_r);
+        materialize(&cp_l, &format!("{dir}/left"), &src_l);
+        materialize(&cp_r, &format!("{dir}/right"), &src_r);
         let merged = temp_dir("join-restore-dst");
         let left = PaimonJoinStore::open_merged(
             config(&format!("{merged}/left")),
@@ -3945,7 +3936,7 @@ mod paimon_state {
         bucket.insert(row_c.clone(), meta_c);
         store.insert(key.clone(), bucket);
         assert_eq!(store.dirty_batch().unwrap().num_rows(), 3, "fresh bucket writes every row");
-        store.checkpoint(&temp_dir("map-diff-cp1")).unwrap();
+        store.checkpoint().unwrap();
 
         // Touch one entry of the hydrated bucket: the flush is that one upsert, not the bucket.
         store.begin_batch(&probe, &[0], &[-1]).unwrap();
@@ -3958,7 +3949,7 @@ mod paimon_state {
             .downcast_ref::<Int8Array>()
             .unwrap();
         assert_eq!(kinds.value(0), 0, "the touched entry flushes as an upsert");
-        store.checkpoint(&temp_dir("map-diff-cp2")).unwrap();
+        store.checkpoint().unwrap();
 
         // A mutation reverted within the interval leaves nothing to flush.
         store.begin_batch(&probe, &[0], &[-1]).unwrap();
@@ -3966,7 +3957,7 @@ mod paimon_state {
         entries.get_mut(&*row_a.0).unwrap().count = 9;
         entries.get_mut(&*row_a.0).unwrap().count = 1;
         assert!(store.dirty_batch().is_none(), "a reverted mutation writes nothing");
-        store.checkpoint(&temp_dir("map-diff-cp3")).unwrap();
+        store.checkpoint().unwrap();
 
         // Removing one entry tombstones just that row.
         store.begin_batch(&probe, &[0], &[-1]).unwrap();
@@ -3979,7 +3970,7 @@ mod paimon_state {
             .downcast_ref::<Int8Array>()
             .unwrap();
         assert_eq!(kinds.value(0), 3, "the vanished entry flushes as a tombstone");
-        store.checkpoint(&temp_dir("map-diff-cp4")).unwrap();
+        store.checkpoint().unwrap();
 
         // The surviving state reads back exactly: b's bumped count and c's removal stuck.
         store.begin_batch(&probe, &[0], &[-1]).unwrap();

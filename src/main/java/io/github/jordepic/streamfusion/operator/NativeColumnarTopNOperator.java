@@ -130,7 +130,7 @@ public class NativeColumnarTopNOperator extends AbstractStreamOperator<ArrowBatc
                       paimon.keyGroupStart(),
                       paimon.keyGroupEnd()));
       long nativeHandle = handle;
-      paimon.register(linkDir -> Native.checkpointPaimonTopNRanker(nativeHandle, linkDir));
+      paimon.register(() -> Native.checkpointPaimonTopNRanker(nativeHandle));
       return;
     }
     handle =

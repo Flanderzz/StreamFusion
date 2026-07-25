@@ -992,10 +992,11 @@ public final class Native {
 
   /**
    * Checkpoint sync phase at the barrier: flushes the write buffer, commits the Paimon snapshot,
-   * hard-links its files under {@code linkDirectory}, and returns the manifest (see {@link
-   * io.github.jordepic.streamfusion.state.PaimonNativeState#checkpoint}).
+   * and returns the manifest (see {@link
+   * io.github.jordepic.streamfusion.state.PaimonNativeState#checkpoint}); the host links the
+   * files its upload will read.
    */
-  public static native String[] checkpointPaimonGroupAggregator(long handle, String linkDirectory);
+  public static native String[] checkpointPaimonGroupAggregator(long handle);
 
   /** Estimated bytes of a Paimon-backed group aggregator's resident working set. */
   public static native long paimonGroupAggregatorStateBytes(long handle);
@@ -1055,7 +1056,7 @@ public final class Native {
 
   /** {@code checkpointPaimonGroupAggregator} for a Paimon-backed keep-last deduplicator. */
   public static native String[] checkpointPaimonKeepLastDeduplicator(
-      long handle, String linkDirectory);
+      long handle);
 
   /** Estimated bytes of a Paimon-backed deduplicator's resident working set. */
   public static native long paimonKeepLastDeduplicatorStateBytes(long handle);
@@ -1103,7 +1104,7 @@ public final class Native {
 
   /** {@code checkpointPaimonGroupAggregator} for a Paimon-backed changelog normalizer. */
   public static native String[] checkpointPaimonChangelogNormalizer(
-      long handle, String linkDirectory);
+      long handle);
 
   /** Estimated bytes of a Paimon-backed changelog normalizer's resident working set. */
   public static native long paimonChangelogNormalizerStateBytes(long handle);
@@ -1158,7 +1159,7 @@ public final class Native {
       long handle, long outArrayAddress, long outSchemaAddress);
 
   /** {@code checkpointPaimonGroupAggregator} for a Paimon-backed Top-N ranker. */
-  public static native String[] checkpointPaimonTopNRanker(long handle, String linkDirectory);
+  public static native String[] checkpointPaimonTopNRanker(long handle);
 
   /** Estimated bytes of a Paimon-backed Top-N ranker's resident working set. */
   public static native long paimonTopNRankerStateBytes(long handle);
@@ -1224,7 +1225,7 @@ public final class Native {
       long handle, long outArrayAddress, long outSchemaAddress);
 
   /** {@code checkpointPaimonGroupAggregator} for a Paimon-backed updating joiner (both tables). */
-  public static native String[] checkpointPaimonUpdatingJoiner(long handle, String linkDirectory);
+  public static native String[] checkpointPaimonUpdatingJoiner(long handle);
 
   /** Estimated bytes of a Paimon-backed updating joiner's resident working set. */
   public static native long paimonUpdatingJoinerStateBytes(long handle);

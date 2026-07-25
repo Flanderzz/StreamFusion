@@ -458,6 +458,20 @@ compaction never blocks the write path; Paimon's optimistic commit retry resolve
 barrier's data commits. Measured on the same A/B: **124.1 s → 55.6–66.1 s** across two runs,
 roughly 2× the Paimon backend's end-to-end throughput, with tables equally maintained.
 
+**Paimon checkpoints hard-link only the files the upload reads.** Every barrier used to hard-link
+the pinned snapshot's whole reachable file set into the per-checkpoint directory — one `mkdir` +
+`linkat` per live file per checkpoint, growing with table size — when the only files ever read
+from that directory are the ones the async phase actually uploads. The reuse decision (which
+files ride as placeholders against the last confirmed checkpoint, which upload) now happens once
+in the sync phase — the backend stashes the checkpoint options and stream factory the runner
+interface only hands to the async phase — and the sync phase links exactly the non-reusable set,
+so the linked set and the upload set are identical by construction; savepoints and
+non-file-sharing modes upload everything and therefore link everything. Link volume per
+checkpoint drops from O(live files) to O(new files). End-to-end movement sat within the session's
+thermal noise (the paimon/memory ratio spanned 0.34–0.48 across control runs whose memory
+baseline itself spanned 4.4–8.7 s); the maintenance-pacing default deserves a cool-machine A/B
+for the same reason.
+
 **Paimon maintenance is paced and directory ensures are cached.** Two follow-ups from the
 post-fix profile, shipped on their profile evidence with the honest note that the end-to-end A/B
 moved within this machine's thermal noise (the paimon/memory ratio spanned 0.38–0.46 against

@@ -120,7 +120,7 @@ public class NativeColumnarKeepLastDeduplicateOperator extends AbstractStreamOpe
                       paimon.keyGroupStart(),
                       paimon.keyGroupEnd()));
       long nativeHandle = handle;
-      paimon.register(linkDir -> Native.checkpointPaimonKeepLastDeduplicator(nativeHandle, linkDir));
+      paimon.register(() -> Native.checkpointPaimonKeepLastDeduplicator(nativeHandle));
       return;
     }
     handle =

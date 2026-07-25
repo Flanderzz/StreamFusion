@@ -84,6 +84,15 @@ final class PaimonSnapshotStrategy
 
   private long lastCompletedCheckpointId = -1;
 
+  /** The in-flight snapshot's options and stream factory, stashed by the backend just before the
+   * sync phase (task thread, so strictly ordered): the sync phase decides file reuse — which
+   * files become placeholders and which the async phase uploads — so it can hard-link exactly the
+   * files the upload will read; the async phase consumes that one decision, so the two can never
+   * drift. */
+  private CheckpointOptions currentOptions;
+
+  private CheckpointStreamFactory currentStreamFactory;
+
   PaimonSnapshotStrategy(
       UUID backendUID,
       KeyGroupRange keyGroupRange,
@@ -130,10 +139,16 @@ final class PaimonSnapshotStrategy
     }
   }
 
+  /** Stashes the snapshot's options; called by the backend just before running the strategy. */
+  void beforeSnapshot(CheckpointOptions options, CheckpointStreamFactory streamFactory) {
+    this.currentOptions = options;
+    this.currentStreamFactory = streamFactory;
+  }
+
   @Override
   public PaimonSnapshotResources syncPrepareResources(long checkpointId) throws Exception {
     File linkDir = new File(checkpointLinkRoot, "chk-" + checkpointId);
-    String[] manifest = nativeState.checkpoint(linkDir.getAbsolutePath());
+    String[] manifest = nativeState.checkpoint();
     if (maintenanceKick != null) {
       // The commit just added one sorted run per touched bucket; maintenance runs off-thread
       // (see PaimonTableMaintenance) so the barrier never waits on compaction.
@@ -156,7 +171,39 @@ final class PaimonSnapshotStrategy
     synchronized (uploadedFiles) {
       confirmedBase = confirmedBase(uploadedFiles, lastCompletedCheckpointId);
     }
-    return new PaimonSnapshotResources(snapshotToken, dataFiles, metaFiles, linkDir, confirmedBase);
+    // Decide reuse now and hard-link exactly the files the async upload will read, so they
+    // survive the compaction and GC of later barriers while the upload runs. Only
+    // FORWARD_BACKWARD sharing may reuse the confirmed base as placeholders (never read again —
+    // linking them re-linked the whole table each barrier); every other mode (savepoints,
+    // NO_SHARING, rescale-bound FORWARD) uploads everything. Meta documents re-upload every
+    // checkpoint regardless.
+    boolean mayReuse =
+        currentOptions != null
+            && currentOptions.getCheckpointType().getSharingFilesStrategy()
+                == SnapshotType.SharingFilesStrategy.FORWARD_BACKWARD;
+    Map<String, StreamStateHandle> reusable = new HashMap<>();
+    if (!snapshotToken.isEmpty()) {
+      for (String rel : dataFiles) {
+        StreamStateHandle confirmed = mayReuse ? confirmedBase.get(rel) : null;
+        if (confirmed != null
+            && currentStreamFactory != null
+            && currentStreamFactory.couldReuseStateHandle(confirmed)) {
+          reusable.put(rel, confirmed);
+          continue;
+        }
+        link(rel, linkDir);
+      }
+      for (String rel : metaFiles) {
+        link(rel, linkDir);
+      }
+    }
+    return new PaimonSnapshotResources(snapshotToken, dataFiles, metaFiles, linkDir, reusable);
+  }
+
+  private void link(String rel, File linkDir) throws IOException {
+    java.nio.file.Path to = new File(linkDir, rel).toPath();
+    Files.createDirectories(to.getParent());
+    Files.createLink(to, new File(tableDirectory, rel).toPath());
   }
 
   /**
@@ -227,10 +274,9 @@ final class PaimonSnapshotStrategy
         sharing == SnapshotType.SharingFilesStrategy.NO_SHARING
             ? CheckpointedStateScope.EXCLUSIVE
             : CheckpointedStateScope.SHARED;
-    final Map<String, StreamStateHandle> reuseBase =
-        sharing == CheckpointType.SharingFilesStrategy.FORWARD_BACKWARD
-            ? resources.confirmedBase
-            : Collections.emptyMap();
+    // The sync phase already decided reuse per file (and linked everything else); consuming that
+    // one decision here keeps the linked set and the upload set identical by construction.
+    final Map<String, StreamStateHandle> reuseBase = resources.reusable;
 
     return snapshotCloseableRegistry -> {
       List<HandleAndLocalPath> sharedState = new ArrayList<>();
@@ -242,7 +288,7 @@ final class PaimonSnapshotStrategy
         long checkpointedSize = 0;
         for (String relPath : resources.dataFiles) {
           StreamStateHandle confirmed = reuseBase.get(relPath);
-          if (confirmed != null && streamFactory.couldReuseStateHandle(confirmed)) {
+          if (confirmed != null) {
             StreamStateHandle placeholder =
                 new PlaceholderStreamStateHandle(
                     confirmed.getStreamStateHandleID(), confirmed.getStateSize(), false);
@@ -376,19 +422,20 @@ final class PaimonSnapshotStrategy
     final List<String> dataFiles;
     final List<String> metaFiles;
     final File linkDir;
-    final Map<String, StreamStateHandle> confirmedBase;
+    /** rel path -> confirmed handle for files the async phase re-references as placeholders. */
+    final Map<String, StreamStateHandle> reusable;
 
     PaimonSnapshotResources(
         String snapshotToken,
         List<String> dataFiles,
         List<String> metaFiles,
         File linkDir,
-        Map<String, StreamStateHandle> confirmedBase) {
+        Map<String, StreamStateHandle> reusable) {
       this.snapshotToken = snapshotToken;
       this.dataFiles = dataFiles;
       this.metaFiles = metaFiles;
       this.linkDir = linkDir;
-      this.confirmedBase = confirmedBase;
+      this.reusable = reusable;
     }
 
     @Override
