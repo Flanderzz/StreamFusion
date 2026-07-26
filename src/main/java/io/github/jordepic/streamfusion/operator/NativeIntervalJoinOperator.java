@@ -2,6 +2,8 @@ package io.github.jordepic.streamfusion.operator;
 
 import io.github.jordepic.streamfusion.Native;
 import io.github.jordepic.streamfusion.arrow.ArrowConversion;
+import io.github.jordepic.streamfusion.planner.NativeConfig;
+import io.github.jordepic.streamfusion.state.PaimonNativeStateSupport;
 import org.apache.arrow.c.ArrowArray;
 import org.apache.arrow.c.ArrowSchema;
 import org.apache.arrow.c.CDataDictionaryProvider;
@@ -57,6 +59,7 @@ public class NativeIntervalJoinOperator extends AbstractStreamOperator<ArrowBatc
   private transient BufferAllocator allocator;
   private transient CDataDictionaryProvider dictionaries;
   private transient long handle;
+  private transient boolean paimonState;
   private transient ManagedMemoryBudget memoryBudget;
   private transient long restoredProcessingTimeTimerDeadline;
   private transient long registeredTimer;
@@ -104,56 +107,122 @@ public class NativeIntervalJoinOperator extends AbstractStreamOperator<ArrowBatc
     RawKeyedState.TimedRestore restored = RawKeyedState.restoreWithTimer(context);
     java.util.List<byte[]> rawSnapshots = restored.snapshots();
     restoredProcessingTimeTimerDeadline = restored.deadline();
-    // Hand both sides' Arrow schemas to the joiner up front so an outer join can type the null-padding
-    // for a side before that side's first batch arrives.
+    predicate.bind();
+    memoryBudget = ManagedMemoryBudget.reserveFor(this);
+    // A proctime interval join times rows by the clock and evicts on processing-time timers
+    // (deadline in raw state), so only the event-time mode is Paimon-eligible.
+    PaimonNativeStateSupport paimon =
+        proctime
+            ? null
+            : PaimonNativeStateSupport.resolve(
+                getKeyedStateBackend(),
+                "interval join",
+                !rawSnapshots.isEmpty(),
+                () ->
+                    withSchemas(
+                            (l, r) ->
+                                Native.paimonRowStateSupported(l)
+                                        && Native.paimonRowStateSupported(r)
+                                    ? 1L
+                                    : 0L)
+                        != 0);
+    paimonState = paimon != null;
+    if (paimonState) {
+      handle =
+          withSchemas(
+              (l, r) ->
+                  Native.createPaimonIntervalJoiner(
+                      leftKeys,
+                      rightKeys,
+                      leftTime,
+                      rightTime,
+                      lowerMillis,
+                      upperMillis,
+                      joinType,
+                      l,
+                      r,
+                      predicate.kinds,
+                      predicate.payload,
+                      predicate.childCounts,
+                      predicate.boundLongs(),
+                      predicate.doubles,
+                      predicate.strings,
+                      keyTimestampPrecisions,
+                      memoryBudget.bytes(),
+                      paimon.tableDirectory(),
+                      maxParallelism,
+                      NativeConfig.paimonBuckets(),
+                      NativeConfig.paimonFileFormat(),
+                      NativeConfig.paimonFileCompression(),
+                      paimon.sourceDirectories(),
+                      paimon.sourceSnapshotTokens(),
+                      paimon.keyGroupStart(),
+                      paimon.keyGroupEnd(),
+                      paimon.aligned()));
+      long nativeHandle = handle;
+      paimon.register(() -> Native.checkpointPaimonIntervalJoiner(nativeHandle));
+      return;
+    }
+    if (!rawSnapshots.isEmpty()) {
+      handle =
+          withSchemas(
+              (l, r) ->
+                  Native.restoreIntervalJoinerPartitions(
+                      leftKeys,
+                      rightKeys,
+                      leftTime,
+                      rightTime,
+                      lowerMillis,
+                      upperMillis,
+                      joinType,
+                      l,
+                      r,
+                      predicate.kinds,
+                      predicate.payload,
+                      predicate.childCounts,
+                      predicate.boundLongs(),
+                      predicate.doubles,
+                      predicate.strings,
+                      rawSnapshots.toArray(new byte[0][]),
+                      memoryBudget.bytes()));
+    } else {
+      handle =
+          withSchemas(
+              (l, r) ->
+                  Native.createIntervalJoiner(
+                      leftKeys,
+                      rightKeys,
+                      leftTime,
+                      rightTime,
+                      lowerMillis,
+                      upperMillis,
+                      joinType,
+                      l,
+                      r,
+                      predicate.kinds,
+                      predicate.payload,
+                      predicate.childCounts,
+                      predicate.boundLongs(),
+                      predicate.doubles,
+                      predicate.strings,
+                      memoryBudget.bytes()));
+    }
+  }
+
+  /**
+   * Exports both side row types as FFI Arrow schemas for the duration of one native call — the
+   * native side consumes the schema contents, so every call needs its own export. The joiner
+   * takes both up front so an outer join can type the null-padding for a side before that side's
+   * first batch arrives.
+   */
+  private long withSchemas(java.util.function.LongBinaryOperator call) {
     BufferAllocator alloc = NativeAllocator.SHARED;
     CDataDictionaryProvider dicts = NativeAllocator.DICTIONARIES;
     try (ArrowSchema leftSchema = ArrowSchema.allocateNew(alloc);
         ArrowSchema rightSchema = ArrowSchema.allocateNew(alloc)) {
       Data.exportSchema(alloc, ArrowConversion.toArrowSchema(leftType), dicts, leftSchema);
       Data.exportSchema(alloc, ArrowConversion.toArrowSchema(rightType), dicts, rightSchema);
-      predicate.bind();
-      memoryBudget = ManagedMemoryBudget.reserveFor(this);
-      if (!rawSnapshots.isEmpty()) {
-        handle =
-            Native.restoreIntervalJoinerPartitions(
-                leftKeys,
-                rightKeys,
-                leftTime,
-                rightTime,
-                lowerMillis,
-                upperMillis,
-                joinType,
-                leftSchema.memoryAddress(),
-                rightSchema.memoryAddress(),
-                predicate.kinds,
-                predicate.payload,
-                predicate.childCounts,
-                predicate.boundLongs(),
-                predicate.doubles,
-                predicate.strings,
-                rawSnapshots.toArray(new byte[0][]),
-                memoryBudget.bytes());
-      } else {
-        handle =
-            Native.createIntervalJoiner(
-                  leftKeys,
-                  rightKeys,
-                  leftTime,
-                  rightTime,
-                  lowerMillis,
-                  upperMillis,
-                  joinType,
-                  leftSchema.memoryAddress(),
-                  rightSchema.memoryAddress(),
-                  predicate.kinds,
-                  predicate.payload,
-                  predicate.childCounts,
-                  predicate.boundLongs(),
-                  predicate.doubles,
-                  predicate.strings,
-                  memoryBudget.bytes());
-      }
+      return call.applyAsLong(leftSchema.memoryAddress(), rightSchema.memoryAddress());
     }
   }
 
@@ -289,11 +358,15 @@ public class NativeIntervalJoinOperator extends AbstractStreamOperator<ArrowBatc
   @Override
   public void snapshotState(StateSnapshotContext context) throws Exception {
     super.snapshotState(context);
-    RawKeyedState.snapshotPartitionsWithTimer(
-        context,
-        Native.snapshotIntervalJoinerPartitions(
-            handle, maxParallelism, keyTimestampPrecisions),
-        proctime ? registeredTimer : Long.MIN_VALUE);
+    // Paimon state checkpoints through the keyed state backend's snapshot (an incremental Paimon
+    // commit); only memory state travels as raw keyed-state blobs.
+    if (!paimonState) {
+      RawKeyedState.snapshotPartitionsWithTimer(
+          context,
+          Native.snapshotIntervalJoinerPartitions(
+              handle, maxParallelism, keyTimestampPrecisions),
+          proctime ? registeredTimer : Long.MIN_VALUE);
+    }
   }
 
   @Override

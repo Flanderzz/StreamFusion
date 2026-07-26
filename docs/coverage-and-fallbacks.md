@@ -679,12 +679,26 @@ the operator just checkpoints its state the old way, in full):
   *start*, with the end a value column — a session extends by rewriting the same start, and a
   merge that consumes a committed start tombstones it (at the barrier for live keys, at the
   firing for keys whose sessions all closed). The **proctime** session aggregate keeps memory
-  state (processing-time timers, deadline in raw state). Every other stateful operator keeps
-  memory state under this backend. The remaining **watermark/timer-driven operators** (the
-  interval and temporal joins) stay on memory state for one remaining reason: their pending
-  buffers are columnar batches or ordered per-key maps that need remodeling as keyed rows — the
-  range-read machinery itself now exists (keep-first dedup, window rank, the `OVER` aggregate,
-  the window join, and the window/session aggregates run on it).
+  state (processing-time timers, deadline in raw state). The **event-time interval join** (all kinds)
+  runs on the backend as one table per side, each row under its equi-join key and an arrival
+  sequence with a matched flag: a push probes the opposite table by the batch's equi keys (the
+  write buffer merged over committed rows, back in arrival order) and joins immediately, a
+  watermark evicts retired rows as deletions, and a committed row's first match rewrites it with
+  `matched = true` so an outer side null-pads exactly once. The **proctime** interval join keeps
+  memory state (rows are clock-timed and evicted on processing-time timers, deadline in raw
+  state). The **temporal join** runs on the backend as a
+  keyed row buffer for the probe side (rows fire in arrival order once the watermark passes
+  their time, leaving state) and one row per (key, version) for the versioned build side — its
+  last-write-wins per version timestamp is the deduplicate merge engine itself, and every
+  changelog kind persists (a retract version marks "no row here", exactly as in memory). Build
+  version pruning is **lazy**, a deliberate deviation from the memory path: a probed key drops
+  its stale versions (all below the latest one at or under the watermark) at each firing, while
+  an unprobed key's old versions sit on disk until its next probe — correctness never depends on
+  pruning (lookups always take the latest version at or under the probe time), only state size
+  does. With that, **every stateful native operator's event-time mode runs on the backend**;
+  what keeps memory state is exactly the proctime modes (processing-time timer deadlines travel
+  in raw state), bounded OVER frames, the local two-phase window half, and the multiset/type
+  gates below.
 - **Multiset-state aggregates** — retracting `MIN`/`MAX` and `COUNT`/`SUM(DISTINCT)` keep per-key
   multisets, which the persistent row codec does not carry yet; an aggregate list containing them
   keeps the whole operator on memory state.

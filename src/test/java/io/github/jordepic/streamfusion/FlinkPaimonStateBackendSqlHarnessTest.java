@@ -201,6 +201,81 @@ class FlinkPaimonStateBackendSqlHarnessTest {
   }
 
   @Test
+  void intervalJoinOnPaimonBackendMatchesHost() throws Exception {
+    // Event-time interval self-join: rows buffer per side in Paimon tables across 50 ms
+    // barriers, each push probes the opposite table by its equi keys (a post-barrier row joins a
+    // committed row through the probe), and watermarks evict retired rows from the tables.
+    NativeParity.assertParity(
+        FlinkPaimonStateBackendSqlHarnessTest::paimonRowtimeEnvironment,
+        "SELECT a.k, a.v, b.v FROM src a JOIN src b ON a.k = b.k"
+            + " AND a.rt BETWEEN b.rt - INTERVAL '1' SECOND AND b.rt + INTERVAL '1' SECOND");
+  }
+
+  @Test
+  void temporalJoinOnPaimonBackendMatchesHost() throws Exception {
+    // Event-time temporal join: the probe rows and the versioned build side live in Paimon
+    // tables across 50 ms barriers (the versioned view's keep-last dedup is Paimon-backed too),
+    // and a watermark firing resolves buffered probes against committed versions.
+    NativeParity.assertParity(
+        FlinkPaimonStateBackendSqlHarnessTest::paimonTemporalEnvironment,
+        "SELECT o.currency, o.amount, r.rate FROM Orders o"
+            + " JOIN Rates FOR SYSTEM_TIME AS OF o.rt AS r ON o.currency = r.currency");
+  }
+
+  /** The temporal-join harness sources (orders + versioned rates) on the Paimon backend. */
+  private static TableEnvironment paimonTemporalEnvironment() {
+    Configuration configuration = new Configuration();
+    configuration.setString(
+        "state.backend.type", "io.github.jordepic.streamfusion.state.PaimonStateBackendFactory");
+    StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment(configuration);
+    env.setParallelism(1);
+    env.enableCheckpointing(50);
+    StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
+    WatermarkStrategy<Row> watermarks =
+        WatermarkStrategy.<Row>forBoundedOutOfOrderness(Duration.ofSeconds(5))
+            .withTimestampAssigner((row, ts) -> (Long) row.getField(2));
+    java.util.function.Function<String, Schema> schema =
+        valueColumn ->
+            Schema.newBuilder()
+                .column("currency", DataTypes.STRING())
+                .column(valueColumn, DataTypes.BIGINT())
+                .column("ts", DataTypes.BIGINT())
+                .columnByMetadata("rt", DataTypes.TIMESTAMP_LTZ(3), "rowtime")
+                .watermark("rt", "SOURCE_WATERMARK()")
+                .build();
+    DataStream<Row> orders =
+        env.fromData(
+                Types.ROW_NAMED(
+                    new String[] {"currency", "amount", "ts"},
+                    Types.STRING,
+                    Types.LONG,
+                    Types.LONG),
+                Row.of("USD", 1L, 150L),
+                Row.of("EUR", 2L, 250L),
+                Row.of("GBP", 4L, 260L),
+                Row.of("USD", 3L, 450L))
+            .assignTimestampsAndWatermarks(watermarks);
+    DataStream<Row> rates =
+        env.fromData(
+                Types.ROW_NAMED(
+                    new String[] {"currency", "rate", "ts"},
+                    Types.STRING,
+                    Types.LONG,
+                    Types.LONG),
+                Row.of("USD", 10L, 100L),
+                Row.of("EUR", 99L, 100L),
+                Row.of("USD", 20L, 300L))
+            .assignTimestampsAndWatermarks(watermarks);
+    tEnv.createTemporaryView("Orders", orders, schema.apply("amount"));
+    tEnv.createTemporaryView("RatesRaw", rates, schema.apply("rate"));
+    tEnv.executeSql(
+        "CREATE TEMPORARY VIEW Rates AS SELECT currency, rate, rt FROM "
+            + "(SELECT *, ROW_NUMBER() OVER (PARTITION BY currency ORDER BY rt DESC) AS rn "
+            + " FROM RatesRaw) WHERE rn = 1");
+    return tEnv;
+  }
+
+  @Test
   void unsupportedAggregatesFallBackToMemoryStateUnderPaimonBackend() throws Exception {
     Path input = Files.createTempDirectory("paimon-minmax-in");
     writeInput(input);

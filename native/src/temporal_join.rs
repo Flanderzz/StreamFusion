@@ -40,7 +40,12 @@ pub(crate) struct TemporalJoiner {
     predicate: Option<JoinPredicate>,
     left_state: HashMap<GroupKey, Vec<LeftEntry>>,
     right_state: HashMap<GroupKey, BTreeMap<i64, (JoinRow, i8)>>,
-    memory: OperatorMemory,
+    pub(crate) memory: OperatorMemory,
+    /// Persistent-state mode: the probe rows and versioned build side live in the Paimon store;
+    /// the in-memory maps stay empty, and firing rebuilds only the fired keys' version sets.
+    #[cfg(feature = "paimon-state")]
+    backend: Option<crate::state::PaimonTemporalJoinStore>,
+    key_timestamp_precisions: Vec<i32>,
 }
 
 /// Estimated footprint of one buffered probe row (its scalars, time, kind, and container entry).
@@ -77,7 +82,270 @@ impl TemporalJoiner {
             left_state: HashMap::default(),
             right_state: HashMap::default(),
             memory: OperatorMemory::unaccounted(),
+            #[cfg(feature = "paimon-state")]
+            backend: None,
+            key_timestamp_precisions: Vec::new(),
         }
+    }
+
+    pub(crate) fn with_key_timestamp_precisions(
+        mut self,
+        key_timestamp_precisions: Vec<i32>,
+    ) -> Self {
+        self.key_timestamp_precisions = key_timestamp_precisions;
+        self
+    }
+
+    #[cfg(feature = "paimon-state")]
+    pub(crate) fn with_backend(mut self, store: crate::state::PaimonTemporalJoinStore) -> Self {
+        self.backend = Some(store);
+        self
+    }
+
+    /// Attaches the managed-memory budget for a backend that starts with nothing resident.
+    #[cfg(feature = "paimon-state")]
+    pub(crate) fn with_read_through_budget(
+        mut self,
+        budget_bytes: i64,
+    ) -> Result<Self, DataFusionError> {
+        self.memory.attach("temporal-join", budget_bytes, 0)?;
+        Ok(self)
+    }
+
+    #[cfg(feature = "paimon-state")]
+    pub(crate) fn store_mut(&mut self) -> &mut crate::state::PaimonTemporalJoinStore {
+        self.backend.as_mut().expect("temporal-join paimon backend")
+    }
+
+    /// The key-field timestamp descriptors, defaulting to non-timestamp per equi-key column.
+    #[cfg(feature = "paimon-state")]
+    fn key_precisions(&self) -> Vec<i32> {
+        if self.key_timestamp_precisions.is_empty() {
+            vec![-1; self.left_keys.len()]
+        } else {
+            self.key_timestamp_precisions.clone()
+        }
+    }
+
+    /// The BinaryRow equi keys of a batch's rows, for the store's PK.
+    #[cfg(feature = "paimon-state")]
+    fn binary_keys(&self, batch: &RecordBatch, key_columns: &[usize]) -> Vec<Vec<u8>> {
+        let precisions = self.key_precisions();
+        let mut encoder = BinaryRowBatchEncoder::new(batch, key_columns, &precisions);
+        (0..batch.num_rows()).map(|row| encoder.encode(row).to_vec()).collect()
+    }
+
+    /// Persistent-state probe-side arrival: rows stage under their equi key with their event
+    /// time and changelog kind (packed as the trailing payload column).
+    #[cfg(feature = "paimon-state")]
+    fn push_left_backend(&mut self, batch: &RecordBatch) -> Result<(), DataFusionError> {
+        let arity = data_arity(batch);
+        let keys = self.binary_keys(batch, &self.left_keys.clone());
+        let key_slices: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
+        let times = rt_to_millis(batch.column(self.left_time));
+        let rt_values: Vec<i64> = (0..batch.num_rows()).map(|row| times.value(row)).collect();
+        let kinds: Vec<i8> = match row_kind_column(batch) {
+            Some(column) => (0..batch.num_rows()).map(|row| column.value(row)).collect(),
+            None => vec![0; batch.num_rows()],
+        };
+        let mut payload: Vec<ArrayRef> = batch.columns()[..arity].to_vec();
+        payload.push(Arc::new(Int8Array::from(kinds)));
+        let store = self.backend.as_mut().expect("temporal-join paimon backend");
+        store.left.stage(&key_slices, rt_values, vec![false; batch.num_rows()], payload)?;
+        let delta = store.footprint_delta();
+        self.memory.record(delta);
+        self.memory.account()
+    }
+
+    /// Persistent-state build-side arrival: one upsert per (key, version) — the deduplicate
+    /// merge engine IS Flink's last-write-wins per timestamp.
+    #[cfg(feature = "paimon-state")]
+    fn push_right_backend(&mut self, batch: &RecordBatch) -> Result<(), DataFusionError> {
+        let arity = data_arity(batch);
+        let keys = self.binary_keys(batch, &self.right_keys.clone());
+        let key_slices: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
+        let times = rt_to_millis(batch.column(self.right_time));
+        let rt_values: Vec<i64> = (0..batch.num_rows()).map(|row| times.value(row)).collect();
+        let kinds: Vec<i8> = match row_kind_column(batch) {
+            Some(column) => (0..batch.num_rows()).map(|row| column.value(row)).collect(),
+            None => vec![0; batch.num_rows()],
+        };
+        let store = self.backend.as_mut().expect("temporal-join paimon backend");
+        store.right.stage(&key_slices, rt_values, kinds, batch.columns()[..arity].to_vec())?;
+        let delta = store.footprint_delta();
+        self.memory.record(delta);
+        self.memory.account()
+    }
+
+    /// Persistent-state firing: the probe side's range read returns every buffered left row the
+    /// watermark passed (in arrival order, deletions staged); the fired keys pull their version
+    /// sets from the build side, each key rebuilding its ordered map for the valid-version
+    /// lookup; and a probed key's stale versions prune via staged deletions.
+    #[cfg(feature = "paimon-state")]
+    fn advance_backend(&mut self, watermark: i64) -> Result<RecordBatch, DataFusionError> {
+        let ctx = self.memory.task_ctx();
+        let (fired, version_batches) = {
+            let store = self.backend.as_mut().expect("temporal-join paimon backend");
+            let fired = store.left.evict(watermark, ctx)?;
+            let version_batches = match &fired {
+                None => Vec::new(),
+                Some(rows) => {
+                    let ks = rows
+                        .column(1)
+                        .as_any()
+                        .downcast_ref::<arrow::array::BinaryArray>()
+                        .expect("k column");
+                    let mut seen: std::collections::HashSet<ByteKey> =
+                        std::collections::HashSet::new();
+                    let mut unique: Vec<ByteKey> = Vec::new();
+                    for row in 0..rows.num_rows() {
+                        let key = ks.value(row);
+                        if !seen.contains(key) {
+                            let owned = ByteKey::from(key);
+                            seen.insert(owned.clone());
+                            unique.push(owned);
+                        }
+                    }
+                    store.right.probe(&unique)?
+                }
+            };
+            (fired, version_batches)
+        };
+        let Some(fired) = fired else {
+            let store = self.backend.as_mut().expect("temporal-join paimon backend");
+            let delta = store.footprint_delta();
+            self.memory.record(delta);
+            self.memory.account()?;
+            return Ok(empty_batch());
+        };
+
+        // Rebuild the fired keys' ordered version maps from the probe.
+        let right_arity = self.right_schema.fields().len();
+        let mut versions: ahash::HashMap<ByteKey, BTreeMap<i64, (JoinRow, i8)>> =
+            ahash::HashMap::default();
+        for batch in &version_batches {
+            let ks = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<arrow::array::BinaryArray>()
+                .expect("k column");
+            let rts = batch.column(2).as_any().downcast_ref::<Int64Array>().expect("rt column");
+            let kinds = batch.column(3).as_any().downcast_ref::<Int8Array>().expect("kind column");
+            for row in 0..batch.num_rows() {
+                let jrow: JoinRow = (0..right_arity)
+                    .map(|i| {
+                        ScalarValue::try_from_array(batch.column(4 + i), row)
+                            .expect("temporal right scalar")
+                    })
+                    .collect();
+                versions.entry(ByteKey::from(ks.value(row))).or_default().insert(
+                    rts.value(row),
+                    (jrow, if kinds.is_valid(row) { kinds.value(row) } else { 0 }),
+                );
+            }
+        }
+
+        // Resolve each fired probe row (already in arrival order) to its valid version.
+        let left_arity = self.left_schema.fields().len();
+        let has_pred = self.predicate.is_some();
+        let ks = fired
+            .column(1)
+            .as_any()
+            .downcast_ref::<arrow::array::BinaryArray>()
+            .expect("k column");
+        let times = fired.column(3).as_any().downcast_ref::<Int64Array>().expect("rt column");
+        let kind_column = fired
+            .column(fired.num_columns() - 1)
+            .as_any()
+            .downcast_ref::<Int8Array>()
+            .expect("kind payload column");
+        let mut decisions: Vec<(JoinRow, i8, Option<JoinRow>)> = Vec::new();
+        let mut pred_pairs: Vec<JoinRow> = Vec::new();
+        let mut pred_idx: Vec<usize> = Vec::new();
+        for row in 0..fired.num_rows() {
+            let left_row: JoinRow = (0..left_arity)
+                .map(|i| {
+                    ScalarValue::try_from_array(fired.column(5 + i), row)
+                        .expect("temporal left scalar")
+                })
+                .collect();
+            let time = times.value(row);
+            let valid = versions
+                .get(ks.value(row))
+                .and_then(|m| m.range(..=time).next_back())
+                .and_then(|(_, (jrow, kind))| (*kind == 0 || *kind == 2).then(|| jrow.clone()));
+            let idx = decisions.len();
+            if has_pred {
+                if let Some(right_row) = &valid {
+                    pred_pairs.push(left_row.iter().chain(right_row).cloned().collect());
+                    pred_idx.push(idx);
+                }
+            }
+            let kind = if kind_column.is_valid(row) { kind_column.value(row) } else { 0 };
+            decisions.push((left_row, kind, valid));
+        }
+        if has_pred && !pred_pairs.is_empty() {
+            let joined = joined_schema(&self.left_schema, &self.right_schema);
+            let mask =
+                self.predicate.as_mut().expect("predicate present").evaluate(&joined, &pred_pairs);
+            for (k, &idx) in pred_idx.iter().enumerate() {
+                if !mask.get(k).copied().unwrap_or(false) {
+                    decisions[idx].2 = None;
+                }
+            }
+        }
+
+        // Lazy prune: each probed key drops the versions behind the latest one still valid at
+        // the watermark (always keeping that one and newer, as the memory path does).
+        {
+            let mut prune_keys: Vec<&[u8]> = Vec::new();
+            let mut prune_rts: Vec<i64> = Vec::new();
+            for (key, map) in &versions {
+                if let Some((&keep_from, _)) = map.range(..=watermark).next_back() {
+                    for (&t, _) in map.range(..keep_from) {
+                        prune_keys.push(&key.0);
+                        prune_rts.push(t);
+                    }
+                }
+            }
+            let store = self.backend.as_mut().expect("temporal-join paimon backend");
+            store.right.stage_deletes(&prune_keys, &prune_rts)?;
+            let delta = store.footprint_delta();
+            self.memory.record(delta);
+            self.memory.account()?;
+        }
+
+        let left_outer = self.join_type == JoinKind::LeftOuter;
+        let right_nulls: JoinRow = self.right_types().iter().map(null_scalar).collect();
+        let mut out_rows: Vec<JoinRow> = Vec::new();
+        let mut out_kinds: Vec<i8> = Vec::new();
+        for (left, kind, valid) in decisions {
+            match valid {
+                Some(right) => {
+                    out_rows.push(left.into_iter().chain(right).collect());
+                    out_kinds.push(kind);
+                }
+                None if left_outer => {
+                    out_rows.push(left.into_iter().chain(right_nulls.iter().cloned()).collect());
+                    out_kinds.push(kind);
+                }
+                None => {}
+            }
+        }
+        if out_rows.is_empty() {
+            return Ok(empty_batch());
+        }
+        let types: Vec<DataType> =
+            self.left_types().into_iter().chain(self.right_types()).collect();
+        let mut fields: Vec<Field> =
+            (0..types.len()).map(|j| Field::new(format!("c{j}"), types[j].clone(), true)).collect();
+        let mut columns: Vec<ArrayRef> = (0..types.len())
+            .map(|j| scalars_to_array(out_rows.iter().map(|r| r[j].clone()).collect(), &types[j]))
+            .collect();
+        fields.push(Field::new(ROW_KIND_COLUMN, DataType::Int8, false));
+        columns.push(Arc::new(Int8Array::from(out_kinds)));
+        Ok(RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
+            .expect("failed to build temporal-join output batch"))
     }
 
     /// Bounds both sides' state by the operator's managed-memory budget (negative = unaccounted),
@@ -113,6 +381,10 @@ impl TemporalJoiner {
     /// Buffers a probe-side batch (no output until a watermark). Each row is stored under its
     /// equi-join key with its event time and changelog kind, in arrival order within the key.
     pub(crate) fn push_left(&mut self, batch: &RecordBatch) -> Result<(), DataFusionError> {
+        #[cfg(feature = "paimon-state")]
+        if self.backend.is_some() {
+            return self.push_left_backend(batch);
+        }
         let arity = data_arity(batch);
         let key_arrays: Vec<&ArrayRef> = self.left_keys.iter().map(|&i| batch.column(i)).collect();
         let times = rt_to_millis(batch.column(self.left_time));
@@ -144,6 +416,10 @@ impl TemporalJoiner {
     /// Folds a build-side changelog batch into the versioned state, keyed by equi-join key and indexed
     /// by right rowtime (last-write-wins per timestamp, every RowKind kept — Flink's `rightState.put`).
     pub(crate) fn push_right(&mut self, batch: &RecordBatch) -> Result<(), DataFusionError> {
+        #[cfg(feature = "paimon-state")]
+        if self.backend.is_some() {
+            return self.push_right_backend(batch);
+        }
         let arity = data_arity(batch);
         let key_arrays: Vec<&ArrayRef> = self.right_keys.iter().map(|&i| batch.column(i)).collect();
         let times = rt_to_millis(batch.column(self.right_time));
@@ -178,7 +454,11 @@ impl TemporalJoiner {
 
     /// Emits the joined rows for every buffered left row the watermark has passed and drops the build
     /// versions the watermark has made obsolete. Output is `[left data.., right data..]` + `$row_kind$`.
-    pub(crate) fn advance(&mut self, watermark: i64) -> RecordBatch {
+    pub(crate) fn advance(&mut self, watermark: i64) -> Result<RecordBatch, DataFusionError> {
+        #[cfg(feature = "paimon-state")]
+        if self.backend.is_some() {
+            return self.advance_backend(watermark);
+        }
         let left_outer = self.join_type == JoinKind::LeftOuter;
         let has_pred = self.predicate.is_some();
 
@@ -274,7 +554,7 @@ impl TemporalJoiner {
         self.memory.account_shrink();
 
         if out_rows.is_empty() {
-            return empty_batch();
+            return Ok(empty_batch());
         }
         let types: Vec<DataType> = self.left_types().into_iter().chain(self.right_types()).collect();
         let mut fields: Vec<Field> =
@@ -284,8 +564,8 @@ impl TemporalJoiner {
             .collect();
         fields.push(Field::new(ROW_KIND_COLUMN, DataType::Int8, false));
         columns.push(Arc::new(Int8Array::from(out_kinds)));
-        RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
-            .expect("failed to build temporal-join output batch")
+        Ok(RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
+            .expect("failed to build temporal-join output batch"))
     }
 
     /// Serializes one side's buffered rows as `[data cols.., __time__, __kind__]` (empty when none).
@@ -630,7 +910,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushRightTemp
 /// obsolete build versions.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_advanceTemporalJoiner<'local>(
-    _env: JNIEnv<'local>,
+    mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     watermark_millis: jlong,
@@ -638,8 +918,11 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_advanceTempor
     out_schema_address: jlong,
 ) {
     let joiner = unsafe { &mut *(handle as *mut TemporalJoiner) };
-    let result = joiner.advance(watermark_millis);
-    export_record_batch(result, out_array_address, out_schema_address);
+    // Fallible in persistent-state mode (the firing reads the committed tables).
+    match joiner.advance(watermark_millis) {
+        Ok(result) => export_record_batch(result, out_array_address, out_schema_address),
+        Err(e) => throw_memory_limit(&mut env, &e.to_string()),
+    }
 }
 
 /// Releases the temporal joiner and its native state.

@@ -2163,7 +2163,7 @@ fn temporal_join_picks_version_valid_at_probe_time() {
     joiner.push_right(&temporal_build_batch(vec![1], vec![20], vec![300], vec![2]));
     joiner.push_right(&temporal_build_batch(vec![2], vec![99], vec![100], vec![0]));
     joiner.push_left(&temporal_probe_batch(vec![1, 1, 2], vec![1, 2, 3], vec![200, 500, 150]));
-    let out = joiner.advance(i64::MAX);
+    let out = joiner.advance(i64::MAX).unwrap();
     assert_eq!(out.num_rows(), 3);
     // probe@200 -> 10, probe@500 -> 20 (the +U version), probe@150 -> 99 (cross-key order varies).
     let mut right_rate = values(&out, 4);
@@ -2183,7 +2183,7 @@ fn temporal_join_left_pads_on_delete_or_missing() {
         vec![1, 2, 3],
         vec![50, 500, 200], // 50: before any version; 500: after key-2 delete; 200: -> 10
     ));
-    let out = joiner.advance(i64::MAX);
+    let out = joiner.advance(i64::MAX).unwrap();
     assert_eq!(out.num_rows(), 3);
     // Exactly one row matched (right rate present); the other two are null-padded.
     let matched = (0..out.num_rows()).filter(|&i| !out.column(4).is_null(i)).count();
@@ -2197,14 +2197,14 @@ fn temporal_join_buffers_and_survives_snapshot_restore() {
     let mut joiner = temporal_joiner(JoinKind::Inner);
     joiner.push_right(&temporal_build_batch(vec![1], vec![10], vec![100], vec![0]));
     joiner.push_left(&temporal_probe_batch(vec![1], vec![1], vec![500]));
-    assert_eq!(joiner.advance(200).num_rows(), 0); // watermark 200 < probe time 500
+    assert_eq!(joiner.advance(200).unwrap().num_rows(), 0); // watermark 200 < probe time 500
     let snapshot = joiner.snapshot();
     let mut restored = TemporalJoiner::restore(
         vec![0], vec![0], 2, 2, JoinKind::Inner, temporal_schema(), temporal_schema(), None,
         &snapshot,
     );
     restored.push_right(&temporal_build_batch(vec![1], vec![20], vec![300], vec![2])); // +U @300
-    let out = restored.advance(i64::MAX);
+    let out = restored.advance(i64::MAX).unwrap();
     assert_eq!(out.num_rows(), 1);
     assert_eq!(values(&out, 4), vec![20]); // resolves to the version valid at 500 (rate 20 @300)
 }
@@ -2232,7 +2232,7 @@ fn temporal_join_state_partitions_and_restores_by_flink_key_group() {
         None,
         &snapshots,
     );
-    let out = restored.advance(i64::MAX);
+    let out = restored.advance(i64::MAX).unwrap();
     let mut rates = values(&out, 4);
     rates.sort_unstable();
     assert_eq!(rates, vec![10, 20]);
@@ -2261,7 +2261,7 @@ fn temporal_join_applies_non_equi_predicate() {
     joiner.push_right(&temporal_build_batch(vec![1], vec![50], vec![300], vec![2]));
     // amount 10 @200 -> version rate 5, 10 > 5 matches; amount 10 @500 -> version rate 50, fails.
     joiner.push_left(&temporal_probe_batch(vec![1, 1], vec![10, 10], vec![200, 500]));
-    let out = joiner.advance(i64::MAX);
+    let out = joiner.advance(i64::MAX).unwrap();
     assert_eq!(out.num_rows(), 1);
     assert_eq!(values(&out, 4), vec![5]); // only the pair passing amount > rate
 }
@@ -2395,7 +2395,7 @@ fn interval_join_evicts_dead_rows_on_watermark() {
     let mut joiner = inner_interval_joiner(-1000, 1000);
     joiner.push_left(join_batch(vec![1], vec![10], vec![5000]), None);
     // Watermark 6000: left.rt - lower = 5000 - (-1000) = 6000, not > 6000, so the row is evicted.
-    joiner.advance(6000);
+    joiner.advance(6000).unwrap();
     // A right row that would otherwise match (delta -500) finds nothing buffered.
     assert_eq!(joiner.push_right(join_batch(vec![1], vec![100], vec![5500]), None).unwrap().num_rows(), 0);
 }
@@ -2581,10 +2581,10 @@ fn interval_left_join_null_pads_unmatched_on_eviction() {
     // Left row k=1, v=10, rt=5000; no right buffered → no immediate match.
     assert_eq!(joiner.push_left(join_batch(vec![1], vec![10], vec![5000]), None).unwrap().num_rows(), 0);
     // Watermark below the eviction point: not yet evicted, nothing emitted.
-    assert_eq!(joiner.advance(5000).num_rows(), 0);
+    assert_eq!(joiner.advance(5000).unwrap().num_rows(), 0);
     // Watermark at/above 5000 - (-1000) = 6000: the left row is evicted unmatched → [left+null]
     // (append-only, so no $row_kind$ column — just the padded row).
-    let out = joiner.advance(6000);
+    let out = joiner.advance(6000).unwrap();
     assert_eq!(out.num_rows(), 1);
     assert_eq!(values(&out, 1), vec![10]); // left v
     assert!(out.column(3).is_null(0)); // right k nulled
@@ -2602,7 +2602,7 @@ fn interval_left_join_matched_row_not_padded() {
     assert_eq!(out.num_rows(), 1);
     assert_eq!(values(&out, 4), vec![100]);
     // Evict the left row: it matched, so no null-pad.
-    assert_eq!(joiner.advance(10000).num_rows(), 0);
+    assert_eq!(joiner.advance(10000).unwrap().num_rows(), 0);
 }
 
 // The match flags survive a checkpoint: a restored LEFT interval joiner does not re-pad a left
@@ -2627,7 +2627,7 @@ fn interval_left_join_match_flags_survive_restore() {
         &snapshot,
     );
     // Evicting the (matched) left row post-restore must emit no null-pad.
-    assert_eq!(restored.advance(10000).num_rows(), 0);
+    assert_eq!(restored.advance(10000).unwrap().num_rows(), 0);
 }
 
 // Raw keyed state can merge key groups that originated on different subtasks. Outer-join row ids
@@ -2668,7 +2668,7 @@ fn interval_outer_raw_state_remaps_subtask_local_row_ids() {
         interval_schema(),
         &snapshots,
     );
-    let out = restored.advance(10_000);
+    let out = restored.advance(10_000).unwrap();
     assert_eq!(out.num_rows(), 1);
     assert_eq!(values(&out, 0), vec![2]);
     assert_eq!(values(&out, 1), vec![20]);
@@ -4328,6 +4328,281 @@ mod paimon_state {
             sa_rows(&restored.flush(i64::MAX).unwrap()).is_empty(),
             "post-restore repeat"
         );
+    }
+
+    fn paimon_interval_joiner(dir: &str, kind: JoinKind, lower: i64, upper: i64) -> IntervalJoiner {
+        let store = PaimonIntervalJoinStore::create(
+            config(dir),
+            vec![DataType::Int64; 3],
+            vec![DataType::Int64; 3],
+        )
+        .unwrap();
+        IntervalJoiner::new(
+            vec![0],
+            vec![0],
+            2,
+            2,
+            lower,
+            upper,
+            None,
+            kind,
+            interval_schema(),
+            interval_schema(),
+        )
+        .with_backend(store)
+    }
+
+    /// Interval-join output pairs as sorted (left v, right v), nulls for outer padding.
+    fn ij_pairs(batch: &RecordBatch) -> Vec<(Option<i64>, Option<i64>)> {
+        if batch.num_rows() == 0 {
+            return Vec::new();
+        }
+        let lv = batch.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
+        let rv = batch.column(4).as_any().downcast_ref::<Int64Array>().unwrap();
+        let mut pairs: Vec<(Option<i64>, Option<i64>)> = (0..batch.num_rows())
+            .map(|r| {
+                (
+                    lv.is_valid(r).then(|| lv.value(r)),
+                    rv.is_valid(r).then(|| rv.value(r)),
+                )
+            })
+            .collect();
+        pairs.sort_unstable();
+        pairs
+    }
+
+    /// The interval join on the Paimon backend matches the memory operator through pushes on
+    /// both sides, watermark evictions, and checkpoints: a row buffered before a barrier joins a
+    /// row arriving after it through the committed probe.
+    #[test]
+    fn paimon_interval_join_matches_memory() {
+        let dir = temp_dir("ij-parity");
+        let mut paimon = paimon_interval_joiner(&dir, JoinKind::Inner, -1000, 1000);
+        let mut memory = inner_interval_joiner(-1000, 1000);
+
+        // Steps: (side, batch) pushes then a watermark; a barrier lands between steps.
+        type Push = (bool, RecordBatch);
+        let steps: Vec<(Vec<Push>, i64)> = vec![
+            (
+                vec![
+                    (false, join_batch(vec![1, 1], vec![100, 200], vec![5500, 7000])),
+                    (true, join_batch(vec![1], vec![10], vec![5000])),
+                ],
+                3000,
+            ),
+            // Post-barrier left row joins the committed right rt-7000 row through the probe.
+            (
+                vec![(true, join_batch(vec![1, 2], vec![20, 30], vec![6500, 6600]))],
+                8000, // evicts everything except rows still reachable
+            ),
+            (vec![(false, join_batch(vec![2], vec![300], vec![9000]))], 12000),
+        ];
+        for (i, (pushes, watermark)) in steps.iter().enumerate() {
+            for (is_left, batch) in pushes {
+                let (p, m) = if *is_left {
+                    (
+                        paimon.push_left(batch.clone(), None).unwrap(),
+                        memory.push_left(batch.clone(), None).unwrap(),
+                    )
+                } else {
+                    (
+                        paimon.push_right(batch.clone(), None).unwrap(),
+                        memory.push_right(batch.clone(), None).unwrap(),
+                    )
+                };
+                assert_eq!(ij_pairs(&m), ij_pairs(&p), "step {i} push diverged");
+            }
+            let p = paimon.advance(*watermark).unwrap();
+            let m = memory.advance(*watermark).unwrap();
+            assert_eq!(ij_pairs(&m), ij_pairs(&p), "step {i} advance diverged");
+            paimon.store_mut().checkpoint().unwrap();
+        }
+    }
+
+    /// LEFT outer on the backend: a committed row that matches after a barrier keeps its matched
+    /// flag through the region rewrite, and eviction null-pads only never-matched rows — within
+    /// the interval, across barriers, and after a restore from listed files only.
+    #[test]
+    fn paimon_interval_join_outer_matched_flags_survive_barriers() {
+        let dir = temp_dir("ij-outer");
+        let mut paimon = paimon_interval_joiner(&dir, JoinKind::LeftOuter, -1000, 1000);
+        let mut memory = IntervalJoiner::new(
+            vec![0],
+            vec![0],
+            2,
+            2,
+            -1000,
+            1000,
+            None,
+            JoinKind::LeftOuter,
+            interval_schema(),
+            interval_schema(),
+        );
+        // Two left rows commit; only one will ever match.
+        for joiner in [&mut paimon, &mut memory] {
+            joiner
+                .push_left(join_batch(vec![1, 2], vec![10, 20], vec![5000, 5000]), None)
+                .unwrap();
+        }
+        paimon.store_mut().checkpoint().unwrap();
+
+        // The post-barrier right row matches the committed left k=1 row (flag rewrites through
+        // the region).
+        let p = paimon.push_right(join_batch(vec![1], vec![100], vec![5500]), None).unwrap();
+        let m = memory.push_right(join_batch(vec![1], vec![100], vec![5500]), None).unwrap();
+        assert_eq!(ij_pairs(&m), ij_pairs(&p));
+        assert_eq!(ij_pairs(&p), vec![(Some(10), Some(100))]);
+        paimon.store_mut().checkpoint().unwrap();
+
+        // Eviction far past both rows: k=2 never matched and null-pads exactly once.
+        let p = paimon.advance(20_000).unwrap();
+        let m = memory.advance(20_000).unwrap();
+        assert_eq!(ij_pairs(&m), ij_pairs(&p));
+        assert_eq!(ij_pairs(&p), vec![(Some(20), None)]);
+        assert_eq!(paimon.advance(30_000).unwrap().num_rows(), 0, "eviction is once");
+
+        let (left_manifest, right_manifest) = paimon.store_mut().checkpoint().unwrap();
+        let restored_dir = temp_dir("ij-restore");
+        materialize(&left_manifest, &format!("{dir}/left"), &format!("{restored_dir}/left"));
+        materialize(&right_manifest, &format!("{dir}/right"), &format!("{restored_dir}/right"));
+        let store = PaimonIntervalJoinStore::open_merged(
+            config(&restored_dir),
+            vec![DataType::Int64; 3],
+            vec![DataType::Int64; 3],
+            &[(format!("{restored_dir}/left"), left_manifest.snapshot_id)],
+            &[(format!("{restored_dir}/right"), right_manifest.snapshot_id)],
+            0..=127,
+            true,
+        )
+        .unwrap();
+        let mut restored = IntervalJoiner::new(
+            vec![0],
+            vec![0],
+            2,
+            2,
+            -1000,
+            1000,
+            None,
+            JoinKind::LeftOuter,
+            interval_schema(),
+            interval_schema(),
+        )
+        .with_backend(store);
+        assert_eq!(restored.advance(i64::MAX).unwrap().num_rows(), 0, "post-restore repeat");
+    }
+
+    fn paimon_temporal_joiner(dir: &str, kind: JoinKind) -> TemporalJoiner {
+        // The probe side's payload carries the changelog kind as a trailing Int8 column.
+        let store = PaimonTemporalJoinStore::create(
+            config(dir),
+            vec![DataType::Int64, DataType::Int64, DataType::Int64, DataType::Int8],
+            vec![DataType::Int64; 3],
+        )
+        .unwrap();
+        temporal_joiner(kind).with_backend(store)
+    }
+
+    /// Temporal-join output rows as sorted (left v, right v?) — memory emission order across
+    /// keys follows map iteration, so parity is over the value set.
+    fn tj_pairs(batch: &RecordBatch) -> Vec<(Option<i64>, Option<i64>)> {
+        if batch.num_rows() == 0 {
+            return Vec::new();
+        }
+        let lv = batch.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
+        let rv = batch.column(4).as_any().downcast_ref::<Int64Array>().unwrap();
+        let mut pairs: Vec<(Option<i64>, Option<i64>)> = (0..batch.num_rows())
+            .map(|r| {
+                (
+                    lv.is_valid(r).then(|| lv.value(r)),
+                    rv.is_valid(r).then(|| rv.value(r)),
+                )
+            })
+            .collect();
+        pairs.sort_unstable();
+        pairs
+    }
+
+    /// The temporal join on the Paimon backend matches the memory operator through version
+    /// upserts, probe buffering, watermark firings, and checkpoints: a post-barrier probe joins
+    /// committed versions, and a retract version marks "no row here" exactly as in memory.
+    #[test]
+    fn paimon_temporal_join_matches_memory() {
+        let dir = temp_dir("tj-parity");
+        let mut paimon = paimon_temporal_joiner(&dir, JoinKind::LeftOuter);
+        let mut memory = temporal_joiner(JoinKind::LeftOuter);
+
+        for joiner in [&mut paimon, &mut memory] {
+            // key 1: rate 10@100, +U 20@300; key 2: 99@100 retracted (-D) at 400.
+            joiner.push_right(&temporal_build_batch(vec![1], vec![10], vec![100], vec![0])).unwrap();
+            joiner.push_right(&temporal_build_batch(vec![1], vec![20], vec![300], vec![2])).unwrap();
+            joiner.push_right(&temporal_build_batch(vec![2], vec![99], vec![100], vec![0])).unwrap();
+        }
+        paimon.store_mut().checkpoint().unwrap();
+
+        // Post-barrier: a -D for key 2 and probes at various times.
+        for joiner in [&mut paimon, &mut memory] {
+            joiner.push_right(&temporal_build_batch(vec![2], vec![99], vec![400], vec![3])).unwrap();
+            joiner
+                .push_left(&temporal_probe_batch(
+                    vec![1, 1, 2, 2],
+                    vec![1, 2, 3, 4],
+                    vec![200, 500, 150, 450],
+                ))
+                .unwrap();
+        }
+        let p = paimon.advance(600).unwrap();
+        let m = memory.advance(600).unwrap();
+        assert_eq!(tj_pairs(&m), tj_pairs(&p));
+        assert_eq!(
+            tj_pairs(&p),
+            vec![
+                (Some(1), Some(10)),  // probe@200 -> version 10@100
+                (Some(2), Some(20)),  // probe@500 -> +U 20@300
+                (Some(3), Some(99)),  // probe@150 -> 99@100
+                (Some(4), None),      // probe@450 -> retracted at 400: LEFT null-pad
+            ],
+        );
+        assert_eq!(paimon.advance(700).unwrap().num_rows(), 0, "fired probes left state");
+        paimon.store_mut().checkpoint().unwrap();
+
+        // Post-barrier probes join the still-committed versions (lazy prune kept the latest).
+        for joiner in [&mut paimon, &mut memory] {
+            joiner.push_left(&temporal_probe_batch(vec![1], vec![5], vec![600])).unwrap();
+        }
+        let p = paimon.advance(1000).unwrap();
+        let m = memory.advance(1000).unwrap();
+        assert_eq!(tj_pairs(&m), tj_pairs(&p));
+        assert_eq!(tj_pairs(&p), vec![(Some(5), Some(20))]);
+    }
+
+    /// Restore from listed files only: buffered probes fire after the restore against the
+    /// restored versions, exactly once.
+    #[test]
+    fn paimon_temporal_join_restores_from_listed_files() {
+        let dir = temp_dir("tj-restore-src");
+        let mut joiner = paimon_temporal_joiner(&dir, JoinKind::Inner);
+        joiner.push_right(&temporal_build_batch(vec![1], vec![10], vec![100], vec![0])).unwrap();
+        joiner.push_left(&temporal_probe_batch(vec![1], vec![7], vec![200])).unwrap();
+        let (left_manifest, right_manifest) = joiner.store_mut().checkpoint().unwrap();
+        let left_seq = joiner.store_mut().left.next_seq();
+
+        let restored_dir = temp_dir("tj-restore-dst");
+        materialize(&left_manifest, &format!("{dir}/left"), &format!("{restored_dir}/left"));
+        materialize(&right_manifest, &format!("{dir}/right"), &format!("{restored_dir}/right"));
+        let mut store = PaimonTemporalJoinStore::open_merged(
+            config(&restored_dir),
+            vec![DataType::Int64, DataType::Int64, DataType::Int64, DataType::Int8],
+            vec![DataType::Int64; 3],
+            &[(format!("{restored_dir}/left"), left_manifest.snapshot_id)],
+            &[(format!("{restored_dir}/right"), right_manifest.snapshot_id)],
+            0..=127,
+            true,
+        )
+        .unwrap();
+        store.left.set_next_seq(left_seq);
+        let mut restored = temporal_joiner(JoinKind::Inner).with_backend(store);
+        assert_eq!(tj_pairs(&restored.advance(500).unwrap()), vec![(Some(7), Some(10))]);
+        assert_eq!(restored.advance(600).unwrap().num_rows(), 0, "fired probe left state");
     }
 
     /// The bundle contract of the two-component store: written slots (the write buffer) survive

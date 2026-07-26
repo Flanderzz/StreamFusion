@@ -198,6 +198,30 @@ cross-check: Flink's merging window assigner keeps a per-key window-mapping stat
 per-window accumulators in RocksDB and rewrites both on merge; the tombstone-on-merge is that
 rewrite, expressed as LSM deletes.
 
+The **interval join** (seventh range-read consumer) is the first store whose reads happen on
+*push* rather than at a watermark: each side is a keyed row buffer (PK `[kg, equi-key, seq]`,
+time and matched-flag columns, typed payload), and an incoming batch probes the opposite side by
+its equi keys with overlay semantics — committed rows for the keys minus rows the region
+superseded, plus the region's live rows, merged back into arrival order — then runs the memory
+path's own tagged join. Eviction is the familiar time range read, staging deletions. The memory
+path's transient matched-id sets become a persistent matched *column*, maintained by
+read-modify-write through the region (the keep-first fired-marker pattern): a committed row's
+first match re-stages its full probe row with the flag set, so an evicted-never-matched outer
+row null-pads exactly once across barriers and restores. RocksDB cross-check: Flink's interval
+join keeps per-key row lists in MapState iterated per probe and tracks outer matches the same
+row-attached way; the equi-key probe is that iteration through the `IN` pushdown.
+
+The **temporal join** (eighth and final consumer) splits naturally: the probe side reuses the
+interval join's keyed row buffer (the changelog kind packed as a trailing payload column), and
+the versioned build side is the one state shape Paimon models *better* than it models itself in
+RAM — `rightState.put(rowTime, row)` last-write-wins per timestamp IS the deduplicate merge
+engine, so build-side writes are plain upserts with no read, no merge bookkeeping, and every
+`RowKind` kept as a column. One deliberate deviation: version pruning is lazy (a probed key
+prunes its stale versions at the firing that probed it; unprobed keys keep old versions on
+disk), where the memory path prunes every key at every watermark — cheap over RAM maps,
+a full scan over a table. Correctness never depends on pruning, only state size does; the
+Java compactor's maintenance keeps the sorted runs bounded either way.
+
 The full design record, including the verified paimon-rust API survey and the rejected
 alternatives (rust-rocksdb baseline, Tonbo, fjall, SlateDB, ForSt), is in
 `.claude/research/paimon-vortex-state-backend-plan.md`.

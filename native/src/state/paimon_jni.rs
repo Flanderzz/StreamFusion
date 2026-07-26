@@ -2394,3 +2394,370 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_checkpointPai
         }
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Interval join on two keyed row-buffer tables (left/, right/): reads happen on push (the
+// incoming batch probes the opposite side by equi key), eviction is the watermark range read.
+// The snapshot token packs both snapshot ids and both arrival sequences
+// ("<left>:<right>:<lseq>:<rseq>").
+// ---------------------------------------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+#[no_mangle]
+pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonIntervalJoiner<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    left_keys: JIntArray<'local>,
+    right_keys: JIntArray<'local>,
+    left_time: jint,
+    right_time: jint,
+    lower: jlong,
+    upper: jlong,
+    join_type: jint,
+    left_schema_address: jlong,
+    right_schema_address: jlong,
+    pred_kinds: JIntArray<'local>,
+    pred_payload: JIntArray<'local>,
+    pred_child_counts: JIntArray<'local>,
+    pred_longs: JLongArray<'local>,
+    pred_doubles: JDoubleArray<'local>,
+    pred_strings: JObjectArray<'local>,
+    key_timestamp_precisions: JIntArray<'local>,
+    memory_budget_bytes: jlong,
+    table_directory: JString<'local>,
+    max_parallelism: jint,
+    buckets: jint,
+    file_format: JString<'local>,
+    file_compression: JString<'local>,
+    source_directories: JObjectArray<'local>,
+    source_snapshot_tokens: JObjectArray<'local>,
+    key_group_start: jint,
+    key_group_end: jint,
+    aligned: jboolean,
+) -> jlong {
+    let left = read_columns(&env, &left_keys);
+    let right = read_columns(&env, &right_keys);
+    let left_schema = import_schema(left_schema_address);
+    let right_schema = import_schema(right_schema_address);
+    let predicate = read_join_predicate(
+        &mut env,
+        &pred_kinds,
+        &pred_payload,
+        &pred_child_counts,
+        &pred_longs,
+        &pred_doubles,
+        &pred_strings,
+    );
+    let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
+        .into_iter()
+        .map(|precision| precision as i32)
+        .collect();
+    let table_dir = read_string(&mut env, &table_directory);
+    let format = read_string(&mut env, &file_format);
+    let compression = read_string(&mut env, &file_compression);
+    let source_dirs: Vec<String> = read_strings(&mut env, &source_directories)
+        .into_iter()
+        .flatten()
+        .collect();
+    let mut left_seq = 0i64;
+    let mut right_seq = 0i64;
+    let mut left_sources: Vec<(String, i64)> = Vec::new();
+    let mut right_sources: Vec<(String, i64)> = Vec::new();
+    for (dir, token) in source_dirs.iter().zip(
+        read_strings(&mut env, &source_snapshot_tokens)
+            .into_iter()
+            .flatten(),
+    ) {
+        let (left_id, right_id, lseq, rseq) = parse_window_join_token(&token);
+        left_seq = left_seq.max(lseq);
+        right_seq = right_seq.max(rseq);
+        if left_id >= 0 {
+            left_sources.push((format!("{dir}/left"), left_id));
+        }
+        if right_id >= 0 {
+            right_sources.push((format!("{dir}/right"), right_id));
+        }
+    }
+
+    let left_types: Vec<DataType> =
+        left_schema.fields().iter().map(|f| f.data_type().clone()).collect();
+    let right_types: Vec<DataType> =
+        right_schema.fields().iter().map(|f| f.data_type().clone()).collect();
+    let config = PaimonStoreConfig {
+        table_dir,
+        max_parallelism: max_parallelism as usize,
+        buckets: buckets as usize,
+        file_format: format,
+        file_compression: compression,
+    };
+    let store = if source_dirs.is_empty() {
+        PaimonIntervalJoinStore::create(config, left_types, right_types)
+    } else {
+        PaimonIntervalJoinStore::open_merged(
+            config,
+            left_types,
+            right_types,
+            &left_sources,
+            &right_sources,
+            key_group_start..=key_group_end,
+            aligned != 0,
+        )
+    };
+    let joiner = store.and_then(|mut store| {
+        store.left.set_next_seq(left_seq);
+        store.right.set_next_seq(right_seq);
+        crate::interval_join::IntervalJoiner::new(
+            left,
+            right,
+            left_time as usize,
+            right_time as usize,
+            lower,
+            upper,
+            predicate,
+            JoinKind::from_code(join_type),
+            left_schema,
+            right_schema,
+        )
+        .with_key_timestamp_precisions(timestamp_precisions)
+        .with_backend(store)
+        .with_read_through_budget(memory_budget_bytes)
+    });
+    boxed_or_throw(&mut env, joiner)
+}
+
+/// Checkpoint sync phase (task thread, at the barrier): commits both side tables; the token line
+/// packs both snapshot ids and both arrival sequences.
+#[no_mangle]
+pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_checkpointPaimonIntervalJoiner<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) -> jobjectArray {
+    let joiner = unsafe { &mut *(handle as *mut crate::interval_join::IntervalJoiner) };
+    let store = joiner.store_mut();
+    let (left_seq, right_seq) = (store.left.next_seq(), store.right.next_seq());
+    match store.checkpoint() {
+        Ok((left, right)) => {
+            let token = if left.snapshot_id < 0 && right.snapshot_id < 0 {
+                String::new()
+            } else {
+                format!("{}:{}:{}:{}", left.snapshot_id, right.snapshot_id, left_seq, right_seq)
+            };
+            let mut lines = Vec::with_capacity(
+                1 + left.data_files.len()
+                    + left.meta_files.len()
+                    + right.data_files.len()
+                    + right.meta_files.len(),
+            );
+            lines.push(token);
+            lines.extend(left.data_files.iter().map(|f| format!("d:left/{f}")));
+            lines.extend(right.data_files.iter().map(|f| format!("d:right/{f}")));
+            lines.extend(left.meta_files.iter().map(|f| format!("m:left/{f}")));
+            lines.extend(right.meta_files.iter().map(|f| format!("m:right/{f}")));
+            let array = env
+                .new_object_array(lines.len() as i32, "java/lang/String", JObject::null())
+                .expect("manifest array");
+            for (i, line) in lines.iter().enumerate() {
+                let value = env.new_string(line).expect("manifest line");
+                env.set_object_array_element(&array, i as i32, value)
+                    .expect("manifest element");
+            }
+            array.into_raw()
+        }
+        Err(e) => {
+            throw_runtime(&mut env, &format!("paimon state checkpoint failed: {e}"));
+            std::ptr::null_mut()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Temporal join: probe side on a keyed row buffer, versioned build side on plain upserts (the
+// deduplicate merge engine IS last-write-wins per version timestamp). The snapshot token packs
+// both snapshot ids and the probe side's arrival sequence ("<left>:<right>:<lseq>").
+// ---------------------------------------------------------------------------------------------
+
+/// Parses one restored temporal-join token — either id `-1` when that side had never committed.
+fn parse_temporal_token(token: &str) -> (i64, i64, i64) {
+    let mut parts = token.splitn(3, ':');
+    let mut next = || {
+        parts
+            .next()
+            .expect("temporal-join paimon snapshot token")
+            .parse::<i64>()
+            .expect("temporal-join paimon token field")
+    };
+    (next(), next(), next())
+}
+
+#[allow(clippy::too_many_arguments)]
+#[no_mangle]
+pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonTemporalJoiner<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    left_keys: JIntArray<'local>,
+    right_keys: JIntArray<'local>,
+    left_time: jint,
+    right_time: jint,
+    join_type: jint,
+    left_schema_address: jlong,
+    right_schema_address: jlong,
+    pred_kinds: JIntArray<'local>,
+    pred_payload: JIntArray<'local>,
+    pred_child_counts: JIntArray<'local>,
+    pred_longs: JLongArray<'local>,
+    pred_doubles: JDoubleArray<'local>,
+    pred_strings: JObjectArray<'local>,
+    key_timestamp_precisions: JIntArray<'local>,
+    memory_budget_bytes: jlong,
+    table_directory: JString<'local>,
+    max_parallelism: jint,
+    buckets: jint,
+    file_format: JString<'local>,
+    file_compression: JString<'local>,
+    source_directories: JObjectArray<'local>,
+    source_snapshot_tokens: JObjectArray<'local>,
+    key_group_start: jint,
+    key_group_end: jint,
+    aligned: jboolean,
+) -> jlong {
+    let left = read_columns(&env, &left_keys);
+    let right = read_columns(&env, &right_keys);
+    let left_schema = import_schema(left_schema_address);
+    let right_schema = import_schema(right_schema_address);
+    let predicate = read_join_predicate(
+        &mut env,
+        &pred_kinds,
+        &pred_payload,
+        &pred_child_counts,
+        &pred_longs,
+        &pred_doubles,
+        &pred_strings,
+    );
+    let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
+        .into_iter()
+        .map(|precision| precision as i32)
+        .collect();
+    let table_dir = read_string(&mut env, &table_directory);
+    let format = read_string(&mut env, &file_format);
+    let compression = read_string(&mut env, &file_compression);
+    let source_dirs: Vec<String> = read_strings(&mut env, &source_directories)
+        .into_iter()
+        .flatten()
+        .collect();
+    let mut left_seq = 0i64;
+    let mut left_sources: Vec<(String, i64)> = Vec::new();
+    let mut right_sources: Vec<(String, i64)> = Vec::new();
+    for (dir, token) in source_dirs.iter().zip(
+        read_strings(&mut env, &source_snapshot_tokens)
+            .into_iter()
+            .flatten(),
+    ) {
+        let (left_id, right_id, lseq) = parse_temporal_token(&token);
+        left_seq = left_seq.max(lseq);
+        if left_id >= 0 {
+            left_sources.push((format!("{dir}/left"), left_id));
+        }
+        if right_id >= 0 {
+            right_sources.push((format!("{dir}/right"), right_id));
+        }
+    }
+
+    // The probe side's payload carries the changelog kind as a trailing Int8 column.
+    let mut left_types: Vec<DataType> =
+        left_schema.fields().iter().map(|f| f.data_type().clone()).collect();
+    left_types.push(DataType::Int8);
+    let right_types: Vec<DataType> =
+        right_schema.fields().iter().map(|f| f.data_type().clone()).collect();
+    let config = PaimonStoreConfig {
+        table_dir,
+        max_parallelism: max_parallelism as usize,
+        buckets: buckets as usize,
+        file_format: format,
+        file_compression: compression,
+    };
+    let store = if source_dirs.is_empty() {
+        PaimonTemporalJoinStore::create(config, left_types, right_types)
+    } else {
+        PaimonTemporalJoinStore::open_merged(
+            config,
+            left_types,
+            right_types,
+            &left_sources,
+            &right_sources,
+            key_group_start..=key_group_end,
+            aligned != 0,
+        )
+    };
+    let joiner = store.and_then(|mut store| {
+        store.left.set_next_seq(left_seq);
+        crate::temporal_join::TemporalJoiner::new(
+            left,
+            right,
+            left_time as usize,
+            right_time as usize,
+            JoinKind::from_code(join_type),
+            left_schema,
+            right_schema,
+            predicate,
+        )
+        .with_key_timestamp_precisions(timestamp_precisions)
+        .with_backend(store)
+        .with_read_through_budget(memory_budget_bytes)
+    });
+    boxed_or_throw(&mut env, joiner)
+}
+
+/// Checkpoint sync phase (task thread, at the barrier): commits both side tables; the token line
+/// packs both snapshot ids and the probe side's arrival sequence.
+#[no_mangle]
+pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_checkpointPaimonTemporalJoiner<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) -> jobjectArray {
+    let joiner = unsafe { &mut *(handle as *mut crate::temporal_join::TemporalJoiner) };
+    let store = joiner.store_mut();
+    let left_seq = store.left.next_seq();
+    match store.checkpoint() {
+        Ok((left, right)) => {
+            let token = if left.snapshot_id < 0 && right.snapshot_id < 0 {
+                String::new()
+            } else {
+                format!("{}:{}:{}", left.snapshot_id, right.snapshot_id, left_seq)
+            };
+            let mut lines = Vec::with_capacity(
+                1 + left.data_files.len()
+                    + left.meta_files.len()
+                    + right.data_files.len()
+                    + right.meta_files.len(),
+            );
+            lines.push(token);
+            lines.extend(left.data_files.iter().map(|f| format!("d:left/{f}")));
+            lines.extend(right.data_files.iter().map(|f| format!("d:right/{f}")));
+            lines.extend(left.meta_files.iter().map(|f| format!("m:left/{f}")));
+            lines.extend(right.meta_files.iter().map(|f| format!("m:right/{f}")));
+            let array = env
+                .new_object_array(lines.len() as i32, "java/lang/String", JObject::null())
+                .expect("manifest array");
+            for (i, line) in lines.iter().enumerate() {
+                let value = env.new_string(line).expect("manifest line");
+                env.set_object_array_element(&array, i as i32, value)
+                    .expect("manifest element");
+            }
+            array.into_raw()
+        }
+        Err(e) => {
+            throw_runtime(&mut env, &format!("paimon state checkpoint failed: {e}"));
+            std::ptr::null_mut()
+        }
+    }
+}

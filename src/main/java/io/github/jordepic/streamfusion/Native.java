@@ -1356,6 +1356,89 @@ public final class Native {
   public static native String[] checkpointPaimonSessionAggregator(long handle);
 
   /**
+   * {@code createIntervalJoiner} on the Paimon state backend (event-time only — a proctime
+   * interval join times rows by the clock and evicts on processing-time timers whose deadline
+   * travels in raw state). One table per side, each row under its equi-join key and an arrival
+   * sequence with a matched flag; a push probes the opposite table by the batch's equi keys
+   * (write buffer merged over committed rows) and joins immediately, eviction is the watermark
+   * range read, and a committed row's first match rewrites it with {@code matched = true} so an
+   * outer side null-pads exactly once. The push/advance/close/state-bytes calls are the memory
+   * family's own — the handle type is shared and branches internally. The snapshot token packs
+   * both snapshot ids and both arrival sequences.
+   */
+  public static native long createPaimonIntervalJoiner(
+      int[] leftKeys,
+      int[] rightKeys,
+      int leftTime,
+      int rightTime,
+      long lowerMillis,
+      long upperMillis,
+      int joinType,
+      long leftSchemaAddress,
+      long rightSchemaAddress,
+      int[] predKinds,
+      int[] predPayload,
+      int[] predChildCounts,
+      long[] predLongs,
+      double[] predDoubles,
+      String[] predStrings,
+      int[] keyTimestampPrecisions,
+      long memoryBudgetBytes,
+      String tableDirectory,
+      int maxParallelism,
+      int buckets,
+      String fileFormat,
+      String fileCompression,
+      String[] sourceDirectories,
+      String[] sourceSnapshotTokens,
+      int keyGroupStart,
+      int keyGroupEnd,
+      boolean aligned);
+
+  /** {@code checkpointPaimonGroupAggregator} for a Paimon-backed interval joiner. */
+  public static native String[] checkpointPaimonIntervalJoiner(long handle);
+
+  /**
+   * {@code createTemporalJoiner} on the Paimon state backend. The probe side is a keyed row
+   * buffer (rows fire in arrival order once the watermark passes their time, leaving state); the
+   * versioned build side is one row per (key, version) whose last-write-wins per timestamp is
+   * the deduplicate merge engine itself, with every changelog kind persisted (a retract version
+   * marks "no row here"). Version pruning is lazy — a probed key drops its stale versions; an
+   * unprobed key's old versions wait for its next probe. The push/advance/close/state-bytes
+   * calls are the memory family's own — the handle type is shared and branches internally. The
+   * snapshot token packs both snapshot ids and the probe side's arrival sequence.
+   */
+  public static native long createPaimonTemporalJoiner(
+      int[] leftKeys,
+      int[] rightKeys,
+      int leftTime,
+      int rightTime,
+      int joinType,
+      long leftSchemaAddress,
+      long rightSchemaAddress,
+      int[] predKinds,
+      int[] predPayload,
+      int[] predChildCounts,
+      long[] predLongs,
+      double[] predDoubles,
+      String[] predStrings,
+      int[] keyTimestampPrecisions,
+      long memoryBudgetBytes,
+      String tableDirectory,
+      int maxParallelism,
+      int buckets,
+      String fileFormat,
+      String fileCompression,
+      String[] sourceDirectories,
+      String[] sourceSnapshotTokens,
+      int keyGroupStart,
+      int keyGroupEnd,
+      boolean aligned);
+
+  /** {@code checkpointPaimonGroupAggregator} for a Paimon-backed temporal joiner. */
+  public static native String[] checkpointPaimonTemporalJoiner(long handle);
+
+  /**
    * {@code createChangelogNormalizer} on the Paimon state backend; state row and restore semantics
    * as in {@link #createPaimonKeepLastDeduplicator}.
    */

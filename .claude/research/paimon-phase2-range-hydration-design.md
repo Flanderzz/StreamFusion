@@ -58,12 +58,22 @@ onto the same store machinery). Sketches, cross-checked against the operators' m
   map must tombstone the key's loaded committed starts right there (the barrier diff can no
   longer see the key), and the fire scan must skip seeded keys wholesale (per-(key,start)
   matching would resurrect a start a merge consumed). Token = plain snapshot id.
-* **Interval join**: PK `[kg, k(equi-key), seq]` per side. Reads happen on push (probe the
-  opposite side by `k IN` + region live rows for those keys, join immediately, emit — arrival
-  order preserved); `advance` stages deletions for rows outside the retention bound. Outer joins
-  persist a matched flag column (read-modify-write through the region, the keep-first-marker
-  pattern) so an evicted-never-matched row can null-pad exactly once.
-* **Temporal join**: right side is naturally `[kg, k, rt]` upserts (last-write-wins per version
+* **Interval join — SHIPPED as RUNG 7 (2026-07-26)**, exactly per this design: PK `[kg, k(equi-key BinaryRow), seq]` per
+  side (two tables left/right; token `"left:right:lseq:rseq"`); columns `rt` millis, `matched`
+  Boolean, payload. Region key = `k ++ seq_be`; time column = rt. Push = probe the OPPOSITE
+  store by the incoming batch's equi keys with overlay semantics (committed `scan_keys` ANTI
+  region touched composites UNION region live rows filtered to those keys, all seq-sorted =
+  arrival order), project to `[payload…, __rowid__ = seq]`, and reuse the memory path's
+  join_tagged; incoming rows get seqs assigned BEFORE the join and stage AFTER it with their
+  matched flags known; opposite-side matched seqs upsert their full probe-batch row with
+  matched=true (read-modify-write via the region — the probe batch has the full row). Advance =
+  per-side eviction range scan (left `rt <= wm + lower`, right `rt <= wm - upper`; committed
+  minus region-deleted plus region live, seq-sorted), null-pad matched=false rows for outer
+  sides, stage deletes for all. Memory path's rowid+matched-sets become a matched COLUMN.
+  Proctime interval join stays memory (clock-stamped times). Tables stay small: eviction GCs to
+  the interval's retention, so per-push probes are bounded like the memory path's own
+  full-buffer concat per push.
+* **Temporal join — SHIPPED as RUNG 8 (2026-07-26)**, per this sketch (lazy per-probed-key version pruning recorded as the deviation): right side is naturally `[kg, k, rt]` upserts (last-write-wins per version
   = the deduplicate merge engine); left side a row-buffer with the equi-key in the PK. `advance`
   fires left rows `rt ≤ wm` (range read), probes right versions for exactly the fired keys
   (`k IN`), and prunes stale right versions (keep the latest ≤ wm) with staged deletions.
