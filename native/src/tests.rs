@@ -4175,6 +4175,25 @@ mod paimon_state {
         assert!(wa_rows(&restored.flush(i64::MAX).unwrap()).is_empty(), "late row dropped");
     }
 
+    /// A window fired from the committed table earlier in the interval must not re-seed when its
+    /// key is touched afterwards: the region's staged deletion shadows the stale committed row
+    /// in the seed scan, not just the fire scan.
+    #[test]
+    fn paimon_window_agg_fired_window_does_not_reseed() {
+        let dir = temp_dir("wa-reseed");
+        let mut agg = TumblingAggregator::new(1000, 1000, false, vec![0], vec![0])
+            .with_backend(window_agg_store(&dir));
+        agg.update(&wa_batch(vec![0], vec![10], vec![1])).unwrap();
+        agg.checkpoint_backend().unwrap();
+
+        // The committed window fires from the table scan (key 1 untouched this interval)...
+        assert_eq!(wa_rows(&agg.flush(1000).unwrap()), vec![(1, 0, 1000, 10)]);
+        // ...then the key is touched with a row for a later window; the fired window's stale
+        // committed row must not seed back in and re-fire.
+        agg.update(&wa_batch(vec![1500], vec![5], vec![1])).unwrap();
+        assert_eq!(wa_rows(&agg.flush(2000).unwrap()), vec![(1, 1000, 2000, 5)]);
+    }
+
     /// The global two-phase half rides the same store: partials merge into seeded committed
     /// windows across a barrier and fire once.
     #[test]

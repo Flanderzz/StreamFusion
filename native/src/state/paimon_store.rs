@@ -3480,8 +3480,10 @@ impl PaimonWindowAggStore {
     }
 
     /// The committed open windows of every given key not yet seeded this interval, as normalized
-    /// store-schema batches (`kg`, `k`, `we`, `ws`, keys…, states…). Marks the keys seeded — the
-    /// committed table is immutable between barriers, so one probe per key per interval.
+    /// store-schema batches (`kg`, `k`, `we`, `ws`, keys…, states…), minus rows the region
+    /// already deleted — a window fired from the committed table earlier this interval must not
+    /// re-seed when its key is touched afterwards. Marks the keys seeded — the committed table
+    /// is immutable between barriers, so one probe per key per interval.
     pub(crate) fn seed_scan(
         &mut self,
         keys: &[ByteKey],
@@ -3495,7 +3497,8 @@ impl PaimonWindowAggStore {
             self.seeded.insert(key.clone());
         }
         let batches = self.core.scan_keys(&misses)?;
-        self.normalize(batches)
+        let normalized = self.normalize(batches)?;
+        self.filter_region_deleted(normalized, None)
     }
 
     /// The committed rows of every window the watermark closes, minus rows the region already
@@ -3513,8 +3516,18 @@ impl PaimonWindowAggStore {
             self.core.scan_predicate(predicate)?
         };
         let normalized = self.normalize(committed)?;
+        self.filter_region_deleted(normalized, Some(watermark))
+    }
+
+    /// Drops rows whose (key, window) the region already deleted — fired earlier this interval —
+    /// and, when a watermark is given, re-checks the pushed range predicate exactly.
+    fn filter_region_deleted(
+        &self,
+        batches: Vec<RecordBatch>,
+        watermark: Option<i64>,
+    ) -> Result<Vec<RecordBatch>, DataFusionError> {
         let mut out = Vec::new();
-        for batch in normalized {
+        for batch in batches {
             let ks = batch.column(1).as_any().downcast_ref::<BinaryArray>().expect("k column");
             let wes = batch.column(2).as_any().downcast_ref::<Int64Array>().expect("we column");
             let wss = batch.column(3).as_any().downcast_ref::<Int64Array>().expect("ws column");
@@ -3522,7 +3535,7 @@ impl PaimonWindowAggStore {
                 .map(|row| {
                     let (we, ws) = (wes.value(row), wss.value(row));
                     Some(
-                        we <= watermark
+                        watermark.is_none_or(|wm| we <= wm)
                             && !self
                                 .region
                                 .contains(&Self::composite_key(ks.value(row), we, ws)),
