@@ -511,18 +511,32 @@ backend A/B: **35.4 s → 9.85 s** — the mkdir storm cost far more than its CP
 because commits blocked on it — bringing the profiling round's cumulative total to
 **124.1 s → 9.85 s (12.6×)**, the Paimon backend at 0.44× the memory backend end to end.
 
-**Paimon hydration is bucket-granular and resident for the interval.** The read path originally
-probed per input batch: every batch's missed keys planned a fresh key-filtered scan, re-opening
-the same bucket files over and over — the per-scan file-open storm the backend flame graph was
-dominated by — and clean entries were dropped at every bundle boundary, forcing the next bundle
-to read them again. The first miss in a bucket now hydrates the whole bucket, and everything
-hydrated stays resident until the barrier. This is not a cache: the pinned table is immutable
-between barriers, so a resident entry can never be stale, and the barrier still drops the entire
-working set. Each bucket's files are read once per checkpoint interval instead of once per
-batch; the memory backend holds strictly more resident, so the bound does not regress. Measured
-on the q4 backend A/B (500 ms checkpoints, 2M events): **55.6–66.1 s → 35.4 s** on top of the
-background-maintenance change — cumulatively 124.1 s → 35.4 s, 3.5× the backend's end-to-end
-throughput in one profiling round.
+**Paimon reads are a per-batch key probe pushed into the reader** *(supersedes the
+interval-resident working set below)*. The store is exactly two components — the write buffer
+(everything written since the last barrier) and the committed disk table — and each input
+batch's keys missing from the buffer are read with one scan whose `IN` predicate the reader
+enforces exactly at parquet decode: file/page stats prune, the key column decodes first, and
+value columns decode only for matching rows. Two techniques make per-batch probing affordable
+where it originally was not: the pinned paimon-rust fork evaluates `IN`/`NOT IN` literal sets
+with **one hash-set pass** over the column instead of one comparison kernel per literal (the
+stock loop is O(rows × literals) — quadratic for a pushed key batch), and the store **plans its
+scan splits once per pinned snapshot** (the table is immutable between barriers), so probes pay
+no per-batch manifest walk. Re-reads of hot files are served by the OS page cache rather than an
+application-side copy of committed state, and the operator memory bound drops from
+touched-state-per-interval to written-state-per-interval. Measured at **parity** on the q4
+backend A/B (same session, 500 ms checkpoints, 2M events): 2.400 s → 2.393 s — on this shape
+nearly every read key is also written, so the superseded design's retained clean rows saved
+nothing.
+
+*(Superseded, kept for the record.)* **Paimon hydration was bucket-granular and resident for the
+interval.** The original per-batch key probe on the bucket-per-key-group layout re-opened the
+same bucket files for every input batch — the file-open storm the first backend flame graph was
+dominated by — so the store switched to reading whole buckets on first miss and keeping
+everything resident until the barrier (measured then: **55.6–66.1 s → 35.4 s**). That evidence
+was later confounded: the storm came from the 128-bucket layout, the per-write mkdir storm, and
+per-literal `IN` evaluation, all since fixed — and once they were, the per-batch probe measured
+identical to residency while holding a working set bounded by writes instead of touches, so the
+resident map (a third copy of state between the write buffer and the page cache) was removed.
 
 **Paimon map-state flushes diff per entry.** The Paimon backend's map store (join state: one table
 row per stored row under PK `[kg, key, row]`) initially flushed a touched key by rewriting its

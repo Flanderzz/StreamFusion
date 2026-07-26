@@ -3357,6 +3357,37 @@ mod paimon_state {
         }
     }
 
+    /// The bundle contract of the two-component store: written slots (the write buffer) survive
+    /// `end_bundle` until the barrier; clean reads are bundle-scoped and drop, and a later bundle
+    /// touching the same key re-reads it from the committed table.
+    #[test]
+    fn paimon_write_buffer_survives_bundles_clean_reads_do_not() {
+        let dir = temp_dir("bundle");
+        let mut agg = paimon_agg(create_store(&dir));
+        agg.update(&group_batch(vec![1, 2], vec![10, 20])).unwrap();
+        agg.flush_mini_batch().unwrap();
+        agg.store_mut().checkpoint().unwrap();
+
+        let store = agg.store_mut();
+        let probe = group_batch(vec![1, 2], vec![0, 0]);
+        let (key1, key2) = {
+            let mut encoder = BinaryRowBatchEncoder::new(&probe, &[0], &[-1]);
+            let key1 = ByteKey::from(encoder.encode(0));
+            let key2 = ByteKey::from(encoder.encode(1));
+            (key1, key2)
+        };
+        store.begin_batch(&probe, &[0], &[-1]).unwrap();
+        assert!(store.get(&key1.0).is_some());
+        assert!(store.get(&key2.0).is_some());
+        store.get_mut(&key1.0).unwrap();
+        store.end_bundle().unwrap();
+        assert!(store.get(&key1.0).is_some(), "a written key stays resident until the barrier");
+        assert!(store.get(&key2.0).is_none(), "a clean read must not outlive its bundle");
+
+        store.begin_batch(&probe, &[0], &[-1]).unwrap();
+        assert!(store.get(&key2.0).is_some(), "a dropped clean key re-reads from the table");
+    }
+
     #[test]
     fn paimon_checkpoint_restores_from_listed_files_only() {
         let dir = temp_dir("restore-src");

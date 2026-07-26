@@ -6,6 +6,14 @@ is being removed (fragmentation proportional to max-parallelism was judged too m
 favor of a small fixed bucket count with RocksDB-style clipping at recovery — Phase 2 builds on
 the de-bucketed store.
 
+Update (same review, follow-up decision): the point-read side of this design already shipped, in
+simplified form — the store is now exactly a write buffer plus the disk table, reads are a
+per-batch key probe pushed into the reader as an exact `IN` predicate (hash-set evaluation added
+to the paimon-rust fork), and no clean row survives its bundle. The interval-resident working
+set this doc assumed as the point-access baseline is gone. What remains of Phase 2 is the range
+side: the Arrow-batch dirty region as a queryable set, the DataFusion overlay for range reads
+(write buffer ∪ committed, buffer winning), and the first watermark/timer operator consumer.
+
 Original draft (2026-07-25): Written after the state-backend
 speed-up round (124.1 s → 9.85 s measured on the q4 A/B; see `docs/benchmarks.md`) so the design
 intent survives sessions. Approved direction from maintainer discussion: dirty region as

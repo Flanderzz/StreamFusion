@@ -1082,6 +1082,7 @@ ratios are quoted loosely):
 | + custom local-fs write path (no per-write `create_dir_all`) | 9.85 s | 203K events/s (**0.44×** memory) |
 | everything + dir cache, paced maintenance, incremental links, standard `-Pbench` (mimalloc) | 8.99 s | 222K events/s (**0.54×** memory) |
 | + de-bucketed tables (`buckets` = 1, recovery-time clip) | 3.08–3.71 s | 539–650K events/s (**1.16–1.27×** memory) |
+| write buffer + per-batch key-probe reads (no retained clean rows) | 2.39 s | 836K events/s (**1.12×** memory) |
 
 **The durable backend now beats the memory backend on this shape** (two runs, machine cooled):
 at 500 ms checkpoints the memory backend serializes and uploads its whole state as raw
@@ -1095,5 +1096,17 @@ measured 33.1 s vs 35.4 s — ~7% — so the bucket-per-key-group layout keeps i
 property at negligible cost. The remaining ~2× against memory decomposes across the
 hard-link/upload farm, the commit path, hydration decode, and background-maintenance interference
 — the next profile decides which.
+
+The last row is a design simplification measured at parity, not a speed-up: the store was reduced
+to exactly a write buffer plus the disk table (reads resolve per batch by pushing the missing
+keys into the reader as an exact `IN` predicate; no clean row survives its bundle, so committed
+state is never duplicated in operator memory). Same-session A/B against the interval-resident
+design: 2.400 s vs 2.393 s — identical within noise (the memory baseline itself drifted
+2.46–2.69 s between the two runs). On this shape nearly every key read is also written, so the
+retained map's re-read savings never materialize; the memory bound drops from
+touched-state-per-interval to written-state-per-interval. The enabling fix was in the reader: the
+pinned paimon-rust fork evaluates `IN` literal sets with one hash-set pass instead of one
+comparison kernel per literal, and the store plans its scan splits once per pinned snapshot
+instead of per probe.
 
 _Apple M1 Max; numbers are comparable only within a machine._

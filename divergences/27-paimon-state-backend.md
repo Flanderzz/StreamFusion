@@ -18,14 +18,20 @@ with the `SharedStateRegistry`.
 
 Native operator state moves into a **local Apache Paimon primary-key table** (via paimon-rust,
 Vortex file format) behind a storage seam in the Rust operators — selected with Flink's normal
-`state.backend.type` toggle, memory remaining the default. Reads are **read-through at bucket
-granularity, scoped to the checkpoint interval**: the first miss in a bucket hydrates the whole
-bucket into the working set, and everything hydrated stays resident until the barrier — not a
-cache (the pinned table is immutable between barriers, so residency can never be stale; the
-barrier drops the whole working set and the next interval re-reads on demand). The original
-key-probe-per-batch design re-opened the same bucket files for every input batch, which the
-backend profile showed as a file-open storm; one bucket read per interval reads the same bytes
-once. Writes buffer as dirty
+`state.backend.type` toggle, memory remaining the default. The store holds exactly **two
+components: a write buffer and the disk table**. Reads resolve per input batch with one
+point-read join: the batch's keys not already in the write buffer are pushed into the table
+reader as an exact `IN` predicate (file/page stats prune, then a single hash-set pass filters
+rows at parquet decode — a fork patch, upstreamable, replaced the reader's per-literal `IN` loop
+that would have made this quadratic), and the matched rows live only until the end of the
+batch's bundle. There is **no retained cache of clean rows between bundles**: re-reads are
+served by the OS page cache plus decode, never by a second in-memory copy of committed state.
+The split list is planned once per pinned snapshot (the table is immutable between barriers), so
+per-batch probes pay no manifest walk. Two earlier read designs were tried and rejected: the
+original key-probe-per-batch on the bucket-per-key-group layout profiled as a file-open storm
+(evidence that turned out to be about the layout, not the probe granularity), and the
+interval-resident working set that replaced it duplicated committed state in memory and tied the
+memory bound to touched-state size rather than written-state size. Writes buffer as dirty
 working-set entries and commit as one typed Arrow batch per checkpoint barrier. Durability lands
 exactly at checkpoints — between barriers the write buffer is RAM, playing the role RocksDB's
 memtable+WAL play, except the "WAL" is the checkpoint itself.
@@ -49,8 +55,8 @@ Why Paimon over rust-rocksdb:
   parallelism, judged too much steady-state overhead for a property rescale rarely uses (Flink
   itself never physically partitions RocksDB by key group; the group is a key prefix in one CF,
   and rescale clips). Key-group locality survives de-bucketing because `kg` leads the primary
-  key: files' row groups are kg-clustered, so hydration prunes by key-group predicate and reads
-  stay proportional to touched groups. Restore has two paths: a single source covering exactly
+  key: files' row groups are kg-clustered, so the per-batch key probe pushes the keys' groups as
+  a stats-prunable companion predicate and reads stay proportional to touched groups. Restore has two paths: a single source covering exactly
   this subtask's range (and the same bucket count) adopts every bucket wholesale — data files
   hard-linked, committed by existing metadata (public `CommitMessage`), no row read — while
   rescale (or a bucket-count change) pays a one-time clip at recovery: each source is scanned
@@ -100,9 +106,10 @@ tables (one per side) under one operator backend — the analog of Flink's two n
 two column families in one RocksDB — carried by one incremental handle whose meta document stores
 an opaque snapshot token the native store packs both snapshot ids into. The map store's flush is
 per-entry, like RocksDB MapState's per-entry puts and deletes, but derived rather than tracked:
-the operator mutates a whole hydrated bucket in place, and at the barrier the store diffs it
-against the hydrated image — only entries that differ are upserted, only vanished rows are
-tombstoned, so a hot join key's untouched rows cost nothing per checkpoint.
+the operator mutates a key's whole entry map in place, and at the barrier the store diffs it
+against the image read from the table when the key was first fetched — only entries that differ
+are upserted, only vanished rows are tombstoned, so a hot join key's untouched rows cost nothing
+per checkpoint.
 
 The full design record, including the verified paimon-rust API survey and the rejected
 alternatives (rust-rocksdb baseline, Tonbo, fjall, SlateDB, ForSt), is in
