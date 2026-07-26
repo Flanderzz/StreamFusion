@@ -48,6 +48,7 @@ class NativeOverAggregateOperatorTest {
             0,
             false,
             new int[0],
+            INPUT,
             MAX_PARALLELISM);
     try (BufferAllocator allocator = new RootAllocator();
         KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness =

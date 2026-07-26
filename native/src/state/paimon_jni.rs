@@ -1538,3 +1538,287 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_closePaimonWi
         drop(from_handle::<crate::topn::WindowRanker>(handle));
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Event-time OVER on the two-table over store: pending rows (dirty region + range overlay) plus
+// per-key fold state (point-access dirty slots). The snapshot token packs both snapshot ids and
+// the arrival sequence ("<pending>:<folds>:<seq>") — the sequence orders pending rows across a
+// restore; without it a restored subtask's new rows would emit ahead of older buffered rows.
+// ---------------------------------------------------------------------------------------------
+
+/// Parses one restored over-store token — `"<pending id>:<folds id>:<next seq>"`, either id `-1`
+/// when that table had never committed.
+fn parse_over_token(token: &str) -> (i64, i64, i64) {
+    let mut parts = token.splitn(3, ':');
+    let pending = parts.next().expect("over paimon token");
+    let folds = parts.next().expect("over paimon folds id");
+    let seq = parts.next().expect("over paimon sequence");
+    (
+        pending.parse::<i64>().expect("over pending snapshot id"),
+        folds.parse::<i64>().expect("over folds snapshot id"),
+        seq.parse::<i64>().expect("over arrival sequence"),
+    )
+}
+
+/// True when this OVER instance's whole state shape is persistable: a watermark-driven fold
+/// (rowtime, unbounded RANGE frame or pure window functions) whose payload row and fold-state
+/// columns all sit in the backend's type map.
+#[no_mangle]
+pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_paimonOverStateSupported<
+    'local,
+>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    row_schema_address: jlong,
+    value_types: JIntArray<'local>,
+    aggregate_kinds: JIntArray<'local>,
+    frame_kind: jint,
+    proctime: jboolean,
+) -> jboolean {
+    let kinds = read_int_array(&env, &aggregate_kinds);
+    let value_type_codes = read_int_array(&env, &value_types);
+    let payload_types: Vec<DataType> = import_schema(row_schema_address)
+        .fields()
+        .iter()
+        .map(|field| field.data_type().clone())
+        .collect();
+    let Some(state_types) = crate::over_agg::paimon_over_state_types(
+        &value_type_codes,
+        &kinds,
+        frame_kind as i64,
+        proctime != 0,
+    ) else {
+        return 0;
+    };
+    (paimon_row_supported(&payload_types) && paimon_row_supported(&state_types)) as jboolean
+}
+
+#[allow(clippy::too_many_arguments)]
+#[no_mangle]
+pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonOverAggregator<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    value_types: JIntArray<'local>,
+    aggregate_kinds: JIntArray<'local>,
+    rt_column: jint,
+    value_columns: JIntArray<'local>,
+    key_columns: JIntArray<'local>,
+    frame_kind: jint,
+    frame_offset: jlong,
+    key_timestamp_precisions: JIntArray<'local>,
+    row_schema_address: jlong,
+    memory_budget_bytes: jlong,
+    table_directory: JString<'local>,
+    max_parallelism: jint,
+    buckets: jint,
+    file_format: JString<'local>,
+    file_compression: JString<'local>,
+    source_directories: JObjectArray<'local>,
+    source_snapshot_tokens: JObjectArray<'local>,
+    key_group_start: jint,
+    key_group_end: jint,
+    aligned: jboolean,
+) -> jlong {
+    let kinds = read_int_array(&env, &aggregate_kinds);
+    let value_type_codes = read_int_array(&env, &value_types);
+    let values = read_columns(&env, &value_columns);
+    let keys = read_columns(&env, &key_columns);
+    let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
+        .into_iter()
+        .map(|precision| precision as i32)
+        .collect();
+    let payload_types: Vec<DataType> = import_schema(row_schema_address)
+        .fields()
+        .iter()
+        .map(|field| field.data_type().clone())
+        .collect();
+    let state_types = crate::over_agg::paimon_over_state_types(
+        &value_type_codes,
+        &kinds,
+        frame_kind as i64,
+        false,
+    );
+    let Some(state_types) = state_types else {
+        throw_runtime(&mut env, "over shape not persistable on the paimon backend");
+        return 0;
+    };
+    let table_dir = read_string(&mut env, &table_directory);
+    let format = read_string(&mut env, &file_format);
+    let compression = read_string(&mut env, &file_compression);
+    let source_dirs: Vec<String> = read_strings(&mut env, &source_directories)
+        .into_iter()
+        .flatten()
+        .collect();
+    let mut next_seq = 0i64;
+    let mut pending_sources: Vec<(String, i64)> = Vec::new();
+    let mut fold_sources: Vec<(String, i64)> = Vec::new();
+    for (dir, token) in source_dirs.iter().zip(
+        read_strings(&mut env, &source_snapshot_tokens)
+            .into_iter()
+            .flatten(),
+    ) {
+        let (pending_id, folds_id, seq) = parse_over_token(&token);
+        next_seq = next_seq.max(seq);
+        if pending_id >= 0 {
+            pending_sources.push((format!("{dir}/pending"), pending_id));
+        }
+        if folds_id >= 0 {
+            fold_sources.push((format!("{dir}/folds"), folds_id));
+        }
+    }
+
+    let config = PaimonStoreConfig {
+        table_dir,
+        max_parallelism: max_parallelism as usize,
+        buckets: buckets as usize,
+        file_format: format,
+        file_compression: compression,
+    };
+    let store = if source_dirs.is_empty() {
+        PaimonOverStore::create(config, payload_types, state_types)
+    } else {
+        PaimonOverStore::open_merged(
+            config,
+            payload_types,
+            state_types,
+            &pending_sources,
+            &fold_sources,
+            key_group_start..=key_group_end,
+            aligned != 0,
+        )
+    };
+    let aggregator = store.and_then(|mut store| {
+        store.set_next_seq(next_seq);
+        crate::over_agg::OverWindowAggregator::new(
+            value_type_codes,
+            kinds,
+            rt_column as usize,
+            values,
+            keys,
+            frame_kind as i64,
+            frame_offset,
+            false,
+        )
+        .with_key_timestamp_precisions(timestamp_precisions)
+        .with_backend(store)
+        .with_read_through_budget(memory_budget_bytes)
+    });
+    boxed_or_throw(&mut env, aggregator)
+}
+
+/// Buffers an input batch into pending state (no output); emission is watermark-driven.
+#[no_mangle]
+pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushPaimonOverAggregator<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    in_array_address: jlong,
+    in_schema_address: jlong,
+) {
+    let aggregator = unsafe { &mut *(handle as *mut crate::over_agg::OverWindowAggregator) };
+    // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
+    let result = {
+        let batch = import_record_batch(in_array_address, in_schema_address);
+        aggregator.push(batch)
+    };
+    if let Err(e) = result {
+        throw_memory_limit(&mut env, &e.to_string());
+    }
+}
+
+/// Exports the rows the watermark completed (input columns + running aggregates) — the overlay
+/// range read over the pending write buffer and the committed table.
+#[no_mangle]
+pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_flushPaimonOverAggregator<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    watermark_millis: jlong,
+    out_array_address: jlong,
+    out_schema_address: jlong,
+) {
+    let aggregator = unsafe { &mut *(handle as *mut crate::over_agg::OverWindowAggregator) };
+    match aggregator.flush(watermark_millis) {
+        Ok(result) => export_record_batch(result, out_array_address, out_schema_address),
+        Err(e) => throw_memory_limit(&mut env, &e.to_string()),
+    }
+}
+
+/// Checkpoint sync phase (task thread, at the barrier): commits both tables; the token line
+/// packs both snapshot ids and the arrival sequence.
+#[no_mangle]
+pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_checkpointPaimonOverAggregator<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) -> jobjectArray {
+    let aggregator = unsafe { &mut *(handle as *mut crate::over_agg::OverWindowAggregator) };
+    let store = aggregator.store_mut();
+    let next_seq = store.next_seq();
+    match store.checkpoint() {
+        Ok((pending, folds)) => {
+            let token = if pending.snapshot_id < 0 && folds.snapshot_id < 0 {
+                String::new()
+            } else {
+                format!("{}:{}:{}", pending.snapshot_id, folds.snapshot_id, next_seq)
+            };
+            let mut lines = Vec::with_capacity(
+                1 + pending.data_files.len()
+                    + pending.meta_files.len()
+                    + folds.data_files.len()
+                    + folds.meta_files.len(),
+            );
+            lines.push(token);
+            lines.extend(pending.data_files.iter().map(|f| format!("d:pending/{f}")));
+            lines.extend(folds.data_files.iter().map(|f| format!("d:folds/{f}")));
+            lines.extend(pending.meta_files.iter().map(|f| format!("m:pending/{f}")));
+            lines.extend(folds.meta_files.iter().map(|f| format!("m:folds/{f}")));
+            let array = env
+                .new_object_array(lines.len() as i32, "java/lang/String", JObject::null())
+                .expect("manifest array");
+            for (i, line) in lines.iter().enumerate() {
+                let value = env.new_string(line).expect("manifest line");
+                env.set_object_array_element(&array, i as i32, value)
+                    .expect("manifest element");
+            }
+            array.into_raw()
+        }
+        Err(e) => {
+            throw_runtime(&mut env, &format!("paimon state checkpoint failed: {e}"));
+            std::ptr::null_mut()
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_paimonOverAggregatorStateBytes<
+    'local,
+>(
+    _env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) -> jlong {
+    let aggregator = unsafe { &*(handle as *const crate::over_agg::OverWindowAggregator) };
+    aggregator.memory.state_bytes as jlong
+}
+
+#[no_mangle]
+pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_closePaimonOverAggregator<
+    'local,
+>(
+    _env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) {
+    unsafe {
+        drop(from_handle::<crate::over_agg::OverWindowAggregator>(handle));
+    }
+}

@@ -83,7 +83,8 @@ public class NativeOverAggExecNode extends ExecNodeBase<ArrowBatch>
             createTransformationMeta(TRANSFORMATION, config),
             new NativeOverAggregateOperator(
                 timeColumn, valueColumns, keyColumns, valueTypes, aggregateKinds, frameKind,
-                frameOffset, proctime, keyTimestampPrecisions, maxParallelism),
+                frameOffset, proctime, keyTimestampPrecisions,
+                (RowType) getInputEdges().get(0).getOutputType(), maxParallelism),
             ArrowBatchTypeInformation.INSTANCE,
             input.getParallelism(),
             false);

@@ -106,6 +106,38 @@ class FlinkPaimonStateBackendSqlHarnessTest {
   }
 
   @Test
+  void rowtimeOverAggregateOnPaimonBackendMatchesHost() throws Exception {
+    // Guard against a silent fallback: the OVER input row carries the rowtime column (pinned to
+    // nanoseconds by the bridge) and the running-SUM fold state must be persistable too.
+    org.apache.flink.table.types.logical.RowType overRow =
+        org.apache.flink.table.types.logical.RowType.of(
+            new org.apache.flink.table.types.logical.BigIntType(),
+            new org.apache.flink.table.types.logical.BigIntType(),
+            new org.apache.flink.table.types.logical.BigIntType(),
+            new org.apache.flink.table.types.logical.LocalZonedTimestampType(3));
+    try (org.apache.arrow.memory.BufferAllocator allocator =
+            new org.apache.arrow.memory.RootAllocator();
+        org.apache.arrow.c.ArrowSchema schema =
+            org.apache.arrow.c.ArrowSchema.allocateNew(allocator)) {
+      org.apache.arrow.c.Data.exportSchema(
+          allocator,
+          io.github.jordepic.streamfusion.arrow.ArrowConversion.toArrowSchema(overRow),
+          null,
+          schema);
+      org.junit.jupiter.api.Assertions.assertTrue(
+          Native.paimonOverStateSupported(
+              schema.memoryAddress(), new int[] {0}, new int[] {0}, 0, false),
+          "the rowtime OVER state shape must be persistable on the Paimon backend");
+    }
+    // Watermark-driven OVER: pending rows and the per-key running fold live in the Paimon store;
+    // every firing is a range read merging the write buffer with the committed table, and the
+    // running sum crosses 50 ms barriers, so folds round-trip through the folds table.
+    NativeParity.assertParity(
+        FlinkPaimonStateBackendSqlHarnessTest::paimonRowtimeEnvironment,
+        "SELECT k, v, ts, SUM(v) OVER (PARTITION BY k ORDER BY rt) AS s FROM src");
+  }
+
+  @Test
   void windowTopNOnPaimonBackendMatchesHost() throws Exception {
     // Event-time window Top-N: open windows' buffers stage into the Paimon table at each 50 ms
     // barrier, and every watermark firing merges the write buffer with a committed range scan

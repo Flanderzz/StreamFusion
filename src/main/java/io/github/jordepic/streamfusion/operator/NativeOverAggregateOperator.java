@@ -1,6 +1,9 @@
 package io.github.jordepic.streamfusion.operator;
 
 import io.github.jordepic.streamfusion.Native;
+import io.github.jordepic.streamfusion.arrow.ArrowConversion;
+import io.github.jordepic.streamfusion.planner.NativeConfig;
+import io.github.jordepic.streamfusion.state.PaimonNativeStateSupport;
 import org.apache.arrow.c.ArrowArray;
 import org.apache.arrow.c.ArrowSchema;
 import org.apache.arrow.c.CDataDictionaryProvider;
@@ -13,6 +16,7 @@ import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
+import org.apache.flink.table.types.logical.RowType;
 
 /**
  * Columnar event-time {@code OVER (… ORDER BY rt RANGE UNBOUNDED PRECEDING)} aggregation: Arrow in,
@@ -20,7 +24,10 @@ import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
  * rows it has completed (rowtime past the watermark) with the running aggregate column(s) appended,
  * the input columns passing through — so the data stays columnar end to end. The buffering, the
  * per-key running fold, and the late-data drop all live in the native operator; this layer only
- * moves batches across the bridge and owns the handle's checkpointed state.
+ * moves batches across the bridge and owns the handle's checkpointed state. On the Paimon backend
+ * the pending rows and the per-key fold state live in the persistent store (write buffers + disk
+ * tables) and the watermark firing is a range read over both; memory state travels as raw
+ * keyed-state blobs.
  */
 public class NativeOverAggregateOperator extends AbstractStreamOperator<ArrowBatch>
     implements OneInputStreamOperator<ArrowBatch, ArrowBatch> {
@@ -34,11 +41,13 @@ public class NativeOverAggregateOperator extends AbstractStreamOperator<ArrowBat
   private final long frameOffset;
   private final boolean proctime;
   private final int[] keyTimestampPrecisions;
+  private final RowType rowType;
   private final int maxParallelism;
 
   private transient BufferAllocator allocator;
   private transient CDataDictionaryProvider dictionaries;
   private transient long handle;
+  private transient boolean paimonState;
   private transient ManagedMemoryBudget memoryBudget;
 
   public NativeOverAggregateOperator(
@@ -51,6 +60,7 @@ public class NativeOverAggregateOperator extends AbstractStreamOperator<ArrowBat
       long frameOffset,
       boolean proctime,
       int[] keyTimestampPrecisions,
+      RowType rowType,
       int maxParallelism) {
     this.timeColumn = timeColumn;
     this.valueColumns = valueColumns;
@@ -61,6 +71,7 @@ public class NativeOverAggregateOperator extends AbstractStreamOperator<ArrowBat
     this.frameOffset = frameOffset;
     this.proctime = proctime;
     this.keyTimestampPrecisions = keyTimestampPrecisions;
+    this.rowType = rowType;
     if (maxParallelism <= 0) {
       throw new IllegalArgumentException("native OVER state requires a positive max parallelism");
     }
@@ -77,6 +88,49 @@ public class NativeOverAggregateOperator extends AbstractStreamOperator<ArrowBat
     super.initializeState(context);
     java.util.List<byte[]> rawSnapshots = RawKeyedState.restore(context);
     memoryBudget = ManagedMemoryBudget.reserveFor(this);
+    PaimonNativeStateSupport paimon =
+        PaimonNativeStateSupport.resolve(
+            getKeyedStateBackend(),
+            "over aggregate",
+            !rawSnapshots.isEmpty(),
+            () ->
+                withRowSchema(
+                        address ->
+                            Native.paimonOverStateSupported(
+                                    address, valueTypes, aggregateKinds, frameKind, proctime)
+                                ? 1L
+                                : 0L)
+                    != 0);
+    paimonState = paimon != null;
+    if (paimonState) {
+      handle =
+          withRowSchema(
+              rowSchemaAddress ->
+                  Native.createPaimonOverAggregator(
+                      valueTypes,
+                      aggregateKinds,
+                      timeColumn,
+                      valueColumns,
+                      keyColumns,
+                      frameKind,
+                      frameOffset,
+                      keyTimestampPrecisions,
+                      rowSchemaAddress,
+                      memoryBudget.bytes(),
+                      paimon.tableDirectory(),
+                      maxParallelism,
+                      NativeConfig.paimonBuckets(),
+                      NativeConfig.paimonFileFormat(),
+                      NativeConfig.paimonFileCompression(),
+                      paimon.sourceDirectories(),
+                      paimon.sourceSnapshotTokens(),
+                      paimon.keyGroupStart(),
+                      paimon.keyGroupEnd(),
+                      paimon.aligned()));
+      long nativeHandle = handle;
+      paimon.register(() -> Native.checkpointPaimonOverAggregator(nativeHandle));
+      return;
+    }
     if (!rawSnapshots.isEmpty()) {
       handle =
           Native.restoreOverAggregatorPartitions(
@@ -102,6 +156,21 @@ public class NativeOverAggregateOperator extends AbstractStreamOperator<ArrowBat
                 frameOffset,
                 proctime,
               memoryBudget.bytes());
+    }
+  }
+
+  /**
+   * Exports the input row type as an FFI Arrow schema for the duration of one native call; the
+   * native side consumes the schema contents, the wrapper struct is released here.
+   */
+  private long withRowSchema(java.util.function.LongUnaryOperator call) {
+    try (ArrowSchema rowSchema = ArrowSchema.allocateNew(NativeAllocator.SHARED)) {
+      Data.exportSchema(
+          NativeAllocator.SHARED,
+          ArrowConversion.toArrowSchema(rowType),
+          NativeAllocator.DICTIONARIES,
+          rowSchema);
+      return call.applyAsLong(rowSchema.memoryAddress());
     }
   }
 
@@ -138,6 +207,9 @@ public class NativeOverAggregateOperator extends AbstractStreamOperator<ArrowBat
             out.close();
           }
         }
+      } else if (paimonState) {
+        // Rowtime on the Paimon backend: rows stage into the pending write buffer.
+        Native.pushPaimonOverAggregator(handle, inArray.memoryAddress(), inSchema.memoryAddress());
       } else {
         // Rowtime: the native aggregator imports and keeps the batch (buffered until a watermark
         // completes these rows), so this side hands it off and closes its own view.
@@ -152,7 +224,10 @@ public class NativeOverAggregateOperator extends AbstractStreamOperator<ArrowBat
   /** Samples the native state size for the operator's gauges; task-thread only. */
   private void publishStateBytes() {
     if (memoryBudget.bounded()) {
-      memoryBudget.publishStateBytes(Native.overAggregatorStateBytes(handle));
+      memoryBudget.publishStateBytes(
+          paimonState
+              ? Native.paimonOverAggregatorStateBytes(handle)
+              : Native.overAggregatorStateBytes(handle));
     }
   }
 
@@ -164,8 +239,13 @@ public class NativeOverAggregateOperator extends AbstractStreamOperator<ArrowBat
     }
     try (ArrowArray array = ArrowArray.allocateNew(allocator);
         ArrowSchema schema = ArrowSchema.allocateNew(allocator)) {
-      Native.flushOverAggregator(
-          handle, mark.getTimestamp(), array.memoryAddress(), schema.memoryAddress());
+      if (paimonState) {
+        Native.flushPaimonOverAggregator(
+            handle, mark.getTimestamp(), array.memoryAddress(), schema.memoryAddress());
+      } else {
+        Native.flushOverAggregator(
+            handle, mark.getTimestamp(), array.memoryAddress(), schema.memoryAddress());
+      }
       VectorSchemaRoot out = Data.importVectorSchemaRoot(allocator, array, schema, dictionaries);
       if (out.getRowCount() > 0) {
         output.collect(new StreamRecord<>(new ArrowBatch(out)));
@@ -180,16 +260,24 @@ public class NativeOverAggregateOperator extends AbstractStreamOperator<ArrowBat
   @Override
   public void snapshotState(StateSnapshotContext context) throws Exception {
     super.snapshotState(context);
-    RawKeyedState.snapshotPartitions(
-        context,
-        Native.snapshotOverAggregatorPartitions(
-            handle, maxParallelism, keyTimestampPrecisions));
+    // Paimon state checkpoints through the keyed state backend's snapshot (an incremental Paimon
+    // commit); only memory state travels as raw keyed-state blobs.
+    if (!paimonState) {
+      RawKeyedState.snapshotPartitions(
+          context,
+          Native.snapshotOverAggregatorPartitions(
+              handle, maxParallelism, keyTimestampPrecisions));
+    }
   }
 
   @Override
   public void close() throws Exception {
     if (handle != 0) {
-      Native.closeOverAggregator(handle);
+      if (paimonState) {
+        Native.closePaimonOverAggregator(handle);
+      } else {
+        Native.closeOverAggregator(handle);
+      }
       handle = 0;
     }
     if (memoryBudget != null) {

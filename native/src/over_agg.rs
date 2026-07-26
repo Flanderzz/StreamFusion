@@ -156,6 +156,48 @@ impl OverAggregator {
             .expect("failed to build over snapshot batch"))
     }
 
+    /// Backend-mode firing: seeds each listed key's running state from persisted scalars (the
+    /// same emit()/restore_value round trip the raw snapshot uses), folds the batch, then
+    /// exports the updated scalars per seed and drops the in-memory map — in backend mode the
+    /// store's write buffer owns the state between firings.
+    #[cfg(feature = "paimon-state")]
+    fn update_hydrated(
+        &mut self,
+        batch: &RecordBatch,
+        seeds: &[(usize, Option<Vec<ScalarValue>>)],
+    ) -> (RecordBatch, Vec<Vec<ScalarValue>>) {
+        {
+            let key_arrays = key_arrays(batch);
+            self.key_types = key_types(&key_arrays);
+            let keys_encoded = encode_keys(&mut self.key_converter, &key_arrays, batch.num_rows());
+            for (row, scalars) in seeds {
+                if let Some(scalars) = scalars {
+                    for (i, state) in
+                        self.states(keys_encoded.row(*row).data()).iter_mut().enumerate()
+                    {
+                        state.restore_value(&scalars[i]);
+                    }
+                }
+            }
+        }
+        let out = self.update(batch);
+        let key_arrays = key_arrays(batch);
+        let keys_encoded = encode_keys(&mut self.key_converter, &key_arrays, batch.num_rows());
+        let published = seeds
+            .iter()
+            .map(|(row, _)| {
+                self.keys
+                    .get(keys_encoded.row(*row).data())
+                    .expect("fired key folded")
+                    .iter()
+                    .map(|state| state.emit())
+                    .collect()
+            })
+            .collect();
+        self.keys.clear();
+        (out, published)
+    }
+
     fn restore(value_types: Vec<i64>, kinds: Vec<i64>, bytes: &[u8]) -> Self {
         let mut aggregator = OverAggregator::new(value_types, kinds);
         let num_agg = aggregator.kinds.len();
@@ -623,6 +665,51 @@ impl WindowFunctionOver {
             .expect("failed to build window-function snapshot batch"))
     }
 
+    /// Backend-mode firing — see {@link OverAggregator::update_hydrated}; window-function state
+    /// round-trips through the same state()/restore_state scalars as the raw snapshot.
+    #[cfg(feature = "paimon-state")]
+    fn update_hydrated(
+        &mut self,
+        batch: &RecordBatch,
+        seeds: &[(usize, Option<Vec<ScalarValue>>)],
+    ) -> (RecordBatch, Vec<Vec<ScalarValue>>) {
+        let state_counts: Vec<usize> =
+            self.kinds.iter().map(|&k| WindowFnState::new(k).state_types().len()).collect();
+        {
+            let key_arrays = key_arrays(batch);
+            self.key_types = key_types(&key_arrays);
+            let keys_encoded = encode_keys(&mut self.key_converter, &key_arrays, batch.num_rows());
+            for (row, scalars) in seeds {
+                if let Some(scalars) = scalars {
+                    let mut column = 0;
+                    for (i, state) in
+                        self.states(keys_encoded.row(*row).data()).iter_mut().enumerate()
+                    {
+                        let count = state_counts[i];
+                        state.restore_state(&scalars[column..column + count]);
+                        column += count;
+                    }
+                }
+            }
+        }
+        let out = self.update(batch);
+        let key_arrays = key_arrays(batch);
+        let keys_encoded = encode_keys(&mut self.key_converter, &key_arrays, batch.num_rows());
+        let published = seeds
+            .iter()
+            .map(|(row, _)| {
+                self.keys
+                    .get(keys_encoded.row(*row).data())
+                    .expect("fired key folded")
+                    .iter()
+                    .flat_map(|state| state.state())
+                    .collect()
+            })
+            .collect();
+        self.keys.clear();
+        (out, published)
+    }
+
     fn restore(kinds: Vec<i64>, bytes: &[u8]) -> Self {
         let mut over = WindowFunctionOver::new(kinds);
         let state_counts: Vec<usize> =
@@ -681,6 +768,21 @@ impl OverInner {
             OverInner::Aggregates(inner) => inner.update(batch),
             OverInner::Bounded(inner) => inner.update(batch),
             OverInner::WindowFunctions(inner) => inner.update(batch),
+        }
+    }
+
+    /// Backend-mode firing with store-resident per-key state; only the fixed-width fold shapes
+    /// support the backend (see `paimon_over_state_types`).
+    #[cfg(feature = "paimon-state")]
+    fn update_hydrated(
+        &mut self,
+        batch: &RecordBatch,
+        seeds: &[(usize, Option<Vec<ScalarValue>>)],
+    ) -> (RecordBatch, Vec<Vec<ScalarValue>>) {
+        match self {
+            OverInner::Aggregates(inner) => inner.update_hydrated(batch, seeds),
+            OverInner::WindowFunctions(inner) => inner.update_hydrated(batch, seeds),
+            OverInner::Bounded(_) => unreachable!("bounded OVER frames stay on memory state"),
         }
     }
 
@@ -749,6 +851,35 @@ impl OverInner {
     }
 }
 
+/// The fold-state column types a Paimon-backed OVER persists per key, or `None` when the shape
+/// stays on memory state: proctime ordering (emission is eager, off-watermark), bounded
+/// ROWS/RANGE frames (a per-key row buffer, not a fixed-width fold), or a mix of window
+/// functions and aggregates.
+#[cfg(feature = "paimon-state")]
+pub(crate) fn paimon_over_state_types(
+    value_types: &[i64],
+    kinds: &[i64],
+    frame_kind: i64,
+    proctime: bool,
+) -> Option<Vec<DataType>> {
+    if proctime {
+        return None;
+    }
+    if kinds.iter().all(|&k| is_window_function_kind(k)) {
+        return Some(kinds.iter().flat_map(|&k| WindowFnState::new(k).state_types()).collect());
+    }
+    if frame_kind != 0 || kinds.iter().any(|&k| is_window_function_kind(k)) {
+        return None;
+    }
+    Some(
+        kinds
+            .iter()
+            .zip(value_types)
+            .map(|(&kind, &vt)| RunningAgg::new(kind, &value_data_type(vt)).result_type())
+            .collect(),
+    )
+}
+
 /// Columnar OVER: buffers whole input batches, and on a watermark emits the rows it has completed
 /// (rowtime <= watermark) with the running aggregate / window-function column(s) appended — the input
 /// columns pass straight through, so the data stays Arrow end to end. The {@link OverInner} does the
@@ -768,7 +899,13 @@ pub(crate) struct OverWindowAggregator {
     /// existing rowtime fold/frames apply unchanged; `next_seq` is the running counter.
     proctime: bool,
     next_seq: i64,
-    memory: OperatorMemory,
+    pub(crate) memory: OperatorMemory,
+    /// Persistent-state mode: pending rows and per-key fold state live in the Paimon store
+    /// (write buffers + disk tables); the in-memory `buffered` batches and the inner's key map
+    /// stay empty between calls.
+    #[cfg(feature = "paimon-state")]
+    backend: Option<crate::state::PaimonOverStore>,
+    key_timestamp_precisions: Vec<i32>,
 }
 
 impl OverWindowAggregator {
@@ -782,6 +919,7 @@ impl OverWindowAggregator {
         frame_offset: i64,
         proctime: bool,
     ) -> Self {
+        let key_arity = key_columns.len();
         OverWindowAggregator {
             inner: OverInner::new(value_types, kinds, frame_kind, frame_offset),
             rt_column,
@@ -792,7 +930,39 @@ impl OverWindowAggregator {
             proctime,
             next_seq: 0,
             memory: OperatorMemory::unaccounted(),
+            #[cfg(feature = "paimon-state")]
+            backend: None,
+            key_timestamp_precisions: vec![-1; key_arity],
         }
+    }
+
+    pub(crate) fn with_key_timestamp_precisions(
+        mut self,
+        key_timestamp_precisions: Vec<i32>,
+    ) -> Self {
+        self.key_timestamp_precisions = key_timestamp_precisions;
+        self
+    }
+
+    #[cfg(feature = "paimon-state")]
+    pub(crate) fn with_backend(mut self, store: crate::state::PaimonOverStore) -> Self {
+        self.backend = Some(store);
+        self
+    }
+
+    /// Attaches the managed-memory budget for a backend that starts with nothing resident.
+    #[cfg(feature = "paimon-state")]
+    pub(crate) fn with_read_through_budget(
+        mut self,
+        budget_bytes: i64,
+    ) -> Result<Self, DataFusionError> {
+        self.memory.attach("over-aggregate", budget_bytes, 0)?;
+        Ok(self)
+    }
+
+    #[cfg(feature = "paimon-state")]
+    pub(crate) fn store_mut(&mut self) -> &mut crate::state::PaimonOverStore {
+        self.backend.as_mut().expect("over paimon backend")
     }
 
     /// Bounds this operator's state (buffered batches plus the inner per-key fold state) by the
@@ -820,8 +990,111 @@ impl OverWindowAggregator {
 
     pub(crate) fn push(&mut self, batch: RecordBatch) -> Result<(), DataFusionError> {
         self.input_schema = Some(batch.schema());
+        #[cfg(feature = "paimon-state")]
+        if self.backend.is_some() {
+            return self.push_backend(batch);
+        }
         self.buffered.push(batch);
         self.account()
+    }
+
+    /// Persistent-state arrival path: every input row stages into the pending write buffer under
+    /// a fresh arrival sequence, routed by its PARTITION BY key's group. Nothing folds here —
+    /// emission and the per-key fold are watermark-driven (`flush`).
+    #[cfg(feature = "paimon-state")]
+    fn push_backend(&mut self, batch: RecordBatch) -> Result<(), DataFusionError> {
+        if batch.num_rows() > 0 {
+            let rts = rt_to_millis(batch.column(self.rt_column));
+            let mut encoder = BinaryRowBatchEncoder::new(
+                &batch,
+                &self.key_columns,
+                &self.key_timestamp_precisions,
+            );
+            let store = self.backend.as_mut().expect("over paimon backend");
+            let kgs: Vec<i32> =
+                (0..batch.num_rows()).map(|row| store.key_group(encoder.encode(row))).collect();
+            let rt_values: Vec<i64> = (0..batch.num_rows()).map(|row| rts.value(row)).collect();
+            store.stage_pending(&kgs, rt_values, batch.columns().to_vec())?;
+        }
+        let store = self.backend.as_mut().expect("over paimon backend");
+        let delta = store.footprint_delta();
+        self.memory.record(delta);
+        self.memory.account()
+    }
+
+    /// Persistent-state firing path: the store's overlay range read returns every pending row the
+    /// watermark completed, in arrival order; the per-key running state hydrates from the folds
+    /// table for exactly the fired keys, folds, and writes back into the folds write buffer.
+    #[cfg(feature = "paimon-state")]
+    fn flush_backend(&mut self, watermark: i64) -> Result<RecordBatch, DataFusionError> {
+        let ctx = self.memory.task_ctx();
+        let fired = self.backend.as_mut().expect("over paimon backend").fire(watermark, ctx)?;
+        let Some(fired) = fired else {
+            let store = self.backend.as_mut().expect("over paimon backend");
+            store.end_bundle();
+            let delta = store.footprint_delta();
+            self.memory.record(delta);
+            self.memory.account()?;
+            return Ok(RecordBatch::new_empty(Arc::new(Schema::empty())));
+        };
+        // The fired batch is store-schema (`kg`, `k`, `rt` millis, payload…): the payload is the
+        // completed input rows in arrival order, the rt column is already the fold's ordering key.
+        let payload_schema = match &self.input_schema {
+            Some(schema) => schema.clone(),
+            None => Arc::new(Schema::new(
+                fired.schema().fields()[3..]
+                    .iter()
+                    .map(|f| f.as_ref().clone())
+                    .collect::<Vec<_>>(),
+            )),
+        };
+        let complete = RecordBatch::try_new(payload_schema, fired.columns()[3..].to_vec())
+            .expect("over payload projection");
+        let subbatch = self.keyed_subbatch(&complete, fired.column(2).clone());
+
+        let mut encoder = BinaryRowBatchEncoder::new(
+            &complete,
+            &self.key_columns,
+            &self.key_timestamp_precisions,
+        );
+        let mut seen: std::collections::HashSet<ByteKey> = std::collections::HashSet::new();
+        let mut first_rows: Vec<(ByteKey, usize)> = Vec::new();
+        for row in 0..complete.num_rows() {
+            let key = encoder.encode(row);
+            if !seen.contains(key) {
+                let owned = ByteKey::from(key);
+                seen.insert(owned.clone());
+                first_rows.push((owned, row));
+            }
+        }
+        let seeds: Vec<(usize, Option<Vec<ScalarValue>>)> = {
+            let store = self.backend.as_mut().expect("over paimon backend");
+            let unique_keys: Vec<ByteKey> = first_rows.iter().map(|(k, _)| k.clone()).collect();
+            store.ensure_folds(&unique_keys)?;
+            first_rows
+                .iter()
+                .map(|(key, row)| (*row, store.fold_scalars(&key.0).map(|s| s.to_vec())))
+                .collect()
+        };
+        let (aggregates, published) = self.inner.update_hydrated(&subbatch, &seeds);
+        let store = self.backend.as_mut().expect("over paimon backend");
+        for ((key, _), scalars) in first_rows.iter().zip(published) {
+            store.put_fold(&key.0, scalars);
+        }
+        store.end_bundle();
+        let delta = store.footprint_delta();
+        self.memory.record(delta);
+        self.memory.account()?;
+
+        let mut fields: Vec<Field> =
+            complete.schema().fields().iter().map(|f| f.as_ref().clone()).collect();
+        let mut columns: Vec<ArrayRef> = complete.columns().to_vec();
+        for (i, field) in aggregates.schema().fields().iter().enumerate() {
+            fields.push(field.as_ref().clone());
+            columns.push(aggregates.column(i).clone());
+        }
+        Ok(RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
+            .expect("failed to build over output batch"))
     }
 
     /// Proctime OVER: fold the whole batch in arrival order and emit every row immediately (proctime
@@ -850,6 +1123,10 @@ impl OverWindowAggregator {
     /// Emits the rows the watermark has completed (input columns + running aggregates) and keeps the
     /// rest buffered. Returns an empty batch when nothing is complete.
     pub(crate) fn flush(&mut self, watermark: i64) -> Result<RecordBatch, DataFusionError> {
+        #[cfg(feature = "paimon-state")]
+        if self.backend.is_some() {
+            return self.flush_backend(watermark);
+        }
         let schema = match &self.input_schema {
             Some(schema) => schema.clone(),
             None => return Ok(RecordBatch::new_empty(Arc::new(Schema::empty()))),
@@ -1093,6 +1370,7 @@ impl OverWindowAggregator {
                 &bytes[12..12 + accumulators_len],
             )
         };
+        let key_arity = key_columns.len();
         let mut aggregator = OverWindowAggregator {
             inner,
             rt_column,
@@ -1103,6 +1381,9 @@ impl OverWindowAggregator {
             proctime,
             next_seq,
             memory: OperatorMemory::unaccounted(),
+            #[cfg(feature = "paimon-state")]
+            backend: None,
+            key_timestamp_precisions: vec![-1; key_arity],
         };
         let buffer = &bytes[12 + accumulators_len..];
         if !buffer.is_empty() {

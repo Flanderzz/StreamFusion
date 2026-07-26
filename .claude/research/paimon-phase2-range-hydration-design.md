@@ -31,7 +31,14 @@ table before new rows rank in (arrival-order tie-break); firing merges buffers w
 snapshot token ("snapshot:watermark"). The dirty region grew caller-supplied key groups
 (composite region keys route by the partition key alone) and PK-carrying delete rows. Proctime
 window rank stays on memory state (processing-time timer deadline lives in raw state).
-Remaining rungs: OVER, interval/window/temporal joins, session/window aggregates (buffer
+RUNG 3 SHIPPED (2026-07-26): the event-time OVER aggregate (unbounded RANGE frame + pure window
+functions) — `PaimonOverStore`, two tables under one operator directory: pending rows under an
+arrival-sequence key (fire = the `rt ≤ watermark` overlay merged back into sequence order; fired
+rows leave state as `-D`) and the per-key running fold as one typed row per key (the raw
+snapshot's emit()/restore scalars, hydrated per firing by the key probe, dirty-slot writes).
+The sequence rides the snapshot token as `"pending:folds:seq"`. Deliberate exclusions recorded
+in coverage: proctime OVER (eager, off-watermark) and bounded frames (per-key list shape, not a
+fixed fold). Remaining rungs: interval/window/temporal joins, session/window aggregates (buffer
 remodels onto the same store machinery).
 
 Original draft (2026-07-25): Written after the state-backend

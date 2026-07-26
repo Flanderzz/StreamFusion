@@ -2760,3 +2760,435 @@ impl WindowBuffer {
         }
     }
 }
+
+/// Time-buffered pending rows plus point-access fold state for the event-time OVER aggregate —
+/// the third range-read consumer. Two tables live under the operator's state directory:
+///
+/// * `pending/` — one row per buffered input row under PK `[kg, k]`, `k` the row's arrival
+///   sequence (big-endian i64, so byte order is arrival order) and `kg` the key group of its
+///   PARTITION BY key. Columns: `rt` (epoch millis) and the full input row as typed payload.
+///   A watermark firing is the overlay range read (`rt <= watermark`), merged back into arrival
+///   order by the sequence; fired rows leave pending state — a `-D` per row commits at the next
+///   barrier. The sequence itself rides the operator's opaque snapshot token: without it a
+///   restored subtask's new rows would order ahead of older pending rows.
+/// * `folds/` — the per-key running state under PK `[kg, k]` (`k` = partition-key BinaryRow),
+///   one typed column per running value — the same scalars the memory path's raw snapshot
+///   round-trips. Point-access only: reads are the per-batch key probe, writes buffer as dirty
+///   slots until the barrier. Unlike the memory path's forever-growing per-key map, the fold
+///   rows are disk-resident between firings.
+pub(crate) struct PaimonOverStore {
+    pending: PaimonTableCore,
+    folds: PaimonTableCore,
+    payload_fields: Vec<Field>,
+    state_fields: Vec<Field>,
+    region: DirtyRegion,
+    fold_working: ahash::HashMap<ByteKey, FoldSlot>,
+    next_seq: i64,
+    last_footprint: usize,
+}
+
+/// One fold-state working entry: `dirty` rows are the folds write buffer (pinned until the
+/// barrier commit); clean rows are this bundle's committed probes and drop at `end_bundle`.
+/// `None` records a probed-absent key.
+struct FoldSlot {
+    scalars: Option<Vec<ScalarValue>>,
+    dirty: bool,
+}
+
+impl PaimonOverStore {
+    const FOLD_ENTRY_BYTES: usize =
+        std::mem::size_of::<(ByteKey, FoldSlot)>() + GROUP_ENTRY_OVERHEAD;
+
+    fn typed_fields(prefix: &str, types: &[DataType]) -> Result<Vec<Field>, DataFusionError> {
+        if !paimon_row_supported(types) {
+            return Err(DataFusionError::Plan(
+                "state shape not supported by the paimon state backend".into(),
+            ));
+        }
+        Ok(types
+            .iter()
+            .enumerate()
+            .map(|(i, t)| Field::new(format!("{prefix}{i}"), t.clone(), true))
+            .collect())
+    }
+
+    fn side_config(config: &PaimonStoreConfig, side: &str) -> PaimonStoreConfig {
+        PaimonStoreConfig {
+            table_dir: format!("{}/{side}", config.table_dir),
+            max_parallelism: config.max_parallelism,
+            buckets: config.buckets,
+            file_format: config.file_format.clone(),
+            file_compression: config.file_compression.clone(),
+        }
+    }
+
+    pub(crate) fn create(
+        config: PaimonStoreConfig,
+        payload_types: Vec<DataType>,
+        state_types: Vec<DataType>,
+    ) -> Result<Self, DataFusionError> {
+        let payload_fields = Self::typed_fields("c", &payload_types)?;
+        let state_fields = Self::typed_fields("s", &state_types)?;
+
+        let pending_config = Self::side_config(&config, "pending");
+        let mut builder = PaimonTableCore::schema_builder(&pending_config)?
+            .column(RT_COLUMN, PaimonType::BigInt(BigIntType::new()));
+        for field in &payload_fields {
+            let paimon_type = paimon_type_of(field.data_type()).ok_or_else(|| {
+                DataFusionError::Plan(format!(
+                    "state type {} not supported by the paimon state backend",
+                    field.data_type()
+                ))
+            })?;
+            builder = builder.column(field.name(), paimon_type);
+        }
+        let pending_schema = builder.primary_key([KG_COLUMN, KEY_COLUMN]).build().map_err(pe)?;
+
+        let folds_config = Self::side_config(&config, "folds");
+        let mut builder = PaimonTableCore::schema_builder(&folds_config)?;
+        for field in &state_fields {
+            let paimon_type = paimon_type_of(field.data_type()).ok_or_else(|| {
+                DataFusionError::Plan(format!(
+                    "state type {} not supported by the paimon state backend",
+                    field.data_type()
+                ))
+            })?;
+            builder = builder.column(field.name(), paimon_type);
+        }
+        let folds_schema = builder.primary_key([KG_COLUMN, KEY_COLUMN]).build().map_err(pe)?;
+
+        let region = DirtyRegion::new(Self::pending_value_fields(&payload_fields), Some(0));
+        Ok(PaimonOverStore {
+            pending: PaimonTableCore::create(pending_config, pending_schema)?,
+            folds: PaimonTableCore::create(folds_config, folds_schema)?,
+            payload_fields,
+            state_fields,
+            region,
+            fold_working: ahash::HashMap::default(),
+            next_seq: 0,
+            last_footprint: 0,
+        })
+    }
+
+    /// Restores from checkpoint sources, each side independently: a source that never committed
+    /// a side (snapshot id `-1`) is skipped for it. Aligned single-source restores adopt files
+    /// wholesale; anything else clips by key-group range.
+    pub(crate) fn open_merged(
+        config: PaimonStoreConfig,
+        payload_types: Vec<DataType>,
+        state_types: Vec<DataType>,
+        pending_sources: &[(String, i64)],
+        fold_sources: &[(String, i64)],
+        key_groups: std::ops::RangeInclusive<i32>,
+        aligned: bool,
+    ) -> Result<Self, DataFusionError> {
+        let mut store = Self::create(config, payload_types, state_types)?;
+        let pending_fields = store.pending_arrow_fields();
+        Self::restore_core(
+            &mut store.pending,
+            pending_sources,
+            key_groups.clone(),
+            aligned,
+            &pending_fields,
+        )?;
+        let fold_fields = store.folds_arrow_fields();
+        Self::restore_core(&mut store.folds, fold_sources, key_groups, aligned, &fold_fields)?;
+        Ok(store)
+    }
+
+    fn restore_core(
+        core: &mut PaimonTableCore,
+        sources: &[(String, i64)],
+        key_groups: std::ops::RangeInclusive<i32>,
+        aligned: bool,
+        write_fields: &[Field],
+    ) -> Result<(), DataFusionError> {
+        if sources.is_empty() {
+            return Ok(());
+        }
+        if aligned && sources.len() == 1 {
+            let (source_dir, snapshot_id) = &sources[0];
+            if core.adopt_all(source_dir, *snapshot_id)? {
+                return Ok(());
+            }
+        }
+        core.clip_from_sources(sources, key_groups, write_fields)
+    }
+
+    fn pending_value_fields(payload_fields: &[Field]) -> Vec<Field> {
+        let mut fields = vec![Field::new(RT_COLUMN, DataType::Int64, true)];
+        fields.extend(payload_fields.iter().cloned());
+        fields
+    }
+
+    /// The pending table's persisted row schema (also its clip write schema).
+    fn pending_arrow_fields(&self) -> Vec<Field> {
+        let mut fields = vec![
+            Field::new(KG_COLUMN, DataType::Int32, false),
+            Field::new(KEY_COLUMN, DataType::Binary, false),
+        ];
+        fields.extend(Self::pending_value_fields(&self.payload_fields));
+        fields
+    }
+
+    /// The folds table's persisted row schema (also its clip write schema).
+    fn folds_arrow_fields(&self) -> Vec<Field> {
+        let mut fields = vec![
+            Field::new(KG_COLUMN, DataType::Int32, false),
+            Field::new(KEY_COLUMN, DataType::Binary, false),
+        ];
+        fields.extend(self.state_fields.iter().cloned());
+        fields
+    }
+
+    pub(crate) fn key_group(&self, key: &[u8]) -> i32 {
+        self.pending.key_group(key)
+    }
+
+    pub(crate) fn next_seq(&self) -> i64 {
+        self.next_seq
+    }
+
+    pub(crate) fn set_next_seq(&mut self, seq: i64) {
+        self.next_seq = seq;
+    }
+
+    /// Buffers one input batch's rows as pending state, each under a fresh arrival sequence.
+    /// `kgs` route each row by its PARTITION BY key; `rts` are epoch millis.
+    pub(crate) fn stage_pending(
+        &mut self,
+        kgs: &[i32],
+        rts: Vec<i64>,
+        payload: Vec<ArrayRef>,
+    ) -> Result<(), DataFusionError> {
+        let n = kgs.len();
+        if n == 0 {
+            return Ok(());
+        }
+        let keys_owned: Vec<[u8; 8]> =
+            (0..n).map(|i| (self.next_seq + i as i64).to_be_bytes()).collect();
+        self.next_seq += n as i64;
+        let key_slices: Vec<&[u8]> = keys_owned.iter().map(|k| k.as_slice()).collect();
+        let mut values: Vec<ArrayRef> = Vec::with_capacity(1 + payload.len());
+        values.push(Arc::new(Int64Array::from(rts)));
+        values.extend(payload);
+        self.region.append_upserts(&key_slices, kgs, values)
+    }
+
+    /// Every pending row the watermark completed — the overlay range read, merged back into
+    /// arrival order by the sequence key. Region schema (`kg`, `k`, `rt`, payload…), `None` when
+    /// nothing fired. Fired rows leave pending state: their deletions stage into the region.
+    pub(crate) fn fire(
+        &mut self,
+        watermark: i64,
+        ctx: Arc<TaskContext>,
+    ) -> Result<Option<RecordBatch>, DataFusionError> {
+        let mut rows: Vec<RecordBatch> = Vec::new();
+        let committed = {
+            let builder = PredicateBuilder::new(&self.pending.fields);
+            let predicate = builder
+                .less_or_equal(RT_COLUMN, Datum::Long(watermark))
+                .map_err(pe)?;
+            self.pending.scan_predicate(predicate)?
+        };
+        if !committed.is_empty() {
+            if self.region.is_empty() {
+                rows = committed;
+            } else {
+                let keys: Vec<&[u8]> = self.region.touched_keys().map(|k| k.0.as_ref()).collect();
+                let keys_batch = RecordBatch::try_new(
+                    Arc::new(Schema::new(vec![Field::new("k", DataType::Binary, false)])),
+                    vec![Arc::new(BinaryArray::from_iter_values(keys))],
+                )
+                .expect("anti-join key batch");
+                rows = crate::join_common::hash_join_right_anti(keys_batch, committed, &[(0, 1)], ctx)?;
+            }
+        }
+        rows.extend(self.region.live_upserts(Some((i64::MIN, watermark)))?);
+        // Exact re-check per row (committed pushdown is best-effort), normalizing reader types.
+        let expected = self.pending_arrow_fields();
+        let mut normalized: Vec<RecordBatch> = Vec::new();
+        for batch in rows {
+            let mut columns: Vec<ArrayRef> = Vec::with_capacity(expected.len());
+            for (i, field) in expected.iter().enumerate() {
+                columns.push(normalized_column(&batch, i, field)?);
+            }
+            let rts = columns[2]
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .ok_or_else(|| DataFusionError::Internal("overlay rt column".into()))?;
+            let mask: BooleanArray = (0..batch.num_rows())
+                .map(|row| Some(rts.is_valid(row) && rts.value(row) <= watermark))
+                .collect();
+            let normalized_batch =
+                RecordBatch::try_new(Arc::new(Schema::new(expected.clone())), columns)
+                    .expect("overlay normalized batch");
+            let filtered = filter_record_batch(&normalized_batch, &mask)
+                .map_err(|e| DataFusionError::External(Box::new(e)))?;
+            if filtered.num_rows() > 0 {
+                normalized.push(filtered);
+            }
+        }
+        if normalized.is_empty() {
+            return Ok(None);
+        }
+        let merged = concat_batches(&Arc::new(Schema::new(expected)), &normalized)
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        // The sequence key is big-endian and non-negative, so byte order is arrival order.
+        let ks = merged
+            .column(1)
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .ok_or_else(|| DataFusionError::Internal("overlay seq column".into()))?;
+        let mut order: Vec<u32> = (0..merged.num_rows() as u32).collect();
+        order.sort_by_key(|&row| ks.value(row as usize));
+        let indices = UInt32Array::from(order);
+        let columns: Vec<ArrayRef> = merged
+            .columns()
+            .iter()
+            .map(|c| take(c, &indices, None).expect("over fire sort"))
+            .collect();
+        let sorted = RecordBatch::try_new(merged.schema(), columns).expect("over fired batch");
+        {
+            let ks = sorted
+                .column(1)
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .expect("sorted seq column");
+            let kgs = sorted
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .expect("sorted kg column");
+            let key_slices: Vec<&[u8]> = (0..sorted.num_rows()).map(|row| ks.value(row)).collect();
+            let key_groups: Vec<i32> = (0..sorted.num_rows()).map(|row| kgs.value(row)).collect();
+            self.region.append_null_deletes(&key_slices, &key_groups)?;
+        }
+        Ok(Some(sorted))
+    }
+
+    /// Fetches the committed fold state for every given key this bundle doesn't already hold —
+    /// one point-read join per firing, recording absent keys too.
+    pub(crate) fn ensure_folds(&mut self, keys: &[ByteKey]) -> Result<(), DataFusionError> {
+        let misses: Vec<ByteKey> = keys
+            .iter()
+            .filter(|k| !self.fold_working.contains_key(&*k.0))
+            .cloned()
+            .collect();
+        if misses.is_empty() {
+            return Ok(());
+        }
+        let expected = self.folds_arrow_fields();
+        for batch in self.folds.scan_keys(&misses)? {
+            let ks = normalized_column(&batch, 1, &expected[1])?;
+            let ks = ks
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .ok_or_else(|| DataFusionError::Internal("paimon fold key column".into()))?;
+            for row in 0..batch.num_rows() {
+                let mut scalars = Vec::with_capacity(self.state_fields.len());
+                for (i, field) in expected.iter().enumerate().skip(2) {
+                    let column = normalized_column(&batch, i, field)?;
+                    scalars.push(
+                        ScalarValue::try_from_array(&column, row)
+                            .map_err(|e| DataFusionError::External(Box::new(e)))?,
+                    );
+                }
+                self.fold_working.insert(
+                    ByteKey::from(ks.value(row)),
+                    FoldSlot { scalars: Some(scalars), dirty: false },
+                );
+            }
+        }
+        for key in misses {
+            self.fold_working.entry(key).or_insert(FoldSlot { scalars: None, dirty: false });
+        }
+        Ok(())
+    }
+
+    /// The key's running state, if the store holds one. Callers must have run `ensure_folds` for
+    /// the key this bundle.
+    pub(crate) fn fold_scalars(&self, key: &[u8]) -> Option<&[ScalarValue]> {
+        self.fold_working.get(key).and_then(|slot| slot.scalars.as_deref())
+    }
+
+    /// Writes a key's updated running state into the write buffer (committed at the barrier).
+    pub(crate) fn put_fold(&mut self, key: &[u8], scalars: Vec<ScalarValue>) {
+        self.fold_working
+            .insert(ByteKey::from(key), FoldSlot { scalars: Some(scalars), dirty: true });
+    }
+
+    /// End of the operator's bundle: clean fold probes drop; the dirty slots (the folds write
+    /// buffer) and the pending region survive to the barrier.
+    pub(crate) fn end_bundle(&mut self) {
+        self.fold_working.retain(|_, slot| slot.dirty);
+    }
+
+    /// The store's untracked footprint change since the last call.
+    pub(crate) fn footprint_delta(&mut self) -> isize {
+        let current = self.region.heap_bytes()
+            + self
+                .fold_working
+                .iter()
+                .map(|(k, slot)| {
+                    k.0.len()
+                        + Self::FOLD_ENTRY_BYTES
+                        + slot
+                            .scalars
+                            .as_ref()
+                            .map(|s| scalar_row_bytes(s))
+                            .unwrap_or(0)
+                })
+                .sum::<usize>();
+        let delta = current as isize - self.last_footprint as isize;
+        self.last_footprint = current;
+        delta
+    }
+
+    /// Checkpoint sync phase, called at the barrier: commits the pending region (live rows and
+    /// fired deletions) and the dirty fold rows as each table's snapshot. Returns the two
+    /// manifests; the caller packs them plus the arrival sequence into the snapshot token.
+    pub(crate) fn checkpoint(
+        &mut self,
+    ) -> Result<(PaimonCheckpointManifest, PaimonCheckpointManifest), DataFusionError> {
+        self.pending.refresh_to_latest()?;
+        let batches = self.region.flush_batches()?;
+        if !batches.is_empty() {
+            self.pending.commit_batches(&batches)?;
+        }
+        self.region.clear();
+
+        self.folds.refresh_to_latest()?;
+        let dirty: Vec<(&ByteKey, &FoldSlot)> =
+            self.fold_working.iter().filter(|(_, slot)| slot.dirty).collect();
+        if !dirty.is_empty() {
+            let mut fields = self.folds_arrow_fields();
+            fields.push(Field::new(VALUE_KIND_COLUMN, DataType::Int8, false));
+            let n = dirty.len();
+            let mut columns: Vec<ArrayRef> = Vec::with_capacity(fields.len());
+            columns.push(Arc::new(Int32Array::from(
+                dirty.iter().map(|(k, _)| self.folds.key_group(&k.0)).collect::<Vec<_>>(),
+            )));
+            columns.push(Arc::new(BinaryArray::from_iter_values(
+                dirty.iter().map(|(k, _)| k.0.as_ref()),
+            )));
+            for (j, field) in self.state_fields.iter().enumerate() {
+                columns.push(scalars_to_array(
+                    dirty
+                        .iter()
+                        .map(|(_, slot)| {
+                            slot.scalars.as_ref().expect("dirty fold holds state")[j].clone()
+                        })
+                        .collect(),
+                    field.data_type(),
+                ));
+            }
+            columns.push(Arc::new(Int8Array::from(vec![0i8; n])));
+            let batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
+                .expect("paimon folds write batch");
+            self.folds.commit(&batch)?;
+        }
+        self.fold_working.clear();
+        Ok((self.pending.checkpoint_manifest()?, self.folds.checkpoint_manifest()?))
+    }
+}

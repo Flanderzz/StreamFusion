@@ -646,11 +646,22 @@ the operator just checkpoints its state the old way, in full):
   persists it in its raw snapshot — without it a restored subtask would re-buffer replayed rows
   of already-fired windows). The **proctime** window rank keeps memory state under this backend:
   it closes windows on processing-time timers whose deadline travels in raw state, not on
-  watermarks. Every other stateful operator keeps memory state under this backend. The remaining
-  **watermark/timer-driven operators** (`OVER` aggregates, interval/window/temporal joins,
-  session/window aggregates) stay on memory state for one remaining reason: their pending
-  buffers are columnar batches that need remodeling as keyed rows — the range-read machinery
-  itself now exists (keep-first dedup and window rank run on it).
+  watermarks. The **event-time `OVER` aggregate** (unbounded RANGE frame, and the pure
+  window-function forms `ROW_NUMBER`/`RANK`/`DENSE_RANK`) runs on the backend as two tables under
+  one operator directory: pending input rows keyed by an arrival sequence (a watermark firing is
+  the range read `rowtime ≤ watermark` over the write buffer and the committed table, merged back
+  into arrival order — the sequence rides the snapshot token so emission order survives restore),
+  and the per-key running fold state as one typed row per key — the same scalars the raw snapshot
+  round-trips, hydrated per firing by the key probe and disk-resident between firings where the
+  memory path's per-key map grows forever. Two `OVER` shapes keep memory state under this
+  backend: **proctime `OVER`** (emission is eager, off-watermark, ordered by an arrival counter)
+  and **bounded ROWS/RANGE frames** (their per-key state is a row buffer with trailing-edge
+  eviction, not a fixed-width fold — a later list-shaped remodel). Every other stateful operator
+  keeps memory state under this backend. The remaining **watermark/timer-driven operators**
+  (interval/window/temporal joins, session/window aggregates) stay on memory state for one
+  remaining reason: their pending buffers are columnar batches that need remodeling as keyed
+  rows — the range-read machinery itself now exists (keep-first dedup, window rank, and the
+  `OVER` aggregate run on it).
 - **Multiset-state aggregates** — retracting `MIN`/`MAX` and `COUNT`/`SUM(DISTINCT)` keep per-key
   multisets, which the persistent row codec does not carry yet; an aggregate list containing them
   keeps the whole operator on memory state.

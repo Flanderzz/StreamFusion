@@ -3760,6 +3760,157 @@ mod paimon_state {
         assert!(wr_rows(&restored.flush(i64::MAX).unwrap()).is_empty(), "post-restore repeat");
     }
 
+    /// OVER output rows in emission order — `(k, v, rt, result)`. Emission order IS part of the
+    /// OVER contract (the memory path emits completed rows in arrival order; the persistent path
+    /// reproduces it through the arrival sequence), so these are not sorted.
+    fn over_rows(batch: &RecordBatch) -> Vec<(i64, i64, i64, i64)> {
+        if batch.num_rows() == 0 {
+            return Vec::new();
+        }
+        let ks = batch.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+        let vs = batch.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
+        let rts = batch.column(2).as_any().downcast_ref::<Int64Array>().unwrap();
+        let results = batch
+            .column(batch.num_columns() - 1)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        (0..batch.num_rows())
+            .map(|r| (ks.value(r), vs.value(r), rts.value(r), results.value(r)))
+            .collect()
+    }
+
+    /// Running SUM over key column 0, value column 1, rowtime column 2 (unbounded RANGE).
+    fn over_aggregator() -> OverWindowAggregator {
+        OverWindowAggregator::new(vec![0], vec![0], 2, vec![1], vec![0], 0, 0, false)
+    }
+
+    fn over_store(dir: &str) -> PaimonOverStore {
+        let state_types =
+            crate::over_agg::paimon_over_state_types(&[0], &[0], 0, false).unwrap();
+        PaimonOverStore::create(config(dir), vec![DataType::Int64; 3], state_types).unwrap()
+    }
+
+    /// The event-time OVER on the Paimon backend matches the memory operator through pushes,
+    /// watermark firings, and checkpoints — same rows, same running values, same emission order
+    /// (arrival order, reproduced by the arrival sequence across the buffer/disk merge).
+    #[test]
+    fn paimon_over_matches_memory() {
+        let dir = temp_dir("over-parity");
+        let mut paimon = over_aggregator().with_backend(over_store(&dir));
+        let mut memory = over_aggregator();
+
+        let steps: Vec<(Vec<RecordBatch>, i64)> = vec![
+            // rt 3 and 4 complete at wm 4; the rt-5 row for key 1 stays pending.
+            (vec![join_batch(vec![1, 2, 1], vec![10, 20, 5], vec![5, 3, 4])], 4),
+            // The pending rt-5 row fires with the new rt-6 row folding after it; key 3 waits.
+            (vec![join_batch(vec![1, 3], vec![7, 9], vec![6, 10])], 8),
+            // Nothing pushed; the committed pending row for key 3 fires from the table scan.
+            (vec![], 20),
+        ];
+        for (i, (batches, watermark)) in steps.iter().enumerate() {
+            for batch in batches {
+                paimon.push(batch.clone()).unwrap();
+                memory.push(batch.clone()).unwrap();
+            }
+            let paimon_out = paimon.flush(*watermark).unwrap();
+            let memory_out = memory.flush(*watermark).unwrap();
+            assert_eq!(
+                over_rows(&memory_out),
+                over_rows(&paimon_out),
+                "step {i} diverged between backends"
+            );
+            paimon.store_mut().checkpoint().unwrap();
+        }
+    }
+
+    /// The per-key running fold survives the barrier and a restore from listed files only, and
+    /// the restored arrival sequence keeps replay-then-new emission order: a key's sum continues
+    /// where the previous run left it, and pending rows committed before the restore fire after
+    /// it exactly once.
+    #[test]
+    fn paimon_over_fold_survives_restore() {
+        let dir = temp_dir("over-restore-src");
+        let mut over = over_aggregator().with_backend(over_store(&dir));
+        over.push(join_batch(vec![1, 1, 2], vec![10, 5, 20], vec![1, 2, 30])).unwrap();
+        assert_eq!(
+            over_rows(&over.flush(10).unwrap()),
+            vec![(1, 10, 1, 10), (1, 5, 2, 15)],
+            "key 1 folds in rowtime order; key 2 stays pending"
+        );
+        let (pending_manifest, folds_manifest) = over.store_mut().checkpoint().unwrap();
+        let next_seq = over.store_mut().next_seq();
+
+        let restored_dir = temp_dir("over-restore-dst");
+        materialize(
+            &pending_manifest,
+            &format!("{dir}/pending"),
+            &format!("{restored_dir}/pending"),
+        );
+        materialize(&folds_manifest, &format!("{dir}/folds"), &format!("{restored_dir}/folds"));
+        let state_types =
+            crate::over_agg::paimon_over_state_types(&[0], &[0], 0, false).unwrap();
+        let mut store = PaimonOverStore::open_merged(
+            config(&restored_dir),
+            vec![DataType::Int64; 3],
+            state_types,
+            &[(format!("{restored_dir}/pending"), pending_manifest.snapshot_id)],
+            &[(format!("{restored_dir}/folds"), folds_manifest.snapshot_id)],
+            0..=127,
+            true,
+        )
+        .unwrap();
+        store.set_next_seq(next_seq);
+        let mut restored = over_aggregator().with_backend(store);
+
+        // A new row arrives before the watermark releases the committed pending row; the
+        // restored sequence must emit the committed row (key 2, rt 30) ahead of it, and key 1's
+        // sum must continue from the persisted fold (15), not restart.
+        restored.push(join_batch(vec![1], vec![100], vec![40])).unwrap();
+        assert_eq!(
+            over_rows(&restored.flush(50).unwrap()),
+            vec![(2, 20, 30, 20), (1, 100, 40, 115)],
+            "committed pending row first, then the new row on the restored fold"
+        );
+        assert!(
+            over_rows(&restored.flush(60).unwrap()).is_empty(),
+            "fired pending rows left the store"
+        );
+    }
+
+    /// ROW_NUMBER (a window function, not a DataFusion accumulator) rides the same store: its
+    /// counter state round-trips through the folds table across checkpoints.
+    #[test]
+    fn paimon_over_window_function_matches_memory() {
+        let make = || OverWindowAggregator::new(vec![], vec![10], 2, vec![], vec![0], 1, 0, false);
+        let dir = temp_dir("over-rownum");
+        let state_types =
+            crate::over_agg::paimon_over_state_types(&[], &[10], 1, false).unwrap();
+        let store =
+            PaimonOverStore::create(config(&dir), vec![DataType::Int64; 3], state_types).unwrap();
+        let mut paimon = make().with_backend(store);
+        let mut memory = make();
+
+        let steps: Vec<(Vec<RecordBatch>, i64)> = vec![
+            (vec![join_batch(vec![1, 2, 1], vec![10, 20, 5], vec![2, 1, 3])], 2),
+            (vec![join_batch(vec![1, 2], vec![7, 9], vec![4, 5])], 10),
+        ];
+        for (i, (batches, watermark)) in steps.iter().enumerate() {
+            for batch in batches {
+                paimon.push(batch.clone()).unwrap();
+                memory.push(batch.clone()).unwrap();
+            }
+            let paimon_out = paimon.flush(*watermark).unwrap();
+            let memory_out = memory.flush(*watermark).unwrap();
+            assert_eq!(
+                over_rows(&memory_out),
+                over_rows(&paimon_out),
+                "step {i} diverged between backends"
+            );
+            paimon.store_mut().checkpoint().unwrap();
+        }
+    }
+
     /// The bundle contract of the two-component store: written slots (the write buffer) survive
     /// `end_bundle` until the barrier; clean reads are bundle-scoped and drop, and a later bundle
     /// touching the same key re-reads it from the committed table.

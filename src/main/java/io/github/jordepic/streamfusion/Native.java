@@ -1171,6 +1171,62 @@ public final class Native {
   public static native void closePaimonWindowRanker(long handle);
 
   /**
+   * Whether an OVER instance's whole state shape is persistable on the Paimon backend: a
+   * watermark-driven fold (rowtime ordering, unbounded RANGE frame or pure window functions)
+   * whose input row and fold-state columns all sit in the backend's type map. Proctime OVER and
+   * bounded ROWS/RANGE frames keep memory state.
+   */
+  public static native boolean paimonOverStateSupported(
+      long rowSchemaAddress, int[] valueTypes, int[] aggregateKinds, int frameKind, boolean proctime);
+
+  /**
+   * {@code createOverAggregator} on the Paimon state backend (event-time only). Two tables under
+   * the operator's state directory: pending input rows keyed by arrival sequence (a watermark
+   * firing is a range read over the write buffer and the committed table, merged back into
+   * arrival order), and the per-key running fold state (point reads, dirty-slot writes). The
+   * snapshot token packs both snapshot ids and the arrival sequence. Restore semantics otherwise
+   * as in {@link #createPaimonKeepLastDeduplicator}.
+   */
+  public static native long createPaimonOverAggregator(
+      int[] valueTypes,
+      int[] aggregateKinds,
+      int timeColumn,
+      int[] valueColumns,
+      int[] keyColumns,
+      int frameKind,
+      long frameOffset,
+      int[] keyTimestampPrecisions,
+      long rowSchemaAddress,
+      long memoryBudgetBytes,
+      String tableDirectory,
+      int maxParallelism,
+      int buckets,
+      String fileFormat,
+      String fileCompression,
+      String[] sourceDirectories,
+      String[] sourceSnapshotTokens,
+      int keyGroupStart,
+      int keyGroupEnd,
+      boolean aligned);
+
+  /** {@code pushOverAggregator} for a Paimon-backed handle (no output; watermark-driven). */
+  public static native void pushPaimonOverAggregator(
+      long handle, long inArrayAddress, long inSchemaAddress);
+
+  /** {@code flushOverAggregator} for a Paimon-backed handle. */
+  public static native void flushPaimonOverAggregator(
+      long handle, long watermarkMillis, long outArrayAddress, long outSchemaAddress);
+
+  /** {@code checkpointPaimonGroupAggregator} for a Paimon-backed OVER aggregator. */
+  public static native String[] checkpointPaimonOverAggregator(long handle);
+
+  /** Estimated bytes of a Paimon-backed OVER aggregator's resident working set. */
+  public static native long paimonOverAggregatorStateBytes(long handle);
+
+  /** Releases a Paimon-backed OVER aggregator handle. */
+  public static native void closePaimonOverAggregator(long handle);
+
+  /**
    * {@code createChangelogNormalizer} on the Paimon state backend; state row and restore semantics
    * as in {@link #createPaimonKeepLastDeduplicator}.
    */

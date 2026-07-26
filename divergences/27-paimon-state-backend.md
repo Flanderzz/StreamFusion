@@ -141,6 +141,22 @@ it in its raw snapshot; without it a restored subtask re-buffers replayed rows o
 windows), and the **proctime** window rank keeps memory state — it closes windows on
 processing-time timers whose deadline travels in raw state, not on watermarks.
 
+The third range-read consumer is the **event-time OVER aggregate**, which splits into two tables
+under one operator directory because its two states have different shapes: the pending input
+rows (time-buffered — one row per buffered input row, keyed by an **arrival sequence** whose
+big-endian bytes make byte order arrival order; a firing is the `rowtime ≤ watermark` overlay
+merged back into sequence order, and fired rows leave state as `-D` rows) and the per-key
+running fold (point-access — one typed row per key holding exactly the running scalars the raw
+snapshot round-trips, hydrated by the key probe for just the fired keys and written back as
+dirty slots). The arrival sequence rides the opaque snapshot token next to both tables' snapshot
+ids, mirroring how the join packs two ids and window rank packs its watermark: without it a
+restored subtask's new rows would emit ahead of older pending rows. RocksDB cross-check: Flink's
+rowtime OVER keeps the same two states per key — `MapState<Long, List<row>>` of pending rows and
+a `ValueState` of accumulators — and its timer sweep is the ordered-CF iteration our pruned range
+scan replaces. Two OVER shapes stay on memory state: proctime (eager emission, no watermark) and
+bounded ROWS/RANGE frames (per-key row buffers with trailing-edge eviction, a list shape, not a
+fixed-width fold).
+
 The full design record, including the verified paimon-rust API survey and the rejected
 alternatives (rust-rocksdb baseline, Tonbo, fjall, SlateDB, ForSt), is in
 `.claude/research/paimon-vortex-state-backend-plan.md`.
