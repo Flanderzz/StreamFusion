@@ -85,6 +85,18 @@ public final class NativeConfig {
   }
 
   /**
+   * The Paimon bucket count for native state tables
+   * ({@code streamfusion.state.paimon.buckets}, default 1: one LSM per operator subtask, the
+   * RocksDB shape). Deliberately small and decoupled from max parallelism — a bucket per key
+   * group wrote one file per touched key group per commit. Key-group locality survives because
+   * the key-group column leads the primary key (hydration prunes by key-group predicate), and
+   * rescale pays a one-time clip rewrite at recovery instead of free bucket adoption.
+   */
+  public static int paimonBuckets() {
+    return Integer.getInteger("streamfusion.state.paimon.buckets", 1);
+  }
+
+  /**
    * Minimum milliseconds between background state-table maintenance rounds
    * ({@code streamfusion.state.paimon.maintenance.min-interval-ms}, default 2000). Barriers kick
    * maintenance, but a round per barrier over-compacts at short checkpoint intervals — the

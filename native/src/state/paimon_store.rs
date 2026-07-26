@@ -27,10 +27,10 @@ use arrow::array::{Array, BinaryArray, Int32Array, Int8Array};
 use paimon::catalog::Identifier;
 use paimon::io::FileIO;
 use paimon::spec::{
-    BigIntType, BooleanType, DataField, DataType as PaimonType, DateType,
-    DecimalType, DoubleType, FloatType, IntType, Schema as PaimonSchema,
-    SmallIntType, TableSchema, TimestampType, TinyIntType, VarBinaryType, VarCharType,
-    EMPTY_SERIALIZED_ROW,
+    BigIntType, BooleanType, DataField, DataType as PaimonType, Datum, DateType,
+    DecimalType, DoubleType, FloatType, IntType, Predicate, PredicateBuilder,
+    Schema as PaimonSchema, SmallIntType, TableSchema, TimestampType, TinyIntType,
+    VarBinaryType, VarCharType, EMPTY_SERIALIZED_ROW,
 };
 use paimon::table::{CommitMessage, Table};
 use std::collections::HashSet as StdHashSet;
@@ -202,8 +202,15 @@ pub(crate) fn paimon_group_supported(kinds: &[i64], state_types: &[DataType]) ->
 pub(crate) struct PaimonStoreConfig {
     /// Absolute local directory holding this operator subtask's table (chosen by the host).
     pub table_dir: String,
-    /// Flink maxParallelism — the bucket count; bucket id == key group id.
+    /// Flink maxParallelism — the modulus of the key-group column (`kg = hash mod this`).
     pub max_parallelism: usize,
+    /// The table's Paimon bucket count. Deliberately small and decoupled from max parallelism
+    /// (default 1: one LSM per subtask, the RocksDB shape): a bucket per key group wrote one
+    /// file per touched key group per commit — fragmentation proportional to max parallelism.
+    /// Key-group locality survives de-bucketing because `kg` leads the primary key, so files'
+    /// row groups are kg-clustered and hydration prunes by key-group predicate; rescale pays a
+    /// one-time clip at recovery instead of free bucket adoption (see `clip_from_sources`).
+    pub buckets: usize,
     /// Paimon `file.format` for state data files.
     pub file_format: String,
     /// Paimon `file.compression` for state data files ("uncompressed", "zstd", "snappy", ...).
@@ -236,6 +243,7 @@ pub(crate) struct PaimonTableCore {
     /// The table pinned at the last committed snapshot; probes read this.
     read_table: Option<Table>,
     read_snapshot: Option<i64>,
+    fields: Vec<DataField>,
     config: PaimonStoreConfig,
     /// Relative paths reachable from the last committed snapshot — the previous set minus the
     /// current one is exactly what local GC may unlink after a commit.
@@ -244,7 +252,7 @@ pub(crate) struct PaimonTableCore {
     /// checkpoint interval. Hydration is bucket-granular: the first miss in a bucket reads the
     /// whole bucket once, and every later probe of it — hit or miss — is answered from memory
     /// (the table is immutable between barriers, so residency is not a cache that can go stale).
-    hydrated_buckets: StdHashSet<i32>,
+    hydrated_key_groups: StdHashSet<i32>,
 }
 
 /// Read-through Paimon-backed store, generic over the operator's value codec (see the module
@@ -379,6 +387,7 @@ impl PaimonTableCore {
         table_schema: TableSchema,
         snapshot_id: Option<i64>,
     ) -> Result<Self, DataFusionError> {
+        let fields = table_schema.fields().to_vec();
         let table = Table::new(
             file_io,
             Identifier::new("streamfusion", "state"),
@@ -389,10 +398,11 @@ impl PaimonTableCore {
         let mut core = PaimonTableCore {
             read_table: None,
             read_snapshot: None,
+            fields,
             table,
             config,
             live_files: StdHashSet::new(),
-            hydrated_buckets: StdHashSet::new(),
+            hydrated_key_groups: StdHashSet::new(),
         };
         if let Some(id) = snapshot_id {
             core.read_snapshot = Some(id);
@@ -402,50 +412,54 @@ impl PaimonTableCore {
         Ok(core)
     }
 
-    /// Adopts every bucket in `key_groups` from one or more restored table directories (rescale):
-    /// their data files are hard-linked and committed by existing metadata — no row is read or
-    /// rewritten.
-    fn adopt_buckets(
-        &mut self,
-        sources: &[(String, i64)],
-        key_groups: std::ops::RangeInclusive<i32>,
-    ) -> Result<(), DataFusionError> {
+    /// Opens a restored source table pinned at its checkpoint snapshot.
+    fn open_source(source_dir: &str, snapshot_id: i64) -> Result<Table, DataFusionError> {
+        let file_io = Self::file_io(source_dir)?;
+        let schema = Self::latest_schema(&file_io, source_dir)?;
+        let source = Table::new(
+            file_io,
+            Identifier::new("streamfusion", "state"),
+            source_dir.to_string(),
+            schema,
+            None,
+        );
+        Ok(Self::pin(&source, snapshot_id))
+    }
+
+    /// The aligned-restore fast path: the single source covers exactly this subtask's key-group
+    /// range, so every bucket is adopted wholesale — data files hard-linked, committed by
+    /// existing metadata, no row read or rewritten. Returns `false` without adopting when the
+    /// source was written with a different bucket count: its rows sit in buckets this table's
+    /// `kg mod buckets` would never look in, so the restore must clip-rewrite instead.
+    fn adopt_all(&mut self, source_dir: &str, snapshot_id: i64) -> Result<bool, DataFusionError> {
+        let source_file_io = Self::file_io(source_dir)?;
+        let source_schema = Self::latest_schema(&source_file_io, source_dir)?;
+        let source_buckets = source_schema.options().get("bucket").cloned();
+        if source_buckets.as_deref() != Some(&self.config.buckets.to_string()) {
+            return Ok(false);
+        }
+        let pinned = Self::open_source(source_dir, snapshot_id)?;
+        let builder = pinned.new_read_builder();
+        let plan = runtime()
+            .block_on(builder.new_scan().plan())
+            .map_err(pe)?;
         let mut messages: Vec<CommitMessage> = Vec::new();
-        for (source_dir, snapshot_id) in sources {
-            let file_io = Self::file_io(source_dir)?;
-            let schema = Self::latest_schema(&file_io, source_dir)?;
-            let source = Table::new(
-                file_io,
-                Identifier::new("streamfusion", "state"),
-                source_dir.clone(),
-                schema,
-                None,
-            );
-            let pinned = Self::pin(&source, *snapshot_id);
-            let builder = pinned.new_read_builder();
-            let plan = runtime()
-                .block_on(builder.new_scan().plan())
-                .map_err(pe)?;
-            for split in plan.splits() {
-                let bucket = split.bucket();
-                if !key_groups.contains(&bucket) {
-                    continue;
+        for split in plan.splits() {
+            let bucket = split.bucket();
+            let bucket_dir = format!("{}/bucket-{}", self.config.table_dir, bucket);
+            std::fs::create_dir_all(&bucket_dir).map_err(io)?;
+            for file in split.data_files() {
+                let from = format!("{}/bucket-{}/{}", source_dir, bucket, file.file_name);
+                let to = format!("{}/{}", bucket_dir, file.file_name);
+                if !std::path::Path::new(&to).exists() {
+                    std::fs::hard_link(&from, &to).map_err(io)?;
                 }
-                let bucket_dir = format!("{}/bucket-{}", self.config.table_dir, bucket);
-                std::fs::create_dir_all(&bucket_dir).map_err(io)?;
-                for file in split.data_files() {
-                    let from = format!("{}/bucket-{}/{}", source_dir, bucket, file.file_name);
-                    let to = format!("{}/{}", bucket_dir, file.file_name);
-                    if !std::path::Path::new(&to).exists() {
-                        std::fs::hard_link(&from, &to).map_err(io)?;
-                    }
-                }
-                messages.push(CommitMessage::new(
-                    EMPTY_SERIALIZED_ROW.to_vec(),
-                    bucket,
-                    split.data_files().to_vec(),
-                ));
             }
+            messages.push(CommitMessage::new(
+                EMPTY_SERIALIZED_ROW.to_vec(),
+                bucket,
+                split.data_files().to_vec(),
+            ));
         }
         if !messages.is_empty() {
             let builder = self.table.new_write_builder();
@@ -453,6 +467,83 @@ impl PaimonTableCore {
                 .block_on(builder.new_commit().commit(messages))
                 .map_err(pe)?;
             self.refresh_after_commit()?;
+        }
+        Ok(true)
+    }
+
+    /// The rescale path — RocksDB's restore-time clip, in Paimon terms: buckets are not
+    /// partitioned by key group, so a resized subtask reads each source with a key-group range
+    /// predicate (`kg` leads the primary key, so row-group pruning keeps the read proportional)
+    /// and rewrites the surviving rows into its fresh table in one commit. Sources hold disjoint
+    /// key-group ranges, so every rewritten primary key is unique and write order is irrelevant.
+    fn clip_from_sources(
+        &mut self,
+        sources: &[(String, i64)],
+        key_groups: std::ops::RangeInclusive<i32>,
+        write_fields: &[Field],
+    ) -> Result<(), DataFusionError> {
+        let mut clipped: Vec<RecordBatch> = Vec::new();
+        for (source_dir, snapshot_id) in sources {
+            let pinned = Self::open_source(source_dir, *snapshot_id)?;
+            let fields = pinned.schema().fields().to_vec();
+            let builder_pred = PredicateBuilder::new(&fields);
+            let predicate = Predicate::and(vec![
+                builder_pred
+                    .greater_or_equal(KG_COLUMN, Datum::Int(*key_groups.start()))
+                    .map_err(pe)?,
+                builder_pred
+                    .less_or_equal(KG_COLUMN, Datum::Int(*key_groups.end()))
+                    .map_err(pe)?,
+            ]);
+            let mut builder = pinned.new_read_builder();
+            builder.with_filter(predicate);
+            let batches = runtime()
+                .block_on(async {
+                    let plan = builder.new_scan().plan().await?;
+                    let read = builder.new_read()?;
+                    let mut stream = read.to_arrow(&plan.splits().to_vec())?;
+                    let mut batches = Vec::new();
+                    use futures::StreamExt;
+                    while let Some(batch) = stream.next().await {
+                        batches.push(batch?);
+                    }
+                    Ok::<_, paimon::Error>(batches)
+                })
+                .map_err(pe)?;
+            for batch in batches {
+                // The predicate pushdown is best-effort: re-check the range per row, and
+                // normalize reader column types to the write schema.
+                let kgs = normalized_column(&batch, 0, &write_fields[0])?;
+                let kgs = kgs
+                    .as_any()
+                    .downcast_ref::<Int32Array>()
+                    .ok_or_else(|| DataFusionError::Internal("paimon kg column".into()))?;
+                let keep: Vec<u32> = (0..batch.num_rows() as u32)
+                    .filter(|&row| key_groups.contains(&kgs.value(row as usize)))
+                    .collect();
+                if keep.is_empty() {
+                    continue;
+                }
+                let indices = arrow::array::UInt32Array::from(keep);
+                let mut columns: Vec<ArrayRef> = Vec::with_capacity(write_fields.len() + 1);
+                for (i, field) in write_fields.iter().enumerate() {
+                    let column = normalized_column(&batch, i, field)?;
+                    columns.push(
+                        arrow::compute::take(&column, &indices, None)
+                            .map_err(|e| DataFusionError::External(Box::new(e)))?,
+                    );
+                }
+                columns.push(Arc::new(Int8Array::from(vec![0i8; indices.len()])));
+                let mut fields: Vec<Field> = write_fields.to_vec();
+                fields.push(Field::new(VALUE_KIND_COLUMN, DataType::Int8, false));
+                clipped.push(
+                    RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
+                        .expect("paimon clip batch"),
+                );
+            }
+        }
+        if !clipped.is_empty() {
+            self.commit_batches(&clipped)?;
         }
         Ok(())
     }
@@ -496,7 +587,7 @@ impl PaimonTableCore {
                     VarBinaryType::try_new(true, VarBinaryType::MAX_LENGTH).map_err(pe)?,
                 ),
             )
-            .option("bucket", &config.max_parallelism.to_string())
+            .option("bucket", &config.buckets.to_string())
             .option("bucket-key", KG_COLUMN)
             .option("bucket-function.type", "mod")
             .option("file.format", &config.file_format)
@@ -508,31 +599,41 @@ impl PaimonTableCore {
         flink_key_group(hash_bytes_by_words(&key.0), self.config.max_parallelism) as i32
     }
 
-    /// The buckets among the missed keys' buckets not yet resident this interval, marking them
-    /// hydrated — the caller must absorb every row `scan_buckets` returns for them, which is what
-    /// makes the mark truthful until the barrier clears it.
-    fn take_unhydrated_buckets(&mut self, misses: &[ByteKey]) -> Vec<i32> {
+    /// The missed keys' key groups not yet resident this interval, marking them hydrated — the
+    /// caller must absorb every row `scan_key_groups` returns for them, which is what makes the
+    /// mark truthful until the barrier clears it.
+    fn take_unhydrated_key_groups(&mut self, misses: &[ByteKey]) -> Vec<i32> {
         let mut fresh: Vec<i32> = Vec::new();
         for key in misses {
             let kg = self.key_group(key);
-            if self.hydrated_buckets.insert(kg) {
+            if self.hydrated_key_groups.insert(kg) {
                 fresh.push(kg);
             }
         }
         fresh
     }
 
-    /// Scans the pinned snapshot for every row of the given buckets. Hydration is one whole-bucket
-    /// read per bucket per checkpoint interval — the alternative, a key-probe scan per input
-    /// batch, re-opened the same bucket files over and over (the file-open storm the backend
-    /// profile was dominated by). Empty when no snapshot is pinned yet.
-    fn scan_buckets(&self, buckets: &[i32]) -> Result<Vec<RecordBatch>, DataFusionError> {
-        if self.read_table.is_none() || buckets.is_empty() {
+    /// Scans the pinned snapshot for every row of the given key groups: one read per key group
+    /// per checkpoint interval — the alternative, a key-probe scan per input batch, re-opened the
+    /// same files over and over (the file-open storm the backend profile was dominated by).
+    /// Splits are filtered to the key groups' buckets, and the `kg` predicate prunes row groups
+    /// inside them (the key-group column leads the primary key, so files are kg-clustered).
+    /// Empty when no snapshot is pinned yet.
+    fn scan_key_groups(&self, key_groups: &[i32]) -> Result<Vec<RecordBatch>, DataFusionError> {
+        if self.read_table.is_none() || key_groups.is_empty() {
             return Ok(Vec::new());
         }
-        let wanted: StdHashSet<i32> = buckets.iter().copied().collect();
+        let buckets = self.config.buckets as i32;
+        let wanted: StdHashSet<i32> = key_groups.iter().map(|kg| kg % buckets).collect();
+        let predicate = PredicateBuilder::new(&self.fields)
+            .is_in(
+                KG_COLUMN,
+                key_groups.iter().map(|kg| Datum::Int(*kg)).collect(),
+            )
+            .map_err(pe)?;
         let read_table = self.read_table.as_ref().expect("pinned read table");
-        let builder = read_table.new_read_builder();
+        let mut builder = read_table.new_read_builder();
+        builder.with_filter(predicate);
         runtime()
             .block_on(async {
                 let plan = builder.new_scan().plan().await?;
@@ -556,11 +657,18 @@ impl PaimonTableCore {
 
     /// Commits one write batch as a new snapshot and re-pins reads on it.
     fn commit(&mut self, batch: &RecordBatch) -> Result<(), DataFusionError> {
+        self.commit_batches(std::slice::from_ref(batch))
+    }
+
+    /// Commits a sequence of write batches, in order, as ONE new snapshot and re-pins reads.
+    fn commit_batches(&mut self, batches: &[RecordBatch]) -> Result<(), DataFusionError> {
         let builder = self.table.new_write_builder();
         runtime()
             .block_on(async {
                 let mut write = builder.new_write()?;
-                write.write_arrow_batch(batch).await?;
+                for batch in batches {
+                    write.write_arrow_batch(batch).await?;
+                }
                 let messages = write.prepare_commit().await?;
                 builder.new_commit().commit(messages).await
             })
@@ -580,7 +688,7 @@ impl PaimonTableCore {
                 meta_files: Vec::new(),
             });
         };
-        self.hydrated_buckets.clear();
+        self.hydrated_key_groups.clear();
         let (data_files, meta_files) = self.snapshot_file_listing(snapshot_id)?;
         self.gc_local(&data_files, &meta_files)?;
         Ok(PaimonCheckpointManifest { snapshot_id, data_files, meta_files })
@@ -718,9 +826,17 @@ impl<C: PaimonStateCodec> PaimonStore<C> {
         codec: C,
         sources: &[(String, i64)],
         key_groups: std::ops::RangeInclusive<i32>,
+        aligned: bool,
     ) -> Result<Self, DataFusionError> {
         let mut store = Self::create(config, codec)?;
-        store.core.adopt_buckets(sources, key_groups)?;
+        if aligned && sources.len() == 1 {
+            let (source_dir, snapshot_id) = &sources[0];
+            if store.core.adopt_all(source_dir, *snapshot_id)? {
+                return Ok(store);
+            }
+        }
+        let write_fields = store.arrow_fields();
+        store.core.clip_from_sources(sources, key_groups, &write_fields)?;
         Ok(store)
     }
 
@@ -774,8 +890,8 @@ impl<C: PaimonStateCodec> PaimonStore<C> {
     /// Hydrates the missed keys' buckets (whole buckets, once per interval) and records every
     /// missed key's result — present or absent — in the working set.
     fn hydrate(&mut self, misses: Vec<ByteKey>) -> Result<(), DataFusionError> {
-        let fresh = self.core.take_unhydrated_buckets(&misses);
-        for batch in self.core.scan_buckets(&fresh)? {
+        let fresh = self.core.take_unhydrated_key_groups(&misses);
+        for batch in self.core.scan_key_groups(&fresh)? {
             self.absorb_scan_batch(&batch)?;
         }
         let mut added_bytes = 0usize;
@@ -1069,9 +1185,17 @@ impl<C: PaimonListCodec> PaimonListStore<C> {
         codec: C,
         sources: &[(String, i64)],
         key_groups: std::ops::RangeInclusive<i32>,
+        aligned: bool,
     ) -> Result<Self, DataFusionError> {
         let mut store = Self::create(config, codec)?;
-        store.core.adopt_buckets(sources, key_groups)?;
+        if aligned && sources.len() == 1 {
+            let (source_dir, snapshot_id) = &sources[0];
+            if store.core.adopt_all(source_dir, *snapshot_id)? {
+                return Ok(store);
+            }
+        }
+        let write_fields = store.arrow_fields();
+        store.core.clip_from_sources(sources, key_groups, &write_fields)?;
         Ok(store)
     }
 
@@ -1131,8 +1255,8 @@ impl<C: PaimonListCodec> PaimonListStore<C> {
     /// ALL probe batches before assembly — the merge reader may split one key's rows across batch
     /// boundaries — then reassembled in `ord` order.
     fn hydrate(&mut self, misses: Vec<ByteKey>) -> Result<(), DataFusionError> {
-        let fresh = self.core.take_unhydrated_buckets(&misses);
-        let batches = self.core.scan_buckets(&fresh)?;
+        let fresh = self.core.take_unhydrated_key_groups(&misses);
+        let batches = self.core.scan_key_groups(&fresh)?;
         let mut collected: ahash::HashMap<ByteKey, Vec<(i64, Vec<ScalarValue>)>> =
             ahash::HashMap::default();
         for batch in &batches {
@@ -1462,9 +1586,17 @@ impl<C: PaimonMapCodec> PaimonMapStore<C> {
         codec: C,
         sources: &[(String, i64)],
         key_groups: std::ops::RangeInclusive<i32>,
+        aligned: bool,
     ) -> Result<Self, DataFusionError> {
         let mut store = Self::create(config, codec)?;
-        store.core.adopt_buckets(sources, key_groups)?;
+        if aligned && sources.len() == 1 {
+            let (source_dir, snapshot_id) = &sources[0];
+            if store.core.adopt_all(source_dir, *snapshot_id)? {
+                return Ok(store);
+            }
+        }
+        let write_fields = store.arrow_fields();
+        store.core.clip_from_sources(sources, key_groups, &write_fields)?;
         Ok(store)
     }
 
@@ -1528,8 +1660,8 @@ impl<C: PaimonMapCodec> PaimonMapStore<C> {
     /// probe batches before assembly — the merge reader may split one key's rows across batch
     /// boundaries.
     fn hydrate(&mut self, misses: Vec<ByteKey>) -> Result<(), DataFusionError> {
-        let fresh = self.core.take_unhydrated_buckets(&misses);
-        let batches = self.core.scan_buckets(&fresh)?;
+        let fresh = self.core.take_unhydrated_key_groups(&misses);
+        let batches = self.core.scan_key_groups(&fresh)?;
         let mut collected: ahash::HashMap<ByteKey, Vec<Vec<ScalarValue>>> =
             ahash::HashMap::default();
         for batch in &batches {

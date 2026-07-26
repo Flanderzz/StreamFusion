@@ -1,6 +1,12 @@
 # Phase 2 design: the Arrow dirty region, DataFusion overlay reads, and range hydration
 
-Status: DESIGN DRAFT (2026-07-25) — not yet plan-reviewed. Written after the state-backend
+Status: DECISIONS RESOLVED (maintainer review 2026-07-26; see the resolutions section at the end).
+A prerequisite rework was also decided in the same review: the bucket-per-key-group table layout
+is being removed (fragmentation proportional to max-parallelism was judged too much overhead) in
+favor of a small fixed bucket count with RocksDB-style clipping at recovery — Phase 2 builds on
+the de-bucketed store.
+
+Original draft (2026-07-25): Written after the state-backend
 speed-up round (124.1 s → 9.85 s measured on the q4 A/B; see `docs/benchmarks.md`) so the design
 intent survives sessions. Approved direction from maintainer discussion: dirty region as
 arrival-ordered Arrow batches + deletion bitmaps, DataFusion for reads, per-batch min/max stats
@@ -112,15 +118,19 @@ are input rows and batch-slice retention can replace the per-cell encode — but
 cool-machine run shows; the 2026-07-25 session's thermal drift (memory baseline 4.4–8.7 s)
 swallowed effects under ~20%.
 
-## Open decisions for plan review
+## Decisions (maintainer review, 2026-07-26)
 
-1. Dirty region per store vs per bucket (per bucket aligns flush partitioning and bounds bitmap
-   scans; per store is simpler).
-2. `PaimonTableProvider` vs direct `scan_buckets` for the committed side of the overlay (the
-   provider buys pushdown classification and SQL-shaped composition; direct scan avoids a DF
-   session per store).
-3. Whether the point-access stores migrate their *write* path to the dirty region at the same
-   time (batch-slice retention for row-payload codecs) or stay on slot-encode until a profile on
-   a dedup/join-heavy query justifies it.
-4. Where the working set's read-your-writes ends and the overlay begins for a Phase 2 operator
-   that does BOTH point probes (keep-first check) and range fires (watermark) on the same table.
+1. **Dirty region per store.** Moot at fine grain now that the bucket count is small and
+   decoupled from max-parallelism.
+2. **DataFusion merges the two worlds.** The committed side reads through a DataFusion table
+   provider over the pinned table; the dirty region is a second provider (deletion bitmaps as
+   selection, per-batch min/max as `PruningStatistics`); the overlay is a DataFusion plan.
+3. **The write path stays as it is.** No DataFusion on writes — there is no relational work in
+   "encode dirty state and hand it to the writer" for a query engine to improve; it would add
+   plan overhead for nothing. Batch-slice retention for row-payload codecs remains a possible
+   later change, orthogonal to DataFusion and currently unjustified by profile (<1%).
+4. **One DataFusion query answers a range read** over the in-memory write buffer plus the
+   committed Paimon data — that single overlay query IS the coherence mechanism. The hot loop's
+   per-row point checks do not run a plan per row: they hit the dirty region's key→row-ref index
+   directly, which is a view over the same batches the query scans, so points and ranges can
+   never disagree.

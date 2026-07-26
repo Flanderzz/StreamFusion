@@ -157,12 +157,14 @@ class PaimonJavaCompactionSpikeTest {
         -1L,
         tableDir,
         128,
+        1,
         "parquet",
         "uncompressed",
         sources,
         snapshots,
         0,
-        127);
+        127,
+        true);
   }
 
   /** Rows (k, 10k * round) for k in 1..3, so sums stay distinguishable per round. */

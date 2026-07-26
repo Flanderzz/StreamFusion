@@ -67,12 +67,14 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonG
     memory_budget_bytes: jlong,
     table_directory: JString<'local>,
     max_parallelism: jint,
+    buckets: jint,
     file_format: JString<'local>,
     file_compression: JString<'local>,
     source_directories: JObjectArray<'local>,
     source_snapshot_tokens: JObjectArray<'local>,
     key_group_start: jint,
     key_group_end: jint,
+    aligned: jboolean,
 ) -> jlong {
     let kinds = read_int_array(&env, &aggregate_kinds);
     let value_type_codes = read_int_array(&env, &value_types);
@@ -109,6 +111,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonG
     let config = PaimonStoreConfig {
         table_dir,
         max_parallelism: max_parallelism as usize,
+        buckets: buckets as usize,
         file_format: format,
         file_compression: compression,
     };
@@ -117,7 +120,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonG
     } else {
         let sources: Vec<(String, i64)> =
             source_dirs.into_iter().zip(source_snapshots).collect();
-        PaimonGroupStore::open_merged(config, codec, &sources, key_group_start..=key_group_end)
+        PaimonGroupStore::open_merged(config, codec, &sources, key_group_start..=key_group_end, aligned != 0)
     };
     let aggregator = store.and_then(|store| {
         let mut base = GroupAggregator::new(
@@ -269,12 +272,14 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonK
     memory_budget_bytes: jlong,
     table_directory: JString<'local>,
     max_parallelism: jint,
+    buckets: jint,
     file_format: JString<'local>,
     file_compression: JString<'local>,
     source_directories: JObjectArray<'local>,
     source_snapshot_tokens: JObjectArray<'local>,
     key_group_start: jint,
     key_group_end: jint,
+    aligned: jboolean,
 ) -> jlong {
     let partitions = read_columns(&env, &partition_columns);
     let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
@@ -303,6 +308,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonK
     let config = PaimonStoreConfig {
         table_dir,
         max_parallelism: max_parallelism as usize,
+        buckets: buckets as usize,
         file_format: format,
         file_compression: compression,
     };
@@ -311,7 +317,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonK
     } else {
         let sources: Vec<(String, i64)> =
             source_dirs.into_iter().zip(source_snapshots).collect();
-        PaimonDedupStore::open_merged(config, codec, &sources, key_group_start..=key_group_end)
+        PaimonDedupStore::open_merged(config, codec, &sources, key_group_start..=key_group_end, aligned != 0)
     };
     let dedup = store.and_then(|store| {
         KeepLastDeduplicator::new(
@@ -454,12 +460,14 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonC
     memory_budget_bytes: jlong,
     table_directory: JString<'local>,
     max_parallelism: jint,
+    buckets: jint,
     file_format: JString<'local>,
     file_compression: JString<'local>,
     source_directories: JObjectArray<'local>,
     source_snapshot_tokens: JObjectArray<'local>,
     key_group_start: jint,
     key_group_end: jint,
+    aligned: jboolean,
 ) -> jlong {
     let keys = read_columns(&env, &key_columns);
     let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
@@ -488,6 +496,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonC
     let config = PaimonStoreConfig {
         table_dir,
         max_parallelism: max_parallelism as usize,
+        buckets: buckets as usize,
         file_format: format,
         file_compression: compression,
     };
@@ -496,7 +505,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonC
     } else {
         let sources: Vec<(String, i64)> =
             source_dirs.into_iter().zip(source_snapshots).collect();
-        PaimonNormalizerStore::open_merged(config, codec, &sources, key_group_start..=key_group_end)
+        PaimonNormalizerStore::open_merged(config, codec, &sources, key_group_start..=key_group_end, aligned != 0)
     };
     let normalizer = store.and_then(|store| {
         ChangelogNormalizer::new(keys, generate_update_before != 0)
@@ -689,12 +698,14 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonT
     memory_budget_bytes: jlong,
     table_directory: JString<'local>,
     max_parallelism: jint,
+    buckets: jint,
     file_format: JString<'local>,
     file_compression: JString<'local>,
     source_directories: JObjectArray<'local>,
     source_snapshot_tokens: JObjectArray<'local>,
     key_group_start: jint,
     key_group_end: jint,
+    aligned: jboolean,
 ) -> jlong {
     let partitions = read_columns(&env, &partition_columns);
     let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
@@ -728,6 +739,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonT
     let config = PaimonStoreConfig {
         table_dir,
         max_parallelism: max_parallelism as usize,
+        buckets: buckets as usize,
         file_format: format,
         file_compression: compression,
     };
@@ -736,7 +748,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonT
     } else {
         let sources: Vec<(String, i64)> =
             source_dirs.into_iter().zip(source_snapshots).collect();
-        PaimonTopNStore::open_merged(config, codec, &sources, key_group_start..=key_group_end)
+        PaimonTopNStore::open_merged(config, codec, &sources, key_group_start..=key_group_end, aligned != 0)
     };
     let ranker = store.and_then(|store| {
         if retracting != 0 {
@@ -896,12 +908,14 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonU
     memory_budget_bytes: jlong,
     table_directory: JString<'local>,
     max_parallelism: jint,
+    buckets: jint,
     file_format: JString<'local>,
     file_compression: JString<'local>,
     source_directories: JObjectArray<'local>,
     source_snapshot_tokens: JObjectArray<'local>,
     key_group_start: jint,
     key_group_end: jint,
+    aligned: jboolean,
 ) -> jlong {
     let left = read_columns(&env, &left_keys);
     let right = read_columns(&env, &right_keys);
@@ -937,6 +951,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonU
     let side_config = |side: &str| PaimonStoreConfig {
         table_dir: format!("{table_dir}/{side}"),
         max_parallelism: max_parallelism as usize,
+        buckets: buckets as usize,
         file_format: format.clone(),
         file_compression: compression.clone(),
     };
@@ -958,6 +973,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonU
                 codec,
                 &sources,
                 key_group_start..=key_group_end,
+                aligned != 0,
             )
         }
     };

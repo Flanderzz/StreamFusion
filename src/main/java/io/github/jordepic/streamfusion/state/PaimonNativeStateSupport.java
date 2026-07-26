@@ -22,12 +22,17 @@ public final class PaimonNativeStateSupport {
   private final PaimonKeyedStateBackend<?> backend;
   private final String[] sourceDirectories;
   private final String[] sourceSnapshotTokens;
+  private final boolean aligned;
 
   private PaimonNativeStateSupport(PaimonKeyedStateBackend<?> backend) {
     this.backend = backend;
     List<PaimonRestoredSource> sources = backend.restoredSources();
     this.sourceDirectories = new String[sources.size()];
     this.sourceSnapshotTokens = new String[sources.size()];
+    this.aligned =
+        sources.size() == 1
+            && sources.get(0).keyGroupStart() == backend.getKeyGroupRange().getStartKeyGroup()
+            && sources.get(0).keyGroupEnd() == backend.getKeyGroupRange().getEndKeyGroup();
     for (int i = 0; i < sources.size(); i++) {
       sourceDirectories[i] = sources.get(i).directory();
       sourceSnapshotTokens[i] = sources.get(i).snapshotToken();
@@ -70,6 +75,14 @@ public final class PaimonNativeStateSupport {
 
   public String[] sourceSnapshotTokens() {
     return sourceSnapshotTokens;
+  }
+
+  /**
+   * Whether the restore is a single source covering exactly this subtask's key-group range —
+   * the wholesale file-adoption fast path; anything else clips by key-group range at recovery.
+   */
+  public boolean aligned() {
+    return aligned;
   }
 
   public int keyGroupStart() {

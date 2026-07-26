@@ -40,12 +40,22 @@ Why Paimon over rust-rocksdb:
   side mirrors `RocksIncrementalSnapshotStrategy`'s bookkeeping (confirmed-base placeholders,
   notification-delay pruning, sharing-strategy switch) over Paimon files and emits ordinary
   `IncrementalRemoteKeyedStateHandle`s, so the JM-side registry contract is Flink's own.
-- **Bucket = Flink key group, spec-compliant.** The table carries a computed key-group INT column
-  as leading primary-key column and bucket key under Paimon's `mod` bucket function with
-  `bucket = maxParallelism` — floor-mod of an in-range int is the identity. Rescale is therefore
-  file reassignment: restore adopts bucket directories from any number of checkpoint file sets by
-  hard-linking data files and committing their existing metadata (public `CommitMessage`), no row
-  rewrites.
+- **A small fixed bucket count, clipped at recovery — the RocksDB shape.** The table carries a
+  computed key-group INT column as leading primary-key column and bucket key under Paimon's `mod`
+  bucket function, but the bucket count is deliberately small and decoupled from max parallelism
+  (`streamfusion.state.paimon.buckets`, default 1: one LSM per subtask). The original design set
+  `bucket = maxParallelism` so bucket id equaled key group and rescale was free file reassignment
+  — but that wrote one file per touched key group per commit, fragmentation proportional to max
+  parallelism, judged too much steady-state overhead for a property rescale rarely uses (Flink
+  itself never physically partitions RocksDB by key group; the group is a key prefix in one CF,
+  and rescale clips). Key-group locality survives de-bucketing because `kg` leads the primary
+  key: files' row groups are kg-clustered, so hydration prunes by key-group predicate and reads
+  stay proportional to touched groups. Restore has two paths: a single source covering exactly
+  this subtask's range (and the same bucket count) adopts every bucket wholesale — data files
+  hard-linked, committed by existing metadata (public `CommitMessage`), no row read — while
+  rescale (or a bucket-count change) pays a one-time clip at recovery: each source is scanned
+  under a key-group-range predicate and the surviving rows are rewritten into the fresh table in
+  one commit, RocksDB's restore-time clip in Paimon terms.
 - **The same tables on object-store FileIO later** are the disaggregated backend with no redesign.
 
 ## Costs and edges we accept

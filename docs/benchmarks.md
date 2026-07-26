@@ -1081,8 +1081,14 @@ ratios are quoted loosely):
 | + bucket-granular hydration, resident until the barrier | 35.4 s | 57K events/s |
 | + custom local-fs write path (no per-write `create_dir_all`) | 9.85 s | 203K events/s (**0.44×** memory) |
 | everything + dir cache, paced maintenance, incremental links, standard `-Pbench` (mimalloc) | 8.99 s | 222K events/s (**0.54×** memory) |
+| + de-bucketed tables (`buckets` = 1, recovery-time clip) | 3.08–3.71 s | 539–650K events/s (**1.16–1.27×** memory) |
 
-**13.8× so far.** Bucket count (= Flink max parallelism, since bucket = key group) was suspected
+**The durable backend now beats the memory backend on this shape** (two runs, machine cooled):
+at 500 ms checkpoints the memory backend serializes and uploads its whole state as raw
+keyed-state snapshots every barrier, while the de-bucketed Paimon backend commits one small
+delta file and uploads incrementally — the classic incremental-checkpoint trade, landing exactly
+where RocksDB-vs-heap lands in Flink for checkpoint-heavy jobs. Cumulative for the round:
+**124.1 s → 3.1 s, ~35×.** Bucket count (= Flink max parallelism, since bucket = key group) was suspected
 as a multiplier on the per-file costs, and the benchmark takes `SF_MAX_PARALLELISM` to test it:
 at max-parallelism 8 (8 buckets instead of 128, 16× fewer files per commit) the pre-fs-fix run
 measured 33.1 s vs 35.4 s — ~7% — so the bucket-per-key-group layout keeps its free-rescale

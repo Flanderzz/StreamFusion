@@ -975,12 +975,14 @@ public final class Native {
       long memoryBudgetBytes,
       String tableDirectory,
       int maxParallelism,
+      int buckets,
       String fileFormat,
       String fileCompression,
       String[] sourceDirectories,
       String[] sourceSnapshotTokens,
       int keyGroupStart,
-      int keyGroupEnd);
+      int keyGroupEnd,
+      boolean aligned);
 
   /** {@link #updateGroupAggregator} for a Paimon-backed handle. */
   public static native void updatePaimonGroupAggregator(
@@ -1035,12 +1037,14 @@ public final class Native {
       long memoryBudgetBytes,
       String tableDirectory,
       int maxParallelism,
+      int buckets,
       String fileFormat,
       String fileCompression,
       String[] sourceDirectories,
       String[] sourceSnapshotTokens,
       int keyGroupStart,
-      int keyGroupEnd);
+      int keyGroupEnd,
+      boolean aligned);
 
   /** {@code pushKeepLastDeduplicator} for a Paimon-backed handle. */
   public static native void pushPaimonKeepLastDeduplicator(
@@ -1083,12 +1087,14 @@ public final class Native {
       long memoryBudgetBytes,
       String tableDirectory,
       int maxParallelism,
+      int buckets,
       String fileFormat,
       String fileCompression,
       String[] sourceDirectories,
       String[] sourceSnapshotTokens,
       int keyGroupStart,
-      int keyGroupEnd);
+      int keyGroupEnd,
+      boolean aligned);
 
   /** {@code pushChangelogNormalizer} for a Paimon-backed handle. */
   public static native void pushPaimonChangelogNormalizer(
@@ -1139,12 +1145,14 @@ public final class Native {
       long memoryBudgetBytes,
       String tableDirectory,
       int maxParallelism,
+      int buckets,
       String fileFormat,
       String fileCompression,
       String[] sourceDirectories,
       String[] sourceSnapshotTokens,
       int keyGroupStart,
-      int keyGroupEnd);
+      int keyGroupEnd,
+      boolean aligned);
 
   /** {@code pushTopNRanker} for a Paimon-backed handle. */
   public static native void pushPaimonTopNRanker(
@@ -1197,12 +1205,14 @@ public final class Native {
       long memoryBudgetBytes,
       String tableDirectory,
       int maxParallelism,
+      int buckets,
       String fileFormat,
       String fileCompression,
       String[] sourceDirectories,
       String[] sourceSnapshotTokens,
       int keyGroupStart,
-      int keyGroupEnd);
+      int keyGroupEnd,
+      boolean aligned);
 
   /** {@code pushLeftUpdatingJoiner} for a Paimon-backed handle. */
   public static native void pushLeftPaimonUpdatingJoiner(

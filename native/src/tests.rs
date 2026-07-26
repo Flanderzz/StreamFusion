@@ -3277,6 +3277,9 @@ mod paimon_state {
         PaimonStoreConfig {
             table_dir: table_dir.to_string(),
             max_parallelism: 128,
+            // Multi-bucket on purpose: key groups interleave across buckets (kg mod 4), so the
+            // kg-predicate hydration and the rescale clip are exercised off the trivial path.
+            buckets: 4,
             file_format: "vortex".to_string(),
             file_compression: "uncompressed".to_string(),
         }
@@ -3461,6 +3464,7 @@ mod paimon_state {
             codec(),
             &[(src_a, cp_a.snapshot_id), (src_b, cp_b.snapshot_id)],
             0..=127,
+            false,
         )
         .unwrap();
         let mut merged = paimon_agg(store);
@@ -3473,6 +3477,57 @@ mod paimon_state {
         assert_eq!(values(&out, 0), vec![1, 1, 5, 5, 8, 8]);
         assert_eq!(values(&out, 1), vec![10, 11, 50, 51, 80, 81]);
         assert_eq!(row_kinds(&out), vec![1, 2, 1, 2, 1, 2]);
+    }
+
+    /// The rescale clip drops out-of-range rows: buckets are not partitioned by key group, so a
+    /// resized subtask rewrites only the rows whose key group falls in its new range — RocksDB's
+    /// restore-time clip, in Paimon terms.
+    #[test]
+    fn paimon_rescale_clips_to_the_key_group_range() {
+        let dir = temp_dir("clip-src");
+        let mut agg = paimon_agg(create_store(&dir));
+        let keys: Vec<i64> = (1..=32).collect();
+        let values_in: Vec<i64> = keys.iter().map(|k| k * 10).collect();
+        agg.update(&group_batch(keys.clone(), values_in)).unwrap();
+        agg.flush_mini_batch().unwrap();
+        let manifest = agg.store_mut().checkpoint().unwrap();
+
+        let src = temp_dir("clip-mat");
+        materialize(&manifest, &dir, &src);
+        let merged_dir = temp_dir("clip-dst");
+        let mut store = PaimonGroupStore::open_merged(
+            config(&merged_dir),
+            codec(),
+            &[(src, manifest.snapshot_id)],
+            0..=63,
+            false,
+        )
+        .unwrap();
+
+        // Probe every key through the clipped table: keys whose group is in 0..=63 survive with
+        // their sums; the rest must probe as absent. The key-group split is a property of the
+        // BinaryRow hash, so partition the expectation with the same function the store uses.
+        let probe = group_batch(keys.clone(), vec![0; keys.len()]);
+        store.begin_batch(&probe, &[0], &[-1]).unwrap();
+        let mut encoder = BinaryRowBatchEncoder::new(&probe, &[0], &[-1]);
+        let mut survivors = 0usize;
+        for (row, key) in keys.iter().enumerate() {
+            let bytes = encoder.encode(row);
+            let kg = flink_key_group(hash_bytes_by_words(bytes), 128) as i32;
+            if (0..=63).contains(&kg) {
+                assert!(
+                    store.get(bytes).is_some(),
+                    "key {key} (group {kg}) is in range and must survive the clip"
+                );
+                survivors += 1;
+            } else {
+                assert!(
+                    store.get(bytes).is_none(),
+                    "key {key} (group {kg}) is out of range and must be clipped"
+                );
+            }
+        }
+        assert!(survivors > 0 && survivors < keys.len(), "the split must be non-trivial");
     }
 
     // -----------------------------------------------------------------------------------------
@@ -3552,6 +3607,7 @@ mod paimon_state {
             dedup_codec(),
             &[(restored_dir, manifest.snapshot_id)],
             0..=127,
+            true,
         )
         .unwrap();
         let mut restored =
@@ -3630,6 +3686,7 @@ mod paimon_state {
             NormalizerStateCodec::new(vec![DataType::Int64, DataType::Int64]),
             &[(restored_dir, manifest.snapshot_id)],
             0..=127,
+            true,
         )
         .unwrap();
         let mut restored = ChangelogNormalizer::new(vec![0], true).with_backend(store);
@@ -3708,6 +3765,7 @@ mod paimon_state {
             codec,
             &[(restored_dir, manifest.snapshot_id)],
             0..=127,
+            true,
         )
         .unwrap();
         let mut restored = TopNRanker::new(vec![0], vec![asc(1)], 2, false, false)
@@ -3868,6 +3926,7 @@ mod paimon_state {
             JoinStateCodec::new(&kv_schema()),
             &[(src_l, cp_l.snapshot_id)],
             0..=127,
+            true,
         )
         .unwrap();
         let right = PaimonJoinStore::open_merged(
@@ -3875,6 +3934,7 @@ mod paimon_state {
             JoinStateCodec::new(&kv_schema()),
             &[(src_r, cp_r.snapshot_id)],
             0..=127,
+            true,
         )
         .unwrap();
         let mut restored = UpdatingJoiner::new(

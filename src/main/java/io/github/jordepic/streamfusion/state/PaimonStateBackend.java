@@ -151,7 +151,11 @@ public class PaimonStateBackend implements StateBackend {
         }
       }
     }
-    return new PaimonRestoredSource(directory.getAbsolutePath(), snapshotToken);
+    return new PaimonRestoredSource(
+        directory.getAbsolutePath(),
+        snapshotToken,
+        handle.getKeyGroupRange().getStartKeyGroup(),
+        handle.getKeyGroupRange().getEndKeyGroup());
   }
 
   @Override

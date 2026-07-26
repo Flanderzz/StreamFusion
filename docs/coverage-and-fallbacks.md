@@ -667,7 +667,10 @@ one sorted run accumulates per touched bucket per checkpoint, growing probe cost
 backend logs a warning. A side effect worth knowing: parquet state tables are ordinary Paimon
 tables, readable by any Paimon tooling for state inspection.
 
-`-Dstreamfusion.state.paimon.maintenance.min-interval-ms` (default `2000`) paces the background
+`-Dstreamfusion.state.paimon.buckets` (default `1`) sets the state tables' Paimon bucket count —
+deliberately small and decoupled from max parallelism (one LSM per subtask, the RocksDB shape);
+an aligned restore adopts files wholesale, while rescale or a bucket-count change clips by
+key-group range at recovery. `-Dstreamfusion.state.paimon.maintenance.min-interval-ms` (default `2000`) paces the background
 maintenance rounds: barriers kick maintenance, kicks inside the pause coalesce, and the default
 mirrors RocksDB's `level0_file_num_compaction_trigger` arithmetic (four sorted runs at 500 ms
 barriers). `-Dstreamfusion.state.paimon.file-format` (default `parquet`) and

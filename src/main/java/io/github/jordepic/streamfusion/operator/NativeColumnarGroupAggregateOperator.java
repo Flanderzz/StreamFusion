@@ -104,10 +104,10 @@ public class NativeColumnarGroupAggregateOperator extends AbstractStreamOperator
               aggregateKinds, valueTypes, valueColumns, keyColumns, keyTimestampPrecisions,
               filterColumns, countColumns, distinctViewColumns, recordCountColumn,
               generateUpdateBefore, miniBatch, memoryBudget.bytes(),
-              paimon.tableDirectory(), maxParallelism,
+              paimon.tableDirectory(), maxParallelism, NativeConfig.paimonBuckets(),
               NativeConfig.paimonFileFormat(), NativeConfig.paimonFileCompression(),
               paimon.sourceDirectories(), paimon.sourceSnapshotTokens(),
-              paimon.keyGroupStart(), paimon.keyGroupEnd());
+              paimon.keyGroupStart(), paimon.keyGroupEnd(), paimon.aligned());
       long nativeHandle = handle;
       paimon.register(() -> Native.checkpointPaimonGroupAggregator(nativeHandle));
       return;

@@ -458,6 +458,19 @@ compaction never blocks the write path; Paimon's optimistic commit retry resolve
 barrier's data commits. Measured on the same A/B: **124.1 s → 55.6–66.1 s** across two runs,
 roughly 2× the Paimon backend's end-to-end throughput, with tables equally maintained.
 
+**State tables are de-bucketed: a small fixed bucket count, clipped at recovery.** The original
+bucket-per-key-group layout made rescale free (whole-bucket file adoption) but wrote one file per
+touched key group per commit — fragmentation proportional to max parallelism, for a property
+rescale rarely uses. Flink never physically partitions RocksDB by key group either: the group is
+a key prefix in one column family, and rescale clips. The tables now default to one bucket per
+subtask (`streamfusion.state.paimon.buckets`), key-group locality survives because `kg` leads the
+primary key (hydration prunes by key-group predicate over kg-clustered row groups), aligned
+restores keep wholesale file adoption, and rescale pays a one-time key-group-range clip rewrite
+at recovery. Measured on the q4 backend A/B (500 ms checkpoints, 2M events, two runs):
+**8.99 s → 3.08–3.71 s**, which puts the Paimon backend at **1.16–1.27× the memory backend** —
+faster than memory state, because each barrier now commits one small delta file where the memory
+backend's raw snapshots serialize and upload the whole state. Round cumulative: 124.1 s → 3.1 s.
+
 **Paimon checkpoints hard-link only the files the upload reads.** Every barrier used to hard-link
 the pinned snapshot's whole reachable file set into the per-checkpoint directory — one `mkdir` +
 `linkat` per live file per checkpoint, growing with table size — when the only files ever read
