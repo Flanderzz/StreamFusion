@@ -1126,7 +1126,7 @@ fn cumulative_two_phase_merges_nested_windows() {
     )
     .unwrap();
     agg.update_partial(&partial).unwrap();
-    let out = agg.flush(3000);
+    let out = agg.flush(3000).unwrap();
     // Nested windows share the bucket start 0; each accumulates the slices up to its end:
     // (0,1000]=10, (0,2000]=10+20=30, (0,3000]=10+20+30=60.
     assert_eq!(values(&out, 1), vec![0, 0, 0]); // window_start
@@ -1195,11 +1195,11 @@ fn window_state_reserves_and_releases_memory() {
     assert_eq!(agg.memory.state_bytes, agg.computed_state_bytes()); // incremental tracking must not drift
     let both_windows = pool.reserved();
 
-    agg.flush(1000); // closes the first window only
+    agg.flush(1000).unwrap(); // closes the first window only
     assert_eq!(agg.memory.state_bytes, agg.computed_state_bytes());
     assert!(pool.reserved() > 0 && pool.reserved() < both_windows);
 
-    agg.flush(2000); // closes the rest
+    agg.flush(2000).unwrap(); // closes the rest
     assert_eq!(pool.reserved(), 0);
     drop(agg);
     assert_eq!(pool.reserved(), 0);
@@ -1215,7 +1215,7 @@ fn window_state_partitions_and_restores_by_flink_key_group() {
 
     let mut restored =
         TumblingAggregator::restore_partitions(1000, 1000, false, vec![0], vec![0], &snapshots);
-    let out = restored.flush(1000);
+    let out = restored.flush(1000).unwrap();
     let keys = out
         .column_by_name("key0")
         .unwrap()
@@ -4053,6 +4053,163 @@ mod paimon_state {
         assert!(
             wj_pairs(&restored.flush(i64::MAX).unwrap()).is_empty(),
             "post-restore repeat"
+        );
+    }
+
+    /// A `[ts, value0, key0]` batch for the keyed window aggregate.
+    fn wa_batch(ts: Vec<i64>, values: Vec<i64>, keys: Vec<i64>) -> RecordBatch {
+        RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("ts", DataType::Int64, false),
+                Field::new("value0", DataType::Int64, true),
+                Field::new("key0", DataType::Int64, false),
+            ])),
+            vec![
+                Arc::new(Int64Array::from(ts)),
+                Arc::new(Int64Array::from(values)),
+                Arc::new(Int64Array::from(keys)),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// Window-aggregate output rows in emission order — `(key, ws, we, result)`; both backends
+    /// drain the same ordered map with the same key sort, so order is part of the parity.
+    fn wa_rows(batch: &RecordBatch) -> Vec<(i64, i64, i64, i64)> {
+        if batch.num_rows() == 0 {
+            return Vec::new();
+        }
+        let ks = batch.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+        let wss = batch.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
+        let wes = batch.column(2).as_any().downcast_ref::<Int64Array>().unwrap();
+        let sums = batch.column(3).as_any().downcast_ref::<Int64Array>().unwrap();
+        (0..batch.num_rows())
+            .map(|r| (ks.value(r), wss.value(r), wes.value(r), sums.value(r)))
+            .collect()
+    }
+
+    fn window_agg_store(dir: &str) -> PaimonWindowAggStore {
+        let state_types: Vec<DataType> = build_aggregates(&[0], &[0])
+            .iter()
+            .flat_map(|a| a.state_fields().into_iter().map(|f| f.data_type().clone()))
+            .collect();
+        PaimonWindowAggStore::create(config(dir), vec![DataType::Int64], state_types).unwrap()
+    }
+
+    /// SUM over 1 s tumbling windows on the Paimon backend matches the memory aggregator through
+    /// folds, watermark firings, and checkpoints: a window fed before a barrier and closed after
+    /// it fires with the committed and post-barrier contributions folded together.
+    #[test]
+    fn paimon_window_agg_matches_memory() {
+        let dir = temp_dir("wa-parity");
+        let mut paimon = TumblingAggregator::new(1000, 1000, false, vec![0], vec![0])
+            .with_backend(window_agg_store(&dir));
+        let mut memory = TumblingAggregator::new(1000, 1000, false, vec![0], vec![0]);
+
+        let steps: Vec<(Vec<RecordBatch>, i64)> = vec![
+            // Window [0,1000): k1 = 10+5, k2 = 20; window [1000,2000): k1 = 7. Nothing closes.
+            (vec![wa_batch(vec![0, 100, 200, 1500], vec![10, 20, 5, 7], vec![1, 2, 1, 1])], 500),
+            // Post-barrier contribution to the committed [0,1000) window, then it closes.
+            (vec![wa_batch(vec![300], vec![3], vec![1])], 1000),
+            // Nothing pushed; the committed [1000,2000) window fires from the table scan.
+            (vec![], 2000),
+        ];
+        for (i, (batches, watermark)) in steps.iter().enumerate() {
+            for batch in batches {
+                paimon.update(batch).unwrap();
+                memory.update(batch).unwrap();
+            }
+            let paimon_out = paimon.flush(*watermark).unwrap();
+            let memory_out = memory.flush(*watermark).unwrap();
+            assert_eq!(
+                wa_rows(&memory_out),
+                wa_rows(&paimon_out),
+                "step {i} diverged between backends"
+            );
+            paimon.checkpoint_backend().unwrap();
+        }
+    }
+
+    /// The barrier stages the open windows and drops them from memory; a later touch re-seeds
+    /// the (key, window) from the committed table, and a fired window never re-fires — within
+    /// the interval, across barriers, and after a restore from listed files only.
+    #[test]
+    fn paimon_window_agg_seeds_and_fires_once() {
+        let dir = temp_dir("wa-committed");
+        let mut agg = TumblingAggregator::new(1000, 1000, false, vec![0], vec![0])
+            .with_backend(window_agg_store(&dir));
+        agg.update(&wa_batch(vec![0], vec![10], vec![1])).unwrap();
+        agg.checkpoint_backend().unwrap();
+
+        // Post-barrier row folds into the seeded committed state (10 + 5).
+        agg.update(&wa_batch(vec![100], vec![5], vec![1])).unwrap();
+        assert_eq!(wa_rows(&agg.flush(1000).unwrap()), vec![(1, 0, 1000, 15)]);
+        assert!(wa_rows(&agg.flush(i64::MAX).unwrap()).is_empty(), "same interval repeat");
+        let (manifest, watermark) = agg.checkpoint_backend().unwrap();
+        assert!(wa_rows(&agg.flush(i64::MAX).unwrap()).is_empty(), "post-barrier repeat");
+
+        let restored_dir = temp_dir("wa-restore");
+        materialize(&manifest, &dir, &restored_dir);
+        let state_types: Vec<DataType> = build_aggregates(&[0], &[0])
+            .iter()
+            .flat_map(|a| a.state_fields().into_iter().map(|f| f.data_type().clone()))
+            .collect();
+        let store = PaimonWindowAggStore::open_merged(
+            config(&restored_dir),
+            vec![DataType::Int64],
+            state_types,
+            &[(restored_dir.clone(), manifest.snapshot_id)],
+            0..=127,
+            true,
+        )
+        .unwrap();
+        let mut restored = TumblingAggregator::new(1000, 1000, false, vec![0], vec![0])
+            .with_backend(store);
+        restored.set_current_watermark(watermark);
+        assert!(
+            wa_rows(&restored.flush(i64::MAX).unwrap()).is_empty(),
+            "post-restore repeat"
+        );
+        // A late row for the fired window drops (the token-carried watermark survives restore).
+        restored.update(&wa_batch(vec![100], vec![99], vec![1])).unwrap();
+        assert!(wa_rows(&restored.flush(i64::MAX).unwrap()).is_empty(), "late row dropped");
+    }
+
+    /// The global two-phase half rides the same store: partials merge into seeded committed
+    /// windows across a barrier and fire once.
+    #[test]
+    fn paimon_window_agg_merges_partials_across_barrier() {
+        let partial = |keys: Vec<i64>, partials: Vec<i64>, slice_ends: Vec<i64>| {
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![
+                    Field::new("key0", DataType::Int64, false),
+                    Field::new("partial0", DataType::Int64, true),
+                    Field::new("slice_end", DataType::Int64, false),
+                ])),
+                vec![
+                    Arc::new(Int64Array::from(keys)),
+                    Arc::new(Int64Array::from(partials)),
+                    Arc::new(Int64Array::from(slice_ends)),
+                ],
+            )
+            .unwrap()
+        };
+        let dir = temp_dir("wa-partial");
+        let mut paimon = TumblingAggregator::new(1000, 1000, false, vec![0], vec![0])
+            .with_backend(window_agg_store(&dir));
+        let mut memory = TumblingAggregator::new(1000, 1000, false, vec![0], vec![0]);
+
+        let first = partial(vec![1, 2], vec![10, 20], vec![1000, 1000]);
+        paimon.update_partial(&first).unwrap();
+        memory.update_partial(&first).unwrap();
+        paimon.checkpoint_backend().unwrap();
+
+        let second = partial(vec![1], vec![5], vec![1000]);
+        paimon.update_partial(&second).unwrap();
+        memory.update_partial(&second).unwrap();
+        assert_eq!(
+            wa_rows(&memory.flush(1000).unwrap()),
+            wa_rows(&paimon.flush(1000).unwrap())
         );
     }
 

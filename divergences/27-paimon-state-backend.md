@@ -169,6 +169,23 @@ and iterates windows from a timer sweep; the row-buffer table's stats-pruned `wi
 watermark` scan replaces that iteration, with no per-window key needed because a firing drains
 every closed window at once.
 
+The fifth range-read consumer is the family of **aligned window aggregates** (tumbling /
+hopping / cumulative; single-phase and the global two-phase half), on the window-rank
+discipline: one table row per open (key, window) under `[kg, key, window_end, window_start]`,
+carrying the typed key columns (emission needs them decoded) and the accumulators' state fields
+— the same scalars the raw snapshot round-trips through `state()`/`merge_batch`. The interval's
+touched windows stay decoded in operator memory as the write buffer — every row folds into them
+— seeded from the committed table on a key's first touch (one probe per key per interval; the
+table is immutable between barriers), staged wholesale at the barrier, and then dropped from
+memory. A firing hydrates the committed windows it closes (minus region-deleted rows) into the
+same decoded map and lets the memory path's own drain emit, so window order and per-window key
+sort cannot diverge. The late-data watermark rides the snapshot token. RocksDB cross-check:
+Flink's slicing window operator keys accumulators by (key, slice) in RocksDB and iterates
+window-end timers from the ordered timer CF; the stats-pruned `window_end ≤ watermark` scan is
+that iteration, and the barrier's whole-row rewrite is the memtable flush. Deliberately memory:
+proctime windows (timer deadline in raw state) and the local two-phase half (slice-bounded
+state that drains at every barrier).
+
 The full design record, including the verified paimon-rust API survey and the rejected
 alternatives (rust-rocksdb baseline, Tonbo, fjall, SlateDB, ForSt), is in
 `.claude/research/paimon-vortex-state-backend-plan.md`.

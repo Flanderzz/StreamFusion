@@ -2,6 +2,8 @@ package io.github.jordepic.streamfusion.operator;
 
 import io.github.jordepic.streamfusion.Native;
 import io.github.jordepic.streamfusion.arrow.ArrowConversion;
+import io.github.jordepic.streamfusion.planner.NativeConfig;
+import io.github.jordepic.streamfusion.state.PaimonNativeStateSupport;
 import org.apache.arrow.c.ArrowArray;
 import org.apache.arrow.c.ArrowSchema;
 import org.apache.arrow.c.CDataDictionaryProvider;
@@ -117,10 +119,10 @@ public class NativeWindowJoinOperator extends AbstractStreamOperator<ArrowBatch>
     memoryBudget = ManagedMemoryBudget.reserveFor(this);
     // A proctime window join closes on processing-time timers whose deadline travels in raw
     // state, so only the event-time mode is Paimon-eligible.
-    io.github.jordepic.streamfusion.state.PaimonNativeStateSupport paimon =
+    PaimonNativeStateSupport paimon =
         proctime
             ? null
-            : io.github.jordepic.streamfusion.state.PaimonNativeStateSupport.resolve(
+            : PaimonNativeStateSupport.resolve(
                 getKeyedStateBackend(),
                 "window join",
                 !rawSnapshots.isEmpty(),
@@ -157,9 +159,9 @@ public class NativeWindowJoinOperator extends AbstractStreamOperator<ArrowBatch>
                       memoryBudget.bytes(),
                       paimon.tableDirectory(),
                       maxParallelism,
-                      io.github.jordepic.streamfusion.planner.NativeConfig.paimonBuckets(),
-                      io.github.jordepic.streamfusion.planner.NativeConfig.paimonFileFormat(),
-                      io.github.jordepic.streamfusion.planner.NativeConfig.paimonFileCompression(),
+                      NativeConfig.paimonBuckets(),
+                      NativeConfig.paimonFileFormat(),
+                      NativeConfig.paimonFileCompression(),
                       paimon.sourceDirectories(),
                       paimon.sourceSnapshotTokens(),
                       paimon.keyGroupStart(),

@@ -1,6 +1,8 @@
 package io.github.jordepic.streamfusion.operator;
 
 import io.github.jordepic.streamfusion.Native;
+import io.github.jordepic.streamfusion.planner.NativeConfig;
+import io.github.jordepic.streamfusion.state.PaimonNativeStateSupport;
 import org.apache.arrow.c.ArrowArray;
 import org.apache.arrow.c.ArrowSchema;
 import org.apache.arrow.c.Data;
@@ -46,6 +48,45 @@ public class NativeColumnarGlobalWindowAggregateOperator extends NativeRowWindow
         maxParallelism);
     this.cumulative = cumulative;
     this.keyTypes = keyTypes;
+  }
+
+  @Override
+  protected PaimonNativeStateSupport resolvePaimonState(
+      boolean rawStateRestored) {
+    return PaimonNativeStateSupport.resolve(
+        getKeyedStateBackend(),
+        "global window aggregate",
+        rawStateRestored,
+        () -> Native.paimonWindowAggStateSupported(valueTypes, aggregateKinds, keyTypes));
+  }
+
+  @Override
+  protected long createPaimonHandle(
+      PaimonNativeStateSupport paimon) {
+    return Native.createPaimonTumblingAggregator(
+        windowMillis,
+        slideMillis,
+        cumulative,
+        valueTypes,
+        aggregateKinds,
+        keyTypes,
+        keyTimestampPrecisions(),
+        memoryBudgetBytes(),
+        paimon.tableDirectory(),
+        maxParallelism(),
+        NativeConfig.paimonBuckets(),
+        NativeConfig.paimonFileFormat(),
+        NativeConfig.paimonFileCompression(),
+        paimon.sourceDirectories(),
+        paimon.sourceSnapshotTokens(),
+        paimon.keyGroupStart(),
+        paimon.keyGroupEnd(),
+        paimon.aligned());
+  }
+
+  @Override
+  protected String[] checkpointPaimonHandle() {
+    return Native.checkpointPaimonTumblingAggregator(handle);
   }
 
   // Cumulative globals merge each slice into the nested windows of its bucket; see the row-fed

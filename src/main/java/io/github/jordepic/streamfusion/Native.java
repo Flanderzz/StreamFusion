@@ -1286,6 +1286,47 @@ public final class Native {
   public static native void closePaimonWindowJoiner(long handle);
 
   /**
+   * Whether a window aggregate's whole persisted shape — the grouping-key columns and every
+   * accumulator's state fields — is persistable on the Paimon backend.
+   */
+  public static native boolean paimonWindowAggStateSupported(
+      int[] valueTypes, int[] aggregateKinds, int[] keyTypes);
+
+  /**
+   * {@code createTumblingAggregator}/{@code createCumulativeAggregator} on the Paimon state
+   * backend (event-time only — a proctime window's timer deadline travels in raw state). One
+   * table row per open (key, window); the interval's touched windows stay decoded in operator
+   * memory (seeded from the committed table on a key's first touch) and stage wholesale at the
+   * barrier, and a watermark firing merges them with a committed range scan under
+   * {@code window_end <= watermark}. The update/flush/close/state-bytes calls are the memory
+   * family's own — the handle type is shared and branches internally. The snapshot token packs
+   * the watermark alongside the snapshot id (late-data dropping must survive restore). Restore
+   * semantics otherwise as in {@link #createPaimonKeepLastDeduplicator}.
+   */
+  public static native long createPaimonTumblingAggregator(
+      long windowMillis,
+      long slideMillis,
+      boolean cumulative,
+      int[] valueTypes,
+      int[] aggregateKinds,
+      int[] keyTypes,
+      int[] keyTimestampPrecisions,
+      long memoryBudgetBytes,
+      String tableDirectory,
+      int maxParallelism,
+      int buckets,
+      String fileFormat,
+      String fileCompression,
+      String[] sourceDirectories,
+      String[] sourceSnapshotTokens,
+      int keyGroupStart,
+      int keyGroupEnd,
+      boolean aligned);
+
+  /** {@code checkpointPaimonGroupAggregator} for a Paimon-backed window aggregator. */
+  public static native String[] checkpointPaimonTumblingAggregator(long handle);
+
+  /**
    * {@code createChangelogNormalizer} on the Paimon state backend; state row and restore semantics
    * as in {@link #createPaimonKeepLastDeduplicator}.
    */

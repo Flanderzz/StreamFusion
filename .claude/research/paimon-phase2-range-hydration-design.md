@@ -42,8 +42,31 @@ fixed fold). RUNG 4 SHIPPED (2026-07-26): the event-time window join — the OVE
 into a reusable row-buffer table (`PaimonRowBufferStore`), and the window join is two of them
 (left/, right/), fire column = window end, both sides' firings feeding the memory path's own
 join in arrival order; token `"left:right:lseq:rseq"`. Proctime window join stays memory
-(processing-time timer deadline in raw state). Remaining rungs: interval/temporal joins,
-session/window aggregates (buffer remodels onto the same store machinery).
+(processing-time timer deadline in raw state). RUNG 5 SHIPPED (2026-07-26): the aligned window aggregates (tumbling/hopping/cumulative;
+single-phase + global two-phase) — `PaimonWindowAggStore`, one row per open (key, window) under
+`[kg, k, we, ws]` with typed key columns + accumulator state fields; touched windows stay
+decoded in memory for the interval (seeded from committed on a key's first touch, one probe per
+key per interval), staged wholesale at the barrier; fire = decoded map + committed `we ≤ wm`
+scan hydrated into it, drained by the memory path's own code; watermark rides the token
+(`"snapshot:watermark"`). The update/flush native symbols are shared with the memory family —
+the handle type is one struct branching internally. Memory-deliberate: proctime windows, local
+two-phase half. Remaining rungs: interval/temporal joins, session aggregates (buffer remodels
+onto the same store machinery). Sketches, cross-checked against the operators' memory state:
+
+* **Session aggregate**: PK `[kg, k, ws]` with `we` a *value* column (a session extends by
+  growing `we` — same PK; merges remove starts — tombstones). Window-agg discipline: touched
+  keys' sessions decode into memory on first touch per interval (recording the committed starts
+  per key), stage at the barrier as upserts plus tombstones for vanished starts, fire via a
+  `we ≤ wm` scan hydrated into the memory drain. The memory path persists no watermark.
+* **Interval join**: PK `[kg, k(equi-key), seq]` per side. Reads happen on push (probe the
+  opposite side by `k IN` + region live rows for those keys, join immediately, emit — arrival
+  order preserved); `advance` stages deletions for rows outside the retention bound. Outer joins
+  persist a matched flag column (read-modify-write through the region, the keep-first-marker
+  pattern) so an evicted-never-matched row can null-pad exactly once.
+* **Temporal join**: right side is naturally `[kg, k, rt]` upserts (last-write-wins per version
+  = the deduplicate merge engine); left side a row-buffer with the equi-key in the PK. `advance`
+  fires left rows `rt ≤ wm` (range read), probes right versions for exactly the fired keys
+  (`k IN`), and prunes stale right versions (keep the latest ≤ wm) with staged deletions.
 
 Original draft (2026-07-25): Written after the state-backend
 speed-up round (124.1 s → 9.85 s measured on the q4 A/B; see `docs/benchmarks.md`) so the design

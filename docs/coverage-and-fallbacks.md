@@ -663,12 +663,23 @@ the operator just checkpoints its state the old way, in full):
   committed table, back in arrival order) feeding the memory path's own join, and fired rows
   leave state. Nothing else persists — outer-join match state is transient within one firing
   because both sides of a window close together. The **proctime** window join keeps memory state
-  (processing-time timers, deadline in raw state — the window-rank rule). Every other stateful
-  operator keeps memory state under this backend. The remaining **watermark/timer-driven
-  operators** (interval/temporal joins, session/window aggregates) stay on memory state for one
-  remaining reason: their pending buffers are columnar batches or ordered per-key maps that need
-  remodeling as keyed rows — the range-read machinery itself now exists (keep-first dedup,
-  window rank, the `OVER` aggregate, and the window join run on it).
+  (processing-time timers, deadline in raw state — the window-rank rule). The **event-time
+  aligned window aggregates** — tumbling, hopping, and cumulative, single-phase and the global
+  half of two-phase — run on the backend as one table row per open (key, window) carrying the
+  typed key columns and every accumulator's state fields: the interval's touched windows stay
+  decoded in operator memory (seeded from the committed table on a key's first touch, one probe
+  per key per interval) and stage wholesale at the barrier, a watermark firing merges the
+  decoded windows with a committed `window_end ≤ watermark` scan, fired windows leave state as
+  deletions, and the late-data watermark rides the snapshot token (the memory path persists it
+  in raw snapshot metadata). Two window-aggregate shapes keep memory state: **proctime windows**
+  (processing-time timers, deadline in raw state) and the **local half of two-phase plans** (its
+  state is bounded by a slice interval and drains at every barrier — persisting it buys
+  nothing). Every other stateful operator keeps memory state under this backend. The remaining
+  **watermark/timer-driven operators** (interval/temporal joins, session aggregates) stay on
+  memory state for one remaining reason: their pending buffers are columnar batches or ordered
+  per-key maps that need remodeling as keyed rows — the range-read machinery itself now exists
+  (keep-first dedup, window rank, the `OVER` aggregate, the window join, and the window
+  aggregates run on it).
 - **Multiset-state aggregates** — retracting `MIN`/`MAX` and `COUNT`/`SUM(DISTINCT)` keep per-key
   multisets, which the persistent row codec does not carry yet; an aggregate list containing them
   keeps the whole operator on memory state.

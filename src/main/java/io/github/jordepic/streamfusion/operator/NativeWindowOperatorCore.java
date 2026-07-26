@@ -1,6 +1,8 @@
 package io.github.jordepic.streamfusion.operator;
 
 import io.github.jordepic.streamfusion.Native;
+import io.github.jordepic.streamfusion.state.PaimonNativeStateSupport;
+import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
@@ -11,7 +13,6 @@ import org.apache.arrow.c.ArrowSchema;
 import org.apache.arrow.c.CDataDictionaryProvider;
 import org.apache.arrow.c.Data;
 import org.apache.arrow.memory.BufferAllocator;
-import java.math.BigDecimal;
 import org.apache.arrow.vector.BigIntVector;
 import org.apache.arrow.vector.BitVector;
 import org.apache.arrow.vector.DateDayVector;
@@ -118,6 +119,7 @@ public abstract class NativeWindowOperatorCore<OUT> extends AbstractStreamOperat
   protected transient BufferAllocator allocator;
   protected transient CDataDictionaryProvider dictionaries;
   protected transient long handle;
+  private transient boolean paimonState;
   private transient ManagedMemoryBudget memoryBudget;
   private transient long restoredProcessingTimeTimerDeadline;
 
@@ -256,6 +258,31 @@ public abstract class NativeWindowOperatorCore<OUT> extends AbstractStreamOperat
     }
   }
 
+  /** Whether this operator's state lives in a Paimon table this run. */
+  protected final boolean paimonState() {
+    return paimonState;
+  }
+
+  /**
+   * Paimon-backend hook: an operator whose native state supports the persistent store resolves
+   * it here (null keeps memory state). Called once from {@link #initializeState}.
+   */
+  protected PaimonNativeStateSupport resolvePaimonState(
+      boolean rawStateRestored) {
+    return null;
+  }
+
+  /** Creates the native handle on the Paimon backend; only reached when the hook resolved. */
+  protected long createPaimonHandle(
+      PaimonNativeStateSupport paimon) {
+    throw new UnsupportedOperationException("operator resolved Paimon state without a create");
+  }
+
+  /** The barrier checkpoint call for a Paimon-backed handle. */
+  protected String[] checkpointPaimonHandle() {
+    throw new UnsupportedOperationException("operator resolved Paimon state without a checkpoint");
+  }
+
   @Override
   public void initializeState(StateInitializationContext context) throws Exception {
     super.initializeState(context);
@@ -263,6 +290,14 @@ public abstract class NativeWindowOperatorCore<OUT> extends AbstractStreamOperat
     RawKeyedState.TimedRestore restored = RawKeyedState.restoreWithTimer(context);
     List<byte[]> snapshots = restored.snapshots();
     restoredProcessingTimeTimerDeadline = restored.deadline();
+    PaimonNativeStateSupport paimon =
+        resolvePaimonState(!snapshots.isEmpty());
+    paimonState = paimon != null;
+    if (paimonState) {
+      handle = createPaimonHandle(paimon);
+      paimon.register(this::checkpointPaimonHandle);
+      return;
+    }
     handle = snapshots.isEmpty() ? createHandle() : restoreRawHandle(snapshots.toArray(new byte[0][]));
   }
 
@@ -270,8 +305,12 @@ public abstract class NativeWindowOperatorCore<OUT> extends AbstractStreamOperat
   public void snapshotState(StateSnapshotContext context) throws Exception {
     super.snapshotState(context);
     flushPending();
-    RawKeyedState.snapshotPartitionsWithTimer(
-        context, snapshotRawPartitions(), processingTimeTimerDeadlineForSnapshot());
+    // Paimon state checkpoints through the keyed state backend's snapshot (an incremental Paimon
+    // commit); only memory state travels as raw keyed-state blobs.
+    if (!paimonState) {
+      RawKeyedState.snapshotPartitionsWithTimer(
+          context, snapshotRawPartitions(), processingTimeTimerDeadlineForSnapshot());
+    }
   }
 
   @Override

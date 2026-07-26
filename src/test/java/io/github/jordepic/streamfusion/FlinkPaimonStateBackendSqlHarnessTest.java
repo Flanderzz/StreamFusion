@@ -150,6 +150,30 @@ class FlinkPaimonStateBackendSqlHarnessTest {
   }
 
   @Test
+  void windowAggregateOnPaimonBackendMatchesHost() throws Exception {
+    // Event-time tumbling aggregate: the interval's touched (key, window) accumulators stage
+    // into the Paimon table at each 50 ms barrier and re-seed from it on the next touch, so a
+    // window spanning barriers folds committed and uncommitted contributions; a watermark firing
+    // merges the decoded windows with a committed range scan.
+    NativeParity.assertParity(
+        FlinkPaimonStateBackendSqlHarnessTest::paimonRowtimeEnvironment,
+        "SELECT k, window_start, window_end, SUM(v) AS s, COUNT(*) AS c FROM"
+            + " TABLE(TUMBLE(TABLE src, DESCRIPTOR(rt), INTERVAL '1' SECOND))"
+            + " GROUP BY k, window_start, window_end");
+  }
+
+  @Test
+  void hoppingWindowAggregateOnPaimonBackendMatchesHost() throws Exception {
+    // Overlapping HOP windows: one row feeds several open windows, so the barrier's staged
+    // rewrite and the firing's range scan both cover windows sharing rows.
+    NativeParity.assertParity(
+        FlinkPaimonStateBackendSqlHarnessTest::paimonRowtimeEnvironment,
+        "SELECT k, window_start, window_end, SUM(v) AS s FROM"
+            + " TABLE(HOP(TABLE src, DESCRIPTOR(rt), INTERVAL '1' SECOND, INTERVAL '2' SECOND))"
+            + " GROUP BY k, window_start, window_end");
+  }
+
+  @Test
   void windowJoinOnPaimonBackendMatchesHost() throws Exception {
     // Event-time window join: both sides' rows buffer in per-side Paimon row-buffer tables
     // across 50 ms barriers, and every watermark firing joins each side's range read (write

@@ -164,6 +164,12 @@ pub(crate) struct TumblingAggregator {
     // Managed-memory accounting: open-window footprint tracked per touched group (not by
     // rescanning all state) and resized against the reservation after every state change.
     pub(crate) memory: OperatorMemory,
+    /// Persistent-state mode: committed (key, window) rows live in the Paimon store; the decoded
+    /// `windows` map holds only this interval's touched state (seeded on first touch, staged
+    /// wholesale at the barrier, then dropped).
+    #[cfg(feature = "paimon-state")]
+    backend: Option<crate::state::PaimonWindowAggStore>,
+    key_timestamp_precisions: Vec<i32>,
 }
 
 impl TumblingAggregator {
@@ -185,6 +191,56 @@ impl TumblingAggregator {
             current_watermark: i64::MIN,
             snapshot_cache: None,
             memory: OperatorMemory::unaccounted(),
+            #[cfg(feature = "paimon-state")]
+            backend: None,
+            key_timestamp_precisions: Vec::new(),
+        }
+    }
+
+    pub(crate) fn with_key_timestamp_precisions(
+        mut self,
+        key_timestamp_precisions: Vec<i32>,
+    ) -> Self {
+        self.key_timestamp_precisions = key_timestamp_precisions;
+        self
+    }
+
+    #[cfg(feature = "paimon-state")]
+    pub(crate) fn with_backend(mut self, store: crate::state::PaimonWindowAggStore) -> Self {
+        self.backend = Some(store);
+        self
+    }
+
+    /// Attaches the managed-memory budget for a backend that starts with nothing resident.
+    #[cfg(feature = "paimon-state")]
+    pub(crate) fn with_read_through_budget(
+        mut self,
+        budget_bytes: i64,
+    ) -> Result<Self, DataFusionError> {
+        self.memory.attach("window-aggregate", budget_bytes, 0)?;
+        Ok(self)
+    }
+
+    #[cfg(feature = "paimon-state")]
+    pub(crate) fn store_mut(&mut self) -> &mut crate::state::PaimonWindowAggStore {
+        self.backend.as_mut().expect("window-agg paimon backend")
+    }
+
+    /// Restores the late-data watermark (persistent-state restore packs it in the token; the
+    /// memory path's raw snapshot carries it in schema metadata).
+    #[cfg(feature = "paimon-state")]
+    pub(crate) fn set_current_watermark(&mut self, watermark: i64) {
+        self.current_watermark = watermark;
+    }
+
+    /// The key-field timestamp descriptors, defaulting to non-timestamp (`-1`) per key column —
+    /// the aggregator learns its key arity from batches, not at construction.
+    #[cfg(feature = "paimon-state")]
+    fn key_precisions(&self, arity: usize) -> Vec<i32> {
+        if self.key_timestamp_precisions.is_empty() {
+            vec![-1; arity]
+        } else {
+            self.key_timestamp_precisions.clone()
         }
     }
 
@@ -253,8 +309,86 @@ impl TumblingAggregator {
         self.windows.keys().copied().take_while(|end| *end <= watermark).collect()
     }
 
+    /// Persistent-state seeding: on a key's first touch this interval, its committed open
+    /// windows read into the decoded map through the per-batch key probe, so folds and firings
+    /// see state written before the last barrier. One probe per key per interval — the committed
+    /// table is immutable between barriers.
+    #[cfg(feature = "paimon-state")]
+    fn seed_batch_keys(&mut self, batch: &RecordBatch) -> Result<(), DataFusionError> {
+        if self.backend.is_none() || batch.num_rows() == 0 {
+            return Ok(());
+        }
+        let schema = batch.schema();
+        let key_indices: Vec<usize> = (0..)
+            .map_while(|j| schema.index_of(&format!("key{j}")).ok())
+            .collect();
+        let precisions = self.key_precisions(key_indices.len());
+        let mut encoder = BinaryRowBatchEncoder::new(batch, &key_indices, &precisions);
+        let mut seen: std::collections::HashSet<ByteKey> = std::collections::HashSet::new();
+        let mut unique: Vec<ByteKey> = Vec::new();
+        for row in 0..batch.num_rows() {
+            let key = encoder.encode(row);
+            if !seen.contains(key) {
+                let owned = ByteKey::from(key);
+                seen.insert(owned.clone());
+                unique.push(owned);
+            }
+        }
+        let batches =
+            self.backend.as_mut().expect("window-agg paimon backend").seed_scan(&unique)?;
+        self.absorb_committed(batches)?;
+        let delta = self.backend.as_mut().expect("window-agg paimon backend").footprint_delta();
+        self.memory.record(delta);
+        self.memory.account()
+    }
+
+    /// Reads committed (key, window) rows into the decoded map — the restore path's own
+    /// merge_batch round trip — skipping entries the map already holds (in-memory state is
+    /// authoritative for anything touched this interval).
+    #[cfg(feature = "paimon-state")]
+    fn absorb_committed(&mut self, batches: Vec<RecordBatch>) -> Result<(), DataFusionError> {
+        let field_counts: Vec<usize> =
+            self.aggregates.iter().map(|a| a.state_fields().len()).collect();
+        let state_total: usize = field_counts.iter().sum();
+        let track = self.memory.tracking();
+        for batch in batches {
+            let arity = batch.num_columns() - 4 - state_total;
+            let wes = batch.column(2).as_any().downcast_ref::<Int64Array>().expect("we column");
+            let wss = batch.column(3).as_any().downcast_ref::<Int64Array>().expect("ws column");
+            let key_arrays: Vec<&ArrayRef> = (0..arity).map(|j| batch.column(4 + j)).collect();
+            self.key_types = key_types(&key_arrays);
+            let keys_encoded =
+                encode_keys(&mut self.key_converter, &key_arrays, batch.num_rows());
+            for row in 0..batch.num_rows() {
+                let (we, ws) = (wes.value(row), wss.value(row));
+                let key = keys_encoded.row(row).owned();
+                if self.windows.get(&we).is_some_and(|w| w.keys.contains_key(&key)) {
+                    continue;
+                }
+                let mut delta = if track { owned_row_bytes(&key) as isize } else { 0 };
+                let accumulators = self.accumulators(ws, we, key);
+                let mut column = 4 + arity;
+                for (i, accumulator) in accumulators.iter_mut().enumerate() {
+                    let count = field_counts[i];
+                    let state: Vec<ArrayRef> = (column..column + count)
+                        .map(|c| batch.column(c).slice(row, 1))
+                        .collect();
+                    accumulator.merge_batch(&state).expect("failed to seed window");
+                    column += count;
+                }
+                if track {
+                    delta += accumulators_bytes(accumulators) as isize;
+                    self.memory.record(delta);
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn update(&mut self, batch: &RecordBatch) -> Result<(), DataFusionError> {
         self.snapshot_cache = None;
+        #[cfg(feature = "paimon-state")]
+        self.seed_batch_keys(batch)?;
         let ts = column_i64(batch, "ts");
         // One value column per aggregate (value0, value1, …), so aggregates can read different
         // columns. Sliced by type-agnostic take, so each accumulator sees its column's own type.
@@ -292,6 +426,8 @@ impl TumblingAggregator {
     /// watermark has already closed). `flush_partial` then emits the partials keyed by window end.
     pub(crate) fn update_attached(&mut self, batch: &RecordBatch) -> Result<(), DataFusionError> {
         self.snapshot_cache = None;
+        #[cfg(feature = "paimon-state")]
+        self.seed_batch_keys(batch)?;
         let starts = column_i64(batch, "window_start");
         let ends = column_i64(batch, "window_end");
         let values: Vec<&ArrayRef> = (0..self.aggregates.len())
@@ -352,9 +488,20 @@ impl TumblingAggregator {
     /// `[key, window_start, window_end, result0..resultN-1]`. The end is carried explicitly since
     /// cumulative windows sharing a start differ by it; each result column takes the aggregate's
     /// own output type.
-    pub(crate) fn flush(&mut self, watermark: i64) -> RecordBatch {
+    pub(crate) fn flush(&mut self, watermark: i64) -> Result<RecordBatch, DataFusionError> {
         self.snapshot_cache = None;
         self.current_watermark = self.current_watermark.max(watermark);
+        // Persistent state: windows committed at earlier barriers and untouched this interval
+        // still close now — hydrate them into the decoded map so one drain covers both.
+        #[cfg(feature = "paimon-state")]
+        if self.backend.is_some() {
+            let batches = self
+                .backend
+                .as_mut()
+                .expect("window-agg paimon backend")
+                .fire_scan(watermark)?;
+            self.absorb_committed(batches)?;
+        }
         let n = self.aggregates.len();
         let mut keys: Vec<OwnedRow> = Vec::new();
         let mut starts = Vec::new();
@@ -380,6 +527,18 @@ impl TumblingAggregator {
 
         let mut fields = key_fields(&self.key_types);
         let mut columns = decode_keys(self.key_converter.as_ref(), &keys, &self.key_types);
+        // Persistent state: every fired (key, window) leaves the store — a `-D` per row commits
+        // at the next barrier, so a closed window can never re-fire after a restore.
+        #[cfg(feature = "paimon-state")]
+        if self.backend.is_some() && !keys.is_empty() {
+            let binary_keys = self.binary_keys(&columns, keys.len())?;
+            let key_slices: Vec<&[u8]> = binary_keys.iter().map(|k| k.as_slice()).collect();
+            let store = self.backend.as_mut().expect("window-agg paimon backend");
+            store.stage_deletes(&key_slices, &ends, &starts)?;
+            let delta = store.footprint_delta();
+            self.memory.record(delta);
+            self.memory.account()?;
+        }
         fields.push(Field::new("window_start", DataType::Int64, false));
         fields.push(Field::new("window_end", DataType::Int64, false));
         columns.push(Arc::new(Int64Array::from(starts)));
@@ -390,8 +549,86 @@ impl TumblingAggregator {
             fields.push(Field::new(format!("result{i}"), self.aggregates[i].result_type(), true));
             columns.push(scalars_to_array(scalars, &self.aggregates[i].result_type()));
         }
-        RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
-            .expect("failed to build result batch")
+        Ok(RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
+            .expect("failed to build result batch"))
+    }
+
+    /// The BinaryRow key bytes of `n` rows whose decoded key columns lead `columns` — how the
+    /// store addresses (key, window) rows.
+    #[cfg(feature = "paimon-state")]
+    fn binary_keys(
+        &self,
+        columns: &[ArrayRef],
+        n: usize,
+    ) -> Result<Vec<Vec<u8>>, DataFusionError> {
+        let arity = self.key_types.len();
+        let key_batch = RecordBatch::try_new_with_options(
+            Arc::new(Schema::new(key_fields(&self.key_types))),
+            columns[..arity].to_vec(),
+            &arrow::record_batch::RecordBatchOptions::new().with_row_count(Some(n)),
+        )
+        .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        let indices: Vec<usize> = (0..arity).collect();
+        let precisions = self.key_precisions(arity);
+        let mut encoder = BinaryRowBatchEncoder::new(&key_batch, &indices, &precisions);
+        Ok((0..n).map(|row| encoder.encode(row).to_vec()).collect())
+    }
+
+    /// Persistent-state barrier: stages every open (key, window) as a whole-row rewrite, drops
+    /// the decoded map (the next interval re-seeds touched keys from the committed table), and
+    /// commits the region. Returns the manifest and the watermark the token must carry.
+    #[cfg(feature = "paimon-state")]
+    pub(crate) fn checkpoint_backend(
+        &mut self,
+    ) -> Result<(crate::state::PaimonCheckpointManifest, i64), DataFusionError> {
+        self.snapshot_cache = None;
+        if self.memory.tracking() {
+            self.memory.forget(self.computed_state_bytes());
+        }
+        let state_types: Vec<DataType> = self
+            .aggregates
+            .iter()
+            .flat_map(|a| a.state_fields().into_iter().map(|f| f.data_type().clone()))
+            .collect();
+        let windows = std::mem::take(&mut self.windows);
+        for (end, window) in windows {
+            let mut entries: Vec<(OwnedRow, Vec<Box<dyn Accumulator>>)> =
+                window.keys.into_iter().collect();
+            let rows = entries.len();
+            let keys: Vec<OwnedRow> = entries.iter().map(|(k, _)| k.clone()).collect();
+            let key_columns = decode_keys(self.key_converter.as_ref(), &keys, &self.key_types);
+            let binary_keys = self.binary_keys(&key_columns, rows)?;
+            let key_slices: Vec<&[u8]> = binary_keys.iter().map(|k| k.as_slice()).collect();
+            let mut state_columns: Vec<Vec<ScalarValue>> = vec![Vec::new(); state_types.len()];
+            for (_, accumulators) in entries.iter_mut() {
+                let mut column = 0;
+                for accumulator in accumulators.iter_mut() {
+                    for scalar in accumulator.state().expect("state") {
+                        state_columns[column].push(scalar);
+                        column += 1;
+                    }
+                }
+            }
+            let state_arrays: Vec<ArrayRef> = state_columns
+                .into_iter()
+                .zip(&state_types)
+                .map(|(scalars, data_type)| scalars_to_array(scalars, data_type))
+                .collect();
+            let store = self.backend.as_mut().expect("window-agg paimon backend");
+            store.stage_upserts(
+                &key_slices,
+                &vec![end; rows],
+                &vec![window.start; rows],
+                key_columns,
+                state_arrays,
+            )?;
+        }
+        let store = self.backend.as_mut().expect("window-agg paimon backend");
+        let manifest = store.checkpoint()?;
+        let delta = store.footprint_delta();
+        self.memory.record(delta);
+        self.memory.account()?;
+        Ok((manifest, self.current_watermark))
     }
 
     /// Local half of two-phase aggregation: emits each closed window's per-aggregate partial state
@@ -439,6 +676,8 @@ impl TumblingAggregator {
     /// `[key, partial0..partialN-1, slice_end]` into the window each slice belongs to.
     pub(crate) fn update_partial(&mut self, batch: &RecordBatch) -> Result<(), DataFusionError> {
         self.snapshot_cache = None;
+        #[cfg(feature = "paimon-state")]
+        self.seed_batch_keys(batch)?;
         let n = self.aggregates.len();
         let key_arrays = key_arrays(batch);
         self.key_types = key_types(&key_arrays);
@@ -878,7 +1117,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_updateAttache
 /// Emits the windows the given watermark has closed as a batch and drops them from state.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_flushTumblingAggregator<'local>(
-    _env: JNIEnv<'local>,
+    mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     watermark_millis: jlong,
@@ -886,8 +1125,11 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_flushTumbling
     out_schema_address: jlong,
 ) {
     let aggregator = unsafe { &mut *(handle as *mut TumblingAggregator) };
-    let result = aggregator.flush(watermark_millis);
-    export_record_batch(result, out_array_address, out_schema_address);
+    // Fallible in persistent-state mode (the firing reads the committed table).
+    match aggregator.flush(watermark_millis) {
+        Ok(result) => export_record_batch(result, out_array_address, out_schema_address),
+        Err(e) => throw_memory_limit(&mut env, &e.to_string()),
+    }
 }
 
 /// Local two-phase half: merges a batch of partials `[key, partial, slice_end]` into the windows.
