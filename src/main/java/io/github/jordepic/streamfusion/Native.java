@@ -1121,6 +1121,56 @@ public final class Native {
   public static native void closePaimonKeepFirstDeduplicator(long handle);
 
   /**
+   * {@code createWindowRanker} on the Paimon state backend (event-time mode only — a proctime
+   * rank's timer deadline travels in raw state). One table row per buffered rank position under
+   * the partition key, window bounds, and position; open windows' buffers stage at the barrier as
+   * whole-buffer rewrites, and a watermark firing merges the write buffer with a committed range
+   * scan. The snapshot token carries the watermark alongside the snapshot id — the memory path
+   * persists it in its raw snapshot, and without it a restored subtask would re-buffer replayed
+   * rows of already-fired windows. Restore semantics otherwise as in {@link
+   * #createPaimonKeepLastDeduplicator}.
+   */
+  public static native long createPaimonWindowRanker(
+      int windowStartColumn,
+      int windowEndColumn,
+      int[] partitionColumns,
+      int[] keyTimestampPrecisions,
+      int[] sortIndices,
+      int[] sortAscending,
+      int[] sortNullsFirst,
+      long limit,
+      boolean outputRankNumber,
+      long rowSchemaAddress,
+      long memoryBudgetBytes,
+      String tableDirectory,
+      int maxParallelism,
+      int buckets,
+      String fileFormat,
+      String fileCompression,
+      String[] sourceDirectories,
+      String[] sourceSnapshotTokens,
+      int keyGroupStart,
+      int keyGroupEnd,
+      boolean aligned);
+
+  /** {@code pushWindowRanker} for a Paimon-backed handle (no output; watermark-driven). */
+  public static native void pushPaimonWindowRanker(
+      long handle, long inArrayAddress, long inSchemaAddress);
+
+  /** {@code flushWindowRanker} for a Paimon-backed handle. */
+  public static native void flushPaimonWindowRanker(
+      long handle, long watermarkMillis, long outArrayAddress, long outSchemaAddress);
+
+  /** {@code checkpointPaimonGroupAggregator} for a Paimon-backed window ranker. */
+  public static native String[] checkpointPaimonWindowRanker(long handle);
+
+  /** Estimated bytes of a Paimon-backed window ranker's resident working set. */
+  public static native long paimonWindowRankerStateBytes(long handle);
+
+  /** Releases a Paimon-backed window ranker handle. */
+  public static native void closePaimonWindowRanker(long handle);
+
+  /**
    * {@code createChangelogNormalizer} on the Paimon state backend; state row and restore semantics
    * as in {@link #createPaimonKeepLastDeduplicator}.
    */

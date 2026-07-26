@@ -126,6 +126,21 @@ end in this shape (input batch → buffer → barrier flush; committed scan → 
 through per-cell scalars, and a fired key keeps a marker row on disk so emitted-ness survives
 checkpoints where the memory path grows an in-RAM emitted-key set forever.
 
+The second range-read consumer is **event-time window rank** (window Top-N / window dedup), on
+the same shape with a composite key: one table row per buffered rank position under
+`[kg, key, window_end, window_start, ord]`. Its open windows' buffers stay decoded in memory for
+the checkpoint interval — every touch re-ranks them, so they are the write buffer, not a cache —
+and stage into the dirty region at the barrier as whole-buffer rewrites (upserts `0..len`,
+tombstones for vacated committed positions), the RocksDB `ListState` rewrite shape. A window
+first touched in an interval seeds from the committed table *before* the batch's own rows rank
+in, preserving the ROW_NUMBER arrival-order tie-break. Firing merges the in-memory buffers with
+a committed scan under `window_end ≤ watermark` (positions already fired this interval are
+shadowed by the region's staged deletions), then stages `-D` rows for every fired position. Two
+deliberate scope edges: the watermark rides the opaque snapshot token (the memory path persists
+it in its raw snapshot; without it a restored subtask re-buffers replayed rows of already-fired
+windows), and the **proctime** window rank keeps memory state — it closes windows on
+processing-time timers whose deadline travels in raw state, not on watermarks.
+
 The full design record, including the verified paimon-rust API survey and the rejected
 alternatives (rust-rocksdb baseline, Tonbo, fjall, SlateDB, ForSt), is in
 `.claude/research/paimon-vortex-state-backend-plan.md`.

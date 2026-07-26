@@ -106,6 +106,18 @@ class FlinkPaimonStateBackendSqlHarnessTest {
   }
 
   @Test
+  void windowTopNOnPaimonBackendMatchesHost() throws Exception {
+    // Event-time window Top-N: open windows' buffers stage into the Paimon table at each 50 ms
+    // barrier, and every watermark firing merges the write buffer with a committed range scan
+    // (a window buffered before a barrier and closed after it fires from the table).
+    NativeParity.assertParity(
+        FlinkPaimonStateBackendSqlHarnessTest::paimonRowtimeEnvironment,
+        "SELECT k, v, window_start FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY window_start,"
+            + " window_end, k ORDER BY v DESC) AS rn FROM"
+            + " TABLE(TUMBLE(TABLE src, DESCRIPTOR(rt), INTERVAL '1' SECOND))) WHERE rn <= 2");
+  }
+
+  @Test
   void unsupportedAggregatesFallBackToMemoryStateUnderPaimonBackend() throws Exception {
     Path input = Files.createTempDirectory("paimon-minmax-in");
     writeInput(input);

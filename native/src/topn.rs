@@ -1421,15 +1421,22 @@ pub(crate) struct WindowRanker {
     sort_columns: Vec<SortColumn>,
     limit: i64,
     output_rank_number: bool,
-    current_watermark: i64,
+    pub(crate) current_watermark: i64,
     /// Bounded, sorted top-N buffer per (window_end, window_start, partition key).
     groups: HashMap<(i64, i64, GroupKey), Vec<JoinRow>>,
     schema: Option<SchemaRef>,
-    memory: OperatorMemory,
+    pub(crate) memory: OperatorMemory,
+    /// Paimon persistent state: open-window buffers and closed windows live in the store instead
+    /// of `groups`; that field then stays unused. BinaryRow key encoding needs the partition
+    /// keys' timestamp precisions, which the memory path only needs at snapshot time.
+    #[cfg(feature = "paimon-state")]
+    backend: Option<crate::state::PaimonWindowRankStore>,
+    #[cfg(feature = "paimon-state")]
+    key_timestamp_precisions: Vec<i32>,
 }
 
 impl WindowRanker {
-    fn new(
+    pub(crate) fn new(
         window_start_col: usize,
         window_end_col: usize,
         partition_columns: Vec<usize>,
@@ -1437,6 +1444,8 @@ impl WindowRanker {
         limit: i64,
         output_rank_number: bool,
     ) -> Self {
+        #[cfg(feature = "paimon-state")]
+        let key_arity = partition_columns.len();
         WindowRanker {
             window_start_col,
             window_end_col,
@@ -1448,7 +1457,37 @@ impl WindowRanker {
             groups: HashMap::default(),
             schema: None,
             memory: OperatorMemory::unaccounted(),
+            #[cfg(feature = "paimon-state")]
+            backend: None,
+            #[cfg(feature = "paimon-state")]
+            key_timestamp_precisions: vec![-1; key_arity],
         }
+    }
+
+    #[cfg(feature = "paimon-state")]
+    pub(crate) fn with_backend(mut self, store: crate::state::PaimonWindowRankStore) -> Self {
+        self.backend = Some(store);
+        self
+    }
+
+    #[cfg(feature = "paimon-state")]
+    pub(crate) fn with_key_timestamp_precisions(mut self, precisions: Vec<i32>) -> Self {
+        self.key_timestamp_precisions = precisions;
+        self
+    }
+
+    #[cfg(feature = "paimon-state")]
+    pub(crate) fn with_read_through_budget(
+        mut self,
+        budget_bytes: i64,
+    ) -> Result<Self, DataFusionError> {
+        self.memory.attach("window-rank", budget_bytes, 0)?;
+        Ok(self)
+    }
+
+    #[cfg(feature = "paimon-state")]
+    pub(crate) fn store_mut(&mut self) -> &mut crate::state::PaimonWindowRankStore {
+        self.backend.as_mut().expect("window-rank paimon backend")
     }
 
     /// Bounds the per-window buffers by the operator's managed-memory budget (negative =
@@ -1466,7 +1505,80 @@ impl WindowRanker {
         Ok(self)
     }
 
-    fn push(&mut self, batch: &RecordBatch) -> Result<(), DataFusionError> {
+    /// Persistent-state arrival path: new windows this batch touches seed from the committed
+    /// table first (committed rows precede this batch's rows — the ROW_NUMBER tie-break is
+    /// arrival order), then every live row ranks into its window's buffer in the store.
+    #[cfg(feature = "paimon-state")]
+    fn push_backend(&mut self, batch: &RecordBatch) -> Result<(), DataFusionError> {
+        let arity = data_arity(batch);
+        self.schema = Some(data_schema(batch));
+        let ws = rt_to_millis(batch.column(self.window_start_col));
+        let we = rt_to_millis(batch.column(self.window_end_col));
+        let data_arrays: Vec<&ArrayRef> = (0..arity).map(|i| batch.column(i)).collect();
+        let mut encoder = crate::BinaryRowBatchEncoder::new(
+            batch,
+            &self.partition_columns,
+            &self.key_timestamp_precisions,
+        );
+        let mut row_windows: Vec<Option<(i64, i64, ByteKey)>> =
+            Vec::with_capacity(batch.num_rows());
+        let mut fresh: Vec<(i64, i64, ByteKey)> = Vec::new();
+        let mut seen: HashSet<(i64, i64, ByteKey)> = HashSet::default();
+        for row in 0..batch.num_rows() {
+            let window_end = we.value(row);
+            if window_end <= self.current_watermark {
+                row_windows.push(None); // late: the window already closed and emitted
+                continue;
+            }
+            let window = (window_end, ws.value(row), ByteKey::from(encoder.encode(row)));
+            let store = self.backend.as_ref().expect("window-rank paimon backend");
+            if !store.buffer_exists(window.0, window.1, &window.2) && seen.insert(window.clone())
+            {
+                fresh.push(window.clone());
+            }
+            row_windows.push(Some(window));
+        }
+        let store = self.backend.as_mut().expect("window-rank paimon backend");
+        store.seed_windows(&fresh)?;
+        for (row, window) in row_windows.iter().enumerate() {
+            let Some((window_end, window_start, key)) = window else { continue };
+            let full: JoinRow = data_arrays
+                .iter()
+                .map(|a| ScalarValue::try_from_array(a, row).expect("window-rank row scalar"))
+                .collect();
+            let buffer = store
+                .buffer_mut(*window_end, *window_start, key)
+                .expect("seeded window buffer");
+            buffer.insert_ranked(full, &self.sort_columns, self.limit as usize);
+        }
+        let delta = store.footprint_delta();
+        self.memory.record(delta);
+        self.memory.account()
+    }
+
+    /// Persistent-state firing path: the store's overlay fire returns every closed window's rows
+    /// (in-memory buffers plus committed windows untouched this interval) in rank order.
+    #[cfg(feature = "paimon-state")]
+    fn flush_backend(&mut self, watermark: i64) -> Result<RecordBatch, DataFusionError> {
+        self.current_watermark = watermark;
+        let store = self.backend.as_mut().expect("window-rank paimon backend");
+        let (rows, ranks) = store.fire(watermark)?;
+        if self.schema.is_none() && !rows.is_empty() {
+            // A post-restore fire before any push: rebuild the data schema from the store's
+            // payload types (positional names; the FFI export is positional).
+            self.schema = Some(Arc::new(Schema::new(store.payload_fields_for_schema())));
+        }
+        let delta = store.footprint_delta();
+        self.memory.record(delta);
+        self.memory.account()?;
+        Ok(self.emit(rows, ranks))
+    }
+
+    pub(crate) fn push(&mut self, batch: &RecordBatch) -> Result<(), DataFusionError> {
+        #[cfg(feature = "paimon-state")]
+        if self.backend.is_some() {
+            return self.push_backend(batch);
+        }
         let arity = data_arity(batch);
         self.schema = Some(data_schema(batch));
         let ws = rt_to_millis(batch.column(self.window_start_col));
@@ -1517,7 +1629,11 @@ impl WindowRanker {
 
     /// Emits the top-N rows of every window the watermark has closed, in rank order (with the rank
     /// number appended when the host projects it), and evicts those windows.
-    fn flush(&mut self, watermark: i64) -> RecordBatch {
+    pub(crate) fn flush(&mut self, watermark: i64) -> Result<RecordBatch, DataFusionError> {
+        #[cfg(feature = "paimon-state")]
+        if self.backend.is_some() {
+            return self.flush_backend(watermark);
+        }
         self.current_watermark = watermark;
         let mut ready: Vec<(i64, i64, GroupKey)> =
             self.groups.keys().filter(|(we, _, _)| *we <= watermark).cloned().collect();
@@ -1540,7 +1656,7 @@ impl WindowRanker {
         }
         self.memory.forget(freed);
         self.memory.account_shrink();
-        self.emit(rows, ranks)
+        Ok(self.emit(rows, ranks))
     }
 
     fn emit(&self, rows: Vec<JoinRow>, ranks: Vec<i64>) -> RecordBatch {
@@ -1795,7 +1911,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushWindowRan
 /// when the host projects it).
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_flushWindowRanker<'local>(
-    _env: JNIEnv<'local>,
+    mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     watermark_millis: jlong,
@@ -1803,8 +1919,10 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_flushWindowRa
     out_schema_address: jlong,
 ) {
     let ranker = unsafe { &mut *(handle as *mut WindowRanker) };
-    let result = ranker.flush(watermark_millis);
-    export_record_batch(result, out_array_address, out_schema_address);
+    match ranker.flush(watermark_millis) {
+        Ok(result) => export_record_batch(result, out_array_address, out_schema_address),
+        Err(e) => throw_memory_limit(&mut env, &e.to_string()),
+    }
 }
 
 /// Releases the window-rank ranker and its per-window state.

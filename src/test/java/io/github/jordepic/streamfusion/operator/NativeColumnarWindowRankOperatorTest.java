@@ -34,6 +34,19 @@ class NativeColumnarWindowRankOperatorTest {
 
   private static final int MAX_PARALLELISM = 128;
 
+  private static final org.apache.flink.table.types.logical.RowType TEST_ROW_TYPE =
+      org.apache.flink.table.types.logical.RowType.of(
+          new org.apache.flink.table.types.logical.BigIntType(),
+          new org.apache.flink.table.types.logical.LocalZonedTimestampType(3),
+          new org.apache.flink.table.types.logical.LocalZonedTimestampType(3));
+
+  private static final org.apache.flink.table.types.logical.RowType KEYED_ROW_TYPE =
+      org.apache.flink.table.types.logical.RowType.of(
+          new org.apache.flink.table.types.logical.BigIntType(),
+          new org.apache.flink.table.types.logical.BigIntType(),
+          new org.apache.flink.table.types.logical.LocalZonedTimestampType(3),
+          new org.apache.flink.table.types.logical.LocalZonedTimestampType(3));
+
   // [v BIGINT, window_start TIMESTAMP_LTZ(3), window_end TIMESTAMP_LTZ(3)]; window cols at 1 and 2.
   private static final RowType SCHEMA =
       RowType.of(
@@ -76,7 +89,7 @@ class NativeColumnarWindowRankOperatorTest {
     NativeColumnarWindowRankOperator operator =
         new NativeColumnarWindowRankOperator(
             1, 2, new int[0], new int[0], new int[] {0}, new int[] {0}, new int[] {0}, 2, true,
-            "UTC", false, 0, 0, false, MAX_PARALLELISM);
+            "UTC", false, 0, 0, false, TEST_ROW_TYPE, MAX_PARALLELISM);
     try (BufferAllocator allocator = new RootAllocator();
         KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness =
             harness(operator)) {
@@ -118,7 +131,7 @@ class NativeColumnarWindowRankOperatorTest {
     NativeColumnarWindowRankOperator operator =
         new NativeColumnarWindowRankOperator(
             1, 2, new int[0], new int[0], new int[] {0}, new int[] {0}, new int[] {0}, 2, true,
-            "UTC", true, 1000, 1000, false, MAX_PARALLELISM);
+            "UTC", true, 1000, 1000, false, TEST_ROW_TYPE, MAX_PARALLELISM);
     try (BufferAllocator allocator = new RootAllocator();
         KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness =
             harness(operator)) {
@@ -276,6 +289,7 @@ class NativeColumnarWindowRankOperatorTest {
         1000,
         1000,
         false,
+        TEST_ROW_TYPE,
         MAX_PARALLELISM);
   }
 
@@ -298,6 +312,7 @@ class NativeColumnarWindowRankOperatorTest {
             0,
             0,
             false,
+            KEYED_ROW_TYPE,
             MAX_PARALLELISM),
         batch -> stateKeys[batch.destination() >= 0 ? batch.destination() : 0],
         Types.INT,

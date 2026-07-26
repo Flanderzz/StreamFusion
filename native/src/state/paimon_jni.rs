@@ -1325,3 +1325,216 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_closePaimonUp
         drop(from_handle::<PaimonUpdatingJoiner>(handle));
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Window Top-N / window dedup on the window-rank time store (dirty region + range overlay). The
+// snapshot token carries the watermark alongside the snapshot id ("<snapshot>:<watermark>") —
+// the memory path persists the watermark in its raw snapshot, and without it a restored subtask
+// would re-buffer replayed rows of already-fired windows and emit them twice.
+// ---------------------------------------------------------------------------------------------
+
+#[no_mangle]
+pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonWindowRanker<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    window_start_col: jint,
+    window_end_col: jint,
+    partition_columns: JIntArray<'local>,
+    key_timestamp_precisions: JIntArray<'local>,
+    sort_indices: JIntArray<'local>,
+    sort_ascending: JIntArray<'local>,
+    sort_nulls_first: JIntArray<'local>,
+    limit: jlong,
+    output_rank_number: jboolean,
+    row_schema_address: jlong,
+    memory_budget_bytes: jlong,
+    table_directory: JString<'local>,
+    max_parallelism: jint,
+    buckets: jint,
+    file_format: JString<'local>,
+    file_compression: JString<'local>,
+    source_directories: JObjectArray<'local>,
+    source_snapshot_tokens: JObjectArray<'local>,
+    key_group_start: jint,
+    key_group_end: jint,
+    aligned: jboolean,
+) -> jlong {
+    let partitions = read_columns(&env, &partition_columns);
+    let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
+        .into_iter()
+        .map(|precision| precision as i32)
+        .collect();
+    let sort =
+        crate::topn::read_sort_columns(&env, &sort_indices, &sort_ascending, &sort_nulls_first);
+    let row_types: Vec<DataType> = import_schema(row_schema_address)
+        .fields()
+        .iter()
+        .map(|field| field.data_type().clone())
+        .collect();
+    let table_dir = read_string(&mut env, &table_directory);
+    let format = read_string(&mut env, &file_format);
+    let compression = read_string(&mut env, &file_compression);
+    let source_dirs: Vec<String> = read_strings(&mut env, &source_directories)
+        .into_iter()
+        .flatten()
+        .collect();
+    let mut watermark = i64::MIN;
+    let source_snapshots: Vec<i64> = read_strings(&mut env, &source_snapshot_tokens)
+        .into_iter()
+        .flatten()
+        .map(|token| {
+            let (snapshot, wm) =
+                token.split_once(':').expect("window-rank paimon snapshot token");
+            watermark = watermark
+                .max(wm.parse::<i64>().expect("window-rank paimon watermark"));
+            snapshot.parse::<i64>().expect("window-rank paimon snapshot id")
+        })
+        .collect();
+
+    let config = PaimonStoreConfig {
+        table_dir,
+        max_parallelism: max_parallelism as usize,
+        buckets: buckets as usize,
+        file_format: format,
+        file_compression: compression,
+    };
+    let store = if source_dirs.is_empty() {
+        PaimonWindowRankStore::create(config, row_types)
+    } else {
+        let sources: Vec<(String, i64)> =
+            source_dirs.into_iter().zip(source_snapshots).collect();
+        PaimonWindowRankStore::open_merged(
+            config,
+            row_types,
+            &sources,
+            key_group_start..=key_group_end,
+            aligned != 0,
+        )
+    };
+    let ranker = store.and_then(|store| {
+        let mut ranker = crate::topn::WindowRanker::new(
+            window_start_col as usize,
+            window_end_col as usize,
+            partitions,
+            sort,
+            limit,
+            output_rank_number != 0,
+        )
+        .with_key_timestamp_precisions(timestamp_precisions)
+        .with_backend(store)
+        .with_read_through_budget(memory_budget_bytes)?;
+        ranker.current_watermark = watermark;
+        Ok(ranker)
+    });
+    boxed_or_throw(&mut env, ranker)
+}
+
+/// Buffers an input batch (no output); emission is watermark-driven (`flush`).
+#[no_mangle]
+pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushPaimonWindowRanker<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    in_array_address: jlong,
+    in_schema_address: jlong,
+) {
+    let ranker = unsafe { &mut *(handle as *mut crate::topn::WindowRanker) };
+    // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
+    let result = {
+        let batch = import_record_batch(in_array_address, in_schema_address);
+        ranker.push(&batch)
+    };
+    if let Err(e) = result {
+        throw_memory_limit(&mut env, &e.to_string());
+    }
+}
+
+/// Exports every closed window's top-N rows — the overlay range read over the write buffer and
+/// the committed table.
+#[no_mangle]
+pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_flushPaimonWindowRanker<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    watermark_millis: jlong,
+    out_array_address: jlong,
+    out_schema_address: jlong,
+) {
+    let ranker = unsafe { &mut *(handle as *mut crate::topn::WindowRanker) };
+    match ranker.flush(watermark_millis) {
+        Ok(result) => export_record_batch(result, out_array_address, out_schema_address),
+        Err(e) => throw_memory_limit(&mut env, &e.to_string()),
+    }
+}
+
+/// Checkpoint sync phase (task thread, at the barrier); the token line packs the watermark.
+#[no_mangle]
+pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_checkpointPaimonWindowRanker<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) -> jobjectArray {
+    let ranker = unsafe { &mut *(handle as *mut crate::topn::WindowRanker) };
+    let watermark = ranker.current_watermark;
+    match ranker.store_mut().checkpoint() {
+        Ok(manifest) => {
+            let token = if manifest.snapshot_id < 0 {
+                String::new()
+            } else {
+                format!("{}:{}", manifest.snapshot_id, watermark)
+            };
+            let mut lines = Vec::with_capacity(
+                1 + manifest.data_files.len() + manifest.meta_files.len(),
+            );
+            lines.push(token);
+            lines.extend(manifest.data_files.iter().map(|f| format!("d:{f}")));
+            lines.extend(manifest.meta_files.iter().map(|f| format!("m:{f}")));
+            let array = env
+                .new_object_array(lines.len() as i32, "java/lang/String", JObject::null())
+                .expect("manifest array");
+            for (i, line) in lines.iter().enumerate() {
+                let value = env.new_string(line).expect("manifest line");
+                env.set_object_array_element(&array, i as i32, value)
+                    .expect("manifest element");
+            }
+            array.into_raw()
+        }
+        Err(e) => {
+            throw_runtime(&mut env, &format!("paimon state checkpoint failed: {e}"));
+            std::ptr::null_mut()
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_paimonWindowRankerStateBytes<
+    'local,
+>(
+    _env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) -> jlong {
+    let ranker = unsafe { &*(handle as *const crate::topn::WindowRanker) };
+    ranker.memory.state_bytes as jlong
+}
+
+#[no_mangle]
+pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_closePaimonWindowRanker<
+    'local,
+>(
+    _env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) {
+    unsafe {
+        drop(from_handle::<crate::topn::WindowRanker>(handle));
+    }
+}

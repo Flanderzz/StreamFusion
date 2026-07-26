@@ -3270,8 +3270,11 @@ mod dirty_region {
                 Field::new("v", DataType::Int64, true),
             ],
             Some(0),
-            128,
         )
+    }
+
+    fn kgs_of(keys: &[&[u8]]) -> Vec<i32> {
+        keys.iter().map(|k| flink_key_group(hash_bytes_by_words(k), 128) as i32).collect()
     }
 
     fn upsert(region: &mut DirtyRegion, entries: &[(&[u8], i64, i64)]) {
@@ -3282,7 +3285,7 @@ mod dirty_region {
         let vs: ArrayRef = Arc::new(Int64Array::from(
             entries.iter().map(|(_, _, v)| *v).collect::<Vec<_>>(),
         ));
-        region.append_upserts(&keys, vec![rts, vs]).unwrap();
+        region.append_upserts(&keys, &kgs_of(&keys), vec![rts, vs]).unwrap();
     }
 
     fn value_of(region: &DirtyRegion, key: &[u8]) -> Option<(i64, i64)> {
@@ -3345,7 +3348,7 @@ mod dirty_region {
     fn delete_shadows_and_flushes_a_tombstone() {
         let mut r = region();
         upsert(&mut r, &[(b"aaaa", 10, 1), (b"bbbb", 20, 2)]);
-        r.append_deletes(&[b"aaaa"]).unwrap();
+        r.append_null_deletes(&[b"aaaa"], &kgs_of(&[b"aaaa"])).unwrap();
         assert!(matches!(r.get(b"aaaa"), Some(DirtyValue::Deleted)));
         assert_eq!(rows_of(&r.live_upserts(None).unwrap()), vec![(20, 2)]);
         assert!(r.contains(b"aaaa") && r.contains(b"bbbb"));
@@ -3645,6 +3648,116 @@ mod paimon_state {
             );
             paimon.store_mut().checkpoint().unwrap();
         }
+    }
+
+    /// Window-rank output rows as sorted `(k, v, rank)` tuples (rank rides the appended column).
+    fn wr_rows(batch: &RecordBatch) -> Vec<(i64, i64, i64)> {
+        if batch.num_rows() == 0 {
+            return Vec::new();
+        }
+        let ks = batch.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+        let vs = batch.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
+        let ranks = batch
+            .column(batch.num_columns() - 1)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let mut rows: Vec<(i64, i64, i64)> = (0..batch.num_rows())
+            .map(|r| (ks.value(r), vs.value(r), ranks.value(r)))
+            .collect();
+        rows.sort_unstable();
+        rows
+    }
+
+    fn window_ranker() -> WindowRanker {
+        // Batch shape [k, v, ws, we]; partition by k, top-2 by v ascending, rank projected.
+        let sort = vec![SortColumn { index: 1, ascending: true, nulls_first: false }];
+        WindowRanker::new(2, 3, vec![0], sort, 2, true)
+    }
+
+    /// Window Top-N on the Paimon backend matches the memory operator through pushes, watermark
+    /// firings, and checkpoints: committed rows seed a window's buffer ahead of new arrivals, a
+    /// late row drops, and a fired window never re-emits.
+    #[test]
+    fn paimon_window_rank_matches_memory() {
+        let dir = temp_dir("wr-parity");
+        let store =
+            PaimonWindowRankStore::create(config(&dir), vec![DataType::Int64; 4]).unwrap();
+        let mut paimon = window_ranker().with_backend(store);
+        let mut memory = window_ranker();
+
+        let steps: Vec<(Vec<RecordBatch>, i64)> = vec![
+            // Window [0,1000): k1 gets 30/10/20 (top-2 ascending = 10, 20) and k2 gets 5;
+            // window [1000,2000) opens for k1 with 7. Watermark 1000 closes only the first.
+            (
+                vec![window_batch(
+                    vec![1, 1, 1, 2, 1],
+                    vec![30, 10, 20, 5, 7],
+                    vec![0, 0, 0, 0, 1000],
+                    vec![1000, 1000, 1000, 1000, 2000],
+                )],
+                1000,
+            ),
+            // A late row for the closed window drops; 3 ranks into k1's open window against the
+            // committed 7 (the paimon side seeds that buffer from the table). Watermark 2000
+            // closes it: (3, rank 1), (7, rank 2).
+            (
+                vec![window_batch(vec![1, 1], vec![1, 3], vec![0, 1000], vec![1000, 2000])],
+                2000,
+            ),
+            // Nothing pending anywhere.
+            (vec![], i64::MAX),
+        ];
+        for (i, (batches, watermark)) in steps.iter().enumerate() {
+            for batch in batches {
+                paimon.push(batch).unwrap();
+                memory.push(batch).unwrap();
+            }
+            let paimon_out = paimon.flush(*watermark).unwrap();
+            let memory_out = memory.flush(*watermark).unwrap();
+            assert_eq!(
+                wr_rows(&memory_out),
+                wr_rows(&paimon_out),
+                "step {i} diverged between backends"
+            );
+            paimon.store_mut().checkpoint().unwrap();
+        }
+    }
+
+    /// A window committed at a barrier and untouched afterwards still fires from the table scan,
+    /// exactly once: the firing's staged deletions guard a repeat fire within the interval, and
+    /// their commit guards it across barriers and a restore.
+    #[test]
+    fn paimon_window_rank_fires_committed_windows_once() {
+        let dir = temp_dir("wr-committed");
+        let store =
+            PaimonWindowRankStore::create(config(&dir), vec![DataType::Int64; 4]).unwrap();
+        let mut ranker = window_ranker().with_backend(store);
+        ranker.push(&window_batch(vec![1], vec![7], vec![0], vec![1000])).unwrap();
+        assert!(wr_rows(&ranker.flush(500).unwrap()).is_empty(), "window still open");
+        ranker.store_mut().checkpoint().unwrap();
+
+        assert_eq!(
+            wr_rows(&ranker.flush(1000).unwrap()),
+            vec![(1, 7, 1)],
+            "the committed window fires from the table scan"
+        );
+        assert!(wr_rows(&ranker.flush(i64::MAX).unwrap()).is_empty(), "same interval repeat");
+        let manifest = ranker.store_mut().checkpoint().unwrap();
+        assert!(wr_rows(&ranker.flush(i64::MAX).unwrap()).is_empty(), "post-barrier repeat");
+
+        // Restore from the listed files: the deletion committed, so nothing re-fires.
+        let restored_dir = temp_dir("wr-restore");
+        materialize(&manifest, &dir, &restored_dir);
+        let restored_store = PaimonWindowRankStore::open(
+            config(&restored_dir),
+            vec![DataType::Int64; 4],
+            manifest.snapshot_id,
+        )
+        .unwrap();
+        let mut restored = window_ranker().with_backend(restored_store);
+        restored.current_watermark = 1000;
+        assert!(wr_rows(&restored.flush(i64::MAX).unwrap()).is_empty(), "post-restore repeat");
     }
 
     /// The bundle contract of the two-component store: written slots (the write buffer) survive

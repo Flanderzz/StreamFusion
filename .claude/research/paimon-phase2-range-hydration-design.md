@@ -22,8 +22,17 @@ Two deviations from this doc's sketch, both deliberate: fired keys keep a **mark
 post-fire row can arrive above the watermark and must not re-emit), and on disk it is bounded
 where the memory path's RAM set is not; and the committed-side anti-join runs per firing rather
 than through a persistent DF TableProvider — provider integration can come with the later rungs.
-Remaining rungs: WindowRank, OVER, interval/window joins (buffer remodels onto the same store
-machinery).
+RUNG 2 SHIPPED (2026-07-26): WindowRank (event-time) — `PaimonWindowRankStore`, one row per
+buffered rank position under `[kg, k, we, ws, ord]`; open windows' buffers stay decoded in
+memory for the interval (they are the write buffer — every touch re-ranks) and stage at the
+barrier as whole-buffer rewrites; a window first touched in an interval seeds from the committed
+table before new rows rank in (arrival-order tie-break); firing merges buffers with a committed
+`we ≤ watermark` scan, region-staged deletions guarding refires; the watermark rides the opaque
+snapshot token ("snapshot:watermark"). The dirty region grew caller-supplied key groups
+(composite region keys route by the partition key alone) and PK-carrying delete rows. Proctime
+window rank stays on memory state (processing-time timer deadline lives in raw state).
+Remaining rungs: OVER, interval/window/temporal joins, session/window aggregates (buffer
+remodels onto the same store machinery).
 
 Original draft (2026-07-25): Written after the state-backend
 speed-up round (124.1 s → 9.85 s measured on the q4 A/B; see `docs/benchmarks.md`) so the design

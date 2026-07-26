@@ -113,6 +113,8 @@ public class NativeWindowRankExecNode extends ExecNodeBase<ArrowBatch>
                 windowMillis,
                 slideMillis,
                 cumulative,
+                (org.apache.flink.table.types.logical.RowType)
+                    getInputEdges().get(0).getOutputType(),
                 maxParallelism),
             ArrowBatchTypeInformation.INSTANCE,
             input.getParallelism(),

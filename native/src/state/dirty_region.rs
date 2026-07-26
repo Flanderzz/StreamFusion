@@ -49,11 +49,13 @@ struct DirtyBatch {
 }
 
 /// See the module docs. The schema is `[kg, k, <value columns>]`; `time_column` indexes an Int64
-/// column within the *value* columns that range scans filter and prune on.
+/// column within the *value* columns that range scans filter and prune on. Key groups are
+/// caller-supplied per row: `k` may be a composite (a partition key plus window bounds or a rank
+/// position) while routing follows the partition key alone, so the region cannot derive the
+/// group from the key bytes itself.
 pub(crate) struct DirtyRegion {
     schema: SchemaRef,
     time_column: Option<usize>,
-    max_parallelism: usize,
     batches: Vec<DirtyBatch>,
     index: ahash::HashMap<ByteKey, DirtyRef>,
     heap_bytes: usize,
@@ -63,11 +65,7 @@ impl DirtyRegion {
     const INDEX_ENTRY_BYTES: usize =
         std::mem::size_of::<(ByteKey, DirtyRef)>() + GROUP_ENTRY_OVERHEAD;
 
-    pub(crate) fn new(
-        value_fields: Vec<Field>,
-        time_column: Option<usize>,
-        max_parallelism: usize,
-    ) -> Self {
+    pub(crate) fn new(value_fields: Vec<Field>, time_column: Option<usize>) -> Self {
         if let Some(t) = time_column {
             assert_eq!(
                 value_fields[t].data_type(),
@@ -83,7 +81,6 @@ impl DirtyRegion {
         DirtyRegion {
             schema: Arc::new(Schema::new(fields)),
             time_column,
-            max_parallelism,
             batches: Vec::new(),
             index: ahash::HashMap::default(),
             heap_bytes: 0,
@@ -95,43 +92,57 @@ impl DirtyRegion {
         &self.schema
     }
 
-    /// Appends one upsert per key, values aligned by position. A key appended twice — in one call
-    /// or across calls — keeps only its latest version live.
+    /// Appends one upsert per key, values aligned by position, each row under the given key
+    /// group. A key appended twice — in one call or across calls — keeps only its latest version
+    /// live.
     pub(crate) fn append_upserts(
         &mut self,
         keys: &[&[u8]],
+        key_groups: &[i32],
         values: Vec<ArrayRef>,
     ) -> Result<(), DataFusionError> {
-        self.append(keys, values, 0)
+        self.append(keys, key_groups, values, 0)
     }
 
-    /// Appends one delete per key (null value columns). Deleting a key never committed is
-    /// harmless; the delete still shadows any committed row at the next flush.
-    pub(crate) fn append_deletes(&mut self, keys: &[&[u8]]) -> Result<(), DataFusionError> {
+    /// Appends one delete per key. Deleting a key never committed is harmless; the delete still
+    /// shadows any committed row at the next flush. `values` must carry at least the columns the
+    /// flushed `-D` row needs to address its table row (primary-key components, for a store whose
+    /// region key is composite); pure-payload columns may be null.
+    pub(crate) fn append_deletes(
+        &mut self,
+        keys: &[&[u8]],
+        key_groups: &[i32],
+        values: Vec<ArrayRef>,
+    ) -> Result<(), DataFusionError> {
+        self.append(keys, key_groups, values, 3)
+    }
+
+    /// `append_deletes` with every value column null — enough for a store whose region key IS the
+    /// table key.
+    pub(crate) fn append_null_deletes(
+        &mut self,
+        keys: &[&[u8]],
+        key_groups: &[i32],
+    ) -> Result<(), DataFusionError> {
         let values = self.schema.fields()[2..]
             .iter()
             .map(|f| new_null_array(f.data_type(), keys.len()))
             .collect();
-        self.append(keys, values, 3)
+        self.append(keys, key_groups, values, 3)
     }
 
     fn append(
         &mut self,
         keys: &[&[u8]],
+        key_groups: &[i32],
         values: Vec<ArrayRef>,
         kind: i8,
     ) -> Result<(), DataFusionError> {
         if keys.is_empty() {
             return Ok(());
         }
-        let kgs: Int32Array = keys
-            .iter()
-            .map(|k| {
-                Some(flink_key_group(hash_bytes_by_words(k), self.max_parallelism) as i32)
-            })
-            .collect();
         let mut columns: Vec<ArrayRef> = Vec::with_capacity(self.schema.fields().len());
-        columns.push(Arc::new(kgs));
+        columns.push(Arc::new(Int32Array::from(key_groups.to_vec())));
         columns.push(Arc::new(BinaryArray::from_iter_values(keys)));
         columns.extend(values);
         let batch = RecordBatch::try_new(self.schema.clone(), columns)

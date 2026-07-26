@@ -638,12 +638,19 @@ the operator just checkpoints its state the old way, in full):
   row on disk so its emitted-ness survives checkpoints (the memory path holds the emitted-key set
   in RAM forever; here it is disk-resident and probed per batch). The
   dedup/normalizer/Top-N/join/keep-first state rows are the stored full rows as typed columns, so
-  the state tables read like the operators' own data. Every other stateful operator keeps memory
-  state under this backend. The remaining **watermark/timer-driven operators** (`OVER`
-  aggregates, window rank, interval/window/temporal joins, session/window aggregates) stay on
-  memory state for one remaining reason: their pending buffers are columnar batches that need
-  remodeling as keyed rows — the range-read machinery itself now exists (keep-first dedup runs on
-  it).
+  the state tables read like the operators' own data. **Event-time window rank / window
+  deduplication** runs on the backend too: one table row per buffered rank position under the
+  partition key, window bounds, and position; open windows' buffers stage at the barrier as
+  whole-buffer rewrites, a watermark firing merges the write buffer with a committed range scan
+  under `window_end ≤ watermark`, and the snapshot token carries the watermark (the memory path
+  persists it in its raw snapshot — without it a restored subtask would re-buffer replayed rows
+  of already-fired windows). The **proctime** window rank keeps memory state under this backend:
+  it closes windows on processing-time timers whose deadline travels in raw state, not on
+  watermarks. Every other stateful operator keeps memory state under this backend. The remaining
+  **watermark/timer-driven operators** (`OVER` aggregates, interval/window/temporal joins,
+  session/window aggregates) stay on memory state for one remaining reason: their pending
+  buffers are columnar batches that need remodeling as keyed rows — the range-read machinery
+  itself now exists (keep-first dedup and window rank run on it).
 - **Multiset-state aggregates** — retracting `MIN`/`MAX` and `COUNT`/`SUM(DISTINCT)` keep per-key
   multisets, which the persistent row codec does not carry yet; an aggregate list containing them
   keeps the whole operator on memory state.
