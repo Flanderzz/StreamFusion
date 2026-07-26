@@ -139,9 +139,10 @@ controls remain in [docs/benchmarks.md](docs/benchmarks.md).
 With each engine on its production **disk state backend** — stock Flink on RocksDB, StreamFusion
 on its Paimon state backend — the same exactly-once pipeline runs at a **1.94× geometric mean**
 (median 2.00×, 21 of 23 wins, up to 12× on session windows; the one loss is q18's
-high-cardinality dedup, whose batched key probes blanket every row group's min/max range —
-RocksDB answers those from bloom filters, the fix on our side is a reader-side key index
-upstream). The full table and method are in [docs/benchmarks.md](docs/benchmarks.md).
+high-cardinality dedup, where our per-batch key probe re-decodes the table's key column per
+batch — O(table) — while RocksDB pays per key from resident blooms and a cache the table fits
+in; the fix is a per-snapshot key index in the reader, upstream). The full table and method are
+in [docs/benchmarks.md](docs/benchmarks.md).
 
 _Apple M1 Max; numbers are comparable only within a machine._
 

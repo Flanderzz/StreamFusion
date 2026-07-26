@@ -1157,14 +1157,20 @@ directions. q11's 12× is session windows: RocksDB pays the merging window assig
 window-mapping rewrites, the native session aggregate folds batch runs in memory and commits
 once per barrier. q18's 0.57× is the one loss and the honest read-through tax: rowtime
 keep-last deduplication over `(bidder, auction)` — a high-cardinality key space whose state
-grows with the stream. The table is PK-sorted, and a *single* key lookup would prune cleanly on
-file and row-group min/max; but the per-batch probe pushes the batch's few thousand keys as one
-`IN` set, and keys spread uniformly over the key space land in every row group's `[min, max]`
-range — range stats discriminate ranges, and the probe set covers the whole range, so nothing
-is eliminated and each batch decodes the table's key column end to end, a cost that grows with
-accumulated state. RocksDB answers the same probes from per-file bloom filters without touching
-data blocks. The fix is reader-side, upstream in paimon-rust: bloom-shaped file indexes, or
-sort-merging the sorted probe set against the parquet page index so the reader skips the pages
-between consecutive probe keys instead of decoding through them. q9 (~parity) is the updating
+grows with the stream, and whose retractions make every probe load-bearing (a `-U` needs the
+old row). The asymmetry is per-batch scan versus per-key point access. The table is PK-sorted,
+and a *single* key lookup would prune cleanly on file and row-group min/max; but the per-batch
+probe pushes the batch's few thousand keys as one `IN` set, and keys spread uniformly over the
+key space land in every row group's — and every page's — `[min, max]` range, so nothing prunes
+and each batch re-decodes the table's key column end to end: **O(table) per batch**, repeated
+even when the pages are hot in the OS page cache, growing as state accumulates. RocksDB's cost
+is **O(batch) per batch**: the (dominant) miss share dies in resident bloom filters without
+touching a block, and hits read single blocks from a cache the whole table fits in — it also
+"touches the data", but once per probed key rather than all keys per batch. The fix must
+change the exponent, not the constant: amortize the decode to once per snapshot pin by building
+a key→position index over the pinned snapshot (the role RocksDB's resident index/filter blocks
+play, and Paimon's own lookup-file design on the Java side), with bloom file indexes as the
+complementary cheap answer for misses — reader-side work, upstream in paimon-rust. Page-index
+skipping would *not* help here: a few thousand spread keys land in every page. q9 (~parity) is the updating
 join plus the retracting top-1 over the full 10-column auction row — per-batch read-through
 over a wide row payload on both stateful operators, the heaviest point-read shape in the suite.
