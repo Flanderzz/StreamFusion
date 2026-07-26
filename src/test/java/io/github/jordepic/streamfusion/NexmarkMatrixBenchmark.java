@@ -14,7 +14,9 @@ import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BooleanSupplier;
 import org.apache.flink.core.execution.JobClient;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.sink.legacy.RichSinkFunction;
@@ -781,6 +783,137 @@ class NexmarkMatrixBenchmark {
       }
       System.out.println(out);
     }
+  }
+
+  /**
+   * The persistent-state-backend comparison on the readme's exactly-once Kafka pipeline: stock
+   * Flink on RocksDB versus the native engine on the Paimon state backend, mini-batching off —
+   * the same corpus, one-second checkpoints, exactly-once delivery, and best-of rule as {@link
+   * #exactlyOnceKafkaSinkModeComparison}, with each engine's production disk backend swapped in.
+   * A q4 preflight pins both backends actually engaging (RocksDB materializes working files
+   * under a directed localdir; a live Paimon store handle is observed), so a silent fall-back to
+   * heap state cannot turn this into a heap-vs-heap comparison. Gated by
+   * {@code SF_MATRIX_STATE_BACKENDS=true}.
+   */
+  @Test
+  @EnabledIfEnvironmentVariable(named = "SF_MATRIX_STATE_BACKENDS", matches = "true")
+  void stateBackendComparison() throws Exception {
+    Path rocksDir = Files.createTempDirectory("nexmark-rocksdb");
+    Map<String, String> rocksdb =
+        Map.of(
+            "state.backend.type", "rocksdb",
+            "state.backend.rocksdb.localdir", rocksDir.toString());
+    Map<String, String> paimon =
+        Map.of(
+            "state.backend.type",
+            "io.github.jordepic.streamfusion.state.PaimonStateBackendFactory");
+    Query[] queries = selectQueries();
+    try (KafkaContainer kafka =
+        new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.6.1"))
+            .withEnv("KAFKA_TRANSACTION_MAX_TIMEOUT_MS", "7200000")) {
+      kafka.start();
+      String brokers = kafka.getBootstrapServers();
+      NexmarkKafkaBenchmark.produce(brokers, "nexmark", "json", ROWS);
+      assertStateBackendsEngage(brokers, rocksdb, paimon, rocksDir);
+      StringBuilder out =
+          new StringBuilder(
+              "\n##### NEXMARK STATE BACKENDS (exactly-once Kafka, mini-batch off; Flink on"
+                  + " RocksDB vs StreamFusion on Paimon; "
+                  + ROWS
+                  + " events, best of "
+                  + RUNS
+                  + ") #####\n");
+      out.append("query  Flink/RocksDB s      ev/s  SF/Paimon s      ev/s  SF/Flink\n");
+      for (Query q : queries) {
+        double flink = kafkaSinkBest(brokers, q, false, rocksdb);
+        String row;
+        try {
+          double nativeRun = kafkaSinkBest(brokers, q, true, paimon);
+          row =
+              String.format(
+                  "%4s  %15.3f  %8.0f  %11.3f  %8.0f  %7.2fx%n",
+                  q.label,
+                  flink,
+                  ROWS / flink,
+                  nativeRun,
+                  ROWS / nativeRun,
+                  flink / nativeRun);
+        } catch (IllegalStateException fallback) {
+          row = String.format("%4s  %15.3f  |  %s%n", q.label, flink, fallback.getMessage());
+        }
+        out.append(row);
+        System.out.print(row);
+      }
+      System.out.println(out);
+    }
+  }
+
+  /** q4 preflight proving both persistent backends engage under the job-level configuration. */
+  private static void assertStateBackendsEngage(
+      String brokers,
+      Map<String, String> rocksdb,
+      Map<String, String> paimon,
+      Path rocksDir)
+      throws Exception {
+    Query q4 =
+        Arrays.stream(ALL_QUERIES).filter(q -> q.label.equals("q4")).findFirst().orElseThrow();
+    AtomicBoolean rocksSeen = new AtomicBoolean();
+    Thread rocksWatcher =
+        engagementWatcher(
+            rocksSeen,
+            () -> {
+              try (var files = Files.list(rocksDir)) {
+                return files.findAny().isPresent();
+              } catch (Exception e) {
+                return false;
+              }
+            });
+    try {
+      kafkaSinkBest(brokers, q4, false, rocksdb, 0, 1);
+    } finally {
+      rocksWatcher.interrupt();
+      rocksWatcher.join();
+    }
+    if (!rocksSeen.get()) {
+      throw new IllegalStateException(
+          "state.backend.type=rocksdb never materialized working files under its localdir;"
+              + " the comparison would run stock Flink on heap state");
+    }
+    AtomicBoolean paimonSeen = new AtomicBoolean();
+    Thread paimonWatcher =
+        engagementWatcher(paimonSeen, () -> Native.liveNativeHandles().contains("Paimon"));
+    try {
+      kafkaSinkBest(brokers, q4, true, paimon, 0, 1);
+    } finally {
+      paimonWatcher.interrupt();
+      paimonWatcher.join();
+    }
+    if (!paimonSeen.get()) {
+      throw new IllegalStateException(
+          "the Paimon backend never engaged (no live Paimon store handle was observed);"
+              + " the comparison would run StreamFusion on memory state");
+    }
+  }
+
+  private static Thread engagementWatcher(AtomicBoolean seen, BooleanSupplier probe) {
+    Thread watcher =
+        new Thread(
+            () -> {
+              while (!seen.get() && !Thread.currentThread().isInterrupted()) {
+                if (probe.getAsBoolean()) {
+                  seen.set(true);
+                  return;
+                }
+                try {
+                  Thread.sleep(50);
+                } catch (InterruptedException e) {
+                  return;
+                }
+              }
+            });
+    watcher.setDaemon(true);
+    watcher.start();
+    return watcher;
   }
 
   private static double kafkaSinkBest(
