@@ -10,9 +10,20 @@ Update (same review, follow-up decision): the point-read side of this design alr
 simplified form — the store is now exactly a write buffer plus the disk table, reads are a
 per-batch key probe pushed into the reader as an exact `IN` predicate (hash-set evaluation added
 to the paimon-rust fork), and no clean row survives its bundle. The interval-resident working
-set this doc assumed as the point-access baseline is gone. What remains of Phase 2 is the range
-side: the Arrow-batch dirty region as a queryable set, the DataFusion overlay for range reads
-(write buffer ∪ committed, buffer winning), and the first watermark/timer operator consumer.
+set this doc assumed as the point-access baseline is gone.
+
+RUNG 1 SHIPPED (2026-07-26): the dirty region (`state/dirty_region.rs` — arrival-ordered
+batches, liveness bitmaps, key index, per-batch time min/max), the overlay range read
+(committed scan under the time predicate, DataFusion right-anti join against the region's
+touched keys, union with the region's live rows), and rowtime keep-first dedup as the first
+consumer (`PaimonKeepFirstStore`; one row per key: rt, fired flag, payload as typed columns).
+Two deviations from this doc's sketch, both deliberate: fired keys keep a **marker row**
+(fired=true, payload nulled) instead of `-D` rows — the emitted set is load-bearing (a
+post-fire row can arrive above the watermark and must not re-emit), and on disk it is bounded
+where the memory path's RAM set is not; and the committed-side anti-join runs per firing rather
+than through a persistent DF TableProvider — provider integration can come with the later rungs.
+Remaining rungs: WindowRank, OVER, interval/window joins (buffer remodels onto the same store
+machinery).
 
 Original draft (2026-07-25): Written after the state-backend
 speed-up round (124.1 s → 9.85 s measured on the q4 A/B; see `docs/benchmarks.md`) so the design

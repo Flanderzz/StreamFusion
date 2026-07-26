@@ -1075,6 +1075,52 @@ public final class Native {
   public static native void closePaimonKeepLastDeduplicator(long handle);
 
   /**
+   * {@code createKeepFirstDeduplicator} on the Paimon state backend. One table row per key: the
+   * candidate's rowtime (millis), a fired flag, and the candidate row as typed columns ({@code
+   * rowSchemaAddress} carries the exported FFI schema of the input row type). Pending candidates
+   * and fired markers share the row — firing nulls the payload and sets the flag, so a key's
+   * emitted-ness persists on disk. Restore semantics as in {@link
+   * #createPaimonKeepLastDeduplicator}.
+   */
+  public static native long createPaimonKeepFirstDeduplicator(
+      int[] partitionColumns,
+      int[] keyTimestampPrecisions,
+      int rtColumn,
+      long rowSchemaAddress,
+      long memoryBudgetBytes,
+      String tableDirectory,
+      int maxParallelism,
+      int buckets,
+      String fileFormat,
+      String fileCompression,
+      String[] sourceDirectories,
+      String[] sourceSnapshotTokens,
+      int keyGroupStart,
+      int keyGroupEnd,
+      boolean aligned);
+
+  /** {@code pushKeepFirstDeduplicator} for a Paimon-backed handle (no output; watermark-driven). */
+  public static native void pushPaimonKeepFirstDeduplicator(
+      long handle, long inArrayAddress, long inSchemaAddress);
+
+  /**
+   * {@code flushKeepFirstDeduplicator} for a Paimon-backed handle: fires every candidate the
+   * watermark reached, merging the uncommitted write buffer with the committed table in one range
+   * read.
+   */
+  public static native void flushPaimonKeepFirstDeduplicator(
+      long handle, long watermarkMillis, long outArrayAddress, long outSchemaAddress);
+
+  /** {@code checkpointPaimonGroupAggregator} for a Paimon-backed keep-first deduplicator. */
+  public static native String[] checkpointPaimonKeepFirstDeduplicator(long handle);
+
+  /** Estimated bytes of a Paimon-backed keep-first deduplicator's resident working set. */
+  public static native long paimonKeepFirstDeduplicatorStateBytes(long handle);
+
+  /** Releases a Paimon-backed keep-first deduplicator handle. */
+  public static native void closePaimonKeepFirstDeduplicator(long handle);
+
+  /**
    * {@code createChangelogNormalizer} on the Paimon state backend; state row and restore semantics
    * as in {@link #createPaimonKeepLastDeduplicator}.
    */

@@ -610,8 +610,9 @@ io.github.jordepic.streamfusion.state.PaimonStateBackendFactory`) moves a suppor
 into a local Apache Paimon primary-key table (uncompressed parquet by default) with **incremental
 checkpoints**:
 snapshots travel through the keyed-state backend as `IncrementalRemoteKeyedStateHandle`s, so a data
-file already uploaded by a completed checkpoint is referenced, not re-uploaded, and rescale
-reassigns whole bucket directories (bucket = Flink key group). JVM-side keyed state in the same job
+file already uploaded by a completed checkpoint is referenced, not re-uploaded. An aligned restore
+adopts the table's files wholesale; rescale clips each source by key-group range at recovery (the
+tables default to one bucket per subtask — the RocksDB shape). JVM-side keyed state in the same job
 (fallback operators, timers) runs unchanged on the wrapped hashmap backend.
 
 What runs on the Paimon backend today, and every condition that keeps an operator on memory state
@@ -629,24 +630,29 @@ the operator just checkpoints its state the old way, in full):
   **updating join** (all kinds: INNER/LEFT/RIGHT/FULL/SEMI/ANTI; one table per side under the
   operator's backend — the analog of Flink's two named join states — each stored row persisted as
   typed columns plus its appear-count and degree under a content-addressed third key column, the
-  analog of Flink's `MapState` join views, flushed per entry against the hydrated image). The
-  dedup/normalizer/Top-N/join state rows are the stored full rows as typed columns, so the state
-  tables read like the operators' own data. Every other stateful operator keeps memory state
-  under this backend. The **watermark/timer-driven operators** (keep-first
-  dedup, `OVER` aggregates, window rank, interval/window/temporal joins, session/window
-  aggregates) stay on memory state for now for two concrete reasons, neither a storage limit:
-  firing on a watermark needs a *range* hydration ("every row with `t ≤ watermark`", a
-  predicate-pruned scan merged with the uncommitted working set) rather than the per-key probe the
-  store does today, and their pending buffers are columnar batches that would first need
-  remodeling as keyed rows.
+  analog of Flink's `MapState` join views, flushed per entry against the hydrated image), and the
+  **watermark-driven rowtime keep-first deduplicator** — the first range-read consumer: one table
+  row per key holds the pending candidate's rowtime, a fired flag, and the candidate row as typed
+  columns; a watermark firing is one range read ("every pending row with `rowtime ≤ watermark`")
+  merging the uncommitted write buffer with the committed table, and a fired key keeps a marker
+  row on disk so its emitted-ness survives checkpoints (the memory path holds the emitted-key set
+  in RAM forever; here it is disk-resident and probed per batch). The
+  dedup/normalizer/Top-N/join/keep-first state rows are the stored full rows as typed columns, so
+  the state tables read like the operators' own data. Every other stateful operator keeps memory
+  state under this backend. The remaining **watermark/timer-driven operators** (`OVER`
+  aggregates, window rank, interval/window/temporal joins, session/window aggregates) stay on
+  memory state for one remaining reason: their pending buffers are columnar batches that need
+  remodeling as keyed rows — the range-read machinery itself now exists (keep-first dedup runs on
+  it).
 - **Multiset-state aggregates** — retracting `MIN`/`MAX` and `COUNT`/`SUM(DISTINCT)` keep per-key
   multisets, which the persistent row codec does not carry yet; an aggregate list containing them
   keeps the whole operator on memory state.
 - **State scalar types** — an aggregate whose persisted scalar (or, for the row-payload operators
-  — deduplicator, changelog normalizer, Top-N, join sides — any column of the row type) falls
+  — deduplicators, changelog normalizer, Top-N, join sides — any column of the row type) falls
   outside
-  boolean/tinyint/smallint/int/bigint/float/double/varchar/varbinary/decimal/date/timestamp(3,6
-  non-LTZ) keeps the operator on memory state.
+  boolean/tinyint/smallint/int/bigint/float/double/varchar/varbinary/decimal/date/timestamp
+  (zoneless milli/micro/nanosecond — the bridge pins Flink `TIMESTAMP`/`TIMESTAMP_LTZ` columns to
+  zoneless nanoseconds, so rowtime-carrying rows persist) keeps the operator on memory state.
 - **A restore from a memory-backend checkpoint** — raw keyed-state blobs restore on memory state;
   there is no silent migration between backends.
 - **A native build without the `paimon-state` feature** — the backend probe answers unavailable and

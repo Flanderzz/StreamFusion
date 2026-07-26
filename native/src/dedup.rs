@@ -25,7 +25,11 @@ pub(crate) struct KeepFirstDeduplicator {
     key_types: Vec<DataType>,
     schema: Option<SchemaRef>,
     snapshot_cache: Option<DedupSnapshotCache>,
-    memory: OperatorMemory,
+    pub(crate) memory: OperatorMemory,
+    /// Paimon persistent state: pending candidates and fired markers live in the store's write
+    /// buffer + disk table instead of `pending`/`emitted`; those memory fields then stay unused.
+    #[cfg(feature = "paimon-state")]
+    backend: Option<crate::state::PaimonKeepFirstStore>,
 }
 
 impl KeepFirstDeduplicator {
@@ -43,7 +47,29 @@ impl KeepFirstDeduplicator {
             schema: None,
             snapshot_cache: None,
             memory: OperatorMemory::unaccounted(),
+            #[cfg(feature = "paimon-state")]
+            backend: None,
         }
+    }
+
+    #[cfg(feature = "paimon-state")]
+    pub(crate) fn with_backend(mut self, store: crate::state::PaimonKeepFirstStore) -> Self {
+        self.backend = Some(store);
+        self
+    }
+
+    #[cfg(feature = "paimon-state")]
+    pub(crate) fn with_read_through_budget(
+        mut self,
+        budget_bytes: i64,
+    ) -> Result<Self, DataFusionError> {
+        self.memory.attach("keep-first-deduplicate", budget_bytes, 0)?;
+        Ok(self)
+    }
+
+    #[cfg(feature = "paimon-state")]
+    pub(crate) fn store_mut(&mut self) -> &mut crate::state::PaimonKeepFirstStore {
+        self.backend.as_mut().expect("keep-first paimon backend")
     }
 
     /// Bounds this deduplicator's state (the pending batch plus the emitted-key set) by the
@@ -55,7 +81,10 @@ impl KeepFirstDeduplicator {
         Ok(self)
     }
 
-    fn with_key_timestamp_precisions(mut self, key_timestamp_precisions: Vec<i32>) -> Self {
+    pub(crate) fn with_key_timestamp_precisions(
+        mut self,
+        key_timestamp_precisions: Vec<i32>,
+    ) -> Self {
         self.key_timestamp_precisions = key_timestamp_precisions;
         self
     }
@@ -69,6 +98,10 @@ impl KeepFirstDeduplicator {
         let live_mask: BooleanArray =
             rt.iter().map(|v| Some(v.unwrap() >= self.current_watermark)).collect();
         let live = filter_record_batch(batch, &live_mask).expect("dedup late filter");
+        #[cfg(feature = "paimon-state")]
+        if self.backend.is_some() {
+            return self.push_backend(live);
+        }
         // Merge with the standing candidates and reduce to one minimum-rowtime row per pending key.
         let track = self.memory.tracking();
         let mut delta = 0isize;
@@ -125,11 +158,104 @@ impl KeepFirstDeduplicator {
         RecordBatch::try_new(batch.schema(), columns).expect("dedup compacted batch")
     }
 
+    /// Persistent-state arrival path: the batch reduces to its per-key minimum-rowtime winners,
+    /// the store answers each winner's status in one batched committed probe, and only fresh keys
+    /// and strict improvements stage into the write buffer. Nothing is emitted here — emission is
+    /// watermark-driven (`flush`).
+    #[cfg(feature = "paimon-state")]
+    fn push_backend(&mut self, live: RecordBatch) -> Result<(), DataFusionError> {
+        if live.num_rows() > 0 {
+            let winners = self.min_per_key(&live);
+            let mut encoder = BinaryRowBatchEncoder::new(
+                &winners,
+                &self.partition_columns,
+                &self.key_timestamp_precisions,
+            );
+            let keys: Vec<ByteKey> =
+                (0..winners.num_rows()).map(|row| ByteKey::from(encoder.encode(row))).collect();
+            let store = self.backend.as_mut().expect("keep-first paimon backend");
+            store.ensure_probed(&keys)?;
+            let rts = rt_to_millis(winners.column(self.rt_column));
+            let mut staged_rows: Vec<u32> = Vec::new();
+            let mut staged_keys: Vec<&[u8]> = Vec::new();
+            let mut staged_rts: Vec<i64> = Vec::new();
+            for (row, key) in keys.iter().enumerate() {
+                let rowtime = rts.value(row);
+                match store.status(&key.0) {
+                    crate::state::KeepFirstStatus::Fired => {}
+                    // Flink's keep-first replaces only on a strictly smaller rowtime.
+                    crate::state::KeepFirstStatus::Pending(prev) if prev <= rowtime => {}
+                    _ => {
+                        staged_rows.push(row as u32);
+                        staged_keys.push(&key.0);
+                        staged_rts.push(rowtime);
+                    }
+                }
+            }
+            if !staged_rows.is_empty() {
+                let idx = UInt32Array::from(staged_rows);
+                let payload: Vec<ArrayRef> = winners
+                    .columns()
+                    .iter()
+                    .map(|c| take(c, &idx, None).expect("dedup stage take"))
+                    .collect();
+                store.stage(&staged_keys, staged_rts, payload)?;
+            }
+            store.end_bundle();
+        }
+        let store = self.backend.as_mut().expect("keep-first paimon backend");
+        let delta = store.footprint_delta();
+        self.memory.record(delta);
+        self.memory.account()
+    }
+
+    /// Persistent-state firing path: the store's overlay range read returns every candidate the
+    /// watermark released — committed and buffered — and stages their fired markers; the output
+    /// is those rows' payload columns.
+    #[cfg(feature = "paimon-state")]
+    fn flush_backend(&mut self, watermark: i64) -> Result<RecordBatch, DataFusionError> {
+        let ctx = self.memory.task_ctx();
+        let store = self.backend.as_mut().expect("keep-first paimon backend");
+        let fired = store.fire(watermark, ctx)?;
+        store.end_bundle();
+        let delta = store.footprint_delta();
+        self.memory.record(delta);
+        self.memory.account()?;
+        if fired.is_empty() {
+            return Ok(self.empty());
+        }
+        // Emit under the operator's input schema when a push established it (the store's payload
+        // field names are positional); the types are identical either way.
+        let schema = match &self.schema {
+            Some(schema) => schema.clone(),
+            None => Arc::new(Schema::new(
+                fired[0].schema().fields()[4..]
+                    .iter()
+                    .map(|f| f.as_ref().clone())
+                    .collect::<Vec<_>>(),
+            )),
+        };
+        let payload_batches: Vec<RecordBatch> = fired
+            .iter()
+            .map(|batch| {
+                RecordBatch::try_new(schema.clone(), batch.columns()[4..].to_vec())
+                    .expect("keep-first payload projection")
+            })
+            .collect();
+        let out = concat_batches(&schema, &payload_batches)
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        Ok(out)
+    }
+
     /// Emits each pending key's candidate whose rowtime the watermark has now reached (insert-only),
     /// records those keys as emitted, and keeps the rest. Both partitions are columnar filters.
     pub(crate) fn flush(&mut self, watermark: i64) -> Result<RecordBatch, DataFusionError> {
         self.snapshot_cache = None;
         self.current_watermark = watermark;
+        #[cfg(feature = "paimon-state")]
+        if self.backend.is_some() {
+            return self.flush_backend(watermark);
+        }
         let Some(pending) = self.pending.take() else {
             return Ok(self.empty());
         };

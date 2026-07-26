@@ -1,6 +1,9 @@
 package io.github.jordepic.streamfusion.operator;
 
 import io.github.jordepic.streamfusion.Native;
+import io.github.jordepic.streamfusion.arrow.ArrowConversion;
+import io.github.jordepic.streamfusion.planner.NativeConfig;
+import io.github.jordepic.streamfusion.state.PaimonNativeStateSupport;
 import org.apache.arrow.c.ArrowArray;
 import org.apache.arrow.c.ArrowSchema;
 import org.apache.arrow.c.CDataDictionaryProvider;
@@ -13,6 +16,7 @@ import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
+import org.apache.flink.table.types.logical.RowType;
 
 /**
  * Columnar append-only keep-first deduplication (`ROW_NUMBER() OVER (PARTITION BY … ORDER BY rowtime
@@ -22,7 +26,9 @@ import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
  * drops every later row for the key. Insert-only — the watermark guarantees no smaller-rowtime row
  * can still arrive once a key's row fires. Keys are co-located by the columnar shuffle; the per-key
  * candidate state and the late-data drop live in the native deduplicator, and this layer moves
- * batches across the bridge and owns the handle's checkpointed state.
+ * batches across the bridge and owns the handle's checkpointed state. On the Paimon backend the
+ * candidates and fired markers live in the persistent store (write buffer + disk table) and the
+ * watermark firing is a range read over both; memory state travels as raw keyed-state blobs.
  */
 public class NativeColumnarDeduplicateOperator extends AbstractStreamOperator<ArrowBatch>
     implements OneInputStreamOperator<ArrowBatch, ArrowBatch> {
@@ -30,18 +36,25 @@ public class NativeColumnarDeduplicateOperator extends AbstractStreamOperator<Ar
   private final int[] partitionColumns;
   private final int[] keyTimestampPrecisions;
   private final int rowtimeColumn;
+  private final RowType rowType;
   private final int maxParallelism;
 
   private transient BufferAllocator allocator;
   private transient CDataDictionaryProvider dictionaries;
   private transient long handle;
+  private transient boolean paimonState;
   private transient ManagedMemoryBudget memoryBudget;
 
   public NativeColumnarDeduplicateOperator(
-      int[] partitionColumns, int[] keyTimestampPrecisions, int rowtimeColumn, int maxParallelism) {
+      int[] partitionColumns,
+      int[] keyTimestampPrecisions,
+      int rowtimeColumn,
+      RowType rowType,
+      int maxParallelism) {
     this.partitionColumns = partitionColumns;
     this.keyTimestampPrecisions = keyTimestampPrecisions;
     this.rowtimeColumn = rowtimeColumn;
+    this.rowType = rowType;
     if (maxParallelism <= 0) {
       throw new IllegalArgumentException("native deduplication state requires a positive max parallelism");
     }
@@ -58,6 +71,38 @@ public class NativeColumnarDeduplicateOperator extends AbstractStreamOperator<Ar
     super.initializeState(context);
     java.util.List<byte[]> snapshots = RawKeyedState.restore(context);
     memoryBudget = ManagedMemoryBudget.reserveFor(this);
+    PaimonNativeStateSupport paimon =
+        PaimonNativeStateSupport.resolve(
+            getKeyedStateBackend(),
+            "keep-first deduplicate",
+            !snapshots.isEmpty(),
+            () ->
+                withRowSchema(address -> Native.paimonRowStateSupported(address) ? 1L : 0L) != 0);
+    paimonState = paimon != null;
+    if (paimonState) {
+      handle =
+          withRowSchema(
+              rowSchemaAddress ->
+                  Native.createPaimonKeepFirstDeduplicator(
+                      partitionColumns,
+                      keyTimestampPrecisions,
+                      rowtimeColumn,
+                      rowSchemaAddress,
+                      memoryBudget.bytes(),
+                      paimon.tableDirectory(),
+                      maxParallelism,
+                      NativeConfig.paimonBuckets(),
+                      NativeConfig.paimonFileFormat(),
+                      NativeConfig.paimonFileCompression(),
+                      paimon.sourceDirectories(),
+                      paimon.sourceSnapshotTokens(),
+                      paimon.keyGroupStart(),
+                      paimon.keyGroupEnd(),
+                      paimon.aligned()));
+      long nativeHandle = handle;
+      paimon.register(() -> Native.checkpointPaimonKeepFirstDeduplicator(nativeHandle));
+      return;
+    }
     handle =
         snapshots.isEmpty()
             ? Native.createKeepFirstDeduplicator(
@@ -68,6 +113,21 @@ public class NativeColumnarDeduplicateOperator extends AbstractStreamOperator<Ar
                 rowtimeColumn,
                 snapshots.toArray(new byte[0][]),
                 memoryBudget.bytes());
+  }
+
+  /**
+   * Exports the input row type as an FFI Arrow schema for the duration of one native call; the
+   * native side consumes the schema contents, the wrapper struct is released here.
+   */
+  private long withRowSchema(java.util.function.LongUnaryOperator call) {
+    try (ArrowSchema rowSchema = ArrowSchema.allocateNew(NativeAllocator.SHARED)) {
+      Data.exportSchema(
+          NativeAllocator.SHARED,
+          ArrowConversion.toArrowSchema(rowType),
+          NativeAllocator.DICTIONARIES,
+          rowSchema);
+      return call.applyAsLong(rowSchema.memoryAddress());
+    }
   }
 
   @Override
@@ -85,7 +145,12 @@ public class NativeColumnarDeduplicateOperator extends AbstractStreamOperator<Ar
     try (ArrowArray array = ArrowArray.allocateNew(inAllocator);
         ArrowSchema schema = ArrowSchema.allocateNew(inAllocator)) {
       Data.exportVectorSchemaRoot(inAllocator, in, dictionaries, array, schema);
-      Native.pushKeepFirstDeduplicator(handle, array.memoryAddress(), schema.memoryAddress());
+      if (paimonState) {
+        Native.pushPaimonKeepFirstDeduplicator(
+            handle, array.memoryAddress(), schema.memoryAddress());
+      } else {
+        Native.pushKeepFirstDeduplicator(handle, array.memoryAddress(), schema.memoryAddress());
+      }
     } finally {
       in.close();
     }
@@ -96,8 +161,13 @@ public class NativeColumnarDeduplicateOperator extends AbstractStreamOperator<Ar
   public void processWatermark(Watermark mark) throws Exception {
     try (ArrowArray array = ArrowArray.allocateNew(allocator);
         ArrowSchema schema = ArrowSchema.allocateNew(allocator)) {
-      Native.flushKeepFirstDeduplicator(
-          handle, mark.getTimestamp(), array.memoryAddress(), schema.memoryAddress());
+      if (paimonState) {
+        Native.flushPaimonKeepFirstDeduplicator(
+            handle, mark.getTimestamp(), array.memoryAddress(), schema.memoryAddress());
+      } else {
+        Native.flushKeepFirstDeduplicator(
+            handle, mark.getTimestamp(), array.memoryAddress(), schema.memoryAddress());
+      }
       VectorSchemaRoot out = Data.importVectorSchemaRoot(allocator, array, schema, dictionaries);
       if (out.getRowCount() > 0) {
         output.collect(new StreamRecord<>(new ArrowBatch(out)));
@@ -112,23 +182,34 @@ public class NativeColumnarDeduplicateOperator extends AbstractStreamOperator<Ar
   /** Samples the native state size for the operator's gauges; task-thread only. */
   private void publishStateBytes() {
     if (memoryBudget.bounded()) {
-      memoryBudget.publishStateBytes(Native.keepFirstDeduplicatorStateBytes(handle));
+      memoryBudget.publishStateBytes(
+          paimonState
+              ? Native.paimonKeepFirstDeduplicatorStateBytes(handle)
+              : Native.keepFirstDeduplicatorStateBytes(handle));
     }
   }
 
   @Override
   public void snapshotState(StateSnapshotContext context) throws Exception {
     super.snapshotState(context);
-    RawKeyedState.snapshotPartitions(
-        context,
-        Native.snapshotKeepFirstDeduplicatorPartitions(
-            handle, maxParallelism, keyTimestampPrecisions));
+    // Paimon state checkpoints through the keyed state backend's snapshot (an incremental Paimon
+    // commit); only memory state travels as raw keyed-state blobs.
+    if (!paimonState) {
+      RawKeyedState.snapshotPartitions(
+          context,
+          Native.snapshotKeepFirstDeduplicatorPartitions(
+              handle, maxParallelism, keyTimestampPrecisions));
+    }
   }
 
   @Override
   public void close() throws Exception {
     if (handle != 0) {
-      Native.closeKeepFirstDeduplicator(handle);
+      if (paimonState) {
+        Native.closePaimonKeepFirstDeduplicator(handle);
+      } else {
+        Native.closeKeepFirstDeduplicator(handle);
+      }
       handle = 0;
     }
     if (memoryBudget != null) {

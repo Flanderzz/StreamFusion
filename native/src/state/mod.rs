@@ -1,6 +1,8 @@
 use crate::*;
 
 #[cfg(feature = "paimon-state")]
+pub(crate) mod dirty_region;
+#[cfg(feature = "paimon-state")]
 pub(crate) mod paimon_jni;
 #[cfg(feature = "paimon-state")]
 pub(crate) mod paimon_store;

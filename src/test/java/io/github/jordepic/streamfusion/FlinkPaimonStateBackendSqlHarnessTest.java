@@ -2,10 +2,17 @@ package io.github.jordepic.streamfusion;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
+import org.apache.flink.api.common.eventtime.WatermarkStrategy;
+import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.table.api.DataTypes;
+import org.apache.flink.table.api.Schema;
 import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
+import org.apache.flink.types.Row;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -54,6 +61,51 @@ class FlinkPaimonStateBackendSqlHarnessTest {
   }
 
   @Test
+  void rowtimeKeepFirstDeduplicationOnPaimonBackendMatchesHost() throws Exception {
+    // Guard against a silent fallback first: the dedup row type includes the rowtime column,
+    // which the bridge pins to a nanosecond timestamp — if the backend's type map refused it the
+    // parity below would pass vacuously on memory state.
+    org.apache.flink.table.types.logical.RowType dedupRow =
+        org.apache.flink.table.types.logical.RowType.of(
+            new org.apache.flink.table.types.logical.BigIntType(),
+            new org.apache.flink.table.types.logical.BigIntType(),
+            new org.apache.flink.table.types.logical.BigIntType(),
+            new org.apache.flink.table.types.logical.LocalZonedTimestampType(3));
+    try (org.apache.arrow.memory.BufferAllocator allocator =
+            new org.apache.arrow.memory.RootAllocator();
+        org.apache.arrow.c.ArrowSchema schema =
+            org.apache.arrow.c.ArrowSchema.allocateNew(allocator)) {
+      org.apache.arrow.c.Data.exportSchema(
+          allocator,
+          io.github.jordepic.streamfusion.arrow.ArrowConversion.toArrowSchema(dedupRow),
+          null,
+          schema);
+      org.junit.jupiter.api.Assertions.assertTrue(
+          Native.paimonRowStateSupported(schema.memoryAddress()),
+          "the keep-first dedup row type must be persistable on the Paimon backend");
+    }
+    // Watermark-driven keep-first: candidates and fired markers live in the Paimon store; every
+    // watermark firing is a range read merging the uncommitted write buffer with the committed
+    // table, checkpointing every 50 ms so both sides of that merge are exercised.
+    NativeParity.assertParity(
+        FlinkPaimonStateBackendSqlHarnessTest::paimonRowtimeEnvironment,
+        "SELECT k, v, ts FROM ("
+            + "SELECT *, ROW_NUMBER() OVER (PARTITION BY k ORDER BY rt ASC) AS rn FROM src)"
+            + " WHERE rn = 1");
+  }
+
+  @Test
+  void rowtimeKeepLastDeduplicationOnPaimonBackendMatchesHost() throws Exception {
+    // Rowtime keep-last rows carry the rowtime column too (nanosecond timestamps after the
+    // bridge), so persisting them rides the same type-map support as keep-first.
+    NativeParity.assertChangelogParity(
+        FlinkPaimonStateBackendSqlHarnessTest::paimonRowtimeEnvironment,
+        "SELECT k, v, ts FROM ("
+            + "SELECT *, ROW_NUMBER() OVER (PARTITION BY k ORDER BY rt DESC) AS rn FROM src)"
+            + " WHERE rn = 1");
+  }
+
+  @Test
   void unsupportedAggregatesFallBackToMemoryStateUnderPaimonBackend() throws Exception {
     Path input = Files.createTempDirectory("paimon-minmax-in");
     writeInput(input);
@@ -74,6 +126,39 @@ class FlinkPaimonStateBackendSqlHarnessTest {
     tEnv.executeSql(
             "INSERT INTO in_write VALUES (1, 10), (1, 20), (2, 5), (1, 30), (2, 15), (3, 7)")
         .await();
+  }
+
+  /** The rowtime dedup harness source (out-of-order rows per key) on the Paimon backend. */
+  private static TableEnvironment paimonRowtimeEnvironment() {
+    Configuration configuration = new Configuration();
+    configuration.setString(
+        "state.backend.type", "io.github.jordepic.streamfusion.state.PaimonStateBackendFactory");
+    StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment(configuration);
+    env.setParallelism(1);
+    env.enableCheckpointing(50);
+    StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
+    DataStream<Row> source =
+        env.fromData(
+                Types.ROW_NAMED(new String[] {"k", "v", "ts"}, Types.LONG, Types.LONG, Types.LONG),
+                Row.of(1L, 30L, 2000L),
+                Row.of(2L, 50L, 1500L),
+                Row.of(1L, 20L, 0L),
+                Row.of(2L, 40L, 1000L),
+                Row.of(1L, 25L, 800L))
+            .assignTimestampsAndWatermarks(
+                WatermarkStrategy.<Row>forBoundedOutOfOrderness(Duration.ofSeconds(2))
+                    .withTimestampAssigner((row, ts) -> (Long) row.getField(2)));
+    tEnv.createTemporaryView(
+        "src",
+        source,
+        Schema.newBuilder()
+            .column("k", DataTypes.BIGINT())
+            .column("v", DataTypes.BIGINT())
+            .column("ts", DataTypes.BIGINT())
+            .columnByMetadata("rt", DataTypes.TIMESTAMP_LTZ(3), "rowtime")
+            .watermark("rt", "SOURCE_WATERMARK()")
+            .build());
+    return tEnv;
   }
 
   private static TableEnvironment paimonEnvironment(Path directory) {

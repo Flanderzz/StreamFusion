@@ -98,7 +98,11 @@ public class NativeDeduplicateExecNode extends ExecNodeBase<ArrowBatch>
                 miniBatchSize,
                 maxParallelism)
             : new NativeColumnarDeduplicateOperator(
-                partitionColumns, keyTimestampPrecisions, rowtimeColumn, maxParallelism);
+                partitionColumns,
+                keyTimestampPrecisions,
+                rowtimeColumn,
+                (RowType) getOutputType(),
+                maxParallelism);
     OneInputTransformation<ArrowBatch, ArrowBatch> transformation =
         ExecNodeUtil.createOneInputTransformation(
             input,

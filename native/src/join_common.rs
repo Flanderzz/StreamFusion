@@ -158,6 +158,54 @@ pub(crate) fn hash_join_inner(
     Ok(rename_positional(&joined))
 }
 
+/// Runs a RIGHT ANTI hash join: the `right` rows whose key matches no `left` row, right schema
+/// unchanged. The state overlay uses this to drop committed rows shadowed by an uncommitted
+/// version of the same key (upsert or delete) before unioning in the uncommitted rows.
+pub(crate) fn hash_join_right_anti(
+    left: RecordBatch,
+    right: Vec<RecordBatch>,
+    key_pairs: &[(usize, usize)],
+    ctx: Arc<TaskContext>,
+) -> Result<Vec<RecordBatch>, DataFusionError> {
+    if right.is_empty() {
+        return Ok(right);
+    }
+    if left.num_rows() == 0 {
+        return Ok(right);
+    }
+    let left_schema = left.schema();
+    let right_schema = right[0].schema();
+    let on: JoinOn = key_pairs
+        .iter()
+        .map(|&(l, r)| {
+            let left_key: Arc<dyn PhysicalExpr> =
+                Arc::new(Column::new(left_schema.field(l).name(), l));
+            let right_key: Arc<dyn PhysicalExpr> =
+                Arc::new(Column::new(right_schema.field(r).name(), r));
+            (left_key, right_key)
+        })
+        .collect();
+    let left_exec = MemorySourceConfig::try_new_exec(&[vec![left]], left_schema, None)
+        .expect("failed to build anti-join build side");
+    let right_exec = MemorySourceConfig::try_new_exec(&[right], right_schema, None)
+        .expect("failed to build anti-join probe side");
+    let join = HashJoinExec::try_new(
+        left_exec,
+        right_exec,
+        on,
+        None,
+        &JoinType::RightAnti,
+        None,
+        PartitionMode::CollectLeft,
+        NullEquality::NullEqualsNothing,
+        false,
+    )
+    .expect("failed to build anti hash join");
+    runtime()
+        .block_on(collect(Arc::new(join), ctx))
+        .map(|batches| batches.into_iter().filter(|b| b.num_rows() > 0).collect())
+}
+
 /// Builds the residual `JoinFilter` for a time-bounded join: the interval bounds (if any) AND the
 /// residual non-equi predicate (if any), over the full joined `[left.., right..]` schema. Returns
 /// None when neither is present. The intermediate schema is the joined schema (columns `c0..`), so a

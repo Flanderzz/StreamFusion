@@ -96,7 +96,7 @@ Why Paimon over rust-rocksdb:
 
 ## State shapes mirror Flink's state primitives
 
-The store grew three shapes, each the analog of a Flink state primitive as RocksDB lays it out:
+The store grew four shapes, each the analog of a Flink state primitive as RocksDB lays it out:
 a **single-value** store (ValueState; PK `[kg, k]`, one typed row per key), a **list** store
 (ListState; PK `[kg, k, ord]`, one row per element, a dirty key rewriting its whole list — exactly
 RocksDB ListState's whole-value rewrite — with positions preserving order-sensitive semantics like
@@ -110,6 +110,21 @@ the operator mutates a key's whole entry map in place, and at the barrier the st
 against the image read from the table when the key was first fetched — only entries that differ
 are upserted, only vanished rows are tombstoned, so a hot join key's untouched rows cost nothing
 per checkpoint.
+
+The fourth shape serves the watermark-driven operators (first consumer: rowtime keep-first
+dedup): a **time-buffered** store whose write buffer is not a decoded map but arrival-ordered
+Arrow batches with a per-batch liveness bitmap, a key index, and per-batch min/max on the time
+column — a queryable set, because watermark firing must answer "every pending row with
+`rowtime ≤ watermark`" *including* uncommitted adds and deletes, which per-key slots cannot
+express. The firing read is an overlay: the committed table scanned under the time predicate
+(stats-pruned, exact at decode), minus rows shadowed by an uncommitted version of the same key (a
+DataFusion right-anti hash join against the buffer's touched keys), plus the buffer's own live
+rows in range. RocksDB cross-check: Flink serves the same firing from ordered iteration (timers
+in a dedicated CF iterated by time); the pruned range scan plays that role — no total order is
+needed because a firing collects *all* rows ≤ watermark. Payload moves as Arrow columns end to
+end in this shape (input batch → buffer → barrier flush; committed scan → emission), never
+through per-cell scalars, and a fired key keeps a marker row on disk so emitted-ness survives
+checkpoints where the memory path grows an in-RAM emitted-key set forever.
 
 The full design record, including the verified paimon-rust API survey and the rejected
 alternatives (rust-rocksdb baseline, Tonbo, fjall, SlateDB, ForSt), is in

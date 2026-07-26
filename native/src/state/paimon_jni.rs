@@ -444,6 +444,170 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_closePaimonKe
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Watermark-driven keep-first dedup on the keep-first time store (dirty region + range overlay).
+// ---------------------------------------------------------------------------------------------
+
+#[no_mangle]
+pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonKeepFirstDeduplicator<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    partition_columns: JIntArray<'local>,
+    key_timestamp_precisions: JIntArray<'local>,
+    rt_column: jint,
+    row_schema_address: jlong,
+    memory_budget_bytes: jlong,
+    table_directory: JString<'local>,
+    max_parallelism: jint,
+    buckets: jint,
+    file_format: JString<'local>,
+    file_compression: JString<'local>,
+    source_directories: JObjectArray<'local>,
+    source_snapshot_tokens: JObjectArray<'local>,
+    key_group_start: jint,
+    key_group_end: jint,
+    aligned: jboolean,
+) -> jlong {
+    let partitions = read_columns(&env, &partition_columns);
+    let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
+        .into_iter()
+        .map(|precision| precision as i32)
+        .collect();
+    let row_types: Vec<DataType> = import_schema(row_schema_address)
+        .fields()
+        .iter()
+        .map(|field| field.data_type().clone())
+        .collect();
+    let table_dir = read_string(&mut env, &table_directory);
+    let format = read_string(&mut env, &file_format);
+    let compression = read_string(&mut env, &file_compression);
+    let source_dirs: Vec<String> = read_strings(&mut env, &source_directories)
+        .into_iter()
+        .flatten()
+        .collect();
+    let source_snapshots: Vec<i64> = read_strings(&mut env, &source_snapshot_tokens)
+        .into_iter()
+        .flatten()
+        .map(|token| token.parse::<i64>().expect("single-table paimon snapshot token"))
+        .collect();
+
+    let config = PaimonStoreConfig {
+        table_dir,
+        max_parallelism: max_parallelism as usize,
+        buckets: buckets as usize,
+        file_format: format,
+        file_compression: compression,
+    };
+    let store = if source_dirs.is_empty() {
+        PaimonKeepFirstStore::create(config, row_types)
+    } else {
+        let sources: Vec<(String, i64)> =
+            source_dirs.into_iter().zip(source_snapshots).collect();
+        PaimonKeepFirstStore::open_merged(
+            config,
+            row_types,
+            &sources,
+            key_group_start..=key_group_end,
+            aligned != 0,
+        )
+    };
+    let dedup = store.and_then(|store| {
+        KeepFirstDeduplicator::new(partitions, rt_column as usize)
+            .with_key_timestamp_precisions(timestamp_precisions)
+            .with_backend(store)
+            .with_read_through_budget(memory_budget_bytes)
+    });
+    boxed_or_throw(&mut env, dedup)
+}
+
+/// Buffers an input batch (no output); emission is watermark-driven (`flush`).
+#[no_mangle]
+pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushPaimonKeepFirstDeduplicator<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    in_array_address: jlong,
+    in_schema_address: jlong,
+) {
+    let dedup = unsafe { &mut *(handle as *mut KeepFirstDeduplicator) };
+    // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
+    let result = {
+        let batch = import_record_batch(in_array_address, in_schema_address);
+        dedup.push(&batch)
+    };
+    if let Err(e) = result {
+        throw_memory_limit(&mut env, &e.to_string());
+    }
+}
+
+/// Exports each key's first (minimum-rowtime) row whose rowtime the watermark has reached — the
+/// overlay range read over the write buffer and the committed table.
+#[no_mangle]
+pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_flushPaimonKeepFirstDeduplicator<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    watermark_millis: jlong,
+    out_array_address: jlong,
+    out_schema_address: jlong,
+) {
+    let dedup = unsafe { &mut *(handle as *mut KeepFirstDeduplicator) };
+    match dedup.flush(watermark_millis) {
+        Ok(result) => export_record_batch(result, out_array_address, out_schema_address),
+        Err(e) => throw_memory_limit(&mut env, &e.to_string()),
+    }
+}
+
+/// Checkpoint sync phase (task thread, at the barrier); see `checkpointPaimonGroupAggregator`.
+#[no_mangle]
+pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_checkpointPaimonKeepFirstDeduplicator<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) -> jobjectArray {
+    let dedup = unsafe { &mut *(handle as *mut KeepFirstDeduplicator) };
+    match dedup.store_mut().checkpoint() {
+        Ok(manifest) => manifest_array(&mut env, &manifest),
+        Err(e) => {
+            throw_runtime(&mut env, &format!("paimon state checkpoint failed: {e}"));
+            std::ptr::null_mut()
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_paimonKeepFirstDeduplicatorStateBytes<
+    'local,
+>(
+    _env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) -> jlong {
+    let dedup = unsafe { &*(handle as *const KeepFirstDeduplicator) };
+    dedup.memory.state_bytes as jlong
+}
+
+#[no_mangle]
+pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_closePaimonKeepFirstDeduplicator<
+    'local,
+>(
+    _env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) {
+    unsafe {
+        drop(from_handle::<KeepFirstDeduplicator>(handle));
+    }
+}
+
 type PaimonChangelogNormalizer = ChangelogNormalizer<PaimonNormalizerStore>;
 
 #[no_mangle]

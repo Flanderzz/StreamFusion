@@ -251,7 +251,14 @@ class NativeColumnarDeduplicateOperatorTest {
     int[] stateKeys = stateKeysForSubtasks(parallelism);
     return new KeyedOneInputStreamOperatorTestHarness<>(
         new NativeColumnarDeduplicateOperator(
-            new int[] {0}, new int[] {-1}, 2, MAX_PARALLELISM),
+            new int[] {0},
+            new int[] {-1},
+            2,
+            org.apache.flink.table.types.logical.RowType.of(
+                new org.apache.flink.table.types.logical.BigIntType(),
+                new org.apache.flink.table.types.logical.BigIntType(),
+                new org.apache.flink.table.types.logical.BigIntType()),
+            MAX_PARALLELISM),
         batch -> stateKeys[batch.destination() >= 0 ? batch.destination() : 0],
         Types.INT,
         MAX_PARALLELISM,

@@ -3258,6 +3258,148 @@ fn format_driver_init_gates_on_version() {
 // ---------------------------------------------------------------------------------------------
 
 #[cfg(feature = "paimon-state")]
+mod dirty_region {
+    use super::*;
+    use crate::state::dirty_region::{DirtyRegion, DirtyValue};
+
+    /// A region shaped like keep-first dedup's pending state: rowtime plus one payload column.
+    fn region() -> DirtyRegion {
+        DirtyRegion::new(
+            vec![
+                Field::new("rowtime", DataType::Int64, true),
+                Field::new("v", DataType::Int64, true),
+            ],
+            Some(0),
+            128,
+        )
+    }
+
+    fn upsert(region: &mut DirtyRegion, entries: &[(&[u8], i64, i64)]) {
+        let keys: Vec<&[u8]> = entries.iter().map(|(k, _, _)| *k).collect();
+        let rts: ArrayRef = Arc::new(Int64Array::from(
+            entries.iter().map(|(_, rt, _)| *rt).collect::<Vec<_>>(),
+        ));
+        let vs: ArrayRef = Arc::new(Int64Array::from(
+            entries.iter().map(|(_, _, v)| *v).collect::<Vec<_>>(),
+        ));
+        region.append_upserts(&keys, vec![rts, vs]).unwrap();
+    }
+
+    fn value_of(region: &DirtyRegion, key: &[u8]) -> Option<(i64, i64)> {
+        match region.get(key)? {
+            DirtyValue::Deleted => None,
+            DirtyValue::Row(batch, row) => {
+                let rt = batch.column(2).as_any().downcast_ref::<Int64Array>().unwrap();
+                let v = batch.column(3).as_any().downcast_ref::<Int64Array>().unwrap();
+                Some((rt.value(row), v.value(row)))
+            }
+        }
+    }
+
+    fn rows_of(batches: &[RecordBatch]) -> Vec<(i64, i64)> {
+        let mut out = Vec::new();
+        for batch in batches {
+            let rt = batch.column(2).as_any().downcast_ref::<Int64Array>().unwrap();
+            let v = batch.column(3).as_any().downcast_ref::<Int64Array>().unwrap();
+            for row in 0..batch.num_rows() {
+                out.push((rt.value(row), v.value(row)));
+            }
+        }
+        out
+    }
+
+    /// A later append supersedes the key's earlier version everywhere: point reads, range scans,
+    /// and the flush all see exactly the latest row.
+    #[test]
+    fn later_append_supersedes_across_batches() {
+        let mut r = region();
+        upsert(&mut r, &[(b"aaaa", 10, 1), (b"bbbb", 20, 2)]);
+        upsert(&mut r, &[(b"aaaa", 5, 3)]);
+        assert_eq!(value_of(&r, b"aaaa"), Some((5, 3)));
+        assert_eq!(value_of(&r, b"bbbb"), Some((20, 2)));
+        assert_eq!(rows_of(&r.live_upserts(None).unwrap()), vec![(20, 2), (5, 3)]);
+        // Flush: one row per key, arrival order across batches, kind column appended.
+        let flushed = r.flush_batches().unwrap();
+        assert_eq!(rows_of(&flushed), vec![(20, 2), (5, 3)]);
+        for batch in &flushed {
+            assert_eq!(
+                batch.schema().field(batch.num_columns() - 1).name(),
+                "_VALUE_KIND"
+            );
+        }
+    }
+
+    /// A key repeated within one call keeps only its last occurrence.
+    #[test]
+    fn repeated_key_in_one_call_keeps_the_last() {
+        let mut r = region();
+        upsert(&mut r, &[(b"aaaa", 10, 1), (b"aaaa", 7, 2), (b"aaaa", 9, 3)]);
+        assert_eq!(value_of(&r, b"aaaa"), Some((9, 3)));
+        assert_eq!(rows_of(&r.live_upserts(None).unwrap()), vec![(9, 3)]);
+    }
+
+    /// A delete shadows the key: point reads answer authoritative absence, range scans exclude
+    /// it, the flush carries the tombstone, and the touched-key set still lists it (the overlay's
+    /// anti-join must remove the committed row).
+    #[test]
+    fn delete_shadows_and_flushes_a_tombstone() {
+        let mut r = region();
+        upsert(&mut r, &[(b"aaaa", 10, 1), (b"bbbb", 20, 2)]);
+        r.append_deletes(&[b"aaaa"]).unwrap();
+        assert!(matches!(r.get(b"aaaa"), Some(DirtyValue::Deleted)));
+        assert_eq!(rows_of(&r.live_upserts(None).unwrap()), vec![(20, 2)]);
+        assert!(r.contains(b"aaaa") && r.contains(b"bbbb"));
+        assert_eq!(r.touched_keys().count(), 2);
+        let flushed = r.flush_batches().unwrap();
+        let kinds: Vec<i8> = flushed
+            .iter()
+            .flat_map(|b| {
+                let kinds = b
+                    .column(b.num_columns() - 1)
+                    .as_any()
+                    .downcast_ref::<Int8Array>()
+                    .unwrap();
+                (0..b.num_rows()).map(|i| kinds.value(i)).collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(kinds, vec![0, 3], "the live upsert then the tombstone");
+        // An upsert after the delete resurrects the key.
+        upsert(&mut r, &[(b"aaaa", 30, 4)]);
+        assert_eq!(value_of(&r, b"aaaa"), Some((30, 4)));
+    }
+
+    /// Range scans filter rows by the time column and prune whole batches by their min/max.
+    #[test]
+    fn range_scan_filters_and_prunes_by_time() {
+        let mut r = region();
+        upsert(&mut r, &[(b"aaaa", 10, 1), (b"bbbb", 20, 2)]);
+        upsert(&mut r, &[(b"cccc", 100, 3), (b"dddd", 200, 4)]);
+        assert_eq!(
+            rows_of(&r.live_upserts(Some((i64::MIN, 20))).unwrap()),
+            vec![(10, 1), (20, 2)]
+        );
+        assert_eq!(
+            rows_of(&r.live_upserts(Some((15, 150))).unwrap()),
+            vec![(20, 2), (100, 3)]
+        );
+        assert!(r.live_upserts(Some((300, i64::MAX))).unwrap().is_empty());
+    }
+
+    /// Clearing after the barrier leaves an empty region ready for the next interval.
+    #[test]
+    fn clear_resets_everything() {
+        let mut r = region();
+        upsert(&mut r, &[(b"aaaa", 10, 1)]);
+        assert!(!r.is_empty() && r.heap_bytes() > 0);
+        r.clear();
+        assert!(r.is_empty());
+        assert_eq!(r.heap_bytes(), 0);
+        assert!(r.live_upserts(None).unwrap().is_empty());
+        assert!(r.flush_batches().unwrap().is_empty());
+    }
+}
+
+#[cfg(feature = "paimon-state")]
 mod paimon_state {
     use super::*;
 
@@ -3353,6 +3495,154 @@ mod paimon_state {
             );
             // A checkpoint between every bundle forces every probe through the table.
             let link = temp_dir(&format!("parity-cp{i}"));
+            paimon.store_mut().checkpoint().unwrap();
+        }
+    }
+
+    fn keep_first_store(dir: &str) -> PaimonKeepFirstStore {
+        PaimonKeepFirstStore::create(config(dir), vec![DataType::Int64]).unwrap()
+    }
+
+    fn kf_stage(store: &mut PaimonKeepFirstStore, entries: &[(&[u8], i64, i64)]) {
+        let keys: Vec<&[u8]> = entries.iter().map(|(k, _, _)| *k).collect();
+        let rts: Vec<i64> = entries.iter().map(|(_, rt, _)| *rt).collect();
+        let payload: ArrayRef =
+            Arc::new(Int64Array::from(entries.iter().map(|(_, _, v)| *v).collect::<Vec<_>>()));
+        store.stage(&keys, rts, vec![payload]).unwrap();
+    }
+
+    /// Fired rows as (rt, payload) pairs, sorted for comparison.
+    fn kf_fired(store: &mut PaimonKeepFirstStore, watermark: i64) -> Vec<(i64, i64)> {
+        let ctx = Arc::new(TaskContext::default());
+        let mut out = Vec::new();
+        for batch in store.fire(watermark, ctx).unwrap() {
+            let rts = batch.column(2).as_any().downcast_ref::<Int64Array>().unwrap();
+            let vs = batch.column(4).as_any().downcast_ref::<Int64Array>().unwrap();
+            for row in 0..batch.num_rows() {
+                out.push((rts.value(row), vs.value(row)));
+            }
+        }
+        out.sort_unstable();
+        out
+    }
+
+    /// The keep-first overlay: firing merges the committed table and the write buffer, an
+    /// uncommitted improvement shadows the committed candidate for the same key, and a fired
+    /// key's marker survives checkpoints and restore so it can never emit twice.
+    #[test]
+    fn paimon_keep_first_fires_across_buffer_and_disk() {
+        let dir = temp_dir("kf");
+        let mut store = keep_first_store(&dir);
+        kf_stage(&mut store, &[(b"aaaa", 10, 1), (b"bbbb", 20, 2)]);
+        store.checkpoint().unwrap();
+
+        // An uncommitted improvement for a committed key, plus a fresh uncommitted key.
+        kf_stage(&mut store, &[(b"aaaa", 5, 3), (b"cccc", 15, 4)]);
+        assert_eq!(
+            kf_fired(&mut store, 15),
+            vec![(5, 3), (15, 4)],
+            "the buffered improvement shadows the committed candidate; b (rt 20) waits"
+        );
+        // A second fire at the same watermark emits nothing: the markers are staged.
+        assert!(kf_fired(&mut store, 15).is_empty());
+        assert_eq!(kf_fired(&mut store, 25), vec![(20, 2)], "the committed candidate fires");
+
+        // Markers persist across the barrier and a restore from listed files only.
+        let manifest = store.checkpoint().unwrap();
+        let restored_dir = temp_dir("kf-restore");
+        materialize(&manifest, &dir, &restored_dir);
+        let mut restored = PaimonKeepFirstStore::open(
+            config(&restored_dir),
+            vec![DataType::Int64],
+            manifest.snapshot_id,
+        )
+        .unwrap();
+        assert!(kf_fired(&mut restored, i64::MAX).is_empty(), "everything already fired");
+        let key = ByteKey::from(b"aaaa".as_slice());
+        restored.ensure_probed(std::slice::from_ref(&key)).unwrap();
+        assert!(
+            matches!(restored.status(b"aaaa"), KeepFirstStatus::Fired),
+            "a restored key's emitted-ness comes from the fired marker"
+        );
+        restored.end_bundle();
+        // A pending key staged after restore fires normally.
+        kf_stage(&mut restored, &[(b"dddd", 30, 5)]);
+        assert_eq!(kf_fired(&mut restored, 30), vec![(30, 5)]);
+    }
+
+    /// Rows of a `[k, v, rt]` batch as sorted tuples — keep-first emission order within one
+    /// firing is not part of the contract (the memory path emits in pending-batch order, the
+    /// persistent path in committed-then-buffered order), the row set is.
+    fn kf_rows(batch: &RecordBatch) -> Vec<(i64, i64, i64)> {
+        if batch.num_rows() == 0 {
+            return Vec::new();
+        }
+        let ks = batch.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+        let vs = batch.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
+        let rts = batch.column(2).as_any().downcast_ref::<Int64Array>().unwrap();
+        let mut rows: Vec<(i64, i64, i64)> =
+            (0..batch.num_rows()).map(|r| (ks.value(r), vs.value(r), rts.value(r))).collect();
+        rows.sort_unstable();
+        rows
+    }
+
+    /// A nanosecond-timestamp payload column — the shape every rowtime-carrying row has after the
+    /// host bridge (which pins timestamps to ns, no zone) — round-trips through the keep-first
+    /// table: staged, committed at the barrier, and read back by the firing range scan.
+    #[test]
+    fn paimon_keep_first_round_trips_nanosecond_timestamps() {
+        let dir = temp_dir("kf-ts");
+        let ts_type = DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None);
+        let mut store =
+            PaimonKeepFirstStore::create(config(&dir), vec![DataType::Int64, ts_type.clone()])
+                .unwrap();
+        let payload_v: ArrayRef = Arc::new(Int64Array::from(vec![7]));
+        let payload_ts: ArrayRef =
+            Arc::new(TimestampNanosecondArray::from(vec![1_234_567_890_123_456_789i64]));
+        store.stage(&[b"aaaa"], vec![10], vec![payload_v, payload_ts]).unwrap();
+        store.checkpoint().unwrap();
+
+        let ctx = Arc::new(TaskContext::default());
+        let fired = store.fire(20, ctx).unwrap();
+        assert_eq!(fired.len(), 1);
+        let ts = fired[0]
+            .column(5)
+            .as_any()
+            .downcast_ref::<TimestampNanosecondArray>()
+            .expect("nanosecond timestamp payload");
+        assert_eq!(ts.value(0), 1_234_567_890_123_456_789i64);
+    }
+
+    /// Watermark-driven keep-first dedup on the Paimon backend matches the memory operator
+    /// through pushes, watermarks, and checkpoints: one emission per key at its minimum rowtime,
+    /// improvements replace pending candidates, late rows drop, fired keys never re-emit.
+    #[test]
+    fn paimon_keep_first_dedup_matches_memory() {
+        let dir = temp_dir("kf-parity");
+        let store = PaimonKeepFirstStore::create(config(&dir), vec![DataType::Int64; 3]).unwrap();
+        let mut paimon = KeepFirstDeduplicator::new(vec![0], 2).with_backend(store);
+        let mut memory = KeepFirstDeduplicator::new(vec![0], 2);
+
+        // (batches, watermark) steps; a checkpoint lands between every step on the paimon side.
+        let steps: Vec<(Vec<RecordBatch>, i64)> = vec![
+            (vec![join_batch(vec![1, 2, 1], vec![10, 20, 11], vec![5, 3, 4])], 4),
+            // Key 3 arrives too new to fire; a late row for key 1 (rt 2 < wm 4) must drop.
+            (vec![join_batch(vec![1, 3], vec![12, 30], vec![2, 10])], 8),
+            // Key 3 improves (9 < 10); key 1 already fired and must stay silent.
+            (vec![join_batch(vec![3, 1], vec![31, 99], vec![9, 100])], 20),
+        ];
+        for (i, (batches, watermark)) in steps.iter().enumerate() {
+            for batch in batches {
+                paimon.push(batch).unwrap();
+                memory.push(batch).unwrap();
+            }
+            let paimon_out = paimon.flush(*watermark).unwrap();
+            let memory_out = memory.flush(*watermark).unwrap();
+            assert_eq!(
+                kf_rows(&memory_out),
+                kf_rows(&paimon_out),
+                "step {i} diverged between backends"
+            );
             paimon.store_mut().checkpoint().unwrap();
         }
     }
