@@ -27,7 +27,12 @@ pub(crate) struct WindowJoiner {
     right_schema: Option<SchemaRef>,
     left_buffered: Vec<RecordBatch>,
     right_buffered: Vec<RecordBatch>,
-    memory: OperatorMemory,
+    pub(crate) memory: OperatorMemory,
+    /// Persistent-state mode: both sides' buffered rows live in the Paimon store (write buffers
+    /// + disk tables); the in-memory `*_buffered` vectors stay empty between calls.
+    #[cfg(feature = "paimon-state")]
+    backend: Option<crate::state::PaimonWindowJoinStore>,
+    key_timestamp_precisions: Vec<i32>,
 }
 
 impl WindowJoiner {
@@ -44,6 +49,7 @@ impl WindowJoiner {
         left_data_schema: SchemaRef,
         right_data_schema: SchemaRef,
     ) -> Self {
+        let key_arity = left_keys.len();
         WindowJoiner {
             left_keys,
             right_keys,
@@ -60,7 +66,41 @@ impl WindowJoiner {
             left_buffered: Vec::new(),
             right_buffered: Vec::new(),
             memory: OperatorMemory::unaccounted(),
+            #[cfg(feature = "paimon-state")]
+            backend: None,
+            // Equi-join key columns have matching types on both sides, so one precision stream
+            // serves both (the raw snapshot partitioner already relies on this).
+            key_timestamp_precisions: vec![-1; key_arity],
         }
+    }
+
+    pub(crate) fn with_key_timestamp_precisions(
+        mut self,
+        key_timestamp_precisions: Vec<i32>,
+    ) -> Self {
+        self.key_timestamp_precisions = key_timestamp_precisions;
+        self
+    }
+
+    #[cfg(feature = "paimon-state")]
+    pub(crate) fn with_backend(mut self, store: crate::state::PaimonWindowJoinStore) -> Self {
+        self.backend = Some(store);
+        self
+    }
+
+    /// Attaches the managed-memory budget for a backend that starts with nothing resident.
+    #[cfg(feature = "paimon-state")]
+    pub(crate) fn with_read_through_budget(
+        mut self,
+        budget_bytes: i64,
+    ) -> Result<Self, DataFusionError> {
+        self.memory.attach("window-join", budget_bytes, 0)?;
+        Ok(self)
+    }
+
+    #[cfg(feature = "paimon-state")]
+    pub(crate) fn store_mut(&mut self) -> &mut crate::state::PaimonWindowJoinStore {
+        self.backend.as_mut().expect("window-join paimon backend")
     }
 
     /// Bounds the buffered rows by the operator's managed-memory budget (negative = unaccounted),
@@ -87,14 +127,80 @@ impl WindowJoiner {
 
     pub(crate) fn push_left(&mut self, batch: RecordBatch) -> Result<(), DataFusionError> {
         self.left_schema = Some(batch.schema());
+        #[cfg(feature = "paimon-state")]
+        if self.backend.is_some() {
+            return self.push_backend(batch, true);
+        }
         self.left_buffered.push(batch);
         self.account()
     }
 
     pub(crate) fn push_right(&mut self, batch: RecordBatch) -> Result<(), DataFusionError> {
         self.right_schema = Some(batch.schema());
+        #[cfg(feature = "paimon-state")]
+        if self.backend.is_some() {
+            return self.push_backend(batch, false);
+        }
         self.right_buffered.push(batch);
         self.account()
+    }
+
+    /// Persistent-state arrival path: every input row stages into its side's write buffer under
+    /// a fresh arrival sequence, keyed by its window end (the fire column) and routed by the
+    /// equi-join key's group. Nothing joins here — emission is watermark-driven (`flush`).
+    #[cfg(feature = "paimon-state")]
+    fn push_backend(&mut self, batch: RecordBatch, left: bool) -> Result<(), DataFusionError> {
+        if batch.num_rows() > 0 {
+            let (keys, wend) = if left {
+                (&self.left_keys, self.left_wend)
+            } else {
+                (&self.right_keys, self.right_wend)
+            };
+            let ends = rt_to_millis(batch.column(wend));
+            let mut encoder =
+                BinaryRowBatchEncoder::new(&batch, keys, &self.key_timestamp_precisions);
+            let store = self.backend.as_mut().expect("window-join paimon backend");
+            let side = if left { &mut store.left } else { &mut store.right };
+            let kgs: Vec<i32> =
+                (0..batch.num_rows()).map(|row| side.key_group(encoder.encode(row))).collect();
+            let times: Vec<i64> = (0..batch.num_rows()).map(|row| ends.value(row)).collect();
+            side.stage(&kgs, times, batch.columns().to_vec())?;
+        }
+        let store = self.backend.as_mut().expect("window-join paimon backend");
+        let delta = store.footprint_delta();
+        self.memory.record(delta);
+        self.memory.account()
+    }
+
+    /// Persistent-state firing path: each side's overlay range read returns the rows of every
+    /// closed window in arrival order (staging their deletions), and the memory path's own join
+    /// runs over them.
+    #[cfg(feature = "paimon-state")]
+    fn flush_backend(&mut self, watermark: i64) -> Result<RecordBatch, DataFusionError> {
+        let ctx = self.memory.task_ctx();
+        let store = self.backend.as_mut().expect("window-join paimon backend");
+        let left_fired = store.left.fire(watermark, ctx.clone())?;
+        let right_fired = store.right.fire(watermark, ctx)?;
+        let delta = store.footprint_delta();
+        self.memory.record(delta);
+        self.memory.account()?;
+        let left = self.side_payload(left_fired, &self.left_data_schema);
+        let right = self.side_payload(right_fired, &self.right_data_schema);
+        self.join_closed(left, right)
+    }
+
+    /// Projects a fired store batch (`kg`, `k`, `rt`, payload…) back to the side's data rows.
+    #[cfg(feature = "paimon-state")]
+    fn side_payload(
+        &self,
+        fired: Option<RecordBatch>,
+        data_schema: &SchemaRef,
+    ) -> Option<RecordBatch> {
+        let fired = fired?;
+        Some(
+            RecordBatch::try_new(data_schema.clone(), fired.columns()[3..].to_vec())
+                .expect("window-join payload projection"),
+        )
     }
 
     /// Splits a side's buffer into the rows whose window has closed (`window_end <= watermark`,
@@ -125,10 +231,24 @@ impl WindowJoiner {
     /// does not appear in it never matched. Empty batch when nothing is emitted. Fallible because
     /// the join's working memory draws on the operator's budget.
     pub(crate) fn flush(&mut self, watermark: i64) -> Result<RecordBatch, DataFusionError> {
+        #[cfg(feature = "paimon-state")]
+        if self.backend.is_some() {
+            return self.flush_backend(watermark);
+        }
         let left = Self::split_closed(&mut self.left_buffered, &self.left_schema, self.left_wend, watermark);
         let right =
             Self::split_closed(&mut self.right_buffered, &self.right_schema, self.right_wend, watermark);
         self.account().expect("closing windows only shrinks the buffers");
+        self.join_closed(left, right)
+    }
+
+    /// Joins the closed rows of both sides — the tail every flush shares, memory- or
+    /// Paimon-backed. See {@link flush} for the outer-join null-padding rationale.
+    fn join_closed(
+        &mut self,
+        left: Option<RecordBatch>,
+        right: Option<RecordBatch>,
+    ) -> Result<RecordBatch, DataFusionError> {
         // Join on the user keys plus the window bounds, so only rows of the same window match.
         let mut on: Vec<(usize, usize)> =
             self.left_keys.iter().zip(&self.right_keys).map(|(&l, &r)| (l, r)).collect();

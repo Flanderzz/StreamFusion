@@ -38,8 +38,12 @@ rows leave state as `-D`) and the per-key running fold as one typed row per key 
 snapshot's emit()/restore scalars, hydrated per firing by the key probe, dirty-slot writes).
 The sequence rides the snapshot token as `"pending:folds:seq"`. Deliberate exclusions recorded
 in coverage: proctime OVER (eager, off-watermark) and bounded frames (per-key list shape, not a
-fixed fold). Remaining rungs: interval/window/temporal joins, session/window aggregates (buffer
-remodels onto the same store machinery).
+fixed fold). RUNG 4 SHIPPED (2026-07-26): the event-time window join — the OVER pending side generalized
+into a reusable row-buffer table (`PaimonRowBufferStore`), and the window join is two of them
+(left/, right/), fire column = window end, both sides' firings feeding the memory path's own
+join in arrival order; token `"left:right:lseq:rseq"`. Proctime window join stays memory
+(processing-time timer deadline in raw state). Remaining rungs: interval/temporal joins,
+session/window aggregates (buffer remodels onto the same store machinery).
 
 Original draft (2026-07-25): Written after the state-backend
 speed-up round (124.1 s → 9.85 s measured on the q4 A/B; see `docs/benchmarks.md`) so the design

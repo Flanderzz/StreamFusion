@@ -1822,3 +1822,284 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_closePaimonOv
         drop(from_handle::<crate::over_agg::OverWindowAggregator>(handle));
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Event-time window join on two row-buffer tables (left/, right/). The snapshot token packs
+// both snapshot ids and both arrival sequences ("<left>:<right>:<lseq>:<rseq>") — the sequences
+// keep each side's emission order across a restore.
+// ---------------------------------------------------------------------------------------------
+
+/// Parses one restored window-join token — either id `-1` when that side had never committed.
+fn parse_window_join_token(token: &str) -> (i64, i64, i64, i64) {
+    let mut parts = token.splitn(4, ':');
+    let mut next = || {
+        parts
+            .next()
+            .expect("window-join paimon snapshot token")
+            .parse::<i64>()
+            .expect("window-join paimon token field")
+    };
+    (next(), next(), next(), next())
+}
+
+#[allow(clippy::too_many_arguments)]
+#[no_mangle]
+pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonWindowJoiner<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    left_keys: JIntArray<'local>,
+    right_keys: JIntArray<'local>,
+    left_window_start: jint,
+    left_window_end: jint,
+    right_window_start: jint,
+    right_window_end: jint,
+    join_type: jint,
+    left_schema_address: jlong,
+    right_schema_address: jlong,
+    pred_kinds: JIntArray<'local>,
+    pred_payload: JIntArray<'local>,
+    pred_child_counts: JIntArray<'local>,
+    pred_longs: JLongArray<'local>,
+    pred_doubles: JDoubleArray<'local>,
+    pred_strings: JObjectArray<'local>,
+    key_timestamp_precisions: JIntArray<'local>,
+    memory_budget_bytes: jlong,
+    table_directory: JString<'local>,
+    max_parallelism: jint,
+    buckets: jint,
+    file_format: JString<'local>,
+    file_compression: JString<'local>,
+    source_directories: JObjectArray<'local>,
+    source_snapshot_tokens: JObjectArray<'local>,
+    key_group_start: jint,
+    key_group_end: jint,
+    aligned: jboolean,
+) -> jlong {
+    let left = read_columns(&env, &left_keys);
+    let right = read_columns(&env, &right_keys);
+    let left_schema = import_schema(left_schema_address);
+    let right_schema = import_schema(right_schema_address);
+    let predicate = read_join_predicate(
+        &mut env,
+        &pred_kinds,
+        &pred_payload,
+        &pred_child_counts,
+        &pred_longs,
+        &pred_doubles,
+        &pred_strings,
+    );
+    let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
+        .into_iter()
+        .map(|precision| precision as i32)
+        .collect();
+    let table_dir = read_string(&mut env, &table_directory);
+    let format = read_string(&mut env, &file_format);
+    let compression = read_string(&mut env, &file_compression);
+    let source_dirs: Vec<String> = read_strings(&mut env, &source_directories)
+        .into_iter()
+        .flatten()
+        .collect();
+    let mut left_seq = 0i64;
+    let mut right_seq = 0i64;
+    let mut left_sources: Vec<(String, i64)> = Vec::new();
+    let mut right_sources: Vec<(String, i64)> = Vec::new();
+    for (dir, token) in source_dirs.iter().zip(
+        read_strings(&mut env, &source_snapshot_tokens)
+            .into_iter()
+            .flatten(),
+    ) {
+        let (left_id, right_id, lseq, rseq) = parse_window_join_token(&token);
+        left_seq = left_seq.max(lseq);
+        right_seq = right_seq.max(rseq);
+        if left_id >= 0 {
+            left_sources.push((format!("{dir}/left"), left_id));
+        }
+        if right_id >= 0 {
+            right_sources.push((format!("{dir}/right"), right_id));
+        }
+    }
+
+    let left_types: Vec<DataType> =
+        left_schema.fields().iter().map(|f| f.data_type().clone()).collect();
+    let right_types: Vec<DataType> =
+        right_schema.fields().iter().map(|f| f.data_type().clone()).collect();
+    let config = PaimonStoreConfig {
+        table_dir,
+        max_parallelism: max_parallelism as usize,
+        buckets: buckets as usize,
+        file_format: format,
+        file_compression: compression,
+    };
+    let store = if source_dirs.is_empty() {
+        PaimonWindowJoinStore::create(config, left_types, right_types)
+    } else {
+        PaimonWindowJoinStore::open_merged(
+            config,
+            left_types,
+            right_types,
+            &left_sources,
+            &right_sources,
+            key_group_start..=key_group_end,
+            aligned != 0,
+        )
+    };
+    let joiner = store.and_then(|mut store| {
+        store.left.set_next_seq(left_seq);
+        store.right.set_next_seq(right_seq);
+        crate::window_join::WindowJoiner::new(
+            left,
+            right,
+            left_window_start as usize,
+            left_window_end as usize,
+            right_window_start as usize,
+            right_window_end as usize,
+            predicate,
+            JoinKind::from_code(join_type),
+            left_schema,
+            right_schema,
+        )
+        .with_key_timestamp_precisions(timestamp_precisions)
+        .with_backend(store)
+        .with_read_through_budget(memory_budget_bytes)
+    });
+    boxed_or_throw(&mut env, joiner)
+}
+
+/// Buffers a left batch into pending state (no output); emission is watermark-driven.
+#[no_mangle]
+pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushLeftPaimonWindowJoiner<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    in_array_address: jlong,
+    in_schema_address: jlong,
+) {
+    let joiner = unsafe { &mut *(handle as *mut crate::window_join::WindowJoiner) };
+    // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
+    let result = {
+        let batch = import_record_batch(in_array_address, in_schema_address);
+        joiner.push_left(batch)
+    };
+    if let Err(e) = result {
+        throw_memory_limit(&mut env, &e.to_string());
+    }
+}
+
+/// Buffers a right batch into pending state (no output).
+#[no_mangle]
+pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushRightPaimonWindowJoiner<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    in_array_address: jlong,
+    in_schema_address: jlong,
+) {
+    let joiner = unsafe { &mut *(handle as *mut crate::window_join::WindowJoiner) };
+    // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
+    let result = {
+        let batch = import_record_batch(in_array_address, in_schema_address);
+        joiner.push_right(batch)
+    };
+    if let Err(e) = result {
+        throw_memory_limit(&mut env, &e.to_string());
+    }
+}
+
+/// Exports the matches of every window the watermark closed — each side's overlay range read
+/// feeding the join, evicting the fired rows.
+#[no_mangle]
+pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_flushPaimonWindowJoiner<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    watermark_millis: jlong,
+    out_array_address: jlong,
+    out_schema_address: jlong,
+) {
+    let joiner = unsafe { &mut *(handle as *mut crate::window_join::WindowJoiner) };
+    match joiner.flush(watermark_millis) {
+        Ok(out) => export_record_batch(out, out_array_address, out_schema_address),
+        Err(e) => throw_memory_limit(&mut env, &e.to_string()),
+    }
+}
+
+/// Checkpoint sync phase (task thread, at the barrier): commits both side tables; the token line
+/// packs both snapshot ids and both arrival sequences.
+#[no_mangle]
+pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_checkpointPaimonWindowJoiner<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) -> jobjectArray {
+    let joiner = unsafe { &mut *(handle as *mut crate::window_join::WindowJoiner) };
+    let store = joiner.store_mut();
+    let (left_seq, right_seq) = (store.left.next_seq(), store.right.next_seq());
+    match store.checkpoint() {
+        Ok((left, right)) => {
+            let token = if left.snapshot_id < 0 && right.snapshot_id < 0 {
+                String::new()
+            } else {
+                format!("{}:{}:{}:{}", left.snapshot_id, right.snapshot_id, left_seq, right_seq)
+            };
+            let mut lines = Vec::with_capacity(
+                1 + left.data_files.len()
+                    + left.meta_files.len()
+                    + right.data_files.len()
+                    + right.meta_files.len(),
+            );
+            lines.push(token);
+            lines.extend(left.data_files.iter().map(|f| format!("d:left/{f}")));
+            lines.extend(right.data_files.iter().map(|f| format!("d:right/{f}")));
+            lines.extend(left.meta_files.iter().map(|f| format!("m:left/{f}")));
+            lines.extend(right.meta_files.iter().map(|f| format!("m:right/{f}")));
+            let array = env
+                .new_object_array(lines.len() as i32, "java/lang/String", JObject::null())
+                .expect("manifest array");
+            for (i, line) in lines.iter().enumerate() {
+                let value = env.new_string(line).expect("manifest line");
+                env.set_object_array_element(&array, i as i32, value)
+                    .expect("manifest element");
+            }
+            array.into_raw()
+        }
+        Err(e) => {
+            throw_runtime(&mut env, &format!("paimon state checkpoint failed: {e}"));
+            std::ptr::null_mut()
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_paimonWindowJoinerStateBytes<
+    'local,
+>(
+    _env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) -> jlong {
+    let joiner = unsafe { &*(handle as *const crate::window_join::WindowJoiner) };
+    joiner.memory.state_bytes as jlong
+}
+
+#[no_mangle]
+pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_closePaimonWindowJoiner<
+    'local,
+>(
+    _env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) {
+    unsafe {
+        drop(from_handle::<crate::window_join::WindowJoiner>(handle));
+    }
+}

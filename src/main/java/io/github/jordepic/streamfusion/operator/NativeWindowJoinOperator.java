@@ -58,6 +58,7 @@ public class NativeWindowJoinOperator extends AbstractStreamOperator<ArrowBatch>
   private transient BufferAllocator allocator;
   private transient CDataDictionaryProvider dictionaries;
   private transient long handle;
+  private transient boolean paimonState;
   private transient ManagedMemoryBudget memoryBudget;
   private transient long restoredProcessingTimeTimerDeadline;
   private transient long registeredTimer;
@@ -112,54 +113,120 @@ public class NativeWindowJoinOperator extends AbstractStreamOperator<ArrowBatch>
     RawKeyedState.TimedRestore restored = RawKeyedState.restoreWithTimer(context);
     java.util.List<byte[]> rawSnapshots = restored.snapshots();
     restoredProcessingTimeTimerDeadline = restored.deadline();
+    predicate.bind();
+    memoryBudget = ManagedMemoryBudget.reserveFor(this);
+    // A proctime window join closes on processing-time timers whose deadline travels in raw
+    // state, so only the event-time mode is Paimon-eligible.
+    io.github.jordepic.streamfusion.state.PaimonNativeStateSupport paimon =
+        proctime
+            ? null
+            : io.github.jordepic.streamfusion.state.PaimonNativeStateSupport.resolve(
+                getKeyedStateBackend(),
+                "window join",
+                !rawSnapshots.isEmpty(),
+                () ->
+                    withSchemas(
+                            (l, r) ->
+                                Native.paimonRowStateSupported(l)
+                                        && Native.paimonRowStateSupported(r)
+                                    ? 1L
+                                    : 0L)
+                        != 0);
+    paimonState = paimon != null;
+    if (paimonState) {
+      handle =
+          withSchemas(
+              (l, r) ->
+                  Native.createPaimonWindowJoiner(
+                      leftKeys,
+                      rightKeys,
+                      leftWindowStart,
+                      leftWindowEnd,
+                      rightWindowStart,
+                      rightWindowEnd,
+                      joinType,
+                      l,
+                      r,
+                      predicate.kinds,
+                      predicate.payload,
+                      predicate.childCounts,
+                      predicate.boundLongs(),
+                      predicate.doubles,
+                      predicate.strings,
+                      keyTimestampPrecisions,
+                      memoryBudget.bytes(),
+                      paimon.tableDirectory(),
+                      maxParallelism,
+                      io.github.jordepic.streamfusion.planner.NativeConfig.paimonBuckets(),
+                      io.github.jordepic.streamfusion.planner.NativeConfig.paimonFileFormat(),
+                      io.github.jordepic.streamfusion.planner.NativeConfig.paimonFileCompression(),
+                      paimon.sourceDirectories(),
+                      paimon.sourceSnapshotTokens(),
+                      paimon.keyGroupStart(),
+                      paimon.keyGroupEnd(),
+                      paimon.aligned()));
+      long nativeHandle = handle;
+      paimon.register(() -> Native.checkpointPaimonWindowJoiner(nativeHandle));
+      return;
+    }
+    if (!rawSnapshots.isEmpty()) {
+      handle =
+          withSchemas(
+              (l, r) ->
+                  Native.restoreWindowJoinerPartitions(
+                      leftKeys,
+                      rightKeys,
+                      leftWindowStart,
+                      leftWindowEnd,
+                      rightWindowStart,
+                      rightWindowEnd,
+                      joinType,
+                      l,
+                      r,
+                      predicate.kinds,
+                      predicate.payload,
+                      predicate.childCounts,
+                      predicate.boundLongs(),
+                      predicate.doubles,
+                      predicate.strings,
+                      rawSnapshots.toArray(new byte[0][]),
+                      memoryBudget.bytes()));
+    } else {
+      handle =
+          withSchemas(
+              (l, r) ->
+                  Native.createWindowJoiner(
+                      leftKeys,
+                      rightKeys,
+                      leftWindowStart,
+                      leftWindowEnd,
+                      rightWindowStart,
+                      rightWindowEnd,
+                      joinType,
+                      l,
+                      r,
+                      predicate.kinds,
+                      predicate.payload,
+                      predicate.childCounts,
+                      predicate.boundLongs(),
+                      predicate.doubles,
+                      predicate.strings,
+                      memoryBudget.bytes()));
+    }
+  }
+
+  /**
+   * Exports both side row types as FFI Arrow schemas for the duration of one native call — the
+   * native side consumes the schema contents, so every call needs its own export.
+   */
+  private long withSchemas(java.util.function.LongBinaryOperator call) {
     BufferAllocator alloc = NativeAllocator.SHARED;
     CDataDictionaryProvider dicts = NativeAllocator.DICTIONARIES;
     try (ArrowSchema leftSchema = ArrowSchema.allocateNew(alloc);
         ArrowSchema rightSchema = ArrowSchema.allocateNew(alloc)) {
       Data.exportSchema(alloc, ArrowConversion.toArrowSchema(leftType), dicts, leftSchema);
       Data.exportSchema(alloc, ArrowConversion.toArrowSchema(rightType), dicts, rightSchema);
-      predicate.bind();
-      memoryBudget = ManagedMemoryBudget.reserveFor(this);
-      if (!rawSnapshots.isEmpty()) {
-        handle =
-            Native.restoreWindowJoinerPartitions(
-                leftKeys,
-                rightKeys,
-                leftWindowStart,
-                leftWindowEnd,
-                rightWindowStart,
-                rightWindowEnd,
-                joinType,
-                leftSchema.memoryAddress(),
-                rightSchema.memoryAddress(),
-                predicate.kinds,
-                predicate.payload,
-                predicate.childCounts,
-                predicate.boundLongs(),
-                predicate.doubles,
-                predicate.strings,
-                rawSnapshots.toArray(new byte[0][]),
-                memoryBudget.bytes());
-      } else {
-        handle =
-            Native.createWindowJoiner(
-                  leftKeys,
-                  rightKeys,
-                  leftWindowStart,
-                  leftWindowEnd,
-                  rightWindowStart,
-                  rightWindowEnd,
-                  joinType,
-                  leftSchema.memoryAddress(),
-                  rightSchema.memoryAddress(),
-                  predicate.kinds,
-                  predicate.payload,
-                  predicate.childCounts,
-                  predicate.boundLongs(),
-                  predicate.doubles,
-                  predicate.strings,
-                  memoryBudget.bytes());
-      }
+      return call.applyAsLong(leftSchema.memoryAddress(), rightSchema.memoryAddress());
     }
   }
 
@@ -197,7 +264,10 @@ public class NativeWindowJoinOperator extends AbstractStreamOperator<ArrowBatch>
   /** Samples the native state size for the operator's gauges; task-thread only. */
   private void publishStateBytes() {
     if (memoryBudget.bounded()) {
-      memoryBudget.publishStateBytes(Native.windowJoinerStateBytes(handle));
+      memoryBudget.publishStateBytes(
+          paimonState
+              ? Native.paimonWindowJoinerStateBytes(handle)
+              : Native.windowJoinerStateBytes(handle));
     }
   }
 
@@ -254,7 +324,13 @@ public class NativeWindowJoinOperator extends AbstractStreamOperator<ArrowBatch>
     try (ArrowArray array = ArrowArray.allocateNew(inAllocator);
         ArrowSchema schema = ArrowSchema.allocateNew(inAllocator)) {
       Data.exportVectorSchemaRoot(inAllocator, in, dictionaries, array, schema);
-      if (left) {
+      if (paimonState) {
+        if (left) {
+          Native.pushLeftPaimonWindowJoiner(handle, array.memoryAddress(), schema.memoryAddress());
+        } else {
+          Native.pushRightPaimonWindowJoiner(handle, array.memoryAddress(), schema.memoryAddress());
+        }
+      } else if (left) {
         Native.pushLeftWindowJoiner(handle, array.memoryAddress(), schema.memoryAddress());
       } else {
         Native.pushRightWindowJoiner(handle, array.memoryAddress(), schema.memoryAddress());
@@ -278,7 +354,12 @@ public class NativeWindowJoinOperator extends AbstractStreamOperator<ArrowBatch>
   private void flush(long threshold) {
     try (ArrowArray array = ArrowArray.allocateNew(allocator);
         ArrowSchema schema = ArrowSchema.allocateNew(allocator)) {
-      Native.flushWindowJoiner(handle, threshold, array.memoryAddress(), schema.memoryAddress());
+      if (paimonState) {
+        Native.flushPaimonWindowJoiner(
+            handle, threshold, array.memoryAddress(), schema.memoryAddress());
+      } else {
+        Native.flushWindowJoiner(handle, threshold, array.memoryAddress(), schema.memoryAddress());
+      }
       VectorSchemaRoot out = Data.importVectorSchemaRoot(allocator, array, schema, dictionaries);
       if (out.getRowCount() > 0) {
         output.collect(new StreamRecord<>(new ArrowBatch(out)));
@@ -291,17 +372,25 @@ public class NativeWindowJoinOperator extends AbstractStreamOperator<ArrowBatch>
   @Override
   public void snapshotState(StateSnapshotContext context) throws Exception {
     super.snapshotState(context);
-    RawKeyedState.snapshotPartitionsWithTimer(
-        context,
-        Native.snapshotWindowJoinerPartitions(
-            handle, maxParallelism, keyTimestampPrecisions),
-        proctime ? maxOpenEnd : Long.MIN_VALUE);
+    // Paimon state checkpoints through the keyed state backend's snapshot (an incremental Paimon
+    // commit); only memory state travels as raw keyed-state blobs.
+    if (!paimonState) {
+      RawKeyedState.snapshotPartitionsWithTimer(
+          context,
+          Native.snapshotWindowJoinerPartitions(
+              handle, maxParallelism, keyTimestampPrecisions),
+          proctime ? maxOpenEnd : Long.MIN_VALUE);
+    }
   }
 
   @Override
   public void close() throws Exception {
     if (handle != 0) {
-      Native.closeWindowJoiner(handle);
+      if (paimonState) {
+        Native.closePaimonWindowJoiner(handle);
+      } else {
+        Native.closeWindowJoiner(handle);
+      }
       handle = 0;
     }
     if (memoryBudget != null) {

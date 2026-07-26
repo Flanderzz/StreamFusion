@@ -150,6 +150,21 @@ class FlinkPaimonStateBackendSqlHarnessTest {
   }
 
   @Test
+  void windowJoinOnPaimonBackendMatchesHost() throws Exception {
+    // Event-time window join: both sides' rows buffer in per-side Paimon row-buffer tables
+    // across 50 ms barriers, and every watermark firing joins each side's range read (write
+    // buffer merged with the committed table) — a window buffered before a barrier and closed
+    // after it joins from the tables.
+    NativeParity.assertParity(
+        FlinkPaimonStateBackendSqlHarnessTest::paimonRowtimeEnvironment,
+        "SELECT a.k, a.v, b.v FROM "
+            + "(SELECT * FROM TABLE(TUMBLE(TABLE src, DESCRIPTOR(rt), INTERVAL '1' SECOND))) a "
+            + "JOIN "
+            + "(SELECT * FROM TABLE(TUMBLE(TABLE src, DESCRIPTOR(rt), INTERVAL '1' SECOND))) b "
+            + "ON a.k = b.k AND a.window_start = b.window_start AND a.window_end = b.window_end");
+  }
+
+  @Test
   void unsupportedAggregatesFallBackToMemoryStateUnderPaimonBackend() throws Exception {
     Path input = Files.createTempDirectory("paimon-minmax-in");
     writeInput(input);

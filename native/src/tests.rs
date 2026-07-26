@@ -3911,6 +3911,151 @@ mod paimon_state {
         }
     }
 
+    /// Window-join output pairs as sorted (left v, right v) with nulls for outer padding — the
+    /// hash join promises no output order, so parity is over the result set.
+    fn wj_pairs(batch: &RecordBatch) -> Vec<(Option<i64>, Option<i64>)> {
+        if batch.num_rows() == 0 {
+            return Vec::new();
+        }
+        let lv = batch.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
+        let rv = batch.column(5).as_any().downcast_ref::<Int64Array>().unwrap();
+        let mut pairs: Vec<(Option<i64>, Option<i64>)> = (0..batch.num_rows())
+            .map(|r| {
+                (
+                    lv.is_valid(r).then(|| lv.value(r)),
+                    rv.is_valid(r).then(|| rv.value(r)),
+                )
+            })
+            .collect();
+        pairs.sort_unstable();
+        pairs
+    }
+
+    fn paimon_window_joiner(dir: &str, kind: JoinKind) -> WindowJoiner {
+        let store = PaimonWindowJoinStore::create(
+            config(dir),
+            vec![DataType::Int64; 4],
+            vec![DataType::Int64; 4],
+        )
+        .unwrap();
+        window_joiner(kind).with_backend(store)
+    }
+
+    /// The window join on the Paimon backend matches the memory operator through pushes,
+    /// watermark firings, and checkpoints: rows buffered before a barrier join rows buffered
+    /// after it, and windows close in the same sets.
+    #[test]
+    fn paimon_window_join_matches_memory() {
+        let dir = temp_dir("wj-parity");
+        let mut paimon = paimon_window_joiner(&dir, JoinKind::Inner);
+        let mut memory = window_joiner(JoinKind::Inner);
+
+        // Steps of ((left batches, right batches), watermark); a barrier lands between steps on
+        // the paimon side, so step 2's join spans the committed table and the write buffer.
+        type Step = ((Vec<RecordBatch>, Vec<RecordBatch>), i64);
+        let steps: Vec<Step> = vec![
+            (
+                (
+                    vec![window_batch(vec![1, 1, 2], vec![10, 11, 20], vec![0, 0, 0], vec![1000, 1000, 1000])],
+                    vec![window_batch(vec![1, 3], vec![100, 300], vec![0, 0], vec![1000, 1000])],
+                ),
+                500, // nothing closes
+            ),
+            (
+                (
+                    vec![window_batch(vec![1], vec![40], vec![1000], vec![2000])],
+                    vec![window_batch(vec![1], vec![400], vec![1000], vec![2000])],
+                ),
+                1000, // closes [0,1000): committed left/right rows join
+            ),
+            ((Vec::new(), Vec::new()), 2000), // closes [1000,2000) from mixed buffer/table state
+        ];
+        for (i, ((left, right), watermark)) in steps.iter().enumerate() {
+            for batch in left {
+                paimon.push_left(batch.clone()).unwrap();
+                memory.push_left(batch.clone()).unwrap();
+            }
+            for batch in right {
+                paimon.push_right(batch.clone()).unwrap();
+                memory.push_right(batch.clone()).unwrap();
+            }
+            let paimon_out = paimon.flush(*watermark).unwrap();
+            let memory_out = memory.flush(*watermark).unwrap();
+            assert_eq!(
+                wj_pairs(&memory_out),
+                wj_pairs(&paimon_out),
+                "step {i} diverged between backends"
+            );
+            paimon.store_mut().checkpoint().unwrap();
+        }
+    }
+
+    /// LEFT outer on the backend: unmatched closed rows null-pad exactly as in memory — the
+    /// match state is transient within one firing, so nothing extra persists.
+    #[test]
+    fn paimon_window_join_left_outer_matches_memory() {
+        let dir = temp_dir("wj-outer");
+        let mut paimon = paimon_window_joiner(&dir, JoinKind::LeftOuter);
+        let mut memory = window_joiner(JoinKind::LeftOuter);
+        for joiner in [&mut paimon, &mut memory] {
+            joiner
+                .push_left(window_batch(vec![1, 2], vec![10, 20], vec![0, 0], vec![1000, 1000]))
+                .unwrap();
+            joiner
+                .push_right(window_batch(vec![1], vec![100], vec![0], vec![1000]))
+                .unwrap();
+        }
+        paimon.store_mut().checkpoint().unwrap(); // the closed window fires from the table
+        let memory_out = memory.flush(1000).unwrap();
+        let paimon_out = paimon.flush(1000).unwrap();
+        assert_eq!(wj_pairs(&memory_out), wj_pairs(&paimon_out));
+        assert_eq!(
+            wj_pairs(&paimon_out),
+            vec![(Some(10), Some(100)), (Some(20), None)],
+            "k=2 closed unmatched and null-pads"
+        );
+    }
+
+    /// A window committed at a barrier fires from the table scan exactly once: the firing's
+    /// staged deletions guard a repeat within the interval, and their commit guards it across
+    /// barriers and a restore from listed files only.
+    #[test]
+    fn paimon_window_join_fires_committed_windows_once() {
+        let dir = temp_dir("wj-committed");
+        let mut joiner = paimon_window_joiner(&dir, JoinKind::Inner);
+        joiner
+            .push_left(window_batch(vec![1], vec![10], vec![0], vec![1000]))
+            .unwrap();
+        joiner
+            .push_right(window_batch(vec![1], vec![100], vec![0], vec![1000]))
+            .unwrap();
+        joiner.store_mut().checkpoint().unwrap();
+
+        assert_eq!(wj_pairs(&joiner.flush(1000).unwrap()), vec![(Some(10), Some(100))]);
+        assert!(wj_pairs(&joiner.flush(i64::MAX).unwrap()).is_empty(), "same interval repeat");
+        let (left_manifest, right_manifest) = joiner.store_mut().checkpoint().unwrap();
+        assert!(wj_pairs(&joiner.flush(i64::MAX).unwrap()).is_empty(), "post-barrier repeat");
+
+        let restored_dir = temp_dir("wj-restore");
+        materialize(&left_manifest, &format!("{dir}/left"), &format!("{restored_dir}/left"));
+        materialize(&right_manifest, &format!("{dir}/right"), &format!("{restored_dir}/right"));
+        let store = PaimonWindowJoinStore::open_merged(
+            config(&restored_dir),
+            vec![DataType::Int64; 4],
+            vec![DataType::Int64; 4],
+            &[(format!("{restored_dir}/left"), left_manifest.snapshot_id)],
+            &[(format!("{restored_dir}/right"), right_manifest.snapshot_id)],
+            0..=127,
+            true,
+        )
+        .unwrap();
+        let mut restored = window_joiner(JoinKind::Inner).with_backend(store);
+        assert!(
+            wj_pairs(&restored.flush(i64::MAX).unwrap()).is_empty(),
+            "post-restore repeat"
+        );
+    }
+
     /// The bundle contract of the two-component store: written slots (the write buffer) survive
     /// `end_bundle` until the barrier; clean reads are bundle-scoped and drop, and a later bundle
     /// touching the same key re-reads it from the committed table.

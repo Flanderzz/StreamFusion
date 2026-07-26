@@ -157,6 +157,18 @@ scan replaces. Two OVER shapes stay on memory state: proctime (eager emission, n
 bounded ROWS/RANGE frames (per-key row buffers with trailing-edge eviction, a list shape, not a
 fixed-width fold).
 
+The OVER aggregate's pending side generalized into a reusable **row-buffer table** (whole input
+rows keyed by an arrival sequence, a time column as the fire predicate, fired rows leaving state
+as `-D`), and the fourth range-read consumer — the **event-time window join** — is simply two of
+them, one per side, under one operator directory. Its fire column is the row's window end; both
+sides' fired rows come back in arrival order, so the memory path's own join code runs over them
+unchanged, and outer-join match state stays transient within one firing (both sides of a window
+close together, so the inner join over the closed rows sees every potential match — nothing else
+persists). RocksDB cross-check: Flink's window join keeps per-window row lists in keyed MapState
+and iterates windows from a timer sweep; the row-buffer table's stats-pruned `window_end ≤
+watermark` scan replaces that iteration, with no per-window key needed because a firing drains
+every closed window at once.
+
 The full design record, including the verified paimon-rust API survey and the rejected
 alternatives (rust-rocksdb baseline, Tonbo, fjall, SlateDB, ForSt), is in
 `.claude/research/paimon-vortex-state-backend-plan.md`.

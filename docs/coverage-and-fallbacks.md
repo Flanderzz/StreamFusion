@@ -656,12 +656,19 @@ the operator just checkpoints its state the old way, in full):
   memory path's per-key map grows forever. Two `OVER` shapes keep memory state under this
   backend: **proctime `OVER`** (emission is eager, off-watermark, ordered by an arrival counter)
   and **bounded ROWS/RANGE frames** (their per-key state is a row buffer with trailing-edge
-  eviction, not a fixed-width fold — a later list-shaped remodel). Every other stateful operator
-  keeps memory state under this backend. The remaining **watermark/timer-driven operators**
-  (interval/window/temporal joins, session/window aggregates) stay on memory state for one
-  remaining reason: their pending buffers are columnar batches that need remodeling as keyed
-  rows — the range-read machinery itself now exists (keep-first dedup, window rank, and the
-  `OVER` aggregate run on it).
+  eviction, not a fixed-width fold — a later list-shaped remodel). The **event-time window
+  join** (all kinds) runs on the backend as one row-buffer table per side under the operator's
+  directory: each buffered row keyed by an arrival sequence with its window end as the fire
+  column, so a watermark firing is each side's range read (write buffer merged with the
+  committed table, back in arrival order) feeding the memory path's own join, and fired rows
+  leave state. Nothing else persists — outer-join match state is transient within one firing
+  because both sides of a window close together. The **proctime** window join keeps memory state
+  (processing-time timers, deadline in raw state — the window-rank rule). Every other stateful
+  operator keeps memory state under this backend. The remaining **watermark/timer-driven
+  operators** (interval/temporal joins, session/window aggregates) stay on memory state for one
+  remaining reason: their pending buffers are columnar batches or ordered per-key maps that need
+  remodeling as keyed rows — the range-read machinery itself now exists (keep-first dedup,
+  window rank, the `OVER` aggregate, and the window join run on it).
 - **Multiset-state aggregates** — retracting `MIN`/`MAX` and `COUNT`/`SUM(DISTINCT)` keep per-key
   multisets, which the persistent row codec does not carry yet; an aggregate list containing them
   keeps the whole operator on memory state.

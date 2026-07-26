@@ -1227,6 +1227,65 @@ public final class Native {
   public static native void closePaimonOverAggregator(long handle);
 
   /**
+   * {@code createWindowJoiner} on the Paimon state backend (event-time only — a proctime window
+   * join closes on processing-time timers whose deadline travels in raw state). One row-buffer
+   * table per side under the operator's state directory, each row keyed by an arrival sequence
+   * with its window end as the fire column; a watermark firing is each side's range read feeding
+   * the memory path's own join, and fired rows leave state. The snapshot token packs both
+   * snapshot ids and both arrival sequences. Restore semantics otherwise as in {@link
+   * #createPaimonKeepLastDeduplicator}.
+   */
+  public static native long createPaimonWindowJoiner(
+      int[] leftKeys,
+      int[] rightKeys,
+      int leftWindowStart,
+      int leftWindowEnd,
+      int rightWindowStart,
+      int rightWindowEnd,
+      int joinType,
+      long leftSchemaAddress,
+      long rightSchemaAddress,
+      int[] predKinds,
+      int[] predPayload,
+      int[] predChildCounts,
+      long[] predLongs,
+      double[] predDoubles,
+      String[] predStrings,
+      int[] keyTimestampPrecisions,
+      long memoryBudgetBytes,
+      String tableDirectory,
+      int maxParallelism,
+      int buckets,
+      String fileFormat,
+      String fileCompression,
+      String[] sourceDirectories,
+      String[] sourceSnapshotTokens,
+      int keyGroupStart,
+      int keyGroupEnd,
+      boolean aligned);
+
+  /** {@code pushLeftWindowJoiner} for a Paimon-backed handle (no output; watermark-driven). */
+  public static native void pushLeftPaimonWindowJoiner(
+      long handle, long inArrayAddress, long inSchemaAddress);
+
+  /** {@code pushRightWindowJoiner} for a Paimon-backed handle (no output; watermark-driven). */
+  public static native void pushRightPaimonWindowJoiner(
+      long handle, long inArrayAddress, long inSchemaAddress);
+
+  /** {@code flushWindowJoiner} for a Paimon-backed handle. */
+  public static native void flushPaimonWindowJoiner(
+      long handle, long watermarkMillis, long outArrayAddress, long outSchemaAddress);
+
+  /** {@code checkpointPaimonGroupAggregator} for a Paimon-backed window joiner. */
+  public static native String[] checkpointPaimonWindowJoiner(long handle);
+
+  /** Estimated bytes of a Paimon-backed window joiner's resident working set. */
+  public static native long paimonWindowJoinerStateBytes(long handle);
+
+  /** Releases a Paimon-backed window joiner handle. */
+  public static native void closePaimonWindowJoiner(long handle);
+
+  /**
    * {@code createChangelogNormalizer} on the Paimon state backend; state row and restore semantics
    * as in {@link #createPaimonKeepLastDeduplicator}.
    */

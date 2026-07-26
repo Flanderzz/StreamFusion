@@ -2761,44 +2761,23 @@ impl WindowBuffer {
     }
 }
 
-/// Time-buffered pending rows plus point-access fold state for the event-time OVER aggregate —
-/// the third range-read consumer. Two tables live under the operator's state directory:
-///
-/// * `pending/` — one row per buffered input row under PK `[kg, k]`, `k` the row's arrival
-///   sequence (big-endian i64, so byte order is arrival order) and `kg` the key group of its
-///   PARTITION BY key. Columns: `rt` (epoch millis) and the full input row as typed payload.
-///   A watermark firing is the overlay range read (`rt <= watermark`), merged back into arrival
-///   order by the sequence; fired rows leave pending state — a `-D` per row commits at the next
-///   barrier. The sequence itself rides the operator's opaque snapshot token: without it a
-///   restored subtask's new rows would order ahead of older pending rows.
-/// * `folds/` — the per-key running state under PK `[kg, k]` (`k` = partition-key BinaryRow),
-///   one typed column per running value — the same scalars the memory path's raw snapshot
-///   round-trips. Point-access only: reads are the per-batch key probe, writes buffer as dirty
-///   slots until the barrier. Unlike the memory path's forever-growing per-key map, the fold
-///   rows are disk-resident between firings.
-pub(crate) struct PaimonOverStore {
-    pending: PaimonTableCore,
-    folds: PaimonTableCore,
+/// One time-buffered table of whole input rows keyed by an **arrival sequence** — the shared
+/// component behind every "rows pending the watermark" state (the OVER aggregate's pending side,
+/// each side of a window join). PK `[kg, k]`: `k` is the sequence's big-endian i64, so byte
+/// order is arrival order and a firing can merge the write buffer with the committed table back
+/// into exactly the memory path's emission order; `kg` is the key group of the row's shuffle key
+/// (rescale clips by it). Columns: `rt` — the epoch-milli time the watermark fires on (a rowtime,
+/// a window end) — and the full input row as typed payload. Fired rows leave state: a `-D` per
+/// row commits at the next barrier. The sequence itself rides the operator's snapshot token;
+/// without it a restored subtask's new rows would order ahead of older pending rows.
+pub(crate) struct PaimonRowBufferStore {
+    core: PaimonTableCore,
     payload_fields: Vec<Field>,
-    state_fields: Vec<Field>,
     region: DirtyRegion,
-    fold_working: ahash::HashMap<ByteKey, FoldSlot>,
     next_seq: i64,
-    last_footprint: usize,
 }
 
-/// One fold-state working entry: `dirty` rows are the folds write buffer (pinned until the
-/// barrier commit); clean rows are this bundle's committed probes and drop at `end_bundle`.
-/// `None` records a probed-absent key.
-struct FoldSlot {
-    scalars: Option<Vec<ScalarValue>>,
-    dirty: bool,
-}
-
-impl PaimonOverStore {
-    const FOLD_ENTRY_BYTES: usize =
-        std::mem::size_of::<(ByteKey, FoldSlot)>() + GROUP_ENTRY_OVERHEAD;
-
+impl PaimonRowBufferStore {
     fn typed_fields(prefix: &str, types: &[DataType]) -> Result<Vec<Field>, DataFusionError> {
         if !paimon_row_supported(types) {
             return Err(DataFusionError::Plan(
@@ -2812,26 +2791,12 @@ impl PaimonOverStore {
             .collect())
     }
 
-    fn side_config(config: &PaimonStoreConfig, side: &str) -> PaimonStoreConfig {
-        PaimonStoreConfig {
-            table_dir: format!("{}/{side}", config.table_dir),
-            max_parallelism: config.max_parallelism,
-            buckets: config.buckets,
-            file_format: config.file_format.clone(),
-            file_compression: config.file_compression.clone(),
-        }
-    }
-
     pub(crate) fn create(
         config: PaimonStoreConfig,
         payload_types: Vec<DataType>,
-        state_types: Vec<DataType>,
     ) -> Result<Self, DataFusionError> {
         let payload_fields = Self::typed_fields("c", &payload_types)?;
-        let state_fields = Self::typed_fields("s", &state_types)?;
-
-        let pending_config = Self::side_config(&config, "pending");
-        let mut builder = PaimonTableCore::schema_builder(&pending_config)?
+        let mut builder = PaimonTableCore::schema_builder(&config)?
             .column(RT_COLUMN, PaimonType::BigInt(BigIntType::new()));
         for field in &payload_fields {
             let paimon_type = paimon_type_of(field.data_type()).ok_or_else(|| {
@@ -2842,107 +2807,58 @@ impl PaimonOverStore {
             })?;
             builder = builder.column(field.name(), paimon_type);
         }
-        let pending_schema = builder.primary_key([KG_COLUMN, KEY_COLUMN]).build().map_err(pe)?;
-
-        let folds_config = Self::side_config(&config, "folds");
-        let mut builder = PaimonTableCore::schema_builder(&folds_config)?;
-        for field in &state_fields {
-            let paimon_type = paimon_type_of(field.data_type()).ok_or_else(|| {
-                DataFusionError::Plan(format!(
-                    "state type {} not supported by the paimon state backend",
-                    field.data_type()
-                ))
-            })?;
-            builder = builder.column(field.name(), paimon_type);
-        }
-        let folds_schema = builder.primary_key([KG_COLUMN, KEY_COLUMN]).build().map_err(pe)?;
-
-        let region = DirtyRegion::new(Self::pending_value_fields(&payload_fields), Some(0));
-        Ok(PaimonOverStore {
-            pending: PaimonTableCore::create(pending_config, pending_schema)?,
-            folds: PaimonTableCore::create(folds_config, folds_schema)?,
+        let schema = builder.primary_key([KG_COLUMN, KEY_COLUMN]).build().map_err(pe)?;
+        let region = DirtyRegion::new(Self::value_fields(&payload_fields), Some(0));
+        Ok(PaimonRowBufferStore {
+            core: PaimonTableCore::create(config, schema)?,
             payload_fields,
-            state_fields,
             region,
-            fold_working: ahash::HashMap::default(),
             next_seq: 0,
-            last_footprint: 0,
         })
     }
 
-    /// Restores from checkpoint sources, each side independently: a source that never committed
-    /// a side (snapshot id `-1`) is skipped for it. Aligned single-source restores adopt files
-    /// wholesale; anything else clips by key-group range.
+    /// Restores from checkpoint sources: an aligned single source adopts files wholesale,
+    /// anything else clips by key-group range. Empty sources leave a fresh table.
     pub(crate) fn open_merged(
         config: PaimonStoreConfig,
         payload_types: Vec<DataType>,
-        state_types: Vec<DataType>,
-        pending_sources: &[(String, i64)],
-        fold_sources: &[(String, i64)],
-        key_groups: std::ops::RangeInclusive<i32>,
-        aligned: bool,
-    ) -> Result<Self, DataFusionError> {
-        let mut store = Self::create(config, payload_types, state_types)?;
-        let pending_fields = store.pending_arrow_fields();
-        Self::restore_core(
-            &mut store.pending,
-            pending_sources,
-            key_groups.clone(),
-            aligned,
-            &pending_fields,
-        )?;
-        let fold_fields = store.folds_arrow_fields();
-        Self::restore_core(&mut store.folds, fold_sources, key_groups, aligned, &fold_fields)?;
-        Ok(store)
-    }
-
-    fn restore_core(
-        core: &mut PaimonTableCore,
         sources: &[(String, i64)],
         key_groups: std::ops::RangeInclusive<i32>,
         aligned: bool,
-        write_fields: &[Field],
-    ) -> Result<(), DataFusionError> {
+    ) -> Result<Self, DataFusionError> {
+        let mut store = Self::create(config, payload_types)?;
         if sources.is_empty() {
-            return Ok(());
+            return Ok(store);
         }
         if aligned && sources.len() == 1 {
             let (source_dir, snapshot_id) = &sources[0];
-            if core.adopt_all(source_dir, *snapshot_id)? {
-                return Ok(());
+            if store.core.adopt_all(source_dir, *snapshot_id)? {
+                return Ok(store);
             }
         }
-        core.clip_from_sources(sources, key_groups, write_fields)
+        let write_fields = store.arrow_fields();
+        store.core.clip_from_sources(sources, key_groups, &write_fields)?;
+        Ok(store)
     }
 
-    fn pending_value_fields(payload_fields: &[Field]) -> Vec<Field> {
+    fn value_fields(payload_fields: &[Field]) -> Vec<Field> {
         let mut fields = vec![Field::new(RT_COLUMN, DataType::Int64, true)];
         fields.extend(payload_fields.iter().cloned());
         fields
     }
 
-    /// The pending table's persisted row schema (also its clip write schema).
-    fn pending_arrow_fields(&self) -> Vec<Field> {
+    /// The persisted row schema (also the clip write schema): `kg`, `k`, `rt`, payload.
+    fn arrow_fields(&self) -> Vec<Field> {
         let mut fields = vec![
             Field::new(KG_COLUMN, DataType::Int32, false),
             Field::new(KEY_COLUMN, DataType::Binary, false),
         ];
-        fields.extend(Self::pending_value_fields(&self.payload_fields));
-        fields
-    }
-
-    /// The folds table's persisted row schema (also its clip write schema).
-    fn folds_arrow_fields(&self) -> Vec<Field> {
-        let mut fields = vec![
-            Field::new(KG_COLUMN, DataType::Int32, false),
-            Field::new(KEY_COLUMN, DataType::Binary, false),
-        ];
-        fields.extend(self.state_fields.iter().cloned());
+        fields.extend(Self::value_fields(&self.payload_fields));
         fields
     }
 
     pub(crate) fn key_group(&self, key: &[u8]) -> i32 {
-        self.pending.key_group(key)
+        self.core.key_group(key)
     }
 
     pub(crate) fn next_seq(&self) -> i64 {
@@ -2953,12 +2869,16 @@ impl PaimonOverStore {
         self.next_seq = seq;
     }
 
-    /// Buffers one input batch's rows as pending state, each under a fresh arrival sequence.
-    /// `kgs` route each row by its PARTITION BY key; `rts` are epoch millis.
-    pub(crate) fn stage_pending(
+    pub(crate) fn heap_bytes(&self) -> usize {
+        self.region.heap_bytes()
+    }
+
+    /// Buffers one input batch's rows, each under a fresh arrival sequence. `kgs` route each row
+    /// by its shuffle key; `times` are the epoch millis the watermark fires on.
+    pub(crate) fn stage(
         &mut self,
         kgs: &[i32],
-        rts: Vec<i64>,
+        times: Vec<i64>,
         payload: Vec<ArrayRef>,
     ) -> Result<(), DataFusionError> {
         let n = kgs.len();
@@ -2970,14 +2890,16 @@ impl PaimonOverStore {
         self.next_seq += n as i64;
         let key_slices: Vec<&[u8]> = keys_owned.iter().map(|k| k.as_slice()).collect();
         let mut values: Vec<ArrayRef> = Vec::with_capacity(1 + payload.len());
-        values.push(Arc::new(Int64Array::from(rts)));
+        values.push(Arc::new(Int64Array::from(times)));
         values.extend(payload);
         self.region.append_upserts(&key_slices, kgs, values)
     }
 
-    /// Every pending row the watermark completed — the overlay range read, merged back into
-    /// arrival order by the sequence key. Region schema (`kg`, `k`, `rt`, payload…), `None` when
-    /// nothing fired. Fired rows leave pending state: their deletions stage into the region.
+    /// Every buffered row the watermark completed — the overlay range read (committed rows under
+    /// `time ≤ watermark` minus rows the region already touched, plus the region's live rows in
+    /// range) — merged back into arrival order by the sequence key. Store schema (`kg`, `k`,
+    /// `rt`, payload…), `None` when nothing fired. Fired rows leave state: their deletions stage
+    /// into the region.
     pub(crate) fn fire(
         &mut self,
         watermark: i64,
@@ -2985,11 +2907,11 @@ impl PaimonOverStore {
     ) -> Result<Option<RecordBatch>, DataFusionError> {
         let mut rows: Vec<RecordBatch> = Vec::new();
         let committed = {
-            let builder = PredicateBuilder::new(&self.pending.fields);
+            let builder = PredicateBuilder::new(&self.core.fields);
             let predicate = builder
                 .less_or_equal(RT_COLUMN, Datum::Long(watermark))
                 .map_err(pe)?;
-            self.pending.scan_predicate(predicate)?
+            self.core.scan_predicate(predicate)?
         };
         if !committed.is_empty() {
             if self.region.is_empty() {
@@ -3006,7 +2928,7 @@ impl PaimonOverStore {
         }
         rows.extend(self.region.live_upserts(Some((i64::MIN, watermark)))?);
         // Exact re-check per row (committed pushdown is best-effort), normalizing reader types.
-        let expected = self.pending_arrow_fields();
+        let expected = self.arrow_fields();
         let mut normalized: Vec<RecordBatch> = Vec::new();
         for batch in rows {
             let mut columns: Vec<ArrayRef> = Vec::with_capacity(expected.len());
@@ -3046,9 +2968,9 @@ impl PaimonOverStore {
         let columns: Vec<ArrayRef> = merged
             .columns()
             .iter()
-            .map(|c| take(c, &indices, None).expect("over fire sort"))
+            .map(|c| take(c, &indices, None).expect("row buffer fire sort"))
             .collect();
-        let sorted = RecordBatch::try_new(merged.schema(), columns).expect("over fired batch");
+        let sorted = RecordBatch::try_new(merged.schema(), columns).expect("row buffer fired batch");
         {
             let ks = sorted
                 .column(1)
@@ -3065,6 +2987,177 @@ impl PaimonOverStore {
             self.region.append_null_deletes(&key_slices, &key_groups)?;
         }
         Ok(Some(sorted))
+    }
+
+    /// Checkpoint sync phase: commits the region's live rows and fired deletions as this table's
+    /// snapshot and runs the checkpoint file phase.
+    pub(crate) fn checkpoint(&mut self) -> Result<PaimonCheckpointManifest, DataFusionError> {
+        self.core.refresh_to_latest()?;
+        let batches = self.region.flush_batches()?;
+        if !batches.is_empty() {
+            self.core.commit_batches(&batches)?;
+        }
+        self.region.clear();
+        self.core.checkpoint_manifest()
+    }
+}
+
+/// Time-buffered pending rows plus point-access fold state for the event-time OVER aggregate —
+/// the third range-read consumer. Two tables live under the operator's state directory:
+///
+/// * `pending/` — a [`PaimonRowBufferStore`] of the buffered input rows (`rt` = rowtime millis,
+///   `kg` routed by the PARTITION BY key). A watermark firing returns the completed rows in
+///   arrival order and stages their deletions.
+/// * `folds/` — the per-key running state under PK `[kg, k]` (`k` = partition-key BinaryRow),
+///   one typed column per running value — the same scalars the memory path's raw snapshot
+///   round-trips. Point-access only: reads are the per-batch key probe, writes buffer as dirty
+///   slots until the barrier. Unlike the memory path's forever-growing per-key map, the fold
+///   rows are disk-resident between firings.
+pub(crate) struct PaimonOverStore {
+    pending: PaimonRowBufferStore,
+    folds: PaimonTableCore,
+    state_fields: Vec<Field>,
+    fold_working: ahash::HashMap<ByteKey, FoldSlot>,
+    last_footprint: usize,
+}
+
+/// One fold-state working entry: `dirty` rows are the folds write buffer (pinned until the
+/// barrier commit); clean rows are this bundle's committed probes and drop at `end_bundle`.
+/// `None` records a probed-absent key.
+struct FoldSlot {
+    scalars: Option<Vec<ScalarValue>>,
+    dirty: bool,
+}
+
+impl PaimonOverStore {
+    const FOLD_ENTRY_BYTES: usize =
+        std::mem::size_of::<(ByteKey, FoldSlot)>() + GROUP_ENTRY_OVERHEAD;
+
+    fn side_config(config: &PaimonStoreConfig, side: &str) -> PaimonStoreConfig {
+        PaimonStoreConfig {
+            table_dir: format!("{}/{side}", config.table_dir),
+            max_parallelism: config.max_parallelism,
+            buckets: config.buckets,
+            file_format: config.file_format.clone(),
+            file_compression: config.file_compression.clone(),
+        }
+    }
+
+    pub(crate) fn create(
+        config: PaimonStoreConfig,
+        payload_types: Vec<DataType>,
+        state_types: Vec<DataType>,
+    ) -> Result<Self, DataFusionError> {
+        let state_fields = PaimonRowBufferStore::typed_fields("s", &state_types)?;
+        let pending =
+            PaimonRowBufferStore::create(Self::side_config(&config, "pending"), payload_types)?;
+        Ok(PaimonOverStore {
+            pending,
+            folds: Self::create_folds(&config, &state_fields)?,
+            state_fields,
+            fold_working: ahash::HashMap::default(),
+            last_footprint: 0,
+        })
+    }
+
+    fn create_folds(
+        config: &PaimonStoreConfig,
+        state_fields: &[Field],
+    ) -> Result<PaimonTableCore, DataFusionError> {
+        let folds_config = Self::side_config(config, "folds");
+        let mut builder = PaimonTableCore::schema_builder(&folds_config)?;
+        for field in state_fields {
+            let paimon_type = paimon_type_of(field.data_type()).ok_or_else(|| {
+                DataFusionError::Plan(format!(
+                    "state type {} not supported by the paimon state backend",
+                    field.data_type()
+                ))
+            })?;
+            builder = builder.column(field.name(), paimon_type);
+        }
+        let folds_schema = builder.primary_key([KG_COLUMN, KEY_COLUMN]).build().map_err(pe)?;
+        PaimonTableCore::create(folds_config, folds_schema)
+    }
+
+    /// Restores from checkpoint sources, each side independently: a source that never committed
+    /// a side (snapshot id `-1`) is skipped for it. Aligned single-source restores adopt files
+    /// wholesale; anything else clips by key-group range.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn open_merged(
+        config: PaimonStoreConfig,
+        payload_types: Vec<DataType>,
+        state_types: Vec<DataType>,
+        pending_sources: &[(String, i64)],
+        fold_sources: &[(String, i64)],
+        key_groups: std::ops::RangeInclusive<i32>,
+        aligned: bool,
+    ) -> Result<Self, DataFusionError> {
+        let state_fields = PaimonRowBufferStore::typed_fields("s", &state_types)?;
+        let pending = PaimonRowBufferStore::open_merged(
+            Self::side_config(&config, "pending"),
+            payload_types,
+            pending_sources,
+            key_groups.clone(),
+            aligned,
+        )?;
+        let mut store = PaimonOverStore {
+            pending,
+            folds: Self::create_folds(&config, &state_fields)?,
+            state_fields,
+            fold_working: ahash::HashMap::default(),
+            last_footprint: 0,
+        };
+        if !fold_sources.is_empty() {
+            let adopted = aligned
+                && fold_sources.len() == 1
+                && store.folds.adopt_all(&fold_sources[0].0, fold_sources[0].1)?;
+            if !adopted {
+                let fold_fields = store.folds_arrow_fields();
+                store.folds.clip_from_sources(fold_sources, key_groups, &fold_fields)?;
+            }
+        }
+        Ok(store)
+    }
+
+    /// The folds table's persisted row schema (also its clip write schema).
+    fn folds_arrow_fields(&self) -> Vec<Field> {
+        let mut fields = vec![
+            Field::new(KG_COLUMN, DataType::Int32, false),
+            Field::new(KEY_COLUMN, DataType::Binary, false),
+        ];
+        fields.extend(self.state_fields.iter().cloned());
+        fields
+    }
+
+    pub(crate) fn key_group(&self, key: &[u8]) -> i32 {
+        self.pending.key_group(key)
+    }
+
+    pub(crate) fn next_seq(&self) -> i64 {
+        self.pending.next_seq()
+    }
+
+    pub(crate) fn set_next_seq(&mut self, seq: i64) {
+        self.pending.set_next_seq(seq);
+    }
+
+    /// Buffers one input batch's rows as pending state — see [`PaimonRowBufferStore::stage`].
+    pub(crate) fn stage_pending(
+        &mut self,
+        kgs: &[i32],
+        rts: Vec<i64>,
+        payload: Vec<ArrayRef>,
+    ) -> Result<(), DataFusionError> {
+        self.pending.stage(kgs, rts, payload)
+    }
+
+    /// Every pending row the watermark completed — see [`PaimonRowBufferStore::fire`].
+    pub(crate) fn fire(
+        &mut self,
+        watermark: i64,
+        ctx: Arc<TaskContext>,
+    ) -> Result<Option<RecordBatch>, DataFusionError> {
+        self.pending.fire(watermark, ctx)
     }
 
     /// Fetches the committed fold state for every given key this bundle doesn't already hold —
@@ -3126,7 +3219,7 @@ impl PaimonOverStore {
 
     /// The store's untracked footprint change since the last call.
     pub(crate) fn footprint_delta(&mut self) -> isize {
-        let current = self.region.heap_bytes()
+        let current = self.pending.heap_bytes()
             + self
                 .fold_working
                 .iter()
@@ -3151,12 +3244,7 @@ impl PaimonOverStore {
     pub(crate) fn checkpoint(
         &mut self,
     ) -> Result<(PaimonCheckpointManifest, PaimonCheckpointManifest), DataFusionError> {
-        self.pending.refresh_to_latest()?;
-        let batches = self.region.flush_batches()?;
-        if !batches.is_empty() {
-            self.pending.commit_batches(&batches)?;
-        }
-        self.region.clear();
+        let pending_manifest = self.pending.checkpoint()?;
 
         self.folds.refresh_to_latest()?;
         let dirty: Vec<(&ByteKey, &FoldSlot)> =
@@ -3189,6 +3277,85 @@ impl PaimonOverStore {
             self.folds.commit(&batch)?;
         }
         self.fold_working.clear();
-        Ok((self.pending.checkpoint_manifest()?, self.folds.checkpoint_manifest()?))
+        Ok((pending_manifest, self.folds.checkpoint_manifest()?))
+    }
+}
+
+/// Both sides of an event-time window join as two [`PaimonRowBufferStore`]s under one operator
+/// directory (`left/`, `right/`) — the fourth range-read consumer, and the simplest: a window
+/// join buffers rows per side and, on a watermark, joins and evicts every row whose window has
+/// closed. The fire column is the row's `window_end` millis; both sides' fired rows come back in
+/// arrival order, so the join over them is the memory path's join over its concatenated buffers.
+/// Nothing else persists: outer-join match state is transient within one flush (both sides of a
+/// window close together, so the inner join over the closed rows sees every potential match).
+/// The snapshot token packs both snapshot ids and both arrival sequences.
+pub(crate) struct PaimonWindowJoinStore {
+    pub(crate) left: PaimonRowBufferStore,
+    pub(crate) right: PaimonRowBufferStore,
+    last_footprint: usize,
+}
+
+impl PaimonWindowJoinStore {
+    pub(crate) fn create(
+        config: PaimonStoreConfig,
+        left_types: Vec<DataType>,
+        right_types: Vec<DataType>,
+    ) -> Result<Self, DataFusionError> {
+        Ok(PaimonWindowJoinStore {
+            left: PaimonRowBufferStore::create(
+                PaimonOverStore::side_config(&config, "left"),
+                left_types,
+            )?,
+            right: PaimonRowBufferStore::create(
+                PaimonOverStore::side_config(&config, "right"),
+                right_types,
+            )?,
+            last_footprint: 0,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn open_merged(
+        config: PaimonStoreConfig,
+        left_types: Vec<DataType>,
+        right_types: Vec<DataType>,
+        left_sources: &[(String, i64)],
+        right_sources: &[(String, i64)],
+        key_groups: std::ops::RangeInclusive<i32>,
+        aligned: bool,
+    ) -> Result<Self, DataFusionError> {
+        Ok(PaimonWindowJoinStore {
+            left: PaimonRowBufferStore::open_merged(
+                PaimonOverStore::side_config(&config, "left"),
+                left_types,
+                left_sources,
+                key_groups.clone(),
+                aligned,
+            )?,
+            right: PaimonRowBufferStore::open_merged(
+                PaimonOverStore::side_config(&config, "right"),
+                right_types,
+                right_sources,
+                key_groups,
+                aligned,
+            )?,
+            last_footprint: 0,
+        })
+    }
+
+    /// The store's untracked footprint change since the last call.
+    pub(crate) fn footprint_delta(&mut self) -> isize {
+        let current = self.left.heap_bytes() + self.right.heap_bytes();
+        let delta = current as isize - self.last_footprint as isize;
+        self.last_footprint = current;
+        delta
+    }
+
+    /// Checkpoint sync phase: commits both sides; the caller packs the two manifests and both
+    /// arrival sequences into the snapshot token.
+    pub(crate) fn checkpoint(
+        &mut self,
+    ) -> Result<(PaimonCheckpointManifest, PaimonCheckpointManifest), DataFusionError> {
+        Ok((self.left.checkpoint()?, self.right.checkpoint()?))
     }
 }
