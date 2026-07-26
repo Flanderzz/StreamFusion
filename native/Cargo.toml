@@ -95,12 +95,14 @@ base64 = "0.22"
 # diff). Pinned to a rev because the machinery this backend needs (Vortex format writer, mod bucket
 # function, Arrow write path) is newer than the last crates.io release. Vortex is the data file
 # format (BtrBlocks-style compression); storage-fs is the local-disk FileIO.
-# Temporarily pinned to the jordepic fork: two commits on top of apache/paimon-rust 7b54d44 add
+# Temporarily pinned to the jordepic fork: three commits on top of apache/paimon-rust 7b54d44 add
 # `FileIOBuilder::with_operator` (the hook the custom state-table fs backend needs, see
-# src/state/state_fs.rs) and hash-set In/NotIn evaluation (the per-batch key-probe read path
-# pushes hundreds of key literals; the stock per-literal loop is O(rows × literals)); drop back
-# to the apache repo once both are merged upstream.
-paimon = { git = "https://github.com/jordepic/paimon-rust.git", rev = "c2b25a8e810a149f0fa299e30083e99781190d41", default-features = false, features = ["storage-fs", "vortex"], optional = true }
+# src/state/state_fs.rs), hash-set In/NotIn evaluation (the per-batch key-probe read path
+# pushes hundreds of key literals; the stock per-literal loop is O(rows × literals)), and
+# bloom-filter file-index READ support (Java-byte-compatible; the store prunes probe files whose
+# index proves every probed key absent — see the q18 analysis in docs/benchmarks.md); drop back
+# to the apache repo once all are merged upstream.
+paimon = { git = "https://github.com/jordepic/paimon-rust.git", rev = "1d8dcd934083c627d5dfe476f9008ccfc789fb90", default-features = false, features = ["storage-fs", "vortex"], optional = true }
 # The custom local-fs backend for state tables (skips the stock fs service's per-write
 # create_dir_all — the top cost in the backend CPU profile). Version-matched to paimon's own
 # split opendal crates so the two share one build of each.

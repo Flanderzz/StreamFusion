@@ -3941,7 +3941,7 @@ dependencies = [
 [[package]]
 name = "paimon"
 version = "0.3.0"
-source = "git+https://github.com/jordepic/paimon-rust.git?rev=c2b25a8e810a149f0fa299e30083e99781190d41#c2b25a8e810a149f0fa299e30083e99781190d41"
+source = "git+https://github.com/jordepic/paimon-rust.git?rev=1d8dcd934083c627d5dfe476f9008ccfc789fb90#1d8dcd934083c627d5dfe476f9008ccfc789fb90"
 dependencies = [
  "apache-avro",
  "arrow-arith",
@@ -3995,6 +3995,7 @@ dependencies = [
  "urlencoding",
  "uuid",
  "vortex",
+ "xxhash-rust",
  "zstd",
 ]
 
@@ -7157,6 +7158,12 @@ dependencies = [
  "libc",
  "rustix",
 ]
+
+[[package]]
+name = "xxhash-rust"
+version = "0.8.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aee1b19627c7c60102ab80d3a9cbe18de90bfe03bfa6c3715447681f0e8c8af6"
 
 [[package]]
 name = "yansi"

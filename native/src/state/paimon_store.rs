@@ -41,7 +41,10 @@ use paimon::spec::{
     Schema as PaimonSchema, SmallIntType, TableSchema, TimestampType, TinyIntType,
     VarBinaryType, VarCharType, EMPTY_SERIALIZED_ROW,
 };
-use paimon::table::{CommitMessage, DataSplit, Table};
+use paimon::file_index::{
+    fast_hash_bytes, BloomFilterIndex, FileIndexFormatReader, BLOOM_FILTER_INDEX,
+};
+use paimon::table::{CommitMessage, DataSplit, DataSplitBuilder, Table};
 use std::collections::HashSet as StdHashSet;
 use std::sync::OnceLock;
 
@@ -269,6 +272,10 @@ pub(crate) struct PaimonTableCore {
     /// Relative paths reachable from the last committed snapshot — the previous set minus the
     /// current one is exactly what local GC may unlink after a commit.
     live_files: StdHashSet<String>,
+    /// Per-pin cache of each data file's key bloom filter (`None` = the file carries no usable
+    /// index — paimon-rust-written level-0 files until compaction rewrites them). Data files are
+    /// immutable and uniquely named; the cache resets with the split list when reads re-pin.
+    key_blooms: ahash::HashMap<String, Option<Arc<BloomFilterIndex>>>,
 }
 
 /// Read-through Paimon-backed store, generic over the operator's value codec (see the module
@@ -433,6 +440,7 @@ impl PaimonTableCore {
             table,
             config,
             live_files: StdHashSet::new(),
+            key_blooms: ahash::HashMap::default(),
         };
         if let Some(id) = snapshot_id {
             core.read_snapshot = Some(id);
@@ -620,6 +628,14 @@ impl PaimonTableCore {
             .option("bucket", &config.buckets.to_string())
             .option("bucket-key", KG_COLUMN)
             .option("bucket-function.type", "mod")
+            // The Java compactor's rewrites attach a bloom-filter index over the key column to
+            // every file they produce (paimon-rust's writes carry none — the fresh level-0 tail
+            // goes unindexed until compaction touches it). The per-batch key probe tests each
+            // file's index against the whole probe set and skips files that cannot contain any
+            // probed key — the answer to point-miss-heavy workloads, where range stats cannot
+            // discriminate a uniformly-spread probe set (see the q18 analysis in
+            // docs/benchmarks.md).
+            .option("file-index.bloom-filter.columns", KEY_COLUMN)
             .option("file.format", &config.file_format)
             .option("file.compression", &config.file_compression)
             .option("merge-engine", "deduplicate"))
@@ -640,13 +656,99 @@ impl PaimonTableCore {
         Ok(self.read_splits.as_deref().expect("planned splits"))
     }
 
+    /// The key-column bloom filter of one data file, from the per-pin cache: parsed from the
+    /// manifest-embedded index bytes or a `.index` sidecar (read whole, once per pin). `None`
+    /// means the file carries no usable index and must always be read.
+    fn key_bloom(
+        &mut self,
+        bucket_path: &str,
+        file: &paimon::spec::DataFileMeta,
+    ) -> Option<Arc<BloomFilterIndex>> {
+        if let Some(cached) = self.key_blooms.get(&file.file_name) {
+            return cached.clone();
+        }
+        let parsed = Self::load_key_bloom(&self.table, bucket_path, file);
+        self.key_blooms.insert(file.file_name.clone(), parsed.clone());
+        parsed
+    }
+
+    fn load_key_bloom(
+        table: &Table,
+        bucket_path: &str,
+        file: &paimon::spec::DataFileMeta,
+    ) -> Option<Arc<BloomFilterIndex>> {
+        let index = runtime().block_on(async {
+            if let Some(bytes) = &file.embedded_index {
+                return FileIndexFormatReader::get_file_index_from_bytes(
+                    bytes::Bytes::from(bytes.clone()),
+                )
+                .await
+                .ok();
+            }
+            let sidecar = file.extra_files.iter().find(|name| name.ends_with(".index"))?;
+            let input = table.file_io().new_input(&format!("{bucket_path}/{sidecar}")).ok()?;
+            FileIndexFormatReader::get_file_index(input).await.ok()
+        })?;
+        let column = runtime().block_on(index.get_column_index(KEY_COLUMN)).ok()?;
+        let bytes = column.get(BLOOM_FILTER_INDEX)?;
+        BloomFilterIndex::from_bytes(bytes).ok().map(Arc::new)
+    }
+
+    /// Drops from each split the data files whose key bloom filter proves that *no* probed key
+    /// can be present — the point-miss answer range stats cannot give (a uniformly-spread probe
+    /// set lands in every file's key range). A file without an index always survives, and a
+    /// dropped file cannot affect the surviving keys' merge: it holds no row for any of them.
+    fn prune_splits_by_key_bloom(
+        &mut self,
+        splits: Vec<DataSplit>,
+        probe_hashes: &[i64],
+    ) -> Result<Vec<DataSplit>, DataFusionError> {
+        let mut pruned: Vec<DataSplit> = Vec::with_capacity(splits.len());
+        for split in splits {
+            let kept: Vec<usize> = (0..split.data_files().len())
+                .filter(|&i| {
+                    match self.key_bloom(split.bucket_path(), &split.data_files()[i]) {
+                        Some(bloom) => probe_hashes.iter().any(|&hash| bloom.test_hash(hash)),
+                        None => true,
+                    }
+                })
+                .collect();
+            if kept.is_empty() {
+                continue;
+            }
+            if kept.len() == split.data_files().len() {
+                pruned.push(split);
+                continue;
+            }
+            let files: Vec<paimon::spec::DataFileMeta> =
+                kept.iter().map(|&i| split.data_files()[i].clone()).collect();
+            let mut builder = DataSplitBuilder::new()
+                .with_snapshot(split.snapshot_id())
+                .with_partition(split.partition().clone())
+                .with_bucket(split.bucket())
+                .with_bucket_path(split.bucket_path().to_string())
+                .with_total_buckets(split.total_buckets())
+                .with_data_files(files)
+                .with_raw_convertible(split.raw_convertible());
+            if let Some(deletions) = split.data_deletion_files() {
+                builder = builder.with_data_deletion_files(
+                    kept.iter().map(|&i| deletions[i].clone()).collect(),
+                );
+            }
+            pruned.push(builder.build().map_err(pe)?);
+        }
+        Ok(pruned)
+    }
+
     /// Reads the committed rows for exactly the given missing keys — the disk side of the
     /// per-batch join between an input batch's keys and (write buffer ∪ table). The key set is
     /// pushed into the reader as an `IN` predicate and enforced exactly at parquet decode (stats
     /// prune files and pages; a single hash-set pass filters rows), so returned batches hold only
     /// requested keys and only their value columns decode. A `kg IN` predicate rides along
     /// because the key-group column leads the primary key: files are kg-clustered, so it is the
-    /// stats-prunable form of the same key set. Empty when no snapshot is pinned yet.
+    /// stats-prunable form of the same key set — and each file's key bloom filter (attached by
+    /// the Java compactor) is tested against the probe set first, so a file containing none of
+    /// the probed keys never decodes at all. Empty when no snapshot is pinned yet.
     fn scan_keys(&mut self, misses: &[ByteKey]) -> Result<Vec<RecordBatch>, DataFusionError> {
         if self.read_table.is_none() || misses.is_empty() {
             return Ok(Vec::new());
@@ -677,6 +779,8 @@ impl PaimonTableCore {
             .filter(|split| wanted.contains(&split.bucket()))
             .cloned()
             .collect();
+        let probe_hashes: Vec<i64> = misses.iter().map(|key| fast_hash_bytes(&key.0)).collect();
+        let splits = self.prune_splits_by_key_bloom(splits, &probe_hashes)?;
         self.read_splits_with_filter(&splits, predicate)
     }
 
@@ -770,6 +874,7 @@ impl PaimonTableCore {
                 self.read_snapshot = Some(latest);
                 self.read_table = Some(Self::pin(&self.table, latest));
                 self.read_splits = None;
+                self.key_blooms.clear();
             }
         }
         Ok(())
@@ -831,6 +936,11 @@ impl PaimonTableCore {
         for split in plan.splits() {
             for file in split.data_files() {
                 files.push(format!("bucket-{}/{}", split.bucket(), file.file_name));
+                // Index sidecars written by the Java compactor live beside their data file and
+                // must ride uploads and local GC with it.
+                for extra in &file.extra_files {
+                    files.push(format!("bucket-{}/{}", split.bucket(), extra));
+                }
             }
         }
         Ok(files)

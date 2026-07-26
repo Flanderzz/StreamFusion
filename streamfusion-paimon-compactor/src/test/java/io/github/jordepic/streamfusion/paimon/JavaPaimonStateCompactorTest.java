@@ -113,6 +113,33 @@ class JavaPaimonStateCompactorTest {
       assertTrue(
           worst <= 5,
           "expected Paimon maintenance to bound the bucket's runs (trigger 5), saw " + worst);
+
+      // The compacted files must carry the key bloom index the Rust-written schema requests —
+      // the witness that `file-index.bloom-filter.columns` flowed into Java's rewriter (the
+      // default in-manifest threshold sends the bloom to an `.index` sidecar).
+      try (Stream<java.nio.file.Path> walk = Files.walk(tableDir.toPath())) {
+        assertTrue(
+            walk.anyMatch(p -> p.getFileName().toString().endsWith(".index")),
+            "expected Java maintenance to attach bloom index sidecars");
+      }
+
+      // Post-compaction rounds now read through indexed files: the hot key's probe must pass
+      // its file's bloom and continue the sum, and a fresh key's probe must miss every indexed
+      // file (pruned without decoding) and insert.
+      VectorSchemaRoot hot =
+          RowDataArrowConverter.write(
+              List.of((RowData) GenericRowData.of(1L, 100L)), INPUT, allocator);
+      harness.processElement(new StreamRecord<>(new ArrowBatch(hot)));
+      assertEquals(
+          List.of(
+              List.of(RowKind.UPDATE_BEFORE, 1L, sum),
+              List.of(RowKind.UPDATE_AFTER, 1L, sum + 100)),
+          collect(harness));
+      VectorSchemaRoot fresh =
+          RowDataArrowConverter.write(
+              List.of((RowData) GenericRowData.of(2L, 7L)), INPUT, allocator);
+      harness.processElement(new StreamRecord<>(new ArrowBatch(fresh)));
+      assertEquals(List.of(List.of(RowKind.INSERT, 2L, 7L)), collect(harness));
     }
   }
 
