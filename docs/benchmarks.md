@@ -1110,3 +1110,61 @@ comparison kernel per literal, and the store plans its scan splits once per pinn
 instead of per probe.
 
 _Apple M1 Max; numbers are comparable only within a machine._
+
+### Flink on RocksDB vs StreamFusion on Paimon (full Nexmark, exactly-once Kafka)
+
+The production-shaped backend comparison (2026-07-26, Apple M1 Max, release + `mimalloc`):
+stock Flink on its RocksDB backend versus the native engine on the Paimon state backend, over
+the readme's exactly-once Kafka pipeline — the same 500K-event JSON corpus, one-second
+checkpoints, exactly-once delivery to Kafka, mini-batching off on both engines, best of two
+after a warmup. Run with `SF_BENCHMARK=true SF_MATRIX_STATE_BACKENDS=true mvn test -Pbench
+-Dtest=NexmarkMatrixBenchmark#stateBackendComparison`. A q4 preflight asserts both backends
+actually engage before any number is recorded (RocksDB must materialize working files under a
+directed localdir; a live Paimon store handle must be observed) — a silent fall-back to heap
+state would turn this into heap versus heap. Operators the Paimon backend does not yet carry
+(the interval and temporal joins, proctime shapes) fall back to memory state with raw
+snapshots, exactly as a deployment would run them; every stateful operator these queries plan
+to is Paimon-backed.
+
+| query | Flink/RocksDB s | ev/s | SF/Paimon s | ev/s | SF/Flink |
+|---|---|---|---|---|---|
+| q0 | 2.143 | 233K | 0.985 | 508K | **2.18×** |
+| q1 | 2.060 | 243K | 1.031 | 485K | **2.00×** |
+| q2 | 1.402 | 357K | 0.939 | 533K | **1.49×** |
+| q3 | 1.120 | 447K | 0.788 | 635K | **1.42×** |
+| q4 | 4.525 | 110K | 2.437 | 205K | **1.86×** |
+| q5 | 2.541 | 197K | 1.004 | 498K | **2.53×** |
+| q7 | 4.652 | 107K | 1.923 | 260K | **2.42×** |
+| q8 | 1.133 | 441K | 0.879 | 569K | **1.29×** |
+| q9 | 5.174 | 97K | 5.112 | 98K | 1.01× |
+| q10 | 2.203 | 227K | 1.024 | 488K | **2.15×** |
+| q11 | 7.247 | 69K | 0.603 | 829K | **12.02×** |
+| q12 | 1.447 | 346K | 0.791 | 632K | **1.83×** |
+| q13 | 1.834 | 273K | 0.990 | 505K | **1.85×** |
+| q14 | 2.236 | 224K | 1.017 | 492K | **2.20×** |
+| q15 | 4.244 | 118K | 1.416 | 353K | **3.00×** |
+| q16 | 5.709 | 88K | 2.068 | 242K | **2.76×** |
+| q17 | 3.274 | 153K | 1.548 | 323K | **2.12×** |
+| q18 | 4.995 | 100K | 8.784 | 57K | 0.57× |
+| q19 | 10.998 | 45K | 8.141 | 61K | **1.35×** |
+| q20 | 3.219 | 155K | 2.652 | 189K | **1.21×** |
+| q21 | 1.443 | 346K | 0.816 | 613K | **1.77×** |
+| q22 | 1.989 | 251K | 0.901 | 555K | **2.21×** |
+| q23 | 8.291 | 60K | 3.227 | 155K | **2.57×** |
+
+Geometric mean **1.94×**, median **2.00×**; 21 of 23 wins. The outliers tell the story in both
+directions. q11's 12× is session windows: RocksDB pays the merging window assigner's per-record
+window-mapping rewrites, the native session aggregate folds batch runs in memory and commits
+once per barrier. q18's 0.57× is the one loss and the honest read-through tax: rowtime
+keep-last deduplication over `(bidder, auction)` — a high-cardinality key space whose state
+grows with the stream. The table is PK-sorted, and a *single* key lookup would prune cleanly on
+file and row-group min/max; but the per-batch probe pushes the batch's few thousand keys as one
+`IN` set, and keys spread uniformly over the key space land in every row group's `[min, max]`
+range — range stats discriminate ranges, and the probe set covers the whole range, so nothing
+is eliminated and each batch decodes the table's key column end to end, a cost that grows with
+accumulated state. RocksDB answers the same probes from per-file bloom filters without touching
+data blocks. The fix is reader-side, upstream in paimon-rust: bloom-shaped file indexes, or
+sort-merging the sorted probe set against the parquet page index so the reader skips the pages
+between consecutive probe keys instead of decoding through them. q9 (~parity) is the updating
+join plus the retracting top-1 over the full 10-column auction row — per-batch read-through
+over a wide row payload on both stateful operators, the heaviest point-read shape in the suite.
