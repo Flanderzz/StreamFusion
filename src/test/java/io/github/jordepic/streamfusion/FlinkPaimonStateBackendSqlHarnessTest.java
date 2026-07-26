@@ -126,11 +126,15 @@ class FlinkPaimonStateBackendSqlHarnessTest {
         "SELECT k, MIN(v) AS mn, MAX(v) AS mx, SUM(v) AS s FROM t GROUP BY k");
   }
 
+  // Batch mode at parallelism 1 writes exactly one part file. The proctime dedup query is
+  // arrival-order sensitive, and the filesystem source's read order across multiple part files is
+  // not stable between the two parity runs — a streaming-mode write rolling files at checkpoints
+  // made this suite flaky.
   private static void writeInput(Path directory) throws Exception {
-    StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
-    env.setParallelism(1);
-    env.enableCheckpointing(100);
-    StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
+    TableEnvironment tEnv =
+        TableEnvironment.create(
+            org.apache.flink.table.api.EnvironmentSettings.inBatchMode());
+    tEnv.getConfig().set("parallelism.default", "1");
     tEnv.executeSql(
         "CREATE TABLE in_write (k BIGINT, v BIGINT) WITH ('connector' = 'filesystem', 'path' = '"
             + directory.toUri()
