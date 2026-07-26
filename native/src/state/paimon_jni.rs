@@ -2288,3 +2288,109 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_checkpointPai
         }
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Session-window aggregates on the session store. Single table, no persisted watermark (the
+// memory path keeps none), so the token is the plain snapshot id.
+// ---------------------------------------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+#[no_mangle]
+pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonSessionAggregator<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    gap_millis: jlong,
+    value_types: JIntArray<'local>,
+    aggregate_kinds: JIntArray<'local>,
+    key_types: JIntArray<'local>,
+    key_timestamp_precisions: JIntArray<'local>,
+    memory_budget_bytes: jlong,
+    table_directory: JString<'local>,
+    max_parallelism: jint,
+    buckets: jint,
+    file_format: JString<'local>,
+    file_compression: JString<'local>,
+    source_directories: JObjectArray<'local>,
+    source_snapshot_tokens: JObjectArray<'local>,
+    key_group_start: jint,
+    key_group_end: jint,
+    aligned: jboolean,
+) -> jlong {
+    let kinds = read_int_array(&env, &aggregate_kinds);
+    let value_type_codes = read_int_array(&env, &value_types);
+    let key_data_types: Vec<DataType> = read_int_array(&env, &key_types)
+        .into_iter()
+        .map(window_key_data_type)
+        .collect();
+    let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
+        .into_iter()
+        .map(|precision| precision as i32)
+        .collect();
+    let state_types: Vec<DataType> = build_aggregates(&kinds, &value_type_codes)
+        .iter()
+        .flat_map(|a| a.state_fields().into_iter().map(|f| f.data_type().clone()))
+        .collect();
+    let table_dir = read_string(&mut env, &table_directory);
+    let format = read_string(&mut env, &file_format);
+    let compression = read_string(&mut env, &file_compression);
+    let source_dirs: Vec<String> = read_strings(&mut env, &source_directories)
+        .into_iter()
+        .flatten()
+        .collect();
+    let source_snapshots: Vec<i64> = read_strings(&mut env, &source_snapshot_tokens)
+        .into_iter()
+        .flatten()
+        .map(|token| token.parse::<i64>().expect("single-table paimon snapshot token"))
+        .collect();
+
+    let config = PaimonStoreConfig {
+        table_dir,
+        max_parallelism: max_parallelism as usize,
+        buckets: buckets as usize,
+        file_format: format,
+        file_compression: compression,
+    };
+    let store = if source_dirs.is_empty() {
+        PaimonSessionAggStore::create(config, key_data_types, state_types)
+    } else {
+        let sources: Vec<(String, i64)> =
+            source_dirs.into_iter().zip(source_snapshots).collect();
+        PaimonSessionAggStore::open_merged(
+            config,
+            key_data_types,
+            state_types,
+            &sources,
+            key_group_start..=key_group_end,
+            aligned != 0,
+        )
+    };
+    let aggregator = store.and_then(|store| {
+        crate::session_agg::SessionAggregator::new(gap_millis, value_type_codes, kinds)
+            .with_key_timestamp_precisions(timestamp_precisions)
+            .with_backend(store)
+            .with_read_through_budget(memory_budget_bytes)
+    });
+    boxed_or_throw(&mut env, aggregator)
+}
+
+/// Checkpoint sync phase (task thread, at the barrier): stages the open sessions, commits the
+/// table, and hands back the manifest.
+#[no_mangle]
+pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_checkpointPaimonSessionAggregator<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) -> jobjectArray {
+    let aggregator = unsafe { &mut *(handle as *mut crate::session_agg::SessionAggregator) };
+    match aggregator.checkpoint_backend() {
+        Ok(manifest) => manifest_array(&mut env, &manifest),
+        Err(e) => {
+            throw_runtime(&mut env, &format!("paimon state checkpoint failed: {e}"));
+            std::ptr::null_mut()
+        }
+    }
+}

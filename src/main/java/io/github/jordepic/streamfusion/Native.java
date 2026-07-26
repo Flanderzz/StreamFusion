@@ -1327,6 +1327,35 @@ public final class Native {
   public static native String[] checkpointPaimonTumblingAggregator(long handle);
 
   /**
+   * {@code createSessionAggregator} on the Paimon state backend (event-time only). One table row
+   * per open (key, session) keyed by the session start — the end is a value column, since a
+   * session extends by growing its end and a merge removes starts (tombstoned at the barrier).
+   * Otherwise the window-aggregate discipline; the memory path persists no watermark, so the
+   * token is the plain snapshot id. The update/flush/close/state-bytes calls are the memory
+   * family's own — the handle type is shared and branches internally.
+   */
+  public static native long createPaimonSessionAggregator(
+      long gapMillis,
+      int[] valueTypes,
+      int[] aggregateKinds,
+      int[] keyTypes,
+      int[] keyTimestampPrecisions,
+      long memoryBudgetBytes,
+      String tableDirectory,
+      int maxParallelism,
+      int buckets,
+      String fileFormat,
+      String fileCompression,
+      String[] sourceDirectories,
+      String[] sourceSnapshotTokens,
+      int keyGroupStart,
+      int keyGroupEnd,
+      boolean aligned);
+
+  /** {@code checkpointPaimonGroupAggregator} for a Paimon-backed session aggregator. */
+  public static native String[] checkpointPaimonSessionAggregator(long handle);
+
+  /**
    * {@code createChangelogNormalizer} on the Paimon state backend; state row and restore semantics
    * as in {@link #createPaimonKeepLastDeduplicator}.
    */

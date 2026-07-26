@@ -53,11 +53,11 @@ the handle type is one struct branching internally. Memory-deliberate: proctime 
 two-phase half. Remaining rungs: interval/temporal joins, session aggregates (buffer remodels
 onto the same store machinery). Sketches, cross-checked against the operators' memory state:
 
-* **Session aggregate**: PK `[kg, k, ws]` with `we` a *value* column (a session extends by
-  growing `we` — same PK; merges remove starts — tombstones). Window-agg discipline: touched
-  keys' sessions decode into memory on first touch per interval (recording the committed starts
-  per key), stage at the barrier as upserts plus tombstones for vanished starts, fire via a
-  `we ≤ wm` scan hydrated into the memory drain. The memory path persists no watermark.
+* **Session aggregate — SHIPPED as RUNG 6 (2026-07-26)**: PK `[kg, k, ws]` with `we` a value
+  column, exactly as sketched, plus two implementation findings: a firing that empties a key's
+  map must tombstone the key's loaded committed starts right there (the barrier diff can no
+  longer see the key), and the fire scan must skip seeded keys wholesale (per-(key,start)
+  matching would resurrect a start a merge consumed). Token = plain snapshot id.
 * **Interval join**: PK `[kg, k(equi-key), seq]` per side. Reads happen on push (probe the
   opposite side by `k IN` + region live rows for those keys, join immediately, emit — arrival
   order preserved); `advance` stages deletions for rows outside the retention bound. Outer joins

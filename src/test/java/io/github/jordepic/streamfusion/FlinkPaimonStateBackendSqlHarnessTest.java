@@ -174,6 +174,18 @@ class FlinkPaimonStateBackendSqlHarnessTest {
   }
 
   @Test
+  void sessionAggregateOnPaimonBackendMatchesHost() throws Exception {
+    // Event-time session aggregate: sessions extend and merge across 50 ms barriers — an
+    // extension rewrites the same start, a merge tombstones the consumed start — and a watermark
+    // firing merges the decoded sessions with a committed range scan.
+    NativeParity.assertParity(
+        FlinkPaimonStateBackendSqlHarnessTest::paimonRowtimeEnvironment,
+        "SELECT k, window_start, window_end, SUM(v) AS s FROM"
+            + " TABLE(SESSION(TABLE src PARTITION BY k, DESCRIPTOR(rt), INTERVAL '1' SECOND))"
+            + " GROUP BY k, window_start, window_end");
+  }
+
+  @Test
   void windowJoinOnPaimonBackendMatchesHost() throws Exception {
     // Event-time window join: both sides' rows buffer in per-side Paimon row-buffer tables
     // across 50 ms barriers, and every watermark firing joins each side's range read (write

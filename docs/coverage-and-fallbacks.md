@@ -674,12 +674,17 @@ the operator just checkpoints its state the old way, in full):
   in raw snapshot metadata). Two window-aggregate shapes keep memory state: **proctime windows**
   (processing-time timers, deadline in raw state) and the **local half of two-phase plans** (its
   state is bounded by a slice interval and drains at every barrier — persisting it buys
-  nothing). Every other stateful operator keeps memory state under this backend. The remaining
-  **watermark/timer-driven operators** (interval/temporal joins, session aggregates) stay on
-  memory state for one remaining reason: their pending buffers are columnar batches or ordered
-  per-key maps that need remodeling as keyed rows — the range-read machinery itself now exists
-  (keep-first dedup, window rank, the `OVER` aggregate, the window join, and the window
-  aggregates run on it).
+  nothing). The **event-time session aggregate** runs on the backend with the window-aggregate
+  discipline under a session-shaped key: one row per open (key, session) keyed by the session
+  *start*, with the end a value column — a session extends by rewriting the same start, and a
+  merge that consumes a committed start tombstones it (at the barrier for live keys, at the
+  firing for keys whose sessions all closed). The **proctime** session aggregate keeps memory
+  state (processing-time timers, deadline in raw state). Every other stateful operator keeps
+  memory state under this backend. The remaining **watermark/timer-driven operators** (the
+  interval and temporal joins) stay on memory state for one remaining reason: their pending
+  buffers are columnar batches or ordered per-key maps that need remodeling as keyed rows — the
+  range-read machinery itself now exists (keep-first dedup, window rank, the `OVER` aggregate,
+  the window join, and the window/session aggregates run on it).
 - **Multiset-state aggregates** — retracting `MIN`/`MAX` and `COUNT`/`SUM(DISTINCT)` keep per-key
   multisets, which the persistent row codec does not carry yet; an aggregate list containing them
   keeps the whole operator on memory state.

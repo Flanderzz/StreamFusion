@@ -1269,7 +1269,7 @@ fn session_state_partitions_and_restores_by_flink_key_group() {
     let snapshots: Vec<Vec<u8>> = partitions.into_values().collect();
 
     let mut restored = SessionAggregator::restore_partitions(1000, vec![0], vec![0], &snapshots);
-    let out = restored.flush(1000);
+    let out = restored.flush(1000).unwrap();
     assert_eq!(values(&out, 0), vec![1, 2]);
     assert_eq!(values(&out, 3), vec![1, 1]);
 }
@@ -4229,6 +4229,104 @@ mod paimon_state {
         assert_eq!(
             wa_rows(&memory.flush(1000).unwrap()),
             wa_rows(&paimon.flush(1000).unwrap())
+        );
+    }
+
+    /// Session-aggregate output rows in emission order — `(key, ws, we, result)`; both backends
+    /// sort the drained rows by (key, start), so order is part of the parity.
+    fn sa_rows(batch: &RecordBatch) -> Vec<(i64, i64, i64, i64)> {
+        wa_rows(batch)
+    }
+
+    fn session_agg_store(dir: &str) -> PaimonSessionAggStore {
+        let state_types: Vec<DataType> = build_aggregates(&[0], &[0])
+            .iter()
+            .flat_map(|a| a.state_fields().into_iter().map(|f| f.data_type().clone()))
+            .collect();
+        PaimonSessionAggStore::create(config(dir), vec![DataType::Int64], state_types).unwrap()
+    }
+
+    /// SUM over gap-1s sessions on the Paimon backend matches the memory aggregator through
+    /// folds, merges, firings, and checkpoints: a session extended across a barrier keeps one
+    /// start, and a row bridging two committed sessions merges them (the consumed start is
+    /// tombstoned by the barrier diff).
+    #[test]
+    fn paimon_session_agg_matches_memory() {
+        let dir = temp_dir("sa-parity");
+        let mut paimon = SessionAggregator::new(1000, vec![0], vec![0])
+            .with_backend(session_agg_store(&dir));
+        let mut memory = SessionAggregator::new(1000, vec![0], vec![0]);
+
+        let steps: Vec<(Vec<RecordBatch>, i64)> = vec![
+            // Two separated sessions for k1 ([0,1000) and [3000,4000)) and one for k2.
+            (vec![wa_batch(vec![0, 3000, 100], vec![10, 7, 20], vec![1, 1, 2])], 500),
+            // A bridging row (ts 1500) merges k1's first session's reach... it extends [0,1000)
+            // to [0,2500) — still separate from [3000,4000). k2's session closes later.
+            (vec![wa_batch(vec![1500], vec![5], vec![1])], 1100),
+            // A second bridge (ts 2600) now connects [0,2500) and [3000,4000) into one session —
+            // consuming the committed start 3000 — and everything closes at the end.
+            (vec![wa_batch(vec![2600], vec![3], vec![1])], i64::MAX),
+        ];
+        for (i, (batches, watermark)) in steps.iter().enumerate() {
+            for batch in batches {
+                paimon.update(batch).unwrap();
+                memory.update(batch).unwrap();
+            }
+            let paimon_out = paimon.flush(*watermark).unwrap();
+            let memory_out = memory.flush(*watermark).unwrap();
+            assert_eq!(
+                sa_rows(&memory_out),
+                sa_rows(&paimon_out),
+                "step {i} diverged between backends"
+            );
+            paimon.checkpoint_backend().unwrap();
+        }
+    }
+
+    /// A committed session fired from the table scan never re-fires — within the interval,
+    /// across barriers, and after a restore from listed files only — and a merge that consumes a
+    /// committed start tombstones it even when the merged session fires before the barrier.
+    #[test]
+    fn paimon_session_agg_fires_once_and_tombstones_merged_starts() {
+        let dir = temp_dir("sa-committed");
+        let mut agg =
+            SessionAggregator::new(1000, vec![0], vec![0]).with_backend(session_agg_store(&dir));
+        // Two separated committed sessions for k1.
+        agg.update(&wa_batch(vec![0, 3000], vec![10, 7], vec![1, 1])).unwrap();
+        agg.checkpoint_backend().unwrap();
+
+        // A gap-connected run (900→1800→2700) bridges both committed sessions into one —
+        // consuming start 3000 — and the merged session fires, all before the next barrier.
+        agg.update(&wa_batch(vec![900, 1800, 2700], vec![5, 3, 2], vec![1, 1, 1])).unwrap();
+        assert_eq!(
+            sa_rows(&agg.flush(i64::MAX).unwrap()),
+            vec![(1, 0, 4000, 27)],
+            "one merged session, all contributions folded once"
+        );
+        assert!(sa_rows(&agg.flush(i64::MAX).unwrap()).is_empty(), "same interval repeat");
+        let manifest = agg.checkpoint_backend().unwrap();
+        assert!(sa_rows(&agg.flush(i64::MAX).unwrap()).is_empty(), "post-barrier repeat");
+
+        let restored_dir = temp_dir("sa-restore");
+        materialize(&manifest, &dir, &restored_dir);
+        let state_types: Vec<DataType> = build_aggregates(&[0], &[0])
+            .iter()
+            .flat_map(|a| a.state_fields().into_iter().map(|f| f.data_type().clone()))
+            .collect();
+        let store = PaimonSessionAggStore::open_merged(
+            config(&restored_dir),
+            vec![DataType::Int64],
+            state_types,
+            &[(restored_dir.clone(), manifest.snapshot_id)],
+            0..=127,
+            true,
+        )
+        .unwrap();
+        let mut restored =
+            SessionAggregator::new(1000, vec![0], vec![0]).with_backend(store);
+        assert!(
+            sa_rows(&restored.flush(i64::MAX).unwrap()).is_empty(),
+            "post-restore repeat"
         );
     }
 

@@ -126,6 +126,27 @@ pub(crate) fn assign_windows(
     RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).expect("failed to build TVF batch")
 }
 
+/// The BinaryRow key bytes of `n` rows whose decoded key columns lead `columns` — how the
+/// persistent stores address keyed rows. Shared by the window and session aggregates.
+#[cfg(feature = "paimon-state")]
+pub(crate) fn binary_row_keys(
+    columns: &[ArrayRef],
+    key_types: &[DataType],
+    precisions: &[i32],
+    n: usize,
+) -> Result<Vec<Vec<u8>>, DataFusionError> {
+    let arity = key_types.len();
+    let key_batch = RecordBatch::try_new_with_options(
+        Arc::new(Schema::new(key_fields(key_types))),
+        columns[..arity].to_vec(),
+        &arrow::record_batch::RecordBatchOptions::new().with_row_count(Some(n)),
+    )
+    .map_err(|e| DataFusionError::External(Box::new(e)))?;
+    let indices: Vec<usize> = (0..arity).collect();
+    let mut encoder = BinaryRowBatchEncoder::new(&key_batch, &indices, precisions);
+    Ok((0..n).map(|row| encoder.encode(row).to_vec()).collect())
+}
+
 /// One open aligned window: its start, plus the per-key accumulators folding in matching rows. The
 /// owning map keys windows by their *end*, which is unique even for cumulative windows that share a
 /// start, so the start is carried here.
@@ -561,17 +582,7 @@ impl TumblingAggregator {
         columns: &[ArrayRef],
         n: usize,
     ) -> Result<Vec<Vec<u8>>, DataFusionError> {
-        let arity = self.key_types.len();
-        let key_batch = RecordBatch::try_new_with_options(
-            Arc::new(Schema::new(key_fields(&self.key_types))),
-            columns[..arity].to_vec(),
-            &arrow::record_batch::RecordBatchOptions::new().with_row_count(Some(n)),
-        )
-        .map_err(|e| DataFusionError::External(Box::new(e)))?;
-        let indices: Vec<usize> = (0..arity).collect();
-        let precisions = self.key_precisions(arity);
-        let mut encoder = BinaryRowBatchEncoder::new(&key_batch, &indices, &precisions);
-        Ok((0..n).map(|row| encoder.encode(row).to_vec()).collect())
+        binary_row_keys(columns, &self.key_types, &self.key_precisions(self.key_types.len()), n)
     }
 
     /// Persistent-state barrier: stages every open (key, window) as a whole-row rewrite, drops

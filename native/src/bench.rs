@@ -117,7 +117,7 @@ impl Session {
     }
 
     pub fn flush(&mut self, watermark: i64) -> RecordBatch {
-        self.0.flush(watermark)
+        self.0.flush(watermark).expect("memory-backed flush")
     }
 }
 

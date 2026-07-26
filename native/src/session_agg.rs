@@ -30,6 +30,11 @@ pub(crate) struct SessionAggregator {
     key_converter: Option<RowConverter>,
     key_types: Vec<DataType>,
     memory: OperatorMemory,
+    /// Persistent-state mode: committed sessions live in the Paimon store; the decoded map holds
+    /// only this interval's touched keys (seeded on first touch, staged wholesale at the barrier).
+    #[cfg(feature = "paimon-state")]
+    backend: Option<crate::state::PaimonSessionAggStore>,
+    key_timestamp_precisions: Vec<i32>,
 }
 
 /// Estimated heap footprint of one open session (its accumulators plus the map entry).
@@ -46,7 +51,204 @@ impl SessionAggregator {
             key_converter: None,
             key_types: Vec::new(),
             memory: OperatorMemory::unaccounted(),
+            #[cfg(feature = "paimon-state")]
+            backend: None,
+            key_timestamp_precisions: Vec::new(),
         }
+    }
+
+    pub(crate) fn with_key_timestamp_precisions(
+        mut self,
+        key_timestamp_precisions: Vec<i32>,
+    ) -> Self {
+        self.key_timestamp_precisions = key_timestamp_precisions;
+        self
+    }
+
+    #[cfg(feature = "paimon-state")]
+    pub(crate) fn with_backend(mut self, store: crate::state::PaimonSessionAggStore) -> Self {
+        self.backend = Some(store);
+        self
+    }
+
+    /// Attaches the managed-memory budget for a backend that starts with nothing resident.
+    #[cfg(feature = "paimon-state")]
+    pub(crate) fn with_read_through_budget(
+        mut self,
+        budget_bytes: i64,
+    ) -> Result<Self, DataFusionError> {
+        self.memory.attach("session-aggregate", budget_bytes, 0)?;
+        Ok(self)
+    }
+
+    #[cfg(feature = "paimon-state")]
+    pub(crate) fn store_mut(&mut self) -> &mut crate::state::PaimonSessionAggStore {
+        self.backend.as_mut().expect("session-agg paimon backend")
+    }
+
+    /// The key-field timestamp descriptors, defaulting to non-timestamp per key column — the
+    /// aggregator learns its key arity from batches, not at construction.
+    #[cfg(feature = "paimon-state")]
+    fn key_precisions(&self, arity: usize) -> Vec<i32> {
+        if self.key_timestamp_precisions.is_empty() {
+            vec![-1; arity]
+        } else {
+            self.key_timestamp_precisions.clone()
+        }
+    }
+
+    /// Persistent-state seeding: a key's first touch this interval reads its committed sessions
+    /// into the decoded map through the per-batch key probe, so merges and firings see state
+    /// written before the last barrier.
+    #[cfg(feature = "paimon-state")]
+    fn seed_batch_keys(&mut self, batch: &RecordBatch) -> Result<(), DataFusionError> {
+        if self.backend.is_none() || batch.num_rows() == 0 {
+            return Ok(());
+        }
+        let schema = batch.schema();
+        let key_indices: Vec<usize> = (0..)
+            .map_while(|j| schema.index_of(&format!("key{j}")).ok())
+            .collect();
+        let precisions = self.key_precisions(key_indices.len());
+        let mut encoder = BinaryRowBatchEncoder::new(batch, &key_indices, &precisions);
+        let mut seen: std::collections::HashSet<ByteKey> = std::collections::HashSet::new();
+        let mut unique: Vec<ByteKey> = Vec::new();
+        for row in 0..batch.num_rows() {
+            let key = encoder.encode(row);
+            if !seen.contains(key) {
+                let owned = ByteKey::from(key);
+                seen.insert(owned.clone());
+                unique.push(owned);
+            }
+        }
+        let batches =
+            self.backend.as_mut().expect("session-agg paimon backend").seed_scan(&unique)?;
+        self.absorb_committed(batches)?;
+        let delta =
+            self.backend.as_mut().expect("session-agg paimon backend").footprint_delta();
+        self.memory.record(delta);
+        self.memory.account()
+    }
+
+    /// Reads committed (key, session) rows into the decoded map — the restore path's own
+    /// merge_batch round trip. Rows arrive only for keys whose map is absent or being seeded, so
+    /// inserts are unconditional (committed sessions are pairwise separated).
+    #[cfg(feature = "paimon-state")]
+    fn absorb_committed(&mut self, batches: Vec<RecordBatch>) -> Result<(), DataFusionError> {
+        let field_counts: Vec<usize> =
+            self.aggregates.iter().map(|a| a.state_fields().len()).collect();
+        let state_total: usize = field_counts.iter().sum();
+        let track = self.memory.tracking();
+        for batch in batches {
+            let arity = batch.num_columns() - 4 - state_total;
+            let wss = batch.column(2).as_any().downcast_ref::<Int64Array>().expect("ws column");
+            let wes = batch.column(3).as_any().downcast_ref::<Int64Array>().expect("we column");
+            let key_arrays: Vec<&ArrayRef> = (0..arity).map(|j| batch.column(4 + j)).collect();
+            self.key_types = key_types(&key_arrays);
+            let keys_encoded =
+                encode_keys(&mut self.key_converter, &key_arrays, batch.num_rows());
+            for row in 0..batch.num_rows() {
+                let key = keys_encoded.row(row).owned();
+                let mut accumulators: Vec<Box<dyn Accumulator>> =
+                    self.aggregates.iter().map(WindowAggregate::create_accumulator).collect();
+                let mut column = 4 + arity;
+                for (i, accumulator) in accumulators.iter_mut().enumerate() {
+                    let count = field_counts[i];
+                    let state: Vec<ArrayRef> = (column..column + count)
+                        .map(|c| batch.column(c).slice(row, 1))
+                        .collect();
+                    accumulator.merge_batch(&state).expect("failed to seed session");
+                    column += count;
+                }
+                let session = Session { end: wes.value(row), accumulators };
+                let mut delta = 0isize;
+                if track {
+                    delta = session_bytes(&session) as isize
+                        + if self.sessions.contains_key(&key) {
+                            0
+                        } else {
+                            owned_row_bytes(&key) as isize
+                        };
+                }
+                self.sessions.entry(key).or_default().insert(wss.value(row), session);
+                if track {
+                    self.memory.record(delta);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Persistent-state barrier: stages every open (key, session) as a whole-row rewrite plus a
+    /// tombstone per committed start a merge consumed, drops the decoded map, and commits the
+    /// region. Returns the manifest (the token is the plain snapshot id — the memory path
+    /// persists no watermark).
+    #[cfg(feature = "paimon-state")]
+    pub(crate) fn checkpoint_backend(
+        &mut self,
+    ) -> Result<crate::state::PaimonCheckpointManifest, DataFusionError> {
+        let state_types: Vec<DataType> = self
+            .aggregates
+            .iter()
+            .flat_map(|a| a.state_fields().into_iter().map(|f| f.data_type().clone()))
+            .collect();
+        if self.memory.tracking() {
+            let state: usize = self
+                .sessions
+                .iter()
+                .map(|(key, map)| {
+                    owned_row_bytes(key) + map.values().map(session_bytes).sum::<usize>()
+                })
+                .sum();
+            self.memory.forget(state);
+        }
+        let sessions = std::mem::take(&mut self.sessions);
+        for (key, mut map) in sessions {
+            let rows = map.len();
+            let keys = vec![key.clone(); rows];
+            let key_columns = decode_keys(self.key_converter.as_ref(), &keys, &self.key_types);
+            let precisions = self.key_precisions(self.key_types.len());
+            let binary_keys =
+                crate::window_agg::binary_row_keys(&key_columns, &self.key_types, &precisions, rows)?;
+            let key_slices: Vec<&[u8]> = binary_keys.iter().map(|k| k.as_slice()).collect();
+            let wss: Vec<i64> = map.keys().copied().collect();
+            let wes: Vec<i64> = map.values().map(|s| s.end).collect();
+            let mut state_columns: Vec<Vec<ScalarValue>> = vec![Vec::new(); state_types.len()];
+            for session in map.values_mut() {
+                let mut column = 0;
+                for accumulator in session.accumulators.iter_mut() {
+                    for scalar in accumulator.state().expect("state") {
+                        state_columns[column].push(scalar);
+                        column += 1;
+                    }
+                }
+            }
+            let state_arrays: Vec<ArrayRef> = state_columns
+                .into_iter()
+                .zip(&state_types)
+                .map(|(scalars, data_type)| scalars_to_array(scalars, data_type))
+                .collect();
+            let store = self.backend.as_mut().expect("session-agg paimon backend");
+            store.stage_upserts(&key_slices, &wss, &wes, key_columns, state_arrays)?;
+            // Committed starts a merge consumed vanish: tombstone loaded starts not live anymore.
+            let binary_key = &key_slices[0];
+            let vanished: Vec<i64> = store
+                .seeded_starts(binary_key)
+                .iter()
+                .copied()
+                .filter(|start| !map.contains_key(start))
+                .collect();
+            if !vanished.is_empty() {
+                let delete_keys = vec![*binary_key; vanished.len()];
+                store.stage_deletes(&delete_keys, &vanished)?;
+            }
+        }
+        let store = self.backend.as_mut().expect("session-agg paimon backend");
+        let manifest = store.checkpoint()?;
+        let delta = store.footprint_delta();
+        self.memory.record(delta);
+        self.memory.account()?;
+        Ok(manifest)
     }
 
     /// Bounds this aggregator's state by the operator's managed-memory budget (negative =
@@ -64,6 +266,8 @@ impl SessionAggregator {
     }
 
     pub(crate) fn update(&mut self, batch: &RecordBatch) -> Result<(), DataFusionError> {
+        #[cfg(feature = "paimon-state")]
+        self.seed_batch_keys(batch)?;
         let ts = column_i64(batch, "ts");
         // One value column per aggregate (value0, value1, …); each accumulator reads its own.
         let values: Vec<&ArrayRef> = (0..self.aggregates.len())
@@ -161,7 +365,18 @@ impl SessionAggregator {
     /// Finalizes and removes sessions the watermark has closed, emitting
     /// `[key, window_start, window_end, result0..resultN-1]`. The end is the session's own bound,
     /// not a fixed offset, so it travels as its own column.
-    pub(crate) fn flush(&mut self, watermark: i64) -> RecordBatch {
+    pub(crate) fn flush(&mut self, watermark: i64) -> Result<RecordBatch, DataFusionError> {
+        // Persistent state: sessions committed at earlier barriers whose keys were untouched
+        // this interval still close now — hydrate them into the decoded map first.
+        #[cfg(feature = "paimon-state")]
+        if self.backend.is_some() {
+            let batches = self
+                .backend
+                .as_mut()
+                .expect("session-agg paimon backend")
+                .fire_scan(watermark)?;
+            self.absorb_committed(batches)?;
+        }
         let n = self.aggregates.len();
         let mut rows: Vec<(OwnedRow, i64, i64, Vec<ScalarValue>)> = Vec::new();
         let track = self.memory.tracking();
@@ -182,11 +397,13 @@ impl SessionAggregator {
                 rows.push((key.clone(), start, session.end, results));
             }
         }
+        let mut emptied: Vec<OwnedRow> = Vec::new();
         self.sessions.retain(|key, map| {
             if map.is_empty() {
                 if track {
                     freed += owned_row_bytes(key);
                 }
+                emptied.push(key.clone());
                 return false;
             }
             true
@@ -196,6 +413,56 @@ impl SessionAggregator {
             self.memory.account_shrink();
         }
         rows.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
+        // Persistent state: every fired (key, start) leaves the store, and a key whose map
+        // emptied tombstones every committed start its seed loaded — a merge may have consumed a
+        // committed start whose session then fired under a different start, and once the key
+        // drops from the map the barrier diff can no longer see it.
+        #[cfg(feature = "paimon-state")]
+        if self.backend.is_some() {
+            let precisions = self.key_precisions(self.key_types.len());
+            if !rows.is_empty() {
+                let keys: Vec<OwnedRow> = rows.iter().map(|(key, ..)| key.clone()).collect();
+                let key_columns =
+                    decode_keys(self.key_converter.as_ref(), &keys, &self.key_types);
+                let binary_keys = crate::window_agg::binary_row_keys(
+                    &key_columns,
+                    &self.key_types,
+                    &precisions,
+                    keys.len(),
+                )?;
+                let key_slices: Vec<&[u8]> = binary_keys.iter().map(|k| k.as_slice()).collect();
+                let starts: Vec<i64> = rows.iter().map(|(_, start, ..)| *start).collect();
+                let store = self.backend.as_mut().expect("session-agg paimon backend");
+                store.stage_deletes(&key_slices, &starts)?;
+            }
+            if !emptied.is_empty() {
+                let key_columns =
+                    decode_keys(self.key_converter.as_ref(), &emptied, &self.key_types);
+                let binary_keys = crate::window_agg::binary_row_keys(
+                    &key_columns,
+                    &self.key_types,
+                    &precisions,
+                    emptied.len(),
+                )?;
+                for binary_key in &binary_keys {
+                    let loaded = self
+                        .backend
+                        .as_ref()
+                        .expect("session-agg paimon backend")
+                        .seeded_starts(binary_key)
+                        .to_vec();
+                    if !loaded.is_empty() {
+                        let delete_keys = vec![binary_key.as_slice(); loaded.len()];
+                        let store = self.backend.as_mut().expect("session-agg paimon backend");
+                        store.stage_deletes(&delete_keys, &loaded)?;
+                    }
+                }
+            }
+            let store = self.backend.as_mut().expect("session-agg paimon backend");
+            let delta = store.footprint_delta();
+            self.memory.record(delta);
+            self.memory.account()?;
+        }
 
         let keys: Vec<OwnedRow> = rows.iter().map(|(key, ..)| key.clone()).collect();
         let starts: Vec<i64> = rows.iter().map(|(_, start, ..)| *start).collect();
@@ -211,8 +478,8 @@ impl SessionAggregator {
             fields.push(Field::new(format!("result{i}"), self.aggregates[i].result_type(), false));
             columns.push(scalars_to_array(scalars, &self.aggregates[i].result_type()));
         }
-        RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
-            .expect("failed to build result batch")
+        Ok(RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
+            .expect("failed to build result batch"))
     }
 
     /// Serializes every open session (one row per (key, session): key, start, end, then each
@@ -424,7 +691,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_updateSession
 /// Emits the sessions the given watermark has closed as a batch and drops them from state.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_flushSessionAggregator<'local>(
-    _env: JNIEnv<'local>,
+    mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     watermark_millis: jlong,
@@ -432,8 +699,11 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_flushSessionA
     out_schema_address: jlong,
 ) {
     let aggregator = unsafe { &mut *(handle as *mut SessionAggregator) };
-    let result = aggregator.flush(watermark_millis);
-    export_record_batch(result, out_array_address, out_schema_address);
+    // Fallible in persistent-state mode (the firing reads the committed table).
+    match aggregator.flush(watermark_millis) {
+        Ok(result) => export_record_batch(result, out_array_address, out_schema_address),
+        Err(e) => throw_memory_limit(&mut env, &e.to_string()),
+    }
 }
 
 /// Releases the session aggregator and its native state.

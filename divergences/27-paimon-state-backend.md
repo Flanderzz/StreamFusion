@@ -186,6 +186,18 @@ that iteration, and the barrier's whole-row rewrite is the memtable flush. Delib
 proctime windows (timer deadline in raw state) and the local two-phase half (slice-bounded
 state that drains at every barrier).
 
+The **session aggregate** (sixth range-read consumer) reuses the window-aggregate discipline
+under a session-shaped key: PK `[kg, key, window_start]` with the end a *value* column, because
+a session's start is stable under extension (the same row rewrites) while a merge removes
+starts. The one genuinely new obligation is merge bookkeeping: the seed scan records which
+committed starts it loaded per key, the barrier tombstones the loaded starts no live session
+carries (a merge consumed them), and a key whose sessions all fire before the barrier
+tombstones its loaded starts at the firing — otherwise a consumed start's stale row would
+outlive the key's presence in the decoded map and resurrect on a later probe. RocksDB
+cross-check: Flink's merging window assigner keeps a per-key window-mapping state plus
+per-window accumulators in RocksDB and rewrites both on merge; the tombstone-on-merge is that
+rewrite, expressed as LSM deletes.
+
 The full design record, including the verified paimon-rust API survey and the rejected
 alternatives (rust-rocksdb baseline, Tonbo, fjall, SlateDB, ForSt), is in
 `.claude/research/paimon-vortex-state-backend-plan.md`.
