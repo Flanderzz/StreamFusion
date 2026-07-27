@@ -545,6 +545,25 @@ churn was off the critical path, and q9 remains bound by synchronous per-batch r
 hit-heavy keys. This entry is kept as the prerequisite shape for fully-async maintenance
 (deletion-vector-aware merge reads in paimon-rust would remove the barrier round entirely).
 
+**The checkpoint file listing advances incrementally from delta manifests** *(2026-07-27)*.
+Every barrier must name the table files the checkpoint upload pins — twice, because the
+synchronous compaction round commits a second snapshot. That listing used to be a full scan
+plan (walk the snapshot's entire manifest chain, merge adds against deletes across every
+manifest file), so its cost grew with table history and hit ~170 ms per call on q9's join
+tables — and with two listings per table per barrier across three tables, the barrier tail
+alone could exceed the one-second checkpoint interval, re-creating the slow-batches→more-barriers
+feedback loop that maintenance was split to avoid. The store now keeps the live file set as
+state: each barrier reads only the *delta* manifests of the snapshots committed since the last
+listing (its own data commit and the compactor's minimal round — both small by construction)
+and folds adds/deletes into the tracked set, re-reading the deletion-vector index manifest only
+when its name changes; the full-chain walk happens once, to seed the set. The pinned paimon-rust
+fork exposes the manifest entry kind/bucket accessors this walk needs. Measured on q9
+(`SF_STATE_PROFILE` wall-clock instrumentation, exactly-once Kafka, 500K events): listings
+**~170 ms → 2–3 ms** each, per-operator barrier sync **0.9–1.6 s → 80–680 ms** — back under
+the checkpoint interval, loop broken. q9's end-to-end ratio itself barely moves (0.83× vs
+RocksDB; it sits at the ~0.86× memory-state structural ceiling), but the win applies to every
+query's barrier path on the backend.
+
 **Paimon reads are a per-batch key probe pushed into the reader** *(supersedes the
 interval-resident working set below)*. The store is exactly two components — the write buffer
 (everything written since the last barrier) and the committed disk table — and each input

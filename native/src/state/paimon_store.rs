@@ -303,6 +303,18 @@ pub(crate) struct PaimonTableCore {
     /// Relative paths reachable from the last committed snapshot — the previous set minus the
     /// current one is exactly what local GC may unlink after a commit.
     live_files: StdHashSet<String>,
+    /// Live data-file paths (`bucket-N/name`, sidecars included), maintained incrementally: a
+    /// full scan plan reads the entire manifest chain — measured at hundreds of milliseconds per
+    /// checkpoint listing on churn-heavy state, twice per barrier — while each snapshot's *delta*
+    /// manifest is one small document. Seeded once (open, or first commit), then advanced by
+    /// walking only the snapshots committed since.
+    live_data: StdHashSet<String>,
+    /// Snapshot id `live_data` reflects; None until seeded.
+    listed_snapshot: Option<i64>,
+    /// The index manifest `live_index` reflects (deletion-vector files, `index/name` paths). The
+    /// index manifest is a full-state document, so a name change triggers one re-read.
+    listed_index_manifest: Option<String>,
+    live_index: StdHashSet<String>,
 }
 
 /// Read-through Paimon-backed store, generic over the operator's value codec (see the module
@@ -502,6 +514,10 @@ impl PaimonTableCore {
             table,
             config,
             live_files: StdHashSet::new(),
+            live_data: StdHashSet::new(),
+            listed_snapshot: None,
+            listed_index_manifest: None,
+            live_index: StdHashSet::new(),
             stats: CoreStats::default(),
         };
         if let Some(id) = snapshot_id {
@@ -941,18 +957,120 @@ impl PaimonTableCore {
         Ok(())
     }
 
-    /// The relative paths of everything the given snapshot needs: live data files (shared upload
-    /// candidates) and the snapshot/manifest/schema documents (private).
-    fn snapshot_file_listing(
-        &self,
-        snapshot_id: i64,
-    ) -> Result<(Vec<String>, Vec<String>), DataFusionError> {
-        let mut data_files = self.reachable_data_files(snapshot_id)?;
-        let mut meta_files = vec![format!("snapshot/snapshot-{snapshot_id}")];
+    /// Advances the incrementally maintained live-file view to `to`: one small *delta* manifest
+    /// walk per snapshot committed since the last listing, instead of re-planning the full
+    /// manifest chain — the plan reads every manifest file ever written and was measured at
+    /// hundreds of milliseconds per checkpoint listing on churn-heavy state. The first call
+    /// seeds from a full plan once.
+    fn advance_live_files(&mut self, to: i64) -> Result<(), DataFusionError> {
+        match self.listed_snapshot {
+            Some(listed) if listed <= to => {
+                let manager = self.table.snapshot_manager();
+                let file_io = self.table.file_io().clone();
+                for id in (listed + 1)..=to {
+                    let entries = runtime()
+                        .block_on(async {
+                            let snapshot = manager.get_snapshot(id).await?;
+                            let delta = snapshot.delta_manifest_list().to_string();
+                            let mut entries = Vec::new();
+                            if !delta.is_empty() {
+                                for meta in paimon::spec::ManifestList::read(
+                                    &file_io,
+                                    &manager.manifest_path(&delta),
+                                )
+                                .await?
+                                {
+                                    entries.extend(
+                                        paimon::spec::Manifest::read(
+                                            &file_io,
+                                            &manager.manifest_path(meta.file_name()),
+                                        )
+                                        .await?,
+                                    );
+                                }
+                            }
+                            Ok::<_, paimon::Error>(entries)
+                        })
+                        .map_err(pe)?;
+                    for entry in entries {
+                        let bucket = entry.bucket();
+                        let file = entry.file();
+                        let mut paths = vec![format!("bucket-{}/{}", bucket, file.file_name)];
+                        // Index sidecars written by the Java compactor live beside their data
+                        // file and must ride uploads and local GC with it.
+                        for extra in &file.extra_files {
+                            paths.push(format!("bucket-{}/{}", bucket, extra));
+                        }
+                        match entry.kind() {
+                            paimon::spec::FileKind::Add => {
+                                for path in paths {
+                                    self.live_data.insert(path);
+                                }
+                            }
+                            paimon::spec::FileKind::Delete => {
+                                for path in &paths {
+                                    self.live_data.remove(path);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {
+                self.live_data = self.reachable_data_files(to)?.into_iter().collect();
+            }
+        }
+        self.listed_snapshot = Some(to);
+
+        // The index manifest is a full-state document (the compactor's deletion-vector files,
+        // immutable payload the raw read path depends on): re-read it only when its name
+        // changes.
         let manager = self.table.snapshot_manager();
         let file_io = self.table.file_io().clone();
         let table_dir = self.config.table_dir.clone();
-        let (manifest_lists, index_files) = runtime()
+        let index_manifest = runtime()
+            .block_on(async {
+                Ok::<_, paimon::Error>(
+                    manager.get_snapshot(to).await?.index_manifest().map(str::to_string),
+                )
+            })
+            .map_err(pe)?;
+        if index_manifest != self.listed_index_manifest {
+            self.live_index.clear();
+            if let Some(index) = &index_manifest {
+                let entries = runtime()
+                    .block_on(paimon::spec::IndexManifest::read(
+                        &file_io,
+                        &format!("{table_dir}/manifest/{index}"),
+                    ))
+                    .map_err(pe)?;
+                for entry in entries {
+                    if entry.kind == paimon::spec::FileKind::Add {
+                        self.live_index
+                            .insert(format!("index/{}", entry.index_file.file_name));
+                    }
+                }
+            }
+            self.listed_index_manifest = index_manifest;
+        }
+        Ok(())
+    }
+
+    /// The relative paths of everything the given snapshot needs: live data files and
+    /// deletion-vector index files (shared upload candidates) and the snapshot/manifest/schema
+    /// documents (private).
+    fn snapshot_file_listing(
+        &mut self,
+        snapshot_id: i64,
+    ) -> Result<(Vec<String>, Vec<String>), DataFusionError> {
+        self.advance_live_files(snapshot_id)?;
+        let mut data_files: Vec<String> =
+            self.live_data.iter().chain(self.live_index.iter()).cloned().collect();
+        data_files.sort();
+        let mut meta_files = vec![format!("snapshot/snapshot-{snapshot_id}")];
+        let manager = self.table.snapshot_manager();
+        let file_io = self.table.file_io().clone();
+        let manifest_lists = runtime()
             .block_on(async {
                 let snapshot = manager.get_snapshot(snapshot_id).await?;
                 let lists = vec![
@@ -971,32 +1089,12 @@ impl PaimonTableCore {
                         documents.push(meta.file_name().to_string());
                     }
                 }
-                // The index manifest is its own document kind (index entries, not a list of
-                // manifests), and the index files it registers (the compactor's deletion
-                // vectors) are immutable payload the raw read path depends on: list them with
-                // the data files so they upload, restore, and GC together.
-                let mut index_files = Vec::new();
                 if let Some(index) = snapshot.index_manifest() {
                     documents.push(index.to_string());
-                    let entries = paimon::spec::IndexManifest::read(
-                        &file_io,
-                        &format!("{table_dir}/manifest/{index}"),
-                    )
-                    .await?;
-                    for entry in entries {
-                        if entry.kind == paimon::spec::FileKind::Add {
-                            index_files.push(format!("index/{}", entry.index_file.file_name));
-                        }
-                    }
                 }
-                Ok::<_, paimon::Error>((documents, index_files))
+                Ok::<_, paimon::Error>(documents)
             })
             .map_err(pe)?;
-        index_files
-            .into_iter()
-            .collect::<StdHashSet<_>>()
-            .into_iter()
-            .for_each(|f| data_files.push(f));
         for name in manifest_lists {
             if !name.is_empty() {
                 meta_files.push(format!("manifest/{name}"));
@@ -1032,7 +1130,7 @@ impl PaimonTableCore {
         Ok(files)
     }
 
-    fn reachable_files(&self, snapshot_id: i64) -> Result<Vec<String>, DataFusionError> {
+    fn reachable_files(&mut self, snapshot_id: i64) -> Result<Vec<String>, DataFusionError> {
         let (mut data, meta) = self.snapshot_file_listing(snapshot_id)?;
         data.extend(meta);
         Ok(data)
