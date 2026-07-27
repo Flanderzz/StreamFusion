@@ -177,6 +177,8 @@ final class PaimonSnapshotStrategy
 
   @Override
   public PaimonSnapshotResources syncPrepareResources(long checkpointId) throws Exception {
+    long profileStart = System.nanoTime();
+    long profileCompactNs = 0;
     File linkDir = new File(checkpointLinkRoot, "chk-" + checkpointId);
     String[] manifest = nativeState.checkpoint();
     if (compactor != null && !manifest[0].isEmpty()) {
@@ -188,11 +190,20 @@ final class PaimonSnapshotStrategy
       // maintenance snapshot, lists its files, and lets local GC drop the superseded runs. A
       // maintenance failure must fail the snapshot: on a deletion-vector table, reads over an
       // uncompacted run would bypass the vectors and resurrect masked rows.
+      long compactStart = System.nanoTime();
       compactTables();
+      profileCompactNs = System.nanoTime() - compactStart;
       manifest = nativeState.checkpoint();
       // The discretionary merges (run counts, space amplification) happen off-thread; deletion
       // vectors keep reads correct however far shaping lags.
       shaping.kick();
+    }
+    if (System.getenv("SF_STATE_PROFILE") != null) {
+      System.err.printf(
+          "SFPROF barrier chk=%d sync_ms=%d compact_ms=%d%n",
+          checkpointId,
+          (System.nanoTime() - profileStart) / 1_000_000,
+          profileCompactNs / 1_000_000);
     }
     String snapshotToken = manifest[0];
     List<String> dataFiles = new ArrayList<>();

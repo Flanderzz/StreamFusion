@@ -272,7 +272,24 @@ enum Slot<V> {
 /// The value-agnostic core every Paimon-backed store shares: table lifecycle, snapshot pinning,
 /// hydration scans, commits, rescale bucket adoption, and the checkpoint file protocol
 /// (listing, hard-links, local GC). The stores compose it with their own working sets and codecs.
+/// Wall-clock accounting for the read-through and checkpoint paths, dumped at store close when
+/// `SF_STATE_PROFILE` is set — a CPU sampler cannot see time spent *waiting* on these round
+/// trips, which is exactly what a latency-bound pipeline spends.
+#[derive(Default)]
+struct CoreStats {
+    probe_calls: u64,
+    probe_ns: u64,
+    probe_rows: u64,
+    range_calls: u64,
+    range_ns: u64,
+    commits: u64,
+    commit_ns: u64,
+    listings: u64,
+    listing_ns: u64,
+}
+
 pub(crate) struct PaimonTableCore {
+    stats: CoreStats,
     table: Table,
     /// The table pinned at the last committed snapshot; probes read this.
     read_table: Option<Table>,
@@ -394,6 +411,28 @@ impl<C: PaimonStateCodec> KeyedStateStore<C::Value> for PaimonStore<C> {
     }
 }
 
+impl Drop for PaimonTableCore {
+    fn drop(&mut self) {
+        if std::env::var_os("SF_STATE_PROFILE").is_none() {
+            return;
+        }
+        let tail: Vec<&str> = self.config.table_dir.rsplit('/').take(2).collect();
+        eprintln!(
+            "SFPROF store={} probes={} probe_ms={} probe_rows={} ranges={} range_ms={} commits={} commit_ms={} listings={} listing_ms={}",
+            tail.iter().rev().cloned().collect::<Vec<_>>().join("/"),
+            self.stats.probe_calls,
+            self.stats.probe_ns / 1_000_000,
+            self.stats.probe_rows,
+            self.stats.range_calls,
+            self.stats.range_ns / 1_000_000,
+            self.stats.commits,
+            self.stats.commit_ns / 1_000_000,
+            self.stats.listings,
+            self.stats.listing_ns / 1_000_000,
+        );
+    }
+}
+
 impl PaimonTableCore {
     /// Creates a fresh table under `config.table_dir` (schema document + directory skeleton).
     fn create(config: PaimonStoreConfig, schema: PaimonSchema) -> Result<Self, DataFusionError> {
@@ -463,6 +502,7 @@ impl PaimonTableCore {
             table,
             config,
             live_files: StdHashSet::new(),
+            stats: CoreStats::default(),
         };
         if let Some(id) = snapshot_id {
             core.read_snapshot = Some(id);
@@ -759,6 +799,7 @@ impl PaimonTableCore {
         if self.read_table.is_none() || misses.is_empty() {
             return Ok(Vec::new());
         }
+        let profile_start = std::time::Instant::now();
         let buckets = self.config.buckets as i32;
         let mut key_groups: Vec<i32> = misses.iter().map(|key| self.key_group(&key.0)).collect();
         key_groups.sort_unstable();
@@ -785,7 +826,13 @@ impl PaimonTableCore {
             .filter(|split| wanted.contains(&split.bucket()))
             .cloned()
             .collect();
-        self.read_splits_with_filter(&splits, predicate)
+        let batches = self.read_splits_with_filter(&splits, predicate);
+        self.stats.probe_calls += 1;
+        self.stats.probe_ns += profile_start.elapsed().as_nanos() as u64;
+        if let Ok(batches) = &batches {
+            self.stats.probe_rows += batches.iter().map(|b| b.num_rows() as u64).sum::<u64>();
+        }
+        batches
     }
 
     /// Reads the committed rows matching an arbitrary predicate across all buckets — the disk
@@ -796,8 +843,12 @@ impl PaimonTableCore {
         if self.read_table.is_none() {
             return Ok(Vec::new());
         }
+        let profile_start = std::time::Instant::now();
         let splits = self.pinned_splits()?.to_vec();
-        self.read_splits_with_filter(&splits, predicate)
+        let batches = self.read_splits_with_filter(&splits, predicate);
+        self.stats.range_calls += 1;
+        self.stats.range_ns += profile_start.elapsed().as_nanos() as u64;
+        batches
     }
 
     fn read_splits_with_filter(
@@ -829,6 +880,7 @@ impl PaimonTableCore {
 
     /// Commits a sequence of write batches, in order, as ONE new snapshot and re-pins reads.
     fn commit_batches(&mut self, batches: &[RecordBatch]) -> Result<(), DataFusionError> {
+        let profile_start = std::time::Instant::now();
         let builder = self.table.new_write_builder();
         runtime()
             .block_on(async {
@@ -840,7 +892,10 @@ impl PaimonTableCore {
                 builder.new_commit().commit(messages).await
             })
             .map_err(pe)?;
-        self.refresh_after_commit()
+        let committed = self.refresh_after_commit();
+        self.stats.commits += 1;
+        self.stats.commit_ns += profile_start.elapsed().as_nanos() as u64;
+        committed
     }
 
     /// The checkpoint file phase, after the dirty commit: garbage-collect local files no longer
@@ -855,8 +910,11 @@ impl PaimonTableCore {
                 meta_files: Vec::new(),
             });
         };
+        let profile_start = std::time::Instant::now();
         let (data_files, meta_files) = self.snapshot_file_listing(snapshot_id)?;
         self.gc_local(&data_files, &meta_files)?;
+        self.stats.listings += 1;
+        self.stats.listing_ns += profile_start.elapsed().as_nanos() as u64;
         Ok(PaimonCheckpointManifest { snapshot_id, data_files, meta_files })
     }
 
