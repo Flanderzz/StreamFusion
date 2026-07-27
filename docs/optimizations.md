@@ -511,24 +511,31 @@ backend A/B: **35.4 s → 9.85 s** — the mkdir storm cost far more than its CP
 because commits blocked on it — bringing the profiling round's cumulative total to
 **124.1 s → 9.85 s (12.6×)**, the Paimon backend at 0.44× the memory backend end to end.
 
-**A key bloom file index answers point misses without decoding** *(2026-07-26)*. The per-batch
-key probe's one weakness was the miss-heavy, high-cardinality workload (Nexmark q18's
-`(bidder, auction)` dedup): a probe set of a few thousand uniformly-spread keys lands in every
-row group's — and every page's — `[min, max]` range, so range stats prune nothing and every
-batch re-decoded the table's whole key column, O(table) per batch and growing with state, where
-RocksDB answers the same probes per key from resident bloom filters and its block cache. The fix
-divides along the existing maintenance split: the state tables request
-`file-index.bloom-filter.columns` on the key column, **stock Java Paimon attaches the index to
-every file its compaction rewrites** (the Rust write path stays index-free — the unindexed
-level-0 tail is small and short-lived), and the Rust probe tests each file's bloom against the
-entire probe set before scheduling it, skipping files that contain none of the probed keys.
-The bloom deserializer and both hash functions (XXH64 for byte keys, Thomas Wang's mix for
-integers) are byte-compatible ports of Java's `BloomFilterFileIndex`, pinned by test vectors
-computed from the Java implementation, and live in the paimon-rust fork for upstreaming; the
-`.index` sidecars ride checkpoint uploads and local GC with their data files. Measured on the
-Flink-on-RocksDB comparison (exactly-once Kafka, 500K events): **q18 8.784 s → 2.146 s (3.9×**,
-flipping the suite's one loss, 0.57× → 2.13×), q4 1.86× → 2.86×, q9 1.01× → 1.21×, q17
-2.12× → 2.74× — the suite moved from 21/23 wins at a 1.94× geometric mean to **23/23 at 2.08×**.
+**An exact per-file key index answers point misses without decoding** *(2026-07-26)*. The
+per-batch key probe's one weakness was the miss-heavy, high-cardinality workload (Nexmark
+q18's `(bidder, auction)` dedup): a probe set of a few thousand uniformly-spread keys lands in
+every row group's — and every page's — `[min, max]` range, so range stats prune nothing and
+every batch re-decoded the table's whole key column, O(table) per batch and growing with
+state, where RocksDB answers the same probes per key from resident bloom filters and its
+block cache. The RocksDB analogy suggests a bloom file index, and one was built first — and
+falsified: a bloom prunes a *single-key* lookup well, but a file is skipped only when every
+probed key misses, probability `(1-fpp)^|probe|` ≈ 0 for thousands of probes at any practical
+fpp, so batched probes false-positive into every file (apparent wins traced to compaction
+timing, and reruns were bimodal). The shipped fix is exact: once per pinned snapshot — the
+table is immutable between barriers — the store reads just a file's `kg`/`k` columns and
+keeps the set of key hashes (XXH64 of the key bytes, the same Java-compatible hash the bloom
+work ported); each probe drops every file whose set shares nothing with the probe set. That
+replaces a per-*batch* whole-table key decode with a per-*interval* one, and pruning is
+deterministic membership, not probability. Two correctness edges: only delete-free files may
+be pruned (the set is built from a merged read, which collapses the tombstones it must
+witness — pruning a tombstone-carrier would resurrect older versions from surviving files),
+and a 64-bit hash collision costs one wasted decode, never correctness, because the reader's
+exact `IN` filter is still applied. The bloom read/write support (byte-compatible with Java's
+`BloomFilterFileIndex`, test vectors computed from the Java implementation) stays in the
+paimon-rust fork for upstreaming — it is the right tool for single-key probes, just not for
+batched ones. Measured on the Flink-on-RocksDB comparison (exactly-once Kafka, 500K events):
+q18 went from a bimodal 0.47–0.57× loss to a deterministic ~1.8–1.9× win across independent
+reruns, and the suite stands at **23/23 wins, 2.03× geometric mean**.
 
 **Paimon reads are a per-batch key probe pushed into the reader** *(supersedes the
 interval-resident working set below)*. The store is exactly two components — the write buffer

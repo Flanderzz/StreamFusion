@@ -41,9 +41,7 @@ use paimon::spec::{
     Schema as PaimonSchema, SmallIntType, TableSchema, TimestampType, TinyIntType,
     VarBinaryType, VarCharType, EMPTY_SERIALIZED_ROW,
 };
-use paimon::file_index::{
-    fast_hash_bytes, BloomFilterIndex, FileIndexFormatReader, BLOOM_FILTER_INDEX,
-};
+use paimon::file_index::fast_hash_bytes;
 use paimon::table::{CommitMessage, DataSplit, DataSplitBuilder, Table};
 use std::collections::HashSet as StdHashSet;
 use std::sync::OnceLock;
@@ -272,10 +270,15 @@ pub(crate) struct PaimonTableCore {
     /// Relative paths reachable from the last committed snapshot — the previous set minus the
     /// current one is exactly what local GC may unlink after a commit.
     live_files: StdHashSet<String>,
-    /// Per-pin cache of each data file's key bloom filter (`None` = the file carries no usable
-    /// index — paimon-rust-written level-0 files until compaction rewrites them). Data files are
-    /// immutable and uniquely named; the cache resets with the split list when reads re-pin.
-    key_blooms: ahash::HashMap<String, Option<Arc<BloomFilterIndex>>>,
+    /// Per-pin, per-file sets of each data file's key hashes (XXH64 of the BinaryRow key
+    /// bytes) — the exact membership index the per-batch probe prunes files with. Built lazily,
+    /// one key-column-only read per file per pin (the table is immutable between barriers), and
+    /// reset with the split list when reads re-pin. A probabilistic filter cannot do this job:
+    /// a probe set of thousands of keys false-positives into every file at any practical fpp;
+    /// exact sets skip a file precisely when it holds none of the probed keys. A 64-bit hash
+    /// collision costs one wasted decode, never correctness — the reader's exact `IN` filter
+    /// owns correctness.
+    key_sets: ahash::HashMap<String, Arc<StdHashSet<i64>>>,
 }
 
 /// Read-through Paimon-backed store, generic over the operator's value codec (see the module
@@ -440,7 +443,7 @@ impl PaimonTableCore {
             table,
             config,
             live_files: StdHashSet::new(),
-            key_blooms: ahash::HashMap::default(),
+            key_sets: ahash::HashMap::default(),
         };
         if let Some(id) = snapshot_id {
             core.read_snapshot = Some(id);
@@ -628,14 +631,6 @@ impl PaimonTableCore {
             .option("bucket", &config.buckets.to_string())
             .option("bucket-key", KG_COLUMN)
             .option("bucket-function.type", "mod")
-            // The Java compactor's rewrites attach a bloom-filter index over the key column to
-            // every file they produce (paimon-rust's writes carry none — the fresh level-0 tail
-            // goes unindexed until compaction touches it). The per-batch key probe tests each
-            // file's index against the whole probe set and skips files that cannot contain any
-            // probed key — the answer to point-miss-heavy workloads, where range stats cannot
-            // discriminate a uniformly-spread probe set (see the q18 analysis in
-            // docs/benchmarks.md).
-            .option("file-index.bloom-filter.columns", KEY_COLUMN)
             .option("file.format", &config.file_format)
             .option("file.compression", &config.file_compression)
             .option("merge-engine", "deduplicate"))
@@ -656,63 +651,102 @@ impl PaimonTableCore {
         Ok(self.read_splits.as_deref().expect("planned splits"))
     }
 
-    /// The key-column bloom filter of one data file, from the per-pin cache: parsed from the
-    /// manifest-embedded index bytes or a `.index` sidecar (read whole, once per pin). `None`
-    /// means the file carries no usable index and must always be read.
-    fn key_bloom(
+    /// One data file's key-hash set, from the per-pin cache — built by reading just that
+    /// file's `kg`/`k` columns once per pin.
+    fn key_set(
         &mut self,
-        bucket_path: &str,
-        file: &paimon::spec::DataFileMeta,
-    ) -> Option<Arc<BloomFilterIndex>> {
-        if let Some(cached) = self.key_blooms.get(&file.file_name) {
-            return cached.clone();
+        split: &DataSplit,
+        file_index: usize,
+    ) -> Result<Arc<StdHashSet<i64>>, DataFusionError> {
+        let file_name = split.data_files()[file_index].file_name.clone();
+        if let Some(cached) = self.key_sets.get(&file_name) {
+            return Ok(cached.clone());
         }
-        let parsed = Self::load_key_bloom(&self.table, bucket_path, file);
-        self.key_blooms.insert(file.file_name.clone(), parsed.clone());
-        parsed
-    }
-
-    fn load_key_bloom(
-        table: &Table,
-        bucket_path: &str,
-        file: &paimon::spec::DataFileMeta,
-    ) -> Option<Arc<BloomFilterIndex>> {
-        let index = runtime().block_on(async {
-            if let Some(bytes) = &file.embedded_index {
-                return FileIndexFormatReader::get_file_index_from_bytes(
-                    bytes::Bytes::from(bytes.clone()),
-                )
-                .await
-                .ok();
+        let single = Self::split_with_files(split, &[file_index])?;
+        let read_table = self.read_table.as_ref().expect("pinned read table");
+        let mut builder = read_table.new_read_builder();
+        builder
+            .with_projection(&[KG_COLUMN, KEY_COLUMN])
+            .map_err(pe)?;
+        let batches = runtime()
+            .block_on(async {
+                let read = builder.new_read()?;
+                let mut stream = read.to_arrow(std::slice::from_ref(&single))?;
+                let mut batches = Vec::new();
+                use futures::StreamExt;
+                while let Some(batch) = stream.next().await {
+                    batches.push(batch?);
+                }
+                Ok::<_, paimon::Error>(batches)
+            })
+            .map_err(pe)?;
+        let mut set: StdHashSet<i64> = StdHashSet::with_capacity(
+            split.data_files()[file_index].row_count.max(0) as usize,
+        );
+        let expected_key = Field::new(KEY_COLUMN, DataType::Binary, false);
+        for batch in batches {
+            let ks = normalized_column(&batch, 1, &expected_key)?;
+            let ks = ks
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .ok_or_else(|| DataFusionError::Internal("paimon key column".into()))?;
+            for row in 0..ks.len() {
+                set.insert(fast_hash_bytes(ks.value(row)));
             }
-            let sidecar = file.extra_files.iter().find(|name| name.ends_with(".index"))?;
-            let input = table.file_io().new_input(&format!("{bucket_path}/{sidecar}")).ok()?;
-            FileIndexFormatReader::get_file_index(input).await.ok()
-        })?;
-        let column = runtime().block_on(index.get_column_index(KEY_COLUMN)).ok()?;
-        let bytes = column.get(BLOOM_FILTER_INDEX)?;
-        BloomFilterIndex::from_bytes(bytes).ok().map(Arc::new)
+        }
+        let set = Arc::new(set);
+        self.key_sets.insert(file_name, set.clone());
+        Ok(set)
     }
 
-    /// Drops from each split the data files whose key bloom filter proves that *no* probed key
-    /// can be present — the point-miss answer range stats cannot give (a uniformly-spread probe
-    /// set lands in every file's key range). A file without an index always survives, and a
-    /// dropped file cannot affect the surviving keys' merge: it holds no row for any of them.
-    fn prune_splits_by_key_bloom(
+    /// Rebuilds a split with a subset of its data files.
+    fn split_with_files(split: &DataSplit, kept: &[usize]) -> Result<DataSplit, DataFusionError> {
+        let files: Vec<paimon::spec::DataFileMeta> =
+            kept.iter().map(|&i| split.data_files()[i].clone()).collect();
+        let mut builder = DataSplitBuilder::new()
+            .with_snapshot(split.snapshot_id())
+            .with_partition(split.partition().clone())
+            .with_bucket(split.bucket())
+            .with_bucket_path(split.bucket_path().to_string())
+            .with_total_buckets(split.total_buckets())
+            .with_data_files(files)
+            .with_raw_convertible(split.raw_convertible());
+        if let Some(deletions) = split.data_deletion_files() {
+            builder = builder
+                .with_data_deletion_files(kept.iter().map(|&i| deletions[i].clone()).collect());
+        }
+        builder.build().map_err(pe)
+    }
+
+    /// Drops from each split the data files whose key set proves that *no* probed key is
+    /// present — exact membership, so a file decodes only when it actually holds probed keys.
+    /// Range stats cannot make this cut (a uniformly-spread probe set lands in every file's key
+    /// range), and neither can a bloom filter at batch sizes (thousands of probe keys
+    /// false-positive into every file); the per-pin set build is one key-column read per file
+    /// per checkpoint interval, replacing that same decode per *batch*. A dropped file cannot
+    /// affect the surviving keys' merge: it holds no row for any of them.
+    fn prune_splits_by_probe(
         &mut self,
         splits: Vec<DataSplit>,
         probe_hashes: &[i64],
     ) -> Result<Vec<DataSplit>, DataFusionError> {
         let mut pruned: Vec<DataSplit> = Vec::with_capacity(splits.len());
         for split in splits {
-            let kept: Vec<usize> = (0..split.data_files().len())
-                .filter(|&i| {
-                    match self.key_bloom(split.bucket_path(), &split.data_files()[i]) {
-                        Some(bloom) => probe_hashes.iter().any(|&hash| bloom.test_hash(hash)),
-                        None => true,
-                    }
-                })
-                .collect();
+            let mut kept: Vec<usize> = Vec::with_capacity(split.data_files().len());
+            for i in 0..split.data_files().len() {
+                // Only a delete-free file may be pruned: its live keys ARE its physical keys.
+                // A file carrying tombstones must always join the merge — a pruned tombstone
+                // would resurrect the key's older version from a surviving file (the set is
+                // built from a merged read, which collapses the deletes it must witness).
+                if split.data_files()[i].delete_row_count.unwrap_or(i64::MAX) != 0 {
+                    kept.push(i);
+                    continue;
+                }
+                let set = self.key_set(&split, i)?;
+                if probe_hashes.iter().any(|hash| set.contains(hash)) {
+                    kept.push(i);
+                }
+            }
             if kept.is_empty() {
                 continue;
             }
@@ -720,22 +754,7 @@ impl PaimonTableCore {
                 pruned.push(split);
                 continue;
             }
-            let files: Vec<paimon::spec::DataFileMeta> =
-                kept.iter().map(|&i| split.data_files()[i].clone()).collect();
-            let mut builder = DataSplitBuilder::new()
-                .with_snapshot(split.snapshot_id())
-                .with_partition(split.partition().clone())
-                .with_bucket(split.bucket())
-                .with_bucket_path(split.bucket_path().to_string())
-                .with_total_buckets(split.total_buckets())
-                .with_data_files(files)
-                .with_raw_convertible(split.raw_convertible());
-            if let Some(deletions) = split.data_deletion_files() {
-                builder = builder.with_data_deletion_files(
-                    kept.iter().map(|&i| deletions[i].clone()).collect(),
-                );
-            }
-            pruned.push(builder.build().map_err(pe)?);
+            pruned.push(Self::split_with_files(&split, &kept)?);
         }
         Ok(pruned)
     }
@@ -746,9 +765,9 @@ impl PaimonTableCore {
     /// prune files and pages; a single hash-set pass filters rows), so returned batches hold only
     /// requested keys and only their value columns decode. A `kg IN` predicate rides along
     /// because the key-group column leads the primary key: files are kg-clustered, so it is the
-    /// stats-prunable form of the same key set — and each file's key bloom filter (attached by
-    /// the Java compactor) is tested against the probe set first, so a file containing none of
-    /// the probed keys never decodes at all. Empty when no snapshot is pinned yet.
+    /// stats-prunable form of the same key set — and each file's per-pin key-hash set is tested
+    /// against the probe set first, so a file containing none of the probed keys never decodes
+    /// at all. Empty when no snapshot is pinned yet.
     fn scan_keys(&mut self, misses: &[ByteKey]) -> Result<Vec<RecordBatch>, DataFusionError> {
         if self.read_table.is_none() || misses.is_empty() {
             return Ok(Vec::new());
@@ -780,7 +799,7 @@ impl PaimonTableCore {
             .cloned()
             .collect();
         let probe_hashes: Vec<i64> = misses.iter().map(|key| fast_hash_bytes(&key.0)).collect();
-        let splits = self.prune_splits_by_key_bloom(splits, &probe_hashes)?;
+        let splits = self.prune_splits_by_probe(splits, &probe_hashes)?;
         self.read_splits_with_filter(&splits, predicate)
     }
 
@@ -874,7 +893,7 @@ impl PaimonTableCore {
                 self.read_snapshot = Some(latest);
                 self.read_table = Some(Self::pin(&self.table, latest));
                 self.read_splits = None;
-                self.key_blooms.clear();
+                self.key_sets.clear();
             }
         }
         Ok(())

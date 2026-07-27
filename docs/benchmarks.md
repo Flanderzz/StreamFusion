@@ -1128,44 +1128,47 @@ to is Paimon-backed.
 
 | query | Flink/RocksDB s | ev/s | SF/Paimon s | ev/s | SF/Flink |
 |---|---|---|---|---|---|
-| q0 | 2.086 | 240K | 1.107 | 451K | **1.88×** |
-| q1 | 2.028 | 247K | 1.004 | 498K | **2.02×** |
-| q2 | 1.354 | 369K | 0.920 | 543K | **1.47×** |
-| q3 | 1.094 | 457K | 0.806 | 620K | **1.36×** |
-| q4 | 4.889 | 102K | 1.707 | 293K | **2.86×** |
-| q5 | 2.402 | 208K | 1.016 | 492K | **2.36×** |
-| q7 | 4.555 | 110K | 1.958 | 255K | **2.33×** |
-| q8 | 1.074 | 466K | 0.754 | 663K | **1.42×** |
-| q9 | 5.560 | 90K | 4.602 | 109K | **1.21×** |
-| q10 | 2.165 | 231K | 1.143 | 437K | **1.89×** |
-| q11 | 7.233 | 69K | 0.754 | 663K | **9.60×** |
-| q12 | 1.452 | 344K | 0.755 | 662K | **1.92×** |
-| q13 | 1.771 | 282K | 0.830 | 602K | **2.13×** |
-| q14 | 2.197 | 228K | 0.991 | 504K | **2.22×** |
-| q15 | 4.227 | 118K | 1.416 | 353K | **2.99×** |
-| q16 | 5.789 | 86K | 2.333 | 214K | **2.48×** |
-| q17 | 3.279 | 152K | 1.196 | 418K | **2.74×** |
-| q18 | 4.573 | 109K | 2.146 | 233K | **2.13×** |
-| q19 | 10.592 | 47K | 8.010 | 62K | **1.32×** |
-| q20 | 3.238 | 154K | 2.576 | 194K | **1.26×** |
-| q21 | 1.421 | 352K | 0.854 | 585K | **1.66×** |
-| q22 | 1.935 | 258K | 0.932 | 536K | **2.08×** |
-| q23 | 8.216 | 61K | 3.243 | 154K | **2.53×** |
+| q0 | 2.169 | 231K | 0.995 | 502K | **2.18×** |
+| q1 | 2.267 | 221K | 0.980 | 510K | **2.31×** |
+| q2 | 1.505 | 332K | 0.969 | 516K | **1.55×** |
+| q3 | 1.093 | 457K | 0.826 | 605K | **1.32×** |
+| q4 | 5.575 | 90K | 2.100 | 238K | **2.66×** |
+| q5 | 2.450 | 204K | 1.079 | 463K | **2.27×** |
+| q7 | 4.703 | 106K | 2.390 | 209K | **1.97×** |
+| q8 | 1.274 | 392K | 0.774 | 646K | **1.65×** |
+| q9 | 6.462 | 77K | 5.463 | 92K | **1.18×** |
+| q10 | 2.559 | 195K | 1.028 | 486K | **2.49×** |
+| q11 | 8.992 | 56K | 0.967 | 517K | **9.29×** |
+| q12 | 1.466 | 341K | 0.887 | 564K | **1.65×** |
+| q13 | 2.111 | 237K | 1.328 | 377K | **1.59×** |
+| q14 | 2.377 | 210K | 1.725 | 290K | **1.38×** |
+| q15 | 5.787 | 86K | 1.598 | 313K | **3.62×** |
+| q16 | 7.200 | 69K | 2.102 | 238K | **3.42×** |
+| q17 | 3.944 | 127K | 1.362 | 367K | **2.90×** |
+| q18 | 6.283 | 80K | 3.257 | 154K | **1.93×** |
+| q19 | 14.792 | 34K | 8.912 | 56K | **1.66×** |
+| q20 | 4.216 | 119K | 3.902 | 128K | **1.08×** |
+| q21 | 1.504 | 333K | 0.825 | 606K | **1.82×** |
+| q22 | 2.332 | 214K | 1.016 | 492K | **2.29×** |
+| q23 | 12.802 | 39K | 11.663 | 43K | **1.10×** |
 
-Geometric mean **2.08×**, median **2.08×**; **23 of 23 wins** (worst query 1.21×). q11's
-9.6× is session windows: RocksDB pays the merging window assigner's per-record window-mapping
+Geometric mean **2.03×**, median **1.93×**; **23 of 23 wins** (worst query 1.08×). q11's
+9.3× is session windows: RocksDB pays the merging window assigner's per-record window-mapping
 rewrites, the native session aggregate folds batch runs in memory and commits once per barrier.
-The thinnest wins are the point-read-heaviest shapes — q9 (updating join + retracting top-1
-over the full 10-column auction row) and q20 — where per-batch read-through still trails
-RocksDB's cached point access even after file-level pruning.
+The thinnest wins are the point-read-heaviest shapes — q20, q23, and q9 (updating join +
+retracting top-1 over the full 10-column auction row) — where per-batch read-through still
+trails RocksDB's cached point access even after file-level pruning.
 
-The first run of this comparison (2026-07-26, same method) lost q18 at **0.57×**
-(8.784 s) and held q4 at 1.86× and q9 at parity: the per-batch `IN` probe re-decoded the
-table's whole key column per batch, because a few thousand uniformly-spread keys land in every
-row group's — and every page's — `[min, max]` range, so range stats prune nothing (RocksDB
-answers the same probes per key, misses from resident bloom filters and hits from a block cache
-the table fits in). The fix is the **key bloom file index** (see `docs/optimizations.md`): the
-state tables request `file-index.bloom-filter.columns = k`, the Java compactor's rewrites attach
-the index to every file they produce, and the Rust probe tests each file's bloom against the
-whole probe set before scheduling it — a file containing none of the probed keys never decodes.
-q18 went 8.784 s → 2.146 s (0.57× → 2.13×) and every point-read-heavy query moved with it.
+The first run of this comparison (2026-07-26, same method) lost q18 at **0.57×** (8.784 s):
+the per-batch `IN` probe re-decoded the table's whole key column per batch, because a few
+thousand uniformly-spread keys land in every row group's — and every page's — `[min, max]`
+range, so range stats prune nothing (RocksDB answers the same probes per key, misses from
+resident bloom filters and hits from a block cache the table fits in). A bloom file index was
+tried first and *falsified*: a bloom answers one key at a time, so a file is skipped only when
+**every** probed key misses — probability `(1-fpp)^|probe|`, which is ~0 for a few thousand
+probes at any practical fpp. The runs that looked fixed were compaction timing (fewer, larger
+runs mean fewer key-column decodes), and reruns were bimodal. The real fix is the **exact
+per-file key index** (see `docs/optimizations.md`): once per pinned snapshot the store reads
+just a file's key column and keeps the set of key hashes; each probe then drops every
+delete-free file that shares no key with the probe set — exact membership, deterministic
+pruning. q18 now holds ~1.8–1.9× across independent reruns.

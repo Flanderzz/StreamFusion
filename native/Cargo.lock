@@ -3941,7 +3941,7 @@ dependencies = [
 [[package]]
 name = "paimon"
 version = "0.3.0"
-source = "git+https://github.com/jordepic/paimon-rust.git?rev=1d8dcd934083c627d5dfe476f9008ccfc789fb90#1d8dcd934083c627d5dfe476f9008ccfc789fb90"
+source = "git+https://github.com/jordepic/paimon-rust.git?rev=00aa3af6a1c13ae98ae36c2d792f8be7a6eca67d#00aa3af6a1c13ae98ae36c2d792f8be7a6eca67d"
 dependencies = [
  "apache-avro",
  "arrow-arith",
