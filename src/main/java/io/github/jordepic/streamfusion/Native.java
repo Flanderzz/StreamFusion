@@ -940,6 +940,13 @@ public final class Native {
   public static native boolean paimonStateAvailable();
 
   /**
+   * One-time process mode switch, set before any Paimon store is created: with a Java compactor
+   * deployed, maintenance runs synchronously at every barrier and new state tables carry deletion
+   * vectors, so committed snapshots hold no level-0 runs and reads take the raw parquet path.
+   */
+  public static native void paimonDeletionVectors(boolean enabled);
+
+  /**
    * Whether the given aggregate list can run on the Paimon state backend (every aggregate's
    * per-key state must be a plain running scalar of a persistable type; multiset-backed aggregates
    * — retracting MIN/MAX, DISTINCT — stay on the memory backend).

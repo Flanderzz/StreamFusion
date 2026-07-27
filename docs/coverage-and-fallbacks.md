@@ -717,24 +717,24 @@ the operator just checkpoints its state the old way, in full):
 
 **Table maintenance (compaction) belongs exclusively to stock Java Paimon** — the native store
 never compacts. Drop `streamfusion-paimon-compactor.jar` plus a Paimon bundle (≥ 1.4.1) into
-Flink's `lib/` and Paimon maintains the state tables — its own compaction picks, its
-sequence-preserving rewriter, its exact deletion handling — on a **background maintenance thread
-per operator backend**, kicked after each barrier's commit (the RocksDB model: each barrier adds
-one sorted run per touched bucket, the analog of a memtable flush adding an L0 file, and
-compaction never runs on the write path). Maintenance commits race data commits safely under
-Paimon's optimistic commit retry. Without the module (or with a
-state file format the deployed Paimon cannot read), tables stay **correct but unmaintained** —
-one sorted run accumulates per touched bucket per checkpoint, growing probe cost — and the
-backend logs a warning. A side effect worth knowing: parquet state tables are ordinary Paimon
+Flink's `lib/` and the state tables run in **deletion-vector mode, compacted synchronously at
+every barrier** (Paimon's own `lookup-wait` model): between the barrier's data commit and the
+checkpoint's file listing, stock Paimon's lookup compaction up-levels the barrier's level-0 run
+and marks overwritten rows in deletion-vector index files, so every committed snapshot holds
+only standalone-correct files and reads never merge sorted runs. A rescale restore's clip
+rewrite is compacted the same way before the first record. A failed maintenance round fails the
+snapshot — on a deletion-vector table, reads over an uncompacted run would silently miss the
+barrier's rows (Paimon skips level 0 in this mode). Without the module (or with a
+state file format the deployed Paimon cannot read), tables are created without deletion vectors
+and stay **correct but unmaintained** through merge reads — one sorted run accumulates per
+touched bucket per checkpoint, growing probe cost — and the backend logs a warning; restoring a
+deletion-vector table into such a deployment fails closed. A side effect worth knowing: parquet state tables are ordinary Paimon
 tables, readable by any Paimon tooling for state inspection.
 
 `-Dstreamfusion.state.paimon.buckets` (default `1`) sets the state tables' Paimon bucket count —
 deliberately small and decoupled from max parallelism (one LSM per subtask, the RocksDB shape);
 an aligned restore adopts files wholesale, while rescale or a bucket-count change clips by
-key-group range at recovery. `-Dstreamfusion.state.paimon.maintenance.min-interval-ms` (default `2000`) paces the background
-maintenance rounds: barriers kick maintenance, kicks inside the pause coalesce, and the default
-mirrors RocksDB's `level0_file_num_compaction_trigger` arithmetic (four sorted runs at 500 ms
-barriers). `-Dstreamfusion.state.paimon.file-format` (default `parquet`) and
+key-group range at recovery. `-Dstreamfusion.state.paimon.file-format` (default `parquet`) and
 `-Dstreamfusion.state.paimon.file-compression` (default `uncompressed`) select the state data
 file format — deliberately the boring baseline until the state-format benchmarks (parquet vs
 lance vs vortex, compression on/off) pick a better pairing; both are stamped into the table

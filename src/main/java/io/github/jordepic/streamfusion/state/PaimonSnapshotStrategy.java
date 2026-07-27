@@ -74,8 +74,20 @@ final class PaimonSnapshotStrategy
   private final KeyGroupRange keyGroupRange;
   private final File checkpointLinkRoot;
   private final File tableDirectory;
-  /** Signals the background maintenance thread that a barrier committed new sorted runs. */
-  @Nullable private final Runnable maintenanceKick;
+  /** Maintains the state tables synchronously at each barrier, between the data commit and the
+   * manifest capture; null when no compactor module is deployed (tables then accumulate runs). */
+  @Nullable private final StateTableCompactor compactor;
+
+  /** Kicked after each barrier's minimal round; null without a compactor. */
+  @Nullable private final PaimonTableShaping shaping;
+
+  /** One compactor per table at a time (see {@link PaimonTableShaping#compactionMutex}). */
+  private final Object compactionMutex = new Object();
+
+  /** Compaction commit identifier: monotonic across restarts (millis-seeded — Paimon dedupes
+   * re-committed identifiers per commit user, so barrier checkpoint ids, which restart small,
+   * cannot be reused for the compactor's own commits). */
+  private long compactRound = System.currentTimeMillis();
 
   private PaimonNativeState nativeState;
 
@@ -98,12 +110,22 @@ final class PaimonSnapshotStrategy
       KeyGroupRange keyGroupRange,
       File checkpointLinkRoot,
       File tableDirectory,
-      @Nullable Runnable maintenanceKick) {
+      @Nullable StateTableCompactor compactor) {
     this.backendUID = backendUID;
     this.keyGroupRange = keyGroupRange;
     this.checkpointLinkRoot = checkpointLinkRoot;
     this.tableDirectory = tableDirectory;
-    this.maintenanceKick = maintenanceKick;
+    this.compactor = compactor;
+    this.shaping =
+        compactor == null
+            ? null
+            : new PaimonTableShaping(compactor, tableDirectory, compactionMutex);
+  }
+
+  void close() {
+    if (shaping != null) {
+      shaping.close();
+    }
   }
 
   void registerNativeState(PaimonNativeState nativeState) {
@@ -149,10 +171,20 @@ final class PaimonSnapshotStrategy
   public PaimonSnapshotResources syncPrepareResources(long checkpointId) throws Exception {
     File linkDir = new File(checkpointLinkRoot, "chk-" + checkpointId);
     String[] manifest = nativeState.checkpoint();
-    if (maintenanceKick != null) {
-      // The commit just added one sorted run per touched bucket; maintenance runs off-thread
-      // (see PaimonTableMaintenance) so the barrier never waits on compaction.
-      maintenanceKick.run();
+    if (compactor != null && !manifest[0].isEmpty()) {
+      // Maintenance runs synchronously between the data commit and the manifest capture —
+      // Paimon's own lookup-wait model. The barrier's sorted runs are compacted away (with
+      // deletion vectors maintained) before any file is listed, so the checkpoint carries no
+      // level-0 files and the next interval's reads take the raw path. The second native
+      // checkpoint call commits nothing (the write buffer already drained); it re-pins the
+      // maintenance snapshot, lists its files, and lets local GC drop the superseded runs. A
+      // maintenance failure must fail the snapshot: on a deletion-vector table, reads over an
+      // uncompacted run would bypass the vectors and resurrect masked rows.
+      compactTables();
+      manifest = nativeState.checkpoint();
+      // The discretionary merges (run counts, space amplification) happen off-thread; deletion
+      // vectors keep reads correct however far shaping lags.
+      shaping.kick();
     }
     String snapshotToken = manifest[0];
     List<String> dataFiles = new ArrayList<>();
@@ -198,6 +230,28 @@ final class PaimonSnapshotStrategy
       }
     }
     return new PaimonSnapshotResources(snapshotToken, dataFiles, metaFiles, linkDir, reusable);
+  }
+
+  private void compactTables() throws Exception {
+    synchronized (compactionMutex) {
+      for (File table : discoverTables(tableDirectory)) {
+        compactor.compact(table.getAbsolutePath(), ++compactRound);
+      }
+    }
+  }
+
+  /**
+   * Restore-time maintenance, called once after the operator's native state opened: a rescale
+   * restore rewrites rows at level 0, which deletion-vector reads skip, so the tables must be
+   * compacted — and the native store re-pinned onto the maintenance snapshot — before the first
+   * record is processed. An adoption restore has no level-0 files, so this is a cheap no-op scan.
+   */
+  void maintainAfterRestore() throws Exception {
+    if (compactor == null) {
+      return;
+    }
+    compactTables();
+    nativeState.checkpoint();
   }
 
   private void link(String rel, File linkDir) throws IOException {

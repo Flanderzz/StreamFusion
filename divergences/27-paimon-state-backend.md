@@ -69,13 +69,20 @@ Why Paimon over rust-rocksdb:
 - paimon-rust has **no LSM compaction or snapshot expiry** yet, and we deliberately carry **no
   native compaction of our own**: table maintenance belongs exclusively to the optional
   `streamfusion-paimon-compactor` module, which hands the whole operation to **stock Java
-  Paimon** (its own picks, its sequence-preserving rewriter, its exact deletion
-  handling), running on a **background thread per operator backend** kicked after each barrier's
-  commit — the RocksDB model, where compaction never runs on the write path (running it
-  synchronously at the barrier measured slower than no maintenance at all). Maintenance commits
-  race the barrier's data commits safely under Paimon's optimistic commit retry on both sides,
-  and the local GC only deletes files it previously listed as live, so an in-flight round can
-  lose an input to GC and retry, never corrupt.
+  Paimon** (its own picks, its sequence-preserving rewriter, its exact deletion handling).
+  Maintenance splits in two, both serialized on one per-backend mutex (Paimon supports exactly
+  one compactor per table at a time): the **minimal round runs synchronously inside the
+  barrier** — deletion-vector reads skip level 0, so up-leveling the barrier's runs (with the
+  vectors maintained through Paimon's lookup index) is correctness-critical, Paimon's own
+  `lookup-wait` model — with the universal triggers disabled so it never grows beyond the
+  delta; the **discretionary shaping merges run on a background thread** kicked after each
+  barrier, the RocksDB model, safe to lag arbitrarily because every level-1+ file with its
+  vectors reads correct standalone. The local GC only deletes files it previously listed as
+  live, so an in-flight shaping round can lose an input to GC and retry, never corrupt.
+  Deletion vectors themselves are capability-gated: legal binary primary keys crash the sorted
+  lookup store's comparator on current Paimon releases (fix contributed upstream), so the
+  compactor probes the deployed Paimon's comparator with the state tables' exact key shape and
+  the backend falls back to merge-read tables when it fails.
   Cross-implementation round trips (Rust writes → Java reads and compacts → Rust
   restores and continues) are pinned by the module's tests against released Paimon. Without the
   module, tables stay correct but accumulate one sorted run per touched bucket per checkpoint

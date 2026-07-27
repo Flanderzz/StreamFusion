@@ -75,27 +75,34 @@ public class PaimonStateBackend implements StateBackend {
             : UUID.randomUUID();
     StateTableCompactor compactor = discoverCompactor();
     File tableDirectory = new File(workingDirectory, "table");
-    PaimonTableMaintenance maintenance =
-        compactor == null ? null : new PaimonTableMaintenance(compactor, tableDirectory);
     PaimonSnapshotStrategy strategy =
         new PaimonSnapshotStrategy(
             backendUID,
             parameters.getKeyGroupRange(),
             new File(workingDirectory, "checkpoints"),
             tableDirectory,
-            maintenance == null ? null : maintenance::kick);
+            compactor);
     if (paimonHandles.size() == 1) {
       IncrementalRemoteKeyedStateHandle restored = paimonHandles.get(0);
       strategy.seedRestored(restored.getCheckpointId(), restored.getSharedState());
     }
-    return new PaimonKeyedStateBackend<>(inner, strategy, workingDirectory, sources, maintenance);
+    return new PaimonKeyedStateBackend<>(
+        inner,
+        strategy,
+        workingDirectory,
+        sources,
+        compactor != null && compactor.supportsDeletionVectors());
   }
 
   /**
    * The table maintainer, when one is deployed (the Java Paimon compactor module), its
-   * dependencies are present, and it can read the configured state file format. There is no
-   * native fallback: without a compactor, state tables stay correct but accumulate one sorted
-   * run per touched bucket per checkpoint — worth a warning, not a failure.
+   * dependencies are present, and it can read the configured state file format. With a
+   * maintainer, compaction runs synchronously at every barrier; when its Paimon also passes the
+   * deletion-vector capability probe, state tables carry deletion vectors and reads never merge
+   * sorted runs (Paimon's own {@code lookup-wait} model). There is no native fallback: without a
+   * compactor, tables are created without deletion vectors and stay correct through merge reads,
+   * but accumulate one sorted run per touched bucket per checkpoint — worth a warning, not a
+   * failure.
    */
   private static StateTableCompactor discoverCompactor() {
     String fileFormat = io.github.jordepic.streamfusion.planner.NativeConfig.paimonFileFormat();

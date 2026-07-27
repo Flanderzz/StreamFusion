@@ -137,12 +137,12 @@ multi-source/blackhole ladder, raw timings, focused repeats, reproduction comman
 controls remain in [docs/benchmarks.md](docs/benchmarks.md).
 
 With each engine on its production **disk state backend** — stock Flink on RocksDB, StreamFusion
-on its Paimon state backend — the same exactly-once pipeline runs at a **2.03× geometric mean**
-(median 1.93×, **23 of 23 wins**, worst query 1.08×, up to 9.3× on session windows). The key
-enabler for the point-read-heavy queries is an exact per-file key index over the state tables:
-built once per pinned snapshot from each file's key column, it lets the per-batch key probe skip
-every file that holds none of the probed keys. The full table and method are in
-[docs/benchmarks.md](docs/benchmarks.md).
+on its Paimon state backend — the same exactly-once pipeline runs at a **1.97× geometric mean**
+(median 2.07×, **22 of 23 wins** with the one loss re-measured at parity in a focused repeat, up
+to 9.2× on session windows). The key enabler is **deletion-vector mode**: stock Java Paimon
+maintains the state tables' deletion vectors synchronously at each barrier, so every committed
+read is a raw parquet scan with exact predicate pushdown — no merge reads, no resident index.
+The full table and method are in [docs/benchmarks.md](docs/benchmarks.md).
 
 _Apple M1 Max; numbers are comparable only within a machine._
 

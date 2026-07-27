@@ -47,6 +47,19 @@ fn manifest_array<'local>(
     array.into_raw()
 }
 
+/// One-time process mode switch, called by the host backend before any store exists: with a Java
+/// compactor deployed, maintenance runs synchronously at every barrier and new state tables carry
+/// deletion vectors (see `PaimonStoreConfig::deletion_vectors`).
+#[no_mangle]
+pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_paimonDeletionVectors(
+    _env: JNIEnv,
+    _class: JClass,
+    enabled: jboolean,
+) {
+    crate::state::paimon_store::DELETION_VECTORS
+        .store(enabled != 0, std::sync::atomic::Ordering::Relaxed);
+}
+
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonGroupAggregator<
     'local,
@@ -114,6 +127,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonG
         buckets: buckets as usize,
         file_format: format,
         file_compression: compression,
+        deletion_vectors: deletion_vectors_mode(),
     };
     let store = if source_dirs.is_empty() {
         PaimonGroupStore::create(config, codec)
@@ -311,6 +325,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonK
         buckets: buckets as usize,
         file_format: format,
         file_compression: compression,
+        deletion_vectors: deletion_vectors_mode(),
     };
     let store = if source_dirs.is_empty() {
         PaimonDedupStore::create(config, codec)
@@ -499,6 +514,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonK
         buckets: buckets as usize,
         file_format: format,
         file_compression: compression,
+        deletion_vectors: deletion_vectors_mode(),
     };
     let store = if source_dirs.is_empty() {
         PaimonKeepFirstStore::create(config, row_types)
@@ -663,6 +679,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonC
         buckets: buckets as usize,
         file_format: format,
         file_compression: compression,
+        deletion_vectors: deletion_vectors_mode(),
     };
     let store = if source_dirs.is_empty() {
         PaimonNormalizerStore::create(config, codec)
@@ -906,6 +923,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonT
         buckets: buckets as usize,
         file_format: format,
         file_compression: compression,
+        deletion_vectors: deletion_vectors_mode(),
     };
     let store = if source_dirs.is_empty() {
         PaimonTopNStore::create(config, codec)
@@ -1118,6 +1136,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonU
         buckets: buckets as usize,
         file_format: format.clone(),
         file_compression: compression.clone(),
+        deletion_vectors: deletion_vectors_mode(),
     };
     let side_store = |side: &str, schema: &SchemaRef, pick: fn(&str) -> i64| {
         let codec = JoinStateCodec::new(schema);
@@ -1399,6 +1418,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonW
         buckets: buckets as usize,
         file_format: format,
         file_compression: compression,
+        deletion_vectors: deletion_vectors_mode(),
     };
     let store = if source_dirs.is_empty() {
         PaimonWindowRankStore::create(config, row_types)
@@ -1675,6 +1695,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonO
         buckets: buckets as usize,
         file_format: format,
         file_compression: compression,
+        deletion_vectors: deletion_vectors_mode(),
     };
     let store = if source_dirs.is_empty() {
         PaimonOverStore::create(config, payload_types, state_types)
@@ -1931,6 +1952,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonW
         buckets: buckets as usize,
         file_format: format,
         file_compression: compression,
+        deletion_vectors: deletion_vectors_mode(),
     };
     let store = if source_dirs.is_empty() {
         PaimonWindowJoinStore::create(config, left_types, right_types)
@@ -2216,6 +2238,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonT
         buckets: buckets as usize,
         file_format: format,
         file_compression: compression,
+        deletion_vectors: deletion_vectors_mode(),
     };
     let store = if source_dirs.is_empty() {
         PaimonWindowAggStore::create(config, key_data_types, state_types)
@@ -2351,6 +2374,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonS
         buckets: buckets as usize,
         file_format: format,
         file_compression: compression,
+        deletion_vectors: deletion_vectors_mode(),
     };
     let store = if source_dirs.is_empty() {
         PaimonSessionAggStore::create(config, key_data_types, state_types)
@@ -2491,6 +2515,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonI
         buckets: buckets as usize,
         file_format: format,
         file_compression: compression,
+        deletion_vectors: deletion_vectors_mode(),
     };
     let store = if source_dirs.is_empty() {
         PaimonIntervalJoinStore::create(config, left_types, right_types)
@@ -2681,6 +2706,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonT
         buckets: buckets as usize,
         file_format: format,
         file_compression: compression,
+        deletion_vectors: deletion_vectors_mode(),
     };
     let store = if source_dirs.is_empty() {
         PaimonTemporalJoinStore::create(config, left_types, right_types)

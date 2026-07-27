@@ -3427,6 +3427,7 @@ mod paimon_state {
             buckets: 4,
             file_format: "vortex".to_string(),
             file_compression: "uncompressed".to_string(),
+            deletion_vectors: false,
         }
     }
 
@@ -5317,5 +5318,176 @@ mod paimon_state {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[&*row_a.0].count, 1);
         assert_eq!(entries[&*row_b.0].count, 2);
+    }
+
+    fn dv_config(table_dir: &str) -> PaimonStoreConfig {
+        PaimonStoreConfig { deletion_vectors: true, ..config(table_dir) }
+    }
+
+    /// Deletion-vector mode stamps the table option, and the barrier's double checkpoint (data
+    /// commit, external compaction, second manifest capture) is idempotent when no maintenance
+    /// snapshot arrived: same snapshot, same file listing, no phantom commit. Also pins the
+    /// mode's read contract: committed level-0 runs are invisible to scans until the compactor
+    /// up-levels them (Paimon's own deletion-vector semantics), which is exactly why maintenance
+    /// is synchronous at the barrier and a missing compactor fails closed.
+    #[test]
+    fn paimon_deletion_vector_table_double_checkpoints() {
+        let dir = temp_dir("dv");
+        let mut paimon = paimon_agg(PaimonGroupStore::create(dv_config(&dir), codec()).unwrap());
+        let mut memory = memory_agg();
+
+        let schema_json =
+            std::fs::read_to_string(format!("{dir}/schema/schema-0")).unwrap();
+        assert!(
+            schema_json.contains("\"deletion-vectors.enabled\":\"true\""),
+            "the option must be stamped so the Java compactor maintains vectors"
+        );
+
+        // Within the interval, reads come from the write buffer: full parity.
+        let bundle = group_changelog(vec![1, 2, 1], vec![Some(10), Some(20), Some(5)], vec![0, 0, 0]);
+        paimon.update(&bundle).unwrap();
+        memory.update(&bundle).unwrap();
+        assert_same_output(
+            &memory.flush_mini_batch().unwrap(),
+            &paimon.flush_mini_batch().unwrap(),
+        );
+
+        let first = paimon.store_mut().checkpoint().unwrap();
+        let second = paimon.store_mut().checkpoint().unwrap();
+        assert_eq!(first.snapshot_id, second.snapshot_id, "no phantom commit");
+        let sorted = |m: &PaimonCheckpointManifest| {
+            let mut files: Vec<String> =
+                m.data_files.iter().chain(m.meta_files.iter()).cloned().collect();
+            files.sort();
+            files
+        };
+        assert_eq!(sorted(&first), sorted(&second), "identical listing");
+
+        // The contract this design exists for: the uncompacted level-0 run is invisible, so a
+        // probe of the committed key misses (emits a fresh INSERT, not an update). In a real
+        // deployment the Java compactor has always up-leveled it before any read.
+        paimon
+            .update(&group_changelog(vec![1], vec![Some(1)], vec![0]))
+            .unwrap();
+        let out = paimon.flush_mini_batch().unwrap();
+        assert_eq!(row_kinds(&out), vec![0], "level-0 must be invisible to deletion-vector reads");
+    }
+
+    /// A deletion-vector table only reads correctly when the vectors are applied and maintained,
+    /// which needs the Java compactor: restoring one into a deployment without it must refuse
+    /// rather than silently merge-read past the vectors.
+    #[test]
+    fn paimon_deletion_vector_restore_requires_compactor() {
+        let dir = temp_dir("dv-restore");
+        let mut paimon = paimon_agg(PaimonGroupStore::create(dv_config(&dir), codec()).unwrap());
+        paimon
+            .update(&group_changelog(vec![1], vec![Some(10)], vec![0]))
+            .unwrap();
+        paimon.flush_mini_batch().unwrap();
+        let manifest = paimon.store_mut().checkpoint().unwrap();
+
+        let restored = temp_dir("dv-restore-target");
+        materialize(&manifest, &dir, &restored);
+        let err = PaimonGroupStore::open(config(&restored), codec(), manifest.snapshot_id)
+            .err()
+            .expect("restore without a compactor must fail closed");
+        assert!(err.to_string().contains("compactor"), "unexpected error: {err}");
+
+        // The rescale path fails closed the same way: the clip rewrite would land at level 0,
+        // which deletion-vector reads skip — restoring silently empty state is worse than
+        // refusing.
+        let clip_err = PaimonGroupStore::open_merged(
+            config(&temp_dir("dv-clip-target")),
+            codec(),
+            &[(restored, manifest.snapshot_id)],
+            0..=127,
+            false,
+        )
+        .err()
+        .expect("clip restore without a compactor must fail closed");
+        assert!(clip_err.to_string().contains("compactor"), "unexpected error: {clip_err}");
+    }
+
+    /// Index files registered in the snapshot's index manifest (the compactor's deletion
+    /// vectors) ride the checkpoint listing with the data files, and a wholesale bucket adoption
+    /// links and re-registers them in the new table's own index manifest.
+    #[test]
+    fn paimon_index_files_ride_listing_and_adoption() {
+        let dir = temp_dir("dv-idx");
+        let mut paimon = paimon_agg(create_store(&dir));
+        paimon
+            .update(&group_changelog(vec![1, 2, 3], vec![Some(1), Some(2), Some(3)], vec![0, 0, 0]))
+            .unwrap();
+        paimon.flush_mini_batch().unwrap();
+        paimon.store_mut().checkpoint().unwrap();
+
+        // Register a fabricated index file the way the Java compactor's commit would: content is
+        // opaque here (nothing merges through it on this non-vector table), the metadata is real.
+        std::fs::create_dir_all(format!("{dir}/index")).unwrap();
+        std::fs::write(format!("{dir}/index/index-test-0"), b"opaque-vector-bytes").unwrap();
+        let meta = paimon::spec::IndexFileMeta {
+            index_type: "DELETION_VECTORS".to_string(),
+            file_name: "index-test-0".to_string(),
+            file_size: 19,
+            row_count: 1,
+            deletion_vectors_ranges: None,
+            global_index_meta: None,
+        };
+        let file_io = paimon::io::FileIO::from_path(&dir).unwrap().build().unwrap();
+        let manager = paimon::table::SchemaManager::new(file_io.clone(), dir.clone());
+        let schema = crate::bridge::runtime().block_on(manager.latest()).unwrap().unwrap();
+        let table = paimon::table::Table::new(
+            file_io,
+            paimon::catalog::Identifier::new("streamfusion", "state"),
+            dir.clone(),
+            std::sync::Arc::unwrap_or_clone(schema),
+            None,
+        );
+        let messages: Vec<paimon::table::CommitMessage> = (0..4)
+            .map(|bucket| {
+                let mut message = paimon::table::CommitMessage::new(
+                    paimon::spec::EMPTY_SERIALIZED_ROW.to_vec(),
+                    bucket,
+                    Vec::new(),
+                );
+                message.new_index_files = vec![meta.clone()];
+                message
+            })
+            .collect();
+        crate::bridge::runtime()
+            .block_on(table.new_write_builder().new_commit().commit(messages))
+            .unwrap();
+
+        let manifest = paimon.store_mut().checkpoint().unwrap();
+        assert!(
+            manifest.data_files.iter().any(|f| f == "index/index-test-0"),
+            "index files must ride the listing: {:?}",
+            manifest.data_files
+        );
+
+        // A restore materialized from exactly the listed files adopts the index file wholesale.
+        let restored = temp_dir("dv-idx-restore");
+        materialize(&manifest, &dir, &restored);
+        let adopted_dir = temp_dir("dv-idx-adopted");
+        let mut adopted = paimon_agg(
+            PaimonGroupStore::open_merged(
+                config(&adopted_dir),
+                codec(),
+                &[(restored, manifest.snapshot_id)],
+                0..=127,
+                true,
+            )
+            .unwrap(),
+        );
+        assert!(
+            std::path::Path::new(&format!("{adopted_dir}/index/index-test-0")).exists(),
+            "adoption must link the index file beside the data files"
+        );
+        let adopted_manifest = adopted.store_mut().checkpoint().unwrap();
+        assert!(
+            adopted_manifest.data_files.iter().any(|f| f == "index/index-test-0"),
+            "the adopted table's own index manifest must register the file: {:?}",
+            adopted_manifest.data_files
+        );
     }
 }

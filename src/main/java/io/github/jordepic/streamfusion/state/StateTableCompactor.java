@@ -24,12 +24,33 @@ public interface StateTableCompactor {
   boolean supports(String fileFormat);
 
   /**
-   * Runs one round of table maintenance against the local table directory. Implementations decide
-   * themselves whether anything needs compacting; doing nothing is a normal outcome. A failure
-   * fails only maintenance, never the checkpoint: the caller logs and continues.
+   * Whether this compactor can maintain deletion-vector tables: their lookup compaction compares
+   * lookup-file keys through the deployed Paimon's slice comparator, which older releases break
+   * on binary primary-key fields (ClassCastException — fixed upstream by comparing binary fields
+   * like BinaryRow does). When false, new state tables are created without deletion vectors and
+   * reads merge sorted runs; maintenance still runs at every barrier.
+   */
+  default boolean supportsDeletionVectors() {
+    return false;
+  }
+
+  /**
+   * The minimal maintenance a barrier must wait for: up-level the barrier's level-0 runs (with
+   * deletion vectors maintained) and nothing else. Deletion-vector reads skip level 0, so this
+   * is correctness-critical and runs synchronously inside the snapshot; everything
+   * discretionary — merging level-1+ runs for read and space amplification — belongs to {@link
+   * #shape} off the barrier path. On a deletion-vector table a failure fails the snapshot; on a
+   * merge-read table the caller may log and continue.
    *
    * @param tableDirectory the state table's local directory
-   * @param checkpointId the barrier's checkpoint id (a monotonic commit identifier)
+   * @param round a monotonic commit identifier
    */
-  void compact(String tableDirectory, long checkpointId) throws Exception;
+  void compact(String tableDirectory, long round) throws Exception;
+
+  /**
+   * One discretionary shaping round: ordinary compaction picks (universal triggers) bounding run
+   * counts and space amplification. Runs on a background thread; deletion vectors keep reads
+   * correct however far shaping lags, so a failed round is only a lost optimization.
+   */
+  default void shape(String tableDirectory, long round) throws Exception {}
 }

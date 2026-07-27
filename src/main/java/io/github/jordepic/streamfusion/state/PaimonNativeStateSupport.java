@@ -56,6 +56,10 @@ public final class PaimonNativeStateSupport {
     }
     PaimonKeyedStateBackend<?> backend = (PaimonKeyedStateBackend<?>) keyedStateBackend;
     if (!rawStateRestored && Native.paimonStateAvailable() && operatorSupported.getAsBoolean()) {
+      // With a compactor whose Paimon handles binary-key lookups, maintenance is synchronous at
+      // each barrier and new tables carry deletion vectors; the native side needs the mode
+      // before it creates any store.
+      Native.paimonDeletionVectors(backend.deletionVectors());
       return new PaimonNativeStateSupport(backend);
     }
     LOG.info(

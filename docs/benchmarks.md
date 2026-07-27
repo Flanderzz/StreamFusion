@@ -1113,62 +1113,77 @@ _Apple M1 Max; numbers are comparable only within a machine._
 
 ### Flink on RocksDB vs StreamFusion on Paimon (full Nexmark, exactly-once Kafka)
 
-The production-shaped backend comparison (2026-07-26, Apple M1 Max, release + `mimalloc`):
+The production-shaped backend comparison (2026-07-27, Apple M1 Max, release + `mimalloc`):
 stock Flink on its RocksDB backend versus the native engine on the Paimon state backend, over
 the readme's exactly-once Kafka pipeline — the same 500K-event JSON corpus, one-second
 checkpoints, exactly-once delivery to Kafka, mini-batching off on both engines, best of two
-after a warmup. Run with `SF_BENCHMARK=true SF_MATRIX_STATE_BACKENDS=true mvn test -Pbench
--Dtest=NexmarkMatrixBenchmark#stateBackendComparison`. A q4 preflight asserts both backends
-actually engage before any number is recorded (RocksDB must materialize working files under a
-directed localdir; a live Paimon store handle must be observed) — a silent fall-back to heap
-state would turn this into heap versus heap. Operators the Paimon backend does not yet carry
-(the interval and temporal joins, proctime shapes) fall back to memory state with raw
-snapshots, exactly as a deployment would run them; every stateful operator these queries plan
-to is Paimon-backed.
+after a warmup. The comparison lives in `streamfusion-paimon-compactor` — the only module whose
+classpath can hold both the backend and its Java table maintainer — and is run with
+`SF_BENCHMARK=true SF_MATRIX_STATE_BACKENDS=true mvn test -Pbench -pl
+streamfusion-paimon-compactor -am -Dtest=NexmarkStateBackendBenchmark#stateBackendComparison`.
+A q4 preflight asserts both backends engage before any number is recorded (RocksDB must
+materialize working files under a directed localdir; a live Paimon store handle must be
+observed), and additionally requires a **deletion-vector-capable compactor**: without one the
+Paimon side runs unmaintained or on merge reads, which is not the configuration this table
+claims to measure — an earlier revision of this table unknowingly did exactly that, because the
+benchmark then lived in a module whose classpath could not carry the compactor. Deletion-vector
+capability currently needs a Paimon bundle with the binary-primary-key lookup comparator fix
+(contributed upstream); until it reaches a release, build one locally and select it with
+`-Dpaimon.bundle.version`. Operators the Paimon backend does not yet carry (proctime shapes)
+fall back to memory state with raw snapshots, exactly as a deployment would run them.
 
 | query | Flink/RocksDB s | ev/s | SF/Paimon s | ev/s | SF/Flink |
 |---|---|---|---|---|---|
-| q0 | 2.169 | 231K | 0.995 | 502K | **2.18×** |
-| q1 | 2.267 | 221K | 0.980 | 510K | **2.31×** |
-| q2 | 1.505 | 332K | 0.969 | 516K | **1.55×** |
-| q3 | 1.093 | 457K | 0.826 | 605K | **1.32×** |
-| q4 | 5.575 | 90K | 2.100 | 238K | **2.66×** |
-| q5 | 2.450 | 204K | 1.079 | 463K | **2.27×** |
-| q7 | 4.703 | 106K | 2.390 | 209K | **1.97×** |
-| q8 | 1.274 | 392K | 0.774 | 646K | **1.65×** |
-| q9 | 6.462 | 77K | 5.463 | 92K | **1.18×** |
-| q10 | 2.559 | 195K | 1.028 | 486K | **2.49×** |
-| q11 | 8.992 | 56K | 0.967 | 517K | **9.29×** |
-| q12 | 1.466 | 341K | 0.887 | 564K | **1.65×** |
-| q13 | 2.111 | 237K | 1.328 | 377K | **1.59×** |
-| q14 | 2.377 | 210K | 1.725 | 290K | **1.38×** |
-| q15 | 5.787 | 86K | 1.598 | 313K | **3.62×** |
-| q16 | 7.200 | 69K | 2.102 | 238K | **3.42×** |
-| q17 | 3.944 | 127K | 1.362 | 367K | **2.90×** |
-| q18 | 6.283 | 80K | 3.257 | 154K | **1.93×** |
-| q19 | 14.792 | 34K | 8.912 | 56K | **1.66×** |
-| q20 | 4.216 | 119K | 3.902 | 128K | **1.08×** |
-| q21 | 1.504 | 333K | 0.825 | 606K | **1.82×** |
-| q22 | 2.332 | 214K | 1.016 | 492K | **2.29×** |
-| q23 | 12.802 | 39K | 11.663 | 43K | **1.10×** |
+| q0 | 2.890 | 173K | 1.130 | 443K | **2.56×** |
+| q1 | 2.386 | 210K | 1.163 | 430K | **2.05×** |
+| q2 | 1.608 | 311K | 1.156 | 433K | **1.39×** |
+| q3 | 1.242 | 403K | 1.060 | 471K | **1.17×** |
+| q4 | 5.780 | 87K | 2.121 | 236K | **2.72×** |
+| q5 | 2.779 | 180K | 1.152 | 434K | **2.41×** |
+| q7 | 5.087 | 98K | 2.314 | 216K | **2.20×** |
+| q8 | 1.305 | 383K | 1.214 | 412K | **1.07×** |
+| q9 | 5.714 | 88K | 7.841 | 64K | 0.73× |
+| q10 | 2.268 | 220K | 1.098 | 455K | **2.07×** |
+| q11 | 7.550 | 66K | 0.818 | 611K | **9.23×** |
+| q12 | 1.494 | 335K | 0.853 | 586K | **1.75×** |
+| q13 | 2.012 | 249K | 0.968 | 517K | **2.08×** |
+| q14 | 2.647 | 189K | 1.189 | 421K | **2.23×** |
+| q15 | 4.576 | 109K | 1.211 | 413K | **3.78×** |
+| q16 | 6.208 | 81K | 2.581 | 194K | **2.41×** |
+| q17 | 3.566 | 140K | 1.258 | 398K | **2.84×** |
+| q18 | 5.045 | 99K | 2.190 | 228K | **2.30×** |
+| q19 | 11.154 | 45K | 10.600 | 47K | **1.05×** |
+| q20 | 3.540 | 141K | 3.128 | 160K | **1.13×** |
+| q21 | 1.567 | 319K | 0.987 | 507K | **1.59×** |
+| q22 | 2.215 | 226K | 1.132 | 442K | **1.96×** |
+| q23 | 11.211 | 45K | 6.355 | 79K | **1.76×** |
 
-Geometric mean **2.03×**, median **1.93×**; **23 of 23 wins** (worst query 1.08×). q11's
-9.3× is session windows: RocksDB pays the merging window assigner's per-record window-mapping
-rewrites, the native session aggregate folds batch runs in memory and commits once per barrier.
-The thinnest wins are the point-read-heaviest shapes — q20, q23, and q9 (updating join +
-retracting top-1 over the full 10-column auction row) — where per-batch read-through still
-trails RocksDB's cached point access even after file-level pruning.
+Geometric mean **1.97×**, median **2.07×**; **22 of 23 wins**. The one loss, q9 (updating join
+plus retracting top-1 over the full auction row), re-measured at **1.04×** in a focused repeat
+directly after the suite — the table cell caught a slow measurement late in a long thermal
+session, the same pattern as the q12 note above. q11's 9.2× is session windows: RocksDB pays
+the merging window assigner's per-record window-mapping rewrites, the native session aggregate
+folds batch runs in memory and commits once per barrier. The thinnest wins are the
+point-read-heaviest shapes — q8, q19, q20 — where per-batch read-through still trails RocksDB's
+cached point access.
 
-The first run of this comparison (2026-07-26, same method) lost q18 at **0.57×** (8.784 s):
-the per-batch `IN` probe re-decoded the table's whole key column per batch, because a few
-thousand uniformly-spread keys land in every row group's — and every page's — `[min, max]`
-range, so range stats prune nothing (RocksDB answers the same probes per key, misses from
-resident bloom filters and hits from a block cache the table fits in). A bloom file index was
-tried first and *falsified*: a bloom answers one key at a time, so a file is skipped only when
-**every** probed key misses — probability `(1-fpp)^|probe|`, which is ~0 for a few thousand
-probes at any practical fpp. The runs that looked fixed were compaction timing (fewer, larger
-runs mean fewer key-column decodes), and reruns were bimodal. The real fix is the **exact
-per-file key index** (see `docs/optimizations.md`): once per pinned snapshot the store reads
-just a file's key column and keeps the set of key hashes; each probe then drops every
-delete-free file that shares no key with the probe set — exact membership, deterministic
-pruning. q18 now holds ~1.8–1.9× across independent reruns.
+**How q18 got fixed — and the two wrong answers before it.** The first revision of this table
+lost q18 at 0.57×: the per-batch `IN` probe re-decoded the table's whole key column per batch,
+because a few thousand uniformly-spread keys land in every file's `[min, max]` range, so range
+stats prune nothing. Two probe-side indexes were shipped and withdrawn (see
+`.claude/wontdos/58-probe-side-file-indexes.md`): a bloom file index — mathematically unable to
+skip a file for a batched probe, since skipping requires *every* probed key to miss,
+`(1-fpp)^|probe|` ≈ 0 — and an exact per-file key-hash set, which pruned deterministically but
+held resident memory proportional to *physical disk rows*, defeating the point of a disk
+backend. The investigation also invalidated every earlier number in this section: the benchmark
+then ran without any table maintenance at all (its module's classpath could not carry the
+compactor), and q18's run-to-run bimodality was a positive feedback loop — a slow start means a
+longer run, more barriers, more sorted runs, slower merge reads. The shipped fix removes merge
+reads instead of indexing them: state tables run in **deletion-vector mode**, every committed
+read is a raw parquet scan with the exact `IN` probe pushed to the decoder and the vectors
+applied as row masks, and the compactor splits into a minimal barrier-synchronous round
+(up-level the barrier's level-0 runs, universal triggers disabled — deletion-vector reads skip
+level 0, so this is correctness, not tuning) plus background shaping merges that can lag
+arbitrarily without affecting results. q18 now measures 1.7–2.4× across independent reruns with
+no resident index memory.
+

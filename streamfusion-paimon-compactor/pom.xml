@@ -12,6 +12,10 @@
 
     <artifactId>streamfusion-paimon-compactor</artifactId>
 
+    <properties>
+        <paimon.bundle.version>1.4.2</paimon.bundle.version>
+    </properties>
+
     <!-- Java Paimon as the maintainer of native state tables: stock Paimon's compaction (its own
          picks, its sequence-preserving rewriter, its deletion handling) runs against the local
          table at every checkpoint barrier, replacing the native store's fallback rewrite. An
@@ -30,7 +34,11 @@
         <dependency>
             <groupId>org.apache.paimon</groupId>
             <artifactId>paimon-bundle</artifactId>
-            <version>1.4.2</version>
+            <!-- Overridable so the deletion-vector suites can run against a Paimon carrying the
+                 binary-primary-key lookup comparator fix before it reaches a release
+                 (-Dpaimon.bundle.version=2.0-SNAPSHOT with a locally built bundle). On releases
+                 without the fix the deletion-vector tests skip via the capability probe. -->
+            <version>${paimon.bundle.version}</version>
             <scope>provided</scope>
         </dependency>
         <!-- The runtime's test classes: the state-backend benchmark reuses the Nexmark test

@@ -485,18 +485,12 @@ thermal noise (the paimon/memory ratio spanned 0.34–0.48 across control runs w
 baseline itself spanned 4.4–8.7 s); the maintenance-pacing default deserves a cool-machine A/B
 for the same reason.
 
-**Paimon maintenance is paced and directory ensures are cached.** Two follow-ups from the
-post-fix profile, shipped on their profile evidence with the honest note that the end-to-end A/B
-moved within this machine's thermal noise (the paimon/memory ratio spanned 0.38–0.46 against
-0.44 before). First, the commit path re-ensures the same table directories on every commit
-(snapshot/manifest mkdirs — still a fifth of the remaining `mkdir` samples); the custom fs
-service now remembers directories it has ensured, with the write path's missing-parent retry as
-the staleness backstop. Second, a maintenance round per barrier over-compacts at short checkpoint
-intervals (the compactor's reads were ~14% of process CPU at 500 ms barriers); rounds now pace at
-`streamfusion.state.paimon.maintenance.min-interval-ms` (default 2000 — RocksDB's
-`level0_file_num_compaction_trigger` of 4 runs at one run per 500 ms barrier), with kicks inside
-the pause coalescing. The pacing trades compaction CPU against temporarily higher run counts for
-readers; the knob exists because the right point is workload-dependent.
+**Directory ensures are cached.** From the post-fix profile: the commit path re-ensures the
+same table directories on every commit (snapshot/manifest mkdirs — a fifth of the remaining
+`mkdir` samples); the custom fs service now remembers directories it has ensured, with the write
+path's missing-parent retry as the staleness backstop. (A companion change from the same round —
+pacing a background maintenance thread — was later removed outright: maintenance is now
+synchronous at the barrier in deletion-vector mode, see the deletion-vector entry above.)
 
 **Paimon state tables write through a custom local-fs backend.** The object-store layer's stock
 filesystem service calls `create_dir_all(parent)` — a `mkdir` plus its companion `stat`, each a
@@ -511,31 +505,28 @@ backend A/B: **35.4 s → 9.85 s** — the mkdir storm cost far more than its CP
 because commits blocked on it — bringing the profiling round's cumulative total to
 **124.1 s → 9.85 s (12.6×)**, the Paimon backend at 0.44× the memory backend end to end.
 
-**An exact per-file key index answers point misses without decoding** *(2026-07-26)*. The
-per-batch key probe's one weakness was the miss-heavy, high-cardinality workload (Nexmark
-q18's `(bidder, auction)` dedup): a probe set of a few thousand uniformly-spread keys lands in
-every row group's — and every page's — `[min, max]` range, so range stats prune nothing and
-every batch re-decoded the table's whole key column, O(table) per batch and growing with
-state, where RocksDB answers the same probes per key from resident bloom filters and its
-block cache. The RocksDB analogy suggests a bloom file index, and one was built first — and
-falsified: a bloom prunes a *single-key* lookup well, but a file is skipped only when every
-probed key misses, probability `(1-fpp)^|probe|` ≈ 0 for thousands of probes at any practical
-fpp, so batched probes false-positive into every file (apparent wins traced to compaction
-timing, and reruns were bimodal). The shipped fix is exact: once per pinned snapshot — the
-table is immutable between barriers — the store reads just a file's `kg`/`k` columns and
-keeps the set of key hashes (XXH64 of the key bytes, the same Java-compatible hash the bloom
-work ported); each probe drops every file whose set shares nothing with the probe set. That
-replaces a per-*batch* whole-table key decode with a per-*interval* one, and pruning is
-deterministic membership, not probability. Two correctness edges: only delete-free files may
-be pruned (the set is built from a merged read, which collapses the tombstones it must
-witness — pruning a tombstone-carrier would resurrect older versions from surviving files),
-and a 64-bit hash collision costs one wasted decode, never correctness, because the reader's
-exact `IN` filter is still applied. The bloom read/write support (byte-compatible with Java's
-`BloomFilterFileIndex`, test vectors computed from the Java implementation) stays in the
-paimon-rust fork for upstreaming — it is the right tool for single-key probes, just not for
-batched ones. Measured on the Flink-on-RocksDB comparison (exactly-once Kafka, 500K events):
-q18 went from a bimodal 0.47–0.57× loss to a deterministic ~1.8–1.9× win across independent
-reruns, and the suite stands at **23/23 wins, 2.03× geometric mean**.
+**Deletion vectors make every committed read a raw scan; maintenance splits into a minimal
+synchronous round and background shaping** *(2026-07-27)*. Two read-path pathologies shared one
+root: reads through Paimon's merge reader. The miss-heavy, high-cardinality workload (Nexmark
+q18's `(bidder, auction)` dedup) re-decoded whole key columns per batch — range stats cannot
+prune a uniformly-spread probe set — and any bucket holding several sorted runs paid the merge
+itself. Two resident-memory indexes were tried and rejected first (a bloom file index cannot
+prune batch-sized probe sets, and an exact per-file key set holds memory proportional to disk
+rows — see `.claude/wontdos/58`). The shipped design removes the merge instead:
+`deletion-vectors.enabled` on the state tables makes every level-1+ file standalone-correct
+(stale rows are masked by vector files, maintained by stock Java Paimon's lookup compaction),
+so every committed read is a raw parquet scan with the exact `IN` probe pushed to the decoder
+and the vectors applied as row masks. Deletion-vector reads skip level 0, so the compactor runs
+a **minimal round synchronously inside the barrier** — up-level the barrier's runs, universal
+triggers disabled, delta-proportional by construction (Paimon's own `lookup-wait` model) —
+while **discretionary shaping merges run on a background thread**, serialized against the
+barrier rounds on one mutex because Paimon supports a single compactor per table. Shaping can
+lag arbitrarily without affecting results; an early variant that ran universal picks inside the
+barrier re-created the old feedback loop (slow batches → more barriers → more in-barrier
+rewrites) and sent q18 to 0.30× under load. Measured on the Flink-on-RocksDB comparison
+(exactly-once Kafka, 500K events): q18 deterministic across independent reruns (1.7–2.4×,
+formerly bimodal between 0.3× and 2.3×), no resident index memory, suite at 22/23 wins with a
+~2.0× geometric mean.
 
 **Paimon reads are a per-batch key probe pushed into the reader** *(supersedes the
 interval-resident working set below)*. The store is exactly two components — the write buffer

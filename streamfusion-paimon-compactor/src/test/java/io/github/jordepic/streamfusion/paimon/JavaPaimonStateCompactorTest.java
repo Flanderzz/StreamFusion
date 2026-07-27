@@ -27,19 +27,32 @@ import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.types.RowKind;
 import org.apache.paimon.fs.Path;
+import org.apache.paimon.io.DataFileMeta;
 import org.apache.paimon.fs.local.LocalFileIO;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.FileStoreTableFactory;
 import org.apache.paimon.table.source.DataSplit;
 import org.apache.paimon.table.source.Split;
+import org.junit.jupiter.api.Assumptions;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 /**
  * The whole delegation chain, end to end: the backend discovers this module's compactor through
- * the ServiceLoader and at checkpoint barriers stock Java Paimon maintains the state table —
- * visible as a bounded run count and an unchanged changelog.
+ * the ServiceLoader, stamps deletion vectors on the state table, and at every checkpoint barrier
+ * stock Java Paimon compacts the barrier's level-0 run away synchronously (Paimon's own
+ * lookup-wait model) — visible as a level-0-free table with a deletion-vector index and an
+ * unchanged changelog.
  */
 class JavaPaimonStateCompactorTest {
+
+  @BeforeAll
+  static void requiresDeletionVectorCapableCompactor() {
+    Assumptions.assumeTrue(
+        new JavaPaimonStateCompactor().supportsDeletionVectors(),
+        "deployed Paimon cannot compare binary primary-key lookup slices"
+            + " (fix pending upstream); deletion-vector suites skip");
+  }
 
   private static final int MAX_PARALLELISM = 128;
   private static final RowType INPUT =
@@ -99,24 +112,23 @@ class JavaPaimonStateCompactorTest {
 
       tableDir = findTableDirectory(harness.getEnvironment().getTaskManagerInfo().getTmpWorkingDirectory());
 
-      // Eight barriers wrote eight level-0 runs into one bucket. Only Java Paimon's maintenance
-      // could have merged any of them (the native store never compacts), so a bounded run count
-      // is the witness that the whole delegation chain ran. Maintenance is a background thread
-      // kicked by each barrier (the RocksDB model), so the witness polls briefly.
-      // (The maintenance snapshot document itself is expired by the store's local GC, so the
-      // commit user cannot serve as the witness.)
-      long deadline = System.currentTimeMillis() + 30_000;
-      int worst;
-      do {
-        worst = maxRunsPerBucket(tableDir);
-      } while (worst > 5 && System.currentTimeMillis() < deadline && sleepBriefly());
+      // Every barrier compacted its own level-0 run away before the checkpoint's manifest was
+      // captured, so the committed table holds only level-1+ files — which deletion-vector reads
+      // require: level 0 is invisible to them, so every read-back above already proved the
+      // maintenance snapshot was in place. Only Java Paimon's compaction can up-level (the
+      // native store never compacts), so a level-0-free table witnesses the delegation chain.
+      // (No index/ directory is expected here: with one tiny bucket, universal compaction picks
+      // full rewrites, so stale rows die by merge; deletion vectors appear only when lookup
+      // up-levels level 0 without rewriting the older file.)
+      assertEquals(0, levelZeroFiles(tableDir), "a barrier's level-0 run survived its checkpoint");
       assertTrue(
-          worst <= 5,
-          "expected Paimon maintenance to bound the bucket's runs (trigger 5), saw " + worst);
+          Files.readString(new File(tableDir, "schema/schema-0").toPath())
+              .contains("deletion-vectors.enabled"),
+          "a maintained deployment must create deletion-vector tables");
 
-      // Post-compaction rounds read through the rewritten files: the hot key's probe continues
-      // the sum, and a fresh key's probe (absent from every file, pruned by the per-pin key
-      // sets without decoding) inserts.
+      // The rounds above already read through the compacted files (each round's probe hits the
+      // previous barrier's maintenance snapshot, raw parquet with the vectors applied); a fresh
+      // key's probe (absent from every file) still inserts.
       VectorSchemaRoot hot =
           RowDataArrowConverter.write(
               List.of((RowData) GenericRowData.of(1L, 100L)), INPUT, allocator);
@@ -134,19 +146,18 @@ class JavaPaimonStateCompactorTest {
     }
   }
 
-  private static int maxRunsPerBucket(File tableDir) throws Exception {
+  private static int levelZeroFiles(File tableDir) throws Exception {
     FileStoreTable table =
         FileStoreTableFactory.create(LocalFileIO.create(), new Path(tableDir.getAbsolutePath()));
-    int worst = 0;
+    int levelZero = 0;
     for (Split split : table.newReadBuilder().newScan().plan().splits()) {
-      worst = Math.max(worst, ((DataSplit) split).dataFiles().size());
+      for (DataFileMeta file : ((DataSplit) split).dataFiles()) {
+        if (file.level() == 0) {
+          levelZero++;
+        }
+      }
     }
-    return worst;
-  }
-
-  private static boolean sleepBriefly() throws InterruptedException {
-    Thread.sleep(100);
-    return true;
+    return levelZero;
   }
 
   private static File findTableDirectory(File tmpWorkingDirectory) throws Exception {

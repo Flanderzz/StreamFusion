@@ -1,10 +1,12 @@
 package io.github.jordepic.streamfusion;
 
+import io.github.jordepic.streamfusion.state.StateTableCompactor;
 import io.github.jordepic.streamfusion.planner.NativePlanner;
 import io.github.jordepic.streamfusion.planner.PhysicalPlanScan;
 import io.github.jordepic.streamfusion.fluss.NativeFluss;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ServiceLoader;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
@@ -855,6 +857,18 @@ class NexmarkMatrixBenchmark {
       Map<String, String> paimon,
       Path rocksDir)
       throws Exception {
+    boolean deletionVectors = false;
+    for (StateTableCompactor candidate : ServiceLoader.load(StateTableCompactor.class)) {
+      deletionVectors |= candidate.available() && candidate.supportsDeletionVectors();
+    }
+    if (!deletionVectors) {
+      throw new IllegalStateException(
+          "no deletion-vector-capable state-table compactor on the classpath: the Paimon backend"
+              + " would run unmaintained or on merge reads, not the production configuration this"
+              + " comparison claims to measure. Run NexmarkStateBackendBenchmark in"
+              + " streamfusion-paimon-compactor against a Paimon bundle with the binary-key"
+              + " lookup comparator fix.");
+    }
     Query q4 =
         Arrays.stream(ALL_QUERIES).filter(q -> q.label.equals("q4")).findFirst().orElseThrow();
     AtomicBoolean rocksSeen = new AtomicBoolean();

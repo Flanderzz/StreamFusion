@@ -97,18 +97,6 @@ public final class NativeConfig {
   }
 
   /**
-   * Minimum milliseconds between background state-table maintenance rounds
-   * ({@code streamfusion.state.paimon.maintenance.min-interval-ms}, default 2000). Barriers kick
-   * maintenance, but a round per barrier over-compacts at short checkpoint intervals — the
-   * RocksDB analog is {@code level0_file_num_compaction_trigger} (default 4): with one sorted run
-   * per barrier, four 500 ms barriers is two seconds. Kicks arriving inside the pause coalesce
-   * into the next round.
-   */
-  public static long paimonMaintenanceMinIntervalMs() {
-    return Long.getLong("streamfusion.state.paimon.maintenance.min-interval-ms", 2000L);
-  }
-
-  /**
    * The operator-scope managed-memory weight, in mebibytes, a native stateful operator declares
    * ({@code streamfusion.memory.operator-weight-mb}, default 64). Flink splits the slot's
    * managed-memory OPERATOR share across declaring operators proportionally to these weights, so the
