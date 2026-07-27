@@ -47,6 +47,11 @@ public final class SharedFlinkCluster
     // (FlinkMemoryAccountingTest does).
     Configuration config = new Configuration();
     config.set(TaskManagerOptions.MANAGED_MEMORY_SIZE, MemorySize.parse("48g"));
+    // Fail fast, never loop: checkpointing enables Flink's default infinite fixed-delay restarts,
+    // under which a deterministically failing job restarts forever while collect() polls — a
+    // silent multi-hour hang where a test failure should be. A real deployment tunes its own
+    // restart strategy; a test's job either works or should fail its assertion promptly.
+    config.setString("restart-strategy.type", "none");
     cluster =
         new MiniClusterExtension(
             new MiniClusterResourceConfiguration.Builder()

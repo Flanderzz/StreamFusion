@@ -25,7 +25,11 @@ public final class NativeExtensionLoader {
         return;
       }
 
-      if (isPackaged(owner)) {
+      // A release extension JAR must carry its own DSO — failing here beats silently binding
+      // to an unrelated library. Source-tree tests may see these classes through a reactor JAR
+      // (a sibling module's test classpath), so the build's test runner sets the development
+      // property to reach the all-features development core library below.
+      if (isPackaged(owner) && !Boolean.getBoolean("streamfusion.native.development")) {
         UnsatisfiedLinkError error =
             new UnsatisfiedLinkError(
                 "No bundled native library for StreamFusion extension '"
