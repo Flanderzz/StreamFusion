@@ -1108,13 +1108,18 @@ class NexmarkMatrixBenchmark {
             .findFirst()
             .orElseThrow(() -> new IllegalArgumentException("unknown profile.query: " + label));
     boolean nativeRun = !"false".equals(System.getProperty("profile.native", "true"));
-    Map<String, String> config =
-        "true".equals(System.getProperty("profile.minibatch"))
-            ? Map.of(
-                "table.exec.mini-batch.enabled", "true",
-                "table.exec.mini-batch.allow-latency", "2 s",
-                "table.exec.mini-batch.size", "50000")
-            : Map.of();
+    Map<String, String> config = new LinkedHashMap<>();
+    if ("true".equals(System.getProperty("profile.minibatch"))) {
+      config.put("table.exec.mini-batch.enabled", "true");
+      config.put("table.exec.mini-batch.allow-latency", "2 s");
+      config.put("table.exec.mini-batch.size", "50000");
+    }
+    // profile.backend=paimon runs the loop on the persistent backend (from the compactor
+    // module, so maintenance and deletion vectors engage exactly as the comparison measures).
+    if ("paimon".equals(System.getProperty("profile.backend"))) {
+      config.put(
+          "state.backend.type", "io.github.jordepic.streamfusion.state.PaimonStateBackendFactory");
+    }
     try (KafkaContainer kafka =
         new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.6.1"))
             .withEnv("KAFKA_TRANSACTION_MAX_TIMEOUT_MS", "7200000")) {
