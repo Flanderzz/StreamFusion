@@ -81,8 +81,13 @@ final class PaimonSnapshotStrategy
   /** Kicked after each barrier's minimal round; null without a compactor. */
   @Nullable private final PaimonTableShaping shaping;
 
-  /** One compactor per table at a time (see {@link PaimonTableShaping#compactionMutex}). */
+  /** One compactor per table at a time (see {@link PaimonTableShaping}). */
   private final Object compactionMutex = new Object();
+
+  /** Long-lived maintenance sessions per table directory, guarded by the mutex: a session holds
+   * the table and writer across barriers and folds the native store's commits in incrementally,
+   * so the full manifest chain is scanned once per session, not once per barrier. */
+  private final Map<String, StateTableCompactor.Session> sessions = new HashMap<>();
 
   /** Compaction commit identifier: monotonic across restarts (millis-seeded — Paimon dedupes
    * re-committed identifiers per commit user, so barrier checkpoint ids, which restart small,
@@ -116,15 +121,18 @@ final class PaimonSnapshotStrategy
     this.checkpointLinkRoot = checkpointLinkRoot;
     this.tableDirectory = tableDirectory;
     this.compactor = compactor;
-    this.shaping =
-        compactor == null
-            ? null
-            : new PaimonTableShaping(compactor, tableDirectory, compactionMutex);
+    this.shaping = compactor == null ? null : new PaimonTableShaping(this::shapeTables);
   }
 
   void close() {
     if (shaping != null) {
       shaping.close();
+    }
+    synchronized (compactionMutex) {
+      for (StateTableCompactor.Session session : sessions.values()) {
+        session.close();
+      }
+      sessions.clear();
     }
   }
 
@@ -235,9 +243,28 @@ final class PaimonSnapshotStrategy
   private void compactTables() throws Exception {
     synchronized (compactionMutex) {
       for (File table : discoverTables(tableDirectory)) {
-        compactor.compact(table.getAbsolutePath(), ++compactRound);
+        session(table).compact(++compactRound);
       }
     }
+  }
+
+  /** One shaping round over every table; called by the shaping thread. */
+  private void shapeTables(long round) throws Exception {
+    synchronized (compactionMutex) {
+      for (File table : discoverTables(tableDirectory)) {
+        session(table).shape(round);
+      }
+    }
+  }
+
+  private StateTableCompactor.Session session(File table) throws Exception {
+    String dir = table.getAbsolutePath();
+    StateTableCompactor.Session session = sessions.get(dir);
+    if (session == null) {
+      session = compactor.open(dir);
+      sessions.put(dir, session);
+    }
+    return session;
   }
 
   /**

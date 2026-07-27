@@ -1,15 +1,17 @@
 package io.github.jordepic.streamfusion.state;
 
-import java.io.File;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
  * Discretionary state-table shaping on a background thread — the RocksDB model: deep compactions
  * never run on the write path. The barrier's synchronous round is only the minimal level-0
- * up-leveling ({@link StateTableCompactor#compact}); this thread runs the ordinary universal
- * picks ({@link StateTableCompactor#shape}) that bound run counts and space amplification,
- * kicked after each barrier and coalescing while a round is in flight.
+ * up-leveling; this thread runs the ordinary universal picks that bound run counts and space
+ * amplification, kicked after each barrier and coalescing while a round is in flight. The
+ * strategy's round callback serializes shaping against the barrier rounds on the compaction
+ * mutex — Paimon supports exactly one compactor per table at a time (concurrent picks can select
+ * the same input files and the loser's commit fails); a round usually fits between barriers, and
+ * a barrier arriving mid-round waits for it.
  *
  * <p>Shaping is best-effort by design: on a deletion-vector table every level-1+ file reads
  * correct standalone however far shaping lags, so a failed or slow round costs scan work, never
@@ -21,14 +23,12 @@ final class PaimonTableShaping implements AutoCloseable {
 
   private static final Logger LOG = LoggerFactory.getLogger(PaimonTableShaping.class);
 
-  private final StateTableCompactor compactor;
-  private final File tableDirectory;
-  /** Serializes shaping rounds against the barrier's minimal rounds: Paimon supports exactly one
-   * compactor per table at a time (concurrent picks can select the same input files and the
-   * loser's commit fails). A shape round usually fits between barriers; when one is mid-flight
-   * at a barrier, the barrier waits for it — and if the round swallowed the level-0 runs, the
-   * barrier's own round degrades to a no-op pick. */
-  private final Object compactionMutex;
+  /** One shaping round over every table the strategy maintains. */
+  interface ShapeRound {
+    void run(long round) throws Exception;
+  }
+
+  private final ShapeRound rounds;
   private final Thread thread;
   private final Object lock = new Object();
   private boolean kicked;
@@ -36,10 +36,8 @@ final class PaimonTableShaping implements AutoCloseable {
   /** Monotonic across restarts (Paimon dedupes re-committed identifiers per commit user). */
   private long round = System.currentTimeMillis();
 
-  PaimonTableShaping(StateTableCompactor compactor, File tableDirectory, Object compactionMutex) {
-    this.compactor = compactor;
-    this.tableDirectory = tableDirectory;
-    this.compactionMutex = compactionMutex;
+  PaimonTableShaping(ShapeRound rounds) {
+    this.rounds = rounds;
     this.thread = new Thread(this::run, "paimon-state-shaping");
     this.thread.setDaemon(true);
     this.thread.start();
@@ -68,14 +66,10 @@ final class PaimonTableShaping implements AutoCloseable {
         }
         kicked = false;
       }
-      synchronized (compactionMutex) {
-        for (File table : PaimonSnapshotStrategy.discoverTables(tableDirectory)) {
-          try {
-            compactor.shape(table.getAbsolutePath(), ++round);
-          } catch (Exception e) {
-            LOG.warn("state-table shaping round failed; the next barrier retries it", e);
-          }
-        }
+      try {
+        rounds.run(++round);
+      } catch (Exception e) {
+        LOG.warn("state-table shaping round failed; the next barrier retries it", e);
       }
     }
   }

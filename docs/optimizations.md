@@ -528,6 +528,23 @@ rewrites) and sent q18 to 0.30× under load. Measured on the Flink-on-RocksDB co
 formerly bimodal between 0.3× and 2.3×), no resident index memory, suite at 22/23 wins with a
 ~2.0× geometric mean.
 
+**Maintenance holds one long-lived writer per table** *(2026-07-27)*. Profiling q9 (the
+hit-heaviest state shape: updating join feeding a retracting top-1) showed Paimon's manifest
+reader pool burning more than a core continuously: every barrier's minimal round re-opened the
+table, re-planned against the full manifest chain, and restored writers from scratch — times
+three subtables. The compactor now opens a session per table holding the table and one minimal
+writer across barriers, the dedicated-compaction-job pattern: after each native data commit it
+reads just that snapshot's delta manifest and folds the new files in via `notifyNewFiles`, so
+the full-chain scan happens once per session (verified by instrumentation: one open per job,
+never per barrier), and the lookup-file caches stay warm. Shaping rounds still use a throwaway
+writer and invalidate the session when they commit — a long-lived writer must be its table's
+only compactor — costing one rescan per trigger-gated shaping commit instead of one per
+barrier. Honest measurement: the wasted core is gone but q9's end-to-end number moved only
+~6% (5.8 s → 5.5 s cool-to-cool; the ratio is dominated by RocksDB's own run variance) — the
+churn was off the critical path, and q9 remains bound by synchronous per-batch read-through on
+hit-heavy keys. This entry is kept as the prerequisite shape for fully-async maintenance
+(deletion-vector-aware merge reads in paimon-rust would remove the barrier round entirely).
+
 **Paimon reads are a per-batch key probe pushed into the reader** *(supersedes the
 interval-resident working set below)*. The store is exactly two components — the write buffer
 (everything written since the last barrier) and the committed disk table — and each input

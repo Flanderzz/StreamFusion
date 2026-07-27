@@ -23,13 +23,27 @@ import org.apache.paimon.table.sink.CommitMessageImpl;
 import org.apache.paimon.table.sink.StreamTableCommit;
 import org.apache.paimon.table.sink.StreamTableWrite;
 import org.apache.paimon.table.sink.StreamWriteBuilder;
+import org.apache.paimon.table.sink.TableWriteImpl;
+import org.apache.paimon.Snapshot;
+import org.apache.paimon.io.DataFileMeta;
+import org.apache.paimon.manifest.FileKind;
+import org.apache.paimon.manifest.ManifestEntry;
+import org.apache.paimon.table.source.ScanMode;
+import org.apache.paimon.utils.SnapshotManager;
+import java.util.ArrayList;
+import java.util.Iterator;
 
 /**
- * Table maintenance by stock Java Paimon: each checkpoint opens the local state table, asks
- * Paimon's own compaction to look at every live bucket ({@code fullCompaction=false}, so its
- * universal strategy picks — usually nothing), and commits whatever it rewrote as a maintenance
- * snapshot directly beneath the checkpoint's data commit. Sequence numbers are preserved by
- * Paimon's rewriter and deletions drop exactly per its own rules.
+ * Table maintenance by stock Java Paimon. A session holds the table and one long-lived minimal
+ * writer across barriers — the dedicated-compaction-job pattern ({@code StoreCompactOperator}):
+ * after each barrier's native data commit, the session reads only that snapshot's delta
+ * manifest and folds the new level-0 files into the held writer via {@code notifyNewFiles},
+ * then asks compaction to up-level them. The full manifest chain is scanned once at session
+ * open, not per barrier — on churn-heavy state the per-barrier rebuild was the dominant
+ * maintenance cost, dwarfing the compaction itself. Shaping rounds use a throwaway writer under
+ * the table's own triggers and invalidate the held view when they commit (a long-lived writer
+ * must be the table's only compactor to keep its level view truthful). Sequence numbers are
+ * preserved by Paimon's rewriter and deletions drop exactly per its own rules.
  */
 public class JavaPaimonStateCompactor implements StateTableCompactor {
 
@@ -83,58 +97,32 @@ public class JavaPaimonStateCompactor implements StateTableCompactor {
   }
 
   @Override
-  public void compact(String tableDirectory, long round) throws Exception {
-    run(tableDirectory, round, COMMIT_USER, true);
+  public Session open(String tableDirectory) {
+    return new PaimonSession(tableDirectory);
   }
 
-  @Override
-  public void shape(String tableDirectory, long round) throws Exception {
-    // Ordinary universal picks under the table's own triggers. A distinct commit user keeps the
-    // identifier sequence independent of the barrier rounds (Paimon dedupes per user).
-    run(tableDirectory, round, SHAPE_COMMIT_USER, false);
-  }
+  private static final class PaimonSession implements Session {
 
-  private static void run(String tableDirectory, long round, String commitUser, boolean minimal)
-      throws Exception {
-    FileStoreTable table =
-        FileStoreTableFactory.create(LocalFileIO.create(), new Path(tableDirectory));
-    if (table.snapshotManager().latestSnapshotId() == null) {
-      return; // nothing committed yet
+    private final String tableDirectory;
+
+    private FileStoreTable table;
+    private StreamTableWrite write;
+    private StreamTableCommit commit;
+    private IOManager ioManager;
+    /** Newest snapshot whose files the held writer's level view includes. */
+    private long lastSeenSnapshot;
+    private int buckets;
+
+    private PaimonSession(String tableDirectory) {
+      this.tableDirectory = tableDirectory;
     }
-    if (minimal) {
-      // The barrier waits on this round, so disable every discretionary pick: with the
-      // universal triggers unreachable, ForceUpLevel0Compaction falls through to exactly the
-      // minimal correctness-critical rewrite — up-level the barrier's level-0 runs, marking
-      // overwritten rows in higher levels through the lookup index instead of merging them.
-      // num-levels must be pinned to the table's real value first: its default is derived from
-      // the run trigger, and deriving it from MAX_VALUE would ask Levels for two billion runs.
-      Map<String, String> options = new HashMap<>();
-      options.put(CoreOptions.NUM_LEVELS.key(), String.valueOf(table.coreOptions().numLevels()));
-      options.put(
-          CoreOptions.NUM_SORTED_RUNS_COMPACTION_TRIGGER.key(),
-          String.valueOf(Integer.MAX_VALUE));
-      options.put(
-          CoreOptions.COMPACTION_MAX_SIZE_AMPLIFICATION_PERCENT.key(),
-          String.valueOf(Integer.MAX_VALUE));
-      table = table.copy(options);
-    }
-    // Ask compaction to look at every bucket by the table's fixed bucket count — a read plan
-    // cannot discover them, because scans of a deletion-vector table skip level-0 files, which
-    // is exactly where the runs needing compaction sit. An untouched bucket costs one empty
-    // strategy pick.
-    int buckets = table.coreOptions().bucket();
-    if (buckets <= 0) {
-      return;
-    }
-    StreamWriteBuilder builder = table.newStreamWriteBuilder().withCommitUser(commitUser);
-    // Lookup compaction (the deletion-vector rewriter) spills its key-position lookup files
-    // through an IOManager; give it scratch space under the JVM temp dir.
-    try (IOManager ioManager =
-            IOManager.create(
-                Files.createTempDirectory("streamfusion-compactor-lookup").toString());
-        StreamTableWrite write = builder.newWrite();
-        StreamTableCommit commit = builder.newCommit()) {
-      write.withIOManager(ioManager);
+
+    @Override
+    public void compact(long round) throws Exception {
+      if (write == null && !openWriter()) {
+        return; // nothing committed yet; retry next round
+      }
+      syncForeignCommits();
       for (int bucket = 0; bucket < buckets; bucket++) {
         write.compact(BinaryRow.EMPTY_ROW, bucket, false);
       }
@@ -145,6 +133,157 @@ public class JavaPaimonStateCompactor implements StateTableCompactor {
           messages.stream().allMatch(message -> ((CommitMessageImpl) message).isEmpty());
       if (!empty) {
         commit.commit(round, messages);
+        // The writer applied its own compaction result internally; fold the commit into the
+        // watermark so the delta walk never revisits it.
+        Long latest = table.snapshotManager().latestSnapshotId();
+        if (latest != null) {
+          lastSeenSnapshot = latest;
+        }
+      }
+    }
+
+    /**
+     * Opens the held table and writer, pinned to the barrier's minimal strategy: with the
+     * universal triggers unreachable, ForceUpLevel0Compaction falls through to exactly the
+     * correctness-critical rewrite — up-level the barrier's level-0 runs, marking overwritten
+     * rows in higher levels through the lookup index instead of merging them. num-levels must
+     * be pinned to the table's real value first: its default is derived from the run trigger,
+     * and deriving it from MAX_VALUE would ask Levels for two billion runs. The writer's bucket
+     * views restore lazily from the manifests on first touch — the only full-chain scan the
+     * session ever pays.
+     */
+    private boolean openWriter() throws Exception {
+      FileStoreTable fresh =
+          FileStoreTableFactory.create(LocalFileIO.create(), new Path(tableDirectory));
+      Long latest = fresh.snapshotManager().latestSnapshotId();
+      if (latest == null) {
+        return false;
+      }
+      int bucketCount = fresh.coreOptions().bucket();
+      if (bucketCount <= 0) {
+        return false;
+      }
+      Map<String, String> options = new HashMap<>();
+      options.put(CoreOptions.NUM_LEVELS.key(), String.valueOf(fresh.coreOptions().numLevels()));
+      options.put(
+          CoreOptions.NUM_SORTED_RUNS_COMPACTION_TRIGGER.key(),
+          String.valueOf(Integer.MAX_VALUE));
+      options.put(
+          CoreOptions.COMPACTION_MAX_SIZE_AMPLIFICATION_PERCENT.key(),
+          String.valueOf(Integer.MAX_VALUE));
+      table = fresh.copy(options);
+      buckets = bucketCount;
+      StreamWriteBuilder builder = table.newStreamWriteBuilder().withCommitUser(COMMIT_USER);
+      // Lookup compaction (the deletion-vector rewriter) spills its key-position lookup files
+      // through an IOManager; give it scratch space under the JVM temp dir.
+      ioManager =
+          IOManager.create(Files.createTempDirectory("streamfusion-compactor-lookup").toString());
+      write = builder.newWrite();
+      write.withIOManager(ioManager);
+      commit = builder.newCommit();
+      lastSeenSnapshot = latest;
+      return true;
+    }
+
+    /**
+     * Folds commits the held writer did not make — the native store's barrier data commits —
+     * into its level view by reading just each snapshot's delta manifest, the
+     * dedicated-compaction-job pattern. Our own minimal commits are skipped (the writer applied
+     * those results internally); shaping commits never reach this walk because a shaping round
+     * that commits invalidates the whole session. Foreign commits are pure appends (the native
+     * store expresses deletion as rows, never as manifest deletes), so ADD entries are the
+     * complete delta. notifyNewFiles itself drops files a bucket's lazy restore already saw.
+     */
+    private void syncForeignCommits() throws Exception {
+      SnapshotManager snapshots = table.snapshotManager();
+      Long latest = snapshots.latestSnapshotId();
+      if (latest == null || latest <= lastSeenSnapshot) {
+        return;
+      }
+      for (long id = lastSeenSnapshot + 1; id <= latest; id++) {
+        Snapshot snapshot = snapshots.snapshot(id);
+        if (COMMIT_USER.equals(snapshot.commitUser())) {
+          continue;
+        }
+        Map<Integer, List<DataFileMeta>> byBucket = new HashMap<>();
+        Iterator<ManifestEntry> entries =
+            table.store()
+                .newScan()
+                .withSnapshot(snapshot)
+                .withKind(ScanMode.DELTA)
+                .dropStats()
+                .readFileIterator();
+        while (entries.hasNext()) {
+          ManifestEntry entry = entries.next();
+          if (entry.kind() == FileKind.ADD) {
+            byBucket.computeIfAbsent(entry.bucket(), b -> new ArrayList<>()).add(entry.file());
+          }
+        }
+        for (Map.Entry<Integer, List<DataFileMeta>> bucket : byBucket.entrySet()) {
+          // notifyNewFiles lives on the implementation, not the StreamTableWrite interface —
+          // the same cast Paimon's own StoreCompactOperator relies on through StoreSinkWrite.
+          ((TableWriteImpl<?>) write)
+              .notifyNewFiles(id, BinaryRow.EMPTY_ROW, bucket.getKey(), bucket.getValue());
+        }
+      }
+      lastSeenSnapshot = latest;
+    }
+
+    @Override
+    public void shape(long round) throws Exception {
+      // Ordinary universal picks under the table's own triggers, through a throwaway writer —
+      // a distinct commit user keeps the identifier sequence independent of the barrier rounds
+      // (Paimon dedupes per user). A commit rewrites files the held writer believes live, so it
+      // invalidates the session; the next barrier's open pays one restore scan, amortized over
+      // the many barriers between trigger-gated shaping commits.
+      FileStoreTable fresh =
+          FileStoreTableFactory.create(LocalFileIO.create(), new Path(tableDirectory));
+      if (fresh.snapshotManager().latestSnapshotId() == null) {
+        return;
+      }
+      int bucketCount = fresh.coreOptions().bucket();
+      if (bucketCount <= 0) {
+        return;
+      }
+      StreamWriteBuilder builder = fresh.newStreamWriteBuilder().withCommitUser(SHAPE_COMMIT_USER);
+      try (IOManager shapeIo =
+              IOManager.create(
+                  Files.createTempDirectory("streamfusion-compactor-lookup").toString());
+          StreamTableWrite shapeWrite = builder.newWrite();
+          StreamTableCommit shapeCommit = builder.newCommit()) {
+        shapeWrite.withIOManager(shapeIo);
+        for (int bucket = 0; bucket < bucketCount; bucket++) {
+          shapeWrite.compact(BinaryRow.EMPTY_ROW, bucket, false);
+        }
+        List<CommitMessage> messages = shapeWrite.prepareCommit(true, round);
+        boolean empty =
+            messages.stream().allMatch(message -> ((CommitMessageImpl) message).isEmpty());
+        if (!empty) {
+          shapeCommit.commit(round, messages);
+          close();
+        }
+      }
+    }
+
+    @Override
+    public void close() {
+      try {
+        if (write != null) {
+          write.close();
+        }
+        if (commit != null) {
+          commit.close();
+        }
+        if (ioManager != null) {
+          ioManager.close();
+        }
+      } catch (Exception e) {
+        throw new RuntimeException("closing paimon maintenance session", e);
+      } finally {
+        write = null;
+        commit = null;
+        ioManager = null;
+        table = null;
       }
     }
   }
