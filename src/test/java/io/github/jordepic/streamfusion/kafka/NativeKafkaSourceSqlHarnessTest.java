@@ -10,6 +10,7 @@ import java.util.HashSet;
 import java.util.Properties;
 import java.util.Set;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.table.api.ExplainDetail;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.apache.flink.types.Row;
 import org.apache.flink.util.CloseableIterator;
@@ -124,6 +125,64 @@ class NativeKafkaSourceSqlHarnessTest {
     } finally {
       System.clearProperty("streamfusion.operator.kafkaSource.enabled");
     }
+  }
+
+  @Test
+  void selfJoinReadsTheTopicOnceThroughASharedSource() throws Exception {
+    // Two views of one topic (the Nexmark person/auction shape): the share pass must plan ONE
+    // native source fanned out to both branches — reading and decoding the topic once, like
+    // Flink's own sub-plan reuse does for its scan — and the join must still see every pairing.
+    System.setProperty("streamfusion.operator.kafkaSource.enabled", "true");
+    try (KafkaContainer kafka =
+        new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.6.1"))) {
+      kafka.start();
+      String brokers = kafka.getBootstrapServers();
+      produce(brokers, MESSAGES);
+      // Each even id pairs with the next odd id, exactly once: (row-2k, row-(2k+1)). Both branches
+      // read the same columns — differing per-branch projection pushdown makes the sources decode
+      // differently and correctly defeats sharing (q3's branches, like these, are identical).
+      String query =
+          "SELECT l.name AS lname, r.name AS rname FROM"
+              + " (SELECT name, id / 2 AS pair FROM k WHERE MOD(id, 2) = 0) l JOIN"
+              + " (SELECT name, id / 2 AS pair FROM k WHERE MOD(id, 2) = 1) r"
+              + " ON l.pair = r.pair";
+
+      StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+      env.setParallelism(1);
+      StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
+      tEnv.executeSql(kafkaTable("k", brokers));
+      PhysicalPlanScan scan = NativePlanner.install(tEnv);
+      String plan = tEnv.explainSql(query, ExplainDetail.JSON_EXECUTION_PLAN);
+      assertTrue(plan.contains("NativeShare(consumers=[2])"), "share point missing:\n" + plan);
+      assertEquals(
+          1,
+          count(plan, "\"contents\" : \"Source: native-kafka-source\""),
+          "expected exactly one native source in the stream graph:\n" + plan);
+
+      Set<String> joined = new HashSet<>();
+      try (CloseableIterator<Row> iterator = tEnv.executeSql(query).collect()) {
+        while (joined.size() < MESSAGES / 2 && iterator.hasNext()) {
+          Row row = iterator.next();
+          joined.add(row.getField("lname") + "|" + row.getField("rname"));
+        }
+      }
+      assertTrue(scan.substitutions() >= 1, "self-join did not route to native");
+      assertEquals(MESSAGES / 2, joined.size(), "expected one pairing per even id");
+      for (long k = 0; k < MESSAGES / 2; k++) {
+        String expected = "row-" + (2 * k) + "|row-" + (2 * k + 1);
+        assertTrue(joined.contains(expected), "missing pairing " + expected);
+      }
+    } finally {
+      System.clearProperty("streamfusion.operator.kafkaSource.enabled");
+    }
+  }
+
+  private static int count(String haystack, String needle) {
+    int occurrences = 0;
+    for (int at = haystack.indexOf(needle); at >= 0; at = haystack.indexOf(needle, at + 1)) {
+      occurrences++;
+    }
+    return occurrences;
   }
 
   @Test

@@ -147,6 +147,16 @@ public final class NativeConfig {
   }
 
   /**
+   * Whether identical native sources within one query dedup into a single shared source whose
+   * batches fan out to every branch as retained views ({@code streamfusion.plan.shareSources},
+   * default {@code true}) — the columnar counterpart of Flink's sub-plan reuse. Disabling leaves
+   * each branch its own source, reading and decoding the topic once per branch.
+   */
+  public static boolean shareSources() {
+    return Boolean.parseBoolean(System.getProperty("streamfusion.plan.shareSources", "true"));
+  }
+
+  /**
    * The operator-scope managed-memory weight, in mebibytes, a native stateful operator declares
    * ({@code streamfusion.memory.operator-weight-mb}, default 64). Flink splits the slot's
    * managed-memory OPERATOR share across declaring operators proportionally to these weights, so the

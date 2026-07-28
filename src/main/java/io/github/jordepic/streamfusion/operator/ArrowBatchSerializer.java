@@ -93,14 +93,17 @@ public final class ArrowBatchSerializer extends TypeSerializer<ArrowBatch> {
       return;
     }
     ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-    try (ArrowStreamWriter writer = new ArrowStreamWriter(batch.root(), null, bytes)) {
+    // One root() take per serialization: under a shared batch each take is a distinct retained
+    // view, so taking once and closing that same root keeps the reference counts balanced.
+    VectorSchemaRoot root = batch.root();
+    try (ArrowStreamWriter writer = new ArrowStreamWriter(root, null, bytes)) {
       writer.start();
       writer.writeBatch();
       writer.end();
     } finally {
       // Serializing ships the batch onto the network edge — its terminal use on the write side, so
       // release the off-heap buffers here (the read side allocates a fresh batch on deserialize).
-      batch.root().close();
+      root.close();
     }
     byte[] encoded = bytes.toByteArray();
     target.writeInt(DESTINATION_TAG);

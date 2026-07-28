@@ -20,12 +20,14 @@ public final class NativePlanner {
   public static PhysicalPlanScan install(TableConfig config) {
     // Sub-plan reuse stays enabled, scoped away from the island by digests: reuse runs after this
     // program's substitution stage and merges subtrees by digest, and every native rel carries a
-    // per-instance digest term (NativeRelDigests), so no columnar subtree can ever merge — an Arrow
-    // batch is handed to exactly one consumer, which closes its off-heap buffers after reading
-    // (ArrowBatchSerializer.copy is a zero-cost identity), and a merged native branch would fan one
-    // batch to two consumers, the second reading freed memory. The rowwise plan around the islands
-    // merges normally, so a self-join or multi-view query reads and converts its source once
-    // instead of once per branch. Reuse only changes the execution graph, never output.
+    // per-instance digest term (NativeRelDigests), so Flink can never merge two native nodes — an
+    // Arrow batch is handed to exactly one consumer, which closes its off-heap buffers after
+    // reading (ArrowBatchSerializer.copy is a zero-cost identity), and a blindly merged native
+    // branch would fan one batch to two consumers, the second reading freed memory. The rowwise
+    // plan around the islands merges normally. Where sharing a native subtree IS safe — identical
+    // native sources — the substitution stage merges them itself under an explicit share node
+    // whose declared consumer count makes every branch take a retained view (PhysicalPlanScan's
+    // share pass), so a multi-view query reads and decodes its topic once on the native path too.
     FlinkChainedProgram<StreamOptimizeContext> program = FlinkStreamProgram.buildProgram(config);
     PhysicalPlanScan scan = new PhysicalPlanScan();
     program.addLast("streamfusion_native", scan);

@@ -1,7 +1,11 @@
 package io.github.jordepic.streamfusion.operator;
 
 import java.lang.ref.Cleaner;
+import java.util.ArrayList;
+import java.util.List;
+import org.apache.arrow.vector.FieldVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.arrow.vector.util.TransferPair;
 
 /**
  * The columnar stream record passed between native operators: one Arrow batch. Carrying batches
@@ -20,6 +24,14 @@ import org.apache.arrow.vector.VectorSchemaRoot;
  * TaskManager's lifetime. A {@link Cleaner} backstop frees the root when a batch is collected
  * without any consumer having taken it. Taking the root disarms the backstop, so it can never free
  * buffers a consumer is still reading.
+ *
+ * <p>A shared sub-plan (one native source feeding several branches of the same query) breaks the
+ * one-consumer rule deliberately: the share operator declares the consumer count via
+ * {@link #shareAcross}, and each {@link #root()} call but the last then hands out its own zero-copy
+ * view over the same retained buffers — every consumer keeps its usual read-then-close contract,
+ * and the buffers free when the last view (or the original root, handed to the final consumer)
+ * closes. This is the refcounted fan-out Arroyo gets from {@code Arc<RecordBatch>} and RisingWave
+ * from Arc-shared chunk columns, expressed through Arrow Java's buffer reference counts.
  */
 public final class ArrowBatch {
 
@@ -29,6 +41,8 @@ public final class ArrowBatch {
   // The destination channel for a key-partitioned batch (the columnar shuffle); -1 when unrouted.
   private final int destination;
   private final Backstop backstop;
+  // How many consumers have yet to take the batch; 1 for the normal single-consumer hand-off.
+  private int pendingConsumers = 1;
 
   public ArrowBatch(VectorSchemaRoot root) {
     this(root, -1);
@@ -41,10 +55,37 @@ public final class ArrowBatch {
     ABANDONED.register(this, backstop);
   }
 
-  /** Hands the batch over: the caller now owns the root and closes it once read. */
-  public VectorSchemaRoot root() {
+  /**
+   * Declares that {@code consumers} chained readers will each take this batch once. Called by the
+   * share operator before the batch fans out; must precede any {@link #root()} call.
+   */
+  public synchronized void shareAcross(int consumers) {
+    pendingConsumers = consumers;
+  }
+
+  /**
+   * Hands the batch over: the caller now owns the returned root and closes it once read. Under a
+   * declared share, every take but the last receives its own zero-copy view over the same retained
+   * buffers, so each consumer's close releases only its own references.
+   */
+  public synchronized VectorSchemaRoot root() {
+    if (pendingConsumers > 1) {
+      pendingConsumers--;
+      return retainedView();
+    }
     backstop.handedOver = true;
     return root;
+  }
+
+  /** A new root whose vectors share (and retain) this batch's buffers — Arrow's zero-copy split. */
+  private VectorSchemaRoot retainedView() {
+    List<FieldVector> shared = new ArrayList<>(root.getFieldVectors().size());
+    for (FieldVector vector : root.getFieldVectors()) {
+      TransferPair pair = vector.getTransferPair(vector.getAllocator());
+      pair.splitAndTransfer(0, vector.getValueCount());
+      shared.add((FieldVector) pair.getTo());
+    }
+    return new VectorSchemaRoot(root.getSchema(), shared, root.getRowCount());
   }
 
   public int destination() {

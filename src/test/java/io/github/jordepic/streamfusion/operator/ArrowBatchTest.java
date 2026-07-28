@@ -43,6 +43,49 @@ class ArrowBatchTest {
     assertEquals(before, NativeAllocator.SHARED.getAllocatedMemory());
   }
 
+  @Test
+  void sharedBatchHandsEachConsumerItsOwnView() {
+    long before = NativeAllocator.SHARED.getAllocatedMemory();
+    ArrowBatch batch = newBatch();
+    batch.shareAcross(3);
+    VectorSchemaRoot first = batch.root();
+    VectorSchemaRoot second = batch.root();
+    VectorSchemaRoot third = batch.root(); // the last take: the original root
+    for (VectorSchemaRoot root : List.of(first, second, third)) {
+      assertEquals(3, root.getRowCount());
+      BigIntVector values = (BigIntVector) root.getVector("v");
+      for (int i = 0; i < 3; i++) {
+        assertEquals(i, values.get(i));
+      }
+    }
+    // Closing in any order: each consumer releases only its own references; the buffers survive
+    // until the final close.
+    third.close();
+    assertEquals(1, ((BigIntVector) first.getVector("v")).get(1), "view died with the original");
+    first.close();
+    assertEquals(1, ((BigIntVector) second.getVector("v")).get(1), "view died with a sibling view");
+    second.close();
+    assertEquals(before, NativeAllocator.SHARED.getAllocatedMemory());
+  }
+
+  @Test
+  void partiallyTakenSharedBatchIsReclaimedByTheBackstop() throws Exception {
+    long before = NativeAllocator.SHARED.getAllocatedMemory();
+    shareTakeOneViewAndDropTheBatch();
+    assertTrue(
+        drainsTo(before),
+        () -> "abandoned shared batch not reclaimed; allocator holds "
+            + (NativeAllocator.SHARED.getAllocatedMemory() - before)
+            + " extra bytes");
+  }
+
+  /** One consumer takes (and closes) a view, the rest never arrive — the original must not leak. */
+  private static void shareTakeOneViewAndDropTheBatch() {
+    ArrowBatch batch = newBatch();
+    batch.shareAcross(2);
+    batch.root().close();
+  }
+
   /** In its own frame so the batch is unquestionably unreachable when the caller polls. */
   private static void newBatchAndDropIt() {
     newBatch();

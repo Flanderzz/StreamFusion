@@ -1,6 +1,8 @@
 package io.github.jordepic.streamfusion.planner;
 
 import java.util.ArrayList;
+import java.util.IdentityHashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import org.apache.calcite.rel.RelNode;
@@ -42,7 +44,9 @@ import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalW
 import org.apache.flink.table.planner.plan.trait.MiniBatchInterval;
 import org.apache.flink.table.planner.plan.trait.MiniBatchIntervalTraitDef$;
 import org.apache.flink.table.planner.plan.trait.MiniBatchMode;
+import org.apache.flink.table.api.config.OptimizerConfigOptions;
 import org.apache.flink.table.planner.plan.optimize.program.FlinkOptimizeProgram;
+import org.apache.flink.table.planner.utils.ShortcutUtils;
 import org.apache.flink.table.planner.plan.utils.ChangelogPlanUtils;
 import org.apache.flink.table.planner.plan.utils.RankProcessStrategy;
 import org.apache.flink.table.planner.plan.optimize.program.StreamOptimizeContext;
@@ -98,7 +102,74 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
       return root;
     }
     // Pass 2 inserts a row↔columnar transpose at each perimeter edge (rowwise source/sink ↔ island).
-    return insertTransitions(substituted);
+    // Pass 3 deduplicates identical native sources into one shared instance, so a multi-view query
+    // reads and decodes its topic once — the columnar counterpart of Flink's sub-plan reuse, which
+    // the digest barriers deliberately keep away from native nodes.
+    return shareIdenticalSources(insertTransitions(substituted));
+  }
+
+  /**
+   * Rewires every group of semantically identical native Kafka sources to one shared instance under
+   * a {@link StreamPhysicalNativeShare} carrying the branch count (the same DAG shape Flink's
+   * sub-plan reuse produces for the rowwise plan, and the source dedup Arroyo's named nodes and
+   * RisingWave's share operator perform). The share operator declares the count on each batch, so
+   * every branch takes its own retained view instead of the single-owner root.
+   */
+  private RelNode shareIdenticalSources(RelNode root) {
+    // The DAG this pass builds only survives translation through Flink's digest-based sub-plan
+    // reuse (SameRelObjectShuttle splits shared instances; SubplanReuseUtil re-merges them by
+    // digest). With reuse disabled the clones would each keep an over-declared consumer count, so
+    // leave the branches reading independently.
+    if (!NativeConfig.shareSources()
+        || !ShortcutUtils.unwrapTableConfig(root)
+            .get(OptimizerConfigOptions.TABLE_OPTIMIZER_REUSE_SUB_PLAN_ENABLED)) {
+      return root;
+    }
+    Map<String, List<RelNode>> groups = new LinkedHashMap<>();
+    collectShareableScans(root, groups);
+    Map<RelNode, RelNode> replacements = new IdentityHashMap<>();
+    for (List<RelNode> group : groups.values()) {
+      if (group.size() < 2) {
+        continue;
+      }
+      long token = NativeRelDigests.nextId();
+      RelNode shared = ((ShareableScan) group.get(0)).withShareToken(token);
+      RelNode share =
+          new StreamPhysicalNativeShare(
+              shared.getCluster(), shared.getTraitSet(), shared, group.size(), token);
+      for (RelNode member : group) {
+        replacements.put(member, share);
+      }
+    }
+    return replacements.isEmpty() ? root : replaceInputs(root, replacements);
+  }
+
+  private static void collectShareableScans(RelNode node, Map<String, List<RelNode>> groups) {
+    if (node instanceof ShareableScan) {
+      // Class-qualified so two different source kinds can never group, whatever their keys.
+      String key = node.getClass().getName() + '|' + ((ShareableScan) node).sharingKey();
+      groups.computeIfAbsent(key, k -> new ArrayList<>()).add(node);
+      return;
+    }
+    for (RelNode input : node.getInputs()) {
+      collectShareableScans(input, groups);
+    }
+  }
+
+  /** Rebuilds the tree with each replaced node swapped for its (shared) replacement instance. */
+  private static RelNode replaceInputs(RelNode node, Map<RelNode, RelNode> replacements) {
+    RelNode replacement = replacements.get(node);
+    if (replacement != null) {
+      return replacement;
+    }
+    List<RelNode> inputs = new ArrayList<>(node.getInputs().size());
+    boolean changed = false;
+    for (RelNode input : node.getInputs()) {
+      RelNode rebuilt = replaceInputs(input, replacements);
+      inputs.add(rebuilt);
+      changed |= rebuilt != input;
+    }
+    return changed ? node.copy(node.getTraitSet(), inputs) : node;
   }
 
   /**
