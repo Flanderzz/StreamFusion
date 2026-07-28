@@ -286,11 +286,13 @@ array`, is **not** here: Flink rejects it too, so we're at parity.)
   unsupported grouping-key/output column type. (Both halves must match for the query to
   accelerate — one staying on the host drags the whole query back via the gate.)
 - **Top-N** — a non-constant (variable) rank range; a row type the converter can't carry; an
-  **update-fast rank** (Flink plans it when the input has a unique key and the sort key is inferred
-  monotonic, e.g. ranking by a descending `COUNT(*)`) — that plan shape delivers a changelog without
-  retractions, so rank rows must be replaced by unique key, which the retracting ranker does not yet
-  implement. (Insert-only and retracting changelog input, an `OFFSET`, and a projected rank number
-  are all handled. `RANK`/`DENSE_RANK` never reach us — Flink rejects them in streaming.)
+  **update-fast rank with an `OFFSET`** (the update-fast shape — Flink plans it when the input has a
+  unique key and the sort key is inferred monotonic, e.g. ranking by a descending `COUNT(*)` — is
+  otherwise native, mirroring `UpdatableTopNFunction`'s bounded state and `FastTop1Function`'s
+  drop-non-improving semantics for `rn <= 1`; its state is memory-backed under every state backend,
+  with no Paimon store shape yet). (Insert-only and retracting changelog input, an `OFFSET` on the
+  non-update-fast shapes, and a projected rank number are all handled. `RANK`/`DENSE_RANK` never
+  reach us — Flink rejects them in streaming.)
 - **LIMIT** — missing `FETCH`, or a retracting input (`OFFSET` is handled — it uses the retracting
   ranker over the insert-only input).
 - **Deduplicate** — not a time-ordered rank-1. Rowtime and proctime, keep-first (`ASC`) and keep-last
@@ -629,7 +631,8 @@ the operator just checkpoints its state the old way, in full):
   positions — tie order, which decides evictions and promotions — survive restore exactly; the
   analog of Flink's `ListState`; the retracting variant persists its full never-truncated buffer,
   and its touched-partition rewrite once per checkpoint is strictly less state writing than the
-  per-record `SortedMap` rewrite Flink's own retractable Top-N pays on RocksDB), and the
+  per-record `SortedMap` rewrite Flink's own retractable Top-N pays on RocksDB; the update-fast
+  variant has no Paimon store shape yet and stays memory-backed), and the
   **updating join** (all kinds: INNER/LEFT/RIGHT/FULL/SEMI/ANTI; one table per side under the
   operator's backend — the analog of Flink's two named join states — each stored row persisted as
   typed columns plus its appear-count and degree under a content-addressed third key column, the

@@ -392,13 +392,31 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
           return noteDisabled(current, "topN");
         }
         // An update-fast rank (unique-keyed input with a monotonic sort key) receives a changelog
-        // WITHOUT retractions — the upstream is planned to emit only +I/+U, and rank rows must be
-        // replaced by their unique key. The retracting ranker's full-row retraction model cannot
-        // run that stream (it would accumulate every version), so the shape stays on the host
-        // until a native update-fast ranker exists.
+        // WITHOUT retractions — the upstream is planned to emit only +I/+U, and rank rows are
+        // replaced by their unique key (the retracting ranker's full-row retraction model would
+        // accumulate every version). It routes to the update-fast ranker, which mirrors Flink's
+        // UpdatableTopNFunction/FastTop1Function state shape.
         if (rank.rankStrategy() instanceof RankProcessStrategy.UpdateFastStrategy) {
-          recordFallback("Top-N: update-fast rank (unique-keyed input, no retractions) runs on the host");
-          return current;
+          if (TopNMatcher.offset(rank) > 0) {
+            recordFallback("Top-N: update-fast rank with OFFSET runs on the host");
+            return current;
+          }
+          substitutions++;
+          int[] updateFastPartitions = TopNMatcher.partitionColumns(rank);
+          return new StreamPhysicalNativeColumnarTopN(
+              rank.getCluster(),
+              rank.getTraitSet(),
+              columnarInput(rank.getInput(), updateFastPartitions),
+              rank.getRowType(),
+              updateFastPartitions,
+              TopNMatcher.sortIndices(rank),
+              TopNMatcher.sortAscending(rank),
+              TopNMatcher.sortNullsFirst(rank),
+              0,
+              TopNMatcher.limit(rank),
+              TopNMatcher.outputRankNumber(rank),
+              false,
+              ((RankProcessStrategy.UpdateFastStrategy) rank.rankStrategy()).getPrimaryKeys());
         }
         substitutions++;
         int[] partitionColumns = TopNMatcher.partitionColumns(rank);
@@ -421,7 +439,8 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
             offset,
             TopNMatcher.limit(rank),
             TopNMatcher.outputRankNumber(rank),
-            retracting);
+            retracting,
+            null);
       }
     }
 
@@ -454,7 +473,8 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
             offset,
             LimitMatcher.limit(sort),
             false, // a global LIMIT never projects a rank column
-            offset > 0); // an OFFSET uses the retracting ranker; no-offset the append-only one
+            offset > 0, // an OFFSET uses the retracting ranker; no-offset the append-only one
+            null);
       }
       // Recognized but not substituted. A sort-limit emits a changelog, so it would otherwise slip
       // past the insert-only guard below unreported; record why here so a non-accelerating query can

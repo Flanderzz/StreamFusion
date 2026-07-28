@@ -43,6 +43,8 @@ class NativeColumnarTopNOperatorTest {
         2L,
         false,
         false,
+        null,
+        null,
         false,
         -1,
         MAX_PARALLELISM);
@@ -60,6 +62,8 @@ class NativeColumnarTopNOperatorTest {
         2L,
         false,
         false,
+        null,
+        null,
         true,
         miniBatchSize,
         MAX_PARALLELISM);
@@ -77,6 +81,8 @@ class NativeColumnarTopNOperatorTest {
         2L,
         false,
         true,
+        null,
+        null,
         true,
         miniBatchSize,
         MAX_PARALLELISM);
@@ -288,6 +294,96 @@ class NativeColumnarTopNOperatorTest {
       expected.sort(java.util.Comparator.comparing(row -> (Long) row.get(1)));
       assertEquals(expected, actual);
     }
+  }
+
+  // Update-fast: [p (partition), k (unique key), s (sort key)]; the bounded state keeps only the
+  // top-N and a record replaces its unique key's previous version.
+  private static final RowType UPDATE_FAST_SCHEMA =
+      RowType.of(
+          new LogicalType[] {new BigIntType(), new BigIntType(), new BigIntType()},
+          new String[] {"p", "k", "s"});
+
+  private static NativeColumnarTopNOperator updateFastOperator() {
+    return new NativeColumnarTopNOperator(
+        new int[] {0},
+        new int[] {-1},
+        UPDATE_FAST_SCHEMA,
+        new int[] {2},
+        new int[] {1},
+        new int[] {0},
+        0L,
+        2L,
+        false,
+        false,
+        new int[] {0, 1},
+        new int[] {-1, -1},
+        false,
+        -1,
+        MAX_PARALLELISM);
+  }
+
+  /**
+   * The update-fast ranker's raw snapshot must carry the unique-key bytes: after restore, a new
+   * version of a buffered row must replace it (found by row key). Were the row key lost, the
+   * record would enter as a second row and evict the true rank-2 occupant instead.
+   */
+  @Test
+  void updateFastStateSurvivesCheckpoint() throws Exception {
+    OperatorSubtaskState snapshot;
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness =
+            harness(updateFastOperator(), 1, 0)) {
+      harness.setup(new ArrowBatchSerializer());
+      harness.open();
+      harness.processElement(
+          new StreamRecord<>(updateFastBatch(allocator, row3(1, 1, 5), row3(1, 2, 3))));
+      snapshot = harness.snapshot(1L, 1L);
+      collect3(harness);
+    }
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> restored =
+            harness(updateFastOperator(), 1, 0)) {
+      restored.setup(new ArrowBatchSerializer());
+      restored.initializeState(snapshot);
+      restored.open();
+      restored.processElement(new StreamRecord<>(updateFastBatch(allocator, row3(1, 2, 2))));
+      assertEquals(
+          List.of(change3(RowKind.INSERT, 1, 2, 2), change3(RowKind.DELETE, 1, 2, 3)),
+          collect3(restored));
+    }
+  }
+
+  private static RowData row3(long partition, long key, long sort) {
+    GenericRowData row = new GenericRowData(3);
+    row.setField(0, partition);
+    row.setField(1, key);
+    row.setField(2, sort);
+    return row;
+  }
+
+  private static ArrowBatch updateFastBatch(BufferAllocator allocator, RowData... rows) {
+    return new ArrowBatch(
+        RowDataArrowConverter.write(List.of(rows), UPDATE_FAST_SCHEMA, allocator, true));
+  }
+
+  private static List<Object> change3(RowKind kind, long partition, long key, long sort) {
+    return List.of(kind, partition, key, sort);
+  }
+
+  private static List<List<Object>> collect3(
+      OneInputStreamOperatorTestHarness<ArrowBatch, ArrowBatch> harness) {
+    List<List<Object>> rows = new ArrayList<>();
+    while (!harness.getOutput().isEmpty()) {
+      Object event = harness.getOutput().poll();
+      if (event instanceof StreamRecord) {
+        try (VectorSchemaRoot root = ((ArrowBatch) ((StreamRecord<?>) event).getValue()).root()) {
+          for (RowData r : RowDataArrowConverter.read(root, UPDATE_FAST_SCHEMA)) {
+            rows.add(List.of(r.getRowKind(), r.getLong(0), r.getLong(1), r.getLong(2)));
+          }
+        }
+      }
+    }
+    return rows;
   }
 
   private static RowData row(long partition, long sort) {

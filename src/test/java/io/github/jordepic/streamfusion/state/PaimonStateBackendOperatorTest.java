@@ -490,6 +490,8 @@ class PaimonStateBackendOperatorTest {
             2L,
             false,
             false,
+            null,
+            null,
             false,
             -1,
             MAX_PARALLELISM);
@@ -511,6 +513,8 @@ class PaimonStateBackendOperatorTest {
             2L,
             false,
             true,
+            null,
+            null,
             false,
             -1,
             MAX_PARALLELISM);

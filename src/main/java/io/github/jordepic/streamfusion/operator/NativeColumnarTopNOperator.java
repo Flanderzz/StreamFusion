@@ -38,6 +38,10 @@ public class NativeColumnarTopNOperator extends AbstractStreamOperator<ArrowBatc
   private final long limit;
   private final boolean outputRankNumber;
   private final boolean retracting;
+  // Update-fast mode (Flink's UpdatableTopNFunction shape): the unique-key columns identifying the
+  // row a record replaces; null for the append-only and retracting rankers.
+  private final int[] rowKeyColumns;
+  private final int[] rowKeyTimestampPrecisions;
   private final boolean netDiff;
   private final long miniBatchSize;
   private final int maxParallelism;
@@ -61,6 +65,8 @@ public class NativeColumnarTopNOperator extends AbstractStreamOperator<ArrowBatc
       long limit,
       boolean outputRankNumber,
       boolean retracting,
+      int[] rowKeyColumns,
+      int[] rowKeyTimestampPrecisions,
       boolean netDiff,
       long miniBatchSize,
       int maxParallelism) {
@@ -74,6 +80,8 @@ public class NativeColumnarTopNOperator extends AbstractStreamOperator<ArrowBatc
     this.limit = limit;
     this.outputRankNumber = outputRankNumber;
     this.retracting = retracting;
+    this.rowKeyColumns = rowKeyColumns;
+    this.rowKeyTimestampPrecisions = rowKeyTimestampPrecisions;
     this.netDiff = netDiff;
     this.miniBatchSize = miniBatchSize;
     if (maxParallelism <= 0) {
@@ -92,6 +100,36 @@ public class NativeColumnarTopNOperator extends AbstractStreamOperator<ArrowBatc
     super.initializeState(context);
     java.util.List<byte[]> snapshots = RawKeyedState.restore(context);
     memoryBudget = ManagedMemoryBudget.reserveFor(this);
+    if (rowKeyColumns != null) {
+      // The update-fast ranker has no Paimon store shape yet: its state is memory-backed and
+      // snapshots as raw keyed-state blobs under every configured state backend.
+      handle =
+          snapshots.isEmpty()
+              ? Native.createUpdateFastTopNRanker(
+                  partitionColumns,
+                  keyTimestampPrecisions,
+                  rowKeyColumns,
+                  rowKeyTimestampPrecisions,
+                  sortIndices,
+                  sortAscending,
+                  sortNullsFirst,
+                  limit,
+                  outputRankNumber,
+                  memoryBudget.bytes())
+              : Native.restoreUpdateFastTopNRankerPartitions(
+                  partitionColumns,
+                  keyTimestampPrecisions,
+                  rowKeyColumns,
+                  rowKeyTimestampPrecisions,
+                  sortIndices,
+                  sortAscending,
+                  sortNullsFirst,
+                  limit,
+                  outputRankNumber,
+                  snapshots.toArray(new byte[0][]),
+                  memoryBudget.bytes());
+      return;
+    }
     // Both rankers run on the Paimon list store: the append-only buffer is capped at N, and the
     // retracting buffer — unbounded, like Flink's own retractable Top-N state — rewrites a
     // touched partition once per checkpoint, strictly less than the per-record state rewrite

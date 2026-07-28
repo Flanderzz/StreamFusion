@@ -1444,11 +1444,356 @@ fn diff_top(
     }
 }
 
-/// The Top-N handle the JVM holds: append-only (insert-only input, bounded buffer) or retracting
-/// (changelog input, full buffer). Both push a batch and return a changelog, snapshot, and restore.
+/// Update-fast streaming Top-N — Flink's `UpdatableTopNFunction` (and `FastTop1Function` for
+/// `limit == 1`): a rank over a changelog whose rows are replaced in place by a unique key (which
+/// contains the partition key) with a sort key the planner proved monotonic, so no retraction ever
+/// arrives — an update is just a new version of its row key. Only the top-N rows are kept per
+/// partition, exactly Flink's state shape: a row displaced past rank N is deleted, and a row
+/// arriving beyond rank N never enters (its later versions can only improve toward the top). The
+/// emitted changelog is the per-input-row diff of the top-N before vs after the mutation — the
+/// retracting ranker's contract, materially identical to Flink's cascade. A tracked row whose sort
+/// key moves the wrong way (possible when upstream state expired) re-sorts like any change —
+/// Flink's lenient path.
+///
+/// `limit == 1` replicates `FastTop1Function`, which never consults the unique key: a record that
+/// does not strictly improve on the current top-1 is dropped without touching state or output, so
+/// a same-sort-key update keeps the stale payload. Matching Flink's materialized result means
+/// reproducing exactly that.
+pub(crate) type UpdatableRow = (OwnedRow, Arc<OwnedRow>, ByteKey);
+
+fn updatable_entry_bytes(entry: &UpdatableRow) -> usize {
+    entry.0.row().as_ref().len()
+        + entry.1.row().as_ref().len()
+        + entry.2.len()
+        + GROUP_ENTRY_OVERHEAD
+}
+
+/// The raw update-fast snapshot stores the row's unique-key bytes alongside the shared
+/// key/sort/row columns, so restore stays a byte wrap like the other rankers'.
+const RAW_SNAPSHOT_ROW_KEY: &str = "__row_key__";
+
+pub(crate) struct UpdatableTopNRanker {
+    partition_columns: Vec<usize>,
+    key_timestamp_precisions: Vec<i32>,
+    row_key_columns: Vec<usize>,
+    row_key_timestamp_precisions: Vec<i32>,
+    sort_columns: Vec<SortColumn>,
+    limit: i64,
+    output_rank_number: bool,
+    schema: Option<SchemaRef>,
+    converters: Option<TopNConverters>,
+    // Memory-backed only for now: no Paimon store shape yet, so under a persistent state backend
+    // this state still snapshots as raw keyed-state blobs.
+    groups: MemoryStateStore<Vec<UpdatableRow>>,
+    pub(crate) memory: OperatorMemory,
+}
+
+impl UpdatableTopNRanker {
+    pub(crate) fn new(
+        partition_columns: Vec<usize>,
+        key_timestamp_precisions: Vec<i32>,
+        row_key_columns: Vec<usize>,
+        row_key_timestamp_precisions: Vec<i32>,
+        sort_columns: Vec<SortColumn>,
+        limit: i64,
+        output_rank_number: bool,
+    ) -> Self {
+        UpdatableTopNRanker {
+            partition_columns,
+            key_timestamp_precisions,
+            row_key_columns,
+            row_key_timestamp_precisions,
+            sort_columns,
+            limit,
+            output_rank_number,
+            schema: None,
+            converters: None,
+            groups: MemoryStateStore::default(),
+            memory: OperatorMemory::unaccounted(),
+        }
+    }
+
+    /// Bounds the per-partition buffers by the operator's managed-memory budget (negative =
+    /// unaccounted), accounting any restored buffers immediately.
+    fn with_memory_budget(mut self, budget_bytes: i64) -> Result<Self, DataFusionError> {
+        let state: usize = self
+            .groups
+            .iter()
+            .map(|(key, buffer)| {
+                byte_key_bytes(&key.0) + buffer.iter().map(updatable_entry_bytes).sum::<usize>()
+            })
+            .sum();
+        self.memory.attach("update-fast-top-n", budget_bytes, state)?;
+        Ok(self)
+    }
+
+    pub(crate) fn push(&mut self, batch: &RecordBatch) -> Result<RecordBatch, DataFusionError> {
+        let arity = data_arity(batch);
+        self.schema = Some(data_schema(batch));
+        if self.converters.is_none() {
+            self.converters = Some(TopNConverters::build(
+                batch,
+                arity,
+                &self.partition_columns,
+                &self.sort_columns,
+            ));
+        }
+        self.groups
+            .begin_batch(batch, &self.partition_columns, &self.key_timestamp_precisions)?;
+        let conv = self.converters.as_ref().expect("converters set");
+        let mut parts = BinaryRowBatchEncoder::new(
+            batch,
+            &self.partition_columns,
+            &self.key_timestamp_precisions,
+        );
+        let mut row_keys = BinaryRowBatchEncoder::new(
+            batch,
+            &self.row_key_columns,
+            &self.row_key_timestamp_precisions,
+        );
+        let sort_arrays: Vec<ArrayRef> =
+            self.sort_columns.iter().map(|s| batch.column(s.index).clone()).collect();
+        let data_arrays: Vec<ArrayRef> = (0..arity).map(|i| batch.column(i).clone()).collect();
+        let keys = encode_group_keys(&conv.sort, &sort_arrays, batch.num_rows());
+        let payloads = conv.payload.convert_columns(&data_arrays).expect("encode payload");
+
+        let limit = self.limit as usize;
+        let top1 = limit == 1;
+        let rank_output = self.output_rank_number;
+        let track = self.memory.tracking();
+        let mut delta = 0isize;
+        let groups = &mut self.groups;
+        let mut out_rows: Vec<Arc<OwnedRow>> = Vec::new();
+        let mut out_kinds: Vec<i8> = Vec::new();
+        let mut out_ranks: Vec<i64> = Vec::new();
+
+        for row in 0..batch.num_rows() {
+            let key_row = keys.row(row);
+            let part = parts.encode(row);
+            let buffer = match groups.get_mut(part) {
+                Some(buffer) => buffer,
+                None => {
+                    if track {
+                        delta += (part.len() + GROUP_ENTRY_OVERHEAD) as isize;
+                    }
+                    groups.insert(ByteKey::from(part), Vec::new())
+                }
+            };
+            // The bounded buffer IS the top-N window.
+            let old_top: Vec<Arc<OwnedRow>> =
+                buffer.iter().map(|(_, p, _)| Arc::clone(p)).collect();
+            if top1 {
+                // FastTop1Function: only a strict improvement replaces the buffered row.
+                match buffer.first() {
+                    None => {
+                        let entry = (
+                            key_row.owned(),
+                            Arc::new(payloads.row(row).owned()),
+                            ByteKey::from(row_keys.encode(row)),
+                        );
+                        if track {
+                            delta += updatable_entry_bytes(&entry) as isize;
+                        }
+                        buffer.push(entry);
+                    }
+                    Some((current, _, _)) if key_row < current.row() => {
+                        if track {
+                            delta -= updatable_entry_bytes(&buffer[0]) as isize;
+                        }
+                        buffer[0] = (
+                            key_row.owned(),
+                            Arc::new(payloads.row(row).owned()),
+                            ByteKey::from(row_keys.encode(row)),
+                        );
+                        if track {
+                            delta += updatable_entry_bytes(&buffer[0]) as isize;
+                        }
+                    }
+                    _ => continue, // equal or worse — dropped, state and output untouched
+                }
+            } else {
+                let row_key = row_keys.encode(row);
+                match buffer.iter().position(|(_, _, k)| &*k.0 == row_key) {
+                    Some(index) => {
+                        if buffer[index].0.row() == key_row {
+                            // Same sort key: replace the payload in place, preserving the row's
+                            // position among sort-key ties (Flink's innerRank).
+                            let payload = Arc::new(payloads.row(row).owned());
+                            if track {
+                                delta += payload.row().as_ref().len() as isize
+                                    - buffer[index].1.row().as_ref().len() as isize;
+                            }
+                            buffer[index].1 = payload;
+                        } else {
+                            let previous = buffer.remove(index);
+                            if track {
+                                delta -= updatable_entry_bytes(&previous) as isize;
+                            }
+                            let pos = buffer.partition_point(|(k, _, _)| k.row() <= key_row);
+                            buffer.insert(
+                                pos,
+                                (key_row.owned(), Arc::new(payloads.row(row).owned()), previous.2),
+                            );
+                            if track {
+                                delta += updatable_entry_bytes(&buffer[pos]) as isize;
+                            }
+                        }
+                    }
+                    None => {
+                        let pos = buffer.partition_point(|(k, _, _)| k.row() <= key_row);
+                        if pos >= limit {
+                            continue; // beyond rank N — never enters, never tracked
+                        }
+                        buffer.insert(
+                            pos,
+                            (
+                                key_row.owned(),
+                                Arc::new(payloads.row(row).owned()),
+                                ByteKey::from(row_key),
+                            ),
+                        );
+                        if track {
+                            delta += updatable_entry_bytes(&buffer[pos]) as isize;
+                        }
+                        if buffer.len() > limit {
+                            let evicted = buffer.pop().expect("buffer over limit is non-empty");
+                            if track {
+                                delta -= updatable_entry_bytes(&evicted) as isize;
+                            }
+                        }
+                    }
+                }
+            }
+            let new_top: Vec<Arc<OwnedRow>> =
+                buffer.iter().map(|(_, p, _)| Arc::clone(p)).collect();
+            diff_top(rank_output, 0, &old_top, &new_top, &mut out_rows, &mut out_kinds, &mut out_ranks);
+        }
+        self.groups.end_bundle()?;
+        self.memory.record(delta + self.groups.footprint_delta());
+        self.memory.account()?;
+        Ok(emit_changelog(
+            self.schema.as_ref(),
+            self.converters.as_ref(),
+            rank_output,
+            out_rows,
+            out_kinds,
+            out_ranks,
+        ))
+    }
+
+    pub(crate) fn snapshot_partitions(&self, max_parallelism: usize) -> BTreeMap<i32, Vec<u8>> {
+        let Some(schema) = self.schema.as_ref() else { return BTreeMap::new() };
+        let mut builders: BTreeMap<i32, (BinaryBuilder, BinaryBuilder, BinaryBuilder, BinaryBuilder)> =
+            BTreeMap::new();
+        for (key, buffer) in self.groups.iter() {
+            if buffer.is_empty() {
+                continue;
+            }
+            let group = flink_key_group(hash_bytes_by_words(&key.0), max_parallelism) as i32;
+            let (keys, sorts, row_keys, rows) = builders.entry(group).or_default();
+            for (sort, payload, row_key) in buffer.iter() {
+                keys.append_value(&key.0);
+                sorts.append_value(sort.row().data());
+                row_keys.append_value(&row_key.0);
+                rows.append_value(payload.row().data());
+            }
+        }
+        let raw_schema = Arc::new(Schema::new_with_metadata(
+            vec![
+                Field::new(RAW_SNAPSHOT_KEY, DataType::Binary, false),
+                Field::new(RAW_SNAPSHOT_SORT, DataType::Binary, false),
+                Field::new(RAW_SNAPSHOT_ROW_KEY, DataType::Binary, false),
+                Field::new(RAW_SNAPSHOT_ROW, DataType::Binary, false),
+            ],
+            std::collections::HashMap::from([(
+                RAW_SNAPSHOT_PAYLOAD_SCHEMA.to_string(),
+                encode_schema_metadata(schema),
+            )]),
+        ));
+        builders
+            .into_iter()
+            .map(|(group, (mut keys, mut sorts, mut row_keys, mut rows))| {
+                let batch = RecordBatch::try_new(
+                    raw_schema.clone(),
+                    vec![
+                        Arc::new(keys.finish()),
+                        Arc::new(sorts.finish()),
+                        Arc::new(row_keys.finish()),
+                        Arc::new(rows.finish()),
+                    ],
+                )
+                .expect("raw update-fast top-n snapshot batch");
+                (group, write_ipc(&batch))
+            })
+            .collect()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn restore_partitions(
+        partition_columns: Vec<usize>,
+        key_timestamp_precisions: Vec<i32>,
+        row_key_columns: Vec<usize>,
+        row_key_timestamp_precisions: Vec<i32>,
+        sort_columns: Vec<SortColumn>,
+        limit: i64,
+        output_rank_number: bool,
+        snapshots: &[Vec<u8>],
+    ) -> Self {
+        let mut ranker = UpdatableTopNRanker::new(
+            partition_columns,
+            key_timestamp_precisions,
+            row_key_columns,
+            row_key_timestamp_precisions,
+            sort_columns,
+            limit,
+            output_rank_number,
+        );
+        for bytes in snapshots {
+            for batch in read_ipc_if_present(bytes) {
+                if ranker.schema.is_none() {
+                    let payload_schema =
+                        decode_schema_metadata(&batch).expect("raw update-fast snapshot payload schema");
+                    let empty = RecordBatch::new_empty(payload_schema.clone());
+                    ranker.converters = Some(TopNConverters::build(
+                        &empty,
+                        empty.num_columns(),
+                        &ranker.partition_columns,
+                        &ranker.sort_columns,
+                    ));
+                    ranker.schema = Some(payload_schema);
+                }
+                let conv = ranker.converters.as_ref().expect("converters set");
+                let sort_parser = conv.sort.parser();
+                let payload_parser = conv.payload.parser();
+                let keys = column_binary(&batch, RAW_SNAPSHOT_KEY);
+                let sorts = column_binary(&batch, RAW_SNAPSHOT_SORT);
+                let row_keys = column_binary(&batch, RAW_SNAPSHOT_ROW_KEY);
+                let rows = column_binary(&batch, RAW_SNAPSHOT_ROW);
+                for row in 0..batch.num_rows() {
+                    let part = keys.value(row);
+                    let buffer = match ranker.groups.get_mut(part) {
+                        Some(buffer) => buffer,
+                        None => ranker.groups.insert(ByteKey::from(part), Vec::new()),
+                    };
+                    buffer.push((
+                        sort_parser.parse(sorts.value(row)).owned(),
+                        Arc::new(payload_parser.parse(rows.value(row)).owned()),
+                        ByteKey::from(row_keys.value(row)),
+                    ));
+                }
+            }
+        }
+        ranker
+    }
+}
+
+/// The Top-N handle the JVM holds: append-only (insert-only input, bounded buffer), retracting
+/// (changelog input, full buffer), or update-fast (unique-keyed changelog without retractions,
+/// bounded buffer). All push a batch and return a changelog, snapshot, and restore.
 pub(crate) enum TopNHandle {
     Append(TopNRanker),
     Retract(RetractableTopNRanker),
+    UpdateFast(UpdatableTopNRanker),
 }
 
 impl TopNHandle {
@@ -1456,6 +1801,7 @@ impl TopNHandle {
         match self {
             TopNHandle::Append(r) => r.push(batch),
             TopNHandle::Retract(r) => r.push(batch),
+            TopNHandle::UpdateFast(r) => r.push(batch),
         }
     }
 
@@ -1463,6 +1809,8 @@ impl TopNHandle {
         match self {
             TopNHandle::Append(r) => r.flush_net_diff(),
             TopNHandle::Retract(r) => r.flush_net_diff(),
+            // The update-fast ranker has no net-diff staging; every push emitted its diff already.
+            TopNHandle::UpdateFast(_) => RecordBatch::new_empty(Arc::new(Schema::empty())),
         }
     }
 
@@ -1471,6 +1819,9 @@ impl TopNHandle {
         Ok(match self {
             TopNHandle::Append(r) => TopNHandle::Append(r.with_memory_budget(budget_bytes)?),
             TopNHandle::Retract(r) => TopNHandle::Retract(r.with_memory_budget(budget_bytes)?),
+            TopNHandle::UpdateFast(r) => {
+                TopNHandle::UpdateFast(r.with_memory_budget(budget_bytes)?)
+            }
         })
     }
 
@@ -1478,6 +1829,9 @@ impl TopNHandle {
         match self {
             TopNHandle::Append(r) => r.snapshot(),
             TopNHandle::Retract(r) => r.snapshot(),
+            TopNHandle::UpdateFast(r) => {
+                r.snapshot_partitions(1).remove(&0).unwrap_or_default()
+            }
         }
     }
 
@@ -1485,6 +1839,7 @@ impl TopNHandle {
         match self {
             TopNHandle::Append(r) => r.snapshot_partitions(max_parallelism),
             TopNHandle::Retract(r) => r.snapshot_partitions(max_parallelism),
+            TopNHandle::UpdateFast(r) => r.snapshot_partitions(max_parallelism),
         }
     }
 
@@ -1946,6 +2301,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_topNRankerSta
     (match ranker {
         TopNHandle::Append(r) => r.memory.state_bytes,
         TopNHandle::Retract(r) => r.memory.state_bytes,
+        TopNHandle::UpdateFast(r) => r.memory.state_bytes,
     }) as jlong
 }
 
@@ -1959,6 +2315,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_topNRankerSta
     match ranker {
         TopNHandle::Append(r) => r.staging_bytes() as jlong,
         TopNHandle::Retract(r) => r.staging_bytes() as jlong,
+        TopNHandle::UpdateFast(_) => 0, // no net-diff staging
     }
 }
 
@@ -1972,6 +2329,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_topNRankerSta
     match ranker {
         TopNHandle::Append(r) => r.staged_partitions() as jlong,
         TopNHandle::Retract(r) => r.staged_partitions() as jlong,
+        TopNHandle::UpdateFast(_) => 0, // no net-diff staging
     }
 }
 
@@ -2410,6 +2768,107 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreTopNRa
         net_diff != 0,
         &restored,
     )
+    .with_memory_budget(memory_budget_bytes);
+    boxed_or_throw(&mut env, ranker)
+}
+
+/// Creates an update-fast streaming Top-N ranker (Flink's `UpdatableTopNFunction` /
+/// `FastTop1Function` shape: unique-keyed changelog without retractions, monotonic sort key) and
+/// returns an opaque handle served by the shared Top-N push/flush/snapshot/close entry points.
+#[no_mangle]
+pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createUpdateFastTopNRanker<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    partition_columns: JIntArray<'local>,
+    key_timestamp_precisions: JIntArray<'local>,
+    row_key_columns: JIntArray<'local>,
+    row_key_timestamp_precisions: JIntArray<'local>,
+    sort_indices: JIntArray<'local>,
+    sort_ascending: JIntArray<'local>,
+    sort_nulls_first: JIntArray<'local>,
+    limit: jlong,
+    output_rank_number: jboolean,
+    memory_budget_bytes: jlong,
+) -> jlong {
+    let partitions = read_columns(&env, &partition_columns);
+    let partition_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
+        .into_iter()
+        .map(|precision| precision as i32)
+        .collect();
+    let row_keys = read_columns(&env, &row_key_columns);
+    let row_key_precisions: Vec<i32> = read_int_array(&env, &row_key_timestamp_precisions)
+        .into_iter()
+        .map(|precision| precision as i32)
+        .collect();
+    let sort = read_sort_columns(&env, &sort_indices, &sort_ascending, &sort_nulls_first);
+    let handle = TopNHandle::UpdateFast(UpdatableTopNRanker::new(
+        partitions,
+        partition_precisions,
+        row_keys,
+        row_key_precisions,
+        sort,
+        limit,
+        output_rank_number != 0,
+    ));
+    boxed_or_throw(&mut env, handle.with_memory_budget(memory_budget_bytes))
+}
+
+/// Rebuilds an update-fast Top-N ranker from raw keyed-state partition blobs.
+#[no_mangle]
+pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreUpdateFastTopNRankerPartitions<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    partition_columns: JIntArray<'local>,
+    key_timestamp_precisions: JIntArray<'local>,
+    row_key_columns: JIntArray<'local>,
+    row_key_timestamp_precisions: JIntArray<'local>,
+    sort_indices: JIntArray<'local>,
+    sort_ascending: JIntArray<'local>,
+    sort_nulls_first: JIntArray<'local>,
+    limit: jlong,
+    output_rank_number: jboolean,
+    snapshots: JObjectArray<'local>,
+    memory_budget_bytes: jlong,
+) -> jlong {
+    let partitions = read_columns(&env, &partition_columns);
+    let partition_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
+        .into_iter()
+        .map(|precision| precision as i32)
+        .collect();
+    let row_keys = read_columns(&env, &row_key_columns);
+    let row_key_precisions: Vec<i32> = read_int_array(&env, &row_key_timestamp_precisions)
+        .into_iter()
+        .map(|precision| precision as i32)
+        .collect();
+    let sort = read_sort_columns(&env, &sort_indices, &sort_ascending, &sort_nulls_first);
+    let count = env
+        .get_array_length(&snapshots)
+        .expect("read update-fast top-n raw partition count");
+    let mut restored = Vec::with_capacity(count as usize);
+    for index in 0..count {
+        let bytes = JByteArray::from(
+            env.get_object_array_element(&snapshots, index)
+                .expect("read update-fast top-n raw partition"),
+        );
+        restored.push(
+            env.convert_byte_array(&bytes)
+                .expect("read update-fast top-n raw partition bytes"),
+        );
+    }
+    let ranker = TopNHandle::UpdateFast(UpdatableTopNRanker::restore_partitions(
+        partitions,
+        partition_precisions,
+        row_keys,
+        row_key_precisions,
+        sort,
+        limit,
+        output_rank_number != 0,
+        &restored,
+    ))
     .with_memory_budget(memory_budget_bytes);
     boxed_or_throw(&mut env, ranker)
 }

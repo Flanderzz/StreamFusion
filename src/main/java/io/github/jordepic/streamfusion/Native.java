@@ -451,6 +451,7 @@ public final class Native {
   /** Releases a split handle. */
   public static native void closeSplit(long handle);
 
+
   /**
    * Imports a whole multi-column batch the JVM exported and exports an equal batch back into the
    * consumer-allocated C structs, exercising batch transfer beyond a single column.
@@ -2139,6 +2140,41 @@ public final class Native {
       boolean outputRankNumber,
       boolean retracting,
       boolean netDiff,
+      byte[][] snapshots,
+      long memoryBudgetBytes);
+
+  /**
+   * Creates an update-fast streaming Top-N ranker — Flink's {@code UpdatableTopNFunction} /
+   * {@code FastTop1Function} shape: a changelog whose rows are replaced in place by a unique key
+   * (no retractions arrive; the planner proved the sort key monotonic). Only the top-N rows are
+   * kept per partition. The handle is served by the shared Top-N push/flush/snapshot/close entry
+   * points.
+   *
+   * @param rowKeyColumns the unique-key column indices identifying the row a record replaces
+   */
+  public static native long createUpdateFastTopNRanker(
+      int[] partitionColumns,
+      int[] keyTimestampPrecisions,
+      int[] rowKeyColumns,
+      int[] rowKeyTimestampPrecisions,
+      int[] sortIndices,
+      int[] sortAscending,
+      int[] sortNullsFirst,
+      long limit,
+      boolean outputRankNumber,
+      long memoryBudgetBytes);
+
+  /** Restores an update-fast Top-N ranker from raw keyed-state partitions assigned to this subtask. */
+  public static native long restoreUpdateFastTopNRankerPartitions(
+      int[] partitionColumns,
+      int[] keyTimestampPrecisions,
+      int[] rowKeyColumns,
+      int[] rowKeyTimestampPrecisions,
+      int[] sortIndices,
+      int[] sortAscending,
+      int[] sortNullsFirst,
+      long limit,
+      boolean outputRankNumber,
       byte[][] snapshots,
       long memoryBudgetBytes);
 

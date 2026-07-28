@@ -180,6 +180,84 @@ class ThroughputBenchmark {
         nativeRun, ROWS / nativeRun, flink / nativeRun);
   }
 
+  @Test
+  void updateFastTopNThroughput() throws Exception {
+    // Update-fast Top-N: rank by a descending COUNT(*) per group — a unique-keyed changelog without
+    // retractions. Counts grow round-robin, so nearly every update re-enters the top-10 and evicts
+    // its tail: the heavy-churn case for both engines' rank maintenance.
+    Path input = Files.createTempDirectory("bench-ufast-in");
+    writeUpdateFastInput(input);
+    double flink = bestOfUpdateFast(input, false);
+    double nativeRun = bestOfUpdateFast(input, true);
+    System.out.printf(
+        "%n[benchmark] Update-fast Top-N (top 10 per group by COUNT(*) DESC, 16x64 keys) over %,d"
+            + " rows (best of %d)%n",
+        ROWS, RUNS);
+    System.out.printf("[benchmark]   Flink : %6.3f s  (%,.0f rows/s)%n", flink, ROWS / flink);
+    System.out.printf(
+        "[benchmark]   Native: %6.3f s  (%,.0f rows/s)  %.2fx vs Flink%n",
+        nativeRun, ROWS / nativeRun, flink / nativeRun);
+  }
+
+  private static double bestOfUpdateFast(Path input, boolean useNative) throws Exception {
+    double best = Double.MAX_VALUE;
+    for (int run = 0; run < WARMUP + RUNS; run++) {
+      double seconds = updateFastRunOnce(input, useNative);
+      if (run >= WARMUP) {
+        best = Math.min(best, seconds);
+      }
+    }
+    return best;
+  }
+
+  private static double updateFastRunOnce(Path input, boolean useNative) throws Exception {
+    StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+    env.setParallelism(1);
+    StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
+    tEnv.getConfig().set("table.optimizer.agg-phase-strategy", "ONE_PHASE");
+    tEnv.executeSql(
+        "CREATE TABLE t (g BIGINT, k BIGINT) WITH ('connector' = 'filesystem', 'path' = '"
+            + input.toUri()
+            + "', 'format' = 'parquet')");
+    tEnv.executeSql(
+        "CREATE TABLE sink (g BIGINT, k BIGINT, cnt BIGINT) WITH ('connector' = 'blackhole')");
+    PhysicalPlanScan scan = useNative ? NativePlanner.install(tEnv) : null;
+    long start = System.nanoTime();
+    tEnv.executeSql(
+            "INSERT INTO sink SELECT g, k, cnt FROM ("
+                + "  SELECT g, k, cnt, ROW_NUMBER() OVER (PARTITION BY g ORDER BY cnt DESC) AS rn"
+                + "  FROM (SELECT g, k, COUNT(*) AS cnt FROM t GROUP BY g, k)"
+                + ") WHERE rn <= 10")
+        .await();
+    double seconds = (System.nanoTime() - start) / 1e9;
+    if (useNative && scan.substitutions() < 3) {
+      throw new IllegalStateException(
+          "native source + aggregate + update-fast ranker did not engage; moot");
+    }
+    return seconds;
+  }
+
+  private static void writeUpdateFastInput(Path directory) throws Exception {
+    StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+    env.setParallelism(1);
+    env.enableCheckpointing(1000);
+    StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
+    // 16 groups x 64 keys, visited round-robin: every key's count keeps overtaking its peers.
+    DataStream<Row> source =
+        env.fromSequence(0, ROWS - 1)
+            .map(i -> Row.of(i % 16, i % 1024))
+            .returns(Types.ROW_NAMED(new String[] {"g", "k"}, Types.LONG, Types.LONG));
+    tEnv.createTemporaryView(
+        "us",
+        source,
+        Schema.newBuilder().column("g", DataTypes.BIGINT()).column("k", DataTypes.BIGINT()).build());
+    tEnv.executeSql(
+        "CREATE TABLE ufast_write (g BIGINT, k BIGINT) WITH ('connector' = 'filesystem', 'path' = '"
+            + directory.toUri()
+            + "', 'format' = 'parquet')");
+    tEnv.executeSql("INSERT INTO ufast_write SELECT * FROM us").await();
+  }
+
   private static double bestOfGroup(Path input, boolean useNative) throws Exception {
     double best = Double.MAX_VALUE;
     for (int run = 0; run < WARMUP + RUNS; run++) {
