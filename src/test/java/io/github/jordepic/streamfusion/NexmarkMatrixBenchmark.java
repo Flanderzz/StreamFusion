@@ -821,23 +821,14 @@ class NexmarkMatrixBenchmark {
   @Test
   @EnabledIfEnvironmentVariable(named = "SF_MATRIX_STATE_BACKENDS", matches = "true")
   void stateBackendComparison() throws Exception {
-    Path rocksDir = Files.createTempDirectory("nexmark-rocksdb");
-    Map<String, String> rocksdb = new LinkedHashMap<>();
-    rocksdb.put("state.backend.type", "rocksdb");
-    rocksdb.put("state.backend.rocksdb.localdir", rocksDir.toString());
-    Map<String, String> paimon = new LinkedHashMap<>();
-    paimon.put(
-        "state.backend.type", "io.github.jordepic.streamfusion.state.PaimonStateBackendFactory");
-    // SF_STATE_BACKENDS_MINI_BATCH=true runs the same comparison in the tuned mini-batch mode
-    // (both engines, the mode comparison's production-style configuration).
-    boolean miniBatch = "true".equals(System.getenv("SF_STATE_BACKENDS_MINI_BATCH"));
-    if (miniBatch) {
-      for (Map<String, String> config : List.of(rocksdb, paimon)) {
-        config.put("table.exec.mini-batch.enabled", "true");
-        config.put("table.exec.mini-batch.allow-latency", "2 s");
-        config.put("table.exec.mini-batch.size", "50000");
-      }
-    }
+    // SF_STATE_BACKENDS_MINI_BATCH=true runs the comparison in the tuned mini-batch mode (both
+    // engines, the mode comparison's production-style configuration); "both" runs the off and on
+    // tables in one pass, sharing the broker, the produced corpus, and the backend preflight.
+    String modeEnv = System.getenv("SF_STATE_BACKENDS_MINI_BATCH");
+    List<Boolean> modes =
+        "both".equals(modeEnv)
+            ? List.of(Boolean.FALSE, Boolean.TRUE)
+            : List.of("true".equals(modeEnv));
     Query[] queries = selectQueries();
     try (KafkaContainer kafka =
         new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.6.1"))
@@ -845,44 +836,75 @@ class NexmarkMatrixBenchmark {
       kafka.start();
       String brokers = kafka.getBootstrapServers();
       NexmarkKafkaBenchmark.produce(brokers, "nexmark", "json", ROWS, PARALLELISM);
-      assertStateBackendsEngage(brokers, rocksdb, paimon, rocksDir);
-      StringBuilder out =
-          new StringBuilder(
-              "\n##### NEXMARK STATE BACKENDS (exactly-once Kafka, mini-batch "
-                  + (miniBatch ? "on" : "off")
-                  + "; Flink on RocksDB vs StreamFusion on Paimon; "
-                  + ROWS
-                  + " events, best of "
-                  + RUNS
-                  + ") #####\n");
-      out.append("query  Flink/RocksDB s      ev/s  SF/Paimon s      ev/s  SF/Flink\n");
-      for (Query q : queries) {
-        String row;
-        // See the mode comparison: a query lost to a transient stall is marked, not fatal.
-        try {
-          double flink = kafkaSinkBest(brokers, q, false, rocksdb);
-          try {
-            double nativeRun = kafkaSinkBest(brokers, q, true, paimon);
-            row =
-                String.format(
-                    "%4s  %15.3f  %8.0f  %11.3f  %8.0f  %7.2fx%n",
-                    q.label,
-                    flink,
-                    ROWS / flink,
-                    nativeRun,
-                    ROWS / nativeRun,
-                    flink / nativeRun);
-          } catch (IllegalStateException fallback) {
-            row = String.format("%4s  %15.3f  |  %s%n", q.label, flink, fallback.getMessage());
+      boolean preflighted = false;
+      for (boolean miniBatch : modes) {
+        Path rocksDir = Files.createTempDirectory("nexmark-rocksdb");
+        Map<String, String> rocksdb = new LinkedHashMap<>();
+        rocksdb.put("state.backend.type", "rocksdb");
+        rocksdb.put("state.backend.rocksdb.localdir", rocksDir.toString());
+        Map<String, String> paimon = new LinkedHashMap<>();
+        paimon.put(
+            "state.backend.type",
+            "io.github.jordepic.streamfusion.state.PaimonStateBackendFactory");
+        if (miniBatch) {
+          for (Map<String, String> config : List.of(rocksdb, paimon)) {
+            config.put("table.exec.mini-batch.enabled", "true");
+            config.put("table.exec.mini-batch.allow-latency", "2 s");
+            config.put("table.exec.mini-batch.size", "50000");
           }
-        } catch (Exception failure) {
-          row = String.format("%4s  FAILED: %s%n", q.label, rootCause(failure));
         }
-        out.append(row);
-        System.out.print(row);
+        if (!preflighted) {
+          assertStateBackendsEngage(brokers, rocksdb, paimon, rocksDir);
+          preflighted = true;
+        }
+        compareStateBackends(brokers, queries, rocksdb, paimon, miniBatch);
       }
-      System.out.println(out);
     }
+  }
+
+  private static void compareStateBackends(
+      String brokers,
+      Query[] queries,
+      Map<String, String> rocksdb,
+      Map<String, String> paimon,
+      boolean miniBatch)
+      throws Exception {
+    StringBuilder out =
+        new StringBuilder(
+            "\n##### NEXMARK STATE BACKENDS (exactly-once Kafka, mini-batch "
+                + (miniBatch ? "on" : "off")
+                + "; Flink on RocksDB vs StreamFusion on Paimon; "
+                + ROWS
+                + " events, best of "
+                + RUNS
+                + ") #####\n");
+    out.append("query  Flink/RocksDB s      ev/s  SF/Paimon s      ev/s  SF/Flink\n");
+    for (Query q : queries) {
+      String row;
+      // See the mode comparison: a query lost to a transient stall is marked, not fatal.
+      try {
+        double flink = kafkaSinkBest(brokers, q, false, rocksdb);
+        try {
+          double nativeRun = kafkaSinkBest(brokers, q, true, paimon);
+          row =
+              String.format(
+                  "%4s  %15.3f  %8.0f  %11.3f  %8.0f  %7.2fx%n",
+                  q.label,
+                  flink,
+                  ROWS / flink,
+                  nativeRun,
+                  ROWS / nativeRun,
+                  flink / nativeRun);
+        } catch (IllegalStateException fallback) {
+          row = String.format("%4s  %15.3f  |  %s%n", q.label, flink, fallback.getMessage());
+        }
+      } catch (Exception failure) {
+        row = String.format("%4s  FAILED: %s%n", q.label, rootCause(failure));
+      }
+      out.append(row);
+      System.out.print(row);
+    }
+    System.out.println(out);
   }
 
   /** q4 preflight proving both persistent backends engage under the job-level configuration. */
