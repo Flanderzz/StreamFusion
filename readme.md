@@ -4,6 +4,7 @@
 # StreamFusion
 
 [![CI](https://github.com/datafusion-contrib/StreamFusion/actions/workflows/ci.yml/badge.svg)](https://github.com/datafusion-contrib/StreamFusion/actions/workflows/ci.yml)
+[![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/gCKHfb96Q)
 
 Run Apache Flink SQL faster by executing supported operators natively (Rust + Apache
 Arrow/DataFusion over JNI) while Flink continues to own planning, coordination, and
