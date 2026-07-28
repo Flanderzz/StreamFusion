@@ -25,6 +25,30 @@ fn transient_consumer_error(error: rdkafka::bindings::rd_kafka_resp_err_t) -> bo
     )
 }
 
+/// One JSON document per row, all in a single encode buffer: producing and JNI materialization
+/// read the per-row slices in place, so no per-record allocation or copy happens on this side
+/// (librdkafka copies borrowed payloads into its own queue on produce).
+#[cfg(feature = "kafka")]
+pub struct EncodedLines {
+    bytes: Vec<u8>,
+    lines: Vec<std::ops::Range<usize>>,
+}
+
+#[cfg(feature = "kafka")]
+impl EncodedLines {
+    pub fn len(&self) -> usize {
+        self.lines.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.lines.is_empty()
+    }
+
+    pub fn line(&self, index: usize) -> &[u8] {
+        &self.bytes[self.lines[index].clone()]
+    }
+}
+
 #[cfg(feature = "kafka")]
 pub(crate) fn encode_json_batch(
     batch: &RecordBatch,
@@ -32,7 +56,7 @@ pub(crate) fn encode_json_batch(
     timestamp_format: &str,
     logical_types: &[String],
     field_names: &[String],
-) -> Result<Vec<Vec<u8>>, String> {
+) -> Result<EncodedLines, String> {
     use arrow::json::writer::{LineDelimited, WriterBuilder};
 
     let batch = annotate_flink_types(batch, logical_types, field_names)?;
@@ -63,11 +87,48 @@ pub(crate) fn encode_json_batch(
             .finish()
             .map_err(|error| format!("failed to finish Kafka JSON batch: {error}"))?;
     }
-    Ok(bytes
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-        .map(<[u8]>::to_vec)
-        .collect())
+    let mut lines = Vec::with_capacity(batch.num_rows());
+    let mut start = 0;
+    for (index, byte) in bytes.iter().enumerate() {
+        if *byte == b'\n' {
+            if index > start {
+                lines.push(start..index);
+            }
+            start = index + 1;
+        }
+    }
+    if bytes.len() > start {
+        lines.push(start..bytes.len());
+    }
+    Ok(EncodedLines { bytes, lines })
+}
+
+/// Per-row key/value slices into the two encode buffers; upsert DELETE/UPDATE_BEFORE rows read
+/// back as tombstones (a key with no value).
+#[cfg(feature = "kafka")]
+struct EncodedKafkaRecords {
+    keys: Option<EncodedLines>,
+    values: EncodedLines,
+    tombstones: Vec<bool>,
+}
+
+#[cfg(feature = "kafka")]
+impl EncodedKafkaRecords {
+    fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    fn key(&self, index: usize) -> Option<&[u8]> {
+        self.keys.as_ref().map(|keys| keys.line(index))
+    }
+
+    fn value(&self, index: usize) -> Option<&[u8]> {
+        if self.tombstones.get(index).copied().unwrap_or(false) {
+            None
+        } else {
+            Some(self.values.line(index))
+        }
+    }
 }
 
 #[cfg(feature = "kafka")]
@@ -80,7 +141,7 @@ fn encode_json_records(
     key_fields: &[usize],
     value_fields: &[usize],
     upsert: bool,
-) -> Result<(Vec<Option<Vec<u8>>>, Vec<Option<Vec<u8>>>), String> {
+) -> Result<EncodedKafkaRecords, String> {
     let key_batch = batch
         .project(key_fields)
         .map_err(|error| format!("failed to project Kafka key fields: {error}"))?;
@@ -100,40 +161,47 @@ fn encode_json_records(
             .collect::<Vec<_>>()
     };
     let keys = if key_fields.is_empty() {
-        vec![None; batch.num_rows()]
+        None
     } else {
-        encode_json_batch(
+        Some(encode_json_batch(
             &key_batch,
             ignore_null_fields,
             timestamp_format,
             &project_types(key_fields),
             &project_names(key_fields),
-        )?
-        .into_iter()
-        .map(Some)
-        .collect()
+        )?)
     };
-    let mut values = encode_json_batch(
+    let values = encode_json_batch(
         &value_batch,
         ignore_null_fields,
         timestamp_format,
         &project_types(value_fields),
         &project_names(value_fields),
-    )?
-    .into_iter()
-    .map(Some)
-    .collect::<Vec<_>>();
-    if upsert {
+    )?;
+    let key_lines = keys.as_ref().map_or(batch.num_rows(), EncodedLines::len);
+    if values.len() != batch.num_rows() || key_lines != batch.num_rows() {
+        return Err(format!(
+            "Kafka JSON encoder produced {} values and {} keys for {} Arrow rows",
+            values.len(),
+            key_lines,
+            batch.num_rows()
+        ));
+    }
+    let tombstones = if upsert {
         let kinds = row_kind_column(batch).ok_or_else(|| {
             "upsert Kafka serialization requires the hidden row-kind column".to_string()
         })?;
-        for (index, value) in values.iter_mut().enumerate() {
-            if matches!(kinds.value(index), 1 | 3) {
-                *value = None;
-            }
-        }
-    }
-    Ok((keys, values))
+        (0..batch.num_rows())
+            .map(|index| matches!(kinds.value(index), 1 | 3))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Ok(EncodedKafkaRecords {
+        keys,
+        values,
+        tombstones,
+    })
 }
 
 #[cfg(feature = "kafka")]
@@ -199,6 +267,12 @@ impl arrow::json::writer::EncoderFactory for FlinkJsonEncoderFactory {
         use arrow::json::writer::{Encoder, NullableEncoder};
 
         let encoder: Option<Box<dyn Encoder + 'a>> = match array.data_type() {
+            DataType::Utf8 => Some(Box::new(FlinkStringEncoder {
+                array: array.as_string::<i32>(),
+            })),
+            DataType::LargeUtf8 => Some(Box::new(FlinkStringEncoder {
+                array: array.as_string::<i64>(),
+            })),
             DataType::Binary => Some(Box::new(FlinkBinaryEncoder {
                 array: array.as_binary::<i32>(),
             })),
@@ -235,6 +309,88 @@ fn flink_temporal_precision(logical_type: &str) -> usize {
         .and_then(|value| value.strip_suffix(')'))
         .and_then(|value| value.parse().ok())
         .unwrap_or(6)
+}
+
+/// arrow-json's string path hands every value to serde_json's scalar per-byte escape scan. The
+/// overwhelmingly common value needs no escaping at all, so this encoder finds that out with a
+/// word-at-a-time scan and bulk-copies; values that do escape go through a loop replicating
+/// serde_json's exact table (`\"`, `\\`, named controls, lowercase `\u00XX`), so output bytes
+/// are identical either way (pinned by a parity test against the stock arrow-json writer).
+#[cfg(feature = "kafka")]
+struct FlinkStringEncoder<'a, O: arrow::array::OffsetSizeTrait> {
+    array: &'a arrow::array::GenericStringArray<O>,
+}
+
+#[cfg(feature = "kafka")]
+impl<O: arrow::array::OffsetSizeTrait> arrow::json::writer::Encoder for FlinkStringEncoder<'_, O> {
+    fn encode(&mut self, index: usize, output: &mut Vec<u8>) {
+        let value = self.array.value(index).as_bytes();
+        output.reserve(value.len() + 2);
+        output.push(b'"');
+        if json_needs_escape(value) {
+            encode_escaped_json(value, output);
+        } else {
+            output.extend_from_slice(value);
+        }
+        output.push(b'"');
+    }
+}
+
+/// Whether any byte is a control character, `"`, or `\` — the only bytes JSON string encoding
+/// touches (UTF-8 continuation bytes are ≥ 0x80 and never match). Eight bytes per step via the
+/// usual SWAR zero-byte/less-than masks.
+#[cfg(feature = "kafka")]
+fn json_needs_escape(bytes: &[u8]) -> bool {
+    const LOW: u64 = 0x0101_0101_0101_0101;
+    const HIGH: u64 = 0x8080_8080_8080_8080;
+    let mut chunks = bytes.chunks_exact(8);
+    for chunk in &mut chunks {
+        let word = u64::from_le_bytes(chunk.try_into().expect("8-byte chunk"));
+        let control = word.wrapping_sub(LOW * 0x20) & !word;
+        let quote = word ^ (LOW * u64::from(b'"'));
+        let quote = quote.wrapping_sub(LOW) & !quote;
+        let backslash = word ^ (LOW * u64::from(b'\\'));
+        let backslash = backslash.wrapping_sub(LOW) & !backslash;
+        if (control | quote | backslash) & HIGH != 0 {
+            return true;
+        }
+    }
+    chunks.remainder().iter().any(|&byte| byte < 0x20 || byte == b'"' || byte == b'\\')
+}
+
+/// serde_json's escape table, applied over unescaped runs (without the surrounding quotes).
+#[cfg(feature = "kafka")]
+fn encode_escaped_json(bytes: &[u8], output: &mut Vec<u8>) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut start = 0;
+    for (index, &byte) in bytes.iter().enumerate() {
+        let escape: &[u8] = match byte {
+            b'"' => b"\\\"",
+            b'\\' => b"\\\\",
+            0x08 => b"\\b",
+            b'\t' => b"\\t",
+            b'\n' => b"\\n",
+            0x0c => b"\\f",
+            b'\r' => b"\\r",
+            byte if byte < 0x20 => &[],
+            _ => continue,
+        };
+        output.extend_from_slice(&bytes[start..index]);
+        if escape.is_empty() {
+            output.extend_from_slice(&[
+                b'\\',
+                b'u',
+                b'0',
+                b'0',
+                HEX[(byte >> 4) as usize],
+                HEX[(byte & 0xf) as usize],
+            ]);
+        } else {
+            output.extend_from_slice(escape);
+        }
+        start = index + 1;
+    }
+    output.extend_from_slice(&bytes[start..]);
 }
 
 #[cfg(feature = "kafka")]
@@ -1026,10 +1182,61 @@ mod kafka_error_tests {
         .unwrap();
 
         let explicit = encode_json_batch(&batch, false, "SQL", &[], &[]).unwrap();
-        assert_eq!(explicit[0], br#"{"id":1,"name":"one","active":true}"#);
-        assert_eq!(explicit[1], br#"{"id":2,"name":null,"active":false}"#);
+        assert_eq!(explicit.line(0), br#"{"id":1,"name":"one","active":true}"#.as_slice());
+        assert_eq!(explicit.line(1), br#"{"id":2,"name":null,"active":false}"#.as_slice());
         let omitted = encode_json_batch(&batch, true, "SQL", &[], &[]).unwrap();
-        assert_eq!(omitted[1], br#"{"id":2,"active":false}"#);
+        assert_eq!(omitted.line(1), br#"{"id":2,"active":false}"#.as_slice());
+    }
+
+    /// The bulk-scan string encoder must match arrow-json's stock (serde_json) escaping byte for
+    /// byte, across every escape class and both scan paths (word chunks and the tail remainder).
+    #[test]
+    fn string_escaping_matches_stock_arrow_json() {
+        let mut values: Vec<String> = vec![
+            String::new(),
+            "plain ascii value".into(),
+            "long clean run long clean run long clean run long clean run".into(),
+            "ünïcodé — 統一碼 🚀 verbatim".into(),
+            r#"say "hello""#.into(),
+            r"back\slash".into(),
+            "tab\there newline\nthere\r\x0c\x08".into(),
+            "escape at end\"".into(),
+            "\"escape at start".into(),
+            "1234567\"9 escape in second word 0123456\u{1f}".into(),
+            "seven b\u{7f}".into(),
+        ];
+        for control in 0u8..0x20 {
+            values.push(format!("ctl {}", control as char));
+        }
+        let schema = Arc::new(Schema::new(vec![Field::new("s", DataType::Utf8, true)]));
+        let strings: Vec<Option<&str>> = values.iter().map(|value| Some(value.as_str())).collect();
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(StringArray::from(strings)) as ArrayRef],
+        )
+        .unwrap();
+
+        let mut stock = Vec::new();
+        {
+            let mut writer = arrow::json::writer::WriterBuilder::new()
+                .with_explicit_nulls(true)
+                .build::<_, arrow::json::writer::LineDelimited>(&mut stock);
+            writer.write(&batch).unwrap();
+            writer.finish().unwrap();
+        }
+        let stock_lines: Vec<&[u8]> =
+            stock.split(|byte| *byte == b'\n').filter(|line| !line.is_empty()).collect();
+
+        let ours = encode_json_batch(&batch, false, "SQL", &[], &[]).unwrap();
+        assert_eq!(ours.len(), stock_lines.len());
+        for index in 0..ours.len() {
+            assert_eq!(
+                ours.line(index),
+                stock_lines[index],
+                "row {index}: {:?}",
+                values[index]
+            );
+        }
     }
 }
 
@@ -1283,34 +1490,22 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_en
                 batch.num_rows()
             ));
         }
-        let values = env
-            .new_object_array(
-                encoded.len() as i32,
-                "[B",
-                jni::objects::JObject::null(),
-            )
-            .map_err(|error| format!("failed to allocate Kafka JSON result: {error}"))?;
-        for (index, value) in encoded.iter().enumerate() {
-            let value = env
-                .byte_array_from_slice(value)
-                .map_err(|error| format!("failed to materialize Kafka JSON value: {error}"))?;
-            env.set_object_array_element(&values, index as i32, value)
-                .map_err(|error| format!("failed to store Kafka JSON value: {error}"))?;
-        }
+        let values = byte_array_array(env, encoded.len(), |index| Some(encoded.line(index)))?;
         Ok(values.into_raw())
     })
 }
 
 #[cfg(feature = "kafka")]
-fn byte_array_array<'local>(
+fn byte_array_array<'slices, 'local>(
     env: &mut JNIEnv<'local>,
-    values: &[Option<Vec<u8>>],
+    len: usize,
+    mut record: impl FnMut(usize) -> Option<&'slices [u8]>,
 ) -> Result<jni::objects::JObjectArray<'local>, String> {
     let result = env
-        .new_object_array(values.len() as i32, "[B", jni::objects::JObject::null())
+        .new_object_array(len as i32, "[B", jni::objects::JObject::null())
         .map_err(|error| format!("failed to allocate Kafka JSON result: {error}"))?;
-    for (index, value) in values.iter().enumerate() {
-        if let Some(value) = value {
+    for index in 0..len {
+        if let Some(value) = record(index) {
             let value = env
                 .byte_array_from_slice(value)
                 .map_err(|error| format!("failed to materialize Kafka JSON value: {error}"))?;
@@ -1354,7 +1549,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_en
             .into_iter()
             .map(|index| index as usize)
             .collect::<Vec<_>>();
-        let (keys, values) = encode_json_records(
+        let records = encode_json_records(
             &batch,
             ignore_null_fields != 0,
             &timestamp_format,
@@ -1364,8 +1559,8 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_en
             &value_fields,
             upsert != 0,
         )?;
-        let keys = byte_array_array(env, &keys)?;
-        let values = byte_array_array(env, &values)?;
+        let keys = byte_array_array(env, records.len(), |index| records.key(index))?;
+        let values = byte_array_array(env, records.len(), |index| records.value(index))?;
         let result = env
             .new_object_array(2, "[[B", jni::objects::JObject::null())
             .map_err(|error| format!("failed to allocate Kafka record result: {error}"))?;
@@ -2117,7 +2312,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_pr
             .into_iter()
             .map(|index| index as usize)
             .collect::<Vec<_>>();
-        let (keys, values) = encode_json_records(
+        let records = encode_json_records(
             &batch,
             ignore_null_fields != 0,
             &timestamp_format,
@@ -2128,8 +2323,8 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_pr
             upsert != 0,
         )?;
         let before = producer.byte_count();
-        for (key, value) in keys.iter().zip(&values) {
-            producer.produce(&topic, key.as_deref(), value.as_deref())?;
+        for index in 0..records.len() {
+            producer.produce(&topic, records.key(index), records.value(index))?;
         }
         Ok((producer.byte_count() - before) as jlong)
     })

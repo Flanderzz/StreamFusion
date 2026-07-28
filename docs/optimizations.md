@@ -704,6 +704,27 @@ parity questions. Residual known gap: librdkafka computes record-batch CRC32C in
 (an upstream FIXME), worth tens of milliseconds per 500K records — a future upstream contribution,
 not a current bottleneck.
 
+**Kafka records produce straight from the encode buffer** *(2026-07-27)*. The JSON encoder used
+to split its one line-delimited batch buffer into a fresh `Vec<u8>` per record before producing —
+a per-record allocation and copy that was pure waste, because librdkafka copies borrowed payloads
+into its own queue on `produce` anyway (and the encode-to-Java path materializes a heap `byte[]`
+regardless). The encoder now returns the single buffer plus per-row line ranges, and both the
+native producer and the JNI materialization read the row slices in place. Together with the
+escape fast path below, the 4096-row Criterion encode dropped 592 µs → 497 µs per batch
+(**6.9 → 8.2 M rows/s**); the q9 differential profile had shown the copy as part of the sink's
+memmove + allocator-churn tail.
+
+**JSON string escaping is a bulk scan, not a per-byte table walk** *(2026-07-27)*. arrow-json
+hands every string value to serde_json's serializer, which scans one byte at a time against an
+escape table — and almost no real value needs escaping at all. The sink's encoder factory now
+supplies a string encoder that answers "anything to escape?" with a word-at-a-time scan (the
+standard SWAR zero-byte/less-than masks over eight bytes per step — the same idea simdjson's
+serializer applies with SIMD) and bulk-copies the clean value; values that do escape take a loop
+replicating serde_json's exact table, so output stays byte-identical (pinned by a parity test
+against the stock arrow-json writer across every escape class). Strings are the wide columns of
+the changelog-heavy sinks — q9's upsert rows carry `itemName`, `description`, and two Nexmark
+`extra` paddings per record.
+
 ## 7. Measurement discipline
 
 Not optimizations themselves, but what makes them findable and trustworthy:

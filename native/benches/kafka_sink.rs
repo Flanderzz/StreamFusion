@@ -45,7 +45,7 @@ fn bench_kafka_json(c: &mut Criterion) {
         b.iter(|| {
             let mut encoded = Vec::with_capacity(ROWS);
             for row in 0..ROWS {
-                encoded.push(encode_kafka_json(&batch.slice(row, 1)).pop().unwrap());
+                encoded.push(encode_kafka_json(&batch.slice(row, 1)).line(0).to_vec());
             }
             black_box(encoded)
         })

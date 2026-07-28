@@ -2,7 +2,7 @@ use super::*;
 
 /// The production Kafka JSON encoder, exposed only to its Criterion benchmark.
 #[cfg(feature = "kafka")]
-pub fn encode_kafka_json(batch: &RecordBatch) -> Vec<Vec<u8>> {
+pub fn encode_kafka_json(batch: &RecordBatch) -> crate::kafka::EncodedLines {
     encode_json_batch(batch, false, "SQL", &[], &[]).expect("Kafka JSON encode")
 }
 
