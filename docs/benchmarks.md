@@ -856,10 +856,51 @@ produces each Arrow batch inside the checkpoint epoch's transaction, and Flink's
 committer commits it after the checkpoint completes (divergence 26); the harness asserts the
 native-producer plan shape for every cell.
 
-#### Current full comparison (2026-07-19, native producer data plane)
+#### Current full comparison (2026-07-27, raw-bytes snapshots + sink encode round)
 
 Apple M1 Max, 500K input events, one-second checkpoints, release+`mimalloc,kafka,json`, one warmup
-and best of two measured runs. Throughput is millions of input events per second.
+and best of two measured runs. Throughput is millions of input events per second. This run
+includes the day's five perf commits: the incremental Paimon checkpoint listing, the sink
+zero-copy + bulk-escape encode, and raw-bytes state snapshots for the updating join, both Top-N
+rankers, keep-last dedup, and the changelog normalizer.
+
+| Query | Flink off | StreamFusion off | SF/Flink off | Flink on | StreamFusion on | SF/Flink on | Flink on/off | SF on/off |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| q0 | 0.229 | 0.495 | 2.16x | 0.242 | 0.490 | 2.03x | 1.05x | 0.99x |
+| q1 | 0.237 | 0.459 | 1.93x | 0.240 | 0.491 | 2.05x | 1.01x | 1.07x |
+| q2 | 0.371 | 0.471 | 1.27x | 0.331 | 0.443 | 1.34x | 0.89x | 0.94x |
+| q3 | 0.471 | 0.703 | 1.49x | 0.439 | 0.686 | 1.56x | 0.93x | 0.98x |
+| q4 | 0.314 | 0.626 | 2.00x | 0.294 | 0.572 | 1.94x | 0.94x | 0.91x |
+| q5 | 0.400 | 0.632 | 1.58x | 0.409 | 0.570 | 1.40x | 1.02x | 0.90x |
+| q7 | 0.263 | 0.676 | 2.57x | 0.236 | 0.679 | 2.88x | 0.90x | 1.01x |
+| q8 | 0.465 | 0.736 | 1.58x | 0.448 | 0.590 | 1.32x | 0.96x | 0.80x |
+| q9 | 0.257 | 0.226 | 0.88x | 0.235 | 0.402 | 1.71x | 0.92x | 1.78x |
+| q10 | 0.223 | 0.406 | 1.82x | 0.220 | 0.487 | 2.22x | 0.98x | 1.20x |
+| q11 | 0.249 | 0.701 | 2.82x | 0.244 | 0.711 | 2.91x | 0.98x | 1.01x |
+| q12 | 0.366 | 0.638 | 1.74x | 0.400 | 0.711 | 1.78x | 1.09x | 1.11x |
+| q13 | 0.284 | 0.623 | 2.19x | 0.273 | 0.516 | 1.89x | 0.96x | 0.83x |
+| q14 | 0.222 | 0.444 | 2.00x | 0.215 | 0.493 | 2.29x | 0.97x | 1.11x |
+| q15 | 0.217 | 0.372 | 1.71x | 0.344 | 0.610 | 1.77x | 1.58x | 1.64x |
+| q16 | 0.197 | 0.300 | 1.52x | 0.285 | 0.531 | 1.86x | 1.45x | 1.77x |
+| q17 | 0.237 | 0.397 | 1.68x | 0.325 | 0.577 | 1.78x | 1.37x | 1.45x |
+| q18 | 0.215 | 0.484 | 2.25x | 0.180 | 0.450 | 2.51x | 0.84x | 0.93x |
+| q19 | 0.055 | 0.076 | 1.39x | 0.059 | 0.566 | 9.55x | 1.08x | 7.42x |
+| q20 | 0.270 | 0.674 | 2.50x | 0.255 | 0.628 | 2.46x | 0.94x | 0.93x |
+| q21 | 0.360 | 0.532 | 1.48x | 0.330 | 0.614 | 1.86x | 0.92x | 1.15x |
+| q22 | 0.260 | 0.534 | 2.06x | 0.252 | 0.535 | 2.12x | 0.97x | 1.00x |
+| q23 | 0.135 | 0.168 | 1.25x | 0.055 | 0.144 | 2.63x | 0.41x | 0.85x |
+
+22 of 23 wins with mini-batching disabled (geometric mean **1.76x**; q9 at 0.88x is the sole
+loss, bound by its synchronous state-snapshot copy on the barrier) and 23 of 23 enabled
+(geometric mean **2.11x**, 1.29–9.55x). Against the prior table the day's snapshot work moved
+exactly the state-heavy cells: q18 off 1.50x→2.25x (keep-last dedup), q19 off 1.07x→1.39x,
+q20 off 1.92x→2.50x, and q9 off 0.86x→0.88x with its profile-loop average gap closing 24%→8%
+(best-of-2 under-resolves a mean shift; the loop counts are in `docs/optimizations.md`).
+
+#### Prior comparison (2026-07-19, superseded — decoded-column snapshots, per-record sink copy)
+
+Same machine, method, and build flags as above; before the raw-bytes snapshot formats and the
+sink encode round.
 
 | Query | Flink off | StreamFusion off | SF/Flink off | Flink on | StreamFusion on | SF/Flink on | Flink on/off | SF on/off |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -1113,11 +1154,12 @@ _Apple M1 Max; numbers are comparable only within a machine._
 
 ### Flink on RocksDB vs StreamFusion on Paimon (full Nexmark, exactly-once Kafka)
 
-The production-shaped backend comparison (2026-07-27, Apple M1 Max, release + `mimalloc`):
-stock Flink on its RocksDB backend versus the native engine on the Paimon state backend, over
-the readme's exactly-once Kafka pipeline — the same 500K-event JSON corpus, one-second
-checkpoints, exactly-once delivery to Kafka, mini-batching off on both engines, best of two
-after a warmup. The comparison lives in `streamfusion-paimon-compactor` — the only module whose
+The production-shaped backend comparison (2026-07-27 evening, Apple M1 Max, release +
+`mimalloc`): stock Flink on its RocksDB backend versus the native engine on the Paimon state
+backend, over the readme's exactly-once Kafka pipeline — the same 500K-event JSON corpus,
+one-second checkpoints, exactly-once delivery to Kafka, best of two after a warmup — in both
+mini-batch modes (`SF_STATE_BACKENDS_MINI_BATCH=true` runs the tuned configuration on both
+engines). The comparison lives in `streamfusion-paimon-compactor` — the only module whose
 classpath can hold both the backend and its Java table maintainer — and is run with
 `SF_BENCHMARK=true SF_MATRIX_STATE_BACKENDS=true mvn test -Pbench -pl
 streamfusion-paimon-compactor -am -Dtest=NexmarkStateBackendBenchmark#stateBackendComparison`.
@@ -1132,40 +1174,76 @@ capability currently needs a Paimon bundle with the binary-primary-key lookup co
 `-Dpaimon.bundle.version`. Operators the Paimon backend does not yet carry (proctime shapes)
 fall back to memory state with raw snapshots, exactly as a deployment would run them.
 
+Mini-batch off:
+
 | query | Flink/RocksDB s | ev/s | SF/Paimon s | ev/s | SF/Flink |
 |---|---|---|---|---|---|
-| q0 | 2.890 | 173K | 1.130 | 443K | **2.56×** |
-| q1 | 2.386 | 210K | 1.163 | 430K | **2.05×** |
-| q2 | 1.608 | 311K | 1.156 | 433K | **1.39×** |
-| q3 | 1.242 | 403K | 1.060 | 471K | **1.17×** |
-| q4 | 5.780 | 87K | 2.121 | 236K | **2.72×** |
-| q5 | 2.779 | 180K | 1.152 | 434K | **2.41×** |
-| q7 | 5.087 | 98K | 2.314 | 216K | **2.20×** |
-| q8 | 1.305 | 383K | 1.214 | 412K | **1.07×** |
-| q9 | 5.714 | 88K | 7.841 | 64K | 0.73× |
-| q10 | 2.268 | 220K | 1.098 | 455K | **2.07×** |
-| q11 | 7.550 | 66K | 0.818 | 611K | **9.23×** |
-| q12 | 1.494 | 335K | 0.853 | 586K | **1.75×** |
-| q13 | 2.012 | 249K | 0.968 | 517K | **2.08×** |
-| q14 | 2.647 | 189K | 1.189 | 421K | **2.23×** |
-| q15 | 4.576 | 109K | 1.211 | 413K | **3.78×** |
-| q16 | 6.208 | 81K | 2.581 | 194K | **2.41×** |
-| q17 | 3.566 | 140K | 1.258 | 398K | **2.84×** |
-| q18 | 5.045 | 99K | 2.190 | 228K | **2.30×** |
-| q19 | 11.154 | 45K | 10.600 | 47K | **1.05×** |
-| q20 | 3.540 | 141K | 3.128 | 160K | **1.13×** |
-| q21 | 1.567 | 319K | 0.987 | 507K | **1.59×** |
-| q22 | 2.215 | 226K | 1.132 | 442K | **1.96×** |
-| q23 | 11.211 | 45K | 6.355 | 79K | **1.76×** |
+| q0 | 2.212 | 226K | 1.032 | 484K | **2.14×** |
+| q1 | 2.071 | 241K | 0.998 | 501K | **2.07×** |
+| q2 | 1.371 | 365K | 1.022 | 489K | **1.34×** |
+| q3 | 1.081 | 462K | 1.300 | 385K | 0.83× † |
+| q4 | 4.992 | 100K | 2.121 | 236K | **2.35×** |
+| q5 | 2.302 | 217K | 1.101 | 454K | **2.09×** |
+| q7 | 3.961 | 126K | 2.384 | 210K | **1.66×** |
+| q8 | 1.071 | 467K | 0.802 | 623K | **1.34×** |
+| q9 | 5.676 | 88K | 6.252 | 80K | 0.91× |
+| q10 | 2.199 | 227K | 1.046 | 478K | **2.10×** |
+| q11 | 7.244 | 69K | 0.793 | 631K | **9.14×** |
+| q12 | 1.487 | 336K | 0.804 | 622K | **1.85×** |
+| q13 | 1.839 | 272K | 0.955 | 523K | **1.93×** |
+| q14 | 2.219 | 225K | 0.921 | 543K | **2.41×** |
+| q15 | 4.368 | 114K | 1.374 | 364K | **3.18×** |
+| q16 | 5.767 | 87K | 1.833 | 273K | **3.15×** |
+| q17 | 3.323 | 150K | 1.174 | 426K | **2.83×** |
+| q18 | 5.131 | 97K | 12.860 | 39K | 0.40× † |
+| q19 | 10.385 | 48K | 10.082 | 50K | **1.03×** |
+| q20 | 3.711 | 135K | 3.180 | 157K | **1.17×** |
+| q21 | 1.480 | 338K | 0.829 | 603K | **1.79×** |
+| q22 | 1.953 | 256K | 1.115 | 448K | **1.75×** |
+| q23 | 8.073 | 62K | 3.865 | 129K | **2.09×** |
 
-Geometric mean **1.97×**, median **2.07×**; **22 of 23 wins**. The one loss, q9 (updating join
-plus retracting top-1 over the full auction row), re-measured at **1.04×** in a focused repeat
-directly after the suite — the table cell caught a slow measurement late in a long thermal
-session, the same pattern as the q12 note above. q11's 9.2× is session windows: RocksDB pays
-the merging window assigner's per-record window-mapping rewrites, the native session aggregate
-folds batch runs in memory and commits once per barrier. The thinnest wins are the
-point-read-heaviest shapes — q8, q19, q20 — where per-batch read-through still trails RocksDB's
-cached point access.
+† A focused repeat of the two anomalous cells directly after the suite, machine cooled: **q3
+1.34×** (0.885 s) and **q18 2.27×** (2.208 s) — both suite cells caught slow StreamFusion
+measurements under sustained load (this pass started seconds after the memory pass finished);
+q18's repeat sits in its established 1.7–2.4× band.
+
+Mini-batch on (both engines tuned):
+
+| query | Flink/RocksDB s | ev/s | SF/Paimon s | ev/s | SF/Flink |
+|---|---|---|---|---|---|
+| q0 | 2.129 | 235K | 1.050 | 476K | **2.03×** |
+| q1 | 2.101 | 238K | 1.133 | 441K | **1.85×** |
+| q2 | 1.383 | 362K | 1.075 | 465K | **1.29×** |
+| q3 | 1.129 | 443K | 0.910 | 550K | **1.24×** |
+| q4 | 4.357 | 115K | 1.798 | 278K | **2.42×** |
+| q5 | 2.212 | 226K | 1.057 | 473K | **2.09×** |
+| q7 | 4.401 | 114K | 2.038 | 245K | **2.16×** |
+| q8 | 1.099 | 455K | 0.941 | 531K | **1.17×** |
+| q9 | 6.148 | 81K | 3.060 | 163K | **2.01×** |
+| q10 | 2.247 | 222K | 1.280 | 390K | **1.76×** |
+| q11 | 7.076 | 71K | 0.862 | 580K | **8.21×** |
+| q12 | 1.439 | 348K | 0.740 | 676K | **1.94×** |
+| q13 | 1.855 | 269K | 0.886 | 564K | **2.09×** |
+| q14 | 2.264 | 221K | 0.926 | 540K | **2.45×** |
+| q15 | 1.468 | 341K | 0.736 | 679K | **1.99×** |
+| q16 | 2.157 | 232K | 0.951 | 526K | **2.27×** |
+| q17 | 1.819 | 275K | 0.881 | 567K | **2.06×** |
+| q18 | 5.719 | 87K | 3.380 | 148K | **1.69×** |
+| q19 | 11.022 | 45K | 1.593 | 314K | **6.92×** |
+| q20 | 3.727 | 134K | 2.715 | 184K | **1.37×** |
+| q21 | 1.496 | 334K | 0.831 | 602K | **1.80×** |
+| q22 | 2.032 | 246K | 1.038 | 482K | **1.96×** |
+| q23 | 8.518 | 59K | 5.027 | 99K | **1.69×** |
+
+Off-mode: geometric mean **1.80×** (with the two † repeats substituted: **1.94×**), 20 of 23
+wins as measured in the suite pass; the remaining sub-parity cells are q9 (0.91×, the same
+snapshot/read-through-bound shape as on memory state) and near-parity q19 (1.03×). Tuned mode:
+**23 of 23 wins**, geometric mean **2.08×** (1.17–8.21×), with q9 flipping to 2.01× and q19 to
+6.92× — the same mini-batch leverage the memory comparison shows, carried intact onto the disk
+backends. q11's ~9× is session windows: RocksDB pays the merging window assigner's per-record
+window-mapping rewrites, the native session aggregate folds batch runs in memory and commits
+once per barrier. The thinnest wins remain the point-read-heaviest shapes — q8, q19, q20 —
+where per-batch read-through still trails RocksDB's cached point access.
 
 **How q18 got fixed — and the two wrong answers before it.** The first revision of this table
 lost q18 at 0.57×: the per-batch `IN` probe re-decoded the table's whole key column per batch,

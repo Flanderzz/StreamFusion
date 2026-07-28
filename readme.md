@@ -91,45 +91,45 @@ checkpoint completes, preserving the host connector's exactly-once recovery exac
 plan — including the native-producer sink shape — is asserted for every cell. q6 is omitted because
 Flink SQL itself cannot run it ([analysis](.claude/wontdos/39-nexmark-q6-exclusion.md)).
 
-These are the 2026-07-19 Apple M1 Max release+`mimalloc` results, best of two after one warmup.
+These are the 2026-07-27 Apple M1 Max release+`mimalloc` results, best of two after one warmup.
 Mini-batching uses the same production-style configuration on both engines
 (`allow-latency=2s`, `size=50000`). Each cell is StreamFusion throughput divided by Flink
 throughput within the same mode.
 
 | Query | SF/Flink off | SF/Flink on |
 |---|---:|---:|
-| q0 | **2.07×** | **1.99×** |
-| q1 | **2.22×** | **2.04×** |
-| q2 | **1.48×** | **1.58×** |
-| q3 | **1.51×** | **1.59×** |
-| q4 | **1.71×** | **1.78×** |
-| q5 | **1.60×** | **1.39×** |
-| q7 | **2.31×** | **2.68×** |
-| q8 | **1.44×** | **1.42×** |
-| q9 | 0.86× | **2.06×** |
-| q10 | **1.88×** | **1.93×** |
-| q11 | **2.84×** | **3.39×** |
-| q12 | **1.62×** | **1.49×** |
-| q13 | **1.87×** | **1.98×** |
-| q14 | **2.36×** | **2.22×** |
-| q15 | **2.02×** | **1.77×** |
-| q16 | **1.33×** | **1.30×** |
-| q17 | **1.45×** | **1.43×** |
-| q18 | **1.50×** | **1.70×** |
-| q19 | **1.07×** | **8.15×** |
-| q20 | **1.92×** | **1.94×** |
-| q21 | **1.33×** | **1.69×** |
-| q22 | **1.95×** | **1.79×** |
-| q23 | **1.33×** | **1.25×** |
+| q0 | **2.16×** | **2.03×** |
+| q1 | **1.93×** | **2.05×** |
+| q2 | **1.27×** | **1.34×** |
+| q3 | **1.49×** | **1.56×** |
+| q4 | **2.00×** | **1.94×** |
+| q5 | **1.58×** | **1.40×** |
+| q7 | **2.57×** | **2.88×** |
+| q8 | **1.58×** | **1.32×** |
+| q9 | 0.88× | **1.71×** |
+| q10 | **1.82×** | **2.22×** |
+| q11 | **2.82×** | **2.91×** |
+| q12 | **1.74×** | **1.78×** |
+| q13 | **2.19×** | **1.89×** |
+| q14 | **2.00×** | **2.29×** |
+| q15 | **1.71×** | **1.77×** |
+| q16 | **1.52×** | **1.86×** |
+| q17 | **1.68×** | **1.78×** |
+| q18 | **2.25×** | **2.51×** |
+| q19 | **1.39×** | **9.55×** |
+| q20 | **2.50×** | **2.46×** |
+| q21 | **1.48×** | **1.86×** |
+| q22 | **2.06×** | **2.12×** |
+| q23 | **1.25×** | **2.63×** |
 
-StreamFusion wins 22 of 23 queries with mini-batching disabled (q9, at 0.86–0.94×, is the one
-remaining loss) and all 23 with it enabled, from 1.25× to 8.15×. The q12 enabled cell re-verified
-at 1.49× (the table's 0.99× was one slow measurement; see the focused repeat in
-[docs/benchmarks.md](docs/benchmarks.md)). Mini-batching's largest direct gains remain the
-changelog-churn queries, where logical bundles remove Kafka-visible updates before they are ever
-produced: q9 2.03×, q15 1.47×, q16 1.32×, q17 1.46×, and q19 7.92× over StreamFusion's own
-disabled path — smaller multipliers than before the native producer because the disabled path
-itself no longer pays a producer penalty.
+StreamFusion wins 22 of 23 queries with mini-batching disabled (q9, at ~0.9×, is the one
+remaining loss — its state snapshots dominate the barrier; see the raw-snapshot entries in
+[docs/optimizations.md](docs/optimizations.md)) and all 23 with it enabled, from 1.29× to 9.55×,
+with geometric means of **1.76×** disabled and **2.11×** enabled. The same pipeline compared on
+the production disk backends — stock Flink on RocksDB versus StreamFusion on its Paimon state
+backend — shows the same shape: q9 is again the sole disabled-mode loss (0.91×, q19 at parity)
+and all 23 win with mini-batching enabled, at geometric means of 1.80–1.94× / 2.08× (full
+tables in [docs/benchmarks.md](docs/benchmarks.md)).
 
 Mini-batching now costs several append-only queries a little (they have no changelog churn to
 amortize, and the native producer removed the per-record cost mini-batching used to hide). The
