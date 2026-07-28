@@ -30,6 +30,7 @@ import org.apache.flink.util.CloseableIterator;
 import org.apache.fluss.server.testutils.FlussClusterExtension;
 import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.admin.AdminClientConfig;
+import org.apache.kafka.clients.admin.NewTopic;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.testcontainers.containers.KafkaContainer;
@@ -995,6 +996,17 @@ class NexmarkMatrixBenchmark {
     runSetup(tEnv, q);
     PhysicalPlanScan scan = nativeRun ? NativePlanner.install(tEnv) : null;
     String suffix = q.label + "-" + java.util.UUID.randomUUID();
+    // Pre-create the output topic with one partition per sink subtask. Broker auto-creation gives
+    // a single partition, which funnels every subtask's exactly-once writer into one partition
+    // log — a sink-side ceiling that is not part of the workload (the corpus topic is already one
+    // partition per source subtask).
+    try (Admin admin =
+        Admin.create(Map.of(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, brokers))) {
+      admin
+          .createTopics(List.of(new NewTopic("nexmark-output-" + suffix, PARALLELISM, (short) 1)))
+          .all()
+          .get();
+    }
     tEnv.executeSql(kafkaSinkDdl(q, brokers, "nexmark-output-" + suffix));
     String plan =
         tEnv.explainSql(

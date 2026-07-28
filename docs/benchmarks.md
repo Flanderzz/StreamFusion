@@ -867,6 +867,13 @@ multi-TaskManager deployment's shuffle pays Arrow IPC instead
 (`streamfusion.exchange.zeroCopyLocal=false` models it, measured ~11% on the shuffle-heaviest
 mini-batch-off cells and nothing elsewhere).
 
+**These tables predate two later changes and are being re-measured**: post-exchange coalescing
+(see the scaling analysis below) and the sink-topic fix — the output topics of these runs were
+broker-auto-created with a **single partition**, so every exactly-once cell funneled four sink
+subtasks into one partition log on both engines (the measured shared ~1.0 M ev/s sink ceiling).
+The harness now pre-creates each output topic with one partition per sink subtask, matching the
+corpus treatment.
+
 | Query | Flink off | StreamFusion off | SF/Flink off | Flink on | StreamFusion on | SF/Flink on | Flink on/off | SF on/off |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | q0 | 0.763 | 1.435 | 1.88x | 0.828 | 0.759 | 0.92x | 1.09x | 0.53x |
