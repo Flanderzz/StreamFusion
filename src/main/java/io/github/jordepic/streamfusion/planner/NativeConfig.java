@@ -1,6 +1,8 @@
 package io.github.jordepic.streamfusion.planner;
 
 import java.util.Locale;
+import org.apache.flink.configuration.DeploymentOptions;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 
 /**
  * Opt-in configuration for the native planner, read from JVM system properties (like {@code
@@ -94,6 +96,30 @@ public final class NativeConfig {
    */
   public static int paimonBuckets() {
     return Integer.getInteger("streamfusion.state.paimon.buckets", 1);
+  }
+
+  /**
+   * Whether a columnar shuffle edge may move Arrow batches by ownership transfer instead of IPC
+   * bytes ({@code streamfusion.exchange.zeroCopyLocal}, default {@code auto}). Zero-copy is only
+   * sound when every consumer shares the producer's process and no in-flight record outlives the
+   * job (a handle is claimable exactly once, in the JVM that issued it). {@code auto} therefore
+   * enables it for local/MiniCluster execution; {@code true} extends it to a deployment the user
+   * vouches runs a single TaskManager; unaligned checkpoints keep it off in every mode, since they
+   * persist in-flight records whose handles would be dead on restore.
+   */
+  public static boolean zeroCopyExchange(StreamExecutionEnvironment env) {
+    String mode = System.getProperty("streamfusion.exchange.zeroCopyLocal", "auto");
+    if ("false".equals(mode)) {
+      return false;
+    }
+    // The planner hands exec nodes a delegating wrapper environment, so detect in-process
+    // execution by the deployment target it forwards, not by the environment's class. "local" is
+    // the embedded cluster; "minicluster" is the test harness's — both run every subtask in this
+    // JVM.
+    String target = env.getConfiguration().getOptional(DeploymentOptions.TARGET).orElse("");
+    boolean singleProcess =
+        "true".equals(mode) || "local".equals(target) || "minicluster".equals(target);
+    return singleProcess && !env.getCheckpointConfig().isUnalignedCheckpointsEnabled();
   }
 
   /**

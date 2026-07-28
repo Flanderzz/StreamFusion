@@ -1,6 +1,8 @@
 package io.github.jordepic.streamfusion.operator;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.util.List;
 import org.apache.arrow.memory.BufferAllocator;
@@ -52,6 +54,47 @@ class ArrowBatchSerializerTest {
           assertEquals(rows.get(i).getInt(1), readBack.get(i).getInt(1), "v row " + i);
         }
       }
+    }
+  }
+
+  @Test
+  void zeroCopyHandsTheSameBatchAcrossTheWire() throws Exception {
+    ArrowBatchSerializer serializer = new ArrowBatchSerializer(true);
+    try (BufferAllocator allocator = new RootAllocator()) {
+      VectorSchemaRoot root =
+          RowDataArrowConverter.write(List.of(row(1L, 10), row(2L, 20)), SCHEMA, allocator);
+      ArrowBatch batch = new ArrowBatch(root, 2);
+
+      DataOutputSerializer out = new DataOutputSerializer(64);
+      serializer.serialize(batch, out);
+      assertEquals(1, ArrowBatchHandles.inFlight());
+
+      // The frame survives a buffer-to-buffer copy and claims back the identical batch: the Arrow
+      // buffers never left the JVM, so nothing was encoded or reallocated.
+      DataOutputSerializer copied = new DataOutputSerializer(64);
+      serializer.copy(new DataInputDeserializer(out.getCopyOfBuffer()), copied);
+      ArrowBatch back = serializer.deserialize(new DataInputDeserializer(copied.getCopyOfBuffer()));
+      assertSame(batch, back);
+      assertEquals(2, back.destination());
+      assertEquals(0, ArrowBatchHandles.inFlight());
+      root.close();
+    }
+  }
+
+  @Test
+  void zeroCopyHandleRejectsAForeignProcessToken() throws Exception {
+    try (BufferAllocator allocator = new RootAllocator()) {
+      VectorSchemaRoot root = RowDataArrowConverter.write(List.of(row(1L, 10)), SCHEMA, allocator);
+      long handle = ArrowBatchHandles.register(new ArrowBatch(root));
+      assertThrows(
+          IllegalStateException.class,
+          () -> ArrowBatchHandles.claim(ArrowBatchHandles.TOKEN_HI + 1, ArrowBatchHandles.TOKEN_LO, handle));
+      // The right token claims it; claiming again is the already-consumed error.
+      ArrowBatchHandles.claim(ArrowBatchHandles.TOKEN_HI, ArrowBatchHandles.TOKEN_LO, handle);
+      assertThrows(
+          IllegalStateException.class,
+          () -> ArrowBatchHandles.claim(ArrowBatchHandles.TOKEN_HI, ArrowBatchHandles.TOKEN_LO, handle));
+      root.close();
     }
   }
 

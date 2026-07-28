@@ -66,7 +66,9 @@ public class NativeColumnarExchangeExecNode extends ExecNodeBase<ArrowBatch>
             createTransformationMeta(TRANSFORMATION, config),
             new SplitByKeyGroupOperator(
                 keyColumns, timestampPrecisions, maxParallelism, numChannels),
-            ArrowBatchTypeInformation.INSTANCE,
+            NativeConfig.zeroCopyExchange(planner.getExecEnv())
+                ? ArrowBatchTypeInformation.ZERO_COPY
+                : ArrowBatchTypeInformation.INSTANCE,
             input.getParallelism(),
             false);
     // ...then route each whole sub-batch to its channel. Pipelined so watermarks flow downstream.

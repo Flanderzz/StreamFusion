@@ -1,5 +1,9 @@
 package io.github.jordepic.streamfusion;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import io.github.jordepic.streamfusion.operator.ArrowBatchHandles;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
@@ -32,7 +36,12 @@ class FlinkColumnarShuffleParallelismTest {
   void keyedWindowAtParallelismTwoMatchesHost() throws Exception {
     Path input = Files.createTempDirectory("cshuffle-p2-in");
     writeInput(input);
+    long registeredBefore = ArrowBatchHandles.registered();
     NativeParity.assertParity(() -> readEnvironment(input), WINDOW_QUERY);
+    // Local execution must take the zero-copy shuffle: batches were parked in the handle table
+    // (the exchange really moved ownership, not IPC bytes) and every one was claimed back.
+    assertTrue(ArrowBatchHandles.registered() > registeredBefore);
+    assertEquals(0, ArrowBatchHandles.inFlight());
   }
 
   /** Writes the input as multiple Parquet files (parallel write) so the sharded read has work per subtask. */

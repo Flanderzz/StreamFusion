@@ -11,7 +11,20 @@ import org.apache.flink.api.common.typeutils.TypeSerializer;
  */
 public final class ArrowBatchTypeInformation extends TypeInformation<ArrowBatch> {
 
-  public static final ArrowBatchTypeInformation INSTANCE = new ArrowBatchTypeInformation();
+  public static final ArrowBatchTypeInformation INSTANCE = new ArrowBatchTypeInformation(false);
+
+  /**
+   * The variant whose serializer moves batches by ownership transfer instead of IPC bytes when
+   * they cross a network edge — only plannable when every consumer provably shares the producer's
+   * JVM (see the planner's zero-copy gate).
+   */
+  public static final ArrowBatchTypeInformation ZERO_COPY = new ArrowBatchTypeInformation(true);
+
+  private final boolean zeroCopy;
+
+  private ArrowBatchTypeInformation(boolean zeroCopy) {
+    this.zeroCopy = zeroCopy;
+  }
 
   @Override
   public boolean isBasicType() {
@@ -45,7 +58,7 @@ public final class ArrowBatchTypeInformation extends TypeInformation<ArrowBatch>
 
   @Override
   public TypeSerializer<ArrowBatch> createSerializer(SerializerConfig config) {
-    return new ArrowBatchSerializer();
+    return new ArrowBatchSerializer(zeroCopy);
   }
 
   @Override

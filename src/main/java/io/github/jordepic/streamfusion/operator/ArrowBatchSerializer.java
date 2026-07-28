@@ -20,14 +20,32 @@ import org.apache.flink.core.memory.DataOutputView;
 /**
  * Type serializer for {@link ArrowBatch}. Within a chained task it is never asked to serialize to
  * bytes — {@link #copy} is the only path, and it is identity because operators emit a fresh batch
- * per record and never retain or mutate it after emit. Across a network edge it serializes the batch
- * with Arrow's IPC stream format, preserving the columnar exchange's destination tag before the
- * length-framed IPC payload.
+ * per record and never retain or mutate it after emit. Across a network edge it has two formats,
+ * dispatched by the frame tag on the read side:
+ *
+ * <ul>
+ *   <li>the IPC format — Arrow's IPC stream encoding, preserving the columnar exchange's
+ *       destination tag before the length-framed payload — valid across any process boundary;
+ *   <li>the zero-copy format (write side opt-in via the constructor flag) — the batch is parked in
+ *       {@link ArrowBatchHandles} and only a token-guarded handle crosses the wire, so a shuffle
+ *       whose endpoints share the JVM moves Arrow buffers by ownership transfer, not by bytes.
+ * </ul>
  */
 public final class ArrowBatchSerializer extends TypeSerializer<ArrowBatch> {
 
-  // Negative so it cannot be confused with the non-negative IPC length in the legacy format.
+  // Negative so they cannot be confused with the non-negative IPC length in the legacy format.
   private static final int DESTINATION_TAG = 0xD5A5_0001;
+  private static final int ZERO_COPY_TAG = 0xD5A5_0002;
+
+  private final boolean zeroCopy;
+
+  public ArrowBatchSerializer() {
+    this(false);
+  }
+
+  public ArrowBatchSerializer(boolean zeroCopy) {
+    this.zeroCopy = zeroCopy;
+  }
 
   private BufferAllocator allocator() {
     return NativeAllocator.SHARED;
@@ -40,7 +58,7 @@ public final class ArrowBatchSerializer extends TypeSerializer<ArrowBatch> {
 
   @Override
   public TypeSerializer<ArrowBatch> duplicate() {
-    return new ArrowBatchSerializer();
+    return new ArrowBatchSerializer(zeroCopy);
   }
 
   @Override
@@ -66,6 +84,14 @@ public final class ArrowBatchSerializer extends TypeSerializer<ArrowBatch> {
 
   @Override
   public void serialize(ArrowBatch batch, DataOutputView target) throws IOException {
+    if (zeroCopy) {
+      // Ownership moves to the handle table; the claiming deserializer takes it back untouched.
+      target.writeInt(ZERO_COPY_TAG);
+      target.writeLong(ArrowBatchHandles.TOKEN_HI);
+      target.writeLong(ArrowBatchHandles.TOKEN_LO);
+      target.writeLong(ArrowBatchHandles.register(batch));
+      return;
+    }
     ByteArrayOutputStream bytes = new ByteArrayOutputStream();
     try (ArrowStreamWriter writer = new ArrowStreamWriter(batch.root(), null, bytes)) {
       writer.start();
@@ -86,6 +112,9 @@ public final class ArrowBatchSerializer extends TypeSerializer<ArrowBatch> {
   @Override
   public ArrowBatch deserialize(DataInputView source) throws IOException {
     int tagOrLength = source.readInt();
+    if (tagOrLength == ZERO_COPY_TAG) {
+      return ArrowBatchHandles.claim(source.readLong(), source.readLong(), source.readLong());
+    }
     int destination = tagOrLength == DESTINATION_TAG ? source.readInt() : -1;
     int length = tagOrLength == DESTINATION_TAG ? source.readInt() : tagOrLength;
     byte[] encoded = new byte[length];
@@ -116,6 +145,13 @@ public final class ArrowBatchSerializer extends TypeSerializer<ArrowBatch> {
   @Override
   public void copy(DataInputView source, DataOutputView target) throws IOException {
     int tagOrLength = source.readInt();
+    if (tagOrLength == ZERO_COPY_TAG) {
+      target.writeInt(ZERO_COPY_TAG);
+      target.writeLong(source.readLong());
+      target.writeLong(source.readLong());
+      target.writeLong(source.readLong());
+      return;
+    }
     int destination = tagOrLength == DESTINATION_TAG ? source.readInt() : -1;
     int length = tagOrLength == DESTINATION_TAG ? source.readInt() : tagOrLength;
     byte[] encoded = new byte[length];
@@ -128,12 +164,12 @@ public final class ArrowBatchSerializer extends TypeSerializer<ArrowBatch> {
 
   @Override
   public boolean equals(Object obj) {
-    return obj instanceof ArrowBatchSerializer;
+    return obj instanceof ArrowBatchSerializer && ((ArrowBatchSerializer) obj).zeroCopy == zeroCopy;
   }
 
   @Override
   public int hashCode() {
-    return ArrowBatchSerializer.class.hashCode();
+    return ArrowBatchSerializer.class.hashCode() + (zeroCopy ? 1 : 0);
   }
 
   @Override
