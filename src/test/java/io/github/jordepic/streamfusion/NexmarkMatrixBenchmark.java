@@ -75,7 +75,8 @@ import org.testcontainers.utility.DockerImageName;
  * <p>Opt-in (millions of rows, Docker for Testcontainers Kafka, the {@code kafka} cargo feature for the
  * native source): {@code SF_BENCHMARK=true mvn test -Pbench -Dnative.cargo.args="build --release
  * --features kafka" -Dtest=NexmarkMatrixBenchmark}. {@code SF_ROWS} overrides the event count (default
- * 500,000), {@code SF_MATRIX_QUERIES} a comma-separated query subset (e.g. {@code q0,q7,q15}), {@code
+ * 500,000), {@code SF_PARALLELISM} the Kafka-fed runs' job parallelism (default 4; both engines, with a
+ * matching corpus partition count), {@code SF_MATRIX_QUERIES} a comma-separated query subset (e.g. {@code q0,q7,q15}), {@code
  * SF_LADDER_FORMATS} the Kafka formats (default {@code json,avro,protobuf}), {@code SF_MATRIX_GENERATOR}
  * ({@code false} to skip the generator column), {@code SF_MATRIX_PARQUET} ({@code false} to skip the
  * Parquet column), {@code SF_MATRIX_KAFKA} ({@code false} to skip Kafka), {@code SF_MATRIX_FLUSS}
@@ -86,6 +87,10 @@ class NexmarkMatrixBenchmark {
 
   private static final long ROWS =
       System.getenv("SF_ROWS") != null ? Long.parseLong(System.getenv("SF_ROWS")) : 500_000L;
+  // The Kafka-fed comparisons run both engines at a representative multi-subtask parallelism; the
+  // corpus topic is created with one partition per subtask so every source instance has a split.
+  private static final int PARALLELISM =
+      System.getenv("SF_PARALLELISM") != null ? Integer.parseInt(System.getenv("SF_PARALLELISM")) : 4;
   private static final int WARMUP = 1;
   private static final int RUNS = 2;
 
@@ -591,7 +596,7 @@ class NexmarkMatrixBenchmark {
             new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.6.1"))) {
           kafka.start();
           String brokers = kafka.getBootstrapServers();
-          NexmarkKafkaBenchmark.produce(brokers, "nexmark", format, ROWS);
+          NexmarkKafkaBenchmark.produce(brokers, "nexmark", format, ROWS, PARALLELISM);
           for (Query q : queries) {
             double flink = kafkaBest(brokers, format, Rung.FLINK, q, null);
             report.get(q.label).add(kafkaCell(brokers, format, q, flink, null, null));
@@ -742,7 +747,7 @@ class NexmarkMatrixBenchmark {
             .withEnv("KAFKA_TRANSACTION_MAX_TIMEOUT_MS", "7200000")) {
       kafka.start();
       String brokers = kafka.getBootstrapServers();
-      NexmarkKafkaBenchmark.produce(brokers, "nexmark", "json", ROWS);
+      NexmarkKafkaBenchmark.produce(brokers, "nexmark", "json", ROWS, PARALLELISM);
       StringBuilder out =
           new StringBuilder(
               "\n##### NEXMARK EXACTLY-ONCE KAFKA MODE COMPARISON ("
@@ -823,7 +828,7 @@ class NexmarkMatrixBenchmark {
             .withEnv("KAFKA_TRANSACTION_MAX_TIMEOUT_MS", "7200000")) {
       kafka.start();
       String brokers = kafka.getBootstrapServers();
-      NexmarkKafkaBenchmark.produce(brokers, "nexmark", "json", ROWS);
+      NexmarkKafkaBenchmark.produce(brokers, "nexmark", "json", ROWS, PARALLELISM);
       assertStateBackendsEngage(brokers, rocksdb, paimon, rocksDir);
       StringBuilder out =
           new StringBuilder(
@@ -1134,7 +1139,7 @@ class NexmarkMatrixBenchmark {
             .withEnv("KAFKA_TRANSACTION_MAX_TIMEOUT_MS", "7200000")) {
       kafka.start();
       String brokers = kafka.getBootstrapServers();
-      NexmarkKafkaBenchmark.produce(brokers, "nexmark", "json", ROWS);
+      NexmarkKafkaBenchmark.produce(brokers, "nexmark", "json", ROWS, PARALLELISM);
       long deadline = System.currentTimeMillis() + Long.getLong("profile.seconds", 60L) * 1000L;
       long iterations = 0;
       do {
@@ -1634,7 +1639,7 @@ class NexmarkMatrixBenchmark {
 
   private static StreamTableEnvironment kafkaEnvironment(String brokers, String format) {
     StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
-    env.setParallelism(1);
+    env.setParallelism(PARALLELISM);
     env.getConfig().enableObjectReuse();
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     tEnv.executeSql(

@@ -10,6 +10,7 @@ import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Properties;
 import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericData;
@@ -23,6 +24,9 @@ import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.apache.flink.table.types.logical.RowType;
+import org.apache.kafka.clients.admin.Admin;
+import org.apache.kafka.clients.admin.AdminClientConfig;
+import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
@@ -228,6 +232,22 @@ class NexmarkKafkaBenchmark {
   }
 
   static void produce(String brokers, String topic, String format, long rows) throws Exception {
+    produce(brokers, topic, format, rows, 1);
+  }
+
+  /**
+   * Produces the corpus round-robin over an explicitly created {@code partitions}-partition topic,
+   * so a parallel source has one split per subtask. Per-partition order stays ascending in event
+   * time (the corpus is globally ordered and round-robin preserves each partition's subsequence),
+   * which is what the per-split source watermarks require.
+   */
+  static void produce(String brokers, String topic, String format, long rows, int partitions)
+      throws Exception {
+    if (partitions > 1) {
+      try (Admin admin = Admin.create(Map.of(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, brokers))) {
+        admin.createTopics(List.of(new NewTopic(topic, partitions, (short) 1))).all().get();
+      }
+    }
     Properties props = new Properties();
     props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, brokers);
     props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class.getName());
@@ -252,7 +272,7 @@ class NexmarkKafkaBenchmark {
         } else {
           value = event(i).getBytes(StandardCharsets.UTF_8);
         }
-        producer.send(new ProducerRecord<>(topic, 0, null, value));
+        producer.send(new ProducerRecord<>(topic, (int) (i % partitions), null, value));
       }
       producer.flush();
     }
