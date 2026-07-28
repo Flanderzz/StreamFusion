@@ -1,5 +1,8 @@
 package io.github.jordepic.streamfusion.state;
 
+import java.io.DataInputStream;
+import java.nio.file.Path;
+import java.util.Arrays;
 import org.apache.flink.core.fs.CloseableRegistry;
 import org.apache.flink.runtime.checkpoint.CheckpointOptions;
 import org.apache.flink.runtime.checkpoint.CheckpointType;
@@ -293,7 +296,7 @@ final class PaimonSnapshotStrategy
   }
 
   private void link(String rel, File linkDir) throws IOException {
-    java.nio.file.Path to = new File(linkDir, rel).toPath();
+    Path to = new File(linkDir, rel).toPath();
     Files.createDirectories(to.getParent());
     Files.createLink(to, new File(tableDirectory, rel).toPath());
   }
@@ -313,7 +316,7 @@ final class PaimonSnapshotStrategy
       return Collections.emptyList();
     }
     List<File> tables = new ArrayList<>();
-    java.util.Arrays.sort(children);
+    Arrays.sort(children);
     for (File child : children) {
       if (new File(child, "schema").isDirectory()) {
         tables.add(child);
@@ -495,7 +498,7 @@ final class PaimonSnapshotStrategy
   /** Reads the snapshot token back out of a checkpoint's metadata document. */
   static String readMetaDocument(StreamStateHandle metaHandle) throws IOException {
     try (InputStream in = metaHandle.openInputStream()) {
-      java.io.DataInputStream data = new java.io.DataInputStream(in);
+      DataInputStream data = new DataInputStream(in);
       int version = data.readInt();
       if (version == 1) {
         // v1 carried the single-table Paimon snapshot id as a long; its token form is the

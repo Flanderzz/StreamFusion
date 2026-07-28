@@ -1,6 +1,7 @@
 package io.github.jordepic.streamfusion.planner;
 
 import java.time.Duration;
+import java.util.Arrays;
 import org.apache.calcite.rel.core.AggregateCall;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.sql.SqlKind;
@@ -175,7 +176,7 @@ final class WindowAggregateMatcher {
   /** Value columns for the hopping local, including the synthetic count1 column (counts rows). */
   static int[] hoppingLocalValueColumns(scala.collection.Seq<AggregateCall> aggCalls) {
     int[] user = valueColumns(aggCalls);
-    int[] withCount = java.util.Arrays.copyOf(user, user.length + 1);
+    int[] withCount = Arrays.copyOf(user, user.length + 1);
     withCount[user.length] = -1; // the synthetic count1$1 counts rows over the synthesized column
     return withCount;
   }
@@ -184,7 +185,7 @@ final class WindowAggregateMatcher {
   static int[] hoppingLocalValueTypes(
       scala.collection.Seq<AggregateCall> aggCalls, RelDataType inputType) {
     int[] user = valueTypeCodes(aggCalls, inputType);
-    return java.util.Arrays.copyOf(user, user.length + 1); // copyOf pads the new slot with 0 (bigint)
+    return Arrays.copyOf(user, user.length + 1); // copyOf pads the new slot with 0 (bigint)
   }
 
   /**

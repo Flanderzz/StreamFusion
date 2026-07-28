@@ -3,6 +3,8 @@ package io.github.jordepic.streamfusion.kafka;
 import io.github.jordepic.streamfusion.format.NativeMessageDecoderFactory;
 import io.github.jordepic.streamfusion.operator.ArrowBatch;
 import java.io.IOException;
+import java.util.Arrays;
+import java.util.LinkedHashMap;
 import java.util.Properties;
 import java.util.function.Supplier;
 import org.apache.flink.api.connector.source.Boundedness;
@@ -88,7 +90,7 @@ public final class NativeKafkaSource
   @Override
   public SourceReader<ArrowBatch, KafkaPartitionSplit> createReader(SourceReaderContext context) {
     NativeKafkaSourceMetrics metrics = new NativeKafkaSourceMetrics(context.metricGroup());
-    java.util.LinkedHashMap<String, String> readerConfig = new java.util.LinkedHashMap<>();
+    LinkedHashMap<String, String> readerConfig = new LinkedHashMap<>();
     for (int i = 0; i < configKeys.length; i++) {
       readerConfig.put(configKeys[i], configValues[i]);
     }
@@ -97,7 +99,7 @@ public final class NativeKafkaSource
         props.getProperty("client.id.prefix") + "-" + context.getIndexOfSubtask());
     String[] readerConfigKeys = readerConfig.keySet().toArray(new String[0]);
     String[] readerConfigValues =
-        java.util.Arrays.stream(readerConfigKeys).map(readerConfig::get).toArray(String[]::new);
+        Arrays.stream(readerConfigKeys).map(readerConfig::get).toArray(String[]::new);
     Supplier<SplitReader<NativeKafkaRecord, KafkaPartitionSplit>> splitReaderSupplier =
         () ->
             new NativeKafkaSplitReader(

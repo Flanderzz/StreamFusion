@@ -2,6 +2,7 @@ package io.github.jordepic.streamfusion.planner;
 
 import io.github.jordepic.streamfusion.kafka.KafkaProducerConfigTranslator;
 import java.util.LinkedHashMap;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Properties;
@@ -114,13 +115,13 @@ final class KafkaSinkTranslator {
               options
                   .getOrDefault("sink.delivery-guarantee", "at-least-once")
                   .replace('-', '_')
-                  .toUpperCase(java.util.Locale.ROOT));
+                  .toUpperCase(Locale.ROOT));
       String namingOption = options.get("sink.transaction-naming-strategy");
       naming =
           namingOption == null || "default".equalsIgnoreCase(namingOption)
               ? TransactionNamingStrategy.DEFAULT
               : TransactionNamingStrategy.valueOf(
-                  namingOption.replace('-', '_').toUpperCase(java.util.Locale.ROOT));
+                  namingOption.replace('-', '_').toUpperCase(Locale.ROOT));
     } catch (IllegalArgumentException invalid) {
       return Result.fallback("invalid Kafka sink delivery or transaction option");
     }
@@ -178,7 +179,7 @@ final class KafkaSinkTranslator {
   }
 
   private static boolean isZeroDuration(String value) {
-    String normalized = value.trim().toLowerCase(java.util.Locale.ROOT);
+    String normalized = value.trim().toLowerCase(Locale.ROOT);
     return normalized.matches("0+(\\.0+)?(\\s*(ms|s|sec|secs|second|seconds))?");
   }
 }

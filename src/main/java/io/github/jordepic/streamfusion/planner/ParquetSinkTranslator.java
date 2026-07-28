@@ -2,6 +2,7 @@ package io.github.jordepic.streamfusion.planner;
 
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -189,7 +190,7 @@ final class ParquetSinkTranslator {
     Map<String, String> config = new LinkedHashMap<>();
 
     String compression =
-        options.getOrDefault("parquet.compression", "SNAPPY").toUpperCase(java.util.Locale.ROOT);
+        options.getOrDefault("parquet.compression", "SNAPPY").toUpperCase(Locale.ROOT);
     switch (compression) {
       case "UNCOMPRESSED":
       case "SNAPPY":
@@ -236,12 +237,12 @@ final class ParquetSinkTranslator {
       if (!dictionary.equalsIgnoreCase("true") && !dictionary.equalsIgnoreCase("false")) {
         return Result.fallback("invalid parquet.enable.dictionary " + dictionary);
       }
-      config.put("enable.dictionary", dictionary.toLowerCase(java.util.Locale.ROOT));
+      config.put("enable.dictionary", dictionary.toLowerCase(Locale.ROOT));
     }
 
     String version = options.get("parquet.writer.version");
     if (version != null) {
-      switch (version.toUpperCase(java.util.Locale.ROOT)) {
+      switch (version.toUpperCase(Locale.ROOT)) {
         case "V1":
         case "PARQUET_1_0":
           config.put("writer.version", "1");
@@ -257,11 +258,11 @@ final class ParquetSinkTranslator {
 
     String unit = options.get("parquet.timestamp.time.unit");
     if (unit != null) {
-      switch (unit.toLowerCase(java.util.Locale.ROOT)) {
+      switch (unit.toLowerCase(Locale.ROOT)) {
         case "millis":
         case "micros":
         case "nanos":
-          config.put("timestamp.unit", unit.toLowerCase(java.util.Locale.ROOT));
+          config.put("timestamp.unit", unit.toLowerCase(Locale.ROOT));
           break;
         default:
           return Result.fallback("unrecognized parquet.timestamp.time.unit " + unit);

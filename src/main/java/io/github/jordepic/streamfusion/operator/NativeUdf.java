@@ -2,7 +2,9 @@ package io.github.jordepic.streamfusion.operator;
 
 import java.io.Serializable;
 import java.lang.reflect.Method;
+import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.arrow.c.ArrowArray;
@@ -304,7 +306,7 @@ public final class NativeUdf {
   private static VectorSchemaRoot resultRoot(int returnType, int rows) {
     Field field = new Field("result", FieldType.nullable(arrowType(returnType)), null);
     VectorSchemaRoot root =
-        VectorSchemaRoot.create(new Schema(java.util.List.of(field)), NativeAllocator.SHARED);
+        VectorSchemaRoot.create(new Schema(List.of(field)), NativeAllocator.SHARED);
     root.getFieldVectors().get(0).setInitialCapacity(rows);
     root.allocateNew();
     return root;
@@ -503,7 +505,7 @@ public final class NativeUdf {
         break;
       default:
         if (code >= DECIMAL_BASE) {
-          ((org.apache.arrow.vector.DecimalVector) vector).setSafe(row, (java.math.BigDecimal) value);
+          ((org.apache.arrow.vector.DecimalVector) vector).setSafe(row, (BigDecimal) value);
           break;
         }
         throw new IllegalArgumentException("unsupported UDF type code " + code);

@@ -8,9 +8,15 @@ import io.github.jordepic.streamfusion.format.NativeFormatProvider;
 import io.github.jordepic.streamfusion.format.NativeFormatProviders;
 import io.github.jordepic.streamfusion.format.NativeMessageDecoderFactory;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Properties;
+import java.util.Random;
+import java.util.UUID;
+import java.util.regex.Pattern;
 import org.apache.calcite.rel.RelNode;
 import org.apache.flink.api.connector.source.Boundedness;
 import org.apache.flink.connector.kafka.source.KafkaSource;
@@ -255,9 +261,9 @@ final class KafkaTables {
     // Keep this implementation detail out of the enumerator/source properties so it cannot make
     // group-offset startup or checkpoint commits appear configured when the table omitted a group.
     nativeProps.putIfAbsent(
-        "group.id", "streamfusion-native-" + java.util.UUID.randomUUID());
+        "group.id", "streamfusion-native-" + UUID.randomUUID());
     Map<String, String> librdkafka =
-        new java.util.HashMap<>(KafkaConfigTranslator.translate(nativeProps).config());
+        new HashMap<>(KafkaConfigTranslator.translate(nativeProps).config());
     // librdkafka-specific throughput tuning with no Java analog (so not produced by the translator):
     // prefetch eagerly instead of idling 1s before refetching, and keep a deep queue so the background
     // fetcher stays ahead of the reader. Measured to lift native consume throughput meaningfully.
@@ -457,7 +463,7 @@ final class KafkaTables {
   }
 
   /** Finds an installed format SPI provider without making this connector artifact depend on a format JAR. */
-  private static java.util.Optional<NativeFormatProvider> formatProvider(
+  private static Optional<NativeFormatProvider> formatProvider(
       Map<String, String> options, RowType rowType) {
     return NativeFormatProviders.find(
         new NativeFormatContext(rowType, rowType, options, ignoreParseErrors(options)));
@@ -543,7 +549,7 @@ final class KafkaTables {
     if (options.get("topic") != null) {
       builder.setTopics(Arrays.asList(options.get("topic").split(";")));
     } else {
-      builder.setTopicPattern(java.util.regex.Pattern.compile(options.get("topic-pattern")));
+      builder.setTopicPattern(Pattern.compile(options.get("topic-pattern")));
     }
     if ("latest-offset".equals(options.get("scan.bounded.mode"))) {
       builder.setBounded(OffsetsInitializer.latest());
@@ -558,7 +564,7 @@ final class KafkaTables {
     return topic != null
         ? KafkaSubscriber.getTopicListSubscriber(Arrays.asList(topic.split(";")))
         : KafkaSubscriber.getTopicPatternSubscriber(
-            java.util.regex.Pattern.compile(options.get("topic-pattern")));
+            Pattern.compile(options.get("topic-pattern")));
   }
 
   /** Whether {@code scan.bounded.mode} is one the native source handles (unbounded or latest-offset). */
@@ -598,7 +604,7 @@ final class KafkaTables {
         startingOffsets
             .getAutoOffsetResetStrategy()
             .name()
-            .toLowerCase(java.util.Locale.ROOT));
+            .toLowerCase(Locale.ROOT));
     if (!props.containsKey("group.id")) {
       props.setProperty("commit.offsets.on.checkpoint", "false");
     }
@@ -606,7 +612,7 @@ final class KafkaTables {
         "client.id.prefix",
         props.containsKey("group.id")
             ? props.getProperty("group.id")
-            : "KafkaSource-" + new java.util.Random().nextLong());
+            : "KafkaSource-" + new Random().nextLong());
     return props;
   }
 
@@ -621,7 +627,7 @@ final class KafkaTables {
         String reset = options.getOrDefault(PROPERTIES_PREFIX + "auto.offset.reset", "none");
         try {
           return OffsetsInitializer.committedOffsets(
-              OffsetResetStrategy.valueOf(reset.toUpperCase(java.util.Locale.ROOT)));
+              OffsetResetStrategy.valueOf(reset.toUpperCase(Locale.ROOT)));
         } catch (IllegalArgumentException ignored) {
           return null;
         }
@@ -648,7 +654,7 @@ final class KafkaTables {
     if (topic == null || topic.contains(";") || offsets == null) {
       return null;
     }
-    Map<TopicPartition, Long> byPartition = new java.util.HashMap<>();
+    Map<TopicPartition, Long> byPartition = new HashMap<>();
     for (String pair : offsets.split(";")) {
       String[] kv = pair.split(",");
       if (kv.length != 2 || !kv[0].startsWith("partition:") || !kv[1].startsWith("offset:")) {

@@ -1,5 +1,7 @@
 package io.github.jordepic.streamfusion.planner;
 
+import java.util.ArrayList;
+import java.util.List;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.apache.flink.runtime.state.KeyGroupRangeAssignment;
@@ -11,7 +13,7 @@ public final class FlinkKeyGroupUtils {
 
   /** Logical timestamp precision per projected key, with {@code -1} for every other type. */
   static int[] timestampPrecisions(RelDataType inputType, int[] keyColumns) {
-    java.util.List<Integer> precisions = new java.util.ArrayList<>();
+    List<Integer> precisions = new ArrayList<>();
     for (int keyColumn : keyColumns) {
       appendTimestampPrecisions(
           inputType.getFieldList().get(keyColumn).getType(), precisions);
@@ -20,7 +22,7 @@ public final class FlinkKeyGroupUtils {
   }
 
   private static void appendTimestampPrecisions(
-      RelDataType type, java.util.List<Integer> precisions) {
+      RelDataType type, List<Integer> precisions) {
     SqlTypeName typeName = type.getSqlTypeName();
     precisions.add(
         typeName == SqlTypeName.TIMESTAMP || typeName == SqlTypeName.TIMESTAMP_WITH_LOCAL_TIME_ZONE

@@ -1,6 +1,8 @@
 package io.github.jordepic.streamfusion.planner;
 
+import java.util.List;
 import java.util.Map;
+import java.util.stream.IntStream;
 import org.apache.flink.table.catalog.ContextResolvedTable;
 import org.apache.flink.table.catalog.ResolvedCatalogBaseTable;
 import org.apache.flink.table.catalog.ResolvedCatalogTable;
@@ -80,10 +82,10 @@ final class KafkaSinkMatcher {
     String timestampFormat = json.getOrDefault("timestamp-format.standard", "SQL");
     boolean ignoreNullFields =
         Boolean.parseBoolean(json.getOrDefault("encode.ignore-null-fields", "false"));
-    int[] valueFields = java.util.stream.IntStream.range(0, rowType.getFieldCount()).toArray();
+    int[] valueFields = IntStream.range(0, rowType.getFieldCount()).toArray();
     int[] keyFields = new int[0];
     if (translated.planned().upsert) {
-      java.util.List<String> primaryKey =
+      List<String> primaryKey =
           table.getResolvedSchema().getPrimaryKey().orElseThrow().getColumns();
       keyFields =
           primaryKey.stream().mapToInt(rowType.getFieldNames()::indexOf).toArray();

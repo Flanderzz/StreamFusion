@@ -1,5 +1,6 @@
 package io.github.jordepic.streamfusion.operator;
 
+import java.util.Arrays;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.MatchResult;
@@ -46,7 +47,7 @@ public final class NativeBuiltinFunctions {
       }
       if (b >= 'A' && b <= 'Z') {
         if (folded == null) {
-          folded = java.util.Arrays.copyOf(bytes, bytes.length);
+          folded = Arrays.copyOf(bytes, bytes.length);
         }
         folded[i] = (byte) (b + 32);
       }
@@ -67,7 +68,7 @@ public final class NativeBuiltinFunctions {
       }
       if (b >= 'a' && b <= 'z') {
         if (folded == null) {
-          folded = java.util.Arrays.copyOf(bytes, bytes.length);
+          folded = Arrays.copyOf(bytes, bytes.length);
         }
         folded[i] = (byte) (b - 32);
       }

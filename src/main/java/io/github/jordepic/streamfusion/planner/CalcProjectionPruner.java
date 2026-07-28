@@ -2,6 +2,7 @@ package io.github.jordepic.streamfusion.planner;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Deque;
 import java.util.List;
 import java.util.Map;
@@ -59,7 +60,7 @@ final class CalcProjectionPruner {
       return null;
     }
     int[] remap = new int[source.getFieldCount()];
-    java.util.Arrays.fill(remap, -1);
+    Arrays.fill(remap, -1);
     int position = 0;
     for (int top : root.children.keySet()) {
       remap[top] = position++;

@@ -4,16 +4,22 @@ import io.github.jordepic.streamfusion.operator.ArrowBatch;
 import io.github.jordepic.streamfusion.operator.NativeAllocator;
 import java.io.IOException;
 import java.io.Serializable;
+import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.stream.Collectors;
 import org.apache.arrow.c.ArrowArray;
 import org.apache.arrow.c.ArrowSchema;
 import org.apache.arrow.c.Data;
@@ -143,7 +149,7 @@ public final class NativeKafkaExactlyOnceSink
     private final int[] ownedSubtaskIds;
     private final int totalOwnedSubtasks;
     private final ReadableBackchannel<TransactionFinished> backchannel;
-    private final java.util.ArrayList<CheckpointTransaction> pendingTransactions;
+    private final ArrayList<CheckpointTransaction> pendingTransactions;
     private final Counter batchesOut;
     private final Counter recordsOut;
     private final Counter bytesOut;
@@ -176,7 +182,7 @@ public final class NativeKafkaExactlyOnceSink
               taskInfo.getIndexOfThisSubtask(),
               taskInfo.getNumberOfParallelSubtasks(),
               recoveredState);
-      this.pendingTransactions = new java.util.ArrayList<>();
+      this.pendingTransactions = new ArrayList<>();
       recoveredState.stream()
           .flatMap(state -> state.getPrecommittedTransactionalIds().stream())
           .forEach(pendingTransactions::add);
@@ -341,7 +347,7 @@ public final class NativeKafkaExactlyOnceSink
         }
       }
       prepareTransaction(checkpointId + 1);
-      java.util.ArrayList<KafkaWriterState> states = new java.util.ArrayList<>();
+      ArrayList<KafkaWriterState> states = new ArrayList<>();
       for (int index = 0; index < ownedSubtaskIds.length; index++) {
         states.add(
             new KafkaWriterState(
@@ -377,15 +383,15 @@ public final class NativeKafkaExactlyOnceSink
         } catch (InterruptedException interrupted) {
           Thread.currentThread().interrupt();
           releaseWhenWarmed(warmed);
-        } catch (java.util.concurrent.ExecutionException failed) {
+        } catch (ExecutionException failed) {
           // The warm-up already released its producer on failure.
-        } catch (java.util.concurrent.TimeoutException unreachableBroker) {
+        } catch (TimeoutException unreachableBroker) {
           // Cancellation must not hang on an unreachable broker; release whenever it finishes.
           releaseWhenWarmed(warmed);
         }
       }
       producerWarmer.shutdown();
-      adminClient.close(java.time.Duration.ofMillis(maxBlockMs));
+      adminClient.close(Duration.ofMillis(maxBlockMs));
       backchannel.close();
     }
 
@@ -485,18 +491,18 @@ public final class NativeKafkaExactlyOnceSink
 
     private void abortLingeringTransactions(
         Collection<KafkaWriterState> recoveredState, long startCheckpointId) {
-      java.util.ArrayList<String> prefixes = new java.util.ArrayList<>();
+      ArrayList<String> prefixes = new ArrayList<>();
       prefixes.add(transactionalIdPrefix);
       recoveredState.stream()
           .map(KafkaWriterState::getTransactionalIdPrefix)
           .filter(prefix -> !prefix.equals(transactionalIdPrefix))
           .distinct()
           .forEach(prefixes::add);
-      java.util.Set<String> precommitted =
+      Set<String> precommitted =
           recoveredState.stream()
               .flatMap(state -> state.getPrecommittedTransactionalIds().stream())
               .map(CheckpointTransaction::getTransactionalId)
-              .collect(java.util.stream.Collectors.toSet());
+              .collect(Collectors.toSet());
       TransactionAbortStrategyContextImpl abortContext =
           new TransactionAbortStrategyContextImpl(
               () -> List.of(topic),

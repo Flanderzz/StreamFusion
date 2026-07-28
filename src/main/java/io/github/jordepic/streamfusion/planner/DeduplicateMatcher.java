@@ -2,6 +2,7 @@ package io.github.jordepic.streamfusion.planner;
 
 import io.github.jordepic.streamfusion.operator.RowDataArrowConverter;
 import java.util.List;
+import java.util.Optional;
 import org.apache.calcite.rel.RelFieldCollation;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
@@ -72,12 +73,12 @@ final class DeduplicateMatcher {
         .orElse(false);
   }
 
-  private static java.util.Optional<RelDataType> orderType(StreamPhysicalRank rank) {
+  private static Optional<RelDataType> orderType(StreamPhysicalRank rank) {
     List<RelFieldCollation> collations = rank.orderKey().getFieldCollations();
     if (collations.size() != 1) {
-      return java.util.Optional.empty();
+      return Optional.empty();
     }
-    return java.util.Optional.of(
+    return Optional.of(
         rank.getInput().getRowType().getFieldList().get(collations.get(0).getFieldIndex()).getType());
   }
 

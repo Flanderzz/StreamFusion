@@ -3,6 +3,7 @@ package io.github.jordepic.streamfusion.operator;
 import io.github.jordepic.streamfusion.Native;
 import io.github.jordepic.streamfusion.planner.NativeConfig;
 import io.github.jordepic.streamfusion.state.PaimonNativeStateSupport;
+import java.util.function.LongBinaryOperator;
 import org.apache.arrow.c.ArrowArray;
 import org.apache.arrow.c.ArrowSchema;
 import org.apache.arrow.c.Data;
@@ -231,7 +232,7 @@ public class NativeWindowJoinOperator extends AbstractNativeStatefulOperator<Arr
   }
 
   /** Exports both side row types as FFI Arrow schemas for the duration of one native call. */
-  private long withSchemas(java.util.function.LongBinaryOperator call) {
+  private long withSchemas(LongBinaryOperator call) {
     return withRowSchemas(leftType, rightType, call);
   }
 

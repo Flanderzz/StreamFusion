@@ -5,6 +5,7 @@ import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.List;
 import org.apache.arrow.c.ArrowArray;
 import org.apache.arrow.c.ArrowSchema;
@@ -256,7 +257,7 @@ public abstract class NativeWindowOperatorCore<OUT> extends AbstractNativeStatef
     BigIntVector ts = new BigIntVector("ts", allocator);
     FieldVector[] values = new FieldVector[valueColumns.length];
     FieldVector[] keys = new FieldVector[keyColumns.length];
-    List<FieldVector> vectors = new java.util.ArrayList<>();
+    List<FieldVector> vectors = new ArrayList<>();
     vectors.add(ts);
     for (int a = 0; a < valueColumns.length; a++) {
       values[a] = newValueVector("value" + a, valueTypes[a]);
@@ -330,7 +331,7 @@ public abstract class NativeWindowOperatorCore<OUT> extends AbstractNativeStatef
     FieldVector[] values = new FieldVector[valueColumns.length];
     FieldVector[] srcValues = new FieldVector[valueColumns.length];
     FieldVector[] keys = new FieldVector[keyColumns.length];
-    List<FieldVector> vectors = new java.util.ArrayList<>();
+    List<FieldVector> vectors = new ArrayList<>();
     vectors.add(windowStart);
     vectors.add(windowEnd);
     for (int a = 0; a < valueColumns.length; a++) {
@@ -382,7 +383,7 @@ public abstract class NativeWindowOperatorCore<OUT> extends AbstractNativeStatef
     FieldVector[] values = new FieldVector[valueColumns.length];
     FieldVector[] srcValues = new FieldVector[valueColumns.length];
     FieldVector[] keys = new FieldVector[keyColumns.length];
-    List<FieldVector> vectors = new java.util.ArrayList<>();
+    List<FieldVector> vectors = new ArrayList<>();
     vectors.add(ts);
     for (int a = 0; a < valueColumns.length; a++) {
       values[a] = newValueVector("value" + a, valueTypes[a]);

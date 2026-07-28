@@ -2,6 +2,7 @@ package io.github.jordepic.streamfusion.kafka;
 
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Properties;
@@ -221,7 +222,7 @@ public final class KafkaProducerConfigTranslator {
         "queue.buffering.max.kbytes", String.valueOf(Math.max(1, (bufferMemory + 1023) / 1024)));
 
     String codec = out.get("compression.type");
-    String levelKey = "compression." + codec.toLowerCase(java.util.Locale.ROOT) + ".level";
+    String levelKey = "compression." + codec.toLowerCase(Locale.ROOT) + ".level";
     if (javaProperties.containsKey(levelKey)) {
       out.put("compression.level", javaProperties.getProperty(levelKey));
     }

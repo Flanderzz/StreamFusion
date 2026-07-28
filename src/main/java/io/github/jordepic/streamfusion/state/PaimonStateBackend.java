@@ -1,5 +1,6 @@
 package io.github.jordepic.streamfusion.state;
 
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.apache.flink.core.execution.SavepointFormatType;
 import org.apache.flink.runtime.state.CheckpointableKeyedStateBackend;
 import org.apache.flink.runtime.state.IncrementalKeyedStateHandle.HandleAndLocalPath;
@@ -38,8 +39,8 @@ public class PaimonStateBackend implements StateBackend {
 
   private static final org.slf4j.Logger LOG =
       org.slf4j.LoggerFactory.getLogger(PaimonStateBackend.class);
-  private static final java.util.concurrent.atomic.AtomicBoolean UNMAINTAINED_WARNING =
-      new java.util.concurrent.atomic.AtomicBoolean();
+  private static final AtomicBoolean UNMAINTAINED_WARNING =
+      new AtomicBoolean();
 
   private final HashMapStateBackend delegate = new HashMapStateBackend();
 

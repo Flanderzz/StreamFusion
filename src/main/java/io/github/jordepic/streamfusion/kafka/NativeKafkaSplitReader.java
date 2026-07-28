@@ -7,6 +7,9 @@ import io.github.jordepic.streamfusion.operator.ArrowBatch;
 import io.github.jordepic.streamfusion.operator.NativeAllocator;
 import io.github.jordepic.streamfusion.operator.NativeSourceWatermarks;
 import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Collection;
@@ -147,7 +150,7 @@ final class NativeKafkaSplitReader implements SplitReader<NativeKafkaRecord, Kaf
     // Native polling caps every batch at the split's stopping offset and reports the consumer's actual
     // position, including progress over Kafka control records. Unassign each completed partition so it
     // cannot fetch beyond the bounded snapshot while the task thread drains this result.
-    List<TopicPartition> justFinished = new java.util.ArrayList<>();
+    List<TopicPartition> justFinished = new ArrayList<>();
     for (Map.Entry<String, Long> stop : stoppingOffsets.entrySet()) {
       String splitId = stop.getKey();
       if (!finished.contains(splitId)
@@ -176,8 +179,8 @@ final class NativeKafkaSplitReader implements SplitReader<NativeKafkaRecord, Kaf
     long[] partitions = new long[splits.size()];
     long[] offsets = new long[splits.size()];
     long[] stops = new long[splits.size()];
-    java.util.Arrays.fill(stops, KafkaPartitionSplit.NO_STOPPING_OFFSET);
-    List<KafkaPartitionSplit> assigned = new java.util.ArrayList<>(splits.size());
+    Arrays.fill(stops, KafkaPartitionSplit.NO_STOPPING_OFFSET);
+    List<KafkaPartitionSplit> assigned = new ArrayList<>(splits.size());
     for (int i = 0; i < splits.size(); i++) {
       KafkaPartitionSplit split = splits.get(i);
       long stop = split.getStoppingOffset().orElse(KafkaPartitionSplit.NO_STOPPING_OFFSET);
@@ -201,10 +204,10 @@ final class NativeKafkaSplitReader implements SplitReader<NativeKafkaRecord, Kaf
       int count = assigned.size();
       NativeKafka.assignKafkaSplits(
           handle,
-          java.util.Arrays.copyOf(topics, count),
-          java.util.Arrays.copyOf(partitions, count),
-          java.util.Arrays.copyOf(offsets, count),
-          java.util.Arrays.copyOf(stops, count));
+          Arrays.copyOf(topics, count),
+          Arrays.copyOf(partitions, count),
+          Arrays.copyOf(offsets, count),
+          Arrays.copyOf(stops, count));
     }
   }
 
@@ -276,7 +279,7 @@ final class NativeKafkaSplitReader implements SplitReader<NativeKafkaRecord, Kaf
     try {
       NativeKafka.setKafkaSplitsPaused(handle, topics, partitions, paused);
     } catch (IOException error) {
-      throw new java.io.UncheckedIOException(error);
+      throw new UncheckedIOException(error);
     }
   }
 

@@ -1,6 +1,8 @@
 package io.github.jordepic.streamfusion.kafka;
 
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Properties;
@@ -225,7 +227,7 @@ public final class KafkaConfigTranslator {
 
   /** The supplied keys the native contract covers, used by the upgrade guard test. */
   static Set<String> classifiedKeys() {
-    Set<String> keys = new java.util.LinkedHashSet<>(java.util.List.of(PASSTHROUGH));
+    Set<String> keys = new LinkedHashSet<>(List.of(PASSTHROUGH));
     keys.addAll(RENAMED.keySet());
     keys.addAll(DEFAULT_PINS.keySet());
     keys.addAll(SECURITY_INPUTS);

@@ -3,6 +3,7 @@ package io.github.jordepic.streamfusion.operator;
 import io.github.jordepic.streamfusion.Native;
 import io.github.jordepic.streamfusion.planner.NativeConfig;
 import io.github.jordepic.streamfusion.state.PaimonNativeStateSupport;
+import java.util.function.LongBinaryOperator;
 import org.apache.arrow.c.ArrowArray;
 import org.apache.arrow.c.ArrowSchema;
 import org.apache.arrow.c.Data;
@@ -186,7 +187,7 @@ public class NativeTemporalJoinOperator extends AbstractNativeStatefulOperator<A
    * joiner takes both up front so a LEFT join can type the null-padding for the build side before
    * that side's first batch arrives.
    */
-  private long withSchemas(java.util.function.LongBinaryOperator call) {
+  private long withSchemas(LongBinaryOperator call) {
     return withRowSchemas(leftType, rightType, call);
   }
 

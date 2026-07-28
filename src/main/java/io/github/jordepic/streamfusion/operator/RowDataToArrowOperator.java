@@ -1,5 +1,6 @@
 package io.github.jordepic.streamfusion.operator;
 
+import java.util.AbstractList;
 import java.util.ArrayList;
 import java.util.List;
 import org.apache.arrow.memory.BufferAllocator;
@@ -100,7 +101,7 @@ public class RowDataToArrowOperator extends AbstractStreamOperator<ArrowBatch>
    * next, so the shared projector is never observed at two positions at once.
    */
   private List<RowData> projected() {
-    return new java.util.AbstractList<RowData>() {
+    return new AbstractList<RowData>() {
       @Override
       public RowData get(int index) {
         return projector.replaceRow(buffer.get(index));

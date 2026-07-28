@@ -25,8 +25,8 @@ public final class ProtobufDescriptors {
    * the row boundary carries: signed integers, float, double, bool, string. Excluded (so they fall
    * back): unsigned/fixed ints (decoded unsigned here, signed in Flink), bytes/enum (no supported
    * row-boundary type, and enum representation is unverified), and any message/group/repeated/map. */
-  private static final java.util.Set<String> SUPPORTED_FIELD_TYPES =
-      java.util.Set.of(
+  private static final Set<String> SUPPORTED_FIELD_TYPES =
+      Set.of(
           "INT32", "SINT32", "SFIXED32", "INT64", "SINT64", "SFIXED64", "FLOAT", "DOUBLE", "BOOL",
           "STRING");
 

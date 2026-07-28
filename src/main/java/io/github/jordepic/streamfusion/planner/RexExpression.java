@@ -1,8 +1,14 @@
 package io.github.jordepic.streamfusion.planner;
 
 import io.github.jordepic.streamfusion.operator.EncodedPredicate;
+import java.lang.reflect.Method;
+import java.math.BigDecimal;
+import java.math.BigInteger;
+import java.math.RoundingMode;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import org.apache.calcite.rel.core.Calc;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rex.RexCall;
@@ -99,19 +105,19 @@ final class RexExpression {
   // Unary functions whose native (Rust) result can differ from the host's JVM result — locale case
   // folding and non-correctly-rounded transcendental math — keyed to their native op code. Admitted
   // only under the allowIncompatible flag (see NativeConfig); otherwise they fall back.
-  private static final java.util.Map<String, Integer> INCOMPATIBLE_UNARY =
-      java.util.Map.ofEntries(
-          java.util.Map.entry("UPPER", 50),
-          java.util.Map.entry("LOWER", 51),
-          java.util.Map.entry("EXP", 72),
-          java.util.Map.entry("LN", 73),
-          java.util.Map.entry("SIN", 74),
-          java.util.Map.entry("COS", 75),
-          java.util.Map.entry("TAN", 76),
-          java.util.Map.entry("ASIN", 77),
-          java.util.Map.entry("ACOS", 78),
-          java.util.Map.entry("ATAN", 79),
-          java.util.Map.entry("LOG10", 80));
+  private static final Map<String, Integer> INCOMPATIBLE_UNARY =
+      Map.ofEntries(
+          Map.entry("UPPER", 50),
+          Map.entry("LOWER", 51),
+          Map.entry("EXP", 72),
+          Map.entry("LN", 73),
+          Map.entry("SIN", 74),
+          Map.entry("COS", 75),
+          Map.entry("TAN", 76),
+          Map.entry("ASIN", 77),
+          Map.entry("ACOS", 78),
+          Map.entry("ATAN", 79),
+          Map.entry("LOG10", 80));
 
   // UDFs referenced by KIND_UDF nodes, and the longs-pool slots holding their local indices. Rather
   // than registering into NativeUdf's (planner-JVM) registry at encode time and baking a global id —
@@ -367,7 +373,7 @@ final class RexExpression {
         }
       case DECIMAL:
         {
-          java.math.BigDecimal value = literal.getValueAs(java.math.BigDecimal.class);
+          BigDecimal value = literal.getValueAs(BigDecimal.class);
           if (value == null) {
             return false;
           }
@@ -376,8 +382,8 @@ final class RexExpression {
           // Decimal arithmetic then stays in Decimal128 rather than routing through double.
           int precision = literal.getType().getPrecision();
           int scale = literal.getType().getScale();
-          java.math.BigInteger unscaled =
-              value.setScale(scale, java.math.RoundingMode.UNNECESSARY).unscaledValue();
+          BigInteger unscaled =
+              value.setScale(scale, RoundingMode.UNNECESSARY).unscaledValue();
           add(KIND_LIT_DECIMAL, strings.size(), 0);
           strings.add(unscaled + "|" + precision + "|" + scale);
           return true;
@@ -458,7 +464,7 @@ final class RexExpression {
       // fall through: the arithmetic op is emitted next as this cast's single child.
     }
     // PROCTIME() / PROCTIME_MATERIALIZE(): a nullary current-processing-time column.
-    if (call.getOperator().getName().toUpperCase(java.util.Locale.ROOT).contains("PROCTIME")) {
+    if (call.getOperator().getName().toUpperCase(Locale.ROOT).contains("PROCTIME")) {
       add(KIND_PROCTIME, 0, 0);
       return true;
     }
@@ -545,7 +551,7 @@ final class RexExpression {
     // Functions whose native result can differ from the host — locale case folding (UPPER/LOWER) and
     // last-ULP transcendental math. They fall back unless the allowIncompatible flag opts them in.
     Integer incompatUnaryOp =
-        INCOMPATIBLE_UNARY.get(call.getOperator().getName().toUpperCase(java.util.Locale.ROOT));
+        INCOMPATIBLE_UNARY.get(call.getOperator().getName().toUpperCase(Locale.ROOT));
     if (incompatUnaryOp != null) {
       return emitIncompatibleUnary(call, incompatUnaryOp);
     }
@@ -770,7 +776,7 @@ final class RexExpression {
         new HostCastFunction(
             org.apache.flink.table.planner.calcite.FlinkTypeFactory.toLogicalType(sourceType),
             org.apache.flink.table.planner.calcite.FlinkTypeFactory.toLogicalType(resultType));
-    java.lang.reflect.Method eval;
+    Method eval;
     try {
       eval = HostCastFunction.class.getMethod("eval", Object.class);
     } catch (ReflectiveOperationException e) {
@@ -1079,7 +1085,7 @@ final class RexExpression {
             io.github.jordepic.streamfusion.operator.NativeUdf.TYPE_STRING
           };
     }
-    java.lang.reflect.Method regexpExtract;
+    Method regexpExtract;
     try {
       regexpExtract =
           io.github.jordepic.streamfusion.operator.NativeBuiltinFunctions.class.getMethod(
@@ -1134,7 +1140,7 @@ final class RexExpression {
         return reject("UDF argument type not native: " + args.get(i).getType().getSqlTypeName());
       }
     }
-    java.lang.reflect.Method eval = resolveEval(scalar, args.size());
+    Method eval = resolveEval(scalar, args.size());
     if (eval == null) {
       return reject(
           "UDF " + scalar.getClass().getName() + " has no single eval of arity " + args.size());
@@ -1279,9 +1285,9 @@ final class RexExpression {
   }
 
   /** The single public {@code eval} of the given arity, or null if none or more than one matches. */
-  private static java.lang.reflect.Method resolveEval(Object function, int arity) {
-    java.lang.reflect.Method match = null;
-    for (java.lang.reflect.Method method : function.getClass().getMethods()) {
+  private static Method resolveEval(Object function, int arity) {
+    Method match = null;
+    for (Method method : function.getClass().getMethods()) {
       if (method.getName().equals("eval") && method.getParameterCount() == arity) {
         if (match != null) {
           return null; // ambiguous — do not guess which overload the host would pick
@@ -1393,7 +1399,7 @@ final class RexExpression {
       RexNode timestamp,
       org.apache.flink.table.functions.ScalarFunction function,
       int returnCode) {
-    java.lang.reflect.Method eval;
+    Method eval;
     try {
       eval = function.getClass().getMethod("eval", Long.class);
     } catch (ReflectiveOperationException e) {
@@ -1518,7 +1524,7 @@ final class RexExpression {
         != io.github.jordepic.streamfusion.operator.NativeUdf.TYPE_STRING) {
       return reject(method + " requires a string argument");
     }
-    java.lang.reflect.Method impl;
+    Method impl;
     try {
       impl =
           io.github.jordepic.streamfusion.operator.NativeBuiltinFunctions.class.getMethod(
@@ -1580,7 +1586,7 @@ final class RexExpression {
   private static String incompatibleReason(String name) {
     return name
         + ": native result may differ from the host; enable with -Dstreamfusion.expression."
-        + name.toUpperCase(java.util.Locale.ROOT)
+        + name.toUpperCase(Locale.ROOT)
         + ".allowIncompatible=true";
   }
 
@@ -1624,7 +1630,7 @@ final class RexExpression {
     // Compatible (always-native) unary functions only. Functions whose native result can diverge from
     // the host (UPPER/LOWER, transcendental math) are handled by the incompatible dispatch in
     // emitCall, gated behind the allowIncompatible flag — see INCOMPATIBLE_UNARY.
-    switch (name.toUpperCase(java.util.Locale.ROOT)) {
+    switch (name.toUpperCase(Locale.ROOT)) {
       case "CHAR_LENGTH":
       case "CHARACTER_LENGTH":
         return 52;
