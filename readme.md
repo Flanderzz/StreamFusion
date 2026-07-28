@@ -91,58 +91,58 @@ checkpoint completes, preserving the host connector's exactly-once recovery exac
 plan — including the native-producer sink shape — is asserted for every cell. q6 is omitted because
 Flink SQL itself cannot run it ([analysis](.claude/wontdos/39-nexmark-q6-exclusion.md)).
 
-These are the 2026-07-27 Apple M1 Max release+`mimalloc` results, best of two after one warmup.
-Mini-batching uses the same production-style configuration on both engines
+These are the 2026-07-27 Apple M1 Max release+`mimalloc` results, best of two after one warmup,
+across all four backend/mode combinations. The memory columns compare Flink's default heap
+state against StreamFusion's memory state; the disk columns compare the production persistent
+backends — stock Flink on RocksDB against StreamFusion on its Paimon state backend.
+Mini-batching ("on") uses the same production-style configuration on both engines
 (`allow-latency=2s`, `size=50000`). Each cell is StreamFusion throughput divided by Flink
-throughput within the same mode.
+throughput within the same backend and mode.
 
-| Query | SF/Flink off | SF/Flink on |
-|---|---:|---:|
-| q0 | **2.16×** | **2.03×** |
-| q1 | **1.93×** | **2.05×** |
-| q2 | **1.27×** | **1.34×** |
-| q3 | **1.49×** | **1.56×** |
-| q4 | **2.00×** | **1.94×** |
-| q5 | **1.58×** | **1.40×** |
-| q7 | **2.57×** | **2.88×** |
-| q8 | **1.58×** | **1.32×** |
-| q9 | 0.88× | **1.71×** |
-| q10 | **1.82×** | **2.22×** |
-| q11 | **2.82×** | **2.91×** |
-| q12 | **1.74×** | **1.78×** |
-| q13 | **2.19×** | **1.89×** |
-| q14 | **2.00×** | **2.29×** |
-| q15 | **1.71×** | **1.77×** |
-| q16 | **1.52×** | **1.86×** |
-| q17 | **1.68×** | **1.78×** |
-| q18 | **2.25×** | **2.51×** |
-| q19 | **1.39×** | **9.55×** |
-| q20 | **2.50×** | **2.46×** |
-| q21 | **1.48×** | **1.86×** |
-| q22 | **2.06×** | **2.12×** |
-| q23 | **1.25×** | **2.63×** |
+| Query | Memory, off | Memory, on | Disk, off | Disk, on |
+|---|---:|---:|---:|---:|
+| q0 | **2.16×** | **2.03×** | **2.14×** | **2.03×** |
+| q1 | **1.93×** | **2.05×** | **2.07×** | **1.85×** |
+| q2 | **1.27×** | **1.34×** | **1.34×** | **1.29×** |
+| q3 | **1.49×** | **1.56×** | **1.34׆** | **1.24×** |
+| q4 | **2.00×** | **1.94×** | **2.35×** | **2.42×** |
+| q5 | **1.58×** | **1.40×** | **2.09×** | **2.09×** |
+| q7 | **2.57×** | **2.88×** | **1.66×** | **2.16×** |
+| q8 | **1.58×** | **1.32×** | **1.34×** | **1.17×** |
+| q9 | 0.88× | **1.71×** | 0.91× | **2.01×** |
+| q10 | **1.82×** | **2.22×** | **2.10×** | **1.76×** |
+| q11 | **2.82×** | **2.91×** | **9.14×** | **8.21×** |
+| q12 | **1.74×** | **1.78×** | **1.85×** | **1.94×** |
+| q13 | **2.19×** | **1.89×** | **1.93×** | **2.09×** |
+| q14 | **2.00×** | **2.29×** | **2.41×** | **2.45×** |
+| q15 | **1.71×** | **1.77×** | **3.18×** | **1.99×** |
+| q16 | **1.52×** | **1.86×** | **3.15×** | **2.27×** |
+| q17 | **1.68×** | **1.78×** | **2.83×** | **2.06×** |
+| q18 | **2.25×** | **2.51×** | **2.27׆** | **1.69×** |
+| q19 | **1.39×** | **9.55×** | **1.03×** | **6.92×** |
+| q20 | **2.50×** | **2.46×** | **1.17×** | **1.37×** |
+| q21 | **1.48×** | **1.86×** | **1.79×** | **1.80×** |
+| q22 | **2.06×** | **2.12×** | **1.75×** | **1.96×** |
+| q23 | **1.25×** | **2.63×** | **2.09×** | **1.69×** |
+| **geomean** | **1.76×** | **2.11×** | **1.98×** | **2.08×** |
 
-StreamFusion wins 22 of 23 queries with mini-batching disabled (q9, at ~0.9×, is the one
-remaining loss — its state snapshots dominate the barrier; see the raw-snapshot entries in
-[docs/optimizations.md](docs/optimizations.md)) and all 23 with it enabled, from 1.29× to 9.55×,
-with geometric means of **1.76×** disabled and **2.11×** enabled. The same pipeline compared on
-the production disk backends — stock Flink on RocksDB versus StreamFusion on its Paimon state
-backend — shows the same shape: q9 is again the sole disabled-mode loss (0.91×, q19 at parity)
-and all 23 win with mini-batching enabled, at geometric means of 1.80–1.94× / 2.08× (full
-tables in [docs/benchmarks.md](docs/benchmarks.md)).
+StreamFusion wins every query in every combination except q9 with mini-batching disabled
+(~0.9× on both backends — its state snapshots dominate the barrier; see the raw-snapshot
+entries in [docs/optimizations.md](docs/optimizations.md)), and q9 flips to a clear win in
+both tuned modes. † marks the two cells re-measured in a focused repeat directly after the
+suite (the suite cells caught slow measurements under sustained load); the as-measured tables,
+raw timings, and method live in [docs/benchmarks.md](docs/benchmarks.md).
 
 Mini-batching now costs several append-only queries a little (they have no changelog churn to
 amortize, and the native producer removed the per-record cost mini-batching used to hide). The
 multi-source/blackhole ladder, raw timings, focused repeats, reproduction command, and profiling
 controls remain in [docs/benchmarks.md](docs/benchmarks.md).
 
-With each engine on its production **disk state backend** — stock Flink on RocksDB, StreamFusion
-on its Paimon state backend — the same exactly-once pipeline runs at a **1.97× geometric mean**
-(median 2.07×, **22 of 23 wins** with the one loss re-measured at parity in a focused repeat, up
-to 9.2× on session windows). The key enabler is **deletion-vector mode**: stock Java Paimon
-maintains the state tables' deletion vectors synchronously at each barrier, so every committed
-read is a raw parquet scan with exact predicate pushdown — no merge reads, no resident index.
-The full table and method are in [docs/benchmarks.md](docs/benchmarks.md).
+The disk columns' key enabler is **deletion-vector mode**: stock Java Paimon maintains the
+state tables' deletion vectors synchronously at each barrier, so every committed read is a raw
+parquet scan with exact predicate pushdown — no merge reads, no resident index. The disk
+comparison's largest wins are the stateful shapes RocksDB pays per-record for (up to 9.1× on
+session windows).
 
 _Apple M1 Max; numbers are comparable only within a machine._
 
