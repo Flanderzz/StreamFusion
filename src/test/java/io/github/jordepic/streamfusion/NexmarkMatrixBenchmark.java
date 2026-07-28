@@ -92,8 +92,12 @@ class NexmarkMatrixBenchmark {
   // corpus topic is created with one partition per subtask so every source instance has a split.
   private static final int PARALLELISM =
       System.getenv("SF_PARALLELISM") != null ? Integer.parseInt(System.getenv("SF_PARALLELISM")) : 4;
-  private static final int WARMUP = 1;
-  private static final int RUNS = 2;
+  // Headline discipline: one warmup, best of two. SF_WARMUP/SF_RUNS override for quick
+  // iteration passes (SF_RUNS=1 SF_WARMUP=0 measures every cell once, ~3x faster and noisier).
+  private static final int WARMUP =
+      System.getenv("SF_WARMUP") != null ? Integer.parseInt(System.getenv("SF_WARMUP")) : 1;
+  private static final int RUNS =
+      System.getenv("SF_RUNS") != null ? Integer.parseInt(System.getenv("SF_RUNS")) : 2;
 
   // Extra TableConfig entries applied to EVERY measured environment (both engines) — the tuned
   // matrix sets the mini-batch keys here so Flink and the native island run the same tuning,
@@ -1015,12 +1019,14 @@ class NexmarkMatrixBenchmark {
 
   private static double runKafkaSinkOnce(
       String brokers, Query q, boolean nativeRun, Map<String, String> config) throws Exception {
+    long t0 = System.nanoTime();
     StreamTableEnvironment tEnv = kafkaEnvironment(brokers, "json");
     tEnv.getConfig().getConfiguration().setString("execution.checkpointing.interval", "1 s");
     config.forEach((key, value) -> tEnv.getConfig().getConfiguration().setString(key, value));
     runSetup(tEnv, q);
     PhysicalPlanScan scan = nativeRun ? NativePlanner.install(tEnv) : null;
     String suffix = q.label + "-" + java.util.UUID.randomUUID();
+    long tEnvReady = System.nanoTime();
     // Pre-create the output topic with one partition per sink subtask. Broker auto-creation gives
     // a single partition, which funnels every subtask's exactly-once writer into one partition
     // log — a sink-side ceiling that is not part of the workload (the corpus topic is already one
@@ -1033,12 +1039,15 @@ class NexmarkMatrixBenchmark {
           .get();
     }
     tEnv.executeSql(kafkaSinkDdl(q, brokers, "nexmark-output-" + suffix));
+    long topicReady = System.nanoTime();
     String plan =
         tEnv.explainSql(
             q.insertSql, org.apache.flink.table.api.ExplainDetail.JSON_EXECUTION_PLAN);
+    long explained = System.nanoTime();
     long start = System.nanoTime();
     tEnv.executeSql(q.insertSql).await();
     double seconds = (System.nanoTime() - start) / 1e9;
+    long executed = System.nanoTime();
     // The exec-node name covers both sink shapes; the transformation name pins that the fully
     // native exactly-once producer engaged rather than the encode-only Java-KafkaSink shape.
     if (nativeRun
@@ -1055,6 +1064,16 @@ class NexmarkMatrixBenchmark {
         admin.deleteTopics(List.of(topic)).all().get();
       }
     }
+    long cleaned = System.nanoTime();
+    System.out.printf(
+        "[phase] %s %s env=%.1fs topic=%.1fs explain=%.1fs execute=%.1fs delete=%.1fs%n",
+        q.label,
+        nativeRun ? "native" : "flink",
+        (tEnvReady - t0) / 1e9,
+        (topicReady - tEnvReady) / 1e9,
+        (explained - topicReady) / 1e9,
+        (executed - explained) / 1e9,
+        (cleaned - executed) / 1e9);
     return seconds;
   }
 
