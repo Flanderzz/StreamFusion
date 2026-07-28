@@ -904,13 +904,34 @@ Geometric means: mini-batch off **1.59x** as measured (**1.63x** with the q3 rep
 substituted), mini-batch on **1.52x** (**1.53x**). The parallelism-1 story compresses at
 parallelism 4: Flink's heap pipeline gains more from quadrupled subtasks than the native island
 does on the shuffle-heavy changelog shapes, so q4 off sits at parity and q19 off below it, and
-q3 hovers near parity even isolated — a scaling gap to close. A second systematic pattern: with
-mini-batching on, the *native* side loses throughput on the stateless/append queries (q0 0.53x
-of its own off-mode, q2 0.61x, q1 0.75x) while stock Flink holds steady — mini-batching still
-pays off handsomely where changelog churn amortizes (q19 on 3.94x), but the cost at parallelism
-is native-specific and unexplained. The windowed
+q3 hovers near parity even isolated — a scaling gap whose root cause is measured (see below).
+The suite's mini-batch-on cells for the stateless queries (q0 0.92x, q2 1.01x, q1 1.13x) read
+low against their own off-mode; clean-machine replications of q0 show on/off parity (0.93–1.09x
+across independent runs), so those on-cells carry the same sustained-load skew the q3 † repeat
+caught, not a native mini-batch cost. Mini-batching still pays off handsomely where changelog
+churn amortizes (q19 on 3.94x). The windowed
 family (q15–q17) shows both engines gaining from mini-batch mode's two-phase aggregation, native
 keeping a 1.6–1.9x edge throughout.
+
+#### Why the off-mode changelog shapes stop scaling (measured 2026-07-28)
+
+Native q4 is flat across parallelism even to a blackhole sink (1.7–1.9 s at p=1, 2, and 4 over
+2M events) while stock Flink halves its time — and with the exactly-once sink both engines
+converge at ~1.0 M events/s, a shared sink/broker ceiling stacked on top. Stage accounting
+pinned the island-internal mechanism to **batch collapse against per-batch fixed cost**: a
+p=4 subtask's consumer drains only its own partition's in-flight fetch per poll (~950 rows vs
+~4,600 when p=1's single consumer aggregates four partitions), the keyed split quarters that,
+and the second aggregate — fed by the first's ~100-row changelog outputs split again — processes
+**26-row batches, ~71× the batch count of p=1**, so the ~4-crossing JNI fixed cost per batch
+dominates. A wall-clock profile agrees: every task thread is starved (5–37% busy, zero
+network-buffer backpressure), columnar compute is ~2.7% of on-CPU time, and librdkafka serve
+loops dominate what CPU is used. Ruled out by probes: cross-partition watermark skew (a
+one-partition corpus at p=4 is *slower*), the poll's `maxRecords` cap (not binding), and broker
+saturation (25–65% of one core). The fix direction is coalescing: mini-batch mode already
+recovers q4 to 1.38x by bundling at the operators (Arroyo runs its updating aggregates this way
+unconditionally, with a 1 s flush default — per-batch changelog emission has no analog there),
+and a latency-bounded source-side floor (accumulate across poll cycles before emitting a batch)
+would lift the off-mode path without changing semantics.
 
 #### Prior comparison (2026-07-27, parallelism 1, 500K events — raw-bytes snapshots + sink encode round)
 
