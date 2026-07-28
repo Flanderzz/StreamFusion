@@ -871,27 +871,59 @@ impl<S: KeyedStateStore<DedupRow>> KeepLastDeduplicator<S> {
     }
 }
 
+/// The dedup raw snapshot stores the exact rowtime alongside the shared key/row columns (the
+/// decoded format re-derived it from the typed rowtime column).
+const RAW_SNAPSHOT_ROWTIME: &str = "__rowtime__";
+
 /// The raw keyed-state snapshot/restore surface exists only on the memory backend — a persistent
 /// store checkpoints through its own commit path instead of materializing the key space.
 impl KeepLastDeduplicator {
-    /// Serializes the stored last-row-per-key set; the rowtime is re-derived from each row on restore.
-    fn snapshot(&self) -> Vec<u8> {
-        self.snapshot_batch()
-            .map(|batch| write_ipc(&batch))
-            .unwrap_or_default()
+    /// One IPC blob per key group of raw state bytes: the stored Flink-BinaryRow key, arrow-row
+    /// payload, and rowtime, verbatim — no decode, and the group is one hash of the stored key's
+    /// bytes per entry (that encoding's hash IS Flink's key-group input). The schema's metadata
+    /// carries the typed payload schema so converters can be rebuilt before any input arrives.
+    fn raw_snapshot_groups(&self, max_parallelism: usize) -> BTreeMap<i32, Vec<u8>> {
+        let Some(schema) = &self.schema else { return BTreeMap::new() };
+        let mut builders: BTreeMap<i32, (BinaryBuilder, BinaryBuilder, Int64Builder)> =
+            BTreeMap::new();
+        for (key, row) in self.rows.iter() {
+            let group = flink_key_group(hash_bytes_by_words(&key.0), max_parallelism) as i32;
+            let (keys, payloads, rowtimes) = builders.entry(group).or_default();
+            keys.append_value(&key.0);
+            payloads.append_value(&row.payload);
+            rowtimes.append_value(row.rowtime);
+        }
+        let raw_schema = Arc::new(Schema::new_with_metadata(
+            vec![
+                Field::new(RAW_SNAPSHOT_KEY, DataType::Binary, false),
+                Field::new(RAW_SNAPSHOT_ROW, DataType::Binary, false),
+                Field::new(RAW_SNAPSHOT_ROWTIME, DataType::Int64, false),
+            ],
+            std::collections::HashMap::from([(
+                RAW_SNAPSHOT_PAYLOAD_SCHEMA.to_string(),
+                encode_schema_metadata(schema),
+            )]),
+        ));
+        builders
+            .into_iter()
+            .map(|(group, (mut keys, mut payloads, mut rowtimes))| {
+                let batch = RecordBatch::try_new(
+                    raw_schema.clone(),
+                    vec![
+                        Arc::new(keys.finish()),
+                        Arc::new(payloads.finish()),
+                        Arc::new(rowtimes.finish()),
+                    ],
+                )
+                .expect("raw dedup snapshot batch");
+                (group, write_ipc(&batch))
+            })
+            .collect()
     }
 
-    fn snapshot_batch(&self) -> Option<RecordBatch> {
-        let Some(schema) = &self.schema else { return None };
-        let Some(conv) = &self.payload_converter else { return None };
-        if self.rows.iter().next().is_none() {
-            return None;
-        }
-        let parser = conv.parser();
-        let columns = conv
-            .convert_rows(self.rows.iter().map(|(_, row)| parser.parse(&row.payload)))
-            .expect("decode dedup snapshot payloads");
-        Some(RecordBatch::try_new(schema.clone(), columns).expect("keep-last snapshot"))
+    /// Serializes the stored last-row-per-key set.
+    fn snapshot(&self) -> Vec<u8> {
+        self.raw_snapshot_groups(1).remove(&0).unwrap_or_default()
     }
 
     fn snapshot_partitions(
@@ -918,37 +950,10 @@ impl KeepLastDeduplicator {
         }) {
             return;
         }
-        let mut snapshots = BTreeMap::new();
-        if let Some(batch) = self.snapshot_batch() {
-            let mut rows_by_group: BTreeMap<i32, Vec<u32>> = BTreeMap::new();
-            for row in 0..batch.num_rows() {
-                let key_group = flink_key_group(
-                    binary_row_hash(
-                        &batch,
-                        &self.partition_columns,
-                        row,
-                        timestamp_precisions,
-                    ),
-                    max_parallelism,
-                ) as i32;
-                rows_by_group.entry(key_group).or_default().push(row as u32);
-            }
-            for (key_group, rows) in rows_by_group {
-                let indices = UInt32Array::from(rows);
-                let columns = batch
-                    .columns()
-                    .iter()
-                    .map(|column| take(column, &indices, None).expect("partition dedup snapshot"))
-                    .collect();
-                let partition = RecordBatch::try_new(batch.schema(), columns)
-                    .expect("partitioned dedup snapshot");
-                snapshots.insert(key_group, write_ipc(&partition));
-            }
-        }
         self.snapshot_cache = Some(DedupSnapshotCache {
             max_parallelism,
             timestamp_precisions: timestamp_precisions.to_vec(),
-            snapshots,
+            snapshots: self.raw_snapshot_groups(max_parallelism),
         });
     }
 
@@ -961,41 +966,73 @@ impl KeepLastDeduplicator {
         keep_first: bool,
         bytes: &[u8],
     ) -> Self {
-        let mut dedup = KeepLastDeduplicator::new(
+        Self::restore_partitions(
             partition_columns,
+            key_timestamp_precisions,
             rt_column,
             generate_update_before,
             rowtime_ordered,
             keep_first,
+            &[bytes.to_vec()],
         )
-        .with_key_timestamp_precisions(key_timestamp_precisions);
-        for batch in read_ipc_if_present(bytes) {
-            let arity = batch.num_columns();
-            dedup.schema = Some(batch.schema());
-            dedup.ensure_converters(&batch, arity);
-            // The stored rowtime matters only to the rowtime keep-last comparison; proctime stores 0.
-            let rt = rowtime_ordered.then(|| rt_to_millis(batch.column(dedup.rt_column)));
-            let mut parts = BinaryRowBatchEncoder::new(
-                &batch,
-                &dedup.partition_columns,
-                &dedup.key_timestamp_precisions,
-            );
-            let data_arrays: Vec<ArrayRef> = (0..arity).map(|i| batch.column(i).clone()).collect();
-            let payloads =
-                dedup.payload_converter.as_ref().unwrap().convert_columns(&data_arrays).expect("encode payload");
-            let rows = &mut dedup.rows;
-            for row in 0..batch.num_rows() {
-                rows.insert(
-                    ByteKey::from(parts.encode(row)),
-                    DedupRow {
-                        rowtime: rt.as_ref().map_or(0, |rt| rt.value(row)),
-                        payload: Arc::from(payloads.row(row).data()),
-                        staged: false,
-                    },
-                );
-            }
+    }
+
+    /// Raw-format rows carry the stored key, payload, and rowtime verbatim — restoring is a
+    /// straight map rebuild with no decode or re-encode.
+    fn load_batch_raw(&mut self, batch: &RecordBatch) {
+        if self.schema.is_none() {
+            let payload_schema =
+                decode_schema_metadata(batch).expect("raw dedup snapshot payload schema");
+            let empty = RecordBatch::new_empty(payload_schema.clone());
+            self.ensure_converters(&empty, empty.num_columns());
+            self.schema = Some(payload_schema);
         }
-        dedup
+        let keys = column_binary(batch, RAW_SNAPSHOT_KEY);
+        let payloads = column_binary(batch, RAW_SNAPSHOT_ROW);
+        let rowtimes = column_i64(batch, RAW_SNAPSHOT_ROWTIME);
+        for row in 0..batch.num_rows() {
+            self.rows.insert(
+                ByteKey::from(keys.value(row)),
+                DedupRow {
+                    rowtime: rowtimes.value(row),
+                    payload: Arc::from(payloads.value(row)),
+                    staged: false,
+                },
+            );
+        }
+    }
+
+    /// Snapshots written before the raw format decoded the rows to typed columns; kept so
+    /// existing savepoints keep restoring.
+    fn load_batch_decoded(&mut self, batch: &RecordBatch) {
+        let arity = batch.num_columns();
+        self.schema = Some(batch.schema());
+        self.ensure_converters(batch, arity);
+        // The stored rowtime matters only to the rowtime keep-last comparison; proctime stores 0.
+        let rt = self.rowtime_ordered.then(|| rt_to_millis(batch.column(self.rt_column)));
+        let mut parts = BinaryRowBatchEncoder::new(
+            batch,
+            &self.partition_columns,
+            &self.key_timestamp_precisions,
+        );
+        let data_arrays: Vec<ArrayRef> = (0..arity).map(|i| batch.column(i).clone()).collect();
+        let payloads = self
+            .payload_converter
+            .as_ref()
+            .unwrap()
+            .convert_columns(&data_arrays)
+            .expect("encode payload");
+        let rows = &mut self.rows;
+        for row in 0..batch.num_rows() {
+            rows.insert(
+                ByteKey::from(parts.encode(row)),
+                DedupRow {
+                    rowtime: rt.as_ref().map_or(0, |rt| rt.value(row)),
+                    payload: Arc::from(payloads.row(row).data()),
+                    staged: false,
+                },
+            );
+        }
     }
 
     fn restore_partitions(
@@ -1007,25 +1044,24 @@ impl KeepLastDeduplicator {
         keep_first: bool,
         snapshots: &[Vec<u8>],
     ) -> Self {
-        let batches: Vec<RecordBatch> = snapshots
-            .iter()
-            .flat_map(|bytes| read_ipc_if_present(bytes))
-            .collect();
-        let snapshot = batches.first().map(|first| {
-            write_ipc(
-                &concat_batches(&first.schema(), batches.iter())
-                    .expect("merge dedup raw partitions"),
-            )
-        });
-        KeepLastDeduplicator::restore(
+        let mut dedup = KeepLastDeduplicator::new(
             partition_columns,
-            key_timestamp_precisions,
             rt_column,
             generate_update_before,
             rowtime_ordered,
             keep_first,
-            snapshot.as_deref().unwrap_or_default(),
         )
+        .with_key_timestamp_precisions(key_timestamp_precisions);
+        for bytes in snapshots {
+            for batch in read_ipc_if_present(bytes) {
+                if batch.schema_ref().field(0).name() == RAW_SNAPSHOT_KEY {
+                    dedup.load_batch_raw(&batch);
+                } else {
+                    dedup.load_batch_decoded(&batch);
+                }
+            }
+        }
+        dedup
     }
 }
 

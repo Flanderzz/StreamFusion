@@ -915,11 +915,6 @@ impl<S: KeyedStateStore<JoinBucket>> UpdatingJoiner<S> {
 
 }
 
-/// Raw-snapshot column names: the stored Flink-BinaryRow bucket key and arrow-row payload bytes.
-/// The key column leading the schema is also the format marker restore branches on.
-const RAW_SNAPSHOT_KEY: &str = "__key__";
-const RAW_SNAPSHOT_ROW: &str = "__row__";
-
 /// Builders for one key group's raw snapshot batch.
 #[derive(Default)]
 struct RawSnapshotColumns {

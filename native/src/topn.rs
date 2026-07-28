@@ -659,20 +659,74 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> TopNRanker<S> {
     }
 }
 
+/// The Top-N raw snapshot adds the memcomparable sort key between the shared key/row columns;
+/// the schema's metadata carries the typed payload schema so converters can be rebuilt before
+/// any input arrives.
+const RAW_SNAPSHOT_SORT: &str = "__sort__";
+
+/// One side's buffers as raw state bytes, one IPC blob per key group, buffer order preserved.
+/// Snapshotting decodes nothing: the group is one hash of the stored partition key's bytes per
+/// bucket (that encoding's hash IS Flink's key-group input).
+fn raw_topn_snapshot_groups(
+    groups: &MemoryTopNStore,
+    schema: Option<&SchemaRef>,
+    max_parallelism: usize,
+) -> BTreeMap<i32, Vec<u8>> {
+    let Some(schema) = schema else { return BTreeMap::new() };
+    let mut builders: BTreeMap<i32, (BinaryBuilder, BinaryBuilder, BinaryBuilder)> =
+        BTreeMap::new();
+    for (key, buffer) in groups.iter() {
+        if buffer.is_empty() {
+            continue;
+        }
+        let group = flink_key_group(hash_bytes_by_words(&key.0), max_parallelism) as i32;
+        let (keys, sorts, rows) = builders.entry(group).or_default();
+        for (sort, payload) in buffer.iter() {
+            keys.append_value(&key.0);
+            sorts.append_value(sort.row().data());
+            rows.append_value(payload.row().data());
+        }
+    }
+    let raw_schema = Arc::new(Schema::new_with_metadata(
+        vec![
+            Field::new(RAW_SNAPSHOT_KEY, DataType::Binary, false),
+            Field::new(RAW_SNAPSHOT_SORT, DataType::Binary, false),
+            Field::new(RAW_SNAPSHOT_ROW, DataType::Binary, false),
+        ],
+        std::collections::HashMap::from([(
+            RAW_SNAPSHOT_PAYLOAD_SCHEMA.to_string(),
+            encode_schema_metadata(schema),
+        )]),
+    ));
+    builders
+        .into_iter()
+        .map(|(group, (mut keys, mut sorts, mut rows))| {
+            let batch = RecordBatch::try_new(
+                raw_schema.clone(),
+                vec![
+                    Arc::new(keys.finish()),
+                    Arc::new(sorts.finish()),
+                    Arc::new(rows.finish()),
+                ],
+            )
+            .expect("raw top-n snapshot batch");
+            (group, write_ipc(&batch))
+        })
+        .collect()
+}
+
 /// The raw keyed-state snapshot/restore surface exists only on the memory backend — a persistent
 /// store checkpoints through its own commit path instead of materializing the key space.
 impl TopNRanker {
     /// Serializes the buffered rows in per-partition buffer order (partition derivable from the row).
     pub(crate) fn snapshot(&self) -> Vec<u8> {
-        let Some(schema) = &self.schema else { return Vec::new() };
-        let Some(conv) = &self.converters else { return Vec::new() };
-        let rows: Vec<Row> =
-            self.groups.iter().flat_map(|(_, buffer)| buffer.iter()).map(|(_, p)| p.row()).collect();
-        if rows.is_empty() {
-            return Vec::new();
-        }
-        let columns = conv.payload.convert_rows(rows).expect("decode top-n snapshot payloads");
-        write_ipc(&RecordBatch::try_new(schema.clone(), columns).expect("top-n snapshot"))
+        raw_topn_snapshot_groups(&self.groups, self.schema.as_ref(), 1)
+            .remove(&0)
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn snapshot_partitions(&self, max_parallelism: usize) -> BTreeMap<i32, Vec<u8>> {
+        raw_topn_snapshot_groups(&self.groups, self.schema.as_ref(), max_parallelism)
     }
 
     pub(crate) fn restore(
@@ -684,35 +738,116 @@ impl TopNRanker {
         net_diff: bool,
         bytes: &[u8],
     ) -> Self {
+        Self::restore_partitions(
+            partition_columns,
+            key_timestamp_precisions,
+            sort_columns,
+            limit,
+            output_rank_number,
+            net_diff,
+            &[bytes.to_vec()],
+        )
+    }
+
+    pub(crate) fn restore_partitions(
+        partition_columns: Vec<usize>,
+        key_timestamp_precisions: Vec<i32>,
+        sort_columns: Vec<SortColumn>,
+        limit: i64,
+        output_rank_number: bool,
+        net_diff: bool,
+        snapshots: &[Vec<u8>],
+    ) -> Self {
         let mut ranker =
             TopNRanker::new(partition_columns, sort_columns, limit, output_rank_number, net_diff)
                 .with_key_timestamp_precisions(key_timestamp_precisions);
-        for batch in read_ipc_if_present(bytes) {
-            let arity = batch.num_columns();
-            ranker.schema = Some(batch.schema());
-            ranker.ensure_converters(&batch, arity);
-            let conv = ranker.converters.as_ref().expect("converters set");
-            let mut parts = BinaryRowBatchEncoder::new(
-                &batch,
-                &ranker.partition_columns,
-                &ranker.key_timestamp_precisions,
-            );
-            let sort_arrays: Vec<ArrayRef> =
-                ranker.sort_columns.iter().map(|s| batch.column(s.index).clone()).collect();
-            let data_arrays: Vec<ArrayRef> = (0..arity).map(|i| batch.column(i).clone()).collect();
-            let keys = encode_group_keys(&conv.sort, &sort_arrays, batch.num_rows());
-            let payloads = conv.payload.convert_columns(&data_arrays).expect("encode payload");
-            let groups = &mut ranker.groups;
-            for row in 0..batch.num_rows() {
-                let part = parts.encode(row);
-                let buffer = match groups.get_mut(part) {
-                    Some(buffer) => buffer,
-                    None => groups.insert(ByteKey::from(part), Vec::new()),
-                };
-                buffer.push((keys.row(row).owned(), Arc::new(payloads.row(row).owned())));
+        for bytes in snapshots {
+            for batch in read_ipc_if_present(bytes) {
+                if batch.schema_ref().field(0).name() == RAW_SNAPSHOT_KEY {
+                    load_topn_batch_raw(
+                        &mut ranker.schema,
+                        &mut ranker.converters,
+                        &mut ranker.groups,
+                        &ranker.partition_columns,
+                        &ranker.sort_columns,
+                        &batch,
+                    );
+                } else {
+                    ranker.load_batch_decoded(&batch);
+                }
             }
         }
         ranker
+    }
+
+    /// Snapshots written before the raw format decoded the buffers to typed columns; kept so
+    /// existing savepoints keep restoring.
+    fn load_batch_decoded(&mut self, batch: &RecordBatch) {
+        let arity = batch.num_columns();
+        self.schema = Some(batch.schema());
+        self.ensure_converters(batch, arity);
+        let conv = self.converters.as_ref().expect("converters set");
+        let mut parts = BinaryRowBatchEncoder::new(
+            batch,
+            &self.partition_columns,
+            &self.key_timestamp_precisions,
+        );
+        let sort_arrays: Vec<ArrayRef> =
+            self.sort_columns.iter().map(|s| batch.column(s.index).clone()).collect();
+        let data_arrays: Vec<ArrayRef> = (0..arity).map(|i| batch.column(i).clone()).collect();
+        let keys = encode_group_keys(&conv.sort, &sort_arrays, batch.num_rows());
+        let payloads = conv.payload.convert_columns(&data_arrays).expect("encode payload");
+        let groups = &mut self.groups;
+        for row in 0..batch.num_rows() {
+            let part = parts.encode(row);
+            let buffer = match groups.get_mut(part) {
+                Some(buffer) => buffer,
+                None => groups.insert(ByteKey::from(part), Vec::new()),
+            };
+            buffer.push((keys.row(row).owned(), Arc::new(payloads.row(row).owned())));
+        }
+    }
+}
+
+/// Raw-format rows carry the stored partition key, sort key, and payload bytes verbatim —
+/// restoring wraps the bytes back into rows with the ranker's own converters (no decode, no
+/// re-encode, and no cross-converter mixing since every blob parses through the same instances).
+fn load_topn_batch_raw(
+    schema: &mut Option<SchemaRef>,
+    converters: &mut Option<TopNConverters>,
+    groups: &mut MemoryTopNStore,
+    partition_columns: &[usize],
+    sort_columns: &[SortColumn],
+    batch: &RecordBatch,
+) {
+    if schema.is_none() {
+        let payload_schema =
+            decode_schema_metadata(batch).expect("raw top-n snapshot payload schema");
+        let empty = RecordBatch::new_empty(payload_schema.clone());
+        *converters = Some(TopNConverters::build(
+            &empty,
+            empty.num_columns(),
+            partition_columns,
+            sort_columns,
+        ));
+        *schema = Some(payload_schema);
+    }
+    let conv = converters.as_ref().expect("converters set");
+    let sort_parser = conv.sort.parser();
+    let payload_parser = conv.payload.parser();
+    let keys = column_binary(batch, RAW_SNAPSHOT_KEY);
+    let sorts = column_binary(batch, RAW_SNAPSHOT_SORT);
+    let rows = column_binary(batch, RAW_SNAPSHOT_ROW);
+    for row in 0..batch.num_rows() {
+        let part = keys.value(row);
+        let buffer = match groups.get_mut(part) {
+            Some(buffer) => buffer,
+            None => groups.insert(ByteKey::from(part), Vec::new()),
+        };
+        buffer.push((
+            sort_parser.parse(sorts.value(row)).owned(),
+            Arc::new(payload_parser.parse(rows.value(row)).owned()),
+        ));
     }
 }
 
@@ -1147,15 +1282,13 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> RetractableTopNRanker<S> {
 impl RetractableTopNRanker {
     /// Serializes the buffered rows in per-partition buffer order (partition derivable from the row).
     fn snapshot(&self) -> Vec<u8> {
-        let Some(schema) = &self.schema else { return Vec::new() };
-        let Some(conv) = &self.converters else { return Vec::new() };
-        let rows: Vec<Row> =
-            self.groups.iter().flat_map(|(_, buffer)| buffer.iter()).map(|(_, p)| p.row()).collect();
-        if rows.is_empty() {
-            return Vec::new();
-        }
-        let columns = conv.payload.convert_rows(rows).expect("decode retract top-n snapshot");
-        write_ipc(&RecordBatch::try_new(schema.clone(), columns).expect("retract top-n snapshot"))
+        raw_topn_snapshot_groups(&self.groups, self.schema.as_ref(), 1)
+            .remove(&0)
+            .unwrap_or_default()
+    }
+
+    fn snapshot_partitions(&self, max_parallelism: usize) -> BTreeMap<i32, Vec<u8>> {
+        raw_topn_snapshot_groups(&self.groups, self.schema.as_ref(), max_parallelism)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1168,42 +1301,82 @@ impl RetractableTopNRanker {
         output_rank_number: bool,
         bytes: &[u8],
     ) -> Self {
+        Self::restore_partitions(
+            partition_columns,
+            key_timestamp_precisions,
+            sort_columns,
+            offset,
+            limit,
+            output_rank_number,
+            &[bytes.to_vec()],
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn restore_partitions(
+        partition_columns: Vec<usize>,
+        key_timestamp_precisions: Vec<i32>,
+        sort_columns: Vec<SortColumn>,
+        offset: i64,
+        limit: i64,
+        output_rank_number: bool,
+        snapshots: &[Vec<u8>],
+    ) -> Self {
         let mut ranker =
             RetractableTopNRanker::new(partition_columns, sort_columns, offset, limit, output_rank_number)
                 .with_key_timestamp_precisions(key_timestamp_precisions);
-        for batch in read_ipc_if_present(bytes) {
-            let arity = batch.num_columns();
-            ranker.schema = Some(batch.schema());
-            if ranker.converters.is_none() {
-                ranker.converters = Some(TopNConverters::build(
-                    &batch,
-                    arity,
-                    &ranker.partition_columns,
-                    &ranker.sort_columns,
-                ));
-            }
-            let conv = ranker.converters.as_ref().expect("converters set");
-            let mut parts = BinaryRowBatchEncoder::new(
-                &batch,
-                &ranker.partition_columns,
-                &ranker.key_timestamp_precisions,
-            );
-            let sort_arrays: Vec<ArrayRef> =
-                ranker.sort_columns.iter().map(|s| batch.column(s.index).clone()).collect();
-            let data_arrays: Vec<ArrayRef> = (0..arity).map(|i| batch.column(i).clone()).collect();
-            let keys = encode_group_keys(&conv.sort, &sort_arrays, batch.num_rows());
-            let payloads = conv.payload.convert_columns(&data_arrays).expect("encode payload");
-            let groups = &mut ranker.groups;
-            for row in 0..batch.num_rows() {
-                let part = parts.encode(row);
-                let buffer = match groups.get_mut(part) {
-                    Some(buffer) => buffer,
-                    None => groups.insert(ByteKey::from(part), Vec::new()),
-                };
-                buffer.push((keys.row(row).owned(), Arc::new(payloads.row(row).owned()))); // buffer order
+        for bytes in snapshots {
+            for batch in read_ipc_if_present(bytes) {
+                if batch.schema_ref().field(0).name() == RAW_SNAPSHOT_KEY {
+                    load_topn_batch_raw(
+                        &mut ranker.schema,
+                        &mut ranker.converters,
+                        &mut ranker.groups,
+                        &ranker.partition_columns,
+                        &ranker.sort_columns,
+                        &batch,
+                    );
+                } else {
+                    ranker.load_batch_decoded(&batch);
+                }
             }
         }
         ranker
+    }
+
+    /// Snapshots written before the raw format decoded the buffers to typed columns; kept so
+    /// existing savepoints keep restoring.
+    fn load_batch_decoded(&mut self, batch: &RecordBatch) {
+        let arity = batch.num_columns();
+        self.schema = Some(batch.schema());
+        if self.converters.is_none() {
+            self.converters = Some(TopNConverters::build(
+                batch,
+                arity,
+                &self.partition_columns,
+                &self.sort_columns,
+            ));
+        }
+        let conv = self.converters.as_ref().expect("converters set");
+        let mut parts = BinaryRowBatchEncoder::new(
+            batch,
+            &self.partition_columns,
+            &self.key_timestamp_precisions,
+        );
+        let sort_arrays: Vec<ArrayRef> =
+            self.sort_columns.iter().map(|s| batch.column(s.index).clone()).collect();
+        let data_arrays: Vec<ArrayRef> = (0..arity).map(|i| batch.column(i).clone()).collect();
+        let keys = encode_group_keys(&conv.sort, &sort_arrays, batch.num_rows());
+        let payloads = conv.payload.convert_columns(&data_arrays).expect("encode payload");
+        let groups = &mut self.groups;
+        for row in 0..batch.num_rows() {
+            let part = parts.encode(row);
+            let buffer = match groups.get_mut(part) {
+                Some(buffer) => buffer,
+                None => groups.insert(ByteKey::from(part), Vec::new()),
+            };
+            buffer.push((keys.row(row).owned(), Arc::new(payloads.row(row).owned()))); // buffer order
+        }
     }
 }
 
@@ -1308,23 +1481,10 @@ impl TopNHandle {
         }
     }
 
-    fn snapshot_partitions(
-        &self,
-        max_parallelism: usize,
-        timestamp_precisions: &[i32],
-    ) -> BTreeMap<i32, Vec<u8>> {
-        topn_snapshot_partitions(
-            &self.snapshot(),
-            self.partition_columns(),
-            max_parallelism,
-            timestamp_precisions,
-        )
-    }
-
-    fn partition_columns(&self) -> &[usize] {
+    fn snapshot_partitions(&self, max_parallelism: usize) -> BTreeMap<i32, Vec<u8>> {
         match self {
-            TopNHandle::Append(r) => &r.partition_columns,
-            TopNHandle::Retract(r) => &r.partition_columns,
+            TopNHandle::Append(r) => r.snapshot_partitions(max_parallelism),
+            TopNHandle::Retract(r) => r.snapshot_partitions(max_parallelism),
         }
     }
 
@@ -1340,72 +1500,31 @@ impl TopNHandle {
         net_diff: bool,
         snapshots: &[Vec<u8>],
     ) -> Self {
-        // `OwnedRow` values retain the RowConverter that created them.  Restoring every raw key
-        // group separately and then extending the maps would therefore mix rows produced by
-        // different converters, which Arrow rejects when we later decode the state.  Reassemble
-        // the independent IPC payloads first, then run the normal restore once.
-        let batches: Vec<RecordBatch> = snapshots
-            .iter()
-            .flat_map(|bytes| read_ipc_if_present(bytes))
-            .collect();
-        let snapshot = batches.first().map(|first| {
-            let combined = concat_batches(&first.schema(), batches.iter())
-                .expect("merge top-n raw partitions");
-            write_ipc(&combined)
-        });
         if retracting {
-            TopNHandle::Retract(RetractableTopNRanker::restore(
-                partition_columns,
-                key_timestamp_precisions,
-                sort_columns,
-                offset,
-                limit,
-                output_rank_number,
-                snapshot.as_deref().unwrap_or_default(),
-            ).with_net_diff(net_diff))
+            TopNHandle::Retract(
+                RetractableTopNRanker::restore_partitions(
+                    partition_columns,
+                    key_timestamp_precisions,
+                    sort_columns,
+                    offset,
+                    limit,
+                    output_rank_number,
+                    snapshots,
+                )
+                .with_net_diff(net_diff),
+            )
         } else {
-            TopNHandle::Append(TopNRanker::restore(
+            TopNHandle::Append(TopNRanker::restore_partitions(
                 partition_columns,
                 key_timestamp_precisions,
                 sort_columns,
                 limit,
                 output_rank_number,
                 net_diff,
-                snapshot.as_deref().unwrap_or_default(),
+                snapshots,
             ))
         }
     }
-}
-
-fn topn_snapshot_partitions(
-    bytes: &[u8],
-    partition_columns: &[usize],
-    max_parallelism: usize,
-    timestamp_precisions: &[i32],
-) -> BTreeMap<i32, Vec<u8>> {
-    let mut partitions = BTreeMap::new();
-    for batch in read_ipc_if_present(bytes) {
-        let mut rows_by_group: BTreeMap<i32, Vec<u32>> = BTreeMap::new();
-        for row in 0..batch.num_rows() {
-            let key_group = flink_key_group(
-                binary_row_hash(&batch, partition_columns, row, timestamp_precisions),
-                max_parallelism,
-            ) as i32;
-            rows_by_group.entry(key_group).or_default().push(row as u32);
-        }
-        for (key_group, rows) in rows_by_group {
-            let indices = UInt32Array::from(rows);
-            let columns = batch
-                .columns()
-                .iter()
-                .map(|column| take(column, &indices, None).expect("partition top-n snapshot"))
-                .collect();
-            let partition = RecordBatch::try_new(batch.schema(), columns)
-                .expect("partitioned top-n snapshot");
-            partitions.insert(key_group, write_ipc(&partition));
-        }
-    }
-    partitions
 }
 
 /// Window Top-N / window deduplication over a windowing-TVF input (Flink's `WindowRank` /
@@ -2231,16 +2350,12 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotTopNR
     _class: JClass<'local>,
     handle: jlong,
     max_parallelism: jint,
-    timestamp_precisions: JIntArray<'local>,
+    _timestamp_precisions: JIntArray<'local>,
 ) -> jni::sys::jobjectArray {
     let ranker = unsafe { &*(handle as *const TopNHandle) };
-    let precisions: Vec<i32> = read_int_array(&env, &timestamp_precisions)
-        .into_iter()
-        .map(|precision| precision as i32)
-        .collect();
     keyed_state_partition_array(
         &mut env,
-        ranker.snapshot_partitions(max_parallelism as usize, &precisions),
+        ranker.snapshot_partitions(max_parallelism as usize),
         "top-n",
     )
 }

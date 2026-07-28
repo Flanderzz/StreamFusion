@@ -465,9 +465,20 @@ loop completed **55 → 63 jobs in 150 s** (per-job 2.73 s → 2.38 s, closing t
 stock Flink from 24% to 8%). The format's worst case — narrow all-fixed-width rows under unique
 keys, where per-bucket hashing amortizes nothing and the removed decode was cheapest — was
 checked on the checkpoint microbench (`checkpoint_4096_rows_per_side`, same-day A/B): 2.50 ms
-old vs 2.30 ms new, still ~8% ahead. The same decode-and-rehash snapshot shape remains in the
-OVER/window/session/temporal/window-join/interval and Top-N operators — mechanical ports of
-this format, pending the same measurement discipline.
+old vs 2.30 ms new, still ~8% ahead.
+
+The format then propagated to every other map-shaped byte store: both Top-N rankers and the
+keep-last deduplicator and changelog normalizer (their raw batches carry the typed payload
+schema in metadata, so converters rebuild on restore before any input arrives; Top-N adds the
+memcomparable sort key as a column, dedup the exact rowtime). Same-day A/B on the shape with the
+most per-key state, q18's `(bidder, auction)` keep-last dedup: **50 → 69 jobs in 150 s (+38%)**.
+A survey of the remaining operators found no equivalent pathology to port: the time-shaped
+operators (OVER, window, session, temporal/window/interval joins) buffer typed batches — their
+snapshots split columns without any row decode — and the group aggregate already hashes stored
+key bytes per bucket and must serialize accumulator values by construction. The one deliberate
+leftover is keep-first dedup's emitted-key set, whose keys are arrow-row (not Flink-BinaryRow)
+encoded, so its key groups cannot be derived from stored bytes without a re-encode — a different
+design, left with the decoded format.
 
 **Paimon table maintenance runs behind the barrier, not on it.** The state-table compactor
 originally ran synchronously in every checkpoint's sync phase, paying a table open, scan plan,

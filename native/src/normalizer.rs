@@ -357,71 +357,111 @@ impl<S: KeyedStateStore<NormalizedRow>> ChangelogNormalizer<S> {
 /// store checkpoints through its own commit path instead of materializing the key space.
 impl ChangelogNormalizer {
     /// Serializes the stored last-row-per-key set with its already canonical BinaryRow key.
-    fn snapshot(&self) -> Vec<u8> {
-        let selected: Vec<ByteKey> = self.rows.keys().cloned().collect();
-        self.snapshot_keys(&selected)
+    /// One IPC blob per key group of raw state bytes: the stored Flink-BinaryRow key and
+    /// arrow-row payload, verbatim — no decode, and the group is one hash of the stored key's
+    /// bytes per entry. The schema's metadata carries the typed payload schema so the converter
+    /// can be rebuilt before any input arrives.
+    fn raw_snapshot_groups(&self, max_parallelism: usize) -> BTreeMap<i32, Vec<u8>> {
+        let Some(schema) = &self.schema else { return BTreeMap::new() };
+        let mut builders: BTreeMap<i32, (BinaryBuilder, BinaryBuilder)> = BTreeMap::new();
+        for (key, row) in self.rows.iter() {
+            let group = flink_key_group(hash_bytes_by_words(&key.0), max_parallelism) as i32;
+            let (keys, payloads) = builders.entry(group).or_default();
+            keys.append_value(&key.0);
+            payloads.append_value(&row.payload);
+        }
+        let raw_schema = Arc::new(Schema::new_with_metadata(
+            vec![
+                Field::new(RAW_SNAPSHOT_KEY, DataType::Binary, false),
+                Field::new(RAW_SNAPSHOT_ROW, DataType::Binary, false),
+            ],
+            std::collections::HashMap::from([(
+                RAW_SNAPSHOT_PAYLOAD_SCHEMA.to_string(),
+                encode_schema_metadata(schema),
+            )]),
+        ));
+        builders
+            .into_iter()
+            .map(|(group, (mut keys, mut payloads))| {
+                let batch = RecordBatch::try_new(
+                    raw_schema.clone(),
+                    vec![Arc::new(keys.finish()), Arc::new(payloads.finish())],
+                )
+                .expect("raw normalizer snapshot batch");
+                (group, write_ipc(&batch))
+            })
+            .collect()
     }
 
-    fn snapshot_keys(&self, selected: &[ByteKey]) -> Vec<u8> {
-        let Some(schema) = &self.schema else { return Vec::new() };
-        if selected.is_empty() {
-            return Vec::new();
-        }
-        let mut fields: Vec<Field> = vec![Field::new("binary_key", DataType::Binary, false)];
-        fields.extend(schema.fields().iter().map(|f| f.as_ref().clone()));
-        let mut columns: Vec<ArrayRef> = vec![Arc::new(
-            arrow::array::BinaryArray::from_iter_values(selected.iter().map(|key| key.0.as_ref())),
-        )];
-        let converter = self.payload_converter.as_ref().expect("payload converter set");
-        let parser = converter.parser();
-        columns.extend(
-            converter
-                .convert_rows(selected.iter().map(|key| {
-                    parser.parse(&self.rows.get(&key.0).expect("selected key present").payload)
-                }))
-                .expect("decode normalizer snapshot payloads"),
-        );
-        write_ipc(
-            &RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
-                .expect("changelog-normalize snapshot"),
-        )
+    fn snapshot(&self) -> Vec<u8> {
+        self.raw_snapshot_groups(1).remove(&0).unwrap_or_default()
     }
 
     fn restore(key_columns: Vec<usize>, generate_update_before: bool, bytes: &[u8]) -> Self {
-        let mut normalizer = ChangelogNormalizer::new(key_columns, generate_update_before);
-        for batch in read_ipc_if_present(bytes) {
-            let schema = Arc::new(Schema::new(
-                batch.schema().fields()[1..].iter().map(|field| field.as_ref().clone()).collect::<Vec<_>>(),
-            ));
-            normalizer.schema = Some(schema.clone());
-            let converter = RowConverter::new(
-                schema
-                    .fields()
-                    .iter()
-                    .map(|field| SortField::new(field.data_type().clone()))
-                    .collect(),
-            )
-            .expect("restore normalizer payload converter");
-            let keys = batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<arrow::array::BinaryArray>()
-                .expect("normalizer snapshot binary keys");
-            let data_arrays: Vec<ArrayRef> =
-                (1..batch.num_columns()).map(|column| batch.column(column).clone()).collect();
-            let payloads = converter
-                .convert_columns(&data_arrays)
-                .expect("encode restored normalizer payloads");
-            for row in 0..batch.num_rows() {
-                let key = ByteKey::from(keys.value(row));
-                normalizer.rows.insert(
-                    key,
-                    NormalizedRow { payload: Arc::from(payloads.row(row).data()), staged: false },
-                );
-            }
-            normalizer.payload_converter = Some(converter);
+        Self::restore_partitions(key_columns, generate_update_before, &[bytes.to_vec()])
+    }
+
+    /// Raw-format rows carry the stored key and payload bytes verbatim — restoring is a straight
+    /// map rebuild with no decode or re-encode.
+    fn load_batch_raw(&mut self, batch: &RecordBatch) {
+        if self.schema.is_none() {
+            let payload_schema =
+                decode_schema_metadata(batch).expect("raw normalizer snapshot payload schema");
+            self.payload_converter = Some(
+                RowConverter::new(
+                    payload_schema
+                        .fields()
+                        .iter()
+                        .map(|field| SortField::new(field.data_type().clone()))
+                        .collect(),
+                )
+                .expect("restore normalizer payload converter"),
+            );
+            self.schema = Some(payload_schema);
         }
-        normalizer
+        let keys = column_binary(batch, RAW_SNAPSHOT_KEY);
+        let payloads = column_binary(batch, RAW_SNAPSHOT_ROW);
+        for row in 0..batch.num_rows() {
+            self.rows.insert(
+                ByteKey::from(keys.value(row)),
+                NormalizedRow { payload: Arc::from(payloads.value(row)), staged: false },
+            );
+        }
+    }
+
+    /// Snapshots written before the raw format decoded the rows to typed columns
+    /// (`[binary_key, data cols..]`); kept so existing savepoints keep restoring.
+    fn load_batch_decoded(&mut self, batch: &RecordBatch) {
+        let schema = Arc::new(Schema::new(
+            batch.schema().fields()[1..].iter().map(|field| field.as_ref().clone()).collect::<Vec<_>>(),
+        ));
+        self.schema = Some(schema.clone());
+        let converter = RowConverter::new(
+            schema
+                .fields()
+                .iter()
+                .map(|field| SortField::new(field.data_type().clone()))
+                .collect(),
+        )
+        .expect("restore normalizer payload converter");
+        let keys = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::BinaryArray>()
+            .expect("normalizer snapshot binary keys");
+        let data_arrays: Vec<ArrayRef> =
+            (1..batch.num_columns()).map(|column| batch.column(column).clone()).collect();
+        let payloads = converter
+            .convert_columns(&data_arrays)
+            .expect("encode restored normalizer payloads");
+        for row in 0..batch.num_rows() {
+            let key = ByteKey::from(keys.value(row));
+            self.rows.insert(
+                key,
+                NormalizedRow { payload: Arc::from(payloads.row(row).data()), staged: false },
+            );
+        }
+        self.payload_converter = Some(converter);
     }
 
     fn snapshot_partitions(
@@ -448,19 +488,10 @@ impl ChangelogNormalizer {
         }) {
             return;
         }
-        let mut keys_by_group: BTreeMap<i32, Vec<ByteKey>> = BTreeMap::new();
-        for key in self.rows.keys().cloned() {
-            let group = flink_key_group(hash_bytes_by_words(&key.0), max_parallelism) as i32;
-            keys_by_group.entry(group).or_default().push(key);
-        }
-        let snapshots = keys_by_group
-            .iter()
-            .map(|(&group, keys)| (group, self.snapshot_keys(keys)))
-            .collect();
         self.snapshot_cache = Some(NormalizerSnapshotCache {
             max_parallelism,
             timestamp_precisions: timestamp_precisions.to_vec(),
-            snapshots,
+            snapshots: self.raw_snapshot_groups(max_parallelism),
         });
     }
 
@@ -469,20 +500,17 @@ impl ChangelogNormalizer {
         generate_update_before: bool,
         snapshots: &[Vec<u8>],
     ) -> Self {
-        let mut merged = ChangelogNormalizer::new(key_columns.clone(), generate_update_before);
+        let mut normalizer = ChangelogNormalizer::new(key_columns, generate_update_before);
         for bytes in snapshots {
-            let restored = ChangelogNormalizer::restore(
-                key_columns.clone(),
-                generate_update_before,
-                bytes,
-            );
-            if merged.schema.is_none() {
-                merged.schema = restored.schema.clone();
-                merged.payload_converter = restored.payload_converter;
+            for batch in read_ipc_if_present(bytes) {
+                if batch.schema_ref().field(0).name() == RAW_SNAPSHOT_KEY {
+                    normalizer.load_batch_raw(&batch);
+                } else {
+                    normalizer.load_batch_decoded(&batch);
+                }
             }
-            merged.rows.absorb(restored.rows);
         }
-        merged
+        normalizer
     }
 }
 

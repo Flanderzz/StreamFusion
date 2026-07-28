@@ -151,6 +151,12 @@ pub(crate) fn column_i32<'a>(batch: &'a RecordBatch, name: &str) -> &'a Int32Arr
         .unwrap_or_else(|| panic!("column {name} must be int32"))
 }
 
+/// Raw-snapshot column names shared by the memory-backend keyed stores: the stored
+/// Flink-BinaryRow bucket key and the arrow-row payload bytes, written verbatim. The key column
+/// leading the schema is also the format marker restore branches on.
+pub(crate) const RAW_SNAPSHOT_KEY: &str = "__key__";
+pub(crate) const RAW_SNAPSHOT_ROW: &str = "__row__";
+
 /// Downcasts a named binary column, with a clear message if it is missing or the wrong type.
 pub(crate) fn column_binary<'a>(batch: &'a RecordBatch, name: &str) -> &'a BinaryArray {
     batch

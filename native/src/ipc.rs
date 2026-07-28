@@ -19,6 +19,29 @@ pub(crate) fn read_ipc(bytes: &[u8]) -> Vec<RecordBatch> {
         .collect()
 }
 
+/// Schema-metadata key on a raw-snapshot batch carrying the typed payload schema its row bytes
+/// decode with — needed when an operator's converters must be rebuilt on restore before any
+/// input batch has arrived.
+pub(crate) const RAW_SNAPSHOT_PAYLOAD_SCHEMA: &str = "streamfusion.raw.payload-schema";
+
+/// Encodes a schema for the metadata carrier: an empty batch's IPC stream, base64'd (metadata
+/// values are strings).
+pub(crate) fn encode_schema_metadata(schema: &SchemaRef) -> String {
+    use base64::Engine;
+
+    base64::engine::general_purpose::STANDARD
+        .encode(write_ipc(&RecordBatch::new_empty(schema.clone())))
+}
+
+/// Reads the carried payload schema back off a raw-snapshot batch.
+pub(crate) fn decode_schema_metadata(batch: &RecordBatch) -> Option<SchemaRef> {
+    use base64::Engine;
+
+    let value = batch.schema_ref().metadata().get(RAW_SNAPSHOT_PAYLOAD_SCHEMA)?;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(value).ok()?;
+    read_ipc(&bytes).first().map(RecordBatch::schema)
+}
+
 /// Serializes several batches of differing schemas into one buffer, each length-prefixed, so a
 /// snapshot can carry side tables (e.g. a per-key multiset) alongside the main per-key state.
 pub(crate) fn write_framed(batches: &[RecordBatch]) -> Vec<u8> {
