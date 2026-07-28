@@ -979,7 +979,7 @@ pub(crate) fn avro_store(avro_schema: &str, id: u32) -> arrow_avro::schema::Sche
 /// where the JVM registers each writer schema by id via `registerAvroSchema` as messages carry it.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createDecoder<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     format: jint,
     schema_array_address: jlong,
@@ -990,28 +990,30 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createDecoder
     skip_parse_errors: jboolean,
     format_options: JString<'local>,
 ) -> jlong {
-    // Avro (1, 4) derives its own schema from the writer schema, so those callers pass 0/0 for the
-    // schema C structs; JSON/CSV/raw (0, 2, 3) decode against the exported target schema.
-    let schema = if format == 1 || format == 4 {
-        Arc::new(Schema::empty())
-    } else {
-        import_record_batch(schema_array_address, schema_address).schema()
-    };
-    let avro_schema: String = env.get_string(&avro_schema).map(Into::into).unwrap_or_default();
-    // Empty unless the planner pushed a projection into an Avro decode: the narrowed reader schema.
-    let reader_avro_schema: String =
-        env.get_string(&reader_avro_schema).map(Into::into).unwrap_or_default();
-    let format_options: String =
-        env.get_string(&format_options).map(Into::into).unwrap_or_default();
-    into_handle(MessageDecoder::new(
-        format,
-        schema,
-        &avro_schema,
-        &reader_avro_schema,
-        schema_id,
-        skip_parse_errors != 0,
-        &format_options,
-    ))
+    crate::bridge::jni_guard(env, move |env| {
+        // Avro (1, 4) derives its own schema from the writer schema, so those callers pass 0/0 for the
+        // schema C structs; JSON/CSV/raw (0, 2, 3) decode against the exported target schema.
+        let schema = if format == 1 || format == 4 {
+            Arc::new(Schema::empty())
+        } else {
+            import_record_batch(schema_array_address, schema_address).schema()
+        };
+        let avro_schema: String = env.get_string(&avro_schema).map(Into::into).unwrap_or_default();
+        // Empty unless the planner pushed a projection into an Avro decode: the narrowed reader schema.
+        let reader_avro_schema: String =
+            env.get_string(&reader_avro_schema).map(Into::into).unwrap_or_default();
+        let format_options: String =
+            env.get_string(&format_options).map(Into::into).unwrap_or_default();
+        into_handle(MessageDecoder::new(
+            format,
+            schema,
+            &avro_schema,
+            &reader_avro_schema,
+            schema_id,
+            skip_parse_errors != 0,
+            &format_options,
+        ))
+    })
 }
 
 /// Creates a protobuf message decoder (Flink's `protobuf` format: bare message bytes, no framing) and
@@ -1022,28 +1024,30 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createDecoder
 /// C-structs needed, unlike JSON).
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createProtobufDecoder<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     descriptor: JByteArray<'local>,
     message_name: JString<'local>,
     schema_array_address: jlong,
     schema_address: jlong,
 ) -> jlong {
-    let descriptor = env.convert_byte_array(&descriptor).expect("failed to read proto descriptor");
-    let message_name: String = env.get_string(&message_name).expect("failed to read message name").into();
-    // When the planner pushed a projection into the decode, it exports the narrowed output schema (0/0
-    // otherwise): prune the descriptor to those fields so ptars builds only the read columns.
-    let descriptor = if schema_array_address != 0 {
-        let schema = import_record_batch(schema_array_address, schema_address).schema();
-        prune_descriptor_set(&descriptor, &message_name, &schema)
-    } else {
-        descriptor
-    };
-    let decoder = MessageDecoder {
-        decoder: FormatDecoder::Protobuf(ProtobufDecoder::new(&descriptor, &message_name)),
-        skip_errors: false,
-    };
-    into_handle(decoder)
+    crate::bridge::jni_guard(env, move |env| {
+        let descriptor = env.convert_byte_array(&descriptor).expect("failed to read proto descriptor");
+        let message_name: String = env.get_string(&message_name).expect("failed to read message name").into();
+        // When the planner pushed a projection into the decode, it exports the narrowed output schema (0/0
+        // otherwise): prune the descriptor to those fields so ptars builds only the read columns.
+        let descriptor = if schema_array_address != 0 {
+            let schema = import_record_batch(schema_array_address, schema_address).schema();
+            prune_descriptor_set(&descriptor, &message_name, &schema)
+        } else {
+            descriptor
+        };
+        let decoder = MessageDecoder {
+            decoder: FormatDecoder::Protobuf(ProtobufDecoder::new(&descriptor, &message_name)),
+            skip_errors: false,
+        };
+        into_handle(decoder)
+    })
 }
 
 /// Registers a writer schema under a Confluent schema id on an existing Confluent-Avro decoder. The
@@ -1052,15 +1056,17 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createProtobu
 /// the store grows with the topic's schema evolution instead of being fixed at plan time.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_registerAvroSchema<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     schema_id: jint,
     schema: JString<'local>,
 ) {
-    let decoder = unsafe { &mut *(handle as *mut MessageDecoder) };
-    let schema: String = env.get_string(&schema).expect("failed to read avro schema").into();
-    decoder.register_writer_schema(schema_id as u32, &schema);
+    crate::bridge::jni_guard(env, move |env| {
+        let decoder = unsafe { &mut *(handle as *mut MessageDecoder) };
+        let schema: String = env.get_string(&schema).expect("failed to read avro schema").into();
+        decoder.register_writer_schema(schema_id as u32, &schema);
+    })
 }
 
 /// Decodes one body batch into a typed batch, exporting it into the consumer-allocated C structs.
@@ -1107,27 +1113,31 @@ pub(crate) fn panic_message(panic: &Box<dyn std::any::Any + Send>) -> &str {
 /// consumer, for an apples-to-apples comparison.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_decodeCount<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     in_array_address: jlong,
     in_schema_address: jlong,
 ) -> jlong {
-    let decoder = unsafe { &*(handle as *mut MessageDecoder) };
-    let bodies = import_record_batch(in_array_address, in_schema_address);
-    decoder.decode(&bodies).num_rows() as jlong
+    crate::bridge::jni_guard(env, move |_env| {
+        let decoder = unsafe { &*(handle as *mut MessageDecoder) };
+        let bodies = import_record_batch(in_array_address, in_schema_address);
+        decoder.decode(&bodies).num_rows() as jlong
+    })
 }
 
 /// Releases a message decoder handle.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_closeDecoder<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
 ) {
-    unsafe {
-        drop(from_handle::<MessageDecoder>(handle));
-    }
+    crate::bridge::jni_guard(env, move |_env| {
+        unsafe {
+            drop(from_handle::<MessageDecoder>(handle));
+        }
+    })
 }
 
 /// This format library's decode behind the cross-DSO driver ABI (`format_abi`): an opaque decoder
@@ -1175,19 +1185,23 @@ pub extern "C" fn streamfusion_format_driver_init(version: i32, driver: *mut For
 #[cfg(feature = "json")]
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_format_json_NativeJsonFormat_driverInitAddress<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
 ) -> jlong {
-    streamfusion_format_driver_init as usize as jlong
+    crate::bridge::jni_guard(env, move |_env| {
+        streamfusion_format_driver_init as usize as jlong
+    })
 }
 
 #[cfg(feature = "json")]
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_format_json_NativeJsonFormat_isLoaded<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
 ) -> jboolean {
-    1
+    crate::bridge::jni_guard(env, move |_env| {
+        1
+    })
 }
 
 #[cfg(feature = "json")]
@@ -1239,19 +1253,23 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_format_json_NativeJs
 #[cfg(feature = "csv")]
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_format_csv_NativeCsvFormat_driverInitAddress<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
 ) -> jlong {
-    streamfusion_format_driver_init as usize as jlong
+    crate::bridge::jni_guard(env, move |_env| {
+        streamfusion_format_driver_init as usize as jlong
+    })
 }
 
 #[cfg(feature = "csv")]
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_format_csv_NativeCsvFormat_isLoaded<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
 ) -> jboolean {
-    1
+    crate::bridge::jni_guard(env, move |_env| {
+        1
+    })
 }
 
 #[cfg(feature = "csv")]
@@ -1290,19 +1308,23 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_format_csv_NativeCsv
 #[cfg(feature = "raw")]
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_format_raw_NativeRawFormat_driverInitAddress<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
 ) -> jlong {
-    streamfusion_format_driver_init as usize as jlong
+    crate::bridge::jni_guard(env, move |_env| {
+        streamfusion_format_driver_init as usize as jlong
+    })
 }
 
 #[cfg(feature = "raw")]
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_format_raw_NativeRawFormat_isLoaded<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
 ) -> jboolean {
-    1
+    crate::bridge::jni_guard(env, move |_env| {
+        1
+    })
 }
 
 #[cfg(feature = "raw")]
@@ -1341,19 +1363,23 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_format_raw_NativeRaw
 #[cfg(feature = "avro")]
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_format_avro_NativeAvroFormat_driverInitAddress<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
 ) -> jlong {
-    streamfusion_format_driver_init as usize as jlong
+    crate::bridge::jni_guard(env, move |_env| {
+        streamfusion_format_driver_init as usize as jlong
+    })
 }
 
 #[cfg(feature = "avro")]
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_format_avro_NativeAvroFormat_isLoaded<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
 ) -> jboolean {
-    1
+    crate::bridge::jni_guard(env, move |_env| {
+        1
+    })
 }
 
 #[cfg(feature = "avro")]
@@ -1407,19 +1433,23 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_format_avro_NativeAv
 #[cfg(feature = "protobuf")]
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_format_protobuf_NativeProtobufFormat_driverInitAddress<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
 ) -> jlong {
-    streamfusion_format_driver_init as usize as jlong
+    crate::bridge::jni_guard(env, move |_env| {
+        streamfusion_format_driver_init as usize as jlong
+    })
 }
 
 #[cfg(feature = "protobuf")]
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_format_protobuf_NativeProtobufFormat_isLoaded<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
 ) -> jboolean {
-    1
+    crate::bridge::jni_guard(env, move |_env| {
+        1
+    })
 }
 
 #[cfg(feature = "protobuf")]

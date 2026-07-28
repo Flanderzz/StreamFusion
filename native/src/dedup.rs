@@ -1071,90 +1071,102 @@ state_bytes_getter!(Java_io_github_jordepic_streamfusion_Native_keepLastDeduplic
 
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_keepLastDeduplicatorStagingBytes<'local>(
-    _env: JNIEnv<'local>, _class: JClass<'local>, handle: jlong,
+    env: JNIEnv<'local>, _class: JClass<'local>, handle: jlong,
 ) -> jlong {
-    let dedup = unsafe { &*(handle as *const KeepLastDeduplicator) };
-    dedup.staged_bytes as jlong
+    crate::bridge::jni_guard(env, move |_env| {
+        let dedup = unsafe { &*(handle as *const KeepLastDeduplicator) };
+        dedup.staged_bytes as jlong
+    })
 }
 
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_keepLastDeduplicatorStagedKeys<'local>(
-    _env: JNIEnv<'local>, _class: JClass<'local>, handle: jlong,
+    env: JNIEnv<'local>, _class: JClass<'local>, handle: jlong,
 ) -> jlong {
-    let dedup = unsafe { &*(handle as *const KeepLastDeduplicator) };
-    dedup.staged.len() as jlong
+    crate::bridge::jni_guard(env, move |_env| {
+        let dedup = unsafe { &*(handle as *const KeepLastDeduplicator) };
+        dedup.staged.len() as jlong
+    })
 }
 
 /// Creates a keep-first deduplicator over the given partition-key columns and rowtime column.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createKeepFirstDeduplicator<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     partition_columns: JIntArray<'local>,
     key_timestamp_precisions: JIntArray<'local>,
     rt_column: jint,
     memory_budget_bytes: jlong,
 ) -> jlong {
-    let partitions = read_columns(&env, &partition_columns);
-    let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-        .into_iter()
-        .map(|precision| precision as i32)
-        .collect();
-    let dedup = KeepFirstDeduplicator::new(partitions, rt_column as usize)
-        .with_key_timestamp_precisions(timestamp_precisions)
-        .with_memory_budget(memory_budget_bytes);
-    boxed_or_throw(&mut env, dedup)
+    crate::bridge::jni_guard(env, move |mut env| {
+        let partitions = read_columns(&env, &partition_columns);
+        let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
+            .into_iter()
+            .map(|precision| precision as i32)
+            .collect();
+        let dedup = KeepFirstDeduplicator::new(partitions, rt_column as usize)
+            .with_key_timestamp_precisions(timestamp_precisions)
+            .with_memory_budget(memory_budget_bytes);
+        boxed_or_throw(&mut env, dedup)
+    })
 }
 
 /// Buffers an input batch (no output); each key's minimum-rowtime row is emitted later, on the
 /// watermark that reaches its rowtime.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushKeepFirstDeduplicator<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     in_array_address: jlong,
     in_schema_address: jlong,
 ) {
-    let dedup = unsafe { &mut *(handle as *mut KeepFirstDeduplicator) };
-    // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
-    let result = {
-        let batch = import_record_batch(in_array_address, in_schema_address);
-        dedup.push(&batch)
-    };
-    if let Err(e) = result {
-        throw_memory_limit(&mut env, &e.to_string());
-    }
+    crate::bridge::jni_guard(env, move |mut env| {
+        let dedup = unsafe { &mut *(handle as *mut KeepFirstDeduplicator) };
+        // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
+        let result = {
+            let batch = import_record_batch(in_array_address, in_schema_address);
+            dedup.push(&batch)
+        };
+        if let Err(e) = result {
+            throw_memory_limit(&mut env, &e.to_string());
+        }
+    })
 }
 
 /// Exports each key's first (minimum-rowtime) row whose rowtime the watermark has reached.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_flushKeepFirstDeduplicator<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     watermark_millis: jlong,
     out_array_address: jlong,
     out_schema_address: jlong,
 ) {
-    let dedup = unsafe { &mut *(handle as *mut KeepFirstDeduplicator) };
-    // The emitted-key set grows here, so even a flush can exceed the budget.
-    match dedup.flush(watermark_millis) {
-        Ok(result) => export_record_batch(result, out_array_address, out_schema_address),
-        Err(e) => throw_memory_limit(&mut env, &e.to_string()),
-    }
+    crate::bridge::jni_guard(env, move |mut env| {
+        let dedup = unsafe { &mut *(handle as *mut KeepFirstDeduplicator) };
+        // The emitted-key set grows here, so even a flush can exceed the budget.
+        match dedup.flush(watermark_millis) {
+            Ok(result) => export_record_batch(result, out_array_address, out_schema_address),
+            Err(e) => throw_memory_limit(&mut env, &e.to_string()),
+        }
+    })
 }
 
 /// Releases the deduplicator and its per-key state.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_closeKeepFirstDeduplicator<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
 ) {
-    unsafe {
-        drop(from_handle::<KeepFirstDeduplicator>(handle));
-    }
+    crate::bridge::jni_guard(env, move |_env| {
+        unsafe {
+            drop(from_handle::<KeepFirstDeduplicator>(handle));
+        }
+    })
 }
 
 /// Serializes the deduplicator's pending candidates, emitted keys, and watermark for a checkpoint.
@@ -1164,56 +1176,62 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotKeepF
     _class: JClass<'local>,
     handle: jlong,
 ) -> jbyteArray {
-    let dedup = unsafe { &mut *(handle as *mut KeepFirstDeduplicator) };
-    env.byte_array_from_slice(&dedup.snapshot())
-        .expect("failed to allocate dedup snapshot array")
-        .into_raw()
+    crate::bridge::jni_guard(env, move |env| {
+        let dedup = unsafe { &mut *(handle as *mut KeepFirstDeduplicator) };
+        env.byte_array_from_slice(&dedup.snapshot())
+            .expect("failed to allocate dedup snapshot array")
+            .into_raw()
+    })
 }
 
 /// Rebuilds a keep-first deduplicator from a snapshot taken by a prior run and returns a fresh handle.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreKeepFirstDeduplicator<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     partition_columns: JIntArray<'local>,
     rt_column: jint,
     snapshot: JByteArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
-    let partitions = read_columns(&env, &partition_columns);
-    let bytes = env.convert_byte_array(&snapshot).expect("failed to read dedup snapshot");
-    let dedup = KeepFirstDeduplicator::restore(partitions, rt_column as usize, &bytes)
-        .with_memory_budget(memory_budget_bytes);
-    boxed_or_throw(&mut env, dedup)
+    crate::bridge::jni_guard(env, move |mut env| {
+        let partitions = read_columns(&env, &partition_columns);
+        let bytes = env.convert_byte_array(&snapshot).expect("failed to read dedup snapshot");
+        let dedup = KeepFirstDeduplicator::restore(partitions, rt_column as usize, &bytes)
+            .with_memory_budget(memory_budget_bytes);
+        boxed_or_throw(&mut env, dedup)
+    })
 }
 
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotKeepFirstDeduplicatorPartitions<
     'local,
 >(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     max_parallelism: jint,
     timestamp_precisions: JIntArray<'local>,
 ) -> jni::sys::jobjectArray {
-    let dedup = unsafe { &mut *(handle as *mut KeepFirstDeduplicator) };
-    let precisions: Vec<i32> = read_int_array(&env, &timestamp_precisions)
-        .into_iter()
-        .map(|precision| precision as i32)
-        .collect();
-    keyed_state_partition_array(
-        &mut env,
-        dedup.snapshot_partitions(max_parallelism as usize, &precisions),
-        "keep-first-dedup",
-    )
+    crate::bridge::jni_guard(env, move |mut env| {
+        let dedup = unsafe { &mut *(handle as *mut KeepFirstDeduplicator) };
+        let precisions: Vec<i32> = read_int_array(&env, &timestamp_precisions)
+            .into_iter()
+            .map(|precision| precision as i32)
+            .collect();
+        keyed_state_partition_array(
+            &mut env,
+            dedup.snapshot_partitions(max_parallelism as usize, &precisions),
+            "keep-first-dedup",
+        )
+    })
 }
 
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreKeepFirstDeduplicatorPartitions<
     'local,
 >(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     partition_columns: JIntArray<'local>,
     key_timestamp_precisions: JIntArray<'local>,
@@ -1221,40 +1239,42 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreKeepFi
     snapshots: JObjectArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
-    let partitions = read_columns(&env, &partition_columns);
-    let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-        .into_iter()
-        .map(|precision| precision as i32)
-        .collect();
-    let count = env
-        .get_array_length(&snapshots)
-        .expect("read keep-first dedup raw partition count");
-    let mut restored = Vec::with_capacity(count as usize);
-    for index in 0..count {
-        let bytes = JByteArray::from(
-            env.get_object_array_element(&snapshots, index)
-                .expect("read keep-first dedup raw partition"),
-        );
-        restored.push(
-            env.convert_byte_array(&bytes)
-                .expect("read keep-first dedup raw partition bytes"),
-        );
-    }
-    let dedup = KeepFirstDeduplicator::restore_partitions(
-        partitions,
-        rt_column as usize,
-        &restored,
-    )
-    .with_key_timestamp_precisions(timestamp_precisions)
-    .with_memory_budget(memory_budget_bytes);
-    boxed_or_throw(&mut env, dedup)
+    crate::bridge::jni_guard(env, move |mut env| {
+        let partitions = read_columns(&env, &partition_columns);
+        let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
+            .into_iter()
+            .map(|precision| precision as i32)
+            .collect();
+        let count = env
+            .get_array_length(&snapshots)
+            .expect("read keep-first dedup raw partition count");
+        let mut restored = Vec::with_capacity(count as usize);
+        for index in 0..count {
+            let bytes = JByteArray::from(
+                env.get_object_array_element(&snapshots, index)
+                    .expect("read keep-first dedup raw partition"),
+            );
+            restored.push(
+                env.convert_byte_array(&bytes)
+                    .expect("read keep-first dedup raw partition bytes"),
+            );
+        }
+        let dedup = KeepFirstDeduplicator::restore_partitions(
+            partitions,
+            rt_column as usize,
+            &restored,
+        )
+        .with_key_timestamp_precisions(timestamp_precisions)
+        .with_memory_budget(memory_budget_bytes);
+        boxed_or_throw(&mut env, dedup)
+    })
 }
 
 /// Creates an eager deduplicator (rowtime/proctime keep-last, or proctime keep-first) and returns an
 /// opaque handle.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createKeepLastDeduplicator<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     partition_columns: JIntArray<'local>,
     key_timestamp_precisions: JIntArray<'local>,
@@ -1265,40 +1285,44 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createKeepLas
     mini_batch: jboolean,
     memory_budget_bytes: jlong,
 ) -> jlong {
-    let partitions = read_columns(&env, &partition_columns);
-    let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-        .into_iter()
-        .map(|precision| precision as i32)
-        .collect();
-    let dedup = KeepLastDeduplicator::new(
-        partitions,
-        rt_column as usize,
-        generate_update_before != 0,
-        rowtime_ordered != 0,
-        keep_first != 0,
-    )
-    .with_mini_batch(mini_batch != 0)
-    .with_key_timestamp_precisions(timestamp_precisions)
-    .with_memory_budget(memory_budget_bytes);
-    boxed_or_throw(&mut env, dedup)
+    crate::bridge::jni_guard(env, move |mut env| {
+        let partitions = read_columns(&env, &partition_columns);
+        let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
+            .into_iter()
+            .map(|precision| precision as i32)
+            .collect();
+        let dedup = KeepLastDeduplicator::new(
+            partitions,
+            rt_column as usize,
+            generate_update_before != 0,
+            rowtime_ordered != 0,
+            keep_first != 0,
+        )
+        .with_mini_batch(mini_batch != 0)
+        .with_key_timestamp_precisions(timestamp_precisions)
+        .with_memory_budget(memory_budget_bytes);
+        boxed_or_throw(&mut env, dedup)
+    })
 }
 
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_flushKeepLastDeduplicator<'local>(
-    mut env: JNIEnv<'local>, _class: JClass<'local>, handle: jlong,
+    env: JNIEnv<'local>, _class: JClass<'local>, handle: jlong,
     out_array_address: jlong, out_schema_address: jlong,
 ) {
-    let dedup = unsafe { &mut *(handle as *mut KeepLastDeduplicator) };
-    match dedup.flush_mini_batch() {
-        Ok(out) => export_record_batch(out, out_array_address, out_schema_address),
-        Err(e) => throw_memory_limit(&mut env, &e.to_string()),
-    }
+    crate::bridge::jni_guard(env, move |mut env| {
+        let dedup = unsafe { &mut *(handle as *mut KeepLastDeduplicator) };
+        match dedup.flush_mini_batch() {
+            Ok(out) => export_record_batch(out, out_array_address, out_schema_address),
+            Err(e) => throw_memory_limit(&mut env, &e.to_string()),
+        }
+    })
 }
 
 /// Folds an input batch and returns the retract changelog it produces (emitted eagerly per row).
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushKeepLastDeduplicator<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     in_array_address: jlong,
@@ -1306,27 +1330,31 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushKeepLastD
     out_array_address: jlong,
     out_schema_address: jlong,
 ) {
-    let dedup = unsafe { &mut *(handle as *mut KeepLastDeduplicator) };
-    // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
-    let result = {
-        let batch = import_record_batch(in_array_address, in_schema_address);
-        dedup.push(&batch)
-    };
-    match result {
-        Ok(out) => export_record_batch(out, out_array_address, out_schema_address),
-        Err(e) => throw_memory_limit(&mut env, &e.to_string()),
-    }
+    crate::bridge::jni_guard(env, move |mut env| {
+        let dedup = unsafe { &mut *(handle as *mut KeepLastDeduplicator) };
+        // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
+        let result = {
+            let batch = import_record_batch(in_array_address, in_schema_address);
+            dedup.push(&batch)
+        };
+        match result {
+            Ok(out) => export_record_batch(out, out_array_address, out_schema_address),
+            Err(e) => throw_memory_limit(&mut env, &e.to_string()),
+        }
+    })
 }
 
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_closeKeepLastDeduplicator<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
 ) {
-    unsafe {
-        drop(from_handle::<KeepLastDeduplicator>(handle));
-    }
+    crate::bridge::jni_guard(env, move |_env| {
+        unsafe {
+            drop(from_handle::<KeepLastDeduplicator>(handle));
+        }
+    })
 }
 
 /// Serializes the keep-last deduplicator's per-key stored rows for a checkpoint.
@@ -1336,16 +1364,18 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotKeepL
     _class: JClass<'local>,
     handle: jlong,
 ) -> jbyteArray {
-    let dedup = unsafe { &mut *(handle as *mut KeepLastDeduplicator) };
-    env.byte_array_from_slice(&dedup.snapshot())
-        .expect("failed to allocate dedup snapshot array")
-        .into_raw()
+    crate::bridge::jni_guard(env, move |env| {
+        let dedup = unsafe { &mut *(handle as *mut KeepLastDeduplicator) };
+        env.byte_array_from_slice(&dedup.snapshot())
+            .expect("failed to allocate dedup snapshot array")
+            .into_raw()
+    })
 }
 
 /// Rebuilds an eager deduplicator from a snapshot and returns a fresh handle.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreKeepLastDeduplicator<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     partition_columns: JIntArray<'local>,
     key_timestamp_precisions: JIntArray<'local>,
@@ -1357,53 +1387,57 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreKeepLa
     snapshot: JByteArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
-    let partitions = read_columns(&env, &partition_columns);
-    let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-        .into_iter()
-        .map(|precision| precision as i32)
-        .collect();
-    let bytes = env.convert_byte_array(&snapshot).expect("failed to read dedup snapshot");
-    let dedup = KeepLastDeduplicator::restore(
-        partitions,
-        timestamp_precisions,
-        rt_column as usize,
-        generate_update_before != 0,
-        rowtime_ordered != 0,
-        keep_first != 0,
-        &bytes,
-    )
-    .with_mini_batch(mini_batch != 0)
-    .with_memory_budget(memory_budget_bytes);
-    boxed_or_throw(&mut env, dedup)
+    crate::bridge::jni_guard(env, move |mut env| {
+        let partitions = read_columns(&env, &partition_columns);
+        let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
+            .into_iter()
+            .map(|precision| precision as i32)
+            .collect();
+        let bytes = env.convert_byte_array(&snapshot).expect("failed to read dedup snapshot");
+        let dedup = KeepLastDeduplicator::restore(
+            partitions,
+            timestamp_precisions,
+            rt_column as usize,
+            generate_update_before != 0,
+            rowtime_ordered != 0,
+            keep_first != 0,
+            &bytes,
+        )
+        .with_mini_batch(mini_batch != 0)
+        .with_memory_budget(memory_budget_bytes);
+        boxed_or_throw(&mut env, dedup)
+    })
 }
 
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotKeepLastDeduplicatorPartitions<
     'local,
 >(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     max_parallelism: jint,
     timestamp_precisions: JIntArray<'local>,
 ) -> jni::sys::jobjectArray {
-    let dedup = unsafe { &mut *(handle as *mut KeepLastDeduplicator) };
-    let precisions: Vec<i32> = read_int_array(&env, &timestamp_precisions)
-        .into_iter()
-        .map(|precision| precision as i32)
-        .collect();
-    keyed_state_partition_array(
-        &mut env,
-        dedup.snapshot_partitions(max_parallelism as usize, &precisions),
-        "keep-last-dedup",
-    )
+    crate::bridge::jni_guard(env, move |mut env| {
+        let dedup = unsafe { &mut *(handle as *mut KeepLastDeduplicator) };
+        let precisions: Vec<i32> = read_int_array(&env, &timestamp_precisions)
+            .into_iter()
+            .map(|precision| precision as i32)
+            .collect();
+        keyed_state_partition_array(
+            &mut env,
+            dedup.snapshot_partitions(max_parallelism as usize, &precisions),
+            "keep-last-dedup",
+        )
+    })
 }
 
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreKeepLastDeduplicatorPartitions<
     'local,
 >(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     partition_columns: JIntArray<'local>,
     key_timestamp_precisions: JIntArray<'local>,
@@ -1415,35 +1449,37 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreKeepLa
     snapshots: JObjectArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
-    let partitions = read_columns(&env, &partition_columns);
-    let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-        .into_iter()
-        .map(|precision| precision as i32)
-        .collect();
-    let count = env
-        .get_array_length(&snapshots)
-        .expect("read keep-last dedup raw partition count");
-    let mut restored = Vec::with_capacity(count as usize);
-    for index in 0..count {
-        let bytes = JByteArray::from(
-            env.get_object_array_element(&snapshots, index)
-                .expect("read keep-last dedup raw partition"),
-        );
-        restored.push(
-            env.convert_byte_array(&bytes)
-                .expect("read keep-last dedup raw partition bytes"),
-        );
-    }
-    let dedup = KeepLastDeduplicator::restore_partitions(
-        partitions,
-        timestamp_precisions,
-        rt_column as usize,
-        generate_update_before != 0,
-        rowtime_ordered != 0,
-        keep_first != 0,
-        &restored,
-    )
-    .with_mini_batch(mini_batch != 0)
-    .with_memory_budget(memory_budget_bytes);
-    boxed_or_throw(&mut env, dedup)
+    crate::bridge::jni_guard(env, move |mut env| {
+        let partitions = read_columns(&env, &partition_columns);
+        let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
+            .into_iter()
+            .map(|precision| precision as i32)
+            .collect();
+        let count = env
+            .get_array_length(&snapshots)
+            .expect("read keep-last dedup raw partition count");
+        let mut restored = Vec::with_capacity(count as usize);
+        for index in 0..count {
+            let bytes = JByteArray::from(
+                env.get_object_array_element(&snapshots, index)
+                    .expect("read keep-last dedup raw partition"),
+            );
+            restored.push(
+                env.convert_byte_array(&bytes)
+                    .expect("read keep-last dedup raw partition bytes"),
+            );
+        }
+        let dedup = KeepLastDeduplicator::restore_partitions(
+            partitions,
+            timestamp_precisions,
+            rt_column as usize,
+            generate_update_before != 0,
+            rowtime_ordered != 0,
+            keep_first != 0,
+            &restored,
+        )
+        .with_mini_batch(mini_batch != 0)
+        .with_memory_budget(memory_budget_bytes);
+        boxed_or_throw(&mut env, dedup)
+    })
 }

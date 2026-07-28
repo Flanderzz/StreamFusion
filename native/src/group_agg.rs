@@ -2287,22 +2287,26 @@ state_bytes_getter!(
 
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_groupAggregatorStagingBytes<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
 ) -> jlong {
-    let aggregator = unsafe { &*(handle as *const GroupAggregator) };
-    aggregator.staging_bytes() as jlong
+    crate::bridge::jni_guard(env, move |_env| {
+        let aggregator = unsafe { &*(handle as *const GroupAggregator) };
+        aggregator.staging_bytes() as jlong
+    })
 }
 
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_groupAggregatorStagedKeys<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
 ) -> jlong {
-    let aggregator = unsafe { &*(handle as *const GroupAggregator) };
-    aggregator.staged_keys() as jlong
+    crate::bridge::jni_guard(env, move |_env| {
+        let aggregator = unsafe { &*(handle as *const GroupAggregator) };
+        aggregator.staged_keys() as jlong
+    })
 }
 
 state_bytes_getter!(
@@ -2317,7 +2321,7 @@ state_bytes_getter!(
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createLocalGroupAggregator<
     'local,
 >(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     aggregate_kinds: JIntArray<'local>,
     value_types: JIntArray<'local>,
@@ -2327,22 +2331,24 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createLocalGr
     distinct_view_sources: JIntArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
-    let kinds = read_int_array(&env, &aggregate_kinds);
-    let value_types = read_int_array(&env, &value_types);
-    let value_columns = read_int_array(&env, &value_columns);
-    let filter_columns = read_int_array(&env, &filter_columns);
-    let key_cols = read_columns(&env, &key_columns);
-    let view_sources = read_int_array(&env, &distinct_view_sources);
-    let aggregator = LocalGroupAggregator::new(
-        kinds,
-        value_types,
-        value_columns,
-        filter_columns,
-        key_cols,
-        view_sources,
-    )
-    .with_memory_budget(memory_budget_bytes);
-    boxed_or_throw(&mut env, aggregator)
+    crate::bridge::jni_guard(env, move |mut env| {
+        let kinds = read_int_array(&env, &aggregate_kinds);
+        let value_types = read_int_array(&env, &value_types);
+        let value_columns = read_int_array(&env, &value_columns);
+        let filter_columns = read_int_array(&env, &filter_columns);
+        let key_cols = read_columns(&env, &key_columns);
+        let view_sources = read_int_array(&env, &distinct_view_sources);
+        let aggregator = LocalGroupAggregator::new(
+            kinds,
+            value_types,
+            value_columns,
+            filter_columns,
+            key_cols,
+            view_sources,
+        )
+        .with_memory_budget(memory_budget_bytes);
+        boxed_or_throw(&mut env, aggregator)
+    })
 }
 
 /// Folds an Arrow batch the JVM exported into the buffered per-key accumulators; emits nothing.
@@ -2350,22 +2356,24 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createLocalGr
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_updateLocalGroupAggregator<
     'local,
 >(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     in_array_address: jlong,
     in_schema_address: jlong,
 ) {
-    let aggregator = unsafe { &mut *(handle as *mut LocalGroupAggregator) };
-    // The batch must drop before a throw: its release callback upcalls into the JVM, which would
-    // clear the pending exception (see updateTumblingAggregator).
-    let result = {
-        let batch = import_record_batch(in_array_address, in_schema_address);
-        aggregator.update(&batch)
-    };
-    if let Err(e) = result {
-        throw_memory_limit(&mut env, &e.to_string());
-    }
+    crate::bridge::jni_guard(env, move |mut env| {
+        let aggregator = unsafe { &mut *(handle as *mut LocalGroupAggregator) };
+        // The batch must drop before a throw: its release callback upcalls into the JVM, which would
+        // clear the pending exception (see updateTumblingAggregator).
+        let result = {
+            let batch = import_record_batch(in_array_address, in_schema_address);
+            aggregator.update(&batch)
+        };
+        if let Err(e) = result {
+            throw_memory_limit(&mut env, &e.to_string());
+        }
+    })
 }
 
 /// Emits the buffered partials (one row per key) and clears the buffer.
@@ -2373,28 +2381,32 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_updateLocalGr
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_flushLocalGroupAggregator<
     'local,
 >(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     out_array_address: jlong,
     out_schema_address: jlong,
 ) {
-    let aggregator = unsafe { &mut *(handle as *mut LocalGroupAggregator) };
-    let result = aggregator.flush();
-    export_record_batch(result, out_array_address, out_schema_address);
+    crate::bridge::jni_guard(env, move |_env| {
+        let aggregator = unsafe { &mut *(handle as *mut LocalGroupAggregator) };
+        let result = aggregator.flush();
+        export_record_batch(result, out_array_address, out_schema_address);
+    })
 }
 
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_closeLocalGroupAggregator<
     'local,
 >(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
 ) {
-    unsafe {
-        drop(from_handle::<LocalGroupAggregator>(handle));
-    }
+    crate::bridge::jni_guard(env, move |_env| {
+        unsafe {
+            drop(from_handle::<LocalGroupAggregator>(handle));
+        }
+    })
 }
 
 /// Creates a non-windowed `GROUP BY` aggregator and returns an opaque handle. The aggregate kinds
@@ -2402,7 +2414,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_closeLocalGro
 /// per-node changelog flag. Grouping keys travel as `key0..` columns on each input batch.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createGroupAggregator<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     aggregate_kinds: JIntArray<'local>,
     value_types: JIntArray<'local>,
@@ -2417,41 +2429,43 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createGroupAg
     mini_batch: jboolean,
     memory_budget_bytes: jlong,
 ) -> jlong {
-    let kinds = read_int_array(&env, &aggregate_kinds);
-    let value_types = read_int_array(&env, &value_types);
-    let value_columns = read_int_array(&env, &value_columns);
-    let filter_columns = read_int_array(&env, &filter_columns);
-    let count_columns = read_int_array(&env, &count_columns);
-    let distinct_view_columns = read_int_array(&env, &distinct_view_columns);
-    let key_columns = read_columns(&env, &key_columns);
-    let key_timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-        .into_iter()
-        .map(|precision| precision as i32)
-        .collect();
-    let mut aggregator = GroupAggregator::new(
-        kinds,
-        value_types,
-        value_columns,
-        key_columns,
-        generate_update_before != 0,
-    )
-    .with_key_timestamp_precisions(key_timestamp_precisions)
-    .with_filter_columns(filter_columns)
-    .with_count_columns(count_columns)
-    .with_distinct_view_columns(distinct_view_columns)
-    .with_record_count_column(record_count_column as i64);
-    if mini_batch != 0 {
-        aggregator = aggregator.with_mini_batch();
-    }
-    let aggregator = aggregator.with_memory_budget(memory_budget_bytes);
-    boxed_or_throw(&mut env, aggregator)
+    crate::bridge::jni_guard(env, move |mut env| {
+        let kinds = read_int_array(&env, &aggregate_kinds);
+        let value_types = read_int_array(&env, &value_types);
+        let value_columns = read_int_array(&env, &value_columns);
+        let filter_columns = read_int_array(&env, &filter_columns);
+        let count_columns = read_int_array(&env, &count_columns);
+        let distinct_view_columns = read_int_array(&env, &distinct_view_columns);
+        let key_columns = read_columns(&env, &key_columns);
+        let key_timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
+            .into_iter()
+            .map(|precision| precision as i32)
+            .collect();
+        let mut aggregator = GroupAggregator::new(
+            kinds,
+            value_types,
+            value_columns,
+            key_columns,
+            generate_update_before != 0,
+        )
+        .with_key_timestamp_precisions(key_timestamp_precisions)
+        .with_filter_columns(filter_columns)
+        .with_count_columns(count_columns)
+        .with_distinct_view_columns(distinct_view_columns)
+        .with_record_count_column(record_count_column as i64);
+        if mini_batch != 0 {
+            aggregator = aggregator.with_mini_batch();
+        }
+        let aggregator = aggregator.with_memory_budget(memory_budget_bytes);
+        boxed_or_throw(&mut env, aggregator)
+    })
 }
 
 /// Folds an input batch into per-key state and exports the changelog rows it produces (the row kinds
 /// ride the `$row_kind$` column of the result).
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_updateGroupAggregator<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     in_array_address: jlong,
@@ -2459,31 +2473,35 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_updateGroupAg
     out_array_address: jlong,
     out_schema_address: jlong,
 ) {
-    let aggregator = unsafe { &mut *(handle as *mut GroupAggregator) };
-    // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
-    let result = {
-        let batch = import_record_batch(in_array_address, in_schema_address);
-        aggregator.update(&batch)
-    };
-    match result {
-        Ok(out) => export_record_batch(out, out_array_address, out_schema_address),
-        Err(e) => throw_memory_limit(&mut env, &e.to_string()),
-    }
+    crate::bridge::jni_guard(env, move |mut env| {
+        let aggregator = unsafe { &mut *(handle as *mut GroupAggregator) };
+        // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
+        let result = {
+            let batch = import_record_batch(in_array_address, in_schema_address);
+            aggregator.update(&batch)
+        };
+        match result {
+            Ok(out) => export_record_batch(out, out_array_address, out_schema_address),
+            Err(e) => throw_memory_limit(&mut env, &e.to_string()),
+        }
+    })
 }
 
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_flushGroupAggregator<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     out_array_address: jlong,
     out_schema_address: jlong,
 ) {
-    let aggregator = unsafe { &mut *(handle as *mut GroupAggregator) };
-    match aggregator.flush_mini_batch() {
-        Ok(out) => export_record_batch(out, out_array_address, out_schema_address),
-        Err(e) => throw_memory_limit(&mut env, &e.to_string()),
-    }
+    crate::bridge::jni_guard(env, move |mut env| {
+        let aggregator = unsafe { &mut *(handle as *mut GroupAggregator) };
+        match aggregator.flush_mini_batch() {
+            Ok(out) => export_record_batch(out, out_array_address, out_schema_address),
+            Err(e) => throw_memory_limit(&mut env, &e.to_string()),
+        }
+    })
 }
 
 /// Serializes the aggregator's per-key state for a checkpoint.
@@ -2495,10 +2513,12 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotGroup
     _class: JClass<'local>,
     handle: jlong,
 ) -> jbyteArray {
-    let aggregator = unsafe { &mut *(handle as *mut GroupAggregator) };
-    env.byte_array_from_slice(&aggregator.snapshot())
-        .expect("failed to allocate group-by snapshot array")
-        .into_raw()
+    crate::bridge::jni_guard(env, move |env| {
+        let aggregator = unsafe { &mut *(handle as *mut GroupAggregator) };
+        env.byte_array_from_slice(&aggregator.snapshot())
+            .expect("failed to allocate group-by snapshot array")
+            .into_raw()
+    })
 }
 
 /// Lists the non-empty Flink key groups represented by this group aggregator's current state.
@@ -2506,22 +2526,24 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotGroup
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotGroupAggregatorPartitions<
     'local,
 >(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     max_parallelism: jint,
     timestamp_precisions: JIntArray<'local>,
 ) -> jni::sys::jobjectArray {
-    let aggregator = unsafe { &mut *(handle as *mut GroupAggregator) };
-    let precisions: Vec<i32> = read_int_array(&env, &timestamp_precisions)
-        .into_iter()
-        .map(|precision| precision as i32)
-        .collect();
-    keyed_state_partition_array(
-        &mut env,
-        aggregator.snapshot_partitions(max_parallelism as usize, &precisions),
-        "group-aggregate",
-    )
+    crate::bridge::jni_guard(env, move |mut env| {
+        let aggregator = unsafe { &mut *(handle as *mut GroupAggregator) };
+        let precisions: Vec<i32> = read_int_array(&env, &timestamp_precisions)
+            .into_iter()
+            .map(|precision| precision as i32)
+            .collect();
+        keyed_state_partition_array(
+            &mut env,
+            aggregator.snapshot_partitions(max_parallelism as usize, &precisions),
+            "group-aggregate",
+        )
+    })
 }
 
 /// Rebuilds a `GROUP BY` aggregator from a snapshot taken by a prior run and returns a fresh handle.
@@ -2529,7 +2551,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotGroup
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreGroupAggregator<
     'local,
 >(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     aggregate_kinds: JIntArray<'local>,
     value_types: JIntArray<'local>,
@@ -2545,38 +2567,40 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreGroupA
     snapshot: JByteArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
-    let kinds = read_int_array(&env, &aggregate_kinds);
-    let value_types = read_int_array(&env, &value_types);
-    let value_columns = read_int_array(&env, &value_columns);
-    let filter_columns = read_int_array(&env, &filter_columns);
-    let count_columns = read_int_array(&env, &count_columns);
-    let distinct_view_columns = read_int_array(&env, &distinct_view_columns);
-    let key_columns = read_columns(&env, &key_columns);
-    let key_timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-        .into_iter()
-        .map(|precision| precision as i32)
-        .collect();
-    let bytes = env
-        .convert_byte_array(&snapshot)
-        .expect("failed to read group-by snapshot");
-    let mut aggregator = GroupAggregator::restore(
-        kinds,
-        value_types,
-        value_columns,
-        key_columns,
-        generate_update_before != 0,
-        &bytes,
-    )
-    .with_key_timestamp_precisions(key_timestamp_precisions)
-    .with_filter_columns(filter_columns)
-    .with_count_columns(count_columns)
-    .with_distinct_view_columns(distinct_view_columns)
-    .with_record_count_column(record_count_column as i64);
-    if mini_batch != 0 {
-        aggregator = aggregator.with_mini_batch();
-    }
-    let aggregator = aggregator.with_memory_budget(memory_budget_bytes);
-    boxed_or_throw(&mut env, aggregator)
+    crate::bridge::jni_guard(env, move |mut env| {
+        let kinds = read_int_array(&env, &aggregate_kinds);
+        let value_types = read_int_array(&env, &value_types);
+        let value_columns = read_int_array(&env, &value_columns);
+        let filter_columns = read_int_array(&env, &filter_columns);
+        let count_columns = read_int_array(&env, &count_columns);
+        let distinct_view_columns = read_int_array(&env, &distinct_view_columns);
+        let key_columns = read_columns(&env, &key_columns);
+        let key_timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
+            .into_iter()
+            .map(|precision| precision as i32)
+            .collect();
+        let bytes = env
+            .convert_byte_array(&snapshot)
+            .expect("failed to read group-by snapshot");
+        let mut aggregator = GroupAggregator::restore(
+            kinds,
+            value_types,
+            value_columns,
+            key_columns,
+            generate_update_before != 0,
+            &bytes,
+        )
+        .with_key_timestamp_precisions(key_timestamp_precisions)
+        .with_filter_columns(filter_columns)
+        .with_count_columns(count_columns)
+        .with_distinct_view_columns(distinct_view_columns)
+        .with_record_count_column(record_count_column as i64);
+        if mini_batch != 0 {
+            aggregator = aggregator.with_mini_batch();
+        }
+        let aggregator = aggregator.with_memory_budget(memory_budget_bytes);
+        boxed_or_throw(&mut env, aggregator)
+    })
 }
 
 /// Rebuilds a `GROUP BY` aggregator from all raw keyed-state partitions assigned to this subtask.
@@ -2584,7 +2608,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreGroupA
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreGroupAggregatorPartitions<
     'local,
 >(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     aggregate_kinds: JIntArray<'local>,
     value_types: JIntArray<'local>,
@@ -2600,59 +2624,63 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreGroupA
     snapshots: JObjectArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
-    let kinds = read_int_array(&env, &aggregate_kinds);
-    let value_types = read_int_array(&env, &value_types);
-    let value_columns = read_int_array(&env, &value_columns);
-    let filter_columns = read_int_array(&env, &filter_columns);
-    let count_columns = read_int_array(&env, &count_columns);
-    let distinct_view_columns = read_int_array(&env, &distinct_view_columns);
-    let key_columns = read_columns(&env, &key_columns);
-    let key_timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-        .into_iter()
-        .map(|precision| precision as i32)
-        .collect();
-    let count = env
-        .get_array_length(&snapshots)
-        .expect("read raw group partition count");
-    let mut restored = Vec::with_capacity(count as usize);
-    for index in 0..count {
-        let object = env
-            .get_object_array_element(&snapshots, index)
-            .expect("read raw group partition");
-        let bytes = JByteArray::from(object);
-        restored.push(
-            env.convert_byte_array(&bytes)
-                .expect("read raw group partition bytes"),
-        );
-    }
-    let mut aggregator = GroupAggregator::restore_partitions(
-        kinds,
-        value_types,
-        value_columns,
-        key_columns,
-        generate_update_before != 0,
-        &restored,
-    )
-    .with_key_timestamp_precisions(key_timestamp_precisions)
-    .with_filter_columns(filter_columns)
-    .with_count_columns(count_columns)
-    .with_distinct_view_columns(distinct_view_columns)
-    .with_record_count_column(record_count_column as i64);
-    if mini_batch != 0 {
-        aggregator = aggregator.with_mini_batch();
-    }
-    let aggregator = aggregator.with_memory_budget(memory_budget_bytes);
-    boxed_or_throw(&mut env, aggregator)
+    crate::bridge::jni_guard(env, move |mut env| {
+        let kinds = read_int_array(&env, &aggregate_kinds);
+        let value_types = read_int_array(&env, &value_types);
+        let value_columns = read_int_array(&env, &value_columns);
+        let filter_columns = read_int_array(&env, &filter_columns);
+        let count_columns = read_int_array(&env, &count_columns);
+        let distinct_view_columns = read_int_array(&env, &distinct_view_columns);
+        let key_columns = read_columns(&env, &key_columns);
+        let key_timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
+            .into_iter()
+            .map(|precision| precision as i32)
+            .collect();
+        let count = env
+            .get_array_length(&snapshots)
+            .expect("read raw group partition count");
+        let mut restored = Vec::with_capacity(count as usize);
+        for index in 0..count {
+            let object = env
+                .get_object_array_element(&snapshots, index)
+                .expect("read raw group partition");
+            let bytes = JByteArray::from(object);
+            restored.push(
+                env.convert_byte_array(&bytes)
+                    .expect("read raw group partition bytes"),
+            );
+        }
+        let mut aggregator = GroupAggregator::restore_partitions(
+            kinds,
+            value_types,
+            value_columns,
+            key_columns,
+            generate_update_before != 0,
+            &restored,
+        )
+        .with_key_timestamp_precisions(key_timestamp_precisions)
+        .with_filter_columns(filter_columns)
+        .with_count_columns(count_columns)
+        .with_distinct_view_columns(distinct_view_columns)
+        .with_record_count_column(record_count_column as i64);
+        if mini_batch != 0 {
+            aggregator = aggregator.with_mini_batch();
+        }
+        let aggregator = aggregator.with_memory_budget(memory_budget_bytes);
+        boxed_or_throw(&mut env, aggregator)
+    })
 }
 
 /// Releases the `GROUP BY` aggregator and its native state.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_closeGroupAggregator<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
 ) {
-    unsafe {
-        drop(from_handle::<GroupAggregator>(handle));
-    }
+    crate::bridge::jni_guard(env, move |_env| {
+        unsafe {
+            drop(from_handle::<GroupAggregator>(handle));
+        }
+    })
 }

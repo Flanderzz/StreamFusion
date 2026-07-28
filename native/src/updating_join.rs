@@ -1117,18 +1117,22 @@ state_bytes_getter!(Java_io_github_jordepic_streamfusion_Native_updatingJoinerSt
 
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_updatingJoinerStagingBytes<'local>(
-    _env: JNIEnv<'local>, _class: JClass<'local>, handle: jlong,
+    env: JNIEnv<'local>, _class: JClass<'local>, handle: jlong,
 ) -> jlong {
-    let joiner = unsafe { &*(handle as *const UpdatingJoiner) };
-    joiner.staging_bytes() as jlong
+    crate::bridge::jni_guard(env, move |_env| {
+        let joiner = unsafe { &*(handle as *const UpdatingJoiner) };
+        joiner.staging_bytes() as jlong
+    })
 }
 
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_updatingJoinerStagedKeys<'local>(
-    _env: JNIEnv<'local>, _class: JClass<'local>, handle: jlong,
+    env: JNIEnv<'local>, _class: JClass<'local>, handle: jlong,
 ) -> jlong {
-    let joiner = unsafe { &*(handle as *const UpdatingJoiner) };
-    joiner.staged_keys() as jlong
+    crate::bridge::jni_guard(env, move |_env| {
+        let joiner = unsafe { &*(handle as *const UpdatingJoiner) };
+        joiner.staged_keys() as jlong
+    })
 }
 
 /// Creates a regular (non-windowed) updating joiner and returns an opaque handle. The key column
@@ -1139,7 +1143,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_updatingJoine
 #[allow(clippy::too_many_arguments)]
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createUpdatingJoiner<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     left_keys: JIntArray<'local>,
     right_keys: JIntArray<'local>,
@@ -1156,54 +1160,58 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createUpdatin
     mini_batch: jboolean,
     memory_budget_bytes: jlong,
 ) -> jlong {
-    let left = read_columns(&env, &left_keys);
-    let right = read_columns(&env, &right_keys);
-    let left_schema = import_schema(left_schema_address);
-    let right_schema = import_schema(right_schema_address);
-    let predicate = read_join_predicate(
-        &mut env,
-        &pred_kinds,
-        &pred_payload,
-        &pred_child_counts,
-        &pred_longs,
-        &pred_doubles,
-        &pred_strings,
-    );
-    let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-        .into_iter()
-        .map(|precision| precision as i32)
-        .collect();
-    let joiner = UpdatingJoiner::new(
-        left,
-        right,
-        JoinKind::from_code(join_type),
-        left_schema,
-        right_schema,
-        predicate,
-    )
-    .with_key_timestamp_precisions(timestamp_precisions)
-    .with_mini_batch(mini_batch != 0)
-    .with_memory_budget(memory_budget_bytes);
-    boxed_or_throw(&mut env, joiner)
+    crate::bridge::jni_guard(env, move |mut env| {
+        let left = read_columns(&env, &left_keys);
+        let right = read_columns(&env, &right_keys);
+        let left_schema = import_schema(left_schema_address);
+        let right_schema = import_schema(right_schema_address);
+        let predicate = read_join_predicate(
+            &mut env,
+            &pred_kinds,
+            &pred_payload,
+            &pred_child_counts,
+            &pred_longs,
+            &pred_doubles,
+            &pred_strings,
+        );
+        let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
+            .into_iter()
+            .map(|precision| precision as i32)
+            .collect();
+        let joiner = UpdatingJoiner::new(
+            left,
+            right,
+            JoinKind::from_code(join_type),
+            left_schema,
+            right_schema,
+            predicate,
+        )
+        .with_key_timestamp_precisions(timestamp_precisions)
+        .with_mini_batch(mini_batch != 0)
+        .with_memory_budget(memory_budget_bytes);
+        boxed_or_throw(&mut env, joiner)
+    })
 }
 
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_flushUpdatingJoiner<'local>(
-    mut env: JNIEnv<'local>, _class: JClass<'local>, handle: jlong,
+    env: JNIEnv<'local>, _class: JClass<'local>, handle: jlong,
     out_array_address: jlong, out_schema_address: jlong,
 ) {
-    let joiner = unsafe { &mut *(handle as *mut UpdatingJoiner) };
-    match joiner.flush_mini_batch() {
-        Ok(out) => export_record_batch(out, out_array_address, out_schema_address),
-        Err(e) => throw_memory_limit(&mut env, &e.to_string()),
-    }
+    crate::bridge::jni_guard(env, move |mut env| {
+        let joiner = unsafe { &mut *(handle as *mut UpdatingJoiner) };
+        match joiner.flush_mini_batch() {
+            Ok(out) => export_record_batch(out, out_array_address, out_schema_address),
+            Err(e) => throw_memory_limit(&mut env, &e.to_string()),
+        }
+    })
 }
 
 /// Folds a left batch into state and exports the join changelog it produces (left cols, right cols,
 /// then `$row_kind$`).
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushLeftUpdatingJoiner<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     in_array_address: jlong,
@@ -1211,22 +1219,24 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushLeftUpdat
     out_array_address: jlong,
     out_schema_address: jlong,
 ) {
-    let joiner = unsafe { &mut *(handle as *mut UpdatingJoiner) };
-    // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
-    let result = {
-        let batch = import_record_batch(in_array_address, in_schema_address);
-        joiner.push(&batch, true)
-    };
-    match result {
-        Ok(out) => export_record_batch(out, out_array_address, out_schema_address),
-        Err(e) => throw_memory_limit(&mut env, &e.to_string()),
-    }
+    crate::bridge::jni_guard(env, move |mut env| {
+        let joiner = unsafe { &mut *(handle as *mut UpdatingJoiner) };
+        // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
+        let result = {
+            let batch = import_record_batch(in_array_address, in_schema_address);
+            joiner.push(&batch, true)
+        };
+        match result {
+            Ok(out) => export_record_batch(out, out_array_address, out_schema_address),
+            Err(e) => throw_memory_limit(&mut env, &e.to_string()),
+        }
+    })
 }
 
 /// Folds a right batch into state and exports the join changelog it produces.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushRightUpdatingJoiner<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     in_array_address: jlong,
@@ -1234,16 +1244,18 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushRightUpda
     out_array_address: jlong,
     out_schema_address: jlong,
 ) {
-    let joiner = unsafe { &mut *(handle as *mut UpdatingJoiner) };
-    // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
-    let result = {
-        let batch = import_record_batch(in_array_address, in_schema_address);
-        joiner.push(&batch, false)
-    };
-    match result {
-        Ok(out) => export_record_batch(out, out_array_address, out_schema_address),
-        Err(e) => throw_memory_limit(&mut env, &e.to_string()),
-    }
+    crate::bridge::jni_guard(env, move |mut env| {
+        let joiner = unsafe { &mut *(handle as *mut UpdatingJoiner) };
+        // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
+        let result = {
+            let batch = import_record_batch(in_array_address, in_schema_address);
+            joiner.push(&batch, false)
+        };
+        match result {
+            Ok(out) => export_record_batch(out, out_array_address, out_schema_address),
+            Err(e) => throw_memory_limit(&mut env, &e.to_string()),
+        }
+    })
 }
 
 /// Serializes the updating joiner's per-side state for a checkpoint.
@@ -1253,35 +1265,39 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotUpdat
     _class: JClass<'local>,
     handle: jlong,
 ) -> jbyteArray {
-    let joiner = unsafe { &mut *(handle as *mut UpdatingJoiner) };
-    env.byte_array_from_slice(&joiner.snapshot())
-        .expect("failed to allocate updating-join snapshot array")
-        .into_raw()
+    crate::bridge::jni_guard(env, move |env| {
+        let joiner = unsafe { &mut *(handle as *mut UpdatingJoiner) };
+        env.byte_array_from_slice(&joiner.snapshot())
+            .expect("failed to allocate updating-join snapshot array")
+            .into_raw()
+    })
 }
 
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotUpdatingJoinerPartitions<
     'local,
 >(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     max_parallelism: jint,
     _timestamp_precisions: JIntArray<'local>,
 ) -> jni::sys::jobjectArray {
-    let joiner = unsafe { &*(handle as *const UpdatingJoiner) };
-    keyed_state_partition_array(
-        &mut env,
-        joiner.snapshot_partitions(max_parallelism as usize),
-        "updating-join",
-    )
+    crate::bridge::jni_guard(env, move |mut env| {
+        let joiner = unsafe { &*(handle as *const UpdatingJoiner) };
+        keyed_state_partition_array(
+            &mut env,
+            joiner.snapshot_partitions(max_parallelism as usize),
+            "updating-join",
+        )
+    })
 }
 
 /// Rebuilds an updating joiner from a snapshot and returns a fresh handle.
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreUpdatingJoiner<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     left_keys: JIntArray<'local>,
     right_keys: JIntArray<'local>,
@@ -1299,37 +1315,39 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreUpdati
     snapshot: JByteArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
-    let left = read_columns(&env, &left_keys);
-    let right = read_columns(&env, &right_keys);
-    let left_schema = import_schema(left_schema_address);
-    let right_schema = import_schema(right_schema_address);
-    let predicate = read_join_predicate(
-        &mut env,
-        &pred_kinds,
-        &pred_payload,
-        &pred_child_counts,
-        &pred_longs,
-        &pred_doubles,
-        &pred_strings,
-    );
-    let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-        .into_iter()
-        .map(|precision| precision as i32)
-        .collect();
-    let bytes = env.convert_byte_array(&snapshot).expect("failed to read updating-join snapshot");
-    let joiner = UpdatingJoiner::restore(
-        left,
-        right,
-        timestamp_precisions,
-        JoinKind::from_code(join_type),
-        left_schema,
-        right_schema,
-        predicate,
-        &bytes,
-    )
-    .with_mini_batch(mini_batch != 0)
-    .with_memory_budget(memory_budget_bytes);
-    boxed_or_throw(&mut env, joiner)
+    crate::bridge::jni_guard(env, move |mut env| {
+        let left = read_columns(&env, &left_keys);
+        let right = read_columns(&env, &right_keys);
+        let left_schema = import_schema(left_schema_address);
+        let right_schema = import_schema(right_schema_address);
+        let predicate = read_join_predicate(
+            &mut env,
+            &pred_kinds,
+            &pred_payload,
+            &pred_child_counts,
+            &pred_longs,
+            &pred_doubles,
+            &pred_strings,
+        );
+        let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
+            .into_iter()
+            .map(|precision| precision as i32)
+            .collect();
+        let bytes = env.convert_byte_array(&snapshot).expect("failed to read updating-join snapshot");
+        let joiner = UpdatingJoiner::restore(
+            left,
+            right,
+            timestamp_precisions,
+            JoinKind::from_code(join_type),
+            left_schema,
+            right_schema,
+            predicate,
+            &bytes,
+        )
+        .with_mini_batch(mini_batch != 0)
+        .with_memory_budget(memory_budget_bytes);
+        boxed_or_throw(&mut env, joiner)
+    })
 }
 
 #[no_mangle]
@@ -1337,7 +1355,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreUpdati
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreUpdatingJoinerPartitions<
     'local,
 >(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     left_keys: JIntArray<'local>,
     right_keys: JIntArray<'local>,
@@ -1355,62 +1373,66 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreUpdati
     snapshots: JObjectArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
-    let left = read_columns(&env, &left_keys);
-    let right = read_columns(&env, &right_keys);
-    let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-        .into_iter()
-        .map(|precision| precision as i32)
-        .collect();
-    let left_schema = import_schema(left_schema_address);
-    let right_schema = import_schema(right_schema_address);
-    let predicate = read_join_predicate(
-        &mut env,
-        &pred_kinds,
-        &pred_payload,
-        &pred_child_counts,
-        &pred_longs,
-        &pred_doubles,
-        &pred_strings,
-    );
-    let count = env
-        .get_array_length(&snapshots)
-        .expect("read updating-join raw partition count");
-    let mut restored = Vec::with_capacity(count as usize);
-    for index in 0..count {
-        let bytes = JByteArray::from(
-            env.get_object_array_element(&snapshots, index)
-                .expect("read updating-join raw partition"),
+    crate::bridge::jni_guard(env, move |mut env| {
+        let left = read_columns(&env, &left_keys);
+        let right = read_columns(&env, &right_keys);
+        let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
+            .into_iter()
+            .map(|precision| precision as i32)
+            .collect();
+        let left_schema = import_schema(left_schema_address);
+        let right_schema = import_schema(right_schema_address);
+        let predicate = read_join_predicate(
+            &mut env,
+            &pred_kinds,
+            &pred_payload,
+            &pred_child_counts,
+            &pred_longs,
+            &pred_doubles,
+            &pred_strings,
         );
-        restored.push(
-            env.convert_byte_array(&bytes)
-                .expect("read updating-join raw partition bytes"),
-        );
-    }
-    let joiner = UpdatingJoiner::restore_partitions(
-        left,
-        right,
-        timestamp_precisions,
-        JoinKind::from_code(join_type),
-        left_schema,
-        right_schema,
-        predicate,
-        &restored,
-    )
-    .with_mini_batch(mini_batch != 0)
-    .with_memory_budget(memory_budget_bytes);
-    boxed_or_throw(&mut env, joiner)
+        let count = env
+            .get_array_length(&snapshots)
+            .expect("read updating-join raw partition count");
+        let mut restored = Vec::with_capacity(count as usize);
+        for index in 0..count {
+            let bytes = JByteArray::from(
+                env.get_object_array_element(&snapshots, index)
+                    .expect("read updating-join raw partition"),
+            );
+            restored.push(
+                env.convert_byte_array(&bytes)
+                    .expect("read updating-join raw partition bytes"),
+            );
+        }
+        let joiner = UpdatingJoiner::restore_partitions(
+            left,
+            right,
+            timestamp_precisions,
+            JoinKind::from_code(join_type),
+            left_schema,
+            right_schema,
+            predicate,
+            &restored,
+        )
+        .with_mini_batch(mini_batch != 0)
+        .with_memory_budget(memory_budget_bytes);
+        boxed_or_throw(&mut env, joiner)
+    })
 }
 
 /// Releases an updating joiner handle.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_closeUpdatingJoiner<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
 ) {
-    unsafe {
-        drop(from_handle::<UpdatingJoiner>(handle));
-    }
+    crate::bridge::jni_guard(env, move |_env| {
+        unsafe {
+            drop(from_handle::<UpdatingJoiner>(handle));
+        }
+    })
 }
 
 /// The join-side persistent backend: the Paimon MAP store — one typed table row per stored join

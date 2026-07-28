@@ -827,7 +827,7 @@ state_bytes_getter!(Java_io_github_jordepic_streamfusion_Native_temporalJoinerSt
 #[allow(clippy::too_many_arguments)]
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createTemporalJoiner<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     left_keys: JIntArray<'local>,
     right_keys: JIntArray<'local>,
@@ -844,97 +844,107 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createTempora
     pred_strings: JObjectArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
-    let left = read_columns(&env, &left_keys);
-    let right = read_columns(&env, &right_keys);
-    let left_schema = import_schema(left_schema_address);
-    let right_schema = import_schema(right_schema_address);
-    let predicate = read_join_predicate(
-        &mut env, &pred_kinds, &pred_payload, &pred_child_counts, &pred_longs, &pred_doubles,
-        &pred_strings,
-    );
-    let joiner = TemporalJoiner::new(
-        left,
-        right,
-        left_time as usize,
-        right_time as usize,
-        JoinKind::from_code(join_type),
-        left_schema,
-        right_schema,
-        predicate,
-    )
-    .with_memory_budget(memory_budget_bytes);
-    boxed_or_throw(&mut env, joiner)
+    crate::bridge::jni_guard(env, move |mut env| {
+        let left = read_columns(&env, &left_keys);
+        let right = read_columns(&env, &right_keys);
+        let left_schema = import_schema(left_schema_address);
+        let right_schema = import_schema(right_schema_address);
+        let predicate = read_join_predicate(
+            &mut env, &pred_kinds, &pred_payload, &pred_child_counts, &pred_longs, &pred_doubles,
+            &pred_strings,
+        );
+        let joiner = TemporalJoiner::new(
+            left,
+            right,
+            left_time as usize,
+            right_time as usize,
+            JoinKind::from_code(join_type),
+            left_schema,
+            right_schema,
+            predicate,
+        )
+        .with_memory_budget(memory_budget_bytes);
+        boxed_or_throw(&mut env, joiner)
+    })
 }
 
 /// Buffers a probe-side (left) batch (no output until a watermark).
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushLeftTemporalJoiner<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     in_array_address: jlong,
     in_schema_address: jlong,
 ) {
-    let joiner = unsafe { &mut *(handle as *mut TemporalJoiner) };
-    // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
-    let result = {
-        let batch = import_record_batch(in_array_address, in_schema_address);
-        joiner.push_left(&batch)
-    };
-    if let Err(e) = result {
-        throw_memory_limit(&mut env, &e.to_string());
-    }
+    crate::bridge::jni_guard(env, move |mut env| {
+        let joiner = unsafe { &mut *(handle as *mut TemporalJoiner) };
+        // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
+        let result = {
+            let batch = import_record_batch(in_array_address, in_schema_address);
+            joiner.push_left(&batch)
+        };
+        if let Err(e) = result {
+            throw_memory_limit(&mut env, &e.to_string());
+        }
+    })
 }
 
 /// Folds a build-side (right) changelog batch into the versioned state (no output until a watermark).
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushRightTemporalJoiner<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     in_array_address: jlong,
     in_schema_address: jlong,
 ) {
-    let joiner = unsafe { &mut *(handle as *mut TemporalJoiner) };
-    // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
-    let result = {
-        let batch = import_record_batch(in_array_address, in_schema_address);
-        joiner.push_right(&batch)
-    };
-    if let Err(e) = result {
-        throw_memory_limit(&mut env, &e.to_string());
-    }
+    crate::bridge::jni_guard(env, move |mut env| {
+        let joiner = unsafe { &mut *(handle as *mut TemporalJoiner) };
+        // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
+        let result = {
+            let batch = import_record_batch(in_array_address, in_schema_address);
+            joiner.push_right(&batch)
+        };
+        if let Err(e) = result {
+            throw_memory_limit(&mut env, &e.to_string());
+        }
+    })
 }
 
 /// Advances the watermark, emitting the joined rows for buffered probe rows it has passed and dropping
 /// obsolete build versions.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_advanceTemporalJoiner<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     watermark_millis: jlong,
     out_array_address: jlong,
     out_schema_address: jlong,
 ) {
-    let joiner = unsafe { &mut *(handle as *mut TemporalJoiner) };
-    // Fallible in persistent-state mode (the firing reads the committed tables).
-    match joiner.advance(watermark_millis) {
-        Ok(result) => export_record_batch(result, out_array_address, out_schema_address),
-        Err(e) => throw_memory_limit(&mut env, &e.to_string()),
-    }
+    crate::bridge::jni_guard(env, move |mut env| {
+        let joiner = unsafe { &mut *(handle as *mut TemporalJoiner) };
+        // Fallible in persistent-state mode (the firing reads the committed tables).
+        match joiner.advance(watermark_millis) {
+            Ok(result) => export_record_batch(result, out_array_address, out_schema_address),
+            Err(e) => throw_memory_limit(&mut env, &e.to_string()),
+        }
+    })
 }
 
 /// Releases the temporal joiner and its native state.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_closeTemporalJoiner<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
 ) {
-    unsafe {
-        drop(from_handle::<TemporalJoiner>(handle));
-    }
+    crate::bridge::jni_guard(env, move |_env| {
+        unsafe {
+            drop(from_handle::<TemporalJoiner>(handle));
+        }
+    })
 }
 
 /// Serializes the joiner's buffered probe rows and versioned build state for a checkpoint.
@@ -944,39 +954,43 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotTempo
     _class: JClass<'local>,
     handle: jlong,
 ) -> jbyteArray {
-    let joiner = unsafe { &*(handle as *mut TemporalJoiner) };
-    env.byte_array_from_slice(&joiner.snapshot())
-        .expect("failed to allocate temporal-join snapshot array")
-        .into_raw()
+    crate::bridge::jni_guard(env, move |env| {
+        let joiner = unsafe { &*(handle as *mut TemporalJoiner) };
+        env.byte_array_from_slice(&joiner.snapshot())
+            .expect("failed to allocate temporal-join snapshot array")
+            .into_raw()
+    })
 }
 
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotTemporalJoinerPartitions<
     'local,
 >(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     max_parallelism: jint,
     timestamp_precisions: JIntArray<'local>,
 ) -> jni::sys::jobjectArray {
-    let joiner = unsafe { &*(handle as *const TemporalJoiner) };
-    let precisions: Vec<i32> = read_int_array(&env, &timestamp_precisions)
-        .into_iter()
-        .map(|precision| precision as i32)
-        .collect();
-    keyed_state_partition_array(
-        &mut env,
-        joiner.snapshot_partitions(max_parallelism as usize, &precisions),
-        "temporal-join",
-    )
+    crate::bridge::jni_guard(env, move |mut env| {
+        let joiner = unsafe { &*(handle as *const TemporalJoiner) };
+        let precisions: Vec<i32> = read_int_array(&env, &timestamp_precisions)
+            .into_iter()
+            .map(|precision| precision as i32)
+            .collect();
+        keyed_state_partition_array(
+            &mut env,
+            joiner.snapshot_partitions(max_parallelism as usize, &precisions),
+            "temporal-join",
+        )
+    })
 }
 
 /// Rebuilds a temporal joiner from a snapshot taken by a prior run and returns a fresh handle.
 #[allow(clippy::too_many_arguments)]
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreTemporalJoiner<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     left_keys: JIntArray<'local>,
     right_keys: JIntArray<'local>,
@@ -994,28 +1008,30 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreTempor
     snapshot: JByteArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
-    let left = read_columns(&env, &left_keys);
-    let right = read_columns(&env, &right_keys);
-    let left_schema = import_schema(left_schema_address);
-    let right_schema = import_schema(right_schema_address);
-    let predicate = read_join_predicate(
-        &mut env, &pred_kinds, &pred_payload, &pred_child_counts, &pred_longs, &pred_doubles,
-        &pred_strings,
-    );
-    let bytes = env.convert_byte_array(&snapshot).expect("failed to read temporal-join snapshot");
-    let joiner = TemporalJoiner::restore(
-        left,
-        right,
-        left_time as usize,
-        right_time as usize,
-        JoinKind::from_code(join_type),
-        left_schema,
-        right_schema,
-        predicate,
-        &bytes,
-    )
-    .with_memory_budget(memory_budget_bytes);
-    boxed_or_throw(&mut env, joiner)
+    crate::bridge::jni_guard(env, move |mut env| {
+        let left = read_columns(&env, &left_keys);
+        let right = read_columns(&env, &right_keys);
+        let left_schema = import_schema(left_schema_address);
+        let right_schema = import_schema(right_schema_address);
+        let predicate = read_join_predicate(
+            &mut env, &pred_kinds, &pred_payload, &pred_child_counts, &pred_longs, &pred_doubles,
+            &pred_strings,
+        );
+        let bytes = env.convert_byte_array(&snapshot).expect("failed to read temporal-join snapshot");
+        let joiner = TemporalJoiner::restore(
+            left,
+            right,
+            left_time as usize,
+            right_time as usize,
+            JoinKind::from_code(join_type),
+            left_schema,
+            right_schema,
+            predicate,
+            &bytes,
+        )
+        .with_memory_budget(memory_budget_bytes);
+        boxed_or_throw(&mut env, joiner)
+    })
 }
 
 #[no_mangle]
@@ -1023,7 +1039,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreTempor
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreTemporalJoinerPartitions<
     'local,
 >(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     left_keys: JIntArray<'local>,
     right_keys: JIntArray<'local>,
@@ -1041,44 +1057,46 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreTempor
     snapshots: JObjectArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
-    let left = read_columns(&env, &left_keys);
-    let right = read_columns(&env, &right_keys);
-    let left_schema = import_schema(left_schema_address);
-    let right_schema = import_schema(right_schema_address);
-    let predicate = read_join_predicate(
-        &mut env,
-        &pred_kinds,
-        &pred_payload,
-        &pred_child_counts,
-        &pred_longs,
-        &pred_doubles,
-        &pred_strings,
-    );
-    let count = env
-        .get_array_length(&snapshots)
-        .expect("read temporal raw partition count");
-    let mut restored = Vec::with_capacity(count as usize);
-    for index in 0..count {
-        let bytes = JByteArray::from(
-            env.get_object_array_element(&snapshots, index)
-                .expect("read temporal raw partition"),
+    crate::bridge::jni_guard(env, move |mut env| {
+        let left = read_columns(&env, &left_keys);
+        let right = read_columns(&env, &right_keys);
+        let left_schema = import_schema(left_schema_address);
+        let right_schema = import_schema(right_schema_address);
+        let predicate = read_join_predicate(
+            &mut env,
+            &pred_kinds,
+            &pred_payload,
+            &pred_child_counts,
+            &pred_longs,
+            &pred_doubles,
+            &pred_strings,
         );
-        restored.push(
-            env.convert_byte_array(&bytes)
-                .expect("read temporal raw partition bytes"),
-        );
-    }
-    let joiner = TemporalJoiner::restore_partitions(
-        left,
-        right,
-        left_time as usize,
-        right_time as usize,
-        JoinKind::from_code(join_type),
-        left_schema,
-        right_schema,
-        predicate,
-        &restored,
-    )
-    .with_memory_budget(memory_budget_bytes);
-    boxed_or_throw(&mut env, joiner)
+        let count = env
+            .get_array_length(&snapshots)
+            .expect("read temporal raw partition count");
+        let mut restored = Vec::with_capacity(count as usize);
+        for index in 0..count {
+            let bytes = JByteArray::from(
+                env.get_object_array_element(&snapshots, index)
+                    .expect("read temporal raw partition"),
+            );
+            restored.push(
+                env.convert_byte_array(&bytes)
+                    .expect("read temporal raw partition bytes"),
+            );
+        }
+        let joiner = TemporalJoiner::restore_partitions(
+            left,
+            right,
+            left_time as usize,
+            right_time as usize,
+            JoinKind::from_code(join_type),
+            left_schema,
+            right_schema,
+            predicate,
+            &restored,
+        )
+        .with_memory_budget(memory_budget_bytes);
+        boxed_or_throw(&mut env, joiner)
+    })
 }

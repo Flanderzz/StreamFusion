@@ -9,10 +9,12 @@ const NO_STOPPING_OFFSET: i64 = i64::MIN;
 #[cfg(feature = "fluss")]
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_fluss_NativeFluss_featureBuilt<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
 ) -> jni::sys::jboolean {
-    cfg!(feature = "fluss") as jni::sys::jboolean
+    crate::bridge::jni_guard(env, move |_env| {
+        cfg!(feature = "fluss") as jni::sys::jboolean
+    })
 }
 
 #[cfg(feature = "fluss")]

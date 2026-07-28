@@ -422,23 +422,25 @@ impl ParquetEncoder {
 /// the key/value arrays the resolved writer settings. Returns an opaque handle.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_parquet_NativeParquet_createParquetEncoder<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     schema_address: jlong,
     partition_columns: JIntArray<'local>,
     config_keys: JObjectArray<'local>,
     config_values: JObjectArray<'local>,
 ) -> jlong {
-    let schema = import_schema(schema_address);
-    let partition_columns = read_columns(&env, &partition_columns);
-    let keys = required_strings(&mut env, &config_keys);
-    let values = required_strings(&mut env, &config_values);
-    into_handle(ParquetEncoder::new(
-        schema,
-        &partition_columns,
-        &keys,
-        &values,
-    ))
+    crate::bridge::jni_guard(env, move |mut env| {
+        let schema = import_schema(schema_address);
+        let partition_columns = read_columns(&env, &partition_columns);
+        let keys = required_strings(&mut env, &config_keys);
+        let values = required_strings(&mut env, &config_values);
+        into_handle(ParquetEncoder::new(
+            schema,
+            &partition_columns,
+            &keys,
+            &values,
+        ))
+    })
 }
 
 fn required_strings(env: &mut JNIEnv, values: &JObjectArray) -> Vec<String> {
@@ -451,15 +453,17 @@ fn required_strings(env: &mut JNIEnv, values: &JObjectArray) -> Vec<String> {
 /// Encodes an Arrow batch the JVM exported into the open Parquet stream behind `handle`.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_parquet_NativeParquet_parquetEncoderWrite<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     in_array_address: jlong,
     in_schema_address: jlong,
 ) {
-    let encoder = unsafe { &mut *(handle as *mut ParquetEncoder) };
-    let batch = import_record_batch(in_array_address, in_schema_address);
-    encoder.write(&batch);
+    crate::bridge::jni_guard(env, move |_env| {
+        let encoder = unsafe { &mut *(handle as *mut ParquetEncoder) };
+        let batch = import_record_batch(in_array_address, in_schema_address);
+        encoder.write(&batch);
+    })
 }
 
 /// Copies buffered encoded bytes into `chunk`, returning the count (0 = drained). The chunk is
@@ -467,43 +471,49 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_parquet_NativeParque
 /// and the Flink output stream the JVM writes it to.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_parquet_NativeParquet_parquetEncoderDrain<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     chunk: JByteArray<'local>,
 ) -> jint {
-    use jni::objects::ReleaseMode;
+    crate::bridge::jni_guard(env, move |env| {
+        use jni::objects::ReleaseMode;
 
-    let encoder = unsafe { &*(handle as *const ParquetEncoder) };
-    let mut elements = unsafe { env.get_array_elements_critical(&chunk, ReleaseMode::CopyBack) }
-        .expect("failed to pin drain chunk");
-    let out =
-        unsafe { std::slice::from_raw_parts_mut(elements.as_mut_ptr() as *mut u8, elements.len()) };
-    encoder.drain_into(out) as jint
+        let encoder = unsafe { &*(handle as *const ParquetEncoder) };
+        let mut elements = unsafe { env.get_array_elements_critical(&chunk, ReleaseMode::CopyBack) }
+            .expect("failed to pin drain chunk");
+        let out =
+            unsafe { std::slice::from_raw_parts_mut(elements.as_mut_ptr() as *mut u8, elements.len()) };
+        encoder.drain_into(out) as jint
+    })
 }
 
 /// Writes the Parquet footer into the buffer. The handle stays open so the JVM can drain the
 /// remaining bytes; release it with `closeParquetEncoder`.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_parquet_NativeParquet_parquetEncoderFinish<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
 ) {
-    let encoder = unsafe { &mut *(handle as *mut ParquetEncoder) };
-    encoder.finish();
+    crate::bridge::jni_guard(env, move |_env| {
+        let encoder = unsafe { &mut *(handle as *mut ParquetEncoder) };
+        encoder.finish();
+    })
 }
 
 /// Releases a Parquet encoder handle; also the abort path for a part file that never finished.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_parquet_NativeParquet_closeParquetEncoder<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
 ) {
-    unsafe {
-        drop(from_handle::<ParquetEncoder>(handle));
-    }
+    crate::bridge::jni_guard(env, move |_env| {
+        unsafe {
+            drop(from_handle::<ParquetEncoder>(handle));
+        }
+    })
 }
 
 /// Splits one batch into per-partition sub-batches — Arroyo's Partitioner::partition shape: the
@@ -577,10 +587,12 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_parquet_NativeParque
     in_schema_address: jlong,
     partition_columns: JIntArray<'local>,
 ) -> jlong {
-    let batch = import_record_batch(in_array_address, in_schema_address);
-    let partition_columns = read_columns(&env, &partition_columns);
-    let slices = split_by_partition_columns(&batch, &partition_columns);
-    into_handle(PartitionSplit { slices: slices.into_iter().rev().collect() })
+    crate::bridge::jni_guard(env, move |env| {
+        let batch = import_record_batch(in_array_address, in_schema_address);
+        let partition_columns = read_columns(&env, &partition_columns);
+        let slices = split_by_partition_columns(&batch, &partition_columns);
+        into_handle(PartitionSplit { slices: slices.into_iter().rev().collect() })
+    })
 }
 
 /// Per-partition groups awaiting export, in reverse so the JVM pulls them in first-seen order.
@@ -592,32 +604,36 @@ pub(crate) struct PartitionSplit {
 /// every group has been pulled.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_parquet_NativeParquet_nextPartitionSlice<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     out_array_address: jlong,
     out_schema_address: jlong,
 ) -> jboolean {
-    let split = unsafe { &mut *(handle as *mut PartitionSplit) };
-    match split.slices.pop() {
-        Some(slice) => {
-            export_record_batch(slice, out_array_address, out_schema_address);
-            1
+    crate::bridge::jni_guard(env, move |_env| {
+        let split = unsafe { &mut *(handle as *mut PartitionSplit) };
+        match split.slices.pop() {
+            Some(slice) => {
+                export_record_batch(slice, out_array_address, out_schema_address);
+                1
+            }
+            None => 0,
         }
-        None => 0,
-    }
+    })
 }
 
 /// Releases a partition split handle, dropping any groups the JVM did not pull.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_parquet_NativeParquet_closePartitionSplit<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
 ) {
-    unsafe {
-        drop(from_handle::<PartitionSplit>(handle));
-    }
+    crate::bridge::jni_guard(env, move |_env| {
+        unsafe {
+            drop(from_handle::<PartitionSplit>(handle));
+        }
+    })
 }
 
 /// Reorders/selects a batch's columns to match the requested projection (by name); identity when no
@@ -698,25 +714,27 @@ pub(crate) fn parquet_file_schema(path: &str) -> SchemaRef {
 /// range_length)` — and returns an opaque handle, released with `closeSource`.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_parquet_NativeParquet_openParquet<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     path: JString<'local>,
     projection: JObjectArray<'local>,
     range_start: jlong,
     range_length: jlong,
 ) -> jlong {
-    let path: String = env.get_string(&path).expect("failed to read path").into();
-    let projection = read_strings(&mut env, &projection)
-        .into_iter()
-        .map(|name| name.expect("projection column name was null"))
-        .collect::<Vec<_>>();
-    let schema = parquet_file_schema(&path);
-    let file_source = Arc::new(
-        datafusion::datasource::physical_plan::ParquetSource::new(schema.clone()),
-    ) as Arc<dyn datafusion::datasource::physical_plan::FileSource>;
-    let source: Box<dyn BatchSource> =
-        Box::new(FileScan::open(file_source, &path, schema, &projection, range_start, range_length));
-    into_handle(source)
+    crate::bridge::jni_guard(env, move |mut env| {
+        let path: String = env.get_string(&path).expect("failed to read path").into();
+        let projection = read_strings(&mut env, &projection)
+            .into_iter()
+            .map(|name| name.expect("projection column name was null"))
+            .collect::<Vec<_>>();
+        let schema = parquet_file_schema(&path);
+        let file_source = Arc::new(
+            datafusion::datasource::physical_plan::ParquetSource::new(schema.clone()),
+        ) as Arc<dyn datafusion::datasource::physical_plan::FileSource>;
+        let source: Box<dyn BatchSource> =
+            Box::new(FileScan::open(file_source, &path, schema, &projection, range_start, range_length));
+        into_handle(source)
+    })
 }
 
 /// Exports the next Arrow batch from the source into the consumer-allocated C structs, returning
@@ -724,32 +742,36 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_parquet_NativeParque
 /// file source.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_parquet_NativeParquet_nextBatch<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     out_array_address: jlong,
     out_schema_address: jlong,
 ) -> jboolean {
-    let source = unsafe { &mut *(handle as *mut Box<dyn BatchSource>) };
-    match source.next_batch() {
-        Some(batch) => {
-            export_record_batch(batch, out_array_address, out_schema_address);
-            1
+    crate::bridge::jni_guard(env, move |_env| {
+        let source = unsafe { &mut *(handle as *mut Box<dyn BatchSource>) };
+        match source.next_batch() {
+            Some(batch) => {
+                export_record_batch(batch, out_array_address, out_schema_address);
+                1
+            }
+            None => 0,
         }
-        None => 0,
-    }
+    })
 }
 
 /// Releases a native file source handle.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_parquet_NativeParquet_closeSource<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
 ) {
-    unsafe {
-        drop(from_handle::<Box<dyn BatchSource>>(handle));
-    }
+    crate::bridge::jni_guard(env, move |_env| {
+        unsafe {
+            drop(from_handle::<Box<dyn BatchSource>>(handle));
+        }
+    })
 }
 
 #[cfg(test)]

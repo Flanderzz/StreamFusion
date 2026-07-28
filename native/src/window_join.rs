@@ -527,7 +527,7 @@ state_bytes_getter!(Java_io_github_jordepic_streamfusion_Native_windowJoinerStat
 #[allow(clippy::too_many_arguments)]
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createWindowJoiner<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     left_keys: JIntArray<'local>,
     right_keys: JIntArray<'local>,
@@ -546,98 +546,108 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createWindowJ
     pred_strings: JObjectArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
-    let left = read_columns(&env, &left_keys);
-    let right = read_columns(&env, &right_keys);
-    let left_schema = import_schema(left_schema_address);
-    let right_schema = import_schema(right_schema_address);
-    let predicate = read_join_predicate(
-        &mut env,
-        &pred_kinds,
-        &pred_payload,
-        &pred_child_counts,
-        &pred_longs,
-        &pred_doubles,
-        &pred_strings,
-    );
-    let joiner = WindowJoiner::new(
-        left,
-        right,
-        left_window_start as usize,
-        left_window_end as usize,
-        right_window_start as usize,
-        right_window_end as usize,
-        predicate,
-        JoinKind::from_code(join_type),
-        left_schema,
-        right_schema,
-    )
-    .with_memory_budget(memory_budget_bytes);
-    boxed_or_throw(&mut env, joiner)
+    crate::bridge::jni_guard(env, move |mut env| {
+        let left = read_columns(&env, &left_keys);
+        let right = read_columns(&env, &right_keys);
+        let left_schema = import_schema(left_schema_address);
+        let right_schema = import_schema(right_schema_address);
+        let predicate = read_join_predicate(
+            &mut env,
+            &pred_kinds,
+            &pred_payload,
+            &pred_child_counts,
+            &pred_longs,
+            &pred_doubles,
+            &pred_strings,
+        );
+        let joiner = WindowJoiner::new(
+            left,
+            right,
+            left_window_start as usize,
+            left_window_end as usize,
+            right_window_start as usize,
+            right_window_end as usize,
+            predicate,
+            JoinKind::from_code(join_type),
+            left_schema,
+            right_schema,
+        )
+        .with_memory_budget(memory_budget_bytes);
+        boxed_or_throw(&mut env, joiner)
+    })
 }
 
 /// Buffers a left batch (no output); its rows are joined later when the watermark closes their window.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushLeftWindowJoiner<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     in_array_address: jlong,
     in_schema_address: jlong,
 ) {
-    let joiner = unsafe { &mut *(handle as *mut WindowJoiner) };
-    // The pushed batch is retained in the buffer (not dropped), so no JVM release upcall runs
-    // between a failed account and the throw (see updateTumblingAggregator).
-    let result = joiner.push_left(import_record_batch(in_array_address, in_schema_address));
-    if let Err(e) = result {
-        throw_memory_limit(&mut env, &e.to_string());
-    }
+    crate::bridge::jni_guard(env, move |mut env| {
+        let joiner = unsafe { &mut *(handle as *mut WindowJoiner) };
+        // The pushed batch is retained in the buffer (not dropped), so no JVM release upcall runs
+        // between a failed account and the throw (see updateTumblingAggregator).
+        let result = joiner.push_left(import_record_batch(in_array_address, in_schema_address));
+        if let Err(e) = result {
+            throw_memory_limit(&mut env, &e.to_string());
+        }
+    })
 }
 
 /// Buffers a right batch (no output).
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushRightWindowJoiner<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     in_array_address: jlong,
     in_schema_address: jlong,
 ) {
-    let joiner = unsafe { &mut *(handle as *mut WindowJoiner) };
-    // The pushed batch is retained in the buffer (not dropped), so no JVM release upcall runs
-    // between a failed account and the throw (see updateTumblingAggregator).
-    let result = joiner.push_right(import_record_batch(in_array_address, in_schema_address));
-    if let Err(e) = result {
-        throw_memory_limit(&mut env, &e.to_string());
-    }
+    crate::bridge::jni_guard(env, move |mut env| {
+        let joiner = unsafe { &mut *(handle as *mut WindowJoiner) };
+        // The pushed batch is retained in the buffer (not dropped), so no JVM release upcall runs
+        // between a failed account and the throw (see updateTumblingAggregator).
+        let result = joiner.push_right(import_record_batch(in_array_address, in_schema_address));
+        if let Err(e) = result {
+            throw_memory_limit(&mut env, &e.to_string());
+        }
+    })
 }
 
 /// Exports the INNER matches of every window the watermark has closed (then evicts those windows).
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_flushWindowJoiner<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     watermark_millis: jlong,
     out_array_address: jlong,
     out_schema_address: jlong,
 ) {
-    let joiner = unsafe { &mut *(handle as *mut WindowJoiner) };
-    match joiner.flush(watermark_millis) {
-        Ok(out) => export_record_batch(out, out_array_address, out_schema_address),
-        Err(e) => throw_memory_limit(&mut env, &e.to_string()),
-    }
+    crate::bridge::jni_guard(env, move |mut env| {
+        let joiner = unsafe { &mut *(handle as *mut WindowJoiner) };
+        match joiner.flush(watermark_millis) {
+            Ok(out) => export_record_batch(out, out_array_address, out_schema_address),
+            Err(e) => throw_memory_limit(&mut env, &e.to_string()),
+        }
+    })
 }
 
 /// Releases the window joiner and its native state.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_closeWindowJoiner<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
 ) {
-    unsafe {
-        drop(from_handle::<WindowJoiner>(handle));
-    }
+    crate::bridge::jni_guard(env, move |_env| {
+        unsafe {
+            drop(from_handle::<WindowJoiner>(handle));
+        }
+    })
 }
 
 /// Serializes the window joiner's buffered rows for a checkpoint.
@@ -647,39 +657,43 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotWindo
     _class: JClass<'local>,
     handle: jlong,
 ) -> jbyteArray {
-    let joiner = unsafe { &*(handle as *mut WindowJoiner) };
-    env.byte_array_from_slice(&joiner.snapshot())
-        .expect("failed to allocate window-join snapshot array")
-        .into_raw()
+    crate::bridge::jni_guard(env, move |env| {
+        let joiner = unsafe { &*(handle as *mut WindowJoiner) };
+        env.byte_array_from_slice(&joiner.snapshot())
+            .expect("failed to allocate window-join snapshot array")
+            .into_raw()
+    })
 }
 
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotWindowJoinerPartitions<
     'local,
 >(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     max_parallelism: jint,
     timestamp_precisions: JIntArray<'local>,
 ) -> jni::sys::jobjectArray {
-    let joiner = unsafe { &*(handle as *const WindowJoiner) };
-    let precisions: Vec<i32> = read_int_array(&env, &timestamp_precisions)
-        .into_iter()
-        .map(|precision| precision as i32)
-        .collect();
-    keyed_state_partition_array(
-        &mut env,
-        joiner.snapshot_partitions(max_parallelism as usize, &precisions),
-        "window-join",
-    )
+    crate::bridge::jni_guard(env, move |mut env| {
+        let joiner = unsafe { &*(handle as *const WindowJoiner) };
+        let precisions: Vec<i32> = read_int_array(&env, &timestamp_precisions)
+            .into_iter()
+            .map(|precision| precision as i32)
+            .collect();
+        keyed_state_partition_array(
+            &mut env,
+            joiner.snapshot_partitions(max_parallelism as usize, &precisions),
+            "window-join",
+        )
+    })
 }
 
 /// Rebuilds a window joiner from a snapshot taken by a prior run and returns a fresh handle.
 #[allow(clippy::too_many_arguments)]
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreWindowJoiner<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     left_keys: JIntArray<'local>,
     right_keys: JIntArray<'local>,
@@ -699,35 +713,37 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreWindow
     snapshot: JByteArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
-    let left = read_columns(&env, &left_keys);
-    let right = read_columns(&env, &right_keys);
-    let left_schema = import_schema(left_schema_address);
-    let right_schema = import_schema(right_schema_address);
-    let predicate = read_join_predicate(
-        &mut env,
-        &pred_kinds,
-        &pred_payload,
-        &pred_child_counts,
-        &pred_longs,
-        &pred_doubles,
-        &pred_strings,
-    );
-    let bytes = env.convert_byte_array(&snapshot).expect("failed to read window-join snapshot");
-    let joiner = WindowJoiner::restore(
-        left,
-        right,
-        left_window_start as usize,
-        left_window_end as usize,
-        right_window_start as usize,
-        right_window_end as usize,
-        predicate,
-        JoinKind::from_code(join_type),
-        left_schema,
-        right_schema,
-        &bytes,
-    )
-    .with_memory_budget(memory_budget_bytes);
-    boxed_or_throw(&mut env, joiner)
+    crate::bridge::jni_guard(env, move |mut env| {
+        let left = read_columns(&env, &left_keys);
+        let right = read_columns(&env, &right_keys);
+        let left_schema = import_schema(left_schema_address);
+        let right_schema = import_schema(right_schema_address);
+        let predicate = read_join_predicate(
+            &mut env,
+            &pred_kinds,
+            &pred_payload,
+            &pred_child_counts,
+            &pred_longs,
+            &pred_doubles,
+            &pred_strings,
+        );
+        let bytes = env.convert_byte_array(&snapshot).expect("failed to read window-join snapshot");
+        let joiner = WindowJoiner::restore(
+            left,
+            right,
+            left_window_start as usize,
+            left_window_end as usize,
+            right_window_start as usize,
+            right_window_end as usize,
+            predicate,
+            JoinKind::from_code(join_type),
+            left_schema,
+            right_schema,
+            &bytes,
+        )
+        .with_memory_budget(memory_budget_bytes);
+        boxed_or_throw(&mut env, joiner)
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -735,7 +751,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreWindow
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreWindowJoinerPartitions<
     'local,
 >(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     left_keys: JIntArray<'local>,
     right_keys: JIntArray<'local>,
@@ -755,46 +771,48 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreWindow
     snapshots: JObjectArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
-    let left = read_columns(&env, &left_keys);
-    let right = read_columns(&env, &right_keys);
-    let left_schema = import_schema(left_schema_address);
-    let right_schema = import_schema(right_schema_address);
-    let predicate = read_join_predicate(
-        &mut env,
-        &pred_kinds,
-        &pred_payload,
-        &pred_child_counts,
-        &pred_longs,
-        &pred_doubles,
-        &pred_strings,
-    );
-    let count = env
-        .get_array_length(&snapshots)
-        .expect("read window-join raw partition count");
-    let mut restored = Vec::with_capacity(count as usize);
-    for index in 0..count {
-        let bytes = JByteArray::from(
-            env.get_object_array_element(&snapshots, index)
-                .expect("read window-join raw partition"),
+    crate::bridge::jni_guard(env, move |mut env| {
+        let left = read_columns(&env, &left_keys);
+        let right = read_columns(&env, &right_keys);
+        let left_schema = import_schema(left_schema_address);
+        let right_schema = import_schema(right_schema_address);
+        let predicate = read_join_predicate(
+            &mut env,
+            &pred_kinds,
+            &pred_payload,
+            &pred_child_counts,
+            &pred_longs,
+            &pred_doubles,
+            &pred_strings,
         );
-        restored.push(
-            env.convert_byte_array(&bytes)
-                .expect("read window-join raw partition bytes"),
-        );
-    }
-    let joiner = WindowJoiner::restore_partitions(
-        left,
-        right,
-        left_window_start as usize,
-        left_window_end as usize,
-        right_window_start as usize,
-        right_window_end as usize,
-        predicate,
-        JoinKind::from_code(join_type),
-        left_schema,
-        right_schema,
-        &restored,
-    )
-    .with_memory_budget(memory_budget_bytes);
-    boxed_or_throw(&mut env, joiner)
+        let count = env
+            .get_array_length(&snapshots)
+            .expect("read window-join raw partition count");
+        let mut restored = Vec::with_capacity(count as usize);
+        for index in 0..count {
+            let bytes = JByteArray::from(
+                env.get_object_array_element(&snapshots, index)
+                    .expect("read window-join raw partition"),
+            );
+            restored.push(
+                env.convert_byte_array(&bytes)
+                    .expect("read window-join raw partition bytes"),
+            );
+        }
+        let joiner = WindowJoiner::restore_partitions(
+            left,
+            right,
+            left_window_start as usize,
+            left_window_end as usize,
+            right_window_start as usize,
+            right_window_end as usize,
+            predicate,
+            JoinKind::from_code(join_type),
+            left_schema,
+            right_schema,
+            &restored,
+        )
+        .with_memory_budget(memory_budget_bytes);
+        boxed_or_throw(&mut env, joiner)
+    })
 }

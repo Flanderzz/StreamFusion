@@ -1450,7 +1450,7 @@ state_bytes_getter!(Java_io_github_jordepic_streamfusion_Native_overAggregatorSt
 /// indices locate those columns within the buffered input batch.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createOverAggregator<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     value_types: JIntArray<'local>,
     aggregate_kinds: JIntArray<'local>,
@@ -1462,47 +1462,51 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createOverAgg
     proctime: jboolean,
     memory_budget_bytes: jlong,
 ) -> jlong {
-    let kinds = read_int_array(&env, &aggregate_kinds);
-    let value_types = read_int_array(&env, &value_types);
-    let values = read_columns(&env, &value_columns);
-    let keys = read_columns(&env, &key_columns);
-    let aggregator = OverWindowAggregator::new(
-        value_types,
-        kinds,
-        rt_column as usize,
-        values,
-        keys,
-        frame_kind as i64,
-        frame_offset,
-        proctime != 0,
-    )
-    .with_memory_budget(memory_budget_bytes);
-    boxed_or_throw(&mut env, aggregator)
+    crate::bridge::jni_guard(env, move |mut env| {
+        let kinds = read_int_array(&env, &aggregate_kinds);
+        let value_types = read_int_array(&env, &value_types);
+        let values = read_columns(&env, &value_columns);
+        let keys = read_columns(&env, &key_columns);
+        let aggregator = OverWindowAggregator::new(
+            value_types,
+            kinds,
+            rt_column as usize,
+            values,
+            keys,
+            frame_kind as i64,
+            frame_offset,
+            proctime != 0,
+        )
+        .with_memory_budget(memory_budget_bytes);
+        boxed_or_throw(&mut env, aggregator)
+    })
 }
 
 /// Buffers an input batch (no output); the rows are emitted later when a watermark completes them.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushOverAggregator<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     in_array_address: jlong,
     in_schema_address: jlong,
 ) {
-    let aggregator = unsafe { &mut *(handle as *mut OverWindowAggregator) };
-    // The pushed batch is retained in the buffer (not dropped), so no JVM release upcall runs
-    // between a failed account and the throw (see updateTumblingAggregator).
-    let result = aggregator.push(import_record_batch(in_array_address, in_schema_address));
-    if let Err(e) = result {
-        throw_memory_limit(&mut env, &e.to_string());
-    }
+    crate::bridge::jni_guard(env, move |mut env| {
+        let aggregator = unsafe { &mut *(handle as *mut OverWindowAggregator) };
+        // The pushed batch is retained in the buffer (not dropped), so no JVM release upcall runs
+        // between a failed account and the throw (see updateTumblingAggregator).
+        let result = aggregator.push(import_record_batch(in_array_address, in_schema_address));
+        if let Err(e) = result {
+            throw_memory_limit(&mut env, &e.to_string());
+        }
+    })
 }
 
 /// Proctime OVER: folds a batch in arrival order and exports its rows immediately (no watermark),
 /// each with the running aggregate / window-function column(s) appended.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushProctimeOverAggregator<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     in_array_address: jlong,
@@ -1510,46 +1514,52 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushProctimeO
     out_array_address: jlong,
     out_schema_address: jlong,
 ) {
-    let aggregator = unsafe { &mut *(handle as *mut OverWindowAggregator) };
-    // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
-    let result = {
-        let batch = import_record_batch(in_array_address, in_schema_address);
-        aggregator.push_proctime(batch)
-    };
-    match result {
-        Ok(out) => export_record_batch(out, out_array_address, out_schema_address),
-        Err(e) => throw_memory_limit(&mut env, &e.to_string()),
-    }
+    crate::bridge::jni_guard(env, move |mut env| {
+        let aggregator = unsafe { &mut *(handle as *mut OverWindowAggregator) };
+        // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
+        let result = {
+            let batch = import_record_batch(in_array_address, in_schema_address);
+            aggregator.push_proctime(batch)
+        };
+        match result {
+            Ok(out) => export_record_batch(out, out_array_address, out_schema_address),
+            Err(e) => throw_memory_limit(&mut env, &e.to_string()),
+        }
+    })
 }
 
 /// Exports the rows the watermark has completed (input columns + running aggregates).
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_flushOverAggregator<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     watermark_millis: jlong,
     out_array_address: jlong,
     out_schema_address: jlong,
 ) {
-    let aggregator = unsafe { &mut *(handle as *mut OverWindowAggregator) };
-    // The inner per-key fold grows on flush, so even a flush can exceed the budget.
-    match aggregator.flush(watermark_millis) {
-        Ok(result) => export_record_batch(result, out_array_address, out_schema_address),
-        Err(e) => throw_memory_limit(&mut env, &e.to_string()),
-    }
+    crate::bridge::jni_guard(env, move |mut env| {
+        let aggregator = unsafe { &mut *(handle as *mut OverWindowAggregator) };
+        // The inner per-key fold grows on flush, so even a flush can exceed the budget.
+        match aggregator.flush(watermark_millis) {
+            Ok(result) => export_record_batch(result, out_array_address, out_schema_address),
+            Err(e) => throw_memory_limit(&mut env, &e.to_string()),
+        }
+    })
 }
 
 /// Releases the OVER aggregator and its native state.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_closeOverAggregator<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
 ) {
-    unsafe {
-        drop(from_handle::<OverWindowAggregator>(handle));
-    }
+    crate::bridge::jni_guard(env, move |_env| {
+        unsafe {
+            drop(from_handle::<OverWindowAggregator>(handle));
+        }
+    })
 }
 
 /// Serializes the OVER aggregator's running state and buffered rows for a checkpoint.
@@ -1559,38 +1569,42 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotOverA
     _class: JClass<'local>,
     handle: jlong,
 ) -> jbyteArray {
-    let aggregator = unsafe { &mut *(handle as *mut OverWindowAggregator) };
-    env.byte_array_from_slice(&aggregator.snapshot())
-        .expect("failed to allocate over snapshot array")
-        .into_raw()
+    crate::bridge::jni_guard(env, move |env| {
+        let aggregator = unsafe { &mut *(handle as *mut OverWindowAggregator) };
+        env.byte_array_from_slice(&aggregator.snapshot())
+            .expect("failed to allocate over snapshot array")
+            .into_raw()
+    })
 }
 
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotOverAggregatorPartitions<
     'local,
 >(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     max_parallelism: jint,
     timestamp_precisions: JIntArray<'local>,
 ) -> jni::sys::jobjectArray {
-    let aggregator = unsafe { &mut *(handle as *mut OverWindowAggregator) };
-    let precisions: Vec<i32> = read_int_array(&env, &timestamp_precisions)
-        .into_iter()
-        .map(|precision| precision as i32)
-        .collect();
-    keyed_state_partition_array(
-        &mut env,
-        aggregator.snapshot_partitions(max_parallelism as usize, &precisions),
-        "over",
-    )
+    crate::bridge::jni_guard(env, move |mut env| {
+        let aggregator = unsafe { &mut *(handle as *mut OverWindowAggregator) };
+        let precisions: Vec<i32> = read_int_array(&env, &timestamp_precisions)
+            .into_iter()
+            .map(|precision| precision as i32)
+            .collect();
+        keyed_state_partition_array(
+            &mut env,
+            aggregator.snapshot_partitions(max_parallelism as usize, &precisions),
+            "over",
+        )
+    })
 }
 
 /// Rebuilds an OVER aggregator from a snapshot taken by a prior run and returns a fresh handle.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreOverAggregator<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     value_types: JIntArray<'local>,
     aggregate_kinds: JIntArray<'local>,
@@ -1603,31 +1617,33 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreOverAg
     snapshot: JByteArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
-    let kinds = read_int_array(&env, &aggregate_kinds);
-    let value_types = read_int_array(&env, &value_types);
-    let values = read_columns(&env, &value_columns);
-    let keys = read_columns(&env, &key_columns);
-    let bytes = env.convert_byte_array(&snapshot).expect("failed to read over snapshot");
-    let aggregator = OverWindowAggregator::restore(
-        value_types,
-        kinds,
-        rt_column as usize,
-        values,
-        keys,
-        frame_kind as i64,
-        frame_offset,
-        proctime != 0,
-        &bytes,
-    )
-    .with_memory_budget(memory_budget_bytes);
-    boxed_or_throw(&mut env, aggregator)
+    crate::bridge::jni_guard(env, move |mut env| {
+        let kinds = read_int_array(&env, &aggregate_kinds);
+        let value_types = read_int_array(&env, &value_types);
+        let values = read_columns(&env, &value_columns);
+        let keys = read_columns(&env, &key_columns);
+        let bytes = env.convert_byte_array(&snapshot).expect("failed to read over snapshot");
+        let aggregator = OverWindowAggregator::restore(
+            value_types,
+            kinds,
+            rt_column as usize,
+            values,
+            keys,
+            frame_kind as i64,
+            frame_offset,
+            proctime != 0,
+            &bytes,
+        )
+        .with_memory_budget(memory_budget_bytes);
+        boxed_or_throw(&mut env, aggregator)
+    })
 }
 
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreOverAggregatorPartitions<
     'local,
 >(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     value_types: JIntArray<'local>,
     aggregate_kinds: JIntArray<'local>,
@@ -1640,35 +1656,37 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreOverAg
     snapshots: JObjectArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
-    let kinds = read_int_array(&env, &aggregate_kinds);
-    let value_types = read_int_array(&env, &value_types);
-    let values = read_columns(&env, &value_columns);
-    let keys = read_columns(&env, &key_columns);
-    let count = env
-        .get_array_length(&snapshots)
-        .expect("read over raw partition count");
-    let mut restored = Vec::with_capacity(count as usize);
-    for index in 0..count {
-        let bytes = JByteArray::from(
-            env.get_object_array_element(&snapshots, index)
-                .expect("read over raw partition"),
-        );
-        restored.push(
-            env.convert_byte_array(&bytes)
-                .expect("read over raw partition bytes"),
-        );
-    }
-    let aggregator = OverWindowAggregator::restore_partitions(
-        value_types,
-        kinds,
-        rt_column as usize,
-        values,
-        keys,
-        frame_kind as i64,
-        frame_offset,
-        proctime != 0,
-        &restored,
-    )
-    .with_memory_budget(memory_budget_bytes);
-    boxed_or_throw(&mut env, aggregator)
+    crate::bridge::jni_guard(env, move |mut env| {
+        let kinds = read_int_array(&env, &aggregate_kinds);
+        let value_types = read_int_array(&env, &value_types);
+        let values = read_columns(&env, &value_columns);
+        let keys = read_columns(&env, &key_columns);
+        let count = env
+            .get_array_length(&snapshots)
+            .expect("read over raw partition count");
+        let mut restored = Vec::with_capacity(count as usize);
+        for index in 0..count {
+            let bytes = JByteArray::from(
+                env.get_object_array_element(&snapshots, index)
+                    .expect("read over raw partition"),
+            );
+            restored.push(
+                env.convert_byte_array(&bytes)
+                    .expect("read over raw partition bytes"),
+            );
+        }
+        let aggregator = OverWindowAggregator::restore_partitions(
+            value_types,
+            kinds,
+            rt_column as usize,
+            values,
+            keys,
+            frame_kind as i64,
+            frame_offset,
+            proctime != 0,
+            &restored,
+        )
+        .with_memory_budget(memory_budget_bytes);
+        boxed_or_throw(&mut env, aggregator)
+    })
 }

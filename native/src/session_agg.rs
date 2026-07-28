@@ -654,68 +654,76 @@ state_bytes_getter!(Java_io_github_jordepic_streamfusion_Native_sessionAggregato
 /// handle, the JVM owns the native state across calls and must release it with the matching close.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createSessionAggregator<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     gap_millis: jlong,
     value_types: JIntArray<'local>,
     aggregate_kinds: JIntArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
-    let kinds = read_int_array(&env, &aggregate_kinds);
-    let value_types = read_int_array(&env, &value_types);
-    let aggregator = SessionAggregator::new(gap_millis, value_types, kinds)
-        .with_memory_budget(memory_budget_bytes);
-    boxed_or_throw(&mut env, aggregator)
+    crate::bridge::jni_guard(env, move |mut env| {
+        let kinds = read_int_array(&env, &aggregate_kinds);
+        let value_types = read_int_array(&env, &value_types);
+        let aggregator = SessionAggregator::new(gap_millis, value_types, kinds)
+            .with_memory_budget(memory_budget_bytes);
+        boxed_or_throw(&mut env, aggregator)
+    })
 }
 
 /// Folds a batch from the JVM into the session aggregator, merging sessions as elements bridge them.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_updateSessionAggregator<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     in_array_address: jlong,
     in_schema_address: jlong,
 ) {
-    let aggregator = unsafe { &mut *(handle as *mut SessionAggregator) };
-    // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
-    let result = {
-        let batch = import_record_batch(in_array_address, in_schema_address);
-        aggregator.update(&batch)
-    };
-    if let Err(e) = result {
-        throw_memory_limit(&mut env, &e.to_string());
-    }
+    crate::bridge::jni_guard(env, move |mut env| {
+        let aggregator = unsafe { &mut *(handle as *mut SessionAggregator) };
+        // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
+        let result = {
+            let batch = import_record_batch(in_array_address, in_schema_address);
+            aggregator.update(&batch)
+        };
+        if let Err(e) = result {
+            throw_memory_limit(&mut env, &e.to_string());
+        }
+    })
 }
 
 /// Emits the sessions the given watermark has closed as a batch and drops them from state.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_flushSessionAggregator<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     watermark_millis: jlong,
     out_array_address: jlong,
     out_schema_address: jlong,
 ) {
-    let aggregator = unsafe { &mut *(handle as *mut SessionAggregator) };
-    // Fallible in persistent-state mode (the firing reads the committed table).
-    match aggregator.flush(watermark_millis) {
-        Ok(result) => export_record_batch(result, out_array_address, out_schema_address),
-        Err(e) => throw_memory_limit(&mut env, &e.to_string()),
-    }
+    crate::bridge::jni_guard(env, move |mut env| {
+        let aggregator = unsafe { &mut *(handle as *mut SessionAggregator) };
+        // Fallible in persistent-state mode (the firing reads the committed table).
+        match aggregator.flush(watermark_millis) {
+            Ok(result) => export_record_batch(result, out_array_address, out_schema_address),
+            Err(e) => throw_memory_limit(&mut env, &e.to_string()),
+        }
+    })
 }
 
 /// Releases the session aggregator and its native state.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_closeSessionAggregator<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
 ) {
-    unsafe {
-        drop(from_handle::<SessionAggregator>(handle));
-    }
+    crate::bridge::jni_guard(env, move |_env| {
+        unsafe {
+            drop(from_handle::<SessionAggregator>(handle));
+        }
+    })
 }
 
 /// Serializes the aggregator's open sessions so the JVM can store them in a checkpoint.
@@ -725,16 +733,18 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotSessi
     _class: JClass<'local>,
     handle: jlong,
 ) -> jbyteArray {
-    let aggregator = unsafe { &mut *(handle as *mut SessionAggregator) };
-    env.byte_array_from_slice(&aggregator.snapshot())
-        .expect("failed to allocate snapshot array")
-        .into_raw()
+    crate::bridge::jni_guard(env, move |env| {
+        let aggregator = unsafe { &mut *(handle as *mut SessionAggregator) };
+        env.byte_array_from_slice(&aggregator.snapshot())
+            .expect("failed to allocate snapshot array")
+            .into_raw()
+    })
 }
 
 /// Rebuilds a session aggregator from a snapshot taken by a prior run and returns a fresh handle.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreSessionAggregator<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     gap_millis: jlong,
     value_types: JIntArray<'local>,
@@ -742,41 +752,45 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreSessio
     snapshot: JByteArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
-    let kinds = read_int_array(&env, &aggregate_kinds);
-    let value_types = read_int_array(&env, &value_types);
-    let bytes = env.convert_byte_array(&snapshot).expect("failed to read snapshot");
-    let aggregator = SessionAggregator::restore(gap_millis, value_types, kinds, &bytes)
-        .with_memory_budget(memory_budget_bytes);
-    boxed_or_throw(&mut env, aggregator)
+    crate::bridge::jni_guard(env, move |mut env| {
+        let kinds = read_int_array(&env, &aggregate_kinds);
+        let value_types = read_int_array(&env, &value_types);
+        let bytes = env.convert_byte_array(&snapshot).expect("failed to read snapshot");
+        let aggregator = SessionAggregator::restore(gap_millis, value_types, kinds, &bytes)
+            .with_memory_budget(memory_budget_bytes);
+        boxed_or_throw(&mut env, aggregator)
+    })
 }
 
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotSessionAggregatorPartitions<
     'local,
 >(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     max_parallelism: jint,
     timestamp_precisions: JIntArray<'local>,
 ) -> jni::sys::jobjectArray {
-    let aggregator = unsafe { &mut *(handle as *mut SessionAggregator) };
-    let precisions: Vec<i32> = read_int_array(&env, &timestamp_precisions)
-        .into_iter()
-        .map(|precision| precision as i32)
-        .collect();
-    keyed_state_partition_array(
-        &mut env,
-        aggregator.snapshot_partitions(max_parallelism as usize, &precisions),
-        "session-window",
-    )
+    crate::bridge::jni_guard(env, move |mut env| {
+        let aggregator = unsafe { &mut *(handle as *mut SessionAggregator) };
+        let precisions: Vec<i32> = read_int_array(&env, &timestamp_precisions)
+            .into_iter()
+            .map(|precision| precision as i32)
+            .collect();
+        keyed_state_partition_array(
+            &mut env,
+            aggregator.snapshot_partitions(max_parallelism as usize, &precisions),
+            "session-window",
+        )
+    })
 }
 
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreSessionAggregatorPartitions<
     'local,
 >(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     gap_millis: jlong,
     value_types: JIntArray<'local>,
@@ -784,23 +798,25 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreSessio
     snapshots: JObjectArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
-    let kinds = read_int_array(&env, &aggregate_kinds);
-    let value_types = read_int_array(&env, &value_types);
-    let count = env
-        .get_array_length(&snapshots)
-        .expect("read session raw partition count");
-    let mut restored = Vec::with_capacity(count as usize);
-    for index in 0..count {
-        let bytes = JByteArray::from(
-            env.get_object_array_element(&snapshots, index)
-                .expect("read session raw partition"),
-        );
-        restored.push(
-            env.convert_byte_array(&bytes)
-                .expect("read session raw partition bytes"),
-        );
-    }
-    let aggregator = SessionAggregator::restore_partitions(gap_millis, value_types, kinds, &restored)
-        .with_memory_budget(memory_budget_bytes);
-    boxed_or_throw(&mut env, aggregator)
+    crate::bridge::jni_guard(env, move |mut env| {
+        let kinds = read_int_array(&env, &aggregate_kinds);
+        let value_types = read_int_array(&env, &value_types);
+        let count = env
+            .get_array_length(&snapshots)
+            .expect("read session raw partition count");
+        let mut restored = Vec::with_capacity(count as usize);
+        for index in 0..count {
+            let bytes = JByteArray::from(
+                env.get_object_array_element(&snapshots, index)
+                    .expect("read session raw partition"),
+            );
+            restored.push(
+                env.convert_byte_array(&bytes)
+                    .expect("read session raw partition bytes"),
+            );
+        }
+        let aggregator = SessionAggregator::restore_partitions(gap_millis, value_types, kinds, &restored)
+            .with_memory_budget(memory_budget_bytes);
+        boxed_or_throw(&mut env, aggregator)
+    })
 }

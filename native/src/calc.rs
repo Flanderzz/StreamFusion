@@ -9,7 +9,7 @@ use crate::*;
 /// it because it actually changes the row count.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_filterGreaterThan<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     in_array_address: jlong,
     in_schema_address: jlong,
@@ -17,45 +17,47 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_filterGreater
     out_schema_address: jlong,
     threshold: jint,
 ) {
-    let ffi_array = unsafe {
-        std::ptr::replace(in_array_address as *mut FFI_ArrowArray, FFI_ArrowArray::empty())
-    };
-    let ffi_schema = unsafe {
-        std::ptr::replace(in_schema_address as *mut FFI_ArrowSchema, FFI_ArrowSchema::empty())
-    };
+    crate::bridge::jni_guard(env, move |_env| {
+        let ffi_array = unsafe {
+            std::ptr::replace(in_array_address as *mut FFI_ArrowArray, FFI_ArrowArray::empty())
+        };
+        let ffi_schema = unsafe {
+            std::ptr::replace(in_schema_address as *mut FFI_ArrowSchema, FFI_ArrowSchema::empty())
+        };
 
-    let field = Field::try_from(&ffi_schema).expect("failed to import Arrow field");
-    let schema = Arc::new(Schema::new(vec![field]));
-    let column_name = schema.field(0).name().clone();
+        let field = Field::try_from(&ffi_schema).expect("failed to import Arrow field");
+        let schema = Arc::new(Schema::new(vec![field]));
+        let column_name = schema.field(0).name().clone();
 
-    let mut data = unsafe { from_ffi(ffi_array, &ffi_schema) }.expect("failed to import Arrow array");
-    data.align_buffers();
-    let batch =
-        RecordBatch::try_new(schema.clone(), vec![make_array(data)]).expect("failed to build batch");
+        let mut data = unsafe { from_ffi(ffi_array, &ffi_schema) }.expect("failed to import Arrow array");
+        data.align_buffers();
+        let batch =
+            RecordBatch::try_new(schema.clone(), vec![make_array(data)]).expect("failed to build batch");
 
-    let result = runtime().block_on(async move {
-        let ctx = SessionContext::new();
-        let frame = ctx
-            .read_batch(batch)
-            .expect("failed to read batch")
-            .filter(logical_col(&column_name).gt(logical_lit(threshold)))
-            .expect("failed to build filter");
-        let mut stream = frame.execute_stream().await.expect("failed to execute plan");
-        let mut batches = Vec::new();
-        while let Some(batch) = stream.next().await {
-            batches.push(batch.expect("failed to pull batch"));
+        let result = runtime().block_on(async move {
+            let ctx = SessionContext::new();
+            let frame = ctx
+                .read_batch(batch)
+                .expect("failed to read batch")
+                .filter(logical_col(&column_name).gt(logical_lit(threshold)))
+                .expect("failed to build filter");
+            let mut stream = frame.execute_stream().await.expect("failed to execute plan");
+            let mut batches = Vec::new();
+            while let Some(batch) = stream.next().await {
+                batches.push(batch.expect("failed to pull batch"));
+            }
+            concat_batches(&schema, &batches).expect("failed to assemble result")
+        });
+
+        let out_data = result.column(0).to_data();
+        let out_array = FFI_ArrowArray::new(&out_data);
+        let out_schema =
+            FFI_ArrowSchema::try_from(out_data.data_type()).expect("failed to export Arrow schema");
+        unsafe {
+            std::ptr::write(out_array_address as *mut FFI_ArrowArray, out_array);
+            std::ptr::write(out_schema_address as *mut FFI_ArrowSchema, out_schema);
         }
-        concat_batches(&schema, &batches).expect("failed to assemble result")
-    });
-
-    let out_data = result.column(0).to_data();
-    let out_array = FFI_ArrowArray::new(&out_data);
-    let out_schema =
-        FFI_ArrowSchema::try_from(out_data.data_type()).expect("failed to export Arrow schema");
-    unsafe {
-        std::ptr::write(out_array_address as *mut FFI_ArrowArray, out_array);
-        std::ptr::write(out_schema_address as *mut FFI_ArrowSchema, out_schema);
-    }
+    })
 }
 
 /// A compiled filter predicate held across batches: the decoded expression tree plus the physical
@@ -121,7 +123,7 @@ impl FilterExpression {
 /// handle owns the compiled plan and must be released with `closeFilterExpression`.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createFilterExpression<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     kinds: JIntArray<'local>,
     payload: JIntArray<'local>,
@@ -130,22 +132,24 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createFilterE
     doubles: JDoubleArray<'local>,
     strings: JObjectArray<'local>,
 ) -> jlong {
-    let expression = FilterExpression {
-        kinds: read_int_array(&env, &kinds),
-        payload: read_int_array(&env, &payload),
-        child_counts: read_int_array(&env, &child_counts),
-        longs: read_longs(&env, &longs),
-        doubles: read_doubles(&env, &doubles),
-        strings: read_strings(&mut env, &strings),
-        compiled: None,
-    };
-    into_handle(expression)
+    crate::bridge::jni_guard(env, move |mut env| {
+        let expression = FilterExpression {
+            kinds: read_int_array(&env, &kinds),
+            payload: read_int_array(&env, &payload),
+            child_counts: read_int_array(&env, &child_counts),
+            longs: read_longs(&env, &longs),
+            doubles: read_doubles(&env, &doubles),
+            strings: read_strings(&mut env, &strings),
+            compiled: None,
+        };
+        into_handle(expression)
+    })
 }
 
 /// Filters a batch from the JVM through a compiled predicate handle, exporting the surviving rows.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_filterExpression<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     in_array_address: jlong,
@@ -153,22 +157,26 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_filterExpress
     out_array_address: jlong,
     out_schema_address: jlong,
 ) {
-    let expression = unsafe { &mut *(handle as *mut FilterExpression) };
-    let batch = import_record_batch(in_array_address, in_schema_address);
-    let result = expression.filter(batch);
-    export_record_batch(result, out_array_address, out_schema_address);
+    crate::bridge::jni_guard(env, move |_env| {
+        let expression = unsafe { &mut *(handle as *mut FilterExpression) };
+        let batch = import_record_batch(in_array_address, in_schema_address);
+        let result = expression.filter(batch);
+        export_record_batch(result, out_array_address, out_schema_address);
+    })
 }
 
 /// Releases a compiled predicate handle and its native state.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_closeFilterExpression<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
 ) {
-    unsafe {
-        drop(from_handle::<FilterExpression>(handle));
-    }
+    crate::bridge::jni_guard(env, move |_env| {
+        unsafe {
+            drop(from_handle::<FilterExpression>(handle));
+        }
+    })
 }
 
 /// The compiled form of a Calc: an optional filter predicate plus the projection expressions.
@@ -267,7 +275,7 @@ impl CalcExpression {
 /// with `closeCalcExpression`.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createCalcExpression<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     kinds: JIntArray<'local>,
     payload: JIntArray<'local>,
@@ -279,29 +287,31 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createCalcExp
     condition_root: jint,
     output_names: JObjectArray<'local>,
 ) -> jlong {
-    capture_jvm(&env); // so a JvmUdf node in this Calc can upcall the JVM bridge at evaluation time
-    let expression = CalcExpression {
-        kinds: read_int_array(&env, &kinds),
-        payload: read_int_array(&env, &payload),
-        child_counts: read_int_array(&env, &child_counts),
-        longs: read_longs(&env, &longs),
-        doubles: read_doubles(&env, &doubles),
-        strings: read_strings(&mut env, &strings),
-        projection_roots: read_int_array(&env, &projection_roots).into_iter().map(|r| r as usize).collect(),
-        condition_root: condition_root as i64,
-        output_names: read_strings(&mut env, &output_names)
-            .into_iter()
-            .map(|s| s.expect("output name"))
-            .collect(),
-        compiled: None,
-    };
-    into_handle(expression)
+    crate::bridge::jni_guard(env, move |mut env| {
+        capture_jvm(&env); // so a JvmUdf node in this Calc can upcall the JVM bridge at evaluation time
+        let expression = CalcExpression {
+            kinds: read_int_array(&env, &kinds),
+            payload: read_int_array(&env, &payload),
+            child_counts: read_int_array(&env, &child_counts),
+            longs: read_longs(&env, &longs),
+            doubles: read_doubles(&env, &doubles),
+            strings: read_strings(&mut env, &strings),
+            projection_roots: read_int_array(&env, &projection_roots).into_iter().map(|r| r as usize).collect(),
+            condition_root: condition_root as i64,
+            output_names: read_strings(&mut env, &output_names)
+                .into_iter()
+                .map(|s| s.expect("output name"))
+                .collect(),
+            compiled: None,
+        };
+        into_handle(expression)
+    })
 }
 
 /// Runs a batch from the JVM through a compiled Calc handle, exporting the projected output batch.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_calcExpression<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     in_array_address: jlong,
@@ -309,20 +319,24 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_calcExpressio
     out_array_address: jlong,
     out_schema_address: jlong,
 ) {
-    let expression = unsafe { &mut *(handle as *mut CalcExpression) };
-    let batch = import_record_batch(in_array_address, in_schema_address);
-    let result = expression.evaluate(batch);
-    export_record_batch(result, out_array_address, out_schema_address);
+    crate::bridge::jni_guard(env, move |_env| {
+        let expression = unsafe { &mut *(handle as *mut CalcExpression) };
+        let batch = import_record_batch(in_array_address, in_schema_address);
+        let result = expression.evaluate(batch);
+        export_record_batch(result, out_array_address, out_schema_address);
+    })
 }
 
 /// Releases a compiled Calc handle and its native state.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_closeCalcExpression<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
 ) {
-    unsafe {
-        drop(from_handle::<CalcExpression>(handle));
-    }
+    crate::bridge::jni_guard(env, move |_env| {
+        unsafe {
+            drop(from_handle::<CalcExpression>(handle));
+        }
+    })
 }

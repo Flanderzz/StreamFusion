@@ -32,6 +32,95 @@ pub(crate) fn throw_memory_limit(env: &mut JNIEnv, message: &str) {
     );
 }
 
+/// The value a guarded entrypoint returns after a panic has been converted into a pending Java
+/// exception. The JVM ignores the return value once an exception is pending, but the ABI still
+/// demands one, so every JNI return type names its zero here.
+pub(crate) trait JniDefault {
+    fn jni_default() -> Self;
+}
+
+impl JniDefault for () {
+    fn jni_default() {}
+}
+
+impl JniDefault for jlong {
+    fn jni_default() -> Self {
+        0
+    }
+}
+
+impl JniDefault for jint {
+    fn jni_default() -> Self {
+        0
+    }
+}
+
+impl JniDefault for jni::sys::jboolean {
+    fn jni_default() -> Self {
+        0 // JNI_FALSE
+    }
+}
+
+// Covers every JNI reference return (jobject and its jbyteArray/jobjectArray/jstring aliases).
+impl<T> JniDefault for *mut T {
+    fn jni_default() -> Self {
+        std::ptr::null_mut()
+    }
+}
+
+/// Contains a Rust panic at the JNI boundary and re-raises it as an exception on the calling task
+/// thread.
+///
+/// A panic that unwinds out of an `extern "system"` frame aborts the process, so an unguarded
+/// entrypoint turns one bad record into a dead TaskManager — every co-located task included — and
+/// gives Flink's restart strategy nothing to act on. Catching here downgrades that to an ordinary
+/// task failure, which is what the restart strategy is for. This is the same boundary discipline
+/// Comet applies: no panic may cross a JVM native frame.
+pub(crate) fn jni_guard<'local, T, F>(mut env: JNIEnv<'local>, f: F) -> T
+where
+    T: JniDefault,
+    F: FnOnce(&mut JNIEnv<'local>) -> T,
+{
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&mut env))) {
+        Ok(value) => value,
+        Err(payload) => {
+            // Don't stack a second exception on a frame that already has one pending — the first
+            // is the real cause and `throw_new` would replace it.
+            if !matches!(env.exception_check(), Ok(true)) {
+                let _ = env.throw_new(
+                    "io/github/jordepic/streamfusion/NativeException",
+                    format!("native panic: {}", panic_message(payload)),
+                );
+            }
+            T::jni_default()
+        }
+    }
+}
+
+/// Panics behind the guard so the containment itself is testable from Java. Without an entrypoint
+/// that deliberately fails, the only way to tell a contained panic from a process abort is to crash
+/// a real job.
+#[no_mangle]
+pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_panicForTest<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+) {
+    jni_guard(env, move |_env| {
+        panic!("deliberate panic from panicForTest");
+    })
+}
+
+/// Best-effort text of a caught panic payload; `panic!` produces one of these two shapes.
+pub(crate) fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "unknown panic".to_string()
+    }
+}
+
 /// Frames every raw keyed-state payload with its big-endian Flink key-group id and returns the
 /// partitions as one JNI object array. This keeps checkpoint partitioning to one native pass and
 /// lets Java stream each payload directly into Flink's keyed-state output.
@@ -160,9 +249,11 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_version<'loca
     env: JNIEnv<'local>,
     _class: JClass<'local>,
 ) -> jstring {
-    env.new_string(env!("CARGO_PKG_VERSION"))
-        .expect("failed to allocate Java string for version")
-        .into_raw()
+    crate::bridge::jni_guard(env, move |env| {
+        env.new_string(env!("CARGO_PKG_VERSION"))
+            .expect("failed to allocate Java string for version")
+            .into_raw()
+    })
 }
 
 /// The live-handle breakdown, e.g. `SessionAggregator=1,MessageDecoder=2` — empty once every
@@ -173,17 +264,19 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_liveNativeHan
     env: JNIEnv<'local>,
     _class: JClass<'local>,
 ) -> jstring {
-    let live = live_handles().lock().unwrap();
-    let breakdown = live
-        .iter()
-        .filter(|(_, count)| **count != 0)
-        .map(|(name, count)| format!("{}={count}", short_type_name(name)))
-        .collect::<Vec<_>>()
-        .join(",");
-    drop(live);
-    env.new_string(breakdown)
-        .expect("failed to allocate Java string for the live-handle breakdown")
-        .into_raw()
+    crate::bridge::jni_guard(env, move |env| {
+        let live = live_handles().lock().unwrap();
+        let breakdown = live
+            .iter()
+            .filter(|(_, count)| **count != 0)
+            .map(|(name, count)| format!("{}={count}", short_type_name(name)))
+            .collect::<Vec<_>>()
+            .join(",");
+        drop(live);
+        env.new_string(breakdown)
+            .expect("failed to allocate Java string for the live-handle breakdown")
+            .into_raw()
+    })
 }
 
 /// Generates a per-type JNI getter for an operator's tracked native state footprint in bytes (zero
@@ -208,10 +301,12 @@ pub(crate) use state_bytes_getter;
 /// blocking pull bridge a JVM thread will use to await native plan execution.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_blockingAnswer<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
 ) -> jlong {
-    runtime().block_on(async { 42 })
+    crate::bridge::jni_guard(env, move |_env| {
+        runtime().block_on(async { 42 })
+    })
 }
 
 /// Imports a single Arrow array exported by the JVM through the C Data Interface and returns the
@@ -221,26 +316,28 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_blockingAnswe
 /// release callbacks fire exactly once when the imported data and schema drop here.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_sumInt<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     array_address: jlong,
     schema_address: jlong,
 ) -> jlong {
-    let ffi_array =
-        unsafe { std::ptr::replace(array_address as *mut FFI_ArrowArray, FFI_ArrowArray::empty()) };
-    let ffi_schema = unsafe {
-        std::ptr::replace(schema_address as *mut FFI_ArrowSchema, FFI_ArrowSchema::empty())
-    };
+    crate::bridge::jni_guard(env, move |_env| {
+        let ffi_array =
+            unsafe { std::ptr::replace(array_address as *mut FFI_ArrowArray, FFI_ArrowArray::empty()) };
+        let ffi_schema = unsafe {
+            std::ptr::replace(schema_address as *mut FFI_ArrowSchema, FFI_ArrowSchema::empty())
+        };
 
-    let mut data = unsafe { from_ffi(ffi_array, &ffi_schema) }.expect("failed to import Arrow array");
-    data.align_buffers();
+        let mut data = unsafe { from_ffi(ffi_array, &ffi_schema) }.expect("failed to import Arrow array");
+        data.align_buffers();
 
-    let array = make_array(data);
-    let ints = array
-        .as_any()
-        .downcast_ref::<Int32Array>()
-        .expect("expected an int32 array");
-    ints.iter().flatten().map(i64::from).sum()
+        let array = make_array(data);
+        let ints = array
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .expect("expected an int32 array");
+        ints.iter().flatten().map(i64::from).sum()
+    })
 }
 
 /// Imports an int32 column from the JVM, rebuilds it into native-owned buffers, and exports the
@@ -251,37 +348,39 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_sumInt<'local
 /// real operator takes: read an input batch, produce a new one.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_roundTrip<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     in_array_address: jlong,
     in_schema_address: jlong,
     out_array_address: jlong,
     out_schema_address: jlong,
 ) {
-    let ffi_array = unsafe {
-        std::ptr::replace(in_array_address as *mut FFI_ArrowArray, FFI_ArrowArray::empty())
-    };
-    let ffi_schema = unsafe {
-        std::ptr::replace(in_schema_address as *mut FFI_ArrowSchema, FFI_ArrowSchema::empty())
-    };
+    crate::bridge::jni_guard(env, move |_env| {
+        let ffi_array = unsafe {
+            std::ptr::replace(in_array_address as *mut FFI_ArrowArray, FFI_ArrowArray::empty())
+        };
+        let ffi_schema = unsafe {
+            std::ptr::replace(in_schema_address as *mut FFI_ArrowSchema, FFI_ArrowSchema::empty())
+        };
 
-    let mut data = unsafe { from_ffi(ffi_array, &ffi_schema) }.expect("failed to import Arrow array");
-    data.align_buffers();
+        let mut data = unsafe { from_ffi(ffi_array, &ffi_schema) }.expect("failed to import Arrow array");
+        data.align_buffers();
 
-    let array = make_array(data);
-    let ints = array
-        .as_any()
-        .downcast_ref::<Int32Array>()
-        .expect("expected an int32 array");
-    let rebuilt = ints.iter().collect::<Int32Array>().to_data();
+        let array = make_array(data);
+        let ints = array
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .expect("expected an int32 array");
+        let rebuilt = ints.iter().collect::<Int32Array>().to_data();
 
-    let out_array = FFI_ArrowArray::new(&rebuilt);
-    let out_schema =
-        FFI_ArrowSchema::try_from(rebuilt.data_type()).expect("failed to export Arrow schema");
-    unsafe {
-        std::ptr::write(out_array_address as *mut FFI_ArrowArray, out_array);
-        std::ptr::write(out_schema_address as *mut FFI_ArrowSchema, out_schema);
-    }
+        let out_array = FFI_ArrowArray::new(&rebuilt);
+        let out_schema =
+            FFI_ArrowSchema::try_from(rebuilt.data_type()).expect("failed to export Arrow schema");
+        unsafe {
+            std::ptr::write(out_array_address as *mut FFI_ArrowArray, out_array);
+            std::ptr::write(out_schema_address as *mut FFI_ArrowSchema, out_schema);
+        }
+    })
 }
 
 /// Runs the first stateless operator over a batch from the JVM: a projection that doubles a single
@@ -293,44 +392,46 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_roundTrip<'lo
 /// across the same boundary.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_doubleColumn<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     in_array_address: jlong,
     in_schema_address: jlong,
     out_array_address: jlong,
     out_schema_address: jlong,
 ) {
-    let ffi_array = unsafe {
-        std::ptr::replace(in_array_address as *mut FFI_ArrowArray, FFI_ArrowArray::empty())
-    };
-    let ffi_schema = unsafe {
-        std::ptr::replace(in_schema_address as *mut FFI_ArrowSchema, FFI_ArrowSchema::empty())
-    };
+    crate::bridge::jni_guard(env, move |_env| {
+        let ffi_array = unsafe {
+            std::ptr::replace(in_array_address as *mut FFI_ArrowArray, FFI_ArrowArray::empty())
+        };
+        let ffi_schema = unsafe {
+            std::ptr::replace(in_schema_address as *mut FFI_ArrowSchema, FFI_ArrowSchema::empty())
+        };
 
-    let field = Field::try_from(&ffi_schema).expect("failed to import Arrow field");
-    let schema = Arc::new(Schema::new(vec![field]));
+        let field = Field::try_from(&ffi_schema).expect("failed to import Arrow field");
+        let schema = Arc::new(Schema::new(vec![field]));
 
-    let mut data = unsafe { from_ffi(ffi_array, &ffi_schema) }.expect("failed to import Arrow array");
-    data.align_buffers();
-    let batch =
-        RecordBatch::try_new(schema.clone(), vec![make_array(data)]).expect("failed to build batch");
+        let mut data = unsafe { from_ffi(ffi_array, &ffi_schema) }.expect("failed to import Arrow array");
+        data.align_buffers();
+        let batch =
+            RecordBatch::try_new(schema.clone(), vec![make_array(data)]).expect("failed to build batch");
 
-    let column = col(schema.field(0).name(), &schema).expect("failed to resolve column");
-    let expr = binary(column, Operator::Multiply, lit(2i32), &schema).expect("failed to build expr");
-    let projected = expr
-        .evaluate(&batch)
-        .expect("failed to evaluate projection")
-        .into_array(batch.num_rows())
-        .expect("failed to realize projected column");
+        let column = col(schema.field(0).name(), &schema).expect("failed to resolve column");
+        let expr = binary(column, Operator::Multiply, lit(2i32), &schema).expect("failed to build expr");
+        let projected = expr
+            .evaluate(&batch)
+            .expect("failed to evaluate projection")
+            .into_array(batch.num_rows())
+            .expect("failed to realize projected column");
 
-    let out_data = projected.to_data();
-    let out_array = FFI_ArrowArray::new(&out_data);
-    let out_schema =
-        FFI_ArrowSchema::try_from(out_data.data_type()).expect("failed to export Arrow schema");
-    unsafe {
-        std::ptr::write(out_array_address as *mut FFI_ArrowArray, out_array);
-        std::ptr::write(out_schema_address as *mut FFI_ArrowSchema, out_schema);
-    }
+        let out_data = projected.to_data();
+        let out_array = FFI_ArrowArray::new(&out_data);
+        let out_schema =
+            FFI_ArrowSchema::try_from(out_data.data_type()).expect("failed to export Arrow schema");
+        unsafe {
+            std::ptr::write(out_array_address as *mut FFI_ArrowArray, out_array);
+            std::ptr::write(out_schema_address as *mut FFI_ArrowSchema, out_schema);
+        }
+    })
 }
 
 /// Imports a whole multi-column batch from the JVM and exports it back. A batch crosses the
@@ -339,32 +440,34 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_doubleColumn<
 /// columns at once need, beyond the single-column path.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_echoBatch<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     in_array_address: jlong,
     in_schema_address: jlong,
     out_array_address: jlong,
     out_schema_address: jlong,
 ) {
-    let ffi_array = unsafe {
-        std::ptr::replace(in_array_address as *mut FFI_ArrowArray, FFI_ArrowArray::empty())
-    };
-    let ffi_schema = unsafe {
-        std::ptr::replace(in_schema_address as *mut FFI_ArrowSchema, FFI_ArrowSchema::empty())
-    };
+    crate::bridge::jni_guard(env, move |_env| {
+        let ffi_array = unsafe {
+            std::ptr::replace(in_array_address as *mut FFI_ArrowArray, FFI_ArrowArray::empty())
+        };
+        let ffi_schema = unsafe {
+            std::ptr::replace(in_schema_address as *mut FFI_ArrowSchema, FFI_ArrowSchema::empty())
+        };
 
-    let mut data = unsafe { from_ffi(ffi_array, &ffi_schema) }.expect("failed to import Arrow batch");
-    data.align_buffers();
-    let batch = RecordBatch::from(StructArray::from(data));
+        let mut data = unsafe { from_ffi(ffi_array, &ffi_schema) }.expect("failed to import Arrow batch");
+        data.align_buffers();
+        let batch = RecordBatch::from(StructArray::from(data));
 
-    let out_data = StructArray::from(batch).to_data();
-    let out_array = FFI_ArrowArray::new(&out_data);
-    let out_schema =
-        FFI_ArrowSchema::try_from(out_data.data_type()).expect("failed to export Arrow schema");
-    unsafe {
-        std::ptr::write(out_array_address as *mut FFI_ArrowArray, out_array);
-        std::ptr::write(out_schema_address as *mut FFI_ArrowSchema, out_schema);
-    }
+        let out_data = StructArray::from(batch).to_data();
+        let out_array = FFI_ArrowArray::new(&out_data);
+        let out_schema =
+            FFI_ArrowSchema::try_from(out_data.data_type()).expect("failed to export Arrow schema");
+        unsafe {
+            std::ptr::write(out_array_address as *mut FFI_ArrowArray, out_array);
+            std::ptr::write(out_schema_address as *mut FFI_ArrowSchema, out_schema);
+        }
+    })
 }
 
 /// Boxes a built operator into an opaque handle, or raises the memory-limit exception and returns

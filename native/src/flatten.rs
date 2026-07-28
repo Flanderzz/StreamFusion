@@ -237,25 +237,27 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_expand<'local
     copy_indices: JIntArray<'local>,
     expand_id_values: JLongArray<'local>,
 ) {
-    let batch = import_record_batch(in_array_address, in_schema_address);
-    let copy = read_int_array(&env, &copy_indices);
-    let ids = read_longs(&env, &expand_id_values);
-    let result = expand(
-        &batch,
-        num_expand_rows as usize,
-        num_out_cols as usize,
-        expand_id_index as usize,
-        expand_id_is_long != 0,
-        &copy,
-        &ids,
-    );
-    export_record_batch(result, out_array_address, out_schema_address);
+    crate::bridge::jni_guard(env, move |env| {
+        let batch = import_record_batch(in_array_address, in_schema_address);
+        let copy = read_int_array(&env, &copy_indices);
+        let ids = read_longs(&env, &expand_id_values);
+        let result = expand(
+            &batch,
+            num_expand_rows as usize,
+            num_out_cols as usize,
+            expand_id_index as usize,
+            expand_id_is_long != 0,
+            &copy,
+            &ids,
+        );
+        export_record_batch(result, out_array_address, out_schema_address);
+    })
 }
 
 /// Stateless INNER UNNEST of an ARRAY column over an Arrow batch the JVM exported.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_unnest<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     in_array_address: jlong,
     in_schema_address: jlong,
@@ -266,13 +268,15 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_unnest<'local
     is_left: jboolean,
     is_multiset: jboolean,
 ) {
-    let batch = import_record_batch(in_array_address, in_schema_address);
-    let result = unnest_array(
-        &batch,
-        array_col as usize,
-        with_ordinality != 0,
-        is_left != 0,
-        is_multiset != 0,
-    );
-    export_record_batch(result, out_array_address, out_schema_address);
+    crate::bridge::jni_guard(env, move |_env| {
+        let batch = import_record_batch(in_array_address, in_schema_address);
+        let result = unnest_array(
+            &batch,
+            array_col as usize,
+            with_ordinality != 0,
+            is_left != 0,
+            is_multiset != 0,
+        );
+        export_record_batch(result, out_array_address, out_schema_address);
+    })
 }

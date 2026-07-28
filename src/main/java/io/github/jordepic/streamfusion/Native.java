@@ -115,6 +115,13 @@ public final class Native {
   public static native String version();
 
   /**
+   * Panics on the native side, on purpose. Exists so the boundary's panic containment is provable:
+   * without it the only way to observe the difference between a contained panic and a process abort
+   * is to crash a real job. Throws {@link NativeException}; the JVM survives and stays usable.
+   */
+  static native void panicForTest();
+
+  /**
    * The native side's live-handle breakdown by type (e.g. {@code SessionAggregator=1}), empty once
    * every handle has been closed. The test harness asserts this drains to empty after each test, so
    * a missing close call fails the test naming the leaking type instead of slowly growing RSS.

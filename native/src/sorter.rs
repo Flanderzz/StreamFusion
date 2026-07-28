@@ -134,59 +134,67 @@ state_bytes_getter!(Java_io_github_jordepic_streamfusion_Native_temporalSorterSt
 /// Creates an event-time sorter over the given rowtime column and returns an opaque handle.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createTemporalSorter<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     rt_column: jint,
     memory_budget_bytes: jlong,
 ) -> jlong {
-    let sorter = TemporalSorter::new(rt_column as usize).with_memory_budget(memory_budget_bytes);
-    boxed_or_throw(&mut env, sorter)
+    crate::bridge::jni_guard(env, move |mut env| {
+        let sorter = TemporalSorter::new(rt_column as usize).with_memory_budget(memory_budget_bytes);
+        boxed_or_throw(&mut env, sorter)
+    })
 }
 
 /// Buffers an input batch (no output); the rows are emitted later, in rowtime order, as watermarks
 /// complete them.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushTemporalSorter<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     in_array_address: jlong,
     in_schema_address: jlong,
 ) {
-    let sorter = unsafe { &mut *(handle as *mut TemporalSorter) };
-    // The pushed batch is retained in the sort buffer (not dropped), so no JVM release upcall runs
-    // between a failed account and the throw (see updateTumblingAggregator).
-    let result = sorter.push(import_record_batch(in_array_address, in_schema_address));
-    if let Err(e) = result {
-        throw_memory_limit(&mut env, &e.to_string());
-    }
+    crate::bridge::jni_guard(env, move |mut env| {
+        let sorter = unsafe { &mut *(handle as *mut TemporalSorter) };
+        // The pushed batch is retained in the sort buffer (not dropped), so no JVM release upcall runs
+        // between a failed account and the throw (see updateTumblingAggregator).
+        let result = sorter.push(import_record_batch(in_array_address, in_schema_address));
+        if let Err(e) = result {
+            throw_memory_limit(&mut env, &e.to_string());
+        }
+    })
 }
 
 /// Exports the rows the watermark has completed, sorted ascending by rowtime.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_flushTemporalSorter<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     watermark_millis: jlong,
     out_array_address: jlong,
     out_schema_address: jlong,
 ) {
-    let sorter = unsafe { &mut *(handle as *mut TemporalSorter) };
-    let result = sorter.flush(watermark_millis);
-    export_record_batch(result, out_array_address, out_schema_address);
+    crate::bridge::jni_guard(env, move |_env| {
+        let sorter = unsafe { &mut *(handle as *mut TemporalSorter) };
+        let result = sorter.flush(watermark_millis);
+        export_record_batch(result, out_array_address, out_schema_address);
+    })
 }
 
 /// Releases the event-time sorter and its buffered rows.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_closeTemporalSorter<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
 ) {
-    unsafe {
-        drop(from_handle::<TemporalSorter>(handle));
-    }
+    crate::bridge::jni_guard(env, move |_env| {
+        unsafe {
+            drop(from_handle::<TemporalSorter>(handle));
+        }
+    })
 }
 
 /// Serializes the sorter's buffered rows for a checkpoint.
@@ -196,23 +204,27 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotTempo
     _class: JClass<'local>,
     handle: jlong,
 ) -> jbyteArray {
-    let sorter = unsafe { &mut *(handle as *mut TemporalSorter) };
-    env.byte_array_from_slice(&sorter.snapshot())
-        .expect("failed to allocate sort snapshot array")
-        .into_raw()
+    crate::bridge::jni_guard(env, move |env| {
+        let sorter = unsafe { &mut *(handle as *mut TemporalSorter) };
+        env.byte_array_from_slice(&sorter.snapshot())
+            .expect("failed to allocate sort snapshot array")
+            .into_raw()
+    })
 }
 
 /// Rebuilds an event-time sorter from a snapshot taken by a prior run and returns a fresh handle.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreTemporalSorter<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     rt_column: jint,
     snapshot: JByteArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
-    let bytes = env.convert_byte_array(&snapshot).expect("failed to read sort snapshot");
-    let sorter =
-        TemporalSorter::restore(rt_column as usize, &bytes).with_memory_budget(memory_budget_bytes);
-    boxed_or_throw(&mut env, sorter)
+    crate::bridge::jni_guard(env, move |mut env| {
+        let bytes = env.convert_byte_array(&snapshot).expect("failed to read sort snapshot");
+        let sorter =
+            TemporalSorter::restore(rt_column as usize, &bytes).with_memory_budget(memory_budget_bytes);
+        boxed_or_throw(&mut env, sorter)
+    })
 }

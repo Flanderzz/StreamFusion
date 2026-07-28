@@ -927,7 +927,7 @@ state_bytes_getter!(Java_io_github_jordepic_streamfusion_Native_intervalJoinerSt
 #[allow(clippy::too_many_arguments)]
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createIntervalJoiner<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     left_keys: JIntArray<'local>,
     right_keys: JIntArray<'local>,
@@ -946,39 +946,41 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createInterva
     pred_strings: JObjectArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
-    let left = read_columns(&env, &left_keys);
-    let right = read_columns(&env, &right_keys);
-    let left_schema = import_schema(left_schema_address);
-    let right_schema = import_schema(right_schema_address);
-    let predicate = read_join_predicate(
-        &mut env,
-        &pred_kinds,
-        &pred_payload,
-        &pred_child_counts,
-        &pred_longs,
-        &pred_doubles,
-        &pred_strings,
-    );
-    let joiner = IntervalJoiner::new(
-        left,
-        right,
-        left_time as usize,
-        right_time as usize,
-        lower,
-        upper,
-        predicate,
-        JoinKind::from_code(join_type),
-        left_schema,
-        right_schema,
-    )
-    .with_memory_budget(memory_budget_bytes);
-    boxed_or_throw(&mut env, joiner)
+    crate::bridge::jni_guard(env, move |mut env| {
+        let left = read_columns(&env, &left_keys);
+        let right = read_columns(&env, &right_keys);
+        let left_schema = import_schema(left_schema_address);
+        let right_schema = import_schema(right_schema_address);
+        let predicate = read_join_predicate(
+            &mut env,
+            &pred_kinds,
+            &pred_payload,
+            &pred_child_counts,
+            &pred_longs,
+            &pred_doubles,
+            &pred_strings,
+        );
+        let joiner = IntervalJoiner::new(
+            left,
+            right,
+            left_time as usize,
+            right_time as usize,
+            lower,
+            upper,
+            predicate,
+            JoinKind::from_code(join_type),
+            left_schema,
+            right_schema,
+        )
+        .with_memory_budget(memory_budget_bytes);
+        boxed_or_throw(&mut env, joiner)
+    })
 }
 
 /// Pushes a left batch, probing the buffered right rows and exporting the matched pairs.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushLeftIntervalJoiner<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     in_array_address: jlong,
@@ -988,21 +990,23 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushLeftInter
     proctime: jboolean,
     proctime_now_millis: jlong,
 ) {
-    let joiner = unsafe { &mut *(handle as *mut IntervalJoiner) };
-    // The pushed batch is retained in the buffer (not dropped), so no JVM release upcall runs
-    // between a failed account and the throw (see updateTumblingAggregator).
-    let batch = import_record_batch(in_array_address, in_schema_address);
-    let result = joiner.push_left(batch, (proctime != 0).then_some(proctime_now_millis));
-    match result {
-        Ok(out) => export_record_batch(out, out_array_address, out_schema_address),
-        Err(e) => throw_memory_limit(&mut env, &e.to_string()),
-    }
+    crate::bridge::jni_guard(env, move |mut env| {
+        let joiner = unsafe { &mut *(handle as *mut IntervalJoiner) };
+        // The pushed batch is retained in the buffer (not dropped), so no JVM release upcall runs
+        // between a failed account and the throw (see updateTumblingAggregator).
+        let batch = import_record_batch(in_array_address, in_schema_address);
+        let result = joiner.push_left(batch, (proctime != 0).then_some(proctime_now_millis));
+        match result {
+            Ok(out) => export_record_batch(out, out_array_address, out_schema_address),
+            Err(e) => throw_memory_limit(&mut env, &e.to_string()),
+        }
+    })
 }
 
 /// Pushes a right batch, probing the buffered left rows and exporting the matched pairs.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushRightIntervalJoiner<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     in_array_address: jlong,
@@ -1012,46 +1016,52 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushRightInte
     proctime: jboolean,
     proctime_now_millis: jlong,
 ) {
-    let joiner = unsafe { &mut *(handle as *mut IntervalJoiner) };
-    // The pushed batch is retained in the buffer (not dropped), so no JVM release upcall runs
-    // between a failed account and the throw (see updateTumblingAggregator).
-    let batch = import_record_batch(in_array_address, in_schema_address);
-    let result = joiner.push_right(batch, (proctime != 0).then_some(proctime_now_millis));
-    match result {
-        Ok(out) => export_record_batch(out, out_array_address, out_schema_address),
-        Err(e) => throw_memory_limit(&mut env, &e.to_string()),
-    }
+    crate::bridge::jni_guard(env, move |mut env| {
+        let joiner = unsafe { &mut *(handle as *mut IntervalJoiner) };
+        // The pushed batch is retained in the buffer (not dropped), so no JVM release upcall runs
+        // between a failed account and the throw (see updateTumblingAggregator).
+        let batch = import_record_batch(in_array_address, in_schema_address);
+        let result = joiner.push_right(batch, (proctime != 0).then_some(proctime_now_millis));
+        match result {
+            Ok(out) => export_record_batch(out, out_array_address, out_schema_address),
+            Err(e) => throw_memory_limit(&mut env, &e.to_string()),
+        }
+    })
 }
 
 /// Advances the combined watermark, evicting rows no future arrival can match, and exporting the
 /// null-padded rows for evicted outer rows that never matched (empty for an INNER join).
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_advanceIntervalJoiner<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     watermark_millis: jlong,
     out_array_address: jlong,
     out_schema_address: jlong,
 ) {
-    let joiner = unsafe { &mut *(handle as *mut IntervalJoiner) };
-    // Fallible in persistent-state mode (the eviction reads the committed table).
-    match joiner.advance(watermark_millis) {
-        Ok(result) => export_record_batch(result, out_array_address, out_schema_address),
-        Err(e) => throw_memory_limit(&mut env, &e.to_string()),
-    }
+    crate::bridge::jni_guard(env, move |mut env| {
+        let joiner = unsafe { &mut *(handle as *mut IntervalJoiner) };
+        // Fallible in persistent-state mode (the eviction reads the committed table).
+        match joiner.advance(watermark_millis) {
+            Ok(result) => export_record_batch(result, out_array_address, out_schema_address),
+            Err(e) => throw_memory_limit(&mut env, &e.to_string()),
+        }
+    })
 }
 
 /// Releases the interval joiner and its native state.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_closeIntervalJoiner<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
 ) {
-    unsafe {
-        drop(from_handle::<IntervalJoiner>(handle));
-    }
+    crate::bridge::jni_guard(env, move |_env| {
+        unsafe {
+            drop(from_handle::<IntervalJoiner>(handle));
+        }
+    })
 }
 
 /// Serializes the joiner's buffered rows for a checkpoint.
@@ -1061,39 +1071,43 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotInter
     _class: JClass<'local>,
     handle: jlong,
 ) -> jbyteArray {
-    let joiner = unsafe { &*(handle as *mut IntervalJoiner) };
-    env.byte_array_from_slice(&joiner.snapshot())
-        .expect("failed to allocate join snapshot array")
-        .into_raw()
+    crate::bridge::jni_guard(env, move |env| {
+        let joiner = unsafe { &*(handle as *mut IntervalJoiner) };
+        env.byte_array_from_slice(&joiner.snapshot())
+            .expect("failed to allocate join snapshot array")
+            .into_raw()
+    })
 }
 
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotIntervalJoinerPartitions<
     'local,
 >(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     max_parallelism: jint,
     timestamp_precisions: JIntArray<'local>,
 ) -> jni::sys::jobjectArray {
-    let joiner = unsafe { &*(handle as *const IntervalJoiner) };
-    let precisions: Vec<i32> = read_int_array(&env, &timestamp_precisions)
-        .into_iter()
-        .map(|precision| precision as i32)
-        .collect();
-    keyed_state_partition_array(
-        &mut env,
-        joiner.snapshot_partitions(max_parallelism as usize, &precisions),
-        "interval-join",
-    )
+    crate::bridge::jni_guard(env, move |mut env| {
+        let joiner = unsafe { &*(handle as *const IntervalJoiner) };
+        let precisions: Vec<i32> = read_int_array(&env, &timestamp_precisions)
+            .into_iter()
+            .map(|precision| precision as i32)
+            .collect();
+        keyed_state_partition_array(
+            &mut env,
+            joiner.snapshot_partitions(max_parallelism as usize, &precisions),
+            "interval-join",
+        )
+    })
 }
 
 /// Rebuilds an interval joiner from a snapshot taken by a prior run and returns a fresh handle.
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreIntervalJoiner<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     left_keys: JIntArray<'local>,
     right_keys: JIntArray<'local>,
@@ -1113,35 +1127,37 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreInterv
     snapshot: JByteArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
-    let left = read_columns(&env, &left_keys);
-    let right = read_columns(&env, &right_keys);
-    let left_schema = import_schema(left_schema_address);
-    let right_schema = import_schema(right_schema_address);
-    let predicate = read_join_predicate(
-        &mut env,
-        &pred_kinds,
-        &pred_payload,
-        &pred_child_counts,
-        &pred_longs,
-        &pred_doubles,
-        &pred_strings,
-    );
-    let bytes = env.convert_byte_array(&snapshot).expect("failed to read join snapshot");
-    let joiner = IntervalJoiner::restore(
-        left,
-        right,
-        left_time as usize,
-        right_time as usize,
-        lower,
-        upper,
-        predicate,
-        JoinKind::from_code(join_type),
-        left_schema,
-        right_schema,
-        &bytes,
-    )
-    .with_memory_budget(memory_budget_bytes);
-    boxed_or_throw(&mut env, joiner)
+    crate::bridge::jni_guard(env, move |mut env| {
+        let left = read_columns(&env, &left_keys);
+        let right = read_columns(&env, &right_keys);
+        let left_schema = import_schema(left_schema_address);
+        let right_schema = import_schema(right_schema_address);
+        let predicate = read_join_predicate(
+            &mut env,
+            &pred_kinds,
+            &pred_payload,
+            &pred_child_counts,
+            &pred_longs,
+            &pred_doubles,
+            &pred_strings,
+        );
+        let bytes = env.convert_byte_array(&snapshot).expect("failed to read join snapshot");
+        let joiner = IntervalJoiner::restore(
+            left,
+            right,
+            left_time as usize,
+            right_time as usize,
+            lower,
+            upper,
+            predicate,
+            JoinKind::from_code(join_type),
+            left_schema,
+            right_schema,
+            &bytes,
+        )
+        .with_memory_budget(memory_budget_bytes);
+        boxed_or_throw(&mut env, joiner)
+    })
 }
 
 #[no_mangle]
@@ -1149,7 +1165,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreInterv
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreIntervalJoinerPartitions<
     'local,
 >(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     left_keys: JIntArray<'local>,
     right_keys: JIntArray<'local>,
@@ -1169,46 +1185,48 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreInterv
     snapshots: JObjectArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
-    let left = read_columns(&env, &left_keys);
-    let right = read_columns(&env, &right_keys);
-    let left_schema = import_schema(left_schema_address);
-    let right_schema = import_schema(right_schema_address);
-    let predicate = read_join_predicate(
-        &mut env,
-        &pred_kinds,
-        &pred_payload,
-        &pred_child_counts,
-        &pred_longs,
-        &pred_doubles,
-        &pred_strings,
-    );
-    let count = env
-        .get_array_length(&snapshots)
-        .expect("read interval raw partition count");
-    let mut restored = Vec::with_capacity(count as usize);
-    for index in 0..count {
-        let bytes = JByteArray::from(
-            env.get_object_array_element(&snapshots, index)
-                .expect("read interval raw partition"),
+    crate::bridge::jni_guard(env, move |mut env| {
+        let left = read_columns(&env, &left_keys);
+        let right = read_columns(&env, &right_keys);
+        let left_schema = import_schema(left_schema_address);
+        let right_schema = import_schema(right_schema_address);
+        let predicate = read_join_predicate(
+            &mut env,
+            &pred_kinds,
+            &pred_payload,
+            &pred_child_counts,
+            &pred_longs,
+            &pred_doubles,
+            &pred_strings,
         );
-        restored.push(
-            env.convert_byte_array(&bytes)
-                .expect("read interval raw partition bytes"),
-        );
-    }
-    let joiner = IntervalJoiner::restore_partitions(
-        left,
-        right,
-        left_time as usize,
-        right_time as usize,
-        lower_bound,
-        upper_bound,
-        predicate,
-        JoinKind::from_code(join_type),
-        left_schema,
-        right_schema,
-        &restored,
-    )
-    .with_memory_budget(memory_budget_bytes);
-    boxed_or_throw(&mut env, joiner)
+        let count = env
+            .get_array_length(&snapshots)
+            .expect("read interval raw partition count");
+        let mut restored = Vec::with_capacity(count as usize);
+        for index in 0..count {
+            let bytes = JByteArray::from(
+                env.get_object_array_element(&snapshots, index)
+                    .expect("read interval raw partition"),
+            );
+            restored.push(
+                env.convert_byte_array(&bytes)
+                    .expect("read interval raw partition bytes"),
+            );
+        }
+        let joiner = IntervalJoiner::restore_partitions(
+            left,
+            right,
+            left_time as usize,
+            right_time as usize,
+            lower_bound,
+            upper_bound,
+            predicate,
+            JoinKind::from_code(join_type),
+            left_schema,
+            right_schema,
+            &restored,
+        )
+        .with_memory_budget(memory_budget_bytes);
+        boxed_or_throw(&mut env, joiner)
+    })
 }

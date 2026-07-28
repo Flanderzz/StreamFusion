@@ -518,28 +518,32 @@ state_bytes_getter!(Java_io_github_jordepic_streamfusion_Native_changelogNormali
 
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_changelogNormalizerStagingBytes<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
 ) -> jlong {
-    let normalizer = unsafe { &*(handle as *const ChangelogNormalizer) };
-    normalizer.staging_bytes() as jlong
+    crate::bridge::jni_guard(env, move |_env| {
+        let normalizer = unsafe { &*(handle as *const ChangelogNormalizer) };
+        normalizer.staging_bytes() as jlong
+    })
 }
 
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_changelogNormalizerStagedKeys<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
 ) -> jlong {
-    let normalizer = unsafe { &*(handle as *const ChangelogNormalizer) };
-    normalizer.staged_keys() as jlong
+    crate::bridge::jni_guard(env, move |_env| {
+        let normalizer = unsafe { &*(handle as *const ChangelogNormalizer) };
+        normalizer.staged_keys() as jlong
+    })
 }
 
 /// Creates a changelog normalizer (keep-last per unique key) and returns an opaque handle.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createChangelogNormalizer<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     key_columns: JIntArray<'local>,
     key_timestamp_precisions: JIntArray<'local>,
@@ -547,37 +551,41 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createChangel
     mini_batch: jboolean,
     memory_budget_bytes: jlong,
 ) -> jlong {
-    let keys = read_columns(&env, &key_columns);
-    let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-        .into_iter()
-        .map(|precision| precision as i32)
-        .collect();
-    let normalizer = ChangelogNormalizer::new(keys, generate_update_before != 0)
-        .with_mini_batch(mini_batch != 0)
-        .with_key_timestamp_precisions(timestamp_precisions)
-        .with_memory_budget(memory_budget_bytes);
-    boxed_or_throw(&mut env, normalizer)
+    crate::bridge::jni_guard(env, move |mut env| {
+        let keys = read_columns(&env, &key_columns);
+        let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
+            .into_iter()
+            .map(|precision| precision as i32)
+            .collect();
+        let normalizer = ChangelogNormalizer::new(keys, generate_update_before != 0)
+            .with_mini_batch(mini_batch != 0)
+            .with_key_timestamp_precisions(timestamp_precisions)
+            .with_memory_budget(memory_budget_bytes);
+        boxed_or_throw(&mut env, normalizer)
+    })
 }
 
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_flushChangelogNormalizer<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     out_array_address: jlong,
     out_schema_address: jlong,
 ) {
-    let normalizer = unsafe { &mut *(handle as *mut ChangelogNormalizer) };
-    match normalizer.flush_mini_batch() {
-        Ok(out) => export_record_batch(out, out_array_address, out_schema_address),
-        Err(e) => throw_memory_limit(&mut env, &e.to_string()),
-    }
+    crate::bridge::jni_guard(env, move |mut env| {
+        let normalizer = unsafe { &mut *(handle as *mut ChangelogNormalizer) };
+        match normalizer.flush_mini_batch() {
+            Ok(out) => export_record_batch(out, out_array_address, out_schema_address),
+            Err(e) => throw_memory_limit(&mut env, &e.to_string()),
+        }
+    })
 }
 
 /// Folds an input changelog batch into the keep-last state and exports the normalized changelog.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushChangelogNormalizer<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     in_array_address: jlong,
@@ -585,16 +593,18 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushChangelog
     out_array_address: jlong,
     out_schema_address: jlong,
 ) {
-    let normalizer = unsafe { &mut *(handle as *mut ChangelogNormalizer) };
-    // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
-    let result = {
-        let batch = import_record_batch(in_array_address, in_schema_address);
-        normalizer.push(&batch)
-    };
-    match result {
-        Ok(out) => export_record_batch(out, out_array_address, out_schema_address),
-        Err(e) => throw_memory_limit(&mut env, &e.to_string()),
-    }
+    crate::bridge::jni_guard(env, move |mut env| {
+        let normalizer = unsafe { &mut *(handle as *mut ChangelogNormalizer) };
+        // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
+        let result = {
+            let batch = import_record_batch(in_array_address, in_schema_address);
+            normalizer.push(&batch)
+        };
+        match result {
+            Ok(out) => export_record_batch(out, out_array_address, out_schema_address),
+            Err(e) => throw_memory_limit(&mut env, &e.to_string()),
+        }
+    })
 }
 
 /// Serializes the normalizer's per-key last rows for a checkpoint.
@@ -604,16 +614,18 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotChang
     _class: JClass<'local>,
     handle: jlong,
 ) -> jbyteArray {
-    let normalizer = unsafe { &mut *(handle as *mut ChangelogNormalizer) };
-    env.byte_array_from_slice(&normalizer.snapshot())
-        .expect("failed to allocate changelog-normalize snapshot array")
-        .into_raw()
+    crate::bridge::jni_guard(env, move |env| {
+        let normalizer = unsafe { &mut *(handle as *mut ChangelogNormalizer) };
+        env.byte_array_from_slice(&normalizer.snapshot())
+            .expect("failed to allocate changelog-normalize snapshot array")
+            .into_raw()
+    })
 }
 
 /// Rebuilds a changelog normalizer from a snapshot and returns a fresh handle.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreChangelogNormalizer<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     key_columns: JIntArray<'local>,
     key_timestamp_precisions: JIntArray<'local>,
@@ -622,46 +634,50 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreChange
     snapshot: JByteArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
-    let keys = read_columns(&env, &key_columns);
-    let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-        .into_iter()
-        .map(|precision| precision as i32)
-        .collect();
-    let bytes = env.convert_byte_array(&snapshot).expect("failed to read changelog-normalize snapshot");
-    let normalizer = ChangelogNormalizer::restore(keys, generate_update_before != 0, &bytes)
-        .with_mini_batch(mini_batch != 0)
-        .with_key_timestamp_precisions(timestamp_precisions)
-        .with_memory_budget(memory_budget_bytes);
-    boxed_or_throw(&mut env, normalizer)
+    crate::bridge::jni_guard(env, move |mut env| {
+        let keys = read_columns(&env, &key_columns);
+        let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
+            .into_iter()
+            .map(|precision| precision as i32)
+            .collect();
+        let bytes = env.convert_byte_array(&snapshot).expect("failed to read changelog-normalize snapshot");
+        let normalizer = ChangelogNormalizer::restore(keys, generate_update_before != 0, &bytes)
+            .with_mini_batch(mini_batch != 0)
+            .with_key_timestamp_precisions(timestamp_precisions)
+            .with_memory_budget(memory_budget_bytes);
+        boxed_or_throw(&mut env, normalizer)
+    })
 }
 
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotChangelogNormalizerPartitions<
     'local,
 >(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     max_parallelism: jint,
     timestamp_precisions: JIntArray<'local>,
 ) -> jni::sys::jobjectArray {
-    let normalizer = unsafe { &mut *(handle as *mut ChangelogNormalizer) };
-    let precisions: Vec<i32> = read_int_array(&env, &timestamp_precisions)
-        .into_iter()
-        .map(|precision| precision as i32)
-        .collect();
-    keyed_state_partition_array(
-        &mut env,
-        normalizer.snapshot_partitions(max_parallelism as usize, &precisions),
-        "changelog-normalizer",
-    )
+    crate::bridge::jni_guard(env, move |mut env| {
+        let normalizer = unsafe { &mut *(handle as *mut ChangelogNormalizer) };
+        let precisions: Vec<i32> = read_int_array(&env, &timestamp_precisions)
+            .into_iter()
+            .map(|precision| precision as i32)
+            .collect();
+        keyed_state_partition_array(
+            &mut env,
+            normalizer.snapshot_partitions(max_parallelism as usize, &precisions),
+            "changelog-normalizer",
+        )
+    })
 }
 
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreChangelogNormalizerPartitions<
     'local,
 >(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     key_columns: JIntArray<'local>,
     key_timestamp_precisions: JIntArray<'local>,
@@ -670,42 +686,46 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreChange
     snapshots: JObjectArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
-    let keys = read_columns(&env, &key_columns);
-    let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-        .into_iter()
-        .map(|precision| precision as i32)
-        .collect();
-    let count = env
-        .get_array_length(&snapshots)
-        .expect("read normalizer raw partition count");
-    let mut restored = Vec::with_capacity(count as usize);
-    for index in 0..count {
-        let bytes = JByteArray::from(
-            env.get_object_array_element(&snapshots, index)
-                .expect("read normalizer raw partition"),
-        );
-        restored.push(
-            env.convert_byte_array(&bytes)
-                .expect("read normalizer raw partition bytes"),
-        );
-    }
-    let normalizer = ChangelogNormalizer::restore_partitions(keys, generate_update_before != 0, &restored)
-        .with_mini_batch(mini_batch != 0)
-        .with_key_timestamp_precisions(timestamp_precisions)
-        .with_memory_budget(memory_budget_bytes);
-    boxed_or_throw(&mut env, normalizer)
+    crate::bridge::jni_guard(env, move |mut env| {
+        let keys = read_columns(&env, &key_columns);
+        let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
+            .into_iter()
+            .map(|precision| precision as i32)
+            .collect();
+        let count = env
+            .get_array_length(&snapshots)
+            .expect("read normalizer raw partition count");
+        let mut restored = Vec::with_capacity(count as usize);
+        for index in 0..count {
+            let bytes = JByteArray::from(
+                env.get_object_array_element(&snapshots, index)
+                    .expect("read normalizer raw partition"),
+            );
+            restored.push(
+                env.convert_byte_array(&bytes)
+                    .expect("read normalizer raw partition bytes"),
+            );
+        }
+        let normalizer = ChangelogNormalizer::restore_partitions(keys, generate_update_before != 0, &restored)
+            .with_mini_batch(mini_batch != 0)
+            .with_key_timestamp_precisions(timestamp_precisions)
+            .with_memory_budget(memory_budget_bytes);
+        boxed_or_throw(&mut env, normalizer)
+    })
 }
 
 /// Releases a changelog normalizer handle.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_closeChangelogNormalizer<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
 ) {
-    unsafe {
-        drop(from_handle::<ChangelogNormalizer>(handle));
-    }
+    crate::bridge::jni_guard(env, move |_env| {
+        unsafe {
+            drop(from_handle::<ChangelogNormalizer>(handle));
+        }
+    })
 }
 
 #[cfg(test)]

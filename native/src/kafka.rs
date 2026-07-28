@@ -1275,10 +1275,12 @@ where
 #[cfg(feature = "kafka")]
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_featureBuilt<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
 ) -> jni::sys::jboolean {
-    cfg!(feature = "kafka") as jni::sys::jboolean
+    crate::bridge::jni_guard(env, move |_env| {
+        cfg!(feature = "kafka") as jni::sys::jboolean
+    })
 }
 
 /// Opens a native Kafka split reader for one subtask and returns an opaque handle, released with
@@ -1288,16 +1290,18 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_fe
 #[cfg(feature = "kafka")]
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_openKafkaConsumer<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     config_keys: JObjectArray<'local>,
     config_values: JObjectArray<'local>,
 ) -> jlong {
-    let keys = read_string_array(&mut env, &config_keys);
-    let values = read_string_array(&mut env, &config_values);
-    let config: Vec<(String, String)> = keys.into_iter().zip(values).collect();
-    let reader = KafkaSplitReader::open(&config);
-    into_handle(reader)
+    crate::bridge::jni_guard(env, move |mut env| {
+        let keys = read_string_array(&mut env, &config_keys);
+        let values = read_string_array(&mut env, &config_values);
+        let config: Vec<(String, String)> = keys.into_iter().zip(values).collect();
+        let reader = KafkaSplitReader::open(&config);
+        into_handle(reader)
+    })
 }
 
 /// Attaches a format library's decode to this consumer through the driver-init handshake:
@@ -1310,20 +1314,22 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_op
 #[cfg(feature = "kafka")]
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_attachKafkaDecoder<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     init_address: jlong,
     decoder_handle: jlong,
 ) -> jboolean {
-    let reader = unsafe { &mut *(handle as *mut KafkaSplitReader) };
-    let init: FormatDriverInit = unsafe { std::mem::transmute(init_address as usize) };
-    let mut driver = FormatDriver { decode_body_batch: unsupported_decode };
-    if init(FORMAT_DRIVER_VERSION_1, &mut driver) != 0 {
-        return 0;
-    }
-    reader.decode = Some((driver.decode_body_batch, decoder_handle));
-    1
+    crate::bridge::jni_guard(env, move |_env| {
+        let reader = unsafe { &mut *(handle as *mut KafkaSplitReader) };
+        let init: FormatDriverInit = unsafe { std::mem::transmute(init_address as usize) };
+        let mut driver = FormatDriver { decode_body_batch: unsupported_decode };
+        if init(FORMAT_DRIVER_VERSION_1, &mut driver) != 0 {
+            return 0;
+        }
+        reader.decode = Some((driver.decode_body_batch, decoder_handle));
+        1
+    })
 }
 
 /// Placeholder the driver struct is initialized with before the handshake fills it; never invoked
@@ -1339,7 +1345,7 @@ extern "C" fn unsupported_decode(_: i64, _: i64, _: i64, _: i64, _: i64) -> i32 
 #[cfg(feature = "kafka")]
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_assignKafkaSplits<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     topics: JObjectArray<'local>,
@@ -1347,12 +1353,14 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_as
     start_offsets: JLongArray<'local>,
     stopping_offsets: JLongArray<'local>,
 ) {
-    let reader = unsafe { &mut *(handle as *mut KafkaSplitReader) };
-    let topics = read_string_array(&mut env, &topics);
-    let partitions = read_longs(&env, &partitions);
-    let offsets = read_longs(&env, &start_offsets);
-    let stopping_offsets = read_longs(&env, &stopping_offsets);
-    reader.assign_splits(&topics, &partitions, &offsets, &stopping_offsets);
+    crate::bridge::jni_guard(env, move |mut env| {
+        let reader = unsafe { &mut *(handle as *mut KafkaSplitReader) };
+        let topics = read_string_array(&mut env, &topics);
+        let partitions = read_longs(&env, &partitions);
+        let offsets = read_longs(&env, &start_offsets);
+        let stopping_offsets = read_longs(&env, &stopping_offsets);
+        reader.assign_splits(&topics, &partitions, &offsets, &stopping_offsets);
+    })
 }
 
 /// Removes finished splits (reached their bounded stopping offset) from the assignment so the consumer
@@ -1360,16 +1368,18 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_as
 #[cfg(feature = "kafka")]
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_unassignKafkaSplits<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     topics: JObjectArray<'local>,
     partitions: JLongArray<'local>,
 ) {
-    let reader = unsafe { &mut *(handle as *mut KafkaSplitReader) };
-    let topics = read_string_array(&mut env, &topics);
-    let partitions = read_longs(&env, &partitions);
-    reader.unassign_splits(&topics, &partitions);
+    crate::bridge::jni_guard(env, move |mut env| {
+        let reader = unsafe { &mut *(handle as *mut KafkaSplitReader) };
+        let topics = read_string_array(&mut env, &topics);
+        let partitions = read_longs(&env, &partitions);
+        reader.unassign_splits(&topics, &partitions);
+    })
 }
 
 /// Commits checkpoint positions from a split-fetcher task, serializing the operation with native
@@ -1444,13 +1454,15 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_po
 #[cfg(feature = "kafka")]
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_wakeKafkaConsumer<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
 ) {
-    let reader = handle as *const KafkaSplitReader;
-    let queue = unsafe { (*reader).consumer_queue };
-    unsafe { rdkafka::bindings::rd_kafka_queue_yield(queue) };
+    crate::bridge::jni_guard(env, move |_env| {
+        let reader = handle as *const KafkaSplitReader;
+        let queue = unsafe { (*reader).consumer_queue };
+        unsafe { rdkafka::bindings::rd_kafka_queue_yield(queue) };
+    })
 }
 
 /// Imports a whole Arrow batch once and materializes the final `byte[]` values consumed by
@@ -1585,34 +1597,38 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_dr
     out_array_address: jlong,
     out_schema_address: jlong,
 ) -> jint {
-    let reader = unsafe { &mut *(handle as *mut KafkaSplitReader) };
-    let (topic, partition, next_offset, batch, bytes, records, high_watermark) =
-        reader.pending.pop_front().expect("drainKafkaSplit called with no pending batch");
-    let rows = batch.num_rows() as jint;
-    let metadata = [partition as i64, next_offset, bytes, records, high_watermark];
-    let metadata_len = env
-        .get_array_length(&split_meta)
-        .expect("failed to read split meta length") as usize;
-    env.set_long_array_region(&split_meta, 0, &metadata[..metadata_len.min(metadata.len())])
-        .expect("failed to write split meta");
-    let topic_jstr = env.new_string(&topic).expect("failed to make topic string");
-    env.set_object_array_element(&out_topic, 0, &topic_jstr)
-        .expect("failed to write topic");
-    export_record_batch(batch, out_array_address, out_schema_address);
-    rows
+    crate::bridge::jni_guard(env, move |env| {
+        let reader = unsafe { &mut *(handle as *mut KafkaSplitReader) };
+        let (topic, partition, next_offset, batch, bytes, records, high_watermark) =
+            reader.pending.pop_front().expect("drainKafkaSplit called with no pending batch");
+        let rows = batch.num_rows() as jint;
+        let metadata = [partition as i64, next_offset, bytes, records, high_watermark];
+        let metadata_len = env
+            .get_array_length(&split_meta)
+            .expect("failed to read split meta length") as usize;
+        env.set_long_array_region(&split_meta, 0, &metadata[..metadata_len.min(metadata.len())])
+            .expect("failed to write split meta");
+        let topic_jstr = env.new_string(&topic).expect("failed to make topic string");
+        env.set_object_array_element(&out_topic, 0, &topic_jstr)
+            .expect("failed to write topic");
+        export_record_batch(batch, out_array_address, out_schema_address);
+        rows
+    })
 }
 
 /// Releases a native Kafka split reader, dropping the rdkafka consumer (which closes its connections).
 #[cfg(feature = "kafka")]
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_closeKafkaConsumer<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
 ) {
-    unsafe {
-        drop(from_handle::<KafkaSplitReader>(handle));
-    }
+    crate::bridge::jni_guard(env, move |_env| {
+        unsafe {
+            drop(from_handle::<KafkaSplitReader>(handle));
+        }
+    })
 }
 
 /// Benchmark-only: drive the **production** split reader (poll + inline decode) over a
@@ -1623,7 +1639,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_cl
 #[cfg(feature = "kafka")]
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_benchmarkNativeConsume<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     config_keys: JObjectArray<'local>,
     config_values: JObjectArray<'local>,
@@ -1635,39 +1651,41 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_be
     schema_id: jint,
     max_messages: jlong,
 ) -> jlong {
-    let keys = read_string_array(&mut env, &config_keys);
-    let values = read_string_array(&mut env, &config_values);
-    let config: Vec<(String, String)> = keys.into_iter().zip(values).collect();
-    let topic: String = env.get_string(&topic).expect("failed to read topic").into();
-    let _ = (format, schema_array_address, schema_address, avro_schema, schema_id);
-    let mut reader = KafkaSplitReader::open(&config);
-    reader.assign_splits(&[topic], &[0], &[-2], &[i64::MIN]); // partition 0, earliest
+    crate::bridge::jni_guard(env, move |mut env| {
+        let keys = read_string_array(&mut env, &config_keys);
+        let values = read_string_array(&mut env, &config_values);
+        let config: Vec<(String, String)> = keys.into_iter().zip(values).collect();
+        let topic: String = env.get_string(&topic).expect("failed to read topic").into();
+        let _ = (format, schema_array_address, schema_address, avro_schema, schema_id);
+        let mut reader = KafkaSplitReader::open(&config);
+        reader.assign_splits(&[topic], &[0], &[-2], &[i64::MIN]); // partition 0, earliest
 
-    let timeout = std::time::Duration::from_millis(250);
-    let mut rows: i64 = 0;
-    let mut idle = 0;
-    // The topic holds exactly `max_messages`; loop until we've decoded them all. A generous idle guard
-    // (≈10s of empty polls) only trips if the broker truly stops delivering, avoiding a hang.
-    // Poll cap from SF env via JVM? Keep it simple: an experiment knob compiled in — the production
-    // reader is driven with the same generous cap the SQL source uses.
-    let poll_cap: usize = std::env::var("SF_KAFKA_POLL_CAP")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(65536);
-    while rows < max_messages && idle < 40 {
-        let count = reader.poll(poll_cap, timeout).expect("failed to poll Kafka");
-        if count == 0 {
-            idle += 1;
-            continue;
+        let timeout = std::time::Duration::from_millis(250);
+        let mut rows: i64 = 0;
+        let mut idle = 0;
+        // The topic holds exactly `max_messages`; loop until we've decoded them all. A generous idle guard
+        // (≈10s of empty polls) only trips if the broker truly stops delivering, avoiding a hang.
+        // Poll cap from SF env via JVM? Keep it simple: an experiment knob compiled in — the production
+        // reader is driven with the same generous cap the SQL source uses.
+        let poll_cap: usize = std::env::var("SF_KAFKA_POLL_CAP")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(65536);
+        while rows < max_messages && idle < 40 {
+            let count = reader.poll(poll_cap, timeout).expect("failed to poll Kafka");
+            if count == 0 {
+                idle += 1;
+                continue;
+            }
+            idle = 0;
+            for (_topic, _partition, _next_offset, batch, _bytes, _records, _high) in
+                reader.pending.drain(..)
+            {
+                rows += batch.num_rows() as i64; // consumed in Rust; no JVM export
+            }
         }
-        idle = 0;
-        for (_topic, _partition, _next_offset, batch, _bytes, _records, _high) in
-            reader.pending.drain(..)
-        {
-            rows += batch.num_rows() as i64; // consumed in Rust; no JVM export
-        }
-    }
-    rows
+        rows
+    })
 }
 
 /// Benchmark-only: measure librdkafka's raw delivery rate — batch-consume the whole topic and count
@@ -1676,82 +1694,84 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_be
 #[cfg(feature = "kafka")]
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_benchmarkConsumeOnly<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     config_keys: JObjectArray<'local>,
     config_values: JObjectArray<'local>,
     topic: JString<'local>,
     max_messages: jlong,
 ) -> jlong {
-    use rdkafka::bindings as rdsys;
-    use rdkafka::config::ClientConfig;
-    use rdkafka::consumer::{BaseConsumer, Consumer};
-    use rdkafka::topic_partition_list::{Offset, TopicPartitionList};
+    crate::bridge::jni_guard(env, move |mut env| {
+        use rdkafka::bindings as rdsys;
+        use rdkafka::config::ClientConfig;
+        use rdkafka::consumer::{BaseConsumer, Consumer};
+        use rdkafka::topic_partition_list::{Offset, TopicPartitionList};
 
-    let keys = read_string_array(&mut env, &config_keys);
-    let values = read_string_array(&mut env, &config_values);
-    let topic: String = env.get_string(&topic).expect("failed to read topic").into();
-    let mut client = ClientConfig::new();
-    for (key, value) in keys.iter().zip(&values) {
-        client.set(key, value);
-    }
-    let consumer: BaseConsumer = client.create().expect("failed to create kafka consumer");
-    // Assign every partition at the beginning — librdkafka fetches them all (one FetchRequest per
-    // broker) and merges them onto the single consumer queue this loop drains.
-    let metadata = consumer
-        .fetch_metadata(Some(&topic), std::time::Duration::from_secs(10))
-        .expect("fetch metadata");
-    let partitions = metadata
-        .topics()
-        .iter()
-        .find(|t| t.name() == topic)
-        .expect("topic in metadata")
-        .partitions();
-    let mut tpl = TopicPartitionList::new();
-    for partition in partitions {
-        tpl.add_partition_offset(&topic, partition.id(), Offset::Beginning).expect("add partition");
-    }
-    consumer.assign(&tpl).expect("assign");
-    let queue = unsafe { rdsys::rd_kafka_queue_get_consumer(consumer.client().native_ptr()) };
+        let keys = read_string_array(&mut env, &config_keys);
+        let values = read_string_array(&mut env, &config_values);
+        let topic: String = env.get_string(&topic).expect("failed to read topic").into();
+        let mut client = ClientConfig::new();
+        for (key, value) in keys.iter().zip(&values) {
+            client.set(key, value);
+        }
+        let consumer: BaseConsumer = client.create().expect("failed to create kafka consumer");
+        // Assign every partition at the beginning — librdkafka fetches them all (one FetchRequest per
+        // broker) and merges them onto the single consumer queue this loop drains.
+        let metadata = consumer
+            .fetch_metadata(Some(&topic), std::time::Duration::from_secs(10))
+            .expect("fetch metadata");
+        let partitions = metadata
+            .topics()
+            .iter()
+            .find(|t| t.name() == topic)
+            .expect("topic in metadata")
+            .partitions();
+        let mut tpl = TopicPartitionList::new();
+        for partition in partitions {
+            tpl.add_partition_offset(&topic, partition.id(), Offset::Beginning).expect("add partition");
+        }
+        consumer.assign(&tpl).expect("assign");
+        let queue = unsafe { rdsys::rd_kafka_queue_get_consumer(consumer.client().native_ptr()) };
 
-    // Drain with the callback API instead of `rd_kafka_consume_batch_queue`: the batch call locks
-    // and unlocks the queue mutex PER MESSAGE (contending with the broker thread's enqueue), while
-    // the callback path bulk-moves the whole queued backlog under ONE lock and dispatches lock-free
-    // (librdkafka destroys each op after the callback returns).
-    struct CountCtx {
-        count: i64,
-    }
-    unsafe extern "C" fn count_message(
-        message: *mut rdsys::rd_kafka_message_t,
-        opaque: *mut std::os::raw::c_void,
-    ) {
-        let context = &mut *(opaque as *mut CountCtx);
-        let message = &*message;
-        if message.err == rdsys::rd_kafka_resp_err_t::RD_KAFKA_RESP_ERR_NO_ERROR
-            && !message.payload.is_null()
-        {
-            context.count += 1; // no decode — raw delivery only
+        // Drain with the callback API instead of `rd_kafka_consume_batch_queue`: the batch call locks
+        // and unlocks the queue mutex PER MESSAGE (contending with the broker thread's enqueue), while
+        // the callback path bulk-moves the whole queued backlog under ONE lock and dispatches lock-free
+        // (librdkafka destroys each op after the callback returns).
+        struct CountCtx {
+            count: i64,
         }
-    }
-    let mut context = CountCtx { count: 0 };
-    let mut idle = 0;
-    while context.count < max_messages && idle < 40 {
-        let served = unsafe {
-            rdsys::rd_kafka_consume_callback_queue(
-                queue,
-                250,
-                Some(count_message),
-                &mut context as *mut CountCtx as *mut std::os::raw::c_void,
-            )
-        };
-        if served <= 0 {
-            idle += 1;
-        } else {
-            idle = 0;
+        unsafe extern "C" fn count_message(
+            message: *mut rdsys::rd_kafka_message_t,
+            opaque: *mut std::os::raw::c_void,
+        ) {
+            let context = &mut *(opaque as *mut CountCtx);
+            let message = &*message;
+            if message.err == rdsys::rd_kafka_resp_err_t::RD_KAFKA_RESP_ERR_NO_ERROR
+                && !message.payload.is_null()
+            {
+                context.count += 1; // no decode — raw delivery only
+            }
         }
-    }
-    unsafe { rdsys::rd_kafka_queue_destroy(queue) };
-    context.count
+        let mut context = CountCtx { count: 0 };
+        let mut idle = 0;
+        while context.count < max_messages && idle < 40 {
+            let served = unsafe {
+                rdsys::rd_kafka_consume_callback_queue(
+                    queue,
+                    250,
+                    Some(count_message),
+                    &mut context as *mut CountCtx as *mut std::os::raw::c_void,
+                )
+            };
+            if served <= 0 {
+                idle += 1;
+            } else {
+                idle = 0;
+            }
+        }
+        unsafe { rdsys::rd_kafka_queue_destroy(queue) };
+        context.count
+    })
 }
 
 /// Benchmark-only: a hand-rolled raw-consume loop with none of the split-reader machinery (no
@@ -1760,7 +1780,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_be
 #[cfg(feature = "kafka")]
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_benchmarkNativeConsumeSerial<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     config_keys: JObjectArray<'local>,
     config_values: JObjectArray<'local>,
@@ -1772,69 +1792,71 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_be
     schema_id: jint,
     max_messages: jlong,
 ) -> jlong {
-    use rdkafka::bindings as rdsys;
-    use rdkafka::config::ClientConfig;
-    use rdkafka::consumer::{BaseConsumer, Consumer};
-    use rdkafka::topic_partition_list::{Offset, TopicPartitionList};
+    crate::bridge::jni_guard(env, move |mut env| {
+        use rdkafka::bindings as rdsys;
+        use rdkafka::config::ClientConfig;
+        use rdkafka::consumer::{BaseConsumer, Consumer};
+        use rdkafka::topic_partition_list::{Offset, TopicPartitionList};
 
-    let keys = read_string_array(&mut env, &config_keys);
-    let values = read_string_array(&mut env, &config_values);
-    let topic: String = env.get_string(&topic).expect("failed to read topic").into();
-    let _ = (format, schema_array_address, schema_address, avro_schema, schema_id);
+        let keys = read_string_array(&mut env, &config_keys);
+        let values = read_string_array(&mut env, &config_values);
+        let topic: String = env.get_string(&topic).expect("failed to read topic").into();
+        let _ = (format, schema_array_address, schema_address, avro_schema, schema_id);
 
-    let mut client = ClientConfig::new();
-    for (key, value) in keys.iter().zip(&values) {
-        client.set(key, value);
-    }
-    let consumer: BaseConsumer = client.create().expect("failed to create kafka consumer");
-    let metadata = consumer
-        .fetch_metadata(Some(&topic), std::time::Duration::from_secs(10))
-        .expect("fetch metadata");
-    let mut tpl = TopicPartitionList::new();
-    for partition in metadata.topics().iter().find(|t| t.name() == topic).expect("topic").partitions() {
-        tpl.add_partition_offset(&topic, partition.id(), Offset::Beginning).expect("add partition");
-    }
-    consumer.assign(&tpl).expect("assign");
-    let queue = unsafe { rdsys::rd_kafka_queue_get_consumer(consumer.client().native_ptr()) };
-
-    // Callback drain (one queue lock per poll, not per message — see benchmarkConsumeOnly). No payload
-    // copy occurs here: this benchmark measures the connector DSO's raw delivery floor.
-    struct SerialCtx {
-        appended: i64,
-    }
-    unsafe extern "C" fn append_payload(
-        message: *mut rdsys::rd_kafka_message_t,
-        opaque: *mut std::os::raw::c_void,
-    ) {
-        let context = &mut *(opaque as *mut SerialCtx);
-        let message = &*message;
-        if message.err == rdsys::rd_kafka_resp_err_t::RD_KAFKA_RESP_ERR_NO_ERROR
-            && !message.payload.is_null()
-        {
-            context.appended += 1;
+        let mut client = ClientConfig::new();
+        for (key, value) in keys.iter().zip(&values) {
+            client.set(key, value);
         }
-    }
-    let mut rows: i64 = 0;
-    let mut idle = 0;
-    while rows < max_messages && idle < 40 {
-        let mut context = SerialCtx { appended: 0 };
-        let served = unsafe {
-            rdsys::rd_kafka_consume_callback_queue(
-                queue,
-                250,
-                Some(append_payload),
-                &mut context as *mut SerialCtx as *mut std::os::raw::c_void,
-            )
-        };
-        if served <= 0 || context.appended == 0 {
-            idle += if served <= 0 { 1 } else { 0 };
-            continue;
+        let consumer: BaseConsumer = client.create().expect("failed to create kafka consumer");
+        let metadata = consumer
+            .fetch_metadata(Some(&topic), std::time::Duration::from_secs(10))
+            .expect("fetch metadata");
+        let mut tpl = TopicPartitionList::new();
+        for partition in metadata.topics().iter().find(|t| t.name() == topic).expect("topic").partitions() {
+            tpl.add_partition_offset(&topic, partition.id(), Offset::Beginning).expect("add partition");
         }
-        idle = 0;
-        rows += context.appended;
-    }
-    unsafe { rdsys::rd_kafka_queue_destroy(queue) };
-    rows
+        consumer.assign(&tpl).expect("assign");
+        let queue = unsafe { rdsys::rd_kafka_queue_get_consumer(consumer.client().native_ptr()) };
+
+        // Callback drain (one queue lock per poll, not per message — see benchmarkConsumeOnly). No payload
+        // copy occurs here: this benchmark measures the connector DSO's raw delivery floor.
+        struct SerialCtx {
+            appended: i64,
+        }
+        unsafe extern "C" fn append_payload(
+            message: *mut rdsys::rd_kafka_message_t,
+            opaque: *mut std::os::raw::c_void,
+        ) {
+            let context = &mut *(opaque as *mut SerialCtx);
+            let message = &*message;
+            if message.err == rdsys::rd_kafka_resp_err_t::RD_KAFKA_RESP_ERR_NO_ERROR
+                && !message.payload.is_null()
+            {
+                context.appended += 1;
+            }
+        }
+        let mut rows: i64 = 0;
+        let mut idle = 0;
+        while rows < max_messages && idle < 40 {
+            let mut context = SerialCtx { appended: 0 };
+            let served = unsafe {
+                rdsys::rd_kafka_consume_callback_queue(
+                    queue,
+                    250,
+                    Some(append_payload),
+                    &mut context as *mut SerialCtx as *mut std::os::raw::c_void,
+                )
+            };
+            if served <= 0 || context.appended == 0 {
+                idle += if served <= 0 { 1 } else { 0 };
+                continue;
+            }
+            idle = 0;
+            rows += context.appended;
+        }
+        unsafe { rdsys::rd_kafka_queue_destroy(queue) };
+        rows
+    })
 }
 
 /// Benchmark-only: consume an entire topic with a native (rdkafka) consumer and decode it to typed
@@ -1846,7 +1868,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_be
 #[cfg(feature = "kafka-bench")]
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_benchmarkKafkaConsume<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     brokers: JString<'local>,
     topic: JString<'local>,
@@ -1854,64 +1876,66 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_be
     schema_address: jlong,
     max_messages: jlong,
 ) -> jlong {
-    use arrow::array::BinaryBuilder;
-    use rdkafka::config::ClientConfig;
-    use rdkafka::consumer::{BaseConsumer, Consumer};
-    use rdkafka::message::Message;
+    crate::bridge::jni_guard(env, move |env| {
+        use arrow::array::BinaryBuilder;
+        use rdkafka::config::ClientConfig;
+        use rdkafka::consumer::{BaseConsumer, Consumer};
+        use rdkafka::message::Message;
 
-    let brokers: String = env.get_string(&brokers).expect("failed to read brokers").into();
-    let topic: String = env.get_string(&topic).expect("failed to read topic").into();
-    let decoder = JsonDecoder::new(import_record_batch(schema_array_address, schema_address).schema());
+        let brokers: String = env.get_string(&brokers).expect("failed to read brokers").into();
+        let topic: String = env.get_string(&topic).expect("failed to read topic").into();
+        let decoder = JsonDecoder::new(import_record_batch(schema_array_address, schema_address).schema());
 
-    // A fresh group reading from the beginning each run; offsets are not committed (the consumer is
-    // throwaway). This mirrors the manual, non-committing consumption the production source would do.
-    // Unique group per call so each timed run re-reads the whole topic from the beginning (a fixed
-    // group would leave the warm-up run's position at the end and the timed run would read nothing).
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let group = format!("streamfusion-bench-{}-{}", std::process::id(), nonce);
-    let consumer: BaseConsumer = ClientConfig::new()
-        .set("bootstrap.servers", &brokers)
-        .set("group.id", &group)
-        .set("enable.auto.commit", "false")
-        .set("auto.offset.reset", "earliest")
-        .create()
-        .expect("failed to create kafka consumer");
-    consumer.subscribe(&[&topic]).expect("failed to subscribe");
+        // A fresh group reading from the beginning each run; offsets are not committed (the consumer is
+        // throwaway). This mirrors the manual, non-committing consumption the production source would do.
+        // Unique group per call so each timed run re-reads the whole topic from the beginning (a fixed
+        // group would leave the warm-up run's position at the end and the timed run would read nothing).
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let group = format!("streamfusion-bench-{}-{}", std::process::id(), nonce);
+        let consumer: BaseConsumer = ClientConfig::new()
+            .set("bootstrap.servers", &brokers)
+            .set("group.id", &group)
+            .set("enable.auto.commit", "false")
+            .set("auto.offset.reset", "earliest")
+            .create()
+            .expect("failed to create kafka consumer");
+        consumer.subscribe(&[&topic]).expect("failed to subscribe");
 
-    let body_field = Field::new("body", DataType::Binary, true);
-    let body_schema = Arc::new(Schema::new(vec![body_field]));
-    let mut builder = BinaryBuilder::new();
-    let mut buffered = 0usize;
-    let mut seen: i64 = 0;
-    let mut rows: i64 = 0;
-    let mut decode = |builder: &mut BinaryBuilder| -> i64 {
-        let batch = RecordBatch::try_new(body_schema.clone(), vec![Arc::new(builder.finish())])
-            .expect("failed to build kafka body batch");
-        decoder.decode(&batch).num_rows() as i64
-    };
+        let body_field = Field::new("body", DataType::Binary, true);
+        let body_schema = Arc::new(Schema::new(vec![body_field]));
+        let mut builder = BinaryBuilder::new();
+        let mut buffered = 0usize;
+        let mut seen: i64 = 0;
+        let mut rows: i64 = 0;
+        let mut decode = |builder: &mut BinaryBuilder| -> i64 {
+            let batch = RecordBatch::try_new(body_schema.clone(), vec![Arc::new(builder.finish())])
+                .expect("failed to build kafka body batch");
+            decoder.decode(&batch).num_rows() as i64
+        };
 
-    while seen < max_messages {
-        match consumer.poll(std::time::Duration::from_secs(5)) {
-            Some(Ok(message)) => {
-                builder.append_value(message.payload().unwrap_or(&[]));
-                buffered += 1;
-                seen += 1;
-                if buffered >= 8192 {
-                    rows += decode(&mut builder);
-                    buffered = 0;
+        while seen < max_messages {
+            match consumer.poll(std::time::Duration::from_secs(5)) {
+                Some(Ok(message)) => {
+                    builder.append_value(message.payload().unwrap_or(&[]));
+                    buffered += 1;
+                    seen += 1;
+                    if buffered >= 8192 {
+                        rows += decode(&mut builder);
+                        buffered = 0;
+                    }
                 }
+                Some(Err(error)) => panic!("kafka consume error: {error}"),
+                None => break, // poll timeout: the produced messages are exhausted
             }
-            Some(Err(error)) => panic!("kafka consume error: {error}"),
-            None => break, // poll timeout: the produced messages are exhausted
         }
-    }
-    if buffered > 0 {
-        rows += decode(&mut builder);
-    }
-    rows
+        if buffered > 0 {
+            rows += decode(&mut builder);
+        }
+        rows
+    })
 }
 
 /// The exactly-once producer hand-off (Phase 0A spike): the native side owns only the data plane of
@@ -2374,11 +2398,13 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_ab
 pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_closeKafkaProducer<
     'local,
 >(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
 ) {
-    drop(unsafe { from_handle::<KafkaTransactionalProducer>(handle) });
+    crate::bridge::jni_guard(env, move |_env| {
+        drop(unsafe { from_handle::<KafkaTransactionalProducer>(handle) });
+    })
 }
 
 /// Diagnostic-only (producer throughput probe): produces `count` copies of one record inside a

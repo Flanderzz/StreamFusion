@@ -2293,51 +2293,57 @@ state_bytes_getter!(Java_io_github_jordepic_streamfusion_Native_windowRankerStat
 /// [`state_bytes_getter`] for the Top-N handle, which wraps its two ranker variants in an enum.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_topNRankerStateBytes<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
 ) -> jlong {
-    let ranker = unsafe { &*(handle as *const TopNHandle) };
-    (match ranker {
-        TopNHandle::Append(r) => r.memory.state_bytes,
-        TopNHandle::Retract(r) => r.memory.state_bytes,
-        TopNHandle::UpdateFast(r) => r.memory.state_bytes,
-    }) as jlong
+    crate::bridge::jni_guard(env, move |_env| {
+        let ranker = unsafe { &*(handle as *const TopNHandle) };
+        (match ranker {
+            TopNHandle::Append(r) => r.memory.state_bytes,
+            TopNHandle::Retract(r) => r.memory.state_bytes,
+            TopNHandle::UpdateFast(r) => r.memory.state_bytes,
+        }) as jlong
+    })
 }
 
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_topNRankerStagingBytes<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
 ) -> jlong {
-    let ranker = unsafe { &*(handle as *const TopNHandle) };
-    match ranker {
-        TopNHandle::Append(r) => r.staging_bytes() as jlong,
-        TopNHandle::Retract(r) => r.staging_bytes() as jlong,
-        TopNHandle::UpdateFast(_) => 0, // no net-diff staging
-    }
+    crate::bridge::jni_guard(env, move |_env| {
+        let ranker = unsafe { &*(handle as *const TopNHandle) };
+        match ranker {
+            TopNHandle::Append(r) => r.staging_bytes() as jlong,
+            TopNHandle::Retract(r) => r.staging_bytes() as jlong,
+            TopNHandle::UpdateFast(_) => 0, // no net-diff staging
+        }
+    })
 }
 
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_topNRankerStagedPartitions<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
 ) -> jlong {
-    let ranker = unsafe { &*(handle as *const TopNHandle) };
-    match ranker {
-        TopNHandle::Append(r) => r.staged_partitions() as jlong,
-        TopNHandle::Retract(r) => r.staged_partitions() as jlong,
-        TopNHandle::UpdateFast(_) => 0, // no net-diff staging
-    }
+    crate::bridge::jni_guard(env, move |_env| {
+        let ranker = unsafe { &*(handle as *const TopNHandle) };
+        match ranker {
+            TopNHandle::Append(r) => r.staged_partitions() as jlong,
+            TopNHandle::Retract(r) => r.staged_partitions() as jlong,
+            TopNHandle::UpdateFast(_) => 0, // no net-diff staging
+        }
+    })
 }
 
 /// Creates a window-rank ranker (window Top-N / window deduplication) over the attached
 /// window_start/window_end columns and returns an opaque handle.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createWindowRanker<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     window_start_col: jint,
     window_end_col: jint,
@@ -2349,69 +2355,77 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createWindowR
     output_rank_number: jboolean,
     memory_budget_bytes: jlong,
 ) -> jlong {
-    let partitions = read_columns(&env, &partition_columns);
-    let sort = read_sort_columns(&env, &sort_indices, &sort_ascending, &sort_nulls_first);
-    let ranker = WindowRanker::new(
-        window_start_col as usize,
-        window_end_col as usize,
-        partitions,
-        sort,
-        limit,
-        output_rank_number != 0,
-    )
-    .with_memory_budget(memory_budget_bytes);
-    boxed_or_throw(&mut env, ranker)
+    crate::bridge::jni_guard(env, move |mut env| {
+        let partitions = read_columns(&env, &partition_columns);
+        let sort = read_sort_columns(&env, &sort_indices, &sort_ascending, &sort_nulls_first);
+        let ranker = WindowRanker::new(
+            window_start_col as usize,
+            window_end_col as usize,
+            partitions,
+            sort,
+            limit,
+            output_rank_number != 0,
+        )
+        .with_memory_budget(memory_budget_bytes);
+        boxed_or_throw(&mut env, ranker)
+    })
 }
 
 /// Buffers an input batch (no output); each window's top-N rows are emitted when the watermark
 /// closes the window.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushWindowRanker<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     in_array_address: jlong,
     in_schema_address: jlong,
 ) {
-    let ranker = unsafe { &mut *(handle as *mut WindowRanker) };
-    // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
-    let result = {
-        let batch = import_record_batch(in_array_address, in_schema_address);
-        ranker.push(&batch)
-    };
-    if let Err(e) = result {
-        throw_memory_limit(&mut env, &e.to_string());
-    }
+    crate::bridge::jni_guard(env, move |mut env| {
+        let ranker = unsafe { &mut *(handle as *mut WindowRanker) };
+        // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
+        let result = {
+            let batch = import_record_batch(in_array_address, in_schema_address);
+            ranker.push(&batch)
+        };
+        if let Err(e) = result {
+            throw_memory_limit(&mut env, &e.to_string());
+        }
+    })
 }
 
 /// Exports the top-N rows of every window the watermark has closed (with the rank number appended
 /// when the host projects it).
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_flushWindowRanker<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     watermark_millis: jlong,
     out_array_address: jlong,
     out_schema_address: jlong,
 ) {
-    let ranker = unsafe { &mut *(handle as *mut WindowRanker) };
-    match ranker.flush(watermark_millis) {
-        Ok(result) => export_record_batch(result, out_array_address, out_schema_address),
-        Err(e) => throw_memory_limit(&mut env, &e.to_string()),
-    }
+    crate::bridge::jni_guard(env, move |mut env| {
+        let ranker = unsafe { &mut *(handle as *mut WindowRanker) };
+        match ranker.flush(watermark_millis) {
+            Ok(result) => export_record_batch(result, out_array_address, out_schema_address),
+            Err(e) => throw_memory_limit(&mut env, &e.to_string()),
+        }
+    })
 }
 
 /// Releases the window-rank ranker and its per-window state.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_closeWindowRanker<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
 ) {
-    unsafe {
-        drop(from_handle::<WindowRanker>(handle));
-    }
+    crate::bridge::jni_guard(env, move |_env| {
+        unsafe {
+            drop(from_handle::<WindowRanker>(handle));
+        }
+    })
 }
 
 /// Serializes the ranker's per-window buffers and watermark for a checkpoint.
@@ -2421,16 +2435,18 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotWindo
     _class: JClass<'local>,
     handle: jlong,
 ) -> jbyteArray {
-    let ranker = unsafe { &mut *(handle as *mut WindowRanker) };
-    env.byte_array_from_slice(&ranker.snapshot())
-        .expect("failed to allocate window-rank snapshot array")
-        .into_raw()
+    crate::bridge::jni_guard(env, move |env| {
+        let ranker = unsafe { &mut *(handle as *mut WindowRanker) };
+        env.byte_array_from_slice(&ranker.snapshot())
+            .expect("failed to allocate window-rank snapshot array")
+            .into_raw()
+    })
 }
 
 /// Rebuilds a window-rank ranker from a snapshot and returns a fresh handle.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreWindowRanker<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     window_start_col: jint,
     window_end_col: jint,
@@ -2443,49 +2459,53 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreWindow
     snapshot: JByteArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
-    let partitions = read_columns(&env, &partition_columns);
-    let sort = read_sort_columns(&env, &sort_indices, &sort_ascending, &sort_nulls_first);
-    let bytes = env.convert_byte_array(&snapshot).expect("failed to read window-rank snapshot");
-    let ranker = WindowRanker::restore(
-        window_start_col as usize,
-        window_end_col as usize,
-        partitions,
-        sort,
-        limit,
-        output_rank_number != 0,
-        &bytes,
-    )
-    .with_memory_budget(memory_budget_bytes);
-    boxed_or_throw(&mut env, ranker)
+    crate::bridge::jni_guard(env, move |mut env| {
+        let partitions = read_columns(&env, &partition_columns);
+        let sort = read_sort_columns(&env, &sort_indices, &sort_ascending, &sort_nulls_first);
+        let bytes = env.convert_byte_array(&snapshot).expect("failed to read window-rank snapshot");
+        let ranker = WindowRanker::restore(
+            window_start_col as usize,
+            window_end_col as usize,
+            partitions,
+            sort,
+            limit,
+            output_rank_number != 0,
+            &bytes,
+        )
+        .with_memory_budget(memory_budget_bytes);
+        boxed_or_throw(&mut env, ranker)
+    })
 }
 
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotWindowRankerPartitions<
     'local,
 >(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     max_parallelism: jint,
     timestamp_precisions: JIntArray<'local>,
 ) -> jni::sys::jobjectArray {
-    let ranker = unsafe { &*(handle as *const WindowRanker) };
-    let precisions: Vec<i32> = read_int_array(&env, &timestamp_precisions)
-        .into_iter()
-        .map(|precision| precision as i32)
-        .collect();
-    keyed_state_partition_array(
-        &mut env,
-        ranker.snapshot_partitions(max_parallelism as usize, &precisions),
-        "window-rank",
-    )
+    crate::bridge::jni_guard(env, move |mut env| {
+        let ranker = unsafe { &*(handle as *const WindowRanker) };
+        let precisions: Vec<i32> = read_int_array(&env, &timestamp_precisions)
+            .into_iter()
+            .map(|precision| precision as i32)
+            .collect();
+        keyed_state_partition_array(
+            &mut env,
+            ranker.snapshot_partitions(max_parallelism as usize, &precisions),
+            "window-rank",
+        )
+    })
 }
 
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreWindowRankerPartitions<
     'local,
 >(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     window_start_col: jint,
     window_end_col: jint,
@@ -2498,33 +2518,35 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreWindow
     snapshots: JObjectArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
-    let partitions = read_columns(&env, &partition_columns);
-    let sort = read_sort_columns(&env, &sort_indices, &sort_ascending, &sort_nulls_first);
-    let count = env
-        .get_array_length(&snapshots)
-        .expect("read window-rank raw partition count");
-    let mut restored = Vec::with_capacity(count as usize);
-    for index in 0..count {
-        let bytes = JByteArray::from(
-            env.get_object_array_element(&snapshots, index)
-                .expect("read window-rank raw partition"),
-        );
-        restored.push(
-            env.convert_byte_array(&bytes)
-                .expect("read window-rank raw partition bytes"),
-        );
-    }
-    let ranker = WindowRanker::restore_partitions(
-        window_start_col as usize,
-        window_end_col as usize,
-        partitions,
-        sort,
-        limit,
-        output_rank_number != 0,
-        &restored,
-    )
-    .with_memory_budget(memory_budget_bytes);
-    boxed_or_throw(&mut env, ranker)
+    crate::bridge::jni_guard(env, move |mut env| {
+        let partitions = read_columns(&env, &partition_columns);
+        let sort = read_sort_columns(&env, &sort_indices, &sort_ascending, &sort_nulls_first);
+        let count = env
+            .get_array_length(&snapshots)
+            .expect("read window-rank raw partition count");
+        let mut restored = Vec::with_capacity(count as usize);
+        for index in 0..count {
+            let bytes = JByteArray::from(
+                env.get_object_array_element(&snapshots, index)
+                    .expect("read window-rank raw partition"),
+            );
+            restored.push(
+                env.convert_byte_array(&bytes)
+                    .expect("read window-rank raw partition bytes"),
+            );
+        }
+        let ranker = WindowRanker::restore_partitions(
+            window_start_col as usize,
+            window_end_col as usize,
+            partitions,
+            sort,
+            limit,
+            output_rank_number != 0,
+            &restored,
+        )
+        .with_memory_budget(memory_budget_bytes);
+        boxed_or_throw(&mut env, ranker)
+    })
 }
 
 /// Builds the sort-column comparator config from three parallel arrays (column index, ascending,
@@ -2553,7 +2575,7 @@ pub(crate) fn read_sort_columns(
 /// and returns an opaque handle. The JVM owns it and must release it with the matching close.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createTopNRanker<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     partition_columns: JIntArray<'local>,
     key_timestamp_precisions: JIntArray<'local>,
@@ -2567,45 +2589,47 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createTopNRan
     net_diff: jboolean,
     memory_budget_bytes: jlong,
 ) -> jlong {
-    let partitions = read_columns(&env, &partition_columns);
-    let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-        .into_iter()
-        .map(|precision| precision as i32)
-        .collect();
-    let sort = read_sort_columns(&env, &sort_indices, &sort_ascending, &sort_nulls_first);
-    let handle = if retracting != 0 {
-        TopNHandle::Retract(
-            RetractableTopNRanker::new(
-                partitions,
-                sort,
-                offset,
-                limit,
-                output_rank_number != 0,
+    crate::bridge::jni_guard(env, move |mut env| {
+        let partitions = read_columns(&env, &partition_columns);
+        let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
+            .into_iter()
+            .map(|precision| precision as i32)
+            .collect();
+        let sort = read_sort_columns(&env, &sort_indices, &sort_ascending, &sort_nulls_first);
+        let handle = if retracting != 0 {
+            TopNHandle::Retract(
+                RetractableTopNRanker::new(
+                    partitions,
+                    sort,
+                    offset,
+                    limit,
+                    output_rank_number != 0,
+                )
+                .with_key_timestamp_precisions(timestamp_precisions)
+                .with_net_diff(net_diff != 0),
             )
-            .with_key_timestamp_precisions(timestamp_precisions)
-            .with_net_diff(net_diff != 0),
-        )
-    } else {
-        // The append-only ranker is the no-OFFSET path (offset always 0).
-        TopNHandle::Append(
-            TopNRanker::new(
-                partitions,
-                sort,
-                limit,
-                output_rank_number != 0,
-                net_diff != 0,
+        } else {
+            // The append-only ranker is the no-OFFSET path (offset always 0).
+            TopNHandle::Append(
+                TopNRanker::new(
+                    partitions,
+                    sort,
+                    limit,
+                    output_rank_number != 0,
+                    net_diff != 0,
+                )
+                .with_key_timestamp_precisions(timestamp_precisions),
             )
-            .with_key_timestamp_precisions(timestamp_precisions),
-        )
-    };
-    boxed_or_throw(&mut env, handle.with_memory_budget(memory_budget_bytes))
+        };
+        boxed_or_throw(&mut env, handle.with_memory_budget(memory_budget_bytes))
+    })
 }
 
 /// Folds an input batch into the per-partition top-N and exports the changelog it produces (the
 /// input columns plus `$row_kind$`).
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushTopNRanker<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     in_array_address: jlong,
@@ -2613,29 +2637,33 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushTopNRanke
     out_array_address: jlong,
     out_schema_address: jlong,
 ) {
-    let ranker = unsafe { &mut *(handle as *mut TopNHandle) };
-    // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
-    let result = {
-        let batch = import_record_batch(in_array_address, in_schema_address);
-        ranker.push(&batch)
-    };
-    match result {
-        Ok(out) => export_record_batch(out, out_array_address, out_schema_address),
-        Err(e) => throw_memory_limit(&mut env, &e.to_string()),
-    }
+    crate::bridge::jni_guard(env, move |mut env| {
+        let ranker = unsafe { &mut *(handle as *mut TopNHandle) };
+        // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
+        let result = {
+            let batch = import_record_batch(in_array_address, in_schema_address);
+            ranker.push(&batch)
+        };
+        match result {
+            Ok(out) => export_record_batch(out, out_array_address, out_schema_address),
+            Err(e) => throw_memory_limit(&mut env, &e.to_string()),
+        }
+    })
 }
 
 /// Emits the append-only ranker's net changes at a Flink logical mini-batch boundary.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_flushTopNRanker<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     out_array_address: jlong,
     out_schema_address: jlong,
 ) {
-    let ranker = unsafe { &mut *(handle as *mut TopNHandle) };
-    export_record_batch(ranker.flush(), out_array_address, out_schema_address);
+    crate::bridge::jni_guard(env, move |_env| {
+        let ranker = unsafe { &mut *(handle as *mut TopNHandle) };
+        export_record_batch(ranker.flush(), out_array_address, out_schema_address);
+    })
 }
 
 /// Serializes the ranker's per-partition buffers for a checkpoint.
@@ -2645,16 +2673,18 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotTopNR
     _class: JClass<'local>,
     handle: jlong,
 ) -> jbyteArray {
-    let ranker = unsafe { &mut *(handle as *mut TopNHandle) };
-    env.byte_array_from_slice(&ranker.snapshot())
-        .expect("failed to allocate top-n snapshot array")
-        .into_raw()
+    crate::bridge::jni_guard(env, move |env| {
+        let ranker = unsafe { &mut *(handle as *mut TopNHandle) };
+        env.byte_array_from_slice(&ranker.snapshot())
+            .expect("failed to allocate top-n snapshot array")
+            .into_raw()
+    })
 }
 
 /// Rebuilds a Top-N ranker from a snapshot and returns a fresh handle.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreTopNRanker<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     partition_columns: JIntArray<'local>,
     key_timestamp_precisions: JIntArray<'local>,
@@ -2669,60 +2699,64 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreTopNRa
     snapshot: JByteArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
-    let partitions = read_columns(&env, &partition_columns);
-    let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-        .into_iter()
-        .map(|precision| precision as i32)
-        .collect();
-    let sort = read_sort_columns(&env, &sort_indices, &sort_ascending, &sort_nulls_first);
-    let bytes = env.convert_byte_array(&snapshot).expect("failed to read top-n snapshot");
-    let handle = if retracting != 0 {
-        TopNHandle::Retract(RetractableTopNRanker::restore(
-            partitions,
-            timestamp_precisions,
-            sort,
-            offset,
-            limit,
-            output_rank_number != 0,
-            &bytes,
-        ).with_net_diff(net_diff != 0))
-    } else {
-        TopNHandle::Append(TopNRanker::restore(
-            partitions,
-            timestamp_precisions,
-            sort,
-            limit,
-            output_rank_number != 0,
-            net_diff != 0,
-            &bytes,
-        ))
-    };
-    boxed_or_throw(&mut env, handle.with_memory_budget(memory_budget_bytes))
+    crate::bridge::jni_guard(env, move |mut env| {
+        let partitions = read_columns(&env, &partition_columns);
+        let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
+            .into_iter()
+            .map(|precision| precision as i32)
+            .collect();
+        let sort = read_sort_columns(&env, &sort_indices, &sort_ascending, &sort_nulls_first);
+        let bytes = env.convert_byte_array(&snapshot).expect("failed to read top-n snapshot");
+        let handle = if retracting != 0 {
+            TopNHandle::Retract(RetractableTopNRanker::restore(
+                partitions,
+                timestamp_precisions,
+                sort,
+                offset,
+                limit,
+                output_rank_number != 0,
+                &bytes,
+            ).with_net_diff(net_diff != 0))
+        } else {
+            TopNHandle::Append(TopNRanker::restore(
+                partitions,
+                timestamp_precisions,
+                sort,
+                limit,
+                output_rank_number != 0,
+                net_diff != 0,
+                &bytes,
+            ))
+        };
+        boxed_or_throw(&mut env, handle.with_memory_budget(memory_budget_bytes))
+    })
 }
 
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotTopNRankerPartitions<
     'local,
 >(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     max_parallelism: jint,
     _timestamp_precisions: JIntArray<'local>,
 ) -> jni::sys::jobjectArray {
-    let ranker = unsafe { &*(handle as *const TopNHandle) };
-    keyed_state_partition_array(
-        &mut env,
-        ranker.snapshot_partitions(max_parallelism as usize),
-        "top-n",
-    )
+    crate::bridge::jni_guard(env, move |mut env| {
+        let ranker = unsafe { &*(handle as *const TopNHandle) };
+        keyed_state_partition_array(
+            &mut env,
+            ranker.snapshot_partitions(max_parallelism as usize),
+            "top-n",
+        )
+    })
 }
 
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreTopNRankerPartitions<
     'local,
 >(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     partition_columns: JIntArray<'local>,
     key_timestamp_precisions: JIntArray<'local>,
@@ -2737,39 +2771,41 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreTopNRa
     snapshots: JObjectArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
-    let partitions = read_columns(&env, &partition_columns);
-    let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-        .into_iter()
-        .map(|precision| precision as i32)
-        .collect();
-    let sort = read_sort_columns(&env, &sort_indices, &sort_ascending, &sort_nulls_first);
-    let count = env
-        .get_array_length(&snapshots)
-        .expect("read top-n raw partition count");
-    let mut restored = Vec::with_capacity(count as usize);
-    for index in 0..count {
-        let bytes = JByteArray::from(
-            env.get_object_array_element(&snapshots, index)
-                .expect("read top-n raw partition"),
-        );
-        restored.push(
-            env.convert_byte_array(&bytes)
-                .expect("read top-n raw partition bytes"),
-        );
-    }
-    let ranker = TopNHandle::restore_partitions(
-        partitions,
-        timestamp_precisions,
-        sort,
-        offset,
-        limit,
-        output_rank_number != 0,
-        retracting != 0,
-        net_diff != 0,
-        &restored,
-    )
-    .with_memory_budget(memory_budget_bytes);
-    boxed_or_throw(&mut env, ranker)
+    crate::bridge::jni_guard(env, move |mut env| {
+        let partitions = read_columns(&env, &partition_columns);
+        let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
+            .into_iter()
+            .map(|precision| precision as i32)
+            .collect();
+        let sort = read_sort_columns(&env, &sort_indices, &sort_ascending, &sort_nulls_first);
+        let count = env
+            .get_array_length(&snapshots)
+            .expect("read top-n raw partition count");
+        let mut restored = Vec::with_capacity(count as usize);
+        for index in 0..count {
+            let bytes = JByteArray::from(
+                env.get_object_array_element(&snapshots, index)
+                    .expect("read top-n raw partition"),
+            );
+            restored.push(
+                env.convert_byte_array(&bytes)
+                    .expect("read top-n raw partition bytes"),
+            );
+        }
+        let ranker = TopNHandle::restore_partitions(
+            partitions,
+            timestamp_precisions,
+            sort,
+            offset,
+            limit,
+            output_rank_number != 0,
+            retracting != 0,
+            net_diff != 0,
+            &restored,
+        )
+        .with_memory_budget(memory_budget_bytes);
+        boxed_or_throw(&mut env, ranker)
+    })
 }
 
 /// Creates an update-fast streaming Top-N ranker (Flink's `UpdatableTopNFunction` /
@@ -2779,7 +2815,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreTopNRa
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createUpdateFastTopNRanker<
     'local,
 >(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     partition_columns: JIntArray<'local>,
     key_timestamp_precisions: JIntArray<'local>,
@@ -2792,27 +2828,29 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createUpdateF
     output_rank_number: jboolean,
     memory_budget_bytes: jlong,
 ) -> jlong {
-    let partitions = read_columns(&env, &partition_columns);
-    let partition_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-        .into_iter()
-        .map(|precision| precision as i32)
-        .collect();
-    let row_keys = read_columns(&env, &row_key_columns);
-    let row_key_precisions: Vec<i32> = read_int_array(&env, &row_key_timestamp_precisions)
-        .into_iter()
-        .map(|precision| precision as i32)
-        .collect();
-    let sort = read_sort_columns(&env, &sort_indices, &sort_ascending, &sort_nulls_first);
-    let handle = TopNHandle::UpdateFast(UpdatableTopNRanker::new(
-        partitions,
-        partition_precisions,
-        row_keys,
-        row_key_precisions,
-        sort,
-        limit,
-        output_rank_number != 0,
-    ));
-    boxed_or_throw(&mut env, handle.with_memory_budget(memory_budget_bytes))
+    crate::bridge::jni_guard(env, move |mut env| {
+        let partitions = read_columns(&env, &partition_columns);
+        let partition_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
+            .into_iter()
+            .map(|precision| precision as i32)
+            .collect();
+        let row_keys = read_columns(&env, &row_key_columns);
+        let row_key_precisions: Vec<i32> = read_int_array(&env, &row_key_timestamp_precisions)
+            .into_iter()
+            .map(|precision| precision as i32)
+            .collect();
+        let sort = read_sort_columns(&env, &sort_indices, &sort_ascending, &sort_nulls_first);
+        let handle = TopNHandle::UpdateFast(UpdatableTopNRanker::new(
+            partitions,
+            partition_precisions,
+            row_keys,
+            row_key_precisions,
+            sort,
+            limit,
+            output_rank_number != 0,
+        ));
+        boxed_or_throw(&mut env, handle.with_memory_budget(memory_budget_bytes))
+    })
 }
 
 /// Rebuilds an update-fast Top-N ranker from raw keyed-state partition blobs.
@@ -2820,7 +2858,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createUpdateF
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreUpdateFastTopNRankerPartitions<
     'local,
 >(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     partition_columns: JIntArray<'local>,
     key_timestamp_precisions: JIntArray<'local>,
@@ -2834,55 +2872,59 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreUpdate
     snapshots: JObjectArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
-    let partitions = read_columns(&env, &partition_columns);
-    let partition_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-        .into_iter()
-        .map(|precision| precision as i32)
-        .collect();
-    let row_keys = read_columns(&env, &row_key_columns);
-    let row_key_precisions: Vec<i32> = read_int_array(&env, &row_key_timestamp_precisions)
-        .into_iter()
-        .map(|precision| precision as i32)
-        .collect();
-    let sort = read_sort_columns(&env, &sort_indices, &sort_ascending, &sort_nulls_first);
-    let count = env
-        .get_array_length(&snapshots)
-        .expect("read update-fast top-n raw partition count");
-    let mut restored = Vec::with_capacity(count as usize);
-    for index in 0..count {
-        let bytes = JByteArray::from(
-            env.get_object_array_element(&snapshots, index)
-                .expect("read update-fast top-n raw partition"),
-        );
-        restored.push(
-            env.convert_byte_array(&bytes)
-                .expect("read update-fast top-n raw partition bytes"),
-        );
-    }
-    let ranker = TopNHandle::UpdateFast(UpdatableTopNRanker::restore_partitions(
-        partitions,
-        partition_precisions,
-        row_keys,
-        row_key_precisions,
-        sort,
-        limit,
-        output_rank_number != 0,
-        &restored,
-    ))
-    .with_memory_budget(memory_budget_bytes);
-    boxed_or_throw(&mut env, ranker)
+    crate::bridge::jni_guard(env, move |mut env| {
+        let partitions = read_columns(&env, &partition_columns);
+        let partition_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
+            .into_iter()
+            .map(|precision| precision as i32)
+            .collect();
+        let row_keys = read_columns(&env, &row_key_columns);
+        let row_key_precisions: Vec<i32> = read_int_array(&env, &row_key_timestamp_precisions)
+            .into_iter()
+            .map(|precision| precision as i32)
+            .collect();
+        let sort = read_sort_columns(&env, &sort_indices, &sort_ascending, &sort_nulls_first);
+        let count = env
+            .get_array_length(&snapshots)
+            .expect("read update-fast top-n raw partition count");
+        let mut restored = Vec::with_capacity(count as usize);
+        for index in 0..count {
+            let bytes = JByteArray::from(
+                env.get_object_array_element(&snapshots, index)
+                    .expect("read update-fast top-n raw partition"),
+            );
+            restored.push(
+                env.convert_byte_array(&bytes)
+                    .expect("read update-fast top-n raw partition bytes"),
+            );
+        }
+        let ranker = TopNHandle::UpdateFast(UpdatableTopNRanker::restore_partitions(
+            partitions,
+            partition_precisions,
+            row_keys,
+            row_key_precisions,
+            sort,
+            limit,
+            output_rank_number != 0,
+            &restored,
+        ))
+        .with_memory_budget(memory_budget_bytes);
+        boxed_or_throw(&mut env, ranker)
+    })
 }
 
 /// Releases a Top-N ranker handle.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_closeTopNRanker<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
 ) {
-    unsafe {
-        drop(from_handle::<TopNHandle>(handle));
-    }
+    crate::bridge::jni_guard(env, move |_env| {
+        unsafe {
+            drop(from_handle::<TopNHandle>(handle));
+        }
+    })
 }
 
 #[cfg(test)]

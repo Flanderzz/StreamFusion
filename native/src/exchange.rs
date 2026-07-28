@@ -59,25 +59,27 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_splitByKey<'l
     max_parallelism: jint,
     num_partitions: jint,
 ) -> jlong {
-    let batch = import_record_batch(in_array_address, in_schema_address);
-    let keys: Vec<usize> = read_int_array(&env, &key_columns)
-        .into_iter()
-        .map(|k| k as usize)
-        .collect();
-    let precisions: Vec<i32> = read_int_array(&env, &timestamp_precisions)
-        .into_iter()
-        .map(|precision| precision as i32)
-        .collect();
-    let partitions = partition_batch(
-        &batch,
-        &keys,
-        &precisions,
-        max_parallelism as usize,
-        num_partitions as usize,
-    );
-    into_handle(SplitState {
-        partitions,
-        cursor: 0,
+    crate::bridge::jni_guard(env, move |env| {
+        let batch = import_record_batch(in_array_address, in_schema_address);
+        let keys: Vec<usize> = read_int_array(&env, &key_columns)
+            .into_iter()
+            .map(|k| k as usize)
+            .collect();
+        let precisions: Vec<i32> = read_int_array(&env, &timestamp_precisions)
+            .into_iter()
+            .map(|precision| precision as i32)
+            .collect();
+        let partitions = partition_batch(
+            &batch,
+            &keys,
+            &precisions,
+            max_parallelism as usize,
+            num_partitions as usize,
+        );
+        into_handle(SplitState {
+            partitions,
+            cursor: 0,
+        })
     })
 }
 
@@ -85,32 +87,36 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_splitByKey<'l
 /// -1 once the split is exhausted.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_nextSplit<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     out_array_address: jlong,
     out_schema_address: jlong,
 ) -> jint {
-    let state = unsafe { &mut *(handle as *mut SplitState) };
-    if state.cursor >= state.partitions.len() {
-        return -1;
-    }
-    let (partition, batch) = state.partitions[state.cursor].clone();
-    state.cursor += 1;
-    export_record_batch(batch, out_array_address, out_schema_address);
-    partition as jint
+    crate::bridge::jni_guard(env, move |_env| {
+        let state = unsafe { &mut *(handle as *mut SplitState) };
+        if state.cursor >= state.partitions.len() {
+            return -1;
+        }
+        let (partition, batch) = state.partitions[state.cursor].clone();
+        state.cursor += 1;
+        export_record_batch(batch, out_array_address, out_schema_address);
+        partition as jint
+    })
 }
 
 /// Releases a split handle.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_closeSplit<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
 ) {
-    unsafe {
-        drop(from_handle::<SplitState>(handle));
-    }
+    crate::bridge::jni_guard(env, move |_env| {
+        unsafe {
+            drop(from_handle::<SplitState>(handle));
+        }
+    })
 }
 
 /// Concatenates batches the JVM exported — row subsets of one exchange edge, so they share a
@@ -125,13 +131,15 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_concatBatches
     out_array_address: jlong,
     out_schema_address: jlong,
 ) {
-    let arrays = read_longs(&env, &in_array_addresses);
-    let schemas = read_longs(&env, &in_schema_addresses);
-    let batches: Vec<RecordBatch> = arrays
-        .into_iter()
-        .zip(schemas)
-        .map(|(array, schema)| import_record_batch(array, schema))
-        .collect();
-    let merged = concat_batches(&batches[0].schema(), &batches).expect("concat batches");
-    export_record_batch(merged, out_array_address, out_schema_address);
+    crate::bridge::jni_guard(env, move |env| {
+        let arrays = read_longs(&env, &in_array_addresses);
+        let schemas = read_longs(&env, &in_schema_addresses);
+        let batches: Vec<RecordBatch> = arrays
+            .into_iter()
+            .zip(schemas)
+            .map(|(array, schema)| import_record_batch(array, schema))
+            .collect();
+        let merged = concat_batches(&batches[0].schema(), &batches).expect("concat batches");
+        export_record_batch(merged, out_array_address, out_schema_address);
+    })
 }

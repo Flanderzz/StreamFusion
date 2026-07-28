@@ -863,21 +863,23 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_flinkBinaryRo
     key_columns: JIntArray<'local>,
     timestamp_precisions: JIntArray<'local>,
 ) -> jni::sys::jintArray {
-    let batch = import_record_batch(in_array_address, in_schema_address);
-    let columns: Vec<usize> = read_int_array(&env, &key_columns)
-        .into_iter()
-        .map(|index| index as usize)
-        .collect();
-    let precisions: Vec<i32> = read_int_array(&env, &timestamp_precisions)
-        .into_iter()
-        .map(|precision| precision as i32)
-        .collect();
-    let mut encoder = BinaryRowBatchEncoder::new(&batch, &columns, &precisions);
-    let hashes: Vec<jint> = (0..batch.num_rows()).map(|row| encoder.hash(row)).collect();
-    let output = env
-        .new_int_array(hashes.len() as i32)
-        .expect("allocate BinaryRow hash result");
-    env.set_int_array_region(&output, 0, &hashes)
-        .expect("write BinaryRow hash result");
-    output.into_raw()
+    crate::bridge::jni_guard(env, move |env| {
+        let batch = import_record_batch(in_array_address, in_schema_address);
+        let columns: Vec<usize> = read_int_array(&env, &key_columns)
+            .into_iter()
+            .map(|index| index as usize)
+            .collect();
+        let precisions: Vec<i32> = read_int_array(&env, &timestamp_precisions)
+            .into_iter()
+            .map(|precision| precision as i32)
+            .collect();
+        let mut encoder = BinaryRowBatchEncoder::new(&batch, &columns, &precisions);
+        let hashes: Vec<jint> = (0..batch.num_rows()).map(|row| encoder.hash(row)).collect();
+        let output = env
+            .new_int_array(hashes.len() as i32)
+            .expect("allocate BinaryRow hash result");
+        env.set_int_array_region(&output, 0, &hashes)
+            .expect("write BinaryRow hash result");
+        output.into_raw()
+    })
 }

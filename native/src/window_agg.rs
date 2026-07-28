@@ -973,7 +973,7 @@ state_bytes_getter!(Java_io_github_jordepic_streamfusion_Native_tumblingAggregat
 /// window_start/window_end/window_time appended. Stateless, so there is no handle to create or close.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_assignWindows<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     in_array_address: jlong,
     in_schema_address: jlong,
@@ -986,16 +986,18 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_assignWindows
     proctime: jboolean,
     proctime_now_millis: jlong,
 ) {
-    let batch = import_record_batch(in_array_address, in_schema_address);
-    let result = assign_windows(
-        &batch,
-        time_col as usize,
-        window_millis,
-        slide_millis,
-        cumulative != 0,
-        (proctime != 0).then_some(proctime_now_millis),
-    );
-    export_record_batch(result, out_array_address, out_schema_address);
+    crate::bridge::jni_guard(env, move |_env| {
+        let batch = import_record_batch(in_array_address, in_schema_address);
+        let result = assign_windows(
+            &batch,
+            time_col as usize,
+            window_millis,
+            slide_millis,
+            cumulative != 0,
+            (proctime != 0).then_some(proctime_now_millis),
+        );
+        export_record_batch(result, out_array_address, out_schema_address);
+    })
 }
 
 /// Runs an event-time tumbling-window sum over a batch from the JVM: rows are bucketed by the start
@@ -1007,7 +1009,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_assignWindows
 /// operator must hold partial windows until a watermark closes them, is a later step.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_tumblingSum<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     in_array_address: jlong,
     in_schema_address: jlong,
@@ -1015,51 +1017,53 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_tumblingSum<'
     out_array_address: jlong,
     out_schema_address: jlong,
 ) {
-    let ffi_array = unsafe {
-        std::ptr::replace(in_array_address as *mut FFI_ArrowArray, FFI_ArrowArray::empty())
-    };
-    let ffi_schema = unsafe {
-        std::ptr::replace(in_schema_address as *mut FFI_ArrowSchema, FFI_ArrowSchema::empty())
-    };
+    crate::bridge::jni_guard(env, move |_env| {
+        let ffi_array = unsafe {
+            std::ptr::replace(in_array_address as *mut FFI_ArrowArray, FFI_ArrowArray::empty())
+        };
+        let ffi_schema = unsafe {
+            std::ptr::replace(in_schema_address as *mut FFI_ArrowSchema, FFI_ArrowSchema::empty())
+        };
 
-    let mut data = unsafe { from_ffi(ffi_array, &ffi_schema) }.expect("failed to import Arrow batch");
-    data.align_buffers();
-    let batch = RecordBatch::from(StructArray::from(data));
+        let mut data = unsafe { from_ffi(ffi_array, &ffi_schema) }.expect("failed to import Arrow batch");
+        data.align_buffers();
+        let batch = RecordBatch::from(StructArray::from(data));
 
-    let window = format!("ts - (ts % {window_millis})");
-    let query = format!(
-        "SELECT {window} AS window_start, SUM(value) AS total \
-         FROM events GROUP BY {window} ORDER BY window_start"
-    );
+        let window = format!("ts - (ts % {window_millis})");
+        let query = format!(
+            "SELECT {window} AS window_start, SUM(value) AS total \
+             FROM events GROUP BY {window} ORDER BY window_start"
+        );
 
-    let result = runtime().block_on(async move {
-        let ctx = SessionContext::new();
-        ctx.register_batch("events", batch).expect("failed to register batch");
-        let frame = ctx.sql(&query).await.expect("failed to plan aggregation");
-        let mut stream = frame.execute_stream().await.expect("failed to execute plan");
-        let schema = stream.schema();
-        let mut batches = Vec::new();
-        while let Some(batch) = stream.next().await {
-            batches.push(batch.expect("failed to pull batch"));
+        let result = runtime().block_on(async move {
+            let ctx = SessionContext::new();
+            ctx.register_batch("events", batch).expect("failed to register batch");
+            let frame = ctx.sql(&query).await.expect("failed to plan aggregation");
+            let mut stream = frame.execute_stream().await.expect("failed to execute plan");
+            let schema = stream.schema();
+            let mut batches = Vec::new();
+            while let Some(batch) = stream.next().await {
+                batches.push(batch.expect("failed to pull batch"));
+            }
+            concat_batches(&schema, &batches).expect("failed to assemble result")
+        });
+
+        let out_data = StructArray::from(result).to_data();
+        let out_array = FFI_ArrowArray::new(&out_data);
+        let out_schema =
+            FFI_ArrowSchema::try_from(out_data.data_type()).expect("failed to export Arrow schema");
+        unsafe {
+            std::ptr::write(out_array_address as *mut FFI_ArrowArray, out_array);
+            std::ptr::write(out_schema_address as *mut FFI_ArrowSchema, out_schema);
         }
-        concat_batches(&schema, &batches).expect("failed to assemble result")
-    });
-
-    let out_data = StructArray::from(result).to_data();
-    let out_array = FFI_ArrowArray::new(&out_data);
-    let out_schema =
-        FFI_ArrowSchema::try_from(out_data.data_type()).expect("failed to export Arrow schema");
-    unsafe {
-        std::ptr::write(out_array_address as *mut FFI_ArrowArray, out_array);
-        std::ptr::write(out_schema_address as *mut FFI_ArrowSchema, out_schema);
-    }
+    })
 }
 
 /// Creates a stateful tumbling-window aggregator and returns an opaque handle to it. The handle
 /// owns native state that lives across calls; the JVM must release it with the matching close.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createTumblingAggregator<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     window_millis: jlong,
     slide_millis: jlong,
@@ -1067,12 +1071,14 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createTumblin
     aggregate_kinds: JIntArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
-    let kinds = read_int_array(&env, &aggregate_kinds);
-    let value_types = read_int_array(&env, &value_types);
-    let aggregator =
-        TumblingAggregator::new(window_millis, slide_millis, false, value_types, kinds)
-            .with_memory_budget(memory_budget_bytes);
-    boxed_or_throw(&mut env, aggregator)
+    crate::bridge::jni_guard(env, move |mut env| {
+        let kinds = read_int_array(&env, &aggregate_kinds);
+        let value_types = read_int_array(&env, &value_types);
+        let aggregator =
+            TumblingAggregator::new(window_millis, slide_millis, false, value_types, kinds)
+                .with_memory_budget(memory_budget_bytes);
+        boxed_or_throw(&mut env, aggregator)
+    })
 }
 
 /// Creates a stateful cumulative-window aggregator (nested windows of `step` up to `max_size`) and
@@ -1080,7 +1086,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createTumblin
 /// flush, snapshot, close) with the tumbling handle; only the window assignment differs.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createCumulativeAggregator<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     max_size_millis: jlong,
     step_millis: jlong,
@@ -1088,33 +1094,37 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createCumulat
     aggregate_kinds: JIntArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
-    let kinds = read_int_array(&env, &aggregate_kinds);
-    let value_types = read_int_array(&env, &value_types);
-    let aggregator = TumblingAggregator::new(max_size_millis, step_millis, true, value_types, kinds)
-        .with_memory_budget(memory_budget_bytes);
-    boxed_or_throw(&mut env, aggregator)
+    crate::bridge::jni_guard(env, move |mut env| {
+        let kinds = read_int_array(&env, &aggregate_kinds);
+        let value_types = read_int_array(&env, &value_types);
+        let aggregator = TumblingAggregator::new(max_size_millis, step_millis, true, value_types, kinds)
+            .with_memory_budget(memory_budget_bytes);
+        boxed_or_throw(&mut env, aggregator)
+    })
 }
 
 /// Folds a batch from the JVM into the aggregator's open windows. Produces no output; results are
 /// emitted later when a watermark closes windows.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_updateTumblingAggregator<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     in_array_address: jlong,
     in_schema_address: jlong,
 ) {
-    let aggregator = unsafe { &mut *(handle as *mut TumblingAggregator) };
-    // The batch must drop before a throw: its release callback upcalls into the JVM (the C Data
-    // producer side), which cannot run with this thread's exception pending.
-    let result = {
-        let batch = import_record_batch(in_array_address, in_schema_address);
-        aggregator.update(&batch)
-    };
-    if let Err(e) = result {
-        throw_memory_limit(&mut env, &e.to_string());
-    }
+    crate::bridge::jni_guard(env, move |mut env| {
+        let aggregator = unsafe { &mut *(handle as *mut TumblingAggregator) };
+        // The batch must drop before a throw: its release callback upcalls into the JVM (the C Data
+        // producer side), which cannot run with this thread's exception pending.
+        let result = {
+            let batch = import_record_batch(in_array_address, in_schema_address);
+            aggregator.update(&batch)
+        };
+        if let Err(e) = result {
+            throw_memory_limit(&mut env, &e.to_string());
+        }
+    })
 }
 
 /// Window-attached local half: folds a batch whose rows carry explicit `window_start`/`window_end`
@@ -1123,39 +1133,43 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_updateTumblin
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_updateAttachedTumblingAggregator<
     'local,
 >(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     in_array_address: jlong,
     in_schema_address: jlong,
 ) {
-    let aggregator = unsafe { &mut *(handle as *mut TumblingAggregator) };
-    // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
-    let result = {
-        let batch = import_record_batch(in_array_address, in_schema_address);
-        aggregator.update_attached(&batch)
-    };
-    if let Err(e) = result {
-        throw_memory_limit(&mut env, &e.to_string());
-    }
+    crate::bridge::jni_guard(env, move |mut env| {
+        let aggregator = unsafe { &mut *(handle as *mut TumblingAggregator) };
+        // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
+        let result = {
+            let batch = import_record_batch(in_array_address, in_schema_address);
+            aggregator.update_attached(&batch)
+        };
+        if let Err(e) = result {
+            throw_memory_limit(&mut env, &e.to_string());
+        }
+    })
 }
 
 /// Emits the windows the given watermark has closed as a batch and drops them from state.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_flushTumblingAggregator<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     watermark_millis: jlong,
     out_array_address: jlong,
     out_schema_address: jlong,
 ) {
-    let aggregator = unsafe { &mut *(handle as *mut TumblingAggregator) };
-    // Fallible in persistent-state mode (the firing reads the committed table).
-    match aggregator.flush(watermark_millis) {
-        Ok(result) => export_record_batch(result, out_array_address, out_schema_address),
-        Err(e) => throw_memory_limit(&mut env, &e.to_string()),
-    }
+    crate::bridge::jni_guard(env, move |mut env| {
+        let aggregator = unsafe { &mut *(handle as *mut TumblingAggregator) };
+        // Fallible in persistent-state mode (the firing reads the committed table).
+        match aggregator.flush(watermark_millis) {
+            Ok(result) => export_record_batch(result, out_array_address, out_schema_address),
+            Err(e) => throw_memory_limit(&mut env, &e.to_string()),
+        }
+    })
 }
 
 /// Local two-phase half: merges a batch of partials `[key, partial, slice_end]` into the windows.
@@ -1163,21 +1177,23 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_flushTumbling
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_updatePartialTumblingAggregator<
     'local,
 >(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     in_array_address: jlong,
     in_schema_address: jlong,
 ) {
-    let aggregator = unsafe { &mut *(handle as *mut TumblingAggregator) };
-    // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
-    let result = {
-        let batch = import_record_batch(in_array_address, in_schema_address);
-        aggregator.update_partial(&batch)
-    };
-    if let Err(e) = result {
-        throw_memory_limit(&mut env, &e.to_string());
-    }
+    crate::bridge::jni_guard(env, move |mut env| {
+        let aggregator = unsafe { &mut *(handle as *mut TumblingAggregator) };
+        // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
+        let result = {
+            let batch = import_record_batch(in_array_address, in_schema_address);
+            aggregator.update_partial(&batch)
+        };
+        if let Err(e) = result {
+            throw_memory_limit(&mut env, &e.to_string());
+        }
+    })
 }
 
 /// Local two-phase half: emits the partial state of the windows the watermark has closed.
@@ -1185,16 +1201,18 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_updatePartial
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_flushPartialTumblingAggregator<
     'local,
 >(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     watermark_millis: jlong,
     out_array_address: jlong,
     out_schema_address: jlong,
 ) {
-    let aggregator = unsafe { &mut *(handle as *mut TumblingAggregator) };
-    let result = aggregator.flush_partial(watermark_millis);
-    export_record_batch(result, out_array_address, out_schema_address);
+    crate::bridge::jni_guard(env, move |_env| {
+        let aggregator = unsafe { &mut *(handle as *mut TumblingAggregator) };
+        let result = aggregator.flush_partial(watermark_millis);
+        export_record_batch(result, out_array_address, out_schema_address);
+    })
 }
 
 /// Local two-phase half: emits every open window's partial state at a barrier, watermark untouched.
@@ -1202,27 +1220,31 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_flushPartialT
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_drainPartialTumblingAggregator<
     'local,
 >(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     out_array_address: jlong,
     out_schema_address: jlong,
 ) {
-    let aggregator = unsafe { &mut *(handle as *mut TumblingAggregator) };
-    let result = aggregator.drain_partial();
-    export_record_batch(result, out_array_address, out_schema_address);
+    crate::bridge::jni_guard(env, move |_env| {
+        let aggregator = unsafe { &mut *(handle as *mut TumblingAggregator) };
+        let result = aggregator.drain_partial();
+        export_record_batch(result, out_array_address, out_schema_address);
+    })
 }
 
 /// Releases the aggregator and its native state.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_closeTumblingAggregator<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
 ) {
-    unsafe {
-        drop(from_handle::<TumblingAggregator>(handle));
-    }
+    crate::bridge::jni_guard(env, move |_env| {
+        unsafe {
+            drop(from_handle::<TumblingAggregator>(handle));
+        }
+    })
 }
 
 /// Serializes the aggregator's open windows so the JVM can store them in a checkpoint.
@@ -1232,16 +1254,18 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotTumbl
     _class: JClass<'local>,
     handle: jlong,
 ) -> jbyteArray {
-    let aggregator = unsafe { &mut *(handle as *mut TumblingAggregator) };
-    env.byte_array_from_slice(&aggregator.snapshot())
-        .expect("failed to allocate snapshot array")
-        .into_raw()
+    crate::bridge::jni_guard(env, move |env| {
+        let aggregator = unsafe { &mut *(handle as *mut TumblingAggregator) };
+        env.byte_array_from_slice(&aggregator.snapshot())
+            .expect("failed to allocate snapshot array")
+            .into_raw()
+    })
 }
 
 /// Rebuilds an aggregator from a snapshot taken by a prior run and returns a fresh handle.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreTumblingAggregator<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     window_millis: jlong,
     slide_millis: jlong,
@@ -1250,19 +1274,21 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreTumbli
     snapshot: JByteArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
-    let kinds = read_int_array(&env, &aggregate_kinds);
-    let value_types = read_int_array(&env, &value_types);
-    let bytes = env.convert_byte_array(&snapshot).expect("failed to read snapshot");
-    let aggregator =
-        TumblingAggregator::restore(window_millis, slide_millis, false, value_types, kinds, &bytes)
-            .with_memory_budget(memory_budget_bytes);
-    boxed_or_throw(&mut env, aggregator)
+    crate::bridge::jni_guard(env, move |mut env| {
+        let kinds = read_int_array(&env, &aggregate_kinds);
+        let value_types = read_int_array(&env, &value_types);
+        let bytes = env.convert_byte_array(&snapshot).expect("failed to read snapshot");
+        let aggregator =
+            TumblingAggregator::restore(window_millis, slide_millis, false, value_types, kinds, &bytes)
+                .with_memory_budget(memory_budget_bytes);
+        boxed_or_throw(&mut env, aggregator)
+    })
 }
 
 /// Rebuilds a cumulative-window aggregator from a snapshot taken by a prior run.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreCumulativeAggregator<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     max_size_millis: jlong,
     step_millis: jlong,
@@ -1271,42 +1297,46 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreCumula
     snapshot: JByteArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
-    let kinds = read_int_array(&env, &aggregate_kinds);
-    let value_types = read_int_array(&env, &value_types);
-    let bytes = env.convert_byte_array(&snapshot).expect("failed to read snapshot");
-    let aggregator =
-        TumblingAggregator::restore(max_size_millis, step_millis, true, value_types, kinds, &bytes)
-            .with_memory_budget(memory_budget_bytes);
-    boxed_or_throw(&mut env, aggregator)
+    crate::bridge::jni_guard(env, move |mut env| {
+        let kinds = read_int_array(&env, &aggregate_kinds);
+        let value_types = read_int_array(&env, &value_types);
+        let bytes = env.convert_byte_array(&snapshot).expect("failed to read snapshot");
+        let aggregator =
+            TumblingAggregator::restore(max_size_millis, step_millis, true, value_types, kinds, &bytes)
+                .with_memory_budget(memory_budget_bytes);
+        boxed_or_throw(&mut env, aggregator)
+    })
 }
 
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotTumblingAggregatorPartitions<
     'local,
 >(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     max_parallelism: jint,
     timestamp_precisions: JIntArray<'local>,
 ) -> jni::sys::jobjectArray {
-    let aggregator = unsafe { &mut *(handle as *mut TumblingAggregator) };
-    let precisions: Vec<i32> = read_int_array(&env, &timestamp_precisions)
-        .into_iter()
-        .map(|precision| precision as i32)
-        .collect();
-    keyed_state_partition_array(
-        &mut env,
-        aggregator.snapshot_partitions(max_parallelism as usize, &precisions),
-        "fixed-window",
-    )
+    crate::bridge::jni_guard(env, move |mut env| {
+        let aggregator = unsafe { &mut *(handle as *mut TumblingAggregator) };
+        let precisions: Vec<i32> = read_int_array(&env, &timestamp_precisions)
+            .into_iter()
+            .map(|precision| precision as i32)
+            .collect();
+        keyed_state_partition_array(
+            &mut env,
+            aggregator.snapshot_partitions(max_parallelism as usize, &precisions),
+            "fixed-window",
+        )
+    })
 }
 
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreTumblingAggregatorPartitions<
     'local,
 >(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     window_millis: jlong,
     slide_millis: jlong,
@@ -1316,30 +1346,32 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreTumbli
     snapshots: JObjectArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
-    let kinds = read_int_array(&env, &aggregate_kinds);
-    let value_types = read_int_array(&env, &value_types);
-    let count = env
-        .get_array_length(&snapshots)
-        .expect("read window raw partition count");
-    let mut restored = Vec::with_capacity(count as usize);
-    for index in 0..count {
-        let bytes = JByteArray::from(
-            env.get_object_array_element(&snapshots, index)
-                .expect("read window raw partition"),
-        );
-        restored.push(
-            env.convert_byte_array(&bytes)
-                .expect("read window raw partition bytes"),
-        );
-    }
-    let aggregator = TumblingAggregator::restore_partitions(
-        window_millis,
-        slide_millis,
-        cumulative != 0,
-        value_types,
-        kinds,
-        &restored,
-    )
-    .with_memory_budget(memory_budget_bytes);
-    boxed_or_throw(&mut env, aggregator)
+    crate::bridge::jni_guard(env, move |mut env| {
+        let kinds = read_int_array(&env, &aggregate_kinds);
+        let value_types = read_int_array(&env, &value_types);
+        let count = env
+            .get_array_length(&snapshots)
+            .expect("read window raw partition count");
+        let mut restored = Vec::with_capacity(count as usize);
+        for index in 0..count {
+            let bytes = JByteArray::from(
+                env.get_object_array_element(&snapshots, index)
+                    .expect("read window raw partition"),
+            );
+            restored.push(
+                env.convert_byte_array(&bytes)
+                    .expect("read window raw partition bytes"),
+            );
+        }
+        let aggregator = TumblingAggregator::restore_partitions(
+            window_millis,
+            slide_millis,
+            cumulative != 0,
+            value_types,
+            kinds,
+            &restored,
+        )
+        .with_memory_budget(memory_budget_bytes);
+        boxed_or_throw(&mut env, aggregator)
+    })
 }
