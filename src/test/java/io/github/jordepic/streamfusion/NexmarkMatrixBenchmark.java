@@ -761,33 +761,44 @@ class NexmarkMatrixBenchmark {
 
       for (int i = 0; i < queries.length; i++) {
         Query q = queries[i];
-        double flinkOff;
-        double nativeOff;
-        double flinkOn;
-        double nativeOn;
-        if ((i & 1) == 0) {
-          flinkOff = kafkaSinkBest(brokers, q, false, Map.of());
-          nativeOff = kafkaSinkBest(brokers, q, true, Map.of());
-          flinkOn = kafkaSinkBest(brokers, q, false, miniBatch);
-          nativeOn = kafkaSinkBest(brokers, q, true, miniBatch);
-        } else {
-          flinkOn = kafkaSinkBest(brokers, q, false, miniBatch);
-          nativeOn = kafkaSinkBest(brokers, q, true, miniBatch);
-          flinkOff = kafkaSinkBest(brokers, q, false, Map.of());
-          nativeOff = kafkaSinkBest(brokers, q, true, Map.of());
+        String row;
+        // One query lost to a transient environment stall (a broker timeout, a TaskExecutor
+        // heartbeat loss) must not discard the whole suite: mark it failed, keep measuring, and
+        // re-run the marked queries alone via SF_MATRIX_QUERIES. Rows also print as they land so
+        // a later fatal cannot erase what completed.
+        try {
+          double flinkOff;
+          double nativeOff;
+          double flinkOn;
+          double nativeOn;
+          if ((i & 1) == 0) {
+            flinkOff = kafkaSinkBest(brokers, q, false, Map.of());
+            nativeOff = kafkaSinkBest(brokers, q, true, Map.of());
+            flinkOn = kafkaSinkBest(brokers, q, false, miniBatch);
+            nativeOn = kafkaSinkBest(brokers, q, true, miniBatch);
+          } else {
+            flinkOn = kafkaSinkBest(brokers, q, false, miniBatch);
+            nativeOn = kafkaSinkBest(brokers, q, true, miniBatch);
+            flinkOff = kafkaSinkBest(brokers, q, false, Map.of());
+            nativeOff = kafkaSinkBest(brokers, q, true, Map.of());
+          }
+          row =
+              String.format(
+                  "%4s  %9.3f  %10.3f  %12.2fx  %8.3f  %9.3f  %11.2fx  %12.2fx  %9.2fx%n",
+                  q.label,
+                  ROWS / flinkOff / 1_000_000.0,
+                  ROWS / nativeOff / 1_000_000.0,
+                  flinkOff / nativeOff,
+                  ROWS / flinkOn / 1_000_000.0,
+                  ROWS / nativeOn / 1_000_000.0,
+                  flinkOn / nativeOn,
+                  flinkOff / flinkOn,
+                  nativeOff / nativeOn);
+        } catch (Exception failure) {
+          row = String.format("%4s  FAILED: %s%n", q.label, rootCause(failure));
         }
-        out.append(
-            String.format(
-                "%4s  %9.3f  %10.3f  %12.2fx  %8.3f  %9.3f  %11.2fx  %12.2fx  %9.2fx%n",
-                q.label,
-                ROWS / flinkOff / 1_000_000.0,
-                ROWS / nativeOff / 1_000_000.0,
-                flinkOff / nativeOff,
-                ROWS / flinkOn / 1_000_000.0,
-                ROWS / nativeOn / 1_000_000.0,
-                flinkOn / nativeOn,
-                flinkOff / flinkOn,
-                nativeOff / nativeOn));
+        out.append(row);
+        System.out.print(row);
       }
       System.out.println(out);
     }
@@ -842,21 +853,26 @@ class NexmarkMatrixBenchmark {
                   + ") #####\n");
       out.append("query  Flink/RocksDB s      ev/s  SF/Paimon s      ev/s  SF/Flink\n");
       for (Query q : queries) {
-        double flink = kafkaSinkBest(brokers, q, false, rocksdb);
         String row;
+        // See the mode comparison: a query lost to a transient stall is marked, not fatal.
         try {
-          double nativeRun = kafkaSinkBest(brokers, q, true, paimon);
-          row =
-              String.format(
-                  "%4s  %15.3f  %8.0f  %11.3f  %8.0f  %7.2fx%n",
-                  q.label,
-                  flink,
-                  ROWS / flink,
-                  nativeRun,
-                  ROWS / nativeRun,
-                  flink / nativeRun);
-        } catch (IllegalStateException fallback) {
-          row = String.format("%4s  %15.3f  |  %s%n", q.label, flink, fallback.getMessage());
+          double flink = kafkaSinkBest(brokers, q, false, rocksdb);
+          try {
+            double nativeRun = kafkaSinkBest(brokers, q, true, paimon);
+            row =
+                String.format(
+                    "%4s  %15.3f  %8.0f  %11.3f  %8.0f  %7.2fx%n",
+                    q.label,
+                    flink,
+                    ROWS / flink,
+                    nativeRun,
+                    ROWS / nativeRun,
+                    flink / nativeRun);
+          } catch (IllegalStateException fallback) {
+            row = String.format("%4s  %15.3f  |  %s%n", q.label, flink, fallback.getMessage());
+          }
+        } catch (Exception failure) {
+          row = String.format("%4s  FAILED: %s%n", q.label, rootCause(failure));
         }
         out.append(row);
         System.out.print(row);
@@ -948,6 +964,15 @@ class NexmarkMatrixBenchmark {
   private static double kafkaSinkBest(
       String brokers, Query q, boolean nativeRun, Map<String, String> config) throws Exception {
     return kafkaSinkBest(brokers, q, nativeRun, config, WARMUP, RUNS);
+  }
+
+  /** The deepest cause — the actual failure under Flink's job-wrapper exception chain. */
+  private static String rootCause(Throwable failure) {
+    Throwable cause = failure;
+    while (cause.getCause() != null) {
+      cause = cause.getCause();
+    }
+    return cause.toString();
   }
 
   private static double kafkaSinkBest(
