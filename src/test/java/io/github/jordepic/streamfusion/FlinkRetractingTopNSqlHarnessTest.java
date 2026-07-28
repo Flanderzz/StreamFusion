@@ -54,6 +54,24 @@ class FlinkRetractingTopNSqlHarnessTest {
         TOP_N_WITH_RANK);
   }
 
+  /**
+   * An update-fast rank — a unique-keyed input whose sort key Flink infers monotonic (here a
+   * descending {@code COUNT(*)}) — is planned WITHOUT retractions: the upstream emits only
+   * {@code +I}/{@code +U} and rank rows replace by unique key. The retracting ranker cannot run
+   * that stream (with no {@code -U} to remove, it retains every version and ranks stale rows), so
+   * the shape stays on the host until a native update-fast ranker exists.
+   */
+  @Test
+  void updateFastRankFallsBackToHost() throws Exception {
+    NativeParity.assertFallbackReasonContains(
+        FlinkRetractingTopNSqlHarnessTest::environment,
+        "SELECT g, k, cnt, rn FROM ("
+            + "  SELECT g, k, cnt, ROW_NUMBER() OVER (PARTITION BY g ORDER BY cnt DESC) AS rn"
+            + "  FROM (SELECT g, k, COUNT(*) AS cnt FROM src GROUP BY g, k)"
+            + ") WHERE rn <= 2",
+        "update-fast rank");
+  }
+
   private static TableEnvironment environment() {
     StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
     env.setParallelism(1);

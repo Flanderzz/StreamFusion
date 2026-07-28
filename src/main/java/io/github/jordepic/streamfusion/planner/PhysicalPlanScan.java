@@ -44,6 +44,7 @@ import org.apache.flink.table.planner.plan.trait.MiniBatchIntervalTraitDef$;
 import org.apache.flink.table.planner.plan.trait.MiniBatchMode;
 import org.apache.flink.table.planner.plan.optimize.program.FlinkOptimizeProgram;
 import org.apache.flink.table.planner.plan.utils.ChangelogPlanUtils;
+import org.apache.flink.table.planner.plan.utils.RankProcessStrategy;
 import org.apache.flink.table.planner.plan.optimize.program.StreamOptimizeContext;
 import org.apache.flink.table.planner.plan.schema.TableSourceTable;
 
@@ -389,6 +390,15 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
       if (TopNMatcher.matches(rank)) {
         if (!NativeConfig.operatorEnabled("topN")) {
           return noteDisabled(current, "topN");
+        }
+        // An update-fast rank (unique-keyed input with a monotonic sort key) receives a changelog
+        // WITHOUT retractions — the upstream is planned to emit only +I/+U, and rank rows must be
+        // replaced by their unique key. The retracting ranker's full-row retraction model cannot
+        // run that stream (it would accumulate every version), so the shape stays on the host
+        // until a native update-fast ranker exists.
+        if (rank.rankStrategy() instanceof RankProcessStrategy.UpdateFastStrategy) {
+          recordFallback("Top-N: update-fast rank (unique-keyed input, no retractions) runs on the host");
+          return current;
         }
         substitutions++;
         int[] partitionColumns = TopNMatcher.partitionColumns(rank);
