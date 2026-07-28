@@ -801,14 +801,22 @@ class NexmarkMatrixBenchmark {
   @EnabledIfEnvironmentVariable(named = "SF_MATRIX_STATE_BACKENDS", matches = "true")
   void stateBackendComparison() throws Exception {
     Path rocksDir = Files.createTempDirectory("nexmark-rocksdb");
-    Map<String, String> rocksdb =
-        Map.of(
-            "state.backend.type", "rocksdb",
-            "state.backend.rocksdb.localdir", rocksDir.toString());
-    Map<String, String> paimon =
-        Map.of(
-            "state.backend.type",
-            "io.github.jordepic.streamfusion.state.PaimonStateBackendFactory");
+    Map<String, String> rocksdb = new LinkedHashMap<>();
+    rocksdb.put("state.backend.type", "rocksdb");
+    rocksdb.put("state.backend.rocksdb.localdir", rocksDir.toString());
+    Map<String, String> paimon = new LinkedHashMap<>();
+    paimon.put(
+        "state.backend.type", "io.github.jordepic.streamfusion.state.PaimonStateBackendFactory");
+    // SF_STATE_BACKENDS_MINI_BATCH=true runs the same comparison in the tuned mini-batch mode
+    // (both engines, the mode comparison's production-style configuration).
+    boolean miniBatch = "true".equals(System.getenv("SF_STATE_BACKENDS_MINI_BATCH"));
+    if (miniBatch) {
+      for (Map<String, String> config : List.of(rocksdb, paimon)) {
+        config.put("table.exec.mini-batch.enabled", "true");
+        config.put("table.exec.mini-batch.allow-latency", "2 s");
+        config.put("table.exec.mini-batch.size", "50000");
+      }
+    }
     Query[] queries = selectQueries();
     try (KafkaContainer kafka =
         new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.6.1"))
@@ -819,8 +827,9 @@ class NexmarkMatrixBenchmark {
       assertStateBackendsEngage(brokers, rocksdb, paimon, rocksDir);
       StringBuilder out =
           new StringBuilder(
-              "\n##### NEXMARK STATE BACKENDS (exactly-once Kafka, mini-batch off; Flink on"
-                  + " RocksDB vs StreamFusion on Paimon; "
+              "\n##### NEXMARK STATE BACKENDS (exactly-once Kafka, mini-batch "
+                  + (miniBatch ? "on" : "off")
+                  + "; Flink on RocksDB vs StreamFusion on Paimon; "
                   + ROWS
                   + " events, best of "
                   + RUNS
