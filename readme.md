@@ -78,11 +78,16 @@ Divergences from these references are recorded in [`divergences/`](divergences/)
 ## Nexmark benchmarks
 
 The headline benchmark is an end-to-end, exactly-once Kafka pipeline—not a blackhole sink. Stock
-Flink and StreamFusion read the same 500K-event Kafka JSON corpus and publish each query result to a
-fresh Kafka topic with a one-second checkpoint interval. Append-only queries use `kafka`; updating
+Flink and StreamFusion run at **parallelism 4**, read the same 2M-event Kafka JSON corpus from a
+four-partition topic (one split per source subtask), and publish each query result to a fresh
+Kafka topic with a one-second checkpoint interval. Append-only queries use `kafka`; updating
 queries use `upsert-kafka` with the result's actual primary key. Each timed run includes source
-consumption, query execution, serialization, Kafka writes, checkpoints, and the bounded job's final
-transaction commit.
+consumption, query execution, the keyed shuffle, serialization, Kafka writes, checkpoints, and
+the bounded job's final transaction commit. Between co-located subtasks StreamFusion's shuffle
+moves Arrow batches by ownership transfer (zero serialization; stock Flink always serializes
+across a shuffle, even in one JVM); a multi-TaskManager deployment's cross-process edges pay
+Arrow IPC instead, measured at ~11% on the shuffle-heaviest mini-batch-off cells and nothing
+elsewhere ([docs/optimizations.md](docs/optimizations.md)).
 
 On StreamFusion, Kafka poll/decode, every supported operator, sink key/value/tombstone
 serialization, and record production all stay native: librdkafka produces each query result inside
@@ -91,57 +96,59 @@ checkpoint completes, preserving the host connector's exactly-once recovery exac
 plan — including the native-producer sink shape — is asserted for every cell. q6 is omitted because
 Flink SQL itself cannot run it ([analysis](.claude/wontdos/39-nexmark-q6-exclusion.md)).
 
-These are the 2026-07-27 Apple M1 Max release+`mimalloc` results, best of two after one warmup,
-across all four backend/mode combinations. The memory columns compare Flink's default heap
-state against StreamFusion's memory state; the disk columns compare the production persistent
-backends — stock Flink on RocksDB against StreamFusion on its Paimon state backend.
+These are the 2026-07-27 Apple M1 Max release+`mimalloc` results at parallelism 4, best of two
+after one warmup, across all four backend/mode combinations. The memory columns compare Flink's
+default heap state against StreamFusion's memory state; the disk columns compare the production
+persistent backends — stock Flink on RocksDB against StreamFusion on its Paimon state backend.
 Mini-batching ("on") uses the same production-style configuration on both engines
 (`allow-latency=2s`, `size=50000`). Each cell is StreamFusion throughput divided by Flink
 throughput within the same backend and mode.
 
 | Query | Memory, off | Memory, on | Disk, off | Disk, on |
 |---|---:|---:|---:|---:|
-| q0 | **2.16×** | **2.03×** | **2.14×** | **2.03×** |
-| q1 | **1.93×** | **2.05×** | **2.07×** | **1.85×** |
-| q2 | **1.27×** | **1.34×** | **1.34×** | **1.29×** |
-| q3 | **1.49×** | **1.56×** | **1.34׆** | **1.24×** |
-| q4 | **2.00×** | **1.94×** | **2.35×** | **2.42×** |
-| q5 | **1.58×** | **1.40×** | **2.09×** | **2.09×** |
-| q7 | **2.57×** | **2.88×** | **1.66×** | **2.16×** |
-| q8 | **1.58×** | **1.32×** | **1.34×** | **1.17×** |
-| q9 | 0.88× | **1.71×** | 0.91× | **2.01×** |
-| q10 | **1.82×** | **2.22×** | **2.10×** | **1.76×** |
-| q11 | **2.82×** | **2.91×** | **9.14×** | **8.21×** |
-| q12 | **1.74×** | **1.78×** | **1.85×** | **1.94×** |
-| q13 | **2.19×** | **1.89×** | **1.93×** | **2.09×** |
-| q14 | **2.00×** | **2.29×** | **2.41×** | **2.45×** |
-| q15 | **1.71×** | **1.77×** | **3.18×** | **1.99×** |
-| q16 | **1.52×** | **1.86×** | **3.15×** | **2.27×** |
-| q17 | **1.68×** | **1.78×** | **2.83×** | **2.06×** |
-| q18 | **2.25×** | **2.51×** | **2.27׆** | **1.69×** |
-| q19 | **1.39×** | **9.55×** | **1.03×** | **6.92×** |
-| q20 | **2.50×** | **2.46×** | **1.17×** | **1.37×** |
-| q21 | **1.48×** | **1.86×** | **1.79×** | **1.80×** |
-| q22 | **2.06×** | **2.12×** | **1.75×** | **1.96×** |
-| q23 | **1.25×** | **2.63×** | **2.09×** | **1.69×** |
-| **geomean** | **1.76×** | **2.11×** | **1.98×** | **2.08×** |
+| q0 | **1.88×** | 0.92× | **1.78×** | **1.63×** |
+| q1 | **1.26×** | **1.13×** | **1.69×** | **1.72×** |
+| q2 | **1.60×** | **1.01×** | **1.48×** | **1.53×** |
+| q3 | **1.06׆** | **1.06׆** | 0.86× | 0.94× |
+| q4 | 0.96× | **1.38×** | **1.64×** | **2.97×** |
+| q5 | **1.34×** | **1.05×** | **1.70×** | **1.56×** |
+| q7 | **1.60×** | **1.59×** | **1.75×** | **2.46×** |
+| q8 | **1.28×** | **1.15×** | **1.58×** | **1.48×** |
+| q9 | **1.67×** | **1.86×** | **1.56×** | **1.71×** |
+| q10 | **1.67×** | **1.36×** | **1.31×** | **1.33×** |
+| q11 | **2.66×** | **2.68×** | **8.15×** | **8.66×** |
+| q12 | **1.71×** | **1.70×** | **2.15×** | **1.85×** |
+| q13 | **1.65×** | **1.60×** | **1.37×** | **1.45×** |
+| q14 | **1.89×** | **1.66×** | **1.92×** | **1.55×** |
+| q15 | **3.05×** | **1.75×** | **6.52×** | **2.04×** |
+| q16 | **1.61×** | **1.76×** | **4.31×** | **2.61×** |
+| q17 | **1.89×** | **1.76×** | **2.56×** | **1.63×** |
+| q18 | **1.62×** | **1.96×** | **1.31×** | **2.66×** |
+| q19 | 0.68× | **3.94×** | **1.71×** | **2.93×** |
+| q20 | **3.65×** | **1.42×** | 0.93× | **1.31×** |
+| q21 | **1.53×** | **1.42×** | **1.06×** | **1.08×** |
+| q22 | **1.65×** | **1.26×** | **1.51×** | **1.69×** |
+| q23 | **1.82×** | **1.89×** | **1.72×** | **1.46׆** |
+| **geomean** | **1.63×** | **1.53×** | **1.83×** | **1.86×** |
 
-StreamFusion wins every query in every combination except q9 with mini-batching disabled
-(~0.9× on both backends — its state snapshots dominate the barrier; see the raw-snapshot
-entries in [docs/optimizations.md](docs/optimizations.md)), and q9 flips to a clear win in
-both tuned modes. † marks the two cells re-measured in a focused repeat directly after the
-suite (the suite cells caught slow measurements under sustained load); the as-measured tables,
-raw timings, and method live in [docs/benchmarks.md](docs/benchmarks.md).
+† marks cells re-measured in a focused repeat directly after the suite (the suite cells caught
+load-skewed measurements); the as-measured tables, raw timings, and method live in
+[docs/benchmarks.md](docs/benchmarks.md).
 
-Mini-batching now costs several append-only queries a little (they have no changelog churn to
-amortize, and the native producer removed the per-record cost mini-batching used to hide). The
-multi-source/blackhole ladder, raw timings, focused repeats, reproduction command, and profiling
-controls remain in [docs/benchmarks.md](docs/benchmarks.md).
+Parallelism 4 is a tougher, more honest baseline than the earlier parallelism-1 tables: the keyed
+shuffle is real work on both engines, and Flink's heap pipeline scales well with subtasks. The
+remaining sub-parity cells are the shuffle-heavy changelog shapes with mini-batching off (q4 at
+parity and q19 below it on memory state; q3 hovers at parity everywhere) and a native-specific
+mini-batch cost on the stateless append queries (q0–q2 "on" columns) — the next scaling work.
+The persistent-backend columns hold up best: RocksDB pays its per-record
+costs in every subtask, and the disk geomeans stay within a few points of their parallelism-1
+values. The multi-source/blackhole ladder, raw timings, focused repeats, reproduction commands,
+and profiling controls remain in [docs/benchmarks.md](docs/benchmarks.md).
 
 The disk columns' key enabler is **deletion-vector mode**: stock Java Paimon maintains the
 state tables' deletion vectors synchronously at each barrier, so every committed read is a raw
 parquet scan with exact predicate pushdown — no merge reads, no resident index. The disk
-comparison's largest wins are the stateful shapes RocksDB pays per-record for (up to 9.1× on
+comparison's largest wins are the stateful shapes RocksDB pays per-record for (up to 8.7× on
 session windows).
 
 _Apple M1 Max; numbers are comparable only within a machine._

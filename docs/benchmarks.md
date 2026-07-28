@@ -856,7 +856,63 @@ produces each Arrow batch inside the checkpoint epoch's transaction, and Flink's
 committer commits it after the checkpoint completes (divergence 26); the harness asserts the
 native-producer plan shape for every cell.
 
-#### Current full comparison (2026-07-27, raw-bytes snapshots + sink encode round)
+#### Current full comparison (2026-07-27 night, parallelism 4, 2M events)
+
+Apple M1 Max, one-second checkpoints, release+`mimalloc,kafka,json`, one warmup and best of two
+measured runs; throughput is millions of input events per second. Both engines run at
+parallelism 4 over a 2M-event corpus on a four-partition topic (one split per source subtask;
+round-robin production keeps each partition ascending in event time). The native side's
+co-located shuffle hands Arrow batches over by ownership (the zero-copy local exchange); a
+multi-TaskManager deployment's shuffle pays Arrow IPC instead
+(`streamfusion.exchange.zeroCopyLocal=false` models it, measured ~11% on the shuffle-heaviest
+mini-batch-off cells and nothing elsewhere).
+
+| Query | Flink off | StreamFusion off | SF/Flink off | Flink on | StreamFusion on | SF/Flink on | Flink on/off | SF on/off |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| q0 | 0.763 | 1.435 | 1.88x | 0.828 | 0.759 | 0.92x | 1.09x | 0.53x |
+| q1 | 0.861 | 1.087 | 1.26x | 0.723 | 0.817 | 1.13x | 0.84x | 0.75x |
+| q2 | 1.367 | 2.186 | 1.60x | 1.318 | 1.330 | 1.01x | 0.96x | 0.61x |
+| q3 | 1.715 | 1.102 | 0.64x † | 1.671 | 1.555 | 0.93x † | 0.97x | 1.41x |
+| q4 | 1.034 | 0.993 | 0.96x | 0.999 | 1.377 | 1.38x | 0.97x | 1.39x |
+| q5 | 1.191 | 1.594 | 1.34x | 1.403 | 1.476 | 1.05x | 1.18x | 0.93x |
+| q7 | 0.890 | 1.423 | 1.60x | 0.826 | 1.315 | 1.59x | 0.93x | 0.92x |
+| q8 | 1.593 | 2.039 | 1.28x | 1.637 | 1.881 | 1.15x | 1.03x | 0.92x |
+| q9 | 0.718 | 1.202 | 1.67x | 0.674 | 1.254 | 1.86x | 0.94x | 1.04x |
+| q10 | 0.785 | 1.312 | 1.67x | 0.738 | 1.001 | 1.36x | 0.94x | 0.76x |
+| q11 | 0.981 | 2.612 | 2.66x | 0.977 | 2.615 | 2.68x | 1.00x | 1.00x |
+| q12 | 1.438 | 2.457 | 1.71x | 1.336 | 2.266 | 1.70x | 0.93x | 0.92x |
+| q13 | 0.997 | 1.646 | 1.65x | 1.004 | 1.605 | 1.60x | 1.01x | 0.98x |
+| q14 | 0.747 | 1.415 | 1.89x | 0.759 | 1.263 | 1.66x | 1.02x | 0.89x |
+| q15 | 0.307 | 0.936 | 3.05x | 1.279 | 2.235 | 1.75x | 4.16x | 2.39x |
+| q16 | 0.418 | 0.673 | 1.61x | 1.070 | 1.880 | 1.76x | 2.56x | 2.79x |
+| q17 | 0.586 | 1.105 | 1.89x | 1.103 | 1.936 | 1.76x | 1.88x | 1.75x |
+| q18 | 0.557 | 0.904 | 1.62x | 0.561 | 1.103 | 1.96x | 1.01x | 1.22x |
+| q19 | 0.138 | 0.094 | 0.68x | 0.189 | 0.744 | 3.94x | 1.37x | 7.90x |
+| q20 | 0.327 | 1.192 | 3.65x | 0.887 | 1.263 | 1.42x | 2.72x | 1.06x |
+| q21 | 1.369 | 2.100 | 1.53x | 1.322 | 1.879 | 1.42x | 0.97x | 0.89x |
+| q22 | 0.826 | 1.362 | 1.65x | 0.848 | 1.071 | 1.26x | 1.03x | 0.79x |
+| q23 | 0.299 | 0.544 | 1.82x | 0.310 | 0.586 | 1.89x | 1.04x | 1.08x |
+
+† q3's suite cells are load anomalies: a focused repeat directly after the suite, in its own JVM,
+measured **1.06x off and 1.06x on** (native 1.564 / 1.667 M events/s) — a modest win, not the
+suite's loss, though still far below its parallelism-1 ratio. q19's off cell could not be
+re-verified in isolation: two of three focused repeat attempts died mid-q19 with the MiniCluster's
+TaskExecutor shutting down (the full suite pass survived it), so 0.68x stands as measured and the
+instability is part of the q19 scaling finding.
+
+Geometric means: mini-batch off **1.59x** as measured (**1.63x** with the q3 repeat
+substituted), mini-batch on **1.52x** (**1.53x**). The parallelism-1 story compresses at
+parallelism 4: Flink's heap pipeline gains more from quadrupled subtasks than the native island
+does on the shuffle-heavy changelog shapes, so q4 off sits at parity and q19 off below it, and
+q3 hovers near parity even isolated — a scaling gap to close. A second systematic pattern: with
+mini-batching on, the *native* side loses throughput on the stateless/append queries (q0 0.53x
+of its own off-mode, q2 0.61x, q1 0.75x) while stock Flink holds steady — mini-batching still
+pays off handsomely where changelog churn amortizes (q19 on 3.94x), but the cost at parallelism
+is native-specific and unexplained. The windowed
+family (q15–q17) shows both engines gaining from mini-batch mode's two-phase aggregation, native
+keeping a 1.6–1.9x edge throughout.
+
+#### Prior comparison (2026-07-27, parallelism 1, 500K events — raw-bytes snapshots + sink encode round)
 
 Apple M1 Max, 500K input events, one-second checkpoints, release+`mimalloc,kafka,json`, one warmup
 and best of two measured runs. Throughput is millions of input events per second. This run
@@ -1002,13 +1058,15 @@ makes fixed job/checkpoint cost large enough to move the ratio from 0.99x to 1.3
 
 Run the four-way comparison in the mandatory release build with:
 
-`SF_BENCHMARK=true SF_MATRIX_KAFKA_SINK=true SF_ROWS=500000
+`SF_BENCHMARK=true SF_MATRIX_KAFKA_SINK=true SF_ROWS=2000000
 SF_MATRIX_QUERIES=q0,q1,q2,q3,q4,q5,q7,q8,q9,q10,q11,q12,q13,q14,q15,q16,q17,q18,q19,q20,q21,q22,q23
 mvn -pl :streamfusion-runtime test -Pbench
 -Dnative.cargo.args="build --release --features mimalloc,kafka,json"
 -Dtest=NexmarkMatrixBenchmark#exactlyOnceKafkaSinkModeComparison`.
 
-`SF_MATRIX_QUERIES` may select a focused subset. For differential profiling,
+`SF_MATRIX_QUERIES` may select a focused subset, and `SF_PARALLELISM` overrides the Kafka-fed
+runs' default parallelism of 4 (the corpus topic is created with one partition per subtask).
+For differential profiling,
 `SF_PROFILE_KAFKA_SINK=true` runs one selected query repeatedly against one broker and bypasses the
 matrix warmup/repetition. Select the query with `-Dprofile.query=q19`, the engine with
 `-Dprofile.native=true|false`, mini-batching with `-Dprofile.minibatch=true|false`, and the
@@ -1154,15 +1212,21 @@ _Apple M1 Max; numbers are comparable only within a machine._
 
 ### Flink on RocksDB vs StreamFusion on Paimon (full Nexmark, exactly-once Kafka)
 
-The production-shaped backend comparison (2026-07-27 evening, Apple M1 Max, release +
+The production-shaped backend comparison (2026-07-27 night, Apple M1 Max, release +
 `mimalloc`): stock Flink on its RocksDB backend versus the native engine on the Paimon state
-backend, over the readme's exactly-once Kafka pipeline — the same 500K-event JSON corpus,
-one-second checkpoints, exactly-once delivery to Kafka, best of two after a warmup — in both
-mini-batch modes (`SF_STATE_BACKENDS_MINI_BATCH=true` runs the tuned configuration on both
-engines). The comparison lives in `streamfusion-paimon-compactor` — the only module whose
+backend, over the readme's exactly-once Kafka pipeline — a 2M-event JSON corpus on a
+four-partition topic, both engines at parallelism 4, one-second checkpoints, exactly-once
+delivery to Kafka, best of two after a warmup — in both mini-batch modes
+(`SF_STATE_BACKENDS_MINI_BATCH=true` runs the tuned configuration on both engines). At
+parallelism 4 the native side's co-located shuffle hands Arrow batches over by ownership (the
+zero-copy local exchange); a multi-TaskManager deployment's shuffle would pay Arrow IPC instead
+(`streamfusion.exchange.zeroCopyLocal=false` models it, worth ~11% on the shuffle-heaviest
+mini-batch-off cells and nothing elsewhere). The comparison lives in `streamfusion-paimon-compactor` — the only module whose
 classpath can hold both the backend and its Java table maintainer — and is run with
-`SF_BENCHMARK=true SF_MATRIX_STATE_BACKENDS=true mvn test -Pbench -pl
-streamfusion-paimon-compactor -am -Dtest=NexmarkStateBackendBenchmark#stateBackendComparison`.
+`SF_BENCHMARK=true SF_MATRIX_STATE_BACKENDS=true SF_ROWS=2000000 mvn test -Pbench -pl
+streamfusion-paimon-compactor -am -Dsurefire.failIfNoSpecifiedTests=false
+-Dtest=NexmarkStateBackendBenchmark#stateBackendComparison` (`SF_PARALLELISM` overrides the
+default parallelism of 4).
 A q4 preflight asserts both backends engage before any number is recorded (RocksDB must
 materialize working files under a directed localdir; a live Paimon store handle must be
 observed), and additionally requires a **deletion-vector-capable compactor**: without one the
@@ -1173,6 +1237,81 @@ capability currently needs a Paimon bundle with the binary-primary-key lookup co
 (contributed upstream); until it reaches a release, build one locally and select it with
 `-Dpaimon.bundle.version`. Operators the Paimon backend does not yet carry (proctime shapes)
 fall back to memory state with raw snapshots, exactly as a deployment would run them.
+
+Mini-batch off:
+
+| query | Flink/RocksDB s | ev/s | SF/Paimon s | ev/s | SF/Flink |
+|---|---|---|---|---|---|
+| q0 | 2.529 | 791K | 1.417 | 1.41M | **1.78×** |
+| q1 | 2.492 | 802K | 1.472 | 1.36M | **1.69×** |
+| q2 | 1.568 | 1.28M | 1.056 | 1.89M | **1.48×** |
+| q3 | 1.292 | 1.55M | 1.508 | 1.33M | 0.86× |
+| q4 | 7.399 | 270K | 4.501 | 444K | **1.64×** |
+| q5 | 3.915 | 511K | 2.300 | 869K | **1.70×** |
+| q7 | 7.867 | 254K | 4.487 | 446K | **1.75×** |
+| q8 | 2.278 | 878K | 1.445 | 1.38M | **1.58×** |
+| q9 | 10.146 | 197K | 6.513 | 307K | **1.56×** |
+| q10 | 2.618 | 764K | 1.999 | 1.00M | **1.31×** |
+| q11 | 7.788 | 257K | 0.956 | 2.09M | **8.15×** |
+| q12 | 2.026 | 987K | 0.943 | 2.12M | **2.15×** |
+| q13 | 2.200 | 909K | 1.611 | 1.24M | **1.37×** |
+| q14 | 2.840 | 704K | 1.481 | 1.35M | **1.92×** |
+| q15 | 14.631 | 137K | 2.246 | 891K | **6.52×** |
+| q16 | 9.211 | 217K | 2.138 | 935K | **4.31×** |
+| q17 | 4.543 | 440K | 1.777 | 1.13M | **2.56×** |
+| q18 | 6.987 | 286K | 5.314 | 376K | **1.31×** |
+| q19 | 10.817 | 185K | 6.313 | 317K | **1.71×** |
+| q20 | 4.985 | 401K | 5.383 | 372K | 0.93× |
+| q21 | 1.481 | 1.35M | 1.398 | 1.43M | **1.06×** |
+| q22 | 2.352 | 850K | 1.557 | 1.28M | **1.51×** |
+| q23 | 15.194 | 132K | 8.810 | 227K | **1.72×** |
+
+Mini-batch on (both engines tuned):
+
+| query | Flink/RocksDB s | ev/s | SF/Paimon s | ev/s | SF/Flink |
+|---|---|---|---|---|---|
+| q0 | 2.418 | 827K | 1.480 | 1.35M | **1.63×** |
+| q1 | 2.363 | 846K | 1.371 | 1.46M | **1.72×** |
+| q2 | 1.585 | 1.26M | 1.038 | 1.93M | **1.53×** |
+| q3 | 1.325 | 1.51M | 1.410 | 1.42M | 0.94× |
+| q4 | 8.132 | 246K | 2.737 | 731K | **2.97×** |
+| q5 | 3.956 | 506K | 2.536 | 789K | **1.56×** |
+| q7 | 7.375 | 271K | 2.992 | 669K | **2.46×** |
+| q8 | 2.237 | 894K | 1.516 | 1.32M | **1.48×** |
+| q9 | 10.856 | 184K | 6.364 | 314K | **1.71×** |
+| q10 | 2.587 | 773K | 1.944 | 1.03M | **1.33×** |
+| q11 | 7.920 | 253K | 0.914 | 2.19M | **8.66×** |
+| q12 | 1.941 | 1.03M | 1.049 | 1.91M | **1.85×** |
+| q13 | 2.135 | 937K | 1.474 | 1.36M | **1.45×** |
+| q14 | 2.689 | 744K | 1.740 | 1.15M | **1.55×** |
+| q15 | 1.974 | 1.01M | 0.968 | 2.07M | **2.04×** |
+| q16 | 2.869 | 697K | 1.100 | 1.82M | **2.61×** |
+| q17 | 2.298 | 870K | 1.407 | 1.42M | **1.63×** |
+| q18 | 7.546 | 265K | 2.833 | 706K | **2.66×** |
+| q19 | 11.373 | 176K | 3.884 | 515K | **2.93×** |
+| q20 | 6.359 | 315K | 4.856 | 412K | **1.31×** |
+| q21 | 1.514 | 1.32M | 1.402 | 1.43M | **1.08×** |
+| q22 | 2.321 | 862K | 1.374 | 1.46M | **1.69×** |
+| q23 | 12.358 | 162K | 25.700 | 78K | 0.48× † |
+
+† q23's tuned suite cell is a load anomaly: a focused repeat directly after the suite, in its own
+JVM, measured **1.46×** (8.914 s vs the suite's 25.700 s) — in line with its off-mode 1.72× and
+its memory-state 1.89×. The suite pass started seconds after the off-mode pass finished.
+
+Off-mode: geometric mean **1.83×**, 21 of 23 wins; the losses are q3 (0.86×) and q20 (0.93×),
+with q21 near parity. Tuned mode: geometric mean **1.76×** as measured, **1.86×** with the †
+repeat substituted, again 21 of 23 wins. The disk comparison survives parallelism far better
+than the memory-state one (its section above): RocksDB pays its per-record serialize/JNI tax in
+every subtask, so quadrupling subtasks does not close its gap the way quadrupling Flink's heap
+pipeline does. The largest wins remain the shapes RocksDB pays per record for — session windows
+(q11, ~8×) and the off-mode window-agg family (q15 6.5×, q16 4.3×). q3 — a small-state join
+whose Flink plan runs unusually fast at parallelism 4 — is the one consistent loss on both
+backends, the same scaling gap the memory table's off-mode q3/q4 show.
+
+#### Prior comparison (2026-07-27 evening, parallelism 1, 500K events)
+
+The same method at parallelism 1 over the earlier 500K-event single-partition corpus — before
+the parallelism-4 harness, the zero-copy local exchange, and the 2M-event corpus:
 
 Mini-batch off:
 
