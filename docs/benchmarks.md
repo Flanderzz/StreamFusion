@@ -856,7 +856,55 @@ produces each Arrow batch inside the checkpoint epoch's transaction, and Flink's
 committer commits it after the checkpoint completes (divergence 26); the harness asserts the
 native-producer plan shape for every cell.
 
-#### Current full comparison (2026-07-27 night, parallelism 4, 2M events)
+#### Current full comparison (2026-07-28, parallelism 4, 2M events, four-partition output topics)
+
+Apple M1 Max, one-second checkpoints, release+`mimalloc` (full feature build), best of two
+measured runs (no warmup — the best-of minimum discards a cold run); throughput is millions of
+input events per second. Both engines run at parallelism 4 over a 2M-event corpus on a
+four-partition topic (one split per source subtask; round-robin production keeps each partition
+ascending in event time), and every exactly-once output topic is pre-created with one partition
+per sink subtask. These are the first tables to include post-exchange coalescing (see the
+scaling analysis below) and the multi-partition sink. The native side's co-located shuffle hands
+Arrow batches over by ownership (the zero-copy local exchange); a multi-TaskManager deployment's
+shuffle pays Arrow IPC instead (`streamfusion.exchange.zeroCopyLocal=false` models it, measured
+~11% on the shuffle-heaviest mini-batch-off cells and nothing elsewhere).
+
+| Query | Flink off | StreamFusion off | SF/Flink off | Flink on | StreamFusion on | SF/Flink on | Flink on/off | SF on/off |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| q0 | 0.634 | 1.003 | 1.58x | 0.778 | 0.979 | 1.26x | 1.23x | 0.98x |
+| q1 | 0.757 | 1.255 | 1.66x | 0.618 | 1.151 | 1.86x | 0.82x | 0.92x |
+| q2 | 1.189 | 1.315 | 1.11x | 1.342 | 1.723 | 1.28x | 1.13x | 1.31x |
+| q3 | 1.536 | 1.386 | 0.90x | 1.391 | 1.190 | 0.86x | 0.91x | 0.86x |
+| q4 | 0.827 | 0.986 | 1.19x | 0.872 | 0.959 | 1.10x | 1.06x | 0.97x |
+| q5 | 1.143 | 1.260 | 1.10x | 1.169 | 1.212 | 1.04x | 1.02x | 0.96x |
+| q7 | 0.815 | 1.063 | 1.30x | 0.622 | 1.084 | 1.74x | 0.76x | 1.02x |
+| q8 | 1.402 | 1.478 | 1.05x | 1.409 | 1.053 | 0.75x | 1.00x | 0.71x |
+| q9 | 0.645 | 0.824 | 1.28x | 0.659 | 0.988 | 1.50x | 1.02x | 1.20x |
+| q10 | 0.712 | 1.013 | 1.42x | 0.742 | 1.006 | 1.36x | 1.04x | 0.99x |
+| q11 | 0.797 | 2.181 | 2.73x | 0.889 | 2.035 | 2.29x | 1.11x | 0.93x |
+| q12 | 1.258 | 2.272 | 1.81x | 1.242 | 2.240 | 1.80x | 0.99x | 0.99x |
+| q13 | 0.985 | 1.320 | 1.34x | 0.965 | 1.371 | 1.42x | 0.98x | 1.04x |
+| q14 | 0.725 | 1.210 | 1.67x | 0.724 | 1.148 | 1.59x | 1.00x | 0.95x |
+| q15 | 0.261 | 0.797 | 3.05x | 1.091 | 1.754 | 1.61x | 4.17x | 2.20x |
+| q16 | 0.445 | 0.757 | 1.70x | 1.017 | 1.514 | 1.49x | 2.29x | 2.00x |
+| q17 | 0.683 | 0.841 | 1.23x | 1.090 | 1.359 | 1.25x | 1.60x | 1.62x |
+| q18 | 0.576 | 0.946 | 1.64x | 0.534 | 0.823 | 1.54x | 0.93x | 0.87x |
+| q19 | 0.225 | 0.297 | 1.32x | 0.231 | 0.639 | 2.76x | 1.03x | 2.15x |
+| q20 | 1.005 | 0.978 | 0.97x | 0.840 | 0.834 | 0.99x | 0.84x | 0.85x |
+| q21 | 1.229 | 1.431 | 1.16x | 1.268 | 1.110 | 0.88x | 1.03x | 0.78x |
+| q22 | 0.810 | 1.245 | 1.54x | 0.824 | 1.227 | 1.49x | 1.02x | 0.99x |
+| q23 | 0.214 | 0.310 | 1.45x | 0.198 | 0.298 | 1.51x | 0.92x | 0.96x |
+
+21 of 23 wins with mini-batching disabled (geometric mean **1.42x**) and 19 of 23 enabled
+(geometric mean **1.39x**). Against the 2026-07-27 tables below, the single-partition output
+topics were the larger distortion: they throttled Flink's sink harder than the native one, so
+un-capping them raised Flink's baselines and brought several ratios down even as coalescing
+raised native throughput — the two changes move exactly the cells the scaling analysis
+predicted (q4 off 0.96x -> 1.19x, q19 off 0.68x -> 1.32x and stable, q3 settling at its real
+0.90x rather than a load-skewed 0.64x). q3 (a plain updating join) is the one consistent loss;
+q8/q21 mini-batch-on hover just below parity.
+
+#### Prior comparison (2026-07-27 night — single-partition output topics, before post-exchange coalescing)
 
 Apple M1 Max, one-second checkpoints, release+`mimalloc,kafka,json`, one warmup and best of two
 measured runs; throughput is millions of input events per second. Both engines run at
@@ -866,13 +914,6 @@ co-located shuffle hands Arrow batches over by ownership (the zero-copy local ex
 multi-TaskManager deployment's shuffle pays Arrow IPC instead
 (`streamfusion.exchange.zeroCopyLocal=false` models it, measured ~11% on the shuffle-heaviest
 mini-batch-off cells and nothing elsewhere).
-
-**These tables predate two later changes and are being re-measured**: post-exchange coalescing
-(see the scaling analysis below) and the sink-topic fix — the output topics of these runs were
-broker-auto-created with a **single partition**, so every exactly-once cell funneled four sink
-subtasks into one partition log on both engines (the measured shared ~1.0 M ev/s sink ceiling).
-The harness now pre-creates each output topic with one partition per sink subtask, matching the
-corpus treatment.
 
 | Query | Flink off | StreamFusion off | SF/Flink off | Flink on | StreamFusion on | SF/Flink on | Flink on/off | SF on/off |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -1254,12 +1295,12 @@ _Apple M1 Max; numbers are comparable only within a machine._
 
 ### Flink on RocksDB vs StreamFusion on Paimon (full Nexmark, exactly-once Kafka)
 
-The production-shaped backend comparison (2026-07-27 night, Apple M1 Max, release +
-`mimalloc`): stock Flink on its RocksDB backend versus the native engine on the Paimon state
+The production-shaped backend comparison (Apple M1 Max, release + `mimalloc`): stock Flink on its RocksDB backend versus the native engine on the Paimon state
 backend, over the readme's exactly-once Kafka pipeline — a 2M-event JSON corpus on a
 four-partition topic, both engines at parallelism 4, one-second checkpoints, exactly-once
 delivery to Kafka, best of two after a warmup — in both mini-batch modes
-(`SF_STATE_BACKENDS_MINI_BATCH=true` runs the tuned configuration on both engines). At
+(`SF_STATE_BACKENDS_MINI_BATCH=true` runs the tuned configuration on both engines; `both`
+runs the two mode tables in one pass, sharing the broker, corpus, and preflight). At
 parallelism 4 the native side's co-located shuffle hands Arrow batches over by ownership (the
 zero-copy local exchange); a multi-TaskManager deployment's shuffle would pay Arrow IPC instead
 (`streamfusion.exchange.zeroCopyLocal=false` models it, worth ~11% on the shuffle-heaviest
@@ -1279,6 +1320,71 @@ capability currently needs a Paimon bundle with the binary-primary-key lookup co
 (contributed upstream); until it reaches a release, build one locally and select it with
 `-Dpaimon.bundle.version`. Operators the Paimon backend does not yet carry (proctime shapes)
 fall back to memory state with raw snapshots, exactly as a deployment would run them.
+
+#### Current (2026-07-28 — four-partition output topics, post-exchange coalescing, best of two with no warmup)
+
+Mini-batch off (geometric mean **1.83x**, 22 of 23 wins):
+
+| query | Flink/RocksDB s | ev/s | SF/Paimon s | ev/s | SF/Flink |
+|---|---|---|---|---|---|
+| q0 | 3.568 | 561K | 2.190 | 913K | **1.63×** |
+| q1 | 3.420 | 585K | 2.001 | 999K | **1.71×** |
+| q2 | 1.875 | 1.07M | 1.616 | 1.24M | **1.16×** |
+| q3 | 1.729 | 1.16M | 2.139 | 935K | 0.81× |
+| q4 | 9.330 | 214K | 5.206 | 384K | **1.79×** |
+| q5 | 4.168 | 480K | 1.925 | 1.04M | **2.17×** |
+| q7 | 8.537 | 234K | 3.214 | 622K | **2.66×** |
+| q8 | 2.243 | 892K | 2.120 | 944K | **1.06×** |
+| q9 | 10.790 | 185K | 6.693 | 299K | **1.61×** |
+| q10 | 3.055 | 655K | 1.886 | 1.06M | **1.62×** |
+| q11 | 8.607 | 232K | 0.971 | 2.06M | **8.87×** |
+| q12 | 2.203 | 908K | 0.905 | 2.21M | **2.43×** |
+| q13 | 2.056 | 973K | 1.521 | 1.31M | **1.35×** |
+| q14 | 2.941 | 680K | 1.764 | 1.13M | **1.67×** |
+| q15 | 15.230 | 131K | 2.618 | 764K | **5.82×** |
+| q16 | 10.375 | 193K | 2.960 | 676K | **3.50×** |
+| q17 | 5.709 | 350K | 2.877 | 695K | **1.98×** |
+| q18 | 8.545 | 234K | 8.304 | 241K | **1.03×** |
+| q19 | 10.704 | 187K | 8.111 | 247K | **1.32×** |
+| q20 | 6.812 | 294K | 5.519 | 362K | **1.23×** |
+| q21 | 1.718 | 1.16M | 1.296 | 1.54M | **1.33×** |
+| q22 | 2.465 | 811K | 1.549 | 1.29M | **1.59×** |
+| q23 | 19.300 | 104K | 8.854 | 226K | **2.18×** |
+
+Mini-batch on, both engines tuned (geometric mean **1.65x**, 22 of 23 wins):
+
+| query | Flink/RocksDB s | ev/s | SF/Paimon s | ev/s | SF/Flink |
+|---|---|---|---|---|---|
+| q0 | 2.729 | 733K | 2.159 | 927K | **1.26×** |
+| q1 | 2.594 | 771K | 1.424 | 1.40M | **1.82×** |
+| q2 | 1.564 | 1.28M | 1.081 | 1.85M | **1.45×** |
+| q3 | 1.363 | 1.47M | 1.975 | 1.01M | 0.69× |
+| q4 | 8.350 | 240K | 5.506 | 363K | **1.52×** |
+| q5 | 4.185 | 478K | 2.579 | 776K | **1.62×** |
+| q7 | 7.641 | 262K | 4.385 | 456K | **1.74×** |
+| q8 | 2.291 | 873K | 1.758 | 1.14M | **1.30×** |
+| q9 | 11.485 | 174K | 6.346 | 315K | **1.81×** |
+| q10 | 2.616 | 764K | 2.220 | 901K | **1.18×** |
+| q11 | 7.999 | 250K | 0.959 | 2.08M | **8.34×** |
+| q12 | 1.815 | 1.10M | 0.838 | 2.39M | **2.17×** |
+| q13 | 2.025 | 988K | 1.561 | 1.28M | **1.30×** |
+| q14 | 2.731 | 732K | 1.658 | 1.21M | **1.65×** |
+| q15 | 2.006 | 997K | 1.050 | 1.91M | **1.91×** |
+| q16 | 2.726 | 734K | 1.136 | 1.76M | **2.40×** |
+| q17 | 2.203 | 908K | 1.209 | 1.65M | **1.82×** |
+| q18 | 7.506 | 266K | 5.983 | 334K | **1.25×** |
+| q19 | 8.726 | 229K | 3.626 | 552K | **2.41×** |
+| q20 | 6.293 | 318K | 5.095 | 393K | **1.24×** |
+| q21 | 1.593 | 1.26M | 1.197 | 1.67M | **1.33×** |
+| q22 | 2.208 | 906K | 1.601 | 1.25M | **1.38×** |
+| q23 | 13.156 | 152K | 8.042 | 249K | **1.64×** |
+
+q3 (a plain updating join) remains the one loss in both modes. Against the prior tables below,
+the multi-partition output topics raised both engines' sink ceilings; the RocksDB baselines
+moved less than the heap ones did in the memory comparison, so the disk ratios held up better —
+the off geomean is unchanged at 1.83x and the on geomean settles at 1.65x.
+
+#### Prior (2026-07-27 night — single-partition output topics, before post-exchange coalescing)
 
 Mini-batch off:
 

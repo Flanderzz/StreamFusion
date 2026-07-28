@@ -96,62 +96,59 @@ checkpoint completes, preserving the host connector's exactly-once recovery exac
 plan — including the native-producer sink shape — is asserted for every cell. q6 is omitted because
 Flink SQL itself cannot run it ([analysis](.claude/wontdos/39-nexmark-q6-exclusion.md)).
 
-These are the 2026-07-27 Apple M1 Max release+`mimalloc` results at parallelism 4, best of two
-after one warmup, across all four backend/mode combinations. The memory columns compare Flink's
+These are the 2026-07-28 Apple M1 Max release+`mimalloc` results at parallelism 4, best of two
+measured runs, across all four backend/mode combinations. The memory columns compare Flink's
 default heap state against StreamFusion's memory state; the disk columns compare the production
 persistent backends — stock Flink on RocksDB against StreamFusion on its Paimon state backend.
 Mini-batching ("on") uses the same production-style configuration on both engines
 (`allow-latency=2s`, `size=50000`). Each cell is StreamFusion throughput divided by Flink
-throughput within the same backend and mode.
+throughput within the same backend and mode. Both the source corpus and every exactly-once
+output topic carry one partition per subtask — an earlier revision of these tables let the
+broker auto-create single-partition output topics, which throttled all four sink writers (on
+both engines) behind one partition log.
 
 | Query | Memory, off | Memory, on | Disk, off | Disk, on |
 |---|---:|---:|---:|---:|
-| q0 | **1.88×** | 0.92× | **1.78×** | **1.63×** |
-| q1 | **1.26×** | **1.13×** | **1.69×** | **1.72×** |
-| q2 | **1.60×** | **1.01×** | **1.48×** | **1.53×** |
-| q3 | **1.06׆** | **1.06׆** | 0.86× | 0.94× |
-| q4 | 0.96× | **1.38×** | **1.64×** | **2.97×** |
-| q5 | **1.34×** | **1.05×** | **1.70×** | **1.56×** |
-| q7 | **1.60×** | **1.59×** | **1.75×** | **2.46×** |
-| q8 | **1.28×** | **1.15×** | **1.58×** | **1.48×** |
-| q9 | **1.67×** | **1.86×** | **1.56×** | **1.71×** |
-| q10 | **1.67×** | **1.36×** | **1.31×** | **1.33×** |
-| q11 | **2.66×** | **2.68×** | **8.15×** | **8.66×** |
-| q12 | **1.71×** | **1.70×** | **2.15×** | **1.85×** |
-| q13 | **1.65×** | **1.60×** | **1.37×** | **1.45×** |
-| q14 | **1.89×** | **1.66×** | **1.92×** | **1.55×** |
-| q15 | **3.05×** | **1.75×** | **6.52×** | **2.04×** |
-| q16 | **1.61×** | **1.76×** | **4.31×** | **2.61×** |
-| q17 | **1.89×** | **1.76×** | **2.56×** | **1.63×** |
-| q18 | **1.62×** | **1.96×** | **1.31×** | **2.66×** |
-| q19 | 0.68× | **3.94×** | **1.71×** | **2.93×** |
-| q20 | **3.65×** | **1.42×** | 0.93× | **1.31×** |
-| q21 | **1.53×** | **1.42×** | **1.06×** | **1.08×** |
-| q22 | **1.65×** | **1.26×** | **1.51×** | **1.69×** |
-| q23 | **1.82×** | **1.89×** | **1.72×** | **1.46׆** |
-| **geomean** | **1.63×** | **1.53×** | **1.83×** | **1.86×** |
-
-† marks cells re-measured in a focused repeat directly after the suite (the suite cells caught
-load-skewed measurements); the as-measured tables, raw timings, and method live in
-[docs/benchmarks.md](docs/benchmarks.md).
+| q0 | **1.58×** | **1.26×** | **1.63×** | **1.26×** |
+| q1 | **1.66×** | **1.86×** | **1.71×** | **1.82×** |
+| q2 | **1.11×** | **1.28×** | **1.16×** | **1.45×** |
+| q3 | 0.90× | 0.86× | 0.81× | 0.69× |
+| q4 | **1.19×** | **1.10×** | **1.79×** | **1.52×** |
+| q5 | **1.10×** | **1.04×** | **2.17×** | **1.62×** |
+| q7 | **1.30×** | **1.74×** | **2.66×** | **1.74×** |
+| q8 | **1.05×** | 0.75× | **1.06×** | **1.30×** |
+| q9 | **1.28×** | **1.50×** | **1.61×** | **1.81×** |
+| q10 | **1.42×** | **1.36×** | **1.62×** | **1.18×** |
+| q11 | **2.73×** | **2.29×** | **8.87×** | **8.34×** |
+| q12 | **1.81×** | **1.80×** | **2.43×** | **2.17×** |
+| q13 | **1.34×** | **1.42×** | **1.35×** | **1.30×** |
+| q14 | **1.67×** | **1.59×** | **1.67×** | **1.65×** |
+| q15 | **3.05×** | **1.61×** | **5.82×** | **1.91×** |
+| q16 | **1.70×** | **1.49×** | **3.50×** | **2.40×** |
+| q17 | **1.23×** | **1.25×** | **1.98×** | **1.82×** |
+| q18 | **1.64×** | **1.54×** | **1.03×** | **1.25×** |
+| q19 | **1.32×** | **2.76×** | **1.32×** | **2.41×** |
+| q20 | 0.97× | 0.99× | **1.23×** | **1.24×** |
+| q21 | **1.16×** | 0.88× | **1.33×** | **1.33×** |
+| q22 | **1.54×** | **1.49×** | **1.59×** | **1.38×** |
+| q23 | **1.45×** | **1.51×** | **2.18×** | **1.64×** |
+| **geomean** | **1.42×** | **1.39×** | **1.83×** | **1.65×** |
 
 Parallelism 4 is a tougher, more honest baseline than the earlier parallelism-1 tables: the keyed
 shuffle is real work on both engines, and Flink's heap pipeline scales well with subtasks. The
-weakest cells were the shuffle-heavy changelog shapes with mini-batching off — a measured
-batch-collapse effect (the exchange fragments every batch p ways, and per-batch fixed cost
-compounds through changelog chains). Post-exchange coalescing has since removed the compounding
-half: q4's off-mode blackhole run moved from ~1.06× to 1.78× vs Flink (the tables above predate
-it; the analysis, the A/B, and the remaining source-side lever are in
-[docs/benchmarks.md](docs/benchmarks.md)).
-The persistent-backend columns hold up best: RocksDB pays its per-record
-costs in every subtask, and the disk geomeans stay within a few points of their parallelism-1
-values. The multi-source/blackhole ladder, raw timings, focused repeats, reproduction commands,
-and profiling controls remain in [docs/benchmarks.md](docs/benchmarks.md).
+shuffle-heavy changelog shapes were flat at first — a measured batch-collapse effect (the
+exchange fragments every batch p ways, and per-batch fixed cost compounds through changelog
+chains) that post-exchange coalescing since removed, worth up to 2× on the compounding shapes
+(the A/B and the remaining source-side lever are in [docs/benchmarks.md](docs/benchmarks.md)).
+The one consistent loss left is q3, a plain updating join, at 0.7–0.9× across the columns. The
+persistent-backend columns hold up best: RocksDB pays its per-record costs in every subtask.
+The multi-source/blackhole ladder, raw timings, reproduction commands, and profiling controls
+remain in [docs/benchmarks.md](docs/benchmarks.md).
 
 The disk columns' key enabler is **deletion-vector mode**: stock Java Paimon maintains the
 state tables' deletion vectors synchronously at each barrier, so every committed read is a raw
 parquet scan with exact predicate pushdown — no merge reads, no resident index. The disk
-comparison's largest wins are the stateful shapes RocksDB pays per-record for (up to 8.7× on
+comparison's largest wins are the stateful shapes RocksDB pays per-record for (up to 8.9× on
 session windows).
 
 _Apple M1 Max; numbers are comparable only within a machine._
