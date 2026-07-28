@@ -62,6 +62,8 @@ public class NativeColumnarUpdatingJoinOperator extends AbstractStreamOperator<A
   private transient MiniBatchBoundary boundary;
   private transient MiniBatchMetrics miniBatchMetrics;
   private transient ManagedMemoryBudget memoryBudget;
+  private transient BatchCoalescer leftCoalescer;
+  private transient BatchCoalescer rightCoalescer;
 
   public NativeColumnarUpdatingJoinOperator(
       int[] leftKeys,
@@ -218,22 +220,38 @@ public class NativeColumnarUpdatingJoinOperator extends AbstractStreamOperator<A
       boundary = new MiniBatchBoundary(miniBatchSize);
       miniBatchMetrics = new MiniBatchMetrics(getMetricGroup());
     }
+    leftCoalescer = BatchCoalescer.create(getProcessingTimeService(), in -> ingest(in, true));
+    rightCoalescer = BatchCoalescer.create(getProcessingTimeService(), in -> ingest(in, false));
   }
 
   @Override
   public void processElement1(StreamRecord<ArrowBatch> element) {
-    process(element.getValue(), true);
-    publishStateBytes();
+    ingestSide(element.getValue().root(), true);
   }
 
   @Override
   public void processElement2(StreamRecord<ArrowBatch> element) {
-    process(element.getValue(), false);
+    ingestSide(element.getValue().root(), false);
+  }
+
+  private void ingestSide(VectorSchemaRoot in, boolean left) {
+    if (leftCoalescer == null) {
+      ingest(in, left);
+      return;
+    }
+    // The join changelog depends on the interleaving of the two inputs, so cross-side order must
+    // survive coalescing: draining the other side before buffering this one means at most one side
+    // is ever pending, and batches still reach the joiner in arrival order.
+    (left ? rightCoalescer : leftCoalescer).flush();
+    (left ? leftCoalescer : rightCoalescer).add(in);
+  }
+
+  private void ingest(VectorSchemaRoot in, boolean left) {
+    process(in, left);
     publishStateBytes();
   }
 
-  private void process(ArrowBatch batch, boolean left) {
-    VectorSchemaRoot in = batch.root();
+  private void process(VectorSchemaRoot in, boolean left) {
     if (!miniBatch) {
       join(in, left);
       return;
@@ -323,6 +341,7 @@ public class NativeColumnarUpdatingJoinOperator extends AbstractStreamOperator<A
 
   @Override
   public void processWatermark(Watermark mark) throws Exception {
+    flushCoalescers();
     if (miniBatch) {
       flushBundle(FlushReason.WATERMARK);
       publishStateBytes();
@@ -332,6 +351,7 @@ public class NativeColumnarUpdatingJoinOperator extends AbstractStreamOperator<A
 
   @Override
   public void prepareSnapshotPreBarrier(long checkpointId) throws Exception {
+    flushCoalescers();
     if (miniBatch) {
       flushBundle(FlushReason.CHECKPOINT);
     }
@@ -340,10 +360,18 @@ public class NativeColumnarUpdatingJoinOperator extends AbstractStreamOperator<A
 
   @Override
   public void finish() throws Exception {
+    flushCoalescers();
     if (miniBatch) {
       flushBundle(FlushReason.FINISH);
     }
     super.finish();
+  }
+
+  private void flushCoalescers() {
+    if (leftCoalescer != null) {
+      leftCoalescer.flush();
+      rightCoalescer.flush();
+    }
   }
 
   private void flushBundle(FlushReason reason) {
@@ -391,6 +419,12 @@ public class NativeColumnarUpdatingJoinOperator extends AbstractStreamOperator<A
 
   @Override
   public void close() throws Exception {
+    if (leftCoalescer != null) {
+      leftCoalescer.close();
+      rightCoalescer.close();
+      leftCoalescer = null;
+      rightCoalescer = null;
+    }
     if (handle != 0) {
       if (paimonState) {
         Native.closePaimonUpdatingJoiner(handle);

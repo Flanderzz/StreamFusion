@@ -933,6 +933,20 @@ unconditionally, with a 1 s flush default — per-batch changelog emission has n
 and a latency-bounded source-side floor (accumulate across poll cycles before emitting a batch)
 would lift the off-mode path without changing semantics.
 
+**Resolved in part (2026-07-28): post-exchange coalescing.** Every keyed changelog operator now
+re-assembles processing-sized batches in front of its native push: sub-batches buffer until a row
+target (`streamfusion.exchange.coalesceRows`, default 4096), merge in one native call, and flush
+on watermark, checkpoint barrier, end of input, or a processing-time backstop
+(`streamfusion.exchange.coalesceLatencyMs`, default 50 ms) — physical chunking only; the
+per-record changelog is byte-identical. Interleaved same-binary A/B on this 2M/p=4 blackhole
+ladder (coalescing on vs `coalesceRows=0`, two legs per side): **q4 full-native 1.95 → 1.23 s
+json (1.59×), 1.39 → 0.96 s avro (1.45×), 1.72 → 0.84 s protobuf (2.06×)** — q4 vs Flink moves
+from ~1.06× to **1.78×** on json — and the row-fed q4 variants gain ~2.5× (5.5 → 2.2 s). q3 and
+q19 sit within cross-leg noise: the collapse compounds through q4's two-aggregate chain, and
+that compounding is what merging removes. The source-side batch floor (a p=4 consumer's ~950-row
+polls, quartered by the split before the first operator) remains the open lever; a
+cross-poll-cycle accumulator is the direction.
+
 #### Prior comparison (2026-07-27, parallelism 1, 500K events — raw-bytes snapshots + sink encode round)
 
 Apple M1 Max, 500K input events, one-second checkpoints, release+`mimalloc,kafka,json`, one warmup

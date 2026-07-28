@@ -48,6 +48,7 @@ public class NativeColumnarGroupAggregateOperator extends AbstractStreamOperator
   private transient MiniBatchBoundary boundary;
   private transient MiniBatchMetrics miniBatchMetrics;
   private transient ManagedMemoryBudget memoryBudget;
+  private transient BatchCoalescer coalescer;
 
   public NativeColumnarGroupAggregateOperator(
       int[] aggregateKinds,
@@ -135,11 +136,20 @@ public class NativeColumnarGroupAggregateOperator extends AbstractStreamOperator
       boundary = new MiniBatchBoundary(miniBatchSize);
       miniBatchMetrics = new MiniBatchMetrics(getMetricGroup());
     }
+    coalescer = BatchCoalescer.create(getProcessingTimeService(), this::ingest);
   }
 
   @Override
   public void processElement(StreamRecord<ArrowBatch> element) {
     VectorSchemaRoot in = element.getValue().root();
+    if (coalescer != null) {
+      coalescer.add(in);
+    } else {
+      ingest(in);
+    }
+  }
+
+  private void ingest(VectorSchemaRoot in) {
     if (!miniBatch) {
       try {
         update(in);
@@ -218,6 +228,9 @@ public class NativeColumnarGroupAggregateOperator extends AbstractStreamOperator
 
   @Override
   public void processWatermark(Watermark mark) throws Exception {
+    if (coalescer != null) {
+      coalescer.flush();
+    }
     if (miniBatch) {
       flushBundle(FlushReason.WATERMARK);
       publishStateBytes();
@@ -227,6 +240,9 @@ public class NativeColumnarGroupAggregateOperator extends AbstractStreamOperator
 
   @Override
   public void prepareSnapshotPreBarrier(long checkpointId) throws Exception {
+    if (coalescer != null) {
+      coalescer.flush();
+    }
     if (miniBatch) {
       flushBundle(FlushReason.CHECKPOINT);
     }
@@ -235,6 +251,9 @@ public class NativeColumnarGroupAggregateOperator extends AbstractStreamOperator
 
   @Override
   public void finish() throws Exception {
+    if (coalescer != null) {
+      coalescer.flush();
+    }
     if (miniBatch) {
       flushBundle(FlushReason.FINISH);
     }
@@ -295,6 +314,10 @@ public class NativeColumnarGroupAggregateOperator extends AbstractStreamOperator
 
   @Override
   public void close() throws Exception {
+    if (coalescer != null) {
+      coalescer.close();
+      coalescer = null;
+    }
     if (handle != 0) {
       if (paimonState) {
         Native.closePaimonGroupAggregator(handle);

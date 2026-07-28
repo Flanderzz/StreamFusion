@@ -112,3 +112,26 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_closeSplit<'l
         drop(from_handle::<SplitState>(handle));
     }
 }
+
+/// Concatenates batches the JVM exported — row subsets of one exchange edge, so they share a
+/// schema — into a single batch exported back into the consumer-allocated C structs. The merge
+/// step of the post-exchange coalescer, undoing the fragmentation `splitByKey` introduced.
+#[no_mangle]
+pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_concatBatches<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    in_array_addresses: JLongArray<'local>,
+    in_schema_addresses: JLongArray<'local>,
+    out_array_address: jlong,
+    out_schema_address: jlong,
+) {
+    let arrays = read_longs(&env, &in_array_addresses);
+    let schemas = read_longs(&env, &in_schema_addresses);
+    let batches: Vec<RecordBatch> = arrays
+        .into_iter()
+        .zip(schemas)
+        .map(|(array, schema)| import_record_batch(array, schema))
+        .collect();
+    let merged = concat_batches(&batches[0].schema(), &batches).expect("concat batches");
+    export_record_batch(merged, out_array_address, out_schema_address);
+}

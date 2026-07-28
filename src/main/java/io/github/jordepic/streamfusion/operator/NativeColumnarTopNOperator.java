@@ -53,6 +53,7 @@ public class NativeColumnarTopNOperator extends AbstractStreamOperator<ArrowBatc
   private transient MiniBatchBoundary boundary;
   private transient MiniBatchMetrics miniBatchMetrics;
   private transient ManagedMemoryBudget memoryBudget;
+  private transient BatchCoalescer coalescer;
 
   public NativeColumnarTopNOperator(
       int[] partitionColumns,
@@ -226,11 +227,20 @@ public class NativeColumnarTopNOperator extends AbstractStreamOperator<ArrowBatc
       boundary = new MiniBatchBoundary(miniBatchSize);
       miniBatchMetrics = new MiniBatchMetrics(getMetricGroup());
     }
+    coalescer = BatchCoalescer.create(getProcessingTimeService(), this::ingest);
   }
 
   @Override
   public void processElement(StreamRecord<ArrowBatch> element) {
     VectorSchemaRoot in = element.getValue().root();
+    if (coalescer != null) {
+      coalescer.add(in);
+    } else {
+      ingest(in);
+    }
+  }
+
+  private void ingest(VectorSchemaRoot in) {
     if (!netDiff) {
       try {
         push(in);
@@ -309,6 +319,9 @@ public class NativeColumnarTopNOperator extends AbstractStreamOperator<ArrowBatc
 
   @Override
   public void processWatermark(Watermark mark) throws Exception {
+    if (coalescer != null) {
+      coalescer.flush();
+    }
     if (netDiff) {
       flushBundle(FlushReason.WATERMARK);
       publishStateBytes();
@@ -318,6 +331,9 @@ public class NativeColumnarTopNOperator extends AbstractStreamOperator<ArrowBatc
 
   @Override
   public void prepareSnapshotPreBarrier(long checkpointId) throws Exception {
+    if (coalescer != null) {
+      coalescer.flush();
+    }
     if (netDiff) {
       flushBundle(FlushReason.CHECKPOINT);
     }
@@ -326,6 +342,9 @@ public class NativeColumnarTopNOperator extends AbstractStreamOperator<ArrowBatc
 
   @Override
   public void finish() throws Exception {
+    if (coalescer != null) {
+      coalescer.flush();
+    }
     if (netDiff) {
       flushBundle(FlushReason.FINISH);
     }
@@ -386,6 +405,10 @@ public class NativeColumnarTopNOperator extends AbstractStreamOperator<ArrowBatc
 
   @Override
   public void close() throws Exception {
+    if (coalescer != null) {
+      coalescer.close();
+      coalescer = null;
+    }
     if (handle != 0) {
       if (paimonState) {
         Native.closePaimonTopNRanker(handle);

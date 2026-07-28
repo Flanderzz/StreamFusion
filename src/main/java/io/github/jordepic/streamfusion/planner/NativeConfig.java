@@ -123,6 +123,30 @@ public final class NativeConfig {
   }
 
   /**
+   * The row target for re-assembling processing-sized batches in front of a keyed native operator
+   * ({@code streamfusion.exchange.coalesceRows}, default 4096; a value of 1 or less disables
+   * coalescing). The columnar exchange splits every source batch into per-channel sub-batches, so
+   * at parallelism p a keyed operator would otherwise see batches roughly p× smaller than the
+   * source emitted — and pay the per-batch native fixed cost p× as often. Coalescing changes only
+   * physical chunking: the record-level changelog is byte-identical because every keyed operator
+   * emits its cascade per record, and watermarks and checkpoint barriers always flush first.
+   */
+  public static int exchangeCoalesceRows() {
+    return Integer.getInteger("streamfusion.exchange.coalesceRows", 4096);
+  }
+
+  /**
+   * The latency backstop for the post-exchange coalescer, in milliseconds
+   * ({@code streamfusion.exchange.coalesceLatencyMs}, default 50; 0 or less disables the timer).
+   * A trickle stream with no watermarks would otherwise buffer below the row target indefinitely;
+   * the timer bounds how long a row can sit in the coalescer, mirroring how Flink's own mini-batch
+   * bounds its bundles with {@code table.exec.mini-batch.allow-latency}.
+   */
+  public static long exchangeCoalesceLatencyMs() {
+    return Long.getLong("streamfusion.exchange.coalesceLatencyMs", 50L);
+  }
+
+  /**
    * The operator-scope managed-memory weight, in mebibytes, a native stateful operator declares
    * ({@code streamfusion.memory.operator-weight-mb}, default 64). Flink splits the slot's
    * managed-memory OPERATOR share across declaring operators proportionally to these weights, so the

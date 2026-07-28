@@ -451,6 +451,16 @@ public final class Native {
   /** Releases a split handle. */
   public static native void closeSplit(long handle);
 
+  /**
+   * Concatenates several exported batches — row subsets of one exchange edge, so they share a
+   * schema — into a single batch exported back into the consumer-allocated C structs. The merge
+   * step of the post-exchange coalescer, undoing the fragmentation {@link #splitByKey} introduced.
+   */
+  public static native void concatBatches(
+      long[] inArrayAddresses,
+      long[] inSchemaAddresses,
+      long outArrayAddress,
+      long outSchemaAddress);
 
   /**
    * Imports a whole multi-column batch the JVM exported and exports an equal batch back into the

@@ -21,8 +21,10 @@ import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.types.RowKind;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 
 /** The columnar Top-N operator: Arrow batches in, a changelog of Arrow batches out. */
+@ExtendWith(CoalescingOff.class)
 class NativeColumnarTopNOperatorTest {
 
   private static final int MAX_PARALLELISM = 128;

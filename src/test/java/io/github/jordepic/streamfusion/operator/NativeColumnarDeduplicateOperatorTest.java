@@ -25,12 +25,14 @@ import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.types.RowKind;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 
 /**
  * The keep-first deduplicate operator emits, per partition key, the minimum-rowtime row once the
  * watermark reaches that rowtime — not the first to arrive. After a key emits, later rows for it are
  * ignored, and a row arriving with a rowtime already below the watermark is dropped as late.
  */
+@ExtendWith(CoalescingOff.class)
 class NativeColumnarDeduplicateOperatorTest {
 
   private static final int MAX_PARALLELISM = 128;

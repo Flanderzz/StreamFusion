@@ -21,6 +21,7 @@ import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.types.RowKind;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 
 /**
  * The changelog normalizer keeps the last row per key and emits the normalized changelog: the first
@@ -28,6 +29,7 @@ import org.junit.jupiter.api.Test;
  * an unchanged row is suppressed, and a delete retracts the stored full row. This verifies the exact
  * emitted change sequence, which the SQL harness's collapsed comparison cannot see.
  */
+@ExtendWith(CoalescingOff.class)
 class NativeColumnarChangelogNormalizeOperatorTest {
 
   private static final int MAX_PARALLELISM = 128;

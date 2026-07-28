@@ -33,6 +33,8 @@ import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.types.RowKind;
 import org.junit.jupiter.api.Test;
+import io.github.jordepic.streamfusion.operator.CoalescingOff;
+import org.junit.jupiter.api.extension.ExtendWith;
 
 /**
  * Native operators on the Paimon state backend: state lives in a local Paimon table, snapshots go
@@ -40,6 +42,7 @@ import org.junit.jupiter.api.Test;
  * state), a completed checkpoint's files are referenced by placeholders instead of re-uploaded
  * (incremental), and a fresh operator restored from the handle continues the changelog exactly.
  */
+@ExtendWith(CoalescingOff.class)
 class PaimonStateBackendOperatorTest {
 
   private static final int MAX_PARALLELISM = 128;

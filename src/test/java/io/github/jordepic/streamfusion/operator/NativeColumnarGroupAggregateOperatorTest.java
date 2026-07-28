@@ -29,8 +29,10 @@ import org.apache.flink.table.types.logical.IntType;
 import org.apache.flink.table.types.logical.VarCharType;
 import org.apache.flink.types.RowKind;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 
 /** The columnar GROUP BY operator: Arrow batches in, a changelog of Arrow batches out. */
+@ExtendWith(CoalescingOff.class)
 class NativeColumnarGroupAggregateOperatorTest {
 
   private static final int MAX_PARALLELISM = 128;

@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.github.jordepic.streamfusion.operator.ArrowBatchHandles;
+import io.github.jordepic.streamfusion.operator.BatchCoalescer;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
@@ -55,6 +56,47 @@ class FlinkColumnarShuffleParallelismTest {
     Path input = Files.createTempDirectory("cshuffle-p2-2phase-in");
     writeInput(input);
     NativeParity.assertParity(() -> readEnvironment(input, "TWO_PHASE", true), WINDOW_QUERY);
+  }
+
+  /**
+   * A changelog aggregate at parallelism 2: the keyed exchange fragments every source batch into
+   * per-channel sub-batches, and the post-exchange coalescer must reassemble processing-sized
+   * batches without changing the per-record changelog. No watermark is declared and the latency
+   * backstop is parked, so nothing flushes mid-stream and the engagement counter must observe an
+   * actual merge — the coalesced path is the one being parity-checked, not the pass-through.
+   * {@code COUNT(*)} keeps the intermediate changelog order-insensitive: at parallelism 2 the two
+   * source subtasks race, so a value-accumulating aggregate's intermediates differ run to run in
+   * both engines.
+   */
+  @Test
+  void changelogAggregateAtParallelismTwoCoalescesSubBatches() throws Exception {
+    Path input = Files.createTempDirectory("cshuffle-p2-agg-in");
+    writeInput(input);
+    String latencyBefore =
+        System.setProperty("streamfusion.exchange.coalesceLatencyMs", "600000");
+    try {
+      long mergedBefore = BatchCoalescer.merged();
+      NativeParity.assertParity(
+          () -> readChangelogEnvironment(input), "SELECT k, COUNT(*) AS total FROM t GROUP BY k");
+      assertTrue(BatchCoalescer.merged() > mergedBefore);
+    } finally {
+      if (latencyBefore == null) {
+        System.clearProperty("streamfusion.exchange.coalesceLatencyMs");
+      } else {
+        System.setProperty("streamfusion.exchange.coalesceLatencyMs", latencyBefore);
+      }
+    }
+  }
+
+  private static TableEnvironment readChangelogEnvironment(Path directory) {
+    StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+    env.setParallelism(2);
+    StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
+    tEnv.executeSql(
+        "CREATE TABLE t (k BIGINT, v BIGINT) WITH ('connector' = 'filesystem', 'path' = '"
+            + directory.toUri()
+            + "', 'format' = 'parquet')");
+    return tEnv;
   }
 
   /** Writes the input as multiple Parquet files (parallel write) so the sharded read has work per subtask. */

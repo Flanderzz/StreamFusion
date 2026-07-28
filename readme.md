@@ -137,9 +137,11 @@ load-skewed measurements); the as-measured tables, raw timings, and method live 
 
 Parallelism 4 is a tougher, more honest baseline than the earlier parallelism-1 tables: the keyed
 shuffle is real work on both engines, and Flink's heap pipeline scales well with subtasks. The
-remaining sub-parity cells are the shuffle-heavy changelog shapes with mini-batching off (q4 at
-parity and q19 below it on memory state; q3 hovers at parity everywhere) — a measured
-batch-collapse effect and the next scaling work (see the analysis in
+weakest cells were the shuffle-heavy changelog shapes with mini-batching off — a measured
+batch-collapse effect (the exchange fragments every batch p ways, and per-batch fixed cost
+compounds through changelog chains). Post-exchange coalescing has since removed the compounding
+half: q4's off-mode blackhole run moved from ~1.06× to 1.78× vs Flink (the tables above predate
+it; the analysis, the A/B, and the remaining source-side lever are in
 [docs/benchmarks.md](docs/benchmarks.md)).
 The persistent-backend columns hold up best: RocksDB pays its per-record
 costs in every subtask, and the disk geomeans stay within a few points of their parallelism-1

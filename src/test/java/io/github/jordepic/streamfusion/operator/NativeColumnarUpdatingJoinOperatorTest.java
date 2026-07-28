@@ -20,8 +20,10 @@ import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.types.RowKind;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 
 /** The columnar updating INNER join: Arrow batches in on both sides, a changelog of batches out. */
+@ExtendWith(CoalescingOff.class)
 class NativeColumnarUpdatingJoinOperatorTest {
 
   private static final int MAX_PARALLELISM = 128;

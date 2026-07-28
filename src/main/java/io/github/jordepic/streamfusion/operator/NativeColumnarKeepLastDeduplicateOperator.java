@@ -52,6 +52,7 @@ public class NativeColumnarKeepLastDeduplicateOperator extends AbstractStreamOpe
   private transient MiniBatchBoundary boundary;
   private transient MiniBatchMetrics miniBatchMetrics;
   private transient ManagedMemoryBudget memoryBudget;
+  private transient BatchCoalescer coalescer;
 
   public NativeColumnarKeepLastDeduplicateOperator(
       int[] partitionColumns,
@@ -172,11 +173,20 @@ public class NativeColumnarKeepLastDeduplicateOperator extends AbstractStreamOpe
       boundary = new MiniBatchBoundary(miniBatchSize);
       miniBatchMetrics = new MiniBatchMetrics(getMetricGroup());
     }
+    coalescer = BatchCoalescer.create(getProcessingTimeService(), this::ingest);
   }
 
   @Override
   public void processElement(StreamRecord<ArrowBatch> element) {
     VectorSchemaRoot in = element.getValue().root();
+    if (coalescer != null) {
+      coalescer.add(in);
+    } else {
+      ingest(in);
+    }
+  }
+
+  private void ingest(VectorSchemaRoot in) {
     if (!miniBatch) {
       try {
         push(in);
@@ -250,6 +260,9 @@ public class NativeColumnarKeepLastDeduplicateOperator extends AbstractStreamOpe
 
   @Override
   public void processWatermark(Watermark mark) throws Exception {
+    if (coalescer != null) {
+      coalescer.flush();
+    }
     if (miniBatch) {
       flushBundle(FlushReason.WATERMARK);
       publishStateBytes();
@@ -259,6 +272,9 @@ public class NativeColumnarKeepLastDeduplicateOperator extends AbstractStreamOpe
 
   @Override
   public void prepareSnapshotPreBarrier(long checkpointId) throws Exception {
+    if (coalescer != null) {
+      coalescer.flush();
+    }
     if (miniBatch) {
       flushBundle(FlushReason.CHECKPOINT);
     }
@@ -267,6 +283,9 @@ public class NativeColumnarKeepLastDeduplicateOperator extends AbstractStreamOpe
 
   @Override
   public void finish() throws Exception {
+    if (coalescer != null) {
+      coalescer.flush();
+    }
     if (miniBatch) {
       flushBundle(FlushReason.FINISH);
     }
@@ -329,6 +348,10 @@ public class NativeColumnarKeepLastDeduplicateOperator extends AbstractStreamOpe
 
   @Override
   public void close() throws Exception {
+    if (coalescer != null) {
+      coalescer.close();
+      coalescer = null;
+    }
     if (handle != 0) {
       if (paimonState) {
         Native.closePaimonKeepLastDeduplicator(handle);
