@@ -749,7 +749,12 @@ class NexmarkMatrixBenchmark {
     Query[] queries = selectQueries();
     try (KafkaContainer kafka =
         new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.6.1"))
-            .withEnv("KAFKA_TRANSACTION_MAX_TIMEOUT_MS", "7200000")) {
+            .withEnv("KAFKA_TRANSACTION_MAX_TIMEOUT_MS", "7200000")
+            // Deleted output topics free their segments immediately: the suites create and
+            // delete one sizeable topic per run, and the default 60s delete delay lets pending
+            // segments accumulate faster than they purge — enough to fill the Docker VM's disk
+            // mid-suite and kill the broker.
+            .withEnv("KAFKA_LOG_SEGMENT_DELETE_DELAY_MS", "0")) {
       kafka.start();
       String brokers = kafka.getBootstrapServers();
       NexmarkKafkaBenchmark.produce(brokers, "nexmark", "json", ROWS, PARALLELISM);
@@ -800,6 +805,12 @@ class NexmarkMatrixBenchmark {
                   nativeOff / nativeOn);
         } catch (Exception failure) {
           row = String.format("%4s  FAILED: %s%n", q.label, rootCause(failure));
+          if (rootCause(failure).contains("createTopics")) {
+            // The broker itself is gone — every further cell would burn the same timeout.
+            out.append(row);
+            System.out.println(out);
+            throw failure;
+          }
         }
         out.append(row);
         System.out.print(row);
@@ -832,7 +843,12 @@ class NexmarkMatrixBenchmark {
     Query[] queries = selectQueries();
     try (KafkaContainer kafka =
         new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.6.1"))
-            .withEnv("KAFKA_TRANSACTION_MAX_TIMEOUT_MS", "7200000")) {
+            .withEnv("KAFKA_TRANSACTION_MAX_TIMEOUT_MS", "7200000")
+            // Deleted output topics free their segments immediately: the suites create and
+            // delete one sizeable topic per run, and the default 60s delete delay lets pending
+            // segments accumulate faster than they purge — enough to fill the Docker VM's disk
+            // mid-suite and kill the broker.
+            .withEnv("KAFKA_LOG_SEGMENT_DELETE_DELAY_MS", "0")) {
       kafka.start();
       String brokers = kafka.getBootstrapServers();
       NexmarkKafkaBenchmark.produce(brokers, "nexmark", "json", ROWS, PARALLELISM);
@@ -900,6 +916,12 @@ class NexmarkMatrixBenchmark {
         }
       } catch (Exception failure) {
         row = String.format("%4s  FAILED: %s%n", q.label, rootCause(failure));
+        if (rootCause(failure).contains("createTopics")) {
+          // The broker itself is gone — every further cell would burn the same timeout.
+          out.append(row);
+          System.out.println(out);
+          throw failure;
+        }
       }
       out.append(row);
       System.out.print(row);
@@ -1214,7 +1236,12 @@ class NexmarkMatrixBenchmark {
     }
     try (KafkaContainer kafka =
         new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.6.1"))
-            .withEnv("KAFKA_TRANSACTION_MAX_TIMEOUT_MS", "7200000")) {
+            .withEnv("KAFKA_TRANSACTION_MAX_TIMEOUT_MS", "7200000")
+            // Deleted output topics free their segments immediately: the suites create and
+            // delete one sizeable topic per run, and the default 60s delete delay lets pending
+            // segments accumulate faster than they purge — enough to fill the Docker VM's disk
+            // mid-suite and kill the broker.
+            .withEnv("KAFKA_LOG_SEGMENT_DELETE_DELAY_MS", "0")) {
       kafka.start();
       String brokers = kafka.getBootstrapServers();
       NexmarkKafkaBenchmark.produce(brokers, "nexmark", "json", ROWS, PARALLELISM);
