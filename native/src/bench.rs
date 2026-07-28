@@ -259,7 +259,7 @@ impl UniqueUpdatingJoin {
     }
 
     pub fn snapshot_partitions(&self, max_parallelism: usize) -> usize {
-        self.0.snapshot_partitions(max_parallelism, &[-1]).values().map(Vec::len).sum()
+        self.0.snapshot_partitions(max_parallelism).values().map(Vec::len).sum()
     }
 }
 

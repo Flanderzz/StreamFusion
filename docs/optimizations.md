@@ -448,6 +448,27 @@ the native-symbol q9 profile that motivated it was dominated by the removed IPC 
 50K-event exactly-once Kafka profile loop subsequently completed 50 jobs in 60 seconds instead of
 45, **11.1% more end-to-end work**.
 
+**Raw keyed-state snapshots write stored bytes, not decoded columns** *(2026-07-27, supersedes
+the entry above — the materialized batch is gone entirely)*. The q9 differential profile put
+~25% of native task-thread CPU inside the 1 s barrier — nearly all of it the updating join's
+memory-state snapshot, which decoded every stored arrow-row back to typed Arrow columns and
+re-derived every row's key group by re-encoding and hashing its key, per barrier, over state
+that only grows. Stock Flink pays its equivalent serialization on the async checkpoint pool,
+off the task thread — the barrier gap was ours alone. The raw snapshot format now carries the
+state maps verbatim: binary columns holding the stored Flink-BinaryRow bucket key and arrow-row
+payload, and the key group comes from one hash of the bucket key's bytes (that encoding's hash
+IS Flink's key-group input) — per bucket, not per row. Restore reads the same bytes straight
+back into the maps (no decode, no re-encode); snapshots from the decoded format still restore
+through the kept legacy path. Measured on exactly-once Kafka q9 (500K events, 60 s profile
+windows): join-snapshot samples 866 → 261, task-thread barrier share 25% → 12%, and the profile
+loop completed **55 → 63 jobs in 150 s** (per-job 2.73 s → 2.38 s, closing the off-mode gap to
+stock Flink from 24% to 8%). The format's worst case — narrow all-fixed-width rows under unique
+keys, where per-bucket hashing amortizes nothing and the removed decode was cheapest — was
+checked on the checkpoint microbench (`checkpoint_4096_rows_per_side`, same-day A/B): 2.50 ms
+old vs 2.30 ms new, still ~8% ahead. The same decode-and-rehash snapshot shape remains in the
+OVER/window/session/temporal/window-join/interval and Top-N operators — mechanical ports of
+this format, pending the same measurement discipline.
+
 **Paimon table maintenance runs behind the barrier, not on it.** The state-table compactor
 originally ran synchronously in every checkpoint's sync phase, paying a table open, scan plan,
 and writer/commit lifecycle per operator per barrier — measured *slower* than no maintenance at

@@ -915,51 +915,70 @@ impl<S: KeyedStateStore<JoinBucket>> UpdatingJoiner<S> {
 
 }
 
+/// Raw-snapshot column names: the stored Flink-BinaryRow bucket key and arrow-row payload bytes.
+/// The key column leading the schema is also the format marker restore branches on.
+const RAW_SNAPSHOT_KEY: &str = "__key__";
+const RAW_SNAPSHOT_ROW: &str = "__row__";
+
+/// Builders for one key group's raw snapshot batch.
+#[derive(Default)]
+struct RawSnapshotColumns {
+    keys: BinaryBuilder,
+    rows: BinaryBuilder,
+    counts: Int64Builder,
+    assocs: Int32Builder,
+}
+
+impl RawSnapshotColumns {
+    fn finish(mut self) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(RAW_SNAPSHOT_KEY, DataType::Binary, false),
+            Field::new(RAW_SNAPSHOT_ROW, DataType::Binary, false),
+            Field::new("__count__", DataType::Int64, false),
+            Field::new("__assoc__", DataType::Int32, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(self.keys.finish()),
+                Arc::new(self.rows.finish()),
+                Arc::new(self.counts.finish()),
+                Arc::new(self.assocs.finish()),
+            ],
+        )
+        .expect("raw join snapshot batch")
+    }
+}
+
 /// The raw keyed-state snapshot/restore surface exists only on the memory backend — a persistent
 /// store checkpoints through its own commit path instead of materializing the key space.
 impl UpdatingJoiner {
-    /// Materializes one side's multiset as `[data cols.., __count__, __assoc__]` (one row per
-    /// distinct live row), or no batch when the side has no rows yet.
-    fn side_snapshot_batch(&self, is_left: bool) -> Option<RecordBatch> {
-        let (schema, state, conv) = if is_left {
-            (&self.left_schema, &self.left_state, &self.left_payload)
-        } else {
-            (&self.right_schema, &self.right_state, &self.right_payload)
-        };
-        let parser = conv.parser();
-        let mut rows: Vec<&ByteKey> = Vec::new();
-        let mut counts: Vec<i64> = Vec::new();
-        let mut assocs: Vec<i32> = Vec::new();
-        for (_, bucket) in state.iter() {
+    /// One side's multiset as raw state bytes, one IPC blob per key group: the stored
+    /// Flink-BinaryRow key and arrow-row payload of every live row, verbatim. Snapshotting
+    /// neither decodes rows nor re-encodes keys — the bucket key's bytes ARE the hash input
+    /// Flink's key-group routing takes, so the group is one hash of bytes per bucket.
+    fn side_snapshot_groups(&self, is_left: bool, max_parallelism: usize) -> BTreeMap<i32, Vec<u8>> {
+        let state = if is_left { &self.left_state } else { &self.right_state };
+        let mut groups: BTreeMap<i32, RawSnapshotColumns> = BTreeMap::new();
+        for (key, bucket) in state.iter() {
+            let group = flink_key_group(hash_bytes_by_words(&key.0), max_parallelism) as i32;
+            let columns = groups.entry(group).or_default();
             for (row, meta) in bucket.iter() {
-                rows.push(row);
-                counts.push(meta.count);
-                assocs.push(meta.num_assoc);
+                columns.keys.append_value(&key.0);
+                columns.rows.append_value(&row.0);
+                columns.counts.append_value(meta.count);
+                columns.assocs.append_value(meta.num_assoc);
             }
         }
-        if rows.is_empty() {
-            return None;
-        }
-        let mut fields: Vec<Field> = schema.fields().iter().map(|f| f.as_ref().clone()).collect();
-        let mut columns: Vec<ArrayRef> = conv
-            .convert_rows(rows.iter().map(|b| parser.parse(&b.0)))
-            .expect("decode join side rows");
-        fields.push(Field::new("__count__", DataType::Int64, false));
-        columns.push(Arc::new(Int64Array::from(counts)));
-        fields.push(Field::new("__assoc__", DataType::Int32, false));
-        columns.push(Arc::new(Int32Array::from(assocs)));
-        Some(RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).expect("join side"))
-    }
-
-    fn serialize_side(&self, is_left: bool) -> Vec<u8> {
-        self.side_snapshot_batch(is_left)
-            .map(|batch| write_ipc(&batch))
-            .unwrap_or_default()
+        groups
+            .into_iter()
+            .map(|(group, columns)| (group, write_ipc(&columns.finish())))
+            .collect()
     }
 
     pub(crate) fn snapshot(&self) -> Vec<u8> {
-        let left = self.serialize_side(true);
-        let right = self.serialize_side(false);
+        let left = self.side_snapshot_groups(true, 1).remove(&0).unwrap_or_default();
+        let right = self.side_snapshot_groups(false, 1).remove(&0).unwrap_or_default();
         Self::snapshot_parts(left, right)
     }
 
@@ -970,87 +989,24 @@ impl UpdatingJoiner {
         out
     }
 
-    pub(crate) fn snapshot_partitions(
-        &self,
-        max_parallelism: usize,
-        timestamp_precisions: &[i32],
-    ) -> BTreeMap<i32, Vec<u8>> {
-        self.raw_snapshot_partitions(max_parallelism, timestamp_precisions)
-    }
-
-    fn raw_snapshot_partitions(
-        &self,
-        max_parallelism: usize,
-        timestamp_precisions: &[i32],
-    ) -> BTreeMap<i32, Vec<u8>> {
-        let left = self.side_raw_partitions(
-            self.side_snapshot_batch(true),
-            &self.left_keys,
-            max_parallelism,
-            timestamp_precisions,
-        );
-        let right = self.side_raw_partitions(
-            self.side_snapshot_batch(false),
-            &self.right_keys,
-            max_parallelism,
-            timestamp_precisions,
-        );
+    pub(crate) fn snapshot_partitions(&self, max_parallelism: usize) -> BTreeMap<i32, Vec<u8>> {
+        let mut left = self.side_snapshot_groups(true, max_parallelism);
+        let mut right = self.side_snapshot_groups(false, max_parallelism);
         let mut groups: Vec<i32> = left.keys().chain(right.keys()).copied().collect();
         groups.sort_unstable();
         groups.dedup();
-        let mut snapshots = BTreeMap::new();
-        for key_group in groups {
-            snapshots.insert(
-                key_group,
-                Self::snapshot_parts(
-                    left.get(&key_group).map(Self::merge_snapshot_batches).unwrap_or_default(),
-                    right.get(&key_group).map(Self::merge_snapshot_batches).unwrap_or_default(),
-                ),
-            );
-        }
-        snapshots
-    }
-
-    fn side_raw_partitions(
-        &self,
-        batch: Option<RecordBatch>,
-        key_columns: &[usize],
-        max_parallelism: usize,
-        timestamp_precisions: &[i32],
-    ) -> BTreeMap<i32, Vec<RecordBatch>> {
-        let mut partitions = BTreeMap::new();
-        if let Some(batch) = batch {
-            let mut rows_by_group: BTreeMap<i32, Vec<u32>> = BTreeMap::new();
-            for row in 0..batch.num_rows() {
-                let key_group = flink_key_group(
-                    binary_row_hash(&batch, key_columns, row, timestamp_precisions),
-                    max_parallelism,
-                ) as i32;
-                rows_by_group.entry(key_group).or_default().push(row as u32);
-            }
-            for (key_group, rows) in rows_by_group {
-                let indices = UInt32Array::from(rows);
-                let columns = batch
-                    .columns()
-                    .iter()
-                    .map(|column| take(column, &indices, None).expect("partition join snapshot"))
-                    .collect();
-                partitions
-                    .entry(key_group)
-                    .or_insert_with(Vec::new)
-                    .push(
-                        RecordBatch::try_new(batch.schema(), columns)
-                            .expect("partitioned join snapshot"),
-                    );
-            }
-        }
-        partitions
-    }
-
-    fn merge_snapshot_batches(batches: &Vec<RecordBatch>) -> Vec<u8> {
-        let combined = concat_batches(&batches[0].schema(), batches.iter())
-            .expect("merge updating-join raw partitions");
-        write_ipc(&combined)
+        groups
+            .into_iter()
+            .map(|group| {
+                (
+                    group,
+                    Self::snapshot_parts(
+                        left.remove(&group).unwrap_or_default(),
+                        right.remove(&group).unwrap_or_default(),
+                    ),
+                )
+            })
+            .collect()
     }
 
     pub(crate) fn restore(
@@ -1086,63 +1042,78 @@ impl UpdatingJoiner {
         predicate: Option<JoinPredicate>,
         snapshots: &[Vec<u8>],
     ) -> Self {
-        let mut left_batches = Vec::new();
-        let mut right_batches = Vec::new();
+        let mut joiner =
+            UpdatingJoiner::new(left_keys, right_keys, kind, left_schema, right_schema, predicate)
+                .with_key_timestamp_precisions(key_timestamp_precisions);
         for bytes in snapshots {
             if bytes.len() < 4 {
                 continue;
             }
             let left_len = u32::from_le_bytes(bytes[0..4].try_into().expect("snapshot len")) as usize;
             assert!(4 + left_len <= bytes.len(), "truncated updating-join raw key-group snapshot");
-            left_batches.extend(read_ipc_if_present(&bytes[4..4 + left_len]));
-            right_batches.extend(read_ipc_if_present(&bytes[4 + left_len..]));
+            joiner.load_side(true, &bytes[4..4 + left_len]);
+            joiner.load_side(false, &bytes[4 + left_len..]);
         }
-        let left = (!left_batches.is_empty())
-            .then(|| Self::merge_snapshot_batches(&left_batches))
-            .unwrap_or_default();
-        let right = (!right_batches.is_empty())
-            .then(|| Self::merge_snapshot_batches(&right_batches))
-            .unwrap_or_default();
-        UpdatingJoiner::restore(
-            left_keys,
-            right_keys,
-            key_timestamp_precisions,
-            kind,
-            left_schema,
-            right_schema,
-            predicate,
-            &Self::snapshot_parts(left, right),
-        )
+        joiner
     }
 
     fn load_side(&mut self, is_left: bool, bytes: &[u8]) {
         for batch in read_ipc_if_present(bytes) {
-            // The snapshot side batch is `[data cols.., __count__, __assoc__]`; the data columns are
-            // all but the two trailing bookkeeping columns.
-            let arity = batch.num_columns() - 2;
-            let key_indices = if is_left { &self.left_keys } else { &self.right_keys };
-            let key_arrays: Vec<ArrayRef> = key_indices.iter().map(|&i| batch.column(i).clone()).collect();
-            let data_arrays: Vec<ArrayRef> = (0..arity).map(|i| batch.column(i).clone()).collect();
-            let counts = column_i64(&batch, "__count__");
-            let assocs = column_i32(&batch, "__assoc__");
-            let mut key_encoder =
-                BinaryRowBatchEncoder::new(&batch, key_indices, &self.key_timestamp_precisions);
-            let payloads = if is_left { &self.left_payload } else { &self.right_payload }
-                .convert_columns(&data_arrays)
-                .expect("encode join payload");
-            let state = if is_left { &mut self.left_state } else { &mut self.right_state };
-            for row in 0..batch.num_rows() {
-                let key = key_encoder.encode(row);
-                let bucket = if state.contains(key) {
-                    state.get_mut(key).expect("bucket present")
-                } else {
-                    state.insert(ByteKey::from(key), JoinBucket::default())
-                };
-                bucket.insert(
-                    ByteKey::from(payloads.row(row).as_ref()),
-                    RowMeta { count: counts.value(row), num_assoc: assocs.value(row) },
-                );
+            if batch.schema_ref().field(0).name() == RAW_SNAPSHOT_KEY {
+                self.load_side_raw(is_left, &batch);
+            } else {
+                self.load_side_decoded(is_left, &batch);
             }
+        }
+    }
+
+    /// Raw-format rows carry the stored key and payload bytes verbatim — restoring is a straight
+    /// map rebuild with no decode or re-encode.
+    fn load_side_raw(&mut self, is_left: bool, batch: &RecordBatch) {
+        let keys = column_binary(batch, RAW_SNAPSHOT_KEY);
+        let rows = column_binary(batch, RAW_SNAPSHOT_ROW);
+        let counts = column_i64(batch, "__count__");
+        let assocs = column_i32(batch, "__assoc__");
+        let state = if is_left { &mut self.left_state } else { &mut self.right_state };
+        for row in 0..batch.num_rows() {
+            let key = keys.value(row);
+            let bucket = if state.contains(key) {
+                state.get_mut(key).expect("bucket present")
+            } else {
+                state.insert(ByteKey::from(key), JoinBucket::default())
+            };
+            bucket.insert(
+                ByteKey::from(rows.value(row)),
+                RowMeta { count: counts.value(row), num_assoc: assocs.value(row) },
+            );
+        }
+    }
+
+    /// Snapshots written before the raw format decoded each side to typed columns
+    /// (`[data cols.., __count__, __assoc__]`); kept so existing savepoints keep restoring.
+    fn load_side_decoded(&mut self, is_left: bool, batch: &RecordBatch) {
+        let arity = batch.num_columns() - 2;
+        let key_indices = if is_left { &self.left_keys } else { &self.right_keys };
+        let data_arrays: Vec<ArrayRef> = (0..arity).map(|i| batch.column(i).clone()).collect();
+        let counts = column_i64(batch, "__count__");
+        let assocs = column_i32(batch, "__assoc__");
+        let mut key_encoder =
+            BinaryRowBatchEncoder::new(batch, key_indices, &self.key_timestamp_precisions);
+        let payloads = if is_left { &self.left_payload } else { &self.right_payload }
+            .convert_columns(&data_arrays)
+            .expect("encode join payload");
+        let state = if is_left { &mut self.left_state } else { &mut self.right_state };
+        for row in 0..batch.num_rows() {
+            let key = key_encoder.encode(row);
+            let bucket = if state.contains(key) {
+                state.get_mut(key).expect("bucket present")
+            } else {
+                state.insert(ByteKey::from(key), JoinBucket::default())
+            };
+            bucket.insert(
+                ByteKey::from(payloads.row(row).as_ref()),
+                RowMeta { count: counts.value(row), num_assoc: assocs.value(row) },
+            );
         }
     }
 }
@@ -1301,16 +1272,12 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotUpdat
     _class: JClass<'local>,
     handle: jlong,
     max_parallelism: jint,
-    timestamp_precisions: JIntArray<'local>,
+    _timestamp_precisions: JIntArray<'local>,
 ) -> jni::sys::jobjectArray {
     let joiner = unsafe { &*(handle as *const UpdatingJoiner) };
-    let precisions: Vec<i32> = read_int_array(&env, &timestamp_precisions)
-        .into_iter()
-        .map(|precision| precision as i32)
-        .collect();
     keyed_state_partition_array(
         &mut env,
-        joiner.snapshot_partitions(max_parallelism as usize, &precisions),
+        joiner.snapshot_partitions(max_parallelism as usize),
         "updating-join",
     )
 }

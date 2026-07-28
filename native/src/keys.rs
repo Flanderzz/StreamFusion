@@ -151,6 +151,16 @@ pub(crate) fn column_i32<'a>(batch: &'a RecordBatch, name: &str) -> &'a Int32Arr
         .unwrap_or_else(|| panic!("column {name} must be int32"))
 }
 
+/// Downcasts a named binary column, with a clear message if it is missing or the wrong type.
+pub(crate) fn column_binary<'a>(batch: &'a RecordBatch, name: &str) -> &'a BinaryArray {
+    batch
+        .column_by_name(name)
+        .unwrap_or_else(|| panic!("missing column {name}"))
+        .as_any()
+        .downcast_ref::<BinaryArray>()
+        .unwrap_or_else(|| panic!("column {name} must be binary"))
+}
+
 /// A state-map key of raw arrow-row bytes. Unlike `OwnedRow`, it can be probed by a **borrowed**
 /// byte slice (`Borrow<[u8]>` + boxed-slice hashing hash the same bytes), so a steady-state lookup
 /// — an input row whose key or content is already in state — allocates nothing; only a first

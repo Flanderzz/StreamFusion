@@ -1,13 +1,15 @@
-pub(crate) use arrow::array::builder::{BooleanBuilder, PrimitiveBuilder, StringBuilder};
+pub(crate) use arrow::array::builder::{
+    BinaryBuilder, BooleanBuilder, Int32Builder, Int64Builder, PrimitiveBuilder, StringBuilder,
+};
 pub(crate) use arrow::array::types::{
     Date32Type, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type,
     TimestampNanosecondType,
 };
 pub(crate) use arrow::array::{
-    make_array, new_empty_array, new_null_array, Array, ArrayRef, BooleanArray, Decimal128Array,
-    Float32Array, Int16Array, Int32Array, Int64Array, Int8Array, ListArray, MapArray, MutableArrayData,
-    RecordBatch, StringArray, StructArray, TimestampMicrosecondArray, TimestampMillisecondArray,
-    TimestampNanosecondArray, UInt32Array,
+    make_array, new_empty_array, new_null_array, Array, ArrayRef, BinaryArray, BooleanArray,
+    Decimal128Array, Float32Array, Int16Array, Int32Array, Int64Array, Int8Array, ListArray,
+    MapArray, MutableArrayData, RecordBatch, StringArray, StructArray, TimestampMicrosecondArray,
+    TimestampMillisecondArray, TimestampNanosecondArray, UInt32Array,
 };
 pub(crate) use arrow::array::NullBufferBuilder;
 pub(crate) use arrow::buffer::{OffsetBuffer, ScalarBuffer};

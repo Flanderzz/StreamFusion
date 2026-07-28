@@ -2029,7 +2029,7 @@ fn updating_join_state_partitions_and_restores_by_flink_key_group() {
     before
         .push(&changelog_join_batch(vec![1, 2], vec![10, 20], vec![0, 0]), true)
         .unwrap();
-    let partitions = before.snapshot_partitions(128, &[-1]);
+    let partitions = before.snapshot_partitions(128);
     assert!(
         partitions.len() >= 2,
         "test keys should cover distinct raw key groups"
