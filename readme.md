@@ -105,34 +105,36 @@ Mini-batching ("on") uses the same production-style configuration on both engine
 throughput within the same backend and mode. Both the source corpus and every exactly-once
 output topic carry one partition per subtask — an earlier revision of these tables let the
 broker auto-create single-partition output topics, which throttled all four sink writers (on
-both engines) behind one partition log.
+both engines) behind one partition log. These tables include shared native sources: a query
+whose branches scan the same topic reads and decodes it once, as Flink's own sub-plan reuse
+already did for the stock plans.
 
 | Query | Memory, off | Memory, on | Disk, off | Disk, on |
 |---|---:|---:|---:|---:|
-| q0 | **1.58×** | **1.26×** | **1.63×** | **1.26×** |
-| q1 | **1.66×** | **1.86×** | **1.71×** | **1.82×** |
-| q2 | **1.11×** | **1.28×** | **1.16×** | **1.45×** |
-| q3 | 0.90× | 0.86× | 0.81× | 0.69× |
-| q4 | **1.19×** | **1.10×** | **1.79×** | **1.52×** |
-| q5 | **1.10×** | **1.04×** | **2.17×** | **1.62×** |
-| q7 | **1.30×** | **1.74×** | **2.66×** | **1.74×** |
-| q8 | **1.05×** | 0.75× | **1.06×** | **1.30×** |
-| q9 | **1.28×** | **1.50×** | **1.61×** | **1.81×** |
-| q10 | **1.42×** | **1.36×** | **1.62×** | **1.18×** |
-| q11 | **2.73×** | **2.29×** | **8.87×** | **8.34×** |
-| q12 | **1.81×** | **1.80×** | **2.43×** | **2.17×** |
-| q13 | **1.34×** | **1.42×** | **1.35×** | **1.30×** |
-| q14 | **1.67×** | **1.59×** | **1.67×** | **1.65×** |
-| q15 | **3.05×** | **1.61×** | **5.82×** | **1.91×** |
-| q16 | **1.70×** | **1.49×** | **3.50×** | **2.40×** |
-| q17 | **1.23×** | **1.25×** | **1.98×** | **1.82×** |
-| q18 | **1.64×** | **1.54×** | **1.03×** | **1.25×** |
-| q19 | **1.32×** | **2.76×** | **1.32×** | **2.41×** |
-| q20 | 0.97× | 0.99× | **1.23×** | **1.24×** |
-| q21 | **1.16×** | 0.88× | **1.33×** | **1.33×** |
-| q22 | **1.54×** | **1.49×** | **1.59×** | **1.38×** |
-| q23 | **1.45×** | **1.51×** | **2.18×** | **1.64×** |
-| **geomean** | **1.42×** | **1.39×** | **1.83×** | **1.65×** |
+| q0 | **1.44×** | **1.43×** | **1.68×** | **1.68×** |
+| q1 | **1.82×** | **1.63×** | **1.69×** | **1.58×** |
+| q2 | **1.35×** | **1.33×** | **1.33×** | 0.95× |
+| q3 | **1.39×** | **1.62×** | **1.04×** | 0.64× |
+| q4 | **1.45×** | **1.83×** | **1.66×** | **1.78×** |
+| q5 | **1.58×** | **1.39×** | **2.11×** | **2.43×** |
+| q7 | **1.39×** | **2.23×** | **1.96×** | **3.19×** |
+| q8 | **1.14×** | **1.49×** | **1.21×** | **1.90×** |
+| q9 | **1.29×** | **1.80×** | **1.75×** | **1.67×** |
+| q10 | **1.28×** | **1.20×** | **1.51×** | **1.46×** |
+| q11 | **2.70×** | **2.86×** | **9.37×** | **9.61×** |
+| q12 | **1.94×** | **1.81×** | **2.22×** | **2.11×** |
+| q13 | **1.28×** | **1.25×** | **1.45×** | **1.20×** |
+| q14 | **1.50×** | **1.50×** | **1.53×** | **1.59×** |
+| q15 | **3.07×** | **1.56×** | **6.62×** | **1.96×** |
+| q16 | **1.62×** | **1.52×** | **4.01×** | **2.35×** |
+| q17 | **1.36×** | **1.40×** | **1.96×** | **1.66×** |
+| q18 | **1.35×** | **1.67×** | 0.99× | **2.67×** |
+| q19 | **1.28×** | **2.08×** | **1.27×** | **2.21×** |
+| q20 | **1.17×** | **1.74×** | **1.21×** | **1.47×** |
+| q21 | **1.38×** | 0.96× | **1.13×** | **1.16×** |
+| q22 | **1.45×** | **1.30×** | **1.45×** | **1.41×** |
+| q23 | **1.85×** | **2.04×** | **2.00×** | **2.93×** |
+| **geomean** | **1.52×** | **1.59×** | **1.83×** | **1.84×** |
 
 Parallelism 4 is a tougher, more honest baseline than the earlier parallelism-1 tables: the keyed
 shuffle is real work on both engines, and Flink's heap pipeline scales well with subtasks. The
@@ -140,7 +142,10 @@ shuffle-heavy changelog shapes were flat at first — a measured batch-collapse 
 exchange fragments every batch p ways, and per-batch fixed cost compounds through changelog
 chains) that post-exchange coalescing since removed, worth up to 2× on the compounding shapes
 (the A/B and the remaining source-side lever are in [docs/benchmarks.md](docs/benchmarks.md)).
-The one consistent loss left is q3, a plain updating join, at 0.7–0.9× across the columns. The
+q3 — formerly the one consistent loss — was a doubled topic read: its two view branches each ran
+a full native source while Flink's plan reused one scan. Sharing the native source fixed it in
+three of the four columns; the remaining loss is q3 on the disk backend with mini-batching on,
+whose bottleneck is the join's persistent-state path, not the source. The
 persistent-backend columns hold up best: RocksDB pays its per-record costs in every subtask.
 The multi-source/blackhole ladder, raw timings, reproduction commands, and profiling controls
 remain in [docs/benchmarks.md](docs/benchmarks.md).

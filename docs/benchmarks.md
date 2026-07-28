@@ -856,7 +856,48 @@ produces each Arrow batch inside the checkpoint epoch's transaction, and Flink's
 committer commits it after the checkpoint completes (divergence 26); the harness asserts the
 native-producer plan shape for every cell.
 
-#### Current full comparison (2026-07-28, parallelism 4, 2M events, four-partition output topics)
+#### Current full comparison (2026-07-28 evening — shared native sources)
+
+Same rig and method as the table below (parallelism 4, 2M events, four-partition source and
+output topics, release+`mimalloc` full feature build, best of two with no warmup); the one
+change is shared native sources: a query whose branches scan the same topic now reads and
+decodes it once, where each branch previously ran its own full native source (Flink's plans
+always shared their scan). Throughput is millions of input events per second.
+
+| Query | Flink off | StreamFusion off | SF/Flink off | Flink on | StreamFusion on | SF/Flink on | Flink on/off | SF on/off |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| q0 | 0.663 | 0.952 | 1.44x | 0.879 | 1.253 | 1.43x | 1.33x | 1.32x |
+| q1 | 0.830 | 1.511 | 1.82x | 0.833 | 1.359 | 1.63x | 1.00x | 0.90x |
+| q2 | 1.413 | 1.904 | 1.35x | 1.441 | 1.918 | 1.33x | 1.02x | 1.01x |
+| q3 | 1.611 | 2.244 | 1.39x | 1.424 | 2.308 | 1.62x | 0.88x | 1.03x |
+| q4 | 0.836 | 1.213 | 1.45x | 0.952 | 1.740 | 1.83x | 1.14x | 1.43x |
+| q5 | 1.231 | 1.948 | 1.58x | 1.240 | 1.723 | 1.39x | 1.01x | 0.88x |
+| q7 | 0.949 | 1.315 | 1.39x | 0.698 | 1.554 | 2.23x | 0.74x | 1.18x |
+| q8 | 1.446 | 1.647 | 1.14x | 1.584 | 2.364 | 1.49x | 1.09x | 1.44x |
+| q9 | 0.758 | 0.980 | 1.29x | 0.704 | 1.271 | 1.80x | 0.93x | 1.30x |
+| q10 | 0.820 | 1.048 | 1.28x | 0.822 | 0.988 | 1.20x | 1.00x | 0.94x |
+| q11 | 0.979 | 2.648 | 2.70x | 0.934 | 2.673 | 2.86x | 0.95x | 1.01x |
+| q12 | 1.339 | 2.596 | 1.94x | 1.416 | 2.559 | 1.81x | 1.06x | 0.99x |
+| q13 | 1.033 | 1.327 | 1.28x | 0.918 | 1.150 | 1.25x | 0.89x | 0.87x |
+| q14 | 0.807 | 1.211 | 1.50x | 0.787 | 1.181 | 1.50x | 0.98x | 0.97x |
+| q15 | 0.280 | 0.860 | 3.07x | 1.254 | 1.955 | 1.56x | 4.47x | 2.27x |
+| q16 | 0.490 | 0.795 | 1.62x | 1.097 | 1.673 | 1.52x | 2.24x | 2.10x |
+| q17 | 0.768 | 1.042 | 1.36x | 1.165 | 1.636 | 1.40x | 1.52x | 1.57x |
+| q18 | 0.724 | 0.974 | 1.35x | 0.601 | 1.001 | 1.67x | 0.83x | 1.03x |
+| q19 | 0.274 | 0.351 | 1.28x | 0.287 | 0.598 | 2.08x | 1.05x | 1.70x |
+| q20 | 1.032 | 1.206 | 1.17x | 0.997 | 1.730 | 1.74x | 0.97x | 1.43x |
+| q21 | 1.339 | 1.842 | 1.38x | 1.286 | 1.241 | 0.96x | 0.96x | 0.67x |
+| q22 | 0.849 | 1.232 | 1.45x | 0.850 | 1.102 | 1.30x | 1.00x | 0.89x |
+| q23 | 0.333 | 0.615 | 1.85x | 0.315 | 0.643 | 2.04x | 0.95x | 1.05x |
+
+23 of 23 wins with mini-batching disabled (geometric mean **1.52x**) and 22 of 23 enabled
+(geometric mean **1.59x**), up from 1.42x/1.39x before source sharing. The moves are exactly
+the multi-view queries: q3 — formerly the one consistent loss, and really a doubled topic
+read — goes 0.90x -> 1.39x off and 0.86x -> 1.62x on; q8 on-mode recovers from 0.75x to 1.49x;
+q4/q9/q20 stop paying the duplicate ingest. q21 mini-batch-on remains the single sub-parity
+cell (0.96x).
+
+#### Prior comparison (2026-07-28 — four-partition output topics, before shared sources)
 
 Apple M1 Max, one-second checkpoints, release+`mimalloc` (full feature build), best of two
 measured runs (no warmup — the best-of minimum discards a cold run); throughput is millions of
@@ -1321,7 +1362,75 @@ capability currently needs a Paimon bundle with the binary-primary-key lookup co
 `-Dpaimon.bundle.version`. Operators the Paimon backend does not yet carry (proctime shapes)
 fall back to memory state with raw snapshots, exactly as a deployment would run them.
 
-#### Current (2026-07-28 — four-partition output topics, post-exchange coalescing, best of two with no warmup)
+#### Current (2026-07-28 evening — shared native sources)
+
+Same method as the table below; the one change is shared native sources (one topic read per
+query, however many views scan it).
+
+Mini-batch off:
+
+| Query | Flink/RocksDB s | ev/s | SF/Paimon s | ev/s | SF/Flink |
+|---|---:|---:|---:|---:|---:|
+| q0 | 2.452 | 0.82M | 1.463 | 1.37M | **1.68×** |
+| q1 | 2.349 | 0.85M | 1.387 | 1.44M | **1.69×** |
+| q2 | 1.435 | 1.39M | 1.079 | 1.85M | **1.33×** |
+| q3 | 1.313 | 1.52M | 1.263 | 1.58M | **1.04×** |
+| q4 | 9.005 | 0.22M | 5.432 | 0.37M | **1.66×** |
+| q5 | 4.644 | 0.43M | 2.197 | 0.91M | **2.11×** |
+| q7 | 8.109 | 0.25M | 4.137 | 0.48M | **1.96×** |
+| q8 | 2.455 | 0.81M | 2.033 | 0.98M | **1.21×** |
+| q9 | 10.779 | 0.19M | 6.155 | 0.32M | **1.75×** |
+| q10 | 2.777 | 0.72M | 1.841 | 1.09M | **1.51×** |
+| q11 | 8.584 | 0.23M | 0.916 | 2.18M | **9.37×** |
+| q12 | 1.838 | 1.09M | 0.829 | 2.41M | **2.22×** |
+| q13 | 2.183 | 0.92M | 1.502 | 1.33M | **1.45×** |
+| q14 | 2.770 | 0.72M | 1.807 | 1.11M | **1.53×** |
+| q15 | 15.504 | 0.13M | 2.343 | 0.85M | **6.62×** |
+| q16 | 9.427 | 0.21M | 2.353 | 0.85M | **4.01×** |
+| q17 | 4.459 | 0.45M | 2.276 | 0.88M | **1.96×** |
+| q18 | 7.305 | 0.27M | 7.361 | 0.27M | 0.99× |
+| q19 | 10.012 | 0.20M | 7.874 | 0.25M | **1.27×** |
+| q20 | 6.215 | 0.32M | 5.152 | 0.39M | **1.21×** |
+| q21 | 1.521 | 1.31M | 1.344 | 1.49M | **1.13×** |
+| q22 | 2.379 | 0.84M | 1.635 | 1.22M | **1.45×** |
+| q23 | 20.198 | 0.10M | 10.075 | 0.20M | **2.00×** |
+
+Mini-batch on:
+
+| Query | Flink/RocksDB s | ev/s | SF/Paimon s | ev/s | SF/Flink |
+|---|---:|---:|---:|---:|---:|
+| q0 | 2.350 | 0.85M | 1.398 | 1.43M | **1.68×** |
+| q1 | 2.311 | 0.87M | 1.467 | 1.36M | **1.58×** |
+| q2 | 1.526 | 1.31M | 1.599 | 1.25M | 0.95× |
+| q3 | 1.449 | 1.38M | 2.249 | 0.89M | 0.64× |
+| q4 | 11.830 | 0.17M | 6.646 | 0.30M | **1.78×** |
+| q5 | 4.083 | 0.49M | 1.678 | 1.19M | **2.43×** |
+| q7 | 8.867 | 0.23M | 2.782 | 0.72M | **3.19×** |
+| q8 | 2.302 | 0.87M | 1.213 | 1.65M | **1.90×** |
+| q9 | 11.366 | 0.18M | 6.798 | 0.29M | **1.67×** |
+| q10 | 2.585 | 0.77M | 1.775 | 1.13M | **1.46×** |
+| q11 | 8.358 | 0.24M | 0.870 | 2.30M | **9.61×** |
+| q12 | 1.794 | 1.11M | 0.848 | 2.36M | **2.11×** |
+| q13 | 1.961 | 1.02M | 1.633 | 1.22M | **1.20×** |
+| q14 | 2.566 | 0.78M | 1.612 | 1.24M | **1.59×** |
+| q15 | 2.075 | 0.96M | 1.061 | 1.89M | **1.96×** |
+| q16 | 2.880 | 0.69M | 1.226 | 1.63M | **2.35×** |
+| q17 | 2.269 | 0.88M | 1.367 | 1.46M | **1.66×** |
+| q18 | 8.455 | 0.24M | 3.162 | 0.63M | **2.67×** |
+| q19 | 8.956 | 0.22M | 4.060 | 0.49M | **2.21×** |
+| q20 | 6.767 | 0.30M | 4.607 | 0.43M | **1.47×** |
+| q21 | 1.520 | 1.32M | 1.312 | 1.52M | **1.16×** |
+| q22 | 2.256 | 0.89M | 1.606 | 1.25M | **1.41×** |
+| q23 | 14.396 | 0.14M | 4.918 | 0.41M | **2.93×** |
+
+Off: 22 of 23 wins, geometric mean **1.83x**; on: 21 of 23, **1.84x** (up from 1.65x). Source
+sharing lifts q3 off-mode from 0.81x to 1.04x and the mini-batch-on multi-view cells broadly
+(q7 1.74x -> 3.19x, q18 1.25x -> 2.67x, q23 1.64x -> 2.93x). The two remaining losses are
+q2 on-mode (0.95x, noise-range) and q3 on-mode (0.64x): with the source no longer the
+bottleneck, q3's mini-batch cost on the persistent backend is the join's Paimon state path —
+the next target this table points at.
+
+#### Prior (2026-07-28 — four-partition output topics, post-exchange coalescing, before shared sources)
 
 Mini-batch off (geometric mean **1.83x**, 22 of 23 wins):
 
