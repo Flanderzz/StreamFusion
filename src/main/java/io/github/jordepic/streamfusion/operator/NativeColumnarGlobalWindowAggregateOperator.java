@@ -37,7 +37,7 @@ public class NativeColumnarGlobalWindowAggregateOperator extends NativeRowWindow
       int[] keyTimestampPrecisions,
       int maxParallelism) {
     super(
-        "streamfusion-global-window-state",
+        "global window aggregate",
         windowMillis,
         slideMillis,
         valueTypes,
@@ -53,9 +53,7 @@ public class NativeColumnarGlobalWindowAggregateOperator extends NativeRowWindow
   @Override
   protected PaimonNativeStateSupport resolvePaimonState(
       boolean rawStateRestored) {
-    return PaimonNativeStateSupport.resolve(
-        getKeyedStateBackend(),
-        "global window aggregate",
+    return resolvePaimon(
         rawStateRestored,
         () -> Native.paimonWindowAggStateSupported(valueTypes, aggregateKinds, keyTypes));
   }

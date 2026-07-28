@@ -1,19 +1,14 @@
 package io.github.jordepic.streamfusion.operator;
 
 import io.github.jordepic.streamfusion.Native;
-import io.github.jordepic.streamfusion.arrow.ArrowConversion;
 import io.github.jordepic.streamfusion.operator.MiniBatchMetrics.FlushReason;
 import io.github.jordepic.streamfusion.planner.NativeConfig;
 import io.github.jordepic.streamfusion.state.PaimonNativeStateSupport;
 import org.apache.arrow.c.ArrowArray;
 import org.apache.arrow.c.ArrowSchema;
-import org.apache.arrow.c.CDataDictionaryProvider;
 import org.apache.arrow.c.Data;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
-import org.apache.flink.runtime.state.StateInitializationContext;
-import org.apache.flink.runtime.state.StateSnapshotContext;
-import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
@@ -25,11 +20,10 @@ import org.apache.flink.table.types.logical.RowType;
  * columnar producer, and the row↔Arrow conversion happens only at the host edges. The output batch
  * carries the changelog kind on its {@code $row_kind$} column.
  */
-public class NativeColumnarTopNOperator extends AbstractStreamOperator<ArrowBatch>
+public class NativeColumnarTopNOperator extends AbstractNativeStatefulOperator<ArrowBatch>
     implements OneInputStreamOperator<ArrowBatch, ArrowBatch> {
 
   private final int[] partitionColumns;
-  private final int[] keyTimestampPrecisions;
   private final RowType rowType;
   private final int[] sortIndices;
   private final int[] sortAscending;
@@ -44,15 +38,9 @@ public class NativeColumnarTopNOperator extends AbstractStreamOperator<ArrowBatc
   private final int[] rowKeyTimestampPrecisions;
   private final boolean netDiff;
   private final long miniBatchSize;
-  private final int maxParallelism;
 
-  private transient BufferAllocator allocator;
-  private transient CDataDictionaryProvider dictionaries;
-  private transient long handle;
-  private transient boolean paimonState;
   private transient MiniBatchBoundary boundary;
   private transient MiniBatchMetrics miniBatchMetrics;
-  private transient ManagedMemoryBudget memoryBudget;
   private transient BatchCoalescer coalescer;
 
   public NativeColumnarTopNOperator(
@@ -71,8 +59,8 @@ public class NativeColumnarTopNOperator extends AbstractStreamOperator<ArrowBatc
       boolean netDiff,
       long miniBatchSize,
       int maxParallelism) {
+    super("top-n", keyTimestampPrecisions, maxParallelism);
     this.partitionColumns = partitionColumns;
-    this.keyTimestampPrecisions = keyTimestampPrecisions;
     this.rowType = rowType;
     this.sortIndices = sortIndices;
     this.sortAscending = sortAscending;
@@ -85,144 +73,147 @@ public class NativeColumnarTopNOperator extends AbstractStreamOperator<ArrowBatc
     this.rowKeyTimestampPrecisions = rowKeyTimestampPrecisions;
     this.netDiff = netDiff;
     this.miniBatchSize = miniBatchSize;
-    if (maxParallelism <= 0) {
-      throw new IllegalArgumentException("native Top-N state requires a positive max parallelism");
-    }
-    this.maxParallelism = maxParallelism;
+  }
+
+  /** Whether this is Flink's UpdatableTopNFunction shape, which has no Paimon store yet. */
+  private boolean updateFast() {
+    return rowKeyColumns != null;
   }
 
   @Override
-  protected boolean isUsingCustomRawKeyedState() {
-    return true;
-  }
-
-  @Override
-  public void initializeState(StateInitializationContext context) throws Exception {
-    super.initializeState(context);
-    java.util.List<byte[]> snapshots = RawKeyedState.restore(context);
-    memoryBudget = ManagedMemoryBudget.reserveFor(this);
-    if (rowKeyColumns != null) {
-      // The update-fast ranker has no Paimon store shape yet: its state is memory-backed and
-      // snapshots as raw keyed-state blobs under every configured state backend.
-      handle =
-          snapshots.isEmpty()
-              ? Native.createUpdateFastTopNRanker(
-                  partitionColumns,
-                  keyTimestampPrecisions,
-                  rowKeyColumns,
-                  rowKeyTimestampPrecisions,
-                  sortIndices,
-                  sortAscending,
-                  sortNullsFirst,
-                  limit,
-                  outputRankNumber,
-                  memoryBudget.bytes())
-              : Native.restoreUpdateFastTopNRankerPartitions(
-                  partitionColumns,
-                  keyTimestampPrecisions,
-                  rowKeyColumns,
-                  rowKeyTimestampPrecisions,
-                  sortIndices,
-                  sortAscending,
-                  sortNullsFirst,
-                  limit,
-                  outputRankNumber,
-                  snapshots.toArray(new byte[0][]),
-                  memoryBudget.bytes());
-      return;
-    }
-    // Both rankers run on the Paimon list store: the append-only buffer is capped at N, and the
-    // retracting buffer — unbounded, like Flink's own retractable Top-N state — rewrites a
+  protected PaimonNativeStateSupport resolvePaimonState(boolean rawStateRestored) {
+    // Both ordinary rankers run on the Paimon list store: the append-only buffer is capped at N,
+    // and the retracting buffer — unbounded, like Flink's own retractable Top-N state — rewrites a
     // touched partition once per checkpoint, strictly less than the per-record state rewrite
-    // Flink's RetractableTopNFunction pays on RocksDB.
-    PaimonNativeStateSupport paimon =
-        PaimonNativeStateSupport.resolve(
-            getKeyedStateBackend(),
-            "top-n",
-            !snapshots.isEmpty(),
-            () ->
-                withRowSchema(address -> Native.paimonRowStateSupported(address) ? 1L : 0L) != 0);
-    paimonState = paimon != null;
-    if (paimonState) {
-      handle =
-          withRowSchema(
-              rowSchemaAddress ->
-                  Native.createPaimonTopNRanker(
-                      partitionColumns,
-                      keyTimestampPrecisions,
-                      sortIndices,
-                      sortAscending,
-                      sortNullsFirst,
-                      rowSchemaAddress,
-                      offset,
-                      limit,
-                      outputRankNumber,
-                      retracting,
-                      netDiff,
-                      memoryBudget.bytes(),
-                      paimon.tableDirectory(),
-                      maxParallelism,
-                      NativeConfig.paimonBuckets(),
-                      NativeConfig.paimonFileFormat(),
-                      NativeConfig.paimonFileCompression(),
-                      paimon.sourceDirectories(),
-                      paimon.sourceSnapshotTokens(),
-                      paimon.keyGroupStart(),
-                      paimon.keyGroupEnd(),
-                      paimon.aligned()));
-      long nativeHandle = handle;
-      paimon.register(() -> Native.checkpointPaimonTopNRanker(nativeHandle));
-      return;
+    // Flink's RetractableTopNFunction pays on RocksDB. The update-fast ranker has no store shape
+    // yet, so its state is memory-backed under every configured state backend.
+    if (updateFast()) {
+      return null;
     }
-    handle =
-        snapshots.isEmpty()
-            ? Native.createTopNRanker(
-                partitionColumns,
-                keyTimestampPrecisions,
-                sortIndices,
-                sortAscending,
-                sortNullsFirst,
-                offset,
-                limit,
-                outputRankNumber,
-                retracting,
-                netDiff,
-                memoryBudget.bytes())
-            : Native.restoreTopNRankerPartitions(
-                partitionColumns,
-                keyTimestampPrecisions,
-                sortIndices,
-                sortAscending,
-                sortNullsFirst,
-                offset,
-                limit,
-                outputRankNumber,
-                retracting,
-                netDiff,
-                snapshots.toArray(new byte[0][]),
-                memoryBudget.bytes());
+    return resolvePaimon(
+        rawStateRestored,
+        () -> withRowSchema(rowType, address -> Native.paimonRowStateSupported(address) ? 1L : 0L) != 0);
   }
 
-  /**
-   * Exports the input row type as an FFI Arrow schema for the duration of one native call; the
-   * native side consumes the schema contents, the wrapper struct is released here.
-   */
-  private long withRowSchema(java.util.function.LongUnaryOperator call) {
-    try (ArrowSchema rowSchema = ArrowSchema.allocateNew(NativeAllocator.SHARED)) {
-      Data.exportSchema(
-          NativeAllocator.SHARED,
-          ArrowConversion.toArrowSchema(rowType),
-          NativeAllocator.DICTIONARIES,
-          rowSchema);
-      return call.applyAsLong(rowSchema.memoryAddress());
+  @Override
+  protected long createPaimonHandle(PaimonNativeStateSupport paimon) {
+    return withRowSchema(
+        rowType,
+        rowSchemaAddress ->
+            Native.createPaimonTopNRanker(
+                partitionColumns,
+                keyTimestampPrecisions(),
+                sortIndices,
+                sortAscending,
+                sortNullsFirst,
+                rowSchemaAddress,
+                offset,
+                limit,
+                outputRankNumber,
+                retracting,
+                netDiff,
+                memoryBudgetBytes(),
+                paimon.tableDirectory(),
+                maxParallelism(),
+                NativeConfig.paimonBuckets(),
+                NativeConfig.paimonFileFormat(),
+                NativeConfig.paimonFileCompression(),
+                paimon.sourceDirectories(),
+                paimon.sourceSnapshotTokens(),
+                paimon.keyGroupStart(),
+                paimon.keyGroupEnd(),
+                paimon.aligned()));
+  }
+
+  @Override
+  protected String[] checkpointPaimonHandle() {
+    return Native.checkpointPaimonTopNRanker(handle);
+  }
+
+  @Override
+  protected long createHandle() {
+    if (updateFast()) {
+      return Native.createUpdateFastTopNRanker(
+          partitionColumns,
+          keyTimestampPrecisions(),
+          rowKeyColumns,
+          rowKeyTimestampPrecisions,
+          sortIndices,
+          sortAscending,
+          sortNullsFirst,
+          limit,
+          outputRankNumber,
+          memoryBudgetBytes());
     }
+    return Native.createTopNRanker(
+        partitionColumns,
+        keyTimestampPrecisions(),
+        sortIndices,
+        sortAscending,
+        sortNullsFirst,
+        offset,
+        limit,
+        outputRankNumber,
+        retracting,
+        netDiff,
+        memoryBudgetBytes());
+  }
+
+  @Override
+  protected long restoreRawHandle(byte[][] snapshots) {
+    if (updateFast()) {
+      return Native.restoreUpdateFastTopNRankerPartitions(
+          partitionColumns,
+          keyTimestampPrecisions(),
+          rowKeyColumns,
+          rowKeyTimestampPrecisions,
+          sortIndices,
+          sortAscending,
+          sortNullsFirst,
+          limit,
+          outputRankNumber,
+          snapshots,
+          memoryBudgetBytes());
+    }
+    return Native.restoreTopNRankerPartitions(
+        partitionColumns,
+        keyTimestampPrecisions(),
+        sortIndices,
+        sortAscending,
+        sortNullsFirst,
+        offset,
+        limit,
+        outputRankNumber,
+        retracting,
+        netDiff,
+        snapshots,
+        memoryBudgetBytes());
+  }
+
+  @Override
+  protected byte[][] snapshotRawPartitions() {
+    return Native.snapshotTopNRankerPartitions(handle, maxParallelism(), keyTimestampPrecisions());
+  }
+
+  @Override
+  protected void closeHandle() {
+    if (paimonState()) {
+      Native.closePaimonTopNRanker(handle);
+    } else {
+      Native.closeTopNRanker(handle);
+    }
+  }
+
+  @Override
+  protected long stateBytesHandle() {
+    return paimonState()
+        ? Native.paimonTopNRankerStateBytes(handle)
+        : Native.topNRankerStateBytes(handle);
   }
 
   @Override
   public void open() throws Exception {
     super.open();
-    allocator = NativeAllocator.SHARED;
-    dictionaries = NativeAllocator.DICTIONARIES;
     if (netDiff) {
       boundary = new MiniBatchBoundary(miniBatchSize);
       miniBatchMetrics = new MiniBatchMetrics(getMetricGroup());
@@ -292,7 +283,7 @@ public class NativeColumnarTopNOperator extends AbstractStreamOperator<ArrowBatc
         ArrowArray outArray = ArrowArray.allocateNew(allocator);
         ArrowSchema outSchema = ArrowSchema.allocateNew(allocator)) {
       Data.exportVectorSchemaRoot(inAllocator, in, dictionaries, inArray, inSchema);
-      if (paimonState) {
+      if (paimonState()) {
         Native.pushPaimonTopNRanker(
             handle,
             inArray.memoryAddress(),
@@ -353,16 +344,16 @@ public class NativeColumnarTopNOperator extends AbstractStreamOperator<ArrowBatc
 
   private void flushBundle(FlushReason reason) {
     long transientBytes =
-        paimonState
+        paimonState()
             ? Native.paimonTopNRankerStagingBytes(handle)
             : Native.topNRankerStagingBytes(handle);
     long touchedPartitions =
-        paimonState
+        paimonState()
             ? Native.paimonTopNRankerStagedKeys(handle)
             : Native.topNRankerStagedPartitions(handle);
     try (ArrowArray outArray = ArrowArray.allocateNew(allocator);
         ArrowSchema outSchema = ArrowSchema.allocateNew(allocator)) {
-      if (paimonState) {
+      if (paimonState()) {
         Native.flushPaimonTopNRanker(handle, outArray.memoryAddress(), outSchema.memoryAddress());
       } else {
         Native.flushTopNRanker(handle, outArray.memoryAddress(), outSchema.memoryAddress());
@@ -380,46 +371,11 @@ public class NativeColumnarTopNOperator extends AbstractStreamOperator<ArrowBatc
     boundary.reset();
   }
 
-  /** Samples the native state size for the operator's gauges; task-thread only. */
-  private void publishStateBytes() {
-    if (memoryBudget.bounded()) {
-      memoryBudget.publishStateBytes(
-          paimonState
-              ? Native.paimonTopNRankerStateBytes(handle)
-              : Native.topNRankerStateBytes(handle));
-    }
-  }
-
-  @Override
-  public void snapshotState(StateSnapshotContext context) throws Exception {
-    super.snapshotState(context);
-    // Paimon state checkpoints through the keyed state backend's snapshot (an incremental Paimon
-    // commit); only memory state travels as raw keyed-state blobs.
-    if (!paimonState) {
-      RawKeyedState.snapshotPartitions(
-          context,
-          Native.snapshotTopNRankerPartitions(
-              handle, maxParallelism, keyTimestampPrecisions));
-    }
-  }
-
   @Override
   public void close() throws Exception {
     if (coalescer != null) {
       coalescer.close();
       coalescer = null;
-    }
-    if (handle != 0) {
-      if (paimonState) {
-        Native.closePaimonTopNRanker(handle);
-      } else {
-        Native.closeTopNRanker(handle);
-      }
-      handle = 0;
-    }
-    if (memoryBudget != null) {
-      memoryBudget.close();
-      memoryBudget = null;
     }
     super.close();
   }

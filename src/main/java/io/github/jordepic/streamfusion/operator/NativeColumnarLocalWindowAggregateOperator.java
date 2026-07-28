@@ -54,7 +54,7 @@ public class NativeColumnarLocalWindowAggregateOperator extends NativeWindowOper
       int[] keyTimestampPrecisions,
       int maxParallelism) {
     super(
-        "streamfusion-local-window-state",
+        "local window aggregate",
         windowMillis,
         slideMillis,
         valueTypes,

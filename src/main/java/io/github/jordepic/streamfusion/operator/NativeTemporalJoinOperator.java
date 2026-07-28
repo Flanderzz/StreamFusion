@@ -1,18 +1,13 @@
 package io.github.jordepic.streamfusion.operator;
 
 import io.github.jordepic.streamfusion.Native;
-import io.github.jordepic.streamfusion.arrow.ArrowConversion;
 import io.github.jordepic.streamfusion.planner.NativeConfig;
 import io.github.jordepic.streamfusion.state.PaimonNativeStateSupport;
 import org.apache.arrow.c.ArrowArray;
 import org.apache.arrow.c.ArrowSchema;
-import org.apache.arrow.c.CDataDictionaryProvider;
 import org.apache.arrow.c.Data;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
-import org.apache.flink.runtime.state.StateInitializationContext;
-import org.apache.flink.runtime.state.StateSnapshotContext;
-import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.TwoInputStreamOperator;
 import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
@@ -38,7 +33,7 @@ import org.apache.flink.table.types.logical.RowType;
  * build side can be absent; a LEFT join null-pads a probe row that finds no valid version. Processing
  * time is intentionally unsupported — Flink itself rejects a processing-time temporal table join.
  */
-public class NativeTemporalJoinOperator extends AbstractStreamOperator<ArrowBatch>
+public class NativeTemporalJoinOperator extends AbstractNativeStatefulOperator<ArrowBatch>
     implements TwoInputStreamOperator<ArrowBatch, ArrowBatch, ArrowBatch> {
 
   private final int[] leftKeys;
@@ -49,14 +44,6 @@ public class NativeTemporalJoinOperator extends AbstractStreamOperator<ArrowBatc
   private final RowType leftType;
   private final RowType rightType;
   private final EncodedPredicate predicate;
-  private final int[] keyTimestampPrecisions;
-  private final int maxParallelism;
-
-  private transient BufferAllocator allocator;
-  private transient CDataDictionaryProvider dictionaries;
-  private transient long handle;
-  private transient boolean paimonState;
-  private transient ManagedMemoryBudget memoryBudget;
 
   public NativeTemporalJoinOperator(
       int[] leftKeys,
@@ -69,6 +56,7 @@ public class NativeTemporalJoinOperator extends AbstractStreamOperator<ArrowBatc
       EncodedPredicate predicate,
       int[] keyTimestampPrecisions,
       int maxParallelism) {
+    super("temporal join", keyTimestampPrecisions, maxParallelism);
     this.leftKeys = leftKeys;
     this.rightKeys = rightKeys;
     this.leftTime = leftTime;
@@ -77,136 +65,134 @@ public class NativeTemporalJoinOperator extends AbstractStreamOperator<ArrowBatc
     this.leftType = leftType;
     this.rightType = rightType;
     this.predicate = predicate;
-    this.keyTimestampPrecisions = keyTimestampPrecisions;
-    if (maxParallelism <= 0) {
-      throw new IllegalArgumentException("native temporal join state requires a positive max parallelism");
-    }
-    this.maxParallelism = maxParallelism;
   }
 
   @Override
-  protected boolean isUsingCustomRawKeyedState() {
-    return true;
-  }
-
-  @Override
-  public void initializeState(StateInitializationContext context) throws Exception {
-    super.initializeState(context);
-    java.util.List<byte[]> rawSnapshots = RawKeyedState.restore(context);
+  protected void beforeHandleCreation() {
     predicate.bind();
-    memoryBudget = ManagedMemoryBudget.reserveFor(this);
-    PaimonNativeStateSupport paimon =
-        PaimonNativeStateSupport.resolve(
-            getKeyedStateBackend(),
-            "temporal join",
-            !rawSnapshots.isEmpty(),
-            () ->
-                withSchemas(
-                        (l, r) ->
-                            Native.paimonRowStateSupported(l)
-                                    && Native.paimonRowStateSupported(r)
-                                ? 1L
-                                : 0L)
-                    != 0);
-    paimonState = paimon != null;
-    if (paimonState) {
-      handle =
-          withSchemas(
-              (l, r) ->
-                  Native.createPaimonTemporalJoiner(
-                      leftKeys,
-                      rightKeys,
-                      leftTime,
-                      rightTime,
-                      joinType,
-                      l,
-                      r,
-                      predicate.kinds,
-                      predicate.payload,
-                      predicate.childCounts,
-                      predicate.boundLongs(),
-                      predicate.doubles,
-                      predicate.strings,
-                      keyTimestampPrecisions,
-                      memoryBudget.bytes(),
-                      paimon.tableDirectory(),
-                      maxParallelism,
-                      NativeConfig.paimonBuckets(),
-                      NativeConfig.paimonFileFormat(),
-                      NativeConfig.paimonFileCompression(),
-                      paimon.sourceDirectories(),
-                      paimon.sourceSnapshotTokens(),
-                      paimon.keyGroupStart(),
-                      paimon.keyGroupEnd(),
-                      paimon.aligned()));
-      long nativeHandle = handle;
-      paimon.register(() -> Native.checkpointPaimonTemporalJoiner(nativeHandle));
-      return;
-    }
-    if (!rawSnapshots.isEmpty()) {
-      handle =
-          withSchemas(
-              (l, r) ->
-                  Native.restoreTemporalJoinerPartitions(
-                      leftKeys,
-                      rightKeys,
-                      leftTime,
-                      rightTime,
-                      joinType,
-                      l,
-                      r,
-                      predicate.kinds,
-                      predicate.payload,
-                      predicate.childCounts,
-                      predicate.boundLongs(),
-                      predicate.doubles,
-                      predicate.strings,
-                      rawSnapshots.toArray(new byte[0][]),
-                      memoryBudget.bytes()));
-    } else {
-      handle =
-          withSchemas(
-              (l, r) ->
-                  Native.createTemporalJoiner(
-                      leftKeys,
-                      rightKeys,
-                      leftTime,
-                      rightTime,
-                      joinType,
-                      l,
-                      r,
-                      predicate.kinds,
-                      predicate.payload,
-                      predicate.childCounts,
-                      predicate.boundLongs(),
-                      predicate.doubles,
-                      predicate.strings,
-                      memoryBudget.bytes()));
-    }
+  }
+
+  @Override
+  protected PaimonNativeStateSupport resolvePaimonState(boolean rawStateRestored) {
+    return resolvePaimon(
+        rawStateRestored,
+        () ->
+            withSchemas(
+                    (l, r) ->
+                        Native.paimonRowStateSupported(l) && Native.paimonRowStateSupported(r)
+                            ? 1L
+                            : 0L)
+                != 0);
+  }
+
+  @Override
+  protected long createPaimonHandle(PaimonNativeStateSupport paimon) {
+    return withSchemas(
+        (l, r) ->
+            Native.createPaimonTemporalJoiner(
+                leftKeys,
+                rightKeys,
+                leftTime,
+                rightTime,
+                joinType,
+                l,
+                r,
+                predicate.kinds,
+                predicate.payload,
+                predicate.childCounts,
+                predicate.boundLongs(),
+                predicate.doubles,
+                predicate.strings,
+                keyTimestampPrecisions(),
+                memoryBudgetBytes(),
+                paimon.tableDirectory(),
+                maxParallelism(),
+                NativeConfig.paimonBuckets(),
+                NativeConfig.paimonFileFormat(),
+                NativeConfig.paimonFileCompression(),
+                paimon.sourceDirectories(),
+                paimon.sourceSnapshotTokens(),
+                paimon.keyGroupStart(),
+                paimon.keyGroupEnd(),
+                paimon.aligned()));
+  }
+
+  @Override
+  protected String[] checkpointPaimonHandle() {
+    return Native.checkpointPaimonTemporalJoiner(handle);
+  }
+
+  @Override
+  protected long createHandle() {
+    return withSchemas(
+        (l, r) ->
+            Native.createTemporalJoiner(
+                leftKeys,
+                rightKeys,
+                leftTime,
+                rightTime,
+                joinType,
+                l,
+                r,
+                predicate.kinds,
+                predicate.payload,
+                predicate.childCounts,
+                predicate.boundLongs(),
+                predicate.doubles,
+                predicate.strings,
+                memoryBudgetBytes()));
+  }
+
+  @Override
+  protected long restoreRawHandle(byte[][] snapshots) {
+    return withSchemas(
+        (l, r) ->
+            Native.restoreTemporalJoinerPartitions(
+                leftKeys,
+                rightKeys,
+                leftTime,
+                rightTime,
+                joinType,
+                l,
+                r,
+                predicate.kinds,
+                predicate.payload,
+                predicate.childCounts,
+                predicate.boundLongs(),
+                predicate.doubles,
+                predicate.strings,
+                snapshots,
+                memoryBudgetBytes()));
+  }
+
+  @Override
+  protected byte[][] snapshotRawPartitions() {
+    return Native.snapshotTemporalJoinerPartitions(
+        handle, maxParallelism(), keyTimestampPrecisions());
+  }
+
+  @Override
+  protected void closeHandle() {
+    Native.closeTemporalJoiner(handle);
+  }
+
+  @Override
+  protected long stateBytesHandle() {
+    return Native.temporalJoinerStateBytes(handle);
   }
 
   /**
-   * Exports both side row types as FFI Arrow schemas for the duration of one native call — the
-   * native side consumes the schema contents, so every call needs its own export. The joiner
-   * takes both up front so a LEFT join can type the null-padding for the build side before that
-   * side's first batch arrives.
+   * Exports both side row types as FFI Arrow schemas for the duration of one native call. The
+   * joiner takes both up front so a LEFT join can type the null-padding for the build side before
+   * that side's first batch arrives.
    */
   private long withSchemas(java.util.function.LongBinaryOperator call) {
-    BufferAllocator alloc = NativeAllocator.SHARED;
-    CDataDictionaryProvider dicts = NativeAllocator.DICTIONARIES;
-    try (ArrowSchema leftSchema = ArrowSchema.allocateNew(alloc);
-        ArrowSchema rightSchema = ArrowSchema.allocateNew(alloc)) {
-      Data.exportSchema(alloc, ArrowConversion.toArrowSchema(leftType), dicts, leftSchema);
-      Data.exportSchema(alloc, ArrowConversion.toArrowSchema(rightType), dicts, rightSchema);
-      return call.applyAsLong(leftSchema.memoryAddress(), rightSchema.memoryAddress());
-    }
+    return withRowSchemas(leftType, rightType, call);
   }
 
   @Override
   public void open() throws Exception {
     super.open();
-    allocator = NativeAllocator.SHARED;
-    dictionaries = NativeAllocator.DICTIONARIES;
   }
 
   @Override
@@ -219,13 +205,6 @@ public class NativeTemporalJoinOperator extends AbstractStreamOperator<ArrowBatc
   public void processElement2(StreamRecord<ArrowBatch> element) {
     buffer(element.getValue(), false);
     publishStateBytes();
-  }
-
-  /** Samples the native state size for the operator's gauges; task-thread only. */
-  private void publishStateBytes() {
-    if (memoryBudget.bounded()) {
-      memoryBudget.publishStateBytes(Native.temporalJoinerStateBytes(handle));
-    }
   }
 
   /** Hands a batch to its side of the joiner, which buffers it (no output until a watermark). */
@@ -274,29 +253,8 @@ public class NativeTemporalJoinOperator extends AbstractStreamOperator<ArrowBatc
   }
 
   @Override
-  public void snapshotState(StateSnapshotContext context) throws Exception {
-    super.snapshotState(context);
-    // Paimon state checkpoints through the keyed state backend's snapshot (an incremental Paimon
-    // commit); only memory state travels as raw keyed-state blobs.
-    if (!paimonState) {
-      RawKeyedState.snapshotPartitions(
-          context,
-          Native.snapshotTemporalJoinerPartitions(
-              handle, maxParallelism, keyTimestampPrecisions));
-    }
-  }
-
-  @Override
   public void close() throws Exception {
-    if (handle != 0) {
-      Native.closeTemporalJoiner(handle);
-      handle = 0;
-    }
-    if (memoryBudget != null) {
-      memoryBudget.close();
-      memoryBudget = null;
-    }
-    predicate.unbind();
     super.close();
+    predicate.unbind();
   }
 }

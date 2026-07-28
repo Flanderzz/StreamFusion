@@ -56,7 +56,7 @@ public class NativeColumnarWindowAggregateOperator extends NativeRowWindowOperat
       int[] keyTimestampPrecisions,
       int maxParallelism) {
     super(
-        "streamfusion-window-aggregate-state",
+        "window aggregate",
         windowMillis,
         slideMillis,
         valueTypes,
@@ -95,9 +95,7 @@ public class NativeColumnarWindowAggregateOperator extends NativeRowWindowOperat
     // so only the event-time mode is Paimon-eligible.
     return proctime
         ? null
-        : PaimonNativeStateSupport.resolve(
-            getKeyedStateBackend(),
-            "window aggregate",
+        : resolvePaimon(
             rawStateRestored,
             () -> Native.paimonWindowAggStateSupported(valueTypes, aggregateKinds, keyTypes));
   }

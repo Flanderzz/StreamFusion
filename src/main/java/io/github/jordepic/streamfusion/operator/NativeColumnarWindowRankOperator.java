@@ -1,7 +1,6 @@
 package io.github.jordepic.streamfusion.operator;
 
 import io.github.jordepic.streamfusion.Native;
-import io.github.jordepic.streamfusion.arrow.ArrowConversion;
 import io.github.jordepic.streamfusion.planner.NativeConfig;
 import io.github.jordepic.streamfusion.state.PaimonNativeStateSupport;
 import java.time.Instant;
@@ -9,18 +8,15 @@ import java.time.ZoneId;
 import java.time.ZoneOffset;
 import org.apache.arrow.c.ArrowArray;
 import org.apache.arrow.c.ArrowSchema;
-import org.apache.arrow.c.CDataDictionaryProvider;
 import org.apache.arrow.c.Data;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.TimeStampNanoVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.flink.api.common.operators.ProcessingTimeService.ProcessingTimeCallback;
-import org.apache.flink.runtime.state.StateInitializationContext;
-import org.apache.flink.runtime.state.StateSnapshotContext;
-import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
+import org.apache.flink.table.types.logical.RowType;
 
 /**
  * Columnar window Top-N / window deduplication over a windowing-TVF input (the host's {@code
@@ -37,13 +33,12 @@ import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
  * slide boundary while windows remain open, like the proctime window aggregate). It ignores
  * watermarks in that mode and drains on finish.
  */
-public class NativeColumnarWindowRankOperator extends AbstractStreamOperator<ArrowBatch>
+public class NativeColumnarWindowRankOperator extends AbstractNativeStatefulOperator<ArrowBatch>
     implements OneInputStreamOperator<ArrowBatch, ArrowBatch>, ProcessingTimeCallback {
 
   private final int windowStartColumn;
   private final int windowEndColumn;
   private final int[] partitionColumns;
-  private final int[] keyTimestampPrecisions;
   private final int[] sortIndices;
   private final int[] sortAscending;
   private final int[] sortNullsFirst;
@@ -54,16 +49,9 @@ public class NativeColumnarWindowRankOperator extends AbstractStreamOperator<Arr
   private final long windowMillis;
   private final long slideMillis;
   private final boolean cumulative;
-  private final org.apache.flink.table.types.logical.RowType rowType;
-  private final int maxParallelism;
+  private final RowType rowType;
 
-  private transient BufferAllocator allocator;
-  private transient CDataDictionaryProvider dictionaries;
   private transient ZoneId zone;
-  private transient long handle;
-  private transient boolean paimonState;
-  private transient ManagedMemoryBudget memoryBudget;
-  private transient long restoredProcessingTimeTimerDeadline;
   private transient long registeredTimer;
   private transient long maxOpenEnd;
 
@@ -82,12 +70,12 @@ public class NativeColumnarWindowRankOperator extends AbstractStreamOperator<Arr
       long windowMillis,
       long slideMillis,
       boolean cumulative,
-      org.apache.flink.table.types.logical.RowType rowType,
+      RowType rowType,
       int maxParallelism) {
+    super("window rank", keyTimestampPrecisions, maxParallelism);
     this.windowStartColumn = windowStartColumn;
     this.windowEndColumn = windowEndColumn;
     this.partitionColumns = partitionColumns;
-    this.keyTimestampPrecisions = keyTimestampPrecisions;
     this.sortIndices = sortIndices;
     this.sortAscending = sortAscending;
     this.sortNullsFirst = sortNullsFirst;
@@ -99,100 +87,123 @@ public class NativeColumnarWindowRankOperator extends AbstractStreamOperator<Arr
     this.slideMillis = slideMillis;
     this.cumulative = cumulative;
     this.rowType = rowType;
-    if (maxParallelism <= 0) {
-      throw new IllegalArgumentException("native window-rank state requires a positive max parallelism");
-    }
-    this.maxParallelism = maxParallelism;
   }
 
+  // A proctime window rank closes windows on processing-time timers, so the deadline must travel
+  // in every raw key group; an event-time one writes the frame with no deadline.
   @Override
-  protected boolean isUsingCustomRawKeyedState() {
+  protected boolean carriesProcessingTimeTimer() {
     return true;
   }
 
   @Override
-  public void initializeState(StateInitializationContext context) throws Exception {
-    super.initializeState(context);
-    RawKeyedState.TimedRestore restored = RawKeyedState.restoreWithTimer(context);
-    java.util.List<byte[]> snapshots = restored.snapshots();
-    restoredProcessingTimeTimerDeadline = restored.deadline();
-    memoryBudget = ManagedMemoryBudget.reserveFor(this);
+  protected long processingTimeTimerDeadlineForSnapshot() {
+    return proctime ? maxOpenEnd : Long.MIN_VALUE;
+  }
+
+  @Override
+  protected PaimonNativeStateSupport resolvePaimonState(boolean rawStateRestored) {
     // A proctime window rank keeps memory state under the Paimon backend too: it closes windows
     // on processing-time timers whose deadline travels in raw state, not on watermarks.
-    PaimonNativeStateSupport paimon =
-        proctime
-            ? null
-            : PaimonNativeStateSupport.resolve(
-                getKeyedStateBackend(),
-                "window rank",
-                !snapshots.isEmpty(),
-                () ->
-                    withRowSchema(address -> Native.paimonRowStateSupported(address) ? 1L : 0L)
-                        != 0);
-    paimonState = paimon != null;
-    if (paimonState) {
-      handle =
-          withRowSchema(
-              rowSchemaAddress ->
-                  Native.createPaimonWindowRanker(
-                      windowStartColumn,
-                      windowEndColumn,
-                      partitionColumns,
-                      keyTimestampPrecisions,
-                      sortIndices,
-                      sortAscending,
-                      sortNullsFirst,
-                      limit,
-                      outputRankNumber,
-                      rowSchemaAddress,
-                      memoryBudget.bytes(),
-                      paimon.tableDirectory(),
-                      maxParallelism,
-                      NativeConfig.paimonBuckets(),
-                      NativeConfig.paimonFileFormat(),
-                      NativeConfig.paimonFileCompression(),
-                      paimon.sourceDirectories(),
-                      paimon.sourceSnapshotTokens(),
-                      paimon.keyGroupStart(),
-                      paimon.keyGroupEnd(),
-                      paimon.aligned()));
-      long nativeHandle = handle;
-      paimon.register(() -> Native.checkpointPaimonWindowRanker(nativeHandle));
-      return;
+    if (proctime) {
+      return null;
     }
-    handle =
-        snapshots.isEmpty()
-            ? Native.createWindowRanker(
+    return resolvePaimon(
+        rawStateRestored,
+        () -> withRowSchema(rowType, address -> Native.paimonRowStateSupported(address) ? 1L : 0L) != 0);
+  }
+
+  @Override
+  protected long createPaimonHandle(PaimonNativeStateSupport paimon) {
+    return withRowSchema(
+        rowType,
+        rowSchemaAddress ->
+            Native.createPaimonWindowRanker(
                 windowStartColumn,
                 windowEndColumn,
                 partitionColumns,
+                keyTimestampPrecisions(),
                 sortIndices,
                 sortAscending,
                 sortNullsFirst,
                 limit,
                 outputRankNumber,
-                memoryBudget.bytes())
-            : Native.restoreWindowRankerPartitions(
-                windowStartColumn,
-                windowEndColumn,
-                partitionColumns,
-                sortIndices,
-                sortAscending,
-                sortNullsFirst,
-                limit,
-                outputRankNumber,
-                snapshots.toArray(new byte[0][]),
-                memoryBudget.bytes());
+                rowSchemaAddress,
+                memoryBudgetBytes(),
+                paimon.tableDirectory(),
+                maxParallelism(),
+                NativeConfig.paimonBuckets(),
+                NativeConfig.paimonFileFormat(),
+                NativeConfig.paimonFileCompression(),
+                paimon.sourceDirectories(),
+                paimon.sourceSnapshotTokens(),
+                paimon.keyGroupStart(),
+                paimon.keyGroupEnd(),
+                paimon.aligned()));
+  }
+
+  @Override
+  protected String[] checkpointPaimonHandle() {
+    return Native.checkpointPaimonWindowRanker(handle);
+  }
+
+  @Override
+  protected long createHandle() {
+    return Native.createWindowRanker(
+        windowStartColumn,
+        windowEndColumn,
+        partitionColumns,
+        sortIndices,
+        sortAscending,
+        sortNullsFirst,
+        limit,
+        outputRankNumber,
+        memoryBudgetBytes());
+  }
+
+  @Override
+  protected long restoreRawHandle(byte[][] snapshots) {
+    return Native.restoreWindowRankerPartitions(
+        windowStartColumn,
+        windowEndColumn,
+        partitionColumns,
+        sortIndices,
+        sortAscending,
+        sortNullsFirst,
+        limit,
+        outputRankNumber,
+        snapshots,
+        memoryBudgetBytes());
+  }
+
+  @Override
+  protected byte[][] snapshotRawPartitions() {
+    return Native.snapshotWindowRankerPartitions(
+        handle, maxParallelism(), keyTimestampPrecisions());
+  }
+
+  @Override
+  protected void closeHandle() {
+    if (paimonState()) {
+      Native.closePaimonWindowRanker(handle);
+    } else {
+      Native.closeWindowRanker(handle);
+    }
+  }
+
+  @Override
+  protected long stateBytesHandle() {
+    return paimonState()
+        ? Native.paimonWindowRankerStateBytes(handle)
+        : Native.windowRankerStateBytes(handle);
   }
 
   @Override
   public void open() throws Exception {
     super.open();
-    allocator = NativeAllocator.SHARED;
-    dictionaries = NativeAllocator.DICTIONARIES;
     zone = ZoneId.of(timeZoneId);
     registeredTimer = Long.MIN_VALUE;
-    maxOpenEnd = restoredProcessingTimeTimerDeadline;
+    maxOpenEnd = restoredProcessingTimeTimerDeadline();
     if (proctime && maxOpenEnd != Long.MIN_VALUE) {
       long now = getProcessingTimeService().getCurrentProcessingTime();
       if (maxOpenEnd <= now) {
@@ -211,7 +222,7 @@ public class NativeColumnarWindowRankOperator extends AbstractStreamOperator<Arr
     try (ArrowArray array = ArrowArray.allocateNew(inAllocator);
         ArrowSchema schema = ArrowSchema.allocateNew(inAllocator)) {
       Data.exportVectorSchemaRoot(inAllocator, in, dictionaries, array, schema);
-      if (paimonState) {
+      if (paimonState()) {
         Native.pushPaimonWindowRanker(handle, array.memoryAddress(), schema.memoryAddress());
       } else {
         Native.pushWindowRanker(handle, array.memoryAddress(), schema.memoryAddress());
@@ -246,16 +257,6 @@ public class NativeColumnarWindowRankOperator extends AbstractStreamOperator<Arr
     publishStateBytes();
   }
 
-  /** Samples the native state size for the operator's gauges; task-thread only. */
-  private void publishStateBytes() {
-    if (memoryBudget.bounded()) {
-      memoryBudget.publishStateBytes(
-          paimonState
-              ? Native.paimonWindowRankerStateBytes(handle)
-              : Native.windowRankerStateBytes(handle));
-    }
-  }
-
   @Override
   public void finish() throws Exception {
     if (proctime) {
@@ -282,7 +283,7 @@ public class NativeColumnarWindowRankOperator extends AbstractStreamOperator<Arr
   private void flush(long threshold) {
     try (ArrowArray array = ArrowArray.allocateNew(allocator);
         ArrowSchema schema = ArrowSchema.allocateNew(allocator)) {
-      if (paimonState) {
+      if (paimonState()) {
         Native.flushPaimonWindowRanker(
             handle, threshold, array.memoryAddress(), schema.memoryAddress());
       } else {
@@ -320,50 +321,4 @@ public class NativeColumnarWindowRankOperator extends AbstractStreamOperator<Arr
     }
   }
 
-  /**
-   * Exports the input row type as an FFI Arrow schema for the duration of one native call; the
-   * native side consumes the schema contents, the wrapper struct is released here.
-   */
-  private long withRowSchema(java.util.function.LongUnaryOperator call) {
-    try (ArrowSchema rowSchema = ArrowSchema.allocateNew(NativeAllocator.SHARED)) {
-      Data.exportSchema(
-          NativeAllocator.SHARED,
-          ArrowConversion.toArrowSchema(rowType),
-          NativeAllocator.DICTIONARIES,
-          rowSchema);
-      return call.applyAsLong(rowSchema.memoryAddress());
-    }
-  }
-
-  @Override
-  public void snapshotState(StateSnapshotContext context) throws Exception {
-    super.snapshotState(context);
-    // Paimon state checkpoints through the keyed state backend's snapshot (an incremental Paimon
-    // commit); only memory state travels as raw keyed-state blobs.
-    if (paimonState) {
-      return;
-    }
-    RawKeyedState.snapshotPartitionsWithTimer(
-        context,
-        Native.snapshotWindowRankerPartitions(
-            handle, maxParallelism, keyTimestampPrecisions),
-        proctime ? maxOpenEnd : Long.MIN_VALUE);
-  }
-
-  @Override
-  public void close() throws Exception {
-    if (handle != 0) {
-      if (paimonState) {
-        Native.closePaimonWindowRanker(handle);
-      } else {
-        Native.closeWindowRanker(handle);
-      }
-      handle = 0;
-    }
-    if (memoryBudget != null) {
-      memoryBudget.close();
-      memoryBudget = null;
-    }
-    super.close();
-  }
 }

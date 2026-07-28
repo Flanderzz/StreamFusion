@@ -1,8 +1,6 @@
 package io.github.jordepic.streamfusion.operator;
 
 import io.github.jordepic.streamfusion.Native;
-import io.github.jordepic.streamfusion.state.PaimonNativeStateSupport;
-import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
@@ -10,9 +8,7 @@ import java.time.ZoneOffset;
 import java.util.List;
 import org.apache.arrow.c.ArrowArray;
 import org.apache.arrow.c.ArrowSchema;
-import org.apache.arrow.c.CDataDictionaryProvider;
 import org.apache.arrow.c.Data;
-import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.BigIntVector;
 import org.apache.arrow.vector.BitVector;
 import org.apache.arrow.vector.DateDayVector;
@@ -26,9 +22,6 @@ import org.apache.arrow.vector.TimeStampNanoVector;
 import org.apache.arrow.vector.TinyIntVector;
 import org.apache.arrow.vector.VarCharVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
-import org.apache.flink.runtime.state.StateInitializationContext;
-import org.apache.flink.runtime.state.StateSnapshotContext;
-import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.table.data.DecimalData;
 import org.apache.flink.table.data.RowData;
@@ -49,7 +42,7 @@ import org.apache.flink.table.types.logical.utils.LogicalTypeChecks;
  * any pending input so it reflects every record seen. The window bounds produced are local
  * wall-clock timestamps in the session zone, matching how the host renders event-time windows.
  */
-public abstract class NativeWindowOperatorCore<OUT> extends AbstractStreamOperator<OUT> {
+public abstract class NativeWindowOperatorCore<OUT> extends AbstractNativeStatefulOperator<OUT> {
 
   protected static final int TIMESTAMP_PRECISION = 3;
 
@@ -112,16 +105,8 @@ public abstract class NativeWindowOperatorCore<OUT> extends AbstractStreamOperat
   // aggregate over different value columns.
   protected final int[] valueTypes;
   protected final long windowMillis;
-  private final int[] keyTimestampPrecisions;
-  private final int maxParallelism;
 
   private transient ZoneId zone;
-  protected transient BufferAllocator allocator;
-  protected transient CDataDictionaryProvider dictionaries;
-  protected transient long handle;
-  private transient boolean paimonState;
-  private transient ManagedMemoryBudget memoryBudget;
-  private transient long restoredProcessingTimeTimerDeadline;
 
   /**
    * Creates a core backed by raw Flink keyed state. The timestamp descriptors describe the logical
@@ -136,16 +121,12 @@ public abstract class NativeWindowOperatorCore<OUT> extends AbstractStreamOperat
       String timeZoneId,
       int[] keyTimestampPrecisions,
       int maxParallelism) {
+    super(stateName, keyTimestampPrecisions, maxParallelism);
     this.windowMillis = windowMillis;
     this.slideMillis = slideMillis;
     this.valueTypes = valueTypes;
     this.aggregateKinds = aggregateKinds;
     this.timeZoneId = timeZoneId;
-    this.keyTimestampPrecisions = keyTimestampPrecisions;
-    if (maxParallelism <= 0) {
-      throw new IllegalArgumentException("native window state requires a positive max parallelism");
-    }
-    this.maxParallelism = maxParallelism;
   }
 
   /** Number of aggregates this window computes (and the partial columns it carries). */
@@ -160,6 +141,7 @@ public abstract class NativeWindowOperatorCore<OUT> extends AbstractStreamOperat
   protected abstract void emitClosedWindows(long watermark);
 
   /** Creates a fresh native aggregator handle. */
+  @Override
   protected long createHandle() {
     return Native.createTumblingAggregator(
         windowMillis, slideMillis, valueTypes, aggregateKinds, memoryBudgetBytes());
@@ -172,6 +154,7 @@ public abstract class NativeWindowOperatorCore<OUT> extends AbstractStreamOperat
   }
 
   /** Restores the fixed-window native state assigned to this task after a raw keyed-state rescale. */
+  @Override
   protected long restoreRawHandle(byte[][] snapshots) {
     return Native.restoreTumblingAggregatorPartitions(
         windowMillis,
@@ -184,27 +167,10 @@ public abstract class NativeWindowOperatorCore<OUT> extends AbstractStreamOperat
   }
 
   /** Returns every fixed-window raw key group from one native checkpoint pass. */
+  @Override
   protected byte[][] snapshotRawPartitions() {
     return Native.snapshotTumblingAggregatorPartitions(
-        handle, maxParallelism, keyTimestampPrecisions);
-  }
-
-  /**
-   * The managed-memory budget bounding the native state (see {@link ManagedMemoryBudget}), for this
-   * class's handle creation and any subclass override's.
-   */
-  protected final long memoryBudgetBytes() {
-    return memoryBudget == null ? ManagedMemoryBudget.UNBOUNDED : memoryBudget.bytes();
-  }
-
-  /** The Flink max parallelism used to map native BinaryRow hashes to raw state key groups. */
-  protected final int maxParallelism() {
-    return maxParallelism;
-  }
-
-  /** Recursive logical timestamp descriptors for the grouping key's BinaryRow layout. */
-  protected final int[] keyTimestampPrecisions() {
-    return keyTimestampPrecisions;
+        handle, maxParallelism(), keyTimestampPrecisions());
   }
 
   /** Folds an exported batch into the native aggregator. */
@@ -222,103 +188,35 @@ public abstract class NativeWindowOperatorCore<OUT> extends AbstractStreamOperat
     return Native.snapshotTumblingAggregator(handle);
   }
 
-  @Override
-  protected boolean isUsingCustomRawKeyedState() {
-    return true;
-  }
-
   /** Releases the native aggregator handle. */
+  @Override
   protected void closeHandle() {
     Native.closeTumblingAggregator(handle);
   }
 
   /** The native aggregator's tracked state footprint in bytes (zero when unaccounted). */
+  @Override
   protected long stateBytesHandle() {
     return Native.tumblingAggregatorStateBytes(handle);
   }
 
-  /** The latest native processing-time cleanup deadline restored from the previous checkpoint. */
-  protected final long restoredProcessingTimeTimerDeadline() {
-    return restoredProcessingTimeTimerDeadline;
-  }
-
-  /** The latest cleanup deadline copied into every raw key group at checkpoint time. */
-  protected long processingTimeTimerDeadlineForSnapshot() {
-    return Long.MIN_VALUE;
-  }
-
-  /**
-   * Samples the native state size and publishes it to the operator's gauges; call after batches and
-   * flushes on the task thread (the handle is not thread-safe). No-op without a budget — the native
-   * side only tracks its footprint when accounted.
-   */
-  protected final void publishStateBytes() {
-    if (memoryBudget.bounded()) {
-      memoryBudget.publishStateBytes(stateBytesHandle());
-    }
-  }
-
-  /** Whether this operator's state lives in a Paimon table this run. */
-  protected final boolean paimonState() {
-    return paimonState;
-  }
-
-  /**
-   * Paimon-backend hook: an operator whose native state supports the persistent store resolves
-   * it here (null keeps memory state). Called once from {@link #initializeState}.
-   */
-  protected PaimonNativeStateSupport resolvePaimonState(
-      boolean rawStateRestored) {
-    return null;
-  }
-
-  /** Creates the native handle on the Paimon backend; only reached when the hook resolved. */
-  protected long createPaimonHandle(
-      PaimonNativeStateSupport paimon) {
-    throw new UnsupportedOperationException("operator resolved Paimon state without a create");
-  }
-
-  /** The barrier checkpoint call for a Paimon-backed handle. */
-  protected String[] checkpointPaimonHandle() {
-    throw new UnsupportedOperationException("operator resolved Paimon state without a checkpoint");
-  }
-
+  // Every window operator can arm a processing-time timer (the proctime modes do; the event-time
+  // ones write the frame with no deadline), so the family shares one raw payload layout.
   @Override
-  public void initializeState(StateInitializationContext context) throws Exception {
-    super.initializeState(context);
-    memoryBudget = ManagedMemoryBudget.reserveFor(this);
-    RawKeyedState.TimedRestore restored = RawKeyedState.restoreWithTimer(context);
-    List<byte[]> snapshots = restored.snapshots();
-    restoredProcessingTimeTimerDeadline = restored.deadline();
-    PaimonNativeStateSupport paimon =
-        resolvePaimonState(!snapshots.isEmpty());
-    paimonState = paimon != null;
-    if (paimonState) {
-      handle = createPaimonHandle(paimon);
-      paimon.register(this::checkpointPaimonHandle);
-      return;
-    }
-    handle = snapshots.isEmpty() ? createHandle() : restoreRawHandle(snapshots.toArray(new byte[0][]));
+  protected boolean carriesProcessingTimeTimer() {
+    return true;
   }
 
+  /** A snapshot must reflect every record seen, so pending input is folded in before it is taken. */
   @Override
-  public void snapshotState(StateSnapshotContext context) throws Exception {
-    super.snapshotState(context);
+  protected void beforeSnapshotState() {
     flushPending();
-    // Paimon state checkpoints through the keyed state backend's snapshot (an incremental Paimon
-    // commit); only memory state travels as raw keyed-state blobs.
-    if (!paimonState) {
-      RawKeyedState.snapshotPartitionsWithTimer(
-          context, snapshotRawPartitions(), processingTimeTimerDeadlineForSnapshot());
-    }
   }
 
   @Override
   public void open() throws Exception {
     super.open();
     zone = ZoneId.of(timeZoneId);
-    allocator = NativeAllocator.SHARED;
-    dictionaries = NativeAllocator.DICTIONARIES;
   }
 
   @Override
@@ -327,19 +225,6 @@ public abstract class NativeWindowOperatorCore<OUT> extends AbstractStreamOperat
     emitClosedWindows(mark.getTimestamp());
     publishStateBytes();
     super.processWatermark(mark);
-  }
-
-  @Override
-  public void close() throws Exception {
-    if (handle != 0) {
-      closeHandle();
-      handle = 0;
-    }
-    if (memoryBudget != null) {
-      memoryBudget.close();
-      memoryBudget = null;
-    }
-    super.close();
   }
 
   /** Window start (epoch millis) rendered as a session-zone local timestamp, as the host does. */

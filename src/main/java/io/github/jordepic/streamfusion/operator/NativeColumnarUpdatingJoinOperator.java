@@ -1,19 +1,14 @@
 package io.github.jordepic.streamfusion.operator;
 
 import io.github.jordepic.streamfusion.Native;
-import io.github.jordepic.streamfusion.arrow.ArrowConversion;
 import io.github.jordepic.streamfusion.operator.MiniBatchMetrics.FlushReason;
 import io.github.jordepic.streamfusion.planner.NativeConfig;
 import io.github.jordepic.streamfusion.state.PaimonNativeStateSupport;
 import org.apache.arrow.c.ArrowArray;
 import org.apache.arrow.c.ArrowSchema;
-import org.apache.arrow.c.CDataDictionaryProvider;
 import org.apache.arrow.c.Data;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
-import org.apache.flink.runtime.state.StateInitializationContext;
-import org.apache.flink.runtime.state.StateSnapshotContext;
-import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.TwoInputStreamOperator;
 import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
@@ -33,7 +28,8 @@ import org.apache.flink.table.types.logical.RowType;
  * Data Interface) so an outer join can type the null-padding for a side before its first batch
  * arrives.
  */
-public class NativeColumnarUpdatingJoinOperator extends AbstractStreamOperator<ArrowBatch>
+public class NativeColumnarUpdatingJoinOperator
+    extends AbstractNativeStatefulOperator<ArrowBatch>
     implements TwoInputStreamOperator<ArrowBatch, ArrowBatch, ArrowBatch> {
 
   private final int[] leftKeys;
@@ -50,18 +46,12 @@ public class NativeColumnarUpdatingJoinOperator extends AbstractStreamOperator<A
   private final double[] predDoubles;
   private final String[] predStrings;
   private final NativeUdf.Binding predBinding;
-  private final int[] keyTimestampPrecisions;
   private final boolean miniBatch;
   private final long miniBatchSize;
-  private final int maxParallelism;
 
-  private transient BufferAllocator allocator;
-  private transient CDataDictionaryProvider dictionaries;
-  private transient long handle;
-  private transient boolean paimonState;
+  private transient long[] boundPredLongs;
   private transient MiniBatchBoundary boundary;
   private transient MiniBatchMetrics miniBatchMetrics;
-  private transient ManagedMemoryBudget memoryBudget;
   private transient BatchCoalescer leftCoalescer;
   private transient BatchCoalescer rightCoalescer;
 
@@ -82,6 +72,7 @@ public class NativeColumnarUpdatingJoinOperator extends AbstractStreamOperator<A
       boolean miniBatch,
       long miniBatchSize,
       int maxParallelism) {
+    super("updating join", keyTimestampPrecisions, maxParallelism);
     this.leftKeys = leftKeys;
     this.rightKeys = rightKeys;
     this.joinType = joinType;
@@ -94,50 +85,42 @@ public class NativeColumnarUpdatingJoinOperator extends AbstractStreamOperator<A
     this.predDoubles = predDoubles;
     this.predStrings = predStrings;
     this.predBinding = predBinding;
-    this.keyTimestampPrecisions = keyTimestampPrecisions;
     this.miniBatch = miniBatch;
     this.miniBatchSize = miniBatchSize;
-    if (maxParallelism <= 0) {
-      throw new IllegalArgumentException("native updating join state requires a positive max parallelism");
-    }
-    this.maxParallelism = maxParallelism;
+  }
+
+  // The residual predicate's bound longs must exist before any create/restore call reads them.
+  @Override
+  protected void beforeHandleCreation() {
+    boundPredLongs = predBinding.bind(predLongs);
   }
 
   @Override
-  protected boolean isUsingCustomRawKeyedState() {
-    return true;
+  protected PaimonNativeStateSupport resolvePaimonState(boolean rawStateRestored) {
+    return resolvePaimon(
+        rawStateRestored, () -> rowTypeSupported(leftType) && rowTypeSupported(rightType));
   }
 
+  /** Whether one side's row type is persistable, probed over a one-call FFI schema export. */
+  private static boolean rowTypeSupported(RowType rowType) {
+    return withRowSchema(rowType, address -> Native.paimonRowStateSupported(address) ? 1L : 0L) != 0;
+  }
+
+  // The joiner needs both sides' Arrow schemas up front (to type outer null-padding); they are
+  // exported through the C Data Interface for the create/restore call to import.
   @Override
-  public void initializeState(StateInitializationContext context) throws Exception {
-    super.initializeState(context);
-    java.util.List<byte[]> rawSnapshots = RawKeyedState.restore(context);
-    // The joiner needs both sides' Arrow schemas up front (to type outer null-padding); export them
-    // through the C Data Interface for the create/restore call to import.
-    BufferAllocator alloc = NativeAllocator.SHARED;
-    CDataDictionaryProvider dicts = NativeAllocator.DICTIONARIES;
-    try (ArrowSchema leftSchema = ArrowSchema.allocateNew(alloc);
-        ArrowSchema rightSchema = ArrowSchema.allocateNew(alloc)) {
-      Data.exportSchema(alloc, ArrowConversion.toArrowSchema(leftType), dicts, leftSchema);
-      Data.exportSchema(alloc, ArrowConversion.toArrowSchema(rightType), dicts, rightSchema);
-      long[] boundPredLongs = predBinding.bind(predLongs);
-      memoryBudget = ManagedMemoryBudget.reserveFor(this);
-      PaimonNativeStateSupport paimon =
-          PaimonNativeStateSupport.resolve(
-              getKeyedStateBackend(),
-              "updating join",
-              !rawSnapshots.isEmpty(),
-              () -> rowTypeSupported(leftType) && rowTypeSupported(rightType));
-      paimonState = paimon != null;
-      if (paimonState) {
-        handle =
+  protected long createPaimonHandle(PaimonNativeStateSupport paimon) {
+    return withRowSchemas(
+        leftType,
+        rightType,
+        (left, right) ->
             Native.createPaimonUpdatingJoiner(
                 leftKeys,
                 rightKeys,
-                keyTimestampPrecisions,
+                keyTimestampPrecisions(),
                 joinType,
-                leftSchema.memoryAddress(),
-                rightSchema.memoryAddress(),
+                left,
+                right,
                 predKinds,
                 predPayload,
                 predChildCounts,
@@ -145,9 +128,9 @@ public class NativeColumnarUpdatingJoinOperator extends AbstractStreamOperator<A
                 predDoubles,
                 predStrings,
                 miniBatch,
-                memoryBudget.bytes(),
+                memoryBudgetBytes(),
                 paimon.tableDirectory(),
-                maxParallelism,
+                maxParallelism(),
                 NativeConfig.paimonBuckets(),
                 NativeConfig.paimonFileFormat(),
                 NativeConfig.paimonFileCompression(),
@@ -155,20 +138,27 @@ public class NativeColumnarUpdatingJoinOperator extends AbstractStreamOperator<A
                 paimon.sourceSnapshotTokens(),
                 paimon.keyGroupStart(),
                 paimon.keyGroupEnd(),
-                paimon.aligned());
-        long nativeHandle = handle;
-        paimon.register(() -> Native.checkpointPaimonUpdatingJoiner(nativeHandle));
-        return;
-      }
-      if (!rawSnapshots.isEmpty()) {
-        handle =
-            Native.restoreUpdatingJoinerPartitions(
+                paimon.aligned()));
+  }
+
+  @Override
+  protected String[] checkpointPaimonHandle() {
+    return Native.checkpointPaimonUpdatingJoiner(handle);
+  }
+
+  @Override
+  protected long createHandle() {
+    return withRowSchemas(
+        leftType,
+        rightType,
+        (left, right) ->
+            Native.createUpdatingJoiner(
                 leftKeys,
                 rightKeys,
-                keyTimestampPrecisions,
+                keyTimestampPrecisions(),
                 joinType,
-                leftSchema.memoryAddress(),
-                rightSchema.memoryAddress(),
+                left,
+                right,
                 predKinds,
                 predPayload,
                 predChildCounts,
@@ -176,46 +166,58 @@ public class NativeColumnarUpdatingJoinOperator extends AbstractStreamOperator<A
                 predDoubles,
                 predStrings,
                 miniBatch,
-                rawSnapshots.toArray(new byte[0][]),
-                memoryBudget.bytes());
-      } else {
-        handle =
-            Native.createUpdatingJoiner(
-                  leftKeys,
-                  rightKeys,
-                  keyTimestampPrecisions,
-                  joinType,
-                  leftSchema.memoryAddress(),
-                  rightSchema.memoryAddress(),
-                  predKinds,
-                  predPayload,
-                  predChildCounts,
-                  boundPredLongs,
-                  predDoubles,
-                  predStrings,
-                  miniBatch,
-                  memoryBudget.bytes());
-      }
+                memoryBudgetBytes()));
+  }
+
+  @Override
+  protected long restoreRawHandle(byte[][] snapshots) {
+    return withRowSchemas(
+        leftType,
+        rightType,
+        (left, right) ->
+            Native.restoreUpdatingJoinerPartitions(
+                leftKeys,
+                rightKeys,
+                keyTimestampPrecisions(),
+                joinType,
+                left,
+                right,
+                predKinds,
+                predPayload,
+                predChildCounts,
+                boundPredLongs,
+                predDoubles,
+                predStrings,
+                miniBatch,
+                snapshots,
+                memoryBudgetBytes()));
+  }
+
+  @Override
+  protected byte[][] snapshotRawPartitions() {
+    return Native.snapshotUpdatingJoinerPartitions(
+        handle, maxParallelism(), keyTimestampPrecisions());
+  }
+
+  @Override
+  protected void closeHandle() {
+    if (paimonState()) {
+      Native.closePaimonUpdatingJoiner(handle);
+    } else {
+      Native.closeUpdatingJoiner(handle);
     }
   }
 
-  /** Whether one side's row type is persistable, probed over a one-call FFI schema export. */
-  private static boolean rowTypeSupported(RowType rowType) {
-    try (ArrowSchema schema = ArrowSchema.allocateNew(NativeAllocator.SHARED)) {
-      Data.exportSchema(
-          NativeAllocator.SHARED,
-          ArrowConversion.toArrowSchema(rowType),
-          NativeAllocator.DICTIONARIES,
-          schema);
-      return Native.paimonRowStateSupported(schema.memoryAddress());
-    }
+  @Override
+  protected long stateBytesHandle() {
+    return paimonState()
+        ? Native.paimonUpdatingJoinerStateBytes(handle)
+        : Native.updatingJoinerStateBytes(handle);
   }
 
   @Override
   public void open() throws Exception {
     super.open();
-    allocator = NativeAllocator.SHARED;
-    dictionaries = NativeAllocator.DICTIONARIES;
     if (miniBatch) {
       boundary = new MiniBatchBoundary(miniBatchSize);
       miniBatchMetrics = new MiniBatchMetrics(getMetricGroup());
@@ -284,16 +286,6 @@ public class NativeColumnarUpdatingJoinOperator extends AbstractStreamOperator<A
     }
   }
 
-  /** Samples the native state size for the operator's gauges; task-thread only. */
-  private void publishStateBytes() {
-    if (memoryBudget.bounded()) {
-      memoryBudget.publishStateBytes(
-          paimonState
-              ? Native.paimonUpdatingJoinerStateBytes(handle)
-              : Native.updatingJoinerStateBytes(handle));
-    }
-  }
-
   private void join(VectorSchemaRoot in, boolean left) {
     try {
       joinOpen(in, left);
@@ -310,7 +302,7 @@ public class NativeColumnarUpdatingJoinOperator extends AbstractStreamOperator<A
         ArrowArray outArray = ArrowArray.allocateNew(allocator);
         ArrowSchema outSchema = ArrowSchema.allocateNew(allocator)) {
       Data.exportVectorSchemaRoot(inAllocator, in, dictionaries, inArray, inSchema);
-      if (paimonState) {
+      if (paimonState()) {
         if (left) {
           Native.pushLeftPaimonUpdatingJoiner(
               handle, inArray.memoryAddress(), inSchema.memoryAddress(),
@@ -376,16 +368,16 @@ public class NativeColumnarUpdatingJoinOperator extends AbstractStreamOperator<A
 
   private void flushBundle(FlushReason reason) {
     long transientBytes =
-        paimonState
+        paimonState()
             ? Native.paimonUpdatingJoinerStagingBytes(handle)
             : Native.updatingJoinerStagingBytes(handle);
     long touchedKeys =
-        paimonState
+        paimonState()
             ? Native.paimonUpdatingJoinerStagedKeys(handle)
             : Native.updatingJoinerStagedKeys(handle);
     try (ArrowArray outArray = ArrowArray.allocateNew(allocator);
         ArrowSchema outSchema = ArrowSchema.allocateNew(allocator)) {
-      if (paimonState) {
+      if (paimonState()) {
         Native.flushPaimonUpdatingJoiner(
             handle, outArray.memoryAddress(), outSchema.memoryAddress());
       } else {
@@ -405,19 +397,6 @@ public class NativeColumnarUpdatingJoinOperator extends AbstractStreamOperator<A
   }
 
   @Override
-  public void snapshotState(StateSnapshotContext context) throws Exception {
-    super.snapshotState(context);
-    // Paimon state checkpoints through the keyed state backend's snapshot (an incremental Paimon
-    // commit); only memory state travels as raw keyed-state blobs.
-    if (!paimonState) {
-      RawKeyedState.snapshotPartitions(
-          context,
-          Native.snapshotUpdatingJoinerPartitions(
-              handle, maxParallelism, keyTimestampPrecisions));
-    }
-  }
-
-  @Override
   public void close() throws Exception {
     if (leftCoalescer != null) {
       leftCoalescer.close();
@@ -425,19 +404,7 @@ public class NativeColumnarUpdatingJoinOperator extends AbstractStreamOperator<A
       leftCoalescer = null;
       rightCoalescer = null;
     }
-    if (handle != 0) {
-      if (paimonState) {
-        Native.closePaimonUpdatingJoiner(handle);
-      } else {
-        Native.closeUpdatingJoiner(handle);
-      }
-      handle = 0;
-    }
-    if (memoryBudget != null) {
-      memoryBudget.close();
-      memoryBudget = null;
-    }
-    predBinding.unbind();
     super.close();
+    predBinding.unbind();
   }
 }

@@ -1,15 +1,12 @@
 package io.github.jordepic.streamfusion.operator;
 
 import io.github.jordepic.streamfusion.Native;
+import java.nio.ByteBuffer;
 import org.apache.arrow.c.ArrowArray;
 import org.apache.arrow.c.ArrowSchema;
-import org.apache.arrow.c.CDataDictionaryProvider;
 import org.apache.arrow.c.Data;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
-import org.apache.flink.runtime.state.StateInitializationContext;
-import org.apache.flink.runtime.state.StateSnapshotContext;
-import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
@@ -23,46 +20,54 @@ import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
  * release all live in the native sorter; this layer moves batches across the bridge and owns the
  * handle's checkpointed state.
  */
-public class NativeColumnarTemporalSortOperator extends AbstractStreamOperator<ArrowBatch>
+public class NativeColumnarTemporalSortOperator extends AbstractNativeStatefulOperator<ArrowBatch>
     implements OneInputStreamOperator<ArrowBatch, ArrowBatch> {
+
+  // Like Flink's EmptyRowDataKeySelector, temporal sort owns exactly one canonical empty key, so
+  // its whole buffer lives in raw key group zero: it can move — but never split — across a rescale.
+  private static final int SINGLETON_KEY_GROUP = 0;
 
   private final int rowtimeColumn;
 
-  private transient BufferAllocator allocator;
-  private transient CDataDictionaryProvider dictionaries;
-  private transient long handle;
-  private transient ManagedMemoryBudget memoryBudget;
-
   public NativeColumnarTemporalSortOperator(int rowtimeColumn) {
+    super("temporal sort", new int[0], 1);
     this.rowtimeColumn = rowtimeColumn;
   }
 
   @Override
-  protected boolean isUsingCustomRawKeyedState() {
-    return true;
+  protected long createHandle() {
+    return Native.createTemporalSorter(rowtimeColumn, memoryBudgetBytes());
   }
 
   @Override
-  public void initializeState(StateInitializationContext context) throws Exception {
-    super.initializeState(context);
-    java.util.List<byte[]> snapshots = RawKeyedState.restore(context);
-    if (snapshots.size() > 1) {
+  protected long restoreRawHandle(byte[][] snapshots) {
+    if (snapshots.length > 1) {
       throw new IllegalStateException(
           "temporal sort has one canonical empty key and cannot restore multiple key groups");
     }
-    byte[] snapshot = snapshots.isEmpty() ? null : snapshots.get(0);
-    memoryBudget = ManagedMemoryBudget.reserveFor(this);
-    handle =
-        snapshot == null
-            ? Native.createTemporalSorter(rowtimeColumn, memoryBudget.bytes())
-            : Native.restoreTemporalSorter(rowtimeColumn, snapshot, memoryBudget.bytes());
+    return Native.restoreTemporalSorter(rowtimeColumn, snapshots[0], memoryBudgetBytes());
   }
 
   @Override
-  public void open() throws Exception {
-    super.open();
-    allocator = NativeAllocator.SHARED;
-    dictionaries = NativeAllocator.DICTIONARIES;
+  protected byte[][] snapshotRawPartitions() {
+    byte[] snapshot = Native.snapshotTemporalSorter(handle);
+    if (snapshot.length == 0) {
+      return new byte[0][];
+    }
+    ByteBuffer framed = ByteBuffer.allocate(Integer.BYTES + snapshot.length);
+    framed.putInt(SINGLETON_KEY_GROUP);
+    framed.put(snapshot);
+    return new byte[][] {framed.array()};
+  }
+
+  @Override
+  protected void closeHandle() {
+    Native.closeTemporalSorter(handle);
+  }
+
+  @Override
+  protected long stateBytesHandle() {
+    return Native.temporalSorterStateBytes(handle);
   }
 
   @Override
@@ -99,35 +104,4 @@ public class NativeColumnarTemporalSortOperator extends AbstractStreamOperator<A
     super.processWatermark(mark);
   }
 
-  /** Samples the native state size for the operator's gauges; task-thread only. */
-  private void publishStateBytes() {
-    if (memoryBudget.bounded()) {
-      memoryBudget.publishStateBytes(Native.temporalSorterStateBytes(handle));
-    }
-  }
-
-  @Override
-  public void snapshotState(StateSnapshotContext context) throws Exception {
-    super.snapshotState(context);
-    byte[] snapshot = Native.snapshotTemporalSorter(handle);
-    if (snapshot.length > 0) {
-      // Like Flink's EmptyRowDataKeySelector, temporal sort owns exactly one empty key. With a
-      // max parallelism of one, that key is raw key group zero and can move—but never split—on
-      // recovery or rescale.
-      RawKeyedState.snapshot(context, new int[] {0}, ignored -> snapshot);
-    }
-  }
-
-  @Override
-  public void close() throws Exception {
-    if (handle != 0) {
-      Native.closeTemporalSorter(handle);
-      handle = 0;
-    }
-    if (memoryBudget != null) {
-      memoryBudget.close();
-      memoryBudget = null;
-    }
-    super.close();
-  }
 }

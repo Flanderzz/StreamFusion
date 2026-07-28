@@ -52,7 +52,7 @@ public class NativeColumnarSessionWindowAggregateOperator extends NativeRowWindo
       int maxParallelism) {
     // Sessions have no fixed size or slide; the gap is the only window parameter, carried separately.
     super(
-        "streamfusion-session-aggregate-state",
+        "session aggregate",
         0,
         0,
         valueTypes,
@@ -92,9 +92,7 @@ public class NativeColumnarSessionWindowAggregateOperator extends NativeRowWindo
     // accumulator state fields) is the window aggregate's own.
     return proctime
         ? null
-        : PaimonNativeStateSupport.resolve(
-            getKeyedStateBackend(),
-            "session aggregate",
+        : resolvePaimon(
             rawStateRestored,
             () -> Native.paimonWindowAggStateSupported(valueTypes, aggregateKinds, keyTypes));
   }
