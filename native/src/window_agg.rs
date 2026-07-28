@@ -645,13 +645,28 @@ impl TumblingAggregator {
     /// Local half of two-phase aggregation: emits each closed window's per-aggregate partial state
     /// as `[key, partial0..partialN-1, slice_end]`. Single-field partials (sum/min/max/count).
     pub(crate) fn flush_partial(&mut self, watermark: i64) -> RecordBatch {
-        self.snapshot_cache = None;
         self.current_watermark = self.current_watermark.max(watermark);
+        let ends = self.closed_windows(watermark);
+        self.emit_partials(ends)
+    }
+
+    /// Barrier flush for the local half: emits every open window's partial state, watermark
+    /// untouched — the local operator then crosses the checkpoint stateless (its pre-shuffle keys
+    /// span all key groups, so its state cannot partition into one subtask's raw key-group range),
+    /// and rows arriving after the barrier are not spuriously late. The global half merges the
+    /// extra per-barrier partial like any other upstream partial.
+    pub(crate) fn drain_partial(&mut self) -> RecordBatch {
+        let ends: Vec<i64> = self.windows.keys().copied().collect();
+        self.emit_partials(ends)
+    }
+
+    fn emit_partials(&mut self, ends: Vec<i64>) -> RecordBatch {
+        self.snapshot_cache = None;
         let n = self.aggregates.len();
         let mut keys: Vec<OwnedRow> = Vec::new();
         let mut slice_ends = Vec::new();
         let mut partials: Vec<Vec<ScalarValue>> = vec![Vec::new(); n];
-        for end in self.closed_windows(watermark) {
+        for end in ends {
             let window = self.windows.remove(&end).expect("window present");
             let mut group: Vec<(OwnedRow, Vec<Box<dyn Accumulator>>)> =
                 window.keys.into_iter().collect();
@@ -1179,6 +1194,22 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_flushPartialT
 ) {
     let aggregator = unsafe { &mut *(handle as *mut TumblingAggregator) };
     let result = aggregator.flush_partial(watermark_millis);
+    export_record_batch(result, out_array_address, out_schema_address);
+}
+
+/// Local two-phase half: emits every open window's partial state at a barrier, watermark untouched.
+#[no_mangle]
+pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_drainPartialTumblingAggregator<
+    'local,
+>(
+    _env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    out_array_address: jlong,
+    out_schema_address: jlong,
+) {
+    let aggregator = unsafe { &mut *(handle as *mut TumblingAggregator) };
+    let result = aggregator.drain_partial();
     export_record_batch(result, out_array_address, out_schema_address);
 }
 

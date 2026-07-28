@@ -5,7 +5,7 @@ import org.apache.calcite.sql.type.SqlTypeName;
 import org.apache.flink.runtime.state.KeyGroupRangeAssignment;
 
 /** Small planning-time helpers shared by the native exchange and raw keyed-state operators. */
-final class FlinkKeyGroupUtils {
+public final class FlinkKeyGroupUtils {
 
   private FlinkKeyGroupUtils() {}
 
@@ -57,7 +57,7 @@ final class FlinkKeyGroupUtils {
    * One ordinary JVM key per downstream subtask, used only to establish Flink's keyed-operator
    * context for a columnar batch. Native state itself is partitioned by every row's BinaryRow key.
    */
-  static int[] stateKeysForSubtasks(int maxParallelism, int parallelism) {
+  public static int[] stateKeysForSubtasks(int maxParallelism, int parallelism) {
     int[] keys = new int[parallelism];
     boolean[] found = new boolean[parallelism];
     int remaining = parallelism;

@@ -541,6 +541,14 @@ public final class Native {
   public static native void flushPartialTumblingAggregator(
       long handle, long watermarkMillis, long outArrayAddress, long outSchemaAddress);
 
+  /**
+   * Local two-phase half's barrier flush: emits every open window's partial state, watermark
+   * untouched, so the local operator crosses the checkpoint stateless and later rows are not
+   * spuriously late.
+   */
+  public static native void drainPartialTumblingAggregator(
+      long handle, long outArrayAddress, long outSchemaAddress);
+
   /** Serializes an aggregator's open windows so they can be stored in a checkpoint. */
   public static native byte[] snapshotTumblingAggregator(long handle);
 

@@ -1,10 +1,12 @@
 package io.github.jordepic.streamfusion.operator;
 
 import io.github.jordepic.streamfusion.Native;
+import io.github.jordepic.streamfusion.planner.FlinkKeyGroupUtils;
 import org.apache.arrow.c.ArrowArray;
 import org.apache.arrow.c.ArrowSchema;
 import org.apache.arrow.c.Data;
 import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.flink.api.common.TaskInfo;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 
@@ -14,6 +16,15 @@ import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
  * slice's partial state as an Arrow batch ({@code [key?, partial0.., slice_end]}) rather than rows.
  * That partial batch is exactly what the columnar global half consumes, so the shuffle between them
  * stays columnar — no row transpose on either side of the exchange.
+ *
+ * <p>The local half runs upstream of the columnar exchange, so its buffered keys are pre-shuffle:
+ * they span every key group and cannot partition into one subtask's raw key-group range. Mirroring
+ * Flink's local slicing window aggregate, it therefore drains every open slice's partial downstream
+ * before each checkpoint barrier and crosses the checkpoint stateless — the global half merges the
+ * extra per-barrier partial like any other upstream partial. Its keyed context (needed only for the
+ * raw-state plumbing it shares with the keyed window operators) is its own subtask's representative
+ * key, set once; the per-record context from the batch's destination tag is meaningless here, since
+ * pre-shuffle batches carry no destination.
  */
 public class NativeColumnarLocalWindowAggregateOperator extends NativeWindowOperatorCore<ArrowBatch>
     implements OneInputStreamOperator<ArrowBatch, ArrowBatch> {
@@ -60,6 +71,21 @@ public class NativeColumnarLocalWindowAggregateOperator extends NativeWindowOper
   }
 
   @Override
+  public void open() throws Exception {
+    super.open();
+    TaskInfo task = getRuntimeContext().getTaskInfo();
+    setCurrentKey(
+        FlinkKeyGroupUtils.stateKeysForSubtasks(
+            maxParallelism(), task.getNumberOfParallelSubtasks())[task.getIndexOfThisSubtask()]);
+  }
+
+  @Override
+  @SuppressWarnings("rawtypes")
+  public void setKeyContextElement1(StreamRecord record) {
+    // The subtask-local key set in open() is the operator's whole keyed context.
+  }
+
+  @Override
   public void processElement(StreamRecord<ArrowBatch> element) {
     try (VectorSchemaRoot in = element.getValue().root()) {
       if (windowEndColumn >= 0) {
@@ -68,6 +94,17 @@ public class NativeColumnarLocalWindowAggregateOperator extends NativeWindowOper
       } else {
         updateColumnar(in, timeColumn, valueColumns, keyColumns, keyTypes);
       }
+    }
+    publishStateBytes();
+  }
+
+  @Override
+  public void prepareSnapshotPreBarrier(long checkpointId) {
+    try (ArrowArray array = ArrowArray.allocateNew(allocator);
+        ArrowSchema schema = ArrowSchema.allocateNew(allocator)) {
+      Native.drainPartialTumblingAggregator(
+          handle, array.memoryAddress(), schema.memoryAddress());
+      emitPartial(Data.importVectorSchemaRoot(allocator, array, schema, dictionaries));
     }
     publishStateBytes();
   }
@@ -83,12 +120,15 @@ public class NativeColumnarLocalWindowAggregateOperator extends NativeWindowOper
         ArrowSchema schema = ArrowSchema.allocateNew(allocator)) {
       Native.flushPartialTumblingAggregator(
           handle, watermark, array.memoryAddress(), schema.memoryAddress());
-      VectorSchemaRoot partial = Data.importVectorSchemaRoot(allocator, array, schema, dictionaries);
-      if (partial.getRowCount() > 0) {
-        output.collect(new StreamRecord<>(new ArrowBatch(partial)));
-      } else {
-        partial.close(); // nothing closed this watermark; release the empty batch
-      }
+      emitPartial(Data.importVectorSchemaRoot(allocator, array, schema, dictionaries));
+    }
+  }
+
+  private void emitPartial(VectorSchemaRoot partial) {
+    if (partial.getRowCount() > 0) {
+      output.collect(new StreamRecord<>(new ArrowBatch(partial)));
+    } else {
+      partial.close(); // nothing to emit; release the empty batch
     }
   }
 }

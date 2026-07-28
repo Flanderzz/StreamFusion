@@ -37,11 +37,24 @@ class FlinkColumnarShuffleParallelismTest {
     Path input = Files.createTempDirectory("cshuffle-p2-in");
     writeInput(input);
     long registeredBefore = ArrowBatchHandles.registered();
-    NativeParity.assertParity(() -> readEnvironment(input), WINDOW_QUERY);
+    NativeParity.assertParity(() -> readEnvironment(input, "ONE_PHASE", false), WINDOW_QUERY);
     // Local execution must take the zero-copy shuffle: batches were parked in the handle table
     // (the exchange really moved ownership, not IPC bytes) and every one was claimed back.
     assertTrue(ArrowBatchHandles.registered() > registeredBefore);
     assertEquals(0, ArrowBatchHandles.inFlight());
+  }
+
+  /**
+   * The two-phase shape at parallelism 2: the local window aggregate is chained upstream of the
+   * exchange, so its keyed context cannot come from a batch destination (pre-shuffle batches carry
+   * none) and its buffered slices cannot survive a barrier (pre-shuffle keys span all key groups).
+   * Checkpointing is on so barrier drains actually fire mid-stream on every subtask.
+   */
+  @Test
+  void twoPhaseWindowAggAtParallelismTwoMatchesHost() throws Exception {
+    Path input = Files.createTempDirectory("cshuffle-p2-2phase-in");
+    writeInput(input);
+    NativeParity.assertParity(() -> readEnvironment(input, "TWO_PHASE", true), WINDOW_QUERY);
   }
 
   /** Writes the input as multiple Parquet files (parallel write) so the sharded read has work per subtask. */
@@ -76,11 +89,15 @@ class FlinkColumnarShuffleParallelismTest {
     tEnv.executeSql("INSERT INTO in_write SELECT * FROM s").await();
   }
 
-  private static TableEnvironment readEnvironment(Path directory) {
+  private static TableEnvironment readEnvironment(
+      Path directory, String aggPhaseStrategy, boolean checkpointing) {
     StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
     env.setParallelism(2);
+    if (checkpointing) {
+      env.enableCheckpointing(100);
+    }
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
-    tEnv.getConfig().set("table.optimizer.agg-phase-strategy", "ONE_PHASE");
+    tEnv.getConfig().set("table.optimizer.agg-phase-strategy", aggPhaseStrategy);
     // Delay larger than the whole data span (~5.7s) so no window closes before end-of-input MAX —
     // keeps this test about the shuffle routing only, independent of watermark-driven late dropping
     // (which has its own coverage; see divergences/09 and the out-of-order parity test).
