@@ -1280,9 +1280,9 @@ fn group_state_over_budget_fails_and_deletes_release() {
     let mut agg = GroupAggregator::new(vec![0], vec![0], vec![1], vec![0], true)
         .with_memory_budget(1 << 20)
         .unwrap();
-    agg.update(&group_changelog(vec![1, 2], vec![Some(10), Some(20)], vec![0, 0])).unwrap();
+    agg.update(&group_changelog(vec![1, 2], vec![Some(10), Some(20)], vec![0, 0]), 0).unwrap();
     assert!(agg.memory.state_bytes > 0);
-    agg.update(&group_changelog(vec![1, 2], vec![Some(10), Some(20)], vec![3, 3])).unwrap();
+    agg.update(&group_changelog(vec![1, 2], vec![Some(10), Some(20)], vec![3, 3]), 0).unwrap();
     assert_eq!(agg.memory.state_bytes, 0); // both groups deleted -> fully released
 
     let mut tight = GroupAggregator::new(vec![0], vec![0], vec![1], vec![0], true)
@@ -1291,7 +1291,7 @@ fn group_state_over_budget_fails_and_deletes_release() {
     let keys: Vec<i64> = (0..100).collect();
     let values: Vec<Option<i64>> = keys.iter().map(|&k| Some(k)).collect();
     let err = tight
-        .update(&group_changelog(keys, values, vec![0; 100]))
+        .update(&group_changelog(keys, values, vec![0; 100]), 0)
         .unwrap_err();
     assert!(err.to_string().contains("managed-memory budget"), "{err}");
 }
@@ -1529,7 +1529,7 @@ fn group_by_emits_insert_then_update_changelog() {
     // SUM(bigint) over value column 1, grouping on key column 0, emitting -U.
     let mut agg = GroupAggregator::new(vec![0], vec![0], vec![1], vec![0], true);
     // keys a,a,b,a with values 1,2,5,0 — the last adds 0, leaving a's sum at 3 (suppressed).
-    let out = agg.update(&group_batch(vec![1, 1, 2, 1], vec![1, 2, 5, 0])).unwrap();
+    let out = agg.update(&group_batch(vec![1, 1, 2, 1], vec![1, 2, 5, 0]), 0).unwrap();
     assert_eq!(row_kinds(&out), vec![0, 1, 2, 0]);
     assert_eq!(values(&out, 0), vec![1, 1, 1, 2]); // key
     assert_eq!(values(&out, 1), vec![1, 1, 3, 5]); // running sum (prev on -U, new on +U)
@@ -1540,7 +1540,7 @@ fn group_by_emits_insert_then_update_changelog() {
 fn group_by_counts_every_row_for_count_star() {
     // kinds COUNT(*), SUM; COUNT(*) has no column (-1), SUM reads column 1; group on column 0.
     let mut agg = GroupAggregator::new(vec![3, 0], vec![0, 0], vec![-1, 1], vec![0], true);
-    let out = agg.update(&group_batch(vec![1, 1], vec![10, 5])).unwrap();
+    let out = agg.update(&group_batch(vec![1, 1], vec![10, 5]), 0).unwrap();
     assert_eq!(row_kinds(&out), vec![0, 1, 2]); // +I, then -U/+U
     assert_eq!(values(&out, 1), vec![1, 1, 2]); // COUNT(*): 1, then 1->2
     assert_eq!(values(&out, 2), vec![10, 10, 15]); // SUM: 10, then 10->15
@@ -1552,7 +1552,7 @@ fn group_by_counts_every_row_for_count_star() {
 fn group_by_avg_truncates_toward_zero() {
     let mut agg = GroupAggregator::new(vec![4], vec![0], vec![1], vec![0], true);
     // One key, values 10 then 1 → avg 10, then 11/2 = 5 (truncated from 5.5, not rounded).
-    let out = agg.update(&group_batch(vec![1, 1], vec![10, 1])).unwrap();
+    let out = agg.update(&group_batch(vec![1, 1], vec![10, 1]), 0).unwrap();
     assert_eq!(row_kinds(&out), vec![0, 1, 2]); // +I, then -U/+U
     assert_eq!(values(&out, 1), vec![10, 10, 5]);
 }
@@ -1574,7 +1574,7 @@ fn group_by_filter_gates_each_aggregate() {
     // COUNT(*) over a boolean filter in column 1; group on column 0.
     let mut agg = GroupAggregator::new(vec![3], vec![0], vec![-1], vec![0], true)
         .with_filter_columns(vec![1]);
-    let out = agg.update(&batch).unwrap();
+    let out = agg.update(&batch, 0).unwrap();
     // Only the TRUE row counts → +I count=1; the FALSE/NULL rows leave it unchanged (suppressed).
     assert_eq!(row_kinds(&out), vec![0]);
     assert_eq!(values(&out, 1), vec![1]);
@@ -1597,7 +1597,7 @@ fn group_by_min_max_string() {
     .unwrap();
     // MIN, MAX over the string column 1; group on column 0; value type code 3 (Utf8).
     let mut agg = GroupAggregator::new(vec![1, 2], vec![3, 3], vec![1, 1], vec![0], true);
-    let out = agg.update(&batch).unwrap();
+    let out = agg.update(&batch, 0).unwrap();
     let last = out.num_rows() - 1;
     let min = out.column(1).as_any().downcast_ref::<StringArray>().unwrap();
     let max = out.column(2).as_any().downcast_ref::<StringArray>().unwrap();
@@ -1621,7 +1621,7 @@ fn group_by_treats_absent_row_kind_as_insert() {
         ],
     )
     .unwrap();
-    let out = agg.update(&batch).unwrap();
+    let out = agg.update(&batch, 0).unwrap();
     assert_eq!(row_kinds(&out), vec![0, 1, 2]); // +I(10); -U(10)/+U(30)
     assert_eq!(values(&out, 1), vec![10, 10, 30]);
 }
@@ -1630,8 +1630,8 @@ fn group_by_treats_absent_row_kind_as_insert() {
 fn group_by_mini_batch_emits_one_final_change_across_physical_batches() {
     let mut agg =
         GroupAggregator::new(vec![0], vec![0], vec![1], vec![0], true).with_mini_batch();
-    let first = agg.update(&group_batch(vec![1, 2], vec![10, 7])).unwrap();
-    let second = agg.update(&group_batch(vec![1, 1], vec![5, 2])).unwrap();
+    let first = agg.update(&group_batch(vec![1, 2], vec![10, 7]), 0).unwrap();
+    let second = agg.update(&group_batch(vec![1, 1], vec![5, 2]), 0).unwrap();
     assert_eq!(first.num_rows(), 0);
     assert_eq!(second.num_rows(), 0);
 
@@ -1645,14 +1645,14 @@ fn group_by_mini_batch_emits_one_final_change_across_physical_batches() {
 fn group_by_mini_batch_preserves_first_preimage_and_suppresses_cancelled_groups() {
     let mut agg =
         GroupAggregator::new(vec![0], vec![0], vec![1], vec![0], true).with_mini_batch();
-    agg.update(&group_batch(vec![1], vec![10])).unwrap();
+    agg.update(&group_batch(vec![1], vec![10]), 0).unwrap();
     agg.flush_mini_batch().unwrap();
 
     agg.update(&group_changelog(
         vec![1, 1, 2, 2],
         vec![Some(5), Some(2), Some(9), Some(9)],
         vec![0, 0, 0, 3],
-    ))
+    ), 0)
     .unwrap();
     let out = agg.flush_mini_batch().unwrap();
     assert_eq!(row_kinds(&out), vec![1, 2]);
@@ -1664,7 +1664,7 @@ fn group_by_mini_batch_preserves_first_preimage_and_suppresses_cancelled_groups(
 #[test]
 fn group_by_omits_update_before_when_disabled() {
     let mut agg = GroupAggregator::new(vec![0], vec![0], vec![1], vec![0], false);
-    let out = agg.update(&group_batch(vec![1, 1], vec![10, 5])).unwrap();
+    let out = agg.update(&group_batch(vec![1, 1], vec![10, 5]), 0).unwrap();
     assert_eq!(row_kinds(&out), vec![0, 2]); // +I(10), +U(15)
     assert_eq!(values(&out, 1), vec![10, 15]);
 }
@@ -1674,13 +1674,139 @@ fn group_by_omits_update_before_when_disabled() {
 #[test]
 fn group_by_survives_snapshot_restore() {
     let mut agg = GroupAggregator::new(vec![0], vec![0], vec![1], vec![0], true);
-    agg.update(&group_batch(vec![1], vec![10]));
+    agg.update(&group_batch(vec![1], vec![10]), 0);
     let snapshot = agg.snapshot();
     let mut restored =
-        GroupAggregator::restore(vec![0], vec![0], vec![1], vec![0], true, &snapshot);
-    let out = restored.update(&group_batch(vec![1], vec![5])).unwrap();
+        GroupAggregator::restore(vec![0], vec![0], vec![1], vec![0], true, &snapshot, 0);
+    let out = restored.update(&group_batch(vec![1], vec![5]), 0).unwrap();
     assert_eq!(row_kinds(&out), vec![1, 2]); // -U(10), +U(15) — continues from 10
     assert_eq!(values(&out, 1), vec![10, 15]);
+}
+
+// State TTL: an idle group expires ttl millis after its last write; the next add is a fresh +I
+// with a restarted accumulator (Flink's NeverReturnExpired: expired reads as absent).
+#[test]
+fn group_by_ttl_expires_an_idle_key_into_a_fresh_insert() {
+    let mut agg =
+        GroupAggregator::new(vec![0], vec![0], vec![1], vec![0], true).with_state_ttl(1000);
+    let out = agg.update(&group_batch(vec![1], vec![10]), 5000).unwrap();
+    assert_eq!(row_kinds(&out), vec![0]); // +I 10
+    // ts 5000 + ttl 1000 <= 6000: expired exactly at the boundary — the sum restarts at 5.
+    let out = agg.update(&group_batch(vec![1], vec![5]), 6000).unwrap();
+    assert_eq!(row_kinds(&out), vec![0]); // +I, not -U/+U
+    assert_eq!(values(&out, 1), vec![5]);
+}
+
+// A write refreshes the TTL (OnCreateAndWrite): steadily-touched keys never expire, and expiry is
+// timed from the LAST write.
+#[test]
+fn group_by_ttl_refreshes_on_every_write() {
+    let mut agg =
+        GroupAggregator::new(vec![0], vec![0], vec![1], vec![0], true).with_state_ttl(1000);
+    agg.update(&group_batch(vec![1], vec![10]), 5000).unwrap();
+    let out = agg.update(&group_batch(vec![1], vec![5]), 5900).unwrap();
+    assert_eq!(row_kinds(&out), vec![1, 2]); // alive: -U(10)/+U(15)
+    // 900ms later the original write is long past ttl, but the refresh at 5900 keeps it alive.
+    let out = agg.update(&group_batch(vec![1], vec![1]), 6800).unwrap();
+    assert_eq!(row_kinds(&out), vec![1, 2]);
+    assert_eq!(values(&out, 1), vec![15, 16]);
+}
+
+// A retraction reaching an expired (absent) group emits nothing and creates no state — Flink
+// drops retractions with no accumulator.
+#[test]
+fn group_by_ttl_drops_a_retraction_against_an_expired_key() {
+    let mut agg =
+        GroupAggregator::new(vec![0], vec![0], vec![1], vec![0], true).with_state_ttl(1000);
+    agg.update(&group_batch(vec![1], vec![10]), 5000).unwrap();
+    let out =
+        agg.update(&group_changelog(vec![1], vec![Some(10)], vec![1]), 7000).unwrap();
+    assert_eq!(out.num_rows(), 0);
+}
+
+// With TTL on, the unchanged-result suppression is disabled: Flink always emits -U/+U so
+// downstream TTL state keeps refreshing (the deterministic, parity-testable TTL behavior).
+#[test]
+fn group_by_ttl_emits_the_unchanged_update_it_would_otherwise_suppress() {
+    let mut agg =
+        GroupAggregator::new(vec![0], vec![0], vec![1], vec![0], true).with_state_ttl(3_600_000);
+    agg.update(&group_batch(vec![1], vec![10]), 5000).unwrap();
+    // Adding 0 leaves the sum at 10 — suppressed without TTL (see the changelog test above).
+    let out = agg.update(&group_batch(vec![1], vec![0]), 5001).unwrap();
+    assert_eq!(row_kinds(&out), vec![1, 2]); // -U(10)/+U(10)
+    assert_eq!(values(&out, 1), vec![10, 10]);
+}
+
+// TTL timestamps ride the snapshot as absolute millis: expiry after a restore is timed from the
+// original write, not from the restore.
+#[test]
+fn group_by_ttl_timestamps_survive_snapshot_restore() {
+    let mut agg =
+        GroupAggregator::new(vec![0], vec![0], vec![1], vec![0], true).with_state_ttl(1000);
+    agg.update(&group_batch(vec![1], vec![10]), 5000).unwrap();
+    let snapshot = agg.snapshot();
+    let mut alive =
+        GroupAggregator::restore(vec![0], vec![0], vec![1], vec![0], true, &snapshot, 5500)
+            .with_state_ttl(1000);
+    let out = alive.update(&group_batch(vec![1], vec![5]), 5999).unwrap();
+    assert_eq!(row_kinds(&out), vec![1, 2]); // one ms inside the window — still alive
+    let mut expired =
+        GroupAggregator::restore(vec![0], vec![0], vec![1], vec![0], true, &snapshot, 5500)
+            .with_state_ttl(1000);
+    let out = expired.update(&group_batch(vec![1], vec![5]), 6000).unwrap();
+    assert_eq!(row_kinds(&out), vec![0]); // ts 5000 + 1000 <= 6000 — fresh insert
+    assert_eq!(values(&out, 1), vec![5]);
+}
+
+// A pre-TTL snapshot (no timestamp column) restored into a TTL'd aggregator stamps every group
+// with the restore time — a full retention from now, Flink's enable-TTL migration — instead of
+// expiring everything on first touch.
+#[test]
+fn group_by_ttl_enable_migration_stamps_restore_time() {
+    let mut agg = GroupAggregator::new(vec![0], vec![0], vec![1], vec![0], true);
+    agg.update(&group_batch(vec![1], vec![10]), 0).unwrap();
+    let snapshot = agg.snapshot(); // TTL off: no timestamp column
+    let mut restored =
+        GroupAggregator::restore(vec![0], vec![0], vec![1], vec![0], true, &snapshot, 5000)
+            .with_state_ttl(1000);
+    let out = restored.update(&group_batch(vec![1], vec![5]), 5999).unwrap();
+    assert_eq!(row_kinds(&out), vec![1, 2]); // alive until restore + ttl
+    assert_eq!(values(&out, 1), vec![10, 15]);
+}
+
+// The periodic sweep reclaims keys that are never touched again, silently (expiry emits nothing).
+#[test]
+fn group_by_ttl_sweep_reclaims_idle_keys_silently() {
+    let mut agg =
+        GroupAggregator::new(vec![0], vec![0], vec![1], vec![0], true).with_state_ttl(1000);
+    agg.update(&group_batch(vec![1], vec![10]), 5000).unwrap();
+    agg.update(&group_batch(vec![2], vec![20]), 5000).unwrap();
+    // Touching only key 2 well past key 1's expiry triggers the once-per-period sweep; key 1's
+    // state is gone from the snapshot without any -D having been emitted.
+    let out = agg.update(&group_batch(vec![2], vec![1]), 7000).unwrap();
+    assert_eq!(row_kinds(&out), vec![0]); // key 2 itself had expired too — fresh +I
+    let snapshot = agg.snapshot();
+    let mut probe =
+        GroupAggregator::restore(vec![0], vec![0], vec![1], vec![0], true, &snapshot, 7000)
+            .with_state_ttl(1000);
+    // Key 1 was swept: a retraction for it finds nothing and emits nothing.
+    let out = probe.update(&group_changelog(vec![1], vec![Some(10)], vec![1]), 7100).unwrap();
+    assert_eq!(out.num_rows(), 0);
+}
+
+// The mini-batch flush applies the same TTL rule: a bundle whose net transition is a no-op still
+// emits -U/+U with retention on (Flink's MiniBatchGroupAggFunction gate).
+#[test]
+fn group_by_ttl_mini_batch_flush_emits_unchanged_transitions() {
+    let mut agg = GroupAggregator::new(vec![0], vec![0], vec![1], vec![0], true)
+        .with_state_ttl(3_600_000)
+        .with_mini_batch();
+    agg.update(&group_batch(vec![1], vec![10]), 5000).unwrap();
+    agg.flush_mini_batch().unwrap();
+    agg.update(&group_batch(vec![1], vec![0]), 5001).unwrap(); // net no-op bundle
+    let out = agg.flush_mini_batch().unwrap();
+    assert_eq!(row_kinds(&out), vec![1, 2]); // -U(10)/+U(10), not suppressed
+    assert_eq!(values(&out, 1), vec![10, 10]);
 }
 
 // Consuming a changelog: a -U input retracts a prior value, updating the running SUM.
@@ -1692,7 +1818,7 @@ fn group_by_retracts_changelog_input() {
         vec![1, 1, 1],
         vec![Some(10), Some(20), Some(10)],
         vec![0, 0, 1],
-    )).unwrap();
+    ), 0).unwrap();
     assert_eq!(row_kinds(&out), vec![0, 1, 2, 1, 2]);
     assert_eq!(values(&out, 1), vec![10, 10, 30, 30, 20]); // +I10; -U10/+U30; -U30/+U20
 }
@@ -1701,7 +1827,7 @@ fn group_by_retracts_changelog_input() {
 #[test]
 fn group_by_deletes_when_last_record_retracted() {
     let mut agg = GroupAggregator::new(vec![0], vec![0], vec![1], vec![0], true);
-    let out = agg.update(&group_changelog(vec![1, 1], vec![Some(10), Some(10)], vec![0, 3])).unwrap();
+    let out = agg.update(&group_changelog(vec![1, 1], vec![Some(10), Some(10)], vec![0, 3]), 0).unwrap();
     assert_eq!(row_kinds(&out), vec![0, 3]); // +I(10), then -D(10)
     assert_eq!(values(&out, 1), vec![10, 10]);
 }
@@ -1716,7 +1842,7 @@ fn group_by_sum_is_null_after_last_value_retracted() {
         vec![1, 1, 1],
         vec![Some(5), None, Some(5)],
         vec![0, 0, 1],
-    )).unwrap();
+    ), 0).unwrap();
     assert_eq!(row_kinds(&out), vec![0, 1, 2]); // +I(5); -U(5)/+U(NULL)
     let result = out.column(1);
     assert_eq!(result.len(), 3);
@@ -1735,7 +1861,7 @@ fn group_by_min_recovers_next_after_retract() {
         vec![1, 1, 1, 1],
         vec![Some(5), Some(3), Some(8), Some(3)],
         vec![0, 0, 0, 1],
-    )).unwrap();
+    ), 0).unwrap();
     assert_eq!(row_kinds(&out), vec![0, 1, 2, 1, 2]);
     // min: 5; 5->3; (8 leaves min 3, suppressed); 3->5 after retracting the 3.
     assert_eq!(values(&out, 1), vec![5, 5, 3, 3, 5]);
@@ -1746,12 +1872,12 @@ fn group_by_min_recovers_next_after_retract() {
 #[test]
 fn group_by_min_multiset_survives_snapshot_restore() {
     let mut agg = GroupAggregator::new(vec![1], vec![0], vec![1], vec![0], true);
-    agg.update(&group_changelog(vec![1, 1], vec![Some(5), Some(3)], vec![0, 0])); // min 3
+    agg.update(&group_changelog(vec![1, 1], vec![Some(5), Some(3)], vec![0, 0]), 0); // min 3
     let snapshot = agg.snapshot();
     let mut restored =
-        GroupAggregator::restore(vec![1], vec![0], vec![1], vec![0], true, &snapshot);
+        GroupAggregator::restore(vec![1], vec![0], vec![1], vec![0], true, &snapshot, 0);
     // Retract the 3 — the restored multiset still holds the 5, so the min becomes 5.
-    let out = restored.update(&group_changelog(vec![1], vec![Some(3)], vec![1])).unwrap();
+    let out = restored.update(&group_changelog(vec![1], vec![Some(3)], vec![1]), 0).unwrap();
     assert_eq!(row_kinds(&out), vec![1, 2]); // -U(3), +U(5)
     assert_eq!(values(&out, 1), vec![3, 5]);
 }
@@ -3491,8 +3617,8 @@ mod paimon_state {
             group_changelog(vec![3, 1], vec![Some(7), Some(5)], vec![3, 3]),
         ];
         for (i, bundle) in bundles.iter().enumerate() {
-            paimon.update(bundle).unwrap();
-            memory.update(bundle).unwrap();
+            paimon.update(bundle, 0).unwrap();
+            memory.update(bundle, 0).unwrap();
             assert_same_output(
                 &memory.flush_mini_batch().unwrap(),
                 &paimon.flush_mini_batch().unwrap(),
@@ -4613,7 +4739,7 @@ mod paimon_state {
     fn paimon_write_buffer_survives_bundles_clean_reads_do_not() {
         let dir = temp_dir("bundle");
         let mut agg = paimon_agg(create_store(&dir));
-        agg.update(&group_batch(vec![1, 2], vec![10, 20])).unwrap();
+        agg.update(&group_batch(vec![1, 2], vec![10, 20]), 0).unwrap();
         agg.flush_mini_batch().unwrap();
         agg.store_mut().checkpoint().unwrap();
 
@@ -4641,14 +4767,14 @@ mod paimon_state {
     fn paimon_checkpoint_restores_from_listed_files_only() {
         let dir = temp_dir("restore-src");
         let mut agg = paimon_agg(create_store(&dir));
-        agg.update(&group_batch(vec![1, 2, 3], vec![10, 20, 30])).unwrap();
+        agg.update(&group_batch(vec![1, 2, 3], vec![10, 20, 30]), 0).unwrap();
         agg.flush_mini_batch().unwrap();
         let first = agg.store_mut().checkpoint().unwrap();
         assert!(first.snapshot_id > 0);
         assert!(!first.data_files.is_empty());
 
         // Second checkpoint reuses unchanged data files and adds only the delta.
-        agg.update(&group_changelog(vec![2], vec![Some(5)], vec![0])).unwrap();
+        agg.update(&group_changelog(vec![2], vec![Some(5)], vec![0]), 0).unwrap();
         agg.flush_mini_batch().unwrap();
         let second = agg.store_mut().checkpoint().unwrap();
         assert!(second.snapshot_id > first.snapshot_id);
@@ -4664,7 +4790,7 @@ mod paimon_state {
         // The restored table must serve state: retract 10 from key 1 -> SUM drops to 0 rows? No:
         // one record remains? key 1 had a single +I of 10; retracting it deletes the group.
         restored
-            .update(&group_changelog(vec![1, 2], vec![Some(10), Some(100)], vec![3, 0]))
+            .update(&group_changelog(vec![1, 2], vec![Some(10), Some(100)], vec![3, 0]), 0)
             .unwrap();
         let out = restored.flush_mini_batch().unwrap();
         assert_eq!(values(&out, 0), vec![1, 2, 2]);
@@ -4676,17 +4802,17 @@ mod paimon_state {
     fn paimon_tombstones_survive_checkpoints() {
         let dir = temp_dir("tombstone");
         let mut agg = paimon_agg(create_store(&dir));
-        agg.update(&group_batch(vec![7], vec![70])).unwrap();
+        agg.update(&group_batch(vec![7], vec![70]), 0).unwrap();
         agg.flush_mini_batch().unwrap();
         agg.store_mut().checkpoint().unwrap();
 
-        agg.update(&group_changelog(vec![7], vec![Some(70)], vec![3])).unwrap();
+        agg.update(&group_changelog(vec![7], vec![Some(70)], vec![3]), 0).unwrap();
         let out = agg.flush_mini_batch().unwrap();
         assert_eq!(row_kinds(&out), vec![3]);
         agg.store_mut().checkpoint().unwrap();
 
         // After the delete is committed, the key must probe as absent: a fresh insert is +I.
-        agg.update(&group_batch(vec![7], vec![1])).unwrap();
+        agg.update(&group_batch(vec![7], vec![1]), 0).unwrap();
         let out = agg.flush_mini_batch().unwrap();
         assert_eq!(row_kinds(&out), vec![0]);
         assert_eq!(values(&out, 1), vec![1]);
@@ -4700,7 +4826,7 @@ mod paimon_state {
         let dir = temp_dir("accumulate");
         let mut agg = paimon_agg(create_store(&dir));
         for i in 1..=10i64 {
-            agg.update(&group_changelog(vec![42], vec![Some(i)], vec![0])).unwrap();
+            agg.update(&group_changelog(vec![42], vec![Some(i)], vec![0]), 0).unwrap();
             agg.flush_mini_batch().unwrap();
             let manifest = agg
                 .store_mut()
@@ -4713,7 +4839,7 @@ mod paimon_state {
             );
         }
         // State reads correctly across all ten runs: SUM 1+2+..+10 = 55.
-        agg.update(&group_changelog(vec![42], vec![Some(55)], vec![0])).unwrap();
+        agg.update(&group_changelog(vec![42], vec![Some(55)], vec![0]), 0).unwrap();
         let out = agg.flush_mini_batch().unwrap();
         assert_eq!(values(&out, 1), vec![55, 110]);
         assert_eq!(row_kinds(&out), vec![1, 2]);
@@ -4726,8 +4852,8 @@ mod paimon_state {
         let dir_b = temp_dir("rescale-b");
         let mut a = paimon_agg(create_store(&dir_a));
         let mut b = paimon_agg(create_store(&dir_b));
-        a.update(&group_batch(vec![1, 2, 3, 4], vec![10, 20, 30, 40])).unwrap();
-        b.update(&group_batch(vec![5, 6, 7, 8], vec![50, 60, 70, 80])).unwrap();
+        a.update(&group_batch(vec![1, 2, 3, 4], vec![10, 20, 30, 40]), 0).unwrap();
+        b.update(&group_batch(vec![5, 6, 7, 8], vec![50, 60, 70, 80]), 0).unwrap();
         a.flush_mini_batch().unwrap();
         b.flush_mini_batch().unwrap();
         let cp_a = a.store_mut().checkpoint().unwrap();
@@ -4751,7 +4877,7 @@ mod paimon_state {
 
         // Every key from both sources must be live: an update to each changes its sum.
         merged
-            .update(&group_batch(vec![1, 5, 8], vec![1, 1, 1]))
+            .update(&group_batch(vec![1, 5, 8], vec![1, 1, 1]), 0)
             .unwrap();
         let out = merged.flush_mini_batch().unwrap();
         assert_eq!(values(&out, 0), vec![1, 1, 5, 5, 8, 8]);
@@ -4768,7 +4894,7 @@ mod paimon_state {
         let mut agg = paimon_agg(create_store(&dir));
         let keys: Vec<i64> = (1..=32).collect();
         let values_in: Vec<i64> = keys.iter().map(|k| k * 10).collect();
-        agg.update(&group_batch(keys.clone(), values_in)).unwrap();
+        agg.update(&group_batch(keys.clone(), values_in), 0).unwrap();
         agg.flush_mini_batch().unwrap();
         let manifest = agg.store_mut().checkpoint().unwrap();
 
@@ -5345,8 +5471,8 @@ mod paimon_state {
 
         // Within the interval, reads come from the write buffer: full parity.
         let bundle = group_changelog(vec![1, 2, 1], vec![Some(10), Some(20), Some(5)], vec![0, 0, 0]);
-        paimon.update(&bundle).unwrap();
-        memory.update(&bundle).unwrap();
+        paimon.update(&bundle, 0).unwrap();
+        memory.update(&bundle, 0).unwrap();
         assert_same_output(
             &memory.flush_mini_batch().unwrap(),
             &paimon.flush_mini_batch().unwrap(),
@@ -5367,7 +5493,7 @@ mod paimon_state {
         // probe of the committed key misses (emits a fresh INSERT, not an update). In a real
         // deployment the Java compactor has always up-leveled it before any read.
         paimon
-            .update(&group_changelog(vec![1], vec![Some(1)], vec![0]))
+            .update(&group_changelog(vec![1], vec![Some(1)], vec![0]), 0)
             .unwrap();
         let out = paimon.flush_mini_batch().unwrap();
         assert_eq!(row_kinds(&out), vec![0], "level-0 must be invisible to deletion-vector reads");
@@ -5381,7 +5507,7 @@ mod paimon_state {
         let dir = temp_dir("dv-restore");
         let mut paimon = paimon_agg(PaimonGroupStore::create(dv_config(&dir), codec()).unwrap());
         paimon
-            .update(&group_changelog(vec![1], vec![Some(10)], vec![0]))
+            .update(&group_changelog(vec![1], vec![Some(10)], vec![0]), 0)
             .unwrap();
         paimon.flush_mini_batch().unwrap();
         let manifest = paimon.store_mut().checkpoint().unwrap();
@@ -5416,7 +5542,7 @@ mod paimon_state {
         let dir = temp_dir("dv-idx");
         let mut paimon = paimon_agg(create_store(&dir));
         paimon
-            .update(&group_changelog(vec![1, 2, 3], vec![Some(1), Some(2), Some(3)], vec![0, 0, 0]))
+            .update(&group_changelog(vec![1, 2, 3], vec![Some(1), Some(2), Some(3)], vec![0, 0, 0]), 0)
             .unwrap();
         paimon.flush_mini_batch().unwrap();
         paimon.store_mut().checkpoint().unwrap();

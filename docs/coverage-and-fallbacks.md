@@ -218,12 +218,17 @@ array`, is **not** here: Flink rejects it too, so we're at parity.)
 
 ### 2. Per-operator matcher declines (exact conditions)
 
-**Idle-state TTL** (`table.exec.state.ttl` ≠ 0) declines every stateful operator: with a TTL the
-host expires idle keys and stops suppressing unchanged updates — semantics the native operators do
-not yet reproduce. For the temporal join and OVER the decline is permanent (Flink expires their
-state on per-key 1.5×-retention cleanup timers, a coarser scheme than per-value TTL); for the rest
-it lifts as native TTL support lands. Window operators and the interval join are unaffected —
-Flink applies no idle-state TTL there.
+**Idle-state TTL** (`table.exec.state.ttl` ≠ 0): the single-phase non-windowed `GROUP BY` runs it
+**natively** — Flink's exact StateTtlConfig semantics (last-write timestamps, expired-reads-as-
+absent with the fresh `+I` restart, retractions against expired state dropped, and the unchanged-
+update suppression disabled), with the `STATE_TTL` hint honored over the job-wide retention. Every
+other stateful operator still declines a nonzero retention: with a TTL the host expires idle keys
+and stops suppressing unchanged updates — semantics those native operators do not yet reproduce.
+For the temporal join and OVER the decline is permanent (Flink expires their state on per-key
+1.5×-retention cleanup timers, a coarser scheme than per-value TTL); for the rest it lifts as
+native TTL support lands. Window operators and the interval join are unaffected — Flink applies no
+idle-state TTL there. Under the Paimon state backend a TTL'd aggregate keeps the memory
+checkpoint route until the persistent shape carries timestamps.
 
 - **OVER** — idle-state TTL ≠ 0 (permanent, above); a frame not of the form `… PRECEDING .. CURRENT ROW` (a `ROWS`/`RANGE` lower bound that
   is not a constant preceding offset); a bounded-RANGE frame over a proctime order (wall-clock
@@ -269,7 +274,7 @@ Flink applies no idle-state TTL there.
   non-native `DISTINCT` form — `COUNT(DISTINCT x)` keeps a per-key value set, `SUM(DISTINCT x)` adds
   a running sum folded as values enter/leave it, and `MIN`/`MAX(DISTINCT)` run as their plain forms,
   the extreme being multiplicity-blind); an approximate aggregate;
-  idle-state TTL ≠ 0; an unsupported key/value column type. `SUM`/`MIN`/`MAX`/`COUNT` all admit
+  an unsupported key/value column type. (Idle-state TTL is native here — see the note above.) `SUM`/`MIN`/`MAX`/`COUNT` all admit
   `DECIMAL` (`SUM` → `DECIMAL(38, s)`, `MIN`/`MAX` → `DECIMAL(p, s)`); **`MIN`/`MAX` also admit a
   string** (`CHAR`/`VARCHAR`), ordered byte-lexicographically — matching Flink's `BinaryStringData`
   byte comparison (its common binary path; the materialized-Java-object path differs only for

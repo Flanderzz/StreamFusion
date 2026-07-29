@@ -143,19 +143,36 @@ class FlinkGroupAggregateSqlHarnessTest {
   }
 
   @Test
-  void stateTtlFallsBackToHost() throws Exception {
-    // With idle-state TTL on, the host refreshes and expires keys (emitting unchanged updates and
-    // deletes) — semantics the append-only native operator does not reproduce, so it stays on host.
-    // The minimal source has exactly the grouped/aggregated columns, so the aggregate is the only
-    // routable node and a clean fallback means zero substitutions.
-    NativeParity.assertFallbackReasonContains(
+  void stateTtlEmitsUnsuppressedUpdatesAndMatchesHost() throws Exception {
+    // With idle-state TTL on (1h — nothing expires in-test), Flink disables the unchanged-result
+    // suppression: the 0-value row produces an identical -U/+U pair the TTL-off run would swallow.
+    // The kinded compare is the only one that can see such a pair, so this pins the native TTL
+    // emission semantics change for change against the host.
+    NativeParity.assertKindedParity(
         () -> {
           TableEnvironment tEnv = minimalEnvironment();
           tEnv.getConfig().set("table.exec.state.ttl", "1 h");
           return tEnv;
         },
-        "SELECT k, SUM(`value`) AS s FROM kv GROUP BY k",
-        "GROUP BY: idle-state TTL");
+        "SELECT k, SUM(`value`) AS s FROM kv GROUP BY k");
+  }
+
+  @Test
+  void stateTtlHintOverridesJobRetention() throws Exception {
+    // STATE_TTL('kv' = '1h') with the job retention at 0: the hint alone must switch the operator
+    // into TTL emission (unsuppressed -U/+U pairs), matching Flink's hint-over-config precedence.
+    NativeParity.assertKindedParity(
+        FlinkGroupAggregateSqlHarnessTest::minimalEnvironment,
+        "SELECT /*+ STATE_TTL('kv' = '1h') */ k, SUM(`value`) AS s FROM kv GROUP BY k");
+    // And the inverse: a zero hint under a job-wide 1h retention turns TTL off for this
+    // aggregate — the no-op update is suppressed again.
+    NativeParity.assertKindedParity(
+        () -> {
+          TableEnvironment tEnv = minimalEnvironment();
+          tEnv.getConfig().set("table.exec.state.ttl", "1 h");
+          return tEnv;
+        },
+        "SELECT /*+ STATE_TTL('kv' = '0s') */ k, SUM(`value`) AS s FROM kv GROUP BY k");
   }
 
   private static TableEnvironment minimalEnvironment() {
@@ -163,11 +180,14 @@ class FlinkGroupAggregateSqlHarnessTest {
     env.setParallelism(1);
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     tEnv.getConfig().set("table.optimizer.agg-phase-strategy", "ONE_PHASE");
+    // The 0-value row leaves key 7's sum unchanged: suppressed with TTL off, an identical -U/+U
+    // pair with TTL on — the emission difference the TTL tests above pin.
     DataStream<Row> source =
         env.fromData(
             Types.ROW_NAMED(new String[] {"k", "value"}, Types.LONG, Types.LONG),
             Row.of(7L, 1L),
             Row.of(7L, 2L),
+            Row.of(7L, 0L),
             Row.of(9L, 3L));
     tEnv.createTemporaryView(
         "kv",

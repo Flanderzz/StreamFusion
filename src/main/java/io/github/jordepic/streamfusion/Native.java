@@ -893,6 +893,9 @@ public final class Native {
    *     otherwise): each row bumps the key's record count by this column instead of ±1, so a key
    *     whose merged count reaches zero is deleted ({@code -D})
    * @param generateUpdateBefore whether to emit an UPDATE_BEFORE row before each UPDATE_AFTER
+   * @param stateTtlMillis idle-state retention ({@code table.exec.state.ttl}); {@code 0} disables
+   *     expiry. A group expires {@code stateTtlMillis} after its last write and then reads as
+   *     absent, and the unchanged-result suppression is disabled — Flink's TTL'd emission
    * @param memoryBudgetBytes managed-memory budget (see {@link #createTumblingAggregator})
    */
   public static native long createGroupAggregator(
@@ -907,14 +910,21 @@ public final class Native {
       int recordCountColumn,
       boolean generateUpdateBefore,
       boolean miniBatch,
+      long stateTtlMillis,
       long memoryBudgetBytes);
 
   /**
    * Folds an input batch into per-key state, exporting the changelog rows it produces (grouping keys,
    * aggregate results, then the {@code $row_kind$} byte column) into the consumer-allocated C structs.
+   * {@code nowMillis} is the operator's processing-time reading — the state-TTL clock.
    */
   public static native void updateGroupAggregator(
-      long handle, long inArrayAddress, long inSchemaAddress, long outArrayAddress, long outSchemaAddress);
+      long handle,
+      long inArrayAddress,
+      long inSchemaAddress,
+      long nowMillis,
+      long outArrayAddress,
+      long outSchemaAddress);
 
   /** Flushes the group changes staged across one logical mini-batch. */
   public static native void flushGroupAggregator(
@@ -930,7 +940,11 @@ public final class Native {
   public static native byte[][] snapshotGroupAggregatorPartitions(
       long handle, int maxParallelism, int[] timestampPrecisions);
 
-  /** Rebuilds a {@code GROUP BY} aggregator from a snapshot and returns a fresh handle. */
+  /**
+   * Rebuilds a {@code GROUP BY} aggregator from a snapshot and returns a fresh handle. {@code
+   * nowMillis} stamps groups restored from a snapshot that carries no TTL timestamps (a pre-TTL
+   * writer), granting them a full retention from the restore — Flink's enable-TTL migration.
+   */
   public static native long restoreGroupAggregator(
       int[] aggregateKinds,
       int[] valueTypes,
@@ -943,6 +957,8 @@ public final class Native {
       int recordCountColumn,
       boolean generateUpdateBefore,
       boolean miniBatch,
+      long stateTtlMillis,
+      long nowMillis,
       byte[] snapshot,
       long memoryBudgetBytes);
 
@@ -959,6 +975,8 @@ public final class Native {
       int recordCountColumn,
       boolean generateUpdateBefore,
       boolean miniBatch,
+      long stateTtlMillis,
+      long nowMillis,
       byte[][] snapshots,
       long memoryBudgetBytes);
 
@@ -1019,7 +1037,12 @@ public final class Native {
 
   /** {@link #updateGroupAggregator} for a Paimon-backed handle. */
   public static native void updatePaimonGroupAggregator(
-      long handle, long inArrayAddress, long inSchemaAddress, long outArrayAddress, long outSchemaAddress);
+      long handle,
+      long inArrayAddress,
+      long inSchemaAddress,
+      long nowMillis,
+      long outArrayAddress,
+      long outSchemaAddress);
 
   /** {@link #flushGroupAggregator} for a Paimon-backed handle. */
   public static native void flushPaimonGroupAggregator(

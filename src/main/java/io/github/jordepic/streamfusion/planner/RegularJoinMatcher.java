@@ -5,6 +5,7 @@ import java.util.Optional;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.rex.RexUtil;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
+import org.apache.flink.table.planner.hint.StateTtlHint;
 import org.apache.flink.table.planner.plan.nodes.exec.spec.JoinSpec;
 import org.apache.flink.table.planner.plan.nodes.physical.common.CommonPhysicalJoin;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalJoin;
@@ -28,9 +29,13 @@ final class RegularJoinMatcher {
   }
 
   static String unsupportedReason(StreamPhysicalJoin join) {
-    // With a TTL set the host expires each side's rows independently, changing what a probe can
-    // match — semantics the native join does not yet reproduce, so it stays on the host.
-    if (IdleStateRetention.isEnabled(join)) {
+    // With a TTL set (job-wide or via a per-side STATE_TTL hint) the host expires each side's rows
+    // independently, changing what a probe can match — semantics the native join does not yet
+    // reproduce, so it stays on the host.
+    boolean hintTtl =
+        StateTtlHint.getStateTtlFromHintOnBiRel(join.getHints()).values().stream()
+            .anyMatch(ttl -> ttl > 0);
+    if (hintTtl || IdleStateRetention.isEnabled(join)) {
       return "regular join: idle-state TTL (table.exec.state.ttl) runs on the host until the native"
           + " operator expires state";
     }

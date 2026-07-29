@@ -387,7 +387,7 @@ impl GroupBy {
     }
 
     pub fn update(&mut self, batch: &RecordBatch) -> RecordBatch {
-        self.0.update(batch).expect("budget exceeded")
+        self.0.update(batch, 0).expect("budget exceeded")
     }
 
     pub fn mini_batch(

@@ -35,6 +35,7 @@ public class NativeColumnarGroupAggregateOperator
   private final boolean generateUpdateBefore;
   private final boolean miniBatch;
   private final long miniBatchSize;
+  private final long stateTtlMillis;
 
   private transient MiniBatchBoundary boundary;
   private transient MiniBatchMetrics miniBatchMetrics;
@@ -52,6 +53,7 @@ public class NativeColumnarGroupAggregateOperator
       boolean generateUpdateBefore,
       boolean miniBatch,
       long miniBatchSize,
+      long stateTtlMillis,
       int[] keyTimestampPrecisions,
       int maxParallelism) {
     super("group aggregate", keyTimestampPrecisions, maxParallelism);
@@ -66,12 +68,18 @@ public class NativeColumnarGroupAggregateOperator
     this.generateUpdateBefore = generateUpdateBefore;
     this.miniBatch = miniBatch;
     this.miniBatchSize = miniBatchSize;
+    this.stateTtlMillis = stateTtlMillis;
   }
 
   @Override
   protected PaimonNativeStateSupport resolvePaimonState(boolean rawStateRestored) {
+    // The Paimon shape does not carry per-group TTL timestamps yet; a TTL'd aggregate keeps the
+    // memory route (the standard fallback for an unsupported shape) until the store gains them.
     return resolvePaimon(
-        rawStateRestored, () -> Native.paimonGroupAggregatorSupported(aggregateKinds, valueTypes));
+        rawStateRestored,
+        () ->
+            stateTtlMillis == 0
+                && Native.paimonGroupAggregatorSupported(aggregateKinds, valueTypes));
   }
 
   @Override
@@ -96,7 +104,7 @@ public class NativeColumnarGroupAggregateOperator
     return Native.createGroupAggregator(
         aggregateKinds, valueTypes, valueColumns, keyColumns, keyTimestampPrecisions(),
         filterColumns, countColumns, distinctViewColumns, recordCountColumn,
-        generateUpdateBefore, miniBatch, memoryBudgetBytes());
+        generateUpdateBefore, miniBatch, stateTtlMillis, memoryBudgetBytes());
   }
 
   @Override
@@ -104,7 +112,8 @@ public class NativeColumnarGroupAggregateOperator
     return Native.restoreGroupAggregatorPartitions(
         aggregateKinds, valueTypes, valueColumns, keyColumns, keyTimestampPrecisions(),
         filterColumns, countColumns, distinctViewColumns, recordCountColumn, generateUpdateBefore,
-        miniBatch, snapshots, memoryBudgetBytes());
+        miniBatch, stateTtlMillis, getProcessingTimeService().getCurrentProcessingTime(),
+        snapshots, memoryBudgetBytes());
   }
 
   @Override
@@ -202,11 +211,15 @@ public class NativeColumnarGroupAggregateOperator
         ArrowArray outArray = ArrowArray.allocateNew(allocator);
         ArrowSchema outSchema = ArrowSchema.allocateNew(allocator)) {
       Data.exportVectorSchemaRoot(inAllocator, in, dictionaries, inArray, inSchema);
+      // Flink's TtlTimeProvider clock: the processing-time service is System.currentTimeMillis in
+      // production and harness-controlled in tests, so expiry is deterministic to test.
+      long now = getProcessingTimeService().getCurrentProcessingTime();
       if (paimonState()) {
         Native.updatePaimonGroupAggregator(
             handle,
             inArray.memoryAddress(),
             inSchema.memoryAddress(),
+            now,
             outArray.memoryAddress(),
             outSchema.memoryAddress());
       } else {
@@ -214,6 +227,7 @@ public class NativeColumnarGroupAggregateOperator
             handle,
             inArray.memoryAddress(),
             inSchema.memoryAddress(),
+            now,
             outArray.memoryAddress(),
             outSchema.memoryAddress());
       }

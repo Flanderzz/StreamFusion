@@ -60,6 +60,11 @@ class NativeColumnarGroupAggregateOperatorTest {
 
   private static NativeColumnarGroupAggregateOperator operator(
       boolean miniBatch, long miniBatchSize) {
+    return operator(miniBatch, miniBatchSize, 0);
+  }
+
+  private static NativeColumnarGroupAggregateOperator operator(
+      boolean miniBatch, long miniBatchSize, long stateTtlMillis) {
     return new NativeColumnarGroupAggregateOperator(
         new int[] {0},
         new int[] {0},
@@ -72,6 +77,7 @@ class NativeColumnarGroupAggregateOperatorTest {
         true,
         miniBatch,
         miniBatchSize,
+        stateTtlMillis,
         new int[] {-1},
         MAX_PARALLELISM);
   }
@@ -108,6 +114,7 @@ class NativeColumnarGroupAggregateOperatorTest {
             true,
             false,
             -1,
+            0,
             new int[] {-1, -1, -1},
             MAX_PARALLELISM);
     return new KeyedOneInputStreamOperatorTestHarness<>(
@@ -209,6 +216,96 @@ class NativeColumnarGroupAggregateOperatorTest {
           List.of(change(RowKind.UPDATE_BEFORE, 1, 10), change(RowKind.UPDATE_AFTER, 1, 15)),
           collect(restored));
     }
+  }
+
+  @Test
+  void ttlExpiresAnIdleKeyIntoAFreshInsert() throws Exception {
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness =
+            ttlHarness(1000)) {
+      harness.setup(new ArrowBatchSerializer());
+      harness.open();
+      harness.setProcessingTime(5000);
+      harness.processElement(new StreamRecord<>(batch(allocator, row(1, 10))));
+      assertEquals(List.of(change(RowKind.INSERT, 1, 10)), collect(harness));
+      // ts 5000 + ttl 1000 <= 6000: expired exactly at the boundary — a fresh +I, sum restarted.
+      harness.setProcessingTime(6000);
+      harness.processElement(new StreamRecord<>(batch(allocator, row(1, 5))));
+      assertEquals(List.of(change(RowKind.INSERT, 1, 5)), collect(harness));
+    }
+  }
+
+  @Test
+  void ttlRefreshesOnEveryWrite() throws Exception {
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness =
+            ttlHarness(1000)) {
+      harness.setup(new ArrowBatchSerializer());
+      harness.open();
+      harness.setProcessingTime(5000);
+      harness.processElement(new StreamRecord<>(batch(allocator, row(1, 10))));
+      collect(harness);
+      harness.setProcessingTime(5900);
+      harness.processElement(new StreamRecord<>(batch(allocator, row(1, 5))));
+      collect(harness);
+      // The original write is long past its ttl, but the write at 5900 refreshed the key.
+      harness.setProcessingTime(6800);
+      harness.processElement(new StreamRecord<>(batch(allocator, row(1, 1))));
+      assertEquals(
+          List.of(change(RowKind.UPDATE_BEFORE, 1, 15), change(RowKind.UPDATE_AFTER, 1, 16)),
+          collect(harness));
+    }
+  }
+
+  @Test
+  void ttlTimestampsSurviveSnapshotRestore() throws Exception {
+    // Timestamps are absolute: expiry after a restore is timed from the original write, so a
+    // restore inside the retention keeps the key alive only until write-time + ttl.
+    OperatorSubtaskState snapshot;
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness =
+            ttlHarness(1000)) {
+      harness.setup(new ArrowBatchSerializer());
+      harness.open();
+      harness.setProcessingTime(5000);
+      harness.processElement(new StreamRecord<>(batch(allocator, row(1, 10))));
+      snapshot = harness.snapshot(1L, 1L);
+      collect(harness);
+    }
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> restored =
+            ttlHarness(1000)) {
+      restored.setup(new ArrowBatchSerializer());
+      restored.initializeState(snapshot);
+      restored.open();
+      restored.setProcessingTime(5999);
+      restored.processElement(new StreamRecord<>(batch(allocator, row(1, 5))));
+      assertEquals(
+          List.of(change(RowKind.UPDATE_BEFORE, 1, 10), change(RowKind.UPDATE_AFTER, 1, 15)),
+          collect(restored));
+    }
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> restored =
+            ttlHarness(1000)) {
+      restored.setup(new ArrowBatchSerializer());
+      restored.initializeState(snapshot);
+      restored.open();
+      restored.setProcessingTime(6000);
+      restored.processElement(new StreamRecord<>(batch(allocator, row(1, 5))));
+      assertEquals(List.of(change(RowKind.INSERT, 1, 5)), collect(restored));
+    }
+  }
+
+  private static KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> ttlHarness(
+      long stateTtlMillis) throws Exception {
+    int[] stateKeys = stateKeysForSubtasks(1);
+    return new KeyedOneInputStreamOperatorTestHarness<>(
+        operator(false, -1, stateTtlMillis),
+        batch -> stateKeys[batch.destination() >= 0 ? batch.destination() : 0],
+        Types.INT,
+        MAX_PARALLELISM,
+        1,
+        0);
   }
 
   @Test

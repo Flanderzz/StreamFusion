@@ -12,6 +12,10 @@ use crate::*;
 /// - a value's timestamp is the wall clock of its last WRITE; reads never refresh it;
 /// - `expired ⟺ ts + ttl <= now` (`TtlUtils.expired`, saturating add);
 /// - expired state reads as absent and is deleted on read; expiry emits nothing downstream.
+/// The trailing raw-snapshot column carrying per-entry last-write timestamps, present only when
+/// the operator's TTL is on — a TTL-off snapshot stays byte-identical to the pre-TTL format.
+pub(crate) const TTL_TS_COLUMN: &str = "__ttl_ts__";
+
 #[derive(Clone, Copy)]
 pub(crate) struct StateTtl {
     ttl_ms: i64,

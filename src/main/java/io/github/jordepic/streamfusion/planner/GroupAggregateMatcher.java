@@ -32,13 +32,6 @@ final class GroupAggregateMatcher {
 
   /** The specific reason this aggregate is not accelerable, or null if it is. */
   static String unsupportedReason(StreamPhysicalGroupAggregate agg) {
-    // The native operator never expires idle keys and suppresses an unchanged result, which matches
-    // the host only with state retention off. With a TTL set the host instead refreshes downstream
-    // (emitting unchanged updates) and deletes expired keys, so leave it on the host.
-    if (IdleStateRetention.isEnabled(agg)) {
-      return "GROUP BY: idle-state TTL (table.exec.state.ttl) runs on the host until the native"
-          + " operator expires state";
-    }
     RelDataType inputType = agg.getInput().getRowType();
     // The whole row crosses the boundary in both directions, so every input and output column must be
     // a type the conversion handles (this also covers the grouping-key and pass-through types).

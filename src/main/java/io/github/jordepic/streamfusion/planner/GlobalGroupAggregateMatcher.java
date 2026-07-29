@@ -7,6 +7,7 @@ import org.apache.calcite.rel.core.AggregateCall;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
+import org.apache.flink.table.planner.hint.StateTtlHint;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalGlobalGroupAggregate;
 import org.apache.flink.table.planner.plan.utils.ChangelogPlanUtils;
 
@@ -34,9 +35,11 @@ final class GlobalGroupAggregateMatcher {
   }
 
   static String unsupportedReason(StreamPhysicalGlobalGroupAggregate agg) {
-    // Same reasoning as the single-phase gate: with a TTL set the host expires idle keys and stops
-    // suppressing unchanged results, semantics the native operator does not yet reproduce.
-    if (IdleStateRetention.isEnabled(agg)) {
+    // With a TTL set (job-wide or via a STATE_TTL hint on the aggregate) the host expires idle
+    // keys and stops suppressing unchanged results — semantics the native merge does not yet
+    // reproduce.
+    Long hintTtl = StateTtlHint.getStateTtlFromHintOnSingleRel(agg.hints());
+    if (hintTtl != null ? hintTtl > 0 : IdleStateRetention.isEnabled(agg)) {
       return "global group aggregate: idle-state TTL (table.exec.state.ttl) runs on the host until"
           + " the native operator expires state";
     }

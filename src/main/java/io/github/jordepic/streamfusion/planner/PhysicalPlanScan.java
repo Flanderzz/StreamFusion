@@ -10,6 +10,7 @@ import org.apache.calcite.rel.core.Calc;
 import org.apache.calcite.rel.core.Sort;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.flink.table.connector.source.DynamicTableSource;
+import org.apache.flink.table.planner.hint.StateTtlHint;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalCalc;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalChangelogNormalize;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalCorrelate;
@@ -314,6 +315,9 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
         }
         substitutions++;
         int[] keyColumns = GroupAggregateMatcher.keyColumns(agg);
+        // A STATE_TTL hint overrides the job-wide retention for this aggregate alone (Flink's
+        // StateMetadata precedence); null means no hint, resolved at translate time.
+        Long stateTtlHint = StateTtlHint.getStateTtlFromHintOnSingleRel(agg.hints());
         // The aggregate is columnar (Arrow in/out). Keep the keyed shuffle columnar where the input
         // sits on a columnar producer (a native exchange splits the batch by the grouping keys);
         // otherwise the transition pass inserts a transpose at the host exchange boundary. Same key
@@ -331,7 +335,8 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
             new int[0], // single-phase: no AVG-merge count partials
             new int[0], // single-phase: distinct values fold per row, no view columns
             -1, // single-phase: liveness counts rows ±1, no count1 partial
-            GroupAggregateMatcher.generateUpdateBefore(agg));
+            GroupAggregateMatcher.generateUpdateBefore(agg),
+            stateTtlHint == null ? -1 : stateTtlHint);
       }
     }
 
@@ -360,7 +365,8 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
             GlobalGroupAggregateMatcher.countColumns(agg),
             GlobalGroupAggregateMatcher.distinctViewColumns(agg),
             GlobalGroupAggregateMatcher.recordCountColumn(agg),
-            GlobalGroupAggregateMatcher.generateUpdateBefore(agg));
+            GlobalGroupAggregateMatcher.generateUpdateBefore(agg),
+            -1); // the global half's TTL gate declines any nonzero retention or hint for now
       }
     }
 

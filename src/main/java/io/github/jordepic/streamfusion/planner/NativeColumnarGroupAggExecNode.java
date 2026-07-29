@@ -33,6 +33,9 @@ public class NativeColumnarGroupAggExecNode extends ExecNodeBase<ArrowBatch>
   private final int[] distinctViewColumns;
   private final int recordCountColumn;
   private final boolean generateUpdateBefore;
+  // Per-operator TTL from a STATE_TTL hint on the aggregate (-1 = no hint); resolved against the
+  // job-wide table.exec.state.ttl at translate time, hint winning — Flink's StateMetadata rule.
+  private final long stateTtlHintMillis;
   private final int[] keyTimestampPrecisions;
 
   public NativeColumnarGroupAggExecNode(
@@ -49,6 +52,7 @@ public class NativeColumnarGroupAggExecNode extends ExecNodeBase<ArrowBatch>
       int[] distinctViewColumns,
       int recordCountColumn,
       boolean generateUpdateBefore,
+      long stateTtlHintMillis,
       int[] keyTimestampPrecisions) {
     super(
         ExecNodeContext.newNodeId(),
@@ -66,6 +70,7 @@ public class NativeColumnarGroupAggExecNode extends ExecNodeBase<ArrowBatch>
     this.distinctViewColumns = distinctViewColumns;
     this.recordCountColumn = recordCountColumn;
     this.generateUpdateBefore = generateUpdateBefore;
+    this.stateTtlHintMillis = stateTtlHintMillis;
     this.keyTimestampPrecisions = keyTimestampPrecisions;
   }
 
@@ -86,6 +91,8 @@ public class NativeColumnarGroupAggExecNode extends ExecNodeBase<ArrowBatch>
             org.apache.flink.table.api.config.ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_ENABLED);
     long miniBatchSize =
         config.get(org.apache.flink.table.api.config.ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_SIZE);
+    long stateTtlMillis =
+        stateTtlHintMillis >= 0 ? stateTtlHintMillis : config.getStateRetentionTime();
     OneInputTransformation<ArrowBatch, ArrowBatch> transformation =
         ExecNodeUtil.createOneInputTransformation(
             input,
@@ -97,6 +104,7 @@ public class NativeColumnarGroupAggExecNode extends ExecNodeBase<ArrowBatch>
                 generateUpdateBefore,
                 miniBatch,
                 miniBatchSize,
+                stateTtlMillis,
                 keyTimestampPrecisions,
                 maxParallelism),
             ArrowBatchTypeInformation.INSTANCE,

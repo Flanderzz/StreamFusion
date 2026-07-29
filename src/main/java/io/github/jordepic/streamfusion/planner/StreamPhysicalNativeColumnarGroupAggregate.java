@@ -32,6 +32,9 @@ public class StreamPhysicalNativeColumnarGroupAggregate extends SingleRel
   private final int[] distinctViewColumns;
   private final int recordCountColumn;
   private final boolean generateUpdateBefore;
+  // Per-operator TTL from a STATE_TTL hint on the host aggregate (-1 = no hint); the exec node
+  // resolves it against table.exec.state.ttl at translate time, hint winning.
+  private final long stateTtlHintMillis;
 
   public StreamPhysicalNativeColumnarGroupAggregate(
       RelOptCluster cluster,
@@ -46,7 +49,8 @@ public class StreamPhysicalNativeColumnarGroupAggregate extends SingleRel
       int[] countColumns,
       int[] distinctViewColumns,
       int recordCountColumn,
-      boolean generateUpdateBefore) {
+      boolean generateUpdateBefore,
+      long stateTtlHintMillis) {
     super(cluster, traitSet, input);
     this.outputRowType = outputRowType;
     this.aggregateKinds = aggregateKinds;
@@ -58,6 +62,7 @@ public class StreamPhysicalNativeColumnarGroupAggregate extends SingleRel
     this.distinctViewColumns = distinctViewColumns;
     this.recordCountColumn = recordCountColumn;
     this.generateUpdateBefore = generateUpdateBefore;
+    this.stateTtlHintMillis = stateTtlHintMillis;
   }
 
   @Override
@@ -85,7 +90,8 @@ public class StreamPhysicalNativeColumnarGroupAggregate extends SingleRel
         countColumns,
         distinctViewColumns,
         recordCountColumn,
-        generateUpdateBefore);
+        generateUpdateBefore,
+        stateTtlHintMillis);
   }
 
   @Override
@@ -104,6 +110,7 @@ public class StreamPhysicalNativeColumnarGroupAggregate extends SingleRel
         distinctViewColumns,
         recordCountColumn,
         generateUpdateBefore,
+        stateTtlHintMillis,
         FlinkKeyGroupUtils.timestampPrecisions(getInput().getRowType(), keyColumns));
   }
 

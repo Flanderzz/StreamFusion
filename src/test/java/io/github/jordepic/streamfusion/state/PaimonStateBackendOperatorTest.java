@@ -599,6 +599,7 @@ class PaimonStateBackendOperatorTest {
             true,
             false,
             0,
+            0,
             new int[] {-1},
             MAX_PARALLELISM);
     return new KeyedOneInputStreamOperatorTestHarness<>(

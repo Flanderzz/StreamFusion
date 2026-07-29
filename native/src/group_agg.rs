@@ -585,6 +585,9 @@ pub(crate) struct GroupKeyState {
     /// runs twice per touched row, and re-walking the tuple's scalars each time was a measurable
     /// slice of the accounted aggregates.
     last_output_bytes: usize,
+    /// Wall-clock millis of the group's last write (Flink state TTL, `OnCreateAndWrite`); stays 0
+    /// while TTL is off.
+    last_write_ms: i64,
 }
 
 /// The resident default backend for the group store (see `state/` for the seam).
@@ -715,7 +718,7 @@ pub(crate) fn group_state_from_scalars(
             agg_state
         })
         .collect();
-    GroupKeyState { aggs, records, last_output: None, last_output_bytes: 0 }
+    GroupKeyState { aggs, records, last_output: None, last_output_bytes: 0, last_write_ms: 0 }
 }
 
 struct StagedGroupChange {
@@ -766,6 +769,13 @@ pub(crate) struct GroupAggregator<S: KeyedStateStore<GroupKeyState> = MemoryGrou
     key_columns: Vec<usize>,
     key_timestamp_precisions: Vec<i32>,
     generate_update_before: bool,
+    // Idle-state retention millis (0 = off — Flink's default). With TTL on, a group expires
+    // `ttl_ms` after its last write, and the no-change output suppression is disabled: Flink always
+    // emits -U/+U under TTL to keep refreshing downstream state.
+    ttl_ms: i64,
+    // When the last full expiry sweep ran; the sweep reclaims groups never touched again, once per
+    // TTL period (expiry itself is enforced lazily at each touch).
+    last_sweep_ms: i64,
     // The group store is keyed by Flink BinaryRow bytes. Besides giving equality the same
     // representation as the keyed exchange, this admits Arrow MAP values, which arrow-row cannot
     // encode.
@@ -855,6 +865,8 @@ impl GroupAggregator {
             key_timestamp_precisions: vec![-1; key_columns.len()],
             key_columns,
             generate_update_before,
+            ttl_ms: 0,
+            last_sweep_ms: 0,
             store: MemoryGroupStore::default(),
             snapshot_cache: None,
             mini_batch: false,
@@ -902,6 +914,8 @@ impl GroupAggregator {
             key_columns: self.key_columns,
             key_timestamp_precisions: self.key_timestamp_precisions,
             generate_update_before: self.generate_update_before,
+            ttl_ms: self.ttl_ms,
+            last_sweep_ms: self.last_sweep_ms,
             store,
             snapshot_cache: None,
             mini_batch: self.mini_batch,
@@ -982,6 +996,33 @@ impl<S: KeyedStateStore<GroupKeyState>> GroupAggregator<S> {
         self
     }
 
+    /// Sets the idle-state retention (`table.exec.state.ttl`) in millis; 0 (Flink's default)
+    /// disables expiry. A builder for the same reason as {@link with_filter_columns}.
+    pub(crate) fn with_state_ttl(mut self, ttl_ms: i64) -> Self {
+        self.ttl_ms = ttl_ms.max(0);
+        self
+    }
+
+    /// Reclaims every group whose TTL elapsed with no further touch — the lazy per-touch expiry
+    /// never sees such a key again. Silent, like Flink's background cleanup.
+    fn sweep_expired(&mut self, ttl: StateTtl) {
+        let track = self.memory.tracking();
+        let mut reclaimed = 0isize;
+        self.store.retain_live(&mut |key, state| {
+            if ttl.expired(state.last_write_ms) {
+                if track {
+                    reclaimed += (group_key_state_bytes(state) + byte_key_bytes(key)) as isize;
+                }
+                false
+            } else {
+                true
+            }
+        });
+        if reclaimed != 0 {
+            self.memory.record(-reclaimed);
+        }
+    }
+
     /// Inserts a key's empty state on its first touch and returns it for folding.
     fn create(&mut self, key: ByteKey) -> &mut GroupKeyState {
         let state = GroupKeyState {
@@ -994,14 +1035,29 @@ impl<S: KeyedStateStore<GroupKeyState>> GroupAggregator<S> {
             records: 0,
             last_output: None,
             last_output_bytes: 0,
+            last_write_ms: 0,
         };
         self.store.insert(key, state)
     }
 
     /// Folds the batch's rows into per-key state in input order, honoring each row's `RowKind`, and
-    /// returns the changelog rows produced, in emission order.
-    pub(crate) fn update(&mut self, batch: &RecordBatch) -> Result<RecordBatch, DataFusionError> {
+    /// returns the changelog rows produced, in emission order. `now_ms` is the host's wall-clock
+    /// reading for this call (only read when state TTL is on).
+    pub(crate) fn update(
+        &mut self,
+        batch: &RecordBatch,
+        now_ms: i64,
+    ) -> Result<RecordBatch, DataFusionError> {
         self.snapshot_cache = None;
+        let ttl = StateTtl::new(self.ttl_ms, now_ms);
+        // The sweep reclaims groups no later row ever touches. Once per TTL period bounds its
+        // amortized cost at one map walk per period; it must not run mid-bundle, where removing a
+        // staged key's state would turn silent expiry into a spurious -D at the flush.
+        if ttl.enabled() && self.staged_changes.is_empty() && now_ms >= self.last_sweep_ms + self.ttl_ms
+        {
+            self.sweep_expired(ttl);
+            self.last_sweep_ms = now_ms;
+        }
         // A read-through backend hydrates every key this batch can touch in one probe; point
         // accesses in the per-row loop below are then guaranteed resident (memory: no-op).
         self.store
@@ -1165,7 +1221,26 @@ impl<S: KeyedStateStore<GroupKeyState>> GroupAggregator<S> {
             // RowKind: 0 +I, 1 -U, 2 +U, 3 -D (absent column ⇒ INSERT). UB/delete retract; I/UA add.
             let kind = row_kinds.map_or(0, |kinds| kinds.value(row));
             let retract = kind == 1 || kind == 3;
-            let exists = self.store.contains(key);
+            // An expired group is deleted on read and treated as never seen (Flink's
+            // NeverReturnExpired): the next add re-enters through the fresh +I path below, and a
+            // retraction falls into the no-accumulator skip. Nothing is emitted for the expiry.
+            let mut expired_bytes = 0isize;
+            let exists = if ttl.enabled() {
+                match self.store.get(key) {
+                    Some(state) if ttl.expired(state.last_write_ms) => {
+                        expired_bytes =
+                            (group_key_state_bytes(state) + byte_key_bytes(key)) as isize;
+                        self.store.remove(key);
+                        false
+                    }
+                    present => present.is_some(),
+                }
+            } else {
+                self.store.contains(key)
+            };
+            if track && expired_bytes != 0 {
+                self.memory.record(-expired_bytes);
+            }
             let before = if track && exists {
                 group_key_state_bytes(self.store.get(key).expect("key present")) as isize
             } else {
@@ -1344,6 +1419,11 @@ impl<S: KeyedStateStore<GroupKeyState>> GroupAggregator<S> {
                         }
                     }
                 };
+                if ttl.enabled() {
+                    // Every processed row is a state write (Flink's accState.update), so it
+                    // refreshes the group's TTL. Reads never do.
+                    state.last_write_ms = ttl.now();
+                }
             }
 
             if self.mini_batch {
@@ -1360,7 +1440,9 @@ impl<S: KeyedStateStore<GroupKeyState>> GroupAggregator<S> {
                         state.last_output = Some(new.clone());
                         push(0, row, new);
                     }
-                    Some(prev) if new != prev => {
+                    // With TTL on the no-change suppression is disabled: Flink always emits -U/+U
+                    // so downstream state keeps refreshing instead of expiring too early.
+                    Some(prev) if new != prev || ttl.enabled() => {
                         state.last_output_bytes = scalar_row_bytes(&new);
                         state.last_output = Some(new.clone());
                         if self.generate_update_before {
@@ -1470,13 +1552,18 @@ impl<S: KeyedStateStore<GroupKeyState>> GroupAggregator<S> {
             out_kinds.push(kind);
         };
 
+        // Staged keys were all written this bundle, so none can be expired here; a TTL shorter
+        // than the bundle interval is degenerate and still only delays expiry to the next touch.
+        let ttl_on = self.ttl_ms > 0;
         for key in order {
             let staged = &changes[&key];
             let new = self.store.get(&key.0).map(|state| output_of(state, &self.result_types));
             match (&staged.old, &new) {
                 (None, Some(after)) => push(0, staged, after.clone()),
                 (Some(before), None) => push(3, staged, before.clone()),
-                (Some(before), Some(after)) if before != after => {
+                // The same TTL rule as immediate mode: no-change transitions are suppressed only
+                // with retention off (Flink's MiniBatchGroupAggFunction gate).
+                (Some(before), Some(after)) if before != after || ttl_on => {
                     if self.generate_update_before {
                         push(1, staged, before.clone());
                     }
@@ -1549,6 +1636,7 @@ impl GroupAggregator {
         let num_agg = self.kinds.len();
         let mut encoded_keys: Vec<&[u8]> = Vec::new();
         let mut records: Vec<i64> = Vec::new();
+        let mut write_timestamps: Vec<i64> = Vec::new();
         let mut state_columns: Vec<Vec<ScalarValue>> = vec![Vec::new(); num_agg];
         let mut non_null_columns: Vec<Vec<i64>> = vec![Vec::new(); num_agg];
         let mut multiset_keys: Vec<Vec<&[u8]>> = vec![Vec::new(); num_agg];
@@ -1561,6 +1649,7 @@ impl GroupAggregator {
                 .expect("snapshot key remains in group state");
             encoded_keys.push(&key.0);
             records.push(state.records);
+            write_timestamps.push(state.last_write_ms);
             for i in 0..num_agg {
                 match &state.aggs[i] {
                     GroupAggState::Running { agg, non_null } => {
@@ -1620,6 +1709,12 @@ impl GroupAggregator {
             columns.push(Arc::new(Int64Array::from(std::mem::take(
                 &mut non_null_columns[i],
             ))));
+        }
+        // The TTL timestamps ride a trailing column only while TTL is on, so a TTL-off snapshot
+        // stays byte-identical to the pre-TTL format (and disabling TTL sheds the timestamps).
+        if self.ttl_ms > 0 {
+            fields.push(Field::new(TTL_TS_COLUMN, DataType::Int64, false));
+            columns.push(Arc::new(Int64Array::from(write_timestamps)));
         }
         let mut batches =
             vec![RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
@@ -1708,6 +1803,7 @@ impl GroupAggregator {
         key_columns: Vec<usize>,
         generate_update_before: bool,
         bytes: &[u8],
+        restored_at_ms: i64,
     ) -> Self {
         let mut aggregator = GroupAggregator::new(
             kinds,
@@ -1721,9 +1817,22 @@ impl GroupAggregator {
         if batches.is_empty() {
             return aggregator;
         }
-        // Main batch: BinaryRow key, records, then (state, nonnull) per aggregate.
+        // Main batch: BinaryRow key, records, then (state, nonnull) per aggregate, then the TTL
+        // timestamps when the writer had TTL on. A pre-TTL snapshot restored into a TTL'd operator
+        // stamps every group with the restore time — a full retention from now, Flink's
+        // enable-TTL migration — instead of 0, which would expire everything on first touch.
         let main = &batches[0];
-        assert_eq!(main.num_columns(), 2 + 2 * num_agg, "group snapshot schema");
+        let write_timestamps = (main.num_columns() > 2 + 2 * num_agg).then(|| {
+            assert_eq!(
+                main.schema().field(2 + 2 * num_agg).name(),
+                TTL_TS_COLUMN,
+                "group snapshot schema"
+            );
+            column_i64(main, TTL_TS_COLUMN)
+        });
+        if write_timestamps.is_none() {
+            assert_eq!(main.num_columns(), 2 + 2 * num_agg, "group snapshot schema");
+        }
         let keys = main
             .column(0)
             .as_any()
@@ -1734,6 +1843,8 @@ impl GroupAggregator {
             let key = ByteKey::from(keys.value(row));
             let state = aggregator.create(key);
             state.records = records.value(row);
+            state.last_write_ms =
+                write_timestamps.as_ref().map_or(restored_at_ms, |ts| ts.value(row));
             for i in 0..num_agg {
                 if let GroupAggState::Running { agg, non_null } = &mut state.aggs[i] {
                     let scalar = ScalarValue::try_from_array(main.column(2 + 2 * i), row)
@@ -1795,6 +1906,7 @@ impl GroupAggregator {
         key_columns: Vec<usize>,
         generate_update_before: bool,
         snapshots: &[Vec<u8>],
+        restored_at_ms: i64,
     ) -> Self {
         let mut merged = GroupAggregator::new(
             kinds.clone(),
@@ -1811,6 +1923,7 @@ impl GroupAggregator {
                 key_columns.clone(),
                 generate_update_before,
                 bytes,
+                restored_at_ms,
             );
             merged.store.absorb(restored.store);
         }
@@ -2427,6 +2540,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createGroupAg
     record_count_column: jint,
     generate_update_before: jboolean,
     mini_batch: jboolean,
+    state_ttl_millis: jlong,
     memory_budget_bytes: jlong,
 ) -> jlong {
     crate::bridge::jni_guard(env, move |mut env| {
@@ -2452,7 +2566,8 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createGroupAg
         .with_filter_columns(filter_columns)
         .with_count_columns(count_columns)
         .with_distinct_view_columns(distinct_view_columns)
-        .with_record_count_column(record_count_column as i64);
+        .with_record_count_column(record_count_column as i64)
+        .with_state_ttl(state_ttl_millis);
         if mini_batch != 0 {
             aggregator = aggregator.with_mini_batch();
         }
@@ -2470,6 +2585,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_updateGroupAg
     handle: jlong,
     in_array_address: jlong,
     in_schema_address: jlong,
+    now_millis: jlong,
     out_array_address: jlong,
     out_schema_address: jlong,
 ) {
@@ -2478,7 +2594,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_updateGroupAg
         // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
         let result = {
             let batch = import_record_batch(in_array_address, in_schema_address);
-            aggregator.update(&batch)
+            aggregator.update(&batch, now_millis)
         };
         match result {
             Ok(out) => export_record_batch(out, out_array_address, out_schema_address),
@@ -2564,6 +2680,8 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreGroupA
     record_count_column: jint,
     generate_update_before: jboolean,
     mini_batch: jboolean,
+    state_ttl_millis: jlong,
+    now_millis: jlong,
     snapshot: JByteArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
@@ -2589,12 +2707,14 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreGroupA
             key_columns,
             generate_update_before != 0,
             &bytes,
+            now_millis,
         )
         .with_key_timestamp_precisions(key_timestamp_precisions)
         .with_filter_columns(filter_columns)
         .with_count_columns(count_columns)
         .with_distinct_view_columns(distinct_view_columns)
-        .with_record_count_column(record_count_column as i64);
+        .with_record_count_column(record_count_column as i64)
+        .with_state_ttl(state_ttl_millis);
         if mini_batch != 0 {
             aggregator = aggregator.with_mini_batch();
         }
@@ -2621,6 +2741,8 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreGroupA
     record_count_column: jint,
     generate_update_before: jboolean,
     mini_batch: jboolean,
+    state_ttl_millis: jlong,
+    now_millis: jlong,
     snapshots: JObjectArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
@@ -2657,12 +2779,14 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreGroupA
             key_columns,
             generate_update_before != 0,
             &restored,
+            now_millis,
         )
         .with_key_timestamp_precisions(key_timestamp_precisions)
         .with_filter_columns(filter_columns)
         .with_count_columns(count_columns)
         .with_distinct_view_columns(distinct_view_columns)
-        .with_record_count_column(record_count_column as i64);
+        .with_record_count_column(record_count_column as i64)
+        .with_state_ttl(state_ttl_millis);
         if mini_batch != 0 {
             aggregator = aggregator.with_mini_batch();
         }
