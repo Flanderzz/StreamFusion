@@ -220,12 +220,14 @@ array`, is **not** here: Flink rejects it too, so we're at parity.)
 
 **Idle-state TTL** (`table.exec.state.ttl` ≠ 0): the non-windowed `GROUP BY` — single-phase and
 the two-phase global merge (the local half is transient, so TTL lives on the global) —
-`ChangelogNormalize`, and deduplication (keep-last, and eager proctime keep-first) run it
+`ChangelogNormalize`, deduplication (keep-last, and eager proctime keep-first), and the regular
+join (per-side retention — each side's rows expire independently under its own TTL) run it
 **natively**: Flink's exact StateTtlConfig semantics (last-write timestamps,
 expired-reads-as-absent with the fresh `+I` restart, retractions and tombstones against expired
-state dropped, and the unchanged-update suppression disabled), with the `STATE_TTL` hint honored
-over the job-wide retention (aggregates only — Flink defines no such hint on normalize or
-deduplicate). The watermark-buffered rowtime keep-first dedup still declines — its buffered
+state dropped, and the unchanged-update suppression disabled — the join has no such suppression
+to disable), with the `STATE_TTL` hint honored
+over the job-wide retention (aggregates, and per side on the join — Flink defines no such hint on
+normalize or deduplicate). The watermark-buffered rowtime keep-first dedup still declines — its buffered
 candidates and emitted-key set do not expire yet. Every other stateful operator likewise declines
 a nonzero retention: with a TTL the host expires idle keys and stops suppressing unchanged
 updates — semantics those native operators do not yet reproduce. For the temporal join and OVER
@@ -257,9 +259,9 @@ shape carries timestamps.
   that isn't a non-legacy `TableSourceTable`. (Projection/filter on the temporal table, residual and
   pre-filter conditions, and constant lookup keys are all native — the operator drives Flink's own
   generated runner; both the sync and async processing-time forms are native — §(a).)
-- **Regular join** — idle-state TTL ≠ 0 (interim, above); unsupported join type; no equi key;
+- **Regular join** — unsupported join type; no equi key;
   non-null-dropping keys; non-equi residual not expressible; an input column type the converter
-  can't carry.
+  can't carry. (Idle-state TTL is native here, per side — see the note above.)
 - **Window aggregate / local / global** — window not event-time `TUMBLE`/`HOP`/`CUMULATE` (zero offset)
   over a local-time-zone **or plain `TIMESTAMP`** rowtime (the bounds render in the session zone for a
   local-time-zone attribute, in UTC — the raw wall-clock — for a plain `TIMESTAMP`) — or, for

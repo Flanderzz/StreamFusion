@@ -19,6 +19,19 @@ pub(crate) struct UpdatingJoiner<S: KeyedStateStore<JoinBucket> = MemoryJoinStor
     right_null: ByteKey,
     left_state: S,
     right_state: S,
+    // Per-side idle-state retention millis (0 = off — Flink's default). Flink keys the join state
+    // per side and the STATE_TTL hint sets each side independently, so a row expires
+    // `ttl_ms` of ITS side after its last write. The operator itself has no expiry awareness
+    // (Flink's StreamingJoinOperator): a probe simply sees fewer rows and the input side treats an
+    // expired entry as absent.
+    left_ttl_ms: i64,
+    right_ttl_ms: i64,
+    // When the last full expiry sweep ran; the sweep reclaims rows never touched again, once per
+    // min enabled TTL period (expiry itself is enforced lazily at each touch).
+    last_sweep_ms: i64,
+    // The last ingest's wall-clock reading; the mini-batch flush replays its staged rows under the
+    // bundle's final clock (inside the nondeterminism wall-clock TTL already has, divergences/28).
+    clock_ms: i64,
     mini_batch: bool,
     left_staged: MiniBatchChanges<ByteKey, ByteKey>,
     right_staged: MiniBatchChanges<ByteKey, ByteKey>,
@@ -96,6 +109,10 @@ impl UpdatingJoiner {
             right_null,
             left_state: MemoryJoinStore::default(),
             right_state: MemoryJoinStore::default(),
+            left_ttl_ms: 0,
+            right_ttl_ms: 0,
+            last_sweep_ms: 0,
+            clock_ms: 0,
             mini_batch: false,
             left_staged: MiniBatchChanges::default(),
             right_staged: MiniBatchChanges::default(),
@@ -135,6 +152,10 @@ impl<S: KeyedStateStore<JoinBucket>> UpdatingJoiner<S> {
             right_null: self.right_null,
             left_state,
             right_state,
+            left_ttl_ms: self.left_ttl_ms,
+            right_ttl_ms: self.right_ttl_ms,
+            last_sweep_ms: self.last_sweep_ms,
+            clock_ms: self.clock_ms,
             mini_batch: self.mini_batch,
             left_staged: self.left_staged,
             right_staged: self.right_staged,
@@ -168,6 +189,75 @@ impl<S: KeyedStateStore<JoinBucket>> UpdatingJoiner<S> {
     pub(crate) fn with_mini_batch(mut self, mini_batch: bool) -> Self {
         self.mini_batch = mini_batch;
         self
+    }
+
+    /// Sets each side's idle-state retention in millis; 0 (Flink's default) disables that side's
+    /// expiry. The sides differ when a `STATE_TTL` hint sets them independently.
+    pub(crate) fn with_state_ttl(mut self, left_ttl_ms: i64, right_ttl_ms: i64) -> Self {
+        self.left_ttl_ms = left_ttl_ms.max(0);
+        self.right_ttl_ms = right_ttl_ms.max(0);
+        self
+    }
+
+    /// The TTL ruleset one side's state is read and written under at this clock reading.
+    fn side_ttl(&self, is_left: bool, now_ms: i64) -> StateTtl {
+        StateTtl::new(if is_left { self.left_ttl_ms } else { self.right_ttl_ms }, now_ms)
+    }
+
+    /// Reclaims one side's rows whose TTL elapsed with no further touch — the lazy per-touch expiry
+    /// never sees such an entry again. Silent, like Flink's background cleanup: expiry emits
+    /// nothing, so a swept outer row's null-pad is never retracted (nor is it by Flink).
+    fn sweep_side(state: &mut S, ttl: StateTtl, track: bool) -> isize {
+        if !ttl.enabled() {
+            return 0;
+        }
+        let mut reclaimed = 0isize;
+        state.retain_live(&mut |key, bucket| {
+            bucket.retain(|row, meta| {
+                if ttl.expired(meta.last_write_ms) {
+                    if track {
+                        reclaimed += join_row_entry_bytes(&row.0) as isize;
+                    }
+                    false
+                } else {
+                    true
+                }
+            });
+            if bucket.is_empty() {
+                if track {
+                    reclaimed += join_key_entry_bytes(key) as isize;
+                }
+                false
+            } else {
+                true
+            }
+        });
+        reclaimed
+    }
+
+    /// Runs the once-per-period full sweep over both sides when due. It must not run mid-bundle:
+    /// the staged mini-batch changes read their first durable row at staging time, and reclaiming
+    /// it underneath them would change what the flush replays.
+    fn maybe_sweep(&mut self, now_ms: i64) {
+        let enabled: Vec<i64> =
+            [self.left_ttl_ms, self.right_ttl_ms].into_iter().filter(|&t| t > 0).collect();
+        let Some(&period) = enabled.iter().min() else {
+            return;
+        };
+        if self.left_staged.touched_keys() + self.right_staged.touched_keys() > 0
+            || now_ms < self.last_sweep_ms + period
+        {
+            return;
+        }
+        let track = self.memory.tracking();
+        let left_ttl = self.side_ttl(true, now_ms);
+        let right_ttl = self.side_ttl(false, now_ms);
+        let reclaimed = Self::sweep_side(&mut self.left_state, left_ttl, track)
+            + Self::sweep_side(&mut self.right_state, right_ttl, track);
+        if reclaimed != 0 {
+            self.memory.record(-reclaimed);
+        }
+        self.last_sweep_ms = now_ms;
     }
 
     /// Drops the candidate matches whose `[left.., right..]` pair fails the residual non-equi
@@ -216,13 +306,20 @@ impl<S: KeyedStateStore<JoinBucket>> UpdatingJoiner<S> {
     /// appear-times (so multiplicity is preserved) and capturing its degree once per distinct row. A
     /// null in the equi-key matches nothing (Flink's null-filtering equi semantics), so an empty key
     /// match means "no associated rows".
-    fn associated(other_state: &S, key: &[u8]) -> Vec<OuterRecord> {
+    ///
+    /// An expired other-side entry is skipped, not deleted: Flink's operator only iterates the
+    /// other side's view, whose TTL filter hides expired entries without removing them — the sweep
+    /// reclaims them. Skip-only also keeps the probe a shared borrow.
+    fn associated(other_state: &S, key: &[u8], other_ttl: StateTtl) -> Vec<OuterRecord> {
         // A null in the equi-key matches nothing (Flink's null-rejecting equality); the caller skips
         // association for null-key rows (a null can't be read back from the encoded key), so this just
         // gathers the matches for a non-null key.
         let mut out = Vec::new();
         if let Some(bucket) = other_state.get(key) {
             for (row, meta) in bucket.iter() {
+                if other_ttl.expired(meta.last_write_ms) {
+                    continue;
+                }
                 for _ in 0..meta.count.max(0) {
                     out.push(OuterRecord { record: row.clone(), num_assoc: meta.num_assoc });
                 }
@@ -249,23 +346,38 @@ impl<S: KeyedStateStore<JoinBucket>> UpdatingJoiner<S> {
     }
 
     /// Bumps `row`'s appear-times in `bucket`, applying `on_existing` to its meta when it is already
-    /// stored (the zero-allocation steady state) and inserting a fresh entry otherwise.
+    /// stored (the zero-allocation steady state) and inserting a fresh entry otherwise. An existing
+    /// entry whose TTL elapsed reads as absent and is overwritten with `fresh` — Flink's
+    /// resurrection: `addRecord` re-creates with appear-times 1, and `updateNumOfAssociations`
+    /// re-creates `(1, num_assoc)` (the literal "compatible for state ttl" branch). Every path is a
+    /// state write (Flink `put`s the tuple each time), so it stamps the entry's TTL clock.
     fn bump_row(
         bucket: &mut JoinBucket,
         row: &[u8],
         fresh: RowMeta,
         on_existing: impl FnOnce(&mut RowMeta),
+        ttl: StateTtl,
         track: bool,
         delta: &mut isize,
     ) {
         if let Some(meta) = bucket.get_mut(row) {
-            on_existing(meta);
+            if ttl.expired(meta.last_write_ms) {
+                *meta = fresh;
+            } else {
+                on_existing(meta);
+            }
+            if ttl.enabled() {
+                meta.last_write_ms = ttl.now();
+            }
             return;
         }
         if track {
             *delta += join_row_entry_bytes(row) as isize;
         }
-        bucket.insert(ByteKey::from(row), fresh);
+        let meta = bucket.entry(ByteKey::from(row)).insert_entry(fresh).into_mut();
+        if ttl.enabled() {
+            meta.last_write_ms = ttl.now();
+        }
     }
 
     /// `state.addRecord(record, num_assoc)` — bumps appear-times and (re)sets the degree, as Flink's
@@ -275,6 +387,7 @@ impl<S: KeyedStateStore<JoinBucket>> UpdatingJoiner<S> {
         key: &[u8],
         row: &[u8],
         num_assoc: i32,
+        ttl: StateTtl,
         track: bool,
         delta: &mut isize,
     ) {
@@ -282,11 +395,12 @@ impl<S: KeyedStateStore<JoinBucket>> UpdatingJoiner<S> {
         Self::bump_row(
             bucket,
             row,
-            RowMeta { count: 1, num_assoc },
+            RowMeta { count: 1, num_assoc, last_write_ms: 0 },
             |m| {
                 m.count += 1;
                 m.num_assoc = num_assoc;
             },
+            ttl,
             track,
             delta,
         );
@@ -298,6 +412,7 @@ impl<S: KeyedStateStore<JoinBucket>> UpdatingJoiner<S> {
         key: &[u8],
         row: &[u8],
         num_assoc: i32,
+        ttl: StateTtl,
         track: bool,
         delta: &mut isize,
     ) {
@@ -305,23 +420,44 @@ impl<S: KeyedStateStore<JoinBucket>> UpdatingJoiner<S> {
         Self::bump_row(
             bucket,
             row,
-            RowMeta { count: 1, num_assoc },
+            RowMeta { count: 1, num_assoc, last_write_ms: 0 },
             |m| m.num_assoc = num_assoc,
+            ttl,
             track,
             delta,
         );
     }
 
-    /// `state.retractRecord(record)` — drops one appear-time, removing the row (and emptied key) at 0.
-    fn retract_record(state: &mut S, key: &[u8], row: &[u8], track: bool, delta: &mut isize) {
+    /// `state.retractRecord(record)` — drops one appear-time, removing the row (and emptied key) at
+    /// 0. An expired entry reads as absent, so the retraction is a state no-op in Flink; here the
+    /// corpse is additionally removed (delete-on-read), with no decrement and nothing emitted —
+    /// the caller still probes the other side and emits for whatever matches there. A decrement
+    /// that leaves the entry live is a write (Flink puts `cnt-1`), refreshing its TTL clock.
+    fn retract_record(
+        state: &mut S,
+        key: &[u8],
+        row: &[u8],
+        ttl: StateTtl,
+        track: bool,
+        delta: &mut isize,
+    ) {
         let mut emptied = false;
         if let Some(bucket) = state.get_mut(key) {
             if let Some(meta) = bucket.get_mut(row) {
-                meta.count -= 1;
-                if meta.count <= 0 {
+                if ttl.expired(meta.last_write_ms) {
                     bucket.remove(row);
                     if track {
                         *delta -= join_row_entry_bytes(row) as isize;
+                    }
+                } else {
+                    meta.count -= 1;
+                    if meta.count <= 0 {
+                        bucket.remove(row);
+                        if track {
+                            *delta -= join_row_entry_bytes(row) as isize;
+                        }
+                    } else if ttl.enabled() {
+                        meta.last_write_ms = ttl.now();
                     }
                 }
             }
@@ -335,18 +471,27 @@ impl<S: KeyedStateStore<JoinBucket>> UpdatingJoiner<S> {
         }
     }
 
-    /// Folds an input batch into its side and emits the join changelog it produces.
-    pub(crate) fn push(&mut self, batch: &RecordBatch, is_left: bool) -> Result<RecordBatch, DataFusionError> {
+    /// Folds an input batch into its side and emits the join changelog it produces. `now_ms` is
+    /// the host's wall-clock reading for this call (only read when a side's state TTL is on).
+    pub(crate) fn push(
+        &mut self,
+        batch: &RecordBatch,
+        is_left: bool,
+        now_ms: i64,
+    ) -> Result<RecordBatch, DataFusionError> {
+        self.clock_ms = now_ms;
+        self.maybe_sweep(now_ms);
         if self.mini_batch {
-            return self.push_mini_batch(batch, is_left);
+            return self.push_mini_batch(batch, is_left, now_ms);
         }
-        self.push_immediate(batch, is_left)
+        self.push_immediate(batch, is_left, now_ms)
     }
 
     fn push_immediate(
         &mut self,
         batch: &RecordBatch,
         is_left: bool,
+        now_ms: i64,
     ) -> Result<RecordBatch, DataFusionError> {
         let arity = data_arity(batch);
         let key_indices: &[usize] = if is_left { &self.left_keys } else { &self.right_keys };
@@ -373,7 +518,7 @@ impl<S: KeyedStateStore<JoinBucket>> UpdatingJoiner<S> {
         // convert_rows/predicate batch, no per-pair row clone, no emit round-trip (the hot q3/q9/q23
         // path). The per-row state machine below still serves the degree-bearing outer/semi/anti kinds.
         if self.kind == JoinKind::Inner {
-            return self.push_inner(is_left, batch, &payloads, &key_null, row_kinds);
+            return self.push_inner(is_left, batch, &payloads, &key_null, row_kinds, now_ms);
         }
 
         let track = self.memory.tracking();
@@ -392,12 +537,12 @@ impl<S: KeyedStateStore<JoinBucket>> UpdatingJoiner<S> {
             let full = payloads.row(row);
             if self.kind.is_semi_anti() {
                 self.process_semi_anti(
-                    key, full.as_ref(), kind, is_left, key_null[row], &mut out_left,
+                    key, full.as_ref(), kind, is_left, key_null[row], now_ms, &mut out_left,
                     &mut out_kinds, track, &mut delta,
                 );
             } else {
                 self.process_inner_outer(
-                    key, full.as_ref(), kind, is_left, key_null[row], &mut out_left,
+                    key, full.as_ref(), kind, is_left, key_null[row], now_ms, &mut out_left,
                     &mut out_right, &mut out_kinds, track, &mut delta,
                 );
             }
@@ -432,6 +577,7 @@ impl<S: KeyedStateStore<JoinBucket>> UpdatingJoiner<S> {
         &mut self,
         batch: &RecordBatch,
         is_left: bool,
+        now_ms: i64,
     ) -> Result<RecordBatch, DataFusionError> {
         let arity = data_arity(batch);
         let key_indices: &[usize] = if is_left { &self.left_keys } else { &self.right_keys };
@@ -451,6 +597,7 @@ impl<S: KeyedStateStore<JoinBucket>> UpdatingJoiner<S> {
         let before_bytes = if self.memory.tracking() { self.staging_bytes() } else { 0 };
         let mut key_encoder =
             BinaryRowBatchEncoder::new(batch, key_indices, &self.key_timestamp_precisions);
+        let input_ttl = self.side_ttl(is_left, now_ms);
         let (staged, state) = if is_left {
             (&mut self.left_staged, &self.left_state)
         } else {
@@ -459,10 +606,15 @@ impl<S: KeyedStateStore<JoinBucket>> UpdatingJoiner<S> {
         for row in 0..batch.num_rows() {
             let key = key_encoder.encode(row);
             if !staged.contains_key(key) {
+                // An expired durable row reads as absent (skip-only under the shared borrow; the
+                // flush's own state writes and the sweep reclaim it), so the bundle replays
+                // against what the immediate path would have seen at this clock.
                 let durable = state.get(key).and_then(|bucket| {
                     bucket
                         .iter()
-                        .find(|(_, meta)| meta.count > 0)
+                        .find(|(_, meta)| {
+                            meta.count > 0 && !input_ttl.expired(meta.last_write_ms)
+                        })
                         .map(|(payload, _)| payload.clone())
                 });
                 staged.touch(ByteKey::from(key), durable);
@@ -544,13 +696,13 @@ impl<S: KeyedStateStore<JoinBucket>> UpdatingJoiner<S> {
         let right_batch = self.staged_batch(right, false);
         let mut outputs = Vec::new();
         if let Some(batch) = left_batch {
-            let out = self.push_immediate(&batch, true)?;
+            let out = self.push_immediate(&batch, true, self.clock_ms)?;
             if out.num_rows() > 0 {
                 outputs.push(out);
             }
         }
         if let Some(batch) = right_batch {
-            let out = self.push_immediate(&batch, false)?;
+            let out = self.push_immediate(&batch, false, self.clock_ms)?;
             if out.num_rows() > 0 {
                 outputs.push(out);
             }
@@ -603,11 +755,14 @@ impl<S: KeyedStateStore<JoinBucket>> UpdatingJoiner<S> {
         payloads: &Rows,
         key_null: &[bool],
         row_kinds: Option<&Int8Array>,
+        now_ms: i64,
     ) -> Result<RecordBatch, DataFusionError> {
         // Split the two state stores so the input side can be mutated while the probe side is borrowed
         // (INNER never mutates the probe side, so the gathered match rows stay valid for the batch).
         let track = self.memory.tracking();
         let mut delta = 0isize;
+        let input_ttl = self.side_ttl(is_left, now_ms);
+        let other_ttl = self.side_ttl(!is_left, now_ms);
         let key_indices: &[usize] = if is_left { &self.left_keys } else { &self.right_keys };
         let mut key_encoder =
             BinaryRowBatchEncoder::new(batch, key_indices, &self.key_timestamp_precisions);
@@ -629,6 +784,10 @@ impl<S: KeyedStateStore<JoinBucket>> UpdatingJoiner<S> {
             if !key_null[row] {
                 if let Some(bucket) = other_state.get(key) {
                     for (other, meta) in bucket.iter() {
+                        // Expired probe-side entries are hidden, not deleted — see `associated`.
+                        if other_ttl.expired(meta.last_write_ms) {
+                            continue;
+                        }
                         for _ in 0..meta.count.max(0) {
                             cand_input_idx.push(row);
                             cand_other.push(other);
@@ -642,13 +801,14 @@ impl<S: KeyedStateStore<JoinBucket>> UpdatingJoiner<S> {
                 Self::bump_row(
                     bucket,
                     full.as_ref(),
-                    RowMeta { count: 1, num_assoc: -1 },
+                    RowMeta { count: 1, num_assoc: -1, last_write_ms: 0 },
                     |m| m.count += 1,
+                    input_ttl,
                     track,
                     &mut delta,
                 );
             } else {
-                Self::retract_record(input_state, key, full.as_ref(), track, &mut delta);
+                Self::retract_record(input_state, key, full.as_ref(), input_ttl, track, &mut delta);
             }
         }
         self.memory.record(delta);
@@ -722,6 +882,7 @@ impl<S: KeyedStateStore<JoinBucket>> UpdatingJoiner<S> {
         kind: i8,
         is_left: bool,
         key_has_null: bool,
+        now_ms: i64,
         out_left: &mut Vec<ByteKey>,
         out_right: &mut Vec<ByteKey>,
         out_kinds: &mut Vec<i8>,
@@ -729,6 +890,8 @@ impl<S: KeyedStateStore<JoinBucket>> UpdatingJoiner<S> {
         delta: &mut isize,
     ) {
         let accumulate = kind == 0 || kind == 2;
+        let input_ttl = self.side_ttl(is_left, now_ms);
+        let other_ttl = self.side_ttl(!is_left, now_ms);
         let input_is_outer = if is_left { self.kind.left_is_outer() } else { self.kind.right_is_outer() };
         let other_is_outer = if is_left { self.kind.right_is_outer() } else { self.kind.left_is_outer() };
         let left_null = self.left_null.clone();
@@ -757,7 +920,11 @@ impl<S: KeyedStateStore<JoinBucket>> UpdatingJoiner<S> {
         let mut associated = if key_has_null {
             Vec::new()
         } else {
-            Self::associated(if is_left { &self.right_state } else { &self.left_state }, key)
+            Self::associated(
+                if is_left { &self.right_state } else { &self.left_state },
+                key,
+                other_ttl,
+            )
         };
         self.filter_associated(full, is_left, &mut associated);
 
@@ -768,7 +935,7 @@ impl<S: KeyedStateStore<JoinBucket>> UpdatingJoiner<S> {
                     out_left.push(l);
                     out_right.push(r);
                     out_kinds.push(0); // +I[record+null]
-                    Self::add_record(self.input_state(is_left), key, full, 0, track, delta);
+                    Self::add_record(self.input_state(is_left), key, full, 0, input_ttl, track, delta);
                 } else {
                     let num = associated.len() as i32;
                     for other in &associated {
@@ -779,17 +946,17 @@ impl<S: KeyedStateStore<JoinBucket>> UpdatingJoiner<S> {
                                 out_right.push(r);
                                 out_kinds.push(3); // -D[null+other]
                             }
-                            Self::update_num_assoc(self.other_state(is_left), key, &other.record.0, other.num_assoc + 1, track, delta);
+                            Self::update_num_assoc(self.other_state(is_left), key, &other.record.0, other.num_assoc + 1, other_ttl, track, delta);
                         }
                         let (l, r) = paired(&other.record);
                         out_left.push(l);
                         out_right.push(r);
                         out_kinds.push(0); // +I[record+other]
                     }
-                    Self::add_record(self.input_state(is_left), key, full, num, track, delta);
+                    Self::add_record(self.input_state(is_left), key, full, num, input_ttl, track, delta);
                 }
             } else {
-                Self::add_record(self.input_state(is_left), key, full, -1, track, delta);
+                Self::add_record(self.input_state(is_left), key, full, -1, input_ttl, track, delta);
                 for other in &associated {
                     if other_is_outer {
                         if other.num_assoc == 0 {
@@ -798,7 +965,7 @@ impl<S: KeyedStateStore<JoinBucket>> UpdatingJoiner<S> {
                             out_right.push(r);
                             out_kinds.push(3); // -D[null+other]
                         }
-                        Self::update_num_assoc(self.other_state(is_left), key, &other.record.0, other.num_assoc + 1, track, delta);
+                        Self::update_num_assoc(self.other_state(is_left), key, &other.record.0, other.num_assoc + 1, other_ttl, track, delta);
                         let (l, r) = paired(&other.record);
                         out_left.push(l);
                         out_right.push(r);
@@ -812,7 +979,7 @@ impl<S: KeyedStateStore<JoinBucket>> UpdatingJoiner<S> {
                 }
             }
         } else {
-            Self::retract_record(self.input_state(is_left), key, full, track, delta);
+            Self::retract_record(self.input_state(is_left), key, full, input_ttl, track, delta);
             if associated.is_empty() {
                 if input_is_outer {
                     let (l, r) = input_padded;
@@ -833,7 +1000,7 @@ impl<S: KeyedStateStore<JoinBucket>> UpdatingJoiner<S> {
                             out_right.push(r);
                             out_kinds.push(0); // +I[null+other]
                         }
-                        Self::update_num_assoc(self.other_state(is_left), key, &other.record.0, other.num_assoc - 1, track, delta);
+                        Self::update_num_assoc(self.other_state(is_left), key, &other.record.0, other.num_assoc - 1, other_ttl, track, delta);
                     }
                 }
             }
@@ -860,6 +1027,7 @@ impl<S: KeyedStateStore<JoinBucket>> UpdatingJoiner<S> {
         kind: i8,
         is_left: bool,
         key_has_null: bool,
+        now_ms: i64,
         out_rows: &mut Vec<ByteKey>,
         out_kinds: &mut Vec<i8>,
         track: bool,
@@ -867,11 +1035,16 @@ impl<S: KeyedStateStore<JoinBucket>> UpdatingJoiner<S> {
     ) {
         let accumulate = kind == 0 || kind == 2;
         let is_anti = self.kind == JoinKind::Anti;
+        let left_ttl = self.side_ttl(true, now_ms);
+        let right_ttl = self.side_ttl(false, now_ms);
         if is_left {
             // processElement1: emit the input row when it has (semi) / lacks (anti) a match, then
             // record it with its current match count as its degree.
-            let mut associated =
-                if key_has_null { Vec::new() } else { Self::associated(&self.right_state, key) };
+            let mut associated = if key_has_null {
+                Vec::new()
+            } else {
+                Self::associated(&self.right_state, key, right_ttl)
+            };
             self.filter_associated(full, true, &mut associated);
             let matched = !associated.is_empty();
             if matched != is_anti {
@@ -879,35 +1052,38 @@ impl<S: KeyedStateStore<JoinBucket>> UpdatingJoiner<S> {
                 out_kinds.push(kind); // forward input RowKind
             }
             if accumulate {
-                Self::add_record(&mut self.left_state, key, full, associated.len() as i32, track, delta);
+                Self::add_record(&mut self.left_state, key, full, associated.len() as i32, left_ttl, track, delta);
             } else {
-                Self::retract_record(&mut self.left_state, key, full, track, delta);
+                Self::retract_record(&mut self.left_state, key, full, left_ttl, track, delta);
             }
         } else {
             // processElement2: a right row flips associated left rows' degree across 0↔1, emitting or
             // retracting them (semi) or the inverse (anti).
-            let mut associated =
-                if key_has_null { Vec::new() } else { Self::associated(&self.left_state, key) };
+            let mut associated = if key_has_null {
+                Vec::new()
+            } else {
+                Self::associated(&self.left_state, key, left_ttl)
+            };
             self.filter_associated(full, false, &mut associated);
             if accumulate {
-                Self::add_record(&mut self.right_state, key, full, -1, track, delta);
+                Self::add_record(&mut self.right_state, key, full, -1, right_ttl, track, delta);
                 for other in &associated {
                     if other.num_assoc == 0 {
                         // anti: -D[left]; semi: +I/+U[left] (input RowKind)
                         out_rows.push(other.record.clone());
                         out_kinds.push(if is_anti { 3 } else { kind });
                     }
-                    Self::update_num_assoc(&mut self.left_state, key, &other.record.0, other.num_assoc + 1, track, delta);
+                    Self::update_num_assoc(&mut self.left_state, key, &other.record.0, other.num_assoc + 1, left_ttl, track, delta);
                 }
             } else {
-                Self::retract_record(&mut self.right_state, key, full, track, delta);
+                Self::retract_record(&mut self.right_state, key, full, right_ttl, track, delta);
                 for other in &associated {
                     if other.num_assoc == 1 {
                         // semi: -D/-U[left] (input RowKind); anti: +I[left]
                         out_rows.push(other.record.clone());
                         out_kinds.push(if is_anti { 0 } else { kind });
                     }
-                    Self::update_num_assoc(&mut self.left_state, key, &other.record.0, other.num_assoc - 1, track, delta);
+                    Self::update_num_assoc(&mut self.left_state, key, &other.record.0, other.num_assoc - 1, left_ttl, track, delta);
                 }
             }
         }
@@ -915,33 +1091,47 @@ impl<S: KeyedStateStore<JoinBucket>> UpdatingJoiner<S> {
 
 }
 
-/// Builders for one key group's raw snapshot batch.
-#[derive(Default)]
+/// Builders for one key group's raw snapshot batch. The TTL timestamps ride a trailing column
+/// only while the side's TTL is on, so a TTL-off snapshot stays byte-identical to the pre-TTL
+/// format (and disabling TTL sheds the timestamps).
 struct RawSnapshotColumns {
     keys: BinaryBuilder,
     rows: BinaryBuilder,
     counts: Int64Builder,
     assocs: Int32Builder,
+    ttl_ts: Option<Int64Builder>,
 }
 
 impl RawSnapshotColumns {
+    fn new(with_ttl: bool) -> Self {
+        RawSnapshotColumns {
+            keys: BinaryBuilder::new(),
+            rows: BinaryBuilder::new(),
+            counts: Int64Builder::new(),
+            assocs: Int32Builder::new(),
+            ttl_ts: with_ttl.then(Int64Builder::new),
+        }
+    }
+
     fn finish(mut self) -> RecordBatch {
-        let schema = Arc::new(Schema::new(vec![
+        let mut fields = vec![
             Field::new(RAW_SNAPSHOT_KEY, DataType::Binary, false),
             Field::new(RAW_SNAPSHOT_ROW, DataType::Binary, false),
             Field::new("__count__", DataType::Int64, false),
             Field::new("__assoc__", DataType::Int32, false),
-        ]));
-        RecordBatch::try_new(
-            schema,
-            vec![
-                Arc::new(self.keys.finish()),
-                Arc::new(self.rows.finish()),
-                Arc::new(self.counts.finish()),
-                Arc::new(self.assocs.finish()),
-            ],
-        )
-        .expect("raw join snapshot batch")
+        ];
+        let mut columns: Vec<ArrayRef> = vec![
+            Arc::new(self.keys.finish()),
+            Arc::new(self.rows.finish()),
+            Arc::new(self.counts.finish()),
+            Arc::new(self.assocs.finish()),
+        ];
+        if let Some(mut ttl_ts) = self.ttl_ts {
+            fields.push(Field::new(TTL_TS_COLUMN, DataType::Int64, false));
+            columns.push(Arc::new(ttl_ts.finish()));
+        }
+        RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
+            .expect("raw join snapshot batch")
     }
 }
 
@@ -954,15 +1144,19 @@ impl UpdatingJoiner {
     /// Flink's key-group routing takes, so the group is one hash of bytes per bucket.
     fn side_snapshot_groups(&self, is_left: bool, max_parallelism: usize) -> BTreeMap<i32, Vec<u8>> {
         let state = if is_left { &self.left_state } else { &self.right_state };
+        let with_ttl = (if is_left { self.left_ttl_ms } else { self.right_ttl_ms }) > 0;
         let mut groups: BTreeMap<i32, RawSnapshotColumns> = BTreeMap::new();
         for (key, bucket) in state.iter() {
             let group = flink_key_group(hash_bytes_by_words(&key.0), max_parallelism) as i32;
-            let columns = groups.entry(group).or_default();
+            let columns = groups.entry(group).or_insert_with(|| RawSnapshotColumns::new(with_ttl));
             for (row, meta) in bucket.iter() {
                 columns.keys.append_value(&key.0);
                 columns.rows.append_value(&row.0);
                 columns.counts.append_value(meta.count);
                 columns.assocs.append_value(meta.num_assoc);
+                if let Some(ttl_ts) = &mut columns.ttl_ts {
+                    ttl_ts.append_value(meta.last_write_ms);
+                }
             }
         }
         groups
@@ -1004,6 +1198,10 @@ impl UpdatingJoiner {
             .collect()
     }
 
+    /// `restored_at_ms` stamps rows restored from a snapshot side that carries no TTL timestamps
+    /// (a pre-TTL or TTL-off writer), granting them a full retention from the restore — Flink's
+    /// enable-TTL migration — instead of 0, which would expire everything on first touch.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn restore(
         left_keys: Vec<usize>,
         right_keys: Vec<usize>,
@@ -1013,6 +1211,7 @@ impl UpdatingJoiner {
         right_schema: SchemaRef,
         predicate: Option<JoinPredicate>,
         bytes: &[u8],
+        restored_at_ms: i64,
     ) -> Self {
         let mut joiner =
             UpdatingJoiner::new(left_keys, right_keys, kind, left_schema, right_schema, predicate)
@@ -1021,8 +1220,8 @@ impl UpdatingJoiner {
             return joiner;
         }
         let left_len = u32::from_le_bytes(bytes[0..4].try_into().expect("snapshot len")) as usize;
-        joiner.load_side(true, &bytes[4..4 + left_len]);
-        joiner.load_side(false, &bytes[4 + left_len..]);
+        joiner.load_side(true, &bytes[4..4 + left_len], restored_at_ms);
+        joiner.load_side(false, &bytes[4 + left_len..], restored_at_ms);
         joiner
     }
 
@@ -1036,6 +1235,7 @@ impl UpdatingJoiner {
         right_schema: SchemaRef,
         predicate: Option<JoinPredicate>,
         snapshots: &[Vec<u8>],
+        restored_at_ms: i64,
     ) -> Self {
         let mut joiner =
             UpdatingJoiner::new(left_keys, right_keys, kind, left_schema, right_schema, predicate)
@@ -1046,29 +1246,34 @@ impl UpdatingJoiner {
             }
             let left_len = u32::from_le_bytes(bytes[0..4].try_into().expect("snapshot len")) as usize;
             assert!(4 + left_len <= bytes.len(), "truncated updating-join raw key-group snapshot");
-            joiner.load_side(true, &bytes[4..4 + left_len]);
-            joiner.load_side(false, &bytes[4 + left_len..]);
+            joiner.load_side(true, &bytes[4..4 + left_len], restored_at_ms);
+            joiner.load_side(false, &bytes[4 + left_len..], restored_at_ms);
         }
         joiner
     }
 
-    fn load_side(&mut self, is_left: bool, bytes: &[u8]) {
+    fn load_side(&mut self, is_left: bool, bytes: &[u8], restored_at_ms: i64) {
         for batch in read_ipc_if_present(bytes) {
             if batch.schema_ref().field(0).name() == RAW_SNAPSHOT_KEY {
-                self.load_side_raw(is_left, &batch);
+                self.load_side_raw(is_left, &batch, restored_at_ms);
             } else {
-                self.load_side_decoded(is_left, &batch);
+                self.load_side_decoded(is_left, &batch, restored_at_ms);
             }
         }
     }
 
     /// Raw-format rows carry the stored key and payload bytes verbatim — restoring is a straight
-    /// map rebuild with no decode or re-encode.
-    fn load_side_raw(&mut self, is_left: bool, batch: &RecordBatch) {
+    /// map rebuild with no decode or re-encode. The TTL timestamps are read by name when the
+    /// writer's side had TTL on; otherwise every row is stamped with the restore time.
+    fn load_side_raw(&mut self, is_left: bool, batch: &RecordBatch, restored_at_ms: i64) {
         let keys = column_binary(batch, RAW_SNAPSHOT_KEY);
         let rows = column_binary(batch, RAW_SNAPSHOT_ROW);
         let counts = column_i64(batch, "__count__");
         let assocs = column_i32(batch, "__assoc__");
+        let ttl_ts = batch
+            .schema_ref()
+            .column_with_name(TTL_TS_COLUMN)
+            .map(|_| column_i64(batch, TTL_TS_COLUMN));
         let state = if is_left { &mut self.left_state } else { &mut self.right_state };
         for row in 0..batch.num_rows() {
             let key = keys.value(row);
@@ -1079,14 +1284,19 @@ impl UpdatingJoiner {
             };
             bucket.insert(
                 ByteKey::from(rows.value(row)),
-                RowMeta { count: counts.value(row), num_assoc: assocs.value(row) },
+                RowMeta {
+                    count: counts.value(row),
+                    num_assoc: assocs.value(row),
+                    last_write_ms: ttl_ts.as_ref().map_or(restored_at_ms, |ts| ts.value(row)),
+                },
             );
         }
     }
 
     /// Snapshots written before the raw format decoded each side to typed columns
-    /// (`[data cols.., __count__, __assoc__]`); kept so existing savepoints keep restoring.
-    fn load_side_decoded(&mut self, is_left: bool, batch: &RecordBatch) {
+    /// (`[data cols.., __count__, __assoc__]`); kept so existing savepoints keep restoring. They
+    /// predate TTL, so rows take the enable-TTL migration stamp.
+    fn load_side_decoded(&mut self, is_left: bool, batch: &RecordBatch, restored_at_ms: i64) {
         let arity = batch.num_columns() - 2;
         let key_indices = if is_left { &self.left_keys } else { &self.right_keys };
         let data_arrays: Vec<ArrayRef> = (0..arity).map(|i| batch.column(i).clone()).collect();
@@ -1107,7 +1317,11 @@ impl UpdatingJoiner {
             };
             bucket.insert(
                 ByteKey::from(payloads.row(row).as_ref()),
-                RowMeta { count: counts.value(row), num_assoc: assocs.value(row) },
+                RowMeta {
+                    count: counts.value(row),
+                    num_assoc: assocs.value(row),
+                    last_write_ms: restored_at_ms,
+                },
             );
         }
     }
@@ -1158,6 +1372,8 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createUpdatin
     pred_doubles: JDoubleArray<'local>,
     pred_strings: JObjectArray<'local>,
     mini_batch: jboolean,
+    left_state_ttl_millis: jlong,
+    right_state_ttl_millis: jlong,
     memory_budget_bytes: jlong,
 ) -> jlong {
     crate::bridge::jni_guard(env, move |mut env| {
@@ -1188,6 +1404,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createUpdatin
         )
         .with_key_timestamp_precisions(timestamp_precisions)
         .with_mini_batch(mini_batch != 0)
+        .with_state_ttl(left_state_ttl_millis, right_state_ttl_millis)
         .with_memory_budget(memory_budget_bytes);
         boxed_or_throw(&mut env, joiner)
     })
@@ -1208,7 +1425,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_flushUpdating
 }
 
 /// Folds a left batch into state and exports the join changelog it produces (left cols, right cols,
-/// then `$row_kind$`).
+/// then `$row_kind$`). `now_millis` is the host's processing-time reading — the state-TTL clock.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushLeftUpdatingJoiner<'local>(
     env: JNIEnv<'local>,
@@ -1216,6 +1433,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushLeftUpdat
     handle: jlong,
     in_array_address: jlong,
     in_schema_address: jlong,
+    now_millis: jlong,
     out_array_address: jlong,
     out_schema_address: jlong,
 ) {
@@ -1224,7 +1442,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushLeftUpdat
         // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
         let result = {
             let batch = import_record_batch(in_array_address, in_schema_address);
-            joiner.push(&batch, true)
+            joiner.push(&batch, true, now_millis)
         };
         match result {
             Ok(out) => export_record_batch(out, out_array_address, out_schema_address),
@@ -1241,6 +1459,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushRightUpda
     handle: jlong,
     in_array_address: jlong,
     in_schema_address: jlong,
+    now_millis: jlong,
     out_array_address: jlong,
     out_schema_address: jlong,
 ) {
@@ -1249,7 +1468,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushRightUpda
         // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
         let result = {
             let batch = import_record_batch(in_array_address, in_schema_address);
-            joiner.push(&batch, false)
+            joiner.push(&batch, false, now_millis)
         };
         match result {
             Ok(out) => export_record_batch(out, out_array_address, out_schema_address),
@@ -1312,6 +1531,9 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreUpdati
     pred_doubles: JDoubleArray<'local>,
     pred_strings: JObjectArray<'local>,
     mini_batch: jboolean,
+    left_state_ttl_millis: jlong,
+    right_state_ttl_millis: jlong,
+    now_millis: jlong,
     snapshot: JByteArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
@@ -1343,8 +1565,10 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreUpdati
             right_schema,
             predicate,
             &bytes,
+            now_millis,
         )
         .with_mini_batch(mini_batch != 0)
+        .with_state_ttl(left_state_ttl_millis, right_state_ttl_millis)
         .with_memory_budget(memory_budget_bytes);
         boxed_or_throw(&mut env, joiner)
     })
@@ -1370,6 +1594,9 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreUpdati
     pred_doubles: JDoubleArray<'local>,
     pred_strings: JObjectArray<'local>,
     mini_batch: jboolean,
+    left_state_ttl_millis: jlong,
+    right_state_ttl_millis: jlong,
+    now_millis: jlong,
     snapshots: JObjectArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
@@ -1414,8 +1641,10 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreUpdati
             right_schema,
             predicate,
             &restored,
+            now_millis,
         )
         .with_mini_batch(mini_batch != 0)
+        .with_state_ttl(left_state_ttl_millis, right_state_ttl_millis)
         .with_memory_budget(memory_budget_bytes);
         boxed_or_throw(&mut env, joiner)
     })
@@ -1538,7 +1767,13 @@ impl crate::state::PaimonMapCodec for JoinStateCodec {
             ScalarValue::Int32(Some(v)) => *v,
             _ => -1,
         };
-        (ByteKey::from(rows.row(0).data()), RowMeta { count, num_assoc })
+        // The persisted shape carries no TTL timestamps yet; a TTL'd join keeps the memory route
+        // (the Java operator gates Paimon off under TTL), so hydrated entries stamp 0 like every
+        // TTL-off write and the per-entry flush diff stays exact.
+        (
+            ByteKey::from(rows.row(0).data()),
+            RowMeta { count, num_assoc, last_write_ms: 0 },
+        )
     }
 
     fn entry_bytes(&self, row: &[u8], _entry: &RowMeta) -> usize {

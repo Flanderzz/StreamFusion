@@ -29,6 +29,10 @@ public class StreamPhysicalNativeColumnarUpdatingJoin extends BiRel
   private final int joinType;
   private final RexExpression predicate;
   private final boolean bothJoinKeysUnique;
+  // Per-side TTLs from a STATE_TTL hint on the host join (-1 = no hint for that side); the exec
+  // node resolves each against table.exec.state.ttl at translate time, hint winning.
+  private final long leftStateTtlHintMillis;
+  private final long rightStateTtlHintMillis;
 
   public StreamPhysicalNativeColumnarUpdatingJoin(
       RelOptCluster cluster,
@@ -40,7 +44,9 @@ public class StreamPhysicalNativeColumnarUpdatingJoin extends BiRel
       int[] rightKeys,
       int joinType,
       RexExpression predicate,
-      boolean bothJoinKeysUnique) {
+      boolean bothJoinKeysUnique,
+      long leftStateTtlHintMillis,
+      long rightStateTtlHintMillis) {
     super(cluster, traitSet, left, right);
     this.outputRowType = outputRowType;
     this.leftKeys = leftKeys;
@@ -48,6 +54,8 @@ public class StreamPhysicalNativeColumnarUpdatingJoin extends BiRel
     this.joinType = joinType;
     this.predicate = predicate;
     this.bothJoinKeysUnique = bothJoinKeysUnique;
+    this.leftStateTtlHintMillis = leftStateTtlHintMillis;
+    this.rightStateTtlHintMillis = rightStateTtlHintMillis;
   }
 
   @Override
@@ -72,7 +80,9 @@ public class StreamPhysicalNativeColumnarUpdatingJoin extends BiRel
         rightKeys,
         joinType,
         predicate,
-        bothJoinKeysUnique);
+        bothJoinKeysUnique,
+        leftStateTtlHintMillis,
+        rightStateTtlHintMillis);
   }
 
   @Override
@@ -90,7 +100,9 @@ public class StreamPhysicalNativeColumnarUpdatingJoin extends BiRel
         FlinkTypeFactory$.MODULE$.toLogicalRowType(getRight().getRowType()),
         predicate,
         FlinkKeyGroupUtils.timestampPrecisions(getLeft().getRowType(), leftKeys),
-        bothJoinKeysUnique);
+        bothJoinKeysUnique,
+        leftStateTtlHintMillis,
+        rightStateTtlHintMillis);
   }
 
   /** Digest-only reuse barrier — see {@link NativeRelDigests}. */

@@ -1665,6 +1665,7 @@ public final class Native {
       long handle,
       long inArrayAddress,
       long inSchemaAddress,
+      long nowMillis,
       long outArrayAddress,
       long outSchemaAddress);
 
@@ -1673,6 +1674,7 @@ public final class Native {
       long handle,
       long inArrayAddress,
       long inSchemaAddress,
+      long nowMillis,
       long outArrayAddress,
       long outSchemaAddress);
 
@@ -2071,6 +2073,11 @@ public final class Native {
    * @param predKinds residual non-equi predicate, encoded over the joined {@code [left.., right..]}
    *     row (empty {@code predKinds} ⇒ no predicate); the {@code pred*} arrays are the same encoding
    *     {@link #createFilterExpression} consumes
+   * @param leftStateTtlMillis idle-state retention for the left side's rows ({@code
+   *     table.exec.state.ttl}, or the per-side {@code STATE_TTL} hint); {@code 0} disables expiry.
+   *     Each stored row expires independently {@code ttl} millis after its last write and then
+   *     reads as absent — Flink's per-entry MapState TTL on the join state views
+   * @param rightStateTtlMillis {@code leftStateTtlMillis} for the right side (the sides may differ)
    * @param memoryBudgetBytes managed-memory budget (see {@link #createTumblingAggregator})
    */
   public static native long createUpdatingJoiner(
@@ -2087,15 +2094,30 @@ public final class Native {
       double[] predDoubles,
       String[] predStrings,
       boolean miniBatch,
+      long leftStateTtlMillis,
+      long rightStateTtlMillis,
       long memoryBudgetBytes);
 
-  /** Pushes a left batch, exporting the join changelog (left columns, right columns, row kind). */
+  /**
+   * Pushes a left batch, exporting the join changelog (left columns, right columns, row kind).
+   * {@code nowMillis} is the operator's processing-time reading — the state-TTL clock.
+   */
   public static native void pushLeftUpdatingJoiner(
-      long handle, long inArrayAddress, long inSchemaAddress, long outArrayAddress, long outSchemaAddress);
+      long handle,
+      long inArrayAddress,
+      long inSchemaAddress,
+      long nowMillis,
+      long outArrayAddress,
+      long outSchemaAddress);
 
   /** Pushes a right batch, exporting the join changelog (left columns, right columns, row kind). */
   public static native void pushRightUpdatingJoiner(
-      long handle, long inArrayAddress, long inSchemaAddress, long outArrayAddress, long outSchemaAddress);
+      long handle,
+      long inArrayAddress,
+      long inSchemaAddress,
+      long nowMillis,
+      long outArrayAddress,
+      long outSchemaAddress);
 
   public static native void flushUpdatingJoiner(
       long handle, long outArrayAddress, long outSchemaAddress);
@@ -2110,7 +2132,11 @@ public final class Native {
   public static native byte[][] snapshotUpdatingJoinerPartitions(
       long handle, int maxParallelism, int[] timestampPrecisions);
 
-  /** Rebuilds an updating joiner from a snapshot and returns a fresh handle. */
+  /**
+   * Rebuilds an updating joiner from a snapshot and returns a fresh handle. {@code nowMillis}
+   * stamps rows restored from a snapshot side that carries no TTL timestamps (a pre-TTL writer),
+   * granting them a full retention from the restore — Flink's enable-TTL migration.
+   */
   public static native long restoreUpdatingJoiner(
       int[] leftKeys,
       int[] rightKeys,
@@ -2125,6 +2151,9 @@ public final class Native {
       double[] predDoubles,
       String[] predStrings,
       boolean miniBatch,
+      long leftStateTtlMillis,
+      long rightStateTtlMillis,
+      long nowMillis,
       byte[] snapshot,
       long memoryBudgetBytes);
 
@@ -2143,6 +2172,9 @@ public final class Native {
       double[] predDoubles,
       String[] predStrings,
       boolean miniBatch,
+      long leftStateTtlMillis,
+      long rightStateTtlMillis,
+      long nowMillis,
       byte[][] snapshots,
       long memoryBudgetBytes);
 

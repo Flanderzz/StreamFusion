@@ -48,6 +48,8 @@ public class NativeColumnarUpdatingJoinOperator
   private final NativeUdf.Binding predBinding;
   private final boolean miniBatch;
   private final long miniBatchSize;
+  private final long leftStateTtlMillis;
+  private final long rightStateTtlMillis;
 
   private transient long[] boundPredLongs;
   private transient MiniBatchBoundary boundary;
@@ -71,6 +73,8 @@ public class NativeColumnarUpdatingJoinOperator
       int[] keyTimestampPrecisions,
       boolean miniBatch,
       long miniBatchSize,
+      long leftStateTtlMillis,
+      long rightStateTtlMillis,
       int maxParallelism) {
     super("updating join", keyTimestampPrecisions, maxParallelism);
     this.leftKeys = leftKeys;
@@ -87,6 +91,8 @@ public class NativeColumnarUpdatingJoinOperator
     this.predBinding = predBinding;
     this.miniBatch = miniBatch;
     this.miniBatchSize = miniBatchSize;
+    this.leftStateTtlMillis = leftStateTtlMillis;
+    this.rightStateTtlMillis = rightStateTtlMillis;
   }
 
   // The residual predicate's bound longs must exist before any create/restore call reads them.
@@ -97,8 +103,15 @@ public class NativeColumnarUpdatingJoinOperator
 
   @Override
   protected PaimonNativeStateSupport resolvePaimonState(boolean rawStateRestored) {
+    // The Paimon shape does not carry per-row TTL timestamps yet; a TTL'd join keeps the memory
+    // route (the standard fallback for an unsupported shape) until the store gains them.
     return resolvePaimon(
-        rawStateRestored, () -> rowTypeSupported(leftType) && rowTypeSupported(rightType));
+        rawStateRestored,
+        () ->
+            leftStateTtlMillis == 0
+                && rightStateTtlMillis == 0
+                && rowTypeSupported(leftType)
+                && rowTypeSupported(rightType));
   }
 
   /** Whether one side's row type is persistable, probed over a one-call FFI schema export. */
@@ -166,6 +179,8 @@ public class NativeColumnarUpdatingJoinOperator
                 predDoubles,
                 predStrings,
                 miniBatch,
+                leftStateTtlMillis,
+                rightStateTtlMillis,
                 memoryBudgetBytes()));
   }
 
@@ -189,6 +204,9 @@ public class NativeColumnarUpdatingJoinOperator
                 predDoubles,
                 predStrings,
                 miniBatch,
+                leftStateTtlMillis,
+                rightStateTtlMillis,
+                getProcessingTimeService().getCurrentProcessingTime(),
                 snapshots,
                 memoryBudgetBytes()));
   }
@@ -304,23 +322,26 @@ public class NativeColumnarUpdatingJoinOperator
         ArrowArray outArray = ArrowArray.allocateNew(allocator);
         ArrowSchema outSchema = ArrowSchema.allocateNew(allocator)) {
       Data.exportVectorSchemaRoot(inAllocator, in, dictionaries, inArray, inSchema);
+      // Flink's TtlTimeProvider clock: the processing-time service is System.currentTimeMillis in
+      // production and harness-controlled in tests, so expiry is deterministic to test.
+      long now = getProcessingTimeService().getCurrentProcessingTime();
       if (paimonState()) {
         if (left) {
           Native.pushLeftPaimonUpdatingJoiner(
-              handle, inArray.memoryAddress(), inSchema.memoryAddress(),
+              handle, inArray.memoryAddress(), inSchema.memoryAddress(), now,
               outArray.memoryAddress(), outSchema.memoryAddress());
         } else {
           Native.pushRightPaimonUpdatingJoiner(
-              handle, inArray.memoryAddress(), inSchema.memoryAddress(),
+              handle, inArray.memoryAddress(), inSchema.memoryAddress(), now,
               outArray.memoryAddress(), outSchema.memoryAddress());
         }
       } else if (left) {
         Native.pushLeftUpdatingJoiner(
-            handle, inArray.memoryAddress(), inSchema.memoryAddress(),
+            handle, inArray.memoryAddress(), inSchema.memoryAddress(), now,
             outArray.memoryAddress(), outSchema.memoryAddress());
       } else {
         Native.pushRightUpdatingJoiner(
-            handle, inArray.memoryAddress(), inSchema.memoryAddress(),
+            handle, inArray.memoryAddress(), inSchema.memoryAddress(), now,
             outArray.memoryAddress(), outSchema.memoryAddress());
       }
       VectorSchemaRoot out =

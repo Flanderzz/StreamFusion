@@ -1270,6 +1270,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushLeftPaimo
     handle: jlong,
     in_array_address: jlong,
     in_schema_address: jlong,
+    now_millis: jlong,
     out_array_address: jlong,
     out_schema_address: jlong,
 ) {
@@ -1278,7 +1279,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushLeftPaimo
         // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
         let result = {
             let batch = import_record_batch(in_array_address, in_schema_address);
-            joiner.push(&batch, true)
+            joiner.push(&batch, true, now_millis)
         };
         match result {
             Ok(out) => export_record_batch(out, out_array_address, out_schema_address),
@@ -1296,6 +1297,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushRightPaim
     handle: jlong,
     in_array_address: jlong,
     in_schema_address: jlong,
+    now_millis: jlong,
     out_array_address: jlong,
     out_schema_address: jlong,
 ) {
@@ -1304,7 +1306,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushRightPaim
         // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
         let result = {
             let batch = import_record_batch(in_array_address, in_schema_address);
-            joiner.push(&batch, false)
+            joiner.push(&batch, false, now_millis)
         };
         match result {
             Ok(out) => export_record_batch(out, out_array_address, out_schema_address),

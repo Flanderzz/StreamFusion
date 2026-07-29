@@ -261,10 +261,19 @@ pub(crate) fn data_schema(batch: &RecordBatch) -> SchemaRef {
 /// (the outer input of LEFT/RIGHT/FULL, or the probe side of SEMI/ANTI); otherwise it stays `-1` and
 /// is ignored — mirroring Flink's `OuterJoinRecordStateView` vs `JoinRecordStateView` and RisingWave's
 /// optional degree table.
+///
+/// `last_write_ms` is the wall-clock millis of this entry's last write (Flink state TTL,
+/// `OnCreateAndWrite` per MapState entry); stays 0 while the side's TTL is off. It participates in
+/// the derived equality on purpose: the Paimon flush diff compares live entries against the
+/// hydrated image, and a refreshed timestamp should eventually re-persist the row once the
+/// persistent shape carries timestamps (today its codec neither persists nor decodes one — it
+/// hydrates 0, and the Java operator keeps a TTL'd join off the Paimon route, so writes stay 0
+/// there too and the diff is unaffected).
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) struct RowMeta {
     pub(crate) count: i64,
     pub(crate) num_assoc: i32,
+    pub(crate) last_write_ms: i64,
 }
 
 /// The join family the updating joiner runs. INNER carries no degree; LEFT/RIGHT/FULL maintain a

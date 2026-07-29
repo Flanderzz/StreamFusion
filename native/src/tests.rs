@@ -1637,16 +1637,16 @@ fn local_group_state_over_budget_fails_and_flush_releases() {
 #[test]
 fn updating_join_state_over_budget_fails_and_retract_releases() {
     let mut joiner = inner_joiner().with_memory_budget(1 << 20).unwrap();
-    joiner.push(&changelog_join_batch(vec![1], vec![10], vec![0]), true).unwrap();
+    joiner.push(&changelog_join_batch(vec![1], vec![10], vec![0]), true, 0).unwrap();
     assert!(joiner.memory.state_bytes > 0);
-    joiner.push(&changelog_join_batch(vec![1], vec![10], vec![3]), true).unwrap();
+    joiner.push(&changelog_join_batch(vec![1], vec![10], vec![3]), true, 0).unwrap();
     assert_eq!(joiner.memory.state_bytes, 0); // the only stored row retracted -> released
 
     let mut tight = inner_joiner().with_memory_budget(64).unwrap();
     let keys: Vec<i64> = (0..100).collect();
     let values: Vec<i64> = (0..100).collect();
     let err = tight
-        .push(&changelog_join_batch(keys, values, vec![0; 100]), true)
+        .push(&changelog_join_batch(keys, values, vec![0; 100]), true, 0)
         .unwrap_err();
     assert!(err.to_string().contains("managed-memory budget"), "{err}");
 }
@@ -2281,18 +2281,18 @@ fn updating_join_emits_matches_with_arriving_kind() {
     let mut joiner = inner_joiner();
     // Buffer a left row (k=1, v=10); no right yet, so nothing emits.
     assert_eq!(
-        joiner.push(&changelog_join_batch(vec![1], vec![10], vec![0]), true).unwrap().num_rows(),
+        joiner.push(&changelog_join_batch(vec![1], vec![10], vec![0]), true, 0).unwrap().num_rows(),
         0
     );
     // A right row (k=1, v=100) matches it: emit +I (left ++ right).
-    let out = joiner.push(&changelog_join_batch(vec![1], vec![100], vec![0]), false).unwrap();
+    let out = joiner.push(&changelog_join_batch(vec![1], vec![100], vec![0]), false, 0).unwrap();
     assert_eq!(row_kinds(&out), vec![0]);
     assert_eq!(values(&out, 0), vec![1]); // left k
     assert_eq!(values(&out, 1), vec![10]); // left v
     assert_eq!(values(&out, 2), vec![1]); // right k
     assert_eq!(values(&out, 3), vec![100]); // right v
     // Retracting the left row emits the matching pair as a retraction.
-    let retract = joiner.push(&changelog_join_batch(vec![1], vec![10], vec![3]), true).unwrap();
+    let retract = joiner.push(&changelog_join_batch(vec![1], vec![10], vec![3]), true, 0).unwrap();
     assert_eq!(row_kinds(&retract), vec![3]); // -D
     assert_eq!(values(&retract, 1), vec![10]);
     assert_eq!(values(&retract, 3), vec![100]);
@@ -2302,7 +2302,7 @@ fn updating_join_emits_matches_with_arriving_kind() {
 fn unique_updating_join_replays_only_each_sides_final_bundle_change() {
     let mut joiner = inner_joiner().with_mini_batch(true);
     assert_eq!(
-        joiner.push(&changelog_join_batch(vec![1], vec![100], vec![0]), false).unwrap().num_rows(),
+        joiner.push(&changelog_join_batch(vec![1], vec![100], vec![0]), false, 0).unwrap().num_rows(),
         0
     );
     assert_eq!(joiner.flush_mini_batch().unwrap().num_rows(), 0);
@@ -2312,6 +2312,7 @@ fn unique_updating_join_replays_only_each_sides_final_bundle_change() {
             .push(
                 &changelog_join_batch(vec![1, 1, 1], vec![10, 10, 20], vec![0, 3, 0]),
                 true,
+                0,
             )
             .unwrap()
             .num_rows(),
@@ -2329,8 +2330,8 @@ fn unique_updating_join_replays_only_each_sides_final_bundle_change() {
 #[test]
 fn updating_join_is_cartesian_per_key() {
     let mut joiner = inner_joiner();
-    joiner.push(&changelog_join_batch(vec![1, 1, 2], vec![100, 200, 300], vec![0, 0, 0]), false);
-    let out = joiner.push(&changelog_join_batch(vec![1], vec![10], vec![0]), true).unwrap();
+    joiner.push(&changelog_join_batch(vec![1, 1, 2], vec![100, 200, 300], vec![0, 0, 0]), false, 0);
+    let out = joiner.push(&changelog_join_batch(vec![1], vec![10], vec![0]), true, 0).unwrap();
     assert_eq!(out.num_rows(), 2); // matches both k=1 right rows, not the k=2 one
     let mut right_vs = values(&out, 3);
     right_vs.sort();
@@ -2356,7 +2357,7 @@ fn updating_join_drops_null_keys() {
         ],
     )
     .unwrap();
-    joiner.push(&right, false);
+    joiner.push(&right, false, 0);
     // Left null key matches nothing; left key=1 matches the stored right (1, 200).
     let left = RecordBatch::try_new(
         right.schema(),
@@ -2367,7 +2368,7 @@ fn updating_join_drops_null_keys() {
         ],
     )
     .unwrap();
-    let out = joiner.push(&left, true).unwrap();
+    let out = joiner.push(&left, true, 0).unwrap();
     assert_eq!(out.num_rows(), 1); // only key=1 pair, not the null-key rows
     assert_eq!(values(&out, 1), vec![20]); // left v
     assert_eq!(values(&out, 3), vec![200]); // right v
@@ -2377,11 +2378,11 @@ fn updating_join_drops_null_keys() {
 #[test]
 fn updating_join_state_survives_snapshot_restore() {
     let mut joiner = inner_joiner();
-    joiner.push(&changelog_join_batch(vec![1], vec![100], vec![0]), false); // buffer right
+    joiner.push(&changelog_join_batch(vec![1], vec![100], vec![0]), false, 0); // buffer right
     let snapshot = joiner.snapshot();
     let mut restored =
-        UpdatingJoiner::restore(vec![0], vec![0], vec![-1], JoinKind::Inner, kv_schema(), kv_schema(), None, &snapshot);
-    let out = restored.push(&changelog_join_batch(vec![1], vec![10], vec![0]), true).unwrap();
+        UpdatingJoiner::restore(vec![0], vec![0], vec![-1], JoinKind::Inner, kv_schema(), kv_schema(), None, &snapshot, 0);
+    let out = restored.push(&changelog_join_batch(vec![1], vec![10], vec![0]), true, 0).unwrap();
     assert_eq!(out.num_rows(), 1);
     assert_eq!(values(&out, 1), vec![10]);
     assert_eq!(values(&out, 3), vec![100]);
@@ -2399,7 +2400,7 @@ fn updating_join_state_partitions_and_restores_by_flink_key_group() {
         None,
     );
     before
-        .push(&changelog_join_batch(vec![1, 2], vec![10, 20], vec![0, 0]), true)
+        .push(&changelog_join_batch(vec![1, 2], vec![10, 20], vec![0, 0]), true, 0)
         .unwrap();
     let partitions = before.snapshot_partitions(128);
     assert!(
@@ -2416,9 +2417,10 @@ fn updating_join_state_partitions_and_restores_by_flink_key_group() {
         schema,
         None,
         &snapshots,
+        0,
     );
     let out = restored
-        .push(&changelog_join_batch(vec![1, 2], vec![100, 200], vec![0, 0]), false)
+        .push(&changelog_join_batch(vec![1, 2], vec![100, 200], vec![0, 0]), false, 0)
         .unwrap();
     assert_eq!(values(&out, 0), vec![1, 2]);
     assert_eq!(values(&out, 1), vec![10, 20]);
@@ -2432,12 +2434,12 @@ fn updating_join_left_outer_null_pads_then_retracts() {
     let mut joiner =
         UpdatingJoiner::new(vec![0], vec![0], JoinKind::LeftOuter, kv_schema(), kv_schema(), None);
     // Left row k=1, v=10: no right match → +I[left + null].
-    let out = joiner.push(&changelog_join_batch(vec![1], vec![10], vec![0]), true).unwrap();
+    let out = joiner.push(&changelog_join_batch(vec![1], vec![10], vec![0]), true, 0).unwrap();
     assert_eq!(row_kinds(&out), vec![0]);
     assert_eq!(values(&out, 1), vec![10]); // left v
     assert!(out.column(3).is_null(0)); // right v nulled
     // Right row k=1, v=100 arrives: -D[left + null], +I[left + right].
-    let out = joiner.push(&changelog_join_batch(vec![1], vec![100], vec![0]), false).unwrap();
+    let out = joiner.push(&changelog_join_batch(vec![1], vec![100], vec![0]), false, 0).unwrap();
     assert_eq!(row_kinds(&out), vec![3, 0]);
     assert!(out.column(3).is_null(0)); // the retracted null-pad's right v
     assert!(!out.column(3).is_null(1)); // the matched pair's right v is present
@@ -2450,9 +2452,9 @@ fn updating_join_left_outer_null_pads_then_retracts() {
 fn updating_join_left_outer_unmatched_retract() {
     let mut joiner =
         UpdatingJoiner::new(vec![0], vec![0], JoinKind::LeftOuter, kv_schema(), kv_schema(), None);
-    let out = joiner.push(&changelog_join_batch(vec![7], vec![70], vec![0]), true).unwrap();
+    let out = joiner.push(&changelog_join_batch(vec![7], vec![70], vec![0]), true, 0).unwrap();
     assert_eq!(row_kinds(&out), vec![0]); // +I[left + null]
-    let out = joiner.push(&changelog_join_batch(vec![7], vec![70], vec![3]), true).unwrap();
+    let out = joiner.push(&changelog_join_batch(vec![7], vec![70], vec![3]), true, 0).unwrap();
     assert_eq!(row_kinds(&out), vec![3]); // -D[left + null]
     assert!(out.column(3).is_null(0));
 }
@@ -2462,9 +2464,9 @@ fn updating_join_left_outer_unmatched_retract() {
 fn updating_join_semi_emits_on_match() {
     let mut joiner = UpdatingJoiner::new(vec![0], vec![0], JoinKind::Semi, kv_schema(), kv_schema(), None);
     // Left row with no right match → nothing (semi).
-    assert_eq!(joiner.push(&changelog_join_batch(vec![1], vec![10], vec![0]), true).unwrap().num_rows(), 0);
+    assert_eq!(joiner.push(&changelog_join_batch(vec![1], vec![10], vec![0]), true, 0).unwrap().num_rows(), 0);
     // Right row arrives → emit the left row (+I), one column-set (left only).
-    let out = joiner.push(&changelog_join_batch(vec![1], vec![100], vec![0]), false).unwrap();
+    let out = joiner.push(&changelog_join_batch(vec![1], vec![100], vec![0]), false, 0).unwrap();
     assert_eq!(row_kinds(&out), vec![0]);
     assert_eq!(out.num_columns(), 3); // left k, left v, $row_kind$ (no right columns)
     assert_eq!(values(&out, 1), vec![10]);
@@ -2474,11 +2476,194 @@ fn updating_join_semi_emits_on_match() {
 #[test]
 fn updating_join_anti_retracts_on_match() {
     let mut joiner = UpdatingJoiner::new(vec![0], vec![0], JoinKind::Anti, kv_schema(), kv_schema(), None);
-    let out = joiner.push(&changelog_join_batch(vec![1], vec![10], vec![0]), true).unwrap();
+    let out = joiner.push(&changelog_join_batch(vec![1], vec![10], vec![0]), true, 0).unwrap();
     assert_eq!(row_kinds(&out), vec![0]); // +I[left] (no match yet)
-    let out = joiner.push(&changelog_join_batch(vec![1], vec![100], vec![0]), false).unwrap();
+    let out = joiner.push(&changelog_join_batch(vec![1], vec![100], vec![0]), false, 0).unwrap();
     assert_eq!(row_kinds(&out), vec![3]); // -D[left] (now matched)
     assert_eq!(values(&out, 1), vec![10]);
+}
+
+// State TTL: each stored row expires independently (Flink's per-entry MapState TTL), so a probe
+// simply sees fewer rows in the bucket — the same key's live entries still match.
+#[test]
+fn updating_join_ttl_hides_expired_rows_per_entry() {
+    let mut joiner = inner_joiner().with_state_ttl(1000, 0);
+    // (1,10) twice (appear-times 2, last write 5500, expires 6500) and (1,11) at 5980 (expires
+    // 6980); the key-2 row at 6100 runs the periodic sweep while both are live, pushing the next
+    // sweep past the probe below so it exercises the lazy per-entry skip.
+    joiner.push(&changelog_join_batch(vec![1], vec![10], vec![0]), true, 5000).unwrap();
+    joiner.push(&changelog_join_batch(vec![1], vec![10], vec![0]), true, 5500).unwrap();
+    joiner.push(&changelog_join_batch(vec![1], vec![11], vec![0]), true, 5980).unwrap();
+    joiner.push(&changelog_join_batch(vec![2], vec![20], vec![0]), true, 6100).unwrap();
+    // At 6600 the (1,10) pair (last write 5500, expired 6500) is hidden mid-bucket — its
+    // appear-times of 2 would otherwise emit two extra pairs — while (1,11) still matches.
+    let out = joiner.push(&changelog_join_batch(vec![1], vec![100], vec![0]), false, 6600).unwrap();
+    assert_eq!(row_kinds(&out), vec![0]);
+    assert_eq!(values(&out, 1), vec![11]);
+}
+
+// A retraction whose input-side row has expired is a state no-op (the entry reads as absent), but
+// the operator has no expiry awareness of its own: it still probes the other side and emits -D
+// for the live matches there — exactly Flink's StreamingJoinOperator retract path.
+#[test]
+fn updating_join_ttl_retract_of_an_expired_row_still_emits_against_live_matches() {
+    let mut joiner = inner_joiner().with_state_ttl(1000, 0);
+    joiner.push(&changelog_join_batch(vec![1], vec![10], vec![0]), true, 5000).unwrap();
+    joiner.push(&changelog_join_batch(vec![1], vec![100], vec![0]), false, 5000).unwrap();
+    let out = joiner.push(&changelog_join_batch(vec![1], vec![10], vec![3]), true, 6000).unwrap();
+    assert_eq!(row_kinds(&out), vec![3]); // -D[10,100]: the emission ignores the expired state
+    assert_eq!(values(&out, 1), vec![10]);
+    assert_eq!(values(&out, 3), vec![100]);
+}
+
+// A retraction that leaves the entry live writes cnt-1 back (Flink `put`s the tuple), so it
+// refreshes the survivor's TTL clock.
+#[test]
+fn updating_join_ttl_retract_leaving_a_live_count_refreshes_the_clock() {
+    let mut joiner = inner_joiner().with_state_ttl(1000, 0);
+    joiner.push(&changelog_join_batch(vec![1, 1], vec![10, 10], vec![0, 0]), true, 5000).unwrap();
+    joiner.push(&changelog_join_batch(vec![1], vec![10], vec![3]), true, 5800).unwrap();
+    // The original write is past its ttl at 6300, but the decrement at 5800 restarted the clock:
+    // the surviving appear-time still matches, exactly once.
+    let out = joiner.push(&changelog_join_batch(vec![1], vec![100], vec![0]), false, 6300).unwrap();
+    assert_eq!(row_kinds(&out), vec![0]);
+    assert_eq!(values(&out, 1), vec![10]);
+}
+
+// LEFT outer: an expired left row is hidden from right probes silently — its null-pad is NOT
+// retracted (Flink's operator never sees the expiry) — and re-adding it lands on the corpse as a
+// fresh row with appear-times 1: Flink's addRecord resurrection (the "compatible for state ttl"
+// family in OuterJoinRecordStateViews).
+#[test]
+fn updating_join_ttl_left_outer_hides_expired_rows_and_resurrects_on_re_add() {
+    let mut joiner = UpdatingJoiner::new(
+        vec![0], vec![0], JoinKind::LeftOuter, kv_schema(), kv_schema(), None,
+    )
+    .with_state_ttl(1000, 0);
+    // (1,10) twice (appear-times 2, last write 5990, expires 6990); the key-2 row at 6100 runs
+    // the periodic sweep while everything is live, pushing the next sweep past the probes below
+    // so they exercise the lazy per-entry paths.
+    joiner.push(&changelog_join_batch(vec![1], vec![10], vec![0]), true, 5000).unwrap();
+    joiner.push(&changelog_join_batch(vec![1], vec![10], vec![0]), true, 5990).unwrap();
+    joiner.push(&changelog_join_batch(vec![2], vec![20], vec![0]), true, 6100).unwrap();
+    let out = joiner.push(&changelog_join_batch(vec![1], vec![11], vec![0]), true, 6995).unwrap();
+    assert_eq!(row_kinds(&out), vec![0]); // +I[11+null]
+    // At 7000 the (1,10) pair is expired and hidden: the first right row retracts exactly one
+    // null-pad and emits exactly one pair; a live (1,10) would have contributed two more pairs.
+    let out = joiner.push(&changelog_join_batch(vec![1], vec![100], vec![0]), false, 7000).unwrap();
+    assert_eq!(row_kinds(&out), vec![3, 0]); // -D[11+null], +I[11,100]
+    assert!(out.column(3).is_null(0));
+    assert_eq!(values(&out, 1), vec![11, 11]);
+    // Re-adding (1,10) lands on the corpse in place (the next sweep is not due until 7100): it
+    // reads as absent, so this is a fresh matched row, stored with appear-times reset to 1.
+    let out = joiner.push(&changelog_join_batch(vec![1], vec![10], vec![0]), true, 7050).unwrap();
+    assert_eq!(row_kinds(&out), vec![0]); // +I[10,100]
+    assert_eq!(values(&out, 1), vec![10]);
+    // A second right row pairs the resurrected row exactly once — stale appear-times (2 old + 1
+    // new) would triple it.
+    let out = joiner.push(&changelog_join_batch(vec![1], vec![101], vec![0]), false, 7060).unwrap();
+    assert_eq!(row_kinds(&out), vec![0, 0]); // +I[10,101], +I[11,101] (bucket order not fixed)
+    let mut left_vs = values(&out, 1);
+    left_vs.sort();
+    assert_eq!(left_vs, vec![10, 11]);
+}
+
+// Each side snapshots its own TTL timestamps (absolute millis): expiry after a restore is timed
+// from the original write, per side — asymmetric retentions restore asymmetrically, and the
+// boundary is Flink's inclusive `ts + ttl <= now`.
+#[test]
+fn updating_join_ttl_timestamps_survive_snapshot_restore_per_side() {
+    let mut joiner = inner_joiner().with_state_ttl(1000, 2000);
+    joiner.push(&changelog_join_batch(vec![1], vec![10], vec![0]), true, 5000).unwrap();
+    joiner.push(&changelog_join_batch(vec![1], vec![100], vec![0]), false, 5000).unwrap();
+    let snapshot = joiner.snapshot();
+    let restore = |at: i64| {
+        UpdatingJoiner::restore(
+            vec![0], vec![0], vec![-1], JoinKind::Inner, kv_schema(), kv_schema(), None,
+            &snapshot, at,
+        )
+        .with_state_ttl(1000, 2000)
+    };
+    // One ms inside the left row's window: the restored right probe still matches it.
+    let mut alive = restore(5500);
+    let out = alive.push(&changelog_join_batch(vec![1], vec![101], vec![0]), false, 5999).unwrap();
+    assert_eq!(values(&out, 1), vec![10]);
+    // Exactly at the boundary (5000 + 1000 <= 6000) the left row is gone — while the right row's
+    // 2000ms retention keeps ITS side alive for a left probe at the same instant.
+    let mut expired = restore(5500);
+    let out = expired.push(&changelog_join_batch(vec![1], vec![101], vec![0]), false, 6000).unwrap();
+    assert_eq!(out.num_rows(), 0);
+    let out = expired.push(&changelog_join_batch(vec![1], vec![11], vec![0]), true, 6000).unwrap();
+    let mut right_vs = values(&out, 3);
+    right_vs.sort();
+    assert_eq!(right_vs, vec![100, 101]);
+}
+
+// A pre-TTL snapshot (no timestamp columns) restored into a TTL'd joiner stamps every row with
+// the restore time — a full retention from now, Flink's enable-TTL migration — instead of
+// expiring everything on first touch.
+#[test]
+fn updating_join_ttl_enable_migration_stamps_restore_time() {
+    let mut joiner = inner_joiner(); // TTL off: the snapshot carries no timestamp columns
+    joiner.push(&changelog_join_batch(vec![1], vec![10], vec![0]), true, 0).unwrap();
+    let snapshot = joiner.snapshot();
+    let restore = |at: i64| {
+        UpdatingJoiner::restore(
+            vec![0], vec![0], vec![-1], JoinKind::Inner, kv_schema(), kv_schema(), None,
+            &snapshot, at,
+        )
+        .with_state_ttl(1000, 1000)
+    };
+    let out = restore(5000)
+        .push(&changelog_join_batch(vec![1], vec![100], vec![0]), false, 5999)
+        .unwrap();
+    assert_eq!(values(&out, 1), vec![10]); // alive until restore + ttl
+    let out = restore(5000)
+        .push(&changelog_join_batch(vec![1], vec![100], vec![0]), false, 6000)
+        .unwrap();
+    assert_eq!(out.num_rows(), 0);
+}
+
+// The periodic sweep reclaims rows never touched again, silently (expiry emits nothing), and
+// drops the emptied bucket and key with them.
+#[test]
+fn updating_join_ttl_sweep_reclaims_idle_rows_silently() {
+    let mut joiner = inner_joiner().with_state_ttl(1000, 1000);
+    joiner.push(&changelog_join_batch(vec![1], vec![10], vec![0]), true, 5000).unwrap();
+    // A push a full period later sweeps both sides; nothing is emitted for the reclaimed row.
+    let out = joiner.push(&changelog_join_batch(vec![2], vec![20], vec![0]), true, 7000).unwrap();
+    assert_eq!(out.num_rows(), 0);
+    // The swept row is gone from the snapshot: a TTL-off restore (which would never expire it
+    // lazily) no longer finds a match for key 1, but still does for the live key 2.
+    let snapshot = joiner.snapshot();
+    let mut probe = UpdatingJoiner::restore(
+        vec![0], vec![0], vec![-1], JoinKind::Inner, kv_schema(), kv_schema(), None,
+        &snapshot, 7000,
+    );
+    let out = probe.push(&changelog_join_batch(vec![1], vec![100], vec![0]), false, 7000).unwrap();
+    assert_eq!(out.num_rows(), 0);
+    let out = probe.push(&changelog_join_batch(vec![2], vec![200], vec![0]), false, 7000).unwrap();
+    assert_eq!(values(&out, 1), vec![20]);
+}
+
+// Mini-batch: the durable-first-row capture reads its own side under TTL, so a bundle replacing
+// an expired stored row replays a fresh insert rather than a retraction of the corpse.
+#[test]
+fn updating_join_ttl_mini_batch_ignores_expired_durable_rows() {
+    let mut joiner = inner_joiner().with_mini_batch(true).with_state_ttl(0, 1000);
+    joiner.push(&changelog_join_batch(vec![1], vec![10], vec![0]), true, 5000).unwrap();
+    joiner.push(&changelog_join_batch(vec![1], vec![100], vec![0]), false, 5000).unwrap();
+    let out = joiner.flush_mini_batch().unwrap();
+    assert_eq!(row_kinds(&out), vec![0]); // +I[10,100]
+    // The left update keeps the bundle's staging non-empty (no mid-bundle sweep); the right
+    // replacement then reads its stored (1,100) as expired at 6000, staging a fresh insert.
+    joiner.push(&changelog_join_batch(vec![1], vec![11], vec![0]), true, 5900).unwrap();
+    joiner.push(&changelog_join_batch(vec![1], vec![101], vec![0]), false, 6000).unwrap();
+    let out = joiner.flush_mini_batch().unwrap();
+    // One fresh pair; a durable probe that ignored expiry would also replay -D[11,100].
+    assert_eq!(row_kinds(&out), vec![0]);
+    assert_eq!(values(&out, 1), vec![11]);
+    assert_eq!(values(&out, 3), vec![101]);
 }
 
 // The `[k, v, rt]` data schema (rt an i64 millis column) both sides carry in the temporal-join
@@ -2661,9 +2846,9 @@ fn updating_join_applies_non_equi_predicate() {
         Some(predicate),
     );
     // Buffer two right rows for k=1: v=5 and v=20.
-    joiner.push(&changelog_join_batch(vec![1, 1], vec![5, 20], vec![0, 0]), false);
+    joiner.push(&changelog_join_batch(vec![1, 1], vec![5, 20], vec![0, 0]), false, 0);
     // Left row k=1, v=10 → matches only the right v=5 (10 > 5), not v=20.
-    let out = joiner.push(&changelog_join_batch(vec![1], vec![10], vec![0]), true).unwrap();
+    let out = joiner.push(&changelog_join_batch(vec![1], vec![10], vec![0]), true, 0).unwrap();
     assert_eq!(out.num_rows(), 1);
     assert_eq!(values(&out, 3), vec![5]); // the one right row passing left.v > right.v
 }
@@ -2674,7 +2859,7 @@ fn updating_join_applies_non_equi_predicate() {
 fn updating_join_outer_degree_survives_snapshot_restore() {
     let mut joiner =
         UpdatingJoiner::new(vec![0], vec![0], JoinKind::LeftOuter, kv_schema(), kv_schema(), None);
-    joiner.push(&changelog_join_batch(vec![1], vec![10], vec![0]), true); // +I[left+null], degree 0
+    joiner.push(&changelog_join_batch(vec![1], vec![10], vec![0]), true, 0); // +I[left+null], degree 0
     let snapshot = joiner.snapshot();
     let mut restored = UpdatingJoiner::restore(
         vec![0],
@@ -2685,8 +2870,9 @@ fn updating_join_outer_degree_survives_snapshot_restore() {
         kv_schema(),
         None,
         &snapshot,
+        0,
     );
-    let out = restored.push(&changelog_join_batch(vec![1], vec![100], vec![0]), false).unwrap();
+    let out = restored.push(&changelog_join_batch(vec![1], vec![100], vec![0]), false, 0).unwrap();
     assert_eq!(row_kinds(&out), vec![3, 0]); // -D[left+null], +I[left+right]
 }
 
@@ -5548,8 +5734,8 @@ mod paimon_state {
         ];
         for (i, (batch, is_left)) in steps.iter().enumerate() {
             assert_same_output(
-                &memory.push(batch, *is_left).unwrap(),
-                &paimon.push(batch, *is_left).unwrap(),
+                &memory.push(batch, *is_left, 0).unwrap(),
+                &paimon.push(batch, *is_left, 0).unwrap(),
             );
             // A checkpoint between every step forces every probe through the tables.
             let (left, right) = paimon.stores_mut();
@@ -5562,8 +5748,8 @@ mod paimon_state {
     fn paimon_join_restores_from_listed_files_only() {
         let dir = temp_dir("join-restore-src");
         let mut joiner = paimon_joiner(&dir);
-        joiner.push(&changelog_join_batch(vec![7], vec![70], vec![0]), true).unwrap();
-        joiner.push(&changelog_join_batch(vec![7], vec![700], vec![0]), false).unwrap();
+        joiner.push(&changelog_join_batch(vec![7], vec![70], vec![0]), true, 0).unwrap();
+        joiner.push(&changelog_join_batch(vec![7], vec![700], vec![0]), false, 0).unwrap();
         let (left, right) = joiner.stores_mut();
         let cp_l = left.checkpoint().unwrap();
         let cp_r = right.checkpoint().unwrap();
@@ -5601,7 +5787,7 @@ mod paimon_state {
 
         // Retracting the pre-restore right row must retract the (hydrated) matched pair and
         // re-emit the left row null-padded — degree state survived the round trip.
-        let out = restored.push(&changelog_join_batch(vec![7], vec![700], vec![3]), false).unwrap();
+        let out = restored.push(&changelog_join_batch(vec![7], vec![700], vec![3]), false, 0).unwrap();
         assert_eq!(row_kinds(&out), vec![3, 0]);
         assert_eq!(values(&out, 1), vec![70, 70]);
         let right_v = out.column(3).as_any().downcast_ref::<Int64Array>().unwrap();

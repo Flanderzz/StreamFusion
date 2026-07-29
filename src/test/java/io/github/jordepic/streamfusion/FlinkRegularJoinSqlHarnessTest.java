@@ -169,17 +169,42 @@ class FlinkRegularJoinSqlHarnessTest {
   }
 
   @Test
-  void stateTtlFallsBackToHost() throws Exception {
-    // With a TTL set the host expires each side's rows independently, changing what a probe can
-    // match — the native join does not yet reproduce that, so the whole query stays on the host.
-    NativeParity.assertFallbackReasonContains(
+  void stateTtlMatchesHost() throws Exception {
+    // With idle-state TTL on (1h — nothing expires in-test) the join routes natively and must
+    // still match the host. The collapsed compare, as everywhere in this file: a two-input join's
+    // raw changelog is interleaving-dependent, its materialization deterministic.
+    NativeParity.assertChangelogParity(
         () -> {
           TableEnvironment tEnv = environment();
           tEnv.getConfig().set("table.exec.state.ttl", "1 h");
           return tEnv;
         },
-        "SELECT a.k, a.v, b.w FROM A AS a JOIN B AS b ON a.k = b.k",
-        "regular join: idle-state TTL");
+        "SELECT la.k, la.sv, rb.sw FROM "
+            + "(SELECT k, SUM(v) AS sv FROM A GROUP BY k) la JOIN "
+            + "(SELECT k, SUM(w) AS sw FROM B GROUP BY k) rb ON la.k = rb.k");
+  }
+
+  @Test
+  void perSideStateTtlHintRoutesAndMatchesHost() throws Exception {
+    // A per-side STATE_TTL hint (KV syntax keyed by table alias, 0 = left / 1 = right internally)
+    // with the job retention at 0: the hint alone must switch each side's retention on the native
+    // operator, matching Flink's hint-over-config precedence.
+    NativeParity.assertChangelogParity(
+        FlinkRegularJoinSqlHarnessTest::environment,
+        "SELECT /*+ STATE_TTL('a' = '1h', 'b' = '2h') */ a.k, a.v, b.w "
+            + "FROM A AS a JOIN B AS b ON a.k = b.k");
+  }
+
+  @Test
+  void outerJoinWithStateTtlMatchesHost() throws Exception {
+    // TTL on the degree-bearing outer family: null-pads and their retractions must still match.
+    NativeParity.assertChangelogParity(
+        () -> {
+          TableEnvironment tEnv = environment();
+          tEnv.getConfig().set("table.exec.state.ttl", "1 h");
+          return tEnv;
+        },
+        "SELECT a.k, a.v, b.w FROM A AS a LEFT JOIN B AS b ON a.k = b.k");
   }
 
   private static TableEnvironment environment() {

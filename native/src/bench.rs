@@ -251,7 +251,7 @@ impl UniqueUpdatingJoin {
     }
 
     pub fn push(&mut self, batch: &RecordBatch, left: bool) -> RecordBatch {
-        self.0.push(batch, left).expect("budget exceeded")
+        self.0.push(batch, left, 0).expect("budget exceeded")
     }
 
     pub fn flush(&mut self) -> RecordBatch {

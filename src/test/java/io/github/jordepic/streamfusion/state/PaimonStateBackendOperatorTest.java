@@ -446,6 +446,8 @@ class PaimonStateBackendOperatorTest {
             new int[] {-1},
             false,
             0,
+            0,
+            0,
             MAX_PARALLELISM);
     return new org.apache.flink.streaming.util.KeyedTwoInputStreamOperatorTestHarness<>(
         operator, batch -> 0, batch -> 0, Types.INT, MAX_PARALLELISM, 1, 0);

@@ -414,6 +414,10 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
         substitutions++;
         int[] leftKeys = RegularJoinMatcher.leftKeys(join);
         int[] rightKeys = RegularJoinMatcher.rightKeys(join);
+        // A STATE_TTL hint sets each side's retention independently (0 = left, 1 = right —
+        // Flink's FlinkHints.LEFT_INPUT convention), overriding the job-wide retention for that
+        // side alone; -1 means no hint, resolved at translate time.
+        Map<Integer, Long> hintTtls = StateTtlHint.getStateTtlFromHintOnBiRel(join.getHints());
         // Columnar (Arrow in/out); keep each side's keyed shuffle columnar where it sits on a
         // columnar producer, else the transition pass transposes at the boundary.
         return new StreamPhysicalNativeColumnarUpdatingJoin(
@@ -427,7 +431,9 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
             RegularJoinMatcher.joinTypeCode(join),
             RegularJoinMatcher.nonEquiPredicate(join),
             RegularJoinMatcher.joinKeyIsUnique(join, 0)
-                && RegularJoinMatcher.joinKeyIsUnique(join, 1));
+                && RegularJoinMatcher.joinKeyIsUnique(join, 1),
+            hintTtls.getOrDefault(0, -1L),
+            hintTtls.getOrDefault(1, -1L));
       }
     }
 

@@ -40,6 +40,11 @@ public class NativeColumnarUpdatingJoinExecNode extends ExecNodeBase<ArrowBatch>
   private final RexExpression predicate;
   private final int[] keyTimestampPrecisions;
   private final boolean bothJoinKeysUnique;
+  // Per-side TTLs from a STATE_TTL hint on the join (-1 = no hint for that side); each resolves
+  // against the job-wide table.exec.state.ttl at translate time, hint winning — Flink's
+  // StateMetadata rule, which carries the join's retention per input.
+  private final long leftStateTtlHintMillis;
+  private final long rightStateTtlHintMillis;
 
   public NativeColumnarUpdatingJoinExecNode(
       ReadableConfig tableConfig,
@@ -54,7 +59,9 @@ public class NativeColumnarUpdatingJoinExecNode extends ExecNodeBase<ArrowBatch>
       RowType rightType,
       RexExpression predicate,
       int[] keyTimestampPrecisions,
-      boolean bothJoinKeysUnique) {
+      boolean bothJoinKeysUnique,
+      long leftStateTtlHintMillis,
+      long rightStateTtlHintMillis) {
     super(
         ExecNodeContext.newNodeId(),
         new ExecNodeContext("stream-exec-native-updating-join_1"),
@@ -70,6 +77,8 @@ public class NativeColumnarUpdatingJoinExecNode extends ExecNodeBase<ArrowBatch>
     this.predicate = predicate;
     this.keyTimestampPrecisions = keyTimestampPrecisions;
     this.bothJoinKeysUnique = bothJoinKeysUnique;
+    this.leftStateTtlHintMillis = leftStateTtlHintMillis;
+    this.rightStateTtlHintMillis = rightStateTtlHintMillis;
   }
 
   @Override
@@ -90,6 +99,10 @@ public class NativeColumnarUpdatingJoinExecNode extends ExecNodeBase<ArrowBatch>
                 org.apache.flink.table.api.config.ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_ENABLED);
     long miniBatchSize =
         config.get(org.apache.flink.table.api.config.ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_SIZE);
+    long leftStateTtlMillis =
+        leftStateTtlHintMillis >= 0 ? leftStateTtlHintMillis : config.getStateRetentionTime();
+    long rightStateTtlMillis =
+        rightStateTtlHintMillis >= 0 ? rightStateTtlHintMillis : config.getStateRetentionTime();
     TwoInputTransformation<ArrowBatch, ArrowBatch, ArrowBatch> transformation =
         ExecNodeUtil.createTwoInputTransformation(
             left,
@@ -111,6 +124,8 @@ public class NativeColumnarUpdatingJoinExecNode extends ExecNodeBase<ArrowBatch>
                 keyTimestampPrecisions,
                 miniBatch,
                 miniBatchSize,
+                leftStateTtlMillis,
+                rightStateTtlMillis,
                 maxParallelism),
             ArrowBatchTypeInformation.INSTANCE,
             left.getParallelism(),

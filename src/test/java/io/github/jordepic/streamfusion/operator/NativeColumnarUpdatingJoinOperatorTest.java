@@ -3,7 +3,9 @@ package io.github.jordepic.streamfusion.operator;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
@@ -48,6 +50,11 @@ class NativeColumnarUpdatingJoinOperatorTest {
 
   private static NativeColumnarUpdatingJoinOperator rawKeyedOperator(
       boolean miniBatch, long miniBatchSize) {
+    return rawKeyedOperator(miniBatch, miniBatchSize, 0, 0);
+  }
+
+  private static NativeColumnarUpdatingJoinOperator rawKeyedOperator(
+      boolean miniBatch, long miniBatchSize, long leftStateTtlMillis, long rightStateTtlMillis) {
     return new NativeColumnarUpdatingJoinOperator(
         new int[] {0},
         new int[] {0},
@@ -64,6 +71,8 @@ class NativeColumnarUpdatingJoinOperatorTest {
         new int[] {-1},
         miniBatch,
         miniBatchSize,
+        leftStateTtlMillis,
+        rightStateTtlMillis,
         MAX_PARALLELISM);
   }
 
@@ -172,6 +181,92 @@ class NativeColumnarUpdatingJoinOperatorTest {
       rawKeyedHarness() throws Exception {
     return new KeyedTwoInputStreamOperatorTestHarness<>(
         rawKeyedOperator(), batch -> 0, batch -> 0, Types.INT, MAX_PARALLELISM, 1, 0);
+  }
+
+  private static KeyedTwoInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch, ArrowBatch>
+      ttlHarness(long leftStateTtlMillis, long rightStateTtlMillis) throws Exception {
+    return new KeyedTwoInputStreamOperatorTestHarness<>(
+        rawKeyedOperator(false, -1, leftStateTtlMillis, rightStateTtlMillis),
+        batch -> 0,
+        batch -> 0,
+        Types.INT,
+        MAX_PARALLELISM,
+        1,
+        0);
+  }
+
+  @Test
+  void ttlExpiresAStoredRowIntoAFreshProbeMiss() throws Exception {
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedTwoInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch, ArrowBatch>
+            harness = ttlHarness(1000, 1000)) {
+      harness.setup(new ArrowBatchSerializer());
+      harness.open();
+      harness.setProcessingTime(5000);
+      harness.processElement2(
+          new StreamRecord<>(batch(allocator, RIGHT, row(RowKind.INSERT, 1, 100))));
+      // ts 5000 + ttl 1000 <= 6000: expired exactly at the boundary — the left probe finds
+      // nothing, and nothing was emitted for the expiry itself.
+      harness.setProcessingTime(6000);
+      harness.processElement1(
+          new StreamRecord<>(batch(allocator, LEFT, row(RowKind.INSERT, 1, 10))));
+      assertEquals(List.of(), collect(harness));
+    }
+  }
+
+  @Test
+  void ttlRefreshesOnEveryWrite() throws Exception {
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedTwoInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch, ArrowBatch>
+            harness = ttlHarness(1000, 1000)) {
+      harness.setup(new ArrowBatchSerializer());
+      harness.open();
+      harness.setProcessingTime(5000);
+      harness.processElement2(
+          new StreamRecord<>(batch(allocator, RIGHT, row(RowKind.INSERT, 1, 100))));
+      // A second write of the same row (appear-times 2) restarts its clock at 5900...
+      harness.setProcessingTime(5900);
+      harness.processElement2(
+          new StreamRecord<>(batch(allocator, RIGHT, row(RowKind.INSERT, 1, 100))));
+      // ...and a retraction to appear-times 1 writes cnt-1 back, restarting it again at 6800.
+      harness.setProcessingTime(6800);
+      harness.processElement2(
+          new StreamRecord<>(batch(allocator, RIGHT, row(RowKind.DELETE, 1, 100))));
+      assertEquals(List.of(), collect(harness));
+      // The original write is long past its ttl, but the refreshes kept the survivor alive.
+      harness.setProcessingTime(7500);
+      harness.processElement1(
+          new StreamRecord<>(batch(allocator, LEFT, row(RowKind.INSERT, 1, 10))));
+      assertEquals(List.of(change(RowKind.INSERT, 1, 10, 1, 100)), collect(harness));
+    }
+  }
+
+  @Test
+  void ttlExpiresEachSideUnderItsOwnRetention() throws Exception {
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedTwoInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch, ArrowBatch>
+            harness = ttlHarness(1000, 2000)) {
+      harness.setup(new ArrowBatchSerializer());
+      harness.open();
+      harness.setProcessingTime(5000);
+      harness.processElement1(
+          new StreamRecord<>(batch(allocator, LEFT, row(RowKind.INSERT, 1, 10))));
+      harness.processElement2(
+          new StreamRecord<>(batch(allocator, RIGHT, row(RowKind.INSERT, 1, 100))));
+      assertEquals(List.of(change(RowKind.INSERT, 1, 10, 1, 100)), collect(harness));
+      // At 6000 the left row (1000ms retention) is expired but the right row's 2000ms retention
+      // keeps it alive: a fresh right row finds the left side empty, while a fresh left row still
+      // matches both right rows (bucket order not fixed, so compare as a set).
+      harness.setProcessingTime(6000);
+      harness.processElement2(
+          new StreamRecord<>(batch(allocator, RIGHT, row(RowKind.INSERT, 1, 101))));
+      assertEquals(List.of(), collect(harness));
+      harness.processElement1(
+          new StreamRecord<>(batch(allocator, LEFT, row(RowKind.INSERT, 1, 11))));
+      assertEquals(
+          Set.of(change(RowKind.INSERT, 1, 11, 1, 100), change(RowKind.INSERT, 1, 11, 1, 101)),
+          new HashSet<>(collect(harness)));
+    }
   }
 
   private static RowData row(RowKind kind, long key, long value) {
