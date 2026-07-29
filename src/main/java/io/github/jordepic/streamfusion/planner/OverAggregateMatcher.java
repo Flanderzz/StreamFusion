@@ -35,6 +35,13 @@ final class OverAggregateMatcher {
 
   /** The specific reason this OVER is not accelerable, or null if it is. */
   static String unsupportedReason(StreamPhysicalOverAggregate over) {
+    // Every Flink over-aggregate function expires state on per-key processing-time cleanup timers
+    // at 1.5x the retention (KeyedProcessFunctionWithCleanupState) — a coarser scheme than the
+    // per-value TTL the native operators implement, so a retention-bounded OVER stays on the host.
+    if (IdleStateRetention.isEnabled(over)) {
+      return "OVER: idle-state TTL (table.exec.state.ttl) runs on the host — Flink's over-aggregate"
+          + " cleanup timers are not reproduced natively";
+    }
     Window window = over.logicWindow();
     if (window.groups.size() != 1) {
       return "OVER: only a single window group";

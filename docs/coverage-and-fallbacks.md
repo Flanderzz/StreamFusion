@@ -217,7 +217,15 @@ array`, is **not** here: Flink rejects it too, so we're at parity.)
   behaves the same way for `streamfusion-fluss`.
 
 ### 2. Per-operator matcher declines (exact conditions)
-- **OVER** — a frame not of the form `… PRECEDING .. CURRENT ROW` (a `ROWS`/`RANGE` lower bound that
+
+**Idle-state TTL** (`table.exec.state.ttl` ≠ 0) declines every stateful operator: with a TTL the
+host expires idle keys and stops suppressing unchanged updates — semantics the native operators do
+not yet reproduce. For the temporal join and OVER the decline is permanent (Flink expires their
+state on per-key 1.5×-retention cleanup timers, a coarser scheme than per-value TTL); for the rest
+it lifts as native TTL support lands. Window operators and the interval join are unaffected —
+Flink applies no idle-state TTL there.
+
+- **OVER** — idle-state TTL ≠ 0 (permanent, above); a frame not of the form `… PRECEDING .. CURRENT ROW` (a `ROWS`/`RANGE` lower bound that
   is not a constant preceding offset); a bounded-RANGE frame over a proctime order (wall-clock
   interval, non-deterministic); an aggregate that is `AVG`, `COUNT(*)`, or reads a non-numeric /
   decimal column (numeric value columns are bigint/int/smallint/tinyint/double/float); `PARTITION BY`
@@ -230,7 +238,8 @@ array`, is **not** here: Flink rejects it too, so we're at parity.)
 - **Window join** — same key/type/non-equi conditions; both sides must carry a window-attached
   windowing of the same time semantics (both event-time or both proctime). Proctime closes the
   window on a processing-time timer instead of a watermark.
-- **Temporal join** — not INNER/LEFT (Flink rejects RIGHT/FULL); no equi key; non-null-dropping keys;
+- **Temporal join** — idle-state TTL ≠ 0 (permanent, above); not INNER/LEFT (Flink rejects
+  RIGHT/FULL); no equi key; non-null-dropping keys;
   equi-key type outside the supported set; a residual non-equi predicate beyond the `FOR SYSTEM_TIME`
   condition that the native engine can't express; a processing-time temporal join (parity — Flink
   rejects it for a versioned table).
@@ -238,8 +247,9 @@ array`, is **not** here: Flink rejects it too, so we're at parity.)
   that isn't a non-legacy `TableSourceTable`. (Projection/filter on the temporal table, residual and
   pre-filter conditions, and constant lookup keys are all native — the operator drives Flink's own
   generated runner; both the sync and async processing-time forms are native — §(a).)
-- **Regular join** — unsupported join type; no equi key; non-null-dropping keys; non-equi residual not
-  expressible; an input column type the converter can't carry.
+- **Regular join** — idle-state TTL ≠ 0 (interim, above); unsupported join type; no equi key;
+  non-null-dropping keys; non-equi residual not expressible; an input column type the converter
+  can't carry.
 - **Window aggregate / local / global** — window not event-time `TUMBLE`/`HOP`/`CUMULATE` (zero offset)
   over a local-time-zone **or plain `TIMESTAMP`** rowtime (the bounds render in the session zone for a
   local-time-zone attribute, in UTC — the raw wall-clock — for a plain `TIMESTAMP`) — or, for
@@ -276,7 +286,9 @@ array`, is **not** here: Flink rejects it too, so we're at parity.)
   — decimal SUM widens to `DECIMAL(38, s)` — bigint for COUNT, the widened `(sum, count)` pair for
   AVG — defensive, not seen from Flink's planner); a retracting input with any aggregate other
   than plain COUNT/AVG; an unsupported grouping-key/input column type.
-- **Global group aggregate** (two-phase merge) — any merge other than SUM/MIN/MAX/COUNT/AVG; a
+- **Global group aggregate** (two-phase merge) — idle-state TTL ≠ 0 (interim, above — the global
+  half carries its own gate since the phase split bypasses the single-phase one); any merge other
+  than SUM/MIN/MAX/COUNT/AVG; a
   partial column outside bigint/int/double/decimal (strings allowed under MIN/MAX); an AVG whose
   partial pair isn't
   `(bigint, bigint)` for an integer (bigint/int/smallint/tinyint) average, `(double, bigint)` for a
@@ -285,7 +297,8 @@ array`, is **not** here: Flink rejects it too, so we're at parity.)
   COUNT/AVG (those merge natively, with the count1 partial driving per-key liveness); an
   unsupported grouping-key/output column type. (Both halves must match for the query to
   accelerate — one staying on the host drags the whole query back via the gate.)
-- **Top-N** — a non-constant (variable) rank range; a row type the converter can't carry; an
+- **Top-N** — idle-state TTL ≠ 0 (interim, above); a non-constant (variable) rank range; a row type
+  the converter can't carry; an
   **update-fast rank with an `OFFSET`** (the update-fast shape — Flink plans it when the input has a
   unique key and the sort key is inferred monotonic, e.g. ranking by a descending `COUNT(*)` — is
   otherwise native, mirroring `UpdatableTopNFunction`'s bounded state and `FastTop1Function`'s
@@ -293,10 +306,12 @@ array`, is **not** here: Flink rejects it too, so we're at parity.)
   with no Paimon store shape yet). (Insert-only and retracting changelog input, an `OFFSET` on the
   non-update-fast shapes, and a projected rank number are all handled. `RANK`/`DENSE_RANK` never
   reach us — Flink rejects them in streaming.)
-- **LIMIT** — missing `FETCH`, or a retracting input (`OFFSET` is handled — it uses the retracting
+- **LIMIT** — idle-state TTL ≠ 0 (interim, above — a limit lowers to a rank the host TTLs like any
+  Top-N); missing `FETCH`, or a retracting input (`OFFSET` is handled — it uses the retracting
   ranker over the insert-only input).
-- **Deduplicate** — not a time-ordered rank-1. Rowtime and proctime, keep-first (`ASC`) and keep-last
-  (`DESC`), are all native; a value-ordered rank-1 is a Top-N (handled separately).
+- **Deduplicate** — idle-state TTL ≠ 0 (interim, above); not a time-ordered rank-1. Rowtime and
+  proctime, keep-first (`ASC`) and keep-last (`DESC`), are all native; a value-ordered rank-1 is a
+  Top-N (handled separately).
 - **Window Top-N / window dedup** — rank not starting at 1 (an `OFFSET`).
 - **Windowing TVF** — not `TUMBLE`/`HOP`/`CUMULATE` (zero offset) over a local-time-zone time
   attribute. Both event-time (assign by rowtime) and proctime (assign by the clock) are native.
@@ -309,8 +324,8 @@ array`, is **not** here: Flink rejects it too, so we're at parity.)
 - **Union** — a row type the converter can't carry. (`UNION` distinct is not a fallback — the host
   rewrites it to a `GROUP BY`, which routes through the aggregate path.)
 - **Expand** — any project cell that isn't a column ref, a NULL literal, or the integer expand id.
-- **ChangelogNormalize** — a pushed filter condition; the source-reuse variant; a row type the
-  converter can't carry.
+- **ChangelogNormalize** — idle-state TTL ≠ 0 (interim, above); a pushed filter condition; the
+  source-reuse variant; a row type the converter can't carry.
 - **Watermark assigner** — only substituted when its input is already a columnar producer (otherwise
   left on host to avoid a double transpose — a no-op, not a true fallback).
 

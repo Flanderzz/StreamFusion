@@ -54,6 +54,20 @@ class FlinkRetractingTopNSqlHarnessTest {
         TOP_N_WITH_RANK);
   }
 
+  @Test
+  void stateTtlFallsBackToHost() throws Exception {
+    // The retracting ranker's full buffer is host-TTL'd like any Top-N state, so it declines too
+    // (the aggregate feeding it declines through its own gate).
+    NativeParity.assertFallbackReasonContains(
+        () -> {
+          TableEnvironment tEnv = environment();
+          tEnv.getConfig().set("table.exec.state.ttl", "1 h");
+          return tEnv;
+        },
+        TOP_N,
+        "Top-N: idle-state TTL");
+  }
+
   private static TableEnvironment environment() {
     StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
     env.setParallelism(1);

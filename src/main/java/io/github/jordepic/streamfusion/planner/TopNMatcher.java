@@ -21,19 +21,34 @@ final class TopNMatcher {
   private TopNMatcher() {}
 
   static boolean matches(StreamPhysicalRank rank) {
+    return unsupportedReason(rank) == null;
+  }
+
+  /** The specific reason this rank is not accelerable, or null if it is. */
+  static String unsupportedReason(StreamPhysicalRank rank) {
+    // With a TTL set the host expires rank state per entry (the buffer thins out silently) —
+    // semantics the native rankers do not yet reproduce.
+    if (IdleStateRetention.isEnabled(rank)) {
+      return "Top-N: idle-state TTL (table.exec.state.ttl) runs on the host until the native"
+          + " operator expires state";
+    }
     if (rank.rankType() != RankType.ROW_NUMBER) {
-      return false;
+      return "Top-N: only ROW_NUMBER ranks (RANK/DENSE_RANK fall back)";
     }
     if (!(rank.rankRange() instanceof ConstantRankRange)) {
-      return false;
+      return "Top-N: only a constant rank range";
     }
     if (DeduplicateMatcher.isTimeOrder(rank)) {
-      return false; // a time-ordered rank is deduplication (DeduplicateMatcher), not a value Top-N
+      // A time-ordered rank is deduplication (DeduplicateMatcher), not a value Top-N.
+      return "Top-N: a time-ordered rank is deduplication, not a value Top-N";
     }
     // The whole row crosses the boundary unchanged, so every column (incl. partition/order keys)
     // must be a type the conversion handles.
-    return RowDataArrowConverter.supports(
-        FlinkTypeFactory$.MODULE$.toLogicalRowType(rank.getRowType()));
+    if (!RowDataArrowConverter.supports(
+        FlinkTypeFactory$.MODULE$.toLogicalRowType(rank.getRowType()))) {
+      return "Top-N: a column type the boundary cannot carry";
+    }
+    return null;
   }
 
   static int[] partitionColumns(StreamPhysicalRank rank) {

@@ -55,6 +55,20 @@ class FlinkTemporalJoinSqlHarnessTest {
             + "ON o.currency = r.currency");
   }
 
+  @Test
+  void stateTtlFallsBackToHost() throws Exception {
+    // Permanent gate: Flink expires temporal-join state on 1.5x-retention cleanup timers, a scheme
+    // the native operator does not reproduce, so a retention-bounded temporal join stays hosted.
+    NativeParity.assertFallbackReasonContains(
+        () -> {
+          TableEnvironment tEnv = environment();
+          tEnv.getConfig().set("table.exec.state.ttl", "1 h");
+          return tEnv;
+        },
+        JOIN,
+        "temporal join: idle-state TTL");
+  }
+
   private static TableEnvironment environment() {
     StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
     env.setParallelism(1);

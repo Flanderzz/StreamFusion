@@ -73,6 +73,18 @@ class FlinkUpdateFastTopNSqlHarnessTest {
         "update-fast rank with OFFSET");
   }
 
+  @Test
+  void stateTtlFallsBackToHost() throws Exception {
+    NativeParity.assertFallbackReasonContains(
+        () -> {
+          TableEnvironment tEnv = environment();
+          tEnv.getConfig().set("table.exec.state.ttl", "1 h");
+          return tEnv;
+        },
+        RANKED,
+        "Top-N: idle-state TTL");
+  }
+
   private static TableEnvironment environment() {
     StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
     env.setParallelism(1);

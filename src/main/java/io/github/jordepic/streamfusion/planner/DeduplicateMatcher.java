@@ -26,6 +26,11 @@ final class DeduplicateMatcher {
   private DeduplicateMatcher() {}
 
   static boolean matches(StreamPhysicalRank rank) {
+    // With a TTL set the host expires idle keys (re-emitting a "first" row) and stops suppressing
+    // unchanged rows — semantics the native deduplicators do not yet reproduce.
+    if (IdleStateRetention.isEnabled(rank)) {
+      return false;
+    }
     if (rank.rankType() != RankType.ROW_NUMBER || rank.outputRankNumber()) {
       return false;
     }
@@ -91,6 +96,10 @@ final class DeduplicateMatcher {
   }
 
   static String unsupportedReason(StreamPhysicalRank rank) {
+    if (IdleStateRetention.isEnabled(rank)) {
+      return "deduplication: idle-state TTL (table.exec.state.ttl) runs on the host until the native"
+          + " operator expires state";
+    }
     return "deduplication: needs ROW_NUMBER() OVER (PARTITION BY … ORDER BY rowtime|proctime ASC|DESC)"
         + " = 1 (keep-first or keep-last) over an insert-only input with zero idle-state TTL";
   }

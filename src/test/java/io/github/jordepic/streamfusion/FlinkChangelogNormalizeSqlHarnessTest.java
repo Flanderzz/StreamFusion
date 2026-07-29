@@ -54,6 +54,20 @@ class FlinkChangelogNormalizeSqlHarnessTest {
     }
   }
 
+  @Test
+  void stateTtlFallsBackToHost() throws Exception {
+    // With a TTL set the host expires idle keys (an update becomes an insert) and stops suppressing
+    // unchanged rows — the native normalizer does not yet reproduce that.
+    NativeParity.assertFallbackReasonContains(
+        () -> {
+          TableEnvironment tEnv = environment();
+          tEnv.getConfig().set("table.exec.state.ttl", "1 h");
+          return tEnv;
+        },
+        "SELECT f0, f1 FROM up",
+        "changelog normalize: idle-state TTL");
+  }
+
   private static TableEnvironment environment() {
     StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
     env.setParallelism(1);

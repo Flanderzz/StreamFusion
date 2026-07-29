@@ -74,6 +74,19 @@ class FlinkLimitSqlHarnessTest {
     }
   }
 
+  @Test
+  void stateTtlFallsBackToHost() throws Exception {
+    // A limit lowers to a rank the host TTLs like any Top-N, so it declines under a TTL too.
+    NativeParity.assertFallbackReasonContains(
+        () -> {
+          TableEnvironment tEnv = environment();
+          tEnv.getConfig().set("table.exec.state.ttl", "1 h");
+          return tEnv;
+        },
+        "SELECT k, v FROM src ORDER BY v LIMIT 2",
+        "limit: idle-state TTL");
+  }
+
   private static TableEnvironment environment() {
     StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
     env.setParallelism(1);

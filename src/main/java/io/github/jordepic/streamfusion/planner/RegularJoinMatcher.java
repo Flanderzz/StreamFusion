@@ -28,6 +28,12 @@ final class RegularJoinMatcher {
   }
 
   static String unsupportedReason(StreamPhysicalJoin join) {
+    // With a TTL set the host expires each side's rows independently, changing what a probe can
+    // match — semantics the native join does not yet reproduce, so it stays on the host.
+    if (IdleStateRetention.isEnabled(join)) {
+      return "regular join: idle-state TTL (table.exec.state.ttl) runs on the host until the native"
+          + " operator expires state";
+    }
     JoinSpec joinSpec = ((CommonPhysicalJoin) join).joinSpec();
     if (joinTypeCode(joinSpec.getJoinType()) < 0) {
       return "regular join: unsupported join type " + joinSpec.getJoinType();

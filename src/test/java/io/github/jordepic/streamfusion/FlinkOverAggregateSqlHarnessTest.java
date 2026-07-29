@@ -292,6 +292,20 @@ class FlinkOverAggregateSqlHarnessTest {
     return tEnv;
   }
 
+  @Test
+  void stateTtlFallsBackToHost() throws Exception {
+    // Permanent gate: every Flink over-aggregate expires state on 1.5x-retention cleanup timers
+    // (KeyedProcessFunctionWithCleanupState), a scheme the native operator does not reproduce.
+    NativeParity.assertFallbackReasonContains(
+        () -> {
+          TableEnvironment tEnv = environment();
+          tEnv.getConfig().set("table.exec.state.ttl", "1 h");
+          return tEnv;
+        },
+        "SELECT v, SUM(v) OVER (ORDER BY rt) AS total FROM src",
+        "OVER: idle-state TTL");
+  }
+
   private static TableEnvironment environment() {
     StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
     env.setParallelism(1);

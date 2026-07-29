@@ -805,9 +805,12 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
     }
 
     // Native operators emit insert-only rows; substituting into a retracting or updating stream
-    // would drop changelog semantics, so only insert-only nodes are eligible.
+    // would drop changelog semantics, so only insert-only nodes are eligible. A changelog-emitting
+    // candidate reaching this point was declined by its matcher above — record why before bailing,
+    // or its reason (unlike an insert-only candidate's, noted at the end) would be lost.
     if (!(current instanceof StreamPhysicalRel)
         || !ChangelogPlanUtils.isInsertOnly((StreamPhysicalRel) current)) {
+      noteFallback(current);
       return current;
     }
 
@@ -1479,6 +1482,19 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
     if (node instanceof StreamPhysicalGlobalGroupAggregate) {
       return GlobalGroupAggregateMatcher.unsupportedReason(
           (StreamPhysicalGlobalGroupAggregate) node);
+    }
+    if (node instanceof StreamPhysicalGroupAggregate) {
+      return GroupAggregateMatcher.unsupportedReason((StreamPhysicalGroupAggregate) node);
+    }
+    if (node instanceof StreamPhysicalJoin) {
+      return RegularJoinMatcher.unsupportedReason((StreamPhysicalJoin) node);
+    }
+    // Both dedup and Top-N are ranks; a time-ordered rank is deduplication, the rest are Top-N.
+    if (node instanceof StreamPhysicalRank) {
+      StreamPhysicalRank rank = (StreamPhysicalRank) node;
+      return DeduplicateMatcher.isTimeOrder(rank)
+          ? DeduplicateMatcher.unsupportedReason(rank)
+          : TopNMatcher.unsupportedReason(rank);
     }
     if (node instanceof StreamPhysicalLocalGroupAggregate) {
       return "local group aggregate: needs SUM/MIN/MAX/COUNT over bigint/int/double values with no"

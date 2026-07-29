@@ -87,6 +87,21 @@ class FlinkTopNSqlHarnessTest {
             + "FROM src) WHERE rn BETWEEN 2 AND 3");
   }
 
+  @Test
+  void stateTtlFallsBackToHost() throws Exception {
+    // With a TTL set the host expires rank state per entry (the buffer thins out silently) — the
+    // native rankers do not yet reproduce that.
+    NativeParity.assertFallbackReasonContains(
+        () -> {
+          TableEnvironment tEnv = environment();
+          tEnv.getConfig().set("table.exec.state.ttl", "1 h");
+          return tEnv;
+        },
+        "SELECT k, v FROM (SELECT k, v, ROW_NUMBER() OVER (PARTITION BY k ORDER BY v) AS rn "
+            + "FROM src) WHERE rn <= 2",
+        "Top-N: idle-state TTL");
+  }
+
   private static TableEnvironment environment() {
     StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
     env.setParallelism(1);

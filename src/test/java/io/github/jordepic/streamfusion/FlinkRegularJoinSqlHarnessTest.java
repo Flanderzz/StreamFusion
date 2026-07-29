@@ -168,6 +168,20 @@ class FlinkRegularJoinSqlHarnessTest {
         "SELECT a.k, a.v + b.v FROM A a JOIN A b ON a.k = b.k");
   }
 
+  @Test
+  void stateTtlFallsBackToHost() throws Exception {
+    // With a TTL set the host expires each side's rows independently, changing what a probe can
+    // match — the native join does not yet reproduce that, so the whole query stays on the host.
+    NativeParity.assertFallbackReasonContains(
+        () -> {
+          TableEnvironment tEnv = environment();
+          tEnv.getConfig().set("table.exec.state.ttl", "1 h");
+          return tEnv;
+        },
+        "SELECT a.k, a.v, b.w FROM A AS a JOIN B AS b ON a.k = b.k",
+        "regular join: idle-state TTL");
+  }
+
   private static TableEnvironment environment() {
     StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
     env.setParallelism(1);

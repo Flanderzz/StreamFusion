@@ -284,6 +284,25 @@ class FlinkTwoPhaseGroupAggregateSqlHarnessTest {
   }
 
   @Test
+  void stateTtlFallsBackToHost() throws Exception {
+    // The single-phase TTL gate does not see a two-phase plan (the phase split bypasses it), so the
+    // global half carries its own: with a TTL set the host expires idle keys and stops suppressing
+    // unchanged results — semantics the native merge does not yet reproduce.
+    Path input = Files.createTempDirectory("twophase-ttl-in");
+    writeInput(input);
+    Supplier<TableEnvironment> environment =
+        () -> {
+          TableEnvironment tEnv = readEnvironment(input).get();
+          tEnv.getConfig().set("table.exec.state.ttl", "1 h");
+          return tEnv;
+        };
+    NativeParity.assertFallbackReasonContains(
+        environment,
+        "SELECT k, SUM(v) AS s FROM t GROUP BY k",
+        "global group aggregate: idle-state TTL");
+  }
+
+  @Test
   void distinctSplitChainFallsBackToHost() throws Exception {
     // With table.optimizer.distinct-agg.split.enabled the plan becomes the five-node incremental
     // chain (PartialLocal → Exchange → IncrementalGroupAggregate → Exchange → FinalGlobal) over a

@@ -148,13 +148,14 @@ class FlinkGroupAggregateSqlHarnessTest {
     // deletes) — semantics the append-only native operator does not reproduce, so it stays on host.
     // The minimal source has exactly the grouped/aggregated columns, so the aggregate is the only
     // routable node and a clean fallback means zero substitutions.
-    NativeParity.assertFallback(
+    NativeParity.assertFallbackReasonContains(
         () -> {
           TableEnvironment tEnv = minimalEnvironment();
           tEnv.getConfig().set("table.exec.state.ttl", "1 h");
           return tEnv;
         },
-        "SELECT k, SUM(`value`) AS s FROM kv GROUP BY k");
+        "SELECT k, SUM(`value`) AS s FROM kv GROUP BY k",
+        "GROUP BY: idle-state TTL");
   }
 
   private static TableEnvironment minimalEnvironment() {

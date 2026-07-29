@@ -34,6 +34,12 @@ final class GlobalGroupAggregateMatcher {
   }
 
   static String unsupportedReason(StreamPhysicalGlobalGroupAggregate agg) {
+    // Same reasoning as the single-phase gate: with a TTL set the host expires idle keys and stops
+    // suppressing unchanged results, semantics the native operator does not yet reproduce.
+    if (IdleStateRetention.isEnabled(agg)) {
+      return "global group aggregate: idle-state TTL (table.exec.state.ttl) runs on the host until"
+          + " the native operator expires state";
+    }
     RelDataType inputType = agg.getInput().getRowType();
     if (!RowDataArrowConverter.supports(
         FlinkTypeFactory$.MODULE$.toLogicalRowType(agg.getRowType()))) {

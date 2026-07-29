@@ -4,11 +4,9 @@ import io.github.jordepic.streamfusion.operator.RowDataArrowConverter;
 import org.apache.calcite.rel.core.AggregateCall;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.sql.type.SqlTypeName;
-import org.apache.flink.table.api.config.ExecutionConfigOptions;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalGroupAggregate;
 import org.apache.flink.table.planner.plan.utils.ChangelogPlanUtils;
-import org.apache.flink.table.planner.utils.ShortcutUtils;
 import org.apache.flink.table.types.logical.RowType;
 import scala.collection.Seq;
 
@@ -29,13 +27,17 @@ final class GroupAggregateMatcher {
   private GroupAggregateMatcher() {}
 
   static boolean matches(StreamPhysicalGroupAggregate agg) {
+    return unsupportedReason(agg) == null;
+  }
+
+  /** The specific reason this aggregate is not accelerable, or null if it is. */
+  static String unsupportedReason(StreamPhysicalGroupAggregate agg) {
     // The native operator never expires idle keys and suppresses an unchanged result, which matches
     // the host only with state retention off. With a TTL set the host instead refreshes downstream
     // (emitting unchanged updates) and deletes expired keys, so leave it on the host.
-    if (!ShortcutUtils.unwrapTableConfig(agg)
-        .get(ExecutionConfigOptions.IDLE_STATE_RETENTION)
-        .isZero()) {
-      return false;
+    if (IdleStateRetention.isEnabled(agg)) {
+      return "GROUP BY: idle-state TTL (table.exec.state.ttl) runs on the host until the native"
+          + " operator expires state";
     }
     RelDataType inputType = agg.getInput().getRowType();
     // The whole row crosses the boundary in both directions, so every input and output column must be
@@ -44,7 +46,7 @@ final class GroupAggregateMatcher {
             FlinkTypeFactory$.MODULE$.toLogicalRowType(inputType))
         || !RowDataArrowConverter.supports(
             FlinkTypeFactory$.MODULE$.toLogicalRowType(agg.getRowType()))) {
-      return false;
+      return "GROUP BY: an input or output column type the boundary cannot carry";
     }
     Seq<AggregateCall> aggCalls = agg.aggCalls();
     for (int i = 0; i < aggCalls.size(); i++) {
@@ -52,14 +54,14 @@ final class GroupAggregateMatcher {
       // A FILTER (call.filterArg >= 0) is native — the filter is a boolean input column the operator
       // gates each fold on; only an approximate aggregate is rejected.
       if (call.isApproximate()) {
-        return false;
+        return "GROUP BY: an approximate aggregate";
       }
       int kind = WindowAggregateMatcher.aggregateKind(call.getAggregation().getKind());
       if (kind < 0) {
-        return false; // SUM/MIN/MAX/COUNT/AVG only
+        return "GROUP BY: only SUM/MIN/MAX/COUNT/AVG aggregates";
       }
       if (call.getArgList().size() > 1) {
-        return false;
+        return "GROUP BY: only single-argument aggregates";
       }
       // DISTINCT: COUNT(DISTINCT x) keeps a value→multiplicity set (Flink's DistinctAccumulator) over
       // any type the row admits; SUM(DISTINCT x) adds a running sum folded as values enter/leave the
@@ -68,7 +70,7 @@ final class GroupAggregateMatcher {
       // AVG(DISTINCT) falls back (its count-of-distinct division isn't modelled).
       if (call.isDistinct()) {
         if (call.getArgList().size() != 1 || kind == WindowAggregateMatcher.KIND_AVG) {
-          return false;
+          return "GROUP BY: DISTINCT is native for COUNT/SUM/MIN/MAX only";
         }
         if (kind == WindowAggregateMatcher.KIND_COUNT) {
           continue;
@@ -89,20 +91,20 @@ final class GroupAggregateMatcher {
           // DECIMAL(38, s) accumulator and the emit divides with Flink's exact decimal division,
           // reporting DECIMAL(38, max(6, s)) — findAvgAggType's derivation.
           if (!isAvgType(valueType) && valueType != SqlTypeName.DECIMAL) {
-            return false;
+            return "GROUP BY: AVG over an unsupported value type";
           }
         } else if (kind == KIND_MIN || kind == KIND_MAX) {
           // MIN/MAX keep a value multiset; admit the running numerics, DECIMAL, and strings (ordered
           // byte-lexicographically, matching Flink's BinaryStringData comparison).
           if (!isRunningType(valueType) && valueType != SqlTypeName.DECIMAL && !isStringType(valueType)) {
-            return false;
+            return "GROUP BY: MIN/MAX over an unsupported value type";
           }
         } else if (!isRunningType(valueType) && valueType != SqlTypeName.DECIMAL) {
-          return false; // SUM
+          return "GROUP BY: SUM over an unsupported value type";
         }
       }
     }
-    return true;
+    return null;
   }
 
   /** The value types the native running aggregate folds directly: bigint, int, double. */
