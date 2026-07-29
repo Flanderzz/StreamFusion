@@ -144,7 +144,12 @@ impl TopNConverters {
 /// rank and a `+U` at the next); sharing it makes those emits refcount bumps rather than a byte-buffer
 /// clone each — the allocator churn a differential profile pinned as the Top-N's cost over Flink (which
 /// reuses `BinaryRowData`). The decode back to Arrow still happens once per emitted row, on flush.
-pub(crate) type TopNRow = (OwnedRow, Arc<OwnedRow>);
+pub(crate) struct TopNRow {
+    pub(crate) sort: OwnedRow,
+    pub(crate) payload: Arc<OwnedRow>,
+    /// Wall-clock millis of the entry's last write (Flink state-TTL); 0 until TTL is wired.
+    pub(crate) ts_ms: i64,
+}
 
 fn topn_staged_entry_bytes(key: &ByteKey, old: &Vec<Arc<OwnedRow>>) -> usize {
     // The key is owned once by the lookup map and once by the deterministic first-touch vector.
@@ -250,7 +255,7 @@ impl crate::state::PaimonListCodec for TopNStateCodec {
         let parser = self.payload.parser();
         let columns = self
             .payload
-            .convert_rows([parser.parse(entry.1.row().data())])
+            .convert_rows([parser.parse(entry.payload.row().data())])
             .expect("decode top-n payload for persistence");
         columns
             .iter()
@@ -273,7 +278,7 @@ impl crate::state::PaimonListCodec for TopNStateCodec {
             .expect("encode hydrated top-n payload")
             .row(0)
             .owned();
-        (sort_key, Arc::new(payload))
+        TopNRow { sort: sort_key, payload: Arc::new(payload), ts_ms: 0 }
     }
 
     fn entry_bytes(&self, entry: &TopNRow) -> usize {
@@ -283,7 +288,7 @@ impl crate::state::PaimonListCodec for TopNStateCodec {
 
 /// Estimated footprint of one buffered Top-N entry (sort key + payload row + container overhead).
 pub(crate) fn topn_entry_bytes(entry: &TopNRow) -> usize {
-    entry.0.row().as_ref().len() + entry.1.row().as_ref().len() + GROUP_ENTRY_OVERHEAD
+    entry.sort.row().as_ref().len() + entry.payload.row().as_ref().len() + GROUP_ENTRY_OVERHEAD
 }
 
 impl TopNRanker {
@@ -438,14 +443,21 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> TopNRanker<S> {
             };
             // Insert after any rows that order equal-or-before, preserving arrival order for ties
             // (byte compare of the memcomparable sort key).
-            let pos = buffer.partition_point(|(k, _)| k.row() <= key_row);
+            let pos = buffer.partition_point(|e| e.sort.row() <= key_row);
 
             if output_rank {
                 if pos >= limit {
                     continue; // beyond rank N — the new row never enters the top-N (nothing allocated)
                 }
                 let old_len = buffer.len();
-                buffer.insert(pos, (key_row.owned(), Arc::new(payloads.row(row).owned())));
+                buffer.insert(
+                    pos,
+                    TopNRow {
+                        sort: key_row.owned(),
+                        payload: Arc::new(payloads.row(row).owned()),
+                        ts_ms: 0,
+                    },
+                );
                 if track {
                     delta += topn_entry_bytes(&buffer[pos]) as isize;
                 }
@@ -453,9 +465,9 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> TopNRanker<S> {
                 // occupant changes, so retract the old and append the new; a brand-new rank inserts.
                 let upper = (old_len + 1).min(limit); // highest 1-based rank to emit
                 for rank in (pos + 1)..=upper {
-                    let new_occupant = buffer[rank - 1].1.clone();
+                    let new_occupant = buffer[rank - 1].payload.clone();
                     if rank <= old_len {
-                        out_rows.push(buffer[rank].1.clone()); // old occupant (shifted down by one)
+                        out_rows.push(buffer[rank].payload.clone()); // old occupant (shifted down by one)
                         out_kinds.push(1); // -U
                         out_ranks.push(rank as i64);
                         out_rows.push(new_occupant);
@@ -475,7 +487,10 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> TopNRanker<S> {
                 }
             } else {
                 let payload = Arc::new(payloads.row(row).owned());
-                buffer.insert(pos, (key_row.owned(), Arc::clone(&payload)));
+                buffer.insert(
+                    pos,
+                    TopNRow { sort: key_row.owned(), payload: Arc::clone(&payload), ts_ms: 0 },
+                );
                 if track {
                     delta += topn_entry_bytes(&buffer[pos]) as isize;
                 }
@@ -484,10 +499,10 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> TopNRanker<S> {
                     if track {
                         delta -= topn_entry_bytes(&evicted) as isize;
                     }
-                    if *evicted.1 == *payload {
+                    if *evicted.payload == *payload {
                         continue; // the new row was itself rank N+1 — it never entered the top-N
                     }
-                    out_rows.push(evicted.1);
+                    out_rows.push(evicted.payload);
                     out_kinds.push(3); // -D the displaced row
                 }
                 out_rows.push(payload);
@@ -555,18 +570,25 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> TopNRanker<S> {
             };
             if !staged_old_tops.contains_key(part) {
                 let key = ByteKey::from(part);
-                let old: Vec<Arc<OwnedRow>> = buffer.iter().map(|(_, p)| p.clone()).collect();
+                let old: Vec<Arc<OwnedRow>> = buffer.iter().map(|e| e.payload.clone()).collect();
                 if track {
                     delta += topn_staged_entry_bytes(&key, &old) as isize;
                 }
                 staged_order.push(key.clone());
                 staged_old_tops.insert(key, old);
             }
-            let pos = buffer.partition_point(|(k, _)| k.row() <= key_row);
+            let pos = buffer.partition_point(|e| e.sort.row() <= key_row);
             if pos >= limit {
                 continue; // beyond rank N — never enters (a buffer never exceeds the limit)
             }
-            buffer.insert(pos, (key_row.owned(), Arc::new(payloads.row(row).owned())));
+            buffer.insert(
+                pos,
+                TopNRow {
+                    sort: key_row.owned(),
+                    payload: Arc::new(payloads.row(row).owned()),
+                    ts_ms: 0,
+                },
+            );
             if track {
                 delta += topn_entry_bytes(&buffer[pos]) as isize;
             }
@@ -601,7 +623,7 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> TopNRanker<S> {
                 .get(&part.0)
                 .expect("staged partition resident")
                 .iter()
-                .map(|(_, payload)| Arc::clone(payload))
+                .map(|e| Arc::clone(&e.payload))
                 .collect();
             if self.output_rank_number {
                 diff_top(
@@ -681,10 +703,10 @@ fn raw_topn_snapshot_groups(
         }
         let group = flink_key_group(hash_bytes_by_words(&key.0), max_parallelism) as i32;
         let (keys, sorts, rows) = builders.entry(group).or_default();
-        for (sort, payload) in buffer.iter() {
+        for entry in buffer.iter() {
             keys.append_value(&key.0);
-            sorts.append_value(sort.row().data());
-            rows.append_value(payload.row().data());
+            sorts.append_value(entry.sort.row().data());
+            rows.append_value(entry.payload.row().data());
         }
     }
     let raw_schema = Arc::new(Schema::new_with_metadata(
@@ -804,7 +826,11 @@ impl TopNRanker {
                 Some(buffer) => buffer,
                 None => groups.insert(ByteKey::from(part), Vec::new()),
             };
-            buffer.push((keys.row(row).owned(), Arc::new(payloads.row(row).owned())));
+            buffer.push(TopNRow {
+                sort: keys.row(row).owned(),
+                payload: Arc::new(payloads.row(row).owned()),
+                ts_ms: 0,
+            });
         }
     }
 }
@@ -844,10 +870,11 @@ fn load_topn_batch_raw(
             Some(buffer) => buffer,
             None => groups.insert(ByteKey::from(part), Vec::new()),
         };
-        buffer.push((
-            sort_parser.parse(sorts.value(row)).owned(),
-            Arc::new(payload_parser.parse(rows.value(row)).owned()),
-        ));
+        buffer.push(TopNRow {
+            sort: sort_parser.parse(sorts.value(row)).owned(),
+            payload: Arc::new(payload_parser.parse(rows.value(row)).owned()),
+            ts_ms: 0,
+        });
     }
 }
 
@@ -1086,7 +1113,7 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> RetractableTopNRanker<S> {
             let old_top: Vec<Arc<OwnedRow>> = buffer
                 [offset.min(buffer.len())..limit.min(buffer.len())]
                 .iter()
-                .map(|(_, p)| Arc::clone(p))
+                .map(|e| Arc::clone(&e.payload))
                 .collect();
             // +I(0)/+U(2) accumulate; -U(1)/-D(3) retract.
             let retract = matches!(row_kinds.map(|k| k.value(row)).unwrap_or(0), 1 | 3);
@@ -1094,7 +1121,7 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> RetractableTopNRanker<S> {
                 // Remove the first full-row-equal match — a byte compare of the value-encoded
                 // payload (the append-only ranker's equality trade).
                 let full = payloads.row(row);
-                if let Some(pos) = buffer.iter().position(|(_, p)| p.row() == full) {
+                if let Some(pos) = buffer.iter().position(|e| e.payload.row() == full) {
                     if track {
                         delta -= topn_entry_bytes(&buffer[pos]) as isize;
                     }
@@ -1104,8 +1131,15 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> RetractableTopNRanker<S> {
                 // Insert after any rows that order equal-or-before, preserving arrival order for
                 // ties (byte compare of the memcomparable sort key).
                 let key_row = keys.row(row);
-                let pos = buffer.partition_point(|(k, _)| k.row() <= key_row);
-                buffer.insert(pos, (key_row.owned(), Arc::new(payloads.row(row).owned())));
+                let pos = buffer.partition_point(|e| e.sort.row() <= key_row);
+                buffer.insert(
+                    pos,
+                    TopNRow {
+                        sort: key_row.owned(),
+                        payload: Arc::new(payloads.row(row).owned()),
+                        ts_ms: 0,
+                    },
+                );
                 if track {
                     delta += topn_entry_bytes(&buffer[pos]) as isize;
                 }
@@ -1113,7 +1147,7 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> RetractableTopNRanker<S> {
             let new_top: Vec<Arc<OwnedRow>> = buffer
                 [offset.min(buffer.len())..limit.min(buffer.len())]
                 .iter()
-                .map(|(_, p)| Arc::clone(p))
+                .map(|e| Arc::clone(&e.payload))
                 .collect();
             diff_top(rank_output, rank_base, &old_top, &new_top, &mut out_rows, &mut out_kinds, &mut out_ranks);
         }
@@ -1188,7 +1222,7 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> RetractableTopNRanker<S> {
                 let key = ByteKey::from(part);
                 let old = buffer[offset.min(buffer.len())..limit.min(buffer.len())]
                     .iter()
-                    .map(|(_, payload)| Arc::clone(payload))
+                    .map(|e| Arc::clone(&e.payload))
                     .collect();
                 if track {
                     delta += topn_staged_entry_bytes(&key, &old) as isize;
@@ -1200,7 +1234,7 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> RetractableTopNRanker<S> {
             let retract = matches!(row_kinds.map(|k| k.value(row)).unwrap_or(0), 1 | 3);
             if retract {
                 let full = payloads.row(row);
-                if let Some(pos) = buffer.iter().position(|(_, payload)| payload.row() == full) {
+                if let Some(pos) = buffer.iter().position(|e| e.payload.row() == full) {
                     if track {
                         delta -= topn_entry_bytes(&buffer[pos]) as isize;
                     }
@@ -1208,8 +1242,15 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> RetractableTopNRanker<S> {
                 }
             } else {
                 let key_row = keys.row(row);
-                let pos = buffer.partition_point(|(key, _)| key.row() <= key_row);
-                buffer.insert(pos, (key_row.owned(), Arc::new(payloads.row(row).owned())));
+                let pos = buffer.partition_point(|e| e.sort.row() <= key_row);
+                buffer.insert(
+                    pos,
+                    TopNRow {
+                        sort: key_row.owned(),
+                        payload: Arc::new(payloads.row(row).owned()),
+                        ts_ms: 0,
+                    },
+                );
                 if track {
                     delta += topn_entry_bytes(&buffer[pos]) as isize;
                 }
@@ -1250,7 +1291,7 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> RetractableTopNRanker<S> {
             let new_top: Vec<Arc<OwnedRow>> = buffer
                 [offset.min(buffer.len())..limit.min(buffer.len())]
                 .iter()
-                .map(|(_, payload)| Arc::clone(payload))
+                .map(|e| Arc::clone(&e.payload))
                 .collect();
             diff_top(
                 self.output_rank_number,
@@ -1375,7 +1416,11 @@ impl RetractableTopNRanker {
                 Some(buffer) => buffer,
                 None => groups.insert(ByteKey::from(part), Vec::new()),
             };
-            buffer.push((keys.row(row).owned(), Arc::new(payloads.row(row).owned()))); // buffer order
+            buffer.push(TopNRow {
+                sort: keys.row(row).owned(),
+                payload: Arc::new(payloads.row(row).owned()),
+                ts_ms: 0,
+            }); // buffer order
         }
     }
 }
@@ -1459,12 +1504,18 @@ fn diff_top(
 /// does not strictly improve on the current top-1 is dropped without touching state or output, so
 /// a same-sort-key update keeps the stale payload. Matching Flink's materialized result means
 /// reproducing exactly that.
-pub(crate) type UpdatableRow = (OwnedRow, Arc<OwnedRow>, ByteKey);
+pub(crate) struct UpdatableRow {
+    pub(crate) sort: OwnedRow,
+    pub(crate) payload: Arc<OwnedRow>,
+    pub(crate) row_key: ByteKey,
+    /// Wall-clock millis of the entry's last write (Flink state-TTL); 0 until TTL is wired.
+    pub(crate) ts_ms: i64,
+}
 
 fn updatable_entry_bytes(entry: &UpdatableRow) -> usize {
-    entry.0.row().as_ref().len()
-        + entry.1.row().as_ref().len()
-        + entry.2.len()
+    entry.sort.row().as_ref().len()
+        + entry.payload.row().as_ref().len()
+        + entry.row_key.len()
         + GROUP_ENTRY_OVERHEAD
 }
 
@@ -1581,30 +1632,32 @@ impl UpdatableTopNRanker {
             };
             // The bounded buffer IS the top-N window.
             let old_top: Vec<Arc<OwnedRow>> =
-                buffer.iter().map(|(_, p, _)| Arc::clone(p)).collect();
+                buffer.iter().map(|e| Arc::clone(&e.payload)).collect();
             if top1 {
                 // FastTop1Function: only a strict improvement replaces the buffered row.
                 match buffer.first() {
                     None => {
-                        let entry = (
-                            key_row.owned(),
-                            Arc::new(payloads.row(row).owned()),
-                            ByteKey::from(row_keys.encode(row)),
-                        );
+                        let entry = UpdatableRow {
+                            sort: key_row.owned(),
+                            payload: Arc::new(payloads.row(row).owned()),
+                            row_key: ByteKey::from(row_keys.encode(row)),
+                            ts_ms: 0,
+                        };
                         if track {
                             delta += updatable_entry_bytes(&entry) as isize;
                         }
                         buffer.push(entry);
                     }
-                    Some((current, _, _)) if key_row < current.row() => {
+                    Some(current) if key_row < current.sort.row() => {
                         if track {
                             delta -= updatable_entry_bytes(&buffer[0]) as isize;
                         }
-                        buffer[0] = (
-                            key_row.owned(),
-                            Arc::new(payloads.row(row).owned()),
-                            ByteKey::from(row_keys.encode(row)),
-                        );
+                        buffer[0] = UpdatableRow {
+                            sort: key_row.owned(),
+                            payload: Arc::new(payloads.row(row).owned()),
+                            row_key: ByteKey::from(row_keys.encode(row)),
+                            ts_ms: 0,
+                        };
                         if track {
                             delta += updatable_entry_bytes(&buffer[0]) as isize;
                         }
@@ -1613,26 +1666,31 @@ impl UpdatableTopNRanker {
                 }
             } else {
                 let row_key = row_keys.encode(row);
-                match buffer.iter().position(|(_, _, k)| &*k.0 == row_key) {
+                match buffer.iter().position(|e| &*e.row_key.0 == row_key) {
                     Some(index) => {
-                        if buffer[index].0.row() == key_row {
+                        if buffer[index].sort.row() == key_row {
                             // Same sort key: replace the payload in place, preserving the row's
                             // position among sort-key ties (Flink's innerRank).
                             let payload = Arc::new(payloads.row(row).owned());
                             if track {
                                 delta += payload.row().as_ref().len() as isize
-                                    - buffer[index].1.row().as_ref().len() as isize;
+                                    - buffer[index].payload.row().as_ref().len() as isize;
                             }
-                            buffer[index].1 = payload;
+                            buffer[index].payload = payload;
                         } else {
                             let previous = buffer.remove(index);
                             if track {
                                 delta -= updatable_entry_bytes(&previous) as isize;
                             }
-                            let pos = buffer.partition_point(|(k, _, _)| k.row() <= key_row);
+                            let pos = buffer.partition_point(|e| e.sort.row() <= key_row);
                             buffer.insert(
                                 pos,
-                                (key_row.owned(), Arc::new(payloads.row(row).owned()), previous.2),
+                                UpdatableRow {
+                                    sort: key_row.owned(),
+                                    payload: Arc::new(payloads.row(row).owned()),
+                                    row_key: previous.row_key,
+                                    ts_ms: 0,
+                                },
                             );
                             if track {
                                 delta += updatable_entry_bytes(&buffer[pos]) as isize;
@@ -1640,17 +1698,18 @@ impl UpdatableTopNRanker {
                         }
                     }
                     None => {
-                        let pos = buffer.partition_point(|(k, _, _)| k.row() <= key_row);
+                        let pos = buffer.partition_point(|e| e.sort.row() <= key_row);
                         if pos >= limit {
                             continue; // beyond rank N — never enters, never tracked
                         }
                         buffer.insert(
                             pos,
-                            (
-                                key_row.owned(),
-                                Arc::new(payloads.row(row).owned()),
-                                ByteKey::from(row_key),
-                            ),
+                            UpdatableRow {
+                                sort: key_row.owned(),
+                                payload: Arc::new(payloads.row(row).owned()),
+                                row_key: ByteKey::from(row_key),
+                                ts_ms: 0,
+                            },
                         );
                         if track {
                             delta += updatable_entry_bytes(&buffer[pos]) as isize;
@@ -1665,7 +1724,7 @@ impl UpdatableTopNRanker {
                 }
             }
             let new_top: Vec<Arc<OwnedRow>> =
-                buffer.iter().map(|(_, p, _)| Arc::clone(p)).collect();
+                buffer.iter().map(|e| Arc::clone(&e.payload)).collect();
             diff_top(rank_output, 0, &old_top, &new_top, &mut out_rows, &mut out_kinds, &mut out_ranks);
         }
         self.groups.end_bundle()?;
@@ -1691,11 +1750,11 @@ impl UpdatableTopNRanker {
             }
             let group = flink_key_group(hash_bytes_by_words(&key.0), max_parallelism) as i32;
             let (keys, sorts, row_keys, rows) = builders.entry(group).or_default();
-            for (sort, payload, row_key) in buffer.iter() {
+            for entry in buffer.iter() {
                 keys.append_value(&key.0);
-                sorts.append_value(sort.row().data());
-                row_keys.append_value(&row_key.0);
-                rows.append_value(payload.row().data());
+                sorts.append_value(entry.sort.row().data());
+                row_keys.append_value(&entry.row_key.0);
+                rows.append_value(entry.payload.row().data());
             }
         }
         let raw_schema = Arc::new(Schema::new_with_metadata(
@@ -1775,11 +1834,12 @@ impl UpdatableTopNRanker {
                         Some(buffer) => buffer,
                         None => ranker.groups.insert(ByteKey::from(part), Vec::new()),
                     };
-                    buffer.push((
-                        sort_parser.parse(sorts.value(row)).owned(),
-                        Arc::new(payload_parser.parse(rows.value(row)).owned()),
-                        ByteKey::from(row_keys.value(row)),
-                    ));
+                    buffer.push(UpdatableRow {
+                        sort: sort_parser.parse(sorts.value(row)).owned(),
+                        payload: Arc::new(payload_parser.parse(rows.value(row)).owned()),
+                        row_key: ByteKey::from(row_keys.value(row)),
+                        ts_ms: 0,
+                    });
                 }
             }
         }
