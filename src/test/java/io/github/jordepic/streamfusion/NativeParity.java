@@ -42,6 +42,46 @@ final class NativeParity {
   }
 
   /**
+   * Like {@link #assertParity} but each row is compared <em>with its RowKind</em>, so the raw
+   * changelog must match change for change. This is the only assertion that can see an unsuppressed
+   * no-op update: an identical {@code -U}/{@code +U} pair nets to zero in the collapsed changelog
+   * and is invisible to a kind-blind row compare — yet with state TTL enabled Flink emits exactly
+   * such pairs where it would otherwise suppress. Sound for single-input operators at parallelism 1,
+   * whose emission order is deterministic (order-insensitivity still comes from the sort).
+   */
+  static void assertKindedParity(Supplier<TableEnvironment> environment, String sql)
+      throws Exception {
+    List<List<Object>> host = collectKinded(environment.get(), sql);
+
+    TableEnvironment nativeEnvironment = environment.get();
+    PhysicalPlanScan scan = NativePlanner.install(nativeEnvironment);
+    List<List<Object>> nativeRows = collectKinded(nativeEnvironment, sql);
+
+    assertTrue(
+        scan.substitutions() > 0,
+        "query did not route to native; parity check is moot; reasons=" + scan.fallbackReasons());
+    assertEquals(sorted(host), sorted(nativeRows), "kinded changelog differs from host");
+  }
+
+  /** {@link #collect} with the row's kind prepended, so ±U/±D changes are distinguishable. */
+  private static List<List<Object>> collectKinded(TableEnvironment environment, String sql)
+      throws Exception {
+    List<List<Object>> rows = new ArrayList<>();
+    try (CloseableIterator<Row> iterator = environment.executeSql(sql).collect()) {
+      while (iterator.hasNext()) {
+        Row row = iterator.next();
+        List<Object> fields = new ArrayList<>(row.getArity() + 1);
+        fields.add(row.getKind().shortString());
+        for (int i = 0; i < row.getArity(); i++) {
+          fields.add(row.getField(i));
+        }
+        rows.add(fields);
+      }
+    }
+    return rows;
+  }
+
+  /**
    * Like {@link #assertParity} but for a retracting/updating result: it compares the <em>collapsed</em>
    * changelog (each emitted row folded into a keyed multiset — added on {@code +I}/{@code +U}, removed
    * on {@code -U}/{@code -D}) rather than the raw stream of change rows. A two-input changelog operator
