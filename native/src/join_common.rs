@@ -263,12 +263,10 @@ pub(crate) fn data_schema(batch: &RecordBatch) -> SchemaRef {
 /// optional degree table.
 ///
 /// `last_write_ms` is the wall-clock millis of this entry's last write (Flink state TTL,
-/// `OnCreateAndWrite` per MapState entry); stays 0 while the side's TTL is off. It participates in
-/// the derived equality on purpose: the Paimon flush diff compares live entries against the
-/// hydrated image, and a refreshed timestamp should eventually re-persist the row once the
-/// persistent shape carries timestamps (today its codec neither persists nor decodes one — it
-/// hydrates 0, and the Java operator keeps a TTL'd join off the Paimon route, so writes stay 0
-/// there too and the diff is unaffected).
+/// `OnCreateAndWrite` per MapState entry); stays 0 while the side's TTL is off. It participates
+/// in the derived equality on purpose: the Paimon flush diff compares live entries against the
+/// hydrated image, so a refreshed timestamp re-persists an otherwise-unchanged row — the ts the
+/// store's trailing column carries must track the latest write.
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) struct RowMeta {
     pub(crate) count: i64,

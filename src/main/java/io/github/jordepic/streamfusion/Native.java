@@ -1614,6 +1614,13 @@ public final class Native {
    * element persists as one typed table row under PK {@code [kg, k, ord]}, {@code ord} preserving
    * buffer positions (tie order) exactly; a dirty partition rewrites its whole list — bounded, the
    * buffer is capped at N. Restore semantics as in {@link #createPaimonKeepLastDeduplicator}.
+   *
+   * <p>With a nonzero {@code stateTtlMillis} each element's last-write wall clock rides a trailing
+   * {@code ts} column. Unlike the KV shape the store never expires at read — only the ranker knows
+   * its expiry granularity (per element for append-only, whole buffer keyed on the head element
+   * for retracting) — so timestamps round-trip verbatim and the ranker's own first-touch expiry
+   * runs identically over hydrated buffers. {@code nowMillis} stamps a restored pre-TTL table's
+   * rows with a full retention from restore (Flink's enable-TTL migration).
    */
   public static native long createPaimonTopNRanker(
       int[] partitionColumns,
@@ -1627,6 +1634,8 @@ public final class Native {
       boolean outputRankNumber,
       boolean retracting,
       boolean netDiff,
+      long stateTtlMillis,
+      long nowMillis,
       long memoryBudgetBytes,
       String tableDirectory,
       int maxParallelism,
@@ -1673,6 +1682,12 @@ public final class Native {
    * as typed columns plus its appear-count and degree under PK {@code [kg, k, r]} with {@code r}
    * the row's Flink BinaryRow bytes. The checkpoint token packs both sides' snapshot ids; a
    * restored source adopts each side independently.
+   *
+   * <p>Each side carries its own retention (the {@code STATE_TTL} hint sets them independently):
+   * with a nonzero TTL that side's table gains a trailing {@code ts} column holding each entry's
+   * last-write wall clock, and hydration expires per entry — an expired committed entry reads as
+   * absent and its tombstone commits at the next barrier. {@code nowMillis} stamps a restored
+   * pre-TTL table's rows with a full retention from restore (Flink's enable-TTL migration).
    */
   public static native long createPaimonUpdatingJoiner(
       int[] leftKeys,
@@ -1688,6 +1703,9 @@ public final class Native {
       double[] predDoubles,
       String[] predStrings,
       boolean miniBatch,
+      long leftStateTtlMillis,
+      long rightStateTtlMillis,
+      long nowMillis,
       long memoryBudgetBytes,
       String tableDirectory,
       int maxParallelism,

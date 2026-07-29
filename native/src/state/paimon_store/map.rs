@@ -28,6 +28,14 @@ pub(crate) trait PaimonMapCodec {
 
     /// One entry's accounted heap footprint.
     fn entry_bytes(&self, row: &[u8], entry: &Self::Entry) -> usize;
+
+    /// The entry's TTL timestamp (state TTL); consulted only when the store carries the ts column.
+    fn write_ms(&self, _entry: &Self::Entry) -> i64 {
+        0
+    }
+
+    /// Stamps a decoded entry with its persisted TTL timestamp.
+    fn stamp_write_ms(&self, _entry: &mut Self::Entry, _ts_ms: i64) {}
 }
 
 enum MapSlot<E> {
@@ -60,8 +68,12 @@ impl<E> MapSlot<E> {
 pub(crate) struct PaimonMapStore<C: PaimonMapCodec> {
     core: PaimonTableCore,
     codec: C,
-    /// The codec's entry columns as Arrow fields, in persisted order after `kg`/`k`/`r`.
+    /// The entry columns as Arrow fields, in persisted order after `kg`/`k`/`r`: the codec's
+    /// fields plus (with TTL on) the store-managed trailing `ts` column (see the single-value
+    /// store).
     value_fields: Vec<Field>,
+    /// The host's wall clock, set before every ingest call; only read when TTL is on.
+    now_ms: i64,
     working: ahash::HashMap<ByteKey, MapSlot<C::Entry>>,
     footprint: isize,
 }
@@ -197,15 +209,18 @@ impl<C: PaimonMapCodec> PaimonMapStore<C> {
     }
 
     /// Builds a fresh table at `config.table_dir` from one or more restored table directories
-    /// (rescale); see `PaimonTableCore::adopt_buckets`.
+    /// (rescale); see `PaimonTableCore::adopt_buckets`. `now_ms` is the host's wall clock at
+    /// restore, the stamp of the enable-TTL migration (see `clip_from_sources`).
     pub(crate) fn open_merged(
         config: PaimonStoreConfig,
         codec: C,
         sources: &[(String, i64)],
         key_groups: std::ops::RangeInclusive<i32>,
         aligned: bool,
+        now_ms: i64,
     ) -> Result<Self, DataFusionError> {
         let mut store = Self::create(config, codec)?;
+        store.now_ms = now_ms;
         if aligned && sources.len() == 1 {
             let (source_dir, snapshot_id) = &sources[0];
             if store.core.adopt_all(source_dir, *snapshot_id)? {
@@ -213,7 +228,7 @@ impl<C: PaimonMapCodec> PaimonMapStore<C> {
             }
         }
         let write_fields = store.arrow_fields();
-        store.core.clip_from_sources(sources, key_groups, &write_fields, crate::state::StateTtl::disabled())?;
+        store.core.clip_from_sources(sources, key_groups, &write_fields, store.ttl())?;
         Ok(store)
     }
 
@@ -223,15 +238,19 @@ impl<C: PaimonMapCodec> PaimonMapStore<C> {
                 "state shape not supported by the paimon state backend".into(),
             ));
         }
-        let value_fields: Vec<Field> = codec
+        let mut value_fields: Vec<Field> = codec
             .value_fields()
             .into_iter()
             .map(|(name, data_type)| Field::new(name, data_type, true))
             .collect();
+        if core.config.ttl_ms > 0 {
+            value_fields.push(Field::new(TS_COLUMN, DataType::Int64, true));
+        }
         Ok(PaimonMapStore {
             core,
             codec,
             value_fields,
+            now_ms: 0,
             working: ahash::HashMap::default(),
             footprint: 0,
         })
@@ -255,10 +274,23 @@ impl<C: PaimonMapCodec> PaimonMapStore<C> {
             })?;
             builder = builder.column(name, paimon_type);
         }
+        if config.ttl_ms > 0 {
+            builder = builder.column(TS_COLUMN, PaimonType::BigInt(BigIntType::new()));
+        }
         builder
             .primary_key([KG_COLUMN, KEY_COLUMN, SUB_KEY_COLUMN])
             .build()
             .map_err(pe)
+    }
+
+    /// Sets the host's wall clock for this ingest call (Flink's `TtlTimeProvider` reading);
+    /// hydration reads it to expire committed entries, the clip to stamp migrated ones.
+    pub(crate) fn set_clock(&mut self, now_ms: i64) {
+        self.now_ms = now_ms;
+    }
+
+    fn ttl(&self) -> crate::state::StateTtl {
+        crate::state::StateTtl::new(self.core.config.ttl_ms, self.now_ms)
     }
 
     /// The Arrow schema of persisted rows (also the write-batch schema, which additionally
@@ -275,7 +307,10 @@ impl<C: PaimonMapCodec> PaimonMapStore<C> {
 
     /// Reads the missed keys from the committed table. Entries are collected across ALL probe
     /// batches before assembly — the merge reader may split one key's rows across batch
-    /// boundaries.
+    /// boundaries. With TTL on this is where the persistent backend expires, per entry: a
+    /// committed entry past its retention is dropped from the live map (read as never seen) but
+    /// kept in the flush base, so the next barrier's per-entry diff commits its tombstone
+    /// (delete-on-read); live entries decode and carry their persisted last-write timestamp.
     fn fetch_missing(&mut self, misses: Vec<ByteKey>) -> Result<(), DataFusionError> {
         let batches = self.core.scan_keys(&misses)?;
         let mut collected: ahash::HashMap<ByteKey, Vec<Vec<ScalarValue>>> =
@@ -307,21 +342,38 @@ impl<C: PaimonMapCodec> PaimonMapStore<C> {
                 collected.entry(ByteKey::from(key)).or_default().push(scalars);
             }
         }
+        let ttl = self.ttl();
         let mut added_bytes = 0usize;
         for (key, rows) in collected {
             let mut entries: ahash::HashMap<ByteKey, C::Entry> = ahash::HashMap::default();
-            for scalars in &rows {
-                let (row_bytes, entry) = self.codec.decode(scalars);
+            let mut persisted: ahash::HashMap<ByteKey, C::Entry> = ahash::HashMap::default();
+            let mut expired_any = false;
+            for mut scalars in rows {
+                // A NULL ts is defensive (no live entry is written without one): it decodes as a
+                // fresh write rather than expiring the entry.
+                let ts_ms = ttl.enabled().then(|| match scalars.pop() {
+                    Some(ScalarValue::Int64(Some(ts))) => ts,
+                    _ => self.now_ms,
+                });
+                let (row_bytes, mut entry) = self.codec.decode(&scalars);
+                if let Some(ts) = ts_ms {
+                    self.codec.stamp_write_ms(&mut entry, ts);
+                }
+                if ts_ms.is_some_and(|ts| ttl.expired(ts)) {
+                    expired_any = true;
+                    persisted.insert(row_bytes, entry);
+                    continue;
+                }
                 added_bytes += self.codec.entry_bytes(&row_bytes.0, &entry);
+                // The image shares the live map's key Arcs; only the entry copies are new.
+                persisted.insert(row_bytes.clone(), entry.clone());
                 entries.insert(row_bytes, entry);
             }
-            // The image shares the live map's key Arcs; only the entry copies are new.
-            let persisted = entries.clone();
             added_bytes += persisted.len() * Self::IMAGE_ENTRY_BYTES;
             added_bytes += byte_key_bytes(&key.0) + Self::SLOT_OVERHEAD;
             self.working.insert(
                 key,
-                MapSlot::Present { entries, dirty: false, persisted },
+                MapSlot::Present { entries, dirty: expired_any, persisted },
             );
         }
         for key in misses {
@@ -346,6 +398,7 @@ impl<C: PaimonMapCodec> PaimonMapStore<C> {
         let mut subs: Vec<Vec<u8>> = Vec::new();
         let mut values: Vec<Vec<ScalarValue>> = vec![Vec::new(); num_value];
         let mut kinds: Vec<i8> = Vec::new();
+        let ttl_on = self.core.config.ttl_ms > 0;
         for (key, slot) in self.working.iter() {
             let (entries, persisted, dirty) = match slot {
                 MapSlot::Present { entries, persisted, dirty } => (Some(entries), persisted, *dirty),
@@ -366,6 +419,10 @@ impl<C: PaimonMapCodec> PaimonMapStore<C> {
                     for (column, scalar) in values.iter_mut().zip(self.codec.encode(&row.0, entry))
                     {
                         column.push(scalar);
+                    }
+                    if ttl_on {
+                        values[num_value - 1]
+                            .push(ScalarValue::Int64(Some(self.codec.write_ms(entry))));
                     }
                     kinds.push(0); // +I upsert — deduplicate keeps the latest by sequence
                 }

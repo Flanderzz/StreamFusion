@@ -56,6 +56,74 @@ class FlinkPaimonStateBackendSqlHarnessTest {
   }
 
   @Test
+  void joinWithTtlOnPaimonBackendMatchesHost() throws Exception {
+    // A TTL'd regular join no longer forces the memory fallback: each side's Paimon table
+    // carries per-entry last-write timestamps in its trailing ts column. 1h retention — nothing
+    // expires in-test; the native tests cover per-side expiry and tombstoning. This pins the
+    // end-to-end SQL result on the Paimon route.
+    Path input = Files.createTempDirectory("paimon-ttl-join-in");
+    writeInput(input);
+    NativeParity.assertChangelogParity(
+        () -> {
+          TableEnvironment tEnv = paimonEnvironment(input);
+          tEnv.getConfig().set("table.exec.state.ttl", "1 h");
+          return tEnv;
+        },
+        "SELECT a.k, a.v, b.v FROM t a JOIN t b ON a.k = b.k");
+  }
+
+  @Test
+  void topNWithTtlOnPaimonBackendMatchesHost() throws Exception {
+    // A TTL'd append-only Top-N stays on the Paimon list store: element timestamps round-trip
+    // through the ts column and the ranker's own first-touch prune enforces expiry (nothing
+    // expires under the 1h retention here; the native tests cover expiry after restore).
+    Path input = Files.createTempDirectory("paimon-ttl-topn-in");
+    writeInput(input);
+    NativeParity.assertChangelogParity(
+        () -> {
+          TableEnvironment tEnv = paimonEnvironment(input);
+          tEnv.getConfig().set("table.exec.state.ttl", "1 h");
+          return tEnv;
+        },
+        "SELECT k, v FROM (SELECT k, v, ROW_NUMBER() OVER (PARTITION BY k ORDER BY v DESC)"
+            + " AS rn FROM t) WHERE rn <= 2");
+  }
+
+  @Test
+  void retractingTopNWithTtlOnPaimonBackendMatchesHost() throws Exception {
+    // The retracting ranker's whole-buffer clock rides the head element's ts; with retention on
+    // both stateful operators here (aggregate + rank) keep their state in TTL'd Paimon tables.
+    Path input = Files.createTempDirectory("paimon-ttl-retopn-in");
+    writeInput(input);
+    NativeParity.assertChangelogParity(
+        () -> {
+          TableEnvironment tEnv = paimonEnvironment(input);
+          tEnv.getConfig().set("table.exec.state.ttl", "1 h");
+          return tEnv;
+        },
+        "SELECT k, total FROM (SELECT k, total, ROW_NUMBER() OVER (ORDER BY total DESC) AS rn"
+            + " FROM (SELECT k, SUM(v) AS total FROM t GROUP BY k)) WHERE rn <= 2");
+  }
+
+  @Test
+  void updateFastTopNWithTtlStaysOnMemoryStateUnderPaimonBackend() throws Exception {
+    // The update-fast ranker (monotonic COUNT(*) DESC over a unique-keyed changelog) has no
+    // Paimon shape: its operator resolves no Paimon support regardless of TTL, so under the
+    // Paimon backend its state is memory-backed while the upstream aggregate keeps a TTL'd
+    // Paimon table — the mixed-route job must still match the host.
+    Path input = Files.createTempDirectory("paimon-ttl-upfast-in");
+    writeInput(input);
+    NativeParity.assertChangelogParity(
+        () -> {
+          TableEnvironment tEnv = paimonEnvironment(input);
+          tEnv.getConfig().set("table.exec.state.ttl", "1 h");
+          return tEnv;
+        },
+        "SELECT k, c FROM (SELECT k, c, ROW_NUMBER() OVER (ORDER BY c DESC) AS rn"
+            + " FROM (SELECT k, COUNT(*) AS c FROM t GROUP BY k)) WHERE rn <= 2");
+  }
+
+  @Test
   void proctimeDeduplicationOnPaimonBackendMatchesHost() throws Exception {
     Path input = Files.createTempDirectory("paimon-dedup-in");
     writeInput(input);

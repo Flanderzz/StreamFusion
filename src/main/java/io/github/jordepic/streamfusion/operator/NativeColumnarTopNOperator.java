@@ -93,14 +93,18 @@ public class NativeColumnarTopNOperator extends AbstractNativeStatefulOperator<A
     if (updateFast()) {
       return null;
     }
-    // The Paimon shape does not carry per-row TTL timestamps yet; a TTL'd Top-N keeps the memory
-    // route (the standard fallback for an unsupported shape) until the store gains them.
+    // The support's retention is the compactor's per-row physical-cleanup bound. It is only
+    // meaningful where every persisted row's ts is individually truthful — the append-only
+    // ranker's per-element clocks. The retracting ranker expires the WHOLE buffer on the head
+    // element's clock and persists ts 0 on the tail rows, so per-row cleanup would drop live
+    // state; its table advertises no retention (the operator still expires logically).
+    long compactionTtlMillis = retracting ? 0 : stateTtlMillis;
     return resolvePaimon(
         rawStateRestored,
         () ->
-            stateTtlMillis == 0
-                && withRowSchema(rowType, address -> Native.paimonRowStateSupported(address) ? 1L : 0L)
-                    != 0);
+            withRowSchema(rowType, address -> Native.paimonRowStateSupported(address) ? 1L : 0L)
+                != 0,
+        compactionTtlMillis);
   }
 
   @Override
@@ -120,6 +124,8 @@ public class NativeColumnarTopNOperator extends AbstractNativeStatefulOperator<A
                 outputRankNumber,
                 retracting,
                 netDiff,
+                stateTtlMillis,
+                getProcessingTimeService().getCurrentProcessingTime(),
                 memoryBudgetBytes(),
                 paimon.tableDirectory(),
                 maxParallelism(),

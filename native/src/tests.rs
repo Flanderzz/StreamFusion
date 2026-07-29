@@ -6342,6 +6342,7 @@ mod paimon_state {
             &[(restored_dir, manifest.snapshot_id)],
             0..=127,
             true,
+            0,
         )
         .unwrap();
         let mut restored = TopNRanker::new(vec![0], vec![asc(1)], 2, false, false)
@@ -6384,6 +6385,235 @@ mod paimon_state {
             assert_same_output(&memory.push(batch, 0).unwrap(), &paimon.push(batch, 0).unwrap());
             // A checkpoint between every step forces every probe through the table.
             let link = temp_dir(&format!("retopn-parity-cp{i}"));
+            paimon.store_mut().checkpoint().unwrap();
+        }
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // State TTL on the LIST store: timestamps ride the trailing ts column VERBATIM — the store
+    // never expires at read (only the ranker knows its granularity: per element for append-only,
+    // whole buffer keyed on the head element for retracting) — and the ranker's own first-touch
+    // expiry runs identically over hydrated buffers.
+    // -----------------------------------------------------------------------------------------
+
+    /// The `paimon_topn` shape with a 1s idle-state retention.
+    fn paimon_topn_ttl(dir: &str) -> TopNRanker<PaimonTopNStore> {
+        let codec = topn_codec();
+        let converters = TopNConverters::from_codec(&codec, &[0]);
+        let store = PaimonTopNStore::create(ttl_config(dir, 1000), codec).unwrap();
+        TopNRanker::new(vec![0], vec![asc(1)], 2, false, false)
+            .with_state_ttl(1000)
+            .with_converters(converters)
+            .with_backend(store)
+    }
+
+    #[test]
+    fn paimon_topn_ttl_round_trips_and_prunes_on_first_touch_after_restore() {
+        let dir = temp_dir("topn-ttl-src");
+        let mut ranker = paimon_topn_ttl(&dir);
+        ranker.store_mut().set_clock(5000);
+        ranker.push(&join_batch(vec![1, 1], vec![10, 20], vec![0, 0]), 5000).unwrap();
+        let manifest = ranker.store_mut().checkpoint().unwrap();
+        let src = temp_dir("topn-ttl-mat");
+        materialize(&manifest, &dir, &src);
+
+        // An aligned TTL→TTL restore adopts the files wholesale, timestamps included; the
+        // ranker's lazy first-touch prune then enforces expiry over the hydrated buffer.
+        let restore = |dst: &str, now: i64| {
+            let codec = topn_codec();
+            let converters = TopNConverters::from_codec(&codec, &[0]);
+            let store = PaimonTopNStore::open_merged(
+                ttl_config(dst, 1000),
+                codec,
+                &[(src.clone(), manifest.snapshot_id)],
+                0..=127,
+                true,
+                now,
+            )
+            .unwrap();
+            let mut restored = TopNRanker::new(vec![0], vec![asc(1)], 2, false, false)
+                .with_state_ttl(1000)
+                .with_converters(converters)
+                .with_backend(store);
+            restored.store_mut().set_clock(now);
+            restored
+        };
+        let probe = join_batch(vec![1], vec![5], vec![9]);
+        // One ms inside the window: the hydrated rows are live, so the new best row evicts the
+        // hydrated rank-2 row — the persisted timestamps round-tripped exactly.
+        let mut ranker = restore(&temp_dir("topn-ttl-dst"), 5999);
+        let alive = ranker.push(&probe, 5999).unwrap();
+        assert_eq!(row_kinds(&alive), vec![3, 0]);
+        assert_eq!(values(&alive, 1), vec![20, 5], "-D must hit the hydrated rank-2 row");
+        // ts + ttl == now: the first touch prunes the whole hydrated buffer, so the new row is a
+        // bare insert (an un-pruned buffer would have evicted it as rank 3 and emitted nothing).
+        let dst = temp_dir("topn-ttl-dst");
+        let mut ranker = restore(&dst, 6000);
+        let expired = ranker.push(&probe, 6000).unwrap();
+        assert_eq!(row_kinds(&expired), vec![0]);
+        assert_eq!(values(&expired, 1), vec![5]);
+        // The prune reached the buffer through the store's mutable probe, so the touched slot is
+        // dirty: the barrier rewrites the one live row and tombstones the vacated positions — a
+        // reader whose clock predates the original expiry sees only the survivor.
+        let cp = ranker.store_mut().checkpoint().unwrap();
+        let mut store =
+            PaimonTopNStore::open(ttl_config(&dst, 1000), topn_codec(), cp.snapshot_id).unwrap();
+        store.set_clock(5000);
+        store.begin_batch(&probe, &[0], &[-1]).unwrap();
+        let key = {
+            let mut encoder = BinaryRowBatchEncoder::new(&probe, &[0], &[-1]);
+            ByteKey::from(encoder.encode(0))
+        };
+        let buffer = store.get(&key.0).expect("the surviving row hydrates");
+        assert_eq!(buffer.len(), 1, "the pruned rows must be tombstoned at the barrier");
+    }
+
+    #[test]
+    fn paimon_pre_ttl_list_table_gains_a_full_retention_on_restore() {
+        // A TTL-off list table (no ts column), the pre-TTL checkpoint of an enable-TTL migration.
+        let dir = temp_dir("topn-mig-src");
+        let mut ranker = paimon_topn(&dir);
+        ranker.push(&join_batch(vec![1, 1], vec![10, 20], vec![0, 0]), 0).unwrap();
+        let manifest = ranker.store_mut().checkpoint().unwrap();
+        let src = temp_dir("topn-mig-mat");
+        materialize(&manifest, &dir, &src);
+
+        // Aligned restore into a TTL'd store: the target schema gained ts, so the wholesale
+        // adoption declines and the name-mapped clip stamps every row with the restore time —
+        // the `ord` PK column maps by name like any other, so positions survive intact.
+        let probe_restored = |restore_ms: i64, probe_ms: i64| {
+            let codec = topn_codec();
+            let converters = TopNConverters::from_codec(&codec, &[0]);
+            let store = PaimonTopNStore::open_merged(
+                ttl_config(&temp_dir("topn-mig-dst"), 1000),
+                codec,
+                &[(src.clone(), manifest.snapshot_id)],
+                0..=127,
+                true,
+                restore_ms,
+            )
+            .unwrap();
+            let mut restored = TopNRanker::new(vec![0], vec![asc(1)], 2, false, false)
+                .with_state_ttl(1000)
+                .with_converters(converters)
+                .with_backend(store);
+            restored.store_mut().set_clock(probe_ms);
+            restored.push(&join_batch(vec![1], vec![5], vec![9]), probe_ms).unwrap()
+        };
+        let alive = probe_restored(5000, 5999);
+        assert_eq!(row_kinds(&alive), vec![3, 0], "migrated rows live on past the restore");
+        assert_eq!(values(&alive, 1), vec![20, 5]);
+        let expired = probe_restored(5000, 6000);
+        assert_eq!(row_kinds(&expired), vec![0], "the migration stamp expires a retention later");
+        assert_eq!(values(&expired, 1), vec![5]);
+    }
+
+    #[test]
+    fn paimon_topn_matches_memory_with_ttl() {
+        let dir = temp_dir("topn-ttl-parity");
+        let mut paimon = paimon_topn_ttl(&dir);
+        let mut memory =
+            TopNRanker::new(vec![0], vec![asc(1)], 2, false, false).with_state_ttl(1000);
+
+        // Writes at 1000/1500, then a push after partition 1's rows (ts 1000) and partition 2's
+        // older row (ts 1000) expired while its refreshed row (ts 1500) lives.
+        let batches: Vec<(RecordBatch, i64)> = vec![
+            (join_batch(vec![1, 1, 2], vec![30, 10, 5], vec![0, 0, 0]), 1000),
+            (join_batch(vec![2], vec![50], vec![0]), 1500),
+            (join_batch(vec![1, 2], vec![20, 1], vec![0, 0]), 2400),
+        ];
+        for (i, (batch, now)) in batches.iter().enumerate() {
+            paimon.store_mut().set_clock(*now);
+            let memory_out = memory.push(batch, *now).unwrap();
+            let paimon_out = paimon.push(batch, *now).unwrap();
+            assert_eq!(memory_out.num_rows(), paimon_out.num_rows(), "batch {i}");
+            if memory_out.num_rows() > 0 {
+                assert_same_output(&memory_out, &paimon_out);
+            }
+            let link = temp_dir(&format!("topn-ttl-parity-cp{i}"));
+            paimon.store_mut().checkpoint().unwrap();
+        }
+    }
+
+    /// `paimon_retract_topn` with a 1s idle-state retention.
+    fn paimon_retract_topn_ttl(dir: &str) -> RetractableTopNRanker<PaimonTopNStore> {
+        let codec = TopNStateCodec::new(vec![DataType::Int64, DataType::Int64], vec![asc(1)]);
+        let converters = TopNConverters::from_codec(&codec, &[0]);
+        let store = PaimonTopNStore::create(ttl_config(dir, 1000), codec).unwrap();
+        RetractableTopNRanker::new(vec![0], vec![asc(1)], 0, 2, true)
+            .with_state_ttl(1000)
+            .with_converters(converters)
+            .with_backend(store)
+    }
+
+    #[test]
+    fn paimon_retracting_topn_ttl_expires_the_whole_buffer_on_the_head_clock() {
+        let dir = temp_dir("retopn-ttl-src");
+        let mut ranker = paimon_retract_topn_ttl(&dir);
+        ranker.store_mut().set_clock(5000);
+        // Whole-buffer granularity: only the head row carries the live clock (5000); the tail
+        // rows keep ts 0, which per-element expiry would wrongly treat as long dead.
+        ranker
+            .push(&changelog_join_batch(vec![1, 1, 1], vec![10, 20, 30], vec![0, 0, 0]), 5000)
+            .unwrap();
+        let manifest = ranker.store_mut().checkpoint().unwrap();
+        let src = temp_dir("retopn-ttl-mat");
+        materialize(&manifest, &dir, &src);
+
+        let probe_restored = |now: i64| {
+            let codec = TopNStateCodec::new(vec![DataType::Int64, DataType::Int64], vec![asc(1)]);
+            let converters = TopNConverters::from_codec(&codec, &[0]);
+            let store = PaimonTopNStore::open_merged(
+                ttl_config(&temp_dir("retopn-ttl-dst"), 1000),
+                codec,
+                &[(src.clone(), manifest.snapshot_id)],
+                0..=127,
+                true,
+                now,
+            )
+            .unwrap();
+            let mut restored = RetractableTopNRanker::new(vec![0], vec![asc(1)], 0, 2, true)
+                .with_state_ttl(1000)
+                .with_converters(converters)
+                .with_backend(store);
+            restored.store_mut().set_clock(now);
+            restored.push(&changelog_join_batch(vec![1], vec![5], vec![0]), now).unwrap()
+        };
+        // Inside the head's window the WHOLE hydrated buffer is live — including the ts-0 tail
+        // rows — so the new best row shifts both displayed ranks.
+        let alive = probe_restored(5999);
+        assert_eq!(row_kinds(&alive), vec![1, 2, 1, 2]);
+        assert_eq!(values(&alive, 1), vec![10, 5, 20, 10]);
+        // head ts + ttl == now: the buffer expires as a unit and the new row seeds rank 1 alone.
+        let expired = probe_restored(6000);
+        assert_eq!(row_kinds(&expired), vec![0]);
+        assert_eq!(values(&expired, 1), vec![5]);
+    }
+
+    #[test]
+    fn paimon_retracting_topn_matches_memory_with_ttl() {
+        let dir = temp_dir("retopn-ttl-parity");
+        let mut paimon = paimon_retract_topn_ttl(&dir);
+        let mut memory =
+            RetractableTopNRanker::new(vec![0], vec![asc(1)], 0, 2, true).with_state_ttl(1000);
+
+        // Accumulations, a retraction landing after the buffer's head clock elapsed (a silent
+        // no-op on the expired buffer), and a re-seed.
+        let steps: Vec<(RecordBatch, i64)> = vec![
+            (changelog_join_batch(vec![1, 1, 1], vec![10, 20, 30], vec![0, 0, 0]), 1000),
+            (changelog_join_batch(vec![1], vec![5], vec![0]), 1500),
+            (changelog_join_batch(vec![1], vec![20], vec![3]), 2600),
+            (changelog_join_batch(vec![1], vec![7], vec![0]), 2700),
+        ];
+        for (i, (batch, now)) in steps.iter().enumerate() {
+            paimon.store_mut().set_clock(*now);
+            let memory_out = memory.push(batch, *now).unwrap();
+            let paimon_out = paimon.push(batch, *now).unwrap();
+            assert_eq!(memory_out.num_rows(), paimon_out.num_rows(), "step {i}");
+            if memory_out.num_rows() > 0 {
+                assert_same_output(&memory_out, &paimon_out);
+            }
+            let link = temp_dir(&format!("retopn-ttl-parity-cp{i}"));
             paimon.store_mut().checkpoint().unwrap();
         }
     }
@@ -6503,6 +6733,7 @@ mod paimon_state {
             &[(src_l, cp_l.snapshot_id)],
             0..=127,
             true,
+            0,
         )
         .unwrap();
         let right = PaimonJoinStore::open_merged(
@@ -6511,6 +6742,7 @@ mod paimon_state {
             &[(src_r, cp_r.snapshot_id)],
             0..=127,
             true,
+            0,
         )
         .unwrap();
         let mut restored = UpdatingJoiner::new(
@@ -6614,6 +6846,284 @@ mod paimon_state {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[&*row_a.0].count, 1);
         assert_eq!(entries[&*row_b.0].count, 2);
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // State TTL on the MAP store: each entry row carries its own last-write clock in the
+    // trailing ts column, expiry happens per entry at hydration (dropped from the live map, its
+    // tombstone committed by the next barrier's per-entry diff), and the join's two side tables
+    // each run under their OWN retention.
+    // -----------------------------------------------------------------------------------------
+
+    /// `paimon_joiner` (INNER k=k) with per-side idle-state retentions.
+    fn paimon_joiner_ttl(
+        dir: &str,
+        left_ttl: i64,
+        right_ttl: i64,
+    ) -> UpdatingJoiner<PaimonJoinStore> {
+        let left = PaimonJoinStore::create(
+            ttl_config(&format!("{dir}/left"), left_ttl),
+            JoinStateCodec::new(&kv_schema()),
+        )
+        .unwrap();
+        let right = PaimonJoinStore::create(
+            ttl_config(&format!("{dir}/right"), right_ttl),
+            JoinStateCodec::new(&kv_schema()),
+        )
+        .unwrap();
+        UpdatingJoiner::new(vec![0], vec![0], JoinKind::Inner, kv_schema(), kv_schema(), None)
+            .with_state_ttl(left_ttl, right_ttl)
+            .with_backend(left, right)
+    }
+
+    fn set_join_clocks(joiner: &mut UpdatingJoiner<PaimonJoinStore>, now: i64) {
+        let (left, right) = joiner.stores_mut();
+        left.set_clock(now);
+        right.set_clock(now);
+    }
+
+    #[test]
+    fn paimon_join_ttl_expires_per_side_on_hydration_and_tombstones() {
+        let dir = temp_dir("join-ttl-sides");
+        let mut joiner = paimon_joiner_ttl(&dir, 1000, 10000);
+        set_join_clocks(&mut joiner, 5000);
+        joiner.push(&changelog_join_batch(vec![1], vec![10], vec![0]), true, 5000).unwrap();
+        joiner.push(&changelog_join_batch(vec![1], vec![100], vec![0]), false, 5000).unwrap();
+        {
+            let (left, right) = joiner.stores_mut();
+            left.checkpoint().unwrap();
+            right.checkpoint().unwrap();
+        }
+
+        // Past the left retention only (one wall clock, per-side rules): the hydrated left entry
+        // expires — dropped from the live bucket, dirty-tombstoned — while the probe of the
+        // right side still finds its live entry.
+        set_join_clocks(&mut joiner, 6000);
+        let out =
+            joiner.push(&changelog_join_batch(vec![1], vec![11], vec![0]), true, 6000).unwrap();
+        assert_eq!(row_kinds(&out), vec![0], "the right row must still match");
+        assert_eq!(values(&out, 1), vec![11]);
+        let (left_cp, right_cp) = {
+            let (left, right) = joiner.stores_mut();
+            (left.checkpoint().unwrap(), right.checkpoint().unwrap())
+        };
+
+        // Reopen BEFORE the original expiry instant: the expired left entry must be gone because
+        // its tombstone committed, not because this reader's clock re-expired it — a right probe
+        // matches only the fresh left row.
+        let left = PaimonJoinStore::open(
+            ttl_config(&format!("{dir}/left"), 1000),
+            JoinStateCodec::new(&kv_schema()),
+            left_cp.snapshot_id,
+        )
+        .unwrap();
+        let right = PaimonJoinStore::open(
+            ttl_config(&format!("{dir}/right"), 10000),
+            JoinStateCodec::new(&kv_schema()),
+            right_cp.snapshot_id,
+        )
+        .unwrap();
+        let mut reopened =
+            UpdatingJoiner::new(vec![0], vec![0], JoinKind::Inner, kv_schema(), kv_schema(), None)
+                .with_state_ttl(1000, 10000)
+                .with_backend(left, right);
+        set_join_clocks(&mut reopened, 5500);
+        let out = reopened
+            .push(&changelog_join_batch(vec![1], vec![200], vec![0]), false, 5500)
+            .unwrap();
+        assert_eq!(row_kinds(&out), vec![0]);
+        assert_eq!(values(&out, 1), vec![11], "only the fresh left row survives the tombstone");
+    }
+
+    /// Per-entry hydration expiry, exercised directly on the store: of one bucket's two entries
+    /// only the one past its retention is dropped and tombstoned — the flush is exactly that one
+    /// -D, and the tombstone holds when reopened before the entry's original expiry instant.
+    #[test]
+    fn paimon_map_store_tombstones_exactly_the_expired_entries_on_hydration() {
+        let dir = temp_dir("map-ttl-hyd");
+        let codec = JoinStateCodec::new(&kv_schema());
+        let mut store =
+            PaimonJoinStore::create(ttl_config(&dir, 1000), JoinStateCodec::new(&kv_schema()))
+                .unwrap();
+        let probe = changelog_join_batch(vec![5], vec![0], vec![0]);
+        let key = {
+            let mut encoder = BinaryRowBatchEncoder::new(&probe, &[0], &[-1]);
+            ByteKey::from(encoder.encode(0))
+        };
+        let (row_a, mut meta_a) = kv_entry(&codec, 5, 10, 1, -1);
+        let (row_b, mut meta_b) = kv_entry(&codec, 5, 20, 1, -1);
+        meta_a.last_write_ms = 4500;
+        meta_b.last_write_ms = 5000;
+        store.set_clock(5000);
+        store.begin_batch(&probe, &[0], &[-1]).unwrap();
+        let mut bucket: JoinBucket = JoinBucket::default();
+        bucket.insert(row_a.clone(), meta_a);
+        bucket.insert(row_b.clone(), meta_b);
+        store.insert(key.clone(), bucket);
+        store.checkpoint().unwrap();
+
+        // At 5600, a expired (4500 + 1000 <= 5600) and b lives: hydration drops exactly a.
+        store.set_clock(5600);
+        store.begin_batch(&probe, &[0], &[-1]).unwrap();
+        let live = store.get(&key.0).expect("bucket hydrates");
+        assert_eq!(live.len(), 1, "the expired entry must read as absent");
+        assert_eq!(live[&*row_b.0].last_write_ms, 5000, "the live entry's ts round-trips");
+        let batch = store.dirty_batch().expect("the expiry leaves a dirty diff");
+        assert_eq!(batch.num_rows(), 1, "exactly the expired entry may flush");
+        let kinds = batch
+            .column(batch.num_columns() - 1)
+            .as_any()
+            .downcast_ref::<Int8Array>()
+            .unwrap();
+        assert_eq!(kinds.value(0), 3, "the expired entry flushes as a tombstone");
+        let manifest = store.checkpoint().unwrap();
+
+        // Reopen BEFORE a's original expiry instant: a stays gone because its tombstone
+        // committed, not because this reader's clock re-expired it.
+        let mut reopened = PaimonJoinStore::open(
+            ttl_config(&dir, 1000),
+            JoinStateCodec::new(&kv_schema()),
+            manifest.snapshot_id,
+        )
+        .unwrap();
+        reopened.set_clock(5400);
+        reopened.begin_batch(&probe, &[0], &[-1]).unwrap();
+        let entries = reopened.get(&key.0).expect("bucket hydrates");
+        assert_eq!(entries.len(), 1);
+        assert!(entries.contains_key(&*row_b.0), "only the live entry survives");
+    }
+
+    /// A ts-only refresh re-persists an otherwise-unchanged entry (RowMeta equality includes the
+    /// clock on purpose), so the refreshed retention survives the next hydration.
+    #[test]
+    fn paimon_map_store_repersists_a_ts_refresh() {
+        let dir = temp_dir("map-ts-refresh");
+        let codec = JoinStateCodec::new(&kv_schema());
+        let mut store =
+            PaimonJoinStore::create(ttl_config(&dir, 1000), JoinStateCodec::new(&kv_schema()))
+                .unwrap();
+        let probe = changelog_join_batch(vec![5], vec![0], vec![0]);
+        let key = {
+            let mut encoder = BinaryRowBatchEncoder::new(&probe, &[0], &[-1]);
+            ByteKey::from(encoder.encode(0))
+        };
+        let (row_a, mut meta_a) = kv_entry(&codec, 5, 10, 1, -1);
+        meta_a.last_write_ms = 5000;
+        store.set_clock(5000);
+        store.begin_batch(&probe, &[0], &[-1]).unwrap();
+        let mut bucket: JoinBucket = JoinBucket::default();
+        bucket.insert(row_a.clone(), meta_a);
+        store.insert(key.clone(), bucket);
+        store.checkpoint().unwrap();
+
+        store.set_clock(5500);
+        store.begin_batch(&probe, &[0], &[-1]).unwrap();
+        store.get_mut(&key.0).unwrap().get_mut(&*row_a.0).unwrap().last_write_ms = 5500;
+        let batch = store.dirty_batch().expect("a ts-only refresh leaves a dirty diff");
+        assert_eq!(batch.num_rows(), 1, "the refreshed entry must re-persist");
+        store.checkpoint().unwrap();
+
+        // At 6200 the ORIGINAL stamp would have expired (5000 + 1000 <= 6200); the refreshed one
+        // (5500) hydrates live and reads back exactly.
+        store.set_clock(6200);
+        store.begin_batch(&probe, &[0], &[-1]).unwrap();
+        let entries = store.get(&key.0).expect("bucket hydrates");
+        assert_eq!(entries[&*row_a.0].last_write_ms, 5500);
+    }
+
+    #[test]
+    fn paimon_pre_ttl_join_tables_gain_a_full_retention_on_restore() {
+        // TTL-off side tables (no ts column), the pre-TTL checkpoint of an enable-TTL migration.
+        let dir = temp_dir("join-mig-src");
+        let mut joiner = paimon_joiner(&dir);
+        joiner.push(&changelog_join_batch(vec![1], vec![10], vec![0]), true, 0).unwrap();
+        joiner.push(&changelog_join_batch(vec![1], vec![100], vec![0]), false, 0).unwrap();
+        let (cp_l, cp_r) = {
+            let (left, right) = joiner.stores_mut();
+            (left.checkpoint().unwrap(), right.checkpoint().unwrap())
+        };
+        let (src_l, src_r) = (temp_dir("join-mig-matl"), temp_dir("join-mig-matr"));
+        materialize(&cp_l, &format!("{dir}/left"), &src_l);
+        materialize(&cp_r, &format!("{dir}/right"), &src_r);
+
+        // Aligned restore into TTL'd stores: the target schemas gained ts, so adoption declines
+        // and the name-mapped clip stamps every row with the restore time — the `r` PK column
+        // maps by name like any other.
+        let probe_restored = |restore_ms: i64, probe_ms: i64| {
+            let merged = temp_dir("join-mig-dst");
+            let left = PaimonJoinStore::open_merged(
+                ttl_config(&format!("{merged}/left"), 1000),
+                JoinStateCodec::new(&kv_schema()),
+                &[(src_l.clone(), cp_l.snapshot_id)],
+                0..=127,
+                true,
+                restore_ms,
+            )
+            .unwrap();
+            let right = PaimonJoinStore::open_merged(
+                ttl_config(&format!("{merged}/right"), 1000),
+                JoinStateCodec::new(&kv_schema()),
+                &[(src_r.clone(), cp_r.snapshot_id)],
+                0..=127,
+                true,
+                restore_ms,
+            )
+            .unwrap();
+            let mut restored = UpdatingJoiner::new(
+                vec![0],
+                vec![0],
+                JoinKind::LeftOuter,
+                kv_schema(),
+                kv_schema(),
+                None,
+            )
+            .with_state_ttl(1000, 1000)
+            .with_backend(left, right);
+            set_join_clocks(&mut restored, probe_ms);
+            restored.push(&changelog_join_batch(vec![1], vec![11], vec![0]), true, probe_ms).unwrap()
+        };
+        // Inside the migrated window the restored right row still matches; a retention after the
+        // restore it hydrates expired, so the fresh left row null-pads instead.
+        let alive = probe_restored(5000, 5999);
+        assert_eq!(row_kinds(&alive), vec![0]);
+        let right_v = alive.column(3).as_any().downcast_ref::<Int64Array>().unwrap();
+        assert_eq!(right_v.value(0), 100, "the migrated right row lives on past the restore");
+        let expired = probe_restored(5000, 6000);
+        assert_eq!(row_kinds(&expired), vec![0]);
+        let right_v = expired.column(3).as_any().downcast_ref::<Int64Array>().unwrap();
+        assert!(right_v.is_null(0), "the migration stamp expires a retention later");
+    }
+
+    #[test]
+    fn paimon_join_matches_memory_with_ttl() {
+        let dir = temp_dir("join-ttl-parity");
+        let mut paimon = paimon_joiner_ttl(&dir, 1000, 1500);
+        let mut memory =
+            UpdatingJoiner::new(vec![0], vec![0], JoinKind::Inner, kv_schema(), kv_schema(), None)
+                .with_state_ttl(1000, 1500);
+
+        // Inserts on both sides, a probe landing after the left row expired but inside the right
+        // retention, a right retraction landing after its own side's expiry (a state no-op that
+        // still retracts the surviving matches), and a re-seed.
+        let steps: Vec<(RecordBatch, bool, i64)> = vec![
+            (changelog_join_batch(vec![1], vec![10], vec![0]), true, 1000),
+            (changelog_join_batch(vec![1], vec![100], vec![0]), false, 1200),
+            (changelog_join_batch(vec![1], vec![11], vec![0]), true, 2100),
+            (changelog_join_batch(vec![1], vec![100], vec![3]), false, 2800),
+            (changelog_join_batch(vec![1], vec![300], vec![0]), false, 2900),
+        ];
+        for (i, (batch, is_left, now)) in steps.iter().enumerate() {
+            set_join_clocks(&mut paimon, *now);
+            let memory_out = memory.push(batch, *is_left, *now).unwrap();
+            let paimon_out = paimon.push(batch, *is_left, *now).unwrap();
+            assert_eq!(memory_out.num_rows(), paimon_out.num_rows(), "step {i}");
+            if memory_out.num_rows() > 0 {
+                assert_same_output(&memory_out, &paimon_out);
+            }
+            let (left, right) = paimon.stores_mut();
+            left.checkpoint().unwrap();
+            right.checkpoint().unwrap();
+        }
     }
 
     fn dv_config(table_dir: &str) -> PaimonStoreConfig {

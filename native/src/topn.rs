@@ -288,7 +288,16 @@ impl crate::state::PaimonListCodec for TopNStateCodec {
             .expect("encode hydrated top-n payload")
             .row(0)
             .owned();
+        // The TTL timestamp rides the store's ts column via `stamp_write_ms`.
         TopNRow { sort: sort_key, payload: Arc::new(payload), ts_ms: 0 }
+    }
+
+    fn write_ms(&self, entry: &TopNRow) -> i64 {
+        entry.ts_ms
+    }
+
+    fn stamp_write_ms(&self, entry: &mut TopNRow, ts_ms: i64) {
+        entry.ts_ms = ts_ms;
     }
 
     fn entry_bytes(&self, entry: &TopNRow) -> usize {

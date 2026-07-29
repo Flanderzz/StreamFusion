@@ -103,15 +103,18 @@ public class NativeColumnarUpdatingJoinOperator
 
   @Override
   protected PaimonNativeStateSupport resolvePaimonState(boolean rawStateRestored) {
-    // The Paimon shape does not carry per-row TTL timestamps yet; a TTL'd join keeps the memory
-    // route (the standard fallback for an unsupported shape) until the store gains them.
+    // The support object exposes one retention for the compactor's physical cleanup, but the
+    // sides expire independently: a single bound is only safe when BOTH sides expire, and then
+    // only the larger one (dropping rows older than max(left, right) can never drop a live row
+    // on either side). With either side unbounded, no shared cleanup bound exists.
+    long compactionTtlMillis =
+        leftStateTtlMillis == 0 || rightStateTtlMillis == 0
+            ? 0
+            : Math.max(leftStateTtlMillis, rightStateTtlMillis);
     return resolvePaimon(
         rawStateRestored,
-        () ->
-            leftStateTtlMillis == 0
-                && rightStateTtlMillis == 0
-                && rowTypeSupported(leftType)
-                && rowTypeSupported(rightType));
+        () -> rowTypeSupported(leftType) && rowTypeSupported(rightType),
+        compactionTtlMillis);
   }
 
   /** Whether one side's row type is persistable, probed over a one-call FFI schema export. */
@@ -141,6 +144,9 @@ public class NativeColumnarUpdatingJoinOperator
                 predDoubles,
                 predStrings,
                 miniBatch,
+                leftStateTtlMillis,
+                rightStateTtlMillis,
+                getProcessingTimeService().getCurrentProcessingTime(),
                 memoryBudgetBytes(),
                 paimon.tableDirectory(),
                 maxParallelism(),

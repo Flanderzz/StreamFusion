@@ -896,6 +896,13 @@ enum PaimonTopNRanker {
 }
 
 impl PaimonTopNRanker {
+    fn set_clock(&mut self, now_ms: i64) {
+        match self {
+            PaimonTopNRanker::Append(r) => r.store_mut().set_clock(now_ms),
+            PaimonTopNRanker::Retract(r) => r.store_mut().set_clock(now_ms),
+        }
+    }
+
     fn push(&mut self, batch: &RecordBatch, now_ms: i64) -> Result<RecordBatch, DataFusionError> {
         match self {
             PaimonTopNRanker::Append(r) => r.push(batch, now_ms),
@@ -956,6 +963,8 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonT
     output_rank_number: jboolean,
     retracting: jboolean,
     net_diff: jboolean,
+    state_ttl_millis: jlong,
+    now_millis: jlong,
     memory_budget_bytes: jlong,
     table_directory: JString<'local>,
     max_parallelism: jint,
@@ -1005,20 +1014,21 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonT
             file_format: format,
             file_compression: compression,
             deletion_vectors: deletion_vectors_mode(),
-            ttl_ms: 0,
+            ttl_ms: state_ttl_millis.max(0),
         };
         let store = if source_dirs.is_empty() {
             PaimonTopNStore::create(config, codec)
         } else {
             let sources: Vec<(String, i64)> =
                 source_dirs.into_iter().zip(source_snapshots).collect();
-            PaimonTopNStore::open_merged(config, codec, &sources, key_group_start..=key_group_end, aligned != 0)
+            PaimonTopNStore::open_merged(config, codec, &sources, key_group_start..=key_group_end, aligned != 0, now_millis)
         };
         let ranker = store.and_then(|store| {
             if retracting != 0 {
                 RetractableTopNRanker::new(partitions, sort, offset, limit, output_rank_number != 0)
                     .with_key_timestamp_precisions(timestamp_precisions)
                     .with_net_diff(net_diff != 0)
+                    .with_state_ttl(state_ttl_millis)
                     .with_converters(converters)
                     .with_backend(store)
                     .with_read_through_budget(memory_budget_bytes)
@@ -1027,6 +1037,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonT
                 // The append-only ranker is the no-OFFSET path (offset always 0).
                 TopNRanker::new(partitions, sort, limit, output_rank_number != 0, net_diff != 0)
                     .with_key_timestamp_precisions(timestamp_precisions)
+                    .with_state_ttl(state_ttl_millis)
                     .with_converters(converters)
                     .with_backend(store)
                     .with_read_through_budget(memory_budget_bytes)
@@ -1050,9 +1061,8 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushPaimonTop
 ) {
     crate::bridge::jni_guard(env, move |mut env| {
         let ranker = unsafe { &mut *(handle as *mut PaimonTopNRanker) };
+        ranker.set_clock(now_millis);
         // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
-        // The Paimon rankers run TTL-free (the operator keeps a TTL'd Top-N on the memory route),
-        // so the clock is inert here — the ABI just stays the memory twin's.
         let result = {
             let batch = import_record_batch(in_array_address, in_schema_address);
             ranker.push(&batch, now_millis)
@@ -1187,6 +1197,9 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonU
     pred_doubles: JDoubleArray<'local>,
     pred_strings: JObjectArray<'local>,
     mini_batch: jboolean,
+    left_state_ttl_millis: jlong,
+    right_state_ttl_millis: jlong,
+    now_millis: jlong,
     memory_budget_bytes: jlong,
     table_directory: JString<'local>,
     max_parallelism: jint,
@@ -1230,17 +1243,19 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonU
             .collect();
 
         // One table per side under the operator's state directory; each side restores independently
-        // from whichever sources ever committed it.
-        let side_config = |side: &str| PaimonStoreConfig {
+        // from whichever sources ever committed it. Each side's table carries its OWN retention
+        // (the STATE_TTL hint sets the sides independently), so per-entry expiry at hydration
+        // runs under that side's clock rule.
+        let side_config = |side: &str, ttl_ms: jlong| PaimonStoreConfig {
             table_dir: format!("{table_dir}/{side}"),
             max_parallelism: max_parallelism as usize,
             buckets: buckets as usize,
             file_format: format.clone(),
             file_compression: compression.clone(),
             deletion_vectors: deletion_vectors_mode(),
-            ttl_ms: 0,
+            ttl_ms: ttl_ms.max(0),
         };
-        let side_store = |side: &str, schema: &SchemaRef, pick: fn(&str) -> i64| {
+        let side_store = |side: &str, schema: &SchemaRef, ttl_ms: jlong, pick: fn(&str) -> i64| {
             let codec = JoinStateCodec::new(schema);
             let sources: Vec<(String, i64)> = source_dirs
                 .iter()
@@ -1251,19 +1266,22 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonU
                 })
                 .collect();
             if sources.is_empty() {
-                PaimonJoinStore::create(side_config(side), codec)
+                PaimonJoinStore::create(side_config(side, ttl_ms), codec)
             } else {
                 PaimonJoinStore::open_merged(
-                    side_config(side),
+                    side_config(side, ttl_ms),
                     codec,
                     &sources,
                     key_group_start..=key_group_end,
                     aligned != 0,
+                    now_millis,
                 )
             }
         };
-        let left_store = side_store("left", &left_schema, |t| parse_join_token(t).0);
-        let right_store = side_store("right", &right_schema, |t| parse_join_token(t).1);
+        let left_store =
+            side_store("left", &left_schema, left_state_ttl_millis, |t| parse_join_token(t).0);
+        let right_store =
+            side_store("right", &right_schema, right_state_ttl_millis, |t| parse_join_token(t).1);
         let joiner = left_store.and_then(|left_store| {
             let right_store = right_store?;
             UpdatingJoiner::new(
@@ -1276,6 +1294,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonU
             )
             .with_mini_batch(mini_batch != 0)
             .with_key_timestamp_precisions(timestamp_precisions)
+            .with_state_ttl(left_state_ttl_millis, right_state_ttl_millis)
             .with_backend(left_store, right_store)
             .with_read_through_budget(memory_budget_bytes)
         });
@@ -1298,6 +1317,11 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushLeftPaimo
 ) {
     crate::bridge::jni_guard(env, move |mut env| {
         let joiner = unsafe { &mut *(handle as *mut PaimonUpdatingJoiner) };
+        // A push hydrates BOTH sides (the input folds into its store, the probe reads the other),
+        // so both stores take this call's clock.
+        let (left_store, right_store) = joiner.stores_mut();
+        left_store.set_clock(now_millis);
+        right_store.set_clock(now_millis);
         // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
         let result = {
             let batch = import_record_batch(in_array_address, in_schema_address);
@@ -1325,6 +1349,10 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushRightPaim
 ) {
     crate::bridge::jni_guard(env, move |mut env| {
         let joiner = unsafe { &mut *(handle as *mut PaimonUpdatingJoiner) };
+        // See pushLeftPaimonUpdatingJoiner: both stores take this call's clock.
+        let (left_store, right_store) = joiner.stores_mut();
+        left_store.set_clock(now_millis);
+        right_store.set_clock(now_millis);
         // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
         let result = {
             let batch = import_record_batch(in_array_address, in_schema_address);

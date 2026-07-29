@@ -1767,13 +1767,19 @@ impl crate::state::PaimonMapCodec for JoinStateCodec {
             ScalarValue::Int32(Some(v)) => *v,
             _ => -1,
         };
-        // The persisted shape carries no TTL timestamps yet; a TTL'd join keeps the memory route
-        // (the Java operator gates Paimon off under TTL), so hydrated entries stamp 0 like every
-        // TTL-off write and the per-entry flush diff stays exact.
+        // The TTL timestamp rides the store's ts column via `stamp_write_ms`.
         (
             ByteKey::from(rows.row(0).data()),
             RowMeta { count, num_assoc, last_write_ms: 0 },
         )
+    }
+
+    fn write_ms(&self, entry: &RowMeta) -> i64 {
+        entry.last_write_ms
+    }
+
+    fn stamp_write_ms(&self, entry: &mut RowMeta, ts_ms: i64) {
+        entry.last_write_ms = ts_ms;
     }
 
     fn entry_bytes(&self, row: &[u8], _entry: &RowMeta) -> usize {

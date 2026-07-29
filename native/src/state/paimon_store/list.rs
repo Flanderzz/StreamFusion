@@ -24,6 +24,19 @@ pub(crate) trait PaimonListCodec {
 
     /// One element's accounted heap footprint.
     fn entry_bytes(&self, entry: &Self::Entry) -> usize;
+
+    /// The element's TTL timestamp (state TTL); consulted only when the store carries the ts
+    /// column. Unlike the single-value and map shapes the list store never expires at read: only
+    /// the operator knows its expiry granularity (per element for the append-only Top-N, the
+    /// whole buffer keyed on the head element for the retracting one), so the store's job is to
+    /// persist and restore each element's timestamp faithfully and let the operator's own
+    /// first-touch expiry run identically over hydrated buffers.
+    fn write_ms(&self, _entry: &Self::Entry) -> i64 {
+        0
+    }
+
+    /// Stamps a decoded element with its persisted TTL timestamp.
+    fn stamp_write_ms(&self, _entry: &mut Self::Entry, _ts_ms: i64) {}
 }
 
 enum ListSlot<E> {
@@ -46,8 +59,13 @@ impl<E> ListSlot<E> {
 pub(crate) struct PaimonListStore<C: PaimonListCodec> {
     core: PaimonTableCore,
     codec: C,
-    /// The codec's element columns as Arrow fields, in persisted order after `kg`/`k`/`ord`.
+    /// The element columns as Arrow fields, in persisted order after `kg`/`k`/`ord`: the codec's
+    /// fields plus (with TTL on) the store-managed trailing `ts` column (see the single-value
+    /// store).
     value_fields: Vec<Field>,
+    /// The host's wall clock, set before every ingest call; only read when TTL is on (the
+    /// defensive NULL-ts decode and the clip's migration stamp — expiry is the operator's).
+    now_ms: i64,
     working: ahash::HashMap<ByteKey, ListSlot<C::Entry>>,
     footprint: isize,
 }
@@ -169,15 +187,22 @@ impl<C: PaimonListCodec> PaimonListStore<C> {
     }
 
     /// Builds a fresh table at `config.table_dir` from one or more restored table directories
-    /// (rescale); see `PaimonTableCore::adopt_buckets`.
+    /// (rescale); see `PaimonTableCore::adopt_buckets`. `now_ms` is the host's wall clock at
+    /// restore, the stamp of the enable-TTL migration (see `clip_from_sources`). The clip's TTL
+    /// ruleset stamps but never expires: shedding individual elements at restore would be wrong
+    /// for the retracting ranker's whole-buffer granularity (only the head element carries the
+    /// live clock), so restored elements always survive and the operator's first-touch expiry
+    /// settles them.
     pub(crate) fn open_merged(
         config: PaimonStoreConfig,
         codec: C,
         sources: &[(String, i64)],
         key_groups: std::ops::RangeInclusive<i32>,
         aligned: bool,
+        now_ms: i64,
     ) -> Result<Self, DataFusionError> {
         let mut store = Self::create(config, codec)?;
+        store.now_ms = now_ms;
         if aligned && sources.len() == 1 {
             let (source_dir, snapshot_id) = &sources[0];
             if store.core.adopt_all(source_dir, *snapshot_id)? {
@@ -185,7 +210,12 @@ impl<C: PaimonListCodec> PaimonListStore<C> {
             }
         }
         let write_fields = store.arrow_fields();
-        store.core.clip_from_sources(sources, key_groups, &write_fields, crate::state::StateTtl::disabled())?;
+        store.core.clip_from_sources(
+            sources,
+            key_groups,
+            &write_fields,
+            crate::state::StateTtl::new(0, now_ms),
+        )?;
         Ok(store)
     }
 
@@ -195,15 +225,19 @@ impl<C: PaimonListCodec> PaimonListStore<C> {
                 "state shape not supported by the paimon state backend".into(),
             ));
         }
-        let value_fields: Vec<Field> = codec
+        let mut value_fields: Vec<Field> = codec
             .value_fields()
             .into_iter()
             .map(|(name, data_type)| Field::new(name, data_type, true))
             .collect();
+        if core.config.ttl_ms > 0 {
+            value_fields.push(Field::new(TS_COLUMN, DataType::Int64, true));
+        }
         Ok(PaimonListStore {
             core,
             codec,
             value_fields,
+            now_ms: 0,
             working: ahash::HashMap::default(),
             footprint: 0,
         })
@@ -223,10 +257,19 @@ impl<C: PaimonListCodec> PaimonListStore<C> {
             })?;
             builder = builder.column(name, paimon_type);
         }
+        if config.ttl_ms > 0 {
+            builder = builder.column(TS_COLUMN, PaimonType::BigInt(BigIntType::new()));
+        }
         builder
             .primary_key([KG_COLUMN, KEY_COLUMN, ORD_COLUMN])
             .build()
             .map_err(pe)
+    }
+
+    /// Sets the host's wall clock for this ingest call (Flink's `TtlTimeProvider` reading); see
+    /// `now_ms` for the narrow role it plays here.
+    pub(crate) fn set_clock(&mut self, now_ms: i64) {
+        self.now_ms = now_ms;
     }
 
     /// The Arrow schema of persisted rows (also the write-batch schema, which additionally
@@ -283,12 +326,27 @@ impl<C: PaimonListCodec> PaimonListStore<C> {
                     .push((ords.value(row), scalars));
             }
         }
+        let ttl_on = self.core.config.ttl_ms > 0;
         let mut added_bytes = 0usize;
         for (key, mut rows) in collected {
             rows.sort_by_key(|(ord, _)| *ord);
             let persisted_len = rows.last().map_or(0, |(ord, _)| *ord as usize + 1);
-            let entries: Vec<C::Entry> =
-                rows.iter().map(|(_, scalars)| self.codec.decode(scalars)).collect();
+            // Timestamps decode verbatim (a NULL ts is defensive and reads as a fresh write);
+            // expiring them is the operator's job — see `PaimonListCodec::write_ms`.
+            let entries: Vec<C::Entry> = rows
+                .into_iter()
+                .map(|(_, mut scalars)| {
+                    let ts_ms = ttl_on.then(|| match scalars.pop() {
+                        Some(ScalarValue::Int64(Some(ts))) => ts,
+                        _ => self.now_ms,
+                    });
+                    let mut entry = self.codec.decode(&scalars);
+                    if let Some(ts) = ts_ms {
+                        self.codec.stamp_write_ms(&mut entry, ts);
+                    }
+                    entry
+                })
+                .collect();
             added_bytes += byte_key_bytes(&key.0)
                 + entries.iter().map(|e| self.codec.entry_bytes(e)).sum::<usize>()
                 + Self::SLOT_OVERHEAD;
@@ -318,6 +376,7 @@ impl<C: PaimonListCodec> PaimonListStore<C> {
         let mut ords: Vec<i64> = Vec::new();
         let mut values: Vec<Vec<ScalarValue>> = vec![Vec::new(); num_value];
         let mut kinds: Vec<i8> = Vec::new();
+        let ttl_on = self.core.config.ttl_ms > 0;
         for (key, slot) in self.working.iter() {
             let (entries, persisted_len): (&[C::Entry], usize) = match slot {
                 ListSlot::Present { entries, dirty: true, persisted_len } => {
@@ -333,6 +392,10 @@ impl<C: PaimonListCodec> PaimonListStore<C> {
                 ords.push(i as i64);
                 for (column, scalar) in values.iter_mut().zip(self.codec.encode(entry)) {
                     column.push(scalar);
+                }
+                if ttl_on {
+                    values[num_value - 1]
+                        .push(ScalarValue::Int64(Some(self.codec.write_ms(entry))));
                 }
                 kinds.push(0); // +I upsert — deduplicate keeps the latest by sequence
             }
