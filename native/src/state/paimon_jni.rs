@@ -754,6 +754,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushPaimonCha
     handle: jlong,
     in_array_address: jlong,
     in_schema_address: jlong,
+    now_millis: jlong,
     out_array_address: jlong,
     out_schema_address: jlong,
 ) {
@@ -762,7 +763,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushPaimonCha
         // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
         let result = {
             let batch = import_record_batch(in_array_address, in_schema_address);
-            normalizer.push(&batch)
+            normalizer.push(&batch, now_millis)
         };
         match result {
             Ok(out) => export_record_batch(out, out_array_address, out_schema_address),

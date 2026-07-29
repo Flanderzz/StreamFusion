@@ -1521,6 +1521,7 @@ public final class Native {
       long handle,
       long inArrayAddress,
       long inSchemaAddress,
+      long nowMillis,
       long outArrayAddress,
       long outSchemaAddress);
 
@@ -1677,6 +1678,9 @@ public final class Native {
    *
    * @param keyColumns unique-key column indices in the input batch
    * @param generateUpdateBefore whether to emit an UPDATE_BEFORE row before each UPDATE_AFTER
+   * @param stateTtlMillis idle-state retention ({@code table.exec.state.ttl}); {@code 0} disables
+   *     expiry. A key expires {@code stateTtlMillis} after its last write and then reads as absent,
+   *     and the unchanged-row suppression is disabled — Flink's TTL'd emission
    * @param memoryBudgetBytes managed-memory budget (see {@link #createTumblingAggregator})
    */
   public static native long createChangelogNormalizer(
@@ -1684,14 +1688,21 @@ public final class Native {
       int[] keyTimestampPrecisions,
       boolean generateUpdateBefore,
       boolean miniBatch,
+      long stateTtlMillis,
       long memoryBudgetBytes);
 
   /**
    * Folds an input changelog batch into per-key keep-last state, exporting the normalized changelog
    * (the input columns then the {@code $row_kind$} byte column) into the consumer-allocated C structs.
+   * {@code nowMillis} is the operator's processing-time reading — the state-TTL clock.
    */
   public static native void pushChangelogNormalizer(
-      long handle, long inArrayAddress, long inSchemaAddress, long outArrayAddress, long outSchemaAddress);
+      long handle,
+      long inArrayAddress,
+      long inSchemaAddress,
+      long nowMillis,
+      long outArrayAddress,
+      long outSchemaAddress);
 
   /** Finalizes the current logical mini-batch into one normalized changelog per touched key. */
   public static native void flushChangelogNormalizer(
@@ -1700,12 +1711,18 @@ public final class Native {
   /** Serializes a changelog normalizer's per-key state for a checkpoint. */
   public static native byte[] snapshotChangelogNormalizer(long handle);
 
-  /** Rebuilds a changelog normalizer from a snapshot and returns a fresh handle. */
+  /**
+   * Rebuilds a changelog normalizer from a snapshot and returns a fresh handle. {@code nowMillis}
+   * stamps keys restored from a snapshot that carries no TTL timestamps (a pre-TTL writer),
+   * granting them a full retention from the restore — Flink's enable-TTL migration.
+   */
   public static native long restoreChangelogNormalizer(
       int[] keyColumns,
       int[] keyTimestampPrecisions,
       boolean generateUpdateBefore,
       boolean miniBatch,
+      long stateTtlMillis,
+      long nowMillis,
       byte[] snapshot,
       long memoryBudgetBytes);
 
@@ -1719,6 +1736,8 @@ public final class Native {
       int[] keyTimestampPrecisions,
       boolean generateUpdateBefore,
       boolean miniBatch,
+      long stateTtlMillis,
+      long nowMillis,
       byte[][] snapshots,
       long memoryBudgetBytes);
 

@@ -131,9 +131,12 @@ where
 
     /// Finalizes every touched key against its current durable value. `final_value` is called for
     /// cancelled keys too, allowing an operator to clear an embedded dirty marker without scanning
-    /// all durable state.
+    /// all durable state. `suppress_unchanged` drops an Update whose before equals its after — the
+    /// no-change gate operators disable under state TTL, where Flink always re-emits -U/+U (a
+    /// cancelled key stays silent either way).
     pub(crate) fn drain_final(
         &mut self,
+        suppress_unchanged: bool,
         mut final_value: impl FnMut(&K) -> Option<R>,
     ) -> Vec<(K, MiniBatchChange<R>)> {
         let order = std::mem::take(&mut self.order);
@@ -143,7 +146,7 @@ where
             .filter_map(|key| {
                 let (before, _) = changes.remove(&key)?;
                 let after = final_value(&key);
-                if before == after {
+                if suppress_unchanged && before == after {
                     return None;
                 }
                 MiniBatchChange::from_endpoints(before, after).map(|change| (key, change))
@@ -244,12 +247,27 @@ mod tests {
         changes.touch("a", Some(2));
         changes.touch("b", None);
         assert_eq!(
-            changes.drain_final(|key| match *key {
+            changes.drain_final(true, |key| match *key {
                 "a" => Some(3),
                 "b" => None,
                 _ => unreachable!(),
             }),
             vec![("a", update(1, 3))]
+        );
+    }
+
+    #[test]
+    fn drain_final_can_emit_unchanged_transitions_but_never_cancelled_keys() {
+        let mut changes = MiniBatchChanges::default();
+        changes.touch("unchanged", Some(1));
+        changes.touch("cancelled", None);
+        assert_eq!(
+            changes.drain_final(false, |key| match *key {
+                "unchanged" => Some(1),
+                "cancelled" => None,
+                _ => unreachable!(),
+            }),
+            vec![("unchanged", update(1, 1))]
         );
     }
 }

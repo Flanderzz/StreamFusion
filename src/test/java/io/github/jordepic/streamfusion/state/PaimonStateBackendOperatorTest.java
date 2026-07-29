@@ -545,7 +545,7 @@ class PaimonStateBackendOperatorTest {
       normalizerHarness() throws Exception {
     NativeColumnarChangelogNormalizeOperator operator =
         new NativeColumnarChangelogNormalizeOperator(
-            new int[] {0}, new int[] {-1}, INPUT, true, false, 0, MAX_PARALLELISM);
+            new int[] {0}, new int[] {-1}, INPUT, true, false, 0, 0, MAX_PARALLELISM);
     return new KeyedOneInputStreamOperatorTestHarness<>(
         operator, batch -> 0, Types.INT, MAX_PARALLELISM, 1, 0);
   }

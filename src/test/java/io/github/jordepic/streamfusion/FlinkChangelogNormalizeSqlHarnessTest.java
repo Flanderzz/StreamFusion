@@ -55,17 +55,18 @@ class FlinkChangelogNormalizeSqlHarnessTest {
   }
 
   @Test
-  void stateTtlFallsBackToHost() throws Exception {
-    // With a TTL set the host expires idle keys (an update becomes an insert) and stops suppressing
-    // unchanged rows — the native normalizer does not yet reproduce that.
-    NativeParity.assertFallbackReasonContains(
+  void stateTtlEmitsUnsuppressedUpdatesAndMatchesHost() throws Exception {
+    // With idle-state TTL on (1h — nothing expires in-test), Flink disables the unchanged-row
+    // suppression: the no-op update of key 2 produces an identical -U/+U pair the TTL-off run
+    // would swallow. The kinded compare is the only one that can see such a pair, so this pins
+    // the native TTL emission semantics change for change against the host.
+    NativeParity.assertKindedParity(
         () -> {
           TableEnvironment tEnv = environment();
           tEnv.getConfig().set("table.exec.state.ttl", "1 h");
           return tEnv;
         },
-        "SELECT f0, f1 FROM up",
-        "changelog normalize: idle-state TTL");
+        "SELECT f0, f1 FROM up");
   }
 
   private static TableEnvironment environment() {

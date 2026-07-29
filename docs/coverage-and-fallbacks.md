@@ -219,17 +219,18 @@ array`, is **not** here: Flink rejects it too, so we're at parity.)
 ### 2. Per-operator matcher declines (exact conditions)
 
 **Idle-state TTL** (`table.exec.state.ttl` ≠ 0): the non-windowed `GROUP BY` — single-phase and
-the two-phase global merge (the local half is transient, so TTL lives on the global) — runs it
-**natively**: Flink's exact StateTtlConfig semantics (last-write timestamps, expired-reads-as-
-absent with the fresh `+I` restart, retractions against expired state dropped, and the unchanged-
-update suppression disabled), with the `STATE_TTL` hint honored over the job-wide retention. Every
-other stateful operator still declines a nonzero retention: with a TTL the host expires idle keys
-and stops suppressing unchanged updates — semantics those native operators do not yet reproduce.
-For the temporal join and OVER the decline is permanent (Flink expires their state on per-key
-1.5×-retention cleanup timers, a coarser scheme than per-value TTL); for the rest it lifts as
-native TTL support lands. Window operators and the interval join are unaffected — Flink applies no
-idle-state TTL there. Under the Paimon state backend a TTL'd aggregate keeps the memory
-checkpoint route until the persistent shape carries timestamps.
+the two-phase global merge (the local half is transient, so TTL lives on the global) — and
+`ChangelogNormalize` run it **natively**: Flink's exact StateTtlConfig semantics (last-write
+timestamps, expired-reads-as-absent with the fresh `+I` restart, retractions and tombstones
+against expired state dropped, and the unchanged-update suppression disabled), with the
+`STATE_TTL` hint honored over the job-wide retention (aggregates only — Flink defines no such
+hint on normalize). Every other stateful operator still declines a nonzero retention: with a TTL
+the host expires idle keys and stops suppressing unchanged updates — semantics those native
+operators do not yet reproduce. For the temporal join and OVER the decline is permanent (Flink
+expires their state on per-key 1.5×-retention cleanup timers, a coarser scheme than per-value
+TTL); for the rest it lifts as native TTL support lands. Window operators and the interval join
+are unaffected — Flink applies no idle-state TTL there. Under the Paimon state backend a TTL'd
+operator keeps the memory checkpoint route until the persistent shape carries timestamps.
 
 - **OVER** — idle-state TTL ≠ 0 (permanent, above); a frame not of the form `… PRECEDING .. CURRENT ROW` (a `ROWS`/`RANGE` lower bound that
   is not a constant preceding offset); a bounded-RANGE frame over a proctime order (wall-clock
@@ -328,8 +329,8 @@ checkpoint route until the persistent shape carries timestamps.
 - **Union** — a row type the converter can't carry. (`UNION` distinct is not a fallback — the host
   rewrites it to a `GROUP BY`, which routes through the aggregate path.)
 - **Expand** — any project cell that isn't a column ref, a NULL literal, or the integer expand id.
-- **ChangelogNormalize** — idle-state TTL ≠ 0 (interim, above); a pushed filter condition; the
-  source-reuse variant; a row type the converter can't carry.
+- **ChangelogNormalize** — a pushed filter condition; the source-reuse variant; a row type the
+  converter can't carry. (Idle-state TTL is native here — see the note above.)
 - **Watermark assigner** — only substituted when its input is already a columnar producer (otherwise
   left on host to avoid a double transpose — a no-op, not a true fallback).
 

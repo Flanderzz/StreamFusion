@@ -67,6 +67,9 @@ public class NativeChangelogNormalizeExecNode extends ExecNodeBase<ArrowBatch>
             org.apache.flink.table.api.config.ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_ENABLED);
     long miniBatchSize =
         config.get(org.apache.flink.table.api.config.ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_SIZE);
+    // Flink supports no STATE_TTL hint on ChangelogNormalize, so the job-wide retention is the
+    // whole story.
+    long stateTtlMillis = config.getStateRetentionTime();
     OneInputTransformation<ArrowBatch, ArrowBatch> transformation =
         ExecNodeUtil.createOneInputTransformation(
             input,
@@ -78,6 +81,7 @@ public class NativeChangelogNormalizeExecNode extends ExecNodeBase<ArrowBatch>
                 generateUpdateBefore,
                 miniBatch,
                 miniBatchSize,
+                stateTtlMillis,
                 maxParallelism),
             ArrowBatchTypeInformation.INSTANCE,
             input.getParallelism(),

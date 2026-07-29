@@ -206,6 +206,92 @@ class NativeColumnarChangelogNormalizeOperatorTest {
     }
   }
 
+  @Test
+  void ttlExpiresAnIdleKeyIntoAFreshInsert() throws Exception {
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness =
+            ttlHarness(1000)) {
+      harness.setup(new ArrowBatchSerializer());
+      harness.open();
+      harness.setProcessingTime(5000);
+      harness.processElement(new StreamRecord<>(batch(allocator, row(RowKind.INSERT, 1L, 10L))));
+      assertEquals(List.of(List.of("+I", 1L, 10L)), collect(harness));
+      // ts 5000 + ttl 1000 <= 6000: expired exactly at the boundary — a fresh +I, not -U/+U.
+      harness.setProcessingTime(6000);
+      harness.processElement(
+          new StreamRecord<>(batch(allocator, row(RowKind.UPDATE_AFTER, 1L, 20L))));
+      assertEquals(List.of(List.of("+I", 1L, 20L)), collect(harness));
+    }
+  }
+
+  @Test
+  void ttlRefreshesOnEveryWrite() throws Exception {
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness =
+            ttlHarness(1000)) {
+      harness.setup(new ArrowBatchSerializer());
+      harness.open();
+      harness.setProcessingTime(5000);
+      harness.processElement(new StreamRecord<>(batch(allocator, row(RowKind.INSERT, 1L, 10L))));
+      collect(harness);
+      harness.setProcessingTime(5900);
+      harness.processElement(
+          new StreamRecord<>(batch(allocator, row(RowKind.UPDATE_AFTER, 1L, 20L))));
+      collect(harness);
+      // The original write is long past its ttl, but the write at 5900 refreshed the key.
+      harness.setProcessingTime(6800);
+      harness.processElement(
+          new StreamRecord<>(batch(allocator, row(RowKind.UPDATE_AFTER, 1L, 30L))));
+      assertEquals(
+          List.of(List.of("-U", 1L, 20L), List.of("+U", 1L, 30L)), collect(harness));
+    }
+  }
+
+  @Test
+  void ttlTimestampsSurviveSnapshotRestore() throws Exception {
+    // Timestamps are absolute: expiry after a restore is timed from the original write, so a
+    // restore inside the retention keeps the key alive only until write-time + ttl.
+    OperatorSubtaskState snapshot;
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness =
+            ttlHarness(1000)) {
+      harness.setup(new ArrowBatchSerializer());
+      harness.open();
+      harness.setProcessingTime(5000);
+      harness.processElement(new StreamRecord<>(batch(allocator, row(RowKind.INSERT, 1L, 10L))));
+      snapshot = harness.snapshot(1L, 1L);
+      collect(harness);
+    }
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> restored =
+            ttlHarness(1000)) {
+      restored.setup(new ArrowBatchSerializer());
+      restored.initializeState(snapshot);
+      restored.open();
+      restored.setProcessingTime(5999);
+      restored.processElement(
+          new StreamRecord<>(batch(allocator, row(RowKind.UPDATE_AFTER, 1L, 20L))));
+      assertEquals(
+          List.of(List.of("-U", 1L, 10L), List.of("+U", 1L, 20L)), collect(restored));
+    }
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> restored =
+            ttlHarness(1000)) {
+      restored.setup(new ArrowBatchSerializer());
+      restored.initializeState(snapshot);
+      restored.open();
+      restored.setProcessingTime(6000);
+      restored.processElement(
+          new StreamRecord<>(batch(allocator, row(RowKind.UPDATE_AFTER, 1L, 20L))));
+      assertEquals(List.of(List.of("+I", 1L, 20L)), collect(restored));
+    }
+  }
+
+  private static KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> ttlHarness(
+      long stateTtlMillis) throws Exception {
+    return harness(operator(true, false, 0, stateTtlMillis), 1, 0);
+  }
+
   private static GenericRowData row(RowKind kind, long f0, long f1) {
     GenericRowData row = new GenericRowData(2);
     row.setRowKind(kind);
@@ -239,6 +325,11 @@ class NativeColumnarChangelogNormalizeOperatorTest {
 
   private static NativeColumnarChangelogNormalizeOperator operator(
       boolean generateUpdateBefore, boolean miniBatch, long miniBatchSize) {
+    return operator(generateUpdateBefore, miniBatch, miniBatchSize, 0);
+  }
+
+  private static NativeColumnarChangelogNormalizeOperator operator(
+      boolean generateUpdateBefore, boolean miniBatch, long miniBatchSize, long stateTtlMillis) {
     return new NativeColumnarChangelogNormalizeOperator(
         new int[] {0},
         new int[] {-1},
@@ -246,6 +337,7 @@ class NativeColumnarChangelogNormalizeOperatorTest {
         generateUpdateBefore,
         miniBatch,
         miniBatchSize,
+        stateTtlMillis,
         MAX_PARALLELISM);
   }
 

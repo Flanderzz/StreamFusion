@@ -19,11 +19,6 @@ final class ChangelogNormalizeMatcher {
   private ChangelogNormalizeMatcher() {}
 
   static boolean matches(StreamPhysicalChangelogNormalize node) {
-    // With a TTL set the host expires idle keys (an update becomes an insert) and stops suppressing
-    // unchanged rows — semantics the native normalizer does not yet reproduce.
-    if (IdleStateRetention.isEnabled(node)) {
-      return false;
-    }
     if (node.filterCondition() != null) {
       return false; // a pushed filter condition is not yet reproduced
     }
@@ -43,10 +38,6 @@ final class ChangelogNormalizeMatcher {
   }
 
   static String unsupportedReason(StreamPhysicalChangelogNormalize node) {
-    if (IdleStateRetention.isEnabled(node)) {
-      return "changelog normalize: idle-state TTL (table.exec.state.ttl) runs on the host until the"
-          + " native operator expires state";
-    }
     if (node.filterCondition() != null) {
       return "changelog normalize: a pushed filter condition is not supported";
     }

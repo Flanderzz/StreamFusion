@@ -5064,8 +5064,8 @@ mod paimon_state {
             changelog_batch(vec![3, 1], vec![30, 12], vec![3, 3]),
         ];
         for (i, bundle) in bundles.iter().enumerate() {
-            paimon.push(bundle).unwrap();
-            memory.push(bundle).unwrap();
+            paimon.push(bundle, 0).unwrap();
+            memory.push(bundle, 0).unwrap();
             assert_same_output(
                 &memory.flush_mini_batch().unwrap(),
                 &paimon.flush_mini_batch().unwrap(),
@@ -5080,7 +5080,7 @@ mod paimon_state {
         let dir = temp_dir("norm-restore-src");
         let mut normalizer = paimon_normalizer(&dir);
         normalizer
-            .push(&changelog_batch(vec![1, 2], vec![10, 20], vec![0, 0]))
+            .push(&changelog_batch(vec![1, 2], vec![10, 20], vec![0, 0]), 0)
             .unwrap();
         let manifest = normalizer.store_mut().checkpoint().unwrap();
 
@@ -5100,14 +5100,14 @@ mod paimon_state {
         // The delete's tombstone may carry only the key: the emitted -D must be the STORED row,
         // which here can only come from hydration of the pre-restore table.
         let out = restored
-            .push(&changelog_batch(vec![1, 2], vec![11, 0], vec![2, 3]))
+            .push(&changelog_batch(vec![1, 2], vec![11, 0], vec![2, 3]), 0)
             .unwrap();
         assert_eq!(row_kinds(&out), vec![1, 2, 3]);
         assert_eq!(values(&out, 1), vec![10, 11, 20]);
         restored.store_mut().checkpoint().unwrap();
 
         // After the tombstone commits, the key probes as absent: a fresh row is +I.
-        let out = restored.push(&changelog_batch(vec![2], vec![9], vec![0])).unwrap();
+        let out = restored.push(&changelog_batch(vec![2], vec![9], vec![0]), 0).unwrap();
         assert_eq!(row_kinds(&out), vec![0]);
         assert_eq!(values(&out, 1), vec![9]);
     }

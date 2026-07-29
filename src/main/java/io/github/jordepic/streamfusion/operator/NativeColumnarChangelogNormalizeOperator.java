@@ -32,6 +32,7 @@ public class NativeColumnarChangelogNormalizeOperator
   private final boolean generateUpdateBefore;
   private final boolean miniBatch;
   private final long miniBatchSize;
+  private final long stateTtlMillis;
 
   private transient MiniBatchBoundary boundary;
   private transient MiniBatchMetrics miniBatchMetrics;
@@ -44,6 +45,7 @@ public class NativeColumnarChangelogNormalizeOperator
       boolean generateUpdateBefore,
       boolean miniBatch,
       long miniBatchSize,
+      long stateTtlMillis,
       int maxParallelism) {
     super("changelog normalize", keyTimestampPrecisions, maxParallelism);
     this.keyColumns = keyColumns;
@@ -51,13 +53,19 @@ public class NativeColumnarChangelogNormalizeOperator
     this.generateUpdateBefore = generateUpdateBefore;
     this.miniBatch = miniBatch;
     this.miniBatchSize = miniBatchSize;
+    this.stateTtlMillis = stateTtlMillis;
   }
 
   @Override
   protected PaimonNativeStateSupport resolvePaimonState(boolean rawStateRestored) {
+    // The Paimon shape does not carry per-key TTL timestamps yet; a TTL'd normalizer keeps the
+    // memory route (the standard fallback for an unsupported shape) until the store gains them.
     return resolvePaimon(
         rawStateRestored,
-        () -> withRowSchema(rowType, address -> Native.paimonRowStateSupported(address) ? 1L : 0L) != 0);
+        () ->
+            stateTtlMillis == 0
+                && withRowSchema(rowType, address -> Native.paimonRowStateSupported(address) ? 1L : 0L)
+                    != 0);
   }
 
   @Override
@@ -92,7 +100,12 @@ public class NativeColumnarChangelogNormalizeOperator
   @Override
   protected long createHandle() {
     return Native.createChangelogNormalizer(
-        keyColumns, keyTimestampPrecisions(), generateUpdateBefore, miniBatch, memoryBudgetBytes());
+        keyColumns,
+        keyTimestampPrecisions(),
+        generateUpdateBefore,
+        miniBatch,
+        stateTtlMillis,
+        memoryBudgetBytes());
   }
 
   @Override
@@ -102,6 +115,8 @@ public class NativeColumnarChangelogNormalizeOperator
         keyTimestampPrecisions(),
         generateUpdateBefore,
         miniBatch,
+        stateTtlMillis,
+        getProcessingTimeService().getCurrentProcessingTime(),
         snapshots,
         memoryBudgetBytes());
   }
@@ -201,11 +216,15 @@ public class NativeColumnarChangelogNormalizeOperator
         ArrowArray outArray = ArrowArray.allocateNew(allocator);
         ArrowSchema outSchema = ArrowSchema.allocateNew(allocator)) {
       Data.exportVectorSchemaRoot(inAllocator, in, dictionaries, inArray, inSchema);
+      // Flink's TtlTimeProvider clock: the processing-time service is System.currentTimeMillis in
+      // production and harness-controlled in tests, so expiry is deterministic to test.
+      long now = getProcessingTimeService().getCurrentProcessingTime();
       if (paimonState()) {
         Native.pushPaimonChangelogNormalizer(
             handle,
             inArray.memoryAddress(),
             inSchema.memoryAddress(),
+            now,
             outArray.memoryAddress(),
             outSchema.memoryAddress());
       } else {
@@ -213,6 +232,7 @@ public class NativeColumnarChangelogNormalizeOperator
             handle,
             inArray.memoryAddress(),
             inSchema.memoryAddress(),
+            now,
             outArray.memoryAddress(),
             outSchema.memoryAddress());
       }
