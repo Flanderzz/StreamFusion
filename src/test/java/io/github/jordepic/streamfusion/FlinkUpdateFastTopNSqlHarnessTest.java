@@ -74,15 +74,17 @@ class FlinkUpdateFastTopNSqlHarnessTest {
   }
 
   @Test
-  void stateTtlFallsBackToHost() throws Exception {
-    NativeParity.assertFallbackReasonContains(
+  void stateTtlMatchesHost() throws Exception {
+    // With idle-state TTL on (1h — nothing expires in-test) the update-fast rank runs natively
+    // with per-row-key entry TTL; without expiry its changelog is unchanged, pinning routing and
+    // the TTL argument threading against the host.
+    NativeParity.assertChangelogParity(
         () -> {
           TableEnvironment tEnv = environment();
           tEnv.getConfig().set("table.exec.state.ttl", "1 h");
           return tEnv;
         },
-        RANKED,
-        "Top-N: idle-state TTL");
+        RANKED);
   }
 
   private static TableEnvironment environment() {

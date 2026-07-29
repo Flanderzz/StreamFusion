@@ -38,6 +38,7 @@ public class NativeColumnarTopNOperator extends AbstractNativeStatefulOperator<A
   private final int[] rowKeyTimestampPrecisions;
   private final boolean netDiff;
   private final long miniBatchSize;
+  private final long stateTtlMillis;
 
   private transient MiniBatchBoundary boundary;
   private transient MiniBatchMetrics miniBatchMetrics;
@@ -58,6 +59,7 @@ public class NativeColumnarTopNOperator extends AbstractNativeStatefulOperator<A
       int[] rowKeyTimestampPrecisions,
       boolean netDiff,
       long miniBatchSize,
+      long stateTtlMillis,
       int maxParallelism) {
     super("top-n", keyTimestampPrecisions, maxParallelism);
     this.partitionColumns = partitionColumns;
@@ -73,6 +75,7 @@ public class NativeColumnarTopNOperator extends AbstractNativeStatefulOperator<A
     this.rowKeyTimestampPrecisions = rowKeyTimestampPrecisions;
     this.netDiff = netDiff;
     this.miniBatchSize = miniBatchSize;
+    this.stateTtlMillis = stateTtlMillis;
   }
 
   /** Whether this is Flink's UpdatableTopNFunction shape, which has no Paimon store yet. */
@@ -90,9 +93,14 @@ public class NativeColumnarTopNOperator extends AbstractNativeStatefulOperator<A
     if (updateFast()) {
       return null;
     }
+    // The Paimon shape does not carry per-row TTL timestamps yet; a TTL'd Top-N keeps the memory
+    // route (the standard fallback for an unsupported shape) until the store gains them.
     return resolvePaimon(
         rawStateRestored,
-        () -> withRowSchema(rowType, address -> Native.paimonRowStateSupported(address) ? 1L : 0L) != 0);
+        () ->
+            stateTtlMillis == 0
+                && withRowSchema(rowType, address -> Native.paimonRowStateSupported(address) ? 1L : 0L)
+                    != 0);
   }
 
   @Override
@@ -143,6 +151,7 @@ public class NativeColumnarTopNOperator extends AbstractNativeStatefulOperator<A
           sortNullsFirst,
           limit,
           outputRankNumber,
+          stateTtlMillis,
           memoryBudgetBytes());
     }
     return Native.createTopNRanker(
@@ -156,6 +165,7 @@ public class NativeColumnarTopNOperator extends AbstractNativeStatefulOperator<A
         outputRankNumber,
         retracting,
         netDiff,
+        stateTtlMillis,
         memoryBudgetBytes());
   }
 
@@ -172,6 +182,8 @@ public class NativeColumnarTopNOperator extends AbstractNativeStatefulOperator<A
           sortNullsFirst,
           limit,
           outputRankNumber,
+          stateTtlMillis,
+          getProcessingTimeService().getCurrentProcessingTime(),
           snapshots,
           memoryBudgetBytes());
     }
@@ -186,6 +198,8 @@ public class NativeColumnarTopNOperator extends AbstractNativeStatefulOperator<A
         outputRankNumber,
         retracting,
         netDiff,
+        stateTtlMillis,
+        getProcessingTimeService().getCurrentProcessingTime(),
         snapshots,
         memoryBudgetBytes());
   }
@@ -284,11 +298,15 @@ public class NativeColumnarTopNOperator extends AbstractNativeStatefulOperator<A
         ArrowArray outArray = ArrowArray.allocateNew(allocator);
         ArrowSchema outSchema = ArrowSchema.allocateNew(allocator)) {
       Data.exportVectorSchemaRoot(inAllocator, in, dictionaries, inArray, inSchema);
+      // Flink's TtlTimeProvider clock: the processing-time service is System.currentTimeMillis in
+      // production and harness-controlled in tests, so expiry is deterministic to test.
+      long now = getProcessingTimeService().getCurrentProcessingTime();
       if (paimonState()) {
         Native.pushPaimonTopNRanker(
             handle,
             inArray.memoryAddress(),
             inSchema.memoryAddress(),
+            now,
             outArray.memoryAddress(),
             outSchema.memoryAddress());
       } else {
@@ -296,6 +314,7 @@ public class NativeColumnarTopNOperator extends AbstractNativeStatefulOperator<A
             handle,
             inArray.memoryAddress(),
             inSchema.memoryAddress(),
+            now,
             outArray.memoryAddress(),
             outSchema.memoryAddress());
       }

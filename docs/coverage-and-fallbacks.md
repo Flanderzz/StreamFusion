@@ -220,14 +220,20 @@ array`, is **not** here: Flink rejects it too, so we're at parity.)
 
 **Idle-state TTL** (`table.exec.state.ttl` ≠ 0): the non-windowed `GROUP BY` — single-phase and
 the two-phase global merge (the local half is transient, so TTL lives on the global) —
-`ChangelogNormalize`, deduplication (keep-last, and eager proctime keep-first), and the regular
-join (per-side retention — each side's rows expire independently under its own TTL) run it
+`ChangelogNormalize`, deduplication (keep-last, and eager proctime keep-first), the regular
+join (per-side retention — each side's rows expire independently under its own TTL), and
+Top-N (all three rankers — append-only, retracting, and update-fast) and LIMIT (which reuses the
+Top-N operator) run it
 **natively**: Flink's exact StateTtlConfig semantics (last-write timestamps,
 expired-reads-as-absent with the fresh `+I` restart, retractions and tombstones against expired
-state dropped, and the unchanged-update suppression disabled — the join has no such suppression
-to disable), with the `STATE_TTL` hint honored
-over the job-wide retention (aggregates, and per side on the join — Flink defines no such hint on
-normalize or deduplicate). The watermark-buffered rowtime keep-first dedup still declines — its buffered
+state dropped, and the unchanged-update suppression disabled — the join and the rank functions
+have no such suppression to disable), with the `STATE_TTL` hint honored over the job-wide
+retention (aggregates, and per side on the join — Flink defines no such hint on
+normalize, deduplicate, or rank). TTL granularity follows each ranker's Flink state shape: the
+append-only ranker expires per sort-key list (every list write refreshes all its tie rows), the
+update-fast one per row-key entry, and the retracting one expires the whole per-partition buffer
+on a clock refreshed by every record — modeling Flink's per-record `SortedMap` rewrite, whose TTL
+governs the partition in practice. The watermark-buffered rowtime keep-first dedup still declines — its buffered
 candidates and emitted-key set do not expire yet. Every other stateful operator likewise declines
 a nonzero retention: with a TTL the host expires idle keys and stops suppressing unchanged
 updates — semantics those native operators do not yet reproduce. For the temporal join and OVER
@@ -307,18 +313,19 @@ shape carries timestamps.
   COUNT/AVG (those merge natively, with the count1 partial driving per-key liveness); an
   unsupported grouping-key/output column type. (Both halves must match for the query to
   accelerate — one staying on the host drags the whole query back via the gate.)
-- **Top-N** — idle-state TTL ≠ 0 (interim, above); a non-constant (variable) rank range; a row type
+- **Top-N** — a non-constant (variable) rank range; a row type
   the converter can't carry; an
   **update-fast rank with an `OFFSET`** (the update-fast shape — Flink plans it when the input has a
   unique key and the sort key is inferred monotonic, e.g. ranking by a descending `COUNT(*)` — is
   otherwise native, mirroring `UpdatableTopNFunction`'s bounded state and `FastTop1Function`'s
   drop-non-improving semantics for `rn <= 1`; its state is memory-backed under every state backend,
   with no Paimon store shape yet). (Insert-only and retracting changelog input, an `OFFSET` on the
-  non-update-fast shapes, and a projected rank number are all handled. `RANK`/`DENSE_RANK` never
+  non-update-fast shapes, a projected rank number, and idle-state TTL (see the note above) are
+  all handled. `RANK`/`DENSE_RANK` never
   reach us — Flink rejects them in streaming.)
-- **LIMIT** — idle-state TTL ≠ 0 (interim, above — a limit lowers to a rank the host TTLs like any
-  Top-N); missing `FETCH`, or a retracting input (`OFFSET` is handled — it uses the retracting
-  ranker over the insert-only input).
+- **LIMIT** — missing `FETCH`, or a retracting input (`OFFSET` is handled — it uses the retracting
+  ranker over the insert-only input). Idle-state TTL is native here — a limit lowers to a rank,
+  which runs its TTL natively (see the note above).
 - **Deduplicate** — idle-state TTL ≠ 0 on the rowtime keep-first shape only (interim, above); not
   a time-ordered rank-1. Rowtime and proctime, keep-first (`ASC`) and keep-last (`DESC`), are all
   native, and the eager shapes run idle-state TTL natively (see the note above); a value-ordered

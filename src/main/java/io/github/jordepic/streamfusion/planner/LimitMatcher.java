@@ -27,11 +27,6 @@ final class LimitMatcher {
   private LimitMatcher() {}
 
   static boolean matches(Sort sort) {
-    // A limit lowers to a rank, which the host TTLs like any Top-N — semantics the native ranker
-    // does not yet reproduce.
-    if (IdleStateRetention.isEnabled(sort)) {
-      return false;
-    }
     if (sort.fetch == null) {
       return false; // a streaming FETCH/LIMIT must bound the output (Flink rejects an unbounded one)
     }
@@ -77,10 +72,6 @@ final class LimitMatcher {
   }
 
   static String unsupportedReason(Sort sort) {
-    if (IdleStateRetention.isEnabled(sort)) {
-      return "limit: idle-state TTL (table.exec.state.ttl) runs on the host until the native"
-          + " operator expires state";
-    }
     if (sort.fetch == null) {
       return "limit: a FETCH/LIMIT count is required on a streaming query";
     }

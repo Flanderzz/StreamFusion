@@ -88,18 +88,18 @@ class FlinkTopNSqlHarnessTest {
   }
 
   @Test
-  void stateTtlFallsBackToHost() throws Exception {
-    // With a TTL set the host expires rank state per entry (the buffer thins out silently) — the
-    // native rankers do not yet reproduce that.
-    NativeParity.assertFallbackReasonContains(
+  void stateTtlMatchesHost() throws Exception {
+    // With idle-state TTL on (1h — nothing expires in-test) the rank still routes natively and
+    // its changelog is unchanged: Flink's rank functions have no unchanged-update suppression to
+    // disable, so this pins the routing and the TTL argument threading kind for kind.
+    NativeParity.assertKindedParity(
         () -> {
           TableEnvironment tEnv = environment();
           tEnv.getConfig().set("table.exec.state.ttl", "1 h");
           return tEnv;
         },
         "SELECT k, v FROM (SELECT k, v, ROW_NUMBER() OVER (PARTITION BY k ORDER BY v) AS rn "
-            + "FROM src) WHERE rn <= 2",
-        "Top-N: idle-state TTL");
+            + "FROM src) WHERE rn <= 2");
   }
 
   private static TableEnvironment environment() {

@@ -75,16 +75,16 @@ class FlinkLimitSqlHarnessTest {
   }
 
   @Test
-  void stateTtlFallsBackToHost() throws Exception {
-    // A limit lowers to a rank the host TTLs like any Top-N, so it declines under a TTL too.
-    NativeParity.assertFallbackReasonContains(
+  void stateTtlMatchesHost() throws Exception {
+    // A limit lowers to a rank, which now runs its TTL natively too (1h — nothing expires
+    // in-test): the changelog is unchanged under TTL, pinning routing and argument threading.
+    NativeParity.assertKindedParity(
         () -> {
           TableEnvironment tEnv = environment();
           tEnv.getConfig().set("table.exec.state.ttl", "1 h");
           return tEnv;
         },
-        "SELECT k, v FROM src ORDER BY v LIMIT 2",
-        "limit: idle-state TTL");
+        "SELECT k, v FROM src ORDER BY v LIMIT 2");
   }
 
   private static TableEnvironment environment() {

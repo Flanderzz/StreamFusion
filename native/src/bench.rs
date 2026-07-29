@@ -224,7 +224,7 @@ impl RetractTopN {
     }
 
     pub fn push(&mut self, batch: &RecordBatch) -> RecordBatch {
-        self.0.push(batch).expect("budget exceeded")
+        self.0.push(batch, 0).expect("budget exceeded")
     }
 
     pub fn flush(&mut self) -> RecordBatch {
@@ -292,7 +292,7 @@ impl AppendTopN {
     }
 
     pub fn push(&mut self, batch: &RecordBatch) -> RecordBatch {
-        self.0.push(batch).expect("budget exceeded")
+        self.0.push(batch, 0).expect("budget exceeded")
     }
 
     pub fn flush(&mut self) -> RecordBatch {

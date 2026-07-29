@@ -879,10 +879,10 @@ enum PaimonTopNRanker {
 }
 
 impl PaimonTopNRanker {
-    fn push(&mut self, batch: &RecordBatch) -> Result<RecordBatch, DataFusionError> {
+    fn push(&mut self, batch: &RecordBatch, now_ms: i64) -> Result<RecordBatch, DataFusionError> {
         match self {
-            PaimonTopNRanker::Append(r) => r.push(batch),
-            PaimonTopNRanker::Retract(r) => r.push(batch),
+            PaimonTopNRanker::Append(r) => r.push(batch, now_ms),
+            PaimonTopNRanker::Retract(r) => r.push(batch, now_ms),
         }
     }
 
@@ -1026,15 +1026,18 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushPaimonTop
     handle: jlong,
     in_array_address: jlong,
     in_schema_address: jlong,
+    now_millis: jlong,
     out_array_address: jlong,
     out_schema_address: jlong,
 ) {
     crate::bridge::jni_guard(env, move |mut env| {
         let ranker = unsafe { &mut *(handle as *mut PaimonTopNRanker) };
         // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
+        // The Paimon rankers run TTL-free (the operator keeps a TTL'd Top-N on the memory route),
+        // so the clock is inert here — the ABI just stays the memory twin's.
         let result = {
             let batch = import_record_batch(in_array_address, in_schema_address);
-            ranker.push(&batch)
+            ranker.push(&batch, now_millis)
         };
         match result {
             Ok(out) => export_record_batch(out, out_array_address, out_schema_address),

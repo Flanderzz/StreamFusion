@@ -1605,6 +1605,7 @@ public final class Native {
       long handle,
       long inArrayAddress,
       long inSchemaAddress,
+      long nowMillis,
       long outArrayAddress,
       long outSchemaAddress);
 
@@ -2196,6 +2197,10 @@ public final class Native {
    * @param netDiff mini-batch mode (append-only ranker only): emit the net logical-bundle rank
    *     diff — old top-N vs new top-N per touched partition — instead of the per-record shift
    *     cascade; the collapsed changelog is unchanged (see divergences/20)
+   * @param stateTtlMillis idle-state retention ({@code table.exec.state.ttl}); {@code 0} disables
+   *     expiry. Expired rank state reads as absent and expiry emits nothing — the append-only
+   *     ranker expires per sort-key list, the retracting one per whole buffer (Flink's treemap
+   *     clock)
    * @param memoryBudgetBytes managed-memory budget (see {@link #createTumblingAggregator})
    */
   public static native long createTopNRanker(
@@ -2209,11 +2214,20 @@ public final class Native {
       boolean outputRankNumber,
       boolean retracting,
       boolean netDiff,
+      long stateTtlMillis,
       long memoryBudgetBytes);
 
-  /** Pushes an input batch, exporting the top-N changelog (input columns plus the row kind). */
+  /**
+   * Pushes an input batch, exporting the top-N changelog (input columns plus the row kind).
+   * {@code nowMillis} is the operator's processing-time reading — the state-TTL clock.
+   */
   public static native void pushTopNRanker(
-      long handle, long inArrayAddress, long inSchemaAddress, long outArrayAddress, long outSchemaAddress);
+      long handle,
+      long inArrayAddress,
+      long inSchemaAddress,
+      long nowMillis,
+      long outArrayAddress,
+      long outSchemaAddress);
 
   /** Flushes the net append-only Top-N changes staged across one logical mini-batch. */
   public static native void flushTopNRanker(
@@ -2225,7 +2239,11 @@ public final class Native {
   /** Serializes a Top-N ranker's bounded per-partition buffers for a checkpoint. */
   public static native byte[] snapshotTopNRanker(long handle);
 
-  /** Rebuilds a Top-N ranker from a snapshot and returns a fresh handle. */
+  /**
+   * Rebuilds a Top-N ranker from a snapshot and returns a fresh handle. {@code nowMillis} stamps
+   * rows restored from a snapshot that carries no TTL timestamps (a pre-TTL writer), granting
+   * them a full retention from the restore — Flink's enable-TTL migration.
+   */
   public static native long restoreTopNRanker(
       int[] partitionColumns,
       int[] keyTimestampPrecisions,
@@ -2237,6 +2255,8 @@ public final class Native {
       boolean outputRankNumber,
       boolean retracting,
       boolean netDiff,
+      long stateTtlMillis,
+      long nowMillis,
       byte[] snapshot,
       long memoryBudgetBytes);
 
@@ -2256,6 +2276,8 @@ public final class Native {
       boolean outputRankNumber,
       boolean retracting,
       boolean netDiff,
+      long stateTtlMillis,
+      long nowMillis,
       byte[][] snapshots,
       long memoryBudgetBytes);
 
@@ -2267,6 +2289,9 @@ public final class Native {
    * points.
    *
    * @param rowKeyColumns the unique-key column indices identifying the row a record replaces
+   * @param stateTtlMillis idle-state retention ({@code table.exec.state.ttl}); {@code 0} disables
+   *     expiry. Per-row-key entry TTL: an expired entry reads as absent, so its next version
+   *     inserts fresh (for {@code limit == 1} even a strictly worse row becomes top-1)
    */
   public static native long createUpdateFastTopNRanker(
       int[] partitionColumns,
@@ -2278,9 +2303,14 @@ public final class Native {
       int[] sortNullsFirst,
       long limit,
       boolean outputRankNumber,
+      long stateTtlMillis,
       long memoryBudgetBytes);
 
-  /** Restores an update-fast Top-N ranker from raw keyed-state partitions assigned to this subtask. */
+  /**
+   * Restores an update-fast Top-N ranker from raw keyed-state partitions assigned to this
+   * subtask; {@code nowMillis} stamps rows from a timestamp-less snapshot (see
+   * {@link #restoreTopNRanker}).
+   */
   public static native long restoreUpdateFastTopNRankerPartitions(
       int[] partitionColumns,
       int[] keyTimestampPrecisions,
@@ -2291,6 +2321,8 @@ public final class Native {
       int[] sortNullsFirst,
       long limit,
       boolean outputRankNumber,
+      long stateTtlMillis,
+      long nowMillis,
       byte[][] snapshots,
       long memoryBudgetBytes);
 

@@ -147,7 +147,11 @@ impl TopNConverters {
 pub(crate) struct TopNRow {
     pub(crate) sort: OwnedRow,
     pub(crate) payload: Arc<OwnedRow>,
-    /// Wall-clock millis of the entry's last write (Flink state-TTL); 0 until TTL is wired.
+    /// Wall-clock millis of the entry's last write (Flink state-TTL); stays 0 while TTL is off.
+    /// Append-only granularity is the sort-key list (Flink's `MapState<sortKey, List<row>>`): every
+    /// write to a list refreshes all its rows, so byte-equal sort keys always share one timestamp.
+    /// The retracting ranker instead expires the WHOLE buffer on the head entry's clock (see the
+    /// divergence note on its push).
     pub(crate) ts_ms: i64,
 }
 
@@ -171,6 +175,12 @@ pub(crate) struct TopNRanker<S: KeyedStateStore<Vec<TopNRow>> = MemoryTopNStore>
     // running mini-batch, whose parity contract is the collapsed changelog — which the diff
     // preserves exactly — rather than the per-record byte sequence (see divergences/20).
     net_diff: bool,
+    // Idle-state retention millis (0 = off — Flink's default). Expiry is silent: downstream only
+    // ever saw +I's from the append-only ranker, and Flink emits nothing when rank state expires.
+    ttl_ms: i64,
+    // When the last full expiry sweep ran; the sweep reclaims partitions never touched again, at
+    // most once per TTL period (expiry itself is enforced lazily at each partition touch).
+    last_sweep_ms: i64,
     schema: Option<SchemaRef>,
     converters: Option<TopNConverters>,
     // Keyed by the partition key's Flink BinaryRow bytes — the encoding every keyed store speaks
@@ -291,6 +301,51 @@ pub(crate) fn topn_entry_bytes(entry: &TopNRow) -> usize {
     entry.sort.row().as_ref().len() + entry.payload.row().as_ref().len() + GROUP_ENTRY_OVERHEAD
 }
 
+/// Refreshes the whole tie group of the row just inserted at `pos`. Flink's append-only Top-N
+/// state is `MapState<sortKey, List<row>>` and every insert writes the ENTIRE sort-key list back
+/// (`dataState.put(sortKey, inputs)` in `AppendOnlyTopNFunction.processElement`), so all buffered
+/// rows with a byte-equal sort key take this write's timestamp together. Ties sit contiguously
+/// below the insertion point (`partition_point` places a new row after its equals), so the
+/// downward walk covers the list.
+fn refresh_sort_key_ties(buffer: &mut [TopNRow], pos: usize, now_ms: i64) {
+    buffer[pos].ts_ms = now_ms;
+    let mut i = pos;
+    while i > 0 && buffer[i - 1].sort == buffer[pos].sort {
+        i -= 1;
+        buffer[i].ts_ms = now_ms;
+    }
+}
+
+/// Refreshes the rows still sharing the evicted row's sort key: when eviction trims (rather than
+/// empties) the last sort-key list, Flink writes the trimmed list back (`updateState` in
+/// `AppendOnlyTopNHelper.processElementWithoutRowNumber`), refreshing it; a sole-member list is
+/// removed with no write. Only the without-rank-number algorithm rewrites on eviction — the
+/// with-rank path (`processElementWithRowNumber`) only removes sort keys wholly past the rank end.
+fn refresh_evicted_ties(buffer: &mut [TopNRow], evicted: &TopNRow, now_ms: i64) {
+    let mut i = buffer.len();
+    while i > 0 && buffer[i - 1].sort == evicted.sort {
+        i -= 1;
+        buffer[i].ts_ms = now_ms;
+    }
+}
+
+/// Drops a buffer's expired rows (Flink's expired map-state entries read as absent), returning the
+/// reclaimed bytes when `track`. Silent by contract: expiry emits nothing downstream.
+fn prune_expired_topn_rows(buffer: &mut Vec<TopNRow>, ttl: StateTtl, track: bool) -> isize {
+    let mut reclaimed = 0isize;
+    buffer.retain(|entry| {
+        if ttl.expired(entry.ts_ms) {
+            if track {
+                reclaimed += topn_entry_bytes(entry) as isize;
+            }
+            false
+        } else {
+            true
+        }
+    });
+    reclaimed
+}
+
 impl TopNRanker {
     pub(crate) fn new(
         partition_columns: Vec<usize>,
@@ -307,6 +362,8 @@ impl TopNRanker {
             limit,
             output_rank_number,
             net_diff,
+            ttl_ms: 0,
+            last_sweep_ms: 0,
             schema: None,
             converters: None,
             groups: MemoryTopNStore::default(),
@@ -346,6 +403,8 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> TopNRanker<S> {
             limit: self.limit,
             output_rank_number: self.output_rank_number,
             net_diff: self.net_diff,
+            ttl_ms: self.ttl_ms,
+            last_sweep_ms: self.last_sweep_ms,
             schema: self.schema,
             converters: self.converters,
             groups,
@@ -393,13 +452,52 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> TopNRanker<S> {
         }
     }
 
-    pub(crate) fn push(&mut self, batch: &RecordBatch) -> Result<RecordBatch, DataFusionError> {
+    /// Sets the idle-state retention (`table.exec.state.ttl`) in millis; 0 (Flink's default)
+    /// disables expiry.
+    pub(crate) fn with_state_ttl(mut self, ttl_ms: i64) -> Self {
+        self.ttl_ms = ttl_ms.max(0);
+        self
+    }
+
+    /// Reclaims every buffered row whose TTL elapsed with no further touch of its partition — the
+    /// lazy first-touch prune never sees such a partition again. Silent, like Flink's background
+    /// cleanup.
+    fn sweep_expired(&mut self, ttl: StateTtl) {
+        let track = self.memory.tracking();
+        let mut reclaimed = 0isize;
+        self.groups.retain_live(&mut |key, buffer| {
+            reclaimed += prune_expired_topn_rows(buffer, ttl, track);
+            if buffer.is_empty() {
+                if track {
+                    reclaimed += (key.len() + GROUP_ENTRY_OVERHEAD) as isize;
+                }
+                false
+            } else {
+                true
+            }
+        });
+        if reclaimed != 0 {
+            self.memory.record(-reclaimed);
+        }
+    }
+
+    /// `now_ms` is the host's wall-clock reading for this call (only read when state TTL is on).
+    pub(crate) fn push(
+        &mut self,
+        batch: &RecordBatch,
+        now_ms: i64,
+    ) -> Result<RecordBatch, DataFusionError> {
         if self.net_diff {
-            return self.push_net_diff(batch);
+            return self.push_net_diff(batch, now_ms);
         }
         let arity = data_arity(batch);
         self.schema = Some(data_schema(batch));
         self.ensure_converters(batch, arity);
+        let ttl = StateTtl::new(self.ttl_ms, now_ms);
+        if ttl.enabled() && now_ms >= self.last_sweep_ms + self.ttl_ms {
+            self.sweep_expired(ttl);
+            self.last_sweep_ms = now_ms;
+        }
         self.groups
             .begin_batch(batch, &self.partition_columns, &self.key_timestamp_precisions)?;
         let conv = self.converters.as_ref().expect("converters set");
@@ -421,6 +519,9 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> TopNRanker<S> {
         let track = self.memory.tracking();
         let mut delta = 0isize;
         let groups = &mut self.groups;
+        // Partitions already pruned by this call: expiry is enforced once per partition per push
+        // (before any preimage or rank read), not re-walked for every row.
+        let mut pruned: HashSet<ByteKey> = HashSet::default();
         let mut out_rows: Vec<Arc<OwnedRow>> = Vec::new();
         let mut out_kinds: Vec<i8> = Vec::new();
         let mut out_ranks: Vec<i64> = Vec::new();
@@ -441,6 +542,12 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> TopNRanker<S> {
                     groups.insert(ByteKey::from(part), Vec::new())
                 }
             };
+            // Expired rows vanish silently — no -D (downstream only ever saw +I's, and Flink emits
+            // nothing when rank state expires); the rest of the row ranks against the survivors.
+            if ttl.enabled() && !pruned.contains(part) {
+                delta -= prune_expired_topn_rows(buffer, ttl, track);
+                pruned.insert(ByteKey::from(part));
+            }
             // Insert after any rows that order equal-or-before, preserving arrival order for ties
             // (byte compare of the memcomparable sort key).
             let pos = buffer.partition_point(|e| e.sort.row() <= key_row);
@@ -460,6 +567,9 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> TopNRanker<S> {
                 );
                 if track {
                     delta += topn_entry_bytes(&buffer[pos]) as isize;
+                }
+                if ttl.enabled() {
+                    refresh_sort_key_ties(buffer, pos, ttl.now());
                 }
                 // Cascade from the new row's rank to the buffer end (capped at the limit): each rank's
                 // occupant changes, so retract the old and append the new; a brand-new rank inserts.
@@ -494,10 +604,16 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> TopNRanker<S> {
                 if track {
                     delta += topn_entry_bytes(&buffer[pos]) as isize;
                 }
+                if ttl.enabled() {
+                    refresh_sort_key_ties(buffer, pos, ttl.now());
+                }
                 if buffer.len() > limit {
                     let evicted = buffer.pop().expect("buffer over limit is non-empty");
                     if track {
                         delta -= topn_entry_bytes(&evicted) as isize;
+                    }
+                    if ttl.enabled() {
+                        refresh_evicted_ties(buffer, &evicted, ttl.now());
                     }
                     if *evicted.payload == *payload {
                         continue; // the new row was itself rank N+1 — it never entered the top-N
@@ -529,10 +645,24 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> TopNRanker<S> {
     /// Folds one physical batch into a logical mini-batch. The first touch of a partition captures
     /// its preimage; output is deferred until `flush_net_diff`, so Arrow batch boundaries are not
     /// observable in the collapsed changelog.
-    fn push_net_diff(&mut self, batch: &RecordBatch) -> Result<RecordBatch, DataFusionError> {
+    fn push_net_diff(
+        &mut self,
+        batch: &RecordBatch,
+        now_ms: i64,
+    ) -> Result<RecordBatch, DataFusionError> {
         let arity = data_arity(batch);
         self.schema = Some(data_schema(batch));
         self.ensure_converters(batch, arity);
+        let ttl = StateTtl::new(self.ttl_ms, now_ms);
+        // The sweep must not run mid-bundle: removing a staged partition's rows would surface at
+        // the flush as a spurious diff instead of silent expiry.
+        if ttl.enabled()
+            && self.staged_old_tops.is_empty()
+            && now_ms >= self.last_sweep_ms + self.ttl_ms
+        {
+            self.sweep_expired(ttl);
+            self.last_sweep_ms = now_ms;
+        }
         // The mini-batch bundle spans pushes: hydrated partitions stay resident until the flush
         // ends the bundle, so the staged preimages' re-probes there stay truthful.
         self.groups
@@ -550,6 +680,7 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> TopNRanker<S> {
         let payloads = conv.payload.convert_columns(&data_arrays).expect("encode payload");
 
         let limit = self.limit as usize;
+        let output_rank = self.output_rank_number;
         let track = self.memory.tracking();
         let mut delta = 0isize;
         let groups = &mut self.groups;
@@ -569,6 +700,12 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> TopNRanker<S> {
                 }
             };
             if !staged_old_tops.contains_key(part) {
+                // Expiry is enforced only on the bundle's first touch, BEFORE the preimage
+                // capture: pruning silently here keeps the expired rows out of the flush diff,
+                // while pruning mid-bundle would surface them as spurious deletes.
+                if ttl.enabled() {
+                    delta -= prune_expired_topn_rows(buffer, ttl, track);
+                }
                 let key = ByteKey::from(part);
                 let old: Vec<Arc<OwnedRow>> = buffer.iter().map(|e| e.payload.clone()).collect();
                 if track {
@@ -592,10 +729,16 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> TopNRanker<S> {
             if track {
                 delta += topn_entry_bytes(&buffer[pos]) as isize;
             }
+            if ttl.enabled() {
+                refresh_sort_key_ties(buffer, pos, ttl.now());
+            }
             if buffer.len() > limit {
                 let evicted = buffer.pop().expect("buffer over limit is non-empty");
                 if track {
                     delta -= topn_entry_bytes(&evicted) as isize;
+                }
+                if ttl.enabled() && !output_rank {
+                    refresh_evicted_ties(buffer, &evicted, ttl.now());
                 }
             }
         }
@@ -688,33 +831,41 @@ const RAW_SNAPSHOT_SORT: &str = "__sort__";
 
 /// One side's buffers as raw state bytes, one IPC blob per key group, buffer order preserved.
 /// Snapshotting decodes nothing: the group is one hash of the stored partition key's bytes per
-/// bucket (that encoding's hash IS Flink's key-group input).
+/// bucket (that encoding's hash IS Flink's key-group input). The TTL timestamps ride a trailing
+/// column only while TTL is on, so a TTL-off snapshot stays byte-identical to the pre-TTL format;
+/// buffer order is preserved, so the retracting ranker's head clock round-trips on the head row.
 fn raw_topn_snapshot_groups(
     groups: &MemoryTopNStore,
     schema: Option<&SchemaRef>,
     max_parallelism: usize,
+    ttl_on: bool,
 ) -> BTreeMap<i32, Vec<u8>> {
     let Some(schema) = schema else { return BTreeMap::new() };
-    let mut builders: BTreeMap<i32, (BinaryBuilder, BinaryBuilder, BinaryBuilder)> =
+    let mut builders: BTreeMap<i32, (BinaryBuilder, BinaryBuilder, BinaryBuilder, Int64Builder)> =
         BTreeMap::new();
     for (key, buffer) in groups.iter() {
         if buffer.is_empty() {
             continue;
         }
         let group = flink_key_group(hash_bytes_by_words(&key.0), max_parallelism) as i32;
-        let (keys, sorts, rows) = builders.entry(group).or_default();
+        let (keys, sorts, rows, write_timestamps) = builders.entry(group).or_default();
         for entry in buffer.iter() {
             keys.append_value(&key.0);
             sorts.append_value(entry.sort.row().data());
             rows.append_value(entry.payload.row().data());
+            write_timestamps.append_value(entry.ts_ms);
         }
     }
+    let mut fields = vec![
+        Field::new(RAW_SNAPSHOT_KEY, DataType::Binary, false),
+        Field::new(RAW_SNAPSHOT_SORT, DataType::Binary, false),
+        Field::new(RAW_SNAPSHOT_ROW, DataType::Binary, false),
+    ];
+    if ttl_on {
+        fields.push(Field::new(TTL_TS_COLUMN, DataType::Int64, false));
+    }
     let raw_schema = Arc::new(Schema::new_with_metadata(
-        vec![
-            Field::new(RAW_SNAPSHOT_KEY, DataType::Binary, false),
-            Field::new(RAW_SNAPSHOT_SORT, DataType::Binary, false),
-            Field::new(RAW_SNAPSHOT_ROW, DataType::Binary, false),
-        ],
+        fields,
         std::collections::HashMap::from([(
             RAW_SNAPSHOT_PAYLOAD_SCHEMA.to_string(),
             encode_schema_metadata(schema),
@@ -722,16 +873,17 @@ fn raw_topn_snapshot_groups(
     ));
     builders
         .into_iter()
-        .map(|(group, (mut keys, mut sorts, mut rows))| {
-            let batch = RecordBatch::try_new(
-                raw_schema.clone(),
-                vec![
-                    Arc::new(keys.finish()),
-                    Arc::new(sorts.finish()),
-                    Arc::new(rows.finish()),
-                ],
-            )
-            .expect("raw top-n snapshot batch");
+        .map(|(group, (mut keys, mut sorts, mut rows, mut write_timestamps))| {
+            let mut columns: Vec<ArrayRef> = vec![
+                Arc::new(keys.finish()),
+                Arc::new(sorts.finish()),
+                Arc::new(rows.finish()),
+            ];
+            if ttl_on {
+                columns.push(Arc::new(write_timestamps.finish()));
+            }
+            let batch = RecordBatch::try_new(raw_schema.clone(), columns)
+                .expect("raw top-n snapshot batch");
             (group, write_ipc(&batch))
         })
         .collect()
@@ -742,15 +894,18 @@ fn raw_topn_snapshot_groups(
 impl TopNRanker {
     /// Serializes the buffered rows in per-partition buffer order (partition derivable from the row).
     pub(crate) fn snapshot(&self) -> Vec<u8> {
-        raw_topn_snapshot_groups(&self.groups, self.schema.as_ref(), 1)
+        raw_topn_snapshot_groups(&self.groups, self.schema.as_ref(), 1, self.ttl_ms > 0)
             .remove(&0)
             .unwrap_or_default()
     }
 
     pub(crate) fn snapshot_partitions(&self, max_parallelism: usize) -> BTreeMap<i32, Vec<u8>> {
-        raw_topn_snapshot_groups(&self.groups, self.schema.as_ref(), max_parallelism)
+        raw_topn_snapshot_groups(&self.groups, self.schema.as_ref(), max_parallelism, self.ttl_ms > 0)
     }
 
+    /// `restored_at_ms` stamps rows from a snapshot carrying no TTL timestamps (a pre-TTL or
+    /// TTL-off writer) — a full retention from the restore, Flink's enable-TTL migration.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn restore(
         partition_columns: Vec<usize>,
         key_timestamp_precisions: Vec<i32>,
@@ -759,6 +914,7 @@ impl TopNRanker {
         output_rank_number: bool,
         net_diff: bool,
         bytes: &[u8],
+        restored_at_ms: i64,
     ) -> Self {
         Self::restore_partitions(
             partition_columns,
@@ -768,9 +924,11 @@ impl TopNRanker {
             output_rank_number,
             net_diff,
             &[bytes.to_vec()],
+            restored_at_ms,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn restore_partitions(
         partition_columns: Vec<usize>,
         key_timestamp_precisions: Vec<i32>,
@@ -779,6 +937,7 @@ impl TopNRanker {
         output_rank_number: bool,
         net_diff: bool,
         snapshots: &[Vec<u8>],
+        restored_at_ms: i64,
     ) -> Self {
         let mut ranker =
             TopNRanker::new(partition_columns, sort_columns, limit, output_rank_number, net_diff)
@@ -793,9 +952,10 @@ impl TopNRanker {
                         &ranker.partition_columns,
                         &ranker.sort_columns,
                         &batch,
+                        restored_at_ms,
                     );
                 } else {
-                    ranker.load_batch_decoded(&batch);
+                    ranker.load_batch_decoded(&batch, restored_at_ms);
                 }
             }
         }
@@ -803,8 +963,9 @@ impl TopNRanker {
     }
 
     /// Snapshots written before the raw format decoded the buffers to typed columns; kept so
-    /// existing savepoints keep restoring.
-    fn load_batch_decoded(&mut self, batch: &RecordBatch) {
+    /// existing savepoints keep restoring. The format predates TTL, so every row is stamped with
+    /// the restore time (the enable-TTL migration).
+    fn load_batch_decoded(&mut self, batch: &RecordBatch, restored_at_ms: i64) {
         let arity = batch.num_columns();
         self.schema = Some(batch.schema());
         self.ensure_converters(batch, arity);
@@ -829,7 +990,7 @@ impl TopNRanker {
             buffer.push(TopNRow {
                 sort: keys.row(row).owned(),
                 payload: Arc::new(payloads.row(row).owned()),
-                ts_ms: 0,
+                ts_ms: restored_at_ms,
             });
         }
     }
@@ -838,6 +999,8 @@ impl TopNRanker {
 /// Raw-format rows carry the stored partition key, sort key, and payload bytes verbatim —
 /// restoring wraps the bytes back into rows with the ranker's own converters (no decode, no
 /// re-encode, and no cross-converter mixing since every blob parses through the same instances).
+/// The TTL timestamps are read by name when the writer had TTL on; a snapshot without them stamps
+/// every row with `restored_at_ms` (Flink's enable-TTL migration).
 fn load_topn_batch_raw(
     schema: &mut Option<SchemaRef>,
     converters: &mut Option<TopNConverters>,
@@ -845,6 +1008,7 @@ fn load_topn_batch_raw(
     partition_columns: &[usize],
     sort_columns: &[SortColumn],
     batch: &RecordBatch,
+    restored_at_ms: i64,
 ) {
     if schema.is_none() {
         let payload_schema =
@@ -864,6 +1028,10 @@ fn load_topn_batch_raw(
     let keys = column_binary(batch, RAW_SNAPSHOT_KEY);
     let sorts = column_binary(batch, RAW_SNAPSHOT_SORT);
     let rows = column_binary(batch, RAW_SNAPSHOT_ROW);
+    let write_timestamps = batch
+        .column_by_name(TTL_TS_COLUMN)
+        .is_some()
+        .then(|| column_i64(batch, TTL_TS_COLUMN));
     for row in 0..batch.num_rows() {
         let part = keys.value(row);
         let buffer = match groups.get_mut(part) {
@@ -873,7 +1041,7 @@ fn load_topn_batch_raw(
         buffer.push(TopNRow {
             sort: sort_parser.parse(sorts.value(row)).owned(),
             payload: Arc::new(payload_parser.parse(rows.value(row)).owned()),
-            ts_ms: 0,
+            ts_ms: write_timestamps.as_ref().map_or(restored_at_ms, |ts| ts.value(row)),
         });
     }
 }
@@ -948,6 +1116,10 @@ pub(crate) struct RetractableTopNRanker<S: KeyedStateStore<Vec<TopNRow>> = Memor
     limit: i64,
     output_rank_number: bool,
     net_diff: bool,
+    // Idle-state retention millis (0 = off). Expiry granularity is the WHOLE buffer, clocked on
+    // the head entry's `ts_ms` — see the invariant documented on `push`.
+    ttl_ms: i64,
+    last_sweep_ms: i64,
     schema: Option<SchemaRef>,
     converters: Option<TopNConverters>,
     // The append-only ranker's byte-row state (see TopNRow): partition probes by borrowed bytes,
@@ -976,6 +1148,8 @@ impl RetractableTopNRanker {
             limit,
             output_rank_number,
             net_diff: false,
+            ttl_ms: 0,
+            last_sweep_ms: 0,
             schema: None,
             converters: None,
             groups: MemoryTopNStore::default(),
@@ -1020,6 +1194,8 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> RetractableTopNRanker<S> {
             limit: self.limit,
             output_rank_number: self.output_rank_number,
             net_diff: self.net_diff,
+            ttl_ms: self.ttl_ms,
+            last_sweep_ms: self.last_sweep_ms,
             schema: self.schema,
             converters: self.converters,
             groups,
@@ -1058,15 +1234,76 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> RetractableTopNRanker<S> {
         self
     }
 
-    pub(crate) fn push(&mut self, batch: &RecordBatch) -> Result<RecordBatch, DataFusionError> {
+    /// Sets the idle-state retention (`table.exec.state.ttl`) in millis; 0 (Flink's default)
+    /// disables expiry.
+    pub(crate) fn with_state_ttl(mut self, ttl_ms: i64) -> Self {
+        self.ttl_ms = ttl_ms.max(0);
+        self
+    }
+
+    /// Reclaims every buffer whose head clock expired with no further touch of its partition.
+    /// Silent, like Flink's background cleanup.
+    fn sweep_expired(&mut self, ttl: StateTtl) {
+        let track = self.memory.tracking();
+        let mut reclaimed = 0isize;
+        self.groups.retain_live(&mut |key, buffer| {
+            if buffer.first().is_some_and(|head| ttl.expired(head.ts_ms)) {
+                if track {
+                    reclaimed += (key.len() + GROUP_ENTRY_OVERHEAD) as isize;
+                    reclaimed += buffer.iter().map(topn_entry_bytes).sum::<usize>() as isize;
+                }
+                false
+            } else {
+                true
+            }
+        });
+        if reclaimed != 0 {
+            self.memory.record(-reclaimed);
+        }
+    }
+
+    /// Clears the buffer if its head clock expired, before anything reads it. Silent: a stale
+    /// retraction then finds nothing and emits nothing (Flink's lenient warn-and-skip), and the
+    /// next accumulate seeds a fresh buffer through the normal diff.
+    fn expire_whole_buffer(buffer: &mut Vec<TopNRow>, ttl: StateTtl, track: bool) -> isize {
+        if !buffer.first().is_some_and(|head| ttl.expired(head.ts_ms)) {
+            return 0;
+        }
+        let reclaimed = if track {
+            buffer.iter().map(topn_entry_bytes).sum::<usize>() as isize
+        } else {
+            0
+        };
+        buffer.clear();
+        reclaimed
+    }
+
+    /// `now_ms` is the host's wall-clock reading for this call (only read when state TTL is on).
+    ///
+    /// TTL model — a DELIBERATE divergence from Flink's mixed granularity: Flink keeps a
+    /// `ValueState<SortedMap>` treemap it rewrites on EVERY record for the key plus a per-sort-key
+    /// `MapState`, so in practice the treemap's TTL governs the partition. We model exactly that
+    /// whole-buffer clock, carried on the head entry: after ANY mutation of a non-empty buffer
+    /// (accumulate or retract, anywhere in it), `buffer[0].ts_ms = now`; expiry clears the whole
+    /// buffer at once.
+    pub(crate) fn push(
+        &mut self,
+        batch: &RecordBatch,
+        now_ms: i64,
+    ) -> Result<RecordBatch, DataFusionError> {
         if self.net_diff {
-            return self.push_net_diff(batch);
+            return self.push_net_diff(batch, now_ms);
         }
         let arity = data_arity(batch);
         self.schema = Some(data_schema(batch));
         if self.converters.is_none() {
             self.converters =
                 Some(TopNConverters::build(batch, arity, &self.partition_columns, &self.sort_columns));
+        }
+        let ttl = StateTtl::new(self.ttl_ms, now_ms);
+        if ttl.enabled() && now_ms >= self.last_sweep_ms + self.ttl_ms {
+            self.sweep_expired(ttl);
+            self.last_sweep_ms = now_ms;
         }
         self.groups
             .begin_batch(batch, &self.partition_columns, &self.key_timestamp_precisions)?;
@@ -1109,6 +1346,12 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> RetractableTopNRanker<S> {
                     groups.insert(ByteKey::from(part), Vec::new())
                 }
             };
+            // Whole-buffer expiry precedes the preimage capture, so the diff never surfaces the
+            // expired rows. Re-checking per row is a head compare and stays a no-op once any
+            // mutation refreshed the head to this call's clock.
+            if ttl.enabled() {
+                delta -= Self::expire_whole_buffer(buffer, ttl, track);
+            }
             // The top-N window before the mutation: Arc bumps of the payloads, not row clones.
             let old_top: Vec<Arc<OwnedRow>> = buffer
                 [offset.min(buffer.len())..limit.min(buffer.len())]
@@ -1144,6 +1387,14 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> RetractableTopNRanker<S> {
                     delta += topn_entry_bytes(&buffer[pos]) as isize;
                 }
             }
+            // The head-clock invariant: Flink ends EVERY processElement with treeMap.update —
+            // even a stale retraction's warn-and-skip — and any ValueState write refreshes its
+            // TTL, so every processed record refreshes the partition's whole-buffer clock.
+            if ttl.enabled() {
+                if let Some(head) = buffer.first_mut() {
+                    head.ts_ms = ttl.now();
+                }
+            }
             let new_top: Vec<Arc<OwnedRow>> = buffer
                 [offset.min(buffer.len())..limit.min(buffer.len())]
                 .iter()
@@ -1177,12 +1428,26 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> RetractableTopNRanker<S> {
 
     /// Applies a changelog batch to the full retracting buffers while retaining only the first
     /// visible Top-N preimage for each partition touched in the current logical mini-batch.
-    fn push_net_diff(&mut self, batch: &RecordBatch) -> Result<RecordBatch, DataFusionError> {
+    fn push_net_diff(
+        &mut self,
+        batch: &RecordBatch,
+        now_ms: i64,
+    ) -> Result<RecordBatch, DataFusionError> {
         let arity = data_arity(batch);
         self.schema = Some(data_schema(batch));
         if self.converters.is_none() {
             self.converters =
                 Some(TopNConverters::build(batch, arity, &self.partition_columns, &self.sort_columns));
+        }
+        let ttl = StateTtl::new(self.ttl_ms, now_ms);
+        // The sweep must not run mid-bundle: dropping a staged partition's buffer would surface
+        // at the flush as a spurious diff instead of silent expiry.
+        if ttl.enabled()
+            && self.staged_old_tops.is_empty()
+            && now_ms >= self.last_sweep_ms + self.ttl_ms
+        {
+            self.sweep_expired(ttl);
+            self.last_sweep_ms = now_ms;
         }
         // The mini-batch bundle spans pushes: hydrated partitions stay resident until the flush
         // ends the bundle, so the staged preimages' re-probes there stay truthful.
@@ -1219,6 +1484,11 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> RetractableTopNRanker<S> {
                 }
             };
             if !staged_old_tops.contains_key(part) {
+                // Whole-buffer expiry only on the bundle's first touch, BEFORE the preimage
+                // capture — silent in the flush diff (see push_net_diff on the append-only ranker).
+                if ttl.enabled() {
+                    delta -= Self::expire_whole_buffer(buffer, ttl, track);
+                }
                 let key = ByteKey::from(part);
                 let old = buffer[offset.min(buffer.len())..limit.min(buffer.len())]
                     .iter()
@@ -1232,6 +1502,7 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> RetractableTopNRanker<S> {
             }
 
             let retract = matches!(row_kinds.map(|k| k.value(row)).unwrap_or(0), 1 | 3);
+            let mut mutated = false;
             if retract {
                 let full = payloads.row(row);
                 if let Some(pos) = buffer.iter().position(|e| e.payload.row() == full) {
@@ -1239,6 +1510,7 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> RetractableTopNRanker<S> {
                         delta -= topn_entry_bytes(&buffer[pos]) as isize;
                     }
                     buffer.remove(pos);
+                    mutated = true;
                 }
             } else {
                 let key_row = keys.row(row);
@@ -1253,6 +1525,12 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> RetractableTopNRanker<S> {
                 );
                 if track {
                     delta += topn_entry_bytes(&buffer[pos]) as isize;
+                }
+                mutated = true;
+            }
+            if ttl.enabled() && mutated {
+                if let Some(head) = buffer.first_mut() {
+                    head.ts_ms = ttl.now();
                 }
             }
         }
@@ -1322,18 +1600,21 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> RetractableTopNRanker<S> {
 /// store checkpoints through its own commit path instead of materializing the key space.
 impl RetractableTopNRanker {
     /// Serializes the buffered rows in per-partition buffer order (partition derivable from the row).
-    fn snapshot(&self) -> Vec<u8> {
-        raw_topn_snapshot_groups(&self.groups, self.schema.as_ref(), 1)
+    pub(crate) fn snapshot(&self) -> Vec<u8> {
+        raw_topn_snapshot_groups(&self.groups, self.schema.as_ref(), 1, self.ttl_ms > 0)
             .remove(&0)
             .unwrap_or_default()
     }
 
     fn snapshot_partitions(&self, max_parallelism: usize) -> BTreeMap<i32, Vec<u8>> {
-        raw_topn_snapshot_groups(&self.groups, self.schema.as_ref(), max_parallelism)
+        raw_topn_snapshot_groups(&self.groups, self.schema.as_ref(), max_parallelism, self.ttl_ms > 0)
     }
 
+    /// `restored_at_ms` stamps rows from a snapshot carrying no TTL timestamps (a pre-TTL or
+    /// TTL-off writer) — the enable-TTL migration; with timestamps present, buffer order is
+    /// preserved so the head clock round-trips.
     #[allow(clippy::too_many_arguments)]
-    fn restore(
+    pub(crate) fn restore(
         partition_columns: Vec<usize>,
         key_timestamp_precisions: Vec<i32>,
         sort_columns: Vec<SortColumn>,
@@ -1341,6 +1622,7 @@ impl RetractableTopNRanker {
         limit: i64,
         output_rank_number: bool,
         bytes: &[u8],
+        restored_at_ms: i64,
     ) -> Self {
         Self::restore_partitions(
             partition_columns,
@@ -1350,6 +1632,7 @@ impl RetractableTopNRanker {
             limit,
             output_rank_number,
             &[bytes.to_vec()],
+            restored_at_ms,
         )
     }
 
@@ -1362,6 +1645,7 @@ impl RetractableTopNRanker {
         limit: i64,
         output_rank_number: bool,
         snapshots: &[Vec<u8>],
+        restored_at_ms: i64,
     ) -> Self {
         let mut ranker =
             RetractableTopNRanker::new(partition_columns, sort_columns, offset, limit, output_rank_number)
@@ -1376,9 +1660,10 @@ impl RetractableTopNRanker {
                         &ranker.partition_columns,
                         &ranker.sort_columns,
                         &batch,
+                        restored_at_ms,
                     );
                 } else {
-                    ranker.load_batch_decoded(&batch);
+                    ranker.load_batch_decoded(&batch, restored_at_ms);
                 }
             }
         }
@@ -1386,8 +1671,9 @@ impl RetractableTopNRanker {
     }
 
     /// Snapshots written before the raw format decoded the buffers to typed columns; kept so
-    /// existing savepoints keep restoring.
-    fn load_batch_decoded(&mut self, batch: &RecordBatch) {
+    /// existing savepoints keep restoring. The format predates TTL, so every row is stamped with
+    /// the restore time (the enable-TTL migration).
+    fn load_batch_decoded(&mut self, batch: &RecordBatch, restored_at_ms: i64) {
         let arity = batch.num_columns();
         self.schema = Some(batch.schema());
         if self.converters.is_none() {
@@ -1419,7 +1705,7 @@ impl RetractableTopNRanker {
             buffer.push(TopNRow {
                 sort: keys.row(row).owned(),
                 payload: Arc::new(payloads.row(row).owned()),
-                ts_ms: 0,
+                ts_ms: restored_at_ms,
             }); // buffer order
         }
     }
@@ -1508,7 +1794,9 @@ pub(crate) struct UpdatableRow {
     pub(crate) sort: OwnedRow,
     pub(crate) payload: Arc<OwnedRow>,
     pub(crate) row_key: ByteKey,
-    /// Wall-clock millis of the entry's last write (Flink state-TTL); 0 until TTL is wired.
+    /// Wall-clock millis of the entry's last write (Flink state-TTL); stays 0 while TTL is off.
+    /// Granularity is the row key (Flink's `MapState<rowKey, …>` / the top-1 `ValueState`):
+    /// refreshed by an in-place replace, a move, or an insert.
     pub(crate) ts_ms: i64,
 }
 
@@ -1517,6 +1805,28 @@ fn updatable_entry_bytes(entry: &UpdatableRow) -> usize {
         + entry.payload.row().as_ref().len()
         + entry.row_key.len()
         + GROUP_ENTRY_OVERHEAD
+}
+
+/// [`prune_expired_topn_rows`] for the update-fast buffer: per-row-key entry expiry. Silent — the
+/// next record for an expired row key is treated as a fresh insert (for `limit == 1` that means
+/// even a strictly worse row becomes the new top-1, exactly Flink's expired `ValueState` read).
+fn prune_expired_updatable_rows(
+    buffer: &mut Vec<UpdatableRow>,
+    ttl: StateTtl,
+    track: bool,
+) -> isize {
+    let mut reclaimed = 0isize;
+    buffer.retain(|entry| {
+        if ttl.expired(entry.ts_ms) {
+            if track {
+                reclaimed += updatable_entry_bytes(entry) as isize;
+            }
+            false
+        } else {
+            true
+        }
+    });
+    reclaimed
 }
 
 /// The raw update-fast snapshot stores the row's unique-key bytes alongside the shared
@@ -1531,6 +1841,9 @@ pub(crate) struct UpdatableTopNRanker {
     sort_columns: Vec<SortColumn>,
     limit: i64,
     output_rank_number: bool,
+    // Idle-state retention millis (0 = off); per-row-key entry expiry, like Flink's MapState TTL.
+    ttl_ms: i64,
+    last_sweep_ms: i64,
     schema: Option<SchemaRef>,
     converters: Option<TopNConverters>,
     // Memory-backed only for now: no Paimon store shape yet, so under a persistent state backend
@@ -1557,10 +1870,40 @@ impl UpdatableTopNRanker {
             sort_columns,
             limit,
             output_rank_number,
+            ttl_ms: 0,
+            last_sweep_ms: 0,
             schema: None,
             converters: None,
             groups: MemoryStateStore::default(),
             memory: OperatorMemory::unaccounted(),
+        }
+    }
+
+    /// Sets the idle-state retention (`table.exec.state.ttl`) in millis; 0 (Flink's default)
+    /// disables expiry.
+    pub(crate) fn with_state_ttl(mut self, ttl_ms: i64) -> Self {
+        self.ttl_ms = ttl_ms.max(0);
+        self
+    }
+
+    /// Reclaims every entry whose TTL elapsed with no further touch of its partition. Silent,
+    /// like Flink's background cleanup.
+    fn sweep_expired(&mut self, ttl: StateTtl) {
+        let track = self.memory.tracking();
+        let mut reclaimed = 0isize;
+        self.groups.retain_live(&mut |key, buffer| {
+            reclaimed += prune_expired_updatable_rows(buffer, ttl, track);
+            if buffer.is_empty() {
+                if track {
+                    reclaimed += (key.len() + GROUP_ENTRY_OVERHEAD) as isize;
+                }
+                false
+            } else {
+                true
+            }
+        });
+        if reclaimed != 0 {
+            self.memory.record(-reclaimed);
         }
     }
 
@@ -1578,7 +1921,12 @@ impl UpdatableTopNRanker {
         Ok(self)
     }
 
-    pub(crate) fn push(&mut self, batch: &RecordBatch) -> Result<RecordBatch, DataFusionError> {
+    /// `now_ms` is the host's wall-clock reading for this call (only read when state TTL is on).
+    pub(crate) fn push(
+        &mut self,
+        batch: &RecordBatch,
+        now_ms: i64,
+    ) -> Result<RecordBatch, DataFusionError> {
         let arity = data_arity(batch);
         self.schema = Some(data_schema(batch));
         if self.converters.is_none() {
@@ -1588,6 +1936,11 @@ impl UpdatableTopNRanker {
                 &self.partition_columns,
                 &self.sort_columns,
             ));
+        }
+        let ttl = StateTtl::new(self.ttl_ms, now_ms);
+        if ttl.enabled() && now_ms >= self.last_sweep_ms + self.ttl_ms {
+            self.sweep_expired(ttl);
+            self.last_sweep_ms = now_ms;
         }
         self.groups
             .begin_batch(batch, &self.partition_columns, &self.key_timestamp_precisions)?;
@@ -1614,6 +1967,11 @@ impl UpdatableTopNRanker {
         let track = self.memory.tracking();
         let mut delta = 0isize;
         let groups = &mut self.groups;
+        // Partitions already pruned by this call (see the append-only push).
+        let mut pruned: HashSet<ByteKey> = HashSet::default();
+        // Every state write (replace, move, insert) stamps the entry's clock; 0 with TTL off so
+        // the TTL-off state stays byte-identical.
+        let stamp = if ttl.enabled() { ttl.now() } else { 0 };
         let mut out_rows: Vec<Arc<OwnedRow>> = Vec::new();
         let mut out_kinds: Vec<i8> = Vec::new();
         let mut out_ranks: Vec<i64> = Vec::new();
@@ -1630,6 +1988,12 @@ impl UpdatableTopNRanker {
                     groups.insert(ByteKey::from(part), Vec::new())
                 }
             };
+            // Per-row-key expiry, enforced before the preimage capture: an expired entry reads as
+            // absent, so its row key's next record takes the fresh-insert path below.
+            if ttl.enabled() && !pruned.contains(part) {
+                delta -= prune_expired_updatable_rows(buffer, ttl, track);
+                pruned.insert(ByteKey::from(part));
+            }
             // The bounded buffer IS the top-N window.
             let old_top: Vec<Arc<OwnedRow>> =
                 buffer.iter().map(|e| Arc::clone(&e.payload)).collect();
@@ -1641,7 +2005,7 @@ impl UpdatableTopNRanker {
                             sort: key_row.owned(),
                             payload: Arc::new(payloads.row(row).owned()),
                             row_key: ByteKey::from(row_keys.encode(row)),
-                            ts_ms: 0,
+                            ts_ms: stamp,
                         };
                         if track {
                             delta += updatable_entry_bytes(&entry) as isize;
@@ -1656,7 +2020,7 @@ impl UpdatableTopNRanker {
                             sort: key_row.owned(),
                             payload: Arc::new(payloads.row(row).owned()),
                             row_key: ByteKey::from(row_keys.encode(row)),
-                            ts_ms: 0,
+                            ts_ms: stamp,
                         };
                         if track {
                             delta += updatable_entry_bytes(&buffer[0]) as isize;
@@ -1677,6 +2041,7 @@ impl UpdatableTopNRanker {
                                     - buffer[index].payload.row().as_ref().len() as isize;
                             }
                             buffer[index].payload = payload;
+                            buffer[index].ts_ms = stamp;
                         } else {
                             let previous = buffer.remove(index);
                             if track {
@@ -1689,7 +2054,7 @@ impl UpdatableTopNRanker {
                                     sort: key_row.owned(),
                                     payload: Arc::new(payloads.row(row).owned()),
                                     row_key: previous.row_key,
-                                    ts_ms: 0,
+                                    ts_ms: stamp,
                                 },
                             );
                             if track {
@@ -1708,7 +2073,7 @@ impl UpdatableTopNRanker {
                                 sort: key_row.owned(),
                                 payload: Arc::new(payloads.row(row).owned()),
                                 row_key: ByteKey::from(row_key),
-                                ts_ms: 0,
+                                ts_ms: stamp,
                             },
                         );
                         if track {
@@ -1742,28 +2107,39 @@ impl UpdatableTopNRanker {
 
     pub(crate) fn snapshot_partitions(&self, max_parallelism: usize) -> BTreeMap<i32, Vec<u8>> {
         let Some(schema) = self.schema.as_ref() else { return BTreeMap::new() };
-        let mut builders: BTreeMap<i32, (BinaryBuilder, BinaryBuilder, BinaryBuilder, BinaryBuilder)> =
-            BTreeMap::new();
+        // The TTL timestamps ride a trailing column only while TTL is on, so a TTL-off snapshot
+        // stays byte-identical to the pre-TTL format.
+        let ttl_on = self.ttl_ms > 0;
+        let mut builders: BTreeMap<
+            i32,
+            (BinaryBuilder, BinaryBuilder, BinaryBuilder, BinaryBuilder, Int64Builder),
+        > = BTreeMap::new();
         for (key, buffer) in self.groups.iter() {
             if buffer.is_empty() {
                 continue;
             }
             let group = flink_key_group(hash_bytes_by_words(&key.0), max_parallelism) as i32;
-            let (keys, sorts, row_keys, rows) = builders.entry(group).or_default();
+            let (keys, sorts, row_keys, rows, write_timestamps) =
+                builders.entry(group).or_default();
             for entry in buffer.iter() {
                 keys.append_value(&key.0);
                 sorts.append_value(entry.sort.row().data());
                 row_keys.append_value(&entry.row_key.0);
                 rows.append_value(entry.payload.row().data());
+                write_timestamps.append_value(entry.ts_ms);
             }
         }
+        let mut fields = vec![
+            Field::new(RAW_SNAPSHOT_KEY, DataType::Binary, false),
+            Field::new(RAW_SNAPSHOT_SORT, DataType::Binary, false),
+            Field::new(RAW_SNAPSHOT_ROW_KEY, DataType::Binary, false),
+            Field::new(RAW_SNAPSHOT_ROW, DataType::Binary, false),
+        ];
+        if ttl_on {
+            fields.push(Field::new(TTL_TS_COLUMN, DataType::Int64, false));
+        }
         let raw_schema = Arc::new(Schema::new_with_metadata(
-            vec![
-                Field::new(RAW_SNAPSHOT_KEY, DataType::Binary, false),
-                Field::new(RAW_SNAPSHOT_SORT, DataType::Binary, false),
-                Field::new(RAW_SNAPSHOT_ROW_KEY, DataType::Binary, false),
-                Field::new(RAW_SNAPSHOT_ROW, DataType::Binary, false),
-            ],
+            fields,
             std::collections::HashMap::from([(
                 RAW_SNAPSHOT_PAYLOAD_SCHEMA.to_string(),
                 encode_schema_metadata(schema),
@@ -1771,22 +2147,27 @@ impl UpdatableTopNRanker {
         ));
         builders
             .into_iter()
-            .map(|(group, (mut keys, mut sorts, mut row_keys, mut rows))| {
-                let batch = RecordBatch::try_new(
-                    raw_schema.clone(),
-                    vec![
+            .map(
+                |(group, (mut keys, mut sorts, mut row_keys, mut rows, mut write_timestamps))| {
+                    let mut columns: Vec<ArrayRef> = vec![
                         Arc::new(keys.finish()),
                         Arc::new(sorts.finish()),
                         Arc::new(row_keys.finish()),
                         Arc::new(rows.finish()),
-                    ],
-                )
-                .expect("raw update-fast top-n snapshot batch");
-                (group, write_ipc(&batch))
-            })
+                    ];
+                    if ttl_on {
+                        columns.push(Arc::new(write_timestamps.finish()));
+                    }
+                    let batch = RecordBatch::try_new(raw_schema.clone(), columns)
+                        .expect("raw update-fast top-n snapshot batch");
+                    (group, write_ipc(&batch))
+                },
+            )
             .collect()
     }
 
+    /// `restored_at_ms` stamps rows from a snapshot carrying no TTL timestamps (a pre-TTL or
+    /// TTL-off writer) — the enable-TTL migration.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn restore_partitions(
         partition_columns: Vec<usize>,
@@ -1797,6 +2178,7 @@ impl UpdatableTopNRanker {
         limit: i64,
         output_rank_number: bool,
         snapshots: &[Vec<u8>],
+        restored_at_ms: i64,
     ) -> Self {
         let mut ranker = UpdatableTopNRanker::new(
             partition_columns,
@@ -1828,6 +2210,10 @@ impl UpdatableTopNRanker {
                 let sorts = column_binary(&batch, RAW_SNAPSHOT_SORT);
                 let row_keys = column_binary(&batch, RAW_SNAPSHOT_ROW_KEY);
                 let rows = column_binary(&batch, RAW_SNAPSHOT_ROW);
+                let write_timestamps = batch
+                    .column_by_name(TTL_TS_COLUMN)
+                    .is_some()
+                    .then(|| column_i64(&batch, TTL_TS_COLUMN));
                 for row in 0..batch.num_rows() {
                     let part = keys.value(row);
                     let buffer = match ranker.groups.get_mut(part) {
@@ -1838,7 +2224,9 @@ impl UpdatableTopNRanker {
                         sort: sort_parser.parse(sorts.value(row)).owned(),
                         payload: Arc::new(payload_parser.parse(rows.value(row)).owned()),
                         row_key: ByteKey::from(row_keys.value(row)),
-                        ts_ms: 0,
+                        ts_ms: write_timestamps
+                            .as_ref()
+                            .map_or(restored_at_ms, |ts| ts.value(row)),
                     });
                 }
             }
@@ -1857,11 +2245,11 @@ pub(crate) enum TopNHandle {
 }
 
 impl TopNHandle {
-    fn push(&mut self, batch: &RecordBatch) -> Result<RecordBatch, DataFusionError> {
+    fn push(&mut self, batch: &RecordBatch, now_ms: i64) -> Result<RecordBatch, DataFusionError> {
         match self {
-            TopNHandle::Append(r) => r.push(batch),
-            TopNHandle::Retract(r) => r.push(batch),
-            TopNHandle::UpdateFast(r) => r.push(batch),
+            TopNHandle::Append(r) => r.push(batch, now_ms),
+            TopNHandle::Retract(r) => r.push(batch, now_ms),
+            TopNHandle::UpdateFast(r) => r.push(batch, now_ms),
         }
     }
 
@@ -1913,7 +2301,9 @@ impl TopNHandle {
         output_rank_number: bool,
         retracting: bool,
         net_diff: bool,
+        state_ttl_ms: i64,
         snapshots: &[Vec<u8>],
+        restored_at_ms: i64,
     ) -> Self {
         if retracting {
             TopNHandle::Retract(
@@ -1925,19 +2315,25 @@ impl TopNHandle {
                     limit,
                     output_rank_number,
                     snapshots,
+                    restored_at_ms,
                 )
-                .with_net_diff(net_diff),
+                .with_net_diff(net_diff)
+                .with_state_ttl(state_ttl_ms),
             )
         } else {
-            TopNHandle::Append(TopNRanker::restore_partitions(
-                partition_columns,
-                key_timestamp_precisions,
-                sort_columns,
-                limit,
-                output_rank_number,
-                net_diff,
-                snapshots,
-            ))
+            TopNHandle::Append(
+                TopNRanker::restore_partitions(
+                    partition_columns,
+                    key_timestamp_precisions,
+                    sort_columns,
+                    limit,
+                    output_rank_number,
+                    net_diff,
+                    snapshots,
+                    restored_at_ms,
+                )
+                .with_state_ttl(state_ttl_ms),
+            )
         }
     }
 }
@@ -2647,6 +3043,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createTopNRan
     output_rank_number: jboolean,
     retracting: jboolean,
     net_diff: jboolean,
+    state_ttl_millis: jlong,
     memory_budget_bytes: jlong,
 ) -> jlong {
     crate::bridge::jni_guard(env, move |mut env| {
@@ -2666,7 +3063,8 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createTopNRan
                     output_rank_number != 0,
                 )
                 .with_key_timestamp_precisions(timestamp_precisions)
-                .with_net_diff(net_diff != 0),
+                .with_net_diff(net_diff != 0)
+                .with_state_ttl(state_ttl_millis),
             )
         } else {
             // The append-only ranker is the no-OFFSET path (offset always 0).
@@ -2678,7 +3076,8 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createTopNRan
                     output_rank_number != 0,
                     net_diff != 0,
                 )
-                .with_key_timestamp_precisions(timestamp_precisions),
+                .with_key_timestamp_precisions(timestamp_precisions)
+                .with_state_ttl(state_ttl_millis),
             )
         };
         boxed_or_throw(&mut env, handle.with_memory_budget(memory_budget_bytes))
@@ -2686,7 +3085,8 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createTopNRan
 }
 
 /// Folds an input batch into the per-partition top-N and exports the changelog it produces (the
-/// input columns plus `$row_kind$`).
+/// input columns plus `$row_kind$`). `now_millis` is the host's processing-time reading — the
+/// state-TTL clock.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushTopNRanker<'local>(
     env: JNIEnv<'local>,
@@ -2694,6 +3094,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushTopNRanke
     handle: jlong,
     in_array_address: jlong,
     in_schema_address: jlong,
+    now_millis: jlong,
     out_array_address: jlong,
     out_schema_address: jlong,
 ) {
@@ -2702,7 +3103,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushTopNRanke
         // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
         let result = {
             let batch = import_record_batch(in_array_address, in_schema_address);
-            ranker.push(&batch)
+            ranker.push(&batch, now_millis)
         };
         match result {
             Ok(out) => export_record_batch(out, out_array_address, out_schema_address),
@@ -2756,6 +3157,8 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreTopNRa
     output_rank_number: jboolean,
     retracting: jboolean,
     net_diff: jboolean,
+    state_ttl_millis: jlong,
+    now_millis: jlong,
     snapshot: JByteArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
@@ -2768,25 +3171,34 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreTopNRa
         let sort = read_sort_columns(&env, &sort_indices, &sort_ascending, &sort_nulls_first);
         let bytes = env.convert_byte_array(&snapshot).expect("failed to read top-n snapshot");
         let handle = if retracting != 0 {
-            TopNHandle::Retract(RetractableTopNRanker::restore(
-                partitions,
-                timestamp_precisions,
-                sort,
-                offset,
-                limit,
-                output_rank_number != 0,
-                &bytes,
-            ).with_net_diff(net_diff != 0))
+            TopNHandle::Retract(
+                RetractableTopNRanker::restore(
+                    partitions,
+                    timestamp_precisions,
+                    sort,
+                    offset,
+                    limit,
+                    output_rank_number != 0,
+                    &bytes,
+                    now_millis,
+                )
+                .with_net_diff(net_diff != 0)
+                .with_state_ttl(state_ttl_millis),
+            )
         } else {
-            TopNHandle::Append(TopNRanker::restore(
-                partitions,
-                timestamp_precisions,
-                sort,
-                limit,
-                output_rank_number != 0,
-                net_diff != 0,
-                &bytes,
-            ))
+            TopNHandle::Append(
+                TopNRanker::restore(
+                    partitions,
+                    timestamp_precisions,
+                    sort,
+                    limit,
+                    output_rank_number != 0,
+                    net_diff != 0,
+                    &bytes,
+                    now_millis,
+                )
+                .with_state_ttl(state_ttl_millis),
+            )
         };
         boxed_or_throw(&mut env, handle.with_memory_budget(memory_budget_bytes))
     })
@@ -2828,6 +3240,8 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreTopNRa
     output_rank_number: jboolean,
     retracting: jboolean,
     net_diff: jboolean,
+    state_ttl_millis: jlong,
+    now_millis: jlong,
     snapshots: JObjectArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
@@ -2861,7 +3275,9 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreTopNRa
             output_rank_number != 0,
             retracting != 0,
             net_diff != 0,
+            state_ttl_millis,
             &restored,
+            now_millis,
         )
         .with_memory_budget(memory_budget_bytes);
         boxed_or_throw(&mut env, ranker)
@@ -2886,6 +3302,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createUpdateF
     sort_nulls_first: JIntArray<'local>,
     limit: jlong,
     output_rank_number: jboolean,
+    state_ttl_millis: jlong,
     memory_budget_bytes: jlong,
 ) -> jlong {
     crate::bridge::jni_guard(env, move |mut env| {
@@ -2900,15 +3317,18 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createUpdateF
             .map(|precision| precision as i32)
             .collect();
         let sort = read_sort_columns(&env, &sort_indices, &sort_ascending, &sort_nulls_first);
-        let handle = TopNHandle::UpdateFast(UpdatableTopNRanker::new(
-            partitions,
-            partition_precisions,
-            row_keys,
-            row_key_precisions,
-            sort,
-            limit,
-            output_rank_number != 0,
-        ));
+        let handle = TopNHandle::UpdateFast(
+            UpdatableTopNRanker::new(
+                partitions,
+                partition_precisions,
+                row_keys,
+                row_key_precisions,
+                sort,
+                limit,
+                output_rank_number != 0,
+            )
+            .with_state_ttl(state_ttl_millis),
+        );
         boxed_or_throw(&mut env, handle.with_memory_budget(memory_budget_bytes))
     })
 }
@@ -2929,6 +3349,8 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreUpdate
     sort_nulls_first: JIntArray<'local>,
     limit: jlong,
     output_rank_number: jboolean,
+    state_ttl_millis: jlong,
+    now_millis: jlong,
     snapshots: JObjectArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
@@ -2958,16 +3380,20 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreUpdate
                     .expect("read update-fast top-n raw partition bytes"),
             );
         }
-        let ranker = TopNHandle::UpdateFast(UpdatableTopNRanker::restore_partitions(
-            partitions,
-            partition_precisions,
-            row_keys,
-            row_key_precisions,
-            sort,
-            limit,
-            output_rank_number != 0,
-            &restored,
-        ))
+        let ranker = TopNHandle::UpdateFast(
+            UpdatableTopNRanker::restore_partitions(
+                partitions,
+                partition_precisions,
+                row_keys,
+                row_key_precisions,
+                sort,
+                limit,
+                output_rank_number != 0,
+                &restored,
+                now_millis,
+            )
+            .with_state_ttl(state_ttl_millis),
+        )
         .with_memory_budget(memory_budget_bytes);
         boxed_or_throw(&mut env, ranker)
     })
@@ -3018,11 +3444,11 @@ mod tests {
         )
         .with_net_diff(true);
 
-        assert_eq!(ranker.push(&changelog(&[10, 20, 30], &[0, 0, 0])).unwrap().num_rows(), 0);
+        assert_eq!(ranker.push(&changelog(&[10, 20, 30], &[0, 0, 0]), 0).unwrap().num_rows(), 0);
         assert_eq!(ranker.flush_net_diff().num_rows(), 2);
 
-        assert_eq!(ranker.push(&changelog(&[10], &[3])).unwrap().num_rows(), 0);
-        assert_eq!(ranker.push(&changelog(&[5], &[0])).unwrap().num_rows(), 0);
+        assert_eq!(ranker.push(&changelog(&[10], &[3]), 0).unwrap().num_rows(), 0);
+        assert_eq!(ranker.push(&changelog(&[5], &[0]), 0).unwrap().num_rows(), 0);
         assert_eq!(ranker.staged_partitions(), 1);
         let out = ranker.flush_net_diff();
         let values = out.column(1).as_any().downcast_ref::<Int64Array>().unwrap();

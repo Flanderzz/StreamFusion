@@ -34,6 +34,10 @@ class NativeColumnarTopNOperatorTest {
       RowType.of(new LogicalType[] {new BigIntType(), new BigIntType()}, new String[] {"p", "s"});
 
   private static NativeColumnarTopNOperator operator() {
+    return operator(0);
+  }
+
+  private static NativeColumnarTopNOperator operator(long stateTtlMillis) {
     return new NativeColumnarTopNOperator(
         new int[] {0},
         new int[] {-1},
@@ -49,6 +53,7 @@ class NativeColumnarTopNOperatorTest {
         null,
         false,
         -1,
+        stateTtlMillis,
         MAX_PARALLELISM);
   }
 
@@ -68,6 +73,7 @@ class NativeColumnarTopNOperatorTest {
         null,
         true,
         miniBatchSize,
+        0,
         MAX_PARALLELISM);
   }
 
@@ -87,6 +93,7 @@ class NativeColumnarTopNOperatorTest {
         null,
         true,
         miniBatchSize,
+        0,
         MAX_PARALLELISM);
   }
 
@@ -204,6 +211,85 @@ class NativeColumnarTopNOperatorTest {
   }
 
   @Test
+  void ttlExpiresIdleRankStateSilently() throws Exception {
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness =
+            harness(operator(1000), 1, 0)) {
+      harness.setup(new ArrowBatchSerializer());
+      harness.open();
+      harness.setProcessingTime(5000);
+      harness.processElement(new StreamRecord<>(batch(allocator, row(1, 5), row(1, 3))));
+      assertEquals(
+          List.of(change(RowKind.INSERT, 1, 5), change(RowKind.INSERT, 1, 3)), collect(harness));
+      // ts 5000 + ttl 1000 <= 6000: expired exactly at the boundary — no DELETE is emitted, and
+      // the worse 8 enters a fresh top-2 instead of being dropped at rank 3.
+      harness.setProcessingTime(6000);
+      harness.processElement(new StreamRecord<>(batch(allocator, row(1, 8))));
+      assertEquals(List.of(change(RowKind.INSERT, 1, 8)), collect(harness));
+    }
+  }
+
+  @Test
+  void ttlRefreshesOnEveryWrite() throws Exception {
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness =
+            harness(operator(1000), 1, 0)) {
+      harness.setup(new ArrowBatchSerializer());
+      harness.open();
+      harness.setProcessingTime(5000);
+      harness.processElement(new StreamRecord<>(batch(allocator, row(1, 5))));
+      collect(harness);
+      // A byte-equal sort key joins the first 5's list, refreshing both (Flink rewrites the
+      // whole sort-key list on insert).
+      harness.setProcessingTime(5900);
+      harness.processElement(new StreamRecord<>(batch(allocator, row(1, 5))));
+      collect(harness);
+      // At 6800 the first write is long past its ttl but alive through the refresh: the top-2 is
+      // still {5, 5}, so the 9 ranks third and emits nothing.
+      harness.setProcessingTime(6800);
+      harness.processElement(new StreamRecord<>(batch(allocator, row(1, 9))));
+      assertEquals(List.of(), collect(harness));
+    }
+  }
+
+  @Test
+  void ttlTimestampsSurviveSnapshotRestore() throws Exception {
+    // Timestamps are absolute: expiry after a restore is timed from the original write.
+    OperatorSubtaskState snapshot;
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness =
+            harness(operator(1000), 1, 0)) {
+      harness.setup(new ArrowBatchSerializer());
+      harness.open();
+      harness.setProcessingTime(5000);
+      harness.processElement(new StreamRecord<>(batch(allocator, row(1, 5), row(1, 3))));
+      snapshot = harness.snapshot(1L, 1L);
+      collect(harness);
+    }
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> restored =
+            harness(operator(1000), 1, 0)) {
+      restored.setup(new ArrowBatchSerializer());
+      restored.initializeState(snapshot);
+      restored.open();
+      restored.setProcessingTime(5999);
+      restored.processElement(new StreamRecord<>(batch(allocator, row(1, 4))));
+      assertEquals(
+          List.of(change(RowKind.DELETE, 1, 5), change(RowKind.INSERT, 1, 4)), collect(restored));
+    }
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> restored =
+            harness(operator(1000), 1, 0)) {
+      restored.setup(new ArrowBatchSerializer());
+      restored.initializeState(snapshot);
+      restored.open();
+      restored.setProcessingTime(6000);
+      restored.processElement(new StreamRecord<>(batch(allocator, row(1, 4))));
+      assertEquals(List.of(change(RowKind.INSERT, 1, 4)), collect(restored));
+    }
+  }
+
+  @Test
   void rawKeyedStateRescalesByFlinkKeyGroup() throws Exception {
     long[] keys = keysForBothSubtasks();
     OperatorSubtaskState snapshot;
@@ -306,6 +392,10 @@ class NativeColumnarTopNOperatorTest {
           new String[] {"p", "k", "s"});
 
   private static NativeColumnarTopNOperator updateFastOperator() {
+    return updateFastOperator(0);
+  }
+
+  private static NativeColumnarTopNOperator updateFastOperator(long stateTtlMillis) {
     return new NativeColumnarTopNOperator(
         new int[] {0},
         new int[] {-1},
@@ -321,6 +411,7 @@ class NativeColumnarTopNOperatorTest {
         new int[] {-1, -1},
         false,
         -1,
+        stateTtlMillis,
         MAX_PARALLELISM);
   }
 
@@ -352,6 +443,24 @@ class NativeColumnarTopNOperatorTest {
       assertEquals(
           List.of(change3(RowKind.INSERT, 1, 2, 2), change3(RowKind.DELETE, 1, 2, 3)),
           collect3(restored));
+    }
+  }
+
+  @Test
+  void ttlExpiredUpdateFastEntryReinsertsFresh() throws Exception {
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness =
+            harness(updateFastOperator(1000), 1, 0)) {
+      harness.setup(new ArrowBatchSerializer());
+      harness.open();
+      harness.setProcessingTime(5000);
+      harness.processElement(new StreamRecord<>(updateFastBatch(allocator, row3(1, 1, 5))));
+      assertEquals(List.of(change3(RowKind.INSERT, 1, 1, 5)), collect3(harness));
+      // Key 1's entry expired: its new version is a fresh insert — un-expired, this update would
+      // also retract the version-5 payload.
+      harness.setProcessingTime(6000);
+      harness.processElement(new StreamRecord<>(updateFastBatch(allocator, row3(1, 1, 9))));
+      assertEquals(List.of(change3(RowKind.INSERT, 1, 1, 9)), collect3(harness));
     }
   }
 

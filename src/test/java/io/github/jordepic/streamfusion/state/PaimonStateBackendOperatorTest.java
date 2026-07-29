@@ -499,6 +499,7 @@ class PaimonStateBackendOperatorTest {
             null,
             false,
             -1,
+            0,
             MAX_PARALLELISM);
     return new KeyedOneInputStreamOperatorTestHarness<>(
         operator, batch -> 0, Types.INT, MAX_PARALLELISM, 1, 0);
@@ -522,6 +523,7 @@ class PaimonStateBackendOperatorTest {
             null,
             false,
             -1,
+            0,
             MAX_PARALLELISM);
     return new KeyedOneInputStreamOperatorTestHarness<>(
         operator, batch -> 0, Types.INT, MAX_PARALLELISM, 1, 0);

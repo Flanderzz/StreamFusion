@@ -87,6 +87,9 @@ public class NativeColumnarTopNExecNode extends ExecNodeBase<ArrowBatch>
             org.apache.flink.table.api.config.ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_ENABLED);
     long miniBatchSize =
         config.get(org.apache.flink.table.api.config.ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_SIZE);
+    // The job-wide idle-state retention; Flink defines STATE_TTL hints only for joins and
+    // aggregates, so ranks have no per-operator override to resolve.
+    long stateTtlMillis = config.getStateRetentionTime();
     int maxParallelism = FlinkKeyGroupUtils.defaultMaxParallelism(input.getParallelism());
     int[] stateKeys = FlinkKeyGroupUtils.stateKeysForSubtasks(maxParallelism, input.getParallelism());
     KeySelector<ArrowBatch, Integer> stateKeySelector =
@@ -111,6 +114,7 @@ public class NativeColumnarTopNExecNode extends ExecNodeBase<ArrowBatch>
                 rowKeyTimestampPrecisions,
                 netDiff,
                 miniBatchSize,
+                stateTtlMillis,
                 maxParallelism),
             ArrowBatchTypeInformation.INSTANCE,
             input.getParallelism(),

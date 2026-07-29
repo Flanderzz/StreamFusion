@@ -1658,11 +1658,11 @@ fn topn_buffer_stays_within_budget_under_eviction() {
         .with_memory_budget(1 << 20)
         .unwrap();
     for i in 0..50 {
-        ranker.push(&topn_batch(vec![1], vec![i])).unwrap();
+        ranker.push(&topn_batch(vec![1], vec![i]), 0).unwrap();
     }
     let bounded = ranker.memory.state_bytes;
     for i in 50..100 {
-        ranker.push(&topn_batch(vec![1], vec![i])).unwrap();
+        ranker.push(&topn_batch(vec![1], vec![i]), 0).unwrap();
     }
     assert_eq!(ranker.memory.state_bytes, bounded); // eviction keeps the tracked state flat
 }
@@ -1672,7 +1672,7 @@ fn topn_net_diff_staging_is_accounted_and_released_on_flush() {
     let mut ranker = TopNRanker::new(vec![0], vec![asc(1)], 3, false, true)
         .with_memory_budget(1 << 20)
         .unwrap();
-    ranker.push(&topn_batch(vec![1, 1, 2], vec![5, 3, 7])).unwrap();
+    ranker.push(&topn_batch(vec![1, 1, 2], vec![5, 3, 7]), 0).unwrap();
     assert_eq!(ranker.staged_partitions(), 2);
     assert!(ranker.staging_bytes() > 0);
     let bundled = ranker.memory.state_bytes;
@@ -2158,7 +2158,7 @@ fn topn_keeps_smallest_n_per_partition() {
     // partition col 0, ORDER BY col 1 ASC, limit 2.
     let mut ranker = TopNRanker::new(vec![0], vec![asc(1)], 2, false, false);
     // s = 5, 3, 8, 1 for partition 1.
-    let out = ranker.push(&topn_batch(vec![1, 1, 1, 1], vec![5, 3, 8, 1])).unwrap();
+    let out = ranker.push(&topn_batch(vec![1, 1, 1, 1], vec![5, 3, 8, 1]), 0).unwrap();
     // 5: +I5. 3: +I3 (top2 = {3,5}). 8: rank 3 -> nothing. 1: +I1, -D5 (top2 = {1,3}).
     assert_eq!(row_kinds(&out), vec![0, 0, 3, 0]);
     assert_eq!(values(&out, 1), vec![5, 3, 5, 1]); // the sort-key column of each emitted row
@@ -2169,7 +2169,7 @@ fn topn_keeps_smallest_n_per_partition() {
 #[test]
 fn topn_with_rank_number_emits_cascade() {
     let mut ranker = TopNRanker::new(vec![0], vec![asc(1)], 2, true, false);
-    let out = ranker.push(&topn_batch(vec![1, 1, 1, 1], vec![5, 3, 8, 1])).unwrap();
+    let out = ranker.push(&topn_batch(vec![1, 1, 1, 1], vec![5, 3, 8, 1]), 0).unwrap();
     // 5: +I(5,1). 3: -U(5,1) +U(3,1) +I(5,2). 8: rank 3 -> nothing.
     // 1: -U(3,1) +U(1,1) -U(5,2) +U(3,2)  [5 pushed past rank 2, retracted by the -U].
     assert_eq!(row_kinds(&out), vec![0, 1, 2, 0, 1, 2, 1, 2]);
@@ -2181,7 +2181,7 @@ fn topn_with_rank_number_emits_cascade() {
 #[test]
 fn topn_is_per_partition() {
     let mut ranker = TopNRanker::new(vec![0], vec![asc(1)], 1, false, false);
-    let out = ranker.push(&topn_batch(vec![1, 2, 1], vec![5, 7, 3])).unwrap();
+    let out = ranker.push(&topn_batch(vec![1, 2, 1], vec![5, 7, 3]), 0).unwrap();
     // p1: +I5; p2: +I7; p1 sees 3 < 5 -> -D5 then +I3 (delete first, as the host emits).
     assert_eq!(row_kinds(&out), vec![0, 0, 3, 0]);
     assert_eq!(values(&out, 0), vec![1, 2, 1, 1]); // partition of each emitted row
@@ -2193,9 +2193,9 @@ fn topn_is_per_partition() {
 #[test]
 fn topn_net_diff_emits_batch_delta_with_rank() {
     let mut ranker = TopNRanker::new(vec![0], vec![asc(1)], 2, true, true);
-    let pending = ranker.push(&topn_batch(vec![1, 1], vec![5, 3])).unwrap();
+    let pending = ranker.push(&topn_batch(vec![1, 1], vec![5, 3]), 0).unwrap();
     assert_eq!(pending.num_rows(), 0);
-    let pending = ranker.push(&topn_batch(vec![1, 1], vec![8, 1])).unwrap();
+    let pending = ranker.push(&topn_batch(vec![1, 1], vec![8, 1]), 0).unwrap();
     assert_eq!(pending.num_rows(), 0);
     let out = ranker.flush_net_diff();
     // Fresh partition: old top empty, new top = {1@rank1, 3@rank2} — two inserts, no cascade.
@@ -2204,7 +2204,7 @@ fn topn_net_diff_emits_batch_delta_with_rank() {
     assert_eq!(values(&out, 2), vec![1, 2]);
 
     // Second batch: 2 enters at rank 2 (1 stays at rank 1) — one -U/+U pair, rank 1 untouched.
-    ranker.push(&topn_batch(vec![1], vec![2])).unwrap();
+    ranker.push(&topn_batch(vec![1], vec![2]), 0).unwrap();
     let out = ranker.flush_net_diff();
     assert_eq!(row_kinds(&out), vec![1, 2]);
     assert_eq!(values(&out, 1), vec![3, 2]);
@@ -2215,19 +2215,19 @@ fn topn_net_diff_emits_batch_delta_with_rank() {
 #[test]
 fn topn_net_diff_emits_membership_delta() {
     let mut ranker = TopNRanker::new(vec![0], vec![asc(1)], 2, false, true);
-    ranker.push(&topn_batch(vec![1, 1], vec![5, 3])).unwrap();
-    ranker.push(&topn_batch(vec![1, 1], vec![8, 1])).unwrap();
+    ranker.push(&topn_batch(vec![1, 1], vec![5, 3]), 0).unwrap();
+    ranker.push(&topn_batch(vec![1, 1], vec![8, 1]), 0).unwrap();
     let out = ranker.flush_net_diff();
     // New partition: final top-2 = {1, 3}; the transient 5 never surfaces.
     assert_eq!(row_kinds(&out), vec![0, 0]);
     assert_eq!(values(&out, 1), vec![1, 3]);
 
     // 2 displaces 3: one -D and one +I; a batch that changes nothing emits nothing.
-    ranker.push(&topn_batch(vec![1], vec![2])).unwrap();
+    ranker.push(&topn_batch(vec![1], vec![2]), 0).unwrap();
     let out = ranker.flush_net_diff();
     assert_eq!(row_kinds(&out), vec![3, 0]);
     assert_eq!(values(&out, 1), vec![3, 2]);
-    ranker.push(&topn_batch(vec![1], vec![9])).unwrap();
+    ranker.push(&topn_batch(vec![1], vec![9]), 0).unwrap();
     let out = ranker.flush_net_diff();
     assert_eq!(out.num_rows(), 0);
 }
@@ -2236,13 +2236,353 @@ fn topn_net_diff_emits_membership_delta() {
 #[test]
 fn topn_buffer_survives_snapshot_restore() {
     let mut ranker = TopNRanker::new(vec![0], vec![asc(1)], 2, false, false);
-    ranker.push(&topn_batch(vec![1, 1], vec![5, 3])); // top2 = {3, 5}
+    ranker.push(&topn_batch(vec![1, 1], vec![5, 3]), 0); // top2 = {3, 5}
     let snapshot = ranker.snapshot();
-    let mut restored = TopNRanker::restore(vec![0], vec![-1], vec![asc(1)], 2, false, false, &snapshot);
+    let mut restored =
+        TopNRanker::restore(vec![0], vec![-1], vec![asc(1)], 2, false, false, &snapshot, 0);
     // A 1 enters the restored top-2 and displaces the 5.
-    let out = restored.push(&topn_batch(vec![1], vec![1])).unwrap();
+    let out = restored.push(&topn_batch(vec![1], vec![1]), 0).unwrap();
     assert_eq!(row_kinds(&out), vec![3, 0]); // -D5, +I1
     assert_eq!(values(&out, 1), vec![5, 1]);
+}
+
+// A `[p, s, $row_kind$]` changelog batch for the retracting Top-N TTL tests.
+fn topn_changelog(p: Vec<i64>, s: Vec<i64>, kinds: Vec<i8>) -> RecordBatch {
+    RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("p", DataType::Int64, false),
+            Field::new("s", DataType::Int64, true),
+            Field::new(ROW_KIND_COLUMN, DataType::Int8, false),
+        ])),
+        vec![
+            Arc::new(Int64Array::from(p)),
+            Arc::new(Int64Array::from(s)),
+            Arc::new(Int8Array::from(kinds)),
+        ],
+    )
+    .unwrap()
+}
+
+// State TTL: append-only Top-N expiry is per sort-key list, silent — no -D for an expired row
+// (downstream only ever saw +I's), and subsequent output ranks against the survivors.
+#[test]
+fn topn_ttl_expired_rows_vanish_silently_and_rank_against_survivors() {
+    let mut ranker = TopNRanker::new(vec![0], vec![asc(1)], 2, false, false).with_state_ttl(1000);
+    let out = ranker.push(&topn_batch(vec![1, 1], vec![5, 3]), 5000).unwrap();
+    assert_eq!(row_kinds(&out), vec![0, 0]);
+    // ts 5000 + ttl 1000 <= 6000: both rows expired — the prune emits nothing and the new row is
+    // a fresh +I against an empty buffer.
+    let out = ranker.push(&topn_batch(vec![1], vec![8]), 6000).unwrap();
+    assert_eq!(row_kinds(&out), vec![0]);
+    assert_eq!(values(&out, 1), vec![8]);
+    // Ranking continues against the survivor: 9 takes rank 2, then 7 displaces it.
+    let out = ranker.push(&topn_batch(vec![1, 1], vec![9, 7]), 6000).unwrap();
+    assert_eq!(row_kinds(&out), vec![0, 3, 0]);
+    assert_eq!(values(&out, 1), vec![9, 9, 7]);
+}
+
+// With the rank number projected, the prune runs before the cascade positions are read: an
+// expired top-2 admits the new row at rank 1 with a single +I, no -U/+U against expired rows.
+#[test]
+fn topn_ttl_prunes_before_the_rank_cascade() {
+    let mut ranker = TopNRanker::new(vec![0], vec![asc(1)], 2, true, false).with_state_ttl(1000);
+    ranker.push(&topn_batch(vec![1, 1], vec![5, 3]), 5000).unwrap();
+    let out = ranker.push(&topn_batch(vec![1], vec![4]), 6000).unwrap();
+    assert_eq!(row_kinds(&out), vec![0]);
+    assert_eq!(values(&out, 2), vec![1]); // the appended rank column: fresh rank 1
+}
+
+// Byte-equal sort keys are one Flink list, rewritten whole on every insert: one tie member's
+// arrival keeps the earlier members alive.
+#[test]
+fn topn_ttl_tie_insert_refreshes_the_whole_sort_key_list() {
+    let mut ranker = TopNRanker::new(vec![0], vec![asc(1)], 2, false, false).with_state_ttl(1000);
+    ranker.push(&topn_batch(vec![1], vec![5]), 5000).unwrap();
+    ranker.push(&topn_batch(vec![1], vec![5]), 5600).unwrap();
+    // At 6300 the first 5 is alive only through the tie refresh at 5600: both survive, so the 1
+    // displaces the second 5 rather than sliding into a half-empty buffer.
+    let out = ranker.push(&topn_batch(vec![1], vec![1]), 6300).unwrap();
+    assert_eq!(row_kinds(&out), vec![3, 0]);
+    assert_eq!(values(&out, 1), vec![5, 1]);
+}
+
+// Evicting one member of the last sort-key list writes the trimmed list back (Flink's
+// updateState rewrite), refreshing the remaining members.
+#[test]
+fn topn_ttl_eviction_rewrite_refreshes_the_trimmed_sort_key_list() {
+    let mut ranker = TopNRanker::new(vec![0], vec![asc(1)], 2, false, false).with_state_ttl(1000);
+    ranker.push(&topn_batch(vec![1, 1], vec![9, 9]), 5000).unwrap();
+    // The 1 evicts the second 9; the trimmed {9} list is rewritten, refreshed to 5600.
+    let out = ranker.push(&topn_batch(vec![1], vec![1]), 5600).unwrap();
+    assert_eq!(row_kinds(&out), vec![3, 0]);
+    // At 6300 the surviving 9 (written 5000) is alive only through that rewrite: the 5 displaces
+    // it instead of filling a pruned buffer.
+    let out = ranker.push(&topn_batch(vec![1], vec![5]), 6300).unwrap();
+    assert_eq!(row_kinds(&out), vec![3, 0]);
+    assert_eq!(values(&out, 1), vec![9, 5]);
+}
+
+// Timestamps are absolute and ride the snapshot: expiry after a restore is timed from the
+// original write, inclusively at write + ttl (Flink's `ts + ttl <= now`).
+#[test]
+fn topn_ttl_timestamps_survive_snapshot_restore() {
+    let mut ranker = TopNRanker::new(vec![0], vec![asc(1)], 1, false, false).with_state_ttl(1000);
+    ranker.push(&topn_batch(vec![1], vec![5]), 5000).unwrap();
+    let snapshot = ranker.snapshot();
+    // One ms inside the window: the buffered 5 is alive, so the worse 7 never enters.
+    let mut alive =
+        TopNRanker::restore(vec![0], vec![-1], vec![asc(1)], 1, false, false, &snapshot, 5500)
+            .with_state_ttl(1000);
+    assert_eq!(alive.push(&topn_batch(vec![1], vec![7]), 5999).unwrap().num_rows(), 0);
+    // Expired exactly at the boundary — the strictly worse row becomes a fresh top-1.
+    let mut expired =
+        TopNRanker::restore(vec![0], vec![-1], vec![asc(1)], 1, false, false, &snapshot, 5500)
+            .with_state_ttl(1000);
+    let out = expired.push(&topn_batch(vec![1], vec![7]), 6000).unwrap();
+    assert_eq!(row_kinds(&out), vec![0]);
+    assert_eq!(values(&out, 1), vec![7]);
+}
+
+// A pre-TTL snapshot (no timestamp column) restored into a TTL'd ranker stamps every row with
+// the restore time — a full retention from now, Flink's enable-TTL migration.
+#[test]
+fn topn_ttl_enable_migration_stamps_restore_time() {
+    let mut ranker = TopNRanker::new(vec![0], vec![asc(1)], 1, false, false);
+    ranker.push(&topn_batch(vec![1], vec![5]), 0).unwrap();
+    let snapshot = ranker.snapshot(); // TTL off: no timestamp column
+    let mut restored =
+        TopNRanker::restore(vec![0], vec![-1], vec![asc(1)], 1, false, false, &snapshot, 5000)
+            .with_state_ttl(1000);
+    assert_eq!(restored.push(&topn_batch(vec![1], vec![7]), 5999).unwrap().num_rows(), 0);
+    let mut expired =
+        TopNRanker::restore(vec![0], vec![-1], vec![asc(1)], 1, false, false, &snapshot, 5000)
+            .with_state_ttl(1000);
+    let out = expired.push(&topn_batch(vec![1], vec![7]), 6000).unwrap();
+    assert_eq!(row_kinds(&out), vec![0]);
+}
+
+// The periodic sweep reclaims partitions that are never touched again, silently.
+#[test]
+fn topn_ttl_sweep_reclaims_idle_partitions_silently() {
+    let mut ranker = TopNRanker::new(vec![0], vec![asc(1)], 1, false, false).with_state_ttl(1000);
+    ranker.push(&topn_batch(vec![1], vec![10]), 5000).unwrap();
+    ranker.push(&topn_batch(vec![2], vec![20]), 5000).unwrap();
+    // Touching only partition 2 well past both expiries triggers the once-per-period sweep;
+    // partition 1's row is gone from the snapshot without anything having been emitted.
+    let out = ranker.push(&topn_batch(vec![2], vec![21]), 7000).unwrap();
+    assert_eq!(row_kinds(&out), vec![0]); // partition 2's own row had expired too — fresh +I
+    let snapshot = ranker.snapshot();
+    // A TTL-off restore probes what survived: partition 1 was swept, so the worse 50 becomes a
+    // fresh top-1 instead of being dropped against the old 10.
+    let mut probe =
+        TopNRanker::restore(vec![0], vec![-1], vec![asc(1)], 1, false, false, &snapshot, 7000);
+    let out = probe.push(&topn_batch(vec![1], vec![50]), 7000).unwrap();
+    assert_eq!(row_kinds(&out), vec![0]);
+    assert_eq!(values(&out, 1), vec![50]);
+}
+
+// Retracting Top-N models Flink's every-record treemap write as a whole-buffer clock on the head
+// entry: an idle partition expires as one unit, a stale retraction then finds nothing and emits
+// nothing (Flink's lenient skip), and the next accumulate re-seeds through the normal diff.
+#[test]
+fn retracting_topn_ttl_expires_the_whole_buffer_and_drops_stale_retractions() {
+    let mut ranker =
+        RetractableTopNRanker::new(vec![0], vec![asc(1)], 0, 2, false).with_state_ttl(1000);
+    let out = ranker.push(&topn_changelog(vec![1, 1, 1], vec![10, 20, 30], vec![0, 0, 0]), 5000).unwrap();
+    assert_eq!(row_kinds(&out), vec![0, 0]); // +I10, +I20 (30 is rank 3)
+    // At 6000 the buffer expired whole; the retraction of 10 hits a cleared buffer — silence.
+    let out = ranker.push(&topn_changelog(vec![1], vec![10], vec![3]), 6000).unwrap();
+    assert_eq!(out.num_rows(), 0);
+    // An accumulate re-seeds a fresh buffer: one +I, nothing about the expired rows.
+    let out = ranker.push(&topn_changelog(vec![1], vec![15], vec![0]), 6000).unwrap();
+    assert_eq!(row_kinds(&out), vec![0]);
+    assert_eq!(values(&out, 1), vec![15]);
+}
+
+// A retraction is a state write too (Flink rewrites the treemap on every record), so a
+// retract-only stretch keeps the buffer alive.
+#[test]
+fn retracting_topn_ttl_retraction_refreshes_the_buffer_clock() {
+    let mut ranker =
+        RetractableTopNRanker::new(vec![0], vec![asc(1)], 0, 2, false).with_state_ttl(1000);
+    ranker.push(&topn_changelog(vec![1, 1, 1], vec![10, 20, 30], vec![0, 0, 0]), 5000).unwrap();
+    // Retracting rank-3 changes no output but refreshes the whole buffer's clock.
+    let out = ranker.push(&topn_changelog(vec![1], vec![30], vec![3]), 5800).unwrap();
+    assert_eq!(out.num_rows(), 0);
+    // At 6300 the 5000 writes are past their ttl, but the retraction at 5800 kept the buffer:
+    // the 5 displaces 20 out of the top-2 instead of seeding an empty one.
+    let out = ranker.push(&topn_changelog(vec![1], vec![5], vec![0]), 6300).unwrap();
+    assert_eq!(row_kinds(&out), vec![0, 3]);
+    assert_eq!(values(&out, 1), vec![5, 20]);
+}
+
+// The head clock rides the snapshot (buffer order is preserved), with the inclusive boundary.
+#[test]
+fn retracting_topn_ttl_head_clock_survives_snapshot_restore() {
+    let mut ranker =
+        RetractableTopNRanker::new(vec![0], vec![asc(1)], 0, 2, false).with_state_ttl(1000);
+    ranker.push(&topn_changelog(vec![1, 1], vec![10, 20], vec![0, 0]), 5000).unwrap();
+    let snapshot = ranker.snapshot();
+    // One ms inside the window: the buffer is alive, so the accumulate displaces 20.
+    let mut alive =
+        RetractableTopNRanker::restore(vec![0], vec![-1], vec![asc(1)], 0, 2, false, &snapshot, 5500)
+            .with_state_ttl(1000);
+    let out = alive.push(&topn_changelog(vec![1], vec![5], vec![0]), 5999).unwrap();
+    assert_eq!(row_kinds(&out), vec![0, 3]);
+    // Expired exactly at the boundary: the whole buffer clears and the accumulate re-seeds.
+    let mut expired =
+        RetractableTopNRanker::restore(vec![0], vec![-1], vec![asc(1)], 0, 2, false, &snapshot, 5500)
+            .with_state_ttl(1000);
+    let out = expired.push(&topn_changelog(vec![1], vec![5], vec![0]), 6000).unwrap();
+    assert_eq!(row_kinds(&out), vec![0]);
+}
+
+// The sweep drops whole idle buffers by their head clock, silently.
+#[test]
+fn retracting_topn_ttl_sweep_drops_idle_buffers_silently() {
+    let mut ranker =
+        RetractableTopNRanker::new(vec![0], vec![asc(1)], 0, 2, false).with_state_ttl(1000);
+    ranker.push(&topn_changelog(vec![1], vec![10], vec![0]), 5000).unwrap();
+    ranker.push(&topn_changelog(vec![2], vec![20], vec![0]), 5000).unwrap();
+    let out = ranker.push(&topn_changelog(vec![2], vec![21], vec![0]), 7000).unwrap();
+    assert_eq!(row_kinds(&out), vec![0]); // partition 2's buffer had expired too — fresh +I
+    let snapshot = ranker.snapshot();
+    // A TTL-off restore probes what survived: partition 1 was swept, so retracting its old 10
+    // finds nothing and emits nothing (were it resident, the top-2 would emit a -D).
+    let mut probe =
+        RetractableTopNRanker::restore(vec![0], vec![-1], vec![asc(1)], 0, 2, false, &snapshot, 7000);
+    let out = probe.push(&topn_changelog(vec![1], vec![10], vec![3]), 7000).unwrap();
+    assert_eq!(out.num_rows(), 0);
+}
+
+// A `[p, k, s]` batch (no `$row_kind$` — the update-fast input carries no retractions) for the
+// update-fast Top-N TTL tests: partition, unique row key, sort key.
+fn uf_batch(p: Vec<i64>, k: Vec<i64>, s: Vec<i64>) -> RecordBatch {
+    RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("p", DataType::Int64, false),
+            Field::new("k", DataType::Int64, false),
+            Field::new("s", DataType::Int64, true),
+        ])),
+        vec![
+            Arc::new(Int64Array::from(p)),
+            Arc::new(Int64Array::from(k)),
+            Arc::new(Int64Array::from(s)),
+        ],
+    )
+    .unwrap()
+}
+
+fn uf_ranker(limit: i64) -> UpdatableTopNRanker {
+    UpdatableTopNRanker::new(
+        vec![0],
+        vec![-1],
+        vec![0, 1],
+        vec![-1, -1],
+        vec![asc(2)],
+        limit,
+        false,
+    )
+}
+
+// Update-fast TTL granularity is the row-key entry: an expired entry reads as absent, so the row
+// key's next version inserts fresh — no retraction of the expired payload.
+#[test]
+fn update_fast_topn_ttl_expired_row_key_updates_as_a_fresh_insert() {
+    let mut ranker = uf_ranker(2).with_state_ttl(1000);
+    let out = ranker.push(&uf_batch(vec![1], vec![7], vec![5]), 5000).unwrap();
+    assert_eq!(row_kinds(&out), vec![0]);
+    let out = ranker.push(&uf_batch(vec![1], vec![7], vec![9]), 6000).unwrap();
+    assert_eq!(row_kinds(&out), vec![0]); // un-expired this would be the +I(9)/-D(5) move diff
+    assert_eq!(values(&out, 2), vec![9]);
+}
+
+// limit == 1 (FastTop1Function): a non-improving record is dropped WITHOUT a state write (no
+// refresh), and once the single entry expires even a strictly worse row becomes the new top-1 —
+// Flink's expired ValueState read.
+#[test]
+fn update_fast_topn_ttl_expired_top1_admits_a_strictly_worse_row() {
+    let mut ranker = uf_ranker(1).with_state_ttl(1000);
+    ranker.push(&uf_batch(vec![1], vec![7], vec![5]), 5000).unwrap();
+    assert_eq!(ranker.push(&uf_batch(vec![1], vec![8], vec![9]), 5900).unwrap().num_rows(), 0);
+    let out = ranker.push(&uf_batch(vec![1], vec![8], vec![9]), 6000).unwrap();
+    assert_eq!(row_kinds(&out), vec![0]);
+    assert_eq!(values(&out, 2), vec![9]);
+}
+
+// An in-place replace (same row key, same sort key) emits nothing but is a state write, so it
+// refreshes the entry.
+#[test]
+fn update_fast_topn_ttl_in_place_replace_refreshes_the_entry() {
+    let mut ranker = uf_ranker(2).with_state_ttl(1000);
+    ranker.push(&uf_batch(vec![1], vec![7], vec![5]), 5000).unwrap();
+    assert_eq!(ranker.push(&uf_batch(vec![1], vec![7], vec![5]), 5900).unwrap().num_rows(), 0);
+    // At 6300 the entry is alive only through the 5900 refresh: key 7's next version is a move
+    // that retracts the old payload rather than a fresh insert.
+    let out = ranker.push(&uf_batch(vec![1], vec![7], vec![4]), 6300).unwrap();
+    assert_eq!(row_kinds(&out), vec![0, 3]);
+    assert_eq!(values(&out, 2), vec![4, 5]);
+}
+
+// Per-entry timestamps ride the raw snapshot, with the inclusive expiry boundary.
+#[test]
+fn update_fast_topn_ttl_timestamps_survive_snapshot_restore() {
+    let mut ranker = uf_ranker(1).with_state_ttl(1000);
+    ranker.push(&uf_batch(vec![1], vec![7], vec![5]), 5000).unwrap();
+    let snapshot = ranker.snapshot_partitions(1).remove(&0).unwrap();
+    let mut alive = UpdatableTopNRanker::restore_partitions(
+        vec![0],
+        vec![-1],
+        vec![0, 1],
+        vec![-1, -1],
+        vec![asc(2)],
+        1,
+        false,
+        &[snapshot.clone()],
+        5500,
+    )
+    .with_state_ttl(1000);
+    assert_eq!(alive.push(&uf_batch(vec![1], vec![8], vec![9]), 5999).unwrap().num_rows(), 0);
+    let mut expired = UpdatableTopNRanker::restore_partitions(
+        vec![0],
+        vec![-1],
+        vec![0, 1],
+        vec![-1, -1],
+        vec![asc(2)],
+        1,
+        false,
+        &[snapshot],
+        5500,
+    )
+    .with_state_ttl(1000);
+    let out = expired.push(&uf_batch(vec![1], vec![8], vec![9]), 6000).unwrap();
+    assert_eq!(row_kinds(&out), vec![0]);
+}
+
+// The sweep prunes idle entries per row key, silently.
+#[test]
+fn update_fast_topn_ttl_sweep_reclaims_idle_entries_silently() {
+    let mut ranker = uf_ranker(1).with_state_ttl(1000);
+    ranker.push(&uf_batch(vec![1], vec![7], vec![5]), 5000).unwrap();
+    ranker.push(&uf_batch(vec![2], vec![8], vec![5]), 5000).unwrap();
+    let out = ranker.push(&uf_batch(vec![2], vec![8], vec![6]), 7000).unwrap();
+    assert_eq!(row_kinds(&out), vec![0]); // partition 2's own entry had expired too — fresh +I
+    let snapshot = ranker.snapshot_partitions(1).remove(&0).unwrap();
+    // A TTL-off restore probes what survived: partition 1 was swept, so a strictly worse row
+    // becomes top-1 instead of being dropped against the old 5.
+    let mut probe = UpdatableTopNRanker::restore_partitions(
+        vec![0],
+        vec![-1],
+        vec![0, 1],
+        vec![-1, -1],
+        vec![asc(2)],
+        1,
+        false,
+        &[snapshot],
+        7000,
+    );
+    let out = probe.push(&uf_batch(vec![1], vec![9], vec![50]), 7000).unwrap();
+    assert_eq!(row_kinds(&out), vec![0]);
 }
 
 // The `[k, v]` data schema (no `$row_kind$`) both sides carry in the updating-join tests.
@@ -5578,7 +5918,7 @@ mod paimon_state {
             join_batch(vec![1, 2], vec![5, 1], vec![0, 0]),
         ];
         for (i, batch) in batches.iter().enumerate() {
-            assert_same_output(&memory.push(batch).unwrap(), &paimon.push(batch).unwrap());
+            assert_same_output(&memory.push(batch, 0).unwrap(), &paimon.push(batch, 0).unwrap());
             // A checkpoint between every batch forces every probe through the table.
             let link = temp_dir(&format!("topn-parity-cp{i}"));
             paimon.store_mut().checkpoint().unwrap();
@@ -5590,7 +5930,7 @@ mod paimon_state {
         let dir = temp_dir("topn-tie-src");
         let mut ranker = paimon_topn(&dir);
         // Two rows tie on the sort key; arrival order (v=70 first) decides who sits at rank 2.
-        ranker.push(&join_batch(vec![9, 9], vec![70, 71], vec![7, 7])).unwrap();
+        ranker.push(&join_batch(vec![9, 9], vec![70, 71], vec![7, 7]), 0).unwrap();
         let manifest = ranker.store_mut().checkpoint().unwrap();
 
         let restored_dir = temp_dir("topn-tie-mat");
@@ -5613,7 +5953,7 @@ mod paimon_state {
         // A better row evicts rank 2 — which must be the LATER arrival of the tie (v=71), so the
         // restored buffer must have preserved [70, 71] exactly, not just the same multiset.
         // rt differs across the checkpoint: only (v) is the sort key; payload compares whole rows.
-        let out = restored.push(&join_batch(vec![9], vec![1], vec![8])).unwrap();
+        let out = restored.push(&join_batch(vec![9], vec![1], vec![8]), 0).unwrap();
         assert_eq!(row_kinds(&out), vec![3, 0]);
         assert_eq!(values(&out, 1), vec![71, 1], "-D must hit the later tie arrival");
     }
@@ -5643,7 +5983,7 @@ mod paimon_state {
             changelog_join_batch(vec![1, 1], vec![10, 20], vec![3, 3]),
         ];
         for (i, batch) in steps.iter().enumerate() {
-            assert_same_output(&memory.push(batch).unwrap(), &paimon.push(batch).unwrap());
+            assert_same_output(&memory.push(batch, 0).unwrap(), &paimon.push(batch, 0).unwrap());
             // A checkpoint between every step forces every probe through the table.
             let link = temp_dir(&format!("retopn-parity-cp{i}"));
             paimon.store_mut().checkpoint().unwrap();

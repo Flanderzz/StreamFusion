@@ -26,12 +26,6 @@ final class TopNMatcher {
 
   /** The specific reason this rank is not accelerable, or null if it is. */
   static String unsupportedReason(StreamPhysicalRank rank) {
-    // With a TTL set the host expires rank state per entry (the buffer thins out silently) —
-    // semantics the native rankers do not yet reproduce.
-    if (IdleStateRetention.isEnabled(rank)) {
-      return "Top-N: idle-state TTL (table.exec.state.ttl) runs on the host until the native"
-          + " operator expires state";
-    }
     if (rank.rankType() != RankType.ROW_NUMBER) {
       return "Top-N: only ROW_NUMBER ranks (RANK/DENSE_RANK fall back)";
     }
