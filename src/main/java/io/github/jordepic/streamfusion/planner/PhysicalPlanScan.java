@@ -352,6 +352,9 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
         }
         substitutions++;
         int[] keyColumns = GlobalGroupAggregateMatcher.keyColumns(agg);
+        // TTL lives on the stateful global half only (the local is a transient per-bundle buffer);
+        // a STATE_TTL hint on the aggregate overrides the job-wide retention, as single-phase.
+        Long stateTtlHint = StateTtlHint.getStateTtlFromHintOnSingleRel(agg.hints());
         return new StreamPhysicalNativeColumnarGroupAggregate(
             agg.getCluster(),
             agg.getTraitSet(),
@@ -366,7 +369,7 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
             GlobalGroupAggregateMatcher.distinctViewColumns(agg),
             GlobalGroupAggregateMatcher.recordCountColumn(agg),
             GlobalGroupAggregateMatcher.generateUpdateBefore(agg),
-            -1); // the global half's TTL gate declines any nonzero retention or hint for now
+            stateTtlHint == null ? -1 : stateTtlHint);
       }
     }
 

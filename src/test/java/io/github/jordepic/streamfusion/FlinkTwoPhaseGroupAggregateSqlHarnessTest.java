@@ -284,22 +284,31 @@ class FlinkTwoPhaseGroupAggregateSqlHarnessTest {
   }
 
   @Test
-  void stateTtlFallsBackToHost() throws Exception {
-    // The single-phase TTL gate does not see a two-phase plan (the phase split bypasses it), so the
-    // global half carries its own: with a TTL set the host expires idle keys and stops suppressing
-    // unchanged results — semantics the native merge does not yet reproduce.
+  void stateTtlEmitsUnsuppressedUpdatesAndMatchesHost() throws Exception {
+    // TTL lives on the global half (the local is transient). Bundle size 2 makes key 1's MIN see a
+    // later, non-improving bundle — an unchanged transition the TTL-off run suppresses and the
+    // TTL-on run (1h, nothing expires in-test) must emit as an identical -U/+U pair, kind-compared
+    // against the host.
     Path input = Files.createTempDirectory("twophase-ttl-in");
     writeInput(input);
     Supplier<TableEnvironment> environment =
         () -> {
-          TableEnvironment tEnv = readEnvironment(input).get();
+          TableEnvironment tEnv = readEnvironment(input, 2).get();
           tEnv.getConfig().set("table.exec.state.ttl", "1 h");
           return tEnv;
         };
-    NativeParity.assertFallbackReasonContains(
-        environment,
-        "SELECT k, SUM(v) AS s FROM t GROUP BY k",
-        "global group aggregate: idle-state TTL");
+    NativeParity.assertKindedParity(environment, "SELECT k, MIN(v) AS m FROM t GROUP BY k");
+  }
+
+  @Test
+  void stateTtlHintRoutesTheGlobalHalfAndMatchesHost() throws Exception {
+    // A STATE_TTL hint with the job retention at 0 must switch the global merge into TTL emission,
+    // mirroring Flink's hint-over-config precedence on the two-phase plan.
+    Path input = Files.createTempDirectory("twophase-ttl-hint-in");
+    writeInput(input);
+    NativeParity.assertKindedParity(
+        readEnvironment(input, 2),
+        "SELECT /*+ STATE_TTL('t' = '1h') */ k, MIN(v) AS m FROM t GROUP BY k");
   }
 
   @Test

@@ -218,8 +218,9 @@ array`, is **not** here: Flink rejects it too, so we're at parity.)
 
 ### 2. Per-operator matcher declines (exact conditions)
 
-**Idle-state TTL** (`table.exec.state.ttl` ≠ 0): the single-phase non-windowed `GROUP BY` runs it
-**natively** — Flink's exact StateTtlConfig semantics (last-write timestamps, expired-reads-as-
+**Idle-state TTL** (`table.exec.state.ttl` ≠ 0): the non-windowed `GROUP BY` — single-phase and
+the two-phase global merge (the local half is transient, so TTL lives on the global) — runs it
+**natively**: Flink's exact StateTtlConfig semantics (last-write timestamps, expired-reads-as-
 absent with the fresh `+I` restart, retractions against expired state dropped, and the unchanged-
 update suppression disabled), with the `STATE_TTL` hint honored over the job-wide retention. Every
 other stateful operator still declines a nonzero retention: with a TTL the host expires idle keys
@@ -291,9 +292,7 @@ checkpoint route until the persistent shape carries timestamps.
   — decimal SUM widens to `DECIMAL(38, s)` — bigint for COUNT, the widened `(sum, count)` pair for
   AVG — defensive, not seen from Flink's planner); a retracting input with any aggregate other
   than plain COUNT/AVG; an unsupported grouping-key/input column type.
-- **Global group aggregate** (two-phase merge) — idle-state TTL ≠ 0 (interim, above — the global
-  half carries its own gate since the phase split bypasses the single-phase one); any merge other
-  than SUM/MIN/MAX/COUNT/AVG; a
+- **Global group aggregate** (two-phase merge) — any merge other than SUM/MIN/MAX/COUNT/AVG; a
   partial column outside bigint/int/double/decimal (strings allowed under MIN/MAX); an AVG whose
   partial pair isn't
   `(bigint, bigint)` for an integer (bigint/int/smallint/tinyint) average, `(double, bigint)` for a
