@@ -22,6 +22,11 @@ import org.junit.jupiter.api.Test;
  * (fallback) operators in the same job run unchanged on the wrapped hashmap backend. MIN/MAX keep
  * multiset state, which the Paimon row codec does not carry — that query exercises the
  * per-operator fallback to memory state under the same backend.
+ *
+ * <p>Lives in the compactor module because the backend fails closed without the Java compactor
+ * on the classpath: every run here is the production shape — state tables carry deletion
+ * vectors and compact synchronously at every barrier, so committed reads take the raw path with
+ * the vectors applied.
  */
 class FlinkPaimonStateBackendSqlHarnessTest {
 

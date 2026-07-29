@@ -96,10 +96,9 @@ public class JavaPaimonStateCompactor implements StateTableCompactor {
 
   /**
    * Probes the deployed Paimon's slice comparator with the state tables' exact key shape
-   * (INT key group, VARBINARY key): releases without the binary-field fix throw
-   * ClassCastException the first time lookup compaction seeks a lookup file, so a broken
-   * deployment must fall back to merge-read tables up front rather than fail at the first
-   * post-restore barrier.
+   * (INT key group, VARBINARY key): releases without the binary-field fix (apache/paimon#8873)
+   * throw ClassCastException the first time lookup compaction seeks a lookup file, so a broken
+   * deployment fails closed at backend creation rather than at the first post-restore barrier.
    */
   @Override
   public boolean supportsDeletionVectors() {

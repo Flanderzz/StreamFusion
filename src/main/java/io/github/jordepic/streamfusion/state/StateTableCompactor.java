@@ -4,11 +4,12 @@ import java.util.Map;
 
 /**
  * The maintainer of a native operator's Paimon state table, discovered via {@link
- * java.util.ServiceLoader}. The native store itself never compacts: whatever maintenance happens
- * comes from an implementation of this interface, run at every checkpoint barrier on the task
- * thread, immediately before the store commits its write buffer, so the maintenance snapshot
- * always lands directly beneath the checkpoint's data snapshot. Without one, state tables stay
- * correct but accumulate one sorted run per touched bucket per checkpoint.
+ * java.util.ServiceLoader}. The native store itself never compacts: all maintenance comes from
+ * an implementation of this interface, run at every checkpoint barrier on the task thread,
+ * immediately before the store commits its write buffer, so the maintenance snapshot always
+ * lands directly beneath the checkpoint's data snapshot. State tables always carry deletion
+ * vectors, which only this maintenance keeps correct, so the backend refuses to start without a
+ * capable implementation (see {@code PaimonStateBackend}).
  *
  * <p>The shipped implementation ({@code streamfusion-paimon-compactor}) delegates to stock Java
  * Paimon: its own compaction picks, its sequence-preserving rewriter, its deletion handling.
@@ -20,8 +21,8 @@ public interface StateTableCompactor {
 
   /**
    * Whether this compactor can maintain tables of the given data file format. A compactor that
-   * cannot read the format must decline — the tables then run unmaintained (e.g. Java Paimon
-   * releases before 2.0 have no vortex format factory).
+   * cannot read the format must decline — the backend then fails closed at creation (e.g. Java
+   * Paimon releases before 2.0 have no vortex format factory).
    */
   boolean supports(String fileFormat);
 
@@ -29,8 +30,8 @@ public interface StateTableCompactor {
    * Whether this compactor can maintain deletion-vector tables: their lookup compaction compares
    * lookup-file keys through the deployed Paimon's slice comparator, which older releases break
    * on binary primary-key fields (ClassCastException — fixed upstream by comparing binary fields
-   * like BinaryRow does). When false, new state tables are created without deletion vectors and
-   * reads merge sorted runs; maintenance still runs at every barrier.
+   * like BinaryRow does, apache/paimon#8873). Deletion vectors are unconditional for state
+   * tables, so a false answer fails the backend closed at creation.
    */
   default boolean supportsDeletionVectors() {
     return false;
@@ -66,8 +67,7 @@ public interface StateTableCompactor {
      * (with deletion vectors maintained) and nothing else. Deletion-vector reads skip level 0,
      * so this is correctness-critical and runs synchronously inside the snapshot; everything
      * discretionary — merging level-1+ runs for read and space amplification — belongs to
-     * {@link #shape} off the barrier path. On a deletion-vector table a failure fails the
-     * snapshot; on a merge-read table the caller may log and continue.
+     * {@link #shape} off the barrier path. A failure fails the snapshot.
      *
      * @param round a monotonic commit identifier
      */

@@ -943,10 +943,9 @@ class NexmarkMatrixBenchmark {
     if (!deletionVectors) {
       throw new IllegalStateException(
           "no deletion-vector-capable state-table compactor on the classpath: the Paimon backend"
-              + " would run unmaintained or on merge reads, not the production configuration this"
-              + " comparison claims to measure. Run NexmarkStateBackendBenchmark in"
-              + " streamfusion-paimon-compactor against a Paimon bundle with the binary-key"
-              + " lookup comparator fix.");
+              + " would refuse to start, so no comparison can run here. Run"
+              + " NexmarkStateBackendBenchmark in streamfusion-paimon-compactor against a Paimon"
+              + " bundle with the binary-key lookup comparator fix (apache/paimon#8873).");
     }
     Query q4 =
         Arrays.stream(ALL_QUERIES).filter(q -> q.label.equals("q4")).findFirst().orElseThrow();

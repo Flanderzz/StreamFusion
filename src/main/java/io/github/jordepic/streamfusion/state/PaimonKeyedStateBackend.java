@@ -53,7 +53,6 @@ public final class PaimonKeyedStateBackend<K>
   private final File workingDirectory;
   private final File tableDirectory;
   private final List<PaimonRestoredSource> restoredSources;
-  private final boolean deletionVectors;
   private final CloseableRegistry cancelStreamRegistry = new CloseableRegistry();
 
   private boolean delegateStateUsed;
@@ -62,23 +61,12 @@ public final class PaimonKeyedStateBackend<K>
       CheckpointableKeyedStateBackend<K> delegate,
       PaimonSnapshotStrategy snapshotStrategy,
       File workingDirectory,
-      List<PaimonRestoredSource> restoredSources,
-      boolean deletionVectors) {
+      List<PaimonRestoredSource> restoredSources) {
     this.delegate = delegate;
     this.snapshotStrategy = snapshotStrategy;
     this.workingDirectory = workingDirectory;
     this.tableDirectory = new File(workingDirectory, "table");
     this.restoredSources = restoredSources;
-    this.deletionVectors = deletionVectors;
-  }
-
-  /**
-   * Whether new state tables carry deletion vectors: a Java compactor maintains the tables
-   * synchronously at each barrier AND the deployed Paimon's lookup comparator handles binary
-   * primary-key fields (see {@link StateTableCompactor#supportsDeletionVectors()}).
-   */
-  public boolean deletionVectors() {
-    return deletionVectors;
   }
 
   // ---- The native operator's surface -----------------------------------------------------------

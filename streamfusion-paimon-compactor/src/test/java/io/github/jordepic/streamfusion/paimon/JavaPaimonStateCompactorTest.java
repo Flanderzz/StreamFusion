@@ -34,8 +34,6 @@ import org.apache.paimon.table.FileStoreTableFactory;
 import org.apache.paimon.table.source.DataSplit;
 import org.apache.paimon.table.source.Split;
 import io.github.jordepic.streamfusion.operator.CoalescingOff;
-import org.junit.jupiter.api.Assumptions;
-import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.Test;
 
@@ -48,14 +46,6 @@ import org.junit.jupiter.api.Test;
  */
 @ExtendWith(CoalescingOff.class)
 class JavaPaimonStateCompactorTest {
-
-  @BeforeAll
-  static void requiresDeletionVectorCapableCompactor() {
-    Assumptions.assumeTrue(
-        new JavaPaimonStateCompactor().supportsDeletionVectors(),
-        "deployed Paimon cannot compare binary primary-key lookup slices"
-            + " (fix pending upstream); deletion-vector suites skip");
-  }
 
   private static final int MAX_PARALLELISM = 128;
   private static final RowType INPUT =

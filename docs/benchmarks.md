@@ -1364,14 +1364,14 @@ streamfusion-paimon-compactor -am -Dsurefire.failIfNoSpecifiedTests=false
 default parallelism of 4).
 A q4 preflight asserts both backends engage before any number is recorded (RocksDB must
 materialize working files under a directed localdir; a live Paimon store handle must be
-observed), and additionally requires a **deletion-vector-capable compactor**: without one the
-Paimon side runs unmaintained or on merge reads, which is not the configuration this table
-claims to measure — an earlier revision of this table unknowingly did exactly that, because the
-benchmark then lived in a module whose classpath could not carry the compactor. Deletion-vector
-capability currently needs a Paimon bundle with the binary-primary-key lookup comparator fix
-(contributed upstream); until it reaches a release, build one locally and select it with
-`-Dpaimon.bundle.version`. Operators the Paimon backend does not yet carry (proctime shapes)
-fall back to memory state with raw snapshots, exactly as a deployment would run them.
+observed), and additionally requires a **deletion-vector-capable compactor** — the backend now
+fails closed at creation without one; an earlier revision of this table unknowingly measured
+unmaintained merge-read tables, because the benchmark then lived in a module whose classpath
+could not carry the compactor. Deletion-vector capability needs a Paimon bundle with the
+binary-primary-key lookup comparator fix (apache/paimon#8873); the module's default
+`2.0-SNAPSHOT` bundle carries it, and `-Dpaimon.bundle.version` overrides. Operators the Paimon
+backend does not yet carry (proctime shapes) fall back to memory state with raw snapshots,
+exactly as a deployment would run them.
 
 #### Current (2026-07-28 evening — shared native sources)
 

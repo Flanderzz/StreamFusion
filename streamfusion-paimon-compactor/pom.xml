@@ -15,21 +15,22 @@
     <properties>
         <!-- The Apache 2.0 snapshot (snapshots published after 2026-07-29 carry the
              binary-primary-key lookup comparator fix, apache/paimon#8873) — the first Paimon
-             deletion-vector state tables can run on, and deletion vectors are the canonical
-             production mode for native state tables. Pin a stable release here the moment one
-             ships with the fix. Overridable for older bundles, where the capability probe falls
-             the backend back to merge-read tables. -->
+             deletion-vector state tables can run on, and deletion vectors are the only mode for
+             native state tables. Pin a stable release here the moment one ships with the fix.
+             Overriding with an older bundle fails the capability probe and with it the backend
+             (creation fails closed; there is no merge-read fallback). -->
         <paimon.bundle.version>2.0-SNAPSHOT</paimon.bundle.version>
     </properties>
 
     <!-- Java Paimon as the maintainer of native state tables: stock Paimon's compaction (its own
          picks, its sequence-preserving rewriter, its deletion handling) runs against the local
-         table at every checkpoint barrier, replacing the native store's fallback rewrite. An
-         optional deployment module in the connector-extension mold: drop this JAR plus a Paimon
-         bundle (>= 1.4.1) into Flink's lib directory to enable it; without them the state backend
-         works unchanged on its fallback — never a linkage failure. Both dependencies are provided:
-         the runtime is already in lib, and Paimon is the user's own bundle (bundling or shading a
-         second copy of org.apache.paimon would collide with it). -->
+         table at every checkpoint barrier. A deployment module in the connector-extension mold —
+         drop this JAR plus a deletion-vector-capable Paimon bundle into Flink's lib directory —
+         but a REQUIRED one for the Paimon state backend: state tables always carry deletion
+         vectors, so backend creation fails closed without it (jobs not selecting the backend are
+         unaffected; never a linkage failure). Both dependencies are provided: the runtime is
+         already in lib, and Paimon is the user's own bundle (bundling or shading a second copy
+         of org.apache.paimon would collide with it). -->
     <dependencies>
         <dependency>
             <groupId>io.github.jordepic</groupId>
@@ -41,15 +42,15 @@
             <groupId>org.apache.paimon</groupId>
             <artifactId>paimon-bundle</artifactId>
             <!-- Overridable (-Dpaimon.bundle.version=...). On bundles without the comparator
-                 fix the deletion-vector tests skip via the capability probe and the backend
-                 runs merge-read tables. -->
+                 fix the capability probe fails and the backend refuses to start, so the
+                 backend suites in this module fail with it. -->
             <version>${paimon.bundle.version}</version>
             <scope>provided</scope>
         </dependency>
-        <!-- The runtime's test classes: the state-backend benchmark reuses the Nexmark test
-             environment, and it must run in THIS module — the state tables are only maintained
-             when the compactor is on the classpath, and a benchmark of unmaintained tables would
-             measure a configuration the docs tell deployments not to run. -->
+        <!-- The runtime's test classes: the backend suites and the state-backend benchmark
+             reuse the runtime's parity and Nexmark test environments, and they must run in THIS
+             module — the backend fails closed without a compactor on the classpath, so this is
+             the only module that can create it. -->
         <dependency>
             <groupId>io.github.jordepic</groupId>
             <artifactId>streamfusion-runtime</artifactId>

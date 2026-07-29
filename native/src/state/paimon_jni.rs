@@ -47,19 +47,6 @@ fn manifest_array<'local>(
     array.into_raw()
 }
 
-/// One-time process mode switch, called by the host backend before any store exists: with a Java
-/// compactor deployed, maintenance runs synchronously at every barrier and new state tables carry
-/// deletion vectors (see `PaimonStoreConfig::deletion_vectors`).
-#[no_mangle]
-pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_paimonDeletionVectors(
-    _env: JNIEnv,
-    _class: JClass,
-    enabled: jboolean,
-) {
-    crate::state::paimon_store::DELETION_VECTORS
-        .store(enabled != 0, std::sync::atomic::Ordering::Relaxed);
-}
-
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonGroupAggregator<
     'local,
@@ -130,7 +117,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonG
             buckets: buckets as usize,
             file_format: format,
             file_compression: compression,
-            deletion_vectors: deletion_vectors_mode(),
+            deletion_vectors: true,
             ttl_ms: state_ttl_millis.max(0),
         };
         let store = if source_dirs.is_empty() {
@@ -350,7 +337,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonK
             buckets: buckets as usize,
             file_format: format,
             file_compression: compression,
-            deletion_vectors: deletion_vectors_mode(),
+            deletion_vectors: true,
             ttl_ms: state_ttl_millis.max(0),
         };
         let store = if source_dirs.is_empty() {
@@ -559,7 +546,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonK
             buckets: buckets as usize,
             file_format: format,
             file_compression: compression,
-            deletion_vectors: deletion_vectors_mode(),
+            deletion_vectors: true,
             ttl_ms: 0,
         };
         let store = if source_dirs.is_empty() {
@@ -740,7 +727,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonC
             buckets: buckets as usize,
             file_format: format,
             file_compression: compression,
-            deletion_vectors: deletion_vectors_mode(),
+            deletion_vectors: true,
             ttl_ms: state_ttl_millis.max(0),
         };
         let store = if source_dirs.is_empty() {
@@ -1013,7 +1000,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonT
             buckets: buckets as usize,
             file_format: format,
             file_compression: compression,
-            deletion_vectors: deletion_vectors_mode(),
+            deletion_vectors: true,
             ttl_ms: state_ttl_millis.max(0),
         };
         let store = if source_dirs.is_empty() {
@@ -1252,7 +1239,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonU
             buckets: buckets as usize,
             file_format: format.clone(),
             file_compression: compression.clone(),
-            deletion_vectors: deletion_vectors_mode(),
+            deletion_vectors: true,
             ttl_ms: ttl_ms.max(0),
         };
         let side_store = |side: &str, schema: &SchemaRef, ttl_ms: jlong, pick: fn(&str) -> i64| {
@@ -1568,7 +1555,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonW
             buckets: buckets as usize,
             file_format: format,
             file_compression: compression,
-            deletion_vectors: deletion_vectors_mode(),
+            deletion_vectors: true,
             ttl_ms: 0,
         };
         let store = if source_dirs.is_empty() {
@@ -1860,7 +1847,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonO
             buckets: buckets as usize,
             file_format: format,
             file_compression: compression,
-            deletion_vectors: deletion_vectors_mode(),
+            deletion_vectors: true,
             ttl_ms: 0,
         };
         let store = if source_dirs.is_empty() {
@@ -2130,7 +2117,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonW
             buckets: buckets as usize,
             file_format: format,
             file_compression: compression,
-            deletion_vectors: deletion_vectors_mode(),
+            deletion_vectors: true,
             ttl_ms: 0,
         };
         let store = if source_dirs.is_empty() {
@@ -2433,7 +2420,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonT
             buckets: buckets as usize,
             file_format: format,
             file_compression: compression,
-            deletion_vectors: deletion_vectors_mode(),
+            deletion_vectors: true,
             ttl_ms: 0,
         };
         let store = if source_dirs.is_empty() {
@@ -2574,7 +2561,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonS
             buckets: buckets as usize,
             file_format: format,
             file_compression: compression,
-            deletion_vectors: deletion_vectors_mode(),
+            deletion_vectors: true,
             ttl_ms: 0,
         };
         let store = if source_dirs.is_empty() {
@@ -2720,7 +2707,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonI
             buckets: buckets as usize,
             file_format: format,
             file_compression: compression,
-            deletion_vectors: deletion_vectors_mode(),
+            deletion_vectors: true,
             ttl_ms: 0,
         };
         let store = if source_dirs.is_empty() {
@@ -2916,7 +2903,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonT
             buckets: buckets as usize,
             file_format: format,
             file_compression: compression,
-            deletion_vectors: deletion_vectors_mode(),
+            deletion_vectors: true,
             ttl_ms: 0,
         };
         let store = if source_dirs.is_empty() {

@@ -282,27 +282,20 @@ pub(crate) struct PaimonStoreConfig {
     /// Paimon `file.compression` for state data files ("uncompressed", "zstd", "snappy", ...).
     /// Stamped into the table schema, so an external compactor's rewrites honor it too.
     pub file_compression: String,
-    /// Stamp `deletion-vectors.enabled` on new tables. Set when the host has a Java compactor:
-    /// in that mode the compactor runs *synchronously at every barrier* (Paimon's own
-    /// `lookup-wait` model), so every committed-and-checkpointed snapshot holds only
-    /// level-1+ files whose stale rows are masked by deletion vectors — reads take the raw
-    /// parquet path with exact predicate pushdown, never the merge reader. Without a compactor
-    /// no one can maintain the vectors, so tables are created without the option and reads
-    /// merge sorted runs as before.
+    /// Stamp `deletion-vectors.enabled` on new tables. The host's Java compactor runs
+    /// *synchronously at every barrier* (Paimon's own `lookup-wait` model), so every
+    /// committed-and-checkpointed snapshot holds only level-1+ files whose stale rows are
+    /// masked by deletion vectors — reads take the raw parquet path with exact predicate
+    /// pushdown, never the merge reader. Production (the JNI layer) always passes true; the
+    /// backend refuses to start without a deletion-vector-capable compactor. `false` exists
+    /// for the Rust unit suite only: it reads its own commits without a Java compactor, which
+    /// a deletion-vector table cannot do (level-0 runs are invisible to raw scans until
+    /// maintenance up-levels them — see `paimon_deletion_vector_table_double_checkpoints`).
     pub deletion_vectors: bool,
     /// Idle-state retention millis (0 = off — Flink's default). When on, the generic KV store
     /// carries each value's last-write wall clock in a trailing `ts` column and enforces
     /// delete-on-read expiry when it decodes committed rows (see `TS_COLUMN`).
     pub ttl_ms: i64,
-}
-
-/// Process-wide deletion-vector mode, set once by the host before any store is created (the
-/// availability of the Java compactor is one answer per JVM). Read at JNI store construction.
-pub(crate) static DELETION_VECTORS: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-pub(crate) fn deletion_vectors_mode() -> bool {
-    DELETION_VECTORS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// A checkpoint's file manifest, handed to the host for upload. `data_files` are immutable,
@@ -537,20 +530,35 @@ impl PaimonTableCore {
     fn open(config: PaimonStoreConfig, snapshot_id: i64) -> Result<Self, DataFusionError> {
         let file_io = Self::file_io(&config.table_dir)?;
         let table_schema = Self::latest_schema(&file_io, &config.table_dir)?;
-        if Self::schema_deletion_vectors(&table_schema) && !config.deletion_vectors {
-            // A deletion-vector table is only correct through raw reads that apply the vectors,
-            // and only the Java compactor maintains them. The merge reader this deployment would
-            // fall back to ignores vectors and resurrects masked rows — refuse instead.
-            return Err(DataFusionError::Plan(
-                "restored state table uses deletion vectors; deploy the streamfusion-paimon-compactor module"
-                    .into(),
-            ));
-        }
+        Self::check_deletion_vectors(&table_schema, &config)?;
         Self::open_at(config, file_io, table_schema, Some(snapshot_id))
     }
 
     fn schema_deletion_vectors(schema: &TableSchema) -> bool {
         schema.options().get("deletion-vectors.enabled").map(String::as_str) == Some("true")
+    }
+
+    /// A restored table must agree with this deployment on deletion vectors; either mismatch is
+    /// fatal. A deletion-vector table is only correct through raw reads that apply the vectors
+    /// (a merge read resurrects masked rows), which the test-only non-vector configuration never
+    /// does. The reverse — a table without the option where the deployment expects it — is a
+    /// pre-deletion-vector state table: none exist (deletion vectors predate every production
+    /// deployment), so refuse rather than guess at a migration.
+    fn check_deletion_vectors(
+        source_schema: &TableSchema,
+        config: &PaimonStoreConfig,
+    ) -> Result<(), DataFusionError> {
+        match (Self::schema_deletion_vectors(source_schema), config.deletion_vectors) {
+            (true, false) => Err(DataFusionError::Plan(
+                "restored state table uses deletion vectors; deploy the streamfusion-paimon-compactor module"
+                    .into(),
+            )),
+            (false, true) => Err(DataFusionError::Plan(
+                "restored state table predates deletion vectors, which is unsupported; no such tables exist"
+                    .into(),
+            )),
+            _ => Ok(()),
+        }
     }
 
     fn open_at(
@@ -628,13 +636,7 @@ impl PaimonTableCore {
         if !same_fields {
             return Ok(false);
         }
-        // A deletion-vector table's level-1+ files are only correct with their vectors applied,
-        // which this table's reads do only when it carries the option itself — on any mismatch
-        // fall back to the clip rewrite, whose source read applies the vectors and whose output
-        // is self-contained rows.
-        if Self::schema_deletion_vectors(&source_schema) != self.config.deletion_vectors {
-            return Ok(false);
-        }
+        Self::check_deletion_vectors(&source_schema, &self.config)?;
         let pinned = Self::open_source(source_dir, snapshot_id)?;
         let index_files = Self::live_index_files(&pinned, source_dir, snapshot_id)?;
         let builder = pinned.new_read_builder();
@@ -740,16 +742,10 @@ impl PaimonTableCore {
         for (source_dir, snapshot_id) in sources {
             // A deletion-vector source is only readable in a deployment that can also maintain
             // the rewritten table (the clip lands at level 0, which deletion-vector reads skip
-            // until compaction) — without a compactor, fail closed rather than restore silently
-            // empty state.
+            // until compaction) — fail closed rather than restore silently empty state.
             let source_file_io = Self::file_io(source_dir)?;
             let source_schema = Self::latest_schema(&source_file_io, source_dir)?;
-            if Self::schema_deletion_vectors(&source_schema) && !self.config.deletion_vectors {
-                return Err(DataFusionError::Plan(
-                    "restored state table uses deletion vectors; deploy the streamfusion-paimon-compactor module"
-                        .into(),
-                ));
-            }
+            Self::check_deletion_vectors(&source_schema, &self.config)?;
             let pinned = Self::open_source(source_dir, *snapshot_id)?;
             let fields = pinned.schema().fields().to_vec();
             let source_index =

@@ -777,20 +777,20 @@ the operator just checkpoints its state the old way, in full):
   native-format savepoints work (uploaded whole, no file sharing, restorable in CLAIM/NO_CLAIM).
 
 **Table maintenance (compaction) belongs exclusively to stock Java Paimon** — the native store
-never compacts. Drop `streamfusion-paimon-compactor.jar` plus a Paimon bundle (≥ 1.4.1) into
-Flink's `lib/` and the state tables run in **deletion-vector mode, compacted synchronously at
-every barrier** (Paimon's own `lookup-wait` model): between the barrier's data commit and the
-checkpoint's file listing, stock Paimon's lookup compaction up-levels the barrier's level-0 run
-and marks overwritten rows in deletion-vector index files, so every committed snapshot holds
-only standalone-correct files and reads never merge sorted runs. A rescale restore's clip
-rewrite is compacted the same way before the first record. A failed maintenance round fails the
-snapshot — on a deletion-vector table, reads over an uncompacted run would silently miss the
-barrier's rows (Paimon skips level 0 in this mode). Without the module (or with a
-state file format the deployed Paimon cannot read), tables are created without deletion vectors
-and stay **correct but unmaintained** through merge reads — one sorted run accumulates per
-touched bucket per checkpoint, growing probe cost — and the backend logs a warning; restoring a
-deletion-vector table into such a deployment fails closed. A side effect worth knowing: parquet state tables are ordinary Paimon
-tables, readable by any Paimon tooling for state inspection.
+never compacts — and the backend **requires** the maintainer: `streamfusion-paimon-compactor.jar`
+plus a Paimon bundle that reads the state file format and carries the binary-key lookup
+comparator fix (apache/paimon#8873) must sit in Flink's `lib/`, or backend creation fails closed
+with a message naming that requirement. There is no maintainer-less mode: state tables always
+carry deletion vectors, run **compacted synchronously at every barrier** (Paimon's own
+`lookup-wait` model) — between the barrier's data commit and the checkpoint's file listing,
+stock Paimon's lookup compaction up-levels the barrier's level-0 run and marks overwritten rows
+in deletion-vector index files, so every committed snapshot holds only standalone-correct files
+and reads never merge sorted runs. A rescale restore's clip rewrite is compacted the same way
+before the first record. A failed maintenance round fails the snapshot — reads over an
+uncompacted run would silently miss the barrier's rows (Paimon skips level 0 under deletion
+vectors). Restoring a state table without the deletion-vector option is refused outright (no
+deployment ever wrote one). A side effect worth knowing: parquet state tables are ordinary
+Paimon tables, readable by any Paimon tooling for state inspection.
 
 `-Dstreamfusion.state.paimon.buckets` (default `1`) sets the state tables' Paimon bucket count —
 deliberately small and decoupled from max parallelism (one LSM per subtask, the RocksDB shape);
@@ -799,6 +799,6 @@ key-group range at recovery. `-Dstreamfusion.state.paimon.file-format` (default 
 `-Dstreamfusion.state.paimon.file-compression` (default `uncompressed`) select the state data
 file format — deliberately the boring baseline until the state-format benchmarks (parquet vs
 lance vs vortex, compression on/off) pick a better pairing; both are stamped into the table
-schema, so the compactor's rewrites honor them too. `vortex` is opt-in and today also opts out
-of maintenance: released Java Paimon has no vortex format (it lands with Paimon 2.0), so the
-compactor declines such tables.
+schema, so the compactor's rewrites honor them too. `vortex` is opt-in and needs a Paimon
+bundle that reads it (the format lands with Paimon 2.0; on older bundles the compactor declines
+the format and backend creation fails closed).

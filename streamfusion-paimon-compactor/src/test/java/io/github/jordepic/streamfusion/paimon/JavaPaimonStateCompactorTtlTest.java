@@ -27,7 +27,6 @@ import org.apache.paimon.table.source.DataSplit;
 import org.apache.paimon.table.source.ReadBuilder;
 import org.apache.paimon.table.source.Split;
 import org.apache.paimon.types.DataTypes;
-import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -72,8 +71,9 @@ class JavaPaimonStateCompactorTtlTest {
         row(EXPIRED, 30, now - TTL_MILLIS - 60_000),
         rowWithNullTs(NULL_TS, 40));
 
-    // A zero cadence escalates the first shaping round to a full compaction: the one rewrite a
-    // merge-read table is guaranteed to see (its barrier rounds are trigger-gated).
+    // A zero cadence escalates the first shaping round to a full compaction: the one rewrite
+    // this vector-less test table is guaranteed to see (without deletion vectors, barrier
+    // rounds are trigger-gated).
     try (StateTableCompactor.Session session =
         new JavaPaimonStateCompactor(0).open(dir, TTL_OPTIONS)) {
       session.shape(100);
@@ -91,9 +91,6 @@ class JavaPaimonStateCompactorTtlTest {
    * so retention rides along at every checkpoint: the up-level itself drops the expired row. */
   @Test
   void barrierRoundAppliesRetentionOnDeletionVectorTables() throws Exception {
-    Assumptions.assumeTrue(
-        new JavaPaimonStateCompactor().supportsDeletionVectors(),
-        "deployed Paimon cannot compare binary primary-key lookup slices");
     String dir = createStateShapedTable(true);
     long now = System.currentTimeMillis();
     write(
@@ -113,10 +110,10 @@ class JavaPaimonStateCompactorTtlTest {
   }
 
   /**
-   * The periodic full round (RocksDB's periodicCompactionSeconds analog): a merge-read table's
-   * files are never picked by the barrier's minimal round or the ordinary shaping triggers, so
-   * their expired rows linger until the wall-clock cadence escalates a shaping round to a full
-   * compaction.
+   * The periodic full round (RocksDB's periodicCompactionSeconds analog): cold files are never
+   * picked by the barrier's minimal round or the ordinary shaping triggers (pinned here on a
+   * vector-less table, whose barrier rounds are all trigger-gated), so their expired rows
+   * linger until the wall-clock cadence escalates a shaping round to a full compaction.
    */
   @Test
   void periodicFullCompactionReclaimsColdFiles() throws Exception {

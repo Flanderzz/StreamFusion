@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.github.jordepic.streamfusion.Native;
 import io.github.jordepic.streamfusion.operator.RowDataArrowConverter;
+import io.github.jordepic.streamfusion.state.StateTableCompactor;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -29,6 +30,7 @@ import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.types.RowKind;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.data.InternalRow;
+import org.apache.paimon.disk.IOManager;
 import org.apache.paimon.fs.Path;
 import org.apache.paimon.fs.local.LocalFileIO;
 import org.apache.paimon.reader.RecordReader;
@@ -45,10 +47,13 @@ import org.junit.jupiter.api.Test;
 
 /**
  * The decisive experiment for "Java Paimon owns state-table compaction": the native store
- * (paimon-rust) writes and commits a state table across several checkpoints; stock, released Java
- * Paimon (1.4.2) opens the same directory, reads the rows back, runs its own full compaction
- * (pick + sequence-preserving rewrite + commit); and the native store then restores from the
- * Java-compacted snapshot and keeps operating. Every arrow of the cross-implementation
+ * (paimon-rust) writes and commits a state table across several checkpoints, with the module's
+ * compactor folding each barrier's level-0 run away between the data commit and a re-pinning
+ * second checkpoint — the production barrier protocol, mandatory now that state tables always
+ * carry deletion vectors (raw reads skip level 0, so an unmaintained run is invisible to both
+ * implementations). Java then reads the rows back through the vector-masked files, runs a full
+ * compaction (pick + sequence-preserving rewrite + commit), and the native store restores from
+ * the Java-compacted snapshot and keeps operating. Every arrow of the cross-implementation
  * compatibility diagram is exercised: Rust manifests/data read by Java, Java manifests/data read
  * by Rust. Runs on parquet state files — the format both implementations share today (Java's
  * vortex format is unreleased, targeted at Paimon 2.0).
@@ -67,14 +72,24 @@ class PaimonJavaCompactionSpikeTest {
   void rustWritesJavaCompactsRustRestores() throws Exception {
     String tableDir = Files.createTempDirectory("spike-table").toString();
 
-    // --- Rust writes: SUM(v) GROUP BY k over four checkpoints -> four level-0 runs.
+    // --- Rust writes: SUM(v) GROUP BY k over four checkpoints. Rounds 1..3 run the production
+    // barrier protocol — data commit, the module's minimal compaction round (up-level the run,
+    // maintain the vectors), and a second checkpoint re-pinning the maintenance snapshot;
+    // without it the next round's probe would miss the level-0 rows entirely. Round 4 commits
+    // its data and stops, leaving one uncompacted level-0 run for Java's full compaction to
+    // fold.
     long handle = createAggregator(tableDir, new String[0], new String[0]);
     long snapshotId = -1;
-    try (BufferAllocator allocator = new RootAllocator()) {
+    try (BufferAllocator allocator = new RootAllocator();
+        StateTableCompactor.Session session =
+            new JavaPaimonStateCompactor().open(tableDir)) {
       for (int round = 1; round <= 4; round++) {
-        // Every round touches keys 1..3, so each bucket accumulates one run per round.
         update(allocator, handle, insertBatch(allocator, round));
         String[] manifest = Native.checkpointPaimonGroupAggregator(handle);
+        if (round < 4) {
+          session.compact(round);
+          manifest = Native.checkpointPaimonGroupAggregator(handle);
+        }
         snapshotId = Long.parseLong(manifest[0]);
       }
     } finally {
@@ -82,28 +97,31 @@ class PaimonJavaCompactionSpikeTest {
     }
     assertTrue(snapshotId > 0);
 
-    // --- Java reads the Rust-written table: sums must be 4 rounds of accumulation.
+    // --- Java reads the Rust-written table through the deletion vectors: round 4's uncompacted
+    // level-0 run is invisible (the contract the barrier protocol exists for — Java agrees with
+    // the native store), so the sums show exactly rounds 1..3: 10k*(1+2+3) = 60k.
     FileStoreTable table = FileStoreTableFactory.create(LocalFileIO.create(), new Path(tableDir));
     Map<Long, List<Long>> rows = readState(table);
     assertEquals(3, rows.size());
-    // Each round r contributed 10k*r, so after rounds 1..4 the sum is 10k*(1+2+3+4) = 100k.
     for (long key = 1; key <= 3; key++) {
-      assertEquals(4, rows.get(key).get(0), "records for key " + key);
-      assertEquals(100 * key, rows.get(key).get(1), "sum for key " + key);
+      assertEquals(3, rows.get(key).get(0), "records for key " + key);
+      assertEquals(60 * key, rows.get(key).get(1), "sum for key " + key);
     }
     Set<Integer> buckets = new HashSet<>();
-    int filesBefore = 0;
     for (Split split : table.newReadBuilder().newScan().plan().splits()) {
-      DataSplit dataSplit = (DataSplit) split;
-      buckets.add(dataSplit.bucket());
-      filesBefore += dataSplit.dataFiles().size();
+      buckets.add(((DataSplit) split).bucket());
     }
-    assertTrue(filesBefore > buckets.size(), "several runs per bucket before compaction");
 
-    // --- Java compacts with its own machinery (pick, sequence-preserving rewrite, commit).
+    // --- Java compacts with its own machinery (pick, sequence-preserving rewrite, commit),
+    // folding the level-0 run into the vector-masked view.
     StreamWriteBuilder writeBuilder = table.newStreamWriteBuilder().withCommitUser("java-spike");
-    try (StreamTableWrite write = writeBuilder.newWrite();
+    try (IOManager ioManager =
+            IOManager.create(Files.createTempDirectory("spike-lookup").toString());
+        StreamTableWrite write = writeBuilder.newWrite();
         StreamTableCommit commit = writeBuilder.newCommit()) {
+      // The lookup rewriter of a deletion-vector table spills its key-position files through an
+      // IOManager, exactly as the module's own writer does.
+      write.withIOManager(ioManager);
       for (int bucket : buckets) {
         write.compact(BinaryRow.EMPTY_ROW, bucket, true);
       }
@@ -117,7 +135,12 @@ class PaimonJavaCompactionSpikeTest {
       filesAfter += ((DataSplit) split).dataFiles().size();
     }
     assertEquals(buckets.size(), filesAfter, "full compaction leaves one file per bucket");
-    assertEquals(rows, readState(reopened), "compaction must not change the state's content");
+    // Round 4's rows surface once compacted: 10k*(1+2+3+4) = 100k over 4 records per key.
+    Map<Long, List<Long>> compacted = readState(reopened);
+    for (long key = 1; key <= 3; key++) {
+      assertEquals(4, compacted.get(key).get(0), "records for key " + key);
+      assertEquals(100 * key, compacted.get(key).get(1), "sum for key " + key);
+    }
     long javaSnapshot = reopened.snapshotManager().latestSnapshotId();
     assertTrue(javaSnapshot > snapshotId);
 

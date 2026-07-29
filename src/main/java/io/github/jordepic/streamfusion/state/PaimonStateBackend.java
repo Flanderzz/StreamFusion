@@ -1,6 +1,5 @@
 package io.github.jordepic.streamfusion.state;
 
-import java.util.concurrent.atomic.AtomicBoolean;
 import org.apache.flink.core.execution.SavepointFormatType;
 import org.apache.flink.runtime.state.CheckpointableKeyedStateBackend;
 import org.apache.flink.runtime.state.IncrementalKeyedStateHandle.HandleAndLocalPath;
@@ -31,16 +30,13 @@ import java.util.UUID;
  * RocksDB backend uses.
  *
  * <p>Selected with {@code state.backend.type:
- * io.github.jordepic.streamfusion.state.PaimonStateBackendFactory}.
+ * io.github.jordepic.streamfusion.state.PaimonStateBackendFactory}. Requires the
+ * {@code streamfusion-paimon-compactor} module with a deletion-vector-capable Paimon bundle on
+ * the classpath (see {@link #discoverCompactor()}); creation fails closed without one.
  */
 public class PaimonStateBackend implements StateBackend {
 
   private static final long serialVersionUID = 1L;
-
-  private static final org.slf4j.Logger LOG =
-      org.slf4j.LoggerFactory.getLogger(PaimonStateBackend.class);
-  private static final AtomicBoolean UNMAINTAINED_WARNING =
-      new AtomicBoolean();
 
   private final HashMapStateBackend delegate = new HashMapStateBackend();
 
@@ -87,40 +83,34 @@ public class PaimonStateBackend implements StateBackend {
       IncrementalRemoteKeyedStateHandle restored = paimonHandles.get(0);
       strategy.seedRestored(restored.getCheckpointId(), restored.getSharedState());
     }
-    return new PaimonKeyedStateBackend<>(
-        inner,
-        strategy,
-        workingDirectory,
-        sources,
-        compactor != null && compactor.supportsDeletionVectors());
+    return new PaimonKeyedStateBackend<>(inner, strategy, workingDirectory, sources);
   }
 
   /**
-   * The table maintainer, when one is deployed (the Java Paimon compactor module), its
-   * dependencies are present, and it can read the configured state file format. With a
-   * maintainer, compaction runs synchronously at every barrier; when its Paimon also passes the
-   * deletion-vector capability probe, state tables carry deletion vectors and reads never merge
-   * sorted runs (Paimon's own {@code lookup-wait} model). There is no native fallback: without a
-   * compactor, tables are created without deletion vectors and stay correct through merge reads,
-   * but accumulate one sorted run per touched bucket per checkpoint — worth a warning, not a
-   * failure.
+   * The table maintainer: the Java Paimon compactor module, whose Paimon bundle can read the
+   * configured state file format and passes the deletion-vector capability probe. State tables
+   * always carry deletion vectors — only compaction maintains the vectors, and it runs
+   * synchronously at every barrier (Paimon's own {@code lookup-wait} model), so reads never
+   * merge sorted runs. There is no maintainer-less mode: a deployment that cannot maintain the
+   * tables fails closed here, at backend creation, rather than silently producing state tables
+   * whose reads would go wrong at the first uncompacted run.
    */
   private static StateTableCompactor discoverCompactor() {
     String fileFormat = io.github.jordepic.streamfusion.planner.NativeConfig.paimonFileFormat();
     for (StateTableCompactor candidate :
         ServiceLoader.load(StateTableCompactor.class, StateTableCompactor.class.getClassLoader())) {
-      if (candidate.available() && candidate.supports(fileFormat)) {
+      if (candidate.available()
+          && candidate.supports(fileFormat)
+          && candidate.supportsDeletionVectors()) {
         return candidate;
       }
     }
-    if (UNMAINTAINED_WARNING.compareAndSet(false, true)) {
-      LOG.warn(
-          "no state-table compactor for file format '{}': native Paimon state tables will not be"
-              + " compacted (reads stay correct, probe cost grows with checkpoints). Deploy"
-              + " streamfusion-paimon-compactor plus a Paimon bundle that reads this format.",
-          fileFormat);
-    }
-    return null;
+    throw new IllegalStateException(
+        "the Paimon state backend requires a deletion-vector-capable state-table compactor for"
+            + " file format '"
+            + fileFormat
+            + "': deploy streamfusion-paimon-compactor with a Paimon bundle that reads this"
+            + " format and carries the binary-key lookup comparator fix (apache/paimon#8873)");
   }
 
   private static File workingDirectory(KeyedStateBackendParameters<?> parameters) {

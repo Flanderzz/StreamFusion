@@ -92,11 +92,21 @@ Why Paimon over rust-rocksdb:
   compaction to paimon-rust is the durable fix.) Local files unreachable from the latest
   snapshot are unlinked after each checkpoint (uploads read from per-checkpoint hard-link
   directories, so GC and uploads never race).
+  *(2026-07-29: the merge-read fallback deployment mode — both the capability-probe fallback
+  and the run-without-the-module degradation above — was removed once a Paimon bundle carrying
+  the comparator fix, apache/paimon#8873, became publishable as the default. Deletion vectors
+  are now unconditional; a missing or incapable compactor fails the backend closed at creation
+  instead of degrading, and restoring a table without the option is refused outright — no
+  merge-read state table was ever produced in production. The capability probe survives as a
+  validation. Merge reads remain only inside the Rust unit suite, which cannot run a Java
+  compactor against its own commits.)*
 - Vortex state files are **not readable by released Java Paimon** — the Java Vortex format
   (reader and writer over the native vortex library) exists on Paimon master, targeted at 2.0,
   and is absent from every 1.4.x release. State files therefore default to `parquet` (Java can
   maintain and inspect them today); `vortex` is opt-in and currently unmaintained. Values stay
-  Rust-defined either way.
+  Rust-defined either way. *(2026-07-29: with the 2.0-SNAPSHOT bundle as the default, vortex
+  state tables are maintainable; on a bundle without the format the backend fails closed at
+  creation rather than running unmaintained.)*
 - Canonical savepoints cannot be expressed; native-format savepoints work.
 - Multiset-state aggregates (retracting MIN/MAX, DISTINCT) stay on memory state until the row
   codec grows side tables (see `docs/coverage-and-fallbacks.md` §c).

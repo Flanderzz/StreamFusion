@@ -24,8 +24,6 @@ import org.apache.flink.util.FileUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import javax.annotation.Nullable;
-
 import java.io.DataOutputStream;
 import java.io.File;
 import java.io.IOException;
@@ -78,11 +76,11 @@ final class PaimonSnapshotStrategy
   private final File checkpointLinkRoot;
   private final File tableDirectory;
   /** Maintains the state tables synchronously at each barrier, between the data commit and the
-   * manifest capture; null when no compactor module is deployed (tables then accumulate runs). */
-  @Nullable private final StateTableCompactor compactor;
+   * manifest capture; never null — the backend fails closed at creation without a compactor. */
+  private final StateTableCompactor compactor;
 
-  /** Kicked after each barrier's minimal round; null without a compactor. */
-  @Nullable private final PaimonTableShaping shaping;
+  /** Kicked after each barrier's minimal round. */
+  private final PaimonTableShaping shaping;
 
   /** One compactor per table at a time (see {@link PaimonTableShaping}). */
   private final Object compactionMutex = new Object();
@@ -123,19 +121,17 @@ final class PaimonSnapshotStrategy
       KeyGroupRange keyGroupRange,
       File checkpointLinkRoot,
       File tableDirectory,
-      @Nullable StateTableCompactor compactor) {
+      StateTableCompactor compactor) {
     this.backendUID = backendUID;
     this.keyGroupRange = keyGroupRange;
     this.checkpointLinkRoot = checkpointLinkRoot;
     this.tableDirectory = tableDirectory;
     this.compactor = compactor;
-    this.shaping = compactor == null ? null : new PaimonTableShaping(this::shapeTables);
+    this.shaping = new PaimonTableShaping(this::shapeTables);
   }
 
   void close() {
-    if (shaping != null) {
-      shaping.close();
-    }
+    shaping.close();
     synchronized (compactionMutex) {
       for (StateTableCompactor.Session session : sessions.values()) {
         session.close();
@@ -190,7 +186,7 @@ final class PaimonSnapshotStrategy
     long profileCompactNs = 0;
     File linkDir = new File(checkpointLinkRoot, "chk-" + checkpointId);
     String[] manifest = nativeState.checkpoint();
-    if (compactor != null && !manifest[0].isEmpty()) {
+    if (!manifest[0].isEmpty()) {
       // Maintenance runs synchronously between the data commit and the manifest capture —
       // Paimon's own lookup-wait model. The barrier's sorted runs are compacted away (with
       // deletion vectors maintained) before any file is listed, so the checkpoint carries no
@@ -322,9 +318,6 @@ final class PaimonSnapshotStrategy
    * record is processed. An adoption restore has no level-0 files, so this is a cheap no-op scan.
    */
   void maintainAfterRestore() throws Exception {
-    if (compactor == null) {
-      return;
-    }
     compactTables();
     nativeState.checkpoint();
   }

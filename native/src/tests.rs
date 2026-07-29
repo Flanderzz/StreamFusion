@@ -7215,6 +7215,47 @@ mod paimon_state {
         assert!(clip_err.to_string().contains("compactor"), "unexpected error: {clip_err}");
     }
 
+    /// The reverse mismatch is just as fatal: a deletion-vector deployment (production always
+    /// is) restoring a table without the option would rewrite or adopt rows a raw scan then
+    /// cannot see correctly. No such table was ever written by a production deployment, so the
+    /// restore refuses outright instead of migrating.
+    #[test]
+    fn paimon_pre_deletion_vector_restore_is_unsupported() {
+        let dir = temp_dir("pre-dv");
+        let mut paimon = paimon_agg(PaimonGroupStore::create(config(&dir), codec()).unwrap());
+        paimon
+            .update(&group_changelog(vec![1], vec![Some(10)], vec![0]), 0)
+            .unwrap();
+        paimon.flush_mini_batch().unwrap();
+        let manifest = paimon.store_mut().checkpoint().unwrap();
+
+        let restored = temp_dir("pre-dv-target");
+        materialize(&manifest, &dir, &restored);
+        let err = PaimonGroupStore::open(dv_config(&restored), codec(), manifest.snapshot_id)
+            .err()
+            .expect("a pre-deletion-vector table must be refused");
+        assert!(err.to_string().contains("predates deletion vectors"), "unexpected error: {err}");
+
+        // Both restore paths refuse: the aligned adoption (same bucket count, same fields — the
+        // deletion-vector option is the only mismatch) and the rescale clip.
+        for aligned in [true, false] {
+            let merged_err = PaimonGroupStore::open_merged(
+                dv_config(&temp_dir("pre-dv-merged-target")),
+                codec(),
+                &[(restored.clone(), manifest.snapshot_id)],
+                0..=127,
+                aligned,
+                0,
+            )
+            .err()
+            .expect("a pre-deletion-vector source must be refused");
+            assert!(
+                merged_err.to_string().contains("predates deletion vectors"),
+                "unexpected error: {merged_err}"
+            );
+        }
+    }
+
     /// Index files registered in the snapshot's index manifest (the compactor's deletion
     /// vectors) ride the checkpoint listing with the data files, and a wholesale bucket adoption
     /// links and re-registers them in the new table's own index manifest.

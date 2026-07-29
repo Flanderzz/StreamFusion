@@ -42,6 +42,10 @@ import org.junit.jupiter.api.extension.ExtendWith;
  * through the keyed-state backend as {@link IncrementalRemoteKeyedStateHandle}s (not raw keyed
  * state), a completed checkpoint's files are referenced by placeholders instead of re-uploaded
  * (incremental), and a fresh operator restored from the handle continues the changelog exactly.
+ *
+ * <p>Lives in the compactor module because the backend fails closed without the Java compactor
+ * on the classpath: every run here is the production shape — state tables carry deletion
+ * vectors and barriers compact synchronously.
  */
 @ExtendWith(CoalescingOff.class)
 class PaimonStateBackendOperatorTest {
