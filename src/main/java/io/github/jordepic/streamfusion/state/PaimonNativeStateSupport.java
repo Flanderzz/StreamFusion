@@ -119,6 +119,6 @@ public final class PaimonNativeStateSupport {
 
   /** Installs the operator's checkpoint hook (see {@link PaimonNativeState}); call once. */
   public void register(PaimonNativeState nativeState) {
-    backend.registerNativeState(nativeState);
+    backend.registerNativeState(nativeState, stateTtlMillis);
   }
 }

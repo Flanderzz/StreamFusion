@@ -93,8 +93,12 @@ public final class PaimonKeyedStateBackend<K>
     return restoredSources;
   }
 
-  /** Registers the operator's native checkpoint hook; snapshots then go through Paimon commits. */
-  public void registerNativeState(PaimonNativeState nativeState) {
+  /**
+   * Registers the operator's native checkpoint hook; snapshots then go through Paimon commits.
+   * The operator's idle-state retention (0 = off) rides along so table maintenance can
+   * physically drop rows the read path already treats as expired.
+   */
+  public void registerNativeState(PaimonNativeState nativeState, long stateTtlMillis) {
     if (snapshotStrategy.hasNativeState()) {
       throw new IllegalStateException("a native state hook is already registered");
     }
@@ -103,7 +107,7 @@ public final class PaimonKeyedStateBackend<K>
           "operator created JVM keyed state before registering native Paimon state; "
               + "the two channels are exclusive");
     }
-    snapshotStrategy.registerNativeState(nativeState);
+    snapshotStrategy.registerNativeState(nativeState, stateTtlMillis);
     if (!restoredSources.isEmpty()) {
       try {
         snapshotStrategy.maintainAfterRestore();

@@ -14,6 +14,7 @@ import io.github.jordepic.streamfusion.operator.NativeColumnarUpdatingJoinOperat
 import io.github.jordepic.streamfusion.operator.RowDataArrowConverter;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
@@ -169,6 +170,29 @@ class PaimonStateBackendOperatorTest {
       harness.processElement(new StreamRecord<>(batch(allocator, row(1, 5))));
       assertEquals(List.of(insert(1, 5)), collect(harness));
     }
+  }
+
+  /**
+   * The retention handed to a maintenance session as record-level-expire options: nothing
+   * without TTL, and padded seconds with it — {@code ceil(ttl/1000) + 1}, so Paimon's
+   * whole-second truncation (of both the clock and the ts column) can never physically drop a
+   * row before its logical {@code ts + ttl} expiry.
+   */
+  @Test
+  void recordLevelExpireOptionsPadTheRetention() {
+    assertEquals(Map.of(), PaimonSnapshotStrategy.recordLevelExpireOptions(0));
+    assertEquals(
+        Map.of("record-level.expire-time", "2s", "record-level.time-field", "ts"),
+        PaimonSnapshotStrategy.recordLevelExpireOptions(1));
+    assertEquals(
+        Map.of("record-level.expire-time", "2s", "record-level.time-field", "ts"),
+        PaimonSnapshotStrategy.recordLevelExpireOptions(1000));
+    assertEquals(
+        Map.of("record-level.expire-time", "3s", "record-level.time-field", "ts"),
+        PaimonSnapshotStrategy.recordLevelExpireOptions(1001));
+    assertEquals(
+        Map.of("record-level.expire-time", "3601s", "record-level.time-field", "ts"),
+        PaimonSnapshotStrategy.recordLevelExpireOptions(3_600_000));
   }
 
   /** Retracting a group to zero records deletes it in the table, across a checkpoint. */

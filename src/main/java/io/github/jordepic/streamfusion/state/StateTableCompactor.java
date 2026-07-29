@@ -1,5 +1,7 @@
 package io.github.jordepic.streamfusion.state;
 
+import java.util.Map;
+
 /**
  * The maintainer of a native operator's Paimon state table, discovered via {@link
  * java.util.ServiceLoader}. The native store itself never compacts: whatever maintenance happens
@@ -42,6 +44,19 @@ public interface StateTableCompactor {
    * table at a time) and closes it before the table directory is deleted.
    */
   Session open(String tableDirectory) throws Exception;
+
+  /**
+   * {@link #open(String)} with dynamic Paimon table options the session must apply to every
+   * writer it creates on the table (e.g. the record-level retention that lets compaction
+   * physically drop rows the read path already treats as expired). The options are per-session
+   * state, never written into the table schema: a job restored with a different retention must
+   * drop rows by the restored value, not a stale stamped one. The default ignores the options so
+   * third-party implementations stay source-compatible; they then merely reclaim less space.
+   */
+  default Session open(String tableDirectory, Map<String, String> dynamicOptions)
+      throws Exception {
+    return open(tableDirectory);
+  }
 
   /** One table's maintenance rounds; not thread-safe, serialized and closed by the caller. */
   interface Session extends AutoCloseable {

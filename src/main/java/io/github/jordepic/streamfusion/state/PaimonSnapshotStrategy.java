@@ -99,6 +99,11 @@ final class PaimonSnapshotStrategy
 
   private PaimonNativeState nativeState;
 
+  /** The operator's idle-state retention millis (0 = off), set at native-state registration —
+   * before any maintenance session opens — so every session carries the retention as dynamic
+   * record-level-expire options. */
+  private long stateTtlMillis;
+
   /** Shared files uploaded per checkpoint; a reuse base once the checkpoint completes. */
   private final SortedMap<Long, Collection<HandleAndLocalPath>> uploadedFiles = new TreeMap<>();
 
@@ -139,8 +144,9 @@ final class PaimonSnapshotStrategy
     }
   }
 
-  void registerNativeState(PaimonNativeState nativeState) {
+  void registerNativeState(PaimonNativeState nativeState, long stateTtlMillis) {
     this.nativeState = nativeState;
+    this.stateTtlMillis = stateTtlMillis;
   }
 
   boolean hasNativeState() {
@@ -275,10 +281,38 @@ final class PaimonSnapshotStrategy
     String dir = table.getAbsolutePath();
     StateTableCompactor.Session session = sessions.get(dir);
     if (session == null) {
-      session = compactor.open(dir);
+      session = compactor.open(dir, recordLevelExpireOptions(stateTtlMillis));
       sessions.put(dir, session);
     }
     return session;
+  }
+
+  /**
+   * The dynamic Paimon options letting a maintenance session physically drop rows past the
+   * operator's retention during its compaction rewrites — the analog of RocksDB's compaction
+   * filter. The read path already enforces expiry logically off the trailing {@code ts}
+   * epoch-millis column, so this only reclaims space for rows never read again; correctness
+   * therefore demands physical drops happen strictly AFTER logical expiry ({@code now >= ts +
+   * ttl}), never before.
+   *
+   * <p>Paimon's {@code RecordLevelExpire} truncates everything to whole seconds: it compares
+   * {@code currentTimeMillis()/1000} against {@code ts/1000 + expireSec}, keeping a row iff
+   * {@code nowSec <= tsSec + expireSec}. Both floor divisions lose up to ~1s each, so the expiry
+   * seconds are padded — {@code ceil(ttl/1000) + 1} — to guarantee a logically live row can never
+   * be dropped, at the cost of holding a dead row for up to ~2 extra seconds. Do NOT "simplify"
+   * the ceil or the +1 away: an unpadded floor could physically drop a row the read path still
+   * serves. The same pad absorbs any sub-second skew between the task's stamping clock and the
+   * compactor's clock (they share a JVM).
+   */
+  static Map<String, String> recordLevelExpireOptions(long stateTtlMillis) {
+    if (stateTtlMillis <= 0) {
+      return Collections.emptyMap();
+    }
+    long paddedExpireSeconds = (stateTtlMillis + 999) / 1000 + 1;
+    Map<String, String> options = new HashMap<>();
+    options.put("record-level.expire-time", paddedExpireSeconds + "s");
+    options.put("record-level.time-field", "ts");
+    return options;
   }
 
   /**

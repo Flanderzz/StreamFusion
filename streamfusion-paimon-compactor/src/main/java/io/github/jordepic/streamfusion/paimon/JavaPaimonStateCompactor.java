@@ -50,6 +50,27 @@ public class JavaPaimonStateCompactor implements StateTableCompactor {
   private static final String COMMIT_USER = "streamfusion-compactor";
   private static final String SHAPE_COMMIT_USER = "streamfusion-shaper";
 
+  /**
+   * How often a shaping round escalates to a full compaction when the session carries retention
+   * options — the analog of RocksDB's periodicCompactionSeconds: a file the universal triggers
+   * never pick again would otherwise keep its expired rows forever. Paimon's full pick is
+   * stats-guided (a max-level run only rewrites the files whose min timestamp is past the
+   * retention), so on a steady table the periodic round is usually a no-op scan. One hour is
+   * deliberately conservative; expired rows are already invisible to reads, this only bounds how
+   * long their bytes linger.
+   */
+  private static final long DEFAULT_FULL_COMPACTION_INTERVAL_MILLIS = 60 * 60 * 1000L;
+
+  private final long fullCompactionIntervalMillis;
+
+  public JavaPaimonStateCompactor() {
+    this(DEFAULT_FULL_COMPACTION_INTERVAL_MILLIS);
+  }
+
+  JavaPaimonStateCompactor(long fullCompactionIntervalMillis) {
+    this.fullCompactionIntervalMillis = fullCompactionIntervalMillis;
+  }
+
   @Override
   public boolean available() {
     try {
@@ -98,12 +119,24 @@ public class JavaPaimonStateCompactor implements StateTableCompactor {
 
   @Override
   public Session open(String tableDirectory) {
-    return new PaimonSession(tableDirectory);
+    return open(tableDirectory, Map.of());
+  }
+
+  @Override
+  public Session open(String tableDirectory, Map<String, String> dynamicOptions) {
+    return new PaimonSession(tableDirectory, dynamicOptions, fullCompactionIntervalMillis);
   }
 
   private static final class PaimonSession implements Session {
 
     private final String tableDirectory;
+    /** Applied to every writer the session creates (see {@link StateTableCompactor#open(String,
+     * Map)}); with the retention options present, every compaction rewrite drops rows past it. */
+    private final Map<String, String> dynamicOptions;
+    private final long fullCompactionIntervalMillis;
+    /** Wall-clock instant the next shaping round escalates to a full compaction; never with an
+     * option-less session (nothing expires, so cold files need no periodic rewrite). */
+    private long fullCompactionDeadline;
 
     private FileStoreTable table;
     private StreamTableWrite write;
@@ -113,8 +146,17 @@ public class JavaPaimonStateCompactor implements StateTableCompactor {
     private long lastSeenSnapshot;
     private int buckets;
 
-    private PaimonSession(String tableDirectory) {
+    private PaimonSession(
+        String tableDirectory,
+        Map<String, String> dynamicOptions,
+        long fullCompactionIntervalMillis) {
       this.tableDirectory = tableDirectory;
+      this.dynamicOptions = dynamicOptions;
+      this.fullCompactionIntervalMillis = fullCompactionIntervalMillis;
+      this.fullCompactionDeadline =
+          dynamicOptions.isEmpty()
+              ? Long.MAX_VALUE
+              : System.currentTimeMillis() + fullCompactionIntervalMillis;
     }
 
     @Override
@@ -163,7 +205,7 @@ public class JavaPaimonStateCompactor implements StateTableCompactor {
       if (bucketCount <= 0) {
         return false;
       }
-      Map<String, String> options = new HashMap<>();
+      Map<String, String> options = new HashMap<>(dynamicOptions);
       options.put(CoreOptions.NUM_LEVELS.key(), String.valueOf(fresh.coreOptions().numLevels()));
       options.put(
           CoreOptions.NUM_SORTED_RUNS_COMPACTION_TRIGGER.key(),
@@ -245,6 +287,16 @@ public class JavaPaimonStateCompactor implements StateTableCompactor {
       if (bucketCount <= 0) {
         return;
       }
+      if (!dynamicOptions.isEmpty()) {
+        fresh = fresh.copy(dynamicOptions);
+      }
+      // The periodic full round (RocksDB's periodicCompactionSeconds analog) reclaims expired
+      // rows from files the universal triggers never pick again; the deadline advances whether
+      // or not the pick found anything, so an all-live table is not re-scanned every round.
+      boolean full = System.currentTimeMillis() >= fullCompactionDeadline;
+      if (full) {
+        fullCompactionDeadline = System.currentTimeMillis() + fullCompactionIntervalMillis;
+      }
       StreamWriteBuilder builder = fresh.newStreamWriteBuilder().withCommitUser(SHAPE_COMMIT_USER);
       try (IOManager shapeIo =
               IOManager.create(
@@ -253,7 +305,7 @@ public class JavaPaimonStateCompactor implements StateTableCompactor {
           StreamTableCommit shapeCommit = builder.newCommit()) {
         shapeWrite.withIOManager(shapeIo);
         for (int bucket = 0; bucket < bucketCount; bucket++) {
-          shapeWrite.compact(BinaryRow.EMPTY_ROW, bucket, false);
+          shapeWrite.compact(BinaryRow.EMPTY_ROW, bucket, full);
         }
         List<CommitMessage> messages = shapeWrite.prepareCommit(true, round);
         boolean empty =
