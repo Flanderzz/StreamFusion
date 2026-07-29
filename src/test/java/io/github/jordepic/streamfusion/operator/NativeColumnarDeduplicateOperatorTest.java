@@ -164,6 +164,82 @@ class NativeColumnarDeduplicateOperatorTest {
   }
 
   @Test
+  void ttlExpiresAnIdleKeyIntoAFreshInsert() throws Exception {
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness =
+            ttlHarness(1000)) {
+      harness.setup(new ArrowBatchSerializer());
+      harness.open();
+      harness.setProcessingTime(5000);
+      harness.processElement(new StreamRecord<>(batch(allocator, row(1, 10, 0))));
+      assertEquals(List.of(List.of("+I", 1L, 10L)), collectChanges(harness));
+      // ts 5000 + ttl 1000 <= 6000: expired exactly at the boundary — a fresh +I, not -U/+U.
+      harness.setProcessingTime(6000);
+      harness.processElement(new StreamRecord<>(batch(allocator, row(1, 20, 0))));
+      assertEquals(List.of(List.of("+I", 1L, 20L)), collectChanges(harness));
+    }
+  }
+
+  @Test
+  void ttlRefreshesOnEveryWrite() throws Exception {
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness =
+            ttlHarness(1000)) {
+      harness.setup(new ArrowBatchSerializer());
+      harness.open();
+      harness.setProcessingTime(5000);
+      harness.processElement(new StreamRecord<>(batch(allocator, row(1, 10, 0))));
+      collectChanges(harness);
+      harness.setProcessingTime(5900);
+      harness.processElement(new StreamRecord<>(batch(allocator, row(1, 20, 0))));
+      collectChanges(harness);
+      // The original write is long past its ttl, but the write at 5900 refreshed the key.
+      harness.setProcessingTime(6800);
+      harness.processElement(new StreamRecord<>(batch(allocator, row(1, 30, 0))));
+      assertEquals(
+          List.of(List.of("-U", 1L, 20L), List.of("+U", 1L, 30L)), collectChanges(harness));
+    }
+  }
+
+  @Test
+  void ttlTimestampsSurviveSnapshotRestore() throws Exception {
+    // Timestamps are absolute: expiry after a restore is timed from the original write, so a
+    // restore inside the retention keeps the key alive only until write-time + ttl.
+    OperatorSubtaskState snapshot;
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness =
+            ttlHarness(1000)) {
+      harness.setup(new ArrowBatchSerializer());
+      harness.open();
+      harness.setProcessingTime(5000);
+      harness.processElement(new StreamRecord<>(batch(allocator, row(1, 10, 0))));
+      snapshot = harness.snapshot(1L, 1L);
+      collectChanges(harness);
+    }
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> restored =
+            ttlHarness(1000)) {
+      restored.setup(new ArrowBatchSerializer());
+      restored.initializeState(snapshot);
+      restored.open();
+      restored.setProcessingTime(5999);
+      restored.processElement(new StreamRecord<>(batch(allocator, row(1, 20, 0))));
+      assertEquals(
+          List.of(List.of("-U", 1L, 10L), List.of("+U", 1L, 20L)), collectChanges(restored));
+    }
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> restored =
+            ttlHarness(1000)) {
+      restored.setup(new ArrowBatchSerializer());
+      restored.initializeState(snapshot);
+      restored.open();
+      restored.setProcessingTime(6000);
+      restored.processElement(new StreamRecord<>(batch(allocator, row(1, 20, 0))));
+      assertEquals(List.of(List.of("+I", 1L, 20L)), collectChanges(restored));
+    }
+  }
+
+  @Test
   void bufferedDeduplicationRawKeyedStateRescalesByFlinkKeyGroup() throws Exception {
     long[] keys = keysForBothSubtasks();
     OperatorSubtaskState snapshot;
@@ -228,6 +304,18 @@ class NativeColumnarDeduplicateOperatorTest {
   private static KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch>
       eagerHarness(int parallelism, int subtask, boolean miniBatch, long miniBatchSize)
           throws Exception {
+    return eagerHarness(parallelism, subtask, miniBatch, miniBatchSize, true, 0);
+  }
+
+  private static KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch>
+      eagerHarness(
+          int parallelism,
+          int subtask,
+          boolean miniBatch,
+          long miniBatchSize,
+          boolean rowtimeOrdered,
+          long stateTtlMillis)
+          throws Exception {
     int[] stateKeys = stateKeysForSubtasks(parallelism);
     return new KeyedOneInputStreamOperatorTestHarness<>(
         new NativeColumnarKeepLastDeduplicateOperator(
@@ -236,16 +324,23 @@ class NativeColumnarDeduplicateOperatorTest {
             2,
             SCHEMA,
             true,
-            true,
+            rowtimeOrdered,
             false,
             miniBatch,
             miniBatchSize,
+            stateTtlMillis,
             MAX_PARALLELISM),
         batch -> stateKeys[batch.destination() >= 0 ? batch.destination() : 0],
         Types.INT,
         MAX_PARALLELISM,
         parallelism,
         subtask);
+  }
+
+  /** Proctime keep-last (arrival order), so the TTL tests replace unconditionally. */
+  private static KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> ttlHarness(
+      long stateTtlMillis) throws Exception {
+    return eagerHarness(1, 0, false, 0, false, stateTtlMillis);
   }
 
   private static KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch>

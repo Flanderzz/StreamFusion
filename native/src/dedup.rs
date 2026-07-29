@@ -499,6 +499,13 @@ pub(crate) struct KeepLastDeduplicator<S: KeyedStateStore<DedupRow> = MemoryDedu
     rowtime_ordered: bool,
     /// Keep-first (insert-only, first row wins) vs keep-last (retract changelog, latest row wins).
     keep_first: bool,
+    // Idle-state retention millis (0 = off — Flink's default). With TTL on, a key expires `ttl_ms`
+    // after its last write, and the proctime keep-last identical-row suppression is disabled:
+    // Flink always emits -U/+U under TTL to keep refreshing downstream state.
+    ttl_ms: i64,
+    // When the last full expiry sweep ran; the sweep reclaims keys never touched again, once per
+    // TTL period (expiry itself is enforced lazily at each touch).
+    last_sweep_ms: i64,
     schema: Option<SchemaRef>,
     /// arrow-row encoder for the value-encoded full row, built once from the first batch.
     payload_converter: Option<RowConverter>,
@@ -524,6 +531,16 @@ pub(crate) struct DedupRow {
     rowtime: i64,
     payload: Arc<[u8]>,
     staged: bool,
+    /// The RowKind of Flink's stored row: false = INSERT (stored at creation, or by a suppressed
+    /// duplicate), true = UPDATE_AFTER. Flink's proctime keep-last stores the row object BEFORE
+    /// emitting it, and emission mutates that same object's kind to UPDATE_AFTER (heap-state
+    /// aliasing); its generated equaliser compares kinds first, so an identical +I row is
+    /// suppressed only while the stored kind is still INSERT — i.e. until the key's first emitted
+    /// update. Replicated bit-for-bit because the suppression difference is parity-visible.
+    update_kind: bool,
+    /// Wall-clock millis of the key's last write (Flink state TTL, `OnCreateAndWrite`); stays 0
+    /// while TTL is off.
+    last_write_ms: i64,
 }
 
 struct DedupStagedChange {
@@ -589,7 +606,11 @@ impl crate::state::PaimonStateCodec for DedupStateCodec {
         } else {
             0
         };
-        DedupRow { rowtime, payload, staged: false }
+        // The Paimon shape carries neither TTL timestamps (a TTL'd deduplicator keeps the memory
+        // route) nor the stored row kind: a hydrated key reads as INSERT-stored, so a proctime
+        // keep-last identical row arriving right after hydration can suppress where the
+        // heap-backed host would emit — the same divergence window as any hydration boundary.
+        DedupRow { rowtime, payload, staged: false, update_kind: false, last_write_ms: 0 }
     }
 
     fn value_bytes(&self, row: &DedupRow) -> usize {
@@ -613,6 +634,8 @@ impl KeepLastDeduplicator {
             generate_update_before,
             rowtime_ordered,
             keep_first,
+            ttl_ms: 0,
+            last_sweep_ms: 0,
             schema: None,
             payload_converter: None,
             rows: MemoryDedupStore::default(),
@@ -649,6 +672,8 @@ impl<S: KeyedStateStore<DedupRow>> KeepLastDeduplicator<S> {
             generate_update_before: self.generate_update_before,
             rowtime_ordered: self.rowtime_ordered,
             keep_first: self.keep_first,
+            ttl_ms: self.ttl_ms,
+            last_sweep_ms: self.last_sweep_ms,
             schema: self.schema,
             payload_converter: self.payload_converter,
             rows,
@@ -680,6 +705,33 @@ impl<S: KeyedStateStore<DedupRow>> KeepLastDeduplicator<S> {
         self
     }
 
+    /// Sets the idle-state retention (`table.exec.state.ttl`) in millis; 0 (Flink's default)
+    /// disables expiry.
+    pub(crate) fn with_state_ttl(mut self, ttl_ms: i64) -> Self {
+        self.ttl_ms = ttl_ms.max(0);
+        self
+    }
+
+    /// Reclaims every key whose TTL elapsed with no further touch — the lazy per-touch expiry
+    /// never sees such a key again. Silent, like Flink's background cleanup.
+    fn sweep_expired(&mut self, ttl: StateTtl) {
+        let track = self.memory.tracking();
+        let mut reclaimed = 0isize;
+        self.rows.retain_live(&mut |key, row| {
+            if ttl.expired(row.last_write_ms) {
+                if track {
+                    reclaimed += dedup_entry_bytes(key, &row.payload) as isize;
+                }
+                false
+            } else {
+                true
+            }
+        });
+        if reclaimed != 0 {
+            self.memory.record(-reclaimed);
+        }
+    }
+
     pub(crate) fn with_key_timestamp_precisions(
         mut self,
         key_timestamp_precisions: Vec<i32>,
@@ -709,8 +761,23 @@ impl<S: KeyedStateStore<DedupRow>> KeepLastDeduplicator<S> {
         );
     }
 
-    pub(crate) fn push(&mut self, batch: &RecordBatch) -> Result<RecordBatch, DataFusionError> {
+    /// Folds an input batch into the per-key kept rows and returns the changelog (or insert-only
+    /// rows) it produces. `now_ms` is the host's wall-clock reading for this call (only read when
+    /// state TTL is on).
+    pub(crate) fn push(
+        &mut self,
+        batch: &RecordBatch,
+        now_ms: i64,
+    ) -> Result<RecordBatch, DataFusionError> {
         self.snapshot_cache = None;
+        let ttl = StateTtl::new(self.ttl_ms, now_ms);
+        // The sweep reclaims keys no later row ever touches. Once per TTL period bounds its
+        // amortized cost at one map walk per period; it must not run mid-bundle, where removing a
+        // staged key's state would strand its staged preimage at the flush.
+        if ttl.enabled() && self.staged.is_empty() && now_ms >= self.last_sweep_ms + self.ttl_ms {
+            self.sweep_expired(ttl);
+            self.last_sweep_ms = now_ms;
+        }
         let arity = data_arity(batch);
         self.schema = Some(data_schema(batch));
         self.ensure_converters(batch, arity);
@@ -736,24 +803,49 @@ impl<S: KeyedStateStore<DedupRow>> KeepLastDeduplicator<S> {
             // Borrowed probe: the key bytes are copied into the map only when a key first appears,
             // and a dropped/ignored row allocates nothing at all.
             let key = parts.encode(row);
-            // keep-first: the first row per key wins, later rows are dropped (insert-only).
+            // An expired key is deleted on read and treated as never seen (Flink's
+            // NeverReturnExpired): the next row re-enters through the fresh +I path. A staged row
+            // was written this bundle and is exempt until the flush ends the bundle — removing it
+            // would strand its staged preimage and double-stage the key (the same rule that skips
+            // the sweep mid-bundle); its expiry just delays to the first touch after the flush.
+            let ttl_ts = |row: &DedupRow| if row.staged { i64::MAX } else { row.last_write_ms };
+            let on_expired = |row: &DedupRow| {
+                if track {
+                    delta -= dedup_entry_bytes(key, &row.payload) as isize;
+                }
+            };
+            // keep-first: the first row per key wins, later rows are dropped (insert-only). A
+            // dropped duplicate is not a state write, so it does not refresh the key's TTL —
+            // Flink's processFirstRowOnProcTime writes state only for the first row.
             if keep_first {
-                if rows.contains(key) {
+                if ttl_contains(rows, key, ttl, ttl_ts, on_expired) {
                     continue;
                 }
                 let payload: Arc<[u8]> = Arc::from(payloads.row(row).data());
                 if track {
                     delta += dedup_entry_bytes(key, &payload) as isize;
                 }
+                // Flink's OnCreateAndWrite: creation stamps the TTL clock.
+                let last_write_ms = if ttl.enabled() { ttl.now() } else { 0 };
                 out_rows.push(payload.clone());
                 out_kinds.push(0); // +I — first row for the key
-                rows.insert(ByteKey::from(key), DedupRow { rowtime: 0, payload, staged: false });
+                rows.insert(
+                    ByteKey::from(key),
+                    DedupRow {
+                        rowtime: 0,
+                        payload,
+                        staged: false,
+                        update_kind: false,
+                        last_write_ms,
+                    },
+                );
                 continue;
             }
             let rowtime = rt.as_ref().map_or(0, |rt| rt.value(row));
-            match rows.get_mut(key) {
+            let current = payloads.row(row).data();
+            match ttl_get_mut(rows, key, ttl, ttl_ts, on_expired) {
                 None => {
-                    let payload: Arc<[u8]> = Arc::from(payloads.row(row).data());
+                    let payload: Arc<[u8]> = Arc::from(current);
                     if track {
                         delta += dedup_entry_bytes(key, &payload) as isize;
                     }
@@ -768,14 +860,34 @@ impl<S: KeyedStateStore<DedupRow>> KeepLastDeduplicator<S> {
                         out_rows.push(payload.clone());
                         out_kinds.push(0); // +I — first row for the key
                     }
-                    rows.insert(owned, DedupRow { rowtime, payload, staged });
+                    let last_write_ms = if ttl.enabled() { ttl.now() } else { 0 };
+                    rows.insert(
+                        owned,
+                        DedupRow { rowtime, payload, staged, update_kind: false, last_write_ms },
+                    );
                 }
                 // A rowtime order ignores an older (smaller-rowtime) row; proctime always replaces.
+                // An ignored row is not a state write, so it does not refresh the key's TTL —
+                // Flink's rowtime helper returns before updateState when the row isn't kept.
                 Some(stored) if rowtime_ordered && rowtime < stored.rowtime => {
                     continue;
                 }
+                // Proctime keep-last suppresses an identical row only while the stored kind is
+                // still INSERT (see `DedupRow::update_kind`) and TTL is off (with TTL on, Flink
+                // always emits -U/+U so downstream state keeps refreshing instead of expiring too
+                // early); the rowtime variant never suppresses — its helper emits through
+                // updateDeduplicateResult with no equality check. Flink's suppression re-stores
+                // the identical row with kind INSERT, so the flag stays false here.
+                Some(stored)
+                    if !rowtime_ordered
+                        && !stored.update_kind
+                        && stored.payload.as_ref() == current
+                        && !ttl.enabled() =>
+                {
+                    continue;
+                }
                 Some(stored) => {
-                    let payload: Arc<[u8]> = Arc::from(payloads.row(row).data());
+                    let payload: Arc<[u8]> = Arc::from(current);
                     if track {
                         // Same key: only the payload is replaced.
                         delta += payload.len() as isize - stored.payload.len() as isize;
@@ -799,9 +911,15 @@ impl<S: KeyedStateStore<DedupRow>> KeepLastDeduplicator<S> {
                         }
                         out_rows.push(payload.clone());
                         out_kinds.push(2); // +U the new (later) row
+                        // Emitting the update mutates Flink's stored row to UPDATE_AFTER.
+                        stored.update_kind = true;
                     }
                     stored.rowtime = rowtime;
                     stored.payload = payload;
+                    if ttl.enabled() {
+                        // Every kept row is a state write, so it refreshes the key's TTL.
+                        stored.last_write_ms = ttl.now();
+                    }
                 }
             }
         }
@@ -826,8 +944,15 @@ impl<S: KeyedStateStore<DedupRow>> KeepLastDeduplicator<S> {
             let row = self.rows.get_mut(&key.0).expect("staged dedup key remains in state");
             row.staged = false;
             let after = row.payload.clone();
-            if before.as_ref() == Some(&after) {
+            // The same rules as immediate mode (Flink's mini-batch flush runs the same
+            // processLastRowOnProcTime): a bundle whose net transition leaves the row unchanged
+            // is suppressed only with retention off and while the stored kind is still INSERT
+            // (staged rows are exempt from the lazy expiry, so none can have expired here).
+            if self.ttl_ms == 0 && !row.update_kind && before.as_ref() == Some(&after) {
                 continue;
+            }
+            if before.is_some() {
+                row.update_kind = true; // the emitted update mutates Flink's stored row to +U
             }
             if let Some(before) = before {
                 if self.generate_update_before {
@@ -875,6 +1000,12 @@ impl<S: KeyedStateStore<DedupRow>> KeepLastDeduplicator<S> {
 /// decoded format re-derived it from the typed rowtime column).
 const RAW_SNAPSHOT_ROWTIME: &str = "__rowtime__";
 
+/// The stored row's kind (see `DedupRow::update_kind`), written only by the proctime keep-last
+/// shape — the only one whose suppression consults it. Flink's heap backend serializes the
+/// mutated kind into its checkpoints, so it must survive ours too; a snapshot without the column
+/// (another shape, or pre-flag) restores as INSERT.
+const RAW_SNAPSHOT_UPDATE_KIND: &str = "__update_kind__";
+
 /// The raw keyed-state snapshot/restore surface exists only on the memory backend — a persistent
 /// store checkpoints through its own commit path instead of materializing the key space.
 impl KeepLastDeduplicator {
@@ -884,21 +1015,38 @@ impl KeepLastDeduplicator {
     /// carries the typed payload schema so converters can be rebuilt before any input arrives.
     fn raw_snapshot_groups(&self, max_parallelism: usize) -> BTreeMap<i32, Vec<u8>> {
         let Some(schema) = &self.schema else { return BTreeMap::new() };
-        let mut builders: BTreeMap<i32, (BinaryBuilder, BinaryBuilder, Int64Builder)> =
-            BTreeMap::new();
+        // The optional columns ride only where they mean something — the stored kind for the
+        // proctime keep-last shape (the only suppression that consults it) and the TTL timestamps
+        // only while TTL is on — so every other snapshot stays byte-identical to its prior format.
+        let kind_on = !self.rowtime_ordered && !self.keep_first;
+        let ttl_on = self.ttl_ms > 0;
+        let mut builders: BTreeMap<
+            i32,
+            (BinaryBuilder, BinaryBuilder, Int64Builder, BooleanBuilder, Int64Builder),
+        > = BTreeMap::new();
         for (key, row) in self.rows.iter() {
             let group = flink_key_group(hash_bytes_by_words(&key.0), max_parallelism) as i32;
-            let (keys, payloads, rowtimes) = builders.entry(group).or_default();
+            let (keys, payloads, rowtimes, update_kinds, write_timestamps) =
+                builders.entry(group).or_default();
             keys.append_value(&key.0);
             payloads.append_value(&row.payload);
             rowtimes.append_value(row.rowtime);
+            update_kinds.append_value(row.update_kind);
+            write_timestamps.append_value(row.last_write_ms);
+        }
+        let mut fields = vec![
+            Field::new(RAW_SNAPSHOT_KEY, DataType::Binary, false),
+            Field::new(RAW_SNAPSHOT_ROW, DataType::Binary, false),
+            Field::new(RAW_SNAPSHOT_ROWTIME, DataType::Int64, false),
+        ];
+        if kind_on {
+            fields.push(Field::new(RAW_SNAPSHOT_UPDATE_KIND, DataType::Boolean, false));
+        }
+        if ttl_on {
+            fields.push(Field::new(TTL_TS_COLUMN, DataType::Int64, false));
         }
         let raw_schema = Arc::new(Schema::new_with_metadata(
-            vec![
-                Field::new(RAW_SNAPSHOT_KEY, DataType::Binary, false),
-                Field::new(RAW_SNAPSHOT_ROW, DataType::Binary, false),
-                Field::new(RAW_SNAPSHOT_ROWTIME, DataType::Int64, false),
-            ],
+            fields,
             std::collections::HashMap::from([(
                 RAW_SNAPSHOT_PAYLOAD_SCHEMA.to_string(),
                 encode_schema_metadata(schema),
@@ -906,23 +1054,32 @@ impl KeepLastDeduplicator {
         ));
         builders
             .into_iter()
-            .map(|(group, (mut keys, mut payloads, mut rowtimes))| {
-                let batch = RecordBatch::try_new(
-                    raw_schema.clone(),
-                    vec![
+            .map(
+                |(
+                    group,
+                    (mut keys, mut payloads, mut rowtimes, mut update_kinds, mut write_timestamps),
+                )| {
+                    let mut columns: Vec<ArrayRef> = vec![
                         Arc::new(keys.finish()),
                         Arc::new(payloads.finish()),
                         Arc::new(rowtimes.finish()),
-                    ],
-                )
-                .expect("raw dedup snapshot batch");
-                (group, write_ipc(&batch))
-            })
+                    ];
+                    if kind_on {
+                        columns.push(Arc::new(update_kinds.finish()));
+                    }
+                    if ttl_on {
+                        columns.push(Arc::new(write_timestamps.finish()));
+                    }
+                    let batch = RecordBatch::try_new(raw_schema.clone(), columns)
+                        .expect("raw dedup snapshot batch");
+                    (group, write_ipc(&batch))
+                },
+            )
             .collect()
     }
 
     /// Serializes the stored last-row-per-key set.
-    fn snapshot(&self) -> Vec<u8> {
+    pub(crate) fn snapshot(&self) -> Vec<u8> {
         self.raw_snapshot_groups(1).remove(&0).unwrap_or_default()
     }
 
@@ -957,7 +1114,7 @@ impl KeepLastDeduplicator {
         });
     }
 
-    fn restore(
+    pub(crate) fn restore(
         partition_columns: Vec<usize>,
         key_timestamp_precisions: Vec<i32>,
         rt_column: usize,
@@ -965,6 +1122,7 @@ impl KeepLastDeduplicator {
         rowtime_ordered: bool,
         keep_first: bool,
         bytes: &[u8],
+        restored_at_ms: i64,
     ) -> Self {
         Self::restore_partitions(
             partition_columns,
@@ -974,12 +1132,18 @@ impl KeepLastDeduplicator {
             rowtime_ordered,
             keep_first,
             &[bytes.to_vec()],
+            restored_at_ms,
         )
     }
 
     /// Raw-format rows carry the stored key, payload, and rowtime verbatim — restoring is a
-    /// straight map rebuild with no decode or re-encode.
-    fn load_batch_raw(&mut self, batch: &RecordBatch) {
+    /// straight map rebuild with no decode or re-encode. The optional trailing columns are read
+    /// by name: the stored row kind when the writer was proctime keep-last (absent restores as
+    /// INSERT), and the TTL timestamps when the writer had TTL on — a pre-TTL snapshot restored
+    /// into a TTL'd deduplicator stamps every key with the restore time (a full retention from
+    /// now, Flink's enable-TTL migration) instead of 0, which would expire everything on first
+    /// touch.
+    fn load_batch_raw(&mut self, batch: &RecordBatch, restored_at_ms: i64) {
         if self.schema.is_none() {
             let payload_schema =
                 decode_schema_metadata(batch).expect("raw dedup snapshot payload schema");
@@ -990,6 +1154,16 @@ impl KeepLastDeduplicator {
         let keys = column_binary(batch, RAW_SNAPSHOT_KEY);
         let payloads = column_binary(batch, RAW_SNAPSHOT_ROW);
         let rowtimes = column_i64(batch, RAW_SNAPSHOT_ROWTIME);
+        let update_kinds = batch.column_by_name(RAW_SNAPSHOT_UPDATE_KIND).map(|column| {
+            column
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .expect("dedup snapshot update-kind column must be boolean")
+        });
+        let write_timestamps = batch
+            .column_by_name(TTL_TS_COLUMN)
+            .is_some()
+            .then(|| column_i64(batch, TTL_TS_COLUMN));
         for row in 0..batch.num_rows() {
             self.rows.insert(
                 ByteKey::from(keys.value(row)),
@@ -997,14 +1171,19 @@ impl KeepLastDeduplicator {
                     rowtime: rowtimes.value(row),
                     payload: Arc::from(payloads.value(row)),
                     staged: false,
+                    update_kind: update_kinds.as_ref().is_some_and(|kinds| kinds.value(row)),
+                    last_write_ms: write_timestamps
+                        .as_ref()
+                        .map_or(restored_at_ms, |ts| ts.value(row)),
                 },
             );
         }
     }
 
     /// Snapshots written before the raw format decoded the rows to typed columns; kept so
-    /// existing savepoints keep restoring.
-    fn load_batch_decoded(&mut self, batch: &RecordBatch) {
+    /// existing savepoints keep restoring. The format predates TTL, so every key is stamped with
+    /// the restore time (the enable-TTL migration).
+    fn load_batch_decoded(&mut self, batch: &RecordBatch, restored_at_ms: i64) {
         let arity = batch.num_columns();
         self.schema = Some(batch.schema());
         self.ensure_converters(batch, arity);
@@ -1030,6 +1209,8 @@ impl KeepLastDeduplicator {
                     rowtime: rt.as_ref().map_or(0, |rt| rt.value(row)),
                     payload: Arc::from(payloads.row(row).data()),
                     staged: false,
+                    update_kind: false,
+                    last_write_ms: restored_at_ms,
                 },
             );
         }
@@ -1043,6 +1224,7 @@ impl KeepLastDeduplicator {
         rowtime_ordered: bool,
         keep_first: bool,
         snapshots: &[Vec<u8>],
+        restored_at_ms: i64,
     ) -> Self {
         let mut dedup = KeepLastDeduplicator::new(
             partition_columns,
@@ -1055,9 +1237,9 @@ impl KeepLastDeduplicator {
         for bytes in snapshots {
             for batch in read_ipc_if_present(bytes) {
                 if batch.schema_ref().field(0).name() == RAW_SNAPSHOT_KEY {
-                    dedup.load_batch_raw(&batch);
+                    dedup.load_batch_raw(&batch, restored_at_ms);
                 } else {
-                    dedup.load_batch_decoded(&batch);
+                    dedup.load_batch_decoded(&batch, restored_at_ms);
                 }
             }
         }
@@ -1283,6 +1465,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createKeepLas
     rowtime_ordered: jboolean,
     keep_first: jboolean,
     mini_batch: jboolean,
+    state_ttl_millis: jlong,
     memory_budget_bytes: jlong,
 ) -> jlong {
     crate::bridge::jni_guard(env, move |mut env| {
@@ -1300,6 +1483,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createKeepLas
         )
         .with_mini_batch(mini_batch != 0)
         .with_key_timestamp_precisions(timestamp_precisions)
+        .with_state_ttl(state_ttl_millis)
         .with_memory_budget(memory_budget_bytes);
         boxed_or_throw(&mut env, dedup)
     })
@@ -1327,6 +1511,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushKeepLastD
     handle: jlong,
     in_array_address: jlong,
     in_schema_address: jlong,
+    now_millis: jlong,
     out_array_address: jlong,
     out_schema_address: jlong,
 ) {
@@ -1335,7 +1520,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushKeepLastD
         // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
         let result = {
             let batch = import_record_batch(in_array_address, in_schema_address);
-            dedup.push(&batch)
+            dedup.push(&batch, now_millis)
         };
         match result {
             Ok(out) => export_record_batch(out, out_array_address, out_schema_address),
@@ -1384,6 +1569,8 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreKeepLa
     rowtime_ordered: jboolean,
     keep_first: jboolean,
     mini_batch: jboolean,
+    state_ttl_millis: jlong,
+    now_millis: jlong,
     snapshot: JByteArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
@@ -1402,8 +1589,10 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreKeepLa
             rowtime_ordered != 0,
             keep_first != 0,
             &bytes,
+            now_millis,
         )
         .with_mini_batch(mini_batch != 0)
+        .with_state_ttl(state_ttl_millis)
         .with_memory_budget(memory_budget_bytes);
         boxed_or_throw(&mut env, dedup)
     })
@@ -1446,6 +1635,8 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreKeepLa
     rowtime_ordered: jboolean,
     keep_first: jboolean,
     mini_batch: jboolean,
+    state_ttl_millis: jlong,
+    now_millis: jlong,
     snapshots: JObjectArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
@@ -1477,8 +1668,10 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreKeepLa
             rowtime_ordered != 0,
             keep_first != 0,
             &restored,
+            now_millis,
         )
         .with_mini_batch(mini_batch != 0)
+        .with_state_ttl(state_ttl_millis)
         .with_memory_budget(memory_budget_bytes);
         boxed_or_throw(&mut env, dedup)
     })

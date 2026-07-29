@@ -1305,7 +1305,7 @@ fn dedup_state_over_budget_fails_clearly() {
     let keys: Vec<i64> = (0..100).collect();
     let values: Vec<i64> = (0..100).collect();
     let rts: Vec<i64> = vec![0; 100];
-    let err = dedup.push(&join_batch(keys, values, rts)).unwrap_err();
+    let err = dedup.push(&join_batch(keys, values, rts), 0).unwrap_err();
     assert!(err.to_string().contains("managed-memory budget"), "{err}");
 }
 
@@ -1314,7 +1314,7 @@ fn keep_last_mini_batch_emits_only_the_final_winner_per_key() {
     let mut dedup = KeepLastDeduplicator::new(vec![0], 2, true, false, false)
         .with_mini_batch(true);
     let pending = dedup
-        .push(&join_batch(vec![1, 1, 2], vec![10, 20, 5], vec![0, 1, 0]))
+        .push(&join_batch(vec![1, 1, 2], vec![10, 20, 5], vec![0, 1, 0]), 0)
         .unwrap();
     assert_eq!(pending.num_rows(), 0);
     let first = dedup.flush_mini_batch().unwrap();
@@ -1323,11 +1323,257 @@ fn keep_last_mini_batch_emits_only_the_final_winner_per_key() {
     assert_eq!(row_kinds(&first), vec![0, 0]);
 
     dedup
-        .push(&join_batch(vec![1, 1], vec![30, 40], vec![2, 3]))
+        .push(&join_batch(vec![1, 1], vec![30, 40], vec![2, 3]), 0)
         .unwrap();
     let second = dedup.flush_mini_batch().unwrap();
     assert_eq!(values(&second, 1), vec![20, 40]);
     assert_eq!(row_kinds(&second), vec![1, 2]);
+}
+
+// A proctime keep-last deduplicator over `[k, v, rt]` (key col 0; the rt column is ignored).
+fn proctime_keep_last() -> KeepLastDeduplicator {
+    KeepLastDeduplicator::new(vec![0], 2, true, false, false)
+}
+
+// State TTL: an idle key expires ttl millis after its last write; the next row is a fresh +I
+// (Flink's NeverReturnExpired: expired reads as absent).
+#[test]
+fn dedup_ttl_expires_an_idle_key_into_a_fresh_insert() {
+    let mut dedup = proctime_keep_last().with_state_ttl(1000);
+    let out = dedup.push(&join_batch(vec![1], vec![10], vec![0]), 5000).unwrap();
+    assert_eq!(row_kinds(&out), vec![0]); // +I 10
+    // ts 5000 + ttl 1000 <= 6000: expired exactly at the boundary — a fresh +I, not -U/+U.
+    let out = dedup.push(&join_batch(vec![1], vec![5], vec![0]), 6000).unwrap();
+    assert_eq!(row_kinds(&out), vec![0]);
+    assert_eq!(values(&out, 1), vec![5]);
+}
+
+// A write refreshes the TTL (OnCreateAndWrite): steadily-touched keys never expire, and expiry
+// is timed from the LAST write.
+#[test]
+fn dedup_ttl_refreshes_on_every_write() {
+    let mut dedup = proctime_keep_last().with_state_ttl(1000);
+    dedup.push(&join_batch(vec![1], vec![10], vec![0]), 5000).unwrap();
+    let out = dedup.push(&join_batch(vec![1], vec![20], vec![0]), 5900).unwrap();
+    assert_eq!(row_kinds(&out), vec![1, 2]); // alive: -U(10)/+U(20)
+    // 900ms later the original write is long past ttl, but the refresh at 5900 keeps it alive.
+    let out = dedup.push(&join_batch(vec![1], vec![30], vec![0]), 6800).unwrap();
+    assert_eq!(row_kinds(&out), vec![1, 2]);
+    assert_eq!(values(&out, 1), vec![20, 30]);
+}
+
+// A rowtime order ignores an older-rowtime row WITHOUT a state write (Flink's rowtime helper
+// returns before updateState when the row isn't kept), so the key still expires on the schedule
+// of its last kept row — and an expired stored row plus an older-rowtime arrival is a fresh +I,
+// not an ignore (the expiry check runs before the rowtime comparison).
+#[test]
+fn dedup_ttl_ignored_older_rowtime_row_does_not_refresh() {
+    let mut dedup = KeepLastDeduplicator::new(vec![0], 2, true, true, false).with_state_ttl(1000);
+    let out = dedup.push(&join_batch(vec![1], vec![10], vec![100]), 5000).unwrap();
+    assert_eq!(row_kinds(&out), vec![0]);
+    // Older rowtime while alive: ignored, and NOT a TTL refresh.
+    let out = dedup.push(&join_batch(vec![1], vec![20], vec![50]), 5900).unwrap();
+    assert_eq!(out.num_rows(), 0);
+    // 5000 + 1000 <= 6000: expired despite the 5900 touch — the older-rowtime row re-enters fresh.
+    let out = dedup.push(&join_batch(vec![1], vec![30], vec![10]), 6000).unwrap();
+    assert_eq!(row_kinds(&out), vec![0]);
+    assert_eq!(values(&out, 1), vec![30]);
+}
+
+// With TTL off, proctime keep-last suppresses an identical row exactly as Flink's
+// processLastRowOnProcTime does on the default heap backend: its generated equaliser compares
+// row kinds first, and emitting an update mutates the stored (aliased) row's kind to
+// UPDATE_AFTER — so only a duplicate of a still-INSERT-stored row (a key that has never emitted
+// an update) is suppressed; after any update, identical rows emit an identical -U/+U pair.
+#[test]
+fn dedup_ttl_off_suppresses_an_identical_proctime_row_until_the_first_update() {
+    let mut dedup = proctime_keep_last();
+    let out = dedup.push(&join_batch(vec![1], vec![10], vec![7]), 0).unwrap();
+    assert_eq!(row_kinds(&out), vec![0]);
+    let out = dedup.push(&join_batch(vec![1], vec![10], vec![7]), 0).unwrap();
+    assert_eq!(out.num_rows(), 0); // stored kind INSERT — suppressed
+    let out = dedup.push(&join_batch(vec![1], vec![10], vec![7]), 0).unwrap();
+    assert_eq!(out.num_rows(), 0); // a suppressed duplicate re-stores as INSERT — still suppressed
+    let out = dedup.push(&join_batch(vec![1], vec![20], vec![7]), 0).unwrap();
+    assert_eq!(row_kinds(&out), vec![1, 2]); // state intact: -U(10)/+U(20)
+    assert_eq!(values(&out, 1), vec![10, 20]);
+    // The stored row is now kind UPDATE_AFTER: Flink's kind-sensitive equaliser no longer sees
+    // the identical row as equal, so the pair emits.
+    let out = dedup.push(&join_batch(vec![1], vec![20], vec![7]), 0).unwrap();
+    assert_eq!(row_kinds(&out), vec![1, 2]); // -U(20)/+U(20), no longer suppressed
+    assert_eq!(values(&out, 1), vec![20, 20]);
+}
+
+// The stored row's kind survives a snapshot, exactly like Flink's heap backend serializing the
+// mutated kind into its checkpoints: an updated key keeps emitting identical pairs after a
+// restore, and a never-updated key keeps suppressing.
+#[test]
+fn dedup_stored_kind_survives_snapshot_restore() {
+    let mut dedup = proctime_keep_last();
+    dedup.push(&join_batch(vec![1, 2], vec![10, 50], vec![7, 7]), 0).unwrap();
+    dedup.push(&join_batch(vec![1], vec![20], vec![7]), 0).unwrap(); // key 1 now UPDATE_AFTER
+    let snapshot = dedup.snapshot();
+    let mut restored =
+        KeepLastDeduplicator::restore(vec![0], vec![-1], 2, true, false, false, &snapshot, 0);
+    let out = restored.push(&join_batch(vec![1], vec![20], vec![7]), 0).unwrap();
+    assert_eq!(row_kinds(&out), vec![1, 2]); // identical, but kind +U — emits
+    let out = restored.push(&join_batch(vec![2], vec![50], vec![7]), 0).unwrap();
+    assert_eq!(out.num_rows(), 0); // key 2 was never updated — still suppressed
+}
+
+// The mini-batch flush applies the same stored-kind rule (its flush runs the same
+// processLastRowOnProcTime): a net no-op bundle is suppressed only until the key's first emitted
+// update.
+#[test]
+fn dedup_mini_batch_suppresses_unchanged_bundles_until_the_first_update() {
+    let mut dedup = proctime_keep_last().with_mini_batch(true);
+    dedup.push(&join_batch(vec![1], vec![10], vec![7]), 0).unwrap();
+    assert_eq!(row_kinds(&dedup.flush_mini_batch().unwrap()), vec![0]);
+    dedup.push(&join_batch(vec![1], vec![10], vec![7]), 0).unwrap();
+    assert_eq!(dedup.flush_mini_batch().unwrap().num_rows(), 0); // no-op bundle, kind INSERT
+    dedup.push(&join_batch(vec![1], vec![20], vec![7]), 0).unwrap();
+    assert_eq!(row_kinds(&dedup.flush_mini_batch().unwrap()), vec![1, 2]); // kind now +U
+    dedup.push(&join_batch(vec![1], vec![20], vec![7]), 0).unwrap();
+    let out = dedup.flush_mini_batch().unwrap();
+    assert_eq!(row_kinds(&out), vec![1, 2]); // -U(20)/+U(20) — no longer suppressed
+    assert_eq!(values(&out, 1), vec![20, 20]);
+}
+
+// The suppression is proctime-only: Flink's rowtime helper emits through
+// updateDeduplicateResult with no equality check, so an identical kept row still emits -U/+U.
+#[test]
+fn dedup_rowtime_keep_last_never_suppresses_an_identical_row() {
+    let mut dedup = KeepLastDeduplicator::new(vec![0], 2, true, true, false);
+    dedup.push(&join_batch(vec![1], vec![10], vec![100]), 0).unwrap();
+    let out = dedup.push(&join_batch(vec![1], vec![10], vec![100]), 0).unwrap();
+    assert_eq!(row_kinds(&out), vec![1, 2]); // -U(10)/+U(10), never suppressed
+}
+
+// With TTL on, the identical-row suppression is disabled: Flink always emits -U/+U so
+// downstream TTL state keeps refreshing (the deterministic, parity-testable TTL behavior).
+#[test]
+fn dedup_ttl_emits_the_identical_row_it_would_otherwise_suppress() {
+    let mut dedup = proctime_keep_last().with_state_ttl(3_600_000);
+    dedup.push(&join_batch(vec![1], vec![10], vec![7]), 5000).unwrap();
+    let out = dedup.push(&join_batch(vec![1], vec![10], vec![7]), 5001).unwrap();
+    assert_eq!(row_kinds(&out), vec![1, 2]); // -U(10)/+U(10), not suppressed
+    assert_eq!(values(&out, 1), vec![10, 10]);
+
+    // The -U half still honors generate_update_before.
+    let mut no_before =
+        KeepLastDeduplicator::new(vec![0], 2, false, false, false).with_state_ttl(3_600_000);
+    no_before.push(&join_batch(vec![1], vec![10], vec![7]), 5000).unwrap();
+    let out = no_before.push(&join_batch(vec![1], vec![10], vec![7]), 5001).unwrap();
+    assert_eq!(row_kinds(&out), vec![2]);
+}
+
+// Proctime keep-first writes state only for the FIRST row (Flink's processFirstRowOnProcTime):
+// a dropped duplicate does not refresh the TTL, so a hot key still expires and re-emits +I.
+#[test]
+fn dedup_ttl_keep_first_duplicate_does_not_refresh() {
+    let mut dedup =
+        KeepLastDeduplicator::new(vec![0], 2, true, false, true).with_state_ttl(1000);
+    let out = dedup.push(&join_batch(vec![1], vec![10], vec![0]), 5000).unwrap();
+    assert_eq!(values(&out, 1), vec![10]); // first row emits (insert-only, no $row_kind$)
+    let out = dedup.push(&join_batch(vec![1], vec![20], vec![0]), 5900).unwrap();
+    assert_eq!(out.num_rows(), 0); // duplicate dropped — and NOT a TTL refresh
+    // 5000 + 1000 <= 6000: expired despite the 5900 duplicate — the key re-emits +I.
+    let out = dedup.push(&join_batch(vec![1], vec![30], vec![0]), 6000).unwrap();
+    assert_eq!(values(&out, 1), vec![30]);
+}
+
+// TTL timestamps ride the snapshot as absolute millis: expiry after a restore is timed from
+// the original write, not from the restore.
+#[test]
+fn dedup_ttl_timestamps_survive_snapshot_restore() {
+    let mut dedup = proctime_keep_last().with_state_ttl(1000);
+    dedup.push(&join_batch(vec![1], vec![10], vec![0]), 5000).unwrap();
+    let snapshot = dedup.snapshot();
+    let mut alive =
+        KeepLastDeduplicator::restore(vec![0], vec![-1], 2, true, false, false, &snapshot, 5500)
+            .with_state_ttl(1000);
+    let out = alive.push(&join_batch(vec![1], vec![20], vec![0]), 5999).unwrap();
+    assert_eq!(row_kinds(&out), vec![1, 2]); // one ms inside the window — still alive
+    let mut expired =
+        KeepLastDeduplicator::restore(vec![0], vec![-1], 2, true, false, false, &snapshot, 5500)
+            .with_state_ttl(1000);
+    let out = expired.push(&join_batch(vec![1], vec![20], vec![0]), 6000).unwrap();
+    assert_eq!(row_kinds(&out), vec![0]); // ts 5000 + 1000 <= 6000 — fresh insert
+    assert_eq!(values(&out, 1), vec![20]);
+}
+
+// A pre-TTL snapshot (no timestamp column) restored into a TTL'd deduplicator stamps every key
+// with the restore time — a full retention from now, Flink's enable-TTL migration — instead of
+// expiring everything on first touch.
+#[test]
+fn dedup_ttl_enable_migration_stamps_restore_time() {
+    let mut dedup = proctime_keep_last();
+    dedup.push(&join_batch(vec![1], vec![10], vec![0]), 0).unwrap();
+    let snapshot = dedup.snapshot(); // TTL off: no timestamp column
+    let mut restored =
+        KeepLastDeduplicator::restore(vec![0], vec![-1], 2, true, false, false, &snapshot, 5000)
+            .with_state_ttl(1000);
+    let out = restored.push(&join_batch(vec![1], vec![20], vec![0]), 5999).unwrap();
+    assert_eq!(row_kinds(&out), vec![1, 2]); // alive until restore + ttl
+    let mut expired =
+        KeepLastDeduplicator::restore(vec![0], vec![-1], 2, true, false, false, &snapshot, 5000)
+            .with_state_ttl(1000);
+    let out = expired.push(&join_batch(vec![1], vec![20], vec![0]), 6000).unwrap();
+    assert_eq!(row_kinds(&out), vec![0]);
+}
+
+// The periodic sweep reclaims keys that are never touched again, silently (expiry emits
+// nothing).
+#[test]
+fn dedup_ttl_sweep_reclaims_idle_keys_silently() {
+    let mut dedup = proctime_keep_last().with_state_ttl(1000);
+    dedup.push(&join_batch(vec![1], vec![10], vec![0]), 5000).unwrap();
+    dedup.push(&join_batch(vec![2], vec![20], vec![0]), 5000).unwrap();
+    // Touching only key 2 well past key 1's expiry triggers the once-per-period sweep; key 1's
+    // row is gone from the snapshot without any -D or -U having been emitted.
+    let out = dedup.push(&join_batch(vec![2], vec![1], vec![0]), 7000).unwrap();
+    assert_eq!(row_kinds(&out), vec![0]); // key 2 itself had expired too — fresh +I
+    let snapshot = dedup.snapshot();
+    // A TTL-off restore probes what survived: key 1 was swept (fresh +I), key 2 was rewritten.
+    let mut probe =
+        KeepLastDeduplicator::restore(vec![0], vec![-1], 2, true, false, false, &snapshot, 7000);
+    let out = probe.push(&join_batch(vec![1], vec![99], vec![0]), 7100).unwrap();
+    assert_eq!(row_kinds(&out), vec![0]);
+    let out = probe.push(&join_batch(vec![2], vec![99], vec![0]), 7100).unwrap();
+    assert_eq!(row_kinds(&out), vec![1, 2]);
+    assert_eq!(values(&out, 1), vec![1, 99]);
+}
+
+// The mini-batch flush applies the same TTL rule: a bundle whose net transition leaves the row
+// unchanged still emits -U/+U with retention on (Flink's mini-batch flush runs the same
+// processLastRowOnProcTime gate).
+#[test]
+fn dedup_ttl_mini_batch_flush_emits_unchanged_transitions() {
+    let mut dedup = proctime_keep_last().with_state_ttl(3_600_000).with_mini_batch(true);
+    dedup.push(&join_batch(vec![1], vec![10], vec![0]), 5000).unwrap();
+    dedup.flush_mini_batch().unwrap();
+    dedup.push(&join_batch(vec![1], vec![10], vec![0]), 5001).unwrap(); // net no-op bundle
+    let out = dedup.flush_mini_batch().unwrap();
+    assert_eq!(row_kinds(&out), vec![1, 2]); // -U(10)/+U(10), not suppressed
+    assert_eq!(values(&out, 1), vec![10, 10]);
+}
+
+// A key that expires between the bundles stages a None preimage after the delete-on-read, so
+// the flush emits the fresh +I Flink would.
+#[test]
+fn dedup_ttl_mini_batch_stages_no_preimage_for_an_expired_key() {
+    let mut dedup = proctime_keep_last().with_state_ttl(1000).with_mini_batch(true);
+    dedup.push(&join_batch(vec![1], vec![10], vec![0]), 5000).unwrap();
+    dedup.flush_mini_batch().unwrap();
+    // Key 9 opens the next bundle before key 1's expiry, so the sweep (skipped mid-bundle)
+    // cannot reclaim key 1; its expiry is enforced by the delete-on-read probe, staging a None
+    // preimage.
+    dedup.push(&join_batch(vec![9], vec![90], vec![0]), 5500).unwrap();
+    dedup.push(&join_batch(vec![1], vec![20], vec![0]), 7000).unwrap();
+    let out = dedup.flush_mini_batch().unwrap();
+    assert_eq!(values(&out, 0), vec![9, 1]);
+    assert_eq!(values(&out, 1), vec![90, 20]);
+    assert_eq!(row_kinds(&out), vec![0, 0]); // both fresh +I
 }
 
 #[test]
@@ -4966,8 +5212,8 @@ mod paimon_state {
             join_batch(vec![3, 1], vec![31, 9], vec![2, 1]),
         ];
         for (i, bundle) in bundles.iter().enumerate() {
-            paimon.push(bundle).unwrap();
-            memory.push(bundle).unwrap();
+            paimon.push(bundle, 0).unwrap();
+            memory.push(bundle, 0).unwrap();
             assert_same_output(
                 &memory.flush_mini_batch().unwrap(),
                 &paimon.flush_mini_batch().unwrap(),
@@ -4982,16 +5228,16 @@ mod paimon_state {
     fn paimon_dedup_rowtime_survives_hydration() {
         let dir = temp_dir("dedup-rt");
         let mut dedup = paimon_dedup(&dir);
-        dedup.push(&join_batch(vec![7], vec![70], vec![5])).unwrap();
+        dedup.push(&join_batch(vec![7], vec![70], vec![5]), 0).unwrap();
         dedup.store_mut().checkpoint().unwrap();
 
         // The working set is empty now; both probes below hydrate from the table, so the ignore
         // depends on the rowtime re-derived from the persisted row.
-        let ignored = dedup.push(&join_batch(vec![7], vec![71], vec![3])).unwrap();
+        let ignored = dedup.push(&join_batch(vec![7], vec![71], vec![3]), 0).unwrap();
         assert_eq!(ignored.num_rows(), 0, "older rowtime must lose against hydrated state");
         dedup.store_mut().checkpoint().unwrap();
 
-        let out = dedup.push(&join_batch(vec![7], vec![72], vec![9])).unwrap();
+        let out = dedup.push(&join_batch(vec![7], vec![72], vec![9]), 0).unwrap();
         assert_eq!(row_kinds(&out), vec![1, 2]);
         assert_eq!(values(&out, 1), vec![70, 72], "-U must carry the persisted payload");
     }
@@ -5000,7 +5246,7 @@ mod paimon_state {
     fn paimon_dedup_restores_from_listed_files_only() {
         let dir = temp_dir("dedup-restore-src");
         let mut dedup = paimon_dedup(&dir);
-        dedup.push(&join_batch(vec![1, 2, 3], vec![10, 20, 30], vec![1, 1, 1])).unwrap();
+        dedup.push(&join_batch(vec![1, 2, 3], vec![10, 20, 30], vec![1, 1, 1]), 0).unwrap();
         let manifest = dedup.store_mut().checkpoint().unwrap();
         assert!(manifest.snapshot_id > 0);
 
@@ -5019,7 +5265,7 @@ mod paimon_state {
         let mut restored =
             KeepLastDeduplicator::new(vec![0], 2, true, true, false).with_backend(store);
 
-        let out = restored.push(&join_batch(vec![2, 4], vec![25, 40], vec![9, 1])).unwrap();
+        let out = restored.push(&join_batch(vec![2, 4], vec![25, 40], vec![9, 1]), 0).unwrap();
         assert_eq!(row_kinds(&out), vec![1, 2, 0]);
         assert_eq!(values(&out, 1), vec![20, 25, 40], "-U carries the pre-restore payload");
     }

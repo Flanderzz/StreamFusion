@@ -219,18 +219,21 @@ array`, is **not** here: Flink rejects it too, so we're at parity.)
 ### 2. Per-operator matcher declines (exact conditions)
 
 **Idle-state TTL** (`table.exec.state.ttl` ≠ 0): the non-windowed `GROUP BY` — single-phase and
-the two-phase global merge (the local half is transient, so TTL lives on the global) — and
-`ChangelogNormalize` run it **natively**: Flink's exact StateTtlConfig semantics (last-write
-timestamps, expired-reads-as-absent with the fresh `+I` restart, retractions and tombstones
-against expired state dropped, and the unchanged-update suppression disabled), with the
-`STATE_TTL` hint honored over the job-wide retention (aggregates only — Flink defines no such
-hint on normalize). Every other stateful operator still declines a nonzero retention: with a TTL
-the host expires idle keys and stops suppressing unchanged updates — semantics those native
-operators do not yet reproduce. For the temporal join and OVER the decline is permanent (Flink
-expires their state on per-key 1.5×-retention cleanup timers, a coarser scheme than per-value
-TTL); for the rest it lifts as native TTL support lands. Window operators and the interval join
-are unaffected — Flink applies no idle-state TTL there. Under the Paimon state backend a TTL'd
-operator keeps the memory checkpoint route until the persistent shape carries timestamps.
+the two-phase global merge (the local half is transient, so TTL lives on the global) —
+`ChangelogNormalize`, and deduplication (keep-last, and eager proctime keep-first) run it
+**natively**: Flink's exact StateTtlConfig semantics (last-write timestamps,
+expired-reads-as-absent with the fresh `+I` restart, retractions and tombstones against expired
+state dropped, and the unchanged-update suppression disabled), with the `STATE_TTL` hint honored
+over the job-wide retention (aggregates only — Flink defines no such hint on normalize or
+deduplicate). The watermark-buffered rowtime keep-first dedup still declines — its buffered
+candidates and emitted-key set do not expire yet. Every other stateful operator likewise declines
+a nonzero retention: with a TTL the host expires idle keys and stops suppressing unchanged
+updates — semantics those native operators do not yet reproduce. For the temporal join and OVER
+the decline is permanent (Flink expires their state on per-key 1.5×-retention cleanup timers, a
+coarser scheme than per-value TTL); for the rest it lifts as native TTL support lands. Window
+operators and the interval join are unaffected — Flink applies no idle-state TTL there. Under the
+Paimon state backend a TTL'd operator keeps the memory checkpoint route until the persistent
+shape carries timestamps.
 
 - **OVER** — idle-state TTL ≠ 0 (permanent, above); a frame not of the form `… PRECEDING .. CURRENT ROW` (a `ROWS`/`RANGE` lower bound that
   is not a constant preceding offset); a bounded-RANGE frame over a proctime order (wall-clock
@@ -314,9 +317,10 @@ operator keeps the memory checkpoint route until the persistent shape carries ti
 - **LIMIT** — idle-state TTL ≠ 0 (interim, above — a limit lowers to a rank the host TTLs like any
   Top-N); missing `FETCH`, or a retracting input (`OFFSET` is handled — it uses the retracting
   ranker over the insert-only input).
-- **Deduplicate** — idle-state TTL ≠ 0 (interim, above); not a time-ordered rank-1. Rowtime and
-  proctime, keep-first (`ASC`) and keep-last (`DESC`), are all native; a value-ordered rank-1 is a
-  Top-N (handled separately).
+- **Deduplicate** — idle-state TTL ≠ 0 on the rowtime keep-first shape only (interim, above); not
+  a time-ordered rank-1. Rowtime and proctime, keep-first (`ASC`) and keep-last (`DESC`), are all
+  native, and the eager shapes run idle-state TTL natively (see the note above); a value-ordered
+  rank-1 is a Top-N (handled separately).
 - **Window Top-N / window dedup** — rank not starting at 1 (an `OFFSET`).
 - **Windowing TVF** — not `TUMBLE`/`HOP`/`CUMULATE` (zero offset) over a local-time-zone time
   attribute. Both event-time (assign by rowtime) and proctime (assign by the clock) are native.

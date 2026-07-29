@@ -70,13 +70,21 @@ class FlinkDeduplicateSqlHarnessTest {
     StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
     env.setParallelism(1);
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
+    // Two identical consecutive rows, placed to pin Flink's proctime keep-last suppression
+    // exactly: key 2's repeated first row is suppressed with TTL off (the stored row's kind is
+    // still INSERT, so the kind-sensitive equaliser sees it as equal), while key 1's repeated
+    // (v=25) row lands after an update — the stored row was mutated to UPDATE_AFTER on emission
+    // (Flink's heap-state aliasing) — so it emits an identical -U/+U pair even with TTL off.
+    // With TTL on the suppression is disabled and both duplicates emit.
     DataStream<Row> source =
         env.fromData(
             Types.ROW_NAMED(new String[] {"k", "v"}, Types.LONG, Types.LONG),
             Row.of(1L, 30L),
             Row.of(2L, 50L),
+            Row.of(2L, 50L),
             Row.of(1L, 20L),
             Row.of(2L, 40L),
+            Row.of(1L, 25L),
             Row.of(1L, 25L));
     tEnv.createTemporaryView(
         "src",
@@ -90,9 +98,59 @@ class FlinkDeduplicateSqlHarnessTest {
   }
 
   @Test
-  void stateTtlFallsBackToHost() throws Exception {
-    // With a TTL set the host expires idle keys (re-emitting a "first" row) and stops suppressing
-    // unchanged rows — the native deduplicators do not yet reproduce that.
+  void stateTtlKeepLastEmitsUnsuppressedUpdatesAndMatchesHost() throws Exception {
+    // With idle-state TTL on (1h — nothing expires in-test), Flink disables the identical-row
+    // suppression: key 2's repeated first row produces an identical -U/+U pair the TTL-off run
+    // would swallow. The kinded compare is the only one that can see such a pair, so this pins
+    // the native TTL emission semantics change for change against the host.
+    NativeParity.assertKindedParity(
+        () -> {
+          TableEnvironment tEnv = proctimeEnvironment();
+          tEnv.getConfig().set("table.exec.state.ttl", "1 h");
+          return tEnv;
+        },
+        KEEP_LAST_PROCTIME);
+  }
+
+  @Test
+  void stateTtlOffSuppressesIdenticalProctimeRowsAndMatchesHost() throws Exception {
+    // The TTL-off counterpart pins Flink's kind-sensitive suppression on both sides of the line:
+    // key 2's repeated first row is swallowed, key 1's post-update duplicate is not (see the
+    // source comment).
+    NativeParity.assertKindedParity(
+        FlinkDeduplicateSqlHarnessTest::proctimeEnvironment, KEEP_LAST_PROCTIME);
+  }
+
+  @Test
+  void stateTtlKeepFirstProctimeMatchesHost() throws Exception {
+    // Proctime keep-first runs TTL natively too (nothing expires in-test at 1h; each key still
+    // emits exactly its first row).
+    NativeParity.assertKindedParity(
+        () -> {
+          TableEnvironment tEnv = proctimeEnvironment();
+          tEnv.getConfig().set("table.exec.state.ttl", "1 h");
+          return tEnv;
+        },
+        KEEP_FIRST_PROCTIME);
+  }
+
+  @Test
+  void stateTtlKeepLastRowtimeMatchesHost() throws Exception {
+    // Rowtime keep-last runs TTL natively as well; Flink's rowtime variant never suppresses, so
+    // the kinded changelog is identical with or without retention.
+    NativeParity.assertKindedParity(
+        () -> {
+          TableEnvironment tEnv = environment();
+          tEnv.getConfig().set("table.exec.state.ttl", "1 h");
+          return tEnv;
+        },
+        KEEP_LAST);
+  }
+
+  @Test
+  void stateTtlRowtimeKeepFirstFallsBackToHost() throws Exception {
+    // Only the watermark-buffered rowtime keep-first still declines a nonzero retention — its
+    // buffered candidates and emitted-key set do not expire yet.
     NativeParity.assertFallbackReasonContains(
         () -> {
           TableEnvironment tEnv = environment();

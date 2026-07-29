@@ -758,6 +758,10 @@ public final class Native {
    * (new)); keep-first emits the first row per key ({@code +I}, insert-only) and drops the rest. A
    * rowtime order ({@code rowtimeOrdered}) reads the rowtime column and keeps the max-rowtime row;
    * proctime uses arrival order (no rowtime read). Released with {@link #closeKeepLastDeduplicator}.
+   *
+   * @param stateTtlMillis idle-state retention ({@code table.exec.state.ttl}); {@code 0} disables
+   *     expiry. A key expires {@code stateTtlMillis} after its last write and then reads as absent,
+   *     and the proctime keep-last identical-row suppression is disabled — Flink's TTL'd emission
    */
   public static native long createKeepLastDeduplicator(
       int[] partitionColumns,
@@ -767,11 +771,20 @@ public final class Native {
       boolean rowtimeOrdered,
       boolean keepFirst,
       boolean miniBatch,
+      long stateTtlMillis,
       long memoryBudgetBytes);
 
-  /** Folds an input batch and returns the changelog (or insert-only rows) it produces. */
+  /**
+   * Folds an input batch and returns the changelog (or insert-only rows) it produces. {@code
+   * nowMillis} is the operator's processing-time reading — the state-TTL clock.
+   */
   public static native void pushKeepLastDeduplicator(
-      long handle, long inArrayAddress, long inSchemaAddress, long outArrayAddress, long outSchemaAddress);
+      long handle,
+      long inArrayAddress,
+      long inSchemaAddress,
+      long nowMillis,
+      long outArrayAddress,
+      long outSchemaAddress);
 
   public static native void flushKeepLastDeduplicator(
       long handle, long outArrayAddress, long outSchemaAddress);
@@ -782,7 +795,11 @@ public final class Native {
   /** Serializes the deduplicator's per-key stored rows for a checkpoint. */
   public static native byte[] snapshotKeepLastDeduplicator(long handle);
 
-  /** Rebuilds an eager deduplicator from a snapshot and returns a fresh handle. */
+  /**
+   * Rebuilds an eager deduplicator from a snapshot and returns a fresh handle. {@code nowMillis}
+   * stamps keys restored from a snapshot that carries no TTL timestamps (a pre-TTL writer),
+   * granting them a full retention from the restore — Flink's enable-TTL migration.
+   */
   public static native long restoreKeepLastDeduplicator(
       int[] partitionColumns,
       int[] keyTimestampPrecisions,
@@ -791,6 +808,8 @@ public final class Native {
       boolean rowtimeOrdered,
       boolean keepFirst,
       boolean miniBatch,
+      long stateTtlMillis,
+      long nowMillis,
       byte[] snapshot,
       long memoryBudgetBytes);
 
@@ -798,7 +817,10 @@ public final class Native {
   public static native byte[][] snapshotKeepLastDeduplicatorPartitions(
       long handle, int maxParallelism, int[] timestampPrecisions);
 
-  /** Restores a keep-last deduplicator from the raw keyed-state partitions assigned to this subtask. */
+  /**
+   * Restores a keep-last deduplicator from the raw keyed-state partitions assigned to this subtask.
+   * Restore semantics as in {@link #restoreKeepLastDeduplicator}.
+   */
   public static native long restoreKeepLastDeduplicatorPartitions(
       int[] partitionColumns,
       int[] keyTimestampPrecisions,
@@ -807,6 +829,8 @@ public final class Native {
       boolean rowtimeOrdered,
       boolean keepFirst,
       boolean miniBatch,
+      long stateTtlMillis,
+      long nowMillis,
       byte[][] snapshots,
       long memoryBudgetBytes);
 
@@ -1107,6 +1131,7 @@ public final class Native {
       long handle,
       long inArrayAddress,
       long inSchemaAddress,
+      long nowMillis,
       long outArrayAddress,
       long outSchemaAddress);
 

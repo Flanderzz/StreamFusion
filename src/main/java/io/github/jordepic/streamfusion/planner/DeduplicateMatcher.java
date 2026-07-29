@@ -26,11 +26,6 @@ final class DeduplicateMatcher {
   private DeduplicateMatcher() {}
 
   static boolean matches(StreamPhysicalRank rank) {
-    // With a TTL set the host expires idle keys (re-emitting a "first" row) and stops suppressing
-    // unchanged rows — semantics the native deduplicators do not yet reproduce.
-    if (IdleStateRetention.isEnabled(rank)) {
-      return false;
-    }
     if (rank.rankType() != RankType.ROW_NUMBER || rank.outputRankNumber()) {
       return false;
     }
@@ -46,6 +41,12 @@ final class DeduplicateMatcher {
     }
     if (!isTimeOrder(rank)) {
       return false; // a non-time order key is a value Top-N, not deduplication
+    }
+    // The eager variants (keep-last, and proctime keep-first) run idle-state TTL natively; only
+    // the watermark-buffered rowtime keep-first still declines a nonzero retention — its buffered
+    // candidates and emitted-key set do not expire yet.
+    if (!keepLast(rank) && !isProctime(rank) && IdleStateRetention.isEnabled(rank)) {
+      return false;
     }
     return RowDataArrowConverter.supports(
         FlinkTypeFactory$.MODULE$.toLogicalRowType(rank.getRowType()));
@@ -96,11 +97,15 @@ final class DeduplicateMatcher {
   }
 
   static String unsupportedReason(StreamPhysicalRank rank) {
-    if (IdleStateRetention.isEnabled(rank)) {
-      return "deduplication: idle-state TTL (table.exec.state.ttl) runs on the host until the native"
-          + " operator expires state";
+    if (isTimeOrder(rank)
+        && !keepLast(rank)
+        && !isProctime(rank)
+        && IdleStateRetention.isEnabled(rank)) {
+      return "deduplication: idle-state TTL (table.exec.state.ttl) runs on the host for rowtime"
+          + " keep-first until the watermark-buffered operator expires state";
     }
     return "deduplication: needs ROW_NUMBER() OVER (PARTITION BY … ORDER BY rowtime|proctime ASC|DESC)"
-        + " = 1 (keep-first or keep-last) over an insert-only input with zero idle-state TTL";
+        + " = 1 (keep-first or keep-last) over an insert-only input (rowtime keep-first also needs"
+        + " zero idle-state TTL)";
   }
 }

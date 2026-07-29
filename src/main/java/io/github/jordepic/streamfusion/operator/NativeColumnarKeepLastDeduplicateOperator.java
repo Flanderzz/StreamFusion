@@ -38,6 +38,7 @@ public class NativeColumnarKeepLastDeduplicateOperator
   private final boolean keepFirst;
   private final boolean miniBatch;
   private final long miniBatchSize;
+  private final long stateTtlMillis;
 
   private transient MiniBatchBoundary boundary;
   private transient MiniBatchMetrics miniBatchMetrics;
@@ -53,6 +54,7 @@ public class NativeColumnarKeepLastDeduplicateOperator
       boolean keepFirst,
       boolean miniBatch,
       long miniBatchSize,
+      long stateTtlMillis,
       int maxParallelism) {
     super("keep-last deduplicate", keyTimestampPrecisions, maxParallelism);
     this.partitionColumns = partitionColumns;
@@ -63,13 +65,19 @@ public class NativeColumnarKeepLastDeduplicateOperator
     this.keepFirst = keepFirst;
     this.miniBatch = miniBatch && !keepFirst;
     this.miniBatchSize = miniBatchSize;
+    this.stateTtlMillis = stateTtlMillis;
   }
 
   @Override
   protected PaimonNativeStateSupport resolvePaimonState(boolean rawStateRestored) {
+    // The Paimon shape does not carry per-key TTL timestamps yet; a TTL'd deduplicator keeps the
+    // memory route (the standard fallback for an unsupported shape) until the store gains them.
     return resolvePaimon(
         rawStateRestored,
-        () -> withRowSchema(rowType, address -> Native.paimonRowStateSupported(address) ? 1L : 0L) != 0);
+        () ->
+            stateTtlMillis == 0
+                && withRowSchema(rowType, address -> Native.paimonRowStateSupported(address) ? 1L : 0L)
+                    != 0);
   }
 
   @Override
@@ -114,6 +122,7 @@ public class NativeColumnarKeepLastDeduplicateOperator
         rowtimeOrdered,
         keepFirst,
         miniBatch,
+        stateTtlMillis,
         memoryBudgetBytes());
   }
 
@@ -127,6 +136,8 @@ public class NativeColumnarKeepLastDeduplicateOperator
         rowtimeOrdered,
         keepFirst,
         miniBatch,
+        stateTtlMillis,
+        getProcessingTimeService().getCurrentProcessingTime(),
         snapshots,
         memoryBudgetBytes());
   }
@@ -221,11 +232,15 @@ public class NativeColumnarKeepLastDeduplicateOperator
         ArrowArray outArray = ArrowArray.allocateNew(allocator);
         ArrowSchema outSchema = ArrowSchema.allocateNew(allocator)) {
       Data.exportVectorSchemaRoot(inAllocator, in, dictionaries, inArray, inSchema);
+      // Flink's TtlTimeProvider clock: the processing-time service is System.currentTimeMillis in
+      // production and harness-controlled in tests, so expiry is deterministic to test.
+      long now = getProcessingTimeService().getCurrentProcessingTime();
       if (paimonState()) {
         Native.pushPaimonKeepLastDeduplicator(
             handle,
             inArray.memoryAddress(),
             inSchema.memoryAddress(),
+            now,
             outArray.memoryAddress(),
             outSchema.memoryAddress());
       } else {
@@ -233,6 +248,7 @@ public class NativeColumnarKeepLastDeduplicateOperator
             handle,
             inArray.memoryAddress(),
             inSchema.memoryAddress(),
+            now,
             outArray.memoryAddress(),
             outSchema.memoryAddress());
       }

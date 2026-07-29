@@ -84,6 +84,10 @@ public class NativeDeduplicateExecNode extends ExecNodeBase<ArrowBatch>
                 org.apache.flink.table.api.config.ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_ENABLED);
     long miniBatchSize =
         config.get(org.apache.flink.table.api.config.ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_SIZE);
+    // Flink defines no STATE_TTL hint on deduplicate, so the job-wide retention is the whole
+    // story. Only the eager operator runs it — the watermark-buffered rowtime keep-first still
+    // declines a nonzero retention at the matcher.
+    long stateTtlMillis = config.getStateRetentionTime();
     OneInputStreamOperator<ArrowBatch, ArrowBatch> operator =
         eager
             ? new NativeColumnarKeepLastDeduplicateOperator(
@@ -96,6 +100,7 @@ public class NativeDeduplicateExecNode extends ExecNodeBase<ArrowBatch>
                 !keepLast,
                 miniBatch,
                 miniBatchSize,
+                stateTtlMillis,
                 maxParallelism)
             : new NativeColumnarDeduplicateOperator(
                 partitionColumns,
