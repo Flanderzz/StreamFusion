@@ -590,7 +590,8 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushPaimonKee
         // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
         let result = {
             let batch = import_record_batch(in_array_address, in_schema_address);
-            dedup.push(&batch)
+            // No TTL clock: a TTL'd keep-first deduplicator never takes the Paimon route.
+            dedup.push(&batch, 0)
         };
         if let Err(e) = result {
             throw_memory_limit(&mut env, &e.to_string());
@@ -613,7 +614,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_flushPaimonKe
 ) {
     crate::bridge::jni_guard(env, move |mut env| {
         let dedup = unsafe { &mut *(handle as *mut KeepFirstDeduplicator) };
-        match dedup.flush(watermark_millis) {
+        match dedup.flush(watermark_millis, 0) {
             Ok(result) => export_record_batch(result, out_array_address, out_schema_address),
             Err(e) => throw_memory_limit(&mut env, &e.to_string()),
         }

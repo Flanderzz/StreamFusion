@@ -717,17 +717,34 @@ public final class Native {
    * an opaque handle. Each input batch is buffered; on a watermark the deduplicator emits each key's
    * minimum-rowtime row (insert-only) once the watermark reaches that rowtime, and drops every later
    * row for the key. Released with {@link #closeKeepFirstDeduplicator}.
+   *
+   * @param stateTtlMillis idle-state retention ({@code table.exec.state.ttl}); {@code 0} disables
+   *     expiry. Only the emitted markers expire — the buffered candidates mirror Flink's
+   *     deliberately un-TTL'd timer state. The marker is written once, when the key fires, and
+   *     never refreshed, so an emitted key expires a fixed retention after firing and can then
+   *     emit a second first row.
    */
   public static native long createKeepFirstDeduplicator(
-      int[] partitionColumns, int[] keyTimestampPrecisions, int rtColumn, long memoryBudgetBytes);
+      int[] partitionColumns,
+      int[] keyTimestampPrecisions,
+      int rtColumn,
+      long stateTtlMillis,
+      long memoryBudgetBytes);
 
-  /** Buffers an input batch; each key's first row is emitted on the watermark that reaches it. */
+  /**
+   * Buffers an input batch; each key's first row is emitted on the watermark that reaches it.
+   * {@code nowMillis} is the operator's processing-time reading — the state-TTL clock.
+   */
   public static native void pushKeepFirstDeduplicator(
-      long handle, long inArrayAddress, long inSchemaAddress);
+      long handle, long inArrayAddress, long inSchemaAddress, long nowMillis);
 
-  /** Exports each key's first (minimum-rowtime) row whose rowtime the watermark has reached. */
+  /**
+   * Exports each key's first (minimum-rowtime) row whose rowtime the watermark has reached.
+   * Firing stamps the key's emitted marker with {@code nowMillis} — the marker's single TTL'd
+   * write.
+   */
   public static native void flushKeepFirstDeduplicator(
-      long handle, long watermarkMillis, long outArrayAddress, long outSchemaAddress);
+      long handle, long watermarkMillis, long nowMillis, long outArrayAddress, long outSchemaAddress);
 
   /** Releases the deduplicator and its per-key state. */
   public static native void closeKeepFirstDeduplicator(long handle);
@@ -735,9 +752,18 @@ public final class Native {
   /** Serializes the deduplicator's pending candidates, emitted keys, and watermark for a checkpoint. */
   public static native byte[] snapshotKeepFirstDeduplicator(long handle);
 
-  /** Rebuilds a keep-first deduplicator from a snapshot and returns a fresh handle. */
+  /**
+   * Rebuilds a keep-first deduplicator from a snapshot and returns a fresh handle. {@code
+   * nowMillis} stamps markers restored from a snapshot that carries no TTL timestamps (a pre-TTL
+   * writer), granting them a full retention from the restore — Flink's enable-TTL migration.
+   */
   public static native long restoreKeepFirstDeduplicator(
-      int[] partitionColumns, int rtColumn, byte[] snapshot, long memoryBudgetBytes);
+      int[] partitionColumns,
+      int rtColumn,
+      long stateTtlMillis,
+      long nowMillis,
+      byte[] snapshot,
+      long memoryBudgetBytes);
 
   /** Lists the non-empty Flink key groups in a keep-first deduplication raw keyed-state checkpoint. */
   public static native byte[][] snapshotKeepFirstDeduplicatorPartitions(
@@ -748,6 +774,8 @@ public final class Native {
       int[] partitionColumns,
       int[] keyTimestampPrecisions,
       int rtColumn,
+      long stateTtlMillis,
+      long nowMillis,
       byte[][] snapshots,
       long memoryBudgetBytes);
 

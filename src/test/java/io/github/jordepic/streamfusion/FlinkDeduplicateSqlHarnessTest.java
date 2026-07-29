@@ -148,17 +148,18 @@ class FlinkDeduplicateSqlHarnessTest {
   }
 
   @Test
-  void stateTtlRowtimeKeepFirstFallsBackToHost() throws Exception {
-    // Only the watermark-buffered rowtime keep-first still declines a nonzero retention — its
-    // buffered candidates and emitted-key set do not expire yet.
-    NativeParity.assertFallbackReasonContains(
+  void stateTtlRowtimeKeepFirstMatchesHost() throws Exception {
+    // The watermark-buffered rowtime keep-first runs TTL natively too (nothing expires in-test at
+    // 1h): only the emitted markers are TTL'd — the buffered candidates mirror Flink's
+    // deliberately un-TTL'd timer state — so each key still emits exactly its minimum-rowtime row.
+    // Append-only output, deterministic at parallelism 1.
+    NativeParity.assertKindedParity(
         () -> {
           TableEnvironment tEnv = environment();
           tEnv.getConfig().set("table.exec.state.ttl", "1 h");
           return tEnv;
         },
-        KEEP_FIRST,
-        "deduplication: idle-state TTL");
+        KEEP_FIRST);
   }
 
   private static TableEnvironment environment() {

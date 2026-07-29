@@ -240,6 +240,35 @@ class NativeColumnarDeduplicateOperatorTest {
   }
 
   @Test
+  void ttlExpiredEmittedMarkerLetsTheKeyFireAgain() throws Exception {
+    // The watermark-buffered keep-first TTLs only its emitted markers (Flink's
+    // alreadyEmittedState — the buffered candidate mirrors the deliberately un-TTL'd timer
+    // state): the marker is written once when the key fires and never refreshed by later dropped
+    // rows, so an expired marker lets the key buffer a new candidate and emit a second first row.
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness =
+            keepFirstHarness(1, 0, 1000)) {
+      harness.setup(new ArrowBatchSerializer());
+      harness.open();
+      harness.setProcessingTime(5000);
+      harness.processElement(new StreamRecord<>(batch(allocator, row(1, 10, 1000))));
+      harness.processWatermark(new Watermark(1000)); // fires — the marker is stamped at 5000
+      assertEquals(List.of(emitted(1, 10)), collect(harness));
+      // A later row while the marker is alive is dropped, and the read does not refresh it.
+      harness.setProcessingTime(5500);
+      harness.processElement(new StreamRecord<>(batch(allocator, row(1, 20, 1500))));
+      harness.processWatermark(new Watermark(2000));
+      assertEquals(List.of(), collect(harness));
+      // 5000 + 1000 <= 6000: the marker expired despite the probe at 5500 — the key re-buffers
+      // and fires a second +I.
+      harness.setProcessingTime(6000);
+      harness.processElement(new StreamRecord<>(batch(allocator, row(1, 30, 2500))));
+      harness.processWatermark(new Watermark(3000));
+      assertEquals(List.of(emitted(1, 30)), collect(harness));
+    }
+  }
+
+  @Test
   void bufferedDeduplicationRawKeyedStateRescalesByFlinkKeyGroup() throws Exception {
     long[] keys = keysForBothSubtasks();
     OperatorSubtaskState snapshot;
@@ -345,6 +374,11 @@ class NativeColumnarDeduplicateOperatorTest {
 
   private static KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch>
       keepFirstHarness(int parallelism, int subtask) throws Exception {
+    return keepFirstHarness(parallelism, subtask, 0);
+  }
+
+  private static KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch>
+      keepFirstHarness(int parallelism, int subtask, long stateTtlMillis) throws Exception {
     int[] stateKeys = stateKeysForSubtasks(parallelism);
     return new KeyedOneInputStreamOperatorTestHarness<>(
         new NativeColumnarDeduplicateOperator(
@@ -355,6 +389,7 @@ class NativeColumnarDeduplicateOperatorTest {
                 new org.apache.flink.table.types.logical.BigIntType(),
                 new org.apache.flink.table.types.logical.BigIntType(),
                 new org.apache.flink.table.types.logical.BigIntType()),
+            stateTtlMillis,
             MAX_PARALLELISM),
         batch -> stateKeys[batch.destination() >= 0 ? batch.destination() : 0],
         Types.INT,

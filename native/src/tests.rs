@@ -1576,6 +1576,122 @@ fn dedup_ttl_mini_batch_stages_no_preimage_for_an_expired_key() {
     assert_eq!(row_kinds(&out), vec![0, 0]); // both fresh +I
 }
 
+// A watermark-buffered rowtime keep-first deduplicator over `[k, v, rt]` (key col 0, rt col 2).
+fn rowtime_keep_first(ttl_ms: i64) -> KeepFirstDeduplicator {
+    KeepFirstDeduplicator::new(vec![0], 2).with_state_ttl(ttl_ms)
+}
+
+// The watermark-buffered keep-first TTLs only its fired markers (Flink's alreadyEmittedState,
+// OnCreateAndWrite + NeverReturnExpired): an expired marker reads as absent, so the key buffers
+// a new candidate and fires a second +I — append-only output, Flink accepts the duplicate
+// insert.
+#[test]
+fn keep_first_ttl_expired_marker_lets_the_key_fire_again() {
+    let mut dedup = rowtime_keep_first(1000);
+    dedup.push(&join_batch(vec![1], vec![10], vec![100]), 5000).unwrap();
+    let out = dedup.flush(100, 5000).unwrap();
+    assert_eq!(values(&out, 1), vec![10]); // first fire — marker stamped at 5000
+    dedup.push(&join_batch(vec![1], vec![20], vec![200]), 5500).unwrap();
+    assert_eq!(dedup.flush(200, 5500).unwrap().num_rows(), 0); // marker alive: row dropped
+    // 5000 + 1000 <= 6000: the marker expired — the row re-buffers and the key fires again.
+    dedup.push(&join_batch(vec![1], vec![30], vec![300]), 6000).unwrap();
+    let out = dedup.flush(300, 6000).unwrap();
+    assert_eq!(values(&out, 1), vec![30]);
+}
+
+// The marker is written ONCE, when the candidate fires (Flink's onTimer update); later rows for
+// the emitted key are reads (`if alreadyEmitted return`) and never refresh it — a hot key still
+// re-fires every retention period.
+#[test]
+fn keep_first_ttl_dropped_rows_do_not_refresh_the_marker() {
+    let mut dedup = rowtime_keep_first(1000);
+    dedup.push(&join_batch(vec![1], vec![10], vec![100]), 1000).unwrap();
+    assert_eq!(values(&dedup.flush(100, 1000).unwrap(), 1), vec![10]);
+    // Two probes deep into the retention: both dropped, neither a write.
+    dedup.push(&join_batch(vec![1], vec![20], vec![200]), 1500).unwrap();
+    assert_eq!(dedup.flush(200, 1500).unwrap().num_rows(), 0);
+    dedup.push(&join_batch(vec![1], vec![30], vec![300]), 1900).unwrap();
+    assert_eq!(dedup.flush(300, 1900).unwrap().num_rows(), 0);
+    // Expiry stays timed from the fire at 1000 (1000 + 1000 <= 2000), not the 1900 probe.
+    dedup.push(&join_batch(vec![1], vec![40], vec![400]), 2000).unwrap();
+    assert_eq!(values(&dedup.flush(400, 2000).unwrap(), 1), vec![40]);
+}
+
+// The pending candidate is deliberately exempt from TTL, mirroring Flink's un-TTL'd timer state:
+// it is cleaned up by the watermark that fires it, and expiring it early would lose data. A
+// candidate older than the whole retention still fires.
+#[test]
+fn keep_first_ttl_never_expires_a_pending_candidate() {
+    let mut dedup = rowtime_keep_first(1000);
+    dedup.push(&join_batch(vec![1], vec![10], vec![1000]), 0).unwrap();
+    // 50 retention periods later another key's traffic runs the sweep; key 1's candidate (not a
+    // marker) must survive it and the per-row probes.
+    dedup.push(&join_batch(vec![2], vec![20], vec![400]), 50_000).unwrap();
+    let out = dedup.flush(500, 50_000).unwrap();
+    assert_eq!(values(&out, 0), vec![2]);
+    let out = dedup.flush(1000, 60_000).unwrap();
+    assert_eq!(values(&out, 1), vec![10]); // the buffered candidate fires — no data loss
+}
+
+// Marker timestamps ride the snapshot as absolute millis: expiry after a restore is timed from
+// the original fire, and the boundary stays inclusive (`ts + ttl <= now`).
+#[test]
+fn keep_first_ttl_marker_timestamps_survive_snapshot_restore() {
+    let mut dedup = rowtime_keep_first(1000);
+    dedup.push(&join_batch(vec![1], vec![10], vec![100]), 5000).unwrap();
+    dedup.flush(100, 5000).unwrap(); // marker stamped at 5000
+    let snapshot = dedup.snapshot();
+    let mut alive =
+        KeepFirstDeduplicator::restore(vec![0], 2, &snapshot, 5500).with_state_ttl(1000);
+    alive.push(&join_batch(vec![1], vec![20], vec![200]), 5999).unwrap();
+    assert_eq!(alive.flush(200, 5999).unwrap().num_rows(), 0); // one ms inside the window
+    let mut expired =
+        KeepFirstDeduplicator::restore(vec![0], 2, &snapshot, 5500).with_state_ttl(1000);
+    expired.push(&join_batch(vec![1], vec![20], vec![200]), 6000).unwrap();
+    assert_eq!(values(&expired.flush(200, 6000).unwrap(), 1), vec![20]); // 5000 + 1000 <= 6000
+}
+
+// A pre-TTL snapshot (no timestamp column) restored into a TTL'd deduplicator stamps every
+// marker with the restore time — a full retention from now, Flink's enable-TTL migration —
+// instead of expiring everything on first probe.
+#[test]
+fn keep_first_ttl_enable_migration_stamps_restore_time() {
+    let mut dedup = rowtime_keep_first(0);
+    dedup.push(&join_batch(vec![1], vec![10], vec![100]), 0).unwrap();
+    dedup.flush(100, 0).unwrap();
+    let snapshot = dedup.snapshot(); // TTL off: no timestamp column
+    let mut restored =
+        KeepFirstDeduplicator::restore(vec![0], 2, &snapshot, 5000).with_state_ttl(1000);
+    restored.push(&join_batch(vec![1], vec![20], vec![200]), 5999).unwrap();
+    assert_eq!(restored.flush(200, 5999).unwrap().num_rows(), 0); // alive until restore + ttl
+    let mut expired =
+        KeepFirstDeduplicator::restore(vec![0], 2, &snapshot, 5000).with_state_ttl(1000);
+    expired.push(&join_batch(vec![1], vec![20], vec![200]), 6000).unwrap();
+    assert_eq!(values(&expired.flush(200, 6000).unwrap(), 1), vec![20]);
+}
+
+// The periodic sweep reclaims markers that are never probed again, silently (expiry emits
+// nothing; only a later row for the key would make the re-fire visible).
+#[test]
+fn keep_first_ttl_sweep_reclaims_markers_silently() {
+    let mut dedup = rowtime_keep_first(1000);
+    dedup.push(&join_batch(vec![1, 2], vec![10, 20], vec![100, 100]), 1000).unwrap();
+    assert_eq!(dedup.flush(100, 1000).unwrap().num_rows(), 2); // both markers stamped at 1000
+    // Key 3's traffic well past the others' expiry triggers the once-per-period sweep; nothing
+    // is emitted for the swept keys.
+    dedup.push(&join_batch(vec![3], vec![30], vec![200]), 3000).unwrap();
+    let out = dedup.flush(200, 3000).unwrap();
+    assert_eq!(values(&out, 0), vec![3]);
+    let snapshot = dedup.snapshot();
+    // A TTL-off restore probes what survived: keys 1 and 2 were swept (they fire fresh), key 3's
+    // marker remains (its row drops).
+    let mut probe = KeepFirstDeduplicator::restore(vec![0], 2, &snapshot, 3000);
+    probe.push(&join_batch(vec![1, 2, 3], vec![11, 21, 31], vec![300, 300, 300]), 3100).unwrap();
+    let out = probe.flush(300, 3100).unwrap();
+    assert_eq!(values(&out, 0), vec![1, 2]);
+    assert_eq!(values(&out, 1), vec![11, 21]);
+}
+
 #[test]
 fn sort_buffer_over_budget_fails_and_flush_releases() {
     let mut sorter = TemporalSorter::new(2).with_memory_budget(1 << 20).unwrap();
@@ -4535,11 +4651,11 @@ mod paimon_state {
         ];
         for (i, (batches, watermark)) in steps.iter().enumerate() {
             for batch in batches {
-                paimon.push(batch).unwrap();
-                memory.push(batch).unwrap();
+                paimon.push(batch, 0).unwrap();
+                memory.push(batch, 0).unwrap();
             }
-            let paimon_out = paimon.flush(*watermark).unwrap();
-            let memory_out = memory.flush(*watermark).unwrap();
+            let paimon_out = paimon.flush(*watermark, 0).unwrap();
+            let memory_out = memory.flush(*watermark, 0).unwrap();
             assert_eq!(
                 kf_rows(&memory_out),
                 kf_rows(&paimon_out),

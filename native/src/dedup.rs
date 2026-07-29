@@ -17,10 +17,22 @@ pub(crate) struct KeepFirstDeduplicator {
     rt_column: usize,
     current_watermark: i64,
     /// One row per pending key — that key's minimum-rowtime candidate — awaiting its release.
+    /// Deliberately exempt from state TTL, mirroring Flink's un-TTL'd timer state: the candidate
+    /// is cleaned up by the watermark firing it, and expiring it early would lose data.
     pending: Option<RecordBatch>,
     /// Keys whose first row has already been emitted, as arrow-row bytes probed by borrowed slice
     /// (the steady-state row — a key already emitted — allocates nothing); later rows are ignored.
-    emitted: HashSet<ByteKey>,
+    /// The value is the firing's wall-clock millis (0 with TTL off) — the marker's only TTL'd
+    /// write, Flink's `alreadyEmittedState.update(true)` in `onTimer`: probes never refresh it, so
+    /// an emitted key expires a fixed retention after it fired and can then fire a second `+I`.
+    emitted: HashMap<ByteKey, i64>,
+    /// Idle-state retention millis (0 = off — Flink's default), applied to the emitted markers
+    /// only. Memory route only: the Paimon keep-first backend carries no marker timestamps, so a
+    /// TTL'd deduplicator keeps the memory route.
+    ttl_ms: i64,
+    /// When the last full marker sweep ran; the sweep reclaims markers never probed again, once
+    /// per TTL period (expiry itself is enforced lazily at each probe).
+    last_sweep_ms: i64,
     key_converter: Option<RowConverter>,
     key_types: Vec<DataType>,
     schema: Option<SchemaRef>,
@@ -41,7 +53,9 @@ impl KeepFirstDeduplicator {
             rt_column,
             current_watermark: i64::MIN,
             pending: None,
-            emitted: HashSet::default(),
+            emitted: HashMap::default(),
+            ttl_ms: 0,
+            last_sweep_ms: 0,
             key_converter: None,
             key_types: Vec::new(),
             schema: None,
@@ -76,9 +90,37 @@ impl KeepFirstDeduplicator {
     /// operator's managed-memory budget (negative = unaccounted).
     fn with_memory_budget(mut self, budget_bytes: i64) -> Result<Self, DataFusionError> {
         let state = self.pending.as_ref().map_or(0, |b| b.get_array_memory_size())
-            + self.emitted.iter().map(|k| byte_key_bytes(&k.0)).sum::<usize>();
+            + self.emitted.keys().map(|k| byte_key_bytes(&k.0)).sum::<usize>();
         self.memory.attach("keep-first-deduplicate", budget_bytes, state)?;
         Ok(self)
+    }
+
+    /// Sets the idle-state retention (`table.exec.state.ttl`) in millis; 0 (Flink's default)
+    /// disables expiry. Only the emitted markers expire — the pending candidates mirror Flink's
+    /// deliberately un-TTL'd timer state (expiring one before its watermark would lose data).
+    pub(crate) fn with_state_ttl(mut self, ttl_ms: i64) -> Self {
+        self.ttl_ms = ttl_ms.max(0);
+        self
+    }
+
+    /// Reclaims every marker whose TTL elapsed with no further probe — the lazy per-probe expiry
+    /// never sees such a key again. Silent, like Flink's background cleanup.
+    fn sweep_expired(&mut self, ttl: StateTtl) {
+        let track = self.memory.tracking();
+        let mut reclaimed = 0isize;
+        self.emitted.retain(|key, fired_ms| {
+            if ttl.expired(*fired_ms) {
+                if track {
+                    reclaimed += byte_key_bytes(&key.0) as isize;
+                }
+                false
+            } else {
+                true
+            }
+        });
+        if reclaimed != 0 {
+            self.memory.record(-reclaimed);
+        }
     }
 
     pub(crate) fn with_key_timestamp_precisions(
@@ -89,7 +131,9 @@ impl KeepFirstDeduplicator {
         self
     }
 
-    pub(crate) fn push(&mut self, batch: &RecordBatch) -> Result<(), DataFusionError> {
+    /// Buffers an input batch (no output); emission is watermark-driven (`flush`). `now_ms` is the
+    /// host's wall-clock reading for this call (only read when state TTL is on).
+    pub(crate) fn push(&mut self, batch: &RecordBatch, now_ms: i64) -> Result<(), DataFusionError> {
         self.snapshot_cache = None;
         let schema = batch.schema();
         self.schema = Some(schema.clone());
@@ -101,6 +145,13 @@ impl KeepFirstDeduplicator {
         #[cfg(feature = "paimon-state")]
         if self.backend.is_some() {
             return self.push_backend(live);
+        }
+        let ttl = StateTtl::new(self.ttl_ms, now_ms);
+        // The sweep reclaims markers no later row ever probes. Once per TTL period bounds its
+        // amortized cost at one map walk per period.
+        if ttl.enabled() && now_ms >= self.last_sweep_ms + self.ttl_ms {
+            self.sweep_expired(ttl);
+            self.last_sweep_ms = now_ms;
         }
         // Merge with the standing candidates and reduce to one minimum-rowtime row per pending key.
         let track = self.memory.tracking();
@@ -114,7 +165,7 @@ impl KeepFirstDeduplicator {
             }
             None => live,
         };
-        let reduced = self.min_per_key(&combined);
+        let reduced = self.min_per_key(&combined, ttl);
         if track && reduced.num_rows() > 0 {
             delta += reduced.get_array_memory_size() as isize;
         }
@@ -127,20 +178,32 @@ impl KeepFirstDeduplicator {
     /// the earlier position (candidates precede new rows in `combined`, so a tie keeps the incumbent —
     /// Flink's keep-first rule of replacing only on a strictly smaller rowtime). The winning rows are
     /// gathered with `take`; the row data is never materialized into scalars.
-    fn min_per_key(&mut self, batch: &RecordBatch) -> RecordBatch {
+    fn min_per_key(&mut self, batch: &RecordBatch, ttl: StateTtl) -> RecordBatch {
         let key_arrays: Vec<&ArrayRef> =
             self.partition_columns.iter().map(|&i| batch.column(i)).collect();
         self.key_types = key_types(&key_arrays);
         let keys_encoded = encode_keys(&mut self.key_converter, &key_arrays, batch.num_rows());
         let rt = rt_to_millis(batch.column(self.rt_column));
+        let track = self.memory.tracking();
+        let mut reclaimed = 0isize;
         // Both maps probe by borrowed key bytes: the per-batch reduction borrows straight from the
-        // encoded batch, and the emitted-set probe (the steady-state path — every row of an
+        // encoded batch, and the emitted-marker probe (the steady-state path — every row of an
         // already-fired key) allocates nothing.
         let mut best: HashMap<&[u8], (i64, u32)> = HashMap::default();
         for row in 0..batch.num_rows() {
             let key = keys_encoded.row(row).data();
-            if self.emitted.contains(key) {
-                continue; // this key's first row already emitted
+            // An expired marker is deleted on read and reads as absent (Flink's
+            // NeverReturnExpired): the key is fresh again — this row becomes a live candidate and
+            // the key can fire a second +I. Probes never refresh the marker.
+            match self.emitted.get(key) {
+                Some(fired_ms) if ttl.expired(*fired_ms) => {
+                    if track {
+                        reclaimed += byte_key_bytes(key) as isize;
+                    }
+                    self.emitted.remove(key);
+                }
+                Some(_) => continue, // this key's first row already emitted
+                None => {}
             }
             let rowtime = rt.value(row);
             match best.get(key) {
@@ -149,6 +212,9 @@ impl KeepFirstDeduplicator {
                     best.insert(key, (rowtime, row as u32));
                 }
             }
+        }
+        if reclaimed != 0 {
+            self.memory.record(-reclaimed);
         }
         let mut indices: Vec<u32> = best.into_values().map(|(_, idx)| idx).collect();
         indices.sort_unstable();
@@ -165,7 +231,9 @@ impl KeepFirstDeduplicator {
     #[cfg(feature = "paimon-state")]
     fn push_backend(&mut self, live: RecordBatch) -> Result<(), DataFusionError> {
         if live.num_rows() > 0 {
-            let winners = self.min_per_key(&live);
+            // The backend keeps its own fired markers; the resident map is empty, so the TTL
+            // probe has nothing to expire (a TTL'd deduplicator never takes the Paimon route).
+            let winners = self.min_per_key(&live, StateTtl::disabled());
             let mut encoder = BinaryRowBatchEncoder::new(
                 &winners,
                 &self.partition_columns,
@@ -249,7 +317,13 @@ impl KeepFirstDeduplicator {
 
     /// Emits each pending key's candidate whose rowtime the watermark has now reached (insert-only),
     /// records those keys as emitted, and keeps the rest. Both partitions are columnar filters.
-    pub(crate) fn flush(&mut self, watermark: i64) -> Result<RecordBatch, DataFusionError> {
+    /// `now_ms` is the host's wall-clock reading (only read when state TTL is on): firing a
+    /// candidate stamps its marker with it — the marker's single TTL'd write.
+    pub(crate) fn flush(
+        &mut self,
+        watermark: i64,
+        now_ms: i64,
+    ) -> Result<RecordBatch, DataFusionError> {
         self.snapshot_cache = None;
         self.current_watermark = watermark;
         #[cfg(feature = "paimon-state")]
@@ -279,13 +353,20 @@ impl KeepFirstDeduplicator {
                 self.partition_columns.iter().map(|&i| ready.column(i)).collect();
             self.key_types = key_types(&key_arrays);
             let keys_encoded = encode_keys(&mut self.key_converter, &key_arrays, ready.num_rows());
+            let ttl = StateTtl::new(self.ttl_ms, now_ms);
+            let stamp = if ttl.enabled() { ttl.now() } else { 0 };
             for row in 0..ready.num_rows() {
                 let key = keys_encoded.row(row).data();
-                // The emitted-key set grows for the operator's lifetime, so a flush can grow state.
-                if !self.emitted.contains(key) {
-                    self.emitted.insert(ByteKey::from(key));
-                    if track {
-                        delta += byte_key_bytes(key) as isize;
+                // The emitted-key set grows for the operator's lifetime, so a flush can grow
+                // state. Firing writes the marker — Flink's onTimer `update(true)` — so a marker
+                // already present (live or expired) is re-stamped in place.
+                match self.emitted.get_mut(key) {
+                    Some(fired_ms) => *fired_ms = stamp,
+                    None => {
+                        self.emitted.insert(ByteKey::from(key), stamp);
+                        if track {
+                            delta += byte_key_bytes(key) as isize;
+                        }
                     }
                 }
             }
@@ -302,7 +383,7 @@ impl KeepFirstDeduplicator {
         }
     }
 
-    fn snapshot(&self) -> Vec<u8> {
+    pub(crate) fn snapshot(&self) -> Vec<u8> {
         self.snapshot_parts(self.pending.clone(), self.emitted_batch())
     }
 
@@ -321,14 +402,25 @@ impl KeepFirstDeduplicator {
         out
     }
 
-    /// The emitted keys as an IPC batch of just the key columns (decoded from the stored key bytes).
+    /// The emitted keys as an IPC batch of the key columns (decoded from the stored key bytes),
+    /// plus — only while TTL is on, so a TTL-off snapshot stays byte-identical to the pre-TTL
+    /// format — a trailing column of each marker's firing timestamp.
     fn emitted_batch(&self) -> Option<RecordBatch> {
         if self.emitted.is_empty() {
             return None;
         }
-        let keys: Vec<&[u8]> = self.emitted.iter().map(|k| k.0.as_ref()).collect();
-        let fields = key_fields(&self.key_types);
-        let columns = decode_byte_keys(self.key_converter.as_ref(), &keys, &self.key_types);
+        let mut keys: Vec<&[u8]> = Vec::with_capacity(self.emitted.len());
+        let mut fired: Vec<i64> = Vec::with_capacity(self.emitted.len());
+        for (key, fired_ms) in self.emitted.iter() {
+            keys.push(key.0.as_ref());
+            fired.push(*fired_ms);
+        }
+        let mut fields = key_fields(&self.key_types);
+        let mut columns = decode_byte_keys(self.key_converter.as_ref(), &keys, &self.key_types);
+        if self.ttl_ms > 0 {
+            fields.push(Field::new(TTL_TS_COLUMN, DataType::Int64, false));
+            columns.push(Arc::new(Int64Array::from(fired)));
+        }
         Some(RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).expect("dedup emitted"))
     }
 
@@ -375,7 +467,8 @@ impl KeepFirstDeduplicator {
             }
         }
         if let Some(batch) = &emitted {
-            let key_columns: Vec<usize> = (0..batch.num_columns()).collect();
+            // Only the key columns feed the key-group hash — the TTL timestamp column trails them.
+            let key_columns: Vec<usize> = (0..self.key_types.len()).collect();
             for row in 0..batch.num_rows() {
                 let key_group = flink_key_group(
                     binary_row_hash(batch, &key_columns, row, timestamp_precisions),
@@ -417,7 +510,16 @@ impl KeepFirstDeduplicator {
         });
     }
 
-    fn restore(partition_columns: Vec<usize>, rt_column: usize, bytes: &[u8]) -> Self {
+    /// The marker timestamps are read by name when the writer had TTL on; a pre-TTL snapshot
+    /// restored into a TTL'd deduplicator stamps every marker with the restore time (a full
+    /// retention from now, Flink's enable-TTL migration) instead of 0, which would expire
+    /// everything on first probe. The pending part carries no timestamps in either format.
+    pub(crate) fn restore(
+        partition_columns: Vec<usize>,
+        rt_column: usize,
+        bytes: &[u8],
+        restored_at_ms: i64,
+    ) -> Self {
         let mut dedup = KeepFirstDeduplicator::new(partition_columns, rt_column);
         if bytes.len() < 8 {
             return dedup;
@@ -429,11 +531,19 @@ impl KeepFirstDeduplicator {
             dedup.pending = Some(batch);
         }
         for batch in read_ipc_if_present(&bytes[12 + pending_len..]) {
-            let key_arrays: Vec<&ArrayRef> = (0..batch.num_columns()).map(|i| batch.column(i)).collect();
+            let fired = batch
+                .column_by_name(TTL_TS_COLUMN)
+                .is_some()
+                .then(|| column_i64(&batch, TTL_TS_COLUMN));
+            let key_arity = batch.num_columns() - fired.is_some() as usize;
+            let key_arrays: Vec<&ArrayRef> = (0..key_arity).map(|i| batch.column(i)).collect();
             dedup.key_types = key_types(&key_arrays);
             let keys_encoded = encode_keys(&mut dedup.key_converter, &key_arrays, batch.num_rows());
             for row in 0..batch.num_rows() {
-                dedup.emitted.insert(ByteKey::from(keys_encoded.row(row).data()));
+                dedup.emitted.insert(
+                    ByteKey::from(keys_encoded.row(row).data()),
+                    fired.as_ref().map_or(restored_at_ms, |ts| ts.value(row)),
+                );
             }
         }
         dedup
@@ -443,6 +553,7 @@ impl KeepFirstDeduplicator {
         partition_columns: Vec<usize>,
         rt_column: usize,
         snapshots: &[Vec<u8>],
+        restored_at_ms: i64,
     ) -> Self {
         let mut watermark = i64::MIN;
         let mut pending = Vec::new();
@@ -474,7 +585,7 @@ impl KeepFirstDeduplicator {
         bytes.extend_from_slice(&(pending.len() as u32).to_le_bytes());
         bytes.extend_from_slice(&pending);
         bytes.extend_from_slice(&emitted);
-        KeepFirstDeduplicator::restore(partition_columns, rt_column, &bytes)
+        KeepFirstDeduplicator::restore(partition_columns, rt_column, &bytes, restored_at_ms)
     }
 }
 
@@ -1279,6 +1390,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createKeepFir
     partition_columns: JIntArray<'local>,
     key_timestamp_precisions: JIntArray<'local>,
     rt_column: jint,
+    state_ttl_millis: jlong,
     memory_budget_bytes: jlong,
 ) -> jlong {
     crate::bridge::jni_guard(env, move |mut env| {
@@ -1289,6 +1401,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createKeepFir
             .collect();
         let dedup = KeepFirstDeduplicator::new(partitions, rt_column as usize)
             .with_key_timestamp_precisions(timestamp_precisions)
+            .with_state_ttl(state_ttl_millis)
             .with_memory_budget(memory_budget_bytes);
         boxed_or_throw(&mut env, dedup)
     })
@@ -1303,13 +1416,14 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushKeepFirst
     handle: jlong,
     in_array_address: jlong,
     in_schema_address: jlong,
+    now_millis: jlong,
 ) {
     crate::bridge::jni_guard(env, move |mut env| {
         let dedup = unsafe { &mut *(handle as *mut KeepFirstDeduplicator) };
         // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
         let result = {
             let batch = import_record_batch(in_array_address, in_schema_address);
-            dedup.push(&batch)
+            dedup.push(&batch, now_millis)
         };
         if let Err(e) = result {
             throw_memory_limit(&mut env, &e.to_string());
@@ -1324,13 +1438,14 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_flushKeepFirs
     _class: JClass<'local>,
     handle: jlong,
     watermark_millis: jlong,
+    now_millis: jlong,
     out_array_address: jlong,
     out_schema_address: jlong,
 ) {
     crate::bridge::jni_guard(env, move |mut env| {
         let dedup = unsafe { &mut *(handle as *mut KeepFirstDeduplicator) };
         // The emitted-key set grows here, so even a flush can exceed the budget.
-        match dedup.flush(watermark_millis) {
+        match dedup.flush(watermark_millis, now_millis) {
             Ok(result) => export_record_batch(result, out_array_address, out_schema_address),
             Err(e) => throw_memory_limit(&mut env, &e.to_string()),
         }
@@ -1373,14 +1488,18 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreKeepFi
     _class: JClass<'local>,
     partition_columns: JIntArray<'local>,
     rt_column: jint,
+    state_ttl_millis: jlong,
+    now_millis: jlong,
     snapshot: JByteArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
     crate::bridge::jni_guard(env, move |mut env| {
         let partitions = read_columns(&env, &partition_columns);
         let bytes = env.convert_byte_array(&snapshot).expect("failed to read dedup snapshot");
-        let dedup = KeepFirstDeduplicator::restore(partitions, rt_column as usize, &bytes)
-            .with_memory_budget(memory_budget_bytes);
+        let dedup =
+            KeepFirstDeduplicator::restore(partitions, rt_column as usize, &bytes, now_millis)
+                .with_state_ttl(state_ttl_millis)
+                .with_memory_budget(memory_budget_bytes);
         boxed_or_throw(&mut env, dedup)
     })
 }
@@ -1418,6 +1537,8 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreKeepFi
     partition_columns: JIntArray<'local>,
     key_timestamp_precisions: JIntArray<'local>,
     rt_column: jint,
+    state_ttl_millis: jlong,
+    now_millis: jlong,
     snapshots: JObjectArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
@@ -1445,8 +1566,10 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreKeepFi
             partitions,
             rt_column as usize,
             &restored,
+            now_millis,
         )
         .with_key_timestamp_precisions(timestamp_precisions)
+        .with_state_ttl(state_ttl_millis)
         .with_memory_budget(memory_budget_bytes);
         boxed_or_throw(&mut env, dedup)
     })

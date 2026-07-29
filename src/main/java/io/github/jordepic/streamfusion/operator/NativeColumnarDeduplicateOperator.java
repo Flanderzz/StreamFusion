@@ -31,24 +31,32 @@ public class NativeColumnarDeduplicateOperator extends AbstractNativeStatefulOpe
   private final int[] partitionColumns;
   private final int rowtimeColumn;
   private final RowType rowType;
+  private final long stateTtlMillis;
 
   public NativeColumnarDeduplicateOperator(
       int[] partitionColumns,
       int[] keyTimestampPrecisions,
       int rowtimeColumn,
       RowType rowType,
+      long stateTtlMillis,
       int maxParallelism) {
     super("keep-first deduplicate", keyTimestampPrecisions, maxParallelism);
     this.partitionColumns = partitionColumns;
     this.rowtimeColumn = rowtimeColumn;
     this.rowType = rowType;
+    this.stateTtlMillis = stateTtlMillis;
   }
 
   @Override
   protected PaimonNativeStateSupport resolvePaimonState(boolean rawStateRestored) {
+    // The Paimon shape does not carry marker TTL timestamps yet; a TTL'd deduplicator keeps the
+    // memory route (the standard fallback for an unsupported shape) until the store gains them.
     return resolvePaimon(
         rawStateRestored,
-        () -> withRowSchema(rowType, address -> Native.paimonRowStateSupported(address) ? 1L : 0L) != 0);
+        () ->
+            stateTtlMillis == 0
+                && withRowSchema(rowType, address -> Native.paimonRowStateSupported(address) ? 1L : 0L)
+                    != 0);
   }
 
   @Override
@@ -82,13 +90,23 @@ public class NativeColumnarDeduplicateOperator extends AbstractNativeStatefulOpe
   @Override
   protected long createHandle() {
     return Native.createKeepFirstDeduplicator(
-        partitionColumns, keyTimestampPrecisions(), rowtimeColumn, memoryBudgetBytes());
+        partitionColumns,
+        keyTimestampPrecisions(),
+        rowtimeColumn,
+        stateTtlMillis,
+        memoryBudgetBytes());
   }
 
   @Override
   protected long restoreRawHandle(byte[][] snapshots) {
     return Native.restoreKeepFirstDeduplicatorPartitions(
-        partitionColumns, keyTimestampPrecisions(), rowtimeColumn, snapshots, memoryBudgetBytes());
+        partitionColumns,
+        keyTimestampPrecisions(),
+        rowtimeColumn,
+        stateTtlMillis,
+        getProcessingTimeService().getCurrentProcessingTime(),
+        snapshots,
+        memoryBudgetBytes());
   }
 
   @Override
@@ -126,7 +144,13 @@ public class NativeColumnarDeduplicateOperator extends AbstractNativeStatefulOpe
         Native.pushPaimonKeepFirstDeduplicator(
             handle, array.memoryAddress(), schema.memoryAddress());
       } else {
-        Native.pushKeepFirstDeduplicator(handle, array.memoryAddress(), schema.memoryAddress());
+        // Flink's TtlTimeProvider clock: the processing-time service is System.currentTimeMillis
+        // in production and harness-controlled in tests, so expiry is deterministic to test.
+        Native.pushKeepFirstDeduplicator(
+            handle,
+            array.memoryAddress(),
+            schema.memoryAddress(),
+            getProcessingTimeService().getCurrentProcessingTime());
       }
     } finally {
       in.close();
@@ -143,7 +167,11 @@ public class NativeColumnarDeduplicateOperator extends AbstractNativeStatefulOpe
             handle, mark.getTimestamp(), array.memoryAddress(), schema.memoryAddress());
       } else {
         Native.flushKeepFirstDeduplicator(
-            handle, mark.getTimestamp(), array.memoryAddress(), schema.memoryAddress());
+            handle,
+            mark.getTimestamp(),
+            getProcessingTimeService().getCurrentProcessingTime(),
+            array.memoryAddress(),
+            schema.memoryAddress());
       }
       VectorSchemaRoot out = Data.importVectorSchemaRoot(allocator, array, schema, dictionaries);
       if (out.getRowCount() > 0) {

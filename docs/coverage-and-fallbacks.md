@@ -220,7 +220,7 @@ array`, is **not** here: Flink rejects it too, so we're at parity.)
 
 **Idle-state TTL** (`table.exec.state.ttl` ≠ 0): the non-windowed `GROUP BY` — single-phase and
 the two-phase global merge (the local half is transient, so TTL lives on the global) —
-`ChangelogNormalize`, deduplication (keep-last, and eager proctime keep-first), the regular
+`ChangelogNormalize`, deduplication (all four shapes), the regular
 join (per-side retention — each side's rows expire independently under its own TTL), and
 Top-N (all three rankers — append-only, retracting, and update-fast) and LIMIT (which reuses the
 Top-N operator) run it
@@ -233,8 +233,11 @@ normalize, deduplicate, or rank). TTL granularity follows each ranker's Flink st
 append-only ranker expires per sort-key list (every list write refreshes all its tie rows), the
 update-fast one per row-key entry, and the retracting one expires the whole per-partition buffer
 on a clock refreshed by every record — modeling Flink's per-record `SortedMap` rewrite, whose TTL
-governs the partition in practice. The watermark-buffered rowtime keep-first dedup still declines — its buffered
-candidates and emitted-key set do not expire yet. Every other stateful operator likewise declines
+governs the partition in practice. The watermark-buffered rowtime keep-first dedup TTLs only its
+emitted markers, exactly as Flink does: the buffered candidate mirrors Flink's deliberately
+un-TTL'd timer state (the watermark cleans it up; expiring it early would lose data), and the
+marker — written once, when the key fires, never refreshed — expires a fixed retention after the
+firing, letting the key emit a second first row. Every other stateful operator declines
 a nonzero retention: with a TTL the host expires idle keys and stops suppressing unchanged
 updates — semantics those native operators do not yet reproduce. For the temporal join and OVER
 the decline is permanent (Flink expires their state on per-key 1.5×-retention cleanup timers, a
@@ -326,10 +329,9 @@ shape carries timestamps.
 - **LIMIT** — missing `FETCH`, or a retracting input (`OFFSET` is handled — it uses the retracting
   ranker over the insert-only input). Idle-state TTL is native here — a limit lowers to a rank,
   which runs its TTL natively (see the note above).
-- **Deduplicate** — idle-state TTL ≠ 0 on the rowtime keep-first shape only (interim, above); not
-  a time-ordered rank-1. Rowtime and proctime, keep-first (`ASC`) and keep-last (`DESC`), are all
-  native, and the eager shapes run idle-state TTL natively (see the note above); a value-ordered
-  rank-1 is a Top-N (handled separately).
+- **Deduplicate** — not a time-ordered rank-1. Rowtime and proctime, keep-first (`ASC`) and
+  keep-last (`DESC`), are all native, idle-state TTL included (see the note above); a
+  value-ordered rank-1 is a Top-N (handled separately).
 - **Window Top-N / window dedup** — rank not starting at 1 (an `OFFSET`).
 - **Windowing TVF** — not `TUMBLE`/`HOP`/`CUMULATE` (zero offset) over a local-time-zone time
   attribute. Both event-time (assign by rowtime) and proctime (assign by the clock) are native.
