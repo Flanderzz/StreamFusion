@@ -356,6 +356,15 @@
             <id>confluent</id>
             <url>https://packages.confluent.io/maven/</url>
         </repository>
+        <!-- Hosts the timestamped Paimon 2.0 snapshot bundle the state compactor pins (the first
+             Paimon carrying the binary-primary-key lookup comparator fix, which deletion-vector
+             state tables require); drop once a Paimon release includes it. -->
+        <repository>
+            <id>apache-snapshots</id>
+            <url>https://repository.apache.org/content/groups/snapshots/</url>
+            <releases><enabled>false</enabled></releases>
+            <snapshots><enabled>true</enabled></snapshots>
+        </repository>
     </repositories>
 
     <build>

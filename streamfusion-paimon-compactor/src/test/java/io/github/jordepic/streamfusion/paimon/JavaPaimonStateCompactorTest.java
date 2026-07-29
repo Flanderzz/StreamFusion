@@ -33,8 +33,10 @@ import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.FileStoreTableFactory;
 import org.apache.paimon.table.source.DataSplit;
 import org.apache.paimon.table.source.Split;
+import io.github.jordepic.streamfusion.operator.CoalescingOff;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -44,6 +46,7 @@ import org.junit.jupiter.api.Test;
  * lookup-wait model) — visible as a level-0-free table with a deletion-vector index and an
  * unchanged changelog.
  */
+@ExtendWith(CoalescingOff.class)
 class JavaPaimonStateCompactorTest {
 
   @BeforeAll

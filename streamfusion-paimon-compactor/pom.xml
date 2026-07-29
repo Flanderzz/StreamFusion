@@ -13,7 +13,13 @@
     <artifactId>streamfusion-paimon-compactor</artifactId>
 
     <properties>
-        <paimon.bundle.version>1.4.2</paimon.bundle.version>
+        <!-- The Apache 2.0 snapshot (snapshots published after 2026-07-29 carry the
+             binary-primary-key lookup comparator fix, apache/paimon#8873) — the first Paimon
+             deletion-vector state tables can run on, and deletion vectors are the canonical
+             production mode for native state tables. Pin a stable release here the moment one
+             ships with the fix. Overridable for older bundles, where the capability probe falls
+             the backend back to merge-read tables. -->
+        <paimon.bundle.version>2.0-SNAPSHOT</paimon.bundle.version>
     </properties>
 
     <!-- Java Paimon as the maintainer of native state tables: stock Paimon's compaction (its own
@@ -34,10 +40,9 @@
         <dependency>
             <groupId>org.apache.paimon</groupId>
             <artifactId>paimon-bundle</artifactId>
-            <!-- Overridable so the deletion-vector suites can run against a Paimon carrying the
-                 binary-primary-key lookup comparator fix before it reaches a release
-                 (-Dpaimon.bundle.version=2.0-SNAPSHOT with a locally built bundle). On releases
-                 without the fix the deletion-vector tests skip via the capability probe. -->
+            <!-- Overridable (-Dpaimon.bundle.version=...). On bundles without the comparator
+                 fix the deletion-vector tests skip via the capability probe and the backend
+                 runs merge-read tables. -->
             <version>${paimon.bundle.version}</version>
             <scope>provided</scope>
         </dependency>
