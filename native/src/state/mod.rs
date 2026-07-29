@@ -1,5 +1,8 @@
 use crate::*;
 
+pub(crate) mod ttl;
+pub(crate) use ttl::*;
+
 #[cfg(feature = "paimon-state")]
 pub(crate) mod dirty_region;
 #[cfg(feature = "paimon-state")]
@@ -126,6 +129,12 @@ pub(crate) trait KeyedStateStore<V> {
     fn footprint_delta(&mut self) -> isize {
         0
     }
+
+    /// Retains only the entries `keep` approves — the TTL sweep's surface for reclaiming keys that
+    /// are never touched again. Default no-op: a persistent backend enforces TTL through its own
+    /// read filtering and compaction instead of materializing the key space; only the resident
+    /// memory store can (and should) walk its entries.
+    fn retain_live(&mut self, _keep: &mut dyn FnMut(&[u8], &mut V) -> bool) {}
 }
 
 /// Today's state backend: the whole working set resident in one hash map. This is the default
@@ -164,6 +173,10 @@ impl<V> KeyedStateStore<V> for MemoryStateStore<V> {
     #[inline]
     fn remove(&mut self, key: &[u8]) {
         self.map.remove(key);
+    }
+
+    fn retain_live(&mut self, keep: &mut dyn FnMut(&[u8], &mut V) -> bool) {
+        self.map.retain(|key, value| keep(&key.0, value));
     }
 }
 
