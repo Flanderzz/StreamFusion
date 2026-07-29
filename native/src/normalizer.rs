@@ -89,12 +89,20 @@ impl crate::state::PaimonStateCodec for NormalizerStateCodec {
 
     fn decode(&self, scalars: &[ScalarValue]) -> NormalizedRow {
         let (payload, _) = self.row.decode_payload(scalars);
-        // The Paimon shape carries no TTL timestamps; a TTL'd normalizer keeps the memory route.
+        // The TTL timestamp rides the store's ts column via `stamp_write_ms`.
         NormalizedRow { payload, staged: false, last_write_ms: 0 }
     }
 
     fn value_bytes(&self, row: &NormalizedRow) -> usize {
         row.payload.len()
+    }
+
+    fn write_ms(&self, row: &NormalizedRow) -> i64 {
+        row.last_write_ms
+    }
+
+    fn stamp_write_ms(&self, row: &mut NormalizedRow, ts_ms: i64) {
+        row.last_write_ms = ts_ms;
     }
 }
 

@@ -77,6 +77,8 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonG
     record_count_column: jint,
     generate_update_before: jboolean,
     mini_batch: jboolean,
+    state_ttl_millis: jlong,
+    now_millis: jlong,
     memory_budget_bytes: jlong,
     table_directory: JString<'local>,
     max_parallelism: jint,
@@ -129,13 +131,14 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonG
             file_format: format,
             file_compression: compression,
             deletion_vectors: deletion_vectors_mode(),
+            ttl_ms: state_ttl_millis.max(0),
         };
         let store = if source_dirs.is_empty() {
             PaimonGroupStore::create(config, codec)
         } else {
             let sources: Vec<(String, i64)> =
                 source_dirs.into_iter().zip(source_snapshots).collect();
-            PaimonGroupStore::open_merged(config, codec, &sources, key_group_start..=key_group_end, aligned != 0)
+            PaimonGroupStore::open_merged(config, codec, &sources, key_group_start..=key_group_end, aligned != 0, now_millis)
         };
         let aggregator = store.and_then(|store| {
             let mut base = GroupAggregator::new(
@@ -149,7 +152,8 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonG
             .with_filter_columns(filter_columns)
             .with_count_columns(count_columns)
             .with_record_count_column(record_count_column as i64)
-            .with_distinct_view_columns(distinct_view_columns);
+            .with_distinct_view_columns(distinct_view_columns)
+            .with_state_ttl(state_ttl_millis);
             if mini_batch != 0 {
                 base = base.with_mini_batch();
             }
@@ -174,6 +178,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_updatePaimonG
 ) {
     crate::bridge::jni_guard(env, move |mut env| {
         let aggregator = unsafe { &mut *(handle as *mut PaimonGroupAggregator) };
+        aggregator.store_mut().set_clock(now_millis);
         // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
         let result = {
             let batch = import_record_batch(in_array_address, in_schema_address);
@@ -300,6 +305,8 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonK
     rowtime_ordered: jboolean,
     keep_first: jboolean,
     mini_batch: jboolean,
+    state_ttl_millis: jlong,
+    now_millis: jlong,
     memory_budget_bytes: jlong,
     table_directory: JString<'local>,
     max_parallelism: jint,
@@ -344,13 +351,14 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonK
             file_format: format,
             file_compression: compression,
             deletion_vectors: deletion_vectors_mode(),
+            ttl_ms: state_ttl_millis.max(0),
         };
         let store = if source_dirs.is_empty() {
             PaimonDedupStore::create(config, codec)
         } else {
             let sources: Vec<(String, i64)> =
                 source_dirs.into_iter().zip(source_snapshots).collect();
-            PaimonDedupStore::open_merged(config, codec, &sources, key_group_start..=key_group_end, aligned != 0)
+            PaimonDedupStore::open_merged(config, codec, &sources, key_group_start..=key_group_end, aligned != 0, now_millis)
         };
         let dedup = store.and_then(|store| {
             KeepLastDeduplicator::new(
@@ -362,6 +370,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonK
             )
             .with_mini_batch(mini_batch != 0)
             .with_key_timestamp_precisions(timestamp_precisions)
+            .with_state_ttl(state_ttl_millis)
             .with_backend(store)
             .with_read_through_budget(memory_budget_bytes)
         });
@@ -384,6 +393,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushPaimonKee
 ) {
     crate::bridge::jni_guard(env, move |mut env| {
         let dedup = unsafe { &mut *(handle as *mut PaimonKeepLastDeduplicator) };
+        dedup.store_mut().set_clock(now_millis);
         // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
         let result = {
             let batch = import_record_batch(in_array_address, in_schema_address);
@@ -550,6 +560,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonK
             file_format: format,
             file_compression: compression,
             deletion_vectors: deletion_vectors_mode(),
+            ttl_ms: 0,
         };
         let store = if source_dirs.is_empty() {
             PaimonKeepFirstStore::create(config, row_types)
@@ -684,6 +695,8 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonC
     row_schema_address: jlong,
     generate_update_before: jboolean,
     mini_batch: jboolean,
+    state_ttl_millis: jlong,
+    now_millis: jlong,
     memory_budget_bytes: jlong,
     table_directory: JString<'local>,
     max_parallelism: jint,
@@ -728,18 +741,20 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonC
             file_format: format,
             file_compression: compression,
             deletion_vectors: deletion_vectors_mode(),
+            ttl_ms: state_ttl_millis.max(0),
         };
         let store = if source_dirs.is_empty() {
             PaimonNormalizerStore::create(config, codec)
         } else {
             let sources: Vec<(String, i64)> =
                 source_dirs.into_iter().zip(source_snapshots).collect();
-            PaimonNormalizerStore::open_merged(config, codec, &sources, key_group_start..=key_group_end, aligned != 0)
+            PaimonNormalizerStore::open_merged(config, codec, &sources, key_group_start..=key_group_end, aligned != 0, now_millis)
         };
         let normalizer = store.and_then(|store| {
             ChangelogNormalizer::new(keys, generate_update_before != 0)
                 .with_mini_batch(mini_batch != 0)
                 .with_key_timestamp_precisions(timestamp_precisions)
+                .with_state_ttl(state_ttl_millis)
                 .with_backend(store)
                 .with_read_through_budget(memory_budget_bytes)
         });
@@ -762,6 +777,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushPaimonCha
 ) {
     crate::bridge::jni_guard(env, move |mut env| {
         let normalizer = unsafe { &mut *(handle as *mut PaimonChangelogNormalizer) };
+        normalizer.store_mut().set_clock(now_millis);
         // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
         let result = {
             let batch = import_record_batch(in_array_address, in_schema_address);
@@ -989,6 +1005,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonT
             file_format: format,
             file_compression: compression,
             deletion_vectors: deletion_vectors_mode(),
+            ttl_ms: 0,
         };
         let store = if source_dirs.is_empty() {
             PaimonTopNStore::create(config, codec)
@@ -1221,6 +1238,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonU
             file_format: format.clone(),
             file_compression: compression.clone(),
             deletion_vectors: deletion_vectors_mode(),
+            ttl_ms: 0,
         };
         let side_store = |side: &str, schema: &SchemaRef, pick: fn(&str) -> i64| {
             let codec = JoinStateCodec::new(schema);
@@ -1523,6 +1541,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonW
             file_format: format,
             file_compression: compression,
             deletion_vectors: deletion_vectors_mode(),
+            ttl_ms: 0,
         };
         let store = if source_dirs.is_empty() {
             PaimonWindowRankStore::create(config, row_types)
@@ -1814,6 +1833,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonO
             file_format: format,
             file_compression: compression,
             deletion_vectors: deletion_vectors_mode(),
+            ttl_ms: 0,
         };
         let store = if source_dirs.is_empty() {
             PaimonOverStore::create(config, payload_types, state_types)
@@ -2083,6 +2103,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonW
             file_format: format,
             file_compression: compression,
             deletion_vectors: deletion_vectors_mode(),
+            ttl_ms: 0,
         };
         let store = if source_dirs.is_empty() {
             PaimonWindowJoinStore::create(config, left_types, right_types)
@@ -2385,6 +2406,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonT
             file_format: format,
             file_compression: compression,
             deletion_vectors: deletion_vectors_mode(),
+            ttl_ms: 0,
         };
         let store = if source_dirs.is_empty() {
             PaimonWindowAggStore::create(config, key_data_types, state_types)
@@ -2525,6 +2547,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonS
             file_format: format,
             file_compression: compression,
             deletion_vectors: deletion_vectors_mode(),
+            ttl_ms: 0,
         };
         let store = if source_dirs.is_empty() {
             PaimonSessionAggStore::create(config, key_data_types, state_types)
@@ -2670,6 +2693,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonI
             file_format: format,
             file_compression: compression,
             deletion_vectors: deletion_vectors_mode(),
+            ttl_ms: 0,
         };
         let store = if source_dirs.is_empty() {
             PaimonIntervalJoinStore::create(config, left_types, right_types)
@@ -2865,6 +2889,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonT
             file_format: format,
             file_compression: compression,
             deletion_vectors: deletion_vectors_mode(),
+            ttl_ms: 0,
         };
         let store = if source_dirs.is_empty() {
             PaimonTemporalJoinStore::create(config, left_types, right_types)

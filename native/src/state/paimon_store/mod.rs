@@ -61,7 +61,7 @@ pub(crate) use temporal_join::*;
 
 use crate::state::dirty_region::DirtyRegion;
 use crate::*;
-use arrow::array::{Array, BinaryArray, Int32Array, Int8Array};
+use arrow::array::{Array, BinaryArray, Int32Array, Int64Array, Int8Array};
 use paimon::catalog::Identifier;
 use paimon::io::FileIO;
 use paimon::spec::{
@@ -88,6 +88,11 @@ const SUB_KEY_COLUMN: &str = "r";
 const WINDOW_END_COLUMN: &str = "we";
 const WINDOW_START_COLUMN: &str = "ws";
 
+/// The store-managed state-TTL column: each value row's last-write wall clock (epoch millis,
+/// absolute), appended as the LAST value column only when the store's TTL is on — a TTL-off
+/// table keeps the pre-TTL schema exactly.
+const TS_COLUMN: &str = "ts";
+
 /// The per-operator half of the store: the value columns beyond `kg`/`k`, and how one state value
 /// maps to and from one row of those columns. The store owns keys, buckets, hydration, dirty
 /// tracking, and the checkpoint file protocol; a codec owns only its row shape, so a new operator
@@ -111,6 +116,14 @@ pub(crate) trait PaimonStateCodec {
 
     /// The value's accounted heap footprint, mirroring the operator's own per-row tracking.
     fn value_bytes(&self, value: &Self::Value) -> usize;
+
+    /// The value's TTL timestamp (state TTL); consulted only when the store carries the ts column.
+    fn write_ms(&self, _value: &Self::Value) -> i64 {
+        0
+    }
+
+    /// Stamps a decoded value with its persisted TTL timestamp.
+    fn stamp_write_ms(&self, _value: &mut Self::Value, _ts_ms: i64) {}
 }
 
 /// One shared runtime for all Paimon state IO: probes and commits run on the Flink task thread via
@@ -277,6 +290,10 @@ pub(crate) struct PaimonStoreConfig {
     /// no one can maintain the vectors, so tables are created without the option and reads
     /// merge sorted runs as before.
     pub deletion_vectors: bool,
+    /// Idle-state retention millis (0 = off — Flink's default). When on, the generic KV store
+    /// carries each value's last-write wall clock in a trailing `ts` column and enforces
+    /// delete-on-read expiry when it decodes committed rows (see `TS_COLUMN`).
+    pub ttl_ms: i64,
 }
 
 /// Process-wide deletion-vector mode, set once by the host before any store is created (the
@@ -361,8 +378,13 @@ pub(crate) struct PaimonTableCore {
 pub(crate) struct PaimonStore<C: PaimonStateCodec> {
     core: PaimonTableCore,
     codec: C,
-    /// The codec's value columns as Arrow fields, in persisted order after `kg`/`k`.
+    /// The value columns as Arrow fields, in persisted order after `kg`/`k`: the codec's fields
+    /// plus (with TTL on) the store-managed trailing `ts` column, so the schema, hydration
+    /// decode, and dirty-batch encode all follow from this one list.
     value_fields: Vec<Field>,
+    /// The host's wall clock (its `ProcessingTimeService`), set before every ingest call; only
+    /// read when TTL is on.
+    now_ms: i64,
     working: ahash::HashMap<ByteKey, Slot<C::Value>>,
     footprint: isize,
 }
@@ -593,6 +615,19 @@ impl PaimonTableCore {
         if source_buckets.as_deref() != Some(&self.config.buckets.to_string()) {
             return Ok(false);
         }
+        // Adoption re-commits the source's files under this table's schema, so the field lists
+        // must agree exactly (names and types). A mismatch — e.g. a pre-TTL table restored into
+        // a TTL'd store, or the reverse — falls back to the clip rewrite, which maps columns by
+        // name and synthesizes or drops the ts column.
+        let same_fields = source_schema.fields().len() == self.fields.len()
+            && source_schema
+                .fields()
+                .iter()
+                .zip(&self.fields)
+                .all(|(s, t)| s.name() == t.name() && s.data_type() == t.data_type());
+        if !same_fields {
+            return Ok(false);
+        }
         // A deletion-vector table's level-1+ files are only correct with their vectors applied,
         // which this table's reads do only when it carries the option itself — on any mismatch
         // fall back to the clip rewrite, whose source read applies the vectors and whose output
@@ -688,11 +723,18 @@ impl PaimonTableCore {
     /// predicate (`kg` leads the primary key, so row-group pruning keeps the read proportional)
     /// and rewrites the surviving rows into its fresh table in one commit. Sources hold disjoint
     /// key-group ranges, so every rewritten primary key is unique and write order is irrelevant.
+    ///
+    /// Columns are matched by NAME, not position, which is what makes the clip double as the
+    /// state-TTL schema migration: a target `ts` column missing from the source (pre-TTL → TTL)
+    /// is synthesized as the restore time — a full retention from now, Flink's enable-TTL
+    /// migration — and a source-only `ts` (TTL → no-TTL) is dropped. Any other mismatch is an
+    /// error. With TTL on, rows already expired at restore time are not rewritten at all.
     fn clip_from_sources(
         &mut self,
         sources: &[(String, i64)],
         key_groups: std::ops::RangeInclusive<i32>,
         write_fields: &[Field],
+        ttl: crate::state::StateTtl,
     ) -> Result<(), DataFusionError> {
         let mut clipped: Vec<RecordBatch> = Vec::new();
         for (source_dir, snapshot_id) in sources {
@@ -710,6 +752,26 @@ impl PaimonTableCore {
             }
             let pinned = Self::open_source(source_dir, *snapshot_id)?;
             let fields = pinned.schema().fields().to_vec();
+            let source_index =
+                |name: &str| fields.iter().position(|field| field.name() == name);
+            for field in &fields {
+                let name = field.name();
+                if name != TS_COLUMN && !write_fields.iter().any(|f| f.name() == name) {
+                    return Err(DataFusionError::Plan(format!(
+                        "restored state column {name} has no counterpart in the target table"
+                    )));
+                }
+            }
+            for field in write_fields {
+                if field.name() != TS_COLUMN && source_index(field.name()).is_none() {
+                    return Err(DataFusionError::Plan(format!(
+                        "target state column {} is missing from the restored table",
+                        field.name()
+                    )));
+                }
+            }
+            let ts_field = Field::new(TS_COLUMN, DataType::Int64, true);
+            let source_ts = source_index(TS_COLUMN);
             let builder_pred = PredicateBuilder::new(&fields);
             let predicate = Predicate::and(vec![
                 builder_pred
@@ -737,25 +799,45 @@ impl PaimonTableCore {
             for batch in batches {
                 // The predicate pushdown is best-effort: re-check the range per row, and
                 // normalize reader column types to the write schema.
-                let kgs = normalized_column(&batch, 0, &write_fields[0])?;
+                let kg_index = source_index(KG_COLUMN).expect("source kg column");
+                let kgs = normalized_column(&batch, kg_index, &write_fields[0])?;
                 let kgs = kgs
                     .as_any()
                     .downcast_ref::<Int32Array>()
                     .ok_or_else(|| DataFusionError::Internal("paimon kg column".into()))?;
+                let source_ts_values = source_ts
+                    .filter(|_| ttl.enabled())
+                    .map(|i| normalized_column(&batch, i, &ts_field))
+                    .transpose()?;
+                let expired = |row: usize| {
+                    source_ts_values.as_ref().is_some_and(|ts| {
+                        let ts = ts.as_any().downcast_ref::<Int64Array>().expect("ts column");
+                        !ts.is_null(row) && ttl.expired(ts.value(row))
+                    })
+                };
                 let keep: Vec<u32> = (0..batch.num_rows() as u32)
-                    .filter(|&row| key_groups.contains(&kgs.value(row as usize)))
+                    .filter(|&row| {
+                        key_groups.contains(&kgs.value(row as usize)) && !expired(row as usize)
+                    })
                     .collect();
                 if keep.is_empty() {
                     continue;
                 }
                 let indices = arrow::array::UInt32Array::from(keep);
                 let mut columns: Vec<ArrayRef> = Vec::with_capacity(write_fields.len() + 1);
-                for (i, field) in write_fields.iter().enumerate() {
-                    let column = normalized_column(&batch, i, field)?;
-                    columns.push(
-                        arrow::compute::take(&column, &indices, None)
-                            .map_err(|e| DataFusionError::External(Box::new(e)))?,
-                    );
+                for field in write_fields.iter() {
+                    let column = match source_index(field.name()) {
+                        Some(i) => arrow::compute::take(
+                            &normalized_column(&batch, i, field)?,
+                            &indices,
+                            None,
+                        )
+                        .map_err(|e| DataFusionError::External(Box::new(e)))?,
+                        // The target-only ts column of a pre-TTL → TTL migration: every restored
+                        // row is stamped with the restore time, a full retention from now.
+                        None => Arc::new(Int64Array::from(vec![ttl.now(); indices.len()])),
+                    };
+                    columns.push(column);
                 }
                 columns.push(Arc::new(Int8Array::from(vec![0i8; indices.len()])));
                 let mut fields: Vec<Field> = write_fields.to_vec();
@@ -1212,15 +1294,18 @@ impl<C: PaimonStateCodec> PaimonStore<C> {
     }
 
     /// Builds a fresh table at `config.table_dir` from one or more restored table directories
-    /// (rescale); see `PaimonTableCore::adopt_buckets`.
+    /// (rescale); see `PaimonTableCore::adopt_buckets`. `now_ms` is the host's wall clock at
+    /// restore, the stamp of the enable-TTL migration (see `clip_from_sources`).
     pub(crate) fn open_merged(
         config: PaimonStoreConfig,
         codec: C,
         sources: &[(String, i64)],
         key_groups: std::ops::RangeInclusive<i32>,
         aligned: bool,
+        now_ms: i64,
     ) -> Result<Self, DataFusionError> {
         let mut store = Self::create(config, codec)?;
+        store.now_ms = now_ms;
         if aligned && sources.len() == 1 {
             let (source_dir, snapshot_id) = &sources[0];
             if store.core.adopt_all(source_dir, *snapshot_id)? {
@@ -1228,7 +1313,7 @@ impl<C: PaimonStateCodec> PaimonStore<C> {
             }
         }
         let write_fields = store.arrow_fields();
-        store.core.clip_from_sources(sources, key_groups, &write_fields)?;
+        store.core.clip_from_sources(sources, key_groups, &write_fields, store.ttl())?;
         Ok(store)
     }
 
@@ -1238,15 +1323,19 @@ impl<C: PaimonStateCodec> PaimonStore<C> {
                 "state shape not supported by the paimon state backend".into(),
             ));
         }
-        let value_fields: Vec<Field> = codec
+        let mut value_fields: Vec<Field> = codec
             .value_fields()
             .into_iter()
             .map(|(name, data_type)| Field::new(name, data_type, true))
             .collect();
+        if core.config.ttl_ms > 0 {
+            value_fields.push(Field::new(TS_COLUMN, DataType::Int64, true));
+        }
         Ok(PaimonStore {
             core,
             codec,
             value_fields,
+            now_ms: 0,
             working: ahash::HashMap::default(),
             footprint: 0,
         })
@@ -1265,7 +1354,20 @@ impl<C: PaimonStateCodec> PaimonStore<C> {
             })?;
             builder = builder.column(name, paimon_type);
         }
+        if config.ttl_ms > 0 {
+            builder = builder.column(TS_COLUMN, PaimonType::BigInt(BigIntType::new()));
+        }
         builder.primary_key([KG_COLUMN, KEY_COLUMN]).build().map_err(pe)
+    }
+
+    /// Sets the host's wall clock for this ingest call (Flink's `TtlTimeProvider` reading);
+    /// hydration reads it to expire committed rows, the clip to stamp migrated ones.
+    pub(crate) fn set_clock(&mut self, now_ms: i64) {
+        self.now_ms = now_ms;
+    }
+
+    fn ttl(&self) -> crate::state::StateTtl {
+        crate::state::StateTtl::new(self.core.config.ttl_ms, self.now_ms)
     }
 
     /// The Arrow schema of persisted rows (also the write-batch schema, which additionally
@@ -1299,7 +1401,10 @@ impl<C: PaimonStateCodec> PaimonStore<C> {
     }
 
     /// Decodes scanned rows into clean working-set entries; a key already in the working set
-    /// stays authoritative over the table.
+    /// stays authoritative over the table. With TTL on this is where the persistent backend
+    /// expires: a committed row past its retention hydrates as a dirty ABSENT slot — read as
+    /// never seen, tombstoned by the next barrier's commit (delete-on-read) — instead of
+    /// decoding; live rows decode and carry their persisted last-write timestamp.
     fn absorb_scan_batch(&mut self, batch: &RecordBatch) -> Result<usize, DataFusionError> {
         let expected = self.arrow_fields();
         let key_index = 1;
@@ -1312,11 +1417,34 @@ impl<C: PaimonStateCodec> PaimonStore<C> {
         for i in 0..self.value_fields.len() {
             value_columns.push(normalized_column(batch, 2 + i, &expected[2 + i])?);
         }
+        let ttl = self.ttl();
+        let ts_column = if ttl.enabled() {
+            let ts = value_columns.pop().expect("ttl store carries the ts column");
+            Some(
+                ts.as_any()
+                    .downcast_ref::<Int64Array>()
+                    .ok_or_else(|| DataFusionError::Internal("paimon ts column".into()))?
+                    .clone(),
+            )
+        } else {
+            None
+        };
         let mut added = 0usize;
         let mut added_bytes = 0usize;
         for row in 0..batch.num_rows() {
             let key = keys.value(row);
             if self.working.contains_key(key) {
+                continue;
+            }
+            // A NULL ts is defensive (no live row is written without one): it decodes as a fresh
+            // write rather than expiring the row.
+            let ts_ms = ts_column
+                .as_ref()
+                .map(|ts| if ts.is_null(row) { self.now_ms } else { ts.value(row) });
+            let owned = ByteKey::from(key);
+            if ts_ms.is_some_and(|ts| ttl.expired(ts)) {
+                added_bytes += Self::SLOT_OVERHEAD;
+                self.working.insert(owned, Slot::Absent { dirty: true });
                 continue;
             }
             let mut scalars: Vec<ScalarValue> = Vec::with_capacity(value_columns.len());
@@ -1326,8 +1454,10 @@ impl<C: PaimonStateCodec> PaimonStore<C> {
                         .map_err(|e| DataFusionError::External(Box::new(e)))?,
                 );
             }
-            let state = self.codec.decode(&scalars);
-            let owned = ByteKey::from(key);
+            let mut state = self.codec.decode(&scalars);
+            if let Some(ts) = ts_ms {
+                self.codec.stamp_write_ms(&mut state, ts);
+            }
             added_bytes +=
                 byte_key_bytes(&owned.0) + self.codec.value_bytes(&state) + Self::SLOT_OVERHEAD;
             self.working
@@ -1346,6 +1476,7 @@ impl<C: PaimonStateCodec> PaimonStore<C> {
         let mut keys: Vec<&[u8]> = Vec::new();
         let mut values: Vec<Vec<ScalarValue>> = vec![Vec::new(); num_value];
         let mut kinds: Vec<i8> = Vec::new();
+        let ttl_on = self.core.config.ttl_ms > 0;
         for (key, slot) in self.working.iter() {
             match slot {
                 Slot::Present { state, dirty: true } => {
@@ -1353,6 +1484,10 @@ impl<C: PaimonStateCodec> PaimonStore<C> {
                     keys.push(&key.0);
                     for (i, scalar) in self.codec.encode(state).into_iter().enumerate() {
                         values[i].push(scalar);
+                    }
+                    if ttl_on {
+                        values[num_value - 1]
+                            .push(ScalarValue::Int64(Some(self.codec.write_ms(state))));
                     }
                     kinds.push(0); // +I upsert — deduplicate keeps the latest by sequence
                 }

@@ -23,9 +23,11 @@ public final class PaimonNativeStateSupport {
   private final String[] sourceDirectories;
   private final String[] sourceSnapshotTokens;
   private final boolean aligned;
+  private final long stateTtlMillis;
 
-  private PaimonNativeStateSupport(PaimonKeyedStateBackend<?> backend) {
+  private PaimonNativeStateSupport(PaimonKeyedStateBackend<?> backend, long stateTtlMillis) {
     this.backend = backend;
+    this.stateTtlMillis = stateTtlMillis;
     List<PaimonRestoredSource> sources = backend.restoredSources();
     this.sourceDirectories = new String[sources.size()];
     this.sourceSnapshotTokens = new String[sources.size()];
@@ -51,6 +53,16 @@ public final class PaimonNativeStateSupport {
       String operatorLabel,
       boolean rawStateRestored,
       BooleanSupplier operatorSupported) {
+    return resolve(keyedStateBackend, operatorLabel, rawStateRestored, operatorSupported, 0);
+  }
+
+  /** {@link #resolve} for an operator whose persistent shape carries state-TTL timestamps. */
+  public static PaimonNativeStateSupport resolve(
+      KeyedStateBackend<?> keyedStateBackend,
+      String operatorLabel,
+      boolean rawStateRestored,
+      BooleanSupplier operatorSupported,
+      long stateTtlMillis) {
     if (!(keyedStateBackend instanceof PaimonKeyedStateBackend)) {
       return null;
     }
@@ -60,7 +72,7 @@ public final class PaimonNativeStateSupport {
       // each barrier and new tables carry deletion vectors; the native side needs the mode
       // before it creates any store.
       Native.paimonDeletionVectors(backend.deletionVectors());
-      return new PaimonNativeStateSupport(backend);
+      return new PaimonNativeStateSupport(backend, stateTtlMillis);
     }
     LOG.info(
         "{} falls back to memory state under the Paimon backend "
@@ -87,6 +99,14 @@ public final class PaimonNativeStateSupport {
    */
   public boolean aligned() {
     return aligned;
+  }
+
+  /**
+   * The operator's idle-state retention millis (0 = off): the store writes each row's last-write
+   * timestamp behind it, and the table compactor may drop rows past it during maintenance.
+   */
+  public long stateTtlMillis() {
+    return stateTtlMillis;
   }
 
   public int keyGroupStart() {

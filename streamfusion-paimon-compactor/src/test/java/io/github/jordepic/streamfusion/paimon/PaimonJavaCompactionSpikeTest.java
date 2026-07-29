@@ -154,6 +154,8 @@ class PaimonJavaCompactionSpikeTest {
         -1,
         true,
         false,
+        0L, // state TTL off
+        0L, // restore clock (unused with TTL off)
         -1L,
         tableDir,
         128,
@@ -188,6 +190,7 @@ class PaimonJavaCompactionSpikeTest {
           handle,
           inArray.memoryAddress(),
           inSchema.memoryAddress(),
+          0, // wall clock, unused with TTL off
           outArray.memoryAddress(),
           outSchema.memoryAddress());
       List<List<Object>> rows = new ArrayList<>();

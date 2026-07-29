@@ -102,8 +102,18 @@ public abstract class AbstractNativeStatefulOperator<OUT> extends AbstractStream
   /** Fills in this operator's backend and label around its own native supported-probe. */
   protected final PaimonNativeStateSupport resolvePaimon(
       boolean rawStateRestored, BooleanSupplier operatorSupported) {
+    return resolvePaimon(rawStateRestored, operatorSupported, 0);
+  }
+
+  /**
+   * {@link #resolvePaimon(boolean, BooleanSupplier)} for an operator whose persistent shape
+   * carries state-TTL timestamps; the retention is exposed on the support object so the barrier
+   * maintenance (the compactor) can learn it.
+   */
+  protected final PaimonNativeStateSupport resolvePaimon(
+      boolean rawStateRestored, BooleanSupplier operatorSupported, long stateTtlMillis) {
     return PaimonNativeStateSupport.resolve(
-        getKeyedStateBackend(), stateLabel, rawStateRestored, operatorSupported);
+        getKeyedStateBackend(), stateLabel, rawStateRestored, operatorSupported, stateTtlMillis);
   }
 
   // -------------------------------------------------------------------- processing-time recovery

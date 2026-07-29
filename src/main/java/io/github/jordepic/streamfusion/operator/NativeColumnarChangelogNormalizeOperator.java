@@ -58,14 +58,12 @@ public class NativeColumnarChangelogNormalizeOperator
 
   @Override
   protected PaimonNativeStateSupport resolvePaimonState(boolean rawStateRestored) {
-    // The Paimon shape does not carry per-key TTL timestamps yet; a TTL'd normalizer keeps the
-    // memory route (the standard fallback for an unsupported shape) until the store gains them.
     return resolvePaimon(
         rawStateRestored,
         () ->
-            stateTtlMillis == 0
-                && withRowSchema(rowType, address -> Native.paimonRowStateSupported(address) ? 1L : 0L)
-                    != 0);
+            withRowSchema(rowType, address -> Native.paimonRowStateSupported(address) ? 1L : 0L)
+                != 0,
+        stateTtlMillis);
   }
 
   @Override
@@ -79,6 +77,8 @@ public class NativeColumnarChangelogNormalizeOperator
                 rowSchemaAddress,
                 generateUpdateBefore,
                 miniBatch,
+                stateTtlMillis,
+                getProcessingTimeService().getCurrentProcessingTime(),
                 memoryBudgetBytes(),
                 paimon.tableDirectory(),
                 maxParallelism(),

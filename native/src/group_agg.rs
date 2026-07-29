@@ -653,6 +653,14 @@ impl crate::state::PaimonStateCodec for GroupStateCodec {
     fn value_bytes(&self, state: &GroupKeyState) -> usize {
         group_key_state_bytes(state)
     }
+
+    fn write_ms(&self, state: &GroupKeyState) -> i64 {
+        state.last_write_ms
+    }
+
+    fn stamp_write_ms(&self, state: &mut GroupKeyState, ts_ms: i64) {
+        state.last_write_ms = ts_ms;
+    }
 }
 
 /// The Arrow type of each aggregate's persisted state scalar (equals the result type except AVG,

@@ -73,13 +73,10 @@ public class NativeColumnarGroupAggregateOperator
 
   @Override
   protected PaimonNativeStateSupport resolvePaimonState(boolean rawStateRestored) {
-    // The Paimon shape does not carry per-group TTL timestamps yet; a TTL'd aggregate keeps the
-    // memory route (the standard fallback for an unsupported shape) until the store gains them.
     return resolvePaimon(
         rawStateRestored,
-        () ->
-            stateTtlMillis == 0
-                && Native.paimonGroupAggregatorSupported(aggregateKinds, valueTypes));
+        () -> Native.paimonGroupAggregatorSupported(aggregateKinds, valueTypes),
+        stateTtlMillis);
   }
 
   @Override
@@ -87,7 +84,8 @@ public class NativeColumnarGroupAggregateOperator
     return Native.createPaimonGroupAggregator(
         aggregateKinds, valueTypes, valueColumns, keyColumns, keyTimestampPrecisions(),
         filterColumns, countColumns, distinctViewColumns, recordCountColumn,
-        generateUpdateBefore, miniBatch, memoryBudgetBytes(),
+        generateUpdateBefore, miniBatch, stateTtlMillis,
+        getProcessingTimeService().getCurrentProcessingTime(), memoryBudgetBytes(),
         paimon.tableDirectory(), maxParallelism(), NativeConfig.paimonBuckets(),
         NativeConfig.paimonFileFormat(), NativeConfig.paimonFileCompression(),
         paimon.sourceDirectories(), paimon.sourceSnapshotTokens(),

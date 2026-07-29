@@ -1058,6 +1058,10 @@ public final class Native {
    * rescale reassigns files without rewriting rows. The native side never compacts; table
    * maintenance belongs to the deployed {@code StateTableCompactor} (stock Java Paimon).
    *
+   * <p>With a nonzero {@code stateTtlMillis} the table carries each group's last-write wall clock
+   * in a trailing {@code ts} column and expires rows on read; {@code nowMillis} stamps a restored
+   * pre-TTL table's rows with a full retention from restore (Flink's enable-TTL migration).
+   *
    * @param maxParallelism the job's max parallelism — the table's bucket count and key-group math
    * @param fileFormat Paimon data file format for state
    * @param fileCompression Paimon {@code file.compression} for state data files (stamped into the
@@ -1075,6 +1079,8 @@ public final class Native {
       int recordCountColumn,
       boolean generateUpdateBefore,
       boolean miniBatch,
+      long stateTtlMillis,
+      long nowMillis,
       long memoryBudgetBytes,
       String tableDirectory,
       int maxParallelism,
@@ -1131,7 +1137,8 @@ public final class Native {
    * {@code createKeepLastDeduplicator} on the Paimon state backend. The persisted state row is the
    * stored full row as typed columns ({@code rowSchemaAddress} carries the exported FFI schema of
    * the input row type); an empty {@code sourceDirectories} creates a fresh table, otherwise the
-   * in-range buckets of each restored source are adopted (rescale merge).
+   * in-range buckets of each restored source are adopted (rescale merge). TTL semantics as in
+   * {@link #createPaimonGroupAggregator}.
    */
   public static native long createPaimonKeepLastDeduplicator(
       int[] partitionColumns,
@@ -1142,6 +1149,8 @@ public final class Native {
       boolean rowtimeOrdered,
       boolean keepFirst,
       boolean miniBatch,
+      long stateTtlMillis,
+      long nowMillis,
       long memoryBudgetBytes,
       String tableDirectory,
       int maxParallelism,
@@ -1557,6 +1566,8 @@ public final class Native {
       long rowSchemaAddress,
       boolean generateUpdateBefore,
       boolean miniBatch,
+      long stateTtlMillis,
+      long nowMillis,
       long memoryBudgetBytes,
       String tableDirectory,
       int maxParallelism,

@@ -78,6 +78,7 @@ class JavaPaimonStateCompactorTest {
             true,
             false,
             0,
+            0,
             new int[] {-1},
             MAX_PARALLELISM);
     File tableDir;

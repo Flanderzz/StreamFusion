@@ -717,15 +717,25 @@ impl crate::state::PaimonStateCodec for DedupStateCodec {
         } else {
             0
         };
-        // The Paimon shape carries neither TTL timestamps (a TTL'd deduplicator keeps the memory
-        // route) nor the stored row kind: a hydrated key reads as INSERT-stored, so a proctime
-        // keep-last identical row arriving right after hydration can suppress where the
-        // heap-backed host would emit — the same divergence window as any hydration boundary.
+        // The Paimon shape does not carry the stored row kind. With TTL off, a hydrated key
+        // reads as INSERT-stored, so a proctime keep-last identical row arriving right after
+        // hydration can suppress where the heap-backed host would emit — the same divergence
+        // window as any hydration boundary. With TTL on the kind flag is irrelevant: the
+        // suppression is disabled outright (Flink always re-emits -U/+U under retention), and
+        // the TTL timestamp rides the store's ts column via `stamp_write_ms`.
         DedupRow { rowtime, payload, staged: false, update_kind: false, last_write_ms: 0 }
     }
 
     fn value_bytes(&self, row: &DedupRow) -> usize {
         row.payload.len()
+    }
+
+    fn write_ms(&self, row: &DedupRow) -> i64 {
+        row.last_write_ms
+    }
+
+    fn stamp_write_ms(&self, row: &mut DedupRow, ts_ms: i64) {
+        row.last_write_ms = ts_ms;
     }
 }
 

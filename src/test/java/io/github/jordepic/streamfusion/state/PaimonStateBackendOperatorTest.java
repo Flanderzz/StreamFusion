@@ -131,6 +131,46 @@ class PaimonStateBackendOperatorTest {
     }
   }
 
+  /**
+   * A TTL'd group aggregate rides the Paimon route too (its snapshot is an incremental Paimon
+   * handle, not raw keyed state): the last-write timestamp persists absolutely in the table's
+   * trailing ts column, so after restore the key expires at write-time + ttl and its next row
+   * is a fresh insert.
+   */
+  @Test
+  void groupAggregateTtlExpiresAcrossCheckpointAndRestore() throws Exception {
+    OperatorSubtaskState snapshot;
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness =
+            harness(1000)) {
+      harness.setStateBackend(new PaimonStateBackend());
+      harness.setup(new ArrowBatchSerializer());
+      harness.open();
+
+      harness.setProcessingTime(5000);
+      harness.processElement(new StreamRecord<>(batch(allocator, row(1, 10))));
+      assertEquals(List.of(insert(1, 10)), collect(harness));
+      snapshot = harness.snapshot(1, 1);
+      paimonHandle(snapshot); // the TTL'd aggregate must resolve to the Paimon route
+      harness.notifyOfCompletedCheckpoint(1);
+    }
+
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness =
+            harness(1000)) {
+      harness.setStateBackend(new PaimonStateBackend());
+      harness.setup(new ArrowBatchSerializer());
+      harness.initializeState(snapshot);
+      harness.open();
+
+      // 5000 + 1000 <= 6000: the restored key hydrates as expired (delete-on-read), so the sum
+      // restarts as a fresh +I instead of a -U/+U update.
+      harness.setProcessingTime(6000);
+      harness.processElement(new StreamRecord<>(batch(allocator, row(1, 5))));
+      assertEquals(List.of(insert(1, 5)), collect(harness));
+    }
+  }
+
   /** Retracting a group to zero records deletes it in the table, across a checkpoint. */
   @Test
   void deletesSurviveCheckpointAndRestore() throws Exception {
@@ -591,6 +631,11 @@ class PaimonStateBackendOperatorTest {
 
   private static KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness()
       throws Exception {
+    return harness(0);
+  }
+
+  private static KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness(
+      long stateTtlMillis) throws Exception {
     NativeColumnarGroupAggregateOperator operator =
         new NativeColumnarGroupAggregateOperator(
             new int[] {0}, // SUM
@@ -604,7 +649,7 @@ class PaimonStateBackendOperatorTest {
             true,
             false,
             0,
-            0,
+            stateTtlMillis,
             new int[] {-1},
             MAX_PARALLELISM);
     return new KeyedOneInputStreamOperatorTestHarness<>(

@@ -213,7 +213,7 @@ impl<C: PaimonMapCodec> PaimonMapStore<C> {
             }
         }
         let write_fields = store.arrow_fields();
-        store.core.clip_from_sources(sources, key_groups, &write_fields)?;
+        store.core.clip_from_sources(sources, key_groups, &write_fields, crate::state::StateTtl::disabled())?;
         Ok(store)
     }
 

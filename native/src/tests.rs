@@ -4442,7 +4442,12 @@ mod paimon_state {
             file_format: "vortex".to_string(),
             file_compression: "uncompressed".to_string(),
             deletion_vectors: false,
+            ttl_ms: 0,
         }
+    }
+
+    fn ttl_config(table_dir: &str, ttl_ms: i64) -> PaimonStoreConfig {
+        PaimonStoreConfig { ttl_ms, ..config(table_dir) }
     }
 
     /// SUM + COUNT(*) aggregator over one BIGINT key, mini-batched, on the given backend.
@@ -4515,6 +4520,219 @@ mod paimon_state {
             let link = temp_dir(&format!("parity-cp{i}"));
             paimon.store_mut().checkpoint().unwrap();
         }
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // State TTL on the generic KV store: last-write timestamps ride the trailing ts column,
+    // expiry happens at hydration (delete-on-read, tombstoned at the next barrier), and restores
+    // migrate the column by name (pre-TTL tables gain a full retention, TTL'd tables shed it).
+    // -----------------------------------------------------------------------------------------
+
+    /// The `paimon_agg` shape with a 1s idle-state retention.
+    fn paimon_agg_ttl(store: PaimonGroupStore) -> GroupAggregator<PaimonGroupStore> {
+        GroupAggregator::new(vec![0, 3], vec![0, 0], vec![1, -1], vec![0], true)
+            .with_mini_batch()
+            .with_state_ttl(1000)
+            .with_backend(store)
+    }
+
+    #[test]
+    fn paimon_group_agg_ttl_expires_on_hydration_and_tombstones() {
+        let dir = temp_dir("ttl-tomb");
+        let store = PaimonGroupStore::create(ttl_config(&dir, 1000), codec()).unwrap();
+        let mut agg = paimon_agg_ttl(store);
+        agg.store_mut().set_clock(5000);
+        agg.update(&group_changelog(vec![1], vec![Some(10)], vec![0]), 5000).unwrap();
+        agg.flush_mini_batch().unwrap();
+        agg.store_mut().checkpoint().unwrap();
+
+        // Past the retention (5000 + 1000 <= 6000, the inclusive boundary), the retraction
+        // hydrates the key as already expired: it emits nothing, and the delete-on-read leaves a
+        // dirty absent slot the next barrier commits as a tombstone.
+        agg.store_mut().set_clock(6000);
+        agg.update(&group_changelog(vec![1], vec![Some(10)], vec![3]), 6000).unwrap();
+        assert_eq!(agg.flush_mini_batch().unwrap().num_rows(), 0);
+        let manifest = agg.store_mut().checkpoint().unwrap();
+
+        // Reopen BEFORE the original expiry instant: the key must be gone because the tombstone
+        // committed, not because this reader's clock expired it again.
+        let store =
+            PaimonGroupStore::open(ttl_config(&dir, 1000), codec(), manifest.snapshot_id).unwrap();
+        let mut reopened = paimon_agg_ttl(store);
+        reopened.store_mut().set_clock(5500);
+        reopened.update(&group_changelog(vec![1], vec![Some(5)], vec![0]), 5500).unwrap();
+        let out = reopened.flush_mini_batch().unwrap();
+        assert_eq!(row_kinds(&out), vec![0], "the tombstoned key restarts as a fresh insert");
+        assert_eq!(values(&out, 1), vec![5]);
+    }
+
+    #[test]
+    fn paimon_group_agg_ttl_timestamps_are_absolute_across_restore() {
+        let dir = temp_dir("ttl-abs");
+        let store = PaimonGroupStore::create(ttl_config(&dir, 1000), codec()).unwrap();
+        let mut agg = paimon_agg_ttl(store);
+        agg.store_mut().set_clock(5000);
+        agg.update(&group_changelog(vec![1], vec![Some(10)], vec![0]), 5000).unwrap();
+        agg.flush_mini_batch().unwrap();
+        let manifest = agg.store_mut().checkpoint().unwrap();
+        let src = temp_dir("ttl-abs-mat");
+        materialize(&manifest, &dir, &src);
+
+        // An aligned TTL→TTL restore adopts the files wholesale, timestamps included: expiry
+        // after the restore is timed from the original write, and the boundary stays inclusive.
+        let probe_restored = |now: i64| {
+            let store = PaimonGroupStore::open_merged(
+                ttl_config(&temp_dir("ttl-abs-dst"), 1000),
+                codec(),
+                &[(src.clone(), manifest.snapshot_id)],
+                0..=127,
+                true,
+                now,
+            )
+            .unwrap();
+            let mut restored = paimon_agg_ttl(store);
+            restored.store_mut().set_clock(now);
+            restored.update(&group_changelog(vec![1], vec![Some(5)], vec![0]), now).unwrap();
+            restored.flush_mini_batch().unwrap()
+        };
+        let alive = probe_restored(5999);
+        assert_eq!(row_kinds(&alive), vec![1, 2], "one ms inside the window: still an update");
+        assert_eq!(values(&alive, 1), vec![10, 15]);
+        let expired = probe_restored(6000);
+        assert_eq!(row_kinds(&expired), vec![0], "ts + ttl == now: expired, a fresh insert");
+        assert_eq!(values(&expired, 1), vec![5]);
+    }
+
+    #[test]
+    fn paimon_group_agg_matches_memory_with_ttl() {
+        let dir = temp_dir("ttl-parity");
+        let mut paimon =
+            paimon_agg_ttl(PaimonGroupStore::create(ttl_config(&dir, 1000), codec()).unwrap());
+        let mut memory = memory_agg().with_state_ttl(1000);
+
+        // Writes, a retraction, and adds landing after both keys' retention elapsed (fresh +I on
+        // an expired key; the retraction of a live key refreshes it).
+        let bundles: Vec<(RecordBatch, i64)> = vec![
+            (group_changelog(vec![1, 2], vec![Some(10), Some(20)], vec![0, 0]), 1000),
+            (group_changelog(vec![1, 1], vec![Some(10), Some(4)], vec![3, 0]), 1500),
+            (group_changelog(vec![1], vec![Some(5)], vec![0]), 2500),
+            (group_changelog(vec![2], vec![Some(1)], vec![0]), 2600),
+        ];
+        for (i, (bundle, now)) in bundles.iter().enumerate() {
+            paimon.store_mut().set_clock(*now);
+            paimon.update(bundle, *now).unwrap();
+            memory.update(bundle, *now).unwrap();
+            assert_same_output(
+                &memory.flush_mini_batch().unwrap(),
+                &paimon.flush_mini_batch().unwrap(),
+            );
+            let link = temp_dir(&format!("ttl-parity-cp{i}"));
+            paimon.store_mut().checkpoint().unwrap();
+        }
+    }
+
+    #[test]
+    fn paimon_pre_ttl_table_gains_a_full_retention_on_restore() {
+        // A TTL-off table (no ts column), the pre-TTL checkpoint of an enable-TTL migration.
+        let dir = temp_dir("mig-on-src");
+        let mut agg = paimon_agg(create_store(&dir));
+        agg.update(&group_changelog(vec![1], vec![Some(10)], vec![0]), 0).unwrap();
+        agg.flush_mini_batch().unwrap();
+        let manifest = agg.store_mut().checkpoint().unwrap();
+        let src = temp_dir("mig-on-mat");
+        materialize(&manifest, &dir, &src);
+
+        // Aligned restore into a TTL'd store: the target schema gained ts, so the wholesale
+        // adoption must decline and the clip rewrite stamp every row with the restore time —
+        // a full retention from restore (asserted behaviorally: the sum survives the rewrite
+        // and expires exactly at restore + ttl).
+        let probe_restored = |restore_ms: i64, probe_ms: i64| {
+            let store = PaimonGroupStore::open_merged(
+                ttl_config(&temp_dir("mig-on-dst"), 1000),
+                codec(),
+                &[(src.clone(), manifest.snapshot_id)],
+                0..=127,
+                true,
+                restore_ms,
+            )
+            .unwrap();
+            let mut restored = paimon_agg_ttl(store);
+            restored.store_mut().set_clock(probe_ms);
+            restored
+                .update(&group_changelog(vec![1], vec![Some(5)], vec![0]), probe_ms)
+                .unwrap();
+            restored.flush_mini_batch().unwrap()
+        };
+        let alive = probe_restored(5000, 5999);
+        assert_eq!(row_kinds(&alive), vec![1, 2]);
+        assert_eq!(values(&alive, 1), vec![10, 15], "migrated state lives on past the restore");
+        let expired = probe_restored(5000, 6000);
+        assert_eq!(row_kinds(&expired), vec![0], "the migration stamp expires a retention later");
+        assert_eq!(values(&expired, 1), vec![5]);
+    }
+
+    #[test]
+    fn paimon_ttl_table_sheds_timestamps_on_a_ttl_off_restore() {
+        let dir = temp_dir("mig-off-src");
+        let store = PaimonGroupStore::create(ttl_config(&dir, 1000), codec()).unwrap();
+        let mut agg = paimon_agg_ttl(store);
+        agg.store_mut().set_clock(5000);
+        agg.update(&group_changelog(vec![1], vec![Some(10)], vec![0]), 5000).unwrap();
+        agg.flush_mini_batch().unwrap();
+        let manifest = agg.store_mut().checkpoint().unwrap();
+        let src = temp_dir("mig-off-mat");
+        materialize(&manifest, &dir, &src);
+
+        // Aligned restore into a TTL-off store: the source-only ts column declines adoption and
+        // is dropped by the clip; the values survive intact and nothing ever expires.
+        let store = PaimonGroupStore::open_merged(
+            config(&temp_dir("mig-off-dst")),
+            codec(),
+            &[(src, manifest.snapshot_id)],
+            0..=127,
+            true,
+            i64::MAX,
+        )
+        .unwrap();
+        let mut restored = paimon_agg(store);
+        restored
+            .update(&group_changelog(vec![1], vec![Some(5)], vec![0]), i64::MAX)
+            .unwrap();
+        let out = restored.flush_mini_batch().unwrap();
+        assert_eq!(row_kinds(&out), vec![1, 2], "the restored sum is live with TTL off");
+        assert_eq!(values(&out, 1), vec![10, 15]);
+    }
+
+    #[test]
+    fn paimon_ttl_clip_skips_rows_already_expired_at_restore() {
+        let dir = temp_dir("ttl-clipx-src");
+        let store = PaimonGroupStore::create(ttl_config(&dir, 1000), codec()).unwrap();
+        let mut agg = paimon_agg_ttl(store);
+        agg.store_mut().set_clock(5000);
+        agg.update(&group_changelog(vec![1], vec![Some(10)], vec![0]), 5000).unwrap();
+        agg.flush_mini_batch().unwrap();
+        let manifest = agg.store_mut().checkpoint().unwrap();
+        let src = temp_dir("ttl-clipx-mat");
+        materialize(&manifest, &dir, &src);
+
+        // A non-aligned restore clips; a row already past its retention at restore time is not
+        // rewritten at all. Probing with the clock turned back before the expiry instant proves
+        // the row is gone from the table, not merely re-expired by this read.
+        let store = PaimonGroupStore::open_merged(
+            ttl_config(&temp_dir("ttl-clipx-dst"), 1000),
+            codec(),
+            &[(src, manifest.snapshot_id)],
+            0..=127,
+            false,
+            6000,
+        )
+        .unwrap();
+        let mut restored = paimon_agg_ttl(store);
+        restored.store_mut().set_clock(5500);
+        restored.update(&group_changelog(vec![1], vec![Some(5)], vec![0]), 5500).unwrap();
+        let out = restored.flush_mini_batch().unwrap();
+        assert_eq!(row_kinds(&out), vec![0], "the expired row was clipped away");
+        assert_eq!(values(&out, 1), vec![5]);
     }
 
     fn keep_first_store(dir: &str) -> PaimonKeepFirstStore {
@@ -5759,6 +5977,7 @@ mod paimon_state {
             &[(src_a, cp_a.snapshot_id), (src_b, cp_b.snapshot_id)],
             0..=127,
             false,
+            0,
         )
         .unwrap();
         let mut merged = paimon_agg(store);
@@ -5795,6 +6014,7 @@ mod paimon_state {
             &[(src, manifest.snapshot_id)],
             0..=63,
             false,
+            0,
         )
         .unwrap();
 
@@ -5867,6 +6087,36 @@ mod paimon_state {
     }
 
     #[test]
+    fn paimon_dedup_matches_memory_with_ttl() {
+        let dir = temp_dir("dedup-ttl-parity");
+        let store = PaimonDedupStore::create(ttl_config(&dir, 1000), dedup_codec()).unwrap();
+        let mut paimon = KeepLastDeduplicator::new(vec![0], 2, true, true, false)
+            .with_state_ttl(1000)
+            .with_backend(store);
+        let mut memory =
+            KeepLastDeduplicator::new(vec![0], 2, true, true, false).with_state_ttl(1000);
+
+        // An ignored older rowtime must not refresh key 1, so both keys expire before the last
+        // bundle; each expired key restarts as a fresh insert regardless of the stored rowtime.
+        let bundles: Vec<(RecordBatch, i64)> = vec![
+            (join_batch(vec![1, 2], vec![10, 20], vec![5, 5]), 1000),
+            (join_batch(vec![1], vec![9], vec![3]), 1500),
+            (join_batch(vec![1, 2], vec![11, 21], vec![4, 9]), 2100),
+        ];
+        for (i, (bundle, now)) in bundles.iter().enumerate() {
+            paimon.store_mut().set_clock(*now);
+            let memory_out = memory.push(bundle, *now).unwrap();
+            let paimon_out = paimon.push(bundle, *now).unwrap();
+            assert_eq!(memory_out.num_rows(), paimon_out.num_rows(), "bundle {i}");
+            if memory_out.num_rows() > 0 {
+                assert_same_output(&memory_out, &paimon_out);
+            }
+            let link = temp_dir(&format!("dedup-ttl-parity-cp{i}"));
+            paimon.store_mut().checkpoint().unwrap();
+        }
+    }
+
+    #[test]
     fn paimon_dedup_rowtime_survives_hydration() {
         let dir = temp_dir("dedup-rt");
         let mut dedup = paimon_dedup(&dir);
@@ -5902,6 +6152,7 @@ mod paimon_state {
             &[(restored_dir, manifest.snapshot_id)],
             0..=127,
             true,
+            0,
         )
         .unwrap();
         let mut restored =
@@ -5964,6 +6215,36 @@ mod paimon_state {
     }
 
     #[test]
+    fn paimon_normalizer_matches_memory_with_ttl() {
+        let dir = temp_dir("norm-ttl-parity");
+        let codec = NormalizerStateCodec::new(vec![DataType::Int64, DataType::Int64]);
+        let store = PaimonNormalizerStore::create(ttl_config(&dir, 1000), codec).unwrap();
+        let mut paimon =
+            ChangelogNormalizer::new(vec![0], true).with_state_ttl(1000).with_backend(store);
+        let mut memory = ChangelogNormalizer::new(vec![0], true).with_state_ttl(1000);
+
+        // An unchanged row re-emits under TTL (the suppression is off), a remove of an expired
+        // key emits nothing, and a put after expiry restarts as a fresh insert.
+        let bundles: Vec<(RecordBatch, i64)> = vec![
+            (changelog_batch(vec![1, 2], vec![10, 20], vec![0, 0]), 1000),
+            (changelog_batch(vec![1], vec![10], vec![2]), 1500),
+            (changelog_batch(vec![2], vec![0], vec![3]), 2500),
+            (changelog_batch(vec![1], vec![12], vec![0]), 2600),
+        ];
+        for (i, (bundle, now)) in bundles.iter().enumerate() {
+            paimon.store_mut().set_clock(*now);
+            let memory_out = memory.push(bundle, *now).unwrap();
+            let paimon_out = paimon.push(bundle, *now).unwrap();
+            assert_eq!(memory_out.num_rows(), paimon_out.num_rows(), "bundle {i}");
+            if memory_out.num_rows() > 0 {
+                assert_same_output(&memory_out, &paimon_out);
+            }
+            let link = temp_dir(&format!("norm-ttl-parity-cp{i}"));
+            paimon.store_mut().checkpoint().unwrap();
+        }
+    }
+
+    #[test]
     fn paimon_normalizer_restores_and_deletes_hydrated_rows() {
         let dir = temp_dir("norm-restore-src");
         let mut normalizer = paimon_normalizer(&dir);
@@ -5981,6 +6262,7 @@ mod paimon_state {
             &[(restored_dir, manifest.snapshot_id)],
             0..=127,
             true,
+            0,
         )
         .unwrap();
         let mut restored = ChangelogNormalizer::new(vec![0], true).with_backend(store);
@@ -6416,6 +6698,7 @@ mod paimon_state {
             &[(restored, manifest.snapshot_id)],
             0..=127,
             false,
+            0,
         )
         .err()
         .expect("clip restore without a compactor must fail closed");
@@ -6490,6 +6773,7 @@ mod paimon_state {
                 &[(restored, manifest.snapshot_id)],
                 0..=127,
                 true,
+                0,
             )
             .unwrap(),
         );

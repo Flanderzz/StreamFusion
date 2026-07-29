@@ -39,6 +39,23 @@ class FlinkPaimonStateBackendSqlHarnessTest {
   }
 
   @Test
+  void groupBySumWithTtlOnPaimonBackendMatchesHost() throws Exception {
+    // Idle-state TTL no longer forces the memory fallback: the store carries the last-write
+    // timestamps in the state table's trailing ts column. 1h retention — nothing expires
+    // in-test; the operator-harness TTL test covers expiry and proves the Paimon route (its
+    // snapshot is an incremental Paimon handle). This pins the end-to-end SQL result.
+    Path input = Files.createTempDirectory("paimon-ttl-sum-in");
+    writeInput(input);
+    NativeParity.assertChangelogParity(
+        () -> {
+          TableEnvironment tEnv = paimonEnvironment(input);
+          tEnv.getConfig().set("table.exec.state.ttl", "1 h");
+          return tEnv;
+        },
+        "SELECT k, SUM(v) AS total, COUNT(*) AS c FROM t GROUP BY k");
+  }
+
+  @Test
   void proctimeDeduplicationOnPaimonBackendMatchesHost() throws Exception {
     Path input = Files.createTempDirectory("paimon-dedup-in");
     writeInput(input);

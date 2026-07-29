@@ -39,6 +39,7 @@ impl PaimonOverStore {
             file_format: config.file_format.clone(),
             file_compression: config.file_compression.clone(),
             deletion_vectors: config.deletion_vectors,
+            ttl_ms: config.ttl_ms,
         }
     }
 
@@ -112,7 +113,7 @@ impl PaimonOverStore {
                 && store.folds.adopt_all(&fold_sources[0].0, fold_sources[0].1)?;
             if !adopted {
                 let fold_fields = store.folds_arrow_fields();
-                store.folds.clip_from_sources(fold_sources, key_groups, &fold_fields)?;
+                store.folds.clip_from_sources(fold_sources, key_groups, &fold_fields, crate::state::StateTtl::disabled())?;
             }
         }
         Ok(store)
