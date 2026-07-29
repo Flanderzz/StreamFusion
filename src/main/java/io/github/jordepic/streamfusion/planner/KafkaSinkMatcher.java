@@ -61,6 +61,12 @@ final class KafkaSinkMatcher {
   }
 
   static Planned plan(StreamPhysicalSink sink) {
+    // Flink materializes an out-of-order upsert changelog with a SinkUpsertMaterializer (a stateful
+    // operator baked into its sink translation); substituting the sink would silently drop it.
+    if (sink.upsertMaterialize()) {
+      return Planned.fallback(
+          "an upsert-materialized sink (SinkUpsertMaterializer) is not natively reproduced");
+    }
     if (sink.abilitySpecs().length != 0) {
       SinkAbilitySpec spec = sink.abilitySpecs()[0];
       return Planned.fallback("sink ability " + spec.getClass().getSimpleName());

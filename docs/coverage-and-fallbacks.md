@@ -489,6 +489,9 @@ Flink applies no idle-state TTL there.
   TINYINT/SMALLINT/INT/BIGINT, FLOAT/DOUBLE, CHAR/VARCHAR, BINARY/VARBINARY, DECIMAL, DATE, TIME,
   TIMESTAMP, and TIMESTAMP_LTZ (SQL or ISO-8601), including `encode.ignore-null-fields`. Every sink
   fallback cause:
+  - an upsert-materialized sink — when Flink decides the upsert changelog arrives out of order it
+    bakes a stateful `SinkUpsertMaterializer` into its own sink translation, which a substituted
+    sink would silently drop;
   - a non-JSON value format or multiple/dynamic topics; a keyed ordinary `kafka` table; an
     `upsert-kafka` table without JSON key and value formats; or an explicit key/value projection,
     key prefix, or `EXCEPT_KEY` value projection;

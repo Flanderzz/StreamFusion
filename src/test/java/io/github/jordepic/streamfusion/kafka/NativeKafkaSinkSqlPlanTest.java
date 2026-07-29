@@ -114,6 +114,38 @@ class NativeKafkaSinkSqlPlanTest {
     assertTrue(plan.contains("native-kafka-exactly-once-sink"), plan);
   }
 
+  @Test
+  void upsertMaterializedSinkKeepsHostSerialization() {
+    // When Flink materializes an out-of-order upsert changelog (SinkUpsertMaterializer), the
+    // materializer is baked into its sink translation — substituting the sink would drop it, so the
+    // matcher must decline. FORCE makes the materialization deterministic for the test.
+    StreamTableEnvironment table = environment();
+    table.getConfig().set("table.exec.sink.upsert-materialize", "FORCE");
+    table.executeSql(
+        "CREATE TABLE src (id BIGINT) "
+            + "WITH ('connector' = 'datagen', 'number-of-rows' = '10')");
+    table.executeSql(
+        "CREATE TABLE output (id BIGINT, total BIGINT, PRIMARY KEY (id) NOT ENFORCED) WITH ("
+            + "'connector' = 'upsert-kafka', "
+            + "'topic' = 'output', "
+            + "'properties.bootstrap.servers' = 'broker:9092', "
+            + "'key.format' = 'json', "
+            + "'value.format' = 'json')");
+
+    PhysicalPlanScan scan = NativePlanner.install(table);
+    String plan =
+        table.explainSql(
+            "INSERT INTO output SELECT id, COUNT(*) FROM src GROUP BY id",
+            ExplainDetail.JSON_EXECUTION_PLAN);
+
+    assertFalse(plan.contains("NativeKafkaSink"), plan);
+    assertTrue(plan.contains("SinkMaterializer"), plan);
+    assertTrue(
+        scan.fallbackReasons().stream()
+            .anyMatch(reason -> reason.contains("upsert-materialized sink")),
+        scan::explainSummary);
+  }
+
   private static StreamTableEnvironment environment() {
     StreamExecutionEnvironment environment = StreamExecutionEnvironment.getExecutionEnvironment();
     environment.setParallelism(1);
