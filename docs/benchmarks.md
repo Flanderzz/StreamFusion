@@ -434,6 +434,17 @@ join, and the group/`DISTINCT` and windowed (tumbling/hopping/cumulative/session
 buffer their state as memcomparable arrow-row bytes (à la RisingWave's value-encoded state + Arroyo's
 `RowConverter`), not boxed `Vec<ScalarValue>`.
 
+### State-TTL fast path (2026-07-29)
+
+The idle-state TTL work (`table.exec.state.ttl`, see `docs/coverage-and-fallbacks.md`) threads a
+clock argument through every stateful ingest call and adds one predicted-false branch per key
+touch when retention is off. A before/after A/B on the stateful generator rungs (2M events,
+release build, min over two runs per side, baseline = the last pre-TTL commit) showed no
+TTL-off regression: q3 +4.5%, q15 ±0%, q18 −4%, q19 +6% — all inside this rig's documented ±7%
+noise band (q19's spread between two same-binary runs alone was 39%). With retention on, the
+per-value timestamps add 8 bytes per stored value/entry and expiry adds a lazy check per key
+touch plus a full sweep at most once per retention period.
+
 ### Current release matrix (2026-07-13)
 
 Run with `SF_BENCHMARK=true SF_MATRIX_FLUSS=true mvn -pl :streamfusion-runtime test -Pbench

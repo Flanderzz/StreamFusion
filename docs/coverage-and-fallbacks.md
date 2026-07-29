@@ -218,33 +218,33 @@ array`, is **not** here: Flink rejects it too, so we're at parity.)
 
 ### 2. Per-operator matcher declines (exact conditions)
 
-**Idle-state TTL** (`table.exec.state.ttl` ≠ 0): the non-windowed `GROUP BY` — single-phase and
-the two-phase global merge (the local half is transient, so TTL lives on the global) —
-`ChangelogNormalize`, deduplication (all four shapes), the regular
-join (per-side retention — each side's rows expire independently under its own TTL), and
-Top-N (all three rankers — append-only, retracting, and update-fast) and LIMIT (which reuses the
-Top-N operator) run it
-**natively**: Flink's exact StateTtlConfig semantics (last-write timestamps,
-expired-reads-as-absent with the fresh `+I` restart, retractions and tombstones against expired
-state dropped, and the unchanged-update suppression disabled — the join and the rank functions
-have no such suppression to disable), with the `STATE_TTL` hint honored over the job-wide
-retention (aggregates, and per side on the join — Flink defines no such hint on
-normalize, deduplicate, or rank). TTL granularity follows each ranker's Flink state shape: the
-append-only ranker expires per sort-key list (every list write refreshes all its tie rows), the
-update-fast one per row-key entry, and the retracting one expires the whole per-partition buffer
-on a clock refreshed by every record — modeling Flink's per-record `SortedMap` rewrite, whose TTL
-governs the partition in practice. The watermark-buffered rowtime keep-first dedup TTLs only its
-emitted markers, exactly as Flink does: the buffered candidate mirrors Flink's deliberately
-un-TTL'd timer state (the watermark cleans it up; expiring it early would lose data), and the
-marker — written once, when the key fires, never refreshed — expires a fixed retention after the
-firing, letting the key emit a second first row. Every other stateful operator declines
-a nonzero retention: with a TTL the host expires idle keys and stops suppressing unchanged
-updates — semantics those native operators do not yet reproduce. For the temporal join and OVER
-the decline is permanent (Flink expires their state on per-key 1.5×-retention cleanup timers, a
-coarser scheme than per-value TTL); for the rest it lifts as native TTL support lands. Window
-operators and the interval join are unaffected — Flink applies no idle-state TTL there. Under the
-Paimon state backend a TTL'd operator keeps the memory checkpoint route until the persistent
-shape carries timestamps.
+**Idle-state TTL** (`table.exec.state.ttl` ≠ 0) runs **natively** on every operator Flink applies
+`StateTtlConfig` to: the non-windowed `GROUP BY` (single-phase and the two-phase global merge —
+the local half is transient), `ChangelogNormalize`, deduplication (all four shapes), the regular
+join, and Top-N (all three rankers) plus LIMIT (which reuses the Top-N operator). The semantics
+are Flink's exactly: every stored value carries its last-**write** wall-clock timestamp (reads
+never refresh), a value is expired at `last_write + ttl` inclusive, expired state reads as absent
+and is deleted on read — the next row restarts as a fresh `+I`, retractions and tombstones against
+expired state emit nothing — and with retention on the unchanged-update suppression is disabled
+(the join and rank functions have none to disable). Expiry itself never emits anything; keys never
+touched again are reclaimed by a silent once-per-retention sweep. The `STATE_TTL` hint overrides
+the job-wide retention where Flink defines it: on aggregates, and per side on the join (each
+side's rows expire independently under its own TTL).
+
+Expiry granularity follows each operator's Flink state shape. The join expires per stored row.
+The append-only ranker expires per sort-key list (every list write refreshes all its tie rows),
+the update-fast one per row-key entry, and the retracting one the whole per-partition buffer on a
+clock refreshed by every record — modeling Flink's per-record `SortedMap` rewrite (divergences/28
+records this and the other deliberate mechanical divergences). The watermark-buffered rowtime
+keep-first dedup TTLs only its emitted markers, exactly as Flink does: the buffered candidate
+mirrors Flink's deliberately un-TTL'd timer state (the watermark cleans it up; expiring it early
+would lose data), and the marker — written once when the key fires, never refreshed — expires a
+fixed retention after the firing, letting the key emit a second first row.
+
+Only the temporal join and OVER decline a nonzero retention, permanently: Flink expires their
+state on per-key 1.5×-retention cleanup timers, a coarser scheme than per-value TTL. Window
+operators and the interval join are unaffected — Flink applies no idle-state TTL there. TTL works
+on both state backends; see §(c) for the persistent-backend mechanics.
 
 - **OVER** — idle-state TTL ≠ 0 (permanent, above); a frame not of the form `… PRECEDING .. CURRENT ROW` (a `ROWS`/`RANGE` lower bound that
   is not a constant preceding offset); a bounded-RANGE frame over a proctime order (wall-clock
@@ -657,6 +657,23 @@ file already uploaded by a completed checkpoint is referenced, not re-uploaded. 
 adopts the table's files wholesale; rescale clips each source by key-group range at recovery (the
 tables default to one bucket per subtask — the RocksDB shape). JVM-side keyed state in the same job
 (fallback operators, timers) runs unchanged on the wrapped hashmap backend.
+
+**Idle-state TTL on this backend** mirrors Flink-on-RocksDB's layering. A TTL'd state table
+carries the last-write timestamp co-located with the value (a trailing `ts` BIGINT column, present
+only while retention is on — TTL-off tables keep the pre-TTL schema); the read path is the source
+of truth for expiry — an expired committed row hydrates as absent and is tombstoned at the next
+barrier — and the checkpoint file protocol is TTL-blind (expired rows inside shared files are
+logical garbage until compaction supersedes them). Physical cleanup belongs to the deployed state
+compactor, which applies Paimon's record-level expiry as dynamic per-session options, padded to
+the next whole second plus one so a physical drop always lands strictly after the row's logical
+expiry, plus a periodic full compaction for cold files (the `periodicCompactionSeconds` analog).
+Restores migrate across a TTL flip: enabling retention stamps existing rows at restore time (a
+full retention from now), disabling it sheds the timestamps. Timestamps are absolute epoch millis,
+so a job restored after downtime longer than the retention expires the affected keys on first
+touch — silently, like everything else about expiry. Two shapes stay conservative: the update-fast
+ranker has no persistent shape (memory checkpoint route, TTL'd there), and the retracting ranker
+advertises no retention to the compactor — its whole-buffer clock lives on the head row alone, so
+per-row physical cleanup would be unsound; its expiry is read-side only.
 
 What runs on the Paimon backend today, and every condition that keeps an operator on memory state
 (memory state remains correct — these are not query fallbacks, and the query still accelerates;
