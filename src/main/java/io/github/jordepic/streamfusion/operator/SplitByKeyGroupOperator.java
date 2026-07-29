@@ -51,6 +51,7 @@ public class SplitByKeyGroupOperator extends AbstractStreamOperator<ArrowBatch>
 
   @Override
   public void processElement(StreamRecord<ArrowBatch> element) {
+    ColumnarRecordMetrics.countIngested(getMetricGroup(), element.getValue().rowCount());
     VectorSchemaRoot in = element.getValue().root();
     BufferAllocator inAllocator =
         in.getFieldVectors().isEmpty() ? allocator : in.getFieldVectors().get(0).getAllocator();
@@ -80,7 +81,7 @@ public class SplitByKeyGroupOperator extends AbstractStreamOperator<ArrowBatch>
           }
           VectorSchemaRoot sub =
               Data.importVectorSchemaRoot(allocator, outArray, outSchema, dictionaries);
-          output.collect(new StreamRecord<>(new ArrowBatch(sub, channel)));
+          ColumnarRecordMetrics.emit(output, getMetricGroup(), new ArrowBatch(sub, channel));
         }
       }
     } finally {

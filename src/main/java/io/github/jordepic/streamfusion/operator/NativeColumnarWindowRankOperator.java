@@ -216,6 +216,7 @@ public class NativeColumnarWindowRankOperator extends AbstractNativeStatefulOper
 
   @Override
   public void processElement(StreamRecord<ArrowBatch> element) {
+    ColumnarRecordMetrics.countIngested(getMetricGroup(), element.getValue().rowCount());
     VectorSchemaRoot in = element.getValue().root();
     BufferAllocator inAllocator =
         in.getFieldVectors().isEmpty() ? allocator : in.getFieldVectors().get(0).getAllocator();
@@ -297,7 +298,7 @@ public class NativeColumnarWindowRankOperator extends AbstractNativeStatefulOper
         // (window_time stays the UTC rowtime). Same toLocal shift as the window aggregate.
         shiftToLocal(out, windowStartColumn);
         shiftToLocal(out, windowEndColumn);
-        output.collect(new StreamRecord<>(new ArrowBatch(out)));
+        ColumnarRecordMetrics.emit(output, getMetricGroup(), new ArrowBatch(out));
       } else {
         out.close(); // no window closed at this threshold
       }

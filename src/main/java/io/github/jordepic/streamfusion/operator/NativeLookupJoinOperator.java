@@ -66,6 +66,7 @@ public class NativeLookupJoinOperator extends AbstractStreamOperator<ArrowBatch>
 
   @Override
   public void processElement(StreamRecord<ArrowBatch> element) throws Exception {
+    ColumnarRecordMetrics.countIngested(getMetricGroup(), element.getValue().rowCount());
     // The runner reuses its joined-row objects across emissions, but each is only *read* during
     // collect — writing its fields into the Arrow builders right there needs no defensive copy
     // (the per-row RowDataSerializer.copy was ~27% of q13's lookup-path CPU) and no gather list.
@@ -99,6 +100,6 @@ public class NativeLookupJoinOperator extends AbstractStreamOperator<ArrowBatch>
     }
     // Insert-only: a processing-time lookup requires an append-only probe, so no row-kind column.
     writer.finish();
-    output.collect(new StreamRecord<>(new ArrowBatch(out)));
+    ColumnarRecordMetrics.emit(output, getMetricGroup(), new ArrowBatch(out));
   }
 }

@@ -67,6 +67,7 @@ public class ParquetPartitionSplitOperator extends AbstractStreamOperator<Partit
 
   @Override
   public void processElement(StreamRecord<ArrowBatch> element) throws Exception {
+    ColumnarRecordMetrics.countIngested(getMetricGroup(), element.getValue().rowCount());
     if (partitionKeys.isEmpty()) {
       output.collect(
           new StreamRecord<>(new PartitionedArrowBatch(element.getValue().root(), "")));

@@ -82,6 +82,7 @@ public class NativeColumnarLocalGroupAggregateOperator extends AbstractStreamOpe
 
   @Override
   public void processElement(StreamRecord<ArrowBatch> element) {
+    ColumnarRecordMetrics.countIngested(getMetricGroup(), element.getValue().rowCount());
     VectorSchemaRoot in = element.getValue().root();
     int rows = in.getRowCount();
     miniBatchMetrics.onPhysicalBatch();
@@ -162,7 +163,7 @@ public class NativeColumnarLocalGroupAggregateOperator extends AbstractStreamOpe
       int outputRows = partial.getRowCount();
       miniBatchMetrics.onFlush(reason, outputRows, outputRows, transientBytes);
       if (partial.getRowCount() > 0) {
-        output.collect(new StreamRecord<>(new ArrowBatch(partial)));
+        ColumnarRecordMetrics.emit(output, getMetricGroup(), new ArrowBatch(partial));
       } else {
         partial.close();
       }

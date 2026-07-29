@@ -99,7 +99,7 @@ public abstract class NativeRowWindowOperatorCore extends NativeWindowOperatorCo
           fillLocalTimestamps(ends, out.getVector(base + 3), n, 0L); // proctime marker (projected away)
         }
         out.setRowCount(n);
-        output.collect(new StreamRecord<>(new ArrowBatch(out)));
+        ColumnarRecordMetrics.emit(output, getMetricGroup(), new ArrowBatch(out));
       }
     }
   }

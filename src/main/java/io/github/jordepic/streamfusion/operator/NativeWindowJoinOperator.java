@@ -253,6 +253,7 @@ public class NativeWindowJoinOperator extends AbstractNativeStatefulOperator<Arr
 
   @Override
   public void processElement1(StreamRecord<ArrowBatch> element) {
+    ColumnarRecordMetrics.countIngested(getMetricGroup(), element.getValue().rowCount());
     buffer(element.getValue(), true);
     onProctimeInput();
     publishStateBytes();
@@ -260,6 +261,7 @@ public class NativeWindowJoinOperator extends AbstractNativeStatefulOperator<Arr
 
   @Override
   public void processElement2(StreamRecord<ArrowBatch> element) {
+    ColumnarRecordMetrics.countIngested(getMetricGroup(), element.getValue().rowCount());
     buffer(element.getValue(), false);
     onProctimeInput();
     publishStateBytes();
@@ -356,7 +358,7 @@ public class NativeWindowJoinOperator extends AbstractNativeStatefulOperator<Arr
       }
       VectorSchemaRoot out = Data.importVectorSchemaRoot(allocator, array, schema, dictionaries);
       if (out.getRowCount() > 0) {
-        output.collect(new StreamRecord<>(new ArrowBatch(out)));
+        ColumnarRecordMetrics.emit(output, getMetricGroup(), new ArrowBatch(out));
       } else {
         out.close(); // no windows closed (or no matches) at this threshold
       }

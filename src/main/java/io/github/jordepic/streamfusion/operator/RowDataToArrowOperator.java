@@ -91,7 +91,7 @@ public class RowDataToArrowOperator extends AbstractStreamOperator<ArrowBatch>
     }
     List<RowData> rows = projector == null ? buffer : projected();
     VectorSchemaRoot root = RowDataArrowConverter.write(rows, rowType, allocator, carryRowKind);
-    output.collect(new StreamRecord<>(new ArrowBatch(root)));
+    ColumnarRecordMetrics.emit(output, getMetricGroup(), new ArrowBatch(root));
     buffer.clear();
   }
 

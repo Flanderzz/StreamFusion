@@ -80,6 +80,7 @@ public class NativeAsyncLookupJoinOperator extends AbstractStreamOperator<ArrowB
 
   @Override
   public void processElement(StreamRecord<ArrowBatch> element) throws Exception {
+    ColumnarRecordMetrics.countIngested(getMetricGroup(), element.getValue().rowCount());
     // Materialise the probe rows off the Arrow buffers before the lookup wait: the reader hands back
     // rows backed by the vectors, which are freed when the batch closes — and the runner's joined
     // rows reference the probe row object, so each row must be a distinct stable copy.
@@ -110,7 +111,7 @@ public class NativeAsyncLookupJoinOperator extends AbstractStreamOperator<ArrowB
     }
     // Insert-only: a processing-time lookup requires an append-only probe, so no row-kind column.
     VectorSchemaRoot out = RowDataArrowConverter.write(outRows, outputType, allocator, false);
-    output.collect(new StreamRecord<>(new ArrowBatch(out)));
+    ColumnarRecordMetrics.emit(output, getMetricGroup(), new ArrowBatch(out));
   }
 
   /** The runner completes each row's joined results through Flink's {@link ResultFuture} shape. */

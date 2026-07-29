@@ -159,6 +159,7 @@ public class NativeColumnarWindowAggregateOperator extends NativeRowWindowOperat
 
   @Override
   public void processElement(StreamRecord<ArrowBatch> element) {
+    ColumnarRecordMetrics.countIngested(getMetricGroup(), element.getValue().rowCount());
     try (var in = element.getValue().root()) {
       if (proctime) {
         long now = getProcessingTimeService().getCurrentProcessingTime();

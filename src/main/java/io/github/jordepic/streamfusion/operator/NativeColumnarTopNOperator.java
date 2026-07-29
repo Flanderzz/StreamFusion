@@ -223,6 +223,7 @@ public class NativeColumnarTopNOperator extends AbstractNativeStatefulOperator<A
 
   @Override
   public void processElement(StreamRecord<ArrowBatch> element) {
+    ColumnarRecordMetrics.countIngested(getMetricGroup(), element.getValue().rowCount());
     VectorSchemaRoot in = element.getValue().root();
     if (coalescer != null) {
       coalescer.add(in);
@@ -301,7 +302,7 @@ public class NativeColumnarTopNOperator extends AbstractNativeStatefulOperator<A
       VectorSchemaRoot out =
           Data.importVectorSchemaRoot(allocator, outArray, outSchema, dictionaries);
       if (out.getRowCount() > 0) {
-        output.collect(new StreamRecord<>(new ArrowBatch(out)));
+        ColumnarRecordMetrics.emit(output, getMetricGroup(), new ArrowBatch(out));
       } else {
         out.close();
       }
@@ -363,7 +364,7 @@ public class NativeColumnarTopNOperator extends AbstractNativeStatefulOperator<A
       int outputRows = out.getRowCount();
       miniBatchMetrics.onFlush(reason, outputRows, touchedPartitions, transientBytes);
       if (outputRows > 0) {
-        output.collect(new StreamRecord<>(new ArrowBatch(out)));
+        ColumnarRecordMetrics.emit(output, getMetricGroup(), new ArrowBatch(out));
       } else {
         out.close();
       }

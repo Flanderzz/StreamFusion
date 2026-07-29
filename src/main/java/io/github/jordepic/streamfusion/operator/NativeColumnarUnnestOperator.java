@@ -46,6 +46,7 @@ public class NativeColumnarUnnestOperator extends AbstractStreamOperator<ArrowBa
 
   @Override
   public void processElement(StreamRecord<ArrowBatch> element) {
+    ColumnarRecordMetrics.countIngested(getMetricGroup(), element.getValue().rowCount());
     VectorSchemaRoot in = element.getValue().root();
     BufferAllocator inAllocator =
         in.getFieldVectors().isEmpty() ? allocator : in.getFieldVectors().get(0).getAllocator();
@@ -68,6 +69,6 @@ public class NativeColumnarUnnestOperator extends AbstractStreamOperator<ArrowBa
     } finally {
       in.close();
     }
-    output.collect(new StreamRecord<>(new ArrowBatch(unnested)));
+    ColumnarRecordMetrics.emit(output, getMetricGroup(), new ArrowBatch(unnested));
   }
 }

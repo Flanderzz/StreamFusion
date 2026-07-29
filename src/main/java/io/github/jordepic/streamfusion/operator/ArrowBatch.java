@@ -92,6 +92,14 @@ public final class ArrowBatch {
     return destination;
   }
 
+  /**
+   * How many rows the batch carries, without taking it.
+   *
+   * <p>{@link #root()} is a hand-off, not an accessor — under a share it spends one of the batch's
+   * consumers and returns that consumer's own retained view. Anything that only wants to measure a
+   * batch (metrics, logging) must ask here instead, or it silently takes a share a real consumer
+   * was owed and leaks the view nobody closes.
+   */
   public int rowCount() {
     return root.getRowCount();
   }

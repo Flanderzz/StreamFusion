@@ -228,11 +228,13 @@ public class NativeColumnarUpdatingJoinOperator
 
   @Override
   public void processElement1(StreamRecord<ArrowBatch> element) {
+    ColumnarRecordMetrics.countIngested(getMetricGroup(), element.getValue().rowCount());
     ingestSide(element.getValue().root(), true);
   }
 
   @Override
   public void processElement2(StreamRecord<ArrowBatch> element) {
+    ColumnarRecordMetrics.countIngested(getMetricGroup(), element.getValue().rowCount());
     ingestSide(element.getValue().root(), false);
   }
 
@@ -324,7 +326,7 @@ public class NativeColumnarUpdatingJoinOperator
       VectorSchemaRoot out =
           Data.importVectorSchemaRoot(allocator, outArray, outSchema, dictionaries);
       if (out.getRowCount() > 0) {
-        output.collect(new StreamRecord<>(new ArrowBatch(out)));
+        ColumnarRecordMetrics.emit(output, getMetricGroup(), new ArrowBatch(out));
       } else {
         out.close();
       }
@@ -388,7 +390,7 @@ public class NativeColumnarUpdatingJoinOperator
       int outputRows = out.getRowCount();
       miniBatchMetrics.onFlush(reason, outputRows, touchedKeys, transientBytes);
       if (outputRows > 0) {
-        output.collect(new StreamRecord<>(new ArrowBatch(out)));
+        ColumnarRecordMetrics.emit(output, getMetricGroup(), new ArrowBatch(out));
       } else {
         out.close();
       }

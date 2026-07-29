@@ -173,6 +173,7 @@ public class NativeColumnarSessionWindowAggregateOperator extends NativeRowWindo
 
   @Override
   public void processElement(StreamRecord<ArrowBatch> element) {
+    ColumnarRecordMetrics.countIngested(getMetricGroup(), element.getValue().rowCount());
     try (VectorSchemaRoot in = element.getValue().root()) {
       if (proctime) {
         long now = getProcessingTimeService().getCurrentProcessingTime();

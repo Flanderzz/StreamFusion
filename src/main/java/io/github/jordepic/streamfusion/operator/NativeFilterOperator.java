@@ -80,6 +80,7 @@ public class NativeFilterOperator extends AbstractStreamOperator<ArrowBatch>
 
   @Override
   public void processElement(StreamRecord<ArrowBatch> element) {
+    ColumnarRecordMetrics.countIngested(getMetricGroup(), element.getValue().rowCount());
     VectorSchemaRoot in = element.getValue().root();
     // The input batch's buffers belong to the upstream operator's allocator; the C Data export must
     // use that same allocator (buffers can only associate within one allocator root). The operator's
@@ -102,7 +103,7 @@ public class NativeFilterOperator extends AbstractStreamOperator<ArrowBatch>
     } finally {
       in.close(); // the input batch is consumed
     }
-    output.collect(new StreamRecord<>(new ArrowBatch(project(filtered))));
+    ColumnarRecordMetrics.emit(output, getMetricGroup(), new ArrowBatch(project(filtered)));
   }
 
   /**

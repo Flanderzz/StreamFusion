@@ -65,6 +65,7 @@ public class NativeColumnarWatermarkAssignerOperator extends AbstractStreamOpera
 
   @Override
   public void processElement(StreamRecord<ArrowBatch> element) {
+    ColumnarRecordMetrics.countIngested(getMetricGroup(), element.getValue().rowCount());
     // Taking the root disarms the batch's abandoned-record backstop, so the forward-as-is paths
     // below re-wrap it in a fresh ArrowBatch rather than forwarding the disarmed element.
     VectorSchemaRoot root = element.getValue().root();
@@ -92,13 +93,13 @@ public class NativeColumnarWatermarkAssignerOperator extends AbstractStreamOpera
     for (int i = 0; i < rows; i++) {
       currentWatermark = Math.max(currentWatermark, toMillis(rt.get(i), type) - delayMillis);
       if (currentWatermark - lastWatermark > watermarkInterval) {
-        output.collect(new StreamRecord<>(new ArrowBatch(root.slice(sliceStart, i - sliceStart + 1))));
+        ColumnarRecordMetrics.emit(output, getMetricGroup(), new ArrowBatch(root.slice(sliceStart, i - sliceStart + 1)));
         sliceStart = i + 1;
         advanceWatermark();
       }
     }
     if (sliceStart < rows) {
-      output.collect(new StreamRecord<>(new ArrowBatch(root.slice(sliceStart, rows - sliceStart))));
+      ColumnarRecordMetrics.emit(output, getMetricGroup(), new ArrowBatch(root.slice(sliceStart, rows - sliceStart)));
     }
     // The slices retain their own references to the shared buffers; release the original batch.
     root.close();

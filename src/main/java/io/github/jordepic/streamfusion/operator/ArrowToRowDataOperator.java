@@ -34,6 +34,7 @@ public class ArrowToRowDataOperator extends AbstractStreamOperator<RowData>
 
   @Override
   public void processElement(StreamRecord<ArrowBatch> element) {
+    ColumnarRecordMetrics.countIngested(getMetricGroup(), element.getValue().rowCount());
     try (VectorSchemaRoot root = element.getValue().root()) {
       ArrowReader reader = ArrowConversion.createArrowReader(root, rowType);
       TinyIntVector kinds = (TinyIntVector) root.getVector(RowDataArrowConverter.ROW_KIND_COLUMN);

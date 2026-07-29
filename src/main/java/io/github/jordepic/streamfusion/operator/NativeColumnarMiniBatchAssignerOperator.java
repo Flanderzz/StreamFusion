@@ -35,6 +35,7 @@ public class NativeColumnarMiniBatchAssignerOperator extends AbstractStreamOpera
 
   @Override
   public void processElement(StreamRecord<ArrowBatch> element) {
+    ColumnarRecordMetrics.countIngested(getMetricGroup(), element.getValue().rowCount());
     long now = getProcessingTimeService().getCurrentProcessingTime();
     long currentBatch = now - now % intervalMs;
     if (currentBatch > currentWatermark) {

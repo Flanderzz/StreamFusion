@@ -119,7 +119,7 @@ public class NativeBytesDecodeOperator extends AbstractStreamOperator<ArrowBatch
         VectorSchemaRoot out =
             Data.importVectorSchemaRoot(allocator, outArray, outSchema, NativeAllocator.DICTIONARIES);
         if (out.getRowCount() > 0) {
-          output.collect(new StreamRecord<>(new ArrowBatch(out)));
+          ColumnarRecordMetrics.emit(output, getMetricGroup(), new ArrowBatch(out));
         } else {
           out.close();
         }

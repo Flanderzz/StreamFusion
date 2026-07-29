@@ -57,6 +57,7 @@ public class NativeColumnarExpandOperator extends AbstractStreamOperator<ArrowBa
 
   @Override
   public void processElement(StreamRecord<ArrowBatch> element) {
+    ColumnarRecordMetrics.countIngested(getMetricGroup(), element.getValue().rowCount());
     VectorSchemaRoot in = element.getValue().root();
     // The input batch's buffers belong to the upstream operator's allocator; the C Data export must
     // use that same allocator. The operator's own allocator owns only the imported result.
@@ -83,6 +84,6 @@ public class NativeColumnarExpandOperator extends AbstractStreamOperator<ArrowBa
     } finally {
       in.close(); // the input batch is consumed
     }
-    output.collect(new StreamRecord<>(new ArrowBatch(expanded)));
+    ColumnarRecordMetrics.emit(output, getMetricGroup(), new ArrowBatch(expanded));
   }
 }

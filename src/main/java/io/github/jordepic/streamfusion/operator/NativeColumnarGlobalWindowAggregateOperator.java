@@ -119,6 +119,7 @@ public class NativeColumnarGlobalWindowAggregateOperator extends NativeRowWindow
 
   @Override
   public void processElement(StreamRecord<ArrowBatch> element) {
+    ColumnarRecordMetrics.countIngested(getMetricGroup(), element.getValue().rowCount());
     VectorSchemaRoot in = element.getValue().root();
     // The partial batch's buffers belong to the upstream allocator; export with that allocator (C
     // Data buffers associate only within one allocator root), then fold it into the aggregator.

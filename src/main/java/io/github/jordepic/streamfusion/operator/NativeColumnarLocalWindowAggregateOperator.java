@@ -87,6 +87,7 @@ public class NativeColumnarLocalWindowAggregateOperator extends NativeWindowOper
 
   @Override
   public void processElement(StreamRecord<ArrowBatch> element) {
+    ColumnarRecordMetrics.countIngested(getMetricGroup(), element.getValue().rowCount());
     try (VectorSchemaRoot in = element.getValue().root()) {
       if (windowEndColumn >= 0) {
         updateColumnarAttached(
@@ -126,7 +127,7 @@ public class NativeColumnarLocalWindowAggregateOperator extends NativeWindowOper
 
   private void emitPartial(VectorSchemaRoot partial) {
     if (partial.getRowCount() > 0) {
-      output.collect(new StreamRecord<>(new ArrowBatch(partial)));
+      ColumnarRecordMetrics.emit(output, getMetricGroup(), new ArrowBatch(partial));
     } else {
       partial.close(); // nothing to emit; release the empty batch
     }

@@ -72,6 +72,7 @@ public class NativeColumnarTemporalSortOperator extends AbstractNativeStatefulOp
 
   @Override
   public void processElement(StreamRecord<ArrowBatch> element) {
+    ColumnarRecordMetrics.countIngested(getMetricGroup(), element.getValue().rowCount());
     VectorSchemaRoot in = element.getValue().root();
     BufferAllocator inAllocator =
         in.getFieldVectors().isEmpty() ? allocator : in.getFieldVectors().get(0).getAllocator();
@@ -95,7 +96,7 @@ public class NativeColumnarTemporalSortOperator extends AbstractNativeStatefulOp
           handle, mark.getTimestamp(), array.memoryAddress(), schema.memoryAddress());
       VectorSchemaRoot out = Data.importVectorSchemaRoot(allocator, array, schema, dictionaries);
       if (out.getRowCount() > 0) {
-        output.collect(new StreamRecord<>(new ArrowBatch(out)));
+        ColumnarRecordMetrics.emit(output, getMetricGroup(), new ArrowBatch(out));
       } else {
         out.close(); // nothing completed this watermark
       }

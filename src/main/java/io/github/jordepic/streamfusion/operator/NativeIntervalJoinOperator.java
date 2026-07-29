@@ -193,12 +193,14 @@ public class NativeIntervalJoinOperator extends AbstractNativeStatefulOperator<A
 
   @Override
   public void processElement1(StreamRecord<ArrowBatch> element) {
+    ColumnarRecordMetrics.countIngested(getMetricGroup(), element.getValue().rowCount());
     join(element.getValue(), true);
     publishStateBytes();
   }
 
   @Override
   public void processElement2(StreamRecord<ArrowBatch> element) {
+    ColumnarRecordMetrics.countIngested(getMetricGroup(), element.getValue().rowCount());
     join(element.getValue(), false);
     publishStateBytes();
   }
@@ -235,7 +237,7 @@ public class NativeIntervalJoinOperator extends AbstractNativeStatefulOperator<A
       }
       VectorSchemaRoot out = Data.importVectorSchemaRoot(allocator, outArray, outSchema, dictionaries);
       if (out.getRowCount() > 0) {
-        output.collect(new StreamRecord<>(new ArrowBatch(out)));
+        ColumnarRecordMetrics.emit(output, getMetricGroup(), new ArrowBatch(out));
       } else {
         out.close(); // no matches for this batch
       }
@@ -288,7 +290,7 @@ public class NativeIntervalJoinOperator extends AbstractNativeStatefulOperator<A
           handle, threshold, outArray.memoryAddress(), outSchema.memoryAddress());
       VectorSchemaRoot out = Data.importVectorSchemaRoot(allocator, outArray, outSchema, dictionaries);
       if (out.getRowCount() > 0) {
-        output.collect(new StreamRecord<>(new ArrowBatch(out)));
+        ColumnarRecordMetrics.emit(output, getMetricGroup(), new ArrowBatch(out));
       } else {
         out.close();
       }

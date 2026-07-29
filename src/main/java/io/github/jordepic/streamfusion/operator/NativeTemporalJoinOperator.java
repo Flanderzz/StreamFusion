@@ -198,12 +198,14 @@ public class NativeTemporalJoinOperator extends AbstractNativeStatefulOperator<A
 
   @Override
   public void processElement1(StreamRecord<ArrowBatch> element) {
+    ColumnarRecordMetrics.countIngested(getMetricGroup(), element.getValue().rowCount());
     buffer(element.getValue(), true);
     publishStateBytes();
   }
 
   @Override
   public void processElement2(StreamRecord<ArrowBatch> element) {
+    ColumnarRecordMetrics.countIngested(getMetricGroup(), element.getValue().rowCount());
     buffer(element.getValue(), false);
     publishStateBytes();
   }
@@ -246,7 +248,7 @@ public class NativeTemporalJoinOperator extends AbstractNativeStatefulOperator<A
       Native.advanceTemporalJoiner(handle, watermark, array.memoryAddress(), schema.memoryAddress());
       VectorSchemaRoot out = Data.importVectorSchemaRoot(allocator, array, schema, dictionaries);
       if (out.getRowCount() > 0) {
-        output.collect(new StreamRecord<>(new ArrowBatch(out)));
+        ColumnarRecordMetrics.emit(output, getMetricGroup(), new ArrowBatch(out));
       } else {
         out.close(); // no probe rows resolvable at this watermark
       }
