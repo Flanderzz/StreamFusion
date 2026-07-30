@@ -45,6 +45,7 @@ public class NativeTemporalJoinOperator extends AbstractNativeStatefulOperator<A
   private final RowType leftType;
   private final RowType rightType;
   private final EncodedPredicate predicate;
+  private final long stateTtlMillis;
 
   public NativeTemporalJoinOperator(
       int[] leftKeys,
@@ -56,6 +57,7 @@ public class NativeTemporalJoinOperator extends AbstractNativeStatefulOperator<A
       RowType rightType,
       EncodedPredicate predicate,
       int[] keyTimestampPrecisions,
+      long stateTtlMillis,
       int maxParallelism) {
     super("temporal join", keyTimestampPrecisions, maxParallelism);
     this.leftKeys = leftKeys;
@@ -66,6 +68,7 @@ public class NativeTemporalJoinOperator extends AbstractNativeStatefulOperator<A
     this.leftType = leftType;
     this.rightType = rightType;
     this.predicate = predicate;
+    this.stateTtlMillis = stateTtlMillis;
   }
 
   @Override
@@ -75,15 +78,18 @@ public class NativeTemporalJoinOperator extends AbstractNativeStatefulOperator<A
 
   @Override
   protected PaimonNativeStateSupport resolvePaimonState(boolean rawStateRestored) {
+    // The Paimon shape does not carry per-key cleanup deadlines yet; a retention-bounded join
+    // keeps the memory route (the standard fallback for an unsupported shape).
     return resolvePaimon(
         rawStateRestored,
         () ->
-            withSchemas(
-                    (l, r) ->
-                        Native.paimonRowStateSupported(l) && Native.paimonRowStateSupported(r)
-                            ? 1L
-                            : 0L)
-                != 0);
+            stateTtlMillis == 0
+                && withSchemas(
+                        (l, r) ->
+                            Native.paimonRowStateSupported(l) && Native.paimonRowStateSupported(r)
+                                ? 1L
+                                : 0L)
+                    != 0);
   }
 
   @Override
@@ -141,6 +147,7 @@ public class NativeTemporalJoinOperator extends AbstractNativeStatefulOperator<A
                 predicate.boundLongs(),
                 predicate.doubles,
                 predicate.strings,
+                stateTtlMillis,
                 memoryBudgetBytes()));
   }
 
@@ -162,6 +169,8 @@ public class NativeTemporalJoinOperator extends AbstractNativeStatefulOperator<A
                 predicate.boundLongs(),
                 predicate.doubles,
                 predicate.strings,
+                stateTtlMillis,
+                getProcessingTimeService().getCurrentProcessingTime(),
                 snapshots,
                 memoryBudgetBytes()));
   }
@@ -218,10 +227,13 @@ public class NativeTemporalJoinOperator extends AbstractNativeStatefulOperator<A
     try (ArrowArray array = ArrowArray.allocateNew(inAllocator);
         ArrowSchema schema = ArrowSchema.allocateNew(inAllocator)) {
       Data.exportVectorSchemaRoot(inAllocator, in, dictionaries, array, schema);
+      // Flink's cleanup-timer clock: the processing-time service is System.currentTimeMillis in
+      // production and harness-controlled in tests, so expiry is deterministic to test.
+      long now = getProcessingTimeService().getCurrentProcessingTime();
       if (left) {
-        Native.pushLeftTemporalJoiner(handle, array.memoryAddress(), schema.memoryAddress());
+        Native.pushLeftTemporalJoiner(handle, array.memoryAddress(), schema.memoryAddress(), now);
       } else {
-        Native.pushRightTemporalJoiner(handle, array.memoryAddress(), schema.memoryAddress());
+        Native.pushRightTemporalJoiner(handle, array.memoryAddress(), schema.memoryAddress(), now);
       }
     } finally {
       in.close();
@@ -245,7 +257,12 @@ public class NativeTemporalJoinOperator extends AbstractNativeStatefulOperator<A
   private void advance(long watermark) {
     try (ArrowArray array = ArrowArray.allocateNew(allocator);
         ArrowSchema schema = ArrowSchema.allocateNew(allocator)) {
-      Native.advanceTemporalJoiner(handle, watermark, array.memoryAddress(), schema.memoryAddress());
+      Native.advanceTemporalJoiner(
+          handle,
+          watermark,
+          getProcessingTimeService().getCurrentProcessingTime(),
+          array.memoryAddress(),
+          schema.memoryAddress());
       VectorSchemaRoot out = Data.importVectorSchemaRoot(allocator, array, schema, dictionaries);
       if (out.getRowCount() > 0) {
         ColumnarRecordMetrics.emit(output, getMetricGroup(), new ArrowBatch(out));

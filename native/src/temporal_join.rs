@@ -1,5 +1,11 @@
 use crate::*;
 
+/// The raw-snapshot column carrying each key's cleanup DEADLINE (not a last-write timestamp, so
+/// not `TTL_TS_COLUMN`): the absolute wall-clock millis at which Flink's registered cleanup timer
+/// would fire and clear the key. Present only while retention cleaning is on, as a third framed
+/// section — a retention-off checkpoint stays byte-identical to the pre-TTL format.
+pub(crate) const CLEANUP_AT_COLUMN: &str = "__cleanup_at__";
+
 /// One buffered probe-side (left) row of a temporal join: its data values, its event time, and its
 /// changelog `RowKind` (forwarded onto the emitted joined row, as Flink does).
 pub(crate) struct LeftEntry {
@@ -40,6 +46,21 @@ pub(crate) struct TemporalJoiner {
     predicate: Option<JoinPredicate>,
     left_state: HashMap<GroupKey, Vec<LeftEntry>>,
     right_state: HashMap<GroupKey, BTreeMap<i64, (JoinRow, i8)>>,
+    /// Idle-state min retention millis (`table.exec.state.ttl`). Flink's temporal join does not use
+    /// per-value `StateTtlConfig`: it keeps ONE per-key processing-time cleanup deadline and, when
+    /// it fires, clears the key's entire state — both sides — silently. Cleaning is enabled iff
+    /// this is `> 1` (Flink's literal `minRetentionTime > 1`; a 1ms retention disables cleaning).
+    min_retention_ms: i64,
+    /// The planner-derived max retention, `min * 3 / 2` (Flink `TableConfigUtils`), saturating.
+    max_retention_ms: i64,
+    /// Per-key cleanup deadline (Flink's `"cleanup-timestamp"` ValueState plus its registered
+    /// timer): the key's state is observably gone once the wall clock reaches the deadline. A
+    /// lazy check at key touch plus the periodic sweep stands in for the timer — firing emits
+    /// nothing, so the substitution is invisible (divergences/28).
+    cleanup_state: HashMap<GroupKey, i64>,
+    /// When the last full deadline sweep ran; it reclaims keys never touched again, at most once
+    /// per min-retention period.
+    last_sweep_ms: i64,
     pub(crate) memory: OperatorMemory,
     /// Persistent-state mode: the probe rows and versioned build side live in the Paimon store;
     /// the in-memory maps stay empty, and firing rebuilds only the fired keys' version sets.
@@ -81,6 +102,10 @@ impl TemporalJoiner {
             predicate,
             left_state: HashMap::default(),
             right_state: HashMap::default(),
+            min_retention_ms: 0,
+            max_retention_ms: 0,
+            cleanup_state: HashMap::default(),
+            last_sweep_ms: 0,
             memory: OperatorMemory::unaccounted(),
             #[cfg(feature = "paimon-state")]
             backend: None,
@@ -94,6 +119,91 @@ impl TemporalJoiner {
     ) -> Self {
         self.key_timestamp_precisions = key_timestamp_precisions;
         self
+    }
+
+    /// Sets the idle-state retention (`table.exec.state.ttl`) in millis. The max deadline horizon
+    /// is derived natively as Flink's planner does — `minRetentionTime * 3 / 2`, saturating.
+    pub(crate) fn with_state_retention(mut self, min_retention_ms: i64) -> Self {
+        self.min_retention_ms = min_retention_ms.max(0);
+        self.max_retention_ms = self.min_retention_ms.saturating_mul(3) / 2;
+        self
+    }
+
+    /// Flink's exact enablement quirk: strictly greater than ONE millisecond, not zero.
+    fn cleaning_enabled(&self) -> bool {
+        self.min_retention_ms > 1
+    }
+
+    /// Flink's `registerProcessingCleanupTimer`: the deadline moves to `now + maxRetention` only
+    /// when the key has none, or the current one would land within a min-retention of now.
+    fn register_cleanup(&mut self, key: &GroupKey, now_ms: i64, grew: &mut isize, track: bool) {
+        match self.cleanup_state.get_mut(key) {
+            Some(deadline) => {
+                if now_ms.saturating_add(self.min_retention_ms) > *deadline {
+                    *deadline = now_ms.saturating_add(self.max_retention_ms);
+                }
+            }
+            None => {
+                if track {
+                    *grew += group_key_bytes(key) as isize;
+                }
+                self.cleanup_state
+                    .insert(key.clone(), now_ms.saturating_add(self.max_retention_ms));
+            }
+        }
+    }
+
+    /// Flink's `cleanupState`: drops the key's ENTIRE state — both sides and the deadline —
+    /// silently, returning the bytes reclaimed (0 when not tracking).
+    fn clear_key(&mut self, key: &GroupKey, track: bool) -> usize {
+        let mut freed = 0usize;
+        if let Some(entries) = self.left_state.remove(key) {
+            if track {
+                freed += group_key_bytes(key) + entries.iter().map(left_entry_bytes).sum::<usize>();
+            }
+        }
+        if let Some(versions) = self.right_state.remove(key) {
+            if track {
+                freed += group_key_bytes(key)
+                    + versions.values().map(|(row, _)| right_version_bytes(row)).sum::<usize>();
+            }
+        }
+        if self.cleanup_state.remove(key).is_some() && track {
+            freed += group_key_bytes(key);
+        }
+        freed
+    }
+
+    /// Lazy stand-in for the fired cleanup timer at a key touch: a timer registered at T fires
+    /// once processing time reaches T, so cleared state is observable at `now >= T`. Returns the
+    /// bytes reclaimed, or None when the deadline has not passed (or none is registered).
+    fn expire_if_due(&mut self, key: &GroupKey, now_ms: i64, track: bool) -> Option<usize> {
+        match self.cleanup_state.get(key) {
+            Some(&deadline) if now_ms >= deadline => Some(self.clear_key(key, track)),
+            _ => None,
+        }
+    }
+
+    /// Reclaims every key whose deadline passed with no further touch — the lazy check never sees
+    /// such a key again. Silent, at most once per min-retention period.
+    fn maybe_sweep(&mut self, now_ms: i64) {
+        if now_ms < self.last_sweep_ms.saturating_add(self.min_retention_ms) {
+            return;
+        }
+        let due: Vec<GroupKey> = self
+            .cleanup_state
+            .iter()
+            .filter(|(_, &deadline)| now_ms >= deadline)
+            .map(|(key, _)| key.clone())
+            .collect();
+        let track = self.memory.tracking();
+        let mut freed = 0usize;
+        for key in &due {
+            freed += self.clear_key(key, track);
+        }
+        self.memory.forget(freed);
+        self.memory.account_shrink();
+        self.last_sweep_ms = now_ms;
     }
 
     #[cfg(feature = "paimon-state")]
@@ -366,7 +476,8 @@ impl TemporalJoiner {
                     + versions.values().map(|(row, _)| right_version_bytes(row)).sum::<usize>()
             })
             .sum();
-        self.memory.attach("temporal-join", budget_bytes, left + right)?;
+        let deadlines: usize = self.cleanup_state.keys().map(group_key_bytes).sum();
+        self.memory.attach("temporal-join", budget_bytes, left + right + deadlines)?;
         Ok(self)
     }
 
@@ -380,10 +491,19 @@ impl TemporalJoiner {
 
     /// Buffers a probe-side batch (no output until a watermark). Each row is stored under its
     /// equi-join key with its event time and changelog kind, in arrival order within the key.
-    pub(crate) fn push_left(&mut self, batch: &RecordBatch) -> Result<(), DataFusionError> {
+    /// `now_ms` is the host's processing-time reading — the cleanup-deadline clock.
+    pub(crate) fn push_left(
+        &mut self,
+        batch: &RecordBatch,
+        now_ms: i64,
+    ) -> Result<(), DataFusionError> {
         #[cfg(feature = "paimon-state")]
         if self.backend.is_some() {
             return self.push_left_backend(batch);
+        }
+        let cleaning = self.cleaning_enabled();
+        if cleaning {
+            self.maybe_sweep(now_ms);
         }
         let arity = data_arity(batch);
         let key_arrays: Vec<&ArrayRef> = self.left_keys.iter().map(|&i| batch.column(i)).collect();
@@ -396,6 +516,12 @@ impl TemporalJoiner {
             let jrow: JoinRow = (0..arity)
                 .map(|i| ScalarValue::try_from_array(batch.column(i), row).expect("temporal left scalar"))
                 .collect();
+            if cleaning {
+                if let Some(reclaimed) = self.expire_if_due(&key, now_ms, track) {
+                    delta -= reclaimed as isize;
+                }
+                self.register_cleanup(&key, now_ms, &mut delta, track);
+            }
             if track && !self.left_state.contains_key(&key) {
                 delta += group_key_bytes(&key) as isize;
             }
@@ -415,10 +541,18 @@ impl TemporalJoiner {
 
     /// Folds a build-side changelog batch into the versioned state, keyed by equi-join key and indexed
     /// by right rowtime (last-write-wins per timestamp, every RowKind kept — Flink's `rightState.put`).
-    pub(crate) fn push_right(&mut self, batch: &RecordBatch) -> Result<(), DataFusionError> {
+    pub(crate) fn push_right(
+        &mut self,
+        batch: &RecordBatch,
+        now_ms: i64,
+    ) -> Result<(), DataFusionError> {
         #[cfg(feature = "paimon-state")]
         if self.backend.is_some() {
             return self.push_right_backend(batch);
+        }
+        let cleaning = self.cleaning_enabled();
+        if cleaning {
+            self.maybe_sweep(now_ms);
         }
         let arity = data_arity(batch);
         let key_arrays: Vec<&ArrayRef> = self.right_keys.iter().map(|&i| batch.column(i)).collect();
@@ -431,6 +565,12 @@ impl TemporalJoiner {
             let jrow: JoinRow = (0..arity)
                 .map(|i| ScalarValue::try_from_array(batch.column(i), row).expect("temporal right scalar"))
                 .collect();
+            if cleaning {
+                if let Some(reclaimed) = self.expire_if_due(&key, now_ms, track) {
+                    delta -= reclaimed as isize;
+                }
+                self.register_cleanup(&key, now_ms, &mut delta, track);
+            }
             if track && !self.right_state.contains_key(&key) {
                 delta += group_key_bytes(&key) as isize;
             }
@@ -454,10 +594,19 @@ impl TemporalJoiner {
 
     /// Emits the joined rows for every buffered left row the watermark has passed and drops the build
     /// versions the watermark has made obsolete. Output is `[left data.., right data..]` + `$row_kind$`.
-    pub(crate) fn advance(&mut self, watermark: i64) -> Result<RecordBatch, DataFusionError> {
+    /// `now_ms` is the host's processing-time reading — the cleanup-deadline clock.
+    pub(crate) fn advance(
+        &mut self,
+        watermark: i64,
+        now_ms: i64,
+    ) -> Result<RecordBatch, DataFusionError> {
         #[cfg(feature = "paimon-state")]
         if self.backend.is_some() {
             return self.advance_backend(watermark);
+        }
+        let cleaning = self.cleaning_enabled();
+        if cleaning {
+            self.maybe_sweep(now_ms);
         }
         let left_outer = self.join_type == JoinKind::LeftOuter;
         let has_pred = self.predicate.is_some();
@@ -470,10 +619,20 @@ impl TemporalJoiner {
         let mut pred_idx: Vec<usize> = Vec::new();
         let track = self.memory.tracking();
         let mut freed = 0usize;
+        let mut grew = 0isize;
         let keys: Vec<GroupKey> = self.left_state.keys().cloned().collect();
         for key in &keys {
+            // A passed cleanup deadline means Flink's timer fired (at wall time T, before this
+            // watermark arrived at wall time now >= T): the key's state is gone, nothing emits.
+            if cleaning {
+                if let Some(reclaimed) = self.expire_if_due(key, now_ms, track) {
+                    freed += reclaimed;
+                    continue;
+                }
+            }
             let entries = self.left_state.remove(key).expect("left key present");
             let versions = self.right_state.get(key);
+            let total = entries.len();
             let mut remaining: Vec<LeftEntry> = Vec::new();
             for e in entries {
                 if e.time > watermark {
@@ -498,12 +657,26 @@ impl TemporalJoiner {
                 }
                 decisions.push((e.row, e.kind, valid));
             }
-            if remaining.is_empty() {
+            let fired = remaining.len() < total;
+            let remaining_empty = remaining.is_empty();
+            if remaining_empty {
                 if track {
                     freed += group_key_bytes(key);
                 }
             } else {
                 self.left_state.insert(key.clone(), remaining);
+            }
+            // Flink's `onEventTime` after emitting: state remaining on either side re-registers
+            // the key's cleanup deadline; a key left empty on both sides drops it (Flink's
+            // `cleanupLastTimer`). Version pruning below keeps at least the latest version, so
+            // checking the right side before pruning matches Flink's after-prune check.
+            if cleaning && fired {
+                let right_live = self.right_state.get(key).is_some_and(|m| !m.is_empty());
+                if !remaining_empty || right_live {
+                    self.register_cleanup(key, now_ms, &mut grew, track);
+                } else if self.cleanup_state.remove(key).is_some() && track {
+                    freed += group_key_bytes(key);
+                }
             }
         }
 
@@ -549,6 +722,10 @@ impl TemporalJoiner {
                     }
                 }
             }
+        }
+        if grew > 0 {
+            self.memory.record(grew);
+            self.memory.account()?;
         }
         self.memory.forget(freed);
         self.memory.account_shrink();
@@ -612,13 +789,41 @@ impl TemporalJoiner {
         write_ipc(&RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).expect("temporal side"))
     }
 
-    pub(crate) fn snapshot(&self) -> Vec<u8> {
-        Self::snapshot_parts(self.serialize_left(), self.serialize_right())
+    /// Serializes the per-key cleanup deadlines as `[key cols.., __cleanup_at__]` (empty when none).
+    fn serialize_cleanup(&self) -> Vec<u8> {
+        if self.cleanup_state.is_empty() {
+            return Vec::new();
+        }
+        let key_types: Vec<DataType> = self
+            .left_keys
+            .iter()
+            .map(|&i| self.left_schema.field(i).data_type().clone())
+            .collect();
+        let keys: Vec<GroupKey> = self.cleanup_state.keys().cloned().collect();
+        let deadlines: Vec<i64> = keys.iter().map(|key| self.cleanup_state[key]).collect();
+        let mut fields = key_fields(&key_types);
+        let mut columns = key_columns(&keys, &key_types);
+        fields.push(Field::new(CLEANUP_AT_COLUMN, DataType::Int64, false));
+        columns.push(Arc::new(Int64Array::from(deadlines)));
+        write_ipc(
+            &RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
+                .expect("temporal cleanup deadlines"),
+        )
     }
 
-    fn snapshot_parts(left: Vec<u8>, right: Vec<u8>) -> Vec<u8> {
+    pub(crate) fn snapshot(&self) -> Vec<u8> {
+        let mut sections = vec![self.serialize_left(), self.serialize_right()];
+        // The deadline section rides only while cleaning is on, keeping retention-off
+        // checkpoints byte-identical to the pre-TTL format.
+        if self.cleaning_enabled() {
+            sections.push(self.serialize_cleanup());
+        }
+        Self::snapshot_parts(sections)
+    }
+
+    fn snapshot_parts(sections: Vec<Vec<u8>>) -> Vec<u8> {
         let mut out = Vec::new();
-        for section in [left, right] {
+        for section in sections {
             out.extend_from_slice(&(section.len() as u32).to_le_bytes());
             out.extend_from_slice(&section);
         }
@@ -651,18 +856,26 @@ impl TemporalJoiner {
             max_parallelism,
             timestamp_precisions,
         );
+        // The deadline section's key columns lead its batch, in equi-key order.
+        let cleanup_keys: Vec<usize> = (0..self.left_keys.len()).collect();
+        let cleanup = sections.get(2).map(|bytes| {
+            Self::side_raw_partitions(bytes, &cleanup_keys, max_parallelism, timestamp_precisions)
+        });
         let mut groups: Vec<i32> = left.keys().chain(right.keys()).copied().collect();
         groups.sort_unstable();
         groups.dedup();
         let mut snapshots = BTreeMap::new();
         for key_group in groups {
-            snapshots.insert(
-                key_group,
-                Self::snapshot_parts(
-                    left.get(&key_group).map(Self::merge_snapshot_batches).unwrap_or_default(),
-                    right.get(&key_group).map(Self::merge_snapshot_batches).unwrap_or_default(),
-                ),
-            );
+            let mut parts = vec![
+                left.get(&key_group).map(Self::merge_snapshot_batches).unwrap_or_default(),
+                right.get(&key_group).map(Self::merge_snapshot_batches).unwrap_or_default(),
+            ];
+            if let Some(cleanup) = &cleanup {
+                parts.push(
+                    cleanup.get(&key_group).map(Self::merge_snapshot_batches).unwrap_or_default(),
+                );
+            }
+            snapshots.insert(key_group, Self::snapshot_parts(parts));
         }
         snapshots
     }
@@ -720,11 +933,14 @@ impl TemporalJoiner {
         right_schema: SchemaRef,
         predicate: Option<JoinPredicate>,
         bytes: &[u8],
+        min_retention_ms: i64,
+        restored_at_ms: i64,
     ) -> Self {
         let mut joiner = TemporalJoiner::new(
             left_keys, right_keys, left_time, right_time, join_type, left_schema, right_schema,
             predicate,
-        );
+        )
+        .with_state_retention(min_retention_ms);
         if bytes.is_empty() {
             return joiner;
         }
@@ -773,6 +989,27 @@ impl TemporalJoiner {
                     .insert(times.value(row), (jrow, kinds.value(row)));
             }
         }
+        if let Some(bytes) = sections.get(2) {
+            for batch in read_ipc_if_present(bytes) {
+                let deadlines = column_i64(&batch, CLEANUP_AT_COLUMN);
+                let key_arrays: Vec<&ArrayRef> =
+                    (0..batch.num_columns() - 1).map(|i| batch.column(i)).collect();
+                for row in 0..batch.num_rows() {
+                    joiner.cleanup_state.insert(read_key(&key_arrays, row), deadlines.value(row));
+                }
+            }
+        }
+        // Enable-retention migration: a key restored without a deadline (a pre-retention writer)
+        // is stamped a full max retention from the restore instead of expiring on first touch.
+        if joiner.cleaning_enabled() {
+            let stamp = restored_at_ms.saturating_add(joiner.max_retention_ms);
+            let TemporalJoiner { left_state, right_state, cleanup_state, .. } = &mut joiner;
+            for key in left_state.keys().chain(right_state.keys()) {
+                if !cleanup_state.contains_key(key) {
+                    cleanup_state.insert(key.clone(), stamp);
+                }
+            }
+        }
         joiner
     }
 
@@ -787,22 +1024,29 @@ impl TemporalJoiner {
         right_schema: SchemaRef,
         predicate: Option<JoinPredicate>,
         snapshots: &[Vec<u8>],
+        min_retention_ms: i64,
+        restored_at_ms: i64,
     ) -> Self {
         let mut left_batches = Vec::new();
         let mut right_batches = Vec::new();
+        let mut cleanup_batches = Vec::new();
         for bytes in snapshots {
             let sections = read_framed_sections(bytes);
-            if sections.len() == 2 {
+            if sections.len() >= 2 {
                 left_batches.extend(read_ipc_if_present(&sections[0]));
                 right_batches.extend(read_ipc_if_present(&sections[1]));
+                if let Some(cleanup) = sections.get(2) {
+                    cleanup_batches.extend(read_ipc_if_present(cleanup));
+                }
             }
         }
-        let left = (!left_batches.is_empty())
-            .then(|| Self::merge_snapshot_batches(&left_batches))
-            .unwrap_or_default();
-        let right = (!right_batches.is_empty())
-            .then(|| Self::merge_snapshot_batches(&right_batches))
-            .unwrap_or_default();
+        let merge = |batches: &Vec<RecordBatch>| {
+            (!batches.is_empty()).then(|| Self::merge_snapshot_batches(batches)).unwrap_or_default()
+        };
+        let mut parts = vec![merge(&left_batches), merge(&right_batches)];
+        if !cleanup_batches.is_empty() {
+            parts.push(merge(&cleanup_batches));
+        }
         TemporalJoiner::restore(
             left_keys,
             right_keys,
@@ -812,7 +1056,9 @@ impl TemporalJoiner {
             left_schema,
             right_schema,
             predicate,
-            &Self::snapshot_parts(left, right),
+            &Self::snapshot_parts(parts),
+            min_retention_ms,
+            restored_at_ms,
         )
     }
 }
@@ -842,6 +1088,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createTempora
     pred_longs: JLongArray<'local>,
     pred_doubles: JDoubleArray<'local>,
     pred_strings: JObjectArray<'local>,
+    state_ttl_millis: jlong,
     memory_budget_bytes: jlong,
 ) -> jlong {
     crate::bridge::jni_guard(env, move |mut env| {
@@ -863,6 +1110,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createTempora
             right_schema,
             predicate,
         )
+        .with_state_retention(state_ttl_millis)
         .with_memory_budget(memory_budget_bytes);
         boxed_or_throw(&mut env, joiner)
     })
@@ -876,13 +1124,14 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushLeftTempo
     handle: jlong,
     in_array_address: jlong,
     in_schema_address: jlong,
+    now_millis: jlong,
 ) {
     crate::bridge::jni_guard(env, move |mut env| {
         let joiner = unsafe { &mut *(handle as *mut TemporalJoiner) };
         // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
         let result = {
             let batch = import_record_batch(in_array_address, in_schema_address);
-            joiner.push_left(&batch)
+            joiner.push_left(&batch, now_millis)
         };
         if let Err(e) = result {
             throw_memory_limit(&mut env, &e.to_string());
@@ -898,13 +1147,14 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushRightTemp
     handle: jlong,
     in_array_address: jlong,
     in_schema_address: jlong,
+    now_millis: jlong,
 ) {
     crate::bridge::jni_guard(env, move |mut env| {
         let joiner = unsafe { &mut *(handle as *mut TemporalJoiner) };
         // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
         let result = {
             let batch = import_record_batch(in_array_address, in_schema_address);
-            joiner.push_right(&batch)
+            joiner.push_right(&batch, now_millis)
         };
         if let Err(e) = result {
             throw_memory_limit(&mut env, &e.to_string());
@@ -920,13 +1170,14 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_advanceTempor
     _class: JClass<'local>,
     handle: jlong,
     watermark_millis: jlong,
+    now_millis: jlong,
     out_array_address: jlong,
     out_schema_address: jlong,
 ) {
     crate::bridge::jni_guard(env, move |mut env| {
         let joiner = unsafe { &mut *(handle as *mut TemporalJoiner) };
         // Fallible in persistent-state mode (the firing reads the committed tables).
-        match joiner.advance(watermark_millis) {
+        match joiner.advance(watermark_millis, now_millis) {
             Ok(result) => export_record_batch(result, out_array_address, out_schema_address),
             Err(e) => throw_memory_limit(&mut env, &e.to_string()),
         }
@@ -1005,6 +1256,8 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreTempor
     pred_longs: JLongArray<'local>,
     pred_doubles: JDoubleArray<'local>,
     pred_strings: JObjectArray<'local>,
+    state_ttl_millis: jlong,
+    now_millis: jlong,
     snapshot: JByteArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
@@ -1028,6 +1281,8 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreTempor
             right_schema,
             predicate,
             &bytes,
+            state_ttl_millis,
+            now_millis,
         )
         .with_memory_budget(memory_budget_bytes);
         boxed_or_throw(&mut env, joiner)
@@ -1054,6 +1309,8 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreTempor
     pred_longs: JLongArray<'local>,
     pred_doubles: JDoubleArray<'local>,
     pred_strings: JObjectArray<'local>,
+    state_ttl_millis: jlong,
+    now_millis: jlong,
     snapshots: JObjectArray<'local>,
     memory_budget_bytes: jlong,
 ) -> jlong {
@@ -1095,6 +1352,8 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreTempor
             right_schema,
             predicate,
             &restored,
+            state_ttl_millis,
+            now_millis,
         )
         .with_memory_budget(memory_budget_bytes);
         boxed_or_throw(&mut env, joiner)

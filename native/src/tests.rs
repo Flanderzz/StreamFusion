@@ -3275,11 +3275,11 @@ fn temporal_joiner(join_type: JoinKind) -> TemporalJoiner {
 fn temporal_join_picks_version_valid_at_probe_time() {
     let mut joiner = temporal_joiner(JoinKind::Inner);
     // key 1: rate 10@100 then rate 20@300 (+U); key 2: rate 99@100.
-    joiner.push_right(&temporal_build_batch(vec![1], vec![10], vec![100], vec![0]));
-    joiner.push_right(&temporal_build_batch(vec![1], vec![20], vec![300], vec![2]));
-    joiner.push_right(&temporal_build_batch(vec![2], vec![99], vec![100], vec![0]));
-    joiner.push_left(&temporal_probe_batch(vec![1, 1, 2], vec![1, 2, 3], vec![200, 500, 150]));
-    let out = joiner.advance(i64::MAX).unwrap();
+    joiner.push_right(&temporal_build_batch(vec![1], vec![10], vec![100], vec![0]), 0);
+    joiner.push_right(&temporal_build_batch(vec![1], vec![20], vec![300], vec![2]), 0);
+    joiner.push_right(&temporal_build_batch(vec![2], vec![99], vec![100], vec![0]), 0);
+    joiner.push_left(&temporal_probe_batch(vec![1, 1, 2], vec![1, 2, 3], vec![200, 500, 150]), 0);
+    let out = joiner.advance(i64::MAX, 0).unwrap();
     assert_eq!(out.num_rows(), 3);
     // probe@200 -> 10, probe@500 -> 20 (the +U version), probe@150 -> 99 (cross-key order varies).
     let mut right_rate = values(&out, 4);
@@ -3291,15 +3291,15 @@ fn temporal_join_picks_version_valid_at_probe_time() {
 #[test]
 fn temporal_join_left_pads_on_delete_or_missing() {
     let mut joiner = temporal_joiner(JoinKind::LeftOuter);
-    joiner.push_right(&temporal_build_batch(vec![1], vec![10], vec![100], vec![0]));
-    joiner.push_right(&temporal_build_batch(vec![2], vec![99], vec![100], vec![0]));
-    joiner.push_right(&temporal_build_batch(vec![2], vec![99], vec![400], vec![3])); // delete @400
+    joiner.push_right(&temporal_build_batch(vec![1], vec![10], vec![100], vec![0]), 0);
+    joiner.push_right(&temporal_build_batch(vec![2], vec![99], vec![100], vec![0]), 0);
+    joiner.push_right(&temporal_build_batch(vec![2], vec![99], vec![400], vec![3]), 0); // delete @400
     joiner.push_left(&temporal_probe_batch(
         vec![1, 2, 1],
         vec![1, 2, 3],
         vec![50, 500, 200], // 50: before any version; 500: after key-2 delete; 200: -> 10
-    ));
-    let out = joiner.advance(i64::MAX).unwrap();
+    ), 0);
+    let out = joiner.advance(i64::MAX, 0).unwrap();
     assert_eq!(out.num_rows(), 3);
     // Exactly one row matched (right rate present); the other two are null-padded.
     let matched = (0..out.num_rows()).filter(|&i| !out.column(4).is_null(i)).count();
@@ -3311,16 +3311,16 @@ fn temporal_join_left_pads_on_delete_or_missing() {
 #[test]
 fn temporal_join_buffers_and_survives_snapshot_restore() {
     let mut joiner = temporal_joiner(JoinKind::Inner);
-    joiner.push_right(&temporal_build_batch(vec![1], vec![10], vec![100], vec![0]));
-    joiner.push_left(&temporal_probe_batch(vec![1], vec![1], vec![500]));
-    assert_eq!(joiner.advance(200).unwrap().num_rows(), 0); // watermark 200 < probe time 500
+    joiner.push_right(&temporal_build_batch(vec![1], vec![10], vec![100], vec![0]), 0);
+    joiner.push_left(&temporal_probe_batch(vec![1], vec![1], vec![500]), 0);
+    assert_eq!(joiner.advance(200, 0).unwrap().num_rows(), 0); // watermark 200 < probe time 500
     let snapshot = joiner.snapshot();
     let mut restored = TemporalJoiner::restore(
         vec![0], vec![0], 2, 2, JoinKind::Inner, temporal_schema(), temporal_schema(), None,
-        &snapshot,
+        &snapshot, 0, 0,
     );
-    restored.push_right(&temporal_build_batch(vec![1], vec![20], vec![300], vec![2])); // +U @300
-    let out = restored.advance(i64::MAX).unwrap();
+    restored.push_right(&temporal_build_batch(vec![1], vec![20], vec![300], vec![2]), 0); // +U @300
+    let out = restored.advance(i64::MAX, 0).unwrap();
     assert_eq!(out.num_rows(), 1);
     assert_eq!(values(&out, 4), vec![20]); // resolves to the version valid at 500 (rate 20 @300)
 }
@@ -3328,8 +3328,8 @@ fn temporal_join_buffers_and_survives_snapshot_restore() {
 #[test]
 fn temporal_join_state_partitions_and_restores_by_flink_key_group() {
     let mut before = temporal_joiner(JoinKind::Inner);
-    let _ = before.push_right(&temporal_build_batch(vec![1, 2], vec![10, 20], vec![100, 100], vec![0, 0]));
-    let _ = before.push_left(&temporal_probe_batch(vec![1, 2], vec![1, 2], vec![500, 500]));
+    let _ = before.push_right(&temporal_build_batch(vec![1, 2], vec![10, 20], vec![100, 100], vec![0, 0]), 0);
+    let _ = before.push_left(&temporal_probe_batch(vec![1, 2], vec![1, 2], vec![500, 500]), 0);
     let partitions = before.snapshot_partitions(128, &[-1]);
     assert!(
         partitions.len() >= 2,
@@ -3347,8 +3347,10 @@ fn temporal_join_state_partitions_and_restores_by_flink_key_group() {
         temporal_schema(),
         None,
         &snapshots,
+        0,
+        0,
     );
-    let out = restored.advance(i64::MAX).unwrap();
+    let out = restored.advance(i64::MAX, 0).unwrap();
     let mut rates = values(&out, 4);
     rates.sort_unstable();
     assert_eq!(rates, vec![10, 20]);
@@ -3373,13 +3375,194 @@ fn temporal_join_applies_non_equi_predicate() {
         Some(predicate),
     );
     // key 1: rate 5@100 then rate 50@300 (+U).
-    joiner.push_right(&temporal_build_batch(vec![1], vec![5], vec![100], vec![0]));
-    joiner.push_right(&temporal_build_batch(vec![1], vec![50], vec![300], vec![2]));
+    joiner.push_right(&temporal_build_batch(vec![1], vec![5], vec![100], vec![0]), 0);
+    joiner.push_right(&temporal_build_batch(vec![1], vec![50], vec![300], vec![2]), 0);
     // amount 10 @200 -> version rate 5, 10 > 5 matches; amount 10 @500 -> version rate 50, fails.
-    joiner.push_left(&temporal_probe_batch(vec![1, 1], vec![10, 10], vec![200, 500]));
-    let out = joiner.advance(i64::MAX).unwrap();
+    joiner.push_left(&temporal_probe_batch(vec![1, 1], vec![10, 10], vec![200, 500]), 0);
+    let out = joiner.advance(i64::MAX, 0).unwrap();
     assert_eq!(out.num_rows(), 1);
     assert_eq!(values(&out, 4), vec![5]); // only the pair passing amount > rate
+}
+
+// Flink retention-bounds the temporal join with ONE per-key processing-time cleanup deadline
+// (min = table.exec.state.ttl, max = 1.5x min), not per-value TTL: registered at every touch,
+// and when the clock reaches it the key's ENTIRE state — both sides — clears silently. A timer
+// registered at T fires once processing time reaches T, so the key is gone at `now >= T`.
+#[test]
+fn temporal_join_retention_clears_the_key_at_exactly_the_deadline() {
+    // Alive one millisecond inside the horizon: deadline = 5000 + 1.5 * 2000 = 8000.
+    let mut alive = temporal_joiner(JoinKind::LeftOuter).with_state_retention(2000);
+    alive.push_right(&temporal_build_batch(vec![1], vec![10], vec![100], vec![0]), 5000).unwrap();
+    alive.push_left(&temporal_probe_batch(vec![1], vec![1], vec![200]), 7999).unwrap();
+    assert_eq!(values(&alive.advance(i64::MAX, 7999).unwrap(), 4), vec![10]);
+
+    // Cleared at exactly the deadline: the probe's touch at 8000 finds the versions gone and
+    // null-pads per the normal absent-version LEFT behavior.
+    let mut expired = temporal_joiner(JoinKind::LeftOuter).with_state_retention(2000);
+    expired.push_right(&temporal_build_batch(vec![1], vec![10], vec![100], vec![0]), 5000).unwrap();
+    expired.push_left(&temporal_probe_batch(vec![1], vec![1], vec![200]), 8000).unwrap();
+    let out = expired.advance(i64::MAX, 8000).unwrap();
+    assert_eq!(out.num_rows(), 1);
+    assert!(out.column(4).is_null(0));
+}
+
+// Flink's re-registration hysteresis: the deadline starts at now + max and moves (to now + max)
+// only when a touch lands within a min-retention of it — `now + min > deadline`. Pinned with a
+// three-write sequence: 1000 registers 4000, 2000 leaves it (2000 + min == 4000, not >), 2001
+// moves it to 5001.
+#[test]
+fn temporal_join_retention_moves_the_deadline_only_past_the_hysteresis() {
+    let mut unmoved = temporal_joiner(JoinKind::LeftOuter).with_state_retention(2000);
+    unmoved.push_right(&temporal_build_batch(vec![1], vec![10], vec![100], vec![0]), 1000).unwrap();
+    unmoved.push_right(&temporal_build_batch(vec![1], vec![20], vec![300], vec![2]), 2000).unwrap();
+    // The write at 2000 did NOT move the 4000 deadline: the key clears at 4000.
+    unmoved.push_left(&temporal_probe_batch(vec![1], vec![1], vec![400]), 4000).unwrap();
+    let out = unmoved.advance(i64::MAX, 4000).unwrap();
+    assert!(out.column(4).is_null(0));
+
+    let mut moved = temporal_joiner(JoinKind::LeftOuter).with_state_retention(2000);
+    moved.push_right(&temporal_build_batch(vec![1], vec![10], vec![100], vec![0]), 1000).unwrap();
+    moved.push_right(&temporal_build_batch(vec![1], vec![20], vec![300], vec![2]), 2000).unwrap();
+    moved.push_right(&temporal_build_batch(vec![1], vec![30], vec![500], vec![2]), 2001).unwrap();
+    // A probe at 3001 (3001 + min == 5001, not > — deadline unmoved) still sees the versions...
+    moved.push_left(&temporal_probe_batch(vec![1], vec![1], vec![600]), 3001).unwrap();
+    assert_eq!(values(&moved.advance(i64::MAX, 3001).unwrap(), 4), vec![30]);
+    // ...and the key clears at the moved deadline 5001.
+    moved.push_left(&temporal_probe_batch(vec![1], vec![2], vec![700]), 5001).unwrap();
+    let out = moved.advance(i64::MAX, 5001).unwrap();
+    assert_eq!(out.num_rows(), 1);
+    assert!(out.column(4).is_null(0));
+}
+
+// Flink's `cleanupState` clears the key's ENTIRE state: buffered probe rows below the watermark
+// vanish with the versions, silently — only rows probed after the expiry emit (null-padded).
+#[test]
+fn temporal_join_retention_cleanup_drops_buffered_probe_rows_too() {
+    let mut joiner = temporal_joiner(JoinKind::LeftOuter).with_state_retention(2000);
+    joiner.push_right(&temporal_build_batch(vec![1], vec![10], vec![100], vec![0]), 1000).unwrap();
+    joiner.push_left(&temporal_probe_batch(vec![1], vec![1], vec![500]), 1000).unwrap();
+    assert_eq!(joiner.advance(200, 1000).unwrap().num_rows(), 0); // buffered below the watermark
+    joiner.push_left(&temporal_probe_batch(vec![1], vec![2], vec![600]), 4000).unwrap();
+    let out = joiner.advance(i64::MAX, 4000).unwrap();
+    assert_eq!(out.num_rows(), 1);
+    assert_eq!(values(&out, 1), vec![2]); // the pre-expiry buffered probe row emitted nothing
+    assert!(out.column(4).is_null(0));
+}
+
+// A key whose buffered probe rows fire re-registers its deadline when state remains on either
+// side (Flink's onEventTime), under the same hysteresis rule.
+#[test]
+fn temporal_join_retention_watermark_fire_re_registers_the_deadline() {
+    let mut joiner = temporal_joiner(JoinKind::Inner).with_state_retention(2000);
+    joiner.push_right(&temporal_build_batch(vec![1], vec![10], vec![100], vec![0]), 1000).unwrap();
+    joiner.push_left(&temporal_probe_batch(vec![1], vec![1], vec![500]), 1000).unwrap();
+    // The fire at 3999 emits and re-registers (3999 + min > 4000): the deadline moves to 6999...
+    assert_eq!(values(&joiner.advance(600, 3999).unwrap(), 4), vec![10]);
+    // ...so a probe at 4000 — the original deadline — still finds the version.
+    joiner.push_left(&temporal_probe_batch(vec![1], vec![2], vec![700]), 4000).unwrap();
+    assert_eq!(values(&joiner.advance(i64::MAX, 4000).unwrap(), 4), vec![10]);
+}
+
+// Flink's enablement quirk, replicated exactly: `stateCleaningEnabled = minRetentionTime > 1` —
+// strictly greater than ONE millisecond, not zero. A 1ms retention never cleans, and its
+// checkpoints stay in the two-section pre-retention format.
+#[test]
+fn temporal_join_retention_of_one_millisecond_disables_cleaning() {
+    let mut joiner = temporal_joiner(JoinKind::Inner).with_state_retention(1);
+    joiner.push_right(&temporal_build_batch(vec![1], vec![10], vec![100], vec![0]), 1000).unwrap();
+    joiner.push_left(&temporal_probe_batch(vec![1], vec![1], vec![200]), i64::MAX).unwrap();
+    assert_eq!(values(&joiner.advance(i64::MAX, i64::MAX).unwrap(), 4), vec![10]);
+    assert_eq!(read_framed_sections(&joiner.snapshot()).len(), 2);
+}
+
+// Keys never touched again are reclaimed by the silent once-per-min-retention sweep — the lazy
+// per-touch check would never see them.
+#[test]
+fn temporal_join_retention_sweep_reclaims_untouched_keys_silently() {
+    let mut joiner = temporal_joiner(JoinKind::Inner).with_state_retention(2000);
+    joiner.push_right(&temporal_build_batch(vec![1], vec![10], vec![100], vec![0]), 1000).unwrap();
+    // Key 1 is never touched again; an ingest of another key past its 4000 deadline runs the
+    // sweep, which drops key 1's versions and deadline with no output.
+    joiner.push_right(&temporal_build_batch(vec![2], vec![99], vec![100], vec![0]), 4000).unwrap();
+    let sections = read_framed_sections(&joiner.snapshot());
+    let right_keys: Vec<i64> =
+        read_ipc_if_present(&sections[1]).iter().flat_map(|b| values(b, 0)).collect();
+    assert_eq!(right_keys, vec![2]);
+    let deadline_keys: Vec<i64> =
+        read_ipc_if_present(&sections[2]).iter().flat_map(|b| values(b, 0)).collect();
+    assert_eq!(deadline_keys, vec![2]);
+}
+
+// The snapshot carries each key's ABSOLUTE deadline (a third framed section, written only while
+// cleaning is on); a restore keeps it as-is rather than re-stamping from the restore clock.
+#[test]
+fn temporal_join_retention_deadline_rides_the_snapshot_absolutely() {
+    let mut writer = temporal_joiner(JoinKind::LeftOuter).with_state_retention(2000);
+    writer.push_right(&temporal_build_batch(vec![1], vec![10], vec![100], vec![0]), 5000).unwrap();
+    let snapshot = writer.snapshot();
+    assert_eq!(read_framed_sections(&snapshot).len(), 3);
+
+    let restore = || {
+        TemporalJoiner::restore(
+            vec![0], vec![0], 2, 2, JoinKind::LeftOuter, temporal_schema(), temporal_schema(),
+            None, &snapshot, 2000, 6000,
+        )
+    };
+    // Alive at 7999 and cleared at exactly 8000 — the writer's deadline, not the restore-time
+    // stamp (restoring at 6000 would have stamped 9000).
+    let mut alive = restore();
+    alive.push_left(&temporal_probe_batch(vec![1], vec![1], vec![200]), 7999).unwrap();
+    assert_eq!(values(&alive.advance(i64::MAX, 7999).unwrap(), 4), vec![10]);
+    let mut expired = restore();
+    expired.push_left(&temporal_probe_batch(vec![1], vec![1], vec![200]), 8000).unwrap();
+    let out = expired.advance(i64::MAX, 8000).unwrap();
+    assert!(out.column(4).is_null(0));
+}
+
+// Deadlines partition with their key groups and survive a partitioned restore. Restoring at 4000
+// would stamp a missing deadline at 7000, so a key still alive at 7999 proves the section (with
+// the writer's 8000) was read, per key group.
+#[test]
+fn temporal_join_retention_deadlines_partition_by_flink_key_group() {
+    let mut before = temporal_joiner(JoinKind::LeftOuter).with_state_retention(2000);
+    before
+        .push_right(&temporal_build_batch(vec![1, 2], vec![10, 20], vec![100, 100], vec![0, 0]), 5000)
+        .unwrap();
+    let partitions = before.snapshot_partitions(128, &[-1]);
+    assert!(partitions.len() >= 2, "test keys should cover distinct raw key groups");
+    let snapshots: Vec<Vec<u8>> = partitions.into_values().collect();
+    let mut restored = TemporalJoiner::restore_partitions(
+        vec![0], vec![0], 2, 2, JoinKind::LeftOuter, temporal_schema(), temporal_schema(), None,
+        &snapshots, 2000, 4000,
+    );
+    restored.push_left(&temporal_probe_batch(vec![1, 2], vec![1, 2], vec![200, 200]), 7999).unwrap();
+    let mut rates = values(&restored.advance(i64::MAX, 7999).unwrap(), 4);
+    rates.sort_unstable();
+    assert_eq!(rates, vec![10, 20]);
+}
+
+// A pre-retention snapshot restored into a retention-enabled joiner stamps every key a full max
+// horizon from the restore (Flink's enable-TTL migration), instead of expiring on first touch.
+#[test]
+fn temporal_join_pre_retention_snapshot_stamps_a_full_deadline_at_restore() {
+    let mut writer = temporal_joiner(JoinKind::LeftOuter);
+    writer.push_right(&temporal_build_batch(vec![1], vec![10], vec![100], vec![0]), 0).unwrap();
+    let snapshot = writer.snapshot();
+    assert_eq!(read_framed_sections(&snapshot).len(), 2); // retention off: pre-TTL format
+
+    let restore = || {
+        TemporalJoiner::restore(
+            vec![0], vec![0], 2, 2, JoinKind::LeftOuter, temporal_schema(), temporal_schema(),
+            None, &snapshot, 2000, 10_000,
+        )
+    };
+    // Stamped 10000 + max = 13000: alive at 12999, cleared at 13000.
+    let mut alive = restore();
+    alive.push_left(&temporal_probe_batch(vec![1], vec![1], vec![200]), 12_999).unwrap();
+    assert_eq!(values(&alive.advance(i64::MAX, 12_999).unwrap(), 4), vec![10]);
+    let mut expired = restore();
+    expired.push_left(&temporal_probe_batch(vec![1], vec![1], vec![200]), 13_000).unwrap();
+    assert!(expired.advance(i64::MAX, 13_000).unwrap().column(4).is_null(0));
 }
 
 // A residual non-equi predicate gates which same-key pairs are matches. `left.v > right.v`
@@ -5869,25 +6052,25 @@ mod paimon_state {
 
         for joiner in [&mut paimon, &mut memory] {
             // key 1: rate 10@100, +U 20@300; key 2: 99@100 retracted (-D) at 400.
-            joiner.push_right(&temporal_build_batch(vec![1], vec![10], vec![100], vec![0])).unwrap();
-            joiner.push_right(&temporal_build_batch(vec![1], vec![20], vec![300], vec![2])).unwrap();
-            joiner.push_right(&temporal_build_batch(vec![2], vec![99], vec![100], vec![0])).unwrap();
+            joiner.push_right(&temporal_build_batch(vec![1], vec![10], vec![100], vec![0]), 0).unwrap();
+            joiner.push_right(&temporal_build_batch(vec![1], vec![20], vec![300], vec![2]), 0).unwrap();
+            joiner.push_right(&temporal_build_batch(vec![2], vec![99], vec![100], vec![0]), 0).unwrap();
         }
         paimon.store_mut().checkpoint().unwrap();
 
         // Post-barrier: a -D for key 2 and probes at various times.
         for joiner in [&mut paimon, &mut memory] {
-            joiner.push_right(&temporal_build_batch(vec![2], vec![99], vec![400], vec![3])).unwrap();
+            joiner.push_right(&temporal_build_batch(vec![2], vec![99], vec![400], vec![3]), 0).unwrap();
             joiner
                 .push_left(&temporal_probe_batch(
                     vec![1, 1, 2, 2],
                     vec![1, 2, 3, 4],
                     vec![200, 500, 150, 450],
-                ))
+                ), 0)
                 .unwrap();
         }
-        let p = paimon.advance(600).unwrap();
-        let m = memory.advance(600).unwrap();
+        let p = paimon.advance(600, 0).unwrap();
+        let m = memory.advance(600, 0).unwrap();
         assert_eq!(tj_pairs(&m), tj_pairs(&p));
         assert_eq!(
             tj_pairs(&p),
@@ -5898,15 +6081,15 @@ mod paimon_state {
                 (Some(4), None),      // probe@450 -> retracted at 400: LEFT null-pad
             ],
         );
-        assert_eq!(paimon.advance(700).unwrap().num_rows(), 0, "fired probes left state");
+        assert_eq!(paimon.advance(700, 0).unwrap().num_rows(), 0, "fired probes left state");
         paimon.store_mut().checkpoint().unwrap();
 
         // Post-barrier probes join the still-committed versions (lazy prune kept the latest).
         for joiner in [&mut paimon, &mut memory] {
-            joiner.push_left(&temporal_probe_batch(vec![1], vec![5], vec![600])).unwrap();
+            joiner.push_left(&temporal_probe_batch(vec![1], vec![5], vec![600]), 0).unwrap();
         }
-        let p = paimon.advance(1000).unwrap();
-        let m = memory.advance(1000).unwrap();
+        let p = paimon.advance(1000, 0).unwrap();
+        let m = memory.advance(1000, 0).unwrap();
         assert_eq!(tj_pairs(&m), tj_pairs(&p));
         assert_eq!(tj_pairs(&p), vec![(Some(5), Some(20))]);
     }
@@ -5917,8 +6100,8 @@ mod paimon_state {
     fn paimon_temporal_join_restores_from_listed_files() {
         let dir = temp_dir("tj-restore-src");
         let mut joiner = paimon_temporal_joiner(&dir, JoinKind::Inner);
-        joiner.push_right(&temporal_build_batch(vec![1], vec![10], vec![100], vec![0])).unwrap();
-        joiner.push_left(&temporal_probe_batch(vec![1], vec![7], vec![200])).unwrap();
+        joiner.push_right(&temporal_build_batch(vec![1], vec![10], vec![100], vec![0]), 0).unwrap();
+        joiner.push_left(&temporal_probe_batch(vec![1], vec![7], vec![200]), 0).unwrap();
         let (left_manifest, right_manifest) = joiner.store_mut().checkpoint().unwrap();
         let left_seq = joiner.store_mut().left.next_seq();
 
@@ -5937,8 +6120,8 @@ mod paimon_state {
         .unwrap();
         store.left.set_next_seq(left_seq);
         let mut restored = temporal_joiner(JoinKind::Inner).with_backend(store);
-        assert_eq!(tj_pairs(&restored.advance(500).unwrap()), vec![(Some(7), Some(10))]);
-        assert_eq!(restored.advance(600).unwrap().num_rows(), 0, "fired probe left state");
+        assert_eq!(tj_pairs(&restored.advance(500, 0).unwrap()), vec![(Some(7), Some(10))]);
+        assert_eq!(restored.advance(600, 0).unwrap().num_rows(), 0, "fired probe left state");
     }
 
     /// The bundle contract of the two-component store: written slots (the write buffer) survive

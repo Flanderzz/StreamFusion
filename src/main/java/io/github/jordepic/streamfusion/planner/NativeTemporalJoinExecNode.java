@@ -79,6 +79,9 @@ public class NativeTemporalJoinExecNode extends ExecNodeBase<ArrowBatch>
     int[] stateKeys = FlinkKeyGroupUtils.stateKeysForSubtasks(maxParallelism, left.getParallelism());
     KeySelector<ArrowBatch, Integer> stateKeySelector =
         batch -> stateKeys[batch.destination() >= 0 ? batch.destination() : 0];
+    // The job-wide retention only: Flink's StreamExecTemporalJoin reads the config directly, with
+    // no STATE_TTL hint support. The 1.5x max deadline horizon is derived natively.
+    long stateTtlMillis = config.getStateRetentionTime();
     TwoInputTransformation<ArrowBatch, ArrowBatch, ArrowBatch> transformation =
         ExecNodeUtil.createTwoInputTransformation(
             left,
@@ -94,6 +97,7 @@ public class NativeTemporalJoinExecNode extends ExecNodeBase<ArrowBatch>
                 rightType,
                 RexExpression.toEncodedPredicate(predicate),
                 keyTimestampPrecisions,
+                stateTtlMillis,
                 maxParallelism),
             ArrowBatchTypeInformation.INSTANCE,
             left.getParallelism(),

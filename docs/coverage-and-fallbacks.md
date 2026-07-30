@@ -244,10 +244,22 @@ mirrors Flink's deliberately un-TTL'd timer state (the watermark cleans it up; e
 would lose data), and the marker — written once when the key fires, never refreshed — expires a
 fixed retention after the firing, letting the key emit a second first row.
 
-Only the temporal join and OVER decline a nonzero retention, permanently: Flink expires their
-state on per-key 1.5×-retention cleanup timers, a coarser scheme than per-value TTL. Window
+The **temporal join** runs retention natively too, but not per-value — Flink bounds it with ONE
+per-key processing-time cleanup deadline, and the native operator replicates that scheme exactly:
+every touch (either side, and each watermark firing that leaves state) registers the deadline at
+`now + 1.5×retention` (Flink's planner-derived max idle retention), an existing deadline moves
+only when a touch lands within one retention of it, and when the clock reaches it the key's
+ENTIRE state — buffered probe rows and build versions — clears silently. The deadline is enforced
+lazily at each key touch plus a once-per-retention silent sweep (equivalent to the timer, since
+firing emits nothing — divergences/28), rides checkpoints absolutely, and cleaning is enabled
+only when the retention exceeds one millisecond — Flink's literal `minRetentionTime > 1` quirk.
+
+Only OVER declines a nonzero retention, permanently: Flink expires its state on the same per-key
+1.5×-retention cleanup timers, a scheme the native OVER operator does not yet reproduce. Window
 operators and the interval join are unaffected — Flink applies no idle-state TTL there. TTL works
-on both state backends; see §(c) for the persistent-backend mechanics.
+on both state backends, except that a retention-bounded temporal join keeps the memory checkpoint
+route (its persistent shape carries no cleanup deadlines yet); see §(c) for the
+persistent-backend mechanics.
 
 - **OVER** — idle-state TTL ≠ 0 (permanent, above); a frame not of the form `… PRECEDING .. CURRENT ROW` (a `ROWS`/`RANGE` lower bound that
   is not a constant preceding offset); a bounded-RANGE frame over a proctime order (wall-clock
@@ -262,7 +274,7 @@ on both state backends; see §(c) for the persistent-backend mechanics.
 - **Window join** — same key/type/non-equi conditions; both sides must carry a window-attached
   windowing of the same time semantics (both event-time or both proctime). Proctime closes the
   window on a processing-time timer instead of a watermark.
-- **Temporal join** — idle-state TTL ≠ 0 (permanent, above); not INNER/LEFT (Flink rejects
+- **Temporal join** — not INNER/LEFT (Flink rejects
   RIGHT/FULL); no equi key; non-null-dropping keys;
   equi-key type outside the supported set; a residual non-equi predicate beyond the `FOR SYSTEM_TIME`
   condition that the native engine can't express; a processing-time temporal join (parity — Flink
@@ -765,7 +777,8 @@ the operator just checkpoints its state the old way, in full):
   its stale versions (all below the latest one at or under the watermark) at each firing, while
   an unprobed key's old versions sit on disk until its next probe — correctness never depends on
   pruning (lookups always take the latest version at or under the probe time), only state size
-  does. With that, **every stateful native operator's event-time mode runs on the backend**;
+  does. A retention-bounded temporal join keeps the memory checkpoint route: the persistent
+  shape carries no per-key cleanup deadlines yet. With that, **every stateful native operator's event-time mode runs on the backend**;
   what keeps memory state is exactly the proctime modes (processing-time timer deadlines travel
   in raw state), bounded OVER frames, the local two-phase window half, and the multiset/type
   gates below.

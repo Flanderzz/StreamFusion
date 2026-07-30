@@ -9,6 +9,7 @@ import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.flink.api.common.typeinfo.Types;
+import org.apache.flink.runtime.checkpoint.OperatorSubtaskState;
 import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.streaming.util.KeyedTwoInputStreamOperatorTestHarness;
@@ -57,6 +58,10 @@ class NativeTemporalJoinOperatorTest {
           new String[] {"k", "amount", "rt", "k0", "rate", "rt0"});
 
   private static NativeTemporalJoinOperator operator(int joinType) {
+    return operator(joinType, 0);
+  }
+
+  private static NativeTemporalJoinOperator operator(int joinType, long stateTtlMillis) {
     return new NativeTemporalJoinOperator(
         new int[] {0},
         new int[] {0},
@@ -67,6 +72,7 @@ class NativeTemporalJoinOperatorTest {
         BUILD,
         EncodedPredicate.NONE,
         new int[] {-1},
+        stateTtlMillis,
         MAX_PARALLELISM);
   }
 
@@ -164,6 +170,68 @@ class NativeTemporalJoinOperatorTest {
       assertEquals(
           List.of(row(RowKind.INSERT, 1L, 1L, 500L, 1L, 20L, 300L)), collect(harness));
       closeForwarded(harness);
+    }
+  }
+
+  @Test
+  void retentionClearsAnIdleKeySilently() throws Exception {
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedTwoInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch, ArrowBatch> harness =
+            keyedHarness(operator(1, 2000))) {
+      harness.setup(new ArrowBatchSerializer());
+      harness.open();
+
+      // The build version at 5000 registers the key's cleanup deadline at 5000 + 1.5x2000 = 8000
+      // (Flink's per-key processing-time cleanup timer at the planner's max idle retention).
+      harness.setProcessingTime(5000);
+      harness.processElement2(
+          new StreamRecord<>(build(allocator, brow(RowKind.INSERT, 1, 10, 100))));
+      // At the deadline the key's entire state is gone, with nothing emitted for the expiry: the
+      // probe behaves exactly as if no version ever existed — null-padded by the LEFT join.
+      harness.setProcessingTime(8000);
+      harness.processElement1(new StreamRecord<>(probe(allocator, prow(1, 1, 200))));
+      harness.processBothWatermarks(new Watermark(Long.MAX_VALUE));
+      assertEquals(
+          List.of(row(RowKind.INSERT, 1L, 1L, 200L, null, null, null)), collect(harness));
+      closeForwarded(harness);
+    }
+  }
+
+  @Test
+  void retentionDeadlineSurvivesSnapshotAndRestore() throws Exception {
+    OperatorSubtaskState snapshot;
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedTwoInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch, ArrowBatch> harness =
+            keyedHarness(operator(1, 2000))) {
+      harness.setup(new ArrowBatchSerializer());
+      harness.open();
+      harness.setProcessingTime(5000); // deadline 8000 rides the snapshot
+      harness.processElement2(
+          new StreamRecord<>(build(allocator, brow(RowKind.INSERT, 1, 10, 100))));
+      snapshot = harness.snapshot(1L, 1L);
+      closeForwarded(harness);
+    }
+
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedTwoInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch, ArrowBatch>
+            restored = keyedHarness(operator(1, 2000))) {
+      restored.setup(new ArrowBatchSerializer());
+      restored.initializeState(snapshot);
+      restored.open();
+      // The restored deadline is the writer's absolute 8000 — not re-stamped from the restore
+      // clock (that would be 0 + 3000, already past by 6000): the version is still probeable...
+      restored.setProcessingTime(6000);
+      restored.processElement1(new StreamRecord<>(probe(allocator, prow(1, 1, 100))));
+      restored.processBothWatermarks(new Watermark(1000));
+      assertEquals(
+          List.of(row(RowKind.INSERT, 1L, 1L, 100L, 1L, 10L, 100L)), collect(restored));
+      // ...and gone once the clock reaches 8000 (a restore-time re-stamp would keep it to 9000).
+      restored.setProcessingTime(8000);
+      restored.processElement1(new StreamRecord<>(probe(allocator, prow(1, 2, 2000))));
+      restored.processBothWatermarks(new Watermark(Long.MAX_VALUE));
+      assertEquals(
+          List.of(row(RowKind.INSERT, 1L, 2L, 2000L, null, null, null)), collect(restored));
+      closeForwarded(restored);
     }
   }
 

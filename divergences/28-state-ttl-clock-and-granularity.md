@@ -2,7 +2,7 @@
 
 Native idle-state TTL (`table.exec.state.ttl`) replicates Flink's `StateTtlConfig` as the table
 runtime configures it — `OnCreateAndWrite`, `NeverReturnExpired`, expired ⟺ `last_write + ttl <=
-now` — but diverges from Flink's mechanics in four deliberate ways. All four are invisible outside
+now` — but diverges from Flink's mechanics in five deliberate ways. All five are invisible outside
 timing windows that wall-clock TTL already makes non-deterministic in Flink itself.
 
 ## Per-call clock sampling
@@ -15,6 +15,20 @@ the run-to-run jitter Flink's own per-access reads have. The win: the test harne
 service's clock, so expiry is deterministically testable at the operator level with no test-only
 hooks. Corollary: the mini-batch flush paths replay staged work under the bundle's last ingest
 clock instead of widening the flush ABI with a second clock argument.
+
+## Temporal join: lazy check for the cleanup timer
+
+Flink retention-bounds the temporal join not with per-value TTL but with one per-key
+processing-time cleanup timer (deadline `now + 1.5×retention`, moved under a hysteresis rule,
+clearing the key's whole state when it fires). The native operator keeps the same deadline in a
+per-key map and enforces it lazily — at each key touch, plus a once-per-retention silent sweep —
+instead of registering a timer. Firing emits nothing and only affects what later probes see, so
+the substitution is observably identical within the per-call clock sampling above. One narrowing:
+Flink also re-arms the deadline when a key's event-time timer fires; we replicate that for keys
+firing buffered probe rows, but a build-only key's single fire-time re-arm — observable only when
+the watermark trails the wall clock by more than half the retention — is not replicated, so such
+a key expires at the deadline its last push registered (never sooner than one full max retention
+after its last write).
 
 ## Retracting Top-N: whole-buffer expiry
 

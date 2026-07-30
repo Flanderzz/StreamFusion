@@ -2036,6 +2036,11 @@ public final class Native {
    * @param rightSchemaAddress C Data Interface address of the right input's (data-only) Arrow schema
    * @param predKinds residual non-equi predicate over the joined {@code [left.., right..]} row (empty
    *     ⇒ none); same encoding {@link #createFilterExpression} takes
+   * @param stateTtlMillis idle-state retention ({@code table.exec.state.ttl}); {@code <= 1}
+   *     disables cleaning (Flink's literal {@code minRetentionTime > 1}). Flink's temporal join
+   *     keeps ONE per-key processing-time cleanup deadline at 1.5x the retention (the planner's
+   *     max idle retention, derived natively) and clears the key's entire state — both sides —
+   *     when it fires
    * @param memoryBudgetBytes managed-memory budget (see {@link #createTumblingAggregator})
    */
   public static native long createTemporalJoiner(
@@ -2052,22 +2057,30 @@ public final class Native {
       long[] predLongs,
       double[] predDoubles,
       String[] predStrings,
+      long stateTtlMillis,
       long memoryBudgetBytes);
 
-  /** Buffers a probe-side (left) batch (no output until a watermark). */
+  /**
+   * Buffers a probe-side (left) batch (no output until a watermark). {@code nowMillis} is the
+   * operator's processing-time reading — the cleanup-deadline clock.
+   */
   public static native void pushLeftTemporalJoiner(
-      long handle, long inArrayAddress, long inSchemaAddress);
+      long handle, long inArrayAddress, long inSchemaAddress, long nowMillis);
 
   /** Folds a build-side (right) changelog batch into the versioned state (no output until a watermark). */
   public static native void pushRightTemporalJoiner(
-      long handle, long inArrayAddress, long inSchemaAddress);
+      long handle, long inArrayAddress, long inSchemaAddress, long nowMillis);
 
   /**
    * Advances the watermark, exporting the joined rows ({@code [left.., right..]} with a trailing
    * {@code $row_kind$}) for the buffered probe rows it has passed.
    */
   public static native void advanceTemporalJoiner(
-      long handle, long watermarkMillis, long outArrayAddress, long outSchemaAddress);
+      long handle,
+      long watermarkMillis,
+      long nowMillis,
+      long outArrayAddress,
+      long outSchemaAddress);
 
   /** Releases a temporal joiner handle. */
   public static native void closeTemporalJoiner(long handle);
@@ -2079,7 +2092,11 @@ public final class Native {
   public static native byte[][] snapshotTemporalJoinerPartitions(
       long handle, int maxParallelism, int[] timestampPrecisions);
 
-  /** Rebuilds a temporal joiner from a snapshot and returns a fresh handle. */
+  /**
+   * Rebuilds a temporal joiner from a snapshot and returns a fresh handle. {@code nowMillis}
+   * stamps a full max-retention deadline onto keys restored from a snapshot that carries no
+   * deadlines (a pre-retention writer) — Flink's enable-TTL migration.
+   */
   public static native long restoreTemporalJoiner(
       int[] leftKeys,
       int[] rightKeys,
@@ -2094,6 +2111,8 @@ public final class Native {
       long[] predLongs,
       double[] predDoubles,
       String[] predStrings,
+      long stateTtlMillis,
+      long nowMillis,
       byte[] snapshot,
       long memoryBudgetBytes);
 
@@ -2112,6 +2131,8 @@ public final class Native {
       long[] predLongs,
       double[] predDoubles,
       String[] predStrings,
+      long stateTtlMillis,
+      long nowMillis,
       byte[][] snapshots,
       long memoryBudgetBytes);
 

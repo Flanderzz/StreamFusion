@@ -40,14 +40,6 @@ final class TemporalJoinMatcher {
 
   /** The specific reason this temporal join is not accelerable, or null if it is. */
   static String unsupportedReason(StreamPhysicalTemporalJoin join) {
-    // Flink expires temporal-join state on per-key processing-time cleanup timers at 1.5× the
-    // retention — a coarser scheme than the per-value TTL the native operators implement, so a
-    // retention-bounded temporal join stays on the host.
-    if (IdleStateRetention.isEnabled(join)) {
-      return "temporal join: idle-state TTL (table.exec.state.ttl) runs on the host — Flink expires"
-          + " temporal-join state on 1.5x-retention cleanup timers the native operator does not"
-          + " reproduce";
-    }
     JoinSpec joinSpec = ((CommonPhysicalJoin) join).joinSpec();
     if (joinTypeCode(joinSpec.getJoinType()) < 0) {
       return "temporal join: only INNER/LEFT joins (Flink rejects RIGHT/FULL for temporal join)";
