@@ -111,11 +111,12 @@ class FlinkPaimonStateBackendSqlHarnessTest {
   }
 
   @Test
-  void updateFastTopNWithTtlStaysOnMemoryStateUnderPaimonBackend() throws Exception {
-    // The update-fast ranker (monotonic COUNT(*) DESC over a unique-keyed changelog) has no
-    // Paimon shape: its operator resolves no Paimon support regardless of TTL, so under the
-    // Paimon backend its state is memory-backed while the upstream aggregate keeps a TTL'd
-    // Paimon table — the mixed-route job must still match the host.
+  void updateFastTopNWithTtlOnPaimonBackendMatchesHost() throws Exception {
+    // The update-fast ranker (monotonic COUNT(*) DESC over a unique-keyed changelog) runs on its
+    // row-keyed Paimon map shape, TTL included: per-row-key clocks ride the ts column and
+    // hydration expires per entry (nothing expires under the 1h retention here; the native tests
+    // cover expiry, tombstones, and the ts-refresh re-persist). Both stateful operators —
+    // aggregate and rank — keep TTL'd Paimon tables; the operator harness test proves the route.
     Path input = Files.createTempDirectory("paimon-ttl-upfast-in");
     writeInput(input);
     NativeParity.assertChangelogParity(

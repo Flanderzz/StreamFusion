@@ -78,26 +78,24 @@ public class NativeColumnarTopNOperator extends AbstractNativeStatefulOperator<A
     this.stateTtlMillis = stateTtlMillis;
   }
 
-  /** Whether this is Flink's UpdatableTopNFunction shape, which has no Paimon store yet. */
+  /** Whether this is Flink's UpdatableTopNFunction shape (a unique-keyed changelog input). */
   private boolean updateFast() {
     return rowKeyColumns != null;
   }
 
   @Override
   protected PaimonNativeStateSupport resolvePaimonState(boolean rawStateRestored) {
-    // Both ordinary rankers run on the Paimon list store: the append-only buffer is capped at N,
+    // The ordinary rankers run on the Paimon list store: the append-only buffer is capped at N,
     // and the retracting buffer — unbounded, like Flink's own retractable Top-N state — rewrites a
     // touched partition once per checkpoint, strictly less than the per-record state rewrite
-    // Flink's RetractableTopNFunction pays on RocksDB. The update-fast ranker has no store shape
-    // yet, so its state is memory-backed under every configured state backend.
-    if (updateFast()) {
-      return null;
-    }
+    // Flink's RetractableTopNFunction pays on RocksDB. The update-fast ranker runs on its own
+    // row-keyed map shape (per-entry flushes under the row's unique-key bytes).
     // The support's retention is the compactor's per-row physical-cleanup bound. It is only
     // meaningful where every persisted row's ts is individually truthful — the append-only
-    // ranker's per-element clocks. The retracting ranker expires the WHOLE buffer on the head
-    // element's clock and persists ts 0 on the tail rows, so per-row cleanup would drop live
-    // state; its table advertises no retention (the operator still expires logically).
+    // ranker's per-element clocks, and the update-fast ranker's per-row-key clocks. The
+    // retracting ranker expires the WHOLE buffer on the head element's clock and persists ts 0 on
+    // the tail rows, so per-row cleanup would drop live state; its table advertises no retention
+    // (the operator still expires logically).
     long compactionTtlMillis = retracting ? 0 : stateTtlMillis;
     return resolvePaimon(
         rawStateRestored,
@@ -109,6 +107,35 @@ public class NativeColumnarTopNOperator extends AbstractNativeStatefulOperator<A
 
   @Override
   protected long createPaimonHandle(PaimonNativeStateSupport paimon) {
+    if (updateFast()) {
+      return withRowSchema(
+          rowType,
+          rowSchemaAddress ->
+              Native.createPaimonUpdateFastTopNRanker(
+                  partitionColumns,
+                  keyTimestampPrecisions(),
+                  rowKeyColumns,
+                  rowKeyTimestampPrecisions,
+                  sortIndices,
+                  sortAscending,
+                  sortNullsFirst,
+                  rowSchemaAddress,
+                  limit,
+                  outputRankNumber,
+                  stateTtlMillis,
+                  getProcessingTimeService().getCurrentProcessingTime(),
+                  memoryBudgetBytes(),
+                  paimon.tableDirectory(),
+                  maxParallelism(),
+                  NativeConfig.paimonBuckets(),
+                  NativeConfig.paimonFileFormat(),
+                  NativeConfig.paimonFileCompression(),
+                  paimon.sourceDirectories(),
+                  paimon.sourceSnapshotTokens(),
+                  paimon.keyGroupStart(),
+                  paimon.keyGroupEnd(),
+                  paimon.aligned()));
+    }
     return withRowSchema(
         rowType,
         rowSchemaAddress ->

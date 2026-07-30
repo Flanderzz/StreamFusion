@@ -38,6 +38,7 @@
 mod list;
 mod map;
 mod keep_first;
+mod updatable_topn;
 mod window_rank;
 mod row_buffer;
 mod over;
@@ -49,6 +50,7 @@ mod temporal_join;
 
 pub(crate) use list::*;
 pub(crate) use map::*;
+pub(crate) use updatable_topn::*;
 pub(crate) use keep_first::*;
 pub(crate) use window_rank::*;
 pub(crate) use row_buffer::*;
@@ -79,6 +81,7 @@ const KEY_COLUMN: &str = "k";
 const VALUE_KIND_COLUMN: &str = "_VALUE_KIND";
 
 const FIRED_COLUMN: &str = "fired";
+const INNER_RANK_COLUMN: &str = "ir";
 const KIND_COLUMN: &str = "kind";
 const MATCHED_COLUMN: &str = "matched";
 const ORD_COLUMN: &str = "ord";

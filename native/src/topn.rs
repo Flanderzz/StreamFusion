@@ -246,6 +246,23 @@ impl TopNStateCodec {
 }
 
 #[cfg(feature = "paimon-state")]
+impl TopNStateCodec {
+    /// Decodes one buffered payload row back to a scalar per column — the persisted form shared
+    /// by the list shape's elements and the update-fast shape's row-keyed entries.
+    pub(crate) fn encode_payload(&self, payload: &OwnedRow) -> Vec<ScalarValue> {
+        let parser = self.payload.parser();
+        let columns = self
+            .payload
+            .convert_rows([parser.parse(payload.row().data())])
+            .expect("decode top-n payload for persistence");
+        columns
+            .iter()
+            .map(|column| ScalarValue::try_from_array(column, 0).expect("top-n state scalar"))
+            .collect()
+    }
+}
+
+#[cfg(feature = "paimon-state")]
 impl crate::state::PaimonListCodec for TopNStateCodec {
     type Entry = TopNRow;
 
@@ -262,15 +279,7 @@ impl crate::state::PaimonListCodec for TopNStateCodec {
     }
 
     fn encode(&self, entry: &TopNRow) -> Vec<ScalarValue> {
-        let parser = self.payload.parser();
-        let columns = self
-            .payload
-            .convert_rows([parser.parse(entry.payload.row().data())])
-            .expect("decode top-n payload for persistence");
-        columns
-            .iter()
-            .map(|column| ScalarValue::try_from_array(column, 0).expect("top-n state scalar"))
-            .collect()
+        self.encode_payload(&entry.payload)
     }
 
     fn decode(&self, scalars: &[ScalarValue]) -> TopNRow {
@@ -1809,7 +1818,7 @@ pub(crate) struct UpdatableRow {
     pub(crate) ts_ms: i64,
 }
 
-fn updatable_entry_bytes(entry: &UpdatableRow) -> usize {
+pub(crate) fn updatable_entry_bytes(entry: &UpdatableRow) -> usize {
     entry.sort.row().as_ref().len()
         + entry.payload.row().as_ref().len()
         + entry.row_key.len()
@@ -1842,7 +1851,9 @@ fn prune_expired_updatable_rows(
 /// key/sort/row columns, so restore stays a byte wrap like the other rankers'.
 const RAW_SNAPSHOT_ROW_KEY: &str = "__row_key__";
 
-pub(crate) struct UpdatableTopNRanker {
+pub(crate) struct UpdatableTopNRanker<
+    S: KeyedStateStore<Vec<UpdatableRow>> = MemoryUpdatableTopNStore,
+> {
     partition_columns: Vec<usize>,
     key_timestamp_precisions: Vec<i32>,
     row_key_columns: Vec<usize>,
@@ -1855,11 +1866,14 @@ pub(crate) struct UpdatableTopNRanker {
     last_sweep_ms: i64,
     schema: Option<SchemaRef>,
     converters: Option<TopNConverters>,
-    // Memory-backed only for now: no Paimon store shape yet, so under a persistent state backend
-    // this state still snapshots as raw keyed-state blobs.
-    groups: MemoryStateStore<Vec<UpdatableRow>>,
+    // Keyed like the other rankers' stores (see TopNRanker::groups); the buffer stays a Vec
+    // sorted by the memcomparable sort key — the binary-searched hot path — on every backend.
+    groups: S,
     pub(crate) memory: OperatorMemory,
 }
+
+/// The resident default backend for the update-fast buffer store (see `state/` for the seam).
+pub(crate) type MemoryUpdatableTopNStore = MemoryStateStore<Vec<UpdatableRow>>;
 
 impl UpdatableTopNRanker {
     pub(crate) fn new(
@@ -1886,6 +1900,52 @@ impl UpdatableTopNRanker {
             groups: MemoryStateStore::default(),
             memory: OperatorMemory::unaccounted(),
         }
+    }
+}
+
+impl<S: KeyedStateStore<Vec<UpdatableRow>>> UpdatableTopNRanker<S> {
+    /// Moves this freshly built (empty, memory-backed) ranker's configuration onto another state
+    /// backend (see the append-only ranker's `with_backend`).
+    pub(crate) fn with_backend<T: KeyedStateStore<Vec<UpdatableRow>>>(
+        self,
+        groups: T,
+    ) -> UpdatableTopNRanker<T> {
+        UpdatableTopNRanker {
+            partition_columns: self.partition_columns,
+            key_timestamp_precisions: self.key_timestamp_precisions,
+            row_key_columns: self.row_key_columns,
+            row_key_timestamp_precisions: self.row_key_timestamp_precisions,
+            sort_columns: self.sort_columns,
+            limit: self.limit,
+            output_rank_number: self.output_rank_number,
+            ttl_ms: self.ttl_ms,
+            last_sweep_ms: self.last_sweep_ms,
+            schema: self.schema,
+            converters: self.converters,
+            groups,
+            memory: self.memory,
+        }
+    }
+
+    /// Attaches the managed-memory budget for a backend that starts with nothing resident.
+    pub(crate) fn with_read_through_budget(
+        mut self,
+        budget_bytes: i64,
+    ) -> Result<Self, DataFusionError> {
+        self.memory.attach("update-fast-top-n", budget_bytes, 0)?;
+        Ok(self)
+    }
+
+    /// The backing store, for backend-specific control paths (checkpointing a persistent store).
+    pub(crate) fn store_mut(&mut self) -> &mut S {
+        &mut self.groups
+    }
+
+    /// Pre-installs a converter set built from declared types (the Paimon path, which must share
+    /// the codec's converters); the lazy first-batch build then never runs.
+    pub(crate) fn with_converters(mut self, converters: TopNConverters) -> Self {
+        self.converters = Some(converters);
+        self
     }
 
     /// Sets the idle-state retention (`table.exec.state.ttl`) in millis; 0 (Flink's default)
@@ -1914,20 +1974,6 @@ impl UpdatableTopNRanker {
         if reclaimed != 0 {
             self.memory.record(-reclaimed);
         }
-    }
-
-    /// Bounds the per-partition buffers by the operator's managed-memory budget (negative =
-    /// unaccounted), accounting any restored buffers immediately.
-    fn with_memory_budget(mut self, budget_bytes: i64) -> Result<Self, DataFusionError> {
-        let state: usize = self
-            .groups
-            .iter()
-            .map(|(key, buffer)| {
-                byte_key_bytes(&key.0) + buffer.iter().map(updatable_entry_bytes).sum::<usize>()
-            })
-            .sum();
-        self.memory.attach("update-fast-top-n", budget_bytes, state)?;
-        Ok(self)
     }
 
     /// `now_ms` is the host's wall-clock reading for this call (only read when state TTL is on).
@@ -2112,6 +2158,24 @@ impl UpdatableTopNRanker {
             out_kinds,
             out_ranks,
         ))
+    }
+}
+
+/// The raw keyed-state snapshot/restore surface exists only on the memory backend — a persistent
+/// store checkpoints through its own commit path instead of materializing the key space.
+impl UpdatableTopNRanker {
+    /// Bounds the per-partition buffers by the operator's managed-memory budget (negative =
+    /// unaccounted), accounting any restored buffers immediately.
+    fn with_memory_budget(mut self, budget_bytes: i64) -> Result<Self, DataFusionError> {
+        let state: usize = self
+            .groups
+            .iter()
+            .map(|(key, buffer)| {
+                byte_key_bytes(&key.0) + buffer.iter().map(updatable_entry_bytes).sum::<usize>()
+            })
+            .sum();
+        self.memory.attach("update-fast-top-n", budget_bytes, state)?;
+        Ok(self)
     }
 
     pub(crate) fn snapshot_partitions(&self, max_parallelism: usize) -> BTreeMap<i32, Vec<u8>> {

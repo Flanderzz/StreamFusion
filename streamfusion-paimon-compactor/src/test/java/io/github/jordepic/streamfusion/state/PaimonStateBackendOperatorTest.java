@@ -443,6 +443,104 @@ class PaimonStateBackendOperatorTest {
     }
   }
 
+  private static final RowType UPDATE_FAST_ROW =
+      RowType.of(
+          new LogicalType[] {new BigIntType(), new BigIntType(), new BigIntType()},
+          new String[] {"p", "k", "s"});
+
+  /**
+   * The update-fast Top-N rides its row-keyed Paimon map shape (PK = the row's unique-key bytes,
+   * with the inner rank among sort-key ties persisted alongside the payload): its checkpoint is
+   * an incremental Paimon handle, and after restore a new version of a buffered row key MOVES the
+   * row — retracting its old payload — which only works if the persisted row-key identity and the
+   * tie order survived the round trip.
+   */
+  @Test
+  void updateFastTopNCheckpointsAndRestoresRowKeyedMoves() throws Exception {
+    OperatorSubtaskState snapshot;
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness =
+            updateFastTopNHarness()) {
+      harness.setStateBackend(new PaimonStateBackend());
+      harness.setup(new ArrowBatchSerializer());
+      harness.open();
+
+      // Two row keys tie on the sort key; arrival order decides who sits at rank 2.
+      harness.processElement(
+          new StreamRecord<>(
+              new ArrowBatch(
+                  RowDataArrowConverter.write(
+                      List.of(GenericRowData.of(9L, 7L, 5L), GenericRowData.of(9L, 8L, 5L)),
+                      UPDATE_FAST_ROW,
+                      allocator))));
+      collectUpdateFast(harness);
+      snapshot = harness.snapshot(1, 1);
+      paimonHandle(snapshot);
+      harness.notifyOfCompletedCheckpoint(1);
+    }
+
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness =
+            updateFastTopNHarness()) {
+      harness.setStateBackend(new PaimonStateBackend());
+      harness.setup(new ArrowBatchSerializer());
+      harness.initializeState(snapshot);
+      harness.open();
+
+      // Row key (9, 7)'s next version improves its sort key: the hydrated entry moves, retracting
+      // the old payload — a fresh insert would instead have evicted the (9, 8) tie row.
+      harness.processElement(
+          new StreamRecord<>(
+              new ArrowBatch(
+                  RowDataArrowConverter.write(
+                      List.of(GenericRowData.of(9L, 7L, 1L)), UPDATE_FAST_ROW, allocator))));
+      assertEquals(
+          List.of(
+              List.of(RowKind.INSERT, 9L, 7L, 1L), List.of(RowKind.DELETE, 9L, 7L, 5L)),
+          collectUpdateFast(harness));
+    }
+  }
+
+  private static KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch>
+      updateFastTopNHarness() throws Exception {
+    NativeColumnarTopNOperator operator =
+        new NativeColumnarTopNOperator(
+            new int[] {0},
+            new int[] {-1},
+            UPDATE_FAST_ROW,
+            new int[] {2},
+            new int[] {1},
+            new int[] {0},
+            0L,
+            2L,
+            false,
+            false,
+            new int[] {0, 1},
+            new int[] {-1, -1},
+            false,
+            -1,
+            0,
+            MAX_PARALLELISM);
+    return new KeyedOneInputStreamOperatorTestHarness<>(
+        operator, batch -> 0, Types.INT, MAX_PARALLELISM, 1, 0);
+  }
+
+  private static List<List<Object>> collectUpdateFast(
+      KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness) {
+    List<List<Object>> rows = new ArrayList<>();
+    while (!harness.getOutput().isEmpty()) {
+      Object event = harness.getOutput().poll();
+      if (event instanceof StreamRecord) {
+        try (VectorSchemaRoot root = ((ArrowBatch) ((StreamRecord<?>) event).getValue()).root()) {
+          for (RowData row : RowDataArrowConverter.read(root, UPDATE_FAST_ROW)) {
+            rows.add(List.of(row.getRowKind(), row.getLong(0), row.getLong(1), row.getLong(2)));
+          }
+        }
+      }
+    }
+    return rows;
+  }
+
   /**
    * The updating join rides two Paimon tables under one backend (the analog of Flink's two named
    * join states as two column families in one RocksDB): one incremental handle carries both, and a

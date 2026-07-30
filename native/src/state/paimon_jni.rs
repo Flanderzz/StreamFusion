@@ -876,10 +876,12 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_closePaimonCh
 
 /// The Paimon-backed Top-N handle: append-only (bounded buffer) or retracting (full buffer, so a
 /// retracted top row's successor can be promoted), both on the same list store and codec — the
-/// buffer shape is identical, only its growth policy differs.
+/// buffer shape is identical, only its growth policy differs — plus update-fast (unique-keyed
+/// changelog without retractions) on the row-keyed map shape.
 enum PaimonTopNRanker {
     Append(TopNRanker<PaimonTopNStore>),
     Retract(RetractableTopNRanker<PaimonTopNStore>),
+    UpdateFast(UpdatableTopNRanker<PaimonUpdatableTopNStore>),
 }
 
 impl PaimonTopNRanker {
@@ -887,6 +889,7 @@ impl PaimonTopNRanker {
         match self {
             PaimonTopNRanker::Append(r) => r.store_mut().set_clock(now_ms),
             PaimonTopNRanker::Retract(r) => r.store_mut().set_clock(now_ms),
+            PaimonTopNRanker::UpdateFast(r) => r.store_mut().set_clock(now_ms),
         }
     }
 
@@ -894,6 +897,7 @@ impl PaimonTopNRanker {
         match self {
             PaimonTopNRanker::Append(r) => r.push(batch, now_ms),
             PaimonTopNRanker::Retract(r) => r.push(batch, now_ms),
+            PaimonTopNRanker::UpdateFast(r) => r.push(batch, now_ms),
         }
     }
 
@@ -901,6 +905,8 @@ impl PaimonTopNRanker {
         match self {
             PaimonTopNRanker::Append(r) => r.flush_net_diff(),
             PaimonTopNRanker::Retract(r) => r.flush_net_diff(),
+            // The update-fast ranker has no net-diff staging; every push emitted its diff already.
+            PaimonTopNRanker::UpdateFast(_) => RecordBatch::new_empty(Arc::new(Schema::empty())),
         }
     }
 
@@ -908,6 +914,7 @@ impl PaimonTopNRanker {
         match self {
             PaimonTopNRanker::Append(r) => r.store_mut().checkpoint(),
             PaimonTopNRanker::Retract(r) => r.store_mut().checkpoint(),
+            PaimonTopNRanker::UpdateFast(r) => r.store_mut().checkpoint(),
         }
     }
 
@@ -915,6 +922,7 @@ impl PaimonTopNRanker {
         match self {
             PaimonTopNRanker::Append(r) => r.memory.state_bytes,
             PaimonTopNRanker::Retract(r) => r.memory.state_bytes,
+            PaimonTopNRanker::UpdateFast(r) => r.memory.state_bytes,
         }
     }
 
@@ -922,6 +930,7 @@ impl PaimonTopNRanker {
         match self {
             PaimonTopNRanker::Append(r) => r.staging_bytes(),
             PaimonTopNRanker::Retract(r) => r.staging_bytes(),
+            PaimonTopNRanker::UpdateFast(_) => 0, // no net-diff staging
         }
     }
 
@@ -929,6 +938,7 @@ impl PaimonTopNRanker {
         match self {
             PaimonTopNRanker::Append(r) => r.staged_partitions(),
             PaimonTopNRanker::Retract(r) => r.staged_partitions(),
+            PaimonTopNRanker::UpdateFast(_) => 0, // no net-diff staging
         }
     }
 }
@@ -1030,6 +1040,116 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonT
                     .with_read_through_budget(memory_budget_bytes)
                     .map(PaimonTopNRanker::Append)
             }
+        });
+        boxed_or_throw(&mut env, ranker)
+    })
+}
+
+/// `createUpdateFastTopNRanker` on the Paimon state backend: the row-keyed map shape (see
+/// `PaimonUpdatableTopNStore`), served by the same push/flush/checkpoint/close entry points as
+/// the other Paimon-backed rankers.
+#[no_mangle]
+pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonUpdateFastTopNRanker<
+    'local,
+>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    partition_columns: JIntArray<'local>,
+    key_timestamp_precisions: JIntArray<'local>,
+    row_key_columns: JIntArray<'local>,
+    row_key_timestamp_precisions: JIntArray<'local>,
+    sort_indices: JIntArray<'local>,
+    sort_ascending: JIntArray<'local>,
+    sort_nulls_first: JIntArray<'local>,
+    row_schema_address: jlong,
+    limit: jlong,
+    output_rank_number: jboolean,
+    state_ttl_millis: jlong,
+    now_millis: jlong,
+    memory_budget_bytes: jlong,
+    table_directory: JString<'local>,
+    max_parallelism: jint,
+    buckets: jint,
+    file_format: JString<'local>,
+    file_compression: JString<'local>,
+    source_directories: JObjectArray<'local>,
+    source_snapshot_tokens: JObjectArray<'local>,
+    key_group_start: jint,
+    key_group_end: jint,
+    aligned: jboolean,
+) -> jlong {
+    crate::bridge::jni_guard(env, move |mut env| {
+        let partitions = read_columns(&env, &partition_columns);
+        let partition_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
+            .into_iter()
+            .map(|precision| precision as i32)
+            .collect();
+        let row_keys = read_columns(&env, &row_key_columns);
+        let row_key_precisions: Vec<i32> = read_int_array(&env, &row_key_timestamp_precisions)
+            .into_iter()
+            .map(|precision| precision as i32)
+            .collect();
+        let sort = read_sort_columns(&env, &sort_indices, &sort_ascending, &sort_nulls_first);
+        let row_types: Vec<DataType> = import_schema(row_schema_address)
+            .fields()
+            .iter()
+            .map(|field| field.data_type().clone())
+            .collect();
+        let table_dir = read_string(&mut env, &table_directory);
+        let format = read_string(&mut env, &file_format);
+        let compression = read_string(&mut env, &file_compression);
+        let source_dirs: Vec<String> = read_strings(&mut env, &source_directories)
+            .into_iter()
+            .flatten()
+            .collect();
+        let source_snapshots: Vec<i64> = read_strings(&mut env, &source_snapshot_tokens)
+            .into_iter()
+            .flatten()
+            .map(|token| token.parse::<i64>().expect("single-table paimon snapshot token"))
+            .collect();
+
+        let codec = TopNStateCodec::new(row_types, sort.clone());
+        // See createPaimonTopNRanker: the ranker's converters are built from — and share — the
+        // codec's, so hydrated rows and operator-built rows are interchangeable.
+        let converters = TopNConverters::from_codec(&codec, &partitions);
+        let config = PaimonStoreConfig {
+            table_dir,
+            max_parallelism: max_parallelism as usize,
+            buckets: buckets as usize,
+            file_format: format,
+            file_compression: compression,
+            deletion_vectors: true,
+            ttl_ms: state_ttl_millis.max(0),
+        };
+        let store = if source_dirs.is_empty() {
+            PaimonUpdatableTopNStore::create(config, codec)
+        } else {
+            let sources: Vec<(String, i64)> =
+                source_dirs.into_iter().zip(source_snapshots).collect();
+            PaimonUpdatableTopNStore::open_merged(
+                config,
+                codec,
+                &sources,
+                key_group_start..=key_group_end,
+                aligned != 0,
+                now_millis,
+            )
+        };
+        let ranker = store.and_then(|store| {
+            UpdatableTopNRanker::new(
+                partitions,
+                partition_precisions,
+                row_keys,
+                row_key_precisions,
+                sort,
+                limit,
+                output_rank_number != 0,
+            )
+            .with_state_ttl(state_ttl_millis)
+            .with_converters(converters)
+            .with_backend(store)
+            .with_read_through_budget(memory_budget_bytes)
+            .map(PaimonTopNRanker::UpdateFast)
         });
         boxed_or_throw(&mut env, ranker)
     })

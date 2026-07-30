@@ -336,8 +336,7 @@ persistent-backend mechanics.
   **update-fast rank with an `OFFSET`** (the update-fast shape — Flink plans it when the input has a
   unique key and the sort key is inferred monotonic, e.g. ranking by a descending `COUNT(*)` — is
   otherwise native, mirroring `UpdatableTopNFunction`'s bounded state and `FastTop1Function`'s
-  drop-non-improving semantics for `rn <= 1`; its state is memory-backed under every state backend,
-  with no Paimon store shape yet). (Insert-only and retracting changelog input, an `OFFSET` on the
+  drop-non-improving semantics for `rn <= 1`). (Insert-only and retracting changelog input, an `OFFSET` on the
   non-update-fast shapes, a projected rank number, and idle-state TTL (see the note above) are
   all handled. `RANK`/`DENSE_RANK` never
   reach us — Flink rejects them in streaming.)
@@ -691,10 +690,9 @@ expiry, plus a periodic full compaction for cold files (the `periodicCompactionS
 Restores migrate across a TTL flip: enabling retention stamps existing rows at restore time (a
 full retention from now), disabling it sheds the timestamps. Timestamps are absolute epoch millis,
 so a job restored after downtime longer than the retention expires the affected keys on first
-touch — silently, like everything else about expiry. Two shapes stay conservative: the update-fast
-ranker has no persistent shape (memory checkpoint route, TTL'd there), and the retracting ranker
-advertises no retention to the compactor — its whole-buffer clock lives on the head row alone, so
-per-row physical cleanup would be unsound; its expiry is read-side only.
+touch — silently, like everything else about expiry. One shape stays conservative: the retracting
+ranker advertises no retention to the compactor — its whole-buffer clock lives on the head row
+alone, so per-row physical cleanup would be unsound; its expiry is read-side only.
 
 What runs on the Paimon backend today, and every condition that keeps an operator on memory state
 (memory state remains correct — these are not query fallbacks, and the query still accelerates;
@@ -702,13 +700,16 @@ the operator just checkpoints its state the old way, in full):
 
 - **Operator coverage** — the non-windowed `GROUP BY` aggregate (single- and two-phase global),
   the eager deduplicator (rowtime/proctime keep-last and proctime keep-first), the changelog
-  normalizer, **both streaming Top-N variants** — append-only and retracting — on one list store
-  (one typed table row per buffered element under a positional third key column, so buffer
+  normalizer, **all three streaming Top-N variants** — append-only and retracting on one list
+  store (one typed table row per buffered element under a positional third key column, so buffer
   positions — tie order, which decides evictions and promotions — survive restore exactly; the
   analog of Flink's `ListState`; the retracting variant persists its full never-truncated buffer,
   and its touched-partition rewrite once per checkpoint is strictly less state writing than the
-  per-record `SortedMap` rewrite Flink's own retractable Top-N pays on RocksDB; the update-fast
-  variant has no Paimon store shape yet and stays memory-backed), and the
+  per-record `SortedMap` rewrite Flink's own retractable Top-N pays on RocksDB), and the
+  update-fast variant on its own row-keyed map shape (one typed table row per buffered entry
+  under the row's unique-key bytes, with its inner rank among sort-key ties persisted alongside
+  the payload — the analog of Flink's `MapState<rowKey, (row, innerRank)>` — flushed per entry
+  against the hydrated image, so an in-place payload replace rewrites one row), and the
   **updating join** (all kinds: INNER/LEFT/RIGHT/FULL/SEMI/ANTI; one table per side under the
   operator's backend — the analog of Flink's two named join states — each stored row persisted as
   typed columns plus its appear-count and degree under a content-addressed third key column, the

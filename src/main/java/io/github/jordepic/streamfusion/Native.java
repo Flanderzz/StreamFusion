@@ -1648,6 +1648,49 @@ public final class Native {
       int keyGroupEnd,
       boolean aligned);
 
+  /**
+   * {@code createUpdateFastTopNRanker} on the Paimon state backend: the row-keyed map shape,
+   * mirroring Flink's {@code UpdatableTopNFunction} state ({@code MapState<rowKey, (row,
+   * innerRank)>}) — one typed table row per buffered entry under PK {@code [kg, k, r]}, {@code r}
+   * the row's unique-key BinaryRow bytes, plus its inner rank among byte-equal sort-key ties (the
+   * sort key itself re-derives from the payload), so the sorted buffer and its tie order survive
+   * restore exactly. The flush is per entry against the hydrated image: an in-place payload
+   * replace — the shape's dominant write — rewrites one row.
+   *
+   * <p>With a nonzero {@code stateTtlMillis} each entry's last-write wall clock rides a trailing
+   * {@code ts} column and hydration expires per entry (the ranker's own granularity IS the
+   * row-key entry, so every persisted clock is individually truthful — unlike the retracting
+   * shape, this one may advertise its retention for physical cleanup). {@code nowMillis} stamps a
+   * restored pre-TTL table's rows with a full retention from restore (Flink's enable-TTL
+   * migration). The handle is served by the shared {@code pushPaimonTopNRanker} /
+   * {@code flushPaimonTopNRanker} / {@code checkpointPaimonTopNRanker} /
+   * {@code closePaimonTopNRanker} entry points.
+   */
+  public static native long createPaimonUpdateFastTopNRanker(
+      int[] partitionColumns,
+      int[] keyTimestampPrecisions,
+      int[] rowKeyColumns,
+      int[] rowKeyTimestampPrecisions,
+      int[] sortIndices,
+      int[] sortAscending,
+      int[] sortNullsFirst,
+      long rowSchemaAddress,
+      long limit,
+      boolean outputRankNumber,
+      long stateTtlMillis,
+      long nowMillis,
+      long memoryBudgetBytes,
+      String tableDirectory,
+      int maxParallelism,
+      int buckets,
+      String fileFormat,
+      String fileCompression,
+      String[] sourceDirectories,
+      String[] sourceSnapshotTokens,
+      int keyGroupStart,
+      int keyGroupEnd,
+      boolean aligned);
+
   /** {@code pushTopNRanker} for a Paimon-backed handle. */
   public static native void pushPaimonTopNRanker(
       long handle,

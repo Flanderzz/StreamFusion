@@ -6944,6 +6944,340 @@ mod paimon_state {
     }
 
     // -----------------------------------------------------------------------------------------
+    // Update-fast Top-N on the row-keyed MAP shape: one typed table row per buffered entry under
+    // PK [kg, k, r] — r the row's unique-key bytes — plus its inner rank among byte-equal
+    // sort-key ties, so the sorted buffer (and its tie order) reassembles exactly on hydration;
+    // the flush diffs per entry against the hydrated image.
+    // -----------------------------------------------------------------------------------------
+
+    // A `[p, k, s, v]` batch: partition, unique row key, monotonic sort key, and a payload
+    // column outside both — so an in-place replace (same key, same sort, new v) is expressible.
+    fn uf4_batch(p: Vec<i64>, k: Vec<i64>, s: Vec<i64>, v: Vec<i64>) -> RecordBatch {
+        RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("p", DataType::Int64, false),
+                Field::new("k", DataType::Int64, false),
+                Field::new("s", DataType::Int64, true),
+                Field::new("v", DataType::Int64, true),
+            ])),
+            vec![
+                Arc::new(Int64Array::from(p)),
+                Arc::new(Int64Array::from(k)),
+                Arc::new(Int64Array::from(s)),
+                Arc::new(Int64Array::from(v)),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn uf_codec() -> TopNStateCodec {
+        TopNStateCodec::new(vec![DataType::Int64; 4], vec![asc(2)])
+    }
+
+    /// Update-fast Top-`limit` partitioned by column 0, row-keyed by columns 0/1, ordered by
+    /// column 2 ascending, no rank projection — on the memory backend.
+    fn memory_uf(limit: i64) -> UpdatableTopNRanker {
+        UpdatableTopNRanker::new(
+            vec![0],
+            vec![-1],
+            vec![0, 1],
+            vec![-1, -1],
+            vec![asc(2)],
+            limit,
+            false,
+        )
+    }
+
+    /// `memory_uf` on a fresh Paimon store (TTL when `ttl_ms > 0`).
+    fn paimon_uf(dir: &str, limit: i64, ttl_ms: i64) -> UpdatableTopNRanker<PaimonUpdatableTopNStore> {
+        let codec = uf_codec();
+        let converters = TopNConverters::from_codec(&codec, &[0]);
+        let store = PaimonUpdatableTopNStore::create(ttl_config(dir, ttl_ms), codec).unwrap();
+        memory_uf(limit)
+            .with_state_ttl(ttl_ms)
+            .with_converters(converters)
+            .with_backend(store)
+    }
+
+    /// `memory_uf` restored from one materialized checkpoint (aligned), clock set to `now`.
+    fn paimon_uf_merged(
+        dst: &str,
+        ttl_ms: i64,
+        src: &str,
+        snapshot_id: i64,
+        limit: i64,
+        now: i64,
+    ) -> UpdatableTopNRanker<PaimonUpdatableTopNStore> {
+        let codec = uf_codec();
+        let converters = TopNConverters::from_codec(&codec, &[0]);
+        let store = PaimonUpdatableTopNStore::open_merged(
+            ttl_config(dst, ttl_ms),
+            codec,
+            &[(src.to_string(), snapshot_id)],
+            0..=127,
+            true,
+            now,
+        )
+        .unwrap();
+        let mut ranker = memory_uf(limit)
+            .with_state_ttl(ttl_ms)
+            .with_converters(converters)
+            .with_backend(store);
+        ranker.store_mut().set_clock(now);
+        ranker
+    }
+
+    #[test]
+    fn paimon_update_fast_topn_matches_memory_across_checkpoints() {
+        let dir = temp_dir("uftopn-parity");
+        let mut paimon = paimon_uf(&dir, 2, 0);
+        let mut memory = memory_uf(2);
+
+        // Inserts (with a beyond-N drop), an in-place payload replace, a row-key move, and an
+        // insert whose eviction depends on the moved order — each landing on a hydrated buffer.
+        let steps: Vec<RecordBatch> = vec![
+            uf4_batch(vec![1, 1, 1], vec![7, 8, 9], vec![10, 20, 30], vec![100, 200, 300]),
+            uf4_batch(vec![1], vec![7], vec![10], vec![101]),
+            uf4_batch(vec![1], vec![8], vec![5], vec![201]),
+            uf4_batch(vec![1, 2], vec![10, 1], vec![7, 1], vec![400, 500]),
+        ];
+        for (i, batch) in steps.iter().enumerate() {
+            let memory_out = memory.push(batch, 0).unwrap();
+            let paimon_out = paimon.push(batch, 0).unwrap();
+            assert_eq!(memory_out.num_rows(), paimon_out.num_rows(), "step {i}");
+            if memory_out.num_rows() > 0 {
+                assert_same_output(&memory_out, &paimon_out);
+            }
+            // A checkpoint between every step forces every probe through the table.
+            paimon.store_mut().checkpoint().unwrap();
+        }
+    }
+
+    #[test]
+    fn paimon_update_fast_top1_ttl_matches_memory_across_checkpoints() {
+        let dir = temp_dir("uftop1-parity");
+        let mut paimon = paimon_uf(&dir, 1, 1000);
+        let mut memory = memory_uf(1).with_state_ttl(1000);
+
+        // FastTop1 semantics across barriers: a non-improving record is dropped WITHOUT a state
+        // write (no refresh persists), so once the entry's original clock elapses even a strictly
+        // worse row becomes the new top-1 — after hydrating through the table.
+        let steps: Vec<(RecordBatch, i64)> = vec![
+            (uf4_batch(vec![1], vec![7], vec![10], vec![70]), 5000),
+            (uf4_batch(vec![1], vec![8], vec![20], vec![80]), 5900),
+            (uf4_batch(vec![1], vec![8], vec![20], vec![80]), 6000),
+        ];
+        for (i, (batch, now)) in steps.iter().enumerate() {
+            paimon.store_mut().set_clock(*now);
+            let memory_out = memory.push(batch, *now).unwrap();
+            let paimon_out = paimon.push(batch, *now).unwrap();
+            assert_eq!(memory_out.num_rows(), paimon_out.num_rows(), "step {i}");
+            if memory_out.num_rows() > 0 {
+                assert_same_output(&memory_out, &paimon_out);
+            }
+            paimon.store_mut().checkpoint().unwrap();
+        }
+    }
+
+    #[test]
+    fn paimon_update_fast_topn_restores_tie_order_and_row_moves() {
+        let dir = temp_dir("uftopn-tie-src");
+        let mut ranker = paimon_uf(&dir, 2, 0);
+        // Two row keys tie on the sort key; arrival order ([7, 8]) decides who leaves first.
+        ranker
+            .push(&uf4_batch(vec![9, 9], vec![7, 8], vec![5, 5], vec![70, 80]), 0)
+            .unwrap();
+        let manifest = ranker.store_mut().checkpoint().unwrap();
+        let src = temp_dir("uftopn-tie-mat");
+        materialize(&manifest, &dir, &src);
+        let mut restored = paimon_uf_merged(
+            &temp_dir("uftopn-tie-dst"),
+            0,
+            &src,
+            manifest.snapshot_id,
+            2,
+            0,
+        );
+
+        // A better row evicts rank 2 — which must be the LATER arrival of the tie (k=8), so the
+        // hydrated buffer preserved [7, 8] exactly (the inner-rank column), not just the multiset.
+        let out = restored.push(&uf4_batch(vec![9], vec![6], vec![1], vec![60]), 0).unwrap();
+        assert_eq!(row_kinds(&out), vec![0, 3]);
+        assert_eq!(values(&out, 3), vec![60, 80], "-D must hit the later tie arrival");
+
+        // A new version of a restored row key MOVES it — retracting the old payload — rather than
+        // inserting fresh: the persisted row-key identity survived the round trip.
+        let out = restored.push(&uf4_batch(vec![9], vec![7], vec![0], vec![71]), 0).unwrap();
+        assert_eq!(row_kinds(&out), vec![0, 3]);
+        assert_eq!(values(&out, 3), vec![71, 70]);
+    }
+
+    /// See `paimon_rescale_clips_to_the_key_group_range`: the same restore-time clip on the
+    /// update-fast shape's compound primary key.
+    #[test]
+    fn paimon_update_fast_topn_rescale_clips_to_the_key_group_range() {
+        let dir = temp_dir("uftopn-clip-src");
+        let mut ranker = paimon_uf(&dir, 2, 0);
+        let keys: Vec<i64> = (1..=32).collect();
+        let sorts: Vec<i64> = keys.iter().map(|k| k * 10).collect();
+        ranker
+            .push(&uf4_batch(keys.clone(), keys.clone(), sorts.clone(), sorts), 0)
+            .unwrap();
+        let manifest = ranker.store_mut().checkpoint().unwrap();
+
+        let src = temp_dir("uftopn-clip-mat");
+        materialize(&manifest, &dir, &src);
+        let merged_dir = temp_dir("uftopn-clip-dst");
+        let mut store = PaimonUpdatableTopNStore::open_merged(
+            config(&merged_dir),
+            uf_codec(),
+            &[(src, manifest.snapshot_id)],
+            0..=63,
+            false,
+            0,
+        )
+        .unwrap();
+
+        let probe = uf4_batch(keys.clone(), keys.clone(), vec![0; keys.len()], vec![0; keys.len()]);
+        store.begin_batch(&probe, &[0], &[-1]).unwrap();
+        let mut encoder = BinaryRowBatchEncoder::new(&probe, &[0], &[-1]);
+        let mut survivors = 0usize;
+        for (row, key) in keys.iter().enumerate() {
+            let bytes = encoder.encode(row);
+            let kg = flink_key_group(hash_bytes_by_words(bytes), 128) as i32;
+            if (0..=63).contains(&kg) {
+                assert!(
+                    store.get(bytes).is_some(),
+                    "partition {key} (group {kg}) is in range and must survive the clip"
+                );
+                survivors += 1;
+            } else {
+                assert!(
+                    store.get(bytes).is_none(),
+                    "partition {key} (group {kg}) is out of range and must be clipped"
+                );
+            }
+        }
+        assert!(survivors > 0 && survivors < keys.len(), "the split must be non-trivial");
+    }
+
+    /// Per-row-key expiry at hydration (delete-on-read): the expired committed entry reads as
+    /// absent — its row key's next record inserts fresh, silently — while its tombstone commits
+    /// at the next barrier.
+    #[test]
+    fn paimon_update_fast_topn_ttl_expires_on_hydration_and_tombstones() {
+        let dir = temp_dir("uftopn-ttl");
+        let mut ranker = paimon_uf(&dir, 2, 1000);
+        ranker.store_mut().set_clock(5000);
+        ranker.push(&uf4_batch(vec![1], vec![7], vec![5], vec![70]), 5000).unwrap();
+        ranker.store_mut().checkpoint().unwrap();
+
+        // ts + ttl == now: the hydrated entry expires, so the new row seeds alone — no -D of the
+        // expired payload (expiry is silent).
+        ranker.store_mut().set_clock(6000);
+        let out = ranker.push(&uf4_batch(vec![1], vec![8], vec![9], vec![80]), 6000).unwrap();
+        assert_eq!(row_kinds(&out), vec![0]);
+        assert_eq!(values(&out, 3), vec![80]);
+        let cp = ranker.store_mut().checkpoint().unwrap();
+
+        // The expired entry stayed in the flush base, so the barrier tombstoned exactly it: a
+        // reader whose clock predates the expiry sees only the survivor.
+        let mut store =
+            PaimonUpdatableTopNStore::open(ttl_config(&dir, 1000), uf_codec(), cp.snapshot_id)
+                .unwrap();
+        store.set_clock(5000);
+        let probe = uf4_batch(vec![1], vec![0], vec![0], vec![0]);
+        store.begin_batch(&probe, &[0], &[-1]).unwrap();
+        let key = {
+            let mut encoder = BinaryRowBatchEncoder::new(&probe, &[0], &[-1]);
+            ByteKey::from(encoder.encode(0))
+        };
+        let buffer = store.get(&key.0).expect("the surviving entry hydrates");
+        assert_eq!(buffer.len(), 1, "the expired row key must be tombstoned at the barrier");
+    }
+
+    /// A timestamp-only refresh re-persists its row (the flush equality deliberately includes
+    /// the clock): the silent in-place replace at 5900 must keep the entry alive at 6300.
+    #[test]
+    fn paimon_update_fast_topn_ttl_repersists_a_ts_refresh() {
+        let dir = temp_dir("uftopn-ttl-refresh");
+        let mut ranker = paimon_uf(&dir, 2, 1000);
+        ranker.store_mut().set_clock(5000);
+        ranker.push(&uf4_batch(vec![1], vec![7], vec![5], vec![70]), 5000).unwrap();
+        ranker.store_mut().checkpoint().unwrap();
+
+        // Byte-identical payload: emits nothing, but IS a state write — the clock refreshes.
+        ranker.store_mut().set_clock(5900);
+        let out = ranker.push(&uf4_batch(vec![1], vec![7], vec![5], vec![70]), 5900).unwrap();
+        assert_eq!(out.num_rows(), 0);
+        ranker.store_mut().checkpoint().unwrap();
+
+        // Alive only through the 5900 refresh: k=7's next version hydrates and MOVES (retracting
+        // the old payload); an un-refreshed table would have expired it into a fresh insert.
+        ranker.store_mut().set_clock(6300);
+        let out = ranker.push(&uf4_batch(vec![1], vec![7], vec![4], vec![71]), 6300).unwrap();
+        assert_eq!(row_kinds(&out), vec![0, 3]);
+        assert_eq!(values(&out, 3), vec![71, 70]);
+    }
+
+    #[test]
+    fn paimon_pre_ttl_update_fast_table_gains_a_full_retention_on_restore() {
+        // A TTL-off table (no ts column), the pre-TTL checkpoint of an enable-TTL migration.
+        let dir = temp_dir("uftopn-mig-src");
+        let mut ranker = paimon_uf(&dir, 2, 0);
+        ranker.push(&uf4_batch(vec![1], vec![7], vec![5], vec![70]), 0).unwrap();
+        let manifest = ranker.store_mut().checkpoint().unwrap();
+        let src = temp_dir("uftopn-mig-mat");
+        materialize(&manifest, &dir, &src);
+
+        // The target schema gained ts, so the wholesale adoption declines and the name-mapped
+        // clip stamps every row with the restore time — on the new [kg, k, r] primary key.
+        let probe_restored = |restore_ms: i64, probe_ms: i64| {
+            let mut restored = paimon_uf_merged(
+                &temp_dir("uftopn-mig-dst"),
+                1000,
+                &src,
+                manifest.snapshot_id,
+                2,
+                restore_ms,
+            );
+            restored.store_mut().set_clock(probe_ms);
+            restored.push(&uf4_batch(vec![1], vec![7], vec![4], vec![71]), probe_ms).unwrap()
+        };
+        let alive = probe_restored(5000, 5999);
+        assert_eq!(row_kinds(&alive), vec![0, 3], "migrated rows live on past the restore");
+        assert_eq!(values(&alive, 3), vec![71, 70]);
+        let expired = probe_restored(5000, 6000);
+        assert_eq!(row_kinds(&expired), vec![0], "the migration stamp expires a retention later");
+        assert_eq!(values(&expired, 3), vec![71]);
+    }
+
+    #[test]
+    fn paimon_update_fast_topn_matches_memory_with_ttl() {
+        let dir = temp_dir("uftopn-ttl-parity");
+        let mut paimon = paimon_uf(&dir, 2, 1000);
+        let mut memory = memory_uf(2).with_state_ttl(1000);
+
+        // Writes at 1000/1500, then a push after k=7 (ts 1000) expired while the refreshed k=8
+        // (ts 1500) lives: the expired row key's update is a fresh insert, the live one a move.
+        let steps: Vec<(RecordBatch, i64)> = vec![
+            (uf4_batch(vec![1, 1], vec![7, 8], vec![10, 20], vec![100, 200]), 1000),
+            (uf4_batch(vec![1], vec![8], vec![20], vec![201]), 1500),
+            (uf4_batch(vec![1, 1], vec![7, 9], vec![30, 5], vec![101, 90]), 2400),
+        ];
+        for (i, (batch, now)) in steps.iter().enumerate() {
+            paimon.store_mut().set_clock(*now);
+            let memory_out = memory.push(batch, *now).unwrap();
+            let paimon_out = paimon.push(batch, *now).unwrap();
+            assert_eq!(memory_out.num_rows(), paimon_out.num_rows(), "step {i}");
+            if memory_out.num_rows() > 0 {
+                assert_same_output(&memory_out, &paimon_out);
+            }
+            paimon.store_mut().checkpoint().unwrap();
+        }
+    }
+
+    // -----------------------------------------------------------------------------------------
     // Updating join on the MAP store: one typed table row per stored join row under PK
     // [kg, k, r], one table per side, degrees and retraction tombstones surviving restore.
     // -----------------------------------------------------------------------------------------
