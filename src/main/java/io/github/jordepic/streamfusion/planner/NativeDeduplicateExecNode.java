@@ -71,15 +71,20 @@ public class NativeDeduplicateExecNode extends ExecNodeBase<ArrowBatch>
       PlannerBase planner, ExecNodeConfig config) {
     Transformation<ArrowBatch> input =
         (Transformation<ArrowBatch>) getInputEdges().get(0).translateToPlan(planner);
+    boolean miniBatchEnabled = config.get(ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_ENABLED);
     // The eager push→emit operator serves proctime (either keep mode) and rowtime keep-last; only
-    // rowtime keep-first is watermark-buffered (it emits a key's min-rowtime row once a watermark
-    // completes it).
-    boolean eager = proctime || keepLast;
+    // rowtime keep-first without mini-batch is watermark-buffered (it emits a key's min-rowtime
+    // row once a watermark completes it). Under mini-batch Flink always plans a rowtime dedup as
+    // its bundled retracting function — keep-first merely flips the comparator — so that shape
+    // routes to the eager operator too.
+    boolean eager = proctime || keepLast || miniBatchEnabled;
     int maxParallelism = FlinkKeyGroupUtils.defaultMaxParallelism(input.getParallelism());
     int[] stateKeys = FlinkKeyGroupUtils.stateKeysForSubtasks(maxParallelism, input.getParallelism());
     KeySelector<ArrowBatch, Integer> stateKeySelector =
         batch -> stateKeys[batch.destination() >= 0 ? batch.destination() : 0];
-    boolean miniBatch = keepLast && config.get(ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_ENABLED);
+    // Proctime keep-first stays eager (its bundled function emits the same insert-only rows);
+    // every other shape bundles.
+    boolean miniBatch = miniBatchEnabled && (keepLast || !proctime);
     // Compact-changes nets each rowtime bundle to one transition per key; the proctime bundled
     // functions always endpoint-net, so the option only steers the rowtime flush.
     boolean compactChanges =

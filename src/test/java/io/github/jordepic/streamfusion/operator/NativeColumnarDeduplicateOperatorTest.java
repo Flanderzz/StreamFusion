@@ -185,6 +185,33 @@ class NativeColumnarDeduplicateOperatorTest {
   }
 
   @Test
+  void keepFirstMiniBatchChainsImprovingRowtimesLikeFlinksBundledFunction() throws Exception {
+    // Rowtime keep-first under mini-batch is Flink's bundled retracting function: a strictly
+    // smaller rowtime displaces with -U/+U (a tie would keep the incumbent), emitted as the full
+    // kept chain at the logical boundary — the keep-last flush with the comparator flipped.
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness =
+            eagerHarness(1, 0, true, false, 4, true, true, 0)) {
+      harness.setup(new ArrowBatchSerializer());
+      harness.open();
+      harness.processElement(
+          new StreamRecord<>(batch(allocator, row(1, 10, 300), row(1, 20, 200))));
+      assertEquals(List.of(), collectChanges(harness));
+      harness.processElement(
+          new StreamRecord<>(batch(allocator, row(2, 5, 100), row(1, 30, 100))));
+      assertEquals(
+          List.of(
+              List.of("+I", 1L, 10L),
+              List.of("-U", 1L, 10L),
+              List.of("+U", 1L, 20L),
+              List.of("-U", 1L, 20L),
+              List.of("+U", 1L, 30L),
+              List.of("+I", 2L, 5L)),
+          collectChanges(harness));
+    }
+  }
+
+  @Test
   void keepLastFlushesAnIncompleteLogicalBatchBeforeWatermark() throws Exception {
     try (BufferAllocator allocator = new RootAllocator();
         KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness =

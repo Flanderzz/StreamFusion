@@ -18,9 +18,10 @@ import org.apache.flink.table.planner.utils.ShortcutUtils;
  * ROW_NUMBER() OVER (PARTITION BY … ORDER BY time …) = 1}. Columnar in and out ({@link ColumnarInput}
  * and {@link ColumnarOutput}): the input is shuffled by the partition key (a columnar exchange).
  * Modes: rowtime keep-first (ASC) buffers and, on a watermark, emits each key's minimum-rowtime row
- * insert-only — so it requires an upstream watermark; every other mode (rowtime keep-last, and
- * proctime keep-first/keep-last) emits eagerly per row with no watermark. Keep-last emits a retract
- * changelog; keep-first is insert-only.
+ * insert-only — so it requires an upstream watermark — except under mini-batch, where Flink plans
+ * it as its bundled retracting function and it emits a changelog like keep-last; every other mode
+ * (rowtime keep-last, and proctime keep-first/keep-last) emits eagerly per row with no watermark.
+ * Keep-last emits a retract changelog; watermark-released keep-first is insert-only.
  */
 public class StreamPhysicalNativeDeduplicate extends SingleRel
     implements StreamPhysicalRel, ColumnarInput, ColumnarOutput {

@@ -1502,6 +1502,88 @@ fn compact_changes_honors_generate_update_before() {
     assert_eq!(row_kinds(&out), vec![2]);
 }
 
+// A rowtime keep-first deduplicator over `[k, v, rt]` in mini-batch mode — Flink's bundled
+// retracting shape (RowTimeMiniBatchDeduplicateFunction with keepLastRow=false): keep-last's
+// machinery with the comparator flipped, so a strictly smaller rowtime displaces with -U/+U.
+fn rowtime_keep_first_mini_batch() -> KeepLastDeduplicator {
+    KeepLastDeduplicator::new(vec![0], 2, true, true, true).with_mini_batch(true)
+}
+
+// The default flush emits a transition for EVERY kept (rowtime-decreasing) row of the bundle,
+// grouped per key — the full chain, exactly like keep-last with the comparison flipped.
+#[test]
+fn keep_first_mini_batch_emits_every_kept_improvement() {
+    let mut dedup = rowtime_keep_first_mini_batch();
+    dedup
+        .push(&join_batch(vec![1, 2, 1, 1], vec![10, 5, 20, 30], vec![300, 500, 200, 100]), 0)
+        .unwrap();
+    let out = dedup.flush_mini_batch().unwrap();
+    assert_eq!(values(&out, 1), vec![10, 10, 20, 20, 30, 5]);
+    assert_eq!(row_kinds(&out), vec![0, 1, 2, 1, 2, 0]);
+
+    // The next bundle's improvement retracts the durable state.
+    dedup.push(&join_batch(vec![1], vec![40], vec![50]), 0).unwrap();
+    let out = dedup.flush_mini_batch().unwrap();
+    assert_eq!(values(&out, 1), vec![30, 40]);
+    assert_eq!(row_kinds(&out), vec![1, 2]);
+}
+
+// Keep-first keeps a row only on a strictly smaller rowtime (Flink's `<`): a tie keeps the
+// incumbent, and an at-or-above rowtime is ignored with no transition and no state write.
+#[test]
+fn keep_first_mini_batch_a_tie_keeps_the_incumbent() {
+    let mut dedup = rowtime_keep_first_mini_batch();
+    dedup
+        .push(&join_batch(vec![1, 1, 1], vec![10, 20, 30], vec![100, 100, 150]), 0)
+        .unwrap();
+    let out = dedup.flush_mini_batch().unwrap();
+    assert_eq!(values(&out, 1), vec![10]);
+    assert_eq!(row_kinds(&out), vec![0]);
+}
+
+// The -U halves of the keep-first chain honor generate_update_before too.
+#[test]
+fn keep_first_mini_batch_chain_honors_generate_update_before() {
+    let mut dedup =
+        KeepLastDeduplicator::new(vec![0], 2, false, true, true).with_mini_batch(true);
+    dedup.push(&join_batch(vec![1, 1], vec![10, 20], vec![300, 200]), 0).unwrap();
+    let out = dedup.flush_mini_batch().unwrap();
+    assert_eq!(values(&out, 1), vec![10, 20]);
+    assert_eq!(row_kinds(&out), vec![0, 2]);
+}
+
+// Compact-changes applies to keep-first identically: each bundle nets to one transition per key,
+// ending at the bundle's minimum-rowtime row.
+#[test]
+fn keep_first_compact_changes_nets_to_the_bundle_endpoint() {
+    let mut dedup = rowtime_keep_first_mini_batch().with_compact_changes(true);
+    dedup
+        .push(&join_batch(vec![1, 1, 1], vec![10, 20, 15], vec![300, 200, 250]), 0)
+        .unwrap();
+    let out = dedup.flush_mini_batch().unwrap();
+    assert_eq!(values(&out, 1), vec![20]);
+    assert_eq!(row_kinds(&out), vec![0]);
+
+    dedup.push(&join_batch(vec![1], vec![30], vec![100]), 0).unwrap();
+    let out = dedup.flush_mini_batch().unwrap();
+    assert_eq!(values(&out, 1), vec![20, 30]);
+    assert_eq!(row_kinds(&out), vec![1, 2]);
+}
+
+// TTL: an idle keep-first key expires like any other; the next row — improving or not — re-enters
+// through the fresh +I path (delete-on-read, Flink's NeverReturnExpired).
+#[test]
+fn keep_first_mini_batch_expires_an_idle_key_into_a_fresh_insert() {
+    let mut dedup = rowtime_keep_first_mini_batch().with_state_ttl(1000);
+    dedup.push(&join_batch(vec![1], vec![10], vec![100]), 5000).unwrap();
+    dedup.flush_mini_batch().unwrap();
+    // rt 200 >= stored 100 would be ignored while alive, but 5000 + 1000 <= 6000: expired.
+    dedup.push(&join_batch(vec![1], vec![20], vec![200]), 6000).unwrap();
+    let out = dedup.flush_mini_batch().unwrap();
+    assert_eq!(values(&out, 1), vec![20]);
+    assert_eq!(row_kinds(&out), vec![0]);
+}
+
 // A proctime keep-last deduplicator over `[k, v, rt]` (key col 0; the rt column is ignored).
 fn proctime_keep_last() -> KeepLastDeduplicator {
     KeepLastDeduplicator::new(vec![0], 2, true, false, false)

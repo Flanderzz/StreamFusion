@@ -15,16 +15,19 @@ import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.table.types.logical.RowType;
 
 /**
- * Columnar eager (push→emit) deduplication: Arrow in, Arrow out. Serves the three non-buffered dedup
+ * Columnar eager (push→emit) deduplication: Arrow in, Arrow out. Serves the non-buffered dedup
  * variants — rowtime keep-last ({@code RowTimeDeduplicateFunction}), proctime keep-last ({@code
- * ProcTimeDeduplicateKeepLastRowFunction}), and proctime keep-first ({@code
- * ProcTimeDeduplicateKeepFirstRowFunction}). Keep-last keeps the winning row per key and emits a
- * retract changelog eagerly on each input batch ({@code +I} for a key's first row, {@code
+ * ProcTimeDeduplicateKeepLastRowFunction}), proctime keep-first ({@code
+ * ProcTimeDeduplicateKeepFirstRowFunction}), and rowtime keep-first under mini-batch (Flink's
+ * bundled {@code RowTimeMiniBatchDeduplicateFunction} with {@code keepLastRow=false} — keep-last's
+ * retracting machinery with the comparator flipped). Keep-last keeps the winning row per key and
+ * emits a retract changelog eagerly on each input batch ({@code +I} for a key's first row, {@code
  * -U}(previous)/{@code +U}(new) on replacement — the kind rides the {@code $row_kind$} column);
- * keep-first emits each key's first row ({@code +I}, insert-only) and drops the rest. A rowtime order
- * keeps the max-rowtime row; proctime uses arrival order. Insert-only input. Keys are co-located by
- * the columnar shuffle; the per-key stored row and the checkpointed handle state live here. (Rowtime
- * keep-first is watermark-buffered — see {@link NativeColumnarDeduplicateOperator}.)
+ * proctime keep-first emits each key's first row ({@code +I}, insert-only) and drops the rest. A
+ * rowtime order keeps the max-rowtime (keep-last) or min-rowtime (keep-first) row; proctime uses
+ * arrival order. Insert-only input. Keys are co-located by the columnar shuffle; the per-key stored
+ * row and the checkpointed handle state live here. (Rowtime keep-first without mini-batch is
+ * watermark-buffered — see {@link NativeColumnarDeduplicateOperator}.)
  */
 public class NativeColumnarKeepLastDeduplicateOperator
     extends AbstractNativeStatefulOperator<ArrowBatch>
@@ -65,7 +68,9 @@ public class NativeColumnarKeepLastDeduplicateOperator
     this.generateUpdateBefore = generateUpdateBefore;
     this.rowtimeOrdered = rowtimeOrdered;
     this.keepFirst = keepFirst;
-    this.miniBatch = miniBatch && !keepFirst;
+    // Proctime keep-first emits eagerly even under mini-batch (same insert-only rows either way);
+    // rowtime keep-first is the mini-batch bundled retracting shape, so it buffers like keep-last.
+    this.miniBatch = miniBatch && (rowtimeOrdered || !keepFirst);
     this.compactChanges = compactChanges;
     this.miniBatchSize = miniBatchSize;
     this.stateTtlMillis = stateTtlMillis;

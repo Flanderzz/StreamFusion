@@ -596,8 +596,8 @@ impl KeepFirstDeduplicator {
     }
 }
 
-/// Eager (push→emit, no watermark buffering) deduplication keyed by a partition key. Serves three of
-/// the four dedup variants — the watermark-buffered event-time keep-first lives in
+/// Eager (push→emit, no watermark buffering) deduplication keyed by a partition key. Serves every
+/// dedup variant except the watermark-buffered event-time keep-first, which lives in
 /// {@link KeepFirstDeduplicator}:
 ///   * **rowtime keep-last** — Flink's `RowTimeDeduplicateFunction`: keep the **maximum**-rowtime row;
 ///     the first row emits `+I`, a later row (rowtime `>=` the stored one) emits `-U`(previous, gated
@@ -606,6 +606,10 @@ impl KeepFirstDeduplicator {
 ///     arrival order, so every later row replaces (no rowtime read or comparison).
 ///   * **proctime keep-first** — Flink's `ProcTimeDeduplicateKeepFirstRowFunction`: the first row per
 ///     key emits `+I` and every later row is dropped; insert-only output (no `$row_kind$`).
+///   * **rowtime keep-first under mini-batch** — Flink then plans the same bundled retracting
+///     function as keep-last with the comparator flipped (a strictly **smaller**-rowtime row
+///     displaces with `-U`/`+U`, a tie keeps the incumbent), so the shape is the keep-last
+///     machinery, not the insert-only watermark buffer — updating output with `$row_kind$`.
 /// Insert-only input. The stored full row per key lives as scalars and is rebuilt with
 /// `scalars_to_array` on emit, like the changelog normalizer below.
 pub(crate) struct KeepLastDeduplicator<S: KeyedStateStore<DedupRow> = MemoryDedupStore> {
@@ -844,8 +848,11 @@ impl<S: KeyedStateStore<DedupRow>> KeepLastDeduplicator<S> {
         &mut self.rows
     }
 
+    /// Proctime keep-first stays eager under mini-batch: Flink's bundled function emits the same
+    /// insert-only first row per key, just at the flush. Rowtime keep-first is different — under
+    /// mini-batch it IS the bundled retracting function — so it buffers like keep-last.
     pub(crate) fn with_mini_batch(mut self, mini_batch: bool) -> Self {
-        self.mini_batch = mini_batch && !self.keep_first;
+        self.mini_batch = mini_batch && (self.rowtime_ordered || !self.keep_first);
         self
     }
 
@@ -964,10 +971,12 @@ impl<S: KeyedStateStore<DedupRow>> KeepLastDeduplicator<S> {
                     delta -= dedup_entry_bytes(key, &row.payload) as isize;
                 }
             };
-            // keep-first: the first row per key wins, later rows are dropped (insert-only). A
-            // dropped duplicate is not a state write, so it does not refresh the key's TTL —
-            // Flink's processFirstRowOnProcTime writes state only for the first row.
-            if keep_first {
+            // Proctime keep-first: the first row per key wins, later rows are dropped
+            // (insert-only). A dropped duplicate is not a state write, so it does not refresh the
+            // key's TTL — Flink's processFirstRowOnProcTime writes state only for the first row.
+            // (Rowtime keep-first — the mini-batch bundled shape — flows through the retracting
+            // path below with the comparator flipped.)
+            if keep_first && !rowtime_ordered {
                 if ttl_contains(rows, key, ttl, ttl_ts, on_expired) {
                     continue;
                 }
@@ -1022,14 +1031,23 @@ impl<S: KeyedStateStore<DedupRow>> KeepLastDeduplicator<S> {
                         DedupRow { rowtime, payload, staged, update_kind: false, last_write_ms },
                     );
                 }
-                // A rowtime order ignores an older (smaller-rowtime) row; proctime always replaces.
+                // A rowtime order ignores a non-improving row — Flink's shouldKeepCurrentRow:
+                // keep-last ignores a smaller rowtime (a tie displaces), keep-first ignores at or
+                // above the stored one (a tie keeps the incumbent); proctime always replaces.
                 // An ignored row is not a state write, so it does not refresh the key's TTL —
                 // Flink's rowtime helper returns before updateState when the row isn't kept —
                 // except under the default (full-chain) mini-batch flush, whose unconditional
                 // state.update at finishBundle re-stamps every key the bundle touched.
                 // Compact-changes writes state only for a winning bundle, so a losing row stays a
                 // pure read there.
-                Some(stored) if rowtime_ordered && rowtime < stored.rowtime => {
+                Some(stored)
+                    if rowtime_ordered
+                        && (if keep_first {
+                            rowtime >= stored.rowtime
+                        } else {
+                            rowtime < stored.rowtime
+                        }) =>
+                {
                     if self.mini_batch && !self.compact_changes && ttl.enabled() {
                         stored.last_write_ms = ttl.now();
                     }
@@ -1208,9 +1226,10 @@ impl<S: KeyedStateStore<DedupRow>> KeepLastDeduplicator<S> {
         let mut columns: Vec<ArrayRef> =
             conv.convert_rows(out_rows.iter().map(|r| parser.parse(r))).expect("decode dedup payloads");
         let mut fields: Vec<Field> = schema.fields().iter().map(|f| f.as_ref().clone()).collect();
-        // Keep-first is insert-only (every emitted row is a +I), so it carries no $row_kind$ column;
-        // keep-last emits a changelog and tags each row's kind.
-        if !self.keep_first {
+        // Proctime keep-first is insert-only (every emitted row is a +I), so it carries no
+        // $row_kind$ column; keep-last — and rowtime keep-first, its mini-batch retracting twin —
+        // emits a changelog and tags each row's kind.
+        if !self.keep_first || self.rowtime_ordered {
             fields.push(Field::new(ROW_KIND_COLUMN, DataType::Int8, false));
             columns.push(Arc::new(Int8Array::from(out_kinds)));
         }
@@ -1410,7 +1429,7 @@ impl KeepLastDeduplicator {
         let arity = batch.num_columns();
         self.schema = Some(batch.schema());
         self.ensure_converters(batch, arity);
-        // The stored rowtime matters only to the rowtime keep-last comparison; proctime stores 0.
+        // The stored rowtime matters only to the rowtime-ordered comparison; proctime stores 0.
         let rt = self.rowtime_ordered.then(|| rt_to_millis(batch.column(self.rt_column)));
         let mut parts = BinaryRowBatchEncoder::new(
             batch,
@@ -1699,8 +1718,8 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreKeepFi
     })
 }
 
-/// Creates an eager deduplicator (rowtime/proctime keep-last, or proctime keep-first) and returns an
-/// opaque handle.
+/// Creates an eager deduplicator (rowtime/proctime keep-last, proctime keep-first, or the
+/// mini-batch rowtime keep-first) and returns an opaque handle.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createKeepLastDeduplicator<'local>(
     env: JNIEnv<'local>,

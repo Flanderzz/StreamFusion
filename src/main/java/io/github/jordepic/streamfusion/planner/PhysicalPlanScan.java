@@ -9,7 +9,6 @@ import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.Calc;
 import org.apache.calcite.rel.core.Sort;
 import org.apache.calcite.rel.type.RelDataType;
-import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.table.connector.source.DynamicTableSource;
 import org.apache.flink.table.planner.hint.StateTtlHint;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalCalc;
@@ -46,7 +45,6 @@ import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalW
 import org.apache.flink.table.planner.plan.trait.MiniBatchInterval;
 import org.apache.flink.table.planner.plan.trait.MiniBatchIntervalTraitDef$;
 import org.apache.flink.table.planner.plan.trait.MiniBatchMode;
-import org.apache.flink.table.api.config.ExecutionConfigOptions;
 import org.apache.flink.table.api.config.OptimizerConfigOptions;
 import org.apache.flink.table.planner.plan.optimize.program.FlinkOptimizeProgram;
 import org.apache.flink.table.planner.utils.ShortcutUtils;
@@ -440,8 +438,9 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
     }
 
     // Row-time deduplication is a rowtime-ordered rank-1 the host plans as a row-time deduplicate:
-    // keep-first (ASC, insert-only, emits on the watermark) or keep-last (DESC, retracting, emits
-    // eagerly). Either way it requires an insert-only input. Checked before Top-N — both are
+    // keep-first (ASC — insert-only and watermark-released, except under mini-batch where Flink
+    // plans it as its bundled retracting function) or keep-last (DESC, retracting, emits eagerly).
+    // Either way it requires an insert-only input. Checked before Top-N — both are
     // StreamPhysicalRank, but a rowtime-ordered rank is deduplication, which TopNMatcher declines.
     if (current instanceof StreamPhysicalRank) {
       StreamPhysicalRank rank = (StreamPhysicalRank) current;
@@ -450,27 +449,13 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
         if (!NativeConfig.operatorEnabled("deduplicate")) {
           return noteDisabled(current, "deduplicate");
         }
-        // Mini-batch changes which operator Flink plans for a ROWTIME dedup. Keep-first stops
-        // being the insert-only watermark-buffered function and becomes the bundled retracting
-        // one (a smaller-rowtime row displaces with -U/+U) — a different changelog contract than
-        // the native buffered operator, so it stays on the host. (Keep-last runs natively in
-        // both mini-batch modes: the default full-changelog flush and the compact-changes
-        // endpoint netting.)
-        ReadableConfig tableConfig = ShortcutUtils.unwrapTableConfig(rank);
-        if (!DeduplicateMatcher.isProctime(rank)
-            && tableConfig.get(ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_ENABLED)
-            && !DeduplicateMatcher.keepLast(rank)) {
-          recordFallback(
-              "deduplicate: mini-batch rowtime keep-first is Flink's bundled retracting"
-                  + " function, not the insert-only watermark operator");
-          return current;
-        }
         substitutions++;
         int[] partitionColumns = DeduplicateMatcher.partitionColumns(rank);
         // Columnar (Arrow in/out); the partitioned shuffle stays columnar where the input sits on a
-        // columnar producer, else the transition pass transposes at the boundary. Keep-first is
-        // insert-only; keep-last emits a retract changelog (the native rel inherits the host rank's
-        // changelog trait, so the boundary transpose carries $row_kind$).
+        // columnar producer, else the transition pass transposes at the boundary. Watermark-released
+        // keep-first is insert-only; keep-last — and rowtime keep-first under mini-batch — emits a
+        // retract changelog (the native rel inherits the host rank's changelog trait, so the
+        // boundary transpose carries $row_kind$).
         return new StreamPhysicalNativeDeduplicate(
             rank.getCluster(),
             rank.getTraitSet(),
