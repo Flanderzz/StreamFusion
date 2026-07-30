@@ -292,6 +292,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonK
     rowtime_ordered: jboolean,
     keep_first: jboolean,
     mini_batch: jboolean,
+    compact_changes: jboolean,
     state_ttl_millis: jlong,
     now_millis: jlong,
     memory_budget_bytes: jlong,
@@ -356,6 +357,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonK
                 keep_first != 0,
             )
             .with_mini_batch(mini_batch != 0)
+            .with_compact_changes(compact_changes != 0)
             .with_key_timestamp_precisions(timestamp_precisions)
             .with_state_ttl(state_ttl_millis)
             .with_backend(store)

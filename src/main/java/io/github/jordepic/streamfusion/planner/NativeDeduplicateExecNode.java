@@ -11,6 +11,7 @@ import org.apache.flink.api.java.functions.KeySelector;
 import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.api.transformations.OneInputTransformation;
+import org.apache.flink.table.api.config.ExecutionConfigOptions;
 import org.apache.flink.table.planner.delegation.PlannerBase;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeBase;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeConfig;
@@ -78,12 +79,15 @@ public class NativeDeduplicateExecNode extends ExecNodeBase<ArrowBatch>
     int[] stateKeys = FlinkKeyGroupUtils.stateKeysForSubtasks(maxParallelism, input.getParallelism());
     KeySelector<ArrowBatch, Integer> stateKeySelector =
         batch -> stateKeys[batch.destination() >= 0 ? batch.destination() : 0];
-    boolean miniBatch =
-        keepLast
+    boolean miniBatch = keepLast && config.get(ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_ENABLED);
+    // Compact-changes nets each rowtime bundle to one transition per key; the proctime bundled
+    // functions always endpoint-net, so the option only steers the rowtime flush.
+    boolean compactChanges =
+        miniBatch
+            && !proctime
             && config.get(
-                org.apache.flink.table.api.config.ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_ENABLED);
-    long miniBatchSize =
-        config.get(org.apache.flink.table.api.config.ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_SIZE);
+                ExecutionConfigOptions.TABLE_EXEC_DEDUPLICATE_MINIBATCH_COMPACT_CHANGES_ENABLED);
+    long miniBatchSize = config.get(ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_SIZE);
     // Flink defines no STATE_TTL hint on deduplicate, so the job-wide retention is the whole
     // story.
     long stateTtlMillis = config.getStateRetentionTime();
@@ -98,6 +102,7 @@ public class NativeDeduplicateExecNode extends ExecNodeBase<ArrowBatch>
                 !proctime,
                 !keepLast,
                 miniBatch,
+                compactChanges,
                 miniBatchSize,
                 stateTtlMillis,
                 maxParallelism)

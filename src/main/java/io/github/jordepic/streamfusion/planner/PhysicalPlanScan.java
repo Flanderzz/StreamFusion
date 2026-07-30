@@ -453,27 +453,17 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
         // Mini-batch changes which operator Flink plans for a ROWTIME dedup. Keep-first stops
         // being the insert-only watermark-buffered function and becomes the bundled retracting
         // one (a smaller-rowtime row displaces with -U/+U) — a different changelog contract than
-        // the native buffered operator, so it stays on the host. Keep-last with compact-changes
-        // on emits only each bundle's net transition where the native operator replicates the
-        // default all-changelog flush; that variant stays on the host too.
+        // the native buffered operator, so it stays on the host. (Keep-last runs natively in
+        // both mini-batch modes: the default full-changelog flush and the compact-changes
+        // endpoint netting.)
         ReadableConfig tableConfig = ShortcutUtils.unwrapTableConfig(rank);
         if (!DeduplicateMatcher.isProctime(rank)
-            && tableConfig.get(ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_ENABLED)) {
-          if (!DeduplicateMatcher.keepLast(rank)) {
-            recordFallback(
-                "deduplicate: mini-batch rowtime keep-first is Flink's bundled retracting"
-                    + " function, not the insert-only watermark operator");
-            return current;
-          }
-          if (tableConfig.get(
-              ExecutionConfigOptions.TABLE_EXEC_DEDUPLICATE_MINIBATCH_COMPACT_CHANGES_ENABLED)) {
-            recordFallback(
-                "deduplicate: mini-batch compact-changes"
-                    + " (table.exec.deduplicate.mini-batch.compact-changes-enabled) emits only"
-                    + " the net transition per bundle; the native flush emits the default full"
-                    + " changelog");
-            return current;
-          }
+            && tableConfig.get(ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_ENABLED)
+            && !DeduplicateMatcher.keepLast(rank)) {
+          recordFallback(
+              "deduplicate: mini-batch rowtime keep-first is Flink's bundled retracting"
+                  + " function, not the insert-only watermark operator");
+          return current;
         }
         substitutions++;
         int[] partitionColumns = DeduplicateMatcher.partitionColumns(rank);

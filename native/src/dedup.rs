@@ -636,6 +636,12 @@ pub(crate) struct KeepLastDeduplicator<S: KeyedStateStore<DedupRow> = MemoryDedu
     /// never re-copying it.
     rows: S,
     mini_batch: bool,
+    /// Mini-batch compact-changes (`table.exec.deduplicate.mini-batch.compact-changes-enabled`,
+    /// rowtime only) — Flink's `RowTimeMiniBatchLatestChangeDeduplicateFunction`: the flush nets
+    /// each key's bundle to one transition (stored preimage to the bundle's final kept row)
+    /// instead of the default full kept chain, and a bundle that keeps nothing writes nothing
+    /// (in particular, no TTL refresh — see the ignored-row guard in `push`).
+    compact_changes: bool,
     staged: Vec<DedupStagedChange>,
     staged_bytes: usize,
     snapshot_cache: Option<DedupSnapshotCache>,
@@ -776,6 +782,7 @@ impl KeepLastDeduplicator {
             payload_converter: None,
             rows: MemoryDedupStore::default(),
             mini_batch: false,
+            compact_changes: false,
             staged: Vec::new(),
             staged_bytes: 0,
             snapshot_cache: None,
@@ -814,6 +821,7 @@ impl<S: KeyedStateStore<DedupRow>> KeepLastDeduplicator<S> {
             payload_converter: self.payload_converter,
             rows,
             mini_batch: self.mini_batch,
+            compact_changes: self.compact_changes,
             staged: self.staged,
             staged_bytes: self.staged_bytes,
             snapshot_cache: None,
@@ -838,6 +846,11 @@ impl<S: KeyedStateStore<DedupRow>> KeepLastDeduplicator<S> {
 
     pub(crate) fn with_mini_batch(mut self, mini_batch: bool) -> Self {
         self.mini_batch = mini_batch && !self.keep_first;
+        self
+    }
+
+    pub(crate) fn with_compact_changes(mut self, compact_changes: bool) -> Self {
+        self.compact_changes = compact_changes;
         self
     }
 
@@ -1011,8 +1024,15 @@ impl<S: KeyedStateStore<DedupRow>> KeepLastDeduplicator<S> {
                 }
                 // A rowtime order ignores an older (smaller-rowtime) row; proctime always replaces.
                 // An ignored row is not a state write, so it does not refresh the key's TTL —
-                // Flink's rowtime helper returns before updateState when the row isn't kept.
+                // Flink's rowtime helper returns before updateState when the row isn't kept —
+                // except under the default (full-chain) mini-batch flush, whose unconditional
+                // state.update at finishBundle re-stamps every key the bundle touched.
+                // Compact-changes writes state only for a winning bundle, so a losing row stays a
+                // pure read there.
                 Some(stored) if rowtime_ordered && rowtime < stored.rowtime => {
+                    if self.mini_batch && !self.compact_changes && ttl.enabled() {
+                        stored.last_write_ms = ttl.now();
+                    }
                     continue;
                 }
                 // Proctime keep-last suppresses an identical row only while the stored kind is
@@ -1102,6 +1122,27 @@ impl<S: KeyedStateStore<DedupRow>> KeepLastDeduplicator<S> {
             let row = self.rows.get_mut(&key.0).expect("staged dedup key remains in state");
             row.staged = None;
             if self.rowtime_ordered {
+                if self.compact_changes {
+                    // Compact-changes nets the bundle to its endpoint: one transition per key,
+                    // stored preimage to the bundle's final kept row, with no equality check
+                    // anywhere (an identical displacing row still emits its -U/+U pair).
+                    let after = kept.into_iter().next_back().expect("compacted chain keeps a row");
+                    match before {
+                        None => {
+                            out_rows.push(after);
+                            out_kinds.push(0); // +I — first row for the key
+                        }
+                        Some(before) => {
+                            if self.generate_update_before {
+                                out_rows.push(before);
+                                out_kinds.push(1);
+                            }
+                            out_rows.push(after);
+                            out_kinds.push(2);
+                        }
+                    }
+                    continue;
+                }
                 // Flink's rowtime mini-batch flush walks the bundle's kept rows and emits every
                 // transition, with no equality check anywhere on the rowtime path — a bundle of
                 // n kept rows is n transitions, not the endpoint-only net one.
@@ -1671,6 +1712,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createKeepLas
     rowtime_ordered: jboolean,
     keep_first: jboolean,
     mini_batch: jboolean,
+    compact_changes: jboolean,
     state_ttl_millis: jlong,
     memory_budget_bytes: jlong,
 ) -> jlong {
@@ -1688,6 +1730,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createKeepLas
             keep_first != 0,
         )
         .with_mini_batch(mini_batch != 0)
+        .with_compact_changes(compact_changes != 0)
         .with_key_timestamp_precisions(timestamp_precisions)
         .with_state_ttl(state_ttl_millis)
         .with_memory_budget(memory_budget_bytes);
@@ -1775,6 +1818,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreKeepLa
     rowtime_ordered: jboolean,
     keep_first: jboolean,
     mini_batch: jboolean,
+    compact_changes: jboolean,
     state_ttl_millis: jlong,
     now_millis: jlong,
     snapshot: JByteArray<'local>,
@@ -1798,6 +1842,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreKeepLa
             now_millis,
         )
         .with_mini_batch(mini_batch != 0)
+        .with_compact_changes(compact_changes != 0)
         .with_state_ttl(state_ttl_millis)
         .with_memory_budget(memory_budget_bytes);
         boxed_or_throw(&mut env, dedup)
@@ -1841,6 +1886,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreKeepLa
     rowtime_ordered: jboolean,
     keep_first: jboolean,
     mini_batch: jboolean,
+    compact_changes: jboolean,
     state_ttl_millis: jlong,
     now_millis: jlong,
     snapshots: JObjectArray<'local>,
@@ -1877,6 +1923,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreKeepLa
             now_millis,
         )
         .with_mini_batch(mini_batch != 0)
+        .with_compact_changes(compact_changes != 0)
         .with_state_ttl(state_ttl_millis)
         .with_memory_budget(memory_budget_bytes);
         boxed_or_throw(&mut env, dedup)

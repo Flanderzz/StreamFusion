@@ -156,6 +156,35 @@ class NativeColumnarDeduplicateOperatorTest {
   }
 
   @Test
+  void keepLastCompactChangesEmitsOnlyTheBundleEndpoint() throws Exception {
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness =
+            eagerHarness(1, 0, true, true, 4, true, false, 0)) {
+      harness.setup(new ArrowBatchSerializer());
+      harness.open();
+      harness.processElement(
+          new StreamRecord<>(batch(allocator, row(1, 10, 0), row(1, 20, 1))));
+      assertEquals(List.of(), collectChanges(harness));
+      harness.processElement(
+          new StreamRecord<>(batch(allocator, row(2, 5, 0), row(1, 30, 2))));
+      // Compact-changes nets each key's bundle to one transition — key 1's improving chain
+      // collapses to a single +I of its endpoint (contrast the full-changelog flush above).
+      assertEquals(
+          List.of(List.of("+I", 1L, 30L), List.of("+I", 2L, 5L)), collectChanges(harness));
+      harness.processElement(
+          new StreamRecord<>(
+              batch(allocator, row(1, 40, 3), row(1, 50, 4), row(2, 6, 0), row(2, 7, 1))));
+      assertEquals(
+          List.of(
+              List.of("-U", 1L, 30L),
+              List.of("+U", 1L, 50L),
+              List.of("-U", 2L, 5L),
+              List.of("+U", 2L, 7L)),
+          collectChanges(harness));
+    }
+  }
+
+  @Test
   void keepLastFlushesAnIncompleteLogicalBatchBeforeWatermark() throws Exception {
     try (BufferAllocator allocator = new RootAllocator();
         KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness =
@@ -369,7 +398,7 @@ class NativeColumnarDeduplicateOperatorTest {
   private static KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch>
       eagerHarness(int parallelism, int subtask, boolean miniBatch, long miniBatchSize)
           throws Exception {
-    return eagerHarness(parallelism, subtask, miniBatch, miniBatchSize, true, 0);
+    return eagerHarness(parallelism, subtask, miniBatch, false, miniBatchSize, true, false, 0);
   }
 
   private static KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch>
@@ -377,8 +406,10 @@ class NativeColumnarDeduplicateOperatorTest {
           int parallelism,
           int subtask,
           boolean miniBatch,
+          boolean compactChanges,
           long miniBatchSize,
           boolean rowtimeOrdered,
+          boolean keepFirst,
           long stateTtlMillis)
           throws Exception {
     int[] stateKeys = stateKeysForSubtasks(parallelism);
@@ -390,8 +421,9 @@ class NativeColumnarDeduplicateOperatorTest {
             SCHEMA,
             true,
             rowtimeOrdered,
-            false,
+            keepFirst,
             miniBatch,
+            compactChanges,
             miniBatchSize,
             stateTtlMillis,
             MAX_PARALLELISM),
@@ -405,7 +437,7 @@ class NativeColumnarDeduplicateOperatorTest {
   /** Proctime keep-last (arrival order), so the TTL tests replace unconditionally. */
   private static KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> ttlHarness(
       long stateTtlMillis) throws Exception {
-    return eagerHarness(1, 0, false, 0, false, stateTtlMillis);
+    return eagerHarness(1, 0, false, false, 0, false, false, stateTtlMillis);
   }
 
   private static KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch>

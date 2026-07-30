@@ -732,6 +732,7 @@ class PaimonStateBackendOperatorTest {
             true,
             false,
             false,
+            false,
             0,
             0,
             MAX_PARALLELISM);

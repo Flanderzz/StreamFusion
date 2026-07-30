@@ -37,6 +37,7 @@ public class NativeColumnarKeepLastDeduplicateOperator
   private final boolean rowtimeOrdered;
   private final boolean keepFirst;
   private final boolean miniBatch;
+  private final boolean compactChanges;
   private final long miniBatchSize;
   private final long stateTtlMillis;
 
@@ -53,6 +54,7 @@ public class NativeColumnarKeepLastDeduplicateOperator
       boolean rowtimeOrdered,
       boolean keepFirst,
       boolean miniBatch,
+      boolean compactChanges,
       long miniBatchSize,
       long stateTtlMillis,
       int maxParallelism) {
@@ -64,6 +66,7 @@ public class NativeColumnarKeepLastDeduplicateOperator
     this.rowtimeOrdered = rowtimeOrdered;
     this.keepFirst = keepFirst;
     this.miniBatch = miniBatch && !keepFirst;
+    this.compactChanges = compactChanges;
     this.miniBatchSize = miniBatchSize;
     this.stateTtlMillis = stateTtlMillis;
   }
@@ -92,6 +95,7 @@ public class NativeColumnarKeepLastDeduplicateOperator
                 rowtimeOrdered,
                 keepFirst,
                 miniBatch,
+                compactChanges,
                 stateTtlMillis,
                 getProcessingTimeService().getCurrentProcessingTime(),
                 memoryBudgetBytes(),
@@ -122,6 +126,7 @@ public class NativeColumnarKeepLastDeduplicateOperator
         rowtimeOrdered,
         keepFirst,
         miniBatch,
+        compactChanges,
         stateTtlMillis,
         memoryBudgetBytes());
   }
@@ -136,6 +141,7 @@ public class NativeColumnarKeepLastDeduplicateOperator
         rowtimeOrdered,
         keepFirst,
         miniBatch,
+        compactChanges,
         stateTtlMillis,
         getProcessingTimeService().getCurrentProcessingTime(),
         snapshots,

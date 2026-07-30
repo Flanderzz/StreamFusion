@@ -1414,6 +1414,94 @@ fn rowtime_mini_batch_chain_honors_generate_update_before() {
     assert_eq!(row_kinds(&out), vec![0, 2]);
 }
 
+// Flink's default rowtime mini-batch flush runs state.update(preRow) for every key the bundle
+// buffered rows for — even a bundle whose rows were ALL ignored re-stamps the key's TTL clock.
+#[test]
+fn rowtime_mini_batch_all_ignored_bundle_refreshes_ttl() {
+    let mut dedup = rowtime_mini_batch().with_state_ttl(1000);
+    dedup.push(&join_batch(vec![1], vec![10], vec![100]), 5000).unwrap();
+    dedup.flush_mini_batch().unwrap();
+    // An all-ignored bundle (older rowtime) emits nothing but refreshes the key at 5900.
+    dedup.push(&join_batch(vec![1], vec![20], vec![50]), 5900).unwrap();
+    assert_eq!(dedup.flush_mini_batch().unwrap().num_rows(), 0);
+    // 5000 + 1000 <= 6800 but 5900 + 1000 > 6800: still alive — a -U/+U chain, not a fresh +I.
+    dedup.push(&join_batch(vec![1], vec![30], vec![200]), 6800).unwrap();
+    let out = dedup.flush_mini_batch().unwrap();
+    assert_eq!(values(&out, 1), vec![10, 30]);
+    assert_eq!(row_kinds(&out), vec![1, 2]);
+}
+
+// A rowtime compact-changes deduplicator over `[k, v, rt]` (key col 0, rt col 2).
+fn rowtime_compact_changes() -> KeepLastDeduplicator {
+    rowtime_mini_batch().with_compact_changes(true)
+}
+
+// Compact-changes (RowTimeMiniBatchLatestChangeDeduplicateFunction) nets each key's bundle to one
+// transition: a fresh key's whole improving chain collapses to a single +I, an existing key's to
+// one -U(stored)/+U(endpoint) pair.
+#[test]
+fn compact_changes_nets_each_bundle_to_one_transition_per_key() {
+    let mut dedup = rowtime_compact_changes();
+    dedup
+        .push(&join_batch(vec![1, 2, 1, 1], vec![10, 5, 20, 30], vec![1, 1, 2, 3]), 0)
+        .unwrap();
+    let out = dedup.flush_mini_batch().unwrap();
+    assert_eq!(values(&out, 1), vec![30, 5]);
+    assert_eq!(row_kinds(&out), vec![0, 0]);
+
+    // The next bundle nets against the durable state: one pair from 30 to the endpoint 50, with
+    // the mid-bundle non-improving row (rt 1 < stored 3) ignored.
+    dedup.push(&join_batch(vec![1, 1, 1], vec![40, 15, 50], vec![4, 1, 5]), 0).unwrap();
+    let out = dedup.flush_mini_batch().unwrap();
+    assert_eq!(values(&out, 1), vec![30, 50]);
+    assert_eq!(row_kinds(&out), vec![1, 2]);
+}
+
+// A bundle whose rows all lose to the stored row emits nothing AND writes nothing — unlike the
+// default flush there is no unconditional state.update, so the key's TTL is not refreshed.
+#[test]
+fn compact_changes_losing_bundle_emits_nothing_and_does_not_refresh_ttl() {
+    let mut dedup = rowtime_compact_changes().with_state_ttl(1000);
+    dedup.push(&join_batch(vec![1], vec![10], vec![100]), 5000).unwrap();
+    dedup.flush_mini_batch().unwrap();
+    dedup.push(&join_batch(vec![1], vec![20], vec![50]), 5900).unwrap();
+    assert_eq!(dedup.flush_mini_batch().unwrap().num_rows(), 0);
+    // 5000 + 1000 <= 6000: expired despite the losing bundle at 5900 — a fresh +I.
+    dedup.push(&join_batch(vec![1], vec![30], vec![10]), 6000).unwrap();
+    let out = dedup.flush_mini_batch().unwrap();
+    assert_eq!(values(&out, 1), vec![30]);
+    assert_eq!(row_kinds(&out), vec![0]);
+}
+
+// Like every rowtime shape, compact-changes has no equality check: an identical row at an equal
+// rowtime displaces (keep-last `<=`) and its -U/+U pair emits verbatim, TTL on or off.
+#[test]
+fn compact_changes_never_suppresses_an_identical_displacement() {
+    for ttl_ms in [0, 3_600_000] {
+        let mut dedup = rowtime_compact_changes().with_state_ttl(ttl_ms);
+        dedup.push(&join_batch(vec![1], vec![10], vec![1]), 5000).unwrap();
+        dedup.flush_mini_batch().unwrap();
+        dedup.push(&join_batch(vec![1], vec![10], vec![1]), 5001).unwrap();
+        let out = dedup.flush_mini_batch().unwrap();
+        assert_eq!(values(&out, 1), vec![10, 10], "ttl={ttl_ms}");
+        assert_eq!(row_kinds(&out), vec![1, 2], "ttl={ttl_ms}");
+    }
+}
+
+// The netted pair's -U half honors generate_update_before, like every keep-last emission.
+#[test]
+fn compact_changes_honors_generate_update_before() {
+    let mut dedup = KeepLastDeduplicator::new(vec![0], 2, false, true, false)
+        .with_mini_batch(true)
+        .with_compact_changes(true);
+    dedup.push(&join_batch(vec![1], vec![10], vec![1]), 0).unwrap();
+    dedup.flush_mini_batch().unwrap();
+    dedup.push(&join_batch(vec![1, 1], vec![20, 30], vec![2, 3]), 0).unwrap();
+    let out = dedup.flush_mini_batch().unwrap();
+    assert_eq!(values(&out, 1), vec![30]);
+    assert_eq!(row_kinds(&out), vec![2]);
+}
+
 // A proctime keep-last deduplicator over `[k, v, rt]` (key col 0; the rt column is ignored).
 fn proctime_keep_last() -> KeepLastDeduplicator {
     KeepLastDeduplicator::new(vec![0], 2, true, false, false)

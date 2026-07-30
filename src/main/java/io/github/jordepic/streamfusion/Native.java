@@ -794,6 +794,9 @@ public final class Native {
    * rowtime order ({@code rowtimeOrdered}) reads the rowtime column and keeps the max-rowtime row;
    * proctime uses arrival order (no rowtime read). Released with {@link #closeKeepLastDeduplicator}.
    *
+   * @param compactChanges mini-batch compact-changes ({@code
+   *     table.exec.deduplicate.mini-batch.compact-changes-enabled}, rowtime only): the flush nets
+   *     each key's bundle to one transition instead of the default full kept chain
    * @param stateTtlMillis idle-state retention ({@code table.exec.state.ttl}); {@code 0} disables
    *     expiry. A key expires {@code stateTtlMillis} after its last write and then reads as absent,
    *     and the proctime keep-last identical-row suppression is disabled — Flink's TTL'd emission
@@ -806,6 +809,7 @@ public final class Native {
       boolean rowtimeOrdered,
       boolean keepFirst,
       boolean miniBatch,
+      boolean compactChanges,
       long stateTtlMillis,
       long memoryBudgetBytes);
 
@@ -843,6 +847,7 @@ public final class Native {
       boolean rowtimeOrdered,
       boolean keepFirst,
       boolean miniBatch,
+      boolean compactChanges,
       long stateTtlMillis,
       long nowMillis,
       byte[] snapshot,
@@ -864,6 +869,7 @@ public final class Native {
       boolean rowtimeOrdered,
       boolean keepFirst,
       boolean miniBatch,
+      boolean compactChanges,
       long stateTtlMillis,
       long nowMillis,
       byte[][] snapshots,
@@ -1149,6 +1155,7 @@ public final class Native {
       boolean rowtimeOrdered,
       boolean keepFirst,
       boolean miniBatch,
+      boolean compactChanges,
       long stateTtlMillis,
       long nowMillis,
       long memoryBudgetBytes,

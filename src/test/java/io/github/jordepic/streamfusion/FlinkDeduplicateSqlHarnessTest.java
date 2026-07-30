@@ -192,13 +192,40 @@ class FlinkDeduplicateSqlHarnessTest {
   }
 
   @Test
-  void miniBatchCompactChangesKeepsDeduplicateOnHost() throws Exception {
-    // With compact-changes on, Flink emits only each bundle's net transition
-    // (RowTimeMiniBatchLatestChangeDeduplicateFunction); the native operator replicates the
-    // default all-changelog flush, so this variant must decline.
+  void miniBatchCompactChangesNetsEachBundleAndMatchesHost() throws Exception {
+    // With compact-changes on, Flink emits only each bundle's net transition per key
+    // (RowTimeMiniBatchLatestChangeDeduplicateFunction), so the kinded multiset DEPENDS on the
+    // bundle boundaries; the fixture pins them deterministically (see compactChangesEnvironment):
+    // bundle one nets key 1's improving pair to a single +I, bundle two nets key 1's win over the
+    // durable row to one -U/+U and displaces key 2 on an equal rowtime.
+    NativeParity.assertKindedParity(
+        FlinkDeduplicateSqlHarnessTest::compactChangesEnvironment, KEEP_LAST);
+  }
+
+  @Test
+  void miniBatchCompactChangesWithStateTtlMatchesHost() throws Exception {
+    // Compact-changes has no equality check either, so retention changes nothing about the netted
+    // transitions (nothing expires in-test at 1h).
+    NativeParity.assertKindedParity(
+        () -> {
+          TableEnvironment tEnv = compactChangesEnvironment();
+          tEnv.getConfig().set("table.exec.state.ttl", "1 h");
+          return tEnv;
+        },
+        KEEP_LAST);
+  }
+
+  /**
+   * The mini-batch environment with compact-changes on and deterministic bundle boundaries: a
+   * count trigger of 3 splits the six rows into exactly two bundles on the host and the native
+   * runs alike (with timestamps at most 500, the 2s-interval rowtime assigner forwards no
+   * mid-stream watermark that could cut a bundle short — only the end-of-input one).
+   */
+  private static TableEnvironment compactChangesEnvironment() {
     TableEnvironment tEnv = miniBatchEnvironment();
     tEnv.getConfig().set("table.exec.deduplicate.mini-batch.compact-changes-enabled", "true");
-    assertDeduplicateFallsBack(tEnv, KEEP_LAST, "compact-changes");
+    tEnv.getConfig().set("table.exec.mini-batch.size", "3");
+    return tEnv;
   }
 
   @Test
