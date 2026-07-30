@@ -159,7 +159,7 @@ class NativeColumnarDeduplicateOperatorTest {
   void keepLastCompactChangesEmitsOnlyTheBundleEndpoint() throws Exception {
     try (BufferAllocator allocator = new RootAllocator();
         KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness =
-            eagerHarness(1, 0, true, true, 4, true, false, 0)) {
+            eagerHarness(1, 0, true, true, 4, true, true, true, false, 0)) {
       harness.setup(new ArrowBatchSerializer());
       harness.open();
       harness.processElement(
@@ -185,13 +185,32 @@ class NativeColumnarDeduplicateOperatorTest {
   }
 
   @Test
+  void insertInsensitiveKeepLastEmitsBareUpdateAfterKinds() throws Exception {
+    // generateUpdateBefore=false models an only-update-after consumer; with generateInsert=false
+    // as well (table.exec.deduplicate.insert-update-after-sensitive-enabled off), Flink's proctime
+    // helper takes its stateless branch: EVERY row emits a bare +U — the fresh key's first row,
+    // the identical duplicate the insert-sensitive mode would suppress, and each replacement.
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness =
+            eagerHarness(1, 0, false, false, 0, false, false, false, false, 0)) {
+      harness.setup(new ArrowBatchSerializer());
+      harness.open();
+      harness.processElement(new StreamRecord<>(batch(allocator, row(1, 10, 0))));
+      assertEquals(List.of(List.of("+U", 1L, 10L)), collectChanges(harness));
+      harness.processElement(new StreamRecord<>(batch(allocator, row(1, 10, 0), row(1, 20, 0))));
+      assertEquals(
+          List.of(List.of("+U", 1L, 10L), List.of("+U", 1L, 20L)), collectChanges(harness));
+    }
+  }
+
+  @Test
   void keepFirstMiniBatchChainsImprovingRowtimesLikeFlinksBundledFunction() throws Exception {
     // Rowtime keep-first under mini-batch is Flink's bundled retracting function: a strictly
     // smaller rowtime displaces with -U/+U (a tie would keep the incumbent), emitted as the full
     // kept chain at the logical boundary — the keep-last flush with the comparator flipped.
     try (BufferAllocator allocator = new RootAllocator();
         KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness =
-            eagerHarness(1, 0, true, false, 4, true, true, 0)) {
+            eagerHarness(1, 0, true, false, 4, true, true, true, true, 0)) {
       harness.setup(new ArrowBatchSerializer());
       harness.open();
       harness.processElement(
@@ -425,7 +444,8 @@ class NativeColumnarDeduplicateOperatorTest {
   private static KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch>
       eagerHarness(int parallelism, int subtask, boolean miniBatch, long miniBatchSize)
           throws Exception {
-    return eagerHarness(parallelism, subtask, miniBatch, false, miniBatchSize, true, false, 0);
+    return eagerHarness(
+        parallelism, subtask, miniBatch, false, miniBatchSize, true, true, true, false, 0);
   }
 
   private static KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch>
@@ -435,6 +455,8 @@ class NativeColumnarDeduplicateOperatorTest {
           boolean miniBatch,
           boolean compactChanges,
           long miniBatchSize,
+          boolean generateUpdateBefore,
+          boolean generateInsert,
           boolean rowtimeOrdered,
           boolean keepFirst,
           long stateTtlMillis)
@@ -446,7 +468,8 @@ class NativeColumnarDeduplicateOperatorTest {
             new int[] {-1},
             2,
             SCHEMA,
-            true,
+            generateUpdateBefore,
+            generateInsert,
             rowtimeOrdered,
             keepFirst,
             miniBatch,
@@ -464,7 +487,7 @@ class NativeColumnarDeduplicateOperatorTest {
   /** Proctime keep-last (arrival order), so the TTL tests replace unconditionally. */
   private static KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> ttlHarness(
       long stateTtlMillis) throws Exception {
-    return eagerHarness(1, 0, false, false, 0, false, false, stateTtlMillis);
+    return eagerHarness(1, 0, false, false, 0, true, true, false, false, stateTtlMillis);
   }
 
   private static KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch>

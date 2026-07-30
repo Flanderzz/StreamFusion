@@ -22,7 +22,9 @@ import org.apache.flink.table.types.logical.RowType;
  * bundled {@code RowTimeMiniBatchDeduplicateFunction} with {@code keepLastRow=false} — keep-last's
  * retracting machinery with the comparator flipped). Keep-last keeps the winning row per key and
  * emits a retract changelog eagerly on each input batch ({@code +I} for a key's first row, {@code
- * -U}(previous)/{@code +U}(new) on replacement — the kind rides the {@code $row_kind$} column);
+ * -U}(previous)/{@code +U}(new) on replacement — the kind rides the {@code $row_kind$} column;
+ * with {@code generateUpdateBefore} and {@code generateInsert} both false every emission is a bare
+ * {@code +U}, Flink's insert-sensitivity option off under an only-update-after consumer);
  * proctime keep-first emits each key's first row ({@code +I}, insert-only) and drops the rest. A
  * rowtime order keeps the max-rowtime (keep-last) or min-rowtime (keep-first) row; proctime uses
  * arrival order. Insert-only input. Keys are co-located by the columnar shuffle; the per-key stored
@@ -37,6 +39,7 @@ public class NativeColumnarKeepLastDeduplicateOperator
   private final int rowtimeColumn;
   private final RowType rowType;
   private final boolean generateUpdateBefore;
+  private final boolean generateInsert;
   private final boolean rowtimeOrdered;
   private final boolean keepFirst;
   private final boolean miniBatch;
@@ -54,6 +57,7 @@ public class NativeColumnarKeepLastDeduplicateOperator
       int rowtimeColumn,
       RowType rowType,
       boolean generateUpdateBefore,
+      boolean generateInsert,
       boolean rowtimeOrdered,
       boolean keepFirst,
       boolean miniBatch,
@@ -66,6 +70,7 @@ public class NativeColumnarKeepLastDeduplicateOperator
     this.rowtimeColumn = rowtimeColumn;
     this.rowType = rowType;
     this.generateUpdateBefore = generateUpdateBefore;
+    this.generateInsert = generateInsert;
     this.rowtimeOrdered = rowtimeOrdered;
     this.keepFirst = keepFirst;
     // Proctime keep-first emits eagerly even under mini-batch (same insert-only rows either way);
@@ -97,6 +102,7 @@ public class NativeColumnarKeepLastDeduplicateOperator
                 rowtimeColumn,
                 rowSchemaAddress,
                 generateUpdateBefore,
+                generateInsert,
                 rowtimeOrdered,
                 keepFirst,
                 miniBatch,
@@ -128,6 +134,7 @@ public class NativeColumnarKeepLastDeduplicateOperator
         keyTimestampPrecisions(),
         rowtimeColumn,
         generateUpdateBefore,
+        generateInsert,
         rowtimeOrdered,
         keepFirst,
         miniBatch,
@@ -143,6 +150,7 @@ public class NativeColumnarKeepLastDeduplicateOperator
         keyTimestampPrecisions(),
         rowtimeColumn,
         generateUpdateBefore,
+        generateInsert,
         rowtimeOrdered,
         keepFirst,
         miniBatch,

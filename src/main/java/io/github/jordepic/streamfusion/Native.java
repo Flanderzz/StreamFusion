@@ -823,6 +823,10 @@ public final class Native {
    * rowtime order ({@code rowtimeOrdered}) reads the rowtime column and keeps the max-rowtime row;
    * proctime uses arrival order (no rowtime read). Released with {@link #closeKeepLastDeduplicator}.
    *
+   * @param generateInsert Flink's insert-sensitivity ({@code
+   *     table.exec.deduplicate.insert-update-after-sensitive-enabled}, default true). With it and
+   *     {@code generateUpdateBefore} both false, every emission is a bare {@code +U} — a fresh
+   *     key's first row included — and the proctime identical-row suppression is disabled
    * @param compactChanges mini-batch compact-changes ({@code
    *     table.exec.deduplicate.mini-batch.compact-changes-enabled}, rowtime only): the flush nets
    *     each key's bundle to one transition instead of the default full kept chain
@@ -835,6 +839,7 @@ public final class Native {
       int[] keyTimestampPrecisions,
       int rtColumn,
       boolean generateUpdateBefore,
+      boolean generateInsert,
       boolean rowtimeOrdered,
       boolean keepFirst,
       boolean miniBatch,
@@ -873,6 +878,7 @@ public final class Native {
       int[] keyTimestampPrecisions,
       int rtColumn,
       boolean generateUpdateBefore,
+      boolean generateInsert,
       boolean rowtimeOrdered,
       boolean keepFirst,
       boolean miniBatch,
@@ -895,6 +901,7 @@ public final class Native {
       int[] keyTimestampPrecisions,
       int rtColumn,
       boolean generateUpdateBefore,
+      boolean generateInsert,
       boolean rowtimeOrdered,
       boolean keepFirst,
       boolean miniBatch,
@@ -1181,6 +1188,7 @@ public final class Native {
       int rtColumn,
       long rowSchemaAddress,
       boolean generateUpdateBefore,
+      boolean generateInsert,
       boolean rowtimeOrdered,
       boolean keepFirst,
       boolean miniBatch,

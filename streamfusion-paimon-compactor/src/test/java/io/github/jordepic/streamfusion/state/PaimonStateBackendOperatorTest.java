@@ -730,6 +730,7 @@ class PaimonStateBackendOperatorTest {
             DEDUP_ROW,
             true,
             true,
+            true,
             false,
             false,
             false,

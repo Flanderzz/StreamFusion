@@ -96,6 +96,13 @@ public class NativeDeduplicateExecNode extends ExecNodeBase<ArrowBatch>
     // Flink defines no STATE_TTL hint on deduplicate, so the job-wide retention is the whole
     // story.
     long stateTtlMillis = config.getStateRetentionTime();
+    // Insert-sensitivity is config-derived at translation, exactly as Flink reads it in
+    // StreamExecDeduplicate (where generateUpdateBefore is plan-derived from the consumer's
+    // requested update kind). The watermark-buffered keep-first shape is insert-only, so only
+    // the eager operator takes it.
+    boolean generateInsert =
+        config.get(
+            ExecutionConfigOptions.TABLE_EXEC_DEDUPLICATE_INSERT_UPDATE_AFTER_SENSITIVE_ENABLED);
     OneInputStreamOperator<ArrowBatch, ArrowBatch> operator =
         eager
             ? new NativeColumnarKeepLastDeduplicateOperator(
@@ -104,6 +111,7 @@ public class NativeDeduplicateExecNode extends ExecNodeBase<ArrowBatch>
                 rowtimeColumn,
                 (RowType) getOutputType(),
                 generateUpdateBefore,
+                generateInsert,
                 !proctime,
                 !keepLast,
                 miniBatch,

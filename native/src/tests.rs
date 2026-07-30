@@ -1811,6 +1811,74 @@ fn compact_changes_honors_generate_update_before() {
     assert_eq!(row_kinds(&out), vec![2]);
 }
 
+// With neither update-befores nor inserts requested (Flink's insert-sensitivity option off under
+// an only-update-after consumer), a fresh key's first emission is a bare +U — never +I — and a
+// replacement stays a lone +U.
+#[test]
+fn insert_insensitive_fresh_key_emits_a_bare_update_after() {
+    let mut dedup =
+        KeepLastDeduplicator::new(vec![0], 2, false, true, false).with_generate_insert(false);
+    let out = dedup.push(&join_batch(vec![1], vec![10], vec![1]), 0).unwrap();
+    assert_eq!(row_kinds(&out), vec![2]);
+    let out = dedup.push(&join_batch(vec![1], vec![20], vec![2]), 0).unwrap();
+    assert_eq!(row_kinds(&out), vec![2]);
+    assert_eq!(values(&out, 1), vec![20]);
+}
+
+// The rowtime mini-batch flush walks a fresh key's kept chain in all-+U transitions.
+#[test]
+fn insert_insensitive_mini_batch_chain_is_all_update_after() {
+    let mut dedup = KeepLastDeduplicator::new(vec![0], 2, false, true, false)
+        .with_mini_batch(true)
+        .with_generate_insert(false);
+    dedup.push(&join_batch(vec![1, 1, 2], vec![10, 20, 5], vec![1, 2, 1]), 0).unwrap();
+    let out = dedup.flush_mini_batch().unwrap();
+    assert_eq!(values(&out, 1), vec![10, 20, 5]);
+    assert_eq!(row_kinds(&out), vec![2, 2, 2]);
+}
+
+// Compact-changes nets a fresh key's bundle to a single bare +U endpoint.
+#[test]
+fn insert_insensitive_compact_changes_endpoint_is_a_bare_update_after() {
+    let mut dedup = KeepLastDeduplicator::new(vec![0], 2, false, true, false)
+        .with_mini_batch(true)
+        .with_compact_changes(true)
+        .with_generate_insert(false);
+    dedup.push(&join_batch(vec![1, 1], vec![10, 20], vec![1, 2]), 0).unwrap();
+    let out = dedup.flush_mini_batch().unwrap();
+    assert_eq!(values(&out, 1), vec![20]);
+    assert_eq!(row_kinds(&out), vec![2]);
+}
+
+// Proctime keep-last mirrors Flink's stateless bare-+U branch: the fresh key emits +U and an
+// identical duplicate is NOT suppressed (the equality check lives in the insert/update-before
+// branch, which this mode never enters).
+#[test]
+fn insert_insensitive_proctime_emits_every_row_unsuppressed() {
+    let mut dedup =
+        KeepLastDeduplicator::new(vec![0], 2, false, false, false).with_generate_insert(false);
+    let out = dedup.push(&join_batch(vec![1], vec![10], vec![7]), 0).unwrap();
+    assert_eq!(row_kinds(&out), vec![2]);
+    let out = dedup.push(&join_batch(vec![1], vec![10], vec![7]), 0).unwrap();
+    assert_eq!(row_kinds(&out), vec![2]); // identical — still emitted
+    assert_eq!(values(&out, 1), vec![10]);
+}
+
+// The proctime mini-batch flush still nets each key's bundle to its endpoint, emitted as the same
+// bare +U — a net no-op bundle included.
+#[test]
+fn insert_insensitive_proctime_mini_batch_flush_is_all_update_after() {
+    let mut dedup = KeepLastDeduplicator::new(vec![0], 2, false, false, false)
+        .with_mini_batch(true)
+        .with_generate_insert(false);
+    dedup.push(&join_batch(vec![1, 1], vec![10, 20], vec![7, 7]), 0).unwrap();
+    assert_eq!(row_kinds(&dedup.flush_mini_batch().unwrap()), vec![2]);
+    dedup.push(&join_batch(vec![1], vec![20], vec![7]), 0).unwrap();
+    let out = dedup.flush_mini_batch().unwrap();
+    assert_eq!(row_kinds(&out), vec![2]);
+    assert_eq!(values(&out, 1), vec![20]);
+}
+
 // A rowtime keep-first deduplicator over `[k, v, rt]` in mini-batch mode — Flink's bundled
 // retracting shape (RowTimeMiniBatchDeduplicateFunction with keepLastRow=false): keep-last's
 // machinery with the comparator flipped, so a strictly smaller rowtime displaces with -U/+U.

@@ -610,13 +610,22 @@ impl KeepFirstDeduplicator {
 ///     function as keep-last with the comparator flipped (a strictly **smaller**-rowtime row
 ///     displaces with `-U`/`+U`, a tie keeps the incumbent), so the shape is the keep-last
 ///     machinery, not the insert-only watermark buffer — updating output with `$row_kind$`.
-/// Insert-only input. The stored full row per key lives as scalars and is rebuilt with
-/// `scalars_to_array` on emit, like the changelog normalizer below.
+/// Every updating shape honors Flink's insert-sensitivity (see `generate_insert`): with it and
+/// `generate_update_before` both false a fresh key emits a bare `+U` instead of `+I`, and the
+/// proctime identical-row suppression is off. Insert-only input. The stored full row per key
+/// lives as scalars and is rebuilt with `scalars_to_array` on emit, like the changelog
+/// normalizer below.
 pub(crate) struct KeepLastDeduplicator<S: KeyedStateStore<DedupRow> = MemoryDedupStore> {
     partition_columns: Vec<usize>,
     key_timestamp_precisions: Vec<i32>,
     rt_column: usize,
     generate_update_before: bool,
+    /// Flink's `table.exec.deduplicate.insert-update-after-sensitive-enabled` (default true).
+    /// With this AND `generate_update_before` both false — the option off under a consumer that
+    /// requests only UPDATE_AFTER — Flink's emission helpers take their stateless else-branch:
+    /// every emission is a bare `+U`, a brand-new key's first row included, and the proctime
+    /// keep-last never consults state for suppression.
+    generate_insert: bool,
     /// Whether the order is a rowtime (read + compared) or proctime (arrival order; rt ignored).
     rowtime_ordered: bool,
     /// Keep-first (insert-only, first row wins) vs keep-last (retract changelog, latest row wins).
@@ -778,6 +787,7 @@ impl KeepLastDeduplicator {
             key_timestamp_precisions: vec![-1; key_arity],
             rt_column,
             generate_update_before,
+            generate_insert: true,
             rowtime_ordered,
             keep_first,
             ttl_ms: 0,
@@ -817,6 +827,7 @@ impl<S: KeyedStateStore<DedupRow>> KeepLastDeduplicator<S> {
             key_timestamp_precisions: self.key_timestamp_precisions,
             rt_column: self.rt_column,
             generate_update_before: self.generate_update_before,
+            generate_insert: self.generate_insert,
             rowtime_ordered: self.rowtime_ordered,
             keep_first: self.keep_first,
             ttl_ms: self.ttl_ms,
@@ -859,6 +870,23 @@ impl<S: KeyedStateStore<DedupRow>> KeepLastDeduplicator<S> {
     pub(crate) fn with_compact_changes(mut self, compact_changes: bool) -> Self {
         self.compact_changes = compact_changes;
         self
+    }
+
+    /// Sets Flink's insert-sensitivity
+    /// (`table.exec.deduplicate.insert-update-after-sensitive-enabled`); see `generate_insert`.
+    pub(crate) fn with_generate_insert(mut self, generate_insert: bool) -> Self {
+        self.generate_insert = generate_insert;
+        self
+    }
+
+    /// The kind of a key's first emission: `+I`, unless neither update-befores nor inserts are
+    /// requested — Flink then emits a bare `+U` even for a brand-new key.
+    fn fresh_key_kind(&self) -> i8 {
+        if self.generate_update_before || self.generate_insert {
+            0
+        } else {
+            2
+        }
     }
 
     /// Sets the idle-state retention (`table.exec.state.ttl`) in millis; 0 (Flink's default)
@@ -950,6 +978,8 @@ impl<S: KeyedStateStore<DedupRow>> KeepLastDeduplicator<S> {
         let keep_first = self.keep_first;
         let rowtime_ordered = self.rowtime_ordered;
         let generate_update_before = self.generate_update_before;
+        let generate_insert = self.generate_insert;
+        let fresh_key_kind = self.fresh_key_kind();
         let track = self.memory.tracking();
         let mut delta = 0isize;
         let rows = &mut self.rows;
@@ -1023,7 +1053,7 @@ impl<S: KeyedStateStore<DedupRow>> KeepLastDeduplicator<S> {
                         delta += retained as isize;
                     } else {
                         out_rows.push(payload.clone());
-                        out_kinds.push(0); // +I — first row for the key
+                        out_kinds.push(fresh_key_kind);
                     }
                     let last_write_ms = if ttl.enabled() { ttl.now() } else { 0 };
                     rows.insert(
@@ -1058,9 +1088,12 @@ impl<S: KeyedStateStore<DedupRow>> KeepLastDeduplicator<S> {
                 // always emits -U/+U so downstream state keeps refreshing instead of expiring too
                 // early); the rowtime variant never suppresses — its helper emits through
                 // updateDeduplicateResult with no equality check. Flink's suppression re-stores
-                // the identical row with kind INSERT, so the flag stays false here.
+                // the identical row with kind INSERT, so the flag stays false here. With neither
+                // update-befores nor inserts requested, Flink's helper takes its stateless bare-+U
+                // branch and never reaches the equality check, so nothing is suppressed.
                 Some(stored)
                     if !rowtime_ordered
+                        && (generate_update_before || generate_insert)
                         && !stored.update_kind
                         && stored.payload.as_ref() == current
                         && !ttl.enabled() =>
@@ -1134,6 +1167,7 @@ impl<S: KeyedStateStore<DedupRow>> KeepLastDeduplicator<S> {
             return Ok(RecordBatch::new_empty(Arc::new(Schema::empty())));
         }
         let changes = std::mem::take(&mut self.staged);
+        let fresh_key_kind = self.fresh_key_kind();
         let mut out_rows = Vec::with_capacity(changes.len() * 2);
         let mut out_kinds = Vec::with_capacity(changes.len() * 2);
         for DedupStagedChange { key, before, kept } in changes {
@@ -1148,7 +1182,7 @@ impl<S: KeyedStateStore<DedupRow>> KeepLastDeduplicator<S> {
                     match before {
                         None => {
                             out_rows.push(after);
-                            out_kinds.push(0); // +I — first row for the key
+                            out_kinds.push(fresh_key_kind);
                         }
                         Some(before) => {
                             if self.generate_update_before {
@@ -1169,7 +1203,7 @@ impl<S: KeyedStateStore<DedupRow>> KeepLastDeduplicator<S> {
                     match previous {
                         None => {
                             out_rows.push(payload.clone());
-                            out_kinds.push(0); // +I — first row for the key
+                            out_kinds.push(fresh_key_kind);
                         }
                         Some(before) => {
                             if self.generate_update_before {
@@ -1188,8 +1222,14 @@ impl<S: KeyedStateStore<DedupRow>> KeepLastDeduplicator<S> {
             // The same rules as immediate mode (Flink's mini-batch flush runs the same
             // processLastRowOnProcTime): a bundle whose net transition leaves the row unchanged
             // is suppressed only with retention off and while the stored kind is still INSERT
-            // (staged rows are exempt from the lazy expiry, so none can have expired here).
-            if self.ttl_ms == 0 && !row.update_kind && before.as_ref() == Some(&after) {
+            // (staged rows are exempt from the lazy expiry, so none can have expired here) —
+            // and never when neither update-befores nor inserts are requested (the bare-+U
+            // branch bypasses the equality check).
+            if self.ttl_ms == 0
+                && (self.generate_update_before || self.generate_insert)
+                && !row.update_kind
+                && before.as_ref() == Some(&after)
+            {
                 continue;
             }
             if before.is_some() {
@@ -1204,7 +1244,7 @@ impl<S: KeyedStateStore<DedupRow>> KeepLastDeduplicator<S> {
                 out_kinds.push(2);
             } else {
                 out_rows.push(after);
-                out_kinds.push(0);
+                out_kinds.push(fresh_key_kind);
             }
         }
         self.rows.end_bundle()?;
@@ -1728,6 +1768,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createKeepLas
     key_timestamp_precisions: JIntArray<'local>,
     rt_column: jint,
     generate_update_before: jboolean,
+    generate_insert: jboolean,
     rowtime_ordered: jboolean,
     keep_first: jboolean,
     mini_batch: jboolean,
@@ -1748,6 +1789,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createKeepLas
             rowtime_ordered != 0,
             keep_first != 0,
         )
+        .with_generate_insert(generate_insert != 0)
         .with_mini_batch(mini_batch != 0)
         .with_compact_changes(compact_changes != 0)
         .with_key_timestamp_precisions(timestamp_precisions)
@@ -1834,6 +1876,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreKeepLa
     key_timestamp_precisions: JIntArray<'local>,
     rt_column: jint,
     generate_update_before: jboolean,
+    generate_insert: jboolean,
     rowtime_ordered: jboolean,
     keep_first: jboolean,
     mini_batch: jboolean,
@@ -1860,6 +1903,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreKeepLa
             &bytes,
             now_millis,
         )
+        .with_generate_insert(generate_insert != 0)
         .with_mini_batch(mini_batch != 0)
         .with_compact_changes(compact_changes != 0)
         .with_state_ttl(state_ttl_millis)
@@ -1902,6 +1946,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreKeepLa
     key_timestamp_precisions: JIntArray<'local>,
     rt_column: jint,
     generate_update_before: jboolean,
+    generate_insert: jboolean,
     rowtime_ordered: jboolean,
     keep_first: jboolean,
     mini_batch: jboolean,
@@ -1941,6 +1986,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreKeepLa
             &restored,
             now_millis,
         )
+        .with_generate_insert(generate_insert != 0)
         .with_mini_batch(mini_batch != 0)
         .with_compact_changes(compact_changes != 0)
         .with_state_ttl(state_ttl_millis)

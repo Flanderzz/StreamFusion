@@ -137,7 +137,11 @@ array`, is **not** here: Flink rejects it too, so we're at parity.)
   rowtime dedup — keep-first included — becomes Flink's bundled retracting function, whose flush
   emits every kept row's transition by default and one net transition per key per bundle under
   `table.exec.deduplicate.mini-batch.compact-changes-enabled`; the proctime flush emits one net
-  transition per key.
+  transition per key. Insert-sensitivity
+  (`table.exec.deduplicate.insert-update-after-sensitive-enabled`, default true) is replicated
+  too: with the option off under a consumer that requests only UPDATE_AFTER (an upsert sink),
+  every emission is a bare `+U` — a fresh key's first row included — and the proctime
+  identical-row suppression is disabled, exactly as Flink's helpers behave.
 - **Joins** — regular/interval/window joins: a residual non-equi predicate must be expressible by the
   native expression engine (event-time and proctime interval and window joins are all native).
   Under mini-batch, a regular join coalesces replacements only when Flink metadata proves that both

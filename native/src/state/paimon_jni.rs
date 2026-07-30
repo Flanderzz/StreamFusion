@@ -289,6 +289,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonK
     rt_column: jint,
     row_schema_address: jlong,
     generate_update_before: jboolean,
+    generate_insert: jboolean,
     rowtime_ordered: jboolean,
     keep_first: jboolean,
     mini_batch: jboolean,
@@ -356,6 +357,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonK
                 rowtime_ordered != 0,
                 keep_first != 0,
             )
+            .with_generate_insert(generate_insert != 0)
             .with_mini_batch(mini_batch != 0)
             .with_compact_changes(compact_changes != 0)
             .with_key_timestamp_precisions(timestamp_precisions)

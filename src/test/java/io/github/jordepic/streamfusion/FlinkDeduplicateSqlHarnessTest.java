@@ -1,6 +1,12 @@
 package io.github.jordepic.streamfusion;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import io.github.jordepic.streamfusion.planner.NativePlanner;
+import io.github.jordepic.streamfusion.planner.PhysicalPlanScan;
 import java.time.Duration;
+import java.util.List;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.datastream.DataStream;
@@ -119,6 +125,72 @@ class FlinkDeduplicateSqlHarnessTest {
     // source comment).
     NativeParity.assertKindedParity(
         FlinkDeduplicateSqlHarnessTest::proctimeEnvironment, KEEP_LAST_PROCTIME);
+  }
+
+  @Test
+  void insertInsensitiveOptionWithCollectSinkMatchesHost() throws Exception {
+    // Under a collect() sink Flink requests update-befores, so the dedup keeps
+    // generateUpdateBefore=true and the +I/-U/+U changelog is unchanged even with the
+    // insert-sensitivity option off (generateInsert only matters when both flags are false).
+    // This pins routing and parity under the option; the upsert-sink tests below reach the
+    // bare-+U path itself.
+    NativeParity.assertKindedParity(
+        () -> {
+          TableEnvironment tEnv = proctimeEnvironment();
+          tEnv.getConfig()
+              .set("table.exec.deduplicate.insert-update-after-sensitive-enabled", "false");
+          return tEnv;
+        },
+        KEEP_LAST_PROCTIME);
+  }
+
+  @Test
+  void insertInsensitiveUpsertSinkReceivesBareUpdateAfterAndMatchesHost() throws Exception {
+    // An upsert sink requests ONLY_UPDATE_AFTER, so the dedup is planned with
+    // generateUpdateBefore=false; with the insert-sensitivity option off as well, Flink's helper
+    // takes its stateless branch: EVERY input row emits a bare +U — fresh keys included, and the
+    // identical duplicates the sensitive mode would suppress. The captured sink-side kinds pin
+    // that end-to-end on both engines.
+    List<String> host = captureUpsertKinds(false, false);
+    assertEquals(7, host.size(), "host emitted " + host);
+    assertTrue(host.stream().allMatch(row -> row.startsWith("+U")), "host emitted " + host);
+    assertEquals(host, captureUpsertKinds(true, false));
+  }
+
+  @Test
+  void insertSensitiveUpsertSinkStillOpensFreshKeysWithInsertAndMatchesHost() throws Exception {
+    // The default (option on) under the same only-update-after edge: no -U halves, but a fresh
+    // key still opens with +I and the identical-duplicate suppression applies — the
+    // generateUpdateBefore=false, generateInsert=true combination no collect()-sink test reaches.
+    List<String> host = captureUpsertKinds(false, true);
+    assertTrue(host.stream().noneMatch(row -> row.startsWith("-U")), "host emitted " + host);
+    assertTrue(host.stream().anyMatch(row -> row.startsWith("+I")), "host emitted " + host);
+    assertEquals(host, captureUpsertKinds(true, true));
+  }
+
+  /**
+   * Runs the proctime keep-last query into the kind-capturing upsert sink and returns the changes
+   * it received, in arrival order (parallelism 1 keeps this deterministic).
+   */
+  private static List<String> captureUpsertKinds(boolean nativeEngine, boolean insertSensitive)
+      throws Exception {
+    TableEnvironment tEnv = proctimeEnvironment();
+    if (!insertSensitive) {
+      tEnv.getConfig()
+          .set("table.exec.deduplicate.insert-update-after-sensitive-enabled", "false");
+    }
+    PhysicalPlanScan scan = nativeEngine ? NativePlanner.install(tEnv) : null;
+    tEnv.executeSql(
+        "CREATE TABLE snk (k BIGINT, v BIGINT, PRIMARY KEY (k) NOT ENFORCED)"
+            + " WITH ('connector' = 'kind-capturing-upsert')");
+    KindCapturingUpsertTableFactory.drain();
+    tEnv.executeSql("INSERT INTO snk " + KEEP_LAST_PROCTIME).await();
+    if (scan != null) {
+      assertTrue(
+          scan.substitutions() > 0,
+          "query did not route to native; reasons=" + scan.fallbackReasons());
+    }
+    return KindCapturingUpsertTableFactory.drain();
   }
 
   @Test
