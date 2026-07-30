@@ -99,7 +99,13 @@ class FlinkColumnarShuffleParallelismTest {
     return tEnv;
   }
 
-  /** Writes the input as multiple Parquet files (parallel write) so the sharded read has work per subtask. */
+  /**
+   * Writes the input as two Parquet files — one INSERT job per 24-row half — so the sharded read
+   * has work per subtask and every downstream channel sees at least two source batches. A single
+   * parallel write left the file count to scheduling: the sequence source assigns splits
+   * dynamically, so one write subtask can concede everything and collapse the input to one file —
+   * one source batch — and the coalescer engagement the changelog test asserts never happens.
+   */
   private static void writeInput(Path directory) throws Exception {
     StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
     env.setParallelism(2);
@@ -128,7 +134,8 @@ class FlinkColumnarShuffleParallelismTest {
             + "'filesystem', 'path' = '"
             + directory.toUri()
             + "', 'format' = 'parquet')");
-    tEnv.executeSql("INSERT INTO in_write SELECT * FROM s").await();
+    tEnv.executeSql("INSERT INTO in_write SELECT * FROM s WHERE v < 24").await();
+    tEnv.executeSql("INSERT INTO in_write SELECT * FROM s WHERE v >= 24").await();
   }
 
   private static TableEnvironment readEnvironment(
