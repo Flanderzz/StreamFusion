@@ -1,5 +1,6 @@
 package io.github.jordepic.streamfusion.planner;
 
+import org.apache.calcite.rel.RelNode;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalUnion;
 
 /**
@@ -23,5 +24,10 @@ final class UnionMatcher {
       return "union: only UNION ALL is supported (UNION distinct rewrites to a GROUP BY)";
     }
     return "union: needs a row type the Arrow conversion supports";
+  }
+
+  static RelNode substitute(StreamPhysicalUnion union, PlanContext ctx) {
+    return new StreamPhysicalNativeUnion(
+        union.getCluster(), union.getTraitSet(), union.getInputs(), union.getRowType());
   }
 }

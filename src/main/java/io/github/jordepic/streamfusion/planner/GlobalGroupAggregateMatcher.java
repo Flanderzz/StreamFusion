@@ -3,10 +3,12 @@ package io.github.jordepic.streamfusion.planner;
 import io.github.jordepic.streamfusion.operator.RowDataArrowConverter;
 import java.util.ArrayList;
 import java.util.List;
+import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.AggregateCall;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
+import org.apache.flink.table.planner.hint.StateTtlHint;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalGlobalGroupAggregate;
 import org.apache.flink.table.planner.plan.utils.ChangelogPlanUtils;
 
@@ -364,5 +366,27 @@ final class GlobalGroupAggregateMatcher {
 
   static boolean generateUpdateBefore(StreamPhysicalGlobalGroupAggregate agg) {
     return ChangelogPlanUtils.generateUpdateBefore(agg);
+  }
+
+  static RelNode substitute(StreamPhysicalGlobalGroupAggregate agg, PlanContext ctx) {
+    int[] keyColumns = GlobalGroupAggregateMatcher.keyColumns(agg);
+    // TTL lives on the stateful global half only (the local is a transient per-bundle buffer);
+    // a STATE_TTL hint on the aggregate overrides the job-wide retention, as single-phase.
+    Long stateTtlHint = StateTtlHint.getStateTtlFromHintOnSingleRel(agg.hints());
+    return new StreamPhysicalNativeColumnarGroupAggregate(
+        agg.getCluster(),
+        agg.getTraitSet(),
+        ctx.columnarInput(agg.getInputs().get(0), keyColumns),
+        agg.getRowType(),
+        GlobalGroupAggregateMatcher.kinds(agg),
+        GlobalGroupAggregateMatcher.valueTypeCodes(agg),
+        GlobalGroupAggregateMatcher.valueColumns(agg),
+        keyColumns,
+        new int[0], // the global merge applies no FILTER — the local half already filtered
+        GlobalGroupAggregateMatcher.countColumns(agg),
+        GlobalGroupAggregateMatcher.distinctViewColumns(agg),
+        GlobalGroupAggregateMatcher.recordCountColumn(agg),
+        GlobalGroupAggregateMatcher.generateUpdateBefore(agg),
+        stateTtlHint == null ? -1 : stateTtlHint);
   }
 }

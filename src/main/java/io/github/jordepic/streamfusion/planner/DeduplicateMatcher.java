@@ -4,6 +4,7 @@ import io.github.jordepic.streamfusion.operator.RowDataArrowConverter;
 import java.util.List;
 import java.util.Optional;
 import org.apache.calcite.rel.RelFieldCollation;
+import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalRank;
@@ -93,5 +94,24 @@ final class DeduplicateMatcher {
   static String unsupportedReason(StreamPhysicalRank rank) {
     return "deduplication: needs ROW_NUMBER() OVER (PARTITION BY … ORDER BY rowtime|proctime ASC|DESC)"
         + " = 1 (keep-first or keep-last) over an insert-only input";
+  }
+
+  static RelNode substitute(StreamPhysicalRank rank, PlanContext ctx) {
+    int[] partitionColumns = DeduplicateMatcher.partitionColumns(rank);
+    // Columnar (Arrow in/out); the partitioned shuffle stays columnar where the input sits on a
+    // columnar producer, else the transition pass transposes at the boundary. Watermark-released
+    // keep-first is insert-only; keep-last — and rowtime keep-first under mini-batch — emits a
+    // retract changelog (the native rel inherits the host rank's changelog trait, so the
+    // boundary transpose carries $row_kind$).
+    return new StreamPhysicalNativeDeduplicate(
+        rank.getCluster(),
+        rank.getTraitSet(),
+        ctx.columnarInput(rank.getInput(), partitionColumns),
+        rank.getRowType(),
+        partitionColumns,
+        DeduplicateMatcher.rowtimeColumn(rank),
+        DeduplicateMatcher.keepLast(rank),
+        DeduplicateMatcher.generateUpdateBefore(rank),
+        DeduplicateMatcher.isProctime(rank));
   }
 }

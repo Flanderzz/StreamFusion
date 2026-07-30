@@ -2,9 +2,12 @@ package io.github.jordepic.streamfusion.planner;
 
 import io.github.jordepic.streamfusion.operator.RowDataArrowConverter;
 import org.apache.calcite.rel.RelFieldCollation;
+import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.Sort;
 import org.apache.calcite.rex.RexLiteral;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
+import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalRel;
+import org.apache.flink.table.planner.plan.utils.ChangelogPlanUtils;
 
 /**
  * Recognizes a global {@code FETCH}/{@code LIMIT} — Flink's {@code StreamPhysicalLimit} (plain
@@ -76,5 +79,37 @@ final class LimitMatcher {
       return "limit: a FETCH/LIMIT count is required on a streaming query";
     }
     return "limit: needs a row type the Arrow conversion supports and an insert-only input";
+  }
+
+  static RelNode substitute(Sort sort, PlanContext ctx) {
+    boolean insertOnlyInput = ChangelogPlanUtils.isInsertOnly((StreamPhysicalRel) sort.getInput());
+    if (LimitMatcher.matches(sort) && insertOnlyInput) {
+      if (!NativeConfig.operatorEnabled("limit")) {
+        ctx.decline(Substitution.disabledReason("limit"));
+        return null;
+      }
+      int[] partitionColumns = new int[0]; // global limit — a single gather, no partition
+      long offset = LimitMatcher.offset(sort);
+      return new StreamPhysicalNativeColumnarTopN(
+          sort.getCluster(),
+          sort.getTraitSet(),
+          ctx.columnarInput(sort.getInput(), partitionColumns),
+          sort.getRowType(),
+          partitionColumns,
+          LimitMatcher.sortIndices(sort),
+          LimitMatcher.sortAscending(sort),
+          LimitMatcher.sortNullsFirst(sort),
+          offset,
+          LimitMatcher.limit(sort),
+          false, // a global LIMIT never projects a rank column
+          offset > 0, // an OFFSET uses the retracting ranker; no-offset the append-only one
+          null);
+    }
+    // A retracting input is the one reason not in unsupportedReason.
+    ctx.decline(
+        insertOnlyInput
+            ? LimitMatcher.unsupportedReason(sort)
+            : "limit: needs an insert-only input (the append-only ranker is implemented)");
+    return null;
   }
 }

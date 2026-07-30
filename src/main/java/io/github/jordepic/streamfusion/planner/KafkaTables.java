@@ -9,7 +9,6 @@ import io.github.jordepic.streamfusion.format.NativeFormatProviders;
 import io.github.jordepic.streamfusion.format.NativeMessageDecoderFactory;
 import java.util.Arrays;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
@@ -669,5 +668,41 @@ final class KafkaTables {
       }
     }
     return OffsetsInitializer.offsets(byPartition);
+  }
+
+  static RelNode substituteDecode(StreamPhysicalTableSourceScan scan, PlanContext ctx) {
+    return new StreamPhysicalNativeKafkaDecode(
+        scan.getCluster(), scan.getTraitSet(), scan.getRowType(), FilesystemTables.options(scan));
+  }
+
+  static RelNode reportCdcWatermark(RelNode node, PlanContext ctx) {
+    String fallback = KafkaTables.cdcWatermarkFallback(node);
+    if (fallback != null) {
+      ctx.decline(fallback);
+    }
+    return null;
+  }
+
+  static RelNode reportAppendWatermark(RelNode node, PlanContext ctx) {
+    String fallback = KafkaTables.appendWatermarkFallback(node);
+    if (fallback != null) {
+      ctx.decline(fallback);
+    }
+    return null;
+  }
+
+  /**
+   * The native rdkafka source consumes and decodes in one place: the installed format provider's
+   * decoder runs inside the poll, so the source emits typed batches — and, because it therefore
+   * holds decoded rowtimes, it regenerates a pushed WATERMARK per split (Flink's own min
+   * combination and idleness over batch-max timestamps).
+   */
+  static RelNode substituteSource(StreamPhysicalTableSourceScan scan, PlanContext ctx) {
+    return new StreamPhysicalNativeKafkaSource(
+        scan.getCluster(),
+        scan.getTraitSet(),
+        scan.getRowType(),
+        FilesystemTables.options(scan),
+        ScanWatermarkSpec.of(scan));
   }
 }

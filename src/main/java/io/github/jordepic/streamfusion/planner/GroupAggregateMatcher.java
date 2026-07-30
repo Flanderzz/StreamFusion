@@ -1,13 +1,14 @@
 package io.github.jordepic.streamfusion.planner;
 
 import io.github.jordepic.streamfusion.operator.RowDataArrowConverter;
+import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.AggregateCall;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
+import org.apache.flink.table.planner.hint.StateTtlHint;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalGroupAggregate;
 import org.apache.flink.table.planner.plan.utils.ChangelogPlanUtils;
-import org.apache.flink.table.types.logical.RowType;
 import scala.collection.Seq;
 
 /**
@@ -174,5 +175,31 @@ final class GroupAggregateMatcher {
   /** Whether the host wants UPDATE_BEFORE rows emitted on this node's output edge. */
   static boolean generateUpdateBefore(StreamPhysicalGroupAggregate agg) {
     return ChangelogPlanUtils.generateUpdateBefore(agg);
+  }
+
+  static RelNode substitute(StreamPhysicalGroupAggregate agg, PlanContext ctx) {
+    int[] keyColumns = GroupAggregateMatcher.keyColumns(agg);
+    // A STATE_TTL hint overrides the job-wide retention for this aggregate alone (Flink's
+    // StateMetadata precedence); null means no hint, resolved at translate time.
+    Long stateTtlHint = StateTtlHint.getStateTtlFromHintOnSingleRel(agg.hints());
+    // The aggregate is columnar (Arrow in/out). Keep the keyed shuffle columnar where the input
+    // sits on a columnar producer (a native exchange splits the batch by the grouping keys);
+    // otherwise the transition pass inserts a transpose at the host exchange boundary. Same key
+    // co-location argument as the window aggregate (divergences/10).
+    return new StreamPhysicalNativeColumnarGroupAggregate(
+        agg.getCluster(),
+        agg.getTraitSet(),
+        ctx.columnarInput(agg.getInputs().get(0), keyColumns),
+        agg.getRowType(),
+        GroupAggregateMatcher.kinds(agg),
+        GroupAggregateMatcher.valueTypeCodes(agg),
+        GroupAggregateMatcher.valueColumns(agg),
+        keyColumns,
+        GroupAggregateMatcher.filterColumns(agg),
+        new int[0], // single-phase: no AVG-merge count partials
+        new int[0], // single-phase: distinct values fold per row, no view columns
+        -1, // single-phase: liveness counts rows ±1, no count1 partial
+        GroupAggregateMatcher.generateUpdateBefore(agg),
+        stateTtlHint == null ? -1 : stateTtlHint);
   }
 }

@@ -1,5 +1,6 @@
 package io.github.jordepic.streamfusion.planner;
 
+import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.AggregateCall;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.sql.type.SqlTypeName;
@@ -175,5 +176,25 @@ final class GlobalWindowAggregateMatcher {
       kinds[i] = WindowAggregateMatcher.aggregateKind(aggregate.aggCalls().apply(i).getAggregation().getKind());
     }
     return kinds;
+  }
+
+  static RelNode substitute(StreamPhysicalGlobalWindowAggregate agg, PlanContext ctx) {
+    int[] keyColumns = GlobalWindowAggregateMatcher.keyColumns(agg);
+    // Always columnar: the columnar local emits Arrow partials, a native exchange
+    // splits them by key, and the columnar global merges — the whole two-phase pipeline flows
+    // Arrow. (columnarInput keeps the partial shuffle Arrow; the local is always a columnar
+    // producer now, so no transpose arises here.)
+    return new StreamPhysicalNativeColumnarGlobalWindowAggregate(
+        agg.getCluster(),
+        agg.getTraitSet(),
+        ctx.columnarInput(agg.getInputs().get(0), keyColumns),
+        agg.getRowType(),
+        GlobalWindowAggregateMatcher.windowMillis(agg),
+        GlobalWindowAggregateMatcher.slideMillis(agg),
+        GlobalWindowAggregateMatcher.cumulative(agg),
+        keyColumns,
+        GlobalWindowAggregateMatcher.valueTypes(agg),
+        GlobalWindowAggregateMatcher.kinds(agg),
+        WindowAggregateMatcher.isLtz(agg.windowing()));
   }
 }

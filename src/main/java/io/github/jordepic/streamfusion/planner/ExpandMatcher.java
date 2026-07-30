@@ -2,6 +2,7 @@ package io.github.jordepic.streamfusion.planner;
 
 import io.github.jordepic.streamfusion.operator.RowDataArrowConverter;
 import java.util.List;
+import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rex.RexInputRef;
 import org.apache.calcite.rex.RexLiteral;
 import org.apache.calcite.rex.RexNode;
@@ -86,5 +87,19 @@ final class ExpandMatcher {
   static String unsupportedReason(StreamPhysicalExpand expand) {
     return "expand: every GROUPING SETS/CUBE/ROLLUP project cell must be a column reference, a NULL,"
         + " or the integer expand id (a computed cell falls back), over Arrow-supported column types";
+  }
+
+  static RelNode substitute(StreamPhysicalExpand expand, PlanContext ctx) {
+    return new StreamPhysicalNativeExpand(
+        expand.getCluster(),
+        expand.getTraitSet(),
+        expand.getInputs().get(0),
+        expand.getRowType(),
+        ExpandMatcher.numExpandRows(expand),
+        ExpandMatcher.numOutputColumns(expand),
+        expand.expandIdIndex(),
+        ExpandMatcher.expandIdIsLong(expand),
+        ExpandMatcher.copyIndices(expand),
+        ExpandMatcher.expandIdValues(expand));
   }
 }

@@ -2,6 +2,7 @@ package io.github.jordepic.streamfusion.planner;
 
 import io.github.jordepic.streamfusion.operator.RowDataArrowConverter;
 import org.apache.calcite.rel.RelFieldCollation;
+import org.apache.calcite.rel.RelNode;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
 import org.apache.flink.table.planner.plan.logical.WindowAttachedWindowingStrategy;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalWindowRank;
@@ -106,5 +107,26 @@ final class WindowRankMatcher {
   static String unsupportedReason(StreamPhysicalWindowRank rank) {
     return "window Top-N: needs ROW_NUMBER() OVER (PARTITION BY window[, key] ORDER BY …) <= N over a"
         + " windowing-TVF input, with input columns the Arrow conversion supports";
+  }
+
+  static RelNode substitute(StreamPhysicalWindowRank rank, PlanContext ctx) {
+    int[] partitionColumns = WindowRankMatcher.partitionColumns(rank);
+    return new StreamPhysicalNativeWindowRank(
+        rank.getCluster(),
+        rank.getTraitSet(),
+        ctx.columnarInput(rank.getInputs().get(0), partitionColumns),
+        rank.getRowType(),
+        WindowRankMatcher.windowStartColumn(rank),
+        WindowRankMatcher.windowEndColumn(rank),
+        partitionColumns,
+        WindowRankMatcher.sortIndices(rank),
+        WindowRankMatcher.sortAscending(rank),
+        WindowRankMatcher.sortNullsFirst(rank),
+        WindowRankMatcher.limit(rank),
+        WindowRankMatcher.outputRankNumber(rank),
+        WindowRankMatcher.isProctime(rank),
+        WindowRankMatcher.windowMillis(rank),
+        WindowRankMatcher.slideMillis(rank),
+        WindowRankMatcher.cumulative(rank));
   }
 }

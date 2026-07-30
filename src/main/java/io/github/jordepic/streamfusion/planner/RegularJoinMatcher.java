@@ -1,10 +1,13 @@
 package io.github.jordepic.streamfusion.planner;
 
 import io.github.jordepic.streamfusion.operator.RowDataArrowConverter;
+import java.util.Map;
 import java.util.Optional;
+import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.rex.RexUtil;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
+import org.apache.flink.table.planner.hint.StateTtlHint;
 import org.apache.flink.table.planner.plan.nodes.exec.spec.JoinSpec;
 import org.apache.flink.table.planner.plan.nodes.physical.common.CommonPhysicalJoin;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalJoin;
@@ -123,5 +126,29 @@ final class RegularJoinMatcher {
       }
     }
     return false;
+  }
+
+  static RelNode substitute(StreamPhysicalJoin join, PlanContext ctx) {
+    int[] leftKeys = RegularJoinMatcher.leftKeys(join);
+    int[] rightKeys = RegularJoinMatcher.rightKeys(join);
+    // A STATE_TTL hint sets each side's retention independently (0 = left, 1 = right —
+    // Flink's FlinkHints.LEFT_INPUT convention), overriding the job-wide retention for that
+    // side alone; -1 means no hint, resolved at translate time.
+    Map<Integer, Long> hintTtls = StateTtlHint.getStateTtlFromHintOnBiRel(join.getHints());
+    // Columnar (Arrow in/out); keep each side's keyed shuffle columnar where it sits on a
+    // columnar producer, else the transition pass transposes at the boundary.
+    return new StreamPhysicalNativeColumnarUpdatingJoin(
+        join.getCluster(),
+        join.getTraitSet(),
+        ctx.columnarInput(join.getLeft(), leftKeys),
+        ctx.columnarInput(join.getRight(), rightKeys),
+        join.getRowType(),
+        leftKeys,
+        rightKeys,
+        RegularJoinMatcher.joinTypeCode(join),
+        RegularJoinMatcher.nonEquiPredicate(join),
+        RegularJoinMatcher.joinKeyIsUnique(join, 0) && RegularJoinMatcher.joinKeyIsUnique(join, 1),
+        hintTtls.getOrDefault(0, -1L),
+        hintTtls.getOrDefault(1, -1L));
   }
 }

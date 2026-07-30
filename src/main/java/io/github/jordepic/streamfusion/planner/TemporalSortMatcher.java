@@ -2,6 +2,7 @@ package io.github.jordepic.streamfusion.planner;
 
 import java.util.List;
 import org.apache.calcite.rel.RelFieldCollation;
+import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalTemporalSort;
 
@@ -44,5 +45,14 @@ final class TemporalSortMatcher {
   static String unsupportedReason(StreamPhysicalTemporalSort sort) {
     return "event-time sort: needs ORDER BY a single time attribute ascending, with input columns the"
         + " Arrow conversion supports";
+  }
+
+  static RelNode substitute(StreamPhysicalTemporalSort sort, PlanContext ctx) {
+    return new StreamPhysicalNativeTemporalSort(
+        sort.getCluster(),
+        sort.getTraitSet(),
+        ctx.columnarInput(sort.getInputs().get(0), new int[0]),
+        sort.getRowType(),
+        TemporalSortMatcher.rowtimeColumn(sort));
   }
 }

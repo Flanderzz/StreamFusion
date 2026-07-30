@@ -35,4 +35,13 @@ final class ParquetSourceMatcher {
   static boolean utcTimestamp(StreamPhysicalTableSourceScan scan) {
     return Boolean.parseBoolean(FilesystemTables.options(scan).getOrDefault("utc-timezone", "false"));
   }
+
+  static RelNode substitute(StreamPhysicalTableSourceScan scan, PlanContext ctx) {
+    return new StreamPhysicalNativeParquetSource(
+        scan.getCluster(),
+        scan.getTraitSet(),
+        scan.getRowType(),
+        path(scan),
+        utcTimestamp(scan));
+  }
 }

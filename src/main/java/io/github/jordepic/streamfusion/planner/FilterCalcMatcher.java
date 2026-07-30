@@ -1,6 +1,7 @@
 package io.github.jordepic.streamfusion.planner;
 
 import java.util.List;
+import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.Calc;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rex.RexInputRef;
@@ -111,5 +112,22 @@ final class FilterCalcMatcher {
       default:
         return false;
     }
+  }
+
+  static RelNode substitute(Calc calc, PlanContext ctx) {
+    RexExpression condition = FilterCalcMatcher.encodedCondition(calc);
+    return new StreamPhysicalNativeFilter(
+        calc.getCluster(),
+        calc.getTraitSet(),
+        calc.getInputs().get(0),
+        calc.getRowType(),
+        FilterCalcMatcher.projection(calc),
+        condition.kinds(),
+        condition.payload(),
+        condition.childCounts(),
+        condition.longs(),
+        condition.doubles(),
+        condition.strings(),
+        condition.udfBinding());
   }
 }

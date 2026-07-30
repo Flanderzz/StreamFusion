@@ -2,6 +2,7 @@ package io.github.jordepic.streamfusion.planner;
 
 import java.lang.reflect.Field;
 import java.util.Optional;
+import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.rex.RexUtil;
@@ -138,5 +139,29 @@ final class IntervalJoinMatcher {
     } catch (ReflectiveOperationException e) {
       throw new IllegalStateException("failed to read interval-join window bounds", e);
     }
+  }
+
+  static RelNode substitute(StreamPhysicalIntervalJoin join, PlanContext ctx) {
+    int[] leftKeys = IntervalJoinMatcher.leftKeys(join);
+    int[] rightKeys = IntervalJoinMatcher.rightKeys(join);
+    // Keep each input's keyed shuffle columnar where it sits on a columnar producer (a native
+    // exchange splits the batch by that side's join key); otherwise the boundary gets a
+    // row→Arrow transpose. The join re-groups by key in its own state, so the exchange hash need
+    // not match Flink's (divergences/10). The join is always columnar (Arrow pairs out).
+    return new StreamPhysicalNativeIntervalJoin(
+        join.getCluster(),
+        join.getTraitSet(),
+        ctx.columnarInput(join.getLeft(), leftKeys),
+        ctx.columnarInput(join.getRight(), rightKeys),
+        join.getRowType(),
+        leftKeys,
+        rightKeys,
+        IntervalJoinMatcher.leftTime(join),
+        IntervalJoinMatcher.rightTime(join),
+        IntervalJoinMatcher.lowerMillis(join),
+        IntervalJoinMatcher.upperMillis(join),
+        IntervalJoinMatcher.joinTypeCode(join),
+        IntervalJoinMatcher.nonEquiPredicate(join),
+        IntervalJoinMatcher.isProctime(join));
   }
 }

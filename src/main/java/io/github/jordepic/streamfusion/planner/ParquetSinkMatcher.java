@@ -2,6 +2,7 @@ package io.github.jordepic.streamfusion.planner;
 
 import java.util.List;
 import java.util.Map;
+import org.apache.calcite.rel.RelNode;
 import org.apache.flink.table.catalog.ContextResolvedTable;
 import org.apache.flink.table.catalog.ObjectIdentifier;
 import org.apache.flink.table.catalog.ResolvedCatalogBaseTable;
@@ -10,7 +11,9 @@ import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
 import org.apache.flink.table.planner.plan.abilities.sink.OverwriteSpec;
 import org.apache.flink.table.planner.plan.abilities.sink.PartitioningSpec;
 import org.apache.flink.table.planner.plan.abilities.sink.SinkAbilitySpec;
+import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalRel;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalSink;
+import org.apache.flink.table.planner.plan.utils.ChangelogPlanUtils;
 import org.apache.flink.table.types.logical.RowType;
 
 /**
@@ -121,5 +124,27 @@ final class ParquetSinkMatcher {
     } catch (RuntimeException e) {
       return null;
     }
+  }
+
+  static RelNode substitute(StreamPhysicalSink sink, PlanContext ctx) {
+    if (!ChangelogPlanUtils.isInsertOnly((StreamPhysicalRel) sink.getInputs().get(0))) {
+      ctx.decline("parquet sink: the input is a changelog, not an insert-only stream");
+      return null;
+    }
+    if (!NativeConfig.operatorEnabled("parquetSink")) {
+      ctx.decline(Substitution.disabledReason("parquetSink"));
+      return null;
+    }
+    ParquetSinkMatcher.Planned planned = ParquetSinkMatcher.plan(sink);
+    if (planned.fallbackReason != null) {
+      ctx.decline("parquet sink: " + planned.fallbackReason);
+      return null;
+    }
+    return new StreamPhysicalNativeParquetSink(
+        sink.getCluster(),
+        sink.getTraitSet(),
+        sink.getInputs().get(0),
+        sink.getRowType(),
+        planned);
   }
 }

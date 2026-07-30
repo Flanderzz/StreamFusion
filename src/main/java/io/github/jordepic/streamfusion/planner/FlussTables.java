@@ -5,6 +5,7 @@ import io.github.jordepic.streamfusion.fluss.NativeFluss;
 import io.github.jordepic.streamfusion.fluss.NativeFlussSource;
 import java.lang.reflect.Field;
 import java.util.Map;
+import org.apache.calcite.rel.RelNode;
 import org.apache.flink.table.connector.source.DynamicTableSource;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalTableSourceScan;
 import org.apache.flink.table.planner.plan.schema.TableSourceTable;
@@ -353,6 +354,31 @@ final class FlussTables {
       this.nativeConfigValues = nativeConfigValues;
       this.projectedFields = projectedFields;
       this.rowtimeIndex = rowtimeIndex;
+    }
+  }
+
+  static RelNode substitute(StreamPhysicalTableSourceScan scan, PlanContext ctx) {
+    String fallback = FlussTables.fallbackReason(scan);
+    if (fallback != null) {
+      ctx.decline("fluss source: " + fallback);
+      return null;
+    }
+    return new StreamPhysicalNativeFlussSource(
+        scan.getCluster(), scan.getTraitSet(), scan.getRowType(), scan);
+  }
+
+  /** Whether the scan's table source is Fluss's, for a table declared without the connector option. */
+  static boolean isFlussTableSource(StreamPhysicalTableSourceScan scan) {
+    try {
+      TableSourceTable table = scan.getTable().unwrap(TableSourceTable.class);
+      if (table == null) {
+        return false;
+      }
+      DynamicTableSource source = table.tableSource();
+      return source != null
+          && "org.apache.fluss.flink.source.FlinkTableSource".equals(source.getClass().getName());
+    } catch (LinkageError | RuntimeException e) {
+      return false;
     }
   }
 }

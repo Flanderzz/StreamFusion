@@ -2,6 +2,7 @@ package io.github.jordepic.streamfusion.planner;
 
 import io.github.jordepic.streamfusion.operator.RowDataArrowConverter;
 import java.lang.reflect.Field;
+import org.apache.calcite.rel.RelNode;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
 import org.apache.flink.table.planner.plan.logical.WindowAttachedWindowingStrategy;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalWindowDeduplicate;
@@ -92,5 +93,26 @@ final class WindowDeduplicateMatcher {
   static String unsupportedReason(StreamPhysicalWindowDeduplicate dedup) {
     return "window deduplication: needs ROW_NUMBER() OVER (PARTITION BY window, key ORDER BY rowtime)"
         + " = 1 over a windowing-TVF input, with input columns the Arrow conversion supports";
+  }
+
+  static RelNode substitute(StreamPhysicalWindowDeduplicate dedup, PlanContext ctx) {
+    int[] partitionColumns = WindowDeduplicateMatcher.partitionColumns(dedup);
+    return new StreamPhysicalNativeWindowRank(
+        dedup.getCluster(),
+        dedup.getTraitSet(),
+        ctx.columnarInput(dedup.getInputs().get(0), partitionColumns),
+        dedup.getRowType(),
+        WindowDeduplicateMatcher.windowStartColumn(dedup),
+        WindowDeduplicateMatcher.windowEndColumn(dedup),
+        partitionColumns,
+        WindowDeduplicateMatcher.sortIndices(dedup),
+        WindowDeduplicateMatcher.sortAscending(dedup),
+        WindowDeduplicateMatcher.sortNullsFirst(dedup),
+        1,
+        false,
+        WindowDeduplicateMatcher.isProctime(dedup),
+        WindowDeduplicateMatcher.windowMillis(dedup),
+        WindowDeduplicateMatcher.slideMillis(dedup),
+        WindowDeduplicateMatcher.cumulative(dedup));
   }
 }

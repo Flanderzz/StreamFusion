@@ -3,11 +3,14 @@ package io.github.jordepic.streamfusion.planner;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.IntStream;
+import org.apache.calcite.rel.RelNode;
 import org.apache.flink.table.catalog.ContextResolvedTable;
 import org.apache.flink.table.catalog.ResolvedCatalogBaseTable;
 import org.apache.flink.table.catalog.ResolvedCatalogTable;
 import org.apache.flink.table.planner.plan.abilities.sink.SinkAbilitySpec;
+import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalRel;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalSink;
+import org.apache.flink.table.planner.plan.utils.ChangelogPlanUtils;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.RowType;
 
@@ -144,5 +147,24 @@ final class KafkaSinkMatcher {
     } catch (RuntimeException ignored) {
       return null;
     }
+  }
+
+  static RelNode substitute(StreamPhysicalSink sink, PlanContext ctx) {
+    KafkaSinkMatcher.Planned planned = KafkaSinkMatcher.plan(sink);
+    if (planned.fallbackReason != null) {
+      ctx.decline("kafka sink: " + planned.fallbackReason);
+      return null;
+    }
+    if (!planned.upsert
+        && !ChangelogPlanUtils.isInsertOnly((StreamPhysicalRel) sink.getInputs().get(0))) {
+      ctx.decline("kafka sink: the input is a changelog, not an insert-only stream");
+      return null;
+    }
+    return new StreamPhysicalNativeKafkaSink(
+        sink.getCluster(),
+        sink.getTraitSet(),
+        sink.getInputs().get(0),
+        sink.getRowType(),
+        planned);
   }
 }

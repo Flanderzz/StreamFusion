@@ -2,6 +2,7 @@ package io.github.jordepic.streamfusion.planner;
 
 import java.time.Duration;
 import java.util.Arrays;
+import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.AggregateCall;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.sql.SqlKind;
@@ -14,6 +15,8 @@ import org.apache.flink.table.planner.plan.logical.TumblingWindowSpec;
 import org.apache.flink.table.planner.plan.logical.WindowAttachedWindowingStrategy;
 import org.apache.flink.table.planner.plan.logical.WindowSpec;
 import org.apache.flink.table.planner.plan.logical.WindowingStrategy;
+import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalLocalWindowAggregate;
+import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalWindowAggregate;
 import org.apache.flink.table.types.logical.LogicalTypeRoot;
 
 /**
@@ -466,5 +469,148 @@ final class WindowAggregateMatcher {
       default:
         return -1;
     }
+  }
+
+  /**
+   * Which shape of local window pre-aggregate a node is, or null when the native operator handles
+   * none of them. Tumbling, hopping and cumulative locals pre-aggregate per slice off a rowtime;
+   * every non-AVG aggregate has a single-field mergeable partial (the custom SUMs mirror Flink's
+   * nullable-sum buffer), so the two-phase split admits the same value types as the single-phase
+   * path. AVG stays single-phase: its (sum, count) buffer spans two partial columns.
+   */
+  enum LocalWindowVariant {
+    /** Pre-aggregates per slice; the global re-buckets slices into windows. */
+    TUMBLING,
+    /** As tumbling, but carries a synthetic count1 column for empty-window detection. */
+    HOPPING,
+    /** As tumbling over a cumulative window; the partials are the plain user aggregates. */
+    CUMULATIVE,
+    /** The input already carries window_start/window_end, so there is no rowtime to slice (q5). */
+    ATTACHED
+  }
+
+  static RelNode substitute(StreamPhysicalWindowAggregate agg, PlanContext ctx) {
+    int[] keyColumns = WindowAggregateMatcher.keyColumns(agg.grouping());
+    // Always columnar: the keyed shuffle stays Arrow where it sits on a columnar
+    // producer (a native exchange splits the batch by the grouping keys), otherwise the transition
+    // pass inserts a row→Arrow transpose at the boundary. The exchange only co-locates each key's
+    // rows on one channel — the window re-groups by key itself — so its hash need not match Flink's.
+    return new StreamPhysicalNativeColumnarWindowAggregate(
+        agg.getCluster(),
+        agg.getTraitSet(),
+        ctx.columnarInput(agg.getInputs().get(0), keyColumns),
+        agg.getRowType(),
+        WindowAggregateMatcher.isCumulative(agg.windowing()),
+        WindowAggregateMatcher.windowSize(agg.windowing()),
+        WindowAggregateMatcher.windowSlide(agg.windowing()),
+        WindowAggregateMatcher.timeColumn(agg.windowing()),
+        WindowAggregateMatcher.valueColumns(agg.aggCalls()),
+        keyColumns,
+        WindowAggregateMatcher.valueTypeCodes(agg.aggCalls(), agg.getInput().getRowType()),
+        WindowAggregateMatcher.kinds(agg.aggCalls()),
+        WindowAggregateMatcher.isProctime(agg.windowing()),
+        WindowAggregateMatcher.isLtz(agg.windowing()));
+  }
+
+  static RelNode substituteSession(StreamPhysicalWindowAggregate agg, PlanContext ctx) {
+    int[] keyColumns = WindowAggregateMatcher.keyColumns(agg.grouping());
+    // Always columnar: the keyed shuffle stays Arrow where it sits on a columnar
+    // producer, otherwise the transition pass transposes at the boundary.
+    return new StreamPhysicalNativeColumnarSessionWindowAggregate(
+        agg.getCluster(),
+        agg.getTraitSet(),
+        ctx.columnarInput(agg.getInputs().get(0), keyColumns),
+        agg.getRowType(),
+        WindowAggregateMatcher.gapMillis(agg.windowing()),
+        WindowAggregateMatcher.timeColumn(agg.windowing()),
+        WindowAggregateMatcher.valueColumns(agg.aggCalls()),
+        keyColumns,
+        WindowAggregateMatcher.valueTypeCodes(agg.aggCalls(), agg.getInput().getRowType()),
+        WindowAggregateMatcher.kinds(agg.aggCalls()),
+        WindowAggregateMatcher.isProctime(agg.windowing()),
+        WindowAggregateMatcher.isLtz(agg.windowing()));
+  }
+
+  static LocalWindowVariant localWindowVariant(StreamPhysicalLocalWindowAggregate agg) {
+    RelDataType input = agg.getInput().getRowType();
+    if (WindowAggregateMatcher.matchesHoppingLocal(
+        agg.windowing(), agg.grouping(), agg.aggCalls(), input)) {
+      return LocalWindowVariant.HOPPING;
+    }
+    boolean sliceable =
+        WindowAggregateMatcher.matches(agg.windowing(), agg.grouping(), agg.aggCalls(), input)
+            && !WindowAggregateMatcher.containsAvg(agg.aggCalls());
+    if (sliceable && WindowAggregateMatcher.isTumbling(agg.windowing())) {
+      return LocalWindowVariant.TUMBLING;
+    }
+    if (sliceable && WindowAggregateMatcher.isCumulative(agg.windowing())) {
+      return LocalWindowVariant.CUMULATIVE;
+    }
+    if (WindowAggregateMatcher.matchesAttachedLocal(
+        agg.windowing(), agg.grouping(), agg.aggCalls(), input)) {
+      return LocalWindowVariant.ATTACHED;
+    }
+    return null;
+  }
+
+  static RelNode substituteLocal(StreamPhysicalLocalWindowAggregate agg, PlanContext ctx) {
+    boolean attached = localWindowVariant(agg) == LocalWindowVariant.ATTACHED;
+    RelDataType localInput = agg.getInput().getRowType();
+    // Hopping carries a trailing synthetic count1 column for empty-window detection, so its kinds
+    // and value columns get a matching extra entry (counts rows). But the planner only injects it
+    // when the user aggregates don't already provide a row count: a COUNT(*) doubles as count1, so
+    // the local emits no separate column. Detect it by the partial count in the local's output
+    // (its row type is [grouping?, partials.., slice_end]) rather than assuming hopping always
+    // adds one — otherwise a hopping COUNT(*) local emits a column the global does not expect.
+    int partialColumns = agg.getRowType().getFieldCount() - agg.grouping().length - 1;
+    boolean syntheticCount = partialColumns > agg.aggCalls().size();
+    int[] kinds =
+        syntheticCount
+            ? WindowAggregateMatcher.hoppingLocalKinds(agg.aggCalls())
+            : WindowAggregateMatcher.kinds(agg.aggCalls());
+    int[] valueColumns =
+        syntheticCount
+            ? WindowAggregateMatcher.hoppingLocalValueColumns(agg.aggCalls())
+            : WindowAggregateMatcher.valueColumns(agg.aggCalls());
+    int[] valueTypes =
+        syntheticCount
+            ? WindowAggregateMatcher.hoppingLocalValueTypes(agg.aggCalls(), localInput)
+            : WindowAggregateMatcher.valueTypeCodes(agg.aggCalls(), localInput);
+    // Window-attached mode reads the window from columns (no rowtime slice); the two modes are
+    // mutually exclusive, so the unused indices are -1.
+    int timeColumn = attached ? -1 : WindowAggregateMatcher.timeColumn(agg.windowing());
+    int windowStartColumn =
+        attached ? WindowAggregateMatcher.windowStartColumn(agg.windowing()) : -1;
+    int windowEndColumn = attached ? WindowAggregateMatcher.windowEndColumn(agg.windowing()) : -1;
+    // Always columnar: the local pre-aggregate emits Arrow partials. Its input feeds
+    // directly (no shuffle precedes a local); the transition pass inserts a row→Arrow transpose
+    // when the producer is rowwise.
+    return new StreamPhysicalNativeColumnarLocalWindowAggregate(
+        agg.getCluster(),
+        agg.getTraitSet(),
+        agg.getInputs().get(0),
+        agg.getRowType(),
+        WindowAggregateMatcher.sliceSize(agg.windowing()),
+        timeColumn,
+        windowStartColumn,
+        windowEndColumn,
+        valueColumns,
+        WindowAggregateMatcher.keyColumns(agg.grouping()),
+        valueTypes,
+        kinds,
+        WindowAggregateMatcher.isLtz(agg.windowing()));
+  }
+
+  /**
+   * The window-aggregate family matches several variants (tumbling/hopping/cumulative, local and
+   * global) with extra gates, so a precise per-condition reason would be unreliable; keep a coarse
+   * operator-level reason naming the requirements.
+   */
+  static String unsupportedReason() {
+    return "window aggregate: needs an event-time TUMBLE/HOP/CUMULATE (zero offset) over a"
+        + " local-time-zone or plain TIMESTAMP rowtime, one value column whose type matches the"
+        + " aggregate (bigint/int/double for SUM/AVG, also smallint/tinyint/float for"
+        + " MIN/MAX/COUNT), and bigint/int/string/boolean/date keys"
+        + " (docs/aggregate-type-support.md)";
   }
 }

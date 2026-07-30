@@ -1,6 +1,7 @@
 package io.github.jordepic.streamfusion.planner;
 
 import java.time.Duration;
+import org.apache.calcite.rel.RelNode;
 import org.apache.flink.table.planner.plan.logical.LogicalWindow;
 import org.apache.flink.table.planner.plan.logical.SessionGroupWindow;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalGroupWindowAggregate;
@@ -93,5 +94,22 @@ final class GroupWindowSessionMatcher {
     return "legacy session group-window: needs an event-time SESSION(...) over a local-time-zone or"
         + " plain TIMESTAMP rowtime, SUM/MIN/MAX/COUNT/AVG aggregates, and exactly (window_start,"
         + " window_end) as the window properties";
+  }
+
+  static RelNode substitute(StreamPhysicalGroupWindowAggregate agg, PlanContext ctx) {
+    int[] keyColumns = WindowAggregateMatcher.keyColumns(agg.grouping());
+    return new StreamPhysicalNativeColumnarSessionWindowAggregate(
+        agg.getCluster(),
+        agg.getTraitSet(),
+        ctx.columnarInput(agg.getInputs().get(0), keyColumns),
+        agg.getRowType(),
+        GroupWindowSessionMatcher.gapMillis(agg),
+        GroupWindowSessionMatcher.timeColumn(agg),
+        WindowAggregateMatcher.valueColumns(agg.aggCalls()),
+        keyColumns,
+        WindowAggregateMatcher.valueTypeCodes(agg.aggCalls(), agg.getInput().getRowType()),
+        WindowAggregateMatcher.kinds(agg.aggCalls()),
+        false, // event-time (proctime sessions are not on this path)
+        GroupWindowSessionMatcher.isLtz(agg));
   }
 }

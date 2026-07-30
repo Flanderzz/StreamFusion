@@ -3,6 +3,7 @@ package io.github.jordepic.streamfusion.planner;
 import io.github.jordepic.streamfusion.operator.RowDataArrowConverter;
 import java.util.ArrayList;
 import java.util.List;
+import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.AggregateCall;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.sql.type.SqlTypeName;
@@ -433,5 +434,25 @@ final class LocalGroupAggregateMatcher {
       array[i] = values.get(i);
     }
     return array;
+  }
+
+  static RelNode substitute(StreamPhysicalLocalGroupAggregate agg, PlanContext ctx) {
+    return new StreamPhysicalNativeColumnarLocalGroupAggregate(
+        agg.getCluster(),
+        agg.getTraitSet(),
+        agg.getInputs().get(0),
+        agg.getRowType(),
+        LocalGroupAggregateMatcher.kinds(agg),
+        LocalGroupAggregateMatcher.valueTypeCodes(agg),
+        LocalGroupAggregateMatcher.valueColumns(agg),
+        LocalGroupAggregateMatcher.filterColumns(agg),
+        LocalGroupAggregateMatcher.keyColumns(agg),
+        LocalGroupAggregateMatcher.distinctViewSources(agg));
+  }
+
+  static String unsupportedReason(StreamPhysicalLocalGroupAggregate agg) {
+    return "local group aggregate: needs SUM/MIN/MAX/COUNT over bigint/int/double values with no"
+        + " widening of the partial, or AVG over any AvgAggFunction numeric, and"
+        + " bigint/int/string/boolean/date/timestamp/decimal grouping keys";
   }
 }

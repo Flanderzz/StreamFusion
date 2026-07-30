@@ -3,6 +3,7 @@ package io.github.jordepic.streamfusion.planner;
 import java.util.HashMap;
 import java.util.Map;
 import org.apache.calcite.plan.RelOptTable;
+import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.JoinRelType;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalLookupJoin;
 import org.apache.flink.table.planner.plan.schema.TableSourceTable;
@@ -68,5 +69,22 @@ final class LookupJoinMatcher {
   private static Object unwrapTable(RelOptTable table) {
     TableSourceTable source = table.unwrap(TableSourceTable.class);
     return source != null ? source : table;
+  }
+
+  static RelNode substitute(StreamPhysicalLookupJoin join, PlanContext ctx) {
+    // A lookup join is stateless (no keyed shuffle); the probe input passes through as-is, and the
+    // dimension is a (sync or async) lookup the operator performs — not an input.
+    return new StreamPhysicalNativeLookupJoin(
+        join.getCluster(),
+        join.getTraitSet(),
+        join.getInput(),
+        join.getRowType(),
+        LookupJoinMatcher.temporalTable(join),
+        LookupJoinMatcher.lookupKeys(join),
+        join.calcOnTemporalTable().isDefined() ? join.calcOnTemporalTable().get() : null,
+        join.finalPreFilterCondition().isDefined() ? join.finalPreFilterCondition().get() : null,
+        join.finalRemainingCondition().isDefined() ? join.finalRemainingCondition().get() : null,
+        LookupJoinMatcher.isLeftOuterJoin(join),
+        join.asyncOptions().isDefined() ? join.asyncOptions().get() : null);
   }
 }

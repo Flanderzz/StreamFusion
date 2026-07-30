@@ -1,6 +1,7 @@
 package io.github.jordepic.streamfusion.planner;
 
 import io.github.jordepic.streamfusion.operator.RowDataArrowConverter;
+import org.apache.calcite.rel.RelNode;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalChangelogNormalize;
 import org.apache.flink.table.planner.plan.utils.ChangelogPlanUtils;
@@ -45,5 +46,16 @@ final class ChangelogNormalizeMatcher {
       return "changelog normalize: the source-reuse variant is not supported";
     }
     return "changelog normalize: needs a row type the Arrow conversion supports";
+  }
+
+  static RelNode substitute(StreamPhysicalChangelogNormalize normalize, PlanContext ctx) {
+    int[] keyColumns = ChangelogNormalizeMatcher.keyColumns(normalize);
+    return new StreamPhysicalNativeChangelogNormalize(
+        normalize.getCluster(),
+        normalize.getTraitSet(),
+        ctx.columnarInput(normalize.getInputs().get(0), keyColumns),
+        normalize.getRowType(),
+        keyColumns,
+        ChangelogNormalizeMatcher.generateUpdateBefore(normalize));
   }
 }

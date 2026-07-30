@@ -1,5 +1,6 @@
 package io.github.jordepic.streamfusion.planner;
 
+import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rex.RexCall;
 import org.apache.calcite.rex.RexInputRef;
 import org.apache.calcite.rex.RexLiteral;
@@ -52,5 +53,15 @@ final class WatermarkAssignerMatcher {
       }
     }
     return null;
+  }
+
+  static RelNode substitute(StreamPhysicalWatermarkAssigner wm, PlanContext ctx) {
+    return new StreamPhysicalNativeWatermarkAssigner(
+        wm.getCluster(),
+        wm.getTraitSet(),
+        wm.getInputs().get(0),
+        wm.getRowType(),
+        WatermarkAssignerMatcher.rowtimeColumn(wm),
+        WatermarkAssignerMatcher.delayMillis(wm));
   }
 }

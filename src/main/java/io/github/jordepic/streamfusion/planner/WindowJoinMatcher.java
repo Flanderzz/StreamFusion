@@ -1,6 +1,7 @@
 package io.github.jordepic.streamfusion.planner;
 
 import java.util.Optional;
+import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.rex.RexUtil;
@@ -134,5 +135,30 @@ final class WindowJoinMatcher {
 
   private static WindowAttachedWindowingStrategy attached(WindowingStrategy windowing) {
     return (WindowAttachedWindowingStrategy) windowing;
+  }
+
+  static RelNode substitute(StreamPhysicalWindowJoin join, PlanContext ctx) {
+    int[] leftKeys = WindowJoinMatcher.leftKeys(join);
+    int[] rightKeys = WindowJoinMatcher.rightKeys(join);
+    // Shuffle each input by its join key (columnar where it sits on a columnar producer), the
+    // same coupling as the interval join. The window join then matches per window in its state.
+    return new StreamPhysicalNativeWindowJoin(
+        join.getCluster(),
+        join.getTraitSet(),
+        ctx.columnarInput(join.getLeft(), leftKeys),
+        ctx.columnarInput(join.getRight(), rightKeys),
+        join.getRowType(),
+        leftKeys,
+        rightKeys,
+        WindowJoinMatcher.leftWindowStart(join),
+        WindowJoinMatcher.leftWindowEnd(join),
+        WindowJoinMatcher.rightWindowStart(join),
+        WindowJoinMatcher.rightWindowEnd(join),
+        WindowJoinMatcher.joinTypeCode(join),
+        WindowJoinMatcher.nonEquiPredicate(join),
+        WindowJoinMatcher.isProctime(join),
+        WindowJoinMatcher.windowMillis(join),
+        WindowJoinMatcher.slideMillis(join),
+        WindowJoinMatcher.cumulative(join));
   }
 }

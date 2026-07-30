@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import org.apache.calcite.plan.RelOptUtil;
+import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rex.RexCall;
 import org.apache.calcite.rex.RexInputRef;
@@ -192,5 +193,24 @@ final class TemporalJoinMatcher {
       return inputRefIndex(((RexCall) node).getOperands().get(0));
     }
     return -1;
+  }
+
+  static RelNode substitute(StreamPhysicalTemporalJoin join, PlanContext ctx) {
+    int[] leftKeys = TemporalJoinMatcher.leftKeys(join);
+    int[] rightKeys = TemporalJoinMatcher.rightKeys(join);
+    // Shuffle each input by its join key (columnar where it sits on a columnar producer); the
+    // versioned join then groups by key in its own state, like the interval/window join.
+    return new StreamPhysicalNativeTemporalJoin(
+        join.getCluster(),
+        join.getTraitSet(),
+        ctx.columnarInput(join.getLeft(), leftKeys),
+        ctx.columnarInput(join.getRight(), rightKeys),
+        join.getRowType(),
+        leftKeys,
+        rightKeys,
+        TemporalJoinMatcher.leftTime(join),
+        TemporalJoinMatcher.rightTime(join),
+        TemporalJoinMatcher.joinTypeCode(join),
+        TemporalJoinMatcher.nonEquiPredicate(join));
   }
 }

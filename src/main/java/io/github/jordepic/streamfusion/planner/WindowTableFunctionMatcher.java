@@ -1,6 +1,7 @@
 package io.github.jordepic.streamfusion.planner;
 
 import java.time.Duration;
+import org.apache.calcite.rel.RelNode;
 import org.apache.flink.table.planner.plan.logical.CumulativeWindowSpec;
 import org.apache.flink.table.planner.plan.logical.HoppingWindowSpec;
 import org.apache.flink.table.planner.plan.logical.TimeAttributeWindowingStrategy;
@@ -77,5 +78,18 @@ final class WindowTableFunctionMatcher {
   static String unsupportedReason(StreamPhysicalWindowTableFunction tvf) {
     return "windowing table function: needs an event-time TUMBLE/HOP/CUMULATE (zero offset) over a"
         + " local-time-zone rowtime, with input columns the Arrow conversion supports";
+  }
+
+  static RelNode substitute(StreamPhysicalWindowTableFunction tvf, PlanContext ctx) {
+    return new StreamPhysicalNativeWindowTableFunction(
+        tvf.getCluster(),
+        tvf.getTraitSet(),
+        tvf.getInputs().get(0),
+        tvf.getRowType(),
+        WindowTableFunctionMatcher.timeColumn(tvf),
+        WindowTableFunctionMatcher.windowMillis(tvf),
+        WindowTableFunctionMatcher.slideMillis(tvf),
+        WindowTableFunctionMatcher.cumulative(tvf),
+        WindowTableFunctionMatcher.isProctime(tvf));
   }
 }

@@ -1,6 +1,7 @@
 package io.github.jordepic.streamfusion.planner;
 
 import java.lang.reflect.Field;
+import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.JoinRelType;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rex.RexCall;
@@ -8,7 +9,6 @@ import org.apache.calcite.rex.RexFieldAccess;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.rex.RexUtil;
 import org.apache.calcite.sql.type.SqlTypeName;
-import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalCorrelate;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalCorrelateBase;
 
@@ -150,5 +150,43 @@ final class UnnestMatcher {
     return "correlate: only an INNER/LEFT UNNEST of a single ARRAY (scalar or ROW element), MAP, or"
         + " MULTISET column, optionally WITH ORDINALITY, is supported — a non-encodable condition or a"
         + " condition over a LEFT unnest fall back";
+  }
+
+  static RelNode substitute(StreamPhysicalCorrelate correlate, PlanContext ctx) {
+    RelNode unnest =
+        new StreamPhysicalNativeUnnest(
+            correlate.getCluster(),
+            correlate.getTraitSet(),
+            correlate.getInputs().get(0),
+            correlate.getRowType(),
+            UnnestMatcher.arrayColumn(correlate),
+            UnnestMatcher.withOrdinality(correlate),
+            UnnestMatcher.isLeft(correlate),
+            UnnestMatcher.isMultiset(correlate));
+    RexExpression condition = UnnestMatcher.encodedCondition(correlate);
+    if (condition == null) {
+      return unnest;
+    }
+    // A filter pushed into the correlate (… WHERE element > x) is applied as a native filter
+    // over the unnest output, with an identity projection (the unnest already produced the
+    // correlate's output columns). The condition's refs were shifted to index that output.
+    int arity = correlate.getRowType().getFieldCount();
+    int[] identity = new int[arity];
+    for (int i = 0; i < arity; i++) {
+      identity[i] = i;
+    }
+    return new StreamPhysicalNativeFilter(
+        correlate.getCluster(),
+        correlate.getTraitSet(),
+        unnest,
+        correlate.getRowType(),
+        identity,
+        condition.kinds(),
+        condition.payload(),
+        condition.childCounts(),
+        condition.longs(),
+        condition.doubles(),
+        condition.strings(),
+        condition.udfBinding());
   }
 }

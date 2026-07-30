@@ -2,6 +2,7 @@ package io.github.jordepic.streamfusion.planner;
 
 import java.util.List;
 import org.apache.calcite.rel.RelFieldCollation;
+import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.Window;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rex.RexCall;
@@ -307,5 +308,23 @@ final class OverAggregateMatcher {
     }
     return WindowAggregateMatcher.aggregateKind(kind);
   }
-}
 
+  static RelNode substitute(StreamPhysicalOverAggregate over, PlanContext ctx) {
+    int[] keyColumns = OverAggregateMatcher.keyColumns(over);
+    // Always columnar: the keyed shuffle becomes a native exchange (split by the
+    // partition keys); the transition pass transposes below it only when the producer is rowwise.
+    return new StreamPhysicalNativeOverAggregate(
+        over.getCluster(),
+        over.getTraitSet(),
+        ctx.columnarInput(over.getInputs().get(0), keyColumns),
+        over.getRowType(),
+        OverAggregateMatcher.timeColumn(over),
+        OverAggregateMatcher.valueColumnIndices(over),
+        keyColumns,
+        OverAggregateMatcher.valueTypeCodes(over),
+        OverAggregateMatcher.kinds(over),
+        OverAggregateMatcher.frameKind(over),
+        OverAggregateMatcher.frameOffset(over),
+        OverAggregateMatcher.isProctime(over));
+  }
+}

@@ -7,11 +7,7 @@ import java.util.List;
 import java.util.Map;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.Calc;
-import org.apache.calcite.rel.core.Sort;
-import org.apache.calcite.rel.type.RelDataType;
 import org.apache.flink.table.api.config.OptimizerConfigOptions;
-import org.apache.flink.table.connector.source.DynamicTableSource;
-import org.apache.flink.table.planner.hint.StateTtlHint;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalCalc;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalChangelogNormalize;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalCorrelate;
@@ -44,12 +40,7 @@ import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalW
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalWindowTableFunction;
 import org.apache.flink.table.planner.plan.optimize.program.FlinkOptimizeProgram;
 import org.apache.flink.table.planner.plan.optimize.program.StreamOptimizeContext;
-import org.apache.flink.table.planner.plan.schema.TableSourceTable;
-import org.apache.flink.table.planner.plan.trait.MiniBatchInterval;
-import org.apache.flink.table.planner.plan.trait.MiniBatchIntervalTraitDef$;
-import org.apache.flink.table.planner.plan.trait.MiniBatchMode;
 import org.apache.flink.table.planner.plan.utils.ChangelogPlanUtils;
-import org.apache.flink.table.planner.plan.utils.RankProcessStrategy;
 import org.apache.flink.table.planner.utils.ShortcutUtils;
 
 /**
@@ -94,15 +85,6 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
   private static final boolean FLUSS_AVAILABLE =
       extensionAvailable(FLUSS_EXTENSION, FLUSS_TABLE_SOURCE);
   private static final boolean PARQUET_AVAILABLE = extensionAvailable(PARQUET_EXTENSION);
-
-  // The row/local window-aggregate path matches several variants (tumbling/hopping/cumulative
-  // local) with extra gates, so a precise per-condition reason would be unreliable; keep a coarse
-  // operator-level reason naming the requirements.
-  private static final String WINDOW_AGGREGATE_REASON =
-      "window aggregate: needs an event-time TUMBLE/HOP/CUMULATE (zero offset) over a"
-          + " local-time-zone or plain TIMESTAMP rowtime, one value column whose type matches the aggregate"
-          + " (bigint/int/double for SUM/AVG, also smallint/tinyint/float for MIN/MAX/COUNT),"
-          + " and bigint/int/string/boolean/date keys (docs/aggregate-type-support.md)";
 
   private static final List<Substitution<?>> REGISTRY = buildRegistry();
 
@@ -160,7 +142,7 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
         Substitution.of(
                 StreamPhysicalGroupAggregate.class,
                 "groupAggregate",
-                PhysicalPlanScan::planGroupAggregate)
+                GroupAggregateMatcher::substitute)
             .matching(GroupAggregateMatcher::matches)
             .reason(GroupAggregateMatcher::unsupportedReason)
             .changelogSafe());
@@ -173,7 +155,7 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
         Substitution.of(
                 StreamPhysicalGlobalGroupAggregate.class,
                 "groupAggregate",
-                PhysicalPlanScan::planGlobalGroupAggregate)
+                GlobalGroupAggregateMatcher::substitute)
             .matching(GlobalGroupAggregateMatcher::matches)
             .reason(GlobalGroupAggregateMatcher::unsupportedReason)
             .changelogSafe());
@@ -186,14 +168,14 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
     // interval) + MapBundleOperator wiring.
     entries.add(
         Substitution.of(
-                StreamPhysicalMiniBatchAssigner.class, PhysicalPlanScan::planMiniBatchAssigner)
+                StreamPhysicalMiniBatchAssigner.class, MiniBatchAssignerMatcher::substitute)
             .changelogSafe());
 
     // A regular (non-windowed) join emits a changelog and consumes one on either side, so it is
     // exempt from the insert-only guard (like the GROUP BY above).
     entries.add(
         Substitution.of(
-                StreamPhysicalJoin.class, "updatingJoin", PhysicalPlanScan::planRegularJoin)
+                StreamPhysicalJoin.class, "updatingJoin", RegularJoinMatcher::substitute)
             .matching(RegularJoinMatcher::matches)
             .reason(RegularJoinMatcher::unsupportedReason)
             .changelogSafe());
@@ -204,7 +186,7 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
     // Either way it requires an insert-only input. Offered before Top-N — both are
     // StreamPhysicalRank, but a rowtime-ordered rank is deduplication, which TopNMatcher declines.
     entries.add(
-        Substitution.of(StreamPhysicalRank.class, "deduplicate", PhysicalPlanScan::planDeduplicate)
+        Substitution.of(StreamPhysicalRank.class, "deduplicate", DeduplicateMatcher::substitute)
             .matching(
                 rank ->
                     DeduplicateMatcher.matches(rank)
@@ -218,7 +200,7 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
     // input uses the retracting ranker (Flink's RetractableTopNFunction), which keeps the full buffer
     // so a deleted top-N row can be replaced by promoting rank N+1.
     entries.add(
-        Substitution.of(StreamPhysicalRank.class, "topN", PhysicalPlanScan::planTopN)
+        Substitution.of(StreamPhysicalRank.class, "topN", TopNMatcher::substitute)
             .matching(TopNMatcher::matches)
             .reason(TopNMatcher::unsupportedReason)
             .changelogSafe());
@@ -233,9 +215,9 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
     // a sort-limit emits a changelog, so it would otherwise slip past the insert-only guard
     // unreported, leaving a non-accelerating query unable to explain itself (ticket 29).
     entries.add(
-        Substitution.of(StreamPhysicalSortLimit.class, PhysicalPlanScan::planLimit).changelogSafe());
+        Substitution.of(StreamPhysicalSortLimit.class, LimitMatcher::substitute).changelogSafe());
     entries.add(
-        Substitution.of(StreamPhysicalLimit.class, PhysicalPlanScan::planLimit).changelogSafe());
+        Substitution.of(StreamPhysicalLimit.class, LimitMatcher::substitute).changelogSafe());
 
     // A CDC changelog source (Debezium/OGG) emits a changelog itself: the native decode operator turns
     // each message into physical rows carrying their RowKind on $row_kind$ (an update fans out to
@@ -253,14 +235,14 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
     // changelog-safe and (like the GROUP BY/join/Top-N/CDC above) exempt from the insert-only guard:
     // it matches the host's Calc over a retracting stream row for row.
     entries.add(
-        Substitution.of(StreamPhysicalCalc.class, "filter", PhysicalPlanScan::planFilterCalc)
+        Substitution.of(StreamPhysicalCalc.class, "filter", FilterCalcMatcher::substitute)
             .matching(FilterCalcMatcher::matches)
-            .reason(PhysicalPlanScan::calcReason)
+            .reason(CalcMatcher::unsupportedReason)
             .changelogSafe());
     entries.add(
-        Substitution.of(StreamPhysicalCalc.class, "calc", PhysicalPlanScan::planCalc)
+        Substitution.of(StreamPhysicalCalc.class, "calc", CalcMatcher::substitute)
             .matching(CalcMatcher::matches)
-            .reason(PhysicalPlanScan::calcReason)
+            .reason(CalcMatcher::unsupportedReason)
             .changelogSafe());
 
     // Changelog normalization (upsert / duplicate-bearing source → regular changelog): keep the last
@@ -271,7 +253,7 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
         Substitution.of(
                 StreamPhysicalChangelogNormalize.class,
                 "changelogNormalize",
-                PhysicalPlanScan::planChangelogNormalize)
+                ChangelogNormalizeMatcher::substitute)
             .matching(ChangelogNormalizeMatcher::matches)
             .reason(ChangelogNormalizeMatcher::unsupportedReason)
             .changelogSafe());
@@ -281,7 +263,7 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
     // (the `$row_kind$` tag rides through), so — like Expand — it is exempt from the insert-only
     // guard.
     entries.add(
-        Substitution.of(StreamPhysicalCorrelate.class, "unnest", PhysicalPlanScan::planUnnest)
+        Substitution.of(StreamPhysicalCorrelate.class, "unnest", UnnestMatcher::substitute)
             .matching(UnnestMatcher::matches)
             .reason(UnnestMatcher::unsupportedReason)
             .changelogSafe());
@@ -292,7 +274,7 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
     // `$row_kind$` tag rides through), so — like the Calc/union — it is exempt from the insert-only
     // guard and runs over either insert-only or changelog input.
     entries.add(
-        Substitution.of(StreamPhysicalExpand.class, "expand", PhysicalPlanScan::planExpand)
+        Substitution.of(StreamPhysicalExpand.class, "expand", ExpandMatcher::substitute)
             .matching(ExpandMatcher::matches)
             .reason(ExpandMatcher::unsupportedReason)
             .changelogSafe());
@@ -303,7 +285,7 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
     // matches the host's union row for row over either insert-only or retracting inputs. The native
     // node carries no operator — it lowers to a UnionTransformation over the inputs' Arrow streams.
     entries.add(
-        Substitution.of(StreamPhysicalUnion.class, "union", PhysicalPlanScan::planUnion)
+        Substitution.of(StreamPhysicalUnion.class, "union", UnionMatcher::substitute)
             .matching(UnionMatcher::matches)
             .reason(UnionMatcher::unsupportedReason)
             .changelogSafe());
@@ -329,7 +311,7 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
         Substitution.of(
                 StreamPhysicalWatermarkAssigner.class,
                 "watermark",
-                PhysicalPlanScan::planWatermarkAssigner)
+                WatermarkAssignerMatcher::substitute)
             .matching(
                 wm ->
                     wm.getInputs().get(0) instanceof ColumnarOutput
@@ -342,7 +324,7 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
         Substitution.of(
                 StreamPhysicalTemporalSort.class,
                 "temporalSort",
-                PhysicalPlanScan::planTemporalSort)
+                TemporalSortMatcher::substitute)
             .matching(TemporalSortMatcher::matches)
             .reason(TemporalSortMatcher::unsupportedReason));
 
@@ -355,7 +337,7 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
         Substitution.of(
                 StreamPhysicalWindowTableFunction.class,
                 "windowTableFunction",
-                PhysicalPlanScan::planWindowTableFunction)
+                WindowTableFunctionMatcher::substitute)
             .matching(WindowTableFunctionMatcher::matches)
             .reason(WindowTableFunctionMatcher::unsupportedReason));
 
@@ -364,7 +346,7 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
     // (or single gather when there is no partition key) stays columnar via columnarInput.
     entries.add(
         Substitution.of(
-                StreamPhysicalWindowRank.class, "windowRank", PhysicalPlanScan::planWindowRank)
+                StreamPhysicalWindowRank.class, "windowRank", WindowRankMatcher::substitute)
             .matching(WindowRankMatcher::matches)
             .reason(WindowRankMatcher::unsupportedReason));
 
@@ -374,7 +356,7 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
         Substitution.of(
                 StreamPhysicalWindowDeduplicate.class,
                 "windowRank",
-                PhysicalPlanScan::planWindowDeduplicate)
+                WindowDeduplicateMatcher::substitute)
             .matching(WindowDeduplicateMatcher::matches)
             .reason(WindowDeduplicateMatcher::unsupportedReason));
 
@@ -382,7 +364,7 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
         Substitution.of(
                 StreamPhysicalWindowAggregate.class,
                 "windowAggregate",
-                PhysicalPlanScan::planWindowAggregate)
+                WindowAggregateMatcher::substitute)
             .matching(
                 agg ->
                     WindowAggregateMatcher.matches(
@@ -390,10 +372,10 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
                         agg.grouping(),
                         agg.aggCalls(),
                         agg.getInput().getRowType()))
-            .reason(agg -> WINDOW_AGGREGATE_REASON));
+            .reason(agg -> WindowAggregateMatcher.unsupportedReason()));
     entries.add(
         Substitution.of(
-                StreamPhysicalWindowAggregate.class, PhysicalPlanScan::planSessionWindowAggregate)
+                StreamPhysicalWindowAggregate.class, WindowAggregateMatcher::substituteSession)
             .matching(
                 agg ->
                     WindowAggregateMatcher.matchesSession(
@@ -408,7 +390,7 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
     entries.add(
         Substitution.of(
                 StreamPhysicalGroupWindowAggregate.class,
-                PhysicalPlanScan::planGroupWindowSession)
+                GroupWindowSessionMatcher::substitute)
             .matching(GroupWindowSessionMatcher::matches)
             .reason(GroupWindowSessionMatcher::unsupportedReason));
 
@@ -420,24 +402,20 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
         Substitution.of(
                 StreamPhysicalLocalGroupAggregate.class,
                 "localGroupAggregate",
-                PhysicalPlanScan::planLocalGroupAggregate)
+                LocalGroupAggregateMatcher::substitute)
             .matching(LocalGroupAggregateMatcher::matches)
-            .reason(
-                agg ->
-                    "local group aggregate: needs SUM/MIN/MAX/COUNT over bigint/int/double values"
-                        + " with no widening of the partial, or AVG over any AvgAggFunction numeric,"
-                        + " and bigint/int/string/boolean/date/timestamp/decimal grouping keys"));
+            .reason(LocalGroupAggregateMatcher::unsupportedReason));
 
     entries.add(
         Substitution.of(
                 StreamPhysicalLocalWindowAggregate.class,
                 "localWindowAggregate",
-                PhysicalPlanScan::planLocalWindowAggregate)
-            .matching(agg -> localWindowVariant(agg) != null)
-            .reason(agg -> WINDOW_AGGREGATE_REASON));
+                WindowAggregateMatcher::substituteLocal)
+            .matching(agg -> WindowAggregateMatcher.localWindowVariant(agg) != null)
+            .reason(agg -> WindowAggregateMatcher.unsupportedReason()));
 
     entries.add(
-        Substitution.of(StreamPhysicalOverAggregate.class, "over", PhysicalPlanScan::planOver)
+        Substitution.of(StreamPhysicalOverAggregate.class, "over", OverAggregateMatcher::substitute)
             .matching(OverAggregateMatcher::matches)
             .reason(OverAggregateMatcher::unsupportedReason));
 
@@ -445,13 +423,13 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
         Substitution.of(
                 StreamPhysicalIntervalJoin.class,
                 "intervalJoin",
-                PhysicalPlanScan::planIntervalJoin)
+                IntervalJoinMatcher::substitute)
             .matching(IntervalJoinMatcher::matches)
             .reason(IntervalJoinMatcher::unsupportedReason));
 
     entries.add(
         Substitution.of(
-                StreamPhysicalWindowJoin.class, "windowJoin", PhysicalPlanScan::planWindowJoin)
+                StreamPhysicalWindowJoin.class, "windowJoin", WindowJoinMatcher::substitute)
             .matching(WindowJoinMatcher::matches)
             .reason(WindowJoinMatcher::unsupportedReason));
 
@@ -459,13 +437,13 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
         Substitution.of(
                 StreamPhysicalTemporalJoin.class,
                 "temporalJoin",
-                PhysicalPlanScan::planTemporalJoin)
+                TemporalJoinMatcher::substitute)
             .matching(TemporalJoinMatcher::matches)
             .reason(TemporalJoinMatcher::unsupportedReason));
 
     entries.add(
         Substitution.of(
-                StreamPhysicalLookupJoin.class, "lookupJoin", PhysicalPlanScan::planLookupJoin)
+                StreamPhysicalLookupJoin.class, "lookupJoin", LookupJoinMatcher::substitute)
             .matching(LookupJoinMatcher::matches)
             .reason(LookupJoinMatcher::unsupportedReason));
 
@@ -473,7 +451,7 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
         Substitution.of(
                 StreamPhysicalGlobalWindowAggregate.class,
                 "globalWindowAggregate",
-                PhysicalPlanScan::planGlobalWindowAggregate)
+                GlobalWindowAggregateMatcher::substitute)
             .matching(GlobalWindowAggregateMatcher::matches)
             .reason(GlobalWindowAggregateMatcher::unsupportedReason));
 
@@ -534,69 +512,20 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
   // -------------------------------------------------------------------- optional-connector entries
 
   private static Substitution<StreamPhysicalSink> kafkaSinkSubstitution() {
-    return Substitution.of(StreamPhysicalSink.class, "kafkaSink", PhysicalPlanScan::planKafkaSink)
+    return Substitution.of(StreamPhysicalSink.class, "kafkaSink", KafkaSinkMatcher::substitute)
         .matching(KafkaSinkMatcher::appliesTo)
         .changelogSafe();
   }
 
-  private static RelNode planKafkaSink(StreamPhysicalSink sink, PlanContext ctx) {
-    KafkaSinkMatcher.Planned planned = KafkaSinkMatcher.plan(sink);
-    if (planned.fallbackReason != null) {
-      ctx.decline("kafka sink: " + planned.fallbackReason);
-      return null;
-    }
-    if (!planned.upsert
-        && !ChangelogPlanUtils.isInsertOnly((StreamPhysicalRel) sink.getInputs().get(0))) {
-      ctx.decline("kafka sink: the input is a changelog, not an insert-only stream");
-      return null;
-    }
-    return new StreamPhysicalNativeKafkaSink(
-        sink.getCluster(),
-        sink.getTraitSet(),
-        sink.getInputs().get(0),
-        sink.getRowType(),
-        planned);
-  }
-
   private static Substitution<StreamPhysicalSink> parquetSinkSubstitution() {
-    return Substitution.of(StreamPhysicalSink.class, PhysicalPlanScan::planParquetSink)
+    return Substitution.of(StreamPhysicalSink.class, ParquetSinkMatcher::substitute)
         .matching(ParquetSinkMatcher::appliesTo)
         .changelogSafe();
   }
 
-  private static RelNode planParquetSink(StreamPhysicalSink sink, PlanContext ctx) {
-    if (!ChangelogPlanUtils.isInsertOnly((StreamPhysicalRel) sink.getInputs().get(0))) {
-      ctx.decline("parquet sink: the input is a changelog, not an insert-only stream");
-      return null;
-    }
-    if (!NativeConfig.operatorEnabled("parquetSink")) {
-      ctx.decline(Substitution.disabledReason("parquetSink"));
-      return null;
-    }
-    ParquetSinkMatcher.Planned planned = ParquetSinkMatcher.plan(sink);
-    if (planned.fallbackReason != null) {
-      ctx.decline("parquet sink: " + planned.fallbackReason);
-      return null;
-    }
-    return new StreamPhysicalNativeParquetSink(
-        sink.getCluster(),
-        sink.getTraitSet(),
-        sink.getInputs().get(0),
-        sink.getRowType(),
-        planned);
-  }
-
   private static Substitution<StreamPhysicalTableSourceScan> parquetSourceSubstitution() {
     return Substitution.of(
-            StreamPhysicalTableSourceScan.class,
-            "parquetSource",
-            (scan, ctx) ->
-                new StreamPhysicalNativeParquetSource(
-                    scan.getCluster(),
-                    scan.getTraitSet(),
-                    scan.getRowType(),
-                    ParquetSourceMatcher.path(scan),
-                    ParquetSourceMatcher.utcTimestamp(scan)))
+            StreamPhysicalTableSourceScan.class, "parquetSource", ParquetSourceMatcher::substitute)
         .matching(ParquetSourceMatcher::matches);
   }
 
@@ -605,46 +534,21 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
    * and lets the remaining source entries look at the same scan.
    */
   private static Substitution<StreamPhysicalTableSourceScan> flussSourceSubstitution() {
-    return Substitution.of(StreamPhysicalTableSourceScan.class, PhysicalPlanScan::planFlussSource)
+    return Substitution.of(StreamPhysicalTableSourceScan.class, FlussTables::substitute)
         .matching(
             scan -> {
               Map<String, String> options = FilesystemTables.options(scan);
               boolean connectorOption = options != null && "fluss".equals(options.get("connector"));
-              return (connectorOption || isFlussTableSource(scan))
+              return (connectorOption || FlussTables.isFlussTableSource(scan))
                   && NativeConfig.operatorEnabled("flussSource");
             })
         .yieldingOnDecline();
   }
 
-  private static RelNode planFlussSource(StreamPhysicalTableSourceScan scan, PlanContext ctx) {
-    String fallback = FlussTables.fallbackReason(scan);
-    if (fallback != null) {
-      ctx.decline("fluss source: " + fallback);
-      return null;
-    }
-    return new StreamPhysicalNativeFlussSource(
-        scan.getCluster(), scan.getTraitSet(), scan.getRowType(), scan);
-  }
-
-  /**
-   * The native rdkafka source consumes and decodes in one place: the installed format provider's
-   * decoder runs inside the poll, so the source emits typed batches — and, because it therefore
-   * holds decoded rowtimes, it regenerates a pushed WATERMARK per split (Flink's own min
-   * combination and idleness over batch-max timestamps).
-   */
   private static Substitution<StreamPhysicalTableSourceScan> kafkaSourceSubstitution() {
-    return Substitution.of(
-            StreamPhysicalTableSourceScan.class,
-            (scan, ctx) ->
-                new StreamPhysicalNativeKafkaSource(
-                    scan.getCluster(),
-                    scan.getTraitSet(),
-                    scan.getRowType(),
-                    FilesystemTables.options(scan),
-                    ScanWatermarkSpec.of(scan)))
+    return Substitution.of(StreamPhysicalTableSourceScan.class, KafkaTables::substituteSource)
         .matching(
-            scan ->
-                KafkaTables.isNativeKafka(scan) && NativeConfig.operatorEnabled("kafkaSource"));
+            scan -> KafkaTables.isNativeKafka(scan) && NativeConfig.operatorEnabled("kafkaSource"));
   }
 
   /**
@@ -653,7 +557,7 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
    * and protobuf all route here; CDC changelog formats route to {@link #cdcDecodeSubstitution()}.
    */
   private static Substitution<StreamPhysicalTableSourceScan> kafkaDecodeSubstitution() {
-    return Substitution.of(StreamPhysicalTableSourceScan.class, PhysicalPlanScan::planKafkaDecode)
+    return Substitution.of(StreamPhysicalTableSourceScan.class, KafkaTables::substituteDecode)
         .matching(
             scan ->
                 KafkaTables.isNativeKafkaDecode(scan)
@@ -661,16 +565,11 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
   }
 
   private static Substitution<StreamPhysicalTableSourceScan> cdcDecodeSubstitution() {
-    return Substitution.of(StreamPhysicalTableSourceScan.class, PhysicalPlanScan::planKafkaDecode)
+    return Substitution.of(StreamPhysicalTableSourceScan.class, KafkaTables::substituteDecode)
         .matching(
             scan ->
                 KafkaTables.isCdcDecode(scan) && NativeConfig.operatorEnabled("kafkaDecode"))
         .changelogSafe();
-  }
-
-  private static RelNode planKafkaDecode(StreamPhysicalTableSourceScan scan, PlanContext ctx) {
-    return new StreamPhysicalNativeKafkaDecode(
-        scan.getCluster(), scan.getTraitSet(), scan.getRowType(), FilesystemTables.options(scan));
   }
 
   /**
@@ -678,17 +577,9 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
    * it substitutes nothing, so it always yields to the entries after it.
    */
   private static Substitution<RelNode> cdcWatermarkReport() {
-    return Substitution.of(RelNode.class, PhysicalPlanScan::reportCdcWatermark)
+    return Substitution.of(RelNode.class, KafkaTables::reportCdcWatermark)
         .changelogSafe()
         .yieldingOnDecline();
-  }
-
-  private static RelNode reportCdcWatermark(RelNode node, PlanContext ctx) {
-    String fallback = KafkaTables.cdcWatermarkFallback(node);
-    if (fallback != null) {
-      ctx.decline(fallback);
-    }
-    return null;
   }
 
   /**
@@ -698,753 +589,8 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
    * timers. Reports only, so it always yields.
    */
   private static Substitution<RelNode> appendWatermarkReport() {
-    return Substitution.of(RelNode.class, PhysicalPlanScan::reportAppendWatermark)
+    return Substitution.of(RelNode.class, KafkaTables::reportAppendWatermark)
         .yieldingOnDecline();
-  }
-
-  private static RelNode reportAppendWatermark(RelNode node, PlanContext ctx) {
-    String fallback = KafkaTables.appendWatermarkFallback(node);
-    if (fallback != null) {
-      ctx.decline(fallback);
-    }
-    return null;
-  }
-
-  // ------------------------------------------------------------------------------ core substitutions
-
-  private static RelNode planGroupAggregate(
-      StreamPhysicalGroupAggregate agg, PlanContext ctx) {
-    int[] keyColumns = GroupAggregateMatcher.keyColumns(agg);
-    // A STATE_TTL hint overrides the job-wide retention for this aggregate alone (Flink's
-    // StateMetadata precedence); null means no hint, resolved at translate time.
-    Long stateTtlHint = StateTtlHint.getStateTtlFromHintOnSingleRel(agg.hints());
-    // The aggregate is columnar (Arrow in/out). Keep the keyed shuffle columnar where the input
-    // sits on a columnar producer (a native exchange splits the batch by the grouping keys);
-    // otherwise the transition pass inserts a transpose at the host exchange boundary. Same key
-    // co-location argument as the window aggregate (divergences/10).
-    return new StreamPhysicalNativeColumnarGroupAggregate(
-        agg.getCluster(),
-        agg.getTraitSet(),
-        ctx.columnarInput(agg.getInputs().get(0), keyColumns),
-        agg.getRowType(),
-        GroupAggregateMatcher.kinds(agg),
-        GroupAggregateMatcher.valueTypeCodes(agg),
-        GroupAggregateMatcher.valueColumns(agg),
-        keyColumns,
-        GroupAggregateMatcher.filterColumns(agg),
-        new int[0], // single-phase: no AVG-merge count partials
-        new int[0], // single-phase: distinct values fold per row, no view columns
-        -1, // single-phase: liveness counts rows ±1, no count1 partial
-        GroupAggregateMatcher.generateUpdateBefore(agg),
-        stateTtlHint == null ? -1 : stateTtlHint);
-  }
-
-  private static RelNode planGlobalGroupAggregate(
-      StreamPhysicalGlobalGroupAggregate agg, PlanContext ctx) {
-    int[] keyColumns = GlobalGroupAggregateMatcher.keyColumns(agg);
-    // TTL lives on the stateful global half only (the local is a transient per-bundle buffer);
-    // a STATE_TTL hint on the aggregate overrides the job-wide retention, as single-phase.
-    Long stateTtlHint = StateTtlHint.getStateTtlFromHintOnSingleRel(agg.hints());
-    return new StreamPhysicalNativeColumnarGroupAggregate(
-        agg.getCluster(),
-        agg.getTraitSet(),
-        ctx.columnarInput(agg.getInputs().get(0), keyColumns),
-        agg.getRowType(),
-        GlobalGroupAggregateMatcher.kinds(agg),
-        GlobalGroupAggregateMatcher.valueTypeCodes(agg),
-        GlobalGroupAggregateMatcher.valueColumns(agg),
-        keyColumns,
-        new int[0], // the global merge applies no FILTER — the local half already filtered
-        GlobalGroupAggregateMatcher.countColumns(agg),
-        GlobalGroupAggregateMatcher.distinctViewColumns(agg),
-        GlobalGroupAggregateMatcher.recordCountColumn(agg),
-        GlobalGroupAggregateMatcher.generateUpdateBefore(agg),
-        stateTtlHint == null ? -1 : stateTtlHint);
-  }
-
-  private static RelNode planMiniBatchAssigner(
-      StreamPhysicalMiniBatchAssigner assigner, PlanContext ctx) {
-    MiniBatchInterval interval =
-        assigner
-            .getTraitSet()
-            .getTrait(MiniBatchIntervalTraitDef$.MODULE$.INSTANCE())
-            .getMiniBatchInterval();
-    if (interval.getMode() != MiniBatchMode.ProcTime
-        && interval.getMode() != MiniBatchMode.RowTime) {
-      ctx.decline("miniBatchAssigner: unsupported mini-batch mode " + interval.getMode());
-      return null;
-    }
-    if (!NativeConfig.operatorEnabled("miniBatchAssigner")) {
-      ctx.decline(Substitution.disabledReason("miniBatchAssigner"));
-      return null;
-    }
-    return new StreamPhysicalNativeMiniBatchAssigner(
-        assigner.getCluster(),
-        assigner.getTraitSet(),
-        assigner.getInputs().get(0),
-        assigner.getRowType(),
-        interval.getInterval(),
-        interval.getMode() == MiniBatchMode.RowTime);
-  }
-
-  private static RelNode planRegularJoin(StreamPhysicalJoin join, PlanContext ctx) {
-    int[] leftKeys = RegularJoinMatcher.leftKeys(join);
-    int[] rightKeys = RegularJoinMatcher.rightKeys(join);
-    // A STATE_TTL hint sets each side's retention independently (0 = left, 1 = right —
-    // Flink's FlinkHints.LEFT_INPUT convention), overriding the job-wide retention for that
-    // side alone; -1 means no hint, resolved at translate time.
-    Map<Integer, Long> hintTtls = StateTtlHint.getStateTtlFromHintOnBiRel(join.getHints());
-    // Columnar (Arrow in/out); keep each side's keyed shuffle columnar where it sits on a
-    // columnar producer, else the transition pass transposes at the boundary.
-    return new StreamPhysicalNativeColumnarUpdatingJoin(
-        join.getCluster(),
-        join.getTraitSet(),
-        ctx.columnarInput(join.getLeft(), leftKeys),
-        ctx.columnarInput(join.getRight(), rightKeys),
-        join.getRowType(),
-        leftKeys,
-        rightKeys,
-        RegularJoinMatcher.joinTypeCode(join),
-        RegularJoinMatcher.nonEquiPredicate(join),
-        RegularJoinMatcher.joinKeyIsUnique(join, 0) && RegularJoinMatcher.joinKeyIsUnique(join, 1),
-        hintTtls.getOrDefault(0, -1L),
-        hintTtls.getOrDefault(1, -1L));
-  }
-
-  private static RelNode planDeduplicate(StreamPhysicalRank rank, PlanContext ctx) {
-    int[] partitionColumns = DeduplicateMatcher.partitionColumns(rank);
-    // Columnar (Arrow in/out); the partitioned shuffle stays columnar where the input sits on a
-    // columnar producer, else the transition pass transposes at the boundary. Watermark-released
-    // keep-first is insert-only; keep-last — and rowtime keep-first under mini-batch — emits a
-    // retract changelog (the native rel inherits the host rank's changelog trait, so the
-    // boundary transpose carries $row_kind$).
-    return new StreamPhysicalNativeDeduplicate(
-        rank.getCluster(),
-        rank.getTraitSet(),
-        ctx.columnarInput(rank.getInput(), partitionColumns),
-        rank.getRowType(),
-        partitionColumns,
-        DeduplicateMatcher.rowtimeColumn(rank),
-        DeduplicateMatcher.keepLast(rank),
-        DeduplicateMatcher.generateUpdateBefore(rank),
-        DeduplicateMatcher.isProctime(rank));
-  }
-
-  private static RelNode planTopN(StreamPhysicalRank rank, PlanContext ctx) {
-    // An update-fast rank (unique-keyed input with a monotonic sort key) receives a changelog
-    // WITHOUT retractions — the upstream is planned to emit only +I/+U, and rank rows are
-    // replaced by their unique key (the retracting ranker's full-row retraction model would
-    // accumulate every version). It routes to the update-fast ranker, which mirrors Flink's
-    // UpdatableTopNFunction/FastTop1Function state shape.
-    if (rank.rankStrategy() instanceof RankProcessStrategy.UpdateFastStrategy) {
-      if (TopNMatcher.offset(rank) > 0) {
-        ctx.decline("Top-N: update-fast rank with OFFSET runs on the host");
-        return null;
-      }
-      int[] updateFastPartitions = TopNMatcher.partitionColumns(rank);
-      return new StreamPhysicalNativeColumnarTopN(
-          rank.getCluster(),
-          rank.getTraitSet(),
-          ctx.columnarInput(rank.getInput(), updateFastPartitions),
-          rank.getRowType(),
-          updateFastPartitions,
-          TopNMatcher.sortIndices(rank),
-          TopNMatcher.sortAscending(rank),
-          TopNMatcher.sortNullsFirst(rank),
-          0,
-          TopNMatcher.limit(rank),
-          TopNMatcher.outputRankNumber(rank),
-          false,
-          ((RankProcessStrategy.UpdateFastStrategy) rank.rankStrategy()).getPrimaryKeys());
-    }
-    int[] partitionColumns = TopNMatcher.partitionColumns(rank);
-    long offset = TopNMatcher.offset(rank);
-    // A changelog input or an OFFSET routes to the retracting ranker (full buffer + rank window);
-    // the append-only bounded ranker handles only the insert-only, no-offset case.
-    boolean retracting =
-        offset > 0 || !ChangelogPlanUtils.isInsertOnly((StreamPhysicalRel) rank.getInput());
-    // Columnar (Arrow in/out); keep the partitioned shuffle columnar where the input sits on a
-    // columnar producer, else the transition pass transposes at the boundary.
-    return new StreamPhysicalNativeColumnarTopN(
-        rank.getCluster(),
-        rank.getTraitSet(),
-        ctx.columnarInput(rank.getInput(), partitionColumns),
-        rank.getRowType(),
-        partitionColumns,
-        TopNMatcher.sortIndices(rank),
-        TopNMatcher.sortAscending(rank),
-        TopNMatcher.sortNullsFirst(rank),
-        offset,
-        TopNMatcher.limit(rank),
-        TopNMatcher.outputRankNumber(rank),
-        retracting,
-        null);
-  }
-
-  private static RelNode planLimit(Sort sort, PlanContext ctx) {
-    boolean insertOnlyInput = ChangelogPlanUtils.isInsertOnly((StreamPhysicalRel) sort.getInput());
-    if (LimitMatcher.matches(sort) && insertOnlyInput) {
-      if (!NativeConfig.operatorEnabled("limit")) {
-        ctx.decline(Substitution.disabledReason("limit"));
-        return null;
-      }
-      int[] partitionColumns = new int[0]; // global limit — a single gather, no partition
-      long offset = LimitMatcher.offset(sort);
-      return new StreamPhysicalNativeColumnarTopN(
-          sort.getCluster(),
-          sort.getTraitSet(),
-          ctx.columnarInput(sort.getInput(), partitionColumns),
-          sort.getRowType(),
-          partitionColumns,
-          LimitMatcher.sortIndices(sort),
-          LimitMatcher.sortAscending(sort),
-          LimitMatcher.sortNullsFirst(sort),
-          offset,
-          LimitMatcher.limit(sort),
-          false, // a global LIMIT never projects a rank column
-          offset > 0, // an OFFSET uses the retracting ranker; no-offset the append-only one
-          null);
-    }
-    // A retracting input is the one reason not in unsupportedReason.
-    ctx.decline(
-        insertOnlyInput
-            ? LimitMatcher.unsupportedReason(sort)
-            : "limit: needs an insert-only input (the append-only ranker is implemented)");
-    return null;
-  }
-
-  private static RelNode planFilterCalc(Calc calc, PlanContext ctx) {
-    RexExpression condition = FilterCalcMatcher.encodedCondition(calc);
-    return new StreamPhysicalNativeFilter(
-        calc.getCluster(),
-        calc.getTraitSet(),
-        calc.getInputs().get(0),
-        calc.getRowType(),
-        FilterCalcMatcher.projection(calc),
-        condition.kinds(),
-        condition.payload(),
-        condition.childCounts(),
-        condition.longs(),
-        condition.doubles(),
-        condition.strings(),
-        condition.udfBinding());
-  }
-
-  private static RelNode planCalc(Calc calc, PlanContext ctx) {
-    RelNode input = calc.getInputs().get(0);
-    RexExpression encoded = CalcMatcher.encode(calc);
-    // Nested projection pushdown: when the input is rowwise (about to be transposed) and the calc
-    // reads only some of its columns / struct sub-fields, prune the entry transpose to just those
-    // and remap the calc's top-level column references to the compacted positions. The transpose
-    // then converts only the read fields of each wide source row to Arrow. (A columnar producer is
-    // left alone — its batch is already built; nested access stays by name, so it needs no remap.)
-    CalcProjectionPruner.Pruned pruned = CalcProjectionPruner.compute(calc);
-    if (ctx.kafkaExtension() && pruned != null && input instanceof StreamPhysicalNativeKafkaDecode) {
-      // The native decode is itself a (Rust) row→Arrow transpose: pushing the projection into it
-      // makes the decoder build only the read columns/fields straight from the bytes, so a wide
-      // record's unread fields are never decoded. Only for decoders that honor a pruned schema.
-      StreamPhysicalNativeKafkaDecode decode = (StreamPhysicalNativeKafkaDecode) input;
-      if (KafkaTables.decodeHonorsProjection(decode.options())) {
-        return new StreamPhysicalNativeCalc(
-            calc.getCluster(),
-            calc.getTraitSet(),
-            decode.withProjection(pruned.inputType),
-            calc.getRowType(),
-            encoded.remapInputs(pruned.remap));
-      }
-    }
-    if (ctx.kafkaExtension() && pruned != null && input instanceof StreamPhysicalNativeKafkaSource) {
-      // The fully-native rdkafka source decodes in Rust too: push the projection in so the in-Rust
-      // decode builds only the read columns/fields straight from the bytes (the columnar-source analog
-      // of pruning the entry transpose). Only for formats whose decoder honors a pruned schema.
-      StreamPhysicalNativeKafkaSource source = (StreamPhysicalNativeKafkaSource) input;
-      // A watermarked source must keep decoding its rowtime column (the per-split watermark reads
-      // it), so a projection that drops it is not pushed — the Calc still runs natively, unpruned.
-      if (KafkaTables.decodeHonorsProjection(source.options())
-          && source.projectionKeepsRowtime(pruned.inputType)) {
-        return new StreamPhysicalNativeCalc(
-            calc.getCluster(),
-            calc.getTraitSet(),
-            source.withProjection(pruned.inputType),
-            calc.getRowType(),
-            encoded.remapInputs(pruned.remap));
-      }
-    }
-    if (pruned != null && !emitsColumnar(input)) {
-      // A rowwise input is about to be transposed: prune that entry transpose to the read fields.
-      boolean carryRowKind =
-          input instanceof StreamPhysicalRel
-              && !ChangelogPlanUtils.isInsertOnly((StreamPhysicalRel) input);
-      RelNode prunedTranspose =
-          new StreamPhysicalRowDataToArrow(
-              input.getCluster(), input.getTraitSet(), input, carryRowKind, pruned.inputType);
-      return new StreamPhysicalNativeCalc(
-          calc.getCluster(),
-          calc.getTraitSet(),
-          prunedTranspose,
-          calc.getRowType(),
-          encoded.remapInputs(pruned.remap));
-    }
-    // The mini-batch assigner is a pass-through (it forwards batches untouched), so it must not
-    // hide a rowwise input from the pruning above: push the pruned entry transpose through it.
-    // Without this, a mini-batch plan pays an UNPRUNED transpose of the full wide source row —
-    // measured at 7x the transpose work on Nexmark q3.
-    if (pruned != null && input instanceof StreamPhysicalNativeMiniBatchAssigner) {
-      StreamPhysicalNativeMiniBatchAssigner assigner = (StreamPhysicalNativeMiniBatchAssigner) input;
-      RelNode below = assigner.getInput(0);
-      if (!emitsColumnar(below)) {
-        boolean carryRowKind =
-            below instanceof StreamPhysicalRel
-                && !ChangelogPlanUtils.isInsertOnly((StreamPhysicalRel) below);
-        RelNode prunedTranspose =
-            new StreamPhysicalRowDataToArrow(
-                below.getCluster(), below.getTraitSet(), below, carryRowKind, pruned.inputType);
-        return new StreamPhysicalNativeCalc(
-            calc.getCluster(),
-            calc.getTraitSet(),
-            assigner.withInput(prunedTranspose, pruned.inputType),
-            calc.getRowType(),
-            encoded.remapInputs(pruned.remap));
-      }
-    }
-    return new StreamPhysicalNativeCalc(
-        calc.getCluster(), calc.getTraitSet(), input, calc.getRowType(), encoded);
-  }
-
-  private static RelNode planChangelogNormalize(
-      StreamPhysicalChangelogNormalize normalize, PlanContext ctx) {
-    int[] keyColumns = ChangelogNormalizeMatcher.keyColumns(normalize);
-    return new StreamPhysicalNativeChangelogNormalize(
-        normalize.getCluster(),
-        normalize.getTraitSet(),
-        ctx.columnarInput(normalize.getInputs().get(0), keyColumns),
-        normalize.getRowType(),
-        keyColumns,
-        ChangelogNormalizeMatcher.generateUpdateBefore(normalize));
-  }
-
-  private static RelNode planUnnest(StreamPhysicalCorrelate correlate, PlanContext ctx) {
-    RelNode unnest =
-        new StreamPhysicalNativeUnnest(
-            correlate.getCluster(),
-            correlate.getTraitSet(),
-            correlate.getInputs().get(0),
-            correlate.getRowType(),
-            UnnestMatcher.arrayColumn(correlate),
-            UnnestMatcher.withOrdinality(correlate),
-            UnnestMatcher.isLeft(correlate),
-            UnnestMatcher.isMultiset(correlate));
-    RexExpression condition = UnnestMatcher.encodedCondition(correlate);
-    if (condition == null) {
-      return unnest;
-    }
-    // A filter pushed into the correlate (… WHERE element > x) is applied as a native filter
-    // over the unnest output, with an identity projection (the unnest already produced the
-    // correlate's output columns). The condition's refs were shifted to index that output.
-    int arity = correlate.getRowType().getFieldCount();
-    int[] identity = new int[arity];
-    for (int i = 0; i < arity; i++) {
-      identity[i] = i;
-    }
-    return new StreamPhysicalNativeFilter(
-        correlate.getCluster(),
-        correlate.getTraitSet(),
-        unnest,
-        correlate.getRowType(),
-        identity,
-        condition.kinds(),
-        condition.payload(),
-        condition.childCounts(),
-        condition.longs(),
-        condition.doubles(),
-        condition.strings(),
-        condition.udfBinding());
-  }
-
-  private static RelNode planExpand(StreamPhysicalExpand expand, PlanContext ctx) {
-    return new StreamPhysicalNativeExpand(
-        expand.getCluster(),
-        expand.getTraitSet(),
-        expand.getInputs().get(0),
-        expand.getRowType(),
-        ExpandMatcher.numExpandRows(expand),
-        ExpandMatcher.numOutputColumns(expand),
-        expand.expandIdIndex(),
-        ExpandMatcher.expandIdIsLong(expand),
-        ExpandMatcher.copyIndices(expand),
-        ExpandMatcher.expandIdValues(expand));
-  }
-
-  private static RelNode planUnion(StreamPhysicalUnion union, PlanContext ctx) {
-    return new StreamPhysicalNativeUnion(
-        union.getCluster(), union.getTraitSet(), union.getInputs(), union.getRowType());
-  }
-
-  private static RelNode planWatermarkAssigner(
-      StreamPhysicalWatermarkAssigner wm, PlanContext ctx) {
-    return new StreamPhysicalNativeWatermarkAssigner(
-        wm.getCluster(),
-        wm.getTraitSet(),
-        wm.getInputs().get(0),
-        wm.getRowType(),
-        WatermarkAssignerMatcher.rowtimeColumn(wm),
-        WatermarkAssignerMatcher.delayMillis(wm));
-  }
-
-  private static RelNode planTemporalSort(StreamPhysicalTemporalSort sort, PlanContext ctx) {
-    return new StreamPhysicalNativeTemporalSort(
-        sort.getCluster(),
-        sort.getTraitSet(),
-        ctx.columnarInput(sort.getInputs().get(0), new int[0]),
-        sort.getRowType(),
-        TemporalSortMatcher.rowtimeColumn(sort));
-  }
-
-  private static RelNode planWindowTableFunction(
-      StreamPhysicalWindowTableFunction tvf, PlanContext ctx) {
-    return new StreamPhysicalNativeWindowTableFunction(
-        tvf.getCluster(),
-        tvf.getTraitSet(),
-        tvf.getInputs().get(0),
-        tvf.getRowType(),
-        WindowTableFunctionMatcher.timeColumn(tvf),
-        WindowTableFunctionMatcher.windowMillis(tvf),
-        WindowTableFunctionMatcher.slideMillis(tvf),
-        WindowTableFunctionMatcher.cumulative(tvf),
-        WindowTableFunctionMatcher.isProctime(tvf));
-  }
-
-  private static RelNode planWindowRank(StreamPhysicalWindowRank rank, PlanContext ctx) {
-    int[] partitionColumns = WindowRankMatcher.partitionColumns(rank);
-    return new StreamPhysicalNativeWindowRank(
-        rank.getCluster(),
-        rank.getTraitSet(),
-        ctx.columnarInput(rank.getInputs().get(0), partitionColumns),
-        rank.getRowType(),
-        WindowRankMatcher.windowStartColumn(rank),
-        WindowRankMatcher.windowEndColumn(rank),
-        partitionColumns,
-        WindowRankMatcher.sortIndices(rank),
-        WindowRankMatcher.sortAscending(rank),
-        WindowRankMatcher.sortNullsFirst(rank),
-        WindowRankMatcher.limit(rank),
-        WindowRankMatcher.outputRankNumber(rank),
-        WindowRankMatcher.isProctime(rank),
-        WindowRankMatcher.windowMillis(rank),
-        WindowRankMatcher.slideMillis(rank),
-        WindowRankMatcher.cumulative(rank));
-  }
-
-  private static RelNode planWindowDeduplicate(
-      StreamPhysicalWindowDeduplicate dedup, PlanContext ctx) {
-    int[] partitionColumns = WindowDeduplicateMatcher.partitionColumns(dedup);
-    return new StreamPhysicalNativeWindowRank(
-        dedup.getCluster(),
-        dedup.getTraitSet(),
-        ctx.columnarInput(dedup.getInputs().get(0), partitionColumns),
-        dedup.getRowType(),
-        WindowDeduplicateMatcher.windowStartColumn(dedup),
-        WindowDeduplicateMatcher.windowEndColumn(dedup),
-        partitionColumns,
-        WindowDeduplicateMatcher.sortIndices(dedup),
-        WindowDeduplicateMatcher.sortAscending(dedup),
-        WindowDeduplicateMatcher.sortNullsFirst(dedup),
-        1,
-        false,
-        WindowDeduplicateMatcher.isProctime(dedup),
-        WindowDeduplicateMatcher.windowMillis(dedup),
-        WindowDeduplicateMatcher.slideMillis(dedup),
-        WindowDeduplicateMatcher.cumulative(dedup));
-  }
-
-  private static RelNode planWindowAggregate(StreamPhysicalWindowAggregate agg, PlanContext ctx) {
-    int[] keyColumns = WindowAggregateMatcher.keyColumns(agg.grouping());
-    // Always columnar: the keyed shuffle stays Arrow where it sits on a columnar
-    // producer (a native exchange splits the batch by the grouping keys), otherwise the transition
-    // pass inserts a row→Arrow transpose at the boundary. The exchange only co-locates each key's
-    // rows on one channel — the window re-groups by key itself — so its hash need not match Flink's.
-    return new StreamPhysicalNativeColumnarWindowAggregate(
-        agg.getCluster(),
-        agg.getTraitSet(),
-        ctx.columnarInput(agg.getInputs().get(0), keyColumns),
-        agg.getRowType(),
-        WindowAggregateMatcher.isCumulative(agg.windowing()),
-        WindowAggregateMatcher.windowSize(agg.windowing()),
-        WindowAggregateMatcher.windowSlide(agg.windowing()),
-        WindowAggregateMatcher.timeColumn(agg.windowing()),
-        WindowAggregateMatcher.valueColumns(agg.aggCalls()),
-        keyColumns,
-        WindowAggregateMatcher.valueTypeCodes(agg.aggCalls(), agg.getInput().getRowType()),
-        WindowAggregateMatcher.kinds(agg.aggCalls()),
-        WindowAggregateMatcher.isProctime(agg.windowing()),
-        WindowAggregateMatcher.isLtz(agg.windowing()));
-  }
-
-  private static RelNode planSessionWindowAggregate(
-      StreamPhysicalWindowAggregate agg, PlanContext ctx) {
-    int[] keyColumns = WindowAggregateMatcher.keyColumns(agg.grouping());
-    // Always columnar: the keyed shuffle stays Arrow where it sits on a columnar
-    // producer, otherwise the transition pass transposes at the boundary.
-    return new StreamPhysicalNativeColumnarSessionWindowAggregate(
-        agg.getCluster(),
-        agg.getTraitSet(),
-        ctx.columnarInput(agg.getInputs().get(0), keyColumns),
-        agg.getRowType(),
-        WindowAggregateMatcher.gapMillis(agg.windowing()),
-        WindowAggregateMatcher.timeColumn(agg.windowing()),
-        WindowAggregateMatcher.valueColumns(agg.aggCalls()),
-        keyColumns,
-        WindowAggregateMatcher.valueTypeCodes(agg.aggCalls(), agg.getInput().getRowType()),
-        WindowAggregateMatcher.kinds(agg.aggCalls()),
-        WindowAggregateMatcher.isProctime(agg.windowing()),
-        WindowAggregateMatcher.isLtz(agg.windowing()));
-  }
-
-  private static RelNode planGroupWindowSession(
-      StreamPhysicalGroupWindowAggregate agg, PlanContext ctx) {
-    int[] keyColumns = WindowAggregateMatcher.keyColumns(agg.grouping());
-    return new StreamPhysicalNativeColumnarSessionWindowAggregate(
-        agg.getCluster(),
-        agg.getTraitSet(),
-        ctx.columnarInput(agg.getInputs().get(0), keyColumns),
-        agg.getRowType(),
-        GroupWindowSessionMatcher.gapMillis(agg),
-        GroupWindowSessionMatcher.timeColumn(agg),
-        WindowAggregateMatcher.valueColumns(agg.aggCalls()),
-        keyColumns,
-        WindowAggregateMatcher.valueTypeCodes(agg.aggCalls(), agg.getInput().getRowType()),
-        WindowAggregateMatcher.kinds(agg.aggCalls()),
-        false, // event-time (proctime sessions are not on this path)
-        GroupWindowSessionMatcher.isLtz(agg));
-  }
-
-  private static RelNode planLocalGroupAggregate(
-      StreamPhysicalLocalGroupAggregate agg, PlanContext ctx) {
-    return new StreamPhysicalNativeColumnarLocalGroupAggregate(
-        agg.getCluster(),
-        agg.getTraitSet(),
-        agg.getInputs().get(0),
-        agg.getRowType(),
-        LocalGroupAggregateMatcher.kinds(agg),
-        LocalGroupAggregateMatcher.valueTypeCodes(agg),
-        LocalGroupAggregateMatcher.valueColumns(agg),
-        LocalGroupAggregateMatcher.filterColumns(agg),
-        LocalGroupAggregateMatcher.keyColumns(agg),
-        LocalGroupAggregateMatcher.distinctViewSources(agg));
-  }
-
-  /**
-   * Which shape of local window pre-aggregate a node is, or null when the native operator handles
-   * none of them. Tumbling, hopping and cumulative locals pre-aggregate per slice off a rowtime;
-   * every non-AVG aggregate has a single-field mergeable partial (the custom SUMs mirror Flink's
-   * nullable-sum buffer), so the two-phase split admits the same value types as the single-phase
-   * path. AVG stays single-phase: its (sum, count) buffer spans two partial columns.
-   */
-  private enum LocalWindowVariant {
-    /** Pre-aggregates per slice; the global re-buckets slices into windows. */
-    TUMBLING,
-    /** As tumbling, but carries a synthetic count1 column for empty-window detection. */
-    HOPPING,
-    /** As tumbling over a cumulative window; the partials are the plain user aggregates. */
-    CUMULATIVE,
-    /** The input already carries window_start/window_end, so there is no rowtime to slice (q5). */
-    ATTACHED
-  }
-
-  private static LocalWindowVariant localWindowVariant(StreamPhysicalLocalWindowAggregate agg) {
-    RelDataType input = agg.getInput().getRowType();
-    if (WindowAggregateMatcher.matchesHoppingLocal(
-        agg.windowing(), agg.grouping(), agg.aggCalls(), input)) {
-      return LocalWindowVariant.HOPPING;
-    }
-    boolean sliceable =
-        WindowAggregateMatcher.matches(agg.windowing(), agg.grouping(), agg.aggCalls(), input)
-            && !WindowAggregateMatcher.containsAvg(agg.aggCalls());
-    if (sliceable && WindowAggregateMatcher.isTumbling(agg.windowing())) {
-      return LocalWindowVariant.TUMBLING;
-    }
-    if (sliceable && WindowAggregateMatcher.isCumulative(agg.windowing())) {
-      return LocalWindowVariant.CUMULATIVE;
-    }
-    if (WindowAggregateMatcher.matchesAttachedLocal(
-        agg.windowing(), agg.grouping(), agg.aggCalls(), input)) {
-      return LocalWindowVariant.ATTACHED;
-    }
-    return null;
-  }
-
-  private static RelNode planLocalWindowAggregate(
-      StreamPhysicalLocalWindowAggregate agg, PlanContext ctx) {
-    boolean attached = localWindowVariant(agg) == LocalWindowVariant.ATTACHED;
-    RelDataType localInput = agg.getInput().getRowType();
-    // Hopping carries a trailing synthetic count1 column for empty-window detection, so its kinds
-    // and value columns get a matching extra entry (counts rows). But the planner only injects it
-    // when the user aggregates don't already provide a row count: a COUNT(*) doubles as count1, so
-    // the local emits no separate column. Detect it by the partial count in the local's output
-    // (its row type is [grouping?, partials.., slice_end]) rather than assuming hopping always
-    // adds one — otherwise a hopping COUNT(*) local emits a column the global does not expect.
-    int partialColumns = agg.getRowType().getFieldCount() - agg.grouping().length - 1;
-    boolean syntheticCount = partialColumns > agg.aggCalls().size();
-    int[] kinds =
-        syntheticCount
-            ? WindowAggregateMatcher.hoppingLocalKinds(agg.aggCalls())
-            : WindowAggregateMatcher.kinds(agg.aggCalls());
-    int[] valueColumns =
-        syntheticCount
-            ? WindowAggregateMatcher.hoppingLocalValueColumns(agg.aggCalls())
-            : WindowAggregateMatcher.valueColumns(agg.aggCalls());
-    int[] valueTypes =
-        syntheticCount
-            ? WindowAggregateMatcher.hoppingLocalValueTypes(agg.aggCalls(), localInput)
-            : WindowAggregateMatcher.valueTypeCodes(agg.aggCalls(), localInput);
-    // Window-attached mode reads the window from columns (no rowtime slice); the two modes are
-    // mutually exclusive, so the unused indices are -1.
-    int timeColumn = attached ? -1 : WindowAggregateMatcher.timeColumn(agg.windowing());
-    int windowStartColumn =
-        attached ? WindowAggregateMatcher.windowStartColumn(agg.windowing()) : -1;
-    int windowEndColumn = attached ? WindowAggregateMatcher.windowEndColumn(agg.windowing()) : -1;
-    // Always columnar: the local pre-aggregate emits Arrow partials. Its input feeds
-    // directly (no shuffle precedes a local); the transition pass inserts a row→Arrow transpose
-    // when the producer is rowwise.
-    return new StreamPhysicalNativeColumnarLocalWindowAggregate(
-        agg.getCluster(),
-        agg.getTraitSet(),
-        agg.getInputs().get(0),
-        agg.getRowType(),
-        WindowAggregateMatcher.sliceSize(agg.windowing()),
-        timeColumn,
-        windowStartColumn,
-        windowEndColumn,
-        valueColumns,
-        WindowAggregateMatcher.keyColumns(agg.grouping()),
-        valueTypes,
-        kinds,
-        WindowAggregateMatcher.isLtz(agg.windowing()));
-  }
-
-  private static RelNode planOver(StreamPhysicalOverAggregate over, PlanContext ctx) {
-    int[] keyColumns = OverAggregateMatcher.keyColumns(over);
-    // Always columnar: the keyed shuffle becomes a native exchange (split by the
-    // partition keys); the transition pass transposes below it only when the producer is rowwise.
-    return new StreamPhysicalNativeOverAggregate(
-        over.getCluster(),
-        over.getTraitSet(),
-        ctx.columnarInput(over.getInputs().get(0), keyColumns),
-        over.getRowType(),
-        OverAggregateMatcher.timeColumn(over),
-        OverAggregateMatcher.valueColumnIndices(over),
-        keyColumns,
-        OverAggregateMatcher.valueTypeCodes(over),
-        OverAggregateMatcher.kinds(over),
-        OverAggregateMatcher.frameKind(over),
-        OverAggregateMatcher.frameOffset(over),
-        OverAggregateMatcher.isProctime(over));
-  }
-
-  private static RelNode planIntervalJoin(StreamPhysicalIntervalJoin join, PlanContext ctx) {
-    int[] leftKeys = IntervalJoinMatcher.leftKeys(join);
-    int[] rightKeys = IntervalJoinMatcher.rightKeys(join);
-    // Keep each input's keyed shuffle columnar where it sits on a columnar producer (a native
-    // exchange splits the batch by that side's join key); otherwise the boundary gets a
-    // row→Arrow transpose. The join re-groups by key in its own state, so the exchange hash need
-    // not match Flink's (divergences/10). The join is always columnar (Arrow pairs out).
-    return new StreamPhysicalNativeIntervalJoin(
-        join.getCluster(),
-        join.getTraitSet(),
-        ctx.columnarInput(join.getLeft(), leftKeys),
-        ctx.columnarInput(join.getRight(), rightKeys),
-        join.getRowType(),
-        leftKeys,
-        rightKeys,
-        IntervalJoinMatcher.leftTime(join),
-        IntervalJoinMatcher.rightTime(join),
-        IntervalJoinMatcher.lowerMillis(join),
-        IntervalJoinMatcher.upperMillis(join),
-        IntervalJoinMatcher.joinTypeCode(join),
-        IntervalJoinMatcher.nonEquiPredicate(join),
-        IntervalJoinMatcher.isProctime(join));
-  }
-
-  private static RelNode planWindowJoin(StreamPhysicalWindowJoin join, PlanContext ctx) {
-    int[] leftKeys = WindowJoinMatcher.leftKeys(join);
-    int[] rightKeys = WindowJoinMatcher.rightKeys(join);
-    // Shuffle each input by its join key (columnar where it sits on a columnar producer), the
-    // same coupling as the interval join. The window join then matches per window in its state.
-    return new StreamPhysicalNativeWindowJoin(
-        join.getCluster(),
-        join.getTraitSet(),
-        ctx.columnarInput(join.getLeft(), leftKeys),
-        ctx.columnarInput(join.getRight(), rightKeys),
-        join.getRowType(),
-        leftKeys,
-        rightKeys,
-        WindowJoinMatcher.leftWindowStart(join),
-        WindowJoinMatcher.leftWindowEnd(join),
-        WindowJoinMatcher.rightWindowStart(join),
-        WindowJoinMatcher.rightWindowEnd(join),
-        WindowJoinMatcher.joinTypeCode(join),
-        WindowJoinMatcher.nonEquiPredicate(join),
-        WindowJoinMatcher.isProctime(join),
-        WindowJoinMatcher.windowMillis(join),
-        WindowJoinMatcher.slideMillis(join),
-        WindowJoinMatcher.cumulative(join));
-  }
-
-  private static RelNode planTemporalJoin(StreamPhysicalTemporalJoin join, PlanContext ctx) {
-    int[] leftKeys = TemporalJoinMatcher.leftKeys(join);
-    int[] rightKeys = TemporalJoinMatcher.rightKeys(join);
-    // Shuffle each input by its join key (columnar where it sits on a columnar producer); the
-    // versioned join then groups by key in its own state, like the interval/window join.
-    return new StreamPhysicalNativeTemporalJoin(
-        join.getCluster(),
-        join.getTraitSet(),
-        ctx.columnarInput(join.getLeft(), leftKeys),
-        ctx.columnarInput(join.getRight(), rightKeys),
-        join.getRowType(),
-        leftKeys,
-        rightKeys,
-        TemporalJoinMatcher.leftTime(join),
-        TemporalJoinMatcher.rightTime(join),
-        TemporalJoinMatcher.joinTypeCode(join),
-        TemporalJoinMatcher.nonEquiPredicate(join));
-  }
-
-  private static RelNode planLookupJoin(StreamPhysicalLookupJoin join, PlanContext ctx) {
-    // A lookup join is stateless (no keyed shuffle); the probe input passes through as-is, and the
-    // dimension is a (sync or async) lookup the operator performs — not an input.
-    return new StreamPhysicalNativeLookupJoin(
-        join.getCluster(),
-        join.getTraitSet(),
-        join.getInput(),
-        join.getRowType(),
-        LookupJoinMatcher.temporalTable(join),
-        LookupJoinMatcher.lookupKeys(join),
-        join.calcOnTemporalTable().isDefined() ? join.calcOnTemporalTable().get() : null,
-        join.finalPreFilterCondition().isDefined() ? join.finalPreFilterCondition().get() : null,
-        join.finalRemainingCondition().isDefined() ? join.finalRemainingCondition().get() : null,
-        LookupJoinMatcher.isLeftOuterJoin(join),
-        join.asyncOptions().isDefined() ? join.asyncOptions().get() : null);
-  }
-
-  private static RelNode planGlobalWindowAggregate(
-      StreamPhysicalGlobalWindowAggregate agg, PlanContext ctx) {
-    int[] keyColumns = GlobalWindowAggregateMatcher.keyColumns(agg);
-    // Always columnar: the columnar local emits Arrow partials, a native exchange
-    // splits them by key, and the columnar global merges — the whole two-phase pipeline flows
-    // Arrow. (columnarInput keeps the partial shuffle Arrow; the local is always a columnar
-    // producer now, so no transpose arises here.)
-    return new StreamPhysicalNativeColumnarGlobalWindowAggregate(
-        agg.getCluster(),
-        agg.getTraitSet(),
-        ctx.columnarInput(agg.getInputs().get(0), keyColumns),
-        agg.getRowType(),
-        GlobalWindowAggregateMatcher.windowMillis(agg),
-        GlobalWindowAggregateMatcher.slideMillis(agg),
-        GlobalWindowAggregateMatcher.cumulative(agg),
-        keyColumns,
-        GlobalWindowAggregateMatcher.valueTypes(agg),
-        GlobalWindowAggregateMatcher.kinds(agg),
-        WindowAggregateMatcher.isLtz(agg.windowing()));
   }
 
   // ---------------------------------------------------------------------------- island composition
@@ -1605,15 +751,6 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
     }
   }
 
-  /** The precise expression reason a Calc fell back, from the encoder. */
-  private static String calcReason(Calc calc) {
-    String reason =
-        FilterCalcMatcher.convertibleRow(calc.getInput().getRowType())
-            ? RexExpression.reasonForCalc(calc)
-            : "unsupported input column type";
-    return "Calc: " + (reason != null ? reason : "unsupported Calc expression");
-  }
-
   // ------------------------------------------------------------------------- extension availability
 
   private static boolean extensionAvailable(String extensionClass, String... prerequisites) {
@@ -1633,20 +770,6 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
       Class.forName(className, false, PhysicalPlanScan.class.getClassLoader());
       return true;
     } catch (ClassNotFoundException | LinkageError e) {
-      return false;
-    }
-  }
-
-  private static boolean isFlussTableSource(StreamPhysicalTableSourceScan scan) {
-    try {
-      TableSourceTable table = scan.getTable().unwrap(TableSourceTable.class);
-      if (table == null) {
-        return false;
-      }
-      DynamicTableSource source = table.tableSource();
-      return source != null
-          && "org.apache.fluss.flink.source.FlinkTableSource".equals(source.getClass().getName());
-    } catch (LinkageError | RuntimeException e) {
       return false;
     }
   }
