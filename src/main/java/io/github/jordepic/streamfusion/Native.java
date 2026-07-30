@@ -746,6 +746,13 @@ public final class Native {
   public static native void flushKeepFirstDeduplicator(
       long handle, long watermarkMillis, long nowMillis, long outArrayAddress, long outSchemaAddress);
 
+  /**
+   * Rows dropped as late (rowtime already below the watermark) over the handle's lifetime,
+   * cumulative across pushes; feeds Flink's {@code numLateRecordsDropped} counter. Serves memory-
+   * and Paimon-backed handles alike (the late filter precedes the backend split).
+   */
+  public static native long keepFirstDeduplicatorLateDrops(long handle);
+
   /** Releases the deduplicator and its per-key state. */
   public static native void closeKeepFirstDeduplicator(long handle);
 

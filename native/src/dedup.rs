@@ -33,6 +33,10 @@ pub(crate) struct KeepFirstDeduplicator {
     /// When the last full marker sweep ran; the sweep reclaims markers never probed again, once
     /// per TTL period (expiry itself is enforced lazily at each probe).
     last_sweep_ms: i64,
+    /// Rows dropped as late (rowtime below the watermark) over the handle's lifetime — the host
+    /// feeds Flink's `numLateRecordsDropped` counter from it. Like any Flink metric it restarts
+    /// at zero with the operator, so it is not checkpointed.
+    pub(crate) late_drops: u64,
     key_converter: Option<RowConverter>,
     key_types: Vec<DataType>,
     schema: Option<SchemaRef>,
@@ -56,6 +60,7 @@ impl KeepFirstDeduplicator {
             emitted: HashMap::default(),
             ttl_ms: 0,
             last_sweep_ms: 0,
+            late_drops: 0,
             key_converter: None,
             key_types: Vec::new(),
             schema: None,
@@ -137,11 +142,13 @@ impl KeepFirstDeduplicator {
         self.snapshot_cache = None;
         let schema = batch.schema();
         self.schema = Some(schema.clone());
-        // Drop late rows (rowtime already below the watermark) with a columnar filter.
+        // Drop late rows (rowtime already below the watermark) with a columnar filter, counting
+        // them as Flink's processElement does before any per-key state is consulted.
         let rt = rt_to_millis(batch.column(self.rt_column));
         let live_mask: BooleanArray =
             rt.iter().map(|v| Some(v.unwrap() >= self.current_watermark)).collect();
         let live = filter_record_batch(batch, &live_mask).expect("dedup late filter");
+        self.late_drops += (batch.num_rows() - live.num_rows()) as u64;
         #[cfg(feature = "paimon-state")]
         if self.backend.is_some() {
             return self.push_backend(live);
@@ -641,7 +648,9 @@ pub(crate) type MemoryDedupStore = MemoryStateStore<DedupRow>;
 pub(crate) struct DedupRow {
     rowtime: i64,
     payload: Arc<[u8]>,
-    staged: bool,
+    /// Index of this key's staged change while a mini-batch bundle is open (`None` otherwise);
+    /// the rowtime shape appends every later kept row of the bundle to that entry's chain.
+    staged: Option<u32>,
     /// The RowKind of Flink's stored row: false = INSERT (stored at creation, or by a suppressed
     /// duplicate), true = UPDATE_AFTER. Flink's proctime keep-last stores the row object BEFORE
     /// emitting it, and emission mutates that same object's kind to UPDATE_AFTER (heap-state
@@ -657,6 +666,12 @@ pub(crate) struct DedupRow {
 struct DedupStagedChange {
     key: ByteKey,
     before: Option<Arc<[u8]>>,
+    /// Every kept row of the bundle in arrival order, staged only by the rowtime shape: Flink's
+    /// rowtime mini-batch flush emits one transition per kept row ("we output all changelog here
+    /// rather than comparing the first and the last record in buffer" — a temporal join's
+    /// versioned table needs every intermediate version), where the proctime shape compacts the
+    /// bundle to its endpoint before the flush ever sees it.
+    kept: Vec<Arc<[u8]>>,
 }
 
 struct DedupSnapshotCache {
@@ -723,7 +738,7 @@ impl crate::state::PaimonStateCodec for DedupStateCodec {
         // window as any hydration boundary. With TTL on the kind flag is irrelevant: the
         // suppression is disabled outright (Flink always re-emits -U/+U under retention), and
         // the TTL timestamp rides the store's ts column via `stamp_write_ms`.
-        DedupRow { rowtime, payload, staged: false, update_kind: false, last_write_ms: 0 }
+        DedupRow { rowtime, payload, staged: None, update_kind: false, last_write_ms: 0 }
     }
 
     fn value_bytes(&self, row: &DedupRow) -> usize {
@@ -929,7 +944,8 @@ impl<S: KeyedStateStore<DedupRow>> KeepLastDeduplicator<S> {
             // was written this bundle and is exempt until the flush ends the bundle — removing it
             // would strand its staged preimage and double-stage the key (the same rule that skips
             // the sweep mid-bundle); its expiry just delays to the first touch after the flush.
-            let ttl_ts = |row: &DedupRow| if row.staged { i64::MAX } else { row.last_write_ms };
+            let ttl_ts =
+                |row: &DedupRow| if row.staged.is_some() { i64::MAX } else { row.last_write_ms };
             let on_expired = |row: &DedupRow| {
                 if track {
                     delta -= dedup_entry_bytes(key, &row.payload) as isize;
@@ -955,7 +971,7 @@ impl<S: KeyedStateStore<DedupRow>> KeepLastDeduplicator<S> {
                     DedupRow {
                         rowtime: 0,
                         payload,
-                        staged: false,
+                        staged: None,
                         update_kind: false,
                         last_write_ms,
                     },
@@ -970,11 +986,17 @@ impl<S: KeyedStateStore<DedupRow>> KeepLastDeduplicator<S> {
                     if track {
                         delta += dedup_entry_bytes(key, &payload) as isize;
                     }
-                    let staged = self.mini_batch;
+                    let staged = self.mini_batch.then(|| self.staged.len() as u32);
                     let owned = ByteKey::from(key);
-                    if staged {
+                    if staged.is_some() {
                         let retained = byte_key_bytes(key);
-                        self.staged.push(DedupStagedChange { key: owned.clone(), before: None });
+                        let kept =
+                            if rowtime_ordered { vec![payload.clone()] } else { Vec::new() };
+                        self.staged.push(DedupStagedChange {
+                            key: owned.clone(),
+                            before: None,
+                            kept,
+                        });
                         self.staged_bytes += retained;
                         delta += retained as isize;
                     } else {
@@ -1014,16 +1036,31 @@ impl<S: KeyedStateStore<DedupRow>> KeepLastDeduplicator<S> {
                         delta += payload.len() as isize - stored.payload.len() as isize;
                     }
                     if self.mini_batch {
-                        if !stored.staged {
-                            let before = stored.payload.clone();
-                            let retained = byte_key_bytes(key) + before.len();
-                            self.staged.push(DedupStagedChange {
-                                key: ByteKey::from(key),
-                                before: Some(before),
-                            });
-                            self.staged_bytes += retained;
-                            delta += retained as isize;
-                            stored.staged = true;
+                        match stored.staged {
+                            None => {
+                                let before = stored.payload.clone();
+                                let retained = byte_key_bytes(key) + before.len();
+                                let kept =
+                                    if rowtime_ordered { vec![payload.clone()] } else { Vec::new() };
+                                stored.staged = Some(self.staged.len() as u32);
+                                self.staged.push(DedupStagedChange {
+                                    key: ByteKey::from(key),
+                                    before: Some(before),
+                                    kept,
+                                });
+                                self.staged_bytes += retained;
+                                delta += retained as isize;
+                            }
+                            // The rowtime shape stages every kept row for the flush to emit; the
+                            // displaced intermediate stays retained by the chain instead of
+                            // freeing with the payload swap below.
+                            Some(index) if rowtime_ordered => {
+                                let retained = stored.payload.len();
+                                self.staged[index as usize].kept.push(payload.clone());
+                                self.staged_bytes += retained;
+                                delta += retained as isize;
+                            }
+                            Some(_) => {}
                         }
                     } else {
                         if generate_update_before {
@@ -1061,9 +1098,33 @@ impl<S: KeyedStateStore<DedupRow>> KeepLastDeduplicator<S> {
         let changes = std::mem::take(&mut self.staged);
         let mut out_rows = Vec::with_capacity(changes.len() * 2);
         let mut out_kinds = Vec::with_capacity(changes.len() * 2);
-        for DedupStagedChange { key, before } in changes {
+        for DedupStagedChange { key, before, kept } in changes {
             let row = self.rows.get_mut(&key.0).expect("staged dedup key remains in state");
-            row.staged = false;
+            row.staged = None;
+            if self.rowtime_ordered {
+                // Flink's rowtime mini-batch flush walks the bundle's kept rows and emits every
+                // transition, with no equality check anywhere on the rowtime path — a bundle of
+                // n kept rows is n transitions, not the endpoint-only net one.
+                let mut previous = before;
+                for payload in kept {
+                    match previous {
+                        None => {
+                            out_rows.push(payload.clone());
+                            out_kinds.push(0); // +I — first row for the key
+                        }
+                        Some(before) => {
+                            if self.generate_update_before {
+                                out_rows.push(before);
+                                out_kinds.push(1);
+                            }
+                            out_rows.push(payload.clone());
+                            out_kinds.push(2);
+                        }
+                    }
+                    previous = Some(payload);
+                }
+                continue;
+            }
             let after = row.payload.clone();
             // The same rules as immediate mode (Flink's mini-batch flush runs the same
             // processLastRowOnProcTime): a bundle whose net transition leaves the row unchanged
@@ -1291,7 +1352,7 @@ impl KeepLastDeduplicator {
                 DedupRow {
                     rowtime: rowtimes.value(row),
                     payload: Arc::from(payloads.value(row)),
-                    staged: false,
+                    staged: None,
                     update_kind: update_kinds.as_ref().is_some_and(|kinds| kinds.value(row)),
                     last_write_ms: write_timestamps
                         .as_ref()
@@ -1329,7 +1390,7 @@ impl KeepLastDeduplicator {
                 DedupRow {
                     rowtime: rt.as_ref().map_or(0, |rt| rt.value(row)),
                     payload: Arc::from(payloads.row(row).data()),
-                    staged: false,
+                    staged: None,
                     update_kind: false,
                     last_write_ms: restored_at_ms,
                 },
@@ -1369,6 +1430,18 @@ impl KeepLastDeduplicator {
 }
 
 state_bytes_getter!(Java_io_github_jordepic_streamfusion_Native_keepFirstDeduplicatorStateBytes, KeepFirstDeduplicator);
+
+/// Rows dropped as late over the handle's lifetime; the counter lives before the backend split,
+/// so one getter serves the memory and Paimon routes alike.
+#[no_mangle]
+pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_keepFirstDeduplicatorLateDrops<'local>(
+    env: JNIEnv<'local>, _class: JClass<'local>, handle: jlong,
+) -> jlong {
+    crate::bridge::jni_guard(env, move |_env| {
+        let dedup = unsafe { &*(handle as *const KeepFirstDeduplicator) };
+        dedup.late_drops as jlong
+    })
+}
 
 state_bytes_getter!(Java_io_github_jordepic_streamfusion_Native_keepLastDeduplicatorStateBytes, KeepLastDeduplicator);
 

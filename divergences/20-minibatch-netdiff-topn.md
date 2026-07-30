@@ -14,8 +14,12 @@ mode).
 Flink's rank operators have no mini-batch variant, so strictly speaking mini-batch Flink still
 emits the per-record cascade. But the parity contract of a mini-batch plan is already the
 **collapsed** changelog, not the raw byte sequence: Flink's own bundled operators (group
-aggregate, dedup) collapse a bundle's intermediates into one event per key per flush, on
+aggregate, proctime dedup) collapse a bundle's intermediates into one event per key per flush, on
 proc-time-driven boundaries that are not deterministic even across two runs of the same Flink job.
+(Rowtime mini-batch dedup is the exception — Flink deliberately emits every kept intermediate for
+temporal-join versioned tables, and the native operator replicates that full changelog exactly,
+kinded-parity-pinned; the exception does not weaken the argument here, since rank has no such
+downstream consumer of intermediates.)
 Our parity harness therefore compares mini-batch plans by their collapsed changelog
 (`assertChangelogParity`), and the net diff preserves that exactly — every materialized state the
 downstream can observe is identical; only intermediate retractions within one Arrow batch are

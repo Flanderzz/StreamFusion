@@ -1309,8 +1309,11 @@ fn dedup_state_over_budget_fails_clearly() {
     assert!(err.to_string().contains("managed-memory budget"), "{err}");
 }
 
+// Proctime only: Flink's proctime mini-batch buffers just the last row per key (addInput
+// overwrites), so its flush emits one net transition per key — the rowtime variant emits every
+// kept row instead (see below).
 #[test]
-fn keep_last_mini_batch_emits_only_the_final_winner_per_key() {
+fn proctime_mini_batch_emits_only_the_final_winner_per_key() {
     let mut dedup = KeepLastDeduplicator::new(vec![0], 2, true, false, false)
         .with_mini_batch(true);
     let pending = dedup
@@ -1328,6 +1331,87 @@ fn keep_last_mini_batch_emits_only_the_final_winner_per_key() {
     let second = dedup.flush_mini_batch().unwrap();
     assert_eq!(values(&second, 1), vec![20, 40]);
     assert_eq!(row_kinds(&second), vec![1, 2]);
+}
+
+// A rowtime keep-last deduplicator over `[k, v, rt]` (key col 0, rt col 2) in mini-batch mode.
+fn rowtime_mini_batch() -> KeepLastDeduplicator {
+    KeepLastDeduplicator::new(vec![0], 2, true, true, false).with_mini_batch(true)
+}
+
+// Rowtime mini-batch replicates Flink's RowTimeMiniBatchDeduplicateFunction: the flush emits a
+// transition for EVERY row of the bundle that displaces the kept row ("we output all changelog
+// here rather than comparing the first and the last record in buffer" — a temporal join's
+// versioned table needs each intermediate version), grouped per key, not just the endpoint.
+#[test]
+fn rowtime_mini_batch_emits_every_kept_intermediate() {
+    let mut dedup = rowtime_mini_batch();
+    // Key 1's improving rows interleave with key 2's single row; the flush groups per key.
+    dedup
+        .push(&join_batch(vec![1, 2, 1, 1], vec![10, 5, 20, 30], vec![1, 1, 2, 3]), 0)
+        .unwrap();
+    let out = dedup.flush_mini_batch().unwrap();
+    assert_eq!(values(&out, 1), vec![10, 10, 20, 20, 30, 5]);
+    assert_eq!(row_kinds(&out), vec![0, 1, 2, 1, 2, 0]);
+
+    // The next bundle's first transition retracts the durable state, then walks the bundle.
+    dedup.push(&join_batch(vec![1, 1], vec![40, 50], vec![4, 5]), 0).unwrap();
+    let out = dedup.flush_mini_batch().unwrap();
+    assert_eq!(values(&out, 1), vec![30, 40, 40, 50]);
+    assert_eq!(row_kinds(&out), vec![1, 2, 1, 2]);
+}
+
+// A non-improving (smaller-rowtime) row mid-bundle is ignored exactly as in immediate mode: no
+// transition, no state write. An equal rowtime improves (Flink's keep-last `<=`).
+#[test]
+fn rowtime_mini_batch_ignores_a_non_improving_row_mid_bundle() {
+    let mut dedup = rowtime_mini_batch();
+    dedup
+        .push(&join_batch(vec![1, 1, 1, 1], vec![10, 20, 30, 40], vec![5, 3, 5, 4]), 0)
+        .unwrap();
+    let out = dedup.flush_mini_batch().unwrap();
+    assert_eq!(values(&out, 1), vec![10, 10, 30]);
+    assert_eq!(row_kinds(&out), vec![0, 1, 2]);
+}
+
+// The rowtime path has no equality check, so an identical kept row emits its -U/+U pair with
+// retention off and on alike (the proctime endpoint suppression never applies to this shape).
+#[test]
+fn rowtime_mini_batch_never_suppresses_identical_transitions() {
+    for ttl_ms in [0, 3_600_000] {
+        let mut dedup = rowtime_mini_batch().with_state_ttl(ttl_ms);
+        dedup.push(&join_batch(vec![1], vec![10], vec![1]), 5000).unwrap();
+        dedup.flush_mini_batch().unwrap();
+        // Identical payload at an equal rowtime: kept (`<=`), and emitted verbatim.
+        dedup.push(&join_batch(vec![1, 1], vec![10, 10], vec![1, 1]), 5001).unwrap();
+        let out = dedup.flush_mini_batch().unwrap();
+        assert_eq!(values(&out, 1), vec![10, 10, 10, 10], "ttl={ttl_ms}");
+        assert_eq!(row_kinds(&out), vec![1, 2, 1, 2], "ttl={ttl_ms}");
+    }
+}
+
+// A key that expired between bundles chains from a fresh +I: the delete-on-read stages a None
+// preimage and the bundle's later kept rows still each emit their transition.
+#[test]
+fn rowtime_mini_batch_chains_from_a_fresh_insert_after_expiry() {
+    let mut dedup = rowtime_mini_batch().with_state_ttl(1000);
+    dedup.push(&join_batch(vec![1], vec![10], vec![1]), 5000).unwrap();
+    dedup.flush_mini_batch().unwrap();
+    // 5000 + 1000 <= 6000: expired — the bundle restarts the key at +I and keeps chaining.
+    dedup.push(&join_batch(vec![1, 1], vec![20, 30], vec![2, 3]), 6000).unwrap();
+    let out = dedup.flush_mini_batch().unwrap();
+    assert_eq!(values(&out, 1), vec![20, 20, 30]);
+    assert_eq!(row_kinds(&out), vec![0, 1, 2]);
+}
+
+// The -U halves of the chain honor generate_update_before, like every keep-last emission.
+#[test]
+fn rowtime_mini_batch_chain_honors_generate_update_before() {
+    let mut dedup =
+        KeepLastDeduplicator::new(vec![0], 2, false, true, false).with_mini_batch(true);
+    dedup.push(&join_batch(vec![1, 1], vec![10, 20], vec![1, 2]), 0).unwrap();
+    let out = dedup.flush_mini_batch().unwrap();
+    assert_eq!(values(&out, 1), vec![10, 20]);
+    assert_eq!(row_kinds(&out), vec![0, 2]);
 }
 
 // A proctime keep-last deduplicator over `[k, v, rt]` (key col 0; the rt column is ignored).
@@ -1579,6 +1663,25 @@ fn dedup_ttl_mini_batch_stages_no_preimage_for_an_expired_key() {
 // A watermark-buffered rowtime keep-first deduplicator over `[k, v, rt]` (key col 0, rt col 2).
 fn rowtime_keep_first(ttl_ms: i64) -> KeepFirstDeduplicator {
     KeepFirstDeduplicator::new(vec![0], 2).with_state_ttl(ttl_ms)
+}
+
+// The late filter counts the rows it drops (rowtime strictly below the watermark — an exactly-
+// at-watermark row is live), cumulatively across pushes: the host bridges the total into
+// Flink's numLateRecordsDropped counter. Rows for an already-emitted key are ignored, not late.
+#[test]
+fn keep_first_counts_late_drops() {
+    let mut dedup = rowtime_keep_first(0);
+    dedup.push(&join_batch(vec![1], vec![10], vec![1000]), 0).unwrap();
+    assert_eq!(dedup.late_drops, 0);
+    let out = dedup.flush(2000, 0).unwrap();
+    assert_eq!(values(&out, 1), vec![10]);
+    // rt 1500 < wm 2000 is late; rt 2000 is not; key 1's live row is a non-late ignore.
+    dedup
+        .push(&join_batch(vec![2, 3, 1], vec![7, 8, 9], vec![1500, 2000, 2500]), 0)
+        .unwrap();
+    assert_eq!(dedup.late_drops, 1);
+    dedup.push(&join_batch(vec![4], vec![6], vec![100]), 0).unwrap();
+    assert_eq!(dedup.late_drops, 2);
 }
 
 // The watermark-buffered keep-first TTLs only its fired markers (Flink's alreadyEmittedState,

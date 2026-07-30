@@ -133,6 +133,9 @@ array`, is **not** here: Flink rejects it too, so we're at parity.)
 - **Deduplication** — all four variants are native: rowtime keep-first (insert-only, watermark-
   released) and keep-last (retracting), and proctime keep-first/keep-last (arrival order, no
   watermark). The proctime order key is materialized by the native `PROCTIME()` expression.
+  Mini-batch keep-last replicates Flink's per-variant emission — the rowtime flush emits every
+  kept row's transition, the proctime flush one net transition per key; the two rowtime
+  mini-batch declines (keep-first, and keep-last under compact-changes) are in §2.
 - **Joins** — regular/interval/window joins: a residual non-equi predicate must be expressible by the
   native expression engine (event-time and proctime interval and window joins are all native).
   Under mini-batch, a regular join coalesces replacements only when Flink metadata proves that both
@@ -331,7 +334,13 @@ on both state backends; see §(c) for the persistent-backend mechanics.
   which runs its TTL natively (see the note above).
 - **Deduplicate** — not a time-ordered rank-1. Rowtime and proctime, keep-first (`ASC`) and
   keep-last (`DESC`), are all native, idle-state TTL included (see the note above); a
-  value-ordered rank-1 is a Top-N (handled separately).
+  value-ordered rank-1 is a Top-N (handled separately). Two mini-batch declines on the rowtime
+  variants: **keep-first under mini-batch** (Flink swaps in its bundled retracting function — a
+  smaller-rowtime row displaces with `-U`/`+U` — a different changelog contract than the
+  insert-only watermark-buffered operator), and **keep-last with
+  `table.exec.deduplicate.mini-batch.compact-changes-enabled`** (Flink then emits only each
+  bundle's net transition; the native flush replicates the default full-changelog emission — one
+  transition per kept row of the bundle, as a temporal join's versioned table requires).
 - **Window Top-N / window dedup** — rank not starting at 1 (an `OFFSET`).
 - **Windowing TVF** — not `TUMBLE`/`HOP`/`CUMULATE` (zero offset) over a local-time-zone time
   attribute. Both event-time (assign by rowtime) and proctime (assign by the clock) are native.

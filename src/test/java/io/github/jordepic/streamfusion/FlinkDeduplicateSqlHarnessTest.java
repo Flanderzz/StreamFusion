@@ -1,5 +1,9 @@
 package io.github.jordepic.streamfusion;
 
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import io.github.jordepic.streamfusion.planner.NativePlanner;
+import io.github.jordepic.streamfusion.planner.PhysicalPlanScan;
 import java.time.Duration;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.typeinfo.Types;
@@ -10,6 +14,7 @@ import org.apache.flink.table.api.Schema;
 import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.apache.flink.types.Row;
+import org.apache.flink.util.CloseableIterator;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -160,6 +165,102 @@ class FlinkDeduplicateSqlHarnessTest {
           return tEnv;
         },
         KEEP_FIRST);
+  }
+
+  @Test
+  void miniBatchKeepLastEmitsEveryKeptIntermediateAndMatchesHost() throws Exception {
+    // Under mini-batch, Flink's rowtime keep-last emits a transition for EVERY row of the bundle
+    // that displaces the kept row ("we output all changelog here rather than comparing the first
+    // and the last record in buffer" — RowTimeMiniBatchDeduplicateFunction), not one net change
+    // per key. That makes the kinded multiset bundle-boundary-invariant, so the compare is sound
+    // even though the assigner's watermark cadence is wall-clock-driven.
+    NativeParity.assertKindedParity(
+        FlinkDeduplicateSqlHarnessTest::miniBatchEnvironment, KEEP_LAST);
+  }
+
+  @Test
+  void miniBatchKeepLastWithStateTtlMatchesHost() throws Exception {
+    // The rowtime path has no equality check, so retention changes nothing about the emitted
+    // chain (only expiry itself, which the 1h retention keeps out of the test window).
+    NativeParity.assertKindedParity(
+        () -> {
+          TableEnvironment tEnv = miniBatchEnvironment();
+          tEnv.getConfig().set("table.exec.state.ttl", "1 h");
+          return tEnv;
+        },
+        KEEP_LAST);
+  }
+
+  @Test
+  void miniBatchCompactChangesKeepsDeduplicateOnHost() throws Exception {
+    // With compact-changes on, Flink emits only each bundle's net transition
+    // (RowTimeMiniBatchLatestChangeDeduplicateFunction); the native operator replicates the
+    // default all-changelog flush, so this variant must decline.
+    TableEnvironment tEnv = miniBatchEnvironment();
+    tEnv.getConfig().set("table.exec.deduplicate.mini-batch.compact-changes-enabled", "true");
+    assertDeduplicateFallsBack(tEnv, KEEP_LAST, "compact-changes");
+  }
+
+  @Test
+  void miniBatchRowtimeKeepFirstKeepsDeduplicateOnHost() throws Exception {
+    // Under mini-batch, Flink's rowtime keep-first is the bundled retracting function (a
+    // smaller-rowtime row displaces with -U/+U), not the insert-only watermark-buffered one the
+    // native operator implements, so it must decline.
+    assertDeduplicateFallsBack(miniBatchEnvironment(), KEEP_FIRST, "keep-first");
+  }
+
+  /** Runs the query with the native planner installed and asserts the dedup declined as stated. */
+  private static void assertDeduplicateFallsBack(
+      TableEnvironment tEnv, String sql, String expectedReason) throws Exception {
+    PhysicalPlanScan scan = NativePlanner.install(tEnv);
+    try (CloseableIterator<Row> rows = tEnv.executeSql(sql).collect()) {
+      while (rows.hasNext()) {
+        rows.next();
+      }
+    }
+    assertTrue(
+        scan.fallbackReasons().stream()
+            .anyMatch(reason -> reason.startsWith("deduplicate:") && reason.contains(expectedReason)),
+        "no deduplicate fallback reason contained \""
+            + expectedReason
+            + "\"; reasons="
+            + scan.fallbackReasons());
+  }
+
+  /**
+   * Mini-batch on, with several updates per key so one bundle holds a whole improving chain for
+   * key 1 (plus a non-improving row and an equal-rowtime displacement for key 2).
+   */
+  private static TableEnvironment miniBatchEnvironment() {
+    StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+    env.setParallelism(1);
+    StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
+    DataStream<Row> source =
+        env.fromData(
+                Types.ROW_NAMED(new String[] {"k", "v", "ts"}, Types.LONG, Types.LONG, Types.LONG),
+                Row.of(1L, 10L, 100L),
+                Row.of(2L, 7L, 500L),
+                Row.of(1L, 20L, 200L),
+                Row.of(1L, 15L, 150L),
+                Row.of(2L, 9L, 500L),
+                Row.of(1L, 30L, 300L))
+            .assignTimestampsAndWatermarks(
+                WatermarkStrategy.<Row>forBoundedOutOfOrderness(Duration.ofSeconds(2))
+                    .withTimestampAssigner((row, ts) -> (Long) row.getField(2)));
+    tEnv.createTemporaryView(
+        "src",
+        source,
+        Schema.newBuilder()
+            .column("k", DataTypes.BIGINT())
+            .column("v", DataTypes.BIGINT())
+            .column("ts", DataTypes.BIGINT())
+            .columnByMetadata("rt", DataTypes.TIMESTAMP_LTZ(3), "rowtime")
+            .watermark("rt", "SOURCE_WATERMARK()")
+            .build());
+    tEnv.getConfig().set("table.exec.mini-batch.enabled", "true");
+    tEnv.getConfig().set("table.exec.mini-batch.allow-latency", "2 s");
+    tEnv.getConfig().set("table.exec.mini-batch.size", "100");
+    return tEnv;
   }
 
   private static TableEnvironment environment() {

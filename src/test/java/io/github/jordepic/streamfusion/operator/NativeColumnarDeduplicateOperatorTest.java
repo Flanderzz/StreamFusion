@@ -141,8 +141,16 @@ class NativeColumnarDeduplicateOperatorTest {
       assertEquals(List.of(), collectChanges(harness));
       harness.processElement(
           new StreamRecord<>(batch(allocator, row(2, 5, 0), row(1, 30, 2))));
+      // The rowtime flush emits every kept row's transition (Flink's mini-batch full changelog),
+      // grouped per key in staging order — not one net change per key.
       assertEquals(
-          List.of(List.of("+I", 1L, 30L), List.of("+I", 2L, 5L)),
+          List.of(
+              List.of("+I", 1L, 10L),
+              List.of("-U", 1L, 10L),
+              List.of("+U", 1L, 20L),
+              List.of("-U", 1L, 20L),
+              List.of("+U", 1L, 30L),
+              List.of("+I", 2L, 5L)),
           collectChanges(harness));
     }
   }
@@ -159,7 +167,9 @@ class NativeColumnarDeduplicateOperatorTest {
       assertEquals(List.of(), collectChanges(harness));
 
       harness.processWatermark(new Watermark(1));
-      assertEquals(List.of(List.of("+I", 1L, 20L)), collectChanges(harness));
+      assertEquals(
+          List.of(List.of("+I", 1L, 10L), List.of("-U", 1L, 10L), List.of("+U", 1L, 20L)),
+          collectChanges(harness));
     }
   }
 
@@ -265,6 +275,32 @@ class NativeColumnarDeduplicateOperatorTest {
       harness.processElement(new StreamRecord<>(batch(allocator, row(1, 30, 2500))));
       harness.processWatermark(new Watermark(3000));
       assertEquals(List.of(emitted(1, 30)), collect(harness));
+    }
+  }
+
+  @Test
+  void lateRowsIncrementTheDroppedCounterWithoutOutput() throws Exception {
+    // Flink's RowTimeDeduplicateKeepFirstRowFunction counts every row with rowtime strictly
+    // below the current watermark under numLateRecordsDropped; a row exactly at the watermark is
+    // not late, and a live row for an already-emitted key is an ignore, not a late drop.
+    NativeColumnarDeduplicateOperator operator = keepFirstOperator(0);
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness =
+            keepFirstHarness(operator, 1, 0)) {
+      harness.setup(new ArrowBatchSerializer());
+      harness.open();
+      harness.processElement(new StreamRecord<>(batch(allocator, row(1, 10, 1000))));
+      harness.processWatermark(new Watermark(2000));
+      assertEquals(List.of(emitted(1, 10)), collect(harness));
+      assertEquals(0, operator.numLateRecordsDropped().getCount());
+
+      harness.processElement(
+          new StreamRecord<>(
+              batch(allocator, row(2, 7, 1500), row(3, 8, 2000), row(1, 9, 2500))));
+      assertEquals(1, operator.numLateRecordsDropped().getCount());
+      harness.processWatermark(new Watermark(3000));
+      // The late row for key 2 never emits; key 3's at-watermark row fires normally.
+      assertEquals(List.of(emitted(3, 8)), collect(harness));
     }
   }
 
@@ -379,18 +415,25 @@ class NativeColumnarDeduplicateOperatorTest {
 
   private static KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch>
       keepFirstHarness(int parallelism, int subtask, long stateTtlMillis) throws Exception {
+    return keepFirstHarness(keepFirstOperator(stateTtlMillis), parallelism, subtask);
+  }
+
+  private static NativeColumnarDeduplicateOperator keepFirstOperator(long stateTtlMillis) {
+    return new NativeColumnarDeduplicateOperator(
+        new int[] {0},
+        new int[] {-1},
+        2,
+        RowType.of(new BigIntType(), new BigIntType(), new BigIntType()),
+        stateTtlMillis,
+        MAX_PARALLELISM);
+  }
+
+  private static KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch>
+      keepFirstHarness(NativeColumnarDeduplicateOperator operator, int parallelism, int subtask)
+          throws Exception {
     int[] stateKeys = stateKeysForSubtasks(parallelism);
     return new KeyedOneInputStreamOperatorTestHarness<>(
-        new NativeColumnarDeduplicateOperator(
-            new int[] {0},
-            new int[] {-1},
-            2,
-            org.apache.flink.table.types.logical.RowType.of(
-                new org.apache.flink.table.types.logical.BigIntType(),
-                new org.apache.flink.table.types.logical.BigIntType(),
-                new org.apache.flink.table.types.logical.BigIntType()),
-            stateTtlMillis,
-            MAX_PARALLELISM),
+        operator,
         batch -> stateKeys[batch.destination() >= 0 ? batch.destination() : 0],
         Types.INT,
         MAX_PARALLELISM,

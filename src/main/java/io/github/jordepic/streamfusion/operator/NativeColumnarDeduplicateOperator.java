@@ -8,9 +8,11 @@ import org.apache.arrow.c.ArrowSchema;
 import org.apache.arrow.c.Data;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.flink.metrics.Counter;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
+import org.apache.flink.table.runtime.operators.over.AbstractRowTimeUnboundedPrecedingOver;
 import org.apache.flink.table.types.logical.RowType;
 
 /**
@@ -32,6 +34,9 @@ public class NativeColumnarDeduplicateOperator extends AbstractNativeStatefulOpe
   private final int rowtimeColumn;
   private final RowType rowType;
   private final long stateTtlMillis;
+
+  private transient Counter numLateRecordsDropped;
+  private transient long reportedLateDrops;
 
   public NativeColumnarDeduplicateOperator(
       int[] partitionColumns,
@@ -132,6 +137,17 @@ public class NativeColumnarDeduplicateOperator extends AbstractNativeStatefulOpe
   }
 
   @Override
+  public void open() throws Exception {
+    super.open();
+    // Flink's RowTimeDeduplicateKeepFirstRowFunction counts every late-dropped row under this
+    // exact name; the native late filter accumulates the total and each push syncs the delta.
+    numLateRecordsDropped =
+        getMetricGroup()
+            .counter(AbstractRowTimeUnboundedPrecedingOver.LATE_ELEMENTS_DROPPED_METRIC_NAME);
+    reportedLateDrops = 0;
+  }
+
+  @Override
   public void processElement(StreamRecord<ArrowBatch> element) {
     ColumnarRecordMetrics.countIngested(getMetricGroup(), element.getValue().rowCount());
     VectorSchemaRoot in = element.getValue().root();
@@ -155,7 +171,14 @@ public class NativeColumnarDeduplicateOperator extends AbstractNativeStatefulOpe
     } finally {
       in.close();
     }
+    long lateDrops = Native.keepFirstDeduplicatorLateDrops(handle);
+    numLateRecordsDropped.inc(lateDrops - reportedLateDrops);
+    reportedLateDrops = lateDrops;
     publishStateBytes();
+  }
+
+  Counter numLateRecordsDropped() {
+    return numLateRecordsDropped;
   }
 
   @Override
