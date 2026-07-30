@@ -219,8 +219,10 @@ array`, is **not** here: Flink rejects it too, so we're at parity.)
   an insert-only input; a retracting/updating input falls it back.
 - **Per-operator kill switch**: `-Dstreamfusion.operator.<name>.enabled=false` (e.g. `filter`,
   `groupAggregate`, `union`, `limit`, `expand`, `changelogNormalize`, `windowRank`,
-  `localGroupAggregate`, `miniBatchAssigner`, `lookupJoin`, …). The two-phase global half reuses the
-  `groupAggregate` switch. All default on, `kafkaSource` included — it activates only when the
+  `localGroupAggregate`, `miniBatchAssigner`, `lookupJoin`, …). A switch covers every shape that
+  reaches one native operator: the two-phase global half reuses `groupAggregate`, window
+  deduplication reuses `windowRank`, and both session aggregates — the windowing-TVF `SESSION` and
+  the legacy `SESSION` group-window — reuse `windowAggregate`. All default on, `kafkaSource` included — it activates only when the
   `streamfusion-kafka` extension (with its Kafka native library) and the matching StreamFusion value
   format JAR are installed; otherwise the plan falls back to Flink's Kafka path. `flussSource`
   behaves the same way for `streamfusion-fluss`.

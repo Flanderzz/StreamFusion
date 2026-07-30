@@ -196,6 +196,24 @@ class FlinkWindowSqlHarnessTest {
   }
 
   @Test
+  void perOperatorFlagKeepsSessionOnHost() throws Exception {
+    // A session is a window aggregate, so it answers to the windowAggregate kill switch like the
+    // fixed-bin windows — it reached the native operator ungated until the registry gave every
+    // substitution its own gate.
+    System.setProperty("streamfusion.operator.windowAggregate.enabled", "false");
+    try {
+      NativeParity.assertFallbackReasonContains(
+          FlinkWindowSqlHarnessTest::environmentWithSource,
+          "SELECT window_start, window_end, SUM(`value`) AS s "
+              + "FROM TABLE(SESSION(TABLE src, DESCRIPTOR(rt), INTERVAL '1' SECOND)) "
+              + "GROUP BY window_start, window_end",
+          "windowAggregate: disabled by config");
+    } finally {
+      System.clearProperty("streamfusion.operator.windowAggregate.enabled");
+    }
+  }
+
+  @Test
   void sessionMergeMatchesHost() throws Exception {
     // An out-of-order element lands between two open sessions and bridges them into one; the native
     // merge of the two windows' accumulators must match the host's merging assigner.

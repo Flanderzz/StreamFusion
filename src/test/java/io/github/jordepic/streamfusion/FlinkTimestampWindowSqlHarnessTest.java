@@ -87,6 +87,25 @@ class FlinkTimestampWindowSqlHarnessTest {
             + "FROM src GROUP BY k, SESSION(ts, INTERVAL '10' SECOND)");
   }
 
+  @Test
+  void perOperatorFlagKeepsLegacySessionOnHost() throws Exception {
+    // The legacy session group-window shares the windowAggregate kill switch with the TVF session it
+    // routes to. This is the shape Nexmark q11 is written in, so the switch is the only way to take
+    // it off the native path — worth pinning, since it is the one legacy group-window we accelerate.
+    System.setProperty("streamfusion.operator.windowAggregate.enabled", "false");
+    try {
+      NativeParity.assertFallbackReasonContains(
+          FlinkTimestampWindowSqlHarnessTest::environment,
+          "SELECT k, COUNT(*) AS c, "
+              + "SESSION_START(ts, INTERVAL '10' SECOND) AS starttime, "
+              + "SESSION_END(ts, INTERVAL '10' SECOND) AS endtime "
+              + "FROM src GROUP BY k, SESSION(ts, INTERVAL '10' SECOND)",
+          "windowAggregate: disabled by config");
+    } finally {
+      System.clearProperty("streamfusion.operator.windowAggregate.enabled");
+    }
+  }
+
   private static TableEnvironment environment() {
     return build("ONE_PHASE");
   }
