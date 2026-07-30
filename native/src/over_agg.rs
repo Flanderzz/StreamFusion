@@ -1140,29 +1140,56 @@ impl OverWindowAggregator {
         }
     }
 
+    /// Writes a deadline mutation through to the persistent deadlines table — a no-op on memory
+    /// state, where the deadline map rides the raw snapshot instead.
+    fn stage_backend_deadline(&mut self, key: &[u8], deadline: Option<i64>) {
+        #[cfg(feature = "paimon-state")]
+        if let Some(store) = &mut self.backend {
+            match deadline {
+                Some(cleanup_at) => store.deadlines_mut().stage(key, cleanup_at),
+                None => store.deadlines_mut().stage_delete(key),
+            }
+        }
+        #[cfg(not(feature = "paimon-state"))]
+        let _ = (key, deadline);
+    }
+
     /// Flink's `registerProcessingCleanupTimer`: the deadline moves to `now + maxRetention` only
     /// when the key has none, or the current one would land within a min-retention of now.
     fn register_cleanup(&mut self, key: &[u8], now_ms: i64) {
-        match self.cleanup_state.get_mut(key) {
+        let armed = now_ms.saturating_add(self.max_retention_ms);
+        let moved = match self.cleanup_state.get_mut(key) {
             Some(deadline) => {
                 if now_ms.saturating_add(self.min_retention_ms) > *deadline {
-                    *deadline = now_ms.saturating_add(self.max_retention_ms);
+                    *deadline = armed;
+                    true
+                } else {
+                    false
                 }
             }
             None => {
                 self.retention_bytes += byte_key_bytes(key);
-                self.cleanup_state
-                    .insert(ByteKey::from(key), now_ms.saturating_add(self.max_retention_ms));
+                self.cleanup_state.insert(ByteKey::from(key), armed);
+                true
             }
+        };
+        if moved {
+            self.stage_backend_deadline(key, Some(armed));
         }
     }
 
     /// Flink's `cleanupState`: drops the key's fold/frame state and its retention stamp, silently
-    /// (emitting nothing).
+    /// (emitting nothing). On the persistent backend the fold row tombstones through the write
+    /// buffer, so a restore cannot resurrect the cleared fold.
     fn clear_key(&mut self, key: &[u8]) {
         self.inner.clear_key(key);
+        #[cfg(feature = "paimon-state")]
+        if let Some(store) = &mut self.backend {
+            store.remove_fold(key);
+        }
         if self.cleanup_state.remove(key).is_some() {
             self.retention_bytes -= byte_key_bytes(key);
+            self.stage_backend_deadline(key, None);
         }
         if self.last_write_ms.remove(key).is_some() {
             self.retention_bytes -= byte_key_bytes(key);
@@ -1202,7 +1229,9 @@ impl OverWindowAggregator {
                 .collect();
             for key in due {
                 if self.pending_rows.contains_key(&key) {
-                    self.cleanup_state.insert(key, now_ms.saturating_add(self.max_retention_ms));
+                    let armed = now_ms.saturating_add(self.max_retention_ms);
+                    self.cleanup_state.insert(key.clone(), armed);
+                    self.stage_backend_deadline(&key.0, Some(armed));
                 } else {
                     self.clear_key(&key.0);
                 }
@@ -1312,6 +1341,108 @@ impl OverWindowAggregator {
         self.backend.as_mut().expect("over paimon backend")
     }
 
+    /// Restore-time hydration of the persistent retention state — the backend's
+    /// `adopt_restored_stamps`: the resident deadline map from the `deadlines/` table, the
+    /// deferral counts re-derived from the pending table's payload (the pending PK is the
+    /// arrival sequence, so only the payload's PARTITION BY columns identify the key), and every
+    /// fold key without a restored deadline stamped `restored_at + max` (the enable-flip
+    /// migration; pending-only keys deliberately get no stamp, exactly as memory mode stamps
+    /// only fold-state keys — deferral protects them regardless).
+    #[cfg(feature = "paimon-state")]
+    pub(crate) fn hydrate_backend_retention(
+        &mut self,
+        restored_at_ms: i64,
+    ) -> Result<(), DataFusionError> {
+        if !self.deadline_cleaning() {
+            return Ok(());
+        }
+        let (deadlines, fold_keys, pending_batches) = {
+            let store = self.backend.as_mut().expect("over paimon backend");
+            (
+                store.deadlines_mut().hydrate_all()?,
+                store.scan_fold_keys()?,
+                store.scan_pending_payload()?,
+            )
+        };
+        for (key, deadline) in deadlines {
+            self.retention_bytes += byte_key_bytes(&key.0);
+            self.cleanup_state.insert(key, deadline);
+        }
+        let stamp = restored_at_ms.saturating_add(self.max_retention_ms);
+        let missing: Vec<ByteKey> = fold_keys
+            .into_iter()
+            .filter(|key| !self.cleanup_state.contains_key(&*key.0))
+            .collect();
+        let store = self.backend.as_mut().expect("over paimon backend");
+        for key in &missing {
+            store.deadlines_mut().stage(&key.0, stamp);
+        }
+        for key in missing {
+            self.retention_bytes += byte_key_bytes(&key.0);
+            self.cleanup_state.insert(key, stamp);
+        }
+        let key_columns = self.key_columns.clone();
+        let precisions = self.key_timestamp_precisions.clone();
+        for batch in pending_batches {
+            let mut encoder = BinaryRowBatchEncoder::new(&batch, &key_columns, &precisions);
+            for row in 0..batch.num_rows() {
+                let key = encoder.encode(row);
+                match self.pending_rows.get_mut(key) {
+                    Some(count) => *count += 1,
+                    None => {
+                        self.retention_bytes += byte_key_bytes(key);
+                        self.pending_rows.insert(ByteKey::from(key), 1);
+                    }
+                }
+            }
+        }
+        let store = self.backend.as_mut().expect("over paimon backend");
+        let delta = store.footprint_delta();
+        self.memory.record(self.retention_bytes as isize + delta);
+        self.memory.account()
+    }
+
+    /// `register_batch` for the persistent path, keyed by the store's BinaryRow key (the folds
+    /// table's PK) so a fired deadline addresses the same fold row: expire, re-arm, and count
+    /// per row, exactly as the memory twin.
+    #[cfg(feature = "paimon-state")]
+    fn register_batch_backend(&mut self, batch: &RecordBatch, now_ms: i64) {
+        let key_columns = self.key_columns.clone();
+        let precisions = self.key_timestamp_precisions.clone();
+        let mut encoder = BinaryRowBatchEncoder::new(batch, &key_columns, &precisions);
+        for row in 0..batch.num_rows() {
+            let key = ByteKey::from(encoder.encode(row));
+            self.expire_if_due(&key.0, now_ms);
+            self.register_cleanup(&key.0, now_ms);
+            match self.pending_rows.get_mut(&*key.0) {
+                Some(count) => *count += 1,
+                None => {
+                    self.retention_bytes += byte_key_bytes(&key.0);
+                    self.pending_rows.insert(key, 1);
+                }
+            }
+        }
+    }
+
+    /// `settle_fired` for the persistent path, over the same BinaryRow keys.
+    #[cfg(feature = "paimon-state")]
+    fn settle_fired_backend(&mut self, complete: &RecordBatch, now_ms: i64) {
+        let key_columns = self.key_columns.clone();
+        let precisions = self.key_timestamp_precisions.clone();
+        let mut encoder = BinaryRowBatchEncoder::new(complete, &key_columns, &precisions);
+        for row in 0..complete.num_rows() {
+            let key = ByteKey::from(encoder.encode(row));
+            if let Some(count) = self.pending_rows.get_mut(&*key.0) {
+                *count -= 1;
+                if *count == 0 {
+                    self.pending_rows.remove(&*key.0);
+                    self.retention_bytes -= byte_key_bytes(&key.0);
+                }
+            }
+            self.register_cleanup(&key.0, now_ms);
+        }
+    }
+
     /// Bounds this operator's state (buffered batches plus the inner per-key fold state) by the
     /// operator's managed-memory budget (negative = unaccounted), accounting restored state
     /// immediately.
@@ -1347,7 +1478,7 @@ impl OverWindowAggregator {
         self.input_schema = Some(batch.schema());
         #[cfg(feature = "paimon-state")]
         if self.backend.is_some() {
-            return self.push_backend(batch);
+            return self.push_backend(batch, now_ms);
         }
         if self.deadline_cleaning() {
             self.maybe_sweep(now_ms);
@@ -1359,9 +1490,17 @@ impl OverWindowAggregator {
 
     /// Persistent-state arrival path: every input row stages into the pending write buffer under
     /// a fresh arrival sequence, routed by its PARTITION BY key's group. Nothing folds here —
-    /// emission and the per-key fold are watermark-driven (`flush`).
+    /// emission and the per-key fold are watermark-driven (`flush`). The deadline bookkeeping
+    /// runs exactly as on memory state, over the store's BinaryRow keys.
     #[cfg(feature = "paimon-state")]
-    fn push_backend(&mut self, batch: RecordBatch) -> Result<(), DataFusionError> {
+    fn push_backend(&mut self, batch: RecordBatch, now_ms: i64) -> Result<(), DataFusionError> {
+        let retention_before = self.retention_bytes;
+        if self.deadline_cleaning() {
+            self.maybe_sweep(now_ms);
+            if batch.num_rows() > 0 {
+                self.register_batch_backend(&batch, now_ms);
+            }
+        }
         if batch.num_rows() > 0 {
             let rts = rt_to_millis(batch.column(self.rt_column));
             let mut encoder = BinaryRowBatchEncoder::new(
@@ -1377,22 +1516,30 @@ impl OverWindowAggregator {
         }
         let store = self.backend.as_mut().expect("over paimon backend");
         let delta = store.footprint_delta();
-        self.memory.record(delta);
+        self.memory
+            .record(delta + self.retention_bytes as isize - retention_before as isize);
         self.memory.account()
     }
 
     /// Persistent-state firing path: the store's overlay range read returns every pending row the
     /// watermark completed, in arrival order; the per-key running state hydrates from the folds
-    /// table for exactly the fired keys, folds, and writes back into the folds write buffer.
+    /// table for exactly the fired keys, folds, and writes back into the folds write buffer. A
+    /// fired key past its deadline folds anyway — its pending rows deferred the cleanup, exactly
+    /// as memory mode — and re-arms through the post-fire settle.
     #[cfg(feature = "paimon-state")]
-    fn flush_backend(&mut self, watermark: i64) -> Result<RecordBatch, DataFusionError> {
+    fn flush_backend(&mut self, watermark: i64, now_ms: i64) -> Result<RecordBatch, DataFusionError> {
+        let retention_before = self.retention_bytes;
+        if self.deadline_cleaning() {
+            self.maybe_sweep(now_ms);
+        }
         let ctx = self.memory.task_ctx();
         let fired = self.backend.as_mut().expect("over paimon backend").fire(watermark, ctx)?;
         let Some(fired) = fired else {
             let store = self.backend.as_mut().expect("over paimon backend");
             store.end_bundle();
             let delta = store.footprint_delta();
-            self.memory.record(delta);
+            self.memory
+                .record(delta + self.retention_bytes as isize - retention_before as isize);
             self.memory.account()?;
             return Ok(RecordBatch::new_empty(Arc::new(Schema::empty())));
         };
@@ -1440,9 +1587,13 @@ impl OverWindowAggregator {
         for ((key, _), scalars) in first_rows.iter().zip(published) {
             store.put_fold(&key.0, scalars);
         }
+        if self.deadline_cleaning() {
+            self.settle_fired_backend(&complete, now_ms);
+        }
+        let store = self.backend.as_mut().expect("over paimon backend");
         store.end_bundle();
         let delta = store.footprint_delta();
-        self.memory.record(delta);
+        self.memory.record(delta + self.retention_bytes as isize - retention_before as isize);
         self.memory.account()?;
 
         let mut fields: Vec<Field> =
@@ -1500,7 +1651,7 @@ impl OverWindowAggregator {
     ) -> Result<RecordBatch, DataFusionError> {
         #[cfg(feature = "paimon-state")]
         if self.backend.is_some() {
-            return self.flush_backend(watermark);
+            return self.flush_backend(watermark, now_ms);
         }
         if self.deadline_cleaning() {
             self.maybe_sweep(now_ms);

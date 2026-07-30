@@ -231,6 +231,30 @@ impl PaimonRowBufferStore {
         Ok(Some(sorted))
     }
 
+    /// Every committed row, normalized to the store schema — restore-time only (the region is
+    /// empty, so committed IS current); the OVER deadline retention derives its per-key deferral
+    /// counts from the payload columns.
+    pub(crate) fn scan_all(&mut self) -> Result<Vec<RecordBatch>, DataFusionError> {
+        let committed = {
+            let builder = PredicateBuilder::new(&self.core.fields);
+            let predicate = builder.greater_or_equal(KG_COLUMN, Datum::Int(0)).map_err(pe)?;
+            self.core.scan_predicate(predicate)?
+        };
+        let expected = self.arrow_fields();
+        let mut out = Vec::new();
+        for batch in committed {
+            let mut columns: Vec<ArrayRef> = Vec::with_capacity(expected.len());
+            for (i, field) in expected.iter().enumerate() {
+                columns.push(normalized_column(&batch, i, field)?);
+            }
+            out.push(
+                RecordBatch::try_new(Arc::new(Schema::new(expected.clone())), columns)
+                    .expect("row buffer scan batch"),
+            );
+        }
+        Ok(out)
+    }
+
     /// Checkpoint sync phase: commits the region's live rows and fired deletions as this table's
     /// snapshot and runs the checkpoint file phase.
     pub(crate) fn checkpoint(&mut self) -> Result<PaimonCheckpointManifest, DataFusionError> {

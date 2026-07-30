@@ -5854,7 +5854,7 @@ mod paimon_state {
     fn over_store(dir: &str) -> PaimonOverStore {
         let state_types =
             crate::over_agg::paimon_over_state_types(&[0], &[0], 0, false).unwrap();
-        PaimonOverStore::create(config(dir), vec![DataType::Int64; 3], state_types).unwrap()
+        PaimonOverStore::create(config(dir), vec![DataType::Int64; 3], state_types, false).unwrap()
     }
 
     /// The event-time OVER on the Paimon backend matches the memory operator through pushes,
@@ -5904,7 +5904,7 @@ mod paimon_state {
             vec![(1, 10, 1, 10), (1, 5, 2, 15)],
             "key 1 folds in rowtime order; key 2 stays pending"
         );
-        let (pending_manifest, folds_manifest) = over.store_mut().checkpoint().unwrap();
+        let (pending_manifest, folds_manifest, _) = over.store_mut().checkpoint().unwrap();
         let next_seq = over.store_mut().next_seq();
 
         let restored_dir = temp_dir("over-restore-dst");
@@ -5922,6 +5922,8 @@ mod paimon_state {
             state_types,
             &[(format!("{restored_dir}/pending"), pending_manifest.snapshot_id)],
             &[(format!("{restored_dir}/folds"), folds_manifest.snapshot_id)],
+            &[],
+            false,
             0..=127,
             true,
         )
@@ -5953,7 +5955,8 @@ mod paimon_state {
         let state_types =
             crate::over_agg::paimon_over_state_types(&[], &[10], 1, false).unwrap();
         let store =
-            PaimonOverStore::create(config(&dir), vec![DataType::Int64; 3], state_types).unwrap();
+            PaimonOverStore::create(config(&dir), vec![DataType::Int64; 3], state_types, false)
+                .unwrap();
         let mut paimon = make().with_backend(store);
         let mut memory = make();
 
@@ -5975,6 +5978,249 @@ mod paimon_state {
             );
             paimon.store_mut().checkpoint().unwrap();
         }
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // OVER idle-state retention on the Paimon backend: the same per-key deadline scheme as
+    // memory mode (hysteresis, deferral, lazy check + sweep), with the deadline map resident in
+    // the operator and persisted through the deadlines/ table.
+    // -----------------------------------------------------------------------------------------
+
+    /// The `over_aggregator` shape with idle-state retention on the Paimon backend.
+    fn paimon_retention_over(dir: &str, retention_ms: i64) -> OverWindowAggregator {
+        let state_types =
+            crate::over_agg::paimon_over_state_types(&[0], &[0], 0, false).unwrap();
+        let store = PaimonOverStore::create(
+            config(dir),
+            vec![DataType::Int64; 3],
+            state_types,
+            retention_ms > 1,
+        )
+        .unwrap();
+        over_aggregator().with_state_retention(retention_ms).with_backend(store)
+    }
+
+    /// Restores an OVER aggregator from a checkpoint's listed files, with the given retention
+    /// and restore clock (the enable-flip stamp time).
+    fn reopen_retention_over(
+        dir: &str,
+        manifests: &(PaimonCheckpointManifest, PaimonCheckpointManifest, PaimonCheckpointManifest),
+        next_seq: i64,
+        retention_ms: i64,
+        restored_at_ms: i64,
+    ) -> OverWindowAggregator {
+        let restored_dir = temp_dir("over-ttl-dst");
+        let (pending, folds, deadlines) = manifests;
+        let mut pending_sources = Vec::new();
+        if pending.snapshot_id >= 0 {
+            materialize(pending, &format!("{dir}/pending"), &format!("{restored_dir}/pending"));
+            pending_sources.push((format!("{restored_dir}/pending"), pending.snapshot_id));
+        }
+        let mut fold_sources = Vec::new();
+        if folds.snapshot_id >= 0 {
+            materialize(folds, &format!("{dir}/folds"), &format!("{restored_dir}/folds"));
+            fold_sources.push((format!("{restored_dir}/folds"), folds.snapshot_id));
+        }
+        let mut deadline_sources = Vec::new();
+        if retention_ms > 1 && deadlines.snapshot_id >= 0 {
+            materialize(
+                deadlines,
+                &format!("{dir}/deadlines"),
+                &format!("{restored_dir}/deadlines"),
+            );
+            deadline_sources.push((format!("{restored_dir}/deadlines"), deadlines.snapshot_id));
+        }
+        let state_types =
+            crate::over_agg::paimon_over_state_types(&[0], &[0], 0, false).unwrap();
+        let mut store = PaimonOverStore::open_merged(
+            config(&restored_dir),
+            vec![DataType::Int64; 3],
+            state_types,
+            &pending_sources,
+            &fold_sources,
+            &deadline_sources,
+            retention_ms > 1,
+            0..=127,
+            true,
+        )
+        .unwrap();
+        store.set_next_seq(next_seq);
+        let mut over =
+            over_aggregator().with_state_retention(retention_ms).with_backend(store);
+        over.hydrate_backend_retention(restored_at_ms).unwrap();
+        over
+    }
+
+    /// The retention-bounded OVER matches the memory operator through identical clocks: alive
+    /// one ms inside the horizon, re-armed under the hysteresis by the second touch, and folding
+    /// fresh at exactly the moved deadline — with a checkpoint between every step forcing the
+    /// deadlines and folds through the tables.
+    #[test]
+    fn paimon_over_matches_memory_with_retention() {
+        let dir = temp_dir("over-ttl-parity");
+        let mut paimon = paimon_retention_over(&dir, 2000);
+        let mut memory = retention_over(0, 0, false, 2000);
+
+        let steps: Vec<(RecordBatch, i64, i64)> = vec![
+            (join_batch(vec![1], vec![10], vec![100]), 200, 5000), // deadline 8000
+            (join_batch(vec![1], vec![5], vec![300]), 400, 7999),  // alive; re-armed to 10999
+            (join_batch(vec![1], vec![2], vec![500]), 600, 10_999), // cleared: folds fresh
+        ];
+        for (i, (batch, watermark, now)) in steps.iter().enumerate() {
+            paimon.push(batch.clone(), *now).unwrap();
+            memory.push(batch.clone(), *now).unwrap();
+            let paimon_out = paimon.flush(*watermark, *now).unwrap();
+            let memory_out = memory.flush(*watermark, *now).unwrap();
+            assert_eq!(
+                over_rows(&memory_out),
+                over_rows(&paimon_out),
+                "step {i} diverged between backends"
+            );
+            paimon.store_mut().checkpoint().unwrap();
+        }
+    }
+
+    /// The persisted deadline is the writer's ABSOLUTE fire time: a restore keeps it as-is
+    /// rather than re-stamping from the restore clock.
+    #[test]
+    fn paimon_over_retention_deadline_rides_the_checkpoint_absolutely() {
+        let dir = temp_dir("over-ttl-abs");
+        let mut writer = paimon_retention_over(&dir, 2000);
+        writer.push(join_batch(vec![1], vec![10], vec![100]), 5000).unwrap();
+        assert_eq!(values(&writer.flush(200, 5000).unwrap(), 3), vec![10]);
+        let manifests = writer.store_mut().checkpoint().unwrap();
+        let next_seq = writer.store_mut().next_seq();
+
+        // Alive at 7999 and folding fresh at exactly 8000 — the writer's deadline, not the
+        // restore-time stamp (restoring at 6000 would have stamped 9000).
+        let mut alive = reopen_retention_over(&dir, &manifests, next_seq, 2000, 6000);
+        alive.push(join_batch(vec![1], vec![5], vec![300]), 7999).unwrap();
+        assert_eq!(values(&alive.flush(400, 7999).unwrap(), 3), vec![15]);
+        let mut expired = reopen_retention_over(&dir, &manifests, next_seq, 2000, 6000);
+        expired.push(join_batch(vec![1], vec![5], vec![300]), 8000).unwrap();
+        assert_eq!(values(&expired.flush(400, 8000).unwrap(), 3), vec![5]);
+    }
+
+    /// A hysteresis re-arm between barriers persists: after the restore the key expires at the
+    /// MOVED deadline, not the one first registered.
+    #[test]
+    fn paimon_over_retention_rearm_survives_the_checkpoint() {
+        let dir = temp_dir("over-ttl-rearm");
+        let mut writer = paimon_retention_over(&dir, 2000);
+        writer.push(join_batch(vec![1], vec![10], vec![100]), 1000).unwrap(); // deadline 4000
+        assert_eq!(values(&writer.flush(200, 1000).unwrap(), 3), vec![10]);
+        writer.push(join_batch(vec![1], vec![1], vec![300]), 2001).unwrap(); // moved to 5001
+        assert_eq!(values(&writer.flush(400, 2001).unwrap(), 3), vec![11]);
+        let manifests = writer.store_mut().checkpoint().unwrap();
+        let next_seq = writer.store_mut().next_seq();
+
+        // Still alive at 5000 — past the original 4000, inside the re-armed 5001...
+        let mut alive = reopen_retention_over(&dir, &manifests, next_seq, 2000, 2500);
+        alive.push(join_batch(vec![1], vec![2], vec![500]), 5000).unwrap();
+        assert_eq!(values(&alive.flush(600, 5000).unwrap(), 3), vec![13]);
+        // ...and folding fresh at exactly the moved deadline.
+        let mut expired = reopen_retention_over(&dir, &manifests, next_seq, 2000, 2500);
+        expired.push(join_batch(vec![1], vec![2], vec![500]), 5001).unwrap();
+        assert_eq!(values(&expired.flush(600, 5001).unwrap(), 3), vec![2]);
+    }
+
+    /// Flink's fired timer DEFERS a key that still has buffered rows the watermark has not
+    /// folded — across a restore: the deferral count re-derives from the committed pending
+    /// table's payload, the due key re-arms instead of clearing, and only the idle expiry after
+    /// the pending row folds restarts the running state.
+    #[test]
+    fn paimon_over_retention_defers_a_pending_key_across_restore() {
+        let dir = temp_dir("over-ttl-defer");
+        let mut over = paimon_retention_over(&dir, 2000);
+        over.push(join_batch(vec![1], vec![10], vec![100]), 1000).unwrap(); // deadline 4000
+        assert_eq!(values(&over.flush(200, 1000).unwrap(), 3), vec![10]);
+        // A row far above the watermark keeps key 1 pending past its deadline.
+        over.push(join_batch(vec![1], vec![1], vec![9000]), 1000).unwrap();
+        let manifests = over.store_mut().checkpoint().unwrap();
+        let next_seq = over.store_mut().next_seq();
+
+        // Restored after the deadline passed: the touch of another key at 5000 sweeps, and key 1
+        // — due but holding a restored pending row — re-arms (to 8000) instead of clearing.
+        let mut restored = reopen_retention_over(&dir, &manifests, next_seq, 2000, 4500);
+        restored.push(join_batch(vec![2], vec![99], vec![9000]), 5000).unwrap();
+        let out = restored.flush(10_000, 5000).unwrap();
+        assert_eq!(
+            over_rows(&out),
+            vec![(1, 1, 9000, 11), (2, 99, 9000, 99)],
+            "the deferred key folds into the surviving accumulator"
+        );
+        // The idle expiry after the deferral: at the re-armed 8000 the key folds fresh.
+        restored.push(join_batch(vec![1], vec![7], vec![11_000]), 8000).unwrap();
+        assert_eq!(values(&restored.flush(12_000, 8000).unwrap(), 3), vec![7]);
+    }
+
+    /// A fired deadline tombstones the folds row: after the clearing checkpoint a restore —
+    /// probed with a clock BEFORE the original expiry instant — folds fresh because the
+    /// tombstone committed, not because this reader's clock expired it again.
+    #[test]
+    fn paimon_over_retention_clear_tombstones_the_fold_across_restore() {
+        let dir = temp_dir("over-ttl-tomb");
+        let mut over = paimon_retention_over(&dir, 2000);
+        over.push(join_batch(vec![1], vec![10], vec![100]), 1000).unwrap(); // deadline 4000
+        assert_eq!(values(&over.flush(200, 1000).unwrap(), 3), vec![10]);
+        over.store_mut().checkpoint().unwrap(); // the fold row is committed
+
+        // Key 1 is never touched again; the ingest of another key past its deadline runs the
+        // sweep, which tombstones key 1's fold and deadline with no output.
+        over.push(join_batch(vec![2], vec![99], vec![300]), 4000).unwrap();
+        assert_eq!(values(&over.flush(400, 4000).unwrap(), 3), vec![99]);
+        let manifests = over.store_mut().checkpoint().unwrap();
+        let next_seq = over.store_mut().next_seq();
+
+        let mut restored = reopen_retention_over(&dir, &manifests, next_seq, 2000, 500);
+        restored.push(join_batch(vec![1], vec![5], vec![500]), 600).unwrap();
+        assert_eq!(
+            values(&restored.flush(1000, 600).unwrap(), 3),
+            vec![5],
+            "the swept fold must not resurrect from the table"
+        );
+    }
+
+    /// The enable-flip migration: a pre-retention checkpoint (no deadlines table) restored with
+    /// retention on stamps every fold key `restored_at + max` instead of expiring on first touch.
+    #[test]
+    fn paimon_over_pre_retention_restore_stamps_a_full_deadline() {
+        let dir = temp_dir("over-ttl-flip-on");
+        let mut writer = paimon_retention_over(&dir, 0); // retention off: no deadlines table
+        writer.push(join_batch(vec![1], vec![10], vec![100]), 0).unwrap();
+        assert_eq!(values(&writer.flush(200, 0).unwrap(), 3), vec![10]);
+        let manifests = writer.store_mut().checkpoint().unwrap();
+        assert_eq!(manifests.2.snapshot_id, -1, "retention off carries no deadlines table");
+        let next_seq = writer.store_mut().next_seq();
+
+        // Restored at 10000 with a 2s retention: stamped 10000 + 3000 = 13000.
+        let mut alive = reopen_retention_over(&dir, &manifests, next_seq, 2000, 10_000);
+        alive.push(join_batch(vec![1], vec![5], vec![300]), 12_999).unwrap();
+        assert_eq!(values(&alive.flush(400, 12_999).unwrap(), 3), vec![15]);
+        let mut expired = reopen_retention_over(&dir, &manifests, next_seq, 2000, 10_000);
+        expired.push(join_batch(vec![1], vec![5], vec![300]), 13_000).unwrap();
+        assert_eq!(values(&expired.flush(400, 13_000).unwrap(), 3), vec![5]);
+    }
+
+    /// The disable-flip: a retention-on checkpoint restored with retention off sheds the
+    /// deadlines table — nothing ever expires.
+    #[test]
+    fn paimon_over_retention_off_restore_sheds_deadlines() {
+        let dir = temp_dir("over-ttl-flip-off");
+        let mut writer = paimon_retention_over(&dir, 2000);
+        writer.push(join_batch(vec![1], vec![10], vec![100]), 5000).unwrap();
+        assert_eq!(values(&writer.flush(200, 5000).unwrap(), 3), vec![10]);
+        let manifests = writer.store_mut().checkpoint().unwrap();
+        assert!(manifests.2.snapshot_id >= 0, "retention on persists the deadlines table");
+        let next_seq = writer.store_mut().next_seq();
+
+        let mut restored = reopen_retention_over(&dir, &manifests, next_seq, 0, i64::MAX);
+        restored.push(join_batch(vec![1], vec![5], vec![300]), i64::MAX).unwrap();
+        assert_eq!(
+            values(&restored.flush(400, i64::MAX).unwrap(), 3),
+            vec![15],
+            "with retention off the restored fold never expires"
+        );
     }
 
     /// Window-join output pairs as sorted (left v, right v) with nulls for outer padding — the
@@ -6563,6 +6809,7 @@ mod paimon_state {
             config(dir),
             vec![DataType::Int64, DataType::Int64, DataType::Int64, DataType::Int8],
             vec![DataType::Int64; 3],
+            false,
         )
         .unwrap();
         temporal_joiner(kind).with_backend(store)
@@ -6649,7 +6896,7 @@ mod paimon_state {
         let mut joiner = paimon_temporal_joiner(&dir, JoinKind::Inner);
         joiner.push_right(&temporal_build_batch(vec![1], vec![10], vec![100], vec![0]), 0).unwrap();
         joiner.push_left(&temporal_probe_batch(vec![1], vec![7], vec![200]), 0).unwrap();
-        let (left_manifest, right_manifest) = joiner.store_mut().checkpoint().unwrap();
+        let (left_manifest, right_manifest, _) = joiner.store_mut().checkpoint().unwrap();
         let left_seq = joiner.store_mut().left.next_seq();
 
         let restored_dir = temp_dir("tj-restore-dst");
@@ -6661,6 +6908,8 @@ mod paimon_state {
             vec![DataType::Int64; 3],
             &[(format!("{restored_dir}/left"), left_manifest.snapshot_id)],
             &[(format!("{restored_dir}/right"), right_manifest.snapshot_id)],
+            &[],
+            false,
             0..=127,
             true,
         )
@@ -6669,6 +6918,325 @@ mod paimon_state {
         let mut restored = temporal_joiner(JoinKind::Inner).with_backend(store);
         assert_eq!(tj_pairs(&restored.advance(500, 0).unwrap()), vec![(Some(7), Some(10))]);
         assert_eq!(restored.advance(600, 0).unwrap().num_rows(), 0, "fired probe left state");
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Temporal-join idle-state retention on the Paimon backend: the same per-key deadline scheme
+    // as memory mode (hysteresis, whole-key clear, lazy check + sweep), with the deadline map
+    // resident in the operator and persisted through the deadlines/ table.
+    // -----------------------------------------------------------------------------------------
+
+    /// The `paimon_temporal_joiner` shape with idle-state retention.
+    fn paimon_temporal_joiner_retention(
+        dir: &str,
+        kind: JoinKind,
+        retention_ms: i64,
+    ) -> TemporalJoiner {
+        let store = PaimonTemporalJoinStore::create(
+            config(dir),
+            vec![DataType::Int64, DataType::Int64, DataType::Int64, DataType::Int8],
+            vec![DataType::Int64; 3],
+            retention_ms > 1,
+        )
+        .unwrap();
+        temporal_joiner(kind).with_state_retention(retention_ms).with_backend(store)
+    }
+
+    /// Restores a temporal joiner from a checkpoint's listed files, with the given retention and
+    /// restore clock (the enable-flip stamp time).
+    fn reopen_retention_temporal(
+        dir: &str,
+        kind: JoinKind,
+        manifests: &(PaimonCheckpointManifest, PaimonCheckpointManifest, PaimonCheckpointManifest),
+        left_seq: i64,
+        retention_ms: i64,
+        restored_at_ms: i64,
+    ) -> TemporalJoiner {
+        let restored_dir = temp_dir("tj-ttl-dst");
+        let (left, right, deadlines) = manifests;
+        let mut left_sources = Vec::new();
+        if left.snapshot_id >= 0 {
+            materialize(left, &format!("{dir}/left"), &format!("{restored_dir}/left"));
+            left_sources.push((format!("{restored_dir}/left"), left.snapshot_id));
+        }
+        let mut right_sources = Vec::new();
+        if right.snapshot_id >= 0 {
+            materialize(right, &format!("{dir}/right"), &format!("{restored_dir}/right"));
+            right_sources.push((format!("{restored_dir}/right"), right.snapshot_id));
+        }
+        let mut deadline_sources = Vec::new();
+        if retention_ms > 1 && deadlines.snapshot_id >= 0 {
+            materialize(
+                deadlines,
+                &format!("{dir}/deadlines"),
+                &format!("{restored_dir}/deadlines"),
+            );
+            deadline_sources.push((format!("{restored_dir}/deadlines"), deadlines.snapshot_id));
+        }
+        let mut store = PaimonTemporalJoinStore::open_merged(
+            config(&restored_dir),
+            vec![DataType::Int64, DataType::Int64, DataType::Int64, DataType::Int8],
+            vec![DataType::Int64; 3],
+            &left_sources,
+            &right_sources,
+            &deadline_sources,
+            retention_ms > 1,
+            0..=127,
+            true,
+        )
+        .unwrap();
+        store.left.set_next_seq(left_seq);
+        let mut joiner =
+            temporal_joiner(kind).with_state_retention(retention_ms).with_backend(store);
+        joiner.hydrate_backend_retention(restored_at_ms).unwrap();
+        joiner
+    }
+
+    /// The retention-bounded temporal join matches the memory operator through identical clocks:
+    /// alive one ms inside the horizon, re-armed by the watermark fire, and cleared at exactly
+    /// the moved deadline — with a checkpoint between every step forcing the deadlines and both
+    /// sides through the tables.
+    #[test]
+    fn paimon_temporal_join_matches_memory_with_retention() {
+        let dir = temp_dir("tj-ttl-parity");
+        let mut paimon = paimon_temporal_joiner_retention(&dir, JoinKind::LeftOuter, 2000);
+        let mut memory = temporal_joiner(JoinKind::LeftOuter).with_state_retention(2000);
+
+        // The version at 5000 arms the deadline at 8000; the fired probe at 7999 joins and the
+        // fire re-registers (7999 + min > 8000), moving the deadline to 10999.
+        for joiner in [&mut paimon, &mut memory] {
+            joiner
+                .push_right(&temporal_build_batch(vec![1], vec![10], vec![100], vec![0]), 5000)
+                .unwrap();
+        }
+        paimon.store_mut().checkpoint().unwrap();
+        for joiner in [&mut paimon, &mut memory] {
+            joiner.push_left(&temporal_probe_batch(vec![1], vec![1], vec![200]), 7999).unwrap();
+        }
+        let p = paimon.advance(i64::MAX, 7999).unwrap();
+        let m = memory.advance(i64::MAX, 7999).unwrap();
+        assert_eq!(tj_pairs(&m), tj_pairs(&p));
+        assert_eq!(tj_pairs(&p), vec![(Some(1), Some(10))]);
+        paimon.store_mut().checkpoint().unwrap();
+
+        // A probe one ms inside the moved horizon still joins (the original 8000 did not fire)...
+        for joiner in [&mut paimon, &mut memory] {
+            joiner.push_left(&temporal_probe_batch(vec![1], vec![2], vec![300]), 10_998).unwrap();
+        }
+        let p = paimon.advance(i64::MAX, 10_998).unwrap();
+        let m = memory.advance(i64::MAX, 10_998).unwrap();
+        assert_eq!(tj_pairs(&m), tj_pairs(&p));
+        assert_eq!(tj_pairs(&p), vec![(Some(2), Some(10))]);
+        paimon.store_mut().checkpoint().unwrap();
+
+        // ...and the touch at the re-moved deadline (10998 + max = 13998) clears the key: the
+        // probe null-pads per the normal absent-version LEFT behavior.
+        for joiner in [&mut paimon, &mut memory] {
+            joiner.push_left(&temporal_probe_batch(vec![1], vec![3], vec![400]), 13_998).unwrap();
+        }
+        let p = paimon.advance(i64::MAX, 13_998).unwrap();
+        let m = memory.advance(i64::MAX, 13_998).unwrap();
+        assert_eq!(tj_pairs(&m), tj_pairs(&p));
+        assert_eq!(tj_pairs(&p), vec![(Some(3), None)]);
+    }
+
+    /// The persisted deadline is the writer's ABSOLUTE fire time: a restore keeps it as-is
+    /// rather than re-stamping from the restore clock.
+    #[test]
+    fn paimon_temporal_retention_deadline_rides_the_checkpoint_absolutely() {
+        let dir = temp_dir("tj-ttl-abs");
+        let mut writer = paimon_temporal_joiner_retention(&dir, JoinKind::LeftOuter, 2000);
+        writer
+            .push_right(&temporal_build_batch(vec![1], vec![10], vec![100], vec![0]), 5000)
+            .unwrap();
+        let manifests = writer.store_mut().checkpoint().unwrap();
+        let left_seq = writer.store_mut().left.next_seq();
+
+        // Alive at 7999 and cleared at exactly 8000 — the writer's deadline, not the restore
+        // stamp (restoring at 6000 would have stamped 9000).
+        let mut alive =
+            reopen_retention_temporal(&dir, JoinKind::LeftOuter, &manifests, left_seq, 2000, 6000);
+        alive.push_left(&temporal_probe_batch(vec![1], vec![1], vec![200]), 7999).unwrap();
+        assert_eq!(tj_pairs(&alive.advance(i64::MAX, 7999).unwrap()), vec![(Some(1), Some(10))]);
+        let mut expired =
+            reopen_retention_temporal(&dir, JoinKind::LeftOuter, &manifests, left_seq, 2000, 6000);
+        expired.push_left(&temporal_probe_batch(vec![1], vec![1], vec![200]), 8000).unwrap();
+        assert_eq!(tj_pairs(&expired.advance(i64::MAX, 8000).unwrap()), vec![(Some(1), None)]);
+    }
+
+    /// A hysteresis re-arm between barriers persists: after the restore the key expires at the
+    /// MOVED deadline, not the one first registered.
+    #[test]
+    fn paimon_temporal_retention_rearm_survives_the_checkpoint() {
+        let dir = temp_dir("tj-ttl-rearm");
+        let mut writer = paimon_temporal_joiner_retention(&dir, JoinKind::LeftOuter, 2000);
+        writer
+            .push_right(&temporal_build_batch(vec![1], vec![10], vec![100], vec![0]), 1000)
+            .unwrap(); // deadline 4000
+        writer
+            .push_right(&temporal_build_batch(vec![1], vec![20], vec![300], vec![2]), 2001)
+            .unwrap(); // moved to 5001
+        let manifests = writer.store_mut().checkpoint().unwrap();
+        let left_seq = writer.store_mut().left.next_seq();
+
+        // Still alive at 5000 — past the original 4000, inside the re-armed 5001...
+        let mut alive =
+            reopen_retention_temporal(&dir, JoinKind::LeftOuter, &manifests, left_seq, 2000, 2500);
+        alive.push_left(&temporal_probe_batch(vec![1], vec![1], vec![600]), 5000).unwrap();
+        assert_eq!(tj_pairs(&alive.advance(i64::MAX, 5000).unwrap()), vec![(Some(1), Some(20))]);
+        // ...and cleared at exactly the moved deadline.
+        let mut expired =
+            reopen_retention_temporal(&dir, JoinKind::LeftOuter, &manifests, left_seq, 2000, 2500);
+        expired.push_left(&temporal_probe_batch(vec![1], vec![1], vec![600]), 5001).unwrap();
+        assert_eq!(tj_pairs(&expired.advance(i64::MAX, 5001).unwrap()), vec![(Some(1), None)]);
+    }
+
+    /// Flink's `cleanupState` clears the key's ENTIRE state — including buffered probe rows the
+    /// watermark never fired. A cleared key's fired rows emit NOTHING (even for LEFT), its
+    /// unfired rows tombstone, and after the clearing checkpoint a restore finds neither the
+    /// versions nor the rows.
+    #[test]
+    fn paimon_temporal_retention_cleanup_drops_buffered_probe_rows_too() {
+        let dir = temp_dir("tj-ttl-clear");
+        let mut joiner = paimon_temporal_joiner_retention(&dir, JoinKind::LeftOuter, 2000);
+        joiner
+            .push_right(&temporal_build_batch(vec![1], vec![10], vec![100], vec![0]), 1000)
+            .unwrap(); // deadline 4000
+        joiner
+            .push_left(&temporal_probe_batch(vec![1, 1], vec![1, 9], vec![500, 5000]), 1000)
+            .unwrap();
+        assert_eq!(joiner.advance(200, 1000).unwrap().num_rows(), 0, "buffered below the mark");
+        joiner.store_mut().checkpoint().unwrap();
+
+        // Pin the sweep clock early (nothing due at 2500) so the advance below exercises the
+        // per-fired-key expiry, not the sweep.
+        joiner
+            .push_right(&temporal_build_batch(vec![2], vec![99], vec![100], vec![0]), 2500)
+            .unwrap();
+        // Key 1's deadline (4000) passed before this watermark arrived: the fired rt-500 row
+        // emits nothing — a LEFT join must NOT null-pad rows of a cleared key — and the unfired
+        // rt-5000 row tombstones with the rest of the key's state.
+        assert_eq!(joiner.advance(600, 4000).unwrap().num_rows(), 0);
+
+        // A fresh probe for the cleared key null-pads (versions gone), and the old rt-5000 row
+        // must never fire: only the new probe emits.
+        joiner.push_left(&temporal_probe_batch(vec![1], vec![2], vec![700]), 4000).unwrap();
+        assert_eq!(tj_pairs(&joiner.advance(i64::MAX, 4000).unwrap()), vec![(Some(2), None)]);
+        let manifests = joiner.store_mut().checkpoint().unwrap();
+        let left_seq = joiner.store_mut().left.next_seq();
+
+        // The clear's tombstones committed: a restore probed with an early clock (nothing could
+        // have expired since) still finds no version for key 1.
+        let mut restored =
+            reopen_retention_temporal(&dir, JoinKind::LeftOuter, &manifests, left_seq, 2000, 4001);
+        restored.push_left(&temporal_probe_batch(vec![1], vec![3], vec![800]), 4001).unwrap();
+        assert_eq!(tj_pairs(&restored.advance(i64::MAX, 4001).unwrap()), vec![(Some(3), None)]);
+    }
+
+    /// The enable-flip migration: a pre-retention checkpoint (no deadlines table) restored with
+    /// retention on stamps every keyed row `restored_at + max` instead of expiring on first
+    /// touch.
+    #[test]
+    fn paimon_temporal_pre_retention_restore_stamps_a_full_deadline() {
+        let dir = temp_dir("tj-ttl-flip-on");
+        let mut writer = paimon_temporal_joiner(&dir, JoinKind::LeftOuter); // retention off
+        writer
+            .push_right(&temporal_build_batch(vec![1], vec![10], vec![100], vec![0]), 0)
+            .unwrap();
+        let manifests = writer.store_mut().checkpoint().unwrap();
+        assert_eq!(manifests.2.snapshot_id, -1, "retention off carries no deadlines table");
+        let left_seq = writer.store_mut().left.next_seq();
+
+        // Restored at 10000 with a 2s retention: stamped 10000 + 3000 = 13000.
+        let mut alive = reopen_retention_temporal(
+            &dir,
+            JoinKind::LeftOuter,
+            &manifests,
+            left_seq,
+            2000,
+            10_000,
+        );
+        alive.push_left(&temporal_probe_batch(vec![1], vec![1], vec![200]), 12_999).unwrap();
+        assert_eq!(tj_pairs(&alive.advance(i64::MAX, 12_999).unwrap()), vec![(Some(1), Some(10))]);
+        let mut expired = reopen_retention_temporal(
+            &dir,
+            JoinKind::LeftOuter,
+            &manifests,
+            left_seq,
+            2000,
+            10_000,
+        );
+        expired.push_left(&temporal_probe_batch(vec![1], vec![1], vec![200]), 13_000).unwrap();
+        assert_eq!(tj_pairs(&expired.advance(i64::MAX, 13_000).unwrap()), vec![(Some(1), None)]);
+    }
+
+    /// The disable-flip: a retention-on checkpoint restored with retention off sheds the
+    /// deadlines table — nothing ever expires.
+    #[test]
+    fn paimon_temporal_retention_off_restore_sheds_deadlines() {
+        let dir = temp_dir("tj-ttl-flip-off");
+        let mut writer = paimon_temporal_joiner_retention(&dir, JoinKind::Inner, 2000);
+        writer
+            .push_right(&temporal_build_batch(vec![1], vec![10], vec![100], vec![0]), 5000)
+            .unwrap();
+        let manifests = writer.store_mut().checkpoint().unwrap();
+        assert!(manifests.2.snapshot_id >= 0, "retention on persists the deadlines table");
+        let left_seq = writer.store_mut().left.next_seq();
+
+        let mut restored =
+            reopen_retention_temporal(&dir, JoinKind::Inner, &manifests, left_seq, 0, i64::MAX);
+        restored.push_left(&temporal_probe_batch(vec![1], vec![1], vec![200]), i64::MAX).unwrap();
+        assert_eq!(
+            tj_pairs(&restored.advance(i64::MAX, i64::MAX).unwrap()),
+            vec![(Some(1), Some(10))],
+            "with retention off the restored version never expires"
+        );
+    }
+
+    /// The rescale clip on the deadlines table: a resized subtask hydrates only the deadlines
+    /// whose key group falls in its new range.
+    #[test]
+    fn paimon_deadline_rescale_clips_to_the_key_group_range() {
+        let dir = temp_dir("dl-clip-src");
+        let mut store = PaimonDeadlineStore::create(config(&dir)).unwrap();
+        let keys: Vec<i64> = (1..=32).collect();
+        let probe = group_batch(keys.clone(), vec![0; keys.len()]);
+        let mut encoder = BinaryRowBatchEncoder::new(&probe, &[0], &[-1]);
+        for row in 0..keys.len() {
+            store.stage(encoder.encode(row), 1000 + row as i64);
+        }
+        let manifest = store.checkpoint().unwrap();
+
+        let src = temp_dir("dl-clip-mat");
+        materialize(&manifest, &dir, &src);
+        let mut clipped = PaimonDeadlineStore::open_merged(
+            config(&temp_dir("dl-clip-dst")),
+            &[(src, manifest.snapshot_id)],
+            0..=63,
+            false,
+        )
+        .unwrap();
+        let restored: std::collections::HashMap<ByteKey, i64> =
+            clipped.hydrate_all().unwrap().into_iter().collect();
+        let mut survivors = 0usize;
+        for (row, key) in keys.iter().enumerate() {
+            let bytes = encoder.encode(row);
+            let kg = flink_key_group(hash_bytes_by_words(bytes), 128) as i32;
+            if (0..=63).contains(&kg) {
+                assert_eq!(
+                    restored.get(bytes),
+                    Some(&(1000 + row as i64)),
+                    "key {key} (group {kg}) is in range and must survive the clip"
+                );
+                survivors += 1;
+            } else {
+                assert!(
+                    restored.get(bytes).is_none(),
+                    "key {key} (group {kg}) is out of range and must be clipped"
+                );
+            }
+        }
+        assert!(survivors > 0 && survivors < keys.len(), "the split must be non-trivial");
     }
 
     /// The bundle contract of the two-component store: written slots (the write buffer) survive

@@ -66,6 +66,17 @@ pub(crate) struct TemporalJoiner {
     /// the in-memory maps stay empty, and firing rebuilds only the fired keys' version sets.
     #[cfg(feature = "paimon-state")]
     backend: Option<crate::state::PaimonTemporalJoinStore>,
+    /// Persistent-state `cleanup_state`, keyed by the store's BinaryRow key so a fired deadline
+    /// addresses the same table rows. Resident in full and hydrated at restore — the hysteresis
+    /// re-arm is a read-modify-write on every element, so read-through would put a point read on
+    /// the push path — with every mutation written through to the `deadlines/` table.
+    #[cfg(feature = "paimon-state")]
+    backend_cleanup: HashMap<ByteKey, i64>,
+    /// Persistent-state buffered-probe-row counts per key (fed at push, drained at firing): the
+    /// post-fire re-registration needs "does the key still hold probe rows" without a store
+    /// read. Maintained only while cleaning; re-derived from the probe table at restore.
+    #[cfg(feature = "paimon-state")]
+    backend_pending: HashMap<ByteKey, u32>,
     key_timestamp_precisions: Vec<i32>,
 }
 
@@ -109,6 +120,10 @@ impl TemporalJoiner {
             memory: OperatorMemory::unaccounted(),
             #[cfg(feature = "paimon-state")]
             backend: None,
+            #[cfg(feature = "paimon-state")]
+            backend_cleanup: HashMap::default(),
+            #[cfg(feature = "paimon-state")]
+            backend_pending: HashMap::default(),
             key_timestamp_precisions: Vec::new(),
         }
     }
@@ -227,6 +242,173 @@ impl TemporalJoiner {
         self.backend.as_mut().expect("temporal-join paimon backend")
     }
 
+    /// Restore-time hydration of the persistent retention state: the resident deadline map from
+    /// the `deadlines/` table, the buffered-probe-row counts from the probe table, and — the
+    /// enable-flip migration, exactly as `restore` stamps the raw snapshot — every key holding
+    /// state on either side without a restored deadline is stamped `restored_at + max` (staged
+    /// so the stamp survives the next barrier).
+    #[cfg(feature = "paimon-state")]
+    pub(crate) fn hydrate_backend_retention(
+        &mut self,
+        restored_at_ms: i64,
+    ) -> Result<(), DataFusionError> {
+        if !self.cleaning_enabled() {
+            return Ok(());
+        }
+        let (deadlines, left_counts, right_keys) = {
+            let store = self.backend.as_mut().expect("temporal-join paimon backend");
+            (
+                store.deadlines_mut().hydrate_all()?,
+                store.left.scan_key_counts()?,
+                store.right.scan_distinct_keys()?,
+            )
+        };
+        let mut grew = 0usize;
+        for (key, deadline) in deadlines {
+            grew += byte_key_bytes(&key.0);
+            self.backend_cleanup.insert(key, deadline);
+        }
+        let stamp = restored_at_ms.saturating_add(self.max_retention_ms);
+        let missing: Vec<ByteKey> = left_counts
+            .iter()
+            .map(|(key, _)| key.clone())
+            .chain(right_keys)
+            .filter(|key| !self.backend_cleanup.contains_key(&*key.0))
+            .collect();
+        let store = self.backend.as_mut().expect("temporal-join paimon backend");
+        for key in missing {
+            store.deadlines_mut().stage(&key.0, stamp);
+            grew += byte_key_bytes(&key.0);
+            self.backend_cleanup.insert(key, stamp);
+        }
+        for (key, count) in left_counts {
+            grew += byte_key_bytes(&key.0);
+            self.backend_pending.insert(key, count);
+        }
+        let store = self.backend.as_mut().expect("temporal-join paimon backend");
+        let delta = store.footprint_delta();
+        self.memory.record(grew as isize + delta);
+        self.memory.account()
+    }
+
+    /// `register_cleanup` for the persistent path — same hysteresis over the resident map, with
+    /// a moved or created deadline written through to the deadlines table.
+    #[cfg(feature = "paimon-state")]
+    fn register_cleanup_backend(&mut self, key: &[u8], now_ms: i64) {
+        let armed = now_ms.saturating_add(self.max_retention_ms);
+        let moved = match self.backend_cleanup.get_mut(key) {
+            Some(deadline) => {
+                if now_ms.saturating_add(self.min_retention_ms) > *deadline {
+                    *deadline = armed;
+                    true
+                } else {
+                    false
+                }
+            }
+            None => {
+                self.memory.record(byte_key_bytes(key) as isize);
+                self.backend_cleanup.insert(ByteKey::from(key), armed);
+                true
+            }
+        };
+        if moved {
+            self.backend
+                .as_mut()
+                .expect("temporal-join paimon backend")
+                .deadlines_mut()
+                .stage(key, armed);
+        }
+    }
+
+    /// Whether the key's fired deadline makes its state observably gone at `now_ms`.
+    #[cfg(feature = "paimon-state")]
+    fn expired_backend(&self, key: &[u8], now_ms: i64) -> bool {
+        self.backend_cleanup.get(key).is_some_and(|&deadline| now_ms >= deadline)
+    }
+
+    /// `clear_key` for the persistent path, batched: reads the keys' remaining rows on both
+    /// sides to address their primary keys — buffered probe rows INCLUDED, so an unfired left
+    /// row of a cleared key can never fire later — stages their tombstones, and drops the
+    /// deadline rows and the resident bookkeeping. Silent, like Flink's fired cleanup timer.
+    #[cfg(feature = "paimon-state")]
+    fn clear_keys_backend(&mut self, keys: &[ByteKey]) -> Result<(), DataFusionError> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+        let ctx = self.memory.task_ctx();
+        {
+            let store = self.backend.as_mut().expect("temporal-join paimon backend");
+            if let Some(rows) = store.left.probe(keys, ctx)? {
+                store.left.stage_row_deletes(&rows)?;
+            }
+            for batch in store.right.probe(keys)? {
+                let ks = batch
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<arrow::array::BinaryArray>()
+                    .expect("k column");
+                let rts =
+                    batch.column(2).as_any().downcast_ref::<Int64Array>().expect("rt column");
+                let key_slices: Vec<&[u8]> =
+                    (0..batch.num_rows()).map(|row| ks.value(row)).collect();
+                let rt_values: Vec<i64> =
+                    (0..batch.num_rows()).map(|row| rts.value(row)).collect();
+                store.right.stage_deletes(&key_slices, &rt_values)?;
+            }
+            for key in keys {
+                store.deadlines_mut().stage_delete(&key.0);
+            }
+        }
+        let mut freed = 0usize;
+        for key in keys {
+            if self.backend_cleanup.remove(&*key.0).is_some() {
+                freed += byte_key_bytes(&key.0);
+            }
+            if self.backend_pending.remove(&*key.0).is_some() {
+                freed += byte_key_bytes(&key.0);
+            }
+        }
+        self.memory.record(-(freed as isize));
+        Ok(())
+    }
+
+    /// The lazy expiry check at a batch of key touches (the push paths): every touched key whose
+    /// deadline passed clears before the batch's rows stage, exactly as the memory path expires
+    /// per row before inserting it.
+    #[cfg(feature = "paimon-state")]
+    fn expire_touched_backend(
+        &mut self,
+        keys: &[Vec<u8>],
+        now_ms: i64,
+    ) -> Result<(), DataFusionError> {
+        let mut due: Vec<ByteKey> = Vec::new();
+        let mut seen: std::collections::HashSet<&[u8]> = std::collections::HashSet::new();
+        for key in keys {
+            if seen.insert(key.as_slice()) && self.expired_backend(key, now_ms) {
+                due.push(ByteKey::from(key.as_slice()));
+            }
+        }
+        self.clear_keys_backend(&due)
+    }
+
+    /// `maybe_sweep` for the persistent path: reclaims every key whose deadline passed with no
+    /// further touch, batch-reading its rows first to stage their tombstones.
+    #[cfg(feature = "paimon-state")]
+    fn maybe_sweep_backend(&mut self, now_ms: i64) -> Result<(), DataFusionError> {
+        if now_ms < self.last_sweep_ms.saturating_add(self.min_retention_ms) {
+            return Ok(());
+        }
+        let due: Vec<ByteKey> = self
+            .backend_cleanup
+            .iter()
+            .filter(|(_, &deadline)| now_ms >= deadline)
+            .map(|(key, _)| key.clone())
+            .collect();
+        self.clear_keys_backend(&due)?;
+        self.last_sweep_ms = now_ms;
+        Ok(())
+    }
+
     /// The key-field timestamp descriptors, defaulting to non-timestamp per equi-key column.
     #[cfg(feature = "paimon-state")]
     fn key_precisions(&self) -> Vec<i32> {
@@ -246,11 +428,22 @@ impl TemporalJoiner {
     }
 
     /// Persistent-state probe-side arrival: rows stage under their equi key with their event
-    /// time and changelog kind (packed as the trailing payload column).
+    /// time and changelog kind (packed as the trailing payload column). With cleaning on, a
+    /// touched key past its deadline clears first (as the memory path does per row), every key
+    /// re-arms under the hysteresis, and the rows join the buffered counts.
     #[cfg(feature = "paimon-state")]
-    fn push_left_backend(&mut self, batch: &RecordBatch) -> Result<(), DataFusionError> {
+    fn push_left_backend(
+        &mut self,
+        batch: &RecordBatch,
+        now_ms: i64,
+    ) -> Result<(), DataFusionError> {
         let arity = data_arity(batch);
         let keys = self.binary_keys(batch, &self.left_keys.clone());
+        let cleaning = self.cleaning_enabled();
+        if cleaning {
+            self.maybe_sweep_backend(now_ms)?;
+            self.expire_touched_backend(&keys, now_ms)?;
+        }
         let key_slices: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
         let times = rt_to_millis(batch.column(self.left_time));
         let rt_values: Vec<i64> = (0..batch.num_rows()).map(|row| times.value(row)).collect();
@@ -262,17 +455,40 @@ impl TemporalJoiner {
         payload.push(Arc::new(Int8Array::from(kinds)));
         let store = self.backend.as_mut().expect("temporal-join paimon backend");
         store.left.stage(&key_slices, rt_values, vec![false; batch.num_rows()], payload)?;
+        if cleaning {
+            for key in &keys {
+                self.register_cleanup_backend(key, now_ms);
+                match self.backend_pending.get_mut(key.as_slice()) {
+                    Some(count) => *count += 1,
+                    None => {
+                        self.memory.record(byte_key_bytes(key) as isize);
+                        self.backend_pending.insert(ByteKey::from(key.as_slice()), 1);
+                    }
+                }
+            }
+        }
+        let store = self.backend.as_mut().expect("temporal-join paimon backend");
         let delta = store.footprint_delta();
         self.memory.record(delta);
         self.memory.account()
     }
 
     /// Persistent-state build-side arrival: one upsert per (key, version) — the deduplicate
-    /// merge engine IS Flink's last-write-wins per timestamp.
+    /// merge engine IS Flink's last-write-wins per timestamp. Cleaning as on the probe side,
+    /// minus the buffered counts (versions never defer anything).
     #[cfg(feature = "paimon-state")]
-    fn push_right_backend(&mut self, batch: &RecordBatch) -> Result<(), DataFusionError> {
+    fn push_right_backend(
+        &mut self,
+        batch: &RecordBatch,
+        now_ms: i64,
+    ) -> Result<(), DataFusionError> {
         let arity = data_arity(batch);
         let keys = self.binary_keys(batch, &self.right_keys.clone());
+        let cleaning = self.cleaning_enabled();
+        if cleaning {
+            self.maybe_sweep_backend(now_ms)?;
+            self.expire_touched_backend(&keys, now_ms)?;
+        }
         let key_slices: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
         let times = rt_to_millis(batch.column(self.right_time));
         let rt_values: Vec<i64> = (0..batch.num_rows()).map(|row| times.value(row)).collect();
@@ -282,6 +498,12 @@ impl TemporalJoiner {
         };
         let store = self.backend.as_mut().expect("temporal-join paimon backend");
         store.right.stage(&key_slices, rt_values, kinds, batch.columns()[..arity].to_vec())?;
+        if cleaning {
+            for key in &keys {
+                self.register_cleanup_backend(key, now_ms);
+            }
+        }
+        let store = self.backend.as_mut().expect("temporal-join paimon backend");
         let delta = store.footprint_delta();
         self.memory.record(delta);
         self.memory.account()
@@ -290,13 +512,25 @@ impl TemporalJoiner {
     /// Persistent-state firing: the probe side's range read returns every buffered left row the
     /// watermark passed (in arrival order, deletions staged); the fired keys pull their version
     /// sets from the build side, each key rebuilding its ordered map for the valid-version
-    /// lookup; and a probed key's stale versions prune via staged deletions.
+    /// lookup; and a probed key's stale versions prune via staged deletions. With cleaning on, a
+    /// fired key whose deadline passed is decided BEFORE its rows resolve: Flink's timer fired
+    /// before this watermark arrived, so the key's state is gone and its rows emit NOTHING —
+    /// even for a LEFT join, exactly as the memory path skips the cleared key.
     #[cfg(feature = "paimon-state")]
-    fn advance_backend(&mut self, watermark: i64) -> Result<RecordBatch, DataFusionError> {
+    fn advance_backend(
+        &mut self,
+        watermark: i64,
+        now_ms: i64,
+    ) -> Result<RecordBatch, DataFusionError> {
+        let cleaning = self.cleaning_enabled();
+        if cleaning {
+            self.maybe_sweep_backend(now_ms)?;
+        }
         let ctx = self.memory.task_ctx();
-        let (fired, version_batches) = {
+        let (fired, unique, version_batches) = {
             let store = self.backend.as_mut().expect("temporal-join paimon backend");
             let fired = store.left.evict(watermark, ctx)?;
+            let mut unique: Vec<ByteKey> = Vec::new();
             let version_batches = match &fired {
                 None => Vec::new(),
                 Some(rows) => {
@@ -307,7 +541,6 @@ impl TemporalJoiner {
                         .expect("k column");
                     let mut seen: std::collections::HashSet<ByteKey> =
                         std::collections::HashSet::new();
-                    let mut unique: Vec<ByteKey> = Vec::new();
                     for row in 0..rows.num_rows() {
                         let key = ks.value(row);
                         if !seen.contains(key) {
@@ -319,7 +552,7 @@ impl TemporalJoiner {
                     store.right.probe(&unique)?
                 }
             };
-            (fired, version_batches)
+            (fired, unique, version_batches)
         };
         let Some(fired) = fired else {
             let store = self.backend.as_mut().expect("temporal-join paimon backend");
@@ -355,6 +588,18 @@ impl TemporalJoiner {
             }
         }
 
+        // A fired key past its deadline is cleared, not resolved: its buffered rows (fired and
+        // not yet fired) tombstone silently. Decided before resolving, as memory mode does.
+        let expired: std::collections::HashSet<ByteKey> = if cleaning {
+            unique.iter().filter(|key| self.expired_backend(&key.0, now_ms)).cloned().collect()
+        } else {
+            std::collections::HashSet::new()
+        };
+        if !expired.is_empty() {
+            let due: Vec<ByteKey> = expired.iter().cloned().collect();
+            self.clear_keys_backend(&due)?;
+        }
+
         // Resolve each fired probe row (already in arrival order) to its valid version.
         let left_arity = self.left_schema.fields().len();
         let has_pred = self.predicate.is_some();
@@ -373,6 +618,9 @@ impl TemporalJoiner {
         let mut pred_pairs: Vec<JoinRow> = Vec::new();
         let mut pred_idx: Vec<usize> = Vec::new();
         for row in 0..fired.num_rows() {
+            if expired.contains(ks.value(row)) {
+                continue; // the fired timer cleared the key: nothing emits
+            }
             let left_row: JoinRow = (0..left_arity)
                 .map(|i| {
                     ScalarValue::try_from_array(fired.column(5 + i), row)
@@ -405,12 +653,50 @@ impl TemporalJoiner {
             }
         }
 
+        // Flink's `onEventTime` after emitting: a fired key with state remaining on either side
+        // re-registers its cleanup deadline; a key left empty on both sides drops it.
+        if cleaning {
+            for row in 0..fired.num_rows() {
+                let key = ks.value(row);
+                if expired.contains(key) {
+                    continue; // cleared above, counts already dropped
+                }
+                if let Some(count) = self.backend_pending.get_mut(key) {
+                    *count -= 1;
+                    if *count == 0 {
+                        self.backend_pending.remove(key);
+                        self.memory.record(-(byte_key_bytes(key) as isize));
+                    }
+                }
+            }
+            for key in &unique {
+                if expired.contains(key) {
+                    continue;
+                }
+                let right_live = versions.get(&*key.0).is_some_and(|m| !m.is_empty());
+                if self.backend_pending.contains_key(&*key.0) || right_live {
+                    self.register_cleanup_backend(&key.0, now_ms);
+                } else if self.backend_cleanup.remove(&*key.0).is_some() {
+                    self.memory.record(-(byte_key_bytes(&key.0) as isize));
+                    self.backend
+                        .as_mut()
+                        .expect("temporal-join paimon backend")
+                        .deadlines_mut()
+                        .stage_delete(&key.0);
+                }
+            }
+        }
+
         // Lazy prune: each probed key drops the versions behind the latest one still valid at
-        // the watermark (always keeping that one and newer, as the memory path does).
+        // the watermark (always keeping that one and newer, as the memory path does); a cleared
+        // key's versions are already fully tombstoned.
         {
             let mut prune_keys: Vec<&[u8]> = Vec::new();
             let mut prune_rts: Vec<i64> = Vec::new();
             for (key, map) in &versions {
+                if expired.contains(key) {
+                    continue;
+                }
                 if let Some((&keep_from, _)) = map.range(..=watermark).next_back() {
                     for (&t, _) in map.range(..keep_from) {
                         prune_keys.push(&key.0);
@@ -499,7 +785,7 @@ impl TemporalJoiner {
     ) -> Result<(), DataFusionError> {
         #[cfg(feature = "paimon-state")]
         if self.backend.is_some() {
-            return self.push_left_backend(batch);
+            return self.push_left_backend(batch, now_ms);
         }
         let cleaning = self.cleaning_enabled();
         if cleaning {
@@ -548,7 +834,7 @@ impl TemporalJoiner {
     ) -> Result<(), DataFusionError> {
         #[cfg(feature = "paimon-state")]
         if self.backend.is_some() {
-            return self.push_right_backend(batch);
+            return self.push_right_backend(batch, now_ms);
         }
         let cleaning = self.cleaning_enabled();
         if cleaning {
@@ -602,7 +888,7 @@ impl TemporalJoiner {
     ) -> Result<RecordBatch, DataFusionError> {
         #[cfg(feature = "paimon-state")]
         if self.backend.is_some() {
-            return self.advance_backend(watermark);
+            return self.advance_backend(watermark, now_ms);
         }
         let cleaning = self.cleaning_enabled();
         if cleaning {

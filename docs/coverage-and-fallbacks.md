@@ -273,9 +273,8 @@ Flink's `NeverReturnExpired` state does. The bounded-RANGE rowtime frame takes n
 all — Flink's own function accepts none (its frame eviction already bounds state) — so
 `table.exec.state.ttl` changes nothing there. With that, NOTHING declines a nonzero retention.
 Window operators and the interval join are unaffected — Flink applies no idle-state TTL there.
-TTL works on both state backends, except that a retention-bounded temporal join or OVER keeps the
-memory checkpoint route (their persistent shapes carry no retention stamps yet); see §(c) for the
-persistent-backend mechanics.
+TTL works on both state backends; see §(c) for the persistent-backend mechanics (the deadline
+shapes persist their per-key deadlines in a dedicated state table).
 
 - **OVER** — a frame not of the form `… PRECEDING .. CURRENT ROW` (a `ROWS`/`RANGE` lower bound that
   is not a constant preceding offset); a bounded-RANGE frame over a proctime order (wall-clock
@@ -705,6 +704,22 @@ touch — silently, like everything else about expiry. One shape stays conservat
 ranker advertises no retention to the compactor — its whole-buffer clock lives on the head row
 alone, so per-row physical cleanup would be unsound; its expiry is read-side only.
 
+The **deadline shapes** (the temporal join and the event-time OVER) layer differently, because
+their retention is not a per-row clock: Flink bounds them with ONE per-key cleanup deadline that
+re-arms under a hysteresis and can be deferred by buffered rows. Each such operator persists that
+deadline in a dedicated `deadlines/` table beside its data tables (PK the operator's key, one
+column: the absolute fire time), and expiry is **operator-driven**: a fired deadline stages real
+tombstones for the key's rows across every table, which compact away normally. Like the
+retracting ranker, these operators advertise no retention to the compactor — a deferred or
+re-armed deadline must never drive a physical drop, so their maintenance sessions carry no
+record-level expiry options. Two resident maps are a deliberate, metered exception to the
+backend's otherwise O(interval) residency rule: the deadline map itself (the hysteresis re-arm is
+a read-modify-write on EVERY element — read-through would put a point read on the push path) and
+the OVER/probe-side buffered-row counts that decide deferral and post-fire re-registration; both
+hydrate from one restore-time scan and count against the operator's memory budget. Retention
+flips migrate like the ts column: enabling retention stamps every restored keyed row a full max
+retention from the restore; disabling it drops the deadlines table.
+
 What runs on the Paimon backend today, and every condition that keeps an operator on memory state
 (memory state remains correct — these are not query fallbacks, and the query still accelerates;
 the operator just checkpoints its state the old way, in full):
@@ -789,8 +804,9 @@ the operator just checkpoints its state the old way, in full):
   its stale versions (all below the latest one at or under the watermark) at each firing, while
   an unprobed key's old versions sit on disk until its next probe — correctness never depends on
   pruning (lookups always take the latest version at or under the probe time), only state size
-  does. A retention-bounded temporal join or OVER keeps the memory checkpoint route: those
-  persistent shapes carry no retention stamps yet. With that, **every stateful native operator's event-time mode runs on the backend**;
+  does. A retention-bounded temporal join or OVER stays on this route too, persisting its per-key
+  cleanup deadlines in a `deadlines/` table (see the idle-state TTL notes above). With that,
+  **every stateful native operator's event-time mode runs on the backend**;
   what keeps memory state is exactly the proctime modes (processing-time timer deadlines travel
   in raw state), bounded OVER frames, the local two-phase window half, and the multiset/type
   gates below.

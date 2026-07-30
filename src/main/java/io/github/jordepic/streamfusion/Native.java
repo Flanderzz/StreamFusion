@@ -1345,9 +1345,14 @@ public final class Native {
    * {@code createOverAggregator} on the Paimon state backend (event-time only). Two tables under
    * the operator's state directory: pending input rows keyed by arrival sequence (a watermark
    * firing is a range read over the write buffer and the committed table, merged back into
-   * arrival order), and the per-key running fold state (point reads, dirty-slot writes). The
-   * snapshot token packs both snapshot ids and the arrival sequence. Restore semantics otherwise
-   * as in {@link #createPaimonKeepLastDeduplicator}.
+   * arrival order), and the per-key running fold state (point reads, dirty-slot writes). With
+   * {@code stateTtlMillis} retention a third table persists the per-key cleanup deadlines; the
+   * deadline map stays resident in the operator (the hysteresis re-arm is a read-modify-write on
+   * every element), a fired deadline tombstones the key's fold unless buffered rows defer it,
+   * and a restore of a pre-retention checkpoint stamps every fold key {@code nowMillis +
+   * maxRetention} (the enable migration). The snapshot token packs the snapshot ids and the
+   * arrival sequence. Restore semantics otherwise as in {@link
+   * #createPaimonKeepLastDeduplicator}.
    */
   public static native long createPaimonOverAggregator(
       int[] valueTypes,
@@ -1359,6 +1364,8 @@ public final class Native {
       long frameOffset,
       int[] keyTimestampPrecisions,
       long rowSchemaAddress,
+      long stateTtlMillis,
+      long nowMillis,
       long memoryBudgetBytes,
       String tableDirectory,
       int maxParallelism,
@@ -1373,11 +1380,11 @@ public final class Native {
 
   /** {@code pushOverAggregator} for a Paimon-backed handle (no output; watermark-driven). */
   public static native void pushPaimonOverAggregator(
-      long handle, long inArrayAddress, long inSchemaAddress);
+      long handle, long inArrayAddress, long inSchemaAddress, long nowMillis);
 
   /** {@code flushOverAggregator} for a Paimon-backed handle. */
   public static native void flushPaimonOverAggregator(
-      long handle, long watermarkMillis, long outArrayAddress, long outSchemaAddress);
+      long handle, long watermarkMillis, long nowMillis, long outArrayAddress, long outSchemaAddress);
 
   /** {@code checkpointPaimonGroupAggregator} for a Paimon-backed OVER aggregator. */
   public static native String[] checkpointPaimonOverAggregator(long handle);
@@ -1566,9 +1573,14 @@ public final class Native {
    * versioned build side is one row per (key, version) whose last-write-wins per timestamp is
    * the deduplicate merge engine itself, with every changelog kind persisted (a retract version
    * marks "no row here"). Version pruning is lazy — a probed key drops its stale versions; an
-   * unprobed key's old versions wait for its next probe. The push/advance/close/state-bytes
-   * calls are the memory family's own — the handle type is shared and branches internally. The
-   * snapshot token packs both snapshot ids and the probe side's arrival sequence.
+   * unprobed key's old versions wait for its next probe. With {@code stateTtlMillis} retention a
+   * third table persists the per-key cleanup deadlines; the deadline map stays resident in the
+   * operator (the hysteresis re-arm is a read-modify-write on every element), a fired deadline
+   * clears the key's tables through staged tombstones, and a restore of a pre-retention
+   * checkpoint stamps every keyed row {@code nowMillis + maxRetention} (the enable migration).
+   * The push/advance/close/state-bytes calls are the memory family's own — the handle type is
+   * shared and branches internally. The snapshot token packs the snapshot ids and the probe
+   * side's arrival sequence.
    */
   public static native long createPaimonTemporalJoiner(
       int[] leftKeys,
@@ -1585,6 +1597,8 @@ public final class Native {
       double[] predDoubles,
       String[] predStrings,
       int[] keyTimestampPrecisions,
+      long stateTtlMillis,
+      long nowMillis,
       long memoryBudgetBytes,
       String tableDirectory,
       int maxParallelism,

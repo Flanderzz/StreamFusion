@@ -187,6 +187,31 @@ impl PaimonTemporalRightStore {
         Ok(out)
     }
 
+    /// The committed table's distinct keys — restore-time only (the region is empty), the
+    /// deadline retention's enable-flip stamp scan.
+    pub(crate) fn scan_distinct_keys(&mut self) -> Result<Vec<ByteKey>, DataFusionError> {
+        let expected = self.arrow_fields();
+        let committed = {
+            let builder = PredicateBuilder::new(&self.core.fields);
+            let predicate = builder.greater_or_equal(KG_COLUMN, Datum::Int(0)).map_err(pe)?;
+            self.core.scan_predicate(predicate)?
+        };
+        let mut seen: StdHashSet<ByteKey> = StdHashSet::new();
+        for batch in committed {
+            let ks = normalized_column(&batch, 1, &expected[1])?;
+            let ks = ks
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .ok_or_else(|| DataFusionError::Internal("paimon k column".into()))?;
+            for row in 0..batch.num_rows() {
+                if !seen.contains(ks.value(row)) {
+                    seen.insert(ByteKey::from(ks.value(row)));
+                }
+            }
+        }
+        Ok(seen.into_iter().collect())
+    }
+
     /// Stages a `-D` per (key, version) — the lazy prune of a probed key's stale versions.
     pub(crate) fn stage_deletes(
         &mut self,
@@ -242,10 +267,13 @@ impl PaimonTemporalRightStore {
 /// Both sides of a temporal join under one operator directory (`left/`, `right/`): the probe
 /// side is a keyed row buffer (the interval-join side store, its matched flag unused, the
 /// changelog kind packed as a trailing payload column) and the build side the versioned store
-/// above. The snapshot token packs both snapshot ids and the probe side's arrival sequence.
+/// above. With idle-state retention on, a third table (`deadlines/`) persists the per-key
+/// cleanup deadlines. The snapshot token packs the snapshot ids and the probe side's arrival
+/// sequence.
 pub(crate) struct PaimonTemporalJoinStore {
     pub(crate) left: PaimonIntervalSideStore,
     pub(crate) right: PaimonTemporalRightStore,
+    deadlines: Option<PaimonDeadlineStore>,
     last_footprint: usize,
 }
 
@@ -254,7 +282,11 @@ impl PaimonTemporalJoinStore {
         config: PaimonStoreConfig,
         left_types: Vec<DataType>,
         right_types: Vec<DataType>,
+        retention: bool,
     ) -> Result<Self, DataFusionError> {
+        let deadlines = retention
+            .then(|| PaimonDeadlineStore::create(PaimonOverStore::side_config(&config, "deadlines")))
+            .transpose()?;
         Ok(PaimonTemporalJoinStore {
             left: PaimonIntervalSideStore::create(
                 PaimonOverStore::side_config(&config, "left"),
@@ -264,6 +296,7 @@ impl PaimonTemporalJoinStore {
                 PaimonOverStore::side_config(&config, "right"),
                 right_types,
             )?,
+            deadlines,
             last_footprint: 0,
         })
     }
@@ -275,9 +308,21 @@ impl PaimonTemporalJoinStore {
         right_types: Vec<DataType>,
         left_sources: &[(String, i64)],
         right_sources: &[(String, i64)],
+        deadline_sources: &[(String, i64)],
+        retention: bool,
         key_groups: std::ops::RangeInclusive<i32>,
         aligned: bool,
     ) -> Result<Self, DataFusionError> {
+        let deadlines = retention
+            .then(|| {
+                PaimonDeadlineStore::open_merged(
+                    PaimonOverStore::side_config(&config, "deadlines"),
+                    deadline_sources,
+                    key_groups.clone(),
+                    aligned,
+                )
+            })
+            .transpose()?;
         Ok(PaimonTemporalJoinStore {
             left: PaimonIntervalSideStore::open_merged(
                 PaimonOverStore::side_config(&config, "left"),
@@ -293,23 +338,39 @@ impl PaimonTemporalJoinStore {
                 key_groups,
                 aligned,
             )?,
+            deadlines,
             last_footprint: 0,
         })
     }
 
+    pub(crate) fn deadlines_mut(&mut self) -> &mut PaimonDeadlineStore {
+        self.deadlines.as_mut().expect("temporal-join deadlines table")
+    }
+
     /// The store's untracked footprint change since the last call.
     pub(crate) fn footprint_delta(&mut self) -> isize {
-        let current = self.left.heap_bytes() + self.right.heap_bytes();
+        let current = self.left.heap_bytes()
+            + self.right.heap_bytes()
+            + self.deadlines.as_ref().map(PaimonDeadlineStore::heap_bytes).unwrap_or(0);
         let delta = current as isize - self.last_footprint as isize;
         self.last_footprint = current;
         delta
     }
 
-    /// Checkpoint sync phase: commits both sides; the caller packs the two manifests and the
-    /// probe side's arrival sequence into the snapshot token.
+    /// Checkpoint sync phase: commits every table; the caller packs the manifests and the probe
+    /// side's arrival sequence into the snapshot token (the deadlines manifest is `absent` while
+    /// retention is off).
+    #[allow(clippy::type_complexity)]
     pub(crate) fn checkpoint(
         &mut self,
-    ) -> Result<(PaimonCheckpointManifest, PaimonCheckpointManifest), DataFusionError> {
-        Ok((self.left.checkpoint()?, self.right.checkpoint()?))
+    ) -> Result<
+        (PaimonCheckpointManifest, PaimonCheckpointManifest, PaimonCheckpointManifest),
+        DataFusionError,
+    > {
+        let deadlines = match &mut self.deadlines {
+            Some(store) => store.checkpoint()?,
+            None => PaimonCheckpointManifest::absent(),
+        };
+        Ok((self.left.checkpoint()?, self.right.checkpoint()?, deadlines))
     }
 }

@@ -11,9 +11,13 @@ use super::*;
 ///   round-trips. Point-access only: reads are the per-batch key probe, writes buffer as dirty
 ///   slots until the barrier. Unlike the memory path's forever-growing per-key map, the fold
 ///   rows are disk-resident between firings.
+///
+/// With idle-state retention on, a third table (`deadlines/`) persists the per-key cleanup
+/// deadlines the operator keeps resident.
 pub(crate) struct PaimonOverStore {
     pending: PaimonRowBufferStore,
     folds: PaimonTableCore,
+    deadlines: Option<PaimonDeadlineStore>,
     state_fields: Vec<Field>,
     fold_working: ahash::HashMap<ByteKey, FoldSlot>,
     last_footprint: usize,
@@ -21,7 +25,8 @@ pub(crate) struct PaimonOverStore {
 
 /// One fold-state working entry: `dirty` rows are the folds write buffer (pinned until the
 /// barrier commit); clean rows are this bundle's committed probes and drop at `end_bundle`.
-/// `None` records a probed-absent key.
+/// `None` records a probed-absent key — or, dirty, a removed fold the barrier commits as a
+/// tombstone (the fired cleanup deadline clearing the key).
 struct FoldSlot {
     scalars: Option<Vec<ScalarValue>>,
     dirty: bool,
@@ -47,13 +52,18 @@ impl PaimonOverStore {
         config: PaimonStoreConfig,
         payload_types: Vec<DataType>,
         state_types: Vec<DataType>,
+        retention: bool,
     ) -> Result<Self, DataFusionError> {
         let state_fields = PaimonRowBufferStore::typed_fields("s", &state_types)?;
         let pending =
             PaimonRowBufferStore::create(Self::side_config(&config, "pending"), payload_types)?;
+        let deadlines = retention
+            .then(|| PaimonDeadlineStore::create(Self::side_config(&config, "deadlines")))
+            .transpose()?;
         Ok(PaimonOverStore {
             pending,
             folds: Self::create_folds(&config, &state_fields)?,
+            deadlines,
             state_fields,
             fold_working: ahash::HashMap::default(),
             last_footprint: 0,
@@ -89,6 +99,8 @@ impl PaimonOverStore {
         state_types: Vec<DataType>,
         pending_sources: &[(String, i64)],
         fold_sources: &[(String, i64)],
+        deadline_sources: &[(String, i64)],
+        retention: bool,
         key_groups: std::ops::RangeInclusive<i32>,
         aligned: bool,
     ) -> Result<Self, DataFusionError> {
@@ -100,9 +112,20 @@ impl PaimonOverStore {
             key_groups.clone(),
             aligned,
         )?;
+        let deadlines = retention
+            .then(|| {
+                PaimonDeadlineStore::open_merged(
+                    Self::side_config(&config, "deadlines"),
+                    deadline_sources,
+                    key_groups.clone(),
+                    aligned,
+                )
+            })
+            .transpose()?;
         let mut store = PaimonOverStore {
             pending,
             folds: Self::create_folds(&config, &state_fields)?,
+            deadlines,
             state_fields,
             fold_working: ahash::HashMap::default(),
             last_footprint: 0,
@@ -117,6 +140,10 @@ impl PaimonOverStore {
             }
         }
         Ok(store)
+    }
+
+    pub(crate) fn deadlines_mut(&mut self) -> &mut PaimonDeadlineStore {
+        self.deadlines.as_mut().expect("over deadlines table")
     }
 
     /// The folds table's persisted row schema (also its clip write schema).
@@ -211,6 +238,52 @@ impl PaimonOverStore {
             .insert(ByteKey::from(key), FoldSlot { scalars: Some(scalars), dirty: true });
     }
 
+    /// Removes a key's running state — the fired cleanup deadline clearing the key. The dirty
+    /// absent slot survives the bundle and commits as a `-D` tombstone at the barrier, so a
+    /// restore cannot resurrect the cleared fold.
+    pub(crate) fn remove_fold(&mut self, key: &[u8]) {
+        self.fold_working.insert(ByteKey::from(key), FoldSlot { scalars: None, dirty: true });
+    }
+
+    /// The committed folds table's keys — restore-time only (the write buffer is empty), the
+    /// deadline retention's enable-flip stamp scan.
+    pub(crate) fn scan_fold_keys(&mut self) -> Result<Vec<ByteKey>, DataFusionError> {
+        let expected = self.folds_arrow_fields();
+        let committed = {
+            let builder = PredicateBuilder::new(&self.folds.fields);
+            let predicate = builder.greater_or_equal(KG_COLUMN, Datum::Int(0)).map_err(pe)?;
+            self.folds.scan_predicate(predicate)?
+        };
+        let mut keys = Vec::new();
+        for batch in committed {
+            let ks = normalized_column(&batch, 1, &expected[1])?;
+            let ks = ks
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .ok_or_else(|| DataFusionError::Internal("paimon fold key column".into()))?;
+            for row in 0..batch.num_rows() {
+                keys.push(ByteKey::from(ks.value(row)));
+            }
+        }
+        Ok(keys)
+    }
+
+    /// The committed pending rows' payload columns (the buffered input rows) — restore-time
+    /// only, deriving the deadline retention's per-key deferral counts: the pending PK is the
+    /// arrival sequence, so only the payload's PARTITION BY columns identify the key.
+    pub(crate) fn scan_pending_payload(&mut self) -> Result<Vec<RecordBatch>, DataFusionError> {
+        let mut out = Vec::new();
+        for batch in self.pending.scan_all()? {
+            let fields: Vec<Field> =
+                batch.schema().fields()[3..].iter().map(|f| f.as_ref().clone()).collect();
+            out.push(
+                RecordBatch::try_new(Arc::new(Schema::new(fields)), batch.columns()[3..].to_vec())
+                    .expect("pending payload projection"),
+            );
+        }
+        Ok(out)
+    }
+
     /// End of the operator's bundle: clean fold probes drop; the dirty slots (the folds write
     /// buffer) and the pending region survive to the barrier.
     pub(crate) fn end_bundle(&mut self) {
@@ -220,6 +293,7 @@ impl PaimonOverStore {
     /// The store's untracked footprint change since the last call.
     pub(crate) fn footprint_delta(&mut self) -> isize {
         let current = self.pending.heap_bytes()
+            + self.deadlines.as_ref().map(PaimonDeadlineStore::heap_bytes).unwrap_or(0)
             + self
                 .fold_working
                 .iter()
@@ -239,11 +313,17 @@ impl PaimonOverStore {
     }
 
     /// Checkpoint sync phase, called at the barrier: commits the pending region (live rows and
-    /// fired deletions) and the dirty fold rows as each table's snapshot. Returns the two
-    /// manifests; the caller packs them plus the arrival sequence into the snapshot token.
+    /// fired deletions), the dirty fold rows — an upsert per updated fold, a `-D` per removed
+    /// one — and the staged deadlines as each table's snapshot. Returns the manifests (the
+    /// deadlines manifest `absent` while retention is off); the caller packs them plus the
+    /// arrival sequence into the snapshot token.
+    #[allow(clippy::type_complexity)]
     pub(crate) fn checkpoint(
         &mut self,
-    ) -> Result<(PaimonCheckpointManifest, PaimonCheckpointManifest), DataFusionError> {
+    ) -> Result<
+        (PaimonCheckpointManifest, PaimonCheckpointManifest, PaimonCheckpointManifest),
+        DataFusionError,
+    > {
         let pending_manifest = self.pending.checkpoint()?;
 
         self.folds.refresh_to_latest()?;
@@ -252,7 +332,6 @@ impl PaimonOverStore {
         if !dirty.is_empty() {
             let mut fields = self.folds_arrow_fields();
             fields.push(Field::new(VALUE_KIND_COLUMN, DataType::Int8, false));
-            let n = dirty.len();
             let mut columns: Vec<ArrayRef> = Vec::with_capacity(fields.len());
             columns.push(Arc::new(Int32Array::from(
                 dirty.iter().map(|(k, _)| self.folds.key_group(&k.0)).collect::<Vec<_>>(),
@@ -264,19 +343,29 @@ impl PaimonOverStore {
                 columns.push(scalars_to_array(
                     dirty
                         .iter()
-                        .map(|(_, slot)| {
-                            slot.scalars.as_ref().expect("dirty fold holds state")[j].clone()
+                        .map(|(_, slot)| match &slot.scalars {
+                            Some(scalars) => scalars[j].clone(),
+                            None => null_scalar(field.data_type()),
                         })
                         .collect(),
                     field.data_type(),
                 ));
             }
-            columns.push(Arc::new(Int8Array::from(vec![0i8; n])));
+            columns.push(Arc::new(Int8Array::from(
+                dirty
+                    .iter()
+                    .map(|(_, slot)| if slot.scalars.is_some() { 0i8 } else { 3i8 })
+                    .collect::<Vec<_>>(),
+            )));
             let batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
                 .expect("paimon folds write batch");
             self.folds.commit(&batch)?;
         }
         self.fold_working.clear();
-        Ok((pending_manifest, self.folds.checkpoint_manifest()?))
+        let deadlines_manifest = match &mut self.deadlines {
+            Some(store) => store.checkpoint()?,
+            None => PaimonCheckpointManifest::absent(),
+        };
+        Ok((pending_manifest, self.folds.checkpoint_manifest()?, deadlines_manifest))
     }
 }

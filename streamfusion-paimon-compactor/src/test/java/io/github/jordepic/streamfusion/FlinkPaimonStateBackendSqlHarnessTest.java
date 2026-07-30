@@ -229,6 +229,43 @@ class FlinkPaimonStateBackendSqlHarnessTest {
   }
 
   @Test
+  void rowtimeOverAggregateWithTtlOnPaimonBackendMatchesHost() throws Exception {
+    // The same anti-fallback guard as the retention-less test: idle-state retention no longer
+    // forces the memory route — the per-key cleanup deadlines ride a third state table — so the
+    // shape probe alone decides, and it must accept this query.
+    org.apache.flink.table.types.logical.RowType overRow =
+        org.apache.flink.table.types.logical.RowType.of(
+            new org.apache.flink.table.types.logical.BigIntType(),
+            new org.apache.flink.table.types.logical.BigIntType(),
+            new org.apache.flink.table.types.logical.BigIntType(),
+            new org.apache.flink.table.types.logical.LocalZonedTimestampType(3));
+    try (org.apache.arrow.memory.BufferAllocator allocator =
+            new org.apache.arrow.memory.RootAllocator();
+        org.apache.arrow.c.ArrowSchema schema =
+            org.apache.arrow.c.ArrowSchema.allocateNew(allocator)) {
+      org.apache.arrow.c.Data.exportSchema(
+          allocator,
+          io.github.jordepic.streamfusion.arrow.ArrowConversion.toArrowSchema(overRow),
+          null,
+          schema);
+      org.junit.jupiter.api.Assertions.assertTrue(
+          Native.paimonOverStateSupported(
+              schema.memoryAddress(), new int[] {0}, new int[] {0}, 0, false),
+          "the retention-bounded rowtime OVER must stay persistable on the Paimon backend");
+    }
+    // 1h retention — nothing expires in-test; the operator-harness test covers expiry across a
+    // restore and proves the Paimon route. This pins the end-to-end SQL result with the
+    // deadlines table in the checkpoint.
+    NativeParity.assertParity(
+        () -> {
+          org.apache.flink.table.api.TableEnvironment tEnv = paimonRowtimeEnvironment();
+          tEnv.getConfig().set("table.exec.state.ttl", "1 h");
+          return tEnv;
+        },
+        "SELECT k, v, ts, SUM(v) OVER (PARTITION BY k ORDER BY rt) AS s FROM src");
+  }
+
+  @Test
   void windowTopNOnPaimonBackendMatchesHost() throws Exception {
     // Event-time window Top-N: open windows' buffers stage into the Paimon table at each 50 ms
     // barrier, and every watermark firing merges the write buffer with a committed range scan
@@ -309,6 +346,44 @@ class FlinkPaimonStateBackendSqlHarnessTest {
     // and a watermark firing resolves buffered probes against committed versions.
     NativeParity.assertParity(
         FlinkPaimonStateBackendSqlHarnessTest::paimonTemporalEnvironment,
+        "SELECT o.currency, o.amount, r.rate FROM Orders o"
+            + " JOIN Rates FOR SYSTEM_TIME AS OF o.rt AS r ON o.currency = r.currency");
+  }
+
+  @Test
+  void temporalJoinWithTtlOnPaimonBackendMatchesHost() throws Exception {
+    // The same anti-fallback guard as the keep-first test: both temporal-join sides carry the
+    // rowtime column, and retention no longer forces the memory route — the per-key cleanup
+    // deadlines ride a third state table.
+    org.apache.flink.table.types.logical.RowType sideRow =
+        org.apache.flink.table.types.logical.RowType.of(
+            new org.apache.flink.table.types.logical.VarCharType(
+                org.apache.flink.table.types.logical.VarCharType.MAX_LENGTH),
+            new org.apache.flink.table.types.logical.BigIntType(),
+            new org.apache.flink.table.types.logical.BigIntType(),
+            new org.apache.flink.table.types.logical.LocalZonedTimestampType(3));
+    try (org.apache.arrow.memory.BufferAllocator allocator =
+            new org.apache.arrow.memory.RootAllocator();
+        org.apache.arrow.c.ArrowSchema schema =
+            org.apache.arrow.c.ArrowSchema.allocateNew(allocator)) {
+      org.apache.arrow.c.Data.exportSchema(
+          allocator,
+          io.github.jordepic.streamfusion.arrow.ArrowConversion.toArrowSchema(sideRow),
+          null,
+          schema);
+      org.junit.jupiter.api.Assertions.assertTrue(
+          Native.paimonRowStateSupported(schema.memoryAddress()),
+          "the retention-bounded temporal join must stay persistable on the Paimon backend");
+    }
+    // 1h retention — nothing expires in-test; the operator-harness test covers expiry across a
+    // restore and proves the Paimon route. This pins the end-to-end SQL result with the
+    // deadlines table in the checkpoint.
+    NativeParity.assertParity(
+        () -> {
+          TableEnvironment tEnv = paimonTemporalEnvironment();
+          tEnv.getConfig().set("table.exec.state.ttl", "1 h");
+          return tEnv;
+        },
         "SELECT o.currency, o.amount, r.rate FROM Orders o"
             + " JOIN Rates FOR SYSTEM_TIME AS OF o.rt AS r ON o.currency = r.currency");
   }

@@ -78,18 +78,19 @@ public class NativeTemporalJoinOperator extends AbstractNativeStatefulOperator<A
 
   @Override
   protected PaimonNativeStateSupport resolvePaimonState(boolean rawStateRestored) {
-    // The Paimon shape does not carry per-key cleanup deadlines yet; a retention-bounded join
-    // keeps the memory route (the standard fallback for an unsupported shape).
+    // Deliberately the retention-less resolvePaimon: the persistent deadlines are not truthful
+    // per-row clocks (a deferred or re-armed deadline must never drive a physical drop), so the
+    // maintenance session gets no record-level expiry options — physical cleanup happens through
+    // the operator's own staged tombstones when a deadline fires.
     return resolvePaimon(
         rawStateRestored,
         () ->
-            stateTtlMillis == 0
-                && withSchemas(
-                        (l, r) ->
-                            Native.paimonRowStateSupported(l) && Native.paimonRowStateSupported(r)
-                                ? 1L
-                                : 0L)
-                    != 0);
+            withSchemas(
+                    (l, r) ->
+                        Native.paimonRowStateSupported(l) && Native.paimonRowStateSupported(r)
+                            ? 1L
+                            : 0L)
+                != 0);
   }
 
   @Override
@@ -111,6 +112,8 @@ public class NativeTemporalJoinOperator extends AbstractNativeStatefulOperator<A
                 predicate.doubles,
                 predicate.strings,
                 keyTimestampPrecisions(),
+                stateTtlMillis,
+                getProcessingTimeService().getCurrentProcessingTime(),
                 memoryBudgetBytes(),
                 paimon.tableDirectory(),
                 maxParallelism(),

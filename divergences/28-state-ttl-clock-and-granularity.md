@@ -30,6 +30,13 @@ the watermark trails the wall clock by more than half the retention — is not r
 a key expires at the deadline its last push registered (never sooner than one full max retention
 after its last write).
 
+On the persistent (Paimon) backend the same lazy + sweep scheme narrows once more: the memory
+path visits every buffered key at each watermark advance and can clear an expired key whose rows
+all sit above the watermark, while the backend only sees the keys the watermark actually fires
+(visiting the rest would mean a full state read per advance). Such a key's state lingers until
+its next fire or the once-per-retention sweep — silent either way, since a fired deadline emits
+nothing and the expiry decision at the eventual fire uses the same deadline.
+
 The OVER aggregate's deadline shapes (rowtime frames and proctime bounded ROWS) make the same
 lazy + sweep substitution. Flink's fired timer defers a rowtime key that still has buffered rows
 awaiting a watermark, re-registering from the fire time (`fire + max`); our deferral re-arm runs

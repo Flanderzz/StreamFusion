@@ -312,28 +312,62 @@ impl PaimonIntervalSideStore {
         }
         let merged = self.merge_by_seq(rows)?;
         if let Some(batch) = &merged {
-            let ks = batch.column(1).as_any().downcast_ref::<BinaryArray>().expect("k column");
-            let seqs = batch.column(2).as_any().downcast_ref::<Int64Array>().expect("seq column");
-            let composites: Vec<Vec<u8>> = (0..batch.num_rows())
-                .map(|row| Self::composite_key(ks.value(row), seqs.value(row)))
-                .collect();
-            let composite_slices: Vec<&[u8]> = composites.iter().map(|c| c.as_slice()).collect();
-            let key_groups: Vec<i32> =
-                (0..batch.num_rows()).map(|row| self.core.key_group(ks.value(row))).collect();
-            let mut values: Vec<ArrayRef> = vec![
-                Arc::new(BinaryArray::from_iter_values(
-                    (0..batch.num_rows()).map(|row| ks.value(row)),
-                )),
-                batch.column(2).clone(),
-                new_null_array(&DataType::Int64, batch.num_rows()),
-                new_null_array(&DataType::Boolean, batch.num_rows()),
-            ];
-            for field in &self.payload_fields {
-                values.push(new_null_array(field.data_type(), batch.num_rows()));
-            }
-            self.region.append_deletes(&composite_slices, &key_groups, values)?;
+            self.stage_row_deletes(batch)?;
         }
         Ok(merged)
+    }
+
+    /// Stages a `-D` per row of a store-schema batch (an evict or probe result) — how fired rows
+    /// leave state, and how the deadline retention clears a key's remaining buffered rows.
+    pub(crate) fn stage_row_deletes(&mut self, batch: &RecordBatch) -> Result<(), DataFusionError> {
+        if batch.num_rows() == 0 {
+            return Ok(());
+        }
+        let ks = batch.column(1).as_any().downcast_ref::<BinaryArray>().expect("k column");
+        let seqs = batch.column(2).as_any().downcast_ref::<Int64Array>().expect("seq column");
+        let composites: Vec<Vec<u8>> = (0..batch.num_rows())
+            .map(|row| Self::composite_key(ks.value(row), seqs.value(row)))
+            .collect();
+        let composite_slices: Vec<&[u8]> = composites.iter().map(|c| c.as_slice()).collect();
+        let key_groups: Vec<i32> =
+            (0..batch.num_rows()).map(|row| self.core.key_group(ks.value(row))).collect();
+        let mut values: Vec<ArrayRef> = vec![
+            Arc::new(BinaryArray::from_iter_values(
+                (0..batch.num_rows()).map(|row| ks.value(row)),
+            )),
+            batch.column(2).clone(),
+            new_null_array(&DataType::Int64, batch.num_rows()),
+            new_null_array(&DataType::Boolean, batch.num_rows()),
+        ];
+        for field in &self.payload_fields {
+            values.push(new_null_array(field.data_type(), batch.num_rows()));
+        }
+        self.region.append_deletes(&composite_slices, &key_groups, values)
+    }
+
+    /// The committed table's per-key buffered-row counts — restore-time only (the region is
+    /// empty), deriving the deadline retention's resident counts and its enable-flip key set.
+    pub(crate) fn scan_key_counts(
+        &mut self,
+    ) -> Result<Vec<(ByteKey, u32)>, DataFusionError> {
+        let expected = self.arrow_fields();
+        let committed = {
+            let builder = PredicateBuilder::new(&self.core.fields);
+            let predicate = builder.greater_or_equal(KG_COLUMN, Datum::Int(0)).map_err(pe)?;
+            self.core.scan_predicate(predicate)?
+        };
+        let mut counts: ahash::HashMap<ByteKey, u32> = ahash::HashMap::default();
+        for batch in committed {
+            let ks = normalized_column(&batch, 1, &expected[1])?;
+            let ks = ks
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .ok_or_else(|| DataFusionError::Internal("paimon k column".into()))?;
+            for row in 0..batch.num_rows() {
+                *counts.entry(ByteKey::from(ks.value(row))).or_insert(0) += 1;
+            }
+        }
+        Ok(counts.into_iter().collect())
     }
 
     /// Re-stages fully-formed store-schema rows (a probe result's matched rows) with

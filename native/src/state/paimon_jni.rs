@@ -1833,24 +1833,23 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_closePaimonWi
 }
 
 // ---------------------------------------------------------------------------------------------
-// Event-time OVER on the two-table over store: pending rows (dirty region + range overlay) plus
-// per-key fold state (point-access dirty slots). The snapshot token packs both snapshot ids and
-// the arrival sequence ("<pending>:<folds>:<seq>") — the sequence orders pending rows across a
-// restore; without it a restored subtask's new rows would emit ahead of older buffered rows.
+// Event-time OVER on the over store: pending rows (dirty region + range overlay), per-key fold
+// state (point-access dirty slots), and — with retention on — the per-key cleanup deadlines. The
+// snapshot token packs the snapshot ids and the arrival sequence
+// ("<pending>:<folds>:<seq>:<deadlines>") — the sequence orders pending rows across a restore;
+// without it a restored subtask's new rows would emit ahead of older buffered rows.
 // ---------------------------------------------------------------------------------------------
 
-/// Parses one restored over-store token — `"<pending id>:<folds id>:<next seq>"`, either id `-1`
-/// when that table had never committed.
-fn parse_over_token(token: &str) -> (i64, i64, i64) {
-    let mut parts = token.splitn(3, ':');
-    let pending = parts.next().expect("over paimon token");
-    let folds = parts.next().expect("over paimon folds id");
-    let seq = parts.next().expect("over paimon sequence");
-    (
-        pending.parse::<i64>().expect("over pending snapshot id"),
-        folds.parse::<i64>().expect("over folds snapshot id"),
-        seq.parse::<i64>().expect("over arrival sequence"),
-    )
+/// Parses one restored over-store token — any id `-1` when that table had never committed. The
+/// deadlines field is optional: a pre-retention token has three fields, and its absence IS the
+/// enable-flip signal (no deadlines table to restore).
+fn parse_over_token(token: &str) -> (i64, i64, i64, i64) {
+    let fields: Vec<i64> = token
+        .split(':')
+        .map(|field| field.parse::<i64>().expect("over paimon token field"))
+        .collect();
+    assert!(fields.len() >= 3, "over paimon snapshot token");
+    (fields[0], fields[1], fields[2], fields.get(3).copied().unwrap_or(-1))
 }
 
 /// True when this OVER instance's whole state shape is persistable: a watermark-driven fold
@@ -1904,6 +1903,8 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonO
     frame_offset: jlong,
     key_timestamp_precisions: JIntArray<'local>,
     row_schema_address: jlong,
+    state_ttl_millis: jlong,
+    now_millis: jlong,
     memory_budget_bytes: jlong,
     table_directory: JString<'local>,
     max_parallelism: jint,
@@ -1947,21 +1948,28 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonO
             .into_iter()
             .flatten()
             .collect();
+        // Flink's exact cleaning enablement (`minRetentionTime > 1`): the deadlines table exists
+        // only while cleaning is on, so a retention-off restore sheds any restored deadlines.
+        let retention = state_ttl_millis > 1;
         let mut next_seq = 0i64;
         let mut pending_sources: Vec<(String, i64)> = Vec::new();
         let mut fold_sources: Vec<(String, i64)> = Vec::new();
+        let mut deadline_sources: Vec<(String, i64)> = Vec::new();
         for (dir, token) in source_dirs.iter().zip(
             read_strings(&mut env, &source_snapshot_tokens)
                 .into_iter()
                 .flatten(),
         ) {
-            let (pending_id, folds_id, seq) = parse_over_token(&token);
+            let (pending_id, folds_id, seq, deadlines_id) = parse_over_token(&token);
             next_seq = next_seq.max(seq);
             if pending_id >= 0 {
                 pending_sources.push((format!("{dir}/pending"), pending_id));
             }
             if folds_id >= 0 {
                 fold_sources.push((format!("{dir}/folds"), folds_id));
+            }
+            if retention && deadlines_id >= 0 {
+                deadline_sources.push((format!("{dir}/deadlines"), deadlines_id));
             }
         }
 
@@ -1975,7 +1983,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonO
             ttl_ms: 0,
         };
         let store = if source_dirs.is_empty() {
-            PaimonOverStore::create(config, payload_types, state_types)
+            PaimonOverStore::create(config, payload_types, state_types, retention)
         } else {
             PaimonOverStore::open_merged(
                 config,
@@ -1983,6 +1991,8 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonO
                 state_types,
                 &pending_sources,
                 &fold_sources,
+                &deadline_sources,
+                retention,
                 key_group_start..=key_group_end,
                 aligned != 0,
             )
@@ -2000,8 +2010,15 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonO
                 false,
             )
             .with_key_timestamp_precisions(timestamp_precisions)
+            .with_state_retention(state_ttl_millis)
             .with_backend(store)
             .with_read_through_budget(memory_budget_bytes)
+        });
+        let aggregator = aggregator.and_then(|mut aggregator| {
+            if !source_dirs.is_empty() {
+                aggregator.hydrate_backend_retention(now_millis)?;
+            }
+            Ok(aggregator)
         });
         boxed_or_throw(&mut env, aggregator)
     })
@@ -2017,15 +2034,14 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushPaimonOve
     handle: jlong,
     in_array_address: jlong,
     in_schema_address: jlong,
+    now_millis: jlong,
 ) {
     crate::bridge::jni_guard(env, move |mut env| {
         let aggregator = unsafe { &mut *(handle as *mut crate::over_agg::OverWindowAggregator) };
         // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
-        // The persistent shape carries no retention (gated on the Java side), so the deadline
-        // clock is never read.
         let result = {
             let batch = import_record_batch(in_array_address, in_schema_address);
-            aggregator.push(batch, 0)
+            aggregator.push(batch, now_millis)
         };
         if let Err(e) = result {
             throw_memory_limit(&mut env, &e.to_string());
@@ -2043,20 +2059,21 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_flushPaimonOv
     _class: JClass<'local>,
     handle: jlong,
     watermark_millis: jlong,
+    now_millis: jlong,
     out_array_address: jlong,
     out_schema_address: jlong,
 ) {
     crate::bridge::jni_guard(env, move |mut env| {
         let aggregator = unsafe { &mut *(handle as *mut crate::over_agg::OverWindowAggregator) };
-        match aggregator.flush(watermark_millis, 0) {
+        match aggregator.flush(watermark_millis, now_millis) {
             Ok(result) => export_record_batch(result, out_array_address, out_schema_address),
             Err(e) => throw_memory_limit(&mut env, &e.to_string()),
         }
     })
 }
 
-/// Checkpoint sync phase (task thread, at the barrier): commits both tables; the token line
-/// packs both snapshot ids and the arrival sequence.
+/// Checkpoint sync phase (task thread, at the barrier): commits every table; the token line
+/// packs the snapshot ids and the arrival sequence.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_checkpointPaimonOverAggregator<
     'local,
@@ -2070,23 +2087,33 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_checkpointPai
         let store = aggregator.store_mut();
         let next_seq = store.next_seq();
         match store.checkpoint() {
-            Ok((pending, folds)) => {
-                let token = if pending.snapshot_id < 0 && folds.snapshot_id < 0 {
+            Ok((pending, folds, deadlines)) => {
+                let token = if pending.snapshot_id < 0
+                    && folds.snapshot_id < 0
+                    && deadlines.snapshot_id < 0
+                {
                     String::new()
                 } else {
-                    format!("{}:{}:{}", pending.snapshot_id, folds.snapshot_id, next_seq)
+                    format!(
+                        "{}:{}:{}:{}",
+                        pending.snapshot_id, folds.snapshot_id, next_seq, deadlines.snapshot_id
+                    )
                 };
                 let mut lines = Vec::with_capacity(
                     1 + pending.data_files.len()
                         + pending.meta_files.len()
                         + folds.data_files.len()
-                        + folds.meta_files.len(),
+                        + folds.meta_files.len()
+                        + deadlines.data_files.len()
+                        + deadlines.meta_files.len(),
                 );
                 lines.push(token);
                 lines.extend(pending.data_files.iter().map(|f| format!("d:pending/{f}")));
                 lines.extend(folds.data_files.iter().map(|f| format!("d:folds/{f}")));
+                lines.extend(deadlines.data_files.iter().map(|f| format!("d:deadlines/{f}")));
                 lines.extend(pending.meta_files.iter().map(|f| format!("m:pending/{f}")));
                 lines.extend(folds.meta_files.iter().map(|f| format!("m:folds/{f}")));
+                lines.extend(deadlines.meta_files.iter().map(|f| format!("m:deadlines/{f}")));
                 let array = env
                     .new_object_array(lines.len() as i32, "java/lang/String", JObject::null())
                     .expect("manifest array");
@@ -2924,21 +2951,21 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_checkpointPai
 
 // ---------------------------------------------------------------------------------------------
 // Temporal join: probe side on a keyed row buffer, versioned build side on plain upserts (the
-// deduplicate merge engine IS last-write-wins per version timestamp). The snapshot token packs
-// both snapshot ids and the probe side's arrival sequence ("<left>:<right>:<lseq>").
+// deduplicate merge engine IS last-write-wins per version timestamp), plus — with retention on —
+// the per-key cleanup deadlines. The snapshot token packs the snapshot ids and the probe side's
+// arrival sequence ("<left>:<right>:<lseq>:<deadlines>").
 // ---------------------------------------------------------------------------------------------
 
-/// Parses one restored temporal-join token — either id `-1` when that side had never committed.
-fn parse_temporal_token(token: &str) -> (i64, i64, i64) {
-    let mut parts = token.splitn(3, ':');
-    let mut next = || {
-        parts
-            .next()
-            .expect("temporal-join paimon snapshot token")
-            .parse::<i64>()
-            .expect("temporal-join paimon token field")
-    };
-    (next(), next(), next())
+/// Parses one restored temporal-join token — any id `-1` when that table had never committed.
+/// The deadlines field is optional: a pre-retention token has three fields, and its absence IS
+/// the enable-flip signal (no deadlines table to restore).
+fn parse_temporal_token(token: &str) -> (i64, i64, i64, i64) {
+    let fields: Vec<i64> = token
+        .split(':')
+        .map(|field| field.parse::<i64>().expect("temporal-join paimon token field"))
+        .collect();
+    assert!(fields.len() >= 3, "temporal-join paimon snapshot token");
+    (fields[0], fields[1], fields[2], fields.get(3).copied().unwrap_or(-1))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2962,6 +2989,8 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonT
     pred_doubles: JDoubleArray<'local>,
     pred_strings: JObjectArray<'local>,
     key_timestamp_precisions: JIntArray<'local>,
+    state_ttl_millis: jlong,
+    now_millis: jlong,
     memory_budget_bytes: jlong,
     table_directory: JString<'local>,
     max_parallelism: jint,
@@ -2999,21 +3028,28 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonT
             .into_iter()
             .flatten()
             .collect();
+        // Flink's exact cleaning enablement (`minRetentionTime > 1`): the deadlines table exists
+        // only while cleaning is on, so a retention-off restore sheds any restored deadlines.
+        let retention = state_ttl_millis > 1;
         let mut left_seq = 0i64;
         let mut left_sources: Vec<(String, i64)> = Vec::new();
         let mut right_sources: Vec<(String, i64)> = Vec::new();
+        let mut deadline_sources: Vec<(String, i64)> = Vec::new();
         for (dir, token) in source_dirs.iter().zip(
             read_strings(&mut env, &source_snapshot_tokens)
                 .into_iter()
                 .flatten(),
         ) {
-            let (left_id, right_id, lseq) = parse_temporal_token(&token);
+            let (left_id, right_id, lseq, deadlines_id) = parse_temporal_token(&token);
             left_seq = left_seq.max(lseq);
             if left_id >= 0 {
                 left_sources.push((format!("{dir}/left"), left_id));
             }
             if right_id >= 0 {
                 right_sources.push((format!("{dir}/right"), right_id));
+            }
+            if retention && deadlines_id >= 0 {
+                deadline_sources.push((format!("{dir}/deadlines"), deadlines_id));
             }
         }
 
@@ -3033,7 +3069,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonT
             ttl_ms: 0,
         };
         let store = if source_dirs.is_empty() {
-            PaimonTemporalJoinStore::create(config, left_types, right_types)
+            PaimonTemporalJoinStore::create(config, left_types, right_types, retention)
         } else {
             PaimonTemporalJoinStore::open_merged(
                 config,
@@ -3041,6 +3077,8 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonT
                 right_types,
                 &left_sources,
                 &right_sources,
+                &deadline_sources,
+                retention,
                 key_group_start..=key_group_end,
                 aligned != 0,
             )
@@ -3058,15 +3096,22 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonT
                 predicate,
             )
             .with_key_timestamp_precisions(timestamp_precisions)
+            .with_state_retention(state_ttl_millis)
             .with_backend(store)
             .with_read_through_budget(memory_budget_bytes)
+        });
+        let joiner = joiner.and_then(|mut joiner| {
+            if !source_dirs.is_empty() {
+                joiner.hydrate_backend_retention(now_millis)?;
+            }
+            Ok(joiner)
         });
         boxed_or_throw(&mut env, joiner)
     })
 }
 
-/// Checkpoint sync phase (task thread, at the barrier): commits both side tables; the token line
-/// packs both snapshot ids and the probe side's arrival sequence.
+/// Checkpoint sync phase (task thread, at the barrier): commits every table; the token line
+/// packs the snapshot ids and the probe side's arrival sequence.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_checkpointPaimonTemporalJoiner<
     'local,
@@ -3080,23 +3125,33 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_checkpointPai
         let store = joiner.store_mut();
         let left_seq = store.left.next_seq();
         match store.checkpoint() {
-            Ok((left, right)) => {
-                let token = if left.snapshot_id < 0 && right.snapshot_id < 0 {
+            Ok((left, right, deadlines)) => {
+                let token = if left.snapshot_id < 0
+                    && right.snapshot_id < 0
+                    && deadlines.snapshot_id < 0
+                {
                     String::new()
                 } else {
-                    format!("{}:{}:{}", left.snapshot_id, right.snapshot_id, left_seq)
+                    format!(
+                        "{}:{}:{}:{}",
+                        left.snapshot_id, right.snapshot_id, left_seq, deadlines.snapshot_id
+                    )
                 };
                 let mut lines = Vec::with_capacity(
                     1 + left.data_files.len()
                         + left.meta_files.len()
                         + right.data_files.len()
-                        + right.meta_files.len(),
+                        + right.meta_files.len()
+                        + deadlines.data_files.len()
+                        + deadlines.meta_files.len(),
                 );
                 lines.push(token);
                 lines.extend(left.data_files.iter().map(|f| format!("d:left/{f}")));
                 lines.extend(right.data_files.iter().map(|f| format!("d:right/{f}")));
+                lines.extend(deadlines.data_files.iter().map(|f| format!("d:deadlines/{f}")));
                 lines.extend(left.meta_files.iter().map(|f| format!("m:left/{f}")));
                 lines.extend(right.meta_files.iter().map(|f| format!("m:right/{f}")));
+                lines.extend(deadlines.meta_files.iter().map(|f| format!("m:deadlines/{f}")));
                 let array = env
                     .new_object_array(lines.len() as i32, "java/lang/String", JObject::null())
                     .expect("manifest array");

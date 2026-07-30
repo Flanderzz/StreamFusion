@@ -47,6 +47,7 @@ mod window_agg;
 mod session_agg;
 mod interval_join;
 mod temporal_join;
+mod deadline;
 
 pub(crate) use list::*;
 pub(crate) use map::*;
@@ -60,6 +61,7 @@ pub(crate) use window_agg::*;
 pub(crate) use session_agg::*;
 pub(crate) use interval_join::*;
 pub(crate) use temporal_join::*;
+pub(crate) use deadline::*;
 
 use crate::state::dirty_region::DirtyRegion;
 use crate::*;
@@ -80,6 +82,7 @@ const KG_COLUMN: &str = "kg";
 const KEY_COLUMN: &str = "k";
 const VALUE_KIND_COLUMN: &str = "_VALUE_KIND";
 
+const DEADLINE_COLUMN: &str = "cleanup_at";
 const FIRED_COLUMN: &str = "fired";
 const INNER_RANK_COLUMN: &str = "ir";
 const KIND_COLUMN: &str = "kind";
@@ -311,6 +314,14 @@ pub(crate) struct PaimonCheckpointManifest {
     pub snapshot_id: i64,
     pub data_files: Vec<String>,
     pub meta_files: Vec<String>,
+}
+
+impl PaimonCheckpointManifest {
+    /// The manifest of a table this operator instance does not carry (id `-1`, no files) — a
+    /// retention-off operator's deadlines slot in a multi-table snapshot token.
+    pub(crate) fn absent() -> Self {
+        PaimonCheckpointManifest { snapshot_id: -1, data_files: Vec::new(), meta_files: Vec::new() }
+    }
 }
 
 /// One working-set entry. `dirty: true` slots are the write buffer — every entry written since

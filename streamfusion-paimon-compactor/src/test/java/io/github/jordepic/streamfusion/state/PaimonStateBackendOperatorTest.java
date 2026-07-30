@@ -6,11 +6,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.github.jordepic.streamfusion.operator.ArrowBatch;
 import io.github.jordepic.streamfusion.operator.ArrowBatchSerializer;
+import io.github.jordepic.streamfusion.operator.EncodedPredicate;
 import io.github.jordepic.streamfusion.operator.NativeColumnarChangelogNormalizeOperator;
 import io.github.jordepic.streamfusion.operator.NativeColumnarGroupAggregateOperator;
 import io.github.jordepic.streamfusion.operator.NativeColumnarKeepLastDeduplicateOperator;
 import io.github.jordepic.streamfusion.operator.NativeColumnarTopNOperator;
 import io.github.jordepic.streamfusion.operator.NativeColumnarUpdatingJoinOperator;
+import io.github.jordepic.streamfusion.operator.NativeOverAggregateOperator;
+import io.github.jordepic.streamfusion.operator.NativeTemporalJoinOperator;
 import io.github.jordepic.streamfusion.operator.RowDataArrowConverter;
 import java.util.ArrayList;
 import java.util.List;
@@ -25,8 +28,10 @@ import org.apache.flink.runtime.state.IncrementalRemoteKeyedStateHandle;
 import org.apache.flink.runtime.state.KeyedStateHandle;
 import org.apache.flink.runtime.state.PlaceholderStreamStateHandle;
 import org.apache.flink.runtime.state.SharedStateRegistryImpl;
+import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.streaming.util.KeyedOneInputStreamOperatorTestHarness;
+import org.apache.flink.streaming.util.KeyedTwoInputStreamOperatorTestHarness;
 import org.apache.flink.table.data.GenericRowData;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.types.logical.BigIntType;
@@ -173,6 +178,144 @@ class PaimonStateBackendOperatorTest {
       harness.setProcessingTime(6000);
       harness.processElement(new StreamRecord<>(batch(allocator, row(1, 5))));
       assertEquals(List.of(insert(1, 5)), collect(harness));
+    }
+  }
+
+  /**
+   * A retention-bounded event-time OVER rides the Paimon route: the per-key cleanup deadline
+   * persists absolutely in the deadlines table, so after restore the key folds fresh at exactly
+   * the writer's deadline. The deadline shapes deliberately register no retention with the
+   * backend ({@code resolvePaimon} without a TTL) — a deferred or re-armed deadline is not a
+   * truthful per-row clock, so every maintenance session opens WITHOUT record-level expiry
+   * options ({@link #recordLevelExpireOptionsPadTheRetention} pins the zero-retention mapping,
+   * and {@code JavaPaimonStateCompactorTtlTest.sessionWithoutOptionsNeverDropsRows} that such a
+   * session never drops rows); physical cleanup is the operator's own staged tombstones.
+   */
+  @Test
+  void overAggregateRetentionExpiresAcrossCheckpointAndRestore() throws Exception {
+    OperatorSubtaskState snapshot;
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness =
+            overHarness(2000)) {
+      harness.setStateBackend(new PaimonStateBackend());
+      harness.setup(new ArrowBatchSerializer());
+      harness.open();
+
+      // The element at 5000 arms the key's cleanup deadline at 5000 + 1.5x2000 = 8000.
+      harness.setProcessingTime(5000);
+      harness.processElement(
+          new StreamRecord<>(
+              new ArrowBatch(
+                  RowDataArrowConverter.write(
+                      List.of(GenericRowData.of(1L, 10L, 100L)), OVER_ROW, allocator))));
+      harness.processWatermark(new Watermark(200));
+      assertEquals(List.of(List.of(RowKind.INSERT, 1L, 10L, 100L, 10L)), collectOver(harness));
+      snapshot = harness.snapshot(1, 1);
+      paimonHandle(snapshot); // the retention-bounded OVER must resolve to the Paimon route
+      harness.notifyOfCompletedCheckpoint(1);
+    }
+
+    // One ms inside the restored (absolute) deadline the fold continues from the table...
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness =
+            overHarness(2000)) {
+      harness.setStateBackend(new PaimonStateBackend());
+      harness.setup(new ArrowBatchSerializer());
+      harness.initializeState(snapshot);
+      harness.open();
+      harness.setProcessingTime(7999);
+      harness.processElement(
+          new StreamRecord<>(
+              new ArrowBatch(
+                  RowDataArrowConverter.write(
+                      List.of(GenericRowData.of(1L, 5L, 300L)), OVER_ROW, allocator))));
+      harness.processWatermark(new Watermark(400));
+      assertEquals(List.of(List.of(RowKind.INSERT, 1L, 5L, 300L, 15L)), collectOver(harness));
+    }
+
+    // ...and at exactly the deadline the key's fold cleared: the running sum restarts fresh.
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness =
+            overHarness(2000)) {
+      harness.setStateBackend(new PaimonStateBackend());
+      harness.setup(new ArrowBatchSerializer());
+      harness.initializeState(snapshot);
+      harness.open();
+      harness.setProcessingTime(8000);
+      harness.processElement(
+          new StreamRecord<>(
+              new ArrowBatch(
+                  RowDataArrowConverter.write(
+                      List.of(GenericRowData.of(1L, 5L, 300L)), OVER_ROW, allocator))));
+      harness.processWatermark(new Watermark(400));
+      assertEquals(List.of(List.of(RowKind.INSERT, 1L, 5L, 300L, 5L)), collectOver(harness));
+    }
+  }
+
+  /**
+   * A retention-bounded temporal join rides the Paimon route with the same absolute-deadline
+   * semantics: past the restored deadline the key's whole state — both sides — is gone, so the
+   * probe null-pads exactly as if no version ever existed. See the OVER test above for why the
+   * maintenance session gets no record-level expiry options.
+   */
+  @Test
+  void temporalJoinRetentionExpiresAcrossCheckpointAndRestore() throws Exception {
+    OperatorSubtaskState snapshot;
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedTwoInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch, ArrowBatch>
+            harness = temporalHarness(2000)) {
+      harness.setStateBackend(new PaimonStateBackend());
+      harness.setup(new ArrowBatchSerializer());
+      harness.open();
+
+      // The build version at 5000 arms the key's cleanup deadline at 5000 + 1.5x2000 = 8000.
+      harness.setProcessingTime(5000);
+      harness.processElement2(
+          new StreamRecord<>(
+              new ArrowBatch(
+                  RowDataArrowConverter.write(
+                      List.of(GenericRowData.of(1L, 10L, 100L)), TEMPORAL_ROW, allocator, true))));
+      snapshot = harness.snapshot(1, 1);
+      paimonHandle(snapshot); // the retention-bounded join must resolve to the Paimon route
+      harness.notifyOfCompletedCheckpoint(1);
+    }
+
+    // One ms inside the restored (absolute) deadline the probe still joins the version...
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedTwoInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch, ArrowBatch>
+            harness = temporalHarness(2000)) {
+      harness.setStateBackend(new PaimonStateBackend());
+      harness.setup(new ArrowBatchSerializer());
+      harness.initializeState(snapshot);
+      harness.open();
+      harness.setProcessingTime(7999);
+      harness.processElement1(
+          new StreamRecord<>(
+              new ArrowBatch(
+                  RowDataArrowConverter.write(
+                      List.of(GenericRowData.of(1L, 1L, 200L)), TEMPORAL_ROW, allocator))));
+      harness.processBothWatermarks(new Watermark(Long.MAX_VALUE));
+      assertEquals(
+          List.of(temporalRow(1L, 1L, 200L, 1L, 10L, 100L)), collectTemporal(harness));
+    }
+
+    // ...and at exactly the deadline the key's whole state cleared: the LEFT probe null-pads.
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedTwoInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch, ArrowBatch>
+            harness = temporalHarness(2000)) {
+      harness.setStateBackend(new PaimonStateBackend());
+      harness.setup(new ArrowBatchSerializer());
+      harness.initializeState(snapshot);
+      harness.open();
+      harness.setProcessingTime(8000);
+      harness.processElement1(
+          new StreamRecord<>(
+              new ArrowBatch(
+                  RowDataArrowConverter.write(
+                      List.of(GenericRowData.of(1L, 1L, 200L)), TEMPORAL_ROW, allocator))));
+      harness.processBothWatermarks(new Watermark(Long.MAX_VALUE));
+      assertEquals(
+          List.of(temporalRow(1L, 1L, 200L, null, null, null)), collectTemporal(harness));
     }
   }
 
@@ -750,6 +893,133 @@ class PaimonStateBackendOperatorTest {
         try (VectorSchemaRoot root = ((ArrowBatch) ((StreamRecord<?>) event).getValue()).root()) {
           for (RowData row : RowDataArrowConverter.read(root, DEDUP_ROW)) {
             rows.add(List.of(row.getRowKind(), row.getLong(0), row.getLong(1), row.getLong(2)));
+          }
+        }
+      }
+    }
+    return rows;
+  }
+
+  /** OVER input `[k, v, rt]` (rt as BIGINT millis); output appends the running SUM. */
+  private static final RowType OVER_ROW =
+      RowType.of(
+          new LogicalType[] {new BigIntType(), new BigIntType(), new BigIntType()},
+          new String[] {"k", "v", "rt"});
+  private static final RowType OVER_OUTPUT =
+      RowType.of(
+          new LogicalType[] {
+            new BigIntType(), new BigIntType(), new BigIntType(), new BigIntType()
+          },
+          new String[] {"k", "v", "rt", "s"});
+
+  private static KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch>
+      overHarness(long stateTtlMillis) throws Exception {
+    NativeOverAggregateOperator operator =
+        new NativeOverAggregateOperator(
+            2,
+            new int[] {1},
+            new int[] {0},
+            new int[] {0},
+            new int[] {0},
+            0,
+            0L,
+            false,
+            new int[] {-1},
+            stateTtlMillis,
+            OVER_ROW,
+            MAX_PARALLELISM);
+    return new KeyedOneInputStreamOperatorTestHarness<>(
+        operator, batch -> 0, Types.INT, MAX_PARALLELISM, 1, 0);
+  }
+
+  private static List<List<Object>> collectOver(
+      KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness) {
+    List<List<Object>> rows = new ArrayList<>();
+    while (!harness.getOutput().isEmpty()) {
+      Object event = harness.getOutput().poll();
+      if (event instanceof StreamRecord) {
+        try (VectorSchemaRoot root = ((ArrowBatch) ((StreamRecord<?>) event).getValue()).root()) {
+          for (RowData row : RowDataArrowConverter.read(root, OVER_OUTPUT)) {
+            rows.add(
+                List.of(
+                    row.getRowKind(),
+                    row.getLong(0),
+                    row.getLong(1),
+                    row.getLong(2),
+                    row.getLong(3)));
+          }
+        }
+      }
+    }
+    return rows;
+  }
+
+  /** Both temporal-join sides `[k, v, rt]` (rt as BIGINT millis); LEFT join, equi key column 0. */
+  private static final RowType TEMPORAL_ROW =
+      RowType.of(
+          new LogicalType[] {new BigIntType(), new BigIntType(), new BigIntType()},
+          new String[] {"k", "v", "rt"});
+  private static final RowType TEMPORAL_OUTPUT =
+      RowType.of(
+          new LogicalType[] {
+            new BigIntType(),
+            new BigIntType(),
+            new BigIntType(),
+            new BigIntType(),
+            new BigIntType(),
+            new BigIntType()
+          },
+          new String[] {"k", "v", "rt", "k0", "v0", "rt0"});
+
+  private static KeyedTwoInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch, ArrowBatch>
+      temporalHarness(long stateTtlMillis) throws Exception {
+    NativeTemporalJoinOperator operator =
+        new NativeTemporalJoinOperator(
+            new int[] {0},
+            new int[] {0},
+            2,
+            2,
+            1, // LEFT
+            TEMPORAL_ROW,
+            TEMPORAL_ROW,
+            EncodedPredicate.NONE,
+            new int[] {-1},
+            stateTtlMillis,
+            MAX_PARALLELISM);
+    return new KeyedTwoInputStreamOperatorTestHarness<>(
+        operator, batch -> 0, batch -> 0, Types.INT, MAX_PARALLELISM, 1, 0);
+  }
+
+  private static List<Object> temporalRow(Long lk, Long lv, Long lrt, Long rk, Long rv, Long rrt) {
+    List<Object> values = new ArrayList<>();
+    values.add(RowKind.INSERT);
+    values.add(lk);
+    values.add(lv);
+    values.add(lrt);
+    values.add(rk);
+    values.add(rv);
+    values.add(rrt);
+    return values;
+  }
+
+  private static List<List<Object>> collectTemporal(
+      KeyedTwoInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch, ArrowBatch>
+          harness) {
+    List<List<Object>> rows = new ArrayList<>();
+    while (!harness.getOutput().isEmpty()) {
+      Object event = harness.getOutput().poll();
+      if (event instanceof StreamRecord) {
+        try (VectorSchemaRoot root = ((ArrowBatch) ((StreamRecord<?>) event).getValue()).root()) {
+          for (RowData row : RowDataArrowConverter.read(root, TEMPORAL_OUTPUT)) {
+            List<Object> values = new ArrayList<>();
+            values.add(row.getRowKind());
+            values.add(row.getLong(0));
+            values.add(row.getLong(1));
+            values.add(row.getLong(2));
+            values.add(row.isNullAt(3) ? null : row.getLong(3));
+            values.add(row.isNullAt(4) ? null : row.getLong(4));
+            values.add(row.isNullAt(5) ? null : row.getLong(5));
+            rows.add(values);
           }
         }
       }
