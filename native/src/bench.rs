@@ -150,11 +150,11 @@ impl Over {
     }
 
     pub fn push(&mut self, batch: RecordBatch) {
-        self.0.push(batch).expect("budget exceeded");
+        self.0.push(batch, 0).expect("budget exceeded");
     }
 
     pub fn flush(&mut self, watermark: i64) -> RecordBatch {
-        self.0.flush(watermark).expect("budget exceeded")
+        self.0.flush(watermark, 0).expect("budget exceeded")
     }
 }
 

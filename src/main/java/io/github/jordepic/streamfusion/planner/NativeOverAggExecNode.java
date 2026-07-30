@@ -77,13 +77,16 @@ public class NativeOverAggExecNode extends ExecNodeBase<ArrowBatch>
     int[] stateKeys = FlinkKeyGroupUtils.stateKeysForSubtasks(maxParallelism, input.getParallelism());
     KeySelector<ArrowBatch, Integer> stateKeySelector =
         batch -> stateKeys[batch.destination() >= 0 ? batch.destination() : 0];
+    // The job-wide retention only: Flink's StreamExecOverAggregate reads the config directly,
+    // with no STATE_TTL hint support. The 1.5x max deadline horizon is derived natively.
+    long stateTtlMillis = config.getStateRetentionTime();
     OneInputTransformation<ArrowBatch, ArrowBatch> transformation =
         ExecNodeUtil.createOneInputTransformation(
             input,
             createTransformationMeta(TRANSFORMATION, config),
             new NativeOverAggregateOperator(
                 timeColumn, valueColumns, keyColumns, valueTypes, aggregateKinds, frameKind,
-                frameOffset, proctime, keyTimestampPrecisions,
+                frameOffset, proctime, keyTimestampPrecisions, stateTtlMillis,
                 (RowType) getInputEdges().get(0).getOutputType(), maxParallelism),
             ArrowBatchTypeInformation.INSTANCE,
             input.getParallelism(),

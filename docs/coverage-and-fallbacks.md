@@ -256,14 +256,24 @@ lazily at each key touch plus a once-per-retention silent sweep (equivalent to t
 firing emits nothing — divergences/28), rides checkpoints absolutely, and cleaning is enabled
 only when the retention exceeds one millisecond — Flink's literal `minRetentionTime > 1` quirk.
 
-Only OVER declines a nonzero retention, permanently: Flink expires its state on the same per-key
-1.5×-retention cleanup timers, a scheme the native OVER operator does not yet reproduce. Window
-operators and the interval join are unaffected — Flink applies no idle-state TTL there. TTL works
-on both state backends, except that a retention-bounded temporal join keeps the memory checkpoint
-route (its persistent shape carries no cleanup deadlines yet); see §(c) for the
+**OVER** runs retention natively across all three of Flink's schemes, which vary by shape. The
+rowtime frames and the proctime bounded-ROWS frame keep the same per-key cleanup deadline as the
+temporal join (registered on every element, hysteresis, `minRetentionTime > 1` enablement, lazy
+check + sweep), clearing the key's accumulator and frame buffer silently — with one wrinkle: at
+the deadline the rowtime shapes defer while the key still has buffered rows the watermark has not
+folded (Flink's timer re-registers and waits), whereas proctime bounded ROWS clears its retract
+frame unconditionally, so the frame observably restarts short. The proctime unbounded fold
+instead puts a per-value TTL (`> 0` enables, last-write refresh) on its accumulator — an expired
+key visibly restarts its running fold, and its ROW_NUMBER/RANK numbering, from zero, exactly as
+Flink's `NeverReturnExpired` state does. The bounded-RANGE rowtime frame takes no retention at
+all — Flink's own function accepts none (its frame eviction already bounds state) — so
+`table.exec.state.ttl` changes nothing there. With that, NOTHING declines a nonzero retention.
+Window operators and the interval join are unaffected — Flink applies no idle-state TTL there.
+TTL works on both state backends, except that a retention-bounded temporal join or OVER keeps the
+memory checkpoint route (their persistent shapes carry no retention stamps yet); see §(c) for the
 persistent-backend mechanics.
 
-- **OVER** — idle-state TTL ≠ 0 (permanent, above); a frame not of the form `… PRECEDING .. CURRENT ROW` (a `ROWS`/`RANGE` lower bound that
+- **OVER** — a frame not of the form `… PRECEDING .. CURRENT ROW` (a `ROWS`/`RANGE` lower bound that
   is not a constant preceding offset); a bounded-RANGE frame over a proctime order (wall-clock
   interval, non-deterministic); an aggregate that is `AVG`, `COUNT(*)`, or reads a non-numeric /
   decimal column (numeric value columns are bigint/int/smallint/tinyint/double/float); `PARTITION BY`
@@ -775,8 +785,8 @@ the operator just checkpoints its state the old way, in full):
   its stale versions (all below the latest one at or under the watermark) at each firing, while
   an unprobed key's old versions sit on disk until its next probe — correctness never depends on
   pruning (lookups always take the latest version at or under the probe time), only state size
-  does. A retention-bounded temporal join keeps the memory checkpoint route: the persistent
-  shape carries no per-key cleanup deadlines yet. With that, **every stateful native operator's event-time mode runs on the backend**;
+  does. A retention-bounded temporal join or OVER keeps the memory checkpoint route: those
+  persistent shapes carry no retention stamps yet. With that, **every stateful native operator's event-time mode runs on the backend**;
   what keeps memory state is exactly the proctime modes (processing-time timer deadlines travel
   in raw state), bounded OVER frames, the local two-phase window half, and the multiset/type
   gates below.

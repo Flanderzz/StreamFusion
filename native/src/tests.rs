@@ -956,16 +956,16 @@ fn over_window_buffers_and_passes_through() {
     ]));
     let batch = RecordBatch::try_new(schema, vec![k, v, rt]).unwrap();
     let mut over = OverWindowAggregator::new(vec![0], vec![0], 2, vec![1], vec![0], 0, 0, false);
-    over.push(batch);
+    over.push(batch, 0).unwrap();
     // Watermark 2000ms completes the first three rows (rt 0/1000/500); the rt=9000 row stays.
-    let out = over.flush(2000).unwrap();
+    let out = over.flush(2000, 0).unwrap();
     assert_eq!(out.num_rows(), 3);
     assert_eq!(values(&out, 0), vec![1, 1, 2]); // k passed through
     assert_eq!(values(&out, 1), vec![10, 20, 100]); // v passed through
     // running SUM per key: key 1 -> 10, 30; key 2 -> 100 (result is the last column).
     assert_eq!(values(&out, 3), vec![10, 30, 100]);
     // The pending row flushes once the watermark passes it.
-    let rest = over.flush(10_000).unwrap();
+    let rest = over.flush(10_000, 0).unwrap();
     assert_eq!(rest.num_rows(), 1);
     assert_eq!(values(&rest, 1), vec![40]); // v
     assert_eq!(values(&rest, 3), vec![70]); // key 1 running sum 10+20+40
@@ -987,7 +987,7 @@ fn over_state_partitions_and_restores_by_flink_key_group() {
     )
     .unwrap();
     let mut before = OverWindowAggregator::new(vec![0], vec![0], 2, vec![1], vec![0], 0, 0, false);
-    before.push(batch).unwrap();
+    before.push(batch, 0).unwrap();
     let partitions = before.snapshot_partitions(128, &[-1]);
     assert!(
         partitions.len() >= 2,
@@ -995,9 +995,9 @@ fn over_state_partitions_and_restores_by_flink_key_group() {
     );
     let snapshots: Vec<Vec<u8>> = partitions.into_values().collect();
     let mut restored = OverWindowAggregator::restore_partitions(
-        vec![0], vec![0], 2, vec![1], vec![0], 0, 0, false, &snapshots,
+        vec![0], vec![0], 2, vec![1], vec![0], 0, 0, false, &snapshots, 0, 0,
     );
-    let out = restored.flush(0).unwrap();
+    let out = restored.flush(0, 0).unwrap();
     let mut rows: Vec<(i64, i64)> = values(&out, 0)
         .into_iter()
         .zip(values(&out, 3))
@@ -1026,8 +1026,8 @@ fn bounded_rows_over_sums_the_frame_slice() {
     let batch = RecordBatch::try_new(schema, vec![k, v, rt]).unwrap();
     // frame_kind 1 = bounded ROWS, offset 1 = one preceding row.
     let mut over = OverWindowAggregator::new(vec![0], vec![0], 2, vec![1], vec![0], 1, 1, false);
-    over.push(batch);
-    let out = over.flush(2000).unwrap();
+    over.push(batch, 0).unwrap();
+    let out = over.flush(2000, 0).unwrap();
     assert_eq!(out.num_rows(), 4);
     // SUM over {self, prev}: key 1 -> 10, 10+20, 20+30; key 2 (lone row) -> 100.
     assert_eq!(values(&out, 1), vec![10, 20, 30, 100]); // v passed through
@@ -1053,8 +1053,8 @@ fn bounded_range_over_sums_the_time_interval() {
     let batch = RecordBatch::try_new(schema, vec![k, v, rt]).unwrap();
     // frame_kind 2 = bounded RANGE, offset 1000 = a 1000ms preceding interval.
     let mut over = OverWindowAggregator::new(vec![0], vec![0], 2, vec![1], vec![0], 2, 1000, false);
-    over.push(batch);
-    let out = over.flush(2000).unwrap();
+    over.push(batch, 0).unwrap();
+    let out = over.flush(2000, 0).unwrap();
     assert_eq!(out.num_rows(), 3);
     // SUM over rows within 1000ms: rt0 -> {10}, rt1000 -> {10,20}, rt2000 -> {20,30}.
     assert_eq!(values(&out, 3), vec![10, 30, 50]);
@@ -1073,7 +1073,7 @@ fn proctime_over_running_sum_in_arrival_order() {
     let batch = RecordBatch::try_new(schema, vec![k, v]).unwrap();
     // rt_column is ignored in proctime mode (arrival order); value col 1, key col 0, unbounded.
     let mut over = OverWindowAggregator::new(vec![0], vec![0], 0, vec![1], vec![0], 0, 0, true);
-    let out = over.push_proctime(batch).unwrap();
+    let out = over.push_proctime(batch, 0).unwrap();
     assert_eq!(out.num_rows(), 3);
     assert_eq!(values(&out, 1), vec![10, 100, 20]); // v passed through
     assert_eq!(values(&out, 2), vec![10, 100, 30]); // running SUM per key, in arrival order
@@ -1100,11 +1100,320 @@ fn over_independent_value_columns() {
     // value types [bigint, bigint]; columns [1, 2]; kinds [SUM, MAX]; rt col 3; key col 0; unbounded.
     let mut over =
         OverWindowAggregator::new(vec![0, 0], vec![0, 2], 3, vec![1, 2], vec![0], 0, 0, false);
-    over.push(batch);
-    let out = over.flush(2000).unwrap();
+    over.push(batch, 0).unwrap();
+    let out = over.flush(2000, 0).unwrap();
     assert_eq!(out.num_rows(), 3);
     assert_eq!(values(&out, 4), vec![10, 30, 60]); // running SUM(v0)
     assert_eq!(values(&out, 5), vec![5, 15, 15]); // running MAX(v1)
+}
+
+/// Running SUM over key column 0, value column 1, rowtime column 2 (a `join_batch`), with the
+/// given frame and idle-state retention.
+fn retention_over(frame_kind: i64, frame_offset: i64, proctime: bool, retention_ms: i64) -> OverWindowAggregator {
+    OverWindowAggregator::new(vec![0], vec![0], 2, vec![1], vec![0], frame_kind, frame_offset, proctime)
+        .with_state_retention(retention_ms)
+}
+
+/// The per-key state batches of an OVER snapshot (the framed accumulators IPC section).
+fn over_acc_batches(snapshot: &[u8]) -> Vec<RecordBatch> {
+    let len = u32::from_le_bytes(snapshot[8..12].try_into().unwrap()) as usize;
+    read_ipc_if_present(&snapshot[12..12 + len])
+}
+
+// Flink retention-bounds the rowtime OVER shapes with ONE per-key processing-time cleanup
+// deadline (min = table.exec.state.ttl, max = 1.5x min), registered on every element: when the
+// clock reaches it, the key's accumulator clears silently and the next fold restarts fresh. A
+// timer registered at T fires once processing time reaches T, so the state is gone at `now >= T`.
+#[test]
+fn over_retention_idle_key_folds_fresh_at_exactly_the_deadline() {
+    // Alive one millisecond inside the horizon: deadline = 5000 + 1.5 * 2000 = 8000.
+    let mut alive = retention_over(0, 0, false, 2000);
+    alive.push(join_batch(vec![1], vec![10], vec![100]), 5000).unwrap();
+    assert_eq!(values(&alive.flush(200, 5000).unwrap(), 3), vec![10]);
+    alive.push(join_batch(vec![1], vec![5], vec![300]), 7999).unwrap();
+    assert_eq!(values(&alive.flush(400, 7999).unwrap(), 3), vec![15]);
+
+    // Cleared at exactly the deadline: the running sum restarts from the new row alone.
+    let mut expired = retention_over(0, 0, false, 2000);
+    expired.push(join_batch(vec![1], vec![10], vec![100]), 5000).unwrap();
+    assert_eq!(values(&expired.flush(200, 5000).unwrap(), 3), vec![10]);
+    expired.push(join_batch(vec![1], vec![5], vec![300]), 8000).unwrap();
+    assert_eq!(values(&expired.flush(400, 8000).unwrap(), 3), vec![5]);
+}
+
+// Flink's re-registration hysteresis: the deadline starts at now + max and moves (to now + max)
+// only when a touch lands within a min-retention of it — `now + min > deadline`, strictly.
+// Pinned with the three-write sequence: 1000 registers 4000, 2000 leaves it (2000 + min == 4000,
+// not >), 2001 moves it to 5001.
+#[test]
+fn over_retention_moves_the_deadline_only_past_the_hysteresis() {
+    let mut unmoved = retention_over(0, 0, false, 2000);
+    unmoved.push(join_batch(vec![1], vec![10], vec![100]), 1000).unwrap();
+    assert_eq!(values(&unmoved.flush(200, 1000).unwrap(), 3), vec![10]);
+    unmoved.push(join_batch(vec![1], vec![1], vec![300]), 2000).unwrap();
+    assert_eq!(values(&unmoved.flush(400, 2000).unwrap(), 3), vec![11]);
+    // The touch at 2000 did NOT move the 4000 deadline: the key folds fresh at 4000.
+    unmoved.push(join_batch(vec![1], vec![2], vec![500]), 4000).unwrap();
+    assert_eq!(values(&unmoved.flush(600, 4000).unwrap(), 3), vec![2]);
+
+    let mut moved = retention_over(0, 0, false, 2000);
+    moved.push(join_batch(vec![1], vec![10], vec![100]), 1000).unwrap();
+    assert_eq!(values(&moved.flush(200, 1000).unwrap(), 3), vec![10]);
+    moved.push(join_batch(vec![1], vec![1], vec![300]), 2000).unwrap();
+    assert_eq!(values(&moved.flush(400, 2000).unwrap(), 3), vec![11]);
+    moved.push(join_batch(vec![1], vec![3], vec![450]), 2001).unwrap();
+    assert_eq!(values(&moved.flush(500, 2001).unwrap(), 3), vec![14]);
+    // The touch at 2001 moved the deadline to 5001: a touch at 3001 (3001 + min == 5001, not >
+    // — deadline unmoved) still folds...
+    moved.push(join_batch(vec![1], vec![2], vec![600]), 3001).unwrap();
+    assert_eq!(values(&moved.flush(700, 3001).unwrap(), 3), vec![16]);
+    // ...and the key folds fresh at the moved deadline.
+    moved.push(join_batch(vec![1], vec![4], vec![800]), 5001).unwrap();
+    assert_eq!(values(&moved.flush(900, 5001).unwrap(), 3), vec![4]);
+}
+
+// Flink's fired cleanup timer DEFERS a key that still has buffered rows the watermark has not
+// folded (its onTimer re-registers and waits) — the sweep re-arms such a key instead of clearing
+// it, so the buffered row later folds into the surviving accumulator.
+#[test]
+fn over_retention_defers_a_key_with_pending_rows() {
+    let mut over = retention_over(0, 0, false, 2000);
+    over.push(join_batch(vec![1], vec![10], vec![100]), 1000).unwrap();
+    assert_eq!(values(&over.flush(200, 1000).unwrap(), 3), vec![10]);
+    // A row far above the watermark keeps key 1 pending past its 4000 deadline.
+    over.push(join_batch(vec![1], vec![1], vec![9000]), 1000).unwrap();
+    // The touch of another key at 5000 sweeps: key 1 is due but deferred (re-armed to 8000).
+    over.push(join_batch(vec![2], vec![99], vec![9000]), 5000).unwrap();
+    let out = over.flush(10_000, 5000).unwrap();
+    assert_eq!(values(&out, 0), vec![1, 2]);
+    assert_eq!(values(&out, 3), vec![11, 99]); // key 1 continued from 10, not fresh
+}
+
+// Keys never touched again are reclaimed by the silent once-per-min-retention sweep — the lazy
+// per-touch check would never see them.
+#[test]
+fn over_retention_sweep_reclaims_untouched_keys_silently() {
+    let mut over = retention_over(0, 0, false, 2000);
+    over.push(join_batch(vec![1], vec![10], vec![100]), 1000).unwrap();
+    assert_eq!(values(&over.flush(200, 1000).unwrap(), 3), vec![10]);
+    // Key 1 is never touched again; an ingest of another key past its 4000 deadline runs the
+    // sweep, which drops key 1's accumulator and deadline with no output.
+    over.push(join_batch(vec![2], vec![99], vec![300]), 4000).unwrap();
+    assert_eq!(values(&over.flush(400, 4000).unwrap(), 3), vec![99]);
+    let accs = over_acc_batches(&over.snapshot());
+    assert_eq!(accs.iter().flat_map(|b| values(b, 0)).collect::<Vec<_>>(), vec![2]);
+}
+
+// A rowtime bounded-ROWS frame clears its buffered frame rows at the deadline too: the next
+// frame restarts short instead of reaching back across the expiry.
+#[test]
+fn bounded_rows_over_retention_clears_the_frame() {
+    let mut alive = retention_over(1, 1, false, 2000);
+    alive.push(join_batch(vec![1], vec![10], vec![1000]), 1000).unwrap();
+    assert_eq!(values(&alive.flush(1000, 1000).unwrap(), 3), vec![10]);
+    alive.push(join_batch(vec![1], vec![20], vec![2000]), 3999).unwrap();
+    assert_eq!(values(&alive.flush(2000, 3999).unwrap(), 3), vec![30]);
+
+    let mut expired = retention_over(1, 1, false, 2000);
+    expired.push(join_batch(vec![1], vec![10], vec![1000]), 1000).unwrap();
+    assert_eq!(values(&expired.flush(1000, 1000).unwrap(), 3), vec![10]);
+    expired.push(join_batch(vec![1], vec![20], vec![2000]), 4000).unwrap();
+    assert_eq!(values(&expired.flush(2000, 4000).unwrap(), 3), vec![20]);
+}
+
+// Flink's enablement quirk, replicated exactly: `stateCleaningEnabled = minRetentionTime > 1` —
+// strictly greater than ONE millisecond, not zero. A 1ms retention never cleans, and its
+// checkpoints stay byte-identical to the retention-off format (no stamp column).
+#[test]
+fn over_retention_of_one_millisecond_disables_cleaning() {
+    let fold = |retention_ms: i64| {
+        let mut over = retention_over(0, 0, false, retention_ms);
+        over.push(join_batch(vec![1], vec![10], vec![100]), 1000).unwrap();
+        assert_eq!(values(&over.flush(200, 1000).unwrap(), 3), vec![10]);
+        over.push(join_batch(vec![1], vec![5], vec![300]), i64::MAX).unwrap();
+        assert_eq!(values(&over.flush(400, i64::MAX).unwrap(), 3), vec![15]);
+        over.snapshot()
+    };
+    assert_eq!(fold(1), fold(0));
+    assert!(over_acc_batches(&fold(1))
+        .iter()
+        .all(|b| b.column_by_name(CLEANUP_AT_COLUMN).is_none()));
+}
+
+// The snapshot carries each key's ABSOLUTE deadline (a trailing per-key column, written only
+// while cleaning is on); a restore keeps it as-is rather than re-stamping from the restore clock.
+#[test]
+fn over_retention_deadline_rides_the_snapshot_absolutely() {
+    let mut writer = retention_over(0, 0, false, 2000);
+    writer.push(join_batch(vec![1], vec![10], vec![100]), 5000).unwrap();
+    assert_eq!(values(&writer.flush(200, 5000).unwrap(), 3), vec![10]);
+    let snapshot = writer.snapshot();
+    assert!(over_acc_batches(&snapshot)
+        .iter()
+        .all(|b| b.column_by_name(CLEANUP_AT_COLUMN).is_some()));
+
+    let restore = || {
+        OverWindowAggregator::restore(
+            vec![0], vec![0], 2, vec![1], vec![0], 0, 0, false, &snapshot, 2000, 6000,
+        )
+    };
+    // Alive at 7999 and fresh at exactly 8000 — the writer's deadline, not the restore-time
+    // stamp (restoring at 6000 would have stamped 9000).
+    let mut alive = restore();
+    alive.push(join_batch(vec![1], vec![1], vec![300]), 7999).unwrap();
+    assert_eq!(values(&alive.flush(400, 7999).unwrap(), 3), vec![11]);
+    let mut expired = restore();
+    expired.push(join_batch(vec![1], vec![1], vec![300]), 8000).unwrap();
+    assert_eq!(values(&expired.flush(400, 8000).unwrap(), 3), vec![1]);
+}
+
+// Deadlines partition with their key groups and survive a partitioned restore. Restoring at 4000
+// would stamp a missing deadline at 7000, so keys still folding at 7999 prove the column (with
+// the writer's 8000) was read, per key group.
+#[test]
+fn over_retention_deadlines_partition_by_flink_key_group() {
+    let mut before = retention_over(0, 0, false, 2000);
+    before.push(join_batch(vec![1, 2], vec![10, 20], vec![0, 0]), 5000).unwrap();
+    assert_eq!(values(&before.flush(0, 5000).unwrap(), 3), vec![10, 20]);
+    let partitions = before.snapshot_partitions(128, &[-1]);
+    assert!(partitions.len() >= 2, "test keys should cover distinct raw key groups");
+    let snapshots: Vec<Vec<u8>> = partitions.into_values().collect();
+    let mut restored = OverWindowAggregator::restore_partitions(
+        vec![0], vec![0], 2, vec![1], vec![0], 0, 0, false, &snapshots, 2000, 4000,
+    );
+    restored.push(join_batch(vec![1, 2], vec![1, 2], vec![100, 100]), 7999).unwrap();
+    let out = restored.flush(200, 7999).unwrap();
+    let mut rows: Vec<(i64, i64)> = values(&out, 0).into_iter().zip(values(&out, 3)).collect();
+    rows.sort_unstable();
+    assert_eq!(rows, vec![(1, 11), (2, 22)]);
+}
+
+// A pre-retention snapshot restored into a retention-enabled OVER stamps every key a full max
+// horizon from the restore (Flink's enable-TTL migration), instead of expiring on first touch.
+#[test]
+fn over_pre_retention_snapshot_stamps_a_full_deadline_at_restore() {
+    let mut writer = retention_over(0, 0, false, 0);
+    writer.push(join_batch(vec![1], vec![10], vec![100]), 0).unwrap();
+    assert_eq!(values(&writer.flush(200, 0).unwrap(), 3), vec![10]);
+    let snapshot = writer.snapshot();
+
+    let restore = || {
+        OverWindowAggregator::restore(
+            vec![0], vec![0], 2, vec![1], vec![0], 0, 0, false, &snapshot, 2000, 10_000,
+        )
+    };
+    // Stamped 10000 + max = 13000: alive at 12999, fresh at 13000.
+    let mut alive = restore();
+    alive.push(join_batch(vec![1], vec![1], vec![300]), 12_999).unwrap();
+    assert_eq!(values(&alive.flush(400, 12_999).unwrap(), 3), vec![11]);
+    let mut expired = restore();
+    expired.push(join_batch(vec![1], vec![1], vec![300]), 13_000).unwrap();
+    assert_eq!(values(&expired.flush(400, 13_000).unwrap(), 3), vec![1]);
+}
+
+// The bounded-RANGE rowtime frame takes NO retention: Flink's own function accepts none (its
+// event-time frame eviction already bounds state), so a nonzero ttl changes nothing — no expiry,
+// and no stamp column in the snapshot.
+#[test]
+fn bounded_range_over_ignores_retention() {
+    let mut over = retention_over(2, 1000, false, 2000);
+    over.push(join_batch(vec![1], vec![10], vec![0]), 1000).unwrap();
+    assert_eq!(values(&over.flush(0, 1000).unwrap(), 3), vec![10]);
+    // Far past any would-be deadline, the 1000ms frame still reaches the earlier row.
+    over.push(join_batch(vec![1], vec![20], vec![1000]), 1_000_000).unwrap();
+    assert_eq!(values(&over.flush(1000, 1_000_000).unwrap(), 3), vec![30]);
+    assert!(over_acc_batches(&over.snapshot()).iter().all(|b| retention_stamps(b).is_none()));
+}
+
+// The proctime unbounded fold runs Flink's per-value StateTtlConfig instead (OnCreateAndWrite /
+// NeverReturnExpired): enabled at ANY positive retention (a 1ms ttl cleans — no `> 1` quirk),
+// every write refreshes, and an expired accumulator reads as absent so the fold restarts.
+#[test]
+fn proctime_over_ttl_expires_an_idle_key_into_a_fresh_fold() {
+    let mut over = retention_over(0, 0, true, 1);
+    let out = over.push_proctime(join_batch(vec![1], vec![10], vec![0]), 5000).unwrap();
+    assert_eq!(values(&out, 3), vec![10]);
+    // 5000 + 1 <= 5001: the 1ms ttl IS enabled and the fold restarts.
+    let out = over.push_proctime(join_batch(vec![1], vec![5], vec![0]), 5001).unwrap();
+    assert_eq!(values(&out, 3), vec![5]);
+
+    let mut refreshed = retention_over(0, 0, true, 1000);
+    let out = refreshed.push_proctime(join_batch(vec![1], vec![10], vec![0]), 5000).unwrap();
+    assert_eq!(values(&out, 3), vec![10]);
+    let out = refreshed.push_proctime(join_batch(vec![1], vec![1], vec![0]), 5900).unwrap();
+    assert_eq!(values(&out, 3), vec![11]);
+    // The write at 5900 refreshed the clock: alive at 6800, expired at 7800 (inclusive).
+    let out = refreshed.push_proctime(join_batch(vec![1], vec![2], vec![0]), 6800).unwrap();
+    assert_eq!(values(&out, 3), vec![13]);
+    let out = refreshed.push_proctime(join_batch(vec![1], vec![4], vec![0]), 7800).unwrap();
+    assert_eq!(values(&out, 3), vec![4]);
+}
+
+// Window functions follow their order kind's scheme: under proctime the per-value TTL resets the
+// counter state, visibly restarting ROW_NUMBER from 1 — observable and Flink-faithful.
+#[test]
+fn proctime_over_ttl_restarts_row_numbering() {
+    let mut over = OverWindowAggregator::new(vec![], vec![10], 2, vec![], vec![0], 0, 0, true)
+        .with_state_retention(2000);
+    let out = over.push_proctime(join_batch(vec![1, 1], vec![0, 0], vec![0, 0]), 5000).unwrap();
+    assert_eq!(values(&out, 3), vec![1, 2]);
+    let out = over.push_proctime(join_batch(vec![1], vec![0], vec![0]), 7000).unwrap();
+    assert_eq!(values(&out, 3), vec![1]); // 5000 + 2000 <= 7000: numbering restarted
+}
+
+// Proctime per-value TTL: last-write stamps ride the snapshot absolutely (the `__ttl_ts__`
+// column), so expiry timing survives a restore.
+#[test]
+fn proctime_over_ttl_stamps_survive_snapshot_restore() {
+    let mut writer = retention_over(0, 0, true, 2000);
+    writer.push_proctime(join_batch(vec![1], vec![10], vec![0]), 5000).unwrap();
+    let snapshot = writer.snapshot();
+    assert!(over_acc_batches(&snapshot)
+        .iter()
+        .all(|b| b.column_by_name(TTL_TS_COLUMN).is_some()));
+
+    let restore = || {
+        OverWindowAggregator::restore(
+            vec![0], vec![0], 2, vec![1], vec![0], 0, 0, true, &snapshot, 2000, 6500,
+        )
+    };
+    // The adopted last-write is the writer's 5000 (expiry at 7000), not the restore-time 6500.
+    let mut alive = restore();
+    let out = alive.push_proctime(join_batch(vec![1], vec![1], vec![0]), 6999).unwrap();
+    assert_eq!(values(&out, 3), vec![11]);
+    let mut expired = restore();
+    let out = expired.push_proctime(join_batch(vec![1], vec![1], vec![0]), 7000).unwrap();
+    assert_eq!(values(&out, 3), vec![1]);
+}
+
+// Proctime per-value TTL: keys never written again fall to the once-per-ttl-period sweep.
+#[test]
+fn proctime_over_ttl_sweep_reclaims_idle_keys_silently() {
+    let mut over = retention_over(0, 0, true, 2000);
+    over.push_proctime(join_batch(vec![1], vec![10], vec![0]), 1000).unwrap();
+    // Key 1 is never written again; the ingest of key 2 at 4000 sweeps it out of state.
+    over.push_proctime(join_batch(vec![2], vec![99], vec![0]), 4000).unwrap();
+    let accs = over_acc_batches(&over.snapshot());
+    assert_eq!(accs.iter().flat_map(|b| values(b, 0)).collect::<Vec<_>>(), vec![2]);
+}
+
+// Proctime bounded ROWS keeps the cleanup DEADLINE scheme (not per-value TTL) and, unlike the
+// rowtime shapes, its fired timer has no deferral: at the deadline the retract-frame buffer
+// clears unconditionally, so the frame observably restarts short — exactly Flink's
+// ProcTimeRowsBoundedPrecedingFunction.
+#[test]
+fn proctime_bounded_rows_retention_clears_the_frame_at_the_deadline() {
+    let mut alive = retention_over(1, 1, true, 2000);
+    let out = alive.push_proctime(join_batch(vec![1], vec![10], vec![0]), 5000).unwrap();
+    assert_eq!(values(&out, 3), vec![10]);
+    let out = alive.push_proctime(join_batch(vec![1], vec![20], vec![0]), 7999).unwrap();
+    assert_eq!(values(&out, 3), vec![30]);
+
+    let mut expired = retention_over(1, 1, true, 2000);
+    let out = expired.push_proctime(join_batch(vec![1], vec![10], vec![0]), 5000).unwrap();
+    assert_eq!(values(&out, 3), vec![10]);
+    let out = expired.push_proctime(join_batch(vec![1], vec![15], vec![0]), 8000).unwrap();
+    assert_eq!(values(&out, 3), vec![15]);
 }
 
 // Two-phase cumulative: per-slice SUM partials merge into the nested windows of their bucket.
@@ -5499,11 +5808,11 @@ mod paimon_state {
         ];
         for (i, (batches, watermark)) in steps.iter().enumerate() {
             for batch in batches {
-                paimon.push(batch.clone()).unwrap();
-                memory.push(batch.clone()).unwrap();
+                paimon.push(batch.clone(), 0).unwrap();
+                memory.push(batch.clone(), 0).unwrap();
             }
-            let paimon_out = paimon.flush(*watermark).unwrap();
-            let memory_out = memory.flush(*watermark).unwrap();
+            let paimon_out = paimon.flush(*watermark, 0).unwrap();
+            let memory_out = memory.flush(*watermark, 0).unwrap();
             assert_eq!(
                 over_rows(&memory_out),
                 over_rows(&paimon_out),
@@ -5521,9 +5830,9 @@ mod paimon_state {
     fn paimon_over_fold_survives_restore() {
         let dir = temp_dir("over-restore-src");
         let mut over = over_aggregator().with_backend(over_store(&dir));
-        over.push(join_batch(vec![1, 1, 2], vec![10, 5, 20], vec![1, 2, 30])).unwrap();
+        over.push(join_batch(vec![1, 1, 2], vec![10, 5, 20], vec![1, 2, 30]), 0).unwrap();
         assert_eq!(
-            over_rows(&over.flush(10).unwrap()),
+            over_rows(&over.flush(10, 0).unwrap()),
             vec![(1, 10, 1, 10), (1, 5, 2, 15)],
             "key 1 folds in rowtime order; key 2 stays pending"
         );
@@ -5555,14 +5864,14 @@ mod paimon_state {
         // A new row arrives before the watermark releases the committed pending row; the
         // restored sequence must emit the committed row (key 2, rt 30) ahead of it, and key 1's
         // sum must continue from the persisted fold (15), not restart.
-        restored.push(join_batch(vec![1], vec![100], vec![40])).unwrap();
+        restored.push(join_batch(vec![1], vec![100], vec![40]), 0).unwrap();
         assert_eq!(
-            over_rows(&restored.flush(50).unwrap()),
+            over_rows(&restored.flush(50, 0).unwrap()),
             vec![(2, 20, 30, 20), (1, 100, 40, 115)],
             "committed pending row first, then the new row on the restored fold"
         );
         assert!(
-            over_rows(&restored.flush(60).unwrap()).is_empty(),
+            over_rows(&restored.flush(60, 0).unwrap()).is_empty(),
             "fired pending rows left the store"
         );
     }
@@ -5586,11 +5895,11 @@ mod paimon_state {
         ];
         for (i, (batches, watermark)) in steps.iter().enumerate() {
             for batch in batches {
-                paimon.push(batch.clone()).unwrap();
-                memory.push(batch.clone()).unwrap();
+                paimon.push(batch.clone(), 0).unwrap();
+                memory.push(batch.clone(), 0).unwrap();
             }
-            let paimon_out = paimon.flush(*watermark).unwrap();
-            let memory_out = memory.flush(*watermark).unwrap();
+            let paimon_out = paimon.flush(*watermark, 0).unwrap();
+            let memory_out = memory.flush(*watermark, 0).unwrap();
             assert_eq!(
                 over_rows(&memory_out),
                 over_rows(&paimon_out),

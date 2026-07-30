@@ -293,17 +293,30 @@ class FlinkOverAggregateSqlHarnessTest {
   }
 
   @Test
-  void stateTtlFallsBackToHost() throws Exception {
-    // Permanent gate: every Flink over-aggregate expires state on 1.5x-retention cleanup timers
-    // (KeyedProcessFunctionWithCleanupState), a scheme the native operator does not reproduce.
-    NativeParity.assertFallbackReasonContains(
+  void stateTtlMatchesHost() throws Exception {
+    // With idle-state retention on (1h — nothing expires in-test, and per Flink's cleanup-timer
+    // scheme nothing observable changes without an expiry) the OVER routes natively and must
+    // still match the host — pinning the routing and the retention/clock threading.
+    NativeParity.assertParity(
         () -> {
           TableEnvironment tEnv = environment();
           tEnv.getConfig().set("table.exec.state.ttl", "1 h");
           return tEnv;
         },
-        "SELECT v, SUM(v) OVER (ORDER BY rt) AS total FROM src",
-        "OVER: idle-state TTL");
+        "SELECT v, SUM(v) OVER (ORDER BY rt) AS total FROM src");
+  }
+
+  @Test
+  void proctimeStateTtlMatchesHost() throws Exception {
+    // The proctime unbounded fold runs retention as a per-value TTL on its accumulator; with a
+    // 1h retention nothing expires in-test and the eager arrival-order fold must match the host.
+    NativeParity.assertParity(
+        () -> {
+          TableEnvironment tEnv = proctimeEnvironment();
+          tEnv.getConfig().set("table.exec.state.ttl", "1 h");
+          return tEnv;
+        },
+        "SELECT k, v, SUM(v) OVER (PARTITION BY k ORDER BY pt) AS s FROM src");
   }
 
   private static TableEnvironment environment() {

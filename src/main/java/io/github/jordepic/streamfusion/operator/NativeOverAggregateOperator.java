@@ -35,6 +35,7 @@ public class NativeOverAggregateOperator extends AbstractNativeStatefulOperator<
   private final int frameKind;
   private final long frameOffset;
   private final boolean proctime;
+  private final long stateTtlMillis;
   private final RowType rowType;
 
   public NativeOverAggregateOperator(
@@ -47,6 +48,7 @@ public class NativeOverAggregateOperator extends AbstractNativeStatefulOperator<
       long frameOffset,
       boolean proctime,
       int[] keyTimestampPrecisions,
+      long stateTtlMillis,
       RowType rowType,
       int maxParallelism) {
     super("over aggregate", keyTimestampPrecisions, maxParallelism);
@@ -58,22 +60,26 @@ public class NativeOverAggregateOperator extends AbstractNativeStatefulOperator<
     this.frameKind = frameKind;
     this.frameOffset = frameOffset;
     this.proctime = proctime;
+    this.stateTtlMillis = stateTtlMillis;
     this.rowType = rowType;
   }
 
   @Override
   protected PaimonNativeStateSupport resolvePaimonState(boolean rawStateRestored) {
+    // The Paimon shape does not carry retention stamps yet; a retention-bounded OVER keeps the
+    // memory route (the standard fallback for an unsupported shape).
     return resolvePaimon(
         rawStateRestored,
         () ->
-            withRowSchema(
-                    rowType,
-                    address ->
-                        Native.paimonOverStateSupported(
-                                address, valueTypes, aggregateKinds, frameKind, proctime)
-                            ? 1L
-                            : 0L)
-                != 0);
+            stateTtlMillis == 0
+                && withRowSchema(
+                        rowType,
+                        address ->
+                            Native.paimonOverStateSupported(
+                                    address, valueTypes, aggregateKinds, frameKind, proctime)
+                                ? 1L
+                                : 0L)
+                    != 0);
   }
 
   @Override
@@ -113,14 +119,24 @@ public class NativeOverAggregateOperator extends AbstractNativeStatefulOperator<
   protected long createHandle() {
     return Native.createOverAggregator(
         valueTypes, aggregateKinds, timeColumn, valueColumns, keyColumns, frameKind, frameOffset,
-        proctime, memoryBudgetBytes());
+        proctime, stateTtlMillis, memoryBudgetBytes());
   }
 
   @Override
   protected long restoreRawHandle(byte[][] snapshots) {
     return Native.restoreOverAggregatorPartitions(
-        valueTypes, aggregateKinds, timeColumn, valueColumns, keyColumns, frameKind, frameOffset,
-        proctime, snapshots, memoryBudgetBytes());
+        valueTypes,
+        aggregateKinds,
+        timeColumn,
+        valueColumns,
+        keyColumns,
+        frameKind,
+        frameOffset,
+        proctime,
+        stateTtlMillis,
+        getProcessingTimeService().getCurrentProcessingTime(),
+        snapshots,
+        memoryBudgetBytes());
   }
 
   @Override
@@ -159,6 +175,9 @@ public class NativeOverAggregateOperator extends AbstractNativeStatefulOperator<
     try (ArrowArray inArray = ArrowArray.allocateNew(inAllocator);
         ArrowSchema inSchema = ArrowSchema.allocateNew(inAllocator)) {
       Data.exportVectorSchemaRoot(inAllocator, in, dictionaries, inArray, inSchema);
+      // Flink's retention clock: the processing-time service is System.currentTimeMillis in
+      // production and harness-controlled in tests, so expiry is deterministic to test.
+      long now = getProcessingTimeService().getCurrentProcessingTime();
       if (proctime) {
         // Proctime: fold in arrival order and emit this batch's rows immediately (no watermark).
         try (ArrowArray outArray = ArrowArray.allocateNew(allocator);
@@ -167,6 +186,7 @@ public class NativeOverAggregateOperator extends AbstractNativeStatefulOperator<
               handle,
               inArray.memoryAddress(),
               inSchema.memoryAddress(),
+              now,
               outArray.memoryAddress(),
               outSchema.memoryAddress());
           VectorSchemaRoot out =
@@ -183,7 +203,7 @@ public class NativeOverAggregateOperator extends AbstractNativeStatefulOperator<
       } else {
         // Rowtime: the native aggregator imports and keeps the batch (buffered until a watermark
         // completes these rows), so this side hands it off and closes its own view.
-        Native.pushOverAggregator(handle, inArray.memoryAddress(), inSchema.memoryAddress());
+        Native.pushOverAggregator(handle, inArray.memoryAddress(), inSchema.memoryAddress(), now);
       }
     } finally {
       in.close();
@@ -204,7 +224,11 @@ public class NativeOverAggregateOperator extends AbstractNativeStatefulOperator<
             handle, mark.getTimestamp(), array.memoryAddress(), schema.memoryAddress());
       } else {
         Native.flushOverAggregator(
-            handle, mark.getTimestamp(), array.memoryAddress(), schema.memoryAddress());
+            handle,
+            mark.getTimestamp(),
+            getProcessingTimeService().getCurrentProcessingTime(),
+            array.memoryAddress(),
+            schema.memoryAddress());
       }
       VectorSchemaRoot out = Data.importVectorSchemaRoot(allocator, array, schema, dictionaries);
       if (out.getRowCount() > 0) {

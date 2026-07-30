@@ -619,6 +619,12 @@ public final class Native {
    * @param frameOffset n preceding rows (ROWS) or the preceding interval in millis (RANGE); 0 when
    *     unbounded
    * @param proctime whether the order is processing time (arrival order, eager emit) vs a rowtime
+   * @param stateTtlMillis idle-state retention ({@code table.exec.state.ttl}). Flink bounds OVER
+   *     state three ways by shape, all replicated natively: the rowtime frames and the proctime
+   *     bounded-ROWS frame keep ONE per-key processing-time cleanup deadline at 1.5x the retention
+   *     ({@code <= 1} disables it — Flink's literal {@code minRetentionTime > 1}); the proctime
+   *     unbounded fold puts a per-value TTL on its accumulator ({@code > 0} enables); and the
+   *     bounded-RANGE rowtime frame takes no retention at all
    * @param memoryBudgetBytes managed-memory budget (see {@link #createTumblingAggregator})
    */
   public static native long createOverAggregator(
@@ -630,25 +636,40 @@ public final class Native {
       int frameKind,
       long frameOffset,
       boolean proctime,
+      long stateTtlMillis,
       long memoryBudgetBytes);
 
-  /** Buffers an input batch; its rows are emitted later when a watermark completes them (rowtime). */
+  /**
+   * Buffers an input batch; its rows are emitted later when a watermark completes them (rowtime).
+   * {@code nowMillis} is the operator's processing-time reading — the cleanup-deadline clock.
+   */
   public static native void pushOverAggregator(
-      long handle, long inArrayAddress, long inSchemaAddress);
+      long handle, long inArrayAddress, long inSchemaAddress, long nowMillis);
 
   /**
    * Proctime OVER: folds a batch in arrival order and exports its rows immediately (no watermark),
-   * each with the running aggregate(s) appended, into the consumer-allocated C structs.
+   * each with the running aggregate(s) appended, into the consumer-allocated C structs. {@code
+   * nowMillis} is the operator's processing-time reading — the retention clock.
    */
   public static native void pushProctimeOverAggregator(
-      long handle, long inArrayAddress, long inSchemaAddress, long outArrayAddress, long outSchemaAddress);
+      long handle,
+      long inArrayAddress,
+      long inSchemaAddress,
+      long nowMillis,
+      long outArrayAddress,
+      long outSchemaAddress);
 
   /**
    * Exports the rows the watermark has completed — the input columns with the running aggregate(s)
-   * appended — into the consumer-allocated C structs (an empty batch if none are complete).
+   * appended — into the consumer-allocated C structs (an empty batch if none are complete). {@code
+   * nowMillis} is the operator's processing-time reading — the cleanup-deadline clock.
    */
   public static native void flushOverAggregator(
-      long handle, long watermarkMillis, long outArrayAddress, long outSchemaAddress);
+      long handle,
+      long watermarkMillis,
+      long nowMillis,
+      long outArrayAddress,
+      long outSchemaAddress);
 
   /** Releases an OVER aggregator handle. */
   public static native void closeOverAggregator(long handle);
@@ -660,7 +681,11 @@ public final class Native {
   public static native byte[][] snapshotOverAggregatorPartitions(
       long handle, int maxParallelism, int[] timestampPrecisions);
 
-  /** Rebuilds an OVER aggregator from a snapshot and returns a fresh handle. */
+  /**
+   * Rebuilds an OVER aggregator from a snapshot and returns a fresh handle. {@code nowMillis}
+   * stamps keys restored from a snapshot that carries no retention stamps (a pre-retention
+   * writer) from the restore clock — Flink's enable-TTL migration.
+   */
   public static native long restoreOverAggregator(
       int[] valueTypes,
       int[] aggregateKinds,
@@ -670,6 +695,8 @@ public final class Native {
       int frameKind,
       long frameOffset,
       boolean proctime,
+      long stateTtlMillis,
+      long nowMillis,
       byte[] snapshot,
       long memoryBudgetBytes);
 
@@ -683,6 +710,8 @@ public final class Native {
       int frameKind,
       long frameOffset,
       boolean proctime,
+      long stateTtlMillis,
+      long nowMillis,
       byte[][] snapshots,
       long memoryBudgetBytes);
 

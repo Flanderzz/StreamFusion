@@ -2019,9 +2019,11 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushPaimonOve
     crate::bridge::jni_guard(env, move |mut env| {
         let aggregator = unsafe { &mut *(handle as *mut crate::over_agg::OverWindowAggregator) };
         // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
+        // The persistent shape carries no retention (gated on the Java side), so the deadline
+        // clock is never read.
         let result = {
             let batch = import_record_batch(in_array_address, in_schema_address);
-            aggregator.push(batch)
+            aggregator.push(batch, 0)
         };
         if let Err(e) = result {
             throw_memory_limit(&mut env, &e.to_string());
@@ -2044,7 +2046,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_flushPaimonOv
 ) {
     crate::bridge::jni_guard(env, move |mut env| {
         let aggregator = unsafe { &mut *(handle as *mut crate::over_agg::OverWindowAggregator) };
-        match aggregator.flush(watermark_millis) {
+        match aggregator.flush(watermark_millis, 0) {
             Ok(result) => export_record_batch(result, out_array_address, out_schema_address),
             Err(e) => throw_memory_limit(&mut env, &e.to_string()),
         }

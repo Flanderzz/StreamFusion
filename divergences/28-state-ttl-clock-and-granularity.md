@@ -16,7 +16,7 @@ service's clock, so expiry is deterministically testable at the operator level w
 hooks. Corollary: the mini-batch flush paths replay staged work under the bundle's last ingest
 clock instead of widening the flush ABI with a second clock argument.
 
-## Temporal join: lazy check for the cleanup timer
+## Temporal join and OVER: lazy check for the cleanup timer
 
 Flink retention-bounds the temporal join not with per-value TTL but with one per-key
 processing-time cleanup timer (deadline `now + 1.5×retention`, moved under a hysteresis rule,
@@ -29,6 +29,14 @@ firing buffered probe rows, but a build-only key's single fire-time re-arm — o
 the watermark trails the wall clock by more than half the retention — is not replicated, so such
 a key expires at the deadline its last push registered (never sooner than one full max retention
 after its last write).
+
+The OVER aggregate's deadline shapes (rowtime frames and proctime bounded ROWS) make the same
+lazy + sweep substitution. Flink's fired timer defers a rowtime key that still has buffered rows
+awaiting a watermark, re-registering from the fire time (`fire + max`); our deferral re-arm runs
+at the next lazy check or sweep instead (`check-time now + max`), which keeps the state
+marginally longer — silent, and bounded by the lazy-check granularity. Bounded RANGE over rowtime
+takes no retention because Flink's own function accepts none: its cleanup is the event-time frame
+eviction derived from the frame bound, which the native buffer already applies.
 
 ## Retracting Top-N: whole-buffer expiry
 
