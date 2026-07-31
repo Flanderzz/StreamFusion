@@ -1484,21 +1484,6 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_closeTemporal
     })
 }
 
-/// Serializes the joiner's buffered probe rows and versioned build state for a checkpoint.
-#[no_mangle]
-pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotTemporalJoiner<'local>(
-    env: JNIEnv<'local>,
-    _class: JClass<'local>,
-    handle: jlong,
-) -> jbyteArray {
-    crate::bridge::jni_guard(env, move |env| {
-        let joiner = unsafe { &*(handle as *mut TemporalJoiner) };
-        env.byte_array_from_slice(&joiner.snapshot())
-            .expect("failed to allocate temporal-join snapshot array")
-            .into_raw()
-    })
-}
-
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotTemporalJoinerPartitions<
     'local,
@@ -1517,58 +1502,6 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotTempo
             joiner.snapshot_partitions(max_parallelism as usize, &precisions),
             "temporal-join",
         )
-    })
-}
-
-/// Rebuilds a temporal joiner from a snapshot taken by a prior run and returns a fresh handle.
-#[allow(clippy::too_many_arguments)]
-#[no_mangle]
-pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreTemporalJoiner<'local>(
-    env: JNIEnv<'local>,
-    _class: JClass<'local>,
-    left_keys: JIntArray<'local>,
-    right_keys: JIntArray<'local>,
-    left_time: jint,
-    right_time: jint,
-    join_type: jint,
-    left_schema_address: jlong,
-    right_schema_address: jlong,
-    pred_kinds: JIntArray<'local>,
-    pred_payload: JIntArray<'local>,
-    pred_child_counts: JIntArray<'local>,
-    pred_longs: JLongArray<'local>,
-    pred_doubles: JDoubleArray<'local>,
-    pred_strings: JObjectArray<'local>,
-    state_ttl_millis: jlong,
-    now_millis: jlong,
-    snapshot: JByteArray<'local>,
-    memory_budget_bytes: jlong,
-) -> jlong {
-    crate::bridge::jni_guard(env, move |mut env| {
-        let left = read_columns(&env, &left_keys);
-        let right = read_columns(&env, &right_keys);
-        let left_schema = import_schema(left_schema_address);
-        let right_schema = import_schema(right_schema_address);
-        let predicate = read_join_predicate(
-            &mut env, &pred_kinds, &pred_payload, &pred_child_counts, &pred_longs, &pred_doubles,
-            &pred_strings,
-        );
-        let bytes = env.convert_byte_array(&snapshot).expect("failed to read temporal-join snapshot");
-        let joiner = TemporalJoiner::restore(
-            left,
-            right,
-            left_time as usize,
-            right_time as usize,
-            JoinKind::from_code(join_type),
-            left_schema,
-            right_schema,
-            predicate,
-            &bytes,
-            state_ttl_millis,
-            now_millis,
-        )
-        .with_memory_budget(memory_budget_bytes);
-        boxed_or_throw(&mut env, joiner)
     })
 }
 

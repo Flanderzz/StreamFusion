@@ -1165,6 +1165,7 @@ impl UpdatingJoiner {
             .collect()
     }
 
+    #[cfg(test)]
     pub(crate) fn snapshot(&self) -> Vec<u8> {
         let left = self.side_snapshot_groups(true, 1).remove(&0).unwrap_or_default();
         let right = self.side_snapshot_groups(false, 1).remove(&0).unwrap_or_default();
@@ -1201,6 +1202,7 @@ impl UpdatingJoiner {
     /// `restored_at_ms` stamps rows restored from a snapshot side that carries no TTL timestamps
     /// (a pre-TTL or TTL-off writer), granting them a full retention from the restore — Flink's
     /// enable-TTL migration — instead of 0, which would expire everything on first touch.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn restore(
         left_keys: Vec<usize>,
@@ -1474,21 +1476,6 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushRightUpda
     })
 }
 
-/// Serializes the updating joiner's per-side state for a checkpoint.
-#[no_mangle]
-pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotUpdatingJoiner<'local>(
-    env: JNIEnv<'local>,
-    _class: JClass<'local>,
-    handle: jlong,
-) -> jbyteArray {
-    crate::bridge::jni_guard(env, move |env| {
-        let joiner = unsafe { &mut *(handle as *mut UpdatingJoiner) };
-        env.byte_array_from_slice(&joiner.snapshot())
-            .expect("failed to allocate updating-join snapshot array")
-            .into_raw()
-    })
-}
-
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotUpdatingJoinerPartitions<
     'local,
@@ -1506,65 +1493,6 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotUpdat
             joiner.snapshot_partitions(max_parallelism as usize),
             "updating-join",
         )
-    })
-}
-
-/// Rebuilds an updating joiner from a snapshot and returns a fresh handle.
-#[no_mangle]
-#[allow(clippy::too_many_arguments)]
-pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreUpdatingJoiner<'local>(
-    env: JNIEnv<'local>,
-    _class: JClass<'local>,
-    left_keys: JIntArray<'local>,
-    right_keys: JIntArray<'local>,
-    key_timestamp_precisions: JIntArray<'local>,
-    join_type: jint,
-    left_schema_address: jlong,
-    right_schema_address: jlong,
-    pred_kinds: JIntArray<'local>,
-    pred_payload: JIntArray<'local>,
-    pred_child_counts: JIntArray<'local>,
-    pred_longs: JLongArray<'local>,
-    pred_doubles: JDoubleArray<'local>,
-    pred_strings: JObjectArray<'local>,
-    mini_batch: jboolean,
-    left_state_ttl_millis: jlong,
-    right_state_ttl_millis: jlong,
-    now_millis: jlong,
-    snapshot: JByteArray<'local>,
-    memory_budget_bytes: jlong,
-) -> jlong {
-    crate::bridge::jni_guard(env, move |mut env| {
-        let left = read_columns(&env, &left_keys);
-        let right = read_columns(&env, &right_keys);
-        let left_schema = import_schema(left_schema_address);
-        let right_schema = import_schema(right_schema_address);
-        let predicate = read_join_predicate(
-            &mut env,
-            &pred_kinds,
-            &pred_payload,
-            &pred_child_counts,
-            &pred_longs,
-            &pred_doubles,
-            &pred_strings,
-        );
-        let timestamp_precisions = read_i32_array(&env, &key_timestamp_precisions);
-        let bytes = env.convert_byte_array(&snapshot).expect("failed to read updating-join snapshot");
-        let joiner = UpdatingJoiner::restore(
-            left,
-            right,
-            timestamp_precisions,
-            JoinKind::from_code(join_type),
-            left_schema,
-            right_schema,
-            predicate,
-            &bytes,
-            now_millis,
-        )
-        .with_mini_batch(mini_batch != 0)
-        .with_state_ttl(left_state_ttl_millis, right_state_ttl_millis)
-        .with_memory_budget(memory_budget_bytes);
-        boxed_or_throw(&mut env, joiner)
     })
 }
 

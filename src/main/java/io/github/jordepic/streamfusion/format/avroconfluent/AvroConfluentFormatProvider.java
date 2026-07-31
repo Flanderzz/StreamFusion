@@ -49,9 +49,9 @@ public final class AvroConfluentFormatProvider implements NativeFormatProvider {
   private static final class Decoder implements NativeMessageDecoder {
     private final ConfluentSchemaRegistry registry;
     private final String readerSchemaText;
-    private transient long handle;
-    private transient Set<Integer> registeredSchemaIds;
-    private transient Schema readerSchema;
+    private long handle;
+    private Set<Integer> registeredSchemaIds;
+    private Schema readerSchema;
 
     private Decoder(ConfluentSchemaRegistry registry, String readerSchemaText) {
       this.registry = registry;

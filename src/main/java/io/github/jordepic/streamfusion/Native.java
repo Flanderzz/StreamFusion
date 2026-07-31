@@ -675,33 +675,15 @@ public final class Native {
   /** Releases an OVER aggregator handle. */
   public static native void closeOverAggregator(long handle);
 
-  /** Serializes an OVER aggregator's running state and buffered rows for a checkpoint. */
-  public static native byte[] snapshotOverAggregator(long handle);
-
   /** Serializes every non-empty OVER key group once, framed by key-group id. */
   public static native byte[][] snapshotOverAggregatorPartitions(
       long handle, int maxParallelism, int[] timestampPrecisions);
 
   /**
-   * Rebuilds an OVER aggregator from a snapshot and returns a fresh handle. {@code nowMillis}
-   * stamps keys restored from a snapshot that carries no retention stamps (a pre-retention
-   * writer) from the restore clock — Flink's enable-TTL migration.
+   * Restores an OVER aggregator from raw keyed-state partitions assigned to this task. {@code
+   * nowMillis} stamps keys restored from a snapshot that carries no retention stamps (a
+   * pre-retention writer) from the restore clock — Flink's enable-TTL migration.
    */
-  public static native long restoreOverAggregator(
-      int[] valueTypes,
-      int[] aggregateKinds,
-      int rtColumn,
-      int[] valueColumns,
-      int[] keyColumns,
-      int frameKind,
-      long frameOffset,
-      boolean proctime,
-      long stateTtlMillis,
-      long nowMillis,
-      byte[] snapshot,
-      long memoryBudgetBytes);
-
-  /** Restores an OVER aggregator from raw keyed-state partitions assigned to this task. */
   public static native long restoreOverAggregatorPartitions(
       int[] valueTypes,
       int[] aggregateKinds,
@@ -786,27 +768,16 @@ public final class Native {
   /** Releases the deduplicator and its per-key state. */
   public static native void closeKeepFirstDeduplicator(long handle);
 
-  /** Serializes the deduplicator's pending candidates, emitted keys, and watermark for a checkpoint. */
-  public static native byte[] snapshotKeepFirstDeduplicator(long handle);
-
-  /**
-   * Rebuilds a keep-first deduplicator from a snapshot and returns a fresh handle. {@code
-   * nowMillis} stamps markers restored from a snapshot that carries no TTL timestamps (a pre-TTL
-   * writer), granting them a full retention from the restore — Flink's enable-TTL migration.
-   */
-  public static native long restoreKeepFirstDeduplicator(
-      int[] partitionColumns,
-      int rtColumn,
-      long stateTtlMillis,
-      long nowMillis,
-      byte[] snapshot,
-      long memoryBudgetBytes);
-
   /** Lists the non-empty Flink key groups in a keep-first deduplication raw keyed-state checkpoint. */
   public static native byte[][] snapshotKeepFirstDeduplicatorPartitions(
       long handle, int maxParallelism, int[] timestampPrecisions);
 
-  /** Restores a keep-first deduplicator from raw keyed-state partitions assigned to this subtask. */
+  /**
+   * Restores a keep-first deduplicator from raw keyed-state partitions assigned to this subtask.
+   * {@code nowMillis} stamps markers restored from a snapshot that carries no TTL timestamps (a
+   * pre-TTL writer), granting them a full retention from the restore — Flink's enable-TTL
+   * migration.
+   */
   public static native long restoreKeepFirstDeduplicatorPartitions(
       int[] partitionColumns,
       int[] keyTimestampPrecisions,
@@ -866,36 +837,15 @@ public final class Native {
   /** Releases the deduplicator and its per-key state. */
   public static native void closeKeepLastDeduplicator(long handle);
 
-  /** Serializes the deduplicator's per-key stored rows for a checkpoint. */
-  public static native byte[] snapshotKeepLastDeduplicator(long handle);
-
-  /**
-   * Rebuilds an eager deduplicator from a snapshot and returns a fresh handle. {@code nowMillis}
-   * stamps keys restored from a snapshot that carries no TTL timestamps (a pre-TTL writer),
-   * granting them a full retention from the restore — Flink's enable-TTL migration.
-   */
-  public static native long restoreKeepLastDeduplicator(
-      int[] partitionColumns,
-      int[] keyTimestampPrecisions,
-      int rtColumn,
-      boolean generateUpdateBefore,
-      boolean generateInsert,
-      boolean rowtimeOrdered,
-      boolean keepFirst,
-      boolean miniBatch,
-      boolean compactChanges,
-      long stateTtlMillis,
-      long nowMillis,
-      byte[] snapshot,
-      long memoryBudgetBytes);
-
   /** Lists the non-empty Flink key groups in a keep-last deduplication raw keyed-state checkpoint. */
   public static native byte[][] snapshotKeepLastDeduplicatorPartitions(
       long handle, int maxParallelism, int[] timestampPrecisions);
 
   /**
    * Restores a keep-last deduplicator from the raw keyed-state partitions assigned to this subtask.
-   * Restore semantics as in {@link #restoreKeepLastDeduplicator}.
+   * {@code nowMillis} stamps keys restored from a snapshot that carries no TTL timestamps (a
+   * pre-TTL writer), granting them a full retention from the restore — Flink's enable-TTL
+   * migration.
    */
   public static native long restoreKeepLastDeduplicatorPartitions(
       int[] partitionColumns,
@@ -940,22 +890,6 @@ public final class Native {
 
   /** Releases the window-rank ranker and its per-window state. */
   public static native void closeWindowRanker(long handle);
-
-  /** Serializes the ranker's per-window buffers and watermark for a checkpoint. */
-  public static native byte[] snapshotWindowRanker(long handle);
-
-  /** Rebuilds a window-rank ranker from a snapshot and returns a fresh handle. */
-  public static native long restoreWindowRanker(
-      int windowStartColumn,
-      int windowEndColumn,
-      int[] partitionColumns,
-      int[] sortIndices,
-      int[] sortAscending,
-      int[] sortNullsFirst,
-      long limit,
-      boolean outputRankNumber,
-      byte[] snapshot,
-      long memoryBudgetBytes);
 
   /** Serializes every non-empty window-rank key group once, framed by key-group id. */
   public static native byte[][] snapshotWindowRankerPartitions(
@@ -1035,36 +969,16 @@ public final class Native {
   /** Releases a {@code GROUP BY} aggregator handle. */
   public static native void closeGroupAggregator(long handle);
 
-  /** Serializes a {@code GROUP BY} aggregator's per-key state for a checkpoint. */
-  public static native byte[] snapshotGroupAggregator(long handle);
-
   /** Lists the non-empty Flink key groups in the group aggregator's raw keyed-state checkpoint. */
   public static native byte[][] snapshotGroupAggregatorPartitions(
       long handle, int maxParallelism, int[] timestampPrecisions);
 
   /**
-   * Rebuilds a {@code GROUP BY} aggregator from a snapshot and returns a fresh handle. {@code
-   * nowMillis} stamps groups restored from a snapshot that carries no TTL timestamps (a pre-TTL
-   * writer), granting them a full retention from the restore — Flink's enable-TTL migration.
+   * Rebuilds a group aggregator from every raw keyed-state partition assigned to this subtask.
+   * {@code nowMillis} stamps groups restored from a snapshot that carries no TTL timestamps (a
+   * pre-TTL writer), granting them a full retention from the restore — Flink's enable-TTL
+   * migration.
    */
-  public static native long restoreGroupAggregator(
-      int[] aggregateKinds,
-      int[] valueTypes,
-      int[] valueColumns,
-      int[] keyColumns,
-      int[] keyTimestampPrecisions,
-      int[] filterColumns,
-      int[] countColumns,
-      int[] distinctViewColumns,
-      int recordCountColumn,
-      boolean generateUpdateBefore,
-      boolean miniBatch,
-      long stateTtlMillis,
-      long nowMillis,
-      byte[] snapshot,
-      long memoryBudgetBytes);
-
-  /** Rebuilds a group aggregator from every raw keyed-state partition assigned to this subtask. */
   public static native long restoreGroupAggregatorPartitions(
       int[] aggregateKinds,
       int[] valueTypes,
@@ -1895,29 +1809,15 @@ public final class Native {
   public static native void flushChangelogNormalizer(
       long handle, long outArrayAddress, long outSchemaAddress);
 
-  /** Serializes a changelog normalizer's per-key state for a checkpoint. */
-  public static native byte[] snapshotChangelogNormalizer(long handle);
-
-  /**
-   * Rebuilds a changelog normalizer from a snapshot and returns a fresh handle. {@code nowMillis}
-   * stamps keys restored from a snapshot that carries no TTL timestamps (a pre-TTL writer),
-   * granting them a full retention from the restore — Flink's enable-TTL migration.
-   */
-  public static native long restoreChangelogNormalizer(
-      int[] keyColumns,
-      int[] keyTimestampPrecisions,
-      boolean generateUpdateBefore,
-      boolean miniBatch,
-      long stateTtlMillis,
-      long nowMillis,
-      byte[] snapshot,
-      long memoryBudgetBytes);
-
   /** Lists the non-empty Flink key groups in a normalizer raw keyed-state checkpoint. */
   public static native byte[][] snapshotChangelogNormalizerPartitions(
       long handle, int maxParallelism, int[] timestampPrecisions);
 
-  /** Restores a normalizer from all raw keyed-state partitions assigned to this subtask. */
+  /**
+   * Restores a normalizer from all raw keyed-state partitions assigned to this subtask. {@code
+   * nowMillis} stamps keys restored from a snapshot that carries no TTL timestamps (a pre-TTL
+   * writer), granting them a full retention from the restore — Flink's enable-TTL migration.
+   */
   public static native long restoreChangelogNormalizerPartitions(
       int[] keyColumns,
       int[] keyTimestampPrecisions,
@@ -1943,8 +1843,8 @@ public final class Native {
    * @param schemaArrayAddress address of an exported (empty) {@code ArrowArray} of the target schema
    * @param schemaAddress address of the matching exported {@code ArrowSchema}
    * @param avroSchema writer-schema JSON for Avro (ignored for JSON; pass ""). For Confluent Avro an
-   *     empty string starts an empty schema store, fed by id at runtime via {@link
-   *     #registerAvroSchema} — the registry-driven path
+   *     empty string starts an empty schema store, fed by id at runtime via the avro facade's
+   *     {@code registerWriterSchema} — the registry-driven path
    * @param readerAvroSchema reader-schema JSON projecting the Avro writer record to a subset of fields
    *     via Avro resolution (the query's columns); pass "" for no projection / non-Avro
    * @param schemaId Confluent schema id the Avro writer schema is registered under (ignored for JSON)
@@ -1965,37 +1865,6 @@ public final class Native {
       int schemaId,
       boolean skipParseErrors,
       String formatOptions);
-
-  /**
-   * Creates a protobuf message decoder (Flink's {@code protobuf} format: bare message bytes, no
-   * Confluent framing), returning a {@link MessageDecoder} handle released with {@link #closeDecoder}.
-   * The Arrow batch schema is derived from the descriptor (no schema C-structs, unlike JSON).
-   *
-   * @param descriptor an encoded protobuf {@code FileDescriptorSet} the JVM serialized off the
-   *     generated message class (the message's {@code .proto} file + its transitive dependencies)
-   * @param messageName the fully-qualified message type to decode each body as
-   * @param schemaArrayAddress address of an exported (empty) {@code ArrowArray} of the projected output
-   *     schema, used to prune the descriptor to the read fields; 0 for no projection (decode in full)
-   * @param schemaAddress address of the matching exported {@code ArrowSchema}, or 0
-   */
-  public static native long createProtobufDecoder(
-      byte[] descriptor, String messageName, long schemaArrayAddress, long schemaAddress);
-
-  /**
-   * Registers a writer schema under a Confluent schema id on an existing Confluent-Avro decoder
-   * (format 1). The decode operator calls this the first time a batch carries an id it hasn't seen,
-   * with the schema fetched from the schema registry — so the decoder's store follows the topic's
-   * schema evolution the way Flink's own {@code avro-confluent} deserializer does.
-   */
-  public static native void registerAvroSchema(long handle, int schemaId, String schema);
-
-  /** Decodes one binary-column body batch into a typed batch, exported into the output C structs. */
-  public static native void decodeInto(
-      long handle,
-      long inArrayAddress,
-      long inSchemaAddress,
-      long outArrayAddress,
-      long outSchemaAddress);
 
   /**
    * Benchmark-only: decode a body batch and return the decoded row count without exporting the result,
@@ -2076,32 +1945,9 @@ public final class Native {
   /** Releases an interval joiner handle. */
   public static native void closeIntervalJoiner(long handle);
 
-  /** Serializes an interval joiner's buffered rows for a checkpoint. */
-  public static native byte[] snapshotIntervalJoiner(long handle);
-
   /** Serializes every non-empty interval-join key group once, framed by key-group id. */
   public static native byte[][] snapshotIntervalJoinerPartitions(
       long handle, int maxParallelism, int[] timestampPrecisions);
-
-  /** Rebuilds an interval joiner from a snapshot and returns a fresh handle. */
-  public static native long restoreIntervalJoiner(
-      int[] leftKeys,
-      int[] rightKeys,
-      int leftTime,
-      int rightTime,
-      long lowerMillis,
-      long upperMillis,
-      int joinType,
-      long leftSchemaAddress,
-      long rightSchemaAddress,
-      int[] predKinds,
-      int[] predPayload,
-      int[] predChildCounts,
-      long[] predLongs,
-      double[] predDoubles,
-      String[] predStrings,
-      byte[] snapshot,
-      long memoryBudgetBytes);
 
   /** Restores an interval joiner from raw keyed-state partitions assigned to this task. */
   public static native long restoreIntervalJoinerPartitions(
@@ -2187,38 +2033,15 @@ public final class Native {
   /** Releases a temporal joiner handle. */
   public static native void closeTemporalJoiner(long handle);
 
-  /** Serializes a temporal joiner's buffered probe rows and versioned build state for a checkpoint. */
-  public static native byte[] snapshotTemporalJoiner(long handle);
-
   /** Serializes every non-empty temporal-join key group once, framed by key-group id. */
   public static native byte[][] snapshotTemporalJoinerPartitions(
       long handle, int maxParallelism, int[] timestampPrecisions);
 
   /**
-   * Rebuilds a temporal joiner from a snapshot and returns a fresh handle. {@code nowMillis}
-   * stamps a full max-retention deadline onto keys restored from a snapshot that carries no
-   * deadlines (a pre-retention writer) — Flink's enable-TTL migration.
+   * Restores a temporal joiner from raw keyed-state partitions assigned to this task. {@code
+   * nowMillis} stamps a full max-retention deadline onto keys restored from a snapshot that
+   * carries no deadlines (a pre-retention writer) — Flink's enable-TTL migration.
    */
-  public static native long restoreTemporalJoiner(
-      int[] leftKeys,
-      int[] rightKeys,
-      int leftTime,
-      int rightTime,
-      int joinType,
-      long leftSchemaAddress,
-      long rightSchemaAddress,
-      int[] predKinds,
-      int[] predPayload,
-      int[] predChildCounts,
-      long[] predLongs,
-      double[] predDoubles,
-      String[] predStrings,
-      long stateTtlMillis,
-      long nowMillis,
-      byte[] snapshot,
-      long memoryBudgetBytes);
-
-  /** Restores a temporal joiner from raw keyed-state partitions assigned to this task. */
   public static native long restoreTemporalJoinerPartitions(
       int[] leftKeys,
       int[] rightKeys,
@@ -2306,39 +2129,16 @@ public final class Native {
   /** Releases an updating joiner handle. */
   public static native void closeUpdatingJoiner(long handle);
 
-  /** Serializes an updating joiner's per-side state for a checkpoint. */
-  public static native byte[] snapshotUpdatingJoiner(long handle);
-
   /** Serializes every non-empty updating-join key group once, framed by key-group id. */
   public static native byte[][] snapshotUpdatingJoinerPartitions(
       long handle, int maxParallelism, int[] timestampPrecisions);
 
   /**
-   * Rebuilds an updating joiner from a snapshot and returns a fresh handle. {@code nowMillis}
-   * stamps rows restored from a snapshot side that carries no TTL timestamps (a pre-TTL writer),
-   * granting them a full retention from the restore — Flink's enable-TTL migration.
+   * Restores an updating joiner from raw keyed-state partitions assigned to this task. {@code
+   * nowMillis} stamps rows restored from a snapshot side that carries no TTL timestamps (a
+   * pre-TTL writer), granting them a full retention from the restore — Flink's enable-TTL
+   * migration.
    */
-  public static native long restoreUpdatingJoiner(
-      int[] leftKeys,
-      int[] rightKeys,
-      int[] keyTimestampPrecisions,
-      int joinType,
-      long leftSchemaAddress,
-      long rightSchemaAddress,
-      int[] predKinds,
-      int[] predPayload,
-      int[] predChildCounts,
-      long[] predLongs,
-      double[] predDoubles,
-      String[] predStrings,
-      boolean miniBatch,
-      long leftStateTtlMillis,
-      long rightStateTtlMillis,
-      long nowMillis,
-      byte[] snapshot,
-      long memoryBudgetBytes);
-
-  /** Restores an updating joiner from raw keyed-state partitions assigned to this task. */
   public static native long restoreUpdatingJoinerPartitions(
       int[] leftKeys,
       int[] rightKeys,
@@ -2416,35 +2216,15 @@ public final class Native {
   /** Releases a Top-N ranker handle. */
   public static native void closeTopNRanker(long handle);
 
-  /** Serializes a Top-N ranker's bounded per-partition buffers for a checkpoint. */
-  public static native byte[] snapshotTopNRanker(long handle);
-
-  /**
-   * Rebuilds a Top-N ranker from a snapshot and returns a fresh handle. {@code nowMillis} stamps
-   * rows restored from a snapshot that carries no TTL timestamps (a pre-TTL writer), granting
-   * them a full retention from the restore — Flink's enable-TTL migration.
-   */
-  public static native long restoreTopNRanker(
-      int[] partitionColumns,
-      int[] keyTimestampPrecisions,
-      int[] sortIndices,
-      int[] sortAscending,
-      int[] sortNullsFirst,
-      long offset,
-      long limit,
-      boolean outputRankNumber,
-      boolean retracting,
-      boolean netDiff,
-      long stateTtlMillis,
-      long nowMillis,
-      byte[] snapshot,
-      long memoryBudgetBytes);
-
   /** Serializes every non-empty Top-N key group once; each payload starts with its key-group id. */
   public static native byte[][] snapshotTopNRankerPartitions(
       long handle, int maxParallelism, int[] timestampPrecisions);
 
-  /** Restores a Top-N ranker from raw keyed-state partitions assigned to this subtask. */
+  /**
+   * Restores a Top-N ranker from raw keyed-state partitions assigned to this subtask. {@code
+   * nowMillis} stamps rows restored from a snapshot that carries no TTL timestamps (a pre-TTL
+   * writer), granting them a full retention from the restore — Flink's enable-TTL migration.
+   */
   public static native long restoreTopNRankerPartitions(
       int[] partitionColumns,
       int[] keyTimestampPrecisions,
@@ -2489,7 +2269,7 @@ public final class Native {
   /**
    * Restores an update-fast Top-N ranker from raw keyed-state partitions assigned to this
    * subtask; {@code nowMillis} stamps rows from a timestamp-less snapshot (see
-   * {@link #restoreTopNRanker}).
+   * {@link #restoreTopNRankerPartitions}).
    */
   public static native long restoreUpdateFastTopNRankerPartitions(
       int[] partitionColumns,
@@ -2556,32 +2336,9 @@ public final class Native {
   /** Releases a window joiner handle. */
   public static native void closeWindowJoiner(long handle);
 
-  /** Serializes a window joiner's buffered rows for a checkpoint. */
-  public static native byte[] snapshotWindowJoiner(long handle);
-
   /** Serializes every non-empty window-join key group once, framed by key-group id. */
   public static native byte[][] snapshotWindowJoinerPartitions(
       long handle, int maxParallelism, int[] timestampPrecisions);
-
-  /** Rebuilds a window joiner from a snapshot and returns a fresh handle. */
-  public static native long restoreWindowJoiner(
-      int[] leftKeys,
-      int[] rightKeys,
-      int leftWindowStart,
-      int leftWindowEnd,
-      int rightWindowStart,
-      int rightWindowEnd,
-      int joinType,
-      long leftSchemaAddress,
-      long rightSchemaAddress,
-      int[] predKinds,
-      int[] predPayload,
-      int[] predChildCounts,
-      long[] predLongs,
-      double[] predDoubles,
-      String[] predStrings,
-      byte[] snapshot,
-      long memoryBudgetBytes);
 
   /** Restores a window joiner from raw keyed-state partitions assigned to this task. */
   public static native long restoreWindowJoinerPartitions(

@@ -1064,21 +1064,6 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_closeInterval
     })
 }
 
-/// Serializes the joiner's buffered rows for a checkpoint.
-#[no_mangle]
-pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotIntervalJoiner<'local>(
-    env: JNIEnv<'local>,
-    _class: JClass<'local>,
-    handle: jlong,
-) -> jbyteArray {
-    crate::bridge::jni_guard(env, move |env| {
-        let joiner = unsafe { &*(handle as *mut IntervalJoiner) };
-        env.byte_array_from_slice(&joiner.snapshot())
-            .expect("failed to allocate join snapshot array")
-            .into_raw()
-    })
-}
-
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotIntervalJoinerPartitions<
     'local,
@@ -1097,63 +1082,6 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotInter
             joiner.snapshot_partitions(max_parallelism as usize, &precisions),
             "interval-join",
         )
-    })
-}
-
-/// Rebuilds an interval joiner from a snapshot taken by a prior run and returns a fresh handle.
-#[no_mangle]
-#[allow(clippy::too_many_arguments)]
-pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreIntervalJoiner<'local>(
-    env: JNIEnv<'local>,
-    _class: JClass<'local>,
-    left_keys: JIntArray<'local>,
-    right_keys: JIntArray<'local>,
-    left_time: jint,
-    right_time: jint,
-    lower: jlong,
-    upper: jlong,
-    join_type: jint,
-    left_schema_address: jlong,
-    right_schema_address: jlong,
-    pred_kinds: JIntArray<'local>,
-    pred_payload: JIntArray<'local>,
-    pred_child_counts: JIntArray<'local>,
-    pred_longs: JLongArray<'local>,
-    pred_doubles: JDoubleArray<'local>,
-    pred_strings: JObjectArray<'local>,
-    snapshot: JByteArray<'local>,
-    memory_budget_bytes: jlong,
-) -> jlong {
-    crate::bridge::jni_guard(env, move |mut env| {
-        let left = read_columns(&env, &left_keys);
-        let right = read_columns(&env, &right_keys);
-        let left_schema = import_schema(left_schema_address);
-        let right_schema = import_schema(right_schema_address);
-        let predicate = read_join_predicate(
-            &mut env,
-            &pred_kinds,
-            &pred_payload,
-            &pred_child_counts,
-            &pred_longs,
-            &pred_doubles,
-            &pred_strings,
-        );
-        let bytes = env.convert_byte_array(&snapshot).expect("failed to read join snapshot");
-        let joiner = IntervalJoiner::restore(
-            left,
-            right,
-            left_time as usize,
-            right_time as usize,
-            lower,
-            upper,
-            predicate,
-            JoinKind::from_code(join_type),
-            left_schema,
-            right_schema,
-            &bytes,
-        )
-        .with_memory_budget(memory_budget_bytes);
-        boxed_or_throw(&mut env, joiner)
     })
 }
 

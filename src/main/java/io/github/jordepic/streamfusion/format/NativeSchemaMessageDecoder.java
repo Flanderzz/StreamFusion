@@ -13,11 +13,6 @@ import org.apache.flink.table.types.logical.RowType;
 /** Common schema-export plumbing for formats whose native decoder is driven by the output Arrow schema. */
 public abstract class NativeSchemaMessageDecoder implements NativeMessageDecoder {
 
-  @FunctionalInterface
-  interface HandleCreator {
-    long create(long schemaArrayAddress, long schemaAddress);
-  }
-
   protected long handle;
 
   @Override

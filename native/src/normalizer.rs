@@ -497,10 +497,12 @@ impl ChangelogNormalizer {
             .collect()
     }
 
+    #[cfg(test)]
     fn snapshot(&self) -> Vec<u8> {
         self.raw_snapshot_groups(1).remove(&0).unwrap_or_default()
     }
 
+    #[cfg(test)]
     fn restore(
         key_columns: Vec<usize>,
         generate_update_before: bool,
@@ -737,49 +739,6 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_pushChangelog
             Ok(out) => export_record_batch(out, out_array_address, out_schema_address),
             Err(e) => throw_memory_limit(&mut env, &e.to_string()),
         }
-    })
-}
-
-/// Serializes the normalizer's per-key last rows for a checkpoint.
-#[no_mangle]
-pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotChangelogNormalizer<'local>(
-    env: JNIEnv<'local>,
-    _class: JClass<'local>,
-    handle: jlong,
-) -> jbyteArray {
-    crate::bridge::jni_guard(env, move |env| {
-        let normalizer = unsafe { &mut *(handle as *mut ChangelogNormalizer) };
-        env.byte_array_from_slice(&normalizer.snapshot())
-            .expect("failed to allocate changelog-normalize snapshot array")
-            .into_raw()
-    })
-}
-
-/// Rebuilds a changelog normalizer from a snapshot and returns a fresh handle.
-#[no_mangle]
-pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreChangelogNormalizer<'local>(
-    env: JNIEnv<'local>,
-    _class: JClass<'local>,
-    key_columns: JIntArray<'local>,
-    key_timestamp_precisions: JIntArray<'local>,
-    generate_update_before: jboolean,
-    mini_batch: jboolean,
-    state_ttl_millis: jlong,
-    now_millis: jlong,
-    snapshot: JByteArray<'local>,
-    memory_budget_bytes: jlong,
-) -> jlong {
-    crate::bridge::jni_guard(env, move |mut env| {
-        let keys = read_columns(&env, &key_columns);
-        let timestamp_precisions = read_i32_array(&env, &key_timestamp_precisions);
-        let bytes = env.convert_byte_array(&snapshot).expect("failed to read changelog-normalize snapshot");
-        let normalizer =
-            ChangelogNormalizer::restore(keys, generate_update_before != 0, &bytes, now_millis)
-                .with_mini_batch(mini_batch != 0)
-                .with_key_timestamp_precisions(timestamp_precisions)
-                .with_state_ttl(state_ttl_millis)
-                .with_memory_budget(memory_budget_bytes);
-        boxed_or_throw(&mut env, normalizer)
     })
 }
 

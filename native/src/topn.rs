@@ -911,6 +911,7 @@ fn raw_topn_snapshot_groups(
 /// store checkpoints through its own commit path instead of materializing the key space.
 impl TopNRanker {
     /// Serializes the buffered rows in per-partition buffer order (partition derivable from the row).
+    #[cfg(test)]
     pub(crate) fn snapshot(&self) -> Vec<u8> {
         raw_topn_snapshot_groups(&self.groups, self.schema.as_ref(), 1, self.ttl_ms > 0)
             .remove(&0)
@@ -923,6 +924,7 @@ impl TopNRanker {
 
     /// `restored_at_ms` stamps rows from a snapshot carrying no TTL timestamps (a pre-TTL or
     /// TTL-off writer) — a full retention from the restore, Flink's enable-TTL migration.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn restore(
         partition_columns: Vec<usize>,
@@ -1618,6 +1620,7 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> RetractableTopNRanker<S> {
 /// store checkpoints through its own commit path instead of materializing the key space.
 impl RetractableTopNRanker {
     /// Serializes the buffered rows in per-partition buffer order (partition derivable from the row).
+    #[cfg(test)]
     pub(crate) fn snapshot(&self) -> Vec<u8> {
         raw_topn_snapshot_groups(&self.groups, self.schema.as_ref(), 1, self.ttl_ms > 0)
             .remove(&0)
@@ -1631,6 +1634,7 @@ impl RetractableTopNRanker {
     /// `restored_at_ms` stamps rows from a snapshot carrying no TTL timestamps (a pre-TTL or
     /// TTL-off writer) — the enable-TTL migration; with timestamps present, buffer order is
     /// preserved so the head clock round-trips.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn restore(
         partition_columns: Vec<usize>,
@@ -2346,16 +2350,6 @@ impl TopNHandle {
         })
     }
 
-    fn snapshot(&self) -> Vec<u8> {
-        match self {
-            TopNHandle::Append(r) => r.snapshot(),
-            TopNHandle::Retract(r) => r.snapshot(),
-            TopNHandle::UpdateFast(r) => {
-                r.snapshot_partitions(1).remove(&0).unwrap_or_default()
-            }
-        }
-    }
-
     fn snapshot_partitions(&self, max_parallelism: usize) -> BTreeMap<i32, Vec<u8>> {
         match self {
             TopNHandle::Append(r) => r.snapshot_partitions(max_parallelism),
@@ -2678,10 +2672,6 @@ impl WindowRanker {
         RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).expect("window-rank output batch")
     }
 
-    fn snapshot(&self) -> Vec<u8> {
-        self.snapshot_parts(self.snapshot_batch())
-    }
-
     fn snapshot_parts(&self, batch: Option<RecordBatch>) -> Vec<u8> {
         let mut out = self.current_watermark.to_le_bytes().to_vec();
         let Some(batch) = batch else { return out };
@@ -2957,55 +2947,6 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_closeWindowRa
     })
 }
 
-/// Serializes the ranker's per-window buffers and watermark for a checkpoint.
-#[no_mangle]
-pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotWindowRanker<'local>(
-    env: JNIEnv<'local>,
-    _class: JClass<'local>,
-    handle: jlong,
-) -> jbyteArray {
-    crate::bridge::jni_guard(env, move |env| {
-        let ranker = unsafe { &mut *(handle as *mut WindowRanker) };
-        env.byte_array_from_slice(&ranker.snapshot())
-            .expect("failed to allocate window-rank snapshot array")
-            .into_raw()
-    })
-}
-
-/// Rebuilds a window-rank ranker from a snapshot and returns a fresh handle.
-#[no_mangle]
-pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreWindowRanker<'local>(
-    env: JNIEnv<'local>,
-    _class: JClass<'local>,
-    window_start_col: jint,
-    window_end_col: jint,
-    partition_columns: JIntArray<'local>,
-    sort_indices: JIntArray<'local>,
-    sort_ascending: JIntArray<'local>,
-    sort_nulls_first: JIntArray<'local>,
-    limit: jlong,
-    output_rank_number: jboolean,
-    snapshot: JByteArray<'local>,
-    memory_budget_bytes: jlong,
-) -> jlong {
-    crate::bridge::jni_guard(env, move |mut env| {
-        let partitions = read_columns(&env, &partition_columns);
-        let sort = read_sort_columns(&env, &sort_indices, &sort_ascending, &sort_nulls_first);
-        let bytes = env.convert_byte_array(&snapshot).expect("failed to read window-rank snapshot");
-        let ranker = WindowRanker::restore(
-            window_start_col as usize,
-            window_end_col as usize,
-            partitions,
-            sort,
-            limit,
-            output_rank_number != 0,
-            &bytes,
-        )
-        .with_memory_budget(memory_budget_bytes);
-        boxed_or_throw(&mut env, ranker)
-    })
-}
-
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotWindowRankerPartitions<
     'local,
@@ -3191,80 +3132,6 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_flushTopNRank
     crate::bridge::jni_guard(env, move |_env| {
         let ranker = unsafe { &mut *(handle as *mut TopNHandle) };
         export_record_batch(ranker.flush(), out_array_address, out_schema_address);
-    })
-}
-
-/// Serializes the ranker's per-partition buffers for a checkpoint.
-#[no_mangle]
-pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotTopNRanker<'local>(
-    env: JNIEnv<'local>,
-    _class: JClass<'local>,
-    handle: jlong,
-) -> jbyteArray {
-    crate::bridge::jni_guard(env, move |env| {
-        let ranker = unsafe { &mut *(handle as *mut TopNHandle) };
-        env.byte_array_from_slice(&ranker.snapshot())
-            .expect("failed to allocate top-n snapshot array")
-            .into_raw()
-    })
-}
-
-/// Rebuilds a Top-N ranker from a snapshot and returns a fresh handle.
-#[no_mangle]
-pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreTopNRanker<'local>(
-    env: JNIEnv<'local>,
-    _class: JClass<'local>,
-    partition_columns: JIntArray<'local>,
-    key_timestamp_precisions: JIntArray<'local>,
-    sort_indices: JIntArray<'local>,
-    sort_ascending: JIntArray<'local>,
-    sort_nulls_first: JIntArray<'local>,
-    offset: jlong,
-    limit: jlong,
-    output_rank_number: jboolean,
-    retracting: jboolean,
-    net_diff: jboolean,
-    state_ttl_millis: jlong,
-    now_millis: jlong,
-    snapshot: JByteArray<'local>,
-    memory_budget_bytes: jlong,
-) -> jlong {
-    crate::bridge::jni_guard(env, move |mut env| {
-        let partitions = read_columns(&env, &partition_columns);
-        let timestamp_precisions = read_i32_array(&env, &key_timestamp_precisions);
-        let sort = read_sort_columns(&env, &sort_indices, &sort_ascending, &sort_nulls_first);
-        let bytes = env.convert_byte_array(&snapshot).expect("failed to read top-n snapshot");
-        let handle = if retracting != 0 {
-            TopNHandle::Retract(
-                RetractableTopNRanker::restore(
-                    partitions,
-                    timestamp_precisions,
-                    sort,
-                    offset,
-                    limit,
-                    output_rank_number != 0,
-                    &bytes,
-                    now_millis,
-                )
-                .with_net_diff(net_diff != 0)
-                .with_state_ttl(state_ttl_millis),
-            )
-        } else {
-            TopNHandle::Append(
-                TopNRanker::restore(
-                    partitions,
-                    timestamp_precisions,
-                    sort,
-                    limit,
-                    output_rank_number != 0,
-                    net_diff != 0,
-                    &bytes,
-                    now_millis,
-                )
-                .with_state_ttl(state_ttl_millis),
-            )
-        };
-        boxed_or_throw(&mut env, handle.with_memory_budget(memory_budget_bytes))
     })
 }
 

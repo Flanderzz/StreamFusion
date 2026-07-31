@@ -1635,6 +1635,7 @@ impl GroupAggregator {
     /// Serializes per-key state. A main batch carries `[key0.., records, state{i}, nonnull{i}…]` (the
     /// raw running value and non-null count for SUM/COUNT; a NULL placeholder for MIN/MAX), and a side
     /// batch per MIN/MAX aggregate carries its `[key0.., value, count]` multiset rows.
+    #[cfg(test)]
     pub(crate) fn snapshot(&mut self) -> Vec<u8> {
         let selected: Vec<ByteKey> = self.store.keys().cloned().collect();
         self.snapshot_keys(&selected)
@@ -2625,23 +2626,6 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_flushGroupAgg
     })
 }
 
-/// Serializes the aggregator's per-key state for a checkpoint.
-#[no_mangle]
-pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotGroupAggregator<
-    'local,
->(
-    env: JNIEnv<'local>,
-    _class: JClass<'local>,
-    handle: jlong,
-) -> jbyteArray {
-    crate::bridge::jni_guard(env, move |env| {
-        let aggregator = unsafe { &mut *(handle as *mut GroupAggregator) };
-        env.byte_array_from_slice(&aggregator.snapshot())
-            .expect("failed to allocate group-by snapshot array")
-            .into_raw()
-    })
-}
-
 /// Lists the non-empty Flink key groups represented by this group aggregator's current state.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotGroupAggregatorPartitions<
@@ -2661,64 +2645,6 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotGroup
             aggregator.snapshot_partitions(max_parallelism as usize, &precisions),
             "group-aggregate",
         )
-    })
-}
-
-/// Rebuilds a `GROUP BY` aggregator from a snapshot taken by a prior run and returns a fresh handle.
-#[no_mangle]
-pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreGroupAggregator<
-    'local,
->(
-    env: JNIEnv<'local>,
-    _class: JClass<'local>,
-    aggregate_kinds: JIntArray<'local>,
-    value_types: JIntArray<'local>,
-    value_columns: JIntArray<'local>,
-    key_columns: JIntArray<'local>,
-    key_timestamp_precisions: JIntArray<'local>,
-    filter_columns: JIntArray<'local>,
-    count_columns: JIntArray<'local>,
-    distinct_view_columns: JIntArray<'local>,
-    record_count_column: jint,
-    generate_update_before: jboolean,
-    mini_batch: jboolean,
-    state_ttl_millis: jlong,
-    now_millis: jlong,
-    snapshot: JByteArray<'local>,
-    memory_budget_bytes: jlong,
-) -> jlong {
-    crate::bridge::jni_guard(env, move |mut env| {
-        let kinds = read_int_array(&env, &aggregate_kinds);
-        let value_types = read_int_array(&env, &value_types);
-        let value_columns = read_int_array(&env, &value_columns);
-        let filter_columns = read_int_array(&env, &filter_columns);
-        let count_columns = read_int_array(&env, &count_columns);
-        let distinct_view_columns = read_int_array(&env, &distinct_view_columns);
-        let key_columns = read_columns(&env, &key_columns);
-        let key_timestamp_precisions = read_i32_array(&env, &key_timestamp_precisions);
-        let bytes = env
-            .convert_byte_array(&snapshot)
-            .expect("failed to read group-by snapshot");
-        let mut aggregator = GroupAggregator::restore(
-            kinds,
-            value_types,
-            value_columns,
-            key_columns,
-            generate_update_before != 0,
-            &bytes,
-            now_millis,
-        )
-        .with_key_timestamp_precisions(key_timestamp_precisions)
-        .with_filter_columns(filter_columns)
-        .with_count_columns(count_columns)
-        .with_distinct_view_columns(distinct_view_columns)
-        .with_record_count_column(record_count_column as i64)
-        .with_state_ttl(state_ttl_millis);
-        if mini_batch != 0 {
-            aggregator = aggregator.with_mini_batch();
-        }
-        let aggregator = aggregator.with_memory_budget(memory_budget_bytes);
-        boxed_or_throw(&mut env, aggregator)
     })
 }
 

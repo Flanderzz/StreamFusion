@@ -1714,6 +1714,7 @@ impl OverWindowAggregator {
             .expect("failed to build over sub-batch")
     }
 
+    #[cfg(test)]
     pub(crate) fn snapshot(&mut self) -> Vec<u8> {
         let accumulators = self.snapshot_accumulators();
         let buffer = self.snapshot_buffer();
@@ -2187,21 +2188,6 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_closeOverAggr
     })
 }
 
-/// Serializes the OVER aggregator's running state and buffered rows for a checkpoint.
-#[no_mangle]
-pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotOverAggregator<'local>(
-    env: JNIEnv<'local>,
-    _class: JClass<'local>,
-    handle: jlong,
-) -> jbyteArray {
-    crate::bridge::jni_guard(env, move |env| {
-        let aggregator = unsafe { &mut *(handle as *mut OverWindowAggregator) };
-        env.byte_array_from_slice(&aggregator.snapshot())
-            .expect("failed to allocate over snapshot array")
-            .into_raw()
-    })
-}
-
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotOverAggregatorPartitions<
     'local,
@@ -2220,51 +2206,6 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotOverA
             aggregator.snapshot_partitions(max_parallelism as usize, &precisions),
             "over",
         )
-    })
-}
-
-/// Rebuilds an OVER aggregator from a snapshot taken by a prior run and returns a fresh handle.
-/// `now_millis` stamps keys restored from a snapshot that carries no retention stamps (a
-/// pre-retention writer) from the restore clock — Flink's enable-TTL migration.
-#[allow(clippy::too_many_arguments)]
-#[no_mangle]
-pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreOverAggregator<'local>(
-    env: JNIEnv<'local>,
-    _class: JClass<'local>,
-    value_types: JIntArray<'local>,
-    aggregate_kinds: JIntArray<'local>,
-    rt_column: jint,
-    value_columns: JIntArray<'local>,
-    key_columns: JIntArray<'local>,
-    frame_kind: jint,
-    frame_offset: jlong,
-    proctime: jboolean,
-    state_ttl_millis: jlong,
-    now_millis: jlong,
-    snapshot: JByteArray<'local>,
-    memory_budget_bytes: jlong,
-) -> jlong {
-    crate::bridge::jni_guard(env, move |mut env| {
-        let kinds = read_int_array(&env, &aggregate_kinds);
-        let value_types = read_int_array(&env, &value_types);
-        let values = read_columns(&env, &value_columns);
-        let keys = read_columns(&env, &key_columns);
-        let bytes = env.convert_byte_array(&snapshot).expect("failed to read over snapshot");
-        let aggregator = OverWindowAggregator::restore(
-            value_types,
-            kinds,
-            rt_column as usize,
-            values,
-            keys,
-            frame_kind as i64,
-            frame_offset,
-            proctime != 0,
-            &bytes,
-            state_ttl_millis,
-            now_millis,
-        )
-        .with_memory_budget(memory_budget_bytes);
-        boxed_or_throw(&mut env, aggregator)
     })
 }
 
