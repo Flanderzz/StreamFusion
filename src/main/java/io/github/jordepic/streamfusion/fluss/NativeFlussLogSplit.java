@@ -8,7 +8,6 @@ public final class NativeFlussLogSplit {
   private final String splitId;
   private final long tableId;
   private final Long partitionId;
-  private final String partitionName;
   private final int bucket;
   private final long startingOffset;
   private final Long stoppingOffset;
@@ -17,14 +16,12 @@ public final class NativeFlussLogSplit {
       String splitId,
       long tableId,
       Long partitionId,
-      String partitionName,
       int bucket,
       long startingOffset,
       Long stoppingOffset) {
     this.splitId = splitId;
     this.tableId = tableId;
     this.partitionId = partitionId;
-    this.partitionName = partitionName;
     this.bucket = bucket;
     this.startingOffset = startingOffset;
     this.stoppingOffset = stoppingOffset;
@@ -40,10 +37,6 @@ public final class NativeFlussLogSplit {
 
   public OptionalLong partitionId() {
     return partitionId == null ? OptionalLong.empty() : OptionalLong.of(partitionId);
-  }
-
-  public String partitionName() {
-    return partitionName;
   }
 
   public int bucket() {

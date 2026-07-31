@@ -24,7 +24,6 @@ public final class FlussSplitTranslator {
         log.splitId(),
         bucket.getTableId(),
         bucket.getPartitionId(),
-        log.getPartitionName(),
         bucket.getBucket(),
         log.getStartingOffset(),
         log.getStoppingOffset().orElse(null));

@@ -36,7 +36,6 @@ class FlussSplitTranslatorTest {
 
     assertEquals(7L, nativeSplit.tableId());
     assertEquals(99L, nativeSplit.partitionId().orElseThrow());
-    assertEquals("dt=2026-07-04", nativeSplit.partitionName());
     assertEquals(3, nativeSplit.bucket());
     assertEquals(5L, nativeSplit.startingOffset());
     assertFalse(nativeSplit.stoppingOffset().isPresent());

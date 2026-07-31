@@ -129,7 +129,7 @@ final class NativeFlussSplitReader implements SplitReader<NativeSourceRecord, So
       OptionalLong partitionId = split.partitionId();
       if (partitionId.isPresent() && removedPartitions.containsKey(partitionId.getAsLong())) {
         removed.add(split);
-        buckets.add(new TableBucket(split.tableId(), partitionId.getAsLong(), (int) split.bucket()));
+        buckets.add(new TableBucket(split.tableId(), partitionId.getAsLong(), split.bucket()));
       }
     }
     for (NativeFlussLogSplit split : removed) {
