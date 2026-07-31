@@ -120,26 +120,64 @@ class KafkaConfigTranslatorTest {
   }
 
   @Test
-  void parsesKerberosJaasIntoKeytabAndPrincipal() {
+  void parsesScramJaasIntoCredentials() {
     Map<String, String> c =
         translated(
             props(
-                "security.protocol", "SASL_PLAINTEXT",
-                "sasl.mechanism", "GSSAPI",
-                "sasl.kerberos.service.name", "kafka",
+                "security.protocol", "SASL_SSL",
+                "sasl.mechanism", "SCRAM-SHA-512",
                 "sasl.jaas.config",
-                "com.sun.security.auth.module.Krb5LoginModule required useKeyTab=true"
-                    + " keyTab=\"/etc/security/keytabs/svc.keytab\""
-                    + " principal=\"svc@TRADING.IMC.INTRA\";"));
-    assertEquals("kafka", c.get("sasl.kerberos.service.name"));
-    assertEquals("/etc/security/keytabs/svc.keytab", c.get("sasl.kerberos.keytab"));
-    assertEquals("svc@TRADING.IMC.INTRA", c.get("sasl.kerberos.principal"));
+                "org.apache.kafka.common.security.scram.ScramLoginModule required"
+                    + " username=\"alice\" password=\"s3cret\";"));
+    assertEquals("SCRAM-SHA-512", c.get("sasl.mechanisms"));
+    assertEquals("alice", c.get("sasl.username"));
+    assertEquals("s3cret", c.get("sasl.password"));
+  }
+
+  @Test
+  void fallsBackOnKerberos() {
+    // Explicit GSSAPI, whatever the login module says.
+    assertTrue(
+        fallback(
+                props(
+                    "security.protocol", "SASL_PLAINTEXT",
+                    "sasl.mechanism", "GSSAPI",
+                    "sasl.jaas.config",
+                    "com.sun.security.auth.module.Krb5LoginModule required useKeyTab=true"
+                        + " keyTab=\"/etc/security/keytabs/svc.keytab\""
+                        + " principal=\"svc@EXAMPLE.COM\";"))
+            .contains("GSSAPI"));
+    // The Java client's default mechanism is GSSAPI, so SASL without a mechanism is Kerberos too.
+    assertTrue(fallback(props("security.protocol", "SASL_SSL")).contains("GSSAPI"));
+    // A Kerberos login module with a non-GSSAPI mechanism is still not runnable natively.
+    assertTrue(
+        fallback(
+                props(
+                    "security.protocol", "SASL_PLAINTEXT",
+                    "sasl.mechanism", "PLAIN",
+                    "sasl.jaas.config",
+                    "com.sun.security.auth.module.Krb5LoginModule required useKeyTab=true;"))
+            .contains("Krb5LoginModule"));
+    assertTrue(
+        fallback(props("sasl.kerberos.service.name", "kafka"))
+            .contains("sasl.kerberos.service.name"));
+  }
+
+  @Test
+  void fallsBackOnSaslWithoutCredentials() {
+    assertTrue(
+        fallback(props("security.protocol", "SASL_SSL", "sasl.mechanism", "PLAIN"))
+            .contains("sasl.jaas.config"));
   }
 
   @Test
   void fallsBackOnUnrecognizedLoginModule() {
     assertTrue(
-        fallback(props("sasl.jaas.config", "com.example.CustomLoginModule required token=\"x\";"))
+        fallback(
+                props(
+                    "security.protocol", "SASL_PLAINTEXT",
+                    "sasl.mechanism", "PLAIN",
+                    "sasl.jaas.config", "com.example.CustomLoginModule required token=\"x\";"))
             .contains("CustomLoginModule"));
   }
 
@@ -152,6 +190,35 @@ class KafkaConfigTranslatorTest {
                 "ssl.truststore.type", "PEM",
                 "ssl.truststore.location", "/certs/ca.pem"));
     assertEquals("/certs/ca.pem", c.get("ssl.ca.location"));
+  }
+
+  @Test
+  void probesThePlatformCaBundleWhenSslHasNoTruststore() {
+    // The statically-linked OpenSSL has no CA directory baked in; without explicit trust material
+    // librdkafka must probe the platform bundle or Linux fails certificate verification.
+    assertEquals("probe", translated(props("security.protocol", "SSL")).get("ssl.ca.location"));
+    Map<String, String> withTrust =
+        translated(
+            props(
+                "security.protocol", "SSL",
+                "ssl.truststore.type", "PEM",
+                "ssl.truststore.location", "/certs/ca.pem"));
+    assertEquals("/certs/ca.pem", withTrust.get("ssl.ca.location"));
+    assertFalse(translated(props("bootstrap.servers", "b:9092")).containsKey("ssl.ca.location"));
+  }
+
+  @Test
+  void mapsPemKeystoreToCertificateAndKey() {
+    Map<String, String> c =
+        translated(
+            props(
+                "security.protocol", "SSL",
+                "ssl.keystore.type", "PEM",
+                "ssl.keystore.location", "/certs/client.pem",
+                "ssl.keystore.password", "ignored-for-pem"));
+    assertEquals("/certs/client.pem", c.get("ssl.certificate.location"));
+    assertEquals("/certs/client.pem", c.get("ssl.key.location"));
+    assertFalse(c.containsKey("ssl.keystore.password"));
   }
 
   @Test

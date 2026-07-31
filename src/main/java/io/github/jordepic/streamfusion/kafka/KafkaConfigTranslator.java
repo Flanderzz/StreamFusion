@@ -73,14 +73,19 @@ public final class KafkaConfigTranslator {
     "security.protocol",
     "client.dns.lookup",
     "sasl.mechanism", // also emitted under the librdkafka plural name below
-    "sasl.kerberos.service.name",
-    "sasl.kerberos.kinit.cmd",
-    "sasl.kerberos.min.time.before.relogin",
     "ssl.key.password",
-    "ssl.keystore.password",
     "ssl.cipher.suites",
     "ssl.endpoint.identification.algorithm",
   };
+
+  /**
+   * The SASL mechanisms the vendored librdkafka build carries: PLAIN is always built in, SCRAM
+   * rides the statically-linked OpenSSL. GSSAPI (Kerberos) is deliberately absent — cyrus-sasl is
+   * excluded from the portable build — and OAUTHBEARER needs the Java-side login callbacks this
+   * translator already declines.
+   */
+  private static final Set<String> NATIVE_SASL_MECHANISMS =
+      Set.of("PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512");
 
   // Java key -> librdkafka key, value copied unchanged.
   private static final Map<String, String> RENAMED =
@@ -120,14 +125,18 @@ public final class KafkaConfigTranslator {
               "reconnect.backoff.ms", new String[] {"reconnect.backoff.ms", "50"},
               "reconnect.backoff.max.ms", new String[] {"reconnect.backoff.max.ms", "1000"}));
 
-  // Security material consumed (converted, not copied) by translateSecurity.
+  // Security material consumed (converted, not copied) by translateSecurity. The keystore
+  // password is accepted but produces no librdkafka key: only PEM keystores are admitted, and a
+  // PEM bundle is not password-protected as a store — an encrypted private key is unlocked by
+  // ssl.key.password, which passes through above.
   private static final Set<String> SECURITY_INPUTS =
       Set.of(
           "sasl.jaas.config",
           "ssl.truststore.location",
           "ssl.truststore.type",
           "ssl.keystore.location",
-          "ssl.keystore.type");
+          "ssl.keystore.type",
+          "ssl.keystore.password");
 
   // Keys owned by the Java side of the native source — the shared Flink enumerator (discovery,
   // startup-offset resolution) and the reader wrapper — or forced by Flink's own builder. They are
@@ -197,6 +206,9 @@ public final class KafkaConfigTranslator {
     }
     if (key.startsWith("sasl.login.") || key.startsWith("sasl.oauthbearer.")) {
       return "OAUTHBEARER/login-callback SASL requires the Java consumer (" + key + ")";
+    }
+    if (key.startsWith("sasl.kerberos.")) {
+      return "SASL/GSSAPI (Kerberos) requires the Java consumer (" + key + ")";
     }
     if (key.startsWith("metrics.") || key.startsWith("internal.")) {
       return "no librdkafka equivalent for " + key;
@@ -281,8 +293,34 @@ public final class KafkaConfigTranslator {
    * defaults.
    */
   static String translateSecurity(Properties props, Map<String, String> out) {
+    String protocol = props.getProperty("security.protocol", "PLAINTEXT").toUpperCase();
+    if (protocol.startsWith("SASL")) {
+      // The Java client's default mechanism is GSSAPI, so an unset mechanism is a Kerberos ask.
+      String mechanism = props.getProperty("sasl.mechanism", "GSSAPI").toUpperCase();
+      if (!NATIVE_SASL_MECHANISMS.contains(mechanism)) {
+        return "SASL mechanism "
+            + mechanism
+            + " requires the Java client (the native build carries PLAIN and SCRAM)";
+      }
+      if (props.getProperty("sasl.jaas.config") == null) {
+        return "SASL " + mechanism + " needs credentials from sasl.jaas.config";
+      }
+    }
     String sasl = sasl(props, out);
-    return sasl != null ? sasl : ssl(props, out);
+    if (sasl != null) {
+      return sasl;
+    }
+    String ssl = ssl(props, out);
+    if (ssl != null) {
+      return ssl;
+    }
+    if (protocol.endsWith("SSL")) {
+      // The vendored-static OpenSSL has no CA directory baked in, so without explicit trust
+      // material librdkafka would verify against a nonexistent path on Linux. "probe" makes it
+      // search the platform's standard CA bundle locations, matching the JVM's default trust.
+      out.putIfAbsent("ssl.ca.location", "probe");
+    }
+    return null;
   }
 
   /** Java reset strategies → librdkafka names; null if there is no equivalent. */
@@ -304,9 +342,9 @@ public final class KafkaConfigTranslator {
 
   /**
    * Parses {@code sasl.jaas.config} into librdkafka SASL keys. Recognizes PLAIN/SCRAM (username +
-   * password) and Kerberos (keytab + principal); returns a fallback reason for an unrecognized
-   * login module or a malformed config, and {@code null} on success (or when SASL isn't
-   * configured).
+   * password); returns a fallback reason for Kerberos (no cyrus-sasl in the native build), an
+   * unrecognized login module, or a malformed config, and {@code null} on success (or when SASL
+   * isn't configured).
    */
   private static String sasl(Properties props, Map<String, String> out) {
     String jaas = props.getProperty("sasl.jaas.config");
@@ -328,13 +366,7 @@ public final class KafkaConfigTranslator {
       return null;
     }
     if (module.endsWith("Krb5LoginModule")) {
-      if (options.containsKey("keytab")) {
-        out.put("sasl.kerberos.keytab", options.get("keytab"));
-      }
-      if (options.containsKey("principal")) {
-        out.put("sasl.kerberos.principal", options.get("principal"));
-      }
-      return null;
+      return "SASL/GSSAPI (Kerberos) requires the Java client (Krb5LoginModule)";
     }
     return "unrecognized SASL login module " + module;
   }
@@ -359,7 +391,12 @@ public final class KafkaConfigTranslator {
       if (!"PEM".equalsIgnoreCase(keyType)) {
         return "ssl.keystore.type=" + keyType + " needs JKS->PEM conversion (not yet supported)";
       }
-      out.put("ssl.certificate.location", props.getProperty("ssl.keystore.location"));
+      String location = props.getProperty("ssl.keystore.location");
+      out.put("ssl.certificate.location", location);
+      // A Java PEM keystore is one bundle carrying the certificate chain and the private key;
+      // librdkafka reads them through separate keys that may point at the same file. Without the
+      // key, mTLS would fail the handshake with only the cert configured.
+      out.putIfAbsent("ssl.key.location", location);
     }
     return null;
   }

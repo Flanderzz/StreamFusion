@@ -558,7 +558,8 @@ shapes persist their per-key deadlines in a dedicated state table).
     unclassified/unknown key, `transactional.id` (owned by Flink's naming strategy),
     `enable.idempotence=false`, custom serializers/partitioner/interceptors, non-default adaptive
     partitioning or `partitioner.ignore.keys=true`, `batch.size=0`, JKS or other
-    non-PEM security material, or a config kafka-clients itself rejects.
+    non-PEM security material, SASL/GSSAPI (Kerberos) or a SASL mechanism outside
+    PLAIN/SCRAM-SHA-256/SCRAM-SHA-512, or a config kafka-clients itself rejects.
 - **Kafka** — missing `streamfusion-kafka` or the matching `streamfusion-*` format JAR; a value format
   outside JSON/CSV/raw/bare-Avro/`avro-confluent`/protobuf; a `key.format`;
   a `scan.bounded.mode` other than unbounded/latest-offset; a consumer property the translator
@@ -568,11 +569,18 @@ shapes persist their per-key deadlines in a dedicated state table).
   and falls back on anything unclassified). Java-owned coordination keys (Flink's
   `client.id.prefix`/discovery/commit-on-checkpoint options, deserializers, group-membership and
   assignment machinery that never engages under manual assignment, reader-call tuning like
-  `max.poll.records`) are honored on the JVM side and deliberately not forwarded. Falling back:
+  `max.poll.records`) are honored on the JVM side and deliberately not forwarded. Security that
+  runs natively: PLAINTEXT, SSL, SASL_PLAINTEXT, and SASL_SSL with the PLAIN, SCRAM-SHA-256, or
+  SCRAM-SHA-512 mechanisms (credentials from a Plain/Scram JAAS module; PEM trust and key
+  material; when SSL is on with no truststore, the platform CA bundle is probed to match the JVM's
+  default trust — the DSO links OpenSSL statically, so no system OpenSSL is needed). Falling back:
   client plugins (`interceptor.classes`, metric reporters, `config.providers`,
   `security.providers`), all `sasl.login.*`/`sasl.oauthbearer.*` (OAUTHBEARER needs the Java
-  client), Kerberos ticket-renewal tuning, JVM-specific SSL machinery (protocol/algorithm
-  selection, engine factories, inline PEM strings, JKS/PKCS#12 stores needing conversion),
+  client), **SASL/GSSAPI (Kerberos)** — every `sasl.kerberos.*` key, a `Krb5LoginModule`, an
+  explicit `GSSAPI` mechanism, or a SASL protocol with no mechanism set (the Java default is
+  GSSAPI) — because cyrus-sasl is deliberately excluded from the portable native build,
+  JVM-specific SSL machinery (protocol/algorithm selection, engine factories, inline PEM strings,
+  JKS/PKCS#12 stores needing conversion), SASL credentials missing from `sasl.jaas.config`,
   `metadata.recovery.*`, an unrecognized JAAS login module, an unmappable `auto.offset.reset`
   (`by_duration:...`), and any unknown key; protobuf fields needing representation
   reconciliation (enum/unsigned/bytes/proto3-defaults/well-known types); **`ignore-parse-errors` on a

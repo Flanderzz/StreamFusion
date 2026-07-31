@@ -43,9 +43,6 @@ public final class KafkaProducerConfigTranslator {
           "client.dns.lookup",
           "security.protocol",
           "sasl.mechanism",
-          "sasl.kerberos.service.name",
-          "sasl.kerberos.kinit.cmd",
-          "sasl.kerberos.min.time.before.relogin",
           "ssl.key.password",
           "ssl.cipher.suites",
           "ssl.endpoint.identification.algorithm",
@@ -58,6 +55,7 @@ public final class KafkaProducerConfigTranslator {
           "ssl.truststore.type",
           "ssl.keystore.location",
           "ssl.keystore.type",
+          "ssl.keystore.password",
           "ssl.key.password");
 
   private static final Set<String> STREAMFUSION_LIMITS =
@@ -260,6 +258,9 @@ public final class KafkaProducerConfigTranslator {
         || "security.providers".equals(key)
         || key.startsWith("metrics.")) {
       return "no librdkafka parity for " + key;
+    }
+    if (key.startsWith("sasl.kerberos.")) {
+      return "SASL/GSSAPI (Kerberos) requires the Java producer (" + key + ")";
     }
     if ("partitioner.adaptive.partitioning.enable".equals(key)) {
       return Boolean.parseBoolean(value) ? null : "non-default adaptive partitioning requires Java";
