@@ -82,9 +82,10 @@ class NativeJsonDecodeSqlHarnessTest {
   @Test
   void metadataColumnFallsBackAndMatchesFlink() throws Exception {
     // `ts` is Kafka's record timestamp, filled by the connector — a native value decode would emit
-    // it as a missing body field (silently NULL). The scan must stay on Flink, and the fallback run
-    // must produce Flink's values end to end (both runs read the same records, so the connector
-    // timestamps compare exactly).
+    // it as a missing body field (silently NULL). The scan stays on Flink (pinned plan-side by
+    // KafkaDecodeRoutingTest; a native Calc above it still substitutes, which is fine) and the run
+    // must produce Flink's values end to end — both runs read the same records, so the connector
+    // timestamps compare exactly, and a silently-NULL ts would diverge here.
     try (KafkaContainer kafka =
         new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.6.1"))) {
       kafka.start();
@@ -94,7 +95,7 @@ class NativeJsonDecodeSqlHarnessTest {
         flat.add(String.format("{\"id\":%d,\"name\":\"row-%d\"}", i, i));
       }
       produce(brokers, "json-metadata", flat);
-      NativeParity.assertFallback(
+      NativeParity.assertParity(
           environment(
               brokers,
               "json-metadata",
