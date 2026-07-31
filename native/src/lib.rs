@@ -69,6 +69,7 @@ mod expr;
 mod files;
 mod flink_key;
 mod format_abi;
+mod format_codes;
 mod flatten;
 #[cfg(any(feature = "json", feature = "csv", feature = "raw", feature = "avro", feature = "protobuf", test))]
 mod flink_text;
@@ -105,7 +106,7 @@ mod window_join;
 #[allow(unused_imports)]
 pub(crate) use {
     aggregates::*, bridge::*, calc::*, changelog::*, dedup::*, exchange::*, expr::*,
-    flink_key::*, flatten::*, format_abi::*, group_agg::*, interval_join::*, ipc::*, join_common::*,
+    flink_key::*, flatten::*, format_abi::*, format_codes::*, group_agg::*, interval_join::*, ipc::*, join_common::*,
     keys::*, memory::*, mini_batch::*, normalizer::*, over_agg::*, rowtime::*, session_agg::*, sorter::*,
     state::*, temporal_join::*, topn::*, updating_join::*, window_agg::*, window_join::*,
 };

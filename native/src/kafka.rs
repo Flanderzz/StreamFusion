@@ -119,7 +119,7 @@ fn parse_json_encode_options(encoded: &str) -> Result<JsonEncodeOptions, String>
 #[cfg(feature = "kafka")]
 fn parse_encode_format(format: i32, encoded: &str) -> Result<JsonEncodeOptions, String> {
     match format {
-        crate::formats::FORMAT_JSON => parse_json_encode_options(encoded),
+        FORMAT_JSON => parse_json_encode_options(encoded),
         other => Err(format!("format code {other} is not natively encoded")),
     }
 }
