@@ -36,12 +36,7 @@ public final class AvroFormatProvider implements NativeFormatProvider {
       // Avro's JSON encoding is a different wire format the native decode doesn't read.
       return false;
     }
-    if (!legacyTimestampMapping(context.options())) {
-      // The corrected mapping changes the derived schema (local-timestamp / TIMESTAMP_LTZ);
-      // the native decode only reproduces the legacy mapping so far.
-      return false;
-    }
-    return AvroDecodeGate.supports(context.writerType(), true);
+    return AvroDecodeGate.supports(context.writerType(), legacyTimestampMapping(context.options()));
   }
 
   /** Flink's {@code avro.timestamp_mapping.legacy}, default true. */
@@ -51,11 +46,13 @@ public final class AvroFormatProvider implements NativeFormatProvider {
 
   @Override
   public NativeMessageDecoderFactory createDecoder(NativeFormatContext context) {
-    String writerSchema = AvroSchemaConverter.convertToSchema(context.writerType().copy(false)).toString();
+    boolean legacy = legacyTimestampMapping(context.options());
+    String writerSchema =
+        AvroSchemaConverter.convertToSchema(context.writerType().copy(false), legacy).toString();
     String readerSchema =
         context.writerType().equals(context.outputType())
             ? ""
-            : AvroSchemaConverter.convertToSchema(context.outputType().copy(false)).toString();
+            : AvroSchemaConverter.convertToSchema(context.outputType().copy(false), legacy).toString();
     return () -> new Decoder(writerSchema, readerSchema);
   }
 

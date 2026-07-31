@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.github.jordepic.streamfusion.format.avro.AvroFormatProvider;
 import io.github.jordepic.streamfusion.format.avroconfluent.AvroConfluentFormatProvider;
 import java.util.Map;
+import org.apache.flink.table.types.logical.ArrayType;
 import org.apache.flink.table.types.logical.BigIntType;
 import org.apache.flink.table.types.logical.BinaryType;
 import org.apache.flink.table.types.logical.DateType;
@@ -117,11 +118,38 @@ class AvroDecodeGateTest {
   void declinesUnreproducedOptions() {
     assertFalse(bareAvro(SUPPORTED, Map.of("format", "avro", "avro.encoding", "json"), false));
     assertTrue(bareAvro(SUPPORTED, Map.of("format", "avro", "avro.encoding", "binary"), false));
-    assertFalse(
-        bareAvro(SUPPORTED, Map.of("format", "avro", "avro.timestamp_mapping.legacy", "false"), false));
     assertFalse(bareAvro(SUPPORTED, Map.of("format", "avro"), true)); // ignore-parse-errors
     // The prefixed form under value.format resolves the same way.
     assertFalse(
         bareAvro(SUPPORTED, Map.of("value.format", "avro", "value.avro.encoding", "json"), false));
+  }
+
+  @Test
+  void correctedTimestampMappingFollowsFlinksOwnAcceptance() {
+    Map<String, String> nonLegacy =
+        Map.of("format", "avro", "avro.timestamp_mapping.legacy", "false");
+    assertTrue(bareAvro(SUPPORTED, nonLegacy, false));
+    // The corrected mapping unlocks TIMESTAMP_LTZ and micros-precision timestamps at the top level.
+    LogicalType[] corrected = {
+      new TimestampType(6), new LocalZonedTimestampType(3), new LocalZonedTimestampType(6)
+    };
+    for (LogicalType type : corrected) {
+      RowType rowType = RowType.of(new LogicalType[] {type}, new String[] {"c"});
+      assertTrue(bareAvro(rowType, nonLegacy, false), type.toString());
+      assertFalse(bareAvro(rowType, Map.of("format", "avro"), false), type.toString());
+    }
+    // Shapes Flink's own factory still rejects under the corrected mapping: precision beyond
+    // micros; TIMESTAMP_LTZ inside a nested row (the converter factory drops the flag for nested
+    // rows) or a collection (the schema derivation drops it there).
+    LogicalType[] rejected = {
+      new TimestampType(9),
+      new LocalZonedTimestampType(9),
+      RowType.of(new LogicalType[] {new LocalZonedTimestampType(3)}, new String[] {"lt"}),
+      new ArrayType(new LocalZonedTimestampType(3))
+    };
+    for (LogicalType type : rejected) {
+      RowType rowType = RowType.of(new LogicalType[] {type}, new String[] {"c"});
+      assertFalse(bareAvro(rowType, nonLegacy, false), type.toString());
+    }
   }
 }

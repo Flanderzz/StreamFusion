@@ -30,6 +30,7 @@ import org.apache.flink.table.types.logical.DecimalType;
 import org.apache.flink.table.types.logical.DoubleType;
 import org.apache.flink.table.types.logical.FloatType;
 import org.apache.flink.table.types.logical.IntType;
+import org.apache.flink.table.types.logical.LocalZonedTimestampType;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.MapType;
 import org.apache.flink.table.types.logical.MultisetType;
@@ -158,6 +159,38 @@ class AvroDecodeParityTest {
     assertParity("truncated datum", truncated());
   }
 
+  @Test
+  void correctedTimestampMappingMatchesFlink() throws Exception {
+    // avro.timestamp_mapping.legacy = false: TIMESTAMP derives local-timestamp-millis/micros and
+    // TIMESTAMP_LTZ becomes representable as timestamp-millis/micros. Flink still reads every
+    // long as epoch millis (its converter has no micros path) — the values below make the
+    // micros-declared columns visibly off by 1000x under a spec-faithful read, so parity here
+    // pins the reproduced quirk end to end.
+    RowType corrected =
+        (RowType)
+            RowType.of(
+                    new LogicalType[] {
+                      new TimestampType(3),
+                      new TimestampType(6),
+                      new LocalZonedTimestampType(3),
+                      new LocalZonedTimestampType(6)
+                    },
+                    new String[] {"ts3", "ts6", "ltz3", "ltz6"})
+                .copy(false);
+    Schema writer = AvroSchemaConverter.convertToSchema(corrected, false);
+    Map<String, String> options =
+        Map.of("format", "avro", "avro.timestamp_mapping.legacy", "false");
+    Consumer<GenericRecord> filler =
+        record -> {
+          record.put("ts3", 1_577_934_245_678L);
+          record.put("ts6", 1_577_934_245_678L);
+          record.put("ltz3", -1L);
+          record.put("ltz6", 1_577_934_245_678L);
+        };
+    assertParity("corrected mapping", corrected, writer, filler, options, false);
+    assertParity("corrected mapping, all null", corrected, writer, record -> {}, options, false);
+  }
+
   private static byte[] truncated() throws Exception {
     byte[] whole =
         encode(
@@ -180,8 +213,7 @@ class AvroDecodeParityTest {
         .orElseThrow();
   }
 
-  private static byte[] encode(Consumer<GenericRecord> filler) throws Exception {
-    Schema schema = writerSchema();
+  private static byte[] encode(Schema schema, Consumer<GenericRecord> filler) throws Exception {
     GenericRecord record = new GenericData.Record(schema);
     filler.accept(record);
     ByteArrayOutputStream out = new ByteArrayOutputStream();
@@ -191,25 +223,48 @@ class AvroDecodeParityTest {
     return out.toByteArray();
   }
 
+  private static byte[] encode(Consumer<GenericRecord> filler) throws Exception {
+    return encode(writerSchema(), filler);
+  }
+
   private static void assertParity(String label, Consumer<GenericRecord> filler) throws Exception {
     assertParity(label, encode(filler));
   }
 
   private static void assertParity(String label, byte[] message) {
-    DecodeParityHarness harness = new DecodeParityHarness(FULL_TYPE, false);
-    harness.assertParity(
-        label,
-        () -> flinkDecode(harness, message),
-        () ->
-            harness.nativeDecode(
-                new AvroFormatProvider(), message, Map.of("format", "avro"), false));
+    assertParity(label, FULL_TYPE, message, Map.of("format", "avro"), true);
   }
 
-  private static List<List<Object>> flinkDecode(DecodeParityHarness harness, byte[] message)
+  private static void assertParity(
+      String label,
+      RowType rowType,
+      Schema writer,
+      Consumer<GenericRecord> filler,
+      Map<String, String> options,
+      boolean legacyTimestampMapping)
+      throws Exception {
+    assertParity(label, rowType, encode(writer, filler), options, legacyTimestampMapping);
+  }
+
+  private static void assertParity(
+      String label,
+      RowType rowType,
+      byte[] message,
+      Map<String, String> options,
+      boolean legacyTimestampMapping) {
+    DecodeParityHarness harness = new DecodeParityHarness(rowType, false);
+    harness.assertParity(
+        label,
+        () -> flinkDecode(harness, rowType, message, legacyTimestampMapping),
+        () -> harness.nativeDecode(new AvroFormatProvider(), message, options, false));
+  }
+
+  private static List<List<Object>> flinkDecode(
+      DecodeParityHarness harness, RowType rowType, byte[] message, boolean legacyTimestampMapping)
       throws Exception {
     AvroRowDataDeserializationSchema schema =
         new AvroRowDataDeserializationSchema(
-            FULL_TYPE, InternalTypeInfo.of(FULL_TYPE), AvroEncoding.BINARY, true);
+            rowType, InternalTypeInfo.of(rowType), AvroEncoding.BINARY, legacyTimestampMapping);
     schema.open(
         new DeserializationSchema.InitializationContext() {
           @Override

@@ -657,10 +657,14 @@ shapes persist their per-key deadlines in a dedicated state table).
     digits exceed the declared precision decodes to NULL, and a null Kafka value (tombstone) is
     dropped silently;
   - **`avro.encoding = json`** — Avro's JSON encoding is a different wire format the native
-    decode doesn't read — and **`avro.timestamp_mapping.legacy = false`** — the corrected mapping
-    changes the derived schema; only the legacy mapping is reproduced natively so far.
-    `avro-confluent` has neither option (Flink hard-wires it to binary encoding and the legacy
-    mapping, an asymmetry the native gate mirrors).
+    decode doesn't read. **`avro.timestamp_mapping.legacy`** is honored both ways: the corrected
+    (`false`) mapping derives `local-timestamp-millis/micros` for TIMESTAMP and unlocks
+    TIMESTAMP_LTZ up to precision 6 natively — but only at the top level, because Flink itself
+    rejects TIMESTAMP_LTZ *nested* under the corrected mapping (its converter factory drops the
+    flag for nested rows, its schema derivation drops it inside collections), and those shapes
+    fall back to reproduce Flink's own submission failure. `avro-confluent` has neither option
+    (Flink hard-wires it to binary encoding and the legacy mapping, an asymmetry the native gate
+    mirrors).
 - **Kafka watermarks / event time** — a pushed `WATERMARK` clause is regenerated inside the native
   source for the reproducible shapes: bounded out-of-orderness (`rt` or `rt - INTERVAL const`) over a
   physical rowtime column or `TO_TIMESTAMP_LTZ(bigintCol, 3)` (the epoch-millis computed-rowtime
