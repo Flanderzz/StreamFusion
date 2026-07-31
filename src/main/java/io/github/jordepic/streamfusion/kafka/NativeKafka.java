@@ -47,6 +47,7 @@ public final class NativeKafka {
       long schemaAddress,
       boolean ignoreNullFields,
       String timestampFormat,
+      boolean decimalAsPlainNumber,
       String[] logicalTypes,
       String[] fieldNames);
 
@@ -56,6 +57,7 @@ public final class NativeKafka {
       long schemaAddress,
       boolean ignoreNullFields,
       String timestampFormat,
+      boolean decimalAsPlainNumber,
       String[] logicalTypes,
       String[] fieldNames,
       int[] keyFields,
@@ -108,6 +110,7 @@ public final class NativeKafka {
       long schemaAddress,
       boolean ignoreNullFields,
       String timestampFormat,
+      boolean decimalAsPlainNumber,
       String[] logicalTypes,
       String[] fieldNames,
       int[] keyFields,

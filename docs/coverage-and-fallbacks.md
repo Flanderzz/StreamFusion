@@ -539,7 +539,9 @@ shapes persist their per-key deadlines in a dedicated state table).
   cross-client transaction hand-off itself (commit, duplicate-commit idempotency, fencing, and
   broker timeout reaping). The native serializer currently covers BOOLEAN,
   TINYINT/SMALLINT/INT/BIGINT, FLOAT/DOUBLE, CHAR/VARCHAR, BINARY/VARBINARY, DECIMAL, DATE, TIME,
-  TIMESTAMP, and TIMESTAMP_LTZ (SQL or ISO-8601), including `encode.ignore-null-fields`. Every sink
+  TIMESTAMP, and TIMESTAMP_LTZ (SQL or ISO-8601), including `encode.ignore-null-fields` and both
+  decimal spellings (`encode.decimal-as-plain-number` keeps the column scale; the default
+  reproduces Jackson's `stripTrailingZeros().toString()`, scientific notation included). Every sink
   fallback cause:
   - an upsert-materialized sink — when Flink decides the upsert changelog arrives out of order it
     bakes a stateful `SinkUpsertMaterializer` into its own sink translation, which a substituted

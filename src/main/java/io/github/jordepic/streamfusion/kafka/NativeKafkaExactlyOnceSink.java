@@ -64,8 +64,7 @@ public final class NativeKafkaExactlyOnceSink
   private final Map<String, String> nativeProducerConfig;
   private final long maxBlockMs;
   private final int maxRequestSize;
-  private final boolean ignoreNullFields;
-  private final String timestampFormat;
+  private final JsonEncodeOptions json;
   private final String[] logicalTypes;
   private final String[] fieldNames;
   private final int[] keyFields;
@@ -83,8 +82,7 @@ public final class NativeKafkaExactlyOnceSink
       Map<String, String> nativeProducerConfig,
       long maxBlockMs,
       int maxRequestSize,
-      boolean ignoreNullFields,
-      String timestampFormat,
+      JsonEncodeOptions json,
       String[] logicalTypes,
       String[] fieldNames,
       int[] keyFields,
@@ -96,8 +94,7 @@ public final class NativeKafkaExactlyOnceSink
     this.nativeProducerConfig = Map.copyOf(nativeProducerConfig);
     this.maxBlockMs = maxBlockMs;
     this.maxRequestSize = maxRequestSize;
-    this.ignoreNullFields = ignoreNullFields;
-    this.timestampFormat = timestampFormat;
+    this.json = json;
     this.logicalTypes = logicalTypes.clone();
     this.fieldNames = fieldNames.clone();
     this.keyFields = keyFields.clone();
@@ -239,8 +236,9 @@ public final class NativeKafkaExactlyOnceSink
                   topic,
                   array.memoryAddress(),
                   schema.memoryAddress(),
-                  ignoreNullFields,
-                  timestampFormat,
+                  json.ignoreNullFields,
+                  json.timestampFormat,
+                  json.decimalAsPlainNumber,
                   logicalTypes,
                   fieldNames,
                   keyFields,

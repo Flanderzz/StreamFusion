@@ -49,11 +49,35 @@ impl EncodedLines {
     }
 }
 
+/// One JSON format instance's encode-affecting options — Flink configures the Jackson mapper and
+/// converter family per format instance from the `json.*` option set, so the native encoder takes
+/// the same trio wherever a format instance would exist.
+#[cfg(feature = "kafka")]
+pub(crate) struct JsonEncodeOptions {
+    pub(crate) ignore_null_fields: bool,
+    pub(crate) iso_8601: bool,
+    pub(crate) decimal_as_plain_number: bool,
+}
+
+#[cfg(feature = "kafka")]
+impl JsonEncodeOptions {
+    pub(crate) fn new(
+        ignore_null_fields: bool,
+        timestamp_format: &str,
+        decimal_as_plain_number: bool,
+    ) -> JsonEncodeOptions {
+        JsonEncodeOptions {
+            ignore_null_fields,
+            iso_8601: timestamp_format.eq_ignore_ascii_case("ISO-8601"),
+            decimal_as_plain_number,
+        }
+    }
+}
+
 #[cfg(feature = "kafka")]
 pub(crate) fn encode_json_batch(
     batch: &RecordBatch,
-    ignore_null_fields: bool,
-    timestamp_format: &str,
+    options: &JsonEncodeOptions,
     logical_types: &[String],
     field_names: &[String],
 ) -> Result<EncodedLines, String> {
@@ -63,12 +87,13 @@ pub(crate) fn encode_json_batch(
 
     let mut builder =
         WriterBuilder::new()
-            .with_explicit_nulls(!ignore_null_fields)
+            .with_explicit_nulls(!options.ignore_null_fields)
             .with_time_format("%H:%M:%S".to_string())
             .with_encoder_factory(Arc::new(FlinkJsonEncoderFactory {
-                timestamp_format: timestamp_format.to_string(),
+                iso_8601: options.iso_8601,
+                decimal_as_plain_number: options.decimal_as_plain_number,
             }));
-    if timestamp_format.eq_ignore_ascii_case("ISO-8601") {
+    if options.iso_8601 {
         builder = builder
             .with_timestamp_format("%Y-%m-%dT%H:%M:%S%.f".to_string())
             .with_timestamp_tz_format("%Y-%m-%dT%H:%M:%S%.fZ".to_string());
@@ -134,8 +159,7 @@ impl EncodedKafkaRecords {
 #[cfg(feature = "kafka")]
 fn encode_json_records(
     batch: &RecordBatch,
-    ignore_null_fields: bool,
-    timestamp_format: &str,
+    options: &JsonEncodeOptions,
     logical_types: &[String],
     field_names: &[String],
     key_fields: &[usize],
@@ -165,16 +189,14 @@ fn encode_json_records(
     } else {
         Some(encode_json_batch(
             &key_batch,
-            ignore_null_fields,
-            timestamp_format,
+            options,
             &project_types(key_fields),
             &project_names(key_fields),
         )?)
     };
     let values = encode_json_batch(
         &value_batch,
-        ignore_null_fields,
-        timestamp_format,
+        options,
         &project_types(value_fields),
         &project_names(value_fields),
     )?;
@@ -251,7 +273,8 @@ fn annotate_flink_types(
 /// Overrides the Arrow JSON defaults whose wire representation differs from Flink's Jackson format.
 #[derive(Debug)]
 struct FlinkJsonEncoderFactory {
-    timestamp_format: String,
+    iso_8601: bool,
+    decimal_as_plain_number: bool,
 }
 
 #[cfg(feature = "kafka")]
@@ -282,6 +305,7 @@ impl arrow::json::writer::EncoderFactory for FlinkJsonEncoderFactory {
             DataType::Decimal128(_, scale) => Some(Box::new(FlinkDecimal128Encoder {
                 array: array.as_primitive::<Decimal128Type>(),
                 scale: *scale,
+                plain: self.decimal_as_plain_number,
             })),
             DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, _)
                 if field
@@ -293,7 +317,7 @@ impl arrow::json::writer::EncoderFactory for FlinkJsonEncoderFactory {
                 Some(Box::new(FlinkLocalTimestampEncoder {
                     array: array.as_primitive::<TimestampNanosecondType>(),
                     precision: flink_temporal_precision(logical_type),
-                    iso_8601: self.timestamp_format.eq_ignore_ascii_case("ISO-8601"),
+                    iso_8601: self.iso_8601,
                 }))
             }
             _ => None,
@@ -418,40 +442,85 @@ impl<O: arrow::array::OffsetSizeTrait> arrow::json::writer::Encoder for FlinkBin
 struct FlinkDecimal128Encoder<'a> {
     array: &'a arrow::array::Decimal128Array,
     scale: i8,
+    plain: bool,
 }
 
 #[cfg(feature = "kafka")]
 impl arrow::json::writer::Encoder for FlinkDecimal128Encoder<'_> {
     fn encode(&mut self, index: usize, output: &mut Vec<u8>) {
-        let value = self.array.value(index);
-        let negative = value < 0;
-        let digits = value.unsigned_abs().to_string();
-        if negative {
-            output.push(b'-');
+        encode_java_big_decimal(self.array.value(index), self.scale, self.plain, output);
+    }
+}
+
+/// Jackson's two `BigDecimal` spellings, replicated over the raw (unscaled, scale) pair. Plain mode
+/// (`WRITE_BIGDECIMAL_AS_PLAIN`) is `toPlainString()` of the column's exact scale — trailing zeros
+/// kept. Default mode is `stripTrailingZeros().toString()`: Java's `toString()` switches to
+/// scientific notation when the stripped scale goes negative or the adjusted exponent drops below
+/// -6, so `100.00` becomes `1E+2` while `123.450` becomes `123.45`.
+#[cfg(feature = "kafka")]
+pub(crate) fn encode_java_big_decimal(
+    unscaled: i128,
+    scale: i8,
+    plain: bool,
+    output: &mut Vec<u8>,
+) {
+    if plain {
+        return encode_plain_decimal(unscaled, i64::from(scale), output);
+    }
+    let mut unscaled = unscaled;
+    let mut scale = i64::from(scale);
+    if unscaled == 0 {
+        scale = 0;
+    } else {
+        while unscaled % 10 == 0 {
+            unscaled /= 10;
+            scale -= 1;
         }
-        let scale = self.scale as usize;
-        if scale == 0 {
-            output.extend_from_slice(digits.as_bytes());
-            return;
+    }
+    let digits = unscaled.unsigned_abs().to_string();
+    let adjusted_exponent = digits.len() as i64 - 1 - scale;
+    if scale >= 0 && adjusted_exponent >= -6 {
+        encode_plain_decimal(unscaled, scale, output);
+        return;
+    }
+    if unscaled < 0 {
+        output.push(b'-');
+    }
+    output.push(digits.as_bytes()[0]);
+    if digits.len() > 1 {
+        output.push(b'.');
+        output.extend_from_slice(&digits.as_bytes()[1..]);
+    }
+    output.push(b'E');
+    if adjusted_exponent > 0 {
+        output.push(b'+');
+    }
+    output.extend_from_slice(adjusted_exponent.to_string().as_bytes());
+}
+
+/// `BigDecimal.toPlainString()`: positional digits with exactly `scale` fraction digits.
+#[cfg(feature = "kafka")]
+fn encode_plain_decimal(unscaled: i128, scale: i64, output: &mut Vec<u8>) {
+    if unscaled < 0 {
+        output.push(b'-');
+    }
+    let digits = unscaled.unsigned_abs().to_string();
+    if scale <= 0 {
+        output.extend_from_slice(digits.as_bytes());
+        for _ in 0..-scale {
+            output.push(b'0');
         }
-        if digits.len() <= scale {
-            output.extend_from_slice(b"0.");
-            for _ in 0..scale - digits.len() {
-                output.push(b'0');
-            }
-            output.extend_from_slice(digits.as_bytes());
-        } else {
-            let split = digits.len() - scale;
-            output.extend_from_slice(digits[..split].as_bytes());
-            output.push(b'.');
-            output.extend_from_slice(digits[split..].as_bytes());
+    } else if digits.len() as i64 > scale {
+        let split = digits.len() - scale as usize;
+        output.extend_from_slice(digits[..split].as_bytes());
+        output.push(b'.');
+        output.extend_from_slice(digits[split..].as_bytes());
+    } else {
+        output.extend_from_slice(b"0.");
+        for _ in 0..scale - digits.len() as i64 {
+            output.push(b'0');
         }
-        while output.last() == Some(&b'0') {
-            output.pop();
-        }
-        if output.last() == Some(&b'.') {
-            output.pop();
-        }
+        output.extend_from_slice(digits.as_bytes());
     }
 }
 
@@ -1149,7 +1218,9 @@ impl KafkaSplitReader {
 
 #[cfg(all(test, feature = "kafka"))]
 mod kafka_error_tests {
-    use super::{encode_json_batch, transient_consumer_error};
+    use super::{
+        encode_java_big_decimal, encode_json_batch, transient_consumer_error, JsonEncodeOptions,
+    };
     use arrow::array::{ArrayRef, BooleanArray, Int64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
@@ -1218,11 +1289,50 @@ mod kafka_error_tests {
         )
         .unwrap();
 
-        let explicit = encode_json_batch(&batch, false, "SQL", &[], &[]).unwrap();
+        let explicit =
+            encode_json_batch(&batch, &JsonEncodeOptions::new(false, "SQL", false), &[], &[])
+                .unwrap();
         assert_eq!(explicit.line(0), br#"{"id":1,"name":"one","active":true}"#.as_slice());
         assert_eq!(explicit.line(1), br#"{"id":2,"name":null,"active":false}"#.as_slice());
-        let omitted = encode_json_batch(&batch, true, "SQL", &[], &[]).unwrap();
+        let omitted =
+            encode_json_batch(&batch, &JsonEncodeOptions::new(true, "SQL", false), &[], &[])
+                .unwrap();
         assert_eq!(omitted.line(1), br#"{"id":2,"active":false}"#.as_slice());
+    }
+
+    /// Pins both Jackson decimal spellings against Java-derived expectations:
+    /// `stripTrailingZeros().toString()` (default, scientific when the stripped scale goes
+    /// negative or the adjusted exponent drops below -6) and `toPlainString()` at the column
+    /// scale (`WRITE_BIGDECIMAL_AS_PLAIN`).
+    #[test]
+    fn decimal_spellings_match_java_big_decimal() {
+        let cases: &[(i128, i8, &str, &str)] = &[
+            (10000, 2, "1E+2", "100.00"),           // 100.00
+            (100, 2, "1", "1.00"),                  // 1.00
+            (0, 2, "0", "0.00"),                    // 0.00
+            (123450, 3, "123.45", "123.450"),       // 123.450
+            (-1, 2, "-0.01", "-0.01"),              // -0.01
+            (-10000, 2, "-1E+2", "-100.00"),        // -100.00
+            (10, 9, "1E-8", "0.000000010"),         // 0.000000010
+            (1, 6, "0.000001", "0.000001"),         // adjusted exponent exactly -6 stays plain
+            (12345, 0, "12345", "12345"),
+            (1234500, 0, "1.2345E+6", "1234500"),   // strips into a negative scale
+            (
+                i128::MIN + 1,
+                38,
+                "-1.70141183460469231731687303715884105727",
+                "-1.70141183460469231731687303715884105727",
+            ),
+            (1, 9, "1E-9", "0.000000001"), // adjusted exponent below -6 goes scientific
+        ];
+        for (unscaled, scale, stripped, plain) in cases {
+            let mut output = Vec::new();
+            encode_java_big_decimal(*unscaled, *scale, false, &mut output);
+            assert_eq!(std::str::from_utf8(&output).unwrap(), *stripped, "default {unscaled}/{scale}");
+            output.clear();
+            encode_java_big_decimal(*unscaled, *scale, true, &mut output);
+            assert_eq!(std::str::from_utf8(&output).unwrap(), *plain, "plain {unscaled}/{scale}");
+        }
     }
 
     /// The bulk-scan string encoder must match arrow-json's stock (serde_json) escaping byte for
@@ -1264,7 +1374,9 @@ mod kafka_error_tests {
         let stock_lines: Vec<&[u8]> =
             stock.split(|byte| *byte == b'\n').filter(|line| !line.is_empty()).collect();
 
-        let ours = encode_json_batch(&batch, false, "SQL", &[], &[]).unwrap();
+        let ours =
+            encode_json_batch(&batch, &JsonEncodeOptions::new(false, "SQL", false), &[], &[])
+                .unwrap();
         assert_eq!(ours.len(), stock_lines.len());
         for index in 0..ours.len() {
             assert_eq!(
@@ -1491,24 +1603,21 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_en
     schema_address: jlong,
     ignore_null_fields: jboolean,
     timestamp_format: JString<'local>,
+    decimal_as_plain_number: jboolean,
     logical_types: JObjectArray<'local>,
     field_names: JObjectArray<'local>,
 ) -> jni::sys::jobjectArray {
     kafka_jni(&mut env, std::ptr::null_mut(), |env| {
         let batch = import_record_batch(array_address, schema_address);
-        let timestamp_format: String = env
-            .get_string(&timestamp_format)
-            .map_err(|error| format!("failed to read JSON timestamp format: {error}"))?
-            .into();
+        let options = read_json_encode_options(
+            env,
+            ignore_null_fields,
+            &timestamp_format,
+            decimal_as_plain_number,
+        )?;
         let logical_types = read_string_array(env, &logical_types);
         let field_names = read_string_array(env, &field_names);
-        let encoded = encode_json_batch(
-            &batch,
-            ignore_null_fields != 0,
-            &timestamp_format,
-            &logical_types,
-            &field_names,
-        )?;
+        let encoded = encode_json_batch(&batch, &options, &logical_types, &field_names)?;
         if encoded.len() != batch.num_rows() {
             return Err(format!(
                 "Kafka JSON encoder produced {} records for {} Arrow rows",
@@ -1519,6 +1628,24 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_en
         let values = byte_array_array(env, encoded.len(), |index| Some(encoded.line(index)))?;
         Ok(values.into_raw())
     })
+}
+
+#[cfg(feature = "kafka")]
+fn read_json_encode_options(
+    env: &mut JNIEnv<'_>,
+    ignore_null_fields: jboolean,
+    timestamp_format: &JString<'_>,
+    decimal_as_plain_number: jboolean,
+) -> Result<JsonEncodeOptions, String> {
+    let timestamp_format: String = env
+        .get_string(timestamp_format)
+        .map_err(|error| format!("failed to read JSON timestamp format: {error}"))?
+        .into();
+    Ok(JsonEncodeOptions::new(
+        ignore_null_fields != 0,
+        &timestamp_format,
+        decimal_as_plain_number != 0,
+    ))
 }
 
 #[cfg(feature = "kafka")]
@@ -1553,6 +1680,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_en
     schema_address: jlong,
     ignore_null_fields: jboolean,
     timestamp_format: JString<'local>,
+    decimal_as_plain_number: jboolean,
     logical_types: JObjectArray<'local>,
     field_names: JObjectArray<'local>,
     key_fields: JIntArray<'local>,
@@ -1561,10 +1689,12 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_en
 ) -> jni::sys::jobjectArray {
     kafka_jni(&mut env, std::ptr::null_mut(), |env| {
         let batch = import_record_batch(array_address, schema_address);
-        let timestamp_format: String = env
-            .get_string(&timestamp_format)
-            .map_err(|error| format!("failed to read JSON timestamp format: {error}"))?
-            .into();
+        let options = read_json_encode_options(
+            env,
+            ignore_null_fields,
+            &timestamp_format,
+            decimal_as_plain_number,
+        )?;
         let logical_types = read_string_array(env, &logical_types);
         let field_names = read_string_array(env, &field_names);
         let key_fields = read_int_array(env, &key_fields)
@@ -1577,8 +1707,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_en
             .collect::<Vec<_>>();
         let records = encode_json_records(
             &batch,
-            ignore_null_fields != 0,
-            &timestamp_format,
+            &options,
             &logical_types,
             &field_names,
             &key_fields,
@@ -2327,6 +2456,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_pr
     schema_address: jlong,
     ignore_null_fields: jboolean,
     timestamp_format: JString<'local>,
+    decimal_as_plain_number: jboolean,
     logical_types: JObjectArray<'local>,
     field_names: JObjectArray<'local>,
     key_fields: JIntArray<'local>,
@@ -2340,10 +2470,12 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_pr
             .map_err(|error| format!("failed to read topic: {error}"))?
             .into();
         let batch = import_record_batch(array_address, schema_address);
-        let timestamp_format: String = env
-            .get_string(&timestamp_format)
-            .map_err(|error| format!("failed to read JSON timestamp format: {error}"))?
-            .into();
+        let options = read_json_encode_options(
+            env,
+            ignore_null_fields,
+            &timestamp_format,
+            decimal_as_plain_number,
+        )?;
         let logical_types = read_string_array(env, &logical_types);
         let field_names = read_string_array(env, &field_names);
         let key_fields = read_int_array(env, &key_fields)
@@ -2356,8 +2488,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_pr
             .collect::<Vec<_>>();
         let records = encode_json_records(
             &batch,
-            ignore_null_fields != 0,
-            &timestamp_format,
+            &options,
             &logical_types,
             &field_names,
             &key_fields,

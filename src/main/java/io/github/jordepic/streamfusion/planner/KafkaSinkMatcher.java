@@ -1,5 +1,6 @@
 package io.github.jordepic.streamfusion.planner;
 
+import io.github.jordepic.streamfusion.kafka.JsonEncodeOptions;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.IntStream;
@@ -22,8 +23,7 @@ final class KafkaSinkMatcher {
   static final class Planned {
     final RowType rowType;
     final KafkaSinkTranslator.Planned sink;
-    final String timestampFormat;
-    final boolean ignoreNullFields;
+    final JsonEncodeOptions json;
     final int[] keyFields;
     final int[] valueFields;
     final boolean upsert;
@@ -32,16 +32,14 @@ final class KafkaSinkMatcher {
     private Planned(
         RowType rowType,
         KafkaSinkTranslator.Planned sink,
-        String timestampFormat,
-        boolean ignoreNullFields,
+        JsonEncodeOptions json,
         int[] keyFields,
         int[] valueFields,
         boolean upsert,
         String fallbackReason) {
       this.rowType = rowType;
       this.sink = sink;
-      this.timestampFormat = timestampFormat;
-      this.ignoreNullFields = ignoreNullFields;
+      this.json = json;
       this.keyFields = keyFields;
       this.valueFields = valueFields;
       this.upsert = upsert;
@@ -49,7 +47,7 @@ final class KafkaSinkMatcher {
     }
 
     private static Planned fallback(String reason) {
-      return new Planned(null, null, null, false, null, null, false, reason);
+      return new Planned(null, null, null, null, null, false, reason);
     }
   }
 
@@ -87,10 +85,7 @@ final class KafkaSinkMatcher {
         return Planned.fallback("JSON type " + type.asSummaryString());
       }
     }
-    Map<String, String> json = translated.planned().jsonOptions;
-    String timestampFormat = json.getOrDefault("timestamp-format.standard", "SQL");
-    boolean ignoreNullFields =
-        Boolean.parseBoolean(json.getOrDefault("encode.ignore-null-fields", "false"));
+    JsonEncodeOptions json = JsonEncodeOptions.fromFormatOptions(translated.planned().jsonOptions);
     int[] valueFields = IntStream.range(0, rowType.getFieldCount()).toArray();
     int[] keyFields = new int[0];
     if (translated.planned().upsert) {
@@ -102,8 +97,7 @@ final class KafkaSinkMatcher {
     return new Planned(
         rowType,
         translated.planned(),
-        timestampFormat,
-        ignoreNullFields,
+        json,
         keyFields,
         valueFields,
         translated.planned().upsert,

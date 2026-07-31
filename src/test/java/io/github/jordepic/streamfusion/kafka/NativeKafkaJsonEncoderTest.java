@@ -82,6 +82,40 @@ class NativeKafkaJsonEncoderTest {
     assertMatchesFlink(rows, timestamps, TimestampFormat.ISO_8601, false);
   }
 
+  /**
+   * Both of Flink's decimal spellings: the default is {@code stripTrailingZeros().toString()},
+   * which turns {@code 100.00} into {@code 1E+2}, while {@code encode.decimal-as-plain-number}
+   * keeps the column scale intact ({@code 100.00}). The helper referees each row against both
+   * serializer configurations.
+   */
+  @Test
+  void matchesFlinkDecimalSpellingsInBothModes() throws Exception {
+    RowType decimals =
+        RowType.of(
+            new LogicalType[] {new DecimalType(10, 2), new DecimalType(12, 3), new DecimalType(38, 10)},
+            new String[] {"low", "mid", "huge"});
+    List<RowData> rows =
+        List.of(
+            row(decimals, "100.00", "123.450", "12345678901234567890123456.7890123456"),
+            row(decimals, "1.00", "0.000", "0.0000000010"),
+            row(decimals, "0.00", "-0.010", "-9999999999999999999999999999.9999999999"),
+            row(decimals, "-0.01", "1000000.000", "0.0000001000"),
+            row(decimals, "12345678.90", "-120.000", "1.0000000000"));
+
+    assertMatchesFlink(rows, decimals, TimestampFormat.SQL, false);
+  }
+
+  private static RowData row(RowType decimals, String... values) {
+    Object[] fields = new Object[values.length];
+    for (int i = 0; i < values.length; i++) {
+      DecimalType type = (DecimalType) decimals.getTypeAt(i);
+      fields[i] =
+          DecimalData.fromBigDecimal(
+              new BigDecimal(values[i]), type.getPrecision(), type.getScale());
+    }
+    return GenericRowData.of(fields);
+  }
+
   @Test
   void matchesFlinkForRemainingScalarTypes() throws Exception {
     RowType scalars =
@@ -121,7 +155,7 @@ class NativeKafkaJsonEncoderTest {
 
   private static void assertMatchesFlink(List<RowData> rows, boolean ignoreNullFields)
       throws Exception {
-    assertMatchesFlink(rows, ROW_TYPE, TimestampFormat.SQL, ignoreNullFields);
+    assertMatchesFlink(rows, ROW_TYPE, TimestampFormat.SQL, ignoreNullFields, false);
   }
 
   private static void assertMatchesFlink(
@@ -130,27 +164,26 @@ class NativeKafkaJsonEncoderTest {
       TimestampFormat timestampFormat,
       boolean ignoreNullFields)
       throws Exception {
+    assertMatchesFlink(rows, rowType, timestampFormat, ignoreNullFields, false);
+    assertMatchesFlink(rows, rowType, timestampFormat, ignoreNullFields, true);
+  }
+
+  private static void assertMatchesFlink(
+      List<RowData> rows,
+      RowType rowType,
+      TimestampFormat timestampFormat,
+      boolean ignoreNullFields,
+      boolean decimalAsPlainNumber)
+      throws Exception {
     JsonRowDataSerializationSchema flink =
         new JsonRowDataSerializationSchema(
             rowType,
             timestampFormat,
             JsonFormatOptions.MapNullKeyMode.LITERAL,
             "null",
-            false,
+            decimalAsPlainNumber,
             ignoreNullFields);
-    flink.open(
-        new SerializationSchema.InitializationContext() {
-          @Override
-          public MetricGroup getMetricGroup() {
-            return new UnregisteredMetricsGroup();
-          }
-
-          @Override
-          public UserCodeClassLoader getUserCodeClassLoader() {
-            return SimpleUserCodeClassLoader.create(
-                NativeKafkaJsonEncoderTest.class.getClassLoader());
-          }
-        });
+    flink.open(initializationContext());
 
     try (BufferAllocator allocator = new RootAllocator();
         CDataDictionaryProvider dictionaries = new CDataDictionaryProvider();
@@ -164,6 +197,7 @@ class NativeKafkaJsonEncoderTest {
               schema.memoryAddress(),
               ignoreNullFields,
               timestampFormat == TimestampFormat.SQL ? "SQL" : "ISO-8601",
+              decimalAsPlainNumber,
               rowType.getChildren().stream().map(Object::toString).toArray(String[]::new),
               rowType.getFieldNames().toArray(String[]::new));
 
@@ -181,5 +215,19 @@ class NativeKafkaJsonEncoderTest {
                 + new String(actual[i], StandardCharsets.UTF_8));
       }
     }
+  }
+
+  private static SerializationSchema.InitializationContext initializationContext() {
+    return new SerializationSchema.InitializationContext() {
+      @Override
+      public MetricGroup getMetricGroup() {
+        return new UnregisteredMetricsGroup();
+      }
+
+      @Override
+      public UserCodeClassLoader getUserCodeClassLoader() {
+        return SimpleUserCodeClassLoader.create(NativeKafkaJsonEncoderTest.class.getClassLoader());
+      }
+    };
   }
 }
