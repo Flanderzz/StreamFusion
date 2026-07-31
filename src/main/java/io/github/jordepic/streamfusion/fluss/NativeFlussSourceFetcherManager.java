@@ -1,5 +1,6 @@
 package io.github.jordepic.streamfusion.fluss;
 
+import io.github.jordepic.streamfusion.operator.NativeSourceRecord;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.Consumer;
@@ -13,13 +14,13 @@ import org.apache.fluss.flink.source.split.SourceSplitBase;
 import org.apache.fluss.metadata.TableBucket;
 
 /** Single-thread Fluss fetcher manager with the partition-removal ACK hook Fluss expects. */
-final class NativeFlussFetcherManager
-    extends SingleThreadFetcherManager<NativeFlussRecord, SourceSplitBase> {
+final class NativeFlussSourceFetcherManager
+    extends SingleThreadFetcherManager<NativeSourceRecord, SourceSplitBase> {
 
-  NativeFlussFetcherManager(
-      Supplier<SplitReader<NativeFlussRecord, SourceSplitBase>> splitReaderSupplier,
-      Configuration config) {
-    super(splitReaderSupplier, config);
+  NativeFlussSourceFetcherManager(
+      Supplier<SplitReader<NativeSourceRecord, SourceSplitBase>> splitReaderSupplier,
+      Configuration configuration) {
+    super(splitReaderSupplier, configuration);
   }
 
   /**
@@ -31,7 +32,7 @@ final class NativeFlussFetcherManager
    */
   void removePartitions(
       Map<Long, String> removedPartitions, Consumer<Set<TableBucket>> unsubscribeCallback) {
-    SplitFetcher<NativeFlussRecord, SourceSplitBase> fetcher = getRunningFetcher();
+    SplitFetcher<NativeSourceRecord, SourceSplitBase> fetcher = getRunningFetcher();
     if (fetcher != null) {
       enqueueRemovePartitionsTask(fetcher, removedPartitions, unsubscribeCallback);
       return;
@@ -42,7 +43,7 @@ final class NativeFlussFetcherManager
   }
 
   private static void enqueueRemovePartitionsTask(
-      SplitFetcher<NativeFlussRecord, SourceSplitBase> fetcher,
+      SplitFetcher<NativeSourceRecord, SourceSplitBase> fetcher,
       Map<Long, String> removedPartitions,
       Consumer<Set<TableBucket>> unsubscribeCallback) {
     NativeFlussSplitReader splitReader = (NativeFlussSplitReader) fetcher.getSplitReader();

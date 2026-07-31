@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 
 import io.github.jordepic.streamfusion.operator.ArrowBatch;
+import io.github.jordepic.streamfusion.operator.NativeSourceRecord;
 import java.util.List;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
@@ -31,7 +32,7 @@ class NativeFlussRecordEmitterTest {
       VectorSchemaRoot root = VectorSchemaRoot.create(new Schema(List.of()), allocator);
       ArrowBatch batch = new ArrowBatch(root);
 
-      emitter.emitRecord(new NativeFlussRecord(batch, 42L, Long.MIN_VALUE), output, splitState);
+      emitter.emitRecord(new NativeSourceRecord(batch, 42L, Long.MIN_VALUE), output, splitState);
 
       assertSame(batch, output.record);
       assertEquals(Long.MIN_VALUE, output.timestamp);
@@ -51,7 +52,7 @@ class NativeFlussRecordEmitterTest {
       VectorSchemaRoot root = VectorSchemaRoot.create(new Schema(List.of()), allocator);
       ArrowBatch batch = new ArrowBatch(root);
 
-      emitter.emitRecord(new NativeFlussRecord(batch, 42L, 1_700_000_000_123L), output, splitState);
+      emitter.emitRecord(new NativeSourceRecord(batch, 42L, 1_700_000_000_123L), output, splitState);
 
       assertSame(batch, output.record);
       assertEquals(1_700_000_000_123L, output.timestamp);

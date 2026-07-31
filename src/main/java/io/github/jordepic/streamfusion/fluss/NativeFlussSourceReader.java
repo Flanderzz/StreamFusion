@@ -1,6 +1,7 @@
 package io.github.jordepic.streamfusion.fluss;
 
 import io.github.jordepic.streamfusion.operator.ArrowBatch;
+import io.github.jordepic.streamfusion.operator.NativeSourceRecord;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.Supplier;
@@ -19,21 +20,21 @@ import org.apache.fluss.flink.source.split.SourceSplitState;
 /** FLIP-27 source reader that swaps Fluss' row split reader for a native Arrow log reader. */
 final class NativeFlussSourceReader
     extends SingleThreadMultiplexSourceReaderBase<
-        NativeFlussRecord, ArrowBatch, SourceSplitBase, SourceSplitState> {
+        NativeSourceRecord, ArrowBatch, SourceSplitBase, SourceSplitState> {
 
-  private final NativeFlussFetcherManager fetcherManager;
+  private final NativeFlussSourceFetcherManager fetcherManager;
 
   NativeFlussSourceReader(
-      Supplier<SplitReader<NativeFlussRecord, SourceSplitBase>> splitReaderSupplier,
-      RecordEmitter<NativeFlussRecord, ArrowBatch, SourceSplitState> recordEmitter,
+      Supplier<SplitReader<NativeSourceRecord, SourceSplitBase>> splitReaderSupplier,
+      RecordEmitter<NativeSourceRecord, ArrowBatch, SourceSplitState> recordEmitter,
       Configuration config,
       SourceReaderContext context) {
-    this(new NativeFlussFetcherManager(splitReaderSupplier, config), recordEmitter, config, context);
+    this(new NativeFlussSourceFetcherManager(splitReaderSupplier, config), recordEmitter, config, context);
   }
 
   private NativeFlussSourceReader(
-      NativeFlussFetcherManager fetcherManager,
-      RecordEmitter<NativeFlussRecord, ArrowBatch, SourceSplitState> recordEmitter,
+      NativeFlussSourceFetcherManager fetcherManager,
+      RecordEmitter<NativeSourceRecord, ArrowBatch, SourceSplitState> recordEmitter,
       Configuration config,
       SourceReaderContext context) {
     super(fetcherManager, recordEmitter, config, context);

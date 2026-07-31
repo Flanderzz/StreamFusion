@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.github.jordepic.streamfusion.operator.NativeSourceRecord;
 import io.github.jordepic.streamfusion.planner.NativePlanner;
 import io.github.jordepic.streamfusion.planner.PhysicalPlanScan;
 import java.time.LocalDateTime;
@@ -562,11 +563,11 @@ class NativeFlussSourceSqlHarnessTest {
   }
 
   private static int drainBatches(
-      RecordsWithSplitIds<NativeFlussRecord> records, Set<String> finishedSplitIds) {
+      RecordsWithSplitIds<NativeSourceRecord> records, Set<String> finishedSplitIds) {
     int rows = 0;
     String splitId = records.nextSplit();
     while (splitId != null) {
-      NativeFlussRecord record = records.nextRecordFromSplit();
+      NativeSourceRecord record = records.nextRecordFromSplit();
       while (record != null) {
         try (VectorSchemaRoot root = record.batch().root()) {
           rows += root.getRowCount();

@@ -1,5 +1,6 @@
 package io.github.jordepic.streamfusion.kafka;
 
+import io.github.jordepic.streamfusion.operator.NativeSourceRecord;
 import java.io.IOException;
 import java.util.Map;
 import java.util.function.Consumer;
@@ -15,10 +16,10 @@ import org.apache.kafka.common.TopicPartition;
 
 /** Runs Kafka consumer operations on the single fetcher thread that owns the native handle. */
 final class NativeKafkaSourceFetcherManager
-    extends SingleThreadFetcherManager<NativeKafkaRecord, KafkaPartitionSplit> {
+    extends SingleThreadFetcherManager<NativeSourceRecord, KafkaPartitionSplit> {
 
   NativeKafkaSourceFetcherManager(
-      Supplier<SplitReader<NativeKafkaRecord, KafkaPartitionSplit>> splitReaderSupplier,
+      Supplier<SplitReader<NativeSourceRecord, KafkaPartitionSplit>> splitReaderSupplier,
       Configuration configuration) {
     super(splitReaderSupplier, configuration);
   }
@@ -28,27 +29,27 @@ final class NativeKafkaSourceFetcherManager
     if (offsets.isEmpty()) {
       return;
     }
-    SplitFetcher<NativeKafkaRecord, KafkaPartitionSplit> fetcher = getRunningFetcher();
-    if (fetcher == null) {
-      fetcher = createSplitFetcher();
-      enqueueCommit(fetcher, offsets, completion);
-      startFetcher(fetcher);
-    } else {
-      enqueueCommit(fetcher, offsets, completion);
+    SplitFetcher<NativeSourceRecord, KafkaPartitionSplit> fetcher = getRunningFetcher();
+    if (fetcher != null) {
+      enqueueCommitTask(fetcher, offsets, completion);
+      return;
     }
+    fetcher = createSplitFetcher();
+    enqueueCommitTask(fetcher, offsets, completion);
+    startFetcher(fetcher);
   }
 
-  private static void enqueueCommit(
-      SplitFetcher<NativeKafkaRecord, KafkaPartitionSplit> fetcher,
+  private static void enqueueCommitTask(
+      SplitFetcher<NativeSourceRecord, KafkaPartitionSplit> fetcher,
       Map<TopicPartition, OffsetAndMetadata> offsets,
       Consumer<Exception> completion) {
-    NativeKafkaSplitReader reader = (NativeKafkaSplitReader) fetcher.getSplitReader();
+    NativeKafkaSplitReader splitReader = (NativeKafkaSplitReader) fetcher.getSplitReader();
     fetcher.enqueueTask(
         new SplitFetcherTask() {
           @Override
           public boolean run() {
             try {
-              reader.commitOffsets(offsets);
+              splitReader.commitOffsets(offsets);
               completion.accept(null);
             } catch (IOException error) {
               completion.accept(error);

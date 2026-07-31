@@ -2,6 +2,7 @@ package io.github.jordepic.streamfusion.kafka;
 
 import io.github.jordepic.streamfusion.format.NativeMessageDecoderFactory;
 import io.github.jordepic.streamfusion.operator.ArrowBatch;
+import io.github.jordepic.streamfusion.operator.NativeSourceRecord;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
@@ -100,7 +101,7 @@ public final class NativeKafkaSource
     String[] readerConfigKeys = readerConfig.keySet().toArray(new String[0]);
     String[] readerConfigValues =
         Arrays.stream(readerConfigKeys).map(readerConfig::get).toArray(String[]::new);
-    Supplier<SplitReader<NativeKafkaRecord, KafkaPartitionSplit>> splitReaderSupplier =
+    Supplier<SplitReader<NativeSourceRecord, KafkaPartitionSplit>> splitReaderSupplier =
         () ->
             new NativeKafkaSplitReader(
                 readerConfigKeys,

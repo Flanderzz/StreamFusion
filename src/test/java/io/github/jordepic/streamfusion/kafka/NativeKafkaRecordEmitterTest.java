@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 
 import io.github.jordepic.streamfusion.operator.ArrowBatch;
+import io.github.jordepic.streamfusion.operator.NativeSourceRecord;
 import java.util.List;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
@@ -31,7 +32,7 @@ class NativeKafkaRecordEmitterTest {
       VectorSchemaRoot root = VectorSchemaRoot.create(new Schema(List.of()), allocator);
       ArrowBatch batch = new ArrowBatch(root);
 
-      emitter.emitRecord(new NativeKafkaRecord(batch, 42L, Long.MIN_VALUE), output, splitState);
+      emitter.emitRecord(new NativeSourceRecord(batch, 42L, Long.MIN_VALUE), output, splitState);
 
       assertSame(batch, output.record);
       assertEquals(Long.MIN_VALUE, output.timestamp);
@@ -51,7 +52,7 @@ class NativeKafkaRecordEmitterTest {
       ArrowBatch batch = new ArrowBatch(root);
 
       emitter.emitRecord(
-          new NativeKafkaRecord(batch, 42L, 1_700_000_000_123L), output, splitState);
+          new NativeSourceRecord(batch, 42L, 1_700_000_000_123L), output, splitState);
 
       assertSame(batch, output.record);
       assertEquals(1_700_000_000_123L, output.timestamp);
@@ -66,7 +67,7 @@ class NativeKafkaRecordEmitterTest {
     KafkaPartitionSplitState splitState = splitState();
     CapturingOutput output = new CapturingOutput();
 
-    emitter.emitRecord(new NativeKafkaRecord(null, 42L, Long.MIN_VALUE), output, splitState);
+    emitter.emitRecord(new NativeSourceRecord(null, 42L, Long.MIN_VALUE), output, splitState);
 
     assertNull(output.record);
     assertEquals(42L, splitState.getCurrentOffset());

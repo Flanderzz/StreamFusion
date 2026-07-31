@@ -1,6 +1,7 @@
 package io.github.jordepic.streamfusion.kafka;
 
 import io.github.jordepic.streamfusion.operator.ArrowBatch;
+import io.github.jordepic.streamfusion.operator.NativeSourceRecord;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -30,7 +31,7 @@ import org.slf4j.LoggerFactory;
  */
 final class NativeKafkaSourceReader
     extends SingleThreadMultiplexSourceReaderBase<
-        NativeKafkaRecord, ArrowBatch, KafkaPartitionSplit, KafkaPartitionSplitState> {
+        NativeSourceRecord, ArrowBatch, KafkaPartitionSplit, KafkaPartitionSplitState> {
 
   private static final Logger LOG = LoggerFactory.getLogger(NativeKafkaSourceReader.class);
   private final SortedMap<Long, Map<TopicPartition, OffsetAndMetadata>> offsetsToCommit =
@@ -42,7 +43,7 @@ final class NativeKafkaSourceReader
 
   NativeKafkaSourceReader(
       NativeKafkaSourceFetcherManager fetcherManager,
-      RecordEmitter<NativeKafkaRecord, ArrowBatch, KafkaPartitionSplitState> recordEmitter,
+      RecordEmitter<NativeSourceRecord, ArrowBatch, KafkaPartitionSplitState> recordEmitter,
       Configuration config,
       SourceReaderContext context,
       NativeKafkaSourceMetrics metrics) {

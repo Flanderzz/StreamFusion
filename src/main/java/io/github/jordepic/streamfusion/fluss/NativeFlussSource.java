@@ -1,6 +1,7 @@
 package io.github.jordepic.streamfusion.fluss;
 
 import io.github.jordepic.streamfusion.operator.ArrowBatch;
+import io.github.jordepic.streamfusion.operator.NativeSourceRecord;
 import java.io.IOException;
 import java.util.List;
 import java.util.Map;
@@ -91,7 +92,7 @@ public final class NativeFlussSource
 
   @Override
   public SourceReader<ArrowBatch, SourceSplitBase> createReader(SourceReaderContext context) {
-    Supplier<SplitReader<NativeFlussRecord, SourceSplitBase>> splitReaderSupplier =
+    Supplier<SplitReader<NativeSourceRecord, SourceSplitBase>> splitReaderSupplier =
         () ->
             new NativeFlussSplitReader(
                 nativeConfigKeys,
