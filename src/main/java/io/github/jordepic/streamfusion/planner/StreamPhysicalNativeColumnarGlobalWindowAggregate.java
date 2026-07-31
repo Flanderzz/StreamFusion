@@ -4,13 +4,10 @@ import java.util.List;
 import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.plan.RelTraitSet;
 import org.apache.calcite.rel.RelNode;
-import org.apache.calcite.rel.RelWriter;
-import org.apache.calcite.rel.SingleRel;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNode;
 import org.apache.flink.table.planner.plan.nodes.exec.InputProperty;
-import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalRel;
 import org.apache.flink.table.planner.utils.ShortcutUtils;
 
 /**
@@ -21,10 +18,9 @@ import org.apache.flink.table.planner.utils.ShortcutUtils;
  * before a rowwise sink at the island perimeter. The partial columns / slice-end position are not
  * needed — the batch already carries the native partial schema, fed straight to the aggregator.
  */
-public class StreamPhysicalNativeColumnarGlobalWindowAggregate extends SingleRel
-    implements StreamPhysicalRel, ColumnarInput, ColumnarOutput {
+public class StreamPhysicalNativeColumnarGlobalWindowAggregate extends StreamPhysicalNativeSingleRel
+    implements ColumnarInput, ColumnarOutput {
 
-  private final RelDataType outputRowType;
   private final long windowMillis;
   private final long slideMillis;
   private final boolean cumulative;
@@ -45,8 +41,7 @@ public class StreamPhysicalNativeColumnarGlobalWindowAggregate extends SingleRel
       int[] valueTypes,
       int[] aggregateKinds,
       boolean timestampLtz) {
-    super(cluster, traitSet, input);
-    this.outputRowType = outputRowType;
+    super(cluster, traitSet, input, outputRowType);
     this.windowMillis = windowMillis;
     this.slideMillis = slideMillis;
     this.cumulative = cumulative;
@@ -59,11 +54,6 @@ public class StreamPhysicalNativeColumnarGlobalWindowAggregate extends SingleRel
   @Override
   public boolean requireWatermark() {
     return true;
-  }
-
-  @Override
-  protected RelDataType deriveRowType() {
-    return outputRowType;
   }
 
   @Override
@@ -97,13 +87,5 @@ public class StreamPhysicalNativeColumnarGlobalWindowAggregate extends SingleRel
         aggregateKinds,
         timestampLtz,
         FlinkKeyGroupUtils.timestampPrecisions(getInput().getRowType(), keyColumns));
-  }
-
-  /** Digest-only reuse barrier — see {@link NativeRelDigests}. */
-  private final long reuseBarrier = NativeRelDigests.nextId();
-
-  @Override
-  public RelWriter explainTerms(RelWriter pw) {
-    return NativeRelDigests.withBarrier(super.explainTerms(pw), reuseBarrier);
   }
 }

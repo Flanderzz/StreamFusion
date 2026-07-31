@@ -5,11 +5,10 @@ import io.github.jordepic.streamfusion.operator.ArrowBatchTypeInformation;
 import io.github.jordepic.streamfusion.operator.NativeColumnarUpdatingJoinOperator;
 import io.github.jordepic.streamfusion.operator.NativeUdf;
 import java.util.Arrays;
-import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.api.dag.Transformation;
-import org.apache.flink.api.java.functions.KeySelector;
 import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.streaming.api.transformations.TwoInputTransformation;
+import org.apache.flink.table.api.config.ExecutionConfigOptions;
 import org.apache.flink.table.planner.delegation.PlannerBase;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeBase;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeConfig;
@@ -90,15 +89,10 @@ public class NativeColumnarUpdatingJoinExecNode extends ExecNodeBase<ArrowBatch>
     Transformation<ArrowBatch> right =
         (Transformation<ArrowBatch>) getInputEdges().get(1).translateToPlan(planner);
     int maxParallelism = FlinkKeyGroupUtils.defaultMaxParallelism(left.getParallelism());
-    int[] stateKeys = FlinkKeyGroupUtils.stateKeysForSubtasks(maxParallelism, left.getParallelism());
-    KeySelector<ArrowBatch, Integer> stateKeySelector =
-        batch -> stateKeys[batch.destination() >= 0 ? batch.destination() : 0];
     boolean miniBatch =
         bothJoinKeysUnique
-            && config.get(
-                org.apache.flink.table.api.config.ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_ENABLED);
-    long miniBatchSize =
-        config.get(org.apache.flink.table.api.config.ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_SIZE);
+            && config.get(ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_ENABLED);
+    long miniBatchSize = config.get(ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_SIZE);
     long leftStateTtlMillis =
         leftStateTtlHintMillis >= 0 ? leftStateTtlHintMillis : config.getStateRetentionTime();
     long rightStateTtlMillis =
@@ -130,10 +124,7 @@ public class NativeColumnarUpdatingJoinExecNode extends ExecNodeBase<ArrowBatch>
             ArrowBatchTypeInformation.INSTANCE,
             left.getParallelism(),
             false);
-    transformation.setMaxParallelism(maxParallelism);
-    transformation.setStateKeySelectors(stateKeySelector, stateKeySelector);
-    transformation.setStateKeyType(Types.INT);
-    NativeManagedMemory.declareOperatorWeight(transformation);
+    FlinkKeyGroupUtils.applyColumnarKeying(transformation, maxParallelism);
     return transformation;
   }
 }

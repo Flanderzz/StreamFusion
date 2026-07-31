@@ -4,13 +4,10 @@ import java.util.List;
 import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.plan.RelTraitSet;
 import org.apache.calcite.rel.RelNode;
-import org.apache.calcite.rel.RelWriter;
-import org.apache.calcite.rel.SingleRel;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNode;
 import org.apache.flink.table.planner.plan.nodes.exec.InputProperty;
-import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalRel;
 import org.apache.flink.table.planner.utils.ShortcutUtils;
 
 /**
@@ -20,10 +17,9 @@ import org.apache.flink.table.planner.utils.ShortcutUtils;
  * running aggregate(s) appended — so it rides the columnar shuffle with no transpose. Requires a
  * watermark, since each row is emitted once the watermark passes its rowtime.
  */
-public class StreamPhysicalNativeOverAggregate extends SingleRel
-    implements StreamPhysicalRel, ColumnarInput, ColumnarOutput {
+public class StreamPhysicalNativeOverAggregate extends StreamPhysicalNativeSingleRel
+    implements ColumnarInput, ColumnarOutput {
 
-  private final RelDataType outputRowType;
   private final int timeColumn;
   private final int[] valueColumns;
   private final int[] keyColumns;
@@ -46,8 +42,7 @@ public class StreamPhysicalNativeOverAggregate extends SingleRel
       int frameKind,
       long frameOffset,
       boolean proctime) {
-    super(cluster, traitSet, input);
-    this.outputRowType = outputRowType;
+    super(cluster, traitSet, input, outputRowType);
     this.timeColumn = timeColumn;
     this.valueColumns = valueColumns;
     this.keyColumns = keyColumns;
@@ -61,11 +56,6 @@ public class StreamPhysicalNativeOverAggregate extends SingleRel
   @Override
   public boolean requireWatermark() {
     return !proctime; // proctime OVER emits eagerly in arrival order; rowtime needs a watermark
-  }
-
-  @Override
-  protected RelDataType deriveRowType() {
-    return outputRowType;
   }
 
   @Override
@@ -91,13 +81,5 @@ public class StreamPhysicalNativeOverAggregate extends SingleRel
         frameOffset,
         proctime,
         FlinkKeyGroupUtils.timestampPrecisions(getInput().getRowType(), keyColumns));
-  }
-
-  /** Digest-only reuse barrier — see {@link NativeRelDigests}. */
-  private final long reuseBarrier = NativeRelDigests.nextId();
-
-  @Override
-  public RelWriter explainTerms(RelWriter pw) {
-    return NativeRelDigests.withBarrier(super.explainTerms(pw), reuseBarrier);
   }
 }

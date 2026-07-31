@@ -4,13 +4,9 @@ import java.util.List;
 import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.plan.RelTraitSet;
 import org.apache.calcite.rel.RelNode;
-import org.apache.calcite.rel.RelWriter;
-import org.apache.calcite.rel.SingleRel;
-import org.apache.calcite.rel.type.RelDataType;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNode;
 import org.apache.flink.table.planner.plan.nodes.exec.InputProperty;
-import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalRel;
 import org.apache.flink.table.planner.utils.ShortcutUtils;
 
 /**
@@ -18,8 +14,8 @@ import org.apache.flink.table.planner.utils.ShortcutUtils;
  * pass where a rowwise operator consumes from a columnar one. The logical row type is unchanged —
  * only the physical carrier returns to rows.
  */
-public class StreamPhysicalArrowToRowData extends SingleRel
-    implements StreamPhysicalRel, ColumnarInput {
+public class StreamPhysicalArrowToRowData extends StreamPhysicalNativeSingleRel
+    implements ColumnarInput {
 
   public StreamPhysicalArrowToRowData(RelOptCluster cluster, RelTraitSet traitSet, RelNode input) {
     super(cluster, traitSet, input);
@@ -28,11 +24,6 @@ public class StreamPhysicalArrowToRowData extends SingleRel
   @Override
   public boolean requireWatermark() {
     return false;
-  }
-
-  @Override
-  protected RelDataType deriveRowType() {
-    return getInput().getRowType();
   }
 
   @Override
@@ -47,14 +38,6 @@ public class StreamPhysicalArrowToRowData extends SingleRel
         InputProperty.DEFAULT,
         FlinkTypeFactory$.MODULE$.toLogicalRowType(getRowType()),
         getRelDetailedDescription());
-  }
-
-  /** Digest-only reuse barrier — see {@link NativeRelDigests}. */
-  private final long reuseBarrier = NativeRelDigests.nextId();
-
-  @Override
-  public RelWriter explainTerms(RelWriter pw) {
-    return NativeRelDigests.withBarrier(super.explainTerms(pw), reuseBarrier);
   }
 }
 

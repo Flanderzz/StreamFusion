@@ -4,13 +4,10 @@ import java.util.List;
 import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.plan.RelTraitSet;
 import org.apache.calcite.rel.RelNode;
-import org.apache.calcite.rel.RelWriter;
-import org.apache.calcite.rel.SingleRel;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNode;
 import org.apache.flink.table.planner.plan.nodes.exec.InputProperty;
-import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalRel;
 import org.apache.flink.table.planner.utils.ShortcutUtils;
 
 /**
@@ -19,10 +16,9 @@ import org.apache.flink.table.planner.utils.ShortcutUtils;
  * and the global merge flow Arrow with no transpose between them. Insert-only (it emits append-only
  * partials), so it requires no {@code $row_kind$} column on its output.
  */
-public class StreamPhysicalNativeColumnarLocalGroupAggregate extends SingleRel
-    implements StreamPhysicalRel, ColumnarInput, ColumnarOutput {
+public class StreamPhysicalNativeColumnarLocalGroupAggregate extends StreamPhysicalNativeSingleRel
+    implements ColumnarInput, ColumnarOutput {
 
-  private final RelDataType outputRowType;
   private final int[] aggregateKinds;
   private final int[] valueTypes;
   private final int[] valueColumns;
@@ -41,8 +37,7 @@ public class StreamPhysicalNativeColumnarLocalGroupAggregate extends SingleRel
       int[] filterColumns,
       int[] keyColumns,
       int[] distinctViewSources) {
-    super(cluster, traitSet, input);
-    this.outputRowType = outputRowType;
+    super(cluster, traitSet, input, outputRowType);
     this.aggregateKinds = aggregateKinds;
     this.valueTypes = valueTypes;
     this.valueColumns = valueColumns;
@@ -54,11 +49,6 @@ public class StreamPhysicalNativeColumnarLocalGroupAggregate extends SingleRel
   @Override
   public boolean requireWatermark() {
     return false;
-  }
-
-  @Override
-  protected RelDataType deriveRowType() {
-    return outputRowType;
   }
 
   @Override
@@ -89,14 +79,6 @@ public class StreamPhysicalNativeColumnarLocalGroupAggregate extends SingleRel
         filterColumns,
         keyColumns,
         distinctViewSources);
-  }
-
-  /** Digest-only reuse barrier — see {@link NativeRelDigests}. */
-  private final long reuseBarrier = NativeRelDigests.nextId();
-
-  @Override
-  public RelWriter explainTerms(RelWriter pw) {
-    return NativeRelDigests.withBarrier(super.explainTerms(pw), reuseBarrier);
   }
 }
 

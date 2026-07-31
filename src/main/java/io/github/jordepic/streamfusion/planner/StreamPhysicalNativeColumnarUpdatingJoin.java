@@ -3,14 +3,11 @@ package io.github.jordepic.streamfusion.planner;
 import java.util.List;
 import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.plan.RelTraitSet;
-import org.apache.calcite.rel.BiRel;
 import org.apache.calcite.rel.RelNode;
-import org.apache.calcite.rel.RelWriter;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNode;
 import org.apache.flink.table.planner.plan.nodes.exec.InputProperty;
-import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalRel;
 import org.apache.flink.table.planner.utils.ShortcutUtils;
 
 /**
@@ -20,10 +17,8 @@ import org.apache.flink.table.planner.utils.ShortcutUtils;
  * otherwise a transpose at the boundary). It preserves the replaced node's output type and traits —
  * including its retracting changelog mode — and needs no watermark (unbounded keyed state).
  */
-public class StreamPhysicalNativeColumnarUpdatingJoin extends BiRel
-    implements StreamPhysicalRel, ColumnarInput, ColumnarOutput {
+public class StreamPhysicalNativeColumnarUpdatingJoin extends StreamPhysicalNativeBiRel {
 
-  private final RelDataType outputRowType;
   private final int[] leftKeys;
   private final int[] rightKeys;
   private final int joinType;
@@ -47,8 +42,7 @@ public class StreamPhysicalNativeColumnarUpdatingJoin extends BiRel
       boolean bothJoinKeysUnique,
       long leftStateTtlHintMillis,
       long rightStateTtlHintMillis) {
-    super(cluster, traitSet, left, right);
-    this.outputRowType = outputRowType;
+    super(cluster, traitSet, left, right, outputRowType);
     this.leftKeys = leftKeys;
     this.rightKeys = rightKeys;
     this.joinType = joinType;
@@ -61,11 +55,6 @@ public class StreamPhysicalNativeColumnarUpdatingJoin extends BiRel
   @Override
   public boolean requireWatermark() {
     return false;
-  }
-
-  @Override
-  protected RelDataType deriveRowType() {
-    return outputRowType;
   }
 
   @Override
@@ -103,13 +92,5 @@ public class StreamPhysicalNativeColumnarUpdatingJoin extends BiRel
         bothJoinKeysUnique,
         leftStateTtlHintMillis,
         rightStateTtlHintMillis);
-  }
-
-  /** Digest-only reuse barrier — see {@link NativeRelDigests}. */
-  private final long reuseBarrier = NativeRelDigests.nextId();
-
-  @Override
-  public RelWriter explainTerms(RelWriter pw) {
-    return NativeRelDigests.withBarrier(super.explainTerms(pw), reuseBarrier);
   }
 }

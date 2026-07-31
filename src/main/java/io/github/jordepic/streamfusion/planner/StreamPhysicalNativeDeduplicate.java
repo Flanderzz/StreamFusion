@@ -4,13 +4,10 @@ import java.util.List;
 import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.plan.RelTraitSet;
 import org.apache.calcite.rel.RelNode;
-import org.apache.calcite.rel.RelWriter;
-import org.apache.calcite.rel.SingleRel;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNode;
 import org.apache.flink.table.planner.plan.nodes.exec.InputProperty;
-import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalRel;
 import org.apache.flink.table.planner.utils.ShortcutUtils;
 
 /**
@@ -23,10 +20,9 @@ import org.apache.flink.table.planner.utils.ShortcutUtils;
  * (rowtime keep-last, and proctime keep-first/keep-last) emits eagerly per row with no watermark.
  * Keep-last emits a retract changelog; watermark-released keep-first is insert-only.
  */
-public class StreamPhysicalNativeDeduplicate extends SingleRel
-    implements StreamPhysicalRel, ColumnarInput, ColumnarOutput {
+public class StreamPhysicalNativeDeduplicate extends StreamPhysicalNativeSingleRel
+    implements ColumnarInput, ColumnarOutput {
 
-  private final RelDataType outputRowType;
   private final int[] partitionColumns;
   private final int rowtimeColumn;
   private final boolean keepLast;
@@ -43,8 +39,7 @@ public class StreamPhysicalNativeDeduplicate extends SingleRel
       boolean keepLast,
       boolean generateUpdateBefore,
       boolean proctime) {
-    super(cluster, traitSet, input);
-    this.outputRowType = outputRowType;
+    super(cluster, traitSet, input, outputRowType);
     this.partitionColumns = partitionColumns;
     this.rowtimeColumn = rowtimeColumn;
     this.keepLast = keepLast;
@@ -56,11 +51,6 @@ public class StreamPhysicalNativeDeduplicate extends SingleRel
   public boolean requireWatermark() {
     // Only rowtime keep-first releases on a watermark; proctime modes and keep-last emit eagerly.
     return !keepLast && !proctime;
-  }
-
-  @Override
-  protected RelDataType deriveRowType() {
-    return outputRowType;
   }
 
   @Override
@@ -90,13 +80,5 @@ public class StreamPhysicalNativeDeduplicate extends SingleRel
         generateUpdateBefore,
         proctime,
         FlinkKeyGroupUtils.timestampPrecisions(getInput().getRowType(), partitionColumns));
-  }
-
-  /** Digest-only reuse barrier — see {@link NativeRelDigests}. */
-  private final long reuseBarrier = NativeRelDigests.nextId();
-
-  @Override
-  public RelWriter explainTerms(RelWriter pw) {
-    return NativeRelDigests.withBarrier(super.explainTerms(pw), reuseBarrier);
   }
 }

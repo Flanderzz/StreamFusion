@@ -3,14 +3,11 @@ package io.github.jordepic.streamfusion.planner;
 import java.util.List;
 import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.plan.RelTraitSet;
-import org.apache.calcite.rel.BiRel;
 import org.apache.calcite.rel.RelNode;
-import org.apache.calcite.rel.RelWriter;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNode;
 import org.apache.flink.table.planner.plan.nodes.exec.InputProperty;
-import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalRel;
 import org.apache.flink.table.planner.utils.ShortcutUtils;
 
 /**
@@ -20,10 +17,8 @@ import org.apache.flink.table.planner.utils.ShortcutUtils;
  * rows (probe columns then build columns). Requires a watermark — the combined input watermark
  * resolves buffered probe rows against the build version valid at their time and drives state cleanup.
  */
-public class StreamPhysicalNativeTemporalJoin extends BiRel
-    implements StreamPhysicalRel, ColumnarInput, ColumnarOutput {
+public class StreamPhysicalNativeTemporalJoin extends StreamPhysicalNativeBiRel {
 
-  private final RelDataType outputRowType;
   private final int[] leftKeys;
   private final int[] rightKeys;
   private final int leftTime;
@@ -43,8 +38,7 @@ public class StreamPhysicalNativeTemporalJoin extends BiRel
       int rightTime,
       int joinType,
       RexExpression predicate) {
-    super(cluster, traitSet, left, right);
-    this.outputRowType = outputRowType;
+    super(cluster, traitSet, left, right, outputRowType);
     this.leftKeys = leftKeys;
     this.rightKeys = rightKeys;
     this.leftTime = leftTime;
@@ -56,11 +50,6 @@ public class StreamPhysicalNativeTemporalJoin extends BiRel
   @Override
   public boolean requireWatermark() {
     return true;
-  }
-
-  @Override
-  protected RelDataType deriveRowType() {
-    return outputRowType;
   }
 
   @Override
@@ -96,13 +85,5 @@ public class StreamPhysicalNativeTemporalJoin extends BiRel
         FlinkTypeFactory$.MODULE$.toLogicalRowType(getRight().getRowType()),
         predicate,
         FlinkKeyGroupUtils.timestampPrecisions(getLeft().getRowType(), leftKeys));
-  }
-
-  /** Digest-only reuse barrier — see {@link NativeRelDigests}. */
-  private final long reuseBarrier = NativeRelDigests.nextId();
-
-  @Override
-  public RelWriter explainTerms(RelWriter pw) {
-    return NativeRelDigests.withBarrier(super.explainTerms(pw), reuseBarrier);
   }
 }

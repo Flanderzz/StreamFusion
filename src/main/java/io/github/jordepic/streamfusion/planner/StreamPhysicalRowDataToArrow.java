@@ -5,12 +5,10 @@ import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.plan.RelTraitSet;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.RelWriter;
-import org.apache.calcite.rel.SingleRel;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNode;
 import org.apache.flink.table.planner.plan.nodes.exec.InputProperty;
-import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalRel;
 import org.apache.flink.table.planner.utils.ShortcutUtils;
 
 /**
@@ -25,8 +23,8 @@ import org.apache.flink.table.planner.utils.ShortcutUtils;
  * those become Arrow columns — the unread fields of a wide source row never get materialized. The
  * consumer's top-level column references are remapped to the compacted positions by the planner.
  */
-public class StreamPhysicalRowDataToArrow extends SingleRel
-    implements StreamPhysicalRel, ColumnarOutput {
+public class StreamPhysicalRowDataToArrow extends StreamPhysicalNativeSingleRel
+    implements ColumnarOutput {
 
   private final boolean carryRowKind;
   private final RelDataType prunedType;
@@ -76,14 +74,11 @@ public class StreamPhysicalRowDataToArrow extends SingleRel
             : FlinkTypeFactory$.MODULE$.toLogicalRowType(getInput().getRowType()));
   }
 
-  /** Digest-only reuse barrier — see {@link NativeRelDigests}. */
-  private final long reuseBarrier = NativeRelDigests.nextId();
-
   @Override
   public RelWriter explainTerms(RelWriter pw) {
     // The rendered field count makes pruning visible in an explain ("why is my transpose wide?");
     // display-only — the digest already carries the full row type.
-    return NativeRelDigests.withBarrier(super.explainTerms(pw), reuseBarrier)
+    return super.explainTerms(pw)
         .itemIf(
             "fields",
             getRowType().getFieldCount(),

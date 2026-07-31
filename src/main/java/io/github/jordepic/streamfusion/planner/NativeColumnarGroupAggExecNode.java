@@ -4,11 +4,10 @@ import io.github.jordepic.streamfusion.operator.ArrowBatch;
 import io.github.jordepic.streamfusion.operator.ArrowBatchTypeInformation;
 import io.github.jordepic.streamfusion.operator.NativeColumnarGroupAggregateOperator;
 import java.util.Collections;
-import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.api.dag.Transformation;
-import org.apache.flink.api.java.functions.KeySelector;
 import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.streaming.api.transformations.OneInputTransformation;
+import org.apache.flink.table.api.config.ExecutionConfigOptions;
 import org.apache.flink.table.planner.delegation.PlannerBase;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeBase;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeConfig;
@@ -81,16 +80,8 @@ public class NativeColumnarGroupAggExecNode extends ExecNodeBase<ArrowBatch>
     Transformation<ArrowBatch> input =
         (Transformation<ArrowBatch>) getInputEdges().get(0).translateToPlan(planner);
     int maxParallelism = FlinkKeyGroupUtils.defaultMaxParallelism(input.getParallelism());
-    int[] stateKeys = FlinkKeyGroupUtils.stateKeysForSubtasks(maxParallelism, input.getParallelism());
-    // Raw keyed state uses the exchange's BinaryRow key groups. This selector only establishes a
-    // valid Flink keyed context for an entire columnar batch; no managed keyed state reads it.
-    KeySelector<ArrowBatch, Integer> stateKeySelector =
-        batch -> stateKeys[batch.destination() >= 0 ? batch.destination() : 0];
-    boolean miniBatch =
-        config.get(
-            org.apache.flink.table.api.config.ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_ENABLED);
-    long miniBatchSize =
-        config.get(org.apache.flink.table.api.config.ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_SIZE);
+    boolean miniBatch = config.get(ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_ENABLED);
+    long miniBatchSize = config.get(ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_SIZE);
     long stateTtlMillis =
         stateTtlHintMillis >= 0 ? stateTtlHintMillis : config.getStateRetentionTime();
     OneInputTransformation<ArrowBatch, ArrowBatch> transformation =
@@ -110,10 +101,7 @@ public class NativeColumnarGroupAggExecNode extends ExecNodeBase<ArrowBatch>
             ArrowBatchTypeInformation.INSTANCE,
             input.getParallelism(),
             false);
-    transformation.setMaxParallelism(maxParallelism);
-    transformation.setStateKeySelector(stateKeySelector);
-    transformation.setStateKeyType(Types.INT);
-    NativeManagedMemory.declareOperatorWeight(transformation);
+    FlinkKeyGroupUtils.applyColumnarKeying(transformation, maxParallelism);
     return transformation;
   }
 }

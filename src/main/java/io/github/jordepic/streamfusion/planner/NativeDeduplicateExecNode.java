@@ -5,9 +5,7 @@ import io.github.jordepic.streamfusion.operator.ArrowBatchTypeInformation;
 import io.github.jordepic.streamfusion.operator.NativeColumnarDeduplicateOperator;
 import io.github.jordepic.streamfusion.operator.NativeColumnarKeepLastDeduplicateOperator;
 import java.util.Collections;
-import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.api.dag.Transformation;
-import org.apache.flink.api.java.functions.KeySelector;
 import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.api.transformations.OneInputTransformation;
@@ -79,9 +77,6 @@ public class NativeDeduplicateExecNode extends ExecNodeBase<ArrowBatch>
     // routes to the eager operator too.
     boolean eager = proctime || keepLast || miniBatchEnabled;
     int maxParallelism = FlinkKeyGroupUtils.defaultMaxParallelism(input.getParallelism());
-    int[] stateKeys = FlinkKeyGroupUtils.stateKeysForSubtasks(maxParallelism, input.getParallelism());
-    KeySelector<ArrowBatch, Integer> stateKeySelector =
-        batch -> stateKeys[batch.destination() >= 0 ? batch.destination() : 0];
     // Proctime keep-first stays eager (its bundled function emits the same insert-only rows);
     // every other shape bundles.
     boolean miniBatch = miniBatchEnabled && (keepLast || !proctime);
@@ -134,10 +129,7 @@ public class NativeDeduplicateExecNode extends ExecNodeBase<ArrowBatch>
             ArrowBatchTypeInformation.INSTANCE,
             input.getParallelism(),
             false);
-    transformation.setMaxParallelism(maxParallelism);
-    transformation.setStateKeySelector(stateKeySelector);
-    transformation.setStateKeyType(Types.INT);
-    NativeManagedMemory.declareOperatorWeight(transformation);
+    FlinkKeyGroupUtils.applyColumnarKeying(transformation, maxParallelism);
     return transformation;
   }
 }

@@ -4,11 +4,10 @@ import io.github.jordepic.streamfusion.operator.ArrowBatch;
 import io.github.jordepic.streamfusion.operator.ArrowBatchTypeInformation;
 import io.github.jordepic.streamfusion.operator.NativeColumnarTopNOperator;
 import java.util.Collections;
-import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.api.dag.Transformation;
-import org.apache.flink.api.java.functions.KeySelector;
 import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.streaming.api.transformations.OneInputTransformation;
+import org.apache.flink.table.api.config.ExecutionConfigOptions;
 import org.apache.flink.table.planner.delegation.PlannerBase;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeBase;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeConfig;
@@ -82,18 +81,12 @@ public class NativeColumnarTopNExecNode extends ExecNodeBase<ArrowBatch>
     // Under mini-batch, both rankers emit the net logical-bundle rank diff instead of exposing
     // per-record intermediate rank windows. The final materialized Top-N is identical; with
     // mini-batch off, the per-input-row changelog remains byte-identical to the host path.
-    boolean netDiff =
-        config.get(
-            org.apache.flink.table.api.config.ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_ENABLED);
-    long miniBatchSize =
-        config.get(org.apache.flink.table.api.config.ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_SIZE);
+    boolean netDiff = config.get(ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_ENABLED);
+    long miniBatchSize = config.get(ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_SIZE);
     // The job-wide idle-state retention; Flink defines STATE_TTL hints only for joins and
     // aggregates, so ranks have no per-operator override to resolve.
     long stateTtlMillis = config.getStateRetentionTime();
     int maxParallelism = FlinkKeyGroupUtils.defaultMaxParallelism(input.getParallelism());
-    int[] stateKeys = FlinkKeyGroupUtils.stateKeysForSubtasks(maxParallelism, input.getParallelism());
-    KeySelector<ArrowBatch, Integer> stateKeySelector =
-        batch -> stateKeys[batch.destination() >= 0 ? batch.destination() : 0];
     OneInputTransformation<ArrowBatch, ArrowBatch> transformation =
         ExecNodeUtil.createOneInputTransformation(
             input,
@@ -119,10 +112,7 @@ public class NativeColumnarTopNExecNode extends ExecNodeBase<ArrowBatch>
             ArrowBatchTypeInformation.INSTANCE,
             input.getParallelism(),
             false);
-    transformation.setMaxParallelism(maxParallelism);
-    transformation.setStateKeySelector(stateKeySelector);
-    transformation.setStateKeyType(Types.INT);
-    NativeManagedMemory.declareOperatorWeight(transformation);
+    FlinkKeyGroupUtils.applyColumnarKeying(transformation, maxParallelism);
     return transformation;
   }
 }

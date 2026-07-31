@@ -4,9 +4,7 @@ import io.github.jordepic.streamfusion.operator.ArrowBatch;
 import io.github.jordepic.streamfusion.operator.ArrowBatchTypeInformation;
 import io.github.jordepic.streamfusion.operator.NativeTemporalJoinOperator;
 import java.util.Arrays;
-import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.api.dag.Transformation;
-import org.apache.flink.api.java.functions.KeySelector;
 import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.streaming.api.transformations.TwoInputTransformation;
 import org.apache.flink.table.planner.delegation.PlannerBase;
@@ -76,9 +74,6 @@ public class NativeTemporalJoinExecNode extends ExecNodeBase<ArrowBatch>
     Transformation<ArrowBatch> right =
         (Transformation<ArrowBatch>) getInputEdges().get(1).translateToPlan(planner);
     int maxParallelism = FlinkKeyGroupUtils.defaultMaxParallelism(left.getParallelism());
-    int[] stateKeys = FlinkKeyGroupUtils.stateKeysForSubtasks(maxParallelism, left.getParallelism());
-    KeySelector<ArrowBatch, Integer> stateKeySelector =
-        batch -> stateKeys[batch.destination() >= 0 ? batch.destination() : 0];
     // The job-wide retention only: Flink's StreamExecTemporalJoin reads the config directly, with
     // no STATE_TTL hint support. The 1.5x max deadline horizon is derived natively.
     long stateTtlMillis = config.getStateRetentionTime();
@@ -102,10 +97,7 @@ public class NativeTemporalJoinExecNode extends ExecNodeBase<ArrowBatch>
             ArrowBatchTypeInformation.INSTANCE,
             left.getParallelism(),
             false);
-    transformation.setMaxParallelism(maxParallelism);
-    transformation.setStateKeySelectors(stateKeySelector, stateKeySelector);
-    transformation.setStateKeyType(Types.INT);
-    NativeManagedMemory.declareOperatorWeight(transformation);
+    FlinkKeyGroupUtils.applyColumnarKeying(transformation, maxParallelism);
     return transformation;
   }
 }

@@ -4,13 +4,10 @@ import java.util.List;
 import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.plan.RelTraitSet;
 import org.apache.calcite.rel.RelNode;
-import org.apache.calcite.rel.RelWriter;
-import org.apache.calcite.rel.SingleRel;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNode;
 import org.apache.flink.table.planner.plan.nodes.exec.InputProperty;
-import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalRel;
 import org.apache.flink.table.planner.utils.ShortcutUtils;
 
 /**
@@ -23,10 +20,9 @@ import org.apache.flink.table.planner.utils.ShortcutUtils;
  * ColumnarInput} and {@link ColumnarOutput}); the watermark flows through the partition
  * transformation as usual.
  */
-public class StreamPhysicalNativeColumnarExchange extends SingleRel
-    implements StreamPhysicalRel, ColumnarInput, ColumnarOutput {
+public class StreamPhysicalNativeColumnarExchange extends StreamPhysicalNativeSingleRel
+    implements ColumnarInput, ColumnarOutput {
 
-  private final RelDataType outputRowType;
   private final int[] keyColumns;
 
   public StreamPhysicalNativeColumnarExchange(
@@ -35,19 +31,13 @@ public class StreamPhysicalNativeColumnarExchange extends SingleRel
       RelNode input,
       RelDataType outputRowType,
       int[] keyColumns) {
-    super(cluster, traitSet, input);
-    this.outputRowType = outputRowType;
+    super(cluster, traitSet, input, outputRowType);
     this.keyColumns = keyColumns;
   }
 
   @Override
   public boolean requireWatermark() {
     return false;
-  }
-
-  @Override
-  protected RelDataType deriveRowType() {
-    return outputRowType;
   }
 
   @Override
@@ -65,13 +55,5 @@ public class StreamPhysicalNativeColumnarExchange extends SingleRel
         getRelDetailedDescription(),
         keyColumns,
         FlinkKeyGroupUtils.timestampPrecisions(outputRowType, keyColumns));
-  }
-
-  /** Digest-only reuse barrier — see {@link NativeRelDigests}. */
-  private final long reuseBarrier = NativeRelDigests.nextId();
-
-  @Override
-  public RelWriter explainTerms(RelWriter pw) {
-    return NativeRelDigests.withBarrier(super.explainTerms(pw), reuseBarrier);
   }
 }

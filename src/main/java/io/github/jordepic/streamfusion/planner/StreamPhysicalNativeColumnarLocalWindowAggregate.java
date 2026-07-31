@@ -4,13 +4,10 @@ import java.util.List;
 import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.plan.RelTraitSet;
 import org.apache.calcite.rel.RelNode;
-import org.apache.calcite.rel.RelWriter;
-import org.apache.calcite.rel.SingleRel;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNode;
 import org.apache.flink.table.planner.plan.nodes.exec.InputProperty;
-import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalRel;
 import org.apache.flink.table.planner.utils.ShortcutUtils;
 
 /**
@@ -18,10 +15,9 @@ import org.apache.flink.table.planner.utils.ShortcutUtils;
  * consuming Arrow batches and emitting partial-state Arrow batches ({@link ColumnarInput} and {@link
  * ColumnarOutput}), so it feeds a columnar exchange and global half with no row transpose.
  */
-public class StreamPhysicalNativeColumnarLocalWindowAggregate extends SingleRel
-    implements StreamPhysicalRel, ColumnarInput, ColumnarOutput {
+public class StreamPhysicalNativeColumnarLocalWindowAggregate extends StreamPhysicalNativeSingleRel
+    implements ColumnarInput, ColumnarOutput {
 
-  private final RelDataType outputRowType;
   private final long sliceMillis;
   private final int timeColumn;
   // Window-attached mode (q5): window boundaries read from these columns instead of slicing a rowtime;
@@ -48,8 +44,7 @@ public class StreamPhysicalNativeColumnarLocalWindowAggregate extends SingleRel
       int[] valueTypes,
       int[] aggregateKinds,
       boolean timestampLtz) {
-    super(cluster, traitSet, input);
-    this.outputRowType = outputRowType;
+    super(cluster, traitSet, input, outputRowType);
     this.sliceMillis = sliceMillis;
     this.timeColumn = timeColumn;
     this.windowStartColumn = windowStartColumn;
@@ -64,11 +59,6 @@ public class StreamPhysicalNativeColumnarLocalWindowAggregate extends SingleRel
   @Override
   public boolean requireWatermark() {
     return true;
-  }
-
-  @Override
-  protected RelDataType deriveRowType() {
-    return outputRowType;
   }
 
   @Override
@@ -106,13 +96,5 @@ public class StreamPhysicalNativeColumnarLocalWindowAggregate extends SingleRel
         aggregateKinds,
         timestampLtz,
         FlinkKeyGroupUtils.timestampPrecisions(getInput().getRowType(), keyColumns));
-  }
-
-  /** Digest-only reuse barrier — see {@link NativeRelDigests}. */
-  private final long reuseBarrier = NativeRelDigests.nextId();
-
-  @Override
-  public RelWriter explainTerms(RelWriter pw) {
-    return NativeRelDigests.withBarrier(super.explainTerms(pw), reuseBarrier);
   }
 }

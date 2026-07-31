@@ -4,12 +4,9 @@ import java.util.List;
 import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.plan.RelTraitSet;
 import org.apache.calcite.rel.RelNode;
-import org.apache.calcite.rel.RelWriter;
-import org.apache.calcite.rel.SingleRel;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNode;
 import org.apache.flink.table.planner.plan.nodes.exec.InputProperty;
-import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalRel;
 import org.apache.flink.table.planner.utils.ShortcutUtils;
 
 /**
@@ -18,10 +15,9 @@ import org.apache.flink.table.planner.utils.ShortcutUtils;
  * options, and the translated encoder settings — for the operator chain the exec node builds.
  * Stateless with respect to event time, so it needs no watermark.
  */
-public class StreamPhysicalNativeParquetSink extends SingleRel
-    implements StreamPhysicalRel, ColumnarInput {
+public class StreamPhysicalNativeParquetSink extends StreamPhysicalNativeSingleRel
+    implements ColumnarInput {
 
-  private final RelDataType outputRowType;
   private final ParquetSinkMatcher.Planned planned;
 
   StreamPhysicalNativeParquetSink(
@@ -30,8 +26,7 @@ public class StreamPhysicalNativeParquetSink extends SingleRel
       RelNode input,
       RelDataType outputRowType,
       ParquetSinkMatcher.Planned planned) {
-    super(cluster, traitSet, input);
-    this.outputRowType = outputRowType;
+    super(cluster, traitSet, input, outputRowType);
     this.planned = planned;
   }
 
@@ -40,11 +35,6 @@ public class StreamPhysicalNativeParquetSink extends SingleRel
     // Partition-time commit triggers consume watermarks inside the reused Flink writer, but they
     // arrive on the stream regardless; the sink itself forces no watermark generation.
     return false;
-  }
-
-  @Override
-  protected RelDataType deriveRowType() {
-    return outputRowType;
   }
 
   @Override
@@ -61,13 +51,5 @@ public class StreamPhysicalNativeParquetSink extends SingleRel
         planned.rowType,
         getRelDetailedDescription(),
         planned);
-  }
-
-  /** Digest-only reuse barrier — see {@link NativeRelDigests}. */
-  private final long reuseBarrier = NativeRelDigests.nextId();
-
-  @Override
-  public RelWriter explainTerms(RelWriter pw) {
-    return NativeRelDigests.withBarrier(super.explainTerms(pw), reuseBarrier);
   }
 }

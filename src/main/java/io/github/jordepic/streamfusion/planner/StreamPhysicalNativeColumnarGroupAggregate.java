@@ -4,13 +4,10 @@ import java.util.List;
 import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.plan.RelTraitSet;
 import org.apache.calcite.rel.RelNode;
-import org.apache.calcite.rel.RelWriter;
-import org.apache.calcite.rel.SingleRel;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNode;
 import org.apache.flink.table.planner.plan.nodes.exec.InputProperty;
-import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalRel;
 import org.apache.flink.table.planner.utils.ShortcutUtils;
 
 /**
@@ -19,10 +16,9 @@ import org.apache.flink.table.planner.utils.ShortcutUtils;
  * transpose — substituted when the aggregate's keyed input is kept columnar across the exchange. The
  * emitted changelog carries its kind on the batch's {@code $row_kind$} column.
  */
-public class StreamPhysicalNativeColumnarGroupAggregate extends SingleRel
-    implements StreamPhysicalRel, ColumnarInput, ColumnarOutput {
+public class StreamPhysicalNativeColumnarGroupAggregate extends StreamPhysicalNativeSingleRel
+    implements ColumnarInput, ColumnarOutput {
 
-  private final RelDataType outputRowType;
   private final int[] aggregateKinds;
   private final int[] valueTypes;
   private final int[] valueColumns;
@@ -51,8 +47,7 @@ public class StreamPhysicalNativeColumnarGroupAggregate extends SingleRel
       int recordCountColumn,
       boolean generateUpdateBefore,
       long stateTtlHintMillis) {
-    super(cluster, traitSet, input);
-    this.outputRowType = outputRowType;
+    super(cluster, traitSet, input, outputRowType);
     this.aggregateKinds = aggregateKinds;
     this.valueTypes = valueTypes;
     this.valueColumns = valueColumns;
@@ -68,11 +63,6 @@ public class StreamPhysicalNativeColumnarGroupAggregate extends SingleRel
   @Override
   public boolean requireWatermark() {
     return false;
-  }
-
-  @Override
-  protected RelDataType deriveRowType() {
-    return outputRowType;
   }
 
   @Override
@@ -112,13 +102,5 @@ public class StreamPhysicalNativeColumnarGroupAggregate extends SingleRel
         generateUpdateBefore,
         stateTtlHintMillis,
         FlinkKeyGroupUtils.timestampPrecisions(getInput().getRowType(), keyColumns));
-  }
-
-  /** Digest-only reuse barrier — see {@link NativeRelDigests}. */
-  private final long reuseBarrier = NativeRelDigests.nextId();
-
-  @Override
-  public RelWriter explainTerms(RelWriter pw) {
-    return NativeRelDigests.withBarrier(super.explainTerms(pw), reuseBarrier);
   }
 }

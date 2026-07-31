@@ -4,13 +4,10 @@ import java.util.List;
 import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.plan.RelTraitSet;
 import org.apache.calcite.rel.RelNode;
-import org.apache.calcite.rel.RelWriter;
-import org.apache.calcite.rel.SingleRel;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNode;
 import org.apache.flink.table.planner.plan.nodes.exec.InputProperty;
-import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalRel;
 import org.apache.flink.table.planner.utils.ShortcutUtils;
 
 /**
@@ -21,10 +18,9 @@ import org.apache.flink.table.planner.utils.ShortcutUtils;
  * rides the batch's {@code $row_kind$} column), so a native changelog chain pays no per-operator
  * transpose; the keyed shuffle stays columnar where the input is a columnar producer.
  */
-public class StreamPhysicalNativeChangelogNormalize extends SingleRel
-    implements StreamPhysicalRel, ColumnarInput, ColumnarOutput {
+public class StreamPhysicalNativeChangelogNormalize extends StreamPhysicalNativeSingleRel
+    implements ColumnarInput, ColumnarOutput {
 
-  private final RelDataType outputRowType;
   private final int[] keyColumns;
   private final boolean generateUpdateBefore;
 
@@ -35,8 +31,7 @@ public class StreamPhysicalNativeChangelogNormalize extends SingleRel
       RelDataType outputRowType,
       int[] keyColumns,
       boolean generateUpdateBefore) {
-    super(cluster, traitSet, input);
-    this.outputRowType = outputRowType;
+    super(cluster, traitSet, input, outputRowType);
     this.keyColumns = keyColumns;
     this.generateUpdateBefore = generateUpdateBefore;
   }
@@ -44,11 +39,6 @@ public class StreamPhysicalNativeChangelogNormalize extends SingleRel
   @Override
   public boolean requireWatermark() {
     return false;
-  }
-
-  @Override
-  protected RelDataType deriveRowType() {
-    return outputRowType;
   }
 
   @Override
@@ -67,13 +57,5 @@ public class StreamPhysicalNativeChangelogNormalize extends SingleRel
         keyColumns,
         generateUpdateBefore,
         FlinkKeyGroupUtils.timestampPrecisions(getInput().getRowType(), keyColumns));
-  }
-
-  /** Digest-only reuse barrier — see {@link NativeRelDigests}. */
-  private final long reuseBarrier = NativeRelDigests.nextId();
-
-  @Override
-  public RelWriter explainTerms(RelWriter pw) {
-    return NativeRelDigests.withBarrier(super.explainTerms(pw), reuseBarrier);
   }
 }

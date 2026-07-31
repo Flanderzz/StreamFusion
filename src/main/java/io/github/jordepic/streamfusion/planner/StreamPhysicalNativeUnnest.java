@@ -4,13 +4,10 @@ import java.util.List;
 import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.plan.RelTraitSet;
 import org.apache.calcite.rel.RelNode;
-import org.apache.calcite.rel.RelWriter;
-import org.apache.calcite.rel.SingleRel;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNode;
 import org.apache.flink.table.planner.plan.nodes.exec.InputProperty;
-import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalRel;
 import org.apache.flink.table.planner.utils.ShortcutUtils;
 
 /**
@@ -21,10 +18,9 @@ import org.apache.flink.table.planner.utils.ShortcutUtils;
  * the {@code $row_kind$} tag through (changelog-transparent), so it sits in the columnar island
  * between its (native) input and whatever consumes the unnested rows.
  */
-public class StreamPhysicalNativeUnnest extends SingleRel
-    implements StreamPhysicalRel, ColumnarInput, ColumnarOutput {
+public class StreamPhysicalNativeUnnest extends StreamPhysicalNativeSingleRel
+    implements ColumnarInput, ColumnarOutput {
 
-  private final RelDataType outputRowType;
   private final int arrayColumn;
   private final boolean withOrdinality;
   private final boolean isLeft;
@@ -39,8 +35,7 @@ public class StreamPhysicalNativeUnnest extends SingleRel
       boolean withOrdinality,
       boolean isLeft,
       boolean isMultiset) {
-    super(cluster, traitSet, input);
-    this.outputRowType = outputRowType;
+    super(cluster, traitSet, input, outputRowType);
     this.arrayColumn = arrayColumn;
     this.withOrdinality = withOrdinality;
     this.isLeft = isLeft;
@@ -50,11 +45,6 @@ public class StreamPhysicalNativeUnnest extends SingleRel
   @Override
   public boolean requireWatermark() {
     return false;
-  }
-
-  @Override
-  protected RelDataType deriveRowType() {
-    return outputRowType;
   }
 
   @Override
@@ -81,14 +71,6 @@ public class StreamPhysicalNativeUnnest extends SingleRel
         withOrdinality,
         isLeft,
         isMultiset);
-  }
-
-  /** Digest-only reuse barrier — see {@link NativeRelDigests}. */
-  private final long reuseBarrier = NativeRelDigests.nextId();
-
-  @Override
-  public RelWriter explainTerms(RelWriter pw) {
-    return NativeRelDigests.withBarrier(super.explainTerms(pw), reuseBarrier);
   }
 }
 

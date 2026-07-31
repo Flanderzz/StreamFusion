@@ -7,15 +7,12 @@ import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.plan.RelOptTable;
 import org.apache.calcite.plan.RelTraitSet;
 import org.apache.calcite.rel.RelNode;
-import org.apache.calcite.rel.RelWriter;
-import org.apache.calcite.rel.SingleRel;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.rex.RexProgram;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNode;
 import org.apache.flink.table.planner.plan.nodes.exec.InputProperty;
-import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalRel;
 import org.apache.flink.table.planner.plan.utils.FlinkRexUtil;
 import org.apache.flink.table.planner.plan.utils.FunctionCallUtil;
 import org.apache.flink.table.planner.utils.ShortcutUtils;
@@ -28,10 +25,9 @@ import org.apache.flink.table.planner.utils.ShortcutUtils;
  * this operator inside the island lets the probe-side Calc/source stay native rather than the whole
  * query falling back to a rowwise plan around the lookup.
  */
-public class StreamPhysicalNativeLookupJoin extends SingleRel
-    implements StreamPhysicalRel, ColumnarInput, ColumnarOutput {
+public class StreamPhysicalNativeLookupJoin extends StreamPhysicalNativeSingleRel
+    implements ColumnarInput, ColumnarOutput {
 
-  private final RelDataType outputRowType;
   private final RelOptTable temporalTable;
   private final Map<Integer, FunctionCallUtil.FunctionParam> lookupKeys;
   private final @Nullable RexProgram calcOnTemporalTable;
@@ -52,8 +48,7 @@ public class StreamPhysicalNativeLookupJoin extends SingleRel
       @Nullable RexNode remainingJoinCondition,
       boolean leftOuterJoin,
       @Nullable FunctionCallUtil.AsyncOptions asyncOptions) {
-    super(cluster, traitSet, input);
-    this.outputRowType = outputRowType;
+    super(cluster, traitSet, input, outputRowType);
     this.temporalTable = temporalTable;
     this.lookupKeys = lookupKeys;
     this.calcOnTemporalTable = calcOnTemporalTable;
@@ -66,11 +61,6 @@ public class StreamPhysicalNativeLookupJoin extends SingleRel
   @Override
   public boolean requireWatermark() {
     return false;
-  }
-
-  @Override
-  protected RelDataType deriveRowType() {
-    return outputRowType;
   }
 
   @Override
@@ -115,14 +105,6 @@ public class StreamPhysicalNativeLookupJoin extends SingleRel
         remainingJoinCondition,
         leftOuterJoin,
         asyncOptions);
-  }
-
-  /** Digest-only reuse barrier — see {@link NativeRelDigests}. */
-  private final long reuseBarrier = NativeRelDigests.nextId();
-
-  @Override
-  public RelWriter explainTerms(RelWriter pw) {
-    return NativeRelDigests.withBarrier(super.explainTerms(pw), reuseBarrier);
   }
 }
 

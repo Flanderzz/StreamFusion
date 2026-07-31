@@ -4,13 +4,10 @@ import java.util.List;
 import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.plan.RelTraitSet;
 import org.apache.calcite.rel.RelNode;
-import org.apache.calcite.rel.RelWriter;
-import org.apache.calcite.rel.SingleRel;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNode;
 import org.apache.flink.table.planner.plan.nodes.exec.InputProperty;
-import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalRel;
 import org.apache.flink.table.planner.utils.ShortcutUtils;
 
 /**
@@ -20,10 +17,9 @@ import org.apache.flink.table.planner.utils.ShortcutUtils;
  * upstream event-time watermarks (row-time mode). Insert-only (it adds no rows and touches no
  * {@code $row_kind$}), so it requires no changelog handling.
  */
-public class StreamPhysicalNativeMiniBatchAssigner extends SingleRel
-    implements StreamPhysicalRel, ColumnarInput, ColumnarOutput {
+public class StreamPhysicalNativeMiniBatchAssigner extends StreamPhysicalNativeSingleRel
+    implements ColumnarInput, ColumnarOutput {
 
-  private final RelDataType outputRowType;
   private final long intervalMs;
   private final boolean rowTime;
 
@@ -34,8 +30,7 @@ public class StreamPhysicalNativeMiniBatchAssigner extends SingleRel
       RelDataType outputRowType,
       long intervalMs,
       boolean rowTime) {
-    super(cluster, traitSet, input);
-    this.outputRowType = outputRowType;
+    super(cluster, traitSet, input, outputRowType);
     this.intervalMs = intervalMs;
     this.rowTime = rowTime;
   }
@@ -43,11 +38,6 @@ public class StreamPhysicalNativeMiniBatchAssigner extends SingleRel
   @Override
   public boolean requireWatermark() {
     return false;
-  }
-
-  @Override
-  protected RelDataType deriveRowType() {
-    return outputRowType;
   }
 
   @Override
@@ -75,14 +65,6 @@ public class StreamPhysicalNativeMiniBatchAssigner extends SingleRel
         getRelDetailedDescription(),
         intervalMs,
         rowTime);
-  }
-
-  /** Digest-only reuse barrier — see {@link NativeRelDigests}. */
-  private final long reuseBarrier = NativeRelDigests.nextId();
-
-  @Override
-  public RelWriter explainTerms(RelWriter pw) {
-    return NativeRelDigests.withBarrier(super.explainTerms(pw), reuseBarrier);
   }
 }
 

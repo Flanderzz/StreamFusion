@@ -5,13 +5,10 @@ import java.util.List;
 import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.plan.RelTraitSet;
 import org.apache.calcite.rel.RelNode;
-import org.apache.calcite.rel.RelWriter;
-import org.apache.calcite.rel.SingleRel;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNode;
 import org.apache.flink.table.planner.plan.nodes.exec.InputProperty;
-import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalRel;
 import org.apache.flink.table.planner.utils.ShortcutUtils;
 
 /**
@@ -20,10 +17,9 @@ import org.apache.flink.table.planner.utils.ShortcutUtils;
  * The general form of the native filter — it covers computed columns and constants as well as column
  * subsets. Keeps the replaced node's output type and traits; stateless, so no watermark.
  */
-public class StreamPhysicalNativeCalc extends SingleRel
-    implements StreamPhysicalRel, ColumnarInput, ColumnarOutput {
+public class StreamPhysicalNativeCalc extends StreamPhysicalNativeSingleRel
+    implements ColumnarInput, ColumnarOutput {
 
-  private final RelDataType outputRowType;
   private final int[] kinds;
   private final int[] payload;
   private final int[] childCounts;
@@ -73,8 +69,7 @@ public class StreamPhysicalNativeCalc extends SingleRel
       int conditionRoot,
       String[] outputNames,
       NativeUdf.Binding udfBinding) {
-    super(cluster, traitSet, input);
-    this.outputRowType = outputRowType;
+    super(cluster, traitSet, input, outputRowType);
     this.kinds = kinds;
     this.payload = payload;
     this.childCounts = childCounts;
@@ -90,11 +85,6 @@ public class StreamPhysicalNativeCalc extends SingleRel
   @Override
   public boolean requireWatermark() {
     return false;
-  }
-
-  @Override
-  protected RelDataType deriveRowType() {
-    return outputRowType;
   }
 
   @Override
@@ -133,14 +123,6 @@ public class StreamPhysicalNativeCalc extends SingleRel
         conditionRoot,
         outputNames,
         udfBinding);
-  }
-
-  /** Digest-only reuse barrier — see {@link NativeRelDigests}. */
-  private final long reuseBarrier = NativeRelDigests.nextId();
-
-  @Override
-  public RelWriter explainTerms(RelWriter pw) {
-    return NativeRelDigests.withBarrier(super.explainTerms(pw), reuseBarrier);
   }
 }
 

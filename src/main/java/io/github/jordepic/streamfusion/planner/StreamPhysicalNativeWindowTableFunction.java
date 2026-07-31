@@ -4,13 +4,10 @@ import java.util.List;
 import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.plan.RelTraitSet;
 import org.apache.calcite.rel.RelNode;
-import org.apache.calcite.rel.RelWriter;
-import org.apache.calcite.rel.SingleRel;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNode;
 import org.apache.flink.table.planner.plan.nodes.exec.InputProperty;
-import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalRel;
 import org.apache.flink.table.planner.utils.ShortcutUtils;
 
 /**
@@ -23,10 +20,9 @@ import org.apache.flink.table.planner.utils.ShortcutUtils;
  * watermarks pass straight through; it requires an upstream watermark because its rowtime windowing
  * is what the downstream window join/aggregate triggers on.
  */
-public class StreamPhysicalNativeWindowTableFunction extends SingleRel
-    implements StreamPhysicalRel, ColumnarInput, ColumnarOutput {
+public class StreamPhysicalNativeWindowTableFunction extends StreamPhysicalNativeSingleRel
+    implements ColumnarInput, ColumnarOutput {
 
-  private final RelDataType outputRowType;
   private final int timeColumn;
   private final long windowMillis;
   private final long slideMillis;
@@ -43,8 +39,7 @@ public class StreamPhysicalNativeWindowTableFunction extends SingleRel
       long slideMillis,
       boolean cumulative,
       boolean proctime) {
-    super(cluster, traitSet, input);
-    this.outputRowType = outputRowType;
+    super(cluster, traitSet, input, outputRowType);
     this.timeColumn = timeColumn;
     this.windowMillis = windowMillis;
     this.slideMillis = slideMillis;
@@ -55,11 +50,6 @@ public class StreamPhysicalNativeWindowTableFunction extends SingleRel
   @Override
   public boolean requireWatermark() {
     return !proctime;
-  }
-
-  @Override
-  protected RelDataType deriveRowType() {
-    return outputRowType;
   }
 
   @Override
@@ -88,14 +78,6 @@ public class StreamPhysicalNativeWindowTableFunction extends SingleRel
         slideMillis,
         cumulative,
         proctime);
-  }
-
-  /** Digest-only reuse barrier — see {@link NativeRelDigests}. */
-  private final long reuseBarrier = NativeRelDigests.nextId();
-
-  @Override
-  public RelWriter explainTerms(RelWriter pw) {
-    return NativeRelDigests.withBarrier(super.explainTerms(pw), reuseBarrier);
   }
 }
 

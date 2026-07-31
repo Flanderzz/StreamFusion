@@ -1,10 +1,15 @@
 package io.github.jordepic.streamfusion.planner;
 
+import io.github.jordepic.streamfusion.operator.ArrowBatch;
 import java.util.ArrayList;
 import java.util.List;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.sql.type.SqlTypeName;
+import org.apache.flink.api.common.typeinfo.Types;
+import org.apache.flink.api.java.functions.KeySelector;
 import org.apache.flink.runtime.state.KeyGroupRangeAssignment;
+import org.apache.flink.streaming.api.transformations.OneInputTransformation;
+import org.apache.flink.streaming.api.transformations.TwoInputTransformation;
 
 /** Small planning-time helpers shared by the native exchange and raw keyed-state operators. */
 public final class FlinkKeyGroupUtils {
@@ -75,5 +80,36 @@ public final class FlinkKeyGroupUtils {
       }
     }
     return keys;
+  }
+
+  /**
+   * Establishes the Flink keyed-operator context for a native keyed transformation. Raw keyed
+   * state uses the exchange's BinaryRow key groups; the selector only maps each whole columnar
+   * batch to an ordinary JVM key owned by its subtask — no managed keyed state reads it.
+   */
+  static void applyColumnarKeying(
+      OneInputTransformation<ArrowBatch, ArrowBatch> transformation, int maxParallelism) {
+    transformation.setMaxParallelism(maxParallelism);
+    transformation.setStateKeySelector(
+        subtaskStateKeySelector(maxParallelism, transformation.getParallelism()));
+    transformation.setStateKeyType(Types.INT);
+    NativeManagedMemory.declareOperatorWeight(transformation);
+  }
+
+  static void applyColumnarKeying(
+      TwoInputTransformation<ArrowBatch, ArrowBatch, ArrowBatch> transformation,
+      int maxParallelism) {
+    KeySelector<ArrowBatch, Integer> stateKeySelector =
+        subtaskStateKeySelector(maxParallelism, transformation.getParallelism());
+    transformation.setMaxParallelism(maxParallelism);
+    transformation.setStateKeySelectors(stateKeySelector, stateKeySelector);
+    transformation.setStateKeyType(Types.INT);
+    NativeManagedMemory.declareOperatorWeight(transformation);
+  }
+
+  private static KeySelector<ArrowBatch, Integer> subtaskStateKeySelector(
+      int maxParallelism, int parallelism) {
+    int[] stateKeys = stateKeysForSubtasks(maxParallelism, parallelism);
+    return batch -> stateKeys[batch.destination() >= 0 ? batch.destination() : 0];
   }
 }

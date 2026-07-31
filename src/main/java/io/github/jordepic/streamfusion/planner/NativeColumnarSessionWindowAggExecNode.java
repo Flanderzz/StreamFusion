@@ -5,9 +5,7 @@ import io.github.jordepic.streamfusion.operator.ArrowBatchTypeInformation;
 import io.github.jordepic.streamfusion.operator.NativeColumnarSessionWindowAggregateOperator;
 import io.github.jordepic.streamfusion.operator.NativeWindowOperatorCore;
 import java.util.Collections;
-import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.api.dag.Transformation;
-import org.apache.flink.api.java.functions.KeySelector;
 import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.streaming.api.transformations.OneInputTransformation;
 import org.apache.flink.table.planner.delegation.PlannerBase;
@@ -83,9 +81,6 @@ public class NativeColumnarSessionWindowAggExecNode extends ExecNodeBase<ArrowBa
         timestampLtz ? planner.getTableConfig().getLocalTimeZone().getId() : "UTC";
     RowType outputType = (RowType) getOutputType();
     int maxParallelism = FlinkKeyGroupUtils.defaultMaxParallelism(input.getParallelism());
-    int[] stateKeys = FlinkKeyGroupUtils.stateKeysForSubtasks(maxParallelism, input.getParallelism());
-    KeySelector<ArrowBatch, Integer> stateKeySelector =
-        batch -> stateKeys[batch.destination() >= 0 ? batch.destination() : 0];
     OneInputTransformation<ArrowBatch, ArrowBatch> transformation =
         ExecNodeUtil.createOneInputTransformation(
             input,
@@ -106,10 +101,7 @@ public class NativeColumnarSessionWindowAggExecNode extends ExecNodeBase<ArrowBa
             ArrowBatchTypeInformation.INSTANCE,
             input.getParallelism(),
             false);
-    transformation.setMaxParallelism(maxParallelism);
-    transformation.setStateKeySelector(stateKeySelector);
-    transformation.setStateKeyType(Types.INT);
-    NativeManagedMemory.declareOperatorWeight(transformation);
+    FlinkKeyGroupUtils.applyColumnarKeying(transformation, maxParallelism);
     return transformation;
   }
 }
