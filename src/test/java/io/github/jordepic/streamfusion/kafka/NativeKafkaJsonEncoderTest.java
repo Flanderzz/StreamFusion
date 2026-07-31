@@ -83,6 +83,38 @@ class NativeKafkaJsonEncoderTest {
   }
 
   /**
+   * Flink's timestamp formatters trim the fraction to its shortest spelling (and drop it entirely
+   * at .000) for plain TIMESTAMP and TIMESTAMP_LTZ alike, regardless of the declared precision.
+   */
+  @Test
+  void matchesFlinkTimestampFractionTrimming() throws Exception {
+    RowType timestamps =
+        RowType.of(
+            new LogicalType[] {
+              new TimestampType(3),
+              new TimestampType(9),
+              new LocalZonedTimestampType(3),
+              new LocalZonedTimestampType(9)
+            },
+            new String[] {"ts3", "ts9", "ltz3", "ltz9"});
+    long base = 1_577_934_245_000L;
+    List<RowData> rows =
+        List.of(
+            timestampRow(TimestampData.fromEpochMillis(base + 500)), // .5, not .500
+            timestampRow(TimestampData.fromEpochMillis(base)), // no fraction at all
+            timestampRow(TimestampData.fromEpochMillis(base + 123, 456_789)), // .123456789
+            timestampRow(TimestampData.fromEpochMillis(base + 120)), // .12
+            timestampRow(TimestampData.fromEpochMillis(base + 100, 230_000))); // .10023
+
+    assertMatchesFlink(rows, timestamps, TimestampFormat.SQL, false);
+    assertMatchesFlink(rows, timestamps, TimestampFormat.ISO_8601, false);
+  }
+
+  private static RowData timestampRow(TimestampData value) {
+    return GenericRowData.of(value, value, value, value);
+  }
+
+  /**
    * Both of Flink's decimal spellings: the default is {@code stripTrailingZeros().toString()},
    * which turns {@code 100.00} into {@code 1E+2}, while {@code encode.decimal-as-plain-number}
    * keeps the column scale intact ({@code 100.00}). The helper referees each row against both

@@ -307,32 +307,25 @@ impl arrow::json::writer::EncoderFactory for FlinkJsonEncoderFactory {
                 scale: *scale,
                 plain: self.decimal_as_plain_number,
             })),
+            // TIMESTAMP_LTZ is an instant Flink renders at UTC with a 'Z' designator; plain
+            // TIMESTAMP is the same wall-clock digit layout without any zone. Both trim the
+            // fraction to its shortest form (appendFraction(NANO_OF_SECOND, 0, 9, true)).
             DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, _)
                 if field
                     .metadata()
                     .get(FLINK_LOGICAL_TYPE)
-                    .is_some_and(|logical_type| logical_type.starts_with("TIMESTAMP_LTZ")) =>
+                    .is_some_and(|logical_type| logical_type.starts_with("TIMESTAMP")) =>
             {
-                let logical_type = &field.metadata()[FLINK_LOGICAL_TYPE];
-                Some(Box::new(FlinkLocalTimestampEncoder {
+                Some(Box::new(FlinkTimestampEncoder {
                     array: array.as_primitive::<TimestampNanosecondType>(),
-                    precision: flink_temporal_precision(logical_type),
                     iso_8601: self.iso_8601,
+                    zulu: field.metadata()[FLINK_LOGICAL_TYPE].starts_with("TIMESTAMP_LTZ"),
                 }))
             }
             _ => None,
         };
         Ok(encoder.map(|encoder| NullableEncoder::new(encoder, array.nulls().cloned())))
     }
-}
-
-#[cfg(feature = "kafka")]
-fn flink_temporal_precision(logical_type: &str) -> usize {
-    logical_type
-        .strip_prefix("TIMESTAMP_LTZ(")
-        .and_then(|value| value.strip_suffix(')'))
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(6)
 }
 
 /// arrow-json's string path hands every value to serde_json's scalar per-byte escape scan. The
@@ -525,21 +518,19 @@ fn encode_plain_decimal(unscaled: i128, scale: i64, output: &mut Vec<u8>) {
 }
 
 #[cfg(feature = "kafka")]
-struct FlinkLocalTimestampEncoder<'a> {
+struct FlinkTimestampEncoder<'a> {
     array: &'a arrow::array::TimestampNanosecondArray,
-    precision: usize,
     iso_8601: bool,
+    zulu: bool,
 }
 
 #[cfg(feature = "kafka")]
-impl arrow::json::writer::Encoder for FlinkLocalTimestampEncoder<'_> {
+impl arrow::json::writer::Encoder for FlinkTimestampEncoder<'_> {
     fn encode(&mut self, index: usize, output: &mut Vec<u8>) {
-        encode_local_timestamp(
-            self.array.value(index),
-            self.precision,
-            self.iso_8601,
-            output,
-        );
+        // Flink's formatters never consult the column's declared precision: the fraction is
+        // whatever the value's nanoseconds carry, trimmed of trailing zeros, so the full
+        // nine-digit width is always offered.
+        encode_flink_timestamp(self.array.value(index), 9, self.iso_8601, self.zulu, output);
     }
 }
 
@@ -548,6 +539,17 @@ pub(crate) fn encode_local_timestamp(
     value: i64,
     precision: usize,
     iso_8601: bool,
+    output: &mut Vec<u8>,
+) {
+    encode_flink_timestamp(value, precision, iso_8601, true, output);
+}
+
+#[cfg(feature = "kafka")]
+fn encode_flink_timestamp(
+    value: i64,
+    precision: usize,
+    iso_8601: bool,
+    zulu: bool,
     output: &mut Vec<u8>,
 ) {
     let seconds = value.div_euclid(1_000_000_000);
@@ -565,6 +567,7 @@ pub(crate) fn encode_local_timestamp(
         nanos,
         precision,
         iso_8601,
+        zulu,
         output,
     );
 }
@@ -590,6 +593,7 @@ pub(crate) fn encode_local_timestamp_chrono_components(
         nanos,
         precision,
         iso_8601,
+        true,
         output,
     );
 }
@@ -605,6 +609,7 @@ fn encode_timestamp_parts(
     nanos: u32,
     precision: usize,
     iso_8601: bool,
+    zulu: bool,
     output: &mut Vec<u8>,
 ) {
     output.push(b'"');
@@ -635,7 +640,10 @@ fn encode_timestamp_parts(
             }
         }
     }
-    output.extend_from_slice(b"Z\"");
+    if zulu {
+        output.push(b'Z');
+    }
+    output.push(b'"');
 }
 
 #[cfg(feature = "kafka")]
