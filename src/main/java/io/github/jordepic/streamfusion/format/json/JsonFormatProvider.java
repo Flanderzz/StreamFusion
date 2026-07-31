@@ -126,6 +126,9 @@ public final class JsonFormatProvider implements NativeFormatProvider {
 
     @Override
     public NativeMessageDecoderFactory createDecoder(NativeFormatContext context) {
+      // Capture the code, not `this`: the factory ships in the job graph and providers are not
+      // serializable (reading the field inside the lambda would capture the provider).
+      int format = this.format;
       return () -> new JsonDecoder(format, context.ignoreParseErrors(), NativeFormatOptions.encode(context.options()));
     }
   }
