@@ -114,14 +114,47 @@ fn parse_json_encode_options(encoded: &str) -> Result<JsonEncodeOptions, String>
     Ok(options)
 }
 
+/// One resolved sink format: the JSON row encode options plus, for a CDC format, the changelog
+/// envelope wrapped around each row. All four CDC JSON dialects forward the same `json.*` option
+/// set to their nested row serializer, exactly as Flink's envelope schemas do. The envelope encode
+/// is part of the sink's JSON encoder (kafka-gated like the rest of it), deliberately independent
+/// of the decode-side `formats` module so a format-less connector build still compiles.
+#[cfg(feature = "kafka")]
+pub(crate) struct EncodeFormat {
+    pub(crate) envelope: Option<CdcEnvelope>,
+    pub(crate) json: JsonEncodeOptions,
+}
+
+/// The CDC JSON dialect whose envelope wraps each encoded row on the sink side.
+#[cfg(feature = "kafka")]
+#[derive(Clone, Copy)]
+pub(crate) enum CdcEnvelope {
+    /// `{"before", "after", "op"}`, op ∈ {`c`, `d`} — `DebeziumJsonSerializationSchema`.
+    Debezium,
+    /// `{"before", "after", "op_type"}`, op ∈ {`I`, `D`} — `OggJsonSerializationSchema`.
+    Ogg,
+    /// `{"data", "type"}`, type ∈ {`insert`, `delete`} — `MaxwellJsonSerializationSchema`.
+    Maxwell,
+    /// `{"data": [row], "type"}`, type ∈ {`INSERT`, `DELETE`} — `CanalJsonSerializationSchema`.
+    Canal,
+}
+
 /// The encode dispatch of the sink's format seam: the JVM passes a `FormatCodes` wire code plus the
 /// format's resolved option lines; each natively encoded sink format adds an arm here.
 #[cfg(feature = "kafka")]
-fn parse_encode_format(format: i32, encoded: &str) -> Result<JsonEncodeOptions, String> {
-    match format {
-        FORMAT_JSON => parse_json_encode_options(encoded),
-        other => Err(format!("format code {other} is not natively encoded")),
-    }
+fn parse_encode_format(format: i32, encoded: &str) -> Result<EncodeFormat, String> {
+    let envelope = match format {
+        FORMAT_JSON => None,
+        FORMAT_DEBEZIUM_JSON => Some(CdcEnvelope::Debezium),
+        FORMAT_OGG_JSON => Some(CdcEnvelope::Ogg),
+        FORMAT_MAXWELL_JSON => Some(CdcEnvelope::Maxwell),
+        FORMAT_CANAL_JSON => Some(CdcEnvelope::Canal),
+        other => return Err(format!("format code {other} is not natively encoded")),
+    };
+    Ok(EncodeFormat {
+        envelope,
+        json: parse_json_encode_options(encoded)?,
+    })
 }
 
 #[cfg(feature = "kafka")]
@@ -184,6 +217,98 @@ pub(crate) fn encode_json_batch(
     Ok(EncodedLines { bytes, lines })
 }
 
+/// The value lines of one resolved sink format: the plain JSON rows, or — for a CDC format — each
+/// row spliced into its dialect's changelog envelope. `kinds` is the batch's `$row_kind$` column;
+/// an absent column is an insert-only edge (every row is an INSERT), matching the transpose
+/// contract in `changelog.rs`.
+#[cfg(feature = "kafka")]
+fn encode_value_lines(
+    batch: &RecordBatch,
+    kinds: Option<&Int8Array>,
+    format: &EncodeFormat,
+    logical_types: &[String],
+    field_names: &[String],
+) -> Result<EncodedLines, String> {
+    let rows = encode_json_batch(batch, &format.json, logical_types, field_names)?;
+    match format.envelope {
+        None => Ok(rows),
+        Some(dialect) => {
+            wrap_cdc_envelopes(&rows, kinds, dialect, format.json.ignore_null_fields)
+        }
+    }
+}
+
+/// Splices each pre-encoded JSON row into its CDC changelog envelope. The row bytes are identical
+/// whether the object is top-level or nested, and the envelope fields around it are constants in
+/// the dialect's declared field order — so parity with Flink's envelope serializers reduces to the
+/// row encode parity already pinned for the plain JSON sink. Flink serializes the envelope with
+/// the same JSON options as the row, so `encode.ignore-null-fields` also drops the envelope's
+/// null `before`/`after` key.
+#[cfg(feature = "kafka")]
+fn wrap_cdc_envelopes(
+    rows: &EncodedLines,
+    kinds: Option<&Int8Array>,
+    dialect: CdcEnvelope,
+    ignore_null_fields: bool,
+) -> Result<EncodedLines, String> {
+    let mut bytes = Vec::with_capacity(rows.bytes.len() + rows.len() * 40);
+    let mut lines = Vec::with_capacity(rows.len());
+    for index in 0..rows.len() {
+        // RowKind byte values: INSERT=0, UPDATE_BEFORE=1, UPDATE_AFTER=2, DELETE=3. Insert and
+        // update-after carry the row as the post-image; update-before and delete as the pre-image.
+        let insert = match kinds.map_or(0, |kinds| kinds.value(index)) {
+            0 | 2 => true,
+            1 | 3 => false,
+            other => return Err(format!("Unsupported operation '{other}' for row kind.")),
+        };
+        let (prefix, suffix) = cdc_envelope(dialect, insert, ignore_null_fields);
+        let start = bytes.len();
+        bytes.extend_from_slice(prefix);
+        bytes.extend_from_slice(rows.line(index));
+        bytes.extend_from_slice(suffix);
+        lines.push(start..bytes.len());
+    }
+    Ok(EncodedLines { bytes, lines })
+}
+
+/// The constant envelope bytes around the row image, per dialect and changelog side, in each
+/// Flink serializer's declared field order.
+#[cfg(feature = "kafka")]
+fn cdc_envelope(
+    dialect: CdcEnvelope,
+    insert: bool,
+    ignore_null_fields: bool,
+) -> (&'static [u8], &'static [u8]) {
+    match dialect {
+        CdcEnvelope::Debezium => match (insert, ignore_null_fields) {
+            (true, false) => (b"{\"before\":null,\"after\":", b",\"op\":\"c\"}"),
+            (true, true) => (b"{\"after\":", b",\"op\":\"c\"}"),
+            (false, false) => (b"{\"before\":", b",\"after\":null,\"op\":\"d\"}"),
+            (false, true) => (b"{\"before\":", b",\"op\":\"d\"}"),
+        },
+        CdcEnvelope::Ogg => match (insert, ignore_null_fields) {
+            (true, false) => (b"{\"before\":null,\"after\":", b",\"op_type\":\"I\"}"),
+            (true, true) => (b"{\"after\":", b",\"op_type\":\"I\"}"),
+            (false, false) => (b"{\"before\":", b",\"after\":null,\"op_type\":\"D\"}"),
+            (false, true) => (b"{\"before\":", b",\"op_type\":\"D\"}"),
+        },
+        CdcEnvelope::Canal => {
+            if insert {
+                (b"{\"data\":[", b"],\"type\":\"INSERT\"}")
+            } else {
+                (b"{\"data\":[", b"],\"type\":\"DELETE\"}")
+            }
+        }
+        CdcEnvelope::Maxwell => {
+            if insert {
+                (b"{\"data\":", b",\"type\":\"insert\"}")
+            } else {
+                (b"{\"data\":", b",\"type\":\"delete\"}")
+            }
+        }
+    }
+}
+
 /// Per-row key/value slices into the two encode buffers; upsert DELETE/UPDATE_BEFORE rows read
 /// back as tombstones (a key with no value).
 #[cfg(feature = "kafka")]
@@ -215,8 +340,8 @@ impl EncodedKafkaRecords {
 #[cfg(feature = "kafka")]
 fn encode_json_records(
     batch: &RecordBatch,
-    options: &JsonEncodeOptions,
-    key_options: &JsonEncodeOptions,
+    options: &EncodeFormat,
+    key_options: &EncodeFormat,
     logical_types: &[String],
     field_names: &[String],
     key_fields: &[usize],
@@ -246,13 +371,14 @@ fn encode_json_records(
     } else {
         Some(encode_json_batch(
             &key_batch,
-            key_options,
+            &key_options.json,
             &project_types(key_fields),
             &project_names(key_fields),
         )?)
     };
-    let values = encode_json_batch(
+    let values = encode_value_lines(
         &value_batch,
+        row_kind_column(batch),
         options,
         &project_types(value_fields),
         &project_names(value_fields),
@@ -1926,7 +2052,17 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_en
         let options = read_encode_format(env, format, &format_options)?;
         let logical_types = read_string_array(env, &logical_types);
         let field_names = read_string_array(env, &field_names);
-        let encoded = encode_json_batch(&batch, &options, &logical_types, &field_names)?;
+        let data_fields = (0..data_arity(&batch)).collect::<Vec<_>>();
+        let data = batch
+            .project(&data_fields)
+            .map_err(|error| format!("failed to project Kafka value fields: {error}"))?;
+        let encoded = encode_value_lines(
+            &data,
+            row_kind_column(&batch),
+            &options,
+            &logical_types,
+            &field_names,
+        )?;
         if encoded.len() != batch.num_rows() {
             return Err(format!(
                 "Kafka JSON encoder produced {} records for {} Arrow rows",
@@ -1944,7 +2080,7 @@ fn read_encode_format(
     env: &mut JNIEnv<'_>,
     format: jint,
     format_options: &JString<'_>,
-) -> Result<JsonEncodeOptions, String> {
+) -> Result<EncodeFormat, String> {
     let encoded: String = env
         .get_string(format_options)
         .map_err(|error| format!("failed to read encode format options: {error}"))?

@@ -33,10 +33,20 @@ public final class EncodeFormat implements Serializable {
    * would have failed.
    */
   public static EncodeFormat of(String identifier, Map<String, String> options) {
-    if (FormatCodes.forIdentifier(identifier) != FormatCodes.JSON) {
+    if (!FormatCodes.isJsonFamily(identifier)) {
       return null;
     }
-    return json(options);
+    int code = FormatCodes.forIdentifier(identifier);
+    // Flink's debezium-json factory rejects schema-include on the serialization side; declining
+    // keeps that ValidationException on Flink. The CDC dialects otherwise forward the shared
+    // json.* option set to their nested row serializer (canal's database/table filters are
+    // deserialization-only and ignored on write, as in Flink).
+    if (code == FormatCodes.DEBEZIUM_JSON
+        && Boolean.parseBoolean(options.get("schema-include"))) {
+      return null;
+    }
+    EncodeFormat json = json(options);
+    return json == null ? null : new EncodeFormat(code, json.options);
   }
 
   /** JSON encode options resolved with Flink's json format factory defaults. */
