@@ -16,7 +16,13 @@ import org.apache.flink.table.types.logical.DoubleType;
 import org.apache.flink.table.types.logical.IntType;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.RowType;
+import org.apache.flink.table.types.logical.ArrayType;
+import org.apache.flink.table.types.logical.FloatType;
+import org.apache.flink.table.types.logical.MapType;
+import org.apache.flink.table.types.logical.MultisetType;
+import org.apache.flink.table.types.logical.SmallIntType;
 import org.apache.flink.table.types.logical.TimeType;
+import org.apache.flink.table.types.logical.TinyIntType;
 import org.apache.flink.table.types.logical.TimestampType;
 import org.apache.flink.table.types.logical.VarBinaryType;
 import org.apache.flink.table.types.logical.VarCharType;
@@ -48,14 +54,34 @@ class JsonDecodeParityTest {
             new DoubleType(),
             new BooleanType(),
             new DateType(),
-            new TimestampType(3)
+            new TimestampType(3),
+            new TinyIntType(),
+            new SmallIntType(),
+            new FloatType()
           },
-          new String[] {"s", "i", "f", "b", "d", "ts"});
+          new String[] {"s", "i", "f", "b", "d", "ts", "ti", "si", "fl"});
 
   private static final RowType DECIMAL_TYPE =
       RowType.of(
           new LogicalType[] {new DecimalType(5, 2), new DecimalType(38, 18), new BigIntType()},
           new String[] {"dec", "wide", "l"});
+
+  private static final RowType NESTED_TYPE =
+      RowType.of(
+          new LogicalType[] {
+            RowType.of(
+                new LogicalType[] {
+                  new IntType(),
+                  new VarCharType(VarCharType.MAX_LENGTH),
+                  RowType.of(new LogicalType[] {new DoubleType()}, new String[] {"d"})
+                },
+                new String[] {"a", "b", "c"}),
+            new ArrayType(new IntType()),
+            new MapType(new VarCharType(VarCharType.MAX_LENGTH), new BigIntType()),
+            new MultisetType(new VarCharType(VarCharType.MAX_LENGTH)),
+            new ArrayType(RowType.of(new LogicalType[] {new IntType()}, new String[] {"x"}))
+          },
+          new String[] {"r", "arr", "m", "ms", "rows"});
 
   private static final RowType TIME_BINARY_TYPE =
       RowType.of(
@@ -94,6 +120,23 @@ class JsonDecodeParityTest {
     "{\"b\": 1}",
     "{\"s\": 42}",
     "{\"s\": true}",
+    // The narrow integers: range-checked int tokens, parseByte/parseShort for strings — and NO
+    // float-token truncation (convertToByte/convertToShort fall through to the raw literal, which
+    // no float literal survives; only INT/BIGINT truncate).
+    "{\"ti\": 5, \"si\": 300}",
+    "{\"ti\": \" 5 \", \"si\": \" -3 \"}",
+    "{\"ti\": 200}",
+    "{\"si\": 70000}",
+    "{\"ti\": 1.9}",
+    "{\"si\": 1.9}",
+    "{\"ti\": \"1.5\"}",
+    // FLOAT: parsed at its own width (one rounding), parseFloat's envelope for strings.
+    "{\"fl\": 1.5}",
+    "{\"fl\": 0.1}",
+    "{\"fl\": 3}",
+    "{\"fl\": \"1.5f\"}",
+    "{\"fl\": \"Infinity\"}",
+    "{\"fl\": \"1e50\"}",
     "{\"s\": {\"a\": 1, \"b\": [true, null, \"x\\n\"]}}",
     // DATE is the strict ISO_LOCAL_DATE.
     "{\"d\": \"2020-1-2\"}",
@@ -121,6 +164,39 @@ class JsonDecodeParityTest {
     for (String scenario : SQL_MODE_SCENARIOS) {
       assertParity(SCALAR_TYPE, scenario, TimestampFormat.SQL, "", false);
       assertParity(SCALAR_TYPE, scenario, TimestampFormat.SQL, "", true);
+    }
+  }
+
+  @Test
+  void nestedTypesMatchFlinkPerMessage() throws Exception {
+    String[] scenarios = {
+      // The full shape: nested-of-nested rows, array elements with nulls and coercions, maps,
+      // a MULTISET (MAP<element, INT> in Flink's decode), and an array of rows.
+      "{\"r\": {\"a\": 1, \"b\": \"x\", \"c\": {\"d\": 2.5}}, \"arr\": [1, null, 3],"
+          + " \"m\": {\"k1\": 10, \"k2\": 20}, \"ms\": {\"x\": 2, \"y\": 1},"
+          + " \"rows\": [{\"x\": 1}, null, {\"x\": \"2\"}]}",
+      // Scalar coercions apply at every depth; unknown keys are ignored at every depth.
+      "{\"r\": {\"a\": \"7\", \"unknown\": true, \"c\": {\"d\": \"Infinity\", \"junk\": 1}}}",
+      "{\"arr\": [\"2\", 3.9, null]}",
+      "{\"m\": {\"k\": \"5\"}}",
+      "{\"ms\": {\"x\": 1.9}}", // the count column is INT: float tokens truncate
+      // Nulls and absences at every level.
+      "{\"r\": null, \"arr\": null, \"m\": null, \"ms\": null, \"rows\": null}",
+      "{\"r\": {}, \"arr\": [], \"m\": {}, \"ms\": {}, \"rows\": []}",
+      "{\"r\": {\"c\": {}}}",
+      "{}",
+      // Duplicate keys: one entry per key, last value wins (Flink builds a java.util.Map).
+      "{\"m\": {\"k\": 1, \"k\": 2}}",
+      "{\"ms\": {\"x\": 1, \"x\": 3}}",
+      // Wrong-shaped containers fail the strict decode on both engines.
+      "{\"r\": [1]}",
+      "{\"arr\": {\"a\": 1}}",
+      "{\"m\": [1]}",
+      "{\"rows\": [1]}",
+    };
+    for (String scenario : scenarios) {
+      assertParity(NESTED_TYPE, scenario, TimestampFormat.SQL, "", false);
+      assertParity(NESTED_TYPE, scenario, TimestampFormat.SQL, "", true);
     }
   }
 
@@ -224,6 +300,15 @@ class JsonDecodeParityTest {
       "{\"dec\": \"junk\"}",
       // The raw literal survives f64-impossible precision.
       "{\"wide\": 0.123456789012345678901234567890123456}",
+      // BigDecimal grammar edges: an explicit plus, exponents (string- and number-positioned),
+      // HALF_UP exactly at the boundary digit, and a negative tiny value at full scale.
+      "{\"dec\": \"+1.5\"}",
+      "{\"dec\": \"1.5e1\"}",
+      "{\"dec\": 1.5e1}",
+      "{\"dec\": 0.005}",
+      "{\"dec\": \"0.004\"}",
+      "{\"wide\": \"-0.000000000000000001\"}",
+      "{\"dec\": \"1,5\"}",
     };
     for (String scenario : scenarios) {
       assertParity(DECIMAL_TYPE, scenario, TimestampFormat.SQL, "", false);

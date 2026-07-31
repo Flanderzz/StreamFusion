@@ -99,6 +99,66 @@ class CdcDecodeParityTest {
   }
 
   @Test
+  void debeziumNestedRowMatchesFlink() throws Exception {
+    // Debezium/OGG route for nested schemas (unlike Maxwell/Canal, gated flat): the envelope's
+    // images decode through the same nested appenders as plain JSON, RowKinds included.
+    RowType nested =
+        RowType.of(
+            new LogicalType[] {
+              new BigIntType(),
+              RowType.of(
+                  new LogicalType[] {new VarCharType(VarCharType.MAX_LENGTH), new DoubleType()},
+                  new String[] {"name", "score"})
+            },
+            new String[] {"id", "info"});
+    DecodeParityHarness harness = new DecodeParityHarness(nested, true);
+    String[] scenarios = {
+      "{\"before\":null,\"after\":{\"id\":1,\"info\":{\"name\":\"a\",\"score\":1.5}},\"op\":\"c\"}",
+      // A nested update with coercions inside the images; missing sub-fields are null.
+      "{\"before\":{\"id\":1,\"info\":{\"name\":\"a\",\"score\":\"1.5\"}},"
+          + "\"after\":{\"id\":1,\"info\":{\"score\":2.5}},\"op\":\"u\"}",
+      "{\"before\":{\"id\":1,\"info\":null},\"after\":null,\"op\":\"d\"}",
+      "{\"before\":null,\"after\":{\"id\":1,\"info\":{\"name\":\"a\",\"score\":true}},\"op\":\"c\"}",
+    };
+    for (String scenario : scenarios) {
+      for (boolean skipErrors : new boolean[] {false, true}) {
+        harness.assertParity(
+            scenario,
+            () -> {
+              DebeziumJsonDeserializationSchema schema =
+                  new DebeziumJsonDeserializationSchema(
+                      TypeConversions.fromLogicalToDataType(nested),
+                      List.of(),
+                      InternalTypeInfo.of(nested),
+                      false,
+                      skipErrors,
+                      TimestampFormat.SQL);
+              schema.open(null);
+              List<List<Object>> rows = new ArrayList<>();
+              schema.deserialize(
+                  scenario.getBytes(StandardCharsets.UTF_8),
+                  new Collector<>() {
+                    @Override
+                    public void collect(RowData row) {
+                      rows.add(harness.fields(row));
+                    }
+
+                    @Override
+                    public void close() {}
+                  });
+              return rows;
+            },
+            () ->
+                harness.nativeDecode(
+                    new DebeziumJsonFormatProvider(),
+                    scenario,
+                    Map.of("format", "debezium-json"),
+                    skipErrors));
+      }
+    }
+  }
+
+  @Test
   void debeziumNullImagesMatchFlink() throws Exception {
     String[] scenarios = {
       "{\"before\":null,\"after\":{\"id\":1,\"name\":\"a\",\"score\":1.5},\"op\":\"c\"}",

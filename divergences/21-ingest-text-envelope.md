@@ -17,8 +17,9 @@ spellings, and `1.5d` suffixes Java accepts. None of that is configurable from t
 The decoders parse text with our own Flink-exact parsers (`native/src/flink_text.rs`), and the CSV
 decode splits records with `csv-core` configured like Flink's Jackson `CsvSchema`
 (`native/src/csv.rs`) instead of using arrow-csv. The JSON simd-path appenders follow the same
-converters — string-encoded numbers with a trim, floats truncating toward zero into integer
-columns, never-failing booleans, the strict `ISO_LOCAL_DATE`, and the table's
+converters — string-encoded numbers with a trim, floats truncating toward zero into INT/BIGINT
+columns (TINYINT/SMALLINT reject float tokens: their converters fall through to `parseByte` over
+the raw literal), never-failing booleans, the strict `ISO_LOCAL_DATE`, and the table's
 `timestamp-format.standard` (SQL or ISO-8601) — and the JSON `ignore-parse-errors` reproduces
 Flink's per-FIELD granularity at every nesting level (a bad value nulls just that value; only a
 structurally bad document drops the message). DECIMAL-bearing JSON schemas keep the arrow-json

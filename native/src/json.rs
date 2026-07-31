@@ -10,9 +10,10 @@ use crate::*;
 /// tape appending straight into a typed builder. `None` (a field absent from the object) and an
 /// explicit JSON null both append SQL NULL. The per-type semantics replicate Flink's own JSON
 /// converters (`JsonParserToRowDataConverters` — string-encoded numbers parse with a trim, floats
-/// truncate toward zero into integer columns, booleans never fail, temporals follow the table's
-/// `timestamp-format.standard`), pinned by a per-message parity test against Flink's deserializer;
-/// the deliberate residual leniencies live in divergences/21.
+/// truncate toward zero into INT/BIGINT columns (the narrow integers reject float tokens),
+/// booleans never fail, temporals follow the table's `timestamp-format.standard`), pinned by a
+/// per-message parity test against Flink's deserializer; the deliberate residual leniencies live
+/// in divergences/21.
 pub(crate) trait JsonAppend {
     fn append(&mut self, value: Option<simd_json::tape::Value<'_, '_>>);
     /// Appends a JSON object key (always a raw string): scalar targets parse it exactly like a
@@ -34,19 +35,28 @@ pub(crate) struct JsonEnv {
 
 /// Integer columns: number tokens convert through `NumCast` (a float truncates toward zero, out of
 /// range fails — Jackson's `getIntValue` family), strings parse per Java's `parseInt` over trimmed
-/// text.
+/// text. INT and BIGINT accept float tokens (`convertToInt`/`convertToLong` truncate); TINYINT and
+/// SMALLINT do not — Flink's `convertToByte`/`convertToShort` fall through to `parseByte` over the
+/// raw literal, which no float literal survives.
 pub(crate) struct PrimitiveJsonAppender<T: ArrowPrimitiveType> {
     builder: PrimitiveBuilder<T>,
     data_type: DataType,
+    float_tokens: bool,
     env: JsonEnv,
 }
 
 impl<T: ArrowPrimitiveType> PrimitiveJsonAppender<T> {
-    fn new(data_type: &DataType, capacity: usize, env: JsonEnv) -> PrimitiveJsonAppender<T> {
+    fn new(
+        data_type: &DataType,
+        capacity: usize,
+        float_tokens: bool,
+        env: JsonEnv,
+    ) -> PrimitiveJsonAppender<T> {
         PrimitiveJsonAppender {
             builder: PrimitiveBuilder::<T>::with_capacity(capacity)
                 .with_data_type(data_type.clone()),
             data_type: data_type.clone(),
+            float_tokens,
             env,
         }
     }
@@ -75,7 +85,10 @@ where
             }
             simd_json::ValueType::I64 => NumCast::from(v.as_i64().expect("i64 node")),
             simd_json::ValueType::U64 => NumCast::from(v.as_u64().expect("u64 node")),
-            simd_json::ValueType::F64 => NumCast::from(v.as_f64().expect("f64 node")),
+            simd_json::ValueType::F64 if self.float_tokens => {
+                NumCast::from(v.as_f64().expect("f64 node"))
+            }
+            simd_json::ValueType::F64 => None, // no float literal parses as a Java byte/short
             other if self.env.lenient => {
                 let _ = other;
                 None
@@ -763,9 +776,23 @@ impl JsonAppend for MapJsonAppender {
             None => self.nulls.append_null(),
             Some(object) => {
                 self.nulls.append_non_null();
+                // Duplicate keys collapse last-value-first-position: Flink's converter builds a
+                // java.util.Map, so a repeated key holds one entry with the final value.
+                let mut keys: Vec<&str> = Vec::with_capacity(object.len());
+                let mut values: Vec<simd_json::tape::Value> = Vec::with_capacity(object.len());
                 for (key, value) in &object {
+                    let existing = keys.iter().position(|k| *k == key);
+                    match existing {
+                        Some(i) => values[i] = value,
+                        None => {
+                            keys.push(key);
+                            values.push(value);
+                        }
+                    }
+                }
+                for (key, value) in keys.iter().zip(&values) {
                     self.keys.append_key(key);
-                    self.values.append(Some(value));
+                    self.values.append(Some(*value));
                     end = end.checked_add(1).expect("offset overflow decoding MAP");
                 }
             }
@@ -805,16 +832,16 @@ pub(crate) fn make_json_appender(
     use arrow::datatypes::TimeUnit;
     match data_type {
         DataType::Int8 => {
-            Box::new(PrimitiveJsonAppender::<Int8Type>::new(data_type, capacity, env))
+            Box::new(PrimitiveJsonAppender::<Int8Type>::new(data_type, capacity, false, env))
         }
         DataType::Int16 => {
-            Box::new(PrimitiveJsonAppender::<Int16Type>::new(data_type, capacity, env))
+            Box::new(PrimitiveJsonAppender::<Int16Type>::new(data_type, capacity, false, env))
         }
         DataType::Int32 => {
-            Box::new(PrimitiveJsonAppender::<Int32Type>::new(data_type, capacity, env))
+            Box::new(PrimitiveJsonAppender::<Int32Type>::new(data_type, capacity, true, env))
         }
         DataType::Int64 => {
-            Box::new(PrimitiveJsonAppender::<Int64Type>::new(data_type, capacity, env))
+            Box::new(PrimitiveJsonAppender::<Int64Type>::new(data_type, capacity, true, env))
         }
         DataType::Float32 => {
             Box::new(FloatJsonAppender::<Float32Type>::new(data_type, capacity, env))

@@ -877,7 +877,7 @@ fn json_decode_covers_boundary_scalar_types() {
                     "f64": 2.5, "flag": true, "day": "2026-07-01", "ts": "2026-07-01 12:00:00.123"}"#,
         ),
         Some(
-            br#"{"i8": 1.9, "i16": -2, "i32": 3, "i64": "42", "f32": 2, "f64": "Infinity",
+            br#"{"i8": 1, "i16": -2, "i32": 3.9, "i64": "42", "f32": 2, "f64": "Infinity",
                     "flag": "TRUE", "day": "1970-01-02", "ts": "2026-07-01 12:00:00.123Z"}"#,
         ),
         Some(br#"{"flag": 1}"#),
@@ -885,10 +885,12 @@ fn json_decode_covers_boundary_scalar_types() {
     let out = JsonDecoder::new(schema, crate::json::JsonEnv::default()).decode(&batch);
     assert_eq!(out.num_rows(), 3);
     let i8s = out.column(0).as_any().downcast_ref::<Int8Array>().unwrap();
-    assert_eq!((i8s.value(0), i8s.value(1)), (-3, 1)); // 1.9 truncates toward zero
+    assert_eq!((i8s.value(0), i8s.value(1)), (-3, 1));
     let i16s = out.column(1).as_any().downcast_ref::<Int16Array>().unwrap();
     assert_eq!((i16s.value(0), i16s.value(1)), (300, -2));
     let i32s = out.column(2).as_any().downcast_ref::<Int32Array>().unwrap();
+    // A float token truncates toward zero under INT/BIGINT (convertToInt); TINYINT/SMALLINT
+    // reject float tokens outright (convertToByte falls through to parseByte) — parity-pinned.
     assert_eq!((i32s.value(0), i32s.value(1)), (70000, 3));
     assert_eq!(values(&out, 3), vec![5000000000, 42, 0]);
     assert!(out.column(3).is_null(2));
