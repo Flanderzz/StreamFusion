@@ -32,6 +32,14 @@ public final class NativeAvroFormat {
       long schemaArrayAddress,
       long schemaAddress);
 
+  /**
+   * The {@code debezium-avro-confluent} decoder: a registry-driven envelope decode against
+   * {@code readerSchema} (the Debezium envelope derivation), fanned out to changelog rows on the
+   * exported physical boundary schema plus {@code $row_kind$}.
+   */
+  public static native long createDebeziumDecoder(
+      String readerSchema, long schemaArrayAddress, long schemaAddress);
+
   public static native void registerWriterSchema(long handle, int schemaId, String schema);
 
   public static native void decodeInto(

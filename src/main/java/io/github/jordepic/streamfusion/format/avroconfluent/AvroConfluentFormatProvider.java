@@ -3,16 +3,8 @@ package io.github.jordepic.streamfusion.format.avroconfluent;
 import io.github.jordepic.streamfusion.format.NativeFormatContext;
 import io.github.jordepic.streamfusion.format.NativeFormatProvider;
 import io.github.jordepic.streamfusion.format.NativeMessageDecoderFactory;
-import io.github.jordepic.streamfusion.format.NativeSchemaMessageDecoder;
 import io.github.jordepic.streamfusion.format.avro.AvroDecodeGate;
-import io.github.jordepic.streamfusion.format.avro.NativeAvroFormat;
 import io.github.jordepic.streamfusion.kafka.ConfluentSchemaRegistry;
-import java.io.IOException;
-import java.io.UncheckedIOException;
-import java.util.HashSet;
-import java.util.Set;
-import org.apache.arrow.vector.VarBinaryVector;
-import org.apache.avro.Schema;
 import org.apache.flink.formats.avro.typeutils.AvroSchemaConverter;
 
 /** Native provider for Flink's {@code avro-confluent} format. */
@@ -46,63 +38,6 @@ public final class AvroConfluentFormatProvider implements NativeFormatProvider {
   public NativeMessageDecoderFactory createDecoder(NativeFormatContext context) {
     ConfluentSchemaRegistry registry = ConfluentSchemaRegistry.fromOptions(context.options());
     String readerSchema = AvroSchemaConverter.convertToSchema(context.outputType().copy(false)).toString();
-    return () -> new Decoder(registry, readerSchema);
-  }
-
-  private static final class Decoder extends NativeSchemaMessageDecoder {
-    private final ConfluentSchemaRegistry registry;
-    private final String readerSchemaText;
-    private Set<Integer> registeredSchemaIds;
-    private Schema readerSchema;
-
-    private Decoder(ConfluentSchemaRegistry registry, String readerSchemaText) {
-      this.registry = registry;
-      this.readerSchemaText = readerSchemaText;
-    }
-
-    @Override
-    protected long createHandle(long schemaArrayAddress, long schemaAddress) {
-      registeredSchemaIds = new HashSet<>();
-      readerSchema = new Schema.Parser().parse(readerSchemaText);
-      return NativeAvroFormat.createDecoder(
-          true, "", readerSchemaText, schemaArrayAddress, schemaAddress);
-    }
-
-    @Override
-    public void beforeDecode(VarBinaryVector bodies, int count) {
-      for (int i = 0; i < count; i++) {
-        byte[] message = bodies.get(i);
-        if (message == null || message.length < 5 || message[0] != 0) {
-          continue;
-        }
-        int id =
-            ((message[1] & 0xff) << 24)
-                | ((message[2] & 0xff) << 16)
-                | ((message[3] & 0xff) << 8)
-                | (message[4] & 0xff);
-        if (registeredSchemaIds.add(id)) {
-          try {
-            Schema writer = registry.fetchWriterSchema(id);
-            NativeAvroFormat.registerWriterSchema(
-                handle, id, ConfluentSchemaRegistry.aliasedToReader(writer, readerSchema).toString());
-          } catch (IOException e) {
-            throw new UncheckedIOException(e);
-          }
-        }
-      }
-    }
-
-    @Override
-    public void decodeInto(long inArray, long inSchema, long outArray, long outSchema) {
-      NativeAvroFormat.decodeInto(handle, inArray, inSchema, outArray, outSchema);
-    }
-
-    @Override
-    public void close() {
-      if (handle != 0) {
-        NativeAvroFormat.closeDecoder(handle);
-        handle = 0;
-      }
-    }
+    return () -> new RegistryAvroDecoder(registry, readerSchema, false);
   }
 }

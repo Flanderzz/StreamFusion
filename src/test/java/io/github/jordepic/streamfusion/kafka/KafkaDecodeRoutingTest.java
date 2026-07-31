@@ -107,6 +107,35 @@ class KafkaDecodeRoutingTest {
   }
 
   @Test
+  void debeziumAvroConfluentRoutes() {
+    StreamTableEnvironment tEnv = env();
+    tEnv.executeSql(
+        table("id BIGINT, name STRING", "debezium-avro-confluent")
+            .replace(
+                "'debezium-avro-confluent')",
+                "'debezium-avro-confluent', 'debezium-avro-confluent.url' = 'http://localhost:8081')"));
+    String plan = NativePlanner.explain(tEnv, "SELECT id, name FROM t");
+    assertTrue(
+        plan.contains("NativeKafkaDecode"),
+        "a plain-URL debezium-avro-confluent table should decode natively:\n" + plan);
+  }
+
+  @Test
+  void debeziumAvroConfluentRegistryAuthKeepsTheScanOnFlink() {
+    // Registry auth/SSL/client-properties options aren't translated to the plain-HTTP native
+    // fetch — the same fallback set as avro-confluent.
+    StreamTableEnvironment tEnv = env();
+    tEnv.executeSql(
+        table("id BIGINT, name STRING", "debezium-avro-confluent")
+            .replace(
+                "'debezium-avro-confluent')",
+                "'debezium-avro-confluent', 'debezium-avro-confluent.url' = 'http://localhost:8081',"
+                    + " 'debezium-avro-confluent.basic-auth.user-info' = 'user:pw')"));
+    assertStaysOnFlink(tEnv, "SELECT id, name FROM t");
+  }
+
+
+  @Test
   void csvComplexColumnKeepsTheScanOnFlink() {
     StreamTableEnvironment tEnv = env();
     tEnv.executeSql(table("id BIGINT, nums ARRAY<BIGINT>", "csv"));

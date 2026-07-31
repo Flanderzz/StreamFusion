@@ -42,8 +42,9 @@ import org.testcontainers.utility.DockerImageName;
  * <p>The registry is a local HTTP server implementing the one read endpoint both sides use
  * ({@code GET /schemas/ids/<id>}); Flink's baseline talks to it through the real Confluent client. The
  * topic carries two writer-schema versions with producer-style record names ({@code com.example.*} —
- * exercising the alias patch that reproduces Avro Java's lenient name check), reordered fields, an
- * extra field the reader drops, and a mid-stream schema switch. Opt-in via {@code SF_BENCHMARK=true}.
+ * exercising the reader-name alignment that reproduces Avro Java's lenient name check), reordered
+ * fields, an extra field the reader drops, and a mid-stream schema switch. Opt-in via
+ * {@code SF_BENCHMARK=true}.
  */
 @EnabledIfEnvironmentVariable(named = "SF_BENCHMARK", matches = "true")
 class NativeConfluentAvroDecodeSqlHarnessTest {

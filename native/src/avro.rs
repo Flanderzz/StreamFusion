@@ -20,6 +20,10 @@ pub(crate) struct AvroDecoder {
     /// Bare datums (Flink's `avro`): the one writer schema sits at synthetic id 0 and each message
     /// gets the 5-byte id-0 Confluent header prepended so the framed decoder applies.
     bare: bool,
+    /// Whether a zero-length body is a tombstone to skip. Debezium's deserializer returns on an
+    /// empty message like it does on null; the plain formats instead fail it (Flink hits EOF
+    /// reading the frame or datum), so only the CDC composition sets this.
+    skip_empty: bool,
 }
 
 /// An arrow-avro writer store keyed by integer id (the Confluent / id-framing layout). An empty
@@ -42,7 +46,13 @@ impl AvroDecoder {
         reader: Option<AvroSchema>,
         target: SchemaRef,
     ) -> AvroDecoder {
-        AvroDecoder { store: store(avro_schema, schema_id), reader, target, bare: false }
+        AvroDecoder {
+            store: store(avro_schema, schema_id),
+            reader,
+            target,
+            bare: false,
+            skip_empty: false,
+        }
     }
 
     pub(crate) fn bare(
@@ -50,7 +60,13 @@ impl AvroDecoder {
         reader: Option<AvroSchema>,
         target: SchemaRef,
     ) -> AvroDecoder {
-        AvroDecoder { store: store(avro_schema, 0), reader, target, bare: true }
+        AvroDecoder { store: store(avro_schema, 0), reader, target, bare: true, skip_empty: false }
+    }
+
+    /// Treats zero-length bodies as tombstones (skipped) — the Debezium envelope contract.
+    pub(crate) fn skipping_empty_bodies(mut self) -> AvroDecoder {
+        self.skip_empty = true;
+        self
     }
 
     /// Registers a writer schema under a Confluent schema id, so subsequent decodes resolve
@@ -94,6 +110,9 @@ impl AvroDecoder {
                 continue;
             }
             if column.value(i).is_empty() {
+                if self.skip_empty {
+                    continue;
+                }
                 // Flink's plain avro/avro-confluent deserializers hit EOF on an empty body and
                 // fail the job; silently dropping it would diverge.
                 panic!("avro decode failed: empty message body");

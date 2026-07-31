@@ -8,18 +8,21 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
-import java.util.HashSet;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import org.apache.avro.Schema;
 
 /**
- * The Confluent schema registry's read side, as the native {@code avro-confluent} decode needs it:
- * fetch a writer schema by the id each message is framed with ({@code GET /schemas/ids/<id>}), exactly
- * the lookup Flink's own deserializer makes through the registry client. Deliberately a plain HTTP
- * client rather than a dependency on the Confluent client library — the only call used is this one
- * GET, and staying dependency-free keeps the build self-contained. Registry auth/SSL options are not
- * translated, so the planner routes only tables without them (they fall back to Flink).
+ * The Confluent schema registry's read side, as the native registry-Avro decodes ({@code
+ * avro-confluent} and {@code debezium-avro-confluent}) need it: fetch a writer schema by the id each
+ * message is framed with ({@code GET /schemas/ids/<id>}), exactly the lookup Flink's own deserializer
+ * makes through the registry client. Deliberately a plain HTTP client rather than a dependency on the
+ * Confluent client library — the only call used is this one GET, and staying dependency-free keeps
+ * the build self-contained. Registry auth/SSL options are not translated, so the planner routes only
+ * tables without them (they fall back to Flink).
  *
  * <p>Serializable (the URL list travels in the operator to distributed task managers); the HTTP client
  * is created lazily on first fetch.
@@ -28,7 +31,7 @@ public class ConfluentSchemaRegistry implements Serializable {
 
   private static final long serialVersionUID = 1L;
 
-  /** {@code avro-confluent} options with no native translation: any of them present → fall back. */
+  /** Registry-format options with no native translation: any of them present → fall back. */
   private static final Set<String> UNSUPPORTED_OPTIONS =
       Set.of(
           "schema",
@@ -58,8 +61,12 @@ public class ConfluentSchemaRegistry implements Serializable {
    */
   public static ConfluentSchemaRegistry fromOptions(Map<String, String> options) {
     // Format options are prefixed with the format identifier — plus "value." when the format was
-    // declared as `value.format`.
-    String prefix = (options.containsKey("value.format") ? "value." : "") + "avro-confluent.";
+    // declared as `value.format`. Both registry formats share the same option set.
+    String identifier = options.getOrDefault("value.format", options.get("format"));
+    if (identifier == null) {
+      return null;
+    }
+    String prefix = (options.containsKey("value.format") ? "value." : "") + identifier + ".";
     String url = options.get(prefix + "url");
     if (url == null) {
       return null;
@@ -115,43 +122,88 @@ public class ConfluentSchemaRegistry implements Serializable {
   }
 
   /**
-   * Adds each reader record's full name as an alias on the corresponding writer record, walking the
-   * two schemas in tandem (fields matched by name, null-unions unwrapped, arrays/maps descended).
+   * Rebuilds the writer schema onto the reader's record names, walking the two schemas in tandem
+   * (fields matched by name, null-unions unwrapped, arrays/maps descended): every writer record
+   * standing where the reader has one is recreated under the reader's full name, keeping the
+   * writer's exact field layout (the wire contract) with writer-only subtrees carried verbatim.
    *
    * <p>Why: Avro Java deliberately skips the spec's record-name check during schema resolution (its
    * {@code Resolver} carries the check commented out for compatibility), so Flink decodes a topic
    * whose writer records are named {@code com.example.User} against a reader derived from the table
-   * type (named {@code org.apache.flink.avro.generated.record}) without complaint. arrow-avro enforces
-   * the check — but accepts a match through aliases, so patching the reader's names onto the writer as
-   * aliases reproduces Java's leniency without touching the writer's real names (self-references in a
-   * recursive schema stay valid). Mutates and returns {@code writer}, which the caller parsed fresh.
+   * type (named {@code org.apache.flink.avro.generated.record}) without complaint. arrow-avro
+   * enforces the check, and it also short-circuits a writer named-type <em>reference</em> to a
+   * positional read of the reader's shape — Debezium's envelope references its one {@code Value}
+   * record for both {@code before} and {@code after}, which would misread any payload whose layout
+   * differs from the reader's. Renaming solves both at once: names match without alias quirks
+   * (arrow-avro compares raw namespace attributes, so a nested alias never matches an
+   * inherited-namespace reader record), and a record referenced from several reader-aligned
+   * positions becomes one copy per position (reader names are position-derived, so the copies get
+   * distinct names and each serializes inline for full field-by-field resolution). A writer record
+   * revisited under the same reader name reuses its copy, so self-references stay valid.
    */
-  public static Schema aliasedToReader(Schema writer, Schema reader) {
-    addReaderAliases(writer, reader, new HashSet<>());
-    return writer;
+  public static Schema alignedToReader(Schema writer, Schema reader) {
+    return align(writer, reader, new HashMap<>());
   }
 
-  private static void addReaderAliases(Schema writer, Schema reader, Set<String> visited) {
-    Schema w = unwrapNullUnion(writer);
+  private static Schema align(Schema writer, Schema reader, Map<String, Schema> copies) {
     Schema r = unwrapNullUnion(reader);
-    if (w.getType() == Schema.Type.RECORD && r.getType() == Schema.Type.RECORD) {
-      if (!visited.add(w.getFullName())) {
-        return;
-      }
-      if (!w.getFullName().equals(r.getFullName())) {
-        w.addAlias(r.getName(), r.getNamespace());
-      }
-      for (Schema.Field readerField : r.getFields()) {
-        Schema.Field writerField = w.getField(readerField.name());
-        if (writerField != null) {
-          addReaderAliases(writerField.schema(), readerField.schema(), visited);
+    if (writer.getType() == Schema.Type.UNION) {
+      List<Schema> branches = new ArrayList<>(writer.getTypes().size());
+      boolean aligned = false;
+      for (Schema branch : writer.getTypes()) {
+        // Align the first non-null branch (the nullability wrapper's payload); a rare multi-branch
+        // union keeps its remaining branches verbatim, matching the old per-branch leniency.
+        if (branch.getType() != Schema.Type.NULL && !aligned) {
+          aligned = true;
+          branches.add(align(branch, r, copies));
+        } else {
+          branches.add(branch);
         }
       }
-    } else if (w.getType() == Schema.Type.ARRAY && r.getType() == Schema.Type.ARRAY) {
-      addReaderAliases(w.getElementType(), r.getElementType(), visited);
-    } else if (w.getType() == Schema.Type.MAP && r.getType() == Schema.Type.MAP) {
-      addReaderAliases(w.getValueType(), r.getValueType(), visited);
+      return Schema.createUnion(branches);
     }
+    switch (writer.getType()) {
+      case RECORD:
+        if (r.getType() != Schema.Type.RECORD) {
+          return writer; // a shape mismatch fails resolution either way, exactly like Flink
+        }
+        return alignRecord(writer, r, copies);
+      case ARRAY:
+        return r.getType() == Schema.Type.ARRAY
+            ? Schema.createArray(align(writer.getElementType(), r.getElementType(), copies))
+            : writer;
+      case MAP:
+        return r.getType() == Schema.Type.MAP
+            ? Schema.createMap(align(writer.getValueType(), r.getValueType(), copies))
+            : writer;
+      default:
+        return writer;
+    }
+  }
+
+  private static Schema alignRecord(Schema writer, Schema reader, Map<String, Schema> copies) {
+    String key = writer.getFullName() + "->" + reader.getFullName();
+    Schema existing = copies.get(key);
+    if (existing != null) {
+      return existing;
+    }
+    Schema copy =
+        Schema.createRecord(
+            reader.getName(), writer.getDoc(), reader.getNamespace(), writer.isError());
+    copies.put(key, copy);
+    List<Schema.Field> fields = new ArrayList<>(writer.getFields().size());
+    for (Schema.Field writerField : writer.getFields()) {
+      Schema.Field readerField = reader.getField(writerField.name());
+      Schema fieldSchema =
+          readerField == null
+              ? writerField.schema() // writer-only: resolution skips it, layout kept verbatim
+              : align(writerField.schema(), readerField.schema(), copies);
+      fields.add(
+          new Schema.Field(
+              writerField.name(), fieldSchema, writerField.doc(), writerField.defaultVal()));
+    }
+    copy.setFields(fields);
+    return copy;
   }
 
   /** The non-null branch of a nullable union, or the schema itself — field nullability wrapping. */

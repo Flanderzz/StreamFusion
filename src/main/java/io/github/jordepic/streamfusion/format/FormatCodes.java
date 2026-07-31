@@ -25,19 +25,22 @@ public final class FormatCodes {
   public static final int OGG_JSON = 7;
   public static final int MAXWELL_JSON = 8;
   public static final int CANAL_JSON = 9;
+  /** Debezium envelope with Confluent-framed Avro bodies; writer schemas fetched by frame id. */
+  public static final int DEBEZIUM_AVRO_CONFLUENT = 10;
 
   private static final Map<String, Integer> BY_IDENTIFIER =
-      Map.of(
-          "json", JSON,
-          "avro-confluent", AVRO_CONFLUENT,
-          "csv", CSV,
-          "raw", RAW,
-          "avro", AVRO,
-          "protobuf", PROTOBUF,
-          "debezium-json", DEBEZIUM_JSON,
-          "ogg-json", OGG_JSON,
-          "maxwell-json", MAXWELL_JSON,
-          "canal-json", CANAL_JSON);
+      Map.ofEntries(
+          Map.entry("json", JSON),
+          Map.entry("avro-confluent", AVRO_CONFLUENT),
+          Map.entry("csv", CSV),
+          Map.entry("raw", RAW),
+          Map.entry("avro", AVRO),
+          Map.entry("protobuf", PROTOBUF),
+          Map.entry("debezium-json", DEBEZIUM_JSON),
+          Map.entry("ogg-json", OGG_JSON),
+          Map.entry("maxwell-json", MAXWELL_JSON),
+          Map.entry("canal-json", CANAL_JSON),
+          Map.entry("debezium-avro-confluent", DEBEZIUM_AVRO_CONFLUENT));
 
   /** The code for a Flink format identifier, or {@link #UNSUPPORTED}. */
   public static int forIdentifier(String identifier) {
@@ -51,12 +54,12 @@ public final class FormatCodes {
 
   /** Whether the code is a CDC changelog envelope (a message fans out to changelog rows). */
   public static boolean isCdc(int code) {
-    return code >= DEBEZIUM_JSON && code <= CANAL_JSON;
+    return code >= DEBEZIUM_JSON && code <= DEBEZIUM_AVRO_CONFLUENT;
   }
 
   /** Whether the identifier decodes JSON text: plain {@code json} or a JSON CDC envelope. */
   public static boolean isJsonFamily(String identifier) {
     int code = forIdentifier(identifier);
-    return code == JSON || isCdc(code);
+    return code == JSON || (code >= DEBEZIUM_JSON && code <= CANAL_JSON);
   }
 }

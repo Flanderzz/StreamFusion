@@ -7,4 +7,5 @@ io.github.jordepic.streamfusion.format.csv.CsvFormatProvider
 io.github.jordepic.streamfusion.format.raw.RawFormatProvider
 io.github.jordepic.streamfusion.format.avro.AvroFormatProvider
 io.github.jordepic.streamfusion.format.avroconfluent.AvroConfluentFormatProvider
+io.github.jordepic.streamfusion.format.avroconfluent.DebeziumAvroConfluentFormatProvider
 io.github.jordepic.streamfusion.format.protobuf.ProtobufFormatProvider

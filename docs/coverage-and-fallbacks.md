@@ -581,7 +581,8 @@ shapes persist their per-key deadlines in a dedicated state table).
     non-PEM security material, SASL/GSSAPI (Kerberos) or a SASL mechanism outside
     PLAIN/SCRAM-SHA-256/SCRAM-SHA-512, or a config kafka-clients itself rejects.
 - **Kafka** — missing `streamfusion-kafka` or the matching `streamfusion-*` format JAR; a value format
-  outside JSON/CSV/raw/bare-Avro/`avro-confluent`/protobuf; a `key.format`;
+  outside JSON/CSV/raw/bare-Avro/`avro-confluent`/protobuf and the CDC formats (the four JSON
+  dialects and `debezium-avro-confluent` — see the CDC entry); a `key.format`;
   a **metadata column** (`ts TIMESTAMP_LTZ(3) METADATA FROM 'timestamp'` and kin — the connector
   fills it, so a value decode would emit it silently NULL; this holds on every decoded path,
   insert-only and CDC alike, and a declared-but-unused metadata column also declines — Flink keeps
@@ -722,11 +723,24 @@ shapes persist their per-key deadlines in a dedicated state table).
   explicit null is kept, an absent key copies the post-image, and Canal's presence spans the whole
   `old` array; envelope pinned by `CdcDecodeParityTest`). `ignore-parse-errors` is native with
   Flink's exact granularity: a structurally bad message drops whole, a bad value inside an image
-  nulls just that field, and a failure mid-fan-out keeps the rows emitted before it. Still falling
+  nulls just that field, and a failure mid-fan-out keeps the rows emitted before it.
+  `debezium-avro-confluent` (the Debezium envelope with Confluent-framed Avro bodies) also routes
+  natively (`streamfusion-avro-confluent-registry`): the reader schema is derived from the envelope
+  row type exactly as Flink derives it, each frame's writer schema is fetched from the registry by
+  id (following mid-topic schema evolution) and rebuilt onto the reader's record names — one record
+  copy per image position, since Debezium's schema references its single `Value` record for both
+  `before` and `after` — and the envelope fans out to changelog rows with the image payloads
+  reconciled like plain `avro-confluent` columns (parity-pinned against Flink's own deserializer —
+  `DebeziumAvroDecodeParityTest`). Null and empty messages are tombstones, skipped; corrupt
+  messages (unknown op, a null pre-image on update/delete) fail the job as Flink does — the format
+  defines no `ignore-parse-errors`. It shares `avro-confluent`'s fallback causes: the registry
+  options beyond a plain `url` (an explicit `schema`, auth, SSL, client `properties`) and the
+  avro type gates (run over the envelope, so TIMESTAMP_LTZ / TIME(0) / BINARY(n) and the other
+  legacy-mapping exclusions apply to the physical columns). Still falling
   back: the `schema-include` envelope wrapper; metadata/computed columns; **nested Maxwell/Canal
   columns** (findValue's recursive search could false-match a column name inside another field —
-  flat scalar schemas only, up to 128 columns); Canal's `database.include`/`table.include` regex
-  filters; and `debezium-avro-confluent` (Avro-bodied envelope).
+  flat scalar schemas only, up to 128 columns); and Canal's `database.include`/`table.include`
+  regex filters.
 - **Fluss** — the native source (fluss-rs' `RecordBatchLogScanner`) replaces a Fluss **log-table**
   scan behind a two-level gate: the `flussSource` operator switch
   (`-Dstreamfusion.operator.flussSource.enabled`, default on) **and** the `streamfusion-fluss` JAR

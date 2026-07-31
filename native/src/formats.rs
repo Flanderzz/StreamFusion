@@ -15,6 +15,7 @@ pub(crate) const FORMAT_DEBEZIUM_JSON: i32 = 6;
 pub(crate) const FORMAT_OGG_JSON: i32 = 7;
 pub(crate) const FORMAT_MAXWELL_JSON: i32 = 8;
 pub(crate) const FORMAT_CANAL_JSON: i32 = 9;
+pub(crate) const FORMAT_DEBEZIUM_AVRO_CONFLUENT: i32 = 10;
 
 /// Decodes a binary "body" batch (one bare protobuf message per row) into typed Arrow, matching Flink's
 /// `protobuf` format: each message is the *whole* serialized protobuf (no Confluent framing), parsed
@@ -837,38 +838,121 @@ impl CdcJsonDecoder {
             }
         }
 
-        // Gather each physical column, choosing the pre/post-image child per output row. The source is
-        // the same across columns except for `Coalesce`, which picks per field by the key's presence
-        // in the message's `old` — so the gather index is built per field.
-        const BEFORE: usize = 0;
-        const AFTER: usize = 1;
-        let mut columns: Vec<ArrayRef> = Vec::with_capacity(self.arity + 1);
-        for field in 0..self.arity {
-            let before_child = before.column(field);
-            let after_child = after.column(field);
-            let indices: Vec<(usize, usize)> = out_rows
-                .iter()
-                .map(|&(_, before_idx, after_idx, source)| match source {
-                    RowSource::Before => (BEFORE, before_idx),
-                    RowSource::After => (AFTER, after_idx),
-                    RowSource::Coalesce(present) => {
-                        if present & (1u128 << field) != 0 {
-                            (BEFORE, before_idx)
-                        } else {
-                            (AFTER, after_idx)
-                        }
+        gather_cdc_batch(&out_rows, before, after, self.arity, &self.output)
+    }
+}
+
+/// Builds the fanned-out changelog batch: each physical column gathered from the pre/post-image
+/// struct children per output row, plus the trailing `$row_kind$` bytes. The source is the same
+/// across columns except for `Coalesce`, which picks per field by the key's presence in the
+/// message's `old` — so the gather index is built per field.
+pub(crate) fn gather_cdc_batch(
+    out_rows: &[(i8, usize, usize, RowSource)],
+    before: &StructArray,
+    after: &StructArray,
+    arity: usize,
+    output: &SchemaRef,
+) -> RecordBatch {
+    const BEFORE: usize = 0;
+    const AFTER: usize = 1;
+    let mut columns: Vec<ArrayRef> = Vec::with_capacity(arity + 1);
+    for field in 0..arity {
+        let before_child = before.column(field);
+        let after_child = after.column(field);
+        let indices: Vec<(usize, usize)> = out_rows
+            .iter()
+            .map(|&(_, before_idx, after_idx, source)| match source {
+                RowSource::Before => (BEFORE, before_idx),
+                RowSource::After => (AFTER, after_idx),
+                RowSource::Coalesce(present) => {
+                    if present & (1u128 << field) != 0 {
+                        (BEFORE, before_idx)
+                    } else {
+                        (AFTER, after_idx)
                     }
-                })
-                .collect();
-            let sources = [before_child.as_ref(), after_child.as_ref()];
-            columns.push(
-                arrow::compute::interleave(&sources, &indices).expect("failed to gather CDC column"),
-            );
+                }
+            })
+            .collect();
+        let sources = [before_child.as_ref(), after_child.as_ref()];
+        columns.push(
+            arrow::compute::interleave(&sources, &indices).expect("failed to gather CDC column"),
+        );
+    }
+    columns.push(Arc::new(Int8Array::from(
+        out_rows.iter().map(|&(kind, _, _, _)| kind).collect::<Vec<i8>>(),
+    )));
+    RecordBatch::try_new(output.clone(), columns).expect("failed to build CDC batch")
+}
+
+/// Decodes Flink's `debezium-avro-confluent` format: the same `{before, after, op}` Debezium
+/// envelope as the JSON dialect, but with Confluent-framed Avro bodies. The composition mirrors
+/// Flink's own deserializer — an ordinary registry-Avro decode of the envelope row type (the
+/// physical row nullable as both images, plus the op string), then the Debezium op fan-out — so
+/// the envelope decode reuses [`crate::avro::AvroDecoder`] whole (id-keyed writer store, schema
+/// evolution mid-batch, reconciliation of the image payloads onto the boundary column types) and
+/// the fan-out reuses the JSON dialects' emit/gather machinery. A null or empty message is a
+/// tombstone, skipped inside the Avro decode; the format has no `ignore-parse-errors`, so every
+/// corruption (unknown op, null pre-image on update/delete) fails the job exactly where Flink's
+/// deserializer throws.
+pub(crate) struct AvroCdcDecoder {
+    /// Decodes and reconciles the envelope: `before`/`after` as nullable structs of the (nullable)
+    /// physical columns, `op` as Utf8.
+    envelope: crate::avro::AvroDecoder,
+    /// Output schema: the physical columns (nullable) + trailing `$row_kind$` Int8.
+    output: SchemaRef,
+    arity: usize,
+}
+
+impl AvroCdcDecoder {
+    fn new(physical: SchemaRef, reader: Option<arrow_avro::schema::AvroSchema>) -> AvroCdcDecoder {
+        let nullable: Fields = physical
+            .fields()
+            .iter()
+            .map(|f| Arc::new(f.as_ref().clone().with_nullable(true)))
+            .collect();
+        let image = DataType::Struct(nullable.clone());
+        let envelope_target = Arc::new(Schema::new(vec![
+            Field::new("before", image.clone(), true),
+            Field::new("after", image, true),
+            Field::new("op", DataType::Utf8, true),
+        ]));
+        let mut output_fields: Vec<FieldRef> = nullable.iter().cloned().collect();
+        output_fields.push(Arc::new(Field::new(ROW_KIND_COLUMN, DataType::Int8, false)));
+        AvroCdcDecoder {
+            envelope: crate::avro::AvroDecoder::confluent("", 0, reader, envelope_target)
+                .skipping_empty_bodies(),
+            output: Arc::new(Schema::new(output_fields)),
+            arity: nullable.len(),
         }
-        columns.push(Arc::new(Int8Array::from(
-            out_rows.iter().map(|&(kind, _, _, _)| kind).collect::<Vec<i8>>(),
-        )));
-        RecordBatch::try_new(self.output.clone(), columns).expect("failed to build CDC batch")
+    }
+
+    fn register_writer_schema(&mut self, id: u32, schema: &str) {
+        self.envelope.register_writer_schema(id, schema);
+    }
+
+    fn decode(&self, bodies: &RecordBatch) -> RecordBatch {
+        let envelope = self.envelope.decode(bodies);
+        let before =
+            envelope.column(0).as_any().downcast_ref::<StructArray>().expect("pre-image struct");
+        let after =
+            envelope.column(1).as_any().downcast_ref::<StructArray>().expect("post-image struct");
+        let ops = envelope.column(2).as_any().downcast_ref::<StringArray>().expect("op string");
+        let mut out_rows: Vec<(i8, usize, usize, RowSource)> =
+            Vec::with_capacity(envelope.num_rows());
+        for row in 0..envelope.num_rows() {
+            let op = if ops.is_valid(row) {
+                ops.value(row)
+            } else {
+                panic!("CDC message has no operation field");
+            };
+            let action = match CdcDialect::Debezium.classify(op) {
+                CdcOp::Change(action) => action,
+                CdcOp::Skip => continue,
+                CdcOp::Unknown => panic!("unknown CDC operation \"{op}\""),
+            };
+            cdc_emit(&action, row, row, CdcShape::BeforeAfter, 0, before, after, &mut out_rows);
+        }
+        gather_cdc_batch(&out_rows, before, after, self.arity, &self.output)
     }
 }
 
@@ -945,6 +1029,8 @@ pub(crate) enum FormatDecoder {
     Protobuf(ProtobufDecoder),
     /// CDC changelog JSON (Debezium/OGG): envelope → physical rows + `$row_kind$`, fanning out updates.
     Cdc(CdcJsonDecoder),
+    /// Debezium envelope with Confluent-framed Avro bodies — see `AvroCdcDecoder`.
+    AvroCdc(AvroCdcDecoder),
 }
 
 impl FormatDecoder {
@@ -956,6 +1042,7 @@ impl FormatDecoder {
             FormatDecoder::Avro(decoder) => decoder.decode(body),
             FormatDecoder::Protobuf(decoder) => decoder.decode(body),
             FormatDecoder::Cdc(decoder) => decoder.decode(body),
+            FormatDecoder::AvroCdc(decoder) => decoder.decode(body),
         }
     }
 
@@ -1055,6 +1142,11 @@ impl MessageDecoder {
                 cdc_env,
                 skip_errors,
             )),
+            // No skip mode: the format defines no ignore-parse-errors, so a corrupt message always
+            // fails the job (Flink's own throw-and-wrap behavior).
+            FORMAT_DEBEZIUM_AVRO_CONFLUENT => {
+                FormatDecoder::AvroCdc(AvroCdcDecoder::new(output_schema, reader))
+            }
             _ => {
                 return MessageDecoder {
                     decoder: FormatDecoder::Json(JsonDecoder::new(
@@ -1109,6 +1201,7 @@ impl MessageDecoder {
     pub(crate) fn register_writer_schema(&mut self, id: u32, schema: &str) {
         match &mut self.decoder {
             FormatDecoder::Avro(decoder) => decoder.register_writer_schema(id, schema),
+            FormatDecoder::AvroCdc(decoder) => decoder.register_writer_schema(id, schema),
             _ => panic!("registerAvroSchema on a non-Confluent-Avro decoder"),
         }
     }
@@ -1479,6 +1572,28 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_format_avro_NativeAv
         schema_array_address,
         schema_address,
         writer_schema,
+        reader_schema,
+        0,
+        0,
+        empty_options,
+    )
+}
+
+#[cfg(feature = "avro")]
+#[no_mangle]
+pub extern "system" fn Java_io_github_jordepic_streamfusion_format_avro_NativeAvroFormat_createDebeziumDecoder<'local>(
+    mut env: JNIEnv<'local>, class: JClass<'local>, reader_schema: JString<'local>,
+    schema_array_address: jlong, schema_address: jlong,
+) -> jlong {
+    let empty_writer = env.new_string("").expect("empty writer schema");
+    let empty_options = env.new_string("").expect("empty format options");
+    Java_io_github_jordepic_streamfusion_Native_createDecoder(
+        env,
+        class,
+        FORMAT_DEBEZIUM_AVRO_CONFLUENT,
+        schema_array_address,
+        schema_address,
+        empty_writer,
         reader_schema,
         0,
         0,

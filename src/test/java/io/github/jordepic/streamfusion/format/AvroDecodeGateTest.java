@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.github.jordepic.streamfusion.format.avro.AvroFormatProvider;
 import io.github.jordepic.streamfusion.format.avroconfluent.AvroConfluentFormatProvider;
+import io.github.jordepic.streamfusion.format.avroconfluent.DebeziumAvroConfluentFormatProvider;
 import java.util.Map;
 import org.apache.flink.table.types.logical.ArrayType;
 import org.apache.flink.table.types.logical.BigIntType;
@@ -51,6 +52,19 @@ class AvroDecodeGateTest {
         .supports(new NativeFormatContext(rowType, rowType, options, false));
   }
 
+  private static boolean debeziumConfluent(RowType rowType) {
+    return debeziumConfluent(
+        rowType,
+        Map.of(
+            "format", "debezium-avro-confluent",
+            "debezium-avro-confluent.url", "http://localhost:8081"));
+  }
+
+  private static boolean debeziumConfluent(RowType rowType, Map<String, String> options) {
+    return new DebeziumAvroConfluentFormatProvider()
+        .supports(new NativeFormatContext(rowType, rowType, options, false));
+  }
+
   @Test
   void admitsTheReconciledTypeFamily() {
     assertTrue(bareAvro(SUPPORTED, Map.of("format", "avro"), false));
@@ -79,7 +93,30 @@ class AvroDecodeGateTest {
       RowType rowType = RowType.of(new LogicalType[] {type}, new String[] {"c"});
       assertFalse(bareAvro(rowType, Map.of("format", "avro"), false), type.toString());
       assertFalse(confluent(rowType), type.toString());
+      assertFalse(debeziumConfluent(rowType), type.toString());
     }
+  }
+
+  @Test
+  void debeziumEnvelopeSharesTheConfluentGates() {
+    // The gate runs over the derived envelope (nullable images + op), so the physical row's
+    // acceptance carries through: supported types admit, underivable and lenient shapes decline.
+    assertTrue(debeziumConfluent(SUPPORTED));
+    assertFalse(
+        debeziumConfluent(
+            RowType.of(new LogicalType[] {new LocalZonedTimestampType(3)}, new String[] {"c"})));
+    assertFalse(
+        debeziumConfluent(RowType.of(new LogicalType[] {new TimeType(0)}, new String[] {"c"})));
+    // The registry-option fallbacks apply verbatim: an explicit reader schema stays on Flink.
+    assertFalse(
+        debeziumConfluent(
+            SUPPORTED,
+            Map.of(
+                "format", "debezium-avro-confluent",
+                "debezium-avro-confluent.url", "http://localhost:8081",
+                "debezium-avro-confluent.schema", "{}")));
+    // No url at all (another format's options in the map) also declines.
+    assertFalse(debeziumConfluent(SUPPORTED, Map.of("format", "debezium-avro-confluent")));
   }
 
   @Test

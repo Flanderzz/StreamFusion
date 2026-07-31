@@ -479,8 +479,9 @@ fn decimal_mod_matches_bigdecimal() {
 // (as the JVM fetches them from the schema registry), and each message resolves against the reader
 // schema. Covers the two things the single-schema path never exercised: a mid-batch schema-id
 // switch (the decoder flushes internally; the flushes concatenate under the one reader shape) and
-// a writer record named differently from the reader (matched through the alias the JVM patches in,
-// mirroring Avro Java's lenient name check).
+// a writer record named differently from the reader (the JVM rebuilds the fetched schema onto the
+// reader's record names — mirroring Avro Java's lenient name check — and arrow-avro also accepts
+// the historical alias form pinned here).
 #[test]
 fn confluent_avro_decodes_evolving_writer_schemas_against_reader() {
     fn zigzag_varint(n: i64) -> Vec<u8> {
@@ -550,6 +551,241 @@ fn confluent_avro_decodes_evolving_writer_schemas_against_reader() {
         .downcast_ref::<arrow::array::StringArray>()
         .unwrap();
     assert_eq!((names.value(0), names.value(1), names.value(2)), ("a", "b", "c"));
+}
+
+// --- debezium-avro-confluent (format 10): the Debezium envelope with Confluent-framed Avro
+// bodies. The reader schema below is the shape Flink derives from the envelope row type
+// ROW<before <physical>.nullable(), after <physical>.nullable(), op STRING>. The writer text is
+// the wire contract the JVM registers after `ConfluentSchemaRegistry.alignedToReader`: the fetched
+// Debezium schema's records rebuilt onto the reader's names — one inline copy per image position
+// (the registry schema references its single Value record for both before and after) — with the
+// writer's exact field layout kept, including envelope fields (source, ts_ms) and image fields
+// (internal) the reader resolves away.
+
+const DBZ_AVRO_READER: &str = r#"{"type":"record","name":"record","namespace":"org.apache.flink.avro.generated","fields":[
+    {"name":"before","type":["null",{"type":"record","name":"record_before","fields":[
+        {"name":"id","type":["null","long"],"default":null},
+        {"name":"name","type":["null","string"],"default":null},
+        {"name":"ts","type":["null",{"type":"long","logicalType":"timestamp-millis"}],"default":null}]}],"default":null},
+    {"name":"after","type":["null",{"type":"record","name":"record_after","fields":[
+        {"name":"id","type":["null","long"],"default":null},
+        {"name":"name","type":["null","string"],"default":null},
+        {"name":"ts","type":["null",{"type":"long","logicalType":"timestamp-millis"}],"default":null}]}],"default":null},
+    {"name":"op","type":["null","string"],"default":null}]}"#;
+
+const DBZ_AVRO_WRITER: &str = r#"{"type":"record","name":"record","namespace":"org.apache.flink.avro.generated","fields":[
+    {"name":"before","type":["null",{"type":"record","name":"record_before","fields":[
+        {"name":"id","type":["null","long"],"default":null},
+        {"name":"name","type":["null","string"],"default":null},
+        {"name":"internal","type":["null","string"],"default":null},
+        {"name":"ts","type":["null",{"type":"long","logicalType":"timestamp-millis"}],"default":null}]}],"default":null},
+    {"name":"after","type":["null",{"type":"record","name":"record_after","fields":[
+        {"name":"id","type":["null","long"],"default":null},
+        {"name":"name","type":["null","string"],"default":null},
+        {"name":"internal","type":["null","string"],"default":null},
+        {"name":"ts","type":["null",{"type":"long","logicalType":"timestamp-millis"}],"default":null}]}],"default":null},
+    {"name":"source","type":["null","string"],"default":null},
+    {"name":"op","type":"string"},
+    {"name":"ts_ms","type":["null","long"],"default":null}]}"#;
+
+fn dbz_zigzag(n: i64) -> Vec<u8> {
+    let mut zz = ((n << 1) ^ (n >> 63)) as u64;
+    let mut out = Vec::new();
+    loop {
+        let mut b = (zz & 0x7f) as u8;
+        zz >>= 7;
+        if zz != 0 {
+            b |= 0x80;
+        }
+        out.push(b);
+        if zz == 0 {
+            break;
+        }
+    }
+    out
+}
+
+fn dbz_string(s: &str) -> Vec<u8> {
+    let mut v = dbz_zigzag(s.len() as i64);
+    v.extend_from_slice(s.as_bytes());
+    v
+}
+
+/// One fully-populated writer image datum in `DBZ_AVRO_WRITER`'s layout: id, name, the
+/// writer-only `internal` field the reader skips, then ts — every field on union branch 1.
+fn dbz_image(id: i64, name: &str, ts_millis: i64) -> Vec<u8> {
+    let mut v = dbz_zigzag(1);
+    v.extend(dbz_zigzag(id));
+    v.extend(dbz_zigzag(1));
+    v.extend(dbz_string(name));
+    v.extend(dbz_zigzag(1));
+    v.extend(dbz_string("writer-only"));
+    v.extend(dbz_zigzag(1));
+    v.extend(dbz_zigzag(ts_millis));
+    v
+}
+
+/// A Confluent-framed writer envelope datum in `DBZ_AVRO_WRITER`'s field order, with a populated
+/// `source` and a null `ts_ms` for the reader to resolve away.
+fn dbz_message(schema_id: u32, before: Option<Vec<u8>>, after: Option<Vec<u8>>, op: &str) -> Vec<u8> {
+    let mut v = vec![0x00];
+    v.extend_from_slice(&schema_id.to_be_bytes());
+    for image in [before, after] {
+        match image {
+            None => v.extend(dbz_zigzag(0)),
+            Some(bytes) => {
+                v.extend(dbz_zigzag(1));
+                v.extend(bytes);
+            }
+        }
+    }
+    v.extend(dbz_zigzag(1));
+    v.extend(dbz_string("dbz-source"));
+    v.extend(dbz_string(op));
+    v.extend(dbz_zigzag(0));
+    v
+}
+
+fn dbz_decoder() -> MessageDecoder {
+    let physical = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, true),
+        Field::new("name", DataType::Utf8, true),
+        Field::new(
+            "ts",
+            DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None),
+            true,
+        ),
+    ]));
+    let mut decoder = MessageDecoder::new(
+        FORMAT_DEBEZIUM_AVRO_CONFLUENT,
+        physical,
+        "",
+        DBZ_AVRO_READER,
+        0,
+        false,
+        "",
+    );
+    decoder.register_writer_schema(5, DBZ_AVRO_WRITER);
+    decoder
+}
+
+// The Avro envelope fans out exactly like the JSON dialect — c/r → INSERT from `after`, u →
+// UPDATE_BEFORE + UPDATE_AFTER, d → DELETE from `before` — while null and empty bodies (Kafka
+// tombstones, which Flink returns on without collecting) contribute no rows, and the image
+// payloads land on the boundary column types (the timestamp long reads as epoch millis and scales
+// to the boundary's nanoseconds, exactly like a plain avro-confluent column).
+#[test]
+fn debezium_avro_decode_emits_changelog() {
+    let insert = dbz_message(5, None, Some(dbz_image(1, "a", 1_000)), "c");
+    let read = dbz_message(5, None, Some(dbz_image(2, "b", 2_000)), "r");
+    let update =
+        dbz_message(5, Some(dbz_image(2, "b", 2_000)), Some(dbz_image(2, "b2", 3_000)), "u");
+    let delete = dbz_message(5, Some(dbz_image(1, "a", 1_000)), None, "d");
+    let body = bodies(vec![
+        Some(&insert),
+        None,
+        Some(&read),
+        Some(&[]),
+        Some(&update),
+        Some(&delete),
+    ]);
+
+    let out = dbz_decoder().decode(&body);
+
+    assert_eq!(out.num_rows(), 5);
+    let id = out.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+    assert_eq!(id.values(), &[1, 2, 2, 2, 1]);
+    let names = out.column(1).as_any().downcast_ref::<StringArray>().unwrap();
+    assert_eq!(
+        (0..5).map(|i| names.value(i)).collect::<Vec<_>>(),
+        vec!["a", "b", "b", "b2", "a"]
+    );
+    let ts = out.column(2).as_any().downcast_ref::<TimestampNanosecondArray>().unwrap();
+    assert_eq!(
+        ts.values(),
+        &[1_000_000_000, 2_000_000_000, 2_000_000_000, 3_000_000_000, 1_000_000_000]
+    );
+    let kinds = out.column(3).as_any().downcast_ref::<Int8Array>().unwrap();
+    assert_eq!(kinds.values(), &[0, 0, 1, 2, 3]);
+    assert_eq!(out.schema().field(3).name(), ROW_KIND_COLUMN);
+}
+
+// Schema evolution mid-batch: a second registered writer (aligned the same way) whose images lack
+// the `ts` field — the reader default (null) fills it — interleaved with the first writer in one
+// batch (the decoder flushes internally on the id switch; the flushes concatenate under the one
+// reader shape).
+#[test]
+fn debezium_avro_decodes_evolving_writer_schemas() {
+    let writer_v2 = r#"{"type":"record","name":"record","namespace":"org.apache.flink.avro.generated","fields":[
+        {"name":"before","type":["null",{"type":"record","name":"record_before","fields":[
+            {"name":"id","type":["null","long"],"default":null},
+            {"name":"name","type":["null","string"],"default":null}]}],"default":null},
+        {"name":"after","type":["null",{"type":"record","name":"record_after","fields":[
+            {"name":"id","type":["null","long"],"default":null},
+            {"name":"name","type":["null","string"],"default":null}]}],"default":null},
+        {"name":"op","type":"string"}]}"#;
+    // Writer-v2 envelope: {before, after, op} only, images without ts.
+    let v2_message = |before: Option<Vec<u8>>, after: Option<Vec<u8>>, op: &str| {
+        let mut v = vec![0x00];
+        v.extend_from_slice(&9u32.to_be_bytes());
+        for image in [before, after] {
+            match image {
+                None => v.extend(dbz_zigzag(0)),
+                Some(bytes) => {
+                    v.extend(dbz_zigzag(1));
+                    v.extend(bytes);
+                }
+            }
+        }
+        v.extend(dbz_string(op));
+        v
+    };
+    let v2_image = |id: i64, name: &str| {
+        let mut v = dbz_zigzag(1);
+        v.extend(dbz_zigzag(id));
+        v.extend(dbz_zigzag(1));
+        v.extend(dbz_string(name));
+        v
+    };
+    let mut decoder = dbz_decoder();
+    decoder.register_writer_schema(9, writer_v2);
+
+    let m1 = dbz_message(5, None, Some(dbz_image(1, "a", 1_000)), "c");
+    let m2 = v2_message(None, Some(v2_image(2, "b")), "c");
+    let m3 = dbz_message(5, Some(dbz_image(1, "a", 1_000)), None, "d");
+    let out = decoder.decode(&bodies(vec![Some(&m1), Some(&m2), Some(&m3)]));
+
+    assert_eq!(out.num_rows(), 3);
+    let id = out.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+    assert_eq!(id.values(), &[1, 2, 1]);
+    let ts = out.column(2).as_any().downcast_ref::<TimestampNanosecondArray>().unwrap();
+    assert!(!ts.is_null(0) && ts.is_null(1) && !ts.is_null(2));
+    let kinds = out.column(3).as_any().downcast_ref::<Int8Array>().unwrap();
+    assert_eq!(kinds.values(), &[0, 0, 3]);
+}
+
+// A null "before" where the op reads it fails the job (Flink's REPLICA IDENTITY error path — this
+// format has no ignore-parse-errors, so there is no skip mode to fall into).
+#[test]
+#[should_panic(expected = "null \"before\"")]
+fn debezium_avro_null_before_update_fails() {
+    let update = dbz_message(5, None, Some(dbz_image(2, "b", 2_000)), "u");
+    dbz_decoder().decode(&bodies(vec![Some(&update)]));
+}
+
+#[test]
+#[should_panic(expected = "null \"before\"")]
+fn debezium_avro_null_before_delete_fails() {
+    let delete = dbz_message(5, None, Some(dbz_image(2, "b", 2_000)), "d");
+    dbz_decoder().decode(&bodies(vec![Some(&delete)]));
+}
+
+// An unrecognized op fails, matching Flink's IOException on an unknown "op" value.
+#[test]
+#[should_panic(expected = "unknown CDC operation")]
+fn debezium_avro_unknown_op_fails() {
+    let unknown = dbz_message(5, None, Some(dbz_image(1, "a", 1_000)), "t");
+    dbz_decoder().decode(&bodies(vec![Some(&unknown)]));
 }
 
 // Debezium JSON (format 6): the `{before, after, op}` envelope fans out to a columnar changelog —

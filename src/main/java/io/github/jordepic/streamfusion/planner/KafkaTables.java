@@ -144,8 +144,8 @@ final class KafkaTables {
 
   // --- Shallow decode path (Phase 2/3): Flink's own KafkaSource consumes raw value bytes, a native
   // operator decodes them to Arrow. Insert-only formats (JSON/CSV/raw/bare-Avro/Confluent-Avro/protobuf)
-  // route via isNativeKafkaDecode; CDC changelog formats (Debezium/OGG) route via isCdcDecode, gated to
-  // the cases reproduced identically to Flink.
+  // route via isNativeKafkaDecode; CDC changelog formats (the JSON dialects and debezium-avro-confluent)
+  // route via isCdcDecode, gated to the cases reproduced identically to Flink.
 
   /**
    * Whether this table's decoder honors a pruned output schema — decoding only the columns and nested
@@ -237,6 +237,9 @@ final class KafkaTables {
    * UPDATE_BEFORE follows Flink's findValue key-presence rule, reproduced by a native per-message
    * key scan of the raw {@code old}. {@code ignore-parse-errors} is supported both ways — the
    * native decoder skips an undecodable message per Flink's catch-everything-per-message semantics.
+   * {@code debezium-avro-confluent} (the same envelope with registry-Avro bodies) routes under its
+   * provider's registry-option and avro-type gates; it defines no error-skip or schema-include
+   * options, so those clauses never engage for it.
    * Still falling back: a {@code schema-include} wrapper, metadata/computed columns the value decode
    * doesn't produce, Canal's database/table include regexes, and nested Maxwell/Canal schemas. See
    * https://github.com/datafusion-contrib/StreamFusion/issues/15 for the follow-ups. */
