@@ -54,11 +54,34 @@ impl EncodedLines {
 /// the same set wherever a format instance would exist. The defaults are the json format
 /// factory's own.
 #[cfg(feature = "kafka")]
-#[derive(Default)]
 pub(crate) struct JsonEncodeOptions {
     pub(crate) ignore_null_fields: bool,
     pub(crate) iso_8601: bool,
     pub(crate) decimal_as_plain_number: bool,
+    pub(crate) map_null_key_mode: MapNullKeyMode,
+    pub(crate) map_null_key_literal: String,
+}
+
+#[cfg(feature = "kafka")]
+impl Default for JsonEncodeOptions {
+    fn default() -> JsonEncodeOptions {
+        JsonEncodeOptions {
+            ignore_null_fields: false,
+            iso_8601: false,
+            decimal_as_plain_number: false,
+            map_null_key_mode: MapNullKeyMode::Fail,
+            map_null_key_literal: "null".to_string(),
+        }
+    }
+}
+
+/// Flink's `json.map-null-key.mode`: what a serialized map does with a null key.
+#[cfg(feature = "kafka")]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum MapNullKeyMode {
+    Fail,
+    Drop,
+    Literal,
 }
 
 /// Parses one format instance's `EncodeFormat` option lines. Only options the planner has resolved
@@ -76,6 +99,15 @@ fn parse_json_encode_options(encoded: &str) -> Result<JsonEncodeOptions, String>
             "encode.decimal-as-plain-number" => {
                 options.decimal_as_plain_number = value == "true"
             }
+            "map-null-key.mode" => {
+                options.map_null_key_mode = match value {
+                    "FAIL" => MapNullKeyMode::Fail,
+                    "DROP" => MapNullKeyMode::Drop,
+                    "LITERAL" => MapNullKeyMode::Literal,
+                    other => return Err(format!("unknown map-null-key.mode {other}")),
+                }
+            }
+            "map-null-key.literal" => options.map_null_key_literal = value.to_string(),
             other => return Err(format!("unknown JSON encode option {other}")),
         }
     }
@@ -110,6 +142,12 @@ pub(crate) fn encode_json_batch(
             .with_encoder_factory(Arc::new(FlinkJsonEncoderFactory {
                 iso_8601: options.iso_8601,
                 decimal_as_plain_number: options.decimal_as_plain_number,
+                map_null_key_mode: options.map_null_key_mode,
+                map_null_key_literal: {
+                    let mut literal = Vec::new();
+                    encode_json_string_value(options.map_null_key_literal.as_bytes(), &mut literal);
+                    literal
+                },
             }));
     if options.iso_8601 {
         builder = builder
@@ -413,15 +451,18 @@ fn descriptor_children(descriptor: &str) -> Option<Vec<&str>> {
 struct FlinkJsonEncoderFactory {
     iso_8601: bool,
     decimal_as_plain_number: bool,
+    map_null_key_mode: MapNullKeyMode,
+    /// The `map-null-key.literal` pre-rendered as a quoted, escaped JSON field name.
+    map_null_key_literal: Vec<u8>,
 }
 
 #[cfg(feature = "kafka")]
 impl arrow::json::writer::EncoderFactory for FlinkJsonEncoderFactory {
     fn make_default_encoder<'a>(
         &self,
-        field: &'a FieldRef,
+        _field: &'a FieldRef,
         array: &'a dyn Array,
-        _options: &'a arrow::json::writer::EncoderOptions,
+        options: &'a arrow::json::writer::EncoderOptions,
     ) -> Result<Option<arrow::json::writer::NullableEncoder<'a>>, arrow::error::ArrowError> {
         use arrow::array::cast::AsArray;
         use arrow::datatypes::{Decimal128Type, TimestampNanosecondType};
@@ -458,9 +499,129 @@ impl arrow::json::writer::EncoderFactory for FlinkJsonEncoderFactory {
                     zulu: timezone.is_some(),
                 }))
             }
+            // Flink's map converter differs from arrow-json's stock one in every null rule: null
+            // VALUES are always written (ignore-null-fields governs row fields only), and null
+            // KEYS follow `json.map-null-key.mode` instead of being rejected outright.
+            DataType::Map(_, _) => Some(Box::new(FlinkMapEncoder::try_new(
+                array.as_map(),
+                options,
+                self.map_null_key_mode,
+                self.map_null_key_literal.clone(),
+            )?)),
             _ => None,
         };
         Ok(encoder.map(|encoder| NullableEncoder::new(encoder, array.nulls().cloned())))
+    }
+}
+
+/// Flink's JSON object encoding of MAP and MULTISET (a MULTISET arrives as MAP<element, INT>).
+/// Entries land in Jackson `ObjectNode` semantics: a duplicate key keeps its first position but
+/// takes the last value, which is also how several null keys collapse onto one LITERAL spelling —
+/// hence the per-row buffering. Key and value child encoders come from `make_encoder`, so every
+/// Flink override applies inside the map.
+#[cfg(feature = "kafka")]
+struct FlinkMapEncoder<'a> {
+    offsets: arrow::buffer::OffsetBuffer<i32>,
+    keys: arrow::json::writer::NullableEncoder<'a>,
+    values: arrow::json::writer::NullableEncoder<'a>,
+    null_key_mode: MapNullKeyMode,
+    /// Pre-rendered quoted, escaped `map-null-key.literal`.
+    null_key_literal: Vec<u8>,
+    scratch: Vec<u8>,
+}
+
+#[cfg(feature = "kafka")]
+impl<'a> FlinkMapEncoder<'a> {
+    fn try_new(
+        array: &'a arrow::array::MapArray,
+        options: &'a arrow::json::writer::EncoderOptions,
+        null_key_mode: MapNullKeyMode,
+        null_key_literal: Vec<u8>,
+    ) -> Result<FlinkMapEncoder<'a>, arrow::error::ArrowError> {
+        use arrow::json::writer::make_encoder;
+
+        let DataType::Map(entry_field, _) = array.data_type() else {
+            unreachable!("FlinkMapEncoder built for a non-map array");
+        };
+        let DataType::Struct(entry_fields) = entry_field.data_type() else {
+            return Err(arrow::error::ArrowError::JsonError(
+                "map entries are not a struct".to_string(),
+            ));
+        };
+        if !matches!(
+            array.keys().data_type(),
+            DataType::Utf8 | DataType::LargeUtf8
+        ) {
+            // The planner declines non-string keys (Flink itself throws for them); reaching this
+            // is a wiring bug, not user input.
+            return Err(arrow::error::ArrowError::JsonError(format!(
+                "JSON format doesn't support non-string as key type of map: {}",
+                array.keys().data_type()
+            )));
+        }
+        Ok(FlinkMapEncoder {
+            offsets: array.offsets().clone(),
+            keys: make_encoder(&entry_fields[0], array.keys().as_ref(), options)?,
+            values: make_encoder(&entry_fields[1], array.values().as_ref(), options)?,
+            null_key_mode,
+            null_key_literal,
+            scratch: Vec::new(),
+        })
+    }
+}
+
+#[cfg(feature = "kafka")]
+impl arrow::json::writer::Encoder for FlinkMapEncoder<'_> {
+    fn encode(&mut self, idx: usize, output: &mut Vec<u8>) {
+        let start = self.offsets[idx] as usize;
+        let end = self.offsets[idx + 1] as usize;
+        self.scratch.clear();
+        let mut entries: Vec<(std::ops::Range<usize>, std::ops::Range<usize>)> =
+            Vec::with_capacity(end - start);
+        for index in start..end {
+            let key_start = self.scratch.len();
+            if self.keys.is_null(index) {
+                match self.null_key_mode {
+                    MapNullKeyMode::Fail => panic!(
+                        "JSON format doesn't support to serialize map data with null keys. You \
+                         can drop null key entries or encode null in literals by specifying the \
+                         json.map-null-key.mode option."
+                    ),
+                    MapNullKeyMode::Drop => continue,
+                    MapNullKeyMode::Literal => {
+                        self.scratch.extend_from_slice(&self.null_key_literal)
+                    }
+                }
+            } else {
+                self.keys.encode(index, &mut self.scratch);
+            }
+            let key = key_start..self.scratch.len();
+            let value_start = self.scratch.len();
+            if self.values.is_null(index) {
+                self.scratch.extend_from_slice(b"null");
+            } else {
+                self.values.encode(index, &mut self.scratch);
+            }
+            let value = value_start..self.scratch.len();
+            if let Some(existing) = entries
+                .iter_mut()
+                .find(|(seen, _)| self.scratch[seen.clone()] == self.scratch[key.clone()])
+            {
+                existing.1 = value;
+            } else {
+                entries.push((key, value));
+            }
+        }
+        output.push(b'{');
+        for (index, (key, value)) in entries.iter().enumerate() {
+            if index != 0 {
+                output.push(b',');
+            }
+            output.extend_from_slice(&self.scratch[key.clone()]);
+            output.push(b':');
+            output.extend_from_slice(&self.scratch[value.clone()]);
+        }
+        output.push(b'}');
     }
 }
 
@@ -477,16 +638,21 @@ struct FlinkStringEncoder<'a, O: arrow::array::OffsetSizeTrait> {
 #[cfg(feature = "kafka")]
 impl<O: arrow::array::OffsetSizeTrait> arrow::json::writer::Encoder for FlinkStringEncoder<'_, O> {
     fn encode(&mut self, index: usize, output: &mut Vec<u8>) {
-        let value = self.array.value(index).as_bytes();
-        output.reserve(value.len() + 2);
-        output.push(b'"');
-        if json_needs_escape(value) {
-            encode_escaped_json(value, output);
-        } else {
-            output.extend_from_slice(value);
-        }
-        output.push(b'"');
+        encode_json_string_value(self.array.value(index).as_bytes(), output);
     }
+}
+
+/// One quoted, serde_json-escaped JSON string value.
+#[cfg(feature = "kafka")]
+fn encode_json_string_value(value: &[u8], output: &mut Vec<u8>) {
+    output.reserve(value.len() + 2);
+    output.push(b'"');
+    if json_needs_escape(value) {
+        encode_escaped_json(value, output);
+    } else {
+        output.extend_from_slice(value);
+    }
+    output.push(b'"');
 }
 
 /// Whether any byte is a control character, `"`, or `\` — the only bytes JSON string encoding

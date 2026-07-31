@@ -1,7 +1,9 @@
 package io.github.jordepic.streamfusion.format;
 
 import java.io.Serializable;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * One native sink format instance: the wire-format code and its encode-affecting options rendered
@@ -49,6 +51,22 @@ public final class EncodeFormat implements Serializable {
     if (!appendBoolean(encoded, "encode.ignore-null-fields", options)
         || !appendBoolean(encoded, "encode.decimal-as-plain-number", options)) {
       return null;
+    }
+    String nullKeyMode =
+        options.getOrDefault("map-null-key.mode", "FAIL").toUpperCase(Locale.ROOT);
+    if (!Set.of("FAIL", "DROP", "LITERAL").contains(nullKeyMode)) {
+      return null;
+    }
+    if (!"FAIL".equals(nullKeyMode)) {
+      encoded.append("map-null-key.mode=").append(nullKeyMode).append('\n');
+    }
+    String nullKeyLiteral = options.get("map-null-key.literal");
+    if (nullKeyLiteral != null && !"null".equals(nullKeyLiteral)) {
+      // The carrier is line-encoded; a literal that cannot ride it stays on Flink.
+      if (nullKeyLiteral.contains("\n") || nullKeyLiteral.contains("\r")) {
+        return null;
+      }
+      encoded.append("map-null-key.literal=").append(nullKeyLiteral).append('\n');
     }
     return new EncodeFormat(FormatCodes.JSON, encoded.toString());
   }

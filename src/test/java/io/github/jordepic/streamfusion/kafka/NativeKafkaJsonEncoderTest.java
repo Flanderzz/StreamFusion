@@ -3,6 +3,8 @@ package io.github.jordepic.streamfusion.kafka;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.github.jordepic.streamfusion.format.EncodeFormat;
 import io.github.jordepic.streamfusion.format.LogicalTypeDescriptors;
@@ -25,9 +27,12 @@ import org.apache.flink.formats.json.JsonFormatOptions;
 import org.apache.flink.formats.json.JsonRowDataSerializationSchema;
 import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.metrics.groups.UnregisteredMetricsGroup;
+import org.apache.flink.table.data.ArrayData;
 import org.apache.flink.table.data.DecimalData;
 import org.apache.flink.table.data.GenericArrayData;
+import org.apache.flink.table.data.GenericMapData;
 import org.apache.flink.table.data.GenericRowData;
+import org.apache.flink.table.data.MapData;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.StringData;
 import org.apache.flink.table.data.TimestampData;
@@ -39,6 +44,8 @@ import org.apache.flink.table.types.logical.DoubleType;
 import org.apache.flink.table.types.logical.IntType;
 import org.apache.flink.table.types.logical.LocalZonedTimestampType;
 import org.apache.flink.table.types.logical.LogicalType;
+import org.apache.flink.table.types.logical.MapType;
+import org.apache.flink.table.types.logical.MultisetType;
 import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.table.types.logical.TimeType;
 import org.apache.flink.table.types.logical.TimestampType;
@@ -285,6 +292,163 @@ class NativeKafkaJsonEncoderTest {
   }
 
   /**
+   * Maps and multisets serialize as JSON objects with Flink's null rules: null map values are
+   * always written (only row fields honor {@code encode.ignore-null-fields}), keys are
+   * Jackson-escaped field names, and the value converters recurse — a map of rows of arrays
+   * proves the deep path. A MULTISET is its element-to-count map.
+   */
+  @Test
+  void matchesFlinkForMapsAndMultisets() throws Exception {
+    RowType valueRow =
+        RowType.of(
+            new LogicalType[] {
+              new LocalZonedTimestampType(3), new ArrayType(new DecimalType(10, 2))
+            },
+            new String[] {"at", "amounts"});
+    RowType rowType =
+        RowType.of(
+            new LogicalType[] {
+              new MapType(new VarCharType(VarCharType.MAX_LENGTH), new IntType()),
+              new MapType(new VarCharType(VarCharType.MAX_LENGTH), valueRow),
+              new MultisetType(new VarCharType(VarCharType.MAX_LENGTH))
+            },
+            new String[] {"counts", "rows", "bag"});
+    java.util.LinkedHashMap<Object, Object> counts = new java.util.LinkedHashMap<>();
+    counts.put(StringData.fromString("plain"), 1);
+    counts.put(StringData.fromString("esc\"aped\nkey"), null);
+    counts.put(StringData.fromString("統一碼"), 3);
+    java.util.LinkedHashMap<Object, Object> rowsByKey = new java.util.LinkedHashMap<>();
+    rowsByKey.put(
+        StringData.fromString("full"),
+        GenericRowData.of(
+            TimestampData.fromEpochMillis(1_577_934_245_500L),
+            new GenericArrayData(
+                new Object[] {DecimalData.fromBigDecimal(new BigDecimal("100.00"), 10, 2), null})));
+    rowsByKey.put(StringData.fromString("holes"), GenericRowData.of(null, null));
+    rowsByKey.put(StringData.fromString("missing"), null);
+    java.util.LinkedHashMap<Object, Object> bag = new java.util.LinkedHashMap<>();
+    bag.put(StringData.fromString("twice"), 2);
+    bag.put(StringData.fromString("once"), 1);
+    List<RowData> rows =
+        List.of(
+            GenericRowData.of(
+                new GenericMapData(counts), new GenericMapData(rowsByKey), new GenericMapData(bag)),
+            GenericRowData.of(
+                new GenericMapData(new java.util.LinkedHashMap<>()), null, null));
+
+    assertMatchesFlink(rows, rowType, TimestampFormat.SQL, false);
+    assertMatchesFlink(rows, rowType, TimestampFormat.SQL, true);
+    assertMatchesFlink(rows, rowType, TimestampFormat.ISO_8601, false);
+  }
+
+  /**
+   * Null map keys follow {@code json.map-null-key.mode}: DROP skips the entry, LITERAL writes the
+   * configured literal as the field name (escaped like any other key). Several null keys — and
+   * duplicate keys generally, which a {@code MapData} can carry — collapse the way Jackson's
+   * ObjectNode does: the first occurrence keeps its position, the last value wins.
+   */
+  @Test
+  void matchesFlinkMapNullKeyModes() throws Exception {
+    RowType rowType =
+        RowType.of(
+            new LogicalType[] {new MapType(new VarCharType(VarCharType.MAX_LENGTH), new IntType())},
+            new String[] {"m"});
+    MapData withNullAndDuplicateKeys =
+        new ArrayBackedMapData(
+            new GenericArrayData(
+                new Object[] {
+                  StringData.fromString("a"), null, StringData.fromString("a"), null
+                }),
+            new GenericArrayData(new Object[] {1, 2, 3, null}));
+    List<RowData> rows = List.of(GenericRowData.of(withNullAndDuplicateKeys));
+
+    assertMatchesFlink(
+        rows,
+        rowType,
+        TimestampFormat.SQL,
+        false,
+        false,
+        JsonFormatOptions.MapNullKeyMode.DROP,
+        "null");
+    assertMatchesFlink(
+        rows,
+        rowType,
+        TimestampFormat.SQL,
+        false,
+        false,
+        JsonFormatOptions.MapNullKeyMode.LITERAL,
+        "esc\"aped literal");
+  }
+
+  /**
+   * FAIL mode is data-dependent, so it cannot gate at plan time: like Flink, the native encoder
+   * fails the record at runtime, and its message points at {@code json.map-null-key.mode} the way
+   * Flink's does.
+   */
+  @Test
+  void failsLikeFlinkOnNullMapKeys() throws Exception {
+    RowType rowType =
+        RowType.of(
+            new LogicalType[] {new MapType(new VarCharType(VarCharType.MAX_LENGTH), new IntType())},
+            new String[] {"m"});
+    java.util.LinkedHashMap<Object, Object> data = new java.util.LinkedHashMap<>();
+    data.put(null, 1);
+    List<RowData> rows = List.of(GenericRowData.of(new GenericMapData(data)));
+
+    JsonRowDataSerializationSchema flink =
+        new JsonRowDataSerializationSchema(
+            rowType,
+            TimestampFormat.SQL,
+            JsonFormatOptions.MapNullKeyMode.FAIL,
+            "null",
+            false,
+            false);
+    flink.open(initializationContext());
+    assertThrows(RuntimeException.class, () -> flink.serialize(rows.get(0)));
+
+    try (BufferAllocator allocator = new RootAllocator();
+        CDataDictionaryProvider dictionaries = new CDataDictionaryProvider();
+        VectorSchemaRoot root = RowDataArrowConverter.write(rows, rowType, allocator);
+        ArrowArray array = ArrowArray.allocateNew(allocator);
+        ArrowSchema schema = ArrowSchema.allocateNew(allocator)) {
+      Data.exportVectorSchemaRoot(allocator, root, dictionaries, array, schema);
+      EncodeFormat format = EncodeFormat.json(Map.of());
+      Exception failure =
+          assertThrows(
+              Exception.class,
+              () ->
+                  NativeKafka.encodeKafkaBatch(
+                      array.memoryAddress(),
+                      schema.memoryAddress(),
+                      format.format,
+                      format.options,
+                      LogicalTypeDescriptors.of(rowType),
+                      rowType.getFieldNames().toArray(String[]::new)));
+      assertTrue(
+          failure.getMessage().contains("json.map-null-key.mode"), failure.getMessage());
+    }
+  }
+
+  /** A {@link MapData} view over two parallel arrays — the shape duplicate keys arrive in. */
+  private record ArrayBackedMapData(GenericArrayData keys, GenericArrayData values)
+      implements MapData {
+    @Override
+    public int size() {
+      return keys.size();
+    }
+
+    @Override
+    public ArrayData keyArray() {
+      return keys;
+    }
+
+    @Override
+    public ArrayData valueArray() {
+      return values;
+    }
+  }
+
+  /**
    * The upsert key format is its own format instance in Flink, configured solely from {@code
    * key.json.*} (or that format's defaults) — never from the value's settings. The referee builds
    * Flink's key and value serializers the way the upsert-kafka factory would, with deliberately
@@ -384,12 +548,31 @@ class NativeKafkaJsonEncoderTest {
       boolean ignoreNullFields,
       boolean decimalAsPlainNumber)
       throws Exception {
+    assertMatchesFlink(
+        rows,
+        rowType,
+        timestampFormat,
+        ignoreNullFields,
+        decimalAsPlainNumber,
+        JsonFormatOptions.MapNullKeyMode.FAIL,
+        "null");
+  }
+
+  private static void assertMatchesFlink(
+      List<RowData> rows,
+      RowType rowType,
+      TimestampFormat timestampFormat,
+      boolean ignoreNullFields,
+      boolean decimalAsPlainNumber,
+      JsonFormatOptions.MapNullKeyMode mapNullKeyMode,
+      String mapNullKeyLiteral)
+      throws Exception {
     JsonRowDataSerializationSchema flink =
         new JsonRowDataSerializationSchema(
             rowType,
             timestampFormat,
-            JsonFormatOptions.MapNullKeyMode.LITERAL,
-            "null",
+            mapNullKeyMode,
+            mapNullKeyLiteral,
             decimalAsPlainNumber,
             ignoreNullFields);
     flink.open(initializationContext());
@@ -408,7 +591,11 @@ class NativeKafkaJsonEncoderTest {
                   "encode.ignore-null-fields",
                   String.valueOf(ignoreNullFields),
                   "encode.decimal-as-plain-number",
-                  String.valueOf(decimalAsPlainNumber)));
+                  String.valueOf(decimalAsPlainNumber),
+                  "map-null-key.mode",
+                  mapNullKeyMode.name(),
+                  "map-null-key.literal",
+                  mapNullKeyLiteral));
       byte[][] actual =
           NativeKafka.encodeKafkaBatch(
               array.memoryAddress(),

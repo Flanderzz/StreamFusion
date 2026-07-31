@@ -2,6 +2,7 @@ package io.github.jordepic.streamfusion.kafka;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.github.jordepic.streamfusion.planner.NativePlanner;
@@ -90,21 +91,55 @@ class NativeKafkaSinkSqlPlanTest {
   }
 
   @Test
-  void recordsWhyAnUnverifiedJsonTypeFallsBack() {
+  void plansStringKeyedMapsAndMultisetsNatively() {
     StreamTableEnvironment table = environment();
     table.executeSql(
-        "CREATE TABLE src (id INT, counts MAP<STRING, INT>) "
+        "CREATE TABLE src (id INT, counts MAP<STRING, INT>, bag MULTISET<STRING>, "
+            + "deep MAP<STRING, ARRAY<ROW<a INT>>>) "
             + "WITH ('connector' = 'datagen', 'number-of-rows' = '1')");
     table.executeSql(
-        "CREATE TABLE output (id INT, counts MAP<STRING, INT>) WITH ("
+        "CREATE TABLE output (id INT, counts MAP<STRING, INT>, bag MULTISET<STRING>, "
+            + "deep MAP<STRING, ARRAY<ROW<a INT>>>) WITH ("
+            + "'connector' = 'kafka', "
+            + "'topic' = 'output', "
+            + "'properties.bootstrap.servers' = 'broker:9092', "
+            + "'format' = 'json', "
+            + "'json.map-null-key.mode' = 'LITERAL', "
+            + "'json.map-null-key.literal' = 'absent')");
+
+    PhysicalPlanScan scan = NativePlanner.install(table);
+    String plan =
+        table.explainSql(
+            "INSERT INTO output SELECT * FROM src", ExplainDetail.JSON_EXECUTION_PLAN);
+
+    assertTrue(scan.substitutions() > 0, scan::explainSummary);
+    assertTrue(plan.contains("NativeKafkaSink"), plan);
+  }
+
+  /**
+   * Flink's own JSON converter rejects a non-string map key when the sink translates; the native
+   * matcher must decline first so substituting the sink never swallows that rejection.
+   */
+  @Test
+  void keepsFlinksRejectionOfNonStringMapKeys() {
+    StreamTableEnvironment table = environment();
+    table.executeSql(
+        "CREATE TABLE src (id INT, counts MAP<INT, STRING>) "
+            + "WITH ('connector' = 'datagen', 'number-of-rows' = '1')");
+    table.executeSql(
+        "CREATE TABLE output (id INT, counts MAP<INT, STRING>) WITH ("
             + "'connector' = 'kafka', "
             + "'topic' = 'output', "
             + "'properties.bootstrap.servers' = 'broker:9092', "
             + "'format' = 'json')");
 
     PhysicalPlanScan scan = NativePlanner.install(table);
-    table.explainSql("INSERT INTO output SELECT * FROM src");
+    UnsupportedOperationException rejection =
+        assertThrows(
+            UnsupportedOperationException.class,
+            () -> table.explainSql("INSERT INTO output SELECT * FROM src"));
 
+    assertTrue(rejection.getMessage().contains("non-string as key type"), rejection.getMessage());
     assertEquals(0, scan.substitutions());
     assertTrue(
         scan.fallbackReasons().stream().anyMatch(reason -> reason.contains("MAP")),

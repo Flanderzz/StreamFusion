@@ -13,6 +13,7 @@ import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalR
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalSink;
 import org.apache.flink.table.planner.plan.utils.ChangelogPlanUtils;
 import org.apache.flink.table.types.logical.LogicalType;
+import org.apache.flink.table.types.logical.LogicalTypeFamily;
 import org.apache.flink.table.types.logical.RowType;
 
 /** Conservative match boundary for native JSON serialization into Flink's Kafka sink. */
@@ -146,6 +147,13 @@ final class KafkaSinkMatcher {
       case ROW:
       case ARRAY:
         return type.getChildren().stream().allMatch(KafkaSinkMatcher::supportsJsonType);
+      case MAP:
+      case MULTISET:
+        // Flink's own converter rejects a non-string map key (a MULTISET's element is its key)
+        // when the job starts; declining keeps that failure on Flink instead of accepting a
+        // schema Flink itself cannot serialize.
+        return type.getChildren().get(0).is(LogicalTypeFamily.CHARACTER_STRING)
+            && type.getChildren().stream().allMatch(KafkaSinkMatcher::supportsJsonType);
       default:
         return false;
     }

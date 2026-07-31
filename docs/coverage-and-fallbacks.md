@@ -539,9 +539,18 @@ shapes persist their per-key deadlines in a dedicated state table).
   cross-client transaction hand-off itself (commit, duplicate-commit idempotency, fencing, and
   broker timeout reaping). The native serializer currently covers BOOLEAN,
   TINYINT/SMALLINT/INT/BIGINT, FLOAT/DOUBLE, CHAR/VARCHAR, BINARY/VARBINARY, DECIMAL, DATE, TIME,
-  TIMESTAMP, and TIMESTAMP_LTZ (SQL or ISO-8601), plus ROW and ARRAY nested recursively over that
-  set (a null field inside a nested row follows `encode.ignore-null-fields` exactly as Flink's
-  recursive converter does; array elements keep explicit nulls regardless), including
+  TIMESTAMP, and TIMESTAMP_LTZ (SQL or ISO-8601), plus ROW, ARRAY, MAP, and MULTISET nested
+  recursively over that set (a null field inside a nested row follows `encode.ignore-null-fields`
+  exactly as Flink's recursive converter does; array elements and map values keep explicit nulls
+  regardless). Map keys must be in the CHARACTER_STRING family — Flink's own converter throws for
+  anything else (a MULTISET's element is its key), so a non-string-keyed column declines and
+  Flink raises its own error. Null map keys follow `json.map-null-key.mode`: DROP and LITERAL
+  (with `json.map-null-key.literal`) are reproduced byte for byte, and the default FAIL mode
+  fails the record at runtime with a message pointing at the option, as Flink's does (a
+  data-dependent failure cannot gate at plan time). Duplicate map keys collapse the way Jackson's
+  ObjectNode does — first position, last value — with one documented corner: a duplicate key
+  whose value is a nested ROW under `encode.ignore-null-fields` merges field-by-field in Flink
+  (an ObjectNode-reuse artifact) but takes the whole last value natively. The options include
   `encode.ignore-null-fields` and both
   decimal spellings (`encode.decimal-as-plain-number` keeps the column scale; the default
   reproduces Jackson's `stripTrailingZeros().toString()`, scientific notation included). Each
@@ -557,8 +566,11 @@ shapes persist their per-key deadlines in a dedicated state table).
     key prefix, or `EXCEPT_KEY` value projection;
   - a non-default partitioner, sink-side buffer flushing, writable metadata, or any other sink
     ability;
-  - a changelog input to ordinary `kafka`, a column outside the verified type family above
-    (MAP/MULTISET, the INTERVAL types), or an unrecognized delivery/transaction option;
+  - a changelog input to ordinary `kafka`, a column outside the verified type family above (a
+    non-string-keyed MAP/MULTISET — which Flink itself cannot serialize — or the INTERVAL types),
+    an out-of-range `json.*` option value (Flink's format factory then raises its own validation
+    error), a `json.map-null-key.literal` containing a line break, or an unrecognized
+    delivery/transaction option;
   - missing `properties.bootstrap.servers`, or exactly-once without a transactional ID prefix;
   - exactly-once with a transaction naming strategy other than `INCREMENTING` (`POOLING` is a
     planned follow-up);
