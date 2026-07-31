@@ -16,13 +16,14 @@ import java.util.Set;
 import org.apache.avro.Schema;
 
 /**
- * The Confluent schema registry's read side, as the native registry-Avro decodes ({@code
- * avro-confluent} and {@code debezium-avro-confluent}) need it: fetch a writer schema by the id each
- * message is framed with ({@code GET /schemas/ids/<id>}), exactly the lookup Flink's own deserializer
- * makes through the registry client. Deliberately a plain HTTP client rather than a dependency on the
- * Confluent client library — the only call used is this one GET, and staying dependency-free keeps
- * the build self-contained. Registry auth/SSL options are not translated, so the planner routes only
- * tables without them (they fall back to Flink).
+ * The Confluent schema registry as the native registry-Avro formats need it: the decodes ({@code
+ * avro-confluent} and {@code debezium-avro-confluent}) fetch a writer schema by the id each message
+ * is framed with ({@code GET /schemas/ids/<id>}), and the sink encode registers its derived writer
+ * schema once at open ({@code POST /subjects/<subject>/versions}) — exactly the two calls Flink's
+ * own de/serializers make through the registry client. Deliberately a plain HTTP client rather than
+ * a dependency on the Confluent client library — only these two calls are used, and staying
+ * dependency-free keeps the build self-contained. Registry auth/SSL options are not translated, so
+ * the planner routes only tables without them (they fall back to Flink).
  *
  * <p>Serializable (the URL list travels in the operator to distributed task managers); the HTTP client
  * is created lazily on first fetch.
@@ -82,6 +83,25 @@ public class ConfluentSchemaRegistry implements Serializable {
   }
 
   /**
+   * Builds the registry accessor from one format instance's prefix-stripped options (the sink
+   * seam's spelling — a key format has no table-level prefix to resolve), with the same
+   * untranslated-option gate as {@link #fromOptions}. The registry options with fallback keys
+   * ({@code schema-registry.url}, {@code schema-registry.schema}) are honored both ways.
+   */
+  public static ConfluentSchemaRegistry fromFormatOptions(Map<String, String> options) {
+    String url = options.getOrDefault("url", options.get("schema-registry.url"));
+    if (url == null || options.containsKey("schema-registry.schema")) {
+      return null;
+    }
+    for (String option : UNSUPPORTED_OPTIONS) {
+      if (options.containsKey(option)) {
+        return null;
+      }
+    }
+    return new ConfluentSchemaRegistry(url.split(","));
+  }
+
+  /**
    * Fetches the writer schema registered under {@code id}, trying each base URL in order. Fails like
    * Flink's deserializer does when the registry can't supply the schema — the record is undecodable
    * without it.
@@ -119,6 +139,55 @@ public class ConfluentSchemaRegistry implements Serializable {
       }
     }
     throw new IOException("Could not find schema with id " + id + " in registry", failure);
+  }
+
+  /**
+   * Registers {@code schemaJson} under {@code subject} ({@code POST /subjects/<subject>/versions})
+   * and returns the id the registry assigned — the exact call Flink's serializer makes through the
+   * registry client before framing each message, made once at sink open. An already-registered
+   * schema gets its existing id back; an incompatible one fails the job with the registry's
+   * response (Flink surfaces the same RestClientException at the first serialized record).
+   */
+  public int register(String subject, String schemaJson) throws IOException {
+    if (client == null) {
+      client = HttpClient.newHttpClient();
+    }
+    ObjectMapper mapper = new ObjectMapper();
+    String body = mapper.createObjectNode().put("schema", schemaJson).toString();
+    IOException failure = null;
+    for (String base : urls) {
+      String url = base.trim();
+      url =
+          (url.endsWith("/") ? url.substring(0, url.length() - 1) : url)
+              + "/subjects/"
+              + subject
+              + "/versions";
+      try {
+        HttpRequest request =
+            HttpRequest.newBuilder(URI.create(url))
+                .header("Accept", "application/vnd.schemaregistry.v1+json")
+                .header("Content-Type", "application/vnd.schemaregistry.v1+json")
+                .POST(HttpRequest.BodyPublishers.ofString(body))
+                .build();
+        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+        if (response.statusCode() != 200) {
+          throw new IOException(
+              "schema registry returned "
+                  + response.statusCode()
+                  + " registering subject "
+                  + subject
+                  + ": "
+                  + response.body());
+        }
+        return mapper.readTree(response.body()).get("id").asInt();
+      } catch (IOException e) {
+        failure = e;
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        throw new IOException("interrupted registering subject " + subject, e);
+      }
+    }
+    throw new IOException("Could not register schema under subject " + subject, failure);
   }
 
   /**

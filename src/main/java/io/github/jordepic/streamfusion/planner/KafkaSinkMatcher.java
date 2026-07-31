@@ -6,6 +6,7 @@ import io.github.jordepic.streamfusion.kafka.NativeKafka;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import org.apache.calcite.rel.RelNode;
 import org.apache.flink.table.catalog.ContextResolvedTable;
@@ -60,7 +61,8 @@ final class KafkaSinkMatcher {
   }
 
   /** The value formats the native serializer implements, by Flink format identifier. */
-  private static final Set<String> NATIVE_VALUE_FORMATS = Set.of("json", "csv");
+  private static final Set<String> NATIVE_VALUE_FORMATS =
+      Set.of("json", "csv", "avro", "avro-confluent");
 
   static boolean appliesTo(StreamPhysicalSink sink) {
     Map<String, String> options = options(sink);
@@ -102,21 +104,17 @@ final class KafkaSinkMatcher {
       }
     }
     EncodeFormat valueFormat =
-        EncodeFormat.of(valueFormatId, translated.planned().valueFormatOptions);
+        EncodeFormat.of(valueFormatId, translated.planned().valueFormatOptions, rowType);
     if (valueFormat == null || !encodedByNativeLibrary(valueFormat)) {
       return Planned.fallback(
-          "value format " + valueFormatId + " is not natively encoded with these options");
+          "value format " + valueFormatId + " is not natively encoded"
+              + " with these options and row type");
     }
     EncodeFormat keyFormat = valueFormat;
     int[] valueFields = IntStream.range(0, rowType.getFieldCount()).toArray();
     int[] keyFields = new int[0];
     if (translated.planned().upsert) {
       String keyFormatId = translated.planned().keyFormat;
-      keyFormat = EncodeFormat.of(keyFormatId, translated.planned().keyFormatOptions);
-      if (keyFormat == null || !encodedByNativeLibrary(keyFormat)) {
-        return Planned.fallback(
-            "key format " + keyFormatId + " is not natively encoded with these options");
-      }
       List<String> primaryKey =
           table.getResolvedSchema().getPrimaryKey().orElseThrow().getColumns();
       keyFields =
@@ -126,6 +124,21 @@ final class KafkaSinkMatcher {
         if (!supportsType(keyFormatId, type)) {
           return Planned.fallback("key " + keyFormatId + " type " + type.asSummaryString());
         }
+      }
+      // The key format serializes its own row: the PK projection, exactly the row type Flink's
+      // upsert-kafka factory hands the key format's encoder.
+      RowType keyRowType =
+          new RowType(
+              false,
+              IntStream.of(keyFields)
+                  .mapToObj(rowType.getFields()::get)
+                  .collect(Collectors.toList()));
+      keyFormat =
+          EncodeFormat.of(keyFormatId, translated.planned().keyFormatOptions, keyRowType);
+      if (keyFormat == null || !encodedByNativeLibrary(keyFormat)) {
+        return Planned.fallback(
+            "key format " + keyFormatId + " is not natively encoded"
+                + " with these options and key type");
       }
     }
     return new Planned(
@@ -156,6 +169,11 @@ final class KafkaSinkMatcher {
     switch (formatIdentifier) {
       case "csv":
         return supportsCsvType(type, false);
+      case "avro":
+      case "avro-confluent":
+        // The avro providers gate their own row type by rerunning Flink's schema derivation
+        // inside EncodeFormat.of; nothing to pre-screen per column here.
+        return true;
       default:
         return false;
     }

@@ -1,5 +1,7 @@
 package io.github.jordepic.streamfusion.format.avro;
 
+import io.github.jordepic.streamfusion.format.EncodeFormat;
+import io.github.jordepic.streamfusion.format.FormatCodes;
 import io.github.jordepic.streamfusion.format.NativeFormatContext;
 import io.github.jordepic.streamfusion.format.NativeFormatOptions;
 import io.github.jordepic.streamfusion.format.NativeFormatProvider;
@@ -7,6 +9,7 @@ import io.github.jordepic.streamfusion.format.NativeMessageDecoderFactory;
 import io.github.jordepic.streamfusion.format.NativeSchemaMessageDecoder;
 import java.util.Map;
 import org.apache.flink.formats.avro.typeutils.AvroSchemaConverter;
+import org.apache.flink.table.types.logical.RowType;
 
 /** Native provider for Flink's schema-embedded {@code avro} format. */
 public final class AvroFormatProvider implements NativeFormatProvider {
@@ -42,6 +45,23 @@ public final class AvroFormatProvider implements NativeFormatProvider {
   /** Flink's {@code avro.timestamp_mapping.legacy}, default true. */
   private static boolean legacyTimestampMapping(Map<String, String> options) {
     return !"false".equalsIgnoreCase(NativeFormatOptions.option(options, "timestamp_mapping.legacy"));
+  }
+
+  @Override
+  public EncodeFormat encodeFormat(RowType rowType, Map<String, String> options) {
+    // The sink seam hands each format instance its prefix-stripped options (a key format has no
+    // value-format spelling for NativeFormatOptions to resolve).
+    if (!"binary".equalsIgnoreCase(options.getOrDefault("encoding", "binary"))) {
+      return null;
+    }
+    boolean legacy = !"false".equalsIgnoreCase(options.get("timestamp_mapping.legacy"));
+    if (!AvroEncodeGate.supports(rowType, legacy)) {
+      return null;
+    }
+    // The derived writer schema travels to the native encoder verbatim, so the wire bytes carry
+    // Flink's exact record names, union order, and logical types.
+    String schema = AvroSchemaConverter.convertToSchema(rowType, legacy).toString();
+    return EncodeFormat.resolved(FormatCodes.AVRO, "avro-schema=" + schema + "\n", null);
   }
 
   @Override

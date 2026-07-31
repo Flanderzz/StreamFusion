@@ -594,11 +594,11 @@ shapes persist their per-key deadlines in a dedicated state table).
   - an upsert-materialized sink — when Flink decides the upsert changelog arrives out of order it
     bakes a stateful `SinkUpsertMaterializer` into its own sink translation, which a substituted
     sink would silently drop;
-  - a value format outside the JSON family (plain `json` or the four CDC JSON envelopes) and
-    `csv`, or multiple/dynamic topics; a keyed ordinary `kafka` table; an `upsert-kafka` table
-    whose key or value format is outside JSON/CSV; `debezium-json.schema-include=true` (rejected
-    by Flink's own sink factory); or an explicit key/value projection, key prefix, or `EXCEPT_KEY`
-    value projection;
+  - a value format outside the JSON family (plain `json` or the four CDC JSON envelopes), `csv`,
+    `avro`, and `avro-confluent`, or multiple/dynamic topics; a keyed ordinary `kafka` table; an
+    `upsert-kafka` table whose key or value format is outside JSON/CSV/Avro/`avro-confluent`;
+    `debezium-json.schema-include=true` (rejected by Flink's own sink factory); or an explicit
+    key/value projection, key prefix, or `EXCEPT_KEY` value projection;
   - a connector library built without the format's encode arm (probed at plan time, so a missing
     optional format is a fallback rather than a runtime dispatch failure);
   - a non-default partitioner, sink-side buffer flushing, writable metadata, or any other sink
@@ -631,6 +631,42 @@ shapes persist their per-key deadlines in a dedicated state table).
     partitioning or `partitioner.ignore.keys=true`, `batch.size=0`, JKS or other
     non-PEM security material, SASL/GSSAPI (Kerberos) or a SASL mechanism outside
     PLAIN/SCRAM-SHA-256/SCRAM-SHA-512, or a config kafka-clients itself rejects.
+- **Kafka Avro sink (`avro` and `avro-confluent`)** — both registryless and Confluent-framed Avro
+  serialize natively, in the same two delivery shapes (and with the same sink-shape fallbacks) as
+  the JSON entry above; both are legal `upsert-kafka` key and value formats (Avro is insert-only),
+  with the key format serializing the primary-key projection as its own format instance. The
+  writer schema is derived from the sink row type with Flink's own converter and shipped to the
+  native encoder verbatim, so record names, null-first unions, and logical types match Flink's
+  bytes exactly; a row type the derivation rejects (RAW, intervals, TIME(p>3), TIMESTAMP beyond the
+  active mapping's precision, TIMESTAMP_LTZ under the legacy mapping, non-string map keys) declines
+  and Flink raises its own submission error. Bare `avro` honors `avro.timestamp_mapping.legacy`
+  both ways; `avro-confluent` hard-wires the legacy mapping, exactly like Flink. For
+  `avro-confluent`, the subject is auto-completed from the single fixed topic
+  (`<topic>-value`/`<topic>-key`, never overriding an explicit subject) the way Flink's Kafka
+  factories do, and the schema is registered once at sink open (`POST /subjects/<subject>/versions`)
+  with the returned id framing every message — a rejected registration (incompatible schema,
+  unreachable registry) fails the job like Flink's serializer failing its first record. Two Flink
+  converter behaviors are reproduced deliberately rather than "fixed": every timestamp flavor is
+  written as an epoch-millisecond long even into a `*-timestamp-micros` schema (Flink calls
+  `toEpochMilli` unconditionally, so micros values read 1000x small and sub-millisecond digits are
+  dropped), and map/multiset entries serialize in `java.util.HashMap` iteration order (Flink copies
+  each map through a HashMap before Avro walks its `entrySet`), including first-position/last-value
+  duplicate-key collapse. A NULL map key fails the record at runtime as Flink's converter does (a
+  data-dependent failure that cannot gate at plan time). BINARY(n) columns, which the Avro *decode*
+  declines, encode fine: the schema says `bytes` and the fixed-size boundary value widens
+  losslessly. Every Avro-specific fallback cause:
+  - `avro.encoding = 'json'` (a different wire format);
+  - a TIME(0) column — its Arrow boundary form is seconds, but Flink serializes the row's full
+    milliseconds (TIME(1..3) is exact; the derivation rejects higher precisions);
+  - registry options the native client does not translate, exactly as on the decode side: an
+    explicit `schema`, `properties.*`, or any `ssl.*`/`basic-auth.*`/`bearer-auth.*` option;
+  - a missing `streamfusion-avro`/`streamfusion-avro-confluent-registry` JAR (the provider seam
+    treats it as an absent native format).
+
+  One loud native-only failure mode: nine map keys sharing one hash bucket of a 64-slot-or-larger
+  table would make Java treeify the bin and iterate in red-black-tree order, which the native
+  encode does not reproduce — it fails the record with an explicit error instead of silently
+  reordering.
 - **Kafka** — missing `streamfusion-kafka` or the matching `streamfusion-*` format JAR; a value format
   outside JSON/CSV/raw/bare-Avro/`avro-confluent`/protobuf and the CDC formats (the four JSON
   dialects and `debezium-avro-confluent` — see the CDC entry); a `key.format`;

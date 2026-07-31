@@ -25,6 +25,8 @@ public final class NativeKafkaSerializationOperator
   private final int[] keyFields;
   private final int[] valueFields;
   private final boolean upsert;
+  private transient String valueFormatOptions;
+  private transient String keyFormatOptions;
   private transient Counter serializationBatches;
   private transient Counter serializationRows;
   private transient Counter serializedBytes;
@@ -50,6 +52,8 @@ public final class NativeKafkaSerializationOperator
   @Override
   public void open() throws Exception {
     super.open();
+    valueFormatOptions = valueFormat.openOptions();
+    keyFormatOptions = keyFormat == valueFormat ? valueFormatOptions : keyFormat.openOptions();
     serializationBatches = getMetricGroup().counter("nativeKafkaSerializationBatches");
     serializationRows = getMetricGroup().counter("nativeKafkaSerializationRows");
     serializedBytes = getMetricGroup().counter("nativeKafkaSerializedBytes");
@@ -73,9 +77,9 @@ public final class NativeKafkaSerializationOperator
                 array.memoryAddress(),
                 schema.memoryAddress(),
                 valueFormat.format,
-                valueFormat.options,
+                valueFormatOptions,
                 keyFormat.format,
-                keyFormat.options,
+                keyFormatOptions,
                 logicalTypes,
                 fieldNames,
                 keyFields,

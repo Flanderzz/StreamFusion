@@ -9,6 +9,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.github.jordepic.streamfusion.format.EncodeFormat;
 import java.util.Map;
 import org.apache.flink.connector.base.DeliveryGuarantee;
+import org.apache.flink.table.types.logical.BigIntType;
+import org.apache.flink.table.types.logical.LocalZonedTimestampType;
+import org.apache.flink.table.types.logical.RowType;
 import org.junit.jupiter.api.Test;
 
 class KafkaSinkTranslatorTest {
@@ -49,25 +52,57 @@ class KafkaSinkTranslatorTest {
     assertFallback(with(base, "topic", "a;b"), "one fixed topic");
   }
 
-  /** The encode-format seam: only resolvable (format, options) pairs produce a native instance. */
+  /** The encode-format seam: only resolvable (format, options, row) triples produce an instance. */
   @Test
   void resolvesOnlyNativelyEncodedFormatInstances() {
-    assertNotNull(EncodeFormat.of("json", Map.of()));
-    assertNull(EncodeFormat.of("avro", Map.of()));
-    assertNull(EncodeFormat.of(null, Map.of()));
-    assertNull(EncodeFormat.of("json", Map.of("timestamp-format.standard", "RFC-1123")));
-    assertNull(EncodeFormat.of("json", Map.of("encode.ignore-null-fields", "yes")));
+    RowType rowType = RowType.of(false, new BigIntType());
+    assertNotNull(EncodeFormat.of("json", Map.of(), rowType));
+    // A format with no installed provider (or no native serializer) declines, never errors.
+    assertNull(EncodeFormat.of("sequence-file", Map.of(), rowType));
+    assertNull(EncodeFormat.of(null, Map.of(), rowType));
+    assertNull(EncodeFormat.of("json", Map.of("timestamp-format.standard", "RFC-1123"), rowType));
+    assertNull(EncodeFormat.of("json", Map.of("encode.ignore-null-fields", "yes"), rowType));
     EncodeFormat iso =
         EncodeFormat.of(
             "json",
             Map.of(
                 "timestamp-format.standard", "ISO-8601",
                 "encode.ignore-null-fields", "TRUE",
-                "encode.decimal-as-plain-number", "false"));
+                "encode.decimal-as-plain-number", "false"),
+            rowType);
     assertNotNull(iso);
     assertTrue(iso.options.contains("timestamp-format=ISO-8601"));
     assertTrue(iso.options.contains("encode.ignore-null-fields=true"));
     assertFalse(iso.options.contains("decimal-as-plain-number"));
+  }
+
+  /** The provider-backed avro instances: derivation-based gates plus the confluent subject. */
+  @Test
+  void resolvesAvroFormatInstancesThroughTheirProviders() {
+    RowType rowType = RowType.of(false, new BigIntType());
+    EncodeFormat avro = EncodeFormat.of("avro", Map.of(), rowType);
+    assertNotNull(avro);
+    assertTrue(avro.options.startsWith("avro-schema={\"type\":\"record\""));
+    assertNull(EncodeFormat.of("avro", Map.of("encoding", "json"), rowType));
+    // Legacy mapping (the default) cannot derive TIMESTAMP_LTZ; the corrected mapping can.
+    RowType ltz = RowType.of(false, new LocalZonedTimestampType(3));
+    assertNull(EncodeFormat.of("avro", Map.of(), ltz));
+    assertNotNull(EncodeFormat.of("avro", Map.of("timestamp_mapping.legacy", "false"), ltz));
+
+    Map<String, String> confluent =
+        Map.of("url", "http://registry:8081", "schema-registry.subject", "t-value");
+    assertNotNull(EncodeFormat.of("avro-confluent", confluent, rowType));
+    // avro-confluent hard-wires the legacy mapping, so TIMESTAMP_LTZ never resolves.
+    assertNull(EncodeFormat.of("avro-confluent", confluent, ltz));
+    assertNull(EncodeFormat.of("avro-confluent", Map.of("url", "http://r:8081"), rowType));
+    assertNull(
+        EncodeFormat.of(
+            "avro-confluent",
+            Map.of(
+                "url", "http://r:8081",
+                "subject", "t-value",
+                "basic-auth.user-info", "user:pass"),
+            rowType));
   }
 
   @Test
@@ -88,6 +123,29 @@ class KafkaSinkTranslatorTest {
         Map.of("timestamp-format.standard", "ISO-8601"), result.planned().keyFormatOptions);
     assertEquals(
         Map.of("encode.decimal-as-plain-number", "true"), result.planned().valueFormatOptions);
+  }
+
+  /** Flink's factories complete a registry format's subject from the topic on a context copy the
+   * planner hook never sees; the translator replays it, never overriding an explicit subject. */
+  @Test
+  void autoCompletesTheSchemaRegistrySubjectFromTheTopic() {
+    KafkaSinkTranslator.Result result =
+        KafkaSinkTranslator.translate(
+            Map.of(
+                "connector", "upsert-kafka",
+                "topic", "orders",
+                "properties.bootstrap.servers", "broker:9092",
+                "value.format", "avro-confluent",
+                "value.avro-confluent.url", "http://registry:8081",
+                "key.format", "avro-confluent",
+                "key.avro-confluent.url", "http://registry:8081",
+                "key.avro-confluent.subject", "explicit-subject"));
+
+    assertTrue(result.fallbackReason == null, () -> result.fallbackReason);
+    assertEquals(
+        "orders-value", result.planned().valueFormatOptions.get("schema-registry.subject"));
+    assertEquals("explicit-subject", result.planned().keyFormatOptions.get("subject"));
+    assertNull(result.planned().keyFormatOptions.get("schema-registry.subject"));
   }
 
   @Test

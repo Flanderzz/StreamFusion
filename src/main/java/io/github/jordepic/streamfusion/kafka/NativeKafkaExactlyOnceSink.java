@@ -157,6 +157,8 @@ public final class NativeKafkaExactlyOnceSink
     private final Counter flushNanos;
     private final String[] configKeys;
     private final String[] configValues;
+    private final String valueFormatOptions;
+    private final String keyFormatOptions;
     private final ExecutorService producerWarmer;
     private final Admin adminClient;
     private CompletableFuture<WarmedProducer> warmingProducer;
@@ -199,6 +201,9 @@ public final class NativeKafkaExactlyOnceSink
       this.flushNanos = context.metricGroup().counter("nativeKafkaProducerFlushNanos");
       this.configKeys = nativeProducerConfig.keySet().toArray(new String[0]);
       this.configValues = nativeProducerConfig.values().toArray(new String[0]);
+      this.valueFormatOptions = valueFormat.openOptions();
+      this.keyFormatOptions =
+          keyFormat == valueFormat ? valueFormatOptions : keyFormat.openOptions();
       this.producerWarmer =
           Executors.newSingleThreadExecutor(
               runnable -> {
@@ -241,9 +246,9 @@ public final class NativeKafkaExactlyOnceSink
                   array.memoryAddress(),
                   schema.memoryAddress(),
                   valueFormat.format,
-                  valueFormat.options,
+                  valueFormatOptions,
                   keyFormat.format,
-                  keyFormat.options,
+                  keyFormatOptions,
                   logicalTypes,
                   fieldNames,
                   keyFields,

@@ -1,9 +1,11 @@
 package io.github.jordepic.streamfusion.format;
 
+import java.io.IOException;
 import java.io.Serializable;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import org.apache.flink.table.types.logical.RowType;
 
 /**
  * One native sink format instance: the wire-format code and its encode-affecting options rendered
@@ -17,39 +19,63 @@ public final class EncodeFormat implements Serializable {
 
   private static final long serialVersionUID = 1L;
 
+  /** Work a format instance defers to sink open, completing the plan-time option lines. */
+  public interface OpenCompletion extends Serializable {
+    String complete(String options) throws IOException;
+  }
+
   public final int format;
   public final String options;
+  private final OpenCompletion completion;
 
-  private EncodeFormat(int format, String options) {
+  private EncodeFormat(int format, String options, OpenCompletion completion) {
     this.format = format;
     this.options = options;
+    this.completion = completion;
   }
 
   /**
-   * Resolves one format instance from its identifier and prefix-stripped table options, or null
-   * when the format (or one of its option values) is not natively encoded — the planner's fallback
-   * gate. An out-of-range option value also returns null so the query stays on Flink, whose own
-   * format factory raises its ValidationException; the native path never runs a validation Flink
-   * would have failed.
+   * Resolves one format instance from its identifier, prefix-stripped table options, and the row
+   * type it will serialize, or null when the format (or one of its option values, or a row type its
+   * mapping cannot carry) is not natively encoded — the planner's fallback gate. An out-of-range
+   * option value also returns null so the query stays on Flink, whose own format factory raises its
+   * ValidationException; the native path never runs a validation Flink would have failed. JSON is
+   * part of the connector itself; other formats resolve through their installed provider artifact.
    */
-  public static EncodeFormat of(String identifier, Map<String, String> options) {
+  public static EncodeFormat of(String identifier, Map<String, String> options, RowType rowType) {
     int code = FormatCodes.forIdentifier(identifier);
     if (code == FormatCodes.CSV) {
       return csv(options);
     }
-    if (!FormatCodes.isJsonFamily(identifier)) {
-      return null;
+    if (FormatCodes.isJsonFamily(identifier)) {
+      // Flink's debezium-json factory rejects schema-include on the serialization side; declining
+      // keeps that ValidationException on Flink. The CDC dialects otherwise forward the shared
+      // json.* option set to their nested row serializer (canal's database/table filters are
+      // deserialization-only and ignored on write, as in Flink).
+      if (code == FormatCodes.DEBEZIUM_JSON
+          && Boolean.parseBoolean(options.get("schema-include"))) {
+        return null;
+      }
+      EncodeFormat json = json(options);
+      return json == null ? null : new EncodeFormat(code, json.options, null);
     }
-    // Flink's debezium-json factory rejects schema-include on the serialization side; declining
-    // keeps that ValidationException on Flink. The CDC dialects otherwise forward the shared
-    // json.* option set to their nested row serializer (canal's database/table filters are
-    // deserialization-only and ignored on write, as in Flink).
-    if (code == FormatCodes.DEBEZIUM_JSON
-        && Boolean.parseBoolean(options.get("schema-include"))) {
-      return null;
-    }
-    EncodeFormat json = json(options);
-    return json == null ? null : new EncodeFormat(code, json.options);
+    return NativeFormatProviders.forIdentifier(identifier)
+        .map(provider -> provider.encodeFormat(rowType, options))
+        .orElse(null);
+  }
+
+  /** A provider-resolved format instance; a non-null completion runs once at sink open. */
+  public static EncodeFormat resolved(int format, String options, OpenCompletion completion) {
+    return new EncodeFormat(format, options, completion);
+  }
+
+  /**
+   * The option lines the encode calls use, running any open-time completion (for example schema
+   * registration, whose returned id the native framing needs). Called once per sink open; a
+   * completion failure fails the job exactly like Flink's serializer failing its first record.
+   */
+  public String openOptions() throws IOException {
+    return completion == null ? options : completion.complete(options);
   }
 
   /** JSON encode options resolved with Flink's json format factory defaults. */
@@ -81,7 +107,7 @@ public final class EncodeFormat implements Serializable {
       }
       encoded.append("map-null-key.literal=").append(nullKeyLiteral).append('\n');
     }
-    return new EncodeFormat(FormatCodes.JSON, encoded.toString());
+    return new EncodeFormat(FormatCodes.JSON, encoded.toString(), null);
   }
 
   /**
@@ -135,7 +161,7 @@ public final class EncodeFormat implements Serializable {
     if (!appendBoolean(encoded, "write-bigdecimal-in-scientific-notation", options)) {
       return null;
     }
-    return new EncodeFormat(FormatCodes.CSV, encoded.toString());
+    return new EncodeFormat(FormatCodes.CSV, encoded.toString(), null);
   }
 
   /** A single-character option as Flink validates it; null when absent, false when unusable. */

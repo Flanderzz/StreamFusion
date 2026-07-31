@@ -1,11 +1,16 @@
 package io.github.jordepic.streamfusion.format.avroconfluent;
 
+import io.github.jordepic.streamfusion.format.EncodeFormat;
+import io.github.jordepic.streamfusion.format.FormatCodes;
 import io.github.jordepic.streamfusion.format.NativeFormatContext;
 import io.github.jordepic.streamfusion.format.NativeFormatProvider;
 import io.github.jordepic.streamfusion.format.NativeMessageDecoderFactory;
 import io.github.jordepic.streamfusion.format.avro.AvroDecodeGate;
+import io.github.jordepic.streamfusion.format.avro.AvroEncodeGate;
 import io.github.jordepic.streamfusion.kafka.ConfluentSchemaRegistry;
+import java.util.Map;
 import org.apache.flink.formats.avro.typeutils.AvroSchemaConverter;
+import org.apache.flink.table.types.logical.RowType;
 
 /** Native provider for Flink's {@code avro-confluent} format. */
 public final class AvroConfluentFormatProvider implements NativeFormatProvider {
@@ -39,5 +44,23 @@ public final class AvroConfluentFormatProvider implements NativeFormatProvider {
     ConfluentSchemaRegistry registry = ConfluentSchemaRegistry.fromOptions(context.options());
     String readerSchema = AvroSchemaConverter.convertToSchema(context.outputType().copy(false)).toString();
     return () -> new RegistryAvroDecoder(registry, readerSchema, false);
+  }
+
+  @Override
+  public EncodeFormat encodeFormat(RowType rowType, Map<String, String> options) {
+    ConfluentSchemaRegistry registry = ConfluentSchemaRegistry.fromFormatOptions(options);
+    // The subject is required for serialization; the sink translator auto-completes it from the
+    // topic under the fallback spelling exactly like Flink's Kafka factories, so a missing one
+    // means an option shape (multiple topics) the translator already declined.
+    String subject = options.getOrDefault("subject", options.get("schema-registry.subject"));
+    // Flink's avro-confluent serializer hard-wires the legacy timestamp mapping, like the decode.
+    if (registry == null || subject == null || !AvroEncodeGate.supports(rowType, true)) {
+      return null;
+    }
+    String schema = AvroSchemaConverter.convertToSchema(rowType).toString();
+    return EncodeFormat.resolved(
+        FormatCodes.AVRO_CONFLUENT,
+        "avro-schema=" + schema + "\n",
+        new ConfluentSchemaRegistration(registry, subject, schema));
   }
 }

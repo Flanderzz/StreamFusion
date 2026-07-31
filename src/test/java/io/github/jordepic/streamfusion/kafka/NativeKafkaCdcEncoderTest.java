@@ -91,8 +91,8 @@ class NativeKafkaCdcEncoderTest {
   /** schema-include is rejected by Flink's debezium sink factory, so it must not resolve natively. */
   @Test
   void debeziumSchemaIncludeStaysOnFlink() {
-    assertNull(EncodeFormat.of("debezium-json", Map.of("schema-include", "true")));
-    assertNotNull(EncodeFormat.of("debezium-json", Map.of("schema-include", "false")));
+    assertNull(EncodeFormat.of("debezium-json", Map.of("schema-include", "true"), ROW_TYPE));
+    assertNotNull(EncodeFormat.of("debezium-json", Map.of("schema-include", "false"), ROW_TYPE));
   }
 
   /** Canal's database/table filters are deserialization-only; Flink ignores them on write. */
@@ -100,7 +100,9 @@ class NativeKafkaCdcEncoderTest {
   void canalIgnoresDeserializationOnlyFilters() {
     assertNotNull(
         EncodeFormat.of(
-            "canal-json", Map.of("database.include", "mydb", "table.include", "orders")));
+            "canal-json",
+            Map.of("database.include", "mydb", "table.include", "orders"),
+            ROW_TYPE));
   }
 
   private interface FlinkCdcSchema {
@@ -212,7 +214,8 @@ class NativeKafkaCdcEncoderTest {
                 "timestamp-format.standard",
                 timestampFormat == TimestampFormat.SQL ? "SQL" : "ISO-8601",
                 "encode.ignore-null-fields",
-                String.valueOf(ignoreNullFields)));
+                String.valueOf(ignoreNullFields)),
+            ROW_TYPE);
     assertNotNull(format, identifier);
 
     try (BufferAllocator allocator = new RootAllocator();

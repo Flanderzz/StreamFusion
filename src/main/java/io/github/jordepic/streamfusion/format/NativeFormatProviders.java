@@ -6,6 +6,7 @@ import java.util.ServiceConfigurationError;
 import java.util.ServiceLoader;
 import java.util.Set;
 import java.util.HashSet;
+import java.util.function.Predicate;
 
 /** Discovers installed native format artifacts through the same provider pattern Flink uses. */
 public final class NativeFormatProviders {
@@ -20,6 +21,16 @@ public final class NativeFormatProviders {
   /** Finds an installed provider that accepts this table's exact decoder options. */
   public static Optional<NativeFormatProvider> find(NativeFormatContext context) {
     String identifier = formatIdentifier(context.options());
+    return forIdentifier(identifier, provider -> provider.supports(context));
+  }
+
+  /** Finds an installed provider by format identifier, regardless of decode-option support. */
+  public static Optional<NativeFormatProvider> forIdentifier(String identifier) {
+    return forIdentifier(identifier, provider -> true);
+  }
+
+  private static Optional<NativeFormatProvider> forIdentifier(
+      String identifier, Predicate<NativeFormatProvider> accepts) {
     if (identifier == null) {
       return Optional.empty();
     }
@@ -30,7 +41,7 @@ public final class NativeFormatProviders {
       if (loader == null) {
         continue;
       }
-      Optional<NativeFormatProvider> provider = findIn(loader, identifier, context, seen);
+      Optional<NativeFormatProvider> provider = findIn(loader, identifier, accepts, seen);
       if (provider.isPresent()) {
         return provider;
       }
@@ -41,14 +52,14 @@ public final class NativeFormatProviders {
   private static Optional<NativeFormatProvider> findIn(
       ClassLoader loader,
       String identifier,
-      NativeFormatContext context,
+      Predicate<NativeFormatProvider> accepts,
       Set<String> seen) {
     try {
       for (NativeFormatProvider provider : ServiceLoader.load(NativeFormatProvider.class, loader)) {
         if (!seen.add(provider.getClass().getName())) {
           continue;
         }
-        if (identifier.equals(provider.formatIdentifier()) && provider.supports(context)) {
+        if (identifier.equals(provider.formatIdentifier()) && accepts.test(provider)) {
           return Optional.of(provider);
         }
       }

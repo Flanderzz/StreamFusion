@@ -481,6 +481,121 @@ class NativeKafkaSinkSqlPlanTest {
     return false;
   }
 
+  @Test
+  void plansBareAvroSerializationNatively() {
+    StreamTableEnvironment table = environment();
+    table.executeSql(
+        "CREATE TABLE src (id BIGINT, name STRING, amount DECIMAL(10, 2), ts TIMESTAMP(3), "
+            + "items ARRAY<INT>, counts MAP<STRING, INT>, nested ROW<a INT, b STRING>) "
+            + "WITH ('connector' = 'datagen', 'number-of-rows' = '1')");
+    table.executeSql(
+        "CREATE TABLE output (id BIGINT, name STRING, amount DECIMAL(10, 2), ts TIMESTAMP(3), "
+            + "items ARRAY<INT>, counts MAP<STRING, INT>, nested ROW<a INT, b STRING>) WITH ("
+            + "'connector' = 'kafka', "
+            + "'topic' = 'output', "
+            + "'properties.bootstrap.servers' = 'broker:9092', "
+            + "'format' = 'avro')");
+
+    PhysicalPlanScan scan = NativePlanner.install(table);
+    String plan =
+        table.explainSql(
+            "INSERT INTO output SELECT * FROM src", ExplainDetail.JSON_EXECUTION_PLAN);
+
+    assertTrue(scan.substitutions() > 0, scan::explainSummary);
+    assertTrue(plan.contains("NativeKafkaSink"), plan);
+  }
+
+  /** Registration happens at sink open, so planning an avro-confluent sink needs no registry. */
+  @Test
+  void plansAvroConfluentSerializationWithoutContactingTheRegistry() {
+    StreamTableEnvironment table = environment();
+    table.executeSql(
+        "CREATE TABLE src (id BIGINT, name STRING) "
+            + "WITH ('connector' = 'datagen', 'number-of-rows' = '1')");
+    table.executeSql(
+        "CREATE TABLE output (id BIGINT, name STRING) WITH ("
+            + "'connector' = 'kafka', "
+            + "'topic' = 'output', "
+            + "'properties.bootstrap.servers' = 'broker:9092', "
+            + "'format' = 'avro-confluent', "
+            + "'avro-confluent.url' = 'http://registry:8081')");
+
+    PhysicalPlanScan scan = NativePlanner.install(table);
+    String plan =
+        table.explainSql(
+            "INSERT INTO output SELECT * FROM src", ExplainDetail.JSON_EXECUTION_PLAN);
+
+    assertTrue(scan.substitutions() > 0, scan::explainSummary);
+    assertTrue(plan.contains("NativeKafkaSink"), plan);
+  }
+
+  /** Avro is insert-only, so it is a legal upsert key and value format; the key format serializes
+   * the PK projection under its own auto-completed {@code <topic>-key} subject. */
+  @Test
+  void plansUpsertAvroConfluentKeyAndValueFormats() {
+    StreamTableEnvironment table = environment();
+    table.executeSql(
+        "CREATE TABLE src (id BIGINT) "
+            + "WITH ('connector' = 'datagen', 'number-of-rows' = '10')");
+    table.executeSql(
+        "CREATE TABLE output (id BIGINT, total BIGINT, PRIMARY KEY (id) NOT ENFORCED) WITH ("
+            + "'connector' = 'upsert-kafka', "
+            + "'topic' = 'output', "
+            + "'properties.bootstrap.servers' = 'broker:9092', "
+            + "'key.format' = 'avro-confluent', "
+            + "'key.avro-confluent.url' = 'http://registry:8081', "
+            + "'value.format' = 'avro-confluent', "
+            + "'value.avro-confluent.url' = 'http://registry:8081')");
+
+    PhysicalPlanScan scan = NativePlanner.install(table);
+    String plan =
+        table.explainSql(
+            "INSERT INTO output SELECT id, COUNT(*) FROM src GROUP BY id",
+            ExplainDetail.JSON_EXECUTION_PLAN);
+
+    assertTrue(scan.substitutions() > 0, scan::explainSummary);
+    assertTrue(plan.contains("NativeKafkaSink"), plan);
+  }
+
+  /**
+   * Option and type shapes whose Avro serialization the native path does not reproduce: Avro's
+   * JSON encoding, registry auth, TIME(0)'s second-precision boundary, and TIMESTAMP_LTZ under
+   * avro-confluent's hard-wired legacy mapping (where Flink itself fails submission).
+   */
+  @Test
+  void keepsUnreproducedAvroShapesOnFlink() {
+    assertAvroFallback("(id BIGINT)", "'format' = 'avro', 'avro.encoding' = 'json'");
+    assertAvroFallback("(id BIGINT, tod TIME(0))", "'format' = 'avro'");
+    assertAvroFallback(
+        "(id BIGINT)",
+        "'format' = 'avro-confluent', "
+            + "'avro-confluent.url' = 'http://registry:8081', "
+            + "'avro-confluent.basic-auth.credentials-source' = 'USER_INFO', "
+            + "'avro-confluent.basic-auth.user-info' = 'user:pass'");
+  }
+
+  private static void assertAvroFallback(String columns, String formatOptions) {
+    StreamTableEnvironment table = environment();
+    table.executeSql(
+        "CREATE TABLE src " + columns + " WITH ('connector' = 'datagen', 'number-of-rows' = '1')");
+    table.executeSql(
+        "CREATE TABLE output " + columns + " WITH ("
+            + "'connector' = 'kafka', "
+            + "'topic' = 'output', "
+            + "'properties.bootstrap.servers' = 'broker:9092', "
+            + formatOptions + ")");
+
+    PhysicalPlanScan scan = NativePlanner.install(table);
+    String plan =
+        table.explainSql(
+            "INSERT INTO output SELECT * FROM src", ExplainDetail.JSON_EXECUTION_PLAN);
+
+    assertFalse(plan.contains("NativeKafkaSink"), plan);
+    assertTrue(
+        scan.fallbackReasons().stream().anyMatch(reason -> reason.contains("not natively encoded")),
+        scan::explainSummary);
+  }
+
   private static StreamTableEnvironment environment() {
     StreamExecutionEnvironment environment = StreamExecutionEnvironment.getExecutionEnvironment();
     environment.setParallelism(1);

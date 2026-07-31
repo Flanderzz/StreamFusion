@@ -165,6 +165,12 @@ final class KafkaSinkTranslator {
             stripPrefix(key, "key." + keyFormat + ".", value, keyFormatOptions);
           }
         });
+    // Flink's Kafka factories auto-complete a schema-registry format's subject from the (single,
+    // fixed) topic before the format factory validates it — on a copied context our planner hook
+    // never sees, so the same completion happens here, under the same fallback spelling and never
+    // overriding an explicit subject.
+    autoCompleteSchemaRegistrySubject(valueFormat, valueFormatOptions, topic + "-value");
+    autoCompleteSchemaRegistrySubject(keyFormat, keyFormatOptions, topic + "-key");
     Integer parallelism =
         options.containsKey("sink.parallelism")
             ? Integer.valueOf(options.get("sink.parallelism"))
@@ -189,6 +195,15 @@ final class KafkaSinkTranslator {
       String key, String prefix, String value, Map<String, String> into) {
     if (key.startsWith(prefix)) {
       into.put(key.substring(prefix.length()), value);
+    }
+  }
+
+  private static void autoCompleteSchemaRegistrySubject(
+      String format, Map<String, String> formatOptions, String subject) {
+    if ("avro-confluent".equals(format)
+        && !formatOptions.containsKey("subject")
+        && !formatOptions.containsKey("schema-registry.subject")) {
+      formatOptions.put("schema-registry.subject", subject);
     }
   }
 
