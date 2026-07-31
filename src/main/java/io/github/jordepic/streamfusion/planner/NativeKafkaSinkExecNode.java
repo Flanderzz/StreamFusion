@@ -1,5 +1,6 @@
 package io.github.jordepic.streamfusion.planner;
 
+import io.github.jordepic.streamfusion.format.LogicalTypeDescriptors;
 import io.github.jordepic.streamfusion.kafka.NativeKafkaExactlyOnceSink;
 import io.github.jordepic.streamfusion.kafka.NativeKafkaSerializationOperator;
 import io.github.jordepic.streamfusion.kafka.PreSerializedKafkaRecord;
@@ -65,7 +66,7 @@ public final class NativeKafkaSinkExecNode extends ExecNodeBase<Object>
               planned.sink.nativeProducerConfig.maxRequestSize(),
               planned.valueFormat,
               planned.keyFormat,
-              planned.rowType.getChildren().stream().map(Object::toString).toArray(String[]::new),
+              LogicalTypeDescriptors.of(planned.rowType),
               planned.rowType.getFieldNames().toArray(String[]::new),
               planned.keyFields,
               planned.valueFields,
@@ -90,9 +91,7 @@ public final class NativeKafkaSinkExecNode extends ExecNodeBase<Object>
                 new NativeKafkaSerializationOperator(
                     planned.valueFormat,
                     planned.keyFormat,
-                    planned.rowType.getChildren().stream()
-                        .map(Object::toString)
-                        .toArray(String[]::new),
+                    LogicalTypeDescriptors.of(planned.rowType),
                     planned.rowType.getFieldNames().toArray(String[]::new),
                     planned.keyFields,
                     planned.valueFields,

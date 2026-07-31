@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
 import io.github.jordepic.streamfusion.format.EncodeFormat;
+import io.github.jordepic.streamfusion.format.LogicalTypeDescriptors;
 import io.github.jordepic.streamfusion.operator.RowDataArrowConverter;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
@@ -25,10 +26,12 @@ import org.apache.flink.formats.json.JsonRowDataSerializationSchema;
 import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.metrics.groups.UnregisteredMetricsGroup;
 import org.apache.flink.table.data.DecimalData;
+import org.apache.flink.table.data.GenericArrayData;
 import org.apache.flink.table.data.GenericRowData;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.StringData;
 import org.apache.flink.table.data.TimestampData;
+import org.apache.flink.table.types.logical.ArrayType;
 import org.apache.flink.table.types.logical.BooleanType;
 import org.apache.flink.table.types.logical.DateType;
 import org.apache.flink.table.types.logical.DecimalType;
@@ -190,6 +193,98 @@ class NativeKafkaJsonEncoderTest {
   }
 
   /**
+   * Nested rows must reproduce Flink's recursive converter byte for byte: a null field inside a
+   * nested row follows the same {@code encode.ignore-null-fields} choice as the top level, a null
+   * nested row is a single null (or omitted), and the scalar encoders (timestamps, time, strings)
+   * apply unchanged inside the container.
+   */
+  @Test
+  void matchesFlinkForNestedRows() throws Exception {
+    RowType inner =
+        RowType.of(
+            new LogicalType[] {
+              new IntType(),
+              new VarCharType(VarCharType.MAX_LENGTH),
+              new LocalZonedTimestampType(3),
+              new TimestampType(9),
+              new TimeType(3)
+            },
+            new String[] {"a", "b", "instant", "ts", "tod"});
+    RowType rowType =
+        RowType.of(new LogicalType[] {inner, new IntType()}, new String[] {"nested", "x"});
+    TimestampData ts = TimestampData.fromEpochMillis(1_577_934_245_500L);
+    List<RowData> rows =
+        List.of(
+            GenericRowData.of(
+                GenericRowData.of(1, StringData.fromString("quote: \" and 雪"), ts, ts, 45_296_789),
+                7),
+            GenericRowData.of(GenericRowData.of(null, null, null, null, null), null),
+            GenericRowData.of(null, 9));
+
+    assertMatchesFlink(rows, rowType, TimestampFormat.SQL, false);
+    assertMatchesFlink(rows, rowType, TimestampFormat.SQL, true);
+    assertMatchesFlink(rows, rowType, TimestampFormat.ISO_8601, false);
+    assertMatchesFlink(rows, rowType, TimestampFormat.ISO_8601, true);
+  }
+
+  /**
+   * Arrays keep explicit nulls for their elements regardless of {@code encode.ignore-null-fields}
+   * (Flink's array converter always renders a null element), while rows inside arrays and arrays
+   * inside arrays recurse through the same converters — including the Jackson decimal spellings
+   * and base64 binary, which proves the encoder factory applies inside containers.
+   */
+  @Test
+  void matchesFlinkForArrays() throws Exception {
+    RowType element =
+        RowType.of(
+            new LogicalType[] {
+              new DecimalType(10, 2),
+              new VarBinaryType(VarBinaryType.MAX_LENGTH),
+              new LocalZonedTimestampType(9)
+            },
+            new String[] {"amount", "payload", "at"});
+    RowType rowType =
+        RowType.of(
+            new LogicalType[] {
+              new ArrayType(new IntType()),
+              new ArrayType(element),
+              new ArrayType(new ArrayType(new VarCharType(VarCharType.MAX_LENGTH))),
+              new ArrayType(new DateType())
+            },
+            new String[] {"ints", "rows", "matrix", "days"});
+    GenericRowData full =
+        GenericRowData.of(
+            new GenericArrayData(new Object[] {1, null, 3}),
+            new GenericArrayData(
+                new Object[] {
+                  GenericRowData.of(
+                      DecimalData.fromBigDecimal(new BigDecimal("100.00"), 10, 2),
+                      new byte[] {0, -1, 7},
+                      TimestampData.fromEpochMillis(1_577_934_245_123L, 456_789)),
+                  null,
+                  GenericRowData.of(null, null, null)
+                }),
+            new GenericArrayData(
+                new Object[] {
+                  new GenericArrayData(
+                      new Object[] {StringData.fromString("esc\"aped"), null}),
+                  null
+                }),
+            new GenericArrayData(new Object[] {(int) LocalDate.of(2020, 2, 29).toEpochDay()}));
+    GenericRowData empty =
+        GenericRowData.of(
+            new GenericArrayData(new Object[0]),
+            null,
+            new GenericArrayData(new Object[] {new GenericArrayData(new Object[0])}),
+            null);
+    List<RowData> rows = List.of(full, empty);
+
+    assertMatchesFlink(rows, rowType, TimestampFormat.SQL, false);
+    assertMatchesFlink(rows, rowType, TimestampFormat.SQL, true);
+    assertMatchesFlink(rows, rowType, TimestampFormat.ISO_8601, false);
+  }
+
+  /**
    * The upsert key format is its own format instance in Flink, configured solely from {@code
    * key.json.*} (or that format's defaults) — never from the value's settings. The referee builds
    * Flink's key and value serializers the way the upsert-kafka factory would, with deliberately
@@ -253,7 +348,7 @@ class NativeKafkaJsonEncoderTest {
               valueFormat.options,
               keyFormat.format,
               keyFormat.options,
-              rowType.getChildren().stream().map(Object::toString).toArray(String[]::new),
+              LogicalTypeDescriptors.of(rowType),
               rowType.getFieldNames().toArray(String[]::new),
               new int[] {0, 1},
               new int[] {0, 1, 2},
@@ -320,7 +415,7 @@ class NativeKafkaJsonEncoderTest {
               schema.memoryAddress(),
               format.format,
               format.options,
-              rowType.getChildren().stream().map(Object::toString).toArray(String[]::new),
+              LogicalTypeDescriptors.of(rowType),
               rowType.getFieldNames().toArray(String[]::new));
 
       assertEquals(rows.size(), actual.length);

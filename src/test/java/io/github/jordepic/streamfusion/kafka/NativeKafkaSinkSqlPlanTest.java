@@ -66,13 +66,37 @@ class NativeKafkaSinkSqlPlanTest {
   }
 
   @Test
+  void plansNestedRowsAndArraysNatively() {
+    StreamTableEnvironment table = environment();
+    table.executeSql(
+        "CREATE TABLE src (id INT, items ARRAY<INT>, "
+            + "nested ROW<a INT, ts TIMESTAMP_LTZ(3), inner_items ARRAY<ROW<b STRING>>>) "
+            + "WITH ('connector' = 'datagen', 'number-of-rows' = '1')");
+    table.executeSql(
+        "CREATE TABLE output (id INT, items ARRAY<INT>, "
+            + "nested ROW<a INT, ts TIMESTAMP_LTZ(3), inner_items ARRAY<ROW<b STRING>>>) WITH ("
+            + "'connector' = 'kafka', "
+            + "'topic' = 'output', "
+            + "'properties.bootstrap.servers' = 'broker:9092', "
+            + "'format' = 'json')");
+
+    PhysicalPlanScan scan = NativePlanner.install(table);
+    String plan =
+        table.explainSql(
+            "INSERT INTO output SELECT * FROM src", ExplainDetail.JSON_EXECUTION_PLAN);
+
+    assertTrue(scan.substitutions() > 0, scan::explainSummary);
+    assertTrue(plan.contains("NativeKafkaSink"), plan);
+  }
+
+  @Test
   void recordsWhyAnUnverifiedJsonTypeFallsBack() {
     StreamTableEnvironment table = environment();
     table.executeSql(
-        "CREATE TABLE src (id INT, items ARRAY<INT>) "
+        "CREATE TABLE src (id INT, counts MAP<STRING, INT>) "
             + "WITH ('connector' = 'datagen', 'number-of-rows' = '1')");
     table.executeSql(
-        "CREATE TABLE output (id INT, items ARRAY<INT>) WITH ("
+        "CREATE TABLE output (id INT, counts MAP<STRING, INT>) WITH ("
             + "'connector' = 'kafka', "
             + "'topic' = 'output', "
             + "'properties.bootstrap.servers' = 'broker:9092', "
@@ -83,7 +107,7 @@ class NativeKafkaSinkSqlPlanTest {
 
     assertEquals(0, scan.substitutions());
     assertTrue(
-        scan.fallbackReasons().stream().anyMatch(reason -> reason.contains("ARRAY")),
+        scan.fallbackReasons().stream().anyMatch(reason -> reason.contains("MAP")),
         scan::explainSummary);
   }
 

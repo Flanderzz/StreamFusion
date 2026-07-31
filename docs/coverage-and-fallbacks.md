@@ -539,7 +539,10 @@ shapes persist their per-key deadlines in a dedicated state table).
   cross-client transaction hand-off itself (commit, duplicate-commit idempotency, fencing, and
   broker timeout reaping). The native serializer currently covers BOOLEAN,
   TINYINT/SMALLINT/INT/BIGINT, FLOAT/DOUBLE, CHAR/VARCHAR, BINARY/VARBINARY, DECIMAL, DATE, TIME,
-  TIMESTAMP, and TIMESTAMP_LTZ (SQL or ISO-8601), including `encode.ignore-null-fields` and both
+  TIMESTAMP, and TIMESTAMP_LTZ (SQL or ISO-8601), plus ROW and ARRAY nested recursively over that
+  set (a null field inside a nested row follows `encode.ignore-null-fields` exactly as Flink's
+  recursive converter does; array elements keep explicit nulls regardless), including
+  `encode.ignore-null-fields` and both
   decimal spellings (`encode.decimal-as-plain-number` keeps the column scale; the default
   reproduces Jackson's `stripTrailingZeros().toString()`, scientific notation included). Each
   option set configures the format instance it belongs to, as in Flink: value options come from
@@ -554,8 +557,8 @@ shapes persist their per-key deadlines in a dedicated state table).
     key prefix, or `EXCEPT_KEY` value projection;
   - a non-default partitioner, sink-side buffer flushing, writable metadata, or any other sink
     ability;
-  - a changelog input to ordinary `kafka`, a column outside the verified scalar family above, or an
-    unrecognized delivery/transaction option;
+  - a changelog input to ordinary `kafka`, a column outside the verified type family above
+    (MAP/MULTISET, the INTERVAL types), or an unrecognized delivery/transaction option;
   - missing `properties.bootstrap.servers`, or exactly-once without a transactional ID prefix;
   - exactly-once with a transaction naming strategy other than `INCREMENTING` (`POOLING` is a
     planned follow-up);

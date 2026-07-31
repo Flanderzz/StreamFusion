@@ -245,9 +245,9 @@ fn encode_json_records(
     })
 }
 
-#[cfg(feature = "kafka")]
-const FLINK_LOGICAL_TYPE: &str = "streamfusion.flink.logical-type";
-
+/// Rebuilds the batch onto the declared sink boundary: each column takes its declared field name
+/// (the input plan may carry generated expression names) and has its TIMESTAMP_LTZ leaves re-marked
+/// (see `mark_ltz_leaves`), so the encoders below need no side channel.
 #[cfg(feature = "kafka")]
 fn annotate_flink_types(
     batch: &RecordBatch,
@@ -265,27 +265,146 @@ fn annotate_flink_types(
             batch.num_columns()
         ));
     }
-    let fields = batch
-        .schema()
-        .fields()
-        .iter()
-        .zip(logical_types.iter().zip(field_names))
-        .map(|(field, (logical_type, field_name))| {
-            let mut metadata = field.metadata().clone();
-            metadata.insert(FLINK_LOGICAL_TYPE.to_string(), logical_type.clone());
+    let mut fields = Vec::with_capacity(batch.num_columns());
+    let mut columns = Vec::with_capacity(batch.num_columns());
+    for (index, field) in batch.schema().fields().iter().enumerate() {
+        let column = mark_ltz_leaves(batch.column(index).clone(), &logical_types[index])?;
+        fields.push(
             field
                 .as_ref()
                 .clone()
-                .with_name(field_name)
-                .with_metadata(metadata)
-        })
-        .collect::<Vec<_>>();
+                .with_name(&field_names[index])
+                .with_data_type(column.data_type().clone()),
+        );
+        columns.push(column);
+    }
     let schema = Arc::new(Schema::new_with_metadata(
         fields,
         batch.schema().metadata().clone(),
     ));
-    RecordBatch::try_new(schema, batch.columns().to_vec())
+    RecordBatch::try_new(schema, columns)
         .map_err(|error| format!("failed to annotate Kafka JSON schema: {error}"))
+}
+
+/// Re-marks every TIMESTAMP_LTZ leaf with a UTC timezone by walking the column's Flink logical
+/// type descriptor in lockstep with the Arrow tree. The Java boundary maps both of Flink's
+/// timestamp flavors to timezone-less nanoseconds, but the JSON encoder must render an LTZ instant
+/// with Flink's 'Z' designator — at any nesting depth. Only the type tree is rebuilt (buffers are
+/// shared), and a column whose descriptor carries no LTZ leaf passes through untouched.
+#[cfg(feature = "kafka")]
+fn mark_ltz_leaves(array: ArrayRef, descriptor: &str) -> Result<ArrayRef, String> {
+    use arrow::array::cast::AsArray;
+    use arrow::array::{LargeListArray, ListArray, MapArray, StructArray};
+    use arrow::datatypes::TimestampNanosecondType;
+
+    if !descriptor.contains("TIMESTAMP_LTZ") {
+        return Ok(array);
+    }
+    let children = |expected: usize| -> Result<Vec<&str>, String> {
+        let children = descriptor_children(descriptor).ok_or_else(|| {
+            format!("Flink descriptor {descriptor} does not match an Arrow container")
+        })?;
+        if children.len() != expected {
+            return Err(format!(
+                "Flink descriptor {descriptor} has {} children for {expected} Arrow children",
+                children.len()
+            ));
+        }
+        Ok(children)
+    };
+    match array.data_type() {
+        DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None)
+            if descriptor.starts_with("TIMESTAMP_LTZ") =>
+        {
+            let marked =
+                array.as_primitive::<TimestampNanosecondType>().clone().with_timezone("UTC");
+            Ok(Arc::new(marked))
+        }
+        DataType::Struct(struct_fields) => {
+            let children = children(struct_fields.len())?;
+            let (fields, columns, nulls) = array.as_struct().clone().into_parts();
+            let mut new_fields = Vec::with_capacity(columns.len());
+            let mut new_columns = Vec::with_capacity(columns.len());
+            for ((field, column), child) in fields.iter().zip(columns).zip(children) {
+                let column = mark_ltz_leaves(column, child)?;
+                new_fields.push(Arc::new(
+                    field.as_ref().clone().with_data_type(column.data_type().clone()),
+                ));
+                new_columns.push(column);
+            }
+            Ok(Arc::new(StructArray::new(new_fields.into(), new_columns, nulls)))
+        }
+        DataType::List(_) => {
+            let element = children(1)?[0];
+            let (field, offsets, values, nulls) = array.as_list::<i32>().clone().into_parts();
+            let values = mark_ltz_leaves(values, element)?;
+            let field =
+                Arc::new(field.as_ref().clone().with_data_type(values.data_type().clone()));
+            Ok(Arc::new(ListArray::new(field, offsets, values, nulls)))
+        }
+        DataType::LargeList(_) => {
+            let element = children(1)?[0];
+            let (field, offsets, values, nulls) = array.as_list::<i64>().clone().into_parts();
+            let values = mark_ltz_leaves(values, element)?;
+            let field =
+                Arc::new(field.as_ref().clone().with_data_type(values.data_type().clone()));
+            Ok(Arc::new(LargeListArray::new(field, offsets, values, nulls)))
+        }
+        DataType::Map(_, ordered) => {
+            let ordered = *ordered;
+            let children = children(2)?;
+            let map = array.as_map();
+            let offsets = map.offsets().clone();
+            let map_nulls = map.nulls().cloned();
+            let (fields, columns, nulls) = map.entries().clone().into_parts();
+            let mut new_fields = Vec::with_capacity(2);
+            let mut new_columns = Vec::with_capacity(2);
+            for ((field, column), child) in fields.iter().zip(columns).zip(children) {
+                let column = mark_ltz_leaves(column, child)?;
+                new_fields.push(Arc::new(
+                    field.as_ref().clone().with_data_type(column.data_type().clone()),
+                ));
+                new_columns.push(column);
+            }
+            let entries = StructArray::new(new_fields.into(), new_columns, nulls);
+            let DataType::Map(entry_field, _) = array.data_type() else {
+                unreachable!("matched Map above");
+            };
+            let entry_field = Arc::new(
+                entry_field.as_ref().clone().with_data_type(entries.data_type().clone()),
+            );
+            Ok(Arc::new(MapArray::new(entry_field, offsets, entries, map_nulls, ordered)))
+        }
+        _ => Ok(array),
+    }
+}
+
+/// The child descriptors of a container descriptor (`ROW<...>`, `ARRAY<...>`, `MAP<k,v>`), or None
+/// for a scalar leaf. Children are comma-split at bracket depth zero, so a scalar spelling with
+/// inner commas (`DECIMAL(10, 2)`) stays whole.
+#[cfg(feature = "kafka")]
+fn descriptor_children(descriptor: &str) -> Option<Vec<&str>> {
+    let (root, rest) = descriptor.split_once('<')?;
+    if !matches!(root, "ROW" | "ARRAY" | "MAP") {
+        return None;
+    }
+    let inner = rest.strip_suffix('>')?;
+    let mut children = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    for (index, byte) in inner.bytes().enumerate() {
+        match byte {
+            b'<' | b'(' => depth += 1,
+            b'>' | b')' => depth = depth.saturating_sub(1),
+            b',' if depth == 0 => {
+                children.push(inner[start..index].trim());
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    children.push(inner[start..].trim());
+    Some(children)
 }
 
 #[cfg(feature = "kafka")]
@@ -328,17 +447,15 @@ impl arrow::json::writer::EncoderFactory for FlinkJsonEncoderFactory {
             })),
             // TIMESTAMP_LTZ is an instant Flink renders at UTC with a 'Z' designator; plain
             // TIMESTAMP is the same wall-clock digit layout without any zone. Both trim the
-            // fraction to its shortest form (appendFraction(NANO_OF_SECOND, 0, 9, true)).
-            DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, _)
-                if field
-                    .metadata()
-                    .get(FLINK_LOGICAL_TYPE)
-                    .is_some_and(|logical_type| logical_type.starts_with("TIMESTAMP")) =>
-            {
+            // fraction to its shortest form (appendFraction(NANO_OF_SECOND, 0, 9, true)). The
+            // boundary marks LTZ leaves with a UTC timezone (`mark_ltz_leaves`), so the Arrow type
+            // alone selects the designator — at any nesting depth, since arrow-json's container
+            // encoders consult this factory recursively.
+            DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, timezone) => {
                 Some(Box::new(FlinkTimestampEncoder {
                     array: array.as_primitive::<TimestampNanosecondType>(),
                     iso_8601: self.iso_8601,
-                    zulu: field.metadata()[FLINK_LOGICAL_TYPE].starts_with("TIMESTAMP_LTZ"),
+                    zulu: timezone.is_some(),
                 }))
             }
             _ => None,

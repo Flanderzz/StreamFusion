@@ -143,6 +143,9 @@ final class KafkaSinkMatcher {
       case TIMESTAMP_WITHOUT_TIME_ZONE:
       case TIMESTAMP_WITH_LOCAL_TIME_ZONE:
         return true;
+      case ROW:
+      case ARRAY:
+        return type.getChildren().stream().allMatch(KafkaSinkMatcher::supportsJsonType);
       default:
         return false;
     }
