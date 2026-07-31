@@ -1,7 +1,7 @@
 FROM rust:1.94-bookworm
 
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends build-essential pkg-config protobuf-compiler \
+    && apt-get install --yes --no-install-recommends build-essential pkg-config protobuf-compiler perl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace

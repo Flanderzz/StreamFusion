@@ -60,11 +60,15 @@ datafusion = { version = "54.0.0", default-features = false, features = [
 ] }
 # Native Kafka consumer, behind the `kafka` feature so the normal build pulls in no Kafka code at all.
 # rdkafka-sys builds and statically links its bundled librdkafka (mklove build, needs only a C
-# toolchain + make — no cmake, no system librdkafka, no pkg-config), so any dev who clones the repo
-# can build it. The sync BaseConsumer is enough, so tokio is off; libz gives gzip-topic support
-# without a system dependency. (SSL/SASL-GSSAPI for the Kerberos cluster would add the `ssl` +
-# `gssapi-vendored` features — a heavier build, deferred until needed.)
-rdkafka = { version = "0.36", default-features = false, features = ["libz-static"], optional = true }
+# toolchain + make + perl — no cmake, no system librdkafka, no pkg-config), so any dev who clones the
+# repo can build it. The sync BaseConsumer is enough, so tokio is off; libz gives gzip-topic support
+# without a system dependency. `ssl-vendored` statically builds OpenSSL for the same self-contained
+# reason: it lights up the SSL/SASL_SSL protocols plus the SCRAM-SHA-256/512 and OAUTHBEARER
+# mechanisms librdkafka gates on OpenSSL (PLAIN is always built in). SASL/GSSAPI is deliberately
+# excluded — it would drag source builds of cyrus-sasl and MIT krb5 into every build environment,
+# and Kerberos needs host configuration no portable artifact can carry; the planner declines it to
+# Flink instead.
+rdkafka = { version = "0.36", default-features = false, features = ["libz-static", "ssl-vendored"], optional = true }
 # Native Fluss log-table reader, behind the `fluss` feature. Pinned to a temporary fork of
 # apache/fluss-rust whose only change is bumping its arrow dependency to align with this workspace's
 # arrow version (resolving to 58.3.0 in Cargo.lock), so the batches the reader hands back are this

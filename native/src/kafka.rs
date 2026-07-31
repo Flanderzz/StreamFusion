@@ -711,7 +711,7 @@ impl Drop for KafkaSplitReader {
 
 #[cfg(feature = "kafka")]
 impl KafkaSplitReader {
-    fn open(config: &[(String, String)]) -> KafkaSplitReader {
+    fn open(config: &[(String, String)]) -> Result<KafkaSplitReader, String> {
         use rdkafka::config::ClientConfig;
 
         let mut client = ClientConfig::new();
@@ -719,15 +719,18 @@ impl KafkaSplitReader {
             client.set(key, value);
         }
         client.set("enable.partition.eof", "true");
-        let consumer: rdkafka::consumer::BaseConsumer =
-            client.create().expect("failed to create kafka consumer");
+        // Surface librdkafka's own message (bad mechanism, missing trust material, unsupported
+        // protocol) instead of a panic — misconfigured auth is an expected failure here.
+        let consumer: rdkafka::consumer::BaseConsumer = client
+            .create()
+            .map_err(|e| format!("failed to create kafka consumer: {e}"))?;
         // The consumer's queue, for draining. (assign/seek still go through the BaseConsumer.)
         let consumer_queue = unsafe {
             use rdkafka::consumer::Consumer;
             rdkafka::bindings::rd_kafka_queue_get_consumer(consumer.client().native_ptr())
         };
 
-        KafkaSplitReader {
+        Ok(KafkaSplitReader {
             consumer,
             consumer_queue,
             body_schema: Arc::new(Schema::new(vec![Field::new("body", DataType::Binary, true)])),
@@ -736,7 +739,7 @@ impl KafkaSplitReader {
             stopping_offsets: HashMap::default(),
             warmed_topics: std::collections::HashSet::default(),
             pending: std::collections::VecDeque::new(),
-        }
+        })
     }
 
     /// Adds splits (idempotent) and re-assigns the whole set: each newly added partition seeks to its
@@ -1164,6 +1167,40 @@ mod kafka_error_tests {
         assert!(!transient_consumer_error(RD_KAFKA_RESP_ERR__UNKNOWN_TOPIC));
     }
 
+    /// Pins the security surface of the vendored librdkafka build: TLS and SCRAM must be present
+    /// (the `ssl-vendored` feature), GSSAPI deliberately absent (no cyrus-sasl — the planner
+    /// declines Kerberos to Flink). If a feature change ever drops OpenSSL, these fail loudly
+    /// instead of secured production jobs dying at task start.
+    #[test]
+    fn vendored_build_speaks_tls_and_scram_but_not_gssapi() {
+        use rdkafka::config::ClientConfig;
+        use rdkafka::consumer::BaseConsumer;
+
+        let mut scram = ClientConfig::new();
+        scram
+            .set("security.protocol", "SASL_SSL")
+            .set("sasl.mechanisms", "SCRAM-SHA-256")
+            .set("sasl.username", "user")
+            .set("sasl.password", "pass");
+        // Config validation and provider selection happen at create(); connection does not.
+        scram.create::<BaseConsumer>().expect(
+            "SASL_SSL + SCRAM consumer must build: the DSO lost its OpenSSL (ssl-vendored)",
+        );
+
+        let mut gssapi = ClientConfig::new();
+        gssapi
+            .set("security.protocol", "SASL_PLAINTEXT")
+            .set("sasl.mechanisms", "GSSAPI");
+        let err = match gssapi.create::<BaseConsumer>() {
+            Ok(_) => panic!("GSSAPI must stay out of the portable build (no cyrus-sasl)"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("No provider for SASL mechanism GSSAPI"),
+            "unexpected GSSAPI refusal: {err}"
+        );
+    }
+
     #[test]
     fn encodes_a_whole_arrow_batch_as_individual_json_values() {
         let schema = Arc::new(Schema::new(vec![
@@ -1267,17 +1304,17 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_is
 #[cfg(feature = "kafka")]
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_openKafkaConsumer<'local>(
-    env: JNIEnv<'local>,
+    mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     config_keys: JObjectArray<'local>,
     config_values: JObjectArray<'local>,
 ) -> jlong {
-    crate::bridge::jni_guard(env, move |mut env| {
-        let keys = read_string_array(&mut env, &config_keys);
-        let values = read_string_array(&mut env, &config_values);
+    kafka_jni(&mut env, 0, |env| {
+        let keys = read_string_array(env, &config_keys);
+        let values = read_string_array(env, &config_values);
         let config: Vec<(String, String)> = keys.into_iter().zip(values).collect();
-        let reader = KafkaSplitReader::open(&config);
-        into_handle(reader)
+        let reader = KafkaSplitReader::open(&config)?;
+        Ok(into_handle(reader))
     })
 }
 
@@ -1634,7 +1671,8 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_be
         let config: Vec<(String, String)> = keys.into_iter().zip(values).collect();
         let topic: String = env.get_string(&topic).expect("failed to read topic").into();
         let _ = (format, schema_array_address, schema_address, avro_schema, schema_id);
-        let mut reader = KafkaSplitReader::open(&config);
+        let mut reader =
+            KafkaSplitReader::open(&config).expect("failed to create kafka consumer");
         reader.assign_splits(&[topic], &[0], &[-2], &[i64::MIN]); // partition 0, earliest
 
         let timeout = std::time::Duration::from_millis(250);
