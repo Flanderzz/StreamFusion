@@ -67,16 +67,21 @@ impl AvroDecoder {
     /// tombstone), which the collector drops silently.
     pub(crate) fn decode(&self, body: &RecordBatch) -> RecordBatch {
         let column = body.column(0).as_any().downcast_ref::<BinaryArray>().expect("binary body");
-        let mut builder = arrow_avro::reader::ReaderBuilder::new()
-            .with_writer_schema_store(self.store.clone())
-            .with_batch_size(column.len().max(1));
-        // With a reader schema, Avro resolution decodes the full writer datum but materializes only
-        // the reader's (subset of) fields — projection pushed into the decode. Writer fields the
-        // reader omits are parsed and discarded, never built into Arrow.
-        if let Some(reader_schema) = &self.reader {
-            builder = builder.with_reader_schema(reader_schema.clone());
-        }
-        let mut decoder = builder.build_decoder().expect("failed to build avro decoder");
+        let build = || {
+            let mut builder = arrow_avro::reader::ReaderBuilder::new()
+                .with_writer_schema_store(self.store.clone())
+                .with_batch_size(column.len().max(1));
+            // With a reader schema, Avro resolution decodes the full writer datum but materializes
+            // only the reader's (subset of) fields — projection pushed into the decode. Writer
+            // fields the reader omits are parsed and discarded, never built into Arrow.
+            if let Some(reader_schema) = &self.reader {
+                builder = builder.with_reader_schema(reader_schema.clone());
+            }
+            builder.build_decoder().expect("failed to build avro decoder")
+        };
+        // Built on the first surviving body: an all-tombstone batch must decode to zero rows even
+        // before any writer schema has been registered (arrow-avro refuses an empty store).
+        let mut decoder = None;
         let mut framed = Vec::new();
         // A message framed with a different schema id than its predecessor makes the decoder stop
         // consuming until the rows decoded so far are flushed (it can't mix writer schemas in one
@@ -88,6 +93,11 @@ impl AvroDecoder {
             if !column.is_valid(i) {
                 continue;
             }
+            if column.value(i).is_empty() {
+                // Flink's plain avro/avro-confluent deserializers hit EOF on an empty body and
+                // fail the job; silently dropping it would diverge.
+                panic!("avro decode failed: empty message body");
+            }
             let bytes = if self.bare {
                 framed.clear();
                 framed.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00]); // id-0 Confluent header
@@ -96,6 +106,7 @@ impl AvroDecoder {
             } else {
                 column.value(i)
             };
+            let decoder = decoder.get_or_insert_with(build);
             let mut consumed = 0;
             while consumed < bytes.len() {
                 let n = decoder.decode(&bytes[consumed..]).expect("avro decode failed");
@@ -110,30 +121,33 @@ impl AvroDecoder {
                 }
             }
         }
-        if let Some(batch) = decoder.flush().expect("avro flush failed") {
+        if let Some(batch) = decoder.as_mut().and_then(|d| d.flush().expect("avro flush failed")) {
             batches.push(batch);
         }
-        let decoded = match batches.len() {
-            0 => return RecordBatch::new_empty(self.output_schema()),
-            1 => batches.into_iter().next().unwrap(),
-            _ => {
-                let schema = batches[0].schema();
-                concat_batches(&schema, &batches).expect("avro batch concat failed")
-            }
-        };
         if self.target.fields().is_empty() {
-            return decoded;
+            // Benchmark-only counting path: no boundary schema, so no reconciliation.
+            return match batches.len() {
+                0 => panic!("an all-null avro body batch needs the boundary schema"),
+                1 => batches.into_iter().next().unwrap(),
+                _ => {
+                    let schema = batches[0].schema();
+                    concat_batches(&schema, &batches).expect("avro batch concat failed")
+                }
+            };
         }
-        reconcile(&self.target, decoded)
-    }
-
-    /// The schema an empty decode (every body a tombstone) is built with.
-    fn output_schema(&self) -> SchemaRef {
-        assert!(
-            !self.target.fields().is_empty(),
-            "an all-null avro body batch needs the boundary schema"
-        );
-        self.target.clone()
+        // Reconcile each flush before concatenating: writer schemas differing mid-batch can flush
+        // under reader shapes that differ in field metadata (arrow-avro annotates a defaulted
+        // field), and reconciliation lands every flush on the one boundary schema.
+        let mut reconciled = batches.into_iter().map(|batch| reconcile(&self.target, batch));
+        match (reconciled.next(), reconciled.next()) {
+            (None, _) => RecordBatch::new_empty(self.target.clone()),
+            (Some(single), None) => single,
+            (Some(first), Some(second)) => {
+                let batches: Vec<RecordBatch> =
+                    [first, second].into_iter().chain(reconciled).collect();
+                concat_batches(&self.target, &batches).expect("avro batch concat failed")
+            }
+        }
     }
 }
 
@@ -390,6 +404,15 @@ mod tests {
         let decoder = AvroDecoder::bare(BOUNDARY_WRITER, None, target.clone());
         let out = decoder.decode(&bodies(vec![None, None]));
         assert_eq!((out.num_rows(), out.schema()), (0, target));
+    }
+
+    // A zero-length body is NOT a tombstone on the plain formats: Flink's deserializer hits EOF
+    // and fails the job (only the Debezium envelope skips empty messages).
+    #[test]
+    #[should_panic(expected = "empty message body")]
+    fn empty_body_fails_the_plain_avro_decode() {
+        let decoder = AvroDecoder::bare(BOUNDARY_WRITER, None, boundary_schema());
+        decoder.decode(&bodies(vec![Some(&[])]));
     }
 
     // A registry writer schema can declare timestamp-micros while the reader (derived from the

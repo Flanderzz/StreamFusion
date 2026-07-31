@@ -6,10 +6,10 @@ import io.github.jordepic.streamfusion.format.NativeFormatProviders;
 import io.github.jordepic.streamfusion.operator.ArrowBatch;
 import io.github.jordepic.streamfusion.operator.ArrowBatchTypeInformation;
 import io.github.jordepic.streamfusion.operator.NativeBytesDecodeOperator;
+import io.github.jordepic.streamfusion.operator.NullableBytesTypeInformation;
 import java.util.Collections;
 import java.util.Map;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
-import org.apache.flink.api.common.typeinfo.PrimitiveArrayTypeInfo;
 import org.apache.flink.api.dag.Transformation;
 import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.connector.kafka.source.KafkaSource;
@@ -73,7 +73,7 @@ public class NativeKafkaDecodeExecNode extends ExecNodeBase<ArrowBatch>
             source,
             WatermarkStrategy.noWatermarks(),
             SOURCE_TRANSFORMATION,
-            PrimitiveArrayTypeInfo.BYTE_PRIMITIVE_ARRAY_TYPE_INFO);
+            NullableBytesTypeInformation.INSTANCE);
     NativeFormatContext formatContext =
         new NativeFormatContext(outputType, writerType, options, KafkaTables.ignoreParseErrors(options));
     NativeFormatProvider formatProvider =

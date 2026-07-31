@@ -68,7 +68,13 @@ public class NativeBytesDecodeOperator extends AbstractStreamOperator<ArrowBatch
 
   @Override
   public void processElement(StreamRecord<byte[]> element) {
-    body.setSafe(count++, element.getValue());
+    // A null Kafka value (a tombstone) becomes a null body slot; each format decoder owns its
+    // semantics (skip, null field, or failure — whatever Flink's deserializer does with null).
+    if (element.getValue() == null) {
+      body.setNull(count++);
+    } else {
+      body.setSafe(count++, element.getValue());
+    }
     if (count >= batchSize) {
       flush();
     } else if (count == 1 && flushIntervalMillis > 0 && !flushTimerPending) {
