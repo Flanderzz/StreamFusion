@@ -644,9 +644,18 @@ shapes persist their per-key deadlines in a dedicated state table).
     limit, a non-string map key. These are declined at plan time (the provider runs the same
     schema/converter derivations Flink's factory runs), so the fallback reproduces Flink's exact
     submission failure instead of the native planner aborting with its own;
-  - a column type whose arrow-avro decode is not yet reconciled with the Arrow boundary schema:
-    DATE, TIME, TIMESTAMP, DECIMAL, BINARY/VARBINARY, TINYINT/SMALLINT, and MULTISET (native
-    today: BOOLEAN/INT/BIGINT/FLOAT/DOUBLE/CHAR/VARCHAR plus ROW/ARRAY/MAP of those);
+  - **TIME(0)** — Flink keeps an avro `time-millis` value's full milliseconds in a TIME(0)
+    column, while the Arrow boundary's second-precision form would truncate them (TIME(1..3) is
+    native and exact); and **BINARY(n)** — Flink accepts avro bytes of any length into a
+    BINARY(n) column, which the boundary's fixed-size form cannot hold (VARBINARY is native).
+    Every other boundary type decodes natively, with the decoded batch reconciled onto the
+    boundary schema and Flink's converter quirks reproduced exactly (parity-pinned —
+    `AvroDecodeParityTest`): every avro timestamp long reads as epoch *millis* whatever the
+    schema's declared unit (Flink's converter has no micros path — a registry writer schema
+    declaring `timestamp-micros` resolves to the raw long, read as millis, in both engines),
+    TINYINT/SMALLINT narrow with Java's wrapping `byteValue()`/`shortValue()`, a decimal whose
+    digits exceed the declared precision decodes to NULL, and a null Kafka value (tombstone) is
+    dropped silently;
   - **`avro.encoding = json`** — Avro's JSON encoding is a different wire format the native
     decode doesn't read — and **`avro.timestamp_mapping.legacy = false`** — the corrected mapping
     changes the derived schema; only the legacy mapping is reproduced natively so far.

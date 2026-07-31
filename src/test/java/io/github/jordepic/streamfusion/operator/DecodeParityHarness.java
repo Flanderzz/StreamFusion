@@ -9,6 +9,7 @@ import io.github.jordepic.streamfusion.format.NativeFormatProvider;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -16,7 +17,14 @@ import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.flink.api.common.typeutils.base.array.BytePrimitiveArraySerializer;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.streaming.util.OneInputStreamOperatorTestHarness;
+import org.apache.flink.table.data.ArrayData;
+import org.apache.flink.table.data.MapData;
 import org.apache.flink.table.data.RowData;
+import org.apache.flink.table.types.logical.ArrayType;
+import org.apache.flink.table.types.logical.IntType;
+import org.apache.flink.table.types.logical.LogicalType;
+import org.apache.flink.table.types.logical.MapType;
+import org.apache.flink.table.types.logical.MultisetType;
 import org.apache.flink.table.types.logical.RowType;
 
 /**
@@ -39,7 +47,7 @@ final class DecodeParityHarness {
     this.compareRowKinds = compareRowKinds;
   }
 
-  void assertParity(String message, Decode flinkDecode, Decode nativeDecode) {
+  void assertParity(String label, Decode flinkDecode, Decode nativeDecode) {
     List<List<Object>> expected;
     try {
       expected = flinkDecode.decode();
@@ -53,11 +61,11 @@ final class DecodeParityHarness {
       actual = null;
     }
     if (expected == null) {
-      assertNull(actual, "Flink rejects but native decode accepts: " + message);
+      assertNull(actual, "Flink rejects but native decode accepts: " + label);
       return;
     }
-    assertNotNull(actual, "Flink accepts but native decode rejects: " + message);
-    assertEquals(expected, actual, "decoded values diverge for: " + message);
+    assertNotNull(actual, "Flink accepts but native decode rejects: " + label);
+    assertEquals(expected, actual, "decoded values diverge for: " + label);
   }
 
   List<List<Object>> nativeDecode(
@@ -111,10 +119,65 @@ final class DecodeParityHarness {
       values.add(row.getRowKind().shortString());
     }
     for (int i = 0; i < rowType.getFieldCount(); i++) {
-      Object value = RowData.createFieldGetter(rowType.getTypeAt(i), i).getFieldOrNull(row);
-      // byte[] (BINARY/VARBINARY fields) has no value-based toString.
-      values.add(value instanceof byte[] ? Arrays.toString((byte[]) value) : Objects.toString(value, null));
+      LogicalType type = rowType.getTypeAt(i);
+      values.add(render(RowData.createFieldGetter(type, i).getFieldOrNull(row), type));
     }
     return values;
+  }
+
+  /**
+   * A value rendered for comparison across engines. Scalars keep their internal-form
+   * {@code toString}; binary compares by content (byte[] has none); nested containers render
+   * element-wise (their internal classes differ between engines), maps sorted by key so hash
+   * iteration order cannot fail parity.
+   */
+  private static Object render(Object value, LogicalType type) {
+    if (value == null) {
+      return null;
+    }
+    switch (type.getTypeRoot()) {
+      case BINARY:
+      case VARBINARY:
+        return Arrays.toString((byte[]) value);
+      case ARRAY:
+        return renderArray((ArrayData) value, ((ArrayType) type).getElementType());
+      case MAP:
+        MapType mapType = (MapType) type;
+        return renderMap((MapData) value, mapType.getKeyType(), mapType.getValueType());
+      case MULTISET:
+        MultisetType multisetType = (MultisetType) type;
+        return renderMap((MapData) value, multisetType.getElementType(), new IntType(false));
+      case ROW:
+        RowData nested = (RowData) value;
+        RowType nestedType = (RowType) type;
+        List<Object> fields = new ArrayList<>();
+        for (int i = 0; i < nestedType.getFieldCount(); i++) {
+          LogicalType fieldType = nestedType.getTypeAt(i);
+          fields.add(render(RowData.createFieldGetter(fieldType, i).getFieldOrNull(nested), fieldType));
+        }
+        return fields;
+      default:
+        return value.toString();
+    }
+  }
+
+  private static List<Object> renderArray(ArrayData array, LogicalType elementType) {
+    ArrayData.ElementGetter getter = ArrayData.createElementGetter(elementType);
+    List<Object> elements = new ArrayList<>();
+    for (int i = 0; i < array.size(); i++) {
+      elements.add(render(getter.getElementOrNull(array, i), elementType));
+    }
+    return elements;
+  }
+
+  private static Object renderMap(MapData map, LogicalType keyType, LogicalType valueType) {
+    List<Object> keys = renderArray(map.keyArray(), keyType);
+    List<Object> values = renderArray(map.valueArray(), valueType);
+    List<String> entries = new ArrayList<>();
+    for (int i = 0; i < keys.size(); i++) {
+      entries.add(keys.get(i) + "=" + values.get(i));
+    }
+    Collections.sort(entries);
+    return entries;
   }
 }

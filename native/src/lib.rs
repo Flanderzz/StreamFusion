@@ -55,6 +55,7 @@ pub(crate) use std::sync::{Arc, Mutex, OnceLock};
 pub(crate) use tokio::runtime::Runtime;
 
 mod aggregates;
+mod avro;
 mod bridge;
 mod calc;
 mod changelog;

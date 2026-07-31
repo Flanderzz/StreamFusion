@@ -7,14 +7,21 @@ import io.github.jordepic.streamfusion.format.avro.AvroFormatProvider;
 import io.github.jordepic.streamfusion.format.avroconfluent.AvroConfluentFormatProvider;
 import java.util.Map;
 import org.apache.flink.table.types.logical.BigIntType;
+import org.apache.flink.table.types.logical.BinaryType;
+import org.apache.flink.table.types.logical.DateType;
+import org.apache.flink.table.types.logical.DecimalType;
 import org.apache.flink.table.types.logical.DoubleType;
 import org.apache.flink.table.types.logical.IntType;
 import org.apache.flink.table.types.logical.LocalZonedTimestampType;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.MapType;
+import org.apache.flink.table.types.logical.MultisetType;
 import org.apache.flink.table.types.logical.RowType;
+import org.apache.flink.table.types.logical.SmallIntType;
 import org.apache.flink.table.types.logical.TimeType;
 import org.apache.flink.table.types.logical.TimestampType;
+import org.apache.flink.table.types.logical.TinyIntType;
+import org.apache.flink.table.types.logical.VarBinaryType;
 import org.apache.flink.table.types.logical.VarCharType;
 import org.junit.jupiter.api.Test;
 
@@ -75,11 +82,35 @@ class AvroDecodeGateTest {
   }
 
   @Test
-  void declinesTypesTheNativeDecodeDoesNotReconcileYet() {
-    RowType rowType =
-        RowType.of(new LogicalType[] {new TimestampType(3)}, new String[] {"ts"});
-    assertFalse(bareAvro(rowType, Map.of("format", "avro"), false));
-    assertFalse(confluent(rowType));
+  void admitsTheReconciledScalarFamily() {
+    LogicalType[] reconciled = {
+      new TinyIntType(),
+      new SmallIntType(),
+      new DateType(),
+      new TimeType(3),
+      new TimestampType(3),
+      new DecimalType(10, 2),
+      new VarBinaryType(VarBinaryType.MAX_LENGTH),
+      new MultisetType(new VarCharType(VarCharType.MAX_LENGTH))
+    };
+    for (LogicalType type : reconciled) {
+      RowType rowType = RowType.of(new LogicalType[] {type}, new String[] {"c"});
+      assertTrue(bareAvro(rowType, Map.of("format", "avro"), false), type.toString());
+      assertTrue(confluent(rowType), type.toString());
+    }
+  }
+
+  @Test
+  void declinesBoundaryShapesFlinkDecodesMoreLenientlyThanArrowCanCarry() {
+    // Flink keeps an avro time-millis value's full millis in a TIME(0) column (the boundary's
+    // second-precision form would truncate), and accepts any-length bytes into BINARY(n) (the
+    // boundary's fixed-size form cannot).
+    LogicalType[] lenient = {new TimeType(0), new BinaryType(4)};
+    for (LogicalType type : lenient) {
+      RowType rowType = RowType.of(new LogicalType[] {type}, new String[] {"c"});
+      assertFalse(bareAvro(rowType, Map.of("format", "avro"), false), type.toString());
+      assertFalse(confluent(rowType), type.toString());
+    }
   }
 
   @Test

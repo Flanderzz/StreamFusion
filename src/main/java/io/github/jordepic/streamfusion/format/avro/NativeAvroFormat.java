@@ -21,7 +21,16 @@ public final class NativeAvroFormat {
    */
   public static native long driverInitAddress();
 
-  public static native long createDecoder(boolean confluent, String writerSchema, String readerSchema);
+  /**
+   * {@code schemaArrayAddress}/{@code schemaAddress} export the boundary Arrow schema (an empty
+   * batch of the output row type); the native decode reconciles each arrow-avro batch onto it.
+   */
+  public static native long createDecoder(
+      boolean confluent,
+      String writerSchema,
+      String readerSchema,
+      long schemaArrayAddress,
+      long schemaAddress);
 
   public static native void registerWriterSchema(long handle, int schemaId, String schema);
 

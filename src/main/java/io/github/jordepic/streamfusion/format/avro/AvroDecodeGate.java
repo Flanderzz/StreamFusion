@@ -4,6 +4,7 @@ import org.apache.flink.formats.avro.AvroToRowDataConverters;
 import org.apache.flink.formats.avro.typeutils.AvroSchemaConverter;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.RowType;
+import org.apache.flink.table.types.logical.TimeType;
 
 /**
  * Plan-time admission shared by the native Avro decode providers. Flink's own avro factories build
@@ -40,20 +41,38 @@ public final class AvroDecodeGate {
   private static boolean decodableColumn(LogicalType type) {
     switch (type.getTypeRoot()) {
       case BOOLEAN:
+      case TINYINT:
+      case SMALLINT:
       case INTEGER:
       case BIGINT:
       case FLOAT:
       case DOUBLE:
       case CHAR:
       case VARCHAR:
+      case VARBINARY:
+      case DECIMAL:
+      case DATE:
+      case TIMESTAMP_WITHOUT_TIME_ZONE:
+      case TIMESTAMP_WITH_LOCAL_TIME_ZONE:
         return true;
+      case TIME_WITHOUT_TIME_ZONE:
+        // TIME(0)'s Arrow boundary form is seconds, but Flink's avro converter keeps the wire
+        // value's full millis in a TIME(0) column — the boundary would truncate what Flink
+        // retains. Precisions 1..3 carry millis exactly (the derivation rejects higher).
+        return ((TimeType) type).getPrecision() >= 1;
+      case BINARY:
+        // BINARY(n)'s boundary form is fixed-size, but Flink's converter accepts avro bytes of
+        // any length into a BINARY(n) column — a mis-sized datum would decode on Flink and fail
+        // natively.
+        return false;
       case ROW:
       case ARRAY:
       case MAP:
+      case MULTISET:
         return type.getChildren().stream().allMatch(AvroDecodeGate::decodableColumn);
       default:
-        // arrow-avro's Arrow mapping for the remaining types (temporal, decimal, binary,
-        // multiset) is not yet reconciled with the boundary schema the operators expect.
+        // The remaining boundary types (intervals) have no avro derivation at all — the
+        // try-derive above already declined them; anything else is unmapped.
         return false;
     }
   }

@@ -940,13 +940,8 @@ pub(crate) enum FormatDecoder {
     Json(JsonDecoder),
     Csv(crate::csv::CsvDecoder),
     Raw(RawDecoder),
-    /// Confluent-framed Avro: each message is `0x00` + 4-byte BE schema id + datum, resolved by id. The
-    /// optional reader schema projects the writer's record to a subset of fields (Avro resolution).
-    Avro(arrow_avro::schema::SchemaStore, Option<arrow_avro::schema::AvroSchema>),
-    /// Bare Avro (Flink's `avro`): each message is just the datum, decoded against the one writer schema
-    /// registered at synthetic id 0 — we prepend the 5-byte id-0 header so the framed decoder applies. An
-    /// optional reader schema projects it to a subset (the query's columns/fields) via Avro resolution.
-    BareAvro(arrow_avro::schema::SchemaStore, Option<arrow_avro::schema::AvroSchema>),
+    /// Avro, bare or Confluent-framed — see `avro::AvroDecoder`.
+    Avro(crate::avro::AvroDecoder),
     Protobuf(ProtobufDecoder),
     /// CDC changelog JSON (Debezium/OGG): envelope → physical rows + `$row_kind$`, fanning out updates.
     Cdc(CdcJsonDecoder),
@@ -958,8 +953,7 @@ impl FormatDecoder {
             FormatDecoder::Json(decoder) => decoder.decode(body),
             FormatDecoder::Csv(decoder) => decoder.decode(body),
             FormatDecoder::Raw(decoder) => decoder.decode(body),
-            FormatDecoder::Avro(store, reader) => decode_avro_body(store, reader, body, false),
-            FormatDecoder::BareAvro(store, reader) => decode_avro_body(store, reader, body, true),
+            FormatDecoder::Avro(decoder) => decoder.decode(body),
             FormatDecoder::Protobuf(decoder) => decoder.decode(body),
             FormatDecoder::Cdc(decoder) => decoder.decode(body),
         }
@@ -1002,9 +996,10 @@ pub(crate) fn silence_expected_decode_panics<R>(work: impl FnOnce() -> R) -> R {
 
 impl MessageDecoder {
     /// `format` is a `FORMAT_*` code (mirroring `FormatCodes.java`). JSON, CSV, raw, and the CDC
-    /// envelopes decode against `output_schema` (CDC treats it as the physical columns);
-    /// Confluent-Avro registers `avro_schema` at `schema_id` and bare Avro registers it as the
-    /// reader schema at synthetic id 0. (Protobuf is built via `createProtobufDecoder`, not here.)
+    /// envelopes decode against `output_schema` (CDC treats it as the physical columns); the Avro
+    /// variants decode via `avro_schema` (registered at `schema_id` for Confluent, synthetic id 0
+    /// for bare) and reconcile the decoded batch onto `output_schema`. (Protobuf is built via
+    /// `createProtobufDecoder`, not here.)
     /// `format_options` carries the table's decode-relevant format options (see
     /// [`parse_format_options`]).
     pub(crate) fn new(
@@ -1029,10 +1024,15 @@ impl MessageDecoder {
         // only serves a CDC batch whose ENVELOPE decode fails structurally.
         let cdc_env = crate::json::JsonEnv { mode: options.timestamp_mode, lenient: false };
         let decoder = match format {
-            FORMAT_AVRO_CONFLUENT => {
-                FormatDecoder::Avro(avro_store(avro_schema, schema_id as u32), reader)
+            FORMAT_AVRO_CONFLUENT => FormatDecoder::Avro(crate::avro::AvroDecoder::confluent(
+                avro_schema,
+                schema_id as u32,
+                reader,
+                output_schema,
+            )),
+            FORMAT_AVRO => {
+                FormatDecoder::Avro(crate::avro::AvroDecoder::bare(avro_schema, reader, output_schema))
             }
-            FORMAT_AVRO => FormatDecoder::BareAvro(avro_store(avro_schema, 0), reader),
             // CSV owns its skip mode: Flink's ignore-parse-errors granularity for CSV is per FIELD
             // (a bad value nulls the field, a short row pads, only a record-level failure drops the
             // row), which the generic per-message retry below cannot reproduce.
@@ -1107,38 +1107,20 @@ impl MessageDecoder {
     /// framed with that id. Only the Confluent-framed Avro decoder carries an id-keyed store; calling
     /// this on any other format is a wiring bug.
     pub(crate) fn register_writer_schema(&mut self, id: u32, schema: &str) {
-        use arrow_avro::schema::{AvroSchema, Fingerprint};
         match &mut self.decoder {
-            FormatDecoder::Avro(store, _) => {
-                store
-                    .set(Fingerprint::Id(id), AvroSchema::new(schema.to_string()))
-                    .expect("failed to register avro schema");
-            }
+            FormatDecoder::Avro(decoder) => decoder.register_writer_schema(id, schema),
             _ => panic!("registerAvroSchema on a non-Confluent-Avro decoder"),
         }
     }
 }
 
-/// An arrow-avro writer store keyed by integer id (the Confluent / id-framing layout). An empty
-/// schema string builds an empty store — the Confluent path starts with no writer schemas and feeds
-/// them in by id as the JVM fetches them from the schema registry (`registerAvroSchema`).
-pub(crate) fn avro_store(avro_schema: &str, id: u32) -> arrow_avro::schema::SchemaStore {
-    use arrow_avro::schema::{AvroSchema, Fingerprint, FingerprintAlgorithm, SchemaStore};
-    let mut store = SchemaStore::new_with_type(FingerprintAlgorithm::Id);
-    if !avro_schema.is_empty() {
-        store
-            .set(Fingerprint::Id(id), AvroSchema::new(avro_schema.to_string()))
-            .expect("failed to register avro schema");
-    }
-    store
-}
-
 /// Creates a format-dispatched message decoder and returns an opaque handle, released with
-/// `closeDecoder`. Formats 0/2/3 (JSON/CSV/raw) decode against the target schema the JVM exports as an
-/// empty batch; formats 1/4 (Confluent/bare Avro) derive their schema from `avroSchema` (registered
-/// under `schemaId` for Confluent, synthetic id 0 for bare) and ignore the schema C structs. A format-1
-/// decoder built with an empty `avroSchema` starts with an empty store — the registry-driven path,
-/// where the JVM registers each writer schema by id via `registerAvroSchema` as messages carry it.
+/// `closeDecoder`. Every format receives the target schema the JVM exports as an empty batch:
+/// JSON/CSV/raw decode against it, and the Avro variants reconcile the arrow-avro decode onto it.
+/// Formats 1/4 (Confluent/bare Avro) decode via `avroSchema` (registered under `schemaId` for
+/// Confluent, synthetic id 0 for bare); a format-1 decoder built with an empty `avroSchema` starts
+/// with an empty store — the registry-driven path, where the JVM registers each writer schema by id
+/// via `registerAvroSchema` as messages carry it.
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createDecoder<'local>(
     env: JNIEnv<'local>,
@@ -1153,9 +1135,9 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createDecoder
     format_options: JString<'local>,
 ) -> jlong {
     crate::bridge::jni_guard(env, move |env| {
-        // Avro derives its own schema from the writer schema, so those callers pass 0/0 for the
-        // schema C structs; JSON/CSV/raw decode against the exported target schema.
-        let schema = if format == FORMAT_AVRO_CONFLUENT || format == FORMAT_AVRO {
+        // Every format decodes against (or, for Avro, reconciles onto) the exported target schema.
+        // Only the Avro benchmark counting path passes 0/0 — it never exports the decoded batch.
+        let schema = if schema_array_address == 0 {
             Arc::new(Schema::empty())
         } else {
             import_record_batch(schema_array_address, schema_address).schema()
@@ -1487,15 +1469,15 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_format_raw_NativeRaw
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_format_avro_NativeAvroFormat_createDecoder<'local>(
     mut env: JNIEnv<'local>, class: JClass<'local>, confluent: jboolean, writer_schema: JString<'local>,
-    reader_schema: JString<'local>,
+    reader_schema: JString<'local>, schema_array_address: jlong, schema_address: jlong,
 ) -> jlong {
     let empty_options = env.new_string("").expect("empty format options");
     Java_io_github_jordepic_streamfusion_Native_createDecoder(
         env,
         class,
         if confluent != 0 { FORMAT_AVRO_CONFLUENT } else { FORMAT_AVRO },
-        0,
-        0,
+        schema_array_address,
+        schema_address,
         writer_schema,
         reader_schema,
         0,
@@ -1523,70 +1505,3 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_format_protobuf_Nati
     )
 }
 
-/// Decodes a binary "body" batch into typed Arrow via arrow-avro against the local schema-id store. When
-/// `bare`, each message is a raw datum (Flink's `avro`) and we prepend the 5-byte id-0 Confluent header
-/// (`0x00` + 4-byte 0) so arrow-avro's framed decoder resolves it against the schema at id 0; otherwise
-/// each message already carries its `0x00` + id prefix (Confluent `avro-confluent`). A null body is
-/// skipped. Used by `MessageDecoder` for both Avro variants.
-pub(crate) fn decode_avro_body(
-    store: &arrow_avro::schema::SchemaStore,
-    reader: &Option<arrow_avro::schema::AvroSchema>,
-    body: &RecordBatch,
-    bare: bool,
-) -> RecordBatch {
-    use arrow::array::{Array, BinaryArray};
-    let column = body.column(0).as_any().downcast_ref::<BinaryArray>().expect("binary body");
-    let mut builder = arrow_avro::reader::ReaderBuilder::new()
-        .with_writer_schema_store(store.clone())
-        .with_batch_size(column.len().max(1));
-    // With a reader schema, Avro resolution decodes the full writer datum but materializes only the
-    // reader's (subset of) fields — projection pushed into the decode. Writer fields the reader omits
-    // are parsed and discarded, never built into Arrow.
-    if let Some(reader_schema) = reader {
-        builder = builder.with_reader_schema(reader_schema.clone());
-    }
-    let mut decoder = builder.build_decoder().expect("failed to build avro decoder");
-    let mut framed = Vec::new();
-    // A message framed with a different schema id than its predecessor makes the decoder stop
-    // consuming until the rows decoded so far are flushed (it can't mix writer schemas in one build),
-    // so decode in a loop, flushing whenever a message is only partially consumed. With a reader
-    // schema every flushed batch has the same (reader) shape, so the flushes concatenate.
-    let mut batches = Vec::new();
-    for i in 0..column.len() {
-        if !column.is_valid(i) {
-            continue;
-        }
-        let bytes = if bare {
-            framed.clear();
-            framed.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00]); // id-0 Confluent header
-            framed.extend_from_slice(column.value(i));
-            &framed[..]
-        } else {
-            column.value(i)
-        };
-        let mut consumed = 0;
-        while consumed < bytes.len() {
-            let n = decoder.decode(&bytes[consumed..]).expect("avro decode failed");
-            consumed += n;
-            if consumed < bytes.len() {
-                match decoder.flush().expect("avro flush failed") {
-                    Some(batch) => batches.push(batch),
-                    // No progress and nothing to flush: the message is truncated/malformed.
-                    None if n == 0 => panic!("avro decode stalled on a malformed message"),
-                    None => {}
-                }
-            }
-        }
-    }
-    if let Some(batch) = decoder.flush().expect("avro flush failed") {
-        batches.push(batch);
-    }
-    match batches.len() {
-        0 => panic!("empty avro batch"),
-        1 => batches.into_iter().next().unwrap(),
-        _ => {
-            let schema = batches[0].schema();
-            arrow::compute::concat_batches(&schema, &batches).expect("avro batch concat failed")
-        }
-    }
-}

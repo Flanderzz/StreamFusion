@@ -3,12 +3,10 @@ package io.github.jordepic.streamfusion.format.avro;
 import io.github.jordepic.streamfusion.format.NativeFormatContext;
 import io.github.jordepic.streamfusion.format.NativeFormatOptions;
 import io.github.jordepic.streamfusion.format.NativeFormatProvider;
-import io.github.jordepic.streamfusion.format.NativeMessageDecoder;
 import io.github.jordepic.streamfusion.format.NativeMessageDecoderFactory;
+import io.github.jordepic.streamfusion.format.NativeSchemaMessageDecoder;
 import java.util.Map;
-import org.apache.arrow.memory.BufferAllocator;
 import org.apache.flink.formats.avro.typeutils.AvroSchemaConverter;
-import org.apache.flink.table.types.logical.RowType;
 
 /** Native provider for Flink's schema-embedded {@code avro} format. */
 public final class AvroFormatProvider implements NativeFormatProvider {
@@ -61,10 +59,9 @@ public final class AvroFormatProvider implements NativeFormatProvider {
     return () -> new Decoder(writerSchema, readerSchema);
   }
 
-  private static final class Decoder implements NativeMessageDecoder {
+  private static final class Decoder extends NativeSchemaMessageDecoder {
     private final String writerSchema;
     private final String readerSchema;
-    private long handle;
 
     private Decoder(String writerSchema, String readerSchema) {
       this.writerSchema = writerSchema;
@@ -72,8 +69,9 @@ public final class AvroFormatProvider implements NativeFormatProvider {
     }
 
     @Override
-    public void open(BufferAllocator allocator, RowType outputType) {
-      handle = NativeAvroFormat.createDecoder(false, writerSchema, readerSchema);
+    protected long createHandle(long schemaArrayAddress, long schemaAddress) {
+      return NativeAvroFormat.createDecoder(
+          false, writerSchema, readerSchema, schemaArrayAddress, schemaAddress);
     }
 
     @Override
@@ -84,11 +82,6 @@ public final class AvroFormatProvider implements NativeFormatProvider {
     @Override
     public long driverInitAddress() {
       return NativeAvroFormat.driverInitAddress();
-    }
-
-    @Override
-    public long decoderHandle() {
-      return handle;
     }
 
     @Override
