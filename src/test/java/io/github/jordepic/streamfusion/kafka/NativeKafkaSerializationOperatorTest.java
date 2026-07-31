@@ -4,14 +4,17 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
+import com.sun.net.httpserver.HttpServer;
 import io.github.jordepic.streamfusion.format.EncodeFormat;
 import io.github.jordepic.streamfusion.operator.ArrowBatch;
 import io.github.jordepic.streamfusion.operator.ArrowBatchSerializer;
 import io.github.jordepic.streamfusion.operator.RowDataArrowConverter;
+import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
@@ -182,5 +185,64 @@ class NativeKafkaSerializationOperatorTest {
         "{\"id\":1,\"name\":\"updated\"}".getBytes(StandardCharsets.UTF_8),
         output.get(2).value());
     assertNull(output.get(3).value());
+  }
+
+  /** An avro-confluent format registers its schema when the operator opens; every emitted value
+   * is framed with the id the registry returned. */
+  @Test
+  void registersTheConfluentSchemaAtOpenAndFramesWithItsId() throws Exception {
+    RowType rowType = RowType.of(false, new LogicalType[] {new IntType()}, new String[] {"id"});
+    HttpServer registry = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+    AtomicInteger registrations = new AtomicInteger();
+    registry.createContext(
+        "/subjects/orders-value/versions",
+        exchange -> {
+          registrations.incrementAndGet();
+          byte[] body = "{\"id\":515}".getBytes(StandardCharsets.UTF_8);
+          exchange.sendResponseHeaders(200, body.length);
+          exchange.getResponseBody().write(body);
+          exchange.close();
+        });
+    registry.start();
+    try {
+      EncodeFormat format =
+          EncodeFormat.of(
+              "avro-confluent",
+              Map.of(
+                  "url", "http://localhost:" + registry.getAddress().getPort(),
+                  "schema-registry.subject", "orders-value"),
+              rowType);
+      List<byte[]> output = new ArrayList<>();
+      try (BufferAllocator allocator = new RootAllocator();
+          OneInputStreamOperatorTestHarness<ArrowBatch, PreSerializedKafkaRecord> harness =
+              new OneInputStreamOperatorTestHarness<>(
+                  new NativeKafkaSerializationOperator(
+                      format,
+                      format,
+                      rowType.getChildren().stream().map(Object::toString).toArray(String[]::new),
+                      rowType.getFieldNames().toArray(String[]::new),
+                      new int[0],
+                      new int[] {0},
+                      false),
+                  new ArrowBatchSerializer())) {
+        harness.open();
+        harness.processElement(
+            new StreamRecord<>(
+                new ArrowBatch(
+                    RowDataArrowConverter.write(
+                        List.of(GenericRowData.of(3)), rowType, allocator))));
+        for (Object record : harness.getOutput()) {
+          if (record instanceof StreamRecord) {
+            output.add(((StreamRecord<PreSerializedKafkaRecord>) record).getValue().value());
+          }
+        }
+      }
+
+      assertEquals(1, registrations.get());
+      // magic 0x00, big-endian id 515, union branch 1, zigzag(3)
+      assertArrayEquals(new byte[] {0, 0, 0, 2, 3, 2, 6}, output.get(0));
+    } finally {
+      registry.stop(0);
+    }
   }
 }
