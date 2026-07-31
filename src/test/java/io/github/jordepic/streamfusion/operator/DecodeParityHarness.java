@@ -8,8 +8,10 @@ import io.github.jordepic.streamfusion.format.NativeFormatContext;
 import io.github.jordepic.streamfusion.format.NativeFormatProvider;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.flink.api.common.typeutils.base.array.BytePrimitiveArraySerializer;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
@@ -64,6 +66,16 @@ final class DecodeParityHarness {
       Map<String, String> formatOptions,
       boolean skipErrors)
       throws Exception {
+    return nativeDecode(
+        provider, message.getBytes(StandardCharsets.UTF_8), formatOptions, skipErrors);
+  }
+
+  List<List<Object>> nativeDecode(
+      NativeFormatProvider provider,
+      byte[] message,
+      Map<String, String> formatOptions,
+      boolean skipErrors)
+      throws Exception {
     try (OneInputStreamOperatorTestHarness<byte[], ArrowBatch> harness =
         new OneInputStreamOperatorTestHarness<>(
             new NativeBytesDecodeOperator(
@@ -75,7 +87,7 @@ final class DecodeParityHarness {
             BytePrimitiveArraySerializer.INSTANCE)) {
       harness.setup(new ArrowBatchSerializer());
       harness.open();
-      harness.processElement(new StreamRecord<>(message.getBytes(StandardCharsets.UTF_8)));
+      harness.processElement(new StreamRecord<>(message));
       harness.prepareSnapshotPreBarrier(1L);
       List<List<Object>> rows = new ArrayList<>();
       while (!harness.getOutput().isEmpty()) {
@@ -100,7 +112,8 @@ final class DecodeParityHarness {
     }
     for (int i = 0; i < rowType.getFieldCount(); i++) {
       Object value = RowData.createFieldGetter(rowType.getTypeAt(i), i).getFieldOrNull(row);
-      values.add(value == null ? null : value.toString());
+      // byte[] (BINARY/VARBINARY fields) has no value-based toString.
+      values.add(value instanceof byte[] ? Arrays.toString((byte[]) value) : Objects.toString(value, null));
     }
     return values;
   }
