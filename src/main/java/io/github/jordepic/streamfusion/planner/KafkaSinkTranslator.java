@@ -42,8 +42,10 @@ final class KafkaSinkTranslator {
     final String transactionalIdPrefix;
     final TransactionNamingStrategy transactionNamingStrategy;
     final Integer parallelism;
-    final Map<String, String> jsonOptions;
-    final Map<String, String> keyJsonOptions;
+    final String valueFormat;
+    final String keyFormat;
+    final Map<String, String> valueFormatOptions;
+    final Map<String, String> keyFormatOptions;
     final boolean upsert;
     final KafkaProducerConfigTranslator.Result nativeProducerConfig;
 
@@ -54,8 +56,10 @@ final class KafkaSinkTranslator {
         String transactionalIdPrefix,
         TransactionNamingStrategy transactionNamingStrategy,
         Integer parallelism,
-        Map<String, String> jsonOptions,
-        Map<String, String> keyJsonOptions,
+        String valueFormat,
+        String keyFormat,
+        Map<String, String> valueFormatOptions,
+        Map<String, String> keyFormatOptions,
         boolean upsert,
         KafkaProducerConfigTranslator.Result nativeProducerConfig) {
       this.topic = topic;
@@ -64,8 +68,10 @@ final class KafkaSinkTranslator {
       this.transactionalIdPrefix = transactionalIdPrefix;
       this.transactionNamingStrategy = transactionNamingStrategy;
       this.parallelism = parallelism;
-      this.jsonOptions = jsonOptions;
-      this.keyJsonOptions = keyJsonOptions;
+      this.valueFormat = valueFormat;
+      this.keyFormat = keyFormat;
+      this.valueFormatOptions = valueFormatOptions;
+      this.keyFormatOptions = keyFormatOptions;
       this.upsert = upsert;
       this.nativeProducerConfig = nativeProducerConfig;
     }
@@ -80,13 +86,13 @@ final class KafkaSinkTranslator {
     if (options.containsKey("topic-pattern")) {
       return Result.fallback("topic-pattern requires writable topic metadata");
     }
-    String format = options.getOrDefault("value.format", options.get("format"));
-    if (!"json".equals(format)) {
-      return Result.fallback("value format " + format + " is not yet natively encoded");
+    String valueFormat = options.getOrDefault("value.format", options.get("format"));
+    String keyFormat = options.get("key.format");
+    if (upsert && keyFormat == null) {
+      return Result.fallback("upsert-kafka requires a key format");
     }
-    if ((upsert && !"json".equals(options.get("key.format")))
-        || (!upsert && options.containsKey("key.format"))) {
-      return Result.fallback("key format is not yet natively encoded for this connector");
+    if (!upsert && keyFormat != null) {
+      return Result.fallback("a keyed ordinary kafka table is not yet natively encoded");
     }
     if (options.containsKey("key.fields")
         || options.containsKey("key.fields-prefix")
@@ -147,18 +153,16 @@ final class KafkaSinkTranslator {
     }
 
     // Flink configures the key and value formats as two independent format instances: value
-    // options live under `json.` / `value.json.`, key options only under `key.json.` (with the
-    // format factory's own defaults when absent, never the value's settings).
-    Map<String, String> jsonOptions = new LinkedHashMap<>();
-    Map<String, String> keyJsonOptions = new LinkedHashMap<>();
+    // options live under `<format>.` / `value.<format>.`, key options only under `key.<format>.`
+    // (with the format factory's own defaults when absent, never the value's settings).
+    Map<String, String> valueFormatOptions = new LinkedHashMap<>();
+    Map<String, String> keyFormatOptions = new LinkedHashMap<>();
     options.forEach(
         (key, value) -> {
-          if (key.startsWith("json.")) {
-            jsonOptions.put(key.substring("json.".length()), value);
-          } else if (key.startsWith("value.json.")) {
-            jsonOptions.put(key.substring("value.json.".length()), value);
-          } else if (key.startsWith("key.json.")) {
-            keyJsonOptions.put(key.substring("key.json.".length()), value);
+          stripPrefix(key, valueFormat + ".", value, valueFormatOptions);
+          stripPrefix(key, "value." + valueFormat + ".", value, valueFormatOptions);
+          if (keyFormat != null) {
+            stripPrefix(key, "key." + keyFormat + ".", value, keyFormatOptions);
           }
         });
     Integer parallelism =
@@ -173,10 +177,19 @@ final class KafkaSinkTranslator {
             transactionalIdPrefix,
             naming,
             parallelism,
-            jsonOptions,
-            keyJsonOptions,
+            valueFormat,
+            keyFormat,
+            valueFormatOptions,
+            keyFormatOptions,
             upsert,
             nativeProducerConfig));
+  }
+
+  private static void stripPrefix(
+      String key, String prefix, String value, Map<String, String> into) {
+    if (key.startsWith(prefix)) {
+      into.put(key.substring(prefix.length()), value);
+    }
   }
 
   private static boolean isZeroDuration(String value) {

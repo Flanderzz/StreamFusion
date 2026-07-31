@@ -1,5 +1,6 @@
 package io.github.jordepic.streamfusion.kafka;
 
+import io.github.jordepic.streamfusion.format.EncodeFormat;
 import io.github.jordepic.streamfusion.operator.ArrowBatch;
 import io.github.jordepic.streamfusion.operator.NativeAllocator;
 import java.io.IOException;
@@ -64,8 +65,8 @@ public final class NativeKafkaExactlyOnceSink
   private final Map<String, String> nativeProducerConfig;
   private final long maxBlockMs;
   private final int maxRequestSize;
-  private final JsonEncodeOptions json;
-  private final JsonEncodeOptions keyJson;
+  private final EncodeFormat valueFormat;
+  private final EncodeFormat keyFormat;
   private final String[] logicalTypes;
   private final String[] fieldNames;
   private final int[] keyFields;
@@ -83,8 +84,8 @@ public final class NativeKafkaExactlyOnceSink
       Map<String, String> nativeProducerConfig,
       long maxBlockMs,
       int maxRequestSize,
-      JsonEncodeOptions json,
-      JsonEncodeOptions keyJson,
+      EncodeFormat valueFormat,
+      EncodeFormat keyFormat,
       String[] logicalTypes,
       String[] fieldNames,
       int[] keyFields,
@@ -96,8 +97,8 @@ public final class NativeKafkaExactlyOnceSink
     this.nativeProducerConfig = Map.copyOf(nativeProducerConfig);
     this.maxBlockMs = maxBlockMs;
     this.maxRequestSize = maxRequestSize;
-    this.json = json;
-    this.keyJson = keyJson;
+    this.valueFormat = valueFormat;
+    this.keyFormat = keyFormat;
     this.logicalTypes = logicalTypes.clone();
     this.fieldNames = fieldNames.clone();
     this.keyFields = keyFields.clone();
@@ -234,17 +235,15 @@ public final class NativeKafkaExactlyOnceSink
             ArrowSchema schema = ArrowSchema.allocateNew(allocator)) {
           Data.exportVectorSchemaRoot(allocator, root, NativeAllocator.DICTIONARIES, array, schema);
           long bytes =
-              NativeKafka.produceKafkaJsonBatch(
+              NativeKafka.produceKafkaBatch(
                   handle,
                   topic,
                   array.memoryAddress(),
                   schema.memoryAddress(),
-                  json.ignoreNullFields,
-                  json.timestampFormat,
-                  json.decimalAsPlainNumber,
-                  keyJson.ignoreNullFields,
-                  keyJson.timestampFormat,
-                  keyJson.decimalAsPlainNumber,
+                  valueFormat.format,
+                  valueFormat.options,
+                  keyFormat.format,
+                  keyFormat.options,
                   logicalTypes,
                   fieldNames,
                   keyFields,

@@ -1,8 +1,12 @@
 package io.github.jordepic.streamfusion.planner;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.github.jordepic.streamfusion.format.EncodeFormat;
 import java.util.Map;
 import org.apache.flink.connector.base.DeliveryGuarantee;
 import org.junit.jupiter.api.Test;
@@ -39,11 +43,31 @@ class KafkaSinkTranslatorTest {
             "topic", "output",
             "properties.bootstrap.servers", "broker:9092",
             "format", "json");
-    assertFallback(with(base, "key.format", "json"), "key format");
+    assertFallback(with(base, "key.format", "json"), "keyed ordinary");
     assertFallback(with(base, "sink.partitioner", "fixed"), "partitioner");
     assertFallback(with(base, "sink.buffer-flush.max-rows", "10"), "buffer");
     assertFallback(with(base, "topic", "a;b"), "one fixed topic");
-    assertFallback(with(base, "format", "avro"), "not yet natively encoded");
+  }
+
+  /** The encode-format seam: only resolvable (format, options) pairs produce a native instance. */
+  @Test
+  void resolvesOnlyNativelyEncodedFormatInstances() {
+    assertNotNull(EncodeFormat.of("json", Map.of()));
+    assertNull(EncodeFormat.of("avro", Map.of()));
+    assertNull(EncodeFormat.of(null, Map.of()));
+    assertNull(EncodeFormat.of("json", Map.of("timestamp-format.standard", "RFC-1123")));
+    assertNull(EncodeFormat.of("json", Map.of("encode.ignore-null-fields", "yes")));
+    EncodeFormat iso =
+        EncodeFormat.of(
+            "json",
+            Map.of(
+                "timestamp-format.standard", "ISO-8601",
+                "encode.ignore-null-fields", "TRUE",
+                "encode.decimal-as-plain-number", "false"));
+    assertNotNull(iso);
+    assertTrue(iso.options.contains("timestamp-format=ISO-8601"));
+    assertTrue(iso.options.contains("encode.ignore-null-fields=true"));
+    assertFalse(iso.options.contains("decimal-as-plain-number"));
   }
 
   @Test
@@ -61,9 +85,9 @@ class KafkaSinkTranslatorTest {
 
     assertTrue(result.fallbackReason == null, () -> result.fallbackReason);
     assertEquals(
-        Map.of("timestamp-format.standard", "ISO-8601"), result.planned().keyJsonOptions);
+        Map.of("timestamp-format.standard", "ISO-8601"), result.planned().keyFormatOptions);
     assertEquals(
-        Map.of("encode.decimal-as-plain-number", "true"), result.planned().jsonOptions);
+        Map.of("encode.decimal-as-plain-number", "true"), result.planned().valueFormatOptions);
   }
 
   @Test

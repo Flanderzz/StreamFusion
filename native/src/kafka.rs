@@ -51,26 +51,44 @@ impl EncodedLines {
 
 /// One JSON format instance's encode-affecting options — Flink configures the Jackson mapper and
 /// converter family per format instance from the `json.*` option set, so the native encoder takes
-/// the same trio wherever a format instance would exist.
+/// the same set wherever a format instance would exist. The defaults are the json format
+/// factory's own.
 #[cfg(feature = "kafka")]
+#[derive(Default)]
 pub(crate) struct JsonEncodeOptions {
     pub(crate) ignore_null_fields: bool,
     pub(crate) iso_8601: bool,
     pub(crate) decimal_as_plain_number: bool,
 }
 
+/// Parses one format instance's `EncodeFormat` option lines. Only options the planner has resolved
+/// reach here — anything unsupported already fell back — so an unknown key is a wiring bug.
 #[cfg(feature = "kafka")]
-impl JsonEncodeOptions {
-    pub(crate) fn new(
-        ignore_null_fields: bool,
-        timestamp_format: &str,
-        decimal_as_plain_number: bool,
-    ) -> JsonEncodeOptions {
-        JsonEncodeOptions {
-            ignore_null_fields,
-            iso_8601: timestamp_format.eq_ignore_ascii_case("ISO-8601"),
-            decimal_as_plain_number,
+fn parse_json_encode_options(encoded: &str) -> Result<JsonEncodeOptions, String> {
+    let mut options = JsonEncodeOptions::default();
+    for line in encoded.lines().filter(|line| !line.is_empty()) {
+        let (key, value) = line
+            .split_once('=')
+            .ok_or_else(|| format!("encode option is not key=value: {line}"))?;
+        match key {
+            "timestamp-format" => options.iso_8601 = value == "ISO-8601",
+            "encode.ignore-null-fields" => options.ignore_null_fields = value == "true",
+            "encode.decimal-as-plain-number" => {
+                options.decimal_as_plain_number = value == "true"
+            }
+            other => return Err(format!("unknown JSON encode option {other}")),
         }
+    }
+    Ok(options)
+}
+
+/// The encode dispatch of the sink's format seam: the JVM passes a `FormatCodes` wire code plus the
+/// format's resolved option lines; each natively encoded sink format adds an arm here.
+#[cfg(feature = "kafka")]
+fn parse_encode_format(format: i32, encoded: &str) -> Result<JsonEncodeOptions, String> {
+    match format {
+        crate::formats::FORMAT_JSON => parse_json_encode_options(encoded),
+        other => Err(format!("format code {other} is not natively encoded")),
     }
 }
 
@@ -1299,12 +1317,17 @@ mod kafka_error_tests {
         .unwrap();
 
         let explicit =
-            encode_json_batch(&batch, &JsonEncodeOptions::new(false, "SQL", false), &[], &[])
+            encode_json_batch(&batch, &JsonEncodeOptions::default(), &[], &[])
                 .unwrap();
         assert_eq!(explicit.line(0), br#"{"id":1,"name":"one","active":true}"#.as_slice());
         assert_eq!(explicit.line(1), br#"{"id":2,"name":null,"active":false}"#.as_slice());
         let omitted =
-            encode_json_batch(&batch, &JsonEncodeOptions::new(true, "SQL", false), &[], &[])
+            encode_json_batch(
+                &batch,
+                &JsonEncodeOptions { ignore_null_fields: true, ..JsonEncodeOptions::default() },
+                &[],
+                &[],
+            )
                 .unwrap();
         assert_eq!(omitted.line(1), br#"{"id":2,"active":false}"#.as_slice());
     }
@@ -1384,7 +1407,7 @@ mod kafka_error_tests {
             stock.split(|byte| *byte == b'\n').filter(|line| !line.is_empty()).collect();
 
         let ours =
-            encode_json_batch(&batch, &JsonEncodeOptions::new(false, "SQL", false), &[], &[])
+            encode_json_batch(&batch, &JsonEncodeOptions::default(), &[], &[])
                 .unwrap();
         assert_eq!(ours.len(), stock_lines.len());
         for index in 0..ours.len() {
@@ -1605,25 +1628,19 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_wa
 /// array per record.
 #[cfg(feature = "kafka")]
 #[no_mangle]
-pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_encodeKafkaJsonBatch<'local>(
+pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_encodeKafkaBatch<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     array_address: jlong,
     schema_address: jlong,
-    ignore_null_fields: jboolean,
-    timestamp_format: JString<'local>,
-    decimal_as_plain_number: jboolean,
+    format: jint,
+    format_options: JString<'local>,
     logical_types: JObjectArray<'local>,
     field_names: JObjectArray<'local>,
 ) -> jni::sys::jobjectArray {
     kafka_jni(&mut env, std::ptr::null_mut(), |env| {
         let batch = import_record_batch(array_address, schema_address);
-        let options = read_json_encode_options(
-            env,
-            ignore_null_fields,
-            &timestamp_format,
-            decimal_as_plain_number,
-        )?;
+        let options = read_encode_format(env, format, &format_options)?;
         let logical_types = read_string_array(env, &logical_types);
         let field_names = read_string_array(env, &field_names);
         let encoded = encode_json_batch(&batch, &options, &logical_types, &field_names)?;
@@ -1640,21 +1657,16 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_en
 }
 
 #[cfg(feature = "kafka")]
-fn read_json_encode_options(
+fn read_encode_format(
     env: &mut JNIEnv<'_>,
-    ignore_null_fields: jboolean,
-    timestamp_format: &JString<'_>,
-    decimal_as_plain_number: jboolean,
+    format: jint,
+    format_options: &JString<'_>,
 ) -> Result<JsonEncodeOptions, String> {
-    let timestamp_format: String = env
-        .get_string(timestamp_format)
-        .map_err(|error| format!("failed to read JSON timestamp format: {error}"))?
+    let encoded: String = env
+        .get_string(format_options)
+        .map_err(|error| format!("failed to read encode format options: {error}"))?
         .into();
-    Ok(JsonEncodeOptions::new(
-        ignore_null_fields != 0,
-        &timestamp_format,
-        decimal_as_plain_number != 0,
-    ))
+    parse_encode_format(format, &encoded)
 }
 
 #[cfg(feature = "kafka")]
@@ -1682,17 +1694,15 @@ fn byte_array_array<'slices, 'local>(
 /// are Kafka tombstones for DELETE and UPDATE_BEFORE, matching Flink's upsert-kafka schema.
 #[cfg(feature = "kafka")]
 #[no_mangle]
-pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_encodeKafkaJsonRecords<'local>(
+pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_encodeKafkaRecords<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     array_address: jlong,
     schema_address: jlong,
-    ignore_null_fields: jboolean,
-    timestamp_format: JString<'local>,
-    decimal_as_plain_number: jboolean,
-    key_ignore_null_fields: jboolean,
-    key_timestamp_format: JString<'local>,
-    key_decimal_as_plain_number: jboolean,
+    format: jint,
+    format_options: JString<'local>,
+    key_format: jint,
+    key_format_options: JString<'local>,
     logical_types: JObjectArray<'local>,
     field_names: JObjectArray<'local>,
     key_fields: JIntArray<'local>,
@@ -1701,18 +1711,8 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_en
 ) -> jni::sys::jobjectArray {
     kafka_jni(&mut env, std::ptr::null_mut(), |env| {
         let batch = import_record_batch(array_address, schema_address);
-        let options = read_json_encode_options(
-            env,
-            ignore_null_fields,
-            &timestamp_format,
-            decimal_as_plain_number,
-        )?;
-        let key_options = read_json_encode_options(
-            env,
-            key_ignore_null_fields,
-            &key_timestamp_format,
-            key_decimal_as_plain_number,
-        )?;
+        let options = read_encode_format(env, format, &format_options)?;
+        let key_options = read_encode_format(env, key_format, &key_format_options)?;
         let logical_types = read_string_array(env, &logical_types);
         let field_names = read_string_array(env, &field_names);
         let key_fields = read_int_array(env, &key_fields)
@@ -2464,7 +2464,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_pr
 /// objects. Returns the total key+value payload bytes enqueued for producer metrics.
 #[cfg(feature = "kafka")]
 #[no_mangle]
-pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_produceKafkaJsonBatch<
+pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_produceKafkaBatch<
     'local,
 >(
     mut env: JNIEnv<'local>,
@@ -2473,12 +2473,10 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_pr
     topic: JString<'local>,
     array_address: jlong,
     schema_address: jlong,
-    ignore_null_fields: jboolean,
-    timestamp_format: JString<'local>,
-    decimal_as_plain_number: jboolean,
-    key_ignore_null_fields: jboolean,
-    key_timestamp_format: JString<'local>,
-    key_decimal_as_plain_number: jboolean,
+    format: jint,
+    format_options: JString<'local>,
+    key_format: jint,
+    key_format_options: JString<'local>,
     logical_types: JObjectArray<'local>,
     field_names: JObjectArray<'local>,
     key_fields: JIntArray<'local>,
@@ -2492,18 +2490,8 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_pr
             .map_err(|error| format!("failed to read topic: {error}"))?
             .into();
         let batch = import_record_batch(array_address, schema_address);
-        let options = read_json_encode_options(
-            env,
-            ignore_null_fields,
-            &timestamp_format,
-            decimal_as_plain_number,
-        )?;
-        let key_options = read_json_encode_options(
-            env,
-            key_ignore_null_fields,
-            &key_timestamp_format,
-            key_decimal_as_plain_number,
-        )?;
+        let options = read_encode_format(env, format, &format_options)?;
+        let key_options = read_encode_format(env, key_format, &key_format_options)?;
         let logical_types = read_string_array(env, &logical_types);
         let field_names = read_string_array(env, &field_names);
         let key_fields = read_int_array(env, &key_fields)

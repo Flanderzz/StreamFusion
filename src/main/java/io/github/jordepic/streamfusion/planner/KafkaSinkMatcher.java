@@ -1,6 +1,6 @@
 package io.github.jordepic.streamfusion.planner;
 
-import io.github.jordepic.streamfusion.kafka.JsonEncodeOptions;
+import io.github.jordepic.streamfusion.format.EncodeFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.IntStream;
@@ -23,8 +23,8 @@ final class KafkaSinkMatcher {
   static final class Planned {
     final RowType rowType;
     final KafkaSinkTranslator.Planned sink;
-    final JsonEncodeOptions json;
-    final JsonEncodeOptions keyJson;
+    final EncodeFormat valueFormat;
+    final EncodeFormat keyFormat;
     final int[] keyFields;
     final int[] valueFields;
     final boolean upsert;
@@ -33,16 +33,16 @@ final class KafkaSinkMatcher {
     private Planned(
         RowType rowType,
         KafkaSinkTranslator.Planned sink,
-        JsonEncodeOptions json,
-        JsonEncodeOptions keyJson,
+        EncodeFormat valueFormat,
+        EncodeFormat keyFormat,
         int[] keyFields,
         int[] valueFields,
         boolean upsert,
         String fallbackReason) {
       this.rowType = rowType;
       this.sink = sink;
-      this.json = json;
-      this.keyJson = keyJson;
+      this.valueFormat = valueFormat;
+      this.keyFormat = keyFormat;
       this.keyFields = keyFields;
       this.valueFields = valueFields;
       this.upsert = upsert;
@@ -88,9 +88,23 @@ final class KafkaSinkMatcher {
         return Planned.fallback("JSON type " + type.asSummaryString());
       }
     }
-    JsonEncodeOptions json = JsonEncodeOptions.fromFormatOptions(translated.planned().jsonOptions);
-    JsonEncodeOptions keyJson =
-        JsonEncodeOptions.fromFormatOptions(translated.planned().keyJsonOptions);
+    EncodeFormat valueFormat =
+        EncodeFormat.of(translated.planned().valueFormat, translated.planned().valueFormatOptions);
+    if (valueFormat == null) {
+      return Planned.fallback(
+          "value format " + translated.planned().valueFormat + " is not natively encoded"
+              + " with these options");
+    }
+    EncodeFormat keyFormat = valueFormat;
+    if (translated.planned().upsert) {
+      keyFormat =
+          EncodeFormat.of(translated.planned().keyFormat, translated.planned().keyFormatOptions);
+      if (keyFormat == null) {
+        return Planned.fallback(
+            "key format " + translated.planned().keyFormat + " is not natively encoded"
+                + " with these options");
+      }
+    }
     int[] valueFields = IntStream.range(0, rowType.getFieldCount()).toArray();
     int[] keyFields = new int[0];
     if (translated.planned().upsert) {
@@ -102,8 +116,8 @@ final class KafkaSinkMatcher {
     return new Planned(
         rowType,
         translated.planned(),
-        json,
-        keyJson,
+        valueFormat,
+        keyFormat,
         keyFields,
         valueFields,
         translated.planned().upsert,

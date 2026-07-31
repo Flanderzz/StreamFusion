@@ -1,5 +1,6 @@
 package io.github.jordepic.streamfusion.kafka;
 
+import io.github.jordepic.streamfusion.format.EncodeFormat;
 import io.github.jordepic.streamfusion.operator.ArrowBatch;
 import io.github.jordepic.streamfusion.operator.NativeAllocator;
 import org.apache.arrow.c.ArrowArray;
@@ -13,12 +14,12 @@ import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 
 /** Encodes each input Arrow batch once and emits the final Kafka value bytes for its rows. */
-public final class NativeKafkaJsonSerializationOperator
+public final class NativeKafkaSerializationOperator
     extends AbstractStreamOperator<PreSerializedKafkaRecord>
     implements OneInputStreamOperator<ArrowBatch, PreSerializedKafkaRecord> {
 
-  private final JsonEncodeOptions json;
-  private final JsonEncodeOptions keyJson;
+  private final EncodeFormat valueFormat;
+  private final EncodeFormat keyFormat;
   private final String[] logicalTypes;
   private final String[] fieldNames;
   private final int[] keyFields;
@@ -29,16 +30,16 @@ public final class NativeKafkaJsonSerializationOperator
   private transient Counter serializedBytes;
   private transient Counter serializationNanos;
 
-  public NativeKafkaJsonSerializationOperator(
-      JsonEncodeOptions json,
-      JsonEncodeOptions keyJson,
+  public NativeKafkaSerializationOperator(
+      EncodeFormat valueFormat,
+      EncodeFormat keyFormat,
       String[] logicalTypes,
       String[] fieldNames,
       int[] keyFields,
       int[] valueFields,
       boolean upsert) {
-    this.json = json;
-    this.keyJson = keyJson;
+    this.valueFormat = valueFormat;
+    this.keyFormat = keyFormat;
     this.logicalTypes = logicalTypes;
     this.fieldNames = fieldNames;
     this.keyFields = keyFields;
@@ -68,15 +69,13 @@ public final class NativeKafkaJsonSerializationOperator
         Data.exportVectorSchemaRoot(
             allocator, root, NativeAllocator.DICTIONARIES, array, schema);
         byte[][][] records =
-            NativeKafka.encodeKafkaJsonRecords(
+            NativeKafka.encodeKafkaRecords(
                 array.memoryAddress(),
                 schema.memoryAddress(),
-                json.ignoreNullFields,
-                json.timestampFormat,
-                json.decimalAsPlainNumber,
-                keyJson.ignoreNullFields,
-                keyJson.timestampFormat,
-                keyJson.decimalAsPlainNumber,
+                valueFormat.format,
+                valueFormat.options,
+                keyFormat.format,
+                keyFormat.options,
                 logicalTypes,
                 fieldNames,
                 keyFields,

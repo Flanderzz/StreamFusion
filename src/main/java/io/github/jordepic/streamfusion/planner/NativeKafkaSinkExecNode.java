@@ -1,7 +1,7 @@
 package io.github.jordepic.streamfusion.planner;
 
 import io.github.jordepic.streamfusion.kafka.NativeKafkaExactlyOnceSink;
-import io.github.jordepic.streamfusion.kafka.NativeKafkaJsonSerializationOperator;
+import io.github.jordepic.streamfusion.kafka.NativeKafkaSerializationOperator;
 import io.github.jordepic.streamfusion.kafka.PreSerializedKafkaRecord;
 import io.github.jordepic.streamfusion.kafka.PreSerializedKafkaRecordSchema;
 import io.github.jordepic.streamfusion.operator.ArrowBatch;
@@ -63,8 +63,8 @@ public final class NativeKafkaSinkExecNode extends ExecNodeBase<Object>
               planned.sink.nativeProducerConfig.nativeConfig(),
               planned.sink.nativeProducerConfig.maxBlockMs(),
               planned.sink.nativeProducerConfig.maxRequestSize(),
-              planned.json,
-              planned.keyJson,
+              planned.valueFormat,
+              planned.keyFormat,
               planned.rowType.getChildren().stream().map(Object::toString).toArray(String[]::new),
               planned.rowType.getFieldNames().toArray(String[]::new),
               planned.keyFields,
@@ -85,11 +85,11 @@ public final class NativeKafkaSinkExecNode extends ExecNodeBase<Object>
     OneInputTransformation<ArrowBatch, PreSerializedKafkaRecord> serialization =
         new OneInputTransformation<>(
             input,
-            "native-kafka-json-serialization",
+            "native-kafka-serialization",
             SimpleOperatorFactory.of(
-                new NativeKafkaJsonSerializationOperator(
-                    planned.json,
-                    planned.keyJson,
+                new NativeKafkaSerializationOperator(
+                    planned.valueFormat,
+                    planned.keyFormat,
                     planned.rowType.getChildren().stream()
                         .map(Object::toString)
                         .toArray(String[]::new),

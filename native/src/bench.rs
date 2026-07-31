@@ -3,7 +3,7 @@ use super::*;
 /// The production Kafka JSON encoder, exposed only to its Criterion benchmark.
 #[cfg(feature = "kafka")]
 pub fn encode_kafka_json(batch: &RecordBatch) -> crate::kafka::EncodedLines {
-    encode_json_batch(batch, &JsonEncodeOptions::new(false, "SQL", false), &[], &[])
+    encode_json_batch(batch, &JsonEncodeOptions::default(), &[], &[])
         .expect("Kafka JSON encode")
 }
 

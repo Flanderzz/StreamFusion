@@ -4,12 +4,14 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
+import io.github.jordepic.streamfusion.format.EncodeFormat;
 import io.github.jordepic.streamfusion.operator.ArrowBatch;
 import io.github.jordepic.streamfusion.operator.ArrowBatchSerializer;
 import io.github.jordepic.streamfusion.operator.RowDataArrowConverter;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
@@ -28,7 +30,7 @@ import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
 @Tag("streamfusion-kafka")
-class NativeKafkaJsonSerializationOperatorTest {
+class NativeKafkaSerializationOperatorTest {
 
   @Test
   void emitsOnePreSerializedValuePerArrowRow() throws Exception {
@@ -40,9 +42,9 @@ class NativeKafkaJsonSerializationOperatorTest {
     try (BufferAllocator allocator = new RootAllocator();
         OneInputStreamOperatorTestHarness<ArrowBatch, PreSerializedKafkaRecord> harness =
             new OneInputStreamOperatorTestHarness<>(
-                new NativeKafkaJsonSerializationOperator(
-                    new JsonEncodeOptions("SQL", false, false),
-                    new JsonEncodeOptions("SQL", false, false),
+                new NativeKafkaSerializationOperator(
+                    EncodeFormat.json(Map.of()),
+                    EncodeFormat.json(Map.of()),
                     rowType.getChildren().stream().map(Object::toString).toArray(String[]::new),
                     rowType.getFieldNames().toArray(String[]::new),
                     new int[0],
@@ -82,9 +84,9 @@ class NativeKafkaJsonSerializationOperatorTest {
     try (BufferAllocator allocator = new RootAllocator();
         OneInputStreamOperatorTestHarness<ArrowBatch, PreSerializedKafkaRecord> harness =
             new OneInputStreamOperatorTestHarness<>(
-                new NativeKafkaJsonSerializationOperator(
-                    new JsonEncodeOptions("SQL", false, false),
-                    new JsonEncodeOptions("SQL", false, false),
+                new NativeKafkaSerializationOperator(
+                    EncodeFormat.json(Map.of()),
+                    EncodeFormat.json(Map.of()),
                     rowType.getChildren().stream().map(Object::toString).toArray(String[]::new),
                     rowType.getFieldNames().toArray(String[]::new),
                     new int[0],
@@ -147,9 +149,9 @@ class NativeKafkaJsonSerializationOperatorTest {
     try (BufferAllocator allocator = new RootAllocator();
         OneInputStreamOperatorTestHarness<ArrowBatch, PreSerializedKafkaRecord> harness =
             new OneInputStreamOperatorTestHarness<>(
-                new NativeKafkaJsonSerializationOperator(
-                    new JsonEncodeOptions("SQL", false, false),
-                    new JsonEncodeOptions("SQL", false, false),
+                new NativeKafkaSerializationOperator(
+                    EncodeFormat.json(Map.of()),
+                    EncodeFormat.json(Map.of()),
                     rowType.getChildren().stream().map(Object::toString).toArray(String[]::new),
                     rowType.getFieldNames().toArray(String[]::new),
                     new int[] {0},

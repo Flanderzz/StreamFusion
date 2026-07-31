@@ -41,29 +41,31 @@ public final class NativeKafka {
 
   public static native void wakeKafkaConsumer(long handle);
 
-  /** Serializes one Arrow batch directly into the final heap byte arrays KafkaProducer requires. */
-  public static native byte[][] encodeKafkaJsonBatch(
+  /**
+   * Serializes one Arrow batch directly into the final heap byte arrays KafkaProducer requires.
+   * {@code format} is the {@code FormatCodes} wire code and {@code formatOptions} the resolved
+   * {@code EncodeFormat} option lines — the native side dispatches on the code, so new sink
+   * formats extend the dispatch instead of this signature.
+   */
+  public static native byte[][] encodeKafkaBatch(
       long arrayAddress,
       long schemaAddress,
-      boolean ignoreNullFields,
-      String timestampFormat,
-      boolean decimalAsPlainNumber,
+      int format,
+      String formatOptions,
       String[] logicalTypes,
       String[] fieldNames);
 
   /**
    * Serializes projected key/value bytes together; null values are upsert tombstones. The key
-   * format is its own instance in Flink, so it encodes under its own option trio.
+   * format is its own instance in Flink, so it encodes under its own format code and options.
    */
-  public static native byte[][][] encodeKafkaJsonRecords(
+  public static native byte[][][] encodeKafkaRecords(
       long arrayAddress,
       long schemaAddress,
-      boolean ignoreNullFields,
-      String timestampFormat,
-      boolean decimalAsPlainNumber,
-      boolean keyIgnoreNullFields,
-      String keyTimestampFormat,
-      boolean keyDecimalAsPlainNumber,
+      int format,
+      String formatOptions,
+      int keyFormat,
+      String keyFormatOptions,
       String[] logicalTypes,
       String[] fieldNames,
       int[] keyFields,
@@ -109,17 +111,15 @@ public final class NativeKafka {
   /**
    * Encodes one Arrow batch and enqueues all of its Kafka records without materializing JVM rows.
    */
-  public static native long produceKafkaJsonBatch(
+  public static native long produceKafkaBatch(
       long handle,
       String topic,
       long arrayAddress,
       long schemaAddress,
-      boolean ignoreNullFields,
-      String timestampFormat,
-      boolean decimalAsPlainNumber,
-      boolean keyIgnoreNullFields,
-      String keyTimestampFormat,
-      boolean keyDecimalAsPlainNumber,
+      int format,
+      String formatOptions,
+      int keyFormat,
+      String keyFormatOptions,
       String[] logicalTypes,
       String[] fieldNames,
       int[] keyFields,

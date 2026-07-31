@@ -4,11 +4,13 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
+import io.github.jordepic.streamfusion.format.EncodeFormat;
 import io.github.jordepic.streamfusion.operator.RowDataArrowConverter;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
 import java.util.List;
+import java.util.Map;
 import org.apache.arrow.c.ArrowArray;
 import org.apache.arrow.c.ArrowSchema;
 import org.apache.arrow.c.CDataDictionaryProvider;
@@ -237,16 +239,20 @@ class NativeKafkaJsonEncoderTest {
         ArrowArray array = ArrowArray.allocateNew(allocator);
         ArrowSchema schema = ArrowSchema.allocateNew(allocator)) {
       Data.exportVectorSchemaRoot(allocator, root, dictionaries, array, schema);
+      EncodeFormat valueFormat = EncodeFormat.json(Map.of());
+      EncodeFormat keyFormat =
+          EncodeFormat.json(
+              Map.of(
+                  "timestamp-format.standard", "ISO-8601",
+                  "encode.decimal-as-plain-number", "true"));
       byte[][][] records =
-          NativeKafka.encodeKafkaJsonRecords(
+          NativeKafka.encodeKafkaRecords(
               array.memoryAddress(),
               schema.memoryAddress(),
-              false,
-              "SQL",
-              false,
-              false,
-              "ISO-8601",
-              true,
+              valueFormat.format,
+              valueFormat.options,
+              keyFormat.format,
+              keyFormat.options,
               rowType.getChildren().stream().map(Object::toString).toArray(String[]::new),
               rowType.getFieldNames().toArray(String[]::new),
               new int[] {0, 1},
@@ -299,13 +305,21 @@ class NativeKafkaJsonEncoderTest {
         ArrowArray array = ArrowArray.allocateNew(allocator);
         ArrowSchema schema = ArrowSchema.allocateNew(allocator)) {
       Data.exportVectorSchemaRoot(allocator, root, dictionaries, array, schema);
+      EncodeFormat format =
+          EncodeFormat.json(
+              Map.of(
+                  "timestamp-format.standard",
+                  timestampFormat == TimestampFormat.SQL ? "SQL" : "ISO-8601",
+                  "encode.ignore-null-fields",
+                  String.valueOf(ignoreNullFields),
+                  "encode.decimal-as-plain-number",
+                  String.valueOf(decimalAsPlainNumber)));
       byte[][] actual =
-          NativeKafka.encodeKafkaJsonBatch(
+          NativeKafka.encodeKafkaBatch(
               array.memoryAddress(),
               schema.memoryAddress(),
-              ignoreNullFields,
-              timestampFormat == TimestampFormat.SQL ? "SQL" : "ISO-8601",
-              decimalAsPlainNumber,
+              format.format,
+              format.options,
               rowType.getChildren().stream().map(Object::toString).toArray(String[]::new),
               rowType.getFieldNames().toArray(String[]::new));
 
