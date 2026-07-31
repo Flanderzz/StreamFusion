@@ -21,7 +21,8 @@ public final class NativeRawFormat {
    */
   public static native long driverInitAddress();
 
-  static native long createDecoder(long schemaArrayAddress, long schemaAddress);
+  static native long createDecoder(
+      long schemaArrayAddress, long schemaAddress, String formatOptions);
 
   static native void decodeInto(
       long handle,

@@ -241,23 +241,85 @@ fn nullable_containers(field: &FieldRef) -> FieldRef {
     }
 }
 
-/// Decodes Flink's `raw` format: the message bytes pass through as a single column. The body is already
-/// a binary column, so this just casts it to the target column's type (Binary passthrough, or Binary →
-/// Utf8 for a STRING column) and renames it. 1:1 with the input rows (a null stays null).
+/// Decodes Flink's `raw` format: each message body is the single column's value verbatim. Strings
+/// and bytes pass through (the plan gate admits only UTF-8 `raw.charset` values, so string bodies are
+/// already in the column's encoding); BOOLEAN reads one byte as `!= 0`; the fixed-width numerics read
+/// an exact-length buffer with the table's `raw.endianness`, failing the job on a wrong-length
+/// message with Flink's own error text. 1:1 with the input rows — a null body stays a null field.
 pub(crate) struct RawDecoder {
     schema: SchemaRef,
+    little_endian: bool,
 }
 
 impl RawDecoder {
-    fn new(schema: SchemaRef) -> RawDecoder {
-        RawDecoder { schema }
+    fn new(schema: SchemaRef, little_endian: bool) -> RawDecoder {
+        RawDecoder { schema, little_endian }
     }
 
     fn decode(&self, bodies: &RecordBatch) -> RecordBatch {
-        let target = self.schema.field(0).data_type();
-        let column = arrow::compute::cast(bodies.column(0), target).expect("failed to cast raw column");
+        use arrow::datatypes::{Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type};
+        let body = bodies.column(0);
+        let column = match self.schema.field(0).data_type() {
+            DataType::Boolean => self.decode_booleans(body),
+            DataType::Int8 => {
+                self.fixed::<Int8Type, 1>(body, "TINYINT", i8::from_be_bytes, i8::from_le_bytes)
+            }
+            DataType::Int16 => {
+                self.fixed::<Int16Type, 2>(body, "SMALLINT", i16::from_be_bytes, i16::from_le_bytes)
+            }
+            DataType::Int32 => {
+                self.fixed::<Int32Type, 4>(body, "INT", i32::from_be_bytes, i32::from_le_bytes)
+            }
+            DataType::Int64 => {
+                self.fixed::<Int64Type, 8>(body, "BIGINT", i64::from_be_bytes, i64::from_le_bytes)
+            }
+            DataType::Float32 => {
+                self.fixed::<Float32Type, 4>(body, "FLOAT", f32::from_be_bytes, f32::from_le_bytes)
+            }
+            DataType::Float64 => {
+                self.fixed::<Float64Type, 8>(body, "DOUBLE", f64::from_be_bytes, f64::from_le_bytes)
+            }
+            target => arrow::compute::cast(body, target).expect("failed to cast raw column"),
+        };
         RecordBatch::try_new(self.schema.clone(), vec![column]).expect("failed to build raw batch")
     }
+
+    fn decode_booleans(&self, body: &ArrayRef) -> ArrayRef {
+        let mut builder = arrow::array::BooleanBuilder::with_capacity(body.len());
+        for row in 0..body.len() {
+            match binary_body(body, row) {
+                None => builder.append_null(),
+                Some(bytes) => builder.append_value(exact::<1>(bytes, "BOOLEAN")[0] != 0),
+            }
+        }
+        Arc::new(builder.finish())
+    }
+
+    fn fixed<T: arrow::datatypes::ArrowPrimitiveType, const N: usize>(
+        &self,
+        body: &ArrayRef,
+        type_name: &str,
+        from_be: fn([u8; N]) -> T::Native,
+        from_le: fn([u8; N]) -> T::Native,
+    ) -> ArrayRef {
+        let convert = if self.little_endian { from_le } else { from_be };
+        let mut builder = arrow::array::PrimitiveBuilder::<T>::with_capacity(body.len());
+        for row in 0..body.len() {
+            match binary_body(body, row) {
+                None => builder.append_null(),
+                Some(bytes) => builder.append_value(convert(exact::<N>(bytes, type_name))),
+            }
+        }
+        Arc::new(builder.finish())
+    }
+}
+
+/// Flink's raw-format length check with its exact `DeserializationException` text: a fixed-width
+/// value must arrive as exactly `N` bytes or the job fails.
+fn exact<const N: usize>(bytes: &[u8], type_name: &str) -> [u8; N] {
+    bytes.try_into().unwrap_or_else(|_| {
+        panic!("Size of data received for deserializing {type_name} type is not {N}.")
+    })
 }
 
 /// Reads row `row` of a binary "body" column as bytes, or `None` if the column is null there. Shared by
@@ -829,17 +891,19 @@ pub(crate) struct MessageDecoder {
 }
 
 /// The decode-relevant format options the JVM plumbs through as `key=value` lines (one per line,
-/// split on the first `=`): the table's `csv.*` Jackson knobs and the JSON family's
-/// `timestamp-format.standard`. Only options the planner has vetted reach here — anything
-/// unsupported already fell back — so an unknown key is a wiring bug, not user input.
+/// split on the first `=`): the table's `csv.*` Jackson knobs, the JSON family's
+/// `timestamp-format.standard`, and `raw.endianness`. Only options the planner has vetted reach
+/// here — anything unsupported already fell back — so an unknown key is a wiring bug, not user input.
 pub(crate) struct FormatOptions {
     pub(crate) csv: crate::csv::CsvOptions,
     pub(crate) timestamp_mode: crate::flink_text::TimestampMode,
+    pub(crate) raw_little_endian: bool,
 }
 
 pub(crate) fn parse_format_options(encoded: &str) -> FormatOptions {
     let mut csv = crate::csv::CsvOptions::default();
     let mut timestamp_mode = crate::flink_text::TimestampMode::default();
+    let mut raw_little_endian = false;
     for line in encoded.lines().filter(|l| !l.is_empty()) {
         let (key, value) = line.split_once('=').expect("format option is not key=value");
         let single_byte = || -> u8 {
@@ -859,10 +923,17 @@ pub(crate) fn parse_format_options(encoded: &str) -> FormatOptions {
                     other => panic!("unknown timestamp-format {other}"),
                 }
             }
+            "raw.endianness" => {
+                raw_little_endian = match value {
+                    "little-endian" => true,
+                    "big-endian" => false,
+                    other => panic!("unknown raw.endianness {other}"),
+                }
+            }
             other => panic!("unknown format option {other}"),
         }
     }
-    FormatOptions { csv, timestamp_mode }
+    FormatOptions { csv, timestamp_mode, raw_little_endian }
 }
 
 pub(crate) enum FormatDecoder {
@@ -975,7 +1046,9 @@ impl MessageDecoder {
                     skip_errors: false,
                 }
             }
-            FORMAT_RAW => FormatDecoder::Raw(RawDecoder::new(output_schema)),
+            FORMAT_RAW => {
+                FormatDecoder::Raw(RawDecoder::new(output_schema, options.raw_little_endian))
+            }
             FORMAT_DEBEZIUM_JSON..=FORMAT_CANAL_JSON => FormatDecoder::Cdc(CdcJsonDecoder::new(
                 output_schema,
                 CdcDialect::for_format(format),
@@ -1400,13 +1473,13 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_format_csv_NativeCsv
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_format_raw_NativeRawFormat_createDecoder<'local>(
     mut env: JNIEnv<'local>, class: JClass<'local>, schema_array_address: jlong, schema_address: jlong,
+    format_options: JString<'local>,
 ) -> jlong {
     let empty_writer = env.new_string("").expect("empty writer schema");
     let empty_reader = env.new_string("").expect("empty reader schema");
-    let empty_options = env.new_string("").expect("empty format options");
     Java_io_github_jordepic_streamfusion_Native_createDecoder(
         env, class, FORMAT_RAW, schema_array_address, schema_address, empty_writer, empty_reader, 0,
-        0, empty_options,
+        0, format_options,
     )
 }
 

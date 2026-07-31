@@ -1,5 +1,7 @@
 package io.github.jordepic.streamfusion.format;
 
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.util.Map;
 
 /** Native decoder option encoding shared by planner gates and format artifacts. */
@@ -22,13 +24,17 @@ public final class NativeFormatOptions {
    * or null when an option value the native decode can't reproduce is present — behavior that must
    * stay on Flink (the fallback gate). CSV carries the Jackson {@code CsvSchema} knobs; the JSON
    * family (plain {@code json} and the CDC envelopes) carries {@code timestamp-format.standard} and
-   * gates {@code fail-on-missing-field}. The CSV delimiter is Java-unescaped and truncated to its
+   * gates {@code fail-on-missing-field}; raw carries {@code raw.endianness} and gates a non-UTF-8
+   * {@code raw.charset}. The CSV delimiter is Java-unescaped and truncated to its
    * first character exactly as {@code CsvFormatFactory} does; quote is a literal single character
    * (the factory validates the length). Each must be ASCII — csv-core splits on bytes — and a null
    * literal must fit the line encoding.
    */
   public static String encode(Map<String, String> options) {
     String format = NativeFormatProviders.formatIdentifier(options);
+    if ("raw".equals(format)) {
+      return encodeRaw(options);
+    }
     StringBuilder encoded = new StringBuilder();
     if (FormatCodes.isJsonFamily(format)) {
       // A missing field is null natively (Flink's default); the fail mode isn't modeled.
@@ -75,6 +81,34 @@ public final class NativeFormatOptions {
       encoded.append("csv.null-literal=").append(nullLiteral).append('\n');
     }
     return encoded.toString();
+  }
+
+  /**
+   * Raw's two options the way {@code RawFormatFactory} reads them. {@code raw.charset} accepts any
+   * name resolving to UTF-8 (the underlying bytes of {@code StringData} are UTF-8, so Flink's
+   * decode is a passthrough then — exactly what the native decode does); any other valid charset
+   * decodes through Java's charset machinery and stays on Flink. Endianness is case-insensitive
+   * {@code big-endian}/{@code little-endian}; only the non-default value is plumbed through. An
+   * invalid charset or endianness value falls back so Flink raises its own ValidationException.
+   */
+  private static String encodeRaw(Map<String, String> options) {
+    String charset = option(options, "charset");
+    if (charset != null && !isUtf8(charset)) {
+      return null;
+    }
+    String endianness = option(options, "endianness");
+    if (endianness == null || "big-endian".equalsIgnoreCase(endianness)) {
+      return "";
+    }
+    return "little-endian".equalsIgnoreCase(endianness) ? "raw.endianness=little-endian\n" : null;
+  }
+
+  private static boolean isUtf8(String charsetName) {
+    try {
+      return StandardCharsets.UTF_8.equals(Charset.forName(charsetName));
+    } catch (Exception e) {
+      return false;
+    }
   }
 
   private static boolean appendChar(StringBuilder encoded, String key, char c) {

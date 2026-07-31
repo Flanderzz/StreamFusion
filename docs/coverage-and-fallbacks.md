@@ -592,6 +592,20 @@ shapes persist their per-key deadlines in a dedicated state table).
   JSON-decoded formats honor the per-message skip, and CSV reproduces Flink's finer per-field
   granularity natively: a bad value nulls the field, a short row pads, a record-level error drops
   the row; a JSON table with the flag set takes the decode path, not the native source).
+- **Kafka raw** — each whole message is the single physical column's value, decoded natively
+  (parity-pinned against Flink's own deserializer — `RawDecodeParityTest`): CHAR/VARCHAR and
+  VARBINARY pass through, BOOLEAN reads one byte as `!= 0`, and
+  TINYINT/SMALLINT/INT/BIGINT/FLOAT/DOUBLE read an exact-length buffer honoring `raw.endianness`
+  (both values, case-insensitive; big-endian default). A wrong-length fixed-width message fails the
+  job with Flink's own error text (raw defines no `ignore-parse-errors`), and a null message stays
+  a null field. Falling back, each at plan time: a schema with more than one physical column or an
+  invalid `raw.charset`/`raw.endianness` value (Flink then raises its own ValidationException); a
+  **non-UTF-8 `raw.charset`** (any name resolving to UTF-8 is native — the decode has no Java
+  charset machinery); a **`RAW<T>` column** (its bytes belong to a Java TypeSerializer, see the
+  type-level RAW exclusion); and a **fixed-length BINARY column** (Flink passes any message length
+  through verbatim where Arrow's fixed-size binary enforces the declared length). One deliberate
+  divergence: a string column fed invalid UTF-8 bytes fails the native decode (Arrow strings must
+  be valid UTF-8) where Flink smuggles the bytes through `StringData` unvalidated.
 - **Kafka CSV** — the decode splits records with csv-core and converts fields with Flink-exact text
   parsers (parity-pinned against Flink's own deserializer — `CsvDecodeParityTest`, divergences/21),
   honoring `field-delimiter` (incl. `\t`/`\uXXXX` forms), `quote-character`,

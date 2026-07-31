@@ -1,13 +1,39 @@
 package io.github.jordepic.streamfusion.format.raw;
 
 import io.github.jordepic.streamfusion.format.NativeFormatContext;
+import io.github.jordepic.streamfusion.format.NativeFormatOptions;
 import io.github.jordepic.streamfusion.format.NativeFormatProvider;
-import io.github.jordepic.streamfusion.format.NativeMessageDecoder;
 import io.github.jordepic.streamfusion.format.NativeMessageDecoderFactory;
 import io.github.jordepic.streamfusion.format.NativeSchemaMessageDecoder;
+import java.util.EnumSet;
+import java.util.Set;
+import org.apache.flink.table.types.logical.LogicalTypeRoot;
+import org.apache.flink.table.types.logical.RowType;
 
-/** Native provider for Flink's raw value format. */
+/**
+ * Native provider for Flink's raw value format: the whole message is the single physical column's
+ * value. Admitted natively: CHAR/VARCHAR (UTF-8 charset only), VARBINARY, BOOLEAN, and the
+ * fixed-width numerics with either {@code raw.endianness}. Staying on Flink: multi-column schemas
+ * and invalid option values (Flink raises its own ValidationException); {@code RAW<T>} columns
+ * (their bytes belong to a Java TypeSerializer); fixed-length BINARY (Flink passes any message
+ * length through where Arrow's fixed-size binary enforces the declared one); a non-UTF-8
+ * {@code raw.charset} (the native decode has no charset machinery); and {@code ignore-parse-errors}
+ * (an option Flink's raw factory doesn't define).
+ */
 public final class RawFormatProvider implements NativeFormatProvider {
+
+  private static final Set<LogicalTypeRoot> SUPPORTED_TYPES =
+      EnumSet.of(
+          LogicalTypeRoot.CHAR,
+          LogicalTypeRoot.VARCHAR,
+          LogicalTypeRoot.VARBINARY,
+          LogicalTypeRoot.BOOLEAN,
+          LogicalTypeRoot.TINYINT,
+          LogicalTypeRoot.SMALLINT,
+          LogicalTypeRoot.INTEGER,
+          LogicalTypeRoot.BIGINT,
+          LogicalTypeRoot.FLOAT,
+          LogicalTypeRoot.DOUBLE);
 
   @Override
   public String formatIdentifier() {
@@ -26,18 +52,29 @@ public final class RawFormatProvider implements NativeFormatProvider {
 
   @Override
   public boolean supports(NativeFormatContext context) {
-    return !context.ignoreParseErrors();
+    RowType schema = context.writerType();
+    return !context.ignoreParseErrors()
+        && schema.getFieldCount() == 1
+        && SUPPORTED_TYPES.contains(schema.getTypeAt(0).getTypeRoot())
+        && NativeFormatOptions.encode(context.options()) != null;
   }
 
   @Override
   public NativeMessageDecoderFactory createDecoder(NativeFormatContext context) {
-    return Decoder::new;
+    String formatOptions = NativeFormatOptions.encode(context.options());
+    return () -> new Decoder(formatOptions);
   }
 
   private static final class Decoder extends NativeSchemaMessageDecoder {
+    private final String formatOptions;
+
+    private Decoder(String formatOptions) {
+      this.formatOptions = formatOptions;
+    }
+
     @Override
     protected long createHandle(long schemaArrayAddress, long schemaAddress) {
-      return NativeRawFormat.createDecoder(schemaArrayAddress, schemaAddress);
+      return NativeRawFormat.createDecoder(schemaArrayAddress, schemaAddress, formatOptions);
     }
 
     @Override
