@@ -630,7 +630,10 @@ impl CdcJsonDecoder {
             assert!(nullable.len() <= 128, "the old-key presence bitmask carries up to 128 columns");
         }
         CdcJsonDecoder {
-            envelope: JsonDecoder::new(
+            // single_object: a CDC message whose root is a top-level array is corrupt in Flink
+            // (the tree converter rejects it), so the envelope decode never fans arrays out the
+            // way the plain `json` format does.
+            envelope: JsonDecoder::single_object(
                 envelope,
                 crate::json::JsonEnv { mode: env.mode, lenient: skip_errors },
             ),

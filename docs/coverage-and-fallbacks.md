@@ -697,7 +697,11 @@ shapes persist their per-key deadlines in a dedicated state table).
   never-failing booleans, strict `ISO_LOCAL_DATE`, integer/boolean/container echo under STRING) is
   Flink's; DECIMAL columns parse the exact raw literal with `BigDecimal`'s HALF_UP-or-NULL (the
   old arrow-json truncation was a silent value divergence); and `ignore-parse-errors` skips with
-  Flink's per-field granularity. TIME columns parse `SQL_TIME_FORMAT` and reproduce Flink's
+  Flink's per-field granularity. A top-level JSON array fans out into one row per element like
+  Flink's `processArray` (empty array → zero rows; a bad element fails the message in strict mode
+  and drops alone under `ignore-parse-errors` — element-granularity details in divergences/21),
+  while the CDC dialects keep treating an array-rooted envelope as a corrupt message, as Flink
+  does. TIME columns parse `SQL_TIME_FORMAT` and reproduce Flink's
   silent sub-second discard (`toSecondOfDay() * 1000`, whatever the declared precision — a parsed
   `.789` never reaches the value) including java.time's SMART hour-24-is-midnight resolution
   (which, on a timestamp column, rolls to the next day exactly as Flink does); VARBINARY columns

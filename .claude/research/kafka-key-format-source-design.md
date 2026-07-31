@@ -77,11 +77,13 @@ mask/index. A v1-only DSO degrades to JVM-mediated keyed decode (attach refusal 
   would need per-column hooks (deferred; registry keys are last/never anyway).
 - A keyed shallow operator must flush both vectors atomically pre-barrier.
 
-## Live divergence found (independent of key.format)
+## Live divergence found (independent of key.format) — FIXED 2026-07-31
 
-**Top-level JSON arrays**: Flink fans a top-level JSON array out into N rows; the native simd path
-PANICS on a non-object root (json.rs `panic!("JSON body was not a single object")`) and merely
-drops it under ignore-parse-errors — while the decimal-bearing arrow-json subpath DOES fan arrays
-out. The two native JSON subpaths disagree with each other and the simd one disagrees with Flink.
-Fix (fan out in the simd walker) or document; blocking for keyed JSON-value tables, real today for
-any JSON table receiving array messages.
+**Top-level JSON arrays**: fixed — both native JSON subpaths now fan a top-level array out into
+one row per element with Flink parity (strict: any bad element fails the message; skip mode:
+per-element drop, granularity notes in divergences/21), and the CDC envelope decode explicitly
+rejects array roots on both subpaths (the arrow-json subpath previously fanned a CDC array out —
+a silent divergence, also fixed). Consequence for the alignment contract above: the plain `json`
+VALUE format is genuinely 1:N with no per-row source-message metadata surviving the decode, so a
+keyed JSON-value table needs contract **(B)** (source-index column) — contract (A)'s presence
+mask cannot represent fan-out. raw/csv/avro/protobuf values stay ≤1 row per message (mask-able).

@@ -1774,8 +1774,128 @@ fn json_decode_rejects_type_mismatch() {
 #[test]
 #[should_panic(expected = "single object")]
 fn json_decode_rejects_non_object_document() {
-    let batch = bodies(vec![Some(br#"[{"id": 1}]"#)]);
+    let batch = bodies(vec![Some(br#"42"#)]);
     JsonDecoder::new(json_schema(), crate::json::JsonEnv::default()).decode(&batch);
+}
+
+// Flink's `json` format fans a top-level array out into one row per element (`processArray`);
+// an empty array contributes no row, and surrounding whitespace is insignificant.
+#[test]
+fn json_decode_fans_out_top_level_arrays() {
+    let batch = bodies(vec![
+        Some(br#"  [ {"id": 1, "name": "a"} , {"id": 2} ]  "#.as_slice()),
+        Some(br#"[]"#),
+        Some(br#"{"id": 3}"#),
+        Some(br#"[{"id": 4, "score": 4.5}]"#),
+    ]);
+    let out = JsonDecoder::new(json_schema(), crate::json::JsonEnv::default()).decode(&batch);
+    assert_eq!(out.num_rows(), 4);
+    assert_eq!(values(&out, 0), vec![1, 2, 3, 4]);
+    let names = out.column(1).as_any().downcast_ref::<StringArray>().unwrap();
+    assert_eq!(names.value(0), "a");
+    assert!(names.is_null(1));
+}
+
+// A non-object array element fails the whole message in strict mode (any element failure fails
+// Flink's deserialize) and drops alone under ignore-parse-errors, keeping its good siblings. A bad
+// *value* inside an element stays the usual per-field null.
+#[test]
+fn json_decode_array_element_granularity_follows_flink() {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    let strict = JsonDecoder::new(json_schema(), crate::json::JsonEnv::default());
+    for body in [
+        br#"[{"id": 1}, 5, {"id": 3}]"#.as_slice(),
+        br#"[{"id": 1}, null]"#,
+        br#"[[{"id": 1}]]"#,
+    ] {
+        let batch = bodies(vec![Some(body)]);
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| strict.decode(&batch))).is_err(),
+            "strict decode must fail: {}",
+            String::from_utf8_lossy(body)
+        );
+    }
+    let lenient = JsonDecoder::new(
+        json_schema(),
+        crate::json::JsonEnv { lenient: true, ..Default::default() },
+    );
+    let out = lenient.decode(&bodies(vec![Some(br#"[{"id": 1}, 5, null, [7], {"id": 3}]"#)]));
+    assert_eq!(values(&out, 0), vec![1, 3]);
+    // A malformed array-rooted document still drops whole, never element by element.
+    let out = lenient.decode(&bodies(vec![Some(br#"[{"id": 1}, {"id": }]"#)]));
+    assert_eq!(out.num_rows(), 0);
+    // A bad value inside an element nulls the field and keeps the element's row.
+    let out = lenient.decode(&bodies(vec![Some(br#"[{"id": 1}, {"id": "junk"}, {"id": 3}]"#)]));
+    assert_eq!(out.num_rows(), 3);
+    let ids = out.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+    assert_eq!((ids.value(0), ids.value(2)), (1, 3));
+    assert!(ids.is_null(1));
+}
+
+// The decimal-bearing (arrow-json) subpath fans arrays out with the same granularity as the simd
+// path, keeping each element's exact raw literal for the decimal parse.
+#[test]
+fn json_decimal_path_fans_out_top_level_arrays() {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    let schema: SchemaRef =
+        Arc::new(Schema::new(vec![Field::new("d", DataType::Decimal128(30, 10), true)]));
+    let strict = JsonDecoder::new(schema.clone(), crate::json::JsonEnv::default());
+    let out = strict.decode(&bodies(vec![
+        Some(br#" [ {"d": 12345678901234567.8901234567}, {"d": 1.5} ] "#.as_slice()),
+        Some(br#"[]"#),
+        Some(br#"{"d": 2.5}"#),
+    ]));
+    assert_eq!(out.num_rows(), 3);
+    let d = out.column(0).as_any().downcast_ref::<Decimal128Array>().unwrap();
+    // The raw literal survives f64-impossible precision through the element split.
+    assert_eq!(d.value(0), 123456789012345678901234567i128);
+    assert_eq!(d.value(1), 15_000_000_000i128);
+    for body in [br#"[{"d": 1.5}, 7]"#.as_slice(), br#"[{"d": 1.5}, null]"#, br#"[[{"d": 1}]]"#] {
+        let batch = bodies(vec![Some(body)]);
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| strict.decode(&batch))).is_err(),
+            "strict decode must fail: {}",
+            String::from_utf8_lossy(body)
+        );
+    }
+    let lenient = JsonDecoder::new(
+        schema,
+        crate::json::JsonEnv { lenient: true, ..Default::default() },
+    );
+    let out = lenient.decode(&bodies(vec![Some(
+        br#"[{"d": 1.5}, 7, null, [7], {"d": "junk"}, {"d": 2.5}]"#,
+    )]));
+    // Non-object elements drop alone; the bad decimal *value* nulls per field and keeps its row.
+    assert_eq!(out.num_rows(), 3);
+    let d = out.column(0).as_any().downcast_ref::<Decimal128Array>().unwrap();
+    assert_eq!((d.value(0), d.value(2)), (15_000_000_000i128, 25_000_000_000i128));
+    assert!(d.is_null(1));
+    let out = lenient.decode(&bodies(vec![Some(br#"[{"d": 1.5}, {"d": }]"#)]));
+    assert_eq!(out.num_rows(), 0);
+}
+
+// The CDC dialects never fan out a top-level array: Flink's envelope conversion rejects an array
+// root as a corrupt message, so the native envelope decode fails it (or drops it whole in skip
+// mode) — on the simd path and, with a decimal-bearing physical schema, on the arrow-json path.
+#[test]
+fn cdc_rejects_top_level_array_messages() {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    let body = br#"[{"before":null,"after":{"id":1,"name":"a","score":1.5},"op":"c"}]"#;
+    let decimal_schema: SchemaRef = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, true),
+        Field::new("score", DataType::Decimal128(5, 2), true),
+    ]));
+    let decimal_body = br#"[{"before":null,"after":{"id":1,"score":1.5},"op":"c"}]"#;
+    for (schema, body) in
+        [(json_schema(), body.as_slice()), (decimal_schema, decimal_body.as_slice())]
+    {
+        let batch = bodies(vec![Some(body)]);
+        let strict =
+            MessageDecoder::new(FORMAT_DEBEZIUM_JSON, schema.clone(), "", "", 0, false, "");
+        assert!(catch_unwind(AssertUnwindSafe(|| strict.decode(&batch))).is_err());
+        let skipping = MessageDecoder::new(FORMAT_DEBEZIUM_JSON, schema, "", "", 0, true, "");
+        assert_eq!(skipping.decode(&batch).num_rows(), 0);
+    }
 }
 
 // OVER (ORDER BY rt RANGE UNBOUNDED PRECEDING) running SUM: ties in rt share the post-fold value,

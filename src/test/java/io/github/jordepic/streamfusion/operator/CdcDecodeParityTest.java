@@ -159,6 +159,27 @@ class CdcDecodeParityTest {
   }
 
   @Test
+  void topLevelArrayMessagesStayCorrupt() throws Exception {
+    // The plain json format fans a top-level array out into one row per element, but a CDC
+    // envelope is never an array: Flink's dialects reject the root (or, for Debezium's
+    // multi-element case, the one-row-per-message contract) — both engines must fail, or both
+    // skip under ignore-parse-errors. (Debezium/OGG unwrap a SINGLE-element array through the
+    // deprecated one-row deserialize — a Flink quirk deliberately not reproduced, so it stays
+    // out of this corpus; see divergences/21.)
+    String debeziumPair =
+        "[{\"before\":null,\"after\":{\"id\":1,\"name\":\"a\",\"score\":1.5},\"op\":\"c\"},"
+            + "{\"before\":null,\"after\":{\"id\":2,\"name\":\"b\",\"score\":2.5},\"op\":\"c\"}]";
+    String maxwellWrapped = "[{\"data\":{\"id\":1,\"name\":\"a\",\"score\":1.5},\"type\":\"insert\"}]";
+    String canalWrapped =
+        "[{\"data\":[{\"id\":1,\"name\":\"a\",\"score\":1.5}],\"type\":\"INSERT\"}]";
+    for (boolean skipErrors : new boolean[] {false, true}) {
+      assertParity(DEBEZIUM, debeziumPair, skipErrors);
+      assertParity(MAXWELL, maxwellWrapped, skipErrors);
+      assertParity(CANAL, canalWrapped, skipErrors);
+    }
+  }
+
+  @Test
   void debeziumNullImagesMatchFlink() throws Exception {
     String[] scenarios = {
       "{\"before\":null,\"after\":{\"id\":1,\"name\":\"a\",\"score\":1.5},\"op\":\"c\"}",

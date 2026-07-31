@@ -1,9 +1,12 @@
 package io.github.jordepic.streamfusion.operator;
 
 import io.github.jordepic.streamfusion.format.json.JsonFormatProvider;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import org.apache.flink.api.common.functions.util.ListCollector;
 import org.apache.flink.formats.common.TimestampFormat;
 import org.apache.flink.formats.json.JsonParserRowDataDeserializationSchema;
 import org.apache.flink.table.data.RowData;
@@ -165,6 +168,73 @@ class JsonDecodeParityTest {
       assertParity(SCALAR_TYPE, scenario, TimestampFormat.SQL, "", false);
       assertParity(SCALAR_TYPE, scenario, TimestampFormat.SQL, "", true);
     }
+  }
+
+  @Test
+  void topLevelArraysFanOutLikeFlink() throws Exception {
+    // Flink's json format fans a top-level array out into one row per element. Any element
+    // failure fails the whole message in strict mode; under ignore-parse-errors a non-object
+    // element drops alone (good siblings kept) while a bad value inside an element stays the
+    // usual per-field null. A nested-array element is excluded from the corpus: Flink's parser
+    // path garbles the message tail on it (see divergences/21).
+    String[] scenarios = {
+      "[{\"s\": \"x\", \"i\": 1}, {\"s\": \"y\", \"i\": 2}, {\"f\": 2.5}]",
+      "[]",
+      "  [ {\"i\": 1} , {\"i\": 2} ]  ",
+      "[{}]",
+      // A bad value inside an element: strict fails the message, lenient nulls the field.
+      "[{\"i\": 1}, {\"i\": \"junk\"}, {\"i\": 3}]",
+      // Non-object elements: strict fails the message, lenient keeps the N-1 good elements.
+      "[{\"i\": 1}, 5, {\"i\": 3}]",
+      "[{\"i\": 1}, null, {\"i\": 3}]",
+      "[{\"i\": 1}, \"x, y\", {\"i\": 3}]",
+      // An array of scalars only.
+      "[1, 2]",
+    };
+    for (String scenario : scenarios) {
+      assertParity(SCALAR_TYPE, scenario, TimestampFormat.SQL, "", false);
+      assertParity(SCALAR_TYPE, scenario, TimestampFormat.SQL, "", true);
+    }
+    // Malformed array documents: both engines fail in strict mode. Skip mode is pinned only for
+    // single-object messages — Flink's parser path keeps an array's already-collected prefix
+    // elements before the parse dies, where the native decode drops the whole message
+    // (divergences/21).
+    String[] malformed = {"[{\"i\": 1}, {\"i\": }]", "[{\"i\": 1},"};
+    for (String scenario : malformed) {
+      assertParity(SCALAR_TYPE, scenario, TimestampFormat.SQL, "", false);
+    }
+  }
+
+  @Test
+  void topLevelArraysCoverNestedRowsAndDecimals() throws Exception {
+    // The fan-out on both native subpaths: nested containers ride the simd tape walk, a DECIMAL
+    // column routes the whole schema through the arrow-json (raw-literal) path.
+    String[] nestedScenarios = {
+      "[{\"r\": {\"a\": 1, \"b\": \"x\", \"c\": {\"d\": 2.5}}, \"arr\": [1, null, 3]},"
+          + " {\"m\": {\"k1\": 10}, \"rows\": [{\"x\": 1}, {\"x\": \"2\"}]}]",
+      "[{\"arr\": []}, {\"r\": {}}]",
+      "[{\"r\": [1]}]", // wrong-shaped container inside an element
+    };
+    for (String scenario : nestedScenarios) {
+      assertParity(NESTED_TYPE, scenario, TimestampFormat.SQL, "", false);
+      assertParity(NESTED_TYPE, scenario, TimestampFormat.SQL, "", true);
+    }
+    String[] decimalScenarios = {
+      // The raw literal survives the element split (f64-impossible precision), HALF_UP applies.
+      "[{\"dec\": 1.235, \"l\": 9}, {\"wide\": 0.123456789012345678901234567890123456}]",
+      " [ {\"dec\": \" 1.235 \"} , {\"dec\": 12345.6} ] ",
+      "[]",
+      "[{\"dec\": 1.5}, 7, {\"dec\": 2.5}]",
+      "[{\"dec\": 1.5}, null, {\"dec\": 2.5}]",
+      // A string element holding separators exercises the raw path's element-boundary scan.
+      "[{\"dec\": 1.5}, \"a,]b\", {\"dec\": 2.5}]",
+      "[{\"dec\": \"junk\", \"l\": 9}, {\"dec\": 2.5}]",
+    };
+    for (String scenario : decimalScenarios) {
+      assertParity(DECIMAL_TYPE, scenario, TimestampFormat.SQL, "", false);
+      assertParity(DECIMAL_TYPE, scenario, TimestampFormat.SQL, "", true);
+    }
+    assertParity(DECIMAL_TYPE, "[{\"dec\": 1.5}, {\"dec\": }]", TimestampFormat.SQL, "", false);
   }
 
   @Test
@@ -332,6 +402,14 @@ class JsonDecodeParityTest {
                 new JsonFormatProvider(), message, nativeOptions(nativeFormatOptions), skipErrors));
   }
 
+  /**
+   * The Flink referee, through the Collector-based deserialize so a top-level array's fan-out is
+   * observed. A failed (non-object) array element reaches the collector as {@code null} — the
+   * parser path's nullable converter swallows the element's error — and a real non-upsert
+   * pipeline fails on a null row, so in strict mode a null makes the referee fail the message; in
+   * skip mode the element drops alone (also exactly what Flink's tree deserializer does with its
+   * {@code result != null} filter). See divergences/21.
+   */
   private static List<List<Object>> flinkDecode(
       DecodeParityHarness harness,
       RowType rowType,
@@ -343,8 +421,19 @@ class JsonDecodeParityTest {
         new JsonParserRowDataDeserializationSchema(
             rowType, InternalTypeInfo.of(rowType), false, ignoreErrors, timestampFormat);
     schema.open(null);
-    RowData row = schema.deserialize(message.getBytes(StandardCharsets.UTF_8));
-    return row == null ? List.of() : List.of(harness.fields(row));
+    List<RowData> collected = new ArrayList<>();
+    schema.deserialize(message.getBytes(StandardCharsets.UTF_8), new ListCollector<>(collected));
+    List<List<Object>> rows = new ArrayList<>();
+    for (RowData row : collected) {
+      if (row == null) {
+        if (!ignoreErrors) {
+          throw new IOException("null row collected for message: " + message);
+        }
+        continue;
+      }
+      rows.add(harness.fields(row));
+    }
+    return rows;
   }
 
   private static Map<String, String> nativeOptions(String encoded) {

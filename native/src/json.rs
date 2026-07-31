@@ -897,20 +897,34 @@ pub(crate) fn json_needs_raw_number_literals(data_type: &DataType) -> bool {
 }
 
 /// Decodes one JSON document per body row into `schema` via a simd-json tape walk. A null or
-/// all-whitespace body contributes no row (exactly what feeding it to arrow-json did); each present
-/// body must be a single complete object. simd-json parses in place, so each body is copied into a
+/// all-whitespace body contributes no row (exactly what feeding it to arrow-json did). A body
+/// whose root is an object decodes as one row; with `fan_out_arrays` a top-level array fans out
+/// into one row per element, as Flink's `json` format does (`processArray`). Element granularity
+/// follows Flink: a non-object element fails the whole message in strict mode, and drops alone
+/// under `ignore-parse-errors` (a bad *value* inside an element stays the appenders' per-field
+/// null, exactly as for a single-object body) — see divergences/21 for how this settles the two
+/// Flink decode paths' disagreement. simd-json parses in place, so each body is copied into a
 /// reused scratch buffer — the copy is part of the measured win over arrow-json.
 pub(crate) fn decode_json_bodies_simd(
     schema: &SchemaRef,
     bodies: &RecordBatch,
     env: JsonEnv,
+    fan_out_arrays: bool,
 ) -> RecordBatch {
+    use simd_json::prelude::*;
     let column = bodies.column(0);
     let mut root = StructJsonAppender::new(schema.fields(), bodies.num_rows(), env);
     let mut scratch: Vec<u8> = Vec::new();
     let mut buffers = simd_json::Buffers::default();
     let scan_binary =
         env.lenient && schema.fields().iter().any(|f| contains_binary(f.data_type()));
+    let mut append_object = |root: &mut StructJsonAppender,
+                             object: &simd_json::tape::Object<'_, '_>| {
+        if scan_binary && object_poisoned(schema.fields(), object) {
+            return;
+        }
+        root.append_object(object);
+    };
     for row in 0..bodies.num_rows() {
         let Some(bytes) = binary_body(column, row) else { continue };
         if bytes.iter().all(u8::is_ascii_whitespace) {
@@ -918,24 +932,35 @@ pub(crate) fn decode_json_bodies_simd(
         }
         scratch.clear();
         scratch.extend_from_slice(bytes);
-        // A structurally bad document (or a non-object root) fails the job like Flink's
-        // deserializer; under ignore-parse-errors it drops the whole message (the value-level
-        // skips inside a good document are the appenders' per-field nulls).
+        // A structurally bad document (or a root that is neither object nor fanned-out array)
+        // fails the job like Flink's deserializer; under ignore-parse-errors it drops the whole
+        // message (the value-level skips inside a good document are the appenders' per-field
+        // nulls).
         let tape = match simd_json::to_tape_with_buffers(&mut scratch, &mut buffers) {
             Ok(tape) => tape,
             Err(_) if env.lenient => continue,
             Err(e) => panic!("failed to decode JSON record: {e}"),
         };
         let value = tape.as_value();
-        let object = match value.as_object() {
-            Some(object) => object,
-            None if env.lenient => continue,
-            None => panic!("JSON body was not a single object"),
-        };
-        if scan_binary && object_poisoned(schema.fields(), &object) {
-            continue;
+        match value.value_type() {
+            simd_json::ValueType::Array if fan_out_arrays => {
+                for element in &value.as_array().expect("array node") {
+                    match element.as_object() {
+                        Some(object) => append_object(&mut root, &object),
+                        None if env.lenient => {}
+                        None => panic!(
+                            "JSON array element was not an object: {:?}",
+                            element.value_type()
+                        ),
+                    }
+                }
+            }
+            _ => match value.as_object() {
+                Some(object) => append_object(&mut root, &object),
+                None if env.lenient => continue,
+                None => panic!("JSON body was not a single object"),
+            },
         }
-        root.append_object(&object);
     }
     RecordBatch::try_new(schema.clone(), root.finish_columns())
         .expect("failed to build JSON batch")
@@ -1006,22 +1031,37 @@ pub(crate) struct JsonDecoder {
     raw_literals: bool,
     /// The table's `timestamp-format.standard` and skip mode.
     env: JsonEnv,
+    /// Flink's plain `json` format fans a top-level array out into one row per element
+    /// (`processArray`); the CDC dialects funnel their envelope through the same converters but
+    /// treat an array root as a corrupt message, so the envelope decoder turns this off.
+    fan_out_arrays: bool,
 }
 
 impl JsonDecoder {
     pub(crate) fn new(schema: SchemaRef, env: JsonEnv) -> JsonDecoder {
+        JsonDecoder::build(schema, env, true)
+    }
+
+    /// The CDC-envelope shape: a top-level array is a corrupt message (job failure, or a whole-
+    /// message drop under `ignore-parse-errors`), never a fan-out.
+    pub(crate) fn single_object(schema: SchemaRef, env: JsonEnv) -> JsonDecoder {
+        JsonDecoder::build(schema, env, false)
+    }
+
+    fn build(schema: SchemaRef, env: JsonEnv, fan_out_arrays: bool) -> JsonDecoder {
         let raw_literals =
             schema.fields().iter().any(|f| json_needs_raw_number_literals(f.data_type()));
-        JsonDecoder { schema, raw_literals, env }
+        JsonDecoder { schema, raw_literals, env, fan_out_arrays }
     }
 
     /// Decodes the single body column of `bodies` into a batch of the target schema. Each row is a
-    /// complete document; a null body contributes no row.
+    /// complete document decoding to one row — or, for a fanned-out top-level array, one row per
+    /// element; a null body contributes no row.
     pub(crate) fn decode(&self, bodies: &RecordBatch) -> RecordBatch {
         if self.raw_literals {
             return self.decode_raw_literals(bodies);
         }
-        decode_json_bodies_simd(&self.schema, bodies, self.env)
+        decode_json_bodies_simd(&self.schema, bodies, self.env, self.fan_out_arrays)
     }
 
     /// The arrow-json path for decimal-bearing schemas: its tape keeps each number's raw literal.
@@ -1042,42 +1082,72 @@ impl JsonDecoder {
                 .map(|f| Arc::new(exact_leaves_as_text(f)))
                 .collect::<Vec<FieldRef>>(),
         ));
-        let build = || {
+        let build = |batch_size: usize| {
             arrow::json::ReaderBuilder::new(text_schema.clone())
-                .with_batch_size(bodies.num_rows().max(1))
+                .with_batch_size(batch_size.max(1))
                 .with_coerce_primitive(true)
                 .build_decoder()
                 .expect("failed to build JSON decoder")
         };
         // In skip mode each message decodes through its own decoder so a bad one drops alone
-        // (arrow-json's decoder state is unusable after an error). Flink's skip on this path is
-        // approximated at message granularity for non-decimal errors — divergences/21; the decimal
-        // cells themselves skip per FIELD in restore_exact_leaves, like the host.
+        // (arrow-json's decoder state is unusable after an error), and each fanned-out array
+        // element through its own so a bad element drops alone — the same per-element granularity
+        // as the simd path. Flink's skip on this path is otherwise approximated at message/element
+        // granularity for non-decimal errors — divergences/21; the decimal cells themselves skip
+        // per FIELD in restore_exact_leaves, like the host.
         let mut batches = Vec::new();
         if self.env.lenient {
             for row in 0..bodies.num_rows() {
                 let Some(bytes) = binary_body(column, row) else { continue };
-                let mut decoder = build();
-                let decoded = decoder
-                    .decode(bytes)
-                    .ok()
-                    .filter(|&consumed| consumed == bytes.len())
-                    .and_then(|_| decoder.flush().ok().flatten());
-                if let Some(batch) = decoded {
-                    batches.push(batch);
+                let elements = match self.array_body(bytes) {
+                    ArrayBody::Not => vec![bytes],
+                    ArrayBody::Elements(elements) => elements,
+                    // A non-fanned (CDC-envelope) array root drops the whole message.
+                    ArrayBody::Corrupt => continue,
+                };
+                for element in elements {
+                    if !starts_with_object(element) {
+                        continue; // a non-object array element drops alone, like the simd path
+                    }
+                    let mut decoder = build(1);
+                    let decoded = decoder
+                        .decode(element)
+                        .ok()
+                        .filter(|&consumed| consumed == element.len())
+                        .and_then(|_| decoder.flush().ok().flatten());
+                    if let Some(batch) = decoded {
+                        batches.push(batch);
+                    }
                 }
             }
         } else {
-            let mut decoder = build();
+            // Fanned-out arrays can exceed the input row count, and the decoder stops consuming
+            // at its batch size — so gather every document first and size the decoder to fit.
+            let mut documents: Vec<&[u8]> = Vec::with_capacity(bodies.num_rows());
             for row in 0..bodies.num_rows() {
-                if let Some(bytes) = binary_body(column, row) {
-                    let consumed = decoder.decode(bytes).expect("failed to decode JSON record");
-                    assert_eq!(
-                        consumed,
-                        bytes.len(),
-                        "JSON body was not a single complete document"
-                    );
+                let Some(bytes) = binary_body(column, row) else { continue };
+                match self.array_body(bytes) {
+                    ArrayBody::Not => documents.push(bytes),
+                    ArrayBody::Elements(elements) => {
+                        for element in elements {
+                            assert!(
+                                starts_with_object(element),
+                                "JSON array element was not an object"
+                            );
+                            documents.push(element);
+                        }
+                    }
+                    ArrayBody::Corrupt => panic!("JSON body was not a single object"),
                 }
+            }
+            let mut decoder = build(documents.len());
+            for document in documents {
+                let consumed = decoder.decode(document).expect("failed to decode JSON record");
+                assert_eq!(
+                    consumed,
+                    document.len(),
+                    "JSON body was not a single complete document"
+                );
             }
             if let Some(batch) = decoder.flush().expect("failed to flush JSON batch") {
                 batches.push(batch);
@@ -1100,6 +1170,79 @@ impl JsonDecoder {
             .collect();
         RecordBatch::try_new(self.schema.clone(), columns).expect("failed to build JSON batch")
     }
+
+    /// Classifies a body for the raw-literals path: `Not` (the root is not an array — decode it as
+    /// a single document), `Elements` (a fanned-out top-level array's raw element slices, exact
+    /// literals intact), or `Corrupt` (an array root where fan-out is off — the CDC envelope — so
+    /// the message fails whole in strict mode and drops whole in skip mode). A malformed document
+    /// behaves like the simd path: strict fails the job here, skip mode drops the whole message.
+    fn array_body<'a>(&self, bytes: &'a [u8]) -> ArrayBody<'a> {
+        if bytes.iter().find(|b| !b.is_ascii_whitespace()) != Some(&&b'[') {
+            return ArrayBody::Not;
+        }
+        if !self.fan_out_arrays {
+            return ArrayBody::Corrupt;
+        }
+        // Validate before scanning boundaries: the scanner assumes well-formed JSON, and a
+        // malformed document must fail/drop whole, never element by element.
+        let mut scratch = bytes.to_vec();
+        match simd_json::to_tape(&mut scratch) {
+            Ok(_) => ArrayBody::Elements(top_level_array_elements(bytes)),
+            Err(_) if self.env.lenient => ArrayBody::Corrupt,
+            Err(e) => panic!("failed to decode JSON record: {e}"),
+        }
+    }
+}
+
+enum ArrayBody<'a> {
+    Not,
+    Elements(Vec<&'a [u8]>),
+    Corrupt,
+}
+
+fn starts_with_object(element: &[u8]) -> bool {
+    element.iter().find(|b| !b.is_ascii_whitespace()) == Some(&&b'{')
+}
+
+/// The raw element slices of a top-level JSON array (whitespace-trimmed only at the edges the
+/// separators leave behind — each slice is the element's exact bytes, so raw number literals
+/// survive for the decimal parse). The input must already be validated as well-formed JSON with an
+/// array root; the scan then only needs string/escape state and container depth to find the
+/// top-level commas.
+fn top_level_array_elements(bytes: &[u8]) -> Vec<&[u8]> {
+    let start = bytes.iter().position(|b| *b == b'[').expect("array root") + 1;
+    let end = bytes.iter().rposition(|b| *b == b']').expect("array root");
+    let mut elements = Vec::new();
+    let (mut depth, mut in_string, mut escaped) = (0usize, false, false);
+    let mut element_start = start;
+    for i in start..end {
+        let byte = bytes[i];
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b'{' | b'[' => depth += 1,
+            b'}' | b']' => depth -= 1,
+            b',' if depth == 0 => {
+                elements.push(&bytes[element_start..i]);
+                element_start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    let last = &bytes[element_start..end];
+    if !last.iter().all(u8::is_ascii_whitespace) {
+        elements.push(last);
+    }
+    elements
 }
 
 /// The leaves the raw-literals path decodes as Utf8 and converts with a Flink-exact parser after

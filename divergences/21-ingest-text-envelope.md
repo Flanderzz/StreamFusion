@@ -78,12 +78,35 @@ value — a job that runs on both engines produces identical results.
   Jackson's compact form, duplicate keys collapsing last-value-first-position). Under
   `ignore-parse-errors` the field nulls — a null where Flink keeps a value, the one lenient-mode
   value divergence.
-- **Skip granularity on a decimal-bearing JSON schema is per message for non-decimal errors.**
-  arrow-json is all-or-nothing per document, so a bad non-decimal value drops the whole message
-  where Flink nulls the field; the decimal cells themselves skip per field. The simd path (every
-  schema without a DECIMAL) has Flink's exact per-field granularity. On a decimal-bearing
-  **Maxwell/Canal** table the same all-or-nothing behavior can trip the `old`-presence alignment
-  check under skip mode — a loud failure where Flink skips, never a silent divergence.
+- **Top-level JSON arrays fan out with the tree walk's element granularity.** Flink's `json`
+  format turns an array-rooted message into one row per element, and the native decode does the
+  same (both subpaths — the simd tape walk fans elements directly, the decimal-bearing arrow-json
+  path splits the validated document into raw element slices so decimal literals survive). On a
+  bad ELEMENT the two Flink paths disagree: in strict mode both fail the message (reproduced — a
+  non-object element or a failing value fails the job); under `ignore-parse-errors` the tree path
+  drops the element alone (its `result != null` filter) while the parser path hands the collector
+  a null row whose fate is pipeline wiring — the standard non-upsert Kafka collector throws, and
+  the deserializer's catch then swallows the REST of the message, keeping only the prefix. The
+  native decode pins the tree path's deterministic per-element drop (a bad value inside an
+  element stays the usual per-field null). Two parser-path artifacts are deliberately not
+  reproduced: a malformed array document keeps its already-collected prefix elements in Flink
+  (natively the whole message drops, like any structurally bad document), and a NESTED-array
+  element garbles the parser's element loop (Flink misparses the message tail
+  nondeterministically; natively the element drops alone).
+- **A single-element array around a CDC envelope is rejected.** Debezium and OGG decode their
+  envelope through the deprecated one-row `deserialize(byte[])`, which fans a top-level array out
+  and then unwraps it when exactly one row came back — so Flink accepts `[{envelope}]` (and only
+  that shape; two elements or an empty array are a corrupt message, and Maxwell/Canal reject any
+  array root). The native envelope decode treats every array-rooted CDC message as corrupt — a
+  reject-where-Flink-rejects match everywhere except the one-element quirk, kept for a uniform
+  "a CDC envelope is never an array" rule.
+- **Skip granularity on a decimal-bearing JSON schema is per message/element for non-decimal
+  errors.** arrow-json is all-or-nothing per document, so a bad non-decimal value drops the whole
+  message (or the whole fanned-out array element) where Flink nulls the field; the decimal cells
+  themselves skip per field. The simd path (every schema without a DECIMAL) has Flink's exact
+  per-field granularity. On a decimal-bearing **Maxwell/Canal** table the same all-or-nothing
+  behavior can trip the `old`-presence alignment check under skip mode — a loud failure where
+  Flink skips, never a silent divergence.
 - **TIME/VARBINARY leaves on a decimal-bearing JSON schema ride arrow-json as coerced text**, and
   the coercion erases the token's type: a number or boolean token under such a column converts
   from its rendered literal, so a base64-shaped literal (`42`, `true`) decodes into a VARBINARY
