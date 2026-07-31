@@ -55,6 +55,19 @@ final class FilesystemTables {
   }
 
   /**
+   * Whether the scan produces exactly the table's physical columns. A metadata column is part of
+   * the scan's output but is filled by the connector, not decoded from the message value, so a
+   * native value decode must not replace such a scan. Computed columns never appear in the scan's
+   * output (the planner projects them above it), so a computed-rowtime table still passes. Returns
+   * false if the schema can't be resolved (fail safe).
+   */
+  static boolean scanProducesPhysicalColumnsOnly(StreamPhysicalTableSourceScan scan) {
+    org.apache.flink.table.types.logical.RowType physical = physicalRowType(scan);
+    return physical != null
+        && scan.getRowType().getFieldNames().equals(physical.getFieldNames());
+  }
+
+  /**
    * The matched scan's physical row type (the columns a value decode produces), or null if the
    * schema can't be resolved (fail safe — callers treat null as unsupported).
    */

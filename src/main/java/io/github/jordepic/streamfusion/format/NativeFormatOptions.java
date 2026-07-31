@@ -41,6 +41,11 @@ public final class NativeFormatOptions {
       if ("true".equalsIgnoreCase(option(options, "fail-on-missing-field"))) {
         return null;
       }
+      // json.decode.json-parser.enabled = false switches Flink to its tree deserializer, whose
+      // coercion envelope differs from the parser path the native decode mirrors.
+      if ("false".equalsIgnoreCase(option(options, "decode.json-parser.enabled"))) {
+        return null;
+      }
       String timestampFormat = option(options, "timestamp-format.standard");
       if (timestampFormat == null || "SQL".equals(timestampFormat)) {
         return encoded.toString();

@@ -567,6 +567,11 @@ shapes persist their per-key deadlines in a dedicated state table).
     PLAIN/SCRAM-SHA-256/SCRAM-SHA-512, or a config kafka-clients itself rejects.
 - **Kafka** — missing `streamfusion-kafka` or the matching `streamfusion-*` format JAR; a value format
   outside JSON/CSV/raw/bare-Avro/`avro-confluent`/protobuf; a `key.format`;
+  a **metadata column** (`ts TIMESTAMP_LTZ(3) METADATA FROM 'timestamp'` and kin — the connector
+  fills it, so a value decode would emit it silently NULL; this holds on every decoded path,
+  insert-only and CDC alike, and a declared-but-unused metadata column also declines — Flink keeps
+  it in the scan's output regardless of the projection); computed columns are fine on the
+  insert-only paths (the planner projects them above the scan);
   a `scan.bounded.mode` other than unbounded/latest-offset; a consumer property the translator
   cannot map faithfully — the contract is fail-closed like the sink's (vanilla Flink forwards
   arbitrary `properties.*` keys and kafka-clients merely warns on unknown ones; the native source
@@ -626,7 +631,16 @@ shapes persist their per-key deadlines in a dedicated state table).
   Flink's; DECIMAL columns parse the exact raw literal with `BigDecimal`'s HALF_UP-or-NULL (the
   old arrow-json truncation was a silent value divergence); and `ignore-parse-errors` skips with
   Flink's per-field granularity. Still falling back: **`fail-on-missing-field = true`** (a missing
-  field is null natively — Flink's default mode; the fail mode isn't modeled). All startup
+  field is null natively — Flink's default mode; the fail mode isn't modeled);
+  **`decode.json-parser.enabled = false`** (it switches Flink to its tree deserializer, whose
+  coercion envelope differs from the parser path the native decode mirrors); a column — or any
+  nested leaf — of a **type outside the natively-converted set** (BOOLEAN, TINYINT, SMALLINT, INT,
+  BIGINT, FLOAT, DOUBLE, CHAR/VARCHAR, DATE, TIMESTAMP, TIMESTAMP_LTZ, DECIMAL, and ROW/ARRAY/MAP/
+  MULTISET over those) — notably **TIME**, **BINARY/VARBINARY**, and the **INTERVAL** types; and a
+  **MAP/MULTISET key type outside CHAR/VARCHAR** (Flink's own JSON format rejects a non-string map
+  key at planning, so this leg of the gate is defensive — no such query reaches substitution). The
+  CDC dialects share the same column-type set (the envelope's images decode through the same
+  appenders). All startup
   modes are supported (earliest/latest/group-offsets/timestamp/specific-offsets),
   as are `topic` lists and `topic-pattern` — discovery and offset resolution run in Flink's own
   reused enumerator (`scan.topic-partition-discovery.interval` honored, including `0` to disable),

@@ -6,9 +6,42 @@ import io.github.jordepic.streamfusion.format.NativeFormatProvider;
 import io.github.jordepic.streamfusion.format.NativeMessageDecoder;
 import io.github.jordepic.streamfusion.format.NativeMessageDecoderFactory;
 import io.github.jordepic.streamfusion.format.NativeSchemaMessageDecoder;
+import org.apache.flink.table.types.logical.RowType;
 
 /** Native provider for Flink's CSV value format. */
 public final class CsvFormatProvider implements NativeFormatProvider {
+
+  /**
+   * Whether every column is a type the native CSV decode converts with Flink's exact semantics —
+   * the scalar family. ARRAY/ROW columns (Jackson's array-element-delimiter layer) and the types
+   * outside that set stay on Flink. A null row type (an identifier-level query with no schema at
+   * hand) passes; the planner gates on the resolved schema separately.
+   */
+  static boolean decodableColumns(RowType rowType) {
+    return rowType == null
+        || rowType.getChildren().stream()
+            .allMatch(
+                type -> {
+                  switch (type.getTypeRoot()) {
+                    case BOOLEAN:
+                    case TINYINT:
+                    case SMALLINT:
+                    case INTEGER:
+                    case BIGINT:
+                    case FLOAT:
+                    case DOUBLE:
+                    case CHAR:
+                    case VARCHAR:
+                    case DATE:
+                    case TIMESTAMP_WITHOUT_TIME_ZONE:
+                    case TIMESTAMP_WITH_LOCAL_TIME_ZONE:
+                    case DECIMAL:
+                      return true;
+                    default:
+                      return false;
+                  }
+                });
+  }
 
   @Override
   public String formatIdentifier() {
@@ -27,7 +60,8 @@ public final class CsvFormatProvider implements NativeFormatProvider {
 
   @Override
   public boolean supports(NativeFormatContext context) {
-    return NativeFormatOptions.encode(context.options()) != null;
+    return NativeFormatOptions.encode(context.options()) != null
+        && decodableColumns(context.outputType());
   }
 
   @Override

@@ -92,38 +92,6 @@ final class KafkaTables {
     return "true".equalsIgnoreCase(NativeFormatOptions.option(options, "ignore-parse-errors"));
   }
 
-  /** Whether every physical column is a type the native CSV decode converts with Flink's exact
-   * semantics — the scalar family. ARRAY/ROW columns (Jackson's array-element-delimiter layer) and
-   * the types outside the boundary set fall back. */
-  private static boolean csvColumnsSupported(StreamPhysicalTableSourceScan scan) {
-    org.apache.flink.table.types.logical.RowType rowType = FilesystemTables.physicalRowType(scan);
-    if (rowType == null) {
-      return false;
-    }
-    return rowType.getChildren().stream()
-        .allMatch(
-            type -> {
-              switch (type.getTypeRoot()) {
-                case BOOLEAN:
-                case TINYINT:
-                case SMALLINT:
-                case INTEGER:
-                case BIGINT:
-                case FLOAT:
-                case DOUBLE:
-                case CHAR:
-                case VARCHAR:
-                case DATE:
-                case TIMESTAMP_WITHOUT_TIME_ZONE:
-                case TIMESTAMP_WITH_LOCAL_TIME_ZONE:
-                case DECIMAL:
-                  return true;
-                default:
-                  return false;
-              }
-            });
-  }
-
   /**
    * Builds the native rdkafka source for a table {@link #isNativeKafka} accepted. The format decoder
    * rides into the source so the split reader decodes on the fetch thread; {@code decodedType} is the
@@ -241,27 +209,26 @@ final class KafkaTables {
     if (!decodeCommon(options)) {
       return false;
     }
+    // A metadata column is filled by the connector, not the message body; a value decode would
+    // emit it as a (missing, so silently NULL) value field. The scan must produce exactly the
+    // physical columns. Computed columns are fine — the planner projects them above the scan.
+    if (!FilesystemTables.scanProducesPhysicalColumnsOnly(scan)) {
+      return false;
+    }
     NativeFormatProvider provider =
         formatProvider(options, FilesystemTables.physicalRowType(scan)).orElse(null);
     if (provider == null) {
-      return false; // format artifact not installed or its exact options are not native-compatible
+      // The format artifact isn't installed, or its exact options or column types are outside the
+      // native decoder's Flink-faithful set (each provider owns that predicate).
+      return false;
     }
-    int code = decodeFormatCode(options);
     // Flink's ignore-parse-errors drops malformed data; the JSON decode honors the per-message skip
     // and the CSV decode reproduces Flink's per-field granularity natively. A protobuf table with
     // it set would fail where Flink skips — fall back.
     if (ignoreParseErrors(options) && !provider.supportsIgnoreParseErrors()) {
       return false;
     }
-    if (code == FormatCodes.CSV) {
-      // CSV routes only when every column is in the natively-converted scalar family and every
-      // Jackson option the table sets is reproduced exactly (see NativeFormatOptions.encode).
-      return csvColumnsSupported(scan) && NativeFormatOptions.encode(options) != null;
-    }
-    if (code == FormatCodes.JSON && NativeFormatOptions.encode(options) == null) {
-      return false; // an unreproducible JSON option (e.g. fail-on-missing-field)
-    }
-    return FormatCodes.isInsertOnly(code);
+    return FormatCodes.isInsertOnly(decodeFormatCode(options));
   }
 
   /** Whether this scan is a CDC changelog format the native decode reproduces <em>identically</em> to

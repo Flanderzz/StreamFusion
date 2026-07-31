@@ -697,9 +697,10 @@ impl JsonAppend for MapJsonAppender {
     }
 }
 
-/// The types here are exactly the ones the boundary type gate admits (see
-/// `docs/coverage-and-fallbacks.md` §4) minus DECIMAL, which `JsonDecoder` routes to the arrow-json
-/// path instead — anything else can never reach a native decode.
+/// The types here are exactly the ones the format-owned plan gate admits
+/// (`JsonFormatProvider.decodableColumns`, kept in lockstep with this dispatch) minus DECIMAL,
+/// which `JsonDecoder` routes to the arrow-json path instead — anything else falls back to Flink
+/// at plan time and can never reach a native decode.
 pub(crate) fn make_json_appender(
     data_type: &DataType,
     capacity: usize,

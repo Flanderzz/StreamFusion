@@ -80,6 +80,30 @@ class NativeJsonDecodeSqlHarnessTest {
   }
 
   @Test
+  void metadataColumnFallsBackAndMatchesFlink() throws Exception {
+    // `ts` is Kafka's record timestamp, filled by the connector — a native value decode would emit
+    // it as a missing body field (silently NULL). The scan must stay on Flink, and the fallback run
+    // must produce Flink's values end to end (both runs read the same records, so the connector
+    // timestamps compare exactly).
+    try (KafkaContainer kafka =
+        new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.6.1"))) {
+      kafka.start();
+      String brokers = kafka.getBootstrapServers();
+      List<String> flat = new ArrayList<>(MESSAGES);
+      for (int i = 0; i < MESSAGES; i++) {
+        flat.add(String.format("{\"id\":%d,\"name\":\"row-%d\"}", i, i));
+      }
+      produce(brokers, "json-metadata", flat);
+      NativeParity.assertFallback(
+          environment(
+              brokers,
+              "json-metadata",
+              "id BIGINT, name STRING, ts TIMESTAMP_LTZ(3) METADATA FROM 'timestamp'"),
+          "SELECT * FROM t");
+    }
+  }
+
+  @Test
   void nestedProjectionPrunesDecodedColumns() throws Exception {
     // A wide record read through a strict subset: the planner prunes the decode to event_type + the two
     // bid sub-fields, so arrow-json never materializes person or bid.channel/url. Must still match Flink.

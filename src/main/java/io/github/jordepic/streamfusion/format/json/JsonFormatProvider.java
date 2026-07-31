@@ -7,9 +7,58 @@ import io.github.jordepic.streamfusion.format.NativeFormatProvider;
 import io.github.jordepic.streamfusion.format.NativeMessageDecoder;
 import io.github.jordepic.streamfusion.format.NativeMessageDecoderFactory;
 import io.github.jordepic.streamfusion.format.NativeSchemaMessageDecoder;
+import org.apache.flink.table.types.logical.LogicalType;
+import org.apache.flink.table.types.logical.LogicalTypeFamily;
+import org.apache.flink.table.types.logical.RowType;
 
 /** Native providers for Flink's JSON and JSON-CDC formats. */
 public final class JsonFormatProvider implements NativeFormatProvider {
+
+  /**
+   * Whether every column (and every nested leaf) is a type the native JSON decode converts with
+   * Flink's exact semantics — the set {@code native/src/json.rs}'s appender dispatch implements,
+   * parity-pinned by {@code JsonDecodeParityTest}. Anything else (TIME, the binary types, the
+   * INTERVAL types) stays on Flink at plan time instead of reaching a native decode it would fail.
+   * A null row type (an identifier-level query with no schema at hand) passes; the planner gates
+   * on the resolved schema separately.
+   */
+  static boolean decodableColumns(RowType rowType) {
+    return rowType == null
+        || rowType.getChildren().stream().allMatch(JsonFormatProvider::decodableType);
+  }
+
+  private static boolean decodableType(LogicalType type) {
+    switch (type.getTypeRoot()) {
+      case BOOLEAN:
+      case TINYINT:
+      case SMALLINT:
+      case INTEGER:
+      case BIGINT:
+      case FLOAT:
+      case DOUBLE:
+      case CHAR:
+      case VARCHAR:
+      case DATE:
+      case TIMESTAMP_WITHOUT_TIME_ZONE:
+      case TIMESTAMP_WITH_LOCAL_TIME_ZONE:
+      case DECIMAL:
+        return true;
+      case ROW:
+      case ARRAY:
+        return type.getChildren().stream().allMatch(JsonFormatProvider::decodableType);
+      case MAP:
+      case MULTISET:
+        // Flink's JSON deserializer itself rejects a non-string map key (a MULTISET's element is
+        // its key); decoding one natively would accept where Flink fails the job.
+        LogicalType key = type.getChildren().get(0);
+        if (!key.is(LogicalTypeFamily.CHARACTER_STRING)) {
+          return false;
+        }
+        return type.getChildren().stream().allMatch(JsonFormatProvider::decodableType);
+      default:
+        return false;
+    }
+  }
 
   @Override
   public String formatIdentifier() {
@@ -28,7 +77,8 @@ public final class JsonFormatProvider implements NativeFormatProvider {
 
   @Override
   public boolean supports(NativeFormatContext context) {
-    return NativeFormatOptions.encode(context.options()) != null;
+    return NativeFormatOptions.encode(context.options()) != null
+        && decodableColumns(context.outputType());
   }
 
   @Override
@@ -65,7 +115,10 @@ public final class JsonFormatProvider implements NativeFormatProvider {
 
     @Override
     public boolean supports(NativeFormatContext context) {
-      return NativeFormatOptions.encode(context.options()) != null;
+      // The CDC dialects share the plain decode's type set: the envelope's images are decoded by
+      // the same JSON appenders.
+      return NativeFormatOptions.encode(context.options()) != null
+          && decodableColumns(context.outputType());
     }
 
     @Override
