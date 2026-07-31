@@ -1,10 +1,5 @@
 package io.github.jordepic.streamfusion.operator;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
-
-import io.github.jordepic.streamfusion.format.NativeFormatContext;
 import io.github.jordepic.streamfusion.format.NativeFormatProvider;
 import io.github.jordepic.streamfusion.format.json.CanalJsonFormatProvider;
 import io.github.jordepic.streamfusion.format.json.DebeziumJsonFormatProvider;
@@ -13,15 +8,11 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.flink.api.common.serialization.DeserializationSchema;
-import org.apache.flink.api.common.typeutils.base.array.BytePrimitiveArraySerializer;
 import org.apache.flink.formats.common.TimestampFormat;
 import org.apache.flink.formats.json.canal.CanalJsonDeserializationSchema;
 import org.apache.flink.formats.json.debezium.DebeziumJsonDeserializationSchema;
 import org.apache.flink.formats.json.maxwell.MaxwellJsonDeserializationSchema;
-import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
-import org.apache.flink.streaming.util.OneInputStreamOperatorTestHarness;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.runtime.typeutils.InternalTypeInfo;
 import org.apache.flink.table.types.DataType;
@@ -53,6 +44,8 @@ class CdcDecodeParityTest {
       RowType.of(
           new LogicalType[] {new BigIntType(), new VarCharType(VarCharType.MAX_LENGTH), new DoubleType()},
           new String[] {"id", "name", "score"});
+
+  private static final DecodeParityHarness HARNESS = new DecodeParityHarness(ROW_TYPE, true);
 
   private static final int MAXWELL = 8;
   private static final int CANAL = 9;
@@ -119,26 +112,16 @@ class CdcDecodeParityTest {
     }
   }
 
-  private static void assertParity(int format, String message, boolean skipErrors)
-      throws Exception {
-    List<List<Object>> expected;
-    try {
-      expected = flinkDecode(format, message, skipErrors);
-    } catch (Exception e) {
-      expected = null;
-    }
-    List<List<Object>> actual;
-    try {
-      actual = nativeDecode(format, message, skipErrors);
-    } catch (Exception e) {
-      actual = null;
-    }
-    if (expected == null) {
-      assertNull(actual, "Flink rejects but native decode accepts: " + message);
-      return;
-    }
-    assertNotNull(actual, "Flink accepts but native decode rejects: " + message);
-    assertEquals(expected, actual, "changelog diverges for: " + message);
+  private static void assertParity(int format, String message, boolean skipErrors) {
+    HARNESS.assertParity(
+        message,
+        () -> flinkDecode(format, message, skipErrors),
+        () ->
+            HARNESS.nativeDecode(
+                provider(format),
+                message,
+                Map.of("format", provider(format).formatIdentifier()),
+                skipErrors));
   }
 
   private static List<List<Object>> flinkDecode(int format, String message, boolean ignoreErrors)
@@ -170,48 +153,13 @@ class CdcDecodeParityTest {
         new Collector<>() {
           @Override
           public void collect(RowData row) {
-            rows.add(fields(row));
+            rows.add(HARNESS.fields(row));
           }
 
           @Override
           public void close() {}
         });
     return rows;
-  }
-
-  private static List<List<Object>> nativeDecode(int format, String message, boolean skipErrors)
-      throws Exception {
-    try (OneInputStreamOperatorTestHarness<byte[], ArrowBatch> harness =
-        new OneInputStreamOperatorTestHarness<>(
-            new NativeBytesDecodeOperator(
-                ROW_TYPE,
-                100,
-                provider(format)
-                    .createDecoder(
-                        new NativeFormatContext(
-                            ROW_TYPE,
-                            ROW_TYPE,
-                            Map.of("format", provider(format).formatIdentifier()),
-                            skipErrors)),
-                0),
-            BytePrimitiveArraySerializer.INSTANCE)) {
-      harness.setup(new ArrowBatchSerializer());
-      harness.open();
-      harness.processElement(new StreamRecord<>(message.getBytes(StandardCharsets.UTF_8)));
-      harness.prepareSnapshotPreBarrier(1L);
-      List<List<Object>> rows = new ArrayList<>();
-      while (!harness.getOutput().isEmpty()) {
-        Object event = harness.getOutput().poll();
-        if (event instanceof StreamRecord) {
-          try (VectorSchemaRoot root = ((ArrowBatch) ((StreamRecord<?>) event).getValue()).root()) {
-            for (RowData row : RowDataArrowConverter.read(root, ROW_TYPE)) {
-              rows.add(fields(row));
-            }
-          }
-        }
-      }
-      return rows;
-    }
   }
 
   private static NativeFormatProvider provider(int format) {
@@ -221,16 +169,5 @@ class CdcDecodeParityTest {
       case DEBEZIUM -> new DebeziumJsonFormatProvider();
       default -> throw new IllegalArgumentException("Unknown CDC format: " + format);
     };
-  }
-
-  /** The row's kind plus each field rendered — what parity compares. */
-  private static List<Object> fields(RowData row) {
-    List<Object> values = new ArrayList<>();
-    values.add(row.getRowKind().shortString());
-    for (int i = 0; i < ROW_TYPE.getFieldCount(); i++) {
-      Object value = RowData.createFieldGetter(ROW_TYPE.getTypeAt(i), i).getFieldOrNull(row);
-      values.add(value == null ? null : value.toString());
-    }
-    return values;
   }
 }

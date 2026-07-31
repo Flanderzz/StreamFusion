@@ -2,6 +2,7 @@ package io.github.jordepic.streamfusion.operator;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
+import io.github.jordepic.streamfusion.planner.FlinkKeyGroupUtils;
 import java.util.ArrayList;
 import java.util.List;
 import org.apache.arrow.memory.BufferAllocator;
@@ -534,7 +535,7 @@ class NativeColumnarTopNOperatorTest {
 
   private static KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness(
       NativeColumnarTopNOperator operator, int parallelism, int subtask) throws Exception {
-    int[] stateKeys = stateKeysForSubtasks(parallelism);
+    int[] stateKeys = FlinkKeyGroupUtils.stateKeysForSubtasks(MAX_PARALLELISM, parallelism);
     return new KeyedOneInputStreamOperatorTestHarness<>(
         operator,
         batch -> stateKeys[batch.destination() >= 0 ? batch.destination() : 0],
@@ -589,24 +590,5 @@ class NativeColumnarTopNOperatorTest {
                 .hashCode(),
             MAX_PARALLELISM);
     return KeyGroupRangeAssignment.computeOperatorIndexForKeyGroup(MAX_PARALLELISM, 2, keyGroup);
-  }
-
-  private static int[] stateKeysForSubtasks(int parallelism) {
-    int[] keys = new int[parallelism];
-    boolean[] found = new boolean[parallelism];
-    int remaining = parallelism;
-    for (int candidate = 0; remaining > 0; candidate++) {
-      int keyGroup =
-          KeyGroupRangeAssignment.computeKeyGroupForKeyHash(candidate, MAX_PARALLELISM);
-      int subtask =
-          KeyGroupRangeAssignment.computeOperatorIndexForKeyGroup(
-              MAX_PARALLELISM, parallelism, keyGroup);
-      if (!found[subtask]) {
-        keys[subtask] = candidate;
-        found[subtask] = true;
-        remaining--;
-      }
-    }
-    return keys;
   }
 }

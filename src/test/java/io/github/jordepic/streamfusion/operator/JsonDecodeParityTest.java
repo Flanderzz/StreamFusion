@@ -1,21 +1,11 @@
 package io.github.jordepic.streamfusion.operator;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
-
-import io.github.jordepic.streamfusion.format.NativeFormatContext;
 import io.github.jordepic.streamfusion.format.json.JsonFormatProvider;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import org.apache.arrow.vector.VectorSchemaRoot;
-import org.apache.flink.api.common.typeutils.base.array.BytePrimitiveArraySerializer;
 import org.apache.flink.formats.common.TimestampFormat;
 import org.apache.flink.formats.json.JsonParserRowDataDeserializationSchema;
-import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
-import org.apache.flink.streaming.util.OneInputStreamOperatorTestHarness;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.runtime.typeutils.InternalTypeInfo;
 import org.apache.flink.table.types.logical.BigIntType;
@@ -158,69 +148,29 @@ class JsonDecodeParityTest {
       String message,
       TimestampFormat timestampFormat,
       String nativeFormatOptions,
-      boolean skipErrors)
-      throws Exception {
-    List<List<Object>> expected;
-    try {
-      expected = flinkDecode(rowType, message, timestampFormat, skipErrors);
-    } catch (Exception e) {
-      expected = null;
-    }
-    List<List<Object>> actual;
-    try {
-      actual = nativeDecode(rowType, message, nativeFormatOptions, skipErrors);
-    } catch (Exception e) {
-      actual = null;
-    }
-    if (expected == null) {
-      assertNull(actual, "Flink rejects but native decode accepts: " + message);
-      return;
-    }
-    assertNotNull(actual, "Flink accepts but native decode rejects: " + message);
-    assertEquals(expected, actual, "decoded values diverge for: " + message);
+      boolean skipErrors) {
+    DecodeParityHarness harness = new DecodeParityHarness(rowType, false);
+    harness.assertParity(
+        message,
+        () -> flinkDecode(harness, rowType, message, timestampFormat, skipErrors),
+        () ->
+            harness.nativeDecode(
+                new JsonFormatProvider(), message, nativeOptions(nativeFormatOptions), skipErrors));
   }
 
   private static List<List<Object>> flinkDecode(
-      RowType rowType, String message, TimestampFormat timestampFormat, boolean ignoreErrors)
+      DecodeParityHarness harness,
+      RowType rowType,
+      String message,
+      TimestampFormat timestampFormat,
+      boolean ignoreErrors)
       throws Exception {
     JsonParserRowDataDeserializationSchema schema =
         new JsonParserRowDataDeserializationSchema(
             rowType, InternalTypeInfo.of(rowType), false, ignoreErrors, timestampFormat);
     schema.open(null);
     RowData row = schema.deserialize(message.getBytes(StandardCharsets.UTF_8));
-    return row == null ? List.of() : List.of(fields(rowType, row));
-  }
-
-  private static List<List<Object>> nativeDecode(
-      RowType rowType, String message, String formatOptions, boolean skipErrors) throws Exception {
-    try (OneInputStreamOperatorTestHarness<byte[], ArrowBatch> harness =
-        new OneInputStreamOperatorTestHarness<>(
-            new NativeBytesDecodeOperator(
-                rowType,
-                100,
-                new JsonFormatProvider()
-                    .createDecoder(
-                        new NativeFormatContext(
-                            rowType, rowType, nativeOptions(formatOptions), skipErrors)),
-                0),
-            BytePrimitiveArraySerializer.INSTANCE)) {
-      harness.setup(new ArrowBatchSerializer());
-      harness.open();
-      harness.processElement(new StreamRecord<>(message.getBytes(StandardCharsets.UTF_8)));
-      harness.prepareSnapshotPreBarrier(1L);
-      List<List<Object>> rows = new ArrayList<>();
-      while (!harness.getOutput().isEmpty()) {
-        Object event = harness.getOutput().poll();
-        if (event instanceof StreamRecord) {
-          try (VectorSchemaRoot root = ((ArrowBatch) ((StreamRecord<?>) event).getValue()).root()) {
-            for (RowData row : RowDataArrowConverter.read(root, rowType)) {
-              rows.add(fields(rowType, row));
-            }
-          }
-        }
-      }
-      return rows;
-    }
+    return row == null ? List.of() : List.of(harness.fields(row));
   }
 
   private static Map<String, String> nativeOptions(String encoded) {
@@ -231,14 +181,5 @@ class JsonDecodeParityTest {
       return Map.of("format", "json", "json.timestamp-format.standard", "ISO-8601");
     }
     throw new IllegalArgumentException("Unknown JSON option fixture: " + encoded);
-  }
-
-  private static List<Object> fields(RowType rowType, RowData row) {
-    List<Object> values = new ArrayList<>();
-    for (int i = 0; i < rowType.getFieldCount(); i++) {
-      Object value = RowData.createFieldGetter(rowType.getTypeAt(i), i).getFieldOrNull(row);
-      values.add(value == null ? null : value.toString());
-    }
-    return values;
   }
 }

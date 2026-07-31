@@ -2,6 +2,7 @@ package io.github.jordepic.streamfusion.operator;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
+import io.github.jordepic.streamfusion.planner.FlinkKeyGroupUtils;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -89,7 +90,7 @@ class NativeColumnarGroupAggregateOperatorTest {
 
   private static KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness(
       int parallelism, int subtask) throws Exception {
-    int[] stateKeys = stateKeysForSubtasks(parallelism);
+    int[] stateKeys = FlinkKeyGroupUtils.stateKeysForSubtasks(MAX_PARALLELISM, parallelism);
     return new KeyedOneInputStreamOperatorTestHarness<>(
         operator(),
         batch -> stateKeys[batch.destination() >= 0 ? batch.destination() : 0],
@@ -140,7 +141,7 @@ class NativeColumnarGroupAggregateOperatorTest {
 
   @Test
   void coalescesGroupsAcrossPhysicalBatchesAtTheLogicalBoundary() throws Exception {
-    int[] stateKeys = stateKeysForSubtasks(1);
+    int[] stateKeys = FlinkKeyGroupUtils.stateKeysForSubtasks(MAX_PARALLELISM, 1);
     try (BufferAllocator allocator = new RootAllocator();
         KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness =
             new KeyedOneInputStreamOperatorTestHarness<>(
@@ -163,7 +164,7 @@ class NativeColumnarGroupAggregateOperatorTest {
 
   @Test
   void splitsPhysicalBatchesAndFlushesTheRemainderOnWatermark() throws Exception {
-    int[] stateKeys = stateKeysForSubtasks(1);
+    int[] stateKeys = FlinkKeyGroupUtils.stateKeysForSubtasks(MAX_PARALLELISM, 1);
     try (BufferAllocator allocator = new RootAllocator();
         KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness =
             new KeyedOneInputStreamOperatorTestHarness<>(
@@ -298,7 +299,7 @@ class NativeColumnarGroupAggregateOperatorTest {
 
   private static KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> ttlHarness(
       long stateTtlMillis) throws Exception {
-    int[] stateKeys = stateKeysForSubtasks(1);
+    int[] stateKeys = FlinkKeyGroupUtils.stateKeysForSubtasks(MAX_PARALLELISM, 1);
     return new KeyedOneInputStreamOperatorTestHarness<>(
         operator(false, -1, stateTtlMillis),
         batch -> stateKeys[batch.destination() >= 0 ? batch.destination() : 0],
@@ -311,7 +312,7 @@ class NativeColumnarGroupAggregateOperatorTest {
   @Test
   void miniBatchFlushesBeforeCheckpointAndRestoresOnlyDurableState() throws Exception {
     OperatorSubtaskState snapshot;
-    int[] stateKeys = stateKeysForSubtasks(1);
+    int[] stateKeys = FlinkKeyGroupUtils.stateKeysForSubtasks(MAX_PARALLELISM, 1);
     try (BufferAllocator allocator = new RootAllocator();
         KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness =
             new KeyedOneInputStreamOperatorTestHarness<>(
@@ -454,25 +455,6 @@ class NativeColumnarGroupAggregateOperatorTest {
                 .hashCode(),
             MAX_PARALLELISM);
     return KeyGroupRangeAssignment.computeOperatorIndexForKeyGroup(MAX_PARALLELISM, 2, keyGroup);
-  }
-
-  private static int[] stateKeysForSubtasks(int parallelism) {
-    int[] keys = new int[parallelism];
-    boolean[] found = new boolean[parallelism];
-    int remaining = parallelism;
-    for (int candidate = 0; remaining > 0; candidate++) {
-      int keyGroup =
-          KeyGroupRangeAssignment.computeKeyGroupForKeyHash(candidate, MAX_PARALLELISM);
-      int subtask =
-          KeyGroupRangeAssignment.computeOperatorIndexForKeyGroup(
-              MAX_PARALLELISM, parallelism, keyGroup);
-      if (!found[subtask]) {
-        keys[subtask] = candidate;
-        found[subtask] = true;
-        remaining--;
-      }
-    }
-    return keys;
   }
 
   private static RowData row(long key, long value) {
