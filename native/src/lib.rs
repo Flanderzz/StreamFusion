@@ -90,6 +90,8 @@ mod memory;
 mod mini_batch;
 mod normalizer;
 mod over_agg;
+#[cfg(any(feature = "protobuf", test))]
+mod protobuf_encode;
 mod rowtime;
 mod session_agg;
 mod sorter;
@@ -114,6 +116,10 @@ pub(crate) use {
 #[cfg(any(feature = "json", feature = "csv", feature = "raw", feature = "avro", feature = "protobuf", test))]
 #[allow(unused_imports)]
 pub(crate) use {formats::*, json::*};
+
+#[cfg(any(feature = "protobuf", test))]
+#[allow(unused_imports)]
+pub(crate) use protobuf_encode::*;
 
 #[cfg(feature = "parquet")]
 pub(crate) use files::*;
