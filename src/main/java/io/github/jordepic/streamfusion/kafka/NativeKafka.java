@@ -42,6 +42,13 @@ public final class NativeKafka {
   public static native void wakeKafkaConsumer(long handle);
 
   /**
+   * Whether this build of the connector library encodes the {@code FormatCodes} wire code — the
+   * planner's capability probe, so a format compiled out of the native library is a plan-time
+   * fallback rather than a runtime dispatch failure.
+   */
+  public static native boolean encodeFormatSupported(int format);
+
+  /**
    * Serializes one Arrow batch directly into the final heap byte arrays KafkaProducer requires.
    * {@code format} is the {@code FormatCodes} wire code and {@code formatOptions} the resolved
    * {@code EncodeFormat} option lines — the native side dispatches on the code, so new sink

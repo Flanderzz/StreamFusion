@@ -62,6 +62,11 @@ mod calc;
 mod changelog;
 #[cfg(any(feature = "json", feature = "csv", feature = "raw", feature = "avro", feature = "protobuf", test))]
 mod csv;
+// The sink-side CSV encoder: it needs the Kafka sink's encode seam (EncodedLines and the shared
+// Flink text helpers live with it), and rides the `csv` feature so a connector build without the
+// format compiles the dispatch's unsupported arm instead.
+#[cfg(all(feature = "kafka", feature = "csv"))]
+mod csv_encode;
 mod dedup;
 mod exchange;
 mod expr;

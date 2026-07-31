@@ -514,7 +514,7 @@ shapes persist their per-key deadlines in a dedicated state table).
     streaming-mode rejection.
   - A **changelog (retracting) input** — defense-in-depth; Flink's own validation rejects it first.
 - **Filesystem sink, non-Parquet format** — any non-Parquet sink format falls back.
-- **Kafka JSON sink** — a fixed-topic JSON table runs natively in one of two shapes. With
+- **Kafka sink (JSON and CSV value formats)** — a fixed-topic table runs natively in one of two shapes. With
   **exactly-once delivery and incremental transaction naming**, the whole data plane is native: Rust
   serializes and produces each Arrow batch inside a librdkafka transaction, flushes it at the
   checkpoint barrier, and surfaces the transaction's (producer id, epoch) as a real Flink
@@ -528,13 +528,13 @@ shapes persist their per-key deadlines in a dedicated state table).
   fallback, never silently dropped. With **`none`/`at-least-once` delivery**, serialization is
   native and the final key/value bytes feed Flink's unmodified `KafkaSink`, whose producer,
   parallelism, and metrics contracts apply verbatim. Ordinary `kafka` tables support value-only
-  insert streams with plain `json`, and full changelog streams with the four CDC JSON envelope
-  formats (`debezium-json`, `canal-json`, `maxwell-json`, `ogg-json`) — the one non-upsert case
-  where changelog input is admitted, since the CDC encoding format requests the full changelog
-  (UPDATE_BEFORE included) from the planner. Each row is spliced into its dialect's envelope in
-  Flink's field order (INSERT/UPDATE_AFTER as the post-image, UPDATE_BEFORE/DELETE as the
-  pre-image), and the shared `json.*` options forward to the nested row serializer exactly as in
-  Flink — `encode.ignore-null-fields` also drops the envelope's null `before`/`after` key. A
+  insert streams with plain `json` or `csv`, and full changelog streams with the four CDC JSON
+  envelope formats (`debezium-json`, `canal-json`, `maxwell-json`, `ogg-json`) — the one
+  non-upsert case where changelog input is admitted, since the CDC encoding format requests the
+  full changelog (UPDATE_BEFORE included) from the planner. Each row is spliced into its dialect's
+  envelope in Flink's field order (INSERT/UPDATE_AFTER as the post-image, UPDATE_BEFORE/DELETE as
+  the pre-image), and the shared `json.*` options forward to the nested row serializer exactly as
+  in Flink — `encode.ignore-null-fields` also drops the envelope's null `before`/`after` key. A
   PRIMARY KEY on such a table is allowed (Flink permits PK only alongside a CDC value format) and,
   as in Flink, produces no key output without `key.format`. `debezium-json.schema-include=true`
   declines so Flink raises its own sink-side ValidationException; canal's `database.include`/
@@ -543,15 +543,16 @@ shapes persist their per-key deadlines in a dedicated state table).
   null-field × option mode against Flink's envelope serializers, and a broker test diffs a native
   updating aggregate's debezium topic against stock Flink's record for record.
   `upsert-kafka` tables support the default primary-key projection and
-  default `ALL` value projection: INSERT/UPDATE_AFTER rows carry a JSON value, while
-  UPDATE_BEFORE/DELETE rows carry a Kafka tombstone. Serialization uses the declared sink field
+  default `ALL` value projection: INSERT/UPDATE_AFTER rows carry a serialized value, while
+  UPDATE_BEFORE/DELETE rows carry a Kafka tombstone (key and value formats resolve independently,
+  so JSON and CSV can mix). Serialization uses the declared sink field
   names even when the input plan uses generated expression names. The sink boundary separately
   reports native batch, row, byte, and flush-nanosecond counters, so encoding cost can be
   distinguished from producer and checkpoint cost. Broker tests pin committed output both normally
   and across a post-checkpoint failover, pin an updating aggregate's exactly-once upsert state, pin
   a native Kafka source-to-sink plan with no RowData transpose at either edge, and pin the
   cross-client transaction hand-off itself (commit, duplicate-commit idempotency, fencing, and
-  broker timeout reaping). The native serializer currently covers BOOLEAN,
+  broker timeout reaping). The JSON serializer currently covers BOOLEAN,
   TINYINT/SMALLINT/INT/BIGINT, FLOAT/DOUBLE, CHAR/VARCHAR, BINARY/VARBINARY, DECIMAL, DATE, TIME,
   TIMESTAMP, and TIMESTAMP_LTZ (SQL or ISO-8601), plus ROW, ARRAY, MAP, and MULTISET nested
   recursively over that set (a null field inside a nested row follows `encode.ignore-null-fields`
@@ -570,15 +571,36 @@ shapes persist their per-key deadlines in a dedicated state table).
   reproduces Jackson's `stripTrailingZeros().toString()`, scientific notation included). Each
   option set configures the format instance it belongs to, as in Flink: value options come from
   `json.*`/`value.json.*`, upsert key options only from `key.json.*` (the format's own defaults
-  when absent — never the value's settings). Every sink
+  when absent — never the value's settings).
+  The **CSV value format** is serialized byte-identically to `CsvRowDataSerializationSchema`
+  (Jackson CSV underneath): one record per row with no trailing line separator, Jackson's default
+  "loose" quote decision (a value longer than 24 UTF-16 units always quotes; otherwise any char
+  at or below `max(delimiter, quote)`, the configured escape char, or — with no escape configured —
+  a backslash triggers quotes; quote chars double inside quotes and a configured escape char
+  doubles itself; numbers, booleans, and the null literal are always raw), nested ROW/ARRAY joined
+  by `csv.array-element-delimiter` into one CSV field with raw elements, base64 BINARY, ISO
+  DATE/TIME spellings (seconds always present, fraction trimmed), the SQL TIMESTAMP spelling, and
+  TIMESTAMP_LTZ with Flink's `'Z'`. DECIMAL defaults to the plain exact-scale spelling — the
+  `csv.write-bigdecimal-in-scientific-notation` default of true is dead in Flink's factory (it
+  reads the option through `getOptional`, which never yields the declared default), so only an
+  explicit true selects `stripTrailingZeros().toString()`. Honored options: `csv.field-delimiter`
+  (Java-unescaped first char), `csv.quote-character`, `csv.disable-quote-character`,
+  `csv.array-element-delimiter`, `csv.escape-character`, `csv.null-literal`, and
+  `csv.write-bigdecimal-in-scientific-notation`; the deser-only `csv.allow-comments` and
+  `csv.ignore-parse-errors` are accepted and ignored, as in Flink's serializer. The CSV type
+  family is scalars plus depth-one ARRAY and ROW (Flink's own schema converter refuses deeper
+  nesting), minus FLOAT/DOUBLE and TIME — see the fallback list. Every sink
   fallback cause:
   - an upsert-materialized sink — when Flink decides the upsert changelog arrives out of order it
     bakes a stateful `SinkUpsertMaterializer` into its own sink translation, which a substituted
     sink would silently drop;
-  - a value format outside the JSON family (plain `json` or the four CDC JSON envelopes) or
-    multiple/dynamic topics; a keyed ordinary `kafka` table; an `upsert-kafka` table without JSON
-    key and value formats; `debezium-json.schema-include=true` (rejected by Flink's own sink
-    factory); or an explicit key/value projection, key prefix, or `EXCEPT_KEY` value projection;
+  - a value format outside the JSON family (plain `json` or the four CDC JSON envelopes) and
+    `csv`, or multiple/dynamic topics; a keyed ordinary `kafka` table; an `upsert-kafka` table
+    whose key or value format is outside JSON/CSV; `debezium-json.schema-include=true` (rejected
+    by Flink's own sink factory); or an explicit key/value projection, key prefix, or `EXCEPT_KEY`
+    value projection;
+  - a connector library built without the format's encode arm (probed at plan time, so a missing
+    optional format is a fallback rather than a runtime dispatch failure);
   - a non-default partitioner, sink-side buffer flushing, writable metadata, or any other sink
     ability;
   - a changelog input to ordinary `kafka` with a plain (non-CDC) value format, a column outside
@@ -587,6 +609,19 @@ shapes persist their per-key deadlines in a dedicated state table).
     an out-of-range `json.*` option value (Flink's format factory then raises its own validation
     error), a `json.map-null-key.literal` containing a line break, or an unrecognized
     delivery/transaction option;
+  - CSV-specific: a **FLOAT/DOUBLE column** — Flink spells them with the JVM's
+    JDK-version-dependent `Double.toString` (JDK 17's rendering differs from shortest-digit
+    formatting on 0.16% of random doubles and 11% of random floats), so there is no byte-exact
+    portable native counterpart — the same stance as the float-to-string CAST fallback; a **TIME
+    column** — SQL DDL resolves every TIME precision to TIME(0), whose Arrow boundary is
+    second-granular while Flink's CSV converter prints whatever milliseconds the value carries
+    (millisecond-preserving precisions ≥ 1 would run, but the SQL planner never produces them);
+    MAP/MULTISET, RAW, second-level ARRAY/ROW nesting, and TIMESTAMP_WITH_TIME_ZONE, which
+    Flink's own converter cannot serialize; an option value Flink's factory refuses (a quote
+    character alongside `csv.disable-quote-character`, a multi-character or malformed-escape
+    delimiter, a malformed boolean — Flink then raises its own validation error); a non-ASCII
+    delimiter/quote/array-delimiter/escape character; or a `csv.null-literal` containing a line
+    break;
   - missing `properties.bootstrap.servers`, or exactly-once without a transactional ID prefix;
   - exactly-once with a transaction naming strategy other than `INCREMENTING` (`POOLING` is a
     planned follow-up);

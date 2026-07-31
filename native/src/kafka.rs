@@ -36,6 +36,10 @@ pub struct EncodedLines {
 
 #[cfg(feature = "kafka")]
 impl EncodedLines {
+    pub(crate) fn new(bytes: Vec<u8>, lines: Vec<std::ops::Range<usize>>) -> EncodedLines {
+        EncodedLines { bytes, lines }
+    }
+
     pub fn len(&self) -> usize {
         self.lines.len()
     }
@@ -114,15 +118,21 @@ fn parse_json_encode_options(encoded: &str) -> Result<JsonEncodeOptions, String>
     Ok(options)
 }
 
-/// One resolved sink format: the JSON row encode options plus, for a CDC format, the changelog
-/// envelope wrapped around each row. All four CDC JSON dialects forward the same `json.*` option
-/// set to their nested row serializer, exactly as Flink's envelope schemas do. The envelope encode
-/// is part of the sink's JSON encoder (kafka-gated like the rest of it), deliberately independent
-/// of the decode-side `formats` module so a format-less connector build still compiles.
+/// One resolved sink format instance: the parsed options of whichever format the wire code named.
+/// The JSON family shares one variant — the four CDC dialects are the JSON row encode plus a
+/// changelog envelope wrapped around each row, forwarding the same `json.*` option set to the
+/// nested row serializer exactly as Flink's envelope schemas do. Formats whose implementation
+/// rides its own cargo feature gate their variant, so a connector build without that feature
+/// still compiles — the dispatch then reports the format unsupported and the JVM's capability
+/// probe (`encodeFormatSupported`) keeps the planner falling back.
 #[cfg(feature = "kafka")]
-pub(crate) struct EncodeFormat {
-    pub(crate) envelope: Option<CdcEnvelope>,
-    pub(crate) json: JsonEncodeOptions,
+pub(crate) enum EncodeOptions {
+    Json {
+        envelope: Option<CdcEnvelope>,
+        options: JsonEncodeOptions,
+    },
+    #[cfg(feature = "csv")]
+    Csv(crate::csv_encode::CsvEncodeOptions),
 }
 
 /// The CDC JSON dialect whose envelope wraps each encoded row on the sink side.
@@ -142,18 +152,22 @@ pub(crate) enum CdcEnvelope {
 /// The encode dispatch of the sink's format seam: the JVM passes a `FormatCodes` wire code plus the
 /// format's resolved option lines; each natively encoded sink format adds an arm here.
 #[cfg(feature = "kafka")]
-fn parse_encode_format(format: i32, encoded: &str) -> Result<EncodeFormat, String> {
+fn parse_encode_format(format: i32, encoded: &str) -> Result<EncodeOptions, String> {
     let envelope = match format {
         FORMAT_JSON => None,
         FORMAT_DEBEZIUM_JSON => Some(CdcEnvelope::Debezium),
         FORMAT_OGG_JSON => Some(CdcEnvelope::Ogg),
         FORMAT_MAXWELL_JSON => Some(CdcEnvelope::Maxwell),
         FORMAT_CANAL_JSON => Some(CdcEnvelope::Canal),
+        #[cfg(feature = "csv")]
+        FORMAT_CSV => {
+            return crate::csv_encode::parse_csv_encode_options(encoded).map(EncodeOptions::Csv)
+        }
         other => return Err(format!("format code {other} is not natively encoded")),
     };
-    Ok(EncodeFormat {
+    Ok(EncodeOptions::Json {
         envelope,
-        json: parse_json_encode_options(encoded)?,
+        options: parse_json_encode_options(encoded)?,
     })
 }
 
@@ -217,23 +231,31 @@ pub(crate) fn encode_json_batch(
     Ok(EncodedLines { bytes, lines })
 }
 
-/// The value lines of one resolved sink format: the plain JSON rows, or — for a CDC format — each
-/// row spliced into its dialect's changelog envelope. `kinds` is the batch's `$row_kind$` column;
-/// an absent column is an insert-only edge (every row is an INSERT), matching the transpose
-/// contract in `changelog.rs`.
+/// The value lines of one resolved sink format: the format's plain rows, or — for a CDC format —
+/// each JSON row spliced into its dialect's changelog envelope. `kinds` is the batch's
+/// `$row_kind$` column; an absent column is an insert-only edge (every row is an INSERT),
+/// matching the transpose contract in `changelog.rs`.
 #[cfg(feature = "kafka")]
 fn encode_value_lines(
     batch: &RecordBatch,
     kinds: Option<&Int8Array>,
-    format: &EncodeFormat,
+    format: &EncodeOptions,
     logical_types: &[String],
     field_names: &[String],
 ) -> Result<EncodedLines, String> {
-    let rows = encode_json_batch(batch, &format.json, logical_types, field_names)?;
-    match format.envelope {
-        None => Ok(rows),
-        Some(dialect) => {
-            wrap_cdc_envelopes(&rows, kinds, dialect, format.json.ignore_null_fields)
+    match format {
+        EncodeOptions::Json { envelope, options } => {
+            let rows = encode_json_batch(batch, options, logical_types, field_names)?;
+            match envelope {
+                None => Ok(rows),
+                Some(dialect) => {
+                    wrap_cdc_envelopes(&rows, kinds, *dialect, options.ignore_null_fields)
+                }
+            }
+        }
+        #[cfg(feature = "csv")]
+        EncodeOptions::Csv(options) => {
+            crate::csv_encode::encode_csv_batch(batch, options, logical_types, field_names)
         }
     }
 }
@@ -338,10 +360,10 @@ impl EncodedKafkaRecords {
 }
 
 #[cfg(feature = "kafka")]
-fn encode_json_records(
+fn encode_records(
     batch: &RecordBatch,
-    options: &EncodeFormat,
-    key_options: &EncodeFormat,
+    options: &EncodeOptions,
+    key_options: &EncodeOptions,
     logical_types: &[String],
     field_names: &[String],
     key_fields: &[usize],
@@ -369,9 +391,12 @@ fn encode_json_records(
     let keys = if key_fields.is_empty() {
         None
     } else {
-        Some(encode_json_batch(
+        // The key format never carries a CDC envelope (CDC formats are not legal key formats)
+        // and the key row has no changelog kind of its own.
+        Some(encode_value_lines(
             &key_batch,
-            &key_options.json,
+            None,
+            key_options,
             &project_types(key_fields),
             &project_names(key_fields),
         )?)
@@ -386,7 +411,7 @@ fn encode_json_records(
     let key_lines = keys.as_ref().map_or(batch.num_rows(), EncodedLines::len);
     if values.len() != batch.num_rows() || key_lines != batch.num_rows() {
         return Err(format!(
-            "Kafka JSON encoder produced {} values and {} keys for {} Arrow rows",
+            "Kafka encoder produced {} values and {} keys for {} Arrow rows",
             values.len(),
             key_lines,
             batch.num_rows()
@@ -413,7 +438,7 @@ fn encode_json_records(
 /// (the input plan may carry generated expression names) and has its TIMESTAMP_LTZ leaves re-marked
 /// (see `mark_ltz_leaves`), so the encoders below need no side channel.
 #[cfg(feature = "kafka")]
-fn annotate_flink_types(
+pub(crate) fn annotate_flink_types(
     batch: &RecordBatch,
     logical_types: &[String],
     field_names: &[String],
@@ -1075,7 +1100,7 @@ fn encode_timestamp_parts(
 }
 
 #[cfg(feature = "kafka")]
-fn civil_date_from_epoch_days(days: i64) -> (i32, u32, u32) {
+pub(crate) fn civil_date_from_epoch_days(days: i64) -> (i32, u32, u32) {
     // Decompose the proleptic Gregorian calendar into 400-year eras; the shift aligns Unix day 0.
     let shifted = days + 719_468;
     let era = (if shifted >= 0 { shifted } else { shifted - 146_096 }) / 146_097;
@@ -1093,7 +1118,7 @@ fn civil_date_from_epoch_days(days: i64) -> (i32, u32, u32) {
 }
 
 #[cfg(feature = "kafka")]
-fn push_two_digits(output: &mut Vec<u8>, value: u32) {
+pub(crate) fn push_two_digits(output: &mut Vec<u8>, value: u32) {
     output.push(b'0' + (value / 10) as u8);
     output.push(b'0' + (value % 10) as u8);
 }
@@ -2065,7 +2090,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_en
         )?;
         if encoded.len() != batch.num_rows() {
             return Err(format!(
-                "Kafka JSON encoder produced {} records for {} Arrow rows",
+                "Kafka encoder produced {} records for {} Arrow rows",
                 encoded.len(),
                 batch.num_rows()
             ));
@@ -2075,12 +2100,29 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_en
     })
 }
 
+/// The planner's capability probe: whether THIS build of the connector library encodes the format
+/// code. A format compiled out (its cargo feature off) reports false so the planner falls back to
+/// Flink instead of accepting a query the runtime dispatch would fail.
+#[cfg(feature = "kafka")]
+#[no_mangle]
+pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_encodeFormatSupported<
+    'local,
+>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    format: jint,
+) -> jboolean {
+    crate::bridge::jni_guard(env, move |_env| {
+        u8::from(parse_encode_format(format, "").is_ok())
+    })
+}
+
 #[cfg(feature = "kafka")]
 fn read_encode_format(
     env: &mut JNIEnv<'_>,
     format: jint,
     format_options: &JString<'_>,
-) -> Result<EncodeFormat, String> {
+) -> Result<EncodeOptions, String> {
     let encoded: String = env
         .get_string(format_options)
         .map_err(|error| format!("failed to read encode format options: {error}"))?
@@ -2142,7 +2184,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_en
             .into_iter()
             .map(|index| index as usize)
             .collect::<Vec<_>>();
-        let records = encode_json_records(
+        let records = encode_records(
             &batch,
             &options,
             &key_options,
@@ -2921,7 +2963,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_pr
             .into_iter()
             .map(|index| index as usize)
             .collect::<Vec<_>>();
-        let records = encode_json_records(
+        let records = encode_records(
             &batch,
             &options,
             &key_options,

@@ -387,6 +387,58 @@ class NativeKafkaSinkIntegrationTest {
     }
   }
 
+  /**
+   * The CSV value format through the whole native exactly-once data plane, with values that
+   * exercise Jackson's quote decision on the wire (a comma inside the field).
+   */
+  @Test
+  void publishesEveryNativeCsvValueInCommittedTransactions() throws Exception {
+    try (KafkaContainer kafka =
+        new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.6.1"))
+            .withEnv("KAFKA_TRANSACTION_MAX_TIMEOUT_MS", "7200000")) {
+      kafka.start();
+      String topic = "native-csv-sink-" + UUID.randomUUID();
+
+      StreamExecutionEnvironment environment =
+          StreamExecutionEnvironment.getExecutionEnvironment();
+      environment.setParallelism(1);
+      environment.enableCheckpointing(50);
+      StreamTableEnvironment table = StreamTableEnvironment.create(environment);
+      List<Row> input = new ArrayList<>(ROWS);
+      for (long id = 0; id < ROWS; id++) {
+        input.add(Row.of(id, "row," + id));
+      }
+      table.createTemporaryView(
+          "src",
+          environment.fromData(
+              Types.ROW_NAMED(new String[] {"id", "name"}, Types.LONG, Types.STRING),
+              input.toArray(Row[]::new)),
+          Schema.newBuilder()
+              .column("id", DataTypes.BIGINT())
+              .column("name", DataTypes.STRING())
+              .build());
+      table.executeSql(
+          "CREATE TABLE output (id BIGINT, name STRING) WITH ("
+              + "'connector' = 'kafka', 'topic' = '"
+              + topic
+              + "', 'properties.bootstrap.servers' = '"
+              + kafka.getBootstrapServers()
+              + "', 'format' = 'csv', "
+              + "'sink.delivery-guarantee' = 'exactly-once', "
+              + "'sink.transactional-id-prefix' = 'native-csv-sink-test')");
+      PhysicalPlanScan scan = NativePlanner.install(table);
+
+      table.executeSql("INSERT INTO output SELECT * FROM src").await();
+
+      assertTrue(scan.substitutions() > 0, scan::explainSummary);
+      Set<String> values = new HashSet<>(consumeCommitted(kafka.getBootstrapServers(), topic, ROWS));
+      assertEquals(ROWS, values.size());
+      for (long id = 0; id < ROWS; id++) {
+        assertTrue(values.contains(id + ",\"row," + id + "\""));
+      }
+    }
+  }
+
   @Test
   void publishesEveryNativeJsonValueInCommittedTransactions() throws Exception {
     try (KafkaContainer kafka =

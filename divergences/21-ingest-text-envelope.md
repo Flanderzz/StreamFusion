@@ -28,6 +28,18 @@ path for its raw number literals, but the decimal columns decode as raw *text*
 own decimal parse truncates extra fraction digits and errors on precision overflow, which silently
 diverged from Flink on valid data.
 
+The same reasoning holds on the way OUT: the Kafka sink's CSV encode (`native/src/csv_encode.rs`)
+is hand-rolled against Jackson's `CsvEncoder` semantics rather than arrow-csv's writer, whose
+envelope cannot be configured into Jackson's — Jackson's "loose" quote decision (25+ UTF-16 units
+always quote; anything at or below `max(delimiter, quote)`, the escape char, or a bare backslash
+quotes), raw never-quoted numbers/booleans/null-literals, doubled quote and escape characters,
+and the joined-array single-field form have no arrow-csv counterparts. Pinned byte-for-byte
+against `CsvRowDataSerializationSchema` in `NativeKafkaCsvEncoderTest`. FLOAT/DOUBLE columns are
+declined there outright: Flink renders them through the JVM's `Double.toString`, whose output is
+JDK-version-dependent (JDK 19 changed it; measured on JDK 17, 0.16% of random doubles and 11% of
+random floats differ from shortest-digit formatting), so no portable byte-exact port exists —
+the float-to-string CAST fallback takes the same stance.
+
 The envelope — what parses, what fails, and the produced value — is pinned message-by-message
 against Flink's own deserializers (`CsvDecodeParityTest` / `JsonDecodeParityTest`, no containers
 needed: Flink's format classes are on the test classpath and referee every scenario). Those tests

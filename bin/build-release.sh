@@ -111,7 +111,10 @@ stage_native_library() {
 rm -rf "$stage_dir"
 mkdir -p "$stage_dir"
 stage_host_library core mimalloc
-stage_host_library kafka mimalloc,kafka
+# The sink encode dispatch lives in the connector library (JSON is compiled with the kafka
+# feature itself); the csv feature adds the CSV encode arm there. The decode-side CSV format
+# still ships as its own extension library below.
+stage_host_library kafka mimalloc,kafka,csv
 stage_host_library json mimalloc,json
 stage_host_library csv mimalloc,csv
 stage_host_library raw mimalloc,raw

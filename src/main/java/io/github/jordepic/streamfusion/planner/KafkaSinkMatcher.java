@@ -2,8 +2,10 @@ package io.github.jordepic.streamfusion.planner;
 
 import io.github.jordepic.streamfusion.format.EncodeFormat;
 import io.github.jordepic.streamfusion.format.FormatCodes;
+import io.github.jordepic.streamfusion.kafka.NativeKafka;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.IntStream;
 import org.apache.calcite.rel.RelNode;
 import org.apache.flink.table.catalog.ContextResolvedTable;
@@ -16,6 +18,7 @@ import org.apache.flink.table.planner.plan.utils.ChangelogPlanUtils;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.LogicalTypeFamily;
 import org.apache.flink.table.types.logical.RowType;
+import org.apache.flink.table.types.logical.TimeType;
 
 /** Conservative match boundary for native JSON serialization into Flink's Kafka sink. */
 final class KafkaSinkMatcher {
@@ -56,6 +59,9 @@ final class KafkaSinkMatcher {
     }
   }
 
+  /** The value formats the native serializer implements, by Flink format identifier. */
+  private static final Set<String> NATIVE_VALUE_FORMATS = Set.of("json", "csv");
+
   static boolean appliesTo(StreamPhysicalSink sink) {
     Map<String, String> options = options(sink);
     if (options == null) {
@@ -63,10 +69,11 @@ final class KafkaSinkMatcher {
     }
     String format = options.getOrDefault("value.format", options.get("format"));
     if ("kafka".equals(options.get("connector"))) {
-      // Plain JSON or a CDC JSON envelope; Flink forbids the CDC formats on upsert-kafka.
-      return FormatCodes.isJsonFamily(format);
+      // Plain JSON, CSV, or a CDC JSON envelope; Flink forbids the CDC formats on upsert-kafka.
+      return FormatCodes.isJsonFamily(format) || NATIVE_VALUE_FORMATS.contains(format);
     }
-    return "upsert-kafka".equals(options.get("connector")) && "json".equals(format);
+    return "upsert-kafka".equals(options.get("connector"))
+        && NATIVE_VALUE_FORMATS.contains(format);
   }
 
   static Planned plan(StreamPhysicalSink sink) {
@@ -88,35 +95,38 @@ final class KafkaSinkMatcher {
     ResolvedCatalogTable table = (ResolvedCatalogTable) context.getResolvedTable();
     RowType rowType =
         (RowType) table.getResolvedSchema().toPhysicalRowDataType().getLogicalType();
+    String valueFormatId = translated.planned().valueFormat;
     for (LogicalType type : rowType.getChildren()) {
-      if (!supportsJsonType(type)) {
-        return Planned.fallback("JSON type " + type.asSummaryString());
+      if (!supportsType(valueFormatId, type)) {
+        return Planned.fallback(valueFormatId + " type " + type.asSummaryString());
       }
     }
     EncodeFormat valueFormat =
-        EncodeFormat.of(translated.planned().valueFormat, translated.planned().valueFormatOptions);
-    if (valueFormat == null) {
+        EncodeFormat.of(valueFormatId, translated.planned().valueFormatOptions);
+    if (valueFormat == null || !encodedByNativeLibrary(valueFormat)) {
       return Planned.fallback(
-          "value format " + translated.planned().valueFormat + " is not natively encoded"
-              + " with these options");
+          "value format " + valueFormatId + " is not natively encoded with these options");
     }
     EncodeFormat keyFormat = valueFormat;
-    if (translated.planned().upsert) {
-      keyFormat =
-          EncodeFormat.of(translated.planned().keyFormat, translated.planned().keyFormatOptions);
-      if (keyFormat == null) {
-        return Planned.fallback(
-            "key format " + translated.planned().keyFormat + " is not natively encoded"
-                + " with these options");
-      }
-    }
     int[] valueFields = IntStream.range(0, rowType.getFieldCount()).toArray();
     int[] keyFields = new int[0];
     if (translated.planned().upsert) {
+      String keyFormatId = translated.planned().keyFormat;
+      keyFormat = EncodeFormat.of(keyFormatId, translated.planned().keyFormatOptions);
+      if (keyFormat == null || !encodedByNativeLibrary(keyFormat)) {
+        return Planned.fallback(
+            "key format " + keyFormatId + " is not natively encoded with these options");
+      }
       List<String> primaryKey =
           table.getResolvedSchema().getPrimaryKey().orElseThrow().getColumns();
       keyFields =
           primaryKey.stream().mapToInt(rowType.getFieldNames()::indexOf).toArray();
+      for (int keyField : keyFields) {
+        LogicalType type = rowType.getTypeAt(keyField);
+        if (!supportsType(keyFormatId, type)) {
+          return Planned.fallback("key " + keyFormatId + " type " + type.asSummaryString());
+        }
+      }
     }
     return new Planned(
         rowType,
@@ -127,6 +137,65 @@ final class KafkaSinkMatcher {
         valueFields,
         translated.planned().upsert,
         null);
+  }
+
+  /** Whether the loaded connector library was built with the format's encode arm. */
+  private static boolean encodedByNativeLibrary(EncodeFormat format) {
+    try {
+      return NativeKafka.encodeFormatSupported(format.format);
+    } catch (LinkageError missing) {
+      return false;
+    }
+  }
+
+  private static boolean supportsType(String formatIdentifier, LogicalType type) {
+    if (FormatCodes.isJsonFamily(formatIdentifier)) {
+      // The CDC dialects nest the physical row through the same JSON row serializer.
+      return supportsJsonType(type);
+    }
+    switch (formatIdentifier) {
+      case "csv":
+        return supportsCsvType(type, false);
+      default:
+        return false;
+    }
+  }
+
+  /**
+   * Flink's CSV serializer covers scalars at the top level plus depth-one ARRAY and ROW (its
+   * schema converter rejects deeper nesting, and its runtime converter has no MAP/MULTISET/
+   * interval arm). FLOAT/DOUBLE are additionally declined natively: Flink spells them with the
+   * JVM's JDK-version-dependent {@code Double.toString}, which has no byte-exact native
+   * counterpart — the same reason the float-to-string CAST stays on the host.
+   */
+  private static boolean supportsCsvType(LogicalType type, boolean nested) {
+    switch (type.getTypeRoot()) {
+      case TINYINT:
+      case SMALLINT:
+      case INTEGER:
+      case BIGINT:
+      case BOOLEAN:
+      case CHAR:
+      case VARCHAR:
+      case BINARY:
+      case VARBINARY:
+      case DECIMAL:
+      case DATE:
+      case TIMESTAMP_WITHOUT_TIME_ZONE:
+      case TIMESTAMP_WITH_LOCAL_TIME_ZONE:
+        return true;
+      case TIME_WITHOUT_TIME_ZONE:
+        // Flink's converter prints whatever milliseconds the value carries even under TIME(0),
+        // but the Arrow boundary stores a TIME(0) column at second granularity — out-of-contract
+        // millisecond data would silently truncate, so only millisecond-preserving precisions run.
+        return ((TimeType) type).getPrecision() >= 1;
+      case ROW:
+      case ARRAY:
+        return !nested
+            && type.getChildren().stream().allMatch(child -> supportsCsvType(child, true));
+      default:
+        return false;
+    }
   }
 
   private static boolean supportsJsonType(LogicalType type) {

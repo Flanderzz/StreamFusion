@@ -329,6 +329,158 @@ class NativeKafkaSinkSqlPlanTest {
         scan::explainSummary);
   }
 
+  @Test
+  void plansTheCsvSinkNatively() {
+    StreamTableEnvironment table = environment();
+    table.executeSql(
+        "CREATE TABLE src (id BIGINT, name STRING, amount DECIMAL(10, 2), event_day DATE, "
+            + "items ARRAY<INT>, nested ROW<a INT, ts TIMESTAMP_LTZ(3)>) "
+            + "WITH ('connector' = 'datagen', 'number-of-rows' = '1')");
+    table.executeSql(
+        "CREATE TABLE output (id BIGINT, name STRING, amount DECIMAL(10, 2), event_day DATE, "
+            + "items ARRAY<INT>, nested ROW<a INT, ts TIMESTAMP_LTZ(3)>) WITH ("
+            + "'connector' = 'kafka', "
+            + "'topic' = 'output', "
+            + "'properties.bootstrap.servers' = 'broker:9092', "
+            + "'format' = 'csv', "
+            + "'csv.field-delimiter' = ';', "
+            + "'csv.escape-character' = '|', "
+            + "'csv.null-literal' = 'N/A', "
+            + "'csv.write-bigdecimal-in-scientific-notation' = 'true')");
+
+    PhysicalPlanScan scan = NativePlanner.install(table);
+    String plan =
+        table.explainSql(
+            "INSERT INTO output SELECT * FROM src", ExplainDetail.JSON_EXECUTION_PLAN);
+
+    assertTrue(scan.substitutions() > 0, scan::explainSummary);
+    assertTrue(plan.contains("NativeKafkaSink"), plan);
+  }
+
+  @Test
+  void plansUpsertCsvSerializationNatively() {
+    StreamTableEnvironment table = environment();
+    table.executeSql(
+        "CREATE TABLE src (id BIGINT) "
+            + "WITH ('connector' = 'datagen', 'number-of-rows' = '10')");
+    table.executeSql(
+        "CREATE TABLE output (id BIGINT, total BIGINT, PRIMARY KEY (id) NOT ENFORCED) WITH ("
+            + "'connector' = 'upsert-kafka', "
+            + "'topic' = 'output', "
+            + "'properties.bootstrap.servers' = 'broker:9092', "
+            + "'key.format' = 'csv', "
+            + "'key.csv.field-delimiter' = ';', "
+            + "'value.format' = 'csv')");
+
+    PhysicalPlanScan scan = NativePlanner.install(table);
+    String plan =
+        table.explainSql(
+            "INSERT INTO output SELECT id, COUNT(*) FROM src GROUP BY id",
+            ExplainDetail.JSON_EXECUTION_PLAN);
+
+    assertTrue(scan.substitutions() > 0, scan::explainSummary);
+    assertTrue(plan.contains("NativeKafkaSink"), plan);
+  }
+
+  /**
+   * Flink spells FLOAT/DOUBLE with the JVM's JDK-version-dependent {@code Double.toString}; there
+   * is no byte-exact native counterpart, so a CSV sink carrying one stays on the host.
+   */
+  @Test
+  void csvFloatColumnsKeepHostSerialization() {
+    StreamTableEnvironment table = environment();
+    table.executeSql(
+        "CREATE TABLE src (id BIGINT, score DOUBLE) "
+            + "WITH ('connector' = 'datagen', 'number-of-rows' = '1')");
+    table.executeSql(
+        "CREATE TABLE output (id BIGINT, score DOUBLE) WITH ("
+            + "'connector' = 'kafka', "
+            + "'topic' = 'output', "
+            + "'properties.bootstrap.servers' = 'broker:9092', "
+            + "'format' = 'csv')");
+
+    PhysicalPlanScan scan = NativePlanner.install(table);
+    String plan =
+        table.explainSql(
+            "INSERT INTO output SELECT * FROM src", ExplainDetail.JSON_EXECUTION_PLAN);
+
+    assertFalse(plan.contains("NativeKafkaSink"), plan);
+    assertTrue(
+        scan.fallbackReasons().stream().anyMatch(reason -> reason.contains("csv type DOUBLE")),
+        scan::explainSummary);
+  }
+
+  /**
+   * A TIME(0) column crosses the Arrow boundary at second granularity, but Flink's CSV converter
+   * prints whatever milliseconds the value carries — out-of-contract data would silently
+   * truncate, so the matcher declines. SQL DDL resolves every TIME precision to TIME(0) in the
+   * sink's physical row type, so in practice a SQL-declared TIME column always stays on the host.
+   */
+  @Test
+  void csvTimeColumnsKeepHostSerialization() {
+    StreamTableEnvironment table = environment();
+    table.executeSql(
+        "CREATE TABLE src (id BIGINT, tod TIME(3)) "
+            + "WITH ('connector' = 'datagen', 'number-of-rows' = '1')");
+    table.executeSql(
+        "CREATE TABLE output (id BIGINT, tod TIME(3)) WITH ("
+            + "'connector' = 'kafka', "
+            + "'topic' = 'output', "
+            + "'properties.bootstrap.servers' = 'broker:9092', "
+            + "'format' = 'csv')");
+
+    PhysicalPlanScan scan = NativePlanner.install(table);
+    String plan =
+        table.explainSql(
+            "INSERT INTO output SELECT * FROM src", ExplainDetail.JSON_EXECUTION_PLAN);
+
+    assertFalse(plan.contains("NativeKafkaSink"), plan);
+    assertTrue(
+        scan.fallbackReasons().stream().anyMatch(reason -> reason.contains("csv type TIME(0)")),
+        scan::explainSummary);
+  }
+
+  /**
+   * Option combinations Flink's own factory validation refuses must decline BEFORE substitution,
+   * so the ValidationException stays Flink's.
+   */
+  @Test
+  void csvQuoteConflictKeepsFlinksValidationError() {
+    StreamTableEnvironment table = environment();
+    table.executeSql(
+        "CREATE TABLE src (id BIGINT) "
+            + "WITH ('connector' = 'datagen', 'number-of-rows' = '1')");
+    table.executeSql(
+        "CREATE TABLE output (id BIGINT) WITH ("
+            + "'connector' = 'kafka', "
+            + "'topic' = 'output', "
+            + "'properties.bootstrap.servers' = 'broker:9092', "
+            + "'format' = 'csv', "
+            + "'csv.quote-character' = 'X', "
+            + "'csv.disable-quote-character' = 'true')");
+
+    PhysicalPlanScan scan = NativePlanner.install(table);
+    RuntimeException rejection =
+        assertThrows(
+            RuntimeException.class,
+            () -> table.explainSql("INSERT INTO output SELECT * FROM src"));
+
+    assertTrue(
+        rejection.toString().contains("ValidationException")
+            || hasValidationCause(rejection),
+        rejection.toString());
+    assertEquals(0, scan.substitutions());
+  }
+
+  private static boolean hasValidationCause(Throwable failure) {
+    for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+      if (cause.getClass().getSimpleName().equals("ValidationException")) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   private static StreamTableEnvironment environment() {
     StreamExecutionEnvironment environment = StreamExecutionEnvironment.getExecutionEnvironment();
     environment.setParallelism(1);
