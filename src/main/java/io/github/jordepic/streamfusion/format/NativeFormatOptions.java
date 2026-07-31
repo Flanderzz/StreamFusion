@@ -7,6 +7,9 @@ public final class NativeFormatOptions {
 
   private NativeFormatOptions() {}
 
+  /** A value-format option, resolved with Flink's own prefixing ({@code FactoryUtil.getFormatPrefix}):
+   * {@code csv.field-delimiter} when the table uses {@code format = 'csv'}, but
+   * {@code value.csv.field-delimiter} when it uses {@code value.format = 'csv'}. */
   public static String option(Map<String, String> options, String suffix) {
     String valueFormat = options.get("value.format");
     return valueFormat != null
@@ -15,8 +18,14 @@ public final class NativeFormatOptions {
   }
 
   /**
-   * Renders the options the native JSON/CSV implementations reproduce, or returns {@code null} when
-   * the table needs behavior that must stay on Flink.
+   * The decode-relevant format options rendered for the native decoder as {@code key=value} lines,
+   * or null when an option value the native decode can't reproduce is present — behavior that must
+   * stay on Flink (the fallback gate). CSV carries the Jackson {@code CsvSchema} knobs; the JSON
+   * family (plain {@code json} and the CDC envelopes) carries {@code timestamp-format.standard} and
+   * gates {@code fail-on-missing-field}. The CSV delimiter is Java-unescaped and truncated to its
+   * first character exactly as {@code CsvFormatFactory} does; quote is a literal single character
+   * (the factory validates the length). Each must be ASCII — csv-core splits on bytes — and a null
+   * literal must fit the line encoding.
    */
   public static String encode(Map<String, String> options) {
     String format = NativeFormatProviders.formatIdentifier(options);
@@ -26,6 +35,7 @@ public final class NativeFormatOptions {
         || "ogg-json".equals(format)
         || "maxwell-json".equals(format)
         || "canal-json".equals(format)) {
+      // A missing field is null natively (Flink's default); the fail mode isn't modeled.
       if ("true".equalsIgnoreCase(option(options, "fail-on-missing-field"))) {
         return null;
       }
@@ -33,6 +43,7 @@ public final class NativeFormatOptions {
       if (timestampFormat == null || "SQL".equals(timestampFormat)) {
         return encoded.toString();
       }
+      // The factory validates the value, so returning null for anything else is defensive.
       return "ISO-8601".equals(timestampFormat) ? "timestamp-format=ISO-8601\n" : null;
     }
     if (!"csv".equals(format)) {
@@ -53,6 +64,8 @@ public final class NativeFormatOptions {
       encoded.append("csv.disable-quote-character=true\n");
     }
     if (option(options, "escape-character") != null) {
+      // Jackson's escape applies in unquoted fields too (parity-pinned: "esc\;aped" unescapes);
+      // csv-core's escape is quoted-context only, so the option can't be reproduced — fall back.
       return null;
     }
     if ("true".equalsIgnoreCase(option(options, "allow-comments"))) {
@@ -76,6 +89,12 @@ public final class NativeFormatOptions {
     return true;
   }
 
+  /**
+   * {@code field-delimiter} the way {@code CsvFormatFactory} reads it — Java-unescaped, first char
+   * ({@code '\t'} arrives as the two characters backslash-t). Handles the escape forms that render
+   * a single character; null (fall back) for anything else rather than risking a mis-read
+   * delimiter.
+   */
   private static Character unescapedDelimiter(String raw) {
     if (raw.length() == 1) {
       return raw.charAt(0);

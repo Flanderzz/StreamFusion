@@ -128,7 +128,7 @@ class CsvDecodeParityTest {
   @Test
   void delimiterQuoteAndCommentsMatchFlink() throws Exception {
     // escape-character is deliberately absent: Jackson unescapes in unquoted fields where csv-core
-    // cannot, so a table setting it falls back (see KafkaTables.encodeFormatOptions).
+    // cannot, so a table setting it falls back (see NativeFormatOptions.encode).
     String[] scenarios = {
       "a;42;2.5;true;2020-01-02;2020-01-02 03:04:05;1.23;9",
       "a,b;42;2.5;true;2020-01-02;2020-01-02 03:04:05;1.23;9",
