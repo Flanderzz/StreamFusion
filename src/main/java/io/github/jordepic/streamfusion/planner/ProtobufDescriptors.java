@@ -35,8 +35,11 @@ public final class ProtobufDescriptors {
    * be a supported scalar (above) or a supported message: nested messages → ROW, repeated → ARRAY, map →
    * MAP, all of which the row boundary now carries. Excluded (fall back): enums and unsigned/fixed ints
    * (decoded differently here than in Flink), {@code bytes} (decode is fine but {@code byte[]} parity is
-   * not yet test-covered), and the well-known types ({@code google.protobuf.*}), which the Arrow decoder
-   * maps to dedicated Arrow types while Flink treats them as ordinary nested rows. */
+   * not yet test-covered), the well-known types ({@code google.protobuf.*}), which the Arrow decoder
+   * maps to dedicated Arrow types while Flink treats them as ordinary nested rows, and every field
+   * shape whose absent-from-the-wire decode could differ from Flink's presence handling: non-proto3
+   * files (proto2 unset scalars are NULL in Flink, defaults here), proto3 {@code optional} scalars, and
+   * scalar oneof arms (Flink force-reads proto3 primitive defaults even for the unset arms). */
   public static boolean isSupportedMessage(String messageClassName) {
     try {
       Object descriptor = Class.forName(messageClassName).getMethod("getDescriptor").invoke(null);
@@ -52,6 +55,9 @@ public final class ProtobufDescriptors {
     if (fullName.startsWith("google.protobuf.")) {
       return false; // well-known types map to dedicated Arrow types, not the nested row Flink produces
     }
+    if (!isProto3File(descriptor)) {
+      return false; // proto2/editions presence semantics for unset fields are not reproduced natively
+    }
     if (!visiting.add(fullName)) {
       return true; // a recursive type already on the path; its fields are validated by the outer call
     }
@@ -65,8 +71,19 @@ public final class ProtobufDescriptors {
     return true;
   }
 
+  /** The native decode's absent-field parity argument (empty-on-the-wire ⇒ Flink's proto3 defaults or
+   * NULL) only holds for plain proto3 fields — messages from proto2 or editions files fall back. */
+  private static boolean isProto3File(Object descriptor) throws ReflectiveOperationException {
+    Object file = descriptor.getClass().getMethod("getFile").invoke(descriptor);
+    Object proto = file.getClass().getMethod("toProto").invoke(file);
+    return "proto3".equals(proto.getClass().getMethod("getSyntax").invoke(proto));
+  }
+
   /** A field is supported if it is a map of supported key/value types, or (singular or repeated) a
-   * supported scalar / a supported nested message. */
+   * supported scalar / a supported nested message — and its unset-field decode is the plain proto3
+   * one. A scalar with explicit presence (proto3 {@code optional}, or a oneof arm) falls back: the
+   * native decoder surfaces the explicit absence as NULL where Flink force-reads proto3 primitive
+   * defaults. Message fields keep their presence (NULL when absent on both sides). */
   private static boolean isSupportedField(Object field, Set<String> visiting)
       throws ReflectiveOperationException {
     if ((boolean) field.getClass().getMethod("isMapField").invoke(field)) {
@@ -74,6 +91,11 @@ public final class ProtobufDescriptors {
       Object key = entry.getClass().getMethod("findFieldByName", String.class).invoke(entry, "key");
       Object value = entry.getClass().getMethod("findFieldByName", String.class).invoke(entry, "value");
       return isSupportedLeaf(key, visiting) && isSupportedLeaf(value, visiting);
+    }
+    String type = field.getClass().getMethod("getType").invoke(field).toString();
+    if (!type.equals("MESSAGE")
+        && (boolean) field.getClass().getMethod("hasPresence").invoke(field)) {
+      return false;
     }
     return isSupportedLeaf(field, visiting);
   }

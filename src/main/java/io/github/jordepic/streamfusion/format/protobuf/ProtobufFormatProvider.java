@@ -28,7 +28,10 @@ public final class ProtobufFormatProvider implements NativeFormatProvider {
   @Override
   public boolean supports(NativeFormatContext context) {
     String messageClass = context.options().get("protobuf.message-class-name");
+    // read-default-values=true makes Flink materialize default instances for unset message /
+    // repeated / map fields where the native decode (and Flink's own default mode) yields NULL.
     return !context.ignoreParseErrors()
+        && !Boolean.parseBoolean(context.options().get("protobuf.read-default-values"))
         && messageClass != null
         && ProtobufDescriptors.isSupportedMessage(messageClass);
   }

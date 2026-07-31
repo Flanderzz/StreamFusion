@@ -1,0 +1,13 @@
+syntax = "proto2";
+
+// A proto2 message, which the planner must decline: an unset proto2 scalar is NULL in Flink's
+// decode (no forced default-reading) but a proto3-semantics default in the native one.
+package streamfusion.test;
+
+option java_package = "io.github.jordepic.streamfusion.proto";
+option java_multiple_files = true;
+
+message Proto2Row {
+  optional int64 id = 1;
+  optional string name = 2;
+}

@@ -583,7 +583,11 @@ shapes persist their per-key deadlines in a dedicated state table).
   JKS/PKCS#12 stores needing conversion), SASL credentials missing from `sasl.jaas.config`,
   `metadata.recovery.*`, an unrecognized JAAS login module, an unmappable `auto.offset.reset`
   (`by_duration:...`), and any unknown key; protobuf fields needing representation
-  reconciliation (enum/unsigned/bytes/proto3-defaults/well-known types); **`ignore-parse-errors` on a
+  reconciliation (enum/unsigned/bytes/well-known types), protobuf presence shapes whose
+  unset-field decode differs from Flink's (non-proto3 files, proto3 `optional` scalars, scalar
+  oneof arms), and `protobuf.read-default-values = 'true'` (Flink then materializes default
+  instances for unset message/repeated/map fields; natively — matching Flink's default mode —
+  an absent or empty-on-the-wire container decodes to NULL); **`ignore-parse-errors` on a
   protobuf table** (Flink skips malformed messages; that native decoder fails on them — the
   JSON-decoded formats honor the per-message skip, and CSV reproduces Flink's finer per-field
   granularity natively: a bad value nulls the field, a short row pads, a record-level error drops

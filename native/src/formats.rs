@@ -158,8 +158,86 @@ impl ProtobufDecoder {
             0,
             "protobuf cannot deserialize a null Kafka value"
         );
-        ptars::binary_array_to_record_batch_direct(column, &self.message, &self.config)
-            .expect("failed to decode protobuf batch")
+        let batch = ptars::binary_array_to_record_batch_direct(column, &self.message, &self.config)
+            .expect("failed to decode protobuf batch");
+        let columns = batch.columns().iter().cloned().map(null_empty_containers).collect();
+        let fields: Vec<_> = batch.schema().fields().iter().map(nullable_containers).collect();
+        RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
+            .expect("failed to rebuild protobuf batch")
+    }
+}
+
+/// Rewrites empty ARRAY/MAP values to NULL, recursively, to match Flink's protobuf decode. ptars
+/// materializes an absent repeated/map field as an empty container, but in proto3 an empty
+/// repeated/map field is indistinguishable from an absent one on the wire, and Flink's generated
+/// `getXCount() > 0` guard (with its default `read-default-values = false`, the only mode the planner
+/// routes natively) leaves the Flink field NULL in both cases — so NULL is the exact decode of every
+/// zero-length container, not an approximation. Recursion covers repeated/map fields inside nested
+/// messages and inside repeated-message elements. Rebuilt arrays carry the `nullable_containers`
+/// field shapes, since ptars declares repeated/map columns non-nullable.
+fn null_empty_containers(array: ArrayRef) -> ArrayRef {
+    use arrow::array::{ListArray, MapArray, StructArray};
+    use arrow::buffer::NullBuffer;
+    match array.data_type() {
+        DataType::List(_) => {
+            let list = array.as_any().downcast_ref::<ListArray>().expect("list column");
+            let (field, offsets, values, nulls) = list.clone().into_parts();
+            let non_empty = NullBuffer::from_iter(
+                offsets.windows(2).map(|window| window[1] > window[0]),
+            );
+            let nulls = NullBuffer::union(nulls.as_ref(), Some(&non_empty));
+            Arc::new(ListArray::new(
+                nullable_containers(&field),
+                offsets,
+                null_empty_containers(values),
+                nulls,
+            ))
+        }
+        DataType::Map(_, _) => {
+            let map = array.as_any().downcast_ref::<MapArray>().expect("map column");
+            let (field, offsets, entries, nulls, ordered) = map.clone().into_parts();
+            let non_empty = NullBuffer::from_iter(
+                offsets.windows(2).map(|window| window[1] > window[0]),
+            );
+            let nulls = NullBuffer::union(nulls.as_ref(), Some(&non_empty));
+            let entries = null_empty_containers(Arc::new(entries));
+            let entries = entries.as_any().downcast_ref::<StructArray>().expect("map entries").clone();
+            Arc::new(MapArray::new(nullable_containers(&field), offsets, entries, nulls, ordered))
+        }
+        DataType::Struct(_) => {
+            let strukt = array.as_any().downcast_ref::<StructArray>().expect("struct column");
+            let (fields, children, nulls) = strukt.clone().into_parts();
+            let fields: Vec<_> = fields.iter().map(nullable_containers).collect();
+            let children = children.into_iter().map(null_empty_containers).collect();
+            Arc::new(StructArray::new(fields.into(), children, nulls))
+        }
+        _ => array,
+    }
+}
+
+/// The field shape `null_empty_containers` produces: every ARRAY/MAP field in the tree marked
+/// nullable (they can now hold the NULLs standing in for absent proto fields), everything else as
+/// ptars declared it.
+fn nullable_containers(field: &FieldRef) -> FieldRef {
+    use arrow::datatypes::Fields;
+    match field.data_type() {
+        DataType::List(element) => Arc::new(
+            Field::new(field.name(), DataType::List(nullable_containers(element)), true),
+        ),
+        DataType::Map(entries, ordered) => Arc::new(Field::new(
+            field.name(),
+            DataType::Map(nullable_containers(entries), *ordered),
+            true,
+        )),
+        DataType::Struct(children) => {
+            let children: Fields = children.iter().map(nullable_containers).collect();
+            Arc::new(Field::new(
+                field.name(),
+                DataType::Struct(children),
+                field.is_nullable(),
+            ))
+        }
+        _ => field.clone(),
     }
 }
 
