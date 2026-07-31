@@ -645,8 +645,10 @@ shapes persist their per-key deadlines in a dedicated state table).
     schema/converter derivations Flink's factory runs), so the fallback reproduces Flink's exact
     submission failure instead of the native planner aborting with its own;
   - **TIME(0)** — Flink keeps an avro `time-millis` value's full milliseconds in a TIME(0)
-    column, while the Arrow boundary's second-precision form would truncate them (TIME(1..3) is
-    native and exact); and **BINARY(n)** — Flink accepts avro bytes of any length into a
+    column, while the Arrow boundary's second-precision form would truncate them. TIME(1..3) is
+    native and exact, but note SQL DDL resolves every `TIME(p)` column to TIME(0) in the catalog,
+    so a TIME column in a SQL-defined table always stays on Flink — TIME(1..3) is reachable only
+    through Table-API-defined schemas; and **BINARY(n)** — Flink accepts avro bytes of any length into a
     BINARY(n) column, which the boundary's fixed-size form cannot hold (VARBINARY is native).
     Every other boundary type decodes natively, with the decoded batch reconciled onto the
     boundary schema and Flink's converter quirks reproduced exactly (parity-pinned —

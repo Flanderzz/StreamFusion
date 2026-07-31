@@ -1,6 +1,8 @@
 package io.github.jordepic.streamfusion;
 
 import java.io.ByteArrayOutputStream;
+import java.math.BigDecimal;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -134,6 +136,70 @@ class NativeAvroDecodeSqlHarnessTest {
     }
   }
 
+  @Test
+  void temporalAndDecimalColumnsDecodeNativelyThroughTheFullPlan() throws Exception {
+    // The reconciled scalar family end to end: decoded natively, reconciled onto the boundary
+    // schema, carried through the plan, and transposed back to rows — against Flink's own decode.
+    try (KafkaContainer kafka =
+        new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.6.1"))) {
+      kafka.start();
+      String brokers = kafka.getBootstrapServers();
+
+      // No TIME column: SQL DDL resolves every TIME(p) to TIME(0), which stays on Flink (its
+      // boundary form would truncate the sub-second millis Flink's converter keeps).
+      RowType temporal =
+          (RowType)
+              DataTypes.ROW(
+                      DataTypes.FIELD("id", DataTypes.BIGINT()),
+                      DataTypes.FIELD("price", DataTypes.DECIMAL(10, 2)),
+                      DataTypes.FIELD("dt", DataTypes.DATE()),
+                      DataTypes.FIELD("ts", DataTypes.TIMESTAMP(3)))
+                  .getLogicalType();
+      produce(brokers, "avro-temporal", temporal, NativeAvroDecodeSqlHarnessTest::temporalRecord);
+      NativeParity.assertParity(
+          environment(
+              brokers, "avro-temporal", "id BIGINT, price DECIMAL(10, 2), dt DATE, ts TIMESTAMP(3)"),
+          "SELECT * FROM t");
+
+      // The corrected timestamp mapping: TIMESTAMP_LTZ is only representable with
+      // avro.timestamp_mapping.legacy = false, and the writer schema derives differently.
+      RowType corrected =
+          (RowType)
+              DataTypes.ROW(
+                      DataTypes.FIELD("id", DataTypes.BIGINT()),
+                      DataTypes.FIELD("ts", DataTypes.TIMESTAMP(3)),
+                      DataTypes.FIELD("ltz", DataTypes.TIMESTAMP_LTZ(3)))
+                  .getLogicalType();
+      produce(
+          brokers,
+          "avro-corrected",
+          AvroSchemaConverter.convertToSchema(corrected.copy(false), false),
+          NativeAvroDecodeSqlHarnessTest::correctedRecord);
+      NativeParity.assertParity(
+          environment(
+              brokers,
+              "avro-corrected",
+              "id BIGINT, ts TIMESTAMP(3), ltz TIMESTAMP_LTZ(3)",
+              ", 'avro.timestamp_mapping.legacy' = 'false'"),
+          "SELECT * FROM t");
+    }
+  }
+
+  private static void temporalRecord(GenericRecord record, int i, Schema schema) {
+    record.put("id", (long) i);
+    record.put(
+        "price",
+        ByteBuffer.wrap(BigDecimal.valueOf(i * 100L + 45, 2).unscaledValue().toByteArray()));
+    record.put("dt", 19_000 + i);
+    record.put("ts", 1_577_934_245_000L + i);
+  }
+
+  private static void correctedRecord(GenericRecord record, int i, Schema schema) {
+    record.put("id", (long) i);
+    record.put("ts", 1_577_934_245_000L + i);
+    record.put("ltz", 1_577_934_245_000L - i);
+  }
+
   private static void wideRecord(GenericRecord record, int i, Schema schema) {
     int eventType = i % 2 == 0 ? 0 : 2;
     record.put("event_type", eventType);
@@ -195,7 +261,11 @@ class NativeAvroDecodeSqlHarnessTest {
       throws Exception {
     // The same reader schema the planner derives (the row forced non-null → a record, not a top-level
     // union), so the produced datums decode identically on both paths.
-    Schema schema = AvroSchemaConverter.convertToSchema(rowType.copy(false));
+    produce(brokers, topic, AvroSchemaConverter.convertToSchema(rowType.copy(false)), filler);
+  }
+
+  private static void produce(String brokers, String topic, Schema schema, Filler filler)
+      throws Exception {
     GenericDatumWriter<GenericRecord> writer = new GenericDatumWriter<>(schema);
 
     Properties props = new Properties();
@@ -223,6 +293,11 @@ class NativeAvroDecodeSqlHarnessTest {
   }
 
   private static Supplier<TableEnvironment> environment(String brokers, String topic, String columns) {
+    return environment(brokers, topic, columns, "");
+  }
+
+  private static Supplier<TableEnvironment> environment(
+      String brokers, String topic, String columns, String extraOptions) {
     return () -> {
       StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
       env.setParallelism(1);
@@ -237,7 +312,9 @@ class NativeAvroDecodeSqlHarnessTest {
               + "', 'properties.group.id' = '"
               + topic
               + "', 'scan.startup.mode' = 'earliest-offset', 'scan.bounded.mode' = 'latest-offset', "
-              + "'format' = 'avro')");
+              + "'format' = 'avro'"
+              + extraOptions
+              + ")");
       return tEnv;
     };
   }
