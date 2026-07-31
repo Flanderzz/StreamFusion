@@ -8,7 +8,7 @@ const NO_STOPPING_OFFSET: i64 = i64::MIN;
 /// Whether this extension library was built with the native Fluss reader feature.
 #[cfg(feature = "fluss")]
 #[no_mangle]
-pub extern "system" fn Java_io_github_jordepic_streamfusion_fluss_NativeFluss_featureBuilt<'local>(
+pub extern "system" fn Java_io_github_jordepic_streamfusion_fluss_NativeFluss_isLoaded<'local>(
     env: JNIEnv<'local>,
     _class: JClass<'local>,
 ) -> jni::sys::jboolean {

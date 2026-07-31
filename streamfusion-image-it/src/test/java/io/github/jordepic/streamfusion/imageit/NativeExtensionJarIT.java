@@ -73,10 +73,7 @@ class NativeExtensionJarIT {
               new URL[] {core.toUri().toURL(), extensionJar.toUri().toURL()},
               ClassLoader.getPlatformClassLoader())) {
         Class<?> facade = Class.forName(facadeClass(extension), true, loader);
-        Object loaded =
-            facade
-                .getMethod(probeMethod(extension))
-                .invoke(null);
+        Object loaded = facade.getMethod("isLoaded").invoke(null);
         if (!Boolean.TRUE.equals(loaded)) {
           throw new IllegalStateException("Native " + extension + " extension did not report loaded");
         }
@@ -112,10 +109,6 @@ class NativeExtensionJarIT {
         case "parquet" -> "io.github.jordepic.streamfusion.parquet.NativeParquet";
         default -> throw new IllegalArgumentException("Unknown extension: " + extension);
       };
-    }
-
-    private static String probeMethod(String extension) {
-      return extension.equals("kafka") || extension.equals("fluss") ? "featureBuilt" : "isLoaded";
     }
 
     @SuppressWarnings({"rawtypes", "unchecked"})

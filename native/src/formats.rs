@@ -1,5 +1,21 @@
 use crate::*;
 
+// The MessageDecoder format-code protocol, mirroring FormatCodes.java. The codes are wire format
+// on the JNI boundary — never renumber them.
+pub(crate) const FORMAT_JSON: i32 = 0;
+pub(crate) const FORMAT_AVRO_CONFLUENT: i32 = 1;
+pub(crate) const FORMAT_CSV: i32 = 2;
+pub(crate) const FORMAT_RAW: i32 = 3;
+pub(crate) const FORMAT_AVRO: i32 = 4;
+// Protobuf decoders are built via `createProtobufDecoder`, never a `MessageDecoder::new` code,
+// but the constant completes the mirrored protocol.
+#[allow(dead_code)]
+pub(crate) const FORMAT_PROTOBUF: i32 = 5;
+pub(crate) const FORMAT_DEBEZIUM_JSON: i32 = 6;
+pub(crate) const FORMAT_OGG_JSON: i32 = 7;
+pub(crate) const FORMAT_MAXWELL_JSON: i32 = 8;
+pub(crate) const FORMAT_CANAL_JSON: i32 = 9;
+
 /// Decodes a binary "body" batch (one bare protobuf message per row) into typed Arrow, matching Flink's
 /// `protobuf` format: each message is the *whole* serialized protobuf (no Confluent framing), parsed
 /// against a descriptor the JVM serialized off the generated message class into a `FileDescriptorSet`.
@@ -269,6 +285,18 @@ pub(crate) struct CdcSpec {
 }
 
 impl CdcDialect {
+    /// The dialect a CDC format code selects — the only thing that differs between the CDC arms of
+    /// [`MessageDecoder::new`].
+    fn for_format(format: i32) -> CdcDialect {
+        match format {
+            FORMAT_DEBEZIUM_JSON => CdcDialect::Debezium,
+            FORMAT_OGG_JSON => CdcDialect::Ogg,
+            FORMAT_MAXWELL_JSON => CdcDialect::Maxwell,
+            FORMAT_CANAL_JSON => CdcDialect::Canal,
+            other => panic!("format code {other} is not a CDC format"),
+        }
+    }
+
     fn spec(self) -> CdcSpec {
         match self {
             CdcDialect::Debezium => CdcSpec {
@@ -824,11 +852,10 @@ pub(crate) fn silence_expected_decode_panics<R>(work: impl FnOnce() -> R) -> R {
 }
 
 impl MessageDecoder {
-    /// `format`: 0 = JSON, 2 = CSV, 3 = `raw`, 6 = debezium-json, 7 = ogg-json, 8 = maxwell-json,
-    /// 9 = canal-json — all decoded against `output_schema` (CDC treats it as the physical columns);
-    /// 1 = Confluent-Avro
-    /// (`avro_schema` registered at `schema_id`); 4 = bare Avro (`avro_schema` as the reader schema,
-    /// registered at synthetic id 0). (Protobuf is built via `createProtobufDecoder`, not here.)
+    /// `format` is a `FORMAT_*` code (mirroring `FormatCodes.java`). JSON, CSV, raw, and the CDC
+    /// envelopes decode against `output_schema` (CDC treats it as the physical columns);
+    /// Confluent-Avro registers `avro_schema` at `schema_id` and bare Avro registers it as the
+    /// reader schema at synthetic id 0. (Protobuf is built via `createProtobufDecoder`, not here.)
     /// `format_options` carries the table's decode-relevant format options (see
     /// [`parse_format_options`]).
     pub(crate) fn new(
@@ -853,12 +880,14 @@ impl MessageDecoder {
         // only serves a CDC batch whose ENVELOPE decode fails structurally.
         let cdc_env = crate::json::JsonEnv { mode: options.timestamp_mode, lenient: false };
         let decoder = match format {
-            1 => FormatDecoder::Avro(avro_store(avro_schema, schema_id as u32), reader),
-            4 => FormatDecoder::BareAvro(avro_store(avro_schema, 0), reader),
+            FORMAT_AVRO_CONFLUENT => {
+                FormatDecoder::Avro(avro_store(avro_schema, schema_id as u32), reader)
+            }
+            FORMAT_AVRO => FormatDecoder::BareAvro(avro_store(avro_schema, 0), reader),
             // CSV owns its skip mode: Flink's ignore-parse-errors granularity for CSV is per FIELD
             // (a bad value nulls the field, a short row pads, only a record-level failure drops the
             // row), which the generic per-message retry below cannot reproduce.
-            2 => {
+            FORMAT_CSV => {
                 return MessageDecoder {
                     decoder: FormatDecoder::Csv(crate::csv::CsvDecoder::new(
                         output_schema,
@@ -868,28 +897,10 @@ impl MessageDecoder {
                     skip_errors: false,
                 }
             }
-            3 => FormatDecoder::Raw(RawDecoder::new(output_schema)),
-            6 => FormatDecoder::Cdc(CdcJsonDecoder::new(
+            FORMAT_RAW => FormatDecoder::Raw(RawDecoder::new(output_schema)),
+            FORMAT_DEBEZIUM_JSON..=FORMAT_CANAL_JSON => FormatDecoder::Cdc(CdcJsonDecoder::new(
                 output_schema,
-                CdcDialect::Debezium,
-                cdc_env,
-                skip_errors,
-            )),
-            7 => FormatDecoder::Cdc(CdcJsonDecoder::new(
-                output_schema,
-                CdcDialect::Ogg,
-                cdc_env,
-                skip_errors,
-            )),
-            8 => FormatDecoder::Cdc(CdcJsonDecoder::new(
-                output_schema,
-                CdcDialect::Maxwell,
-                cdc_env,
-                skip_errors,
-            )),
-            9 => FormatDecoder::Cdc(CdcJsonDecoder::new(
-                output_schema,
-                CdcDialect::Canal,
+                CdcDialect::for_format(format),
                 cdc_env,
                 skip_errors,
             )),
@@ -991,9 +1002,9 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createDecoder
     format_options: JString<'local>,
 ) -> jlong {
     crate::bridge::jni_guard(env, move |env| {
-        // Avro (1, 4) derives its own schema from the writer schema, so those callers pass 0/0 for the
-        // schema C structs; JSON/CSV/raw (0, 2, 3) decode against the exported target schema.
-        let schema = if format == 1 || format == 4 {
+        // Avro derives its own schema from the writer schema, so those callers pass 0/0 for the
+        // schema C structs; JSON/CSV/raw decode against the exported target schema.
+        let schema = if format == FORMAT_AVRO_CONFLUENT || format == FORMAT_AVRO {
             Arc::new(Schema::empty())
         } else {
             import_record_batch(schema_array_address, schema_address).schema()
@@ -1302,7 +1313,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_format_csv_NativeCsv
     let empty_writer = env.new_string("").expect("empty writer schema");
     let empty_reader = env.new_string("").expect("empty reader schema");
     Java_io_github_jordepic_streamfusion_Native_createDecoder(
-        env, class, 2, schema_array_address, schema_address, empty_writer, empty_reader, 0,
+        env, class, FORMAT_CSV, schema_array_address, schema_address, empty_writer, empty_reader, 0,
         skip_parse_errors, format_options,
     )
 }
@@ -1316,8 +1327,8 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_format_raw_NativeRaw
     let empty_reader = env.new_string("").expect("empty reader schema");
     let empty_options = env.new_string("").expect("empty format options");
     Java_io_github_jordepic_streamfusion_Native_createDecoder(
-        env, class, 3, schema_array_address, schema_address, empty_writer, empty_reader, 0, 0,
-        empty_options,
+        env, class, FORMAT_RAW, schema_array_address, schema_address, empty_writer, empty_reader, 0,
+        0, empty_options,
     )
 }
 
@@ -1331,7 +1342,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_format_avro_NativeAv
     Java_io_github_jordepic_streamfusion_Native_createDecoder(
         env,
         class,
-        if confluent != 0 { 1 } else { 4 },
+        if confluent != 0 { FORMAT_AVRO_CONFLUENT } else { FORMAT_AVRO },
         0,
         0,
         writer_schema,

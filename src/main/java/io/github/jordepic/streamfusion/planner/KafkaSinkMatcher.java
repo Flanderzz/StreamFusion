@@ -75,8 +75,8 @@ final class KafkaSinkMatcher {
       return Planned.fallback("sink ability " + spec.getClass().getSimpleName());
     }
     KafkaSinkTranslator.Result translated = KafkaSinkTranslator.translate(options(sink));
-    if (!translated.isTranslated()) {
-      return Planned.fallback(translated.fallbackReason().orElseThrow());
+    if (translated.fallbackReason != null) {
+      return Planned.fallback(translated.fallbackReason);
     }
     ContextResolvedTable context = sink.contextResolvedTable();
     ResolvedCatalogTable table = (ResolvedCatalogTable) context.getResolvedTable();

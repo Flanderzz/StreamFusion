@@ -167,7 +167,7 @@ fn protobuf_decode_rejects_a_tombstone_like_flink() {
 #[test]
 fn csv_decode_emits_one_row_per_record() {
     let body = bodies(vec![Some(b"1,a,1.5"), Some(b"2,b,2.5")]);
-    let out = MessageDecoder::new(2, json_schema(), "", "", 0, false, "").decode(&body);
+    let out = MessageDecoder::new(FORMAT_CSV, json_schema(), "", "", 0, false, "").decode(&body);
     assert_eq!(out.num_rows(), 2);
     let id = out.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
     assert_eq!(id.values(), &[1, 2]);
@@ -183,7 +183,7 @@ fn raw_decode_passes_bytes_through() {
     let schema: SchemaRef =
         Arc::new(Schema::new(vec![Field::new("payload", DataType::Utf8, true)]));
     let body = bodies(vec![Some(b"hello"), Some(b"world")]);
-    let out = MessageDecoder::new(3, schema, "", "", 0, false, "").decode(&body);
+    let out = MessageDecoder::new(FORMAT_RAW, schema, "", "", 0, false, "").decode(&body);
     assert_eq!(out.num_rows(), 2);
     let col = out.column(0).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
     assert_eq!((col.value(0), col.value(1)), ("hello", "world"));
@@ -223,7 +223,7 @@ fn bare_avro_decode_emits_one_row_per_datum() {
     let m1 = datum(2, "b", 2.5);
     let body = bodies(vec![Some(m0.as_slice()), Some(m1.as_slice())]);
 
-    let out = MessageDecoder::new(4, Arc::new(Schema::empty()), reader_schema, "", 0, false, "").decode(&body);
+    let out = MessageDecoder::new(FORMAT_AVRO, Arc::new(Schema::empty()), reader_schema, "", 0, false, "").decode(&body);
 
     assert_eq!(out.num_rows(), 2);
     let id = out.column_by_name("id").unwrap().as_any().downcast_ref::<Int64Array>().unwrap();
@@ -325,7 +325,7 @@ fn confluent_avro_decodes_evolving_writer_schemas_against_reader() {
             "aliases":["org.apache.flink.avro.generated.record"],"fields":[
             {"name":"name","type":"string"},{"name":"id","type":"long"}]}"#;
 
-    let mut decoder = MessageDecoder::new(1, Arc::new(Schema::empty()), "", reader, 0, false, "");
+    let mut decoder = MessageDecoder::new(FORMAT_AVRO_CONFLUENT, Arc::new(Schema::empty()), "", reader, 0, false, "");
     decoder.register_writer_schema(7, writer_v1);
     decoder.register_writer_schema(9, writer_v2);
 
@@ -365,7 +365,7 @@ fn cdc_debezium_decode_emits_changelog() {
     let delete = br#"{"before":{"id":3,"name":"c","score":4.5},"after":null,"op":"d"}"#;
     let body = bodies(vec![Some(insert.as_slice()), Some(update), Some(delete)]);
 
-    let out = MessageDecoder::new(6, json_schema(), "", "", 0, false, "").decode(&body);
+    let out = MessageDecoder::new(FORMAT_DEBEZIUM_JSON, json_schema(), "", "", 0, false, "").decode(&body);
 
     // 1 (insert) + 2 (update) + 1 (delete) physical rows.
     assert_eq!(out.num_rows(), 4);
@@ -391,7 +391,7 @@ fn cdc_debezium_skips_tombstone() {
     let insert = br#"{"before":null,"after":{"id":1,"name":"a","score":1.5},"op":"r"}"#;
     let body = bodies(vec![None, Some(insert.as_slice())]);
 
-    let out = MessageDecoder::new(6, json_schema(), "", "", 0, false, "").decode(&body);
+    let out = MessageDecoder::new(FORMAT_DEBEZIUM_JSON, json_schema(), "", "", 0, false, "").decode(&body);
 
     assert_eq!(out.num_rows(), 1);
     let id = out.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
@@ -407,7 +407,7 @@ fn cdc_debezium_skips_tombstone() {
 #[should_panic(expected = "unknown CDC operation")]
 fn cdc_unknown_op_fails() {
     let unknown = br#"{"before":null,"after":{"id":9,"name":"z","score":9.5},"op":"x"}"#;
-    MessageDecoder::new(6, json_schema(), "", "", 0, false, "").decode(&bodies(vec![Some(unknown.as_slice())]));
+    MessageDecoder::new(FORMAT_DEBEZIUM_JSON, json_schema(), "", "", 0, false, "").decode(&bodies(vec![Some(unknown.as_slice())]));
 }
 
 // A null "before" on an update fails (Flink's REPLICA_IDENTITY error), not a silent drop.
@@ -415,7 +415,7 @@ fn cdc_unknown_op_fails() {
 #[should_panic(expected = "null \"before\"")]
 fn cdc_debezium_null_before_update_fails() {
     let update = br#"{"before":null,"after":{"id":2,"name":"b","score":2.5},"op":"u"}"#;
-    MessageDecoder::new(6, json_schema(), "", "", 0, false, "").decode(&bodies(vec![Some(update.as_slice())]));
+    MessageDecoder::new(FORMAT_DEBEZIUM_JSON, json_schema(), "", "", 0, false, "").decode(&bodies(vec![Some(update.as_slice())]));
 }
 
 // Skip mode (`ignore-parse-errors`): every per-message failure — malformed JSON, an unknown op, a
@@ -436,7 +436,7 @@ fn cdc_debezium_skip_mode_drops_undecodable_messages() {
         Some(delete),
     ]);
 
-    let out = MessageDecoder::new(6, json_schema(), "", "", 0, true, "").decode(&body);
+    let out = MessageDecoder::new(FORMAT_DEBEZIUM_JSON, json_schema(), "", "", 0, true, "").decode(&body);
 
     assert_eq!(out.num_rows(), 2);
     let id = out.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
@@ -456,7 +456,7 @@ fn json_skip_mode_drops_undecodable_messages() {
     let body =
         bodies(vec![Some(good.as_slice()), Some(malformed), Some(bad_type), Some(also_good)]);
 
-    let out = MessageDecoder::new(0, json_schema(), "", "", 0, true, "").decode(&body);
+    let out = MessageDecoder::new(FORMAT_JSON, json_schema(), "", "", 0, true, "").decode(&body);
 
     // Flink's JSON ignore-parse-errors granularity (parity-pinned): a structurally bad document
     // drops the whole message, but a bad VALUE nulls just that field and keeps the row.
@@ -475,7 +475,7 @@ fn json_skip_mode_clean_batch_decodes_in_full() {
     let b = br#"{"id":2,"name":"b","score":2.5}"#;
     let body = bodies(vec![Some(a.as_slice()), Some(b)]);
 
-    let out = MessageDecoder::new(0, json_schema(), "", "", 0, true, "").decode(&body);
+    let out = MessageDecoder::new(FORMAT_JSON, json_schema(), "", "", 0, true, "").decode(&body);
 
     assert_eq!(out.num_rows(), 2);
 }
@@ -490,7 +490,7 @@ fn cdc_ogg_dialect_uses_op_type() {
     let delete = br#"{"before":{"id":3,"name":"c","score":4.5},"after":null,"op_type":"D"}"#;
     let body = bodies(vec![Some(insert.as_slice()), Some(update), Some(delete)]);
 
-    let out = MessageDecoder::new(7, json_schema(), "", "", 0, false, "").decode(&body);
+    let out = MessageDecoder::new(FORMAT_OGG_JSON, json_schema(), "", "", 0, false, "").decode(&body);
 
     assert_eq!(out.num_rows(), 4); // insert + (update→2) + delete
     let id = out.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
@@ -510,7 +510,7 @@ fn cdc_maxwell_merges_partial_old_image() {
     let delete = br#"{"data":{"id":3,"name":"c","score":3.5},"type":"delete"}"#;
     let body = bodies(vec![Some(insert.as_slice()), Some(update), Some(delete)]);
 
-    let out = MessageDecoder::new(8, json_schema(), "", "", 0, false, "").decode(&body);
+    let out = MessageDecoder::new(FORMAT_MAXWELL_JSON, json_schema(), "", "", 0, false, "").decode(&body);
 
     assert_eq!(out.num_rows(), 4);
     let id = out.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
@@ -533,7 +533,7 @@ fn cdc_maxwell_keeps_explicit_null_in_old() {
         br#"{"data":{"id":1,"name":"was-null","score":1.5},"old":{"name":null},"type":"update"}"#;
     let body = bodies(vec![Some(update.as_slice())]);
 
-    let out = MessageDecoder::new(8, json_schema(), "", "", 0, false, "").decode(&body);
+    let out = MessageDecoder::new(FORMAT_MAXWELL_JSON, json_schema(), "", "", 0, false, "").decode(&body);
 
     assert_eq!(out.num_rows(), 2);
     let names = out.column(1).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
@@ -551,7 +551,7 @@ fn cdc_maxwell_keeps_explicit_null_in_old() {
 fn cdc_maxwell_update_without_old_fails() {
     let update = br#"{"data":{"id":1,"name":"x","score":1.5},"type":"update"}"#;
     let body = bodies(vec![Some(update.as_slice())]);
-    MessageDecoder::new(8, json_schema(), "", "", 0, false, "").decode(&body);
+    MessageDecoder::new(FORMAT_MAXWELL_JSON, json_schema(), "", "", 0, false, "").decode(&body);
 }
 
 #[test]
@@ -559,7 +559,7 @@ fn cdc_maxwell_update_without_old_fails() {
 fn cdc_canal_uneven_update_arrays_fail() {
     let update = br#"{"data":[{"id":1,"name":"x","score":1.5},{"id":2,"name":"y","score":2.5}],"old":[{"name":"w"}],"type":"UPDATE"}"#;
     let body = bodies(vec![Some(update.as_slice())]);
-    MessageDecoder::new(9, json_schema(), "", "", 0, false, "").decode(&body);
+    MessageDecoder::new(FORMAT_CANAL_JSON, json_schema(), "", "", 0, false, "").decode(&body);
 }
 
 // Canal's findValue presence scan covers the WHOLE `old` array: a key present in any element
@@ -570,7 +570,7 @@ fn cdc_canal_presence_is_per_message_across_elements() {
     let update = br#"{"data":[{"id":1,"name":"a2","score":1.5},{"id":2,"name":"b2","score":2.5}],"old":[{"name":"a"},{"id":2}],"type":"UPDATE"}"#;
     let body = bodies(vec![Some(update.as_slice())]);
 
-    let out = MessageDecoder::new(9, json_schema(), "", "", 0, false, "").decode(&body);
+    let out = MessageDecoder::new(FORMAT_CANAL_JSON, json_schema(), "", "", 0, false, "").decode(&body);
 
     assert_eq!(out.num_rows(), 4); // two elements, UB+UA each
     let id = out.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
@@ -599,7 +599,7 @@ fn cdc_canal_fans_out_arrays_and_merges_old() {
     let ddl = br#"{"data":null,"type":"CREATE"}"#;
     let body = bodies(vec![Some(insert.as_slice()), Some(update), Some(ddl)]);
 
-    let out = MessageDecoder::new(9, json_schema(), "", "", 0, false, "").decode(&body);
+    let out = MessageDecoder::new(FORMAT_CANAL_JSON, json_schema(), "", "", 0, false, "").decode(&body);
 
     // 2 inserts + (update → UB + UA); CREATE dropped.
     assert_eq!(out.num_rows(), 4);

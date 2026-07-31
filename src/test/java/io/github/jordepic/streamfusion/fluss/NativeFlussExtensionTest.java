@@ -12,7 +12,7 @@ class NativeFlussExtensionTest {
 
   static boolean nativeFlussFeatureBuilt() {
     try {
-      return NativeFluss.featureBuilt();
+      return NativeFluss.isLoaded();
     } catch (LinkageError ignored) {
       return false;
     }
@@ -20,6 +20,6 @@ class NativeFlussExtensionTest {
 
   @Test
   void loadsTheFlussJniFacadeFromTheDevelopmentLibrary() {
-    assertTrue(NativeFluss.featureBuilt());
+    assertTrue(NativeFluss.isLoaded());
   }
 }

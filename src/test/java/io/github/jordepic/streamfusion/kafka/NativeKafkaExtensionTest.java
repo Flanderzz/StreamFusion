@@ -10,6 +10,6 @@ class NativeKafkaExtensionTest {
 
   @Test
   void loadsTheKafkaJniFacadeFromTheDevelopmentLibrary() {
-    assertTrue(NativeKafka.featureBuilt());
+    assertTrue(NativeKafka.isLoaded());
   }
 }

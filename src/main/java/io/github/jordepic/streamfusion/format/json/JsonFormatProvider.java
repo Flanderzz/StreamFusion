@@ -1,5 +1,6 @@
 package io.github.jordepic.streamfusion.format.json;
 
+import io.github.jordepic.streamfusion.format.FormatCodes;
 import io.github.jordepic.streamfusion.format.NativeFormatContext;
 import io.github.jordepic.streamfusion.format.NativeFormatOptions;
 import io.github.jordepic.streamfusion.format.NativeFormatProvider;
@@ -32,7 +33,9 @@ public final class JsonFormatProvider implements NativeFormatProvider {
 
   @Override
   public NativeMessageDecoderFactory createDecoder(NativeFormatContext context) {
-    return () -> new JsonDecoder(0, context.ignoreParseErrors(), NativeFormatOptions.encode(context.options()));
+    return () ->
+        new JsonDecoder(
+            FormatCodes.JSON, context.ignoreParseErrors(), NativeFormatOptions.encode(context.options()));
   }
 
   /** A separate provider class shares this JAR for each Flink JSON CDC identifier. */
@@ -40,9 +43,9 @@ public final class JsonFormatProvider implements NativeFormatProvider {
     private final String identifier;
     private final int format;
 
-    public Cdc(String identifier, int format) {
+    public Cdc(String identifier) {
       this.identifier = identifier;
-      this.format = format;
+      this.format = FormatCodes.forIdentifier(identifier);
     }
 
     @Override

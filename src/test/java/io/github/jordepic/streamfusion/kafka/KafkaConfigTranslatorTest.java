@@ -23,14 +23,15 @@ class KafkaConfigTranslatorTest {
 
   private static Map<String, String> translated(Properties p) {
     KafkaConfigTranslator.Result r = KafkaConfigTranslator.translate(p);
-    assertTrue(r.isTranslated(), () -> "expected translation, got fallback: " + r.fallbackReason());
+    assertTrue(
+        r.fallbackReason == null, () -> "expected translation, got fallback: " + r.fallbackReason);
     return r.config();
   }
 
   private static String fallback(Properties p) {
     KafkaConfigTranslator.Result r = KafkaConfigTranslator.translate(p);
-    assertFalse(r.isTranslated(), "expected fallback, got translation");
-    return r.fallbackReason().orElseThrow();
+    assertTrue(r.fallbackReason != null, "expected fallback, got translation");
+    return r.fallbackReason;
   }
 
   @Test
@@ -220,9 +221,10 @@ class KafkaConfigTranslatorTest {
       java.util.Properties input = props("bootstrap.servers", "b:9092");
       input.setProperty(key, "__explicit__");
       KafkaConfigTranslator.Result result = KafkaConfigTranslator.translate(input);
-      assertFalse(
-          result.isTranslated(), () -> "new ConsumerConfig key needs classification: " + key);
-      assertTrue(result.fallbackReason().orElseThrow().contains(key));
+      assertTrue(
+          result.fallbackReason != null,
+          () -> "new ConsumerConfig key needs classification: " + key);
+      assertTrue(result.fallbackReason.contains(key));
     }
   }
 }

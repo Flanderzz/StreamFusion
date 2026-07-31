@@ -1,7 +1,6 @@
 package io.github.jordepic.streamfusion.kafka;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.Map;
@@ -100,24 +99,25 @@ class KafkaProducerConfigTranslatorTest {
       Properties input = props("bootstrap.servers", "b:9092");
       input.setProperty(key, "__explicit__");
       KafkaProducerConfigTranslator.Result result = KafkaProducerConfigTranslator.translate(input);
-      assertFalse(
-          result.isTranslated(), () -> "new ProducerConfig key needs classification: " + key);
-      assertTrue(result.fallbackReason().orElseThrow().contains(key));
+      assertTrue(
+          result.fallbackReason != null,
+          () -> "new ProducerConfig key needs classification: " + key);
+      assertTrue(result.fallbackReason.contains(key));
     }
   }
 
   private static KafkaProducerConfigTranslator.Result translated(Properties properties) {
     KafkaProducerConfigTranslator.Result result =
         KafkaProducerConfigTranslator.translate(properties);
-    assertTrue(result.isTranslated(), () -> result.fallbackReason().orElse("missing config"));
+    assertTrue(result.fallbackReason == null, () -> result.fallbackReason);
     return result;
   }
 
   private static void assertFallback(String key, String value) {
     KafkaProducerConfigTranslator.Result result =
         KafkaProducerConfigTranslator.translate(props("bootstrap.servers", "b:9092", key, value));
-    assertFalse(result.isTranslated(), () -> "expected fallback for " + key);
-    assertTrue(result.fallbackReason().orElseThrow().contains(key));
+    assertTrue(result.fallbackReason != null, () -> "expected fallback for " + key);
+    assertTrue(result.fallbackReason.contains(key));
   }
 
   private static Properties props(String... values) {

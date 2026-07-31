@@ -4,7 +4,6 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Properties;
 import java.util.Set;
 import java.util.regex.Matcher;
@@ -31,7 +30,8 @@ public final class KafkaConfigTranslator {
   /** Either a librdkafka config (translation succeeded) or a reason the source must fall back. */
   public static final class Result {
     private final Map<String, String> config;
-    private final String fallbackReason;
+    /** Why the native consumer can't be used for these settings; null when translated. */
+    public final String fallbackReason;
 
     private Result(Map<String, String> config, String fallbackReason) {
       this.config = config;
@@ -46,18 +46,9 @@ public final class KafkaConfigTranslator {
       return new Result(null, reason);
     }
 
-    public boolean isTranslated() {
-      return config != null;
-    }
-
-    /** The librdkafka config; present only when {@link #isTranslated()}. */
+    /** The librdkafka config; present only when {@link #fallbackReason} is null. */
     public Map<String, String> config() {
       return config;
-    }
-
-    /** Why the native consumer can't be used for these settings; present only on fallback. */
-    public Optional<String> fallbackReason() {
-      return Optional.ofNullable(fallbackReason);
     }
   }
 

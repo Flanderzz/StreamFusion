@@ -2,7 +2,6 @@ package io.github.jordepic.streamfusion.fluss;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
-import java.util.Optional;
 import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.util.TimeUtils;
 
@@ -22,7 +21,8 @@ public final class FlussConfigTranslator {
   public static final class Result {
     private final Map<String, String> config;
     private final Map<String, String> coordinationOptions;
-    private final String fallbackReason;
+    /** Why the native reader can't be used for these settings; null when translated. */
+    public final String fallbackReason;
 
     private Result(
         Map<String, String> config, Map<String, String> coordinationOptions, String fallbackReason) {
@@ -39,20 +39,12 @@ public final class FlussConfigTranslator {
       return new Result(null, Map.of(), reason);
     }
 
-    public boolean isTranslated() {
-      return config != null;
-    }
-
     public Map<String, String> config() {
       return config;
     }
 
     public Map<String, String> coordinationOptions() {
       return coordinationOptions;
-    }
-
-    public Optional<String> fallbackReason() {
-      return Optional.ofNullable(fallbackReason);
     }
   }
 

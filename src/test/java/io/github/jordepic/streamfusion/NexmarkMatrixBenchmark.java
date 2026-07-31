@@ -518,7 +518,7 @@ class NexmarkMatrixBenchmark {
     String formatsEnv = System.getenv("SF_LADDER_FORMATS");
     String[] formats =
         formatsEnv != null ? formatsEnv.split(",") : new String[] {"json", "avro", "protobuf"};
-    if (runFluss && !NativeFluss.featureBuilt()) {
+    if (runFluss && !NativeFluss.isLoaded()) {
       throw new IllegalArgumentException(
           "SF_MATRIX_FLUSS=true now reports native Fluss vs stock Flink-on-Fluss, so the native "
               + "library must be built with the fluss cargo feature.");

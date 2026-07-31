@@ -477,7 +477,7 @@ class NativeFlussSourceSqlHarnessTest {
 
   static boolean nativeFlussFeatureBuilt() {
     try {
-      return NativeFluss.featureBuilt();
+      return NativeFluss.isLoaded();
     } catch (LinkageError ignored) {
       return false;
     }

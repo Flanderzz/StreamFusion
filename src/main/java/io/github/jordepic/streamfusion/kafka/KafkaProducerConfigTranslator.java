@@ -4,7 +4,6 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Properties;
 import java.util.Set;
 import org.apache.kafka.clients.producer.ProducerConfig;
@@ -100,7 +99,8 @@ public final class KafkaProducerConfigTranslator {
     private final long maxBlockMs;
     private final int maxRequestSize;
     private final long bufferMemory;
-    private final String fallbackReason;
+    /** Why the native producer can't be used for these settings; null when translated. */
+    public final String fallbackReason;
 
     private Result(
         Properties javaProperties,
@@ -131,10 +131,6 @@ public final class KafkaProducerConfigTranslator {
       return new Result(null, null, 0, 0, 0, reason);
     }
 
-    public boolean isTranslated() {
-      return nativeConfig != null;
-    }
-
     public Properties javaProperties() {
       return javaProperties;
     }
@@ -153,10 +149,6 @@ public final class KafkaProducerConfigTranslator {
 
     public long bufferMemory() {
       return bufferMemory;
-    }
-
-    public Optional<String> fallbackReason() {
-      return Optional.ofNullable(fallbackReason);
     }
   }
 

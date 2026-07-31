@@ -90,8 +90,8 @@ final class ParquetSinkMatcher {
     List<String> partitionKeys = table.getPartitionKeys();
     ParquetSinkTranslator.Result translated =
         ParquetSinkTranslator.translate(options, rowType, partitionKeys);
-    if (!translated.isTranslated()) {
-      return Planned.fallback(translated.fallbackReason().orElseThrow());
+    if (translated.fallbackReason != null) {
+      return Planned.fallback(translated.fallbackReason);
     }
     return new Planned(
         options.get("path"),

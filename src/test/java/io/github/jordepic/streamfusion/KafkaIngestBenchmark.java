@@ -1,5 +1,6 @@
 package io.github.jordepic.streamfusion;
 
+import io.github.jordepic.streamfusion.format.FormatCodes;
 import io.github.jordepic.streamfusion.kafka.NativeKafka;
 import java.time.Duration;
 import java.util.List;
@@ -310,7 +311,8 @@ class KafkaIngestBenchmark {
               allocator,
               dictionaries,
               (arrayAddress, schemaAddress) ->
-                  Native.createDecoder(0, arrayAddress, schemaAddress, "", "", 0, false, ""));
+                  Native.createDecoder(
+                      FormatCodes.JSON, arrayAddress, schemaAddress, "", "", 0, false, ""));
       try {
         while (seen < MESSAGES) {
           ConsumerRecords<byte[], byte[]> records = consumer.poll(Duration.ofSeconds(5));
@@ -431,7 +433,9 @@ class KafkaIngestBenchmark {
         CDataDictionaryProvider dictionaries = new CDataDictionaryProvider();
         KafkaConsumer<byte[], byte[]> consumer = new KafkaConsumer<>(props)) {
       consumer.subscribe(List.of(AVRO_TOPIC));
-      long handle = Native.createDecoder(1, 0, 0, avroSchema, "", SCHEMA_ID, false, "");
+      long handle =
+          Native.createDecoder(
+              FormatCodes.AVRO_CONFLUENT, 0, 0, avroSchema, "", SCHEMA_ID, false, "");
       try {
         while (seen < MESSAGES) {
           ConsumerRecords<byte[], byte[]> records = consumer.poll(Duration.ofSeconds(5));

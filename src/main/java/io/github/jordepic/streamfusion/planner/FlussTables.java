@@ -29,7 +29,7 @@ final class FlussTables {
   /** Null when the native Fluss source can faithfully run this scan, else the fallback reason. */
   static String fallbackReason(StreamPhysicalTableSourceScan scan) {
     try {
-      if (!NativeFluss.featureBuilt()) {
+      if (!NativeFluss.isLoaded()) {
         return "the native Fluss extension is unavailable";
       }
     } catch (LinkageError ignored) {
@@ -148,9 +148,8 @@ final class FlussTables {
       }
 
       FlussConfigTranslator.Result translated = FlussConfigTranslator.translate(flussConfig.toMap());
-      if (!translated.isTranslated()) {
-        return Planned.fallback(
-            translated.fallbackReason().orElse("client config is not translatable to fluss-rs"));
+      if (translated.fallbackReason != null) {
+        return Planned.fallback(translated.fallbackReason);
       }
       String[] keys = translated.config().keySet().toArray(new String[0]);
       String[] values = new String[keys.length];

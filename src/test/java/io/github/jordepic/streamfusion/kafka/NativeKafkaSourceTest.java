@@ -497,7 +497,8 @@ class NativeKafkaSourceTest {
   private static long open(
       Properties props, String[] topics, long[] startOffsets, long[] stoppingOffsets) {
     KafkaConfigTranslator.Result config = KafkaConfigTranslator.translate(props);
-    assertTrue(config.isTranslated(), () -> "config should translate: " + config.fallbackReason());
+    assertTrue(
+        config.fallbackReason == null, () -> "config should translate: " + config.fallbackReason);
     String[] keys = config.config().keySet().toArray(new String[0]);
     String[] values = new String[keys.length];
     for (int i = 0; i < keys.length; i++) {

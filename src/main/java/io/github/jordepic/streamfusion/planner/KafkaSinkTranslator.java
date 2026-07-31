@@ -4,7 +4,6 @@ import io.github.jordepic.streamfusion.kafka.KafkaProducerConfigTranslator;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Properties;
 import org.apache.flink.connector.base.DeliveryGuarantee;
 import org.apache.flink.connector.kafka.sink.TransactionNamingStrategy;
@@ -16,7 +15,7 @@ final class KafkaSinkTranslator {
 
   static final class Result {
     private final Planned planned;
-    private final String fallbackReason;
+    final String fallbackReason;
 
     private Result(Planned planned, String fallbackReason) {
       this.planned = planned;
@@ -31,16 +30,8 @@ final class KafkaSinkTranslator {
       return new Result(null, reason);
     }
 
-    boolean isTranslated() {
-      return planned != null;
-    }
-
     Planned planned() {
       return planned;
-    }
-
-    Optional<String> fallbackReason() {
-      return Optional.ofNullable(fallbackReason);
     }
   }
 
@@ -147,8 +138,8 @@ final class KafkaSinkTranslator {
             "native exactly-once producer currently requires incremental transaction naming");
       }
       nativeProducerConfig = KafkaProducerConfigTranslator.translate(producer);
-      if (!nativeProducerConfig.isTranslated()) {
-        return Result.fallback(nativeProducerConfig.fallbackReason().orElseThrow());
+      if (nativeProducerConfig.fallbackReason != null) {
+        return Result.fallback(nativeProducerConfig.fallbackReason);
       }
     }
 

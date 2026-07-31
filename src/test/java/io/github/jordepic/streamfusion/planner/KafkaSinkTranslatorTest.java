@@ -1,7 +1,6 @@
 package io.github.jordepic.streamfusion.planner;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.Map;
@@ -24,7 +23,7 @@ class KafkaSinkTranslatorTest {
                 "sink.transactional-id-prefix", "orders",
                 "sink.parallelism", "3"));
 
-    assertTrue(result.isTranslated(), () -> result.fallbackReason().orElse("unknown fallback"));
+    assertTrue(result.fallbackReason == null, () -> result.fallbackReason);
     assertEquals(DeliveryGuarantee.EXACTLY_ONCE, result.planned().deliveryGuarantee);
     assertEquals("orders", result.planned().transactionalIdPrefix);
     assertEquals("lz4", result.planned().producerProperties.getProperty("compression.type"));
@@ -56,8 +55,8 @@ class KafkaSinkTranslatorTest {
                 "properties.bootstrap.servers", "broker:9092",
                 "format", "json",
                 "sink.delivery-guarantee", "exactly-once"));
-    assertFalse(result.isTranslated());
-    assertTrue(result.fallbackReason().orElseThrow().contains("transactional-id-prefix"));
+    assertTrue(result.fallbackReason != null);
+    assertTrue(result.fallbackReason.contains("transactional-id-prefix"));
   }
 
   @Test
@@ -71,14 +70,14 @@ class KafkaSinkTranslatorTest {
                 "format", "json",
                 "sink.delivery-guarantee", "exactly-once",
                 "sink.transactional-id-prefix", "orders"));
-    assertFalse(result.isTranslated());
-    assertTrue(result.fallbackReason().orElseThrow().contains("interceptor.classes"));
+    assertTrue(result.fallbackReason != null);
+    assertTrue(result.fallbackReason.contains("interceptor.classes"));
   }
 
   private static void assertFallback(Map<String, String> options, String expected) {
     KafkaSinkTranslator.Result result = KafkaSinkTranslator.translate(options);
-    assertFalse(result.isTranslated());
-    assertTrue(result.fallbackReason().orElseThrow().contains(expected));
+    assertTrue(result.fallbackReason != null);
+    assertTrue(result.fallbackReason.contains(expected));
   }
 
   private static Map<String, String> with(Map<String, String> base, String key, String value) {

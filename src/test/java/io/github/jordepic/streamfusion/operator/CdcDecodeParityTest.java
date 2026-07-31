@@ -1,5 +1,6 @@
 package io.github.jordepic.streamfusion.operator;
 
+import io.github.jordepic.streamfusion.format.FormatCodes;
 import io.github.jordepic.streamfusion.format.NativeFormatProvider;
 import io.github.jordepic.streamfusion.format.json.CanalJsonFormatProvider;
 import io.github.jordepic.streamfusion.format.json.DebeziumJsonFormatProvider;
@@ -47,9 +48,9 @@ class CdcDecodeParityTest {
 
   private static final DecodeParityHarness HARNESS = new DecodeParityHarness(ROW_TYPE, true);
 
-  private static final int MAXWELL = 8;
-  private static final int CANAL = 9;
-  private static final int DEBEZIUM = 6;
+  private static final int MAXWELL = FormatCodes.MAXWELL_JSON;
+  private static final int CANAL = FormatCodes.CANAL_JSON;
+  private static final int DEBEZIUM = FormatCodes.DEBEZIUM_JSON;
 
   @Test
   void maxwellMatchesFlinkPerMessage() throws Exception {

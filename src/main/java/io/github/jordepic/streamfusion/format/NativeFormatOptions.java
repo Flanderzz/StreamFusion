@@ -30,11 +30,7 @@ public final class NativeFormatOptions {
   public static String encode(Map<String, String> options) {
     String format = NativeFormatProviders.formatIdentifier(options);
     StringBuilder encoded = new StringBuilder();
-    if ("json".equals(format)
-        || "debezium-json".equals(format)
-        || "ogg-json".equals(format)
-        || "maxwell-json".equals(format)
-        || "canal-json".equals(format)) {
+    if (FormatCodes.isJsonFamily(format)) {
       // A missing field is null natively (Flink's default); the fail mode isn't modeled.
       if ("true".equalsIgnoreCase(option(options, "fail-on-missing-field"))) {
         return null;

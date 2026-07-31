@@ -3,6 +3,7 @@ package io.github.jordepic.streamfusion.planner;
 import io.github.jordepic.streamfusion.kafka.KafkaConfigTranslator;
 import io.github.jordepic.streamfusion.kafka.NativeKafka;
 import io.github.jordepic.streamfusion.kafka.NativeKafkaSource;
+import io.github.jordepic.streamfusion.format.FormatCodes;
 import io.github.jordepic.streamfusion.format.NativeFormatContext;
 import io.github.jordepic.streamfusion.format.NativeFormatOptions;
 import io.github.jordepic.streamfusion.format.NativeFormatProvider;
@@ -74,12 +75,12 @@ final class KafkaTables {
     if (!decodeCommon(options)) {
       return false;
     }
-    return KafkaConfigTranslator.translate(consumerProperties(options)).isTranslated();
+    return KafkaConfigTranslator.translate(consumerProperties(options)).fallbackReason == null;
   }
 
   private static boolean nativeKafkaAvailable() {
     try {
-      return NativeKafka.featureBuilt();
+      return NativeKafka.isLoaded();
     } catch (LinkageError ignored) {
       return false;
     }
@@ -191,36 +192,10 @@ final class KafkaTables {
     return formatProvider(options, null).map(NativeFormatProvider::honorsProjection).orElse(false);
   }
 
-  /** The {@code MessageDecoder} format code for this table's value format, or -1 if not decodable here. */
+  /** The {@code MessageDecoder} format code for this table's value format, or
+   * {@link FormatCodes#UNSUPPORTED} if not decodable here. */
   static int decodeFormatCode(Map<String, String> options) {
-    String format = NativeFormatProviders.formatIdentifier(options);
-    if (format == null) {
-      return -1;
-    }
-    switch (format) {
-      case "json":
-        return 0;
-      case "avro-confluent":
-        return 1; // writer schemas fetched from the registry by frame id; reader from the RowType
-      case "csv":
-        return 2;
-      case "raw":
-        return 3;
-      case "avro":
-        return 4; // bare Avro; the reader schema is derived from the table's RowType
-      case "protobuf":
-        return 5; // descriptor derived from the message-class-name's generated class
-      case "debezium-json":
-        return 6;
-      case "ogg-json":
-        return 7;
-      case "maxwell-json":
-        return 8;
-      case "canal-json":
-        return 9;
-      default:
-        return -1;
-    }
+    return FormatCodes.forIdentifier(NativeFormatProviders.formatIdentifier(options));
   }
 
   /** The Kafka consume/topic/offset prerequisites the decode path needs, independent of value format. */
@@ -278,15 +253,15 @@ final class KafkaTables {
     if (ignoreParseErrors(options) && !provider.supportsIgnoreParseErrors()) {
       return false;
     }
-    if (code == 2) {
+    if (code == FormatCodes.CSV) {
       // CSV routes only when every column is in the natively-converted scalar family and every
       // Jackson option the table sets is reproduced exactly (see NativeFormatOptions.encode).
       return csvColumnsSupported(scan) && NativeFormatOptions.encode(options) != null;
     }
-    if (code == 0 && NativeFormatOptions.encode(options) == null) {
+    if (code == FormatCodes.JSON && NativeFormatOptions.encode(options) == null) {
       return false; // an unreproducible JSON option (e.g. fail-on-missing-field)
     }
-    return code == 0 || code == 1 || code == 2 || code == 3 || code == 4 || code == 5;
+    return FormatCodes.isInsertOnly(code);
   }
 
   /** Whether this scan is a CDC changelog format the native decode reproduces <em>identically</em> to
@@ -317,10 +292,10 @@ final class KafkaTables {
       return false;
     }
     int code = decodeFormatCode(options);
-    if (code < 6 || code > 9) {
+    if (!FormatCodes.isCdc(code)) {
       return false;
     }
-    if (code == 8 || code == 9) {
+    if (code == FormatCodes.MAXWELL_JSON || code == FormatCodes.CANAL_JSON) {
       // Maxwell/Canal: the partial-`old` pre-image follows Flink's findValue KEY-presence rule,
       // reproduced natively by a per-message key scan — but findValue searches the `old` subtree
       // recursively, so a nested column's name could false-match inside another field's object.
@@ -329,7 +304,7 @@ final class KafkaTables {
       if (!flatScalarColumns(scan)) {
         return false;
       }
-      if (code == 9
+      if (code == FormatCodes.CANAL_JSON
           && (NativeFormatOptions.option(options, "database.include") != null
               || NativeFormatOptions.option(options, "table.include") != null)) {
         return false;
@@ -403,7 +378,7 @@ final class KafkaTables {
       return null;
     }
     int code = decodeFormatCode(options);
-    if (cdc ? code < 6 || code > 9 : code < 0 || code > 5) {
+    if (cdc ? !FormatCodes.isCdc(code) : !FormatCodes.isInsertOnly(code)) {
       return null;
     }
     if (cdc) {

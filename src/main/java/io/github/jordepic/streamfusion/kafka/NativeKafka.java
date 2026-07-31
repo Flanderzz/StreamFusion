@@ -12,7 +12,7 @@ public final class NativeKafka {
 
   private NativeKafka() {}
 
-  public static native boolean featureBuilt();
+  public static native boolean isLoaded();
 
   public static native long openKafkaConsumer(String[] configKeys, String[] configValues);
 

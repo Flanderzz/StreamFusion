@@ -4,7 +4,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Set;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.RowType;
@@ -34,7 +33,7 @@ final class ParquetSinkTranslator {
 
   static final class Result {
     private final Map<String, String> encoderConfig;
-    private final String fallbackReason;
+    final String fallbackReason;
 
     private Result(Map<String, String> encoderConfig, String fallbackReason) {
       this.encoderConfig = encoderConfig;
@@ -47,14 +46,6 @@ final class ParquetSinkTranslator {
 
     static Result fallback(String reason) {
       return new Result(null, reason);
-    }
-
-    boolean isTranslated() {
-      return encoderConfig != null;
-    }
-
-    Optional<String> fallbackReason() {
-      return Optional.ofNullable(fallbackReason);
     }
 
     String[] encoderKeys() {

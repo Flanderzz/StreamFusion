@@ -1251,7 +1251,7 @@ where
 /// Whether this extension library carries the native Kafka source.
 #[cfg(feature = "kafka")]
 #[no_mangle]
-pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_featureBuilt<'local>(
+pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_isLoaded<'local>(
     env: JNIEnv<'local>,
     _class: JClass<'local>,
 ) -> jni::sys::jboolean {

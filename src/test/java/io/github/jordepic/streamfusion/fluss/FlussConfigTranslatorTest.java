@@ -14,14 +14,15 @@ class FlussConfigTranslatorTest {
   private static Map<String, String> translated(Map<String, String> options) {
     FlussConfigTranslator.Result result = FlussConfigTranslator.translate(options);
     assertTrue(
-        result.isTranslated(), () -> "expected translation, got " + result.fallbackReason());
+        result.fallbackReason == null,
+        () -> "expected translation, got " + result.fallbackReason);
     return result.config();
   }
 
   private static String fallback(Map<String, String> options) {
     FlussConfigTranslator.Result result = FlussConfigTranslator.translate(options);
-    assertFalse(result.isTranslated(), "expected fallback, got translation");
-    return result.fallbackReason().orElseThrow();
+    assertTrue(result.fallbackReason != null, "expected fallback, got translation");
+    return result.fallbackReason;
   }
 
   @Test
@@ -72,7 +73,9 @@ class FlussConfigTranslatorTest {
                 "client.lookup.max-batch-size", "256",
                 "client.lookup.batch-timeout", "50 ms"));
 
-    assertTrue(result.isTranslated(), () -> "expected translation, got " + result.fallbackReason());
+    assertTrue(
+        result.fallbackReason == null,
+        () -> "expected translation, got " + result.fallbackReason);
     assertEquals(Map.of("bootstrap_servers", "localhost:9123"), result.config());
   }
 
@@ -97,7 +100,7 @@ class FlussConfigTranslatorTest {
                 "scan.startup.mode", "earliest",
                 "scan.partition.discovery.interval", "1 min"));
 
-    assertTrue(result.isTranslated());
+    assertTrue(result.fallbackReason == null);
     assertFalse(result.config().containsKey("scan.startup.mode"));
     assertFalse(result.config().containsKey("scan.partition.discovery.interval"));
     assertEquals("earliest", result.coordinationOptions().get("scan.startup.mode"));

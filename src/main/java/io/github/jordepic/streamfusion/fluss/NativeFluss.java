@@ -11,7 +11,7 @@ public final class NativeFluss {
 
   private NativeFluss() {}
 
-  public static native boolean featureBuilt();
+  public static native boolean isLoaded();
 
   public static native long openFlussReader(
       String[] configKeys,

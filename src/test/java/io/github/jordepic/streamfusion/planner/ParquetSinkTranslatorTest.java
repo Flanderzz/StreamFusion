@@ -1,7 +1,6 @@
 package io.github.jordepic.streamfusion.planner;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.HashMap;
@@ -40,7 +39,8 @@ class ParquetSinkTranslatorTest {
     ParquetSinkTranslator.Result result =
         ParquetSinkTranslator.translate(options, rowType, partitionKeys);
     assertTrue(
-        result.isTranslated(), () -> "expected translation, got " + result.fallbackReason());
+        result.fallbackReason == null,
+        () -> "expected translation, got " + result.fallbackReason);
     Map<String, String> config = new HashMap<>();
     String[] keys = result.encoderKeys();
     String[] values = result.encoderValues();
@@ -54,8 +54,8 @@ class ParquetSinkTranslatorTest {
       Map<String, String> options, RowType rowType, List<String> partitionKeys) {
     ParquetSinkTranslator.Result result =
         ParquetSinkTranslator.translate(options, rowType, partitionKeys);
-    assertFalse(result.isTranslated(), "expected fallback, got translation");
-    return result.fallbackReason().orElseThrow();
+    assertTrue(result.fallbackReason != null, "expected fallback, got translation");
+    return result.fallbackReason;
   }
 
   @Test
@@ -117,7 +117,7 @@ class ParquetSinkTranslatorTest {
     options.put("sink.parallelism", "4");
     options.put("partition.default-name", "__NULL__");
     assertTrue(
-        ParquetSinkTranslator.translate(options, SIMPLE, List.of("dt")).isTranslated());
+        ParquetSinkTranslator.translate(options, SIMPLE, List.of("dt")).fallbackReason == null);
   }
 
   @Test
@@ -162,7 +162,7 @@ class ParquetSinkTranslatorTest {
             new LogicalType[] {new IntType(), new TimestampType(3)},
             new String[] {"id", "ts"});
     assertTrue(
-        ParquetSinkTranslator.translate(baseOptions(), rowType, List.of("ts")).isTranslated());
+        ParquetSinkTranslator.translate(baseOptions(), rowType, List.of("ts")).fallbackReason == null);
   }
 
   @Test
@@ -181,7 +181,7 @@ class ParquetSinkTranslatorTest {
             new LogicalType[] {new DecimalType(38, 10), new BigIntType()},
             new String[] {"d", "v"});
     assertTrue(
-        ParquetSinkTranslator.translate(baseOptions(), rowType, List.of()).isTranslated());
+        ParquetSinkTranslator.translate(baseOptions(), rowType, List.of()).fallbackReason == null);
   }
 
   @Test
@@ -197,7 +197,7 @@ class ParquetSinkTranslatorTest {
     options.put("auto-compaction", "false");
     options.put("compaction.file-size", "128MB");
     options.put("sink.shuffle-by-partition.enable", "true");
-    assertTrue(ParquetSinkTranslator.translate(options, SIMPLE, List.of()).isTranslated());
+    assertTrue(ParquetSinkTranslator.translate(options, SIMPLE, List.of()).fallbackReason == null);
   }
 
   @Test

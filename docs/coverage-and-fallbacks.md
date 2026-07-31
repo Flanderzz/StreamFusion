@@ -633,7 +633,7 @@ shapes persist their per-key deadlines in a dedicated state table).
   scan behind a two-level gate: the `flussSource` operator switch
   (`-Dstreamfusion.operator.flussSource.enabled`, default on) **and** the `streamfusion-fluss` JAR
   with a native library for the deployment platform. The planner probes
-  `NativeFluss.featureBuilt` and records `the native Fluss extension is unavailable` when it cannot
+  `NativeFluss.isLoaded` and records `the native Fluss extension is unavailable` when it cannot
   load that extension. Coordination stays on the JVM by design — split assignment, startup-offset
   resolution, partition discovery/acknowledgement, snapshot leases, and checkpointing run in the
   Flink-side enumerator, so `scan.startup.mode`/`scan.startup.timestamp`,
