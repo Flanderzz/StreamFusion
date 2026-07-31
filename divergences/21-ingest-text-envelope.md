@@ -32,8 +32,10 @@ against Flink's own deserializers (`CsvDecodeParityTest` / `JsonDecodeParityTest
 needed: Flink's format classes are on the test classpath and referee every scenario). Those tests
 are how the non-obvious behaviors were settled: Java's `appendFraction(…, 0, 9, true)` accepts a
 bare trailing decimal point in a timestamp, `java.sql.Date.valueOf` leniently normalizes a day past
-the month's end (`2020-02-31` → `2020-03-02`), and JSON's skip mode keeps a row whose field failed
-— all reproduced.
+the month's end (`2020-02-31` → `2020-03-02`), java.time's SMART resolver reads hour 24 as
+midnight (rolling a timestamp to the next day, leaving a bare TIME at 00:00), TIME silently
+discards a parsed fraction (`toSecondOfDay() * 1000`), and JSON's skip mode keeps a row whose
+field failed — all reproduced.
 
 ## Deliberate residual divergences
 
@@ -69,6 +71,19 @@ value — a job that runs on both engines produces identical results.
   schema without a DECIMAL) has Flink's exact per-field granularity. On a decimal-bearing
   **Maxwell/Canal** table the same all-or-nothing behavior can trip the `old`-presence alignment
   check under skip mode — a loud failure where Flink skips, never a silent divergence.
+- **TIME/VARBINARY leaves on a decimal-bearing JSON schema ride arrow-json as coerced text**, and
+  the coercion erases the token's type: a number or boolean token under such a column converts
+  from its rendered literal, so a base64-shaped literal (`42`, `true`) decodes into a VARBINARY
+  where Flink's `getBinaryValue` fails the job — accept-where-Flink-rejects, decimal-path only
+  (the simd path sees the token type and fails like Flink). Likewise, the quote-consuming base64
+  shapes (below) null the field on this path instead of dropping the message — the columns are
+  already built when the text converts.
+- **Jackson's quote-consuming base64 shapes drop the whole message under `ignore-parse-errors`.**
+  A base64 group cut after one character or after a single `=` makes Jackson's streaming decoder
+  read — and consume — the string's closing quote before throwing; the corrupted parser then
+  fails outside Flink's per-field catch and the deserializer's message-level catch swallows the
+  document. Parity-pinned and reproduced on the simd path by a pre-scan (lenient, BINARY-bearing
+  schemas only) that drops such a message before anything is appended.
 
 ## Options gated to fallback (not divergences — the query runs on Flink)
 

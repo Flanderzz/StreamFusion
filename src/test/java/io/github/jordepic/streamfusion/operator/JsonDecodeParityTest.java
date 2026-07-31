@@ -16,7 +16,9 @@ import org.apache.flink.table.types.logical.DoubleType;
 import org.apache.flink.table.types.logical.IntType;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.RowType;
+import org.apache.flink.table.types.logical.TimeType;
 import org.apache.flink.table.types.logical.TimestampType;
+import org.apache.flink.table.types.logical.VarBinaryType;
 import org.apache.flink.table.types.logical.VarCharType;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
@@ -54,6 +56,16 @@ class JsonDecodeParityTest {
       RowType.of(
           new LogicalType[] {new DecimalType(5, 2), new DecimalType(38, 18), new BigIntType()},
           new String[] {"dec", "wide", "l"});
+
+  private static final RowType TIME_BINARY_TYPE =
+      RowType.of(
+          new LogicalType[] {new TimeType(0), new TimeType(3), new TimeType(9), new VarBinaryType(4)},
+          new String[] {"t0", "t3", "t9", "b"});
+
+  private static final RowType DECIMAL_TIME_BINARY_TYPE =
+      RowType.of(
+          new LogicalType[] {new DecimalType(5, 2), new TimeType(3), new VarBinaryType(8)},
+          new String[] {"dec", "t", "b"});
 
   private static final String TS = "\"ts\": \"2020-01-02 03:04:05.678\"";
 
@@ -96,6 +108,9 @@ class JsonDecodeParityTest {
     "{\"ts\": \"2020-01-02T03:04:05\"}",
     "{\"ts\": \"2020-01-02 03:04\"}",
     "{\"ts\": \"2020-01-02 03:04:05+05:00\"}",
+    // SMART hour-24 resolves to midnight of the same parsed date.
+    "{\"ts\": \"2020-01-02 24:00:00\"}",
+    "{\"ts\": \"2020-01-02 24:00:00.5\"}",
     "{\"ts\": 123456789}",
     // Malformed document.
     "{\"i\": }",
@@ -106,6 +121,80 @@ class JsonDecodeParityTest {
     for (String scenario : SQL_MODE_SCENARIOS) {
       assertParity(SCALAR_TYPE, scenario, TimestampFormat.SQL, "", false);
       assertParity(SCALAR_TYPE, scenario, TimestampFormat.SQL, "", true);
+    }
+  }
+
+  @Test
+  void timeAndVarbinaryMatchFlinkPerMessage() throws Exception {
+    String[] scenarios = {
+      // TIME parses SQL_TIME_FORMAT then Flink stores toSecondOfDay() * 1000 — sub-second digits
+      // are silently discarded whatever the declared precision (t0/t3/t9 must all agree on that).
+      "{\"t0\": \"12:34:56\", \"t3\": \"12:34:56\", \"t9\": \"12:34:56\"}",
+      "{\"t0\": \"12:34:56.789\", \"t3\": \"12:34:56.789\", \"t9\": \"12:34:56.123456789\"}",
+      "{\"t3\": \"00:00:00.\"}",
+      "{\"t3\": \"23:59:59.9999999999\"}", // ten fraction digits: too many
+      "{\"t3\": \"12:34\"}", // seconds are required (unlike ISO_LOCAL_TIME)
+      // SMART resolution: hour 24 is midnight (0) when everything else is zero, an error otherwise.
+      "{\"t3\": \"24:00:00\"}",
+      "{\"t3\": \"24:00:00.000\"}",
+      "{\"t3\": \"24:00:01\"}",
+      "{\"t3\": \"24:00:00.5\"}",
+      "{\"t3\": \"25:00:00\"}",
+      "{\"t3\": \"12:34:60\"}",
+      "{\"t3\": \"12:34:56Z\"}",
+      "{\"t3\": \" 12:34:56\"}", // TIME does not trim
+      "{\"t3\": 123456}",
+      "{\"t3\": true}",
+      // VARBINARY is Jackson's base64 read; the declared length (4) is NOT enforced.
+      "{\"b\": \"AQID\"}",
+      "{\"b\": \"AQ==\"}",
+      "{\"b\": \"AQI=\"}",
+      "{\"b\": \"AQIDBAUGBwg=\"}", // 9 bytes through VARBINARY(4)
+      "{\"b\": \"\"}",
+      "{\"b\": \" AQID AQ== \"}", // whitespace between four-char groups is skipped
+      "{\"b\": \"AQ ID\"}", // ...but inside a group it is an error
+      "{\"b\": \"AQ\"}", // missing padding: a clean per-field error (Jackson rewinds the quote)
+      "{\"b\": \"AQI\"}",
+      "{\"b\": \"QQ=Q\"}",
+      // The quote-consuming shapes (a 1-char group, a group cut after one '='): Jackson eats the
+      // string's closing quote before throwing, so under ignore-parse-errors Flink drops the
+      // WHOLE message — reproduced natively by the pre-scan, siblings notwithstanding.
+      "{\"b\": \"AQ=\"}",
+      "{\"b\": \"A\"}",
+      "{\"b\": \"AQ=\", \"t0\": \"01:02:03\"}",
+      "{\"t0\": \"01:02:03\", \"b\": \"AQ=\"}",
+      "{\"b\": \"####\"}",
+      "{\"b\": \"AQ-_\"}", // url-safe alphabet is not the MIME alphabet
+      "{\"b\": 42}",
+      "{\"b\": true}",
+      "{\"t0\": null, \"b\": null}",
+      "{}",
+    };
+    for (String scenario : scenarios) {
+      assertParity(TIME_BINARY_TYPE, scenario, TimestampFormat.SQL, "", false);
+      assertParity(TIME_BINARY_TYPE, scenario, TimestampFormat.SQL, "", true);
+    }
+  }
+
+  @Test
+  void timeAndVarbinaryRideTheDecimalPathExactly() throws Exception {
+    // A DECIMAL-bearing schema decodes via arrow-json (raw number literals); TIME and VARBINARY
+    // leaves there convert as text through the same Flink-exact parsers as the simd path. A number
+    // or boolean token under those columns is excluded: arrow-json's text coercion erases the
+    // token type, so the native decode accepts base64-shaped literals where Flink fails the job —
+    // the accept-where-Flink-rejects residual documented in divergences/21.
+    String[] scenarios = {
+      "{\"dec\": 1.235, \"t\": \"12:34:56.789\", \"b\": \"AQID\"}",
+      "{\"dec\": 12345.6, \"t\": \"07:08:09\", \"b\": \"AQIDBAUGBwg=\"}",
+      "{\"t\": \"12:34\"}",
+      "{\"t\": \"12:34:56Z\"}",
+      "{\"b\": \"AQ\"}",
+      "{\"b\": \"####\"}",
+      "{\"dec\": null, \"t\": null, \"b\": null}",
+    };
+    for (String scenario : scenarios) {
+      assertParity(DECIMAL_TIME_BINARY_TYPE, scenario, TimestampFormat.SQL, "", false);
+      assertParity(DECIMAL_TIME_BINARY_TYPE, scenario, TimestampFormat.SQL, "", true);
     }
   }
 

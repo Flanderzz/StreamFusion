@@ -153,6 +153,16 @@ pub(crate) fn parse_flink_timestamp(s: &str, mode: TimestampMode) -> Option<i64>
     days.checked_mul(86_400_000_000_000)?.checked_add(nanos_of_day)
 }
 
+/// A TIME column string per Flink's `SQL_TIME_FORMAT` (`HH:mm:ss[.f{0,9}]` — seconds required,
+/// no zone), as the **whole seconds** of the day: Flink's converter does
+/// `localTime.toSecondOfDay() * 1000`, silently discarding any parsed fraction regardless of the
+/// column's declared precision, so the produced value never carries sub-second digits (the
+/// fraction still has to *parse* — 1–9 digits after the point).
+pub(crate) fn parse_sql_time_second_of_day(s: &str) -> Option<i64> {
+    // SMART hour-24 is a whole day; with no date to roll into, LocalTime is midnight.
+    parse_flink_time(s, false).map(|nanos| (nanos / 1_000_000_000) % 86_400)
+}
+
 /// `HH:mm[:ss][.f{1,9}]` — seconds optional only for ISO-8601 (`ISO_LOCAL_TIME`), fraction only
 /// after seconds.
 fn parse_flink_time(s: &str, seconds_optional: bool) -> Option<i64> {
@@ -167,7 +177,7 @@ fn parse_flink_time(s: &str, seconds_optional: bool) -> Option<i64> {
         return None;
     }
     let minute = two(3)?;
-    if hour > 23 || minute > 59 {
+    if hour > 24 || minute > 59 {
         return None;
     }
     let (second, rest) = if b.len() == 5 {
@@ -196,7 +206,81 @@ fn parse_flink_time(s: &str, seconds_optional: bool) -> Option<i64> {
             digits.parse::<i64>().ok()? * 10i64.pow(9 - digits.len() as u32)
         }
     };
+    if hour == 24 && (minute != 0 || second != 0 || nanos != 0) {
+        // java.time's SMART resolver (the formatters' default) accepts hour 24 only at exactly
+        // zero minutes/seconds/fraction — resolved as a full day, which the callers fold per
+        // Flink's queries: a timestamp rolls to the next day's midnight, a bare TIME's LocalTime
+        // query sees 00:00 (the excess day is never applied without a date).
+        return None;
+    }
     Some(((hour as i64 * 60 + minute as i64) * 60 + second as i64) * 1_000_000_000 + nanos)
+}
+
+/// How a base64 read failed, mirroring what Jackson's *streaming* decoder does to the parser:
+/// most bad inputs throw with the string's closing quote unread (`Recoverable` — Flink's
+/// per-field skip then nulls just the value), but a group truncated after one character or after
+/// a single `=` makes Jackson read — and consume — the closing quote before throwing, corrupting
+/// the parser so Flink's lenient mode drops the whole message (`QuoteConsumed`).
+#[derive(Debug, PartialEq)]
+pub(crate) enum Base64Error {
+    Recoverable,
+    QuoteConsumed,
+}
+
+/// Base64 exactly as Flink's BINARY/VARBINARY JSON columns consume it —
+/// `JsonParser.getBinaryValue()` with Jackson's default variant (MIME-NO-LINEFEEDS): the standard
+/// `A–Za–z0–9+/` alphabet, whitespace skipped between (never inside) four-character groups, and
+/// padding **required** on a trailing partial group (jackson-core 2.12+ reads the MIME variants
+/// as padding-required). The declared column length is not enforced, matching Flink.
+pub(crate) fn parse_jackson_base64(s: &str) -> Result<Vec<u8>, Base64Error> {
+    fn decode(b: u8) -> Result<u32, Base64Error> {
+        match b {
+            b'A'..=b'Z' => Ok((b - b'A') as u32),
+            b'a'..=b'z' => Ok((b - b'a' + 26) as u32),
+            b'0'..=b'9' => Ok((b - b'0' + 52) as u32),
+            b'+' => Ok(62),
+            b'/' => Ok(63),
+            _ => Err(Base64Error::Recoverable),
+        }
+    }
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
+    let mut i = 0;
+    loop {
+        while i < bytes.len() && bytes[i] <= 0x20 {
+            i += 1;
+        }
+        if i == bytes.len() {
+            return Ok(out);
+        }
+        let head = decode(bytes[i])?;
+        // A group of exactly one character: Jackson reads the closing quote as the second char.
+        let second = *bytes.get(i + 1).ok_or(Base64Error::QuoteConsumed)?;
+        let mut data = (head << 6) | decode(second)?;
+        // A two-character group must carry `==`; end-of-string here is the rewound (recoverable)
+        // missing-padding error.
+        let third = *bytes.get(i + 2).ok_or(Base64Error::Recoverable)?;
+        i += 3;
+        if third == b'=' {
+            // After one `=` Jackson insists on the second and reads the quote to find it.
+            if *bytes.get(i).ok_or(Base64Error::QuoteConsumed)? != b'=' {
+                return Err(Base64Error::Recoverable);
+            }
+            i += 1;
+            out.push((data >> 4) as u8);
+            continue;
+        }
+        data = (data << 6) | decode(third)?;
+        let fourth = *bytes.get(i).ok_or(Base64Error::Recoverable)?;
+        i += 1;
+        if fourth == b'=' {
+            data >>= 2;
+            out.extend_from_slice(&[(data >> 8) as u8, data as u8]);
+            continue;
+        }
+        data = (data << 6) | decode(fourth)?;
+        out.extend_from_slice(&[(data >> 16) as u8, (data >> 8) as u8, data as u8]);
+    }
 }
 
 /// `new BigDecimal(String)`: an optional sign, digits with at most one decimal point (at least one
@@ -338,6 +422,13 @@ mod tests {
         assert_eq!(parse_flink_timestamp("1970-01-02 00:00", TimestampMode::Sql), None);
         // Java's fraction parser tolerates the bare decimal point (parity-pinned).
         assert_eq!(parse_flink_timestamp("1970-01-02 00:00:00.", TimestampMode::Sql), Some(base));
+        // SMART hour-24 rolls a timestamp to the NEXT day's midnight (parity-pinned against
+        // Flink's deserializer); anything nonzero behind the 24 is an error.
+        assert_eq!(
+            parse_flink_timestamp("1970-01-02 24:00:00", TimestampMode::Sql),
+            Some(2 * base)
+        );
+        assert_eq!(parse_flink_timestamp("1970-01-02 24:00:00.5", TimestampMode::Sql), None);
         assert_eq!(parse_flink_timestamp("1970-01-02 00:00:00.1234567890", TimestampMode::Sql), None);
         assert_eq!(parse_flink_timestamp("1970-01-02 00:00:00+05:00", TimestampMode::Sql), None);
         assert_eq!(parse_flink_timestamp("1970-01-02", TimestampMode::Sql), None);
@@ -353,6 +444,53 @@ mod tests {
         );
         assert_eq!(parse_flink_timestamp("1970-01-02 00:00:00", TimestampMode::Iso8601), None);
         assert_eq!(parse_flink_timestamp("1970-01-02T00:01.5", TimestampMode::Iso8601), None);
+    }
+
+    #[test]
+    fn sql_time_requires_seconds_and_discards_the_fraction() {
+        assert_eq!(parse_sql_time_second_of_day("00:00:00"), Some(0));
+        assert_eq!(parse_sql_time_second_of_day("12:34:56"), Some(45_296));
+        // Sub-second digits parse but never reach the value (Flink's toSecondOfDay * 1000).
+        assert_eq!(parse_sql_time_second_of_day("12:34:56.789"), Some(45_296));
+        assert_eq!(parse_sql_time_second_of_day("12:34:56.123456789"), Some(45_296));
+        assert_eq!(parse_sql_time_second_of_day("12:34:56."), Some(45_296));
+        assert_eq!(parse_sql_time_second_of_day("23:59:59"), Some(86_399));
+        // Seconds are required (SQL_TIME_FORMAT, unlike ISO_LOCAL_TIME) and the shape is strict.
+        assert_eq!(parse_sql_time_second_of_day("12:34"), None);
+        // SMART resolution: hour 24 is midnight when everything else is zero, an error otherwise.
+        assert_eq!(parse_sql_time_second_of_day("24:00:00"), Some(0));
+        assert_eq!(parse_sql_time_second_of_day("24:00:00.000"), Some(0));
+        assert_eq!(parse_sql_time_second_of_day("24:00:01"), None);
+        assert_eq!(parse_sql_time_second_of_day("24:00:00.5"), None);
+        assert_eq!(parse_sql_time_second_of_day("25:00:00"), None);
+        assert_eq!(parse_sql_time_second_of_day("12:34:60"), None);
+        assert_eq!(parse_sql_time_second_of_day("12:34:56.1234567890"), None);
+        assert_eq!(parse_sql_time_second_of_day("12:34:56Z"), None);
+        assert_eq!(parse_sql_time_second_of_day(" 12:34:56"), None);
+        assert_eq!(parse_sql_time_second_of_day("123456"), None);
+    }
+
+    #[test]
+    fn jackson_base64_requires_padding_and_rejects_inner_whitespace() {
+        assert_eq!(parse_jackson_base64(""), Ok(vec![]));
+        assert_eq!(parse_jackson_base64("AQID"), Ok(vec![1, 2, 3]));
+        assert_eq!(parse_jackson_base64("AQ=="), Ok(vec![1]));
+        assert_eq!(parse_jackson_base64("AQI="), Ok(vec![1, 2]));
+        assert_eq!(parse_jackson_base64("AQIDBA=="), Ok(vec![1, 2, 3, 4]));
+        // Whitespace between four-char groups is skipped; inside a group it is an error.
+        assert_eq!(parse_jackson_base64(" AQID AQ== "), Ok(vec![1, 2, 3, 1]));
+        assert_eq!(parse_jackson_base64("AQ ID"), Err(Base64Error::Recoverable));
+        // A trailing partial group without padding fails (jackson-core 2.12+ MIME read behavior).
+        assert_eq!(parse_jackson_base64("AQ"), Err(Base64Error::Recoverable));
+        assert_eq!(parse_jackson_base64("AQI"), Err(Base64Error::Recoverable));
+        assert_eq!(parse_jackson_base64("QQ=Q"), Err(Base64Error::Recoverable));
+        // Outside the standard alphabet (url-safe chars included) is an error.
+        assert_eq!(parse_jackson_base64("AQ*D"), Err(Base64Error::Recoverable));
+        assert_eq!(parse_jackson_base64("AQ-_"), Err(Base64Error::Recoverable));
+        // The quote-consuming shapes: a 1-char group, or a group cut after a single '='.
+        assert_eq!(parse_jackson_base64("A"), Err(Base64Error::QuoteConsumed));
+        assert_eq!(parse_jackson_base64("AQIDA"), Err(Base64Error::QuoteConsumed));
+        assert_eq!(parse_jackson_base64("AQ="), Err(Base64Error::QuoteConsumed));
     }
 
     #[test]

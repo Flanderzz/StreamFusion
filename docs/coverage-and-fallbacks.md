@@ -630,17 +630,25 @@ shapes persist their per-key deadlines in a dedicated state table).
   never-failing booleans, strict `ISO_LOCAL_DATE`, integer/boolean/container echo under STRING) is
   Flink's; DECIMAL columns parse the exact raw literal with `BigDecimal`'s HALF_UP-or-NULL (the
   old arrow-json truncation was a silent value divergence); and `ignore-parse-errors` skips with
-  Flink's per-field granularity. Still falling back: **`fail-on-missing-field = true`** (a missing
-  field is null natively — Flink's default mode; the fail mode isn't modeled);
+  Flink's per-field granularity. TIME columns parse `SQL_TIME_FORMAT` and reproduce Flink's
+  silent sub-second discard (`toSecondOfDay() * 1000`, whatever the declared precision — a parsed
+  `.789` never reaches the value) including java.time's SMART hour-24-is-midnight resolution
+  (which, on a timestamp column, rolls to the next day exactly as Flink does); VARBINARY columns
+  reproduce Jackson's exact base64 read (whitespace between four-char groups, padding required,
+  declared length NOT enforced), down to the skip-mode granularity of its corrupted-parser shapes
+  (a group cut after one character or one `=` makes Flink drop the whole message; the native
+  decode pre-scans and does the same). Still falling back: **`fail-on-missing-field = true`** (a
+  missing field is null natively — Flink's default mode; the fail mode isn't modeled);
   **`decode.json-parser.enabled = false`** (it switches Flink to its tree deserializer, whose
   coercion envelope differs from the parser path the native decode mirrors); a column — or any
   nested leaf — of a **type outside the natively-converted set** (BOOLEAN, TINYINT, SMALLINT, INT,
-  BIGINT, FLOAT, DOUBLE, CHAR/VARCHAR, DATE, TIMESTAMP, TIMESTAMP_LTZ, DECIMAL, and ROW/ARRAY/MAP/
-  MULTISET over those) — notably **TIME**, **BINARY/VARBINARY**, and the **INTERVAL** types; and a
-  **MAP/MULTISET key type outside CHAR/VARCHAR** (Flink's own JSON format rejects a non-string map
-  key at planning, so this leg of the gate is defensive — no such query reaches substitution). The
-  CDC dialects share the same column-type set (the envelope's images decode through the same
-  appenders). All startup
+  BIGINT, FLOAT, DOUBLE, CHAR/VARCHAR, DATE, TIME, TIMESTAMP, TIMESTAMP_LTZ, DECIMAL, VARBINARY,
+  and ROW/ARRAY/MAP/MULTISET over those) — notably **BINARY** (its fixed-size Arrow carriage
+  cannot hold the arbitrary-length base64 Flink decodes without length enforcement) and the
+  **INTERVAL** types; and a **MAP/MULTISET key type outside CHAR/VARCHAR** (Flink's own JSON
+  format rejects a non-string map key at planning, so this leg of the gate is defensive — no such
+  query reaches substitution). The CDC dialects share the same column-type set (the envelope's
+  images decode through the same appenders). All startup
   modes are supported (earliest/latest/group-offsets/timestamp/specific-offsets),
   as are `topic` lists and `topic-pattern` — discovery and offset resolution run in Flink's own
   reused enumerator (`scan.topic-partition-discovery.interval` honored, including `0` to disable),

@@ -51,10 +51,13 @@ class KafkaDecodeRoutingTest {
   }
 
   @Test
-  void timeColumnKeepsTheScanOnFlink() {
+  void timeAndVarbinaryColumnsRoute() {
     StreamTableEnvironment tEnv = env();
-    tEnv.executeSql(table("id BIGINT, t TIME(0)", "json"));
-    assertStaysOnFlink(tEnv, "SELECT id, t FROM t");
+    tEnv.executeSql(table("id BIGINT, t TIME(0), t3 TIME(3), b VARBINARY(1024)", "json"));
+    String plan = NativePlanner.explain(tEnv, "SELECT id, t, t3, b FROM t");
+    assertTrue(
+        plan.contains("NativeKafkaDecode") || plan.contains("NativeKafkaSource"),
+        "TIME and VARBINARY columns should decode natively:\n" + plan);
   }
 
   @Test

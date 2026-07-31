@@ -17,10 +17,11 @@ public final class JsonFormatProvider implements NativeFormatProvider {
   /**
    * Whether every column (and every nested leaf) is a type the native JSON decode converts with
    * Flink's exact semantics — the set {@code native/src/json.rs}'s appender dispatch implements,
-   * parity-pinned by {@code JsonDecodeParityTest}. Anything else (TIME, the binary types, the
-   * INTERVAL types) stays on Flink at plan time instead of reaching a native decode it would fail.
-   * A null row type (an identifier-level query with no schema at hand) passes; the planner gates
-   * on the resolved schema separately.
+   * parity-pinned by {@code JsonDecodeParityTest}. Anything else stays on Flink at plan time
+   * instead of reaching a native decode it would fail: BINARY (its fixed-size Arrow carriage
+   * cannot hold the arbitrary-length base64 Flink decodes without enforcing the declared length)
+   * and the INTERVAL types (unimplemented). A null row type (an identifier-level query with no
+   * schema at hand) passes; the planner gates on the resolved schema separately.
    */
   static boolean decodableColumns(RowType rowType) {
     return rowType == null
@@ -38,7 +39,9 @@ public final class JsonFormatProvider implements NativeFormatProvider {
       case DOUBLE:
       case CHAR:
       case VARCHAR:
+      case VARBINARY:
       case DATE:
+      case TIME_WITHOUT_TIME_ZONE:
       case TIMESTAMP_WITHOUT_TIME_ZONE:
       case TIMESTAMP_WITH_LOCAL_TIME_ZONE:
       case DECIMAL:

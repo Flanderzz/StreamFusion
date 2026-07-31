@@ -256,6 +256,102 @@ impl JsonAppend for TimestampJsonAppender {
     }
 }
 
+/// TIME: strings parse per Flink's `SQL_TIME_FORMAT` (`HH:mm:ss` + optional fraction), then the
+/// fraction is DISCARDED — Flink stores `toSecondOfDay() * 1000` whatever the declared precision —
+/// so the appended value is whole seconds scaled to the column's Arrow time unit. A bare number
+/// fails, as in Flink (the formatter rejects digits).
+pub(crate) struct TimeJsonAppender<T: ArrowPrimitiveType> {
+    builder: PrimitiveBuilder<T>,
+    data_type: DataType,
+    per_second: i64,
+    env: JsonEnv,
+}
+
+impl<T: ArrowPrimitiveType> TimeJsonAppender<T> {
+    fn new(data_type: &DataType, capacity: usize, per_second: i64, env: JsonEnv) -> TimeJsonAppender<T> {
+        TimeJsonAppender {
+            builder: PrimitiveBuilder::<T>::with_capacity(capacity)
+                .with_data_type(data_type.clone()),
+            data_type: data_type.clone(),
+            per_second,
+            env,
+        }
+    }
+}
+
+impl<T> JsonAppend for TimeJsonAppender<T>
+where
+    T: ArrowPrimitiveType,
+    T::Native: num_traits::NumCast,
+{
+    fn append(&mut self, value: Option<simd_json::tape::Value<'_, '_>>) {
+        use simd_json::prelude::*;
+        let Some(v) = value else {
+            self.builder.append_null();
+            return;
+        };
+        match v.value_type() {
+            simd_json::ValueType::Null => self.builder.append_null(),
+            simd_json::ValueType::String => self.append_key(v.as_str().expect("string node")),
+            _ if self.env.lenient => self.builder.append_null(),
+            other => panic!("failed to decode JSON {other:?} as {}", self.data_type),
+        }
+    }
+
+    fn append_key(&mut self, key: &str) {
+        let value = flink_text::parse_sql_time_second_of_day(key)
+            .and_then(|seconds| num_traits::NumCast::from(seconds * self.per_second));
+        match value {
+            Some(value) => self.builder.append_value(value),
+            None if self.env.lenient => self.builder.append_null(),
+            None => panic!("failed to parse \"{key}\" as {}", self.data_type),
+        }
+    }
+
+    fn finish(&mut self) -> ArrayRef {
+        Arc::new(self.builder.finish())
+    }
+}
+
+/// VARBINARY: strings base64-decode with Jackson's exact read (`JsonParser.getBinaryValue`);
+/// declared length is not enforced, matching Flink. Every non-string token fails, as
+/// `getBinaryValue` does. (BINARY is gated out at plan time — its fixed-size Arrow carriage
+/// cannot hold an arbitrary-length decode.)
+pub(crate) struct BinaryJsonAppender {
+    builder: BinaryBuilder,
+    env: JsonEnv,
+}
+
+impl JsonAppend for BinaryJsonAppender {
+    fn append(&mut self, value: Option<simd_json::tape::Value<'_, '_>>) {
+        use simd_json::prelude::*;
+        let Some(v) = value else {
+            self.builder.append_null();
+            return;
+        };
+        match v.value_type() {
+            simd_json::ValueType::Null => self.builder.append_null(),
+            simd_json::ValueType::String => self.append_key(v.as_str().expect("string node")),
+            _ if self.env.lenient => self.builder.append_null(),
+            other => panic!("failed to decode JSON {other:?} as VARBINARY"),
+        }
+    }
+
+    fn append_key(&mut self, key: &str) {
+        match flink_text::parse_jackson_base64(key) {
+            Ok(bytes) => self.builder.append_value(bytes),
+            // A quote-consuming shape never reaches a lenient appender — the message-level
+            // pre-scan drops the whole document first, as Flink's corrupted parser does.
+            Err(_) if self.env.lenient => self.builder.append_null(),
+            Err(_) => panic!("failed to decode base64 \"{key}\" as VARBINARY"),
+        }
+    }
+
+    fn finish(&mut self) -> ArrayRef {
+        Arc::new(self.builder.finish())
+    }
+}
+
 pub(crate) struct BooleanJsonAppender {
     builder: BooleanBuilder,
     env: JsonEnv,
@@ -732,6 +828,20 @@ pub(crate) fn make_json_appender(
         DataType::Timestamp(TimeUnit::Nanosecond, None) => {
             Box::new(TimestampJsonAppender::new(data_type, capacity, env))
         }
+        // TIME(p)'s Arrow unit follows the declared precision; the value is always whole seconds.
+        DataType::Time32(TimeUnit::Second) => {
+            Box::new(TimeJsonAppender::<Time32SecondType>::new(data_type, capacity, 1, env))
+        }
+        DataType::Time32(TimeUnit::Millisecond) => Box::new(
+            TimeJsonAppender::<Time32MillisecondType>::new(data_type, capacity, 1_000, env),
+        ),
+        DataType::Time64(TimeUnit::Microsecond) => Box::new(
+            TimeJsonAppender::<Time64MicrosecondType>::new(data_type, capacity, 1_000_000, env),
+        ),
+        DataType::Time64(TimeUnit::Nanosecond) => Box::new(
+            TimeJsonAppender::<Time64NanosecondType>::new(data_type, capacity, 1_000_000_000, env),
+        ),
+        DataType::Binary => Box::new(BinaryJsonAppender { builder: BinaryBuilder::new(), env }),
         DataType::Boolean => {
             Box::new(BooleanJsonAppender { builder: BooleanBuilder::new(), env })
         }
@@ -772,6 +882,8 @@ pub(crate) fn decode_json_bodies_simd(
     let mut root = StructJsonAppender::new(schema.fields(), bodies.num_rows(), env);
     let mut scratch: Vec<u8> = Vec::new();
     let mut buffers = simd_json::Buffers::default();
+    let scan_binary =
+        env.lenient && schema.fields().iter().any(|f| contains_binary(f.data_type()));
     for row in 0..bodies.num_rows() {
         let Some(bytes) = binary_body(column, row) else { continue };
         if bytes.iter().all(u8::is_ascii_whitespace) {
@@ -793,10 +905,69 @@ pub(crate) fn decode_json_bodies_simd(
             None if env.lenient => continue,
             None => panic!("JSON body was not a single object"),
         };
+        if scan_binary && object_poisoned(schema.fields(), &object) {
+            continue;
+        }
         root.append_object(&object);
     }
     RecordBatch::try_new(schema.clone(), root.finish_columns())
         .expect("failed to build JSON batch")
+}
+
+fn contains_binary(data_type: &DataType) -> bool {
+    match data_type {
+        DataType::Binary => true,
+        DataType::Struct(fields) => fields.iter().any(|f| contains_binary(f.data_type())),
+        DataType::List(field) => contains_binary(field.data_type()),
+        DataType::Map(entries, _) => contains_binary(entries.data_type()),
+        _ => false,
+    }
+}
+
+/// Whether the document holds, under a BINARY-typed leaf, a base64 string whose failure makes
+/// Jackson consume the closing quote (see [`flink_text::Base64Error::QuoteConsumed`]). Flink's
+/// lenient mode drops the WHOLE message on those — the corrupted parser fails outside the
+/// per-field catch — so the pre-scan reproduces that granularity before anything is appended.
+fn object_poisoned(fields: &Fields, object: &simd_json::tape::Object<'_, '_>) -> bool {
+    object.iter().any(|(key, value)| {
+        fields
+            .iter()
+            .find(|f| f.name() == key)
+            .is_some_and(|f| value_poisoned(f.data_type(), value))
+    })
+}
+
+fn value_poisoned(data_type: &DataType, value: simd_json::tape::Value<'_, '_>) -> bool {
+    use simd_json::prelude::*;
+    if !contains_binary(data_type) {
+        return false;
+    }
+    match (data_type, value.value_type()) {
+        (DataType::Binary, simd_json::ValueType::String) => matches!(
+            flink_text::parse_jackson_base64(value.as_str().expect("string node")),
+            Err(flink_text::Base64Error::QuoteConsumed)
+        ),
+        (DataType::Struct(fields), simd_json::ValueType::Object) => {
+            object_poisoned(fields, &value.as_object().expect("object node"))
+        }
+        (DataType::List(field), simd_json::ValueType::Array) => value
+            .as_array()
+            .expect("array node")
+            .iter()
+            .any(|element| value_poisoned(field.data_type(), element)),
+        (DataType::Map(entries, _), simd_json::ValueType::Object) => {
+            let value_type = match entries.data_type() {
+                DataType::Struct(kv) if kv.len() == 2 => kv[1].data_type(),
+                other => panic!("MAP entries must be a two-field struct, got {other}"),
+            };
+            value
+                .as_object()
+                .expect("object node")
+                .iter()
+                .any(|(_, entry)| value_poisoned(value_type, entry))
+        }
+        _ => false,
+    }
 }
 
 pub(crate) struct JsonDecoder {
@@ -831,15 +1002,17 @@ impl JsonDecoder {
     /// literal) and converted here with Flink's exact semantics — `new BigDecimal(String)` then a
     /// HALF_UP rescale that goes NULL on precision overflow. arrow-json's own decimal parse
     /// truncates extra fraction digits and errors on overflow, which silently diverged from Flink
-    /// on valid data. Documents feed one at a time to keep the decoder's record boundaries aligned
-    /// with the input rows.
+    /// on valid data. TIME and VARBINARY leaves sharing such a schema also ride as text and
+    /// convert through the same Flink-exact parsers the simd path uses — arrow-json's own
+    /// time/binary handling has a different envelope. Documents feed one at a time to keep the
+    /// decoder's record boundaries aligned with the input rows.
     fn decode_raw_literals(&self, bodies: &RecordBatch) -> RecordBatch {
         let column = bodies.column(0);
         let text_schema = Arc::new(Schema::new(
             self.schema
                 .fields()
                 .iter()
-                .map(|f| Arc::new(decimals_as_text(f)))
+                .map(|f| Arc::new(exact_leaves_as_text(f)))
                 .collect::<Vec<FieldRef>>(),
         ));
         let build = || {
@@ -852,7 +1025,7 @@ impl JsonDecoder {
         // In skip mode each message decodes through its own decoder so a bad one drops alone
         // (arrow-json's decoder state is unusable after an error). Flink's skip on this path is
         // approximated at message granularity for non-decimal errors — divergences/21; the decimal
-        // cells themselves skip per FIELD in restore_decimals, like the host.
+        // cells themselves skip per FIELD in restore_exact_leaves, like the host.
         let mut batches = Vec::new();
         if self.env.lenient {
             for row in 0..bodies.num_rows() {
@@ -896,23 +1069,44 @@ impl JsonDecoder {
             .fields()
             .iter()
             .zip(decoded.columns())
-            .map(|(field, column)| restore_decimals(column, field.data_type(), self.env.lenient))
+            .map(|(field, column)| restore_exact_leaves(column, field.data_type(), self.env.lenient))
             .collect();
         RecordBatch::try_new(self.schema.clone(), columns).expect("failed to build JSON batch")
     }
 }
 
-/// The arrow-json decode schema for the raw-literals path: every (nested) DECIMAL leaf becomes
-/// Utf8, so `coerce_primitive` captures the exact raw literal for [`restore_decimals`] to convert.
-fn decimals_as_text(field: &Field) -> Field {
+/// The leaves the raw-literals path decodes as Utf8 and converts with a Flink-exact parser after
+/// arrow-json: DECIMAL (needs the raw number literal), TIME, and VARBINARY (arrow-json's own
+/// envelopes differ from Flink's).
+fn text_restored_leaf(data_type: &DataType) -> bool {
+    matches!(
+        data_type,
+        DataType::Decimal128(_, _) | DataType::Time32(_) | DataType::Time64(_) | DataType::Binary
+    )
+}
+
+/// Whether a (nested) leaf of this type is converted by [`restore_exact_leaves`].
+fn needs_text_restore(data_type: &DataType) -> bool {
+    match data_type {
+        DataType::Struct(fields) => fields.iter().any(|f| needs_text_restore(f.data_type())),
+        DataType::List(field) => needs_text_restore(field.data_type()),
+        DataType::Map(entries, _) => needs_text_restore(entries.data_type()),
+        other => text_restored_leaf(other),
+    }
+}
+
+/// The arrow-json decode schema for the raw-literals path: every (nested) DECIMAL/TIME/VARBINARY
+/// leaf becomes Utf8, so `coerce_primitive` captures the exact literal for
+/// [`restore_exact_leaves`] to convert.
+fn exact_leaves_as_text(field: &Field) -> Field {
     let data_type = match field.data_type() {
-        DataType::Decimal128(_, _) => DataType::Utf8,
+        leaf if text_restored_leaf(leaf) => DataType::Utf8,
         DataType::Struct(fields) => DataType::Struct(
-            fields.iter().map(|f| Arc::new(decimals_as_text(f))).collect::<Fields>(),
+            fields.iter().map(|f| Arc::new(exact_leaves_as_text(f))).collect::<Fields>(),
         ),
-        DataType::List(f) => DataType::List(Arc::new(decimals_as_text(f))),
+        DataType::List(f) => DataType::List(Arc::new(exact_leaves_as_text(f))),
         DataType::Map(entries, sorted) => {
-            DataType::Map(Arc::new(decimals_as_text(entries)), *sorted)
+            DataType::Map(Arc::new(exact_leaves_as_text(entries)), *sorted)
         }
         other => other.clone(),
     };
@@ -921,13 +1115,47 @@ fn decimals_as_text(field: &Field) -> Field {
 
 /// Converts a raw-literals column back to its declared type: a Utf8-decoded DECIMAL leaf parses
 /// with Flink's `BigDecimal` + `DecimalData.fromBigDecimal` (HALF_UP, precision overflow → NULL,
-/// garbage fails); containers rebuild around their converted children; anything else is already
-/// its declared type.
-fn restore_decimals(column: &ArrayRef, target: &DataType, lenient: bool) -> ArrayRef {
-    if !json_needs_raw_number_literals(target) {
+/// garbage fails), TIME with the `SQL_TIME_FORMAT`-and-truncate rule, VARBINARY with Jackson's
+/// base64 read; containers rebuild around their converted children; anything else is already its
+/// declared type.
+fn restore_exact_leaves(column: &ArrayRef, target: &DataType, lenient: bool) -> ArrayRef {
+    if !needs_text_restore(target) {
         return column.clone();
     }
     match target {
+        DataType::Time32(_) | DataType::Time64(_) => {
+            let strings = column.as_any().downcast_ref::<StringArray>().expect("time text");
+            let seconds: Vec<Option<i64>> = strings
+                .iter()
+                .map(|text| {
+                    let text = text?;
+                    match flink_text::parse_sql_time_second_of_day(text) {
+                        Some(seconds) => Some(seconds),
+                        None if lenient => None,
+                        None => panic!("failed to parse \"{text}\" as {target}"),
+                    }
+                })
+                .collect();
+            time_array(target, &seconds)
+        }
+        DataType::Binary => {
+            let strings = column.as_any().downcast_ref::<StringArray>().expect("binary text");
+            let values: BinaryArray = strings
+                .iter()
+                .map(|text| {
+                    let text = text?;
+                    match flink_text::parse_jackson_base64(text) {
+                        Ok(bytes) => Some(bytes),
+                        // Message-drop granularity for a quote-consuming shape is not
+                        // reproducible on this path (columns are already built) — the field
+                        // nulls instead, a decimal-path residual noted in divergences/21.
+                        Err(_) if lenient => None,
+                        Err(_) => panic!("failed to decode base64 \"{text}\" as VARBINARY"),
+                    }
+                })
+                .collect();
+            Arc::new(values)
+        }
         DataType::Decimal128(p, s) => {
             let strings = column.as_any().downcast_ref::<StringArray>().expect("decimal text");
             let values: Decimal128Array = strings
@@ -950,7 +1178,7 @@ fn restore_decimals(column: &ArrayRef, target: &DataType, lenient: bool) -> Arra
             let children = fields
                 .iter()
                 .zip(source.columns())
-                .map(|(field, child)| restore_decimals(child, field.data_type(), lenient))
+                .map(|(field, child)| restore_exact_leaves(child, field.data_type(), lenient))
                 .collect();
             Arc::new(
                 StructArray::try_new(fields.clone(), children, source.nulls().cloned())
@@ -959,7 +1187,7 @@ fn restore_decimals(column: &ArrayRef, target: &DataType, lenient: bool) -> Arra
         }
         DataType::List(field) => {
             let source = column.as_any().downcast_ref::<ListArray>().expect("list column");
-            let values = restore_decimals(source.values(), field.data_type(), lenient);
+            let values = restore_exact_leaves(source.values(), field.data_type(), lenient);
             Arc::new(
                 ListArray::try_new(
                     field.clone(),
@@ -972,7 +1200,7 @@ fn restore_decimals(column: &ArrayRef, target: &DataType, lenient: bool) -> Arra
         }
         DataType::Map(entries_field, sorted) => {
             let source = column.as_any().downcast_ref::<MapArray>().expect("map column");
-            let entries = restore_decimals(
+            let entries = restore_exact_leaves(
                 &(Arc::new(source.entries().clone()) as ArrayRef),
                 entries_field.data_type(),
                 lenient,
@@ -990,5 +1218,35 @@ fn restore_decimals(column: &ArrayRef, target: &DataType, lenient: bool) -> Arra
             )
         }
         _ => column.clone(),
+    }
+}
+
+/// Builds the declared Arrow time array from whole seconds of the day (the unit follows the
+/// column's declared precision; the value is always whole seconds — see the TIME appender).
+fn time_array(target: &DataType, seconds: &[Option<i64>]) -> ArrayRef {
+    use arrow::datatypes::TimeUnit;
+    fn collect<T>(seconds: &[Option<i64>], per_second: i64) -> ArrayRef
+    where
+        T: ArrowPrimitiveType,
+        T::Native: num_traits::NumCast,
+    {
+        let values: PrimitiveArray<T> = seconds
+            .iter()
+            .map(|s| {
+                s.map(|s| num_traits::NumCast::from(s * per_second).expect("a day fits the unit"))
+            })
+            .collect();
+        Arc::new(values)
+    }
+    match target {
+        DataType::Time32(TimeUnit::Second) => collect::<Time32SecondType>(seconds, 1),
+        DataType::Time32(TimeUnit::Millisecond) => collect::<Time32MillisecondType>(seconds, 1_000),
+        DataType::Time64(TimeUnit::Microsecond) => {
+            collect::<Time64MicrosecondType>(seconds, 1_000_000)
+        }
+        DataType::Time64(TimeUnit::Nanosecond) => {
+            collect::<Time64NanosecondType>(seconds, 1_000_000_000)
+        }
+        other => panic!("not a TIME type: {other}"),
     }
 }

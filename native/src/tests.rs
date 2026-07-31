@@ -909,6 +909,67 @@ fn json_decode_covers_boundary_scalar_types() {
     assert!(ts.is_null(2));
 }
 
+// TIME parses SQL_TIME_FORMAT and stores whole seconds at the column's Arrow unit (Flink's
+// toSecondOfDay() * 1000 discards the fraction whatever the declared precision); VARBINARY is
+// Jackson's base64 read, declared length not enforced. Both hold on the simd path and — riding as
+// text — on the decimal-bearing arrow-json path.
+#[test]
+fn json_decode_time_truncates_and_binary_follows_jackson() {
+    use arrow::array::{Time32MillisecondArray, Time32SecondArray, Time64NanosecondArray};
+    use arrow::datatypes::TimeUnit;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    let schema: SchemaRef = Arc::new(Schema::new(vec![
+        Field::new("t0", DataType::Time32(TimeUnit::Second), true),
+        Field::new("t3", DataType::Time32(TimeUnit::Millisecond), true),
+        Field::new("t9", DataType::Time64(TimeUnit::Nanosecond), true),
+        Field::new("b", DataType::Binary, true),
+    ]));
+    let batch = bodies(vec![Some(
+        br#"{"t0": "12:34:56.789", "t3": "12:34:56.789", "t9": "12:34:56.123456789",
+                "b": "AQIDBAUGBwg="}"#,
+    )]);
+    let out = JsonDecoder::new(schema.clone(), crate::json::JsonEnv::default()).decode(&batch);
+    let secs = 12 * 3600 + 34 * 60 + 56;
+    let t0 = out.column(0).as_any().downcast_ref::<Time32SecondArray>().unwrap();
+    assert_eq!(t0.value(0), secs as i32);
+    let t3 = out.column(1).as_any().downcast_ref::<Time32MillisecondArray>().unwrap();
+    assert_eq!(t3.value(0), (secs * 1000) as i32); // the .789 is gone
+    let t9 = out.column(2).as_any().downcast_ref::<Time64NanosecondArray>().unwrap();
+    assert_eq!(t9.value(0), secs as i64 * 1_000_000_000);
+    let b = out.column(3).as_any().downcast_ref::<BinaryArray>().unwrap();
+    assert_eq!(b.value(0), [1, 2, 3, 4, 5, 6, 7, 8]);
+    // Missing base64 padding fails like Jackson's MIME read; under skip mode the field nulls.
+    let bad = bodies(vec![Some(br#"{"b": "AQ"}"#)]);
+    let strict = schema.clone();
+    assert!(catch_unwind(AssertUnwindSafe(|| JsonDecoder::new(
+        strict,
+        crate::json::JsonEnv::default()
+    )
+    .decode(&bad)))
+    .is_err());
+    let lenient = JsonDecoder::new(
+        schema,
+        crate::json::JsonEnv { lenient: true, ..Default::default() },
+    )
+    .decode(&bad);
+    assert!(lenient.column(3).is_null(0));
+
+    // The decimal-bearing schema keeps the same envelope through the text-restored path.
+    let mixed: SchemaRef = Arc::new(Schema::new(vec![
+        Field::new("dec", DataType::Decimal128(5, 2), true),
+        Field::new("t3", DataType::Time32(TimeUnit::Millisecond), true),
+        Field::new("b", DataType::Binary, true),
+    ]));
+    let batch = bodies(vec![Some(br#"{"dec": 1.235, "t3": "12:34:56.789", "b": "AQID"}"#)]);
+    let out = JsonDecoder::new(mixed, crate::json::JsonEnv::default()).decode(&batch);
+    let dec = out.column(0).as_any().downcast_ref::<Decimal128Array>().unwrap();
+    assert_eq!(dec.value(0), 124); // HALF_UP
+    let t3 = out.column(1).as_any().downcast_ref::<Time32MillisecondArray>().unwrap();
+    assert_eq!(t3.value(0), (secs * 1000) as i32);
+    let b = out.column(2).as_any().downcast_ref::<BinaryArray>().unwrap();
+    assert_eq!(b.value(0), [1, 2, 3]);
+}
+
 /// The SQL/ISO-8601 timestamp modes reject each other's separator, numbers fail a timestamp/date
 /// column, and a float literal under a STRING column fails loudly (raw literal unrecoverable) —
 /// the Flink envelope, per the JSON decode parity test.
