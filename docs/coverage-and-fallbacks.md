@@ -528,7 +528,21 @@ shapes persist their per-key deadlines in a dedicated state table).
   fallback, never silently dropped. With **`none`/`at-least-once` delivery**, serialization is
   native and the final key/value bytes feed Flink's unmodified `KafkaSink`, whose producer,
   parallelism, and metrics contracts apply verbatim. Ordinary `kafka` tables support value-only
-  insert streams. `upsert-kafka` tables support the default primary-key projection and
+  insert streams with plain `json`, and full changelog streams with the four CDC JSON envelope
+  formats (`debezium-json`, `canal-json`, `maxwell-json`, `ogg-json`) — the one non-upsert case
+  where changelog input is admitted, since the CDC encoding format requests the full changelog
+  (UPDATE_BEFORE included) from the planner. Each row is spliced into its dialect's envelope in
+  Flink's field order (INSERT/UPDATE_AFTER as the post-image, UPDATE_BEFORE/DELETE as the
+  pre-image), and the shared `json.*` options forward to the nested row serializer exactly as in
+  Flink — `encode.ignore-null-fields` also drops the envelope's null `before`/`after` key. A
+  PRIMARY KEY on such a table is allowed (Flink permits PK only alongside a CDC value format) and,
+  as in Flink, produces no key output without `key.format`. `debezium-json.schema-include=true`
+  declines so Flink raises its own sink-side ValidationException; canal's `database.include`/
+  `table.include` are deserialization-only and ignored on write, as Flink does; `upsert-kafka`
+  keeps Flink's own rejection of CDC value formats. Byte parity is pinned per dialect × row kind ×
+  null-field × option mode against Flink's envelope serializers, and a broker test diffs a native
+  updating aggregate's debezium topic against stock Flink's record for record.
+  `upsert-kafka` tables support the default primary-key projection and
   default `ALL` value projection: INSERT/UPDATE_AFTER rows carry a JSON value, while
   UPDATE_BEFORE/DELETE rows carry a Kafka tombstone. Serialization uses the declared sink field
   names even when the input plan uses generated expression names. The sink boundary separately
@@ -561,12 +575,14 @@ shapes persist their per-key deadlines in a dedicated state table).
   - an upsert-materialized sink — when Flink decides the upsert changelog arrives out of order it
     bakes a stateful `SinkUpsertMaterializer` into its own sink translation, which a substituted
     sink would silently drop;
-  - a non-JSON value format or multiple/dynamic topics; a keyed ordinary `kafka` table; an
-    `upsert-kafka` table without JSON key and value formats; or an explicit key/value projection,
-    key prefix, or `EXCEPT_KEY` value projection;
+  - a value format outside the JSON family (plain `json` or the four CDC JSON envelopes) or
+    multiple/dynamic topics; a keyed ordinary `kafka` table; an `upsert-kafka` table without JSON
+    key and value formats; `debezium-json.schema-include=true` (rejected by Flink's own sink
+    factory); or an explicit key/value projection, key prefix, or `EXCEPT_KEY` value projection;
   - a non-default partitioner, sink-side buffer flushing, writable metadata, or any other sink
     ability;
-  - a changelog input to ordinary `kafka`, a column outside the verified type family above (a
+  - a changelog input to ordinary `kafka` with a plain (non-CDC) value format, a column outside
+    the verified type family above (a
     non-string-keyed MAP/MULTISET — which Flink itself cannot serialize — or the INTERVAL types),
     an out-of-range `json.*` option value (Flink's format factory then raises its own validation
     error), a `json.map-null-key.literal` containing a line break, or an unrecognized

@@ -7,8 +7,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.github.jordepic.streamfusion.planner.NativePlanner;
 import io.github.jordepic.streamfusion.planner.PhysicalPlanScan;
+import java.util.List;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.api.ExplainDetail;
+import org.apache.flink.table.api.ValidationException;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
@@ -171,6 +173,128 @@ class NativeKafkaSinkSqlPlanTest {
     assertTrue(scan.substitutions() > 0, scan::explainSummary);
     assertTrue(plan.contains("NativeKafkaSink"), plan);
     assertTrue(plan.contains("native-kafka-exactly-once-sink"), plan);
+  }
+
+  /**
+   * A CDC envelope value format is Flink's way of writing a changelog to an ordinary kafka table
+   * (the sink requests the full changelog, UPDATE_BEFORE included), so an updating aggregate feeds
+   * the native sink directly — the one non-upsert case where changelog input is admitted.
+   */
+  @Test
+  void plansChangelogThroughCdcEnvelopeFormats() {
+    for (String format : List.of("debezium-json", "canal-json", "maxwell-json", "ogg-json")) {
+      StreamTableEnvironment table = environment();
+      table.executeSql(
+          "CREATE TABLE src (id BIGINT) "
+              + "WITH ('connector' = 'datagen', 'number-of-rows' = '10')");
+      table.executeSql(
+          "CREATE TABLE output (id BIGINT, total BIGINT) WITH ("
+              + "'connector' = 'kafka', "
+              + "'topic' = 'output', "
+              + "'properties.bootstrap.servers' = 'broker:9092', "
+              + "'format' = '"
+              + format
+              + "')");
+
+      PhysicalPlanScan scan = NativePlanner.install(table);
+      String plan =
+          table.explainSql(
+              "INSERT INTO output SELECT id, COUNT(*) FROM src GROUP BY id",
+              ExplainDetail.JSON_EXECUTION_PLAN,
+              ExplainDetail.CHANGELOG_MODE);
+
+      assertTrue(scan.substitutions() > 0, format + ": " + scan.explainSummary());
+      assertTrue(plan.contains("NativeKafkaSink"), format + ": " + plan);
+      // The CDC sink requests the full changelog, so the planner must not strip the aggregate's
+      // UPDATE_BEFORE rows (an upsert-mode consumer would show I,UA only).
+      assertTrue(plan.contains("I,UB,UA"), format + ": " + plan);
+    }
+  }
+
+  /**
+   * Flink's kafka factory allows PRIMARY KEY only alongside a CDC value format, and without a
+   * key.format the records still have no key output — the PK must not disturb the native plan.
+   */
+  @Test
+  void plansPrimaryKeyedCdcTableWithoutKeyOutput() {
+    StreamTableEnvironment table = environment();
+    table.executeSql(
+        "CREATE TABLE src (id BIGINT) "
+            + "WITH ('connector' = 'datagen', 'number-of-rows' = '10')");
+    table.executeSql(
+        "CREATE TABLE output (id BIGINT, total BIGINT, PRIMARY KEY (id) NOT ENFORCED) WITH ("
+            + "'connector' = 'kafka', "
+            + "'topic' = 'output', "
+            + "'properties.bootstrap.servers' = 'broker:9092', "
+            + "'format' = 'debezium-json')");
+
+    PhysicalPlanScan scan = NativePlanner.install(table);
+    String plan =
+        table.explainSql(
+            "INSERT INTO output SELECT id, COUNT(*) FROM src GROUP BY id",
+            ExplainDetail.JSON_EXECUTION_PLAN);
+
+    assertTrue(scan.substitutions() > 0, scan::explainSummary);
+    assertTrue(plan.contains("NativeKafkaSink"), plan);
+  }
+
+  /** Flink rejects schema-include on a debezium-json sink; the native path must not swallow it. */
+  @Test
+  void debeziumSchemaIncludeKeepsFlinksRejection() {
+    StreamTableEnvironment table = environment();
+    table.executeSql(
+        "CREATE TABLE src (id BIGINT) "
+            + "WITH ('connector' = 'datagen', 'number-of-rows' = '1')");
+    table.executeSql(
+        "CREATE TABLE output (id BIGINT) WITH ("
+            + "'connector' = 'kafka', "
+            + "'topic' = 'output', "
+            + "'properties.bootstrap.servers' = 'broker:9092', "
+            + "'format' = 'debezium-json', "
+            + "'debezium-json.schema-include' = 'true')");
+
+    PhysicalPlanScan scan = NativePlanner.install(table);
+    ValidationException rejection =
+        assertThrows(
+            ValidationException.class,
+            () -> table.explainSql("INSERT INTO output SELECT * FROM src"));
+
+    assertTrue(messages(rejection).contains("schema-include"), messages(rejection));
+    assertEquals(0, scan.substitutions());
+  }
+
+  /** upsert-kafka forbids CDC value formats in Flink; the rejection must survive installation. */
+  @Test
+  void upsertKafkaKeepsFlinksCdcFormatRejection() {
+    StreamTableEnvironment table = environment();
+    table.executeSql(
+        "CREATE TABLE src (id BIGINT) "
+            + "WITH ('connector' = 'datagen', 'number-of-rows' = '10')");
+    table.executeSql(
+        "CREATE TABLE output (id BIGINT, total BIGINT, PRIMARY KEY (id) NOT ENFORCED) WITH ("
+            + "'connector' = 'upsert-kafka', "
+            + "'topic' = 'output', "
+            + "'properties.bootstrap.servers' = 'broker:9092', "
+            + "'key.format' = 'json', "
+            + "'value.format' = 'debezium-json')");
+
+    PhysicalPlanScan scan = NativePlanner.install(table);
+    ValidationException rejection =
+        assertThrows(
+            ValidationException.class,
+            () ->
+                table.explainSql("INSERT INTO output SELECT id, COUNT(*) FROM src GROUP BY id"));
+
+    assertTrue(messages(rejection).contains("not in insert-only mode"), messages(rejection));
+    assertEquals(0, scan.substitutions());
+  }
+
+  private static String messages(Throwable failure) {
+    StringBuilder messages = new StringBuilder();
+    for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+      messages.append(cause.getMessage()).append('\n');
+    }
+    return messages.toString();
   }
 
   @Test

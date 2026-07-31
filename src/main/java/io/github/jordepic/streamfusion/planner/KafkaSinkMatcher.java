@@ -1,6 +1,7 @@
 package io.github.jordepic.streamfusion.planner;
 
 import io.github.jordepic.streamfusion.format.EncodeFormat;
+import io.github.jordepic.streamfusion.format.FormatCodes;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.IntStream;
@@ -57,12 +58,15 @@ final class KafkaSinkMatcher {
 
   static boolean appliesTo(StreamPhysicalSink sink) {
     Map<String, String> options = options(sink);
-    if (options == null
-        || !("kafka".equals(options.get("connector"))
-            || "upsert-kafka".equals(options.get("connector")))) {
+    if (options == null) {
       return false;
     }
-    return "json".equals(options.getOrDefault("value.format", options.get("format")));
+    String format = options.getOrDefault("value.format", options.get("format"));
+    if ("kafka".equals(options.get("connector"))) {
+      // Plain JSON or a CDC JSON envelope; Flink forbids the CDC formats on upsert-kafka.
+      return FormatCodes.isJsonFamily(format);
+    }
+    return "upsert-kafka".equals(options.get("connector")) && "json".equals(format);
   }
 
   static Planned plan(StreamPhysicalSink sink) {
@@ -180,7 +184,11 @@ final class KafkaSinkMatcher {
       ctx.decline("kafka sink: " + planned.fallbackReason);
       return null;
     }
+    // A CDC envelope format is Flink's way of writing a changelog to an ordinary kafka table (its
+    // sink requests the full changelog, UPDATE_BEFORE included), so changelog input is exactly the
+    // admitted case there; every other non-upsert format requires an insert-only stream.
     if (!planned.upsert
+        && !FormatCodes.isCdc(planned.valueFormat.format)
         && !ChangelogPlanUtils.isInsertOnly((StreamPhysicalRel) sink.getInputs().get(0))) {
       ctx.decline("kafka sink: the input is a changelog, not an insert-only stream");
       return null;
