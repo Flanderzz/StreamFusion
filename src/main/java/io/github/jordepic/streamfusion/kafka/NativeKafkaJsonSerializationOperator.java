@@ -18,6 +18,7 @@ public final class NativeKafkaJsonSerializationOperator
     implements OneInputStreamOperator<ArrowBatch, PreSerializedKafkaRecord> {
 
   private final JsonEncodeOptions json;
+  private final JsonEncodeOptions keyJson;
   private final String[] logicalTypes;
   private final String[] fieldNames;
   private final int[] keyFields;
@@ -30,12 +31,14 @@ public final class NativeKafkaJsonSerializationOperator
 
   public NativeKafkaJsonSerializationOperator(
       JsonEncodeOptions json,
+      JsonEncodeOptions keyJson,
       String[] logicalTypes,
       String[] fieldNames,
       int[] keyFields,
       int[] valueFields,
       boolean upsert) {
     this.json = json;
+    this.keyJson = keyJson;
     this.logicalTypes = logicalTypes;
     this.fieldNames = fieldNames;
     this.keyFields = keyFields;
@@ -71,6 +74,9 @@ public final class NativeKafkaJsonSerializationOperator
                 json.ignoreNullFields,
                 json.timestampFormat,
                 json.decimalAsPlainNumber,
+                keyJson.ignoreNullFields,
+                keyJson.timestampFormat,
+                keyJson.decimalAsPlainNumber,
                 logicalTypes,
                 fieldNames,
                 keyFields,

@@ -51,13 +51,19 @@ public final class NativeKafka {
       String[] logicalTypes,
       String[] fieldNames);
 
-  /** Serializes projected key/value bytes together; null values are upsert tombstones. */
+  /**
+   * Serializes projected key/value bytes together; null values are upsert tombstones. The key
+   * format is its own instance in Flink, so it encodes under its own option trio.
+   */
   public static native byte[][][] encodeKafkaJsonRecords(
       long arrayAddress,
       long schemaAddress,
       boolean ignoreNullFields,
       String timestampFormat,
       boolean decimalAsPlainNumber,
+      boolean keyIgnoreNullFields,
+      String keyTimestampFormat,
+      boolean keyDecimalAsPlainNumber,
       String[] logicalTypes,
       String[] fieldNames,
       int[] keyFields,
@@ -111,6 +117,9 @@ public final class NativeKafka {
       boolean ignoreNullFields,
       String timestampFormat,
       boolean decimalAsPlainNumber,
+      boolean keyIgnoreNullFields,
+      String keyTimestampFormat,
+      boolean keyDecimalAsPlainNumber,
       String[] logicalTypes,
       String[] fieldNames,
       int[] keyFields,

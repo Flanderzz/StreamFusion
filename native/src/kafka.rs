@@ -160,6 +160,7 @@ impl EncodedKafkaRecords {
 fn encode_json_records(
     batch: &RecordBatch,
     options: &JsonEncodeOptions,
+    key_options: &JsonEncodeOptions,
     logical_types: &[String],
     field_names: &[String],
     key_fields: &[usize],
@@ -189,7 +190,7 @@ fn encode_json_records(
     } else {
         Some(encode_json_batch(
             &key_batch,
-            options,
+            key_options,
             &project_types(key_fields),
             &project_names(key_fields),
         )?)
@@ -1689,6 +1690,9 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_en
     ignore_null_fields: jboolean,
     timestamp_format: JString<'local>,
     decimal_as_plain_number: jboolean,
+    key_ignore_null_fields: jboolean,
+    key_timestamp_format: JString<'local>,
+    key_decimal_as_plain_number: jboolean,
     logical_types: JObjectArray<'local>,
     field_names: JObjectArray<'local>,
     key_fields: JIntArray<'local>,
@@ -1703,6 +1707,12 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_en
             &timestamp_format,
             decimal_as_plain_number,
         )?;
+        let key_options = read_json_encode_options(
+            env,
+            key_ignore_null_fields,
+            &key_timestamp_format,
+            key_decimal_as_plain_number,
+        )?;
         let logical_types = read_string_array(env, &logical_types);
         let field_names = read_string_array(env, &field_names);
         let key_fields = read_int_array(env, &key_fields)
@@ -1716,6 +1726,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_en
         let records = encode_json_records(
             &batch,
             &options,
+            &key_options,
             &logical_types,
             &field_names,
             &key_fields,
@@ -2465,6 +2476,9 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_pr
     ignore_null_fields: jboolean,
     timestamp_format: JString<'local>,
     decimal_as_plain_number: jboolean,
+    key_ignore_null_fields: jboolean,
+    key_timestamp_format: JString<'local>,
+    key_decimal_as_plain_number: jboolean,
     logical_types: JObjectArray<'local>,
     field_names: JObjectArray<'local>,
     key_fields: JIntArray<'local>,
@@ -2484,6 +2498,12 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_pr
             &timestamp_format,
             decimal_as_plain_number,
         )?;
+        let key_options = read_json_encode_options(
+            env,
+            key_ignore_null_fields,
+            &key_timestamp_format,
+            key_decimal_as_plain_number,
+        )?;
         let logical_types = read_string_array(env, &logical_types);
         let field_names = read_string_array(env, &field_names);
         let key_fields = read_int_array(env, &key_fields)
@@ -2497,6 +2517,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_pr
         let records = encode_json_records(
             &batch,
             &options,
+            &key_options,
             &logical_types,
             &field_names,
             &key_fields,

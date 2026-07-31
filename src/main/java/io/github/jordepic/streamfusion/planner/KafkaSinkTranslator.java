@@ -43,6 +43,7 @@ final class KafkaSinkTranslator {
     final TransactionNamingStrategy transactionNamingStrategy;
     final Integer parallelism;
     final Map<String, String> jsonOptions;
+    final Map<String, String> keyJsonOptions;
     final boolean upsert;
     final KafkaProducerConfigTranslator.Result nativeProducerConfig;
 
@@ -54,6 +55,7 @@ final class KafkaSinkTranslator {
         TransactionNamingStrategy transactionNamingStrategy,
         Integer parallelism,
         Map<String, String> jsonOptions,
+        Map<String, String> keyJsonOptions,
         boolean upsert,
         KafkaProducerConfigTranslator.Result nativeProducerConfig) {
       this.topic = topic;
@@ -63,6 +65,7 @@ final class KafkaSinkTranslator {
       this.transactionNamingStrategy = transactionNamingStrategy;
       this.parallelism = parallelism;
       this.jsonOptions = jsonOptions;
+      this.keyJsonOptions = keyJsonOptions;
       this.upsert = upsert;
       this.nativeProducerConfig = nativeProducerConfig;
     }
@@ -143,13 +146,19 @@ final class KafkaSinkTranslator {
       }
     }
 
+    // Flink configures the key and value formats as two independent format instances: value
+    // options live under `json.` / `value.json.`, key options only under `key.json.` (with the
+    // format factory's own defaults when absent, never the value's settings).
     Map<String, String> jsonOptions = new LinkedHashMap<>();
+    Map<String, String> keyJsonOptions = new LinkedHashMap<>();
     options.forEach(
         (key, value) -> {
           if (key.startsWith("json.")) {
             jsonOptions.put(key.substring("json.".length()), value);
           } else if (key.startsWith("value.json.")) {
             jsonOptions.put(key.substring("value.json.".length()), value);
+          } else if (key.startsWith("key.json.")) {
+            keyJsonOptions.put(key.substring("key.json.".length()), value);
           }
         });
     Integer parallelism =
@@ -165,6 +174,7 @@ final class KafkaSinkTranslator {
             naming,
             parallelism,
             jsonOptions,
+            keyJsonOptions,
             upsert,
             nativeProducerConfig));
   }

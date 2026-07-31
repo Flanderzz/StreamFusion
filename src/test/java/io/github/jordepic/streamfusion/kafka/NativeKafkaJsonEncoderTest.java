@@ -2,6 +2,7 @@ package io.github.jordepic.streamfusion.kafka;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 import io.github.jordepic.streamfusion.operator.RowDataArrowConverter;
 import java.math.BigDecimal;
@@ -38,6 +39,7 @@ import org.apache.flink.table.types.logical.TimeType;
 import org.apache.flink.table.types.logical.TimestampType;
 import org.apache.flink.table.types.logical.VarBinaryType;
 import org.apache.flink.table.types.logical.VarCharType;
+import org.apache.flink.types.RowKind;
 import org.apache.flink.util.SimpleUserCodeClassLoader;
 import org.apache.flink.util.UserCodeClassLoader;
 import org.junit.jupiter.api.Tag;
@@ -183,6 +185,80 @@ class NativeKafkaJsonEncoderTest {
 
     assertMatchesFlink(rows, scalars, TimestampFormat.SQL, false);
     assertMatchesFlink(rows, scalars, TimestampFormat.ISO_8601, false);
+  }
+
+  /**
+   * The upsert key format is its own format instance in Flink, configured solely from {@code
+   * key.json.*} (or that format's defaults) — never from the value's settings. The referee builds
+   * Flink's key and value serializers the way the upsert-kafka factory would, with deliberately
+   * conflicting options, and diffs both byte streams.
+   */
+  @Test
+  void honorsKeyFormatOptionsIndependentlyOfValueOptions() throws Exception {
+    RowType rowType =
+        RowType.of(
+            new LogicalType[] {
+              new DecimalType(10, 2), new TimestampType(3), new VarCharType(VarCharType.MAX_LENGTH)
+            },
+            new String[] {"amount", "ts", "name"});
+    RowType keyType =
+        RowType.of(
+            new LogicalType[] {new DecimalType(10, 2), new TimestampType(3)},
+            new String[] {"amount", "ts"});
+    DecimalData amount = DecimalData.fromBigDecimal(new BigDecimal("100.00"), 10, 2);
+    TimestampData ts = TimestampData.fromEpochMillis(1_577_934_245_500L);
+    GenericRowData insert = GenericRowData.of(amount, ts, StringData.fromString("one"));
+    GenericRowData delete = GenericRowData.of(amount, ts, StringData.fromString("one"));
+    delete.setRowKind(RowKind.DELETE);
+    List<RowData> rows = List.of(insert, delete);
+
+    JsonRowDataSerializationSchema flinkKey =
+        new JsonRowDataSerializationSchema(
+            keyType,
+            TimestampFormat.ISO_8601,
+            JsonFormatOptions.MapNullKeyMode.LITERAL,
+            "null",
+            true,
+            false);
+    flinkKey.open(initializationContext());
+    JsonRowDataSerializationSchema flinkValue =
+        new JsonRowDataSerializationSchema(
+            rowType,
+            TimestampFormat.SQL,
+            JsonFormatOptions.MapNullKeyMode.LITERAL,
+            "null",
+            false,
+            false);
+    flinkValue.open(initializationContext());
+
+    try (BufferAllocator allocator = new RootAllocator();
+        CDataDictionaryProvider dictionaries = new CDataDictionaryProvider();
+        VectorSchemaRoot root = RowDataArrowConverter.write(rows, rowType, allocator, true);
+        ArrowArray array = ArrowArray.allocateNew(allocator);
+        ArrowSchema schema = ArrowSchema.allocateNew(allocator)) {
+      Data.exportVectorSchemaRoot(allocator, root, dictionaries, array, schema);
+      byte[][][] records =
+          NativeKafka.encodeKafkaJsonRecords(
+              array.memoryAddress(),
+              schema.memoryAddress(),
+              false,
+              "SQL",
+              false,
+              false,
+              "ISO-8601",
+              true,
+              rowType.getChildren().stream().map(Object::toString).toArray(String[]::new),
+              rowType.getFieldNames().toArray(String[]::new),
+              new int[] {0, 1},
+              new int[] {0, 1, 2},
+              true);
+
+      byte[] expectedKey = flinkKey.serialize(GenericRowData.of(amount, ts));
+      assertArrayEquals(expectedKey, records[0][0]);
+      assertArrayEquals(expectedKey, records[0][1]);
+      assertArrayEquals(flinkValue.serialize(insert), records[1][0]);
+      assertNull(records[1][1]);
+    }
   }
 
   private static void assertMatchesFlink(List<RowData> rows, boolean ignoreNullFields)

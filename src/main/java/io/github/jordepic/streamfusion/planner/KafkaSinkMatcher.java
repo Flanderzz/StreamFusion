@@ -24,6 +24,7 @@ final class KafkaSinkMatcher {
     final RowType rowType;
     final KafkaSinkTranslator.Planned sink;
     final JsonEncodeOptions json;
+    final JsonEncodeOptions keyJson;
     final int[] keyFields;
     final int[] valueFields;
     final boolean upsert;
@@ -33,6 +34,7 @@ final class KafkaSinkMatcher {
         RowType rowType,
         KafkaSinkTranslator.Planned sink,
         JsonEncodeOptions json,
+        JsonEncodeOptions keyJson,
         int[] keyFields,
         int[] valueFields,
         boolean upsert,
@@ -40,6 +42,7 @@ final class KafkaSinkMatcher {
       this.rowType = rowType;
       this.sink = sink;
       this.json = json;
+      this.keyJson = keyJson;
       this.keyFields = keyFields;
       this.valueFields = valueFields;
       this.upsert = upsert;
@@ -47,7 +50,7 @@ final class KafkaSinkMatcher {
     }
 
     private static Planned fallback(String reason) {
-      return new Planned(null, null, null, null, null, false, reason);
+      return new Planned(null, null, null, null, null, null, false, reason);
     }
   }
 
@@ -86,6 +89,8 @@ final class KafkaSinkMatcher {
       }
     }
     JsonEncodeOptions json = JsonEncodeOptions.fromFormatOptions(translated.planned().jsonOptions);
+    JsonEncodeOptions keyJson =
+        JsonEncodeOptions.fromFormatOptions(translated.planned().keyJsonOptions);
     int[] valueFields = IntStream.range(0, rowType.getFieldCount()).toArray();
     int[] keyFields = new int[0];
     if (translated.planned().upsert) {
@@ -98,6 +103,7 @@ final class KafkaSinkMatcher {
         rowType,
         translated.planned(),
         json,
+        keyJson,
         keyFields,
         valueFields,
         translated.planned().upsert,

@@ -65,6 +65,7 @@ public final class NativeKafkaExactlyOnceSink
   private final long maxBlockMs;
   private final int maxRequestSize;
   private final JsonEncodeOptions json;
+  private final JsonEncodeOptions keyJson;
   private final String[] logicalTypes;
   private final String[] fieldNames;
   private final int[] keyFields;
@@ -83,6 +84,7 @@ public final class NativeKafkaExactlyOnceSink
       long maxBlockMs,
       int maxRequestSize,
       JsonEncodeOptions json,
+      JsonEncodeOptions keyJson,
       String[] logicalTypes,
       String[] fieldNames,
       int[] keyFields,
@@ -95,6 +97,7 @@ public final class NativeKafkaExactlyOnceSink
     this.maxBlockMs = maxBlockMs;
     this.maxRequestSize = maxRequestSize;
     this.json = json;
+    this.keyJson = keyJson;
     this.logicalTypes = logicalTypes.clone();
     this.fieldNames = fieldNames.clone();
     this.keyFields = keyFields.clone();
@@ -239,6 +242,9 @@ public final class NativeKafkaExactlyOnceSink
                   json.ignoreNullFields,
                   json.timestampFormat,
                   json.decimalAsPlainNumber,
+                  keyJson.ignoreNullFields,
+                  keyJson.timestampFormat,
+                  keyJson.decimalAsPlainNumber,
                   logicalTypes,
                   fieldNames,
                   keyFields,

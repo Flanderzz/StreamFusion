@@ -47,6 +47,26 @@ class KafkaSinkTranslatorTest {
   }
 
   @Test
+  void collectsKeyAndValueFormatOptionsSeparately() {
+    KafkaSinkTranslator.Result result =
+        KafkaSinkTranslator.translate(
+            Map.of(
+                "connector", "upsert-kafka",
+                "topic", "output",
+                "properties.bootstrap.servers", "broker:9092",
+                "key.format", "json",
+                "value.format", "json",
+                "key.json.timestamp-format.standard", "ISO-8601",
+                "value.json.encode.decimal-as-plain-number", "true"));
+
+    assertTrue(result.fallbackReason == null, () -> result.fallbackReason);
+    assertEquals(
+        Map.of("timestamp-format.standard", "ISO-8601"), result.planned().keyJsonOptions);
+    assertEquals(
+        Map.of("encode.decimal-as-plain-number", "true"), result.planned().jsonOptions);
+  }
+
+  @Test
   void requiresAStableTransactionalPrefixForExactlyOnce() {
     KafkaSinkTranslator.Result result =
         KafkaSinkTranslator.translate(

@@ -64,6 +64,7 @@ public final class NativeKafkaSinkExecNode extends ExecNodeBase<Object>
               planned.sink.nativeProducerConfig.maxBlockMs(),
               planned.sink.nativeProducerConfig.maxRequestSize(),
               planned.json,
+              planned.keyJson,
               planned.rowType.getChildren().stream().map(Object::toString).toArray(String[]::new),
               planned.rowType.getFieldNames().toArray(String[]::new),
               planned.keyFields,
@@ -88,6 +89,7 @@ public final class NativeKafkaSinkExecNode extends ExecNodeBase<Object>
             SimpleOperatorFactory.of(
                 new NativeKafkaJsonSerializationOperator(
                     planned.json,
+                    planned.keyJson,
                     planned.rowType.getChildren().stream()
                         .map(Object::toString)
                         .toArray(String[]::new),

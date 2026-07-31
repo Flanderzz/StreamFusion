@@ -42,6 +42,7 @@ class NativeKafkaJsonSerializationOperatorTest {
             new OneInputStreamOperatorTestHarness<>(
                 new NativeKafkaJsonSerializationOperator(
                     new JsonEncodeOptions("SQL", false, false),
+                    new JsonEncodeOptions("SQL", false, false),
                     rowType.getChildren().stream().map(Object::toString).toArray(String[]::new),
                     rowType.getFieldNames().toArray(String[]::new),
                     new int[0],
@@ -82,6 +83,7 @@ class NativeKafkaJsonSerializationOperatorTest {
         OneInputStreamOperatorTestHarness<ArrowBatch, PreSerializedKafkaRecord> harness =
             new OneInputStreamOperatorTestHarness<>(
                 new NativeKafkaJsonSerializationOperator(
+                    new JsonEncodeOptions("SQL", false, false),
                     new JsonEncodeOptions("SQL", false, false),
                     rowType.getChildren().stream().map(Object::toString).toArray(String[]::new),
                     rowType.getFieldNames().toArray(String[]::new),
@@ -146,6 +148,7 @@ class NativeKafkaJsonSerializationOperatorTest {
         OneInputStreamOperatorTestHarness<ArrowBatch, PreSerializedKafkaRecord> harness =
             new OneInputStreamOperatorTestHarness<>(
                 new NativeKafkaJsonSerializationOperator(
+                    new JsonEncodeOptions("SQL", false, false),
                     new JsonEncodeOptions("SQL", false, false),
                     rowType.getChildren().stream().map(Object::toString).toArray(String[]::new),
                     rowType.getFieldNames().toArray(String[]::new),
