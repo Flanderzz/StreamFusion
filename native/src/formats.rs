@@ -1173,28 +1173,98 @@ pub extern "C" fn streamfusion_format_driver_init(version: i32, driver: *mut For
 // decoder implementation remains shared in this crate, but the symbols below are compiled only into the
 // corresponding extension build; loading a format JAR therefore cannot accidentally make a connector
 // or the core artifact provide that format.
+//
+// Four of the five facade entry points are identical across formats — only the exported class name
+// differs — so one macro stamps them per artifact. Each format keeps its own `createDecoder` (and
+// avro its schema registration), the one place the Java signatures genuinely diverge.
+macro_rules! format_jni_facade {
+    (
+        $feature:literal,
+        $driver_init_address:ident,
+        $is_loaded:ident,
+        $decode_into:ident,
+        $close_decoder:ident
+    ) => {
+        #[cfg(feature = $feature)]
+        #[no_mangle]
+        pub extern "system" fn $driver_init_address<'local>(
+            env: JNIEnv<'local>,
+            _class: JClass<'local>,
+        ) -> jlong {
+            crate::bridge::jni_guard(env, move |_env| {
+                streamfusion_format_driver_init as usize as jlong
+            })
+        }
 
-#[cfg(feature = "json")]
-#[no_mangle]
-pub extern "system" fn Java_io_github_jordepic_streamfusion_format_json_NativeJsonFormat_driverInitAddress<'local>(
-    env: JNIEnv<'local>,
-    _class: JClass<'local>,
-) -> jlong {
-    crate::bridge::jni_guard(env, move |_env| {
-        streamfusion_format_driver_init as usize as jlong
-    })
+        #[cfg(feature = $feature)]
+        #[no_mangle]
+        pub extern "system" fn $is_loaded<'local>(
+            env: JNIEnv<'local>,
+            _class: JClass<'local>,
+        ) -> jboolean {
+            crate::bridge::jni_guard(env, move |_env| 1)
+        }
+
+        #[cfg(feature = $feature)]
+        #[no_mangle]
+        pub extern "system" fn $decode_into<'local>(
+            env: JNIEnv<'local>, class: JClass<'local>, handle: jlong, in_array: jlong,
+            in_schema: jlong, out_array: jlong, out_schema: jlong,
+        ) {
+            Java_io_github_jordepic_streamfusion_Native_decodeInto(
+                env, class, handle, in_array, in_schema, out_array, out_schema,
+            )
+        }
+
+        #[cfg(feature = $feature)]
+        #[no_mangle]
+        pub extern "system" fn $close_decoder<'local>(
+            env: JNIEnv<'local>, class: JClass<'local>, handle: jlong,
+        ) {
+            Java_io_github_jordepic_streamfusion_Native_closeDecoder(env, class, handle)
+        }
+    };
 }
 
-#[cfg(feature = "json")]
-#[no_mangle]
-pub extern "system" fn Java_io_github_jordepic_streamfusion_format_json_NativeJsonFormat_isLoaded<'local>(
-    env: JNIEnv<'local>,
-    _class: JClass<'local>,
-) -> jboolean {
-    crate::bridge::jni_guard(env, move |_env| {
-        1
-    })
-}
+format_jni_facade!(
+    "json",
+    Java_io_github_jordepic_streamfusion_format_json_NativeJsonFormat_driverInitAddress,
+    Java_io_github_jordepic_streamfusion_format_json_NativeJsonFormat_isLoaded,
+    Java_io_github_jordepic_streamfusion_format_json_NativeJsonFormat_decodeInto,
+    Java_io_github_jordepic_streamfusion_format_json_NativeJsonFormat_closeDecoder
+);
+
+format_jni_facade!(
+    "csv",
+    Java_io_github_jordepic_streamfusion_format_csv_NativeCsvFormat_driverInitAddress,
+    Java_io_github_jordepic_streamfusion_format_csv_NativeCsvFormat_isLoaded,
+    Java_io_github_jordepic_streamfusion_format_csv_NativeCsvFormat_decodeInto,
+    Java_io_github_jordepic_streamfusion_format_csv_NativeCsvFormat_closeDecoder
+);
+
+format_jni_facade!(
+    "raw",
+    Java_io_github_jordepic_streamfusion_format_raw_NativeRawFormat_driverInitAddress,
+    Java_io_github_jordepic_streamfusion_format_raw_NativeRawFormat_isLoaded,
+    Java_io_github_jordepic_streamfusion_format_raw_NativeRawFormat_decodeInto,
+    Java_io_github_jordepic_streamfusion_format_raw_NativeRawFormat_closeDecoder
+);
+
+format_jni_facade!(
+    "avro",
+    Java_io_github_jordepic_streamfusion_format_avro_NativeAvroFormat_driverInitAddress,
+    Java_io_github_jordepic_streamfusion_format_avro_NativeAvroFormat_isLoaded,
+    Java_io_github_jordepic_streamfusion_format_avro_NativeAvroFormat_decodeInto,
+    Java_io_github_jordepic_streamfusion_format_avro_NativeAvroFormat_closeDecoder
+);
+
+format_jni_facade!(
+    "protobuf",
+    Java_io_github_jordepic_streamfusion_format_protobuf_NativeProtobufFormat_driverInitAddress,
+    Java_io_github_jordepic_streamfusion_format_protobuf_NativeProtobufFormat_isLoaded,
+    Java_io_github_jordepic_streamfusion_format_protobuf_NativeProtobufFormat_decodeInto,
+    Java_io_github_jordepic_streamfusion_format_protobuf_NativeProtobufFormat_closeDecoder
+);
 
 #[cfg(feature = "json")]
 #[no_mangle]
@@ -1223,47 +1293,6 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_format_json_NativeJs
     )
 }
 
-#[cfg(feature = "json")]
-#[no_mangle]
-pub extern "system" fn Java_io_github_jordepic_streamfusion_format_json_NativeJsonFormat_decodeInto<'local>(
-    env: JNIEnv<'local>, class: JClass<'local>, handle: jlong, in_array: jlong, in_schema: jlong,
-    out_array: jlong, out_schema: jlong,
-) {
-    Java_io_github_jordepic_streamfusion_Native_decodeInto(
-        env, class, handle, in_array, in_schema, out_array, out_schema,
-    )
-}
-
-#[cfg(feature = "json")]
-#[no_mangle]
-pub extern "system" fn Java_io_github_jordepic_streamfusion_format_json_NativeJsonFormat_closeDecoder<'local>(
-    env: JNIEnv<'local>, class: JClass<'local>, handle: jlong,
-) {
-    Java_io_github_jordepic_streamfusion_Native_closeDecoder(env, class, handle)
-}
-
-#[cfg(feature = "csv")]
-#[no_mangle]
-pub extern "system" fn Java_io_github_jordepic_streamfusion_format_csv_NativeCsvFormat_driverInitAddress<'local>(
-    env: JNIEnv<'local>,
-    _class: JClass<'local>,
-) -> jlong {
-    crate::bridge::jni_guard(env, move |_env| {
-        streamfusion_format_driver_init as usize as jlong
-    })
-}
-
-#[cfg(feature = "csv")]
-#[no_mangle]
-pub extern "system" fn Java_io_github_jordepic_streamfusion_format_csv_NativeCsvFormat_isLoaded<'local>(
-    env: JNIEnv<'local>,
-    _class: JClass<'local>,
-) -> jboolean {
-    crate::bridge::jni_guard(env, move |_env| {
-        1
-    })
-}
-
 #[cfg(feature = "csv")]
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_format_csv_NativeCsvFormat_createDecoder<'local>(
@@ -1278,47 +1307,6 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_format_csv_NativeCsv
     )
 }
 
-#[cfg(feature = "csv")]
-#[no_mangle]
-pub extern "system" fn Java_io_github_jordepic_streamfusion_format_csv_NativeCsvFormat_decodeInto<'local>(
-    env: JNIEnv<'local>, class: JClass<'local>, handle: jlong, in_array: jlong, in_schema: jlong,
-    out_array: jlong, out_schema: jlong,
-) {
-    Java_io_github_jordepic_streamfusion_Native_decodeInto(
-        env, class, handle, in_array, in_schema, out_array, out_schema,
-    )
-}
-
-#[cfg(feature = "csv")]
-#[no_mangle]
-pub extern "system" fn Java_io_github_jordepic_streamfusion_format_csv_NativeCsvFormat_closeDecoder<'local>(
-    env: JNIEnv<'local>, class: JClass<'local>, handle: jlong,
-) {
-    Java_io_github_jordepic_streamfusion_Native_closeDecoder(env, class, handle)
-}
-
-#[cfg(feature = "raw")]
-#[no_mangle]
-pub extern "system" fn Java_io_github_jordepic_streamfusion_format_raw_NativeRawFormat_driverInitAddress<'local>(
-    env: JNIEnv<'local>,
-    _class: JClass<'local>,
-) -> jlong {
-    crate::bridge::jni_guard(env, move |_env| {
-        streamfusion_format_driver_init as usize as jlong
-    })
-}
-
-#[cfg(feature = "raw")]
-#[no_mangle]
-pub extern "system" fn Java_io_github_jordepic_streamfusion_format_raw_NativeRawFormat_isLoaded<'local>(
-    env: JNIEnv<'local>,
-    _class: JClass<'local>,
-) -> jboolean {
-    crate::bridge::jni_guard(env, move |_env| {
-        1
-    })
-}
-
 #[cfg(feature = "raw")]
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_format_raw_NativeRawFormat_createDecoder<'local>(
@@ -1331,47 +1319,6 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_format_raw_NativeRaw
         env, class, 3, schema_array_address, schema_address, empty_writer, empty_reader, 0, 0,
         empty_options,
     )
-}
-
-#[cfg(feature = "raw")]
-#[no_mangle]
-pub extern "system" fn Java_io_github_jordepic_streamfusion_format_raw_NativeRawFormat_decodeInto<'local>(
-    env: JNIEnv<'local>, class: JClass<'local>, handle: jlong, in_array: jlong, in_schema: jlong,
-    out_array: jlong, out_schema: jlong,
-) {
-    Java_io_github_jordepic_streamfusion_Native_decodeInto(
-        env, class, handle, in_array, in_schema, out_array, out_schema,
-    )
-}
-
-#[cfg(feature = "raw")]
-#[no_mangle]
-pub extern "system" fn Java_io_github_jordepic_streamfusion_format_raw_NativeRawFormat_closeDecoder<'local>(
-    env: JNIEnv<'local>, class: JClass<'local>, handle: jlong,
-) {
-    Java_io_github_jordepic_streamfusion_Native_closeDecoder(env, class, handle)
-}
-
-#[cfg(feature = "avro")]
-#[no_mangle]
-pub extern "system" fn Java_io_github_jordepic_streamfusion_format_avro_NativeAvroFormat_driverInitAddress<'local>(
-    env: JNIEnv<'local>,
-    _class: JClass<'local>,
-) -> jlong {
-    crate::bridge::jni_guard(env, move |_env| {
-        streamfusion_format_driver_init as usize as jlong
-    })
-}
-
-#[cfg(feature = "avro")]
-#[no_mangle]
-pub extern "system" fn Java_io_github_jordepic_streamfusion_format_avro_NativeAvroFormat_isLoaded<'local>(
-    env: JNIEnv<'local>,
-    _class: JClass<'local>,
-) -> jboolean {
-    crate::bridge::jni_guard(env, move |_env| {
-        1
-    })
 }
 
 #[cfg(feature = "avro")]
@@ -1403,47 +1350,6 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_format_avro_NativeAv
     Java_io_github_jordepic_streamfusion_Native_registerAvroSchema(env, class, handle, schema_id, schema)
 }
 
-#[cfg(feature = "avro")]
-#[no_mangle]
-pub extern "system" fn Java_io_github_jordepic_streamfusion_format_avro_NativeAvroFormat_decodeInto<'local>(
-    env: JNIEnv<'local>, class: JClass<'local>, handle: jlong, in_array: jlong, in_schema: jlong,
-    out_array: jlong, out_schema: jlong,
-) {
-    Java_io_github_jordepic_streamfusion_Native_decodeInto(
-        env, class, handle, in_array, in_schema, out_array, out_schema,
-    )
-}
-
-#[cfg(feature = "avro")]
-#[no_mangle]
-pub extern "system" fn Java_io_github_jordepic_streamfusion_format_avro_NativeAvroFormat_closeDecoder<'local>(
-    env: JNIEnv<'local>, class: JClass<'local>, handle: jlong,
-) {
-    Java_io_github_jordepic_streamfusion_Native_closeDecoder(env, class, handle)
-}
-
-#[cfg(feature = "protobuf")]
-#[no_mangle]
-pub extern "system" fn Java_io_github_jordepic_streamfusion_format_protobuf_NativeProtobufFormat_driverInitAddress<'local>(
-    env: JNIEnv<'local>,
-    _class: JClass<'local>,
-) -> jlong {
-    crate::bridge::jni_guard(env, move |_env| {
-        streamfusion_format_driver_init as usize as jlong
-    })
-}
-
-#[cfg(feature = "protobuf")]
-#[no_mangle]
-pub extern "system" fn Java_io_github_jordepic_streamfusion_format_protobuf_NativeProtobufFormat_isLoaded<'local>(
-    env: JNIEnv<'local>,
-    _class: JClass<'local>,
-) -> jboolean {
-    crate::bridge::jni_guard(env, move |_env| {
-        1
-    })
-}
-
 #[cfg(feature = "protobuf")]
 #[no_mangle]
 pub extern "system" fn Java_io_github_jordepic_streamfusion_format_protobuf_NativeProtobufFormat_createDecoder<'local>(
@@ -1453,25 +1359,6 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_format_protobuf_Nati
     Java_io_github_jordepic_streamfusion_Native_createProtobufDecoder(
         env, class, descriptor, message_name, schema_array_address, schema_address,
     )
-}
-
-#[cfg(feature = "protobuf")]
-#[no_mangle]
-pub extern "system" fn Java_io_github_jordepic_streamfusion_format_protobuf_NativeProtobufFormat_decodeInto<'local>(
-    env: JNIEnv<'local>, class: JClass<'local>, handle: jlong, in_array: jlong, in_schema: jlong,
-    out_array: jlong, out_schema: jlong,
-) {
-    Java_io_github_jordepic_streamfusion_Native_decodeInto(
-        env, class, handle, in_array, in_schema, out_array, out_schema,
-    )
-}
-
-#[cfg(feature = "protobuf")]
-#[no_mangle]
-pub extern "system" fn Java_io_github_jordepic_streamfusion_format_protobuf_NativeProtobufFormat_closeDecoder<'local>(
-    env: JNIEnv<'local>, class: JClass<'local>, handle: jlong,
-) {
-    Java_io_github_jordepic_streamfusion_Native_closeDecoder(env, class, handle)
 }
 
 /// Decodes a binary "body" batch into typed Arrow via arrow-avro against the local schema-id store. When
