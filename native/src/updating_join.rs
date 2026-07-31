@@ -1390,10 +1390,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createUpdatin
             &pred_doubles,
             &pred_strings,
         );
-        let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-            .into_iter()
-            .map(|precision| precision as i32)
-            .collect();
+        let timestamp_precisions = read_i32_array(&env, &key_timestamp_precisions);
         let joiner = UpdatingJoiner::new(
             left,
             right,
@@ -1551,10 +1548,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreUpdati
             &pred_doubles,
             &pred_strings,
         );
-        let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-            .into_iter()
-            .map(|precision| precision as i32)
-            .collect();
+        let timestamp_precisions = read_i32_array(&env, &key_timestamp_precisions);
         let bytes = env.convert_byte_array(&snapshot).expect("failed to read updating-join snapshot");
         let joiner = UpdatingJoiner::restore(
             left,
@@ -1603,10 +1597,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreUpdati
     crate::bridge::jni_guard(env, move |mut env| {
         let left = read_columns(&env, &left_keys);
         let right = read_columns(&env, &right_keys);
-        let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-            .into_iter()
-            .map(|precision| precision as i32)
-            .collect();
+        let timestamp_precisions = read_i32_array(&env, &key_timestamp_precisions);
         let left_schema = import_schema(left_schema_address);
         let right_schema = import_schema(right_schema_address);
         let predicate = read_join_predicate(

@@ -3018,10 +3018,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotWindo
 ) -> jni::sys::jobjectArray {
     crate::bridge::jni_guard(env, move |mut env| {
         let ranker = unsafe { &*(handle as *const WindowRanker) };
-        let precisions: Vec<i32> = read_int_array(&env, &timestamp_precisions)
-            .into_iter()
-            .map(|precision| precision as i32)
-            .collect();
+        let precisions = read_i32_array(&env, &timestamp_precisions);
         keyed_state_partition_array(
             &mut env,
             ranker.snapshot_partitions(max_parallelism as usize, &precisions),
@@ -3121,10 +3118,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createTopNRan
 ) -> jlong {
     crate::bridge::jni_guard(env, move |mut env| {
         let partitions = read_columns(&env, &partition_columns);
-        let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-            .into_iter()
-            .map(|precision| precision as i32)
-            .collect();
+        let timestamp_precisions = read_i32_array(&env, &key_timestamp_precisions);
         let sort = read_sort_columns(&env, &sort_indices, &sort_ascending, &sort_nulls_first);
         let handle = if retracting != 0 {
             TopNHandle::Retract(
@@ -3237,10 +3231,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreTopNRa
 ) -> jlong {
     crate::bridge::jni_guard(env, move |mut env| {
         let partitions = read_columns(&env, &partition_columns);
-        let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-            .into_iter()
-            .map(|precision| precision as i32)
-            .collect();
+        let timestamp_precisions = read_i32_array(&env, &key_timestamp_precisions);
         let sort = read_sort_columns(&env, &sort_indices, &sort_ascending, &sort_nulls_first);
         let bytes = env.convert_byte_array(&snapshot).expect("failed to read top-n snapshot");
         let handle = if retracting != 0 {
@@ -3320,10 +3311,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreTopNRa
 ) -> jlong {
     crate::bridge::jni_guard(env, move |mut env| {
         let partitions = read_columns(&env, &partition_columns);
-        let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-            .into_iter()
-            .map(|precision| precision as i32)
-            .collect();
+        let timestamp_precisions = read_i32_array(&env, &key_timestamp_precisions);
         let sort = read_sort_columns(&env, &sort_indices, &sort_ascending, &sort_nulls_first);
         let count = env
             .get_array_length(&snapshots)
@@ -3380,15 +3368,9 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createUpdateF
 ) -> jlong {
     crate::bridge::jni_guard(env, move |mut env| {
         let partitions = read_columns(&env, &partition_columns);
-        let partition_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-            .into_iter()
-            .map(|precision| precision as i32)
-            .collect();
+        let partition_precisions = read_i32_array(&env, &key_timestamp_precisions);
         let row_keys = read_columns(&env, &row_key_columns);
-        let row_key_precisions: Vec<i32> = read_int_array(&env, &row_key_timestamp_precisions)
-            .into_iter()
-            .map(|precision| precision as i32)
-            .collect();
+        let row_key_precisions = read_i32_array(&env, &row_key_timestamp_precisions);
         let sort = read_sort_columns(&env, &sort_indices, &sort_ascending, &sort_nulls_first);
         let handle = TopNHandle::UpdateFast(
             UpdatableTopNRanker::new(
@@ -3429,15 +3411,9 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreUpdate
 ) -> jlong {
     crate::bridge::jni_guard(env, move |mut env| {
         let partitions = read_columns(&env, &partition_columns);
-        let partition_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-            .into_iter()
-            .map(|precision| precision as i32)
-            .collect();
+        let partition_precisions = read_i32_array(&env, &key_timestamp_precisions);
         let row_keys = read_columns(&env, &row_key_columns);
-        let row_key_precisions: Vec<i32> = read_int_array(&env, &row_key_timestamp_precisions)
-            .into_iter()
-            .map(|precision| precision as i32)
-            .collect();
+        let row_key_precisions = read_i32_array(&env, &row_key_timestamp_precisions);
         let sort = read_sort_columns(&env, &sort_indices, &sort_ascending, &sort_nulls_first);
         let count = env
             .get_array_length(&snapshots)

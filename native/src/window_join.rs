@@ -677,10 +677,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotWindo
 ) -> jni::sys::jobjectArray {
     crate::bridge::jni_guard(env, move |mut env| {
         let joiner = unsafe { &*(handle as *const WindowJoiner) };
-        let precisions: Vec<i32> = read_int_array(&env, &timestamp_precisions)
-            .into_iter()
-            .map(|precision| precision as i32)
-            .collect();
+        let precisions = read_i32_array(&env, &timestamp_precisions);
         keyed_state_partition_array(
             &mut env,
             joiner.snapshot_partitions(max_parallelism as usize, &precisions),

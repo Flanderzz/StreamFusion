@@ -1240,35 +1240,12 @@ mod kafka_error_tests {
     }
 }
 
-/// Contains native failures at the JNI boundary and turns them into the checked exception the
-/// FLIP-27 split-reader contract expects. This follows the same boundary discipline as Comet: no
-/// Rust panic may unwind through a JVM native frame.
 #[cfg(feature = "kafka")]
 fn kafka_jni<T, F>(env: &mut JNIEnv, default: T, f: F) -> T
 where
     F: FnOnce(&mut JNIEnv) -> Result<T, String>,
 {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(env))) {
-        Ok(Ok(value)) => value,
-        Ok(Err(message)) => {
-            let _ = env.throw_new("java/io/IOException", message);
-            default
-        }
-        Err(payload) => {
-            let message = if let Some(message) = payload.downcast_ref::<&str>() {
-                (*message).to_string()
-            } else if let Some(message) = payload.downcast_ref::<String>() {
-                message.clone()
-            } else {
-                "unknown panic".to_string()
-            };
-            let _ = env.throw_new(
-                "java/io/IOException",
-                format!("native Kafka reader panic: {message}"),
-            );
-            default
-        }
-    }
+    connector_jni(env, default, "native Kafka reader panic", f)
 }
 
 /// Whether this extension library carries the native Kafka source.

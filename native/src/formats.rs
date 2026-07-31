@@ -1094,18 +1094,10 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_decodeInto<'l
         Err(panic) => {
             let _ = env.throw_new(
                 "java/lang/RuntimeException",
-                format!("native decode failed: {}", panic_message(&panic)),
+                format!("native decode failed: {}", panic_message(panic)),
             );
         }
     }
-}
-
-pub(crate) fn panic_message(panic: &Box<dyn std::any::Any + Send>) -> &str {
-    panic
-        .downcast_ref::<String>()
-        .map(String::as_str)
-        .or_else(|| panic.downcast_ref::<&str>().copied())
-        .unwrap_or("panic")
 }
 
 /// Benchmark-only: decode a body batch and return the decoded row count without exporting the result —

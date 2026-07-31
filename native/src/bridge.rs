@@ -121,6 +121,29 @@ pub(crate) fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
+/// Contains native connector failures at the JNI boundary and turns them into the checked
+/// `java.io.IOException` the FLIP-27 split-reader contract expects — an explicit `Err` as-is, a
+/// panic prefixed with the connector's name. Same boundary discipline as `jni_guard`: no Rust
+/// panic may unwind through a JVM native frame.
+#[cfg(any(feature = "kafka", feature = "fluss"))]
+pub(crate) fn connector_jni<T, F>(env: &mut JNIEnv, default: T, prefix: &str, f: F) -> T
+where
+    F: FnOnce(&mut JNIEnv) -> Result<T, String>,
+{
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(env))) {
+        Ok(Ok(value)) => value,
+        Ok(Err(message)) => {
+            let _ = env.throw_new("java/io/IOException", message);
+            default
+        }
+        Err(payload) => {
+            let _ = env
+                .throw_new("java/io/IOException", format!("{prefix}: {}", panic_message(payload)));
+            default
+        }
+    }
+}
+
 /// Frames every raw keyed-state payload with its big-endian Flink key-group id and returns the
 /// partitions as one JNI object array. This keeps checkpoint partitioning to one native pass and
 /// lets Java stream each payload directly into Flink's keyed-state output.
@@ -482,12 +505,17 @@ pub(crate) fn boxed_or_throw<T>(env: &mut JNIEnv, operator: Result<T, DataFusion
     }
 }
 
-/// Reads a JVM int[] (aggregate kinds or per-aggregate value-type codes) into a Vec.
-pub(crate) fn read_int_array(env: &JNIEnv, array: &JIntArray) -> Vec<i64> {
+/// Reads a JVM int[] into a Vec.
+pub(crate) fn read_i32_array(env: &JNIEnv, array: &JIntArray) -> Vec<i32> {
     let length = env.get_array_length(array).expect("failed to read int array length");
     let mut buffer = vec![0i32; length as usize];
     env.get_int_array_region(array, 0, &mut buffer).expect("failed to read int array");
-    buffer.into_iter().map(i64::from).collect()
+    buffer
+}
+
+/// Reads a JVM int[] (aggregate kinds or per-aggregate value-type codes) widened into a Vec<i64>.
+pub(crate) fn read_int_array(env: &JNIEnv, array: &JIntArray) -> Vec<i64> {
+    read_i32_array(env, array).into_iter().map(i64::from).collect()
 }
 
 /// Reads a JVM double[] into a Vec.
@@ -525,7 +553,7 @@ pub(crate) fn read_strings(env: &mut JNIEnv, values: &JObjectArray) -> Vec<Optio
 
 /// Reads a JVM int[] of column indices into a Vec.
 pub(crate) fn read_columns(env: &JNIEnv, columns: &JIntArray) -> Vec<usize> {
-    read_int_array(env, columns).into_iter().map(|c| c as usize).collect()
+    read_i32_array(env, columns).into_iter().map(|c| c as usize).collect()
 }
 
 /// Reads a JVM String[] into a Vec<String>.

@@ -86,10 +86,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonG
         let count_columns = read_int_array(&env, &count_columns);
         let distinct_view_columns = read_int_array(&env, &distinct_view_columns);
         let key_columns = read_columns(&env, &key_columns);
-        let key_timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-            .into_iter()
-            .map(|precision| precision as i32)
-            .collect();
+        let key_timestamp_precisions = read_i32_array(&env, &key_timestamp_precisions);
         let table_dir = read_string(&mut env, &table_directory);
         let format = read_string(&mut env, &file_format);
         let compression = read_string(&mut env, &file_compression);
@@ -310,10 +307,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonK
 ) -> jlong {
     crate::bridge::jni_guard(env, move |mut env| {
         let partitions = read_columns(&env, &partition_columns);
-        let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-            .into_iter()
-            .map(|precision| precision as i32)
-            .collect();
+        let timestamp_precisions = read_i32_array(&env, &key_timestamp_precisions);
         let row_types: Vec<DataType> = import_schema(row_schema_address)
             .fields()
             .iter()
@@ -522,10 +516,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonK
 ) -> jlong {
     crate::bridge::jni_guard(env, move |mut env| {
         let partitions = read_columns(&env, &partition_columns);
-        let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-            .into_iter()
-            .map(|precision| precision as i32)
-            .collect();
+        let timestamp_precisions = read_i32_array(&env, &key_timestamp_precisions);
         let row_types: Vec<DataType> = import_schema(row_schema_address)
             .fields()
             .iter()
@@ -702,10 +693,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonC
 ) -> jlong {
     crate::bridge::jni_guard(env, move |mut env| {
         let keys = read_columns(&env, &key_columns);
-        let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-            .into_iter()
-            .map(|precision| precision as i32)
-            .collect();
+        let timestamp_precisions = read_i32_array(&env, &key_timestamp_precisions);
         let row_types: Vec<DataType> = import_schema(row_schema_address)
             .fields()
             .iter()
@@ -980,10 +968,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonT
 ) -> jlong {
     crate::bridge::jni_guard(env, move |mut env| {
         let partitions = read_columns(&env, &partition_columns);
-        let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-            .into_iter()
-            .map(|precision| precision as i32)
-            .collect();
+        let timestamp_precisions = read_i32_array(&env, &key_timestamp_precisions);
         let sort = read_sort_columns(&env, &sort_indices, &sort_ascending, &sort_nulls_first);
         let row_types: Vec<DataType> = import_schema(row_schema_address)
             .fields()
@@ -1084,15 +1069,9 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonU
 ) -> jlong {
     crate::bridge::jni_guard(env, move |mut env| {
         let partitions = read_columns(&env, &partition_columns);
-        let partition_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-            .into_iter()
-            .map(|precision| precision as i32)
-            .collect();
+        let partition_precisions = read_i32_array(&env, &key_timestamp_precisions);
         let row_keys = read_columns(&env, &row_key_columns);
-        let row_key_precisions: Vec<i32> = read_int_array(&env, &row_key_timestamp_precisions)
-            .into_iter()
-            .map(|precision| precision as i32)
-            .collect();
+        let row_key_precisions = read_i32_array(&env, &row_key_timestamp_precisions);
         let sort = read_sort_columns(&env, &sort_indices, &sort_ascending, &sort_nulls_first);
         let row_types: Vec<DataType> = import_schema(row_schema_address)
             .fields()
@@ -1326,10 +1305,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonU
     crate::bridge::jni_guard(env, move |mut env| {
         let left = read_columns(&env, &left_keys);
         let right = read_columns(&env, &right_keys);
-        let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-            .into_iter()
-            .map(|precision| precision as i32)
-            .collect();
+        let timestamp_precisions = read_i32_array(&env, &key_timestamp_precisions);
         let left_schema = import_schema(left_schema_address);
         let right_schema = import_schema(right_schema_address);
         let predicate = read_join_predicate(
@@ -1642,10 +1618,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonW
 ) -> jlong {
     crate::bridge::jni_guard(env, move |mut env| {
         let partitions = read_columns(&env, &partition_columns);
-        let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-            .into_iter()
-            .map(|precision| precision as i32)
-            .collect();
+        let timestamp_precisions = read_i32_array(&env, &key_timestamp_precisions);
         let sort =
             crate::topn::read_sort_columns(&env, &sort_indices, &sort_ascending, &sort_nulls_first);
         let row_types: Vec<DataType> = import_schema(row_schema_address)
@@ -1922,10 +1895,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonO
         let value_type_codes = read_int_array(&env, &value_types);
         let values = read_columns(&env, &value_columns);
         let keys = read_columns(&env, &key_columns);
-        let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-            .into_iter()
-            .map(|precision| precision as i32)
-            .collect();
+        let timestamp_precisions = read_i32_array(&env, &key_timestamp_precisions);
         let payload_types: Vec<DataType> = import_schema(row_schema_address)
             .fields()
             .iter()
@@ -2229,10 +2199,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonW
             &pred_doubles,
             &pred_strings,
         );
-        let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-            .into_iter()
-            .map(|precision| precision as i32)
-            .collect();
+        let timestamp_precisions = read_i32_array(&env, &key_timestamp_precisions);
         let table_dir = read_string(&mut env, &table_directory);
         let format = read_string(&mut env, &file_format);
         let compression = read_string(&mut env, &file_compression);
@@ -2539,10 +2506,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonT
             .into_iter()
             .map(window_key_data_type)
             .collect();
-        let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-            .into_iter()
-            .map(|precision| precision as i32)
-            .collect();
+        let timestamp_precisions = read_i32_array(&env, &key_timestamp_precisions);
         let state_types: Vec<DataType> = build_aggregates(&kinds, &value_type_codes)
             .iter()
             .flat_map(|a| a.state_fields().into_iter().map(|f| f.data_type().clone()))
@@ -2687,10 +2651,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonS
             .into_iter()
             .map(window_key_data_type)
             .collect();
-        let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-            .into_iter()
-            .map(|precision| precision as i32)
-            .collect();
+        let timestamp_precisions = read_i32_array(&env, &key_timestamp_precisions);
         let state_types: Vec<DataType> = build_aggregates(&kinds, &value_type_codes)
             .iter()
             .flat_map(|a| a.state_fields().into_iter().map(|f| f.data_type().clone()))
@@ -2819,10 +2780,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonI
             &pred_doubles,
             &pred_strings,
         );
-        let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-            .into_iter()
-            .map(|precision| precision as i32)
-            .collect();
+        let timestamp_precisions = read_i32_array(&env, &key_timestamp_precisions);
         let table_dir = read_string(&mut env, &table_directory);
         let format = read_string(&mut env, &file_format);
         let compression = read_string(&mut env, &file_compression);
@@ -3017,10 +2975,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createPaimonT
             &pred_doubles,
             &pred_strings,
         );
-        let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-            .into_iter()
-            .map(|precision| precision as i32)
-            .collect();
+        let timestamp_precisions = read_i32_array(&env, &key_timestamp_precisions);
         let table_dir = read_string(&mut env, &table_directory);
         let format = read_string(&mut env, &file_format);
         let compression = read_string(&mut env, &file_compression);

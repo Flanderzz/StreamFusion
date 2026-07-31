@@ -65,10 +65,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_splitByKey<'l
             .into_iter()
             .map(|k| k as usize)
             .collect();
-        let precisions: Vec<i32> = read_int_array(&env, &timestamp_precisions)
-            .into_iter()
-            .map(|precision| precision as i32)
-            .collect();
+        let precisions = read_i32_array(&env, &timestamp_precisions);
         let partitions = partition_batch(
             &batch,
             &keys,

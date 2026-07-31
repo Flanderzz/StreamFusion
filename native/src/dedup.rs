@@ -1578,10 +1578,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createKeepFir
 ) -> jlong {
     crate::bridge::jni_guard(env, move |mut env| {
         let partitions = read_columns(&env, &partition_columns);
-        let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-            .into_iter()
-            .map(|precision| precision as i32)
-            .collect();
+        let timestamp_precisions = read_i32_array(&env, &key_timestamp_precisions);
         let dedup = KeepFirstDeduplicator::new(partitions, rt_column as usize)
             .with_key_timestamp_precisions(timestamp_precisions)
             .with_state_ttl(state_ttl_millis)
@@ -1699,10 +1696,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotKeepF
 ) -> jni::sys::jobjectArray {
     crate::bridge::jni_guard(env, move |mut env| {
         let dedup = unsafe { &mut *(handle as *mut KeepFirstDeduplicator) };
-        let precisions: Vec<i32> = read_int_array(&env, &timestamp_precisions)
-            .into_iter()
-            .map(|precision| precision as i32)
-            .collect();
+        let precisions = read_i32_array(&env, &timestamp_precisions);
         keyed_state_partition_array(
             &mut env,
             dedup.snapshot_partitions(max_parallelism as usize, &precisions),
@@ -1727,10 +1721,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreKeepFi
 ) -> jlong {
     crate::bridge::jni_guard(env, move |mut env| {
         let partitions = read_columns(&env, &partition_columns);
-        let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-            .into_iter()
-            .map(|precision| precision as i32)
-            .collect();
+        let timestamp_precisions = read_i32_array(&env, &key_timestamp_precisions);
         let count = env
             .get_array_length(&snapshots)
             .expect("read keep-first dedup raw partition count");
@@ -1778,10 +1769,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createKeepLas
 ) -> jlong {
     crate::bridge::jni_guard(env, move |mut env| {
         let partitions = read_columns(&env, &partition_columns);
-        let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-            .into_iter()
-            .map(|precision| precision as i32)
-            .collect();
+        let timestamp_precisions = read_i32_array(&env, &key_timestamp_precisions);
         let dedup = KeepLastDeduplicator::new(
             partitions,
             rt_column as usize,
@@ -1888,10 +1876,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreKeepLa
 ) -> jlong {
     crate::bridge::jni_guard(env, move |mut env| {
         let partitions = read_columns(&env, &partition_columns);
-        let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-            .into_iter()
-            .map(|precision| precision as i32)
-            .collect();
+        let timestamp_precisions = read_i32_array(&env, &key_timestamp_precisions);
         let bytes = env.convert_byte_array(&snapshot).expect("failed to read dedup snapshot");
         let dedup = KeepLastDeduplicator::restore(
             partitions,
@@ -1924,10 +1909,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotKeepL
 ) -> jni::sys::jobjectArray {
     crate::bridge::jni_guard(env, move |mut env| {
         let dedup = unsafe { &mut *(handle as *mut KeepLastDeduplicator) };
-        let precisions: Vec<i32> = read_int_array(&env, &timestamp_precisions)
-            .into_iter()
-            .map(|precision| precision as i32)
-            .collect();
+        let precisions = read_i32_array(&env, &timestamp_precisions);
         keyed_state_partition_array(
             &mut env,
             dedup.snapshot_partitions(max_parallelism as usize, &precisions),
@@ -1958,10 +1940,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreKeepLa
 ) -> jlong {
     crate::bridge::jni_guard(env, move |mut env| {
         let partitions = read_columns(&env, &partition_columns);
-        let timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-            .into_iter()
-            .map(|precision| precision as i32)
-            .collect();
+        let timestamp_precisions = read_i32_array(&env, &key_timestamp_precisions);
         let count = env
             .get_array_length(&snapshots)
             .expect("read keep-last dedup raw partition count");

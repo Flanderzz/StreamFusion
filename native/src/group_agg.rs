@@ -2559,10 +2559,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_createGroupAg
         let count_columns = read_int_array(&env, &count_columns);
         let distinct_view_columns = read_int_array(&env, &distinct_view_columns);
         let key_columns = read_columns(&env, &key_columns);
-        let key_timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-            .into_iter()
-            .map(|precision| precision as i32)
-            .collect();
+        let key_timestamp_precisions = read_i32_array(&env, &key_timestamp_precisions);
         let mut aggregator = GroupAggregator::new(
             kinds,
             value_types,
@@ -2658,10 +2655,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_snapshotGroup
 ) -> jni::sys::jobjectArray {
     crate::bridge::jni_guard(env, move |mut env| {
         let aggregator = unsafe { &mut *(handle as *mut GroupAggregator) };
-        let precisions: Vec<i32> = read_int_array(&env, &timestamp_precisions)
-            .into_iter()
-            .map(|precision| precision as i32)
-            .collect();
+        let precisions = read_i32_array(&env, &timestamp_precisions);
         keyed_state_partition_array(
             &mut env,
             aggregator.snapshot_partitions(max_parallelism as usize, &precisions),
@@ -2701,10 +2695,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreGroupA
         let count_columns = read_int_array(&env, &count_columns);
         let distinct_view_columns = read_int_array(&env, &distinct_view_columns);
         let key_columns = read_columns(&env, &key_columns);
-        let key_timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-            .into_iter()
-            .map(|precision| precision as i32)
-            .collect();
+        let key_timestamp_precisions = read_i32_array(&env, &key_timestamp_precisions);
         let bytes = env
             .convert_byte_array(&snapshot)
             .expect("failed to read group-by snapshot");
@@ -2762,10 +2753,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_restoreGroupA
         let count_columns = read_int_array(&env, &count_columns);
         let distinct_view_columns = read_int_array(&env, &distinct_view_columns);
         let key_columns = read_columns(&env, &key_columns);
-        let key_timestamp_precisions: Vec<i32> = read_int_array(&env, &key_timestamp_precisions)
-            .into_iter()
-            .map(|precision| precision as i32)
-            .collect();
+        let key_timestamp_precisions = read_i32_array(&env, &key_timestamp_precisions);
         let count = env
             .get_array_length(&snapshots)
             .expect("read raw group partition count");

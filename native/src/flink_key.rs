@@ -869,10 +869,7 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_Native_flinkBinaryRo
             .into_iter()
             .map(|index| index as usize)
             .collect();
-        let precisions: Vec<i32> = read_int_array(&env, &timestamp_precisions)
-            .into_iter()
-            .map(|precision| precision as i32)
-            .collect();
+        let precisions = read_i32_array(&env, &timestamp_precisions);
         let mut encoder = BinaryRowBatchEncoder::new(&batch, &columns, &precisions);
         let hashes: Vec<jint> = (0..batch.num_rows()).map(|row| encoder.hash(row)).collect();
         let output = env

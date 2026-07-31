@@ -422,36 +422,7 @@ fn fluss_jni<T, F>(env: &mut JNIEnv, default: T, f: F) -> T
 where
     F: FnOnce(&mut JNIEnv) -> Result<T, String>,
 {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(env))) {
-        Ok(Ok(value)) => value,
-        Ok(Err(message)) => {
-            throw_fluss_exception(env, &message);
-            default
-        }
-        Err(payload) => {
-            throw_fluss_exception(
-                env,
-                &format!("native Fluss reader panic: {}", panic_message(payload)),
-            );
-            default
-        }
-    }
-}
-
-#[cfg(feature = "fluss")]
-fn throw_fluss_exception(env: &mut JNIEnv, message: &str) {
-    let _ = env.throw_new("java/io/IOException", message);
-}
-
-#[cfg(feature = "fluss")]
-fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
-    if let Some(message) = payload.downcast_ref::<&str>() {
-        (*message).to_string()
-    } else if let Some(message) = payload.downcast_ref::<String>() {
-        message.clone()
-    } else {
-        "unknown panic".to_string()
-    }
+    connector_jni(env, default, "native Fluss reader panic", f)
 }
 
 #[cfg(feature = "fluss")]
