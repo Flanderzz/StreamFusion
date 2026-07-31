@@ -1899,7 +1899,10 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_be
 
         let brokers: String = env.get_string(&brokers).expect("failed to read brokers").into();
         let topic: String = env.get_string(&topic).expect("failed to read topic").into();
-        let decoder = JsonDecoder::new(import_record_batch(schema_array_address, schema_address).schema());
+        let decoder = JsonDecoder::new(
+            import_record_batch(schema_array_address, schema_address).schema(),
+            crate::json::JsonEnv::default(),
+        );
 
         // A fresh group reading from the beginning each run; offsets are not committed (the consumer is
         // throwaway). This mirrors the manual, non-committing consumption the production source would do.
