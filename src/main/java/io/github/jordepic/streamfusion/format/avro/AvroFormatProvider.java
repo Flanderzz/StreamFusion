@@ -1,9 +1,11 @@
 package io.github.jordepic.streamfusion.format.avro;
 
 import io.github.jordepic.streamfusion.format.NativeFormatContext;
+import io.github.jordepic.streamfusion.format.NativeFormatOptions;
 import io.github.jordepic.streamfusion.format.NativeFormatProvider;
 import io.github.jordepic.streamfusion.format.NativeMessageDecoder;
 import io.github.jordepic.streamfusion.format.NativeMessageDecoderFactory;
+import java.util.Map;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.flink.formats.avro.typeutils.AvroSchemaConverter;
 import org.apache.flink.table.types.logical.RowType;
@@ -28,7 +30,25 @@ public final class AvroFormatProvider implements NativeFormatProvider {
 
   @Override
   public boolean supports(NativeFormatContext context) {
-    return !context.ignoreParseErrors();
+    if (context.ignoreParseErrors()) {
+      return false;
+    }
+    String encoding = NativeFormatOptions.option(context.options(), "encoding");
+    if (encoding != null && !"binary".equalsIgnoreCase(encoding)) {
+      // Avro's JSON encoding is a different wire format the native decode doesn't read.
+      return false;
+    }
+    if (!legacyTimestampMapping(context.options())) {
+      // The corrected mapping changes the derived schema (local-timestamp / TIMESTAMP_LTZ);
+      // the native decode only reproduces the legacy mapping so far.
+      return false;
+    }
+    return AvroDecodeGate.supports(context.writerType(), true);
+  }
+
+  /** Flink's {@code avro.timestamp_mapping.legacy}, default true. */
+  private static boolean legacyTimestampMapping(Map<String, String> options) {
+    return !"false".equalsIgnoreCase(NativeFormatOptions.option(options, "timestamp_mapping.legacy"));
   }
 
   @Override

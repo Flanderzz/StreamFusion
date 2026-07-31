@@ -1,0 +1,96 @@
+package io.github.jordepic.streamfusion.format;
+
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import io.github.jordepic.streamfusion.format.avro.AvroFormatProvider;
+import io.github.jordepic.streamfusion.format.avroconfluent.AvroConfluentFormatProvider;
+import java.util.Map;
+import org.apache.flink.table.types.logical.BigIntType;
+import org.apache.flink.table.types.logical.DoubleType;
+import org.apache.flink.table.types.logical.IntType;
+import org.apache.flink.table.types.logical.LocalZonedTimestampType;
+import org.apache.flink.table.types.logical.LogicalType;
+import org.apache.flink.table.types.logical.MapType;
+import org.apache.flink.table.types.logical.RowType;
+import org.apache.flink.table.types.logical.TimeType;
+import org.apache.flink.table.types.logical.TimestampType;
+import org.apache.flink.table.types.logical.VarCharType;
+import org.junit.jupiter.api.Test;
+
+/**
+ * The Avro providers must decline — not crash job submission for — every table whose type or
+ * options the native decode cannot reproduce. Flink's own factory throws for the underivable
+ * types at submission, so a declined table reaches the identical Flink failure; a mis-admitted
+ * one would decode wrongly typed batches.
+ */
+class AvroDecodeGateTest {
+
+  private static final RowType SUPPORTED =
+      RowType.of(
+          new LogicalType[] {new BigIntType(), new VarCharType(VarCharType.MAX_LENGTH), new DoubleType()},
+          new String[] {"id", "name", "score"});
+
+  private static boolean bareAvro(RowType rowType, Map<String, String> options, boolean skipErrors) {
+    return new AvroFormatProvider()
+        .supports(new NativeFormatContext(rowType, rowType, options, skipErrors));
+  }
+
+  private static boolean confluent(RowType rowType) {
+    Map<String, String> options =
+        Map.of("format", "avro-confluent", "avro-confluent.url", "http://localhost:8081");
+    return new AvroConfluentFormatProvider()
+        .supports(new NativeFormatContext(rowType, rowType, options, false));
+  }
+
+  @Test
+  void admitsTheReconciledTypeFamily() {
+    assertTrue(bareAvro(SUPPORTED, Map.of("format", "avro"), false));
+    assertTrue(confluent(SUPPORTED));
+    RowType nested =
+        RowType.of(
+            new LogicalType[] {
+              RowType.of(new LogicalType[] {new BigIntType()}, new String[] {"a"}),
+              new MapType(new VarCharType(VarCharType.MAX_LENGTH), new BigIntType())
+            },
+            new String[] {"nested", "tags"});
+    assertTrue(bareAvro(nested, Map.of("format", "avro"), false));
+  }
+
+  @Test
+  void declinesTypesFlinkCannotDeriveASchemaFor() {
+    // Each of these makes Flink's own factory throw at submission; the native path must decline
+    // so the table falls back and reproduces that exact failure.
+    LogicalType[] underivable = {
+      new LocalZonedTimestampType(3), // TIMESTAMP_LTZ under the legacy mapping
+      new TimestampType(6), // precision beyond the legacy mapping
+      new TimeType(6),
+      new MapType(new IntType(), new BigIntType()) // non-string map key
+    };
+    for (LogicalType type : underivable) {
+      RowType rowType = RowType.of(new LogicalType[] {type}, new String[] {"c"});
+      assertFalse(bareAvro(rowType, Map.of("format", "avro"), false), type.toString());
+      assertFalse(confluent(rowType), type.toString());
+    }
+  }
+
+  @Test
+  void declinesTypesTheNativeDecodeDoesNotReconcileYet() {
+    RowType rowType =
+        RowType.of(new LogicalType[] {new TimestampType(3)}, new String[] {"ts"});
+    assertFalse(bareAvro(rowType, Map.of("format", "avro"), false));
+    assertFalse(confluent(rowType));
+  }
+
+  @Test
+  void declinesUnreproducedOptions() {
+    assertFalse(bareAvro(SUPPORTED, Map.of("format", "avro", "avro.encoding", "json"), false));
+    assertTrue(bareAvro(SUPPORTED, Map.of("format", "avro", "avro.encoding", "binary"), false));
+    assertFalse(
+        bareAvro(SUPPORTED, Map.of("format", "avro", "avro.timestamp_mapping.legacy", "false"), false));
+    assertFalse(bareAvro(SUPPORTED, Map.of("format", "avro"), true)); // ignore-parse-errors
+    // The prefixed form under value.format resolves the same way.
+    assertFalse(
+        bareAvro(SUPPORTED, Map.of("value.format", "avro", "value.avro.encoding", "json"), false));
+  }
+}

@@ -4,6 +4,7 @@ import io.github.jordepic.streamfusion.format.NativeFormatContext;
 import io.github.jordepic.streamfusion.format.NativeFormatProvider;
 import io.github.jordepic.streamfusion.format.NativeMessageDecoder;
 import io.github.jordepic.streamfusion.format.NativeMessageDecoderFactory;
+import io.github.jordepic.streamfusion.format.avro.AvroDecodeGate;
 import io.github.jordepic.streamfusion.format.avro.NativeAvroFormat;
 import io.github.jordepic.streamfusion.kafka.ConfluentSchemaRegistry;
 import java.io.IOException;
@@ -36,7 +37,11 @@ public final class AvroConfluentFormatProvider implements NativeFormatProvider {
 
   @Override
   public boolean supports(NativeFormatContext context) {
-    return !context.ignoreParseErrors() && ConfluentSchemaRegistry.fromOptions(context.options()) != null;
+    // Flink's avro-confluent factory has no timestamp-mapping option: it is hard-wired to the
+    // legacy mapping, so the gate always checks the legacy derivation.
+    return !context.ignoreParseErrors()
+        && ConfluentSchemaRegistry.fromOptions(context.options()) != null
+        && AvroDecodeGate.supports(context.writerType(), true);
   }
 
   @Override

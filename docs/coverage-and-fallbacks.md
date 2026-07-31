@@ -626,17 +626,32 @@ shapes persist their per-key deadlines in a dedicated state table).
   Flink's; DECIMAL columns parse the exact raw literal with `BigDecimal`'s HALF_UP-or-NULL (the
   old arrow-json truncation was a silent value divergence); and `ignore-parse-errors` skips with
   Flink's per-field granularity. Still falling back: **`fail-on-missing-field = true`** (a missing
-  field is null natively — Flink's default mode; the fail mode isn't modeled).
-  `avro-confluent` (decode
-  path only, not the native source) fetches each frame's writer schema from the registry by id at
-  runtime — the same lazy per-id lookup Flink's deserializer makes, following mid-stream schema
-  evolution — but falls back when the registry options need more than a plain URL: an explicit
-  reader `schema`, basic/bearer auth, SSL stores, or pass-through client `properties`. All startup
+  field is null natively — Flink's default mode; the fail mode isn't modeled). All startup
   modes are supported (earliest/latest/group-offsets/timestamp/specific-offsets),
   as are `topic` lists and `topic-pattern` — discovery and offset resolution run in Flink's own
   reused enumerator (`scan.topic-partition-discovery.interval` honored, including `0` to disable),
   so the native paths inherit its semantics; mid-job partition additions reach the native consumer
   as incremental split assignments.
+- **Kafka Avro (`avro` and `avro-confluent`)** — both variants run on the shallow decode operator
+  *and* the native source (the source's split reader decodes through the JVM when a format needs
+  per-batch JVM work, which the registry lookup does). `avro-confluent` fetches each frame's
+  writer schema from the registry by id at runtime — the same lazy per-id lookup Flink's
+  deserializer makes, following mid-stream schema evolution — but falls back when the registry
+  options need more than a plain URL: an explicit reader `schema`, basic/bearer auth, SSL stores,
+  or pass-through client `properties`. Falling back:
+  - a row type Flink's own avro factory rejects at job submission — RAW and the other unmapped
+    types, TIMESTAMP_LTZ under the legacy mapping, TIMESTAMP/TIME precision beyond the mapping's
+    limit, a non-string map key. These are declined at plan time (the provider runs the same
+    schema/converter derivations Flink's factory runs), so the fallback reproduces Flink's exact
+    submission failure instead of the native planner aborting with its own;
+  - a column type whose arrow-avro decode is not yet reconciled with the Arrow boundary schema:
+    DATE, TIME, TIMESTAMP, DECIMAL, BINARY/VARBINARY, TINYINT/SMALLINT, and MULTISET (native
+    today: BOOLEAN/INT/BIGINT/FLOAT/DOUBLE/CHAR/VARCHAR plus ROW/ARRAY/MAP of those);
+  - **`avro.encoding = json`** — Avro's JSON encoding is a different wire format the native
+    decode doesn't read — and **`avro.timestamp_mapping.legacy = false`** — the corrected mapping
+    changes the derived schema; only the legacy mapping is reproduced natively so far.
+    `avro-confluent` has neither option (Flink hard-wires it to binary encoding and the legacy
+    mapping, an asymmetry the native gate mirrors).
 - **Kafka watermarks / event time** — a pushed `WATERMARK` clause is regenerated inside the native
   source for the reproducible shapes: bounded out-of-orderness (`rt` or `rt - INTERVAL const`) over a
   physical rowtime column or `TO_TIMESTAMP_LTZ(bigintCol, 3)` (the epoch-millis computed-rowtime
