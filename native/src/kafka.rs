@@ -25,7 +25,7 @@ fn transient_consumer_error(error: rdkafka::bindings::rd_kafka_resp_err_t) -> bo
     )
 }
 
-/// One JSON document per row, all in a single encode buffer: producing and JNI materialization
+/// One encoded record per row, all in a single encode buffer: producing and JNI materialization
 /// read the per-row slices in place, so no per-record allocation or copy happens on this side
 /// (librdkafka copies borrowed payloads into its own queue on produce).
 #[cfg(feature = "kafka")]
@@ -37,6 +37,12 @@ pub struct EncodedLines {
 #[cfg(feature = "kafka")]
 impl EncodedLines {
     pub(crate) fn new(bytes: Vec<u8>, lines: Vec<std::ops::Range<usize>>) -> EncodedLines {
+        EncodedLines { bytes, lines }
+    }
+
+    /// Wraps a buffer of concatenated records delimited by `offsets` (`rows + 1` entries).
+    pub(crate) fn from_offsets(bytes: Vec<u8>, offsets: &[usize]) -> EncodedLines {
+        let lines = offsets.windows(2).map(|pair| pair[0]..pair[1]).collect();
         EncodedLines { bytes, lines }
     }
 
@@ -133,6 +139,8 @@ pub(crate) enum EncodeOptions {
     },
     #[cfg(feature = "csv")]
     Csv(crate::csv_encode::CsvEncodeOptions),
+    #[cfg(feature = "avro")]
+    Avro(crate::avro::AvroEncodeOptions),
 }
 
 /// The CDC JSON dialect whose envelope wraps each encoded row on the sink side.
@@ -162,6 +170,14 @@ fn parse_encode_format(format: i32, encoded: &str) -> Result<EncodeOptions, Stri
         #[cfg(feature = "csv")]
         FORMAT_CSV => {
             return crate::csv_encode::parse_csv_encode_options(encoded).map(EncodeOptions::Csv)
+        }
+        #[cfg(feature = "avro")]
+        FORMAT_AVRO => {
+            return crate::avro::AvroEncodeOptions::parse(encoded, false).map(EncodeOptions::Avro)
+        }
+        #[cfg(feature = "avro")]
+        FORMAT_AVRO_CONFLUENT => {
+            return crate::avro::AvroEncodeOptions::parse(encoded, true).map(EncodeOptions::Avro)
         }
         other => return Err(format!("format code {other} is not natively encoded")),
     };
@@ -256,6 +272,10 @@ fn encode_value_lines(
         #[cfg(feature = "csv")]
         EncodeOptions::Csv(options) => {
             crate::csv_encode::encode_csv_batch(batch, options, logical_types, field_names)
+        }
+        #[cfg(feature = "avro")]
+        EncodeOptions::Avro(options) => {
+            crate::avro::encode_avro_batch(batch, options, logical_types, field_names)
         }
     }
 }
@@ -2112,9 +2132,22 @@ pub extern "system" fn Java_io_github_jordepic_streamfusion_kafka_NativeKafka_en
     _class: JClass<'local>,
     format: jint,
 ) -> jboolean {
-    crate::bridge::jni_guard(env, move |_env| {
-        u8::from(parse_encode_format(format, "").is_ok())
-    })
+    crate::bridge::jni_guard(env, move |_env| u8::from(encode_format_compiled(format)))
+}
+
+/// Whether this build compiles an encode arm for the format code — capability only, never option
+/// validation (a format like Avro has required options the probe cannot supply).
+#[cfg(feature = "kafka")]
+fn encode_format_compiled(format: i32) -> bool {
+    match format {
+        FORMAT_JSON | FORMAT_DEBEZIUM_JSON | FORMAT_OGG_JSON | FORMAT_MAXWELL_JSON
+        | FORMAT_CANAL_JSON => true,
+        #[cfg(feature = "csv")]
+        FORMAT_CSV => true,
+        #[cfg(feature = "avro")]
+        FORMAT_AVRO | FORMAT_AVRO_CONFLUENT => true,
+        _ => false,
+    }
 }
 
 #[cfg(feature = "kafka")]
