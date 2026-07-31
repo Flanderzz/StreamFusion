@@ -5,9 +5,6 @@ import io.github.jordepic.streamfusion.format.NativeFormatOptions;
 import io.github.jordepic.streamfusion.format.NativeFormatProvider;
 import io.github.jordepic.streamfusion.format.NativeMessageDecoderFactory;
 import io.github.jordepic.streamfusion.format.NativeSchemaMessageDecoder;
-import java.util.EnumSet;
-import java.util.Set;
-import org.apache.flink.table.types.logical.LogicalTypeRoot;
 import org.apache.flink.table.types.logical.RowType;
 
 /**
@@ -22,22 +19,30 @@ import org.apache.flink.table.types.logical.RowType;
  */
 public final class RawFormatProvider implements NativeFormatProvider {
 
-  private static final Set<LogicalTypeRoot> SUPPORTED_TYPES =
-      EnumSet.of(
-          LogicalTypeRoot.CHAR,
-          LogicalTypeRoot.VARCHAR,
-          LogicalTypeRoot.VARBINARY,
-          LogicalTypeRoot.BOOLEAN,
-          LogicalTypeRoot.TINYINT,
-          LogicalTypeRoot.SMALLINT,
-          LogicalTypeRoot.INTEGER,
-          LogicalTypeRoot.BIGINT,
-          LogicalTypeRoot.FLOAT,
-          LogicalTypeRoot.DOUBLE);
-
   @Override
   public String formatIdentifier() {
     return "raw";
+  }
+
+  /** The single column's admitted roots — kept in a method body (like the sibling providers') so
+   * the class links under a Flink-less loader: the extension-JAR probe instantiates providers over
+   * the platform classloader, where a static {@code EnumSet<LogicalTypeRoot>} fails resolution. */
+  private static boolean supportedType(RowType schema) {
+    switch (schema.getTypeAt(0).getTypeRoot()) {
+      case CHAR:
+      case VARCHAR:
+      case VARBINARY:
+      case BOOLEAN:
+      case TINYINT:
+      case SMALLINT:
+      case INTEGER:
+      case BIGINT:
+      case FLOAT:
+      case DOUBLE:
+        return true;
+      default:
+        return false;
+    }
   }
 
   @Override
@@ -55,7 +60,7 @@ public final class RawFormatProvider implements NativeFormatProvider {
     RowType schema = context.writerType();
     return !context.ignoreParseErrors()
         && schema.getFieldCount() == 1
-        && SUPPORTED_TYPES.contains(schema.getTypeAt(0).getTypeRoot())
+        && supportedType(schema)
         && NativeFormatOptions.encode(context.options()) != null;
   }
 
