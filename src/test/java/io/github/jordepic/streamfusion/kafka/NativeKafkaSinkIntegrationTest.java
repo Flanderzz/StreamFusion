@@ -809,6 +809,143 @@ class NativeKafkaSinkIntegrationTest {
     return values;
   }
 
+  /**
+   * The definitive Avro sink parity check: the same bounded SQL job publishes byte-identical
+   * messages whether serialization runs natively or through Flink's own Avro serializers — bare
+   * datums and Confluent-framed ones alike. Both jobs (and Flink's Confluent client) share one
+   * stub registry, which hands the same id to identical schemas the way a real registry does.
+   */
+  @Test
+  void publishesAvroBytesIdenticalToVanillaFlink() throws Exception {
+    try (KafkaContainer kafka =
+        new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.6.1"))) {
+      kafka.start();
+      com.sun.net.httpserver.HttpServer registry =
+          com.sun.net.httpserver.HttpServer.create(
+              new java.net.InetSocketAddress("localhost", 0), 0);
+      // Like a real registry, identical schemas get one id back no matter the subject — the
+      // native and vanilla jobs write to different topics (subjects) but must frame the same id.
+      Map<String, Integer> schemaIds = new HashMap<>();
+      registry.createContext(
+          "/subjects",
+          exchange -> {
+            String posted =
+                new com.fasterxml.jackson.databind.ObjectMapper()
+                    .readTree(exchange.getRequestBody())
+                    .get("schema")
+                    .asText();
+            int id;
+            synchronized (schemaIds) {
+              id = schemaIds.computeIfAbsent(posted, key -> 20 + schemaIds.size());
+            }
+            byte[] body = ("{\"id\":" + id + "}").getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, body.length);
+            exchange.getResponseBody().write(body);
+            exchange.close();
+          });
+      registry.start();
+      String inputTopic = "avro-parity-input-" + UUID.randomUUID();
+      produceAvroParityInput(kafka.getBootstrapServers(), inputTopic);
+      try {
+        for (String format : List.of("avro", "avro-confluent")) {
+          String registryUrl = "http://localhost:" + registry.getAddress().getPort();
+          String nativeTopic = "avro-parity-native-" + UUID.randomUUID();
+          String flinkTopic = "avro-parity-flink-" + UUID.randomUUID();
+          runAvroSinkJob(
+              kafka.getBootstrapServers(), inputTopic, nativeTopic, format, registryUrl, true);
+          runAvroSinkJob(
+              kafka.getBootstrapServers(), inputTopic, flinkTopic, format, registryUrl, false);
+          List<ConsumerRecord<byte[], byte[]>> nativeRecords =
+              consumeAllCommitted(kafka.getBootstrapServers(), nativeTopic);
+          List<ConsumerRecord<byte[], byte[]>> flinkRecords =
+              consumeAllCommitted(kafka.getBootstrapServers(), flinkTopic);
+          assertEquals(2, nativeRecords.size(), format);
+          assertEquals(flinkRecords.size(), nativeRecords.size(), format);
+          for (int i = 0; i < nativeRecords.size(); i++) {
+            org.junit.jupiter.api.Assertions.assertArrayEquals(
+                flinkRecords.get(i).value(), nativeRecords.get(i).value(), format + " row " + i);
+          }
+        }
+      } finally {
+        registry.stop(0);
+      }
+    }
+  }
+
+  private static final String AVRO_PARITY_COLUMNS =
+      "(id BIGINT, name STRING, amount DECIMAL(10, 2), ts TIMESTAMP(3), tags MAP<STRING, INT>)";
+
+  private static void produceAvroParityInput(String brokers, String topic) {
+    Properties properties = new Properties();
+    properties.setProperty(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, brokers);
+    properties.setProperty(
+        ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class.getName());
+    properties.setProperty(
+        ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class.getName());
+    try (KafkaProducer<byte[], byte[]> producer = new KafkaProducer<>(properties)) {
+      producer.send(
+          new ProducerRecord<>(
+              topic,
+              ("{\"id\":1,\"name\":\"alpha\",\"amount\":12.34,"
+                      + "\"ts\":\"2024-05-05 10:00:00.123\","
+                      + "\"tags\":{\"zebra\":1,\"apple\":2,\"kiwi\":3,\"mango\":4}}")
+                  .getBytes(StandardCharsets.UTF_8)));
+      producer.send(
+          new ProducerRecord<>(
+              topic,
+              ("{\"id\":2,\"name\":null,\"amount\":0.01,"
+                      + "\"ts\":\"1969-12-31 23:59:59.999\",\"tags\":{\"k\":4}}")
+                  .getBytes(StandardCharsets.UTF_8)));
+      producer.flush();
+    }
+  }
+
+  private static void runAvroSinkJob(
+      String brokers,
+      String inputTopic,
+      String topic,
+      String format,
+      String registryUrl,
+      boolean nativePlanner)
+      throws Exception {
+    StreamExecutionEnvironment environment = StreamExecutionEnvironment.getExecutionEnvironment();
+    environment.setParallelism(1);
+    StreamTableEnvironment table = StreamTableEnvironment.create(environment);
+    table.executeSql(
+        "CREATE TABLE input "
+            + AVRO_PARITY_COLUMNS
+            + " WITH ('connector' = 'kafka', 'topic' = '"
+            + inputTopic
+            + "', 'properties.bootstrap.servers' = '"
+            + brokers
+            + "', 'properties.group.id' = 'avro-parity-"
+            + UUID.randomUUID()
+            + "', 'scan.startup.mode' = 'earliest-offset', "
+            + "'scan.bounded.mode' = 'latest-offset', 'format' = 'json')");
+    String formatOptions =
+        "avro-confluent".equals(format)
+            ? "'format' = 'avro-confluent', 'avro-confluent.url' = '" + registryUrl + "'"
+            : "'format' = 'avro'";
+    table.executeSql(
+        "CREATE TABLE output "
+            + AVRO_PARITY_COLUMNS
+            + " WITH ('connector' = 'kafka', 'topic' = '"
+            + topic
+            + "', 'properties.bootstrap.servers' = '"
+            + brokers
+            + "', "
+            + formatOptions
+            + ")");
+    PhysicalPlanScan scan = nativePlanner ? NativePlanner.install(table) : null;
+    String statement = "INSERT INTO output SELECT * FROM input";
+    String plan = nativePlanner ? table.explainSql(statement) : null;
+    table.executeSql(statement).await();
+    if (scan != null) {
+      assertTrue(scan.substitutions() > 0, scan::explainSummary);
+      assertTrue(plan.contains("NativeKafkaSink"), plan);
+    }
+  }
+
   private static List<ConsumerRecord<byte[], byte[]>> consumeAllCommitted(
       String brokers, String topic) {
     Properties properties = new Properties();
