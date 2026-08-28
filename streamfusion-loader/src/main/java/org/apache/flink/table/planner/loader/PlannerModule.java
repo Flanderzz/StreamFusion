@@ -55,10 +55,10 @@ import org.apache.flink.util.IOUtils;
  * other planner behavior continues through Flink's normal implementation.
  */
 @Internal
-public class PlannerModule {
+public class PlannerModule extends PlannerModuleCompat {
 
   static final String FLINK_TABLE_PLANNER_FAT_JAR = "flink-table-planner.jar";
-  private static final Set<String> SUPPORTED_FLINK_VERSIONS = Set.of("2.2.0", "2.2.1");
+  private static final Set<String> SUPPORTED_FLINK_VERSIONS = SupportedFlinkVersions.VERSIONS;
   private static final String STREAMFUSION_PLANNER_JAR = "streamfusion-planner.jar";
   private static final String[] STREAMFUSION_EXTENSION_PREFIXES = {
     "streamfusion-kafka-",
@@ -129,6 +129,7 @@ public class PlannerModule {
     }
   }
 
+  @Override
   public URLClassLoader getSubmoduleClassLoader() {
     return submoduleClassLoader;
   }

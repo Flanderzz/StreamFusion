@@ -28,6 +28,16 @@ Flink still performs all standard planning and execution. The only injected beha
 scan stage, after which unsupported plan shapes retain their normal Flink nodes.
 
 The cost is a version-sensitive private-class seam. The shim supports exactly the tested Flink
-**2.2.0 and 2.2.1** planner ABIs and fails closed for unknown or unversioned artifacts. It
-rejects incompatible packaged versions at startup. A public upstream planner-extension API would
-replace this file and remove the class-name shadow.
+**2.1.3, 2.2.0 and 2.2.1** planner ABIs and fails closed for unknown or unversioned artifacts. It
+rejects incompatible packaged versions at startup. Because the whitelist is compiled per Flink line,
+a build admits only the patch versions it was actually validated against.
+
+Shadowing a private class also means matching its exact signatures, and the lines disagree on one:
+the accessor exposing the component classloader was narrowed to a concrete type in 2.2, so the two
+lines compile call sites against different descriptors and a single declared return type would be a
+missing-method failure on whichever line lost the coin toss. Rather than fork the whole shim, it
+declares the wider type in a base class and narrows it in the subclass, which makes the compiler
+emit a bridge so one class satisfies both lines. That keeps the seam a signature detail instead of
+a second copy of the file to maintain.
+
+A public upstream planner-extension API would replace this file and remove the class-name shadow.

@@ -48,6 +48,8 @@
              admitted planner ABI patch versions. -->
         <flink.loader.test.version>2.2.0</flink.loader.test.version>
         <flink.runtime.version>2.2.1</flink.runtime.version>
+        <flink.connector.kafka.version>5.0.0-2.2</flink.connector.kafka.version>
+        <flink.compat.source>java-flink2.2</flink.compat.source>
         <junit.version>5.10.2</junit.version>
     </properties>
 
@@ -99,7 +101,7 @@
         <dependency>
             <groupId>org.apache.flink</groupId>
             <artifactId>flink-connector-kafka</artifactId>
-            <version>5.0.0-2.2</version>
+            <version>${flink.connector.kafka.version}</version>
             <scope>test</scope>
         </dependency>
         <dependency>
@@ -130,6 +132,25 @@
 
     <build>
         <plugins>
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>build-helper-maven-plugin</artifactId>
+                <version>3.6.0</version>
+                <executions>
+                    <execution>
+                        <id>add-flink-compat-source</id>
+                        <phase>generate-sources</phase>
+                        <goals>
+                            <goal>add-source</goal>
+                        </goals>
+                        <configuration>
+                            <sources>
+                                <source>${project.basedir}/src/main/${flink.compat.source}</source>
+                            </sources>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-dependency-plugin</artifactId>
@@ -171,6 +192,17 @@
     </build>
 
     <profiles>
+        <!-- Flink 2.1 line. Declared here as well as in the reactor root because this module is
+             standalone and cannot inherit the root's profile. -->
+        <profile>
+            <id>flink-2.1</id>
+            <properties>
+                <flink.loader.test.version>2.1.3</flink.loader.test.version>
+                <flink.runtime.version>2.1.3</flink.runtime.version>
+                <flink.connector.kafka.version>5.0.0-2.1</flink.connector.kafka.version>
+                <flink.compat.source>java-flink2.1</flink.compat.source>
+            </properties>
+        </profile>
         <!-- This module is intentionally standalone from the reactor parent because it executes in
              Flink's isolated planner classloader. Repeat the release attachments it cannot inherit. -->
         <profile>
