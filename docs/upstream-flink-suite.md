@@ -55,8 +55,12 @@ coverage; their `Calc` versus `NativeCalc`-style diffs are diagnostic output, no
 
 The checkout is cached between runs. Set `FLINK_SUITE_ROOT` to put it elsewhere, or tune local test
 parallelism with `FLINK_SUITE_UNIT_FORKS` and `FLINK_SUITE_IT_FORKS`. The runner uses only public
-artifact repositories, independent of developer-specific Maven mirrors. `FLINK_VERSION` is pinned by
-the harness and should only be changed after validating the injection point against that release.
+artifact repositories, independent of developer-specific Maven mirrors. `FLINK_VERSION` selects the
+Flink line under test and drives everything derived from it — the release tag cloned, the matching
+connector release, and the build profile StreamFusion itself is compiled with. Setting it to a
+release whose injection point has not been validated is the one thing that needs review first;
+building StreamFusion for a different line than the planner it is about to run against would
+otherwise produce a green suite that proves nothing.
 
 After a successful build, skip the StreamFusion and Flink rebuild while iterating on test selection:
 

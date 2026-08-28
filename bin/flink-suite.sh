@@ -5,6 +5,14 @@ set -uo pipefail
 readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly FLINK_VERSION="${FLINK_VERSION:-2.2.1}"
 readonly FLINK_TAG="release-${FLINK_VERSION}"
+# The suite must build StreamFusion for the same Flink line it is about to run against.
+readonly FLINK_LINE="${FLINK_VERSION%.*}"
+readonly FLINK_KAFKA_CONNECTOR_VERSION="${KAFKA_CONNECTOR_VERSION:-5.0.0}-${FLINK_LINE}"
+if [[ "${FLINK_LINE}" == "2.2" ]]; then
+  readonly SF_FLINK_PROFILE_ARG=""
+else
+  readonly SF_FLINK_PROFILE_ARG="-Pflink-${FLINK_LINE}"
+fi
 readonly KAFKA_CONNECTOR_VERSION="${KAFKA_CONNECTOR_VERSION:-5.0.0}"
 readonly KAFKA_CONNECTOR_TAG="v${KAFKA_CONNECTOR_VERSION}"
 readonly SUITE_ROOT="${FLINK_SUITE_ROOT:-${REPO_ROOT}/.flink-suite}"
@@ -198,11 +206,14 @@ else
   echo "Building and installing StreamFusion and its supported connector/format modules against the source-suite planner..."
   mvn -B -ntp -s "${MAVEN_SETTINGS}" -Dmaven.repo.local="${SUITE_MAVEN_REPO}" \
     -Dstreamfusion.flink-source-suite \
+    ${SF_FLINK_PROFILE_ARG} \
     -f "${STREAMFUSION_BUILD_ROOT}/pom.xml" \
     -pl :streamfusion-core,:streamfusion-kafka,:streamfusion-json,:streamfusion-csv,:streamfusion-raw,:streamfusion-avro,:streamfusion-avro-confluent-registry,:streamfusion-protobuf,:streamfusion-parquet \
     -am -DskipTests clean install || exit $?
   mvn -B -ntp -s "${MAVEN_SETTINGS}" -Dmaven.repo.local="${SUITE_MAVEN_REPO}" \
     -f "${REPO_ROOT}/dev/flink-suite/classpath-pom.xml" \
+    -Dflink.version="${FLINK_VERSION}" \
+    -Dflink.connector.kafka.version="${FLINK_KAFKA_CONNECTOR_VERSION}" \
     dependency:build-classpath -Dmdep.outputFile="${CLASSPATH_FILE}" || exit $?
 
   if [[ "${SUITE_MODE}" == "formats" || "${SUITE_MODE}" == "parquet" ]]; then
