@@ -78,6 +78,10 @@ class FlinkUnnestSqlHarnessTest {
   }
 
   @Test
+  @EnabledIfFlinkAtLeast(
+      major = 2,
+      minor = 2,
+      reason = "FLINK-33217; earlier planners cannot type this query at all")
   void leftUnnestWithOrdinalityMatchesHost() throws Exception {
     // A LEFT null-pad row carries a null ordinal too.
     NativeParity.assertParity(
