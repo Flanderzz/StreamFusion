@@ -1,13 +1,12 @@
 package tech.streamfusion.planner;
 
-import java.util.HashMap;
-import java.util.Map;
 import org.apache.calcite.plan.RelOptTable;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.JoinRelType;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalLookupJoin;
 import org.apache.flink.table.planner.plan.schema.TableSourceTable;
-import org.apache.flink.table.planner.plan.utils.FunctionCallUtil;
+import tech.streamfusion.planner.compat.FlinkCompat;
+import tech.streamfusion.planner.compat.LookupKeys;
 
 /**
  * Recognizes the processing-time lookup joins the native operator runs: {@code probe JOIN dim FOR
@@ -40,22 +39,12 @@ final class LookupJoinMatcher {
     if (!(unwrapTable(join.temporalTable()) instanceof TableSourceTable)) {
       return "lookup join: temporal table is not a (non-legacy) table source";
     }
-    for (FunctionCallUtil.FunctionParam param : lookupKeys(join).values()) {
-      if (!(param instanceof FunctionCallUtil.FieldRef)
-          && !(param instanceof FunctionCallUtil.Constant)) {
-        return "lookup join: unsupported lookup key shape " + param.getClass().getSimpleName();
-      }
-    }
-    return null;
+    return FlinkCompat.unsupportedKeyShape(lookupKeys(join));
   }
 
   /** The dimension key → probe field/constant map the generated fetcher builds its key row from. */
-  static Map<Integer, FunctionCallUtil.FunctionParam> lookupKeys(StreamPhysicalLookupJoin join) {
-    Map<Integer, FunctionCallUtil.FunctionParam> keys = new HashMap<>();
-    scala.collection.JavaConverters.mapAsJavaMapConverter(join.allLookupKeys())
-        .asJava()
-        .forEach((index, param) -> keys.put((Integer) index, param));
-    return keys;
+  static LookupKeys lookupKeys(StreamPhysicalLookupJoin join) {
+    return FlinkCompat.lookupKeys(join);
   }
 
   static boolean isLeftOuterJoin(StreamPhysicalLookupJoin join) {
@@ -85,7 +74,7 @@ final class LookupJoinMatcher {
         join.finalPreFilterCondition().isDefined() ? join.finalPreFilterCondition().get() : null,
         join.finalRemainingCondition().isDefined() ? join.finalRemainingCondition().get() : null,
         LookupJoinMatcher.isLeftOuterJoin(join),
-        join.asyncOptions().isDefined() ? join.asyncOptions().get() : null,
+        FlinkCompat.asyncOptions(join),
         join.retryOptions().isDefined() ? join.retryOptions().get() : null,
         join.preferCustomShuffle(),
         join.inputChangelogMode());

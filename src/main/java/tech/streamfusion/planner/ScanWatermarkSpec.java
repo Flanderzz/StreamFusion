@@ -12,6 +12,7 @@ import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
 import org.apache.flink.table.planner.plan.abilities.source.SourceAbilitySpec;
 import org.apache.flink.table.planner.plan.abilities.source.SourceWatermarkSpec;
 import org.apache.flink.table.planner.plan.abilities.source.WatermarkPushDownSpec;
+import tech.streamfusion.planner.compat.FlinkCompat;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalTableSourceScan;
 import org.apache.flink.table.planner.plan.schema.TableSourceTable;
 import org.apache.flink.table.planner.utils.ShortcutUtils;
@@ -75,8 +76,9 @@ final class ScanWatermarkSpec {
     // computed rowtime); it must be one of the supported terms and agree with the watermark
     // expression's column.
     Integer rowtimeFromExpr = null;
-    if (pushed.getRowtimeExpr().isPresent()) {
-      Integer index = rowtimeTerm(stripReinterpret(pushed.getRowtimeExpr().get()));
+    var declaredRowtime = FlinkCompat.watermarkRowtimeExpr(pushed);
+    if (declaredRowtime.isPresent()) {
+      Integer index = rowtimeTerm(stripReinterpret(declaredRowtime.get()));
       if (index == null) {
         return UNSUPPORTED;
       }

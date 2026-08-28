@@ -1,6 +1,7 @@
 package tech.streamfusion.planner;
 
 import tech.streamfusion.operator.RowDataArrowConverter;
+import tech.streamfusion.planner.compat.FlinkCompat;
 import org.apache.calcite.rel.RelNode;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalChangelogNormalize;
@@ -23,7 +24,7 @@ final class ChangelogNormalizeMatcher {
     if (node.filterCondition() != null) {
       return false; // a pushed filter condition is not yet reproduced
     }
-    if (node.sourceReused() || node.commonFilter().length > 0) {
+    if (FlinkCompat.sharesSourceOrCommonFilter(node)) {
       return false; // the source-reuse rewrite changes the operator's contract
     }
     return RowDataArrowConverter.supports(
@@ -42,7 +43,7 @@ final class ChangelogNormalizeMatcher {
     if (node.filterCondition() != null) {
       return "changelog normalize: a pushed filter condition is not supported";
     }
-    if (node.sourceReused() || node.commonFilter().length > 0) {
+    if (FlinkCompat.sharesSourceOrCommonFilter(node)) {
       return "changelog normalize: the source-reuse variant is not supported";
     }
     return "changelog normalize: needs a row type the Arrow conversion supports";

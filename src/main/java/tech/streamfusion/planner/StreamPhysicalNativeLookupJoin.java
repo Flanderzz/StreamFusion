@@ -1,7 +1,6 @@
 package tech.streamfusion.planner;
 
 import java.util.List;
-import java.util.Map;
 import javax.annotation.Nullable;
 import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.plan.RelOptTable;
@@ -13,11 +12,13 @@ import org.apache.calcite.rex.RexProgram;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNode;
 import org.apache.flink.table.planner.plan.nodes.exec.InputProperty;
-import org.apache.flink.table.planner.plan.utils.FlinkRexUtil;
-import org.apache.flink.table.planner.plan.utils.FunctionCallUtil;
 import org.apache.flink.table.planner.plan.utils.LookupJoinUtil;
 import org.apache.flink.table.planner.utils.ShortcutUtils;
 import org.apache.flink.table.connector.ChangelogMode;
+import tech.streamfusion.planner.compat.AsyncLookupOptions;
+import tech.streamfusion.planner.compat.ExpandedCalc;
+import tech.streamfusion.planner.compat.FlinkCompat;
+import tech.streamfusion.planner.compat.LookupKeys;
 
 /**
  * Physical node standing in for a processing-time lookup join the native operator runs. Columnar on
@@ -31,12 +32,12 @@ public class StreamPhysicalNativeLookupJoin extends StreamPhysicalNativeSingleRe
     implements ColumnarInput, ColumnarOutput {
 
   private final RelOptTable temporalTable;
-  private final Map<Integer, FunctionCallUtil.FunctionParam> lookupKeys;
+  private final LookupKeys lookupKeys;
   private final @Nullable RexProgram calcOnTemporalTable;
   private final @Nullable RexNode preFilterCondition;
   private final @Nullable RexNode remainingJoinCondition;
   private final boolean leftOuterJoin;
-  private final @Nullable FunctionCallUtil.AsyncOptions asyncOptions;
+  private final @Nullable AsyncLookupOptions asyncOptions;
   private final @Nullable LookupJoinUtil.RetryLookupOptions retryOptions;
   private final boolean preferCustomShuffle;
   private final ChangelogMode inputChangelogMode;
@@ -47,12 +48,12 @@ public class StreamPhysicalNativeLookupJoin extends StreamPhysicalNativeSingleRe
       RelNode input,
       RelDataType outputRowType,
       RelOptTable temporalTable,
-      Map<Integer, FunctionCallUtil.FunctionParam> lookupKeys,
+      LookupKeys lookupKeys,
       @Nullable RexProgram calcOnTemporalTable,
       @Nullable RexNode preFilterCondition,
       @Nullable RexNode remainingJoinCondition,
       boolean leftOuterJoin,
-      @Nullable FunctionCallUtil.AsyncOptions asyncOptions,
+      @Nullable AsyncLookupOptions asyncOptions,
       @Nullable LookupJoinUtil.RetryLookupOptions retryOptions,
       boolean preferCustomShuffle,
       ChangelogMode inputChangelogMode) {
@@ -100,10 +101,9 @@ public class StreamPhysicalNativeLookupJoin extends StreamPhysicalNativeSingleRe
     List<RexNode> projectionOnTemporalTable = null;
     RexNode filterOnTemporalTable = null;
     if (calcOnTemporalTable != null) {
-      scala.Tuple2<List<RexNode>, scala.Option<RexNode>> expanded =
-          FlinkRexUtil.expandRexProgram(calcOnTemporalTable);
-      projectionOnTemporalTable = expanded._1();
-      filterOnTemporalTable = expanded._2().isDefined() ? expanded._2().get() : null;
+      ExpandedCalc expanded = FlinkCompat.expandCalcProgram(calcOnTemporalTable);
+      projectionOnTemporalTable = expanded.projection();
+      filterOnTemporalTable = expanded.filter();
     }
     return new NativeLookupJoinExecNode(
         ShortcutUtils.unwrapTableConfig(this),

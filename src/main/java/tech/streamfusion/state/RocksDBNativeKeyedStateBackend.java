@@ -432,8 +432,9 @@ public final class RocksDBNativeKeyedStateBackend<K>
     return delegateUnchecked().isSafeToReuseKVState();
   }
 
-  @Override
+  // Declared on the backend interface only from Flink 2.2; unused on 2.1.
   public String getBackendTypeIdentifier() {
-    return delegateUnchecked().getBackendTypeIdentifier();
+    return tech.streamfusion.planner.compat.FlinkCompat.backendTypeIdentifier(
+        delegateUnchecked());
   }
 }

@@ -16,6 +16,25 @@
     <build>
         <sourceDirectory>${project.basedir}/../src/main/java</sourceDirectory>
         <plugins>
+            <!-- This module compiles the whole shared tree, so it also needs the planner seam
+                 belonging to the active Flink line. -->
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>build-helper-maven-plugin</artifactId>
+                <version>3.6.0</version>
+                <executions>
+                    <execution>
+                        <id>add-flink-compat-source</id>
+                        <phase>generate-sources</phase>
+                        <goals><goal>add-source</goal></goals>
+                        <configuration>
+                            <sources>
+                                <source>${project.basedir}/../src/main/${flink.compat.source}</source>
+                            </sources>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
