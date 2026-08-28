@@ -2,12 +2,18 @@ package tech.streamfusion.suite;
 
 import java.lang.instrument.Instrumentation;
 import java.lang.reflect.InvocationTargetException;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import net.bytebuddy.agent.builder.AgentBuilder;
 import net.bytebuddy.asm.Advice;
+import net.bytebuddy.description.type.TypeDescription;
+import net.bytebuddy.dynamic.DynamicType;
+import net.bytebuddy.utility.JavaModule;
 
 import static net.bytebuddy.matcher.ElementMatchers.named;
 import static net.bytebuddy.matcher.ElementMatchers.takesArguments;
@@ -32,6 +38,9 @@ public final class StreamFusionSuiteAgent {
   private static final AtomicBoolean NATIVE_MEMORY_STATE_REPORTED = new AtomicBoolean();
   private static final AtomicBoolean ROCKSDB_STATE_REPORTED = new AtomicBoolean();
   private static final AtomicBoolean NATIVE_PARQUET_WRITER_REPORTED = new AtomicBoolean();
+  private static final Set<String> TRANSFORMED_TYPES = Collections.synchronizedSet(new HashSet<>());
+  private static final AtomicBoolean PLANNER_ADVICE_ENTERED = new AtomicBoolean();
+  private static volatile Instrumentation INSTRUMENTATION;
   private static final Set<Object> INSTALLED_CONFIGS =
       Collections.synchronizedSet(Collections.newSetFromMap(new WeakHashMap<>()));
   private static final ThreadLocal<Boolean> UNMODIFIED_PLAN_SETUP = new ThreadLocal<>();
@@ -41,8 +50,13 @@ public final class StreamFusionSuiteAgent {
   private StreamFusionSuiteAgent() {}
 
   public static void premain(String arguments, Instrumentation instrumentation) {
+    INSTRUMENTATION = instrumentation;
+    Runtime.getRuntime()
+        .addShutdownHook(
+            new Thread(StreamFusionSuiteAgent::auditInterception, "streamfusion-suite-audit"));
     new AgentBuilder.Default()
         .with(AgentBuilder.Listener.StreamWriting.toSystemError().withTransformationsOnly())
+        .with(new InterceptionAudit())
         .type(named(PLANNER_FACTORY))
         .transform(
             (builder, type, classLoader, module, protectionDomain) ->
@@ -124,6 +138,7 @@ public final class StreamFusionSuiteAgent {
 
     @Advice.OnMethodEnter
     static void enter(@Advice.Argument(0) Object context) {
+      StreamFusionSuiteAgent.recordPlannerAdviceEntered();
       try {
         if (requiresUnmodifiedFlinkPlan()) {
           return;
@@ -275,6 +290,74 @@ public final class StreamFusionSuiteAgent {
         System.err.println(
             "StreamFusion upstream Parquet suite created native Parquet sink writer");
       }
+    }
+  }
+
+  public static void recordPlannerAdviceEntered() {
+    PLANNER_ADVICE_ENTERED.set(true);
+  }
+
+  /**
+   * Fails the JVM when the planner interception never took effect.
+   *
+   * <p>The advice is attached by class and method name, so on an untested Flink version a rename or
+   * a signature change attaches nothing at all and the upstream suite then passes while running
+   * stock Flink — a green result that proves nothing. Loaded-but-never-instrumented is unambiguous
+   * and halts; instrumented-but-never-entered only warns, because a suite can load the factory
+   * without ever building a table environment.
+   */
+  static void auditInterception() {
+    Instrumentation instrumentation = INSTRUMENTATION;
+    if (instrumentation == null) {
+      return;
+    }
+    boolean plannerLoaded = isLoaded(instrumentation, PLANNER_FACTORY);
+    boolean delegateLoaded = isLoaded(instrumentation, DELEGATE_PLANNER_FACTORY);
+    if (!plannerLoaded && !delegateLoaded) {
+      return; // no table stack in this JVM, so no interception was expected
+    }
+    List<String> problems = new ArrayList<>();
+    if (plannerLoaded && !TRANSFORMED_TYPES.contains(PLANNER_FACTORY)) {
+      problems.add(PLANNER_FACTORY + " was loaded but never instrumented");
+    }
+    if (delegateLoaded && !TRANSFORMED_TYPES.contains(DELEGATE_PLANNER_FACTORY)) {
+      problems.add(DELEGATE_PLANNER_FACTORY + " was loaded but never instrumented");
+    }
+    if (!problems.isEmpty()) {
+      System.err.println(
+          "FATAL: the StreamFusion suite agent did not instrument the Flink planner factory."
+              + " This run exercised stock Flink and any pass it reported is meaningless.");
+      problems.forEach(problem -> System.err.println("  - " + problem));
+      System.err.flush();
+      Runtime.getRuntime().halt(70);
+    }
+    if (!PLANNER_ADVICE_ENTERED.get()) {
+      System.err.println(
+          "WARNING: the StreamFusion suite agent instrumented the Flink planner factory, but its"
+              + " create(..) advice never ran — check that the method matcher still applies.");
+    }
+  }
+
+  private static boolean isLoaded(Instrumentation instrumentation, String className) {
+    for (Class<?> loaded : instrumentation.getAllLoadedClasses()) {
+      if (className.equals(loaded.getName())) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** Records which interception targets actually took effect. */
+  private static final class InterceptionAudit extends AgentBuilder.Listener.Adapter {
+
+    @Override
+    public void onTransformation(
+        TypeDescription typeDescription,
+        ClassLoader classLoader,
+        JavaModule module,
+        boolean loaded,
+        DynamicType dynamicType) {
+      TRANSFORMED_TYPES.add(typeDescription.getName());
     }
   }
 }
