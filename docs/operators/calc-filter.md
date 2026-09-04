@@ -324,6 +324,10 @@ The upcall casts **decline** — i.e. fall back to Flink entirely — when the d
 `table.exec.legacy-cast-behaviour` is enabled, since its null-on-failure semantics differ from the
 default cast the upcall reproduces.
 
+Generated cast executors initialize with a valid value of the declared input type, including
+`CHAR`/`VARCHAR NOT NULL`. Startup does not evaluate an illegal NULL input; actual malformed
+runtime values still fail according to Flink's cast rules.
+
 ### Still falling back
 
 Boolean-to-string casts and other pairs not listed above. Temporal casts now use Flink-generated
