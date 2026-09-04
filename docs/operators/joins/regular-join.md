@@ -56,4 +56,9 @@ back with `residual condition does not compile natively` before the first batch 
 - there's no equi key;
 - the key columns aren't null-dropping for a non-INNER join;
 - the non-equi residual isn't expressible by the native expression engine;
-- an input column has a type the Arrow converter can't carry.
+- an input column has a type the Arrow converter can't carry;
+- `table.optimizer.delta-join.strategy` is `FORCE` and the optimizer block containing this join has
+  no delta join — that block is left unchanged for Flink's later statement-wide validation, even
+  if a delta join exists in another block. A block containing a delta join is not rejected by the
+  `FORCE` guard; ordinary admission and island checks still apply, and `DeltaJoin` remains
+  unsupported. See [Global switches](../index.md#global-switches).
