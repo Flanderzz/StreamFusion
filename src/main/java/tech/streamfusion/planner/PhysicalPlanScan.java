@@ -22,6 +22,7 @@ import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalG
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalGroupAggregate;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalGroupWindowAggregate;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalIntervalJoin;
+import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalDeltaJoin;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalJoin;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalLimit;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalLocalGroupAggregate;
@@ -89,6 +90,14 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
     // Master switch: with native acceleration off, substitute nothing — the query runs on the host.
     if (!NativeConfig.nativeEnabled()) {
       LOG.info("StreamFusion native acceleration is disabled; the plan runs on Flink");
+      return root;
+    }
+    // Flink runs its FORCE delta-join validation after this pass, and only complains when a regular
+    // join survives. Substituting one away would silently run a plan the host means to reject.
+    if (deltaJoinForceWouldReject(root)) {
+      fallbackReasons.add(
+          "delta join: table.optimizer.delta-join.strategy is FORCE but the plan has no delta join");
+      LOG.info("StreamFusion declined the plan so Flink can enforce its FORCE delta-join strategy");
       return root;
     }
     RelNode optimized = substitute(root);
@@ -719,6 +728,29 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
     for (RelNode input : node.getInputs()) {
       record(input);
     }
+  }
+
+  /** Mirrors {@code StreamPhysicalDeltaJoinForceValidator}, which spares a plan that has any delta join. */
+  private static boolean deltaJoinForceWouldReject(RelNode root) {
+    if (ShortcutUtils.unwrapTableConfig(root)
+            .get(OptimizerConfigOptions.TABLE_OPTIMIZER_DELTA_JOIN_STRATEGY)
+        != OptimizerConfigOptions.DeltaJoinStrategy.FORCE) {
+      return false;
+    }
+    return contains(root, StreamPhysicalJoin.class)
+        && !contains(root, StreamPhysicalDeltaJoin.class);
+  }
+
+  private static boolean contains(RelNode node, Class<?> relType) {
+    if (relType.isInstance(node)) {
+      return true;
+    }
+    for (RelNode input : node.getInputs()) {
+      if (contains(input, relType)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /** Operator types seen in the optimized physical plans, in traversal order. */
