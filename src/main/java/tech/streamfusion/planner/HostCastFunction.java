@@ -88,9 +88,46 @@ public final class HostCastFunction extends ScalarFunction {
       // java.lang.reflect switches from its native accessor to a generated accessor after a small
       // invocation threshold. Force that transition while Flink's job classloader is open; otherwise
       // a long-running native batch can cross the threshold after the safety wrapper was retired.
+      Object sample = warmupValue(inputType);
       for (int i = 0; i < 20; i++) {
-        executor.cast(null);
+        try {
+          executor.cast(sample);
+        } catch (Throwable warmupFailure) {
+          // Warming is an optimization, never a precondition: a rejected sample must not fail startup.
+          break;
+        }
       }
+    }
+  }
+
+  /**
+   * A value the executor can actually consume. {@code null} is not legal input for a NOT NULL type,
+   * whose generated cast dereferences the argument without a guard.
+   */
+  private static Object warmupValue(LogicalType type) {
+    switch (type.getTypeRoot()) {
+      case CHAR:
+      case VARCHAR:
+        return StringData.fromString("0");
+      case BOOLEAN:
+        return Boolean.FALSE;
+      case TINYINT:
+        return (byte) 0;
+      case SMALLINT:
+        return (short) 0;
+      case INTEGER:
+        return 0;
+      case BIGINT:
+        return 0L;
+      case FLOAT:
+        return 0f;
+      case DOUBLE:
+        return 0d;
+      case DECIMAL:
+        DecimalType decimal = (DecimalType) type;
+        return DecimalData.fromBigDecimal(BigDecimal.ZERO, decimal.getPrecision(), decimal.getScale());
+      default:
+        return null;
     }
   }
 
