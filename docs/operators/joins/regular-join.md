@@ -45,6 +45,11 @@ TTL-bearing operator: each stored row carries its last-**write** wall-clock time
 `last_write + ttl` inclusive, and reads as absent (deleted on read) once expired. See [Idle-state
 TTL](../index.md#idle-state-ttl) and [Configuration](../../configuration.md) for the flag surface.
 
+Residual predicates are compiled at planning time against the nullable `[left, right]` Arrow
+schema and must return `BOOLEAN`. Successful expression encoding alone is not admission: an
+unsupported coercion, such as comparing a materialized interval with an interval literal, falls
+back with `residual condition does not compile natively` before the first batch is processed.
+
 ## Falls back to Flink when
 
 - the join type isn't one the native operator covers;
