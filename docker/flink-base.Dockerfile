@@ -1,12 +1,15 @@
 ARG FLINK_IMAGE=flink:2.2.1-scala_2.12-java17
 ARG STREAMFUSION_VERSION=0.1.0-rc2
+# Deployable coordinates carry the Flink line; this must match FLINK_IMAGE's line.
+ARG STREAMFUSION_FLINK_LINE=2.2
 FROM ${FLINK_IMAGE}
 
 ARG FLINK_IMAGE
 ARG STREAMFUSION_VERSION
+ARG STREAMFUSION_FLINK_LINE
 
 LABEL org.opencontainers.image.title="StreamFusion Flink base image" \
-      org.opencontainers.image.description="Flink 2.2 with StreamFusion's native planner and runtime" \
+      org.opencontainers.image.description="Flink with StreamFusion's native planner and runtime" \
       tech.streamfusion.flink-base-image="${FLINK_IMAGE}"
 
 # The release library links mimalloc inside its own DSO. Reserve enough static TLS before the JVM
@@ -21,7 +24,7 @@ ENV GLIBC_TUNABLES=glibc.rtld.optional_static_tls=131072 \
 
 # These are Flink runtime extensions, not user-job dependencies. Keep the loader first so its
 # PlannerModule shadow is resolved before Flink's stock planner loader.
-COPY streamfusion-loader/target/streamfusion-loader-${STREAMFUSION_VERSION}.jar \
+COPY streamfusion-loader/target/streamfusion-loader-flink${STREAMFUSION_FLINK_LINE}-${STREAMFUSION_VERSION}.jar \
      /opt/flink/lib/00-streamfusion-loader.jar
-COPY streamfusion-core/target/streamfusion-core-${STREAMFUSION_VERSION}-runtime.jar \
+COPY streamfusion-core/target/streamfusion-core-flink${STREAMFUSION_FLINK_LINE}-${STREAMFUSION_VERSION}-runtime.jar \
      /opt/flink/lib/streamfusion-core.jar

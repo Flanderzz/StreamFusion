@@ -4,10 +4,17 @@ set -eu
 
 script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(cd "$script_dir/.." && pwd)
+# Deployable coordinates carry the Flink line, so a bundle holds one line's jars.
+flink_line=2.2
+if [ "${1:-}" = "--flink-line" ]; then
+  [ "$#" -ge 2 ] || { echo "usage: $0 [--flink-line <line>] [output-dir]" >&2; exit 64; }
+  flink_line=$2
+  shift 2
+fi
 version=$(cd "$repo_root" && mvn -q -DforceStdout help:evaluate -Dexpression=project.version)
 output_dir=${1:-"$repo_root/target/release"}
 stage_dir=$(mktemp -d)
-bundle_dir=$stage_dir/streamfusion-$version
+bundle_dir=$stage_dir/streamfusion-flink$flink_line-$version
 
 cleanup() {
   rm -rf "$stage_dir"
@@ -16,15 +23,15 @@ trap cleanup EXIT HUP INT TERM
 
 mkdir -p "$bundle_dir" "$output_dir"
 cp "$repo_root/LICENSE" "$repo_root/readme.md" "$bundle_dir/"
-cp "$repo_root/streamfusion-loader/target/streamfusion-loader-$version.jar" "$bundle_dir/"
-cp "$repo_root/streamfusion-core/target/streamfusion-core-$version-runtime.jar" "$bundle_dir/"
+cp "$repo_root/streamfusion-loader/target/streamfusion-loader-flink$flink_line-$version.jar" "$bundle_dir/"
+cp "$repo_root/streamfusion-core/target/streamfusion-core-flink$flink_line-$version-runtime.jar" "$bundle_dir/"
 
 for suffix in kafka json csv raw avro avro-confluent-registry protobuf parquet; do
-  cp "$repo_root/streamfusion-$suffix/target/streamfusion-$suffix-$version.jar" "$bundle_dir/"
+  cp "$repo_root/streamfusion-$suffix/target/streamfusion-$suffix-flink$flink_line-$version.jar" "$bundle_dir/"
 done
 
-archive=$output_dir/streamfusion-$version-bin.tar.gz
-(cd "$stage_dir" && tar -czf "$archive" "streamfusion-$version")
+archive=$output_dir/streamfusion-flink$flink_line-$version-bin.tar.gz
+(cd "$stage_dir" && tar -czf "$archive" "streamfusion-flink$flink_line-$version")
 (cd "$output_dir" && shasum -a 256 "$(basename "$archive")" > "$(basename "$archive").sha256")
 
 printf '%s\n' "$archive"

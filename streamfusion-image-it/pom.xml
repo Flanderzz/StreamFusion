@@ -48,6 +48,7 @@
                         <streamfusion.image.job.jar>${project.build.directory}/${project.build.finalName}.jar</streamfusion.image.job.jar>
                         <streamfusion.project.dir>${project.basedir}/..</streamfusion.project.dir>
                         <streamfusion.version>${project.version}</streamfusion.version>
+                        <streamfusion.flink.line>${flink.line}</streamfusion.flink.line>
                     </systemPropertyVariables>
                 </configuration>
             </plugin>

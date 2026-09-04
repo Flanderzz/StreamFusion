@@ -8,7 +8,7 @@
         <artifactId>StreamFusion</artifactId>
         <version>${revision}</version>
     </parent>
-    <artifactId>streamfusion-delta</artifactId>
+    <artifactId>streamfusion-delta-flink${flink.line}</artifactId>
     <name>StreamFusion Delta</name>
     <properties><native.test.resource.skip>true</native.test.resource.skip></properties>
     <dependencies>
@@ -21,25 +21,25 @@
         </dependency>
         <dependency>
             <groupId>tech.streamfusion</groupId>
-            <artifactId>streamfusion-kafka</artifactId>
+            <artifactId>streamfusion-kafka-flink${flink.line}</artifactId>
             <version>${project.version}</version>
             <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>tech.streamfusion</groupId>
-            <artifactId>streamfusion-json</artifactId>
+            <artifactId>streamfusion-json-flink${flink.line}</artifactId>
             <version>${project.version}</version>
             <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>tech.streamfusion</groupId>
-            <artifactId>streamfusion-core</artifactId>
+            <artifactId>streamfusion-core-flink${flink.line}</artifactId>
             <version>${project.version}</version>
             <scope>provided</scope>
         </dependency>
         <dependency>
             <groupId>tech.streamfusion</groupId>
-            <artifactId>streamfusion-parquet</artifactId>
+            <artifactId>streamfusion-parquet-flink${flink.line}</artifactId>
             <version>${project.version}</version>
             <scope>provided</scope>
         </dependency>

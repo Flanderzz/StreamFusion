@@ -25,6 +25,8 @@ fi
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(cd "$script_dir/.." && pwd)
 version=$(cd "$repo_root" && mvn -q -DforceStdout help:evaluate -Dexpression=project.version)
+# Module directories are line-neutral; the artifacts they build are not.
+flink_line=${FLINK_LINE:-2.2}
 modules="core kafka json csv raw avro avro-confluent-registry protobuf parquet"
 entries=$(mktemp)
 native_entries=$(mktemp)
@@ -69,10 +71,11 @@ assert_no_native_payload() {
 
 for suffix in $modules; do
   module="streamfusion-$suffix"
+  artifact="$module-flink$flink_line"
   if [ "$suffix" = core ]; then
-    jar_file="$repo_root/$module/target/$module-$version-runtime.jar"
+    jar_file="$repo_root/$module/target/$artifact-$version-runtime.jar"
   else
-    jar_file="$repo_root/$module/target/$module-$version.jar"
+    jar_file="$repo_root/$module/target/$artifact-$version.jar"
   fi
   if [ ! -f "$jar_file" ]; then
     echo "missing artifact: $jar_file" >&2
@@ -87,8 +90,8 @@ for suffix in $modules; do
   fi
 done
 
-core_jar="$repo_root/streamfusion-core/target/streamfusion-core-$version-runtime.jar"
-core_main_jar="$repo_root/streamfusion-core/target/streamfusion-core-$version.jar"
+core_jar="$repo_root/streamfusion-core/target/streamfusion-core-flink$flink_line-$version-runtime.jar"
+core_main_jar="$repo_root/streamfusion-core/target/streamfusion-core-flink$flink_line-$version.jar"
 assert_native_payload "$core_main_jar" streamfusion-core libstreamfusion ""
 assert_native_payload "$core_jar" streamfusion-core libstreamfusion ""
 if jar tf "$core_jar" | grep -Eq '^tech/streamfusion/(kafka|parquet|format/(json|csv|raw|avro|avroconfluent|protobuf))/'; then
@@ -98,7 +101,7 @@ fi
 
 for suffix in kafka json csv raw avro protobuf parquet; do
   assert_native_payload \
-    "$repo_root/streamfusion-$suffix/target/streamfusion-$suffix-$version.jar" \
+    "$repo_root/streamfusion-$suffix/target/streamfusion-$suffix-flink$flink_line-$version.jar" \
     "streamfusion-$suffix" "libstreamfusion_$suffix" "$suffix"
 done
 
@@ -106,10 +109,10 @@ assert_no_native_payload \
   "$repo_root/streamfusion-runtime/target/streamfusion-runtime-$version.jar" \
   streamfusion-runtime
 assert_no_native_payload \
-  "$repo_root/streamfusion-avro-confluent-registry/target/streamfusion-avro-confluent-registry-$version.jar" \
+  "$repo_root/streamfusion-avro-confluent-registry/target/streamfusion-avro-confluent-registry-flink$flink_line-$version.jar" \
   streamfusion-avro-confluent-registry
 
-loader_jar="$repo_root/streamfusion-loader/target/streamfusion-loader-$version.jar"
+loader_jar="$repo_root/streamfusion-loader/target/streamfusion-loader-flink$flink_line-$version.jar"
 if [ ! -f "$loader_jar" ]; then
   echo "missing artifact: $loader_jar" >&2
   exit 1
@@ -127,7 +130,7 @@ if [ -n "$duplicates" ]; then
   exit 1
 fi
 
-confluent_jar="$repo_root/streamfusion-avro-confluent-registry/target/streamfusion-avro-confluent-registry-$version.jar"
+confluent_jar="$repo_root/streamfusion-avro-confluent-registry/target/streamfusion-avro-confluent-registry-flink$flink_line-$version.jar"
 if jar tf "$confluent_jar" | grep -q 'libstreamfusion_avro'; then
   echo "the Confluent integration duplicates streamfusion-avro's native library" >&2
   exit 1

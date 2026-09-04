@@ -4,10 +4,10 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
     <parent><groupId>tech.streamfusion</groupId><artifactId>StreamFusion</artifactId><version>${revision}</version></parent>
-    <artifactId>streamfusion-json</artifactId>
+    <artifactId>streamfusion-json-flink${flink.line}</artifactId>
     <name>StreamFusion JSON</name>
     <properties><native.test.resource.skip>true</native.test.resource.skip></properties>
-    <dependencies><dependency><groupId>tech.streamfusion</groupId><artifactId>streamfusion-core</artifactId><version>${project.version}</version><scope>provided</scope></dependency></dependencies>
+    <dependencies><dependency><groupId>tech.streamfusion</groupId><artifactId>streamfusion-core-flink${flink.line}</artifactId><version>${project.version}</version><scope>provided</scope></dependency></dependencies>
     <build>
         <sourceDirectory>${project.basedir}/../src/main/java</sourceDirectory>
         <resources combine.self="override">

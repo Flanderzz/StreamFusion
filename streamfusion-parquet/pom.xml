@@ -10,14 +10,14 @@
         <version>${revision}</version>
     </parent>
 
-    <artifactId>streamfusion-parquet</artifactId>
+    <artifactId>streamfusion-parquet-flink${flink.line}</artifactId>
     <name>StreamFusion Parquet</name>
     <properties><native.test.resource.skip>true</native.test.resource.skip></properties>
 
     <dependencies>
         <dependency>
             <groupId>tech.streamfusion</groupId>
-            <artifactId>streamfusion-core</artifactId>
+            <artifactId>streamfusion-core-flink${flink.line}</artifactId>
             <version>${project.version}</version>
             <scope>provided</scope>
         </dependency>

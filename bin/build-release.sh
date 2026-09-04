@@ -2,10 +2,10 @@
 
 set -eu
 
-if [ "$#" -gt 1 ] || { [ "$#" -eq 1 ] && [ "$1" != "--host-only" ] && [ "$1" != "--linux-only" ]; }; then
-  echo "usage: $0 [--host-only | --linux-only]" >&2
+usage() {
+  echo "usage: $0 [--host-only | --linux-only] [--flink-line <line>]" >&2
   exit 64
-fi
+}
 
 script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(cd "$script_dir/.." && pwd)
@@ -13,12 +13,32 @@ native_dir=$repo_root/native
 stage_dir=$native_dir/target/universal
 host_only=false
 linux_only=false
+# Deployable coordinates carry the Flink line, so a release targets one line at a time.
+flink_line=2.2
 
-if [ "$#" -eq 1 ] && [ "$1" = "--host-only" ]; then
-  host_only=true
-elif [ "$#" -eq 1 ]; then
-  linux_only=true
+while [ "$#" -gt 0 ]; do
+  case $1 in
+    --host-only) host_only=true ;;
+    --linux-only) linux_only=true ;;
+    --flink-line)
+      [ "$#" -ge 2 ] || usage
+      flink_line=$2
+      shift
+      ;;
+    *) usage ;;
+  esac
+  shift
+done
+
+if [ "$host_only" = true ] && [ "$linux_only" = true ]; then
+  usage
 fi
+
+case $flink_line in
+  2.2) flink_profile= ;;
+  2.1) flink_profile=,flink-2.1 ;;
+  *) echo "unsupported Flink line: $flink_line" >&2; exit 64 ;;
+esac
 
 host_platform() {
   case "$(uname -s)" in
@@ -176,4 +196,4 @@ fi
 # platform build. A release always starts from empty Java output directories. The release profile
 # builds the same source and javadoc attachments as the publish workflow, unsigned, so attachment
 # failures surface here instead of on the release runner.
-(cd "$repo_root" && mvn clean package -Pdist,universal,release -Dgpg.skip=true -DskipTests)
+(cd "$repo_root" && mvn clean package -Pdist,universal,release${flink_profile} -Dgpg.skip=true -DskipTests)

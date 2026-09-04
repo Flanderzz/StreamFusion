@@ -13,6 +13,7 @@ Builds a job-neutral StreamFusion Flink base image.
   --load                  Build one platform and load it into the local Docker daemon.
   --platform <platform>   Platform for --load (default: Docker server platform).
   --flink-image <image>   Flink base image (default: flink:2.2.1-scala_2.12-java17).
+  --flink-line <line>     StreamFusion Flink line to build (default: 2.2). Must match --flink-image.
   --skip-release-build    Reuse the already-built StreamFusion JARs.
 EOF
   exit 64
@@ -21,6 +22,7 @@ EOF
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(cd "$script_dir/.." && pwd)
 flink_image=flink:2.2.1-scala_2.12-java17
+flink_line=2.2
 image_tag=
 mode=
 platform=
@@ -48,6 +50,11 @@ while [ "$#" -gt 0 ]; do
       flink_image=$2
       shift 2
       ;;
+    --flink-line)
+      [ "$#" -ge 2 ] || usage
+      flink_line=$2
+      shift 2
+      ;;
     --skip-release-build)
       skip_release_build=true
       shift
@@ -67,12 +74,12 @@ command -v docker >/dev/null 2>&1 || {
 docker buildx version >/dev/null
 
 if [ "$skip_release_build" = false ]; then
-  "$repo_root/bin/build-release.sh" --linux-only
+  "$repo_root/bin/build-release.sh" --linux-only --flink-line "$flink_line"
 fi
 
 artifact_version=$(cd "$repo_root" && mvn -q -DforceStdout help:evaluate -Dexpression=project.version)
-loader_jar=$repo_root/streamfusion-loader/target/streamfusion-loader-$artifact_version.jar
-core_jar=$repo_root/streamfusion-core/target/streamfusion-core-$artifact_version-runtime.jar
+loader_jar=$repo_root/streamfusion-loader/target/streamfusion-loader-flink$flink_line-$artifact_version.jar
+core_jar=$repo_root/streamfusion-core/target/streamfusion-core-flink$flink_line-$artifact_version-runtime.jar
 [ -f "$loader_jar" ] && [ -f "$core_jar" ] || {
   echo "StreamFusion release JARs are missing; run bin/build-release.sh first." >&2
   exit 66
@@ -104,6 +111,7 @@ docker buildx build \
   --platform "$platforms" \
   --build-arg "FLINK_IMAGE=$flink_image" \
   --build-arg "STREAMFUSION_VERSION=$artifact_version" \
+  --build-arg "STREAMFUSION_FLINK_LINE=$flink_line" \
   --tag "$image_tag" \
   --file "$repo_root/docker/flink-base.Dockerfile" \
   "$output" \

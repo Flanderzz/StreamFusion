@@ -9,52 +9,53 @@
     <!-- Overridden per Flink line by bin/flink-suite.sh. -->
     <properties>
         <flink.version>2.2.1</flink.version>
+        <flink.line>2.2</flink.line>
         <flink.connector.kafka.version>5.0.0-2.2</flink.connector.kafka.version>
     </properties>
     <dependencies>
         <dependency>
             <groupId>tech.streamfusion</groupId>
-            <artifactId>streamfusion-core</artifactId>
+            <artifactId>streamfusion-core-flink${flink.line}</artifactId>
             <version>0.1.0-rc2</version>
         </dependency>
         <dependency>
             <groupId>tech.streamfusion</groupId>
-            <artifactId>streamfusion-kafka</artifactId>
+            <artifactId>streamfusion-kafka-flink${flink.line}</artifactId>
             <version>0.1.0-rc2</version>
         </dependency>
         <dependency>
             <groupId>tech.streamfusion</groupId>
-            <artifactId>streamfusion-json</artifactId>
+            <artifactId>streamfusion-json-flink${flink.line}</artifactId>
             <version>0.1.0-rc2</version>
         </dependency>
         <dependency>
             <groupId>tech.streamfusion</groupId>
-            <artifactId>streamfusion-csv</artifactId>
+            <artifactId>streamfusion-csv-flink${flink.line}</artifactId>
             <version>0.1.0-rc2</version>
         </dependency>
         <dependency>
             <groupId>tech.streamfusion</groupId>
-            <artifactId>streamfusion-raw</artifactId>
+            <artifactId>streamfusion-raw-flink${flink.line}</artifactId>
             <version>0.1.0-rc2</version>
         </dependency>
         <dependency>
             <groupId>tech.streamfusion</groupId>
-            <artifactId>streamfusion-avro</artifactId>
+            <artifactId>streamfusion-avro-flink${flink.line}</artifactId>
             <version>0.1.0-rc2</version>
         </dependency>
         <dependency>
             <groupId>tech.streamfusion</groupId>
-            <artifactId>streamfusion-avro-confluent-registry</artifactId>
+            <artifactId>streamfusion-avro-confluent-registry-flink${flink.line}</artifactId>
             <version>0.1.0-rc2</version>
         </dependency>
         <dependency>
             <groupId>tech.streamfusion</groupId>
-            <artifactId>streamfusion-protobuf</artifactId>
+            <artifactId>streamfusion-protobuf-flink${flink.line}</artifactId>
             <version>0.1.0-rc2</version>
         </dependency>
         <dependency>
             <groupId>tech.streamfusion</groupId>
-            <artifactId>streamfusion-parquet</artifactId>
+            <artifactId>streamfusion-parquet-flink${flink.line}</artifactId>
             <version>0.1.0-rc2</version>
         </dependency>
         <!-- StreamFusion discovers connector planner extensions at startup. Connector APIs are

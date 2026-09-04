@@ -10,7 +10,7 @@
         <version>${revision}</version>
     </parent>
 
-    <artifactId>streamfusion-kafka</artifactId>
+    <artifactId>streamfusion-kafka-flink${flink.line}</artifactId>
     <name>StreamFusion Kafka</name>
 
     <properties><native.test.resource.skip>true</native.test.resource.skip></properties>
@@ -18,7 +18,7 @@
     <dependencies>
         <dependency>
             <groupId>tech.streamfusion</groupId>
-            <artifactId>streamfusion-core</artifactId>
+            <artifactId>streamfusion-core-flink${flink.line}</artifactId>
             <version>${project.version}</version>
             <scope>provided</scope>
         </dependency>

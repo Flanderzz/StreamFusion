@@ -13,6 +13,11 @@
     <artifactId>streamfusion-runtime</artifactId>
     <name>StreamFusion Runtime</name>
 
+    <!-- Internal build module: it compiles the shared tree and hosts the test suite, but a
+         deployment consumes the shaded per-Flink-line artifacts instead. Publishing it would put
+         one unsuffixed name on two lines' bytecode. -->
+    <properties><maven.deploy.skip>true</maven.deploy.skip></properties>
+
     <!-- Keep the repository layout stable while exposing a conventional runtime Maven module. -->
     <build>
         <sourceDirectory>${project.basedir}/../src/main/java</sourceDirectory>

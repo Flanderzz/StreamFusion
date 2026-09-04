@@ -215,16 +215,22 @@ else
     exit 1
   fi
   echo "Flink ${FLINK_VERSION} pins Calcite ${CALCITE_VERSION}."
+  # Deployable coordinates carry the Flink line, so the module list is per-line too.
+  SF_MODULES=""
+  for module in core kafka json csv raw avro avro-confluent-registry protobuf parquet; do
+    SF_MODULES="${SF_MODULES}${SF_MODULES:+,}:streamfusion-${module}-flink${FLINK_LINE}"
+  done
   mvn -B -ntp -s "${MAVEN_SETTINGS}" -Dmaven.repo.local="${SUITE_MAVEN_REPO}" \
     -Dstreamfusion.flink-source-suite \
     ${SF_FLINK_PROFILE_ARG} \
     -Dcalcite.version="${CALCITE_VERSION}" \
     -f "${STREAMFUSION_BUILD_ROOT}/pom.xml" \
-    -pl :streamfusion-core,:streamfusion-kafka,:streamfusion-json,:streamfusion-csv,:streamfusion-raw,:streamfusion-avro,:streamfusion-avro-confluent-registry,:streamfusion-protobuf,:streamfusion-parquet \
+    -pl "${SF_MODULES}" \
     -am -DskipTests clean install || exit $?
   mvn -B -ntp -s "${MAVEN_SETTINGS}" -Dmaven.repo.local="${SUITE_MAVEN_REPO}" \
     -f "${REPO_ROOT}/dev/flink-suite/classpath-pom.xml" \
     -Dflink.version="${FLINK_VERSION}" \
+    -Dflink.line="${FLINK_LINE}" \
     -Dflink.connector.kafka.version="${FLINK_KAFKA_CONNECTOR_VERSION}" \
     dependency:build-classpath -Dmdep.outputFile="${CLASSPATH_FILE}" || exit $?
 

@@ -50,7 +50,8 @@ class NativeExtensionJarIT {
                 ExtensionProbe.class.getName(),
                 requiredProperty("streamfusion.project.dir"),
                 requiredProperty("streamfusion.version"),
-                extension)
+                extension,
+                requiredProperty("streamfusion.flink.line"))
             .redirectErrorStream(true);
     process.environment().put("GLIBC_TUNABLES", "glibc.rtld.optional_static_tls=131072");
     return process.start();
@@ -65,9 +66,11 @@ class NativeExtensionJarIT {
       Path projectDirectory = Path.of(args[0]);
       String version = args[1];
       String extension = args[2];
-      Path core = artifact(projectDirectory, "streamfusion-core", version);
-      Path extensionJar = artifact(projectDirectory, "streamfusion-" + extension, version);
-      URL[] classpath = extensionClasspath(projectDirectory, version, extension, core, extensionJar);
+      String flinkLine = args[3];
+      Path core = artifact(projectDirectory, "streamfusion-core", version, flinkLine);
+      Path extensionJar = artifact(projectDirectory, "streamfusion-" + extension, version, flinkLine);
+      URL[] classpath =
+          extensionClasspath(projectDirectory, version, extension, core, extensionJar, flinkLine);
       try (URLClassLoader loader =
           new URLClassLoader(
               classpath, ClassLoader.getPlatformClassLoader())) {
@@ -84,10 +87,15 @@ class NativeExtensionJarIT {
     }
 
     private static URL[] extensionClasspath(
-        Path projectDirectory, String version, String extension, Path core, Path extensionJar)
+        Path projectDirectory,
+        String version,
+        String extension,
+        Path core,
+        Path extensionJar,
+        String flinkLine)
         throws IOException {
       if ("avro-confluent-registry".equals(extension)) {
-        Path avro = artifact(projectDirectory, "streamfusion-avro", version);
+        Path avro = artifact(projectDirectory, "streamfusion-avro", version, flinkLine);
         return new URL[] {core.toUri().toURL(), avro.toUri().toURL(), extensionJar.toUri().toURL()};
       }
       if ("parquet".equals(extension)) {
@@ -101,12 +109,13 @@ class NativeExtensionJarIT {
       return new URL[] {core.toUri().toURL(), extensionJar.toUri().toURL()};
     }
 
-    private static Path artifact(Path projectDirectory, String module, String version) {
+    private static Path artifact(
+        Path projectDirectory, String module, String version, String flinkLine) {
       Path artifact =
           projectDirectory
               .resolve(module)
               .resolve("target")
-              .resolve(module + "-" + version + ".jar");
+              .resolve(module + "-flink" + flinkLine + "-" + version + ".jar");
       if (!Files.isRegularFile(artifact)) {
         throw new IllegalStateException("Missing packaged extension artifact: " + artifact);
       }
