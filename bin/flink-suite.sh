@@ -21,7 +21,9 @@ readonly KAFKA_CONNECTOR_ROOT="${SUITE_ROOT}/flink-connector-kafka-${KAFKA_CONNE
 readonly STREAMFUSION_BUILD_ROOT="${SUITE_ROOT}/streamfusion-source"
 readonly AGENT_ROOT="${REPO_ROOT}/dev/flink-suite/agent"
 readonly AGENT_JAR="${AGENT_ROOT}/target/streamfusion-flink-suite-agent-1.0-SNAPSHOT.jar"
-readonly CLASSPATH_FILE="${SUITE_ROOT}/streamfusion-classpath.txt"
+# Per line: the two lines resolve different Flink, Calcite and connector jars, so a shared file lets
+# a reused build run one line's tests against the other line's classpath.
+readonly CLASSPATH_FILE="${SUITE_ROOT}/streamfusion-classpath-${FLINK_VERSION}.txt"
 readonly MAVEN_SETTINGS="${REPO_ROOT}/dev/flink-suite/settings.xml"
 readonly SUITE_MAVEN_REPO="${SUITE_ROOT}/m2"
 readonly UNSHADED_PLANNER_JAR="${SUITE_ROOT}/flink-table-planner-${FLINK_VERSION}-unshaded.jar"
@@ -204,9 +206,19 @@ else
   ) || exit $?
 
   echo "Building and installing StreamFusion and its supported connector/format modules against the source-suite planner..."
+  # Flink pins Calcite per line, and the source-suite classpath must agree with it: a planner
+  # compiled against one Calcite cannot initialise its convertlet table against another.
+  readonly FLINK_TABLE_POM="${FLINK_ROOT}/flink-table/pom.xml"
+  CALCITE_VERSION="$(sed -n 's:.*<calcite\.version>\(.*\)</calcite\.version>.*:\1:p' "${FLINK_TABLE_POM}" | head -1)"
+  if [[ -z "${CALCITE_VERSION}" ]]; then
+    echo "Could not read calcite.version from ${FLINK_TABLE_POM}" >&2
+    exit 1
+  fi
+  echo "Flink ${FLINK_VERSION} pins Calcite ${CALCITE_VERSION}."
   mvn -B -ntp -s "${MAVEN_SETTINGS}" -Dmaven.repo.local="${SUITE_MAVEN_REPO}" \
     -Dstreamfusion.flink-source-suite \
     ${SF_FLINK_PROFILE_ARG} \
+    -Dcalcite.version="${CALCITE_VERSION}" \
     -f "${STREAMFUSION_BUILD_ROOT}/pom.xml" \
     -pl :streamfusion-core,:streamfusion-kafka,:streamfusion-json,:streamfusion-csv,:streamfusion-raw,:streamfusion-avro,:streamfusion-avro-confluent-registry,:streamfusion-protobuf,:streamfusion-parquet \
     -am -DskipTests clean install || exit $?
