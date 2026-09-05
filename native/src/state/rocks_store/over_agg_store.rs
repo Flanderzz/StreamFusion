@@ -1,6 +1,6 @@
 use super::{
-    checkpoint_files, copy_checkpoint_db, open_shared_db, prefix_successor, re, FlinkWriteBatch,
-    OpenedDb, PAIR_FIRST_TABLE, PAIR_SECOND_TABLE,
+    checkpoint_files, copy_checkpoint_db, multi_get_pinned, open_shared_db, prefix_successor, re,
+    FlinkWriteBatch, OpenedDb, PAIR_FIRST_TABLE, PAIR_SECOND_TABLE,
 };
 use crate::*;
 use arrow::row::{RowConverter, SortField};
@@ -286,7 +286,7 @@ impl RocksOverAggStore {
         &self,
         db_keys: &[Vec<u8>],
     ) -> Result<Vec<Option<(i64, Vec<ScalarValue>)>>, DataFusionError> {
-        let fetched = self.db.multi_get(db_keys);
+        let fetched = multi_get_pinned(&self.db, db_keys);
         let mut values = Vec::with_capacity(fetched.len());
         for value in fetched {
             values.push(value.map_err(re)?);
@@ -294,7 +294,7 @@ impl RocksOverAggStore {
         let hits: Vec<&[u8]> = values
             .iter()
             .flatten()
-            .map(|value| &value.as_slice()[STAMP_LEN..])
+            .map(|value| &value[STAMP_LEN..])
             .collect();
         let mut states = self.decode_states(&hits)?.into_iter();
         Ok(values
@@ -559,7 +559,7 @@ impl RocksOverAggStore {
 
     /// Presence probe for a batch's (key, element) pairs: one multi-get.
     pub(crate) fn probe_distinct(&self, db_keys: &[Vec<u8>]) -> Result<Vec<bool>, DataFusionError> {
-        let fetched = self.db.multi_get(db_keys);
+        let fetched = multi_get_pinned(&self.db, db_keys);
         let mut out = Vec::with_capacity(fetched.len());
         for value in fetched {
             out.push(value.map_err(re)?.is_some());

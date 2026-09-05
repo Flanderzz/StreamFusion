@@ -1,6 +1,6 @@
 use super::{
-    checkpoint_files, copy_checkpoint_db, open_shared_db, re, FlinkWriteBatch, OpenedDb,
-    PAIR_FIRST_TABLE, PAIR_SECOND_TABLE,
+    checkpoint_files, copy_checkpoint_db, multi_get_pinned, open_shared_db, re, FlinkWriteBatch,
+    OpenedDb, PAIR_FIRST_TABLE, PAIR_SECOND_TABLE,
 };
 use crate::*;
 use arrow::row::{RowConverter, SortField};
@@ -228,7 +228,7 @@ impl RocksKeepFirstDedupStore {
             .map(|key| Self::db_key(key, EMITTED_TABLE))
             .collect();
         let mut out = HashMap::default();
-        for (key, value) in keys.iter().zip(self.db.multi_get(&db_keys)) {
+        for (key, value) in keys.iter().zip(multi_get_pinned(&self.db, &db_keys)) {
             if let Some(bytes) = value.map_err(re)? {
                 let stamp =
                     (bytes.len() == 8).then(|| i64::from_le_bytes(bytes[..8].try_into().unwrap()));
@@ -248,7 +248,7 @@ impl RocksKeepFirstDedupStore {
             .map(|key| Self::db_key(key, PENDING_TABLE))
             .collect();
         let mut out = HashMap::default();
-        for (key, value) in keys.iter().zip(self.db.multi_get(&db_keys)) {
+        for (key, value) in keys.iter().zip(multi_get_pinned(&self.db, &db_keys)) {
             if let Some(bytes) = value.map_err(re)? {
                 out.insert(
                     key.clone(),
@@ -549,6 +549,38 @@ mod tests {
         let store =
             RocksKeepFirstDedupStore::create(test_config(name, ttl_ms), schema(), &[0]).unwrap();
         memory_dedup(ttl_ms).with_store(store)
+    }
+
+    #[test]
+    fn explicit_default_cf_preserves_the_table_ttl_filter() {
+        let mut config = test_config("cf-ttl", 1000);
+        let mut options = FlinkRocksOptions::from_json(&config.options_json).unwrap();
+        options.compaction_filter_query_time_after_num_entries = 1;
+        config.options_json = serde_json::to_string(&options).unwrap();
+        let opened = open_shared_db(
+            &config,
+            &[(Some(PENDING_TABLE), 0), (Some(EMITTED_TABLE), 1000)],
+        )
+        .unwrap();
+        let pending = [0, 0, 0, 1, PENDING_TABLE, 0];
+        let expired = [0, 0, 0, 1, EMITTED_TABLE, 0];
+        let live = [0, 0, 0, 1, EMITTED_TABLE, 1];
+        opened.db.put(pending, []).unwrap();
+        opened.db.put(expired, 0i64.to_le_bytes()).unwrap();
+        opened.db.put(live, 1500i64.to_le_bytes()).unwrap();
+        opened
+            .clock
+            .store(2000, std::sync::atomic::Ordering::Relaxed);
+        opened.db.flush().unwrap();
+        opened.db.compact_range(None::<&[u8]>, None::<&[u8]>);
+        assert!(opened.db.get(expired).unwrap().is_none());
+        assert_eq!(opened.db.get(pending).unwrap(), Some(vec![]));
+        assert_eq!(
+            opened.db.get(live).unwrap(),
+            Some(1500i64.to_le_bytes().to_vec())
+        );
+        drop(opened);
+        std::fs::remove_dir_all(config.table_dir).unwrap();
     }
 
     // Emission is exactly the memory path's order: incumbents in their standing order, keys whose

@@ -26,6 +26,17 @@ checkpoint, which flushes live memtables itself. Typed-store values are compact 
 state-TTL value carries its last-write timestamp as a fixed 8-byte prefix, so the TTL compaction
 filter reads one integer per entry.
 
+Point reads use RocksDB's optimized batched MultiGet API on the default column family. The Rust
+binding borrows the batch's key bytes and returns pinned values, which remain valid through the
+batch decode and are then released. Operator state owns its decoded values; it does not retain
+RocksDB cache pins across bundles. This changes the read path without changing persisted keys,
+value encodings, or checkpoint files. Range-oriented state continues to use iterators.
+
+The group-aggregate codec builds primitive Arrow columns directly from its accumulators and
+restores groups from decoded columns, avoiding temporary scalar rows. Arrow-row conversion still
+allocates and copies between columnar buffers and row bytes; it is a batched conversion, not a
+zero-copy view. Decimal and string state retain the general scalar-to-array conversion.
+
 Native store memory follows Flink's RocksDB memory control (`state.backend.rocksdb.memory.*`): one
 shared block cache and write-buffer manager per slot — sized by `memory.fixed-per-slot` if set,
 else the slot's managed-memory share (`memory.managed`, on by default), else `memory.fixed-per-tm`

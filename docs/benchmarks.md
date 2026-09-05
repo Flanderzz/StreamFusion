@@ -62,40 +62,46 @@ TZ=UTC SF_BENCHMARK=true SF_PROFILE_DECODE=true \
 
 ## Nexmark, parallelism 4
 
-Apple M1 Max, release + `mimalloc`, measured with one measured run per cell (memory columns 2026-08-25, disk columns 2026-08-26 after the multiset-aggregate direct-store work) across all
-four backend/mode combinations. The memory columns compare Flink's default heap state against
-StreamFusion's memory state; the disk columns compare stock Flink RocksDB against StreamFusion's
-native RocksDB backend, both after the per-key state rework that put every native operator on
-RocksDB's own write path. Mini-batching ("on") uses the same production-style configuration on
-both engines (`allow-latency=2s`, `size=50000`). Each cell is StreamFusion throughput divided by
-Flink throughput within the same backend and mode.
+Apple M1 Max, release + `mimalloc`, measured across all four backend/mode combinations. The memory
+columns use one measured run per cell (2026-08-25); the disk columns use one warmup and the best of
+two measured runs (2026-09-05, after the pinned batched-read and column-state-codec work). The
+memory columns compare Flink's default heap state against StreamFusion's memory state; the disk
+columns compare stock Flink RocksDB against StreamFusion's native RocksDB backend. The Kafka
+harness fixes the table session time zone at UTC so `TIMESTAMP_LTZ` window coverage does not depend
+on the benchmark host. Mini-batching ("on") uses the same production-style configuration on both
+engines (`allow-latency=2s`, `size=50000`). Each cell is StreamFusion throughput divided by Flink
+throughput within the same backend and mode.
 
 | Query | Memory, off | Memory, on | Disk, off | Disk, on |
 |---|---:|---:|---:|---:|
-| q0 | **1.69×** | **1.39×** | **1.61×** | **1.26×** |
-| q1 | **1.40×** | **1.40×** | **1.32×** | **1.38×** |
-| q2 | **1.26×** | **1.08×** | 0.99× | **1.18×** |
-| q3 | **1.03×** | **1.16×** | **1.06×** | **1.16×** |
-| q4 | **1.83×** | **1.60×** | **6.18×** | **12.10×** |
-| q5 | **1.41×** | **1.23×** | **3.72×** | **3.44×** |
-| q7 | **1.30×** | **1.47×** | **6.90×** | **15.16×** |
-| q8 | **1.27×** | **1.12×** | **3.55×** | **2.70×** |
-| q9 | **1.22×** | **1.80×** | **14.22×** | **28.15×** |
-| q10 | **1.45×** | **1.94×** | **1.52×** | **1.34×** |
-| q11 | **1.47×** | **1.50×** | **10.40×** | **10.22×** |
-| q12 | **1.09×** | **1.13×** | **1.33×** | **1.40×** |
-| q13 | **1.20×** | **1.14×** | **1.16×** | **1.36×** |
-| q14 | **1.47×** | **1.25×** | **1.43×** | **1.33×** |
-| q15 | **1.47×** | **1.22×** | **1.33×** | **1.25×** |
-| q16 | **1.17×** | **1.41×** | **1.17×** | **1.50×** |
-| q17 | **1.20×** | **1.18×** | **1.86×** | **1.55×** |
-| q18 | **1.07×** | **1.37×** | **4.52×** | **6.38×** |
-| q19 | 0.99× | **2.82×** | **1.93×** | **5.60×** |
-| q20 | **1.22×** | **1.56×** | **24.01×** | **40.33×** |
-| q21 | **1.23×** | **1.31×** | **1.36×** | **1.37×** |
-| q22 | **1.33×** | **1.25×** | **1.37×** | 0.97× |
-| q23 | **1.69×** | **3.32×** | **1.55×** | **2.32×** |
-| **geomean** | **1.31×** | **1.44×** | **2.47×** | **2.92×** |
+| q0 | **1.69×** | **1.39×** | **1.36×** | **1.40×** |
+| q1† | **1.40×** | **1.40×** | **1.38×** | **1.41×** |
+| q2 | **1.26×** | **1.08×** | **1.11×** | **1.08×** |
+| q3 | **1.03×** | **1.16×** | **1.08×** | **1.14×** |
+| q4 | **1.83×** | **1.60×** | **8.92×** | **15.11×** |
+| q5 | **1.41×** | **1.23×** | **4.38×** | **4.38×** |
+| q7 | **1.30×** | **1.47×** | **7.41×** | **11.93×** |
+| q8 | **1.27×** | **1.12×** | **2.33×** | **2.43×** |
+| q9 | **1.22×** | **1.80×** | **17.83×** | **67.95×** |
+| q10† | **1.45×** | **1.94×** | **1.42×** | **1.40×** |
+| q11 | **1.47×** | **1.50×** | **9.84×** | **10.03×** |
+| q12 | **1.09×** | **1.13×** | **1.45×** | **1.33×** |
+| q13 | **1.20×** | **1.14×** | **1.15×** | **1.22×** |
+| q14† | **1.47×** | **1.25×** | **1.49×** | **1.53×** |
+| q15† | **1.47×** | **1.22×** | **1.61×** | **1.32×** |
+| q16† | **1.17×** | **1.41×** | **1.49×** | **1.28×** |
+| q17† | **1.20×** | **1.18×** | **1.92×** | **1.65×** |
+| q18 | **1.07×** | **1.37×** | **6.01×** | **8.92×** |
+| q19 | 0.99× | **2.82×** | **2.44×** | **5.09×** |
+| q20 | **1.22×** | **1.56×** | **37.43×** | **68.20×** |
+| q21† | **1.23×** | **1.31×** | **1.26×** | **1.27×** |
+| q22 | **1.33×** | **1.25×** | **1.30×** | **1.22×** |
+| q23 | **1.69×** | **3.32×** | **3.15×** | **12.10×** |
+| **geomean** | **1.31×** | **1.44×** | **2.75×** | **3.41×** |
+
+† The benchmark's existing opt-in expression variants are used for these headline cells: q1 uses
+approximate decimal arithmetic; q10, q14–q17, and q21 use native datetime or regex/case behavior
+that can differ from Flink at documented edge cases.
 
 _Apple M1 Max; numbers are comparable only within a machine._
 
@@ -108,6 +114,15 @@ SF_BENCHMARK=true mvn -pl :streamfusion-runtime test -Pbench
 runs the end-to-end suites (`ThroughputBenchmark`, `NexmarkBenchmark`, `NexmarkKafkaBenchmark`,
 `NexmarkMatrixBenchmark`); the `-Pbench` profile is required. The Criterion micro-benchmarks run
 independently with `cd native && cargo bench`.
+
+To reproduce the two persistent-backend columns above in one run:
+
+```sh
+SF_BENCHMARK=true SF_MATRIX_STATE_BACKENDS=true SF_STATE_BACKENDS_MINI_BATCH=both \
+  SF_ROWS=2000000 SF_PARALLELISM=4 SF_KAFKA_PARTITIONS=4 SF_WARMUP=1 SF_RUNS=2 \
+  mvn -pl :streamfusion-runtime test -Pbench \
+  -Dtest='NexmarkMatrixBenchmark#stateBackendComparison'
+```
 
 To capture matched async-profiler CPU recordings for every exactly-once Kafka query with the memory
 backend and mini-batching disabled, run `exactlyOnceKafkaSinkProfileAll` with

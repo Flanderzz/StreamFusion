@@ -1158,36 +1158,92 @@ impl crate::state::RocksStateCodec for GroupStateCodec {
         }
         fields
     }
-    fn encode(&self, state: &GroupKeyState) -> Vec<ScalarValue> {
-        let (records, scalars, counts) = group_state_scalars(state, &self.state_types);
-        let mut row = vec![ScalarValue::Int64(Some(records))];
-        for (scalar, count) in scalars.into_iter().zip(counts) {
-            row.push(scalar);
-            row.push(ScalarValue::Int64(Some(count)));
+    fn encode_columns(&self, states: &[&GroupKeyState]) -> Vec<ArrayRef> {
+        let mut columns: Vec<ArrayRef> = Vec::with_capacity(1 + 2 * self.state_types.len());
+        columns.push(Arc::new(Int64Array::from_iter_values(
+            states.iter().map(|state| state.records),
+        )));
+        for (i, state_type) in self.state_types.iter().enumerate() {
+            // Numeric scalars stay on the stack: no per-group scalar row, transpose, or
+            // intermediate Vec<ScalarValue> before Arrow's typed column builder.
+            let values = states
+                .iter()
+                .map(|state| state.aggs[i].persisted_scalar(state_type));
+            macro_rules! primitive_column {
+                ($array:ty, $scalar:ident) => {
+                    Arc::new(<$array>::from_iter(values.map(|value| match value {
+                        ScalarValue::$scalar(value) => value,
+                        _ => unreachable!("aggregate state type mismatch"),
+                    }))) as ArrayRef
+                };
+            }
+            let column = match state_type {
+                DataType::Int8 => primitive_column!(Int8Array, Int8),
+                DataType::Int16 => primitive_column!(Int16Array, Int16),
+                DataType::Int32 => primitive_column!(Int32Array, Int32),
+                DataType::Int64 => primitive_column!(Int64Array, Int64),
+                DataType::Float32 => primitive_column!(Float32Array, Float32),
+                DataType::Float64 => primitive_column!(arrow::array::Float64Array, Float64),
+                // Keep the general converter for decimal and string states, including typed
+                // NULLs and decimal precision/scale. These still avoid the per-group rows.
+                _ => scalars_to_array(values.collect(), state_type),
+            };
+            columns.push(column);
+            columns.push(Arc::new(Int64Array::from_iter_values(
+                states.iter().map(|state| state.aggs[i].persisted_count()),
+            )));
         }
-        row
+        columns
     }
-    fn decode(&self, scalars: &[ScalarValue]) -> GroupKeyState {
-        let as_i64 = |s: &ScalarValue| {
-            if let ScalarValue::Int64(Some(v)) = s {
-                *v
-            } else {
+    fn decode_row(
+        &self,
+        columns: &[ArrayRef],
+        row: usize,
+    ) -> Result<GroupKeyState, DataFusionError> {
+        let count = |column: usize| {
+            let values = columns[column]
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            if values.is_null(row) {
                 0
+            } else {
+                values.value(row)
             }
         };
-        let mut states = Vec::new();
-        let mut non_nulls = Vec::new();
-        for i in 0..self.state_types.len() {
-            states.push(scalars[1 + 2 * i].clone());
-            non_nulls.push(as_i64(&scalars[2 + 2 * i]));
+        let mut aggs = Vec::with_capacity(self.kinds.len());
+        for (i, (&kind, value_type)) in self.kinds.iter().zip(&self.value_types).enumerate() {
+            let scalar = ScalarValue::try_from_array(&columns[1 + 2 * i], row)?;
+            let mut state = GroupAggState::new(kind, value_type);
+            match &mut state {
+                GroupAggState::Running { agg, non_null } => {
+                    agg.restore_value(&scalar);
+                    *non_null = count(2 + 2 * i);
+                }
+                GroupAggState::Extremes { extreme, .. } => {
+                    if !scalar.is_null() {
+                        *extreme = Some(MinMaxKey::from_scalar(&scalar));
+                    }
+                }
+                GroupAggState::Distinct { live, .. } => {
+                    if let ScalarValue::Int64(Some(value)) = scalar {
+                        *live = value;
+                    }
+                }
+                GroupAggState::DistinctRunning { agg, live, .. } => {
+                    agg.restore_value(&scalar);
+                    *live = count(2 + 2 * i);
+                }
+            }
+            aggs.push(state);
         }
-        group_state_from_scalars(
-            &self.kinds,
-            &self.value_types,
-            as_i64(&scalars[0]),
-            &states,
-            &non_nulls,
-        )
+        Ok(GroupKeyState {
+            aggs,
+            records: count(0),
+            last_output: None,
+            last_output_bytes: 0,
+            last_write_ms: 0,
+        })
     }
     fn value_bytes(&self, state: &GroupKeyState) -> usize {
         group_key_state_bytes(state)
@@ -1210,97 +1266,29 @@ pub(crate) fn group_state_types(kinds: &[i64], value_types: &[DataType]) -> Vec<
         .collect()
 }
 
-/// One group's persisted row: live record count, per-aggregate state scalar, per-aggregate
-/// non-null count. A `Running` aggregate stores its scalar exactly as the raw keyed-state snapshot
-/// does. A multiset aggregate stores the running value its emit needs — the elements live in the
-/// companion tables and only the touched ones are ever hydrated: the current extreme for MIN/MAX,
-/// the live distinct cardinality for COUNT(DISTINCT), and the running sum (with the cardinality in
-/// the count slot) for SUM(DISTINCT).
+/// A multiset's main-row slot carries only its running value and count. Its elements remain
+/// in companion tables and are hydrated separately for the keys a bundle touches.
 #[cfg(feature = "rocksdb-state")]
-pub(crate) fn group_state_scalars(
-    state: &GroupKeyState,
-    state_types: &[DataType],
-) -> (i64, Vec<ScalarValue>, Vec<i64>) {
-    let mut scalars = Vec::with_capacity(state.aggs.len());
-    let mut non_nulls = Vec::with_capacity(state.aggs.len());
-    for (i, agg) in state.aggs.iter().enumerate() {
-        match agg {
-            GroupAggState::Running { agg, non_null } => {
-                scalars.push(agg.emit());
-                non_nulls.push(*non_null);
-            }
-            GroupAggState::Extremes { extreme, stale, .. } => {
+impl GroupAggState {
+    fn persisted_scalar(&self, state_type: &DataType) -> ScalarValue {
+        match self {
+            Self::Running { agg, .. } | Self::DistinctRunning { agg, .. } => agg.emit(),
+            Self::Extremes { extreme, stale, .. } => {
                 debug_assert!(!stale, "extremes persisted before the backend reseek");
-                scalars.push(extreme.as_ref().map_or_else(
-                    || null_scalar(&state_types[i]),
-                    |k| k.scalar(&state_types[i]),
-                ));
-                non_nulls.push(0);
+                extreme
+                    .as_ref()
+                    .map_or_else(|| null_scalar(state_type), |key| key.scalar(state_type))
             }
-            GroupAggState::Distinct { live, .. } => {
-                scalars.push(ScalarValue::Int64(Some(*live)));
-                non_nulls.push(0);
-            }
-            GroupAggState::DistinctRunning { agg, live, .. } => {
-                scalars.push(agg.emit());
-                non_nulls.push(*live);
-            }
+            Self::Distinct { live, .. } => ScalarValue::Int64(Some(*live)),
         }
     }
-    (state.records, scalars, non_nulls)
-}
 
-/// Rebuilds one group's state from its persisted row (the inverse of `group_state_scalars`); a
-/// multiset aggregate starts with an empty partial view, hydrated per touched element by the
-/// backend.
-#[cfg(feature = "rocksdb-state")]
-pub(crate) fn group_state_from_scalars(
-    kinds: &[i64],
-    value_types: &[DataType],
-    records: i64,
-    states: &[ScalarValue],
-    non_nulls: &[i64],
-) -> GroupKeyState {
-    let as_i64 = |s: &ScalarValue| {
-        if let ScalarValue::Int64(Some(v)) = s {
-            *v
-        } else {
-            0
+    fn persisted_count(&self) -> i64 {
+        match self {
+            Self::Running { non_null, .. } => *non_null,
+            Self::DistinctRunning { live, .. } => *live,
+            Self::Extremes { .. } | Self::Distinct { .. } => 0,
         }
-    };
-    let aggs = kinds
-        .iter()
-        .zip(value_types)
-        .enumerate()
-        .map(|(i, (&kind, vt))| {
-            let mut agg_state = GroupAggState::new(kind, vt);
-            match &mut agg_state {
-                GroupAggState::Running { agg, non_null } => {
-                    agg.restore_value(&states[i]);
-                    *non_null = non_nulls[i];
-                }
-                GroupAggState::Extremes { extreme, .. } => {
-                    if !states[i].is_null() {
-                        *extreme = Some(MinMaxKey::from_scalar(&states[i]));
-                    }
-                }
-                GroupAggState::Distinct { live, .. } => {
-                    *live = as_i64(&states[i]);
-                }
-                GroupAggState::DistinctRunning { agg, live, .. } => {
-                    agg.restore_value(&states[i]);
-                    *live = non_nulls[i];
-                }
-            }
-            agg_state
-        })
-        .collect();
-    GroupKeyState {
-        aggs,
-        records,
-        last_output: None,
-        last_output_bytes: 0,
-        last_write_ms: 0,
     }
 }
 
@@ -3361,4 +3349,213 @@ pub extern "system" fn Java_tech_streamfusion_Native_closeGroupAggregator<'local
     crate::bridge::jni_guard(env, move |_env| unsafe {
         drop(from_handle::<GroupAggregator>(handle));
     })
+}
+
+#[cfg(all(test, feature = "rocksdb-state"))]
+mod rocks_codec_tests {
+    use super::*;
+    use crate::state::RocksStateCodec;
+
+    fn group(records: i64, aggs: Vec<GroupAggState>) -> GroupKeyState {
+        GroupKeyState {
+            aggs,
+            records,
+            last_output: None,
+            last_output_bytes: 0,
+            last_write_ms: 0,
+        }
+    }
+
+    fn check_columns(codec: &GroupStateCodec, states: &[GroupKeyState], expected: Vec<ArrayRef>) {
+        let refs: Vec<_> = states.iter().collect();
+        let mut converter = RowConverter::new(
+            codec
+                .value_fields()
+                .into_iter()
+                .map(|(_, ty)| SortField::new(ty))
+                .collect(),
+        )
+        .unwrap();
+        // These columns describe the existing persisted schema independently of the new codec.
+        let legacy_rows = converter.convert_columns(&expected).unwrap();
+        let actual_rows = converter
+            .convert_columns(&codec.encode_columns(&refs))
+            .unwrap();
+        assert_eq!(actual_rows.num_rows(), legacy_rows.num_rows());
+        for (actual, expected) in actual_rows.iter().zip(legacy_rows.iter()) {
+            assert_eq!(actual.data(), expected.data());
+        }
+        let columns = converter.convert_rows(legacy_rows.iter()).unwrap();
+        for (row, original) in states.iter().enumerate() {
+            let restored = codec.decode_row(&columns, row).unwrap();
+            assert_eq!(restored.records, original.records);
+            assert_eq!(restored.aggs.len(), original.aggs.len());
+            for (i, (restored, original)) in restored.aggs.iter().zip(&original.aggs).enumerate() {
+                assert_eq!(restored.persisted_count(), original.persisted_count());
+                assert_eq!(
+                    restored.persisted_scalar(&codec.state_types[i]),
+                    original.persisted_scalar(&codec.state_types[i]),
+                );
+            }
+        }
+        assert_eq!(codec.encode_columns(&[]).len(), expected.len());
+        assert!(codec
+            .encode_columns(&[])
+            .iter()
+            .all(|column| column.is_empty()));
+    }
+
+    #[test]
+    fn numeric_columns_preserve_legacy_rows_and_nulls() {
+        let cases = [
+            (
+                DataType::Int8,
+                vec![ScalarValue::Int8(Some(i8::MIN)), ScalarValue::Int8(None)],
+            ),
+            (
+                DataType::Int16,
+                vec![ScalarValue::Int16(Some(i16::MIN)), ScalarValue::Int16(None)],
+            ),
+            (
+                DataType::Int32,
+                vec![ScalarValue::Int32(Some(i32::MIN)), ScalarValue::Int32(None)],
+            ),
+            (
+                DataType::Int64,
+                vec![ScalarValue::Int64(Some(i64::MIN)), ScalarValue::Int64(None)],
+            ),
+            (
+                DataType::Float32,
+                vec![
+                    ScalarValue::Float32(Some(-0.0)),
+                    ScalarValue::Float32(None),
+                    ScalarValue::Float32(Some(f32::NAN)),
+                ],
+            ),
+            (
+                DataType::Float64,
+                vec![
+                    ScalarValue::Float64(Some(-0.0)),
+                    ScalarValue::Float64(None),
+                    ScalarValue::Float64(Some(f64::NAN)),
+                ],
+            ),
+        ];
+        for (ty, values) in cases {
+            let codec = GroupStateCodec::new(vec![0], vec![ty.clone()], vec![1], vec![]);
+            let counts: Vec<i64> = values
+                .iter()
+                .map(|value| i64::from(!value.is_null()))
+                .collect();
+            let states: Vec<_> = values
+                .iter()
+                .zip(&counts)
+                .map(|(value, &non_null)| {
+                    let mut agg = RunningAgg::new(0, &ty);
+                    agg.restore_value(value);
+                    group(3, vec![GroupAggState::Running { agg, non_null }])
+                })
+                .collect();
+            let columns: Vec<ArrayRef> = vec![
+                Arc::new(Int64Array::from(vec![3; values.len()])),
+                scalars_to_array(values, &ty),
+                Arc::new(Int64Array::from(counts)),
+            ];
+            check_columns(&codec, &states, columns);
+        }
+    }
+
+    #[test]
+    fn widened_avg_decimal_and_multiset_columns_preserve_legacy_rows() {
+        let kinds = vec![4, 4, 0, 1, 7, 9];
+        let types = vec![
+            DataType::Int16,
+            DataType::Float32,
+            DataType::Decimal128(12, 2),
+            DataType::Utf8,
+            DataType::Int64,
+            DataType::Int64,
+        ];
+        let codec = GroupStateCodec::new(kinds.clone(), types.clone(), vec![1; 6], vec![]);
+        let mut extreme = GroupAggState::new(1, &DataType::Utf8);
+        if let GroupAggState::Extremes { extreme, .. } = &mut extreme {
+            *extreme = Some(MinMaxKey::Str("\0\u{1f642}abcdefghijk".into()));
+        }
+        let first = group(
+            10,
+            vec![
+                GroupAggState::Running {
+                    agg: RunningAgg::AvgInt {
+                        sum: -40000,
+                        result: DataType::Int16,
+                    },
+                    non_null: 2,
+                },
+                GroupAggState::Running {
+                    agg: RunningAgg::AvgFloat {
+                        sum: 1.5,
+                        result: DataType::Float32,
+                    },
+                    non_null: 3,
+                },
+                GroupAggState::Running {
+                    agg: RunningAgg::SumDecimal {
+                        sum: 12345,
+                        scale: 2,
+                        overflow: false,
+                    },
+                    non_null: 7,
+                },
+                extreme,
+                GroupAggState::Distinct {
+                    set: DistinctSet::new(&DataType::Int64),
+                    live: 3,
+                },
+                GroupAggState::DistinctRunning {
+                    counts: DistinctSet::new(&DataType::Int64),
+                    agg: RunningAgg::SumI64(Some(17)),
+                    live: 2,
+                },
+            ],
+        );
+        let mut empty = group(
+            1,
+            kinds
+                .iter()
+                .zip(&types)
+                .map(|(&kind, ty)| GroupAggState::new(kind, ty))
+                .collect(),
+        );
+        if let GroupAggState::Running {
+            agg: RunningAgg::SumDecimal { overflow, .. },
+            ..
+        } = &mut empty.aggs[2]
+        {
+            *overflow = true;
+        }
+        let counts = |values: Vec<i64>| Arc::new(Int64Array::from(values)) as ArrayRef;
+        let columns = vec![
+            counts(vec![10, 1]),
+            counts(vec![-40000, 0]),
+            counts(vec![2, 0]),
+            Arc::new(arrow::array::Float64Array::from(vec![1.5, 0.0])),
+            counts(vec![3, 0]),
+            Arc::new(
+                Decimal128Array::from(vec![Some(12345), None])
+                    .with_precision_and_scale(38, 2)
+                    .unwrap(),
+            ),
+            counts(vec![7, 0]),
+            Arc::new(StringArray::from(vec![
+                Some("\0\u{1f642}abcdefghijk"),
+                None,
+            ])),
+            counts(vec![0, 0]),
+            counts(vec![3, 0]),
+            counts(vec![0, 0]),
+            Arc::new(Int64Array::from(vec![Some(17), None])),
+            counts(vec![2, 0]),
+        ];
+        check_columns(&codec, &[first, empty], columns);
+    }
 }

@@ -248,12 +248,6 @@ impl crate::state::RocksStateCodec for TopNStateCodec {
     fn value_fields(&self) -> Vec<(String, DataType)> {
         vec![("rows".to_string(), DataType::Binary)]
     }
-    fn encode(&self, _value: &Vec<TopNRow>) -> Vec<ScalarValue> {
-        unreachable!("raw codec")
-    }
-    fn decode(&self, _scalars: &[ScalarValue]) -> Vec<TopNRow> {
-        unreachable!("raw codec")
-    }
     fn value_bytes(&self, value: &Vec<TopNRow>) -> usize {
         4 + value
             .iter()
@@ -2151,12 +2145,6 @@ impl crate::state::RocksStateCodec for UpdatableTopNStateCodec {
     }
     fn value_fields(&self) -> Vec<(String, DataType)> {
         vec![("rows".to_string(), DataType::Binary)]
-    }
-    fn encode(&self, _value: &Vec<UpdatableRow>) -> Vec<ScalarValue> {
-        unreachable!("raw codec")
-    }
-    fn decode(&self, _scalars: &[ScalarValue]) -> Vec<UpdatableRow> {
-        unreachable!("raw codec")
     }
     fn value_bytes(&self, value: &Vec<UpdatableRow>) -> usize {
         4 + value

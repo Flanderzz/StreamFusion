@@ -80,12 +80,6 @@ impl crate::state::RocksStateCodec for JoinStateCodec {
     fn value_fields(&self) -> Vec<(String, DataType)> {
         vec![("bucket".to_string(), DataType::Binary)]
     }
-    fn encode(&self, _value: &JoinBucket) -> Vec<ScalarValue> {
-        unreachable!("raw codec")
-    }
-    fn decode(&self, _scalars: &[ScalarValue]) -> JoinBucket {
-        unreachable!("raw codec")
-    }
     fn value_bytes(&self, value: &JoinBucket) -> usize {
         4 + value
             .keys()

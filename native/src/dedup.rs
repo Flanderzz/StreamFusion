@@ -885,12 +885,6 @@ impl crate::state::RocksStateCodec for DedupStateCodec {
     fn value_fields(&self) -> Vec<(String, DataType)> {
         vec![("row".to_string(), DataType::Binary)]
     }
-    fn encode(&self, _value: &DedupRow) -> Vec<ScalarValue> {
-        unreachable!("raw codec")
-    }
-    fn decode(&self, _scalars: &[ScalarValue]) -> DedupRow {
-        unreachable!("raw codec")
-    }
     fn value_bytes(&self, value: &DedupRow) -> usize {
         DEDUP_RAW_PREFIX + value.payload.len()
     }

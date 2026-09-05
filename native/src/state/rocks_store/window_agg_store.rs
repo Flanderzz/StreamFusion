@@ -1,6 +1,6 @@
 use super::{
-    checkpoint_files, copy_checkpoint_db, merged_timer_deadline, open_shared_db, re,
-    stored_timer_deadline, write_timer_deadline, FlinkWriteBatch, OpenedDb, TIMER_DEADLINE_KEY,
+    checkpoint_files, copy_checkpoint_db, merged_timer_deadline, multi_get_pinned, open_shared_db,
+    re, stored_timer_deadline, write_timer_deadline, FlinkWriteBatch, OpenedDb, TIMER_DEADLINE_KEY,
 };
 use crate::*;
 use arrow::row::{RowConverter, SortField};
@@ -185,16 +185,12 @@ impl RocksWindowAggStore {
         &self,
         db_keys: &[Vec<u8>],
     ) -> Result<Vec<Option<(i64, Vec<ScalarValue>)>>, DataFusionError> {
-        let fetched = self.db.multi_get(db_keys);
+        let fetched = multi_get_pinned(&self.db, db_keys);
         let mut values = Vec::with_capacity(fetched.len());
         for value in fetched {
             values.push(value.map_err(re)?);
         }
-        let hits: Vec<&[u8]> = values
-            .iter()
-            .flatten()
-            .map(|value| &value.as_slice()[8..])
-            .collect();
+        let hits: Vec<&[u8]> = values.iter().flatten().map(|value| &value[8..]).collect();
         let mut states = self.decode_states(&hits)?.into_iter();
         Ok(values
             .iter()

@@ -4,6 +4,7 @@ import tech.streamfusion.planner.NativePlanner;
 import tech.streamfusion.planner.PhysicalPlanScan;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
@@ -1972,6 +1973,10 @@ class NexmarkMatrixBenchmark {
       env.getConfig().enableObjectReuse();
     }
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
+    // Keep TIMESTAMP_LTZ window alignment and rendering stable across benchmark hosts. In
+    // particular, a local-zone offset with whole minutes does not align with Nexmark's 10-second
+    // windows and would make otherwise-supported native window plans fall back.
+    tEnv.getConfig().setLocalTimeZone(ZoneId.of("UTC"));
     tEnv.executeSql(
         "CREATE TABLE src ("
             + NexmarkKafkaBenchmark.SCHEMA

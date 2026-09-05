@@ -30,7 +30,8 @@ use crate::*;
 use arrow::row::{RowConverter, SortField};
 use rocksdb::checkpoint::Checkpoint;
 use rocksdb::{
-    Cache, CompactionDecision, Direction, IteratorMode, Options, WriteBatch, WriteOptions, DB,
+    Cache, CompactionDecision, DBPinnableSlice, Direction, IteratorMode, Options, WriteBatch,
+    WriteOptions, DB,
 };
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
@@ -78,8 +79,16 @@ pub(crate) trait RocksStateCodec {
     type Value;
     fn supported(&self) -> bool;
     fn value_fields(&self) -> Vec<(String, DataType)>;
-    fn encode(&self, value: &Self::Value) -> Vec<ScalarValue>;
-    fn decode(&self, scalars: &[ScalarValue]) -> Self::Value;
+    fn encode_columns(&self, _values: &[&Self::Value]) -> Vec<ArrayRef> {
+        unreachable!("not a columnar codec")
+    }
+    fn decode_row(
+        &self,
+        _columns: &[ArrayRef],
+        _row: usize,
+    ) -> Result<Self::Value, DataFusionError> {
+        unreachable!("not a columnar codec")
+    }
     fn value_bytes(&self, value: &Self::Value) -> usize;
     fn write_ms(&self, _value: &Self::Value) -> i64 {
         0
@@ -88,9 +97,9 @@ pub(crate) trait RocksStateCodec {
 
     /// A codec whose value already carries a self-contained byte payload (an arrow-row the
     /// operator encoded) can persist its own layout directly, skipping the store's columnar
-    /// conversion in both directions. A raw codec implements all three methods; `encode`/`decode`
-    /// are then unused. `raw_write` appends into the store's value buffer (after any TTL prefix),
-    /// so a composite layout costs no intermediate copy.
+    /// conversion in both directions. A raw codec implements all three methods;
+    /// `encode_columns`/`decode_row` are then unused. `raw_write` appends into the store's value
+    /// buffer (after any TTL prefix), so a composite layout costs no intermediate copy.
     fn raw(&self) -> bool {
         false
     }
@@ -344,7 +353,6 @@ pub(crate) struct RocksStore<C: RocksStateCodec> {
     /// bundle's element puts (so a re-created key keeps its new elements), and later probes must
     /// not hydrate their stale committed rows.
     removed_multiset_keys: ahash::HashSet<ByteKey>,
-    value_fields: Vec<Field>,
     converter: RowConverter,
     now_ms: i64,
     clock: Arc<AtomicI64>,
@@ -409,13 +417,32 @@ fn open_shared_db(
             }
         });
     }
-    let db = Arc::new(DB::open(&options, &config.table_dir).map_err(re)?);
+    // Register the default CF handle for RocksDB's optimized batched MultiGet. Give it the
+    // translated options too: opening it with default CF options would lose the table/cache/TTL
+    // configuration even though the DB-level options were preserved.
+    let db = Arc::new(
+        DB::open_cf_with_opts(&options, &config.table_dir, [("default", options.clone())])
+            .map_err(re)?,
+    );
     Ok(OpenedDb {
         db,
         cache,
         clock,
         write_batch_size,
     })
+}
+
+/// Borrow keys and pin returned blocks through decoding, avoiding the legacy MultiGet binding's
+/// key/value copies. Input order is arbitrary; RocksDB sorts its lookup context and returns
+/// results in the original order. Pins must not escape into the operator's resident state.
+fn multi_get_pinned<'db>(
+    db: &'db DB,
+    keys: &[Vec<u8>],
+) -> Vec<Result<Option<DBPinnableSlice<'db>>, rocksdb::Error>> {
+    let cf = db
+        .cf_handle("default")
+        .expect("registered default column family");
+    db.batched_multi_get_cf(cf, keys, false)
 }
 
 impl<C: RocksStateCodec> RocksStore<C> {
@@ -616,7 +643,6 @@ impl<C: RocksStateCodec> RocksStore<C> {
             multisets,
             probed_multiset_keys: ahash::HashSet::default(),
             removed_multiset_keys: ahash::HashSet::default(),
-            value_fields,
             converter,
             now_ms: 0,
             clock: Arc::clone(&opened.clock),
@@ -781,7 +807,7 @@ impl<C: RocksStateCodec> RocksStore<C> {
             if probe_keys.is_empty() {
                 continue;
             }
-            let fetched = self.db.multi_get(&probe_keys);
+            let fetched = multi_get_pinned(&self.db, &probe_keys);
             for (value, (index, key)) in fetched.into_iter().zip(&probe_meta) {
                 match value {
                     Ok(Some(bytes)) => {
@@ -898,18 +924,7 @@ impl<C: RocksStateCodec> RocksStore<C> {
                 writes.put(self.db_key(&key.0), value)?;
             }
         } else if !keys.is_empty() {
-            let mut columns: Vec<Vec<ScalarValue>> =
-                vec![Vec::with_capacity(states.len()); self.value_fields.len()];
-            for state in &states {
-                for (column, scalar) in columns.iter_mut().zip(self.codec.encode(state)) {
-                    column.push(scalar);
-                }
-            }
-            let arrays: Vec<_> = columns
-                .into_iter()
-                .zip(&self.value_fields)
-                .map(|(scalars, field)| scalars_to_array(scalars, field.data_type()))
-                .collect();
+            let arrays = self.codec.encode_columns(&states);
             let rows = self
                 .converter
                 .convert_columns(&arrays)
@@ -969,16 +984,12 @@ impl<C: RocksStateCodec> RocksStore<C> {
             .convert_rows(rows)
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
         let mut out = Vec::with_capacity(values.len());
-        let mut scalars = vec![ScalarValue::Null; columns.len()];
         for (row, value) in values.iter().enumerate() {
             let Ok(ts) = live_ts(value) else {
                 out.push(None);
                 continue;
             };
-            for (slot, column) in scalars.iter_mut().zip(&columns) {
-                *slot = ScalarValue::try_from_array(column, row)?;
-            }
-            let mut state = self.codec.decode(&scalars);
+            let mut state = self.codec.decode_row(&columns, row)?;
             if let Some(ts) = ts {
                 self.codec.stamp_write_ms(&mut state, ts);
             }
@@ -1153,7 +1164,8 @@ impl<C: RocksStateCodec> KeyedStateStore<C::Value> for RocksStore<C> {
             return self.probe_multisets(batch, key_columns, precisions);
         }
         let db_keys: Vec<_> = missing.iter().map(|key| self.db_key(&key.0)).collect();
-        let fetched = self.db.multi_get(&db_keys);
+        let db = Arc::clone(&self.db);
+        let fetched = multi_get_pinned(&db, &db_keys);
         let mut hit_keys = Vec::new();
         let mut hit_values = Vec::new();
         let mut purge = Vec::new();
@@ -1161,7 +1173,7 @@ impl<C: RocksStateCodec> KeyedStateStore<C::Value> for RocksStore<C> {
             match value {
                 Ok(Some(bytes)) => {
                     hit_keys.push(key.clone());
-                    hit_values.push(bytes.as_slice());
+                    hit_values.push(bytes.as_ref());
                 }
                 Ok(None) => {
                     // With TTL off, a companion row cannot outlive its main row (every main-row
@@ -1175,8 +1187,11 @@ impl<C: RocksStateCodec> KeyedStateStore<C::Value> for RocksStore<C> {
                 Err(error) => return Err(re(error.clone())),
             }
         }
+        let decoded = self.decode_values(&hit_values)?;
+        drop(hit_values);
+        drop(fetched);
         let mut hydrate = Vec::new();
-        for (key, state) in hit_keys.into_iter().zip(self.decode_values(&hit_values)?) {
+        for (key, state) in hit_keys.into_iter().zip(decoded) {
             let slot = match state {
                 Some(state) => {
                     if !self.multisets.is_empty() {
@@ -1432,4 +1447,60 @@ fn checkpoint_files(
         data_files,
         meta_files,
     })
+}
+
+#[cfg(test)]
+mod batch_read_tests {
+    use super::*;
+
+    #[test]
+    fn pinned_reads_preserve_order_and_values_across_flush_and_reopen() {
+        let path =
+            std::env::temp_dir().join(format!("streamfusion-pinned-reads-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        let mut options = Options::default();
+        options.create_if_missing(true);
+        // Start with the old open path, as an existing checkpoint would.
+        let legacy = DB::open(&options, &path).unwrap();
+        legacy.put(b"a", b"first").unwrap();
+        legacy.put(b"b", b"").unwrap();
+        legacy.put(b"c", b"last").unwrap();
+        drop(legacy);
+
+        let keys: Vec<Vec<u8>> = [b"c".as_slice(), b"missing", b"a", b"c", b"b"]
+            .into_iter()
+            .map(<[u8]>::to_vec)
+            .collect();
+        for _ in 0..2 {
+            let db =
+                DB::open_cf_with_opts(&options, &path, [("default", options.clone())]).unwrap();
+            // Exercise both memtable and SST reads, with misses, duplicates and empty values.
+            db.put(b"a", b"first").unwrap();
+            for flush in [false, true] {
+                if flush {
+                    db.flush().unwrap();
+                }
+                assert!(multi_get_pinned(&db, &[]).is_empty());
+                let expected = db.multi_get(&keys);
+                let pinned = multi_get_pinned(&db, &keys);
+                assert_eq!(pinned.len(), keys.len());
+                for (actual, expected) in pinned.iter().zip(&expected) {
+                    assert_eq!(
+                        actual.as_ref().unwrap().as_ref().map(|v| v.as_ref()),
+                        expected.as_ref().unwrap().as_deref()
+                    );
+                }
+                // A pin remains valid when its key is overwritten and the old SST compacted.
+                db.put(b"a", b"replacement").unwrap();
+                db.flush().unwrap();
+                db.compact_range(None::<&[u8]>, None::<&[u8]>);
+                assert_eq!(
+                    pinned[2].as_ref().unwrap().as_ref().unwrap().as_ref(),
+                    b"first"
+                );
+                db.put(b"a", b"first").unwrap();
+            }
+        }
+        std::fs::remove_dir_all(path).unwrap();
+    }
 }

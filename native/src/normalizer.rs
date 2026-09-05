@@ -73,12 +73,6 @@ impl crate::state::RocksStateCodec for NormalizerStateCodec {
     fn value_fields(&self) -> Vec<(String, DataType)> {
         vec![("row".to_string(), DataType::Binary)]
     }
-    fn encode(&self, _value: &NormalizedRow) -> Vec<ScalarValue> {
-        unreachable!("raw codec")
-    }
-    fn decode(&self, _scalars: &[ScalarValue]) -> NormalizedRow {
-        unreachable!("raw codec")
-    }
     fn value_bytes(&self, value: &NormalizedRow) -> usize {
         value.payload.len()
     }

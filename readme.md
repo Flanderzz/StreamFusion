@@ -100,11 +100,12 @@ Rust. Rust also accelerates every supported operator and sink key/value/tombston
 is omitted because Flink SQL itself cannot run it
 ([analysis](.claude/wontdos/39-nexmark-q6-exclusion.md)).
 
-These are Apple M1 Max release+`mimalloc` results measured at parallelism 4, one measured run
-per cell (memory columns 2026-08-25, disk columns 2026-08-26 after the multiset-aggregate
-direct-store work). The memory columns compare Flink's default heap state
-against StreamFusion's memory state; the disk columns compare stock Flink RocksDB against
-StreamFusion's native RocksDB backend.
+These are Apple M1 Max release+`mimalloc` results measured at parallelism 4. The memory columns
+use one measured run per cell (2026-08-25); the disk columns use one warmup and the best of two
+measured runs (2026-09-05, after the pinned batched-read and column-state-codec work). The memory
+columns compare Flink's default heap state against StreamFusion's memory state; the disk columns
+compare stock Flink RocksDB against StreamFusion's native RocksDB backend. The Kafka harness sets
+the table session time zone to UTC so `TIMESTAMP_LTZ` window coverage is host-independent.
 Mini-batching ("on") uses the same production-style configuration on both engines
 (`allow-latency=2s`, `size=50000`). Each cell is StreamFusion throughput divided by Flink
 throughput within the same backend and mode. Both the source corpus and every exactly-once
@@ -116,30 +117,34 @@ already did for the stock plans.
 
 | Query | Memory, off | Memory, on | Disk, off | Disk, on |
 |---|---:|---:|---:|---:|
-| q0 | **1.69×** | **1.39×** | **1.61×** | **1.26×** |
-| q1 | **1.40×** | **1.40×** | **1.32×** | **1.38×** |
-| q2 | **1.26×** | **1.08×** | 0.99× | **1.18×** |
-| q3 | **1.03×** | **1.16×** | **1.06×** | **1.16×** |
-| q4 | **1.83×** | **1.60×** | **6.18×** | **12.10×** |
-| q5 | **1.41×** | **1.23×** | **3.72×** | **3.44×** |
-| q7 | **1.30×** | **1.47×** | **6.90×** | **15.16×** |
-| q8 | **1.27×** | **1.12×** | **3.55×** | **2.70×** |
-| q9 | **1.22×** | **1.80×** | **14.22×** | **28.15×** |
-| q10 | **1.45×** | **1.94×** | **1.52×** | **1.34×** |
-| q11 | **1.47×** | **1.50×** | **10.40×** | **10.22×** |
-| q12 | **1.09×** | **1.13×** | **1.33×** | **1.40×** |
-| q13 | **1.20×** | **1.14×** | **1.16×** | **1.36×** |
-| q14 | **1.47×** | **1.25×** | **1.43×** | **1.33×** |
-| q15 | **1.47×** | **1.22×** | **1.33×** | **1.25×** |
-| q16 | **1.17×** | **1.41×** | **1.17×** | **1.50×** |
-| q17 | **1.20×** | **1.18×** | **1.86×** | **1.55×** |
-| q18 | **1.07×** | **1.37×** | **4.52×** | **6.38×** |
-| q19 | 0.99× | **2.82×** | **1.93×** | **5.60×** |
-| q20 | **1.22×** | **1.56×** | **24.01×** | **40.33×** |
-| q21 | **1.23×** | **1.31×** | **1.36×** | **1.37×** |
-| q22 | **1.33×** | **1.25×** | **1.37×** | 0.97× |
-| q23 | **1.69×** | **3.32×** | **1.55×** | **2.32×** |
-| **geomean** | **1.31×** | **1.44×** | **2.47×** | **2.92×** |
+| q0 | **1.69×** | **1.39×** | **1.36×** | **1.40×** |
+| q1† | **1.40×** | **1.40×** | **1.38×** | **1.41×** |
+| q2 | **1.26×** | **1.08×** | **1.11×** | **1.08×** |
+| q3 | **1.03×** | **1.16×** | **1.08×** | **1.14×** |
+| q4 | **1.83×** | **1.60×** | **8.92×** | **15.11×** |
+| q5 | **1.41×** | **1.23×** | **4.38×** | **4.38×** |
+| q7 | **1.30×** | **1.47×** | **7.41×** | **11.93×** |
+| q8 | **1.27×** | **1.12×** | **2.33×** | **2.43×** |
+| q9 | **1.22×** | **1.80×** | **17.83×** | **67.95×** |
+| q10† | **1.45×** | **1.94×** | **1.42×** | **1.40×** |
+| q11 | **1.47×** | **1.50×** | **9.84×** | **10.03×** |
+| q12 | **1.09×** | **1.13×** | **1.45×** | **1.33×** |
+| q13 | **1.20×** | **1.14×** | **1.15×** | **1.22×** |
+| q14† | **1.47×** | **1.25×** | **1.49×** | **1.53×** |
+| q15† | **1.47×** | **1.22×** | **1.61×** | **1.32×** |
+| q16† | **1.17×** | **1.41×** | **1.49×** | **1.28×** |
+| q17† | **1.20×** | **1.18×** | **1.92×** | **1.65×** |
+| q18 | **1.07×** | **1.37×** | **6.01×** | **8.92×** |
+| q19 | 0.99× | **2.82×** | **2.44×** | **5.09×** |
+| q20 | **1.22×** | **1.56×** | **37.43×** | **68.20×** |
+| q21† | **1.23×** | **1.31×** | **1.26×** | **1.27×** |
+| q22 | **1.33×** | **1.25×** | **1.30×** | **1.22×** |
+| q23 | **1.69×** | **3.32×** | **3.15×** | **12.10×** |
+| **geomean** | **1.31×** | **1.44×** | **2.75×** | **3.41×** |
+
+† The benchmark's existing opt-in expression variants are used for these headline cells: q1 uses
+approximate decimal arithmetic; q10, q14–q17, and q21 use native datetime or regex/case behavior
+that can differ from Flink at documented edge cases.
 
 Parallelism 4 is a tougher, more honest baseline than the earlier parallelism-1 tables: the keyed
 shuffle is real work on both engines, and Flink's heap pipeline scales well with subtasks. The
@@ -148,10 +153,9 @@ exchange fragments every batch p ways, and per-batch fixed cost compounds throug
 chains) that post-exchange coalescing since removed, worth up to 2× on the compounding shapes
 (the A/B and the remaining source-side lever are in
 [Benchmarks](https://datafusion-contrib.github.io/StreamFusion/benchmarks/)).
-q3 is now the only consistent loss, while q8 remains near parity. q17's disk/no-mini-batch
-regression disappears when mini-batching is enabled. The persistent-backend columns hold up best:
-Flink's RocksDB path pays its per-record costs in every subtask, while StreamFusion batches native
-state work.
+The persistent-backend columns put StreamFusion ahead in all 46 disk query/mode cells. Flink's
+RocksDB path pays its per-record costs in every subtask, while StreamFusion batches native state
+work; the largest gains are on q9 and q20, especially with mini-batching enabled.
 The multi-source/blackhole ladder, raw timings, reproduction commands, and profiling controls
 remain on the docs site's [Benchmarks](https://datafusion-contrib.github.io/StreamFusion/benchmarks/)
 page.

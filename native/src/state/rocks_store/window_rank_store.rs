@@ -1,6 +1,6 @@
 use super::{
-    checkpoint_files, copy_checkpoint_db, merged_timer_deadline, open_shared_db, re,
-    stored_timer_deadline, write_timer_deadline, FlinkWriteBatch, OpenedDb, TIMER_DEADLINE_KEY,
+    checkpoint_files, copy_checkpoint_db, merged_timer_deadline, multi_get_pinned, open_shared_db,
+    re, stored_timer_deadline, write_timer_deadline, FlinkWriteBatch, OpenedDb, TIMER_DEADLINE_KEY,
 };
 use crate::*;
 use arrow::row::{RowConverter, SortField};
@@ -193,12 +193,16 @@ impl RocksWindowRankStore {
         &self,
         db_keys: &[Vec<u8>],
     ) -> Result<Vec<Option<Vec<JoinRow>>>, DataFusionError> {
-        let fetched = self.db.multi_get(db_keys);
+        let fetched = multi_get_pinned(&self.db, db_keys);
         let mut values = Vec::with_capacity(fetched.len());
         for value in fetched {
             values.push(value.map_err(re)?);
         }
-        let hits: Vec<&[u8]> = values.iter().flatten().map(Vec::as_slice).collect();
+        let hits: Vec<&[u8]> = values
+            .iter()
+            .flatten()
+            .map(|value| value.as_ref())
+            .collect();
         let mut buffers = self.decode_buffers(&hits)?.into_iter();
         Ok(values
             .iter()
