@@ -53,4 +53,4 @@ format writer recognises the bundle behind the first row and encodes the whole b
   reassigns them after re-buffering whole routed batches instead of single rows.
 - **Primary-key tables stay stock for now.** Their merge-tree path sorts rows in a buffer before
   writing, so a native entry needs either write-only jobs with a native L0 writer or a native
-  merge; see issue #27.
+  merge; see issue #33.

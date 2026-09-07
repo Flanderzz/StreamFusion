@@ -101,12 +101,22 @@ Paimon.
 
 ## Outlook
 
-Primary-key tables (merge-on-read, copy-on-write, and deletion-vector merge-on-write), dynamic
-buckets, ORC data files, the writer and commit coordinators, and clustering are tracked in
-[issue #27](https://github.com/datafusion-contrib/StreamFusion/issues/27). Released Paimon 2.0.0
-walks a bundle row by row before the format writer; a Paimon release that passes bundles through
-takes the same writer's direct path with no change here. The jar-ordering requirement goes away
-once Paimon's format discovery gains a priority, which is proposed upstream.
+Each remaining gap has its own issue:
+[primary-key tables](https://github.com/datafusion-contrib/StreamFusion/issues/33) (merge-on-read,
+copy-on-write, and deletion-vector merge-on-write),
+[dynamic and postpone buckets](https://github.com/datafusion-contrib/StreamFusion/issues/34),
+[ORC data files](https://github.com/datafusion-contrib/StreamFusion/issues/35),
+[the writer and commit coordinators](https://github.com/datafusion-contrib/StreamFusion/issues/36),
+[clustering and the dynamic partition sink strategy](https://github.com/datafusion-contrib/StreamFusion/issues/37),
+and [native encoding through the buffered spill mode](https://github.com/datafusion-contrib/StreamFusion/issues/40).
+Released Paimon 2.0.0 walks a bundle row by row before the format writer; a Paimon release that
+passes bundles through takes the same writer's direct path with no change here
+([#39](https://github.com/datafusion-contrib/StreamFusion/issues/39)). The jar-ordering requirement
+goes away once Paimon's format discovery gains a priority, which
+[#38](https://github.com/datafusion-contrib/StreamFusion/issues/38) proposes upstream. A native
+Paimon source is [issue #27](https://github.com/datafusion-contrib/StreamFusion/issues/27). Like the
+other native sinks, this one does not yet run Flink's NOT NULL and type-length constraint enforcer
+in front of the writer ([#43](https://github.com/datafusion-contrib/StreamFusion/issues/43)).
 
 Build with the `paimon` Maven profile. The module has no snapshot, local-Maven, path, or forked
 Paimon dependency.
