@@ -1,5 +1,7 @@
 package tech.streamfusion.paimon;
 
+import java.io.IOException;
+import java.util.List;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.flink.runtime.state.StateInitializationContext;
 import org.apache.flink.streaming.api.operators.StreamOperator;
@@ -21,7 +23,8 @@ import tech.streamfusion.operator.BucketedArrowBatch;
  * Paimon's table write operator fed with routed Arrow batches instead of rows. Each batch already
  * belongs to one (partition, bucket), so it enters Paimon's bundle write entry, which hands it to
  * the append writer for that bucket; the file writer then encodes the whole batch natively. State,
- * checkpointing, commit preparation, and compaction stay Paimon's.
+ * checkpointing, commit preparation, compaction, and the per-checkpoint refresh of writer options
+ * (Paimon's {@code sink.writer-refresh-detectors}) stay Paimon's.
  */
 public final class NativePaimonWriteOperator extends TableWriteOperator<BucketedArrowBatch> {
 
@@ -69,6 +72,14 @@ public final class NativePaimonWriteOperator extends TableWriteOperator<Bucketed
           .getWrite()
           .writeBundle(partition, batch.bucket(), new ArrowBatchBundle(root, rowType));
     }
+  }
+
+  @Override
+  protected List<Committable> prepareCommit(boolean waitCompaction, long checkpointId)
+      throws IOException {
+    List<Committable> committables = super.prepareCommit(waitCompaction, checkpointId);
+    tryRefreshWrite();
+    return committables;
   }
 
   /**

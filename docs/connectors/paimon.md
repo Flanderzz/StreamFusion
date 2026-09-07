@@ -32,6 +32,8 @@ Supported:
   `ROW` of those, recursively, with Paimon's field ids on every column.
 - Hint options (`/*+ OPTIONS(...) */`) and the `paimon.<catalog>.<db>.<table>.<option>` dynamic
   options from the job configuration, resolved the way Paimon's own factory resolves them.
+- `sink.writer-refresh-detectors`: the writer re-reads the refreshed option groups (external data
+  paths) after each checkpoint's commit preparation, exactly when the stock operator does.
 
 Files written natively are row-, statistics-, and footer-schema-identical to the stock writer's
 (verified against twin tables in `PaimonSinkParityTest` and `NativePaimonParquetWriterTest`). The

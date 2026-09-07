@@ -20,6 +20,7 @@ import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.table.api.Schema;
 import org.apache.flink.table.api.Table;
+import org.apache.flink.table.api.TableResult;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.apache.flink.types.Row;
 import org.apache.paimon.Snapshot;
@@ -150,6 +151,52 @@ class PaimonSinkParityTest {
     }
     assertTrue(kinds.contains(Snapshot.CommitKind.COMPACT), kinds::toString);
     assertTrue(kinds.contains(Snapshot.CommitKind.APPEND), kinds::toString);
+  }
+
+  @Test
+  void writerOptionsRefreshAtCheckpointsLikeTheStockOperator() throws Exception {
+    java.nio.file.Path warehouse = Files.createTempDirectory("paimon-sink-refresh");
+    java.nio.file.Path firstExternal = Files.createTempDirectory("paimon-sink-external-1");
+    java.nio.file.Path secondExternal = Files.createTempDirectory("paimon-sink-external-2");
+    StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+    env.setParallelism(1);
+    env.enableCheckpointing(200);
+    StreamTableEnvironment tableEnv = catalogEnvironment(env, warehouse);
+    tableEnv.executeSql(
+        "CREATE TABLE relocated (id BIGINT, name STRING) WITH ('bucket' = '-1',"
+            + " 'sink.writer-refresh-detectors' = 'external-paths',"
+            + " 'data-file.external-paths' = '"
+            + firstExternal.toUri()
+            + "', 'data-file.external-paths.strategy' = 'round-robin')");
+    tableEnv.executeSql(
+        "CREATE TEMPORARY TABLE ticks (id BIGINT, name STRING) WITH ('connector' = 'datagen',"
+            + " 'rows-per-second' = '50', 'number-of-rows' = '400', 'fields.name.length' = '8')");
+    PhysicalPlanScan scan = NativePlanner.install(tableEnv);
+
+    TableResult insert = tableEnv.executeSql("INSERT INTO relocated SELECT id, name FROM ticks");
+    waitForFiles(firstExternal);
+    tableEnv.executeSql(
+        "ALTER TABLE relocated SET ('data-file.external-paths' = '" + secondExternal.toUri() + "')");
+    insert.await();
+
+    assertAccelerated(scan);
+    FileStoreTable table = openTable(warehouse, "relocated");
+    assertEquals(400, PaimonTestTables.readRows(table, table.rowType()).size());
+    assertTrue(countFiles(secondExternal) >= 1, "no data file reached the refreshed external path");
+  }
+
+  private static void waitForFiles(java.nio.file.Path root) throws Exception {
+    long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(60);
+    while (countFiles(root) == 0) {
+      assertTrue(System.nanoTime() < deadline, "no data file reached " + root);
+      Thread.sleep(100);
+    }
+  }
+
+  private static long countFiles(java.nio.file.Path root) throws Exception {
+    try (Stream<java.nio.file.Path> paths = Files.walk(root)) {
+      return paths.filter(Files::isRegularFile).count();
+    }
   }
 
   static Stream<Arguments> declinedTables() {
