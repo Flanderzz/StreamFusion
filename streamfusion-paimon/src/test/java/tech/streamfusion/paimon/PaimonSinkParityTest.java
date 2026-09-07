@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.math.BigDecimal;
 import java.nio.file.Files;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
@@ -57,7 +58,7 @@ class PaimonSinkParityTest {
     {"price", "DECIMAL(10, 2)"},
     {"big", "DECIMAL(20, 4)"},
     {"ts", "TIMESTAMP(3)"},
-    {"ts6", "TIMESTAMP(6)"},
+    {"ts6", "TIMESTAMP_LTZ(6)"},
     {"dt", "DATE"},
     {"tags", "ARRAY<INT>"},
     {"attrs", "MAP<STRING, BIGINT>"},
@@ -342,7 +343,7 @@ class PaimonSinkParityTest {
         Types.BIG_DEC,
         Types.BIG_DEC,
         Types.LOCAL_DATE_TIME,
-        Types.LOCAL_DATE_TIME,
+        Types.INSTANT,
         Types.LOCAL_DATE,
         Types.OBJECT_ARRAY(Types.INT),
         Types.MAP(Types.STRING, Types.LONG),
@@ -375,7 +376,9 @@ class PaimonSinkParityTest {
               v[4] == null ? null : LocalDateTime.ofEpochSecond((Long) v[4] / 1000, (int) ((Long) v[4] % 1000) * 1_000_000, ZoneOffset.UTC),
               micros == null
                   ? null
-                  : LocalDateTime.ofEpochSecond(micros[0] / 1000, (int) (micros[0] % 1000) * 1_000_000 + (int) micros[1], ZoneOffset.UTC),
+                  : Instant.ofEpochSecond(
+                      Math.floorDiv(micros[0], 1000),
+                      (int) Math.floorMod(micros[0], 1000) * 1_000_000 + (int) micros[1]),
               v[6] == null ? null : LocalDate.ofEpochDay((Integer) v[6]),
               v[7],
               v[8],

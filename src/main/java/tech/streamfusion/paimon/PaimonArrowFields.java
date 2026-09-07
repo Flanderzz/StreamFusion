@@ -5,6 +5,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import javax.annotation.Nullable;
+import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.arrow.vector.types.pojo.Schema;
@@ -21,7 +22,8 @@ import org.apache.paimon.types.TimestampType;
 /**
  * Carries the parts of a Paimon schema that Arrow does not model onto the Arrow fields the native
  * encoder reads: Paimon's Parquet field ids, including the ids it derives for list elements and map
- * keys and values, and the per-column timestamp unit its precision selects. The encoder's Paimon
+ * keys and values, the per-column timestamp unit its precision selects, and the instant semantics
+ * of a local-zoned timestamp, which the encoder writes as adjusted to UTC. The encoder's Paimon
  * schema shape turns these into the same descriptor Paimon's own writer produces. Columns bind by
  * position and take the table's names and nullability, as Paimon's own writer describes a file by
  * the table type: the planner has matched the query's types, but the query may have aliased the
@@ -109,10 +111,12 @@ final class PaimonArrowFields {
       default -> {}
     }
     FieldType fieldType = arrow.getFieldType();
+    ArrowType arrowType = fieldType.getType();
+    if (type instanceof LocalZonedTimestampType && arrowType instanceof ArrowType.Timestamp) {
+      arrowType = new ArrowType.Timestamp(((ArrowType.Timestamp) arrowType).getUnit(), "UTC");
+    }
     return new Field(
-        name,
-        new FieldType(type.isNullable(), fieldType.getType(), fieldType.getDictionary(), metadata),
-        children);
+        name, new FieldType(type.isNullable(), arrowType, fieldType.getDictionary(), metadata), children);
   }
 
   @Nullable

@@ -25,6 +25,7 @@ import org.apache.flink.table.types.logical.IntType;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.MapType;
 import org.apache.flink.table.types.logical.RowType;
+import org.apache.flink.table.types.logical.LocalZonedTimestampType;
 import org.apache.flink.table.types.logical.TimestampType;
 import org.apache.flink.table.types.logical.VarBinaryType;
 import org.apache.flink.table.types.logical.VarCharType;
@@ -73,7 +74,7 @@ final class PaimonTestTables {
             new DecimalType(10, 2),
             new DecimalType(20, 4),
             new TimestampType(3),
-            new TimestampType(6),
+            new LocalZonedTimestampType(6),
             new DateType(),
             new ArrayType(new IntType()),
             new MapType(new VarCharType(VarCharType.MAX_LENGTH), new BigIntType()),
@@ -97,7 +98,7 @@ final class PaimonTestTables {
         .column("price", DataTypes.DECIMAL(10, 2))
         .column("big", DataTypes.DECIMAL(20, 4))
         .column("ts", DataTypes.TIMESTAMP(3))
-        .column("ts6", DataTypes.TIMESTAMP(6))
+        .column("ts6", DataTypes.TIMESTAMP_WITH_LOCAL_TIME_ZONE(6))
         .column("dt", DataTypes.DATE())
         .column("tags", DataTypes.ARRAY(DataTypes.INT()))
         .column("attrs", DataTypes.MAP(DataTypes.STRING(), DataTypes.BIGINT()))
