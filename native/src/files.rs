@@ -147,7 +147,22 @@ struct EncoderConfig {
     enable_dictionary: bool,
     writer_version: parquet::file::properties::WriterVersion,
     timestamp_unit: arrow::datatypes::TimeUnit,
+    schema_shape: SchemaShape,
 }
+
+/// Which writer's Parquet descriptor the encoder reproduces. Both share Flink's leaf encodings; they
+/// differ in the root group name and in how decimals are laid out (Paimon uses INT32/INT64 for
+/// precisions up to 9 and 18 where Flink always writes a minimal FIXED_LEN_BYTE_ARRAY).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SchemaShape {
+    Flink,
+    Paimon,
+}
+
+/// Arrow field metadata that selects a per-column INT64 unit, overriding `timestamp.unit`. Set by
+/// hosts whose precision is a per-column property (Paimon writes MILLIS up to precision 3 and
+/// MICROS up to 6).
+pub(crate) const TIMESTAMP_UNIT_META_KEY: &str = "streamfusion:timestamp_unit";
 
 impl EncoderConfig {
     fn parse(keys: &[String], values: &[String]) -> EncoderConfig {
@@ -167,6 +182,7 @@ impl EncoderConfig {
             enable_dictionary: true,
             writer_version: WriterVersion::PARQUET_1_0,
             timestamp_unit: arrow::datatypes::TimeUnit::Microsecond,
+            schema_shape: SchemaShape::Flink,
         };
         for (key, value) in keys.iter().zip(values) {
             match key.as_str() {
@@ -189,12 +205,12 @@ impl EncoderConfig {
                         other => panic!("unsupported parquet writer version {other}"),
                     }
                 }
-                "timestamp.unit" => {
-                    config.timestamp_unit = match value.as_str() {
-                        "millis" => arrow::datatypes::TimeUnit::Millisecond,
-                        "micros" => arrow::datatypes::TimeUnit::Microsecond,
-                        "nanos" => arrow::datatypes::TimeUnit::Nanosecond,
-                        other => panic!("unsupported parquet timestamp unit {other}"),
+                "timestamp.unit" => config.timestamp_unit = parse_timestamp_unit(value),
+                "schema.shape" => {
+                    config.schema_shape = match value.as_str() {
+                        "flink" => SchemaShape::Flink,
+                        "paimon" => SchemaShape::Paimon,
+                        other => panic!("unsupported parquet schema shape {other}"),
                     }
                 }
                 other => panic!("unknown parquet encoder option {other}"),
@@ -231,45 +247,39 @@ impl EncoderConfig {
     }
 }
 
-/// The Flink type a written column takes on: timestamps land in the configured INT64 unit
-/// (`timestamp.time.unit`) while retaining whether they represent an instant (Arrow timezone set,
-/// Parquet adjusted-to-UTC) or a local timestamp. TIME narrows to millisecond INT32. Everything
-/// else is written as it arrives from the canonical Arrow encoding.
-fn write_data_type(source: &DataType, timestamp_unit: arrow::datatypes::TimeUnit) -> DataType {
-    use arrow::datatypes::TimeUnit;
-    match source {
-        DataType::Timestamp(_, timezone) => DataType::Timestamp(timestamp_unit, timezone.clone()),
-        DataType::Time32(_) | DataType::Time64(_) => DataType::Time32(TimeUnit::Millisecond),
-        DataType::Struct(fields) => DataType::Struct(
-            fields
-                .iter()
-                .map(|field| {
-                    Arc::new(
-                        field
-                            .as_ref()
-                            .clone()
-                            .with_data_type(write_data_type(field.data_type(), timestamp_unit)),
-                    )
-                })
-                .collect(),
-        ),
-        DataType::List(field) => DataType::List(Arc::new(
-            field
-                .as_ref()
-                .clone()
-                .with_data_type(write_data_type(field.data_type(), timestamp_unit)),
-        )),
-        DataType::Map(field, sorted) => DataType::Map(
-            Arc::new(
-                field
-                    .as_ref()
-                    .clone()
-                    .with_data_type(write_data_type(field.data_type(), timestamp_unit)),
-            ),
-            *sorted,
-        ),
-        other => other.clone(),
+fn parse_timestamp_unit(value: &str) -> arrow::datatypes::TimeUnit {
+    match value {
+        "millis" => arrow::datatypes::TimeUnit::Millisecond,
+        "micros" => arrow::datatypes::TimeUnit::Microsecond,
+        "nanos" => arrow::datatypes::TimeUnit::Nanosecond,
+        other => panic!("unsupported parquet timestamp unit {other}"),
     }
+}
+
+/// The type a written column takes on: timestamps land in INT64 at the configured unit (or the
+/// field's own [`TIMESTAMP_UNIT_META_KEY`]) while retaining whether they represent an instant
+/// (Arrow timezone set, Parquet adjusted-to-UTC) or a local timestamp. TIME narrows to millisecond
+/// INT32. Everything else is written as it arrives from the canonical Arrow encoding. Field
+/// metadata is preserved so nested field ids and units survive into the descriptor.
+fn write_field(source: &Field, timestamp_unit: arrow::datatypes::TimeUnit) -> Field {
+    use arrow::datatypes::TimeUnit;
+    let nested = |field: &Arc<Field>| Arc::new(write_field(field, timestamp_unit));
+    let data_type = match source.data_type() {
+        DataType::Timestamp(_, timezone) => {
+            let unit = source
+                .metadata()
+                .get(TIMESTAMP_UNIT_META_KEY)
+                .map(|value| parse_timestamp_unit(value))
+                .unwrap_or(timestamp_unit);
+            DataType::Timestamp(unit, timezone.clone())
+        }
+        DataType::Time32(_) | DataType::Time64(_) => DataType::Time32(TimeUnit::Millisecond),
+        DataType::Struct(fields) => DataType::Struct(fields.iter().map(nested).collect()),
+        DataType::List(field) => DataType::List(nested(field)),
+        DataType::Map(field, sorted) => DataType::Map(nested(field), *sorted),
+        other => other.clone(),
+    };
+    source.clone().with_data_type(data_type)
 }
 
 /// Converts one column to its write type. Unit narrowing floors the value (Flink's TimestampData
@@ -402,11 +412,12 @@ fn decimal_min_bytes(precision: i32) -> i32 {
     num_bytes
 }
 
-/// The Parquet leaf Flink's schema converter produces for a write-typed field. This is forced onto
-/// the `ArrowWriter` as an explicit descriptor because the arrow-rs converter disagrees with Flink
-/// on decimals (INT32/INT64 for small precision where Flink always writes FIXED_LEN_BYTE_ARRAY)
-/// and on TIME's UTC-adjustment flag.
-fn flink_parquet_type(field: &Field) -> parquet::schema::types::Type {
+/// The Parquet type the host's schema converter produces for a write-typed field. This is forced
+/// onto the `ArrowWriter` as an explicit descriptor because the arrow-rs converter disagrees with
+/// Flink on decimals (INT32/INT64 for small precision where Flink always writes
+/// FIXED_LEN_BYTE_ARRAY) and on TIME's UTC-adjustment flag. A field carrying
+/// `PARQUET:field_id` metadata keeps that id, as Paimon's converter does for every column.
+fn host_parquet_type(field: &Field, shape: SchemaShape) -> parquet::schema::types::Type {
     use parquet::basic::{
         LogicalType, Repetition, TimeUnit as ParquetTimeUnit, Type as PhysicalType,
     };
@@ -472,77 +483,121 @@ fn flink_parquet_type(field: &Field) -> parquet::schema::types::Type {
                 }))
         }
         DataType::Decimal128(precision, scale) => {
-            ParquetType::primitive_type_builder(field.name(), PhysicalType::FIXED_LEN_BYTE_ARRAY)
+            let precision = *precision as i32;
+            let physical = match shape {
+                SchemaShape::Paimon if precision <= 9 => PhysicalType::INT32,
+                SchemaShape::Paimon if precision <= 18 => PhysicalType::INT64,
+                _ => PhysicalType::FIXED_LEN_BYTE_ARRAY,
+            };
+            let builder = ParquetType::primitive_type_builder(field.name(), physical)
                 .with_logical_type(Some(LogicalType::Decimal {
-                    precision: *precision as i32,
+                    precision,
                     scale: *scale as i32,
                 }))
-                .with_precision(*precision as i32)
-                .with_scale(*scale as i32)
-                .with_length(decimal_min_bytes(*precision as i32))
+                .with_precision(precision)
+                .with_scale(*scale as i32);
+            if physical == PhysicalType::FIXED_LEN_BYTE_ARRAY {
+                builder.with_length(decimal_min_bytes(precision))
+            } else {
+                builder
+            }
         }
         DataType::Struct(fields) => {
-            return ParquetType::group_type_builder(field.name())
-                .with_repetition(repetition)
-                .with_fields(
-                    fields
-                        .iter()
-                        .map(|child| Arc::new(flink_parquet_type(child)))
-                        .collect(),
-                )
-                .build()
-                .expect("failed to build parquet struct");
+            return with_field_id(
+                ParquetType::group_type_builder(field.name())
+                    .with_repetition(repetition)
+                    .with_fields(
+                        fields
+                            .iter()
+                            .map(|child| Arc::new(host_parquet_type(child, shape)))
+                            .collect(),
+                    )
+                    .build()
+                    .expect("failed to build parquet struct"),
+                field,
+            );
         }
         DataType::List(element) => {
-            let element = Field::new(
-                "element",
-                element.data_type().clone(),
-                element.is_nullable(),
-            );
+            let element = element.as_ref().clone().with_name("element");
             let repeated = ParquetType::group_type_builder("list")
                 .with_repetition(Repetition::REPEATED)
-                .with_fields(vec![Arc::new(flink_parquet_type(&element))])
+                .with_fields(vec![Arc::new(host_parquet_type(&element, shape))])
                 .build()
                 .expect("failed to build parquet list entries");
-            return ParquetType::group_type_builder(field.name())
-                .with_repetition(repetition)
-                .with_logical_type(Some(LogicalType::List))
-                .with_fields(vec![Arc::new(repeated)])
-                .build()
-                .expect("failed to build parquet list");
+            return with_field_id(
+                ParquetType::group_type_builder(field.name())
+                    .with_repetition(repetition)
+                    .with_logical_type(Some(LogicalType::List))
+                    .with_fields(vec![Arc::new(repeated)])
+                    .build()
+                    .expect("failed to build parquet list"),
+                field,
+            );
         }
         DataType::Map(entries, _) => {
             let fields = match entries.data_type() {
                 DataType::Struct(fields) if fields.len() == 2 => fields,
                 other => panic!("map entries were not a key/value struct: {other:?}"),
             };
-            let key = Field::new("key", fields[0].data_type().clone(), false);
-            let value = Field::new(
-                "value",
-                fields[1].data_type().clone(),
-                fields[1].is_nullable(),
-            );
+            let key = fields[0]
+                .as_ref()
+                .clone()
+                .with_name("key")
+                .with_nullable(false);
+            let value = fields[1].as_ref().clone().with_name("value");
             let repeated = ParquetType::group_type_builder("key_value")
                 .with_repetition(Repetition::REPEATED)
                 .with_fields(vec![
-                    Arc::new(flink_parquet_type(&key)),
-                    Arc::new(flink_parquet_type(&value)),
+                    Arc::new(host_parquet_type(&key, shape)),
+                    Arc::new(host_parquet_type(&value, shape)),
                 ])
                 .build()
                 .expect("failed to build parquet map entries");
-            return ParquetType::group_type_builder(field.name())
-                .with_repetition(repetition)
-                .with_logical_type(Some(LogicalType::Map))
-                .with_fields(vec![Arc::new(repeated)])
-                .build()
-                .expect("failed to build parquet map");
+            return with_field_id(
+                ParquetType::group_type_builder(field.name())
+                    .with_repetition(repetition)
+                    .with_logical_type(Some(LogicalType::Map))
+                    .with_fields(vec![Arc::new(repeated)])
+                    .build()
+                    .expect("failed to build parquet map"),
+                field,
+            );
         }
-        other => panic!("type {other:?} has no Flink parquet mapping"),
+        other => panic!("type {other:?} has no host parquet mapping"),
+    };
+    let builder = match field_id(field) {
+        Some(id) => builder.with_id(Some(id)),
+        None => builder,
     };
     builder
         .with_repetition(repetition)
         .build()
         .expect("failed to build parquet leaf")
+}
+
+fn field_id(field: &Field) -> Option<i32> {
+    field
+        .metadata()
+        .get(parquet::arrow::PARQUET_FIELD_ID_META_KEY)
+        .map(|id| id.parse().expect("invalid parquet field id"))
+}
+
+fn with_field_id(
+    group: parquet::schema::types::Type,
+    field: &Field,
+) -> parquet::schema::types::Type {
+    match (group, field_id(field)) {
+        (parquet::schema::types::Type::GroupType { basic_info, fields }, Some(id)) => {
+            parquet::schema::types::Type::group_type_builder(basic_info.name())
+                .with_repetition(basic_info.repetition())
+                .with_logical_type(basic_info.logical_type_ref().cloned())
+                .with_fields(fields)
+                .with_id(Some(id))
+                .build()
+                .expect("failed to rebuild parquet group")
+        }
+        (group, _) => group,
+    }
 }
 
 /// Encodes Arrow batches through parquet-rs' standard Arrow writer. The output still belongs to
@@ -574,14 +629,7 @@ impl<W: std::io::Write + Send> ParquetEncoder<W> {
             .collect();
         let data_fields = projection
             .iter()
-            .map(|&index| {
-                let field = full_schema.field(index);
-                Field::new(
-                    field.name(),
-                    write_data_type(field.data_type(), config.timestamp_unit),
-                    field.is_nullable(),
-                )
-            })
+            .map(|&index| write_field(full_schema.field(index), config.timestamp_unit))
             .collect::<Vec<_>>();
         let write_fields: Vec<Field> = if changelog {
             std::iter::once(Field::new(
@@ -614,12 +662,16 @@ impl<W: std::io::Write + Send> ParquetEncoder<W> {
         });
         let input_schema = full_schema.clone();
 
-        let root = parquet::schema::types::Type::group_type_builder("flink_schema")
+        let root_name = match config.schema_shape {
+            SchemaShape::Flink => "flink_schema",
+            SchemaShape::Paimon => "paimon_schema",
+        };
+        let root = parquet::schema::types::Type::group_type_builder(root_name)
             .with_fields(
                 write_schema
                     .fields()
                     .iter()
-                    .map(|field| Arc::new(flink_parquet_type(field)))
+                    .map(|field| Arc::new(host_parquet_type(field, config.schema_shape)))
                     .collect(),
             )
             .build()
@@ -1350,17 +1402,155 @@ mod parquet_encoder_tests {
     }
 
     #[test]
+    fn schema_descriptor_matches_paimon_shape() {
+        let with_meta = |field: Field, pairs: &[(&str, &str)]| {
+            field.with_metadata(
+                pairs
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+            )
+        };
+        let element = with_meta(
+            Field::new("item", DataType::Int32, true),
+            &[(parquet::arrow::PARQUET_FIELD_ID_META_KEY, "536871936")],
+        );
+        let schema = Arc::new(Schema::new(vec![
+            with_meta(
+                Field::new("small_dec", DataType::Decimal128(5, 2), true),
+                &[(parquet::arrow::PARQUET_FIELD_ID_META_KEY, "0")],
+            ),
+            with_meta(
+                Field::new("mid_dec", DataType::Decimal128(15, 4), true),
+                &[(parquet::arrow::PARQUET_FIELD_ID_META_KEY, "1")],
+            ),
+            with_meta(
+                Field::new("large_dec", DataType::Decimal128(38, 10), true),
+                &[(parquet::arrow::PARQUET_FIELD_ID_META_KEY, "2")],
+            ),
+            with_meta(
+                Field::new(
+                    "ts3",
+                    DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None),
+                    true,
+                ),
+                &[
+                    (parquet::arrow::PARQUET_FIELD_ID_META_KEY, "3"),
+                    (TIMESTAMP_UNIT_META_KEY, "millis"),
+                ],
+            ),
+            with_meta(
+                Field::new(
+                    "ts6",
+                    DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None),
+                    true,
+                ),
+                &[
+                    (parquet::arrow::PARQUET_FIELD_ID_META_KEY, "4"),
+                    (TIMESTAMP_UNIT_META_KEY, "micros"),
+                ],
+            ),
+            with_meta(
+                Field::new("arr", DataType::List(Arc::new(element.clone())), true),
+                &[(parquet::arrow::PARQUET_FIELD_ID_META_KEY, "5")],
+            ),
+        ]));
+        let list = {
+            let mut builder = arrow::array::ListBuilder::new(arrow::array::Int32Builder::new())
+                .with_field(Arc::new(element));
+            builder.values().append_value(7);
+            builder.append(true);
+            builder.finish()
+        };
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(
+                    Decimal128Array::from(vec![Some(12345i128)])
+                        .with_precision_and_scale(5, 2)
+                        .unwrap(),
+                ),
+                Arc::new(
+                    Decimal128Array::from(vec![Some(123_456_789_012_345i128)])
+                        .with_precision_and_scale(15, 4)
+                        .unwrap(),
+                ),
+                Arc::new(
+                    Decimal128Array::from(vec![Some(1i128 << 100)])
+                        .with_precision_and_scale(38, 10)
+                        .unwrap(),
+                ),
+                Arc::new(TimestampNanosecondArray::from(vec![Some(1_500_000_000i64)])),
+                Arc::new(TimestampNanosecondArray::from(vec![Some(1_500_000_000i64)])),
+                Arc::new(list),
+            ],
+        )
+        .unwrap();
+        use arrow::array::AsArray;
+        let file = encode(schema, &[], &[("schema.shape", "paimon")], &[batch]);
+        let (batches, metadata) = read_back(file);
+
+        let descriptor = metadata.file_metadata().schema_descr();
+        assert_eq!(descriptor.root_schema().name(), "paimon_schema");
+        let leaf = |index: usize| descriptor.column(index).self_type_ptr();
+        // Paimon lays decimals out by precision instead of Flink's always-FIXED rule.
+        assert_eq!(leaf(0).get_physical_type(), PhysicalType::INT32);
+        assert_eq!(leaf(1).get_physical_type(), PhysicalType::INT64);
+        assert_eq!(
+            leaf(2).get_physical_type(),
+            PhysicalType::FIXED_LEN_BYTE_ARRAY
+        );
+        assert_eq!(leaf(0).get_basic_info().id(), 0);
+        assert_eq!(leaf(2).get_basic_info().id(), 2);
+        // Per-column INT64 units follow the field's own precision metadata, not one global unit.
+        assert_eq!(
+            leaf(3).get_basic_info().logical_type_ref(),
+            Some(&LogicalType::Timestamp {
+                is_adjusted_to_u_t_c: false,
+                unit: parquet::basic::TimeUnit::MILLIS
+            })
+        );
+        assert_eq!(
+            leaf(4).get_basic_info().logical_type_ref(),
+            Some(&LogicalType::Timestamp {
+                is_adjusted_to_u_t_c: false,
+                unit: parquet::basic::TimeUnit::MICROS
+            })
+        );
+        let ts3 = batches[0]
+            .column(3)
+            .as_primitive::<arrow::datatypes::TimestampMillisecondType>();
+        let ts6 = batches[0]
+            .column(4)
+            .as_primitive::<arrow::datatypes::TimestampMicrosecondType>();
+        assert_eq!(ts3.value(0), 1_500);
+        assert_eq!(ts6.value(0), 1_500_000);
+        // Nested ids: the list group keeps the column id and the element carries Paimon's
+        // derived structured-type id.
+        let arr = descriptor.root_schema().get_fields()[5].clone();
+        assert_eq!(arr.get_basic_info().id(), 5);
+        assert_eq!(leaf(5).name(), "element");
+        assert_eq!(leaf(5).get_basic_info().id(), 536_871_936);
+    }
+
+    #[test]
     fn timestamp_timezone_controls_parquet_utc_adjustment() {
-        let instant = flink_parquet_type(&Field::new(
-            "instant",
-            DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, Some("UTC".into())),
-            true,
-        ));
-        let local = flink_parquet_type(&Field::new(
-            "local",
-            DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, None),
-            true,
-        ));
+        let instant = host_parquet_type(
+            &Field::new(
+                "instant",
+                DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, Some("UTC".into())),
+                true,
+            ),
+            SchemaShape::Flink,
+        );
+        let local = host_parquet_type(
+            &Field::new(
+                "local",
+                DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, None),
+                true,
+            ),
+            SchemaShape::Flink,
+        );
         assert_eq!(
             instant.get_basic_info().logical_type_ref(),
             Some(&LogicalType::Timestamp {
