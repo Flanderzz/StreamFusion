@@ -527,6 +527,7 @@
                                 <sourceFileExclude>tech/streamfusion/paimon/**</sourceFileExclude>
                                 <sourceFileExclude>tech/streamfusion/planner/Paimon*.java</sourceFileExclude>
                                 <sourceFileExclude>tech/streamfusion/planner/NativePaimon*.java</sourceFileExclude>
+                                <sourceFileExclude>tech/streamfusion/planner/StreamPhysicalNativePaimon*.java</sourceFileExclude>
                             </sourceFileExcludes>
                             <additionalDependencies>
                                 <additionalDependency>

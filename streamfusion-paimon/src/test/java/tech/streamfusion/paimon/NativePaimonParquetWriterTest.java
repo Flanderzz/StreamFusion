@@ -20,7 +20,6 @@ import org.apache.flink.table.data.RowData;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.format.FileFormat;
-import org.apache.paimon.format.FormatWriter;
 import org.apache.paimon.format.FormatWriterFactory;
 import org.apache.paimon.format.parquet.ParquetUtil;
 import org.apache.paimon.fs.Path;
@@ -81,11 +80,11 @@ class NativePaimonParquetWriterTest {
     writeStock(twinTable, values);
 
     RowType rowType = nativeTable.rowType();
-    assertEquals(readRows(twinTable, rowType), readRows(nativeTable, rowType));
-    assertEquals(ROWS, readRows(nativeTable, rowType).size());
+    assertEquals(PaimonTestTables.readRows(twinTable, rowType), PaimonTestTables.readRows(nativeTable, rowType));
+    assertEquals(ROWS, PaimonTestTables.readRows(nativeTable, rowType).size());
 
-    Map<String, List<DataFileMeta>> nativeFiles = dataFiles(nativeTable);
-    Map<String, List<DataFileMeta>> twinFiles = dataFiles(twinTable);
+    Map<String, List<DataFileMeta>> nativeFiles = PaimonTestTables.dataFiles(nativeTable);
+    Map<String, List<DataFileMeta>> twinFiles = PaimonTestTables.dataFiles(twinTable);
     assertEquals(twinFiles.keySet(), nativeFiles.keySet(), "same partitions and buckets");
     for (String destination : twinFiles.keySet()) {
       List<DataFileMeta> expected = twinFiles.get(destination);
@@ -98,8 +97,8 @@ class NativePaimonParquetWriterTest {
         assertEquals(twin.minSequenceNumber(), ours.minSequenceNumber(), destination);
         assertEquals(twin.maxSequenceNumber(), ours.maxSequenceNumber(), destination);
         assertEquals(
-            describe(twin, rowType),
-            describe(ours, rowType),
+            PaimonTestTables.describe(twin, rowType),
+            PaimonTestTables.describe(ours, rowType),
             "footer statistics in " + destination);
         assertEquals(twin.valueStatsCols(), ours.valueStatsCols(), destination);
         assertEquals(twin.schemaId(), ours.schemaId(), destination);
@@ -109,7 +108,7 @@ class NativePaimonParquetWriterTest {
         assertEquals(twin.deleteRowCount(), ours.deleteRowCount(), destination);
       }
     }
-    assertEquals(footers(twinTable), footers(nativeTable));
+    assertEquals(PaimonTestTables.footers(twinTable), PaimonTestTables.footers(nativeTable));
   }
 
   @Test
@@ -118,6 +117,29 @@ class NativePaimonParquetWriterTest {
     FileFormat format = FileFormat.fromIdentifier("parquet", options);
     assertInstanceOf(NativePaimonParquetFormat.class, format);
     assertEquals("parquet", format.getFormatIdentifier());
+  }
+
+  @Test
+  void bundleRowsReadAsTheRowsTheyStandFor() throws Exception {
+    List<Object[]> values = PaimonTestTables.values(21);
+    RowType rowType = PaimonTestTables.paimonSchema(Map.of()).rowType();
+    try (BufferAllocator allocator = new RootAllocator();
+        VectorSchemaRoot root =
+            RowDataArrowConverter.write(
+                values.stream().map(PaimonTestTables::flinkRow).collect(Collectors.toList()),
+                PaimonTestTables.FLINK_TYPE,
+                allocator)) {
+      ArrowBatchBundle bundle = new ArrowBatchBundle(root, PaimonTestTables.FLINK_TYPE);
+      List<String> rendered = new ArrayList<>();
+      for (InternalRow row : bundle) {
+        rendered.add(PaimonTestTables.render(row, rowType));
+      }
+      assertEquals(
+          values.stream()
+              .map(row -> PaimonTestTables.render(PaimonTestTables.paimonRow(row), rowType))
+              .collect(Collectors.toList()),
+          rendered);
+    }
   }
 
   @Test
@@ -142,7 +164,7 @@ class NativePaimonParquetWriterTest {
                   PaimonTestTables.FLINK_TYPE,
                   allocator)) {
         assertThrows(
-            IllegalStateException.class, () -> writer.writeBundle(new ArrowBatchBundle(root)));
+            IllegalStateException.class, () -> writer.writeBundle(new ArrowBatchBundle(root, PaimonTestTables.FLINK_TYPE)));
       }
       writer.close();
       assertFalse(writer.wroteNatively());
@@ -159,7 +181,7 @@ class NativePaimonParquetWriterTest {
                 PaimonTestTables.FLINK_TYPE,
                 allocator)) {
       NativePaimonParquetWriter writer = (NativePaimonParquetWriter) factory.create(out, "zstd");
-      writer.writeBundle(new ArrowBatchBundle(root));
+      writer.writeBundle(new ArrowBatchBundle(root, PaimonTestTables.FLINK_TYPE));
       assertThrows(
           IllegalStateException.class,
           () -> writer.addElement(PaimonTestTables.paimonRow(values.get(0))));
@@ -186,20 +208,6 @@ class NativePaimonParquetWriterTest {
             .nativeWriterFallbackReason(PaimonTestTables.paimonSchema(Map.of()).rowType()));
   }
 
-  /** Dense statistics carry only the columns named by {@code valueStatsCols}. */
-  private static String describe(DataFileMeta file, RowType rowType) {
-    org.apache.paimon.stats.SimpleStats stats = file.valueStats();
-    if (file.valueStatsCols() != null) {
-      rowType = rowType.project(file.valueStatsCols());
-    }
-    return "min="
-        + PaimonTestTables.render(stats.minValues(), rowType)
-        + "\nmax="
-        + PaimonTestTables.render(stats.maxValues(), rowType)
-        + "\nnulls="
-        + java.util.Arrays.toString(stats.nullCounts().toLongArray());
-  }
-
   private static void writeNatively(FileStoreTable table, List<Object[]> values) throws Exception {
     StreamTableWrite write = table.newStreamWriteBuilder().withCommitUser("native").newWrite();
     StreamTableCommit commit = table.newStreamWriteBuilder().withCommitUser("native").newCommit();
@@ -221,7 +229,7 @@ class NativePaimonParquetWriterTest {
             destinations.get(key).stream().map(PaimonTestTables::flinkRow).collect(Collectors.toList());
         try (VectorSchemaRoot root =
             RowDataArrowConverter.write(rows, PaimonTestTables.FLINK_TYPE, allocator)) {
-          write.writeBundle(partitions.get(key), buckets.get(key), new ArrowBatchBundle(root));
+          write.writeBundle(partitions.get(key), buckets.get(key), new ArrowBatchBundle(root, PaimonTestTables.FLINK_TYPE));
         }
       }
     }
@@ -241,54 +249,5 @@ class NativePaimonParquetWriterTest {
     commit.commit(1, messages);
     write.close();
     commit.close();
-  }
-
-  private static List<String> readRows(FileStoreTable table, RowType rowType) throws Exception {
-    List<String> rows = new ArrayList<>();
-    table
-        .newReadBuilder()
-        .newRead()
-        .createReader(table.newReadBuilder().newScan().plan())
-        .forEachRemaining(row -> rows.add(PaimonTestTables.render(row, rowType)));
-    rows.sort(String::compareTo);
-    return rows;
-  }
-
-  private static Map<String, List<DataFileMeta>> dataFiles(FileStoreTable table) {
-    Map<String, List<DataFileMeta>> files = new TreeMap<>();
-    for (Split split : table.newReadBuilder().newScan().plan().splits()) {
-      DataSplit dataSplit = (DataSplit) split;
-      files
-          .computeIfAbsent(dataSplit.partition() + "@" + dataSplit.bucket(), k -> new ArrayList<>())
-          .addAll(dataSplit.dataFiles());
-    }
-    return files;
-  }
-
-  /** The schema, row-group row counts, and per-column codecs of every data file, by destination. */
-  private static Map<String, List<String>> footers(FileStoreTable table) throws Exception {
-    Map<String, List<String>> footers = new TreeMap<>();
-    LocalFileIO fileIO = LocalFileIO.create();
-    for (Split split : table.newReadBuilder().newScan().plan().splits()) {
-      DataSplit dataSplit = (DataSplit) split;
-      List<String> described = new ArrayList<>();
-      for (DataFileMeta file : dataSplit.dataFiles()) {
-        Path path = new Path(dataSplit.bucketPath(), file.fileName());
-        try (ParquetFileReader reader =
-            ParquetUtil.getParquetReader(fileIO, path, file.fileSize(), new Options())) {
-          ParquetMetadata footer = reader.getFooter();
-          StringBuilder description = new StringBuilder(footer.getFileMetaData().getSchema().toString());
-          for (BlockMetaData block : footer.getBlocks()) {
-            description.append("\nrows=").append(block.getRowCount());
-            for (ColumnChunkMetaData column : block.getColumns()) {
-              description.append(' ').append(column.getPath()).append(':').append(column.getCodec());
-            }
-          }
-          described.add(description.toString());
-        }
-      }
-      footers.put(dataSplit.partition() + "@" + dataSplit.bucket(), described);
-    }
-    return footers;
   }
 }

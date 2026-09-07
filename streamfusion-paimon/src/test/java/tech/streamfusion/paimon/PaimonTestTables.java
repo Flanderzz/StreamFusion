@@ -46,6 +46,16 @@ import org.apache.paimon.table.FileStoreTableFactory;
 import org.apache.paimon.types.DataType;
 import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.utils.InternalRowUtils;
+import java.util.TreeMap;
+import org.apache.paimon.io.DataFileMeta;
+import org.apache.paimon.options.Options;
+import org.apache.paimon.format.parquet.ParquetUtil;
+import org.apache.paimon.shade.org.apache.parquet.hadoop.ParquetFileReader;
+import org.apache.paimon.shade.org.apache.parquet.hadoop.metadata.BlockMetaData;
+import org.apache.paimon.shade.org.apache.parquet.hadoop.metadata.ColumnChunkMetaData;
+import org.apache.paimon.shade.org.apache.parquet.hadoop.metadata.ParquetMetadata;
+import org.apache.paimon.table.source.DataSplit;
+import org.apache.paimon.table.source.Split;
 
 /**
  * One fixture schema in its Paimon and Flink forms, and rows built from the same values in both
@@ -257,5 +267,69 @@ final class PaimonTestTables {
         return value.toString();
       }
     }
+  }
+
+  /** Dense statistics carry only the columns named by {@code valueStatsCols}. */
+  static String describe(DataFileMeta file, org.apache.paimon.types.RowType rowType) {
+    org.apache.paimon.stats.SimpleStats stats = file.valueStats();
+    if (file.valueStatsCols() != null) {
+      rowType = rowType.project(file.valueStatsCols());
+    }
+    return "min="
+        + render(stats.minValues(), rowType)
+        + "\nmax="
+        + render(stats.maxValues(), rowType)
+        + "\nnulls="
+        + java.util.Arrays.toString(stats.nullCounts().toLongArray());
+  }
+
+  static List<String> readRows(FileStoreTable table, org.apache.paimon.types.RowType rowType)
+      throws Exception {
+    List<String> rows = new ArrayList<>();
+    table
+        .newReadBuilder()
+        .newRead()
+        .createReader(table.newReadBuilder().newScan().plan())
+        .forEachRemaining(row -> rows.add(render(row, rowType)));
+    rows.sort(String::compareTo);
+    return rows;
+  }
+
+  static Map<String, List<DataFileMeta>> dataFiles(FileStoreTable table) {
+    Map<String, List<DataFileMeta>> files = new TreeMap<>();
+    for (Split split : table.newReadBuilder().newScan().plan().splits()) {
+      DataSplit dataSplit = (DataSplit) split;
+      files
+          .computeIfAbsent(dataSplit.partition() + "@" + dataSplit.bucket(), k -> new ArrayList<>())
+          .addAll(dataSplit.dataFiles());
+    }
+    return files;
+  }
+
+  /** The schema, row-group row counts, and per-column codecs of every data file, by destination. */
+  static Map<String, List<String>> footers(FileStoreTable table) throws Exception {
+    Map<String, List<String>> footers = new TreeMap<>();
+    LocalFileIO fileIO = LocalFileIO.create();
+    for (Split split : table.newReadBuilder().newScan().plan().splits()) {
+      DataSplit dataSplit = (DataSplit) split;
+      List<String> described = new ArrayList<>();
+      for (DataFileMeta file : dataSplit.dataFiles()) {
+        Path path = new Path(dataSplit.bucketPath(), file.fileName());
+        try (ParquetFileReader reader =
+            ParquetUtil.getParquetReader(fileIO, path, file.fileSize(), new Options())) {
+          ParquetMetadata footer = reader.getFooter();
+          StringBuilder description = new StringBuilder(footer.getFileMetaData().getSchema().toString());
+          for (BlockMetaData block : footer.getBlocks()) {
+            description.append("\nrows=").append(block.getRowCount());
+            for (ColumnChunkMetaData column : block.getColumns()) {
+              description.append(' ').append(column.getPath()).append(':').append(column.getCodec());
+            }
+          }
+          described.add(description.toString());
+        }
+      }
+      footers.put(dataSplit.partition() + "@" + dataSplit.bucket(), described);
+    }
+    return footers;
   }
 }

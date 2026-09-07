@@ -80,7 +80,10 @@ for the full per-format breakdown. `avro-confluent` uses both `streamfusion-avro
 Avro codec) and `streamfusion-avro-confluent-registry` with Flink's
 `flink-avro-confluent-registry`. Use
 `flink-parquet` with `streamfusion-parquet`, the
-same way. A missing optional module is always a normal planner fallback to stock Flink, never a
+same way. Paimon needs `paimon-flink-2.2-2.0.0.jar`, `streamfusion-parquet`, and
+`streamfusion-paimon` installed as `01-streamfusion-paimon.jar` — Paimon takes the first `parquet`
+format factory it finds and Flink loads `lib/` in sorted name order, so the StreamFusion JAR must
+sort before `paimon-flink-*`; see [Apache Paimon](connectors/paimon.md). A missing optional module is always a normal planner fallback to stock Flink, never a
 linkage failure — the core image doesn't require any of them.
 
 ## Bare metal

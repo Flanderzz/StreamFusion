@@ -58,6 +58,7 @@
                         <exclude>tech/streamfusion/paimon/**</exclude>
                         <exclude>tech/streamfusion/planner/Paimon*.java</exclude>
                         <exclude>tech/streamfusion/planner/NativePaimon*.java</exclude>
+                        <exclude>tech/streamfusion/planner/StreamPhysicalNativePaimon*.java</exclude>
                     </excludes>
                 </configuration>
             </plugin>

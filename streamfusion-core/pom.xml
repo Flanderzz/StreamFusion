@@ -28,6 +28,7 @@
                         <exclude>tech/streamfusion/paimon/**</exclude>
                         <exclude>tech/streamfusion/planner/Paimon*.java</exclude>
                         <exclude>tech/streamfusion/planner/NativePaimon*.java</exclude>
+                        <exclude>tech/streamfusion/planner/StreamPhysicalNativePaimon*.java</exclude>
                         <exclude>tech/streamfusion/format/avro/**</exclude>
                         <exclude>tech/streamfusion/format/avroconfluent/**</exclude>
                         <exclude>tech/streamfusion/format/csv/**</exclude>

@@ -37,6 +37,12 @@
             <version>${paimon.version}</version>
             <scope>provided</scope>
         </dependency>
+        <dependency>
+            <groupId>org.apache.hadoop</groupId>
+            <artifactId>hadoop-common</artifactId>
+            <version>3.3.4</version>
+            <scope>provided</scope>
+        </dependency>
     </dependencies>
     <build>
         <sourceDirectory>${project.basedir}/../src/main/java</sourceDirectory>
@@ -52,6 +58,7 @@
                     <include>tech/streamfusion/paimon/**/*.java</include>
                     <include>tech/streamfusion/planner/Paimon*.java</include>
                     <include>tech/streamfusion/planner/NativePaimon*.java</include>
+                    <include>tech/streamfusion/planner/StreamPhysicalNativePaimon*.java</include>
                 </includes></configuration>
             </plugin>
         </plugins>
