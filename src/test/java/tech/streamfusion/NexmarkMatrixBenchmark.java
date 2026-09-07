@@ -18,6 +18,7 @@ import org.apache.flink.streaming.api.functions.sink.legacy.RichSinkFunction;
 import org.apache.flink.table.api.Table;
 import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
+import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.types.Row;
 import org.apache.flink.util.CloseableIterator;
 import org.apache.kafka.clients.admin.Admin;
@@ -831,12 +832,25 @@ class NexmarkMatrixBenchmark {
    */
   static void runDeltaMergeOnReadSinkComparison(DeltaTableInitializer tableInitializer)
       throws Exception {
-    Query[] queries = selectQueries();
-    boolean retainOutput = System.getenv("SF_DELTA_OUTPUT") != null;
+    runLakeSinkComparison(deltaSink(tableInitializer));
+  }
+
+  /**
+   * Runs the append-only queries of the same matrix against fresh Paimon append tables, either
+   * bucket-unaware (Paimon's default, with its in-job compaction) or fixed-bucket keyed on the
+   * result's first column. Invoked from the optional Paimon module.
+   */
+  static void runPaimonAppendSinkComparison(boolean fixedBucket) throws Exception {
+    runLakeSinkComparison(paimonAppendSink(fixedBucket));
+  }
+
+  private static void runLakeSinkComparison(LakeSink sink) throws Exception {
+    Query[] queries = Arrays.stream(selectQueries()).filter(sink::accepts).toArray(Query[]::new);
+    boolean retainOutput = System.getenv(sink.retainOutputVariable()) != null;
     Path outputRoot =
         retainOutput
-            ? Path.of(System.getenv("SF_DELTA_OUTPUT"))
-            : Files.createTempDirectory("nexmark-delta-mor");
+            ? Path.of(System.getenv(sink.retainOutputVariable())).resolve(sink.id())
+            : Files.createTempDirectory("nexmark-" + sink.id());
     Files.createDirectories(outputRoot);
     try (KafkaContainer kafka =
         new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.6.1"))) {
@@ -845,8 +859,9 @@ class NexmarkMatrixBenchmark {
       NexmarkKafkaBenchmark.produce(brokers, "nexmark", "json", ROWS, KAFKA_PARTITIONS);
       StringBuilder out =
           new StringBuilder(
-              "\n##### NEXMARK DELTA SINK "
-                  + "(Kafka JSON, memory state, mini-batch off; MOR upsert for updating queries; "
+              "\n##### NEXMARK "
+                  + sink.title()
+                  + " (Kafka JSON, memory state, mini-batch off; "
                   + ROWS
                   + " events, best of "
                   + RUNS
@@ -860,10 +875,8 @@ class NexmarkMatrixBenchmark {
       for (Query q : queries) {
         String row;
         try {
-          double flink =
-              deltaSinkBest(brokers, outputRoot, q, false, retainOutput, tableInitializer);
-          double nativeRun =
-              deltaSinkBest(brokers, outputRoot, q, true, retainOutput, tableInitializer);
+          double flink = lakeSinkBest(brokers, outputRoot, q, false, retainOutput, sink);
+          double nativeRun = lakeSinkBest(brokers, outputRoot, q, true, retainOutput, sink);
           double speedup = flink / nativeRun;
           logSpeedupSum += Math.log(speedup);
           completed++;
@@ -894,19 +907,18 @@ class NexmarkMatrixBenchmark {
     }
   }
 
-  private static double deltaSinkBest(
+  private static double lakeSinkBest(
       String brokers,
       Path outputRoot,
       Query q,
       boolean nativeRun,
       boolean retainOutput,
-      DeltaTableInitializer tableInitializer)
+      LakeSink sink)
       throws Exception {
-    return deltaSinkBest(
-        brokers, outputRoot, q, nativeRun, retainOutput, WARMUP, RUNS, tableInitializer);
+    return lakeSinkBest(brokers, outputRoot, q, nativeRun, retainOutput, WARMUP, RUNS, sink);
   }
 
-  private static double deltaSinkBest(
+  private static double lakeSinkBest(
       String brokers,
       Path outputRoot,
       Query q,
@@ -914,7 +926,7 @@ class NexmarkMatrixBenchmark {
       boolean retainOutput,
       int warmups,
       int runs,
-      DeltaTableInitializer tableInitializer)
+      LakeSink sink)
       throws Exception {
     Map<String, String> properties = new LinkedHashMap<>();
     properties.put("streamfusion.native.enabled", Boolean.toString(nativeRun));
@@ -937,7 +949,8 @@ class NexmarkMatrixBenchmark {
             run + 1,
             warmups + runs,
             run < warmups ? " (warmup)" : "");
-        double seconds = runDeltaSinkOnce(brokers, output, q, nativeRun, tableInitializer);
+        deleteTree(output);
+        double seconds = runLakeSinkOnce(brokers, output, q, nativeRun, sink);
         System.out.printf("    completed in %.3f s%n", seconds);
         if (run >= warmups) {
           best = Math.min(best, seconds);
@@ -945,7 +958,7 @@ class NexmarkMatrixBenchmark {
         if (!retainOutput) {
           deleteTree(output);
         }
-        // Every cell is a fully closed bounded Flink job with a fresh Delta table. Force the test
+        // Every cell is a fully closed bounded Flink job with a fresh lake table. Force the test
         // JVM to reclaim the previous MiniCluster/job graph before starting the next repetition;
         // otherwise several q10-sized cells can leave enough unreachable heap committed for macOS
         // to kill the fork before G1's next pressure-triggered collection.
@@ -968,14 +981,23 @@ class NexmarkMatrixBenchmark {
   /** Captures matched CPU and wall-clock profiles of one Kafka JSON to Delta MOR query. */
   static void runDeltaMergeOnReadSinkProfile(DeltaTableInitializer tableInitializer)
       throws Exception {
-    String label = System.getProperty("profile.query", "q19");
+    runLakeSinkProfile(deltaSink(tableInitializer), "q19");
+  }
+
+  /** Captures matched CPU and wall-clock profiles of one Kafka JSON to Paimon append query. */
+  static void runPaimonAppendSinkProfile(boolean fixedBucket) throws Exception {
+    runLakeSinkProfile(paimonAppendSink(fixedBucket), "q0");
+  }
+
+  private static void runLakeSinkProfile(LakeSink sink, String defaultQuery) throws Exception {
+    String label = System.getProperty("profile.query", defaultQuery);
     Query q =
         Arrays.stream(ALL_QUERIES)
             .filter(candidate -> candidate.label.equals(label))
             .findFirst()
             .orElseThrow(() -> new IllegalArgumentException("unknown profile.query: " + label));
     Path outputDir =
-        Path.of(System.getProperty("profile.outputDir", "target/profiles/nexmark-delta"))
+        Path.of(System.getProperty("profile.outputDir", "target/profiles/nexmark-" + sink.id()))
             .toAbsolutePath();
     Files.createDirectories(outputDir);
     String asprof = System.getProperty("profile.asprof", "asprof");
@@ -989,7 +1011,7 @@ class NexmarkMatrixBenchmark {
       for (boolean nativeRun : new boolean[] {false, true}) {
         String engine = nativeRun ? "streamfusion" : "flink";
         Path engineOutput = outputDir.resolve(engine + "-output");
-        deltaSinkBest(brokers, engineOutput, q, nativeRun, false, 1, 1, tableInitializer);
+        lakeSinkBest(brokers, engineOutput, q, nativeRun, false, 1, 1, sink);
         String[] profileEvents =
             System.getProperty("profile.events", "cpu,wall").split(",");
         for (String event : profileEvents) {
@@ -1014,37 +1036,30 @@ class NexmarkMatrixBenchmark {
           runProfiler(asprof, startArgs.toArray(String[]::new));
           double seconds;
           try {
-            seconds =
-                deltaSinkBest(
-                    brokers, engineOutput, q, nativeRun, false, 0, 1, tableInitializer);
+            seconds = lakeSinkBest(brokers, engineOutput, q, nativeRun, false, 0, 1, sink);
           } finally {
             runProfiler(asprof, "stop", pid);
           }
           System.out.printf(
-              "[profile-delta] %-12s %-4s %-4s %.3f s -> %s%n",
-              engine, q.label, event, seconds, recording);
+              "[profile-%s] %-12s %-4s %-4s %.3f s -> %s%n",
+              sink.id(), engine, q.label, event, seconds, recording);
         }
       }
     }
   }
 
-  private static double runDeltaSinkOnce(
-      String brokers,
-      Path output,
-      Query q,
-      boolean nativeRun,
-      DeltaTableInitializer tableInitializer)
-      throws Exception {
+  private static double runLakeSinkOnce(
+      String brokers, Path output, Query q, boolean nativeRun, LakeSink sink) throws Exception {
     StreamTableEnvironment tEnv = kafkaEnvironment(brokers, "json");
     tEnv.getConfig().getConfiguration().setString("execution.checkpointing.interval", "1 s");
     tEnv.getConfig().getConfiguration().setString("table.exec.mini-batch.enabled", "false");
     runSetup(tEnv, q);
     PhysicalPlanScan scan = nativeRun ? NativePlanner.install(tEnv) : null;
-    tEnv.executeSql(deltaSinkDdl(q, output));
-    org.apache.flink.table.types.logical.RowType sinkType =
-        (org.apache.flink.table.types.logical.RowType)
+    tEnv.executeSql(sink.ddl(q, output));
+    RowType sinkType =
+        (RowType)
             tEnv.from("sink").getResolvedSchema().toPhysicalRowDataType().getLogicalType();
-    tableInitializer.initialize(output, sinkType);
+    sink.initialize(output, sinkType);
     String plan =
         tEnv.explainSql(q.insertSql, org.apache.flink.table.api.ExplainDetail.JSON_EXECUTION_PLAN);
     long start = System.nanoTime();
@@ -1055,10 +1070,13 @@ class NexmarkMatrixBenchmark {
             || !plan.contains("native-kafka-source")
             || plan.contains("RowDataToArrow")
             || plan.contains("ArrowToRowData")
+            || !plan.contains(sink.nativePlanMarker())
             || scan.substitutions() < 3)) {
       throw new IllegalStateException(
           q.label
-              + ": the native Kafka-to-Delta path did not engage (decode="
+              + ": the native Kafka-to-"
+              + sink.id()
+              + " path did not engage (decode="
               + plan.contains("NativeKafkaDecode")
               + ", source="
               + plan.contains("native-kafka-source")
@@ -1066,12 +1084,123 @@ class NexmarkMatrixBenchmark {
               + plan.contains("RowDataToArrow")
               + ", arrow-to-row="
               + plan.contains("ArrowToRowData")
+              + ", sink="
+              + plan.contains(sink.nativePlanMarker())
               + ", substitutions="
               + scan.substitutions()
               + "). "
               + scan.explainSummary());
     }
     return seconds;
+  }
+
+  /** A lake-table sink the Kafka JSON matrix can drain into, on both the stock and native path. */
+  interface LakeSink {
+    String id();
+
+    String title();
+
+    String retainOutputVariable();
+
+    boolean accepts(Query q);
+
+    String ddl(Query q, Path output);
+
+    /** The operator name that proves the native sink topology is in the execution plan. */
+    String nativePlanMarker();
+
+    default void initialize(Path output, RowType rowType)
+        throws Exception {}
+  }
+
+  private static LakeSink deltaSink(DeltaTableInitializer tableInitializer) {
+    return new LakeSink() {
+      @Override
+      public String id() {
+        return "delta";
+      }
+
+      @Override
+      public String title() {
+        return "DELTA SINK; MOR upsert for updating queries";
+      }
+
+      @Override
+      public String retainOutputVariable() {
+        return "SF_DELTA_OUTPUT";
+      }
+
+      @Override
+      public boolean accepts(Query q) {
+        return true;
+      }
+
+      @Override
+      public String ddl(Query q, Path output) {
+        return deltaSinkDdl(q, output);
+      }
+
+      @Override
+      public String nativePlanMarker() {
+        return "native-delta-arrow-views";
+      }
+
+      @Override
+      public void initialize(Path output, RowType rowType)
+          throws Exception {
+        tableInitializer.initialize(output, rowType);
+      }
+    };
+  }
+
+  private static LakeSink paimonAppendSink(boolean fixedBucket) {
+    return new LakeSink() {
+      @Override
+      public String id() {
+        return fixedBucket ? "paimon-fixed-bucket" : "paimon-unaware-bucket";
+      }
+
+      @Override
+      public String title() {
+        return fixedBucket
+            ? "PAIMON APPEND SINK; 4 fixed buckets keyed on the first column"
+            : "PAIMON APPEND SINK; bucket-unaware with in-job compaction";
+      }
+
+      @Override
+      public String retainOutputVariable() {
+        return "SF_PAIMON_OUTPUT";
+      }
+
+      @Override
+      public boolean accepts(Query q) {
+        return !UPSERT_KEYS.containsKey(q.label);
+      }
+
+      @Override
+      public String ddl(Query q, Path output) {
+        return paimonSinkDdl(q, output, fixedBucket);
+      }
+
+      @Override
+      public String nativePlanMarker() {
+        return "native-paimon-bucket-route";
+      }
+    };
+  }
+
+  private static String paimonSinkDdl(Query q, Path output, boolean fixedBucket) {
+    String ddl = q.sinkDdl.replace("%TS%", "TIMESTAMP_LTZ(3)").replace("%WTS%", "TIMESTAMP(3)");
+    String firstColumn = ddl.substring(ddl.indexOf('(') + 1).trim().split("\\s+")[0];
+    String bucketing =
+        fixedBucket ? "'bucket' = '4', 'bucket-key' = '" + firstColumn + "'" : "'bucket' = '-1'";
+    String options =
+        "WITH ('connector' = 'paimon', 'path' = '"
+            + output.toUri()
+            + "', 'auto-create' = 'true', 'file.format' = 'parquet', "
+            + bucketing
+            + ")";
+    return ddl.replace("WITH ('connector' = 'blackhole')", options);
   }
 
   private static String deltaSinkDdl(Query q, Path output) {
@@ -1095,7 +1224,7 @@ class NexmarkMatrixBenchmark {
 
   @FunctionalInterface
   interface DeltaTableInitializer {
-    void initialize(Path path, org.apache.flink.table.types.logical.RowType rowType) throws Exception;
+    void initialize(Path path, RowType rowType) throws Exception;
   }
 
   private static void deleteTree(Path root) throws Exception {

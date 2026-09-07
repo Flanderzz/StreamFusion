@@ -21,6 +21,18 @@
         </dependency>
         <dependency>
             <groupId>tech.streamfusion</groupId>
+            <artifactId>streamfusion-kafka</artifactId>
+            <version>${project.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>tech.streamfusion</groupId>
+            <artifactId>streamfusion-json</artifactId>
+            <version>${project.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>tech.streamfusion</groupId>
             <artifactId>streamfusion-core</artifactId>
             <version>${project.version}</version>
             <scope>provided</scope>
@@ -42,6 +54,27 @@
             <artifactId>hadoop-common</artifactId>
             <version>3.3.4</version>
             <scope>provided</scope>
+            <exclusions>
+                <!-- Hadoop's log4j 1.x bindings would win SLF4J's binding lookup over Flink's log4j2
+                     test binding and leave every logger at DEBUG, which makes parquet-mr wrap the
+                     stock Paimon writer in per-value record logging and distorts the benchmark. -->
+                <exclusion>
+                    <groupId>org.slf4j</groupId>
+                    <artifactId>slf4j-reload4j</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>ch.qos.reload4j</groupId>
+                    <artifactId>reload4j</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.slf4j</groupId>
+                    <artifactId>slf4j-log4j12</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>log4j</groupId>
+                    <artifactId>log4j</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
     </dependencies>
     <build>

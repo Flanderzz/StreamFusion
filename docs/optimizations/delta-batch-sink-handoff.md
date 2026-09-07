@@ -17,4 +17,4 @@ parquet-rs `ArrowWriter`. Neither path transposes the data-file payload through 
 
 This adapter uses published `delta-flink` merge and commit APIs. The current released-only 2M-event
 Nexmark sink diagnostic completed all 23 supported queries at a **1.522×** suite geomean over the
-stock Delta writer; see [Benchmarks](../benchmarks.md#parquet-and-delta-sink-diagnostics).
+stock Delta writer; see [Benchmarks](../benchmarks.md#parquet-delta-and-paimon-sink-diagnostics).

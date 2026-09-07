@@ -51,7 +51,7 @@ Falls back to Flink on:
 
 On the 2M-event, four-partition Kafka JSON Nexmark sink diagnostic (memory state, mini-batching off,
 one warmup, best of three), all 23 queries supported by Flink completed and StreamFusion's suite
-geomean was **1.535×** the stock parquet-mr path. See [Benchmarks](../benchmarks.md#parquet-and-delta-sink-diagnostics)
+geomean was **1.535×** the stock parquet-mr path. See [Benchmarks](../benchmarks.md#parquet-delta-and-paimon-sink-diagnostics)
 for the exact method and reproduction commands.
 
 See [Deployment](../deployment.md) for the JARs a Parquet sink needs.

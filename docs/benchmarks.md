@@ -131,20 +131,22 @@ per engine/query, and writes `flink-q*.jfr` and `streamfusion-q*.jfr` under
 `-Dprofile.outputDir=...`. It invokes `asprof` from `PATH` by default; override that executable with
 `-Dprofile.asprof=...`.
 
-## Parquet and Delta sink diagnostics
+## Parquet, Delta, and Paimon sink diagnostics
 
 These diagnostics use the readme-like 2M-event Kafka JSON workload with four input partitions,
 parallelism four, memory state, mini-batching disabled, one warmup, and the best of three measured
 runs. They cover q0–q5 and q7–q23; q6 is omitted because stock Flink cannot execute it. Unlike the
 headline table, these runs measure local data-file output rather than Kafka output.
 
-Apple M1 Max, release + `mimalloc`, measured 2026-08-22:
+Apple M1 Max, release + `mimalloc`; Parquet and Delta measured 2026-08-22, Paimon 2026-09-07:
 
 | Sink | Completed | Suite geomean |
 |---|---:|---:|
 | Parquet physical changelog | 23/23 | **1.535×** |
 | Delta (MOR for updating queries) | 23/23 | **1.522×** |
 | Combined | 46/46 | **1.529×** |
+| Paimon append, bucket-unaware (16 append-only queries) | 16/16 | **1.47×** |
+| Paimon append, 4 fixed buckets (16 append-only queries) | 16/16 | **1.47×** |
 
 For the Parquet diagnostic, set `SF_MATRIX_PARQUET_SINK=true` and run
 `NexmarkMatrixBenchmark#changelogParquetSinkComparison`. This mode always disables Flink logical
@@ -194,3 +196,31 @@ TZ=UTC SF_BENCHMARK=true SF_MATRIX_DELTA_SINK=true SF_ROWS=2000000 \
 The explicit UTC setting is required for the timestamp-window queries: the native
 `TIMESTAMP_LTZ` window path accepts fixed-offset post-1970 zones, while a host-local DST zone is an
 intentional planner fallback.
+
+The Paimon diagnostic compares the published Paimon 2.0.0 Flink 2.2 connector with StreamFusion's
+append-table sink and covers the 16 queries whose result is insert-only (the updating queries q4,
+q9, and q15–q19 need a primary-key table, which stays stock). Every table is a Parquet append table
+that Paimon creates from the sink DDL; the bucket-unaware variant keeps Paimon's in-job compaction
+topology, and the fixed-bucket variant uses four buckets keyed on the result's first column. Both
+engines run Paimon's writer, committer, and manifests unchanged, so the row counts read back through
+Paimon's snapshots agree on every query except q12, whose processing-time window Flink never fires
+at end of input while StreamFusion flushes it. Per query the speed-up ranges from 1.08× (q3, a
+join that emits under a thousand rows) to 2.04× (q23, which writes 5.5 M joined rows); queries that
+write most of their input land at 1.4–1.8×. Set `SF_PAIMON_OUTPUT` to retain the tables, one
+directory per variant.
+
+```sh
+TZ=UTC SF_BENCHMARK=true SF_MATRIX_PAIMON_SINK=true SF_ROWS=2000000 \
+  SF_PARALLELISM=4 SF_KAFKA_PARTITIONS=4 SF_WARMUP=1 SF_RUNS=3 \
+  mvn -Ppaimon -pl :streamfusion-paimon -am test -Pbench \
+  -Duser.timezone=UTC -Dtest='NexmarkPaimonSinkBenchmark' \
+  -Dsurefire.failIfNoSpecifiedTests=false
+```
+
+Set `SF_PROFILE_PAIMON_SINK=true` and run `unawareBucketAppendProfile` for matched q0 CPU and
+wall-clock recordings of the stock and native paths. A word of caution that this profile taught
+us: stock Paimon's parquet-mr wraps its record consumer in per-value debug logging whenever its
+logger has DEBUG enabled, so a benchmark JVM with an unconfigured log4j 1.x binding makes the stock
+sink look 15–60× slower than it is. The module's test classpath excludes Hadoop's log4j 1.x
+bindings for exactly this reason; check the stock profile before trusting a sink number that far
+out of line with the rest of this table.

@@ -83,5 +83,5 @@ On the 2M-event, four-partition Kafka JSON Nexmark sink diagnostic (memory state
 one warmup, best of three), all 23 queries supported by Flink completed and StreamFusion's suite
 geomean was **1.522×** the stock published-Delta path. Updating queries used Delta 4.4 merge-on-read
 upserts; naturally append-only queries used append mode. See
-[Benchmarks](../benchmarks.md#parquet-and-delta-sink-diagnostics) for the exact method and
+[Benchmarks](../benchmarks.md#parquet-delta-and-paimon-sink-diagnostics) for the exact method and
 reproduction commands.

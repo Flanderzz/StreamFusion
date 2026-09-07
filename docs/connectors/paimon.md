@@ -73,6 +73,17 @@ In spill mode the absolute sequence numbers in file metadata differ from a stock
 reassigns them on the rewrite, and it triggers after whole routed batches rather than single rows);
 rows, statistics, and footers are unchanged.
 
+## Benchmark
+
+On the 2M-event, four-partition Kafka JSON Nexmark sink diagnostic (memory state, mini-batching off,
+one warmup, best of three), the 16 append-only queries completed on both engines and StreamFusion's
+suite geomean was **1.47×** the stock published-Paimon path for bucket-unaware tables with in-job
+compaction and **1.47×** for four fixed buckets, from 1.08× on a join that emits a few hundred rows
+to 2.04× on the query that writes 5.5 M joined rows. Row counts read back through Paimon's snapshots
+agree on every query except the processing-time window q12, whose output is non-deterministic by
+construction. See [Benchmarks](../benchmarks.md#parquet-delta-and-paimon-sink-diagnostics) for the
+method and reproduction command.
+
 ## Deployment
 
 Install the published `paimon-flink-2.2-2.0.0.jar`, `streamfusion-parquet`, and
