@@ -34,6 +34,10 @@ Supported:
   options from the job configuration, resolved the way Paimon's own factory resolves them.
 - `sink.writer-refresh-detectors`: the writer re-reads the refreshed option groups (external data
   paths) after each checkpoint's commit preparation, exactly when the stock operator does.
+- Any insert-only query shape: columns bind to the table by position as in Flink's own sink, so
+  aliased projections (`SELECT a AS x ...`) and casts the planner inserts are written under the
+  table's names and nullability, and an insert-only stream coming out of a changelog-capable
+  operator (a join, an aggregate) is accepted with its hidden row-kind column dropped.
 
 Files written natively are row-, statistics-, and footer-schema-identical to the stock writer's
 (verified against twin tables in `PaimonSinkParityTest` and `NativePaimonParquetWriterTest`), and

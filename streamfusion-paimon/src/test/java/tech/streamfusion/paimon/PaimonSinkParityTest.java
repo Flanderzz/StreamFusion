@@ -123,6 +123,43 @@ class PaimonSinkParityTest {
   }
 
   @Test
+  void aliasedQueryColumnsBindToTheTablePositionally() throws Exception {
+    java.nio.file.Path warehouse = Files.createTempDirectory("paimon-sink-aliased");
+    FileStoreTable nativeTable = insertAliasedFixture(warehouse, true);
+    FileStoreTable stockTable = insertAliasedFixture(warehouse, false);
+
+    assertSameTables(stockTable, nativeTable, true);
+    assertEquals(
+        List.of("id", "label", "nested", "pt"), nativeTable.rowType().getFieldNames());
+  }
+
+  private static FileStoreTable insertAliasedFixture(java.nio.file.Path warehouse, boolean nativeSink)
+      throws Exception {
+    String name = nativeSink ? "renamed_native" : "renamed_stock";
+    StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+    env.setParallelism(1);
+    StreamTableEnvironment tableEnv = catalogEnvironment(env, warehouse);
+    tableEnv.executeSql(
+        "CREATE TABLE "
+            + name
+            + " (id BIGINT NOT NULL, label STRING, nested ROW<x INT, y STRING>, pt STRING)"
+            + " PARTITIONED BY (pt) WITH ('bucket' = '2', 'bucket-key' = 'id')");
+    DataStream<Row> stream = env.fromData(fixtureTypeInformation(), fixtureRows());
+    tableEnv.createTemporaryView("fixture_source", tableEnv.fromDataStream(stream, fixtureSchema()));
+    PhysicalPlanScan scan = nativeSink ? NativePlanner.install(tableEnv) : null;
+
+    tableEnv
+        .executeSql(
+            "INSERT INTO " + name + " SELECT id, name AS n, nested, pt AS p FROM fixture_source")
+        .await();
+
+    if (nativeSink) {
+      assertAccelerated(scan);
+    }
+    return openTable(warehouse, name);
+  }
+
+  @Test
   void unawareTableCompactsInJobThroughTheStockRowWriter() throws Exception {
     java.nio.file.Path warehouse = Files.createTempDirectory("paimon-sink-compact");
     StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();

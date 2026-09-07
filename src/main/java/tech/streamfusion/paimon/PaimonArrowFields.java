@@ -22,7 +22,10 @@ import org.apache.paimon.types.TimestampType;
  * Carries the parts of a Paimon schema that Arrow does not model onto the Arrow fields the native
  * encoder reads: Paimon's Parquet field ids, including the ids it derives for list elements and map
  * keys and values, and the per-column timestamp unit its precision selects. The encoder's Paimon
- * schema shape turns these into the same descriptor Paimon's own writer produces.
+ * schema shape turns these into the same descriptor Paimon's own writer produces. Columns bind by
+ * position and take the table's names and nullability, as Paimon's own writer describes a file by
+ * the table type: the planner has matched the query's types, but the query may have aliased the
+ * columns or lost a NOT NULL through a cast.
  */
 final class PaimonArrowFields {
 
@@ -47,14 +50,10 @@ final class PaimonArrowFields {
   }
 
   private static Field annotate(Field arrow, DataField paimon) {
-    if (!arrow.getName().equals(paimon.name())) {
-      throw new IllegalArgumentException(
-          "Arrow column " + arrow.getName() + " does not match Paimon field " + paimon.name());
-    }
-    return annotate(arrow, paimon.type(), paimon.id(), 0);
+    return annotate(arrow, paimon.name(), paimon.type(), paimon.id(), 0);
   }
 
-  private static Field annotate(Field arrow, DataType type, int fieldId, int depth) {
+  private static Field annotate(Field arrow, String name, DataType type, int fieldId, int depth) {
     Map<String, String> metadata = new HashMap<>();
     if (arrow.getMetadata() != null) {
       metadata.putAll(arrow.getMetadata());
@@ -72,6 +71,7 @@ final class PaimonArrowFields {
             List.of(
                 annotate(
                     children.get(0),
+                    children.get(0).getName(),
                     element,
                     SpecialFields.getArrayElementFieldId(fieldId, depth + 1),
                     depth + 1));
@@ -87,11 +87,13 @@ final class PaimonArrowFields {
                     List.of(
                         annotate(
                             entries.getChildren().get(0),
-                            map.getKeyType(),
+                            entries.getChildren().get(0).getName(),
+                            map.getKeyType().copy(false),
                             SpecialFields.getMapKeyFieldId(fieldId, depth + 1),
                             depth + 1),
                         annotate(
                             entries.getChildren().get(1),
+                            entries.getChildren().get(1).getName(),
                             map.getValueType(),
                             SpecialFields.getMapValueFieldId(fieldId, depth + 1),
                             depth + 1))));
@@ -108,8 +110,8 @@ final class PaimonArrowFields {
     }
     FieldType fieldType = arrow.getFieldType();
     return new Field(
-        arrow.getName(),
-        new FieldType(fieldType.isNullable(), fieldType.getType(), fieldType.getDictionary(), metadata),
+        name,
+        new FieldType(type.isNullable(), fieldType.getType(), fieldType.getDictionary(), metadata),
         children);
   }
 

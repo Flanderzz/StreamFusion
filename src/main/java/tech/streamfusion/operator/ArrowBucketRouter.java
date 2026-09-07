@@ -6,6 +6,7 @@ import org.apache.arrow.c.ArrowSchema;
 import org.apache.arrow.c.CDataDictionaryProvider;
 import org.apache.arrow.c.Data;
 import org.apache.arrow.memory.BufferAllocator;
+import org.apache.arrow.vector.FieldVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
@@ -18,6 +19,10 @@ import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
  * function over the bucket-key columns, both computed on the columns in place so no row is ever
  * materialized on the JVM. Paimon's {@code BinaryRow} shares Flink's {@code BinaryRowData} layout
  * and hash, so the native Flink key encoder yields both byte for byte.
+ *
+ * <p>The destinations are append tables, so the planner only routes insert-only streams here. An
+ * upstream changelog operator still tags its output with the hidden row-kind column, all inserts on
+ * such an edge, and the router drops it so the routed batches carry exactly the table's columns.
  */
 public class ArrowBucketRouter extends AbstractStreamOperator<BucketedArrowBatch>
     implements OneInputStreamOperator<ArrowBatch, BucketedArrowBatch> {
@@ -59,7 +64,7 @@ public class ArrowBucketRouter extends AbstractStreamOperator<BucketedArrowBatch
   @Override
   public void processElement(StreamRecord<ArrowBatch> element) {
     ColumnarRecordMetrics.countIngested(getMetricGroup(), element.getValue().rowCount());
-    VectorSchemaRoot in = element.getValue().root();
+    VectorSchemaRoot in = withoutRowKinds(element.getValue().root());
     BufferAllocator inAllocator =
         in.getFieldVectors().isEmpty() ? allocator : in.getFieldVectors().get(0).getAllocator();
     long route;
@@ -100,5 +105,15 @@ public class ArrowBucketRouter extends AbstractStreamOperator<BucketedArrowBatch
     } finally {
       Native.closeBucketRoute(route);
     }
+  }
+
+  private static VectorSchemaRoot withoutRowKinds(VectorSchemaRoot root) {
+    FieldVector rowKinds = root.getVector(RowDataArrowConverter.ROW_KIND_COLUMN);
+    if (rowKinds == null) {
+      return root;
+    }
+    VectorSchemaRoot data = root.removeVector(root.getFieldVectors().indexOf(rowKinds));
+    rowKinds.close();
+    return data;
   }
 }

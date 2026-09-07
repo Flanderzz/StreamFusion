@@ -85,9 +85,15 @@ class ArrowBucketRouterTest {
     return Math.abs(new RowDataSerializer(BUCKET_KEY_TYPE).toBinaryRow(key).hashCode() % numBuckets);
   }
 
-  @SuppressWarnings("unchecked")
   private static List<BucketedArrowBatch> route(
       List<RowData> rows, int numBuckets, BufferAllocator allocator) throws Exception {
+    return route(rows, numBuckets, allocator, false);
+  }
+
+  @SuppressWarnings("unchecked")
+  private static List<BucketedArrowBatch> route(
+      List<RowData> rows, int numBuckets, BufferAllocator allocator, boolean withRowKind)
+      throws Exception {
     try (OneInputStreamOperatorTestHarness<ArrowBatch, BucketedArrowBatch> harness =
         new OneInputStreamOperatorTestHarness<>(
             new ArrowBucketRouter(
@@ -97,7 +103,7 @@ class ArrowBucketRouterTest {
       harness.open();
       harness.processElement(
           new StreamRecord<>(
-              new ArrowBatch(RowDataArrowConverter.write(rows, SCHEMA, allocator))));
+              new ArrowBatch(RowDataArrowConverter.write(rows, SCHEMA, allocator, withRowKind))));
       List<BucketedArrowBatch> out = new ArrayList<>();
       for (Object record : harness.getOutput()) {
         if (record instanceof StreamRecord<?>) {
@@ -155,6 +161,24 @@ class ArrowBucketRouterTest {
           }
         }
       }
+    }
+  }
+
+  @Test
+  void dropsTheRowKindColumnAChangelogOperatorLeavesOnInsertOnlyOutput() throws Exception {
+    List<RowData> rows = rows(40);
+    try (BufferAllocator allocator = new RootAllocator()) {
+      int total = 0;
+      for (BucketedArrowBatch batch : route(rows, 3, allocator, true)) {
+        try (VectorSchemaRoot sub = batch.root()) {
+          assertEquals(SCHEMA.getFieldNames(), sub.getSchema().getFields().stream().map(f -> f.getName()).toList());
+          for (RowData row : RowDataArrowConverter.read(sub, SCHEMA)) {
+            assertEquals(flinkBucket(row, 3), batch.bucket());
+            total++;
+          }
+        }
+      }
+      assertEquals(rows.size(), total);
     }
   }
 

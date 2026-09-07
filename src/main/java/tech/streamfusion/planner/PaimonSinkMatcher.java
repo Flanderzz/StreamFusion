@@ -126,8 +126,12 @@ final class PaimonSinkMatcher {
     }
     RelDataType inputType = sink.getInput().getRowType();
     List<String> fieldNames = table.rowType().getFieldNames();
-    if (!inputType.getFieldNames().equals(fieldNames)) {
-      return Planned.fallback("the sink input columns do not match the Paimon table schema");
+    if (inputType.getFieldCount() != fieldNames.size()) {
+      return Planned.fallback(
+          "the sink input has "
+              + inputType.getFieldCount()
+              + " columns for a table with "
+              + fieldNames.size());
     }
     String formatFallback = formatFallbackReason(table);
     if (formatFallback != null) {
