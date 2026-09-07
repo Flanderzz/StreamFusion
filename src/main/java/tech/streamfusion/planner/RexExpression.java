@@ -517,6 +517,20 @@ final class RexExpression {
     if ("COALESCE".equalsIgnoreCase(call.getOperator().getName())) {
       return emitCoalesceAsCase(call.getOperands());
     }
+    String functionName = call.getOperator().getName().toUpperCase(Locale.ROOT);
+    if ("CONCAT".equals(functionName) || "||".equals(functionName)) {
+      return emitStringCall(call, 93, 1, Integer.MAX_VALUE);
+    }
+    if ("CONCAT_WS".equals(functionName)) {
+      return emitStringCall(call, 94, 1, Integer.MAX_VALUE);
+    }
+    int hashOp = hashOpCode(functionName);
+    if (hashOp >= 0) {
+      return emitStringCall(call, hashOp, 1, 1);
+    }
+    if ("SHA2".equals(functionName)) {
+      return emitSha2(call);
+    }
     if ("TRIM".equalsIgnoreCase(call.getOperator().getName())) {
       return emitTrim(call);
     }
@@ -697,6 +711,64 @@ final class RexExpression {
       }
     }
     return character && numeric;
+  }
+
+  private boolean emitStringCall(RexCall call, int op, int minArgs, int maxArgs) {
+    List<RexNode> args = call.getOperands();
+    if (args.size() < minArgs || args.size() > maxArgs) {
+      return reject("unsupported arity for " + call.getOperator().getName());
+    }
+    for (RexNode arg : args) {
+      if (arg.getType().getSqlTypeName().getFamily() != SqlTypeFamily.CHARACTER
+          && arg.getType().getSqlTypeName() != SqlTypeName.NULL) {
+        return reject(call.getOperator().getName() + ": only character strings admitted");
+      }
+    }
+    add(KIND_CALL, op, args.size());
+    for (RexNode arg : args) {
+      if (!emit(arg)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private static int hashOpCode(String name) {
+    switch (name) {
+      case "MD5":
+        return 95;
+      case "SHA224":
+        return 96;
+      case "SHA256":
+        return 97;
+      case "SHA384":
+        return 98;
+      case "SHA512":
+        return 99;
+      default:
+        return -1;
+    }
+  }
+
+  private boolean emitSha2(RexCall call) {
+    List<RexNode> args = call.getOperands();
+    if (args.size() != 2) {
+      return reject("SHA2: only the two-argument UTF-8 form is admitted");
+    }
+    RexNode bitLength = args.get(1);
+    if (!(bitLength instanceof RexLiteral) || ((RexLiteral) bitLength).isNull()) {
+      return reject("SHA2 requires a literal bit length of 224, 256, 384, or 512");
+    }
+    int op = hashOpCode("SHA" + ((RexLiteral) bitLength).getValueAs(Integer.class));
+    if (op < 0) {
+      return reject("SHA2 requires a literal bit length of 224, 256, 384, or 512");
+    }
+    if (args.get(0).getType().getSqlTypeName().getFamily() != SqlTypeFamily.CHARACTER
+        && args.get(0).getType().getSqlTypeName() != SqlTypeName.NULL) {
+      return reject("SHA2: only character strings admitted");
+    }
+    add(KIND_CALL, op, 1);
+    return emit(args.get(0));
   }
 
   private static boolean isDayTimeIntervalMultiply(RexCall call) {

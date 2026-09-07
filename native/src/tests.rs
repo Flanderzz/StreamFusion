@@ -68,6 +68,121 @@ fn sample_batch() -> RecordBatch {
     .unwrap()
 }
 
+fn evaluate_string_call(
+    op: i64,
+    args: Vec<datafusion::prelude::Expr>,
+    batch: &RecordBatch,
+) -> ArrayRef {
+    let schema = Arc::new(DFSchema::try_from(batch.schema().as_ref().clone()).unwrap());
+    let context = SimplifyContext::builder()
+        .with_schema(schema.clone())
+        .build();
+    let logical = ExprSimplifier::new(context)
+        .coerce(build_call(op, args), &schema)
+        .unwrap();
+    let result = create_physical_expr(&logical, &schema, &ExecutionProps::new())
+        .unwrap()
+        .evaluate(batch)
+        .unwrap()
+        .into_array(batch.num_rows())
+        .unwrap();
+    assert_eq!(result.data_type(), &DataType::Utf8);
+    result
+}
+
+#[test]
+fn concat_preserves_nulls_in_sliced_arrays_and_scalar_arguments() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("a", DataType::Utf8, true),
+        Field::new("b", DataType::Utf8, true),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from(vec![
+                Some("skip"),
+                Some("a"),
+                None,
+                Some(""),
+                Some("z"),
+            ])),
+            Arc::new(StringArray::from(vec![
+                Some("skip"),
+                Some("b"),
+                Some("c"),
+                Some(""),
+                None,
+            ])),
+        ],
+    )
+    .unwrap()
+    .slice(1, 4);
+    let result = evaluate_string_call(93, vec![logical_col("a"), logical_col("b")], &batch);
+    assert_eq!(
+        result.as_any().downcast_ref::<StringArray>().unwrap(),
+        &StringArray::from(vec![Some("ab"), None, Some(""), None]),
+    );
+    let null = logical_lit(ScalarValue::Utf8(None));
+    let result = evaluate_string_call(93, vec![logical_col("a"), null.clone()], &batch);
+    assert_eq!(result.null_count(), 4);
+    let result = evaluate_string_call(93, vec![logical_lit("a"), null], &batch);
+    assert_eq!(result.null_count(), 4);
+    let result = evaluate_string_call(93, vec![logical_lit("a"), logical_lit("b")], &batch);
+    assert_eq!(
+        result.as_any().downcast_ref::<StringArray>().unwrap(),
+        &StringArray::from(vec!["ab"; 4]),
+    );
+    for op in [93, 94] {
+        let result = evaluate_string_call(
+            op,
+            vec![logical_col("a"), logical_col("b")],
+            &batch.slice(0, 0),
+        );
+        assert!(result.is_empty());
+    }
+}
+
+#[test]
+fn concat_ws_distinguishes_empty_strings_null_values_and_null_separator() {
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("sep", DataType::Utf8, true),
+            Field::new("a", DataType::Utf8, true),
+            Field::new("b", DataType::Utf8, true),
+        ])),
+        vec![
+            Arc::new(StringArray::from(vec![
+                Some(":"),
+                Some(":"),
+                Some(":"),
+                None,
+            ])),
+            Arc::new(StringArray::from(vec![None, Some(""), None, Some("a")])),
+            Arc::new(StringArray::from(vec![
+                Some("b"),
+                Some(""),
+                None,
+                Some("b"),
+            ])),
+        ],
+    )
+    .unwrap();
+    let result = evaluate_string_call(
+        94,
+        vec![logical_col("sep"), logical_col("a"), logical_col("b")],
+        &batch,
+    );
+    assert_eq!(
+        result.as_any().downcast_ref::<StringArray>().unwrap(),
+        &StringArray::from(vec![Some("b"), Some(":"), Some(""), None]),
+    );
+    let result = evaluate_string_call(94, vec![logical_col("sep")], &batch);
+    assert_eq!(
+        result.as_any().downcast_ref::<StringArray>().unwrap(),
+        &StringArray::from(vec![Some(""), Some(""), Some(""), None]),
+    );
+}
+
 fn values(batch: &RecordBatch, column: usize) -> Vec<i64> {
     batch
         .column(column)

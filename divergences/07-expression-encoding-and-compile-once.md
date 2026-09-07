@@ -75,8 +75,8 @@ Some functions diverge from the host only at precision/locale edges, not in valu
 **by default** but are opt-in via `NativeConfig` — `-Dstreamfusion.expression.<NAME>.allowIncompatible`
 (or the blanket `-Dstreamfusion.expression.allowIncompatible`), mirroring DataFusion Comet's
 `spark.comet.expression.<EXPR>.allowIncompatible`. This covers `UPPER`/`LOWER`, `ROUND`, and the
-transcendental math below. A true value divergence (`CONCAT`'s NULL handling) is never opt-in — it
-would just be wrong.
+transcendental math below. A true value divergence must be corrected before admission, as with the
+strict NULL propagation applied to `CONCAT` below.
 
 - **Integer `/` and `%`:** DataFusion and Flink (Java) agree for all finite operands —
   division truncates toward zero and modulo takes the sign of the dividend (verified with
@@ -135,9 +135,14 @@ would just be wrong.
   rounds with a binary float multiply (`(x·10^n).round()/10^n`). They agree on sampled values but
   differ on input-dependent precision edges, so a sample passing does not prove parity. Comet
   likewise falls back float/double `ROUND` ("does not support Spark's BigDecimal rounding").
-- **`CONCAT` is *not* admitted:** Flink's `CONCAT` propagates NULL (`CONCAT(null, x) = null`) but
-  DataFusion's `concat` ignores NULL args — a value divergence, so it falls back (asserted by a test)
-  rather than ship a wrong answer.
+- **`CONCAT` is admitted with strict NULL propagation:** Flink propagates NULL
+  (`CONCAT(null, x) = null`), whereas DataFusion's general-purpose kernel skips NULL arguments.
+  Following the wrapper pattern Comet uses through DataFusion's Spark `concat`, we union the input
+  null bitmaps, delegate concatenation to DataFusion, and apply the mask to its output buffers.
+  Arguments are evaluated once and the mask does not copy the string payload. `CONCAT_WS` already
+  matches Flink's separator and NULL-value semantics and delegates directly. MD5 and SHA-2 likewise
+  reuse DataFusion's kernels, returning lowercase hexadecimal UTF-8 strings to the Java boundary.
+  Exact admission and remaining gaps live in `docs/operators/calc-filter.md`.
 - **`CAST`:** widening numeric (`integer→wider int`, `integer→float/double`, `float→double`) is a plain
   Arrow cast — lossless/IEEE-identical. **Narrowing to an integer type** (a wider int, or a float/double,
   → `TINYINT`/`SMALLINT`/`INTEGER`/`BIGINT`) is *not* a plain Arrow cast — arrow's kernel errors on

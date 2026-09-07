@@ -368,6 +368,37 @@ pub(crate) fn build_call(
     if op == 92 {
         return datafusion::logical_expr::ScalarUDF::new_from_impl(IntervalScale::new()).call(args);
     }
+    if op == 93 {
+        return datafusion::logical_expr::ScalarUDF::new_from_impl(FlinkConcat::new()).call(args);
+    }
+    if op == 94 {
+        let mut args = args;
+        // Flink accepts a separator alone; DataFusion requires at least one value to concatenate.
+        if args.len() == 1 {
+            args.push(logical_lit(ScalarValue::Utf8(None)));
+        }
+        return datafusion::prelude::Expr::Cast(datafusion::logical_expr::Cast::new(
+            Box::new(datafusion::functions::string::concat_ws().call(args)),
+            DataType::Utf8,
+        ));
+    }
+    if (95..=99).contains(&op) {
+        use datafusion::functions::{crypto::expr_fn as crypto, encoding::expr_fn::encode};
+
+        let input = args.into_iter().next().expect("hash input");
+        let hashed = match op {
+            95 => crypto::md5(input),
+            96 => encode(crypto::sha224(input), logical_lit("hex")),
+            97 => encode(crypto::sha256(input), logical_lit("hex")),
+            98 => encode(crypto::sha384(input), logical_lit("hex")),
+            99 => encode(crypto::sha512(input), logical_lit("hex")),
+            _ => unreachable!(),
+        };
+        return datafusion::prelude::Expr::Cast(datafusion::logical_expr::Cast::new(
+            Box::new(hashed),
+            DataType::Utf8,
+        ));
+    }
     if op == 87 {
         // TO_TIMESTAMP_LTZ(millis, 3): the single operand is epoch millis (the Java side admits only
         // the precision-3 form). Casting Int64 -> Timestamp(ms) reads the int as millis-since-epoch
@@ -486,6 +517,66 @@ pub(crate) fn build_call(
             DataType::Utf8,
         )),
         other => panic!("unsupported expression op: {other}"),
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct FlinkConcat {
+    signature: datafusion::logical_expr::Signature,
+}
+
+impl FlinkConcat {
+    fn new() -> Self {
+        Self {
+            signature: datafusion::logical_expr::Signature::variadic(
+                vec![DataType::Utf8],
+                datafusion::logical_expr::Volatility::Immutable,
+            ),
+        }
+    }
+}
+
+impl datafusion::logical_expr::ScalarUDFImpl for FlinkConcat {
+    fn name(&self) -> &str {
+        "flink_concat"
+    }
+
+    fn signature(&self) -> &datafusion::logical_expr::Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _: &[DataType]) -> datafusion::common::Result<DataType> {
+        Ok(DataType::Utf8)
+    }
+
+    fn invoke_with_args(
+        &self,
+        args: datafusion::logical_expr::ScalarFunctionArgs,
+    ) -> datafusion::common::Result<datafusion::logical_expr::ColumnarValue> {
+        use arrow::buffer::NullBuffer;
+        use datafusion::logical_expr::ColumnarValue;
+
+        // Evaluate each child once, then restore Flink's strict NULL propagation over DataFusion's
+        // concatenated buffers. A CASE over cloned children would evaluate expensive UDFs twice.
+        let mut nulls = None;
+        for arg in &args.args {
+            match arg {
+                ColumnarValue::Scalar(value) if value.is_null() => {
+                    return Ok(ColumnarValue::Scalar(ScalarValue::Utf8(None)));
+                }
+                ColumnarValue::Array(array) => {
+                    nulls = NullBuffer::union(nulls.as_ref(), array.nulls());
+                }
+                _ => {}
+            }
+        }
+        let result = datafusion::functions::string::concat().invoke_with_args(args)?;
+        match result {
+            ColumnarValue::Array(array) => Ok(ColumnarValue::Array(make_array(
+                array.to_data().into_builder().nulls(nulls).build()?,
+            ))),
+            scalar => Ok(scalar),
+        }
     }
 }
 

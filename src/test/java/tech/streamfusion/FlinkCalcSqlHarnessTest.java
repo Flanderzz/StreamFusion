@@ -149,7 +149,7 @@ class FlinkCalcSqlHarnessTest {
     // A function the expression encoder does not admit makes the whole Calc fall back, and the
     // fallback reason names the offending function (ticket 29).
     NativeParity.assertFallbackReasonContains(
-        FlinkCalcSqlHarnessTest::environment, "SELECT MD5(s) FROM f", "MD5");
+        FlinkCalcSqlHarnessTest::environment, "SELECT SHA1(s) FROM f", "SHA1");
   }
 
   @Test
@@ -258,11 +258,9 @@ class FlinkCalcSqlHarnessTest {
   }
 
   @Test
-  void concatFallsBack() throws Exception {
-    // Flink's CONCAT propagates NULL (CONCAT(null,x) = null), but DataFusion's `concat` ignores NULL
-    // args — a semantic divergence — so CONCAT is not admitted and the Calc falls back, naming it.
-    NativeParity.assertFallbackReasonContains(
-        FlinkCalcSqlHarnessTest::nullableEnvironment, "SELECT CONCAT(s, '!') FROM g", "CONCAT");
+  void concatMatchesHost() throws Exception {
+    NativeParity.assertParity(
+        FlinkCalcSqlHarnessTest::nullableEnvironment, "SELECT CONCAT(s, '!') FROM g");
   }
 
   @Test
