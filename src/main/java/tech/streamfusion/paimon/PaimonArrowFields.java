@@ -1,0 +1,161 @@
+package tech.streamfusion.paimon;
+
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import javax.annotation.Nullable;
+import org.apache.arrow.vector.types.pojo.Field;
+import org.apache.arrow.vector.types.pojo.FieldType;
+import org.apache.arrow.vector.types.pojo.Schema;
+import org.apache.paimon.table.SpecialFields;
+import org.apache.paimon.types.ArrayType;
+import org.apache.paimon.types.DataField;
+import org.apache.paimon.types.DataType;
+import org.apache.paimon.types.DataTypeRoot;
+import org.apache.paimon.types.LocalZonedTimestampType;
+import org.apache.paimon.types.MapType;
+import org.apache.paimon.types.RowType;
+import org.apache.paimon.types.TimestampType;
+
+/**
+ * Carries the parts of a Paimon schema that Arrow does not model onto the Arrow fields the native
+ * encoder reads: Paimon's Parquet field ids, including the ids it derives for list elements and map
+ * keys and values, and the per-column timestamp unit its precision selects. The encoder's Paimon
+ * schema shape turns these into the same descriptor Paimon's own writer produces.
+ */
+final class PaimonArrowFields {
+
+  static final String FIELD_ID_KEY = "PARQUET:field_id";
+  static final String TIMESTAMP_UNIT_KEY = "streamfusion:timestamp_unit";
+  private static final int MAX_NATIVE_TIMESTAMP_PRECISION = 6;
+
+  private PaimonArrowFields() {}
+
+  static Schema annotate(Schema arrow, RowType paimon) {
+    List<Field> fields = new ArrayList<>();
+    List<DataField> dataFields = paimon.getFields();
+    if (arrow.getFields().size() != dataFields.size()) {
+      throw new IllegalArgumentException(
+          "Arrow batch has " + arrow.getFields().size() + " columns for " + dataFields.size()
+              + " Paimon fields");
+    }
+    for (int i = 0; i < dataFields.size(); i++) {
+      fields.add(annotate(arrow.getFields().get(i), dataFields.get(i)));
+    }
+    return new Schema(fields, arrow.getCustomMetadata());
+  }
+
+  private static Field annotate(Field arrow, DataField paimon) {
+    if (!arrow.getName().equals(paimon.name())) {
+      throw new IllegalArgumentException(
+          "Arrow column " + arrow.getName() + " does not match Paimon field " + paimon.name());
+    }
+    return annotate(arrow, paimon.type(), paimon.id(), 0);
+  }
+
+  private static Field annotate(Field arrow, DataType type, int fieldId, int depth) {
+    Map<String, String> metadata = new HashMap<>();
+    if (arrow.getMetadata() != null) {
+      metadata.putAll(arrow.getMetadata());
+    }
+    metadata.put(FIELD_ID_KEY, Integer.toString(fieldId));
+    Integer precision = timestampPrecision(type);
+    if (precision != null) {
+      metadata.put(TIMESTAMP_UNIT_KEY, precision <= 3 ? "millis" : "micros");
+    }
+    List<Field> children = arrow.getChildren();
+    switch (type.getTypeRoot()) {
+      case ARRAY -> {
+        DataType element = ((ArrayType) type).getElementType();
+        children =
+            List.of(
+                annotate(
+                    children.get(0),
+                    element,
+                    SpecialFields.getArrayElementFieldId(fieldId, depth + 1),
+                    depth + 1));
+      }
+      case MAP -> {
+        MapType map = (MapType) type;
+        Field entries = children.get(0);
+        children =
+            List.of(
+                new Field(
+                    entries.getName(),
+                    entries.getFieldType(),
+                    List.of(
+                        annotate(
+                            entries.getChildren().get(0),
+                            map.getKeyType(),
+                            SpecialFields.getMapKeyFieldId(fieldId, depth + 1),
+                            depth + 1),
+                        annotate(
+                            entries.getChildren().get(1),
+                            map.getValueType(),
+                            SpecialFields.getMapValueFieldId(fieldId, depth + 1),
+                            depth + 1))));
+      }
+      case ROW -> {
+        List<DataField> nested = ((RowType) type).getFields();
+        List<Field> annotated = new ArrayList<>();
+        for (int i = 0; i < nested.size(); i++) {
+          annotated.add(annotate(children.get(i), nested.get(i)));
+        }
+        children = annotated;
+      }
+      default -> {}
+    }
+    FieldType fieldType = arrow.getFieldType();
+    return new Field(
+        arrow.getName(),
+        new FieldType(fieldType.isNullable(), fieldType.getType(), fieldType.getDictionary(), metadata),
+        children);
+  }
+
+  @Nullable
+  private static Integer timestampPrecision(DataType type) {
+    if (type instanceof TimestampType) {
+      return ((TimestampType) type).getPrecision();
+    }
+    if (type instanceof LocalZonedTimestampType) {
+      return ((LocalZonedTimestampType) type).getPrecision();
+    }
+    return null;
+  }
+
+  /** Why the native encoder cannot write this row type, or null when every column is supported. */
+  @Nullable
+  static String unsupportedTypeReason(RowType type) {
+    for (DataField field : type.getFields()) {
+      String reason = unsupportedTypeReason(field.type());
+      if (reason != null) {
+        return "Paimon column " + field.name() + ": " + reason;
+      }
+    }
+    return null;
+  }
+
+  @Nullable
+  private static String unsupportedTypeReason(DataType type) {
+    Integer precision = timestampPrecision(type);
+    if (precision != null) {
+      return precision > MAX_NATIVE_TIMESTAMP_PRECISION
+          ? "timestamp precision " + precision + " is written as INT96, which the native writer does not produce"
+          : null;
+    }
+    DataTypeRoot root = type.getTypeRoot();
+    return switch (root) {
+      case BOOLEAN, TINYINT, SMALLINT, INTEGER, BIGINT, FLOAT, DOUBLE, DECIMAL, CHAR, VARCHAR,
+          BINARY, VARBINARY, DATE -> null;
+      case ARRAY -> unsupportedTypeReason(((ArrayType) type).getElementType());
+      case MAP -> {
+        MapType map = (MapType) type;
+        String key = unsupportedTypeReason(map.getKeyType());
+        yield key != null ? key : unsupportedTypeReason(map.getValueType());
+      }
+      case ROW -> unsupportedTypeReason((RowType) type);
+      default -> "type " + type + " is not verified by the native writer";
+    };
+  }
+}

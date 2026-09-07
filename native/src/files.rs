@@ -545,8 +545,14 @@ fn host_parquet_type(field: &Field, shape: SchemaShape) -> parquet::schema::type
                 .with_name("key")
                 .with_nullable(false);
             let value = fields[1].as_ref().clone().with_name("value");
+            // parquet-mr's ConversionPatterns.mapType, which Paimon's schema converter uses, still
+            // stamps the legacy MAP_KEY_VALUE converted type on the repeated group.
             let repeated = ParquetType::group_type_builder("key_value")
                 .with_repetition(Repetition::REPEATED)
+                .with_converted_type(match shape {
+                    SchemaShape::Paimon => parquet::basic::ConvertedType::MAP_KEY_VALUE,
+                    SchemaShape::Flink => parquet::basic::ConvertedType::NONE,
+                })
                 .with_fields(vec![
                     Arc::new(host_parquet_type(&key, shape)),
                     Arc::new(host_parquet_type(&value, shape)),
@@ -1531,6 +1537,32 @@ mod parquet_encoder_tests {
         assert_eq!(arr.get_basic_info().id(), 5);
         assert_eq!(leaf(5).name(), "element");
         assert_eq!(leaf(5).get_basic_info().id(), 536_871_936);
+    }
+
+    #[test]
+    fn paimon_map_groups_carry_the_legacy_map_key_value_annotation() {
+        let entries = Arc::new(Field::new(
+            "entries",
+            DataType::Struct(
+                vec![
+                    Arc::new(Field::new("key", DataType::Utf8, false)),
+                    Arc::new(Field::new("value", DataType::Int64, true)),
+                ]
+                .into(),
+            ),
+            false,
+        ));
+        let field = Field::new("attrs", DataType::Map(entries, false), true);
+        let repeated_of = |shape: SchemaShape| {
+            host_parquet_type(&field, shape).get_fields()[0]
+                .get_basic_info()
+                .converted_type()
+        };
+        assert_eq!(
+            repeated_of(SchemaShape::Paimon),
+            ConvertedType::MAP_KEY_VALUE
+        );
+        assert_eq!(repeated_of(SchemaShape::Flink), ConvertedType::NONE);
     }
 
     #[test]

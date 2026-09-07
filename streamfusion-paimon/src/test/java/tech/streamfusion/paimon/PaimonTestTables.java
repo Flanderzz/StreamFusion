@@ -1,0 +1,261 @@
+package tech.streamfusion.paimon;
+
+import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
+import org.apache.flink.table.data.DecimalData;
+import org.apache.flink.table.data.GenericArrayData;
+import org.apache.flink.table.data.GenericMapData;
+import org.apache.flink.table.data.GenericRowData;
+import org.apache.flink.table.data.RowData;
+import org.apache.flink.table.data.StringData;
+import org.apache.flink.table.data.TimestampData;
+import org.apache.flink.table.types.logical.ArrayType;
+import org.apache.flink.table.types.logical.BigIntType;
+import org.apache.flink.table.types.logical.BooleanType;
+import org.apache.flink.table.types.logical.DateType;
+import org.apache.flink.table.types.logical.DecimalType;
+import org.apache.flink.table.types.logical.DoubleType;
+import org.apache.flink.table.types.logical.IntType;
+import org.apache.flink.table.types.logical.LogicalType;
+import org.apache.flink.table.types.logical.MapType;
+import org.apache.flink.table.types.logical.RowType;
+import org.apache.flink.table.types.logical.TimestampType;
+import org.apache.flink.table.types.logical.VarBinaryType;
+import org.apache.flink.table.types.logical.VarCharType;
+import org.apache.paimon.data.BinaryString;
+import org.apache.paimon.data.Decimal;
+import org.apache.paimon.data.GenericArray;
+import org.apache.paimon.data.GenericMap;
+import org.apache.paimon.data.GenericRow;
+import org.apache.paimon.data.InternalArray;
+import org.apache.paimon.data.InternalMap;
+import org.apache.paimon.data.InternalRow;
+import org.apache.paimon.data.Timestamp;
+import org.apache.paimon.fs.Path;
+import org.apache.paimon.fs.local.LocalFileIO;
+import org.apache.paimon.schema.Schema;
+import org.apache.paimon.schema.SchemaManager;
+import org.apache.paimon.table.FileStoreTable;
+import org.apache.paimon.table.FileStoreTableFactory;
+import org.apache.paimon.types.DataType;
+import org.apache.paimon.types.DataTypes;
+import org.apache.paimon.utils.InternalRowUtils;
+
+/**
+ * One fixture schema in its Paimon and Flink forms, and rows built from the same values in both
+ * forms, so a natively written table can be compared with a twin Paimon wrote itself.
+ */
+final class PaimonTestTables {
+
+  private PaimonTestTables() {}
+
+  static final RowType FLINK_TYPE =
+      RowType.of(
+          new LogicalType[] {
+            new BigIntType(false),
+            new VarCharType(VarCharType.MAX_LENGTH),
+            new DecimalType(10, 2),
+            new DecimalType(20, 4),
+            new TimestampType(3),
+            new TimestampType(6),
+            new DateType(),
+            new ArrayType(new IntType()),
+            new MapType(new VarCharType(VarCharType.MAX_LENGTH), new BigIntType()),
+            RowType.of(
+                new LogicalType[] {new IntType(), new VarCharType(VarCharType.MAX_LENGTH)},
+                new String[] {"a", "b"}),
+            new BooleanType(),
+            new DoubleType(),
+            new VarBinaryType(VarBinaryType.MAX_LENGTH),
+            new VarCharType(VarCharType.MAX_LENGTH)
+          },
+          new String[] {
+            "id", "name", "price", "big", "ts", "ts6", "dt", "tags", "attrs", "nested", "flag",
+            "dbl", "bin", "pt"
+          });
+
+  static Schema paimonSchema(Map<String, String> options) {
+    return Schema.newBuilder()
+        .column("id", DataTypes.BIGINT().notNull())
+        .column("name", DataTypes.STRING())
+        .column("price", DataTypes.DECIMAL(10, 2))
+        .column("big", DataTypes.DECIMAL(20, 4))
+        .column("ts", DataTypes.TIMESTAMP(3))
+        .column("ts6", DataTypes.TIMESTAMP(6))
+        .column("dt", DataTypes.DATE())
+        .column("tags", DataTypes.ARRAY(DataTypes.INT()))
+        .column("attrs", DataTypes.MAP(DataTypes.STRING(), DataTypes.BIGINT()))
+        .column("nested", DataTypes.ROW(DataTypes.FIELD(100, "a", DataTypes.INT()), DataTypes.FIELD(101, "b", DataTypes.STRING())))
+        .column("flag", DataTypes.BOOLEAN())
+        .column("dbl", DataTypes.DOUBLE())
+        .column("bin", DataTypes.BYTES())
+        .column("pt", DataTypes.STRING())
+        .partitionKeys("pt")
+        .options(options)
+        .build();
+  }
+
+  static FileStoreTable createTable(java.nio.file.Path dir, Map<String, String> options)
+      throws Exception {
+    Path path = new Path(dir.toUri());
+    new SchemaManager(LocalFileIO.create(), path).createTable(paimonSchema(options));
+    return FileStoreTableFactory.create(LocalFileIO.create(), path);
+  }
+
+  /** Every {@code n}th row nulls out a different column family, including the partition value. */
+  static List<Object[]> values(int n) {
+    List<Object[]> rows = new ArrayList<>();
+    String[] partitions = {"2026-01-01", "2026-01-02", null, "long-partition-value-beyond-sixteen"};
+    for (int i = 0; i < n; i++) {
+      boolean nulls = i % 7 == 6;
+      Map<String, Long> attrs = new LinkedHashMap<>();
+      attrs.put("k" + (i % 3), (long) i);
+      attrs.put("z", null);
+      rows.add(
+          new Object[] {
+            (long) i,
+            nulls ? null : "name-" + i + (i % 5 == 0 ? "-with-a-long-suffix-over-sixteen-chars" : ""),
+            nulls ? null : BigDecimal.valueOf(i * 1_00L + 7, 2),
+            nulls ? null : new BigDecimal("12345678901234.5678").add(BigDecimal.valueOf(i)),
+            nulls ? null : 1_700_000_000_000L + i * 1_000L,
+            nulls ? null : new long[] {1_700_000_000_000L + i, (i % 1000) * 1_000L},
+            nulls ? null : 19_000 + i,
+            nulls ? null : new Integer[] {i, null, i * 2},
+            nulls ? null : attrs,
+            nulls ? null : new Object[] {i % 2 == 0 ? null : i, "b" + i},
+            nulls ? null : i % 2 == 0,
+            nulls ? null : i * 0.5,
+            nulls ? null : ("bin" + i).getBytes(StandardCharsets.UTF_8),
+            partitions[i % partitions.length]
+          });
+    }
+    return rows;
+  }
+
+  static RowData flinkRow(Object[] v) {
+    GenericRowData row = new GenericRowData(v.length);
+    row.setField(0, v[0]);
+    row.setField(1, v[1] == null ? null : StringData.fromString((String) v[1]));
+    row.setField(2, v[2] == null ? null : DecimalData.fromBigDecimal((BigDecimal) v[2], 10, 2));
+    row.setField(3, v[3] == null ? null : DecimalData.fromBigDecimal((BigDecimal) v[3], 20, 4));
+    row.setField(4, v[4] == null ? null : TimestampData.fromEpochMillis((Long) v[4]));
+    long[] micros = (long[]) v[5];
+    row.setField(5, micros == null ? null : TimestampData.fromEpochMillis(micros[0], (int) micros[1]));
+    row.setField(6, v[6]);
+    row.setField(7, v[7] == null ? null : new GenericArrayData((Integer[]) v[7]));
+    if (v[8] != null) {
+      Map<StringData, Long> attrs = new LinkedHashMap<>();
+      ((Map<?, ?>) v[8]).forEach((k, value) -> attrs.put(StringData.fromString((String) k), (Long) value));
+      row.setField(8, new GenericMapData(attrs));
+    }
+    if (v[9] != null) {
+      Object[] nested = (Object[]) v[9];
+      GenericRowData inner = new GenericRowData(2);
+      inner.setField(0, nested[0]);
+      inner.setField(1, StringData.fromString((String) nested[1]));
+      row.setField(9, inner);
+    }
+    row.setField(10, v[10]);
+    row.setField(11, v[11]);
+    row.setField(12, v[12]);
+    row.setField(13, v[13] == null ? null : StringData.fromString((String) v[13]));
+    return row;
+  }
+
+  static InternalRow paimonRow(Object[] v) {
+    GenericRow row = new GenericRow(v.length);
+    row.setField(0, v[0]);
+    row.setField(1, v[1] == null ? null : BinaryString.fromString((String) v[1]));
+    row.setField(2, v[2] == null ? null : Decimal.fromBigDecimal((BigDecimal) v[2], 10, 2));
+    row.setField(3, v[3] == null ? null : Decimal.fromBigDecimal((BigDecimal) v[3], 20, 4));
+    row.setField(4, v[4] == null ? null : Timestamp.fromEpochMillis((Long) v[4]));
+    long[] micros = (long[]) v[5];
+    row.setField(5, micros == null ? null : Timestamp.fromEpochMillis(micros[0], (int) micros[1]));
+    row.setField(6, v[6]);
+    row.setField(7, v[7] == null ? null : new GenericArray((Integer[]) v[7]));
+    if (v[8] != null) {
+      Map<BinaryString, Long> attrs = new LinkedHashMap<>();
+      ((Map<?, ?>) v[8]).forEach((k, value) -> attrs.put(BinaryString.fromString((String) k), (Long) value));
+      row.setField(8, new GenericMap(attrs));
+    }
+    if (v[9] != null) {
+      Object[] nested = (Object[]) v[9];
+      GenericRow inner = new GenericRow(2);
+      inner.setField(0, nested[0]);
+      inner.setField(1, BinaryString.fromString((String) nested[1]));
+      row.setField(9, inner);
+    }
+    row.setField(10, v[10]);
+    row.setField(11, v[11]);
+    row.setField(12, v[12]);
+    row.setField(13, v[13] == null ? null : BinaryString.fromString((String) v[13]));
+    return row;
+  }
+
+  /**
+   * parquet-rs follows the Parquet specification's signed-zero rule for floating-point statistics
+   * (a minimum of +0.0 is recorded as -0.0) while parquet-mr records the value as seen; the bounds
+   * are numerically equal, so comparisons treat the two zeros alike.
+   */
+  private static double withoutSignedZero(double value) {
+    return value + 0.0;
+  }
+
+  /** A type-driven rendering of a Paimon row so rows from different readers compare by value. */
+  static String render(InternalRow row, org.apache.paimon.types.RowType type) {
+    List<String> fields = new ArrayList<>();
+    for (int i = 0; i < type.getFieldCount(); i++) {
+      fields.add(render(InternalRowUtils.get(row, i, type.getTypeAt(i)), type.getTypeAt(i)));
+    }
+    return String.join("|", fields);
+  }
+
+  private static String render(Object value, DataType type) {
+    if (value == null) {
+      return "null";
+    }
+    switch (type.getTypeRoot()) {
+      case ARRAY -> {
+        InternalArray array = (InternalArray) value;
+        DataType element = ((org.apache.paimon.types.ArrayType) type).getElementType();
+        List<String> items = new ArrayList<>();
+        for (int i = 0; i < array.size(); i++) {
+          items.add(render(InternalRowUtils.get(array, i, element), element));
+        }
+        return "[" + String.join(",", items) + "]";
+      }
+      case MAP -> {
+        InternalMap map = (InternalMap) value;
+        org.apache.paimon.types.MapType mapType = (org.apache.paimon.types.MapType) type;
+        List<String> entries = new ArrayList<>();
+        for (int i = 0; i < map.size(); i++) {
+          entries.add(
+              render(InternalRowUtils.get(map.keyArray(), i, mapType.getKeyType()), mapType.getKeyType())
+                  + "="
+                  + render(
+                      InternalRowUtils.get(map.valueArray(), i, mapType.getValueType()),
+                      mapType.getValueType()));
+        }
+        return "{" + entries.stream().sorted().collect(Collectors.joining(",")) + "}";
+      }
+      case ROW -> {
+        return "(" + render((InternalRow) value, (org.apache.paimon.types.RowType) type) + ")";
+      }
+      case BINARY, VARBINARY -> {
+        return Arrays.toString((byte[]) value);
+      }
+      case FLOAT, DOUBLE -> {
+        return Double.toString(withoutSignedZero(((Number) value).doubleValue()));
+      }
+      default -> {
+        return value.toString();
+      }
+    }
+  }
+}

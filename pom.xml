@@ -67,6 +67,7 @@
         <!-- Matches the protobuf runtime Flink's protobuf format generates code against. -->
         <protobuf.version>4.32.1</protobuf.version>
         <delta.version>4.4.0</delta.version>
+        <paimon.version>2.0.0</paimon.version>
         <!-- Native build: debug by default for a fast correctness loop. The `bench` profile flips
              both of these to a release build, which benchmarks must use (debug Rust is far slower). -->
         <native.profile>debug</native.profile>
@@ -523,6 +524,9 @@
                                 <sourceFileExclude>tech/streamfusion/planner/DeltaSinkMatcher.java</sourceFileExclude>
                                 <sourceFileExclude>tech/streamfusion/planner/NativeDeltaSinkExecNode.java</sourceFileExclude>
                                 <sourceFileExclude>tech/streamfusion/planner/StreamPhysicalNativeDeltaSink.java</sourceFileExclude>
+                                <sourceFileExclude>tech/streamfusion/paimon/**</sourceFileExclude>
+                                <sourceFileExclude>tech/streamfusion/planner/Paimon*.java</sourceFileExclude>
+                                <sourceFileExclude>tech/streamfusion/planner/NativePaimon*.java</sourceFileExclude>
                             </sourceFileExcludes>
                             <additionalDependencies>
                                 <additionalDependency>
@@ -707,6 +711,14 @@
             <id>delta</id>
             <modules>
                 <module>streamfusion-delta</module>
+            </modules>
+        </profile>
+        <!-- Paimon is optional for the same reason: only deployments that write Paimon tables install
+             its connector and the StreamFusion format plug-in. Published artifacts only. -->
+        <profile>
+            <id>paimon</id>
+            <modules>
+                <module>streamfusion-paimon</module>
             </modules>
         </profile>
     </profiles>

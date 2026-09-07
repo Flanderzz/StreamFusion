@@ -54,6 +54,10 @@
                         <exclude>tech/streamfusion/planner/DeltaSinkMatcher.java</exclude>
                         <exclude>tech/streamfusion/planner/NativeDeltaSinkExecNode.java</exclude>
                         <exclude>tech/streamfusion/planner/StreamPhysicalNativeDeltaSink.java</exclude>
+                        <!-- Paimon likewise ships as its own module against the Paimon connector. -->
+                        <exclude>tech/streamfusion/paimon/**</exclude>
+                        <exclude>tech/streamfusion/planner/Paimon*.java</exclude>
+                        <exclude>tech/streamfusion/planner/NativePaimon*.java</exclude>
                     </excludes>
                 </configuration>
             </plugin>
