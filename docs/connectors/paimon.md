@@ -36,7 +36,9 @@ Supported:
   paths) after each checkpoint's commit preparation, exactly when the stock operator does.
 
 Files written natively are row-, statistics-, and footer-schema-identical to the stock writer's
-(verified against twin tables in `PaimonSinkParityTest` and `NativePaimonParquetWriterTest`). The
+(verified against twin tables in `PaimonSinkParityTest` and `NativePaimonParquetWriterTest`), and
+`bin/flink-suite.sh paimon` runs Paimon's own unchanged append-table SQL integration tests with the
+native sink installed (see [the upstream suite](../upstream-flink-suite.md)). The
 one known statistics difference: a `DOUBLE`/`FLOAT` column whose minimum is a negative zero is
 recorded as `-0.0` by parquet-rs and `0.0` by parquet-mr.
 

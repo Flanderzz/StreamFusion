@@ -8,11 +8,17 @@ import java.util.WeakHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import net.bytebuddy.agent.builder.AgentBuilder;
 import net.bytebuddy.asm.Advice;
+import net.bytebuddy.implementation.bytecode.assign.Assigner;
 
 import static net.bytebuddy.matcher.ElementMatchers.named;
 import static net.bytebuddy.matcher.ElementMatchers.takesArguments;
 
-/** Installs StreamFusion when an untouched upstream Flink test creates a streaming planner. */
+/**
+ * Installs StreamFusion when an untouched upstream Flink test creates a streaming planner, and loads
+ * the native library at that moment: a TaskManager loads it once at startup, whereas a fresh test
+ * fork would otherwise pay the load inside the first native task and delay that job's first
+ * checkpoint, which timing-sensitive upstream tests would misread as a behavioural difference.
+ */
 public final class StreamFusionSuiteAgent {
 
   private static final String PLANNER_FACTORY =
@@ -27,11 +33,19 @@ public final class StreamFusionSuiteAgent {
       "tech.streamfusion.operator.AbstractNativeStatefulOperator";
   private static final String NATIVE_PARQUET_WRITER_FACTORY =
       "tech.streamfusion.operator.NativeParquetBulkWriterFactory";
+  private static final String PAIMON_FORMAT_FACTORY_UTIL =
+      "org.apache.paimon.factories.FormatFactoryUtil";
+  private static final String NATIVE_PAIMON_FORMAT_FACTORY =
+      "tech.streamfusion.paimon.NativePaimonParquetFormatFactory";
+  private static final String NATIVE_PAIMON_PARQUET_WRITER =
+      "tech.streamfusion.paimon.NativePaimonParquetWriter";
   private static final AtomicBoolean ACTIVATION_REPORTED = new AtomicBoolean();
   private static final AtomicBoolean HEAP_STATE_REPORTED = new AtomicBoolean();
   private static final AtomicBoolean NATIVE_MEMORY_STATE_REPORTED = new AtomicBoolean();
   private static final AtomicBoolean ROCKSDB_STATE_REPORTED = new AtomicBoolean();
   private static final AtomicBoolean NATIVE_PARQUET_WRITER_REPORTED = new AtomicBoolean();
+  private static final AtomicBoolean NATIVE_PAIMON_FORMAT_REPORTED = new AtomicBoolean();
+  private static final AtomicBoolean NATIVE_PAIMON_BUNDLE_REPORTED = new AtomicBoolean();
   private static final Set<Object> INSTALLED_CONFIGS =
       Collections.synchronizedSet(Collections.newSetFromMap(new WeakHashMap<>()));
   private static final ThreadLocal<Boolean> UNMODIFIED_PLAN_SETUP = new ThreadLocal<>();
@@ -79,6 +93,18 @@ public final class StreamFusionSuiteAgent {
                 builder.visit(
                     Advice.to(ReportNativeParquetWriter.class)
                         .on(named("create").and(takesArguments(1)))))
+        .type(named(PAIMON_FORMAT_FACTORY_UTIL))
+        .transform(
+            (builder, type, classLoader, module, protectionDomain) ->
+                builder.visit(
+                    Advice.to(PreferNativePaimonFormat.class)
+                        .on(named("discoverFactory").and(takesArguments(2)))))
+        .type(named(NATIVE_PAIMON_PARQUET_WRITER))
+        .transform(
+            (builder, type, classLoader, module, protectionDomain) ->
+                builder.visit(
+                    Advice.to(ReportNativePaimonBundle.class)
+                        .on(named("writeNative").and(takesArguments(1)))))
         .installOn(instrumentation);
   }
 
@@ -100,6 +126,36 @@ public final class StreamFusionSuiteAgent {
 
   public static boolean reportNativeParquetWriter() {
     return NATIVE_PARQUET_WRITER_REPORTED.compareAndSet(false, true);
+  }
+
+  public static boolean reportNativePaimonBundle() {
+    return NATIVE_PAIMON_BUNDLE_REPORTED.compareAndSet(false, true);
+  }
+
+  /**
+   * The test-JVM stand-in for deploying {@code 01-streamfusion-paimon.jar} ahead of Paimon: Surefire
+   * appends StreamFusion's classpath in no fixed order, so Paimon's first-factory-wins discovery is
+   * resolved here to the native {@code parquet} factory whenever the module is present.
+   */
+  public static Object nativePaimonFormatFactory(ClassLoader classLoader, String identifier) {
+    if (!"parquet".equals(identifier)) {
+      return null;
+    }
+    try {
+      Object factory =
+          Class.forName(NATIVE_PAIMON_FORMAT_FACTORY, true, classLoader)
+              .getConstructor()
+              .newInstance();
+      if (NATIVE_PAIMON_FORMAT_REPORTED.compareAndSet(false, true)) {
+        System.err.println(
+            "StreamFusion upstream Paimon suite resolved parquet to the native format factory");
+      }
+      return factory;
+    } catch (ClassNotFoundException e) {
+      return null;
+    } catch (ReflectiveOperationException e) {
+      throw new IllegalStateException("native Paimon format factory instantiation failed", e);
+    }
   }
 
   public static boolean markConfigForInstallation(Object tableConfig) {
@@ -155,6 +211,7 @@ public final class StreamFusionSuiteAgent {
           nativePlanner
               .getMethod("install", Class.forName("org.apache.flink.table.api.TableConfig"))
               .invoke(null, tableConfig);
+          Class.forName("tech.streamfusion.Native", true, classLoader);
         } catch (ClassNotFoundException
             | NoSuchMethodException
             | IllegalAccessException
@@ -274,6 +331,36 @@ public final class StreamFusionSuiteAgent {
       if (StreamFusionSuiteAgent.reportNativeParquetWriter()) {
         System.err.println(
             "StreamFusion upstream Parquet suite created native Parquet sink writer");
+      }
+    }
+  }
+
+  /** Gives the native Paimon Parquet factory the classpath precedence a deployment gives its jar. */
+  public static final class PreferNativePaimonFormat {
+
+    private PreferNativePaimonFormat() {}
+
+    @Advice.OnMethodExit
+    static void exit(
+        @Advice.Argument(0) ClassLoader classLoader,
+        @Advice.Argument(1) String identifier,
+        @Advice.Return(readOnly = false, typing = Assigner.Typing.DYNAMIC) Object factory) {
+      Object preferred = StreamFusionSuiteAgent.nativePaimonFormatFactory(classLoader, identifier);
+      if (preferred != null) {
+        factory = preferred;
+      }
+    }
+  }
+
+  /** Proves that an untouched upstream Paimon test wrote a data file from a native Arrow bundle. */
+  public static final class ReportNativePaimonBundle {
+
+    private ReportNativePaimonBundle() {}
+
+    @Advice.OnMethodEnter
+    static void enter() {
+      if (StreamFusionSuiteAgent.reportNativePaimonBundle()) {
+        System.err.println("StreamFusion upstream Paimon suite wrote a native Paimon bundle");
       }
     }
   }
