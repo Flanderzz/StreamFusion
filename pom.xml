@@ -332,8 +332,76 @@
                 <version>1.7.1</version>
             </extension>
         </extensions>
+        <!-- Releases attach javadoc for every module, and the shared source root lets javadoc see
+             the optional connector sources beside each module's own, so a broken reference or an
+             unresolvable connector class only surfaced at release time. Generating (not packaging)
+             the javadoc in the ordinary test build makes `mvn test` fail the same way the release
+             would; skip it for a quick loop with -Dmaven.javadoc.skip=true. -->
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-javadoc-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>check-javadoc</id>
+                        <phase>process-test-classes</phase>
+                        <goals><goal>javadoc</goal></goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
         <pluginManagement>
         <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-javadoc-plugin</artifactId>
+                <version>3.11.2</version>
+                <configuration>
+                    <doclint>none</doclint>
+                    <quiet>true</quiet>
+                    <!-- Modules document only the sources they compile, but javadoc still
+                         parses the opt-in Delta and Paimon sources it finds next to them on the
+                         shared sourcepath, so their connector dependencies must be resolvable. -->
+                    <sourceFileExcludes>
+                        <sourceFileExclude>tech/streamfusion/delta/**</sourceFileExclude>
+                        <sourceFileExclude>tech/streamfusion/planner/DeltaPlannerExtension.java</sourceFileExclude>
+                        <sourceFileExclude>tech/streamfusion/planner/DeltaSinkMatcher.java</sourceFileExclude>
+                        <sourceFileExclude>tech/streamfusion/planner/NativeDeltaSinkExecNode.java</sourceFileExclude>
+                        <sourceFileExclude>tech/streamfusion/planner/StreamPhysicalNativeDeltaSink.java</sourceFileExclude>
+                        <sourceFileExclude>tech/streamfusion/paimon/**</sourceFileExclude>
+                        <sourceFileExclude>tech/streamfusion/planner/Paimon*.java</sourceFileExclude>
+                        <sourceFileExclude>tech/streamfusion/planner/NativePaimon*.java</sourceFileExclude>
+                        <sourceFileExclude>tech/streamfusion/planner/StreamPhysicalNativePaimon*.java</sourceFileExclude>
+                    </sourceFileExcludes>
+                    <additionalDependencies>
+                        <additionalDependency>
+                            <groupId>io.delta</groupId>
+                            <artifactId>delta-flink_2.2</artifactId>
+                            <version>${delta.version}</version>
+                        </additionalDependency>
+                        <additionalDependency>
+                            <groupId>io.delta</groupId>
+                            <artifactId>delta-kernel-api</artifactId>
+                            <version>${delta.version}</version>
+                        </additionalDependency>
+                        <additionalDependency>
+                            <groupId>org.apache.parquet</groupId>
+                            <artifactId>parquet-hadoop</artifactId>
+                            <version>1.16.0</version>
+                        </additionalDependency>
+                        <additionalDependency>
+                            <groupId>org.apache.hadoop</groupId>
+                            <artifactId>hadoop-common</artifactId>
+                            <version>3.3.4</version>
+                        </additionalDependency>
+                        <additionalDependency>
+                            <groupId>org.apache.paimon</groupId>
+                            <artifactId>paimon-flink-2.2</artifactId>
+                            <version>${paimon.version}</version>
+                        </additionalDependency>
+                    </additionalDependencies>
+                </configuration>
+            </plugin>
             <!-- Generates the protobuf message class a `protobuf`-format table names (and that the host
                  baseline parses with), from a test .proto, using the same protoc Flink's format uses. -->
             <plugin>
@@ -511,47 +579,6 @@
                     <plugin>
                         <groupId>org.apache.maven.plugins</groupId>
                         <artifactId>maven-javadoc-plugin</artifactId>
-                        <version>3.11.2</version>
-                        <configuration>
-                            <doclint>none</doclint>
-                            <quiet>true</quiet>
-                            <!-- Modules document only the sources they compile, but javadoc still
-                                 parses the opt-in Delta sources it finds next to them on the shared
-                                 sourcepath, so their connector dependencies must be resolvable. -->
-                            <sourceFileExcludes>
-                                <sourceFileExclude>tech/streamfusion/delta/**</sourceFileExclude>
-                                <sourceFileExclude>tech/streamfusion/planner/DeltaPlannerExtension.java</sourceFileExclude>
-                                <sourceFileExclude>tech/streamfusion/planner/DeltaSinkMatcher.java</sourceFileExclude>
-                                <sourceFileExclude>tech/streamfusion/planner/NativeDeltaSinkExecNode.java</sourceFileExclude>
-                                <sourceFileExclude>tech/streamfusion/planner/StreamPhysicalNativeDeltaSink.java</sourceFileExclude>
-                                <sourceFileExclude>tech/streamfusion/paimon/**</sourceFileExclude>
-                                <sourceFileExclude>tech/streamfusion/planner/Paimon*.java</sourceFileExclude>
-                                <sourceFileExclude>tech/streamfusion/planner/NativePaimon*.java</sourceFileExclude>
-                                <sourceFileExclude>tech/streamfusion/planner/StreamPhysicalNativePaimon*.java</sourceFileExclude>
-                            </sourceFileExcludes>
-                            <additionalDependencies>
-                                <additionalDependency>
-                                    <groupId>io.delta</groupId>
-                                    <artifactId>delta-flink_2.2</artifactId>
-                                    <version>${delta.version}</version>
-                                </additionalDependency>
-                                <additionalDependency>
-                                    <groupId>io.delta</groupId>
-                                    <artifactId>delta-kernel-api</artifactId>
-                                    <version>${delta.version}</version>
-                                </additionalDependency>
-                                <additionalDependency>
-                                    <groupId>org.apache.parquet</groupId>
-                                    <artifactId>parquet-hadoop</artifactId>
-                                    <version>1.16.0</version>
-                                </additionalDependency>
-                                <additionalDependency>
-                                    <groupId>org.apache.hadoop</groupId>
-                                    <artifactId>hadoop-common</artifactId>
-                                    <version>3.3.4</version>
-                                </additionalDependency>
-                            </additionalDependencies>
-                        </configuration>
                         <executions>
                             <execution>
                                 <id>attach-javadocs</id>

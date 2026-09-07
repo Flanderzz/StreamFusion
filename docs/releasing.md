@@ -40,7 +40,11 @@ bin/check-artifacts.sh --host-only
 ```
 
 `bin/build-release.sh` packages with the unsigned `release` profile, so the source and javadoc
-attachments the publish workflow builds are verified locally before any tag exists.
+attachments the publish workflow builds are verified locally before any tag exists. Javadoc itself is
+also generated during every `mvn test`, because the shared source root lets javadoc see the optional
+connector sources (Delta, Paimon) beside each module's own: a reference javadoc cannot resolve fails
+the ordinary test build rather than the release, and `-Dmaven.javadoc.skip=true` skips it for a
+quick loop.
 
 ## Publish
 
