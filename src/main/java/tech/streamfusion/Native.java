@@ -538,6 +538,41 @@ public final class Native {
   public static native void closeSplit(long handle);
 
   /**
+   * Routes a batch the JVM exported to Paimon write destinations: one order-preserving sub-batch
+   * per distinct (partition, bucket) pair, where the partition is the BinaryRow of the partition
+   * columns and the bucket is Paimon's default bucket function {@code abs(hash % numBuckets)} over
+   * the bucket-key columns. Returns a handle to pull the sub-batches with {@link #nextBucketRoute};
+   * released with {@link #closeBucketRoute}.
+   *
+   * @param partitionTimestampPrecisions pre-order timestamp precision sidecar for the partition
+   *     columns ({@code -1} for non-timestamp type nodes), as for {@link #splitByKey}
+   * @param bucketTimestampPrecisions the same sidecar for the bucket-key columns
+   * @param numBuckets the fixed bucket count, or a non-positive value for a bucket-unaware table
+   *     whose rows all land in bucket 0
+   */
+  public static native long routeByBucket(
+      long inArrayAddress,
+      long inSchemaAddress,
+      int[] partitionColumns,
+      int[] partitionTimestampPrecisions,
+      int[] bucketColumns,
+      int[] bucketTimestampPrecisions,
+      int numBuckets);
+
+  /**
+   * Exports the next routed sub-batch into the consumer-allocated C structs and returns its bucket,
+   * or -1 once the route is exhausted.
+   */
+  public static native int nextBucketRoute(
+      long handle, long outArrayAddress, long outSchemaAddress);
+
+  /** The partition BinaryRow bytes of the sub-batch returned by the latest {@link #nextBucketRoute}. */
+  public static native byte[] currentBucketRoutePartition(long handle);
+
+  /** Releases a route handle. */
+  public static native void closeBucketRoute(long handle);
+
+  /**
    * Concatenates several exported batches — row subsets of one exchange edge, so they share a
    * schema — into a single batch exported back into the consumer-allocated C structs. The merge
    * step of the post-exchange coalescer, undoing the fragmentation {@link #splitByKey} introduced.

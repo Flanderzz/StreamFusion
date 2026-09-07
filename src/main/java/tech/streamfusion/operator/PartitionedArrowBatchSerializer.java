@@ -1,16 +1,6 @@
 package tech.streamfusion.operator;
 
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.List;
-import org.apache.arrow.memory.BufferAllocator;
-import org.apache.arrow.vector.FieldVector;
-import org.apache.arrow.vector.VectorSchemaRoot;
-import org.apache.arrow.vector.ipc.ArrowStreamReader;
-import org.apache.arrow.vector.ipc.ArrowStreamWriter;
-import org.apache.arrow.vector.util.TransferPair;
 import org.apache.flink.api.common.typeutils.SimpleTypeSerializerSnapshot;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.common.typeutils.TypeSerializerSnapshot;
@@ -23,10 +13,6 @@ import org.apache.flink.core.memory.DataOutputView;
  * id carried alongside the framed batch bytes.
  */
 public final class PartitionedArrowBatchSerializer extends TypeSerializer<PartitionedArrowBatch> {
-
-  private BufferAllocator allocator() {
-    return NativeAllocator.SHARED;
-  }
 
   @Override
   public boolean isImmutableType() {
@@ -62,41 +48,13 @@ public final class PartitionedArrowBatchSerializer extends TypeSerializer<Partit
   @Override
   public void serialize(PartitionedArrowBatch batch, DataOutputView target) throws IOException {
     target.writeUTF(batch.bucketId());
-    ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-    try (ArrowStreamWriter writer = new ArrowStreamWriter(batch.root(), null, bytes)) {
-      writer.start();
-      writer.writeBatch();
-      writer.end();
-    } finally {
-      // Serializing ships the batch onto the network edge — its terminal use on the write side.
-      batch.root().close();
-    }
-    byte[] encoded = bytes.toByteArray();
-    target.writeInt(encoded.length);
-    target.write(encoded);
+    ArrowIpcFrame.write(batch.root(), target);
   }
 
   @Override
   public PartitionedArrowBatch deserialize(DataInputView source) throws IOException {
     String bucketId = source.readUTF();
-    int length = source.readInt();
-    byte[] encoded = new byte[length];
-    source.readFully(encoded);
-    try (ArrowStreamReader reader =
-        new ArrowStreamReader(new ByteArrayInputStream(encoded), allocator())) {
-      reader.loadNextBatch();
-      VectorSchemaRoot read = reader.getVectorSchemaRoot();
-      // Transfer the buffers out of the reader so the batch outlives it.
-      List<FieldVector> transferred = new ArrayList<>();
-      for (FieldVector vector : read.getFieldVectors()) {
-        TransferPair pair = vector.getTransferPair(allocator());
-        pair.transfer();
-        transferred.add((FieldVector) pair.getTo());
-      }
-      VectorSchemaRoot root = new VectorSchemaRoot(transferred);
-      root.setRowCount(read.getRowCount());
-      return new PartitionedArrowBatch(root, bucketId);
-    }
+    return new PartitionedArrowBatch(ArrowIpcFrame.read(source, NativeAllocator.SHARED), bucketId);
   }
 
   @Override
@@ -108,11 +66,7 @@ public final class PartitionedArrowBatchSerializer extends TypeSerializer<Partit
   @Override
   public void copy(DataInputView source, DataOutputView target) throws IOException {
     target.writeUTF(source.readUTF());
-    int length = source.readInt();
-    byte[] encoded = new byte[length];
-    source.readFully(encoded);
-    target.writeInt(length);
-    target.write(encoded);
+    ArrowIpcFrame.copy(source, target);
   }
 
   @Override

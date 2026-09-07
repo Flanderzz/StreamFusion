@@ -62,6 +62,7 @@ mod aggregates;
 mod avro;
 mod avro_datum;
 mod bridge;
+mod bucket_route;
 mod calc;
 mod changelog;
 #[cfg(any(
