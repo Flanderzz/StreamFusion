@@ -35,15 +35,20 @@ These functions run entirely in Rust by default, in projections, predicates, and
 | `SHA2(s, bit_length)` | The two-argument form with a literal bit length of 224, 256, 384, or 512; equivalent to the corresponding fixed-width function. |
 
 A non-literal or NULL `SHA2` bit length, and other bit lengths, are not admitted. A dynamic bit length
-falls back; an invalid constant can also be rejected by Flink itself. Flink 2.2 does not expose hash
+falls back; literal values are checked exactly, including `BIGINT`, without truncating to 32 bits.
+For example, `SHA2(s, CAST(4294967520 AS BIGINT))` falls back and retains Flink's unsupported-algorithm
+failure instead of being treated as SHA-224. Flink 2.2 does not expose hash
 overloads with an explicit character set. Binary/collection concatenation is outside this
 character-string admission.
 
-The implementation reuses DataFusion's concatenation and hash kernels. `CONCAT` adds Flink's strict
-NULL propagation using the input validity bitmaps, without re-evaluating its arguments or copying
-the output buffers. Hash results are converted to the UTF-8 Arrow representation expected by
-Flink's column-vector boundary. SQL parity tests cover NULLs, empty strings, embedded zero bytes,
-Unicode, long inputs, nested calls, filters, and dynamic-bit-length fallback.
+`CONCAT` computes Flink's strict NULL propagation from the input validity bitmaps, without
+re-evaluating its arguments. Batches without NULL results use DataFusion's kernel directly; batches
+with NULL results append only surviving rows. Neither path revalidates the concatenated UTF-8
+payload. `CONCAT_WS` delegates to DataFusion. Hashes use the same released MD5/SHA-2 libraries as
+DataFusion, writing lowercase hex directly into presized UTF-8 Arrow buffers without intermediate
+binary or string-view columns or per-row heap allocations. See [string copy reduction](../optimizations/string-copy-reduction.md).
+SQL parity tests cover NULLs, empty strings, embedded zero bytes, Unicode, long inputs, nested
+calls, filters, valid BIGINT widths, and dynamic or oversized bit-length fallback.
 
 The corresponding throughput diagnostics compare stock Flink against native execution with a
 rowwise generated source, both row/Arrow transposes, and a blackhole sink. They assert those native
@@ -54,18 +59,29 @@ They are function diagnostics, separate from the Nexmark headline benchmark:
 SF_BENCHMARK=true SF_ROWS=2000000 mvn -pl :streamfusion-runtime test -Pbench \
   '-Dnative.cargo.args=build --release --features mimalloc' \
   '-Dtest=ThroughputBenchmark#stringConcatThroughput+stringHashThroughput'
+
+SF_BENCHMARK=true SF_ROWS=2000000 mvn -pl :streamfusion-runtime test -Pbench \
+  '-Dnative.cargo.args=build --release --features mimalloc' \
+  '-Dtest=ThroughputBenchmark#nullableStringConcatThroughput'
 ```
 
-Measured on Apple M4 Pro with JDK 17 on 2026-09-07, using the core-only release build above and
-2 million rows whose strings cycle through `s0` to `s7`:
+Measured on Apple M4 Pro with JDK 17 on 2026-09-08, using the core-only release build above and
+2 million rows whose strings cycle through `s0` to `s7`. The nullable diagnostic adds a 1 KiB
+literal prefix and a CASE argument that makes 75% of results NULL. The two commands run in
+separate JVMs:
 
 | Diagnostic | Flink | StreamFusion | Throughput ratio |
 |---|---:|---:|---:|
-| `CONCAT` and `CONCAT_WS` projections | 0.691 s | 0.736 s | 0.94x |
-| MD5 and SHA-2 projections | 4.271 s | 3.338 s | 1.28x |
+| `CONCAT` and `CONCAT_WS` projections | 0.566 s | 0.733 s | 0.77x |
+| MD5 and SHA-2 projections | 4.141 s | 2.211 s | 1.87x |
+| Nullable `CONCAT`, 1 KiB prefix | 0.390 s | 0.613 s | 0.64x |
 
-The short-string concatenation case remains slower. Its admission is useful for keeping larger
-queries fully native; these results retain the standalone regression alongside the hashing gain.
+Both standalone concatenation cases remain slower than Flink. Their admission is useful for keeping
+larger queries fully native; these results retain the regressions alongside the hashing gain.
+Against the previous native implementation on the same upstream revision, hashing throughput
+improved by about 47% and nullable concatenation by about 16%; short concatenation was essentially
+unchanged. The [optimization ledger](../optimizations/string-copy-reduction.md#calc-construct-only-the-final-string-buffers)
+records the before/after native times.
 Both engines are timed through planning, source generation, and job completion; the native path
 also includes both transposes. These are end-to-end diagnostics on this machine rather than
 isolated kernel timings.

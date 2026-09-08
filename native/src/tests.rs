@@ -122,6 +122,21 @@ fn concat_preserves_nulls_in_sliced_arrays_and_scalar_arguments() {
         result.as_any().downcast_ref::<StringArray>().unwrap(),
         &StringArray::from(vec![Some("ab"), None, Some(""), None]),
     );
+    result.to_data().validate_full().unwrap();
+    assert_eq!(
+        result
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .value_offsets(),
+        &[0, 2, 2, 2, 2],
+        "NULL rows must not copy their non-NULL arguments",
+    );
+    let result = evaluate_string_call(93, vec![logical_lit("prefix"), logical_col("a")], &batch);
+    assert_eq!(
+        result.as_any().downcast_ref::<StringArray>().unwrap(),
+        &StringArray::from(vec![Some("prefixa"), None, Some("prefix"), Some("prefixz")]),
+    );
     let null = logical_lit(ScalarValue::Utf8(None));
     let result = evaluate_string_call(93, vec![logical_col("a"), null.clone()], &batch);
     assert_eq!(result.null_count(), 4);
@@ -181,6 +196,107 @@ fn concat_ws_distinguishes_empty_strings_null_values_and_null_separator() {
         result.as_any().downcast_ref::<StringArray>().unwrap(),
         &StringArray::from(vec![Some(""), Some(""), Some(""), None]),
     );
+}
+
+#[test]
+fn concat_all_null_results_do_not_copy_payloads() {
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Utf8, true),
+            Field::new("b", DataType::Utf8, true),
+        ])),
+        vec![
+            Arc::new(StringArray::from(vec![Some("abc"), None])),
+            Arc::new(StringArray::from(vec![None, Some("def")])),
+        ],
+    )
+    .unwrap();
+    let result = evaluate_string_call(93, vec![logical_col("a"), logical_col("b")], &batch);
+    assert_eq!(result.null_count(), 2);
+    assert!(result
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap()
+        .values()
+        .is_empty());
+    result.to_data().validate_full().unwrap();
+}
+
+#[test]
+fn hash_functions_preserve_utf8_buffers_nulls_and_slices() {
+    use datafusion::functions::{crypto, encoding::expr_fn::encode};
+
+    let long = "Gr\u{fc}\u{df}e\0\u{1f600}".repeat(1000);
+    let strings: StringArray = (0..100)
+        .map(|i| match i % 4 {
+            0 => None,
+            1 => Some(""),
+            2 => Some("abc"),
+            _ => Some(long.as_str()),
+        })
+        .collect();
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new("s", DataType::Utf8, true)])),
+        vec![Arc::new(strings)],
+    )
+    .unwrap()
+    .slice(9, 75);
+    let schema = DFSchema::try_from(batch.schema().as_ref().clone()).unwrap();
+    for (op, udf) in [
+        (95, crypto::md5()),
+        (96, crypto::sha224()),
+        (97, crypto::sha256()),
+        (98, crypto::sha384()),
+        (99, crypto::sha512()),
+    ] {
+        let reference = udf.call(vec![logical_col("s")]);
+        let reference = if op == 95 {
+            reference
+        } else {
+            encode(reference, logical_lit("hex"))
+        };
+        let reference = create_physical_expr(&reference, &schema, &ExecutionProps::new())
+            .unwrap()
+            .evaluate(&batch)
+            .unwrap()
+            .into_array(batch.num_rows())
+            .unwrap();
+        let reference = arrow::compute::cast(&reference, &DataType::Utf8).unwrap();
+        let result = evaluate_string_call(op, vec![logical_col("s")], &batch);
+        assert_eq!(result.as_ref(), reference.as_ref(), "hash op {op}");
+        result.to_data().validate_full().unwrap();
+        let result = evaluate_string_call(op, vec![logical_lit("abc")], &batch);
+        let strings = result.as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(
+            strings.value(0),
+            reference
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .value(1)
+        );
+        assert_eq!(strings.value(0), strings.value(batch.num_rows() - 1));
+        let result = evaluate_string_call(op, vec![logical_lit(ScalarValue::Utf8(None))], &batch);
+        assert_eq!(result.null_count(), batch.num_rows());
+        let result = evaluate_string_call(op, vec![logical_col("s")], &batch.slice(0, 0));
+        assert!(result.is_empty());
+        result.to_data().validate_full().unwrap();
+    }
+}
+
+#[test]
+fn hash_functions_reject_invalid_arity_without_panicking() {
+    let schema = Arc::new(DFSchema::empty());
+    let context = SimplifyContext::builder()
+        .with_schema(schema.clone())
+        .build();
+    let simplifier = ExprSimplifier::new(context);
+    for op in 95..=99 {
+        for args in [vec![], vec![logical_lit("a"), logical_lit("b")]] {
+            let result = simplifier.coerce(build_call(op, args), &schema);
+            assert!(result.is_err(), "hash op {op} must reject incorrect arity");
+        }
+    }
 }
 
 fn values(batch: &RecordBatch, column: usize) -> Vec<i64> {

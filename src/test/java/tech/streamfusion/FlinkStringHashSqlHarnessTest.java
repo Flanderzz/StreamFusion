@@ -1,5 +1,8 @@
 package tech.streamfusion;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.api.DataTypes;
@@ -8,6 +11,9 @@ import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.apache.flink.types.Row;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import tech.streamfusion.planner.NativePlanner;
 
 class FlinkStringHashSqlHarnessTest {
 
@@ -51,6 +57,29 @@ class FlinkStringHashSqlHarnessTest {
     NativeParity.assertFallbackReasonContains(
         FlinkStringHashSqlHarnessTest::environment,
         "SELECT SHA2(s, bits) FROM strings", "literal bit length");
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      longs = {
+        4294967520L, 4294967552L, 4294967680L, 4294967808L,
+        -4294967072L, -4294967040L, Long.MIN_VALUE, Long.MAX_VALUE
+      })
+  void oversizedSha2BitLengthFallsBack(long bits) {
+    // Flink rejects these algorithms; narrowing to int must not admit their low 32 bits.
+    String plan =
+        NativePlanner.explain(
+            environment(), "SELECT SHA2(s, CAST(" + bits + " AS BIGINT)) FROM strings");
+    assertFalse(plan.contains("NativeCalc"), plan);
+    assertTrue(plan.contains("literal bit length"), plan);
+  }
+
+  @Test
+  void validBigintSha2BitLengthsMatchHost() throws Exception {
+    NativeParity.assertParity(
+        FlinkStringHashSqlHarnessTest::environment,
+        "SELECT SHA2(s, CAST(224 AS BIGINT)), SHA2(s, CAST(256 AS BIGINT)),"
+            + " SHA2(s, CAST(384 AS BIGINT)), SHA2(s, CAST(512 AS BIGINT)) FROM strings");
   }
 
   private static TableEnvironment environment() {

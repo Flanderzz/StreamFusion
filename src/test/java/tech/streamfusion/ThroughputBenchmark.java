@@ -62,6 +62,16 @@ class ThroughputBenchmark {
             + " SHA2(s, 256) FROM f");
   }
 
+  @Test
+  void nullableStringConcatThroughput() throws Exception {
+    compareStringFunctions(
+        "Nullable string concatenation (1 KiB prefix, 75% NULL results)",
+        "CREATE TABLE sink (a STRING) WITH ('connector' = 'blackhole')",
+        "INSERT INTO sink SELECT CONCAT('"
+            + "x".repeat(1024)
+            + "', s, CASE WHEN v < 75 THEN CAST(NULL AS STRING) ELSE s END) FROM f");
+  }
+
   private static void compareStringFunctions(String label, String sinkDdl, String insertSql)
       throws Exception {
     TableEnvironment tEnv = filterEnvironment();
