@@ -64,3 +64,9 @@ The verified UTF-8 form reinterprets the same Arrow offsets, values, and validit
 
 [Complete-job Flink/native results](../benchmarks/scalar-functions.md#encode).
 
+## DECODE
+
+A successful safe Arrow Utf8 construction validates the BinaryArray once and reuses its buffers. Malformed byte sequences use the existing JDK-compatible replacement decoder and one reusable output buffer. This avoids per-row output allocation on valid UTF-8 without assuming that arbitrary bytes are valid.
+
+[Complete-job Flink/native results](../benchmarks/scalar-functions.md#decode).
+

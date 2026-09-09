@@ -99,6 +99,7 @@ pub(crate) fn function(op: i64, arity: usize) -> Option<ScalarUDF> {
             scalar::url_decode_ascii,
         ),
         120 => encode::function(),
+        121 => decode::function(),
         _ => return None,
     })
 }

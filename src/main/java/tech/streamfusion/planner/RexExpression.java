@@ -574,6 +574,9 @@ final class RexExpression {
     if ("ENCODE".equals(functionName)) {
       return emitCharsetFunction(call, 120, SqlTypeFamily.CHARACTER);
     }
+    if ("DECODE".equals(functionName)) {
+      return emitCharsetFunction(call, 121, SqlTypeFamily.BINARY);
+    }
     if ("STARTSWITH".equals(functionName)) {
       return emitCharacterFunction(call, 100, 2, 2);
     }

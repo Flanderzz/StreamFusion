@@ -205,6 +205,10 @@ shapes, differential tests, and individual end-to-end measurements.
 
 UTF-8 reuses the Arrow offsets, bytes, and validity; the single-byte encodings reuse one batch scratch buffer. This follows Comet's scalar/array kernel boundary without a JVM callback.
 
+### DECODE
+
+Valid UTF-8 is validated once and reuses the BinaryArray buffers as Utf8. Invalid input uses the already parity-tested JDK UTF-8 replacement routine. No per-row byte or String allocation is needed.
+
 ### TO_TIMESTAMP (deferred)
 
 Native parsing is withdrawn. Its millisecond timestamp result can represent expanded years,
