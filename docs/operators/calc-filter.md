@@ -197,6 +197,11 @@ Two character arguments, literal or column. Matches a literal prefix, including 
 empty strings; any NULL argument returns NULL. Wildcard characters have no special meaning.
 Binary operands fall back.
 
+### ENDSWITH
+
+Two character arguments with the same NULL and type rules as STARTSWITH. Matches a literal
+suffix; an empty suffix matches every non-NULL string. Wildcards have no special meaning.
+
 ## Case folding & regex
 
 **Native by default — not a fallback.** `UPPER`/`LOWER` and `REGEXP_EXTRACT` run natively by default

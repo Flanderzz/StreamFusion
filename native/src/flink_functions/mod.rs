@@ -14,6 +14,7 @@ pub(crate) fn function(op: i64, arity: usize) -> Option<ScalarUDF> {
         100 => datafusion::functions::string::starts_with()
             .as_ref()
             .clone(),
+        101 => datafusion::functions::string::ends_with().as_ref().clone(),
         _ => return None,
     })
 }

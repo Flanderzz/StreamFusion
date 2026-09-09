@@ -544,6 +544,9 @@ final class RexExpression {
     if ("STARTSWITH".equals(functionName)) {
       return emitCharacterFunction(call, 100, 2, 2);
     }
+    if ("ENDSWITH".equals(functionName)) {
+      return emitCharacterFunction(call, 101, 2, 2);
+    }
     if ("CONCAT".equals(functionName) || "||".equals(functionName)) {
       return emitStringCall(call, 93, 1, Integer.MAX_VALUE);
     }

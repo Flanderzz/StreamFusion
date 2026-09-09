@@ -56,7 +56,9 @@ class ScalarFunctionBenchmark {
 
   private static final List<Query> SEARCH_FUNCTIONS =
       List.of(new Query("STARTSWITH_LITERAL", "search", "STARTSWITH(s, 'row:')", "BOOLEAN"),
-new Query("STARTSWITH_COLUMN", "search_prefix", "STARTSWITH(s, needle)", "BOOLEAN"));
+new Query("STARTSWITH_COLUMN", "search_prefix", "STARTSWITH(s, needle)", "BOOLEAN"),
+new Query("ENDSWITH_LITERAL", "search", "ENDSWITH(s, ':match')", "BOOLEAN"),
+new Query("ENDSWITH_COLUMN", "search_needle", "ENDSWITH(s, needle)", "BOOLEAN"));
 
   private static final List<Query> ENCODING_FUNCTIONS =
       Stream.concat(
