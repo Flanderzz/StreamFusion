@@ -457,7 +457,8 @@ new Query("RPAD_DYNAMIC", "tt_pad", "RPAD(s, n, p)", "STRING"),
 new Query("SPLIT_INDEX_DYNAMIC", "tt_split", "SPLIT_INDEX(s, p, n)", "STRING"),
 new Query("TO_DATE", "tt_date_text", "TO_DATE(s)", "DATE"),
 new Query("QUARTER", "tt_timestamp", "QUARTER(ts)", "BIGINT"),
-new Query("WEEK", "tt_timestamp", "WEEK(ts)", "BIGINT"));
+new Query("WEEK", "tt_timestamp", "WEEK(ts)", "BIGINT"),
+new Query("DAYOFYEAR", "tt_timestamp", "DAYOFYEAR(ts)", "BIGINT"));
   }
 
   private static String payload(String pattern) {

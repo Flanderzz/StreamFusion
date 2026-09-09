@@ -328,6 +328,10 @@ QUARTER and EXTRACT(QUARTER) over DATE or plain TIMESTAMP return, for ordinary c
 
 WEEK and EXTRACT(WEEK) over DATE or plain TIMESTAMP use ISO week numbers, including weeks spanning calendar years. NULL propagates. TIMESTAMP_LTZ falls back for this field.
 
+### DAYOFYEAR
+
+DAYOFYEAR/EXTRACT(DOY) over DATE or plain TIMESTAMP return, for ordinary calendar dates, 1 through 365/366 as BIGINT. NULL propagates. TIMESTAMP_LTZ falls back for this field.
+
 ### FLOOR (timestamp)
 
 Temporal FLOOR falls back to Flink for every unit and timestamp precision, including

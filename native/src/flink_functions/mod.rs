@@ -123,6 +123,7 @@ pub(crate) fn function(op: i64, arity: usize) -> Option<ScalarUDF> {
         131 => to_date::function(),
         133 => calendar::function(calendar::Field::Quarter),
         134 => calendar::function(calendar::Field::Week),
+        135 => calendar::function(calendar::Field::DayOfYear),
         _ => return None,
     })
 }

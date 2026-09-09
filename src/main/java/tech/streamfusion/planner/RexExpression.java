@@ -1705,6 +1705,7 @@ final class RexExpression {
         switch (calendarUnit) {
           case "QUARTER" -> 133;
           case "WEEK" -> 134;
+          case "DOY" -> 135;
           default -> -1;
         };
     if (calendarOp >= 0

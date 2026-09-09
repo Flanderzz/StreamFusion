@@ -263,6 +263,10 @@ Fuses Flink's timestamp-to-day conversion and integer Julian-calendar extraction
 
 Uses Flink's integer ISO-week calculation in the shared single-pass calendar kernel. Tests span leap days, year boundaries, and pre-epoch fractions. DATE inputs retain Flink's integer arithmetic.
 
+### DAYOFYEAR
+
+Subtracts the first Julian day of the year using Flink's integer arithmetic in the shared calendar kernel. Expanded years retain Flink's overflow results rather than becoming NULL outside chrono's range.
+
 ### FLOOR (timestamp, deferred)
 
 Temporal FLOOR is withdrawn: its millisecond output does not satisfy downstream native

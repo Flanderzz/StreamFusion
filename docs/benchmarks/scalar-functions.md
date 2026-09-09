@@ -377,3 +377,12 @@ not subtracted from function times because their result types and lengths can di
 | `WEEK` | TIMESTAMP(9), non-null | 0.367 | 0.452 | 0.81x |
 | `WEEK` | TIMESTAMP(9), NULL/8 | 0.385 | 0.472 | 0.81x |
 
+## DAYOFYEAR
+
+`DAYOFYEAR`: `DAYOFYEAR(ts)`
+
+| Case | Input | Flink (s) | Native (s) | Flink / native |
+|---|---|---:|---:|---:|
+| `DAYOFYEAR` | TIMESTAMP(9), non-null | 0.370 | 0.439 | 0.84x |
+| `DAYOFYEAR` | TIMESTAMP(9), NULL/8 | 0.373 | 0.464 | 0.80x |
+
