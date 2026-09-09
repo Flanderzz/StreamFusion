@@ -240,6 +240,10 @@ Copies borrowed UTF-8 prefixes and whole padding spans, following Comet's paddin
 
 Reuses the same UTF-16 prefix accounting and UTF-8 span-copying kernel, placing the padding on the right.
 
+### SPLIT_INDEX
+
+Scans only as far as the requested token, retaining empty tokens, instead of constructing the complete split array. An empty separator uses the exact Java Character.isWhitespace set, not Rust is_whitespace or ASCII space alone.
+
 ### TO_TIMESTAMP (deferred)
 
 Native parsing is withdrawn. Its millisecond timestamp result can represent expanded years,

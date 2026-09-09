@@ -12,10 +12,24 @@ import org.junit.jupiter.api.Test;
 
 /**
  * {@code SPLIT_INDEX} — Nexmark q22's URL-directory extraction. The native UDF reproduces Flink's
- * {@code splitByWholeSeparatorPreserveAllTokens} (0-based, NULL out of range / negative / empty input
- * / null arg). Value-compared to the host over URLs with leading/empty/short segments.
+ * {@code splitByWholeSeparatorPreserveAllTokens} (0-based, NULL out of range / negative / empty
+ * input / null arg). Value-compared to the host over URLs with leading/empty/short segments.
  */
 class FlinkSplitIndexSqlHarnessTest {
+
+  @Test
+  void functionAlsoRunsInsideTheNativePredicate() throws Exception {
+    NativeParity.assertParity(
+        TextTimeFunctionTestInputs::parameters,
+        "SELECT id FROM inputs WHERE SPLIT_INDEX(s, p, n) = 'a'");
+  }
+
+  @Test
+  void splitIndexHandlesDynamicEmptySeparatorsAndMissingTokens() throws Exception {
+    NativeParity.assertParity(
+        TextTimeFunctionTestInputs::parameters,
+        "SELECT id, SPLIT_INDEX(s, p, n), SPLIT_INDEX(s, '', n) FROM inputs");
+  }
 
   @Test
   void splitIndexMatchesHost() throws Exception {
@@ -46,5 +60,29 @@ class FlinkSplitIndexSqlHarnessTest {
             .column("url", DataTypes.STRING())
             .build());
     return tEnv;
+  }
+
+  @org.junit.jupiter.params.ParameterizedTest
+  @org.junit.jupiter.params.provider.ValueSource(strings = {"TINYINT", "SMALLINT"})
+  void narrowIntegerParametersStayNative(String type) throws Exception {
+    NativeParity.assertParity(
+        TextTimeFunctionTestInputs::parameters,
+        "SELECT id, SPLIT_INDEX(s, p, CAST(n AS " + type + ")) FROM inputs");
+  }
+
+  @Test
+  void emptySeparatorUsesTheJavaWhitespaceSet() throws Exception {
+    java.util.List<String> values = new java.util.ArrayList<>();
+    for (int ch = 0; ch <= Character.MAX_VALUE; ch++) {
+      if (Character.isWhitespace(ch) || Character.isSpaceChar(ch) || ch == 0x0085) {
+        values.add("a" + (char) ch + "b" + (char) ch);
+        values.add("" + (char) ch + (char) ch);
+      }
+    }
+    values.add(null);
+    NativeParity.assertParity(
+        () -> TextTimeFunctionTestInputs.textRows(values.toArray(String[]::new)),
+        "SELECT id, SPLIT_INDEX(s, '', 0), SPLIT_INDEX(s, '', 1), SPLIT_INDEX(s, '', 2) FROM"
+            + " inputs");
   }
 }

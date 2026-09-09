@@ -453,7 +453,8 @@ new Query("SUBSTRING_DYNAMIC", "tt_substring", "SUBSTRING(s, n, len)", "STRING")
 new Query("LEFT_DYNAMIC", "tt_counted", "LEFT(s, n)", "STRING"),
 new Query("RIGHT_DYNAMIC", "tt_counted", "RIGHT(s, n)", "STRING"),
 new Query("LPAD_DYNAMIC", "tt_pad", "LPAD(s, n, p)", "STRING"),
-new Query("RPAD_DYNAMIC", "tt_pad", "RPAD(s, n, p)", "STRING"));
+new Query("RPAD_DYNAMIC", "tt_pad", "RPAD(s, n, p)", "STRING"),
+new Query("SPLIT_INDEX_DYNAMIC", "tt_split", "SPLIT_INDEX(s, p, n)", "STRING"));
   }
 
   private static String payload(String pattern) {

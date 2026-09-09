@@ -304,6 +304,10 @@ STRING, dynamic INT-width length, and literal or dynamic STRING padding. NULL, n
 
 Same input and boundary rules as LPAD, with padding appended on the right. Dynamic lengths and padding are admitted, with Flink 2.2.1 UTF-16 counting.
 
+### SPLIT_INDEX
+
+Character separators and TINYINT/SMALLINT/INTEGER indices may be dynamic. Indices are zero-based; negative/out-of-range indices, empty input, or any NULL produce NULL. Whole separators preserve empty tokens. An empty separator uses Java Character.isWhitespace, including tabs and line separators but excluding non-breaking spaces. Numeric separators and BIGINT indices fall back.
+
 ## Case folding & regex
 
 **Native by default — not a fallback.** `UPPER`/`LOWER` and `REGEXP_EXTRACT` run natively by default
@@ -360,7 +364,7 @@ implementation can't handle, even though the function itself is supported:
 - An **unsupported literal type** anywhere in the expression.
 - **`TRIM`** — anything other than the default `BOTH`-whitespace form.
 - **`POSITION`** — a `FROM` start offset.
-- **`SPLIT_INDEX`** — an empty or non-literal separator.
+- **`SPLIT_INDEX`** — the numeric separator overload.
 - **`DATE_FORMAT`** — a non-literal pattern, or (on the pure-native path only) a
   non-translatable pattern (text, fraction, or zone fields) — the JVM-upcall `TIMESTAMP_LTZ` path
   accepts any pattern Flink's own formatter does.

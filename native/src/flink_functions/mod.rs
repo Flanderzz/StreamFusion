@@ -18,6 +18,7 @@ pub(crate) mod lpad;
 pub(crate) mod right;
 pub(crate) mod rpad;
 pub(crate) mod split;
+pub(crate) mod split_index;
 pub(crate) mod substring;
 
 mod binary_strings;
@@ -116,6 +117,7 @@ pub(crate) fn function(op: i64, arity: usize) -> Option<ScalarUDF> {
         127 => right::function(),
         128 => lpad::function(),
         129 => rpad::function(),
+        130 => split_index::function(),
         _ => return None,
     })
 }

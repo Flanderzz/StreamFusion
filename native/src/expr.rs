@@ -342,12 +342,6 @@ pub(crate) fn build_call(
                 .call(args);
         }
 
-        85 => {
-            // SPLIT_INDEX(str, sep, index): Flink's whole-separator split, index-th piece (see SplitIndex).
-            return datafusion::logical_expr::ScalarUDF::new_from_impl(SplitIndex::new())
-                .call(args);
-        }
-
         40 => {
             // Searched CASE: [when1, then1, …, else]. The trailing else is the odd operand out.
             let mut args = args;
@@ -1149,80 +1143,6 @@ impl datafusion::logical_expr::ScalarUDFImpl for DecimalDivide {
             .with_precision_and_scale(self.precision, self.scale)
             .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
         Ok(ColumnarValue::Array(Arc::new(result)))
-    }
-}
-
-/// Flink's `SPLIT_INDEX(str, separator, index)`: split `str` on the whole `separator` (preserving
-/// empty tokens) and return the 0-based `index`-th piece, or NULL when `index` is negative or past the
-/// last piece, when `str` is empty (Commons' `splitByWholeSeparatorPreserveAllTokens` yields no tokens
-/// for an empty input), or when any argument is NULL — a faithful port of `SqlFunctionUtils.splitIndex`.
-/// The JVM encoder admits this only with a non-empty literal separator, so Rust's `str::split` (also
-/// non-overlapping, left-to-right, preserving empty tokens) reproduces Commons exactly.
-#[derive(Debug, PartialEq, Eq, Hash)]
-pub(crate) struct SplitIndex {
-    signature: datafusion::logical_expr::Signature,
-}
-
-impl SplitIndex {
-    fn new() -> Self {
-        Self {
-            signature: datafusion::logical_expr::Signature::variadic_any(
-                datafusion::logical_expr::Volatility::Immutable,
-            ),
-        }
-    }
-}
-
-impl datafusion::logical_expr::ScalarUDFImpl for SplitIndex {
-    fn name(&self) -> &str {
-        "split_index"
-    }
-    fn signature(&self) -> &datafusion::logical_expr::Signature {
-        &self.signature
-    }
-    fn return_type(&self, _: &[DataType]) -> datafusion::common::Result<DataType> {
-        Ok(DataType::Utf8)
-    }
-    fn invoke_with_args(
-        &self,
-        args: datafusion::logical_expr::ScalarFunctionArgs,
-    ) -> datafusion::common::Result<datafusion::logical_expr::ColumnarValue> {
-        use datafusion::logical_expr::ColumnarValue;
-        let rows = args.number_rows;
-        let arrays = ColumnarValue::values_to_arrays(&args.args)?;
-        let strs = arrow::compute::cast(&arrays[0], &DataType::Utf8)?;
-        let seps = arrow::compute::cast(&arrays[1], &DataType::Utf8)?;
-        let idxs = arrow::compute::cast(&arrays[2], &DataType::Int32)?;
-        let strs = strs
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .expect("utf8 str");
-        let seps = seps
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .expect("utf8 sep");
-        let idxs = idxs
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .expect("i32 index");
-        let mut builder = arrow::array::StringBuilder::new();
-        for row in 0..rows {
-            if strs.is_null(row) || seps.is_null(row) || idxs.is_null(row) {
-                builder.append_null();
-                continue;
-            }
-            let index = idxs.value(row);
-            let str = strs.value(row);
-            if index < 0 || str.is_empty() {
-                builder.append_null();
-                continue;
-            }
-            match str.split(seps.value(row)).nth(index as usize) {
-                Some(piece) => builder.append_value(piece),
-                None => builder.append_null(),
-            }
-        }
-        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }
 

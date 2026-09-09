@@ -9627,8 +9627,8 @@ fn calc_split_index_matches_flink() {
     )
     .unwrap();
     let mut calc = CalcExpression {
-        kinds: vec![6, 0, 3, 7],    // CALL(SPLIT_INDEX), col url, lit "/", lit 3
-        payload: vec![85, 0, 0, 0], // op 85; col 0; strings[0]; longs[0]
+        kinds: vec![6, 0, 3, 7],     // CALL(SPLIT_INDEX), col url, lit "/", lit 3
+        payload: vec![130, 0, 0, 0], // op 130; col 0; strings[0]; longs[0]
         child_counts: vec![3, 0, 0, 0],
         longs: vec![3],
         doubles: vec![],

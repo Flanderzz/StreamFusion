@@ -341,3 +341,12 @@ not subtracted from function times because their result types and lengths can di
 | `RPAD_DYNAMIC` | ASCII, 264-byte budget | 0.815 | 1.173 | 0.70x |
 | `RPAD_DYNAMIC` | Unicode, 264-byte budget, NULL/8 | 1.189 | 1.410 | 0.84x |
 
+## SPLIT_INDEX
+
+`SPLIT_INDEX_DYNAMIC`: `SPLIT_INDEX(s, p, n)`
+
+| Case | Input | Flink (s) | Native (s) | Flink / native |
+|---|---|---:|---:|---:|
+| `SPLIT_INDEX_DYNAMIC` | ASCII, 264-byte budget | 2.099 | 1.065 | 1.97x |
+| `SPLIT_INDEX_DYNAMIC` | Unicode, 264-byte budget, NULL/8 | 2.029 | 1.121 | 1.81x |
+
