@@ -218,6 +218,10 @@ TINYINT, SMALLINT, INTEGER, and BIGINT inputs are admitted. Returns binary digit
 
 Integer and character inputs are admitted. All four signed integer widths preserve Long.toHexString behavior: no leading zeros, uppercase digits, and 16 digits for negative values. Character strings encode their UTF-8 bytes as uppercase hex. NULL returns NULL.
 
+### TO_BASE64
+
+Character strings are encoded as padded RFC 4648 Base64 over UTF-8 bytes without line wrapping. Empty input stays empty; NULL propagates. BINARY/VARBINARY input and FROM_BASE64 fall back.
+
 ## Case folding & regex
 
 **Native by default — not a fallback.** `UPPER`/`LOWER` and `REGEXP_EXTRACT` run natively by default

@@ -76,7 +76,8 @@ class ScalarFunctionBenchmark {
                           Stream.of(
                               new Query("BIN_" + type.toUpperCase(Locale.ROOT), type, "BIN(n)"),
                               new Query("HEX_" + type.toUpperCase(Locale.ROOT), type, "HEX(n)"))),
-              Stream.of(new Query("HEX_STRING", "text", "HEX(s)")))
+              Stream.of(new Query("HEX_STRING", "text", "HEX(s)"),
+new Query("TO_BASE64", "text", "TO_BASE64(s)")))
           .toList();
 
   private static final List<Query> FUNCTIONS =

@@ -41,6 +41,14 @@ Output offsets are checked against Arrow Utf8's 32-bit limit before allocating t
 
 [Per-function complete-job results](../benchmarks/scalar-functions.md#hex) include both transposes.
 
+### TO_BASE64
+
+Uses standard padded base64 encoding, computes output offsets with checked sizes, and writes directly into the final Arrow buffer. Unlike Spark's MIME form modeled by Comet, Flink does not wrap lines. Arrow's safe constructor validates the result.
+
+Output offsets are checked against Arrow Utf8's 32-bit limit before allocating the final values buffer. NULL rows consume no bytes and reuse input validity.
+
+[Per-function complete-job results](../benchmarks/scalar-functions.md#to_base64) include both transposes.
+
 ## Columnar-kernel internal state where it fits
 
 Keep-first dedup holds its per-key candidates as a single Arrow batch — one row per pending key —

@@ -564,6 +564,9 @@ final class RexExpression {
     if ("HEX".equals(functionName)) {
       return emitEncoding(call, 105, true, true);
     }
+    if ("TO_BASE64".equals(functionName)) {
+      return emitEncoding(call, 107, false, true);
+    }
     if ("CONCAT".equals(functionName) || "||".equals(functionName)) {
       return emitStringCall(call, 93, 1, Integer.MAX_VALUE);
     }

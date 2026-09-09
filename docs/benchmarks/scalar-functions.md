@@ -152,3 +152,12 @@ not subtracted from function times because their result types and lengths can di
 | `HEX_BIGINT` | NULL/8 | 0.314 | 0.428 | 0.73x |
 | `HEX_STRING` | Unicode, 264-byte budget, NULL/8 | 1.857 | 1.103 | 1.68x |
 
+## TO_BASE64
+
+`TO_BASE64`: `TO_BASE64(s)`
+
+| Case | Input | Flink (s) | Native (s) | Flink / native |
+|---|---|---:|---:|---:|
+| `TO_BASE64` | ASCII, 264-byte budget | 0.657 | 0.963 | 0.68x |
+| `TO_BASE64` | Unicode, 264-byte budget, NULL/8 | 0.840 | 1.037 | 0.81x |
+
