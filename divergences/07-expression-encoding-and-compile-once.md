@@ -128,6 +128,7 @@ strict NULL propagation applied to `CONCAT` below.
 - **`LEAST`:** Reuses the shared extremum kernel with minimum comparison, including primitive Arrow loops, folded constants, and strict NULL masking. Matching decimal scale is preserved on the output. DataFusion skips NULLs; Flink requires strict NULL propagation, with floating point and mixed decimal scales still unverified. See the Calc page for admission, semantics, and individual measurements.
 - **`INITCAP`:** A Flink-specific column kernel changes only ASCII case bits, preserving other UTF-8 bytes and word boundaries. See the Calc page for admission, semantics, and individual measurements.
 - **`TRANSLATE`:** ASCII mappings use direct lookup; non-ASCII codepoints use the project's ahash map. Consecutive equal alphabets reuse the mapping. Duplicate source positions retain their first mapping, including deletion mappings. Comet explicitly marks DataFusion's grapheme-based translation as incompatible. Flink requires codepoint mappings and its own duplicate/NULL rules. See the Calc page for admission, semantics, and individual measurements.
+- **`BTRIM`:** Both default and literal character-set trimming delegate to DataFusion's btrim kernel; no duplicate space-only kernel is maintained. See the Calc page for admission, semantics, and individual measurements.
 - **`UPPER`/`LOWER` fall back by default** (opt-in via the flag above; asserted by a test). Native (Rust) case
   folding is locale-independent Unicode, but the JVM's `String.toUpperCase()/toLowerCase()` is
   locale-sensitive (e.g. Turkish dotless-i), so non-ASCII results can silently differ. DataFusion
@@ -231,3 +232,8 @@ byte order for binary-backed strings. There is no single Unicode order that repr
 plan shapes. GREATEST/LEAST therefore admit only ASCII-provable string literals and CASE results;
 unrestricted string columns fall back. The existing string comparison operators predate this
 change and share that limitation; this PR does not claim to fix their Unicode ordering.
+
+Flink's binary-backed `isSpaceString` can treat a trim set beginning with a space as space-only.
+BTRIM/LTRIM/RTRIM consequently admit literal sets only. The benchmarks use literal trim sets
+that match this admission rule. Both of these gates avoid promising exact results
+from a kernel whose semantics depend on Flink's runtime string representation.

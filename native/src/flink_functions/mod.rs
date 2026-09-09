@@ -67,6 +67,7 @@ pub(crate) fn function(op: i64, arity: usize) -> Option<ScalarUDF> {
             DataType::Utf8,
             scalar::translate,
         ),
+        113 => datafusion::functions::string::btrim().as_ref().clone(),
         _ => return None,
     })
 }

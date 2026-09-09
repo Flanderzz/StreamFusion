@@ -40,3 +40,9 @@ ASCII mappings use direct lookup; non-ASCII codepoints use the project's ahash m
 
 [Complete-job Flink/native results](../benchmarks/scalar-functions.md#translate).
 
+## BTRIM
+
+Default and literal-set trimming both reuse DataFusion's btrim kernel. Keeping one implementation avoids a duplicate space-only scan while preserving the verified literal-set semantics.
+
+[Complete-job Flink/native results](../benchmarks/scalar-functions.md#btrim).
+

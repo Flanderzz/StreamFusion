@@ -608,6 +608,9 @@ final class RexExpression {
         || "TRANSLATE3".equals(functionName)) {
       return emitCharacterFunction(call, 112, 3, 3);
     }
+    if ("BTRIM".equals(functionName)) {
+      return emitTrimSet(call, 113, 1);
+    }
     if ("CONCAT".equals(functionName) || "||".equals(functionName)) {
       return emitStringCall(call, 93, 1, Integer.MAX_VALUE);
     }
@@ -884,6 +887,13 @@ final class RexExpression {
       return isAsciiLiteralResult(operands.get(operands.size() - 1));
     }
     return false;
+  }
+
+  private boolean emitTrimSet(RexCall call, int op, int min) {
+    if (call.getOperands().size() == 2 && !(call.getOperands().get(1) instanceof RexLiteral)) {
+      return reject(call.getOperator().getName() + " requires a literal trim set");
+    }
+    return emitCharacterFunction(call, op, min, 2);
   }
 
   private boolean emitCharacterFunction(RexCall call, int op, int min, int max) {

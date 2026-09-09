@@ -55,7 +55,8 @@ class ScalarFunctionBenchmark {
       List.of(new Query("GREATEST", "numbers", "GREATEST(n, m, 17)"),
 new Query("LEAST", "numbers", "LEAST(n, m, 17)"),
 new Query("INITCAP", "text", "INITCAP(s)"),
-new Query("TRANSLATE", "text", "TRANSLATE(s, 'abcdef', 'ABCDEF')"));
+new Query("TRANSLATE", "text", "TRANSLATE(s, 'abcdef', 'ABCDEF')"),
+new Query("BTRIM", "text", "BTRIM(s)"));
 
   private static final List<Query> SEARCH_FUNCTIONS =
       List.of(

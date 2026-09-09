@@ -66,6 +66,7 @@ fn functions(c: &mut Criterion) {
                 112,
                 vec![strings(0), scalar_text("abcdef"), scalar_text("ABCDEF")],
             ),
+            ("BTRIM", 113, vec![strings(0)]),
         ];
         let mut group = c.benchmark_group(format!("scalar/{name}"));
         group.throughput(Throughput::Elements(ROWS as u64));

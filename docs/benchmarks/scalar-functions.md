@@ -206,3 +206,12 @@ not subtracted from function times because their result types and lengths can di
 | `TRANSLATE` | ASCII, 264-byte budget | 2.377 | 1.350 | 1.76x |
 | `TRANSLATE` | Unicode, 264-byte budget, NULL/8 | 3.138 | 1.240 | 2.53x |
 
+## BTRIM
+
+`BTRIM`: `BTRIM(s)`
+
+| Case | Input | Flink (s) | Native (s) | Flink / native |
+|---|---|---:|---:|---:|
+| `BTRIM` | ASCII, 264-byte budget | 0.566 | 0.868 | 0.65x |
+| `BTRIM` | Unicode, 264-byte budget, NULL/8 | 0.728 | 0.937 | 0.78x |
+
