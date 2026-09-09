@@ -3252,6 +3252,7 @@ dependencies = [
  "libmimalloc-sys",
  "log",
  "md-5",
+ "memchr",
  "num-bigint",
  "num-traits",
  "parquet",

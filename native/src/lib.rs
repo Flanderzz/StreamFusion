@@ -85,6 +85,7 @@ mod expr;
 #[cfg(feature = "parquet")]
 mod files;
 mod flatten;
+mod flink_functions;
 mod flink_key;
 #[cfg(any(
     feature = "json",

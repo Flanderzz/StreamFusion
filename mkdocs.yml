@@ -107,7 +107,9 @@ nav:
   - Memory management: memory-management.md
   - Native metric parity: metrics-parity.md
   - Upstream Flink suite: upstream-flink-suite.md
-  - Benchmarks: benchmarks.md
+  - Benchmarks:
+      - benchmarks.md
+      - Scalar functions: benchmarks/scalar-functions.md
   - Optimizations:
       - optimizations/index.md
       - Foundational bets: optimizations/foundational-bets.md
@@ -117,6 +119,7 @@ nav:
       - Zero-copy local shuffle: optimizations/zero-copy-local-shuffle.md
       - Columnar changelog operators: optimizations/columnar-changelog-operators.md
       - Expression compile-once: optimizations/expression-compile-once.md
+      - Scalar function kernels: optimizations/scalar-function-kernels.md
       - Calc projection before filtering: optimizations/calc-projection-before-filter.md
       - Export Calc schemas once: optimizations/calc-schema-once-c-data.md
       - Shared FFI allocator: optimizations/shared-ffi-allocator.md

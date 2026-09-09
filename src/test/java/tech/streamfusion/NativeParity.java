@@ -193,8 +193,18 @@ final class NativeParity {
     return rows;
   }
 
-  /** Java arrays compare by identity; turn binary SQL values into a stable value representation. */
+  /** Java arrays compare by identity; compare binary and collection outputs by content. */
   private static Object comparableValue(Object value) {
-    return value instanceof byte[] bytes ? HexFormat.of().formatHex(bytes) : value;
+    if (value instanceof byte[] bytes) {
+      return HexFormat.of().formatHex(bytes);
+    }
+    if (value != null && value.getClass().isArray()) {
+      List<Object> values = new ArrayList<>();
+      for (int i = 0; i < java.lang.reflect.Array.getLength(value); i++) {
+        values.add(comparableValue(java.lang.reflect.Array.get(value, i)));
+      }
+      return values;
+    }
+    return value;
   }
 }

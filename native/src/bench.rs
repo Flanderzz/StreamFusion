@@ -1,5 +1,10 @@
 use super::*;
 
+/// The production Flink scalar UDFs, including scalar adaptation and result allocation.
+pub fn flink_scalar_function(op: i64, arity: usize) -> datafusion::logical_expr::ScalarUDF {
+    crate::flink_functions::function(op, arity).expect("registered scalar benchmark")
+}
+
 /// The production Kafka JSON encoder, exposed only to its Criterion benchmark.
 #[cfg(feature = "kafka")]
 pub fn encode_kafka_json(batch: &RecordBatch) -> crate::kafka::EncodedLines {

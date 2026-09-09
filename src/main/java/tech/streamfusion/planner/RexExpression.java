@@ -1,6 +1,5 @@
 package tech.streamfusion.planner;
 
-import tech.streamfusion.operator.EncodedPredicate;
 import java.lang.reflect.Method;
 import java.math.BigDecimal;
 import java.math.BigInteger;
@@ -22,14 +21,15 @@ import org.apache.calcite.rex.RexUtil;
 import org.apache.calcite.sql.SqlKind;
 import org.apache.calcite.sql.type.SqlTypeFamily;
 import org.apache.calcite.sql.type.SqlTypeName;
+import tech.streamfusion.operator.EncodedPredicate;
 
 /**
  * Encodes a {@link RexNode} into the compact pre-order form the native engine decodes (see {@link
- * tech.streamfusion.Native#createFilterExpression}): parallel {@code kinds}/{@code
- * payload}/{@code childCounts} arrays plus typed literal pools. The encoding is the JVM counterpart
- * of the native expression builder, and admits only the operations the native side evaluates with
- * verified Flink parity; an unsupported node makes the whole encode fail (returning null), so the
- * containing operator falls back to Flink.
+ * tech.streamfusion.Native#createFilterExpression}): parallel {@code kinds}/{@code payload}/{@code
+ * childCounts} arrays plus typed literal pools. The encoding is the JVM counterpart of the native
+ * expression builder, and admits only the operations the native side evaluates with verified Flink
+ * parity; an unsupported node makes the whole encode fail (returning null), so the containing
+ * operator falls back to Flink.
  */
 final class RexExpression {
 
@@ -50,30 +50,39 @@ final class RexExpression {
   private static final int KIND_CAST = 11;
   // PROCTIME(): a nullary call materializing the current processing time as a TIMESTAMP_LTZ(3)
   // column. Admitting it keeps the planner's `PROCTIME() AS …` projection columnar, which is what
-  // unblocks proctime-ordered operators (dedup, OVER) — those use the column only as an arrival-order
+  // unblocks proctime-ordered operators (dedup, OVER) — those use the column only as an
+  // arrival-order
   // key and project it away, so its (non-deterministic) value is never observed in the output.
   private static final int KIND_PROCTIME = 12;
   // Field access: extract a named field from a ROW/struct-typed child. payload is the string-pool
   // index of the field name, with one child (the struct-typed expression). Nested access (a.b.c)
   // nests these, the child being itself a field access. Mirrors DataFusion's get_field.
   private static final int KIND_FIELD_ACCESS = 13;
-  // Approximate decimal cast: payload packs the target DECIMAL precision/scale (precision*100 + scale),
-  // one child. Wraps a (double-computed) arithmetic result, casting it to the declared DECIMAL so the
+  // Approximate decimal cast: payload packs the target DECIMAL precision/scale (precision*100 +
+  // scale),
+  // one child. Wraps a (double-computed) arithmetic result, casting it to the declared DECIMAL so
+  // the
   // output column type matches — only under the approximate-decimal flag (not byte-exact to Flink).
   private static final int KIND_CAST_DECIMAL = 14;
   // A day-time INTERVAL literal: payload is the long-pool index of its value in milliseconds. The
-  // native side builds an Arrow IntervalDayTime, so `timestamp - interval` evaluates to a timestamp.
+  // native side builds an Arrow IntervalDayTime, so `timestamp - interval` evaluates to a
+  // timestamp.
   private static final int KIND_LIT_INTERVAL = 15;
-  // An exact DECIMAL literal: payload indexes the string pool, whose entry is "unscaled|precision|scale"
-  // (the unscaled integer as a string, as it can exceed i64). The native side builds a Decimal128 scalar,
+  // An exact DECIMAL literal: payload indexes the string pool, whose entry is
+  // "unscaled|precision|scale"
+  // (the unscaled integer as a string, as it can exceed i64). The native side builds a Decimal128
+  // scalar,
   // so decimal arithmetic stays exact instead of routing through double.
   private static final int KIND_LIT_DECIMAL = 16;
   // A JVM UDF call: payload indexes the long pool at [udf id, return-type code]; children are the
-  // argument expressions. The native JvmUdf node upcalls NativeUdf.invokeUdf to run the actual Flink
-  // ScalarFunction.eval over each batch (columnar), so a non-builtin UDF stays inside the native island.
+  // argument expressions. The native JvmUdf node upcalls NativeUdf.invokeUdf to run the actual
+  // Flink
+  // ScalarFunction.eval over each batch (columnar), so a non-builtin UDF stays inside the native
+  // island.
   private static final int KIND_UDF = 17;
   // A narrowing cast to an integer type: payload is the target integer type code (CAST_TINYINT..
-  // CAST_BIGINT), one child. Built natively as a wrapping/saturating kernel matching Flink's primitive
+  // CAST_BIGINT), one child. Built natively as a wrapping/saturating kernel matching Flink's
+  // primitive
   // Java cast, since arrow's own cast errors on overflow rather than wrapping.
   private static final int KIND_CAST_NARROW = 18;
 
@@ -83,13 +92,15 @@ final class RexExpression {
   // are admitted — see emitItem.
   private static final int KIND_ITEM = 19;
 
-  // Decimal `/` and `%`: payload packs the declared result's precision*100 + scale; two children (the
+  // Decimal `/` and `%`: payload packs the declared result's precision*100 + scale; two children
+  // (the
   // operands). A fused native kernel reproduces Flink's 38-significant-digit quotient + rescale.
   private static final int KIND_DECIMAL_DIVIDE = 20;
   private static final int KIND_DECIMAL_MOD = 21;
 
   // A single-precision literal, so a FLOAT expression is not widened to double by its constants.
   private static final int KIND_LIT_FLOAT = 22;
+  private static final int KIND_LIT_BINARY = 23;
 
   // Cast target type codes, mirrored on the native side.
   private static final int CAST_TINYINT = 0;
@@ -123,11 +134,12 @@ final class RexExpression {
           Map.entry("LOG10", 80));
 
   // UDFs referenced by KIND_UDF nodes, and the longs-pool slots holding their local indices. Rather
-  // than registering into NativeUdf's (planner-JVM) registry at encode time and baking a global id —
-  // which a task manager's empty registry wouldn't have — we carry a serializable descriptor per UDF
+  // than registering into NativeUdf's (planner-JVM) registry at encode time and baking a global id
+  // —
+  // which a task manager's empty registry wouldn't have — we carry a serializable descriptor per
+  // UDF
   // and bake its local index; the operator registers them at open() and patches the slots.
-  private final List<tech.streamfusion.operator.NativeUdf.Descriptor> udfs =
-      new ArrayList<>();
+  private final List<tech.streamfusion.operator.NativeUdf.Descriptor> udfs = new ArrayList<>();
   private final List<Integer> udfIdSlots = new ArrayList<>();
 
   private final List<Integer> projectionRoots = new ArrayList<>();
@@ -137,15 +149,19 @@ final class RexExpression {
   private String reason;
   // The session time zone (table.local-time-zone) — needed to format/extract a TIMESTAMP_LTZ, whose
   // calendar fields depend on it. Set only on the Calc path (where DATE_FORMAT/EXTRACT live); null
-  // elsewhere, so an LTZ date/extract in a bare-RexNode context (e.g. a join residual) safely falls back.
+  // elsewhere, so an LTZ date/extract in a bare-RexNode context (e.g. a join residual) safely falls
+  // back.
   private String sessionZoneId;
-  // Whether table.exec.legacy-cast-behaviour is enabled — known only when encoding a Calc (the config
+  // Whether table.exec.legacy-cast-behaviour is enabled — known only when encoding a Calc (the
+  // config
   // rides the node). null (a bare predicate encode) declines the host-exact casts, conservatively.
   private Boolean legacyCastBehaviour;
 
   private RexExpression() {}
 
-  /** Records the first decline reason and returns false, so callers can {@code return reject(...)}. */
+  /**
+   * Records the first decline reason and returns false, so callers can {@code return reject(...)}.
+   */
   private boolean reject(String why) {
     if (reason == null) {
       reason = why;
@@ -160,8 +176,8 @@ final class RexExpression {
   }
 
   /**
-   * Packages an encoded single-expression predicate (its root at node 0) for a native join operator,
-   * or {@link EncodedPredicate#NONE} when there is no predicate.
+   * Packages an encoded single-expression predicate (its root at node 0) for a native join
+   * operator, or {@link EncodedPredicate#NONE} when there is no predicate.
    */
   static EncodedPredicate toEncodedPredicate(RexExpression predicate) {
     if (predicate == null) {
@@ -268,7 +284,8 @@ final class RexExpression {
    * Remaps every top-level input-column reference through {@code map} (old column index → new), in
    * place. Used when the entry transpose prunes the input: the Arrow batch the native operator sees
    * holds only the read columns, compacted, so each {@code INPUT_REF} points at its new position.
-   * Nested field access is encoded by name and the pruned fields keep their names, so it is unaffected.
+   * Nested field access is encoded by name and the pruned fields keep their names, so it is
+   * unaffected.
    */
   RexExpression remapInputs(int[] map) {
     for (int i = 0; i < kinds.size(); i++) {
@@ -313,9 +330,9 @@ final class RexExpression {
 
   /**
    * Records a UDF to register at operator open() and returns its local index (baked into the {@code
-   * longs} pool in place of a plan-time global id); also notes the next {@code longs} slot as the one
-   * holding that index, so the operator's {@link
-   * tech.streamfusion.operator.NativeUdf.Binding} can patch it to the runtime id.
+   * longs} pool in place of a plan-time global id); also notes the next {@code longs} slot as the
+   * one holding that index, so the operator's {@link tech.streamfusion.operator.NativeUdf.Binding}
+   * can patch it to the runtime id.
    */
   private int addUdf(tech.streamfusion.operator.NativeUdf.Descriptor descriptor) {
     int localIndex = udfs.size();
@@ -331,7 +348,10 @@ final class RexExpression {
         toIntArray(udfIdSlots));
   }
 
-  /** Appends {@code node} in pre-order; returns false (abandoning the encode) on an unsupported node. */
+  /**
+   * Appends {@code node} in pre-order; returns false (abandoning the encode) on an unsupported
+   * node.
+   */
   private boolean emit(RexNode node) {
     if (node instanceof RexInputRef) {
       add(KIND_INPUT_REF, ((RexInputRef) node).getIndex(), 0);
@@ -353,15 +373,28 @@ final class RexExpression {
   }
 
   private boolean emitLiteral(RexLiteral literal) {
-    // An untyped NULL (e.g. a NULLIF/CASE `THEN NULL` branch); the surrounding expression's coercion
-    // gives it a type, as it does on the host.
+    SqlTypeName type = literal.getType().getSqlTypeName();
     if (literal.isNull()) {
+      if (type == SqlTypeName.CHAR
+          || type == SqlTypeName.VARCHAR
+          || type == SqlTypeName.VARBINARY) {
+        if (type == SqlTypeName.VARBINARY) {
+          add(KIND_LIT_BINARY, longs.size(), 0);
+          longs.add(-1L);
+        } else {
+          add(KIND_LIT_STRING, strings.size(), 0);
+          strings.add(null);
+        }
+        return true;
+      }
+      // Other NULL types are inferred from the surrounding expression.
       add(KIND_LIT_NULL, -1, 0);
       return true;
     }
-    SqlTypeName type = literal.getType().getSqlTypeName();
-    // A day-time INTERVAL literal (SECOND/MINUTE/HOUR/DAY) — Calcite stores its value in milliseconds.
-    // Admitted so datetime arithmetic like `ts - INTERVAL '10' SECOND` (Nexmark q7) is expressible; a
+    // A day-time INTERVAL literal (SECOND/MINUTE/HOUR/DAY) — Calcite stores its value in
+    // milliseconds.
+    // Admitted so datetime arithmetic like `ts - INTERVAL '10' SECOND` (Nexmark q7) is expressible;
+    // a
     // year-month interval (value in months) falls back.
     if (type.getFamily() == SqlTypeFamily.INTERVAL_DAY_TIME) {
       Long millis = literal.getValueAs(Long.class);
@@ -414,7 +447,8 @@ final class RexExpression {
           if (value == null) {
             return false;
           }
-          // The host evaluates FLOAT arithmetic in single precision. A double literal would widen the
+          // The host evaluates FLOAT arithmetic in single precision. A double literal would widen
+          // the
           // whole expression, changing both the result type the plan promised and its last bits.
           add(KIND_LIT_FLOAT, doubles.size(), 0);
           doubles.add(value);
@@ -441,6 +475,21 @@ final class RexExpression {
           strings.add(value);
           return true;
         }
+      case VARBINARY:
+        {
+          org.apache.calcite.avatica.util.ByteString value =
+              literal.getValueAs(org.apache.calcite.avatica.util.ByteString.class);
+          if (value == null) {
+            return false;
+          }
+          byte[] bytes = value.getBytes();
+          add(KIND_LIT_BINARY, longs.size(), 0);
+          longs.add((long) bytes.length);
+          for (byte item : bytes) {
+            longs.add((long) (item & 0xff));
+          }
+          return true;
+        }
       case BOOLEAN:
         {
           Boolean value = literal.getValueAs(Boolean.class);
@@ -464,7 +513,8 @@ final class RexExpression {
     if (call.getKind() == SqlKind.CAST) {
       return emitCast(call);
     }
-    // Reinterpret only re-tags a value's type (e.g. stripping a time-attribute/ROWTIME marker), never
+    // Reinterpret only re-tags a value's type (e.g. stripping a time-attribute/ROWTIME marker),
+    // never
     // changing the value — an identity projection of its first operand.
     if (call.getKind() == SqlKind.REINTERPRET) {
       return emit(call.getOperands().get(0));
@@ -481,9 +531,12 @@ final class RexExpression {
       add(KIND_CALL, 92, 2);
       return emit(operands.get(interval)) && emit(operands.get(1 - interval));
     }
-    // Decimal-typed arithmetic, all exact. Add/subtract/multiply: the operands reach the native side
-    // as Decimal128 (columns already are; literals emit as exact Decimal128), and Arrow's Decimal128
-    // add/sub/multiply match Flink's — the products carry the full scale (sum of input scales for ×,
+    // Decimal-typed arithmetic, all exact. Add/subtract/multiply: the operands reach the native
+    // side
+    // as Decimal128 (columns already are; literals emit as exact Decimal128), and Arrow's
+    // Decimal128
+    // add/sub/multiply match Flink's — the products carry the full scale (sum of input scales for
+    // ×,
     // aligned max scale for ±), and the wrapping cast to the declared DECIMAL(p, s) rounds HALF_UP,
     // the same rounding Flink uses. Division/modulo need Flink's own two rounding steps (the
     // 38-significant-digit quotient, then the rescale to the declared type), which Arrow's division
@@ -518,6 +571,96 @@ final class RexExpression {
     if ("COALESCE".equals(functionName)) {
       return emitCoalesceAsCase(call.getOperands());
     }
+    if ("ENCODE".equals(functionName)) {
+      return emitCharsetFunction(call, 120, SqlTypeFamily.CHARACTER);
+    }
+    if ("DECODE".equals(functionName)) {
+      return emitCharsetFunction(call, 121, SqlTypeFamily.BINARY);
+    }
+    if ("TO_DATE".equals(functionName)) {
+      return emitCharacterFunction(call, 131, 1, 1);
+    }
+    if ("TO_TIMESTAMP".equals(functionName)) {
+      return reject("TO_TIMESTAMP is deferred until native timestamp units are compatible");
+    }
+    if ("JSON_QUOTE".equals(functionName)) {
+      return emitCharacterFunction(call, 122, 1, 1);
+    }
+    if ("JSON_UNQUOTE".equals(functionName)) {
+      return emitCharacterFunction(call, 123, 1, 1);
+    }
+    if ("SPLIT".equals(functionName)) {
+      List<RexNode> args = call.getOperands();
+      if (args.size() != 2
+          || !isCharacter(args.get(0))
+          || !isCharacter(args.get(1))
+          || !(args.get(1) instanceof RexLiteral)) {
+        return reject("SPLIT requires a literal non-empty character separator");
+      }
+      String separator = ((RexLiteral) args.get(1)).getValueAs(String.class);
+      if (separator == null || separator.isEmpty()) {
+        return reject("SPLIT requires a literal non-empty character separator");
+      }
+      return emitBuiltinCall(call, 124);
+    }
+    if ("STARTSWITH".equals(functionName)) {
+      return emitCharacterFunction(call, 100, 2, 2);
+    }
+    if ("ENDSWITH".equals(functionName)) {
+      return emitCharacterFunction(call, 101, 2, 2);
+    }
+    if ("INSTR".equals(functionName)) {
+      return emitStringSearch(call, 102, false);
+    }
+    if ("LOCATE".equals(functionName)) {
+      return emitStringSearch(call, 102, true);
+    }
+    if ("BIN".equals(functionName)) {
+      return emitEncoding(call, 104, true, false);
+    }
+    if ("HEX".equals(functionName)) {
+      return emitEncoding(call, 105, true, true);
+    }
+    if ("TO_BASE64".equals(functionName)) {
+      return emitEncoding(call, 107, false, true);
+    }
+    if ("UNHEX".equals(functionName)) {
+      return emitEncoding(call, 108, false, true);
+    }
+    if ("GREATEST".equals(functionName)) {
+      return emitExtremum(call, 109);
+    }
+    if ("LEAST".equals(functionName)) {
+      return emitExtremum(call, 110);
+    }
+    if ("INITCAP".equals(functionName)) {
+      return emitCharacterFunction(call, 111, 1, 1);
+    }
+    if ("TRANSLATE".equals(functionName)
+        || "TRANSLATE3".equals(functionName)) {
+      return emitCharacterFunction(call, 112, 3, 3);
+    }
+    if ("BTRIM".equals(functionName)) {
+      return emitTrimSet(call, 113, 1);
+    }
+    if ("LTRIM".equals(functionName) && call.getOperands().size() == 2) {
+      return emitTrimSet(call, 139, 2);
+    }
+    if ("RTRIM".equals(functionName) && call.getOperands().size() == 2) {
+      return emitTrimSet(call, 140, 2);
+    }
+    if ("ELT".equals(functionName)) {
+      return emitElt(call);
+    }
+    if ("URL_ENCODE".equals(functionName)) {
+      return emitCharacterFunction(call, 115, 1, 1);
+    }
+    if ("URL_DECODE".equals(functionName)) {
+      return emitCharacterFunction(call, Runtime.version().feature() >= 25 ? 118 : 117, 1, 1);
+    }
+    if ("OVERLAY".equals(functionName)) {
+      return emitOverlay(call);
+    }
     if ("CONCAT".equals(functionName) || "||".equals(functionName)) {
       return emitStringCall(call, 93, 1, Integer.MAX_VALUE);
     }
@@ -534,8 +677,9 @@ final class RexExpression {
     if ("TRIM".equals(functionName)) {
       return emitTrim(call);
     }
-    if ("SUBSTRING".equals(functionName)) {
-      return emitSubstring(call.getOperands());
+    if ("SUBSTRING".equals(functionName)
+        || "SUBSTR".equals(functionName)) {
+      return emitStringWithIntegers(call, 125, 2, 3);
     }
     if ("REPLACE".equals(functionName)) {
       List<RexNode> args = call.getOperands();
@@ -575,9 +719,16 @@ final class RexExpression {
       return emitFloatUnary(call, 62);
     }
     if ("FLOOR".equals(functionName)) {
+      if (call.getOperands().size() == 2) {
+        return reject("Temporal FLOOR is deferred until native timestamp units are compatible");
+      }
       return emitFloatUnary(call, 63);
     }
-    if ("CEIL".equals(functionName) || "CEILING".equals(functionName)) {
+    if ("CEIL".equals(functionName)
+        || "CEILING".equals(functionName)) {
+      if (call.getOperands().size() == 2) {
+        return reject("Temporal CEIL is deferred until native timestamp units are compatible");
+      }
       return emitFloatUnary(call, 64);
     }
     if ("SIGN".equals(functionName)) {
@@ -593,24 +744,27 @@ final class RexExpression {
       return emit(args.get(0)) && emit(args.get(1));
     }
     if ("LEFT".equals(functionName)) {
-      return emitBoundedSubstr(call, 69);
+      return emitStringWithIntegers(call, 126, 2, 2);
     }
     if ("RIGHT".equals(functionName)) {
-      return emitBoundedSubstr(call, 70);
+      return emitStringWithIntegers(call, 127, 2, 2);
     }
     if ("LPAD".equals(functionName)) {
-      return emitPad(call, 82);
+      return emitPad(call, 128);
     }
     if ("RPAD".equals(functionName)) {
-      return emitPad(call, 83);
+      return emitPad(call, 129);
     }
-    // Functions whose native result can differ from the host — locale case folding (UPPER/LOWER) and
+    // Functions whose native result can differ from the host — locale case folding (UPPER/LOWER)
+    // and
     // last-ULP transcendental math. They fall back unless the allowIncompatible flag opts them in.
-    Integer incompatUnaryOp = INCOMPATIBLE_UNARY.get(functionName);
+    Integer incompatUnaryOp =
+        INCOMPATIBLE_UNARY.get(functionName);
     if (incompatUnaryOp != null) {
       return emitIncompatibleUnary(call, incompatUnaryOp);
     }
-    if ("POWER".equals(functionName) || "POW".equals(functionName)) {
+    if ("POWER".equals(functionName)
+        || "POW".equals(functionName)) {
       return emitIncompatiblePower(call);
     }
     if ("ROUND".equals(functionName)) {
@@ -694,12 +848,12 @@ final class RexExpression {
     boolean character = false;
     boolean numeric = false;
     for (RexNode operand : comparison.getOperands()) {
-      character |=
-          operand.getType().getSqlTypeName().getFamily() == SqlTypeFamily.CHARACTER;
+      character |= operand.getType().getSqlTypeName().getFamily() == SqlTypeFamily.CHARACTER;
       numeric |= operand.getType().getSqlTypeName().getFamily() == SqlTypeFamily.NUMERIC;
       if (operand instanceof RexCall && operand.getKind() == SqlKind.CAST) {
         RexNode source = ((RexCall) operand).getOperands().get(0);
-        boolean sourceString = source.getType().getSqlTypeName().getFamily() == SqlTypeFamily.CHARACTER;
+        boolean sourceString =
+            source.getType().getSqlTypeName().getFamily() == SqlTypeFamily.CHARACTER;
         boolean targetNumeric =
             operand.getType().getSqlTypeName().getFamily() == SqlTypeFamily.NUMERIC;
         if (sourceString && targetNumeric) {
@@ -708,6 +862,207 @@ final class RexExpression {
       }
     }
     return character && numeric;
+  }
+
+  private boolean emitStringSearch(RexCall call, int op, boolean locate) {
+    List<RexNode> args = call.getOperands();
+    String name = call.getOperator().getName();
+    if (args.size() != 2 && !(locate && args.size() == 3)) {
+      return reject(name + (locate ? " requires 2 or 3 arguments" : " requires 2 arguments"));
+    }
+    for (int i = 0; i < 2; i++) {
+      SqlTypeName type = args.get(i).getType().getSqlTypeName();
+      if (type.getFamily() != SqlTypeFamily.CHARACTER && type != SqlTypeName.NULL) {
+        return reject(name + ": only character strings admitted");
+      }
+    }
+    if (args.size() == 3) {
+      SqlTypeName startType = args.get(2).getType().getSqlTypeName();
+      if (startType != SqlTypeName.TINYINT
+          && startType != SqlTypeName.SMALLINT
+          && startType != SqlTypeName.INTEGER
+          && startType != SqlTypeName.NULL) {
+        return reject("LOCATE start must be TINYINT, SMALLINT, or INTEGER");
+      }
+      op = 103;
+    }
+    add(KIND_CALL, op, args.size());
+    // LOCATE takes (needle, string[, start]); the native functions take the string first.
+    return emit(args.get(locate ? 1 : 0))
+        && emit(args.get(locate ? 0 : 1))
+        && (args.size() == 2 || emit(args.get(2)));
+  }
+
+  private boolean emitCharsetFunction(RexCall call, int op, SqlTypeFamily inputFamily) {
+    List<RexNode> args = call.getOperands();
+    if (args.size() != 2
+        || args.get(0).getType().getSqlTypeName().getFamily() != inputFamily
+        || !(args.get(1) instanceof RexLiteral)) {
+      return reject(call.getOperator().getName() + " requires a literal charset");
+    }
+    String name = ((RexLiteral) args.get(1)).getValueAs(String.class);
+    if (name == null) {
+      return reject(call.getOperator().getName() + ": NULL charset");
+    }
+    String charset;
+    try {
+      charset = java.nio.charset.Charset.forName(name).name();
+    } catch (IllegalArgumentException e) {
+      return reject(call.getOperator().getName() + ": unknown charset");
+    }
+    if (!List.of("UTF-8", "US-ASCII", "ISO-8859-1").contains(charset)) {
+      return reject(call.getOperator().getName() + ": unverified charset " + charset);
+    }
+    add(KIND_CALL, op, 2);
+    if (!emit(args.get(0))) {
+      return false;
+    }
+    add(KIND_LIT_STRING, strings.size(), 0);
+    strings.add(charset);
+    return true;
+  }
+
+  private boolean emitExtremum(RexCall call, int op) {
+    List<RexNode> args = call.getOperands();
+    if (args.size() < 2) {
+      return reject(call.getOperator().getName() + " requires at least two arguments");
+    }
+    RelDataType result = call.getType();
+    SqlTypeName type = result.getSqlTypeName();
+    boolean integer = SqlTypeFamily.INTEGER.getTypeNames().contains(type);
+    boolean character = type.getFamily() == SqlTypeFamily.CHARACTER;
+    if (character && args.stream().anyMatch(arg -> !isAsciiLiteralResult(arg))) {
+      return reject(call.getOperator().getName() + " requires ASCII-provable string operands");
+    }
+    if (!integer && !character && type != SqlTypeName.BOOLEAN && type != SqlTypeName.DECIMAL) {
+      return reject(
+          call.getOperator().getName()
+              + " supports integers, strings, boolean, and matching decimals");
+    }
+    for (RexNode arg : args) {
+      RelDataType input = arg.getType();
+      SqlTypeName inputType = input.getSqlTypeName();
+      boolean admitted =
+          integer
+              ? SqlTypeFamily.INTEGER.getTypeNames().contains(inputType)
+              : character
+                  ? inputType.getFamily() == SqlTypeFamily.CHARACTER
+                  : inputType == type
+                      && (type != SqlTypeName.DECIMAL
+                          || (input.getPrecision() == result.getPrecision()
+                              && input.getScale() == result.getScale()));
+      if (!admitted) {
+        return reject(call.getOperator().getName() + " operand types require unverified coercion");
+      }
+    }
+    return emitBuiltinCall(call, op);
+  }
+
+  private static boolean isAsciiLiteralResult(RexNode node) {
+    if (node instanceof RexLiteral literal) {
+      String value = literal.getValueAs(String.class);
+      return value == null || value.chars().allMatch(ch -> ch < 128);
+    }
+    if (node instanceof RexCall call && call.getKind() == SqlKind.CASE) {
+      List<RexNode> operands = call.getOperands();
+      for (int i = 1; i < operands.size() - 1; i += 2) {
+        if (!isAsciiLiteralResult(operands.get(i))) {
+          return false;
+        }
+      }
+      return isAsciiLiteralResult(operands.get(operands.size() - 1));
+    }
+    return false;
+  }
+
+  private boolean emitTrimSet(RexCall call, int op, int min) {
+    if (call.getOperands().size() == 2 && !(call.getOperands().get(1) instanceof RexLiteral)) {
+      return reject(call.getOperator().getName() + " requires a literal trim set");
+    }
+    return emitCharacterFunction(call, op, min, 2);
+  }
+
+  private boolean emitCharacterFunction(RexCall call, int op, int min, int max) {
+    if (call.getOperands().size() < min
+        || call.getOperands().size() > max
+        || call.getOperands().stream().anyMatch(arg -> !isCharacter(arg))) {
+      return reject(
+          call.getOperator().getName() + " requires " + min + ".." + max + " character arguments");
+    }
+    return emitBuiltinCall(call, op);
+  }
+
+  private static boolean isCharacter(RexNode arg) {
+    return arg.getType().getSqlTypeName().getFamily() == SqlTypeFamily.CHARACTER;
+  }
+
+  private boolean emitBuiltinCall(RexCall call, int op) {
+    add(KIND_CALL, op, call.getOperands().size());
+    for (RexNode arg : call.getOperands()) {
+      if (!emit(arg)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private boolean emitElt(RexCall call) {
+    List<RexNode> args = call.getOperands();
+    if (args.size() < 2
+        || args.get(0).getType().getSqlTypeName() != SqlTypeName.INTEGER
+        || args.subList(1, args.size()).stream().anyMatch(arg -> !isCharacter(arg))) {
+      // Flink 2.2.1 casts its Number index to java.lang.Integer after checking the bounds.
+      return reject("ELT requires an INTEGER index and character values");
+    }
+    return emitBuiltinCall(call, 114);
+  }
+
+  private boolean emitOverlay(RexCall call) {
+    List<RexNode> args = call.getOperands();
+    if ((args.size() != 3 && args.size() != 4)
+        || !isCharacter(args.get(0))
+        || !isCharacter(args.get(1))
+        || args.subList(2, args.size()).stream()
+            .anyMatch(
+                arg ->
+                    !SqlTypeFamily.INTEGER
+                        .getTypeNames()
+                        .contains(arg.getType().getSqlTypeName()))) {
+      return reject("OVERLAY requires two character strings and integer positions");
+    }
+    add(KIND_CALL, 116, args.size());
+    for (int i = 0; i < args.size(); i++) {
+      if (i >= 2) {
+        add(KIND_CAST, CAST_BIGINT, 1);
+      }
+      if (!emit(args.get(i))) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private boolean emitEncoding(RexCall call, int op, boolean integers, boolean strings) {
+    String name = call.getOperator().getName();
+    if (call.getOperands().size() != 1) {
+      return reject(name + " requires 1 argument");
+    }
+    RexNode arg = call.getOperands().get(0);
+    SqlTypeName type = arg.getType().getSqlTypeName();
+    boolean integer =
+        type == SqlTypeName.TINYINT
+            || type == SqlTypeName.SMALLINT
+            || type == SqlTypeName.INTEGER
+            || type == SqlTypeName.BIGINT;
+    boolean string = type.getFamily() == SqlTypeFamily.CHARACTER;
+    if (!(integers && integer) && !(strings && string) && type != SqlTypeName.NULL) {
+      return reject(name + ": unsupported input type " + type);
+    }
+    if (op == 105 && !integer) {
+      op = 106;
+    }
+    add(KIND_CALL, op, 1);
+    return emit(arg);
   }
 
   private boolean emitStringCall(RexCall call, int op, int minArgs, int maxArgs) {
@@ -808,10 +1163,10 @@ final class RexExpression {
   }
 
   /**
-   * Lowers {@code COALESCE(a, b, …, z)} to the searched CASE the host defines it as —
-   * {@code CASE WHEN a IS NOT NULL THEN a WHEN b IS NOT NULL THEN b … ELSE z} — so it rides the
-   * admitted CASE path with identical (first-non-null) semantics. Calcite does not pre-expand
-   * COALESCE here, so we expand it ourselves rather than admit a separate op.
+   * Lowers {@code COALESCE(a, b, …, z)} to the searched CASE the host defines it as — {@code CASE
+   * WHEN a IS NOT NULL THEN a WHEN b IS NOT NULL THEN b … ELSE z} — so it rides the admitted CASE
+   * path with identical (first-non-null) semantics. Calcite does not pre-expand COALESCE here, so
+   * we expand it ourselves rather than admit a separate op.
    */
   private boolean emitCoalesceAsCase(List<RexNode> operands) {
     int n = operands.size();
@@ -835,9 +1190,9 @@ final class RexExpression {
 
   /**
    * Emits a cast, but only a widening numeric one (integer to a wider integer, integer to
-   * float/double, float to double, or an identity cast). Those are lossless and evaluate identically
-   * on both sides; narrowing, float-to-integer, and string casts differ in overflow/rounding/parsing
-   * semantics, so they are not admitted and the expression falls back.
+   * float/double, float to double, or an identity cast). Those are lossless and evaluate
+   * identically on both sides; narrowing, float-to-integer, and string casts differ in
+   * overflow/rounding/parsing semantics, so they are not admitted and the expression falls back.
    */
   private boolean emitCast(RexCall call) {
     if (call.getOperands().size() != 1) {
@@ -845,9 +1200,12 @@ final class RexExpression {
     }
     RelDataType sourceType = call.getOperands().get(0).getType();
     RelDataType resultType = call.getType();
-    // A cast that leaves the value unchanged — same base type and precision/scale, differing only in
-    // nullability or a time-attribute marker (Flink's `CAST(... ):TIMESTAMP_LTZ *ROWTIME*` that marks
-    // the event-time column) — is an identity projection: emit the operand so the column passes through.
+    // A cast that leaves the value unchanged — same base type and precision/scale, differing only
+    // in
+    // nullability or a time-attribute marker (Flink's `CAST(... ):TIMESTAMP_LTZ *ROWTIME*` that
+    // marks
+    // the event-time column) — is an identity projection: emit the operand so the column passes
+    // through.
     if (sourceType.getSqlTypeName() == resultType.getSqlTypeName()
         && sourceType.getPrecision() == resultType.getPrecision()
         && sourceType.getScale() == resultType.getScale()) {
@@ -864,18 +1222,22 @@ final class RexExpression {
       return emit(call.getOperands().get(0));
     }
     // A non-narrowing cast to VARCHAR from a CHAR or VARCHAR source (target length ≥ source). Flink
-    // stores both as unpadded StringData and neither pads nor truncates a widening string cast, so the
+    // stores both as unpadded StringData and neither pads nor truncates a widening string cast, so
+    // the
     // value is unchanged — emit the operand as a passthrough. This covers a bounded computed string
     // coerced to an unbounded STRING sink column (Nexmark q14/q21's CASE result) and a CHAR literal
-    // unified up to VARCHAR (the ELSE branch of COALESCE(s, 'x') / CASE). Narrowing (target < source)
+    // unified up to VARCHAR (the ELSE branch of COALESCE(s, 'x') / CASE). Narrowing (target <
+    // source)
     // truncates and is not admitted; casting *to* CHAR(n) pads, so it is not admitted either.
     if ((source == SqlTypeName.VARCHAR || source == SqlTypeName.CHAR)
         && targetType == SqlTypeName.VARCHAR
         && resultType.getPrecision() >= sourceType.getPrecision()) {
       return emit(call.getOperands().get(0));
     }
-    // A cast to DECIMAL from an exact source (another DECIMAL, e.g. coercing q1's `0.908 * price` to
-    // the sink's DECIMAL(23,3), or an integer) is byte-exact natively: Arrow rescales Decimal128 with
+    // A cast to DECIMAL from an exact source (another DECIMAL, e.g. coercing q1's `0.908 * price`
+    // to
+    // the sink's DECIMAL(23,3), or an integer) is byte-exact natively: Arrow rescales Decimal128
+    // with
     // HALF_UP rounding, the same mode Flink uses. A float/double or string source falls through to
     // the host-exact cast upcall below.
     if (targetType == SqlTypeName.DECIMAL) {
@@ -892,7 +1254,8 @@ final class RexExpression {
       return emit(call.getOperands().get(0));
     }
     // A narrowing cast to an integer target (a wider integer, or a float/double, narrowed to an
-    // integer type). Flink emits the primitive Java cast: an integer source truncates to the low bits
+    // integer type). Flink emits the primitive Java cast: an integer source truncates to the low
+    // bits
     // (two's-complement wraparound), a float/double source rounds toward zero and saturates to the
     // target range with NaN→0. Rust's `as` reproduces both exactly, so a dedicated native wrapping
     // kernel matches the host — where arrow's own cast would instead error on overflow. See
@@ -902,7 +1265,8 @@ final class RexExpression {
       add(KIND_CAST_NARROW, narrowTarget, 1);
       return emit(call.getOperands().get(0));
     }
-    // The casts whose formatting/parsing the native engine cannot reproduce byte-for-byte — a number
+    // The casts whose formatting/parsing the native engine cannot reproduce byte-for-byte — a
+    // number
     // (incl. decimal) to/from a string, narrowing a string / padding to CHAR(n), and the inexact
     // float/double→DECIMAL — run Flink's own CastExecutor through the columnar JVM upcall, so
     // trailing zeros, scientific-notation thresholds, trim semantics, and failure behavior are the
@@ -913,7 +1277,9 @@ final class RexExpression {
     return reject("unsupported CAST " + source + "→" + targetType);
   }
 
-  /** The number↔string / string-length / float→decimal casts routed through the host's cast rules. */
+  /**
+   * The number↔string / string-length / float→decimal casts routed through the host's cast rules.
+   */
   private static boolean hostCastSupported(RelDataType sourceType, RelDataType resultType) {
     SqlTypeName source = sourceType.getSqlTypeName();
     SqlTypeName target = resultType.getSqlTypeName();
@@ -929,11 +1295,13 @@ final class RexExpression {
         || (sourceFloat && target == SqlTypeName.DECIMAL);
   }
 
-  /** The UDF marshalling code for a host-cast operand/result, or -1 for a type the upcall can't carry. */
+  /**
+   * The UDF marshalling code for a host-cast operand/result, or -1 for a type the upcall can't
+   * carry.
+   */
   private static int hostCastTypeCode(RelDataType type) {
     if (type.getSqlTypeName() == SqlTypeName.DECIMAL) {
-      return tech.streamfusion.operator.NativeUdf.decimalType(
-          type.getPrecision(), type.getScale());
+      return tech.streamfusion.operator.NativeUdf.decimalType(type.getPrecision(), type.getScale());
     }
     return udfTypeCode(type.getSqlTypeName());
   }
@@ -975,7 +1343,9 @@ final class RexExpression {
     return emit(call.getOperands().get(0));
   }
 
-  /** The target type code for a widening numeric cast {@code source → target}, or -1 if not safe. */
+  /**
+   * The target type code for a widening numeric cast {@code source → target}, or -1 if not safe.
+   */
   private static int wideningTargetCode(SqlTypeName source, SqlTypeName target) {
     int from = numericRank(source);
     int to = numericRank(target);
@@ -1002,11 +1372,11 @@ final class RexExpression {
   }
 
   /**
-   * The target integer code for a narrowing cast to an integer type — an integer→narrower-integer or a
-   * float/double→integer cast — or -1 if {@code target} is not an integer type or the cast is not
-   * narrowing (widening is handled by {@link #wideningTargetCode}, an identity/same-rank cast earlier).
-   * Admitted because Flink's primitive Java cast wraps (integer source) / saturates with NaN→0 (float
-   * source), which the native wrapping kernel reproduces.
+   * The target integer code for a narrowing cast to an integer type — an integer→narrower-integer
+   * or a float/double→integer cast — or -1 if {@code target} is not an integer type or the cast is
+   * not narrowing (widening is handled by {@link #wideningTargetCode}, an identity/same-rank cast
+   * earlier). Admitted because Flink's primitive Java cast wraps (integer source) / saturates with
+   * NaN→0 (float source), which the native wrapping kernel reproduces.
    */
   private static int narrowingIntTargetCode(SqlTypeName source, SqlTypeName target) {
     int from = numericRank(source);
@@ -1027,7 +1397,9 @@ final class RexExpression {
     }
   }
 
-  /** A widening order over the numeric types (lower widens losslessly to higher); -1 if not numeric. */
+  /**
+   * A widening order over the numeric types (lower widens losslessly to higher); -1 if not numeric.
+   */
   private static int numericRank(SqlTypeName type) {
     switch (type) {
       case TINYINT:
@@ -1063,16 +1435,9 @@ final class RexExpression {
   }
 
   /**
-   * Emits {@code SUBSTRING(s FROM pos [FOR len])} (op 55, 2 or 3 operands → native substr/substring).
-   * Admitted only when {@code pos} is an integer literal ≥ 1 and {@code len} (if present) ≥ 0: Flink
-   * and DataFusion diverge when the start is below 1 (Flink clamps it to 1, DataFusion counts the
-   * out-of-range prefix against the length), and a runtime position can't be checked — so a non-
-   * literal or out-of-range bound falls back rather than risk a wrong answer.
-   */
-  /**
-   * Emits the SQL subscript {@code array[i]} / {@code map[key]} (Calcite's ITEM). Admitted only with
-   * a literal subscript: DataFusion counts a runtime-negative array index from the end where Flink
-   * returns NULL, and the native map lookup binds the key at compile time — so a non-literal
+   * Emits the SQL subscript {@code array[i]} / {@code map[key]} (Calcite's ITEM). Admitted only
+   * with a literal subscript: DataFusion counts a runtime-negative array index from the end where
+   * Flink returns NULL, and the native map lookup binds the key at compile time — so a non-literal
    * subscript falls back rather than risk a wrong answer. An array index literal below 1 also falls
    * back, leaving the host to raise its plan-time validation error. NULL-on-miss semantics (null
    * collection, index past the end, absent key) match Flink on the native side.
@@ -1095,86 +1460,41 @@ final class RexExpression {
     return emit(collection) && emit(subscript);
   }
 
-  private boolean emitSubstring(List<RexNode> args) {
-    if (args.size() != 2 && args.size() != 3) {
-      return reject("unsupported SUBSTRING arity");
-    }
-    if (!isIntLiteralAtLeast(args.get(1), 1)) {
-      return reject("SUBSTRING requires a literal start position ≥ 1");
-    }
-    if (args.size() == 3 && !isIntLiteralAtLeast(args.get(2), 0)) {
-      return reject("SUBSTRING requires a literal length ≥ 0");
-    }
-    add(KIND_CALL, 55, args.size());
-    for (RexNode arg : args) {
-      if (!emit(arg)) {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  /**
-   * Emits {@code LEFT}/{@code RIGHT}(s, n) (op {@code op}) admitted only when {@code n} is an integer
-   * literal ≥ 0: Flink returns the empty string for a negative count while DataFusion drops that many
-   * characters from the other end, so a negative or runtime count falls back.
-   */
-  private boolean emitBoundedSubstr(RexCall call, int op) {
+  private boolean emitStringWithIntegers(RexCall call, int op, int min, int max) {
     List<RexNode> args = call.getOperands();
-    if (args.size() != 2) {
-      return reject(call.getOperator().getName() + " requires 2 arguments");
+    if (args.size() < min
+        || args.size() > max
+        || !isCharacter(args.get(0))
+        || args.stream().skip(1).anyMatch(arg -> !isInt32(arg))) {
+      return reject(call.getOperator().getName() + " requires a string and INT parameters");
     }
-    if (!isIntLiteralAtLeast(args.get(1), 0)) {
-      return reject(call.getOperator().getName() + " requires a literal count ≥ 0");
-    }
-    add(KIND_CALL, op, 2);
-    return emit(args.get(0)) && emit(args.get(1));
+    return emitBuiltinCall(call, op);
   }
 
-  /**
-   * Emits {@code LPAD}/{@code RPAD}(s, len [, pad]) (op {@code op}) with the length a literal ≥ 0 and
-   * the pad string (if present) a literal — matching DataFusion Comet's scalar-pad constraint and
-   * avoiding the negative/runtime-length edges, the same gating as LEFT/RIGHT/SUBSTRING.
-   */
+  private static boolean isInt32(RexNode arg) {
+    return List.of(SqlTypeName.TINYINT, SqlTypeName.SMALLINT, SqlTypeName.INTEGER, SqlTypeName.NULL)
+        .contains(arg.getType().getSqlTypeName());
+  }
+
   private boolean emitPad(RexCall call, int op) {
     List<RexNode> args = call.getOperands();
-    if (args.size() != 2 && args.size() != 3) {
-      return reject(call.getOperator().getName() + " requires 2 or 3 arguments");
+    if (args.size() != 3
+        || !isCharacter(args.get(0))
+        || !isInt32(args.get(1))
+        || !isCharacter(args.get(2))) {
+      return reject(call.getOperator().getName() + " requires STRING, INT, STRING arguments");
     }
-    if (!isIntLiteralAtLeast(args.get(1), 0)) {
-      return reject(call.getOperator().getName() + " requires a literal length ≥ 0");
-    }
-    if (args.size() == 3 && !(args.get(2) instanceof RexLiteral)) {
-      return reject(call.getOperator().getName() + " pad string must be a literal");
-    }
-    add(KIND_CALL, op, args.size());
-    for (RexNode arg : args) {
-      if (!emit(arg)) {
-        return false;
-      }
-    }
-    return true;
+    return emitBuiltinCall(call, op);
   }
 
-  /**
-   * Emits {@code SPLIT_INDEX(str, sep, index)} (op 85). Admitted only when {@code sep} is a non-empty
-   * string literal: with a whole, non-empty separator the native split reproduces Flink's
-   * {@code splitByWholeSeparatorPreserveAllTokens} exactly. An empty or runtime separator (or the
-   * char-code overload) falls back.
-   */
   private boolean emitSplitIndex(List<RexNode> args) {
-    if (args.size() != 3) {
-      return reject("SPLIT_INDEX requires 3 arguments");
+    if (args.size() != 3
+        || !isCharacter(args.get(0))
+        || !isCharacter(args.get(1))
+        || !isInt32(args.get(2))) {
+      return reject("SPLIT_INDEX requires STRING, STRING, INT arguments");
     }
-    RexNode separator = args.get(1);
-    if (!(separator instanceof RexLiteral)) {
-      return reject("SPLIT_INDEX requires a literal separator");
-    }
-    String value = ((RexLiteral) separator).getValueAs(String.class);
-    if (value == null || value.isEmpty()) {
-      return reject("SPLIT_INDEX requires a non-empty separator");
-    }
-    add(KIND_CALL, 85, 3);
+    add(KIND_CALL, 130, 3);
     for (RexNode arg : args) {
       if (!emit(arg)) {
         return false;
@@ -1184,12 +1504,13 @@ final class RexExpression {
   }
 
   /**
-   * Emits {@code REGEXP_EXTRACT(str, pattern[, groupIndex])}. By default it routes through the host's own
-   * {@code SqlFunctionUtils.regexpExtract} as a JVM-upcall node (see {@link #emitRegexpExtractJvm}), so the
-   * regex is evaluated by {@code java.util.regex} exactly as Flink would — byte-identical, and the rest of
-   * the expression still runs natively. Under the {@code allowIncompatible} flag it instead uses the pure
-   * native Rust {@code regex} path (op 88, faster, no JVM crossing), which agrees with Java on common
-   * syntax but can diverge on advanced features (backreferences, lookaround, some Unicode/class edges).
+   * Emits {@code REGEXP_EXTRACT(str, pattern[, groupIndex])}. By default it routes through the
+   * host's own {@code SqlFunctionUtils.regexpExtract} as a JVM-upcall node (see {@link
+   * #emitRegexpExtractJvm}), so the regex is evaluated by {@code java.util.regex} exactly as Flink
+   * would — byte-identical, and the rest of the expression still runs natively. Under the {@code
+   * allowIncompatible} flag it instead uses the pure native Rust {@code regex} path (op 88, faster,
+   * no JVM crossing), which agrees with Java on common syntax but can diverge on advanced features
+   * (backreferences, lookaround, some Unicode/class edges).
    */
   private boolean emitRegexpExtract(List<RexNode> args) {
     if (NativeConfig.allowsIncompatible("REGEXP_EXTRACT")) {
@@ -1199,9 +1520,9 @@ final class RexExpression {
   }
 
   /**
-   * The pure-native REGEXP_EXTRACT (op 88), opt-in behind the allowIncompatible flag. The pattern must be
-   * a string literal (so the native side compiles it once per batch) and the group index a literal ≥ 0.
-   * The two-argument form (no explicit index) falls back.
+   * The pure-native REGEXP_EXTRACT (op 88), opt-in behind the allowIncompatible flag. The pattern
+   * must be a string literal (so the native side compiles it once per batch) and the group index a
+   * literal ≥ 0. The two-argument form (no explicit index) falls back.
    */
   private boolean emitRegexpExtractNative(List<RexNode> args) {
     if (args.size() != 3) {
@@ -1223,13 +1544,13 @@ final class RexExpression {
   }
 
   /**
-   * Emits {@code REGEXP_EXTRACT} as a JVM-upcall node (op {@link #KIND_UDF}) backed by
-   * {@code NativeBuiltinFunctions.regexpExtract} — Flink's own {@code SqlFunctionUtils.regexpExtract}
+   * Emits {@code REGEXP_EXTRACT} as a JVM-upcall node (op {@link #KIND_UDF}) backed by {@code
+   * NativeBuiltinFunctions.regexpExtract} — Flink's own {@code SqlFunctionUtils.regexpExtract}
    * logic byte-for-byte, minus its per-call {@code Pattern.compile}. The native engine packs the
    * argument columns and upcalls per batch, so the match runs under {@code java.util.regex} and is
-   * byte-identical to the host for every pattern (the two- and three-argument forms both apply). The
-   * string arguments must be string-typed and the group index INTEGER or BIGINT; anything else falls
-   * back.
+   * byte-identical to the host for every pattern (the two- and three-argument forms both apply).
+   * The string arguments must be string-typed and the group index INTEGER or BIGINT; anything else
+   * falls back.
    */
   private boolean emitRegexpExtractJvm(List<RexNode> args) {
     if (args.size() != 2 && args.size() != 3) {
@@ -1293,14 +1614,14 @@ final class RexExpression {
   }
 
   /**
-   * Emits a Flink user {@link org.apache.flink.table.functions.ScalarFunction} call as a JVM-upcall node
-   * (op {@link #KIND_UDF}). The function is registered in {@link
-   * tech.streamfusion.operator.NativeUdf} and invoked per batch by the native {@code
-   * JvmUdf} expression, which runs the actual {@code eval} over the Arrow argument columns (columnar) —
-   * so the result is byte-identical to Flink. Admitted only when the definition is a {@code
-   * ScalarFunction}, every argument and the result map to a supported marshalling type, and exactly one
-   * {@code eval} overload of the right arity exists (an ambiguous overload is not guessed); otherwise the
-   * call falls back.
+   * Emits a Flink user {@link org.apache.flink.table.functions.ScalarFunction} call as a JVM-upcall
+   * node (op {@link #KIND_UDF}). The function is registered in {@link
+   * tech.streamfusion.operator.NativeUdf} and invoked per batch by the native {@code JvmUdf}
+   * expression, which runs the actual {@code eval} over the Arrow argument columns (columnar) — so
+   * the result is byte-identical to Flink. Admitted only when the definition is a {@code
+   * ScalarFunction}, every argument and the result map to a supported marshalling type, and exactly
+   * one {@code eval} overload of the right arity exists (an ambiguous overload is not guessed);
+   * otherwise the call falls back.
    */
   private boolean emitUdf(RexCall call) {
     org.apache.flink.table.functions.FunctionDefinition def =
@@ -1343,7 +1664,10 @@ final class RexExpression {
     return true;
   }
 
-  /** The native UDF marshalling type code for a SQL type (see NativeUdf.TYPE_*), or -1 if unsupported. */
+  /**
+   * The native UDF marshalling type code for a SQL type (see NativeUdf.TYPE_*), or -1 if
+   * unsupported.
+   */
   private static int udfTypeCode(SqlTypeName type) {
     switch (type) {
       case VARCHAR:
@@ -1370,12 +1694,10 @@ final class RexExpression {
   }
 
   /**
-   * Emits {@code EXTRACT(unit FROM ts)} (op 89), the lowering of {@code YEAR}/{@code MONTH}/{@code
-   * HOUR}/… (Nexmark q14's {@code HOUR(dateTime)}). Admitted only over a plain {@code TIMESTAMP} (a
-   * local-zoned timestamp's fields depend on the session zone, like {@code DATE_FORMAT}) for the
-   * unambiguous integer fields whose value is identical in Flink and chrono; anything else — a fractional
-   * result (e.g. {@code SECOND} carrying millis, whose result type is decimal) or a
-   * convention-divergent unit ({@code DOW}/{@code WEEK}/{@code QUARTER}) — falls back.
+   * Emits integer calendar extraction. DATE/plain TIMESTAMP support QUARTER, WEEK, DOY and DOW
+   * through Flink's integer calendar kernel. YEAR through SECOND retain the existing timestamp
+   * path, including session-zone-aware LTZ extraction. Fractional results and unlisted fields fall
+   * back.
    */
   private boolean emitExtract(RexCall call) {
     List<RexNode> operands = call.getOperands();
@@ -1384,6 +1706,20 @@ final class RexExpression {
     }
     RexNode source = operands.get(1);
     SqlTypeName sourceType = source.getType().getSqlTypeName();
+    String calendarUnit = String.valueOf(((RexLiteral) operands.get(0)).getValue());
+    int calendarOp =
+        switch (calendarUnit) {
+          case "QUARTER" -> 133;
+          case "WEEK" -> 134;
+          case "DOY" -> 135;
+          case "DOW" -> 136;
+          default -> -1;
+        };
+    if (calendarOp >= 0
+        && (sourceType == SqlTypeName.DATE || sourceType == SqlTypeName.TIMESTAMP)) {
+      add(KIND_CALL, calendarOp, 1);
+      return emit(source);
+    }
     if (sourceType != SqlTypeName.TIMESTAMP
         && sourceType != SqlTypeName.TIMESTAMP_WITH_LOCAL_TIME_ZONE) {
       return reject("EXTRACT: only a TIMESTAMP or TIMESTAMP_LTZ argument is supported");
@@ -1410,12 +1746,13 @@ final class RexExpression {
   }
 
   /**
-   * {@code EXTRACT} over a {@code TIMESTAMP_LTZ}, whose fields depend on the session time zone. By default
-   * routes through Flink's own {@code DateTimeUtils.extractFromTimestamp(unit, ts, zone)} via the JVM
-   * upcall (byte-identical); behind {@code allowIncompatible} emits the native {@code chrono-tz} path
-   * (op 91: the timestamp, the chrono field name, the zone id).
+   * {@code EXTRACT} over a {@code TIMESTAMP_LTZ}, whose fields depend on the session time zone. By
+   * default routes through Flink's own {@code DateTimeUtils.extractFromTimestamp(unit, ts, zone)}
+   * via the JVM upcall (byte-identical); behind {@code allowIncompatible} emits the native {@code
+   * chrono-tz} path (op 91: the timestamp, the chrono field name, the zone id).
    */
-  private boolean emitExtractLtz(RexNode source, Object unit, String field, SqlTypeName returnType) {
+  private boolean emitExtractLtz(
+      RexNode source, Object unit, String field, SqlTypeName returnType) {
     if (sessionZoneId == null) {
       return reject("EXTRACT over TIMESTAMP_LTZ: session time zone unavailable");
     }
@@ -1439,12 +1776,14 @@ final class RexExpression {
     }
     return emitLtzUpcall(
         source,
-        new tech.streamfusion.operator.LtzDateTimeFunctions.Extract(
-            unit.toString(), sessionZoneId),
+        new tech.streamfusion.operator.LtzDateTimeFunctions.Extract(unit.toString(), sessionZoneId),
         returnCode);
   }
 
-  /** The chrono field name for a Calcite {@code TimeUnitRange}, or null if not a supported integer field. */
+  /**
+   * The chrono field name for a Calcite {@code TimeUnitRange}, or null if not a supported integer
+   * field.
+   */
   private static String extractField(String unit) {
     if (unit == null) {
       return null;
@@ -1553,10 +1892,10 @@ final class RexExpression {
   }
 
   /**
-   * Emits {@code TO_TIMESTAMP_LTZ(epoch, precision)} (op 87). Admitted only for the millisecond form
-   * ({@code precision} literal 3) over an integer epoch — the only shape the native side reads (epoch
-   * millis → the nanosecond/no-tz timestamp ArrowConversion pins every timestamp column to). Any other
-   * precision (seconds, micros) or a non-literal precision falls back.
+   * Emits {@code TO_TIMESTAMP_LTZ(epoch, precision)} (op 87). Admitted only for the millisecond
+   * form ({@code precision} literal 3) over an integer epoch — the only shape the native side reads
+   * (epoch millis → the nanosecond/no-tz timestamp ArrowConversion pins every timestamp column to).
+   * Any other precision (seconds, micros) or a non-literal precision falls back.
    */
   private boolean emitToTimestampLtz(List<RexNode> args) {
     if (args.size() != 2) {
@@ -1574,10 +1913,11 @@ final class RexExpression {
   }
 
   /**
-   * Emits {@code DATE_FORMAT(timestamp, format)} (op 86). Admitted only for a plain {@code TIMESTAMP}
-   * (not local-zoned, whose formatting would depend on the session zone) with a literal format whose
-   * Java pattern translates to a byte-identical chrono pattern (see {@link #toChronoFormat}); the
-   * translated pattern is passed to the native side. Anything else falls back.
+   * Emits {@code DATE_FORMAT(timestamp, format)} (op 86). Admitted only for a plain {@code
+   * TIMESTAMP} (not local-zoned, whose formatting would depend on the session zone) with a literal
+   * format whose Java pattern translates to a byte-identical chrono pattern (see {@link
+   * #toChronoFormat}); the translated pattern is passed to the native side. Anything else falls
+   * back.
    */
   private boolean emitDateFormat(List<RexNode> args) {
     if (args.size() != 2) {
@@ -1609,11 +1949,11 @@ final class RexExpression {
   }
 
   /**
-   * {@code DATE_FORMAT} over a {@code TIMESTAMP_LTZ}, whose formatting depends on the session time zone.
-   * By default it routes through Flink's own {@code DateTimeUtils.formatTimestamp(ts, pattern, zone)} via
-   * the columnar JVM upcall — byte-identical. Behind {@code allowIncompatible} it emits the pure-native
-   * {@code chrono-tz} path (op 90: the timestamp, the chrono pattern, the zone id), which can diverge from
-   * the JVM at tz-database edges (see the divergences note).
+   * {@code DATE_FORMAT} over a {@code TIMESTAMP_LTZ}, whose formatting depends on the session time
+   * zone. By default it routes through Flink's own {@code DateTimeUtils.formatTimestamp(ts,
+   * pattern, zone)} via the columnar JVM upcall — byte-identical. Behind {@code allowIncompatible}
+   * it emits the pure-native {@code chrono-tz} path (op 90: the timestamp, the chrono pattern, the
+   * zone id), which can diverge from the JVM at tz-database edges (see the divergences note).
    */
   private boolean emitDateFormatLtz(RexNode timestamp, String javaPattern) {
     if (sessionZoneId == null) {
@@ -1639,20 +1979,18 @@ final class RexExpression {
     }
     return emitLtzUpcall(
         timestamp,
-        new tech.streamfusion.operator.LtzDateTimeFunctions.DateFormat(
-            javaPattern, sessionZoneId),
+        new tech.streamfusion.operator.LtzDateTimeFunctions.DateFormat(javaPattern, sessionZoneId),
         tech.streamfusion.operator.NativeUdf.TYPE_STRING);
   }
 
   /**
-   * Emits an arity-1 JVM upcall over a single {@code TIMESTAMP_LTZ} column (marshalled as epoch millis),
-   * backed by the given serializable {@link org.apache.flink.table.functions.ScalarFunction} that calls
-   * Flink's own zone-aware datetime code — the LTZ parity path, mirroring {@link #emitRegexpExtractJvm}.
+   * Emits an arity-1 JVM upcall over a single {@code TIMESTAMP_LTZ} column (marshalled as epoch
+   * millis), backed by the given serializable {@link
+   * org.apache.flink.table.functions.ScalarFunction} that calls Flink's own zone-aware datetime
+   * code — the LTZ parity path, mirroring {@link #emitRegexpExtractJvm}.
    */
   private boolean emitLtzUpcall(
-      RexNode timestamp,
-      org.apache.flink.table.functions.ScalarFunction function,
-      int returnCode) {
+      RexNode timestamp, org.apache.flink.table.functions.ScalarFunction function, int returnCode) {
     Method eval;
     try {
       eval = function.getClass().getMethod("eval", Long.class);
@@ -1673,21 +2011,20 @@ final class RexExpression {
   }
 
   /**
-   * Whether the native {@code chrono-tz} path accepts this session zone: IANA names ({@code Region/City}),
-   * {@code UTC}, and fixed offsets ({@code +HH:MM}). Legacy JVM forms ({@code GMT+1}, {@code PST}) that
-   * {@code chrono-tz} rejects fall back, so we never diverge silently on an unparseable zone.
+   * Whether the native {@code chrono-tz} path accepts this session zone: IANA names ({@code
+   * Region/City}), {@code UTC}, and fixed offsets ({@code +HH:MM}). Legacy JVM forms ({@code
+   * GMT+1}, {@code PST}) that {@code chrono-tz} rejects fall back, so we never diverge silently on
+   * an unparseable zone.
    */
   private static boolean nativeZoneSupported(String zoneId) {
-    return "UTC".equals(zoneId)
-        || zoneId.indexOf('/') >= 0
-        || zoneId.matches("[+-]\\d{2}:\\d{2}");
+    return "UTC".equals(zoneId) || zoneId.indexOf('/') >= 0 || zoneId.matches("[+-]\\d{2}:\\d{2}");
   }
 
   /**
-   * Translates a Java {@code DateTimeFormatter} pattern to the equivalent chrono strftime pattern, or
-   * null if it uses any field the translation can't reproduce byte-for-byte. Only zero-padded numeric
-   * fields (the unambiguous ones) and literal separators are admitted; text fields, fractional seconds,
-   * am/pm, zones, and single-letter (non-padded) fields fall back.
+   * Translates a Java {@code DateTimeFormatter} pattern to the equivalent chrono strftime pattern,
+   * or null if it uses any field the translation can't reproduce byte-for-byte. Only zero-padded
+   * numeric fields (the unambiguous ones) and literal separators are admitted; text fields,
+   * fractional seconds, am/pm, zones, and single-letter (non-padded) fields fall back.
    */
   private static String toChronoFormat(String pattern) {
     if (pattern == null || pattern.isEmpty()) {
@@ -1745,8 +2082,10 @@ final class RexExpression {
   private boolean emitIncompatibleUnary(RexCall call, int op) {
     String name = call.getOperator().getName();
     if (!NativeConfig.allowsIncompatible(name)) {
-      // UPPER/LOWER have an exact default: route to the host's own case folding via a JVM upcall, so
-      // they run natively and byte-identically without the flag. The transcendental math ops (last-ULP
+      // UPPER/LOWER have an exact default: route to the host's own case folding via a JVM upcall,
+      // so
+      // they run natively and byte-identically without the flag. The transcendental math ops
+      // (last-ULP
       // divergence) have no such cheap exact path, so they still fall back unless opted in.
       if (op == 50) {
         return emitStringCaseJvm(call, "upper");
@@ -1766,8 +2105,8 @@ final class RexExpression {
   /**
    * Emits {@code UPPER}/{@code LOWER} as a JVM-upcall node (op {@link #KIND_UDF}) backed by {@link
    * tech.streamfusion.operator.NativeBuiltinFunctions}, which calls Flink's own {@code
-   * BinaryStringData} case folding — byte-identical to the host, with the rest of the expression still
-   * native. The argument must be string-typed.
+   * BinaryStringData} case folding — byte-identical to the host, with the rest of the expression
+   * still native. The argument must be string-typed.
    */
   private boolean emitStringCaseJvm(RexCall call, String method) {
     List<RexNode> args = call.getOperands();
@@ -1790,9 +2129,7 @@ final class RexExpression {
     int localIndex =
         addUdf(
             tech.streamfusion.operator.NativeUdf.Descriptor.forBuiltin(
-                impl,
-                new int[] {tech.streamfusion.operator.NativeUdf.TYPE_STRING},
-                returnCode));
+                impl, new int[] {tech.streamfusion.operator.NativeUdf.TYPE_STRING}, returnCode));
     add(KIND_UDF, longs.size(), 1);
     longs.add((long) localIndex);
     longs.add((long) returnCode);
@@ -1855,9 +2192,10 @@ final class RexExpression {
 
   /**
    * Emits {@code TRIM(BOTH ' ' FROM s)} — the default whitespace both-sides trim — as a unary call
-   * (op 54) mapped to DataFusion's {@code btrim}. Calcite gives TRIM three operands: a BOTH/LEADING/
-   * TRAILING flag, the trim characters, and the source string. Only the default (flag {@code BOTH},
-   * a single-space trim set) is admitted; LEADING/TRAILING or custom trim chars fall back.
+   * (op 54) mapped to DataFusion's {@code btrim}. Calcite gives TRIM three operands: a
+   * BOTH/LEADING/ TRAILING flag, the trim characters, and the source string. Only the default (flag
+   * {@code BOTH}, a single-space trim set) is admitted; LEADING/TRAILING or custom trim chars fall
+   * back.
    */
   private boolean emitTrim(RexCall call) {
     List<RexNode> operands = call.getOperands();
@@ -1881,7 +2219,8 @@ final class RexExpression {
    * folding, code-point vs UTF-16 length) are recorded in divergences/07.
    */
   private static int functionOpCode(String name) {
-    // Compatible (always-native) unary functions only. Functions whose native result can diverge from
+    // Compatible (always-native) unary functions only. Functions whose native result can diverge
+    // from
     // the host (UPPER/LOWER, transcendental math) are handled by the incompatible dispatch in
     // emitCall, gated behind the allowIncompatible flag — see INCOMPATIBLE_UNARY.
     switch (name.toUpperCase(Locale.ROOT)) {

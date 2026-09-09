@@ -24,7 +24,7 @@ pub(crate) fn build_expr(
         )),
         1 => logical_lit(longs[arg]),
         2 => logical_lit(doubles[arg]),
-        3 => logical_lit(strings[arg].clone().expect("string literal")),
+        3 => logical_lit(ScalarValue::Utf8(strings[arg].clone())),
         4 => logical_lit(longs[arg] != 0),
         // An untyped NULL; the surrounding expression's coercion (e.g. a CASE branch) types it.
         5 => datafusion::prelude::Expr::Literal(ScalarValue::Null, None),
@@ -35,6 +35,16 @@ pub(crate) fn build_expr(
         9 => logical_lit(longs[arg] as i8),
         // Likewise for FLOAT, which the host evaluates in single precision.
         22 => logical_lit(doubles[arg] as f32),
+        23 => {
+            // Binary literals use a length followed by bytes in the existing long pool; -1 is NULL.
+            let length = longs[arg];
+            logical_lit(ScalarValue::Binary((length >= 0).then(|| {
+                longs[arg + 1..arg + 1 + length as usize]
+                    .iter()
+                    .map(|&byte| byte as u8)
+                    .collect()
+            })))
+        }
         11 => {
             // A widening numeric cast: build the single child, then wrap it. `arg` is the target code.
             let child = build_expr(
@@ -300,218 +310,183 @@ pub(crate) fn build_call(
     op: i64,
     args: Vec<datafusion::prelude::Expr>,
 ) -> datafusion::prelude::Expr {
-    if op == 40 {
-        // Searched CASE: [when1, then1, …, else]. The trailing else is the odd operand out.
-        let mut args = args;
-        let else_expr = (args.len() % 2 == 1).then(|| Box::new(args.pop().expect("case else")));
-        let mut when_then = Vec::with_capacity(args.len() / 2);
-        let mut iter = args.into_iter();
-        while let (Some(when), Some(then)) = (iter.next(), iter.next()) {
-            when_then.push((Box::new(when), Box::new(then)));
-        }
-        return datafusion::prelude::Expr::Case(datafusion::logical_expr::Case::new(
-            None, when_then, else_expr,
-        ));
+    if let Some(function) = crate::flink_functions::function(op, args.len()) {
+        return function.call(args);
     }
-    if op == 58 {
-        // REPLACE(s, from, to): replace every occurrence of `from` with `to`.
-        let mut a = args.into_iter();
-        return datafusion::functions::string::expr_fn::replace(
-            a.next().expect("replace string"),
-            a.next().expect("replace from"),
-            a.next().expect("replace to"),
-        );
-    }
-    if op == 84 {
-        // ROUND(x) or ROUND(x, scale): opt-in (allowIncompatible) — see the Java encoder.
-        return datafusion::functions::math::expr_fn::round(args);
-    }
-    if op == 82 || op == 83 {
-        // LPAD/RPAD yield a Utf8View; cast back to Utf8 for the JVM converter.
-        let padded = if op == 82 {
-            datafusion::functions::unicode::expr_fn::lpad(args)
-        } else {
-            datafusion::functions::unicode::expr_fn::rpad(args)
-        };
-        return datafusion::prelude::Expr::Cast(datafusion::logical_expr::Cast::new(
-            Box::new(padded),
-            DataType::Utf8,
-        ));
-    }
-    if op == 85 {
-        // SPLIT_INDEX(str, sep, index): Flink's whole-separator split, index-th piece (see SplitIndex).
-        return datafusion::logical_expr::ScalarUDF::new_from_impl(SplitIndex::new()).call(args);
-    }
-    if op == 86 {
-        // DATE_FORMAT(ts, fmt): fmt is the already-translated chrono pattern (see DateFormat).
-        return datafusion::logical_expr::ScalarUDF::new_from_impl(DateFormat::new()).call(args);
-    }
-    if op == 88 {
-        // REGEXP_EXTRACT(str, pattern, groupIndex): opt-in (allowIncompatible) — see RegexpExtract.
-        return datafusion::logical_expr::ScalarUDF::new_from_impl(RegexpExtract::new()).call(args);
-    }
-    if op == 89 {
-        // EXTRACT(unit FROM ts): unit is a literal chrono field name (see ExtractField).
-        return datafusion::logical_expr::ScalarUDF::new_from_impl(ExtractField::new()).call(args);
-    }
-    if op == 90 {
-        // DATE_FORMAT(ltz, fmt) with a session zone (opt-in) — see DateFormatLtz. Args: ts, chrono fmt,
-        // zone id. Converts the instant to the zone's local wall-clock before formatting.
-        return datafusion::logical_expr::ScalarUDF::new_from_impl(DateFormatLtz::new()).call(args);
-    }
-    if op == 91 {
-        // EXTRACT(unit FROM ltz) with a session zone (opt-in) — see ExtractFieldLtz. Args: ts, field,
-        // zone id. Converts the instant to the zone's local wall-clock before extracting.
-        return datafusion::logical_expr::ScalarUDF::new_from_impl(ExtractFieldLtz::new())
-            .call(args);
-    }
-    if op == 92 {
-        return datafusion::logical_expr::ScalarUDF::new_from_impl(IntervalScale::new()).call(args);
-    }
-    if op == 93 {
-        return datafusion::logical_expr::ScalarUDF::new_from_impl(FlinkConcat::new()).call(args);
-    }
-    if op == 94 {
-        let mut args = args;
-        // Flink accepts a separator alone; DataFusion requires at least one value to concatenate.
-        if args.len() == 1 {
-            args.push(logical_lit(ScalarValue::Utf8(None)));
-        }
-        return datafusion::prelude::Expr::Cast(datafusion::logical_expr::Cast::new(
-            Box::new(datafusion::functions::string::concat_ws().call(args)),
-            DataType::Utf8,
-        ));
-    }
-    let hash = match op {
-        95 => Some(HashAlgorithm::Md5),
-        96 => Some(HashAlgorithm::Sha224),
-        97 => Some(HashAlgorithm::Sha256),
-        98 => Some(HashAlgorithm::Sha384),
-        99 => Some(HashAlgorithm::Sha512),
-        _ => None,
-    };
-    if let Some(algorithm) = hash {
-        return datafusion::logical_expr::ScalarUDF::new_from_impl(FlinkHash::new(algorithm))
-            .call(args);
-    }
-    if op == 87 {
-        // TO_TIMESTAMP_LTZ(millis, 3): the single operand is epoch millis (the Java side admits only
-        // the precision-3 form). Casting Int64 -> Timestamp(ms) reads the int as millis-since-epoch
-        // (the right instant); the second cast rescales to the nanosecond/no-tz unit ArrowConversion
-        // pins every TIMESTAMP/TIMESTAMP_LTZ column to.
-        let mut a = args.into_iter();
-        let millis = a.next().expect("to_timestamp_ltz operand");
-        let as_ms = datafusion::prelude::Expr::Cast(datafusion::logical_expr::Cast::new(
-            Box::new(millis),
-            DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
-        ));
-        return datafusion::prelude::Expr::Cast(datafusion::logical_expr::Cast::new(
-            Box::new(as_ms),
-            DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None),
-        ));
-    }
-    if op == 57 {
-        // POSITION(sub IN s): operands arrive [sub, s]; strpos takes (string, substring).
-        let mut a = args.into_iter();
-        let substring = a.next().expect("position substring");
-        let string = a.next().expect("position string");
-        return datafusion::functions::unicode::expr_fn::strpos(string, substring);
-    }
-    if op == 55 {
-        // SUBSTRING: 2-arg substr(s, pos) or 3-arg substring(s, pos, len). DataFusion's substr
-        // yields a Utf8View; cast back to Utf8 so the result is a plain VarChar vector the JVM
-        // converter reads (same string content, just the non-view representation).
-        let mut a = args.into_iter();
-        let source = a.next().expect("substring source");
-        let position = a.next().expect("substring position");
-        let result = match a.next() {
-            Some(length) => {
-                datafusion::functions::unicode::expr_fn::substring(source, position, length)
-            }
-            None => datafusion::functions::unicode::expr_fn::substr(source, position),
-        };
-        return datafusion::prelude::Expr::Cast(datafusion::logical_expr::Cast::new(
-            Box::new(result),
-            DataType::Utf8,
-        ));
-    }
-    let mut it = args.into_iter();
-    let mut next = || it.next().expect("missing operand");
     match op {
-        0 => next() + next(),
-        1 => next() - next(),
-        2 => next() * next(),
-        3 => next() / next(),
-        4 => next() % next(),
-        10 => next().gt(next()),
-        11 => next().gt_eq(next()),
-        12 => next().lt(next()),
-        13 => next().lt_eq(next()),
-        14 => next().eq(next()),
-        15 => next().not_eq(next()),
-        20 => next().and(next()),
-        21 => next().or(next()),
-        22 => !next(),
-        30 => next().is_null(),
-        31 => next().is_not_null(),
-        // x IS [NOT] TRUE/FALSE — three-valued: a null operand is neither true nor false.
-        32 => next().is_true(),
-        33 => next().is_not_true(),
-        34 => next().is_false(),
-        35 => next().is_not_false(),
-        52 => datafusion::functions::unicode::expr_fn::character_length(next()),
-        54 => datafusion::functions::string::expr_fn::btrim(vec![next()]),
-        60 => datafusion::functions::string::expr_fn::ltrim(vec![next()]),
-        61 => datafusion::functions::string::expr_fn::rtrim(vec![next()]),
-        62 => datafusion::functions::math::expr_fn::abs(next()),
-        63 => datafusion::functions::math::expr_fn::floor(next()),
-        64 => datafusion::functions::math::expr_fn::ceil(next()),
-        65 => datafusion::functions::math::expr_fn::signum(next()),
-        66 => datafusion::functions::string::expr_fn::repeat(next(), next()),
-        67 => datafusion::functions::string::expr_fn::ascii(next()),
-        81 => datafusion::functions::string::expr_fn::chr(next()),
-        // Opt-in (allowIncompatible) functions: native results may differ from the host. The Java
-        // encoder admits these only under the per-function flag — see NativeConfig.
-        50 => datafusion::functions::string::expr_fn::upper(next()),
-        51 => datafusion::functions::string::expr_fn::lower(next()),
-        71 => datafusion::functions::math::expr_fn::power(next(), next()),
-        72 => datafusion::functions::math::expr_fn::exp(next()),
-        73 => datafusion::functions::math::expr_fn::ln(next()),
-        74 => datafusion::functions::math::expr_fn::sin(next()),
-        75 => datafusion::functions::math::expr_fn::cos(next()),
-        76 => datafusion::functions::math::expr_fn::tan(next()),
-        77 => datafusion::functions::math::expr_fn::asin(next()),
-        78 => datafusion::functions::math::expr_fn::acos(next()),
-        79 => datafusion::functions::math::expr_fn::atan(next()),
-        80 => datafusion::functions::math::expr_fn::log10(next()),
-        // LEFT/RIGHT yield a Utf8View; cast back to Utf8 for the JVM converter.
-        69 => datafusion::prelude::Expr::Cast(datafusion::logical_expr::Cast::new(
-            Box::new(datafusion::functions::unicode::expr_fn::left(
-                next(),
-                next(),
-            )),
-            DataType::Utf8,
-        )),
-        70 => datafusion::prelude::Expr::Cast(datafusion::logical_expr::Cast::new(
-            Box::new(datafusion::functions::unicode::expr_fn::right(
-                next(),
-                next(),
-            )),
-            DataType::Utf8,
-        )),
-        56 => datafusion::prelude::Expr::Like(datafusion::logical_expr::Like::new(
-            false,
-            Box::new(next()),
-            Box::new(next()),
-            None,
-            false,
-        )),
-        // REVERSE yields a Utf8View (like substr); cast back to Utf8 for the JVM converter.
-        59 => datafusion::prelude::Expr::Cast(datafusion::logical_expr::Cast::new(
-            Box::new(datafusion::functions::unicode::expr_fn::reverse(next())),
-            DataType::Utf8,
-        )),
-        other => panic!("unsupported expression op: {other}"),
+        93 => {
+            return datafusion::logical_expr::ScalarUDF::new_from_impl(FlinkConcat::new())
+                .call(args);
+        }
+        94 => {
+            let mut args = args;
+            // Flink accepts a separator alone; DataFusion requires at least one value to concatenate.
+            if args.len() == 1 {
+                args.push(logical_lit(ScalarValue::Utf8(None)));
+            }
+            return datafusion::prelude::Expr::Cast(datafusion::logical_expr::Cast::new(
+                Box::new(datafusion::functions::string::concat_ws().call(args)),
+                DataType::Utf8,
+            ));
+        }
+        95..=99 => {
+            let algorithm = match op {
+                95 => HashAlgorithm::Md5,
+                96 => HashAlgorithm::Sha224,
+                97 => HashAlgorithm::Sha256,
+                98 => HashAlgorithm::Sha384,
+                99 => HashAlgorithm::Sha512,
+                _ => unreachable!("matched hash opcode"),
+            };
+            return datafusion::logical_expr::ScalarUDF::new_from_impl(FlinkHash::new(algorithm))
+                .call(args);
+        }
+
+        40 => {
+            // Searched CASE: [when1, then1, …, else]. The trailing else is the odd operand out.
+            let mut args = args;
+            let else_expr = (args.len() % 2 == 1).then(|| Box::new(args.pop().expect("case else")));
+            let mut when_then = Vec::with_capacity(args.len() / 2);
+            let mut iter = args.into_iter();
+            while let (Some(when), Some(then)) = (iter.next(), iter.next()) {
+                when_then.push((Box::new(when), Box::new(then)));
+            }
+            return datafusion::prelude::Expr::Case(datafusion::logical_expr::Case::new(
+                None, when_then, else_expr,
+            ));
+        }
+        58 => {
+            // REPLACE(s, from, to): replace every occurrence of `from` with `to`.
+            let mut a = args.into_iter();
+            return datafusion::functions::string::expr_fn::replace(
+                a.next().expect("replace string"),
+                a.next().expect("replace from"),
+                a.next().expect("replace to"),
+            );
+        }
+        84 => {
+            // ROUND(x) or ROUND(x, scale): opt-in (allowIncompatible) — see the Java encoder.
+            return datafusion::functions::math::expr_fn::round(args);
+        }
+        86 => {
+            // DATE_FORMAT(ts, fmt): fmt is the already-translated chrono pattern (see DateFormat).
+            return datafusion::logical_expr::ScalarUDF::new_from_impl(DateFormat::new())
+                .call(args);
+        }
+        88 => {
+            // REGEXP_EXTRACT(str, pattern, groupIndex): opt-in (allowIncompatible) — see RegexpExtract.
+            return datafusion::logical_expr::ScalarUDF::new_from_impl(RegexpExtract::new())
+                .call(args);
+        }
+        89 => {
+            // EXTRACT(unit FROM ts): unit is a literal chrono field name (see ExtractField).
+            return datafusion::logical_expr::ScalarUDF::new_from_impl(ExtractField::new())
+                .call(args);
+        }
+        90 => {
+            // DATE_FORMAT(ltz, fmt) with a session zone (opt-in) — see DateFormatLtz. Args: ts, chrono fmt,
+            // zone id. Converts the instant to the zone's local wall-clock before formatting.
+            return datafusion::logical_expr::ScalarUDF::new_from_impl(DateFormatLtz::new())
+                .call(args);
+        }
+        91 => {
+            // EXTRACT(unit FROM ltz) with a session zone (opt-in) — see ExtractFieldLtz. Args: ts, field,
+            // zone id. Converts the instant to the zone's local wall-clock before extracting.
+            return datafusion::logical_expr::ScalarUDF::new_from_impl(ExtractFieldLtz::new())
+                .call(args);
+        }
+        92 => {
+            return datafusion::logical_expr::ScalarUDF::new_from_impl(IntervalScale::new())
+                .call(args);
+        }
+        87 => {
+            // TO_TIMESTAMP_LTZ(millis, 3): the single operand is epoch millis (the Java side admits only
+            // the precision-3 form). Casting Int64 -> Timestamp(ms) reads the int as millis-since-epoch
+            // (the right instant); the second cast rescales to the nanosecond/no-tz unit ArrowConversion
+            // pins every TIMESTAMP/TIMESTAMP_LTZ column to.
+            let mut a = args.into_iter();
+            let millis = a.next().expect("to_timestamp_ltz operand");
+            let as_ms = datafusion::prelude::Expr::Cast(datafusion::logical_expr::Cast::new(
+                Box::new(millis),
+                DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+            ));
+            return datafusion::prelude::Expr::Cast(datafusion::logical_expr::Cast::new(
+                Box::new(as_ms),
+                DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None),
+            ));
+        }
+        57 => {
+            // POSITION(sub IN s): operands arrive [sub, s]; strpos takes (string, substring).
+            let mut a = args.into_iter();
+            let substring = a.next().expect("position substring");
+            let string = a.next().expect("position string");
+            return datafusion::functions::unicode::expr_fn::strpos(string, substring);
+        }
+        _ => {
+            let mut it = args.into_iter();
+            let mut next = || it.next().expect("missing operand");
+            match op {
+                0 => next() + next(),
+                1 => next() - next(),
+                2 => next() * next(),
+                3 => next() / next(),
+                4 => next() % next(),
+                10 => next().gt(next()),
+                11 => next().gt_eq(next()),
+                12 => next().lt(next()),
+                13 => next().lt_eq(next()),
+                14 => next().eq(next()),
+                15 => next().not_eq(next()),
+                20 => next().and(next()),
+                21 => next().or(next()),
+                22 => !next(),
+                30 => next().is_null(),
+                31 => next().is_not_null(),
+                // x IS [NOT] TRUE/FALSE — three-valued: a null operand is neither true nor false.
+                32 => next().is_true(),
+                33 => next().is_not_true(),
+                34 => next().is_false(),
+                35 => next().is_not_false(),
+                52 => datafusion::functions::unicode::expr_fn::character_length(next()),
+                54 => datafusion::functions::string::expr_fn::btrim(vec![next()]),
+                60 => datafusion::functions::string::expr_fn::ltrim(vec![next()]),
+                61 => datafusion::functions::string::expr_fn::rtrim(vec![next()]),
+                62 => datafusion::functions::math::expr_fn::abs(next()),
+                63 => datafusion::functions::math::expr_fn::floor(next()),
+                64 => datafusion::functions::math::expr_fn::ceil(next()),
+                65 => datafusion::functions::math::expr_fn::signum(next()),
+                66 => datafusion::functions::string::expr_fn::repeat(next(), next()),
+                67 => datafusion::functions::string::expr_fn::ascii(next()),
+                81 => datafusion::functions::string::expr_fn::chr(next()),
+                // Opt-in (allowIncompatible) functions: native results may differ from the host. The Java
+                // encoder admits these only under the per-function flag — see NativeConfig.
+                50 => datafusion::functions::string::expr_fn::upper(next()),
+                51 => datafusion::functions::string::expr_fn::lower(next()),
+                71 => datafusion::functions::math::expr_fn::power(next(), next()),
+                72 => datafusion::functions::math::expr_fn::exp(next()),
+                73 => datafusion::functions::math::expr_fn::ln(next()),
+                74 => datafusion::functions::math::expr_fn::sin(next()),
+                75 => datafusion::functions::math::expr_fn::cos(next()),
+                76 => datafusion::functions::math::expr_fn::tan(next()),
+                77 => datafusion::functions::math::expr_fn::asin(next()),
+                78 => datafusion::functions::math::expr_fn::acos(next()),
+                79 => datafusion::functions::math::expr_fn::atan(next()),
+                80 => datafusion::functions::math::expr_fn::log10(next()),
+                56 => datafusion::prelude::Expr::Like(datafusion::logical_expr::Like::new(
+                    false,
+                    Box::new(next()),
+                    Box::new(next()),
+                    None,
+                    false,
+                )),
+                // REVERSE yields a Utf8View (like substr); cast back to Utf8 for the JVM converter.
+                59 => datafusion::prelude::Expr::Cast(datafusion::logical_expr::Cast::new(
+                    Box::new(datafusion::functions::unicode::expr_fn::reverse(next())),
+                    DataType::Utf8,
+                )),
+                other => panic!("unsupported expression op: {other}"),
+            }
+        }
     }
 }
 
@@ -1168,80 +1143,6 @@ impl datafusion::logical_expr::ScalarUDFImpl for DecimalDivide {
             .with_precision_and_scale(self.precision, self.scale)
             .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
         Ok(ColumnarValue::Array(Arc::new(result)))
-    }
-}
-
-/// Flink's `SPLIT_INDEX(str, separator, index)`: split `str` on the whole `separator` (preserving
-/// empty tokens) and return the 0-based `index`-th piece, or NULL when `index` is negative or past the
-/// last piece, when `str` is empty (Commons' `splitByWholeSeparatorPreserveAllTokens` yields no tokens
-/// for an empty input), or when any argument is NULL — a faithful port of `SqlFunctionUtils.splitIndex`.
-/// The JVM encoder admits this only with a non-empty literal separator, so Rust's `str::split` (also
-/// non-overlapping, left-to-right, preserving empty tokens) reproduces Commons exactly.
-#[derive(Debug, PartialEq, Eq, Hash)]
-pub(crate) struct SplitIndex {
-    signature: datafusion::logical_expr::Signature,
-}
-
-impl SplitIndex {
-    fn new() -> Self {
-        Self {
-            signature: datafusion::logical_expr::Signature::variadic_any(
-                datafusion::logical_expr::Volatility::Immutable,
-            ),
-        }
-    }
-}
-
-impl datafusion::logical_expr::ScalarUDFImpl for SplitIndex {
-    fn name(&self) -> &str {
-        "split_index"
-    }
-    fn signature(&self) -> &datafusion::logical_expr::Signature {
-        &self.signature
-    }
-    fn return_type(&self, _: &[DataType]) -> datafusion::common::Result<DataType> {
-        Ok(DataType::Utf8)
-    }
-    fn invoke_with_args(
-        &self,
-        args: datafusion::logical_expr::ScalarFunctionArgs,
-    ) -> datafusion::common::Result<datafusion::logical_expr::ColumnarValue> {
-        use datafusion::logical_expr::ColumnarValue;
-        let rows = args.number_rows;
-        let arrays = ColumnarValue::values_to_arrays(&args.args)?;
-        let strs = arrow::compute::cast(&arrays[0], &DataType::Utf8)?;
-        let seps = arrow::compute::cast(&arrays[1], &DataType::Utf8)?;
-        let idxs = arrow::compute::cast(&arrays[2], &DataType::Int32)?;
-        let strs = strs
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .expect("utf8 str");
-        let seps = seps
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .expect("utf8 sep");
-        let idxs = idxs
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .expect("i32 index");
-        let mut builder = arrow::array::StringBuilder::new();
-        for row in 0..rows {
-            if strs.is_null(row) || seps.is_null(row) || idxs.is_null(row) {
-                builder.append_null();
-                continue;
-            }
-            let index = idxs.value(row);
-            let str = strs.value(row);
-            if index < 0 || str.is_empty() {
-                builder.append_null();
-                continue;
-            }
-            match str.split(seps.value(row)).nth(index as usize) {
-                Some(piece) => builder.append_value(piece),
-                None => builder.append_null(),
-            }
-        }
-        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }
 

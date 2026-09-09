@@ -178,6 +178,184 @@ any other pair not listed above.
 The old `decimalArithmetic.approximate` flag is retired entirely: the float/double→`DECIMAL` cast it
 used to gate now runs host-exact through the cast upcall above.
 
+## String and calendar functions
+
+The following list describes admission and fallback. Per-function Flink/native timings and
+workload details are on the [scalar function benchmark page](../benchmarks/scalar-functions.md).
+
+Admission requires verified semantics; it does not promise a speedup for every isolated query.
+Retained coverage with slower standalone results is a precursor to the concrete optimizations
+in this PR: scalar parameter reuse, direct output construction, primitive extrema, and shared
+text scans. Cheap expressions can also remain inside a larger native Calc without another
+host boundary. This is not a measured whole-query speedup claim. STARTSWITH/ENDSWITH remain
+native for this composition benefit; their standalone regressions are documented in the
+benchmark results and do not disable otherwise verified expressions.
+
+### STARTSWITH
+
+Two character arguments, literal or column. Matches a literal prefix, including Unicode and
+empty strings; any NULL argument returns NULL. Wildcard characters have no special meaning.
+Binary operands fall back.
+
+### ENDSWITH
+
+Two character arguments with the same NULL and type rules as STARTSWITH. Matches a literal
+suffix; an empty suffix matches every non-NULL string. Wildcards have no special meaning.
+
+### INSTR
+
+Two character arguments only. Returns the first match as a 1-based Unicode codepoint position, or zero if absent. An empty needle returns 1; any NULL returns NULL. Three/four-argument INSTR falls back.
+
+### LOCATE
+
+Both LOCATE(needle, s) and LOCATE(needle, s, start) are native. Character inputs and TINYINT/SMALLINT/INTEGER starts are admitted; BIGINT starts fall back without narrowing. Positions count Unicode codepoints. Empty needles return 1 for every non-NULL start. Zero/negative starts search from the beginning, except INTEGER minimum: start - 1 wraps to maximum, matching Flink. Out-of-range starts return zero; any NULL argument returns NULL.
+
+### BIN
+
+TINYINT, SMALLINT, INTEGER, and BIGINT inputs are admitted. Returns binary digits without leading zeros; zero is `0`. Negative values have 64 two's-complement digits even for narrow input types. NULL returns NULL. Folded string NULL literals retain their declared type.
+
+### HEX
+
+Integer and character inputs are admitted. All four signed integer widths preserve Long.toHexString behavior: no leading zeros, uppercase digits, and 16 digits for negative values. Character strings encode their UTF-8 bytes as uppercase hex. NULL returns NULL.
+
+### TO_BASE64
+
+Character strings are encoded as padded RFC 4648 Base64 over UTF-8 bytes without line wrapping. Empty input stays empty; NULL propagates. BINARY/VARBINARY input and FROM_BASE64 fall back.
+
+### UNHEX
+
+Character inputs produce BYTES. Either hex letter case is accepted; invalid bytes, whitespace, `0x` prefixes, and non-ASCII digits return NULL. Empty input produces empty bytes. Flink validates but discards an odd leading digit, emitting zero: `UNHEX('A') = 00`, `UNHEX('ABC') = 00 BC`. Folded VARBINARY constants carry bytes directly as typed binary literals, including empty values and NULLs; fixed-size BINARY literals retain the existing fallback.
+
+### GREATEST
+
+Integers, BOOLEAN and matching-precision/scale DECIMAL are native, with strict NULL propagation. Strings require ASCII literals or CASE results composed entirely of ASCII literals. Unrestricted string columns fall back: Flink uses UTF-16 order for Java-backed strings and byte order after binary materialization. Floating point and mixed decimal scales fall back.
+
+### LEAST
+
+Uses the same type and ASCII-proof gates as GREATEST, with strict NULL propagation and minimum comparison.
+
+### INITCAP
+
+Character strings only. Only ASCII letters and digits form words; every other character separates words and is preserved. NULL returns NULL. This follows Flink rather than DataFusion word boundaries.
+
+### TRANSLATE
+
+Three character arguments. Mappings use Unicode codepoints, not graphemes. The first duplicate mapping wins, but duplicates consume target positions. Missing target characters delete; a NULL target acts as empty. NULL/empty `from` leaves the source unchanged. A NULL source returns NULL.
+
+### BTRIM
+
+One-argument space trimming and two-argument character-set trimming with a literal set are native. Empty sets preserve the input and NULL propagates. Column trim sets fall back because Flink can change their meaning after an exchange when the first set character is a space.
+
+### ELT
+
+An INTEGER index and character alternatives are admitted. The index is 1-based; out-of-range and NULL indices return NULL. Only the selected alternative's NULL matters. Other index types and binary alternatives fall back: Flink casts its boxed index to Integer after its bounds check. Explicit casts to INTEGER follow the existing cast rules.
+
+### URL_ENCODE
+
+Character strings use Java form encoding: space becomes `+`, ASCII alphanumerics and `-_. *` are preserved apart from space, and other UTF-8 bytes use uppercase percent escapes. NULL returns NULL.
+
+### OVERLAY
+
+Character strings and integer positions, widened to BIGINT without losing bits. Preserves Java UTF-16 positions, length narrowing/overflow, and substring errors. Non-positive or beyond-end starts return the source; zero/negative lengths omit the suffix. Split surrogate pairs encode as `?`, like Flink. Any NULL argument returns NULL.
+
+### URL_DECODE
+
+One character argument is native. Form decoding preserves JDK UTF-8 replacement grouping and returns NULL for malformed escapes. The planner selects the runtime JDK rule: JDK 17/21 (and pre-25 runtimes) use Integer.parseInt, accepting signed one-digit escapes and BMP Unicode hex digits; JDK 25+ uses ASCII-only HexFormat rules.
+
+The JDK rule is selected on the JobManager during planning, so the JobManager and TaskManagers must use the same URL-decoding rule (pre-25 or 25+); mixed JDK groups can produce results that differ from Flink on the TaskManager.
+
+### ENCODE
+
+Character input and a literal UTF-8, US-ASCII, or ISO-8859-1 charset (including JDK aliases). Returns BYTES, preserves NULL, and replaces unmappable characters with `?`. Other or dynamic charsets fall back.
+
+### DECODE
+
+Binary input and the same three literal charsets as ENCODE. UTF-8 uses the JDK's replacement grouping for malformed sequences; ASCII replaces each non-ASCII byte; Latin-1 maps all bytes. NULL stays NULL. Other or dynamic charsets fall back.
+
+### JSON_QUOTE
+
+Character input, including NULL. Matches Flink 2.2.1's actual spelling: slash is escaped, non-ASCII values use lowercase Unicode escapes, and supplementary characters emit a full code-point escape followed by a low-surrogate escape. Unlisted ASCII controls are retained.
+
+### JSON_UNQUOTE
+
+One character argument is native. Valid quoted values are unescaped with Flink/Jackson first-token validation; invalid input is preserved and NULL propagates. A truncated Unicode escape after a valid first token fails the job, matching Flink 2.2.1's uncaught bounds exception. A truncated escape inside the first token is invalid JSON and is preserved.
+
+### SPLIT
+
+Character input and a literal non-empty separator. The separator is literal text, including regex metacharacters. NULL input returns NULL, empty input returns an empty array, and leading/repeated/trailing separators retain empty tokens. Empty or dynamic separators fall back; the empty form splits UTF-16 surrogate units in Flink.
+
+### SUBSTRING
+
+SUBSTRING/SUBSTR accepts dynamic TINYINT, SMALLINT, or INT starts and optional lengths. Positive positions are one-based, zero starts at the first character, negative positions count from the end, and a position before the beginning returns empty. Negative length returns NULL; input NULLs propagate.
+
+### LEFT
+
+Character input with a dynamic TINYINT, SMALLINT, or INT count. Non-positive counts return empty, large counts return the full string, and NULL propagates. Counts measure Unicode code points.
+
+### RIGHT
+
+Character input with a dynamic TINYINT, SMALLINT, or INT count. Non-positive counts return empty, large counts return the full string, and NULL propagates. Counts measure Unicode code points.
+
+### LPAD
+
+STRING, dynamic INT-width length, and literal or dynamic STRING padding. NULL, negative length, or empty padding returns NULL; zero length otherwise returns empty. Flink 2.2.1 counts UTF-16 units, including truncation through surrogate pairs.
+
+### RPAD
+
+Same input and boundary rules as LPAD, with padding appended on the right. Dynamic lengths and padding are admitted, with Flink 2.2.1 UTF-16 counting.
+
+### SPLIT_INDEX
+
+Character separators and TINYINT/SMALLINT/INTEGER indices may be dynamic. Indices are zero-based; negative/out-of-range indices, empty input, or any NULL produce NULL. Whole separators preserve empty tokens. An empty separator uses Java Character.isWhitespace, including tabs and line separators but excluding non-breaking spaces. Numeric separators and BIGINT indices fall back.
+
+### TO_DATE
+
+One character argument. Accepts Flink's partial year/year-month forms, field trimming, and a timestamp suffix after the first ASCII space. Impossible dates return NULL; an all-digit field overflowing INTEGER fails the job. Formatted two-argument calls fall back.
+
+### TO_TIMESTAMP
+
+Falls back to Flink for both the default and explicit-format forms. Native support is
+deferred: parsed timestamps can exceed the nanosecond range, while downstream native
+operators require nanosecond columns. A millisecond result is therefore unsafe even when
+standalone parsing succeeds. Computed-rowtime windows and parsed timestamp group keys
+also remain on Flink.
+
+### QUARTER
+
+QUARTER and EXTRACT(QUARTER) over DATE or plain TIMESTAMP return, for ordinary calendar dates, 1 through 4 as BIGINT. NULL propagates. TIMESTAMP_LTZ falls back for this newly admitted field.
+
+### WEEK
+
+WEEK and EXTRACT(WEEK) over DATE or plain TIMESTAMP use ISO week numbers, including weeks spanning calendar years. NULL propagates. TIMESTAMP_LTZ falls back for this field.
+
+### DAYOFYEAR
+
+DAYOFYEAR/EXTRACT(DOY) over DATE or plain TIMESTAMP return, for ordinary calendar dates, 1 through 365/366 as BIGINT. NULL propagates. TIMESTAMP_LTZ falls back for this field.
+
+### DAYOFWEEK
+
+DAYOFWEEK/EXTRACT(DOW) over DATE or plain TIMESTAMP return Sunday=1 through Saturday=7 as BIGINT. NULL propagates. TIMESTAMP_LTZ falls back for this field.
+
+### FLOOR (timestamp)
+
+Temporal FLOOR falls back to Flink for every unit and timestamp precision, including
+TIMESTAMP(3) and TIMESTAMP(9). Its former millisecond Arrow output is incompatible with
+downstream native timestamp columns. The one-argument numeric FLOOR admission is unchanged.
+
+### CEIL (timestamp)
+
+Temporal CEIL/CEILING falls back to Flink for every unit and timestamp precision, for the
+same timestamp-unit incompatibility as temporal FLOOR. One-argument numeric CEIL/CEILING
+keeps its existing native admission. No millisecond timestamp rounding kernel is registered.
+
+### LTRIM
+
+One-argument space trimming and two-argument trimming with a literal Unicode character set are native. Empty sets preserve the input; NULL propagates. Dynamic trim sets fall back because Flink semantics depend on whether strings are Java-backed or binary-backed.
+
+### RTRIM
+
+Uses the same literal-set gate as LTRIM, trimming from the right. Dynamic trim sets fall back; one-argument space trimming is native.
+
 ## Case folding & regex
 
 **Native by default — not a fallback.** `UPPER`/`LOWER` and `REGEXP_EXTRACT` run natively by default
@@ -213,7 +391,9 @@ beyond roughly 2100, and deep historical dates.
 
 A **legacy zone spelling** the native parser can't read (`GMT+1`, `PST`) makes the opt-in path fall
 back; the default upcall path handles any zone Flink itself accepts. A plain `TIMESTAMP` argument
-(no zone) stays on the pure-native path either way — there's nothing zone-dependent to upcall.
+(no zone) uses the pure-native path when its Arrow representation is nanoseconds. Parsed or rounded
+millisecond results have a wider range than the legacy chrono formatting/extraction kernels and
+fall back for those consumers. The new QUARTER/WEEK/DAYOFYEAR/DAYOFWEEK kernels accept them.
 
 ## Opt-in math
 
@@ -232,17 +412,15 @@ A number of otherwise-admitted functions decline when called with an argument sh
 implementation can't handle, even though the function itself is supported:
 
 - An **unsupported literal type** anywhere in the expression.
-- **`SUBSTRING`** — a non-literal or out-of-range start/length.
-- **`LEFT`/`RIGHT`/`REPEAT`/`LPAD`/`RPAD`** — a non-literal or negative count.
 - **`TRIM`** — anything other than the default `BOTH`-whitespace form.
 - **`POSITION`** — a `FROM` start offset.
-- **`SPLIT_INDEX`** — an empty or non-literal separator.
+- **`SPLIT_INDEX`** — the numeric separator overload.
 - **`DATE_FORMAT`** — a non-literal pattern, or (on the pure-native path only) a
   non-translatable pattern (text, fraction, or zone fields) — the JVM-upcall `TIMESTAMP_LTZ` path
   accepts any pattern Flink's own formatter does.
-- **`EXTRACT`** — a fractional or convention-divergent field (`SECOND`, `DOW`, `WEEK`, `QUARTER`). A
-  `TIMESTAMP_LTZ` argument to either `DATE_FORMAT` or `EXTRACT` now runs natively regardless — see
-  Date/time above.
+- **`EXTRACT`** — a fractional result or a field outside the admitted set. The added
+  `QUARTER`/`WEEK`/`DOY`/`DOW` fields admit DATE and plain TIMESTAMP; their LTZ forms fall back.
+  Existing YEAR/MONTH/DAY/HOUR/MINUTE/SECOND LTZ extraction uses the host-exact upcall described above.
 - **`TO_TIMESTAMP_LTZ`** — a precision other than 3.
 - **A non-literal subscript** in `array[i]`/`map[key]` — at runtime a negative index counts from the
   end in DataFusion but is `NULL` in Flink, and the native map lookup binds its key at compile time,

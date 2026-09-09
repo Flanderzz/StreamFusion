@@ -2,6 +2,28 @@ use super::*;
 use arrow::array::BinaryArray;
 
 #[test]
+fn binary_literal_encoding_preserves_all_bytes_empty_and_typed_null() {
+    let schema = Arc::new(Schema::empty());
+    for value in [Some((0..=255).collect::<Vec<u8>>()), Some(vec![]), None] {
+        let mut longs = vec![42, value.as_ref().map_or(-1, |bytes| bytes.len() as i64)];
+        if let Some(bytes) = &value {
+            longs.extend(bytes.iter().map(|&byte| i64::from(byte)));
+        }
+        let mut cursor = 0;
+        let expression = build_expr(&schema, &[23], &[1], &[0], &longs, &[], &[], &mut cursor);
+        assert_eq!(expression, logical_lit(ScalarValue::Binary(value)));
+        assert_eq!(cursor, 1);
+    }
+}
+
+#[test]
+fn scalar_registry_declines_unknown_and_retired_operations() {
+    for op in [55, 69, 70, 82, 83, 85, 132, 137, 138, i64::MAX] {
+        assert!(crate::flink_functions::function(op, 1).is_none());
+    }
+}
+
+#[test]
 fn max_rowtime_skips_nulls_and_floors_millis() {
     use arrow::array::TimestampNanosecondArray;
     let rowtime: ArrayRef = Arc::new(TimestampNanosecondArray::from(vec![
@@ -66,6 +88,642 @@ fn sample_batch() -> RecordBatch {
         vec![a, b],
     )
     .unwrap()
+}
+
+fn evaluate_scalar_call(
+    op: i64,
+    args: Vec<datafusion::prelude::Expr>,
+    batch: &RecordBatch,
+) -> ArrayRef {
+    let schema = Arc::new(DFSchema::try_from(batch.schema().as_ref().clone()).unwrap());
+    let context = SimplifyContext::builder()
+        .with_schema(schema.clone())
+        .build();
+    let logical = ExprSimplifier::new(context)
+        .coerce(build_call(op, args), &schema)
+        .unwrap();
+    create_physical_expr(&logical, &schema, &ExecutionProps::new())
+        .unwrap()
+        .evaluate(batch)
+        .unwrap()
+        .into_array(batch.num_rows())
+        .unwrap()
+}
+
+#[test]
+fn scalar_extrema_and_text_handle_null_masks_slices_and_scalars() {
+    let input = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Int32, true),
+            Field::new("b", DataType::Int32, true),
+            Field::new("s", DataType::Utf8, true),
+        ])),
+        vec![
+            Arc::new(Int32Array::from(vec![
+                Some(99),
+                Some(1),
+                None,
+                Some(3),
+                Some(-5),
+            ])),
+            Arc::new(Int32Array::from(vec![
+                Some(99),
+                Some(2),
+                Some(2),
+                None,
+                Some(9),
+            ])),
+            Arc::new(StringArray::from(vec![
+                Some("ignore"),
+                Some(" abC "),
+                None,
+                Some("z"),
+                Some(""),
+            ])),
+        ],
+    )
+    .unwrap()
+    .slice(1, 4);
+    for (op, expected) in [
+        (109, vec![Some(2), None, None, Some(9)]),
+        (110, vec![Some(1), None, None, Some(-5)]),
+    ] {
+        let result = evaluate_scalar_call(op, vec![logical_col("a"), logical_col("b")], &input);
+        assert_eq!(
+            result
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap()
+                .iter()
+                .collect::<Vec<_>>(),
+            expected
+        );
+        let null = evaluate_scalar_call(
+            op,
+            vec![logical_col("a"), logical_lit(ScalarValue::Int32(None))],
+            &input,
+        );
+        assert_eq!(null.null_count(), 4);
+        let string = evaluate_scalar_call(op, vec![logical_col("s"), logical_lit("m")], &input);
+        assert_eq!(string.null_count(), 1);
+    }
+    for (op, args) in [
+        (109, vec![logical_col("a"), logical_lit(3i32)]),
+        (110, vec![logical_col("s"), logical_lit("m")]),
+        (111, vec![logical_col("s")]),
+        (
+            112,
+            vec![logical_col("s"), logical_lit("ab"), logical_lit("xy")],
+        ),
+        (113, vec![logical_col("s"), logical_lit(" ab")]),
+        (114, vec![logical_col("a"), logical_col("s")]),
+        (115, vec![logical_col("s")]),
+    ] {
+        assert_eq!(evaluate_scalar_call(op, args, &input.slice(0, 0)).len(), 0);
+    }
+    for (op, args, expected) in [
+        (111, vec![logical_lit("a_BC")], "A_Bc"),
+        (
+            112,
+            vec![logical_lit("abba"), logical_lit("aab"), logical_lit("123")],
+            "1331",
+        ),
+        (
+            113,
+            vec![
+                logical_lit("\u{1f600}abc\u{1f600}"),
+                logical_lit("\u{1f600}"),
+            ],
+            "abc",
+        ),
+        (
+            114,
+            vec![
+                logical_lit(2i32),
+                logical_lit(ScalarValue::Utf8(None)),
+                logical_lit("chosen"),
+            ],
+            "chosen",
+        ),
+        (115, vec![logical_lit("a +")], "a+%2B"),
+    ] {
+        let result = evaluate_scalar_call(op, args, &input);
+        assert_eq!(
+            result
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .value(0),
+            expected
+        );
+    }
+}
+
+#[test]
+fn encoding_integer_arrays_preserve_nulls_and_long_bits() {
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new("n", DataType::Int64, true)])),
+        vec![Arc::new(Int64Array::from(vec![
+            Some(99),
+            Some(0),
+            Some(-1),
+            Some(i64::MIN),
+            Some(i64::MAX),
+            None,
+        ]))],
+    )
+    .unwrap()
+    .slice(1, 5);
+    let binary = evaluate_scalar_call(104, vec![logical_col("n")], &batch);
+    assert_eq!(
+        binary.as_any().downcast_ref::<StringArray>().unwrap(),
+        &StringArray::from(vec![
+            Some("0".to_string()),
+            Some("1".repeat(64)),
+            Some(format!("1{}", "0".repeat(63))),
+            Some("1".repeat(63)),
+            None,
+        ])
+    );
+    let hex = evaluate_scalar_call(105, vec![logical_col("n")], &batch);
+    hex.to_data().validate_full().unwrap();
+    assert_eq!(
+        hex.as_any().downcast_ref::<StringArray>().unwrap(),
+        &StringArray::from(vec![
+            Some("0"),
+            Some("FFFFFFFFFFFFFFFF"),
+            Some("8000000000000000"),
+            Some("7FFFFFFFFFFFFFFF"),
+            None,
+        ])
+    );
+}
+
+#[test]
+fn encoding_strings_preserve_padding_and_flink_unhex_edges() {
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new("s", DataType::Utf8, true)])),
+        vec![Arc::new(StringArray::from(vec![
+            Some("skip"),
+            Some(""),
+            Some("a"),
+            Some("ab"),
+            Some("abc"),
+            Some("\u{4e2d}\u{1f600}"),
+            Some("a\0b"),
+            None,
+        ]))],
+    )
+    .unwrap()
+    .slice(1, 7);
+    for (op, expected) in [
+        (
+            106,
+            vec![
+                Some(""),
+                Some("61"),
+                Some("6162"),
+                Some("616263"),
+                Some("E4B8ADF09F9880"),
+                Some("610062"),
+                None,
+            ],
+        ),
+        (
+            107,
+            vec![
+                Some(""),
+                Some("YQ=="),
+                Some("YWI="),
+                Some("YWJj"),
+                Some("5Lit8J+YgA=="),
+                Some("YQBi"),
+                None,
+            ],
+        ),
+    ] {
+        let result = evaluate_scalar_call(op, vec![logical_col("s")], &batch);
+        assert_eq!(
+            result.as_any().downcast_ref::<StringArray>().unwrap(),
+            &StringArray::from(expected)
+        );
+    }
+    let input = RecordBatch::try_new(
+        batch.schema(),
+        vec![Arc::new(StringArray::from(vec![
+            Some(""),
+            Some("A"),
+            Some("AbC"),
+            Some("aF00"),
+            Some("G12"),
+            Some("0G"),
+            Some(" 12"),
+            Some("\u{ff11}\u{ff12}"),
+            None,
+        ]))],
+    )
+    .unwrap();
+    for op in 106..=108 {
+        let empty = evaluate_scalar_call(op, vec![logical_col("s")], &input.slice(0, 0));
+        assert!(empty.is_empty());
+        assert_eq!(
+            empty.data_type(),
+            if op == 108 {
+                &DataType::Binary
+            } else {
+                &DataType::Utf8
+            }
+        );
+    }
+    let decoded = evaluate_scalar_call(108, vec![logical_col("s")], &input);
+    assert_eq!(
+        decoded
+            .as_any()
+            .downcast_ref::<arrow::array::BinaryArray>()
+            .unwrap(),
+        &arrow::array::BinaryArray::from(vec![
+            Some(&b""[..]),
+            Some(&b"\x00"[..]),
+            Some(&b"\x00\xbc"[..]),
+            Some(&b"\xaf\x00"[..]),
+            None,
+            None,
+            None,
+            None,
+            None,
+        ])
+    );
+}
+
+#[test]
+fn encoding_unhex_rolls_back_invalid_rows_in_sliced_batches() {
+    let long_hex = "aF".repeat(4097);
+    let invalid_tail = format!("{long_hex}0G");
+    let input = StringArray::from(vec![
+        Some(long_hex.as_str()),
+        Some("aF00GG"),
+        Some("1234"),
+        Some("A12G4"),
+        Some("ABC"),
+        None,
+        Some(""),
+        Some("f"),
+        Some("0011\u{ff11}\u{ff12}"),
+        Some("00\0f"),
+        Some("ff00"),
+        Some(invalid_tail.as_str()),
+        Some("aF"),
+        Some(long_hex.as_str()),
+    ]);
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new("s", DataType::Utf8, true)])),
+        vec![Arc::new(input.slice(1, 12))],
+    )
+    .unwrap();
+    let result = evaluate_scalar_call(108, vec![logical_col("s")], &batch);
+    assert_eq!(
+        result.as_any().downcast_ref::<BinaryArray>().unwrap(),
+        &BinaryArray::from(vec![
+            None,
+            Some(&b"\x12\x34"[..]),
+            None,
+            Some(&b"\x00\xbc"[..]),
+            None,
+            Some(&b""[..]),
+            Some(&b"\x00"[..]),
+            None,
+            None,
+            Some(&b"\xff\x00"[..]),
+            None,
+            Some(&b"\xaf"[..]),
+        ])
+    );
+    result.to_data().validate_full().unwrap();
+}
+
+#[test]
+fn encoding_unhex_accepts_only_ascii_hex_digits() {
+    let digits: Vec<String> = (0u8..=255)
+        .map(|byte| char::from(byte).to_string())
+        .collect();
+    let input = StringArray::from(digits);
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new("s", DataType::Utf8, false)])),
+        vec![Arc::new(input)],
+    )
+    .unwrap();
+    let result = evaluate_scalar_call(108, vec![logical_col("s")], &batch);
+    let decoded = result.as_any().downcast_ref::<BinaryArray>().unwrap();
+    for byte in 0u8..=255 {
+        assert_eq!(decoded.is_valid(byte as usize), byte.is_ascii_hexdigit());
+        if byte.is_ascii_hexdigit() {
+            assert_eq!(decoded.value(byte as usize), &[0]);
+        }
+    }
+}
+
+#[test]
+fn encoding_scalars_empty_batches_and_arity() {
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new("n", DataType::Int64, false)])),
+        vec![Arc::new(Int64Array::from(vec![1, 2, 3]))],
+    )
+    .unwrap();
+    for (op, value, expected) in [
+        (104, logical_lit(5i8), "101"),
+        (105, logical_lit(-1i16), "FFFFFFFFFFFFFFFF"),
+        (106, logical_lit("ab"), "6162"),
+        (107, logical_lit("ab"), "YWI="),
+    ] {
+        let result = evaluate_scalar_call(op, vec![value.clone()], &batch);
+        assert_eq!(
+            result.as_any().downcast_ref::<StringArray>().unwrap(),
+            &StringArray::from(vec![expected; 3])
+        );
+        let empty = evaluate_scalar_call(op, vec![value], &batch.slice(0, 0));
+        assert!(empty.is_empty());
+        assert_eq!(empty.data_type(), &DataType::Utf8);
+    }
+    let result = evaluate_scalar_call(108, vec![logical_lit("ABC")], &batch);
+    assert_eq!(
+        result
+            .as_any()
+            .downcast_ref::<arrow::array::BinaryArray>()
+            .unwrap(),
+        &arrow::array::BinaryArray::from(vec![&b"\0\xbc"[..]; 3])
+    );
+    for op in 104..=108 {
+        let arg = if op <= 105 {
+            logical_col("n")
+        } else {
+            logical_lit("a")
+        };
+        let empty = evaluate_scalar_call(op, vec![arg], &batch.slice(0, 0));
+        assert!(empty.is_empty());
+        let schema = Arc::new(DFSchema::empty());
+        let context = SimplifyContext::builder()
+            .with_schema(schema.clone())
+            .build();
+        for args in [vec![], vec![logical_lit(1), logical_lit(2)]] {
+            assert!(
+                ExprSimplifier::new(context.clone())
+                    .coerce(build_call(op, args), &schema)
+                    .is_err(),
+                "encoding op {op}"
+            );
+        }
+    }
+}
+
+#[test]
+fn string_search_locate_handles_slices_scalars_and_empty_batches() {
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("s", DataType::Utf8, true),
+            Field::new("needle", DataType::Utf8, true),
+            Field::new("start", DataType::Int32, true),
+        ])),
+        vec![
+            Arc::new(StringArray::from(vec![
+                Some("skip"),
+                Some("a\u{1f600}\u{4e2d}b\u{1f600}"),
+                Some("abcabc"),
+                Some(""),
+                Some("abc"),
+                None,
+                Some("abc"),
+                Some("abc"),
+            ])),
+            Arc::new(StringArray::from(vec![
+                Some("skip"),
+                Some("\u{1f600}"),
+                Some("bc"),
+                Some(""),
+                Some(""),
+                Some("a"),
+                None,
+                Some("a"),
+            ])),
+            Arc::new(Int32Array::from(vec![
+                Some(1),
+                Some(3),
+                Some(3),
+                Some(i32::MIN),
+                Some(i32::MAX),
+                Some(1),
+                None,
+                Some(i32::MIN),
+            ])),
+        ],
+    )
+    .unwrap()
+    .slice(1, 7);
+    let args = vec![
+        logical_col("s"),
+        logical_col("needle"),
+        logical_col("start"),
+    ];
+    let result = evaluate_scalar_call(103, args.clone(), &batch);
+    assert_eq!(
+        result.as_any().downcast_ref::<Int32Array>().unwrap(),
+        &Int32Array::from(vec![
+            Some(5),
+            Some(5),
+            Some(1),
+            Some(1),
+            None,
+            None,
+            Some(0)
+        ])
+    );
+    let scalar = evaluate_scalar_call(
+        103,
+        vec![logical_lit("abcabc"), logical_lit("bc"), logical_lit(3i32)],
+        &batch,
+    );
+    assert_eq!(
+        scalar.as_any().downcast_ref::<Int32Array>().unwrap(),
+        &Int32Array::from(vec![5; 7])
+    );
+    let null = evaluate_scalar_call(
+        103,
+        vec![
+            logical_lit("abc"),
+            logical_lit("a"),
+            logical_lit(ScalarValue::Int32(None)),
+        ],
+        &batch,
+    );
+    assert_eq!(null.null_count(), 7);
+    let empty = evaluate_scalar_call(103, args, &batch.slice(0, 0));
+    assert!(empty.is_empty());
+    assert_eq!(empty.data_type(), &DataType::Int32);
+}
+
+#[test]
+fn string_search_locate_scalar_and_column_arguments_match_on_ascii_slices() {
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("s", DataType::Utf8, true),
+            Field::new("needle", DataType::Utf8, true),
+            Field::new("start", DataType::Int32, true),
+        ])),
+        vec![
+            Arc::new(StringArray::from(vec![
+                Some("\u{4e2d}"),
+                Some("abcabc"),
+                Some("aaabaaab"),
+                Some(""),
+                Some("ab\0bc"),
+                None,
+                Some("abc"),
+                Some("abc"),
+                Some("\u{1f600}"),
+            ])),
+            Arc::new(StringArray::from(vec![
+                Some("skip"),
+                Some("bc"),
+                Some("aaab"),
+                Some(""),
+                Some("\0"),
+                Some("a"),
+                Some("a"),
+                Some("a"),
+                None,
+            ])),
+            Arc::new(Int32Array::from(vec![
+                Some(0),
+                Some(3),
+                Some(3),
+                Some(i32::MIN),
+                Some(4),
+                Some(1),
+                Some(i32::MAX),
+                None,
+                Some(0),
+            ])),
+        ],
+    )
+    .unwrap()
+    .slice(1, 7);
+    for (args, expected) in [
+        (
+            vec![
+                logical_col("s"),
+                logical_col("needle"),
+                logical_col("start"),
+            ],
+            vec![Some(5), Some(5), Some(1), Some(0), None, Some(0), None],
+        ),
+        (
+            vec![logical_col("s"), logical_lit("bc"), logical_col("start")],
+            vec![Some(5), Some(0), Some(0), Some(4), None, Some(0), None],
+        ),
+        (
+            vec![logical_col("s"), logical_col("needle"), logical_lit(2i32)],
+            vec![Some(2), Some(5), Some(1), Some(3), None, Some(0), Some(0)],
+        ),
+        (
+            vec![logical_col("s"), logical_lit("bc"), logical_lit(2i32)],
+            vec![Some(2), Some(0), Some(0), Some(4), None, Some(2), Some(2)],
+        ),
+        (
+            vec![
+                logical_lit("aaabaaab"),
+                logical_col("needle"),
+                logical_col("start"),
+            ],
+            vec![Some(0), Some(5), Some(1), Some(0), Some(1), Some(0), None],
+        ),
+        (
+            vec![
+                logical_col("s"),
+                logical_lit(ScalarValue::Utf8(None)),
+                logical_lit(2i32),
+            ],
+            vec![None; 7],
+        ),
+    ] {
+        let result = evaluate_scalar_call(103, args.clone(), &batch);
+        assert_eq!(
+            result.as_any().downcast_ref::<Int32Array>().unwrap(),
+            &Int32Array::from(expected),
+            "{args:?}",
+        );
+        assert!(evaluate_scalar_call(103, args, &batch.slice(0, 0)).is_empty());
+    }
+}
+
+#[test]
+fn string_search_locate_rejects_bad_arity_types_and_lengths() {
+    use datafusion::logical_expr::{ColumnarValue, ScalarFunctionArgs};
+
+    let datafusion::prelude::Expr::ScalarFunction(call) = build_call(103, vec![]) else {
+        panic!("expected LOCATE UDF");
+    };
+    let string = ColumnarValue::Scalar(ScalarValue::Utf8(Some("abc".into())));
+    let start = ColumnarValue::Scalar(ScalarValue::Int32(Some(1)));
+    let short = ColumnarValue::Array(Arc::new(StringArray::from(vec!["a"])));
+    for args in [
+        vec![],
+        vec![string.clone(), start.clone()],
+        vec![string.clone(), string.clone(), start.clone(), start.clone()],
+        vec![short.clone(), string.clone(), start.clone()],
+        vec![string.clone(), short, start.clone()],
+        vec![
+            string.clone(),
+            string.clone(),
+            ColumnarValue::Array(Arc::new(Int32Array::from(vec![1]))),
+        ],
+        vec![string.clone(), start.clone(), start],
+        vec![string.clone(), string.clone(), string],
+    ] {
+        assert!(call
+            .func
+            .invoke_with_args(ScalarFunctionArgs {
+                args,
+                arg_fields: vec![],
+                number_rows: 2,
+                return_field: Arc::new(Field::new("out", DataType::Int32, true)),
+                config_options: Arc::new(datafusion::common::config::ConfigOptions::new()),
+            })
+            .is_err());
+    }
+}
+
+#[test]
+fn string_search_positions_preserve_types() {
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("s", DataType::Utf8, false),
+            Field::new("needle", DataType::Utf8, false),
+        ])),
+        vec![
+            Arc::new(StringArray::from(vec!["abc", "", "\u{4e2d}\u{1f600}x"])),
+            Arc::new(StringArray::from(vec!["ab", "", "\u{1f600}x"])),
+        ],
+    )
+    .unwrap();
+    let result = evaluate_scalar_call(102, vec![logical_col("s"), logical_col("needle")], &batch);
+    assert_eq!(
+        result.as_any().downcast_ref::<Int32Array>().unwrap(),
+        &Int32Array::from(vec![1, 1, 2])
+    );
+}
+
+#[test]
+fn string_search_rejects_invalid_arity_without_panicking() {
+    let schema = Arc::new(DFSchema::empty());
+    let context = SimplifyContext::builder()
+        .with_schema(schema.clone())
+        .build();
+    for op in 102..=103 {
+        let result = ExprSimplifier::new(context.clone()).coerce(build_call(op, vec![]), &schema);
+        assert!(
+            result.is_err(),
+            "search op {op} must reject missing arguments"
+        );
+    }
 }
 
 fn evaluate_string_call(
@@ -8969,8 +9627,8 @@ fn calc_split_index_matches_flink() {
     )
     .unwrap();
     let mut calc = CalcExpression {
-        kinds: vec![6, 0, 3, 7],    // CALL(SPLIT_INDEX), col url, lit "/", lit 3
-        payload: vec![85, 0, 0, 0], // op 85; col 0; strings[0]; longs[0]
+        kinds: vec![6, 0, 3, 7],     // CALL(SPLIT_INDEX), col url, lit "/", lit 3
+        payload: vec![130, 0, 0, 0], // op 130; col 0; strings[0]; longs[0]
         child_counts: vec![3, 0, 0, 0],
         longs: vec![3],
         doubles: vec![],
@@ -8996,15 +9654,16 @@ fn calc_split_index_matches_flink() {
 // a null input (the JVM encoder supplies the chrono pattern).
 #[test]
 fn calc_date_format_matches_flink() {
-    let ts: ArrayRef = Arc::new(TimestampMillisecondArray::from(vec![
+    // Flink's transpose supplies nanoseconds.
+    let ts: ArrayRef = Arc::new(TimestampNanosecondArray::from(vec![
         Some(0),
-        Some(86_400_000),
+        Some(86_400_000_000_000),
         None,
     ]));
     let batch = RecordBatch::try_new(
         Arc::new(Schema::new(vec![Field::new(
             "ts",
-            DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+            DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None),
             true,
         )])),
         vec![ts],
@@ -9038,15 +9697,15 @@ fn calc_date_format_matches_flink() {
 // 1970-01-02T01:00 (hour 1).
 #[test]
 fn calc_extract_hour_matches_flink() {
-    let ts: ArrayRef = Arc::new(TimestampMillisecondArray::from(vec![
+    let ts: ArrayRef = Arc::new(TimestampNanosecondArray::from(vec![
         Some(0),
-        Some(86_400_000 + 3_600_000),
+        Some((86_400_000 + 3_600_000) * 1_000_000),
         None,
     ]));
     let batch = RecordBatch::try_new(
         Arc::new(Schema::new(vec![Field::new(
             "ts",
-            DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+            DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None),
             true,
         )])),
         vec![ts],
