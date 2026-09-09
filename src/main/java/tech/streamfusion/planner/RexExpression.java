@@ -374,11 +374,16 @@ final class RexExpression {
   private boolean emitLiteral(RexLiteral literal) {
     // An untyped NULL (e.g. a NULLIF/CASE `THEN NULL` branch); the surrounding expression's coercion
     // gives it a type, as it does on the host.
+    SqlTypeName type = literal.getType().getSqlTypeName();
     if (literal.isNull()) {
+      if (type == SqlTypeName.CHAR || type == SqlTypeName.VARCHAR) {
+        add(KIND_LIT_STRING, strings.size(), 0);
+        strings.add(null);
+        return true;
+      }
       add(KIND_LIT_NULL, -1, 0);
       return true;
     }
-    SqlTypeName type = literal.getType().getSqlTypeName();
     // A day-time INTERVAL literal (SECOND/MINUTE/HOUR/DAY) — Calcite stores its value in milliseconds.
     // Admitted so datetime arithmetic like `ts - INTERVAL '10' SECOND` (Nexmark q7) is expressible; a
     // year-month interval (value in months) falls back.
@@ -552,6 +557,9 @@ final class RexExpression {
     }
     if ("LOCATE".equals(functionName)) {
       return emitStringSearch(call, 102, true);
+    }
+    if ("BIN".equals(functionName)) {
+      return emitEncoding(call, 104, true, false);
     }
     if ("CONCAT".equals(functionName) || "||".equals(functionName)) {
       return emitStringCall(call, 93, 1, Integer.MAX_VALUE);
@@ -800,6 +808,29 @@ final class RexExpression {
       }
     }
     return true;
+  }
+
+  private boolean emitEncoding(RexCall call, int op, boolean integers, boolean strings) {
+    String name = call.getOperator().getName();
+    if (call.getOperands().size() != 1) {
+      return reject(name + " requires 1 argument");
+    }
+    RexNode arg = call.getOperands().get(0);
+    SqlTypeName type = arg.getType().getSqlTypeName();
+    boolean integer =
+        type == SqlTypeName.TINYINT
+            || type == SqlTypeName.SMALLINT
+            || type == SqlTypeName.INTEGER
+            || type == SqlTypeName.BIGINT;
+    boolean string = type.getFamily() == SqlTypeFamily.CHARACTER;
+    if (!(integers && integer) && !(strings && string) && type != SqlTypeName.NULL) {
+      return reject(name + ": unsupported input type " + type);
+    }
+    if (op == 105 && !integer) {
+      op = 106;
+    }
+    add(KIND_CALL, op, 1);
+    return emit(arg);
   }
 
   private boolean emitStringCall(RexCall call, int op, int minArgs, int maxArgs) {

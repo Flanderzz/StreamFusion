@@ -70,10 +70,10 @@ class ScalarFunctionBenchmark {
 
   private static final List<Query> ENCODING_FUNCTIONS =
       Stream.concat(
-              Stream.<String>empty()
+              Stream.of("tinyint", "smallint", "integer", "bigint")
                   .flatMap(
                       type ->
-                          Stream.<Query>of()),
+                          Stream.of(new Query("BIN_" + type.toUpperCase(Locale.ROOT), type, "BIN(n)"))),
               Stream.<Query>of())
           .toList();
 

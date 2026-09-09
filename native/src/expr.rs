@@ -24,7 +24,7 @@ pub(crate) fn build_expr(
         )),
         1 => logical_lit(longs[arg]),
         2 => logical_lit(doubles[arg]),
-        3 => logical_lit(strings[arg].clone().expect("string literal")),
+        3 => logical_lit(ScalarValue::Utf8(strings[arg].clone())),
         4 => logical_lit(longs[arg] != 0),
         // An untyped NULL; the surrounding expression's coercion (e.g. a CASE branch) types it.
         5 => datafusion::prelude::Expr::Literal(ScalarValue::Null, None),

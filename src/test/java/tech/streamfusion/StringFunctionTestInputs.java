@@ -52,4 +52,107 @@ final class StringFunctionTestInputs {
     return tEnv;
   }
 
+  static TableEnvironment encodings() {
+    StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+    env.setParallelism(1);
+    StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
+    long[] numbers = {
+      0,
+      1,
+      -1,
+      Long.MIN_VALUE,
+      Long.MAX_VALUE,
+      Integer.MIN_VALUE,
+      Integer.MAX_VALUE,
+      Short.MIN_VALUE,
+      Short.MAX_VALUE,
+      Byte.MIN_VALUE,
+      Byte.MAX_VALUE,
+      255,
+      256,
+      4294967297L,
+      -4294967297L,
+      17,
+      31,
+      32
+    };
+    String[] strings = {
+      "",
+      "a",
+      "ab",
+      "abc",
+      "abcd",
+      "\u4e2d\ud83d\ude00",
+      "\u00e9e\u0301",
+      "a\u0000b",
+      "line\r\nnext",
+      " ",
+      "\t",
+      "%_\\",
+      "x".repeat(57),
+      "x".repeat(58),
+      "\u4e2d".repeat(4097),
+      null,
+      "abc ",
+      "0123456789"
+    };
+    String[] hexStrings = {
+      "",
+      "A",
+      "AB",
+      "ABC",
+      "fF00",
+      "12345",
+      "G",
+      "0G",
+      "G12",
+      " 12",
+      "12\n",
+      "0x12",
+      "\uff11\uff12",
+      "\u0000",
+      "aF".repeat(4097),
+      null,
+      "f",
+      "0123456789aBcDeF"
+    };
+    List<Row> rows = new ArrayList<>();
+    for (int id = 0; id < numbers.length; id++) {
+      long value = numbers[id];
+      boolean isNull = id == 15;
+      rows.add(
+          Row.of(
+              id,
+              strings[id],
+              hexStrings[id],
+              isNull ? null : value,
+              isNull ? null : (int) value,
+              isNull ? null : (short) value,
+              isNull ? null : (byte) value));
+    }
+    tEnv.createTemporaryView(
+        "encodings",
+        env.fromData(
+            rows,
+            Types.ROW_NAMED(
+                new String[] {"id", "s", "hex_text", "n", "i", "sh", "t"},
+                Types.INT,
+                Types.STRING,
+                Types.STRING,
+                Types.LONG,
+                Types.INT,
+                Types.SHORT,
+                Types.BYTE)),
+        Schema.newBuilder()
+            .column("id", DataTypes.INT())
+            .column("s", DataTypes.STRING())
+            .column("hex_text", DataTypes.STRING())
+            .column("n", DataTypes.BIGINT())
+            .column("i", DataTypes.INT())
+            .column("sh", DataTypes.SMALLINT())
+            .column("t", DataTypes.TINYINT())
+            .build());
+    return tEnv;
+  }
+
 }

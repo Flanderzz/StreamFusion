@@ -120,3 +120,18 @@ not subtracted from function times because their result types and lengths can di
 | `LOCATE3_LITERAL` | ASCII, 8-byte padding | 0.453 | 0.653 | 0.69x |
 | `LOCATE3_COLUMN` | ASCII, 8-byte padding | 0.586 | 0.860 | 0.68x |
 
+## BIN
+
+`BIN_TINYINT`: `BIN(n)`; `BIN_SMALLINT`: `BIN(n)`; `BIN_INTEGER`: `BIN(n)`; `BIN_BIGINT`: `BIN(n)`
+
+| Case | Input | Flink (s) | Native (s) | Flink / native |
+|---|---|---:|---:|---:|
+| `BIN_TINYINT` | non-null | 0.335 | 0.472 | 0.71x |
+| `BIN_SMALLINT` | non-null | 0.336 | 0.468 | 0.72x |
+| `BIN_INTEGER` | non-null | 0.341 | 0.469 | 0.73x |
+| `BIN_BIGINT` | non-null | 0.331 | 0.476 | 0.70x |
+| `BIN_TINYINT` | NULL/8 | 0.321 | 0.478 | 0.67x |
+| `BIN_SMALLINT` | NULL/8 | 0.324 | 0.468 | 0.69x |
+| `BIN_INTEGER` | NULL/8 | 0.332 | 0.464 | 0.71x |
+| `BIN_BIGINT` | NULL/8 | 0.325 | 0.468 | 0.69x |
+
