@@ -288,6 +288,10 @@ Character input and a literal non-empty separator. The separator is literal text
 
 SUBSTRING/SUBSTR accepts dynamic TINYINT, SMALLINT, or INT starts and optional lengths. Positive positions are one-based, zero starts at the first character, negative positions count from the end, and a position before the beginning returns empty. Negative length returns NULL; input NULLs propagate.
 
+### LEFT
+
+Character input with a dynamic TINYINT, SMALLINT, or INT count. Non-positive counts return empty, large counts return the full string, and NULL propagates. Counts measure Unicode code points.
+
 ## Case folding & regex
 
 **Native by default — not a fallback.** `UPPER`/`LOWER` and `REGEXP_EXTRACT` run natively by default
@@ -342,7 +346,7 @@ A number of otherwise-admitted functions decline when called with an argument sh
 implementation can't handle, even though the function itself is supported:
 
 - An **unsupported literal type** anywhere in the expression.
-- **`LEFT`/`RIGHT`/`LPAD`/`RPAD`** — a non-literal or negative count.
+- **`RIGHT`/`LPAD`/`RPAD`** — a non-literal or negative count.
 - **`TRIM`** — anything other than the default `BOTH`-whitespace form.
 - **`POSITION`** — a `FROM` start offset.
 - **`SPLIT_INDEX`** — an empty or non-literal separator.

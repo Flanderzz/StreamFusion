@@ -222,6 +222,10 @@ Writes one Arrow `List<Utf8>` column with batch-level builders. Single-byte sepa
 
 Copies a borrowed UTF-8 slice into Arrow. ASCII positions use byte offsets; negative Unicode positions scan backward only as far as the requested start. This removes a full character-count pass while preserving Flink's boundaries.
 
+### LEFT
+
+Copies a borrowed prefix into the Arrow output and avoids DataFusion's different negative-count semantics. Constant and dynamic counts use the same verified kernel.
+
 ### TO_TIMESTAMP (deferred)
 
 Native parsing is withdrawn. Its millisecond timestamp result can represent expanded years,

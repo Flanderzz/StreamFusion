@@ -13,6 +13,7 @@ pub(crate) mod decode;
 pub(crate) mod encode;
 pub(crate) mod json_quote;
 pub(crate) mod json_unquote;
+pub(crate) mod left;
 pub(crate) mod split;
 pub(crate) mod substring;
 
@@ -108,6 +109,7 @@ pub(crate) fn function(op: i64, arity: usize) -> Option<ScalarUDF> {
         123 => json_unquote::function(),
         124 => split::function(),
         125 => substring::function(arity),
+        126 => left::function(),
         _ => return None,
     })
 }

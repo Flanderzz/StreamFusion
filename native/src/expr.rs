@@ -456,13 +456,6 @@ pub(crate) fn build_call(
             let mut it = args.into_iter();
             let mut next = || it.next().expect("missing operand");
             match op {
-                69 => datafusion::prelude::Expr::Cast(datafusion::logical_expr::Cast::new(
-                    Box::new(datafusion::functions::unicode::expr_fn::left(
-                        next(),
-                        next(),
-                    )),
-                    DataType::Utf8,
-                )),
                 70 => datafusion::prelude::Expr::Cast(datafusion::logical_expr::Cast::new(
                     Box::new(datafusion::functions::unicode::expr_fn::right(
                         next(),

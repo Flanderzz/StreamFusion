@@ -470,10 +470,9 @@ class FlinkCalcSqlHarnessTest {
   }
 
   @Test
-  void leftNegativeCountFallsBack() throws Exception {
-    // A negative count diverges (Flink empty vs DataFusion drop-from-other-end), so it falls back.
-    NativeParity.assertFallbackReasonContains(
-        FlinkCalcSqlHarnessTest::spacedStringEnvironment, "SELECT LEFT(s, -1) FROM ss", "LEFT");
+  void leftNegativeCountMatchesHost() throws Exception {
+    NativeParity.assertParity(
+        FlinkCalcSqlHarnessTest::spacedStringEnvironment, "SELECT LEFT(s, -1) FROM ss");
   }
 
   @Test

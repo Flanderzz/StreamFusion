@@ -726,7 +726,7 @@ final class RexExpression {
       return emit(args.get(0)) && emit(args.get(1));
     }
     if ("LEFT".equals(functionName)) {
-      return emitBoundedSubstr(call, 69);
+      return emitStringWithIntegers(call, 126, 2, 2);
     }
     if ("RIGHT".equals(functionName)) {
       return emitBoundedSubstr(call, 70);
