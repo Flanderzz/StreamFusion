@@ -224,3 +224,12 @@ not subtracted from function times because their result types and lengths can di
 | `ELT` | ASCII, 264-byte budget | 0.753 | 1.342 | 0.56x |
 | `ELT` | Unicode, 264-byte budget, NULL/8 | 1.112 | 1.575 | 0.71x |
 
+## URL_ENCODE
+
+`URL_ENCODE`: `URL_ENCODE(s)`
+
+| Case | Input | Flink (s) | Native (s) | Flink / native |
+|---|---|---:|---:|---:|
+| `URL_ENCODE` | ASCII, 264-byte budget | 1.450 | 1.285 | 1.13x |
+| `URL_ENCODE` | Unicode, 264-byte budget, NULL/8 | 4.400 | 1.448 | 3.04x |
+

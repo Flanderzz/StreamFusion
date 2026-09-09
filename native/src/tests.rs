@@ -111,6 +111,115 @@ fn evaluate_scalar_call(
 }
 
 #[test]
+fn scalar_extrema_and_text_handle_null_masks_slices_and_scalars() {
+    let input = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Int32, true),
+            Field::new("b", DataType::Int32, true),
+            Field::new("s", DataType::Utf8, true),
+        ])),
+        vec![
+            Arc::new(Int32Array::from(vec![
+                Some(99),
+                Some(1),
+                None,
+                Some(3),
+                Some(-5),
+            ])),
+            Arc::new(Int32Array::from(vec![
+                Some(99),
+                Some(2),
+                Some(2),
+                None,
+                Some(9),
+            ])),
+            Arc::new(StringArray::from(vec![
+                Some("ignore"),
+                Some(" abC "),
+                None,
+                Some("z"),
+                Some(""),
+            ])),
+        ],
+    )
+    .unwrap()
+    .slice(1, 4);
+    for (op, expected) in [
+        (109, vec![Some(2), None, None, Some(9)]),
+        (110, vec![Some(1), None, None, Some(-5)]),
+    ] {
+        let result = evaluate_scalar_call(op, vec![logical_col("a"), logical_col("b")], &input);
+        assert_eq!(
+            result
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap()
+                .iter()
+                .collect::<Vec<_>>(),
+            expected
+        );
+        let null = evaluate_scalar_call(
+            op,
+            vec![logical_col("a"), logical_lit(ScalarValue::Int32(None))],
+            &input,
+        );
+        assert_eq!(null.null_count(), 4);
+        let string = evaluate_scalar_call(op, vec![logical_col("s"), logical_lit("m")], &input);
+        assert_eq!(string.null_count(), 1);
+    }
+    for (op, args) in [
+        (109, vec![logical_col("a"), logical_lit(3i32)]),
+        (110, vec![logical_col("s"), logical_lit("m")]),
+        (111, vec![logical_col("s")]),
+        (
+            112,
+            vec![logical_col("s"), logical_lit("ab"), logical_lit("xy")],
+        ),
+        (113, vec![logical_col("s"), logical_lit(" ab")]),
+        (114, vec![logical_col("a"), logical_col("s")]),
+        (115, vec![logical_col("s")]),
+    ] {
+        assert_eq!(evaluate_scalar_call(op, args, &input.slice(0, 0)).len(), 0);
+    }
+    for (op, args, expected) in [
+        (111, vec![logical_lit("a_BC")], "A_Bc"),
+        (
+            112,
+            vec![logical_lit("abba"), logical_lit("aab"), logical_lit("123")],
+            "1331",
+        ),
+        (
+            113,
+            vec![
+                logical_lit("\u{1f600}abc\u{1f600}"),
+                logical_lit("\u{1f600}"),
+            ],
+            "abc",
+        ),
+        (
+            114,
+            vec![
+                logical_lit(2i32),
+                logical_lit(ScalarValue::Utf8(None)),
+                logical_lit("chosen"),
+            ],
+            "chosen",
+        ),
+        (115, vec![logical_lit("a +")], "a+%2B"),
+    ] {
+        let result = evaluate_scalar_call(op, args, &input);
+        assert_eq!(
+            result
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .value(0),
+            expected
+        );
+    }
+}
+
+#[test]
 fn encoding_integer_arrays_preserve_nulls_and_long_bits() {
     let batch = RecordBatch::try_new(
         Arc::new(Schema::new(vec![Field::new("n", DataType::Int64, true)])),

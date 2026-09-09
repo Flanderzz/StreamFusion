@@ -614,6 +614,9 @@ final class RexExpression {
     if ("ELT".equals(functionName)) {
       return emitElt(call);
     }
+    if ("URL_ENCODE".equals(functionName)) {
+      return emitCharacterFunction(call, 115, 1, 1);
+    }
     if ("CONCAT".equals(functionName) || "||".equals(functionName)) {
       return emitStringCall(call, 93, 1, Integer.MAX_VALUE);
     }

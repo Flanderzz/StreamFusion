@@ -69,6 +69,12 @@ pub(crate) fn function(op: i64, arity: usize) -> Option<ScalarUDF> {
         ),
         113 => datafusion::functions::string::btrim().as_ref().clone(),
         114 => scalar::elt_function(arity),
+        115 => udf(
+            "flink_url_encode",
+            vec![DataType::Utf8],
+            DataType::Utf8,
+            scalar::url_encode,
+        ),
         _ => return None,
     })
 }

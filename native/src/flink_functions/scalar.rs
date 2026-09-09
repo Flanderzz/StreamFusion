@@ -324,6 +324,33 @@ fn elt(args: &[ArrayRef]) -> Result<ArrayRef> {
     Ok(Arc::new(builder.finish()))
 }
 
+pub(super) fn url_encode(args: &[ArrayRef]) -> Result<ArrayRef> {
+    let [arg] = args else {
+        return exec_err!("URL_ENCODE expects one argument");
+    };
+    let strings = datafusion::common::cast::as_string_array(arg)?;
+    let mut builder = StringBuilder::new();
+    let mut output = String::new();
+    for value in strings {
+        let Some(value) = value else {
+            builder.append_null();
+            continue;
+        };
+        output.clear();
+        for byte in value.bytes() {
+            if byte.is_ascii_alphanumeric() || b"-_. *".contains(&byte) {
+                output.push(if byte == b' ' { '+' } else { byte as char });
+            } else {
+                output.push('%');
+                output.push(super::HEX_DIGITS[(byte >> 4) as usize] as char);
+                output.push(super::HEX_DIGITS[(byte & 15) as usize] as char);
+            }
+        }
+        builder.append_value(&output);
+    }
+    Ok(Arc::new(builder.finish()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -338,6 +365,44 @@ mod tests {
             .unwrap()
             .iter()
             .collect()
+    }
+
+    #[test]
+    fn text_kernels_preserve_codepoints_and_nonstandard_null_rules() {
+        let source = strings(vec![
+            Some("ignored"),
+            Some("a\u{301}ab\0"),
+            Some("ab"),
+            None,
+            Some("ab"),
+        ])
+        .slice(1, 4);
+        let from = strings(vec![Some("aa\u{301}b"), None, Some("ab"), Some("ab")]);
+        let to = strings(vec![Some("12X"), Some("x"), Some("x"), None]);
+        let result = translate(&[source, from, to]).unwrap();
+        assert_eq!(
+            values(&result),
+            vec![Some("1X1\0"), Some("ab"), None, Some("")]
+        );
+        let input = strings(vec![
+            Some("9ABC_\u{e9}aBC\u{1f600}DEF\0gHI"),
+            None,
+            Some(""),
+        ]);
+        assert_eq!(
+            values(&initcap(&[input.clone()]).unwrap()),
+            vec![Some("9abc_\u{e9}Abc\u{1f600}Def\0Ghi"), None, Some("")]
+        );
+        assert_eq!(
+            values(&url_encode(&[strings(vec![Some("~*+% -_.\0\u{1f600}"), None])]).unwrap()),
+            vec![Some("%7E*%2B%25+-_.%00%F0%9F%98%80"), None]
+        );
+        for kernel in [initcap, url_encode] {
+            assert_eq!(kernel(&[input.slice(0, 0)]).unwrap().len(), 0);
+            assert!(kernel(&[]).is_err());
+        }
+        assert!(translate(&[]).is_err());
+        assert!(translate(&[input.clone(), input.clone(), input.slice(0, 1)]).is_err());
     }
 
     #[test]

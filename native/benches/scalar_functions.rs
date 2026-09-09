@@ -87,6 +87,7 @@ fn functions(c: &mut Criterion) {
                     strings(1),
                 ],
             ),
+            ("URL_ENCODE", 115, vec![strings(0)]),
         ];
         let mut group = c.benchmark_group(format!("scalar/{name}"));
         group.throughput(Throughput::Elements(ROWS as u64));
