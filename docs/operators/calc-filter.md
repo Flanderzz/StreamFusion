@@ -332,6 +332,10 @@ WEEK and EXTRACT(WEEK) over DATE or plain TIMESTAMP use ISO week numbers, includ
 
 DAYOFYEAR/EXTRACT(DOY) over DATE or plain TIMESTAMP return, for ordinary calendar dates, 1 through 365/366 as BIGINT. NULL propagates. TIMESTAMP_LTZ falls back for this field.
 
+### DAYOFWEEK
+
+DAYOFWEEK/EXTRACT(DOW) over DATE or plain TIMESTAMP return Sunday=1 through Saturday=7 as BIGINT. NULL propagates. TIMESTAMP_LTZ falls back for this field.
+
 ### FLOOR (timestamp)
 
 Temporal FLOOR falls back to Flink for every unit and timestamp precision, including

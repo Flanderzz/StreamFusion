@@ -267,6 +267,10 @@ Uses Flink's integer ISO-week calculation in the shared single-pass calendar ker
 
 Subtracts the first Julian day of the year using Flink's integer arithmetic in the shared calendar kernel. Expanded years retain Flink's overflow results rather than becoming NULL outside chrono's range.
 
+### DAYOFWEEK
+
+Computes the Julian-day remainder with Sunday=1, directly in the shared primitive-array mapping. Preserves Flink's timestamp-day conversion and integer overflow on expanded years.
+
 ### FLOOR (timestamp, deferred)
 
 Temporal FLOOR is withdrawn: its millisecond output does not satisfy downstream native
