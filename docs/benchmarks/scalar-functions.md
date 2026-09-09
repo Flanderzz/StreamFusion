@@ -296,3 +296,12 @@ not subtracted from function times because their result types and lengths can di
 | `SPLIT` | ASCII, 264-byte budget | 3.241 | 6.581 | 0.49x |
 | `SPLIT` | Unicode, 264-byte budget, NULL/8 | 2.535 | 4.821 | 0.53x |
 
+## SUBSTRING
+
+`SUBSTRING_DYNAMIC`: `SUBSTRING(s, n, len)`
+
+| Case | Input | Flink (s) | Native (s) | Flink / native |
+|---|---|---:|---:|---:|
+| `SUBSTRING_DYNAMIC` | ASCII, 264-byte budget | 0.760 | 0.929 | 0.82x |
+| `SUBSTRING_DYNAMIC` | Unicode, 264-byte budget, NULL/8 | 0.937 | 1.005 | 0.93x |
+

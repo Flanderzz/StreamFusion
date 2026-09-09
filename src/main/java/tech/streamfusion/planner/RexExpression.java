@@ -665,8 +665,9 @@ final class RexExpression {
     if ("TRIM".equals(functionName)) {
       return emitTrim(call);
     }
-    if ("SUBSTRING".equals(functionName)) {
-      return emitSubstring(call.getOperands());
+    if ("SUBSTRING".equals(functionName)
+        || "SUBSTR".equals(functionName)) {
+      return emitStringWithIntegers(call, 125, 2, 3);
     }
     if ("REPLACE".equals(functionName)) {
       List<RexNode> args = call.getOperands();
@@ -1430,6 +1431,22 @@ final class RexExpression {
     }
     add(KIND_ITEM, 0, 2);
     return emit(collection) && emit(subscript);
+  }
+
+  private boolean emitStringWithIntegers(RexCall call, int op, int min, int max) {
+    List<RexNode> args = call.getOperands();
+    if (args.size() < min
+        || args.size() > max
+        || !isCharacter(args.get(0))
+        || args.stream().skip(1).anyMatch(arg -> !isInt32(arg))) {
+      return reject(call.getOperator().getName() + " requires a string and INT parameters");
+    }
+    return emitBuiltinCall(call, op);
+  }
+
+  private static boolean isInt32(RexNode arg) {
+    return List.of(SqlTypeName.TINYINT, SqlTypeName.SMALLINT, SqlTypeName.INTEGER, SqlTypeName.NULL)
+        .contains(arg.getType().getSqlTypeName());
   }
 
   /**
@@ -2307,25 +2324,6 @@ final class RexExpression {
     }
     return out;
   }
-  private boolean emitSubstring(List<RexNode> args) {
-    if (args.size() != 2 && args.size() != 3) {
-      return reject("unsupported SUBSTRING arity");
-    }
-    if (!isIntLiteralAtLeast(args.get(1), 1)) {
-      return reject("SUBSTRING requires a literal start position ≥ 1");
-    }
-    if (args.size() == 3 && !isIntLiteralAtLeast(args.get(2), 0)) {
-      return reject("SUBSTRING requires a literal length ≥ 0");
-    }
-    add(KIND_CALL, 55, args.size());
-    for (RexNode arg : args) {
-      if (!emit(arg)) {
-        return false;
-      }
-    }
-    return true;
-  }
-
   /**
    * Emits {@code LEFT}/{@code RIGHT}(s, n) (op {@code op}) admitted only when {@code n} is an integer
    * literal ≥ 0: Flink returns the empty string for a negative count while DataFusion drops that many

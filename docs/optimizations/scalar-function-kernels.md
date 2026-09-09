@@ -82,3 +82,9 @@ Single-byte separators use Rust's character searcher (memchr) instead of the gen
 
 [Complete-job Flink/native results](../benchmarks/scalar-functions.md#split).
 
+## SUBSTRING
+
+ASCII uses byte offsets. Negative positions in Unicode strings traverse backward only to the requested start, replacing a full character count followed by a second forward scan. The selected UTF-8 span is borrowed and copied into the Arrow builder.
+
+[Complete-job Flink/native results](../benchmarks/scalar-functions.md#substring).
+

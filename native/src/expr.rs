@@ -371,24 +371,6 @@ pub(crate) fn build_call(
             return datafusion::logical_expr::ScalarUDF::new_from_impl(SplitIndex::new())
                 .call(args);
         }
-        55 => {
-            // SUBSTRING: 2-arg substr(s, pos) or 3-arg substring(s, pos, len). DataFusion's substr
-            // yields a Utf8View; cast back to Utf8 so the result is a plain VarChar vector the JVM
-            // converter reads (same string content, just the non-view representation).
-            let mut a = args.into_iter();
-            let source = a.next().expect("substring source");
-            let position = a.next().expect("substring position");
-            let result = match a.next() {
-                Some(length) => {
-                    datafusion::functions::unicode::expr_fn::substring(source, position, length)
-                }
-                None => datafusion::functions::unicode::expr_fn::substr(source, position),
-            };
-            return datafusion::prelude::Expr::Cast(datafusion::logical_expr::Cast::new(
-                Box::new(result),
-                DataType::Utf8,
-            ));
-        }
 
         40 => {
             // Searched CASE: [when1, then1, …, else]. The trailing else is the odd operand out.

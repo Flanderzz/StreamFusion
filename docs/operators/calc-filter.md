@@ -284,6 +284,10 @@ One character argument is native. Valid quoted values are unescaped with Flink/J
 
 Character input and a literal non-empty separator. The separator is literal text, including regex metacharacters. NULL input returns NULL, empty input returns an empty array, and leading/repeated/trailing separators retain empty tokens. Empty or dynamic separators fall back; the empty form splits UTF-16 surrogate units in Flink.
 
+### SUBSTRING
+
+SUBSTRING/SUBSTR accepts dynamic TINYINT, SMALLINT, or INT starts and optional lengths. Positive positions are one-based, zero starts at the first character, negative positions count from the end, and a position before the beginning returns empty. Negative length returns NULL; input NULLs propagate.
+
 ## Case folding & regex
 
 **Native by default — not a fallback.** `UPPER`/`LOWER` and `REGEXP_EXTRACT` run natively by default
@@ -338,7 +342,6 @@ A number of otherwise-admitted functions decline when called with an argument sh
 implementation can't handle, even though the function itself is supported:
 
 - An **unsupported literal type** anywhere in the expression.
-- **`SUBSTRING`** — a non-literal or out-of-range start/length.
 - **`LEFT`/`RIGHT`/`LPAD`/`RPAD`** — a non-literal or negative count.
 - **`TRIM`** — anything other than the default `BOTH`-whitespace form.
 - **`POSITION`** — a `FROM` start offset.

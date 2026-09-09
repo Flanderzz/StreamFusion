@@ -14,6 +14,7 @@ pub(crate) mod encode;
 pub(crate) mod json_quote;
 pub(crate) mod json_unquote;
 pub(crate) mod split;
+pub(crate) mod substring;
 
 mod binary_strings;
 mod charset;
@@ -106,6 +107,7 @@ pub(crate) fn function(op: i64, arity: usize) -> Option<ScalarUDF> {
         122 => json_quote::function(),
         123 => json_unquote::function(),
         124 => split::function(),
+        125 => substring::function(arity),
         _ => return None,
     })
 }

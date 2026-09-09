@@ -289,19 +289,15 @@ class FlinkCalcSqlHarnessTest {
   }
 
   @Test
-  void substringStartBelowOneFallsBack() throws Exception {
-    // Flink clamps a start below 1 to 1; DataFusion counts the out-of-range prefix against the
-    // length. So a literal start < 1 is not admitted and the Calc falls back.
-    NativeParity.assertFallback(
+  void substringStartBelowOneMatchesHost() throws Exception {
+    NativeParity.assertParity(
         FlinkCalcSqlHarnessTest::spacedStringEnvironment, "SELECT SUBSTRING(s FROM 0 FOR 3) FROM ss");
   }
 
   @Test
-  void substringRuntimePositionFallsBack() throws Exception {
-    // A non-literal start (column v) can't be range-checked at plan time, so it falls back, and the
-    // reason points at SUBSTRING.
-    NativeParity.assertFallbackReasonContains(
-        FlinkCalcSqlHarnessTest::environment, "SELECT SUBSTRING(s FROM v) FROM f", "SUBSTRING");
+  void substringRuntimePositionMatchesHost() throws Exception {
+    NativeParity.assertParity(
+        FlinkCalcSqlHarnessTest::environment, "SELECT SUBSTRING(s FROM v) FROM f");
   }
 
   @Test
