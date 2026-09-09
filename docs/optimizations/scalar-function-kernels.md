@@ -76,3 +76,9 @@ Combines first-token JSON validation and unescaping in one scan, writes UTF-8 di
 
 [Complete-job Flink/native results](../benchmarks/scalar-functions.md#json_unquote).
 
+## SPLIT
+
+Single-byte separators use Rust's character searcher (memchr) instead of the general substring searcher. One Arrow List builder accumulates each batch; complete-job results also include materializing the array output back into Flink rows.
+
+[Complete-job Flink/native results](../benchmarks/scalar-functions.md#split).
+

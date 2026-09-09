@@ -217,6 +217,10 @@ A reusable Rust string buffer mirrors Flink's UTF-16 iteration. A general JSON s
 
 Combines Jackson's first-token validation and unescaping in one scan, with one reusable UTF-8 buffer and a pending surrogate. It deliberately preserves Flink's treatment of trailing text after that first value.
 
+### SPLIT
+
+Writes one Arrow `List<Utf8>` column with batch-level builders. Single-byte separators use Rust's character searcher (memchr); other separators use literal substring search. Comet's SPLIT uses regex semantics, so only its Arrow output structure is applicable here.
+
 ### TO_TIMESTAMP (deferred)
 
 Native parsing is withdrawn. Its millisecond timestamp result can represent expanded years,

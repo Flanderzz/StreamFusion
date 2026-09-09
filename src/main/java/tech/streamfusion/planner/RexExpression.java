@@ -583,6 +583,20 @@ final class RexExpression {
     if ("JSON_UNQUOTE".equals(functionName)) {
       return emitCharacterFunction(call, 123, 1, 1);
     }
+    if ("SPLIT".equals(functionName)) {
+      List<RexNode> args = call.getOperands();
+      if (args.size() != 2
+          || !isCharacter(args.get(0))
+          || !isCharacter(args.get(1))
+          || !(args.get(1) instanceof RexLiteral)) {
+        return reject("SPLIT requires a literal non-empty character separator");
+      }
+      String separator = ((RexLiteral) args.get(1)).getValueAs(String.class);
+      if (separator == null || separator.isEmpty()) {
+        return reject("SPLIT requires a literal non-empty character separator");
+      }
+      return emitBuiltinCall(call, 124);
+    }
     if ("STARTSWITH".equals(functionName)) {
       return emitCharacterFunction(call, 100, 2, 2);
     }

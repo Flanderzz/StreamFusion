@@ -287,3 +287,12 @@ not subtracted from function times because their result types and lengths can di
 | `JSON_UNQUOTE` | ASCII, 264-byte budget | 1.615 | 1.317 | 1.23x |
 | `JSON_UNQUOTE` | Unicode, 264-byte budget, NULL/8 | 1.719 | 1.312 | 1.31x |
 
+## SPLIT
+
+`SPLIT`: `SPLIT(s, '|')`
+
+| Case | Input | Flink (s) | Native (s) | Flink / native |
+|---|---|---:|---:|---:|
+| `SPLIT` | ASCII, 264-byte budget | 3.241 | 6.581 | 0.49x |
+| `SPLIT` | Unicode, 264-byte budget, NULL/8 | 2.535 | 4.821 | 0.53x |
+
