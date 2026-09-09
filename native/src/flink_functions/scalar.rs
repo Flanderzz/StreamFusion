@@ -183,6 +183,26 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn extrema_reject_bad_arity_and_array_lengths() {
+        for op in [109, 110] {
+            let udf = super::super::function(op, 2).unwrap();
+            assert!(udf.return_type(&[]).is_err());
+            assert!(udf.coerce_types(&[DataType::Int32]).is_err());
+            let args = ScalarFunctionArgs {
+                args: vec![
+                    ColumnarValue::Array(strings(vec![Some("a")])),
+                    ColumnarValue::Array(strings(vec![Some("a"), None])),
+                ],
+                arg_fields: vec![],
+                number_rows: 1,
+                return_field: Arc::new(arrow::datatypes::Field::new("out", DataType::Utf8, true)),
+                config_options: Arc::new(datafusion::common::config::ConfigOptions::new()),
+            };
+            assert!(udf.invoke_with_args(args).is_err());
+        }
+    }
+
     fn invoke(op: i64, args: Vec<ColumnarValue>, datatype: DataType, rows: usize) -> ColumnarValue {
         super::super::function(op, args.len())
             .unwrap()
@@ -194,5 +214,57 @@ mod tests {
                 config_options: Arc::new(datafusion::common::config::ConfigOptions::new()),
             })
             .unwrap()
+    }
+
+    #[test]
+    fn primitive_extrema_preserve_sliced_nulls_and_decimal_scale() {
+        use arrow::array::Int64Array;
+        for datatype in [
+            DataType::Int8,
+            DataType::Int16,
+            DataType::Int32,
+            DataType::Int64,
+            DataType::Decimal128(20, 3),
+        ] {
+            let first = Int64Array::from(vec![Some(0), Some(-9), None, Some(5), Some(12), Some(7)]);
+            let second =
+                Int64Array::from(vec![Some(0), Some(-2), Some(3), None, Some(2), Some(11)]);
+            let first = arrow::compute::cast(&first.slice(1, 5), &datatype).unwrap();
+            let second = arrow::compute::cast(&second.slice(1, 5), &datatype).unwrap();
+            let scalar = ScalarValue::Int64(Some(4)).cast_to(&datatype).unwrap();
+            for (op, expected) in [
+                (109, vec![Some(4), None, None, Some(12), Some(11)]),
+                (110, vec![Some(-9), None, None, Some(2), Some(4)]),
+            ] {
+                let args = vec![
+                    ColumnarValue::Array(first.clone()),
+                    ColumnarValue::Scalar(scalar.clone()),
+                    ColumnarValue::Array(second.clone()),
+                    ColumnarValue::Array(first.clone()),
+                ];
+                let actual = invoke(op, args, datatype.clone(), 5).into_array(5).unwrap();
+                let expected =
+                    arrow::compute::cast(&Int64Array::from(expected), &datatype).unwrap();
+                assert_eq!(actual.to_data(), expected.to_data());
+                let args = vec![
+                    ColumnarValue::Array(first.slice(0, 0)),
+                    ColumnarValue::Scalar(scalar.clone()),
+                ];
+                let empty = invoke(op, args, datatype.clone(), 0).into_array(0).unwrap();
+                assert_eq!(empty.len(), 0);
+                assert_eq!(empty.data_type(), &datatype);
+                let args = vec![
+                    ColumnarValue::Array(first.clone()),
+                    ColumnarValue::Scalar(ScalarValue::try_new_null(&datatype).unwrap()),
+                ];
+                assert_eq!(
+                    invoke(op, args, datatype.clone(), 5)
+                        .into_array(5)
+                        .unwrap()
+                        .null_count(),
+                    5
+                );
+            }
+        }
     }
 }

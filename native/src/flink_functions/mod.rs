@@ -54,6 +54,7 @@ pub(crate) fn function(op: i64, arity: usize) -> Option<ScalarUDF> {
             binary_strings::unhex,
         ),
         109 => scalar::extremum(true),
+        110 => scalar::extremum(false),
         _ => return None,
     })
 }

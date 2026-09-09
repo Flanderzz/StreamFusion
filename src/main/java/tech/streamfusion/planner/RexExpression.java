@@ -598,6 +598,9 @@ final class RexExpression {
     if ("GREATEST".equals(functionName)) {
       return emitExtremum(call, 109);
     }
+    if ("LEAST".equals(functionName)) {
+      return emitExtremum(call, 110);
+    }
     if ("CONCAT".equals(functionName) || "||".equals(functionName)) {
       return emitStringCall(call, 93, 1, Integer.MAX_VALUE);
     }

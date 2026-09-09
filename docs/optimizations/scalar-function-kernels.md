@@ -28,3 +28,9 @@ Integer and matching-scale Decimal extrema use primitive Arrow comparison loops,
 
 [Complete-job Flink/native results](../benchmarks/scalar-functions.md#greatest).
 
+## LEAST
+
+Reuses the shared extremum kernel with minimum comparison, including primitive Arrow loops, folded constants, and strict NULL masking. Matching decimal scale is preserved on the output.
+
+[Complete-job Flink/native results](../benchmarks/scalar-functions.md#least).
+

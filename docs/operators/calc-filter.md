@@ -230,6 +230,10 @@ Character inputs produce BYTES. Either hex letter case is accepted; invalid byte
 
 Integers, BOOLEAN and matching-precision/scale DECIMAL are native, with strict NULL propagation. Strings require ASCII literals or CASE results composed entirely of ASCII literals. Unrestricted string columns fall back: Flink uses UTF-16 order for Java-backed strings and byte order after binary materialization. Floating point and mixed decimal scales fall back.
 
+### LEAST
+
+Uses the same type and ASCII-proof gates as GREATEST, with strict NULL propagation and minimum comparison.
+
 ## Case folding & regex
 
 **Native by default — not a fallback.** `UPPER`/`LOWER` and `REGEXP_EXTRACT` run natively by default

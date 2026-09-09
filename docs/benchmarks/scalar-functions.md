@@ -179,3 +179,12 @@ not subtracted from function times because their result types and lengths can di
 | `GREATEST` | non-null | 0.308 | 0.471 | 0.65x |
 | `GREATEST` | NULL/8 | 0.287 | 0.453 | 0.63x |
 
+## LEAST
+
+`LEAST`: `LEAST(n, m, 17)`
+
+| Case | Input | Flink (s) | Native (s) | Flink / native |
+|---|---|---:|---:|---:|
+| `LEAST` | non-null | 0.294 | 0.449 | 0.65x |
+| `LEAST` | NULL/8 | 0.276 | 0.453 | 0.61x |
+
