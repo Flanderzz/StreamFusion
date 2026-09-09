@@ -350,3 +350,12 @@ not subtracted from function times because their result types and lengths can di
 | `SPLIT_INDEX_DYNAMIC` | ASCII, 264-byte budget | 2.099 | 1.065 | 1.97x |
 | `SPLIT_INDEX_DYNAMIC` | Unicode, 264-byte budget, NULL/8 | 2.029 | 1.121 | 1.81x |
 
+## TO_DATE
+
+`TO_DATE`: `TO_DATE(s)`
+
+| Case | Input | Flink (s) | Native (s) | Flink / native |
+|---|---|---:|---:|---:|
+| `TO_DATE` | date strings, non-null | 0.427 | 0.529 | 0.81x |
+| `TO_DATE` | date strings, NULL/8 | 0.435 | 0.544 | 0.80x |
+

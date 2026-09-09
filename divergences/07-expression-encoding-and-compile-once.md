@@ -244,6 +244,10 @@ Reuses the same UTF-16 prefix accounting and UTF-8 span-copying kernel, placing 
 
 Scans only as far as the requested token, retaining empty tokens, instead of constructing the complete split array. An empty separator uses the exact Java Character.isWhitespace set, not Rust is_whitespace or ASCII space alone.
 
+### TO_DATE
+
+A native parser mirrors DateTimeUtils.parseDate rather than the stricter Arrow ISO parser. Calendar validation includes year 0 through 9999 and leap-year rules.
+
 ### TO_TIMESTAMP (deferred)
 
 Native parsing is withdrawn. Its millisecond timestamp result can represent expanded years,

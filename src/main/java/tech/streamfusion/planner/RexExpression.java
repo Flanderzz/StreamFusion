@@ -577,6 +577,9 @@ final class RexExpression {
     if ("DECODE".equals(functionName)) {
       return emitCharsetFunction(call, 121, SqlTypeFamily.BINARY);
     }
+    if ("TO_DATE".equals(functionName)) {
+      return emitCharacterFunction(call, 131, 1, 1);
+    }
     if ("JSON_QUOTE".equals(functionName)) {
       return emitCharacterFunction(call, 122, 1, 1);
     }

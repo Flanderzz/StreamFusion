@@ -92,6 +92,36 @@ final class TextTimeFunctionTestInputs {
     return tables;
   }
 
+  static TableEnvironment dates() {
+    String[] text = {
+      null,
+      "",
+      "1970",
+      "1970-2",
+      "1970-1-2",
+      "1970-01-02 12:34:56",
+      "2020-02-29",
+      "1900-02-29",
+      "2000-02-29",
+      "2021-02-30",
+      "0000-1-1",
+      "9999-12-31",
+      "10000-1-1",
+      "-1-1-1",
+      "+1970-1-1",
+      " 1970-1-2 ",
+      "1970- 1-2",
+      "1970-1-2junk",
+      "1970--2",
+      "1970-1",
+      "1970\t",
+      "1970-1-2\t",
+      "1970-1-2T00:00:00",
+      "\uff11\uff19\uff17\uff10"
+    };
+    return textRows(text);
+  }
+
   static TableEnvironment textRows(String... text) {
     List<Row> rows = new ArrayList<>();
     for (int i = 0; i < text.length; i++) {

@@ -308,6 +308,10 @@ Same input and boundary rules as LPAD, with padding appended on the right. Dynam
 
 Character separators and TINYINT/SMALLINT/INTEGER indices may be dynamic. Indices are zero-based; negative/out-of-range indices, empty input, or any NULL produce NULL. Whole separators preserve empty tokens. An empty separator uses Java Character.isWhitespace, including tabs and line separators but excluding non-breaking spaces. Numeric separators and BIGINT indices fall back.
 
+### TO_DATE
+
+One character argument. Accepts Flink's partial year/year-month forms, field trimming, and a timestamp suffix after the first ASCII space. Impossible dates return NULL; an all-digit field overflowing INTEGER fails the job. Formatted two-argument calls fall back.
+
 ## Case folding & regex
 
 **Native by default — not a fallback.** `UPPER`/`LOWER` and `REGEXP_EXTRACT` run natively by default
