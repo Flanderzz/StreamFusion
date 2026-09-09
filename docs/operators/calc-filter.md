@@ -312,6 +312,30 @@ Character separators and TINYINT/SMALLINT/INTEGER indices may be dynamic. Indice
 
 One character argument. Accepts Flink's partial year/year-month forms, field trimming, and a timestamp suffix after the first ASCII space. Impossible dates return NULL; an all-digit field overflowing INTEGER fails the job. Formatted two-argument calls fall back.
 
+### TO_TIMESTAMP
+
+Falls back to Flink for both the default and explicit-format forms. Native support is
+deferred: parsed timestamps can exceed the nanosecond range, while downstream native
+operators require nanosecond columns. A millisecond result is therefore unsafe even when
+standalone parsing succeeds. Computed-rowtime windows and parsed timestamp group keys
+also remain on Flink.
+
+### QUARTER
+
+QUARTER and EXTRACT(QUARTER) over DATE or plain TIMESTAMP return, for ordinary calendar dates, 1 through 4 as BIGINT. NULL propagates. TIMESTAMP_LTZ falls back for this newly admitted field.
+
+### FLOOR (timestamp)
+
+Temporal FLOOR falls back to Flink for every unit and timestamp precision, including
+TIMESTAMP(3) and TIMESTAMP(9). Its former millisecond Arrow output is incompatible with
+downstream native timestamp columns. The one-argument numeric FLOOR admission is unchanged.
+
+### CEIL (timestamp)
+
+Temporal CEIL/CEILING falls back to Flink for every unit and timestamp precision, for the
+same timestamp-unit incompatibility as temporal FLOOR. One-argument numeric CEIL/CEILING
+keeps its existing native admission. No millisecond timestamp rounding kernel is registered.
+
 ## Case folding & regex
 
 **Native by default — not a fallback.** `UPPER`/`LOWER` and `REGEXP_EXTRACT` run natively by default
@@ -347,7 +371,9 @@ beyond roughly 2100, and deep historical dates.
 
 A **legacy zone spelling** the native parser can't read (`GMT+1`, `PST`) makes the opt-in path fall
 back; the default upcall path handles any zone Flink itself accepts. A plain `TIMESTAMP` argument
-(no zone) stays on the pure-native path either way — there's nothing zone-dependent to upcall.
+(no zone) uses the pure-native path when its Arrow representation is nanoseconds. Parsed or rounded
+millisecond results have a wider range than the legacy chrono formatting/extraction kernels and
+fall back for those consumers. The new QUARTER/WEEK/DAYOFYEAR/DAYOFWEEK kernels accept them.
 
 ## Opt-in math
 
@@ -372,9 +398,9 @@ implementation can't handle, even though the function itself is supported:
 - **`DATE_FORMAT`** — a non-literal pattern, or (on the pure-native path only) a
   non-translatable pattern (text, fraction, or zone fields) — the JVM-upcall `TIMESTAMP_LTZ` path
   accepts any pattern Flink's own formatter does.
-- **`EXTRACT`** — a fractional or convention-divergent field (`SECOND`, `DOW`, `WEEK`, `QUARTER`). A
-  `TIMESTAMP_LTZ` argument to either `DATE_FORMAT` or `EXTRACT` now runs natively regardless — see
-  Date/time above.
+- **`EXTRACT`** — a fractional result or a field outside the admitted set. The added
+  `QUARTER`/`WEEK`/`DOY`/`DOW` fields admit DATE and plain TIMESTAMP; their LTZ forms fall back.
+  Existing YEAR/MONTH/DAY/HOUR/MINUTE/SECOND LTZ extraction uses the host-exact upcall described above.
 - **`TO_TIMESTAMP_LTZ`** — a precision other than 3.
 - **A non-literal subscript** in `array[i]`/`map[key]` — at runtime a negative index counts from the
   end in DataFusion but is `NULL` in Flink, and the native map lookup binds its key at compile time,

@@ -359,3 +359,12 @@ not subtracted from function times because their result types and lengths can di
 | `TO_DATE` | date strings, non-null | 0.427 | 0.529 | 0.81x |
 | `TO_DATE` | date strings, NULL/8 | 0.435 | 0.544 | 0.80x |
 
+## QUARTER
+
+`QUARTER`: `QUARTER(ts)`
+
+| Case | Input | Flink (s) | Native (s) | Flink / native |
+|---|---|---:|---:|---:|
+| `QUARTER` | TIMESTAMP(9), non-null | 0.368 | 0.434 | 0.85x |
+| `QUARTER` | TIMESTAMP(9), NULL/8 | 0.378 | 0.460 | 0.82x |
+

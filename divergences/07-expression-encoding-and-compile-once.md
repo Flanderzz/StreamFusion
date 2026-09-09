@@ -255,6 +255,10 @@ but downstream native windows and keyed operators assume nanoseconds. A standalo
 benchmark does not establish safe composition. The expression encoder declines the function,
 so the existing all-or-nothing admission rule keeps its consumers on Flink as well.
 
+### QUARTER
+
+Fuses Flink's timestamp-to-day conversion and integer Julian-calendar extraction in one Arrow primitive-array pass. Epoch milliseconds divide towards zero, including before 1970. The integer algorithm also preserves Flink's overflow behavior across the full DATE range.
+
 ### FLOOR (timestamp, deferred)
 
 Temporal FLOOR is withdrawn: its millisecond output does not satisfy downstream native

@@ -9654,15 +9654,16 @@ fn calc_split_index_matches_flink() {
 // a null input (the JVM encoder supplies the chrono pattern).
 #[test]
 fn calc_date_format_matches_flink() {
-    let ts: ArrayRef = Arc::new(TimestampMillisecondArray::from(vec![
+    // Flink's transpose supplies nanoseconds.
+    let ts: ArrayRef = Arc::new(TimestampNanosecondArray::from(vec![
         Some(0),
-        Some(86_400_000),
+        Some(86_400_000_000_000),
         None,
     ]));
     let batch = RecordBatch::try_new(
         Arc::new(Schema::new(vec![Field::new(
             "ts",
-            DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+            DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None),
             true,
         )])),
         vec![ts],
@@ -9696,15 +9697,15 @@ fn calc_date_format_matches_flink() {
 // 1970-01-02T01:00 (hour 1).
 #[test]
 fn calc_extract_hour_matches_flink() {
-    let ts: ArrayRef = Arc::new(TimestampMillisecondArray::from(vec![
+    let ts: ArrayRef = Arc::new(TimestampNanosecondArray::from(vec![
         Some(0),
-        Some(86_400_000 + 3_600_000),
+        Some((86_400_000 + 3_600_000) * 1_000_000),
         None,
     ]));
     let batch = RecordBatch::try_new(
         Arc::new(Schema::new(vec![Field::new(
             "ts",
-            DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+            DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None),
             true,
         )])),
         vec![ts],

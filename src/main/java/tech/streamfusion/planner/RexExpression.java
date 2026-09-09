@@ -580,6 +580,9 @@ final class RexExpression {
     if ("TO_DATE".equals(functionName)) {
       return emitCharacterFunction(call, 131, 1, 1);
     }
+    if ("TO_TIMESTAMP".equals(functionName)) {
+      return reject("TO_TIMESTAMP is deferred until native timestamp units are compatible");
+    }
     if ("JSON_QUOTE".equals(functionName)) {
       return emitCharacterFunction(call, 122, 1, 1);
     }
@@ -710,10 +713,16 @@ final class RexExpression {
       return emitFloatUnary(call, 62);
     }
     if ("FLOOR".equals(functionName)) {
+      if (call.getOperands().size() == 2) {
+        return reject("Temporal FLOOR is deferred until native timestamp units are compatible");
+      }
       return emitFloatUnary(call, 63);
     }
     if ("CEIL".equals(functionName)
         || "CEILING".equals(functionName)) {
+      if (call.getOperands().size() == 2) {
+        return reject("Temporal CEIL is deferred until native timestamp units are compatible");
+      }
       return emitFloatUnary(call, 64);
     }
     if ("SIGN".equals(functionName)) {
@@ -1175,9 +1184,9 @@ final class RexExpression {
 
   /**
    * Emits a cast, but only a widening numeric one (integer to a wider integer, integer to
-   * float/double, float to double, or an identity cast). Those are lossless and evaluate identically
-   * on both sides; narrowing, float-to-integer, and string casts differ in overflow/rounding/parsing
-   * semantics, so they are not admitted and the expression falls back.
+   * float/double, float to double, or an identity cast). Those are lossless and evaluate
+   * identically on both sides; narrowing, float-to-integer, and string casts differ in
+   * overflow/rounding/parsing semantics, so they are not admitted and the expression falls back.
    */
   private boolean emitCast(RexCall call) {
     if (call.getOperands().size() != 1) {
@@ -1185,9 +1194,12 @@ final class RexExpression {
     }
     RelDataType sourceType = call.getOperands().get(0).getType();
     RelDataType resultType = call.getType();
-    // A cast that leaves the value unchanged — same base type and precision/scale, differing only in
-    // nullability or a time-attribute marker (Flink's `CAST(... ):TIMESTAMP_LTZ *ROWTIME*` that marks
-    // the event-time column) — is an identity projection: emit the operand so the column passes through.
+    // A cast that leaves the value unchanged — same base type and precision/scale, differing only
+    // in
+    // nullability or a time-attribute marker (Flink's `CAST(... ):TIMESTAMP_LTZ *ROWTIME*` that
+    // marks
+    // the event-time column) — is an identity projection: emit the operand so the column passes
+    // through.
     if (sourceType.getSqlTypeName() == resultType.getSqlTypeName()
         && sourceType.getPrecision() == resultType.getPrecision()
         && sourceType.getScale() == resultType.getScale()) {
@@ -1204,18 +1216,22 @@ final class RexExpression {
       return emit(call.getOperands().get(0));
     }
     // A non-narrowing cast to VARCHAR from a CHAR or VARCHAR source (target length ≥ source). Flink
-    // stores both as unpadded StringData and neither pads nor truncates a widening string cast, so the
+    // stores both as unpadded StringData and neither pads nor truncates a widening string cast, so
+    // the
     // value is unchanged — emit the operand as a passthrough. This covers a bounded computed string
     // coerced to an unbounded STRING sink column (Nexmark q14/q21's CASE result) and a CHAR literal
-    // unified up to VARCHAR (the ELSE branch of COALESCE(s, 'x') / CASE). Narrowing (target < source)
+    // unified up to VARCHAR (the ELSE branch of COALESCE(s, 'x') / CASE). Narrowing (target <
+    // source)
     // truncates and is not admitted; casting *to* CHAR(n) pads, so it is not admitted either.
     if ((source == SqlTypeName.VARCHAR || source == SqlTypeName.CHAR)
         && targetType == SqlTypeName.VARCHAR
         && resultType.getPrecision() >= sourceType.getPrecision()) {
       return emit(call.getOperands().get(0));
     }
-    // A cast to DECIMAL from an exact source (another DECIMAL, e.g. coercing q1's `0.908 * price` to
-    // the sink's DECIMAL(23,3), or an integer) is byte-exact natively: Arrow rescales Decimal128 with
+    // A cast to DECIMAL from an exact source (another DECIMAL, e.g. coercing q1's `0.908 * price`
+    // to
+    // the sink's DECIMAL(23,3), or an integer) is byte-exact natively: Arrow rescales Decimal128
+    // with
     // HALF_UP rounding, the same mode Flink uses. A float/double or string source falls through to
     // the host-exact cast upcall below.
     if (targetType == SqlTypeName.DECIMAL) {
@@ -1232,7 +1248,8 @@ final class RexExpression {
       return emit(call.getOperands().get(0));
     }
     // A narrowing cast to an integer target (a wider integer, or a float/double, narrowed to an
-    // integer type). Flink emits the primitive Java cast: an integer source truncates to the low bits
+    // integer type). Flink emits the primitive Java cast: an integer source truncates to the low
+    // bits
     // (two's-complement wraparound), a float/double source rounds toward zero and saturates to the
     // target range with NaN→0. Rust's `as` reproduces both exactly, so a dedicated native wrapping
     // kernel matches the host — where arrow's own cast would instead error on overflow. See
@@ -1242,7 +1259,8 @@ final class RexExpression {
       add(KIND_CAST_NARROW, narrowTarget, 1);
       return emit(call.getOperands().get(0));
     }
-    // The casts whose formatting/parsing the native engine cannot reproduce byte-for-byte — a number
+    // The casts whose formatting/parsing the native engine cannot reproduce byte-for-byte — a
+    // number
     // (incl. decimal) to/from a string, narrowing a string / padding to CHAR(n), and the inexact
     // float/double→DECIMAL — run Flink's own CastExecutor through the columnar JVM upcall, so
     // trailing zeros, scientific-notation thresholds, trim semantics, and failure behavior are the
@@ -1670,12 +1688,10 @@ final class RexExpression {
   }
 
   /**
-   * Emits {@code EXTRACT(unit FROM ts)} (op 89), the lowering of {@code YEAR}/{@code MONTH}/{@code
-   * HOUR}/… (Nexmark q14's {@code HOUR(dateTime)}). Admitted only over a plain {@code TIMESTAMP} (a
-   * local-zoned timestamp's fields depend on the session zone, like {@code DATE_FORMAT}) for the
-   * unambiguous integer fields whose value is identical in Flink and chrono; anything else — a fractional
-   * result (e.g. {@code SECOND} carrying millis, whose result type is decimal) or a
-   * convention-divergent unit ({@code DOW}/{@code WEEK}/{@code QUARTER}) — falls back.
+   * Emits integer calendar extraction. DATE/plain TIMESTAMP support QUARTER, WEEK, DOY and DOW
+   * through Flink's integer calendar kernel. YEAR through SECOND retain the existing timestamp
+   * path, including session-zone-aware LTZ extraction. Fractional results and unlisted fields fall
+   * back.
    */
   private boolean emitExtract(RexCall call) {
     List<RexNode> operands = call.getOperands();
@@ -1684,6 +1700,17 @@ final class RexExpression {
     }
     RexNode source = operands.get(1);
     SqlTypeName sourceType = source.getType().getSqlTypeName();
+    String calendarUnit = String.valueOf(((RexLiteral) operands.get(0)).getValue());
+    int calendarOp =
+        switch (calendarUnit) {
+          case "QUARTER" -> 133;
+          default -> -1;
+        };
+    if (calendarOp >= 0
+        && (sourceType == SqlTypeName.DATE || sourceType == SqlTypeName.TIMESTAMP)) {
+      add(KIND_CALL, calendarOp, 1);
+      return emit(source);
+    }
     if (sourceType != SqlTypeName.TIMESTAMP
         && sourceType != SqlTypeName.TIMESTAMP_WITH_LOCAL_TIME_ZONE) {
       return reject("EXTRACT: only a TIMESTAMP or TIMESTAMP_LTZ argument is supported");

@@ -100,3 +100,8 @@ Reuses the same prefix and padding-span machinery on the right, including Flink'
 
 [Complete-job Flink/native results](../benchmarks/scalar-functions.md#rpad).
 
+## QUARTER
+
+Fuses timestamp unit conversion, Flink's truncating day calculation, and integer Julian-calendar extraction into one primitive Arrow mapping. Besides eliminating intermediate arrays, this preserves Flink's expanded-year integer arithmetic outside chrono's range.
+
+[Complete-job Flink/native results](../benchmarks/scalar-functions.md#quarter).

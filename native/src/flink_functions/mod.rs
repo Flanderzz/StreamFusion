@@ -9,6 +9,7 @@ use datafusion::common::{cast::as_primitive_array, exec_err, Result};
 use datafusion::logical_expr::{ScalarUDF, Volatility};
 use std::sync::Arc;
 
+pub(crate) mod calendar;
 pub(crate) mod decode;
 pub(crate) mod encode;
 pub(crate) mod json_quote;
@@ -120,6 +121,7 @@ pub(crate) fn function(op: i64, arity: usize) -> Option<ScalarUDF> {
         129 => rpad::function(),
         130 => split_index::function(),
         131 => to_date::function(),
+        133 => calendar::function(calendar::Field::Quarter),
         _ => return None,
     })
 }
@@ -140,6 +142,27 @@ fn udf(
             vec![],
         )),
     )
+}
+
+fn map_timestamp_millis(input: &ArrayRef, map: impl Fn(i64) -> i64) -> Result<Int64Array> {
+    match input.data_type() {
+        DataType::Timestamp(TimeUnit::Second, None) => {
+            Ok(as_primitive_array::<TimestampSecondType>(input)?
+                .unary::<_, Int64Type>(|value| map(value.wrapping_mul(1000))))
+        }
+        DataType::Timestamp(TimeUnit::Millisecond, None) => {
+            Ok(as_primitive_array::<TimestampMillisecondType>(input)?.unary::<_, Int64Type>(map))
+        }
+        DataType::Timestamp(TimeUnit::Microsecond, None) => {
+            Ok(as_primitive_array::<TimestampMicrosecondType>(input)?
+                .unary::<_, Int64Type>(|value| map(value.div_euclid(1000))))
+        }
+        DataType::Timestamp(TimeUnit::Nanosecond, None) => {
+            Ok(as_primitive_array::<TimestampNanosecondType>(input)?
+                .unary::<_, Int64Type>(|value| map(value.div_euclid(1_000_000))))
+        }
+        other => exec_err!("Expected plain TIMESTAMP, got {other}"),
+    }
 }
 
 fn check_string_capacity(current: usize, additional: usize) -> Result<()> {

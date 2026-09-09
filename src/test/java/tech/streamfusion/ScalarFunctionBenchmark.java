@@ -455,7 +455,8 @@ new Query("RIGHT_DYNAMIC", "tt_counted", "RIGHT(s, n)", "STRING"),
 new Query("LPAD_DYNAMIC", "tt_pad", "LPAD(s, n, p)", "STRING"),
 new Query("RPAD_DYNAMIC", "tt_pad", "RPAD(s, n, p)", "STRING"),
 new Query("SPLIT_INDEX_DYNAMIC", "tt_split", "SPLIT_INDEX(s, p, n)", "STRING"),
-new Query("TO_DATE", "tt_date_text", "TO_DATE(s)", "DATE"));
+new Query("TO_DATE", "tt_date_text", "TO_DATE(s)", "DATE"),
+new Query("QUARTER", "tt_timestamp", "QUARTER(ts)", "BIGINT"));
   }
 
   private static String payload(String pattern) {

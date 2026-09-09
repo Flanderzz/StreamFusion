@@ -139,6 +139,48 @@ final class TextTimeFunctionTestInputs {
     return tables;
   }
 
+  static TableEnvironment calendar() {
+    return calendar(9);
+  }
+
+  static TableEnvironment calendar(int precision) {
+    List<Row> rows = new ArrayList<>();
+    java.time.LocalDate start = java.time.LocalDate.of(1968, 1, 1);
+    for (int i = 0; i < 1462; i++) {
+      java.time.LocalDate date = start.plusDays(i);
+      rows.add(Row.of(i, date, date.atTime(23, 59, 59, 999999999)));
+    }
+    for (String value :
+        new String[] {
+          "1900-01-01",
+          "2000-02-29",
+          "2015-12-31",
+          "2016-01-01",
+          "2020-12-31",
+          "2021-01-01",
+          "2024-03-31"
+        }) {
+      java.time.LocalDate date = java.time.LocalDate.parse(value);
+      rows.add(Row.of(rows.size(), date, date.atStartOfDay()));
+    }
+    rows.add(Row.of(rows.size(), null, null));
+    StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+    env.setParallelism(1);
+    StreamTableEnvironment tables = StreamTableEnvironment.create(env);
+    tables.createTemporaryView(
+        "inputs",
+        env.fromData(
+            Types.ROW_NAMED(
+                new String[] {"id", "d", "ts"}, Types.INT, Types.LOCAL_DATE, Types.LOCAL_DATE_TIME),
+            rows.toArray(Row[]::new)),
+        Schema.newBuilder()
+            .column("id", DataTypes.INT())
+            .column("d", DataTypes.DATE())
+            .column("ts", DataTypes.TIMESTAMP(precision))
+            .build());
+    return tables;
+  }
+
   static TableEnvironment bytes() {
     List<Row> rows = new ArrayList<>();
     rows.add(Row.of(0, null));
