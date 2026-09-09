@@ -305,4 +305,59 @@ final class StringFunctionTestInputs {
     return tables;
   }
 
+  static TableEnvironment urlBoundaries() {
+    List<Row> rows = new ArrayList<>();
+    String[] hex = new String[256];
+    for (int i = 0; i < hex.length; i++) {
+      hex[i] = String.format(java.util.Locale.ROOT, "%%%02X", i);
+    }
+    for (int a = 0; a < 256; a++) {
+      for (int b = 0; b < 256; b++) {
+        rows.add(Row.of(rows.size(), hex[a] + hex[b]));
+      }
+    }
+    int[] boundaries = {0, 0x28, 0x7f, 0x80, 0x8f, 0x90, 0x9f, 0xa0, 0xbf, 0xc0, 0xff};
+    for (int a = 0xe0; a <= 0xf7; a++) {
+      for (int b : boundaries) {
+        for (int c : boundaries) {
+          String prefix = hex[a] + hex[b] + hex[c];
+          rows.add(Row.of(rows.size(), prefix));
+          for (int d : boundaries) {
+            rows.add(Row.of(rows.size(), prefix + hex[d]));
+          }
+        }
+      }
+    }
+    for (char c = 0; c < Character.MAX_VALUE; c++) {
+      if (Character.digit(c, 16) >= 0) {
+        rows.add(Row.of(rows.size(), "%0" + c));
+        rows.add(Row.of(rows.size(), "%" + c + "0"));
+      }
+    }
+    for (String value :
+        new String[] {
+          "%+A",
+          "%-0",
+          "%-1",
+          "%++",
+          "%\uff11\uff12",
+          "%+\uff26",
+          "%\ud835\udfd8",
+          "%C3x%A9",
+          "%C3+%A9",
+          "%E2%82%",
+          "%E2%82%G0",
+          "%F0%9F%98%80"
+        }) {
+      rows.add(Row.of(rows.size(), value));
+    }
+    StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+    env.setParallelism(1);
+    StreamTableEnvironment tables = StreamTableEnvironment.create(env);
+    tables.createTemporaryView(
+        "urls",
+        env.fromData(rows, Types.ROW_NAMED(new String[] {"id", "s"}, Types.INT, Types.STRING)),
+        Schema.newBuilder().column("id", DataTypes.INT()).column("s", DataTypes.STRING()).build());
+    return tables;
+  }
 }

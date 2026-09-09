@@ -82,6 +82,18 @@ pub(crate) fn function(op: i64, arity: usize) -> Option<ScalarUDF> {
             }
             udf("flink_overlay", types, DataType::Utf8, scalar::overlay)
         }
+        117 => udf(
+            "flink_url_decode",
+            vec![DataType::Utf8],
+            DataType::Utf8,
+            scalar::url_decode,
+        ),
+        118 => udf(
+            "flink_url_decode_ascii",
+            vec![DataType::Utf8],
+            DataType::Utf8,
+            scalar::url_decode_ascii,
+        ),
         _ => return None,
     })
 }

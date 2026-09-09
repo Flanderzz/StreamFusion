@@ -242,3 +242,12 @@ not subtracted from function times because their result types and lengths can di
 | `OVERLAY` | ASCII, 264-byte budget | 0.834 | 1.197 | 0.70x |
 | `OVERLAY` | Unicode, 264-byte budget, NULL/8 | 1.201 | 1.415 | 0.85x |
 
+## URL_DECODE
+
+`URL_DECODE`: `URL_DECODE(s)`
+
+| Case | Input | Flink (s) | Native (s) | Flink / native |
+|---|---|---:|---:|---:|
+| `URL_DECODE` | ASCII, 264-byte budget | 1.713 | 1.507 | 1.14x |
+| `URL_DECODE` | Unicode, 264-byte budget, NULL/8 | 1.521 | 1.257 | 1.21x |
+

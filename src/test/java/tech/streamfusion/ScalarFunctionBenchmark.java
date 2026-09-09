@@ -52,14 +52,16 @@ class ScalarFunctionBenchmark {
   }
 
   private static final List<Query> SCALAR_FUNCTIONS =
-      List.of(new Query("GREATEST", "numbers", "GREATEST(n, m, 17)"),
-new Query("LEAST", "numbers", "LEAST(n, m, 17)"),
-new Query("INITCAP", "text", "INITCAP(s)"),
-new Query("TRANSLATE", "text", "TRANSLATE(s, 'abcdef', 'ABCDEF')"),
-new Query("BTRIM", "text", "BTRIM(s)"),
-new Query("ELT", "elt", "ELT(i, s, t)"),
-new Query("URL_ENCODE", "text", "URL_ENCODE(s)"),
-new Query("OVERLAY", "overlay", "OVERLAY(s PLACING t FROM i FOR n)"));
+      List.of(
+          new Query("GREATEST", "numbers", "GREATEST(n, m, 17)"),
+          new Query("LEAST", "numbers", "LEAST(n, m, 17)"),
+          new Query("INITCAP", "text", "INITCAP(s)"),
+          new Query("TRANSLATE", "text", "TRANSLATE(s, 'abcdef', 'ABCDEF')"),
+          new Query("BTRIM", "text", "BTRIM(s)"),
+          new Query("ELT", "elt", "ELT(i, s, t)"),
+          new Query("URL_ENCODE", "text", "URL_ENCODE(s)"),
+          new Query("URL_DECODE", "encoded", "URL_DECODE(s)"),
+          new Query("OVERLAY", "overlay", "OVERLAY(s PLACING t FROM i FOR n)"));
 
   private static final List<Query> SEARCH_FUNCTIONS =
       List.of(

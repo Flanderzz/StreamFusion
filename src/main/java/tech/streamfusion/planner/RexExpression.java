@@ -617,6 +617,9 @@ final class RexExpression {
     if ("URL_ENCODE".equals(functionName)) {
       return emitCharacterFunction(call, 115, 1, 1);
     }
+    if ("URL_DECODE".equals(functionName)) {
+      return emitCharacterFunction(call, Runtime.version().feature() >= 25 ? 118 : 117, 1, 1);
+    }
     if ("OVERLAY".equals(functionName)) {
       return emitOverlay(call);
     }

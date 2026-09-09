@@ -447,6 +447,141 @@ fn utf16_byte_offset(value: &str, mut units: usize) -> Option<usize> {
     (units == 0).then_some(value.len())
 }
 
+pub(super) fn url_decode(args: &[ArrayRef]) -> Result<ArrayRef> {
+    url_decode_with_rules(args, false)
+}
+
+pub(super) fn url_decode_ascii(args: &[ArrayRef]) -> Result<ArrayRef> {
+    url_decode_with_rules(args, true)
+}
+
+fn url_decode_with_rules(args: &[ArrayRef], ascii_hex: bool) -> Result<ArrayRef> {
+    let [arg] = args else {
+        return exec_err!("URL_DECODE expects one argument");
+    };
+    let strings = datafusion::common::cast::as_string_array(arg)?;
+    let mut builder = StringBuilder::new();
+    let mut output = String::new();
+    let mut bytes = Vec::new();
+    for value in strings {
+        match value {
+            Some(value) if decode_url(value, &mut output, &mut bytes, ascii_hex).is_some() => {
+                builder.append_value(&output)
+            }
+            _ => builder.append_null(),
+        }
+    }
+    Ok(Arc::new(builder.finish()))
+}
+
+fn decode_url(
+    value: &str,
+    output: &mut String,
+    bytes: &mut Vec<u8>,
+    ascii_hex: bool,
+) -> Option<()> {
+    output.clear();
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '+' => output.push(' '),
+            '%' => {
+                bytes.clear();
+                loop {
+                    let a = chars.next()?;
+                    let b = chars.next()?;
+                    let byte = if ascii_hex {
+                        // JDK 25 switched URLDecoder from parseInt to ASCII-only HexFormat.
+                        if !a.is_ascii_hexdigit() || !b.is_ascii_hexdigit() {
+                            return None;
+                        }
+                        (a.to_digit(16)? * 16 + b.to_digit(16)?) as u8
+                    } else {
+                        let b = java_hex_digit(b)?;
+                        match a {
+                            '+' => b,
+                            '-' if b == 0 => 0,
+                            _ => java_hex_digit(a)? * 16 + b,
+                        }
+                    };
+                    bytes.push(byte);
+                    if chars.peek() != Some(&'%') {
+                        break;
+                    }
+                    chars.next();
+                }
+                append_java_utf8(bytes, output);
+            }
+            _ => output.push(ch),
+        }
+    }
+    Some(())
+}
+
+pub(crate) fn java_hex_digit(ch: char) -> Option<u8> {
+    if let Some(digit) = ch.to_digit(16) {
+        return Some(digit as u8);
+    }
+    let code = ch as u32;
+    if (0xff21..=0xff26).contains(&code) {
+        return Some((code - 0xff21 + 10) as u8);
+    }
+    if (0xff41..=0xff46).contains(&code) {
+        return Some((code - 0xff41 + 10) as u8);
+    }
+    // Character.digit(char, 16) accepts BMP decimal digits, but not supplementary digits.
+    const ZEROS: &[u32] = &[
+        0x0660, 0x06f0, 0x07c0, 0x0966, 0x09e6, 0x0a66, 0x0ae6, 0x0b66, 0x0be6, 0x0c66, 0x0ce6,
+        0x0d66, 0x0de6, 0x0e50, 0x0ed0, 0x0f20, 0x1040, 0x1090, 0x17e0, 0x1810, 0x1946, 0x19d0,
+        0x1a80, 0x1a90, 0x1b50, 0x1bb0, 0x1c40, 0x1c50, 0xa620, 0xa8d0, 0xa900, 0xa9d0, 0xa9f0,
+        0xaa50, 0xabf0, 0xff10,
+    ];
+    let i = ZEROS.partition_point(|&zero| zero <= code).checked_sub(1)?;
+    let digit = code - ZEROS[i];
+    (digit < 10).then_some(digit as u8)
+}
+
+pub(crate) fn append_java_utf8(bytes: &[u8], output: &mut String) {
+    let mut i = 0;
+    while i < bytes.len() {
+        let first = bytes[i];
+        if first < 0x80 {
+            output.push(first as char);
+            i += 1;
+            continue;
+        }
+        let width = match first {
+            0xc2..=0xdf => 2,
+            0xe0..=0xef => 3,
+            0xf0..=0xf4 => 4,
+            _ => 1,
+        };
+        let mut consumed = 1;
+        let mut code = (first & (0x7f >> width)) as u32;
+        while consumed < width && i + consumed < bytes.len() {
+            let next = bytes[i + consumed];
+            if next & 0xc0 != 0x80
+                || (consumed == 1
+                    && ((first == 0xe0 && next < 0xa0)
+                        || (first == 0xf0 && next < 0x90)
+                        || (first == 0xf4 && next > 0x8f)))
+            {
+                break;
+            }
+            code = (code << 6) | (next & 0x3f) as u32;
+            consumed += 1;
+        }
+        // Java consumes the whole malformed surrogate triplet as one replacement, unlike
+        // Rust's from_utf8_lossy. Other malformed sequences consume their valid prefix.
+        output.push(if width > 1 && consumed == width {
+            char::from_u32(code).unwrap_or(char::REPLACEMENT_CHARACTER)
+        } else {
+            char::REPLACEMENT_CHARACTER
+        });
+        i += consumed;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -518,6 +653,48 @@ mod tests {
         );
         assert!(elt(&[]).is_err());
         assert!(elt(&[index, first.slice(0, 1)]).is_err());
+    }
+
+    #[test]
+    fn overlay_and_url_decode_keep_java_boundaries_without_upcalls() {
+        use arrow::array::Int64Array;
+        let input = strings(vec![Some("a\u{1f600}b"), Some("abc"), Some("abc"), None]);
+        let replacements = strings(vec![Some("x"); 4]);
+        let starts: ArrayRef = Arc::new(Int64Array::from(vec![3, 2, i64::MAX, 1]));
+        let lengths: ArrayRef = Arc::new(Int64Array::from(vec![1, 4294967297, 1, 1]));
+        assert_eq!(
+            values(
+                &overlay(&[input.clone(), replacements.clone(), starts.clone(), lengths]).unwrap()
+            ),
+            vec![Some("a?xb"), Some("axc"), Some("abc"), None]
+        );
+        let overflow: ArrayRef = Arc::new(Int64Array::from(vec![i32::MAX as i64; 4]));
+        assert!(overlay(&[input.clone(), replacements, starts, overflow]).is_err());
+        let result = url_decode(&[strings(vec![
+            Some("%ED%A0%80"),
+            Some("%ED%A0"),
+            Some("%F0%80%80%80"),
+            Some("%+A%-0"),
+            Some("%\u{ff11}\u{ff12}"),
+            Some("%"),
+            None,
+        ])])
+        .unwrap();
+        assert_eq!(
+            values(&result),
+            vec![
+                Some("\u{fffd}"),
+                Some("\u{fffd}"),
+                Some("\u{fffd}\u{fffd}\u{fffd}\u{fffd}"),
+                Some("\n\0"),
+                Some("\u{12}"),
+                None,
+                None
+            ]
+        );
+        assert!(overlay(&[]).is_err());
+        assert!(url_decode(&[]).is_err());
+        assert_eq!(url_decode(&[input.slice(0, 0)]).unwrap().len(), 0);
     }
 
     #[test]
@@ -626,5 +803,20 @@ mod tests {
                 );
             }
         }
+    }
+    #[test]
+    fn jdk25_url_escape_rules_reject_signed_and_unicode_digits() {
+        let input = strings(vec![
+            Some("%+A"),
+            Some("%-0"),
+            Some("%\u{ff11}\u{ff12}"),
+            Some("a+b%20%FF"),
+            None,
+        ]);
+        assert_eq!(
+            values(&url_decode_ascii(&[input]).unwrap()),
+            vec![None, None, None, Some("a b \u{fffd}"), None]
+        );
+        assert!(super::super::function(999, 1).is_none());
     }
 }

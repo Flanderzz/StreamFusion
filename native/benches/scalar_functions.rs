@@ -100,6 +100,13 @@ fn functions(c: &mut Criterion) {
                     ColumnarValue::Scalar(ScalarValue::Int64(Some(2))),
                 ],
             ),
+            (
+                "URL_DECODE",
+                117,
+                vec![array(StringArray::from_iter(
+                    (0..ROWS).map(|i| valid(i).then_some(encoded.as_str())),
+                ))],
+            ),
         ];
         let mut group = c.benchmark_group(format!("scalar/{name}"));
         group.throughput(Throughput::Elements(ROWS as u64));
