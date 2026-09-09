@@ -604,6 +604,10 @@ final class RexExpression {
     if ("INITCAP".equals(functionName)) {
       return emitCharacterFunction(call, 111, 1, 1);
     }
+    if ("TRANSLATE".equals(functionName)
+        || "TRANSLATE3".equals(functionName)) {
+      return emitCharacterFunction(call, 112, 3, 3);
+    }
     if ("CONCAT".equals(functionName) || "||".equals(functionName)) {
       return emitStringCall(call, 93, 1, Integer.MAX_VALUE);
     }

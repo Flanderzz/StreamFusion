@@ -202,6 +202,65 @@ fn string_bytes(strings: &StringArray) -> usize {
     (strings.value_offsets()[strings.len()] - strings.value_offsets()[0]) as usize
 }
 
+pub(super) fn translate(args: &[ArrayRef]) -> Result<ArrayRef> {
+    let [source, from, to] = args else {
+        return exec_err!("TRANSLATE expects three arguments");
+    };
+    let source = datafusion::common::cast::as_string_array(source)?;
+    let from = datafusion::common::cast::as_string_array(from)?;
+    let to = datafusion::common::cast::as_string_array(to)?;
+    if source.len() != from.len() || source.len() != to.len() {
+        return exec_err!("TRANSLATE array lengths differ");
+    }
+    let mut builder = StringBuilder::with_capacity(source.len(), string_bytes(source));
+    let mut dict = HashMap::default();
+    let mut ascii: [Option<Option<char>>; 128] = [None; 128];
+    let mut previous = None;
+    let mut output = String::new();
+    for ((source, from), to) in source.iter().zip(from).zip(to) {
+        let Some(source) = source else {
+            builder.append_null();
+            continue;
+        };
+        let from = from.unwrap_or("");
+        if source.is_empty() || from.is_empty() {
+            builder.append_value(source);
+            continue;
+        }
+        let pair = (from, to.unwrap_or(""));
+        if previous != Some(pair) {
+            dict.clear();
+            ascii.fill(None);
+            let mut replacements = pair.1.chars();
+            for ch in from.chars() {
+                // Duplicates keep the first mapping but still consume a replacement codepoint.
+                let replacement = replacements.next();
+                if ch.is_ascii() {
+                    ascii[ch as usize].get_or_insert(replacement);
+                } else {
+                    dict.entry(ch).or_insert(replacement);
+                }
+            }
+            previous = Some(pair);
+        }
+        output.clear();
+        for ch in source.chars() {
+            let replacement = if ch.is_ascii() {
+                ascii[ch as usize].as_ref()
+            } else {
+                dict.get(&ch)
+            };
+            match replacement {
+                Some(Some(replacement)) => output.push(*replacement),
+                Some(None) => {}
+                None => output.push(ch),
+            }
+        }
+        builder.append_value(&output);
+    }
+    Ok(Arc::new(builder.finish()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

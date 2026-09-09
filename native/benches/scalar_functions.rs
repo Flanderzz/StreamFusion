@@ -61,6 +61,11 @@ fn functions(c: &mut Criterion) {
             ("GREATEST", 109, numbers()),
             ("LEAST", 110, numbers()),
             ("INITCAP", 111, vec![strings(0)]),
+            (
+                "TRANSLATE",
+                112,
+                vec![strings(0), scalar_text("abcdef"), scalar_text("ABCDEF")],
+            ),
         ];
         let mut group = c.benchmark_group(format!("scalar/{name}"));
         group.throughput(Throughput::Elements(ROWS as u64));

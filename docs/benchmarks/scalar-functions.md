@@ -197,3 +197,12 @@ not subtracted from function times because their result types and lengths can di
 | `INITCAP` | ASCII, 264-byte budget | 1.347 | 1.266 | 1.06x |
 | `INITCAP` | Unicode, 264-byte budget, NULL/8 | 1.812 | 1.463 | 1.24x |
 
+## TRANSLATE
+
+`TRANSLATE`: `TRANSLATE(s, 'abcdef', 'ABCDEF')`
+
+| Case | Input | Flink (s) | Native (s) | Flink / native |
+|---|---|---:|---:|---:|
+| `TRANSLATE` | ASCII, 264-byte budget | 2.377 | 1.350 | 1.76x |
+| `TRANSLATE` | Unicode, 264-byte budget, NULL/8 | 3.138 | 1.240 | 2.53x |
+

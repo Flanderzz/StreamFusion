@@ -34,3 +34,9 @@ Reuses the shared extremum kernel with minimum comparison, including primitive A
 
 [Complete-job Flink/native results](../benchmarks/scalar-functions.md#least).
 
+## TRANSLATE
+
+ASCII mappings use direct lookup; non-ASCII codepoints use the project's ahash map. Consecutive equal alphabets reuse the mapping. Duplicate source positions retain their first mapping, including deletion mappings.
+
+[Complete-job Flink/native results](../benchmarks/scalar-functions.md#translate).
+

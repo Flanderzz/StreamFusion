@@ -61,6 +61,12 @@ pub(crate) fn function(op: i64, arity: usize) -> Option<ScalarUDF> {
             DataType::Utf8,
             scalar::initcap,
         ),
+        112 => udf(
+            "flink_translate",
+            vec![DataType::Utf8; 3],
+            DataType::Utf8,
+            scalar::translate,
+        ),
         _ => return None,
     })
 }
