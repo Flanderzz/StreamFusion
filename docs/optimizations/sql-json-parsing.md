@@ -1,6 +1,6 @@
 # SQL/JSON parsing
 
-JSON_VALUE use a shared native reader with two parsing paths. The streaming
+JSON_VALUE and JSON_EXISTS use a shared native reader with two parsing paths. The streaming
 path borrows selected tokens and validates the first JSON document with Flink/Jackson rules.
 The SIMD path uses the existing `simd-json` dependency for documents containing many short
 members, where repeatedly scanning individual keys and values costs more than building a tape.
@@ -23,7 +23,7 @@ workloads dominated by floating-point members or numeric selections.
 Long padding strings and documents with many fields are separate benchmark workloads. SIMD
 is useful for the latter; a large byte count alone does not predict a benefit. The benchmark
 parameter `scalar.json.fields` adds that many short string members without changing the selected
-path. JSON_VALUE is measured independently against Flink, including both transposes.
+path. Each JSON function is measured independently against Flink, including both transposes.
 Final measurements and reproduction commands are on the
 [scalar benchmark page](../benchmarks/scalar-functions.md#sqljson-measurements).
 

@@ -420,7 +420,7 @@ not subtracted from function times because their result types and lengths can di
 Measured on 2026-09-10 with the same release profile, JDK 17, Flink/DataFusion versions,
 2,000,000 rows, parallelism 1, two warmups, five measured trials, interleaved engines and
 both transposes described above. Each scenario starts a fresh JVM; no other test or benchmark
-runs concurrently. This function requires the explicit compatibility flag documented under
+runs concurrently. These functions require the explicit compatibility flags documented under
 [Calc / filter](../operators/calc-filter.md).
 
 The input alternates between a document containing `user.name` and a document without that
@@ -439,7 +439,8 @@ streaming path for the padding-only scenarios. See the [parsing technique](../op
 TZ=UTC SF_BENCHMARK=true mvn -pl :streamfusion-runtime test -Pbench \
   '-Dtest=ScalarFunctionBenchmark#individualFunctions' \
   -Dstreamfusion.expression.JSON_VALUE.allowIncompatible=true \
-  -Dscalar.engine=both -Dscalar.functions=JSON_VALUE \
+  -Dstreamfusion.expression.JSON_EXISTS.allowIncompatible=true \
+  -Dscalar.engine=both -Dscalar.functions=JSON_VALUE,JSON_EXISTS \
   -Dscalar.rows=2000000 -Dscalar.warmup=2 -Dscalar.runs=5 \
   -Dscalar.bytes=264 -Dscalar.json.fields=0 \
   -Dscalar.unicode=false -Dscalar.nullEvery=0 \
@@ -465,3 +466,17 @@ Flink/native medians, with no intermediate optimization results.
 | 16 extra members, ASCII, 32-byte padding | 2.748 | 1.756 | 1.57x |
 | 64 extra members, ASCII, 32-byte padding | 8.014 | 4.593 | 1.74x |
 | 64 extra members, Unicode, 32-byte padding, NULL/8 | 6.394 | 3.307 | 1.93x |
+
+## JSON_EXISTS
+
+`JSON_EXISTS(s, 'lax $.user.name')`
+
+| Scenario | Flink (s) | Native (s) | Flink / Native |
+|---|---:|---:|---:|
+| ASCII, 32-byte padding | 1.184 | 0.812 | 1.46x |
+| ASCII, 264-byte padding | 1.763 | 1.280 | 1.38x |
+| ASCII, 1024-byte padding | 3.809 | 2.970 | 1.28x |
+| Unicode, 264-byte padding, NULL/8 | 1.430 | 1.084 | 1.32x |
+| 16 extra members, ASCII, 32-byte padding | 2.706 | 1.751 | 1.55x |
+| 64 extra members, ASCII, 32-byte padding | 8.003 | 4.579 | 1.75x |
+| 64 extra members, Unicode, 32-byte padding, NULL/8 | 6.383 | 3.282 | 1.94x |

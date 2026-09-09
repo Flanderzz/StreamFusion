@@ -99,7 +99,9 @@ class ScalarFunctionBenchmark {
               ENCODING_FUNCTIONS,
               TextTimeFunctions.QUERIES,
               List.of(
-                  new Query("JSON_VALUE", "tt_json", "JSON_VALUE(s, 'lax $.user.name')", "STRING")))
+                  new Query("JSON_VALUE", "tt_json", "JSON_VALUE(s, 'lax $.user.name')", "STRING"),
+                  new Query(
+                      "JSON_EXISTS", "tt_json", "JSON_EXISTS(s, 'lax $.user.name')", "BOOLEAN")))
           .flatMap(List::stream)
           .toList();
 

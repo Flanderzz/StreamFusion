@@ -41,7 +41,7 @@ class JsonPathSpecTest {
     var types = new JavaTypeFactoryImpl();
     var rex = new RexBuilder(types);
     var text = types.createSqlType(SqlTypeName.VARCHAR);
-    for (String name : List.of("JSON_VALUE")) {
+    for (String name : List.of("JSON_VALUE", "JSON_EXISTS")) {
       var function =
           new SqlFunction(
               name, SqlKind.OTHER_FUNCTION, null, null, null, SqlFunctionCategory.SYSTEM);

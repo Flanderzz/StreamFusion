@@ -18,7 +18,7 @@ serialized operator configuration rather than process-global state before a stab
 - **`-Dstreamfusion.expression.<NAME>.allowIncompatible=true`** — opt into the faster pure-Rust
   path for expressions that otherwise use a byte-exact JVM upcall or fall back (`UPPER`/`LOWER`,
   `REGEXP_EXTRACT`, `DATE_FORMAT`/`EXTRACT` over `TIMESTAMP_LTZ`, `ROUND` on float, transcendental
-  math, and `JSON_VALUE` at Jackson's numeric resource-limit boundary).
+  math, and `JSON_VALUE`/`JSON_EXISTS` at Jackson's numeric resource-limit boundary).
   Off by default — parity-first. See the per-operator/expression pages under
   [Operators](operators/index.md) for exactly which functions this affects and how they can diverge.
 - **`-Dstreamfusion.plan.shareSources=false`** — disable the substitution pass's own source-sharing

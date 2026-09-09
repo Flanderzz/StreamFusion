@@ -592,6 +592,9 @@ final class RexExpression {
     if ("JSON_VALUE".equals(functionName)) {
       return emitJsonValue(call);
     }
+    if ("JSON_EXISTS".equals(functionName)) {
+      return emitJsonExists(call);
+    }
     if ("SPLIT".equals(functionName)) {
       List<RexNode> args = call.getOperands();
       if (args.size() != 2
@@ -1050,6 +1053,33 @@ final class RexExpression {
     for (String value : new String[] {path, empty, emptyDefault, error, errorDefault}) {
       emitString(value);
     }
+    emitString(JsonPathSpec.unicodeVersion());
+    return true;
+  }
+
+  private boolean emitJsonExists(RexCall call) {
+    if (!NativeConfig.allowsIncompatible("JSON_EXISTS")) {
+      return reject(
+          incompatibleReason("JSON_EXISTS") + "; Jackson number limits depend on buffer history");
+    }
+    if (JsonPathSpec.unicodeVersion() == null) {
+      return reject("JSON_EXISTS requires verified JDK 17, 21, 24 or 25 token rules");
+    }
+    List<RexNode> args = call.getOperands();
+    String path = jsonPath(args);
+    if (path == null || args.size() > 3) {
+      return reject("JSON_EXISTS requires a literal definite member/index path");
+    }
+    String error = args.size() == 2 ? "FALSE" : jsonSymbol(args.get(2));
+    if (error == null || !List.of("TRUE", "FALSE", "UNKNOWN", "ERROR").contains(error)) {
+      return reject("JSON_EXISTS has an unsupported ON ERROR behavior");
+    }
+    add(KIND_CALL, 142, 4);
+    if (!emit(args.get(0))) {
+      return false;
+    }
+    emitString(path);
+    emitString(error);
     emitString(JsonPathSpec.unicodeVersion());
     return true;
   }

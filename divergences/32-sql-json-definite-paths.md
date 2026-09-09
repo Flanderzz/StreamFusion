@@ -5,7 +5,7 @@ column inputs and streams through each document instead of building a DOM on its
 path. StreamFusion follows that structure: the path and policies remain scalar, a definite
 path is parsed once per batch, and unescaped selected strings borrow their input span until
 appended to the Arrow result. Every field is validated, including fields outside the selected
-path. JSON_VALUE uses this parser under the scalar-function registry.
+path. JSON_VALUE and JSON_EXISTS share this parser under the scalar-function registry.
 
 For documents with many short members, a shared `simd-json` reader reuses its input scratch,
 structural buffers and tape across rows. It validates the whole document before selecting a
@@ -66,7 +66,7 @@ Native validation models a fresh 4000-character reader buffer for documents long
 1001-digit tokens in a 37,502-character document whose host buffer had grown through prior
 parses. A 67,096-case subset on JDK 24 has the same two exceptions. Inputs within the documented
 limits agreed, including every BMP token suffix on both JDKs and every escaped UTF-16 unit on
-JDK 17. JSON_VALUE therefore uses the existing per-function `allowIncompatible` opt-in;
+JDK 17. Both functions therefore use the existing per-function `allowIncompatible` opt-in;
 default planning keeps Flink. This preserves the repository's strict default while making
 native execution available to users who accept this specific resource-limit exception.
 
@@ -81,4 +81,5 @@ slices and dynamic paths remain on Flink. JSON_VALUE initially returns VARCHAR; 
 integer and double RETURNING conversions in Flink are Java object casts outside ON ERROR,
 so reusing SQL CAST would be incorrect. Non-null character literal defaults are admitted;
 null defaults participate in Flink's generated whole-call null guard and are declined.
-JSON_VALUE is an ordinary scalar expression; no operator, converter or JVM callback is added.
+JSON_EXISTS supports all four ON ERROR behaviors. Both functions are ordinary scalar
+expressions; no operator, converter or JVM callback is added.
