@@ -88,6 +88,18 @@ fn functions(c: &mut Criterion) {
                 ],
             ),
             ("URL_ENCODE", 115, vec![strings(0)]),
+            (
+                "OVERLAY",
+                116,
+                vec![
+                    strings(0),
+                    scalar_text("ABC"),
+                    array(Int64Array::from_iter_values(
+                        (0..ROWS).map(|i| (i % 2) as i64 + 1),
+                    )),
+                    ColumnarValue::Scalar(ScalarValue::Int64(Some(2))),
+                ],
+            ),
         ];
         let mut group = c.benchmark_group(format!("scalar/{name}"));
         group.throughput(Throughput::Elements(ROWS as u64));

@@ -617,6 +617,9 @@ final class RexExpression {
     if ("URL_ENCODE".equals(functionName)) {
       return emitCharacterFunction(call, 115, 1, 1);
     }
+    if ("OVERLAY".equals(functionName)) {
+      return emitOverlay(call);
+    }
     if ("CONCAT".equals(functionName) || "||".equals(functionName)) {
       return emitStringCall(call, 93, 1, Integer.MAX_VALUE);
     }
@@ -935,6 +938,31 @@ final class RexExpression {
       return reject("ELT requires an INTEGER index and character values");
     }
     return emitBuiltinCall(call, 114);
+  }
+
+  private boolean emitOverlay(RexCall call) {
+    List<RexNode> args = call.getOperands();
+    if ((args.size() != 3 && args.size() != 4)
+        || !isCharacter(args.get(0))
+        || !isCharacter(args.get(1))
+        || args.subList(2, args.size()).stream()
+            .anyMatch(
+                arg ->
+                    !SqlTypeFamily.INTEGER
+                        .getTypeNames()
+                        .contains(arg.getType().getSqlTypeName()))) {
+      return reject("OVERLAY requires two character strings and integer positions");
+    }
+    add(KIND_CALL, 116, args.size());
+    for (int i = 0; i < args.size(); i++) {
+      if (i >= 2) {
+        add(KIND_CAST, CAST_BIGINT, 1);
+      }
+      if (!emit(args.get(i))) {
+        return false;
+      }
+    }
+    return true;
   }
 
   private boolean emitEncoding(RexCall call, int op, boolean integers, boolean strings) {

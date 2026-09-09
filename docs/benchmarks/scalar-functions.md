@@ -233,3 +233,12 @@ not subtracted from function times because their result types and lengths can di
 | `URL_ENCODE` | ASCII, 264-byte budget | 1.450 | 1.285 | 1.13x |
 | `URL_ENCODE` | Unicode, 264-byte budget, NULL/8 | 4.400 | 1.448 | 3.04x |
 
+## OVERLAY
+
+`OVERLAY`: `OVERLAY(s PLACING t FROM i FOR n)`
+
+| Case | Input | Flink (s) | Native (s) | Flink / native |
+|---|---|---:|---:|---:|
+| `OVERLAY` | ASCII, 264-byte budget | 0.834 | 1.197 | 0.70x |
+| `OVERLAY` | Unicode, 264-byte budget, NULL/8 | 1.201 | 1.415 | 0.85x |
+

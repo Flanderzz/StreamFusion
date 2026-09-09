@@ -351,6 +351,102 @@ pub(super) fn url_encode(args: &[ArrayRef]) -> Result<ArrayRef> {
     Ok(Arc::new(builder.finish()))
 }
 
+pub(super) fn overlay(args: &[ArrayRef]) -> Result<ArrayRef> {
+    use datafusion::common::cast::{as_int64_array, as_string_array};
+    use std::fmt::Write;
+    if args.len() != 3 && args.len() != 4 {
+        return exec_err!("OVERLAY expects three or four arguments");
+    }
+    let source = as_string_array(&args[0])?;
+    let replacement = as_string_array(&args[1])?;
+    let start = as_int64_array(&args[2])?;
+    let length = args.get(3).map(|arg| as_int64_array(arg)).transpose()?;
+    if args.iter().any(|arg| arg.len() != source.len()) {
+        return exec_err!("OVERLAY array lengths differ");
+    }
+    let mut builder = StringBuilder::with_capacity(source.len(), string_bytes(source));
+    let mut units = Vec::new();
+    let mut output = String::new();
+    for row in 0..source.len() {
+        if args.iter().any(|arg| arg.is_null(row)) {
+            builder.append_null();
+            continue;
+        }
+        let source = source.value(row);
+        let replacement = replacement.value(row);
+        let start = start.value(row);
+        if start <= 0 || start as u64 > source.len() as u64 {
+            builder.append_value(source);
+            continue;
+        }
+        let ascii = source.is_ascii();
+        let size = if ascii {
+            source.len()
+        } else {
+            source.encode_utf16().count()
+        };
+        if start as u64 > size as u64 {
+            builder.append_value(source);
+            continue;
+        }
+        let start = start as i32;
+        let length = length.map_or_else(
+            || replacement.encode_utf16().count() as i32,
+            |a| a.value(row) as i32,
+        );
+        let suffix = if length > 0 && (start.wrapping_add(length) as i64) <= size as i64 {
+            let offset = start.wrapping_sub(1).wrapping_add(length);
+            if offset < 0 || offset as usize > size {
+                return exec_err!("OVERLAY substring index out of bounds: {offset}");
+            }
+            Some(offset as usize)
+        } else {
+            None
+        };
+        let prefix = start as usize - 1;
+        let suffix = suffix.unwrap_or(size);
+        let boundaries = if ascii {
+            Some((prefix, suffix))
+        } else {
+            utf16_byte_offset(source, prefix).zip(if suffix == size {
+                Some(source.len())
+            } else {
+                utf16_byte_offset(source, suffix)
+            })
+        };
+        if let Some((prefix, suffix)) = boundaries {
+            // Copy intact codepoints directly; only a split surrogate needs Java's UTF-16 path.
+            builder.write_str(&source[..prefix])?;
+            builder.write_str(replacement)?;
+            builder.write_str(&source[suffix..])?;
+            builder.append_value("");
+            continue;
+        }
+        units.clear();
+        units.extend(source.encode_utf16());
+        output.clear();
+        // Flink's StringUtf8Utils encodes a split UTF-16 surrogate as the ASCII '?' byte.
+        let selected = units[..start as usize - 1]
+            .iter()
+            .copied()
+            .chain(replacement.encode_utf16())
+            .chain(units[suffix..].iter().copied());
+        output.extend(char::decode_utf16(selected).map(|ch| ch.unwrap_or('?')));
+        builder.append_value(&output);
+    }
+    Ok(Arc::new(builder.finish()))
+}
+
+fn utf16_byte_offset(value: &str, mut units: usize) -> Option<usize> {
+    for (offset, ch) in value.char_indices() {
+        if units == 0 {
+            return Some(offset);
+        }
+        units = units.checked_sub(ch.len_utf16())?;
+    }
+    (units == 0).then_some(value.len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

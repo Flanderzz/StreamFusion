@@ -58,7 +58,8 @@ new Query("INITCAP", "text", "INITCAP(s)"),
 new Query("TRANSLATE", "text", "TRANSLATE(s, 'abcdef', 'ABCDEF')"),
 new Query("BTRIM", "text", "BTRIM(s)"),
 new Query("ELT", "elt", "ELT(i, s, t)"),
-new Query("URL_ENCODE", "text", "URL_ENCODE(s)"));
+new Query("URL_ENCODE", "text", "URL_ENCODE(s)"),
+new Query("OVERLAY", "overlay", "OVERLAY(s PLACING t FROM i FOR n)"));
 
   private static final List<Query> SEARCH_FUNCTIONS =
       List.of(

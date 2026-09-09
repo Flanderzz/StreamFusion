@@ -52,3 +52,9 @@ A scalar index returns the selected array with its buffers/NULL mask intact. Lon
 
 [Complete-job Flink/native results](../benchmarks/scalar-functions.md#elt).
 
+## OVERLAY
+
+Copies intact UTF-8 prefix/replacement/suffix slices when UTF-16 cuts align with codepoints; ASCII needs no UTF-16 conversion. Cuts inside surrogate pairs retain full UTF-16 reconstruction, recombined pairs, and Java's encoding of lone surrogates.
+
+[Complete-job Flink/native results](../benchmarks/scalar-functions.md#overlay).
+
