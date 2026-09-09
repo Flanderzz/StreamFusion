@@ -226,6 +226,10 @@ Copies a borrowed UTF-8 slice into Arrow. ASCII positions use byte offsets; nega
 
 Copies a borrowed prefix into the Arrow output and avoids DataFusion's different negative-count semantics. Constant and dynamic counts use the same verified kernel.
 
+### RIGHT
+
+Locates the suffix by traversing character boundaries from the end, without an initial full-string character count.
+
 ### TO_TIMESTAMP (deferred)
 
 Native parsing is withdrawn. Its millisecond timestamp result can represent expanded years,
@@ -266,3 +270,8 @@ Flink's binary-backed `isSpaceString` can treat a trim set beginning with a spac
 BTRIM/LTRIM/RTRIM consequently admit literal sets only. The benchmarks use literal trim sets
 that match this admission rule. Both of these gates avoid promising exact results
 from a kernel whose semantics depend on Flink's runtime string representation.
+
+ENCODE/DECODE keep the charset scalar, matching Comet's scalar-parameter approach. Integer HEX uses Comet's bounded stack-digit buffer, avoiding general formatting and the
+old to_hex/uppercase array pipeline. LPAD/RPAD write directly to Arrow builders rather than materializing intermediate arrays or
+copying a per-row scratch string. The shared codepoint reverse scan serves SUBSTRING and RIGHT;
+LOCATE reuses memmem for both scalar and column needles.

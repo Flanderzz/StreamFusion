@@ -729,7 +729,7 @@ final class RexExpression {
       return emitStringWithIntegers(call, 126, 2, 2);
     }
     if ("RIGHT".equals(functionName)) {
-      return emitBoundedSubstr(call, 70);
+      return emitStringWithIntegers(call, 127, 2, 2);
     }
     if ("LPAD".equals(functionName)) {
       return emitPad(call, 82);
@@ -2324,21 +2324,4 @@ final class RexExpression {
     }
     return out;
   }
-  /**
-   * Emits {@code LEFT}/{@code RIGHT}(s, n) (op {@code op}) admitted only when {@code n} is an integer
-   * literal ≥ 0: Flink returns the empty string for a negative count while DataFusion drops that many
-   * characters from the other end, so a negative or runtime count falls back.
-   */
-  private boolean emitBoundedSubstr(RexCall call, int op) {
-    List<RexNode> args = call.getOperands();
-    if (args.size() != 2) {
-      return reject(call.getOperator().getName() + " requires 2 arguments");
-    }
-    if (!isIntLiteralAtLeast(args.get(1), 0)) {
-      return reject(call.getOperator().getName() + " requires a literal count ≥ 0");
-    }
-    add(KIND_CALL, op, 2);
-    return emit(args.get(0)) && emit(args.get(1));
-  }
-
 }

@@ -450,7 +450,8 @@ new Query("JSON_QUOTE", "tt_text", "JSON_QUOTE(s)", "STRING"),
 new Query("JSON_UNQUOTE", "tt_quoted", "JSON_UNQUOTE(s)", "STRING"),
 new Query("SPLIT", "tt_text", "SPLIT(s, '|')", "ARRAY<STRING>"),
 new Query("SUBSTRING_DYNAMIC", "tt_substring", "SUBSTRING(s, n, len)", "STRING"),
-new Query("LEFT_DYNAMIC", "tt_counted", "LEFT(s, n)", "STRING"));
+new Query("LEFT_DYNAMIC", "tt_counted", "LEFT(s, n)", "STRING"),
+new Query("RIGHT_DYNAMIC", "tt_counted", "RIGHT(s, n)", "STRING"));
   }
 
   private static String payload(String pattern) {
