@@ -68,6 +68,7 @@ pub(crate) fn function(op: i64, arity: usize) -> Option<ScalarUDF> {
             scalar::translate,
         ),
         113 => datafusion::functions::string::btrim().as_ref().clone(),
+        114 => scalar::elt_function(arity),
         _ => return None,
     })
 }

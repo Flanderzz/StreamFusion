@@ -611,6 +611,9 @@ final class RexExpression {
     if ("BTRIM".equals(functionName)) {
       return emitTrimSet(call, 113, 1);
     }
+    if ("ELT".equals(functionName)) {
+      return emitElt(call);
+    }
     if ("CONCAT".equals(functionName) || "||".equals(functionName)) {
       return emitStringCall(call, 93, 1, Integer.MAX_VALUE);
     }
@@ -918,6 +921,17 @@ final class RexExpression {
       }
     }
     return true;
+  }
+
+  private boolean emitElt(RexCall call) {
+    List<RexNode> args = call.getOperands();
+    if (args.size() < 2
+        || args.get(0).getType().getSqlTypeName() != SqlTypeName.INTEGER
+        || args.subList(1, args.size()).stream().anyMatch(arg -> !isCharacter(arg))) {
+      // Flink 2.2.1 casts its Number index to java.lang.Integer after checking the bounds.
+      return reject("ELT requires an INTEGER index and character values");
+    }
+    return emitBuiltinCall(call, 114);
   }
 
   private boolean emitEncoding(RexCall call, int op, boolean integers, boolean strings) {

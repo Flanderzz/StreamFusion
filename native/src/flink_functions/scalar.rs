@@ -17,6 +17,32 @@ pub(super) fn extremum(greatest: bool) -> ScalarUDF {
     })
 }
 
+pub(super) fn elt_function(arity: usize) -> ScalarUDF {
+    let mut types = vec![DataType::Utf8; arity];
+    if let Some(first) = types.first_mut() {
+        *first = DataType::Int32;
+    }
+    datafusion::logical_expr::create_udf(
+        "flink_elt",
+        types,
+        DataType::Utf8,
+        Volatility::Immutable,
+        Arc::new(|args| {
+            if args.len() < 2 {
+                return exec_err!("ELT expects an index and at least one string");
+            }
+            if let Some(ColumnarValue::Scalar(ScalarValue::Int32(index))) = args.first() {
+                return Ok(index
+                    .filter(|&i| i >= 1)
+                    .and_then(|i| args.get(i as usize))
+                    .cloned()
+                    .unwrap_or(ColumnarValue::Scalar(ScalarValue::Utf8(None))));
+            }
+            datafusion::functions::utils::make_scalar_function(elt, vec![])(args)
+        }),
+    )
+}
+
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct FlinkExtremum {
     greatest: bool,
@@ -261,6 +287,43 @@ pub(super) fn translate(args: &[ArrayRef]) -> Result<ArrayRef> {
     Ok(Arc::new(builder.finish()))
 }
 
+fn elt(args: &[ArrayRef]) -> Result<ArrayRef> {
+    if args.len() < 2 {
+        return exec_err!("ELT expects an index and at least one string");
+    }
+    let indices = datafusion::common::cast::as_int32_array(&args[0])?;
+    let strings: Vec<&StringArray> = args[1..]
+        .iter()
+        .map(|array| datafusion::common::cast::as_string_array(array))
+        .collect::<Result<_>>()?;
+    if strings.iter().any(|array| array.len() != indices.len()) {
+        return exec_err!("ELT array lengths differ");
+    }
+    let selected = indices.iter().enumerate().map(|(row, index)| {
+        index
+            .filter(|&i| i >= 1)
+            .and_then(|i| strings.get(i as usize - 1))
+            .filter(|array| !array.is_null(row))
+            .map(|array| array.value(row))
+    });
+    let estimated_bytes = strings.iter().map(|s| string_bytes(s)).sum::<usize>() / strings.len();
+    if estimated_bytes <= indices.len() * std::mem::size_of::<Option<&str>>() {
+        // For short outputs, a second selection pass costs more than growing the payload buffer.
+        let mut builder = StringBuilder::with_capacity(indices.len(), estimated_bytes);
+        for value in selected {
+            builder.append_option(value);
+        }
+        return Ok(Arc::new(builder.finish()));
+    }
+    let selected: Vec<_> = selected.collect();
+    let bytes = selected.iter().flatten().map(|s| s.len()).sum();
+    let mut builder = StringBuilder::with_capacity(indices.len(), bytes);
+    for value in selected {
+        builder.append_option(value);
+    }
+    Ok(Arc::new(builder.finish()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,6 +338,25 @@ mod tests {
             .unwrap()
             .iter()
             .collect()
+    }
+
+    #[test]
+    fn elt_checks_bounds_and_only_the_selected_validity() {
+        let index: ArrayRef = Arc::new(Int32Array::from(vec![
+            Some(1),
+            Some(2),
+            Some(0),
+            Some(i32::MAX),
+            None,
+        ]));
+        let first = strings(vec![Some("a"), None, Some("b"), Some("c"), Some("d")]);
+        let second = strings(vec![None, Some("x"), None, None, None]);
+        assert_eq!(
+            values(&elt(&[index.clone(), first.clone(), second]).unwrap()),
+            vec![Some("a"), Some("x"), None, None, None]
+        );
+        assert!(elt(&[]).is_err());
+        assert!(elt(&[index, first.slice(0, 1)]).is_err());
     }
 
     #[test]
@@ -308,6 +390,29 @@ mod tests {
                 config_options: Arc::new(datafusion::common::config::ConfigOptions::new()),
             })
             .unwrap()
+    }
+
+    #[test]
+    fn constant_elt_reuses_the_selected_sliced_array() {
+        let input = strings(vec![Some("unused"), Some("selected"), None, Some("tail")]).slice(1, 2);
+        let args = |index| {
+            vec![
+                ColumnarValue::Scalar(ScalarValue::Int32(index)),
+                ColumnarValue::Array(input.clone()),
+                ColumnarValue::Scalar(ScalarValue::Utf8(None)),
+            ]
+        };
+        let ColumnarValue::Array(result) = invoke(114, args(Some(1)), DataType::Utf8, 2) else {
+            panic!("selected an array");
+        };
+        assert!(Arc::ptr_eq(&input, &result));
+        assert_eq!(values(&result), vec![Some("selected"), None]);
+        for index in [None, Some(-1), Some(0), Some(2), Some(i32::MAX)] {
+            assert!(matches!(
+                invoke(114, args(index), DataType::Utf8, 2),
+                ColumnarValue::Scalar(ScalarValue::Utf8(None))
+            ));
+        }
     }
 
     #[test]

@@ -46,3 +46,9 @@ Default and literal-set trimming both reuse DataFusion's btrim kernel. Keeping o
 
 [Complete-job Flink/native results](../benchmarks/scalar-functions.md#btrim).
 
+## ELT
+
+A scalar index returns the selected array with its buffers/NULL mask intact. Longer dynamic outputs are sized before writing; short strings keep a single writing pass to avoid a selection vector larger than their payload.
+
+[Complete-job Flink/native results](../benchmarks/scalar-functions.md#elt).
+

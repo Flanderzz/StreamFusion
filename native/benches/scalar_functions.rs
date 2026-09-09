@@ -67,6 +67,26 @@ fn functions(c: &mut Criterion) {
                 vec![strings(0), scalar_text("abcdef"), scalar_text("ABCDEF")],
             ),
             ("BTRIM", 113, vec![strings(0)]),
+            (
+                "ELT",
+                114,
+                vec![
+                    array(Int32Array::from_iter_values(
+                        (0..ROWS).map(|i| (i % 2) as i32 + 1),
+                    )),
+                    strings(0),
+                    strings(1),
+                ],
+            ),
+            (
+                "ELT_CONSTANT_INDEX",
+                114,
+                vec![
+                    ColumnarValue::Scalar(ScalarValue::Int32(Some(1))),
+                    strings(0),
+                    strings(1),
+                ],
+            ),
         ];
         let mut group = c.benchmark_group(format!("scalar/{name}"));
         group.throughput(Throughput::Elements(ROWS as u64));

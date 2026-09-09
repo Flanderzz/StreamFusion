@@ -215,3 +215,12 @@ not subtracted from function times because their result types and lengths can di
 | `BTRIM` | ASCII, 264-byte budget | 0.566 | 0.868 | 0.65x |
 | `BTRIM` | Unicode, 264-byte budget, NULL/8 | 0.728 | 0.937 | 0.78x |
 
+## ELT
+
+`ELT`: `ELT(i, s, t)`
+
+| Case | Input | Flink (s) | Native (s) | Flink / native |
+|---|---|---:|---:|---:|
+| `ELT` | ASCII, 264-byte budget | 0.753 | 1.342 | 0.56x |
+| `ELT` | Unicode, 264-byte budget, NULL/8 | 1.112 | 1.575 | 0.71x |
+
