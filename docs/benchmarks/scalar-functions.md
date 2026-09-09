@@ -15,9 +15,11 @@ sink. The harness checks that every native function and identity-control plan in
 time: above 1 means native is faster for that workload; below 1 means it is slower. Small
 differences can be run-to-run noise, and these measurements do not isolate kernel cost.
 
-The tables below contain the independently measured cases for the functions admitted by
-this revision. Additional cases are introduced together with their function commits.
-See [Calc / filter](../operators/calc-filter.md) for the current argument gates.
+The 48 cases cover all 35 retained functions, including integer widths and literal/column
+search parameters. All cases run with the 264-byte ASCII/non-null and Unicode/NULL scenarios;
+the ten search cases also run with 8-byte ASCII padding, giving 106 Flink/native comparisons.
+TO_TIMESTAMP and temporal FLOOR/CEIL/CEILING are outside the PR's native coverage and have no
+result rows. See [Calc / filter](../operators/calc-filter.md) for the complete argument gates.
 
 ## Inputs
 
@@ -404,3 +406,11 @@ not subtracted from function times because their result types and lengths can di
 | `LTRIM_LITERAL_SET` | ASCII, 264-byte budget | 0.756 | 1.107 | 0.68x |
 | `LTRIM_LITERAL_SET` | Unicode, 264-byte budget, NULL/8 | 0.851 | 1.072 | 0.79x |
 
+## RTRIM
+
+`RTRIM_LITERAL_SET`: `RTRIM(s, ' |ab')`
+
+| Case | Input | Flink (s) | Native (s) | Flink / native |
+|---|---|---:|---:|---:|
+| `RTRIM_LITERAL_SET` | ASCII, 264-byte budget | 1.923 | 0.990 | 1.94x |
+| `RTRIM_LITERAL_SET` | Unicode, 264-byte budget, NULL/8 | 1.581 | 1.063 | 1.49x |

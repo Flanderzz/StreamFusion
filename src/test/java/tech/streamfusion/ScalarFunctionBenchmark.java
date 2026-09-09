@@ -444,23 +444,25 @@ class ScalarFunctionBenchmark {
 
   private static final class TextTimeFunctions {
     static final List<Query> QUERIES =
-        List.of(new Query("ENCODE_UTF8", "tt_text", "ENCODE(s, 'UTF-8')", "BYTES"),
-new Query("DECODE_UTF8", "tt_bytes", "DECODE(b, 'UTF-8')", "STRING"),
-new Query("JSON_QUOTE", "tt_text", "JSON_QUOTE(s)", "STRING"),
-new Query("JSON_UNQUOTE", "tt_quoted", "JSON_UNQUOTE(s)", "STRING"),
-new Query("SPLIT", "tt_text", "SPLIT(s, '|')", "ARRAY<STRING>"),
-new Query("SUBSTRING_DYNAMIC", "tt_substring", "SUBSTRING(s, n, len)", "STRING"),
-new Query("LEFT_DYNAMIC", "tt_counted", "LEFT(s, n)", "STRING"),
-new Query("RIGHT_DYNAMIC", "tt_counted", "RIGHT(s, n)", "STRING"),
-new Query("LPAD_DYNAMIC", "tt_pad", "LPAD(s, n, p)", "STRING"),
-new Query("RPAD_DYNAMIC", "tt_pad", "RPAD(s, n, p)", "STRING"),
-new Query("SPLIT_INDEX_DYNAMIC", "tt_split", "SPLIT_INDEX(s, p, n)", "STRING"),
-new Query("TO_DATE", "tt_date_text", "TO_DATE(s)", "DATE"),
-new Query("QUARTER", "tt_timestamp", "QUARTER(ts)", "BIGINT"),
-new Query("WEEK", "tt_timestamp", "WEEK(ts)", "BIGINT"),
-new Query("DAYOFYEAR", "tt_timestamp", "DAYOFYEAR(ts)", "BIGINT"),
-new Query("DAYOFWEEK", "tt_timestamp", "DAYOFWEEK(ts)", "BIGINT"),
-new Query("LTRIM_LITERAL_SET", "tt_trim", "LTRIM(s, ' |ab')", "STRING"));
+        List.of(
+            new Query("ENCODE_UTF8", "tt_text", "ENCODE(s, 'UTF-8')", "BYTES"),
+            new Query("DECODE_UTF8", "tt_bytes", "DECODE(b, 'UTF-8')", "STRING"),
+            new Query("JSON_QUOTE", "tt_text", "JSON_QUOTE(s)", "STRING"),
+            new Query("JSON_UNQUOTE", "tt_quoted", "JSON_UNQUOTE(s)", "STRING"),
+            new Query("SPLIT", "tt_text", "SPLIT(s, '|')", "ARRAY<STRING>"),
+            new Query("SUBSTRING_DYNAMIC", "tt_substring", "SUBSTRING(s, n, len)", "STRING"),
+            new Query("LEFT_DYNAMIC", "tt_counted", "LEFT(s, n)", "STRING"),
+            new Query("RIGHT_DYNAMIC", "tt_counted", "RIGHT(s, n)", "STRING"),
+            new Query("LPAD_DYNAMIC", "tt_pad", "LPAD(s, n, p)", "STRING"),
+            new Query("RPAD_DYNAMIC", "tt_pad", "RPAD(s, n, p)", "STRING"),
+            new Query("SPLIT_INDEX_DYNAMIC", "tt_split", "SPLIT_INDEX(s, p, n)", "STRING"),
+            new Query("TO_DATE", "tt_date_text", "TO_DATE(s)", "DATE"),
+            new Query("QUARTER", "tt_timestamp", "QUARTER(ts)", "BIGINT"),
+            new Query("WEEK", "tt_timestamp", "WEEK(ts)", "BIGINT"),
+            new Query("DAYOFYEAR", "tt_timestamp", "DAYOFYEAR(ts)", "BIGINT"),
+            new Query("DAYOFWEEK", "tt_timestamp", "DAYOFWEEK(ts)", "BIGINT"),
+            new Query("LTRIM_LITERAL_SET", "tt_trim", "LTRIM(s, ' |ab')", "STRING"),
+            new Query("RTRIM_LITERAL_SET", "tt_trim", "RTRIM(s, ' |ab')", "STRING"));
   }
 
   private static String payload(String pattern) {

@@ -646,6 +646,9 @@ final class RexExpression {
     if ("LTRIM".equals(functionName) && call.getOperands().size() == 2) {
       return emitTrimSet(call, 139, 2);
     }
+    if ("RTRIM".equals(functionName) && call.getOperands().size() == 2) {
+      return emitTrimSet(call, 140, 2);
+    }
     if ("ELT".equals(functionName)) {
       return emitElt(call);
     }

@@ -105,7 +105,7 @@ strict NULL propagation applied to `CONCAT` below.
 - **`CHR`:** Delegates to DataFusion chr.
 - **`LTRIM`:** The one- and two-argument forms delegate to DataFusion's space/character-set kernel;
   two-argument trim sets must be literal, with strict NULL propagation.
-- **`RTRIM`:** Only the existing one-argument space trim is native.
+- **`RTRIM`:** Likewise delegates right trimming, with literal character sets.
 - **`POSITION`/`REPEAT`/`ABS`/`FLOOR`/`CEIL`/`SIGN`:** `POSITION(sub IN s)` uses `strpos(s, sub)`
   (Int32, matching Flink's INT); `REPEAT(s, n)` uses `repeat`. The numeric `ABS`/`FLOOR`/`CEIL`/`SIGN`
   forms admit float/double; incompatible integer behavior still falls back. Temporal FLOOR/CEIL
@@ -290,6 +290,10 @@ physical Calc operators or row/Arrow conversion.
 ### LTRIM
 
 Delegates literal character sets to the released DataFusion Unicode trim kernel; dynamic sets are declined.
+
+### RTRIM
+
+Delegates literal sets to DataFusion's right-trim kernel and scalar-pattern reuse; dynamic sets are declined.
 
 ## Review-driven admission and organization
 

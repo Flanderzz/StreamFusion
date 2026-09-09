@@ -126,6 +126,7 @@ pub(crate) fn function(op: i64, arity: usize) -> Option<ScalarUDF> {
         135 => calendar::function(calendar::Field::DayOfYear),
         136 => calendar::function(calendar::Field::DayOfWeek),
         139 => datafusion::functions::string::ltrim().as_ref().clone(),
+        140 => datafusion::functions::string::rtrim().as_ref().clone(),
         _ => return None,
     })
 }
