@@ -601,6 +601,9 @@ final class RexExpression {
     if ("LEAST".equals(functionName)) {
       return emitExtremum(call, 110);
     }
+    if ("INITCAP".equals(functionName)) {
+      return emitCharacterFunction(call, 111, 1, 1);
+    }
     if ("CONCAT".equals(functionName) || "||".equals(functionName)) {
       return emitStringCall(call, 93, 1, Integer.MAX_VALUE);
     }

@@ -55,6 +55,12 @@ pub(crate) fn function(op: i64, arity: usize) -> Option<ScalarUDF> {
         ),
         109 => scalar::extremum(true),
         110 => scalar::extremum(false),
+        111 => udf(
+            "flink_initcap",
+            vec![DataType::Utf8],
+            DataType::Utf8,
+            scalar::initcap,
+        ),
         _ => return None,
     })
 }

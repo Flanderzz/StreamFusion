@@ -234,6 +234,10 @@ Integers, BOOLEAN and matching-precision/scale DECIMAL are native, with strict N
 
 Uses the same type and ASCII-proof gates as GREATEST, with strict NULL propagation and minimum comparison.
 
+### INITCAP
+
+Character strings only. Only ASCII letters and digits form words; every other character separates words and is preserved. NULL returns NULL. This follows Flink rather than DataFusion word boundaries.
+
 ## Case folding & regex
 
 **Native by default — not a fallback.** `UPPER`/`LOWER` and `REGEXP_EXTRACT` run natively by default

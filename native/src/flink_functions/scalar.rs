@@ -167,6 +167,41 @@ where
     Ok(Arc::new(result.with_data_type(first.data_type().clone())))
 }
 
+pub(super) fn initcap(args: &[ArrayRef]) -> Result<ArrayRef> {
+    let [arg] = args else {
+        return exec_err!("INITCAP expects one argument");
+    };
+    let strings = datafusion::common::cast::as_string_array(arg)?;
+    let mut builder = StringBuilder::with_capacity(strings.len(), string_bytes(strings));
+    let mut output = Vec::new();
+    for value in strings {
+        let Some(value) = value else {
+            builder.append_null();
+            continue;
+        };
+        output.clear();
+        let mut start = true;
+        for byte in value.bytes() {
+            output.push(if start {
+                byte.to_ascii_uppercase()
+            } else {
+                byte.to_ascii_lowercase()
+            });
+            start = !byte.is_ascii_alphanumeric();
+        }
+        // Only ASCII case bits changed; non-ASCII bytes retain their original UTF-8 encoding.
+        builder.append_value(
+            std::str::from_utf8(&output)
+                .map_err(|e| datafusion::common::exec_datafusion_err!("INITCAP: {e}"))?,
+        );
+    }
+    Ok(Arc::new(builder.finish()))
+}
+
+fn string_bytes(strings: &StringArray) -> usize {
+    (strings.value_offsets()[strings.len()] - strings.value_offsets()[0]) as usize
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

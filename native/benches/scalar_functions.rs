@@ -57,7 +57,11 @@ fn functions(c: &mut Criterion) {
                 ColumnarValue::Scalar(ScalarValue::Int64(Some(17))),
             ]
         };
-        let cases = [("GREATEST", 109, numbers()), ("LEAST", 110, numbers())];
+        let cases = [
+            ("GREATEST", 109, numbers()),
+            ("LEAST", 110, numbers()),
+            ("INITCAP", 111, vec![strings(0)]),
+        ];
         let mut group = c.benchmark_group(format!("scalar/{name}"));
         group.throughput(Throughput::Elements(ROWS as u64));
         group.sample_size(20);
