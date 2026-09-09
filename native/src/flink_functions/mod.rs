@@ -46,6 +46,12 @@ pub(crate) fn function(op: i64, arity: usize) -> Option<ScalarUDF> {
             DataType::Utf8,
             |args| binary_strings::encode(args, true),
         ),
+        108 => udf(
+            "flink_unhex",
+            vec![DataType::Utf8],
+            DataType::Binary,
+            binary_strings::unhex,
+        ),
         _ => return None,
     })
 }

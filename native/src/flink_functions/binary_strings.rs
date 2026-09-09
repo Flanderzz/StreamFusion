@@ -102,3 +102,74 @@ pub(super) fn encode(args: &[ArrayRef], base64: bool) -> datafusion::common::Res
         strings.nulls().cloned(),
     )))
 }
+
+pub(super) fn unhex(args: &[ArrayRef]) -> datafusion::common::Result<ArrayRef> {
+    let [arg] = args else {
+        return datafusion::common::exec_err!("UNHEX expects one argument");
+    };
+    let strings = datafusion::common::cast::as_string_array(arg)?;
+    let input_offsets = strings.value_offsets();
+    let byte_span = (input_offsets[strings.len()] - input_offsets[0]) as usize;
+    // Each odd-length row needs one extra nibble. Use the slice's span, not its parent buffer.
+    let mut values = Vec::with_capacity(byte_span.div_ceil(2) + strings.len() / 2);
+    let mut offsets = Vec::with_capacity(strings.len() + 1);
+    let mut nulls = arrow::array::NullBufferBuilder::new(strings.len());
+    offsets.push(0i32);
+    for string in strings {
+        let row_start = values.len();
+        let valid = if let Some(string) = string {
+            values.resize(row_start + string.len().div_ceil(2), 0);
+            decode_unhex(string.as_bytes(), &mut values[row_start..])
+        } else {
+            false
+        };
+        if !valid {
+            values.truncate(row_start);
+        }
+        nulls.append(valid);
+        offsets.push(i32::try_from(values.len()).map_err(|_| {
+            datafusion::common::exec_datafusion_err!("UNHEX output exceeds Binary capacity")
+        })?);
+    }
+    Ok(Arc::new(arrow::array::BinaryArray::new(
+        arrow::buffer::OffsetBuffer::new(offsets.into()),
+        arrow::buffer::Buffer::from_vec(values),
+        nulls.finish(),
+    )))
+}
+
+fn decode_unhex(bytes: &[u8], output: &mut [u8]) -> bool {
+    const INVALID: u8 = 0xff;
+    const NIBBLES: [u8; 256] = {
+        let mut table = [INVALID; 256];
+        let mut i = 0;
+        while i < table.len() {
+            table[i] = match i as u8 {
+                b'0'..=b'9' => i as u8 - b'0',
+                b'A'..=b'F' => i as u8 - b'A' + 10,
+                b'a'..=b'f' => i as u8 - b'a' + 10,
+                _ => INVALID,
+            };
+            i += 1;
+        }
+        table
+    };
+    let odd = bytes.len() % 2;
+    if odd == 1 {
+        if NIBBLES[bytes[0] as usize] == INVALID {
+            return false;
+        }
+        // Flink validates but discards the leading odd digit, leaving a zero output byte.
+        output[0] = 0;
+    }
+    for (pair, out) in bytes[odd..].chunks_exact(2).zip(&mut output[odd..]) {
+        let first = NIBBLES[pair[0] as usize];
+        let second = NIBBLES[pair[1] as usize];
+        // Valid nibbles use only four bits; either invalid digit makes the OR 0xff.
+        if (first | second) == INVALID {
+            return false;
+        }
+        *out = (first << 4) | second;
+    }
+    true
+}

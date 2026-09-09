@@ -161,3 +161,12 @@ not subtracted from function times because their result types and lengths can di
 | `TO_BASE64` | ASCII, 264-byte budget | 0.657 | 0.963 | 0.68x |
 | `TO_BASE64` | Unicode, 264-byte budget, NULL/8 | 0.840 | 1.037 | 0.81x |
 
+## UNHEX
+
+`UNHEX`: `UNHEX(s)`
+
+| Case | Input | Flink (s) | Native (s) | Flink / native |
+|---|---|---:|---:|---:|
+| `UNHEX` | 528 hex bytes, non-null | 1.203 | 1.295 | 0.93x |
+| `UNHEX` | 528 hex bytes, NULL/8 | 1.130 | 1.063 | 1.06x |
+

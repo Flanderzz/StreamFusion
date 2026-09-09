@@ -35,6 +35,16 @@ pub(crate) fn build_expr(
         9 => logical_lit(longs[arg] as i8),
         // Likewise for FLOAT, which the host evaluates in single precision.
         22 => logical_lit(doubles[arg] as f32),
+        23 => {
+            // Binary literals use a length followed by bytes in the existing long pool; -1 is NULL.
+            let length = longs[arg];
+            logical_lit(ScalarValue::Binary((length >= 0).then(|| {
+                longs[arg + 1..arg + 1 + length as usize]
+                    .iter()
+                    .map(|&byte| byte as u8)
+                    .collect()
+            })))
+        }
         11 => {
             // A widening numeric cast: build the single child, then wrap it. `arg` is the target code.
             let child = build_expr(

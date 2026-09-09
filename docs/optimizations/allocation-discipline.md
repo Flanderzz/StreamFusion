@@ -49,6 +49,12 @@ Output offsets are checked against Arrow Utf8's 32-bit limit before allocating t
 
 [Per-function complete-job results](../benchmarks/scalar-functions.md#to_base64) include both transposes.
 
+### UNHEX
+
+Follows Comet's nibble lookup table and combined invalid-digit check, while retaining Flink's odd-length rule. Validation and decoding share a pass into the final Arrow binary buffer. Invalid rows roll back partial output. Capacity uses the active slice, offsets stay checked, and the constructor remains safe; no per-row temporary output copy is needed.
+
+[Per-function complete-job results](../benchmarks/scalar-functions.md#unhex) include both transposes.
+
 ## Columnar-kernel internal state where it fits
 
 Keep-first dedup holds its per-key candidates as a single Arrow batch — one row per pending key —

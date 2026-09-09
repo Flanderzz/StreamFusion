@@ -2,6 +2,21 @@ use super::*;
 use arrow::array::BinaryArray;
 
 #[test]
+fn binary_literal_encoding_preserves_all_bytes_empty_and_typed_null() {
+    let schema = Arc::new(Schema::empty());
+    for value in [Some((0..=255).collect::<Vec<u8>>()), Some(vec![]), None] {
+        let mut longs = vec![42, value.as_ref().map_or(-1, |bytes| bytes.len() as i64)];
+        if let Some(bytes) = &value {
+            longs.extend(bytes.iter().map(|&byte| i64::from(byte)));
+        }
+        let mut cursor = 0;
+        let expression = build_expr(&schema, &[23], &[1], &[0], &longs, &[], &[], &mut cursor);
+        assert_eq!(expression, logical_lit(ScalarValue::Binary(value)));
+        assert_eq!(cursor, 1);
+    }
+}
+
+#[test]
 fn scalar_registry_declines_unknown_and_retired_operations() {
     for op in [55, 69, 70, 82, 83, 85, 132, 137, 138, i64::MAX] {
         assert!(crate::flink_functions::function(op, 1).is_none());
@@ -133,6 +148,222 @@ fn encoding_integer_arrays_preserve_nulls_and_long_bits() {
             None,
         ])
     );
+}
+
+#[test]
+fn encoding_strings_preserve_padding_and_flink_unhex_edges() {
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new("s", DataType::Utf8, true)])),
+        vec![Arc::new(StringArray::from(vec![
+            Some("skip"),
+            Some(""),
+            Some("a"),
+            Some("ab"),
+            Some("abc"),
+            Some("\u{4e2d}\u{1f600}"),
+            Some("a\0b"),
+            None,
+        ]))],
+    )
+    .unwrap()
+    .slice(1, 7);
+    for (op, expected) in [
+        (
+            106,
+            vec![
+                Some(""),
+                Some("61"),
+                Some("6162"),
+                Some("616263"),
+                Some("E4B8ADF09F9880"),
+                Some("610062"),
+                None,
+            ],
+        ),
+        (
+            107,
+            vec![
+                Some(""),
+                Some("YQ=="),
+                Some("YWI="),
+                Some("YWJj"),
+                Some("5Lit8J+YgA=="),
+                Some("YQBi"),
+                None,
+            ],
+        ),
+    ] {
+        let result = evaluate_scalar_call(op, vec![logical_col("s")], &batch);
+        assert_eq!(
+            result.as_any().downcast_ref::<StringArray>().unwrap(),
+            &StringArray::from(expected)
+        );
+    }
+    let input = RecordBatch::try_new(
+        batch.schema(),
+        vec![Arc::new(StringArray::from(vec![
+            Some(""),
+            Some("A"),
+            Some("AbC"),
+            Some("aF00"),
+            Some("G12"),
+            Some("0G"),
+            Some(" 12"),
+            Some("\u{ff11}\u{ff12}"),
+            None,
+        ]))],
+    )
+    .unwrap();
+    for op in 106..=108 {
+        let empty = evaluate_scalar_call(op, vec![logical_col("s")], &input.slice(0, 0));
+        assert!(empty.is_empty());
+        assert_eq!(
+            empty.data_type(),
+            if op == 108 {
+                &DataType::Binary
+            } else {
+                &DataType::Utf8
+            }
+        );
+    }
+    let decoded = evaluate_scalar_call(108, vec![logical_col("s")], &input);
+    assert_eq!(
+        decoded
+            .as_any()
+            .downcast_ref::<arrow::array::BinaryArray>()
+            .unwrap(),
+        &arrow::array::BinaryArray::from(vec![
+            Some(&b""[..]),
+            Some(&b"\x00"[..]),
+            Some(&b"\x00\xbc"[..]),
+            Some(&b"\xaf\x00"[..]),
+            None,
+            None,
+            None,
+            None,
+            None,
+        ])
+    );
+}
+
+#[test]
+fn encoding_unhex_rolls_back_invalid_rows_in_sliced_batches() {
+    let long_hex = "aF".repeat(4097);
+    let invalid_tail = format!("{long_hex}0G");
+    let input = StringArray::from(vec![
+        Some(long_hex.as_str()),
+        Some("aF00GG"),
+        Some("1234"),
+        Some("A12G4"),
+        Some("ABC"),
+        None,
+        Some(""),
+        Some("f"),
+        Some("0011\u{ff11}\u{ff12}"),
+        Some("00\0f"),
+        Some("ff00"),
+        Some(invalid_tail.as_str()),
+        Some("aF"),
+        Some(long_hex.as_str()),
+    ]);
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new("s", DataType::Utf8, true)])),
+        vec![Arc::new(input.slice(1, 12))],
+    )
+    .unwrap();
+    let result = evaluate_scalar_call(108, vec![logical_col("s")], &batch);
+    assert_eq!(
+        result.as_any().downcast_ref::<BinaryArray>().unwrap(),
+        &BinaryArray::from(vec![
+            None,
+            Some(&b"\x12\x34"[..]),
+            None,
+            Some(&b"\x00\xbc"[..]),
+            None,
+            Some(&b""[..]),
+            Some(&b"\x00"[..]),
+            None,
+            None,
+            Some(&b"\xff\x00"[..]),
+            None,
+            Some(&b"\xaf"[..]),
+        ])
+    );
+    result.to_data().validate_full().unwrap();
+}
+
+#[test]
+fn encoding_unhex_accepts_only_ascii_hex_digits() {
+    let digits: Vec<String> = (0u8..=255)
+        .map(|byte| char::from(byte).to_string())
+        .collect();
+    let input = StringArray::from(digits);
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new("s", DataType::Utf8, false)])),
+        vec![Arc::new(input)],
+    )
+    .unwrap();
+    let result = evaluate_scalar_call(108, vec![logical_col("s")], &batch);
+    let decoded = result.as_any().downcast_ref::<BinaryArray>().unwrap();
+    for byte in 0u8..=255 {
+        assert_eq!(decoded.is_valid(byte as usize), byte.is_ascii_hexdigit());
+        if byte.is_ascii_hexdigit() {
+            assert_eq!(decoded.value(byte as usize), &[0]);
+        }
+    }
+}
+
+#[test]
+fn encoding_scalars_empty_batches_and_arity() {
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new("n", DataType::Int64, false)])),
+        vec![Arc::new(Int64Array::from(vec![1, 2, 3]))],
+    )
+    .unwrap();
+    for (op, value, expected) in [
+        (104, logical_lit(5i8), "101"),
+        (105, logical_lit(-1i16), "FFFFFFFFFFFFFFFF"),
+        (106, logical_lit("ab"), "6162"),
+        (107, logical_lit("ab"), "YWI="),
+    ] {
+        let result = evaluate_scalar_call(op, vec![value.clone()], &batch);
+        assert_eq!(
+            result.as_any().downcast_ref::<StringArray>().unwrap(),
+            &StringArray::from(vec![expected; 3])
+        );
+        let empty = evaluate_scalar_call(op, vec![value], &batch.slice(0, 0));
+        assert!(empty.is_empty());
+        assert_eq!(empty.data_type(), &DataType::Utf8);
+    }
+    let result = evaluate_scalar_call(108, vec![logical_lit("ABC")], &batch);
+    assert_eq!(
+        result
+            .as_any()
+            .downcast_ref::<arrow::array::BinaryArray>()
+            .unwrap(),
+        &arrow::array::BinaryArray::from(vec![&b"\0\xbc"[..]; 3])
+    );
+    for op in 104..=108 {
+        let arg = if op <= 105 {
+            logical_col("n")
+        } else {
+            logical_lit("a")
+        };
+        let empty = evaluate_scalar_call(op, vec![arg], &batch.slice(0, 0));
+        assert!(empty.is_empty());
+        let schema = Arc::new(DFSchema::empty());
+        let context = SimplifyContext::builder()
+            .with_schema(schema.clone())
+            .build();
+        for args in [vec![], vec![logical_lit(1), logical_lit(2)]] {
+            assert!(
+                ExprSimplifier::new(context.clone())
+                    .coerce(build_call(op, args), &schema)
+                    .is_err(),
+                "encoding op {op}"
+            );
+        }
+    }
 }
 
 #[test]

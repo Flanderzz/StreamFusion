@@ -100,6 +100,7 @@ final class RexExpression {
 
   // A single-precision literal, so a FLOAT expression is not widened to double by its constants.
   private static final int KIND_LIT_FLOAT = 22;
+  private static final int KIND_LIT_BINARY = 23;
 
   // Cast target type codes, mirrored on the native side.
   private static final int CAST_TINYINT = 0;
@@ -372,20 +373,28 @@ final class RexExpression {
   }
 
   private boolean emitLiteral(RexLiteral literal) {
-    // An untyped NULL (e.g. a NULLIF/CASE `THEN NULL` branch); the surrounding expression's coercion
-    // gives it a type, as it does on the host.
     SqlTypeName type = literal.getType().getSqlTypeName();
     if (literal.isNull()) {
-      if (type == SqlTypeName.CHAR || type == SqlTypeName.VARCHAR) {
-        add(KIND_LIT_STRING, strings.size(), 0);
-        strings.add(null);
+      if (type == SqlTypeName.CHAR
+          || type == SqlTypeName.VARCHAR
+          || type == SqlTypeName.VARBINARY) {
+        if (type == SqlTypeName.VARBINARY) {
+          add(KIND_LIT_BINARY, longs.size(), 0);
+          longs.add(-1L);
+        } else {
+          add(KIND_LIT_STRING, strings.size(), 0);
+          strings.add(null);
+        }
         return true;
       }
+      // Other NULL types are inferred from the surrounding expression.
       add(KIND_LIT_NULL, -1, 0);
       return true;
     }
-    // A day-time INTERVAL literal (SECOND/MINUTE/HOUR/DAY) — Calcite stores its value in milliseconds.
-    // Admitted so datetime arithmetic like `ts - INTERVAL '10' SECOND` (Nexmark q7) is expressible; a
+    // A day-time INTERVAL literal (SECOND/MINUTE/HOUR/DAY) — Calcite stores its value in
+    // milliseconds.
+    // Admitted so datetime arithmetic like `ts - INTERVAL '10' SECOND` (Nexmark q7) is expressible;
+    // a
     // year-month interval (value in months) falls back.
     if (type.getFamily() == SqlTypeFamily.INTERVAL_DAY_TIME) {
       Long millis = literal.getValueAs(Long.class);
@@ -438,7 +447,8 @@ final class RexExpression {
           if (value == null) {
             return false;
           }
-          // The host evaluates FLOAT arithmetic in single precision. A double literal would widen the
+          // The host evaluates FLOAT arithmetic in single precision. A double literal would widen
+          // the
           // whole expression, changing both the result type the plan promised and its last bits.
           add(KIND_LIT_FLOAT, doubles.size(), 0);
           doubles.add(value);
@@ -463,6 +473,21 @@ final class RexExpression {
           }
           add(KIND_LIT_STRING, strings.size(), 0);
           strings.add(value);
+          return true;
+        }
+      case VARBINARY:
+        {
+          org.apache.calcite.avatica.util.ByteString value =
+              literal.getValueAs(org.apache.calcite.avatica.util.ByteString.class);
+          if (value == null) {
+            return false;
+          }
+          byte[] bytes = value.getBytes();
+          add(KIND_LIT_BINARY, longs.size(), 0);
+          longs.add((long) bytes.length);
+          for (byte item : bytes) {
+            longs.add((long) (item & 0xff));
+          }
           return true;
         }
       case BOOLEAN:
@@ -566,6 +591,9 @@ final class RexExpression {
     }
     if ("TO_BASE64".equals(functionName)) {
       return emitEncoding(call, 107, false, true);
+    }
+    if ("UNHEX".equals(functionName)) {
+      return emitEncoding(call, 108, false, true);
     }
     if ("CONCAT".equals(functionName) || "||".equals(functionName)) {
       return emitStringCall(call, 93, 1, Integer.MAX_VALUE);

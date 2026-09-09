@@ -222,6 +222,10 @@ Integer and character inputs are admitted. All four signed integer widths preser
 
 Character strings are encoded as padded RFC 4648 Base64 over UTF-8 bytes without line wrapping. Empty input stays empty; NULL propagates. BINARY/VARBINARY input and FROM_BASE64 fall back.
 
+### UNHEX
+
+Character inputs produce BYTES. Either hex letter case is accepted; invalid bytes, whitespace, `0x` prefixes, and non-ASCII digits return NULL. Empty input produces empty bytes. Flink validates but discards an odd leading digit, emitting zero: `UNHEX('A') = 00`, `UNHEX('ABC') = 00 BC`. Folded VARBINARY constants carry bytes directly as typed binary literals, including empty values and NULLs; fixed-size BINARY literals retain the existing fallback.
+
 ## Case folding & regex
 
 **Native by default — not a fallback.** `UPPER`/`LOWER` and `REGEXP_EXTRACT` run natively by default
