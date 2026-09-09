@@ -732,10 +732,10 @@ final class RexExpression {
       return emitStringWithIntegers(call, 127, 2, 2);
     }
     if ("LPAD".equals(functionName)) {
-      return emitPad(call, 82);
+      return emitPad(call, 128);
     }
     if ("RPAD".equals(functionName)) {
-      return emitPad(call, 83);
+      return emitLegacyPad(call, 83);
     }
     // Functions whose native result can differ from the host — locale case folding (UPPER/LOWER)
     // and
@@ -1449,29 +1449,15 @@ final class RexExpression {
         .contains(arg.getType().getSqlTypeName());
   }
 
-  /**
-   * Emits {@code LPAD}/{@code RPAD}(s, len [, pad]) (op {@code op}) with the length a literal ≥ 0 and
-   * the pad string (if present) a literal — matching DataFusion Comet's scalar-pad constraint and
-   * avoiding the negative/runtime-length edges, the same gating as LEFT/RIGHT/SUBSTRING.
-   */
   private boolean emitPad(RexCall call, int op) {
     List<RexNode> args = call.getOperands();
-    if (args.size() != 2 && args.size() != 3) {
-      return reject(call.getOperator().getName() + " requires 2 or 3 arguments");
+    if (args.size() != 3
+        || !isCharacter(args.get(0))
+        || !isInt32(args.get(1))
+        || !isCharacter(args.get(2))) {
+      return reject(call.getOperator().getName() + " requires STRING, INT, STRING arguments");
     }
-    if (!isIntLiteralAtLeast(args.get(1), 0)) {
-      return reject(call.getOperator().getName() + " requires a literal length ≥ 0");
-    }
-    if (args.size() == 3 && !(args.get(2) instanceof RexLiteral)) {
-      return reject(call.getOperator().getName() + " pad string must be a literal");
-    }
-    add(KIND_CALL, op, args.size());
-    for (RexNode arg : args) {
-      if (!emit(arg)) {
-        return false;
-      }
-    }
-    return true;
+    return emitBuiltinCall(call, op);
   }
 
   /**
@@ -2324,4 +2310,29 @@ final class RexExpression {
     }
     return out;
   }
+  /**
+   * Emits {@code LPAD}/{@code RPAD}(s, len [, pad]) (op {@code op}) with the length a literal ≥ 0 and
+   * the pad string (if present) a literal — matching DataFusion Comet's scalar-pad constraint and
+   * avoiding the negative/runtime-length edges, the same gating as LEFT/RIGHT/SUBSTRING.
+   */
+  private boolean emitLegacyPad(RexCall call, int op) {
+    List<RexNode> args = call.getOperands();
+    if (args.size() != 2 && args.size() != 3) {
+      return reject(call.getOperator().getName() + " requires 2 or 3 arguments");
+    }
+    if (!isIntLiteralAtLeast(args.get(1), 0)) {
+      return reject(call.getOperator().getName() + " requires a literal length ≥ 0");
+    }
+    if (args.size() == 3 && !(args.get(2) instanceof RexLiteral)) {
+      return reject(call.getOperator().getName() + " pad string must be a literal");
+    }
+    add(KIND_CALL, op, args.size());
+    for (RexNode arg : args) {
+      if (!emit(arg)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
 }

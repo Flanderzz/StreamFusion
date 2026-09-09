@@ -88,3 +88,9 @@ ASCII uses byte offsets. Negative positions in Unicode strings traverse backward
 
 [Complete-job Flink/native results](../benchmarks/scalar-functions.md#substring).
 
+## LPAD
+
+Following Comet's padding structure, the kernel writes intact UTF-8 prefixes and repeated pattern spans directly into the Arrow builder. A small prefix object tracks UTF-16 units and a cut surrogate, avoiding three whole-row UTF-16 buffers. Unpaired high surrogates still become the JDK '?' replacement. The ASCII path computes prefix positions from byte offsets.
+
+[Complete-job Flink/native results](../benchmarks/scalar-functions.md#lpad).
+

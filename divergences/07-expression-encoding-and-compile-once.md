@@ -98,15 +98,17 @@ strict NULL propagation applied to `CONCAT` below.
   to DataFusion's `btrim`; `LEADING`/`TRAILING` and custom trim characters fall back (asserted by a
   test). The encoder reads Calcite's three-operand TRIM (flag, trim-chars, source) and only proceeds
   for the `BOTH` + single-space case.
-- **`LPAD`/`RPAD`/`CHR`:** `LPAD`/`RPAD` → `lpad`/`rpad` (cast `Utf8View`→`Utf8`), length a literal
-  ≥ 0 and pad a literal (Comet's scalar-pad constraint); `CHR` → `chr`. Exact, no rounding/case/locale.
-- **`LTRIM`/`RTRIM`/`POSITION`/`REPEAT`/`ABS`/`FLOOR`/`CEIL`/`SIGN`:** `LTRIM`/`RTRIM` default-
-  whitespace only (a 2-arg custom-char form falls back); `POSITION(sub IN s)` → `strpos(s, sub)`
-  (returns Int32, matching Flink's INT); `REPEAT(s, n)` → `repeat`; `ABS`/`FLOOR`/`CEIL`/`SIGN`
-  admitted **only over float/double** — integer `ABS(INT_MIN)` overflows differently, integer
-  `FLOOR`/`CEIL` is an identity Flink keeps in the int type, and integer `SIGN` would return int where
-  DataFusion's `signum` returns float, so the integer forms fall back. `25.5` is a SQL `DECIMAL`
-  literal, so the operand must be a true double (e.g. `v - 25.5E0`) to route.
+- **`LPAD`:** The native kernel admits dynamic length/padding and counts UTF-16 units, matching
+  released Flink 2.2.1. Empty padding and negative length return NULL. DataFusion and newer Flink
+  source count code points, so their kernels cannot reproduce supplementary-character truncation.
+- **`RPAD`:** The existing DataFusion form requires a nonnegative literal length and literal padding.
+- **`CHR`:** Delegates to DataFusion chr.
+- **`LTRIM`:** Only the existing one-argument space trim is native.
+- **`RTRIM`:** Only the existing one-argument space trim is native.
+- **`POSITION`/`REPEAT`/`ABS`/`FLOOR`/`CEIL`/`SIGN`:** `POSITION(sub IN s)` uses `strpos(s, sub)`
+  (Int32, matching Flink's INT); `REPEAT(s, n)` uses `repeat`. The numeric `ABS`/`FLOOR`/`CEIL`/`SIGN`
+  forms admit float/double; incompatible integer behavior still falls back. Temporal FLOOR/CEIL
+  remain on Flink; their millisecond-producing kernels are removed from this PR.
 - **`LIKE`/`REPLACE`/`REVERSE`:** `LIKE` maps to DataFusion's `Expr::Like` (case-sensitive, no
   explicit `ESCAPE` — a 3-operand `LIKE … ESCAPE` falls back); `REPLACE(s, from, to)` to `replace`;
   `REVERSE` to `reverse` (cast `Utf8View`→`Utf8`). ASCII-identical to the host.
@@ -229,6 +231,10 @@ Copies a borrowed prefix into the Arrow output and avoids DataFusion's different
 ### RIGHT
 
 Locates the suffix by traversing character boundaries from the end, without an initial full-string character count.
+
+### LPAD
+
+Copies borrowed UTF-8 prefixes and whole padding spans, following Comet's padding structure. A prefix counter measures Flink 2.2.1 UTF-16 units; a cut through a surrogate pair appends the JDK `?` replacement. Intact spans write directly into the Arrow output builder, without a per-row scratch string or whole-row UTF-16 buffers. Newer Flink source counts code points and cannot be substituted for the released runtime.
 
 ### TO_TIMESTAMP (deferred)
 
