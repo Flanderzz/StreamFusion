@@ -15,7 +15,7 @@ sink. The harness checks that every native function and identity-control plan in
 time: above 1 means native is faster for that workload; below 1 means it is slower. Small
 differences can be run-to-run noise, and these measurements do not isolate kernel cost.
 
-The 48 cases cover all 35 retained functions, including integer widths and literal/column
+The original 48 cases cover 35 retained functions, including integer widths and literal/column
 search parameters. All cases run with the 264-byte ASCII/non-null and Unicode/NULL scenarios;
 the ten search cases also run with 8-byte ASCII padding, giving 106 Flink/native comparisons.
 TO_TIMESTAMP and temporal FLOOR/CEIL/CEILING are outside the PR's native coverage and have no
@@ -45,7 +45,7 @@ Use JDK 17 and run one timing process at a time:
 ```sh
 TZ=UTC SF_BENCHMARK=true mvn -pl :streamfusion-runtime test -Pbench \
   '-Dtest=ScalarFunctionBenchmark#individualFunctions' \
-  -Dscalar.engine=both -Dscalar.functions=ALL \
+  -Dscalar.engine=both -Dscalar.functions=SCALAR,SEARCH,ENCODING,TEXT_TIME \
   -Dscalar.rows=2000000 -Dscalar.warmup=2 -Dscalar.runs=5 \
   -Dscalar.bytes=264 -Dscalar.unicode=false -Dscalar.nullEvery=0 \
   -Dscalar.output=target/scalar-ascii264.csv
@@ -414,3 +414,54 @@ not subtracted from function times because their result types and lengths can di
 |---|---|---:|---:|---:|
 | `RTRIM_LITERAL_SET` | ASCII, 264-byte budget | 1.923 | 0.990 | 1.94x |
 | `RTRIM_LITERAL_SET` | Unicode, 264-byte budget, NULL/8 | 1.581 | 1.063 | 1.49x |
+
+## SQL/JSON measurements
+
+Measured on 2026-09-10 with the same release profile, JDK 17, Flink/DataFusion versions,
+2,000,000 rows, parallelism 1, two warmups, five measured trials, interleaved engines and
+both transposes described above. Each scenario starts a fresh JVM; no other test or benchmark
+runs concurrently. This function requires the explicit compatibility flag documented under
+[Calc / filter](../operators/calc-filter.md).
+
+The input alternates between a document containing `user.name` and a document without that
+member. The byte budget controls a separate padding string, excluding JSON syntax and other
+fields. Unicode input also includes an escaped newline in the selected name; every eighth
+source value is SQL NULL. Each query evaluates one function, using the literal path
+`lax $.user.name`. Identity controls use the same source and are not included in the tables.
+
+The multi-member scenarios add 16 or 64 short string members (`field0: value0`, and so on)
+between `user` and `padding`. They distinguish repeated key/value parsing from scanning one
+long string. Both shapes retain full input validation and last-duplicate-member semantics.
+The native reader selects its protected SIMD path for these multi-member scenarios and the
+streaming path for the padding-only scenarios. See the [parsing technique](../optimizations/sql-json-parsing.md).
+
+```sh
+TZ=UTC SF_BENCHMARK=true mvn -pl :streamfusion-runtime test -Pbench \
+  '-Dtest=ScalarFunctionBenchmark#individualFunctions' \
+  -Dstreamfusion.expression.JSON_VALUE.allowIncompatible=true \
+  -Dscalar.engine=both -Dscalar.functions=JSON_VALUE \
+  -Dscalar.rows=2000000 -Dscalar.warmup=2 -Dscalar.runs=5 \
+  -Dscalar.bytes=264 -Dscalar.json.fields=0 \
+  -Dscalar.unicode=false -Dscalar.nullEvery=0 \
+  -Dscalar.output=target/json-functions.csv
+```
+
+Repeat with 32 and 1024 ASCII padding bytes, and with 264 bytes plus `scalar.unicode=true`
+and `scalar.nullEvery=8`. For multi-member documents, use 32 padding bytes and
+`scalar.json.fields=16` or `64`; repeat the 64-member case with Unicode and NULL/8.
+Raw trial output stays in the local target directory; the tables contain only the final
+Flink/native medians, with no intermediate optimization results.
+
+## JSON_VALUE
+
+`JSON_VALUE(s, 'lax $.user.name')`
+
+| Scenario | Flink (s) | Native (s) | Flink / Native |
+|---|---:|---:|---:|
+| ASCII, 32-byte padding | 1.215 | 0.814 | 1.49x |
+| ASCII, 264-byte padding | 1.862 | 1.282 | 1.45x |
+| ASCII, 1024-byte padding | 3.836 | 2.937 | 1.31x |
+| Unicode, 264-byte padding, NULL/8 | 1.440 | 1.111 | 1.30x |
+| 16 extra members, ASCII, 32-byte padding | 2.748 | 1.756 | 1.57x |
+| 64 extra members, ASCII, 32-byte padding | 8.014 | 4.593 | 1.74x |
+| 64 extra members, Unicode, 32-byte padding, NULL/8 | 6.394 | 3.307 | 1.93x |

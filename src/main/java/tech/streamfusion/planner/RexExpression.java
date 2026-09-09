@@ -589,6 +589,9 @@ final class RexExpression {
     if ("JSON_UNQUOTE".equals(functionName)) {
       return emitCharacterFunction(call, 123, 1, 1);
     }
+    if ("JSON_VALUE".equals(functionName)) {
+      return emitJsonValue(call);
+    }
     if ("SPLIT".equals(functionName)) {
       List<RexNode> args = call.getOperands();
       if (args.size() != 2
@@ -990,6 +993,89 @@ final class RexExpression {
           call.getOperator().getName() + " requires " + min + ".." + max + " character arguments");
     }
     return emitBuiltinCall(call, op);
+  }
+
+  private boolean emitJsonValue(RexCall call) {
+    if (!NativeConfig.allowsIncompatible("JSON_VALUE")) {
+      return reject(
+          incompatibleReason("JSON_VALUE") + "; Jackson number limits depend on buffer history");
+    }
+    if (JsonPathSpec.unicodeVersion() == null) {
+      return reject("JSON_VALUE requires verified JDK 17, 21, 24 or 25 token rules");
+    }
+    List<RexNode> args = call.getOperands();
+    if (call.getType().getSqlTypeName() != SqlTypeName.VARCHAR) {
+      return reject("JSON_VALUE currently supports RETURNING VARCHAR");
+    }
+    String path = jsonPath(args);
+    if (path == null) {
+      return reject("JSON_VALUE requires a literal definite member/index path");
+    }
+    String empty = "NULL";
+    String error = "NULL";
+    String emptyDefault = null;
+    String errorDefault = null;
+    for (int i = 2; i < args.size(); ) {
+      String behavior = jsonSymbol(args.get(i++));
+      String defaultValue = null;
+      if ("DEFAULT".equals(behavior)) {
+        if (i >= args.size()
+            || !(args.get(i++) instanceof RexLiteral literal)
+            || !isCharacter(literal)
+            || literal.isNull()) {
+          return reject("JSON_VALUE DEFAULT requires a non-null character literal");
+        }
+        defaultValue = literal.getValueAs(String.class);
+      } else if (!"NULL".equals(behavior) && !"ERROR".equals(behavior)) {
+        return reject("JSON_VALUE has an unsupported behavior");
+      }
+      if (i >= args.size()) {
+        return reject("JSON_VALUE requires ON EMPTY or ON ERROR after a behavior");
+      }
+      String mode = jsonSymbol(args.get(i++));
+      if ("EMPTY".equals(mode)) {
+        empty = behavior;
+        emptyDefault = defaultValue;
+      } else if ("ERROR".equals(mode)) {
+        error = behavior;
+        errorDefault = defaultValue;
+      } else {
+        return reject("JSON_VALUE has an unsupported behavior target");
+      }
+    }
+    add(KIND_CALL, 141, 7);
+    if (!emit(args.get(0))) {
+      return false;
+    }
+    for (String value : new String[] {path, empty, emptyDefault, error, errorDefault}) {
+      emitString(value);
+    }
+    emitString(JsonPathSpec.unicodeVersion());
+    return true;
+  }
+
+  private static String jsonPath(List<RexNode> args) {
+    if (args.size() < 2
+        || !isCharacter(args.get(0))
+        || !(args.get(1) instanceof RexLiteral literal)
+        || !isCharacter(literal)
+        || literal.isNull()) {
+      return null;
+    }
+    return JsonPathSpec.normalize(literal.getValueAs(String.class));
+  }
+
+  private static String jsonSymbol(RexNode node) {
+    return node instanceof RexLiteral literal
+            && literal.getType().getSqlTypeName() == SqlTypeName.SYMBOL
+            && literal.getValue() instanceof Enum<?> symbol
+        ? symbol.name()
+        : null;
+  }
+
+  private void emitString(String value) {
+    add(KIND_LIT_STRING, strings.size(), 0);
+    strings.add(value);
   }
 
   private static boolean isCharacter(RexNode arg) {

@@ -280,6 +280,42 @@ Character input, including NULL. Matches Flink 2.2.1's actual spelling: slash is
 
 One character argument is native. Valid quoted values are unescaped with Flink/Jackson first-token validation; invalid input is preserved and NULL propagates. A truncated Unicode escape after a valid first token fails the job, matching Flink 2.2.1's uncaught bounds exception. A truncated escape inside the first token is invalid JSON and is preserved.
 
+### JSON_VALUE
+
+Opt-in with `-Dstreamfusion.expression.JSON_VALUE.allowIncompatible=true`; default execution
+stays on Flink because of the parser resource-limit exception described below.
+
+Character input with a non-null literal definite path is native. Supported paths are `$`,
+dot members such as `$.user.name`, bracket members such as `$['user name']`, and nonnegative
+32-bit array indexes such as `$.users[0].name`. Dot names use ASCII letters, digits and
+underscores, with a letter/underscore first; bracket names additionally allow spaces and
+hyphens. Member names are case-sensitive. Wildcards, recursive descent, filters, slices,
+negative indexes, escapes/Unicode in path member names and dynamic paths fall back.
+
+The default return type and explicit `RETURNING VARCHAR(n)` are native; Flink 2.2.1 does
+not truncate this function's result to `n`. Numeric/boolean RETURNING types fall back.
+`NULL`, `ERROR`, and non-null character-literal `DEFAULT` behaviors are supported independently
+for ON EMPTY and ON ERROR. Null, non-character, or non-literal defaults fall back.
+
+The default path mode is **strict**. Missing members, selected JSON nulls, malformed JSON,
+and selected containers invoke ON ERROR in strict mode. In lax mode these invoke ON EMPTY,
+except a document containing the JSON literal `null`, which invokes ON ERROR in either mode.
+SQL NULL input always returns SQL NULL. ERROR ON EMPTY fails directly, even with a default
+ON ERROR. Duplicate members keep the last value, decimal text retains Jackson's BigDecimal
+scale/exponent spelling, and unpaired escaped surrogates become `?` in UTF-8 output.
+
+JSON_VALUE uses native first-document parsing and validate unselected fields too.
+It currently admits JDK 17, 21, 24 and 25, selecting the corresponding Unicode version for
+Jackson's token-termination rules; other JDKs fall back. The profile is selected on the
+JobManager, so TaskManagers must use the same JSON parsing rules. Inputs within Jackson's documented
+limits (1000 nesting levels, 1000 number digits, 20 million UTF-16 string units, 50,000 member-name
+units) are the parity contract. At the numeric resource-limit boundary, Jackson can accept an
+extra digit depending on its recycled input buffer; native parsing models a fresh 4000-character
+reader buffer. That resource-limit behavior is not identical for every JVM buffer history,
+which is why JSON_VALUE requires an explicit compatibility opt-in.
+See the [SQL/JSON parser note](https://github.com/datafusion-contrib/StreamFusion/blob/main/divergences/32-sql-json-definite-paths.md)
+and [per-function benchmarks](../benchmarks/scalar-functions.md).
+
 ### SPLIT
 
 Character input and a literal non-empty separator. The separator is literal text, including regex metacharacters. NULL input returns NULL, empty input returns an empty array, and leading/repeated/trailing separators retain empty tokens. Empty or dynamic separators fall back; the empty form splits UTF-16 surrogate units in Flink.

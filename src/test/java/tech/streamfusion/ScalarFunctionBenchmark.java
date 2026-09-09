@@ -32,6 +32,7 @@ class ScalarFunctionBenchmark {
   private static final int RUNS = Integer.getInteger("scalar.runs", 5);
   private static final boolean UNICODE = Boolean.getBoolean("scalar.unicode");
   private static final int NULL_EVERY = Integer.getInteger("scalar.nullEvery", 0);
+  private static final int JSON_FIELDS = Integer.getInteger("scalar.json.fields", 0);
   private static final String ENGINE =
       System.getProperty("scalar.engine", "both").toLowerCase(Locale.ROOT);
 
@@ -92,7 +93,13 @@ class ScalarFunctionBenchmark {
           .toList();
 
   private static final List<Query> FUNCTIONS =
-      Stream.of(SCALAR_FUNCTIONS, SEARCH_FUNCTIONS, ENCODING_FUNCTIONS, TextTimeFunctions.QUERIES)
+      Stream.of(
+              SCALAR_FUNCTIONS,
+              SEARCH_FUNCTIONS,
+              ENCODING_FUNCTIONS,
+              TextTimeFunctions.QUERIES,
+              List.of(
+                  new Query("JSON_VALUE", "tt_json", "JSON_VALUE(s, 'lax $.user.name')", "STRING")))
           .flatMap(List::stream)
           .toList();
 
@@ -133,7 +140,7 @@ class ScalarFunctionBenchmark {
     List<String> csv =
         new ArrayList<>(
             List.of(
-                "function,input,output_type,payload_bytes,unicode,null_every,rows,engine,trial,seconds"));
+                "function,input,output_type,payload_bytes,json_fields,unicode,null_every,rows,engine,trial,seconds"));
     Path output = Path.of(System.getProperty("scalar.output", "target/scalar-functions.csv"));
     if (output.getParent() != null && !Files.isDirectory(output.getParent())) {
       Files.createDirectories(output.getParent());
@@ -153,11 +160,12 @@ class ScalarFunctionBenchmark {
             csv.add(
                 String.format(
                     Locale.ROOT,
-                    "%s,%s,%s,%d,%s,%d,%d,%s,%d,%.6f",
+                    "%s,%s,%s,%d,%d,%s,%d,%d,%s,%d,%.6f",
                     query.name(),
                     query.input(),
                     query.outputType(),
                     BYTES,
+                    query.input().equals("tt_json") ? JSON_FIELDS : 0,
                     UNICODE,
                     NULL_EVERY,
                     ROWS,

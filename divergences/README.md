@@ -64,6 +64,7 @@ host — verified by the parity harness.
 - [32 — Primary-key level-0 files are written natively and handed to Paimon's writer through its compaction hook](32-paimon-pk-l0-through-the-compactor-hook.md) — Paimon's merge-tree writer sorts rows one at a time and creates level-0 files privately, so the sink merges each bucket's changelog natively (sort by key and arrival, last row wins) and writes the level-0 files itself, then feeds them to the Paimon writer for the bucket through the entry its dedicated compaction operator uses, keeping compaction, changelog production, and recovery Paimon's and needing no native compactor or upstream change.
 - Persistent state now uses a Rust-owned RocksDB instance with Flink-compatible checkpoint and
   rescaling semantics; see [Backends](../docs/backends/index.md).
+- [32 - SQL/JSON definite paths](32-sql-json-definite-paths.md) - scalar path reuse and borrowed string scanning, with Flink-specific modes, number formatting and an explicit opt-in for Jackson's buffer-dependent numeric resource-limit boundary.
 
 ## Resolved: early per-operator transposition (historical)
 

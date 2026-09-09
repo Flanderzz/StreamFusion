@@ -25,6 +25,8 @@ pub(crate) mod to_date;
 
 mod binary_strings;
 mod charset;
+mod json_path;
+mod json_value;
 mod locate;
 mod scalar;
 
@@ -127,6 +129,7 @@ pub(crate) fn function(op: i64, arity: usize) -> Option<ScalarUDF> {
         136 => calendar::function(calendar::Field::DayOfWeek),
         139 => datafusion::functions::string::ltrim().as_ref().clone(),
         140 => datafusion::functions::string::rtrim().as_ref().clone(),
+        141 => json_value::function(),
         _ => return None,
     })
 }
