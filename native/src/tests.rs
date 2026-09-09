@@ -2,6 +2,13 @@ use super::*;
 use arrow::array::BinaryArray;
 
 #[test]
+fn scalar_registry_declines_unknown_and_retired_operations() {
+    for op in [55, 69, 70, 82, 83, 85, 132, 137, 138, i64::MAX] {
+        assert!(crate::flink_functions::function(op, 1).is_none());
+    }
+}
+
+#[test]
 fn max_rowtime_skips_nulls_and_floors_millis() {
     use arrow::array::TimestampNanosecondArray;
     let rowtime: ArrayRef = Arc::new(TimestampNanosecondArray::from(vec![

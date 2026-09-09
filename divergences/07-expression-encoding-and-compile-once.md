@@ -173,3 +173,11 @@ strict NULL propagation applied to `CONCAT` below.
   intermediate quotient can need more digits than fit in a fixed-width `i128` before it is rescaled back
   down. A `CAST` to `DECIMAL` from an exact source (another decimal or an integer) is likewise
   byte-exact; from a float/double source it is approximate (flag-gated).
+
+## Review-driven admission and organization
+
+All scalar registrations added here live in `native/src/flink_functions/mod.rs`, following
+Arroyo's registry pattern. The expression decoder consults that registry once, and all local
+kernels live beneath the same module. Unknown registrations return None; they never select an
+unrelated function. Retired opcodes are not reused. Numeric/date-time operations that predate
+this PR retain their existing decoder behavior.
