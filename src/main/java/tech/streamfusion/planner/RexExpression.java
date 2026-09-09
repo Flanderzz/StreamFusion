@@ -506,24 +506,38 @@ final class RexExpression {
       add(KIND_CAST_DECIMAL, precision * 100 + scale, 1);
       // fall through: the arithmetic op is emitted next as this cast's single child.
     }
+    String functionName = call.getOperator().getName().toUpperCase(Locale.ROOT);
     // PROCTIME() / PROCTIME_MATERIALIZE(): a nullary current-processing-time column.
-    if (call.getOperator().getName().toUpperCase(Locale.ROOT).contains("PROCTIME")) {
+    if (functionName.contains("PROCTIME")) {
       add(KIND_PROCTIME, 0, 0);
       return true;
     }
-    if ("ITEM".equals(call.getOperator().getName())) {
+    if ("ITEM".equals(functionName)) {
       return emitItem(call);
     }
-    if ("COALESCE".equalsIgnoreCase(call.getOperator().getName())) {
+    if ("COALESCE".equals(functionName)) {
       return emitCoalesceAsCase(call.getOperands());
     }
-    if ("TRIM".equalsIgnoreCase(call.getOperator().getName())) {
+    if ("CONCAT".equals(functionName) || "||".equals(functionName)) {
+      return emitStringCall(call, 93, 1, Integer.MAX_VALUE);
+    }
+    if ("CONCAT_WS".equals(functionName)) {
+      return emitStringCall(call, 94, 1, Integer.MAX_VALUE);
+    }
+    int hashOp = hashOpCode(functionName);
+    if (hashOp >= 0) {
+      return emitStringCall(call, hashOp, 1, 1);
+    }
+    if ("SHA2".equals(functionName)) {
+      return emitSha2(call);
+    }
+    if ("TRIM".equals(functionName)) {
       return emitTrim(call);
     }
-    if ("SUBSTRING".equalsIgnoreCase(call.getOperator().getName())) {
+    if ("SUBSTRING".equals(functionName)) {
       return emitSubstring(call.getOperands());
     }
-    if ("REPLACE".equalsIgnoreCase(call.getOperator().getName())) {
+    if ("REPLACE".equals(functionName)) {
       List<RexNode> args = call.getOperands();
       if (args.size() != 3) {
         return reject("REPLACE requires 3 arguments");
@@ -536,7 +550,7 @@ final class RexExpression {
       }
       return true;
     }
-    if ("POSITION".equalsIgnoreCase(call.getOperator().getName())) {
+    if ("POSITION".equals(functionName)) {
       // POSITION(sub IN s) — operands [sub, s]; the native side calls strpos(s, sub).
       List<RexNode> args = call.getOperands();
       if (args.size() != 2) {
@@ -545,32 +559,31 @@ final class RexExpression {
       add(KIND_CALL, 57, 2);
       return emit(args.get(0)) && emit(args.get(1));
     }
-    if ("SPLIT_INDEX".equalsIgnoreCase(call.getOperator().getName())) {
+    if ("SPLIT_INDEX".equals(functionName)) {
       return emitSplitIndex(call.getOperands());
     }
-    if ("REGEXP_EXTRACT".equalsIgnoreCase(call.getOperator().getName())) {
+    if ("REGEXP_EXTRACT".equals(functionName)) {
       return emitRegexpExtract(call.getOperands());
     }
-    if ("DATE_FORMAT".equalsIgnoreCase(call.getOperator().getName())) {
+    if ("DATE_FORMAT".equals(functionName)) {
       return emitDateFormat(call.getOperands());
     }
-    if ("TO_TIMESTAMP_LTZ".equalsIgnoreCase(call.getOperator().getName())) {
+    if ("TO_TIMESTAMP_LTZ".equals(functionName)) {
       return emitToTimestampLtz(call.getOperands());
     }
-    if ("ABS".equalsIgnoreCase(call.getOperator().getName())) {
+    if ("ABS".equals(functionName)) {
       return emitFloatUnary(call, 62);
     }
-    if ("FLOOR".equalsIgnoreCase(call.getOperator().getName())) {
+    if ("FLOOR".equals(functionName)) {
       return emitFloatUnary(call, 63);
     }
-    if ("CEIL".equalsIgnoreCase(call.getOperator().getName())
-        || "CEILING".equalsIgnoreCase(call.getOperator().getName())) {
+    if ("CEIL".equals(functionName) || "CEILING".equals(functionName)) {
       return emitFloatUnary(call, 64);
     }
-    if ("SIGN".equalsIgnoreCase(call.getOperator().getName())) {
+    if ("SIGN".equals(functionName)) {
       return emitFloatUnary(call, 65);
     }
-    if ("REPEAT".equalsIgnoreCase(call.getOperator().getName())) {
+    if ("REPEAT".equals(functionName)) {
       // REPEAT(s, n): repeat s n times — operands [s, n], same order as DataFusion repeat.
       List<RexNode> args = call.getOperands();
       if (args.size() != 2) {
@@ -579,30 +592,28 @@ final class RexExpression {
       add(KIND_CALL, 66, 2);
       return emit(args.get(0)) && emit(args.get(1));
     }
-    if ("LEFT".equalsIgnoreCase(call.getOperator().getName())) {
+    if ("LEFT".equals(functionName)) {
       return emitBoundedSubstr(call, 69);
     }
-    if ("RIGHT".equalsIgnoreCase(call.getOperator().getName())) {
+    if ("RIGHT".equals(functionName)) {
       return emitBoundedSubstr(call, 70);
     }
-    if ("LPAD".equalsIgnoreCase(call.getOperator().getName())) {
+    if ("LPAD".equals(functionName)) {
       return emitPad(call, 82);
     }
-    if ("RPAD".equalsIgnoreCase(call.getOperator().getName())) {
+    if ("RPAD".equals(functionName)) {
       return emitPad(call, 83);
     }
     // Functions whose native result can differ from the host — locale case folding (UPPER/LOWER) and
     // last-ULP transcendental math. They fall back unless the allowIncompatible flag opts them in.
-    Integer incompatUnaryOp =
-        INCOMPATIBLE_UNARY.get(call.getOperator().getName().toUpperCase(Locale.ROOT));
+    Integer incompatUnaryOp = INCOMPATIBLE_UNARY.get(functionName);
     if (incompatUnaryOp != null) {
       return emitIncompatibleUnary(call, incompatUnaryOp);
     }
-    if ("POWER".equalsIgnoreCase(call.getOperator().getName())
-        || "POW".equalsIgnoreCase(call.getOperator().getName())) {
+    if ("POWER".equals(functionName) || "POW".equals(functionName)) {
       return emitIncompatiblePower(call);
     }
-    if ("ROUND".equalsIgnoreCase(call.getOperator().getName())) {
+    if ("ROUND".equals(functionName)) {
       return emitIncompatibleRound(call);
     }
     int fnOp = functionOpCode(call.getOperator().getName());
@@ -697,6 +708,70 @@ final class RexExpression {
       }
     }
     return character && numeric;
+  }
+
+  private boolean emitStringCall(RexCall call, int op, int minArgs, int maxArgs) {
+    List<RexNode> args = call.getOperands();
+    if (args.size() < minArgs || args.size() > maxArgs) {
+      return reject("unsupported arity for " + call.getOperator().getName());
+    }
+    for (RexNode arg : args) {
+      if (arg.getType().getSqlTypeName().getFamily() != SqlTypeFamily.CHARACTER
+          && arg.getType().getSqlTypeName() != SqlTypeName.NULL) {
+        return reject(call.getOperator().getName() + ": only character strings admitted");
+      }
+    }
+    add(KIND_CALL, op, args.size());
+    for (RexNode arg : args) {
+      if (!emit(arg)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private static int hashOpCode(String name) {
+    switch (name) {
+      case "MD5":
+        return 95;
+      case "SHA224":
+        return 96;
+      case "SHA256":
+        return 97;
+      case "SHA384":
+        return 98;
+      case "SHA512":
+        return 99;
+      default:
+        return -1;
+    }
+  }
+
+  private boolean emitSha2(RexCall call) {
+    List<RexNode> args = call.getOperands();
+    if (args.size() != 2) {
+      return reject("SHA2: only the two-argument UTF-8 form is admitted");
+    }
+    RexNode bitLength = args.get(1);
+    if (!(bitLength instanceof RexLiteral) || ((RexLiteral) bitLength).isNull()) {
+      return reject("SHA2 requires a literal bit length of 224, 256, 384, or 512");
+    }
+    int bits;
+    try {
+      bits = ((RexLiteral) bitLength).getValueAs(BigDecimal.class).intValueExact();
+    } catch (ArithmeticException e) {
+      return reject("SHA2 requires a literal bit length of 224, 256, 384, or 512");
+    }
+    int op = hashOpCode("SHA" + bits);
+    if (op < 0) {
+      return reject("SHA2 requires a literal bit length of 224, 256, 384, or 512");
+    }
+    if (args.get(0).getType().getSqlTypeName().getFamily() != SqlTypeFamily.CHARACTER
+        && args.get(0).getType().getSqlTypeName() != SqlTypeName.NULL) {
+      return reject("SHA2: only character strings admitted");
+    }
+    add(KIND_CALL, op, 1);
+    return emit(args.get(0));
   }
 
   private static boolean isDayTimeIntervalMultiply(RexCall call) {

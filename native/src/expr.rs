@@ -368,6 +368,32 @@ pub(crate) fn build_call(
     if op == 92 {
         return datafusion::logical_expr::ScalarUDF::new_from_impl(IntervalScale::new()).call(args);
     }
+    if op == 93 {
+        return datafusion::logical_expr::ScalarUDF::new_from_impl(FlinkConcat::new()).call(args);
+    }
+    if op == 94 {
+        let mut args = args;
+        // Flink accepts a separator alone; DataFusion requires at least one value to concatenate.
+        if args.len() == 1 {
+            args.push(logical_lit(ScalarValue::Utf8(None)));
+        }
+        return datafusion::prelude::Expr::Cast(datafusion::logical_expr::Cast::new(
+            Box::new(datafusion::functions::string::concat_ws().call(args)),
+            DataType::Utf8,
+        ));
+    }
+    let hash = match op {
+        95 => Some(HashAlgorithm::Md5),
+        96 => Some(HashAlgorithm::Sha224),
+        97 => Some(HashAlgorithm::Sha256),
+        98 => Some(HashAlgorithm::Sha384),
+        99 => Some(HashAlgorithm::Sha512),
+        _ => None,
+    };
+    if let Some(algorithm) = hash {
+        return datafusion::logical_expr::ScalarUDF::new_from_impl(FlinkHash::new(algorithm))
+            .call(args);
+    }
     if op == 87 {
         // TO_TIMESTAMP_LTZ(millis, 3): the single operand is epoch millis (the Java side admits only
         // the precision-3 form). Casting Int64 -> Timestamp(ms) reads the int as millis-since-epoch
@@ -486,6 +512,250 @@ pub(crate) fn build_call(
             DataType::Utf8,
         )),
         other => panic!("unsupported expression op: {other}"),
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct FlinkConcat {
+    signature: datafusion::logical_expr::Signature,
+}
+
+impl FlinkConcat {
+    fn new() -> Self {
+        Self {
+            signature: datafusion::logical_expr::Signature::variadic(
+                vec![DataType::Utf8],
+                datafusion::logical_expr::Volatility::Immutable,
+            ),
+        }
+    }
+}
+
+impl datafusion::logical_expr::ScalarUDFImpl for FlinkConcat {
+    fn name(&self) -> &str {
+        "flink_concat"
+    }
+
+    fn signature(&self) -> &datafusion::logical_expr::Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _: &[DataType]) -> datafusion::common::Result<DataType> {
+        Ok(DataType::Utf8)
+    }
+
+    fn invoke_with_args(
+        &self,
+        args: datafusion::logical_expr::ScalarFunctionArgs,
+    ) -> datafusion::common::Result<datafusion::logical_expr::ColumnarValue> {
+        use arrow::buffer::NullBuffer;
+        use datafusion::logical_expr::ColumnarValue;
+
+        // Children are already evaluated. Inspect their validity once, before copying any bytes.
+        let mut nulls = None;
+        for arg in &args.args {
+            match arg {
+                ColumnarValue::Scalar(value) if value.is_null() => {
+                    return Ok(ColumnarValue::Scalar(ScalarValue::Utf8(None)));
+                }
+                ColumnarValue::Array(array) => {
+                    nulls = NullBuffer::union(nulls.as_ref(), array.nulls());
+                }
+                _ => {}
+            }
+        }
+        match nulls {
+            Some(nulls) if nulls.null_count() > 0 => concat_valid_rows(&args.args, nulls),
+            // No mask is needed; return DataFusion's validated buffers without rebuilding them.
+            _ => datafusion::functions::string::concat().invoke_with_args(args),
+        }
+    }
+}
+
+fn concat_valid_rows(
+    args: &[datafusion::logical_expr::ColumnarValue],
+    nulls: arrow::buffer::NullBuffer,
+) -> datafusion::common::Result<datafusion::logical_expr::ColumnarValue> {
+    use arrow::buffer::OffsetBuffer;
+    use datafusion::common::{cast::as_string_array, exec_datafusion_err, exec_err};
+    use datafusion::logical_expr::ColumnarValue;
+
+    enum Input<'a> {
+        Scalar(&'a str),
+        Array(&'a StringArray),
+    }
+
+    if nulls.null_count() == nulls.len() {
+        return Ok(ColumnarValue::Array(Arc::new(StringArray::new_null(
+            nulls.len(),
+        ))));
+    }
+    let inputs = args
+        .iter()
+        .map(|arg| match arg {
+            ColumnarValue::Scalar(ScalarValue::Utf8(Some(s))) => Ok(Input::Scalar(s)),
+            ColumnarValue::Array(array) => {
+                let array = as_string_array(array)?;
+                if array.len() != nulls.len() {
+                    return exec_err!("CONCAT arguments have different lengths");
+                }
+                Ok(Input::Array(array))
+            }
+            _ => exec_err!("CONCAT expects UTF-8 strings"),
+        })
+        .collect::<datafusion::common::Result<Vec<_>>>()?;
+    let mut offsets = Vec::with_capacity(nulls.len() + 1);
+    let mut values = Vec::new();
+    offsets.push(0i32);
+    for row in 0..nulls.len() {
+        if nulls.is_valid(row) {
+            for input in &inputs {
+                let value = match input {
+                    Input::Scalar(s) => s,
+                    Input::Array(array) => array.value(row),
+                };
+                values.extend_from_slice(value.as_bytes());
+            }
+        }
+        offsets.push(
+            i32::try_from(values.len()).map_err(|_| {
+                exec_datafusion_err!("CONCAT output exceeds the UTF-8 offset limit")
+            })?,
+        );
+    }
+    // SAFETY: whole UTF-8 strings are appended only for valid rows. Offsets start at zero,
+    // stay within the checked i32 range and end at values.len(); the mask has one bit per row.
+    let result = unsafe {
+        StringArray::new_unchecked(
+            OffsetBuffer::new(offsets.into()),
+            values.into(),
+            Some(nulls),
+        )
+    };
+    Ok(ColumnarValue::Array(Arc::new(result)))
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+enum HashAlgorithm {
+    Md5,
+    Sha224,
+    Sha256,
+    Sha384,
+    Sha512,
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct FlinkHash {
+    algorithm: HashAlgorithm,
+    signature: datafusion::logical_expr::Signature,
+}
+
+impl FlinkHash {
+    fn new(algorithm: HashAlgorithm) -> Self {
+        Self {
+            algorithm,
+            signature: datafusion::logical_expr::Signature::exact(
+                vec![DataType::Utf8],
+                datafusion::logical_expr::Volatility::Immutable,
+            ),
+        }
+    }
+}
+
+impl datafusion::logical_expr::ScalarUDFImpl for FlinkHash {
+    fn name(&self) -> &str {
+        match self.algorithm {
+            HashAlgorithm::Md5 => "flink_md5",
+            HashAlgorithm::Sha224 => "flink_sha224",
+            HashAlgorithm::Sha256 => "flink_sha256",
+            HashAlgorithm::Sha384 => "flink_sha384",
+            HashAlgorithm::Sha512 => "flink_sha512",
+        }
+    }
+
+    fn signature(&self) -> &datafusion::logical_expr::Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, arg_types: &[DataType]) -> datafusion::common::Result<DataType> {
+        if arg_types.len() != 1 {
+            return datafusion::common::plan_err!("{} expects exactly one argument", self.name());
+        }
+        Ok(DataType::Utf8)
+    }
+
+    fn invoke_with_args(
+        &self,
+        args: datafusion::logical_expr::ScalarFunctionArgs,
+    ) -> datafusion::common::Result<datafusion::logical_expr::ColumnarValue> {
+        let [input] = args.args.as_slice() else {
+            return datafusion::common::exec_err!("{} expects exactly one argument", self.name());
+        };
+        match self.algorithm {
+            HashAlgorithm::Md5 => hash_utf8::<md5::Md5>(input),
+            HashAlgorithm::Sha224 => hash_utf8::<sha2::Sha224>(input),
+            HashAlgorithm::Sha256 => hash_utf8::<sha2::Sha256>(input),
+            HashAlgorithm::Sha384 => hash_utf8::<sha2::Sha384>(input),
+            HashAlgorithm::Sha512 => hash_utf8::<sha2::Sha512>(input),
+        }
+    }
+}
+
+fn hash_utf8<D: sha2::Digest>(
+    input: &datafusion::logical_expr::ColumnarValue,
+) -> datafusion::common::Result<datafusion::logical_expr::ColumnarValue> {
+    use arrow::buffer::OffsetBuffer;
+    use datafusion::common::{cast::as_string_array, exec_datafusion_err, exec_err};
+    use datafusion::logical_expr::ColumnarValue;
+
+    let width = <D as sha2::Digest>::output_size() * 2;
+    match input {
+        ColumnarValue::Scalar(ScalarValue::Utf8(None) | ScalarValue::Null) => {
+            Ok(ColumnarValue::Scalar(ScalarValue::Utf8(None)))
+        }
+        ColumnarValue::Scalar(ScalarValue::Utf8(Some(value))) => {
+            let mut hex = Vec::with_capacity(width);
+            append_digest_hex::<D>(value, &mut hex);
+            let hex = String::from_utf8(hex).map_err(|e| exec_datafusion_err!("{e}"))?;
+            Ok(ColumnarValue::Scalar(ScalarValue::Utf8(Some(hex))))
+        }
+        ColumnarValue::Array(array) => {
+            let strings = as_string_array(array)?;
+            let capacity = (strings.len() - strings.null_count())
+                .checked_mul(width)
+                .filter(|size| *size <= i32::MAX as usize)
+                .ok_or_else(|| {
+                    exec_datafusion_err!("Hash output exceeds the UTF-8 offset limit")
+                })?;
+            let mut offsets = Vec::with_capacity(strings.len() + 1);
+            let mut values = Vec::with_capacity(capacity);
+            offsets.push(0i32);
+            for value in strings.iter() {
+                if let Some(value) = value {
+                    append_digest_hex::<D>(value, &mut values);
+                }
+                offsets.push(values.len() as i32);
+            }
+            // SAFETY: hex is ASCII; each non-NULL row writes exactly `width` bytes. The checked
+            // total fits i32, offsets delimit those bytes, and the input mask has the same length.
+            let result = unsafe {
+                StringArray::new_unchecked(
+                    OffsetBuffer::new(offsets.into()),
+                    values.into(),
+                    strings.nulls().cloned(),
+                )
+            };
+            Ok(ColumnarValue::Array(Arc::new(result)))
+        }
+        _ => exec_err!("Hash input must be a UTF-8 string"),
+    }
+}
+
+fn append_digest_hex<D: sha2::Digest>(value: &str, output: &mut Vec<u8>) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for byte in D::digest(value.as_bytes()) {
+        output.push(HEX[(byte >> 4) as usize]);
+        output.push(HEX[(byte & 0xf) as usize]);
     }
 }
 

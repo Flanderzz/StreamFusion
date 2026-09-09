@@ -45,6 +45,47 @@ class ThroughputBenchmark {
   }
 
   @Test
+  void stringConcatThroughput() throws Exception {
+    compareStringFunctions(
+        "String concatenation (CONCAT / CONCAT_WS)",
+        "CREATE TABLE sink (a STRING, b STRING) WITH ('connector' = 'blackhole')",
+        "INSERT INTO sink SELECT CONCAT(s, ':', s, ':', s), CONCAT_WS(':', s, s, s) FROM f");
+  }
+
+  @Test
+  void stringHashThroughput() throws Exception {
+    compareStringFunctions(
+        "String hashes (MD5 / SHA-2)",
+        "CREATE TABLE sink (a STRING, b STRING, c STRING, d STRING, e STRING, f STRING)"
+            + " WITH ('connector' = 'blackhole')",
+        "INSERT INTO sink SELECT MD5(s), SHA224(s), SHA256(s), SHA384(s), SHA512(s),"
+            + " SHA2(s, 256) FROM f");
+  }
+
+  @Test
+  void nullableStringConcatThroughput() throws Exception {
+    compareStringFunctions(
+        "Nullable string concatenation (1 KiB prefix, 75% NULL results)",
+        "CREATE TABLE sink (a STRING) WITH ('connector' = 'blackhole')",
+        "INSERT INTO sink SELECT CONCAT('"
+            + "x".repeat(1024)
+            + "', s, CASE WHEN v < 75 THEN CAST(NULL AS STRING) ELSE s END) FROM f");
+  }
+
+  private static void compareStringFunctions(String label, String sinkDdl, String insertSql)
+      throws Exception {
+    TableEnvironment tEnv = filterEnvironment();
+    tEnv.executeSql(sinkDdl);
+    String plan = NativePlanner.explain(tEnv, insertSql);
+    if (!plan.contains("NativeCalc")
+        || !plan.contains("RowDataToArrow")
+        || !plan.contains("ArrowToRowData")) {
+      throw new IllegalStateException("string benchmark must include both transposes: " + plan);
+    }
+    compare(label, ThroughputBenchmark::filterEnvironment, sinkDdl, insertSql);
+  }
+
+  @Test
   void tumblingThroughput() throws Exception {
     compare(
         "Tumbling (1s SUM)",

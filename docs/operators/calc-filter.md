@@ -18,9 +18,79 @@ The rest of this page is the exact admission list: what's unconditionally native
 default via a JVM upcall (and why that's not a fallback), what's opt-in, and what's a straight
 fallback.
 
-- **Unsupported function/operator** outside the admitted set (e.g. `MD5`; `CONCAT`, for a
-  NULL-semantics divergence from Flink) is a plain fallback — there's no partial evaluation of an
-  expression tree, so one unknown function anywhere in it declines the whole `Calc`.
+- **Unsupported function/operator** outside the admitted set (e.g. `SHA1`) is a plain fallback —
+  there's no partial evaluation of an expression tree, so one unknown function anywhere in it
+  declines the whole `Calc`.
+
+## String concatenation and hashes
+
+These functions run entirely in Rust by default, in projections, predicates, and nested expressions:
+
+| Function | Native behavior and admission |
+|---|---|
+| `CONCAT(s, ...)`, `s \|\| t` | Character-string arguments; any NULL argument makes the result NULL. Empty strings are preserved. |
+| `CONCAT_WS(separator, ...)` | A literal or column separator; a NULL separator makes the result NULL. NULL values are skipped, empty strings are preserved, and no values or all-NULL values produce an empty string. |
+| `MD5(s)` | Lowercase hexadecimal MD5 of the string's UTF-8 bytes; NULL input produces NULL. |
+| `SHA224(s)`, `SHA256(s)`, `SHA384(s)`, `SHA512(s)` | Lowercase hexadecimal SHA-2 of the UTF-8 bytes; NULL input produces NULL. |
+| `SHA2(s, bit_length)` | The two-argument form with a literal bit length of 224, 256, 384, or 512; equivalent to the corresponding fixed-width function. |
+
+A non-literal or NULL `SHA2` bit length, and other bit lengths, are not admitted. A dynamic bit length
+falls back; literal values are checked exactly, including `BIGINT`, without truncating to 32 bits.
+For example, `SHA2(s, CAST(4294967520 AS BIGINT))` falls back and retains Flink's unsupported-algorithm
+failure instead of being treated as SHA-224. Flink 2.2 does not expose hash
+overloads with an explicit character set. Binary/collection concatenation is outside this
+character-string admission.
+
+`CONCAT` computes Flink's strict NULL propagation from the input validity bitmaps, without
+re-evaluating its arguments. Batches without NULL results use DataFusion's kernel directly; batches
+with NULL results append only surviving rows. Neither path revalidates the concatenated UTF-8
+payload. `CONCAT_WS` delegates to DataFusion. Hashes use the same released MD5/SHA-2 libraries as
+DataFusion, writing lowercase hex directly into presized UTF-8 Arrow buffers without intermediate
+binary or string-view columns or per-row heap allocations. See [string copy reduction](../optimizations/string-copy-reduction.md).
+SQL parity tests cover NULLs, empty strings, embedded zero bytes, Unicode, long inputs, nested
+calls, filters, valid BIGINT widths, and dynamic or oversized bit-length fallback.
+
+The corresponding throughput diagnostics compare stock Flink against native execution with a
+rowwise generated source, both row/Arrow transposes, and a blackhole sink. They assert those native
+plan boundaries and use one warmup followed by the best of three complete job runs at parallelism 1.
+They are function diagnostics, separate from the Nexmark headline benchmark:
+
+```sh
+SF_BENCHMARK=true SF_ROWS=2000000 mvn -pl :streamfusion-runtime test -Pbench \
+  '-Dnative.cargo.args=build --release --features mimalloc' \
+  '-Dtest=ThroughputBenchmark#stringConcatThroughput+stringHashThroughput'
+
+SF_BENCHMARK=true SF_ROWS=2000000 mvn -pl :streamfusion-runtime test -Pbench \
+  '-Dnative.cargo.args=build --release --features mimalloc' \
+  '-Dtest=ThroughputBenchmark#nullableStringConcatThroughput'
+```
+
+Measured on Apple M4 Pro with JDK 17 on 2026-09-08, using the core-only release build above and
+2 million rows whose strings cycle through `s0` to `s7`. The nullable diagnostic adds a 1 KiB
+literal prefix and a CASE argument that makes 75% of results NULL. The two commands run in
+separate JVMs:
+
+| Diagnostic | Flink | StreamFusion | Throughput ratio |
+|---|---:|---:|---:|
+| `CONCAT` and `CONCAT_WS` projections | 0.566 s | 0.733 s | 0.77x |
+| MD5 and SHA-2 projections | 4.141 s | 2.211 s | 1.87x |
+| Nullable `CONCAT`, 1 KiB prefix | 0.390 s | 0.613 s | 0.64x |
+
+The short-concatenation ratio changed from 0.94x in the first patchset to 0.77x here,
+but native time was effectively unchanged (0.736 s to 0.733 s). Flink's baseline moved
+from 0.691 s to 0.566 s, an approximately 18% decrease. The ratio change is within
+the observed run-to-run baseline variance, not evidence of a native regression;
+these separate runs do not establish a precise change in relative performance.
+
+Both standalone concatenation cases remain slower than Flink. Their admission is useful for keeping
+larger queries fully native; these results retain the regressions alongside the hashing gain.
+Against the previous native implementation on the same upstream revision, hashing throughput
+improved by about 47% and nullable concatenation by about 16%; short concatenation was essentially
+unchanged. The [optimization ledger](../optimizations/string-copy-reduction.md#calc-construct-only-the-final-string-buffers)
+records the before/after native times.
+Both engines are timed through planning, source generation, and job completion; the native path
+also includes both transposes. These are end-to-end diagnostics on this machine rather than
+isolated kernel timings.
 
 ## Declared-type guard
 
