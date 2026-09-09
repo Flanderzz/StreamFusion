@@ -73,8 +73,10 @@ class ScalarFunctionBenchmark {
               Stream.of("tinyint", "smallint", "integer", "bigint")
                   .flatMap(
                       type ->
-                          Stream.of(new Query("BIN_" + type.toUpperCase(Locale.ROOT), type, "BIN(n)"))),
-              Stream.<Query>of())
+                          Stream.of(
+                              new Query("BIN_" + type.toUpperCase(Locale.ROOT), type, "BIN(n)"),
+                              new Query("HEX_" + type.toUpperCase(Locale.ROOT), type, "HEX(n)"))),
+              Stream.of(new Query("HEX_STRING", "text", "HEX(s)")))
           .toList();
 
   private static final List<Query> FUNCTIONS =

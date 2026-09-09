@@ -96,6 +96,46 @@ fn evaluate_scalar_call(
 }
 
 #[test]
+fn encoding_integer_arrays_preserve_nulls_and_long_bits() {
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new("n", DataType::Int64, true)])),
+        vec![Arc::new(Int64Array::from(vec![
+            Some(99),
+            Some(0),
+            Some(-1),
+            Some(i64::MIN),
+            Some(i64::MAX),
+            None,
+        ]))],
+    )
+    .unwrap()
+    .slice(1, 5);
+    let binary = evaluate_scalar_call(104, vec![logical_col("n")], &batch);
+    assert_eq!(
+        binary.as_any().downcast_ref::<StringArray>().unwrap(),
+        &StringArray::from(vec![
+            Some("0".to_string()),
+            Some("1".repeat(64)),
+            Some(format!("1{}", "0".repeat(63))),
+            Some("1".repeat(63)),
+            None,
+        ])
+    );
+    let hex = evaluate_scalar_call(105, vec![logical_col("n")], &batch);
+    hex.to_data().validate_full().unwrap();
+    assert_eq!(
+        hex.as_any().downcast_ref::<StringArray>().unwrap(),
+        &StringArray::from(vec![
+            Some("0"),
+            Some("FFFFFFFFFFFFFFFF"),
+            Some("8000000000000000"),
+            Some("7FFFFFFFFFFFFFFF"),
+            None,
+        ])
+    );
+}
+
+#[test]
 fn string_search_locate_handles_slices_scalars_and_empty_batches() {
     let batch = RecordBatch::try_new(
         Arc::new(Schema::new(vec![

@@ -1,7 +1,7 @@
 # Allocation discipline on the per-row paths
 
 **Applies to:** windowed/session aggregation, [GROUP BY](../operators/group-by.md), [Top-N](../operators/top-n.md),
-the updating join, `OVER`, deduplication
+the updating join, `OVER`, deduplication, [Calc string encoding](../benchmarks/scalar-functions.md#hex)
 
 Beyond the arrow-row and mini-batch mechanisms covered elsewhere, a series of targeted fixes removed
 allocations and redundant per-row work from specific hot loops: reuse instead of realloc, move
@@ -30,6 +30,16 @@ kernel instead of a row loop at all.
 - The session aggregator segments each key's rows into gap-connected runs so a run pays one value
   slice and one accumulator update, with the merge scan a bounded O(log n) range probe (**9.4x** on
   dense sessions, `62dffda`).
+
+## String encoding output buffers
+
+### HEX
+
+Integer HEX writes uppercase digits from a bounded 16-byte stack buffer, following Comet's integer encoding pattern. String HEX checks output sizes and writes uppercase digits directly into the final Arrow buffer, avoiding temporary strings and a separate uppercase array. Arrow's safe constructor validates the result.
+
+Output offsets are checked against Arrow Utf8's 32-bit limit before allocating the final values buffer. NULL rows consume no bytes and reuse input validity.
+
+[Per-function complete-job results](../benchmarks/scalar-functions.md#hex) include both transposes.
 
 ## Columnar-kernel internal state where it fits
 

@@ -12,6 +12,8 @@ use std::sync::Arc;
 mod binary_strings;
 mod locate;
 
+const HEX_DIGITS: &[u8; 16] = b"0123456789ABCDEF";
+
 pub(crate) fn function(op: i64, arity: usize) -> Option<ScalarUDF> {
     Some(match op {
         100 => datafusion::functions::string::starts_with()
@@ -25,6 +27,18 @@ pub(crate) fn function(op: i64, arity: usize) -> Option<ScalarUDF> {
             vec![DataType::Int64],
             DataType::Utf8,
             binary_strings::bin,
+        ),
+        105 => udf(
+            "flink_hex_int",
+            vec![DataType::Int64],
+            DataType::Utf8,
+            binary_strings::hex_int,
+        ),
+        106 => udf(
+            "flink_hex_string",
+            vec![DataType::Utf8],
+            DataType::Utf8,
+            |args| binary_strings::encode(args, false),
         ),
         _ => return None,
     })

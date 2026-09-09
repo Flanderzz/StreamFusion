@@ -135,3 +135,20 @@ not subtracted from function times because their result types and lengths can di
 | `BIN_INTEGER` | NULL/8 | 0.332 | 0.464 | 0.71x |
 | `BIN_BIGINT` | NULL/8 | 0.325 | 0.468 | 0.69x |
 
+## HEX
+
+`HEX_STRING`: `HEX(s)`; `HEX_TINYINT`: `HEX(n)`; `HEX_SMALLINT`: `HEX(n)`; `HEX_INTEGER`: `HEX(n)`; `HEX_BIGINT`: `HEX(n)`
+
+| Case | Input | Flink (s) | Native (s) | Flink / native |
+|---|---|---:|---:|---:|
+| `HEX_TINYINT` | non-null | 0.335 | 0.436 | 0.77x |
+| `HEX_SMALLINT` | non-null | 0.338 | 0.432 | 0.78x |
+| `HEX_INTEGER` | non-null | 0.344 | 0.430 | 0.80x |
+| `HEX_BIGINT` | non-null | 0.332 | 0.440 | 0.75x |
+| `HEX_STRING` | ASCII, 264-byte budget | 1.348 | 1.057 | 1.27x |
+| `HEX_TINYINT` | NULL/8 | 0.321 | 0.438 | 0.73x |
+| `HEX_SMALLINT` | NULL/8 | 0.325 | 0.434 | 0.75x |
+| `HEX_INTEGER` | NULL/8 | 0.328 | 0.434 | 0.76x |
+| `HEX_BIGINT` | NULL/8 | 0.314 | 0.428 | 0.73x |
+| `HEX_STRING` | Unicode, 264-byte budget, NULL/8 | 1.857 | 1.103 | 1.68x |
+

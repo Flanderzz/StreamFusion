@@ -155,4 +155,154 @@ final class StringFunctionTestInputs {
     return tEnv;
   }
 
+  static TableEnvironment text() {
+    StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+    env.setParallelism(1);
+    StreamTableEnvironment tables = StreamTableEnvironment.create(env);
+    String[] strings = {
+      "",
+      "aBC dEF",
+      "a_B-C.9ABC",
+      "\u00e9aBC\u4e2dDEF",
+      "a\ud83d\ude00BC",
+      "e\u0301ABC",
+      "a\u0000b",
+      " abba ",
+      "\tab\r\n",
+      "~*+% -_.",
+      "%",
+      "%GG",
+      "%A",
+      "%C3%28",
+      "%ED%A0%80",
+      "%F0%9F%98%80",
+      "%00+%2B",
+      "abc".repeat(4097),
+      null,
+      "abba"
+    };
+    String[] from = {
+      "",
+      "ab",
+      "aab",
+      "\u00e9\u4e2d",
+      "\ud83d\ude00a",
+      "e\u0301",
+      "\u0000",
+      " ab",
+      "\t\n",
+      null,
+      "QUERY",
+      "HOST",
+      "PATH",
+      "REF",
+      "PROTOCOL",
+      "FILE",
+      "AUTHORITY",
+      "USERINFO",
+      null,
+      "ab"
+    };
+    String[] to = {
+      "",
+      "x",
+      "123",
+      "\ud83d\ude00x",
+      "xy",
+      "X",
+      "Z",
+      "z",
+      "",
+      "a",
+      "a.b",
+      "a",
+      "missing",
+      "[",
+      "",
+      "a",
+      "a",
+      "a",
+      null,
+      null
+    };
+    long[] positions = {
+      0,
+      1,
+      2,
+      3,
+      3,
+      -1,
+      1,
+      2,
+      1,
+      2,
+      Integer.MIN_VALUE,
+      Integer.MAX_VALUE,
+      Long.MIN_VALUE,
+      Long.MAX_VALUE,
+      4294967297L,
+      1,
+      2,
+      3,
+      1,
+      2
+    };
+    List<Row> rows = new ArrayList<>();
+    for (int id = 0; id < strings.length; id++) {
+      Long n =
+          id == 18 ? null : id == 0 ? Long.MIN_VALUE : id == 1 ? Long.MAX_VALUE : (long) (id - 5);
+      Integer i =
+          id == 18 ? null : id == 0 ? Integer.MIN_VALUE : id == 1 ? Integer.MAX_VALUE : id % 6 - 1;
+      String url =
+          id == 18
+              ? null
+              : id % 4 == 0
+                  ? "invalid"
+                  : id % 4 == 1
+                      ? "file:/tmp/a?x=1"
+                      : "https://user:pass@example.com:8080/a%20b?a=1&a=2&a.b=z#anchor";
+      rows.add(
+          Row.of(
+              id,
+              strings[id],
+              from[id],
+              to[id],
+              n,
+              i,
+              id == 18 ? null : positions[id],
+              id == 18 ? null : id % 2 == 0,
+              id == 18 ? null : new BigDecimal(id + ".125"),
+              url));
+    }
+    tables.createTemporaryView(
+        "texts",
+        env.fromData(
+            rows,
+            Types.ROW_NAMED(
+                new String[] {"id", "s", "f", "t", "n", "i", "p", "b", "d", "u"},
+                Types.INT,
+                Types.STRING,
+                Types.STRING,
+                Types.STRING,
+                Types.LONG,
+                Types.INT,
+                Types.LONG,
+                Types.BOOLEAN,
+                Types.BIG_DEC,
+                Types.STRING)),
+        Schema.newBuilder()
+            .column("id", DataTypes.INT())
+            .column("s", DataTypes.STRING())
+            .column("f", DataTypes.STRING())
+            .column("t", DataTypes.STRING())
+            .column("n", DataTypes.BIGINT())
+            .column("i", DataTypes.INT())
+            .column("p", DataTypes.BIGINT())
+            .column("b", DataTypes.BOOLEAN())
+            .column("d", DataTypes.DECIMAL(20, 3))
+            .column("u", DataTypes.STRING())
+            .build());
+    return tables;
+  }
+
 }
