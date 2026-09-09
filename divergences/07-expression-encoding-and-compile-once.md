@@ -259,6 +259,10 @@ so the existing all-or-nothing admission rule keeps its consumers on Flink as we
 
 Fuses Flink's timestamp-to-day conversion and integer Julian-calendar extraction in one Arrow primitive-array pass. Epoch milliseconds divide towards zero, including before 1970. The integer algorithm also preserves Flink's overflow behavior across the full DATE range.
 
+### WEEK
+
+Uses Flink's integer ISO-week calculation in the shared single-pass calendar kernel. Tests span leap days, year boundaries, and pre-epoch fractions. DATE inputs retain Flink's integer arithmetic.
+
 ### FLOOR (timestamp, deferred)
 
 Temporal FLOOR is withdrawn: its millisecond output does not satisfy downstream native

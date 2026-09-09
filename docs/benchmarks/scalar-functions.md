@@ -368,3 +368,12 @@ not subtracted from function times because their result types and lengths can di
 | `QUARTER` | TIMESTAMP(9), non-null | 0.368 | 0.434 | 0.85x |
 | `QUARTER` | TIMESTAMP(9), NULL/8 | 0.378 | 0.460 | 0.82x |
 
+## WEEK
+
+`WEEK`: `WEEK(ts)`
+
+| Case | Input | Flink (s) | Native (s) | Flink / native |
+|---|---|---:|---:|---:|
+| `WEEK` | TIMESTAMP(9), non-null | 0.367 | 0.452 | 0.81x |
+| `WEEK` | TIMESTAMP(9), NULL/8 | 0.385 | 0.472 | 0.81x |
+

@@ -1704,6 +1704,7 @@ final class RexExpression {
     int calendarOp =
         switch (calendarUnit) {
           case "QUARTER" -> 133;
+          case "WEEK" -> 134;
           default -> -1;
         };
     if (calendarOp >= 0
