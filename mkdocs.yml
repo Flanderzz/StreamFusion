@@ -107,7 +107,9 @@ nav:
   - Memory management: memory-management.md
   - Native metric parity: metrics-parity.md
   - Upstream Flink suite: upstream-flink-suite.md
-  - Benchmarks: benchmarks.md
+  - Benchmarks:
+      - benchmarks.md
+      - Scalar functions: benchmarks/scalar-functions.md
   - Optimizations:
       - optimizations/index.md
       - Foundational bets: optimizations/foundational-bets.md

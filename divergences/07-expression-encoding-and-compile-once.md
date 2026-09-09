@@ -112,10 +112,12 @@ strict NULL propagation applied to `CONCAT` below.
   literal, so the operand must be a true double (e.g. `v - 25.5E0`) to route.
 - **`LIKE`/`REPLACE`/`REVERSE`:** `LIKE` maps to DataFusion's `Expr::Like` (case-sensitive, no
   explicit `ESCAPE` — a 3-operand `LIKE … ESCAPE` falls back); `REPLACE(s, from, to)` to `replace`;
-  `REVERSE` to `reverse` (cast `Utf8View`→`Utf8` like `SUBSTRING`). ASCII-identical to the host.
+  `REVERSE` to `reverse` (cast `Utf8View`→`Utf8`). ASCII-identical to the host.
 - **`CHAR_LENGTH`** maps to DataFusion's `character_length` (Comet marks `Length` compatible). It
   counts Unicode code points; a supplementary character (e.g. an emoji) is one code point on both
   sides, so ASCII and BMP text are bit-identical.
+- **`STARTSWITH`:** Character operands delegate to DataFusion's starts_with through the shared scalar registry. Flink materializes both operands before comparing UTF-8 bytes, so prefix matching does not have the representation-dependent ordering problem of string extrema. Scalar needles stay scalar. Standalone regressions remain documented; verified expressions can stay in a composed native Calc.
+- **`TO_BASE64`:** Uses DataFusion's standard padded base64 codec, computes output offsets with checked sizes, and writes directly into the final Arrow buffer. Unlike Spark's MIME form modeled by Comet, Flink does not wrap lines. Arrow's safe constructor validates the result. See the Calc page for admission, semantics, and individual measurements.
 - **`UPPER`/`LOWER` fall back by default** (opt-in via the flag above; asserted by a test). Native (Rust) case
   folding is locale-independent Unicode, but the JVM's `String.toUpperCase()/toLowerCase()` is
   locale-sensitive (e.g. Turkish dotless-i), so non-ASCII results can silently differ. DataFusion
@@ -173,6 +175,38 @@ strict NULL propagation applied to `CONCAT` below.
   intermediate quotient can need more digits than fit in a fixed-width `i128` before it is rescaled back
   down. A `CAST` to `DECIMAL` from an exact source (another decimal or an integer) is likewise
   byte-exact; from a float/double source it is approximate (flag-gated).
+
+## Further text and calendar scalar functions
+
+The registration follows Arroyo's DataFusion ScalarUDF structure. Kernels follow Comet's
+scalar/array and Arrow-buffer patterns; the released Flink 2.2.1 runtime determines semantics.
+Relevant references include Comet's `string_funcs/split.rs`, `string_funcs/unbase64.rs`,
+`datetime_funcs/extract_date_part.rs`, and `datetime_funcs/timestamp_trunc.rs`. These references
+are architectural guidance; dependencies remain released crates and Maven artifacts. No new
+JNI callback or row/Arrow conversion is introduced. See the Calc coverage page for the admitted
+shapes, differential tests, and individual end-to-end measurements.
+
+### TO_TIMESTAMP (deferred)
+
+Native parsing is withdrawn. Its millisecond timestamp result can represent expanded years,
+but downstream native windows and keyed operators assume nanoseconds. A standalone parsing
+benchmark does not establish safe composition. The expression encoder declines the function,
+so the existing all-or-nothing admission rule keeps its consumers on Flink as well.
+
+### FLOOR (timestamp, deferred)
+
+Temporal FLOOR is withdrawn: its millisecond output does not satisfy downstream native
+operators' nanosecond contract. Rejecting the temporal expression keeps projection, grouping,
+formatting, comparison, and computed-rowtime window consumers on Flink. Numeric FLOOR retains
+its existing native implementation.
+
+### CEIL (timestamp, deferred)
+
+Temporal CEIL/CEILING is withdrawn for the same timestamp-unit mismatch as FLOOR. The shared
+rounding kernel, resolution encoder, and millisecond-only extraction/coercion guards are
+removed with the last producer that required them. Existing numeric rounding is unaffected.
+The change stays within expression admission; it adds no timestamp metadata or checks to
+physical Calc operators or row/Arrow conversion.
 
 ## Review-driven admission and organization
 

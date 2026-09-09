@@ -541,6 +541,9 @@ final class RexExpression {
     if ("COALESCE".equals(functionName)) {
       return emitCoalesceAsCase(call.getOperands());
     }
+    if ("STARTSWITH".equals(functionName)) {
+      return emitCharacterFunction(call, 100, 2, 2);
+    }
     if ("CONCAT".equals(functionName) || "||".equals(functionName)) {
       return emitStringCall(call, 93, 1, Integer.MAX_VALUE);
     }
@@ -735,6 +738,30 @@ final class RexExpression {
       }
     }
     return character && numeric;
+  }
+
+  private boolean emitCharacterFunction(RexCall call, int op, int min, int max) {
+    if (call.getOperands().size() < min
+        || call.getOperands().size() > max
+        || call.getOperands().stream().anyMatch(arg -> !isCharacter(arg))) {
+      return reject(
+          call.getOperator().getName() + " requires " + min + ".." + max + " character arguments");
+    }
+    return emitBuiltinCall(call, op);
+  }
+
+  private static boolean isCharacter(RexNode arg) {
+    return arg.getType().getSqlTypeName().getFamily() == SqlTypeFamily.CHARACTER;
+  }
+
+  private boolean emitBuiltinCall(RexCall call, int op) {
+    add(KIND_CALL, op, call.getOperands().size());
+    for (RexNode arg : call.getOperands()) {
+      if (!emit(arg)) {
+        return false;
+      }
+    }
+    return true;
   }
 
   private boolean emitStringCall(RexCall call, int op, int minArgs, int maxArgs) {

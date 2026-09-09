@@ -178,6 +178,25 @@ any other pair not listed above.
 The old `decimalArithmetic.approximate` flag is retired entirely: the float/double→`DECIMAL` cast it
 used to gate now runs host-exact through the cast upcall above.
 
+## String and calendar functions
+
+The following list describes admission and fallback. Per-function Flink/native timings and
+workload details are on the [scalar function benchmark page](../benchmarks/scalar-functions.md).
+
+Admission requires verified semantics; it does not promise a speedup for every isolated query.
+Retained coverage with slower standalone results is a precursor to the concrete optimizations
+in this PR: scalar parameter reuse, direct output construction, primitive extrema, and shared
+text scans. Cheap expressions can also remain inside a larger native Calc without another
+host boundary. This is not a measured whole-query speedup claim. STARTSWITH/ENDSWITH remain
+native for this composition benefit; their standalone regressions are documented in the
+benchmark results and do not disable otherwise verified expressions.
+
+### STARTSWITH
+
+Two character arguments, literal or column. Matches a literal prefix, including Unicode and
+empty strings; any NULL argument returns NULL. Wildcard characters have no special meaning.
+Binary operands fall back.
+
 ## Case folding & regex
 
 **Native by default — not a fallback.** `UPPER`/`LOWER` and `REGEXP_EXTRACT` run natively by default
@@ -233,7 +252,7 @@ implementation can't handle, even though the function itself is supported:
 
 - An **unsupported literal type** anywhere in the expression.
 - **`SUBSTRING`** — a non-literal or out-of-range start/length.
-- **`LEFT`/`RIGHT`/`REPEAT`/`LPAD`/`RPAD`** — a non-literal or negative count.
+- **`LEFT`/`RIGHT`/`LPAD`/`RPAD`** — a non-literal or negative count.
 - **`TRIM`** — anything other than the default `BOTH`-whitespace form.
 - **`POSITION`** — a `FROM` start offset.
 - **`SPLIT_INDEX`** — an empty or non-literal separator.
