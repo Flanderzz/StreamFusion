@@ -76,6 +76,12 @@ separate JVMs:
 | MD5 and SHA-2 projections | 4.141 s | 2.211 s | 1.87x |
 | Nullable `CONCAT`, 1 KiB prefix | 0.390 s | 0.613 s | 0.64x |
 
+The short-concatenation ratio changed from 0.94x in the first patchset to 0.77x here,
+but native time was effectively unchanged (0.736 s to 0.733 s). Flink's baseline moved
+from 0.691 s to 0.566 s, an approximately 18% decrease. The ratio change is within
+the observed run-to-run baseline variance, not evidence of a native regression;
+these separate runs do not establish a precise change in relative performance.
+
 Both standalone concatenation cases remain slower than Flink. Their admission is useful for keeping
 larger queries fully native; these results retain the regressions alongside the hashing gain.
 Against the previous native implementation on the same upstream revision, hashing throughput

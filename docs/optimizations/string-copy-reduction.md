@@ -60,5 +60,11 @@ diagnostics run together, with the nullable diagnostic in a separate JVM, for bo
 | MD5 / SHA-2 | 3.261 s | 2.211 s | +47% |
 | `CONCAT`, 1 KiB prefix, 75% NULL results | 0.709 s | 0.613 s | +16% |
 
+This table compares native implementations on the same upstream revision. Across patchsets,
+Flink's short-concatenation baseline varied by about 18% (0.691 s to 0.566 s), while native
+time stayed effectively unchanged (0.736 s to 0.733 s). The resulting 0.94x to 0.77x ratio
+change is within the observed run-to-run baseline variance, not a native regression. The
+native-to-native hashing comparison above is the evidence for the allocation optimization.
+
 The concatenation cases still lose to Flink end to end. Removing redundant work improves the
 nullable case within the native pipeline; it does not establish a standalone concatenation win.
