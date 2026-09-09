@@ -70,3 +70,9 @@ A successful safe Arrow Utf8 construction validates the BinaryArray once and reu
 
 [Complete-job Flink/native results](../benchmarks/scalar-functions.md#decode).
 
+## JSON_UNQUOTE
+
+Combines first-token JSON validation and unescaping in one scan, writes UTF-8 directly, and retains only a pending high surrogate instead of a whole intermediate UTF-16 vector. Flink's treatment of trailing text remains covered by SQL differential tests.
+
+[Complete-job Flink/native results](../benchmarks/scalar-functions.md#json_unquote).
+

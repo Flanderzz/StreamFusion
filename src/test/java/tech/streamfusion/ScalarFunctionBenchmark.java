@@ -446,7 +446,8 @@ class ScalarFunctionBenchmark {
     static final List<Query> QUERIES =
         List.of(new Query("ENCODE_UTF8", "tt_text", "ENCODE(s, 'UTF-8')", "BYTES"),
 new Query("DECODE_UTF8", "tt_bytes", "DECODE(b, 'UTF-8')", "STRING"),
-new Query("JSON_QUOTE", "tt_text", "JSON_QUOTE(s)", "STRING"));
+new Query("JSON_QUOTE", "tt_text", "JSON_QUOTE(s)", "STRING"),
+new Query("JSON_UNQUOTE", "tt_quoted", "JSON_UNQUOTE(s)", "STRING"));
   }
 
   private static String payload(String pattern) {

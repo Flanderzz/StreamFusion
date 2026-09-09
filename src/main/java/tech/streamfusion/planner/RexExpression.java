@@ -580,6 +580,9 @@ final class RexExpression {
     if ("JSON_QUOTE".equals(functionName)) {
       return emitCharacterFunction(call, 122, 1, 1);
     }
+    if ("JSON_UNQUOTE".equals(functionName)) {
+      return emitCharacterFunction(call, 123, 1, 1);
+    }
     if ("STARTSWITH".equals(functionName)) {
       return emitCharacterFunction(call, 100, 2, 2);
     }

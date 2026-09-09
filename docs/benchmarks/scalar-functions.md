@@ -278,3 +278,12 @@ not subtracted from function times because their result types and lengths can di
 | `JSON_QUOTE` | ASCII, 264-byte budget | 1.550 | 1.570 | 0.99x |
 | `JSON_QUOTE` | Unicode, 264-byte budget, NULL/8 | 26.048 | 2.972 | 8.77x |
 
+## JSON_UNQUOTE
+
+`JSON_UNQUOTE`: `JSON_UNQUOTE(s)`
+
+| Case | Input | Flink (s) | Native (s) | Flink / native |
+|---|---|---:|---:|---:|
+| `JSON_UNQUOTE` | ASCII, 264-byte budget | 1.615 | 1.317 | 1.23x |
+| `JSON_UNQUOTE` | Unicode, 264-byte budget, NULL/8 | 1.719 | 1.312 | 1.31x |
+

@@ -213,6 +213,10 @@ Valid UTF-8 is validated once and reuses the BinaryArray buffers as Utf8. Invali
 
 A reusable Rust string buffer mirrors Flink's UTF-16 iteration. A general JSON serializer would produce different output for these inputs.
 
+### JSON_UNQUOTE
+
+Combines Jackson's first-token validation and unescaping in one scan, with one reusable UTF-8 buffer and a pending surrogate. It deliberately preserves Flink's treatment of trailing text after that first value.
+
 ### TO_TIMESTAMP (deferred)
 
 Native parsing is withdrawn. Its millisecond timestamp result can represent expanded years,
