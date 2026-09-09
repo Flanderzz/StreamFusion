@@ -547,6 +547,9 @@ final class RexExpression {
     if ("ENDSWITH".equals(functionName)) {
       return emitCharacterFunction(call, 101, 2, 2);
     }
+    if ("INSTR".equals(functionName)) {
+      return emitStringSearch(call, 102, false);
+    }
     if ("CONCAT".equals(functionName) || "||".equals(functionName)) {
       return emitStringCall(call, 93, 1, Integer.MAX_VALUE);
     }
@@ -741,6 +744,35 @@ final class RexExpression {
       }
     }
     return character && numeric;
+  }
+
+  private boolean emitStringSearch(RexCall call, int op, boolean locate) {
+    List<RexNode> args = call.getOperands();
+    String name = call.getOperator().getName();
+    if (args.size() != 2 && !(locate && args.size() == 3)) {
+      return reject(name + (locate ? " requires 2 or 3 arguments" : " requires 2 arguments"));
+    }
+    for (int i = 0; i < 2; i++) {
+      SqlTypeName type = args.get(i).getType().getSqlTypeName();
+      if (type.getFamily() != SqlTypeFamily.CHARACTER && type != SqlTypeName.NULL) {
+        return reject(name + ": only character strings admitted");
+      }
+    }
+    if (args.size() == 3) {
+      SqlTypeName startType = args.get(2).getType().getSqlTypeName();
+      if (startType != SqlTypeName.TINYINT
+          && startType != SqlTypeName.SMALLINT
+          && startType != SqlTypeName.INTEGER
+          && startType != SqlTypeName.NULL) {
+        return reject("LOCATE start must be TINYINT, SMALLINT, or INTEGER");
+      }
+      op = 103;
+    }
+    add(KIND_CALL, op, args.size());
+    // LOCATE takes (needle, string[, start]); the native functions take the string first.
+    return emit(args.get(locate ? 1 : 0))
+        && emit(args.get(locate ? 0 : 1))
+        && (args.size() == 2 || emit(args.get(2)));
   }
 
   private boolean emitCharacterFunction(RexCall call, int op, int min, int max) {

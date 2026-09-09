@@ -75,6 +75,46 @@ fn sample_batch() -> RecordBatch {
     .unwrap()
 }
 
+fn evaluate_scalar_call(
+    op: i64,
+    args: Vec<datafusion::prelude::Expr>,
+    batch: &RecordBatch,
+) -> ArrayRef {
+    let schema = Arc::new(DFSchema::try_from(batch.schema().as_ref().clone()).unwrap());
+    let context = SimplifyContext::builder()
+        .with_schema(schema.clone())
+        .build();
+    let logical = ExprSimplifier::new(context)
+        .coerce(build_call(op, args), &schema)
+        .unwrap();
+    create_physical_expr(&logical, &schema, &ExecutionProps::new())
+        .unwrap()
+        .evaluate(batch)
+        .unwrap()
+        .into_array(batch.num_rows())
+        .unwrap()
+}
+
+#[test]
+fn string_search_positions_preserve_types() {
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("s", DataType::Utf8, false),
+            Field::new("needle", DataType::Utf8, false),
+        ])),
+        vec![
+            Arc::new(StringArray::from(vec!["abc", "", "\u{4e2d}\u{1f600}x"])),
+            Arc::new(StringArray::from(vec!["ab", "", "\u{1f600}x"])),
+        ],
+    )
+    .unwrap();
+    let result = evaluate_scalar_call(102, vec![logical_col("s"), logical_col("needle")], &batch);
+    assert_eq!(
+        result.as_any().downcast_ref::<Int32Array>().unwrap(),
+        &Int32Array::from(vec![1, 1, 2])
+    );
+}
+
 fn evaluate_string_call(
     op: i64,
     args: Vec<datafusion::prelude::Expr>,

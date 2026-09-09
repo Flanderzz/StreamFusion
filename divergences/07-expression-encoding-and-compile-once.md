@@ -118,6 +118,7 @@ strict NULL propagation applied to `CONCAT` below.
   sides, so ASCII and BMP text are bit-identical.
 - **`STARTSWITH`:** Character operands delegate to DataFusion's starts_with through the shared scalar registry. Flink materializes both operands before comparing UTF-8 bytes, so prefix matching does not have the representation-dependent ordering problem of string extrema. Scalar needles stay scalar. Standalone regressions remain documented; verified expressions can stay in a composed native Calc.
 - **`ENDSWITH`:** Character operands similarly delegate to DataFusion's ends_with, preserving strict NULLs and empty-suffix matching without a custom kernel. Admission follows semantic compatibility, including when standalone execution is slower than Flink.
+- **`INSTR`:** Delegates to DataFusion 54's strpos, retaining its scalar-needle search path and Unicode positions. See the Calc page for admission, semantics, and individual measurements.
 - **`TO_BASE64`:** Uses DataFusion's standard padded base64 codec, computes output offsets with checked sizes, and writes directly into the final Arrow buffer. Unlike Spark's MIME form modeled by Comet, Flink does not wrap lines. Arrow's safe constructor validates the result. See the Calc page for admission, semantics, and individual measurements.
 - **`UPPER`/`LOWER` fall back by default** (opt-in via the flag above; asserted by a test). Native (Rust) case
   folding is locale-independent Unicode, but the JVM's `String.toUpperCase()/toLowerCase()` is

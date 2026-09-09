@@ -202,6 +202,10 @@ Binary operands fall back.
 Two character arguments with the same NULL and type rules as STARTSWITH. Matches a literal
 suffix; an empty suffix matches every non-NULL string. Wildcards have no special meaning.
 
+### INSTR
+
+Two character arguments only. Returns the first match as a 1-based Unicode codepoint position, or zero if absent. An empty needle returns 1; any NULL returns NULL. Three/four-argument INSTR falls back.
+
 ## Case folding & regex
 
 **Native by default — not a fallback.** `UPPER`/`LOWER` and `REGEXP_EXTRACT` run natively by default
