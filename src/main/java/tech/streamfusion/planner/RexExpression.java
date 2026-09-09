@@ -550,6 +550,9 @@ final class RexExpression {
     if ("INSTR".equals(functionName)) {
       return emitStringSearch(call, 102, false);
     }
+    if ("LOCATE".equals(functionName)) {
+      return emitStringSearch(call, 102, true);
+    }
     if ("CONCAT".equals(functionName) || "||".equals(functionName)) {
       return emitStringCall(call, 93, 1, Integer.MAX_VALUE);
     }

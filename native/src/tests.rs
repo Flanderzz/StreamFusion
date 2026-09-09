@@ -96,6 +96,222 @@ fn evaluate_scalar_call(
 }
 
 #[test]
+fn string_search_locate_handles_slices_scalars_and_empty_batches() {
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("s", DataType::Utf8, true),
+            Field::new("needle", DataType::Utf8, true),
+            Field::new("start", DataType::Int32, true),
+        ])),
+        vec![
+            Arc::new(StringArray::from(vec![
+                Some("skip"),
+                Some("a\u{1f600}\u{4e2d}b\u{1f600}"),
+                Some("abcabc"),
+                Some(""),
+                Some("abc"),
+                None,
+                Some("abc"),
+                Some("abc"),
+            ])),
+            Arc::new(StringArray::from(vec![
+                Some("skip"),
+                Some("\u{1f600}"),
+                Some("bc"),
+                Some(""),
+                Some(""),
+                Some("a"),
+                None,
+                Some("a"),
+            ])),
+            Arc::new(Int32Array::from(vec![
+                Some(1),
+                Some(3),
+                Some(3),
+                Some(i32::MIN),
+                Some(i32::MAX),
+                Some(1),
+                None,
+                Some(i32::MIN),
+            ])),
+        ],
+    )
+    .unwrap()
+    .slice(1, 7);
+    let args = vec![
+        logical_col("s"),
+        logical_col("needle"),
+        logical_col("start"),
+    ];
+    let result = evaluate_scalar_call(103, args.clone(), &batch);
+    assert_eq!(
+        result.as_any().downcast_ref::<Int32Array>().unwrap(),
+        &Int32Array::from(vec![
+            Some(5),
+            Some(5),
+            Some(1),
+            Some(1),
+            None,
+            None,
+            Some(0)
+        ])
+    );
+    let scalar = evaluate_scalar_call(
+        103,
+        vec![logical_lit("abcabc"), logical_lit("bc"), logical_lit(3i32)],
+        &batch,
+    );
+    assert_eq!(
+        scalar.as_any().downcast_ref::<Int32Array>().unwrap(),
+        &Int32Array::from(vec![5; 7])
+    );
+    let null = evaluate_scalar_call(
+        103,
+        vec![
+            logical_lit("abc"),
+            logical_lit("a"),
+            logical_lit(ScalarValue::Int32(None)),
+        ],
+        &batch,
+    );
+    assert_eq!(null.null_count(), 7);
+    let empty = evaluate_scalar_call(103, args, &batch.slice(0, 0));
+    assert!(empty.is_empty());
+    assert_eq!(empty.data_type(), &DataType::Int32);
+}
+
+#[test]
+fn string_search_locate_scalar_and_column_arguments_match_on_ascii_slices() {
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("s", DataType::Utf8, true),
+            Field::new("needle", DataType::Utf8, true),
+            Field::new("start", DataType::Int32, true),
+        ])),
+        vec![
+            Arc::new(StringArray::from(vec![
+                Some("\u{4e2d}"),
+                Some("abcabc"),
+                Some("aaabaaab"),
+                Some(""),
+                Some("ab\0bc"),
+                None,
+                Some("abc"),
+                Some("abc"),
+                Some("\u{1f600}"),
+            ])),
+            Arc::new(StringArray::from(vec![
+                Some("skip"),
+                Some("bc"),
+                Some("aaab"),
+                Some(""),
+                Some("\0"),
+                Some("a"),
+                Some("a"),
+                Some("a"),
+                None,
+            ])),
+            Arc::new(Int32Array::from(vec![
+                Some(0),
+                Some(3),
+                Some(3),
+                Some(i32::MIN),
+                Some(4),
+                Some(1),
+                Some(i32::MAX),
+                None,
+                Some(0),
+            ])),
+        ],
+    )
+    .unwrap()
+    .slice(1, 7);
+    for (args, expected) in [
+        (
+            vec![
+                logical_col("s"),
+                logical_col("needle"),
+                logical_col("start"),
+            ],
+            vec![Some(5), Some(5), Some(1), Some(0), None, Some(0), None],
+        ),
+        (
+            vec![logical_col("s"), logical_lit("bc"), logical_col("start")],
+            vec![Some(5), Some(0), Some(0), Some(4), None, Some(0), None],
+        ),
+        (
+            vec![logical_col("s"), logical_col("needle"), logical_lit(2i32)],
+            vec![Some(2), Some(5), Some(1), Some(3), None, Some(0), Some(0)],
+        ),
+        (
+            vec![logical_col("s"), logical_lit("bc"), logical_lit(2i32)],
+            vec![Some(2), Some(0), Some(0), Some(4), None, Some(2), Some(2)],
+        ),
+        (
+            vec![
+                logical_lit("aaabaaab"),
+                logical_col("needle"),
+                logical_col("start"),
+            ],
+            vec![Some(0), Some(5), Some(1), Some(0), Some(1), Some(0), None],
+        ),
+        (
+            vec![
+                logical_col("s"),
+                logical_lit(ScalarValue::Utf8(None)),
+                logical_lit(2i32),
+            ],
+            vec![None; 7],
+        ),
+    ] {
+        let result = evaluate_scalar_call(103, args.clone(), &batch);
+        assert_eq!(
+            result.as_any().downcast_ref::<Int32Array>().unwrap(),
+            &Int32Array::from(expected),
+            "{args:?}",
+        );
+        assert!(evaluate_scalar_call(103, args, &batch.slice(0, 0)).is_empty());
+    }
+}
+
+#[test]
+fn string_search_locate_rejects_bad_arity_types_and_lengths() {
+    use datafusion::logical_expr::{ColumnarValue, ScalarFunctionArgs};
+
+    let datafusion::prelude::Expr::ScalarFunction(call) = build_call(103, vec![]) else {
+        panic!("expected LOCATE UDF");
+    };
+    let string = ColumnarValue::Scalar(ScalarValue::Utf8(Some("abc".into())));
+    let start = ColumnarValue::Scalar(ScalarValue::Int32(Some(1)));
+    let short = ColumnarValue::Array(Arc::new(StringArray::from(vec!["a"])));
+    for args in [
+        vec![],
+        vec![string.clone(), start.clone()],
+        vec![string.clone(), string.clone(), start.clone(), start.clone()],
+        vec![short.clone(), string.clone(), start.clone()],
+        vec![string.clone(), short, start.clone()],
+        vec![
+            string.clone(),
+            string.clone(),
+            ColumnarValue::Array(Arc::new(Int32Array::from(vec![1]))),
+        ],
+        vec![string.clone(), start.clone(), start],
+        vec![string.clone(), string.clone(), string],
+    ] {
+        assert!(call
+            .func
+            .invoke_with_args(ScalarFunctionArgs {
+                args,
+                arg_fields: vec![],
+                number_rows: 2,
+                return_field: Arc::new(Field::new("out", DataType::Int32, true)),
+                config_options: Arc::new(datafusion::common::config::ConfigOptions::new()),
+            })
+            .is_err());
+    }
+}
+
+#[test]
 fn string_search_positions_preserve_types() {
     let batch = RecordBatch::try_new(
         Arc::new(Schema::new(vec![
@@ -113,6 +329,21 @@ fn string_search_positions_preserve_types() {
         result.as_any().downcast_ref::<Int32Array>().unwrap(),
         &Int32Array::from(vec![1, 1, 2])
     );
+}
+
+#[test]
+fn string_search_rejects_invalid_arity_without_panicking() {
+    let schema = Arc::new(DFSchema::empty());
+    let context = SimplifyContext::builder()
+        .with_schema(schema.clone())
+        .build();
+    for op in 102..=103 {
+        let result = ExprSimplifier::new(context.clone()).coerce(build_call(op, vec![]), &schema);
+        assert!(
+            result.is_err(),
+            "search op {op} must reject missing arguments"
+        );
+    }
 }
 
 fn evaluate_string_call(

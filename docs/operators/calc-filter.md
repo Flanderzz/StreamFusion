@@ -206,6 +206,10 @@ suffix; an empty suffix matches every non-NULL string. Wildcards have no special
 
 Two character arguments only. Returns the first match as a 1-based Unicode codepoint position, or zero if absent. An empty needle returns 1; any NULL returns NULL. Three/four-argument INSTR falls back.
 
+### LOCATE
+
+Both LOCATE(needle, s) and LOCATE(needle, s, start) are native. Character inputs and TINYINT/SMALLINT/INTEGER starts are admitted; BIGINT starts fall back without narrowing. Positions count Unicode codepoints. Empty needles return 1 for every non-NULL start. Zero/negative starts search from the beginning, except INTEGER minimum: start - 1 wraps to maximum, matching Flink. Out-of-range starts return zero; any NULL argument returns NULL.
+
 ## Case folding & regex
 
 **Native by default — not a fallback.** `UPPER`/`LOWER` and `REGEXP_EXTRACT` run natively by default
