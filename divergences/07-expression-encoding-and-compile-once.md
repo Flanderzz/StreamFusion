@@ -201,6 +201,10 @@ are architectural guidance; dependencies remain released crates and Maven artifa
 JNI callback or row/Arrow conversion is introduced. See the Calc coverage page for the admitted
 shapes, differential tests, and individual end-to-end measurements.
 
+### ENCODE
+
+UTF-8 reuses the Arrow offsets, bytes, and validity; the single-byte encodings reuse one batch scratch buffer. This follows Comet's scalar/array kernel boundary without a JVM callback.
+
 ### TO_TIMESTAMP (deferred)
 
 Native parsing is withdrawn. Its millisecond timestamp result can represent expanded years,

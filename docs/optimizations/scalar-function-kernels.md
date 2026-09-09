@@ -58,3 +58,9 @@ Copies intact UTF-8 prefix/replacement/suffix slices when UTF-16 cuts align with
 
 [Complete-job Flink/native results](../benchmarks/scalar-functions.md#overlay).
 
+## ENCODE
+
+The verified UTF-8 form reinterprets the same Arrow offsets, values, and validity as Binary, so the kernel copies no payload. The charset stays scalar through invocation, avoiding a full-length constant array; single-byte charsets reuse a scratch buffer.
+
+[Complete-job Flink/native results](../benchmarks/scalar-functions.md#encode).
+

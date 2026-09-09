@@ -264,6 +264,10 @@ One character argument is native. Form decoding preserves JDK UTF-8 replacement 
 
 The JDK rule is selected on the JobManager during planning, so the JobManager and TaskManagers must use the same URL-decoding rule (pre-25 or 25+); mixed JDK groups can produce results that differ from Flink on the TaskManager.
 
+### ENCODE
+
+Character input and a literal UTF-8, US-ASCII, or ISO-8859-1 charset (including JDK aliases). Returns BYTES, preserves NULL, and replaces unmappable characters with `?`. Other or dynamic charsets fall back.
+
 ## Case folding & regex
 
 **Native by default — not a fallback.** `UPPER`/`LOWER` and `REGEXP_EXTRACT` run natively by default

@@ -13,6 +13,49 @@ import org.apache.flink.types.Row;
 final class TextTimeFunctionTestInputs {
   private TextTimeFunctionTestInputs() {}
 
+  static TableEnvironment strings() {
+    String[] values = {
+      null,
+      "",
+      "a",
+      "|a||",
+      ".*x.*",
+      "\u4e2d\ud83d\ude00\u4e2d",
+      "a\u0000b",
+      "/\"\\\b\f\n\r\t",
+      "\"ok\"",
+      "\"\\ud83d\\ude00\"",
+      "\"\\ud800\"",
+      "\"\\udc00\"",
+      "\"bad\\q\"",
+      "\"a\" \"b\"",
+      " \"ok\" ",
+      "null",
+      "[]",
+      "{}",
+      "\"a\u0000b\"",
+      "\"\\u0000\"",
+      "\"\\u00e9\"",
+      "\"\\u1f600\\ude00\"",
+      "\"x\" garbage\"",
+      "\u00e9\ud83d\ude00".repeat(4097)
+    };
+    List<Row> rows = new ArrayList<>();
+    for (int i = 0; i < values.length; i++) {
+      rows.add(Row.of(i, values[i]));
+    }
+    StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+    env.setParallelism(1);
+    StreamTableEnvironment tables = StreamTableEnvironment.create(env);
+    tables.createTemporaryView(
+        "inputs",
+        env.fromData(
+            Types.ROW_NAMED(new String[] {"id", "s"}, Types.INT, Types.STRING),
+            rows.toArray(Row[]::new)),
+        Schema.newBuilder().column("id", DataTypes.INT()).column("s", DataTypes.STRING()).build());
+    return tables;
+  }
+
   static TableEnvironment parameters() {
     String[] text = {
       null, "", "abc", "a\ud83d\ude00\u4e2db", "\u00e9e\u0301", "a|b||", " a  b ", "a\u0000b"

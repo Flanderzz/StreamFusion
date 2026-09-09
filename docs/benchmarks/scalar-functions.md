@@ -251,3 +251,12 @@ not subtracted from function times because their result types and lengths can di
 | `URL_DECODE` | ASCII, 264-byte budget | 1.713 | 1.507 | 1.14x |
 | `URL_DECODE` | Unicode, 264-byte budget, NULL/8 | 1.521 | 1.257 | 1.21x |
 
+## ENCODE
+
+`ENCODE_UTF8`: `ENCODE(s, 'UTF-8')`
+
+| Case | Input | Flink (s) | Native (s) | Flink / native |
+|---|---|---:|---:|---:|
+| `ENCODE_UTF8` | ASCII, 264-byte budget | 0.454 | 0.755 | 0.60x |
+| `ENCODE_UTF8` | Unicode, 264-byte budget, NULL/8 | 0.900 | 0.821 | 1.10x |
+

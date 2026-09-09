@@ -9,7 +9,11 @@ use datafusion::common::{cast::as_primitive_array, exec_err, Result};
 use datafusion::logical_expr::{ScalarUDF, Volatility};
 use std::sync::Arc;
 
+pub(crate) mod decode;
+pub(crate) mod encode;
+
 mod binary_strings;
+mod charset;
 mod locate;
 mod scalar;
 
@@ -94,6 +98,7 @@ pub(crate) fn function(op: i64, arity: usize) -> Option<ScalarUDF> {
             DataType::Utf8,
             scalar::url_decode_ascii,
         ),
+        120 => encode::function(),
         _ => return None,
     })
 }
@@ -114,4 +119,14 @@ fn udf(
             vec![],
         )),
     )
+}
+
+fn check_string_capacity(current: usize, additional: usize) -> Result<()> {
+    if current
+        .checked_add(additional)
+        .is_none_or(|size| size > i32::MAX as usize)
+    {
+        return exec_err!("Function output exceeds Arrow string capacity");
+    }
+    Ok(())
 }

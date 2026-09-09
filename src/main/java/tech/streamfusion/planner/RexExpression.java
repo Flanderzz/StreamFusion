@@ -571,6 +571,9 @@ final class RexExpression {
     if ("COALESCE".equals(functionName)) {
       return emitCoalesceAsCase(call.getOperands());
     }
+    if ("ENCODE".equals(functionName)) {
+      return emitCharsetFunction(call, 120, SqlTypeFamily.CHARACTER);
+    }
     if ("STARTSWITH".equals(functionName)) {
       return emitCharacterFunction(call, 100, 2, 2);
     }
@@ -846,6 +849,35 @@ final class RexExpression {
     return emit(args.get(locate ? 1 : 0))
         && emit(args.get(locate ? 0 : 1))
         && (args.size() == 2 || emit(args.get(2)));
+  }
+
+  private boolean emitCharsetFunction(RexCall call, int op, SqlTypeFamily inputFamily) {
+    List<RexNode> args = call.getOperands();
+    if (args.size() != 2
+        || args.get(0).getType().getSqlTypeName().getFamily() != inputFamily
+        || !(args.get(1) instanceof RexLiteral)) {
+      return reject(call.getOperator().getName() + " requires a literal charset");
+    }
+    String name = ((RexLiteral) args.get(1)).getValueAs(String.class);
+    if (name == null) {
+      return reject(call.getOperator().getName() + ": NULL charset");
+    }
+    String charset;
+    try {
+      charset = java.nio.charset.Charset.forName(name).name();
+    } catch (IllegalArgumentException e) {
+      return reject(call.getOperator().getName() + ": unknown charset");
+    }
+    if (!List.of("UTF-8", "US-ASCII", "ISO-8859-1").contains(charset)) {
+      return reject(call.getOperator().getName() + ": unverified charset " + charset);
+    }
+    add(KIND_CALL, op, 2);
+    if (!emit(args.get(0))) {
+      return false;
+    }
+    add(KIND_LIT_STRING, strings.size(), 0);
+    strings.add(charset);
+    return true;
   }
 
   private boolean emitExtremum(RexCall call, int op) {

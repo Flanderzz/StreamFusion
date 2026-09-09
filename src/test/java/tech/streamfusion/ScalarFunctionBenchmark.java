@@ -444,7 +444,7 @@ class ScalarFunctionBenchmark {
 
   private static final class TextTimeFunctions {
     static final List<Query> QUERIES =
-        List.of();
+        List.of(new Query("ENCODE_UTF8", "tt_text", "ENCODE(s, 'UTF-8')", "BYTES"));
   }
 
   private static String payload(String pattern) {
