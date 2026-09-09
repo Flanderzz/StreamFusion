@@ -459,7 +459,8 @@ new Query("TO_DATE", "tt_date_text", "TO_DATE(s)", "DATE"),
 new Query("QUARTER", "tt_timestamp", "QUARTER(ts)", "BIGINT"),
 new Query("WEEK", "tt_timestamp", "WEEK(ts)", "BIGINT"),
 new Query("DAYOFYEAR", "tt_timestamp", "DAYOFYEAR(ts)", "BIGINT"),
-new Query("DAYOFWEEK", "tt_timestamp", "DAYOFWEEK(ts)", "BIGINT"));
+new Query("DAYOFWEEK", "tt_timestamp", "DAYOFWEEK(ts)", "BIGINT"),
+new Query("LTRIM_LITERAL_SET", "tt_trim", "LTRIM(s, ' |ab')", "STRING"));
   }
 
   private static String payload(String pattern) {

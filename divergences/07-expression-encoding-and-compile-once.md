@@ -103,7 +103,8 @@ strict NULL propagation applied to `CONCAT` below.
   source count code points, so their kernels cannot reproduce supplementary-character truncation.
 - **`RPAD`:** Uses the same verified padding machinery on the right, including UTF-16 truncation.
 - **`CHR`:** Delegates to DataFusion chr.
-- **`LTRIM`:** Only the existing one-argument space trim is native.
+- **`LTRIM`:** The one- and two-argument forms delegate to DataFusion's space/character-set kernel;
+  two-argument trim sets must be literal, with strict NULL propagation.
 - **`RTRIM`:** Only the existing one-argument space trim is native.
 - **`POSITION`/`REPEAT`/`ABS`/`FLOOR`/`CEIL`/`SIGN`:** `POSITION(sub IN s)` uses `strpos(s, sub)`
   (Int32, matching Flink's INT); `REPEAT(s, n)` uses `repeat`. The numeric `ABS`/`FLOOR`/`CEIL`/`SIGN`
@@ -285,6 +286,10 @@ rounding kernel, resolution encoder, and millisecond-only extraction/coercion gu
 removed with the last producer that required them. Existing numeric rounding is unaffected.
 The change stays within expression admission; it adds no timestamp metadata or checks to
 physical Calc operators or row/Arrow conversion.
+
+### LTRIM
+
+Delegates literal character sets to the released DataFusion Unicode trim kernel; dynamic sets are declined.
 
 ## Review-driven admission and organization
 

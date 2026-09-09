@@ -348,6 +348,10 @@ Temporal CEIL/CEILING falls back to Flink for every unit and timestamp precision
 same timestamp-unit incompatibility as temporal FLOOR. One-argument numeric CEIL/CEILING
 keeps its existing native admission. No millisecond timestamp rounding kernel is registered.
 
+### LTRIM
+
+One-argument space trimming and two-argument trimming with a literal Unicode character set are native. Empty sets preserve the input; NULL propagates. Dynamic trim sets fall back because Flink semantics depend on whether strings are Java-backed or binary-backed.
+
 ## Case folding & regex
 
 **Native by default — not a fallback.** `UPPER`/`LOWER` and `REGEXP_EXTRACT` run natively by default
