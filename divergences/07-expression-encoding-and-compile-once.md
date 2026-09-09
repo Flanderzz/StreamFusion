@@ -101,7 +101,7 @@ strict NULL propagation applied to `CONCAT` below.
 - **`LPAD`:** The native kernel admits dynamic length/padding and counts UTF-16 units, matching
   released Flink 2.2.1. Empty padding and negative length return NULL. DataFusion and newer Flink
   source count code points, so their kernels cannot reproduce supplementary-character truncation.
-- **`RPAD`:** The existing DataFusion form requires a nonnegative literal length and literal padding.
+- **`RPAD`:** Uses the same verified padding machinery on the right, including UTF-16 truncation.
 - **`CHR`:** Delegates to DataFusion chr.
 - **`LTRIM`:** Only the existing one-argument space trim is native.
 - **`RTRIM`:** Only the existing one-argument space trim is native.
@@ -235,6 +235,10 @@ Locates the suffix by traversing character boundaries from the end, without an i
 ### LPAD
 
 Copies borrowed UTF-8 prefixes and whole padding spans, following Comet's padding structure. A prefix counter measures Flink 2.2.1 UTF-16 units; a cut through a surrogate pair appends the JDK `?` replacement. Intact spans write directly into the Arrow output builder, without a per-row scratch string or whole-row UTF-16 buffers. Newer Flink source counts code points and cannot be substituted for the released runtime.
+
+### RPAD
+
+Reuses the same UTF-16 prefix accounting and UTF-8 span-copying kernel, placing the padding on the right.
 
 ### TO_TIMESTAMP (deferred)
 

@@ -94,3 +94,9 @@ Following Comet's padding structure, the kernel writes intact UTF-8 prefixes and
 
 [Complete-job Flink/native results](../benchmarks/scalar-functions.md#lpad).
 
+## RPAD
+
+Reuses the same prefix and padding-span machinery on the right, including Flink's UTF-16 cut behavior. It avoids whole-row transcoding while retaining exact results for cuts through supplementary characters.
+
+[Complete-job Flink/native results](../benchmarks/scalar-functions.md#rpad).
+

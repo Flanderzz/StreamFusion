@@ -342,18 +342,6 @@ pub(crate) fn build_call(
                 .call(args);
         }
 
-        83 => {
-            // LPAD/RPAD yield a Utf8View; cast back to Utf8 for the JVM converter.
-            let padded = if op == 82 {
-                datafusion::functions::unicode::expr_fn::lpad(args)
-            } else {
-                datafusion::functions::unicode::expr_fn::rpad(args)
-            };
-            return datafusion::prelude::Expr::Cast(datafusion::logical_expr::Cast::new(
-                Box::new(padded),
-                DataType::Utf8,
-            ));
-        }
         85 => {
             // SPLIT_INDEX(str, sep, index): Flink's whole-separator split, index-th piece (see SplitIndex).
             return datafusion::logical_expr::ScalarUDF::new_from_impl(SplitIndex::new())

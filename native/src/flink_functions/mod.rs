@@ -16,6 +16,7 @@ pub(crate) mod json_unquote;
 pub(crate) mod left;
 pub(crate) mod lpad;
 pub(crate) mod right;
+pub(crate) mod rpad;
 pub(crate) mod split;
 pub(crate) mod substring;
 
@@ -114,6 +115,7 @@ pub(crate) fn function(op: i64, arity: usize) -> Option<ScalarUDF> {
         126 => left::function(),
         127 => right::function(),
         128 => lpad::function(),
+        129 => rpad::function(),
         _ => return None,
     })
 }
