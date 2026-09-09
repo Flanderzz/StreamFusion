@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 pub(crate) mod decode;
 pub(crate) mod encode;
+pub(crate) mod json_quote;
 
 mod binary_strings;
 mod charset;
@@ -100,6 +101,7 @@ pub(crate) fn function(op: i64, arity: usize) -> Option<ScalarUDF> {
         ),
         120 => encode::function(),
         121 => decode::function(),
+        122 => json_quote::function(),
         _ => return None,
     })
 }

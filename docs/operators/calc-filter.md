@@ -272,6 +272,10 @@ Character input and a literal UTF-8, US-ASCII, or ISO-8859-1 charset (including 
 
 Binary input and the same three literal charsets as ENCODE. UTF-8 uses the JDK's replacement grouping for malformed sequences; ASCII replaces each non-ASCII byte; Latin-1 maps all bytes. NULL stays NULL. Other or dynamic charsets fall back.
 
+### JSON_QUOTE
+
+Character input, including NULL. Matches Flink 2.2.1's actual spelling: slash is escaped, non-ASCII values use lowercase Unicode escapes, and supplementary characters emit a full code-point escape followed by a low-surrogate escape. Unlisted ASCII controls are retained.
+
 ## Case folding & regex
 
 **Native by default — not a fallback.** `UPPER`/`LOWER` and `REGEXP_EXTRACT` run natively by default

@@ -209,6 +209,10 @@ UTF-8 reuses the Arrow offsets, bytes, and validity; the single-byte encodings r
 
 Valid UTF-8 is validated once and reuses the BinaryArray buffers as Utf8. Invalid input uses the already parity-tested JDK UTF-8 replacement routine. No per-row byte or String allocation is needed.
 
+### JSON_QUOTE
+
+A reusable Rust string buffer mirrors Flink's UTF-16 iteration. A general JSON serializer would produce different output for these inputs.
+
 ### TO_TIMESTAMP (deferred)
 
 Native parsing is withdrawn. Its millisecond timestamp result can represent expanded years,

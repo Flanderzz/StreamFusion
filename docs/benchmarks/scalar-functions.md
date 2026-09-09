@@ -269,3 +269,12 @@ not subtracted from function times because their result types and lengths can di
 | `DECODE_UTF8` | ASCII, 264-byte budget | 0.442 | 0.657 | 0.67x |
 | `DECODE_UTF8` | Unicode, 264-byte budget, NULL/8 | 0.846 | 0.735 | 1.15x |
 
+## JSON_QUOTE
+
+`JSON_QUOTE`: `JSON_QUOTE(s)`
+
+| Case | Input | Flink (s) | Native (s) | Flink / native |
+|---|---|---:|---:|---:|
+| `JSON_QUOTE` | ASCII, 264-byte budget | 1.550 | 1.570 | 0.99x |
+| `JSON_QUOTE` | Unicode, 264-byte budget, NULL/8 | 26.048 | 2.972 | 8.77x |
+
