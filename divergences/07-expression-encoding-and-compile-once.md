@@ -124,6 +124,7 @@ strict NULL propagation applied to `CONCAT` below.
 - **`HEX`:** Integer HEX writes uppercase digits directly into the Arrow string builder in one pass. String HEX checks output sizes and writes uppercase digits directly into the final Arrow buffer, avoiding temporary strings and a separate uppercase array. Arrow's safe constructor validates the result. See the Calc page for admission, semantics, and individual measurements.
 - **`TO_BASE64`:** Uses DataFusion's standard padded base64 codec, computes output offsets with checked sizes, and writes directly into the final Arrow buffer. Unlike Spark's MIME form modeled by Comet, Flink does not wrap lines. Arrow's safe constructor validates the result. See the Calc page for admission, semantics, and individual measurements.
 - **`UNHEX`:** Follows Comet's nibble lookup table and combined invalid-digit check, while retaining Flink's odd-length rule. Validation and decoding share a pass into the final Arrow binary buffer. Invalid rows roll back partial output. Capacity uses the active slice, offsets stay checked, and the constructor remains safe; no per-row temporary output copy is needed. DataFusion's strict decoder errors on invalid input and does not implement Flink's odd-leading-zero rule. VARBINARY literals use a dedicated literal kind, carrying length and byte values in the existing long pool; -1 denotes NULL. Like Comet BytesVal literals, they become ScalarValue::Binary directly, without a synthetic function call or a new JNI payload. See the Calc page for admission, semantics, and individual measurements.
+- **`GREATEST`:** Integer and matching-scale Decimal extrema use primitive Arrow comparison loops, folding constants once and combining validity masks. Boolean and ASCII-provable string extrema reuse DataFusion with Flink's strict NULL mask. This avoids intermediate Boolean selection arrays and expanded scalar arrays. Arroyo's registry structure is retained. DataFusion skips NULLs; Flink requires strict NULL propagation. Floating point and mixed decimal scales remain unverified. See the Calc page for admission, semantics, and individual measurements.
 - **`UPPER`/`LOWER` fall back by default** (opt-in via the flag above; asserted by a test). Native (Rust) case
   folding is locale-independent Unicode, but the JVM's `String.toUpperCase()/toLowerCase()` is
   locale-sensitive (e.g. Turkish dotless-i), so non-ASCII results can silently differ. DataFusion
@@ -221,3 +222,9 @@ Arroyo's registry pattern. The expression decoder consults that registry once, a
 kernels live beneath the same module. Unknown registrations return None; they never select an
 unrelated function. Retired opcodes are not reused. Numeric/date-time operations that predate
 this PR retain their existing decoder behavior.
+
+Flink's `BinaryStringData.compareTo` uses UTF-16 String.compareTo for Java-backed strings and
+byte order for binary-backed strings. There is no single Unicode order that reproduces both
+plan shapes. GREATEST/LEAST therefore admit only ASCII-provable string literals and CASE results;
+unrestricted string columns fall back. The existing string comparison operators predate this
+change and share that limitation; this PR does not claim to fix their Unicode ordering.

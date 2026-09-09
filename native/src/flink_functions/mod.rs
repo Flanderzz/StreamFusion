@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 mod binary_strings;
 mod locate;
+mod scalar;
 
 const HEX_DIGITS: &[u8; 16] = b"0123456789ABCDEF";
 
@@ -52,6 +53,7 @@ pub(crate) fn function(op: i64, arity: usize) -> Option<ScalarUDF> {
             DataType::Binary,
             binary_strings::unhex,
         ),
+        109 => scalar::extremum(true),
         _ => return None,
     })
 }

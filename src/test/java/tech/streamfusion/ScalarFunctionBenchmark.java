@@ -52,7 +52,7 @@ class ScalarFunctionBenchmark {
   }
 
   private static final List<Query> SCALAR_FUNCTIONS =
-      List.of();
+      List.of(new Query("GREATEST", "numbers", "GREATEST(n, m, 17)"));
 
   private static final List<Query> SEARCH_FUNCTIONS =
       List.of(

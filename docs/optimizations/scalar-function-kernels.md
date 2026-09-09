@@ -22,3 +22,9 @@ The two-argument form reverses operands into DataFusion strpos. The three-argume
 
 [Complete-job Flink/native results](../benchmarks/scalar-functions.md#locate).
 
+## GREATEST
+
+Integer and matching-scale Decimal extrema use primitive Arrow comparison loops, folding constants once and combining validity masks. ASCII-provable string/Boolean extrema reuse DataFusion with Flink's strict NULL mask. This avoids intermediate Boolean selection arrays and expanded scalar arrays.
+
+[Complete-job Flink/native results](../benchmarks/scalar-functions.md#greatest).
+

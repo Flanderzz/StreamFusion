@@ -595,6 +595,9 @@ final class RexExpression {
     if ("UNHEX".equals(functionName)) {
       return emitEncoding(call, 108, false, true);
     }
+    if ("GREATEST".equals(functionName)) {
+      return emitExtremum(call, 109);
+    }
     if ("CONCAT".equals(functionName) || "||".equals(functionName)) {
       return emitStringCall(call, 93, 1, Integer.MAX_VALUE);
     }
@@ -818,6 +821,59 @@ final class RexExpression {
     return emit(args.get(locate ? 1 : 0))
         && emit(args.get(locate ? 0 : 1))
         && (args.size() == 2 || emit(args.get(2)));
+  }
+
+  private boolean emitExtremum(RexCall call, int op) {
+    List<RexNode> args = call.getOperands();
+    if (args.size() < 2) {
+      return reject(call.getOperator().getName() + " requires at least two arguments");
+    }
+    RelDataType result = call.getType();
+    SqlTypeName type = result.getSqlTypeName();
+    boolean integer = SqlTypeFamily.INTEGER.getTypeNames().contains(type);
+    boolean character = type.getFamily() == SqlTypeFamily.CHARACTER;
+    if (character && args.stream().anyMatch(arg -> !isAsciiLiteralResult(arg))) {
+      return reject(call.getOperator().getName() + " requires ASCII-provable string operands");
+    }
+    if (!integer && !character && type != SqlTypeName.BOOLEAN && type != SqlTypeName.DECIMAL) {
+      return reject(
+          call.getOperator().getName()
+              + " supports integers, strings, boolean, and matching decimals");
+    }
+    for (RexNode arg : args) {
+      RelDataType input = arg.getType();
+      SqlTypeName inputType = input.getSqlTypeName();
+      boolean admitted =
+          integer
+              ? SqlTypeFamily.INTEGER.getTypeNames().contains(inputType)
+              : character
+                  ? inputType.getFamily() == SqlTypeFamily.CHARACTER
+                  : inputType == type
+                      && (type != SqlTypeName.DECIMAL
+                          || (input.getPrecision() == result.getPrecision()
+                              && input.getScale() == result.getScale()));
+      if (!admitted) {
+        return reject(call.getOperator().getName() + " operand types require unverified coercion");
+      }
+    }
+    return emitBuiltinCall(call, op);
+  }
+
+  private static boolean isAsciiLiteralResult(RexNode node) {
+    if (node instanceof RexLiteral literal) {
+      String value = literal.getValueAs(String.class);
+      return value == null || value.chars().allMatch(ch -> ch < 128);
+    }
+    if (node instanceof RexCall call && call.getKind() == SqlKind.CASE) {
+      List<RexNode> operands = call.getOperands();
+      for (int i = 1; i < operands.size() - 1; i += 2) {
+        if (!isAsciiLiteralResult(operands.get(i))) {
+          return false;
+        }
+      }
+      return isAsciiLiteralResult(operands.get(operands.size() - 1));
+    }
+    return false;
   }
 
   private boolean emitCharacterFunction(RexCall call, int op, int min, int max) {
