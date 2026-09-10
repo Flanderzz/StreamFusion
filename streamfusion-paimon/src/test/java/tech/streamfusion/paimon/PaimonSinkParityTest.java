@@ -18,8 +18,11 @@ import java.util.stream.Stream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.common.typeinfo.Types;
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.JsonNode;
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.table.api.Schema;
+import org.apache.flink.table.api.ExplainDetail;
 import org.apache.flink.table.api.Table;
 import org.apache.flink.table.api.TableResult;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
@@ -43,6 +46,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import tech.streamfusion.planner.NativePlanner;
 import tech.streamfusion.planner.PhysicalPlanScan;
 
@@ -308,11 +312,55 @@ class PaimonSinkParityTest {
   @Test
   void primaryKeyTableIgnoringDeletesAcrossWritersMatchesTheStockTwin() throws Exception {
     java.nio.file.Path warehouse = Files.createTempDirectory("paimon-sink-pk-ignore-delete");
-    String options = "'bucket' = '3', 'ignore-delete' = 'true', 'file.compression' = 'zstd'";
-    FileStoreTable nativeTable = upsertFixture(warehouse, "pk_native", options, 2, true, 0);
-    FileStoreTable stockTable = upsertFixture(warehouse, "pk_stock", options, 2, false, 0);
+    // Normalize on one upstream task so both sink writers see deterministic bucket-local order.
+    String options =
+        "'bucket' = '3', 'ignore-delete' = 'true', 'file.compression' = 'zstd',"
+            + " 'sink.parallelism' = '2'";
+    FileStoreTable nativeTable = upsertFixture(warehouse, "pk_native", options, 1, true, 0);
+    FileStoreTable stockTable = upsertFixture(warehouse, "pk_stock", options, 1, false, 0);
 
     assertSameTables(stockTable, nativeTable, true, mergedRows(true));
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  void explicitSinkParallelismKeepsTheUpstreamNormalizationOrdered(boolean nativeSink)
+      throws Exception {
+    java.nio.file.Path warehouse = Files.createTempDirectory("paimon-sink-parallel-plan");
+    StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+    env.setParallelism(1);
+    StreamTableEnvironment tableEnv = catalogEnvironment(env, warehouse);
+    createPrimaryKeyTable(tableEnv, "parallel_sink", "'bucket' = '3', 'sink.parallelism' = '2'");
+    registerChangelog(env, tableEnv);
+    if (nativeSink) {
+      NativePlanner.install(tableEnv);
+    }
+    String plan =
+        tableEnv.explainSql(
+            "INSERT INTO parallel_sink SELECT * FROM changelog_source",
+            ExplainDetail.JSON_EXECUTION_PLAN);
+    String marker = "== Physical Execution Plan ==";
+    JsonNode nodes =
+        new ObjectMapper()
+            .readTree(plan.substring(plan.indexOf(marker) + marker.length()).trim())
+            .get("nodes");
+    int normalizers = 0;
+    int writers = 0;
+    for (JsonNode node : nodes) {
+      if (node.get("type").asText().contains("ChangelogNormalize")) {
+        assertEquals(1, node.get("parallelism").asInt(), plan);
+        normalizers++;
+      }
+      if (node.get("type").asText().equals("Writer : parallel_sink")) {
+        assertEquals(2, node.get("parallelism").asInt(), plan);
+        writers++;
+      }
+    }
+    assertEquals(1, normalizers, plan);
+    assertEquals(1, writers, plan);
+    if (nativeSink) {
+      assertTrue(plan.contains("NativePaimonSink"), plan);
+    }
   }
 
   /**
@@ -489,7 +537,6 @@ class PaimonSinkParityTest {
               v[10],
               v[11]));
     }
-    // Keep record arrival order identical across twin jobs; the sink retains env parallelism.
     DataStream<Row> stream =
         env.fromData(
             Types.ROW_NAMED(
@@ -507,8 +554,7 @@ class PaimonSinkParityTest {
                 Types.PRIMITIVE_ARRAY(Types.BYTE),
                 Types.BYTE,
                 Types.STRING),
-            rows.toArray(new Row[0]))
-            .setParallelism(1);
+            rows.toArray(new Row[0]));
     Table source =
         tableEnv.fromChangelogStream(
             stream,
