@@ -2298,27 +2298,27 @@ final class RexExpression {
     return value != null && value >= min;
   }
 
-  /**
-   * Emits {@code TRIM(BOTH ' ' FROM s)} — the default whitespace both-sides trim — as a unary call
-   * (op 54) mapped to DataFusion's {@code btrim}. Calcite gives TRIM three operands: a
-   * BOTH/LEADING/ TRAILING flag, the trim characters, and the source string. Only the default (flag
-   * {@code BOTH}, a single-space trim set) is admitted; LEADING/TRAILING or custom trim chars fall
-   * back.
-   */
+  /** Reuses the literal-set trim kernels for SQL's BOTH/LEADING/TRAILING syntax. */
   private boolean emitTrim(RexCall call) {
     List<RexNode> operands = call.getOperands();
     if (operands.size() != 3
-        || !(operands.get(0) instanceof RexLiteral)
-        || !(operands.get(1) instanceof RexLiteral)) {
-      return reject("unsupported TRIM form");
+        || !(operands.get(0) instanceof RexLiteral flag)
+        || !(operands.get(1) instanceof RexLiteral trim)
+        || !isCharacter(trim)
+        || !isCharacter(operands.get(2))) {
+      return reject("TRIM requires a literal trim set");
     }
-    String flag = String.valueOf(((RexLiteral) operands.get(0)).getValue());
-    String trimChars = ((RexLiteral) operands.get(1)).getValueAs(String.class);
-    if (!"BOTH".equals(flag) || !" ".equals(trimChars)) {
-      return reject("TRIM supports only the default BOTH whitespace trim");
+    int op = switch (String.valueOf(flag.getValue())) {
+      case "BOTH" -> 113;
+      case "LEADING" -> 139;
+      case "TRAILING" -> 140;
+      default -> -1;
+    };
+    if (op < 0) {
+      return reject("unsupported TRIM direction");
     }
-    add(KIND_CALL, 54, 1);
-    return emit(operands.get(2));
+    add(KIND_CALL, op, 2);
+    return emit(operands.get(2)) && emit(trim);
   }
 
   /**

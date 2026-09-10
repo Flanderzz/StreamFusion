@@ -270,9 +270,8 @@ class FlinkCalcSqlHarnessTest {
   }
 
   @Test
-  void trimLeadingFallsBack() throws Exception {
-    // Only TRIM(BOTH ' ' …) is admitted; LEADING/TRAILING trims fall back.
-    NativeParity.assertFallback(
+  void trimLeadingMatchesHost() throws Exception {
+    NativeParity.assertParity(
         FlinkCalcSqlHarnessTest::spacedStringEnvironment, "SELECT TRIM(LEADING FROM s) FROM ss");
   }
 

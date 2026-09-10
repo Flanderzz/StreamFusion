@@ -94,10 +94,9 @@ strict NULL propagation applied to `CONCAT` below.
 - **`SUBSTRING`:** A native borrowed-slice kernel admits dynamic starts/lengths and preserves Flink's
   zero/negative-position and negative-length behavior. The DataFusion substring semantics differ at
   these boundaries; the result is a plain Utf8 array. See the Calc page for exact admission.
-- **`TRIM`:** only the default `TRIM(BOTH ' ' FROM s)` (whitespace, both sides) is admitted, mapped
-  to DataFusion's `btrim`; `LEADING`/`TRAILING` and custom trim characters fall back (asserted by a
-  test). The encoder reads Calcite's three-operand TRIM (flag, trim-chars, source) and only proceeds
-  for the `BOTH` + single-space case.
+- **`TRIM`:** SQL's `BOTH`, `LEADING`, and `TRAILING` forms reuse the same DataFusion kernels as
+  `BTRIM`, `LTRIM`, and `RTRIM`. Custom character sets must be literal, avoiding Flink's
+  representation-dependent treatment of binary-backed sets beginning with a space.
 - **`LPAD`:** The native kernel admits dynamic length/padding and counts UTF-16 units, matching
   released Flink 2.2.1. Empty padding and negative length return NULL. DataFusion and newer Flink
   source count code points, so their kernels cannot reproduce supplementary-character truncation.

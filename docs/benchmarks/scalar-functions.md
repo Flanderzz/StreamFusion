@@ -478,3 +478,23 @@ Flink/native medians, with no intermediate optimization results.
 | 16 extra members, ASCII, 32-byte padding | 2.773 | 1.772 | 1.56x |
 | 64 extra members, ASCII, 32-byte padding | 8.115 | 4.576 | 1.77x |
 | 64 extra members, Unicode, 32-byte padding, NULL/8 | 6.464 | 3.315 | 1.95x |
+
+## TRIM directions and literal sets
+
+Measured on 2026-09-10 using the release profile and the interleaved, 2,000,000-row,
+two-warmup/five-trial method above, including both transposes. Run with
+`scalar.functions=TRIM_LEADING,TRIM_TRAILING,TRIM_LITERAL_SET` and the listed byte budgets.
+The queries are `TRIM(LEADING FROM s)`, `TRIM(TRAILING FROM s)`, and
+`TRIM(BOTH ' |ab' FROM s)`. Each query measures one function independently.
+
+| Function | Scenario | Flink (s) | Native (s) | Flink / native |
+|---|---|---:|---:|---:|
+| TRIM_LEADING | ASCII, 32-byte budget | 0.377 | 0.543 | 0.69x |
+| TRIM_LEADING | ASCII, 264-byte budget | 0.823 | 1.141 | 0.72x |
+| TRIM_LEADING | Unicode, 264-byte budget, NULL/8 | 0.710 | 0.982 | 0.72x |
+| TRIM_TRAILING | ASCII, 32-byte budget | 0.377 | 0.546 | 0.69x |
+| TRIM_TRAILING | ASCII, 264-byte budget | 0.817 | 1.126 | 0.73x |
+| TRIM_TRAILING | Unicode, 264-byte budget, NULL/8 | 0.680 | 0.965 | 0.70x |
+| TRIM_LITERAL_SET | ASCII, 32-byte budget | 0.845 | 0.579 | 1.46x |
+| TRIM_LITERAL_SET | ASCII, 264-byte budget | 2.911 | 1.154 | 2.52x |
+| TRIM_LITERAL_SET | Unicode, 264-byte budget, NULL/8 | 1.605 | 0.985 | 1.63x |
