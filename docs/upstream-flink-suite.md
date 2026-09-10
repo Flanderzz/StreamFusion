@@ -30,11 +30,17 @@ created. `kafka` covers `DynamicKafkaTableITCase`, `KafkaChangelogTableITCase`,
 `KafkaTableITCase`, and `UpsertKafkaTableITCase` from the pinned Kafka connector release. The Kafka
 suite starts broker containers and therefore requires a working Docker daemon. `paimon` runs the
 Paimon Flink connector's `AppendOnlyTableITCase`, `AppendTableITCase`, `BatchFileStoreITCase`,
-`ComputedColumnAndWatermarkTableITCase`, `ContinuousFileStoreITCase`, and `ReadWriteTableITCase`
-from the pinned Paimon release, built against the suite's Flink version, and fails unless it proves
-that a streaming insert wrote a Paimon data file from a native Arrow bundle. Only the streaming
-inserts in those classes can take the native sink; their batch inserts, primary-key tables, and
-compaction rewrites run stock Paimon, which is what the tests then have to agree with. Because
+`ComputedColumnAndWatermarkTableITCase`, `ContinuousFileStoreITCase`, `ReadWriteTableITCase`,
+`PrimaryKeyFileStoreTableITCase`, `CompositePkAndMultiPartitionedTableITCase`,
+`FullCompactionFileStoreITCase`, `FlinkJobRecoveryITCase`, `RescaleBucketITCase`,
+`ScanBucketITCase`, `KeyOnlyDeletesITCase`, and `FirstRowITCase` from the pinned Paimon release,
+built against the suite's Flink version, and fails unless it proves both that a streaming insert
+wrote an append-table data file from a native Arrow bundle and that one wrote a primary-key
+level-0 file natively. Only the streaming inserts into append tables and into fixed-bucket
+deduplicate primary-key tables without a changelog producer can take the native sink; batch
+inserts, the other primary-key shapes those classes exercise (changelog producers, first-row and
+key-only deletes, dynamic buckets), and compaction rewrites run stock Paimon, which is what the
+tests then have to agree with. Because
 Surefire appends StreamFusion's classpath in no fixed order, the agent also resolves Paimon's
 `parquet` format identifier to the StreamFusion factory whenever the module is present, standing in
 for the `01-streamfusion-paimon.jar` ordering a deployment relies on. Paimon's module declares the

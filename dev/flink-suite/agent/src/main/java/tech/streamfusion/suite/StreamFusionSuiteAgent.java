@@ -39,6 +39,8 @@ public final class StreamFusionSuiteAgent {
       "tech.streamfusion.paimon.NativePaimonParquetFormatFactory";
   private static final String NATIVE_PAIMON_PARQUET_WRITER =
       "tech.streamfusion.paimon.NativePaimonParquetWriter";
+  private static final String NATIVE_PAIMON_KEY_VALUE_FILE_WRITER =
+      "tech.streamfusion.paimon.NativePaimonKeyValueFileWriter";
   private static final AtomicBoolean ACTIVATION_REPORTED = new AtomicBoolean();
   private static final AtomicBoolean HEAP_STATE_REPORTED = new AtomicBoolean();
   private static final AtomicBoolean NATIVE_MEMORY_STATE_REPORTED = new AtomicBoolean();
@@ -46,6 +48,7 @@ public final class StreamFusionSuiteAgent {
   private static final AtomicBoolean NATIVE_PARQUET_WRITER_REPORTED = new AtomicBoolean();
   private static final AtomicBoolean NATIVE_PAIMON_FORMAT_REPORTED = new AtomicBoolean();
   private static final AtomicBoolean NATIVE_PAIMON_BUNDLE_REPORTED = new AtomicBoolean();
+  private static final AtomicBoolean NATIVE_PAIMON_LEVEL_ZERO_FILE_REPORTED = new AtomicBoolean();
   private static final Set<Object> INSTALLED_CONFIGS =
       Collections.synchronizedSet(Collections.newSetFromMap(new WeakHashMap<>()));
   private static final ThreadLocal<Boolean> UNMODIFIED_PLAN_SETUP = new ThreadLocal<>();
@@ -105,6 +108,12 @@ public final class StreamFusionSuiteAgent {
                 builder.visit(
                     Advice.to(ReportNativePaimonBundle.class)
                         .on(named("writeNative").and(takesArguments(1)))))
+        .type(named(NATIVE_PAIMON_KEY_VALUE_FILE_WRITER))
+        .transform(
+            (builder, type, classLoader, module, protectionDomain) ->
+                builder.visit(
+                    Advice.to(ReportNativePaimonLevelZeroFile.class)
+                        .on(named("write").and(takesArguments(3)))))
         .installOn(instrumentation);
   }
 
@@ -130,6 +139,10 @@ public final class StreamFusionSuiteAgent {
 
   public static boolean reportNativePaimonBundle() {
     return NATIVE_PAIMON_BUNDLE_REPORTED.compareAndSet(false, true);
+  }
+
+  public static boolean reportNativePaimonLevelZeroFile() {
+    return NATIVE_PAIMON_LEVEL_ZERO_FILE_REPORTED.compareAndSet(false, true);
   }
 
   /**
@@ -361,6 +374,18 @@ public final class StreamFusionSuiteAgent {
     static void enter() {
       if (StreamFusionSuiteAgent.reportNativePaimonBundle()) {
         System.err.println("StreamFusion upstream Paimon suite wrote a native Paimon bundle");
+      }
+    }
+  }
+
+  public static final class ReportNativePaimonLevelZeroFile {
+
+    private ReportNativePaimonLevelZeroFile() {}
+
+    @Advice.OnMethodEnter
+    static void enter() {
+      if (StreamFusionSuiteAgent.reportNativePaimonLevelZeroFile()) {
+        System.err.println("StreamFusion upstream Paimon suite wrote a native Paimon level-0 file");
       }
     }
   }

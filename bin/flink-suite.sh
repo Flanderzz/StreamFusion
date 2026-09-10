@@ -34,7 +34,7 @@ readonly PAIMON_BUILD_ARGS=(-Pflink2 "-Dpaimon-flink-common.flink.version=${FLIN
 readonly FORMAT_MODULES="flink-formats/flink-json,flink-formats/flink-csv,flink-formats/flink-avro,flink-formats/flink-avro-confluent-registry,flink-formats/flink-protobuf"
 readonly PARQUET_MODULE="flink-formats/flink-parquet"
 readonly PARQUET_SINK_TESTS="org.apache.flink.formats.parquet.ParquetFsStreamingSinkITCase,org.apache.flink.formats.parquet.ParquetTimestampITCase"
-readonly PAIMON_APPEND_SQL_TESTS="org.apache.paimon.flink.AppendOnlyTableITCase,org.apache.paimon.flink.AppendTableITCase,org.apache.paimon.flink.BatchFileStoreITCase,org.apache.paimon.flink.ComputedColumnAndWatermarkTableITCase,org.apache.paimon.flink.ContinuousFileStoreITCase,org.apache.paimon.flink.ReadWriteTableITCase"
+readonly PAIMON_SQL_TESTS="org.apache.paimon.flink.AppendOnlyTableITCase,org.apache.paimon.flink.AppendTableITCase,org.apache.paimon.flink.BatchFileStoreITCase,org.apache.paimon.flink.ComputedColumnAndWatermarkTableITCase,org.apache.paimon.flink.ContinuousFileStoreITCase,org.apache.paimon.flink.ReadWriteTableITCase,org.apache.paimon.flink.PrimaryKeyFileStoreTableITCase,org.apache.paimon.flink.CompositePkAndMultiPartitionedTableITCase,org.apache.paimon.flink.FullCompactionFileStoreITCase,org.apache.paimon.flink.FlinkJobRecoveryITCase,org.apache.paimon.flink.RescaleBucketITCase,org.apache.paimon.flink.ScanBucketITCase,org.apache.paimon.flink.KeyOnlyDeletesITCase,org.apache.paimon.flink.FirstRowITCase"
 readonly KAFKA_SQL_TESTS="org.apache.flink.streaming.connectors.kafka.table.DynamicKafkaTableITCase,org.apache.flink.streaming.connectors.kafka.table.KafkaChangelogTableITCase,org.apache.flink.streaming.connectors.kafka.table.KafkaTableITCase,org.apache.flink.streaming.connectors.kafka.table.UpsertKafkaTableITCase"
 readonly ROCKSDB_STATE_SQL_TESTS="org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase,org.apache.flink.table.planner.runtime.stream.sql.DeduplicateITCase,org.apache.flink.table.planner.runtime.stream.sql.GroupWindowITCase,org.apache.flink.table.planner.runtime.stream.sql.IntervalJoinITCase,org.apache.flink.table.planner.runtime.stream.sql.JoinITCase,org.apache.flink.table.planner.runtime.stream.sql.OverAggregateITCase,org.apache.flink.table.planner.runtime.stream.sql.RankITCase,org.apache.flink.table.planner.runtime.stream.sql.TemporalJoinITCase,org.apache.flink.table.planner.runtime.stream.sql.WindowAggregateITCase,org.apache.flink.table.planner.runtime.stream.sql.WindowDeduplicateITCase,org.apache.flink.table.planner.runtime.stream.sql.WindowJoinITCase,org.apache.flink.table.planner.runtime.stream.sql.WindowRankITCase,org.apache.flink.table.planner.runtime.stream.table.AggregateITCase,org.apache.flink.table.planner.runtime.stream.table.JoinITCase,org.apache.flink.table.planner.runtime.stream.table.OverAggregateITCase,org.apache.flink.table.planner.runtime.stream.table.RetractionITCase"
 TEST_SELECTOR_ARGS=()
@@ -90,7 +90,7 @@ case "${SUITE_MODE}" in
     TEST_MODULES="${PAIMON_MODULE}"
     REPORT_ROOT="${PAIMON_ROOT}/${PAIMON_MODULE}/target/surefire-reports"
     if [[ -z "${FLINK_SUITE_TEST:-}" ]]; then
-      TEST_SELECTOR_ARGS=("-Dtest=${PAIMON_APPEND_SQL_TESTS}")
+      TEST_SELECTOR_ARGS=("-Dtest=${PAIMON_SQL_TESTS}")
     fi
     ;;
   all)
@@ -358,11 +358,14 @@ if [[ "${SUITE_MODE}" == "parquet" && ${TEST_STATUS} -eq 0 ]]; then
 fi
 
 if [[ "${SUITE_MODE}" == "paimon" && ${TEST_STATUS} -eq 0 ]]; then
-  readonly PAIMON_MARKER="StreamFusion upstream Paimon suite wrote a native Paimon bundle"
-  if ! grep -RqsF "${PAIMON_MARKER}" "${REPORT_ROOT}"; then
-    echo "The upstream Paimon suite did not prove: ${PAIMON_MARKER}" >&2
-    exit 1
-  fi
+  for required_marker in \
+    "StreamFusion upstream Paimon suite wrote a native Paimon bundle" \
+    "StreamFusion upstream Paimon suite wrote a native Paimon level-0 file"; do
+    if ! grep -RqsF "${required_marker}" "${REPORT_ROOT}"; then
+      echo "The upstream Paimon suite did not prove: ${required_marker}" >&2
+      exit 1
+    fi
+  done
 fi
 
 SUMMARY_ARGS=("${REPORT_ROOT}")
