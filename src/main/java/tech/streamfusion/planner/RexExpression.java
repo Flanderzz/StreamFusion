@@ -593,6 +593,12 @@ final class RexExpression {
     if ("JSON_UNQUOTE".equals(functionName)) {
       return emitCharacterFunction(call, 123, 1, 1);
     }
+    if ("JSON_STRING".equals(functionName)) {
+      if (call.getOperands().size() != 1 || !isJsonScalarValue(call.getOperands().get(0))) {
+        return reject("JSON_STRING requires a character, boolean, or signed integer scalar");
+      }
+      return emitBuiltinCall(call, 152);
+    }
     if ("JSON_VALUE".equals(functionName)) {
       return emitJsonValue(call);
     }
@@ -919,6 +925,19 @@ final class RexExpression {
     return emit(args.get(locate ? 1 : 0))
         && emit(args.get(locate ? 0 : 1))
         && (args.size() == 2 || emit(args.get(2)));
+  }
+
+  private static boolean isJsonScalarValue(RexNode value) {
+    // Flink treats direct JSON constructors as raw JSON, despite their character return type.
+    if (value instanceof RexCall call
+        && List.of("JSON_OBJECT", "JSON_ARRAY", "JSON")
+            .contains(call.getOperator().getName().toUpperCase(Locale.ROOT))) {
+      return false;
+    }
+    return switch (value.getType().getSqlTypeName()) {
+      case CHAR, VARCHAR, BOOLEAN, TINYINT, SMALLINT, INTEGER, BIGINT -> true;
+      default -> false;
+    };
   }
 
   private boolean emitCharsetFunction(RexCall call, int op, SqlTypeFamily inputFamily) {

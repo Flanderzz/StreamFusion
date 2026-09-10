@@ -13,6 +13,21 @@ import org.junit.jupiter.api.Test;
 
 class RexExpressionScalarAdmissionTest {
   @Test
+  void jsonStringRequiresTheScalarTypeThatFlinkCanSerialize() {
+    var types = new JavaTypeFactoryImpl();
+    var rex = new RexBuilder(types);
+    var function =
+        new SqlFunction(
+            "JSON_STRING", SqlKind.OTHER_FUNCTION, null, null, null, SqlFunctionCategory.STRING);
+    var call =
+        rex.makeCall(
+            types.createSqlType(SqlTypeName.VARCHAR),
+            function,
+            List.of(rex.makeNullLiteral(types.createSqlType(SqlTypeName.NULL))));
+    assertNull(RexExpression.encodeProjections(List.of(call), List.of("json")));
+  }
+
+  @Test
   void hexRejectsBooleanEvenIfAnUpstreamPlannerSuppliesTheCall() {
     var types = new JavaTypeFactoryImpl();
     var rex = new RexBuilder(types);

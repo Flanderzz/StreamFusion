@@ -17,6 +17,7 @@ final class TextTimeBenchmarkInputs {
   static String baselineExpression(String input) {
     return switch (input) {
       case "tt_bytes", "tt_utf16", "tt_utf16be", "tt_utf16le" -> "b";
+      case "tt_boolean" -> "b";
       case "tt_timestamp" -> "ts";
       default -> "s";
     };
@@ -25,6 +26,7 @@ final class TextTimeBenchmarkInputs {
   static String baselineType(String input) {
     return switch (input) {
       case "tt_bytes", "tt_utf16", "tt_utf16be", "tt_utf16le" -> "BYTES";
+      case "tt_boolean" -> "BOOLEAN";
       case "tt_timestamp" -> "TIMESTAMP(9)";
       default -> "STRING";
     };
@@ -39,7 +41,14 @@ final class TextTimeBenchmarkInputs {
       payload(unicode ? " |\u4e2daB\ud83d\ude00| " : " |abCd| efGh| ", bytes),
       payload(unicode ? " |\u00e9dE\ud83d\ude42| " : " |deFg| abCd| ", bytes)
     };
-    if (input.equals("tt_timestamp")) {
+    if (input.equals("tt_boolean")) {
+      tables.createTemporaryView(
+          "inputs",
+          env.fromSequence(0, rows - 1)
+              .map(i -> Row.of(isNull(i, nullEvery) ? null : i % 2 == 0))
+              .returns(Types.ROW_NAMED(new String[] {"b"}, Types.BOOLEAN)),
+          Schema.newBuilder().column("b", DataTypes.BOOLEAN()).build());
+    } else if (input.equals("tt_timestamp")) {
       LocalDateTime[] values = {
         LocalDateTime.of(1969, 12, 31, 23, 59, 59, 987654321),
         LocalDateTime.of(2000, 2, 29, 12, 34, 56, 123456789),

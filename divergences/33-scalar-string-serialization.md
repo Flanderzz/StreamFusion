@@ -25,5 +25,19 @@ so the decoder keeps the JDK byte-consumption rules explicitly.
 SQL parity covers all 65,536 single code units, boundary pairs, random byte strings,
 NULLs, empty input, and compositions. Encoding/decoding are independent native kernels.
 
+## JSON scalar serialization
+
+Flink 2.2.1's JsonStringCallGen converts scalars to Jackson nodes and serializes them
+through SqlJsonUtils.serializeJson. StreamFusion's character, boolean and signed-integer
+forms follow the same bytes while writing directly to the Arrow output builder. The shared
+string writer also serves the existing native JSON decoder: it copies unescaped spans in
+bulk, following Comet's to_json.rs structure, and handles every ASCII control as Jackson
+does (including uppercase hex escapes). Flink's separate JSON_QUOTE is not this serializer.
+
+The core writer has no connector-feature dependency. Unlike Comet's general Spark cast
+path, unverified floating-point, decimal, binary, temporal and container types remain on
+Flink. Direct JSON constructors are excluded from scalar inputs because Flink's code
+generator inserts those as raw JSON instead of quoting their character result.
+
 Coverage is listed in [Calc/filter](../docs/operators/calc-filter.md); independent
 Flink/native measurements are in [scalar benchmarks](../docs/benchmarks/scalar-functions.md).

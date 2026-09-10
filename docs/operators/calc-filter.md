@@ -301,6 +301,23 @@ Character input, including NULL. Matches Flink 2.2.1's actual spelling: slash is
 
 One character argument is native. Valid quoted values are unescaped with Flink/Jackson first-token validation; invalid input is preserved and NULL propagates. A truncated Unicode escape after a valid first token fails the job, matching Flink 2.2.1's uncaught bounds exception. A truncated escape inside the first token is invalid JSON and is preserved.
 
+### JSON_STRING
+
+One character, BOOLEAN, TINYINT, SMALLINT, INTEGER, or BIGINT scalar is native by default.
+SQL NULL returns SQL NULL; other scalars serialize to JSON text. Strings use Jackson's
+escaping: quote/backslash and ASCII controls are escaped, other controls use uppercase
+`\u00XX`, and slashes and Unicode remain unescaped. Integer widths retain their exact
+decimal spelling. Output is written directly into the Arrow string builder.
+
+Floating point, DECIMAL, binary, temporal, and collection inputs fall back. Direct nested
+JSON_OBJECT, JSON_ARRAY, and JSON(value) calls also fall back: Flink treats those as raw JSON,
+which is outside this scalar admission. JSON_STRING applied to an ordinary string column
+containing JSON text quotes it normally. No compatibility opt-in is needed.
+
+NULL values must have a supported scalar type, for example `CAST(NULL AS STRING)`.
+An operand whose type remains SQL NULL falls back: Flink's JSON node generator cannot
+serialize that type. The same typed-NULL rule applies to JSON_OBJECT values.
+
 ### IS JSON
 
 `s IS JSON [VALUE | OBJECT | ARRAY | SCALAR]` and their `IS NOT JSON` forms are native

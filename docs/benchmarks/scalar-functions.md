@@ -531,6 +531,24 @@ BOM for UTF-16. Non-null benchmark inputs are valid encoded text.
 | DECODE_UTF16BE | Unicode, 264-byte text budget, NULL/8 | 1.141 | 0.976 |
 | DECODE_UTF16LE | Unicode, 264-byte text budget, NULL/8 | 1.311 | 1.001 |
 
+## JSON_STRING scalars
+
+Measured on 2026-09-10 with the release profile, 2,000,000 rows, two warmups,
+five interleaved trials and both transposes. `JSON_STRING_TEXT` uses `tt_text`;
+`JSON_STRING_BOOLEAN` alternates boolean values; `JSON_STRING_INTEGER` uses the
+BIGINT fixture. Each query contains one JSON_STRING call. Byte budgets affect only
+text, so boolean/integer results list non-null and NULL/8 inputs once each.
+
+| Input scenario | Flink (s) | Native (s) |
+|---|---:|---:|
+| STRING, ASCII, 32-byte budget | 0.605 | 0.644 |
+| STRING, ASCII, 264-byte budget | 1.529 | 1.513 |
+| STRING, Unicode, 264-byte budget, NULL/8 | 1.176 | 1.262 |
+| BOOLEAN, non-null | 0.424 | 0.470 |
+| BOOLEAN, NULL/8 | 0.386 | 0.464 |
+| BIGINT, non-null | 0.456 | 0.487 |
+| BIGINT, NULL/8 | 0.402 | 0.478 |
+
 ## TRIM directions and literal sets
 
 Measured on 2026-09-10 using the release profile and the interleaved, 2,000,000-row,
