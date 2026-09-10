@@ -16,7 +16,7 @@ final class TextTimeBenchmarkInputs {
 
   static String baselineExpression(String input) {
     return switch (input) {
-      case "tt_bytes" -> "b";
+      case "tt_bytes", "tt_utf16", "tt_utf16be", "tt_utf16le" -> "b";
       case "tt_timestamp" -> "ts";
       default -> "s";
     };
@@ -24,7 +24,7 @@ final class TextTimeBenchmarkInputs {
 
   static String baselineType(String input) {
     return switch (input) {
-      case "tt_bytes" -> "BYTES";
+      case "tt_bytes", "tt_utf16", "tt_utf16be", "tt_utf16le" -> "BYTES";
       case "tt_timestamp" -> "TIMESTAMP(9)";
       default -> "STRING";
     };
@@ -51,9 +51,16 @@ final class TextTimeBenchmarkInputs {
               .map(i -> Row.of(isNull(i, nullEvery) ? null : values[(int) (i % values.length)]))
               .returns(Types.ROW_NAMED(new String[] {"ts"}, Types.LOCAL_DATE_TIME)),
           Schema.newBuilder().column("ts", DataTypes.TIMESTAMP(9)).build());
-    } else if (input.equals("tt_bytes")) {
+    } else if (input.equals("tt_bytes") || input.startsWith("tt_utf16")) {
+      java.nio.charset.Charset charset =
+          switch (input) {
+            case "tt_utf16" -> StandardCharsets.UTF_16;
+            case "tt_utf16be" -> StandardCharsets.UTF_16BE;
+            case "tt_utf16le" -> StandardCharsets.UTF_16LE;
+            default -> StandardCharsets.UTF_8;
+          };
       byte[][] values = {
-        text[0].getBytes(StandardCharsets.UTF_8), text[1].getBytes(StandardCharsets.UTF_8)
+        text[0].getBytes(charset), text[1].getBytes(charset)
       };
       tables.createTemporaryView(
           "inputs",

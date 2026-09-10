@@ -13,5 +13,17 @@ It avoids DataFusion Spark's per-row temporary byte vectors while retaining the
 existing scalar/array invocation convention and NULL propagation. Only verified
 literal charsets are admitted; no incompatible-behavior switch is needed.
 
+## UTF-16 decoding
+
+DECODE follows JDK `sun.nio.cs.UnicodeDecoder`, used by Flink 2.2.1. UTF-16 consumes
+an initial BOM and otherwise defaults to big-endian. Explicit BE/LE codecs preserve
+the BOM as a character. A high surrogate plus a non-low code unit consumes four bytes
+as one malformed sequence; a terminal high surrogate with one trailing byte consumes
+all three bytes. Rust's ordinary UTF-16 replacement iterator groups these differently,
+so the decoder keeps the JDK byte-consumption rules explicitly.
+
+SQL parity covers all 65,536 single code units, boundary pairs, random byte strings,
+NULLs, empty input, and compositions. Encoding/decoding are independent native kernels.
+
 Coverage is listed in [Calc/filter](../docs/operators/calc-filter.md); independent
 Flink/native measurements are in [scalar benchmarks](../docs/benchmarks/scalar-functions.md).

@@ -510,6 +510,27 @@ over `tt_text`; select `ENCODE_UTF16`, `ENCODE_UTF16BE`, or `ENCODE_UTF16LE`.
 | ENCODE_UTF16BE | Unicode, 264-byte budget, NULL/8 | 1.222 | 1.222 |
 | ENCODE_UTF16LE | Unicode, 264-byte budget, NULL/8 | 2.063 | 1.227 |
 
+## DECODE UTF-16 charsets
+
+Measured on 2026-09-10 with the release profile, 2,000,000 rows, two warmups,
+five interleaved trials and both transposes. Run each of `DECODE_UTF16`,
+`DECODE_UTF16BE`, and `DECODE_UTF16LE` independently. Source fixtures pre-encode
+text in the matching charset, so only DECODE is measured. The budgets describe
+the original text in UTF-8; actual binary input uses UTF-16 code units plus a
+BOM for UTF-16. Non-null benchmark inputs are valid encoded text.
+
+| Function | Scenario | Flink (s) | Native (s) |
+|---|---|---:|---:|
+| DECODE_UTF16 | ASCII, 32-byte text budget | 0.423 | 0.526 |
+| DECODE_UTF16BE | ASCII, 32-byte text budget | 0.441 | 0.514 |
+| DECODE_UTF16LE | ASCII, 32-byte text budget | 0.557 | 0.507 |
+| DECODE_UTF16 | ASCII, 264-byte text budget | 1.020 | 1.342 |
+| DECODE_UTF16BE | ASCII, 264-byte text budget | 1.112 | 1.322 |
+| DECODE_UTF16LE | ASCII, 264-byte text budget | 1.318 | 1.389 |
+| DECODE_UTF16 | Unicode, 264-byte text budget, NULL/8 | 1.025 | 0.975 |
+| DECODE_UTF16BE | Unicode, 264-byte text budget, NULL/8 | 1.141 | 0.976 |
+| DECODE_UTF16LE | Unicode, 264-byte text budget, NULL/8 | 1.311 | 1.001 |
+
 ## TRIM directions and literal sets
 
 Measured on 2026-09-10 using the release profile and the interleaved, 2,000,000-row,

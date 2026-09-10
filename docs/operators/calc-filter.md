@@ -286,7 +286,12 @@ Other or dynamic charsets fall back.
 
 ### DECODE
 
-Binary input and a literal UTF-8, US-ASCII, or ISO-8859-1 charset. UTF-8 uses the JDK's replacement grouping for malformed sequences; ASCII replaces each non-ASCII byte; Latin-1 maps all bytes. NULL stays NULL. Other or dynamic charsets fall back.
+Binary input and the same six literal charsets as ENCODE. UTF-8 uses the JDK's replacement
+grouping for malformed sequences; ASCII replaces each non-ASCII byte; Latin-1 maps all bytes.
+UTF-16 detects and consumes an initial BOM, defaulting to big-endian without one. UTF-16BE/LE
+use their fixed byte order and retain the BOM as a character. Malformed surrogate pairs and
+odd trailing bytes follow JDK UnicodeDecoder grouping, including consuming a high surrogate
+and a following non-low code unit together. NULL stays NULL. Other or dynamic charsets fall back.
 
 ### JSON_QUOTE
 

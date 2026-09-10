@@ -938,9 +938,8 @@ final class RexExpression {
     } catch (IllegalArgumentException e) {
       return reject(call.getOperator().getName() + ": unknown charset");
     }
-    boolean utf16Encoding =
-        op == 120 && List.of("UTF-16", "UTF-16BE", "UTF-16LE").contains(charset);
-    if (!utf16Encoding && !List.of("UTF-8", "US-ASCII", "ISO-8859-1").contains(charset)) {
+    if (!List.of("UTF-8", "US-ASCII", "ISO-8859-1", "UTF-16", "UTF-16BE", "UTF-16LE")
+        .contains(charset)) {
       return reject(call.getOperator().getName() + ": unverified charset " + charset);
     }
     add(KIND_CALL, op, 2);
