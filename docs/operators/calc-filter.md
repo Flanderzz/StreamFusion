@@ -278,11 +278,15 @@ The JDK rule is selected on the JobManager during planning, so the JobManager an
 
 ### ENCODE
 
-Character input and a literal UTF-8, US-ASCII, or ISO-8859-1 charset (including JDK aliases). Returns BYTES, preserves NULL, and replaces unmappable characters with `?`. Other or dynamic charsets fall back.
+Character input and a literal UTF-8, US-ASCII, ISO-8859-1, UTF-16, UTF-16BE, or UTF-16LE
+charset (including JDK aliases). Returns BYTES, preserves NULL, and replaces unmappable
+characters with `?` in ASCII/Latin-1. UTF-16 emits a big-endian BOM for non-empty strings;
+UTF-16BE/LE emit no BOM. Empty strings produce empty bytes in all six charsets.
+Other or dynamic charsets fall back.
 
 ### DECODE
 
-Binary input and the same three literal charsets as ENCODE. UTF-8 uses the JDK's replacement grouping for malformed sequences; ASCII replaces each non-ASCII byte; Latin-1 maps all bytes. NULL stays NULL. Other or dynamic charsets fall back.
+Binary input and a literal UTF-8, US-ASCII, or ISO-8859-1 charset. UTF-8 uses the JDK's replacement grouping for malformed sequences; ASCII replaces each non-ASCII byte; Latin-1 maps all bytes. NULL stays NULL. Other or dynamic charsets fall back.
 
 ### JSON_QUOTE
 

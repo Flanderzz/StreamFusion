@@ -492,6 +492,24 @@ containing the ASCII/Unicode payload bytes; encoding is the only measured functi
 | ASCII, 264-byte budget | 0.499 | 0.767 |
 | Unicode, 264-byte budget, NULL/8 | 0.485 | 0.753 |
 
+## ENCODE UTF-16 charsets
+
+Measured on 2026-09-10 with the same release, interleaved 2,000,000-row method,
+two warmups, five measured trials and both transposes. Each charset runs separately
+over `tt_text`; select `ENCODE_UTF16`, `ENCODE_UTF16BE`, or `ENCODE_UTF16LE`.
+
+| Function | Scenario | Flink (s) | Native (s) |
+|---|---|---:|---:|
+| ENCODE_UTF16 | ASCII, 32-byte budget | 0.440 | 0.627 |
+| ENCODE_UTF16BE | ASCII, 32-byte budget | 0.454 | 0.688 |
+| ENCODE_UTF16LE | ASCII, 32-byte budget | 0.540 | 0.689 |
+| ENCODE_UTF16 | ASCII, 264-byte budget | 0.998 | 1.537 |
+| ENCODE_UTF16BE | ASCII, 264-byte budget | 0.997 | 1.544 |
+| ENCODE_UTF16LE | ASCII, 264-byte budget | 1.599 | 1.484 |
+| ENCODE_UTF16 | Unicode, 264-byte budget, NULL/8 | 1.889 | 1.242 |
+| ENCODE_UTF16BE | Unicode, 264-byte budget, NULL/8 | 1.222 | 1.222 |
+| ENCODE_UTF16LE | Unicode, 264-byte budget, NULL/8 | 2.063 | 1.227 |
+
 ## TRIM directions and literal sets
 
 Measured on 2026-09-10 using the release profile and the interleaved, 2,000,000-row,

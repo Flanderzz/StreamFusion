@@ -13,7 +13,17 @@ class FlinkEncodeSqlHarnessTest {
   @Test
   void unverifiedFormsFallBackBeforeExecution() throws Exception {
     NativeParity.assertFallback(
-        StringFunctionTestInputs::encodings, "SELECT id, ENCODE(s, 'UTF-16') FROM encodings");
+        StringFunctionTestInputs::encodings, "SELECT id, ENCODE(s, 'UTF-32') FROM encodings");
+  }
+
+  @Test
+  void utf16EncodesBomEndianAliasesAndSupplementaryCharacters() throws Exception {
+    NativeParity.assertParity(
+        () -> TextTimeFunctionTestInputs.textRows(
+            null, "", "a\u0000b", "\ufeff", "\ufffe", "\u007f\u0080",
+            "\u4e2d\ud83d\ude00", "\ud7ff\ue000\uffff", "\ud83d\ude00".repeat(2048)),
+        "SELECT id, ENCODE(s, 'UTF-16'), ENCODE(s, 'UnicodeBigUnmarked'),"
+            + " ENCODE(s, 'UnicodeLittleUnmarked'), ENCODE(s, 'Unicode') FROM inputs");
   }
 
   @Test

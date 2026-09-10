@@ -93,6 +93,9 @@ class ScalarFunctionBenchmark {
                   new Query("HEX_STRING", "text", "HEX(s)"),
                   new Query("TO_BASE64", "text", "TO_BASE64(s)"),
                   new Query("TO_BASE64_BINARY", "tt_bytes", "TO_BASE64(b)"),
+                  new Query("ENCODE_UTF16", "tt_text", "ENCODE(s, 'UTF-16')", "BYTES"),
+                  new Query("ENCODE_UTF16BE", "tt_text", "ENCODE(s, 'UTF-16BE')", "BYTES"),
+                  new Query("ENCODE_UTF16LE", "tt_text", "ENCODE(s, 'UTF-16LE')", "BYTES"),
                   new Query("UNHEX", "hex", "UNHEX(s)", "BYTES")))
           .toList();
 

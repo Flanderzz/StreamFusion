@@ -10,6 +10,9 @@ pub(super) enum Charset {
     Utf8,
     Ascii,
     Latin1,
+    Utf16,
+    Utf16Be,
+    Utf16Le,
 }
 
 pub(super) fn function(decode: bool) -> ScalarUDF {
@@ -65,6 +68,9 @@ impl ScalarUDFImpl for CharsetFunction {
             "UTF-8" => Charset::Utf8,
             "US-ASCII" => Charset::Ascii,
             "ISO-8859-1" => Charset::Latin1,
+            "UTF-16" => Charset::Utf16,
+            "UTF-16BE" => Charset::Utf16Be,
+            "UTF-16LE" => Charset::Utf16Le,
             other => return exec_err!("Unsupported ENCODE/DECODE charset: {other}"),
         };
         let scalar = matches!(input, ColumnarValue::Scalar(_));

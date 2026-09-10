@@ -32,6 +32,9 @@ pub(super) fn decode(input: &ArrayRef, charset: Charset) -> Result<ArrayRef> {
         }
         text.clear();
         match charset {
+            Charset::Utf16 | Charset::Utf16Be | Charset::Utf16Le => {
+                return datafusion::common::exec_err!("Unverified DECODE charset");
+            }
             Charset::Utf8 => super::scalar::append_java_utf8(input.value(row), &mut text),
             Charset::Latin1 => text.extend(input.value(row).iter().map(|&byte| char::from(byte))),
             Charset::Ascii => text.extend(input.value(row).iter().map(|&byte| {
