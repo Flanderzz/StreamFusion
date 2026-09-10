@@ -39,10 +39,7 @@ import org.apache.paimon.table.source.DataSplit;
 import org.apache.paimon.table.source.Split;
 import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.InternalRowUtils;
-import org.junit.jupiter.api.MethodOrderer;
-import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.TestMethodOrder;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -53,8 +50,6 @@ import tech.streamfusion.planner.PhysicalPlanScan;
  * Streaming SQL inserts into Paimon append and primary-key tables through the native sink, checked
  * against twins written by the stock Paimon connector in the same MiniCluster.
  */
-// Run the added fallback twin after the scheduler-sensitive multi-writer sequence checks.
-@TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class PaimonSinkParityTest {
 
   private static final int ROWS = 300;
@@ -142,7 +137,6 @@ class PaimonSinkParityTest {
   }
 
   @Test
-  @Order(Integer.MAX_VALUE)
   void sinkConstraintsMatchTheStockTwin() throws Exception {
     java.nio.file.Path warehouse = Files.createTempDirectory("paimon-sink-constraints");
     FileStoreTable stockTable = insertConstraintFixture(warehouse, false);
@@ -495,6 +489,7 @@ class PaimonSinkParityTest {
               v[10],
               v[11]));
     }
+    // Keep record arrival order identical across twin jobs; the sink retains env parallelism.
     DataStream<Row> stream =
         env.fromData(
             Types.ROW_NAMED(
@@ -512,7 +507,8 @@ class PaimonSinkParityTest {
                 Types.PRIMITIVE_ARRAY(Types.BYTE),
                 Types.BYTE,
                 Types.STRING),
-            rows.toArray(new Row[0]));
+            rows.toArray(new Row[0]))
+            .setParallelism(1);
     Table source =
         tableEnv.fromChangelogStream(
             stream,
