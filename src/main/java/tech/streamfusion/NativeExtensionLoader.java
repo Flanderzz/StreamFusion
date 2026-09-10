@@ -37,7 +37,10 @@ public final class NativeExtensionLoader {
       System.loadLibrary(libraryName);
       return;
     } catch (UnsatisfiedLinkError libraryPathFailure) {
-      if (loadBundled(owner, extension, libraryName)) {
+      // A development build binds every extension class to the all-features development core
+      // library below; a release library left in a module's classes by an earlier release build
+      // must not be picked up next to it, or the tests would exercise that stale library instead.
+      if (!BuildVersion.developmentMode() && loadBundled(owner, extension, libraryName)) {
         return;
       }
 
@@ -45,7 +48,7 @@ public final class NativeExtensionLoader {
       // to an unrelated library. Source-tree tests may see these classes through a reactor JAR
       // (a sibling module's test classpath), so the build's test runner sets the development
       // property to reach the all-features development core library below.
-      if (isPackaged(owner) && !Boolean.getBoolean("streamfusion.native.development")) {
+      if (isPackaged(owner) && !BuildVersion.developmentMode()) {
         UnsatisfiedLinkError error =
             new UnsatisfiedLinkError(
                 "No bundled native library for StreamFusion extension '"
