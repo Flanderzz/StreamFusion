@@ -51,14 +51,17 @@ public final class KeyedUpsertBuffer implements AutoCloseable {
     this.handle = Native.createKeyedUpsertBuffer(keyColumns, kindColumn, keepLast, ignoreRetracts);
   }
 
-  /** Hands a batch over; its rows take the sequence numbers {@code firstSequence} onwards. */
-  public void push(VectorSchemaRoot root, long firstSequence) {
+  /**
+   * Hands a batch over; its rows take the sequence numbers {@code firstSequence} onwards. Returns
+   * the rows retained, which is fewer than pushed when ignored retracts were dropped.
+   */
+  public long push(VectorSchemaRoot root, long firstSequence) {
     BufferAllocator rootAllocator =
         root.getFieldVectors().isEmpty() ? allocator : root.getFieldVectors().get(0).getAllocator();
     try (ArrowArray array = ArrowArray.allocateNew(rootAllocator);
         ArrowSchema schema = ArrowSchema.allocateNew(rootAllocator)) {
       Data.exportVectorSchemaRoot(rootAllocator, root, NativeAllocator.DICTIONARIES, array, schema);
-      Native.keyedUpsertBufferPush(
+      return Native.keyedUpsertBufferPush(
           handle, array.memoryAddress(), schema.memoryAddress(), firstSequence);
     } finally {
       root.close();

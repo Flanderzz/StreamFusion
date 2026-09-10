@@ -96,7 +96,8 @@ public final class NativePaimonParquetWriter implements BundleFormatWriter {
     BufferAllocator allocator = allocatorOf(root);
     try (ArrowArray array = ArrowArray.allocateNew(allocator)) {
       Data.exportVectorSchemaRoot(allocator, root, NativeAllocator.DICTIONARIES, array);
-      NativeParquet.parquetEncoderWrite(encoder, array.memoryAddress(), new int[0], 0, root.getRowCount());
+      NativeParquet.parquetEncoderWrite(
+          encoder, array.memoryAddress(), new int[0], bundle.rowOffset(), (int) bundle.rowCount());
     }
     lastBundle = bundle;
   }

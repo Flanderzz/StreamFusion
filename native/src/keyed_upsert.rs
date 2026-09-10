@@ -11,7 +11,9 @@ pub(crate) enum Keep {
 /// requires every file of a primary-key table to be sorted by key with each key appearing once, so a
 /// buffer of upserts becomes a file only after a sort by (key, arrival) and a per-key merge. The
 /// arrival order is captured as a sequence number assigned on push, so the merge is deterministic
-/// and the file records the same sequence semantics Paimon's own writer records.
+/// and the file records the same sequence semantics Paimon's own writer records. Retracts a table
+/// ignores are dropped on push, before numbering, as Paimon's table write drops them before its
+/// writer numbers a row.
 pub(crate) struct KeyedUpsertBuffer {
     key_columns: Vec<usize>,
     kind_column: usize,
@@ -62,12 +64,35 @@ impl KeyedUpsertBuffer {
         }
     }
 
-    /// Retains a batch whose rows take the sequence numbers `first_sequence..` in arrival order.
-    pub(crate) fn push(&mut self, batch: RecordBatch, first_sequence: i64) {
-        self.rows += batch.num_rows();
-        self.bytes += batch.get_array_memory_size();
-        self.sequences.push(first_sequence);
-        self.batches.push(batch);
+    /// Retains a batch whose rows take the sequence numbers `first_sequence..` in arrival order and
+    /// returns how many rows were retained.
+    pub(crate) fn push(&mut self, batch: RecordBatch, first_sequence: i64) -> usize {
+        let batch = if self.ignore_retracts {
+            self.without_retracts(&batch)
+        } else {
+            batch
+        };
+        let retained = batch.num_rows();
+        if retained > 0 {
+            self.rows += retained;
+            self.bytes += batch.get_array_memory_size();
+            self.sequences.push(first_sequence);
+            self.batches.push(batch);
+        }
+        retained
+    }
+
+    fn without_retracts(&self, batch: &RecordBatch) -> RecordBatch {
+        let kinds = batch
+            .column(self.kind_column)
+            .as_any()
+            .downcast_ref::<Int8Array>()
+            .expect("row kind column");
+        let keep: BooleanArray = kinds
+            .iter()
+            .map(|kind| Some(!is_retract(kind.unwrap())))
+            .collect();
+        filter_record_batch(batch, &keep).expect("drop ignored retracts")
     }
 
     pub(crate) fn rows(&self) -> usize {
@@ -92,11 +117,6 @@ impl KeyedUpsertBuffer {
             .flat_map(|(batch, first)| *first..*first + batch.num_rows() as i64)
             .collect();
         let batch = concat_batches(&schema, &batches).expect("concat pending upserts");
-        let kinds = batch
-            .column(self.kind_column)
-            .as_any()
-            .downcast_ref::<Int8Array>()
-            .expect("row kind column");
         let key_arrays: Vec<&ArrayRef> = self
             .key_columns
             .iter()
@@ -105,9 +125,7 @@ impl KeyedUpsertBuffer {
         let keys = key_row_converter(&key_arrays)
             .convert_columns(&key_arrays.iter().map(|a| (*a).clone()).collect::<Vec<_>>())
             .expect("encode upsert keys");
-        let mut order: Vec<usize> = (0..batch.num_rows())
-            .filter(|&row| !(self.ignore_retracts && is_retract(kinds.value(row))))
-            .collect();
+        let mut order: Vec<usize> = (0..batch.num_rows()).collect();
         order.sort_unstable_by(|&a, &b| {
             keys.row(a)
                 .cmp(&keys.row(b))
@@ -216,7 +234,7 @@ pub extern "system" fn Java_tech_streamfusion_Native_createKeyedUpsertBuffer<'lo
 }
 
 /// Takes ownership of a batch the JVM exported and assigns its rows the sequence numbers starting
-/// at `first_sequence` in arrival order.
+/// at `first_sequence` in arrival order; returns the number of rows retained.
 #[no_mangle]
 pub extern "system" fn Java_tech_streamfusion_Native_keyedUpsertBufferPush<'local>(
     env: JNIEnv<'local>,
@@ -225,13 +243,13 @@ pub extern "system" fn Java_tech_streamfusion_Native_keyedUpsertBufferPush<'loca
     in_array_address: jlong,
     in_schema_address: jlong,
     first_sequence: jlong,
-) {
+) -> jlong {
     crate::bridge::jni_guard(env, move |_env| {
         let buffer = unsafe { &mut *(handle as *mut KeyedUpsertBuffer) };
         buffer.push(
             import_record_batch(in_array_address, in_schema_address),
             first_sequence,
-        );
+        ) as jlong
     })
 }
 
@@ -407,15 +425,23 @@ mod tests {
     }
 
     #[test]
-    fn ignoring_retracts_drops_them_before_the_merge() {
+    fn ignoring_retracts_drops_them_before_numbering_and_merging() {
         let mut buffer = KeyedUpsertBuffer::new(vec![0], 2, Keep::Last, true);
-        buffer.push(batch(&[(1, "a", 0), (1, "b", 3), (2, "c", 1)]), 0);
+        assert_eq!(
+            buffer.push(
+                batch(&[(1, "a", 0), (1, "b", 3), (2, "c", 1), (2, "d", 2)]),
+                0
+            ),
+            2
+        );
         let merged = buffer.flush().expect("rows");
-        assert_eq!(i64s(&merged.batch, 0), vec![1]);
-        assert_eq!(strings(&merged.batch, 4), vec!["a"]);
+        assert_eq!(i64s(&merged.batch, 0), vec![1, 2]);
+        assert_eq!(i64s(&merged.batch, 1), vec![0, 1]);
+        assert_eq!(strings(&merged.batch, 4), vec!["a", "d"]);
         assert_eq!(merged.delete_rows, 0);
         let mut only_retracts = KeyedUpsertBuffer::new(vec![0], 2, Keep::Last, true);
-        only_retracts.push(batch(&[(1, "a", 3)]), 0);
+        assert_eq!(only_retracts.push(batch(&[(1, "a", 3)]), 0), 0);
+        assert_eq!(only_retracts.rows(), 0);
         assert!(only_retracts.flush().is_none());
     }
 

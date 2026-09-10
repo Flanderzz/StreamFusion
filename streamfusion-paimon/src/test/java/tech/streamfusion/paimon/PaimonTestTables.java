@@ -27,8 +27,10 @@ import org.apache.flink.table.types.logical.MapType;
 import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.table.types.logical.LocalZonedTimestampType;
 import org.apache.flink.table.types.logical.TimestampType;
+import org.apache.flink.table.types.logical.TinyIntType;
 import org.apache.flink.table.types.logical.VarBinaryType;
 import org.apache.flink.table.types.logical.VarCharType;
+import org.apache.flink.types.RowKind;
 import org.apache.paimon.data.BinaryString;
 import org.apache.paimon.data.Decimal;
 import org.apache.paimon.data.GenericArray;
@@ -90,6 +92,130 @@ final class PaimonTestTables {
             "id", "name", "price", "big", "ts", "ts6", "dt", "tags", "attrs", "nested", "flag",
             "dbl", "bin", "pt"
           });
+
+  static final RowType PRIMARY_KEY_FLINK_TYPE =
+      RowType.of(
+          new LogicalType[] {
+            new BigIntType(false),
+            new VarCharType(false, VarCharType.MAX_LENGTH),
+            new VarCharType(VarCharType.MAX_LENGTH),
+            new DecimalType(10, 2),
+            new TimestampType(3),
+            new DateType(),
+            new BooleanType(),
+            new DoubleType(),
+            new VarBinaryType(VarBinaryType.MAX_LENGTH),
+            new TinyIntType(),
+            new VarCharType(false, VarCharType.MAX_LENGTH)
+          },
+          new String[] {"id", "cat", "name", "price", "ts", "dt", "flag", "dbl", "bin", "small", "pt"});
+
+  /** A partitioned primary-key table keyed on (id, cat, pt); the trimmed key is (id, cat). */
+  static Schema primaryKeySchema(Map<String, String> options) {
+    return Schema.newBuilder()
+        .column("id", DataTypes.BIGINT().notNull())
+        .column("cat", DataTypes.STRING().notNull())
+        .column("name", DataTypes.STRING())
+        .column("price", DataTypes.DECIMAL(10, 2))
+        .column("ts", DataTypes.TIMESTAMP(3))
+        .column("dt", DataTypes.DATE())
+        .column("flag", DataTypes.BOOLEAN())
+        .column("dbl", DataTypes.DOUBLE())
+        .column("bin", DataTypes.BYTES())
+        .column("small", DataTypes.TINYINT())
+        .column("pt", DataTypes.STRING().notNull())
+        .primaryKey("id", "cat", "pt")
+        .partitionKeys("pt")
+        .options(options)
+        .build();
+  }
+
+  static FileStoreTable createPrimaryKeyTable(java.nio.file.Path dir, Map<String, String> options)
+      throws Exception {
+    Path path = new Path(dir.toUri());
+    new SchemaManager(LocalFileIO.create(), path).createTable(primaryKeySchema(options));
+    return FileStoreTableFactory.create(LocalFileIO.create(), path);
+  }
+
+  /**
+   * An upsert changelog over {@code keys} distinct keys: the first row of a key inserts it, later
+   * rows update or (every fifth row) delete it, and a key always stays in one partition.
+   */
+  static List<Object[]> changelog(int n, int keys) {
+    List<Object[]> rows = new ArrayList<>();
+    java.util.Set<String> seen = new java.util.HashSet<>();
+    for (int i = 0; i < n; i++) {
+      long id = i % keys;
+      String cat = "c" + (id % 3);
+      String pt = "p" + (id % 2);
+      RowKind kind =
+          seen.add(id + cat) ? RowKind.INSERT : i % 5 == 4 ? RowKind.DELETE : RowKind.UPDATE_AFTER;
+      boolean nulls = i % 7 == 6;
+      rows.add(
+          new Object[] {
+            kind,
+            id,
+            cat,
+            nulls ? null : "name-" + i + (i % 5 == 0 ? "-with-a-long-suffix-over-sixteen-chars" : ""),
+            nulls ? null : BigDecimal.valueOf(i * 1_00L + 7, 2),
+            nulls ? null : 1_700_000_000_000L + i * 1_000L,
+            nulls ? null : 19_000 + i,
+            nulls ? null : i % 2 == 0,
+            nulls ? null : i * 0.5,
+            nulls ? null : ("bin" + i).getBytes(StandardCharsets.UTF_8),
+            nulls ? null : (byte) (i % 100),
+            pt
+          });
+    }
+    return rows;
+  }
+
+  static RowData primaryKeyFlinkRow(Object[] v) {
+    GenericRowData row = new GenericRowData((RowKind) v[0], v.length - 1);
+    row.setField(0, v[1]);
+    row.setField(1, StringData.fromString((String) v[2]));
+    row.setField(2, v[3] == null ? null : StringData.fromString((String) v[3]));
+    row.setField(3, v[4] == null ? null : DecimalData.fromBigDecimal((BigDecimal) v[4], 10, 2));
+    row.setField(4, v[5] == null ? null : TimestampData.fromEpochMillis((Long) v[5]));
+    row.setField(5, v[6]);
+    row.setField(6, v[7]);
+    row.setField(7, v[8]);
+    row.setField(8, v[9]);
+    row.setField(9, v[10]);
+    row.setField(10, StringData.fromString((String) v[11]));
+    return row;
+  }
+
+  static InternalRow primaryKeyPaimonRow(Object[] v) {
+    GenericRow row =
+        new GenericRow(org.apache.paimon.types.RowKind.fromByteValue(((RowKind) v[0]).toByteValue()), v.length - 1);
+    row.setField(0, v[1]);
+    row.setField(1, BinaryString.fromString((String) v[2]));
+    row.setField(2, v[3] == null ? null : BinaryString.fromString((String) v[3]));
+    row.setField(3, v[4] == null ? null : Decimal.fromBigDecimal((BigDecimal) v[4], 10, 2));
+    row.setField(4, v[5] == null ? null : Timestamp.fromEpochMillis((Long) v[5]));
+    row.setField(5, v[6]);
+    row.setField(6, v[7]);
+    row.setField(7, v[8]);
+    row.setField(8, v[9]);
+    row.setField(9, v[10]);
+    row.setField(10, BinaryString.fromString((String) v[11]));
+    return row;
+  }
+
+  /** Key bounds and key statistics of a primary-key data file. */
+  static String describeKeys(DataFileMeta file, org.apache.paimon.types.RowType keyType) {
+    return "minKey="
+        + render(file.minKey(), keyType)
+        + " maxKey="
+        + render(file.maxKey(), keyType)
+        + " keyMin="
+        + render(file.keyStats().minValues(), keyType)
+        + " keyMax="
+        + render(file.keyStats().maxValues(), keyType)
+        + " keyNulls="
+        + Arrays.toString(file.keyStats().nullCounts().toLongArray());
+  }
 
   static Schema paimonSchema(Map<String, String> options) {
     return Schema.newBuilder()

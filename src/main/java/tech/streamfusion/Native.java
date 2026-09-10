@@ -599,7 +599,7 @@ public final class Native {
    * Takes ownership of a batch the JVM exported and assigns its rows the sequence numbers starting
    * at {@code firstSequence} in arrival order.
    */
-  public static native void keyedUpsertBufferPush(
+  public static native long keyedUpsertBufferPush(
       long handle, long inArrayAddress, long inSchemaAddress, long firstSequence);
 
   /** Arrow memory held by the pending rows. */

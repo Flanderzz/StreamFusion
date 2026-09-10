@@ -24,11 +24,20 @@ import tech.streamfusion.arrow.ArrowConversion;
 public final class ArrowBatchBundle implements BundleRecords {
 
   private final VectorSchemaRoot root;
+  private final int rowOffset;
+  private final int rowCount;
   private final ColumnarRowData view;
   private final Cursor cursor;
 
   public ArrowBatchBundle(VectorSchemaRoot root, RowType rowType) {
+    this(root, rowType, 0, root.getRowCount());
+  }
+
+  /** The rows {@code rowOffset} to {@code rowOffset + rowCount} of the batch, without copying them. */
+  public ArrowBatchBundle(VectorSchemaRoot root, RowType rowType, int rowOffset, int rowCount) {
     this.root = root;
+    this.rowOffset = rowOffset;
+    this.rowCount = rowCount;
     this.view =
         new ColumnarRowData(
             new VectorizedColumnBatch(
@@ -40,19 +49,23 @@ public final class ArrowBatchBundle implements BundleRecords {
     return root;
   }
 
+  int rowOffset() {
+    return rowOffset;
+  }
+
   @Override
   public long rowCount() {
-    return root.getRowCount();
+    return rowCount;
   }
 
   @Override
   public Iterator<InternalRow> iterator() {
     return new Iterator<>() {
-      private int next;
+      private int next = rowOffset;
 
       @Override
       public boolean hasNext() {
-        return next < root.getRowCount();
+        return next < rowOffset + rowCount;
       }
 
       @Override

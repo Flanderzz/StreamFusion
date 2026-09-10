@@ -21,8 +21,9 @@ import tech.streamfusion.operator.BucketedArrowBatch;
 
 /**
  * Paimon's table write operator fed with routed Arrow batches instead of rows. Each batch already
- * belongs to one (partition, bucket), so it enters Paimon's bundle write entry, which hands it to
- * the append writer for that bucket; the file writer then encodes the whole batch natively. State,
+ * belongs to one (partition, bucket). For an append table it enters Paimon's bundle write entry,
+ * which hands it to the append writer for that bucket, and the file writer encodes the whole batch
+ * natively; for a primary-key table it enters the native key-value sink write. State,
  * checkpointing, commit preparation, compaction, and the per-checkpoint refresh of writer options
  * (Paimon's {@code sink.writer-refresh-detectors}) stay Paimon's.
  */
@@ -67,6 +68,10 @@ public final class NativePaimonWriteOperator extends TableWriteOperator<Bucketed
   public void processElement(StreamRecord<BucketedArrowBatch> element) throws Exception {
     BucketedArrowBatch batch = element.getValue();
     BinaryRow partition = PaimonPartitions.fromBytes(batch.partition(), partitionArity);
+    if (write instanceof NativeKeyValueSinkWrite) {
+      ((NativeKeyValueSinkWrite) write).writeBundle(partition, batch.bucket(), batch.root());
+      return;
+    }
     try (VectorSchemaRoot root = batch.root()) {
       ((StoreSinkWriteImpl) write)
           .getWrite()

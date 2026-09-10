@@ -95,7 +95,7 @@ public final class NativePaimonSinkExecNode extends ExecNodeBase<Object>
       DataStream<BucketedArrowBatch> partitioned =
           FlinkStreamPartitioner.partition(
               routed, BucketedArrowBatchChannelComputer.byBucket(partitionArity), parallelism);
-      end = new NativePaimonFixedBucketSink(table).sinkFrom(partitioned);
+      end = new NativePaimonFixedBucketSink(table, false).sinkFrom(partitioned);
     } else {
       DataStream<BucketedArrowBatch> shuffled = routed;
       if (partitionArity > 0

@@ -102,14 +102,16 @@ class KeyedUpsertBufferTest {
     try (BufferAllocator allocator = new RootAllocator();
         KeyedUpsertBuffer buffer =
             new KeyedUpsertBuffer(allocator, new int[] {0}, KIND_COLUMN, true, true)) {
-      buffer.push(
-          batch(allocator, row(RowKind.INSERT, 1, "a"), row(RowKind.DELETE, 1, "b")), 0);
+      assertEquals(
+          1,
+          buffer.push(
+              batch(allocator, row(RowKind.INSERT, 1, "a"), row(RowKind.DELETE, 1, "b")), 0));
       KeyedUpsertBuffer.Flushed flushed = buffer.flush();
       try (VectorSchemaRoot root = flushed.root) {
         assertEquals(List.of("a"), strings(root, 4));
       }
       assertEquals(0, flushed.deleteRows);
-      buffer.push(batch(allocator, row(RowKind.DELETE, 1, "c")), 2);
+      assertEquals(0, buffer.push(batch(allocator, row(RowKind.DELETE, 1, "c")), 1));
       assertNull(buffer.flush());
     }
   }
