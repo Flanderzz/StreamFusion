@@ -136,6 +136,58 @@ class PaimonSinkParityTest {
         List.of("id", "label", "nested", "pt"), nativeTable.rowType().getFieldNames());
   }
 
+  @Test
+  void sinkConstraintsMatchTheStockTwin() throws Exception {
+    java.nio.file.Path warehouse = Files.createTempDirectory("paimon-sink-constraints");
+    FileStoreTable stockTable = insertConstraintFixture(warehouse, false);
+    FileStoreTable plannedTable = insertConstraintFixture(warehouse, true);
+
+    List<String> expected = List.of("1|x  |abc", "2|too|yz");
+    assertEquals(expected, PaimonTestTables.readRows(stockTable, stockTable.rowType()));
+    assertEquals(expected, PaimonTestTables.readRows(plannedTable, plannedTable.rowType()));
+  }
+
+  private static FileStoreTable insertConstraintFixture(
+      java.nio.file.Path warehouse, boolean installPlanner) throws Exception {
+    String name = installPlanner ? "constraints_planned" : "constraints_stock";
+    StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+    env.setParallelism(1);
+    StreamTableEnvironment tableEnv = catalogEnvironment(env, warehouse);
+    tableEnv.getConfig().set("table.exec.sink.not-null-enforcer", "DROP");
+    tableEnv.getConfig().set("table.exec.sink.type-length-enforcer", "TRIM_PAD");
+    tableEnv.executeSql(
+        "CREATE TABLE "
+            + name
+            + " (id BIGINT NOT NULL, fixed CHAR(3), limited VARCHAR(3)) WITH ('bucket' = '-1')");
+    DataStream<Row> stream =
+        env.fromData(
+            Types.ROW_NAMED(
+                new String[] {"id", "fixed", "limited"},
+                Types.LONG,
+                Types.STRING,
+                Types.STRING),
+            Row.of(null, "x", "abcdef"),
+            Row.of(1L, "x", "abcdef"),
+            Row.of(2L, "toolong", "yz"));
+    tableEnv.createTemporaryView(
+        "constraint_source",
+        tableEnv.fromDataStream(
+            stream,
+            Schema.newBuilder()
+                .column("id", "BIGINT")
+                .column("fixed", "CHAR(3)")
+                .column("limited", "VARCHAR(3)")
+                .build()));
+    PhysicalPlanScan scan = installPlanner ? NativePlanner.install(tableEnv) : null;
+
+    tableEnv.executeSql("INSERT INTO " + name + " SELECT * FROM constraint_source").await();
+
+    if (installPlanner) {
+      assertDeclined(scan, "not-null-enforcer=DROP");
+    }
+    return openTable(warehouse, name);
+  }
+
   private static FileStoreTable insertAliasedFixture(java.nio.file.Path warehouse, boolean nativeSink)
       throws Exception {
     String name = nativeSink ? "renamed_native" : "renamed_stock";

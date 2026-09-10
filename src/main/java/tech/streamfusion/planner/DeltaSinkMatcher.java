@@ -76,6 +76,10 @@ final class DeltaSinkMatcher {
         return Planned.fallback("Delta column type " + type + " is not verified by the native writer");
       }
     }
+    String constraintFallback = SinkConstraintGate.fallbackReason(sink);
+    if (constraintFallback != null) {
+      return Planned.fallback(constraintFallback);
+    }
     if (!"no".equalsIgnoreCase(options.getOrDefault("schema_evolution.mode", "no"))) {
       return Planned.fallback("schema evolution is enabled");
     }

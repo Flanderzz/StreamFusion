@@ -45,6 +45,9 @@ Falls back to Flink on:
 - `'auto-compaction' = 'true'`.
 - Unsupported compression codecs, or multithreaded zstd.
 - `INSERT OVERWRITE`.
+- A nullable query field assigned to a `NOT NULL` target, or a bounded `CHAR`/`VARCHAR` or
+  `BINARY`/`VARBINARY` target while `table.exec.sink.type-length-enforcer` is enabled. The stock
+  sink path preserves Flink's configured fail/drop and trim/pad/error behavior.
 - A changelog (retracting) input through the standard filesystem connector. The benchmark-only
   `changelog-parquet` connector can persist the raw physical change stream with a native
   `_row_kind` column; it is not a materialized-table sink.

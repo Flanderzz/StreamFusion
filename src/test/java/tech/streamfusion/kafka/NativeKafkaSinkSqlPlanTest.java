@@ -78,7 +78,7 @@ class NativeKafkaSinkSqlPlanTest {
   void fallsBackOnSinkParallelismOverAChangelogInput() {
     StreamTableEnvironment table = environment();
     table.executeSql(
-        "CREATE TABLE src (name STRING) "
+        "CREATE TABLE src (name STRING NOT NULL) "
             + "WITH ('connector' = 'datagen', 'number-of-rows' = '1')");
     table.executeSql(
         "CREATE TABLE output (name STRING, cnt BIGINT, PRIMARY KEY (name) NOT ENFORCED) WITH ("
@@ -144,6 +144,48 @@ class NativeKafkaSinkSqlPlanTest {
 
     assertTrue(scan.substitutions() > 0, scan::explainSummary);
     assertTrue(plan.contains("NativeKafkaSink"), plan);
+  }
+
+  @Test
+  void nullableInputForNotNullColumnUsesFlinksSinkEnforcer() {
+    StreamTableEnvironment table = environment();
+    table.executeSql(
+        "CREATE TABLE src (id BIGINT) "
+            + "WITH ('connector' = 'datagen', 'number-of-rows' = '1')");
+    table.executeSql(
+        "CREATE TABLE output (id BIGINT NOT NULL) WITH ("
+            + "'connector' = 'kafka', "
+            + "'topic' = 'output', "
+            + "'properties.bootstrap.servers' = 'broker:9092', "
+            + "'format' = 'json')");
+
+    PhysicalPlanScan scan = NativePlanner.install(table);
+    String plan = table.explainSql("INSERT INTO output SELECT * FROM src");
+
+    assertFalse(plan.contains("NativeKafkaSink"), plan);
+    assertTrue(scan.explainSummary().contains("not-null-enforcer=ERROR"), scan::explainSummary);
+  }
+
+  @Test
+  void enforcedCharacterLengthUsesFlinksSinkEnforcer() {
+    StreamTableEnvironment table = environment();
+    table.getConfig().set("table.exec.sink.type-length-enforcer", "TRIM_PAD");
+    table.executeSql(
+        "CREATE TABLE src (fixed CHAR(3), limited VARCHAR(3)) "
+            + "WITH ('connector' = 'datagen', 'number-of-rows' = '1')");
+    table.executeSql(
+        "CREATE TABLE output (fixed CHAR(3), limited VARCHAR(3)) WITH ("
+            + "'connector' = 'kafka', "
+            + "'topic' = 'output', "
+            + "'properties.bootstrap.servers' = 'broker:9092', "
+            + "'format' = 'json')");
+
+    PhysicalPlanScan scan = NativePlanner.install(table);
+    String plan = table.explainSql("INSERT INTO output SELECT * FROM src");
+
+    assertFalse(plan.contains("NativeKafkaSink"), plan);
+    assertTrue(
+        scan.explainSummary().contains("type-length-enforcer=TRIM_PAD"), scan::explainSummary);
   }
 
   @Test
@@ -278,7 +320,7 @@ class NativeKafkaSinkSqlPlanTest {
   void updatingUpsertSinkRoutesNativelyWithItsAggregate() {
     StreamTableEnvironment table = environment();
     table.executeSql(
-        "CREATE TABLE src (id BIGINT) "
+        "CREATE TABLE src (id BIGINT NOT NULL) "
             + "WITH ('connector' = 'datagen', 'number-of-rows' = '10')");
     table.executeSql(
         "CREATE TABLE output (id BIGINT, total BIGINT, PRIMARY KEY (id) NOT ENFORCED) WITH ("
@@ -344,7 +386,7 @@ class NativeKafkaSinkSqlPlanTest {
   void primaryKeyedCdcSinkRoutesNativelyWithItsAggregate() {
     StreamTableEnvironment table = environment();
     table.executeSql(
-        "CREATE TABLE src (id BIGINT) "
+        "CREATE TABLE src (id BIGINT NOT NULL) "
             + "WITH ('connector' = 'datagen', 'number-of-rows' = '10')");
     table.executeSql(
         "CREATE TABLE output (id BIGINT, total BIGINT, PRIMARY KEY (id) NOT ENFORCED) WITH ("
@@ -486,7 +528,7 @@ class NativeKafkaSinkSqlPlanTest {
   void upsertCsvSinkRoutesNativelyWithItsAggregate() {
     StreamTableEnvironment table = environment();
     table.executeSql(
-        "CREATE TABLE src (id BIGINT) "
+        "CREATE TABLE src (id BIGINT NOT NULL) "
             + "WITH ('connector' = 'datagen', 'number-of-rows' = '10')");
     table.executeSql(
         "CREATE TABLE output (id BIGINT, total BIGINT, PRIMARY KEY (id) NOT ENFORCED) WITH ("
@@ -714,7 +756,7 @@ class NativeKafkaSinkSqlPlanTest {
   void upsertAvroSinkRoutesNativelyWithItsAggregate() {
     StreamTableEnvironment table = environment();
     table.executeSql(
-        "CREATE TABLE src (id BIGINT) "
+        "CREATE TABLE src (id BIGINT NOT NULL) "
             + "WITH ('connector' = 'datagen', 'number-of-rows' = '10')");
     table.executeSql(
         "CREATE TABLE output (id BIGINT, total BIGINT, PRIMARY KEY (id) NOT ENFORCED) WITH ("

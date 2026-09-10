@@ -84,6 +84,9 @@ Key and value formats are resolved independently. Native sink substitution requi
 - Non-default sink partitioners, sink-side buffer flushing, or writable metadata.
 - A changelog/parallelism shape whose host translation inserts ordering or materialization that
   the substituted native boundary cannot preserve.
+- A nullable query field assigned to a `NOT NULL` target, or a bounded `CHAR`/`VARCHAR` or
+  `BINARY`/`VARBINARY` target while `table.exec.sink.type-length-enforcer` is enabled. The stock
+  sink path preserves Flink's configured fail/drop and trim/pad/error behavior.
 - Unsupported format options, types, or a missing format artifact.
 
 ## Copy cost

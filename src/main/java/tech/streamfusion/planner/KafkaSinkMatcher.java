@@ -105,6 +105,10 @@ final class KafkaSinkMatcher {
     ResolvedCatalogTable table = (ResolvedCatalogTable) context.getResolvedTable();
     RowType rowType =
         (RowType) table.getResolvedSchema().toPhysicalRowDataType().getLogicalType();
+    String constraintFallback = SinkConstraintGate.fallbackReason(sink);
+    if (constraintFallback != null) {
+      return Planned.fallback(constraintFallback);
+    }
     String valueFormatId = translated.planned().valueFormat;
     for (LogicalType type : rowType.getChildren()) {
       if (!supportsType(valueFormatId, type)) {

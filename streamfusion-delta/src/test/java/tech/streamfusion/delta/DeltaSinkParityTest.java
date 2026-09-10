@@ -37,6 +37,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.Function;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.api.connector.sink2.SinkWriter;
 import org.apache.flink.streaming.api.datastream.DataStream;
@@ -72,6 +73,13 @@ class DeltaSinkParityTest {
               new StructField("id", LongType.LONG, false),
               new StructField("v", IntegerType.INTEGER, true),
               new StructField("dt", StringType.STRING, true)));
+
+  private static final StructType CONSTRAINT_SCHEMA =
+      new StructType(
+          List.of(
+              new StructField("id", LongType.LONG, false),
+              new StructField("fixed", StringType.STRING, true),
+              new StructField("limited", StringType.STRING, true)));
 
   @org.junit.jupiter.api.Test
   void nativeFilesPublishTypedDeltaStatistics() throws Exception {
@@ -189,6 +197,24 @@ class DeltaSinkParityTest {
     assertEquals(readNestedRows(host), readNestedRows(nativePath));
   }
 
+  @org.junit.jupiter.api.Test
+  void sinkConstraintsMatchTheStockTwin() throws Exception {
+    Path host = Files.createTempDirectory("delta-constraints-host");
+    Path planned = Files.createTempDirectory("delta-constraints-planned");
+
+    runConstraintAppend(host, false);
+    PhysicalPlanScan scan = runConstraintAppend(planned, true);
+
+    List<List<Object>> expected =
+        List.of(List.of(1L, "x  ", "abc"), List.of(2L, "too", "yz"));
+    assertEquals(expected, sorted(readConstraintRows(host)));
+    assertEquals(expected, sorted(readConstraintRows(planned)));
+    assertTrue(
+        scan.fallbackReasons().stream()
+            .anyMatch(reason -> reason.contains("not-null-enforcer=DROP")),
+        scan::explainSummary);
+  }
+
   @org.junit.jupiter.api.Disabled("published Delta API does not expose an engine hook for catalogs")
   @org.junit.jupiter.api.Test
   void unityCatalogManagedTableRoutesThroughTheNativeWriter() {
@@ -254,7 +280,7 @@ class DeltaSinkParityTest {
         "nested_changes",
         source,
         Schema.newBuilder()
-            .column("id", DataTypes.BIGINT())
+            .column("id", DataTypes.BIGINT().notNull())
             .column(
                 "details",
                 DataTypes.ROW(
@@ -275,6 +301,43 @@ class DeltaSinkParityTest {
     PhysicalPlanScan scan = nativeWriter ? NativePlanner.install(tableEnv) : null;
     tableEnv.executeSql("INSERT INTO sink SELECT * FROM nested_changes").await();
     assertAccelerated(scan);
+  }
+
+  private static PhysicalPlanScan runConstraintAppend(Path path, boolean installPlanner)
+      throws Exception {
+    StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+    env.setParallelism(1);
+    StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env);
+    tableEnv.getConfig().set("table.exec.sink.not-null-enforcer", "DROP");
+    tableEnv.getConfig().set("table.exec.sink.type-length-enforcer", "TRIM_PAD");
+    DataStream<org.apache.flink.types.Row> source =
+        env.fromData(
+            Types.ROW_NAMED(
+                new String[] {"id", "fixed", "limited"},
+                Types.LONG,
+                Types.STRING,
+                Types.STRING),
+            org.apache.flink.types.Row.of(null, "x", "abcdef"),
+            org.apache.flink.types.Row.of(1L, "x", "abcdef"),
+            org.apache.flink.types.Row.of(2L, "toolong", "yz"));
+    tableEnv.createTemporaryView(
+        "constraint_changes",
+        source,
+        Schema.newBuilder()
+            .column("id", DataTypes.BIGINT())
+            .column("fixed", DataTypes.CHAR(3))
+            .column("limited", DataTypes.VARCHAR(3))
+            .build());
+    tableEnv.executeSql(
+        "CREATE TEMPORARY TABLE sink (id BIGINT NOT NULL, fixed CHAR(3), limited VARCHAR(3)) "
+            + "WITH ('connector'='delta', 'table_path'='"
+            + path.toUri()
+            + "', 'file_rolling.strategy'='count', 'file_rolling.count'='-1')");
+    PhysicalPlanScan scan = installPlanner ? NativePlanner.install(tableEnv) : null;
+
+    tableEnv.executeSql("INSERT INTO sink SELECT * FROM constraint_changes").await();
+
+    return scan;
   }
 
   private static List<List<Object>> readNestedRows(Path path) throws Exception {
@@ -462,9 +525,28 @@ class DeltaSinkParityTest {
   }
 
   private static List<List<Object>> readLogicalRows(Path tablePath) throws Exception {
+    return readRows(
+        tablePath,
+        DELTA_SCHEMA,
+        row ->
+            Arrays.asList(
+                row.getLong(0),
+                row.isNullAt(1) ? null : row.getInt(1),
+                row.isNullAt(2) ? null : row.getString(2)));
+  }
+
+  private static List<List<Object>> readConstraintRows(Path tablePath) throws Exception {
+    return readRows(
+        tablePath,
+        CONSTRAINT_SCHEMA,
+        row -> List.of(row.getLong(0), row.getString(1), row.getString(2)));
+  }
+
+  private static List<List<Object>> readRows(
+      Path tablePath, StructType readSchema, Function<Row, List<Object>> render) throws Exception {
     Engine engine = DefaultEngine.create(new org.apache.hadoop.conf.Configuration());
     Snapshot snapshot = TableManager.loadSnapshot(tablePath.toString()).build(engine);
-    Scan scan = snapshot.getScanBuilder().withReadSchema(DELTA_SCHEMA).build();
+    Scan scan = snapshot.getScanBuilder().withReadSchema(readSchema).build();
     Row scanState = scan.getScanState(engine);
     StructType physicalSchema = ScanStateRow.getPhysicalDataReadSchema(scanState);
     List<List<Object>> rows = new ArrayList<>();
@@ -487,12 +569,7 @@ class DeltaSinkParityTest {
               while (data.hasNext()) {
                 try (CloseableIterator<Row> logicalRows = data.next().getRows()) {
                   while (logicalRows.hasNext()) {
-                    Row row = logicalRows.next();
-                    rows.add(
-                        Arrays.asList(
-                            row.getLong(0),
-                            row.isNullAt(1) ? null : row.getInt(1),
-                            row.isNullAt(2) ? null : row.getString(2)));
+                    rows.add(render.apply(logicalRows.next()));
                   }
                 }
               }

@@ -151,6 +151,10 @@ final class PaimonSinkMatcher {
               + " columns for a table with "
               + fieldNames.size());
     }
+    String constraintFallback = SinkConstraintGate.fallbackReason(sink);
+    if (constraintFallback != null) {
+      return Planned.fallback(constraintFallback);
+    }
     String formatFallback = formatFallbackReason(table);
     if (formatFallback != null) {
       return Planned.fallback(formatFallback);

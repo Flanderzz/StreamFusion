@@ -102,6 +102,9 @@ Each of these declines at planning time with a reason visible in `NativePlanner.
   file indexes (`file-index.*`), `row-tracking.enabled`, `data-evolution.enabled`, `BLOB` columns.
 - `sink.clustering.*`, `partition.sink-strategy = PARTITION_DYNAMIC`,
   `sink.writer-coordinator.enabled`, `sink.coordinator-commit.enabled`.
+- A nullable query field assigned to a `NOT NULL` target, or a bounded `CHAR`/`VARCHAR` or
+  `BINARY`/`VARBINARY` target while `table.exec.sink.type-length-enforcer` is enabled. The stock
+  sink path preserves Flink's configured fail/drop and trim/pad/error behavior.
 - `TIMESTAMP` precision above 6 (Paimon writes INT96 there), `VARIANT`, vector, and geospatial
   types.
 - `parquet.*` keys the native writer cannot honour: bloom filters, page validation, custom
@@ -173,9 +176,7 @@ passes bundles through takes the same writer's direct path with no change here
 ([#39](https://github.com/datafusion-contrib/StreamFusion/issues/39)). The jar-ordering requirement
 goes away once Paimon's format discovery gains a priority, which
 [#38](https://github.com/datafusion-contrib/StreamFusion/issues/38) proposes upstream. A native
-Paimon source is [issue #27](https://github.com/datafusion-contrib/StreamFusion/issues/27). Like the
-other native sinks, this one does not yet run Flink's NOT NULL and type-length constraint enforcer
-in front of the writer ([#43](https://github.com/datafusion-contrib/StreamFusion/issues/43)).
+Paimon source is [issue #27](https://github.com/datafusion-contrib/StreamFusion/issues/27).
 
 Build with the `paimon` Maven profile. The module has no snapshot, local-Maven, path, or forked
 Paimon dependency.

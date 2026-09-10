@@ -61,6 +61,13 @@ binary, date, timestamp, `ROW`, `ARRAY`, and `MAP` columns recursively. Schema e
 connector path. Delta Lake data files remain Parquet: the transaction log and deletion-vector
 sidecars are protocol files, not alternative table data formats.
 
+Sink constraints remain Flink-owned. A nullable query field assigned to a `NOT NULL` target keeps
+the Delta sink on the stock path so `table.exec.sink.not-null-enforcer` can fail or drop the row.
+When `table.exec.sink.type-length-enforcer` is enabled, bounded `CHAR`/`VARCHAR` and
+`BINARY`/`VARBINARY` targets likewise stay on the stock path for Flink's trim, pad, or error
+behavior. Statically non-null inputs and the default type-length setting (`IGNORE`) remain eligible
+for native writing.
+
 Count- and size-based file rolling remain on the native path. The connector default is size rolling
 at 100 MiB. Count rolling uses exact row boundaries. Size rolling uses parquet-rs' encoded-byte
 estimate and checks it every 1,024 rows, so a file can exceed the configured size by one check

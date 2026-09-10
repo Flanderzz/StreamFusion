@@ -106,6 +106,10 @@ final class ParquetSinkMatcher {
     // and file-schema projection must use the catalog sink schema, just like stock Flink.
     RowType rowType =
         (RowType) table.getResolvedSchema().toPhysicalRowDataType().getLogicalType();
+    String constraintFallback = SinkConstraintGate.fallbackReason(sink);
+    if (constraintFallback != null) {
+      return Planned.fallback(constraintFallback);
+    }
     List<String> partitionKeys = table.getPartitionKeys();
     ParquetSinkTranslator.Result translated =
         ParquetSinkTranslator.translate(options, rowType, partitionKeys);
