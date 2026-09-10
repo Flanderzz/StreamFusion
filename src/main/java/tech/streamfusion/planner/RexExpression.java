@@ -157,8 +157,8 @@ final class RexExpression {
   // config
   // rides the node). null (a bare predicate encode) declines the host-exact casts, conservatively.
   private Boolean legacyCastBehaviour;
-  // Flink can unbox a boxed Boolean NULL without checking its null flag in predicates/CASE.
-  private RexNode directProjection;
+  // Root of the projection currently being encoded; null for conditions and bare predicates.
+  private RexNode projectionRoot;
 
   private RexExpression() {}
 
@@ -209,7 +209,7 @@ final class RexExpression {
   static RexExpression encodeProjections(List<RexNode> projections, List<String> names) {
     RexExpression encoder = new RexExpression();
     for (RexNode projection : projections) {
-      encoder.directProjection = projection;
+      encoder.projectionRoot = projection;
       encoder.projectionRoots.add(encoder.kinds.size());
       if (!encoder.emit(projection)) {
         return null;
@@ -239,6 +239,8 @@ final class RexExpression {
                     .TABLE_EXEC_LEGACY_CAST_BEHAVIOUR)
             .isEnabled();
     RexProgram program = calc.getProgram();
+    // A filter condition is never a direct projection, regardless of encoding order.
+    projectionRoot = null;
     if (program.getCondition() != null) {
       RexNode condition =
           RexUtil.expandSearch(
@@ -257,7 +259,7 @@ final class RexExpression {
       RexNode projection =
           RexUtil.expandSearch(
               calc.getCluster().getRexBuilder(), null, program.expandLocalRef(ref));
-      directProjection = projection;
+      projectionRoot = projection;
       if (!emit(projection)) {
         return false;
       }
@@ -1107,7 +1109,21 @@ final class RexExpression {
     return args.stream().anyMatch(RexExpression::containsFallibleJsonCall);
   }
 
+  private boolean jsonRuntimeAvailable() {
+    try {
+      if (tech.streamfusion.operator.NativeJsonRuntime.available()) {
+        return true;
+      }
+    } catch (LinkageError incompatibleJackson) {
+      // Loading the runtime class itself may fail before available() can run.
+    }
+    return reject("SQL/JSON requires Jackson 2.18.2 with a shared thread-local token buffer");
+  }
+
   private boolean emitJsonValue(RexCall call) {
+    if (!jsonRuntimeAvailable()) {
+      return false;
+    }
     if (JsonPathSpec.unicodeVersion() == null) {
       return reject("JSON_VALUE requires verified JDK 17, 21, 24 or 25 token rules");
     }
@@ -1162,7 +1178,7 @@ final class RexExpression {
     }
     if (returnType == SqlTypeName.BOOLEAN
         && ("NULL".equals(empty) || "NULL".equals(error))
-        && call != directProjection) {
+        && call != projectionRoot) {
       return reject(
           "JSON_VALUE BOOLEAN with NULL policies requires a direct projection; Flink unboxes null"
               + " in boolean contexts");
@@ -1198,6 +1214,9 @@ final class RexExpression {
   }
 
   private boolean emitIsJson(RexCall call, int op, boolean negate) {
+    if (!jsonRuntimeAvailable()) {
+      return false;
+    }
     if (JsonPathSpec.unicodeVersion() == null) {
       return reject("IS JSON requires verified JDK 17, 21, 24 or 25 token rules");
     }
@@ -1216,6 +1235,9 @@ final class RexExpression {
   }
 
   private boolean emitJsonExists(RexCall call) {
+    if (!jsonRuntimeAvailable()) {
+      return false;
+    }
     if (JsonPathSpec.unicodeVersion() == null) {
       return reject("JSON_EXISTS requires verified JDK 17, 21, 24 or 25 token rules");
     }
@@ -1228,7 +1250,7 @@ final class RexExpression {
     if (error == null || !List.of("TRUE", "FALSE", "UNKNOWN", "ERROR").contains(error)) {
       return reject("JSON_EXISTS has an unsupported ON ERROR behavior");
     }
-    if ("UNKNOWN".equals(error) && call != directProjection) {
+    if ("UNKNOWN".equals(error) && call != projectionRoot) {
       return reject(
           "JSON_EXISTS UNKNOWN ON ERROR requires a direct projection; Flink unboxes null in boolean contexts");
     }

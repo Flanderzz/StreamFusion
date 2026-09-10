@@ -408,6 +408,11 @@ on Flink to preserve row short-circuiting. The default FALSE policy and TRUE ON 
 remain native in predicates and nested expressions.
 
 These JSON functions use native first-document parsing and validate unselected fields too.
+Admission first probes the shaded Jackson runtime once per class loader: version 2.18.2,
+the default thread-local recycler pool, and successful buffer acquisition, cross-factory
+reuse and release are required. Missing methods/classes, a different version or pool,
+or probe failure cause planning-time fallback for JSON_VALUE, JSON_EXISTS and IS JSON.
+JobManagers and TaskManagers must use the same verified shaded Jackson runtime.
 They currently admit JDK 17, 21, 24 and 25, selecting the corresponding Unicode version for
 Jackson's token-termination rules; other JDKs fall back. The profile is selected on the
 JobManager, so TaskManagers must use the same JSON parsing rules. Jackson's resource limits

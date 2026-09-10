@@ -61,9 +61,23 @@ while its fast path uses 0. This can admit a 1001-digit floating-point token onl
 slow path. Leading zeroes and end-of-input select that path predictably; buffer boundaries
 also depend on Jackson's thread-local recycled buffer and prior unrelated parser calls.
 
-The reader acquires the task thread's actual token buffer from the released shaded Jackson
-`JsonFactory`/`BufferRecycler` API before evaluating a batch. This is the same default
-thread-local pool used by Flink's `SqlJsonUtils`. Inputs of at most 32768 UTF-16 units grow
+The reader acquires the task thread's actual token buffer from shaded Jackson 2.18.2's
+`JsonFactory._getBufferRecycler()` and `BufferRecycler` before evaluating a batch. The
+underscore-prefixed accessor is internal despite being public, so it is a versioned
+compatibility dependency. Both factories must use `JsonRecyclerPools.ThreadLocalPool`,
+the default in 2.18.2 used by Flink's `SqlJsonUtils`. Jackson 2.17.0 changed the default
+pool, and 2.17.1 reverted it; another default cannot be assumed to share task-thread state.
+
+Before encoding JSON_VALUE, JSON_EXISTS or IS JSON, the planner checks a result cached once
+per class loader. The probe requires version 2.18.2 and the thread-local pool, constructs a
+runtime, returns its buffer and verifies that a second default factory acquires the same
+recycler and buffer. Construction/release failures, missing classes/methods and other linkage
+errors decline the expressions during planning. Factory initialization is lazy so those
+failures are caught by the probe rather than escaping static initialization. An upgrade
+requires re-verifying this contract and the parity fixtures before widening the version gate.
+Planning and task JVMs must carry the same verified shaded Jackson classes and pool strategy.
+
+Inputs of at most 32768 UTF-16 units grow
 the capacity before parsing, including invalid input and rows handled by SIMD; larger inputs
 use the existing capacity as `StringReader` does. The native number scanner uses that actual
 capacity for boundary checks. At batch completion, including an EMPTY/ERROR policy failure,
