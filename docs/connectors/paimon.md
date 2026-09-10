@@ -157,9 +157,12 @@ Paimon.
 ## Outlook
 
 Each remaining gap has its own issue:
-[the remaining primary-key shapes](https://github.com/datafusion-contrib/StreamFusion/issues/33)
-(changelog producers, deletion vectors, the other merge engines, `sequence.field`, thin mode, and a
-Paimon bundle entry for the merge-tree writer that would remove the idle-writer rescan),
+[primary-key changelog producers and deletion vectors](https://github.com/datafusion-contrib/StreamFusion/issues/33),
+[the other merge engines, `sequence.field`, and `rowkind.field`](https://github.com/datafusion-contrib/StreamFusion/issues/47),
+[the remaining primary-key writer options](https://github.com/datafusion-contrib/StreamFusion/issues/48)
+(thin mode, key-only deletes, local merge, external paths, managed memory, snapshot sequence init),
+[a Paimon bundle entry for the merge-tree writer](https://github.com/datafusion-contrib/StreamFusion/issues/49)
+that would remove the compaction hand-off and the idle-writer rescan,
 [dynamic and postpone buckets](https://github.com/datafusion-contrib/StreamFusion/issues/34),
 [ORC data files](https://github.com/datafusion-contrib/StreamFusion/issues/35),
 [the writer and commit coordinators](https://github.com/datafusion-contrib/StreamFusion/issues/36),

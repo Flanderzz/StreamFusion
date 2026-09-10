@@ -57,7 +57,7 @@ The sink owns the level-0 file of a primary-key bucket and nothing else:
   between checkpoints it can look idle; Paimon then closes it and the next hand-off recreates it
   with a scan of the bucket's committed files. Paimon's dedicated compactor pays the same scan. A
   bundle entry on the merge-tree writer with a sequence hand-off would remove it; that proposal is
-  tracked with the remaining primary-key work in issue #33.
+  [issue #49](https://github.com/datafusion-contrib/StreamFusion/issues/49).
 - **Compaction results land one checkpoint later** unless the table waits for compaction, which is
   how the stock streaming sink behaves too.
 - **Memory budget.** The native buffers are bounded by `write-buffer-size` per task, spilling the
