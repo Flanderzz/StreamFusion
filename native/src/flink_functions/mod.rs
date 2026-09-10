@@ -27,6 +27,7 @@ mod binary_strings;
 mod charset;
 mod is_json;
 mod json_exists;
+mod json_object;
 mod json_path;
 mod json_serialize;
 mod json_value;
@@ -148,6 +149,7 @@ pub(crate) fn function(op: i64, arity: usize) -> Option<ScalarUDF> {
             |args| binary_strings::encode(args, true),
         ),
         152 => json_serialize::function(),
+        153 => json_object::function(),
         _ => return None,
     })
 }

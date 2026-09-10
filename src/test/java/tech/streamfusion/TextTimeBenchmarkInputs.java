@@ -41,7 +41,24 @@ final class TextTimeBenchmarkInputs {
       payload(unicode ? " |\u4e2daB\ud83d\ude00| " : " |abCd| efGh| ", bytes),
       payload(unicode ? " |\u00e9dE\ud83d\ude42| " : " |deFg| abCd| ", bytes)
     };
-    if (input.equals("tt_boolean")) {
+    if (input.equals("tt_json_object")) {
+      tables.createTemporaryView(
+          "inputs",
+          env.fromSequence(0, rows - 1)
+              .map(
+                  i -> Row.of(
+                      isNull(i, nullEvery) ? null : text[(int) (i % 2)],
+                      isNull(i + 1, nullEvery) ? null : i,
+                      isNull(i + 2, nullEvery) ? null : i % 2 == 0))
+              .returns(
+                  Types.ROW_NAMED(
+                      new String[] {"s", "n", "b"}, Types.STRING, Types.LONG, Types.BOOLEAN)),
+          Schema.newBuilder()
+              .column("s", DataTypes.STRING())
+              .column("n", DataTypes.BIGINT())
+              .column("b", DataTypes.BOOLEAN())
+              .build());
+    } else if (input.equals("tt_boolean")) {
       tables.createTemporaryView(
           "inputs",
           env.fromSequence(0, rows - 1)

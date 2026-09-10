@@ -18,6 +18,7 @@ import org.apache.calcite.rex.RexLocalRef;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.rex.RexProgram;
 import org.apache.calcite.rex.RexUtil;
+import org.apache.calcite.sql.SqlJsonConstructorNullClause;
 import org.apache.calcite.sql.SqlKind;
 import org.apache.calcite.sql.type.SqlTypeFamily;
 import org.apache.calcite.sql.type.SqlTypeName;
@@ -599,6 +600,9 @@ final class RexExpression {
       }
       return emitBuiltinCall(call, 152);
     }
+    if ("JSON_OBJECT".equals(functionName)) {
+      return emitJsonObject(call);
+    }
     if ("JSON_VALUE".equals(functionName)) {
       return emitJsonValue(call);
     }
@@ -925,6 +929,43 @@ final class RexExpression {
     return emit(args.get(locate ? 1 : 0))
         && emit(args.get(locate ? 0 : 1))
         && (args.size() == 2 || emit(args.get(2)));
+  }
+
+  private boolean emitJsonObject(RexCall call) {
+    List<RexNode> args = call.getOperands();
+    if (args.isEmpty() || args.size() % 2 != 1 || !(args.get(0) instanceof RexLiteral)) {
+      return reject("JSON_OBJECT requires a NULL policy and key/value pairs");
+    }
+    Object policyValue = ((RexLiteral) args.get(0)).getValue();
+    if (!(policyValue instanceof SqlJsonConstructorNullClause nullClause)) {
+      return reject("JSON_OBJECT: unsupported NULL policy");
+    }
+    String policy =
+        switch (nullClause) {
+          case NULL_ON_NULL -> "NULL";
+          case ABSENT_ON_NULL -> "ABSENT";
+        };
+    for (int index = 1; index < args.size(); index += 2) {
+      if (!(args.get(index) instanceof RexLiteral key) || !isCharacter(key) || key.isNull()) {
+        return reject("JSON_OBJECT requires non-null literal character keys");
+      }
+      String name = key.getValueAs(String.class);
+      if (name == null || name.codePoints().anyMatch(c -> c >= 0xd800 && c <= 0xdfff)) {
+        return reject("JSON_OBJECT requires keys with well-formed Unicode");
+      }
+      if (!isJsonScalarValue(args.get(index + 1))) {
+        return reject("JSON_OBJECT requires character, boolean, or signed integer scalar values");
+      }
+    }
+    add(KIND_CALL, 153, args.size());
+    add(KIND_LIT_STRING, strings.size(), 0);
+    strings.add(policy);
+    for (RexNode arg : args.subList(1, args.size())) {
+      if (!emit(arg)) {
+        return false;
+      }
+    }
+    return true;
   }
 
   private static boolean isJsonScalarValue(RexNode value) {

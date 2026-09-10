@@ -39,5 +39,19 @@ path, unverified floating-point, decimal, binary, temporal and container types r
 Flink. Direct JSON constructors are excluded from scalar inputs because Flink's code
 generator inserts those as raw JSON instead of quoting their character result.
 
+## JSON object construction
+
+Flink's JsonObjectCallGen inserts fields into a Jackson ObjectNode, keeping the last
+insertion for each key and skipping NULLs under ABSENT ON NULL. serializeJson converts
+that tree to a map and sorts keys using Java's UTF-16 String.compareTo. Sorting UTF-8
+bytes would disagree for supplementary characters versus high BMP code points.
+
+The native object UDF groups duplicate literal keys in stable UTF-16 order and escapes
+each unique key once per batch. It keeps scalar values as one-row arrays and downcasts
+column values once, then selects each key's last applicable value while writing the
+final Arrow string buffer. No per-row JSON tree, map, or temporary result string is
+constructed. The initial admission is deliberately scalar: direct nested constructors
+and other Flink JsonNode conversions remain on Flink until independently verified.
+
 Coverage is listed in [Calc/filter](../docs/operators/calc-filter.md); independent
 Flink/native measurements are in [scalar benchmarks](../docs/benchmarks/scalar-functions.md).

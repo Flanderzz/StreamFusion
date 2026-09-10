@@ -318,6 +318,22 @@ NULL values must have a supported scalar type, for example `CAST(NULL AS STRING)
 An operand whose type remains SQL NULL falls back: Flink's JSON node generator cannot
 serialize that type. The same typed-NULL rule applies to JSON_OBJECT values.
 
+### JSON_OBJECT
+
+Literal, non-null character keys with character, BOOLEAN, TINYINT, SMALLINT, INTEGER,
+or BIGINT scalar values are native. Keys must contain well-formed Unicode. The default
+NULL ON NULL writes JSON null values; ABSENT ON NULL skips them. Duplicate keys retain
+the last inserted value, so an absent NULL does not overwrite an earlier non-null value.
+Objects with no surviving entries produce `{}`, never SQL NULL.
+
+Keys are sorted in Java UTF-16 order, matching Flink's Jackson serializer even when BMP
+and supplementary characters mix. Keys and values use the same escaping as JSON_STRING.
+Each batch reuses escaped keys and scalar parameters while writing directly to Arrow.
+
+Dynamic/NULL keys, other value types, and direct nested JSON_OBJECT, JSON_ARRAY or
+JSON(value) inputs fall back. An ordinary string containing JSON text is quoted.
+No compatibility opt-in is needed.
+
 ### IS JSON
 
 `s IS JSON [VALUE | OBJECT | ARRAY | SCALAR]` and their `IS NOT JSON` forms are native

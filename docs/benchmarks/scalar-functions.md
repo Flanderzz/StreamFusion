@@ -549,6 +549,25 @@ text, so boolean/integer results list non-null and NULL/8 inputs once each.
 | BIGINT, non-null | 0.456 | 0.487 |
 | BIGINT, NULL/8 | 0.402 | 0.478 |
 
+## JSON_OBJECT scalar values
+
+Measured on 2026-09-10 with the release profile, 2,000,000 rows, two warmups,
+five interleaved trials and both transposes. Run `JSON_OBJECT_NULL` or
+`JSON_OBJECT_ABSENT` independently. Each query constructs one object from a text
+column, a BIGINT row ordinal and an alternating BOOLEAN column, using literal
+keys `text`, `id` and `flag`. The two functions differ only in NULL ON NULL versus
+ABSENT ON NULL. In the NULL/8 scenario each column is NULL every eighth row, at
+staggered positions; the byte budget describes the text column.
+
+| Function | Scenario | Flink (s) | Native (s) |
+|---|---|---:|---:|
+| JSON_OBJECT_NULL | ASCII, 32-byte text budget | 1.099 | 0.863 |
+| JSON_OBJECT_ABSENT | ASCII, 32-byte text budget | 1.102 | 0.863 |
+| JSON_OBJECT_NULL | ASCII, 264-byte text budget | 2.009 | 1.742 |
+| JSON_OBJECT_ABSENT | ASCII, 264-byte text budget | 2.036 | 1.774 |
+| JSON_OBJECT_NULL | Unicode, 264-byte text budget, NULL/8 | 1.644 | 1.484 |
+| JSON_OBJECT_ABSENT | Unicode, 264-byte text budget, NULL/8 | 1.598 | 1.475 |
+
 ## TRIM directions and literal sets
 
 Measured on 2026-09-10 using the release profile and the interleaved, 2,000,000-row,

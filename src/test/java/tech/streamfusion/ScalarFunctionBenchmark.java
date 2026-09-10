@@ -113,6 +113,14 @@ class ScalarFunctionBenchmark {
                   new Query("JSON_STRING_TEXT", "tt_text", "JSON_STRING(s)"),
                   new Query("JSON_STRING_BOOLEAN", "tt_boolean", "JSON_STRING(b)"),
                   new Query("JSON_STRING_INTEGER", "bigint", "JSON_STRING(n)", "STRING"),
+                  new Query(
+                      "JSON_OBJECT_NULL",
+                      "tt_json_object",
+                      "JSON_OBJECT('text' VALUE s, 'id' VALUE n, 'flag' VALUE b NULL ON NULL)"),
+                  new Query(
+                      "JSON_OBJECT_ABSENT",
+                      "tt_json_object",
+                      "JSON_OBJECT('text' VALUE s, 'id' VALUE n, 'flag' VALUE b ABSENT ON NULL)"),
                   new Query("IS_JSON_VALUE", "tt_json_predicate", "s IS JSON VALUE", "BOOLEAN"),
                   new Query("IS_JSON_OBJECT", "tt_json_predicate", "s IS JSON OBJECT", "BOOLEAN"),
                   new Query("IS_JSON_ARRAY", "tt_json_predicate", "s IS JSON ARRAY", "BOOLEAN"),
