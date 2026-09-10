@@ -595,6 +595,16 @@ final class RexExpression {
     if ("JSON_EXISTS".equals(functionName)) {
       return emitJsonExists(call);
     }
+    int jsonPredicate = switch (functionName) {
+      case "IS JSON VALUE", "IS NOT JSON VALUE" -> 144;
+      case "IS JSON OBJECT", "IS NOT JSON OBJECT" -> 145;
+      case "IS JSON ARRAY", "IS NOT JSON ARRAY" -> 146;
+      case "IS JSON SCALAR", "IS NOT JSON SCALAR" -> 147;
+      default -> -1;
+    };
+    if (jsonPredicate >= 0) {
+      return emitIsJson(call, jsonPredicate, functionName.startsWith("IS NOT"));
+    }
     if ("SPLIT".equals(functionName)) {
       List<RexNode> args = call.getOperands();
       if (args.size() != 2
@@ -1048,6 +1058,24 @@ final class RexExpression {
     }
     for (String value : new String[] {path, empty, emptyDefault, error, errorDefault}) {
       emitString(value);
+    }
+    emitString(JsonPathSpec.unicodeVersion());
+    return true;
+  }
+
+  private boolean emitIsJson(RexCall call, int op, boolean negate) {
+    if (JsonPathSpec.unicodeVersion() == null) {
+      return reject("IS JSON requires verified JDK 17, 21, 24 or 25 token rules");
+    }
+    if (call.getOperands().size() != 1 || !isCharacter(call.getOperands().get(0))) {
+      return reject("IS JSON requires one character argument");
+    }
+    if (negate) {
+      add(KIND_CALL, opCode(SqlKind.NOT), 1);
+    }
+    add(KIND_CALL, op, 2);
+    if (!emit(call.getOperands().get(0))) {
+      return false;
     }
     emitString(JsonPathSpec.unicodeVersion());
     return true;

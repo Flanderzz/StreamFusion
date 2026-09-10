@@ -24,6 +24,19 @@ impl Reader {
     }
 
     pub fn read<'a>(&'a mut self, path: &Path<'_>, input: &'a str) -> Result<Value<'a>, ()> {
+        path.apply_policy(self.parse(path, input))
+    }
+
+    /// IS JSON validates the first document without Jayway's root-null or path-mode policy.
+    pub fn read_document<'a>(
+        &'a mut self,
+        root: &Path<'_>,
+        input: &'a str,
+    ) -> Result<Value<'a>, ()> {
+        self.parse(root, input).map(|(value, _)| value)
+    }
+
+    fn parse<'a>(&'a mut self, path: &Path<'_>, input: &'a str) -> Result<(Value<'a>, bool), ()> {
         // Jackson copies short documents into its recycled token buffer before parsing,
         // including malformed documents and documents handled by the SIMD path here.
         if input.len() > self.buffer_size && self.buffer_size < 32768 {
@@ -33,20 +46,24 @@ impl Reader {
             }
         }
         if !candidate(input) {
-            return path.read_with_buffer(input, self.buffer_size);
+            return path.parse_with_buffer(input, self.buffer_size);
         }
         self.scratch.clear();
         self.scratch.extend_from_slice(input.as_bytes());
         let mut tape = self.tape.take().unwrap_or_else(Tape::null).reset();
         let value = match simd_json::fill_tape(&mut self.scratch, &mut self.buffers, &mut tape) {
-            Ok(()) if compatible(&tape) => select(&tape, &path.steps),
+            Ok(()) if compatible(&tape) => select(&tape, &path.steps).map(|value| {
+                (
+                    value,
+                    matches!(tape.0.first(), Some(Node::Static(StaticNode::Null))),
+                )
+            }),
             _ => None,
         };
         self.tape = Some(tape.reset());
         match value {
-            Some(Value::Missing | Value::Null) if !path.lax => Err(()),
             Some(value) => Ok(value),
-            None => path.read_with_buffer(input, self.buffer_size),
+            None => path.parse_with_buffer(input, self.buffer_size),
         }
     }
 }
@@ -69,7 +86,6 @@ fn compatible(tape: &Tape<'_>) -> bool {
             .0
             .iter()
             .any(|node| matches!(node, Node::Static(StaticNode::F64(_))))
-        && !matches!(tape.0.first(), Some(Node::Static(StaticNode::Null)))
 }
 
 fn select<'a>(tape: &Tape<'a>, steps: &[Step<'_>]) -> Option<Value<'a>> {

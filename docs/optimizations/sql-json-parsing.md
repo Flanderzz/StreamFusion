@@ -1,6 +1,6 @@
 # SQL/JSON parsing
 
-JSON_VALUE and JSON_EXISTS use a shared native reader with two parsing paths. The streaming
+JSON_VALUE, JSON_EXISTS and IS JSON use a shared native reader with two parsing paths. The streaming
 path borrows selected tokens and validates the first JSON document with Flink/Jackson rules.
 The SIMD path uses the existing `simd-json` dependency for documents containing many short
 members, where repeatedly scanning individual keys and values costs more than building a tape.
@@ -15,7 +15,7 @@ input bytes. A successful tape must contain at most 1000 nodes, with no floating
 Unicode escapes and selected numbers use the streaming path. Those bounds preserve Jackson's
 resource limits, BigDecimal spelling and UTF-16 escape behavior. Invalid SIMD input also goes
 through the streaming parser, retaining Flink's first-document and trailing-content behavior.
-Both functions are admitted by default for their verified SQL shapes.
+These functions are admitted by default for their verified SQL shapes.
 A document rejected after tape construction is parsed again by the streaming path. The
 multi-member measurements use string members; they do not establish an improvement for
 workloads dominated by floating-point members or numeric selections.

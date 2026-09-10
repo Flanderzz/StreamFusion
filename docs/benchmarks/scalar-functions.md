@@ -510,3 +510,29 @@ The queries are `TRIM(LEADING FROM s)`, `TRIM(TRAILING FROM s)`, and
 | ASCII, 32-byte budget | 0.837 | 0.697 | 1.20x |
 | ASCII, 264-byte budget | 2.229 | 1.299 | 1.72x |
 | Unicode, 264-byte budget, NULL/8 | 1.882 | 1.151 | 1.64x |
+
+## IS JSON predicates
+
+Measured on 2026-09-10 with the same release profile, 2,000,000 rows, two warmups,
+five interleaved trials and both transposes. Run with
+`scalar.functions=IS_JSON_VALUE,IS_JSON_OBJECT,IS_JSON_ARRAY,IS_JSON_SCALAR`.
+Each predicate runs independently over the same mixture: object, array, string scalar,
+and malformed object, in equal proportions before SQL NULL injection. Each document contains
+a padding string with the listed byte budget. Malformed inputs account for 25% of all rows
+and exercise Flink's exception-handling cost; these results are specific to that mixture.
+The Unicode case replaces every eighth row with SQL NULL.
+
+| Function | Scenario | Flink (s) | Native (s) | Flink / native |
+|---|---|---:|---:|---:|
+| IS_JSON_VALUE | ASCII, 32-byte padding | 1.608 | 0.629 | 2.56x |
+| IS_JSON_OBJECT | ASCII, 32-byte padding | 1.600 | 0.625 | 2.56x |
+| IS_JSON_ARRAY | ASCII, 32-byte padding | 1.645 | 0.625 | 2.63x |
+| IS_JSON_SCALAR | ASCII, 32-byte padding | 1.648 | 0.624 | 2.64x |
+| IS_JSON_VALUE | ASCII, 264-byte padding | 2.224 | 1.156 | 1.92x |
+| IS_JSON_OBJECT | ASCII, 264-byte padding | 2.301 | 1.163 | 1.98x |
+| IS_JSON_ARRAY | ASCII, 264-byte padding | 2.284 | 1.133 | 2.02x |
+| IS_JSON_SCALAR | ASCII, 264-byte padding | 2.280 | 1.136 | 2.01x |
+| IS_JSON_VALUE | Unicode, 264-byte padding, NULL/8 | 2.158 | 0.933 | 2.31x |
+| IS_JSON_OBJECT | Unicode, 264-byte padding, NULL/8 | 2.181 | 0.968 | 2.25x |
+| IS_JSON_ARRAY | Unicode, 264-byte padding, NULL/8 | 2.177 | 0.949 | 2.30x |
+| IS_JSON_SCALAR | Unicode, 264-byte padding, NULL/8 | 2.201 | 0.942 | 2.33x |

@@ -136,6 +136,12 @@ final class TextTimeBenchmarkInputs {
       String[] values =
           switch (input) {
             case "tt_text" -> text;
+            case "tt_json_predicate" -> new String[] {
+              "{\"padding\":\"" + text[0] + "\"}",
+              "[\"" + text[1] + "\"]",
+              "\"" + text[0] + "\"",
+              "{\"invalid\":\"" + text[1] + "\",}"
+            };
             case "tt_quoted" -> new String[] {quoted, quoted};
             case "tt_json" -> {
               int fields = Integer.getInteger("scalar.json.fields", 0);
@@ -163,7 +169,7 @@ final class TextTimeBenchmarkInputs {
       tables.createTemporaryView(
           "inputs",
           env.fromSequence(0, rows - 1)
-              .map(i -> Row.of(isNull(i, nullEvery) ? null : values[(int) (i % 2)]))
+              .map(i -> Row.of(isNull(i, nullEvery) ? null : values[(int) (i % values.length)]))
               .returns(Types.ROW_NAMED(new String[] {"s"}, Types.STRING)),
           Schema.newBuilder().column("s", DataTypes.STRING()).build());
     }

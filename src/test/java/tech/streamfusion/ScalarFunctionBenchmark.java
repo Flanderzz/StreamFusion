@@ -103,6 +103,10 @@ class ScalarFunctionBenchmark {
               TextTimeFunctions.QUERIES,
               List.of(
                   new Query("SHA1", "tt_text", "SHA1(s)"),
+                  new Query("IS_JSON_VALUE", "tt_json_predicate", "s IS JSON VALUE", "BOOLEAN"),
+                  new Query("IS_JSON_OBJECT", "tt_json_predicate", "s IS JSON OBJECT", "BOOLEAN"),
+                  new Query("IS_JSON_ARRAY", "tt_json_predicate", "s IS JSON ARRAY", "BOOLEAN"),
+                  new Query("IS_JSON_SCALAR", "tt_json_predicate", "s IS JSON SCALAR", "BOOLEAN"),
                   new Query("JSON_VALUE", "tt_json", "JSON_VALUE(s, 'lax $.user.name')", "STRING"),
                   new Query(
                       "JSON_EXISTS", "tt_json", "JSON_EXISTS(s, 'lax $.user.name')", "BOOLEAN")))

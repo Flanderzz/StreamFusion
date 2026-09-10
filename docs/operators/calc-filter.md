@@ -288,6 +288,18 @@ Character input, including NULL. Matches Flink 2.2.1's actual spelling: slash is
 
 One character argument is native. Valid quoted values are unescaped with Flink/Jackson first-token validation; invalid input is preserved and NULL propagates. A truncated Unicode escape after a valid first token fails the job, matching Flink 2.2.1's uncaught bounds exception. A truncated escape inside the first token is invalid JSON and is preserved.
 
+### IS JSON
+
+`s IS JSON [VALUE | OBJECT | ARRAY | SCALAR]` and their `IS NOT JSON` forms are native
+for character input. Omitting the type means VALUE. Results are non-nullable: SQL NULL
+and invalid JSON return FALSE (TRUE for the negated form). The JSON literal `null` is
+a valid VALUE and SCALAR, but is neither an OBJECT nor an ARRAY.
+
+Parsing matches Flink 2.2.1's Jackson first-document validation, including trailing
+content, token boundaries, escaped surrogates, and limits in every nested field.
+It shares the streaming/SIMD reader and JDK profiles described below; no compatibility
+opt-in is needed. This validates the document directly, without applying JSON path policies.
+
 ### JSON_VALUE
 
 Enabled by default for the following verified shapes; no compatibility opt-in is needed.
@@ -322,7 +334,7 @@ strict missing/null paths invoke ON ERROR. Malformed JSON invokes ON ERROR in st
 and returns FALSE in lax mode. A document containing the JSON literal `null` invokes ON ERROR
 in both modes. SQL NULL input returns SQL NULL.
 
-Both SQL/JSON functions use native first-document parsing and validate unselected fields too.
+These JSON functions use native first-document parsing and validate unselected fields too.
 They currently admit JDK 17, 21, 24 and 25, selecting the corresponding Unicode version for
 Jackson's token-termination rules; other JDKs fall back. The profile is selected on the
 JobManager, so TaskManagers must use the same JSON parsing rules. Jackson's resource limits
@@ -466,7 +478,7 @@ A number of otherwise-admitted functions decline when called with an argument sh
 implementation can't handle, even though the function itself is supported:
 
 - An **unsupported literal type** anywhere in the expression.
-- **`TRIM`** — anything other than the default `BOTH`-whitespace form.
+- **`TRIM`** — dynamic trim sets; all directions with literal sets are native.
 - **`POSITION`** — a `FROM` start offset.
 - **`SPLIT_INDEX`** — the numeric separator overload.
 - **`DATE_FORMAT`** — a non-literal pattern, or (on the pure-native path only) a

@@ -88,10 +88,14 @@ impl<'a> Path<'a> {
 
     #[cfg(test)]
     pub fn read<'s>(&self, input: &'s str) -> Result<Value<'s>, ()> {
-        self.read_with_buffer(input, 4000)
+        self.apply_policy(self.parse_with_buffer(input, 4000))
     }
 
-    fn read_with_buffer<'s>(&self, input: &'s str, buffer_size: usize) -> Result<Value<'s>, ()> {
+    fn parse_with_buffer<'s>(
+        &self,
+        input: &'s str,
+        buffer_size: usize,
+    ) -> Result<(Value<'s>, bool), ()> {
         let mut parser = Parser {
             input,
             pos: 0,
@@ -101,10 +105,16 @@ impl<'a> Path<'a> {
         };
         parser.whitespace();
         let root_null = parser.remaining().starts_with("null");
-        match parser.value(Some(&self.steps), 0) {
-            Ok(_) if root_null => Err(()), // Jayway cannot construct a context from Java null.
-            Ok(Value::Missing | Value::Null) if !self.lax => Err(()),
-            Ok(value) => Ok(value),
+        parser
+            .value(Some(&self.steps), 0)
+            .map(|value| (value, root_null))
+    }
+
+    fn apply_policy<'s>(&self, parsed: Result<(Value<'s>, bool), ()>) -> Result<Value<'s>, ()> {
+        match parsed {
+            Ok((_, true)) => Err(()), // Jayway cannot construct a context from Java null.
+            Ok((Value::Missing | Value::Null, _)) if !self.lax => Err(()),
+            Ok((value, _)) => Ok(value),
             Err(()) if self.lax => Ok(Value::Missing),
             Err(()) => Err(()),
         }

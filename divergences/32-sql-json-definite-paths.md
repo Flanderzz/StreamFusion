@@ -5,7 +5,7 @@ column inputs and streams through each document instead of building a DOM on its
 path. StreamFusion follows that structure: the path and policies remain scalar, a definite
 path is parsed once per batch, and unescaped selected strings borrow their input span until
 appended to the Arrow result. Every field is validated, including fields outside the selected
-path. JSON_VALUE and JSON_EXISTS share this parser under the scalar-function registry.
+path. JSON_VALUE, JSON_EXISTS and IS JSON share this parser under the scalar-function registry.
 
 For documents with many short members, a shared `simd-json` reader reuses its input scratch,
 structural buffers and tape across rows. It validates the whole document before selecting a
@@ -81,7 +81,14 @@ exercise growth within and across batches, Unicode length, malformed input and S
 They assert the fixture really produces different Flink results under different buffer
 histories; matching a fresh-buffer run alone would miss the original bug.
 
-SQL harness validation uses JDK 17. The six JNI buffer-history tests also pass on JDK 24
+IS JSON uses the same validated first-document result before applying Jayway's path policy.
+This is essential for root JSON null: Jackson accepts it as a scalar, while Jayway refuses
+to construct a path context from Java null. Its VALUE/OBJECT/ARRAY/SCALAR predicates and
+their negations are enabled by default. SQL NULL and invalid documents produce FALSE,
+with no SQL NULL result. Neither DataFusion's general JSON readers nor Comet's Spark JSON
+extraction implements this SQL predicate contract, so the wrapper reuses our verified parser.
+
+SQL harness validation uses JDK 17. The ten JNI buffer-history tests also pass on JDK 24
 with `-Dtest=NativeJsonBufferHistoryTest -Djunit.jupiter.extensions.autodetection.enabled=false`.
 That disables the automatic MiniCluster extension, which these direct comparisons do not
 need. The full SQL harness cannot start on JDK 24 because the current Hadoop dependency

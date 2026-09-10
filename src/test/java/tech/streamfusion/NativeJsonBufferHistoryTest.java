@@ -28,6 +28,45 @@ class NativeJsonBufferHistoryTest {
   private static final JsonFactory FACTORY = new JsonFactory();
 
   @ParameterizedTest
+  @ValueSource(ints = {144, 145, 146, 147})
+  void documentPredicatesUseTheActualRecycledBuffer(int op) {
+    List<String> documents =
+        Arrays.asList(
+            null,
+            "null",
+            "[]",
+            "true",
+            boundary(3990, "1." + "2".repeat(1000)),
+            " ".repeat(8000) + "invalid",
+            boundary(7990, "1." + "2".repeat(1000)));
+    for (int size : new int[] {4000, 8000, 16000, 32768}) {
+      List<String> expected =
+          withBuffer(
+              size,
+              () ->
+                  documents.stream()
+                      .map(
+                          document ->
+                              Boolean.toString(
+                                  switch (op) {
+                                    case 144 -> SqlJsonUtils.isJsonValue(document);
+                                    case 145 -> SqlJsonUtils.isJsonObject(document);
+                                    case 146 -> SqlJsonUtils.isJsonArray(document);
+                                    case 147 -> SqlJsonUtils.isJsonScalar(document);
+                                    default -> throw new AssertionError(op);
+                                  }))
+                      .toList());
+      for (int batchSize : new int[] {1, documents.size()}) {
+        assertEquals(
+            expected,
+            withBuffer(
+                size, () -> nativeRows(documents, op, new String[] {unicodeVersion()}, batchSize)),
+            "op " + op + ", buffer " + size + ", batch " + batchSize);
+      }
+    }
+  }
+
+  @ParameterizedTest
   @ValueSource(booleans = {false, true})
   void numericBoundaryUsesTheActualRecycledBuffer(boolean exists) {
     List<String> documents = new ArrayList<>();
@@ -151,24 +190,31 @@ class NativeJsonBufferHistoryTest {
 
   private static List<String> nativeRows(
       List<String> documents, boolean exists, int batchSize, boolean throwOnError) {
-    String unicode =
-        switch (Runtime.version().feature()) {
-          case 17 -> "13.0";
-          case 21 -> "15.0";
-          case 24, 25 -> "16.0";
-          default -> throw new IllegalStateException("Unverified JDK");
-        };
+    String unicode = unicodeVersion();
     String[] literals =
         exists
             ? new String[] {"strict $.a", throwOnError ? "ERROR" : "UNKNOWN", unicode}
             : new String[] {
               "strict $.a", "DEFAULT", "EMPTY", throwOnError ? "ERROR" : "DEFAULT", "ERROR", unicode
             };
+    return nativeRows(documents, exists ? 142 : 141, literals, batchSize);
+  }
+
+  static String unicodeVersion() {
+    return switch (Runtime.version().feature()) {
+      case 17 -> "13.0";
+      case 21 -> "15.0";
+      case 24, 25 -> "16.0";
+      default -> throw new IllegalStateException("Unverified JDK");
+    };
+  }
+
+  static List<String> nativeRows(List<String> documents, int op, String[] literals, int batchSize) {
     int[] kinds = new int[literals.length + 2];
     int[] payload = new int[kinds.length];
     int[] children = new int[kinds.length];
     kinds[0] = 6;
-    payload[0] = exists ? 142 : 141;
+    payload[0] = op;
     children[0] = literals.length + 1;
     for (int i = 0; i < literals.length; i++) {
       kinds[i + 2] = 3;
