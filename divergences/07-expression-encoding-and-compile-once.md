@@ -94,10 +94,9 @@ strict NULL propagation applied to `CONCAT` below.
 - **`SUBSTRING`:** A native borrowed-slice kernel admits dynamic starts/lengths and preserves Flink's
   zero/negative-position and negative-length behavior. The DataFusion substring semantics differ at
   these boundaries; the result is a plain Utf8 array. See the Calc page for exact admission.
-- **`TRIM`:** only the default `TRIM(BOTH ' ' FROM s)` (whitespace, both sides) is admitted, mapped
-  to DataFusion's `btrim`; `LEADING`/`TRAILING` and custom trim characters fall back (asserted by a
-  test). The encoder reads Calcite's three-operand TRIM (flag, trim-chars, source) and only proceeds
-  for the `BOTH` + single-space case.
+- **`TRIM`:** SQL's `BOTH`, `LEADING`, and `TRAILING` forms reuse the same DataFusion kernels as
+  `BTRIM`, `LTRIM`, and `RTRIM`. Custom character sets must be literal, avoiding Flink's
+  representation-dependent treatment of binary-backed sets beginning with a space.
 - **`LPAD`:** The native kernel admits dynamic length/padding and counts UTF-16 units, matching
   released Flink 2.2.1. Empty padding and negative length return NULL. DataFusion and newer Flink
   source count code points, so their kernels cannot reproduce supplementary-character truncation.
@@ -159,9 +158,10 @@ strict NULL propagation applied to `CONCAT` below.
   result directly when no rows are NULL, and append only valid rows when a mask is required. This
   avoids copying bytes for NULL results and rebuilding the array through a full UTF-8 validation
   pass. `CONCAT_WS` already matches Flink's separator and NULL-value semantics and delegates directly.
-- **MD5 and SHA-2 fuse digest and hex output:** Arroyo delegates hashes to DataFusion; Comet's Spark
+- **MD5, SHA-1 and SHA-2 fuse digest and hex output:** Arroyo delegates hashes to DataFusion; Comet's Spark
   SHA-2 wrapper also reuses the released Rust digest implementations. We use the same `md-5` and
-  `sha2` crates but write lowercase hex directly into the final UTF-8 Arrow buffers. This removes
+  `sha2` crates, plus the released `sha1` crate used by Comet's `SparkSha1`, but write lowercase hex
+  directly into the final UTF-8 Arrow buffers. This removes
   intermediate binary columns, per-row hex strings, and MD5's string-view-to-UTF-8 copy. The digest
   algorithms are unchanged; the deviation is allocation and output construction, measured in
   `docs/optimizations/string-copy-reduction.md`. `SHA2` literal widths are compared exactly, without

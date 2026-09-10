@@ -16,7 +16,8 @@ final class TextTimeBenchmarkInputs {
 
   static String baselineExpression(String input) {
     return switch (input) {
-      case "tt_bytes" -> "b";
+      case "tt_bytes", "tt_utf16", "tt_utf16be", "tt_utf16le" -> "b";
+      case "tt_boolean" -> "b";
       case "tt_timestamp" -> "ts";
       default -> "s";
     };
@@ -24,7 +25,8 @@ final class TextTimeBenchmarkInputs {
 
   static String baselineType(String input) {
     return switch (input) {
-      case "tt_bytes" -> "BYTES";
+      case "tt_bytes", "tt_utf16", "tt_utf16be", "tt_utf16le" -> "BYTES";
+      case "tt_boolean" -> "BOOLEAN";
       case "tt_timestamp" -> "TIMESTAMP(9)";
       default -> "STRING";
     };
@@ -39,7 +41,31 @@ final class TextTimeBenchmarkInputs {
       payload(unicode ? " |\u4e2daB\ud83d\ude00| " : " |abCd| efGh| ", bytes),
       payload(unicode ? " |\u00e9dE\ud83d\ude42| " : " |deFg| abCd| ", bytes)
     };
-    if (input.equals("tt_timestamp")) {
+    if (input.equals("tt_json_object")) {
+      tables.createTemporaryView(
+          "inputs",
+          env.fromSequence(0, rows - 1)
+              .map(
+                  i -> Row.of(
+                      isNull(i, nullEvery) ? null : text[(int) (i % 2)],
+                      isNull(i + 1, nullEvery) ? null : i,
+                      isNull(i + 2, nullEvery) ? null : i % 2 == 0))
+              .returns(
+                  Types.ROW_NAMED(
+                      new String[] {"s", "n", "b"}, Types.STRING, Types.LONG, Types.BOOLEAN)),
+          Schema.newBuilder()
+              .column("s", DataTypes.STRING())
+              .column("n", DataTypes.BIGINT())
+              .column("b", DataTypes.BOOLEAN())
+              .build());
+    } else if (input.equals("tt_boolean")) {
+      tables.createTemporaryView(
+          "inputs",
+          env.fromSequence(0, rows - 1)
+              .map(i -> Row.of(isNull(i, nullEvery) ? null : i % 2 == 0))
+              .returns(Types.ROW_NAMED(new String[] {"b"}, Types.BOOLEAN)),
+          Schema.newBuilder().column("b", DataTypes.BOOLEAN()).build());
+    } else if (input.equals("tt_timestamp")) {
       LocalDateTime[] values = {
         LocalDateTime.of(1969, 12, 31, 23, 59, 59, 987654321),
         LocalDateTime.of(2000, 2, 29, 12, 34, 56, 123456789),
@@ -51,9 +77,16 @@ final class TextTimeBenchmarkInputs {
               .map(i -> Row.of(isNull(i, nullEvery) ? null : values[(int) (i % values.length)]))
               .returns(Types.ROW_NAMED(new String[] {"ts"}, Types.LOCAL_DATE_TIME)),
           Schema.newBuilder().column("ts", DataTypes.TIMESTAMP(9)).build());
-    } else if (input.equals("tt_bytes")) {
+    } else if (input.equals("tt_bytes") || input.startsWith("tt_utf16")) {
+      java.nio.charset.Charset charset =
+          switch (input) {
+            case "tt_utf16" -> StandardCharsets.UTF_16;
+            case "tt_utf16be" -> StandardCharsets.UTF_16BE;
+            case "tt_utf16le" -> StandardCharsets.UTF_16LE;
+            default -> StandardCharsets.UTF_8;
+          };
       byte[][] values = {
-        text[0].getBytes(StandardCharsets.UTF_8), text[1].getBytes(StandardCharsets.UTF_8)
+        text[0].getBytes(charset), text[1].getBytes(charset)
       };
       tables.createTemporaryView(
           "inputs",
@@ -136,14 +169,53 @@ final class TextTimeBenchmarkInputs {
       String[] values =
           switch (input) {
             case "tt_text" -> text;
+            case "tt_json_predicate" ->
+                new String[] {
+                  "{\"padding\":\"" + text[0] + "\"}",
+                  "[\"" + text[1] + "\"]",
+                  "\"" + text[0] + "\"",
+                  "{\"invalid\":\"" + text[1] + "\",}"
+                };
             case "tt_quoted" -> new String[] {quoted, quoted};
+            case "tt_json_boolean", "tt_json_integer", "tt_json_double" -> {
+              String[] selected =
+                  switch (input) {
+                    case "tt_json_boolean" -> new String[] {"true", "false"};
+                    case "tt_json_integer" -> new String[] {"123456789", "-234567890"};
+                    default -> new String[] {"1.23456789", "-2.3456789e12"};
+                  };
+              yield new String[] {
+                "{\"v\":" + selected[0] + ",\"padding\":\"" + text[0] + "\"}",
+                "{\"v\":" + selected[1] + ",\"padding\":\"" + text[1] + "\"}"
+              };
+            }
+            case "tt_json" -> {
+              int fields = Integer.getInteger("scalar.json.fields", 0);
+              if (fields < 0) {
+                throw new IllegalArgumentException("scalar.json.fields must be nonnegative");
+              }
+              StringBuilder members = new StringBuilder();
+              for (int i = 0; i < fields; i++) {
+                members.append(",\"field").append(i).append("\":\"value").append(i).append("\"");
+              }
+              yield new String[] {
+                "{\"user\":{\"name\":\""
+                    + (unicode ? "\u4e2d\\n\ud83d\ude00" : "Alice")
+                    + "\",\"active\":true}"
+                    + members
+                    + ",\"padding\":\""
+                    + text[0]
+                    + "\"}",
+                "{\"user\":{\"active\":false}" + members + ",\"padding\":\"" + text[1] + "\"}"
+              };
+            }
             case "tt_date_text" -> new String[] {"2000-02-29", "1969-12-31"};
             default -> throw new IllegalArgumentException("Unknown text/time input: " + input);
           };
       tables.createTemporaryView(
           "inputs",
           env.fromSequence(0, rows - 1)
-              .map(i -> Row.of(isNull(i, nullEvery) ? null : values[(int) (i % 2)]))
+              .map(i -> Row.of(isNull(i, nullEvery) ? null : values[(int) (i % values.length)]))
               .returns(Types.ROW_NAMED(new String[] {"s"}, Types.STRING)),
           Schema.newBuilder().column("s", DataTypes.STRING()).build());
     }

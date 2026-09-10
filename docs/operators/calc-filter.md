@@ -18,7 +18,7 @@ The rest of this page is the exact admission list: what's unconditionally native
 default via a JVM upcall (and why that's not a fallback), what's opt-in, and what's a straight
 fallback.
 
-- **Unsupported function/operator** outside the admitted set (e.g. `SHA1`) is a plain fallback —
+- **Unsupported function/operator** outside the admitted set (e.g. `PARSE_URL`) is a plain fallback —
   there's no partial evaluation of an expression tree, so one unknown function anywhere in it
   declines the whole `Calc`.
 
@@ -31,6 +31,7 @@ These functions run entirely in Rust by default, in projections, predicates, and
 | `CONCAT(s, ...)`, `s \|\| t` | Character-string arguments; any NULL argument makes the result NULL. Empty strings are preserved. |
 | `CONCAT_WS(separator, ...)` | A literal or column separator; a NULL separator makes the result NULL. NULL values are skipped, empty strings are preserved, and no values or all-NULL values produce an empty string. |
 | `MD5(s)` | Lowercase hexadecimal MD5 of the string's UTF-8 bytes; NULL input produces NULL. |
+| `SHA1(s)` | Lowercase hexadecimal SHA-1 of the character string's UTF-8 bytes; NULL input produces NULL. |
 | `SHA224(s)`, `SHA256(s)`, `SHA384(s)`, `SHA512(s)` | Lowercase hexadecimal SHA-2 of the UTF-8 bytes; NULL input produces NULL. |
 | `SHA2(s, bit_length)` | The two-argument form with a literal bit length of 224, 256, 384, or 512; equivalent to the corresponding fixed-width function. |
 
@@ -44,8 +45,8 @@ character-string admission.
 `CONCAT` computes Flink's strict NULL propagation from the input validity bitmaps, without
 re-evaluating its arguments. Batches without NULL results use DataFusion's kernel directly; batches
 with NULL results append only surviving rows. Neither path revalidates the concatenated UTF-8
-payload. `CONCAT_WS` delegates to DataFusion. Hashes use the same released MD5/SHA-2 libraries as
-DataFusion, writing lowercase hex directly into presized UTF-8 Arrow buffers without intermediate
+payload. `CONCAT_WS` delegates to DataFusion. Hashes use the released RustCrypto libraries used by
+DataFusion and Comet, writing lowercase hex directly into presized UTF-8 Arrow buffers without intermediate
 binary or string-view columns or per-row heap allocations. See [string copy reduction](../optimizations/string-copy-reduction.md).
 SQL parity tests cover NULLs, empty strings, embedded zero bytes, Unicode, long inputs, nested
 calls, filters, valid BIGINT widths, and dynamic or oversized bit-length fallback.
@@ -220,7 +221,11 @@ Integer and character inputs are admitted. All four signed integer widths preser
 
 ### TO_BASE64
 
-Character strings are encoded as padded RFC 4648 Base64 over UTF-8 bytes without line wrapping. Empty input stays empty; NULL propagates. BINARY/VARBINARY input and FROM_BASE64 fall back.
+Character strings and binary columns are encoded as padded RFC 4648 Base64 without line wrapping.
+Strings use their UTF-8 bytes; binary inputs preserve every byte, including invalid UTF-8.
+Both overloads share the direct-output encoder. Empty input stays empty and NULL propagates.
+VARBINARY literals are native; fixed-size BINARY literals retain the literal encoder's fallback.
+FROM_BASE64 falls back.
 
 ### UNHEX
 
@@ -246,6 +251,13 @@ Three character arguments. Mappings use Unicode codepoints, not graphemes. The f
 
 One-argument space trimming and two-argument character-set trimming with a literal set are native. Empty sets preserve the input and NULL propagates. Column trim sets fall back because Flink can change their meaning after an exchange when the first set character is a space.
 
+### TRIM
+
+The SQL `TRIM([BOTH | LEADING | TRAILING] [characters] FROM s)` forms are native with
+a literal trim set, including Unicode, empty and NULL sets. The default set is the ASCII
+space, not all whitespace. These forms reuse BTRIM/LTRIM/RTRIM's character-set kernels.
+Column trim sets fall back for the same Flink representation-dependent behavior as BTRIM.
+
 ### ELT
 
 An INTEGER index and character alternatives are admitted. The index is 1-based; out-of-range and NULL indices return NULL. Only the selected alternative's NULL matters. Other index types and binary alternatives fall back: Flink casts its boxed index to Integer after its bounds check. Explicit casts to INTEGER follow the existing cast rules.
@@ -266,11 +278,20 @@ The JDK rule is selected on the JobManager during planning, so the JobManager an
 
 ### ENCODE
 
-Character input and a literal UTF-8, US-ASCII, or ISO-8859-1 charset (including JDK aliases). Returns BYTES, preserves NULL, and replaces unmappable characters with `?`. Other or dynamic charsets fall back.
+Character input and a literal UTF-8, US-ASCII, ISO-8859-1, UTF-16, UTF-16BE, or UTF-16LE
+charset (including JDK aliases). Returns BYTES, preserves NULL, and replaces unmappable
+characters with `?` in ASCII/Latin-1. UTF-16 emits a big-endian BOM for non-empty strings;
+UTF-16BE/LE emit no BOM. Empty strings produce empty bytes in all six charsets.
+Other or dynamic charsets fall back.
 
 ### DECODE
 
-Binary input and the same three literal charsets as ENCODE. UTF-8 uses the JDK's replacement grouping for malformed sequences; ASCII replaces each non-ASCII byte; Latin-1 maps all bytes. NULL stays NULL. Other or dynamic charsets fall back.
+Binary input and the same six literal charsets as ENCODE. UTF-8 uses the JDK's replacement
+grouping for malformed sequences; ASCII replaces each non-ASCII byte; Latin-1 maps all bytes.
+UTF-16 detects and consumes an initial BOM, defaulting to big-endian without one. UTF-16BE/LE
+use their fixed byte order and retain the BOM as a character. Malformed surrogate pairs and
+odd trailing bytes follow JDK UnicodeDecoder grouping, including consuming a high surrogate
+and a following non-low code unit together. NULL stays NULL. Other or dynamic charsets fall back.
 
 ### JSON_QUOTE
 
@@ -279,6 +300,129 @@ Character input, including NULL. Matches Flink 2.2.1's actual spelling: slash is
 ### JSON_UNQUOTE
 
 One character argument is native. Valid quoted values are unescaped with Flink/Jackson first-token validation; invalid input is preserved and NULL propagates. A truncated Unicode escape after a valid first token fails the job, matching Flink 2.2.1's uncaught bounds exception. A truncated escape inside the first token is invalid JSON and is preserved.
+
+### JSON_STRING
+
+One character, BOOLEAN, TINYINT, SMALLINT, INTEGER, or BIGINT scalar is native by default.
+SQL NULL returns SQL NULL; other scalars serialize to JSON text. Strings use Jackson's
+escaping: quote/backslash and ASCII controls are escaped, other controls use uppercase
+`\u00XX`, and slashes and Unicode remain unescaped. Integer widths retain their exact
+decimal spelling. Output is written directly into the Arrow string builder.
+
+Floating point, DECIMAL, binary, temporal, and collection inputs fall back. Direct nested
+JSON_OBJECT, JSON_ARRAY, and JSON(value) calls also fall back: Flink treats those as raw JSON,
+which is outside this scalar admission. JSON_STRING applied to an ordinary string column
+containing JSON text quotes it normally. No compatibility opt-in is needed.
+
+NULL values must have a supported scalar type, for example `CAST(NULL AS STRING)`.
+An operand whose type remains SQL NULL falls back: Flink's JSON node generator cannot
+serialize that type. The same typed-NULL rule applies to JSON_OBJECT values.
+
+### JSON_OBJECT
+
+Literal, non-null character keys with character, BOOLEAN, TINYINT, SMALLINT, INTEGER,
+or BIGINT scalar values are native. Keys must contain well-formed Unicode. The default
+NULL ON NULL writes JSON null values; ABSENT ON NULL skips them. Duplicate keys retain
+the last inserted value, so an absent NULL does not overwrite an earlier non-null value.
+Objects with no surviving entries produce `{}`, never SQL NULL.
+
+Keys are sorted in Java UTF-16 order, matching Flink's Jackson serializer even when BMP
+and supplementary characters mix. Keys and values use the same escaping as JSON_STRING.
+Each batch reuses escaped keys and scalar parameters while writing directly to Arrow.
+
+Dynamic/NULL keys, other value types, and direct nested JSON_OBJECT, JSON_ARRAY or
+JSON(value) inputs fall back. An ordinary string containing JSON text is quoted.
+No compatibility opt-in is needed.
+
+### IS JSON
+
+`s IS JSON [VALUE | OBJECT | ARRAY | SCALAR]` and their `IS NOT JSON` forms are native
+for character input. Omitting the type means VALUE. Results are non-nullable: SQL NULL
+and invalid JSON return FALSE (TRUE for the negated form). The JSON literal `null` is
+a valid VALUE and SCALAR, but is neither an OBJECT nor an ARRAY.
+
+Parsing matches Flink 2.2.1's Jackson first-document validation, including trailing
+content, token boundaries, escaped surrogates, and limits in every nested field.
+It shares the streaming/SIMD reader and JDK profiles described below; no compatibility
+opt-in is needed. This validates the document directly, without applying JSON path policies.
+
+### JSON_VALUE
+
+Enabled by default for the following verified shapes; no compatibility opt-in is needed.
+
+Character input with a non-null literal definite path is native. Supported paths are `$`,
+dot members such as `$.user.name`, bracket members such as `$['user name']`, and nonnegative
+32-bit array indexes such as `$.users[0].name`. Dot names use ASCII letters, digits and
+underscores, with a letter/underscore first; bracket names additionally allow spaces and
+hyphens. Member names are case-sensitive. Wildcards, recursive descent, filters, slices,
+negative indexes, escapes/Unicode in path member names and dynamic paths fall back.
+
+The default return type and explicit `RETURNING VARCHAR(n)` are native; Flink 2.2.1 does
+not truncate this function's result to `n`. `RETURNING BOOLEAN`, `INTEGER` and `DOUBLE`
+are also native with the following exact Flink object-type rules:
+
+| RETURNING | Accepted selected scalar | Supported literal DEFAULT |
+|---|---|---|
+| VARCHAR(n) | String, boolean or number converted to Jackson's text | Non-null character literal |
+| BOOLEAN | JSON boolean | Non-null BOOLEAN literal |
+| INTEGER | JSON integer token within signed 32-bit range | Non-null INTEGER literal |
+| DOUBLE | JSON number with a decimal point or exponent (Jackson BigDecimal) | Not admitted |
+
+`NULL` and `ERROR` behaviors are supported independently for ON EMPTY and ON ERROR.
+Other default types, NULL defaults and non-literal defaults fall back. DOUBLE defaults stay
+on Flink because generated Double/DecimalData defaults do not match its BigDecimal cast.
+Selected scalar type mismatches fail the job **outside ON ERROR**, matching Flink: a quoted
+`"12"` is not an INTEGER, `1.0` is not an INTEGER, and `1` is not a DOUBLE. Decimal-to-double
+conversion preserves rounding, infinity and underflow; a decimal zero has no negative sign.
+
+A BOOLEAN form with either NULL policy is admitted only as a direct projection. Flink 2.2.1
+can unbox its boxed NULL result without checking the null flag in a bare WHERE condition,
+truth predicate or CASE condition, failing the job. Such compositions stay on Flink.
+BOOLEAN forms with non-null DEFAULT or ERROR for both policies can compose natively.
+Typed JSON_VALUE calls nested under AND/OR stay on Flink: DataFusion may evaluate the
+unneeded side on some rows, exposing a scalar conversion failure that Flink short-circuits.
+CASE result branches retain native admission and evaluate only selected conversions.
+VARCHAR calls with an ERROR policy also stay on Flink when nested under AND/OR.
+
+The default path mode is **strict**. Missing members, selected JSON nulls, malformed JSON,
+and selected containers invoke ON ERROR in strict mode. In lax mode these invoke ON EMPTY,
+except a document containing the JSON literal `null`, which invokes ON ERROR in either mode.
+SQL NULL input always returns SQL NULL. ERROR ON EMPTY fails directly, even with a default
+ON ERROR. Duplicate members keep the last value, decimal text retains Jackson's BigDecimal
+scale/exponent spelling, and unpaired escaped surrogates become `?` in UTF-8 output.
+
+### JSON_EXISTS
+
+Enabled by default for the following verified shapes; no compatibility opt-in is needed.
+
+Character input and the same literal path grammar as JSON_VALUE are native. Supports FALSE
+(the default), TRUE, UNKNOWN and ERROR ON ERROR. A selected scalar or container, including an
+empty object/array, returns TRUE. Lax missing paths and selected JSON nulls return FALSE;
+strict missing/null paths invoke ON ERROR. Malformed JSON invokes ON ERROR in strict mode
+and returns FALSE in lax mode. A document containing the JSON literal `null` invokes ON ERROR
+in both modes. SQL NULL input returns SQL NULL.
+
+UNKNOWN ON ERROR is admitted only as a direct projection, preserving the same Flink
+boxed-null behavior described for BOOLEAN JSON_VALUE. ERROR ON ERROR under AND/OR stays
+on Flink to preserve row short-circuiting. The default FALSE policy and TRUE ON ERROR
+remain native in predicates and nested expressions.
+
+These JSON functions use native first-document parsing and validate unselected fields too.
+Admission first probes the shaded Jackson runtime once per class loader: version 2.18.2,
+the default thread-local recycler pool, and successful buffer acquisition, cross-factory
+reuse and release are required. Missing methods/classes, a different version or pool,
+or probe failure cause planning-time fallback for JSON_VALUE, JSON_EXISTS and IS JSON.
+JobManagers and TaskManagers must use the same verified shaded Jackson runtime.
+They currently admit JDK 17, 21, 24 and 25, selecting the corresponding Unicode version for
+Jackson's token-termination rules; other JDKs fall back. The profile is selected on the
+JobManager, so TaskManagers must use the same JSON parsing rules. Jackson's resource limits
+(1000 nesting levels, 1000 number digits, 20 million UTF-16 string units, 50,000 member-name
+units) also apply to unselected values. Its numeric boundary has a buffer-dependent exception:
+the slow parser can accept an extra digit. Native evaluation uses the task thread's actual
+Jackson input-buffer capacity and preserves its growth, including invalid input and SIMD
+parsing. A batch exchanges this capacity through JNI; documents and results remain native.
+See the [SQL/JSON parser note](https://github.com/datafusion-contrib/StreamFusion/blob/main/divergences/32-sql-json-definite-paths.md)
+and [per-function benchmarks](../benchmarks/scalar-functions.md).
 
 ### SPLIT
 
@@ -412,7 +556,7 @@ A number of otherwise-admitted functions decline when called with an argument sh
 implementation can't handle, even though the function itself is supported:
 
 - An **unsupported literal type** anywhere in the expression.
-- **`TRIM`** — anything other than the default `BOTH`-whitespace form.
+- **`TRIM`** — dynamic trim sets; all directions with literal sets are native.
 - **`POSITION`** — a `FROM` start offset.
 - **`SPLIT_INDEX`** — the numeric separator overload.
 - **`DATE_FORMAT`** — a non-literal pattern, or (on the pure-native path only) a

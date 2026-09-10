@@ -150,6 +150,7 @@ mod json;
     test
 ))]
 mod json_retry;
+mod json_string;
 #[cfg(feature = "kafka")]
 mod kafka;
 #[cfg(any(feature = "core", test))]

@@ -605,24 +605,7 @@ fn write_json_value(out: &mut String, value: simd_json::tape::Value<'_, '_>) {
 /// JSON string escaping matching Jackson's writer: quote/backslash escaped, the short control
 /// escapes for \b \t \n \f \r, \u00XX for the other control characters, everything else raw.
 pub(crate) fn write_json_string(out: &mut String, s: &str) {
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\u{8}' => out.push_str("\\b"),
-            '\t' => out.push_str("\\t"),
-            '\n' => out.push_str("\\n"),
-            '\u{c}' => out.push_str("\\f"),
-            '\r' => out.push_str("\\r"),
-            c if (c as u32) < 0x20 => {
-                // Jackson writes the remaining control characters with uppercase hex.
-                out.push_str(&format!("\\u{:04X}", c as u32));
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('"');
+    crate::json_string::write_json_string(out, s).expect("String writes cannot fail");
 }
 
 pub(crate) struct StructJsonAppender {

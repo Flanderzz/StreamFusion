@@ -32,6 +32,7 @@ class ScalarFunctionBenchmark {
   private static final int RUNS = Integer.getInteger("scalar.runs", 5);
   private static final boolean UNICODE = Boolean.getBoolean("scalar.unicode");
   private static final int NULL_EVERY = Integer.getInteger("scalar.nullEvery", 0);
+  private static final int JSON_FIELDS = Integer.getInteger("scalar.json.fields", 0);
   private static final String ENGINE =
       System.getProperty("scalar.engine", "both").toLowerCase(Locale.ROOT);
 
@@ -58,6 +59,9 @@ class ScalarFunctionBenchmark {
           new Query("INITCAP", "text", "INITCAP(s)"),
           new Query("TRANSLATE", "text", "TRANSLATE(s, 'abcdef', 'ABCDEF')"),
           new Query("BTRIM", "text", "BTRIM(s)"),
+          new Query("TRIM_LEADING", "tt_text", "TRIM(LEADING FROM s)"),
+          new Query("TRIM_TRAILING", "tt_text", "TRIM(TRAILING FROM s)"),
+          new Query("TRIM_LITERAL_SET", "tt_text", "TRIM(BOTH ' |ab' FROM s)"),
           new Query("ELT", "elt", "ELT(i, s, t)"),
           new Query("URL_ENCODE", "text", "URL_ENCODE(s)"),
           new Query("URL_DECODE", "encoded", "URL_DECODE(s)"),
@@ -88,11 +92,57 @@ class ScalarFunctionBenchmark {
               Stream.of(
                   new Query("HEX_STRING", "text", "HEX(s)"),
                   new Query("TO_BASE64", "text", "TO_BASE64(s)"),
+                  new Query("TO_BASE64_BINARY", "tt_bytes", "TO_BASE64(b)"),
+                  new Query("ENCODE_UTF16", "tt_text", "ENCODE(s, 'UTF-16')", "BYTES"),
+                  new Query("ENCODE_UTF16BE", "tt_text", "ENCODE(s, 'UTF-16BE')", "BYTES"),
+                  new Query("ENCODE_UTF16LE", "tt_text", "ENCODE(s, 'UTF-16LE')", "BYTES"),
+                  new Query("DECODE_UTF16", "tt_utf16", "DECODE(b, 'UTF-16')"),
+                  new Query("DECODE_UTF16BE", "tt_utf16be", "DECODE(b, 'UTF-16BE')"),
+                  new Query("DECODE_UTF16LE", "tt_utf16le", "DECODE(b, 'UTF-16LE')"),
                   new Query("UNHEX", "hex", "UNHEX(s)", "BYTES")))
           .toList();
 
   private static final List<Query> FUNCTIONS =
-      Stream.of(SCALAR_FUNCTIONS, SEARCH_FUNCTIONS, ENCODING_FUNCTIONS, TextTimeFunctions.QUERIES)
+      Stream.of(
+              SCALAR_FUNCTIONS,
+              SEARCH_FUNCTIONS,
+              ENCODING_FUNCTIONS,
+              TextTimeFunctions.QUERIES,
+              List.of(
+                  new Query("SHA1", "tt_text", "SHA1(s)"),
+                  new Query("JSON_STRING_TEXT", "tt_text", "JSON_STRING(s)"),
+                  new Query("JSON_STRING_BOOLEAN", "tt_boolean", "JSON_STRING(b)"),
+                  new Query("JSON_STRING_INTEGER", "bigint", "JSON_STRING(n)", "STRING"),
+                  new Query(
+                      "JSON_OBJECT_NULL",
+                      "tt_json_object",
+                      "JSON_OBJECT('text' VALUE s, 'id' VALUE n, 'flag' VALUE b NULL ON NULL)"),
+                  new Query(
+                      "JSON_OBJECT_ABSENT",
+                      "tt_json_object",
+                      "JSON_OBJECT('text' VALUE s, 'id' VALUE n, 'flag' VALUE b ABSENT ON NULL)"),
+                  new Query("IS_JSON_VALUE", "tt_json_predicate", "s IS JSON VALUE", "BOOLEAN"),
+                  new Query("IS_JSON_OBJECT", "tt_json_predicate", "s IS JSON OBJECT", "BOOLEAN"),
+                  new Query("IS_JSON_ARRAY", "tt_json_predicate", "s IS JSON ARRAY", "BOOLEAN"),
+                  new Query("IS_JSON_SCALAR", "tt_json_predicate", "s IS JSON SCALAR", "BOOLEAN"),
+                  new Query("JSON_VALUE", "tt_json", "JSON_VALUE(s, 'lax $.user.name')", "STRING"),
+                  new Query(
+                      "JSON_VALUE_BOOLEAN",
+                      "tt_json_boolean",
+                      "JSON_VALUE(s, '$.v' RETURNING BOOLEAN)",
+                      "BOOLEAN"),
+                  new Query(
+                      "JSON_VALUE_INTEGER",
+                      "tt_json_integer",
+                      "JSON_VALUE(s, '$.v' RETURNING INTEGER)",
+                      "INT"),
+                  new Query(
+                      "JSON_VALUE_DOUBLE",
+                      "tt_json_double",
+                      "JSON_VALUE(s, '$.v' RETURNING DOUBLE)",
+                      "DOUBLE"),
+                  new Query(
+                      "JSON_EXISTS", "tt_json", "JSON_EXISTS(s, 'lax $.user.name')", "BOOLEAN")))
           .flatMap(List::stream)
           .toList();
 
@@ -133,7 +183,7 @@ class ScalarFunctionBenchmark {
     List<String> csv =
         new ArrayList<>(
             List.of(
-                "function,input,output_type,payload_bytes,unicode,null_every,rows,engine,trial,seconds"));
+                "function,input,output_type,payload_bytes,json_fields,unicode,null_every,rows,engine,trial,seconds"));
     Path output = Path.of(System.getProperty("scalar.output", "target/scalar-functions.csv"));
     if (output.getParent() != null && !Files.isDirectory(output.getParent())) {
       Files.createDirectories(output.getParent());
@@ -153,11 +203,12 @@ class ScalarFunctionBenchmark {
             csv.add(
                 String.format(
                     Locale.ROOT,
-                    "%s,%s,%s,%d,%s,%d,%d,%s,%d,%.6f",
+                    "%s,%s,%s,%d,%d,%s,%d,%d,%s,%d,%.6f",
                     query.name(),
                     query.input(),
                     query.outputType(),
                     BYTES,
+                    query.input().equals("tt_json") ? JSON_FIELDS : 0,
                     UNICODE,
                     NULL_EVERY,
                     ROWS,

@@ -25,6 +25,12 @@ pub(crate) mod to_date;
 
 mod binary_strings;
 mod charset;
+mod is_json;
+mod json_exists;
+mod json_object;
+mod json_path;
+mod json_serialize;
+mod json_value;
 mod locate;
 mod scalar;
 
@@ -127,6 +133,23 @@ pub(crate) fn function(op: i64, arity: usize) -> Option<ScalarUDF> {
         136 => calendar::function(calendar::Field::DayOfWeek),
         139 => datafusion::functions::string::ltrim().as_ref().clone(),
         140 => datafusion::functions::string::rtrim().as_ref().clone(),
+        141 => json_value::function(),
+        142 => json_exists::function(),
+        144 => is_json::function(is_json::JsonType::Value),
+        145 => is_json::function(is_json::JsonType::Object),
+        146 => is_json::function(is_json::JsonType::Array),
+        147 => is_json::function(is_json::JsonType::Scalar),
+        148 => json_value::typed_function(json_value::ReturnType::Boolean),
+        149 => json_value::typed_function(json_value::ReturnType::Integer),
+        150 => json_value::typed_function(json_value::ReturnType::Double),
+        151 => udf(
+            "flink_to_base64_binary",
+            vec![DataType::Binary],
+            DataType::Utf8,
+            |args| binary_strings::encode(args, true),
+        ),
+        152 => json_serialize::function(),
+        153 => json_object::function(),
         _ => return None,
     })
 }

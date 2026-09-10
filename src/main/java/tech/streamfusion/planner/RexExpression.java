@@ -18,6 +18,7 @@ import org.apache.calcite.rex.RexLocalRef;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.rex.RexProgram;
 import org.apache.calcite.rex.RexUtil;
+import org.apache.calcite.sql.SqlJsonConstructorNullClause;
 import org.apache.calcite.sql.SqlKind;
 import org.apache.calcite.sql.type.SqlTypeFamily;
 import org.apache.calcite.sql.type.SqlTypeName;
@@ -156,6 +157,8 @@ final class RexExpression {
   // config
   // rides the node). null (a bare predicate encode) declines the host-exact casts, conservatively.
   private Boolean legacyCastBehaviour;
+  // Root of the projection currently being encoded; null for conditions and bare predicates.
+  private RexNode projectionRoot;
 
   private RexExpression() {}
 
@@ -206,6 +209,7 @@ final class RexExpression {
   static RexExpression encodeProjections(List<RexNode> projections, List<String> names) {
     RexExpression encoder = new RexExpression();
     for (RexNode projection : projections) {
+      encoder.projectionRoot = projection;
       encoder.projectionRoots.add(encoder.kinds.size());
       if (!encoder.emit(projection)) {
         return null;
@@ -235,6 +239,8 @@ final class RexExpression {
                     .TABLE_EXEC_LEGACY_CAST_BEHAVIOUR)
             .isEnabled();
     RexProgram program = calc.getProgram();
+    // A filter condition is never a direct projection, regardless of encoding order.
+    projectionRoot = null;
     if (program.getCondition() != null) {
       RexNode condition =
           RexUtil.expandSearch(
@@ -253,6 +259,7 @@ final class RexExpression {
       RexNode projection =
           RexUtil.expandSearch(
               calc.getCluster().getRexBuilder(), null, program.expandLocalRef(ref));
+      projectionRoot = projection;
       if (!emit(projection)) {
         return false;
       }
@@ -589,6 +596,31 @@ final class RexExpression {
     if ("JSON_UNQUOTE".equals(functionName)) {
       return emitCharacterFunction(call, 123, 1, 1);
     }
+    if ("JSON_STRING".equals(functionName)) {
+      if (call.getOperands().size() != 1 || !isJsonScalarValue(call.getOperands().get(0))) {
+        return reject("JSON_STRING requires a character, boolean, or signed integer scalar");
+      }
+      return emitBuiltinCall(call, 152);
+    }
+    if ("JSON_OBJECT".equals(functionName)) {
+      return emitJsonObject(call);
+    }
+    if ("JSON_VALUE".equals(functionName)) {
+      return emitJsonValue(call);
+    }
+    if ("JSON_EXISTS".equals(functionName)) {
+      return emitJsonExists(call);
+    }
+    int jsonPredicate = switch (functionName) {
+      case "IS JSON VALUE", "IS NOT JSON VALUE" -> 144;
+      case "IS JSON OBJECT", "IS NOT JSON OBJECT" -> 145;
+      case "IS JSON ARRAY", "IS NOT JSON ARRAY" -> 146;
+      case "IS JSON SCALAR", "IS NOT JSON SCALAR" -> 147;
+      default -> -1;
+    };
+    if (jsonPredicate >= 0) {
+      return emitIsJson(call, jsonPredicate, functionName.startsWith("IS NOT"));
+    }
     if ("SPLIT".equals(functionName)) {
       List<RexNode> args = call.getOperands();
       if (args.size() != 2
@@ -622,6 +654,11 @@ final class RexExpression {
       return emitEncoding(call, 105, true, true);
     }
     if ("TO_BASE64".equals(functionName)) {
+      if (call.getOperands().size() == 1
+          && call.getOperands().get(0).getType().getSqlTypeName().getFamily()
+              == SqlTypeFamily.BINARY) {
+        return emitBuiltinCall(call, 151);
+      }
       return emitEncoding(call, 107, false, true);
     }
     if ("UNHEX".equals(functionName)) {
@@ -803,6 +840,9 @@ final class RexExpression {
         return emit(operands.get(0));
       case AND:
       case OR:
+        if (operands.stream().anyMatch(RexExpression::containsFallibleJsonCall)) {
+          return reject("SQL/JSON under AND/OR requires Flink's row short-circuiting");
+        }
         // Calcite leaves AND/OR n-ary; the native binary op needs a left-deep nesting, which a
         // pre-order stream encodes as (n-1) call headers followed by the operands in order.
         if (operands.size() < 2) {
@@ -893,6 +933,56 @@ final class RexExpression {
         && (args.size() == 2 || emit(args.get(2)));
   }
 
+  private boolean emitJsonObject(RexCall call) {
+    List<RexNode> args = call.getOperands();
+    if (args.isEmpty() || args.size() % 2 != 1 || !(args.get(0) instanceof RexLiteral)) {
+      return reject("JSON_OBJECT requires a NULL policy and key/value pairs");
+    }
+    Object policyValue = ((RexLiteral) args.get(0)).getValue();
+    if (!(policyValue instanceof SqlJsonConstructorNullClause nullClause)) {
+      return reject("JSON_OBJECT: unsupported NULL policy");
+    }
+    String policy =
+        switch (nullClause) {
+          case NULL_ON_NULL -> "NULL";
+          case ABSENT_ON_NULL -> "ABSENT";
+        };
+    for (int index = 1; index < args.size(); index += 2) {
+      if (!(args.get(index) instanceof RexLiteral key) || !isCharacter(key) || key.isNull()) {
+        return reject("JSON_OBJECT requires non-null literal character keys");
+      }
+      String name = key.getValueAs(String.class);
+      if (name == null || name.codePoints().anyMatch(c -> c >= 0xd800 && c <= 0xdfff)) {
+        return reject("JSON_OBJECT requires keys with well-formed Unicode");
+      }
+      if (!isJsonScalarValue(args.get(index + 1))) {
+        return reject("JSON_OBJECT requires character, boolean, or signed integer scalar values");
+      }
+    }
+    add(KIND_CALL, 153, args.size());
+    add(KIND_LIT_STRING, strings.size(), 0);
+    strings.add(policy);
+    for (RexNode arg : args.subList(1, args.size())) {
+      if (!emit(arg)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private static boolean isJsonScalarValue(RexNode value) {
+    // Flink treats direct JSON constructors as raw JSON, despite their character return type.
+    if (value instanceof RexCall call
+        && List.of("JSON_OBJECT", "JSON_ARRAY", "JSON")
+            .contains(call.getOperator().getName().toUpperCase(Locale.ROOT))) {
+      return false;
+    }
+    return switch (value.getType().getSqlTypeName()) {
+      case CHAR, VARCHAR, BOOLEAN, TINYINT, SMALLINT, INTEGER, BIGINT -> true;
+      default -> false;
+    };
+  }
+
   private boolean emitCharsetFunction(RexCall call, int op, SqlTypeFamily inputFamily) {
     List<RexNode> args = call.getOperands();
     if (args.size() != 2
@@ -910,7 +1000,8 @@ final class RexExpression {
     } catch (IllegalArgumentException e) {
       return reject(call.getOperator().getName() + ": unknown charset");
     }
-    if (!List.of("UTF-8", "US-ASCII", "ISO-8859-1").contains(charset)) {
+    if (!List.of("UTF-8", "US-ASCII", "ISO-8859-1", "UTF-16", "UTF-16BE", "UTF-16LE")
+        .contains(charset)) {
       return reject(call.getOperator().getName() + ": unverified charset " + charset);
     }
     add(KIND_CALL, op, 2);
@@ -990,6 +1081,211 @@ final class RexExpression {
           call.getOperator().getName() + " requires " + min + ".." + max + " character arguments");
     }
     return emitBuiltinCall(call, op);
+  }
+
+  private static boolean containsFallibleJsonCall(RexNode node) {
+    if (!(node instanceof RexCall call)) {
+      return false;
+    }
+    String name = call.getOperator().getName().toUpperCase(Locale.ROOT);
+    List<RexNode> args = call.getOperands();
+    if ("JSON_VALUE".equals(name)) {
+      if (call.getType().getSqlTypeName() != SqlTypeName.VARCHAR) {
+        return true;
+      }
+      for (int i = 2; i < args.size(); ) {
+        String policy = jsonSymbol(args.get(i));
+        if ("ERROR".equals(policy)) {
+          return true;
+        }
+        i += "DEFAULT".equals(policy) ? 3 : 2;
+      }
+    }
+    if ("JSON_EXISTS".equals(name)
+        && args.size() == 3
+        && "ERROR".equals(jsonSymbol(args.get(2)))) {
+      return true;
+    }
+    return args.stream().anyMatch(RexExpression::containsFallibleJsonCall);
+  }
+
+  private boolean jsonRuntimeAvailable() {
+    try {
+      if (tech.streamfusion.operator.NativeJsonRuntime.available()) {
+        return true;
+      }
+    } catch (LinkageError incompatibleJackson) {
+      // Loading the runtime class itself may fail before available() can run.
+    }
+    return reject("SQL/JSON requires Jackson 2.18.2 with a shared thread-local token buffer");
+  }
+
+  private boolean emitJsonValue(RexCall call) {
+    if (!jsonRuntimeAvailable()) {
+      return false;
+    }
+    if (JsonPathSpec.unicodeVersion() == null) {
+      return reject("JSON_VALUE requires verified JDK 17, 21, 24 or 25 token rules");
+    }
+    List<RexNode> args = call.getOperands();
+    SqlTypeName returnType = call.getType().getSqlTypeName();
+    int op =
+        switch (returnType) {
+          case VARCHAR -> 141;
+          case BOOLEAN -> 148;
+          case INTEGER -> 149;
+          case DOUBLE -> 150;
+          default -> -1;
+        };
+    if (op < 0) {
+      return reject("JSON_VALUE supports RETURNING VARCHAR, BOOLEAN, INTEGER or DOUBLE");
+    }
+    String path = jsonPath(args);
+    if (path == null) {
+      return reject("JSON_VALUE requires a literal definite member/index path");
+    }
+    String empty = "NULL";
+    String error = "NULL";
+    String emptyDefault = null;
+    String errorDefault = null;
+    for (int i = 2; i < args.size(); ) {
+      String behavior = jsonSymbol(args.get(i++));
+      String defaultValue = null;
+      if ("DEFAULT".equals(behavior)) {
+        if (i >= args.size()
+            || !(args.get(i++) instanceof RexLiteral literal)
+            || (defaultValue = jsonDefault(literal, returnType)) == null) {
+          return reject(
+              "JSON_VALUE DEFAULT requires a non-null literal matching RETURNING; DOUBLE defaults"
+                  + " are not admitted");
+        }
+      } else if (!"NULL".equals(behavior) && !"ERROR".equals(behavior)) {
+        return reject("JSON_VALUE has an unsupported behavior");
+      }
+      if (i >= args.size()) {
+        return reject("JSON_VALUE requires ON EMPTY or ON ERROR after a behavior");
+      }
+      String mode = jsonSymbol(args.get(i++));
+      if ("EMPTY".equals(mode)) {
+        empty = behavior;
+        emptyDefault = defaultValue;
+      } else if ("ERROR".equals(mode)) {
+        error = behavior;
+        errorDefault = defaultValue;
+      } else {
+        return reject("JSON_VALUE has an unsupported behavior target");
+      }
+    }
+    if (returnType == SqlTypeName.BOOLEAN
+        && ("NULL".equals(empty) || "NULL".equals(error))
+        && call != projectionRoot) {
+      return reject(
+          "JSON_VALUE BOOLEAN with NULL policies requires a direct projection; Flink unboxes null"
+              + " in boolean contexts");
+    }
+    add(KIND_CALL, op, 7);
+    if (!emit(args.get(0))) {
+      return false;
+    }
+    for (String value : new String[] {path, empty, emptyDefault, error, errorDefault}) {
+      emitString(value);
+    }
+    emitString(JsonPathSpec.unicodeVersion());
+    return true;
+  }
+
+  private static String jsonDefault(RexLiteral literal, SqlTypeName returnType) {
+    if (literal.isNull()) {
+      return null;
+    }
+    SqlTypeName literalType = literal.getType().getSqlTypeName();
+    if (returnType == SqlTypeName.VARCHAR && isCharacter(literal)) {
+      return literal.getValueAs(String.class);
+    }
+    if (returnType == SqlTypeName.BOOLEAN && literalType == SqlTypeName.BOOLEAN) {
+      return literal.getValueAs(Boolean.class).toString();
+    }
+    if (returnType == SqlTypeName.INTEGER && literalType == SqlTypeName.INTEGER) {
+      return Integer.toString(literal.getValueAs(BigDecimal.class).intValueExact());
+    }
+    // DOUBLE defaults are generated as Double/DecimalData, not the BigDecimal object
+    // that Flink's RETURNING conversion expects. Preserve that behavior on Flink.
+    return null;
+  }
+
+  private boolean emitIsJson(RexCall call, int op, boolean negate) {
+    if (!jsonRuntimeAvailable()) {
+      return false;
+    }
+    if (JsonPathSpec.unicodeVersion() == null) {
+      return reject("IS JSON requires verified JDK 17, 21, 24 or 25 token rules");
+    }
+    if (call.getOperands().size() != 1 || !isCharacter(call.getOperands().get(0))) {
+      return reject("IS JSON requires one character argument");
+    }
+    if (negate) {
+      add(KIND_CALL, opCode(SqlKind.NOT), 1);
+    }
+    add(KIND_CALL, op, 2);
+    if (!emit(call.getOperands().get(0))) {
+      return false;
+    }
+    emitString(JsonPathSpec.unicodeVersion());
+    return true;
+  }
+
+  private boolean emitJsonExists(RexCall call) {
+    if (!jsonRuntimeAvailable()) {
+      return false;
+    }
+    if (JsonPathSpec.unicodeVersion() == null) {
+      return reject("JSON_EXISTS requires verified JDK 17, 21, 24 or 25 token rules");
+    }
+    List<RexNode> args = call.getOperands();
+    String path = jsonPath(args);
+    if (path == null || args.size() > 3) {
+      return reject("JSON_EXISTS requires a literal definite member/index path");
+    }
+    String error = args.size() == 2 ? "FALSE" : jsonSymbol(args.get(2));
+    if (error == null || !List.of("TRUE", "FALSE", "UNKNOWN", "ERROR").contains(error)) {
+      return reject("JSON_EXISTS has an unsupported ON ERROR behavior");
+    }
+    if ("UNKNOWN".equals(error) && call != projectionRoot) {
+      return reject(
+          "JSON_EXISTS UNKNOWN ON ERROR requires a direct projection; Flink unboxes null in boolean contexts");
+    }
+    add(KIND_CALL, 142, 4);
+    if (!emit(args.get(0))) {
+      return false;
+    }
+    emitString(path);
+    emitString(error);
+    emitString(JsonPathSpec.unicodeVersion());
+    return true;
+  }
+
+  private static String jsonPath(List<RexNode> args) {
+    if (args.size() < 2
+        || !isCharacter(args.get(0))
+        || !(args.get(1) instanceof RexLiteral literal)
+        || !isCharacter(literal)
+        || literal.isNull()) {
+      return null;
+    }
+    return JsonPathSpec.normalize(literal.getValueAs(String.class));
+  }
+
+  private static String jsonSymbol(RexNode node) {
+    return node instanceof RexLiteral literal
+            && literal.getType().getSqlTypeName() == SqlTypeName.SYMBOL
+            && literal.getValue() instanceof Enum<?> symbol
+        ? symbol.name()
+        : null;
+  }
+
+  private void emitString(String value) {
+    add(KIND_LIT_STRING, strings.size(), 0);
+    strings.add(value);
   }
 
   private static boolean isCharacter(RexNode arg) {
@@ -1087,6 +1383,8 @@ final class RexExpression {
 
   private static int hashOpCode(String name) {
     switch (name) {
+      case "SHA1":
+        return 143;
       case "MD5":
         return 95;
       case "SHA224":
@@ -2190,27 +2488,27 @@ final class RexExpression {
     return value != null && value >= min;
   }
 
-  /**
-   * Emits {@code TRIM(BOTH ' ' FROM s)} — the default whitespace both-sides trim — as a unary call
-   * (op 54) mapped to DataFusion's {@code btrim}. Calcite gives TRIM three operands: a
-   * BOTH/LEADING/ TRAILING flag, the trim characters, and the source string. Only the default (flag
-   * {@code BOTH}, a single-space trim set) is admitted; LEADING/TRAILING or custom trim chars fall
-   * back.
-   */
+  /** Reuses the literal-set trim kernels for SQL's BOTH/LEADING/TRAILING syntax. */
   private boolean emitTrim(RexCall call) {
     List<RexNode> operands = call.getOperands();
     if (operands.size() != 3
-        || !(operands.get(0) instanceof RexLiteral)
-        || !(operands.get(1) instanceof RexLiteral)) {
-      return reject("unsupported TRIM form");
+        || !(operands.get(0) instanceof RexLiteral flag)
+        || !(operands.get(1) instanceof RexLiteral trim)
+        || !isCharacter(trim)
+        || !isCharacter(operands.get(2))) {
+      return reject("TRIM requires a literal trim set");
     }
-    String flag = String.valueOf(((RexLiteral) operands.get(0)).getValue());
-    String trimChars = ((RexLiteral) operands.get(1)).getValueAs(String.class);
-    if (!"BOTH".equals(flag) || !" ".equals(trimChars)) {
-      return reject("TRIM supports only the default BOTH whitespace trim");
+    int op = switch (String.valueOf(flag.getValue())) {
+      case "BOTH" -> 113;
+      case "LEADING" -> 139;
+      case "TRAILING" -> 140;
+      default -> -1;
+    };
+    if (op < 0) {
+      return reject("unsupported TRIM direction");
     }
-    add(KIND_CALL, 54, 1);
-    return emit(operands.get(2));
+    add(KIND_CALL, op, 2);
+    return emit(operands.get(2)) && emit(trim);
   }
 
   /**

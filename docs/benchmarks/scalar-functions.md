@@ -15,7 +15,7 @@ sink. The harness checks that every native function and identity-control plan in
 time: above 1 means native is faster for that workload; below 1 means it is slower. Small
 differences can be run-to-run noise, and these measurements do not isolate kernel cost.
 
-The 48 cases cover all 35 retained functions, including integer widths and literal/column
+The original 48 cases cover 35 retained functions, including integer widths and literal/column
 search parameters. All cases run with the 264-byte ASCII/non-null and Unicode/NULL scenarios;
 the ten search cases also run with 8-byte ASCII padding, giving 106 Flink/native comparisons.
 TO_TIMESTAMP and temporal FLOOR/CEIL/CEILING are outside the PR's native coverage and have no
@@ -45,7 +45,7 @@ Use JDK 17 and run one timing process at a time:
 ```sh
 TZ=UTC SF_BENCHMARK=true mvn -pl :streamfusion-runtime test -Pbench \
   '-Dtest=ScalarFunctionBenchmark#individualFunctions' \
-  -Dscalar.engine=both -Dscalar.functions=ALL \
+  -Dscalar.engine=both -Dscalar.functions=SCALAR,SEARCH,ENCODING,TEXT_TIME \
   -Dscalar.rows=2000000 -Dscalar.warmup=2 -Dscalar.runs=5 \
   -Dscalar.bytes=264 -Dscalar.unicode=false -Dscalar.nullEvery=0 \
   -Dscalar.output=target/scalar-ascii264.csv
@@ -414,3 +414,237 @@ not subtracted from function times because their result types and lengths can di
 |---|---|---:|---:|---:|
 | `RTRIM_LITERAL_SET` | ASCII, 264-byte budget | 1.923 | 0.990 | 1.94x |
 | `RTRIM_LITERAL_SET` | Unicode, 264-byte budget, NULL/8 | 1.581 | 1.063 | 1.49x |
+
+## SQL/JSON measurements
+
+Measured on 2026-09-10 with the same release profile, JDK 17, Flink/DataFusion versions,
+2,000,000 rows, parallelism 1, two warmups, five measured trials, interleaved engines and
+both transposes described above. Each scenario starts a fresh JVM; no other test or benchmark
+runs concurrently. Both functions use default admission, including synchronization with
+Jackson's actual recycled input-buffer capacity; no compatibility flags are enabled.
+
+The input alternates between a document containing `user.name` and a document without that
+member. The byte budget controls a separate padding string, excluding JSON syntax and other
+fields. Unicode input also includes an escaped newline in the selected name; every eighth
+source value is SQL NULL. Each query evaluates one function, using the literal path
+`lax $.user.name`. Identity controls use the same source and are not included in the tables.
+
+The multi-member scenarios add 16 or 64 short string members (`field0: value0`, and so on)
+between `user` and `padding`. They distinguish repeated key/value parsing from scanning one
+long string. Both shapes retain full input validation and last-duplicate-member semantics.
+The native reader selects its protected SIMD path for these multi-member scenarios and the
+streaming path for the padding-only scenarios. See the [parsing technique](../optimizations/sql-json-parsing.md).
+
+```sh
+TZ=UTC SF_BENCHMARK=true mvn -pl :streamfusion-runtime test -Pbench \
+  '-Dtest=ScalarFunctionBenchmark#individualFunctions' \
+  -Dscalar.engine=both -Dscalar.functions=JSON_VALUE,JSON_EXISTS \
+  -Dscalar.rows=2000000 -Dscalar.warmup=2 -Dscalar.runs=5 \
+  -Dscalar.bytes=264 -Dscalar.json.fields=0 \
+  -Dscalar.unicode=false -Dscalar.nullEvery=0 \
+  -Dscalar.output=target/json-functions.csv
+```
+
+Repeat with 32 and 1024 ASCII padding bytes, and with 264 bytes plus `scalar.unicode=true`
+and `scalar.nullEvery=8`. For multi-member documents, use 32 padding bytes and
+`scalar.json.fields=16` or `64`; repeat the 64-member case with Unicode and NULL/8.
+Raw trial output stays in the local target directory; the tables contain only the final
+Flink/native medians, with no intermediate optimization results.
+
+## JSON_VALUE
+
+`JSON_VALUE(s, 'lax $.user.name')`
+
+| Scenario | Flink (s) | Native (s) | Flink / Native |
+|---|---:|---:|---:|
+| ASCII, 32-byte padding | 1.212 | 0.831 | 1.46x |
+| ASCII, 264-byte padding | 1.796 | 1.311 | 1.37x |
+| ASCII, 1024-byte padding | 3.648 | 2.962 | 1.23x |
+| Unicode, 264-byte padding, NULL/8 | 1.439 | 1.108 | 1.30x |
+| 16 extra members, ASCII, 32-byte padding | 2.805 | 1.786 | 1.57x |
+| 64 extra members, ASCII, 32-byte padding | 8.067 | 4.595 | 1.76x |
+| 64 extra members, Unicode, 32-byte padding, NULL/8 | 6.429 | 3.321 | 1.94x |
+
+## JSON_EXISTS
+
+`JSON_EXISTS(s, 'lax $.user.name')`
+
+| Scenario | Flink (s) | Native (s) | Flink / Native |
+|---|---:|---:|---:|
+| ASCII, 32-byte padding | 1.182 | 0.828 | 1.43x |
+| ASCII, 264-byte padding | 1.766 | 1.287 | 1.37x |
+| ASCII, 1024-byte padding | 3.621 | 3.211 | 1.13x |
+| Unicode, 264-byte padding, NULL/8 | 1.438 | 1.091 | 1.32x |
+| 16 extra members, ASCII, 32-byte padding | 2.773 | 1.772 | 1.56x |
+| 64 extra members, ASCII, 32-byte padding | 8.115 | 4.576 | 1.77x |
+| 64 extra members, Unicode, 32-byte padding, NULL/8 | 6.464 | 3.315 | 1.95x |
+
+## TO_BASE64 binary input
+
+Measured on 2026-09-10 with the release profile, 2,000,000 rows, two warmups and
+five interleaved trials, including both transposes. Run with
+`scalar.functions=TO_BASE64_BINARY`. The `tt_bytes` fixture supplies binary columns
+containing the ASCII/Unicode payload bytes; encoding is the only measured function.
+
+| Scenario | Flink (s) | Native (s) |
+|---|---:|---:|
+| ASCII, 32-byte budget | 0.357 | 0.495 |
+| ASCII, 264-byte budget | 0.499 | 0.767 |
+| Unicode, 264-byte budget, NULL/8 | 0.485 | 0.753 |
+
+## ENCODE UTF-16 charsets
+
+Measured on 2026-09-10 with the same release, interleaved 2,000,000-row method,
+two warmups, five measured trials and both transposes. Each charset runs separately
+over `tt_text`; select `ENCODE_UTF16`, `ENCODE_UTF16BE`, or `ENCODE_UTF16LE`.
+
+| Function | Scenario | Flink (s) | Native (s) |
+|---|---|---:|---:|
+| ENCODE_UTF16 | ASCII, 32-byte budget | 0.440 | 0.627 |
+| ENCODE_UTF16BE | ASCII, 32-byte budget | 0.454 | 0.688 |
+| ENCODE_UTF16LE | ASCII, 32-byte budget | 0.540 | 0.689 |
+| ENCODE_UTF16 | ASCII, 264-byte budget | 0.998 | 1.537 |
+| ENCODE_UTF16BE | ASCII, 264-byte budget | 0.997 | 1.544 |
+| ENCODE_UTF16LE | ASCII, 264-byte budget | 1.599 | 1.484 |
+| ENCODE_UTF16 | Unicode, 264-byte budget, NULL/8 | 1.889 | 1.242 |
+| ENCODE_UTF16BE | Unicode, 264-byte budget, NULL/8 | 1.222 | 1.222 |
+| ENCODE_UTF16LE | Unicode, 264-byte budget, NULL/8 | 2.063 | 1.227 |
+
+## DECODE UTF-16 charsets
+
+Measured on 2026-09-10 with the release profile, 2,000,000 rows, two warmups,
+five interleaved trials and both transposes. Run each of `DECODE_UTF16`,
+`DECODE_UTF16BE`, and `DECODE_UTF16LE` independently. Source fixtures pre-encode
+text in the matching charset, so only DECODE is measured. The budgets describe
+the original text in UTF-8; actual binary input uses UTF-16 code units plus a
+BOM for UTF-16. Non-null benchmark inputs are valid encoded text.
+
+| Function | Scenario | Flink (s) | Native (s) |
+|---|---|---:|---:|
+| DECODE_UTF16 | ASCII, 32-byte text budget | 0.423 | 0.526 |
+| DECODE_UTF16BE | ASCII, 32-byte text budget | 0.441 | 0.514 |
+| DECODE_UTF16LE | ASCII, 32-byte text budget | 0.557 | 0.507 |
+| DECODE_UTF16 | ASCII, 264-byte text budget | 1.020 | 1.342 |
+| DECODE_UTF16BE | ASCII, 264-byte text budget | 1.112 | 1.322 |
+| DECODE_UTF16LE | ASCII, 264-byte text budget | 1.318 | 1.389 |
+| DECODE_UTF16 | Unicode, 264-byte text budget, NULL/8 | 1.025 | 0.975 |
+| DECODE_UTF16BE | Unicode, 264-byte text budget, NULL/8 | 1.141 | 0.976 |
+| DECODE_UTF16LE | Unicode, 264-byte text budget, NULL/8 | 1.311 | 1.001 |
+
+## JSON_STRING scalars
+
+Measured on 2026-09-10 with the release profile, 2,000,000 rows, two warmups,
+five interleaved trials and both transposes. `JSON_STRING_TEXT` uses `tt_text`;
+`JSON_STRING_BOOLEAN` alternates boolean values; `JSON_STRING_INTEGER` uses the
+BIGINT fixture. Each query contains one JSON_STRING call. Byte budgets affect only
+text, so boolean/integer results list non-null and NULL/8 inputs once each.
+
+| Input scenario | Flink (s) | Native (s) |
+|---|---:|---:|
+| STRING, ASCII, 32-byte budget | 0.605 | 0.644 |
+| STRING, ASCII, 264-byte budget | 1.529 | 1.513 |
+| STRING, Unicode, 264-byte budget, NULL/8 | 1.176 | 1.262 |
+| BOOLEAN, non-null | 0.424 | 0.470 |
+| BOOLEAN, NULL/8 | 0.386 | 0.464 |
+| BIGINT, non-null | 0.456 | 0.487 |
+| BIGINT, NULL/8 | 0.402 | 0.478 |
+
+## JSON_OBJECT scalar values
+
+Measured on 2026-09-10 with the release profile, 2,000,000 rows, two warmups,
+five interleaved trials and both transposes. Run `JSON_OBJECT_NULL` or
+`JSON_OBJECT_ABSENT` independently. Each query constructs one object from a text
+column, a BIGINT row ordinal and an alternating BOOLEAN column, using literal
+keys `text`, `id` and `flag`. The two functions differ only in NULL ON NULL versus
+ABSENT ON NULL. In the NULL/8 scenario each column is NULL every eighth row, at
+staggered positions; the byte budget describes the text column.
+
+| Function | Scenario | Flink (s) | Native (s) |
+|---|---|---:|---:|
+| JSON_OBJECT_NULL | ASCII, 32-byte text budget | 1.099 | 0.863 |
+| JSON_OBJECT_ABSENT | ASCII, 32-byte text budget | 1.102 | 0.863 |
+| JSON_OBJECT_NULL | ASCII, 264-byte text budget | 2.009 | 1.742 |
+| JSON_OBJECT_ABSENT | ASCII, 264-byte text budget | 2.036 | 1.774 |
+| JSON_OBJECT_NULL | Unicode, 264-byte text budget, NULL/8 | 1.644 | 1.484 |
+| JSON_OBJECT_ABSENT | Unicode, 264-byte text budget, NULL/8 | 1.598 | 1.475 |
+
+## TRIM directions and literal sets
+
+Measured on 2026-09-10 using the release profile and the interleaved, 2,000,000-row,
+two-warmup/five-trial method above, including both transposes. Run with
+`scalar.functions=TRIM_LEADING,TRIM_TRAILING,TRIM_LITERAL_SET` and the listed byte budgets.
+The queries are `TRIM(LEADING FROM s)`, `TRIM(TRAILING FROM s)`, and
+`TRIM(BOTH ' |ab' FROM s)`. Each query measures one function independently.
+
+| Function | Scenario | Flink (s) | Native (s) | Flink / native |
+|---|---|---:|---:|---:|
+| TRIM_LEADING | ASCII, 32-byte budget | 0.377 | 0.543 | 0.69x |
+| TRIM_LEADING | ASCII, 264-byte budget | 0.823 | 1.141 | 0.72x |
+| TRIM_LEADING | Unicode, 264-byte budget, NULL/8 | 0.710 | 0.982 | 0.72x |
+| TRIM_TRAILING | ASCII, 32-byte budget | 0.377 | 0.546 | 0.69x |
+| TRIM_TRAILING | ASCII, 264-byte budget | 0.817 | 1.126 | 0.73x |
+| TRIM_TRAILING | Unicode, 264-byte budget, NULL/8 | 0.680 | 0.965 | 0.70x |
+| TRIM_LITERAL_SET | ASCII, 32-byte budget | 0.845 | 0.579 | 1.46x |
+| TRIM_LITERAL_SET | ASCII, 264-byte budget | 2.911 | 1.154 | 2.52x |
+| TRIM_LITERAL_SET | Unicode, 264-byte budget, NULL/8 | 1.605 | 0.985 | 1.63x |
+
+## SHA1
+
+`SHA1(s)` measured on 2026-09-10 with the same release, interleaved method as TRIM,
+2,000,000 rows, two warmups and five trials, including both transposes. Run with
+`scalar.functions=SHA1`. The input is the `tt_text` fixture.
+
+| Scenario | Flink (s) | Native (s) | Flink / native |
+|---|---:|---:|---:|
+| ASCII, 32-byte budget | 0.837 | 0.697 | 1.20x |
+| ASCII, 264-byte budget | 2.229 | 1.299 | 1.72x |
+| Unicode, 264-byte budget, NULL/8 | 1.882 | 1.151 | 1.64x |
+
+## IS JSON predicates
+
+Measured on 2026-09-10 with the same release profile, 2,000,000 rows, two warmups,
+five interleaved trials and both transposes. Run with
+`scalar.functions=IS_JSON_VALUE,IS_JSON_OBJECT,IS_JSON_ARRAY,IS_JSON_SCALAR`.
+Each predicate runs independently over the same mixture: object, array, string scalar,
+and malformed object, in equal proportions before SQL NULL injection. Each document contains
+a padding string with the listed byte budget. Malformed inputs account for 25% of all rows
+and exercise Flink's exception-handling cost; these results are specific to that mixture.
+The Unicode case replaces every eighth row with SQL NULL.
+
+| Function | Scenario | Flink (s) | Native (s) | Flink / native |
+|---|---|---:|---:|---:|
+| IS_JSON_VALUE | ASCII, 32-byte padding | 1.608 | 0.629 | 2.56x |
+| IS_JSON_OBJECT | ASCII, 32-byte padding | 1.600 | 0.625 | 2.56x |
+| IS_JSON_ARRAY | ASCII, 32-byte padding | 1.645 | 0.625 | 2.63x |
+| IS_JSON_SCALAR | ASCII, 32-byte padding | 1.648 | 0.624 | 2.64x |
+| IS_JSON_VALUE | ASCII, 264-byte padding | 2.224 | 1.156 | 1.92x |
+| IS_JSON_OBJECT | ASCII, 264-byte padding | 2.301 | 1.163 | 1.98x |
+| IS_JSON_ARRAY | ASCII, 264-byte padding | 2.284 | 1.133 | 2.02x |
+| IS_JSON_SCALAR | ASCII, 264-byte padding | 2.280 | 1.136 | 2.01x |
+| IS_JSON_VALUE | Unicode, 264-byte padding, NULL/8 | 2.158 | 0.933 | 2.31x |
+| IS_JSON_OBJECT | Unicode, 264-byte padding, NULL/8 | 2.181 | 0.968 | 2.25x |
+| IS_JSON_ARRAY | Unicode, 264-byte padding, NULL/8 | 2.177 | 0.949 | 2.30x |
+| IS_JSON_SCALAR | Unicode, 264-byte padding, NULL/8 | 2.201 | 0.942 | 2.33x |
+
+## JSON_VALUE RETURNING
+
+Measured on 2026-09-10 with the release, interleaved method above: 2,000,000 rows,
+two warmups, five measured trials and both transposes. Run with
+`scalar.functions=JSON_VALUE_BOOLEAN,JSON_VALUE_INTEGER,JSON_VALUE_DOUBLE`. Each query
+projects `JSON_VALUE(s, '$.v' RETURNING <type>)` independently. Documents contain a
+selected `v` member and a separate padding string with the listed byte budget.
+BOOLEAN alternates true/false, INTEGER alternates 123456789/-234567890, and DOUBLE
+alternates 1.23456789/-2.3456789e12. Unicode changes the padding; every eighth row is
+SQL NULL in that scenario. All non-null documents are valid and contain a matching scalar.
+
+| RETURNING | Scenario | Flink (s) | Native (s) | Flink / native |
+|---|---|---:|---:|---:|
+| BOOLEAN | ASCII, 32-byte padding | 0.862 | 0.698 | 1.24x |
+| INTEGER | ASCII, 32-byte padding | 0.899 | 0.715 | 1.26x |
+| DOUBLE | ASCII, 32-byte padding | 0.959 | 0.798 | 1.20x |
+| BOOLEAN | ASCII, 264-byte padding | 1.472 | 1.226 | 1.20x |
+| INTEGER | ASCII, 264-byte padding | 1.417 | 1.244 | 1.14x |
+| DOUBLE | ASCII, 264-byte padding | 1.496 | 1.424 | 1.05x |
+| BOOLEAN | Unicode, 264-byte padding, NULL/8 | 1.331 | 1.158 | 1.15x |
+| INTEGER | Unicode, 264-byte padding, NULL/8 | 1.198 | 1.065 | 1.12x |
+| DOUBLE | Unicode, 264-byte padding, NULL/8 | 1.296 | 1.158 | 1.12x |
