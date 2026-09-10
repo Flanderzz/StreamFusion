@@ -999,10 +999,6 @@ final class RexExpression {
   }
 
   private boolean emitJsonValue(RexCall call) {
-    if (!NativeConfig.allowsIncompatible("JSON_VALUE")) {
-      return reject(
-          incompatibleReason("JSON_VALUE") + "; Jackson number limits depend on buffer history");
-    }
     if (JsonPathSpec.unicodeVersion() == null) {
       return reject("JSON_VALUE requires verified JDK 17, 21, 24 or 25 token rules");
     }
@@ -1058,10 +1054,6 @@ final class RexExpression {
   }
 
   private boolean emitJsonExists(RexCall call) {
-    if (!NativeConfig.allowsIncompatible("JSON_EXISTS")) {
-      return reject(
-          incompatibleReason("JSON_EXISTS") + "; Jackson number limits depend on buffer history");
-    }
     if (JsonPathSpec.unicodeVersion() == null) {
       return reject("JSON_EXISTS requires verified JDK 17, 21, 24 or 25 token rules");
     }

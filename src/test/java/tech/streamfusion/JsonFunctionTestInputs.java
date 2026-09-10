@@ -3,24 +3,12 @@ package tech.streamfusion;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import java.util.function.Supplier;
 import org.apache.flink.table.api.TableEnvironment;
 import tech.streamfusion.planner.NativePlanner;
 import tech.streamfusion.planner.PhysicalPlanScan;
 
 final class JsonFunctionTestInputs {
   private JsonFunctionTestInputs() {}
-
-  static Supplier<TableEnvironment> nativeInput(String function, Supplier<TableEnvironment> input) {
-    return () -> {
-      TableEnvironment tables = input.get();
-      tables
-          .getConfig()
-          .getConfiguration()
-          .setString("streamfusion.expression." + function + ".allowIncompatible", "true");
-      return tables;
-    };
-  }
 
   static TableEnvironment documents() {
     return TextTimeFunctionTestInputs.textRows(
@@ -86,14 +74,6 @@ final class JsonFunctionTestInputs {
   static void assertFails(String document, String expression, String nativeMessage) {
     for (boolean nativeEnabled : new boolean[] {false, true}) {
       TableEnvironment tables = TextTimeFunctionTestInputs.textRows(document);
-      tables
-          .getConfig()
-          .getConfiguration()
-          .setString(
-              "streamfusion.expression."
-                  + expression.substring(0, expression.indexOf('('))
-                  + ".allowIncompatible",
-              "true");
       PhysicalPlanScan scan = nativeEnabled ? NativePlanner.install(tables) : null;
       Exception error =
           assertThrows(

@@ -1,25 +1,16 @@
 package tech.streamfusion;
 
-import java.util.function.Supplier;
-import org.apache.flink.table.api.TableEnvironment;
+import static tech.streamfusion.NativeParity.assertFallback;
+import static tech.streamfusion.NativeParity.assertParity;
+
 import org.junit.jupiter.api.Test;
 
 class FlinkJsonValueSqlHarnessTest {
-  private static void assertParity(Supplier<TableEnvironment> input, String sql) throws Exception {
-    NativeParity.assertParity(JsonFunctionTestInputs.nativeInput("JSON_VALUE", input), sql);
-  }
-
-  private static void assertFallback(Supplier<TableEnvironment> input, String sql)
-      throws Exception {
-    NativeParity.assertFallback(JsonFunctionTestInputs.nativeInput("JSON_VALUE", input), sql);
-  }
-
   @Test
-  void strictDefaultPreservesFlinkUntilOptedIn() throws Exception {
-    NativeParity.assertFallbackReasonContains(
+  void nativeAdmissionDoesNotRequireCompatibilityOptIn() throws Exception {
+    NativeParity.assertParity(
         JsonFunctionTestInputs::documents,
-        "SELECT id, JSON_VALUE(s, '$.a') FROM inputs",
-        "allowIncompatible");
+        "SELECT id, JSON_VALUE(s, '$.a') FROM inputs");
   }
 
   @Test
@@ -82,8 +73,7 @@ class FlinkJsonValueSqlHarnessTest {
             + "WHERE JSON_VALUE(s, '$.a') IS NOT NULL GROUP BY JSON_VALUE(s, '$.a')";
     String plan =
         tech.streamfusion.planner.NativePlanner.explain(
-            JsonFunctionTestInputs.nativeInput("JSON_VALUE", JsonFunctionTestInputs::documents)
-                .get(),
+            JsonFunctionTestInputs.documents(),
             sql);
     org.junit.jupiter.api.Assertions.assertTrue(plan.contains("NativeCalc"), plan);
     org.junit.jupiter.api.Assertions.assertTrue(

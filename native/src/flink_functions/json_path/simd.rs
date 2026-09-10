@@ -6,20 +6,34 @@ pub(crate) struct Reader {
     scratch: Vec<u8>,
     buffers: Buffers,
     tape: Option<Tape<'static>>,
+    buffer_size: usize,
 }
 
 impl Reader {
-    pub fn new() -> Self {
+    pub fn new(buffer_size: usize) -> Self {
         Self {
             scratch: Vec::new(),
             buffers: Buffers::default(),
             tape: Some(Tape::null()),
+            buffer_size,
         }
     }
 
+    pub fn buffer_size(&self) -> usize {
+        self.buffer_size
+    }
+
     pub fn read<'a>(&'a mut self, path: &Path<'_>, input: &'a str) -> Result<Value<'a>, ()> {
+        // Jackson copies short documents into its recycled token buffer before parsing,
+        // including malformed documents and documents handled by the SIMD path here.
+        if input.len() > self.buffer_size && self.buffer_size < 32768 {
+            let units = input.encode_utf16().take(32769).count();
+            if units <= 32768 {
+                self.buffer_size = self.buffer_size.max(units);
+            }
+        }
         if !candidate(input) {
-            return path.read(input);
+            return path.read_with_buffer(input, self.buffer_size);
         }
         self.scratch.clear();
         self.scratch.extend_from_slice(input.as_bytes());
@@ -32,7 +46,7 @@ impl Reader {
         match value {
             Some(Value::Missing | Value::Null) if !path.lax => Err(()),
             Some(value) => Ok(value),
-            None => path.read(input),
+            None => path.read_with_buffer(input, self.buffer_size),
         }
     }
 }
@@ -132,7 +146,7 @@ mod tests {
 
     #[test]
     fn wide_documents_preserve_last_duplicate_members_and_scalar_results() {
-        let mut reader = Reader::new();
+        let mut reader = Reader::new(4000);
         for mode in ["strict", "lax"] {
             for suffix in [
                 r#""last""#,
@@ -165,7 +179,7 @@ mod tests {
     #[test]
     fn jackson_edges_use_the_existing_parser() {
         let path = Path::parse("lax $.a", "13.0").unwrap();
-        let mut reader = Reader::new();
+        let mut reader = Reader::new(4000);
         for tail in [
             r#", "bad": tru"#,
             r#", "bad": "\ud800""#,
@@ -194,7 +208,7 @@ mod tests {
     fn reuses_allocations_and_returns_decoded_strings() {
         let path = Path::parse("lax $.a", "13.0").unwrap();
         let input = format!(r#"{{"a":"line\ntext"{}}}"#, fields());
-        let mut reader = Reader::new();
+        let mut reader = Reader::new(4000);
         for _ in 0..10 {
             assert!(matches!(
                 reader.read(&path, &input),

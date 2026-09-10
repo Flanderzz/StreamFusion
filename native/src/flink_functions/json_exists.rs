@@ -1,4 +1,4 @@
-use super::json_path::{Path, Reader, Value};
+use super::json_path::{with_reader, Path, Value};
 use super::json_value::{finish, literal};
 use arrow::array::{Array, BooleanBuilder};
 use arrow::datatypes::DataType;
@@ -53,24 +53,25 @@ impl ScalarUDFImpl for JsonExists {
         let input = input.to_array(if scalar { 1 } else { args.number_rows })?;
         let input = as_string_array(&input)?;
         let mut output = BooleanBuilder::with_capacity(input.len());
-        let mut reader = Reader::new();
-        for document in input.iter() {
-            let Some(document) = document else {
-                output.append_null();
-                continue;
-            };
-            let value = match reader.read(&path, document) {
-                Ok(Value::Missing | Value::Null) => Some(false),
-                Ok(_) => Some(true),
-                Err(()) => error.map_err(|()| {
-                    datafusion::common::exec_datafusion_err!(
-                        "JSON_EXISTS ERROR result is not allowed"
-                    )
-                })?,
-            };
-            output.append_option(value);
-        }
-        finish(Arc::new(output.finish()), scalar)
+        with_reader(|reader| {
+            for document in input.iter() {
+                let Some(document) = document else {
+                    output.append_null();
+                    continue;
+                };
+                let value = match reader.read(&path, document) {
+                    Ok(Value::Missing | Value::Null) => Some(false),
+                    Ok(_) => Some(true),
+                    Err(()) => error.map_err(|()| {
+                        datafusion::common::exec_datafusion_err!(
+                            "JSON_EXISTS ERROR result is not allowed"
+                        )
+                    })?,
+                };
+                output.append_option(value);
+            }
+            finish(Arc::new(output.finish()), scalar)
+        })
     }
 }
 

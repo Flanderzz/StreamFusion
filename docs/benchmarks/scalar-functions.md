@@ -420,8 +420,8 @@ not subtracted from function times because their result types and lengths can di
 Measured on 2026-09-10 with the same release profile, JDK 17, Flink/DataFusion versions,
 2,000,000 rows, parallelism 1, two warmups, five measured trials, interleaved engines and
 both transposes described above. Each scenario starts a fresh JVM; no other test or benchmark
-runs concurrently. These functions require the explicit compatibility flags documented under
-[Calc / filter](../operators/calc-filter.md).
+runs concurrently. Both functions use default admission, including synchronization with
+Jackson's actual recycled input-buffer capacity; no compatibility flags are enabled.
 
 The input alternates between a document containing `user.name` and a document without that
 member. The byte budget controls a separate padding string, excluding JSON syntax and other
@@ -438,8 +438,6 @@ streaming path for the padding-only scenarios. See the [parsing technique](../op
 ```sh
 TZ=UTC SF_BENCHMARK=true mvn -pl :streamfusion-runtime test -Pbench \
   '-Dtest=ScalarFunctionBenchmark#individualFunctions' \
-  -Dstreamfusion.expression.JSON_VALUE.allowIncompatible=true \
-  -Dstreamfusion.expression.JSON_EXISTS.allowIncompatible=true \
   -Dscalar.engine=both -Dscalar.functions=JSON_VALUE,JSON_EXISTS \
   -Dscalar.rows=2000000 -Dscalar.warmup=2 -Dscalar.runs=5 \
   -Dscalar.bytes=264 -Dscalar.json.fields=0 \
@@ -459,13 +457,13 @@ Flink/native medians, with no intermediate optimization results.
 
 | Scenario | Flink (s) | Native (s) | Flink / Native |
 |---|---:|---:|---:|
-| ASCII, 32-byte padding | 1.215 | 0.814 | 1.49x |
-| ASCII, 264-byte padding | 1.862 | 1.282 | 1.45x |
-| ASCII, 1024-byte padding | 3.836 | 2.937 | 1.31x |
-| Unicode, 264-byte padding, NULL/8 | 1.440 | 1.111 | 1.30x |
-| 16 extra members, ASCII, 32-byte padding | 2.748 | 1.756 | 1.57x |
-| 64 extra members, ASCII, 32-byte padding | 8.014 | 4.593 | 1.74x |
-| 64 extra members, Unicode, 32-byte padding, NULL/8 | 6.394 | 3.307 | 1.93x |
+| ASCII, 32-byte padding | 1.212 | 0.831 | 1.46x |
+| ASCII, 264-byte padding | 1.796 | 1.311 | 1.37x |
+| ASCII, 1024-byte padding | 3.648 | 2.962 | 1.23x |
+| Unicode, 264-byte padding, NULL/8 | 1.439 | 1.108 | 1.30x |
+| 16 extra members, ASCII, 32-byte padding | 2.805 | 1.786 | 1.57x |
+| 64 extra members, ASCII, 32-byte padding | 8.067 | 4.595 | 1.76x |
+| 64 extra members, Unicode, 32-byte padding, NULL/8 | 6.429 | 3.321 | 1.94x |
 
 ## JSON_EXISTS
 
@@ -473,10 +471,10 @@ Flink/native medians, with no intermediate optimization results.
 
 | Scenario | Flink (s) | Native (s) | Flink / Native |
 |---|---:|---:|---:|
-| ASCII, 32-byte padding | 1.184 | 0.812 | 1.46x |
-| ASCII, 264-byte padding | 1.763 | 1.280 | 1.38x |
-| ASCII, 1024-byte padding | 3.809 | 2.970 | 1.28x |
-| Unicode, 264-byte padding, NULL/8 | 1.430 | 1.084 | 1.32x |
-| 16 extra members, ASCII, 32-byte padding | 2.706 | 1.751 | 1.55x |
-| 64 extra members, ASCII, 32-byte padding | 8.003 | 4.579 | 1.75x |
-| 64 extra members, Unicode, 32-byte padding, NULL/8 | 6.383 | 3.282 | 1.94x |
+| ASCII, 32-byte padding | 1.182 | 0.828 | 1.43x |
+| ASCII, 264-byte padding | 1.766 | 1.287 | 1.37x |
+| ASCII, 1024-byte padding | 3.621 | 3.211 | 1.13x |
+| Unicode, 264-byte padding, NULL/8 | 1.438 | 1.091 | 1.32x |
+| 16 extra members, ASCII, 32-byte padding | 2.773 | 1.772 | 1.56x |
+| 64 extra members, ASCII, 32-byte padding | 8.115 | 4.576 | 1.77x |
+| 64 extra members, Unicode, 32-byte padding, NULL/8 | 6.464 | 3.315 | 1.95x |

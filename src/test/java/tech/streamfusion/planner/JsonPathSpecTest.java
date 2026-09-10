@@ -53,7 +53,6 @@ class JsonPathSpecTest {
           rex.makeCall(
               output, function, List.of(rex.makeInputRef(text, 0), rex.makeLiteral("$.a")));
       var config = new org.apache.flink.configuration.Configuration();
-      config.setString("streamfusion.expression." + name + ".allowIncompatible", "true");
       try (var ignored = NativeConfig.usePlannerConfig(config)) {
         assertNull(RexExpression.encodeProjections(List.of(call), List.of("v")));
         assertNotNull(RexExpression.encodeProjections(List.of(literalPath), List.of("v")));

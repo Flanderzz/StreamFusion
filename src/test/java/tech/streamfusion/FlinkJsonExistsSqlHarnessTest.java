@@ -1,25 +1,16 @@
 package tech.streamfusion;
 
-import java.util.function.Supplier;
-import org.apache.flink.table.api.TableEnvironment;
+import static tech.streamfusion.NativeParity.assertFallback;
+import static tech.streamfusion.NativeParity.assertParity;
+
 import org.junit.jupiter.api.Test;
 
 class FlinkJsonExistsSqlHarnessTest {
-  private static void assertParity(Supplier<TableEnvironment> input, String sql) throws Exception {
-    NativeParity.assertParity(JsonFunctionTestInputs.nativeInput("JSON_EXISTS", input), sql);
-  }
-
-  private static void assertFallback(Supplier<TableEnvironment> input, String sql)
-      throws Exception {
-    NativeParity.assertFallback(JsonFunctionTestInputs.nativeInput("JSON_EXISTS", input), sql);
-  }
-
   @Test
-  void strictDefaultPreservesFlinkUntilOptedIn() throws Exception {
-    NativeParity.assertFallbackReasonContains(
+  void nativeAdmissionDoesNotRequireCompatibilityOptIn() throws Exception {
+    NativeParity.assertParity(
         JsonFunctionTestInputs::documents,
-        "SELECT id, JSON_EXISTS(s, '$.a') FROM inputs",
-        "allowIncompatible");
+        "SELECT id, JSON_EXISTS(s, '$.a') FROM inputs");
   }
 
   @Test

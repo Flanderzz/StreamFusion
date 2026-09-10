@@ -4,6 +4,8 @@ use std::borrow::Cow;
 
 mod simd;
 pub(super) use simd::Reader;
+mod runtime;
+pub(super) use runtime::with_reader;
 
 #[derive(Debug)]
 pub(super) struct Path<'a> {
@@ -84,12 +86,18 @@ impl<'a> Path<'a> {
         })
     }
 
+    #[cfg(test)]
     pub fn read<'s>(&self, input: &'s str) -> Result<Value<'s>, ()> {
+        self.read_with_buffer(input, 4000)
+    }
+
+    fn read_with_buffer<'s>(&self, input: &'s str, buffer_size: usize) -> Result<Value<'s>, ()> {
         let mut parser = Parser {
             input,
             pos: 0,
             identifier: self.identifier,
             legacy_decimal_exponent: self.legacy_decimal_exponent,
+            buffer_size,
         };
         parser.whitespace();
         let root_null = parser.remaining().starts_with("null");
@@ -138,6 +146,7 @@ struct Parser<'a> {
     pos: usize,
     identifier: &'static regex::Regex,
     legacy_decimal_exponent: bool,
+    buffer_size: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -345,13 +354,13 @@ impl<'a> Parser<'a> {
             return false;
         }
         // ReaderBasedJsonParser._parseNumber2 counts an absent fraction/exponent as -1.
-        // It is entered for a leading zero, EOF, or a number crossing its 4000-char buffer.
+        // It is entered for a leading zero, EOF, or a number crossing the actual input buffer.
         let number = self.input[start..self.pos].trim_start_matches('-');
         let slow = number.starts_with('0') || self.pos == self.input.len() || {
             let units = self.input.encode_utf16().count();
             units > 32768
-                && self.input[..start].encode_utf16().count() / 4000
-                    != self.input[..self.pos].encode_utf16().count() / 4000
+                && self.input[..start].encode_utf16().count() / self.buffer_size
+                    != self.input[..self.pos].encode_utf16().count() / self.buffer_size
         };
         slow && digits - usize::from(fraction == 0) - usize::from(exponent == 0) <= 1000
     }

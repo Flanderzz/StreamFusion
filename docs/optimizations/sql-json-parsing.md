@@ -15,10 +15,16 @@ input bytes. A successful tape must contain at most 1000 nodes, with no floating
 Unicode escapes and selected numbers use the streaming path. Those bounds preserve Jackson's
 resource limits, BigDecimal spelling and UTF-16 escape behavior. Invalid SIMD input also goes
 through the streaming parser, retaining Flink's first-document and trailing-content behavior.
-These are internal parsing choices; the SQL admission and compatibility opt-ins are unchanged.
+Both functions are admitted by default for their verified SQL shapes.
 A document rejected after tape construction is parsed again by the streaming path. The
 multi-member measurements use string members; they do not establish an improvement for
 workloads dominated by floating-point members or numeric selections.
+
+Jackson's recycled input-buffer capacity is acquired once per batch through its released
+Java API. Native parsing tracks the same UTF-16 input-length growth and returns the resulting
+capacity to the recycler, including when a policy fails. This preserves Jackson's numeric
+limit behavior at buffer crossings without sending documents or results through JNI. The
+SIMD path updates this state too, so subsequent native or Flink parsing sees the same capacity.
 
 Long padding strings and documents with many fields are separate benchmark workloads. SIMD
 is useful for the latter; a large byte count alone does not predict a benefit. The benchmark

@@ -1,4 +1,4 @@
-use super::json_path::{Path, Reader, Value};
+use super::json_path::{with_reader, Path, Value};
 use arrow::array::{Array, ArrayRef, StringBuilder};
 use arrow::datatypes::DataType;
 use datafusion::common::{cast::as_string_array, exec_err, Result, ScalarValue};
@@ -49,20 +49,21 @@ impl ScalarUDFImpl for JsonValue {
         let input = input.to_array(if scalar { 1 } else { args.number_rows })?;
         let input = as_string_array(&input)?;
         let mut output = StringBuilder::with_capacity(input.len(), input.len() * 8);
-        let mut reader = Reader::new();
-        for document in input.iter() {
-            let Some(document) = document else {
-                output.append_null();
-                continue;
-            };
-            match reader.read(&path, document) {
-                Ok(Value::Missing | Value::Null) => output.append_option(empty.apply("EMPTY")?),
-                Ok(Value::Container) if path.lax => output.append_option(empty.apply("EMPTY")?),
-                Ok(Value::Container) | Err(()) => output.append_option(error.apply("ERROR")?),
-                Ok(value) => output.append_option(value.text()),
+        with_reader(|reader| {
+            for document in input.iter() {
+                let Some(document) = document else {
+                    output.append_null();
+                    continue;
+                };
+                match reader.read(&path, document) {
+                    Ok(Value::Missing | Value::Null) => output.append_option(empty.apply("EMPTY")?),
+                    Ok(Value::Container) if path.lax => output.append_option(empty.apply("EMPTY")?),
+                    Ok(Value::Container) | Err(()) => output.append_option(error.apply("ERROR")?),
+                    Ok(value) => output.append_option(value.text()),
+                }
             }
-        }
-        finish(Arc::new(output.finish()), scalar)
+            finish(Arc::new(output.finish()), scalar)
+        })
     }
 }
 

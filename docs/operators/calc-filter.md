@@ -282,8 +282,7 @@ One character argument is native. Valid quoted values are unescaped with Flink/J
 
 ### JSON_VALUE
 
-Opt-in with `-Dstreamfusion.expression.JSON_VALUE.allowIncompatible=true`; default execution
-stays on Flink because of the parser resource-limit exception described below.
+Enabled by default for the following verified shapes; no compatibility opt-in is needed.
 
 Character input with a non-null literal definite path is native. Supported paths are `$`,
 dot members such as `$.user.name`, bracket members such as `$['user name']`, and nonnegative
@@ -306,8 +305,7 @@ scale/exponent spelling, and unpaired escaped surrogates become `?` in UTF-8 out
 
 ### JSON_EXISTS
 
-Opt-in with `-Dstreamfusion.expression.JSON_EXISTS.allowIncompatible=true`; default execution
-stays on Flink for the same resource-limit reason.
+Enabled by default for the following verified shapes; no compatibility opt-in is needed.
 
 Character input and the same literal path grammar as JSON_VALUE are native. Supports FALSE
 (the default), TRUE, UNKNOWN and ERROR ON ERROR. A selected scalar or container, including an
@@ -319,12 +317,12 @@ in both modes. SQL NULL input returns SQL NULL.
 Both SQL/JSON functions use native first-document parsing and validate unselected fields too.
 They currently admit JDK 17, 21, 24 and 25, selecting the corresponding Unicode version for
 Jackson's token-termination rules; other JDKs fall back. The profile is selected on the
-JobManager, so TaskManagers must use the same JSON parsing rules. Inputs within Jackson's documented
-limits (1000 nesting levels, 1000 number digits, 20 million UTF-16 string units, 50,000 member-name
-units) are the parity contract. At the numeric resource-limit boundary, Jackson can accept an
-extra digit depending on its recycled input buffer; native parsing models a fresh 4000-character
-reader buffer. That resource-limit behavior is not identical for every JVM buffer history,
-which is why both functions require an explicit compatibility opt-in.
+JobManager, so TaskManagers must use the same JSON parsing rules. Jackson's resource limits
+(1000 nesting levels, 1000 number digits, 20 million UTF-16 string units, 50,000 member-name
+units) also apply to unselected values. Its numeric boundary has a buffer-dependent exception:
+the slow parser can accept an extra digit. Native evaluation uses the task thread's actual
+Jackson input-buffer capacity and preserves its growth, including invalid input and SIMD
+parsing. A batch exchanges this capacity through JNI; documents and results remain native.
 See the [SQL/JSON parser note](https://github.com/datafusion-contrib/StreamFusion/blob/main/divergences/32-sql-json-definite-paths.md)
 and [per-function benchmarks](../benchmarks/scalar-functions.md).
 

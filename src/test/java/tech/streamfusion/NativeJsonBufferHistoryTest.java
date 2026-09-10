@@ -1,0 +1,250 @@
+package tech.streamfusion;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.function.Supplier;
+import org.apache.arrow.c.ArrowArray;
+import org.apache.arrow.c.ArrowSchema;
+import org.apache.arrow.c.Data;
+import org.apache.arrow.memory.RootAllocator;
+import org.apache.arrow.vector.VarCharVector;
+import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.core.JsonFactory;
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.core.util.BufferRecycler;
+import org.apache.flink.table.api.JsonExistsOnError;
+import org.apache.flink.table.api.JsonValueOnEmptyOrError;
+import org.apache.flink.table.runtime.functions.SqlJsonUtils;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+
+/** Compares actual JNI evaluation with Flink under controlled Jackson recycler histories. */
+class NativeJsonBufferHistoryTest {
+  private static final JsonFactory FACTORY = new JsonFactory();
+
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  void numericBoundaryUsesTheActualRecycledBuffer(boolean exists) {
+    List<String> documents = new ArrayList<>();
+    for (int start : new int[] {2999, 3000, 3990, 7990, 15990, 32760}) {
+      for (int digits : new int[] {999, 1000, 1001}) {
+        documents.add(boundary(start, "1." + "2".repeat(digits)));
+        documents.add(boundary(start, "-1e" + "0".repeat(digits)));
+      }
+      documents.add(boundary(start, "1." + "2".repeat(1000)).replace("x", "\u4e2d"));
+      documents.add(boundary(start, "1." + "2".repeat(1000)).replace("x", "\ud83d\ude00"));
+    }
+    List<String> fresh = withBuffer(4000, () -> hostRows(documents, exists));
+    List<String> grown = withBuffer(32768, () -> hostRows(documents, exists));
+    assertNotEquals(fresh, grown, "The fixture must exercise Jackson's history dependence");
+    for (int size : new int[] {4000, 8000, 16000, 32768}) {
+      assertEquals(
+          withBuffer(size, () -> hostRows(documents, exists)),
+          withBuffer(size, () -> nativeRows(documents, exists, documents.size())),
+          "initial buffer " + size);
+    }
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  void growthIncludesInvalidUnicodeAndSimdInputsAcrossBatches(boolean exists) {
+    String number = "1." + "2".repeat(1000);
+    StringBuilder wide = new StringBuilder("{\"a\":\"ok\"");
+    for (int i = 0; i < 64; i++) {
+      wide.append(",\"f")
+          .append(i)
+          .append("\":\"")
+          .append("x".repeat(i < 16 ? 1 : 150))
+          .append('"');
+    }
+    wide.append('}');
+    List<String> documents =
+        Arrays.asList(
+            boundary(3990, number),
+            null,
+            "{\"a\":\"" + "\u4e2d\ud83d\ude00".repeat(1700) + "\"}",
+            boundary(3990, number),
+            wide.toString(),
+            boundary(wide.length() - 10, number),
+            " ".repeat(8000) + "invalid",
+            boundary(7990, number),
+            "{\"padding\":\"" + "x".repeat(32700) + "\"}",
+            boundary(15990, number),
+            " ".repeat(32767) + "0",
+            " ".repeat(32768) + "0",
+            "\"" + "x".repeat(33000) + "\"",
+            boundary(32760, number));
+    List<String> expected = withBuffer(4000, () -> hostRows(documents, exists));
+    int expectedSize =
+        withBuffer(
+            4000,
+            () -> {
+              hostRows(documents, exists);
+              return bufferSize();
+            });
+    for (int batch : new int[] {1, 3, documents.size()}) {
+      withBuffer(
+          4000,
+          () -> {
+            assertEquals(expected, nativeRows(documents, exists, batch), "batch size " + batch);
+            assertEquals(expectedSize, bufferSize(), "publish growth for subsequent Flink calls");
+            assertEquals(
+                hostRows(List.of(boundary(15990, number)), exists),
+                nativeRows(List.of(boundary(15990, number)), exists, 1));
+            return null;
+          });
+    }
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  void errorPoliciesReturnTheGrownBuffer(boolean exists) {
+    String document = " ".repeat(8192) + "invalid";
+    withBuffer(
+        4000,
+        () -> {
+          assertThrows(NativeException.class, () -> nativeRows(List.of(document), exists, 1, true));
+          assertEquals(document.length(), bufferSize());
+          return null;
+        });
+  }
+
+  private static String boundary(int start, String number) {
+    String prefix = "{\"a\":\"ok\",\"padding\":\"";
+    String before = prefix + "x".repeat(start - prefix.length() - 6) + "\",\"n\":";
+    String tail = ",\"tail\":\"";
+    return before
+        + number
+        + tail
+        + "x".repeat(37502 - before.length() - number.length() - tail.length() - 2)
+        + "\"}";
+  }
+
+  private static List<String> hostRows(List<String> documents, boolean exists) {
+    List<String> result = new ArrayList<>();
+    for (String document : documents) {
+      Object value =
+          document == null
+              ? null
+              : exists
+                  ? SqlJsonUtils.jsonExists(document, "$.a", JsonExistsOnError.UNKNOWN)
+                  : SqlJsonUtils.jsonValue(
+                      document,
+                      "$.a",
+                      JsonValueOnEmptyOrError.DEFAULT,
+                      "EMPTY",
+                      JsonValueOnEmptyOrError.DEFAULT,
+                      "ERROR");
+      result.add(value == null ? null : value.toString());
+    }
+    return result;
+  }
+
+  private static List<String> nativeRows(List<String> documents, boolean exists, int batchSize) {
+    return nativeRows(documents, exists, batchSize, false);
+  }
+
+  private static List<String> nativeRows(
+      List<String> documents, boolean exists, int batchSize, boolean throwOnError) {
+    String unicode =
+        switch (Runtime.version().feature()) {
+          case 17 -> "13.0";
+          case 21 -> "15.0";
+          case 24, 25 -> "16.0";
+          default -> throw new IllegalStateException("Unverified JDK");
+        };
+    String[] literals =
+        exists
+            ? new String[] {"strict $.a", throwOnError ? "ERROR" : "UNKNOWN", unicode}
+            : new String[] {
+              "strict $.a", "DEFAULT", "EMPTY", throwOnError ? "ERROR" : "DEFAULT", "ERROR", unicode
+            };
+    int[] kinds = new int[literals.length + 2];
+    int[] payload = new int[kinds.length];
+    int[] children = new int[kinds.length];
+    kinds[0] = 6;
+    payload[0] = exists ? 142 : 141;
+    children[0] = literals.length + 1;
+    for (int i = 0; i < literals.length; i++) {
+      kinds[i + 2] = 3;
+      payload[i + 2] = i;
+    }
+    long calc =
+        Native.createCalcExpression(
+            kinds,
+            payload,
+            children,
+            new long[0],
+            new double[0],
+            literals,
+            new int[] {0},
+            -1,
+            new String[] {"result"});
+    List<String> result = new ArrayList<>();
+    try (RootAllocator allocator = new RootAllocator()) {
+      for (int offset = 0; offset < documents.size(); offset += batchSize) {
+        int rows = Math.min(batchSize, documents.size() - offset);
+        VarCharVector values = new VarCharVector("s", allocator);
+        try (VectorSchemaRoot input = VectorSchemaRoot.of(values);
+            ArrowArray inArray = ArrowArray.allocateNew(allocator);
+            ArrowSchema inSchema = ArrowSchema.allocateNew(allocator);
+            ArrowArray outArray = ArrowArray.allocateNew(allocator);
+            ArrowSchema outSchema = ArrowSchema.allocateNew(allocator)) {
+          values.allocateNew();
+          for (int row = 0; row < rows; row++) {
+            String document = documents.get(offset + row);
+            if (document == null) {
+              values.setNull(row);
+            } else {
+              values.setSafe(row, document.getBytes(StandardCharsets.UTF_8));
+            }
+          }
+          input.setRowCount(rows);
+          Data.exportVectorSchemaRoot(allocator, input, null, inArray, inSchema);
+          Native.calcExpression(
+              calc,
+              inArray.memoryAddress(),
+              inSchema.memoryAddress(),
+              outArray.memoryAddress(),
+              outSchema.memoryAddress());
+          try (VectorSchemaRoot output =
+              Data.importVectorSchemaRoot(allocator, outArray, outSchema, null)) {
+            for (int row = 0; row < rows; row++) {
+              Object value = output.getVector(0).getObject(row);
+              result.add(value == null ? null : value.toString());
+            }
+          }
+        }
+      }
+    } finally {
+      Native.closeCalcExpression(calc);
+    }
+    return result;
+  }
+
+  private static int bufferSize() {
+    BufferRecycler recycler = FACTORY._getBufferRecycler();
+    char[] buffer = recycler.allocCharBuffer(BufferRecycler.CHAR_TOKEN_BUFFER);
+    recycler.releaseCharBuffer(BufferRecycler.CHAR_TOKEN_BUFFER, buffer);
+    recycler.releaseToPool();
+    return buffer.length;
+  }
+
+  private static <T> T withBuffer(int size, Supplier<T> action) {
+    BufferRecycler recycler = FACTORY._getBufferRecycler();
+    char[] original = recycler.allocCharBuffer(BufferRecycler.CHAR_TOKEN_BUFFER);
+    recycler.releaseCharBuffer(BufferRecycler.CHAR_TOKEN_BUFFER, new char[size]);
+    try {
+      return action.get();
+    } finally {
+      recycler.allocCharBuffer(BufferRecycler.CHAR_TOKEN_BUFFER);
+      recycler.releaseCharBuffer(BufferRecycler.CHAR_TOKEN_BUFFER, original);
+      recycler.releaseToPool();
+    }
+  }
+}

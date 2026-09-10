@@ -61,18 +61,31 @@ while its fast path uses 0. This can admit a 1001-digit floating-point token onl
 slow path. Leading zeroes and end-of-input select that path predictably; buffer boundaries
 also depend on Jackson's thread-local recycled buffer and prior unrelated parser calls.
 
-Native validation models a fresh 4000-character reader buffer for documents longer than
-32768 UTF-16 units. A differential probe found two differences in 132,632 cases, both involving
-1001-digit tokens in a 37,502-character document whose host buffer had grown through prior
-parses. A 67,096-case subset on JDK 24 has the same two exceptions. Inputs within the documented
-limits agreed, including every BMP token suffix on both JDKs and every escaped UTF-16 unit on
-JDK 17. Both functions therefore use the existing per-function `allowIncompatible` opt-in;
-default planning keeps Flink. This preserves the repository's strict default while making
-native execution available to users who accept this specific resource-limit exception.
+The reader acquires the task thread's actual token buffer from the released shaded Jackson
+`JsonFactory`/`BufferRecycler` API before evaluating a batch. This is the same default
+thread-local pool used by Flink's `SqlJsonUtils`. Inputs of at most 32768 UTF-16 units grow
+the capacity before parsing, including invalid input and rows handled by SIMD; larger inputs
+use the existing capacity as `StringReader` does. The native number scanner uses that actual
+capacity for boundary checks. At batch completion, including an EMPTY/ERROR policy failure,
+the buffer is returned with the capacity reached by the reader. No JSON document or selected
+value crosses JNI, and neither the operator nor the row/Arrow converters change.
 
-SQL harness validation uses JDK 17. Direct `SqlJsonUtils` comparisons also run on JDK 24;
-the repository's full SQL harness cannot start there because its current Hadoop dependency
-calls the removed `Subject.getSubject` API, before any query is executed.
+Comet's `native/spark-expr/src/jvm_udf/mod.rs` and `native/jni-bridge/src/comet_udf_bridge.rs`
+provide the reference for calling back on the driving task thread. This use is narrower than
+an expression callback: only parser state is exchanged, and a JNI local frame bounds the
+Java object's lifetime. The streaming and SIMD kernels continue to execute in Rust.
+
+Both functions are enabled by default. The regression tests compare native JNI evaluation
+with `SqlJsonUtils` under initial capacities of 4000, 8000, 16000 and 32768 characters, and
+exercise growth within and across batches, Unicode length, malformed input and SIMD input.
+They assert the fixture really produces different Flink results under different buffer
+histories; matching a fresh-buffer run alone would miss the original bug.
+
+SQL harness validation uses JDK 17. The six JNI buffer-history tests also pass on JDK 24
+with `-Dtest=NativeJsonBufferHistoryTest -Djunit.jupiter.extensions.autodetection.enabled=false`.
+That disables the automatic MiniCluster extension, which these direct comparisons do not
+need. The full SQL harness cannot start on JDK 24 because the current Hadoop dependency
+calls the removed `Subject.getSubject` API before any query is executed.
 
 ## Initial admission
 
@@ -82,4 +95,4 @@ integer and double RETURNING conversions in Flink are Java object casts outside 
 so reusing SQL CAST would be incorrect. Non-null character literal defaults are admitted;
 null defaults participate in Flink's generated whole-call null guard and are declined.
 JSON_EXISTS supports all four ON ERROR behaviors. Both functions are ordinary scalar
-expressions; no operator, converter or JVM callback is added.
+expressions; no operator or converter changes are required.
