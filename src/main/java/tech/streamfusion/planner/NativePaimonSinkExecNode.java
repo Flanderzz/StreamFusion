@@ -30,10 +30,11 @@ import tech.streamfusion.paimon.NativePaimonAppendSink;
 import tech.streamfusion.paimon.NativePaimonFixedBucketSink;
 
 /**
- * Builds the columnar Paimon append topology: batches are split natively per (partition, bucket),
- * shuffled with Paimon's own channel formula while still Arrow, and handed to Paimon's write and
- * commit operators as bundles. The shuffle and parallelism rules mirror Paimon's sink builder so
- * the resulting job graph differs from the stock one only in the record type crossing the edge.
+ * Builds the columnar Paimon sink topology: batches are split natively per (partition, bucket),
+ * shuffled with Paimon's own channel formula while still Arrow, and handed to the write and commit
+ * operators as bundles: Paimon's own write for an append table, the native key-value write for a
+ * primary-key table. The shuffle and parallelism rules mirror Paimon's sink builder so the
+ * resulting job graph differs from the stock one only in the record type crossing the edge.
  */
 public final class NativePaimonSinkExecNode extends ExecNodeBase<Object>
     implements StreamExecNode<Object>, SingleTransformationTranslator<Object> {
@@ -80,7 +81,8 @@ public final class NativePaimonSinkExecNode extends ExecNodeBase<Object>
                     planned.partitionTimestampPrecisions,
                     planned.bucketColumns,
                     planned.bucketTimestampPrecisions,
-                    numBuckets)),
+                    numBuckets,
+                    planned.primaryKey)),
             BucketedArrowBatchTypeInformation.INSTANCE,
             input.getParallelism(),
             false);
@@ -95,7 +97,7 @@ public final class NativePaimonSinkExecNode extends ExecNodeBase<Object>
       DataStream<BucketedArrowBatch> partitioned =
           FlinkStreamPartitioner.partition(
               routed, BucketedArrowBatchChannelComputer.byBucket(partitionArity), parallelism);
-      end = new NativePaimonFixedBucketSink(table, false).sinkFrom(partitioned);
+      end = new NativePaimonFixedBucketSink(table, planned.primaryKey).sinkFrom(partitioned);
     } else {
       DataStream<BucketedArrowBatch> shuffled = routed;
       if (partitionArity > 0

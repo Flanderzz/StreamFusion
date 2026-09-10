@@ -14,7 +14,10 @@ import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalR
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalSink;
 import org.apache.flink.table.planner.plan.utils.ChangelogPlanUtils;
 import org.apache.paimon.CoreOptions;
+import org.apache.paimon.CoreOptions.ChangelogProducer;
+import org.apache.paimon.CoreOptions.MergeEngine;
 import org.apache.paimon.CoreOptions.PartitionSinkStrategy;
+import org.apache.paimon.CoreOptions.SequenceNumberInitMode;
 import org.apache.paimon.catalog.CatalogContext;
 import org.apache.paimon.fileindex.FileIndexOptions;
 import org.apache.paimon.flink.DataCatalogTable;
@@ -28,17 +31,22 @@ import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.FileStoreTableFactory;
 import org.apache.paimon.table.Table;
 import tech.streamfusion.paimon.NativePaimonParquetFormat;
+import tech.streamfusion.paimon.PaimonKeyValueLayout;
 
 /**
- * Whitelist-first admission for the columnar Paimon append-table sink. The table is resolved the
- * way Paimon's own Flink factory resolves it, so every option the stock sink would see — DDL,
- * hints, and the table-scoped dynamic options — shapes the native topology identically.
+ * Whitelist-first admission for the columnar Paimon sink. The table is resolved the way Paimon's
+ * own Flink factory resolves it, so every option the stock sink would see — DDL, hints, and the
+ * table-scoped dynamic options — shapes the native topology identically. An append table takes an
+ * insert-only input; a primary-key table takes a changelog, and is admitted only in the shape the
+ * native level-0 writer reproduces: fixed buckets, the deduplicate merge engine with Paimon's own
+ * compaction, and no changelog production.
  */
 final class PaimonSinkMatcher {
   private PaimonSinkMatcher() {}
 
   static final class Planned {
     final FileStoreTable table;
+    final boolean primaryKey;
     final int[] partitionColumns;
     final int[] partitionTimestampPrecisions;
     final int[] bucketColumns;
@@ -47,12 +55,14 @@ final class PaimonSinkMatcher {
 
     private Planned(
         FileStoreTable table,
+        boolean primaryKey,
         int[] partitionColumns,
         int[] partitionTimestampPrecisions,
         int[] bucketColumns,
         int[] bucketTimestampPrecisions,
         String fallbackReason) {
       this.table = table;
+      this.primaryKey = primaryKey;
       this.partitionColumns = partitionColumns;
       this.partitionTimestampPrecisions = partitionTimestampPrecisions;
       this.bucketColumns = bucketColumns;
@@ -61,7 +71,7 @@ final class PaimonSinkMatcher {
     }
 
     static Planned fallback(String reason) {
-      return new Planned(null, null, null, null, null, reason);
+      return new Planned(null, false, null, null, null, null, reason);
     }
   }
 
@@ -75,21 +85,29 @@ final class PaimonSinkMatcher {
         return Planned.fallback("INSERT OVERWRITE is not supported");
       }
     }
-    if (!ChangelogPlanUtils.isInsertOnly((StreamPhysicalRel) sink.getInput())) {
-      return Planned.fallback("an append table takes an insert-only input");
+    if (sink.upsertMaterialize()) {
+      return Planned.fallback(
+          "an upsert-materialized sink (SinkUpsertMaterializer) is not natively reproduced");
     }
     FileStoreTable table = resolveTable(sink);
     if (table == null) {
       return Planned.fallback("the sink is not a Paimon data table");
     }
+    boolean primaryKey = !table.primaryKeys().isEmpty();
+    if (!primaryKey && !ChangelogPlanUtils.isInsertOnly((StreamPhysicalRel) sink.getInput())) {
+      return Planned.fallback("an append table takes an insert-only input");
+    }
     CoreOptions coreOptions = table.coreOptions();
     Options options = coreOptions.toConfiguration();
-    if (!table.primaryKeys().isEmpty()) {
-      return Planned.fallback("primary-key tables are not supported yet");
-    }
     BucketMode bucketMode = table.bucketMode();
     if (bucketMode != BucketMode.HASH_FIXED && bucketMode != BucketMode.BUCKET_UNAWARE) {
       return Planned.fallback("bucket mode " + bucketMode + " is not supported");
+    }
+    if (primaryKey) {
+      String reason = primaryKeyFallbackReason(table, coreOptions, options);
+      if (reason != null) {
+        return Planned.fallback(reason);
+      }
     }
     if (!"parquet".equalsIgnoreCase(coreOptions.fileFormatString())) {
       return Planned.fallback("file.format " + coreOptions.fileFormatString() + " is not supported");
@@ -144,11 +162,70 @@ final class PaimonSinkMatcher {
             : new int[0];
     return new Planned(
         table,
+        primaryKey,
         partitionColumns,
         FlinkKeyGroupUtils.timestampPrecisions(inputType, partitionColumns),
         bucketColumns,
         FlinkKeyGroupUtils.timestampPrecisions(inputType, bucketColumns),
         null);
+  }
+
+  /**
+   * The primary-key shapes whose files the native level-0 writer reproduces exactly: rows merged by
+   * last arrival (Paimon's deduplicate engine, optionally ignoring deletes), compaction left to the
+   * Paimon writer in the same job or to a dedicated job, no changelog files produced, and sequence
+   * numbers continued from the committed files. Every other shape changes what a level-0 file holds
+   * or how it is committed, so it stays on the stock writer.
+   */
+  private static String primaryKeyFallbackReason(
+      FileStoreTable table, CoreOptions coreOptions, Options options) {
+    if (coreOptions.mergeEngine() != MergeEngine.DEDUPLICATE) {
+      return "merge-engine " + coreOptions.mergeEngine() + " is not supported";
+    }
+    if (coreOptions.changelogProducer() != ChangelogProducer.NONE) {
+      return "changelog-producer " + coreOptions.changelogProducer() + " is not supported";
+    }
+    if (coreOptions.deletionVectorsEnabled()) {
+      return "deletion-vectors.enabled is not supported";
+    }
+    if (coreOptions.forceLookup()) {
+      return "force-lookup is not supported";
+    }
+    if (!coreOptions.sequenceField().isEmpty()) {
+      return "sequence.field is not supported";
+    }
+    if (coreOptions.rowkindField().isPresent()) {
+      return "rowkind.field is not supported";
+    }
+    if (coreOptions.localMergeEnabled()) {
+      return "local-merge-buffer-size is not supported";
+    }
+    if (coreOptions.dataFileThinMode()) {
+      return "data-file.thin-mode is not supported";
+    }
+    if (coreOptions.dataFileExternalPaths() != null) {
+      return "data-file.external-paths is not supported for primary-key tables";
+    }
+    if (options.get(FlinkConnectorOptions.SINK_KEY_ONLY_DELETES_ENABLED)) {
+      return "sink.key-only-deletes.enabled is not supported";
+    }
+    if (coreOptions.fullCompactionDeltaCommits() != null
+        || options.contains(FlinkConnectorOptions.CHANGELOG_PRODUCER_FULL_COMPACTION_TRIGGER_INTERVAL)) {
+      return "full-compaction.delta-commits is not supported";
+    }
+    if (options.get(FlinkConnectorOptions.PRECOMMIT_COMPACT)) {
+      return FlinkConnectorOptions.PRECOMMIT_COMPACT.key() + " is not supported";
+    }
+    if (options.get(CoreOptions.WRITE_SEQUENCE_NUMBER_INIT_MODE) != SequenceNumberInitMode.SCAN) {
+      return CoreOptions.WRITE_SEQUENCE_NUMBER_INIT_MODE.key()
+          + " "
+          + options.get(CoreOptions.WRITE_SEQUENCE_NUMBER_INIT_MODE)
+          + " is not supported";
+    }
+    if (options.get(FlinkConnectorOptions.SINK_USE_MANAGED_MEMORY)) {
+      return FlinkConnectorOptions.SINK_USE_MANAGED_MEMORY.key() + " is not supported";
+    }
+    return PaimonKeyValueLayout.unsupportedKeyReason(table);
   }
 
   /**

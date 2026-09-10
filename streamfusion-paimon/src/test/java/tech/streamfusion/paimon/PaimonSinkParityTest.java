@@ -23,7 +23,9 @@ import org.apache.flink.table.api.Schema;
 import org.apache.flink.table.api.Table;
 import org.apache.flink.table.api.TableResult;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
+import org.apache.flink.table.connector.ChangelogMode;
 import org.apache.flink.types.Row;
+import org.apache.flink.types.RowKind;
 import org.apache.paimon.Snapshot;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.data.InternalRow;
@@ -45,8 +47,8 @@ import tech.streamfusion.planner.NativePlanner;
 import tech.streamfusion.planner.PhysicalPlanScan;
 
 /**
- * Streaming SQL inserts into Paimon append tables through the native sink, checked against twins
- * written by the stock Paimon connector in the same MiniCluster.
+ * Streaming SQL inserts into Paimon append and primary-key tables through the native sink, checked
+ * against twins written by the stock Paimon connector in the same MiniCluster.
  */
 class PaimonSinkParityTest {
 
@@ -81,7 +83,7 @@ class PaimonSinkParityTest {
     FileStoreTable nativeTable = insertFixture(warehouse, "PARTITIONED BY (pt)", options, 1, true);
     FileStoreTable stockTable = insertFixture(warehouse, "PARTITIONED BY (pt)", options, 1, false);
 
-    assertSameTables(stockTable, nativeTable, true);
+    assertSameTables(stockTable, nativeTable, true, ROWS);
     assertBucketsMatchPaimonsExtractor(nativeTable);
   }
 
@@ -98,7 +100,7 @@ class PaimonSinkParityTest {
     FileStoreTable nativeTable = insertFixture(warehouse, "PARTITIONED BY (pt)", options, 1, true);
     FileStoreTable stockTable = insertFixture(warehouse, "PARTITIONED BY (pt)", options, 1, false);
 
-    assertSameTables(stockTable, nativeTable, false);
+    assertSameTables(stockTable, nativeTable, false, ROWS);
     assertBucketsMatchPaimonsExtractor(nativeTable);
   }
 
@@ -109,7 +111,7 @@ class PaimonSinkParityTest {
     FileStoreTable nativeTable = insertFixture(warehouse, "", options, 2, true);
     FileStoreTable stockTable = insertFixture(warehouse, "", options, 2, false);
 
-    assertSameTables(stockTable, nativeTable, true);
+    assertSameTables(stockTable, nativeTable, true, ROWS);
     assertBucketsMatchPaimonsExtractor(nativeTable);
   }
 
@@ -120,7 +122,7 @@ class PaimonSinkParityTest {
     FileStoreTable nativeTable = insertFixture(warehouse, "PARTITIONED BY (pt)", options, 2, true);
     FileStoreTable stockTable = insertFixture(warehouse, "PARTITIONED BY (pt)", options, 2, false);
 
-    assertSameTables(stockTable, nativeTable, true);
+    assertSameTables(stockTable, nativeTable, true, ROWS);
   }
 
   @Test
@@ -129,7 +131,7 @@ class PaimonSinkParityTest {
     FileStoreTable nativeTable = insertAliasedFixture(warehouse, true);
     FileStoreTable stockTable = insertAliasedFixture(warehouse, false);
 
-    assertSameTables(stockTable, nativeTable, true);
+    assertSameTables(stockTable, nativeTable, true, ROWS);
     assertEquals(
         List.of("id", "label", "nested", "pt"), nativeTable.rowType().getFieldNames());
   }
@@ -237,9 +239,264 @@ class PaimonSinkParityTest {
     }
   }
 
+
+  private static final int CHANGELOG_ROWS = 600;
+  private static final int CHANGELOG_KEYS = 150;
+
+  @Test
+  void primaryKeyPartitionedTableMatchesTheStockTwin() throws Exception {
+    java.nio.file.Path warehouse = Files.createTempDirectory("paimon-sink-pk");
+    String options = "'bucket' = '2'";
+    FileStoreTable nativeTable = upsertFixture(warehouse, "pk_native", options, 1, true, 0);
+    FileStoreTable stockTable = upsertFixture(warehouse, "pk_stock", options, 1, false, 0);
+
+    assertSameTables(stockTable, nativeTable, true, mergedRows(false));
+  }
+
+  @Test
+  void primaryKeyTableIgnoringDeletesAcrossWritersMatchesTheStockTwin() throws Exception {
+    java.nio.file.Path warehouse = Files.createTempDirectory("paimon-sink-pk-ignore-delete");
+    String options = "'bucket' = '3', 'ignore-delete' = 'true', 'file.compression' = 'zstd'";
+    FileStoreTable nativeTable = upsertFixture(warehouse, "pk_native", options, 2, true, 0);
+    FileStoreTable stockTable = upsertFixture(warehouse, "pk_stock", options, 2, false, 0);
+
+    assertSameTables(stockTable, nativeTable, true, mergedRows(true));
+  }
+
+  /**
+   * A second job over the same table continues the sequence numbering from the committed files,
+   * and the files it adds trip Paimon's compaction inside the write job, so both twins end with the
+   * compacted files Paimon's own writer produced from level-0 files of identical content.
+   */
+  @Test
+  void primaryKeyTableCompactsInJobAndContinuesSequenceNumbersAcrossJobs() throws Exception {
+    java.nio.file.Path warehouse = Files.createTempDirectory("paimon-sink-pk-compact");
+    String options = "'bucket' = '2', 'num-sorted-run.compaction-trigger' = '2'";
+    upsertFixture(warehouse, "pk_native", options, 1, true, 0);
+    upsertFixture(warehouse, "pk_stock", options, 1, false, 0);
+    FileStoreTable nativeTable = upsertFixture(warehouse, "pk_native", options, 1, true, 1);
+    FileStoreTable stockTable = upsertFixture(warehouse, "pk_stock", options, 1, false, 1);
+
+    assertSameTables(stockTable, nativeTable, true, mergedRows(false));
+    assertTrue(
+        PaimonTestTables.dataFiles(nativeTable).values().stream()
+            .flatMap(List::stream)
+            .anyMatch(file -> file.level() > 0),
+        "the second job's files were compacted in the job");
+  }
+
+  @Test
+  void writeOnlyPrimaryKeyTableLeavesLevelZeroFilesForADedicatedCompaction() throws Exception {
+    java.nio.file.Path warehouse = Files.createTempDirectory("paimon-sink-pk-write-only");
+    String options = "'bucket' = '2', 'write-only' = 'true', 'num-sorted-run.compaction-trigger' = '2'";
+    upsertFixture(warehouse, "pk_native", options, 1, true, 0);
+    upsertFixture(warehouse, "pk_stock", options, 1, false, 0);
+    FileStoreTable nativeTable = upsertFixture(warehouse, "pk_native", options, 1, true, 1);
+    FileStoreTable stockTable = upsertFixture(warehouse, "pk_stock", options, 1, false, 1);
+
+    assertSameTables(stockTable, nativeTable, true, mergedRows(false));
+    assertTrue(
+        PaimonTestTables.dataFiles(nativeTable).values().stream()
+            .flatMap(List::stream)
+            .allMatch(file -> file.level() == 0));
+  }
+
+  @Test
+  void insertOnlyStreamIntoAPrimaryKeyTableMatchesTheStockTwin() throws Exception {
+    java.nio.file.Path warehouse = Files.createTempDirectory("paimon-sink-pk-insert-only");
+    FileStoreTable nativeTable = insertOnlyUpsertFixture(warehouse, "pk_native", true);
+    FileStoreTable stockTable = insertOnlyUpsertFixture(warehouse, "pk_stock", false);
+
+    assertSameTables(stockTable, nativeTable, true, ROWS);
+  }
+
+  @Test
+  void aForcedUpsertMaterializerDeclinesThePrimaryKeySink() throws Exception {
+    java.nio.file.Path warehouse = Files.createTempDirectory("paimon-sink-pk-materializer");
+    StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+    env.setParallelism(1);
+    StreamTableEnvironment tableEnv = catalogEnvironment(env, warehouse);
+    tableEnv.getConfig().set("table.exec.sink.upsert-materialize", "FORCE");
+    createPrimaryKeyTable(tableEnv, "pk_forced", "'bucket' = '2'");
+    registerChangelog(env, tableEnv);
+    PhysicalPlanScan scan = NativePlanner.install(tableEnv);
+
+    tableEnv.explainSql("INSERT INTO pk_forced SELECT * FROM changelog_source");
+
+    assertDeclined(scan, "upsert-materialized");
+  }
+
+  private static int mergedRows(boolean ignoreDelete) {
+    Map<String, Object[]> live = new java.util.LinkedHashMap<>();
+    for (Object[] row : PaimonTestTables.changelog(CHANGELOG_ROWS, CHANGELOG_KEYS)) {
+      String key = row[1] + "|" + row[2];
+      if (row[0] == RowKind.DELETE) {
+        if (!ignoreDelete) {
+          live.remove(key);
+        }
+      } else {
+        live.put(key, row);
+      }
+    }
+    return live.size();
+  }
+
+  /** Writes the changelog fixture's rows {@code job * CHANGELOG_ROWS ..} through one streaming job. */
+  private static FileStoreTable upsertFixture(
+      java.nio.file.Path warehouse,
+      String name,
+      String options,
+      int parallelism,
+      boolean nativeSink,
+      int job)
+      throws Exception {
+    StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+    env.setParallelism(parallelism);
+    StreamTableEnvironment tableEnv = catalogEnvironment(env, warehouse);
+    if (job == 0) {
+      createPrimaryKeyTable(tableEnv, name, options);
+    }
+    registerChangelog(env, tableEnv, job);
+    PhysicalPlanScan scan = nativeSink ? NativePlanner.install(tableEnv) : null;
+
+    tableEnv.executeSql("INSERT INTO " + name + " SELECT * FROM changelog_source").await();
+
+    if (nativeSink) {
+      assertAccelerated(scan);
+    }
+    return openTable(warehouse, name);
+  }
+
+  private static FileStoreTable insertOnlyUpsertFixture(
+      java.nio.file.Path warehouse, String name, boolean nativeSink) throws Exception {
+    StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+    env.setParallelism(1);
+    StreamTableEnvironment tableEnv = catalogEnvironment(env, warehouse);
+    tableEnv.executeSql(
+        "CREATE TABLE "
+            + name
+            + " (id BIGINT NOT NULL, name STRING, price DECIMAL(10, 2), pt STRING NOT NULL,"
+            + " PRIMARY KEY (id, pt) NOT ENFORCED) PARTITIONED BY (pt) WITH ('bucket' = '2')");
+    DataStream<Row> stream = env.fromData(fixtureTypeInformation(), fixtureRows());
+    tableEnv.createTemporaryView("fixture_source", tableEnv.fromDataStream(stream, fixtureSchema()));
+    PhysicalPlanScan scan = nativeSink ? NativePlanner.install(tableEnv) : null;
+
+    tableEnv
+        .executeSql(
+            "INSERT INTO " + name + " SELECT id, name, price, COALESCE(pt, '-') FROM fixture_source")
+        .await();
+
+    if (nativeSink) {
+      assertAccelerated(scan);
+    }
+    return openTable(warehouse, name);
+  }
+
+  private static void createPrimaryKeyTable(
+      StreamTableEnvironment tableEnv, String name, String options) {
+    tableEnv.executeSql(
+        "CREATE TABLE "
+            + name
+            + " (id BIGINT NOT NULL, cat STRING NOT NULL, name STRING, price DECIMAL(10, 2),"
+            + " ts TIMESTAMP(3), dt DATE, flag BOOLEAN, dbl DOUBLE, bin BYTES, small TINYINT,"
+            + " pt STRING NOT NULL, PRIMARY KEY (id, cat, pt) NOT ENFORCED) PARTITIONED BY (pt)"
+            + " WITH ("
+            + options
+            + ")");
+  }
+
+  private static void registerChangelog(
+      StreamExecutionEnvironment env, StreamTableEnvironment tableEnv) {
+    registerChangelog(env, tableEnv, 0);
+  }
+
+  private static void registerChangelog(
+      StreamExecutionEnvironment env, StreamTableEnvironment tableEnv, int job) {
+    List<Row> rows = new ArrayList<>();
+    List<Object[]> changelog =
+        PaimonTestTables.changelog((job + 1) * CHANGELOG_ROWS, CHANGELOG_KEYS)
+            .subList(job * CHANGELOG_ROWS, (job + 1) * CHANGELOG_ROWS);
+    for (Object[] v : changelog) {
+      rows.add(
+          Row.ofKind(
+              (RowKind) v[0],
+              v[1],
+              v[2],
+              v[3],
+              v[4],
+              v[5] == null
+                  ? null
+                  : LocalDateTime.ofEpochSecond(
+                      Math.floorDiv((Long) v[5], 1000L),
+                      (int) Math.floorMod((Long) v[5], 1000L) * 1_000_000,
+                      ZoneOffset.UTC),
+              v[6] == null ? null : LocalDate.ofEpochDay((Integer) v[6]),
+              v[7],
+              v[8],
+              v[9],
+              v[10],
+              v[11]));
+    }
+    DataStream<Row> stream =
+        env.fromData(
+            Types.ROW_NAMED(
+                new String[] {
+                  "id", "cat", "name", "price", "ts", "dt", "flag", "dbl", "bin", "small", "pt"
+                },
+                Types.LONG,
+                Types.STRING,
+                Types.STRING,
+                Types.BIG_DEC,
+                Types.LOCAL_DATE_TIME,
+                Types.LOCAL_DATE,
+                Types.BOOLEAN,
+                Types.DOUBLE,
+                Types.PRIMITIVE_ARRAY(Types.BYTE),
+                Types.BYTE,
+                Types.STRING),
+            rows.toArray(new Row[0]));
+    Table source =
+        tableEnv.fromChangelogStream(
+            stream,
+            Schema.newBuilder()
+                .column("id", "BIGINT NOT NULL")
+                .column("cat", "STRING NOT NULL")
+                .column("name", "STRING")
+                .column("price", "DECIMAL(10, 2)")
+                .column("ts", "TIMESTAMP(3)")
+                .column("dt", "DATE")
+                .column("flag", "BOOLEAN")
+                .column("dbl", "DOUBLE")
+                .column("bin", "BYTES")
+                .column("small", "TINYINT")
+                .column("pt", "STRING NOT NULL")
+                .primaryKey("id", "cat", "pt")
+                .build(),
+            ChangelogMode.upsert());
+    tableEnv.createTemporaryView("changelog_source", source);
+  }
+
+  private static final String PK_SCHEMA = "(id BIGINT NOT NULL, v INT, PRIMARY KEY (id) NOT ENFORCED)";
+
   static Stream<Arguments> declinedTables() {
     return Stream.of(
-        Arguments.of("(id BIGINT, v INT, PRIMARY KEY (id) NOT ENFORCED)", "'bucket' = '2'", "primary-key"),
+        Arguments.of(PK_SCHEMA, "'bucket' = '-1'", "bucket mode HASH_DYNAMIC"),
+        Arguments.of(PK_SCHEMA, "'bucket' = '2', 'merge-engine' = 'partial-update'", "merge-engine partial-update"),
+        Arguments.of(PK_SCHEMA, "'bucket' = '2', 'merge-engine' = 'first-row'", "merge-engine first-row"),
+        Arguments.of(PK_SCHEMA, "'bucket' = '2', 'changelog-producer' = 'input'", "changelog-producer input"),
+        Arguments.of(PK_SCHEMA, "'bucket' = '2', 'changelog-producer' = 'lookup'", "changelog-producer lookup"),
+        Arguments.of(PK_SCHEMA, "'bucket' = '2', 'changelog-producer' = 'full-compaction'", "changelog-producer full-compaction"),
+        Arguments.of(PK_SCHEMA, "'bucket' = '2', 'deletion-vectors.enabled' = 'true'", "deletion-vectors.enabled"),
+        Arguments.of(PK_SCHEMA, "'bucket' = '2', 'force-lookup' = 'true'", "force-lookup"),
+        Arguments.of(PK_SCHEMA, "'bucket' = '2', 'sequence.field' = 'v'", "sequence.field"),
+        Arguments.of(PK_SCHEMA, "'bucket' = '2', 'local-merge-buffer-size' = '1 mb'", "local-merge-buffer-size"),
+        Arguments.of(PK_SCHEMA, "'bucket' = '2', 'data-file.thin-mode' = 'true'", "data-file.thin-mode"),
+        Arguments.of(PK_SCHEMA, "'bucket' = '2', 'sink.key-only-deletes.enabled' = 'true'", "sink.key-only-deletes.enabled"),
+        Arguments.of(PK_SCHEMA, "'bucket' = '2', 'full-compaction.delta-commits' = '3'", "full-compaction.delta-commits"),
+        Arguments.of(PK_SCHEMA, "'bucket' = '2', 'precommit-compact' = 'true'", "precommit-compact"),
+        Arguments.of(PK_SCHEMA, "'bucket' = '2', 'write.sequence-number-init-mode' = 'snapshot'", "write.sequence-number-init-mode"),
+        Arguments.of(PK_SCHEMA, "'bucket' = '2', 'sink.use-managed-memory-allocator' = 'true'", "sink.use-managed-memory-allocator"),
+        Arguments.of("(id BIGINT NOT NULL, k DOUBLE NOT NULL, PRIMARY KEY (id, k) NOT ENFORCED)", "'bucket' = '2'", "DOUBLE"),
         Arguments.of("(id BIGINT, v INT)", "'bucket' = '-1', 'file.format' = 'orc'", "file.format orc"),
         Arguments.of("(id BIGINT, v INT)", "'bucket' = '-1', 'write-buffer-for-append' = 'true'", "write-buffer-for-append"),
         Arguments.of("(id BIGINT, v INT)", "'bucket' = '-1', 'file-index.bloom-filter.columns' = 'v'", "file indexes"),
@@ -289,6 +546,9 @@ class PaimonSinkParityTest {
   }
 
   private static String selectFor(String schema) {
+    if (schema.contains("k DOUBLE")) {
+      return "CAST(v AS DOUBLE) AS k";
+    }
     if (schema.contains("TIMESTAMP(9)")) {
       return "CAST(TO_TIMESTAMP_LTZ(id, 3) AS TIMESTAMP(9)) AS v";
     }
@@ -392,30 +652,33 @@ class PaimonSinkParityTest {
   }
 
   private static void assertSameTables(
-      FileStoreTable expected, FileStoreTable actual, boolean absoluteSequenceNumbers)
+      FileStoreTable expected, FileStoreTable actual, boolean absoluteSequenceNumbers, int rows)
       throws Exception {
     RowType rowType = expected.rowType();
     List<String> expectedRows = PaimonTestTables.readRows(expected, rowType);
-    assertEquals(ROWS, expectedRows.size());
+    assertEquals(rows, expectedRows.size());
     assertEquals(expectedRows, PaimonTestTables.readRows(actual, rowType));
     Map<String, List<DataFileMeta>> expectedFiles = PaimonTestTables.dataFiles(expected);
     Map<String, List<DataFileMeta>> actualFiles = PaimonTestTables.dataFiles(actual);
     assertEquals(expectedFiles.keySet(), actualFiles.keySet());
+    RowType keyType =
+        expected.primaryKeys().isEmpty() ? null : PaimonKeyValueLayout.of(expected).keyType;
     for (String destination : expectedFiles.keySet()) {
       assertEquals(
-          describeAll(expectedFiles.get(destination), rowType, absoluteSequenceNumbers),
-          describeAll(actualFiles.get(destination), rowType, absoluteSequenceNumbers),
+          describeAll(expectedFiles.get(destination), rowType, keyType, absoluteSequenceNumbers),
+          describeAll(actualFiles.get(destination), rowType, keyType, absoluteSequenceNumbers),
           destination);
     }
     assertEquals(PaimonTestTables.footers(expected), PaimonTestTables.footers(actual));
   }
 
   private static List<String> describeAll(
-      List<DataFileMeta> files, RowType rowType, boolean absoluteSequenceNumbers) {
+      List<DataFileMeta> files, RowType rowType, RowType keyType, boolean absoluteSequenceNumbers) {
     return files.stream()
         .map(
             file ->
-                "rows="
+                (keyType == null ? "" : PaimonTestTables.describeKeys(file, keyType) + "\n")
+                    + "rows="
                     + file.rowCount()
                     + " seq="
                     + (absoluteSequenceNumbers ? file.minSequenceNumber() + ".." : "span ")

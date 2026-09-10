@@ -51,6 +51,6 @@ format writer recognises the bundle behind the first row and encodes the whole b
   `write-max-writers-to-spill` writers in one task) encode through Paimon's writer; correctness is
   unaffected, and in spill mode absolute sequence numbers differ from a stock run because Paimon
   reassigns them after re-buffering whole routed batches instead of single rows.
-- **Primary-key tables stay stock for now.** Their merge-tree path sorts rows in a buffer before
-  writing, so a native entry needs either write-only jobs with a native L0 writer or a native
-  merge; see issue #33.
+- **Primary-key tables need one more native piece.** Their merge-tree path sorts rows in a buffer
+  before writing and has no bundle entry, so the sink writes their level-0 files itself and hands
+  them to Paimon's writer for compaction; see [32](32-paimon-pk-l0-through-the-compactor-hook.md).

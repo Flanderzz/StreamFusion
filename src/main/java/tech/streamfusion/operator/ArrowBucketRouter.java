@@ -20,9 +20,11 @@ import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
  * materialized on the JVM. Paimon's {@code BinaryRow} shares Flink's {@code BinaryRowData} layout
  * and hash, so the native Flink key encoder yields both byte for byte.
  *
- * <p>The destinations are append tables, so the planner only routes insert-only streams here. An
- * upstream changelog operator still tags its output with the hidden row-kind column, all inserts on
- * such an edge, and the router drops it so the routed batches carry exactly the table's columns.
+ * <p>An append table takes an insert-only stream. An upstream changelog operator still tags its
+ * output with the hidden row-kind column, all inserts on such an edge, and the router drops it so
+ * the routed batches carry exactly the table's columns. A primary-key table takes a changelog, so
+ * the router keeps the column for its writer to merge by; it trails the table's columns, so the
+ * routing ordinals are the same either way.
  */
 public class ArrowBucketRouter extends AbstractStreamOperator<BucketedArrowBatch>
     implements OneInputStreamOperator<ArrowBatch, BucketedArrowBatch> {
@@ -32,6 +34,7 @@ public class ArrowBucketRouter extends AbstractStreamOperator<BucketedArrowBatch
   private final int[] bucketColumns;
   private final int[] bucketTimestampPrecisions;
   private final int numBuckets;
+  private final boolean keepRowKinds;
 
   private transient BufferAllocator allocator;
   private transient CDataDictionaryProvider dictionaries;
@@ -39,18 +42,21 @@ public class ArrowBucketRouter extends AbstractStreamOperator<BucketedArrowBatch
   /**
    * @param numBuckets the table's fixed bucket count, or a non-positive value for a bucket-unaware
    *     table whose rows all land in bucket 0
+   * @param keepRowKinds whether the hidden row-kind column travels with the routed batches
    */
   public ArrowBucketRouter(
       int[] partitionColumns,
       int[] partitionTimestampPrecisions,
       int[] bucketColumns,
       int[] bucketTimestampPrecisions,
-      int numBuckets) {
+      int numBuckets,
+      boolean keepRowKinds) {
     this.partitionColumns = partitionColumns;
     this.partitionTimestampPrecisions = partitionTimestampPrecisions;
     this.bucketColumns = bucketColumns;
     this.bucketTimestampPrecisions = bucketTimestampPrecisions;
     this.numBuckets = numBuckets;
+    this.keepRowKinds = keepRowKinds;
   }
 
   @Override
@@ -64,7 +70,8 @@ public class ArrowBucketRouter extends AbstractStreamOperator<BucketedArrowBatch
   @Override
   public void processElement(StreamRecord<ArrowBatch> element) {
     ColumnarRecordMetrics.countIngested(getMetricGroup(), element.getValue().rowCount());
-    VectorSchemaRoot in = withoutRowKinds(element.getValue().root());
+    VectorSchemaRoot in =
+        keepRowKinds ? element.getValue().root() : withoutRowKinds(element.getValue().root());
     BufferAllocator inAllocator =
         in.getFieldVectors().isEmpty() ? allocator : in.getFieldVectors().get(0).getAllocator();
     long route;

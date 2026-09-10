@@ -1,11 +1,12 @@
 # Apache Paimon
 
 **Status:** experimental. The optional `streamfusion-paimon` module accelerates streaming
-`INSERT INTO` jobs into Paimon **append-only tables** on the published Paimon `2.0.0` Flink 2.2
-connector. Paimon keeps every table-level responsibility: schema and catalog, bucket assignment
-rules, sequence numbers, file rolling, statistics, manifests, snapshots, commits, and the in-job
-compaction topology. StreamFusion replaces two things: the per-row shuffle in front of the writers
-and the Parquet encoding of each data file.
+`INSERT INTO` jobs into Paimon **append-only tables** and **fixed-bucket primary-key tables** on
+the published Paimon `2.0.0` Flink 2.2 connector. Paimon keeps every table-level responsibility:
+schema and catalog, bucket assignment rules, sequence numbering rules, file rolling, statistics,
+manifests, snapshots, commits, and compaction. StreamFusion replaces the per-row shuffle in front
+of the writers, the Parquet encoding of each data file, and, for primary-key tables, the sort and
+merge that turns a bucket's changelog into a level-0 file.
 
 ## What runs natively
 
@@ -39,8 +40,42 @@ Supported:
   table's names and nullability, and an insert-only stream coming out of a changelog-capable
   operator (a join, an aggregate) is accepted with its hidden row-kind column dropped.
 
-Files written natively are row-, statistics-, and footer-schema-identical to the stock writer's
-(verified against twin tables in `PaimonSinkParityTest` and `NativePaimonParquetWriterTest`), and
+### Primary-key tables
+
+A fixed-bucket primary-key table takes the changelog Flink infers for it (`+I`/`+U`/`-D`; Paimon's
+sink declares that it needs no `UPDATE_BEFORE`). The routed batches keep their row kinds and are
+held per bucket in a native buffer. At a checkpoint, or once a task's buffers exceed
+`write-buffer-size` (largest bucket first, as Paimon's memory pool spills), a bucket's rows are
+sorted by key and arrival, reduced to the last row per key (Paimon's `deduplicate` merge engine;
+`ignore-delete` drops the retracts first), and written straight into level-0 data files in Paimon's
+key-value layout with the native Parquet encoder, rolled at `target-file-size`. Every file carries
+the metadata Paimon's own writer records: key bounds, key and value statistics from the footer,
+sequence range, delete count, level 0. Sequence numbers continue from the bucket's committed files
+exactly as a restored Paimon writer's do, so a native run numbers its rows like a stock run.
+
+Compaction stays Paimon's, in the same job: the new files are handed to Paimon's merge-tree writer
+for the bucket before it prepares each checkpoint's commit, through the entry Paimon's dedicated
+compaction operator uses for files written elsewhere, so the writer compacts them with the table's
+own strategy (`num-sorted-run.compaction-trigger`, `compaction.*`, `commit.force-compact`) and the
+rewrites run through Paimon's stock Parquet writer as they do today. Paimon's writer sees no rows,
+only files; when it is idle across checkpoints Paimon closes it and the next hand-off recreates it
+with a scan of the bucket's committed files, the same cost Paimon's dedicated compactor pays. With
+`write-only = true` the hand-off is inert and a dedicated compaction job (`CALL sys.compact` or a
+compaction action) picks the level-0 files up unchanged.
+
+Supported: `bucket >= 1` with the default or an explicit `bucket-key`, `merge-engine =
+deduplicate`, `changelog-producer = none`, `ignore-delete`, `write-only`, `file.compression*` and
+the `parquet.*` writer keys as for append tables, and key columns of type `BOOLEAN`,
+`TINYINT`..`BIGINT`, `DECIMAL`, `CHAR`/`VARCHAR`, `BINARY`/`VARBINARY`, `DATE`, `TIMESTAMP`, and
+`TIMESTAMP_LTZ` (the native sort orders keys by their Arrow byte encoding, which agrees with
+Paimon's key comparator for exactly these types). An insert-only stream into a primary-key table
+is taken as all inserts.
+
+### Parity
+
+Files written natively are row-, metadata-, statistics-, and footer-schema-identical to the stock
+writer's (verified against twin tables in `PaimonSinkParityTest`, `NativePaimonParquetWriterTest`,
+`NativePaimonKeyValueFileWriterTest`, and `NativeKeyValueSinkWriteTest`), and
 `bin/flink-suite.sh paimon` runs Paimon's own unchanged append-table SQL integration tests with the
 native sink installed (see [the upstream suite](../upstream-flink-suite.md)). The
 one known statistics difference: a `DOUBLE`/`FLOAT` column whose minimum is a negative zero is
@@ -50,9 +85,19 @@ recorded as `-0.0` by parquet-rs and `0.0` by parquet-mr.
 
 Each of these declines at planning time with a reason visible in `NativePlanner.explain`:
 
-- Primary-key tables (see the outlook below), dynamic-bucket and postpone-bucket modes.
-- A changelog (retracting or updating) input, `INSERT OVERWRITE`, and batch-mode inserts (the
-  substitution only exists in the streaming planner).
+- Dynamic-bucket, cross-partition, and postpone-bucket modes (so every primary-key table with
+  `bucket = -1`).
+- A changelog (retracting or updating) input into an append table, a sink Flink plans with a
+  `SinkUpsertMaterializer` (`table.exec.sink.upsert-materialize`; Paimon itself refuses that
+  operator), `INSERT OVERWRITE`, and batch-mode inserts (the substitution only exists in the
+  streaming planner).
+- Primary-key tables with `merge-engine` `first-row`, `partial-update`, or `aggregation`;
+  `changelog-producer` `input`, `lookup`, or `full-compaction`; `deletion-vectors.enabled`,
+  `force-lookup`, `sequence.field`, `rowkind.field`, `local-merge-buffer-size`,
+  `data-file.thin-mode`, `data-file.external-paths`, `sink.key-only-deletes.enabled`,
+  `full-compaction.delta-commits` (or `changelog-producer.compaction-interval`),
+  `precommit-compact`, `write.sequence-number-init-mode = snapshot`,
+  `sink.use-managed-memory-allocator`; or a `FLOAT`/`DOUBLE` key column.
 - `file.format` other than `parquet`, `file.format.per.level`, `write-buffer-for-append = true`,
   file indexes (`file-index.*`), `row-tracking.enabled`, `data-evolution.enabled`, `BLOB` columns.
 - `sink.clustering.*`, `partition.sink-strategy = PARTITION_DYNAMIC`,
@@ -66,12 +111,14 @@ Each of these declines at planning time with a reason visible in `NativePlanner.
 
 Two runtime situations route rows through Paimon's stock Parquet writer inside an otherwise native
 job, keeping the output identical to stock Paimon at the cost of the native speed-up for those
-files: compaction rewrites (in-job or from a dedicated compaction job), and Paimon's buffer-spill
-mode, which a writer task enters once it holds more than `write-max-writers-to-spill` (default 10)
-partition-bucket writers and which re-buffers and rewrites what those writers had already written.
-In spill mode the absolute sequence numbers in file metadata differ from a stock run (Paimon
-reassigns them on the rewrite, and it triggers after whole routed batches rather than single rows);
-rows, statistics, and footers are unchanged.
+files: compaction rewrites (in-job or from a dedicated compaction job), and, for append tables,
+Paimon's buffer-spill mode, which a writer task enters once it holds more than
+`write-max-writers-to-spill` (default 10) partition-bucket writers and which re-buffers and
+rewrites what those writers had already written. In spill mode the absolute sequence numbers in
+file metadata differ from a stock run (Paimon reassigns them on the rewrite, and it triggers after
+whole routed batches rather than single rows); rows, statistics, and footers are unchanged.
+Primary-key buckets never enter that mode: their rows live in the native buffers, which spill by
+size into level-0 files.
 
 ## Benchmark
 
@@ -102,8 +149,9 @@ Paimon.
 ## Outlook
 
 Each remaining gap has its own issue:
-[primary-key tables](https://github.com/datafusion-contrib/StreamFusion/issues/33) (merge-on-read,
-copy-on-write, and deletion-vector merge-on-write),
+[the remaining primary-key shapes](https://github.com/datafusion-contrib/StreamFusion/issues/33)
+(changelog producers, deletion vectors, the other merge engines, `sequence.field`, thin mode, and a
+Paimon bundle entry for the merge-tree writer that would remove the idle-writer rescan),
 [dynamic and postpone buckets](https://github.com/datafusion-contrib/StreamFusion/issues/34),
 [ORC data files](https://github.com/datafusion-contrib/StreamFusion/issues/35),
 [the writer and commit coordinators](https://github.com/datafusion-contrib/StreamFusion/issues/36),

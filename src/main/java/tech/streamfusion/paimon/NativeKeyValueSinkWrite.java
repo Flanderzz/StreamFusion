@@ -8,6 +8,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import javax.annotation.Nullable;
+import org.apache.arrow.vector.FieldVector;
+import org.apache.arrow.vector.TinyIntVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.runtime.io.disk.iomanager.IOManager;
@@ -23,8 +25,10 @@ import org.apache.paimon.manifest.ManifestEntry;
 import org.apache.paimon.memory.MemoryPoolFactory;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.sink.CommitMessageImpl;
+import org.apache.paimon.types.RowKind;
 import tech.streamfusion.operator.KeyedUpsertBuffer;
 import tech.streamfusion.operator.NativeAllocator;
+import tech.streamfusion.operator.RowDataArrowConverter;
 
 /**
  * The sink write of a primary-key table fed with routed Arrow batches. Paimon's merge-tree writer
@@ -99,11 +103,17 @@ public final class NativeKeyValueSinkWrite extends StoreSinkWriteImpl {
     this.files = new NativePaimonKeyValueFileWriter(table, layout);
   }
 
-  /** Takes a routed batch (the table's columns plus the hidden row-kind column) for one bucket. */
+  /**
+   * Takes a routed batch for one bucket: the table's columns plus the hidden row-kind column, or
+   * the columns alone from an insert-only edge, whose rows are all inserts.
+   */
   public void writeBundle(BinaryRow partition, int bucket, VectorSchemaRoot root) throws IOException {
     if (root.getRowCount() == 0) {
       root.close();
       return;
+    }
+    if (root.getFieldVectors().size() == kindColumn) {
+      root = withInsertKinds(root);
     }
     BucketBuffer buffer =
         buffers
@@ -113,6 +123,23 @@ public final class NativeKeyValueSinkWrite extends StoreSinkWriteImpl {
     if (bufferedBytes() > bufferBudget) {
       flush(largestBuffer());
     }
+  }
+
+  private static VectorSchemaRoot withInsertKinds(VectorSchemaRoot root) {
+    int rows = root.getRowCount();
+    TinyIntVector kinds =
+        new TinyIntVector(
+            RowDataArrowConverter.ROW_KIND_COLUMN, root.getFieldVectors().get(0).getAllocator());
+    kinds.allocateNew(rows);
+    for (int row = 0; row < rows; row++) {
+      kinds.set(row, RowKind.INSERT.toByteValue());
+    }
+    kinds.setValueCount(rows);
+    List<FieldVector> columns = new ArrayList<>(root.getFieldVectors());
+    columns.add(kinds);
+    VectorSchemaRoot withKinds = new VectorSchemaRoot(columns);
+    withKinds.setRowCount(rows);
+    return withKinds;
   }
 
   private BucketBuffer open(BinaryRow partition, int bucket) {
