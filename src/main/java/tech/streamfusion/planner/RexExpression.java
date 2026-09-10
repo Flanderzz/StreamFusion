@@ -642,6 +642,11 @@ final class RexExpression {
       return emitEncoding(call, 105, true, true);
     }
     if ("TO_BASE64".equals(functionName)) {
+      if (call.getOperands().size() == 1
+          && call.getOperands().get(0).getType().getSqlTypeName().getFamily()
+              == SqlTypeFamily.BINARY) {
+        return emitBuiltinCall(call, 151);
+      }
       return emitEncoding(call, 107, false, true);
     }
     if ("UNHEX".equals(functionName)) {

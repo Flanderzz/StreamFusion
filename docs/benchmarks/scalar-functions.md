@@ -479,6 +479,19 @@ Flink/native medians, with no intermediate optimization results.
 | 64 extra members, ASCII, 32-byte padding | 8.115 | 4.576 | 1.77x |
 | 64 extra members, Unicode, 32-byte padding, NULL/8 | 6.464 | 3.315 | 1.95x |
 
+## TO_BASE64 binary input
+
+Measured on 2026-09-10 with the release profile, 2,000,000 rows, two warmups and
+five interleaved trials, including both transposes. Run with
+`scalar.functions=TO_BASE64_BINARY`. The `tt_bytes` fixture supplies binary columns
+containing the ASCII/Unicode payload bytes; encoding is the only measured function.
+
+| Scenario | Flink (s) | Native (s) |
+|---|---:|---:|
+| ASCII, 32-byte budget | 0.357 | 0.495 |
+| ASCII, 264-byte budget | 0.499 | 0.767 |
+| Unicode, 264-byte budget, NULL/8 | 0.485 | 0.753 |
+
 ## TRIM directions and literal sets
 
 Measured on 2026-09-10 using the release profile and the interleaved, 2,000,000-row,

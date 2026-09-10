@@ -92,6 +92,7 @@ class ScalarFunctionBenchmark {
               Stream.of(
                   new Query("HEX_STRING", "text", "HEX(s)"),
                   new Query("TO_BASE64", "text", "TO_BASE64(s)"),
+                  new Query("TO_BASE64_BINARY", "tt_bytes", "TO_BASE64(b)"),
                   new Query("UNHEX", "hex", "UNHEX(s)", "BYTES")))
           .toList();
 

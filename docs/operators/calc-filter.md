@@ -221,7 +221,11 @@ Integer and character inputs are admitted. All four signed integer widths preser
 
 ### TO_BASE64
 
-Character strings are encoded as padded RFC 4648 Base64 over UTF-8 bytes without line wrapping. Empty input stays empty; NULL propagates. BINARY/VARBINARY input and FROM_BASE64 fall back.
+Character strings and binary columns are encoded as padded RFC 4648 Base64 without line wrapping.
+Strings use their UTF-8 bytes; binary inputs preserve every byte, including invalid UTF-8.
+Both overloads share the direct-output encoder. Empty input stays empty and NULL propagates.
+VARBINARY literals are native; fixed-size BINARY literals retain the literal encoder's fallback.
+FROM_BASE64 falls back.
 
 ### UNHEX
 

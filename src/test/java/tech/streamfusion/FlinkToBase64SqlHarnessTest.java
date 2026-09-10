@@ -29,8 +29,18 @@ class FlinkToBase64SqlHarnessTest {
   }
 
   @Test
-  void binaryArgumentFallsBack() throws Exception {
-    NativeParity.assertFallbackReasonContains(
-        TextTimeFunctionTestInputs::bytes, "SELECT id, TO_BASE64(b) FROM inputs", "TO_BASE64");
+  void binaryBytesNeedNoUtf8Conversion() throws Exception {
+    NativeParity.assertParity(
+        TextTimeFunctionTestInputs::bytes, "SELECT id, TO_BASE64(b) FROM inputs");
+  }
+
+  @Test
+  void binaryLiteralsAndCompositions() throws Exception {
+    NativeParity.assertParity(
+        TextTimeFunctionTestInputs::bytes,
+        "SELECT id, TO_BASE64(COALESCE(b, CAST(X'00FF' AS BYTES))),"
+            + " TO_BASE64(CAST(X'00FF80' AS BYTES)),"
+            + " TO_BASE64(CAST(NULL AS BYTES)), CHAR_LENGTH(TO_BASE64(b))"
+            + " FROM inputs WHERE TO_BASE64(b) <> ''");
   }
 }

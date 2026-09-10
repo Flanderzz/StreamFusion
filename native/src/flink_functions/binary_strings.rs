@@ -1,4 +1,4 @@
-use arrow::array::{Array, ArrayRef, StringArray};
+use arrow::array::{Array, ArrayRef, BinaryArray, StringArray};
 use std::sync::Arc;
 
 pub(super) fn hex_int(args: &[ArrayRef]) -> datafusion::common::Result<ArrayRef> {
@@ -59,7 +59,17 @@ pub(super) fn encode(args: &[ArrayRef], base64: bool) -> datafusion::common::Res
     let [arg] = args else {
         return datafusion::common::exec_err!("string encoding expects one argument");
     };
-    let strings = datafusion::common::cast::as_string_array(arg)?;
+    let binary;
+    let strings = if let Some(strings) = arg.as_any().downcast_ref::<StringArray>() {
+        binary = BinaryArray::new(
+            strings.offsets().clone(),
+            strings.values().clone(),
+            strings.nulls().cloned(),
+        );
+        &binary
+    } else {
+        datafusion::common::cast::as_binary_array(arg)?
+    };
     let mut offsets = Vec::with_capacity(strings.len() + 1);
     let mut total = 0usize;
     offsets.push(0i32);
@@ -87,10 +97,10 @@ pub(super) fn encode(args: &[ArrayRef], base64: bool) -> datafusion::common::Res
         let output = &mut values[offsets[row] as usize..offsets[row + 1] as usize];
         if base64 {
             base64::engine::general_purpose::STANDARD
-                .encode_slice(string.as_bytes(), output)
+                .encode_slice(string, output)
                 .map_err(|e| datafusion::common::exec_datafusion_err!("TO_BASE64: {e}"))?;
         } else {
-            for (&byte, pair) in string.as_bytes().iter().zip(output.chunks_exact_mut(2)) {
+            for (&byte, pair) in string.iter().zip(output.chunks_exact_mut(2)) {
                 pair[0] = super::HEX_DIGITS[(byte >> 4) as usize];
                 pair[1] = super::HEX_DIGITS[(byte & 15) as usize];
             }
@@ -172,4 +182,35 @@ fn decode_unhex(bytes: &[u8], output: &mut [u8]) -> bool {
         *out = (first << 4) | second;
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base64_preserves_arbitrary_bytes_on_a_nullable_slice() {
+        let input = BinaryArray::from(vec![
+            Some(&b"skip"[..]),
+            Some(&b"\x00\xff\x80"[..]),
+            None,
+            Some(&b""[..]),
+            Some(&b"a"[..]),
+            Some(&b"ab"[..]),
+        ])
+        .slice(1, 5);
+        let result = encode(&[Arc::new(input)], true).unwrap();
+        let result = datafusion::common::cast::as_string_array(&result).unwrap();
+        assert_eq!(
+            result,
+            &StringArray::from(vec![
+                Some("AP+A"),
+                None,
+                Some(""),
+                Some("YQ=="),
+                Some("YWI=")
+            ])
+        );
+        result.to_data().validate_full().unwrap();
+    }
 }
