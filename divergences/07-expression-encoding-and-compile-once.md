@@ -158,9 +158,10 @@ strict NULL propagation applied to `CONCAT` below.
   result directly when no rows are NULL, and append only valid rows when a mask is required. This
   avoids copying bytes for NULL results and rebuilding the array through a full UTF-8 validation
   pass. `CONCAT_WS` already matches Flink's separator and NULL-value semantics and delegates directly.
-- **MD5 and SHA-2 fuse digest and hex output:** Arroyo delegates hashes to DataFusion; Comet's Spark
+- **MD5, SHA-1 and SHA-2 fuse digest and hex output:** Arroyo delegates hashes to DataFusion; Comet's Spark
   SHA-2 wrapper also reuses the released Rust digest implementations. We use the same `md-5` and
-  `sha2` crates but write lowercase hex directly into the final UTF-8 Arrow buffers. This removes
+  `sha2` crates, plus the released `sha1` crate used by Comet's `SparkSha1`, but write lowercase hex
+  directly into the final UTF-8 Arrow buffers. This removes
   intermediate binary columns, per-row hex strings, and MD5's string-view-to-UTF-8 copy. The digest
   algorithms are unchanged; the deviation is allocation and output construction, measured in
   `docs/optimizations/string-copy-reduction.md`. `SHA2` literal widths are compared exactly, without

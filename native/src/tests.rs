@@ -943,13 +943,49 @@ fn hash_functions_preserve_utf8_buffers_nulls_and_slices() {
 }
 
 #[test]
+fn sha1_known_vectors_preserve_nulls_slices_and_scalars() {
+    let million = "a".repeat(1_000_000);
+    let input = StringArray::from(vec![
+        Some("unused"),
+        None,
+        Some(""),
+        Some("abc"),
+        Some(&million),
+    ]);
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new("s", DataType::Utf8, true)])),
+        vec![Arc::new(input)],
+    )
+    .unwrap()
+    .slice(1, 4);
+    let result = evaluate_string_call(143, vec![logical_col("s")], &batch);
+    let expected = StringArray::from(vec![
+        None,
+        Some("da39a3ee5e6b4b0d3255bfef95601890afd80709"),
+        Some("a9993e364706816aba3e25717850c26c9cd0d89d"),
+        Some("34aa973cd4c4daa4f61eeb2bdbad27316534016f"),
+    ]);
+    assert_eq!(result.as_ref(), &expected);
+    result.to_data().validate_full().unwrap();
+    let scalar = evaluate_string_call(143, vec![logical_lit("abc")], &batch);
+    assert_eq!(
+        scalar.as_ref(),
+        &StringArray::from(vec![expected.value(2); 4])
+    );
+    let null = evaluate_string_call(143, vec![logical_lit(ScalarValue::Utf8(None))], &batch);
+    assert_eq!(null.null_count(), 4);
+    let empty = evaluate_string_call(143, vec![logical_col("s")], &batch.slice(0, 0));
+    assert!(empty.is_empty());
+}
+
+#[test]
 fn hash_functions_reject_invalid_arity_without_panicking() {
     let schema = Arc::new(DFSchema::empty());
     let context = SimplifyContext::builder()
         .with_schema(schema.clone())
         .build();
     let simplifier = ExprSimplifier::new(context);
-    for op in 95..=99 {
+    for op in (95..=99).chain([143]) {
         for args in [vec![], vec![logical_lit("a"), logical_lit("b")]] {
             let result = simplifier.coerce(build_call(op, args), &schema);
             assert!(result.is_err(), "hash op {op} must reject incorrect arity");

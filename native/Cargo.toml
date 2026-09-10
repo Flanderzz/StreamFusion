@@ -26,6 +26,7 @@ regex = "1"
 # The same released digest implementations used by DataFusion, with hex written directly to Arrow.
 md-5 = "0.11"
 sha2 = "0.11"
+sha1 = "0.11"
 # The logging facade the whole native tree (including DataFusion) emits through; the
 # JNI_OnLoad-installed bridge forwards it to the host's SLF4J. Already in the tree transitively;
 # pinned here for direct use.

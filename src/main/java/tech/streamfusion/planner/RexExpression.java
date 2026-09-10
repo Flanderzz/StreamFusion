@@ -1195,6 +1195,8 @@ final class RexExpression {
 
   private static int hashOpCode(String name) {
     switch (name) {
+      case "SHA1":
+        return 143;
       case "MD5":
         return 95;
       case "SHA224":

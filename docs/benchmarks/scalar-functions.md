@@ -498,3 +498,15 @@ The queries are `TRIM(LEADING FROM s)`, `TRIM(TRAILING FROM s)`, and
 | TRIM_LITERAL_SET | ASCII, 32-byte budget | 0.845 | 0.579 | 1.46x |
 | TRIM_LITERAL_SET | ASCII, 264-byte budget | 2.911 | 1.154 | 2.52x |
 | TRIM_LITERAL_SET | Unicode, 264-byte budget, NULL/8 | 1.605 | 0.985 | 1.63x |
+
+## SHA1
+
+`SHA1(s)` measured on 2026-09-10 with the same release, interleaved method as TRIM,
+2,000,000 rows, two warmups and five trials, including both transposes. Run with
+`scalar.functions=SHA1`. The input is the `tt_text` fixture.
+
+| Scenario | Flink (s) | Native (s) | Flink / native |
+|---|---:|---:|---:|
+| ASCII, 32-byte budget | 0.837 | 0.697 | 1.20x |
+| ASCII, 264-byte budget | 2.229 | 1.299 | 1.72x |
+| Unicode, 264-byte budget, NULL/8 | 1.882 | 1.151 | 1.64x |

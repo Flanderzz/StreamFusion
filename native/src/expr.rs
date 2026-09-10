@@ -329,13 +329,14 @@ pub(crate) fn build_call(
                 DataType::Utf8,
             ));
         }
-        95..=99 => {
+        95..=99 | 143 => {
             let algorithm = match op {
                 95 => HashAlgorithm::Md5,
                 96 => HashAlgorithm::Sha224,
                 97 => HashAlgorithm::Sha256,
                 98 => HashAlgorithm::Sha384,
                 99 => HashAlgorithm::Sha512,
+                143 => HashAlgorithm::Sha1,
                 _ => unreachable!("matched hash opcode"),
             };
             return datafusion::logical_expr::ScalarUDF::new_from_impl(FlinkHash::new(algorithm))
@@ -613,6 +614,7 @@ fn concat_valid_rows(
 #[derive(Debug, PartialEq, Eq, Hash)]
 enum HashAlgorithm {
     Md5,
+    Sha1,
     Sha224,
     Sha256,
     Sha384,
@@ -641,6 +643,7 @@ impl datafusion::logical_expr::ScalarUDFImpl for FlinkHash {
     fn name(&self) -> &str {
         match self.algorithm {
             HashAlgorithm::Md5 => "flink_md5",
+            HashAlgorithm::Sha1 => "flink_sha1",
             HashAlgorithm::Sha224 => "flink_sha224",
             HashAlgorithm::Sha256 => "flink_sha256",
             HashAlgorithm::Sha384 => "flink_sha384",
@@ -668,6 +671,7 @@ impl datafusion::logical_expr::ScalarUDFImpl for FlinkHash {
         };
         match self.algorithm {
             HashAlgorithm::Md5 => hash_utf8::<md5::Md5>(input),
+            HashAlgorithm::Sha1 => hash_utf8::<sha1::Sha1>(input),
             HashAlgorithm::Sha224 => hash_utf8::<sha2::Sha224>(input),
             HashAlgorithm::Sha256 => hash_utf8::<sha2::Sha256>(input),
             HashAlgorithm::Sha384 => hash_utf8::<sha2::Sha384>(input),

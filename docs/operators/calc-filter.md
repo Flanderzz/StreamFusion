@@ -18,7 +18,7 @@ The rest of this page is the exact admission list: what's unconditionally native
 default via a JVM upcall (and why that's not a fallback), what's opt-in, and what's a straight
 fallback.
 
-- **Unsupported function/operator** outside the admitted set (e.g. `SHA1`) is a plain fallback —
+- **Unsupported function/operator** outside the admitted set (e.g. `PARSE_URL`) is a plain fallback —
   there's no partial evaluation of an expression tree, so one unknown function anywhere in it
   declines the whole `Calc`.
 
@@ -31,6 +31,7 @@ These functions run entirely in Rust by default, in projections, predicates, and
 | `CONCAT(s, ...)`, `s \|\| t` | Character-string arguments; any NULL argument makes the result NULL. Empty strings are preserved. |
 | `CONCAT_WS(separator, ...)` | A literal or column separator; a NULL separator makes the result NULL. NULL values are skipped, empty strings are preserved, and no values or all-NULL values produce an empty string. |
 | `MD5(s)` | Lowercase hexadecimal MD5 of the string's UTF-8 bytes; NULL input produces NULL. |
+| `SHA1(s)` | Lowercase hexadecimal SHA-1 of the character string's UTF-8 bytes; NULL input produces NULL. |
 | `SHA224(s)`, `SHA256(s)`, `SHA384(s)`, `SHA512(s)` | Lowercase hexadecimal SHA-2 of the UTF-8 bytes; NULL input produces NULL. |
 | `SHA2(s, bit_length)` | The two-argument form with a literal bit length of 224, 256, 384, or 512; equivalent to the corresponding fixed-width function. |
 
@@ -44,8 +45,8 @@ character-string admission.
 `CONCAT` computes Flink's strict NULL propagation from the input validity bitmaps, without
 re-evaluating its arguments. Batches without NULL results use DataFusion's kernel directly; batches
 with NULL results append only surviving rows. Neither path revalidates the concatenated UTF-8
-payload. `CONCAT_WS` delegates to DataFusion. Hashes use the same released MD5/SHA-2 libraries as
-DataFusion, writing lowercase hex directly into presized UTF-8 Arrow buffers without intermediate
+payload. `CONCAT_WS` delegates to DataFusion. Hashes use the released RustCrypto libraries used by
+DataFusion and Comet, writing lowercase hex directly into presized UTF-8 Arrow buffers without intermediate
 binary or string-view columns or per-row heap allocations. See [string copy reduction](../optimizations/string-copy-reduction.md).
 SQL parity tests cover NULLs, empty strings, embedded zero bytes, Unicode, long inputs, nested
 calls, filters, valid BIGINT widths, and dynamic or oversized bit-length fallback.

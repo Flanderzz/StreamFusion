@@ -149,7 +149,7 @@ class FlinkCalcSqlHarnessTest {
     // A function the expression encoder does not admit makes the whole Calc fall back, and the
     // fallback reason names the offending function (ticket 29).
     NativeParity.assertFallbackReasonContains(
-        FlinkCalcSqlHarnessTest::environment, "SELECT SHA1(s) FROM f", "SHA1");
+        FlinkCalcSqlHarnessTest::environment, "SELECT PARSE_URL(s, 'HOST') FROM f", "PARSE_URL");
   }
 
   @Test
