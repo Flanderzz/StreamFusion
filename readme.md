@@ -37,8 +37,9 @@ Native coverage is broad — most of the streaming SQL surface:
   (`s3:`/`gs:`/`abfs:`/`hdfs:`/…, `PARTITIONED BY` and partition commit included — native encoding
   drained into Flink's own recoverable streams; Parquet reads use Flink's stock source); Delta Lake
   append and merge-on-read sinks, with Delta 4.4 owning table semantics and Rust writing Parquet
-  bytes; Apache Paimon append-only table sinks, shuffled by bucket while still Arrow and encoded
-  natively while Paimon 2.0 keeps its manifests, commits, and in-job compaction; and Kafka source ingest and sink output for JSON/CSV/raw/Avro/protobuf and supported CDC
+  bytes; Apache Paimon append-only and primary-key table sinks, shuffled by bucket while still
+  Arrow, merged by key and encoded natively while Paimon 2.0 keeps its manifests, commits, and
+  in-job compaction; and Kafka source ingest and sink output for JSON/CSV/raw/Avro/protobuf and supported CDC
   formats. Flink's Kafka clients own consumption, production, offsets, and transactions while Rust
   performs the format serialization/deserialization; supported periodic source watermarks retain
   Flink's per-partition watermark semantics.

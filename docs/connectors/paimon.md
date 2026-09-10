@@ -128,8 +128,16 @@ suite geomean was **1.47×** the stock published-Paimon path for bucket-unaware 
 compaction and **1.47×** for four fixed buckets, from 1.08× on a join that emits a few hundred rows
 to 2.04× on the query that writes 5.5 M joined rows. Row counts read back through Paimon's snapshots
 agree on every query except the processing-time window q12, whose output is non-deterministic by
-construction. See [Benchmarks](../benchmarks.md#parquet-delta-and-paimon-sink-diagnostics) for the
-method and reproduction command.
+construction.
+
+The seven updating queries (q4, q9, q15–q19) ran against `deduplicate` primary-key tables with four
+fixed buckets and Paimon's default in-job compaction on the same diagnostic: StreamFusion's suite
+geomean was **1.64×** the stock path, from 1.18× on q9 (updates concentrated on 120 K keys) to
+2.38× on q16 (eight keys rewritten a million times), and the merged row counts read back through
+Paimon agree on every query. Stock Paimon pays for its row-at-a-time sort buffer; the native sink
+merges each bucket's routed Arrow batches by key in Rust and writes the level-0 files directly. See
+[Benchmarks](../benchmarks.md#parquet-delta-and-paimon-sink-diagnostics) for the method and
+reproduction command.
 
 ## Deployment
 

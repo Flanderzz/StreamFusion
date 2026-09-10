@@ -138,7 +138,8 @@ parallelism four, memory state, mini-batching disabled, one warmup, and the best
 runs. They cover q0–q5 and q7–q23; q6 is omitted because stock Flink cannot execute it. Unlike the
 headline table, these runs measure local data-file output rather than Kafka output.
 
-Apple M1 Max, release + `mimalloc`; Parquet and Delta measured 2026-08-22, Paimon 2026-09-07:
+Apple M1 Max, release + `mimalloc`; Parquet and Delta measured 2026-08-22, Paimon append tables
+2026-09-07 and primary-key tables 2026-09-09:
 
 | Sink | Completed | Suite geomean |
 |---|---:|---:|
@@ -147,6 +148,7 @@ Apple M1 Max, release + `mimalloc`; Parquet and Delta measured 2026-08-22, Paimo
 | Combined | 46/46 | **1.529×** |
 | Paimon append, bucket-unaware (16 append-only queries) | 16/16 | **1.47×** |
 | Paimon append, 4 fixed buckets (16 append-only queries) | 16/16 | **1.47×** |
+| Paimon primary key, 4 fixed buckets, in-job compaction (7 updating queries) | 7/7 | **1.64×** |
 
 For the Parquet diagnostic, set `SF_MATRIX_PARQUET_SINK=true` and run
 `NexmarkMatrixBenchmark#changelogParquetSinkComparison`. This mode always disables Flink logical
@@ -198,16 +200,25 @@ The explicit UTC setting is required for the timestamp-window queries: the nativ
 intentional planner fallback.
 
 The Paimon diagnostic compares the published Paimon 2.0.0 Flink 2.2 connector with StreamFusion's
-append-table sink and covers the 16 queries whose result is insert-only (the updating queries q4,
-q9, and q15–q19 need a primary-key table, which stays stock). Every table is a Parquet append table
-that Paimon creates from the sink DDL; the bucket-unaware variant keeps Paimon's in-job compaction
-topology, and the fixed-bucket variant uses four buckets keyed on the result's first column. Both
-engines run Paimon's writer, committer, and manifests unchanged, so the row counts read back through
-Paimon's snapshots agree on every query except q12, whose processing-time window Flink never fires
-at end of input while StreamFusion flushes it. Per query the speed-up ranges from 1.08× (q3, a
-join that emits under a thousand rows) to 2.04× (q23, which writes 5.5 M joined rows); queries that
-write most of their input land at 1.4–1.8×. Set `SF_PAIMON_OUTPUT` to retain the tables, one
-directory per variant.
+Paimon sink in three variants. The two append variants cover the 16 queries whose result is
+insert-only: every table is a Parquet append table that Paimon creates from the sink DDL; the
+bucket-unaware variant keeps Paimon's in-job compaction topology, and the fixed-bucket variant uses
+four buckets keyed on the result's first column. Both engines run Paimon's writer, committer, and
+manifests unchanged, so the row counts read back through Paimon's snapshots agree on every query
+except q12, whose processing-time window Flink never fires at end of input while StreamFusion
+flushes it. Per query the speed-up ranges from 1.08× (q3, a join that emits under a thousand rows)
+to 2.04× (q23, which writes 5.5 M joined rows); queries that write most of their input land at
+1.4–1.8×.
+
+The primary-key variant covers the seven updating queries (q4, q9, q15–q19) with a `deduplicate`
+primary-key table on the result's key, four fixed buckets, and Paimon's default in-job compaction;
+Flink's upsert materializer is disabled for both engines because Paimon refuses it. Stock Paimon
+takes the changelog one row at a time into its sort buffer, while StreamFusion buckets the Arrow
+batches natively, merges each bucket's changelog by key in Rust, and writes the level-0 files itself
+before Paimon's own writer compacts them. Per query the speed-up ranges from 1.18× (q9, whose
+changelog is dominated by updates of the same 120 K keys) to 2.38× (q16, eight keys rewritten a
+million times), and the merged row counts read back through Paimon agree on every query. Set
+`SF_PAIMON_OUTPUT` to retain the tables, one directory per variant.
 
 ```sh
 TZ=UTC SF_BENCHMARK=true SF_MATRIX_PAIMON_SINK=true SF_ROWS=2000000 \
@@ -216,6 +227,9 @@ TZ=UTC SF_BENCHMARK=true SF_MATRIX_PAIMON_SINK=true SF_ROWS=2000000 \
   -Duser.timezone=UTC -Dtest='NexmarkPaimonSinkBenchmark' \
   -Dsurefire.failIfNoSpecifiedTests=false
 ```
+
+`NexmarkPaimonSinkBenchmark` runs all three variants; select `unawareBucketAppendComparison`,
+`fixedBucketAppendComparison`, or `primaryKeyComparison` for one of them.
 
 Set `SF_PROFILE_PAIMON_SINK=true` and run `unawareBucketAppendProfile` for matched q0 CPU and
 wall-clock recordings of the stock and native paths. A word of caution that this profile taught

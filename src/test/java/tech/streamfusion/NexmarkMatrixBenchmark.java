@@ -15,6 +15,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.sink.legacy.RichSinkFunction;
+import org.apache.flink.table.api.EnvironmentSettings;
 import org.apache.flink.table.api.Table;
 import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
@@ -844,6 +845,15 @@ class NexmarkMatrixBenchmark {
     runLakeSinkComparison(paimonAppendSink(fixedBucket));
   }
 
+  /**
+   * Runs the updating queries of the same matrix against fresh Paimon primary-key tables keyed on
+   * the result's real primary key, with four fixed buckets, the deduplicate merge engine, and
+   * Paimon's compaction inside the write job. Invoked from the optional Paimon module.
+   */
+  static void runPaimonPrimaryKeySinkComparison() throws Exception {
+    runLakeSinkComparison(paimonPrimaryKeySink());
+  }
+
   private static void runLakeSinkComparison(LakeSink sink) throws Exception {
     Query[] queries = Arrays.stream(selectQueries()).filter(sink::accepts).toArray(Query[]::new);
     boolean retainOutput = System.getenv(sink.retainOutputVariable()) != null;
@@ -869,21 +879,27 @@ class NexmarkMatrixBenchmark {
                   + "output: "
                   + outputRoot.toAbsolutePath()
                   + (retainOutput ? " (retained)\n" : " (temporary)\n")
-                  + "query  Flink s      ev/s  StreamFusion s      ev/s  SF/Flink\n");
+                  + "query  Flink s      ev/s  StreamFusion s      ev/s  SF/Flink  rows Flink/SF\n");
       double logSpeedupSum = 0.0;
       int completed = 0;
       for (Query q : queries) {
         String row;
         try {
-          double flink = lakeSinkBest(brokers, outputRoot, q, false, retainOutput, sink);
-          double nativeRun = lakeSinkBest(brokers, outputRoot, q, true, retainOutput, sink);
-          double speedup = flink / nativeRun;
+          LakeRun flink = lakeSinkBest(brokers, outputRoot, q, false, retainOutput, sink);
+          LakeRun nativeRun = lakeSinkBest(brokers, outputRoot, q, true, retainOutput, sink);
+          double speedup = flink.seconds / nativeRun.seconds;
           logSpeedupSum += Math.log(speedup);
           completed++;
           row =
               String.format(
-                  "%4s  %7.3f  %8.0f  %14.3f  %8.0f  %8.2fx%n",
-                  q.label, flink, ROWS / flink, nativeRun, ROWS / nativeRun, speedup);
+                  "%4s  %7.3f  %8.0f  %14.3f  %8.0f  %8.2fx  %s%n",
+                  q.label,
+                  flink.seconds,
+                  ROWS / flink.seconds,
+                  nativeRun.seconds,
+                  ROWS / nativeRun.seconds,
+                  speedup,
+                  flink.rows < 0 ? "" : flink.rows + "/" + nativeRun.rows);
         } catch (Exception failure) {
           if ("true".equals(System.getenv("SF_BENCHMARK_STACKTRACE"))) {
             failure.printStackTrace(System.out);
@@ -907,7 +923,18 @@ class NexmarkMatrixBenchmark {
     }
   }
 
-  private static double lakeSinkBest(
+  /** One measured lake-sink job: its wall-clock seconds and the rows its table holds, or -1. */
+  private static final class LakeRun {
+    final double seconds;
+    final long rows;
+
+    LakeRun(double seconds, long rows) {
+      this.seconds = seconds;
+      this.rows = rows;
+    }
+  }
+
+  private static LakeRun lakeSinkBest(
       String brokers,
       Path outputRoot,
       Query q,
@@ -918,7 +945,7 @@ class NexmarkMatrixBenchmark {
     return lakeSinkBest(brokers, outputRoot, q, nativeRun, retainOutput, WARMUP, RUNS, sink);
   }
 
-  private static double lakeSinkBest(
+  private static LakeRun lakeSinkBest(
       String brokers,
       Path outputRoot,
       Query q,
@@ -937,7 +964,7 @@ class NexmarkMatrixBenchmark {
     properties.forEach((key, value) -> previous.put(key, System.getProperty(key)));
     properties.forEach(System::setProperty);
     try {
-      double best = Double.MAX_VALUE;
+      LakeRun best = new LakeRun(Double.MAX_VALUE, -1);
       for (int run = 0; run < warmups + runs; run++) {
         Path output =
             outputRoot.resolve(
@@ -953,7 +980,8 @@ class NexmarkMatrixBenchmark {
         double seconds = runLakeSinkOnce(brokers, output, q, nativeRun, sink);
         System.out.printf("    completed in %.3f s%n", seconds);
         if (run >= warmups) {
-          best = Math.min(best, seconds);
+          long rows = run == warmups + runs - 1 ? sink.rowsWritten(q, output) : best.rows;
+          best = new LakeRun(Math.min(best.seconds, seconds), rows);
         }
         if (!retainOutput) {
           deleteTree(output);
@@ -1036,7 +1064,7 @@ class NexmarkMatrixBenchmark {
           runProfiler(asprof, startArgs.toArray(String[]::new));
           double seconds;
           try {
-            seconds = lakeSinkBest(brokers, engineOutput, q, nativeRun, false, 0, 1, sink);
+            seconds = lakeSinkBest(brokers, engineOutput, q, nativeRun, false, 0, 1, sink).seconds;
           } finally {
             runProfiler(asprof, "stop", pid);
           }
@@ -1053,6 +1081,7 @@ class NexmarkMatrixBenchmark {
     StreamTableEnvironment tEnv = kafkaEnvironment(brokers, "json");
     tEnv.getConfig().getConfiguration().setString("execution.checkpointing.interval", "1 s");
     tEnv.getConfig().getConfiguration().setString("table.exec.mini-batch.enabled", "false");
+    sink.tableConfig().forEach(tEnv.getConfig().getConfiguration()::setString);
     runSetup(tEnv, q);
     PhysicalPlanScan scan = nativeRun ? NativePlanner.install(tEnv) : null;
     tEnv.executeSql(sink.ddl(q, output));
@@ -1111,6 +1140,16 @@ class NexmarkMatrixBenchmark {
 
     default void initialize(Path output, RowType rowType)
         throws Exception {}
+
+    /** Table configuration both engines run with, on top of the matrix's own. */
+    default Map<String, String> tableConfig() {
+      return Map.of();
+    }
+
+    /** The rows a finished job left in its table, read back through the connector, or -1. */
+    default long rowsWritten(Query q, Path output) throws Exception {
+      return -1;
+    }
   }
 
   private static LakeSink deltaSink(DeltaTableInitializer tableInitializer) {
@@ -1153,6 +1192,52 @@ class NexmarkMatrixBenchmark {
     };
   }
 
+  private static LakeSink paimonPrimaryKeySink() {
+    return new LakeSink() {
+      @Override
+      public String id() {
+        return "paimon-primary-key";
+      }
+
+      @Override
+      public String title() {
+        return "PAIMON PRIMARY-KEY SINK; 4 fixed buckets, deduplicate merge, in-job compaction";
+      }
+
+      @Override
+      public String retainOutputVariable() {
+        return "SF_PAIMON_OUTPUT";
+      }
+
+      @Override
+      public boolean accepts(Query q) {
+        return UPSERT_KEYS.containsKey(q.label);
+      }
+
+      @Override
+      public String ddl(Query q, Path output) {
+        return paimonSinkDdl(q, output, true);
+      }
+
+      @Override
+      public String nativePlanMarker() {
+        return "native-paimon-bucket-route";
+      }
+
+      @Override
+      public Map<String, String> tableConfig() {
+        // Paimon's sink refuses Flink's SinkUpsertMaterializer; its documentation has every
+        // primary-key job turn it off, and both engines run under that same setting.
+        return Map.of("table.exec.sink.upsert-materialize", "NONE");
+      }
+
+      @Override
+      public long rowsWritten(Query q, Path output) throws Exception {
+        return paimonRowCount(ddl(q, output));
+      }
+    };
+  }
+
   private static LakeSink paimonAppendSink(boolean fixedBucket) {
     return new LakeSink() {
       @Override
@@ -1186,14 +1271,34 @@ class NexmarkMatrixBenchmark {
       public String nativePlanMarker() {
         return "native-paimon-bucket-route";
       }
+
+      @Override
+      public long rowsWritten(Query q, Path output) throws Exception {
+        return paimonRowCount(ddl(q, output));
+      }
     };
+  }
+
+  /** The rows of the sink's Paimon table, read back through the connector's own batch read. */
+  private static long paimonRowCount(String sinkDdl) throws Exception {
+    TableEnvironment tEnv = TableEnvironment.create(EnvironmentSettings.inBatchMode());
+    tEnv.executeSql(sinkDdl);
+    try (CloseableIterator<Row> rows = tEnv.executeSql("SELECT COUNT(*) FROM sink").collect()) {
+      return rows.next().<Long>getFieldAs(0);
+    }
   }
 
   private static String paimonSinkDdl(Query q, Path output, boolean fixedBucket) {
     String ddl = q.sinkDdl.replace("%TS%", "TIMESTAMP_LTZ(3)").replace("%WTS%", "TIMESTAMP(3)");
+    String key = UPSERT_KEYS.get(q.label);
+    if (key != null) {
+      ddl = ddl.replace(") WITH", ", PRIMARY KEY (" + key + ") NOT ENFORCED) WITH");
+    }
     String firstColumn = ddl.substring(ddl.indexOf('(') + 1).trim().split("\\s+")[0];
     String bucketing =
-        fixedBucket ? "'bucket' = '4', 'bucket-key' = '" + firstColumn + "'" : "'bucket' = '-1'";
+        key != null
+            ? "'bucket' = '4'"
+            : fixedBucket ? "'bucket' = '4', 'bucket-key' = '" + firstColumn + "'" : "'bucket' = '-1'";
     String options =
         "WITH ('connector' = 'paimon', 'path' = '"
             + output.toUri()
