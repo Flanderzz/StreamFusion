@@ -69,6 +69,45 @@ jobs:
       - name: Run Java test suite
         run: mvn -B -ntp test
 
+  lake-module-tests:
+    name: ${{ matrix.name }} tests (debug native build)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Delta
+            profile: delta
+            module: streamfusion-delta
+          - name: Paimon
+            profile: paimon
+            module: streamfusion-paimon
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup
+          df -h /
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+
+      - uses: dtolnay/rust-toolchain@1.94.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+
+      - name: Run optional lake module suite
+        run: >
+          mvn -B -ntp -P${{ matrix.profile }}
+          -pl :${{ matrix.module }} -am test
+
   image-integration:
     name: Flink image integration (optimized native build)
     runs-on: ubuntu-24.04
