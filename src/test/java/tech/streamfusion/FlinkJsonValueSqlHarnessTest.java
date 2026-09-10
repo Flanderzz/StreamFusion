@@ -9,8 +9,7 @@ class FlinkJsonValueSqlHarnessTest {
   @Test
   void nativeAdmissionDoesNotRequireCompatibilityOptIn() throws Exception {
     NativeParity.assertParity(
-        JsonFunctionTestInputs::documents,
-        "SELECT id, JSON_VALUE(s, '$.a') FROM inputs");
+        JsonFunctionTestInputs::documents, "SELECT id, JSON_VALUE(s, '$.a') FROM inputs");
   }
 
   @Test
@@ -72,9 +71,7 @@ class FlinkJsonValueSqlHarnessTest {
         "SELECT JSON_VALUE(s, '$.a'), COUNT(*) FROM inputs "
             + "WHERE JSON_VALUE(s, '$.a') IS NOT NULL GROUP BY JSON_VALUE(s, '$.a')";
     String plan =
-        tech.streamfusion.planner.NativePlanner.explain(
-            JsonFunctionTestInputs.documents(),
-            sql);
+        tech.streamfusion.planner.NativePlanner.explain(JsonFunctionTestInputs.documents(), sql);
     org.junit.jupiter.api.Assertions.assertTrue(plan.contains("NativeCalc"), plan);
     org.junit.jupiter.api.Assertions.assertTrue(
         plan.contains("NativeColumnarGroupAggregate"), plan);
@@ -118,6 +115,14 @@ class FlinkJsonValueSqlHarnessTest {
         "JSON_VALUE EMPTY");
     JsonFunctionTestInputs.assertFails(
         "{\"a\":null}", "JSON_VALUE(s, 'strict $.a' ERROR ON ERROR)", "JSON_VALUE ERROR");
+  }
+
+  @Test
+  void stringErrorPolicyKeepsFlinkRowShortCircuiting() throws Exception {
+    NativeParity.assertFallbackReasonContains(
+        () -> TextTimeFunctionTestInputs.textRows("{\"a\":\"ok\"}", "invalid"),
+        "SELECT id, id = 1 OR JSON_VALUE(s, '$.a' ERROR ON ERROR) = 'ok' FROM inputs",
+        "row short-circuiting");
   }
 
   @Test

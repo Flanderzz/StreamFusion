@@ -823,8 +823,8 @@ final class RexExpression {
         return emit(operands.get(0));
       case AND:
       case OR:
-        if (operands.stream().anyMatch(RexExpression::containsTypedJsonValue)) {
-          return reject("typed JSON_VALUE under AND/OR requires Flink's row short-circuiting");
+        if (operands.stream().anyMatch(RexExpression::containsFallibleJsonCall)) {
+          return reject("SQL/JSON under AND/OR requires Flink's row short-circuiting");
         }
         // Calcite leaves AND/OR n-ary; the native binary op needs a left-deep nesting, which a
         // pre-order stream encodes as (n-1) call headers followed by the operands in order.
@@ -1015,13 +1015,30 @@ final class RexExpression {
     return emitBuiltinCall(call, op);
   }
 
-  private static boolean containsTypedJsonValue(RexNode node) {
+  private static boolean containsFallibleJsonCall(RexNode node) {
     if (!(node instanceof RexCall call)) {
       return false;
     }
-    return ("JSON_VALUE".equalsIgnoreCase(call.getOperator().getName())
-            && call.getType().getSqlTypeName() != SqlTypeName.VARCHAR)
-        || call.getOperands().stream().anyMatch(RexExpression::containsTypedJsonValue);
+    String name = call.getOperator().getName().toUpperCase(Locale.ROOT);
+    List<RexNode> args = call.getOperands();
+    if ("JSON_VALUE".equals(name)) {
+      if (call.getType().getSqlTypeName() != SqlTypeName.VARCHAR) {
+        return true;
+      }
+      for (int i = 2; i < args.size(); ) {
+        String policy = jsonSymbol(args.get(i));
+        if ("ERROR".equals(policy)) {
+          return true;
+        }
+        i += "DEFAULT".equals(policy) ? 3 : 2;
+      }
+    }
+    if ("JSON_EXISTS".equals(name)
+        && args.size() == 3
+        && "ERROR".equals(jsonSymbol(args.get(2)))) {
+      return true;
+    }
+    return args.stream().anyMatch(RexExpression::containsFallibleJsonCall);
   }
 
   private boolean emitJsonValue(RexCall call) {
@@ -1144,6 +1161,10 @@ final class RexExpression {
     String error = args.size() == 2 ? "FALSE" : jsonSymbol(args.get(2));
     if (error == null || !List.of("TRUE", "FALSE", "UNKNOWN", "ERROR").contains(error)) {
       return reject("JSON_EXISTS has an unsupported ON ERROR behavior");
+    }
+    if ("UNKNOWN".equals(error) && call != directProjection) {
+      return reject(
+          "JSON_EXISTS UNKNOWN ON ERROR requires a direct projection; Flink unboxes null in boolean contexts");
     }
     add(KIND_CALL, 142, 4);
     if (!emit(args.get(0))) {

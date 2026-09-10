@@ -9,8 +9,7 @@ class FlinkJsonExistsSqlHarnessTest {
   @Test
   void nativeAdmissionDoesNotRequireCompatibilityOptIn() throws Exception {
     NativeParity.assertParity(
-        JsonFunctionTestInputs::documents,
-        "SELECT id, JSON_EXISTS(s, '$.a') FROM inputs");
+        JsonFunctionTestInputs::documents, "SELECT id, JSON_EXISTS(s, '$.a') FROM inputs");
   }
 
   @Test
@@ -39,6 +38,20 @@ class FlinkJsonExistsSqlHarnessTest {
         "SELECT id, JSON_EXISTS(s, '$.a' UNKNOWN ON ERROR), "
             + "JSON_EXISTS(s, 'lax $.a'), JSON_EXISTS(s, '$.a[1].b'), "
             + "JSON_EXISTS(s, '$.field63'), JSON_EXISTS(s, '$.absent' TRUE ON ERROR) FROM inputs");
+  }
+
+  @Test
+  void unknownBooleanContextsKeepFlinkBoxedNullFailure() {
+    JsonFunctionTestInputs.assertFallbackFails(
+        "null", "JSON_EXISTS(s, '$' UNKNOWN ON ERROR) IS TRUE", "NullPointerException");
+  }
+
+  @Test
+  void errorPolicyKeepsFlinkRowShortCircuiting() throws Exception {
+    NativeParity.assertFallbackReasonContains(
+        () -> TextTimeFunctionTestInputs.textRows("{\"a\":1}", "invalid"),
+        "SELECT id, id = 1 OR JSON_EXISTS(s, '$.a' ERROR ON ERROR) FROM inputs",
+        "row short-circuiting");
   }
 
   @Test

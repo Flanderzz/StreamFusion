@@ -336,6 +336,7 @@ BOOLEAN forms with non-null DEFAULT or ERROR for both policies can compose nativ
 Typed JSON_VALUE calls nested under AND/OR stay on Flink: DataFusion may evaluate the
 unneeded side on some rows, exposing a scalar conversion failure that Flink short-circuits.
 CASE result branches retain native admission and evaluate only selected conversions.
+VARCHAR calls with an ERROR policy also stay on Flink when nested under AND/OR.
 
 The default path mode is **strict**. Missing members, selected JSON nulls, malformed JSON,
 and selected containers invoke ON ERROR in strict mode. In lax mode these invoke ON EMPTY,
@@ -354,6 +355,11 @@ empty object/array, returns TRUE. Lax missing paths and selected JSON nulls retu
 strict missing/null paths invoke ON ERROR. Malformed JSON invokes ON ERROR in strict mode
 and returns FALSE in lax mode. A document containing the JSON literal `null` invokes ON ERROR
 in both modes. SQL NULL input returns SQL NULL.
+
+UNKNOWN ON ERROR is admitted only as a direct projection, preserving the same Flink
+boxed-null behavior described for BOOLEAN JSON_VALUE. ERROR ON ERROR under AND/OR stays
+on Flink to preserve row short-circuiting. The default FALSE policy and TRUE ON ERROR
+remain native in predicates and nested expressions.
 
 These JSON functions use native first-document parsing and validate unselected fields too.
 They currently admit JDK 17, 21, 24 and 25, selecting the corresponding Unicode version for

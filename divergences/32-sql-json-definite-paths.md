@@ -120,5 +120,10 @@ admission check, not a change to operators or row/Arrow conversion.
 Typed JSON_VALUE under AND/OR is also declined: DataFusion 54's batch short-circuiting
 can still evaluate the right side for rows Flink skips. SQL probes pin both an OR and an
 AND with an invalid scalar type on the skipped row; CASE result selection remains native.
+The same short-circuit gate covers VARCHAR JSON_VALUE with an ERROR policy and JSON_EXISTS
+with ERROR ON ERROR. JSON_EXISTS UNKNOWN ON ERROR requires a direct projection because
+Flink's MethodCallGen also returns a boxed Boolean, with the same unsafe consumers. Default
+FALSE and TRUE ON ERROR remain composable. Regression probes verify the host failures and
+the successful short-circuited results that would otherwise diverge in native execution.
 JSON_EXISTS supports all four ON ERROR behaviors. Both functions are ordinary scalar
 expressions; no operator or converter changes are required.
