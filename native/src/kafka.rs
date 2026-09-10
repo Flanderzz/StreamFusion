@@ -1633,9 +1633,9 @@ where
 #[no_mangle]
 pub extern "system" fn Java_tech_streamfusion_kafka_NativeKafka_nativeBuildVersion<'local>(
     env: JNIEnv<'local>,
-    class: JClass<'local>,
+    _class: JClass<'local>,
 ) -> jstring {
-    crate::bridge::Java_tech_streamfusion_Native_version(env, class)
+    crate::bridge::version_probe(env)
 }
 
 /// Whether the Kafka serialization extension loaded successfully.

@@ -122,6 +122,7 @@ where
 /// Panics behind the guard so the containment itself is testable from Java. Without an entrypoint
 /// that deliberately fails, the only way to tell a contained panic from a process abort is to crash
 /// a real job.
+#[cfg(any(feature = "core", test))]
 #[no_mangle]
 pub extern "system" fn Java_tech_streamfusion_Native_panicForTest<'local>(
     env: JNIEnv<'local>,
@@ -350,21 +351,30 @@ pub(crate) fn build_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-#[no_mangle]
-pub extern "system" fn Java_tech_streamfusion_Native_version<'local>(
-    env: JNIEnv<'local>,
-    _class: JClass<'local>,
-) -> jstring {
-    crate::bridge::jni_guard(env, move |env| {
+/// The build version as a Java string: the core class's probe below and every extension class's
+/// own probe, since a native method binds to whichever loaded library exports its symbol and only a
+/// probe named after the owning class is guaranteed to read that class's library.
+pub(crate) fn version_probe<'local>(env: JNIEnv<'local>) -> jstring {
+    jni_guard(env, move |env| {
         env.new_string(build_version())
             .expect("failed to allocate Java string for version")
             .into_raw()
     })
 }
 
+#[cfg(any(feature = "core", test))]
+#[no_mangle]
+pub extern "system" fn Java_tech_streamfusion_Native_version<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+) -> jstring {
+    version_probe(env)
+}
+
 /// The live-handle breakdown, e.g. `SessionAggregator=1,MessageDecoder=2` — empty once every
 /// handle has been closed. The test harness asserts it drains to empty after each job, so a
 /// missing close call fails the test naming the leaking type instead of slowly growing RSS.
+#[cfg(any(feature = "core", test))]
 #[no_mangle]
 pub extern "system" fn Java_tech_streamfusion_Native_liveNativeHandles<'local>(
     env: JNIEnv<'local>,
@@ -388,6 +398,7 @@ pub extern "system" fn Java_tech_streamfusion_Native_liveNativeHandles<'local>(
 /// Generates a per-type JNI getter for an operator's tracked native state footprint in bytes (zero
 /// when unaccounted). Must be called on the task thread between batches — handles are not
 /// thread-safe — so the Java side samples it per batch into an atomic its metrics thread reads.
+#[cfg(any(feature = "core", test))]
 macro_rules! state_bytes_getter {
     ($fn_name:ident, $ty:ty) => {
         #[no_mangle]
@@ -401,10 +412,12 @@ macro_rules! state_bytes_getter {
         }
     };
 }
+#[cfg(any(feature = "core", test))]
 pub(crate) use state_bytes_getter;
 
 /// Drives a trivial asynchronous computation to completion on the shared runtime, proving the
 /// blocking pull bridge a JVM thread will use to await native plan execution.
+#[cfg(any(feature = "core", test))]
 #[no_mangle]
 pub extern "system" fn Java_tech_streamfusion_Native_blockingAnswer<'local>(
     env: JNIEnv<'local>,
@@ -418,6 +431,7 @@ pub extern "system" fn Java_tech_streamfusion_Native_blockingAnswer<'local>(
 ///
 /// Takes ownership of the producer-allocated C structs by swapping in released placeholders, so the
 /// release callbacks fire exactly once when the imported data and schema drop here.
+#[cfg(any(feature = "core", test))]
 #[no_mangle]
 pub extern "system" fn Java_tech_streamfusion_Native_sumInt<'local>(
     env: JNIEnv<'local>,
@@ -458,6 +472,7 @@ pub extern "system" fn Java_tech_streamfusion_Native_sumInt<'local>(
 /// The rebuilt array owns its buffers, so the inbound import is released when this call returns
 /// while the outbound array stays alive until the JVM imports and releases it. This is the shape a
 /// real operator takes: read an input batch, produce a new one.
+#[cfg(any(feature = "core", test))]
 #[no_mangle]
 pub extern "system" fn Java_tech_streamfusion_Native_roundTrip<'local>(
     env: JNIEnv<'local>,
@@ -509,6 +524,7 @@ pub extern "system" fn Java_tech_streamfusion_Native_roundTrip<'local>(
 /// The fixed `column * 2` expression stands in until the planner feeds real expressions; the point
 /// is that genuine engine logic now executes over JVM-owned columnar data and produces a batch back
 /// across the same boundary.
+#[cfg(any(feature = "core", test))]
 #[no_mangle]
 pub extern "system" fn Java_tech_streamfusion_Native_doubleColumn<'local>(
     env: JNIEnv<'local>,
@@ -565,6 +581,7 @@ pub extern "system" fn Java_tech_streamfusion_Native_doubleColumn<'local>(
 /// boundary as a single struct, so importing it yields one struct array that unwraps into a record
 /// batch and re-wraps on the way out. This is the columnar shape operators that read several
 /// columns at once need, beyond the single-column path.
+#[cfg(any(feature = "core", test))]
 #[no_mangle]
 pub extern "system" fn Java_tech_streamfusion_Native_echoBatch<'local>(
     env: JNIEnv<'local>,

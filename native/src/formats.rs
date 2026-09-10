@@ -1659,8 +1659,7 @@ impl MessageDecoder {
 /// Confluent, synthetic id 0 for bare); a format-1 decoder built with an empty `avroSchema` starts
 /// with an empty store — the registry-driven path, where the JVM registers each writer schema by id
 /// via `registerAvroSchema` as messages carry it.
-#[no_mangle]
-pub extern "system" fn Java_tech_streamfusion_Native_createDecoder<'local>(
+pub(crate) fn create_decoder<'local>(
     env: JNIEnv<'local>,
     _class: JClass<'local>,
     format: jint,
@@ -1712,8 +1711,7 @@ pub extern "system" fn Java_tech_streamfusion_Native_createDecoder<'local>(
 /// to decode each body as. When supplied, the imported Arrow schema narrows the descriptor and output
 /// columns to the projection selected by the planner; legacy callers may omit it with zero addresses.
 #[cfg(any(feature = "protobuf", test))]
-#[no_mangle]
-pub extern "system" fn Java_tech_streamfusion_Native_createProtobufDecoder<'local>(
+pub(crate) fn create_protobuf_decoder<'local>(
     env: JNIEnv<'local>,
     _class: JClass<'local>,
     descriptor: JByteArray<'local>,
@@ -1760,8 +1758,7 @@ pub extern "system" fn Java_tech_streamfusion_Native_createProtobufDecoder<'loca
 /// JVM operator calls this the first time a batch carries an id it hasn't seen: it fetches the schema
 /// from the schema registry (as Flink's own `avro-confluent` deserializer does) and feeds it here, so
 /// the store grows with the topic's schema evolution instead of being fixed at plan time.
-#[no_mangle]
-pub extern "system" fn Java_tech_streamfusion_Native_registerAvroSchema<'local>(
+pub(crate) fn register_avro_schema<'local>(
     env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
@@ -1782,8 +1779,7 @@ pub extern "system" fn Java_tech_streamfusion_Native_registerAvroSchema<'local>(
 /// A decode failure (bad data outside skip mode) surfaces as a Java `RuntimeException` — the task
 /// fails the way Flink's own deserializer failure does — rather than unwinding across the JNI
 /// boundary, which would abort the whole process.
-#[no_mangle]
-pub extern "system" fn Java_tech_streamfusion_Native_decodeInto<'local>(
+pub(crate) fn decode_into<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
@@ -1936,31 +1932,8 @@ pub extern "system" fn Java_tech_streamfusion_format_json_NativeJsonFormat_decod
     }
 }
 
-/// Benchmark-only: decode a body batch and return the decoded row count without exporting the result —
-/// so the shallow path can terminate with Arrow in Rust (counted in Rust), symmetric with the native
-/// consumer, for an apples-to-apples comparison.
-#[no_mangle]
-pub extern "system" fn Java_tech_streamfusion_Native_decodeCount<'local>(
-    env: JNIEnv<'local>,
-    _class: JClass<'local>,
-    handle: jlong,
-    in_array_address: jlong,
-    in_schema_address: jlong,
-) -> jlong {
-    crate::bridge::jni_guard(env, move |_env| {
-        let decoder = unsafe { &*(handle as *mut MessageDecoder) };
-        let bodies = import_record_batch(in_array_address, in_schema_address);
-        decoder.decode(&bodies).num_rows() as jlong
-    })
-}
-
 /// Releases a message decoder handle.
-#[no_mangle]
-pub extern "system" fn Java_tech_streamfusion_Native_closeDecoder<'local>(
-    env: JNIEnv<'local>,
-    _class: JClass<'local>,
-    handle: jlong,
-) {
+pub(crate) fn close_decoder<'local>(env: JNIEnv<'local>, _class: JClass<'local>, handle: jlong) {
     crate::bridge::jni_guard(env, move |_env| unsafe {
         drop(from_handle::<MessageDecoder>(handle));
     })
@@ -2072,9 +2045,9 @@ macro_rules! format_jni_facade {
         #[no_mangle]
         pub extern "system" fn $native_build_version<'local>(
             env: JNIEnv<'local>,
-            class: JClass<'local>,
+            _class: JClass<'local>,
         ) -> jstring {
-            crate::bridge::Java_tech_streamfusion_Native_version(env, class)
+            crate::bridge::version_probe(env)
         }
 
         #[cfg(feature = $feature)]
@@ -2088,7 +2061,7 @@ macro_rules! format_jni_facade {
             out_array: jlong,
             out_schema: jlong,
         ) {
-            Java_tech_streamfusion_Native_decodeInto(
+            decode_into(
                 env, class, handle, in_array, in_schema, out_array, out_schema,
             )
         }
@@ -2100,7 +2073,7 @@ macro_rules! format_jni_facade {
             class: JClass<'local>,
             handle: jlong,
         ) {
-            Java_tech_streamfusion_Native_closeDecoder(env, class, handle)
+            close_decoder(env, class, handle)
         }
     };
 }
@@ -2163,7 +2136,7 @@ pub extern "system" fn Java_tech_streamfusion_format_json_NativeJsonFormat_creat
 ) -> jlong {
     let empty_writer = env.new_string("").expect("empty writer schema");
     let empty_reader = env.new_string("").expect("empty reader schema");
-    Java_tech_streamfusion_Native_createDecoder(
+    create_decoder(
         env,
         class,
         format,
@@ -2189,7 +2162,7 @@ pub extern "system" fn Java_tech_streamfusion_format_csv_NativeCsvFormat_createD
 ) -> jlong {
     let empty_writer = env.new_string("").expect("empty writer schema");
     let empty_reader = env.new_string("").expect("empty reader schema");
-    Java_tech_streamfusion_Native_createDecoder(
+    create_decoder(
         env,
         class,
         FORMAT_CSV,
@@ -2214,7 +2187,7 @@ pub extern "system" fn Java_tech_streamfusion_format_raw_NativeRawFormat_createD
 ) -> jlong {
     let empty_writer = env.new_string("").expect("empty writer schema");
     let empty_reader = env.new_string("").expect("empty reader schema");
-    Java_tech_streamfusion_Native_createDecoder(
+    create_decoder(
         env,
         class,
         FORMAT_RAW,
@@ -2240,7 +2213,7 @@ pub extern "system" fn Java_tech_streamfusion_format_avro_NativeAvroFormat_creat
     schema_address: jlong,
 ) -> jlong {
     let empty_options = env.new_string("").expect("empty format options");
-    Java_tech_streamfusion_Native_createDecoder(
+    create_decoder(
         env,
         class,
         if confluent != 0 {
@@ -2271,7 +2244,7 @@ pub extern "system" fn Java_tech_streamfusion_format_avro_NativeAvroFormat_creat
 ) -> jlong {
     let empty_writer = env.new_string("").expect("empty writer schema");
     let empty_options = env.new_string("").expect("empty format options");
-    Java_tech_streamfusion_Native_createDecoder(
+    create_decoder(
         env,
         class,
         FORMAT_DEBEZIUM_AVRO_CONFLUENT,
@@ -2296,7 +2269,7 @@ pub extern "system" fn Java_tech_streamfusion_format_avro_NativeAvroFormat_regis
     schema_id: jint,
     schema: JString<'local>,
 ) {
-    Java_tech_streamfusion_Native_registerAvroSchema(env, class, handle, schema_id, schema)
+    register_avro_schema(env, class, handle, schema_id, schema)
 }
 
 #[cfg(feature = "protobuf")]
@@ -2312,7 +2285,7 @@ pub extern "system" fn Java_tech_streamfusion_format_protobuf_NativeProtobufForm
     schema_array_address: jlong,
     schema_address: jlong,
 ) -> jlong {
-    Java_tech_streamfusion_Native_createProtobufDecoder(
+    create_protobuf_decoder(
         env,
         class,
         descriptor,

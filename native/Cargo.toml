@@ -101,9 +101,14 @@ libmimalloc-sys = { version = "0.1", optional = true }
 cc = "1"
 
 [features]
-# A core build carries no connector-specific code. Maven's development test build explicitly enables
-# Kafka serialization, while deployable connector JARs compile and ship their own feature-specific DSO.
-default = []
+# `core` is the engine: the operators, the planner bridge, and every JNI entry point of the core
+# `Native` class. A core build carries no connector-specific code; deployable connector and format
+# JARs ship their own library built with `--no-default-features` plus their feature, which exports
+# only that library's own entry points. The JVM binds each native method to whichever loaded
+# library exports its symbol, so a connector library that also exported the core's could capture
+# some of the core class's methods and leave the two libraries' state split.
+default = ["core"]
+core = []
 kafka = []
 parquet = ["dep:parquet"]
 json = []
@@ -114,7 +119,7 @@ protobuf = []
 # Rust-owned persistent operator state (see src/state/). Core-engine infrastructure, not a
 # connector: Flink's RocksDB backend selection activates it without routing state access through
 # Java or JNI.
-rocksdb-state = ["dep:rocksdb", "dep:serde", "dep:bytes"]
+rocksdb-state = ["core", "dep:rocksdb", "dep:serde", "dep:bytes"]
 # Rebind the C allocator to mimalloc for everything linked into THIS library,
 # via link-time symbol aliases emitted by build.rs. Library-scoped: the hosting JVM process keeps
 # its own allocator, so this carries none of the risk of a process-wide malloc override (a zone-swap

@@ -842,9 +842,9 @@ fn parquet_row_kinds(batch: &RecordBatch, values: &ArrayRef) -> ArrayRef {
 #[no_mangle]
 pub extern "system" fn Java_tech_streamfusion_parquet_NativeParquet_nativeBuildVersion<'local>(
     env: JNIEnv<'local>,
-    class: JClass<'local>,
+    _class: JClass<'local>,
 ) -> jstring {
-    crate::bridge::Java_tech_streamfusion_Native_version(env, class)
+    crate::bridge::version_probe(env)
 }
 
 /// Creates a Parquet encoder for the sink: `schemaAddress` carries the full row schema through the

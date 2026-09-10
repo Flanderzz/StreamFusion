@@ -26,6 +26,7 @@ ships a native implementation for:
 
 Each optional format is its own `streamfusion-*` Maven artifact and native library, mirroring
 Flink's own connector/format module split — installing a format you don't use never pulls its
-native code into a connector you do. A missing format module is always a normal planner fallback
+native code into a connector you do, and each library exports only its own class's native entry
+points, so the JVM binds every core method to the core library alone. A missing format module is always a normal planner fallback
 to Flink's own decode/encode path, never a linkage failure. See [Deployment](../deployment.md) for
 which JARs a given connector+format combination needs.

@@ -344,7 +344,7 @@ pub(crate) fn parse_java_big_decimal(s: &str) -> Option<(num_bigint::BigInt, i64
 /// fails the field); `Ok(None)` is the precision-overflow null.
 pub(crate) fn parse_flink_decimal(s: &str, precision: u8, scale: i8) -> Result<Option<i128>, ()> {
     let (unscaled, source_scale) = parse_java_big_decimal(s).ok_or(())?;
-    Ok(crate::expr::rescale_half_up(
+    Ok(crate::jdk_decimal::rescale_half_up(
         unscaled,
         source_scale,
         precision,

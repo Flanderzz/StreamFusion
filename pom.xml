@@ -701,7 +701,7 @@
             <id>dist</id>
             <properties>
                 <native.profile>release</native.profile>
-                <native.cargo.args>build --release --no-default-features --features mimalloc,rocksdb-state</native.cargo.args>
+                <native.cargo.args>build --release --no-default-features --features mimalloc,core,rocksdb-state</native.cargo.args>
             </properties>
         </profile>
         <!-- Packages the resource tree staged by bin/build-release.sh. It deliberately does not

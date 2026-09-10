@@ -2051,50 +2051,6 @@ public final class Native {
   public static native void closeChangelogNormalizer(long handle);
 
   /**
-   * Creates the single format-dispatched message decoder shared by every ingest path, released with
-   * {@link #closeDecoder}. It turns a batch of one binary column of raw message bodies into a typed
-   * batch — the format-decode core both the shallow and native Kafka paths feed bytes into. Stateless,
-   * so no snapshot/restore.
-   *
-   * @param format a {@link FormatCodes} code. JSON, CSV,
-   *     raw, and the CDC envelopes decode against the schema C structs (the CDC formats append a
-   *     {@code $row_kind$} byte); the Avro variants derive their schema from {@code avroSchema}
-   * @param schemaArrayAddress address of an exported (empty) {@code ArrowArray} of the target schema
-   * @param schemaAddress address of the matching exported {@code ArrowSchema}
-   * @param avroSchema writer-schema JSON for Avro (ignored for JSON; pass ""). For Confluent Avro an
-   *     empty string starts an empty schema store, fed by id at runtime via the avro facade's
-   *     {@code registerWriterSchema} — the registry-driven path
-   * @param readerAvroSchema reader-schema JSON projecting the Avro writer record to a subset of fields
-   *     via Avro resolution (the query's columns); pass "" for no projection / non-Avro
-   * @param schemaId Confluent schema id the Avro writer schema is registered under (ignored for JSON)
-   * @param skipParseErrors Flink's {@code ignore-parse-errors}: an undecodable message contributes no
-   *     rows instead of failing the decode (honored by the JSON-decoded formats — plain JSON and the
-   *     CDC envelopes — and by CSV, which reproduces Flink's per-field skip granularity natively;
-   *     other formats are only routed with it off)
-   * @param formatOptions decode-relevant format options as {@code key=value} lines (the CSV
-   *     delimiter/quote/escape/comments/null-literal knobs — see {@code KafkaTables}); "" for
-   *     defaults. Only planner-vetted options reach here: anything unsupported already fell back.
-   */
-  public static native long createDecoder(
-      int format,
-      long schemaArrayAddress,
-      long schemaAddress,
-      String avroSchema,
-      String readerAvroSchema,
-      int schemaId,
-      boolean skipParseErrors,
-      String formatOptions);
-
-  /**
-   * Benchmark-only: decode a body batch and return the decoded row count without exporting the result,
-   * so the shallow path terminates with Arrow in Rust (symmetric with the native consumer).
-   */
-  public static native long decodeCount(long handle, long inArrayAddress, long inSchemaAddress);
-
-  /** Releases a message decoder handle. */
-  public static native void closeDecoder(long handle);
-
-  /**
    * Creates an event-time INNER interval joiner and returns an opaque handle. It buffers both inputs
    * per equi-join key and emits a matched pair when the second of its two rows arrives. The JVM owns
    * the handle across calls and must release it with {@link #closeIntervalJoiner}.

@@ -80,7 +80,7 @@ stage_darwin_libraries() {
   for target_and_architecture in aarch64-apple-darwin:aarch64 x86_64-apple-darwin:x86_64; do
     target=${target_and_architecture%:*}
     architecture=${target_and_architecture#*:}
-    stage_darwin_library core mimalloc,rocksdb-state "$target" "$architecture"
+    stage_darwin_library core mimalloc,core,rocksdb-state "$target" "$architecture"
     stage_darwin_library kafka mimalloc,kafka,csv,avro,protobuf,raw "$target" "$architecture"
     stage_darwin_library json mimalloc,json "$target" "$architecture"
     stage_darwin_library csv mimalloc,csv "$target" "$architecture"
@@ -147,12 +147,27 @@ stage_native_library() {
   esac
   mkdir -p "$destination_directory"
   cp "$source_library" "$destination_directory/$destination_library"
+  if [ "$extension" != core ]; then
+    assert_exports_only_its_own_entry_points "$destination_directory/$destination_library"
+  fi
+}
+
+# The JVM binds a native method to whichever loaded library exports its symbol, so an extension
+# library that also exported the core class's entry points could capture some of them and split the
+# core's state between two libraries. The extension builds leave the core feature off; this checks
+# that no core entry point slipped through.
+assert_exports_only_its_own_entry_points() {
+  library=$1
+  if nm -g "$library" 2>/dev/null | grep -q ' _\{0,1\}Java_tech_streamfusion_Native_'; then
+    echo "$library exports core entry points; build it without the core feature" >&2
+    exit 70
+  fi
 }
 
 rm -rf "$stage_dir"
 mkdir -p "$stage_dir"
 if [ "$host_only" = true ]; then
-  stage_host_library core mimalloc,rocksdb-state
+  stage_host_library core mimalloc,core,rocksdb-state
   stage_host_library kafka mimalloc,kafka,csv,avro,protobuf,raw
   stage_host_library json mimalloc,json
   stage_host_library csv mimalloc,csv

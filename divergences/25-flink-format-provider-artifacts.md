@@ -28,5 +28,15 @@ allocator state across dynamic-library boundaries, which is not a stable ABI.
 
 Arrow's C Data Interface is already the ownership-safe JNI boundary in this project. Each format DSO
 imports or exports Arrow data through that boundary while every native handle remains private to its
-creator. The JVM byte-array boundary adds copies, but it keeps Kafka settings and runtime semantics
+creator.
+
+Each library also exports only the JNI entry points of its own Java class. The JVM binds a native
+method, on its first call, to whichever loaded library exports the mangled symbol, so a connector
+library that also exported the core class's entry points could capture some of them once both were
+loaded, leaving the core's handle registry, captured JVM, and memory accounting split between two
+copies. The engine and the core class's entry points therefore sit behind the crate's `core` feature,
+on by default and left off when a connector or format library is built; the release build checks
+every extension library's exported symbols for a core entry point. This is the export half of the
+ADBC driver discipline (one init symbol per driver, everything else through a table) without its
+manual loading, which we do not need because every library ships from one build at one version. The JVM byte-array boundary adds copies, but it keeps Kafka settings and runtime semantics
 identical to Flink and keeps each format independently installable, testable, and fallback-safe.
