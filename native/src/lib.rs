@@ -132,6 +132,7 @@ mod json;
 mod json_retry;
 #[cfg(feature = "kafka")]
 mod kafka;
+mod keyed_upsert;
 mod keys;
 mod logging;
 mod memory;
@@ -161,9 +162,9 @@ mod window_join;
 pub(crate) use {
     aggregates::*, bridge::*, calc::*, changelog::*, dedup::*, exchange::*, expr::*, flatten::*,
     flink_key::*, format_abi::*, format_codes::*, group_agg::*, interval_join::*, ipc::*,
-    jdk_double::*, join_common::*, keys::*, memory::*, mini_batch::*, normalizer::*, over_agg::*,
-    rowtime::*, session_agg::*, sorter::*, state::*, temporal_join::*, topn::*, updating_join::*,
-    window_agg::*, window_join::*,
+    jdk_double::*, join_common::*, keyed_upsert::*, keys::*, memory::*, mini_batch::*,
+    normalizer::*, over_agg::*, rowtime::*, session_agg::*, sorter::*, state::*, temporal_join::*,
+    topn::*, updating_join::*, window_agg::*, window_join::*,
 };
 
 #[cfg(any(

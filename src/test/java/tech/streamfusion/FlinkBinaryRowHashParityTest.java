@@ -21,6 +21,7 @@ import org.apache.flink.table.data.GenericRowData;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.StringData;
 import org.apache.flink.table.data.TimestampData;
+import org.apache.flink.table.data.binary.BinaryRowData;
 import org.apache.flink.table.runtime.typeutils.RowDataSerializer;
 import org.apache.flink.table.types.logical.BigIntType;
 import org.apache.flink.table.types.logical.ArrayType;
@@ -84,8 +85,7 @@ class FlinkBinaryRowHashParityTest {
             "millis"
           });
 
-  @Test
-  void nativeHashMatchesFlinksBinaryRowForScalarKeys() {
+  private static List<RowData> scalarRows() {
     GenericRowData values = new GenericRowData(KEY_SCHEMA.getFieldCount());
     values.setField(0, true);
     values.setField(1, -123);
@@ -105,7 +105,12 @@ class FlinkBinaryRowHashParityTest {
     values.setField(15, -86_399_123L);
 
     GenericRowData nulls = new GenericRowData(KEY_SCHEMA.getFieldCount());
-    List<RowData> rows = List.of(values, nulls);
+    return List.of(values, nulls);
+  }
+
+  @Test
+  void nativeHashMatchesFlinksBinaryRowForScalarKeys() {
+    List<RowData> rows = scalarRows();
     int[] keyColumns = java.util.stream.IntStream.range(0, KEY_SCHEMA.getFieldCount()).toArray();
     int[] timestampPrecisions = new int[KEY_SCHEMA.getFieldCount()];
     java.util.Arrays.fill(timestampPrecisions, -1);
@@ -124,6 +129,41 @@ class FlinkBinaryRowHashParityTest {
       RowDataSerializer serializer = new RowDataSerializer(KEY_SCHEMA);
       int[] expected = rows.stream().mapToInt(row -> serializer.toBinaryRow(row).hashCode()).toArray();
       assertArrayEquals(expected, actual);
+    }
+  }
+
+  @Test
+  void nativeBinaryRowsMatchFlinksSerializedBytes() {
+    List<RowData> rows = scalarRows();
+    int[] keyColumns = {5, 2, 12};
+    int[] timestampPrecisions = {-1, -1, 3};
+    RowType keyType =
+        RowType.of(new VarCharType(VarCharType.MAX_LENGTH), new BigIntType(), new TimestampType(3));
+    RowDataSerializer serializer = new RowDataSerializer(keyType);
+    try (BufferAllocator allocator = new RootAllocator();
+        VectorSchemaRoot root = RowDataArrowConverter.write(rows, KEY_SCHEMA, allocator);
+        CDataDictionaryProvider dictionaries = new CDataDictionaryProvider();
+        ArrowArray array = ArrowArray.allocateNew(allocator);
+        ArrowSchema schema = ArrowSchema.allocateNew(allocator)) {
+      Data.exportVectorSchemaRoot(allocator, root, dictionaries, array, schema);
+      byte[][] actual =
+          Native.flinkBinaryRows(
+              array.memoryAddress(),
+              schema.memoryAddress(),
+              keyColumns,
+              timestampPrecisions,
+              new int[] {1, 0});
+      for (int i = 0; i < 2; i++) {
+        RowData row = rows.get(1 - i);
+        GenericRowData key = new GenericRowData(3);
+        key.setField(0, row.isNullAt(5) ? null : row.getString(5));
+        key.setField(1, row.isNullAt(2) ? null : row.getLong(2));
+        key.setField(2, row.isNullAt(12) ? null : row.getTimestamp(12, 3));
+        BinaryRowData binary = serializer.toBinaryRow(key);
+        byte[] expected = new byte[binary.getSizeInBytes()];
+        binary.getSegments()[0].get(binary.getOffset(), expected, 0, expected.length);
+        assertArrayEquals(expected, actual[i]);
+      }
     }
   }
 

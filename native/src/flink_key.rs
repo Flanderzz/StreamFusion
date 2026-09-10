@@ -883,3 +883,35 @@ pub extern "system" fn Java_tech_streamfusion_Native_flinkBinaryRowHashes<'local
         output.into_raw()
     })
 }
+
+/// The `BinaryRowData` bytes of the requested rows projected to the key columns, one byte array per
+/// row, for callers that need a few encoded keys (a file's first and last key) rather than hashes.
+#[no_mangle]
+pub extern "system" fn Java_tech_streamfusion_Native_flinkBinaryRows<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    in_array_address: jlong,
+    in_schema_address: jlong,
+    key_columns: JIntArray<'local>,
+    timestamp_precisions: JIntArray<'local>,
+    rows: JIntArray<'local>,
+) -> jni::sys::jobjectArray {
+    crate::bridge::jni_guard(env, move |env| {
+        let batch = import_record_batch(in_array_address, in_schema_address);
+        let columns = read_columns(env, &key_columns);
+        let precisions = read_i32_array(env, &timestamp_precisions);
+        let rows = read_i32_array(env, &rows);
+        let mut encoder = BinaryRowBatchEncoder::new(&batch, &columns, &precisions);
+        let output = env
+            .new_object_array(rows.len() as i32, "[B", jni::objects::JObject::null())
+            .expect("allocate BinaryRow result");
+        for (index, row) in rows.iter().enumerate() {
+            let bytes = env
+                .byte_array_from_slice(encoder.encode(*row as usize))
+                .expect("allocate BinaryRow bytes");
+            env.set_object_array_element(&output, index as i32, bytes)
+                .expect("store BinaryRow bytes");
+        }
+        output.into_raw()
+    })
+}

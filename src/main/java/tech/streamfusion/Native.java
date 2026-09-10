@@ -573,6 +573,53 @@ public final class Native {
   public static native void closeBucketRoute(long handle);
 
   /**
+   * Flink's {@code BinaryRowData} bytes of the requested rows projected to the key columns, one byte
+   * array per row, for callers that need a few encoded keys (a file's first and last key) rather
+   * than every row's hash. Same key-column and precision-sidecar contract as {@link
+   * #flinkBinaryRowHashes}.
+   */
+  public static native byte[][] flinkBinaryRows(
+      long arrayAddress,
+      long schemaAddress,
+      int[] keyColumns,
+      int[] timestampPrecisions,
+      int[] rows);
+
+  /**
+   * Creates a buffer that retains changelog batches for one write destination and merges them per
+   * key on flush: sorted by key, one surviving row per key (the last or the first by arrival), in
+   * Paimon's key-value file layout. {@code kindColumn} is the hidden row-kind byte column; when
+   * {@code ignoreRetracts} is set, update-before and delete rows are dropped before the merge.
+   * Released with {@link #closeKeyedUpsertBuffer}.
+   */
+  public static native long createKeyedUpsertBuffer(
+      int[] keyColumns, int kindColumn, boolean keepLast, boolean ignoreRetracts);
+
+  /**
+   * Takes ownership of a batch the JVM exported and assigns its rows the sequence numbers starting
+   * at {@code firstSequence} in arrival order.
+   */
+  public static native void keyedUpsertBufferPush(
+      long handle, long inArrayAddress, long inSchemaAddress, long firstSequence);
+
+  /** Arrow memory held by the pending rows. */
+  public static native long keyedUpsertBufferBytes(long handle);
+
+  /** Pending rows before merging. */
+  public static native long keyedUpsertBufferRows(long handle);
+
+  /**
+   * Merges the pending rows into one sorted key-value batch exported into the consumer-allocated C
+   * structs and empties the buffer. Returns {@code {rows, deleteRows, minSequence, maxSequence}};
+   * when {@code rows} is 0 nothing was exported.
+   */
+  public static native long[] keyedUpsertBufferFlush(
+      long handle, long outArrayAddress, long outSchemaAddress);
+
+  /** Releases a keyed-upsert buffer and its pending rows. */
+  public static native void closeKeyedUpsertBuffer(long handle);
+
+  /**
    * Concatenates several exported batches — row subsets of one exchange edge, so they share a
    * schema — into a single batch exported back into the consumer-allocated C structs. The merge
    * step of the post-exchange coalescer, undoing the fragmentation {@link #splitByKey} introduced.
