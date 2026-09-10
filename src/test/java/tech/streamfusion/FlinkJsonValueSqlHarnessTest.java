@@ -121,11 +121,8 @@ class FlinkJsonValueSqlHarnessTest {
   }
 
   @Test
-  void unverifiedPathsAndReturningTypesFallBack() throws Exception {
+  void unverifiedPathsFallBack() throws Exception {
     assertFallback(
         JsonFunctionTestInputs::documents, "SELECT id, JSON_VALUE(s, '$.*') FROM inputs");
-    assertFallback(
-        () -> TextTimeFunctionTestInputs.textRows("{\"a\":12}", "{}", null),
-        "SELECT id, JSON_VALUE(s, '$.a' RETURNING INTEGER) FROM inputs");
   }
 }

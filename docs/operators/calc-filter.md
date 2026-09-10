@@ -312,9 +312,30 @@ hyphens. Member names are case-sensitive. Wildcards, recursive descent, filters,
 negative indexes, escapes/Unicode in path member names and dynamic paths fall back.
 
 The default return type and explicit `RETURNING VARCHAR(n)` are native; Flink 2.2.1 does
-not truncate this function's result to `n`. Numeric/boolean RETURNING types fall back.
-`NULL`, `ERROR`, and non-null character-literal `DEFAULT` behaviors are supported independently
-for ON EMPTY and ON ERROR. Null, non-character, or non-literal defaults fall back.
+not truncate this function's result to `n`. `RETURNING BOOLEAN`, `INTEGER` and `DOUBLE`
+are also native with the following exact Flink object-type rules:
+
+| RETURNING | Accepted selected scalar | Supported literal DEFAULT |
+|---|---|---|
+| VARCHAR(n) | String, boolean or number converted to Jackson's text | Non-null character literal |
+| BOOLEAN | JSON boolean | Non-null BOOLEAN literal |
+| INTEGER | JSON integer token within signed 32-bit range | Non-null INTEGER literal |
+| DOUBLE | JSON number with a decimal point or exponent (Jackson BigDecimal) | Not admitted |
+
+`NULL` and `ERROR` behaviors are supported independently for ON EMPTY and ON ERROR.
+Other default types, NULL defaults and non-literal defaults fall back. DOUBLE defaults stay
+on Flink because generated Double/DecimalData defaults do not match its BigDecimal cast.
+Selected scalar type mismatches fail the job **outside ON ERROR**, matching Flink: a quoted
+`"12"` is not an INTEGER, `1.0` is not an INTEGER, and `1` is not a DOUBLE. Decimal-to-double
+conversion preserves rounding, infinity and underflow; a decimal zero has no negative sign.
+
+A BOOLEAN form with either NULL policy is admitted only as a direct projection. Flink 2.2.1
+can unbox its boxed NULL result without checking the null flag in a bare WHERE condition,
+truth predicate or CASE condition, failing the job. Such compositions stay on Flink.
+BOOLEAN forms with non-null DEFAULT or ERROR for both policies can compose natively.
+Typed JSON_VALUE calls nested under AND/OR stay on Flink: DataFusion may evaluate the
+unneeded side on some rows, exposing a scalar conversion failure that Flink short-circuits.
+CASE result branches retain native admission and evaluate only selected conversions.
 
 The default path mode is **strict**. Missing members, selected JSON nulls, malformed JSON,
 and selected containers invoke ON ERROR in strict mode. In lax mode these invoke ON EMPTY,

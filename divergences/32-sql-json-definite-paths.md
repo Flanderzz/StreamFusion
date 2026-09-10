@@ -97,9 +97,28 @@ calls the removed `Subject.getSubject` API before any query is executed.
 ## Initial admission
 
 Only constant definite member/index paths are admitted. Wildcards, recursion, predicates,
-slices and dynamic paths remain on Flink. JSON_VALUE initially returns VARCHAR; the boolean,
-integer and double RETURNING conversions in Flink are Java object casts outside ON ERROR,
-so reusing SQL CAST would be incorrect. Non-null character literal defaults are admitted;
-null defaults participate in Flink's generated whole-call null guard and are declined.
+slices and dynamic paths remain on Flink. JSON_VALUE returns VARCHAR, BOOLEAN, INTEGER or
+DOUBLE. The latter three conversions in Flink are Java object casts outside ON ERROR, so
+reusing SQL CAST would be incorrect. Native extraction writes directly into the matching
+Arrow primitive builder, requiring a JSON boolean, a signed 32-bit integer token, or a
+decimal/exponent token respectively. Type mismatch fails after EMPTY/ERROR policies.
+The DOUBLE conversion parses the validated decimal spelling with correctly rounded binary
+conversion, removing a minus sign only from a mathematically zero decimal. Underflow of a
+negative nonzero value retains negative zero, as BigDecimal.doubleValue does. JNI tests
+compare 2,010 deterministic boundary/random samples against Flink's BigDecimal output bits.
+
+Non-null character, BOOLEAN and INTEGER literal defaults match their corresponding return
+types. DOUBLE defaults are declined because generated Flink Double/DecimalData objects cannot
+be cast to BigDecimal. Null defaults participate in Flink's generated whole-call null guard
+and are declined, as are non-literal or mismatched-type defaults.
+
+There is a separate Flink code-generation edge for boxed boolean NULLs: Calc/filter,
+truth predicates and CASE conditions may unbox the result without consulting its null flag.
+Nullable BOOLEAN JSON_VALUE forms therefore require a direct projection. Supplying non-null
+DEFAULT or ERROR for both EMPTY and ERROR permits native composition. This is an expression
+admission check, not a change to operators or row/Arrow conversion.
+Typed JSON_VALUE under AND/OR is also declined: DataFusion 54's batch short-circuiting
+can still evaluate the right side for rows Flink skips. SQL probes pin both an OR and an
+AND with an invalid scalar type on the skipped row; CASE result selection remains native.
 JSON_EXISTS supports all four ON ERROR behaviors. Both functions are ordinary scalar
 expressions; no operator or converter changes are required.

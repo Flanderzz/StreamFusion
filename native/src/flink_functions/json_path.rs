@@ -128,7 +128,7 @@ fn is_identifier(name: &str) -> bool {
         && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub(super) enum Value<'a> {
     Missing,
     Null,

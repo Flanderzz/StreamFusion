@@ -156,6 +156,8 @@ final class RexExpression {
   // config
   // rides the node). null (a bare predicate encode) declines the host-exact casts, conservatively.
   private Boolean legacyCastBehaviour;
+  // Flink can unbox a boxed Boolean NULL without checking its null flag in predicates/CASE.
+  private RexNode directProjection;
 
   private RexExpression() {}
 
@@ -206,6 +208,7 @@ final class RexExpression {
   static RexExpression encodeProjections(List<RexNode> projections, List<String> names) {
     RexExpression encoder = new RexExpression();
     for (RexNode projection : projections) {
+      encoder.directProjection = projection;
       encoder.projectionRoots.add(encoder.kinds.size());
       if (!encoder.emit(projection)) {
         return null;
@@ -253,6 +256,7 @@ final class RexExpression {
       RexNode projection =
           RexUtil.expandSearch(
               calc.getCluster().getRexBuilder(), null, program.expandLocalRef(ref));
+      directProjection = projection;
       if (!emit(projection)) {
         return false;
       }
@@ -819,6 +823,9 @@ final class RexExpression {
         return emit(operands.get(0));
       case AND:
       case OR:
+        if (operands.stream().anyMatch(RexExpression::containsTypedJsonValue)) {
+          return reject("typed JSON_VALUE under AND/OR requires Flink's row short-circuiting");
+        }
         // Calcite leaves AND/OR n-ary; the native binary op needs a left-deep nesting, which a
         // pre-order stream encodes as (n-1) call headers followed by the operands in order.
         if (operands.size() < 2) {
@@ -1008,13 +1015,31 @@ final class RexExpression {
     return emitBuiltinCall(call, op);
   }
 
+  private static boolean containsTypedJsonValue(RexNode node) {
+    if (!(node instanceof RexCall call)) {
+      return false;
+    }
+    return ("JSON_VALUE".equalsIgnoreCase(call.getOperator().getName())
+            && call.getType().getSqlTypeName() != SqlTypeName.VARCHAR)
+        || call.getOperands().stream().anyMatch(RexExpression::containsTypedJsonValue);
+  }
+
   private boolean emitJsonValue(RexCall call) {
     if (JsonPathSpec.unicodeVersion() == null) {
       return reject("JSON_VALUE requires verified JDK 17, 21, 24 or 25 token rules");
     }
     List<RexNode> args = call.getOperands();
-    if (call.getType().getSqlTypeName() != SqlTypeName.VARCHAR) {
-      return reject("JSON_VALUE currently supports RETURNING VARCHAR");
+    SqlTypeName returnType = call.getType().getSqlTypeName();
+    int op =
+        switch (returnType) {
+          case VARCHAR -> 141;
+          case BOOLEAN -> 148;
+          case INTEGER -> 149;
+          case DOUBLE -> 150;
+          default -> -1;
+        };
+    if (op < 0) {
+      return reject("JSON_VALUE supports RETURNING VARCHAR, BOOLEAN, INTEGER or DOUBLE");
     }
     String path = jsonPath(args);
     if (path == null) {
@@ -1030,11 +1055,11 @@ final class RexExpression {
       if ("DEFAULT".equals(behavior)) {
         if (i >= args.size()
             || !(args.get(i++) instanceof RexLiteral literal)
-            || !isCharacter(literal)
-            || literal.isNull()) {
-          return reject("JSON_VALUE DEFAULT requires a non-null character literal");
+            || (defaultValue = jsonDefault(literal, returnType)) == null) {
+          return reject(
+              "JSON_VALUE DEFAULT requires a non-null literal matching RETURNING; DOUBLE defaults"
+                  + " are not admitted");
         }
-        defaultValue = literal.getValueAs(String.class);
       } else if (!"NULL".equals(behavior) && !"ERROR".equals(behavior)) {
         return reject("JSON_VALUE has an unsupported behavior");
       }
@@ -1052,7 +1077,14 @@ final class RexExpression {
         return reject("JSON_VALUE has an unsupported behavior target");
       }
     }
-    add(KIND_CALL, 141, 7);
+    if (returnType == SqlTypeName.BOOLEAN
+        && ("NULL".equals(empty) || "NULL".equals(error))
+        && call != directProjection) {
+      return reject(
+          "JSON_VALUE BOOLEAN with NULL policies requires a direct projection; Flink unboxes null"
+              + " in boolean contexts");
+    }
+    add(KIND_CALL, op, 7);
     if (!emit(args.get(0))) {
       return false;
     }
@@ -1061,6 +1093,25 @@ final class RexExpression {
     }
     emitString(JsonPathSpec.unicodeVersion());
     return true;
+  }
+
+  private static String jsonDefault(RexLiteral literal, SqlTypeName returnType) {
+    if (literal.isNull()) {
+      return null;
+    }
+    SqlTypeName literalType = literal.getType().getSqlTypeName();
+    if (returnType == SqlTypeName.VARCHAR && isCharacter(literal)) {
+      return literal.getValueAs(String.class);
+    }
+    if (returnType == SqlTypeName.BOOLEAN && literalType == SqlTypeName.BOOLEAN) {
+      return literal.getValueAs(Boolean.class).toString();
+    }
+    if (returnType == SqlTypeName.INTEGER && literalType == SqlTypeName.INTEGER) {
+      return Integer.toString(literal.getValueAs(BigDecimal.class).intValueExact());
+    }
+    // DOUBLE defaults are generated as Double/DecimalData, not the BigDecimal object
+    // that Flink's RETURNING conversion expects. Preserve that behavior on Flink.
+    return null;
   }
 
   private boolean emitIsJson(RexCall call, int op, boolean negate) {

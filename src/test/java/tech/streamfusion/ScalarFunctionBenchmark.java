@@ -109,6 +109,21 @@ class ScalarFunctionBenchmark {
                   new Query("IS_JSON_SCALAR", "tt_json_predicate", "s IS JSON SCALAR", "BOOLEAN"),
                   new Query("JSON_VALUE", "tt_json", "JSON_VALUE(s, 'lax $.user.name')", "STRING"),
                   new Query(
+                      "JSON_VALUE_BOOLEAN",
+                      "tt_json_boolean",
+                      "JSON_VALUE(s, '$.v' RETURNING BOOLEAN)",
+                      "BOOLEAN"),
+                  new Query(
+                      "JSON_VALUE_INTEGER",
+                      "tt_json_integer",
+                      "JSON_VALUE(s, '$.v' RETURNING INTEGER)",
+                      "INT"),
+                  new Query(
+                      "JSON_VALUE_DOUBLE",
+                      "tt_json_double",
+                      "JSON_VALUE(s, '$.v' RETURNING DOUBLE)",
+                      "DOUBLE"),
+                  new Query(
                       "JSON_EXISTS", "tt_json", "JSON_EXISTS(s, 'lax $.user.name')", "BOOLEAN")))
           .flatMap(List::stream)
           .toList();

@@ -136,13 +136,26 @@ final class TextTimeBenchmarkInputs {
       String[] values =
           switch (input) {
             case "tt_text" -> text;
-            case "tt_json_predicate" -> new String[] {
-              "{\"padding\":\"" + text[0] + "\"}",
-              "[\"" + text[1] + "\"]",
-              "\"" + text[0] + "\"",
-              "{\"invalid\":\"" + text[1] + "\",}"
-            };
+            case "tt_json_predicate" ->
+                new String[] {
+                  "{\"padding\":\"" + text[0] + "\"}",
+                  "[\"" + text[1] + "\"]",
+                  "\"" + text[0] + "\"",
+                  "{\"invalid\":\"" + text[1] + "\",}"
+                };
             case "tt_quoted" -> new String[] {quoted, quoted};
+            case "tt_json_boolean", "tt_json_integer", "tt_json_double" -> {
+              String[] selected =
+                  switch (input) {
+                    case "tt_json_boolean" -> new String[] {"true", "false"};
+                    case "tt_json_integer" -> new String[] {"123456789", "-234567890"};
+                    default -> new String[] {"1.23456789", "-2.3456789e12"};
+                  };
+              yield new String[] {
+                "{\"v\":" + selected[0] + ",\"padding\":\"" + text[0] + "\"}",
+                "{\"v\":" + selected[1] + ",\"padding\":\"" + text[1] + "\"}"
+              };
+            }
             case "tt_json" -> {
               int fields = Integer.getInteger("scalar.json.fields", 0);
               if (fields < 0) {
@@ -153,15 +166,15 @@ final class TextTimeBenchmarkInputs {
                 members.append(",\"field").append(i).append("\":\"value").append(i).append("\"");
               }
               yield new String[] {
-                  "{\"user\":{\"name\":\""
-                      + (unicode ? "\u4e2d\\n\ud83d\ude00" : "Alice")
-                      + "\",\"active\":true}"
-                      + members
-                      + ",\"padding\":\""
-                      + text[0]
-                      + "\"}",
-                  "{\"user\":{\"active\":false}" + members + ",\"padding\":\"" + text[1] + "\"}"
-                };
+                "{\"user\":{\"name\":\""
+                    + (unicode ? "\u4e2d\\n\ud83d\ude00" : "Alice")
+                    + "\",\"active\":true}"
+                    + members
+                    + ",\"padding\":\""
+                    + text[0]
+                    + "\"}",
+                "{\"user\":{\"active\":false}" + members + ",\"padding\":\"" + text[1] + "\"}"
+              };
             }
             case "tt_date_text" -> new String[] {"2000-02-29", "1969-12-31"};
             default -> throw new IllegalArgumentException("Unknown text/time input: " + input);

@@ -536,3 +536,26 @@ The Unicode case replaces every eighth row with SQL NULL.
 | IS_JSON_OBJECT | Unicode, 264-byte padding, NULL/8 | 2.181 | 0.968 | 2.25x |
 | IS_JSON_ARRAY | Unicode, 264-byte padding, NULL/8 | 2.177 | 0.949 | 2.30x |
 | IS_JSON_SCALAR | Unicode, 264-byte padding, NULL/8 | 2.201 | 0.942 | 2.33x |
+
+## JSON_VALUE RETURNING
+
+Measured on 2026-09-10 with the release, interleaved method above: 2,000,000 rows,
+two warmups, five measured trials and both transposes. Run with
+`scalar.functions=JSON_VALUE_BOOLEAN,JSON_VALUE_INTEGER,JSON_VALUE_DOUBLE`. Each query
+projects `JSON_VALUE(s, '$.v' RETURNING <type>)` independently. Documents contain a
+selected `v` member and a separate padding string with the listed byte budget.
+BOOLEAN alternates true/false, INTEGER alternates 123456789/-234567890, and DOUBLE
+alternates 1.23456789/-2.3456789e12. Unicode changes the padding; every eighth row is
+SQL NULL in that scenario. All non-null documents are valid and contain a matching scalar.
+
+| RETURNING | Scenario | Flink (s) | Native (s) | Flink / native |
+|---|---|---:|---:|---:|
+| BOOLEAN | ASCII, 32-byte padding | 0.862 | 0.698 | 1.24x |
+| INTEGER | ASCII, 32-byte padding | 0.899 | 0.715 | 1.26x |
+| DOUBLE | ASCII, 32-byte padding | 0.959 | 0.798 | 1.20x |
+| BOOLEAN | ASCII, 264-byte padding | 1.472 | 1.226 | 1.20x |
+| INTEGER | ASCII, 264-byte padding | 1.417 | 1.244 | 1.14x |
+| DOUBLE | ASCII, 264-byte padding | 1.496 | 1.424 | 1.05x |
+| BOOLEAN | Unicode, 264-byte padding, NULL/8 | 1.331 | 1.158 | 1.15x |
+| INTEGER | Unicode, 264-byte padding, NULL/8 | 1.198 | 1.065 | 1.12x |
+| DOUBLE | Unicode, 264-byte padding, NULL/8 | 1.296 | 1.158 | 1.12x |

@@ -137,6 +137,9 @@ pub(crate) fn function(op: i64, arity: usize) -> Option<ScalarUDF> {
         145 => is_json::function(is_json::JsonType::Object),
         146 => is_json::function(is_json::JsonType::Array),
         147 => is_json::function(is_json::JsonType::Scalar),
+        148 => json_value::typed_function(json_value::ReturnType::Boolean),
+        149 => json_value::typed_function(json_value::ReturnType::Integer),
+        150 => json_value::typed_function(json_value::ReturnType::Double),
         _ => return None,
     })
 }
