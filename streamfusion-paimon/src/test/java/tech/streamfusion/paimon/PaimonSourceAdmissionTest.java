@@ -1,0 +1,76 @@
+package tech.streamfusion.paimon;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+import java.nio.file.Files;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import tech.streamfusion.planner.NativePlanner;
+
+class PaimonSourceAdmissionTest {
+  @ParameterizedTest
+  @CsvSource(
+      delimiter = '|',
+      value = {
+        "'file.format'='orc'|file.format",
+        "'source.checkpoint-align.enabled'='true'|checkpoint-align",
+        "'scan.ignore-corrupt-file'='true'|ignore-corrupt-file",
+        "'data-file.thin-mode'='true'|thin-mode"
+      })
+  void unsupportedOptionsRetainStockSource(String options, String reason) throws Exception {
+    var sql = environment();
+    sql.executeSql(
+        "CREATE TABLE t (id INT NOT NULL, v STRING, PRIMARY KEY(id) NOT ENFORCED) WITH"
+            + " ('bucket'='2', 'changelog-producer'='input', "
+            + options
+            + ")");
+    String plan = NativePlanner.explain(sql, "SELECT * FROM t");
+    assertFalse(plan.contains("StreamPhysicalNativePaimonSource"), plan);
+    assertTrue(plan.contains(reason), plan);
+  }
+
+  @Test
+  void primaryKeyWithoutChangelogAndNanosecondTimestampRemainStock() throws Exception {
+    var sql = environment();
+    sql.executeSql(
+        "CREATE TABLE t (id INT NOT NULL, v STRING, PRIMARY KEY(id) NOT ENFORCED) WITH"
+            + " ('bucket'='2')");
+    assertTrue(
+        NativePlanner.explain(sql, "SELECT * FROM t").contains("requires a changelog producer"));
+    sql.executeSql("CREATE TABLE ns (v TIMESTAMP(9))");
+    assertFalse(NativePlanner.explain(sql, "SELECT * FROM ns").contains("NativePaimonSource"));
+  }
+
+  @Test
+  void watermarkProjectionAndFiltersAreAdmitted() throws Exception {
+    var sql = environment();
+    sql.executeSql(
+        "CREATE TABLE t (id INT, ts TIMESTAMP(3), WATERMARK FOR ts AS ts - INTERVAL '1' SECOND)");
+    String plan = NativePlanner.explain(sql, "SELECT ts, id FROM t WHERE id > 10");
+    assertTrue(plan.contains("NativePaimonSource"), plan);
+  }
+
+  @Test
+  void nestedPruningStaysOnJava() throws Exception {
+    var sql = environment();
+    sql.executeSql("CREATE TABLE t (id INT, nested ROW<a INT, b STRING>)");
+    String plan = NativePlanner.explain(sql, "SELECT nested.a FROM t");
+    assertFalse(plan.contains("NativePaimonSource"), plan);
+  }
+
+  private static StreamTableEnvironment environment() throws Exception {
+    var env = StreamExecutionEnvironment.getExecutionEnvironment();
+    env.setParallelism(1);
+    env.enableCheckpointing(1000);
+    var sql = StreamTableEnvironment.create(env);
+    sql.executeSql(
+        "CREATE CATALOG p WITH ('type'='paimon', 'warehouse'='"
+            + Files.createTempDirectory("paimon-source-plan").toUri()
+            + "')");
+    sql.executeSql("USE CATALOG p");
+    return sql;
+  }
+}

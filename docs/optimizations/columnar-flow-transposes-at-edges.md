@@ -20,3 +20,11 @@ and owns compaction and commits without receiving input rows on this path.
 The [release writer diagnostic](../connectors/paimon.md#merge-engine-writer-diagnostic) measured
 1.20–1.27× throughput against stock ingestion for the four new modes, including routing and the
 ingress RowData-to-Arrow conversion. Unsupported merge combinations retain the stock writer.
+
+Paimon's streaming source applies the same boundary in reverse: Java plans committed files and
+owns storage access, while native Parquet decoding emits Arrow directly for append files and
+primary-key changelog files. Initial primary-key snapshot merging stays in Java and pays one
+row-to-Arrow conversion after the merge. The
+[source file-reader diagnostic](../connectors/paimon.md#source-file-reader-diagnostic) measured
+1.30× append and 2.18× changelog throughput against the stock reader, including the Java byte-range
+bridge and Arrow import. These numbers measure local file reads, not whole Flink jobs.

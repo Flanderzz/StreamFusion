@@ -2,7 +2,7 @@ package tech.streamfusion.parquet;
 
 import tech.streamfusion.NativeExtensionLoader;
 
-/** JNI entry point for the optional native Parquet sink. */
+/** JNI entry points for optional native Parquet encoding and decoding. */
 public final class NativeParquet {
 
   static {
@@ -21,6 +21,13 @@ public final class NativeParquet {
   public static boolean isLoaded() {
     return true;
   }
+
+  public static native long createParquetDecoder(
+      Object input, long length, long schemaAddress, String[] physicalNames, int batchSize);
+
+  public static native boolean parquetDecoderNext(long handle, long arrayAddress, long schemaAddress);
+
+  public static native void closeParquetDecoder(long handle);
 
   public static native long createParquetEncoder(
       long schemaAddress,

@@ -1,7 +1,7 @@
 # Apache Paimon
 
 **Status:** experimental. The optional `streamfusion-paimon` module accelerates streaming
-`INSERT INTO` jobs into Paimon **append-only tables** and **primary-key tables with fixed,
+`SELECT` reads and `INSERT INTO` jobs on Paimon **append-only tables** and **primary-key tables with fixed,
 dynamic, or postpone buckets** on the published Paimon `2.0.0` Flink 2.2 connector.
 Paimon keeps every table-level responsibility:
 schema and catalog, bucket assignment rules, sequence numbering rules, file rolling, statistics,
@@ -10,7 +10,98 @@ of the writers, append buffering and spilling, the Parquet encoding of each data
 primary-key tables, the sort and merge that turns a bucket's changelog into a level-0 file. Postpone
 staging retains every accepted change for Paimon's separate compactor.
 
-## What runs natively
+## Streaming source
+
+Streaming Parquet reads retain the released Java Paimon client for table/catalog resolution,
+snapshot and manifest discovery, split assignment, filesystem credentials, and enumerator
+checkpoint serialization. A task-side reader emits Arrow batches into the native pipeline:
+
+| Read phase | Implementation |
+|---|---|
+| Append snapshot and subsequent committed data | Native Parquet decoding into Arrow |
+| Primary-key initial snapshot | Java Paimon reads and merges versions; the completed logical rows are converted into Arrow |
+| Primary-key changelog tailing | Native Parquet decoding of value columns and the stored row-kind byte |
+
+Primary-key tailing requires `changelog-producer = input`, `lookup`, or `full-compaction`, and
+Parquet changelog files. The producer has already generated the changes; the source preserves
+`+I`, `-U`, `+U`, and `-D` without another merge. Default startup reads the current snapshot before
+following commits. `scan.mode = latest` starts with new commits only. Native snapshot merging
+using paimon-rust is tracked in [#53](https://github.com/datafusion-contrib/StreamFusion/issues/53).
+
+The native decoder calls Paimon's seekable `FileIO` through a reusable 64 KiB transfer buffer.
+parquet-rs reads the projected column chunks and decodes batches of up to 4,096 rows. It does not
+load an entire file into Java memory. Arrow C Data exports transfer ownership to the source batch;
+closing the reader releases the native decoder and Java input stream. Memory includes compressed
+column chunks, decoder working buffers, and the source's bounded fetch queue; the batch row count
+is not a hard byte budget.
+
+Top-level projection, reordered columns, nested values, and supported periodic source watermarks
+are preserved. Query predicates remain Flink residual filters; this first source does not push
+query predicates into its Java scan or native decoder. Checkpoints save the number of emitted
+logical rows per split with Paimon's existing serializer. Recovery skips precisely that many rows,
+including positions within a new batch size. Prefetched rows do not advance the checkpoint.
+
+The reader deliberately retains Java decoding and row-to-Arrow conversion for splits requiring
+schema evolution, deletion-vector selection, or non-Parquet historical files, and for specialized
+split representations. This preserves those files' Java read semantics within an admitted source.
+The initial primary-key snapshot always uses Java, including its merge engine and delete handling.
+
+### Source admission and fallbacks
+
+Only streaming data-table reads enter this path. It uses the sink's supported value types below
+(including nested values and timestamps up to precision 6). These configurations retain the stock
+source at planning time:
+
+- Primary-key tables without a changelog producer, non-Parquet table/changelog formats, thin data
+  files, data evolution, row tracking, chain tables, query authorization, and exposing internal
+  key-value sequence numbers.
+- Nested subfield pruning, zero-column projections, metadata columns, pushed limits/aggregates,
+  and source abilities other than top-level projection, residual filters, and supported watermarks.
+- Consumer retention (`consumer-id`), dedicated split generation, checkpoint/snapshot alignment,
+  and `postpone.merge-on-read`.
+- Source watermarks outside the shared periodic constant-delay contract, including on-event
+  emission and watermark alignment.
+- Unverified `scan.*`, `streaming-read-*`, `log.*`, and custom `parquet.*` settings. The admitted scan settings are
+  `scan.mode`, `scan.snapshot-id`, `scan.timestamp-millis`, `scan.timestamp`, `scan.tag-name`,
+  `scan.watermark`, `scan.bounded.watermark`, `scan.parallelism`, `scan.infer-parallelism`,
+  `scan.infer-parallelism.max`, `scan.remove-normalize`, and supported watermark idle/emit settings.
+
+`streamfusion.operator.paimonSource.enabled=false` disables the substitution. The Parquet module
+must be installed alongside the Paimon module, as for the sink. Native format-factory discovery
+is not required for this reader: it calls the decoder directly on Java-planned files.
+
+`PaimonSourceReadTest` checks append/primary-key twin readers, row kinds, nested values, partition
+values, historical schema mapping, projections, `latest` startup and within-batch resume.
+`PaimonSourceRecoveryTest` checkpoints the asynchronous source reader after emission and restores
+with Paimon's serialized split state. `PaimonSourceSqlTest` follows an initial snapshot and a later
+commit through streaming SQL, including source watermarks; `PaimonSourceAdmissionTest` checks fallback
+and watermark admission.
+
+### Source file-reader diagnostic
+
+The opt-in `PaimonSourceBenchmark` compares released Java reading with native Parquet-to-Arrow
+reading on 262,144 rows and four projected columns, including a nested array. Files are generated
+before timing. Each read includes file open/close, decode, and an id-column checksum; native reads
+also include the Java FileIO/JNI transfer and Arrow import. It verifies row counts and checksums.
+One warmup and three measured runs alternate engine order and report each engine's best time.
+This is a local file-reader diagnostic, not an end-to-end Flink or remote-storage benchmark.
+
+| Path | Stock | Native | Throughput ratio |
+|---|---:|---:|---:|
+| Append files | 0.035 s | 0.027 s | 1.30× |
+| Primary-key changelog files | 0.048 s | 0.022 s | 2.18× |
+
+Run with release native libraries:
+
+```bash
+SF_PAIMON_SOURCE_BENCHMARK=true mvn test -Pbench,paimon \
+  -pl :streamfusion-paimon -am -Dtest=PaimonSourceBenchmark \
+  -Dsurefire.failIfNoSpecifiedTests=false
+```
+
+`SF_PAIMON_SOURCE_ROWS` changes the input count.
+
+## Streaming sink
 
 A sink's Arrow batches are split natively into one sub-batch per `(partition, bucket)` pair. Rust
 computes the partition `BinaryRow` and Paimon's default bucket hash column-wise (Paimon's row
@@ -293,7 +384,7 @@ rows and snapshot histories after a lost checkpoint and replay, including an alr
 snapshot whose acknowledgement was lost. The upstream SQL suite includes Paimon's unchanged
 `CoordinatorCommitITCase` for topology, commit metrics, committed rows, and idle-watermark parity.
 
-## Falls back to stock Paimon on
+## Sink falls back to stock Paimon on
 
 Each of these declines at planning time with a reason visible in `NativePlanner.explain`:
 
@@ -472,8 +563,8 @@ Released Paimon 2.0.0 walks a bundle row by row before the format writer; a Paim
 passes bundles through takes the same writer's direct path with no change here
 ([#39](https://github.com/datafusion-contrib/StreamFusion/issues/39)). The jar-ordering requirement
 goes away once Paimon's format discovery gains a priority, which
-[#38](https://github.com/datafusion-contrib/StreamFusion/issues/38) proposes upstream. A native
-Paimon source is [issue #27](https://github.com/datafusion-contrib/StreamFusion/issues/27).
+[#38](https://github.com/datafusion-contrib/StreamFusion/issues/38) proposes upstream. Remaining streaming
+source coverage is [issue #27](https://github.com/datafusion-contrib/StreamFusion/issues/27).
 
 Build with the `paimon` Maven profile. The module has no snapshot, local-Maven, path, or forked
 Paimon dependency.
