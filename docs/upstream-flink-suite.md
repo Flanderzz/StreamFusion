@@ -37,7 +37,12 @@ Paimon Flink connector's `AppendOnlyTableITCase`, `AppendTableITCase`, `BatchFil
 pinned Paimon release,
 built against the suite's Flink version, and fails unless it proves both that a streaming insert
 wrote an append-table data file from a native Arrow bundle and that one wrote a primary-key
-level-0 file natively. The native-write markers are emitted only after the write returns successfully.
+level-0 file natively, and that a native snapshot merger emitted an Arrow batch. The markers are
+emitted only after the corresponding write or read returns successfully.
+The source-reuse plan assertion in `ContinuousFileStoreITCase.testSourceReuseWithScanPushDown`
+currently fails with native sources enabled: the native node prevents Flink's projection-unifying
+scan reuse. The harness leaves this assertion enabled and reports the failure. Remaining source
+sharing coverage is tracked in [#27](https://github.com/datafusion-contrib/StreamFusion/issues/27).
 Streaming inserts covered by the [Paimon connector whitelist](connectors/paimon.md)
 can take the native sink, including coordinated writers, coordinator commits, dynamic
 partition routing, and automatic append-buffer spilling. The regular StreamFusion SQL parity

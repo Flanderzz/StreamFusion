@@ -11,8 +11,9 @@
     <artifactId>streamfusion-paimon</artifactId>
     <name>StreamFusion Paimon</name>
     <properties>
-        <native.cargo.packages>-p streamfusion -p streamfusion-parquet</native.cargo.packages>
-        <native.test.resource.skip>true</native.test.resource.skip>
+        <native.cargo.packages>-p streamfusion -p streamfusion-parquet -p streamfusion-paimon</native.cargo.packages>
+        <native.library>streamfusion_paimon</native.library>
+        <native.resource.path>tech/streamfusion/native/paimon</native.resource.path>
     </properties>
     <dependencies>
         <dependency>
@@ -83,7 +84,24 @@
     <build>
         <sourceDirectory>${project.basedir}/../src/main/java</sourceDirectory>
         <resources combine.self="override">
-            <resource><directory>${project.basedir}/src/main/resources</directory></resource>
+            <resource>
+                <directory>${project.basedir}/..</directory>
+                <targetPath>META-INF</targetPath>
+                <includes>
+                    <include>LICENSE</include>
+                </includes>
+            </resource>
+            <resource>
+                <directory>${project.basedir}/src/main/resources</directory>
+            </resource>
+            <resource>
+                <directory>${native.resource.directory}</directory>
+                <targetPath>${native.resource.path}</targetPath>
+                <includes>
+                    <include>lib${native.library}.so</include>
+                    <include>lib${native.library}.dylib</include>
+                </includes>
+            </resource>
         </resources>
         <plugins>
             <plugin>
@@ -103,4 +121,21 @@
             </plugin>
         </plugins>
     </build>
+    <profiles>
+        <profile>
+            <id>universal</id>
+            <build>
+                <resources>
+                    <resource>
+                        <directory>${project.basedir}/../native/target/universal/paimon</directory>
+                        <targetPath>tech/streamfusion/native/paimon</targetPath>
+                        <includes>
+                            <include>**/libstreamfusion_paimon.so</include>
+                            <include>**/libstreamfusion_paimon.dylib</include>
+                        </includes>
+                    </resource>
+                </resources>
+            </build>
+        </profile>
+    </profiles>
 </project>

@@ -39,7 +39,7 @@ import tech.streamfusion.operator.NativeSourceRecord;
 import tech.streamfusion.operator.NativeSourceWatermarks;
 import tech.streamfusion.operator.RowDataArrowConverter;
 
-/** Java snapshot merge and native append/changelog decode under one logical-row checkpoint. */
+/** Native and Java Paimon split reads under one logical-row checkpoint. */
 public final class NativePaimonSplitReader
     implements SplitReader<NativeSourceRecord, FileStoreSourceSplit> {
   private final FileStoreTable table;
@@ -58,11 +58,23 @@ public final class NativePaimonSplitReader
   private RecordReader.RecordIterator<InternalRow> rowBatch;
   private Queue<DataFileMeta> files;
   private NativePaimonParquetReader parquet;
+  private NativePaimonSnapshotReader snapshot;
+  private boolean nativeSnapshotsEnabled = true;
+  private int nativeSnapshots;
   private volatile boolean wakeup;
   private int nativeFiles;
 
   public int nativeFilesRead() {
     return nativeFiles;
+  }
+
+  public int nativeSnapshotsRead() {
+    return nativeSnapshots;
+  }
+
+  NativePaimonSplitReader withNativeSnapshots(boolean enabled) {
+    nativeSnapshotsEnabled = enabled;
+    return this;
   }
 
   public NativePaimonSplitReader(
@@ -100,11 +112,21 @@ public final class NativePaimonSplitReader
       if (canDecode(current)) {
         files = new ArrayDeque<>(((DataSplit) current.split()).dataFiles());
       } else {
-        rows = stock.createReader(current.split());
+        if (nativeSnapshotsEnabled && current.split() instanceof DataSplit) {
+          snapshot =
+              NativePaimonSnapshotReader.create(
+                  table, (DataSplit) current.split(), outputType, batchRows);
+        }
+        if (snapshot != null) {
+          nativeSnapshots++;
+        } else {
+          rows = stock.createReader(current.split());
+        }
       }
     }
     while (true) {
-      VectorSchemaRoot root = files != null ? nativeBatch() : javaBatch();
+      VectorSchemaRoot root =
+          snapshot != null ? snapshot.next() : files != null ? nativeBatch() : javaBatch();
       if (root == null) {
         if (skip > 0) {
           throw new IOException(
@@ -156,7 +178,11 @@ public final class NativePaimonSplitReader
     }
     DataSplit data = (DataSplit) split.split();
     // Historical schemas and deletion-vector selections retain Java's mapping and filtering.
-    return (!primaryKey || data.isStreaming())
+    return (!primaryKey
+            || data.isStreaming()
+            || (nativeSnapshotsEnabled
+                && data.rawConvertible()
+                && data.dataFiles().stream().allMatch(f -> f.deleteRowCount().isPresent())))
         && data.deletionFiles().isEmpty()
         && data.dataFiles().stream()
             .allMatch(f -> f.schemaId() == table.schema().id() && f.fileFormat().equals("parquet"));
@@ -172,7 +198,7 @@ public final class NativePaimonSplitReader
         DataSplit split = (DataSplit) current.split();
         List<Field> fields = new ArrayList<>(ArrowConversion.toArrowSchema(outputType).getFields());
         List<String> names = new ArrayList<>(outputType.getFieldNames());
-        if (primaryKey) {
+        if (primaryKey && split.isStreaming()) {
           fields.add(
               Field.nullable(RowDataArrowConverter.ROW_KIND_COLUMN, new ArrowType.Int(8, true)));
           names.add("_VALUE_KIND");
@@ -236,9 +262,16 @@ public final class NativePaimonSplitReader
             parquet.close();
           }
         } finally {
-          parquet = null;
-          files = null;
-          current = null;
+          try {
+            if (snapshot != null) {
+              snapshot.close();
+            }
+          } finally {
+            snapshot = null;
+            parquet = null;
+            files = null;
+            current = null;
+          }
         }
       }
     }

@@ -51,11 +51,30 @@ public final class NativePaimonParquetReader implements AutoCloseable {
   }
 
   public VectorSchemaRoot next() {
+    return importBatch(this::exportNext);
+  }
+
+  public boolean exportNext(long array, long schema) {
+    if (handle == 0) {
+      throw new IllegalStateException("Paimon Parquet reader is closed");
+    }
+    return NativeParquet.parquetDecoderNext(handle, array, schema);
+  }
+
+  public long maxRowGroupBytes() {
+    return NativeParquet.parquetDecoderMaxRowGroupBytes(handle);
+  }
+
+  @FunctionalInterface
+  interface BatchExporter {
+    boolean next(long array, long schema);
+  }
+
+  static VectorSchemaRoot importBatch(BatchExporter exporter) {
     try (ArrowArray array = ArrowArray.allocateNew(NativeAllocator.SHARED);
         ArrowSchema schema = ArrowSchema.allocateNew(NativeAllocator.SHARED)) {
       try {
-        if (!NativeParquet.parquetDecoderNext(
-            handle, array.memoryAddress(), schema.memoryAddress())) {
+        if (!exporter.next(array.memoryAddress(), schema.memoryAddress())) {
           return null;
         }
         VectorSchemaRoot root =

@@ -23,6 +23,7 @@ def main():
     owners = {
         "streamfusion": "Java_tech_streamfusion_Native_",
         "streamfusion-kafka": "Java_tech_streamfusion_kafka_NativeKafka_",
+        "streamfusion-paimon": "Java_tech_streamfusion_paimon_NativePaimon_",
         "streamfusion-parquet": "Java_tech_streamfusion_parquet_NativeParquet_",
     }
     for name in ("json", "csv", "raw", "avro", "protobuf"):
@@ -58,6 +59,10 @@ def main():
             continue
         suffix = "dylib" if sys.platform == "darwin" else "so"
         library = args.libraries / f"lib{cdylibs[0]['name']}.{suffix}"
+        if name == "streamfusion-paimon" and not library.exists():
+            # The optional Maven paimon profile builds this library. Its JNI tests require it;
+            # the default reactor still checks the dependency graph without building the module.
+            continue
         command = ["nm", "-gU"] if sys.platform == "darwin" else ["nm", "-D", "--defined-only"]
         symbols = subprocess.check_output(command + [str(library)], text=True)
         exports = set(re.findall(r"(?:^|\s)_?(Java_\w+)", symbols, re.MULTILINE))

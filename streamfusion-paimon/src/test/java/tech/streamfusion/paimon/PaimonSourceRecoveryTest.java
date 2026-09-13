@@ -29,7 +29,8 @@ class PaimonSourceRecoveryTest {
   @ParameterizedTest
   @ValueSource(booleans = {false, true})
   void checkpointOnlyAdvancesAfterEmissionAndRestoresInsideBatch(boolean tail) throws Exception {
-    FileStoreTable table = PaimonMergeEngineTest.table(Map.of("changelog-producer", "input"));
+    FileStoreTable table = PaimonMergeEngineTest.table(
+        Map.of("changelog-producer", "input", "write-only", "true"));
     var read = table.newReadBuilder().withProjection(new int[] {0, 3});
     var scan = read.newStreamScan();
     List<Split> splits;
@@ -38,10 +39,12 @@ class PaimonSourceRecoveryTest {
             table, false, new PaimonChangelogSinkWriteTest.MemoryState(), 7)) {
       writer.write(PaimonMergeEngineTest.rows(60, false));
       writer.commit(1);
+      writer.write(PaimonMergeEngineTest.rows(90, false));
+      writer.commit(2);
       splits = scan.plan().splits();
       if (tail) {
         writer.write(PaimonMergeEngineTest.rows(240, false));
-        writer.commit(2);
+        writer.commit(3);
         splits = scan.plan().splits();
       }
     }

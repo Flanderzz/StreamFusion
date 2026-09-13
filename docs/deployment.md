@@ -127,7 +127,9 @@ The release build enables `mimalloc` by default.
 | `native/engine` | Operators, planner bridge, Rust state, and the core `Native` JNI entry points; produces `libstreamfusion`. |
 | `native/bridge` | JNI guards, Arrow C Data import/export, handle accounting, Flink numeric/text semantics, and format ABI types. No JNI exports of its own. |
 | `native/format-support` | Shared decoder lifecycle, parse-error isolation, key/value composition, CDC gathering, and format facade macros. No engine or third-party format implementation. |
-| `native/kafka`, `native/parquet` | Connector-specific JNI entry points and implementation. Kafka owns its existing sink encoders. |
+| `native/kafka` | Kafka-specific JNI entry points, source implementation and existing sink encoders. |
+| `native/parquet` | Parquet format encoding and decoding, including reads through host FileIO. |
+| `native/paimon` | Optional Paimon snapshot merge, bundled in `streamfusion-paimon`; consumes the Parquet library's Arrow C Data output. |
 | `native/json`, `native/csv`, `native/raw`, `native/avro`, `native/protobuf` | One decoder library per format JAR. Avro and Avro-Confluent-Registry continue to share the Avro native library. |
 | `native/native-build` | Shared build dependency for library-local mimalloc aliases and the checked free/realloc shim. |
 | `native/integration-tests` | Rust round trips that exercise both connector encoding and format decoding. |

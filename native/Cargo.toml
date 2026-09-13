@@ -12,6 +12,7 @@ members = [
   "avro",
   "protobuf",
   "parquet",
+  "paimon",
   "integration-tests",
 ]
 

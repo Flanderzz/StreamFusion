@@ -16,13 +16,58 @@ import org.apache.paimon.fs.Path;
 import org.apache.paimon.fs.local.LocalFileIO;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.FileStoreTableFactory;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import tech.streamfusion.planner.NativePlanner;
 
 class PaimonSourceSqlTest {
+  @Test
+  void sourceUidMatchesPaimonAcrossGraphChanges() throws Exception {
+    List<List<String>> twins = new ArrayList<>();
+    for (boolean nativeSource : new boolean[] {false, true}) {
+      var env = StreamExecutionEnvironment.getExecutionEnvironment();
+      var sql = StreamTableEnvironment.create(env);
+      sql.executeSql(
+          "CREATE CATALOG p WITH ('type'='paimon', 'warehouse'='"
+              + Files.createTempDirectory("paimon-source-uid").toUri()
+              + "')");
+      sql.executeSql("USE CATALOG p");
+      sql.executeSql("CREATE TABLE t (id INT) WITH ('bucket'='-1', 'file.format'='parquet')");
+      if (nativeSource) {
+        NativePlanner.install(sql);
+      }
+      List<String> uids = new ArrayList<>();
+      for (String suffix : List.of("before", "after")) {
+        var stream =
+            sql.toDataStream(
+                sql.sqlQuery(
+                    "SELECT * FROM t /*+ OPTIONS('source.operator-uid.suffix'='"
+                        + suffix
+                        + "') */"));
+        var sources =
+            stream.getTransformation().getTransitivePredecessors().stream()
+                .filter(
+                    t ->
+                        t
+                            instanceof
+                            org.apache.flink.streaming.api.transformations.SourceTransformation)
+                .toList();
+        assertEquals(1, sources.size());
+        assertNotNull(sources.get(0).getUid());
+        if (nativeSource) {
+          assertEquals("native-paimon-source", sources.get(0).getName());
+        }
+        uids.add(sources.get(0).getUid());
+      }
+      assertNotEquals(uids.get(0), uids.get(1));
+      twins.add(uids);
+    }
+    assertEquals(twins.get(0), twins.get(1));
+  }
+
   @ParameterizedTest
-  @CsvSource({"false,false", "true,false", "false,true"})
+  @CsvSource({"false,false", "true,false", "false,true", "true,true"})
   void streamingSqlReadsSnapshotThenNewCommit(boolean primaryKey, boolean watermark)
       throws Exception {
     List<List<String>> twins = new ArrayList<>();
@@ -43,7 +88,7 @@ class PaimonSourceSqlTest {
               + (primaryKey ? "2" : "-1")
               + "', 'file.format'='parquet', 'changelog-producer'='"
               + (primaryKey ? "input" : "none")
-              + "', 'continuous.discovery-interval'='10 ms')");
+              + "', 'write-only'='true', 'continuous.discovery-interval'='10 ms')");
       FileStoreTable table =
           FileStoreTableFactory.create(
               LocalFileIO.create(), new Path(warehouse.resolve("default.db/t").toUri()));
@@ -59,6 +104,17 @@ class PaimonSourceSqlTest {
                   org.apache.paimon.data.Timestamp.fromEpochMillis(i * 2000L)));
         }
         commit.commit(1, writer.prepareCommit(true, 1));
+        if (primaryKey) {
+          for (int i = 0; i < 3; i++) {
+            writer.write(
+                GenericRow.of(
+                    i,
+                    BinaryString.fromString("merged"),
+                    BinaryString.fromString("p"),
+                    org.apache.paimon.data.Timestamp.fromEpochMillis(i * 2000L)));
+          }
+          commit.commit(2, writer.prepareCommit(true, 2));
+        }
         var plan = nativeSource ? NativePlanner.install(sql) : null;
         var result = sql.executeSql("SELECT ts, pt, id, v FROM t WHERE id >= 0");
         var executor = Executors.newSingleThreadExecutor();
@@ -87,7 +143,8 @@ class PaimonSourceSqlTest {
                       BinaryString.fromString("p"),
                       org.apache.paimon.data.Timestamp.fromEpochMillis(i * 2000L)));
             }
-            commit.commit(2, writer.prepareCommit(true, 2));
+            int checkpoint = primaryKey ? 3 : 2;
+            commit.commit(checkpoint, writer.prepareCommit(true, checkpoint));
             twins.add(collected.get(45, TimeUnit.SECONDS));
             if (plan != null) {
               assertTrue(plan.substitutions() > 0, plan.explainSummary());

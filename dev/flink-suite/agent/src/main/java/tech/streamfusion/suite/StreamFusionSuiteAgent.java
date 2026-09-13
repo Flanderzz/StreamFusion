@@ -42,6 +42,9 @@ public final class StreamFusionSuiteAgent {
       "tech.streamfusion.paimon.NativePaimonParquetWriter";
   private static final String NATIVE_PAIMON_KEY_VALUE_FILE_WRITER =
       "tech.streamfusion.paimon.NativePaimonKeyValueFileWriter";
+  private static final String NATIVE_PAIMON_SNAPSHOT_READER =
+      "tech.streamfusion.paimon.NativePaimonSnapshotReader";
+  private static final AtomicBoolean NATIVE_PAIMON_SNAPSHOT_REPORTED = new AtomicBoolean();
   private static final AtomicBoolean ACTIVATION_REPORTED = new AtomicBoolean();
   private static final AtomicBoolean HEAP_STATE_REPORTED = new AtomicBoolean();
   private static final AtomicBoolean NATIVE_MEMORY_STATE_REPORTED = new AtomicBoolean();
@@ -116,6 +119,12 @@ public final class StreamFusionSuiteAgent {
                     Advice.to(ReportNativePaimonLevelZeroFile.class)
                         .on(named("write")
                             .and(takesArgument(0, named("org.apache.paimon.data.BinaryRow"))))))
+        .type(named(NATIVE_PAIMON_SNAPSHOT_READER))
+        .transform(
+            (builder, type, classLoader, module, protectionDomain) ->
+                builder.visit(
+                    Advice.to(ReportNativePaimonSnapshot.class)
+                        .on(named("next").and(takesArguments(0)))))
         .installOn(instrumentation);
   }
 
@@ -388,6 +397,18 @@ public final class StreamFusionSuiteAgent {
     static void exit() {
       if (StreamFusionSuiteAgent.reportNativePaimonLevelZeroFile()) {
         System.err.println("StreamFusion upstream Paimon suite wrote a native Paimon level-0 file");
+      }
+    }
+  }
+  public static boolean reportNativePaimonSnapshot() {
+    return NATIVE_PAIMON_SNAPSHOT_REPORTED.compareAndSet(false, true);
+  }
+
+  public static final class ReportNativePaimonSnapshot {
+    @Advice.OnMethodExit
+    static void exit(@Advice.Return(typing = Assigner.Typing.DYNAMIC) Object batch) {
+      if (batch != null && StreamFusionSuiteAgent.reportNativePaimonSnapshot()) {
+        System.err.println("StreamFusion upstream Paimon suite merged a native snapshot batch");
       }
     }
   }

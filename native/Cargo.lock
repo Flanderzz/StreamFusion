@@ -3396,6 +3396,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "streamfusion-paimon"
+version = "0.1.0-rc2"
+dependencies = [
+ "arrow",
+ "jni",
+ "libmimalloc-sys",
+ "streamfusion-bridge",
+ "streamfusion-native-build",
+]
+
+[[package]]
 name = "streamfusion-parquet"
 version = "0.1.0-rc2"
 dependencies = [

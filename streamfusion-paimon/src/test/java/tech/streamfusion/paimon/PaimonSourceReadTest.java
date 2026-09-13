@@ -34,7 +34,7 @@ class PaimonSourceReadTest {
       writer.commit(1);
       var initial = scan.plan().splits();
       assertFalse(initial.isEmpty());
-      assertRead(table, read, initial, false);
+      assertRead(table, read, initial, true);
       writer.write(PaimonMergeEngineTest.rows(110, false));
       writer.commit(2);
       var changes = scan.plan().splits();
@@ -149,7 +149,7 @@ class PaimonSourceReadTest {
             finished = !fetched.finishedSplits().isEmpty();
             fetched.recycle();
           }
-          assertEquals(expectNative, reader.nativeFilesRead() > 0);
+          assertEquals(expectNative, reader.nativeFilesRead() > 0 || reader.nativeSnapshotsRead() > 0);
         }
         assertEquals(expected.subList(skip, expected.size()), actual);
       }

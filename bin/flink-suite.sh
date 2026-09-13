@@ -360,7 +360,8 @@ fi
 if [[ "${SUITE_MODE}" == "paimon" && ${TEST_STATUS} -eq 0 ]]; then
   for required_marker in \
     "StreamFusion upstream Paimon suite wrote a native Paimon bundle" \
-    "StreamFusion upstream Paimon suite wrote a native Paimon level-0 file"; do
+    "StreamFusion upstream Paimon suite wrote a native Paimon level-0 file" \
+    "StreamFusion upstream Paimon suite merged a native snapshot batch"; do
     if ! grep -RqsF "${required_marker}" "${REPORT_ROOT}"; then
       echo "The upstream Paimon suite did not prove: ${required_marker}" >&2
       exit 1

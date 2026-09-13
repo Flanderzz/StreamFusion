@@ -19,16 +19,16 @@ checkpoint serialization. A task-side reader emits Arrow batches into the native
 | Read phase | Implementation |
 |---|---|
 | Append snapshot and subsequent committed data | Native Parquet decoding into Arrow |
-| Primary-key initial snapshot | Java Paimon reads and merges versions; the completed logical rows are converted into Arrow |
+| Primary-key initial snapshot | Native Parquet for raw-convertible files; native sorted-run merge for admitted deduplication splits; Java merge-to-Arrow for other splits |
 | Primary-key changelog tailing | Native Parquet decoding of value columns and the stored row-kind byte |
 
 Primary-key tailing requires `changelog-producer = input`, `lookup`, or `full-compaction`, and
 Parquet changelog files. The producer has already generated the changes; the source preserves
 `+I`, `-U`, `+U`, and `-D` without another merge. Default startup reads the current snapshot before
-following commits. `scan.mode = latest` starts with new commits only. Native snapshot merging
-using paimon-rust is tracked in [#53](https://github.com/datafusion-contrib/StreamFusion/issues/53).
-The [snapshot-merge design draft](https://github.com/datafusion-contrib/StreamFusion/blob/main/.claude/research/paimon-native-snapshot-merge-design.md)
-describes the proposed Java file/run planning and Arrow batch interface; it is not implemented.
+following commits. `scan.mode = latest` starts with new commits only. Remaining snapshot merge coverage
+is tracked in [#53](https://github.com/datafusion-contrib/StreamFusion/issues/53). The
+[snapshot-merge design](https://github.com/datafusion-contrib/StreamFusion/blob/main/.claude/research/paimon-native-snapshot-merge-design.md)
+records the Java planning and Arrow batch interface.
 
 The native decoder calls Paimon's seekable `FileIO` through a reusable 64 KiB transfer buffer.
 parquet-rs reads the projected column chunks and decodes batches of up to 4,096 rows. It does not
@@ -42,11 +42,100 @@ are preserved. Query predicates remain Flink residual filters; this first source
 query predicates into its Java scan or native decoder. Checkpoints save the number of emitted
 logical rows per split with Paimon's existing serializer. Recovery skips precisely that many rows,
 including positions within a new batch size. Prefetched rows do not advance the checkpoint.
+`source.operator-uid.suffix` uses Paimon's released UID generation, preserving explicit source
+identity when restoring savepoints after job graph changes.
 
 The reader deliberately retains Java decoding and row-to-Arrow conversion for splits requiring
 schema evolution, deletion-vector selection, or non-Parquet historical files, and for specialized
 split representations. This preserves those files' Java read semantics within an admitted source.
-The initial primary-key snapshot always uses Java, including its merge engine and delete handling.
+Primary-key snapshot splits needing unsupported merge semantics retain Java, including its merge
+engine and delete handling.
+
+### Native initial snapshot merge
+
+Java Paimon's released `IntervalPartition` groups each snapshot split into disjoint key sections
+and sorted runs. Native code merges the runs in a section while opening each run's files in order.
+The optional Paimon native library adapts paimon-rust's loser tree, Arrow key comparison and batch
+output gathering. It requests Arrow batches from the separate Parquet library through a Java
+callback that forwards C Data addresses. No Java row or Java Arrow vector is materialized between
+decoding and merging. Java still owns file access, schemas, discovery and checkpoints.
+
+The native merger currently admits fixed-bucket `deduplicate` tables with default sequence and
+delete handling, the default loser-tree sort engine, and nonempty stored keys made of `INT`,
+`BIGINT` and `STRING` fields. Values use the supported source types. It requires current-schema
+Parquet files without deletion vectors. These snapshot combinations retain Java:
+
+- User sequence fields, non-default delete handling, other merge engines, dynamic/postpone
+  buckets, unsupported key types and specialized split representations.
+- Overlapping file sequence-number intervals within a section. This conservative check avoids
+  importing a sequence-tie rule that might select a different winner from released Java.
+- Sections exceeding `sort-spill-threshold`, or the encoded row-group admission budget below.
+
+For raw-convertible primary-key snapshot splits with known delete counts and no deletion vectors,
+the source follows Java's raw reader: native Parquet values emit insert rows. This path does not
+need a merge. For admitted merge splits, it drops winning retracts and retains the winning add
+kind. Changelog tailing continues to preserve all stored changes.
+
+`sort-spill-buffer-size` supplies the snapshot merger's retained-buffer budget. Before emission,
+the reader inspects file footers and requires the sum of each run's largest compressed-plus-
+uncompressed row-group size to fit half that budget. Larger splits retain Java's spill-capable
+reader. Native merging accounts for retained Arrow inputs, encoded keys, the current winner and
+pending output references; exceeding the budget fails the read. Output flushes by bytes as well
+as rows, and completed batches are reclaimed even during long stretches of deleted keys.
+
+These are encoded-data admission and retained-buffer limits, not a strict total-process or Flink
+managed-memory reservation. Transient decoder/output allocations, an individual wide record,
+Java stream buffers and the source handover queue add memory. A resource or storage failure after
+emission fails the attempt; it never silently switches readers in the middle of a split.
+
+Recovery still checkpoints emitted logical rows after merging and delete removal. Replaying the
+same split and skipping that prefix supports changes in batch size and Java/native restoration
+in either direction. It rereads the prefix rather than persisting native pointers or per-file
+version offsets.
+
+`PaimonSnapshotMergeTest` checks stock- and native-written overlapping snapshots, nested values,
+projections omitting keys, partitioned composite keys, Java/native restoration and admission
+fallbacks. `PaimonSourceRecoveryTest` also restores the asynchronous source reader inside a merge.
+The Rust tests cover keys spanning input batches, 100,000-version and delete-only inputs,
+byte-triggered output flushes, and budget/storage failures. The SQL harness requires a marker
+proving that a native snapshot merger emitted a batch.
+
+The Paimon 2.0.0 SQL harness passed 112 result/recovery cases across `ReadWriteTableITCase`,
+`ContinuousFileStoreITCase`, `ComputedColumnAndWatermarkTableITCase`,
+`FullCompactionFileStoreITCase`, `PrimaryKeyFileStoreTableITCase` and `FlinkJobRecoveryITCase`.
+The additional source-reuse plan assertion described below remains failing. The final targeted
+primary-key/savepoint run passed all 37 cases and all native write/merge markers:
+
+```bash
+FLINK_SUITE_TEST='org.apache.paimon.flink.PrimaryKeyFileStoreTableITCase,org.apache.paimon.flink.FlinkJobRecoveryITCase' \
+  bin/flink-suite.sh paimon
+```
+
+### Snapshot catch-up diagnostic
+
+`PaimonSnapshotMergeBenchmark` writes 65,536 keys over one, four and eight commits, including
+updates, deletes, strings and nested arrays, before timing. It compares the existing Java
+merge-to-Arrow path with native snapshot reading, including Java run planning and footer checks,
+file open/close, byte reads, decoding, merging, final Arrow import and an id checksum. Both paths
+produce Arrow. One warmup and three measured runs alternate engine order and report best times.
+Counts and checksums must match, and every native run must exercise the merger.
+
+| Commits | Java merge to Arrow | Native merge to Arrow | Throughput ratio |
+|---|---:|---:|---:|
+| 1 | 0.036 s | 0.015 s | 2.36× |
+| 4 | 0.073 s | 0.036 s | 2.03× |
+| 8 | 0.128 s | 0.069 s | 1.84× |
+
+These release measurements describe local snapshot catch-up, not whole-job or remote-storage
+performance. Run with:
+
+```bash
+SF_PAIMON_SNAPSHOT_BENCHMARK=true mvn test -Pbench,paimon \
+  -pl :streamfusion-paimon -am -Dtest=PaimonSnapshotMergeBenchmark \
+  -Dsurefire.failIfNoSpecifiedTests=false
+```
+
+`SF_PAIMON_SNAPSHOT_ROWS` changes the key count.
 
 ### Source admission and fallbacks
 
@@ -71,6 +160,12 @@ source at planning time:
 `streamfusion.operator.paimonSource.enabled=false` disables the substitution. The Parquet module
 must be installed alongside the Paimon module, as for the sink. Native format-factory discovery
 is not required for this reader: it calls the decoder directly on Java-planned files.
+
+Repeated native scans currently use independent readers. Flink's later projection-unifying source
+reuse pass does not recognize the native source node; safe Arrow sharing across these scans is
+remaining work in [#27](https://github.com/datafusion-contrib/StreamFusion/issues/27). Consequently,
+Paimon's `ContinuousFileStoreITCase.testSourceReuseWithScanPushDown` still fails its compiled-plan
+`Reused` assertion with native sources enabled. The default harness reports this planning failure.
 
 `PaimonSourceReadTest` checks append/primary-key twin readers, row kinds, nested values, partition
 values, historical schema mapping, projections, `latest` startup and within-batch resume.

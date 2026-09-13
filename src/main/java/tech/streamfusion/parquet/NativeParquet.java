@@ -29,6 +29,8 @@ public final class NativeParquet {
 
   public static native void closeParquetDecoder(long handle);
 
+  public static native long parquetDecoderMaxRowGroupBytes(long handle);
+
   public static native long createParquetEncoder(
       long schemaAddress,
       int[] partitionColumns,

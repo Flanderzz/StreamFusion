@@ -1,9 +1,13 @@
 # Native Paimon snapshot merging with Java file planning
 
-Draft, 2026-09-13. Design for the proposed boundary in
-[#53](https://github.com/datafusion-contrib/StreamFusion/issues/53). This is a design and API
-feasibility check; native snapshot merging is not implemented or benchmarked yet. The shipped
-source still uses Java for primary-key initial snapshots.
+Design recorded 2026-09-13 for [#53](https://github.com/datafusion-contrib/StreamFusion/issues/53).
+The first deduplication increment is now implemented; [connector coverage](../../docs/connectors/paimon.md)
+is the current behavior and validation reference. The original proposal below records the rationale.
+
+Implementation refinements: raw-convertible snapshots follow Java's insert-only raw path;
+ambiguous file sequence intervals retain Java; native merge keys initially cover INT, BIGINT and
+STRING. Footer admission and retained-Arrow limits do not constitute a strict process-wide managed
+memory reservation. Broader merge policies, sequence ties, schemas and deletion vectors remain #53.
 
 ## Proposed flow
 

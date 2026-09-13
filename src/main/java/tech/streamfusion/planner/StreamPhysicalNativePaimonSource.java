@@ -13,7 +13,7 @@ import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalR
 import org.apache.flink.table.planner.utils.ShortcutUtils;
 import org.apache.paimon.table.FileStoreTable;
 
-/** Streaming Paimon scan whose task reader emits Arrow and retains Java snapshot merging. */
+/** Streaming Paimon scan with native Parquet reads and admitted native snapshot merging. */
 public final class StreamPhysicalNativePaimonSource extends AbstractRelNode
     implements StreamPhysicalRel, ColumnarOutput {
   private final RelDataType output;
@@ -53,7 +53,7 @@ public final class StreamPhysicalNativePaimonSource extends AbstractRelNode
     return NativeRelDigests.withBarrier(
         super.explainTerms(writer)
             .item("table", table.name())
-            .item("snapshotMerge", "Java")
+            .item("snapshotMerge", "native deduplicate / Java fallback")
             .item("fileDecode", "native Parquet"),
         reuseBarrier);
   }

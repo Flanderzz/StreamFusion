@@ -21,11 +21,13 @@ backstop covers records discarded during task failure.
 
 paimon-rust's table/data_file_reader.rs, table/kv_file_reader.rs and arrow/format/parquet.rs were
 reviewed. They couple Parquet decode with their own schema manager, filesystem and read plans.
-For this boundary, the already-released parquet-rs dependency is sufficient; no paimon-rust source
-or dependency is imported. Java merges the initial primary-key snapshot and those logical rows
-are converted to Arrow. The agreed follow-up is
-[#53](https://github.com/datafusion-contrib/StreamFusion/issues/53), which will adapt paimon-rust's
-snapshot merge without taking over the Java table lifecycle. Batch SQL remains out of scope.
+For file decoding, the already-released parquet-rs dependency is sufficient; no paimon-rust
+filesystem or table-reader dependency is imported. Java merges unsupported initial primary-key
+snapshot combinations and those logical rows are converted to Arrow. The first native
+deduplication snapshot increment now extracts the loser tree from paimon-rust and adapts its Arrow
+cursor/output algorithm into the optional Paimon library.
+[#53](https://github.com/datafusion-contrib/StreamFusion/issues/53) tracks broader snapshot merge
+coverage while retaining the Java table lifecycle. Batch SQL remains out of scope.
 
 The source's native file path is restricted to the current schema without deletion-vector
 selections. Historical schemas, deletion vectors, historical non-Parquet files and specialized
@@ -35,3 +37,15 @@ filter is silently consumed. Advanced source options and abilities decline at pl
 
 The connector coverage page describes the exact gates, memory boundary, validation and release
 file-reader diagnostic (1.30x append and 2.18x changelog throughput on the local fixture).
+
+Native snapshot sections and sorted runs are planned by released Java `IntervalPartition`.
+A Java callback forwards Arrow C structs between the Parquet and Paimon libraries without a
+row conversion or a cross-library Rust handle. The extracted Rust tree is unchanged apart from
+visibility; cursors and output gathering are adapted to synchronous batch pulls and incremental
+winner retention. Completed batches can be reclaimed even when many keys produce no output.
+File sequence intervals that could contain ties retain Java, because the two reference mergers'
+tie traversal differs. Raw-convertible snapshots emit insert rows just like Java's raw reader;
+merge snapshots preserve the winning add kind. Recovery counts emitted merged rows and replays
+the prefix, including when switching between Java and native readers. Apache attribution ships
+in the Paimon JAR's NOTICE. Current coverage, budgets and catch-up measurements are in the
+connector page.

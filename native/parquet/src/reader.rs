@@ -88,6 +88,7 @@ struct ParquetDecoder {
     reader: ParquetRecordBatchReader,
     output: SchemaRef,
     names: Vec<String>,
+    max_row_group_bytes: i64,
 }
 #[no_mangle]
 pub extern "system" fn Java_tech_streamfusion_parquet_NativeParquet_createParquetDecoder<'local>(
@@ -111,6 +112,17 @@ pub extern "system" fn Java_tech_streamfusion_parquet_NativeParquet_createParque
             length: length as u64,
         }));
         let builder = ParquetRecordBatchReaderBuilder::try_new(file).expect("open Parquet file");
+        let max_row_group_bytes = builder
+            .metadata()
+            .row_groups()
+            .iter()
+            .map(|group| {
+                group
+                    .compressed_size()
+                    .saturating_add(group.total_byte_size())
+            })
+            .max()
+            .unwrap_or(0);
         let indices: Vec<usize> = names
             .iter()
             .map(|name| {
@@ -130,7 +142,18 @@ pub extern "system" fn Java_tech_streamfusion_parquet_NativeParquet_createParque
             reader,
             output: schema,
             names,
+            max_row_group_bytes,
         })
+    })
+}
+#[no_mangle]
+pub extern "system" fn Java_tech_streamfusion_parquet_NativeParquet_parquetDecoderMaxRowGroupBytes(
+    env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+) -> jlong {
+    bridge::jni_guard(env, |_| unsafe {
+        (*(handle as *mut ParquetDecoder)).max_row_group_bytes
     })
 }
 #[no_mangle]

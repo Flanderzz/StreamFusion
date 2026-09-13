@@ -23,8 +23,14 @@ ingress RowData-to-Arrow conversion. Unsupported merge combinations retain the s
 
 Paimon's streaming source applies the same boundary in reverse: Java plans committed files and
 owns storage access, while native Parquet decoding emits Arrow directly for append files and
-primary-key changelog files. Initial primary-key snapshot merging stays in Java and pays one
+primary-key changelog files. Admitted initial deduplication snapshots also merge in native code,
+using paimon-rust's loser tree and Arrow cursors. Other snapshot merges stay in Java and pay one
 row-to-Arrow conversion after the merge. The
 [source file-reader diagnostic](../connectors/paimon.md#source-file-reader-diagnostic) measured
 1.30× append and 2.18× changelog throughput against the stock reader, including the Java byte-range
 bridge and Arrow import. These numbers measure local file reads, not whole Flink jobs.
+
+The [snapshot catch-up diagnostic](../connectors/paimon.md#snapshot-catch-up-diagnostic) measured
+1.84–2.36× throughput over the Java merge-to-Arrow path on one, four and eight commits. Both paths
+include storage reads and emit Arrow. Keeping one running winner per key and flushing retained
+output references by bytes avoids pinning all input versions during snapshot catch-up.

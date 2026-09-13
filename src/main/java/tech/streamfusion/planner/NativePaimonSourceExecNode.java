@@ -62,6 +62,10 @@ final class NativePaimonSourceExecNode extends ExecNodeBase<ArrowBatch>
         env.fromSource(
             source, strategy, "native-paimon-source", ArrowBatchTypeInformation.INSTANCE);
     Options options = Options.fromMap(table.options());
+    String uidSuffix = options.get(FlinkConnectorOptions.SOURCE_OPERATOR_UID_SUFFIX);
+    if (!org.apache.flink.util.StringUtils.isNullOrWhitespaceOnly(uidSuffix)) {
+      stream.uid(FlinkConnectorOptions.generateCustomUid("Source", table.name(), uidSuffix));
+    }
     Integer parallelism = options.get(FlinkConnectorOptions.SCAN_PARALLELISM);
     boolean infer =
         Boolean.parseBoolean(
