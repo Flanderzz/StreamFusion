@@ -27,6 +27,8 @@ Parquet changelog files. The producer has already generated the changes; the sou
 `+I`, `-U`, `+U`, and `-D` without another merge. Default startup reads the current snapshot before
 following commits. `scan.mode = latest` starts with new commits only. Native snapshot merging
 using paimon-rust is tracked in [#53](https://github.com/datafusion-contrib/StreamFusion/issues/53).
+The [snapshot-merge design draft](https://github.com/datafusion-contrib/StreamFusion/blob/main/.claude/research/paimon-native-snapshot-merge-design.md)
+describes the proposed Java file/run planning and Arrow batch interface; it is not implemented.
 
 The native decoder calls Paimon's seekable `FileIO` through a reusable 64 KiB transfer buffer.
 parquet-rs reads the projected column chunks and decodes batches of up to 4,096 rows. It does not
