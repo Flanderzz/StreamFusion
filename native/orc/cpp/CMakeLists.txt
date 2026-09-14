@@ -12,7 +12,9 @@ include(FetchContent)
 
 # ORC's release defaults to a Git revision of zlib. Use a published archive instead.
 FetchContent_Declare(ZLIB
-  URL https://zlib.net/fossils/zlib-1.3.2.tar.gz
+  URL
+    https://github.com/madler/zlib/releases/download/v1.3.2/zlib-1.3.2.tar.gz
+    https://zlib.net/fossils/zlib-1.3.2.tar.gz
   URL_HASH SHA256=bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16)
 set(BUILD_JAVA OFF CACHE BOOL "" FORCE)
 set(BUILD_CPP_TESTS OFF CACHE BOOL "" FORCE)

@@ -37,7 +37,7 @@ class NativePlannerTest {
             .map(provider -> provider.type().getSimpleName())
             .collect(Collectors.toSet());
     assertEquals(
-        Set.of("KafkaPlannerExtension", "ParquetPlannerExtension"),
+        Set.of("KafkaPlannerExtension", "ParquetPlannerExtension", "OrcPlannerExtension"),
         extensions);
   }
 

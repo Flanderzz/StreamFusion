@@ -112,9 +112,16 @@ and 200,000-change writer diagnostic measured:
 
 These are local diagnostics, not whole-job throughput claims. The reader is currently slower
 than Java's checksum scan: native reading also produces Arrow and copies from ORC vectors,
-whereas Java's comparator consumes rows directly. Its current purpose is format coverage for
-the columnar pipeline and snapshot merger. It needs further optimization before claiming a
-standalone read speedup. The writer includes row-to-Arrow conversion, routing, sorting, encoding,
+whereas Java's comparator consumes rows directly. Both readers project four columns, including
+nested data, but the checksum touches only the first integer column. Native reading materializes
+every projected column into Arrow; Java does not perform the matching Java-to-Arrow conversion.
+The current ORC adapter appends values individually and allocates Arrow output for each batch.
+Host FileIO callbacks and Arrow import also occur within the timed native path. These are known
+additional operations, not a profile attributing the slowdown to any one of them. A comparison
+of equivalent Arrow output is needed to measure the benefit to a downstream native pipeline.
+The reader's current purpose is format coverage for that pipeline and the snapshot merger.
+It needs further optimization before claiming a standalone read speedup.
+The writer includes row-to-Arrow conversion, routing, sorting, encoding,
 and Paimon's checkpoint/compaction work; full compaction remains Java.
 
 ```bash

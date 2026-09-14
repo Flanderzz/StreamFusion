@@ -128,6 +128,9 @@ make, Python 3 with venv/pip, and normal platform development headers are requir
 3.25 or newer when available, otherwise bootstraps the pinned CMake 3.31.10 binary wheel into the
 Cargo target directory. macOS uses the Xcode command-line tools; Linux release containers include
 the C++ toolchain. Codec dependencies are static; only platform libraries remain dynamic.
+The pinned zlib archive is fetched from its official GitHub release, with zlib.net as a fallback;
+both locations must match the same published SHA-256. This avoids depending on a single download
+endpoint when fresh builds run concurrently in CI.
 The same build works for the supported macOS Apple Silicon and Linux x86_64 release targets;
 local Intel macOS cross-builds and Linux ARM64 builds use their corresponding toolchains.
 Build caches stay under the Cargo target/profile directory. Third-party license texts travel in
