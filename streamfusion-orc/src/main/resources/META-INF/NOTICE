@@ -20,3 +20,6 @@ Copyright 2023 The Apache Software Foundation
 
 This product includes software developed at
 The Apache Software Foundation (http://www.apache.org/).
+
+The Rust reader uses orc-rust 0.9.0 (Apache-2.0) and Apache Arrow Rust 59,
+with Arrow C Data transfer into the runtime's Arrow Rust 58.

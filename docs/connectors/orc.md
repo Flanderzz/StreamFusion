@@ -7,20 +7,23 @@ Batch jobs retain the stock connector.
 ## Architecture
 
 Flink/Paimon keep file discovery, filesystem plugins, credentials, partition and bucket routing
-rules, commits, checkpoints, compaction and statistics extraction. Apache ORC C++ reads and writes
-ORC vectors; a small nanoarrow adapter converts those vectors to/from Arrow C Data. This copies
-columns between ORC and Arrow representations, without materializing Java rows. Java owns the
-seekable input and recoverable output streams, with bounded JNI transfers. ORC, Parquet and the
-engine remain separate native libraries.
+rules, commits, checkpoints, compaction and statistics extraction. Production reads use released
+`orc-rust` 0.9.0. Its Arrow 59 output crosses the standard C Data ABI into our Arrow 58 operators
+without copying buffers. Projection order and logical types are restored, and CHAR values are
+trimmed recursively in arrays, maps and rows to match Java. Apache ORC C++ still writes ORC
+vectors through the nanoarrow adapter. Java owns the seekable input and recoverable output
+streams, with bounded JNI transfers. ORC, Parquet and the engine remain separate native libraries.
 
 Filesystem source scans stay on stock Flink, as with Parquet. Paimon streaming sources use native
 Arrow decoding for append files and changelog files, and the existing native merger for admitted
 primary-key snapshots. The same Java split planning, row-kind handling, projection, restore offsets
 and fallback rules apply to both formats. ORC footers are inspected before a split emits data.
-LZO files, timestamp files written in an unverified timezone, and files without enough variable-width
-statistics to estimate decoder memory, retain Java reading. Snapshot admission adds conservative
-decoded dictionary/payload estimates to ORC's compressed-stripe/decompressor estimate; this is not
-a hard Flink managed-memory reservation.
+LZO files, timestamp files written in an unverified timezone, encrypted files, and files without enough payload or collection-count statistics to estimate
+decoder memory retain Java reading. Rust checks all stripe footers before emitting data.
+Snapshot admission accounts for retained compressed streams, decompression scratch space and
+conservative whole-stripe decoded column/dictionary bounds, including null collection elements.
+Declared compression block sizes are upper bounds; tiny streams are bounded by their decoded
+column sizes plus encoding overhead. This is not a hard Flink managed-memory reservation.
 
 ## Configuration and types
 
@@ -170,9 +173,9 @@ Files are local and warm in the OS cache. `peak_batch_bytes` is Arrow's reported
 the largest output batch, **not peak decoder or process memory**. `io_bytes` counts bytes
 requested through the native readers' host callback; it is unavailable for the Java baseline.
 
-The comparison dependencies and JNI entry points are enabled only by `orc-reader-bench` /
-`reader-comparison`; ordinary builds and deployments keep the existing nanoarrow adapter.
-The comparison profile is for tests, not release packaging.
+The C++ comparison adapters and diagnostic JNI entry points are enabled by `orc-reader-bench` /
+`reader-comparison`. Production reads use the separate orc-rust integration with metadata
+admission and recursive CHAR normalization. The comparison profile is for tests, not packaging.
 
 On an Apple M1 Max (64 GiB RAM, Java 17, UTC), five-trial median times for 262,144 rows were:
 
@@ -206,13 +209,14 @@ Arrow C++ dependency. Its portable source build works here, at the cost of anoth
 
 The candidates match Java on these timed datasets and on 21 scalar edge-case fixtures including
 integer limits, floating-point NaNs/infinities/signed zero, decimal precision 38, Unicode strings,
-binary, historical dates and fractional pre-epoch timestamps. The remaining fixture exposes a
+binary, historical dates and fractional pre-epoch timestamps. The raw-reader fixture exposes a
 specific integration difference: **both candidates return padded CHAR strings**, whereas Java and
-our adapter strip trailing spaces. The test asserts the exact padded result separately, rather
-than treating it as Java parity. A production replacement must normalize CHAR, including nested
-CHAR, and pass the existing source admission, timezone, recovery and snapshot suites. Neither
-candidate is enabled for production by this benchmark change. Linux comparison-profile builds
-and peak decoder memory still need separate verification.
+our adapter strip trailing spaces. The raw comparison asserts the padded result separately. Production orc-rust reads now normalize
+CHAR recursively and pass the existing source admission, timezone, recovery and snapshot suites.
+The production reader switch passed 216 focused tests, including 136 snapshot-key cases,
+40 scalar-value cases, four nested-CHAR cases and source/ORC regressions. Arrow C++ remains only
+a benchmark candidate. Linux comparison-profile builds and peak decoder memory still need
+separate verification.
 
 ### Writing from arrow-rs
 

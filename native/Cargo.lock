@@ -3792,10 +3792,12 @@ version = "0.1.0-rc2"
 dependencies = [
  "arrow 58.3.0",
  "arrow 59.3.0",
+ "bytes",
  "cmake",
  "jni",
  "libmimalloc-sys",
  "orc-rust",
+ "prost 0.13.5",
  "streamfusion-bridge",
  "streamfusion-native-build",
 ]

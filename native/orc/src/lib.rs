@@ -1,10 +1,11 @@
-//! Apache ORC C++ vector batches behind the same host-owned I/O and C Data boundary as Parquet.
+//! Rust ORC decoding and columnar encoding over host-owned I/O and Arrow C Data.
 use jni::objects::{GlobalRef, JObject, JValue};
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::ptr::NonNull;
 use streamfusion_bridge::prelude::*;
 use streamfusion_bridge::{self as bridge, *};
 streamfusion_bridge::link_allocator!();
+mod reader;
 
 #[cfg(feature = "reader-comparison")]
 mod reader_comparison;
@@ -27,6 +28,7 @@ unsafe extern "C" {
     fn sf_orc_writer_finish(writer: *mut c_void) -> c_int;
     fn sf_orc_writer_size(writer: *mut c_void) -> u64;
     fn sf_orc_writer_free(writer: *mut c_void);
+    #[cfg(any(test, feature = "reader-comparison"))]
     fn sf_orc_reader_new(
         schema: *const FFI_ArrowSchema,
         names: *const *const c_char,
@@ -37,8 +39,9 @@ unsafe extern "C" {
         read: extern "C" fn(*mut c_void, u64, u64, *mut c_void) -> c_int,
         context: *mut c_void,
     ) -> *mut c_void;
+    #[cfg(any(test, feature = "reader-comparison"))]
     fn sf_orc_reader_next(reader: *mut c_void, array: *mut FFI_ArrowArray) -> c_int;
-    fn sf_orc_reader_memory(reader: *mut c_void) -> u64;
+    #[cfg(any(test, feature = "reader-comparison"))]
     fn sf_orc_reader_free(reader: *mut c_void);
 }
 fn error() -> String {
@@ -148,18 +151,6 @@ impl Drop for Encoder {
     fn drop(&mut self) {
         unsafe {
             sf_orc_writer_free(self.native.as_ptr());
-        }
-    }
-}
-struct Decoder {
-    native: NonNull<c_void>,
-    _host: Box<HostIo>,
-    schema: SchemaRef,
-}
-impl Drop for Decoder {
-    fn drop(&mut self) {
-        unsafe {
-            sf_orc_reader_free(self.native.as_ptr());
         }
     }
 }
@@ -326,35 +317,22 @@ pub extern "system" fn Java_tech_streamfusion_orc_NativeOrc_createOrcDecoder<'a>
     bridge::jni_guard(env, |env| {
         assert!(length >= 0 && batch_size > 0);
         let schema = import_schema(schema);
-        let ffi = FFI_ArrowSchema::try_from(schema.as_ref()).expect("ORC schema export");
-        let names = strings(env, &names);
-        assert_eq!(names.len(), schema.fields().len());
-        let instant_zone = CString::new(
-            env.get_string(&instant_zone)
-                .expect("ORC instant timezone")
-                .to_str()
-                .unwrap(),
-        )
-        .unwrap();
-        let mut host = Box::new(HostIo::new(env, input, None));
-        let native = unsafe {
-            sf_orc_reader_new(
-                &ffi,
-                pointers(&names).as_ptr(),
-                names.len(),
-                length as u64,
-                batch_size as u64,
-                instant_zone.as_ptr(),
-                read_host,
-                (&mut *host as *mut HostIo).cast(),
-            )
-        };
-        let native = NonNull::new(native).unwrap_or_else(|| panic!("Open ORC reader: {}", error()));
-        into_handle(Decoder {
-            native,
-            _host: host,
+        let names = read_strings(env, &names)
+            .into_iter()
+            .map(|n| n.expect("null ORC name"))
+            .collect();
+        let zone: String = env
+            .get_string(&instant_zone)
+            .expect("ORC instant timezone")
+            .into();
+        into_handle(reader::Decoder::open(
+            HostIo::new(env, input, None),
+            length as u64,
             schema,
-        })
+            names,
+            batch_size as usize,
+            &zone,
+        ))
     })
 }
 #[no_mangle]
@@ -366,18 +344,10 @@ pub extern "system" fn Java_tech_streamfusion_orc_NativeOrc_orcDecoderNext(
     schema: jlong,
 ) -> jboolean {
     bridge::jni_guard(env, |_| {
-        let decoder = unsafe { &mut *(handle as *mut Decoder) };
-        let mut output = FFI_ArrowArray::empty();
-        let status = unsafe { sf_orc_reader_next(decoder.native.as_ptr(), &mut output) };
-        check(status);
-        if status == 0 {
+        let decoder = unsafe { &mut *(handle as *mut reader::Decoder) };
+        let Some(batch) = decoder.next() else {
             return 0;
-        }
-        let data = unsafe {
-            from_ffi_and_data_type(output, DataType::Struct(decoder.schema.fields().clone()))
-        }
-        .expect("Import ORC Arrow batch");
-        let batch = RecordBatch::from(StructArray::from(data));
+        };
         export_record_batch(batch, array, schema);
         1
     })
@@ -389,8 +359,8 @@ pub extern "system" fn Java_tech_streamfusion_orc_NativeOrc_orcDecoderMaxStripeB
     handle: jlong,
 ) -> jlong {
     bridge::jni_guard(env, |_| {
-        let decoder = unsafe { &*(handle as *const Decoder) };
-        unsafe { sf_orc_reader_memory(decoder.native.as_ptr()).min(i64::MAX as u64) as i64 }
+        let decoder = unsafe { &*(handle as *const reader::Decoder) };
+        decoder.memory
     })
 }
 #[no_mangle]
@@ -400,7 +370,7 @@ pub extern "system" fn Java_tech_streamfusion_orc_NativeOrc_closeOrcDecoder(
     handle: jlong,
 ) {
     bridge::jni_guard(env, |_| unsafe {
-        drop(from_handle::<Decoder>(handle));
+        drop(from_handle::<reader::Decoder>(handle));
     })
 }
 

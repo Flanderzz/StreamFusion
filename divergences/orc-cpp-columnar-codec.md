@@ -1,8 +1,9 @@
-# ORC uses the released Apache C++ implementation
+# ORC writing uses the released Apache C++ implementation
 
 Arroyo's filesystem source and Comet's Arrow/JNI ownership patterns remain the model: the host
 owns file lifecycle and the native boundary exchanges columnar batches. ORC differs from Parquet
-because the released, full ORC implementation is C++. It is isolated behind a small C ABI in its
+because its writer uses the released Apache ORC C++ implementation. Production reading now uses
+released orc-rust 0.9.0 with recursive CHAR normalization and the same Java file lifecycle. It is isolated behind a small C ABI in its
 own optional DSO, with the existing Rust JNI guard and ownership layer. It does not link Arrow C++
 or another deployable StreamFusion DSO. nanoarrow copies between ORC's vectors and Arrow C Data;
 strings may borrow input buffers only during the synchronous writer call.

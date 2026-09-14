@@ -145,7 +145,7 @@ Build caches stay under the Cargo target/profile directory. Third-party license 
 | `native/format-support` | Shared decoder lifecycle, parse-error isolation, key/value composition, CDC gathering, and format facade macros. No engine or third-party format implementation. |
 | `native/kafka` | Kafka-specific JNI entry points, source implementation and existing sink encoders. |
 | `native/parquet` | Parquet format encoding and decoding, including reads through host FileIO. |
-| `native/orc` | Apache ORC C++ encoding/decoding and nanoarrow C Data conversion, with host-owned I/O. |
+| `native/orc` | orc-rust decoding and Apache ORC C++ encoding, with host-owned I/O and Arrow C Data. |
 | `native/paimon` | Optional Paimon snapshot merge, bundled in `streamfusion-paimon`; consumes the selected file codec's Arrow C Data output. |
 | `native/json`, `native/csv`, `native/raw`, `native/avro`, `native/protobuf` | One decoder library per format JAR. Avro and Avro-Confluent-Registry continue to share the Avro native library. |
 | `native/native-build` | Shared build dependency for library-local mimalloc aliases and the checked free/realloc shim. |

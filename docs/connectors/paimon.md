@@ -34,7 +34,7 @@ is tracked in [#53](https://github.com/datafusion-contrib/StreamFusion/issues/53
 records the Java planning and Arrow batch interface.
 
 The native decoder calls Paimon's seekable `FileIO` through a reusable 64 KiB transfer buffer.
-parquet-rs or Apache ORC C++ reads the projected columns and decodes batches of up to 4,096 rows. It does not
+parquet-rs or orc-rust reads the projected columns and decodes batches of up to 4,096 rows. It does not
 load an entire file into Java memory. Arrow C Data exports transfer ownership to the source batch;
 closing the reader releases the native decoder and Java input stream. Memory includes compressed
 column chunks, decoder working buffers, and the source's bounded fetch queue; the batch row count
