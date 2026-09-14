@@ -32,6 +32,8 @@ import org.apache.paimon.table.source.DataSplit;
 import org.apache.paimon.table.source.Split;
 import org.apache.paimon.types.RowType;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import tech.streamfusion.operator.RowDataArrowConverter;
 
 /**
@@ -53,9 +55,16 @@ class NativeKeyValueSinkWriteTest {
     return options;
   }
 
-  @Test
-  void compactsNativeFilesInJobAndContinuesSequenceNumbersAcrossRuns() throws Exception {
-    Map<String, String> options = options("num-sorted-run.compaction-trigger", "2");
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  void compactsNativeFilesInJobAndContinuesSequenceNumbersAcrossRuns(boolean thin)
+      throws Exception {
+    Map<String, String> options =
+        options(
+            "num-sorted-run.compaction-trigger",
+            "2",
+            "data-file.thin-mode",
+            Boolean.toString(thin));
     FileStoreTable table =
         PaimonTestTables.createPrimaryKeyTable(Files.createTempDirectory("pk-sink"), options);
     FileStoreTable twin =
@@ -87,6 +96,38 @@ class NativeKeyValueSinkWriteTest {
         "compaction left files above level 0");
   }
 
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  void snapshotSequenceInitializationMatchesStockIncludingMigration(boolean writeOnly)
+      throws Exception {
+    Map<String, String> settings = options("write-only", Boolean.toString(writeOnly));
+    FileStoreTable table =
+        PaimonTestTables.createPrimaryKeyTable(
+            Files.createTempDirectory("pk-sequence-snapshot"), settings);
+    FileStoreTable twin =
+        PaimonTestTables.createPrimaryKeyTable(
+            Files.createTempDirectory("pk-sequence-snapshot-twin"), settings);
+    List<Object[]> rows = PaimonTestTables.changelog(600, 120);
+    for (int run = 0; run < 3; run++) {
+      if (run == 1) {
+        table = table.copy(Map.of("write.sequence-number-init-mode", "snapshot"));
+        twin = twin.copy(Map.of("write.sequence-number-init-mode", "snapshot"));
+      }
+      List<Object[]> chunk = rows.subList(run * 200, (run + 1) * 200);
+      List<CommitMessage> actual = runNatively(table, run + 1, chunk);
+      List<CommitMessage> expected = runStock(twin, run + 1, chunk);
+      assertEquals(sequenceRanges(expected), sequenceRanges(actual), "run " + run);
+      assertEquals(
+          PaimonTestTables.readRows(twin, twin.rowType()),
+          PaimonTestTables.readRows(table, table.rowType()));
+      if (run > 0) {
+        assertEquals(
+            twin.snapshotManager().latestSnapshot().properties(),
+            table.snapshotManager().latestSnapshot().properties());
+      }
+    }
+  }
+
   @Test
   void spillsTheLargestBucketOnceBuffersExceedTheWriteBufferSize() throws Exception {
     Map<String, String> options = options("write-buffer-size", "64 kb", "page-size", "4 kb");
@@ -106,6 +147,29 @@ class NativeKeyValueSinkWriteTest {
     RowType rowType = table.rowType();
     assertEquals(
         PaimonTestTables.readRows(twin, rowType), PaimonTestTables.readRows(table, rowType));
+  }
+
+  @Test
+  void managedMemorySpillsAndReleasesReservationsAfterCommit() throws Exception {
+    Map<String, String> settings = options("sink.use-managed-memory-allocator", "true");
+    FileStoreTable table =
+        PaimonTestTables.createPrimaryKeyTable(Files.createTempDirectory("pk-managed"), settings);
+    FileStoreTable twin =
+        PaimonTestTables.createPrimaryKeyTable(
+            Files.createTempDirectory("pk-managed-twin"), settings);
+    List<Object[]> changes = PaimonTestTables.changelog(3000, 500);
+    List<CommitMessage> committed = runNatively(table, 1, changes);
+    runStock(twin, 1, changes);
+    assertTrue(
+        newFiles(committed).stream()
+            .collect(Collectors.groupingBy(Map.Entry::getKey, Collectors.counting()))
+            .values()
+            .stream()
+            .anyMatch(n -> n > 1),
+        "managed budget forced a bucket to flush");
+    assertEquals(
+        PaimonTestTables.readRows(twin, twin.rowType()),
+        PaimonTestTables.readRows(table, table.rowType()));
   }
 
   @Test
@@ -159,6 +223,14 @@ class NativeKeyValueSinkWriteTest {
                 new MemoryPoolFactory(
                     new HeapMemorySegmentPool(options.writeBufferSize(), options.pageSize())),
                 null));
+    var manager =
+        org.apache.flink.runtime.memory.MemoryManagerBuilder.newBuilder()
+            .setMemorySize(64 * 1024)
+            .setPageSize(4 * 1024)
+            .build();
+    if (Boolean.parseBoolean(table.options().get("sink.use-managed-memory-allocator"))) {
+      write.managedMemory(manager, 64 * 1024);
+    }
     StreamTableWrite router = table.newStreamWriteBuilder().withCommitUser("router").newWrite();
     Map<String, List<RowData>> pending = new LinkedHashMap<>();
     Map<String, BinaryRow> partitions = new LinkedHashMap<>();
@@ -190,6 +262,8 @@ class NativeKeyValueSinkWriteTest {
         messages.add(committable.commitMessage());
       }
       write.close();
+      assertTrue(manager.verifyEmpty(), "commit and close return all native reservations");
+      manager.shutdown();
       commit(table, "native", checkpointId, messages);
       return messages;
     }

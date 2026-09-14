@@ -10,6 +10,7 @@ import org.apache.arrow.vector.FieldVector;
 import org.apache.arrow.vector.TinyIntVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.paimon.CoreOptions;
+import org.apache.paimon.Snapshot;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.flink.sink.Committable;
@@ -82,7 +83,7 @@ public final class NativeKeyValueSinkWrite implements StoreSinkWrite, AutoClosea
   private final int kindColumn;
   private final boolean ignoreDelete;
   private final String mergeOptions;
-  private final long bufferBudget;
+  private PaimonBufferMemory memory;
   private final Integer totalBuckets;
   private final Map<BinaryRow, Map<Integer, BucketBuffer>> buffers = new LinkedHashMap<>();
   private NativePaimonKeyValueFileWriter files;
@@ -105,9 +106,14 @@ public final class NativeKeyValueSinkWrite implements StoreSinkWrite, AutoClosea
     this.kindColumn = table.rowType().getFieldCount();
     this.ignoreDelete = options.ignoreDelete();
     this.mergeOptions = PaimonMergeOptions.encode(table);
-    this.bufferBudget = options.writeBufferSize();
+    this.memory = new PaimonBufferMemory(options.writeBufferSize());
     this.totalBuckets = table.bucketSpec().getNumBuckets();
     this.files = new NativePaimonKeyValueFileWriter(fileTable, layout);
+  }
+
+  void managedMemory(org.apache.flink.runtime.memory.MemoryManager manager, long budget) {
+    memory.close();
+    memory = new PaimonBufferMemory(budget, manager);
   }
 
   private FileStoreTable fileTable(FileStoreTable table) {
@@ -145,7 +151,7 @@ public final class NativeKeyValueSinkWrite implements StoreSinkWrite, AutoClosea
       throw failure;
     }
     buffer.nextSequence += buffer.buffer.push(root, buffer.nextSequence);
-    if (bufferedBytes() > bufferBudget) {
+    while (!memory.update(bufferedBytes())) {
       flush(largestBuffer());
     }
   }
@@ -168,7 +174,7 @@ public final class NativeKeyValueSinkWrite implements StoreSinkWrite, AutoClosea
   }
 
   private BucketBuffer open(BinaryRow partition, int bucket) {
-    long firstSequence = maxCommittedSequence(partition, bucket) + 1;
+    long firstSequence = startingMaxSequence(partition, bucket) + 1;
     PaimonDynamicBucketIndex index =
         table.bucketMode() == BucketMode.HASH_DYNAMIC
             ? new PaimonDynamicBucketIndex(table, partition, bucket, layout)
@@ -199,6 +205,25 @@ public final class NativeKeyValueSinkWrite implements StoreSinkWrite, AutoClosea
   }
 
   /** The largest sequence number in the bucket's committed files, or -1 for an empty bucket. */
+  private long startingMaxSequence(BinaryRow partition, int bucket) {
+    if (postpone
+        || table.coreOptions().writeSequenceNumberInitMode()
+            != CoreOptions.SequenceNumberInitMode.SNAPSHOT) {
+      return maxCommittedSequence(partition, bucket);
+    }
+    Snapshot snapshot = table.snapshotManager().latestSnapshotFromFileSystem();
+    // Paimon persists this property at commit; its reader is package-private in 2.0.0.
+    String maximum =
+        snapshot == null || snapshot.properties() == null
+            ? null
+            : snapshot.properties().get("sequence.generation.max-sequence-number");
+    long snapshotMaximum = maximum == null ? -1 : Long.parseLong(maximum);
+    if (table.coreOptions().writeOnly() && (snapshot == null || maximum != null)) {
+      return snapshotMaximum;
+    }
+    return Math.max(maxCommittedSequence(partition, bucket), snapshotMaximum);
+  }
+
   private long maxCommittedSequence(BinaryRow partition, int bucket) {
     if (postpone) {
       return -1;
@@ -267,6 +292,7 @@ public final class NativeKeyValueSinkWrite implements StoreSinkWrite, AutoClosea
     for (Map<Integer, BucketBuffer> partition : buffers.values()) {
       for (BucketBuffer buffer : partition.values()) {
         flush(buffer);
+        memory.update(bufferedBytes());
         if (!postpone && !buffer.pendingFiles.isEmpty()) {
           delegate.notifyNewFiles(
               NEW_FILES_SNAPSHOT, buffer.partition, buffer.bucket, buffer.pendingFiles);
@@ -282,6 +308,7 @@ public final class NativeKeyValueSinkWrite implements StoreSinkWrite, AutoClosea
         }
       }
     }
+    memory.update(0);
     List<Committable> committables = new ArrayList<>();
     for (Committable committable : delegate.prepareCommit(waitCompaction, checkpointId)) {
       committables.add(withNewFiles(committable, checkpointId));
@@ -391,12 +418,18 @@ public final class NativeKeyValueSinkWrite implements StoreSinkWrite, AutoClosea
 
   @Override
   public void close() throws Exception {
-    for (Map<Integer, BucketBuffer> partition : buffers.values()) {
-      for (BucketBuffer buffer : partition.values()) {
-        buffer.buffer.close();
+    try {
+      List<AutoCloseable> all = new ArrayList<>();
+      for (Map<Integer, BucketBuffer> partition : buffers.values()) {
+        for (BucketBuffer buffer : partition.values()) {
+          all.add(buffer.buffer);
+        }
       }
+      buffers.clear();
+      org.apache.flink.util.IOUtils.closeAll(all);
+    } finally {
+      memory.close();
+      delegate.close();
     }
-    buffers.clear();
-    delegate.close();
   }
 }

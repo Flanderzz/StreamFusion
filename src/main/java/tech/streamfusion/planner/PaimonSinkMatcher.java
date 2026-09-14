@@ -15,7 +15,6 @@ import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalS
 import org.apache.flink.table.planner.plan.utils.ChangelogPlanUtils;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.CoreOptions.ChangelogProducer;
-import org.apache.paimon.CoreOptions.SequenceNumberInitMode;
 import org.apache.paimon.catalog.CatalogContext;
 import org.apache.paimon.fileindex.FileIndexOptions;
 import org.apache.paimon.flink.DataCatalogTable;
@@ -125,10 +124,6 @@ final class PaimonSinkMatcher {
     if (options.get(CoreOptions.WRITE_BUFFER_FOR_APPEND)) {
       return Planned.fallback("write-buffer-for-append is not supported");
     }
-    if (!primaryKey && options.get(FlinkConnectorOptions.SINK_USE_MANAGED_MEMORY)) {
-      return Planned.fallback(
-          "sink.use-managed-memory-allocator is not supported by the native Arrow buffer");
-    }
     if (!primaryKey
         && !java.util.Set.of("lz4", "zstd", "lzo")
             .contains(
@@ -219,27 +214,6 @@ final class PaimonSinkMatcher {
     }
     if (coreOptions.localMergeEnabled()) {
       return "local-merge-buffer-size is not supported";
-    }
-    if (coreOptions.dataFileThinMode()) {
-      return "data-file.thin-mode is not supported";
-    }
-    if (coreOptions.dataFileExternalPaths() != null) {
-      return "data-file.external-paths is not supported for primary-key tables";
-    }
-    if (options.get(FlinkConnectorOptions.SINK_KEY_ONLY_DELETES_ENABLED)) {
-      return "sink.key-only-deletes.enabled is not supported";
-    }
-    if (options.get(FlinkConnectorOptions.PRECOMMIT_COMPACT)) {
-      return FlinkConnectorOptions.PRECOMMIT_COMPACT.key() + " is not supported";
-    }
-    if (options.get(CoreOptions.WRITE_SEQUENCE_NUMBER_INIT_MODE) != SequenceNumberInitMode.SCAN) {
-      return CoreOptions.WRITE_SEQUENCE_NUMBER_INIT_MODE.key()
-          + " "
-          + options.get(CoreOptions.WRITE_SEQUENCE_NUMBER_INIT_MODE)
-          + " is not supported";
-    }
-    if (options.get(FlinkConnectorOptions.SINK_USE_MANAGED_MEMORY)) {
-      return FlinkConnectorOptions.SINK_USE_MANAGED_MEMORY.key() + " is not supported";
     }
     return PaimonKeyValueLayout.unsupportedKeyReason(table);
   }

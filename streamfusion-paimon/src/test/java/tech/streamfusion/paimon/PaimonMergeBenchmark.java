@@ -20,6 +20,7 @@ class PaimonMergeBenchmark {
   @EnabledIfEnvironmentVariable(named = "SF_PAIMON_MERGE_BENCHMARK", matches = "true")
   void compareReleasedWriter() throws Exception {
     int count = Integer.parseInt(System.getenv().getOrDefault("SF_PAIMON_MERGE_ROWS", "131072"));
+    boolean thin = Boolean.parseBoolean(System.getenv("SF_PAIMON_MERGE_THIN"));
     List<InternalRow> input = new ArrayList<>();
     for (int i = 0; i < count; i++) {
       input.add(
@@ -42,6 +43,7 @@ class PaimonMergeBenchmark {
           int engine = (offset + iteration) % 2;
           Map<String, String> options = new HashMap<>();
           options.put("write-only", "true");
+          options.put("data-file.thin-mode", Boolean.toString(thin));
           if (mode.equals("sequence")) {
             options.put("sequence.field", "seq,seq2");
           } else {
@@ -78,8 +80,8 @@ class PaimonMergeBenchmark {
         }
       }
       System.out.printf(
-          "PAIMON_MERGE mode=%s rows=%d stock_s=%.3f native_s=%.3f speedup=%.2fx%n",
-          mode, count, best[0], best[1], best[0] / best[1]);
+          "PAIMON_MERGE mode=%s thin=%s rows=%d stock_s=%.3f native_s=%.3f speedup=%.2fx%n",
+          mode, thin, count, best[0], best[1], best[0] / best[1]);
     }
   }
 }

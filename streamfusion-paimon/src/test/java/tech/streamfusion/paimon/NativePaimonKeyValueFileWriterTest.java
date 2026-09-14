@@ -52,21 +52,39 @@ class NativePaimonKeyValueFileWriterTest {
         "input",
         "input-counts",
         "input-none",
-        "input-ignore-delete"
+        "input-ignore-delete",
+        "thin",
+        "thin-none",
+        "input-thin",
+        "input-thin-counts"
       })
   void nativeLevelZeroFilesMatchStockTwins(String variant) throws Exception {
     Map<String, String> options = new LinkedHashMap<>();
     options.put("bucket", "2");
     switch (variant) {
       case "default" -> {}
+      case "thin", "thin-none" -> {
+        options.put("data-file.thin-mode", "true");
+        if (variant.equals("thin-none")) {
+          options.put("metadata.stats-mode", "none");
+        }
+      }
       case "ignore-delete" -> options.put("ignore-delete", "true");
       case "single-bucket-zstd" -> {
         options.put("bucket", "1");
         options.put("file.compression", "zstd");
       }
-      case "input", "input-counts", "input-none", "input-ignore-delete" -> {
+      case "input",
+          "input-counts",
+          "input-none",
+          "input-ignore-delete",
+          "input-thin",
+          "input-thin-counts" -> {
+        if (variant.contains("thin")) {
+          options.put("data-file.thin-mode", "true");
+        }
         options.put("changelog-producer", "input");
-        if (variant.equals("input-counts")) {
+        if (variant.endsWith("counts")) {
           options.put("changelog-file.compression", "zstd");
           options.put("changelog-file.stats-mode", "counts");
         } else if (variant.equals("input-none")) {

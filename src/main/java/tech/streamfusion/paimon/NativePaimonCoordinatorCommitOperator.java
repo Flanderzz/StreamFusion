@@ -37,6 +37,18 @@ public final class NativePaimonCoordinatorCommitOperator
     rowType = LogicalTypeConversion.toLogicalType(table.rowType());
   }
 
+  @Override
+  public void initializeState(org.apache.flink.runtime.state.StateInitializationContext context)
+      throws Exception {
+    super.initializeState(context);
+    if (options.get(org.apache.paimon.flink.FlinkConnectorOptions.SINK_USE_MANAGED_MEMORY)) {
+      ((NativeAppendSinkWrite) write)
+          .managedMemory(
+              getContainingTask().getEnvironment().getMemoryManager(),
+              memoryPoolFactory.totalBufferSize());
+    }
+  }
+
   // Released Paimon fixes its lifecycle class's input to InternalRow. Erasing only this method
   // lets the Arrow-typed factory replace ingestion while inheriting the entire commit protocol.
   @Override

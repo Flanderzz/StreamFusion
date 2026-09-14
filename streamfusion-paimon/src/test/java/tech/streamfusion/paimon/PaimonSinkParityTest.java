@@ -130,6 +130,22 @@ class PaimonSinkParityTest {
     NativeAppendSinkWriteTest.assertNativeFiles(ours);
   }
 
+  @ParameterizedTest
+  @ValueSource(strings = {"-1", "2"})
+  void appendArrowSpillUsesFlinkManagedMemory(String bucket) throws Exception {
+    java.nio.file.Path warehouse = Files.createTempDirectory("paimon-managed-append");
+    String options =
+        "'bucket' = '"
+            + bucket
+            + "', 'write-only' = 'true',"
+            + " 'write-max-writers-to-spill' = '0', 'sink.use-managed-memory-allocator' = 'true'"
+            + (bucket.equals("-1") ? "" : ", 'bucket-key' = 'id'");
+    FileStoreTable stock = insertFixture(warehouse, "PARTITIONED BY (pt)", options, 1, false);
+    FileStoreTable ours = insertFixture(warehouse, "PARTITIONED BY (pt)", options, 1, true);
+    assertSameTables(stock, ours, true, ROWS);
+    NativeAppendSinkWriteTest.assertNativeFiles(ours);
+  }
+
   @Test
   void fixedBucketUnpartitionedTableShufflesLikeStockAcrossWriters() throws Exception {
     java.nio.file.Path warehouse = Files.createTempDirectory("paimon-sink-fixed-flat");
@@ -370,8 +386,9 @@ class PaimonSinkParityTest {
     assertTrue(kinds.contains(Snapshot.CommitKind.APPEND), kinds::toString);
   }
 
-  @Test
-  void writerOptionsRefreshAtCheckpointsLikeTheStockOperator() throws Exception {
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  void writerOptionsRefreshAtCheckpointsLikeTheStockOperator(boolean primaryKey) throws Exception {
     java.nio.file.Path warehouse = Files.createTempDirectory("paimon-sink-refresh");
     java.nio.file.Path firstExternal = Files.createTempDirectory("paimon-sink-external-1");
     java.nio.file.Path secondExternal = Files.createTempDirectory("paimon-sink-external-2");
@@ -380,7 +397,10 @@ class PaimonSinkParityTest {
     env.enableCheckpointing(200);
     StreamTableEnvironment tableEnv = catalogEnvironment(env, warehouse);
     tableEnv.executeSql(
-        "CREATE TABLE relocated (id BIGINT, name STRING) WITH ('bucket' = '-1',"
+        "CREATE TABLE relocated (id BIGINT, name STRING"
+            + (primaryKey
+                ? ", PRIMARY KEY (id) NOT ENFORCED) WITH ('bucket' = '1',"
+                : ") WITH ('bucket' = '-1',")
             + " 'sink.writer-refresh-detectors' = 'external-paths',"
             + " 'data-file.external-paths' = '"
             + firstExternal.toUri()
@@ -390,7 +410,9 @@ class PaimonSinkParityTest {
             + " 'rows-per-second' = '50', 'number-of-rows' = '400', 'fields.name.length' = '8')");
     PhysicalPlanScan scan = NativePlanner.install(tableEnv);
 
-    TableResult insert = tableEnv.executeSql("INSERT INTO relocated SELECT id, name FROM ticks");
+    TableResult insert =
+        tableEnv.executeSql(
+            "INSERT INTO relocated SELECT COALESCE(id, CAST(0 AS BIGINT)), name FROM ticks");
     waitForFiles(firstExternal);
     tableEnv.executeSql(
         "ALTER TABLE relocated SET ('data-file.external-paths' = '"
@@ -577,9 +599,10 @@ class PaimonSinkParityTest {
     }
   }
 
-  @Test
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
   @Timeout(120)
-  void coordinatorCommitsBufferedAppendBatches() throws Exception {
+  void coordinatorCommitsBufferedAppendBatches(boolean managed) throws Exception {
     java.nio.file.Path warehouse = Files.createTempDirectory("paimon-spill-coordinator");
     List<List<String>> contents = new ArrayList<>();
     for (boolean nativeWriter : new boolean[] {false, true}) {
@@ -593,7 +616,10 @@ class PaimonSinkParityTest {
               + name
               + " (id BIGINT) WITH ('bucket' = '-1', 'write-only' = 'true',"
               + " 'sink.coordinator-commit.enabled' = 'true','write-max-writers-to-spill' = '0',"
-              + " 'write-buffer-size' = '16 kb', 'page-size' = '4 kb')");
+              + " 'write-buffer-size' = '16 kb', 'page-size' = '4 kb',"
+              + " 'sink.use-managed-memory-allocator' = '"
+              + managed
+              + "')");
       DataStream<Row> rows =
           env.fromSequence(0, Long.MAX_VALUE)
               .map(
@@ -706,6 +732,47 @@ class PaimonSinkParityTest {
         List<String> expected = PaimonChangelogSinkWriteTest.changelogRows(stock);
         assertTrue(!expected.isEmpty(), "the stock sink produced changelog records");
         assertEquals(expected, PaimonChangelogSinkWriteTest.changelogRows(ours));
+      }
+    }
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "'data-file.thin-mode' = 'true'",
+        "'data-file.thin-mode' = 'true', 'changelog-producer' = 'lookup'",
+        "'write.sequence-number-init-mode' = 'snapshot'",
+        "'precommit-compact' = 'true', 'changelog-producer' = 'input'",
+        "'precommit-compact' = 'true', 'changelog-producer' = 'lookup'",
+        "'sink.key-only-deletes.enabled' = 'true'",
+        "'sink.use-managed-memory-allocator' = 'true'"
+      })
+  void primaryKeyWriterOptionsPreserveRowsAcrossJobs(String extra) throws Exception {
+    java.nio.file.Path warehouse = Files.createTempDirectory("paimon-pk-writer-options");
+    String options = "'bucket' = '2', 'sink.parallelism' = '2', " + extra;
+    for (int run = 0; run < 2; run++) {
+      List<Object[]> changes =
+          PaimonTestTables.changelog((run + 1) * CHANGELOG_ROWS, CHANGELOG_KEYS)
+              .subList(run * CHANGELOG_ROWS, (run + 1) * CHANGELOG_ROWS);
+      if (extra.contains("key-only")) {
+        for (Object[] row : changes) {
+          if (row[0] == RowKind.DELETE) {
+            java.util.Arrays.fill(row, 3, row.length - 1, null);
+          }
+        }
+      }
+      FileStoreTable ours =
+          writePrimaryKeyFixture(warehouse, "pk_native", options, 1, true, run == 0, true, changes);
+      FileStoreTable stock =
+          writePrimaryKeyFixture(warehouse, "pk_stock", options, 1, false, run == 0, true, changes);
+      assertEquals(
+          PaimonTestTables.readRows(stock, stock.rowType()),
+          PaimonTestTables.readRows(ours, ours.rowType()));
+      if (ours.coreOptions().changelogProducer()
+          != org.apache.paimon.CoreOptions.ChangelogProducer.NONE) {
+        assertEquals(
+            PaimonChangelogSinkWriteTest.changelogRows(stock),
+            PaimonChangelogSinkWriteTest.changelogRows(ours));
       }
     }
   }
@@ -1242,10 +1309,6 @@ class PaimonSinkParityTest {
             "'bucket' = '-1', 'spill-compression' = 'none'",
             "spill-compression"),
         Arguments.of(
-            "(id BIGINT, v INT)",
-            "'bucket' = '-1', 'sink.use-managed-memory-allocator' = 'true'",
-            "sink.use-managed-memory-allocator"),
-        Arguments.of(
             "(id BIGINT NOT NULL, v INT, pt STRING, PRIMARY KEY (id) NOT ENFORCED) PARTITIONED BY"
                 + " (pt)",
             "'bucket' = '-1'",
@@ -1293,22 +1356,6 @@ class PaimonSinkParityTest {
             PK_SCHEMA,
             "'bucket' = '2', 'local-merge-buffer-size' = '1 mb'",
             "local-merge-buffer-size"),
-        Arguments.of(
-            PK_SCHEMA, "'bucket' = '2', 'data-file.thin-mode' = 'true'", "data-file.thin-mode"),
-        Arguments.of(
-            PK_SCHEMA,
-            "'bucket' = '2', 'sink.key-only-deletes.enabled' = 'true'",
-            "sink.key-only-deletes.enabled"),
-        Arguments.of(
-            PK_SCHEMA, "'bucket' = '2', 'precommit-compact' = 'true'", "precommit-compact"),
-        Arguments.of(
-            PK_SCHEMA,
-            "'bucket' = '2', 'write.sequence-number-init-mode' = 'snapshot'",
-            "write.sequence-number-init-mode"),
-        Arguments.of(
-            PK_SCHEMA,
-            "'bucket' = '2', 'sink.use-managed-memory-allocator' = 'true'",
-            "sink.use-managed-memory-allocator"),
         Arguments.of(
             "(id BIGINT NOT NULL, k DOUBLE NOT NULL, PRIMARY KEY (id, k) NOT ENFORCED)",
             "'bucket' = '2'",

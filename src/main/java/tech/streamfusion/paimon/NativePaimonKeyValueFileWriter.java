@@ -92,7 +92,7 @@ public final class NativePaimonKeyValueFileWriter {
     this.changelogLayout = PaimonKeyValueLayout.changelog(table);
     this.writerFactory =
         FileFormat.fromIdentifier(options.fileFormatString(), options.toConfiguration())
-            .createWriterFactory(layout.writeType);
+            .createWriterFactory(layout.fileType);
   }
 
   /** Writes and closes both outputs of a bucket's flush, returning data and changelog metadata. */
@@ -154,6 +154,13 @@ public final class NativePaimonKeyValueFileWriter {
       throws IOException {
     Path path = changelog ? paths.newChangelogPath() : paths.newPath();
     int rows = root.getRowCount();
+    // This projection borrows vectors; the flushed root owns and closes them after both writes.
+    VectorSchemaRoot fileRoot =
+        layout.thinMode
+            ? new VectorSchemaRoot(
+                root.getFieldVectors()
+                    .subList(layout.keyFieldCount(), root.getFieldVectors().size()))
+            : root;
     int end = start;
     long fileSize;
     Object writerMetadata;
@@ -164,7 +171,7 @@ public final class NativePaimonKeyValueFileWriter {
         while (end < rows) {
           int count = Math.min(ROWS_PER_CHUNK, rows - end);
           ((NativePaimonFileWriter) writer)
-              .writeBundle(new ArrowBatchBundle(root, layout.flinkWriteType, end, count));
+              .writeBundle(new ArrowBatchBundle(fileRoot, layout.flinkFileType, end, count));
           end += count;
           if (end < rows && writer.reachTargetSize(true, targetFileSize)) {
             break;
@@ -201,12 +208,15 @@ public final class NativePaimonKeyValueFileWriter {
     }
     SimpleColStats[] rowStats =
         layout.statsProducer.extract(fileIO, file.path, file.fileSize, file.writerMetadata);
-    SimpleStats keyStats =
-        layout.keyStatsConverter.toBinaryAllMode(
-            Arrays.copyOfRange(rowStats, 0, layout.keyFieldCount()));
-    Pair<List<String>, SimpleStats> valueStats =
-        layout.valueStatsConverter.toBinary(
-            Arrays.copyOfRange(rowStats, layout.valueColumnOffset(), rowStats.length));
+    SimpleColStats[] valueColumns =
+        Arrays.copyOfRange(
+            rowStats, layout.thinMode ? 2 : layout.valueColumnOffset(), rowStats.length);
+    SimpleColStats[] keyColumns = new SimpleColStats[layout.keyFieldCount()];
+    for (int i = 0; i < keyColumns.length; i++) {
+      keyColumns[i] = layout.thinMode ? valueColumns[layout.keyColumns[i]] : rowStats[i];
+    }
+    SimpleStats keyStats = layout.keyStatsConverter.toBinaryAllMode(keyColumns);
+    Pair<List<String>, SimpleStats> valueStats = layout.valueStatsConverter.toBinary(valueColumns);
     return DataFileMeta.create(
         file.path.getName(),
         file.fileSize,

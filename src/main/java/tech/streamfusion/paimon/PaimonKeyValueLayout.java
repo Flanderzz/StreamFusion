@@ -38,6 +38,9 @@ public final class PaimonKeyValueLayout {
   final RowType keyType;
   final RowType valueType;
   final RowType writeType;
+  final RowType fileType;
+  final boolean thinMode;
+  final org.apache.flink.table.types.logical.RowType flinkFileType;
   final org.apache.flink.table.types.logical.RowType flinkWriteType;
   final int[] keyColumns;
   final int[] keyTimestampPrecisions;
@@ -54,6 +57,9 @@ public final class PaimonKeyValueLayout {
     this.valueType = new RowType(false, schema.fields());
     this.writeType = KeyValue.schema(keyType, valueType);
     this.flinkWriteType = LogicalTypeConversion.toLogicalType(writeType);
+    this.thinMode = options.dataFileThinMode();
+    this.fileType = thinMode ? KeyValue.schema(RowType.of(), valueType) : writeType;
+    this.flinkFileType = LogicalTypeConversion.toLogicalType(fileType);
     List<String> fieldNames = schema.fieldNames();
     List<String> trimmedPrimaryKeys = schema.trimmedPrimaryKeys();
     this.keyColumns = trimmedPrimaryKeys.stream().mapToInt(fieldNames::indexOf).toArray();
@@ -63,7 +69,12 @@ public final class PaimonKeyValueLayout {
             .toArray();
     this.statsProducer =
         SimpleStatsProducer.fromExtractor(
-            statsExtractor(options, writeType, changelog).orElse(null));
+            statsExtractor(
+                    options,
+                    fileType,
+                    changelog,
+                    thinMode ? keyType.getFieldNames() : Collections.emptyList())
+                .orElse(null));
     this.keyStatsConverter = new SimpleStatsConverter(keyType);
     this.valueStatsConverter = new SimpleStatsConverter(valueType, options.statsDenseStore());
   }
@@ -151,14 +162,14 @@ public final class PaimonKeyValueLayout {
    * The footer statistics extractor Paimon's key-value writer factory builds for a Parquet file.
    */
   private static Optional<SimpleStatsExtractor> statsExtractor(
-      CoreOptions options, RowType writeType, boolean changelog) {
+      CoreOptions options, RowType writeType, boolean changelog, List<String> keyNames) {
     String statsMode =
         changelog && options.changelogFileStatsMode() != null
             ? options.changelogFileStatsMode()
             : options.statsModePerLevel().getOrDefault(0, options.statsMode());
     SimpleColStatsCollector.Factory[] factories =
         StatsCollectorFactories.createStatsFactories(
-            statsMode, options, writeType.getFieldNames(), Collections.emptyList());
+            statsMode, options, writeType.getFieldNames(), keyNames);
     boolean disabled = true;
     for (SimpleColStatsCollector collector : SimpleColStatsCollector.create(factories)) {
       disabled &= collector instanceof NoneSimpleColStatsCollector;

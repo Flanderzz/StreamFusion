@@ -49,6 +49,20 @@ public final class NativePaimonWriteOperator extends TableWriteOperator<Bucketed
   }
 
   @Override
+  public void initializeState(StateInitializationContext context) throws Exception {
+    super.initializeState(context);
+    if (options.get(org.apache.paimon.flink.FlinkConnectorOptions.SINK_USE_MANAGED_MEMORY)) {
+      var manager = getContainingTask().getEnvironment().getMemoryManager();
+      long budget = memoryPoolFactory.totalBufferSize();
+      if (write instanceof NativeKeyValueSinkWrite) {
+        ((NativeKeyValueSinkWrite) write).managedMemory(manager, budget);
+      } else if (write instanceof NativeAppendSinkWrite) {
+        ((NativeAppendSinkWrite) write).managedMemory(manager, budget);
+      }
+    }
+  }
+
+  @Override
   protected StoreSinkWriteState createState(
       int subtaskId,
       StateInitializationContext context,

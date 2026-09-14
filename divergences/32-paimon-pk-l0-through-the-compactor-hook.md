@@ -61,9 +61,11 @@ The sink owns the level-0 file of a primary-key bucket and nothing else:
   [issue #49](https://github.com/datafusion-contrib/StreamFusion/issues/49).
 - **Compaction results land one checkpoint later** unless the table waits for compaction, which is
   how the stock streaming sink behaves too.
-- **Memory budget.** The native buffers are bounded by `write-buffer-size` per task, spilling the
-  largest bucket into level-0 files; Flink managed memory (`sink.use-managed-memory-allocator`) is
-  not drawn on, so that option declines.
+- **Memory budget.** The native buffers use `write-buffer-size` by default. With
+  `sink.use-managed-memory-allocator`, they reserve retained Arrow bytes through Flink's memory
+  manager against the operator's assigned share. Exceeding either budget or failing a reservation
+  flushes the largest bucket into level-0 files. Temporary sorting and encoding allocations are
+  outside that retained-buffer budget; see [35](35-paimon-append-arrow-spill.md).
 
 ## Changelog production and reuse of upstream writers
 

@@ -41,6 +41,7 @@ public final class NativeAppendSinkWrite implements StoreSinkWrite, AutoCloseabl
   private final RowType rowType;
   private final Map<Bucket, Integer> buffers = new LinkedHashMap<>();
   private CoreOptions options;
+  private PaimonBufferMemory memory;
   private long handle;
   private int nextId;
 
@@ -49,6 +50,12 @@ public final class NativeAppendSinkWrite implements StoreSinkWrite, AutoCloseabl
     this.directories = directories;
     this.rowType = LogicalTypeConversion.toLogicalType(table.rowType());
     this.options = table.coreOptions();
+    this.memory = new PaimonBufferMemory(options.writeBufferSize());
+  }
+
+  void managedMemory(org.apache.flink.runtime.memory.MemoryManager manager, long budget) {
+    memory.close();
+    memory = new PaimonBufferMemory(budget, manager);
   }
 
   static StoreSinkWrite.Provider provider(StoreSinkWrite.Provider provider) {
@@ -109,7 +116,7 @@ public final class NativeAppendSinkWrite implements StoreSinkWrite, AutoCloseabl
         Data.exportVectorSchemaRoot(allocator, root, NativeAllocator.DICTIONARIES, array, schema);
         Native.appendBufferPush(handle, id, array.memoryAddress(), schema.memoryAddress());
       }
-      while (Native.appendBufferBytes(handle) > options.writeBufferSize()) {
+      while (!memory.update(Native.appendBufferBytes(handle))) {
         int flushId = Native.appendBufferSpillLargest(handle);
         if (flushId >= 0) {
           Bucket flushKey =
@@ -177,6 +184,7 @@ public final class NativeAppendSinkWrite implements StoreSinkWrite, AutoCloseabl
         }
       }
     }
+    memory.update(Native.appendBufferBytes(handle));
     delegate.compact(key.partition(), key.bucket(), false);
     buffers.remove(key);
   }
@@ -189,6 +197,7 @@ public final class NativeAppendSinkWrite implements StoreSinkWrite, AutoCloseabl
         flush(key);
       }
       nextId = 0;
+      memory.update(0);
       return delegate.prepareCommit(waitCompaction, checkpointId);
     } catch (Exception failure) {
       throw new IOException(failure);
@@ -266,6 +275,7 @@ public final class NativeAppendSinkWrite implements StoreSinkWrite, AutoCloseabl
       }
       buffers.clear();
     } finally {
+      memory.close();
       delegate.close();
     }
   }

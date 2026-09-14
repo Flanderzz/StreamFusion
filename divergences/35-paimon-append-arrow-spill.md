@@ -27,11 +27,15 @@ output slice bounds allocations even on corrupt input. Our local framing uses 64
 uncompressed/compressed lengths; these disposable spill files are consumed by the same native
 writer and do not need Java's spill-file framing.
 
-The buffer uses the table's Arrow memory budget rather than Paimon's Java memory segments.
-Managed-memory append sinks consequently keep the stock planner path. The released Java spill
-writer dereferences a null compressor with `spill-compression = none`; that setting stays stock
-as well rather than silently changing its failure behavior. Primary-key buffering and batch
-execution retain their existing paths.
+The buffer retains Arrow allocations instead of allocating Paimon Java memory segments. With
+managed memory enabled, retained bytes reserve capacity in Flink's `MemoryManager`, bounded by
+the share Paimon's sink topology assigns the operator. Like Comet's `CometUnifiedMemoryPool`, a
+failed host reservation triggers spilling, and released buffers return their reservation. The
+reservation is updated at batch boundaries; ingress, sort/encode scratch, and encoder allocations
+remain transient off-heap memory. Java compaction retains its own page allocator. This applies to
+both append and primary-key buffers, including coordinator commits. Batch execution remains stock.
+The released Java spill writer dereferences a null compressor with `spill-compression = none`;
+that setting stays stock rather than silently changing its failure behavior.
 There is no corresponding Arroyo Paimon sink operator to port.
 
 Coverage and configuration are described in [the Paimon connector page](../docs/connectors/paimon.md).

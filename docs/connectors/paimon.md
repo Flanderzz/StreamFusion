@@ -317,9 +317,13 @@ encoding/IPC working memory. Automatic writer-count spilling enables disk spill 
 `write-buffer-spillable = false`, as Paimon's automatic transition does.
 
 `sink.use-managed-memory-allocator` defaults to `false`, giving the sink an independent buffer
-budget controlled by `write-buffer-size`. Enabling it obtains the buffer budget and memory segments
-from Flink's managed memory pool. Native Arrow allocations do not participate in that pool, so
-append sinks with this option enabled use stock Paimon.
+budget controlled by `write-buffer-size`. Enabling it obtains the buffer budget from Flink's
+managed memory pool. Retained native Arrow buffers reserve their byte counts through
+Flink's `MemoryManager`, use the operator's assigned managed-memory share, and spill the largest
+bucket if the share or the available reservation is exhausted. Checkpoint drains and close return
+the reservations. This accounts for retained buffers; incoming batches, sort/encode scratch space,
+and file-encoder allocations remain transient off-heap allocations. Paimon's Java compactor retains
+its own managed-memory allocator. Both append and primary-key sinks support this setting.
 
 Paimon rereads and rewrites unfinished files at the transition; StreamFusion retains those valid
 files. This avoids a row conversion and repeated encoding, but file boundaries, per-file statistics,
@@ -364,7 +368,27 @@ the selected format's writer keys as for append tables, and key columns of type 
 Paimon's key comparator for exactly these types). An insert-only stream into a primary-key table
 is taken as all inserts.
 
-#### Merge engines and input ordering
+#### Primary-key writer options
+
+`data-file.thin-mode = true` writes only sequence number, row kind, and table values, omitting
+duplicate `_KEY_*` columns from both data and input-changelog files. The encoder borrows the
+existing value vectors; key bounds still come from the sorted keys, and key statistics map to the
+corresponding value fields with Paimon's key-statistics policy. Java compaction reads and rewrites
+these files normally. Native source admission for thin files remains a separate source limitation.
+
+`data-file.external-paths` and `data-file.external-paths.strategy` use Paimon's path factory and
+persist the full external path in each file's metadata. Writer option refresh takes effect after
+checkpoints. `write.sequence-number-init-mode = snapshot` starts from the larger of the restored
+bucket maximum and the snapshot's generated-sequence property. Write-only mode skips the bucket
+scan when that property exists, and scans older snapshots that lack it, matching Paimon.
+
+`sink.key-only-deletes.enabled` retains Paimon's changelog negotiation: supported upsert inputs
+may supply keys with null value fields on deletes. Paimon ignores this negotiation flag for input
+changelogs, aggregation, and partial updates with aggregates. `precommit-compact` retains the
+stock changelog compaction coordinator, workers, and creation-time sort before commit. Its buffer
+and thread settings are parsed by those Java operators.
+
+### Merge engines and input ordering
 
 - `deduplicate` keeps the last row in merge order; `first-row` keeps the first. Paimon's normal
   first-row restrictions still apply, including its lookup producer and delete handling.
@@ -560,14 +584,11 @@ Each of these declines at planning time with a reason visible in `NativePlanner.
   comparable-type whitelist; `sequence.field` combined with `partial-update` or `aggregation`;
   defaults on routing columns;
   input changelog with `changelog-file.format` differing from the table format or unsupported changelog
-  compression; primary-key vector, full-text, BTree, or bitmap indexes; `local-merge-buffer-size`,
-  `data-file.thin-mode`, `data-file.external-paths`, `sink.key-only-deletes.enabled`,
-  `precommit-compact`, `write.sequence-number-init-mode = snapshot`,
-  `sink.use-managed-memory-allocator`; or a `FLOAT`/`DOUBLE` key column.
+  compression; primary-key vector, full-text, BTree, or bitmap indexes; `local-merge-buffer-size`;
+  or a `FLOAT`/`DOUBLE` key column.
 - `file.format` other than installed `parquet` or `orc`, `file.format.per.level`, `write-buffer-for-append = true`,
   file indexes (`file-index.*`), `row-tracking.enabled`, `data-evolution.enabled`, `BLOB` columns.
-- Append tables with `spill-compression` other than `lz4`/`lzo`/`zstd`, or
-  `sink.use-managed-memory-allocator = true` (the native buffer uses Arrow memory).
+- Append tables with `spill-compression` other than `lz4`/`lzo`/`zstd`.
   Released Paimon 2.0.0 fails when actually spilling with `none`; it remains on the stock path.
 - A nullable query field assigned to a `NOT NULL` target, or a bounded `CHAR`/`VARCHAR` or
   `BINARY`/`VARBINARY` target while `table.exec.sink.type-length-enforcer` is enabled. The stock
@@ -655,6 +676,10 @@ On the same local machine with release native libraries:
 | Aggregation with sum | 0.127 s | 0.106 s | 1.20× |
 | Deduplicate with two sequence fields | 0.108 s | 0.085 s | 1.27× |
 
+With `SF_PAIMON_MERGE_THIN=true` on the same 131,072-row fixture, stock/native seconds were
+0.109/0.092 for first row, 0.140/0.118 for partial update, 0.124/0.106 for aggregation, and
+0.104/0.087 for sequence-based deduplication: **1.17–1.20×** stock throughput with matching rows.
+
 Every run verifies the final table contents against its stock twin. This is a writer diagnostic,
 not an end-to-end Flink job benchmark. Run it with:
 
@@ -717,6 +742,10 @@ SF_PAIMON_FILE_FORMAT=orc mvn test -Ppaimon -pl :streamfusion-paimon -am \
   '-Dtest=tech.streamfusion.paimon.*Test' -Dsurefire.failIfNoSpecifiedTests=false
 ```
 
+The merge diagnostic also accepts `SF_PAIMON_MERGE_THIN=true` to measure thin data files against
+stock Paimon with the same setting, including ingress conversion, routing, merge, encoding, and
+commit. Use the release `bench` profile for timing.
+
 The source and changelog diagnostics accept the same environment variable with `-Pbench,paimon`.
 
 ## Deployment
@@ -739,7 +768,7 @@ Paimon.
 Each remaining gap has its own issue:
 [remaining merge combinations and specialized field aggregates](https://github.com/datafusion-contrib/StreamFusion/issues/47),
 [the remaining primary-key writer options](https://github.com/datafusion-contrib/StreamFusion/issues/48)
-(thin mode, key-only deletes, local merge, external paths, managed memory, snapshot sequence init),
+(local merging before the bucket shuffle),
 [a Paimon bundle entry for the merge-tree writer](https://github.com/datafusion-contrib/StreamFusion/issues/49)
 that would remove the compaction hand-off and the idle-writer rescan.
 Released Paimon 2.0.0 walks a bundle row by row before the format writer; a Paimon release that
