@@ -31,6 +31,7 @@ row-to-Arrow conversion after the merge. The
 bridge and Arrow import. These numbers measure local file reads, not whole Flink jobs.
 
 The [snapshot catch-up diagnostic](../connectors/paimon.md#snapshot-catch-up-diagnostic) measured
-1.84–2.36× throughput over the Java merge-to-Arrow path on one, four and eight commits. Both paths
-include storage reads and emit Arrow. Keeping one running winner per key and flushing retained
+1.61–2.58× throughput over the Java merge-to-Arrow path with integer keys on one, four and eight
+commits, and 1.68–2.08× with decimal, timestamp, binary and date keys on four commits. Both paths
+include storage reads, emit Arrow and checksum the same integer payload. Keeping one running winner per key and flushing retained
 output references by bytes avoids pinning all input versions during snapshot catch-up.

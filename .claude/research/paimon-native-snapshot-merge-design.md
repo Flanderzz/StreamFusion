@@ -5,9 +5,10 @@ The first deduplication increment is now implemented; [connector coverage](../..
 is the current behavior and validation reference. The original proposal below records the rationale.
 
 Implementation refinements: raw-convertible snapshots follow Java's insert-only raw path;
-ambiguous file sequence intervals retain Java; native merge keys initially cover INT, BIGINT and
-STRING. Footer admission and retained-Arrow limits do not constitute a strict process-wide managed
-memory reservation. Broader merge policies, sequence ties, schemas and deletion vectors remain #53.
+ambiguous file sequence intervals retain Java; native merge keys share the sink's comparable
+scalar whitelist, including decimals, binary, dates and timestamps through precision 6. Footer
+admission and retained-Arrow limits do not constitute a strict process-wide managed-memory
+reservation. Broader merge policies, sequence ties, schemas and deletion vectors remain #53.
 
 ## Proposed flow
 

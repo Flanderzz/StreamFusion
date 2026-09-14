@@ -13,22 +13,34 @@ import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.types.RowKind;
 import org.apache.paimon.types.RowType;
-import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 /** Includes Java merge-to-Arrow or native merge, file opening, planning, and Arrow import. */
 class PaimonSnapshotMergeBenchmark {
-  @Test
+  @ParameterizedTest
+  @ValueSource(strings = {"int", "decimal", "timestamp", "binary", "date"})
   @EnabledIfEnvironmentVariable(named = "SF_PAIMON_SNAPSHOT_BENCHMARK", matches = "true")
-  void compareSnapshotCatchup() throws Exception {
+  void compareSnapshotCatchup(String keyType) throws Exception {
     int rows = Integer.parseInt(System.getenv().getOrDefault("SF_PAIMON_SNAPSHOT_ROWS", "65536"));
     var type =
         new RowType(
             List.of(
-                new DataField(0, "id", DataTypes.INT().notNull()),
+                new DataField(
+                    0,
+                    "id",
+                    switch (keyType) {
+                      case "decimal" -> DataTypes.DECIMAL(38, 2).notNull();
+                      case "timestamp" -> DataTypes.TIMESTAMP(6).notNull();
+                      case "binary" -> DataTypes.VARBINARY(4).notNull();
+                      case "date" -> DataTypes.DATE().notNull();
+                      default -> DataTypes.INT().notNull();
+                    }),
                 new DataField(1, "v", DataTypes.STRING()),
-                new DataField(2, "nested", DataTypes.ARRAY(DataTypes.INT()))));
-    for (int runs : new int[] {1, 4, 8}) {
+                new DataField(2, "nested", DataTypes.ARRAY(DataTypes.INT())),
+                new DataField(3, "ordinal", DataTypes.INT().notNull())));
+    for (int runs : (keyType.equals("int") ? new int[] {1, 4, 8} : new int[] {4})) {
       var table =
           PaimonMergeEngineTest.table(
               Map.of("changelog-producer", "input", "write-only", "true"), type);
@@ -39,9 +51,10 @@ class PaimonSnapshotMergeBenchmark {
           for (int i = 0; i < rows; i++) {
             var row =
                 GenericRow.of(
-                    i,
+                    key(i - rows / 2, keyType),
                     BinaryString.fromString("value-" + checkpoint + "-" + i),
-                    new GenericArray(new Integer[] {checkpoint, null, -i}));
+                    new GenericArray(new Integer[] {checkpoint, null, -i}),
+                    i);
             if (checkpoint == runs && i % 7 == 0) {
               row.setRowKind(RowKind.DELETE);
             }
@@ -73,7 +86,7 @@ class PaimonSnapshotMergeBenchmark {
                   if (record != null) {
                     try (var root = record.batch().root()) {
                       count += root.getRowCount();
-                      var ids = (org.apache.arrow.vector.IntVector) root.getVector(0);
+                      var ids = (org.apache.arrow.vector.IntVector) root.getVector(3);
                       for (int row = 0; row < root.getRowCount(); row++) {
                         checksum += ids.get(row);
                       }
@@ -104,9 +117,21 @@ class PaimonSnapshotMergeBenchmark {
         }
       }
       System.out.printf(
-          "PAIMON_SNAPSHOT rows=%d commits=%d java_arrow_s=%.3f native_arrow_s=%.3f"
+          "PAIMON_SNAPSHOT key=%s rows=%d commits=%d java_arrow_s=%.3f native_arrow_s=%.3f"
               + " speedup=%.2fx%n",
-          rows, runs, best[0], best[1], best[0] / best[1]);
+          keyType, rows, runs, best[0], best[1], best[0] / best[1]);
     }
+  }
+
+  private static Object key(int i, String type) {
+    return switch (type) {
+      case "decimal" ->
+          org.apache.paimon.data.Decimal.fromBigDecimal(java.math.BigDecimal.valueOf(i, 2), 38, 2);
+      case "timestamp" ->
+          org.apache.paimon.data.Timestamp.fromEpochMillis(
+              Math.floorDiv(i, 1000), Math.floorMod(i, 1000) * 1000);
+      case "binary" -> java.nio.ByteBuffer.allocate(4).putInt(i).array();
+      default -> i;
+    };
   }
 }

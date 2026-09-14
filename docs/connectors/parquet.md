@@ -35,6 +35,8 @@ partition commit, and filesystem-specific options without translation. `ROW`, `A
 `MULTISET` are encoded recursively with Flink's exact three-level Parquet list/map layout,
 including the legacy `MAP_KEY_VALUE` annotation on each repeated `key_value` group. Nested dates,
 decimals, times, and timestamps use the same host-compatible leaf encoding as top-level columns.
+`BINARY(n)` Arrow buffers are converted to Parquet `BYTE_ARRAY`, matching Flink and Paimon
+rather than Parquet fixed-length byte arrays; nulls, nested fields and sliced batches are preserved.
 The partitioned SQL parity test compares stock and native footer schemas and rows with MAP columns.
 
 Falls back to Flink on:

@@ -67,8 +67,17 @@ class PaimonSourceSqlTest {
   }
 
   @ParameterizedTest
-  @CsvSource({"false,false", "true,false", "false,true", "true,true"})
-  void streamingSqlReadsSnapshotThenNewCommit(boolean primaryKey, boolean watermark)
+  @CsvSource({
+    "false,false,INT",
+    "true,false,INT",
+    "false,true,INT",
+    "true,true,INT",
+    "true,false,'DECIMAL(38, 2)'",
+    "true,false,DATE",
+    "true,false,TIMESTAMP(6)",
+    "true,false,VARBINARY(4)"
+  })
+  void streamingSqlReadsSnapshotThenNewCommit(boolean primaryKey, boolean watermark, String keyType)
       throws Exception {
     List<List<String>> twins = new ArrayList<>();
     for (boolean nativeSource : new boolean[] {false, true}) {
@@ -81,7 +90,9 @@ class PaimonSourceSqlTest {
           "CREATE CATALOG p WITH ('type'='paimon', 'warehouse'='" + warehouse.toUri() + "')");
       sql.executeSql("USE CATALOG p");
       sql.executeSql(
-          "CREATE TABLE t (id INT NOT NULL, v STRING, pt STRING NOT NULL, ts TIMESTAMP(3)"
+          "CREATE TABLE t (id "
+              + keyType
+              + " NOT NULL, v STRING, pt STRING NOT NULL, ts TIMESTAMP(3)"
               + (watermark ? ", WATERMARK FOR ts AS ts - INTERVAL '1' SECOND" : "")
               + (primaryKey ? ", PRIMARY KEY (id, pt) NOT ENFORCED" : "")
               + ") PARTITIONED BY (pt) WITH ('bucket'='"
@@ -98,7 +109,7 @@ class PaimonSourceSqlTest {
         for (int i = 0; i < 3; i++) {
           writer.write(
               GenericRow.of(
-                  i,
+                  sqlKey(i, keyType),
                   BinaryString.fromString("before"),
                   BinaryString.fromString("p"),
                   org.apache.paimon.data.Timestamp.fromEpochMillis(i * 2000L)));
@@ -108,7 +119,7 @@ class PaimonSourceSqlTest {
           for (int i = 0; i < 3; i++) {
             writer.write(
                 GenericRow.of(
-                    i,
+                    sqlKey(i, keyType),
                     BinaryString.fromString("merged"),
                     BinaryString.fromString("p"),
                     org.apache.paimon.data.Timestamp.fromEpochMillis(i * 2000L)));
@@ -116,7 +127,7 @@ class PaimonSourceSqlTest {
           commit.commit(2, writer.prepareCommit(true, 2));
         }
         var plan = nativeSource ? NativePlanner.install(sql) : null;
-        var result = sql.executeSql("SELECT ts, pt, id, v FROM t WHERE id >= 0");
+        var result = sql.executeSql("SELECT ts, pt, id, v FROM t WHERE v IS NOT NULL");
         var executor = Executors.newSingleThreadExecutor();
         try (var rows = result.collect()) {
           CountDownLatch initial = new CountDownLatch(1);
@@ -138,7 +149,7 @@ class PaimonSourceSqlTest {
             for (int i = 3; i < 6; i++) {
               writer.write(
                   GenericRow.of(
-                      i,
+                      sqlKey(i, keyType),
                       BinaryString.fromString("after"),
                       BinaryString.fromString("p"),
                       org.apache.paimon.data.Timestamp.fromEpochMillis(i * 2000L)));
@@ -160,5 +171,17 @@ class PaimonSourceSqlTest {
       }
     }
     assertEquals(twins.get(0), twins.get(1));
+  }
+
+  private static Object sqlKey(int i, String type) {
+    return switch (type) {
+      case "DECIMAL(38, 2)" ->
+          org.apache.paimon.data.Decimal.fromBigDecimal(
+              java.math.BigDecimal.valueOf(i - 3, 2), 38, 2);
+      case "DATE" -> i - 3;
+      case "TIMESTAMP(6)" -> org.apache.paimon.data.Timestamp.fromEpochMillis(-1, i * 1000);
+      case "VARBINARY(4)" -> new byte[] {(byte) (i + 125)};
+      default -> i;
+    };
   }
 }

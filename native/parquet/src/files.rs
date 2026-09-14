@@ -259,7 +259,7 @@ fn parse_timestamp_unit(value: &str) -> arrow::datatypes::TimeUnit {
 /// The type a written column takes on: timestamps land in INT64 at the configured unit (or the
 /// field's own [`TIMESTAMP_UNIT_META_KEY`]) while retaining whether they represent an instant
 /// (Arrow timezone set, Parquet adjusted-to-UTC) or a local timestamp. TIME narrows to millisecond
-/// INT32. Everything else is written as it arrives from the canonical Arrow encoding. Field
+/// INT32. Fixed-size binary uses BYTE_ARRAY, as both host converters require. Field
 /// metadata is preserved so nested field ids and units survive into the descriptor.
 fn write_field(source: &Field, timestamp_unit: arrow::datatypes::TimeUnit) -> Field {
     use arrow::datatypes::TimeUnit;
@@ -274,6 +274,7 @@ fn write_field(source: &Field, timestamp_unit: arrow::datatypes::TimeUnit) -> Fi
             DataType::Timestamp(unit, timezone.clone())
         }
         DataType::Time32(_) | DataType::Time64(_) => DataType::Time32(TimeUnit::Millisecond),
+        DataType::FixedSizeBinary(_) => DataType::Binary,
         DataType::Struct(fields) => DataType::Struct(fields.iter().map(nested).collect()),
         DataType::List(field) => DataType::List(nested(field)),
         DataType::Map(field, sorted) => DataType::Map(nested(field), *sorted),
@@ -299,6 +300,9 @@ fn convert_column(column: &ArrayRef, target: &DataType) -> ArrayRef {
         return column.clone();
     }
     match (column.data_type(), target) {
+        (DataType::FixedSizeBinary(_), DataType::Binary) => {
+            arrow::compute::cast(column, target).expect("failed to convert fixed-size binary")
+        }
         (DataType::Struct(_), DataType::Struct(target_fields)) => {
             let source = column
                 .as_any()
@@ -1573,6 +1577,49 @@ mod parquet_encoder_tests {
             repeated_of(SchemaShape::Flink),
             ConvertedType::MAP_KEY_VALUE
         );
+    }
+
+    #[test]
+    fn fixed_binary_uses_host_byte_arrays_with_nested_nulls_and_slices() {
+        use arrow::array::{BinaryArray, FixedSizeBinaryArray, StructArray};
+        let field = Arc::new(Field::new("bin", DataType::FixedSizeBinary(2), true));
+        let binary: ArrayRef = Arc::new(FixedSizeBinaryArray::from(vec![
+            Some(&[1u8, 2][..]),
+            Some(&[128u8, 255][..]),
+            None,
+            Some(&[0u8, 255][..]),
+        ]));
+        let nested: ArrayRef = Arc::new(StructArray::from(vec![(field.clone(), binary.clone())]));
+        let schema = Arc::new(Schema::new(vec![
+            field.as_ref().clone(),
+            Field::new("nested", nested.data_type().clone(), false),
+        ]));
+        let batch = RecordBatch::try_new(schema.clone(), vec![binary, nested])
+            .unwrap()
+            .slice(1, 3);
+        for shape in ["flink", "paimon"] {
+            let (batches, metadata) = read_back(encode(
+                schema.clone(),
+                &[],
+                &[("schema.shape", shape)],
+                &[batch.clone()],
+            ));
+            for leaf in metadata.file_metadata().schema_descr().columns() {
+                assert_eq!(leaf.physical_type(), PhysicalType::BYTE_ARRAY);
+            }
+            let nested = batches[0]
+                .column(1)
+                .as_any()
+                .downcast_ref::<StructArray>()
+                .unwrap();
+            for column in [batches[0].column(0), nested.column(0)] {
+                let binary = column.as_any().downcast_ref::<BinaryArray>().unwrap();
+                assert_eq!(
+                    binary.iter().collect::<Vec<_>>(),
+                    vec![Some(&[128u8, 255][..]), None, Some(&[0u8, 255][..])]
+                );
+            }
+        }
     }
 
     #[test]

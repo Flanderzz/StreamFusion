@@ -61,8 +61,12 @@ callback that forwards C Data addresses. No Java row or Java Arrow vector is mat
 decoding and merging. Java still owns file access, schemas, discovery and checkpoints.
 
 The native merger currently admits fixed-bucket `deduplicate` tables with default sequence and
-delete handling, the default loser-tree sort engine, and nonempty stored keys made of `INT`,
-`BIGINT` and `STRING` fields. Values use the supported source types. It requires current-schema
+delete handling, the default loser-tree sort engine, and nonempty stored keys using the sink's
+comparable scalar types: `BOOLEAN`, `TINYINT` through `BIGINT`, `DECIMAL`, `CHAR`/`VARCHAR`,
+`BINARY`/`VARBINARY`, `DATE`, and `TIMESTAMP`/`TIMESTAMP_LTZ` through precision 6. Composite keys
+use those same types after Java removes table partition columns from the stored key. Floating-point
+keys retain Java because their full ordering contract is not verified; timestamps above precision 6
+retain the stock source. Values use the supported source types. It requires current-schema
 Parquet files without deletion vectors. These snapshot combinations retain Java:
 
 - User sequence fields, non-default delete handling, other merge engines, dynamic/postpone
@@ -95,36 +99,49 @@ version offsets.
 
 `PaimonSnapshotMergeTest` checks stock- and native-written overlapping snapshots, nested values,
 projections omitting keys, partitioned composite keys, Java/native restoration and admission
-fallbacks. `PaimonSourceRecoveryTest` also restores the asynchronous source reader inside a merge.
+fallbacks. `PaimonSnapshotKeyTypesTest` adds 58 cases covering every admitted key type with both
+stock and native writers, signed integer extremes, all three Parquet decimal physical encodings,
+Unicode and binary prefix ordering, pre-epoch dates/timestamps, timestamp precisions 0–6,
+projections and restoration in both Java/native directions. Unsupported floating-point and
+nanosecond keys exercise Java fallback even when projected away. `PaimonSourceSqlTest` also follows
+decimal, date, microsecond timestamp and binary keys from snapshot into subsequent commits.
+`PaimonSourceRecoveryTest` also restores the asynchronous source reader inside a merge.
 The Rust tests cover keys spanning input batches, 100,000-version and delete-only inputs,
 byte-triggered output flushes, and budget/storage failures. The SQL harness requires a marker
 proving that a native snapshot merger emitted a batch.
 
-The Paimon 2.0.0 SQL harness passed 112 result/recovery cases across `ReadWriteTableITCase`,
-`ContinuousFileStoreITCase`, `ComputedColumnAndWatermarkTableITCase`,
-`FullCompactionFileStoreITCase`, `PrimaryKeyFileStoreTableITCase` and `FlinkJobRecoveryITCase`.
-The additional source-reuse plan assertion described below remains failing. The final targeted
-primary-key/savepoint run passed all 37 cases and all native write/merge markers:
+The Paimon 2.0.0 SQL harness passed 83 distinct result/recovery cases: all cases in
+`ReadWriteTableITCase`, `PrimaryKeyFileStoreTableITCase` and `FlinkJobRecoveryITCase`, plus
+`ContinuousFileStoreITCase.testWithPrimaryKey` and `testProjectionWithPrimaryKey`. The focused
+continuous-reader run proved native snapshot emission; the other suites can finish without
+needing that path, so include those reader cases when checking the harness's required markers.
+The separate source-reuse plan assertion described below remains failing.
 
 ```bash
-FLINK_SUITE_TEST='org.apache.paimon.flink.PrimaryKeyFileStoreTableITCase,org.apache.paimon.flink.FlinkJobRecoveryITCase' \
+FLINK_SUITE_TEST='org.apache.paimon.flink.ReadWriteTableITCase,org.apache.paimon.flink.PrimaryKeyFileStoreTableITCase,org.apache.paimon.flink.FlinkJobRecoveryITCase,org.apache.paimon.flink.ContinuousFileStoreITCase#testWithPrimaryKey+testProjectionWithPrimaryKey' \
   bin/flink-suite.sh paimon
 ```
 
 ### Snapshot catch-up diagnostic
 
-`PaimonSnapshotMergeBenchmark` writes 65,536 keys over one, four and eight commits, including
+`PaimonSnapshotMergeBenchmark` writes 65,536 keys over one, four and eight commits for `INT`,
+and four commits for `DECIMAL(38,2)`, `TIMESTAMP(6)`, `VARBINARY(4)` and `DATE`, including
 updates, deletes, strings and nested arrays, before timing. It compares the existing Java
 merge-to-Arrow path with native snapshot reading, including Java run planning and footer checks,
-file open/close, byte reads, decoding, merging, final Arrow import and an id checksum. Both paths
-produce Arrow. One warmup and three measured runs alternate engine order and report best times.
+file open/close, byte reads, decoding, merging, final Arrow import and an integer payload checksum.
+Keys span negative and positive values; a separate integer ordinal keeps checksum work identical
+across key types. Both paths produce Arrow. One warmup and three measured runs alternate engine order and report best times.
 Counts and checksums must match, and every native run must exercise the merger.
 
-| Commits | Java merge to Arrow | Native merge to Arrow | Throughput ratio |
-|---|---:|---:|---:|
-| 1 | 0.036 s | 0.015 s | 2.36× |
-| 4 | 0.073 s | 0.036 s | 2.03× |
-| 8 | 0.128 s | 0.069 s | 1.84× |
+| Key type | Commits | Java merge to Arrow | Native merge to Arrow | Throughput ratio |
+|---|---:|---:|---:|---:|
+| INT | 1 | 0.043 s | 0.017 s | 2.58× |
+| INT | 4 | 0.072 s | 0.041 s | 1.77× |
+| INT | 8 | 0.119 s | 0.074 s | 1.61× |
+| DECIMAL(38,2) | 4 | 0.087 s | 0.042 s | 2.08× |
+| TIMESTAMP(6) | 4 | 0.065 s | 0.039 s | 1.68× |
+| VARBINARY(4) | 4 | 0.080 s | 0.043 s | 1.85× |
+| DATE | 4 | 0.070 s | 0.037 s | 1.89× |
 
 These release measurements describe local snapshot catch-up, not whole-job or remote-storage
 performance. Run with:
@@ -207,7 +224,9 @@ routed batches are shuffled while still Arrow with Paimon's own channel formula.
 enters Paimon's bundle write entry point for its bucket and reaches a StreamFusion
 `FileFormatFactory` registered under the `parquet` identifier, whose writer encodes the whole batch
 with the standard parquet-rs `ArrowWriter` over Paimon's output stream. Paimon reads statistics
-from the resulting footer exactly as from its own files.
+from the resulting footer exactly as from its own files. Fixed-length `BINARY(n)` uses Paimon's
+`BYTE_ARRAY` encoding, including when nested; Arrow's fixed-size buffers are converted at the
+writer boundary.
 
 Supported:
 

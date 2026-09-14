@@ -4,7 +4,6 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
-import java.util.Set;
 import org.apache.arrow.c.ArrowSchema;
 import org.apache.arrow.c.Data;
 import org.apache.arrow.vector.VectorSchemaRoot;
@@ -23,7 +22,6 @@ import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.PrimaryKeyFileStoreTable;
 import org.apache.paimon.table.PrimaryKeyTableUtils;
 import org.apache.paimon.table.source.DataSplit;
-import org.apache.paimon.types.DataTypeRoot;
 import org.apache.paimon.types.RowType;
 import tech.streamfusion.arrow.ArrowConversion;
 import tech.streamfusion.operator.NativeAllocator;
@@ -31,9 +29,6 @@ import tech.streamfusion.operator.RowDataArrowConverter;
 
 /** Java plans runs and owns file access; Rust decodes and merges into Arrow. */
 public final class NativePaimonSnapshotReader implements AutoCloseable {
-  private static final Set<DataTypeRoot> MERGE_KEY_TYPES =
-      Set.of(DataTypeRoot.INTEGER, DataTypeRoot.BIGINT, DataTypeRoot.VARCHAR);
-
   private final FileStoreTable table;
   private final DataSplit split;
   private final List<List<SortedRun>> sections;
@@ -78,7 +73,8 @@ public final class NativePaimonSnapshotReader implements AutoCloseable {
     }
     var keys = table.schema().trimmedPrimaryKeysFields();
     if (keys.isEmpty()
-        || keys.stream().anyMatch(f -> !MERGE_KEY_TYPES.contains(f.type().getTypeRoot()))) {
+        || PaimonKeyValueLayout.unsupportedKeyReason(table) != null
+        || PaimonArrowFields.unsupportedTypeReason(new RowType(keys)) != null) {
       return null;
     }
     List<List<SortedRun>> sections =
