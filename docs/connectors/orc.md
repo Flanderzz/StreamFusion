@@ -99,28 +99,33 @@ run them with `mvn test -Pbench,paimon` so the native libraries are optimized. T
 validation remain identical to the Parquet diagnostics documented on the Paimon page.
 
 On local Apple Silicon with release libraries and mimalloc, the 262,144-row reader diagnostic
-and 200,000-change writer diagnostic measured:
+measured:
+
+| Path | Java rows | Java to Arrow | Native to Arrow | Native / Java-to-Arrow throughput |
+|---|---:|---:|---:|---:|
+| Append file read | 0.027 s | 0.104 s | 0.057 s | 1.82× |
+| Changelog file read | 0.020 s | 0.095 s | 0.047 s | 2.01× |
+
+The 200,000-change writer diagnostic measured:
 
 | Path | Java | Native | Throughput ratio |
 |---|---:|---:|---:|
-| Append file read | 0.023 s | 0.052 s | 0.45× |
-| Changelog file read | 0.023 s | 0.045 s | 0.51× |
 | Input changelog write | 0.567 s | 0.311 s | 1.82× |
 | Lookup changelog write | 0.474 s | 0.368 s | 1.29× |
 | Full-compaction changelog write | 0.314 s | 0.350 s | 0.90× |
 | Deletion-vector write | 0.374 s | 0.273 s | 1.37× |
 
-These are local diagnostics, not whole-job throughput claims. The reader is currently slower
-than Java's checksum scan: native reading also produces Arrow and copies from ORC vectors,
-whereas Java's comparator consumes rows directly. Both readers project four columns, including
-nested data, but the checksum touches only the first integer column. Native reading materializes
-every projected column into Arrow; Java does not perform the matching Java-to-Arrow conversion.
+These are local diagnostics, not whole-job throughput claims. Native reading is slower than
+Java's row checksum scan but faster than Java reading followed by the existing row-to-Arrow
+converter. All paths project four columns, including nested data, but the checksum touches only
+the first integer column. Both Arrow paths materialize every projected column; the Java row scan
+does not construct Arrow output. The Java-to-Arrow baseline includes the production fallback's
+row ownership copy and uses the same 4,096-row batch size and changelog sidecar as native reading.
 The current ORC adapter appends values individually and allocates Arrow output for each batch.
 Host FileIO callbacks and Arrow import also occur within the timed native path. These are known
-additional operations, not a profile attributing the slowdown to any one of them. A comparison
-of equivalent Arrow output is needed to measure the benefit to a downstream native pipeline.
-The reader's current purpose is format coverage for that pipeline and the snapshot merger.
-It needs further optimization before claiming a standalone read speedup.
+additional operations, not a profile attributing the slowdown to any one of them. The Arrow
+comparison measures the boundary needed by the native pipeline and snapshot merger; it does
+not establish that the C++ codec alone decodes faster than Java, or that an entire Flink job does.
 The writer includes row-to-Arrow conversion, routing, sorting, encoding,
 and Paimon's checkpoint/compaction work; full compaction remains Java.
 

@@ -198,17 +198,31 @@ and watermark admission.
 
 ### Source file-reader diagnostic
 
-The opt-in `PaimonSourceBenchmark` compares released Java reading with native Parquet-to-Arrow
-reading on 262,144 rows and four projected columns, including a nested array. Files are generated
-before timing. Each read includes file open/close, decode, and an id-column checksum; native reads
-also include the Java FileIO/JNI transfer and Arrow import. It verifies row counts and checksums.
-One warmup and three measured runs alternate engine order and report each engine's best time.
+The opt-in `PaimonSourceBenchmark` compares three paths on 262,144 rows and four projected columns,
+including a nested array: released Java reading to rows, Java reading followed by conversion to
+Arrow, and native Parquet/ORC reading to Arrow. Files are generated before timing. Each read
+includes file open/close, decode, and an id-column checksum; native reads also include the Java
+FileIO/JNI transfer and Arrow import. The Java-to-Arrow baseline uses the existing fallback's row
+ownership copy and converter, with the same 4,096-row batch size and changelog sidecar as the native
+reader. Both Arrow paths materialize every projected column and checksum the resulting id vector.
+The Java row scan checksums the id directly and does not construct Arrow output.
+It verifies row counts and checksums across all three paths. One warmup and three measured runs
+rotate execution order and report each path's best time. `speedup` compares native with Java rows;
+`arrow_speedup` compares native with Java-to-Arrow, the relevant boundary for a native pipeline.
 This is a local file-reader diagnostic, not an end-to-end Flink or remote-storage benchmark.
 
-| Path | Stock | Native | Throughput ratio |
-|---|---:|---:|---:|
-| Append files | 0.035 s | 0.027 s | 1.30× |
-| Primary-key changelog files | 0.048 s | 0.022 s | 2.18× |
+Local Apple Silicon measurements with release libraries and mimalloc:
+
+| Format | Path | Java rows | Java to Arrow | Native to Arrow | Native / Java-to-Arrow throughput |
+|---|---|---:|---:|---:|---:|
+| Parquet | Append files | 0.032 s | 0.130 s | 0.026 s | 5.00× |
+| Parquet | Primary-key changelog files | 0.035 s | 0.124 s | 0.019 s | 6.70× |
+| ORC | Append files | 0.027 s | 0.104 s | 0.057 s | 1.82× |
+| ORC | Primary-key changelog files | 0.020 s | 0.095 s | 0.047 s | 2.01× |
+
+ORC remains slower than Java when the consumer only needs the row checksum. At the Arrow output
+boundary both native formats beat the current Java-to-Arrow path in this diagnostic. This does not
+isolate codec speed from representation conversion or establish whole-job throughput.
 
 Run with release native libraries:
 
@@ -218,7 +232,7 @@ SF_PAIMON_SOURCE_BENCHMARK=true mvn test -Pbench,paimon \
   -Dsurefire.failIfNoSpecifiedTests=false
 ```
 
-`SF_PAIMON_SOURCE_ROWS` changes the input count.
+`SF_PAIMON_SOURCE_ROWS` changes the input count; `SF_PAIMON_FILE_FORMAT=orc` selects ORC.
 
 ## Streaming sink
 
