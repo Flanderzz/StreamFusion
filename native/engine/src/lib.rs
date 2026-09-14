@@ -37,6 +37,7 @@ mod calc;
 mod dedup;
 mod exchange;
 mod expr;
+mod file_partition;
 mod flatten;
 mod flink_functions;
 mod flink_key;

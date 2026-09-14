@@ -57,7 +57,7 @@ public final class NativePaimonSplitReader
   private RecordReader<InternalRow> rows;
   private RecordReader.RecordIterator<InternalRow> rowBatch;
   private Queue<DataFileMeta> files;
-  private NativePaimonParquetReader parquet;
+  private NativePaimonFileReader decoder;
   private NativePaimonSnapshotReader snapshot;
   private boolean nativeSnapshotsEnabled = true;
   private int nativeSnapshots;
@@ -172,54 +172,75 @@ public final class NativePaimonSplitReader
     }
   }
 
-  private boolean canDecode(FileStoreSourceSplit split) {
+  private boolean canDecode(FileStoreSourceSplit split) throws IOException {
     if (!(split.split() instanceof DataSplit)) {
       return false;
     }
     DataSplit data = (DataSplit) split.split();
     // Historical schemas and deletion-vector selections retain Java's mapping and filtering.
-    return (!primaryKey
-            || data.isStreaming()
-            || (nativeSnapshotsEnabled
-                && data.rawConvertible()
-                && data.dataFiles().stream().allMatch(f -> f.deleteRowCount().isPresent())))
-        && data.deletionFiles().isEmpty()
-        && data.dataFiles().stream()
-            .allMatch(f -> f.schemaId() == table.schema().id() && f.fileFormat().equals("parquet"));
+    boolean eligible =
+        (!primaryKey
+                || data.isStreaming()
+                || (nativeSnapshotsEnabled
+                    && data.rawConvertible()
+                    && data.dataFiles().stream().allMatch(f -> f.deleteRowCount().isPresent())))
+            && data.deletionFiles().isEmpty()
+            && data.dataFiles().stream()
+                .allMatch(
+                    f ->
+                        f.schemaId() == table.schema().id()
+                            && PaimonCodecs.available(f.fileFormat()));
+    if (!eligible) return false;
+    for (DataFileMeta file : data.dataFiles()) {
+      if (file.fileFormat().equals("orc")) {
+        try (NativePaimonFileReader reader = openFile(file, data)) {
+          if (reader.readerMemory() == Long.MAX_VALUE) return false;
+        }
+      }
+    }
+    return true;
   }
 
   private VectorSchemaRoot nativeBatch() throws IOException {
     while (true) {
-      if (parquet == null) {
+      if (decoder == null) {
         DataFileMeta file = files.poll();
         if (file == null) {
           return null;
         }
         DataSplit split = (DataSplit) current.split();
-        List<Field> fields = new ArrayList<>(ArrowConversion.toArrowSchema(outputType).getFields());
-        List<String> names = new ArrayList<>(outputType.getFieldNames());
-        if (primaryKey && split.isStreaming()) {
-          fields.add(
-              Field.nullable(RowDataArrowConverter.ROW_KIND_COLUMN, new ArrowType.Int(8, true)));
-          names.add("_VALUE_KIND");
-        }
         nativeFiles++;
-        parquet =
-            new NativePaimonParquetReader(
-                table.fileIO(),
-                new Path(file.externalPath().orElse(split.bucketPath() + "/" + file.fileName())),
-                file.fileSize(),
-                new Schema(fields),
-                names.toArray(String[]::new),
-                batchRows);
+        decoder = openFile(file, split);
       }
-      VectorSchemaRoot root = parquet.next();
+      VectorSchemaRoot root = decoder.next();
       if (root != null) {
         return root;
       }
-      parquet.close();
-      parquet = null;
+      decoder.close();
+      decoder = null;
     }
+  }
+
+  private NativePaimonFileReader openFile(DataFileMeta file, DataSplit split) throws IOException {
+    List<Field> fields = new ArrayList<>(ArrowConversion.toArrowSchema(outputType).getFields());
+    List<String> names = new ArrayList<>(outputType.getFieldNames());
+    if (primaryKey && split.isStreaming()) {
+      fields.add(Field.nullable(RowDataArrowConverter.ROW_KIND_COLUMN, new ArrowType.Int(8, true)));
+      names.add("_VALUE_KIND");
+    }
+    return new NativePaimonFileReader(
+        PaimonCodecs.reader(
+            file.fileFormat(),
+            table
+                .coreOptions()
+                .toConfiguration()
+                .get(org.apache.paimon.format.OrcOptions.ORC_TIMESTAMP_LTZ_LEGACY_TYPE)),
+        table.fileIO(),
+        new Path(file.externalPath().orElse(split.bucketPath() + "/" + file.fileName())),
+        file.fileSize(),
+        new Schema(fields),
+        names.toArray(String[]::new),
+        batchRows);
   }
 
   private VectorSchemaRoot javaBatch() throws IOException {
@@ -258,8 +279,8 @@ public final class NativePaimonSplitReader
       } finally {
         rows = null;
         try {
-          if (parquet != null) {
-            parquet.close();
+          if (decoder != null) {
+            decoder.close();
           }
         } finally {
           try {
@@ -268,7 +289,7 @@ public final class NativePaimonSplitReader
             }
           } finally {
             snapshot = null;
-            parquet = null;
+            decoder = null;
             files = null;
             current = null;
           }

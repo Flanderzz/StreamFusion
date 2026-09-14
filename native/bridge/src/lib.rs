@@ -11,3 +11,5 @@ pub mod json_string;
 
 pub use {bridge::*, changelog::*, format_abi::*, format_codes::*, jdk_decimal::*, jdk_double::*};
 mod allocator;
+
+pub mod partition;

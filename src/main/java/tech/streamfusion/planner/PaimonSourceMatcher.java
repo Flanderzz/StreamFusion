@@ -11,6 +11,7 @@ import org.apache.paimon.flink.source.DataTableSource;
 import org.apache.paimon.table.FileStoreTable;
 import tech.streamfusion.operator.RowDataArrowConverter;
 import tech.streamfusion.paimon.NativePaimonSource;
+import tech.streamfusion.paimon.PaimonCodecs;
 
 /** Admission for the hybrid streaming source; all pushed predicates remain Flink residuals. */
 final class PaimonSourceMatcher {
@@ -34,8 +35,8 @@ final class PaimonSourceMatcher {
     if (typeReason != null) {
       return typeReason;
     }
-    if (!options.fileFormatString().equals("parquet")) {
-      return "file.format must be parquet";
+    if (!PaimonCodecs.available(options.fileFormatString())) {
+      return "file.format requires an installed native Parquet or ORC module";
     }
     if (!table.primaryKeys().isEmpty()
         && options.changelogProducer() == CoreOptions.ChangelogProducer.NONE) {
@@ -43,8 +44,8 @@ final class PaimonSourceMatcher {
     }
     if (!table.primaryKeys().isEmpty()
         && options.changelogFileFormat() != null
-        && !options.changelogFileFormat().equals("parquet")) {
-      return "changelog-file.format must be parquet";
+        && !PaimonCodecs.available(options.changelogFileFormat())) {
+      return "changelog-file.format requires an installed native Parquet or ORC module";
     }
     if (options.queryAuthEnabled()) {
       return "query authorization retains the stock source";
@@ -85,10 +86,13 @@ final class PaimonSourceMatcher {
           .contains(key)) {
         continue;
       }
+      if (key.equals("orc.timestamp-ltz.legacy.type")
+          && java.util.Set.of("true", "false").contains(table.options().get(key))) continue;
       if (key.startsWith("scan.")
           || key.startsWith("streaming-read-")
           || key.startsWith("log.")
-          || key.startsWith("parquet.")) {
+          || key.startsWith("parquet.")
+          || key.startsWith("orc.")) {
         return "source option " + key + " is not supported";
       }
     }
@@ -104,6 +108,12 @@ final class PaimonSourceMatcher {
       }
     }
     var type = FlinkTypeFactory$.MODULE$.toLogicalRowType(scan.getRowType());
+    if ("orc".equals(options.fileFormatString()) || "orc".equals(options.changelogFileFormat())) {
+      String timestampReason =
+          tech.streamfusion.orc.OrcWriterSettings.timestampFallback(
+              LogicalTypeConversion.toLogicalType(table.rowType()));
+      if (timestampReason != null) return timestampReason;
+    }
     if (type.getFieldCount() == 0) {
       return "zero-column projection is not supported";
     }

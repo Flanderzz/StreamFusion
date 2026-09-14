@@ -28,10 +28,12 @@ readonly UNSHADED_BRIDGE_POM="${SUITE_ROOT}/flink-table-calcite-bridge-${FLINK_V
 readonly UNSHADED_SQL_PARSER_JAR="${SUITE_ROOT}/flink-sql-parser-${FLINK_VERSION}-unshaded.jar"
 readonly UNSHADED_SQL_PARSER_POM="${SUITE_ROOT}/flink-sql-parser-${FLINK_VERSION}-effective.pom"
 readonly SUITE_MODE="${1:-runtime}"
-readonly FLINK_MODULE_CONFIG="-Djava.library.path=${STREAMFUSION_BUILD_ROOT}/native/target/debug --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED --add-opens=java.base/java.time=ALL-UNNAMED --add-opens=java.base/java.math=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED -Djunit.platform.reflection.search.useLegacySemantics=true -javaagent:${AGENT_JAR}"
+readonly FLINK_MODULE_CONFIG="-Duser.timezone=UTC -Djava.library.path=${STREAMFUSION_BUILD_ROOT}/native/target/debug --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED --add-opens=java.base/java.time=ALL-UNNAMED --add-opens=java.base/java.math=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED -Djunit.platform.reflection.search.useLegacySemantics=true -javaagent:${AGENT_JAR}"
 readonly PAIMON_MODULE_CONFIG="-XX:+IgnoreUnrecognizedVMOptions --add-opens=java.base/java.lang.invoke=ALL-UNNAMED --add-opens=java.base/java.lang.reflect=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED --add-opens=java.base/java.net=ALL-UNNAMED --add-opens=java.base/java.util.concurrent=ALL-UNNAMED --add-opens=java.base/jdk.internal.ref=ALL-UNNAMED --add-opens=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java.base/sun.nio.cs=ALL-UNNAMED --add-opens=java.base/sun.security.action=ALL-UNNAMED --add-opens=java.base/sun.util.calendar=ALL-UNNAMED --add-opens=java.security.jgss/sun.security.krb5=ALL-UNNAMED -Djdk.reflect.useDirectMethodHandle=false -Dio.netty.tryReflectionSetAccessible=true ${FLINK_MODULE_CONFIG}"
 readonly PAIMON_BUILD_ARGS=(-Pflink2 "-Dpaimon-flink-common.flink.version=${FLINK_VERSION}" "-Dtest.flink.version=${FLINK_VERSION}" -Dspotless.check.skip=true -Dcheckstyle.skip=true -Drat.skip=true -Dmaven.javadoc.skip=true)
 readonly FORMAT_MODULES="flink-formats/flink-json,flink-formats/flink-csv,flink-formats/flink-avro,flink-formats/flink-avro-confluent-registry,flink-formats/flink-protobuf"
+readonly ORC_MODULE="flink-formats/flink-orc"
+readonly ORC_SQL_TESTS="org.apache.flink.orc.OrcFsStreamingSinkITCase,org.apache.flink.orc.OrcFileSystemITCase"
 readonly PARQUET_MODULE="flink-formats/flink-parquet"
 readonly PARQUET_SINK_TESTS="org.apache.flink.formats.parquet.ParquetFsStreamingSinkITCase,org.apache.flink.formats.parquet.ParquetTimestampITCase"
 readonly PAIMON_SQL_TESTS="org.apache.paimon.flink.AppendOnlyTableITCase,org.apache.paimon.flink.AppendTableITCase,org.apache.paimon.flink.BatchFileStoreITCase,org.apache.paimon.flink.ComputedColumnAndWatermarkTableITCase,org.apache.paimon.flink.ContinuousFileStoreITCase,org.apache.paimon.flink.ReadWriteTableITCase,org.apache.paimon.flink.PrimaryKeyFileStoreTableITCase,org.apache.paimon.flink.CompositePkAndMultiPartitionedTableITCase,org.apache.paimon.flink.FullCompactionFileStoreITCase,org.apache.paimon.flink.FlinkJobRecoveryITCase,org.apache.paimon.flink.RescaleBucketITCase,org.apache.paimon.flink.ScanBucketITCase,org.apache.paimon.flink.KeyOnlyDeletesITCase,org.apache.paimon.flink.FirstRowITCase,org.apache.paimon.flink.CoordinatorCommitITCase"
@@ -65,7 +67,7 @@ case "${SUITE_MODE}" in
   formats)
     TEST_GOAL="surefire:test@integration-tests"
     TEST_MODULES="${FORMAT_MODULES}"
-    FORMAT_COMPILE_MODULES="${FORMAT_MODULES},${PARQUET_MODULE}"
+    FORMAT_COMPILE_MODULES="${FORMAT_MODULES},${PARQUET_MODULE},${ORC_MODULE}"
     REPORT_ROOT="${FLINK_ROOT}/flink-formats"
     ;;
   parquet)
@@ -75,6 +77,15 @@ case "${SUITE_MODE}" in
     REPORT_ROOT="${FLINK_ROOT}/flink-formats/flink-parquet/target/surefire-reports"
     if [[ -z "${FLINK_SUITE_TEST:-}" ]]; then
       TEST_SELECTOR_ARGS=("-Dtest=${PARQUET_SINK_TESTS}")
+    fi
+    ;;
+  orc)
+    TEST_GOAL="surefire:test@integration-tests"
+    TEST_MODULES="${ORC_MODULE}"
+    FORMAT_COMPILE_MODULES="${ORC_MODULE}"
+    REPORT_ROOT="${FLINK_ROOT}/flink-formats/flink-orc/target/surefire-reports"
+    if [[ -z "${FLINK_SUITE_TEST:-}" ]]; then
+      TEST_SELECTOR_ARGS=("-Dtest=${ORC_SQL_TESTS}")
     fi
     ;;
   kafka)
@@ -96,13 +107,14 @@ case "${SUITE_MODE}" in
   all)
     "${BASH_SOURCE[0]}" formats || exit $?
     FLINK_SUITE_REUSE_BUILD=true "${BASH_SOURCE[0]}" parquet || exit $?
+    FLINK_SUITE_REUSE_BUILD=true "${BASH_SOURCE[0]}" orc || exit $?
     FLINK_SUITE_REUSE_BUILD=true "${BASH_SOURCE[0]}" runtime || exit $?
     "${BASH_SOURCE[0]}" paimon || exit $?
     "${BASH_SOURCE[0]}" kafka
     exit $?
     ;;
   *)
-    echo "Usage: $0 [runtime|diagnostic|state|formats|parquet|kafka|paimon|all]" >&2
+    echo "Usage: $0 [runtime|diagnostic|state|formats|parquet|orc|kafka|paimon|all]" >&2
     exit 2
     ;;
 esac
@@ -158,6 +170,12 @@ if [[ "${FLINK_SUITE_REUSE_BUILD:-false}" == "true" ]]; then
       && { [[ ! -f "${FLINK_ROOT}/flink-formats/flink-parquet/target/test-classes/org/apache/flink/formats/parquet/ParquetFsStreamingSinkITCase.class" ]] \
         || ! grep -q 'streamfusion-parquet' "${CLASSPATH_FILE}"; }; then
     echo "Cannot reuse the Parquet-suite build; run bin/flink-suite.sh parquet once without FLINK_SUITE_REUSE_BUILD." >&2
+    exit 2
+  fi
+  if [[ "${SUITE_MODE}" == "orc" ]] \
+      && { [[ ! -f "${FLINK_ROOT}/${ORC_MODULE}/target/test-classes/org/apache/flink/orc/OrcFsStreamingSinkITCase.class" ]] \
+        || ! grep -q 'streamfusion-orc' "${CLASSPATH_FILE}"; }; then
+    echo "Cannot reuse the ORC-suite build; run bin/flink-suite.sh orc once without FLINK_SUITE_REUSE_BUILD." >&2
     exit 2
   fi
   if [[ "${SUITE_MODE}" == "kafka" ]] \
@@ -234,13 +252,13 @@ else
   mvn -B -ntp -s "${MAVEN_SETTINGS}" -Dmaven.repo.local="${SUITE_MAVEN_REPO}" \
     -Dstreamfusion.flink-source-suite -Ppaimon \
     -f "${STREAMFUSION_BUILD_ROOT}/pom.xml" \
-    -pl :streamfusion-core,:streamfusion-kafka,:streamfusion-json,:streamfusion-csv,:streamfusion-raw,:streamfusion-avro,:streamfusion-avro-confluent-registry,:streamfusion-protobuf,:streamfusion-parquet,:streamfusion-paimon \
+    -pl :streamfusion-core,:streamfusion-kafka,:streamfusion-json,:streamfusion-csv,:streamfusion-raw,:streamfusion-avro,:streamfusion-avro-confluent-registry,:streamfusion-protobuf,:streamfusion-parquet,:streamfusion-orc,:streamfusion-paimon \
     -am -DskipTests clean install || exit $?
   mvn -B -ntp -s "${MAVEN_SETTINGS}" -Dmaven.repo.local="${SUITE_MAVEN_REPO}" \
     -f "${REPO_ROOT}/dev/flink-suite/classpath-pom.xml" \
     dependency:build-classpath -Dmdep.outputFile="${CLASSPATH_FILE}" || exit $?
 
-  if [[ "${SUITE_MODE}" == "formats" || "${SUITE_MODE}" == "parquet" ]]; then
+  if [[ "${SUITE_MODE}" == "formats" || "${SUITE_MODE}" == "parquet" || "${SUITE_MODE}" == "orc" ]]; then
     echo "Compiling the untouched upstream Flink format integration tests..."
     "${FLINK_ROOT}/mvnw" -B -ntp -s "${MAVEN_SETTINGS}" -f "${FLINK_ROOT}/pom.xml" \
       -Dmaven.repo.local="${SUITE_MAVEN_REPO}" -Didea.version=streamfusion-suite \
@@ -264,6 +282,15 @@ else
   fi
 fi
 STREAMFUSION_CLASSPATH="$(tr ':' ',' < "${CLASSPATH_FILE}")"
+if [[ "${SUITE_MODE}" != "paimon" ]]; then
+  # Paimon's provided connector API is supplied by its own suite. Do not install its optional
+  # planner extension into unrelated Flink test JVMs that do not have that connector.
+  STREAMFUSION_CLASSPATH="$(python3 - "${STREAMFUSION_CLASSPATH}" <<'PY'
+import sys
+print(','.join(p for p in sys.argv[1].split(',') if '/tech/streamfusion/streamfusion-paimon/' not in p))
+PY
+)"
+fi
 if [[ "${SUITE_MODE}" == "paimon" ]]; then
   # Paimon declares the planner's test-jar before the planner itself, which places stock
   # calcite-core ahead of Flink's patched Calcite classes in Surefire's resolved classpath. Drop the
@@ -322,7 +349,7 @@ else
 fi
 if [[ ${#TEST_SELECTOR_ARGS[@]} -gt 0 ]]; then
   MAVEN_TEST_ARGS+=("${TEST_SELECTOR_ARGS[@]}")
-  if [[ "${SUITE_MODE}" == "formats" || "${SUITE_MODE}" == "parquet" || "${SUITE_MODE}" == "paimon" ]]; then
+  if [[ "${SUITE_MODE}" == "formats" || "${SUITE_MODE}" == "parquet" || "${SUITE_MODE}" == "orc" || "${SUITE_MODE}" == "paimon" ]]; then
     MAVEN_TEST_ARGS+=("-Dsurefire.failIfNoSpecifiedTests=false")
   fi
 fi
@@ -349,10 +376,12 @@ if [[ "${SUITE_MODE}" == "state" && ${TEST_STATUS} -eq 0 ]]; then
   done
 fi
 
-if [[ "${SUITE_MODE}" == "parquet" && ${TEST_STATUS} -eq 0 ]]; then
-  readonly PARQUET_MARKER="StreamFusion upstream Parquet suite created native Parquet sink writer"
+if [[ ( "${SUITE_MODE}" == "parquet" || "${SUITE_MODE}" == "orc" ) && ${TEST_STATUS} -eq 0 ]]; then
+  codec_name="Parquet"
+  if [[ "${SUITE_MODE}" == "orc" ]]; then codec_name="Orc"; fi
+  readonly PARQUET_MARKER="StreamFusion upstream ${codec_name} suite created native ${codec_name} sink writer"
   if ! grep -RqsF "${PARQUET_MARKER}" "${REPORT_ROOT}"; then
-    echo "The upstream Parquet suite did not prove: ${PARQUET_MARKER}" >&2
+    echo "The upstream ${codec_name} suite did not prove: ${PARQUET_MARKER}" >&2
     exit 1
   fi
 fi

@@ -10,24 +10,31 @@ import org.apache.flink.table.planner.plan.nodes.exec.InputProperty;
 import org.apache.flink.table.planner.utils.ShortcutUtils;
 
 /**
- * Physical node standing in for a filesystem Parquet sink the native writer runs. It keeps the
+ * Physical node standing in for a filesystem columnar sink the native writer runs. It keeps the
  * replaced sink's row type and traits and carries the matcher's plan — path, partition keys, table
  * options, and the translated encoder settings — for the operator chain the exec node builds.
  * Stateless with respect to event time, so it needs no watermark.
  */
-public class StreamPhysicalNativeParquetSink extends StreamPhysicalNativeSingleRel
+public class StreamPhysicalNativeFileSink extends StreamPhysicalNativeSingleRel
     implements ColumnarInput {
 
-  private final ParquetSinkMatcher.Planned planned;
+  private final FileSinkMatcher.Planned planned;
 
-  StreamPhysicalNativeParquetSink(
+  StreamPhysicalNativeFileSink(
       RelOptCluster cluster,
       RelTraitSet traitSet,
       RelNode input,
       RelDataType outputRowType,
-      ParquetSinkMatcher.Planned planned) {
+      FileSinkMatcher.Planned planned) {
     super(cluster, traitSet, input, outputRowType);
     this.planned = planned;
+  }
+
+  @Override
+  public String getRelTypeName() {
+    return "StreamPhysicalNative"
+        + (Character.toUpperCase(planned.format.charAt(0)) + planned.format.substring(1))
+        + "Sink";
   }
 
   @Override
@@ -39,13 +46,13 @@ public class StreamPhysicalNativeParquetSink extends StreamPhysicalNativeSingleR
 
   @Override
   public RelNode copy(RelTraitSet traitSet, List<RelNode> inputs) {
-    return new StreamPhysicalNativeParquetSink(
+    return new StreamPhysicalNativeFileSink(
         getCluster(), traitSet, inputs.get(0), outputRowType, planned);
   }
 
   @Override
   public ExecNode<?> translateToExecNode() {
-    return new NativeParquetSinkExecNode(
+    return new NativeFileSinkExecNode(
         ShortcutUtils.unwrapTableConfig(this),
         InputProperty.DEFAULT,
         planned.rowType,

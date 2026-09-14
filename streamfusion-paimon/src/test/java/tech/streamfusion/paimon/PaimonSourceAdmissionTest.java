@@ -15,7 +15,7 @@ class PaimonSourceAdmissionTest {
   @CsvSource(
       delimiter = '|',
       value = {
-        "'file.format'='orc'|file.format",
+        "'file.format'='avro'|file.format",
         "'source.checkpoint-align.enabled'='true'|checkpoint-align",
         "'scan.ignore-corrupt-file'='true'|ignore-corrupt-file",
         "'data-file.thin-mode'='true'|thin-mode"
@@ -69,6 +69,8 @@ class PaimonSourceAdmissionTest {
     sql.executeSql(
         "CREATE CATALOG p WITH ('type'='paimon', 'warehouse'='"
             + Files.createTempDirectory("paimon-source-plan").toUri()
+            + "', 'table-default.file.format'='"
+            + PaimonTestTables.fileFormat()
             + "')");
     sql.executeSql("USE CATALOG p");
     return sql;

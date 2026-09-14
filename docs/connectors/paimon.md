@@ -6,24 +6,27 @@ dynamic, or postpone buckets** on the published Paimon `2.0.0` Flink 2.2 connect
 Paimon keeps every table-level responsibility:
 schema and catalog, bucket assignment rules, sequence numbering rules, file rolling, statistics,
 manifests, snapshots, commits, and compaction. StreamFusion replaces the per-row shuffle in front
-of the writers, append buffering and spilling, the Parquet encoding of each data file, and, for
+of the writers, append buffering and spilling, the Parquet/ORC encoding of each data file, and, for
 primary-key tables, the sort and merge that turns a bucket's changelog into a level-0 file. Postpone
 staging retains every accepted change for Paimon's separate compactor.
 
+Both file formats share the same Java lifecycle, native routing and merge paths. ORC's physical
+encoding options and UTC timestamp restrictions are detailed on the [ORC page](orc.md).
+
 ## Streaming source
 
-Streaming Parquet reads retain the released Java Paimon client for table/catalog resolution,
+Streaming Parquet and ORC reads retain the released Java Paimon client for table/catalog resolution,
 snapshot and manifest discovery, split assignment, filesystem credentials, and enumerator
 checkpoint serialization. A task-side reader emits Arrow batches into the native pipeline:
 
 | Read phase | Implementation |
 |---|---|
-| Append snapshot and subsequent committed data | Native Parquet decoding into Arrow |
-| Primary-key initial snapshot | Native Parquet for raw-convertible files; native sorted-run merge for admitted deduplication splits; Java merge-to-Arrow for other splits |
-| Primary-key changelog tailing | Native Parquet decoding of value columns and the stored row-kind byte |
+| Append snapshot and subsequent committed data | Native Parquet/ORC decoding into Arrow |
+| Primary-key initial snapshot | Native Parquet/ORC for raw-convertible files; native sorted-run merge for admitted deduplication splits; Java merge-to-Arrow for other splits |
+| Primary-key changelog tailing | Native Parquet/ORC decoding of value columns and the stored row-kind byte |
 
 Primary-key tailing requires `changelog-producer = input`, `lookup`, or `full-compaction`, and
-Parquet changelog files. The producer has already generated the changes; the source preserves
+Parquet or ORC changelog files. The producer has already generated the changes; the source preserves
 `+I`, `-U`, `+U`, and `-D` without another merge. Default startup reads the current snapshot before
 following commits. `scan.mode = latest` starts with new commits only. Remaining snapshot merge coverage
 is tracked in [#53](https://github.com/datafusion-contrib/StreamFusion/issues/53). The
@@ -31,7 +34,7 @@ is tracked in [#53](https://github.com/datafusion-contrib/StreamFusion/issues/53
 records the Java planning and Arrow batch interface.
 
 The native decoder calls Paimon's seekable `FileIO` through a reusable 64 KiB transfer buffer.
-parquet-rs reads the projected column chunks and decodes batches of up to 4,096 rows. It does not
+parquet-rs or Apache ORC C++ reads the projected columns and decodes batches of up to 4,096 rows. It does not
 load an entire file into Java memory. Arrow C Data exports transfer ownership to the source batch;
 closing the reader releases the native decoder and Java input stream. Memory includes compressed
 column chunks, decoder working buffers, and the source's bounded fetch queue; the batch row count
@@ -46,7 +49,7 @@ including positions within a new batch size. Prefetched rows do not advance the 
 identity when restoring savepoints after job graph changes.
 
 The reader deliberately retains Java decoding and row-to-Arrow conversion for splits requiring
-schema evolution, deletion-vector selection, or non-Parquet historical files, and for specialized
+schema evolution, deletion-vector selection, or historical files without an installed native codec, and for specialized
 split representations. This preserves those files' Java read semantics within an admitted source.
 Primary-key snapshot splits needing unsupported merge semantics retain Java, including its merge
 engine and delete handling.
@@ -56,7 +59,7 @@ engine and delete handling.
 Java Paimon's released `IntervalPartition` groups each snapshot split into disjoint key sections
 and sorted runs. Native code merges the runs in a section while opening each run's files in order.
 The optional Paimon native library adapts paimon-rust's loser tree, Arrow key comparison and batch
-output gathering. It requests Arrow batches from the separate Parquet library through a Java
+output gathering. It requests Arrow batches from the separate Parquet or ORC library through a Java
 callback that forwards C Data addresses. No Java row or Java Arrow vector is materialized between
 decoding and merging. Java still owns file access, schemas, discovery and checkpoints.
 
@@ -67,7 +70,9 @@ comparable scalar types: `BOOLEAN`, `TINYINT` through `BIGINT`, `DECIMAL`, `CHAR
 use those same types after Java removes table partition columns from the stored key. Floating-point
 keys retain Java because their full ordering contract is not verified; timestamps above precision 6
 retain the stock source. Values use the supported source types. It requires current-schema
-Parquet files without deletion vectors. These snapshot combinations retain Java:
+Parquet/ORC files without deletion vectors. ORC additionally retains Java for fractional timestamp key bounds that can lose sorted order
+through its last-negative-second alias, and for non-leading fractional timestamp keys; see the
+[ORC timestamp restrictions](orc.md#configuration-and-types). These snapshot combinations retain Java:
 
 - User sequence fields, non-default delete handling, other merge engines, dynamic/postpone
   buckets, unsupported key types and specialized split representations.
@@ -76,13 +81,13 @@ Parquet files without deletion vectors. These snapshot combinations retain Java:
 - Sections exceeding `sort-spill-threshold`, or the encoded row-group admission budget below.
 
 For raw-convertible primary-key snapshot splits with known delete counts and no deletion vectors,
-the source follows Java's raw reader: native Parquet values emit insert rows. This path does not
+the source follows Java's raw reader: native decoded values emit insert rows. This path does not
 need a merge. For admitted merge splits, it drops winning retracts and retains the winning add
 kind. Changelog tailing continues to preserve all stored changes.
 
 `sort-spill-buffer-size` supplies the snapshot merger's retained-buffer budget. Before emission,
 the reader inspects file footers and requires the sum of each run's largest compressed-plus-
-uncompressed row-group size to fit half that budget. Larger splits retain Java's spill-capable
+uncompressed row-group size (Parquet), or its conservative stripe/dictionary estimate (ORC), to fit half that budget. Larger splits retain Java's spill-capable
 reader. Native merging accounts for retained Arrow inputs, encoded keys, the current winner and
 pending output references; exceeding the budget fails the read. Output flushes by bytes as well
 as rows, and completed batches are reclaimed even during long stretches of deleted keys.
@@ -99,7 +104,7 @@ version offsets.
 
 `PaimonSnapshotMergeTest` checks stock- and native-written overlapping snapshots, nested values,
 projections omitting keys, partitioned composite keys, Java/native restoration and admission
-fallbacks. `PaimonSnapshotKeyTypesTest` adds 58 cases covering every admitted key type with both
+fallbacks. `PaimonSnapshotKeyTypesTest` adds 136 cases across Parquet and ORC covering every admitted key type with both
 stock and native writers, signed integer extremes, all three Parquet decimal physical encodings,
 Unicode and binary prefix ordering, pre-epoch dates/timestamps, timestamp precisions 0–6,
 projections and restoration in both Java/native directions. Unsupported floating-point and
@@ -124,7 +129,7 @@ FLINK_SUITE_TEST='org.apache.paimon.flink.ReadWriteTableITCase,org.apache.paimon
 
 ### Snapshot catch-up diagnostic
 
-`PaimonSnapshotMergeBenchmark` writes 65,536 keys over one, four and eight commits for `INT`,
+`PaimonSnapshotMergeBenchmark` writes Parquet files with 65,536 keys over one, four and eight commits for `INT`,
 and four commits for `DECIMAL(38,2)`, `TIMESTAMP(6)`, `VARBINARY(4)` and `DATE`, including
 updates, deletes, strings and nested arrays, before timing. It compares the existing Java
 merge-to-Arrow path with native snapshot reading, including Java run planning and footer checks,
@@ -160,7 +165,7 @@ Only streaming data-table reads enter this path. It uses the sink's supported va
 (including nested values and timestamps up to precision 6). These configurations retain the stock
 source at planning time:
 
-- Primary-key tables without a changelog producer, non-Parquet table/changelog formats, thin data
+- Primary-key tables without a changelog producer, table/changelog formats without an installed native Parquet or ORC module, thin data
   files, data evolution, row tracking, chain tables, query authorization, and exposing internal
   key-value sequence numbers.
 - Nested subfield pruning, zero-column projections, metadata columns, pushed limits/aggregates,
@@ -169,12 +174,12 @@ source at planning time:
   and `postpone.merge-on-read`.
 - Source watermarks outside the shared periodic constant-delay contract, including on-event
   emission and watermark alignment.
-- Unverified `scan.*`, `streaming-read-*`, `log.*`, and custom `parquet.*` settings. The admitted scan settings are
+- Unverified `scan.*`, `streaming-read-*`, `log.*`, and custom `parquet.*`/`orc.*` settings. ORC also admits the boolean `orc.timestamp-ltz.legacy.type`; timestamp schemas require a UTC JVM timezone. The admitted scan settings are
   `scan.mode`, `scan.snapshot-id`, `scan.timestamp-millis`, `scan.timestamp`, `scan.tag-name`,
   `scan.watermark`, `scan.bounded.watermark`, `scan.parallelism`, `scan.infer-parallelism`,
   `scan.infer-parallelism.max`, `scan.remove-normalize`, and supported watermark idle/emit settings.
 
-`streamfusion.operator.paimonSource.enabled=false` disables the substitution. The Parquet module
+`streamfusion.operator.paimonSource.enabled=false` disables the substitution. The selected Parquet or ORC module
 must be installed alongside the Paimon module, as for the sink. Native format-factory discovery
 is not required for this reader: it calls the decoder directly on Java-planned files.
 
@@ -222,9 +227,12 @@ computes the partition `BinaryRow` and Paimon's default bucket hash column-wise 
 layout and Murmur hash are Flink's, so the native key encoder already produces both), and the
 routed batches are shuffled while still Arrow with Paimon's own channel formula. Each batch then
 enters Paimon's bundle write entry point for its bucket and reaches a StreamFusion
-`FileFormatFactory` registered under the `parquet` identifier, whose writer encodes the whole batch
-with the standard parquet-rs `ArrowWriter` over Paimon's output stream. Paimon reads statistics
-from the resulting footer exactly as from its own files. Fixed-length `BINARY(n)` uses Paimon's
+`FileFormatFactory` registered under the selected `parquet` or `orc` identifier, whose writer encodes the whole batch
+with parquet-rs or Apache ORC C++ over Paimon's output stream. Paimon reads statistics
+from the resulting footer. Native Parquet writers additionally collect top-level floating-point
+bounds with Paimon's collector and pass them through its writer-metadata API: parquet-rs excludes
+NaN from footer bounds, whereas Paimon's manifest bounds include it. No Java rows are materialized
+for this column-wise collection. Fixed-length `BINARY(n)` uses Paimon's
 `BYTE_ARRAY` encoding, including when nested; Arrow's fixed-size buffers are converted at the
 writer boundary.
 
@@ -234,6 +242,8 @@ Supported:
   or `hash`, including Paimon's in-job compaction coordinator and workers.
 - Fixed-bucket append tables (`bucket > 0` with `bucket-key`), partitioned or not, with the
   `sink.parallelism` and small-bucket-count parallelism rules of the stock sink.
+- `file.format = orc` with NONE/ZLIB/SNAPPY/LZ4/ZSTD compression, Paimon block/level mappings,
+  and the [verified ORC writer settings](orc.md#configuration-and-types).
 - `file.format = parquet` with `file.compression` `none`/`snappy`/`gzip`/`zstd` (and
   `file.compression.zstd-level`), `file.block-size`, and the `parquet.*` writer keys the stock
   writer honours: page and dictionary-page size, dictionary encoding, writer version.
@@ -298,7 +308,7 @@ held per bucket in a native buffer. At a checkpoint, or once a task's buffers ex
 sorted by key, optional user sequence, and arrival, reduced by the table's merge engine,
 and written straight into level-0 data files in Paimon's
 key-value layout with the native Parquet encoder, rolled at `target-file-size`. Every file carries
-the metadata Paimon's own writer records: key bounds, key and value statistics from the footer,
+the metadata Paimon's own writer records: key bounds, key and value statistics from the format,
 sequence range, delete count, level 0. Sequence numbers continue from the bucket's committed files
 exactly as a restored Paimon writer's do, so a native run numbers its rows like a stock run.
 
@@ -316,7 +326,7 @@ Supported: `bucket >= 1` with the default or an explicit `bucket-key`, or dynami
 deduplicate`/`first-row`/`partial-update`/`aggregation`,
 `changelog-producer` `none`/`input`/`lookup`/`full-compaction`, `ignore-delete`, `ignore-update-before`,
 `write-only`, `file.compression*` and
-the `parquet.*` writer keys as for append tables, and key columns of type `BOOLEAN`,
+the selected format's writer keys as for append tables, and key columns of type `BOOLEAN`,
 `TINYINT`..`BIGINT`, `DECIMAL`, `CHAR`/`VARCHAR`, `BINARY`/`VARBINARY`, `DATE`, `TIMESTAMP`, and
 `TIMESTAMP_LTZ` (the native sort orders keys by their Arrow byte encoding, which agrees with
 Paimon's key comparator for exactly these types). An insert-only stream into a primary-key table
@@ -382,10 +392,10 @@ Creation times increase by at least one millisecond per partition/writer, even w
 within one clock tick. Recovery continues after that writer's committed staging files, so neither
 manifest scan order nor a stalled clock can reorder its changes.
 
-The native postpone files use Parquet. Stock Paimon 2.0.0 normally chooses Avro internally for
-these staging files, even when `file.format = parquet`; Paimon's released readers and compactor
-accept both. Native staging therefore differs in physical encoding while preserving the records,
-row kinds, replay order, and commit protocol. It uses the normal native Parquet option whitelist.
+Native postpone files use the configured Parquet or ORC format. Stock Paimon 2.0.0 normally
+chooses Avro internally for these staging files; Paimon's released readers and compactor
+accept the configured native formats too. Native staging therefore differs in physical encoding while preserving the records,
+row kinds, replay order, and commit protocol. It uses the selected native format's option whitelist.
 
 Postpone ingestion does not produce the final merged table or changelog. Paimon's dedicated
 compaction job (`CALL sys.compact` in batch mode) assigns real buckets and applies the configured
@@ -403,7 +413,7 @@ For fixed and dynamic buckets:
   are encoded into separate Parquet changelog files and committed through Paimon's changelog
   manifests. They are not data-file extras, and their rolling boundaries are independent of the
   merged data files. `ignore-delete` removes retracts before both outputs and before numbering.
-  `changelog-file.format = parquet`, `changelog-file.compression`, and
+  `changelog-file.format` matching the table format (`parquet` or `orc`), `changelog-file.compression`, and
   `changelog-file.stats-mode` follow Paimon's writer settings; compression has the same native
   whitelist as data files.
 - **Lookup and force-lookup:** native level-0 files enter Paimon's selected lookup writer.
@@ -427,16 +437,19 @@ The native sink uses the released Java connector for these lifecycles; see
 
 ### Parity
 
-Files written natively are row-, metadata-, statistics-, and footer-schema-identical to the stock
-writer's (verified against twin tables in `PaimonSinkParityTest`, `NativePaimonParquetWriterTest`,
-`NativePaimonKeyValueFileWriterTest`, `NativeKeyValueSinkWriteTest`, and
-`PaimonChangelogSinkWriteTest`), except for the postpone staging encoding and append-buffer
-transition described above, and the random per-file row distribution with `PARTITION_DYNAMIC`
-described below.
+Twin-table tests compare logical rows, key/value statistics, sequence and row-kind metadata,
+and footer schemas against the stock writer in `PaimonSinkParityTest`,
+`NativePaimonParquetWriterTest`, `NativePaimonOrcTest`, `NativePaimonKeyValueFileWriterTest`,
+`NativeKeyValueSinkWriteTest`, and `PaimonChangelogSinkWriteTest`. Compressed sizes can differ;
+size-based rolling and compaction still follow Paimon's decisions on the actual files. Postpone
+staging, append-buffer transitions and random `PARTITION_DYNAMIC` routing have the additional
+physical-file differences described on this page.
 `bin/flink-suite.sh paimon` runs Paimon's own unchanged append-table SQL integration tests with the
-native sink installed (see [the upstream suite](../upstream-flink-suite.md)). The
-one known statistics difference: a `DOUBLE`/`FLOAT` column whose minimum is a negative zero is
-recorded as `-0.0` by parquet-rs and `0.0` by parquet-mr.
+native sink installed (see [the upstream suite](../upstream-flink-suite.md)). Parquet's physical
+floating-point footer bounds can differ for NaN and signed zero; Paimon manifest statistics use
+the collector described above. `PaimonValueTypesTest` checks 40 scalar edge-value cases across
+both formats, including native snapshot reads, NaN/infinities, signed zero, integer extremes,
+precision-38 decimals, Unicode, binary and dates.
 
 The regular CI Paimon job runs SQL parity for dynamic and postpone buckets, including reopened
 jobs, assigner/writer rescaling, and Paimon's SQL compaction of native postpone files. A recovery
@@ -514,12 +527,12 @@ Each of these declines at planning time with a reason visible in `NativePlanner.
   `product`, and floating-point `min`/`max`); sequence fields or sequence groups outside the
   comparable-type whitelist; `sequence.field` combined with `partial-update` or `aggregation`;
   defaults on routing columns;
-  input changelog with `changelog-file.format` other than `parquet` or unsupported changelog
+  input changelog with `changelog-file.format` differing from the table format or unsupported changelog
   compression; primary-key vector, full-text, BTree, or bitmap indexes; `local-merge-buffer-size`,
   `data-file.thin-mode`, `data-file.external-paths`, `sink.key-only-deletes.enabled`,
   `precommit-compact`, `write.sequence-number-init-mode = snapshot`,
   `sink.use-managed-memory-allocator`; or a `FLOAT`/`DOUBLE` key column.
-- `file.format` other than `parquet`, `file.format.per.level`, `write-buffer-for-append = true`,
+- `file.format` other than installed `parquet` or `orc`, `file.format.per.level`, `write-buffer-for-append = true`,
   file indexes (`file-index.*`), `row-tracking.enabled`, `data-evolution.enabled`, `BLOB` columns.
 - Append tables with `spill-compression` other than `lz4`/`lzo`/`zstd`, or
   `sink.use-managed-memory-allocator = true` (the native buffer uses Arrow memory).
@@ -532,13 +545,16 @@ Each of these declines at planning time with a reason visible in `NativePlanner.
 - `parquet.*` keys the native writer cannot honour: bloom filters, page validation, custom
   padding, page row-count limits, statistics/column-index truncation, page-size row checks,
   multithreaded zstd, and any per-column (`parquet.*#column`) or unrecognised writer key.
-- The `parquet` format identifier resolving to Paimon's own factory (see deployment below).
+- The selected format identifier resolving to Paimon's own factory (see deployment below).
 
 Compaction rewrites (in-job or from a dedicated compaction job) still use Paimon's stock Parquet
 writer. Append buffer spilling retains native encoding as described above. Primary-key buckets
 use their existing native buffers, which flush by size into level-0 files.
 
 ## Benchmark
+
+The measurements below use Parquet files. [ORC diagnostics](orc.md#build-and-verification)
+report that format's reader and writer results separately.
 
 On the 2M-event, four-partition Kafka JSON Nexmark sink diagnostic (memory state, mini-batching off,
 one warmup, best of three), the 16 append-only queries completed on both engines and StreamFusion's
@@ -576,14 +592,15 @@ SF_PAIMON_CHANGELOG_BENCHMARK=true mvn test -Ppaimon,bench \
 The default input is 200,000 changes over 20,000 keys, four buckets, and batches of 4,096 rows.
 `SF_PAIMON_CHANGELOG_ROWS` changes the input size while retaining the ten-to-one change/key ratio.
 
-Local release measurements on 2026-09-11 with Paimon 2.0.0:
+Local release measurements with Paimon 2.0.0: the 1M-change run is from 2026-09-11;
+the 200K-change run was repeated on 2026-09-13 with the shared file writer and floating statistics.
 
 | Mode | Stock, 1M changes | Native, 1M changes | Speedup, 1M | Speedup, 200K |
 |---|---:|---:|---:|---:|
-| Input changelog | 3.716 s | 2.319 s | 1.60× | 1.83× |
-| Lookup changelog | 2.387 s | 1.856 s | 1.29× | 1.18× |
-| Full-compaction changelog | 1.276 s | 1.343 s | 0.95× | 0.78× |
-| Deletion vectors enabled | 1.498 s | 1.122 s | 1.34× | 1.31× |
+| Input changelog | 3.716 s | 2.319 s | 1.60× | 1.92× |
+| Lookup changelog | 2.387 s | 1.856 s | 1.29× | 1.28× |
+| Full-compaction changelog | 1.276 s | 1.343 s | 0.95× | 0.93× |
+| Deletion vectors enabled | 1.498 s | 1.122 s | 1.34× | 1.34× |
 
 Full compaction is slower in this row-fed diagnostic. It retains Paimon's rowwise compaction and
 adds the native path's conversion and file hand-off costs. Its admission adds coverage for columnar
@@ -651,14 +668,33 @@ for existing columnar pipelines and a boundary for future optimization; faster i
 Arrow source has not been measured. The default fixture size is 200,000 changes. The Nexmark
 harness is unchanged.
 
+## Cross-format validation
+
+`SF_PAIMON_FILE_FORMAT=orc` runs the shared Paimon table, SQL, spill, merge, bucket and recovery
+fixtures with ORC defaults. Explicit format-specific tests keep their own format. CI runs the
+suite for both defaults, with UTC test JVMs; timezone-fallback tests set and restore other zones.
+The source/key tests also parameterize the formats directly, and native append files are checked
+for their encoder's footer writer ID.
+The ORC-default run passes 436 Paimon cases, alongside the Parquet regression suite. Shared
+filesystem tests pass 52 cases covering both codecs, including failed-footer cleanup. The option tests inspect
+actual bloom-filter streams, index strides, compression blocks and file versions using Paimon's
+released reader.
+
+```bash
+SF_PAIMON_FILE_FORMAT=orc mvn test -Ppaimon -pl :streamfusion-paimon -am \
+  '-Dtest=tech.streamfusion.paimon.*Test' -Dsurefire.failIfNoSpecifiedTests=false
+```
+
+The source and changelog diagnostics accept the same environment variable with `-Pbench,paimon`.
+
 ## Deployment
 
-Install the published `paimon-flink-2.2-2.0.0.jar`, `streamfusion-parquet`, and
+Install the published `paimon-flink-2.2-2.0.0.jar`, the selected `streamfusion-parquet` or `streamfusion-orc` module, and
 `streamfusion-paimon` in Flink's `lib/`. Paimon resolves a file format by taking the **first**
 `FileFormatFactory` on the classpath that claims the identifier, and Flink adds `lib/` JARs in
 sorted name order, so the StreamFusion JAR must sort before `paimon-flink-*`: name it
 `01-streamfusion-paimon.jar` (the same convention as `00-streamfusion-loader.jar`). The planner
-checks at planning time that `parquet` resolves to the StreamFusion factory and declines the sink
+checks at planning time that the selected format resolves to the StreamFusion factory and declines the sink
 with an explicit reason otherwise; it never enters the native topology only to discover the stock
 format at runtime. Removing the StreamFusion Paimon JAR restores the stock connector entirely.
 
@@ -673,8 +709,7 @@ Each remaining gap has its own issue:
 [the remaining primary-key writer options](https://github.com/datafusion-contrib/StreamFusion/issues/48)
 (thin mode, key-only deletes, local merge, external paths, managed memory, snapshot sequence init),
 [a Paimon bundle entry for the merge-tree writer](https://github.com/datafusion-contrib/StreamFusion/issues/49)
-that would remove the compaction hand-off and the idle-writer rescan,
-[ORC data files](https://github.com/datafusion-contrib/StreamFusion/issues/35).
+that would remove the compaction hand-off and the idle-writer rescan.
 Released Paimon 2.0.0 walks a bundle row by row before the format writer; a Paimon release that
 passes bundles through takes the same writer's direct path with no change here
 ([#39](https://github.com/datafusion-contrib/StreamFusion/issues/39)). The jar-ordering requirement

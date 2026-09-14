@@ -208,7 +208,7 @@ class PaimonSnapshotMergeTest {
                     "bucket",
                     "1",
                     "file.format",
-                    "parquet",
+                    PaimonTestTables.fileFormat(),
                     "write-only",
                     "true",
                     "changelog-producer",

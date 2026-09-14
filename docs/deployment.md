@@ -79,9 +79,10 @@ Replace `streamfusion-json` with `streamfusion-csv`, `streamfusion-raw`, `stream
 for the full per-format breakdown. `avro-confluent` uses both `streamfusion-avro` (the shared native
 Avro codec) and `streamfusion-avro-confluent-registry` with Flink's
 `flink-avro-confluent-registry`. Use
-`flink-parquet` with `streamfusion-parquet`, the
-same way. Paimon needs `paimon-flink-2.2-2.0.0.jar`, `streamfusion-parquet`, and
-`streamfusion-paimon` installed as `01-streamfusion-paimon.jar` — Paimon takes the first `parquet`
+`flink-parquet` with `streamfusion-parquet`, or `flink-orc` with `streamfusion-orc`, the
+same way. Paimon needs `paimon-flink-2.2-2.0.0.jar`, the selected `streamfusion-parquet` or
+`streamfusion-orc` format module, and `streamfusion-paimon` installed as
+`01-streamfusion-paimon.jar` — Paimon takes the first matching
 format factory it finds and Flink loads `lib/` in sorted name order, so the StreamFusion JAR must
 sort before `paimon-flink-*`; see [Apache Paimon](connectors/paimon.md). A missing optional module is always a normal planner fallback to stock Flink, never a
 linkage failure — the core image doesn't require any of them.
@@ -120,6 +121,18 @@ bin/build-release.sh
 
 The release build enables `mimalloc` by default.
 
+The ORC module builds Apache ORC 2.3.1 and nanoarrow 0.8.0 statically through Cargo's CMake
+build step, invoked by the same Maven lifecycle. It downloads canonical, checksum-pinned release
+archives; no local ORC checkout or shared ORC/Arrow C++ installation is required. A C++17 toolchain,
+make, Python 3 with venv/pip, and normal platform development headers are required. It uses CMake
+3.25 or newer when available, otherwise bootstraps the pinned CMake 3.31.10 binary wheel into the
+Cargo target directory. macOS uses the Xcode command-line tools; Linux release containers include
+the C++ toolchain. Codec dependencies are static; only platform libraries remain dynamic.
+The same build works for the supported macOS Apple Silicon and Linux x86_64 release targets;
+local Intel macOS cross-builds and Linux ARM64 builds use their corresponding toolchains.
+Build caches stay under the Cargo target/profile directory. Third-party license texts travel in
+`streamfusion-orc` under `META-INF/licenses`.
+
 ### Native workspace
 
 | Directory | Responsibility |
@@ -129,7 +142,8 @@ The release build enables `mimalloc` by default.
 | `native/format-support` | Shared decoder lifecycle, parse-error isolation, key/value composition, CDC gathering, and format facade macros. No engine or third-party format implementation. |
 | `native/kafka` | Kafka-specific JNI entry points, source implementation and existing sink encoders. |
 | `native/parquet` | Parquet format encoding and decoding, including reads through host FileIO. |
-| `native/paimon` | Optional Paimon snapshot merge, bundled in `streamfusion-paimon`; consumes the Parquet library's Arrow C Data output. |
+| `native/orc` | Apache ORC C++ encoding/decoding and nanoarrow C Data conversion, with host-owned I/O. |
+| `native/paimon` | Optional Paimon snapshot merge, bundled in `streamfusion-paimon`; consumes the selected file codec's Arrow C Data output. |
 | `native/json`, `native/csv`, `native/raw`, `native/avro`, `native/protobuf` | One decoder library per format JAR. Avro and Avro-Confluent-Registry continue to share the Avro native library. |
 | `native/native-build` | Shared build dependency for library-local mimalloc aliases and the checked free/realloc shim. |
 | `native/integration-tests` | Rust round trips that exercise both connector encoding and format decoding. |

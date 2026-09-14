@@ -22,13 +22,13 @@ import org.apache.paimon.types.RowType;
 
 /**
  * Paimon's Parquet format with only the data-file writer replaced. Reads, schema validation, and
- * footer statistics stay with Paimon's own implementation, so a table written natively is read and
- * described exactly as one written by parquet-mr. The writer factory it hands out writes Arrow
- * bundles through the native encoder and delegates every row-fed file (compaction rewrites, batch
- * inserts, foreign bundles) to the stock writer, so no table ever mixes writer behaviour by
- * accident.
+ * footer statistics stay with Paimon's own implementation, with Paimon's floating-point collector
+ * supplying manifest bounds that include NaN. The writer factory it hands out writes Arrow bundles
+ * through the native encoder and delegates every row-fed file (compaction rewrites, batch inserts,
+ * foreign bundles) to the stock writer, so no table ever mixes writer behaviour by accident.
  */
-public final class NativePaimonParquetFormat extends FileFormat implements SupportsFieldMetadata {
+public final class NativePaimonParquetFormat extends FileFormat
+    implements SupportsFieldMetadata, NativePaimonFileFormat {
 
   private final ParquetFileFormat delegate;
   private final Options parquetOptions;
@@ -68,6 +68,7 @@ public final class NativePaimonParquetFormat extends FileFormat implements Suppo
 
   @Nullable
   public String nativeWriterFallbackReason(RowType type, String compression) {
+    if (!PaimonCodecs.available("parquet")) return "streamfusion-parquet is not installed";
     String unsupportedType = PaimonArrowFields.unsupportedTypeReason(type);
     if (unsupportedType != null) {
       return unsupportedType;
@@ -105,6 +106,8 @@ public final class NativePaimonParquetFormat extends FileFormat implements Suppo
   @Override
   public Optional<SimpleStatsExtractor> createStatsExtractor(
       RowType type, SimpleColStatsCollector.Factory[] statsCollectors) {
-    return delegate.createStatsExtractor(type, statsCollectors);
+    return delegate
+        .createStatsExtractor(type, statsCollectors)
+        .map(extractor -> PaimonParquetFloatingStats.wrap(extractor, statsCollectors));
   }
 }

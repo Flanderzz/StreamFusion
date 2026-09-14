@@ -1,5 +1,9 @@
 package tech.streamfusion.suite;
 
+import static net.bytebuddy.matcher.ElementMatchers.named;
+import static net.bytebuddy.matcher.ElementMatchers.takesArgument;
+import static net.bytebuddy.matcher.ElementMatchers.takesArguments;
+
 import java.lang.instrument.Instrumentation;
 import java.lang.reflect.InvocationTargetException;
 import java.util.Collections;
@@ -10,14 +14,10 @@ import net.bytebuddy.agent.builder.AgentBuilder;
 import net.bytebuddy.asm.Advice;
 import net.bytebuddy.implementation.bytecode.assign.Assigner;
 
-import static net.bytebuddy.matcher.ElementMatchers.named;
-import static net.bytebuddy.matcher.ElementMatchers.takesArgument;
-import static net.bytebuddy.matcher.ElementMatchers.takesArguments;
-
 /**
- * Installs StreamFusion when an untouched upstream Flink test creates a streaming planner, and loads
- * the native library at that moment: a TaskManager loads it once at startup, whereas a fresh test
- * fork would otherwise pay the load inside the first native task and delay that job's first
+ * Installs StreamFusion when an untouched upstream Flink test creates a streaming planner, and
+ * loads the native library at that moment: a TaskManager loads it once at startup, whereas a fresh
+ * test fork would otherwise pay the load inside the first native task and delay that job's first
  * checkpoint, which timing-sensitive upstream tests would misread as a behavioural difference.
  */
 public final class StreamFusionSuiteAgent {
@@ -33,13 +33,13 @@ public final class StreamFusionSuiteAgent {
   private static final String NATIVE_STATEFUL_OPERATOR =
       "tech.streamfusion.operator.AbstractNativeStatefulOperator";
   private static final String NATIVE_PARQUET_WRITER_FACTORY =
-      "tech.streamfusion.operator.NativeParquetBulkWriterFactory";
+      "tech.streamfusion.operator.NativeFileBulkWriterFactory";
   private static final String PAIMON_FORMAT_FACTORY_UTIL =
       "org.apache.paimon.factories.FormatFactoryUtil";
   private static final String NATIVE_PAIMON_FORMAT_FACTORY =
       "tech.streamfusion.paimon.NativePaimonParquetFormatFactory";
   private static final String NATIVE_PAIMON_PARQUET_WRITER =
-      "tech.streamfusion.paimon.NativePaimonParquetWriter";
+      "tech.streamfusion.paimon.NativePaimonFileWriter";
   private static final String NATIVE_PAIMON_KEY_VALUE_FILE_WRITER =
       "tech.streamfusion.paimon.NativePaimonKeyValueFileWriter";
   private static final String NATIVE_PAIMON_SNAPSHOT_READER =
@@ -49,7 +49,8 @@ public final class StreamFusionSuiteAgent {
   private static final AtomicBoolean HEAP_STATE_REPORTED = new AtomicBoolean();
   private static final AtomicBoolean NATIVE_MEMORY_STATE_REPORTED = new AtomicBoolean();
   private static final AtomicBoolean ROCKSDB_STATE_REPORTED = new AtomicBoolean();
-  private static final AtomicBoolean NATIVE_PARQUET_WRITER_REPORTED = new AtomicBoolean();
+  private static final java.util.Set<String> NATIVE_FILE_WRITERS_REPORTED =
+      java.util.concurrent.ConcurrentHashMap.newKeySet();
   private static final AtomicBoolean NATIVE_PAIMON_FORMAT_REPORTED = new AtomicBoolean();
   private static final AtomicBoolean NATIVE_PAIMON_BUNDLE_REPORTED = new AtomicBoolean();
   private static final AtomicBoolean NATIVE_PAIMON_LEVEL_ZERO_FILE_REPORTED = new AtomicBoolean();
@@ -117,8 +118,9 @@ public final class StreamFusionSuiteAgent {
             (builder, type, classLoader, module, protectionDomain) ->
                 builder.visit(
                     Advice.to(ReportNativePaimonLevelZeroFile.class)
-                        .on(named("write")
-                            .and(takesArgument(0, named("org.apache.paimon.data.BinaryRow"))))))
+                        .on(
+                            named("write")
+                                .and(takesArgument(0, named("org.apache.paimon.data.BinaryRow"))))))
         .type(named(NATIVE_PAIMON_SNAPSHOT_READER))
         .transform(
             (builder, type, classLoader, module, protectionDomain) ->
@@ -144,8 +146,8 @@ public final class StreamFusionSuiteAgent {
     return NATIVE_MEMORY_STATE_REPORTED.compareAndSet(false, true);
   }
 
-  public static boolean reportNativeParquetWriter() {
-    return NATIVE_PARQUET_WRITER_REPORTED.compareAndSet(false, true);
+  public static boolean reportNativeFileWriter(String format) {
+    return NATIVE_FILE_WRITERS_REPORTED.add(format);
   }
 
   public static boolean reportNativePaimonBundle() {
@@ -157,22 +159,30 @@ public final class StreamFusionSuiteAgent {
   }
 
   /**
-   * The test-JVM stand-in for deploying {@code 01-streamfusion-paimon.jar} ahead of Paimon: Surefire
-   * appends StreamFusion's classpath in no fixed order, so Paimon's first-factory-wins discovery is
-   * resolved here to the native {@code parquet} factory whenever the module is present.
+   * The test-JVM stand-in for deploying {@code 01-streamfusion-paimon.jar} ahead of Paimon:
+   * Surefire appends StreamFusion's classpath in no fixed order, so Paimon's first-factory-wins
+   * discovery is resolved here to the native {@code parquet} factory whenever the module is
+   * present.
    */
   public static Object nativePaimonFormatFactory(ClassLoader classLoader, String identifier) {
-    if (!"parquet".equals(identifier)) {
+    if (!"parquet".equals(identifier) && !"orc".equals(identifier)) {
       return null;
     }
     try {
       Object factory =
-          Class.forName(NATIVE_PAIMON_FORMAT_FACTORY, true, classLoader)
+          Class.forName(
+                  identifier.equals("orc")
+                      ? "tech.streamfusion.paimon.NativePaimonOrcFormatFactory"
+                      : NATIVE_PAIMON_FORMAT_FACTORY,
+                  true,
+                  classLoader)
               .getConstructor()
               .newInstance();
       if (NATIVE_PAIMON_FORMAT_REPORTED.compareAndSet(false, true)) {
         System.err.println(
-            "StreamFusion upstream Paimon suite resolved parquet to the native format factory");
+            "StreamFusion upstream Paimon suite resolved "
+                + identifier
+                + " to the native format factory");
       }
       return factory;
     } catch (ClassNotFoundException e) {
@@ -298,14 +308,16 @@ public final class StreamFusionSuiteAgent {
         return;
       }
       try {
-        Class<?> configOption =
-            Class.forName("org.apache.flink.configuration.ConfigOption");
+        Class<?> configOption = Class.forName("org.apache.flink.configuration.ConfigOption");
         Object backendOption =
             Class.forName("org.apache.flink.configuration.StateBackendOptions")
                 .getField("STATE_BACKEND")
                 .get(null);
         Object selected =
-            configuration.getClass().getMethod("get", configOption).invoke(configuration, backendOption);
+            configuration
+                .getClass()
+                .getMethod("get", configOption)
+                .invoke(configuration, backendOption);
         if ("hashmap".equalsIgnoreCase(String.valueOf(selected))) {
           if (StreamFusionSuiteAgent.reportHeapState()) {
             System.err.println("StreamFusion upstream state suite exercised Flink heap backend");
@@ -339,8 +351,7 @@ public final class StreamFusionSuiteAgent {
     @Advice.OnMethodExit
     static void exit(@Advice.FieldValue("rocksdbState") boolean rocksdbState) {
       if (!rocksdbState && StreamFusionSuiteAgent.reportNativeMemoryState()) {
-        System.err.println(
-            "StreamFusion upstream state suite initialized native memory backend");
+        System.err.println("StreamFusion upstream state suite initialized native memory backend");
       }
     }
   }
@@ -350,16 +361,19 @@ public final class StreamFusionSuiteAgent {
 
     private ReportNativeParquetWriter() {}
 
-    @Advice.OnMethodEnter
-    static void enter() {
-      if (StreamFusionSuiteAgent.reportNativeParquetWriter()) {
+    @Advice.OnMethodExit
+    static void exit(@Advice.FieldValue("codec") Object codec) {
+      String format = codec.getClass().getSimpleName().replace("Codec", "");
+      if (StreamFusionSuiteAgent.reportNativeFileWriter(format)) {
         System.err.println(
-            "StreamFusion upstream Parquet suite created native Parquet sink writer");
+            "StreamFusion upstream " + format + " suite created native " + format + " sink writer");
       }
     }
   }
 
-  /** Gives the native Paimon Parquet factory the classpath precedence a deployment gives its jar. */
+  /**
+   * Gives the native Paimon Parquet factory the classpath precedence a deployment gives its jar.
+   */
   public static final class PreferNativePaimonFormat {
 
     private PreferNativePaimonFormat() {}
@@ -400,6 +414,7 @@ public final class StreamFusionSuiteAgent {
       }
     }
   }
+
   public static boolean reportNativePaimonSnapshot() {
     return NATIVE_PAIMON_SNAPSHOT_REPORTED.compareAndSet(false, true);
   }

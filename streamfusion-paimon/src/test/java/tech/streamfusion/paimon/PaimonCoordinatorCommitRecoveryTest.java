@@ -225,7 +225,14 @@ class PaimonCoordinatorCommitRecoveryTest {
             Schema.newBuilder()
                 .column("id", DataTypes.INT())
                 .column("v", DataTypes.BIGINT())
-                .options(Map.of("bucket", "-1", "write-only", "true", "file.format", "parquet"))
+                .options(
+                    Map.of(
+                        "bucket",
+                        "-1",
+                        "write-only",
+                        "true",
+                        "file.format",
+                        PaimonTestTables.fileFormat()))
                 .build());
     return FileStoreTableFactory.create(LocalFileIO.create(), path);
   }

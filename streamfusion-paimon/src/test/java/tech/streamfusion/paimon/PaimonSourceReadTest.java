@@ -50,8 +50,14 @@ class PaimonSourceReadTest {
         PaimonTestTables.createTable(
             java.nio.file.Files.createTempDirectory("paimon-append-read"),
             buckets == -1
-                ? Map.of("bucket", "-1", "file.format", "parquet")
-                : Map.of("bucket", "2", "bucket-key", "id", "file.format", "parquet"));
+                ? Map.of("bucket", "-1", "file.format", PaimonTestTables.fileFormat())
+                : Map.of(
+                    "bucket",
+                    "2",
+                    "bucket-key",
+                    "id",
+                    "file.format",
+                    PaimonTestTables.fileFormat()));
     ReadBuilder read = table.newReadBuilder();
     var scan = read.newStreamScan();
     var builder = table.newStreamWriteBuilder().withCommitUser("test");
@@ -72,7 +78,7 @@ class PaimonSourceReadTest {
     FileStoreTable table =
         PaimonTestTables.createTable(
             java.nio.file.Files.createTempDirectory("paimon-schema-read"),
-            Map.of("bucket", "-1", "file.format", "parquet"));
+            Map.of("bucket", "-1", "file.format", PaimonTestTables.fileFormat()));
     var builder = table.newStreamWriteBuilder().withCommitUser("schema");
     try (var writer = builder.newWrite();
         var commit = builder.newCommit()) {
@@ -149,7 +155,8 @@ class PaimonSourceReadTest {
             finished = !fetched.finishedSplits().isEmpty();
             fetched.recycle();
           }
-          assertEquals(expectNative, reader.nativeFilesRead() > 0 || reader.nativeSnapshotsRead() > 0);
+          assertEquals(
+              expectNative, reader.nativeFilesRead() > 0 || reader.nativeSnapshotsRead() > 0);
         }
         assertEquals(expected.subList(skip, expected.size()), actual);
       }

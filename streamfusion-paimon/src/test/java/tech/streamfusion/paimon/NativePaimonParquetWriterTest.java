@@ -11,7 +11,6 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.TreeMap;
 import java.util.stream.Collectors;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
@@ -27,20 +26,15 @@ import org.apache.paimon.fs.PositionOutputStream;
 import org.apache.paimon.fs.local.LocalFileIO;
 import org.apache.paimon.io.DataFileMeta;
 import org.apache.paimon.options.Options;
-import org.apache.paimon.shade.org.apache.parquet.hadoop.ParquetFileReader;
 import org.apache.paimon.shade.org.apache.parquet.hadoop.metadata.BlockMetaData;
-import org.apache.paimon.shade.org.apache.parquet.hadoop.metadata.ColumnChunkMetaData;
-import org.apache.paimon.shade.org.apache.parquet.hadoop.metadata.ParquetMetadata;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.sink.CommitMessage;
 import org.apache.paimon.table.sink.StreamTableCommit;
 import org.apache.paimon.table.sink.StreamTableWrite;
-import org.apache.paimon.table.source.DataSplit;
-import org.apache.paimon.table.source.Split;
 import org.apache.paimon.types.RowType;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
-import org.junit.jupiter.api.Test;
 import tech.streamfusion.operator.RowDataArrowConverter;
 
 /**
@@ -80,7 +74,9 @@ class NativePaimonParquetWriterTest {
     writeStock(twinTable, values);
 
     RowType rowType = nativeTable.rowType();
-    assertEquals(PaimonTestTables.readRows(twinTable, rowType), PaimonTestTables.readRows(nativeTable, rowType));
+    assertEquals(
+        PaimonTestTables.readRows(twinTable, rowType),
+        PaimonTestTables.readRows(nativeTable, rowType));
     assertEquals(ROWS, PaimonTestTables.readRows(nativeTable, rowType).size());
 
     Map<String, List<DataFileMeta>> nativeFiles = PaimonTestTables.dataFiles(nativeTable);
@@ -153,7 +149,7 @@ class NativePaimonParquetWriterTest {
 
     Path rowFile = new Path(dir.toUri() + "/rows.parquet");
     try (PositionOutputStream out = fileIO.newOutputStream(rowFile, false)) {
-      NativePaimonParquetWriter writer = (NativePaimonParquetWriter) factory.create(out, "zstd");
+      NativePaimonFileWriter writer = (NativePaimonFileWriter) factory.create(out, "zstd");
       for (Object[] row : values) {
         writer.addElement(PaimonTestTables.paimonRow(row));
       }
@@ -164,13 +160,20 @@ class NativePaimonParquetWriterTest {
                   PaimonTestTables.FLINK_TYPE,
                   allocator)) {
         assertThrows(
-            IllegalStateException.class, () -> writer.writeBundle(new ArrowBatchBundle(root, PaimonTestTables.FLINK_TYPE)));
+            IllegalStateException.class,
+            () -> writer.writeBundle(new ArrowBatchBundle(root, PaimonTestTables.FLINK_TYPE)));
       }
       writer.close();
       assertFalse(writer.wroteNatively());
     }
-    assertEquals(5, ParquetUtil.getParquetReader(fileIO, rowFile, fileIO.getFileSize(rowFile), new Options())
-        .getFooter().getBlocks().stream().mapToLong(BlockMetaData::getRowCount).sum());
+    assertEquals(
+        5,
+        ParquetUtil.getParquetReader(fileIO, rowFile, fileIO.getFileSize(rowFile), new Options())
+            .getFooter()
+            .getBlocks()
+            .stream()
+            .mapToLong(BlockMetaData::getRowCount)
+            .sum());
 
     Path bundleFile = new Path(dir.toUri() + "/bundle.parquet");
     try (PositionOutputStream out = fileIO.newOutputStream(bundleFile, false);
@@ -180,7 +183,7 @@ class NativePaimonParquetWriterTest {
                 values.stream().map(PaimonTestTables::flinkRow).collect(Collectors.toList()),
                 PaimonTestTables.FLINK_TYPE,
                 allocator)) {
-      NativePaimonParquetWriter writer = (NativePaimonParquetWriter) factory.create(out, "zstd");
+      NativePaimonFileWriter writer = (NativePaimonFileWriter) factory.create(out, "zstd");
       writer.writeBundle(new ArrowBatchBundle(root, PaimonTestTables.FLINK_TYPE));
       assertThrows(
           IllegalStateException.class,
@@ -188,8 +191,15 @@ class NativePaimonParquetWriterTest {
       writer.close();
       assertTrue(writer.wroteNatively());
     }
-    assertEquals(5, ParquetUtil.getParquetReader(fileIO, bundleFile, fileIO.getFileSize(bundleFile), new Options())
-        .getFooter().getBlocks().stream().mapToLong(BlockMetaData::getRowCount).sum());
+    assertEquals(
+        5,
+        ParquetUtil.getParquetReader(
+                fileIO, bundleFile, fileIO.getFileSize(bundleFile), new Options())
+            .getFooter()
+            .getBlocks()
+            .stream()
+            .mapToLong(BlockMetaData::getRowCount)
+            .sum());
   }
 
   @Test
@@ -208,7 +218,7 @@ class NativePaimonParquetWriterTest {
             .nativeWriterFallbackReason(PaimonTestTables.paimonSchema(Map.of()).rowType()));
   }
 
-  private static void writeNatively(FileStoreTable table, List<Object[]> values) throws Exception {
+  static void writeNatively(FileStoreTable table, List<Object[]> values) throws Exception {
     StreamTableWrite write = table.newStreamWriteBuilder().withCommitUser("native").newWrite();
     StreamTableCommit commit = table.newStreamWriteBuilder().withCommitUser("native").newCommit();
     Map<String, List<Object[]>> destinations = new LinkedHashMap<>();
@@ -226,10 +236,15 @@ class NativePaimonParquetWriterTest {
     try (BufferAllocator allocator = new RootAllocator()) {
       for (String key : destinations.keySet()) {
         List<RowData> rows =
-            destinations.get(key).stream().map(PaimonTestTables::flinkRow).collect(Collectors.toList());
+            destinations.get(key).stream()
+                .map(PaimonTestTables::flinkRow)
+                .collect(Collectors.toList());
         try (VectorSchemaRoot root =
             RowDataArrowConverter.write(rows, PaimonTestTables.FLINK_TYPE, allocator)) {
-          write.writeBundle(partitions.get(key), buckets.get(key), new ArrowBatchBundle(root, PaimonTestTables.FLINK_TYPE));
+          write.writeBundle(
+              partitions.get(key),
+              buckets.get(key),
+              new ArrowBatchBundle(root, PaimonTestTables.FLINK_TYPE));
         }
       }
     }
@@ -239,7 +254,7 @@ class NativePaimonParquetWriterTest {
     commit.close();
   }
 
-  private static void writeStock(FileStoreTable table, List<Object[]> values) throws Exception {
+  static void writeStock(FileStoreTable table, List<Object[]> values) throws Exception {
     StreamTableWrite write = table.newStreamWriteBuilder().withCommitUser("twin").newWrite();
     StreamTableCommit commit = table.newStreamWriteBuilder().withCommitUser("twin").newCommit();
     for (Object[] row : values) {

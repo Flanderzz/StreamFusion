@@ -94,20 +94,39 @@ class PaimonSnapshotKeyTypesTest {
               .toList();
       add(cases, DataTypes.TIMESTAMP(precision), values);
       add(cases, DataTypes.TIMESTAMP_WITH_LOCAL_TIME_ZONE(precision), values);
+      if (precision > 0) {
+        var positive =
+            values.stream()
+                .map(
+                    v ->
+                        Timestamp.fromEpochMillis(
+                            v.getMillisecond() + 1_000_000_000_000L, v.getNanoOfMillisecond()))
+                .toList();
+        for (boolean nativeWriter : new boolean[] {false, true}) {
+          cases.add(Arguments.of(DataTypes.TIMESTAMP(precision), positive, nativeWriter, "orc"));
+          cases.add(
+              Arguments.of(
+                  DataTypes.TIMESTAMP_WITH_LOCAL_TIME_ZONE(precision),
+                  positive,
+                  nativeWriter,
+                  "orc"));
+        }
+      }
     }
     return cases.stream();
   }
 
   private static void add(List<Arguments> cases, DataType type, List<?> values) {
     for (boolean nativeWriter : new boolean[] {false, true}) {
-      cases.add(Arguments.of(type, values, nativeWriter));
+      for (String format : List.of("parquet", "orc"))
+        cases.add(Arguments.of(type, values, nativeWriter, format));
     }
   }
 
-  @ParameterizedTest(name = "{0}, native writer={2}")
+  @ParameterizedTest(name = "{0}, native writer={2}, format={3}")
   @MethodSource("keyTypes")
   void scalarCompositeKeysMatchJavaAcrossProjectionAndRestore(
-      DataType keyType, List<?> keys, boolean nativeWriter) throws Exception {
+      DataType keyType, List<?> keys, boolean nativeWriter, String format) throws Exception {
     var fields =
         new RowType(
             List.of(
@@ -127,7 +146,7 @@ class PaimonSnapshotKeyTypesTest {
                     "bucket",
                     "1",
                     "file.format",
-                    "parquet",
+                    format,
                     "write-only",
                     "true",
                     "changelog-producer",
@@ -182,10 +201,24 @@ class PaimonSnapshotKeyTypesTest {
           }
         }
       }
-      assertEquals(2, merged, "Both table partitions must use native snapshot merging");
+      int precision =
+          keyType instanceof org.apache.paimon.types.TimestampType timestamp
+              ? timestamp.getPrecision()
+              : keyType instanceof org.apache.paimon.types.LocalZonedTimestampType timestamp
+                  ? timestamp.getPrecision()
+                  : 0;
+      boolean orderingRisk =
+          format.equals("orc")
+              && precision > 0
+              && keys.stream().anyMatch(k -> ((Timestamp) k).getMillisecond() < 0);
+      assertEquals(
+          orderingRisk ? 0 : 2,
+          merged,
+          "Native merging requires ordered decoded keys; ORC's last negative second retains Java");
     }
     assertEquals("", NativePaimon.liveNativeHandles());
     assertEquals("", NativeParquet.liveNativeHandles());
+    assertEquals("", tech.streamfusion.orc.NativeOrc.liveNativeHandles());
   }
 
   static Stream<Arguments> unsupportedKeys() {

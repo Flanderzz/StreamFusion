@@ -7,6 +7,7 @@ import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 import java.util.stream.Collectors;
 import org.apache.flink.table.data.DecimalData;
 import org.apache.flink.table.data.GenericArrayData;
@@ -22,10 +23,10 @@ import org.apache.flink.table.types.logical.DateType;
 import org.apache.flink.table.types.logical.DecimalType;
 import org.apache.flink.table.types.logical.DoubleType;
 import org.apache.flink.table.types.logical.IntType;
+import org.apache.flink.table.types.logical.LocalZonedTimestampType;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.MapType;
 import org.apache.flink.table.types.logical.RowType;
-import org.apache.flink.table.types.logical.LocalZonedTimestampType;
 import org.apache.flink.table.types.logical.TimestampType;
 import org.apache.flink.table.types.logical.TinyIntType;
 import org.apache.flink.table.types.logical.VarBinaryType;
@@ -40,25 +41,24 @@ import org.apache.paimon.data.InternalArray;
 import org.apache.paimon.data.InternalMap;
 import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.data.Timestamp;
+import org.apache.paimon.format.parquet.ParquetUtil;
 import org.apache.paimon.fs.Path;
 import org.apache.paimon.fs.local.LocalFileIO;
-import org.apache.paimon.schema.Schema;
-import org.apache.paimon.schema.SchemaManager;
-import org.apache.paimon.table.FileStoreTable;
-import org.apache.paimon.table.FileStoreTableFactory;
-import org.apache.paimon.types.DataType;
-import org.apache.paimon.types.DataTypes;
-import org.apache.paimon.utils.InternalRowUtils;
-import java.util.TreeMap;
 import org.apache.paimon.io.DataFileMeta;
 import org.apache.paimon.options.Options;
-import org.apache.paimon.format.parquet.ParquetUtil;
+import org.apache.paimon.schema.Schema;
+import org.apache.paimon.schema.SchemaManager;
 import org.apache.paimon.shade.org.apache.parquet.hadoop.ParquetFileReader;
 import org.apache.paimon.shade.org.apache.parquet.hadoop.metadata.BlockMetaData;
 import org.apache.paimon.shade.org.apache.parquet.hadoop.metadata.ColumnChunkMetaData;
 import org.apache.paimon.shade.org.apache.parquet.hadoop.metadata.ParquetMetadata;
+import org.apache.paimon.table.FileStoreTable;
+import org.apache.paimon.table.FileStoreTableFactory;
 import org.apache.paimon.table.source.DataSplit;
 import org.apache.paimon.table.source.Split;
+import org.apache.paimon.types.DataType;
+import org.apache.paimon.types.DataTypes;
+import org.apache.paimon.utils.InternalRowUtils;
 
 /**
  * One fixture schema in its Paimon and Flink forms, and rows built from the same values in both
@@ -67,6 +67,18 @@ import org.apache.paimon.table.source.Split;
 final class PaimonTestTables {
 
   private PaimonTestTables() {}
+
+  static String fileFormat() {
+    String format = System.getenv().getOrDefault("SF_PAIMON_FILE_FORMAT", "parquet");
+    if (!List.of("parquet", "orc").contains(format)) throw new IllegalArgumentException(format);
+    return format;
+  }
+
+  static Map<String, String> fileOptions(Map<String, String> options) {
+    Map<String, String> result = new LinkedHashMap<>(options);
+    result.putIfAbsent("file.format", fileFormat());
+    return result;
+  }
 
   static final RowType FLINK_TYPE =
       RowType.of(
@@ -108,7 +120,9 @@ final class PaimonTestTables {
             new TinyIntType(),
             new VarCharType(false, VarCharType.MAX_LENGTH)
           },
-          new String[] {"id", "cat", "name", "price", "ts", "dt", "flag", "dbl", "bin", "small", "pt"});
+          new String[] {
+            "id", "cat", "name", "price", "ts", "dt", "flag", "dbl", "bin", "small", "pt"
+          });
 
   /** A partitioned primary-key table keyed on (id, cat, pt); the trimmed key is (id, cat). */
   static Schema primaryKeySchema(Map<String, String> options) {
@@ -126,7 +140,7 @@ final class PaimonTestTables {
         .column("pt", DataTypes.STRING().notNull())
         .primaryKey("id", "cat", "pt")
         .partitionKeys("pt")
-        .options(options)
+        .options(fileOptions(options))
         .build();
   }
 
@@ -156,7 +170,9 @@ final class PaimonTestTables {
             kind,
             id,
             cat,
-            nulls ? null : "name-" + i + (i % 5 == 0 ? "-with-a-long-suffix-over-sixteen-chars" : ""),
+            nulls
+                ? null
+                : "name-" + i + (i % 5 == 0 ? "-with-a-long-suffix-over-sixteen-chars" : ""),
             nulls ? null : BigDecimal.valueOf(i * 1_00L + 7, 2),
             nulls ? null : 1_700_000_000_000L + i * 1_000L,
             nulls ? null : 19_000 + i,
@@ -188,7 +204,9 @@ final class PaimonTestTables {
 
   static InternalRow primaryKeyPaimonRow(Object[] v) {
     GenericRow row =
-        new GenericRow(org.apache.paimon.types.RowKind.fromByteValue(((RowKind) v[0]).toByteValue()), v.length - 1);
+        new GenericRow(
+            org.apache.paimon.types.RowKind.fromByteValue(((RowKind) v[0]).toByteValue()),
+            v.length - 1);
     row.setField(0, v[1]);
     row.setField(1, BinaryString.fromString((String) v[2]));
     row.setField(2, v[3] == null ? null : BinaryString.fromString((String) v[3]));
@@ -228,13 +246,17 @@ final class PaimonTestTables {
         .column("dt", DataTypes.DATE())
         .column("tags", DataTypes.ARRAY(DataTypes.INT()))
         .column("attrs", DataTypes.MAP(DataTypes.STRING(), DataTypes.BIGINT()))
-        .column("nested", DataTypes.ROW(DataTypes.FIELD(100, "a", DataTypes.INT()), DataTypes.FIELD(101, "b", DataTypes.STRING())))
+        .column(
+            "nested",
+            DataTypes.ROW(
+                DataTypes.FIELD(100, "a", DataTypes.INT()),
+                DataTypes.FIELD(101, "b", DataTypes.STRING())))
         .column("flag", DataTypes.BOOLEAN())
         .column("dbl", DataTypes.DOUBLE())
         .column("bin", DataTypes.BYTES())
         .column("pt", DataTypes.STRING())
         .partitionKeys("pt")
-        .options(options)
+        .options(fileOptions(options))
         .build();
   }
 
@@ -257,7 +279,9 @@ final class PaimonTestTables {
       rows.add(
           new Object[] {
             (long) i,
-            nulls ? null : "name-" + i + (i % 5 == 0 ? "-with-a-long-suffix-over-sixteen-chars" : ""),
+            nulls
+                ? null
+                : "name-" + i + (i % 5 == 0 ? "-with-a-long-suffix-over-sixteen-chars" : ""),
             nulls ? null : BigDecimal.valueOf(i * 1_00L + 7, 2),
             nulls ? null : new BigDecimal("12345678901234.5678").add(BigDecimal.valueOf(i)),
             nulls ? null : 1_700_000_000_000L + i * 1_000L,
@@ -283,12 +307,14 @@ final class PaimonTestTables {
     row.setField(3, v[3] == null ? null : DecimalData.fromBigDecimal((BigDecimal) v[3], 20, 4));
     row.setField(4, v[4] == null ? null : TimestampData.fromEpochMillis((Long) v[4]));
     long[] micros = (long[]) v[5];
-    row.setField(5, micros == null ? null : TimestampData.fromEpochMillis(micros[0], (int) micros[1]));
+    row.setField(
+        5, micros == null ? null : TimestampData.fromEpochMillis(micros[0], (int) micros[1]));
     row.setField(6, v[6]);
     row.setField(7, v[7] == null ? null : new GenericArrayData((Integer[]) v[7]));
     if (v[8] != null) {
       Map<StringData, Long> attrs = new LinkedHashMap<>();
-      ((Map<?, ?>) v[8]).forEach((k, value) -> attrs.put(StringData.fromString((String) k), (Long) value));
+      ((Map<?, ?>) v[8])
+          .forEach((k, value) -> attrs.put(StringData.fromString((String) k), (Long) value));
       row.setField(8, new GenericMapData(attrs));
     }
     if (v[9] != null) {
@@ -318,7 +344,8 @@ final class PaimonTestTables {
     row.setField(7, v[7] == null ? null : new GenericArray((Integer[]) v[7]));
     if (v[8] != null) {
       Map<BinaryString, Long> attrs = new LinkedHashMap<>();
-      ((Map<?, ?>) v[8]).forEach((k, value) -> attrs.put(BinaryString.fromString((String) k), (Long) value));
+      ((Map<?, ?>) v[8])
+          .forEach((k, value) -> attrs.put(BinaryString.fromString((String) k), (Long) value));
       row.setField(8, new GenericMap(attrs));
     }
     if (v[9] != null) {
@@ -373,7 +400,9 @@ final class PaimonTestTables {
         List<String> entries = new ArrayList<>();
         for (int i = 0; i < map.size(); i++) {
           entries.add(
-              render(InternalRowUtils.get(map.keyArray(), i, mapType.getKeyType()), mapType.getKeyType())
+              render(
+                      InternalRowUtils.get(map.keyArray(), i, mapType.getKeyType()),
+                      mapType.getKeyType())
                   + "="
                   + render(
                       InternalRowUtils.get(map.valueArray(), i, mapType.getValueType()),
@@ -442,14 +471,36 @@ final class PaimonTestTables {
       List<String> described = new ArrayList<>();
       for (DataFileMeta file : dataSplit.dataFiles()) {
         Path path = new Path(dataSplit.bucketPath(), file.fileName());
+        if (file.fileFormat().equals("orc")) {
+          try (var reader =
+              org.apache.paimon.shade.org.apache.orc.OrcFile.createReader(
+                  new org.apache.hadoop.fs.Path(path.toUri()),
+                  org.apache.paimon.shade.org.apache.orc.OrcFile.readerOptions(
+                      new org.apache.hadoop.conf.Configuration()))) {
+            String description =
+                reader.getSchema()
+                    + "\nrows="
+                    + reader.getNumberOfRows()
+                    + " compression="
+                    + reader.getCompressionKind();
+            for (var type : reader.getTypes()) description += "\n" + type;
+            described.add(description);
+          }
+          continue;
+        }
         try (ParquetFileReader reader =
             ParquetUtil.getParquetReader(fileIO, path, file.fileSize(), new Options())) {
           ParquetMetadata footer = reader.getFooter();
-          StringBuilder description = new StringBuilder(footer.getFileMetaData().getSchema().toString());
+          StringBuilder description =
+              new StringBuilder(footer.getFileMetaData().getSchema().toString());
           for (BlockMetaData block : footer.getBlocks()) {
             description.append("\nrows=").append(block.getRowCount());
             for (ColumnChunkMetaData column : block.getColumns()) {
-              description.append(' ').append(column.getPath()).append(':').append(column.getCodec());
+              description
+                  .append(' ')
+                  .append(column.getPath())
+                  .append(':')
+                  .append(column.getCodec());
             }
           }
           described.add(description.toString());

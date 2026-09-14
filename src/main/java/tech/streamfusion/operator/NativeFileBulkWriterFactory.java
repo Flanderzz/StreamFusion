@@ -11,37 +11,43 @@ import org.apache.flink.api.common.serialization.BulkWriter;
 import org.apache.flink.core.fs.FSDataOutputStream;
 import org.apache.flink.table.types.logical.RowType;
 import tech.streamfusion.arrow.ArrowConversion;
-import tech.streamfusion.parquet.NativeParquet;
+import tech.streamfusion.format.ColumnarFileCodec;
 
 /**
- * Creates the native Parquet writers behind the sink's part files. Each part file pairs a native
- * parquet-rs Arrow writer with the
- * Flink {@link FSDataOutputStream} the bucket opened, so the bytes travel Flink's own
- * recoverable-stream path — any Flink filesystem, the host's exactly-once commit — while the
- * encoding never touches Java rows. Encoded bytes cross JNI through a reusable one-MiB array.
+ * Creates the native columnar writers behind the sink's part files. Each part file pairs a native
+ * Arrow file writer with the Flink {@link FSDataOutputStream} the bucket opened, so the bytes
+ * travel Flink's own recoverable-stream path — any Flink filesystem, the host's exactly-once commit
+ * — while the encoding never touches Java rows. Encoded bytes cross JNI through a reusable one-MiB
+ * array.
  */
-public final class NativeParquetBulkWriterFactory
-    implements BulkWriter.Factory<PartitionedArrowBatch> {
+public class NativeFileBulkWriterFactory implements BulkWriter.Factory<PartitionedArrowBatch> {
 
   private static final int DRAIN_CHUNK_BYTES = 1 << 20;
 
+  private final ColumnarFileCodec codec;
   private final RowType rowType;
   private final int[] partitionColumns;
   private final String[] configKeys;
   private final String[] configValues;
   private final boolean changelog;
 
-  public NativeParquetBulkWriterFactory(
-      RowType rowType, int[] partitionColumns, String[] configKeys, String[] configValues) {
-    this(rowType, partitionColumns, configKeys, configValues, false);
+  public NativeFileBulkWriterFactory(
+      ColumnarFileCodec codec,
+      RowType rowType,
+      int[] partitionColumns,
+      String[] configKeys,
+      String[] configValues) {
+    this(codec, rowType, partitionColumns, configKeys, configValues, false);
   }
 
-  public NativeParquetBulkWriterFactory(
+  public NativeFileBulkWriterFactory(
+      ColumnarFileCodec codec,
       RowType rowType,
       int[] partitionColumns,
       String[] configKeys,
       String[] configValues,
       boolean changelog) {
+    this.codec = codec;
     this.rowType = rowType;
     this.partitionColumns = partitionColumns;
     this.configKeys = configKeys;
@@ -58,7 +64,7 @@ public final class NativeParquetBulkWriterFactory
       Data.exportSchema(
           allocator, ArrowConversion.toArrowSchema(rowType), NativeAllocator.DICTIONARIES, schema);
       encoder =
-          NativeParquet.createParquetEncoder(
+          codec.createEncoder(
               schema.memoryAddress(),
               partitionColumns,
               configKeys,
@@ -67,22 +73,25 @@ public final class NativeParquetBulkWriterFactory
               out,
               chunk);
     }
-    return new NativeParquetBulkWriter(encoder);
+    return new NativeFileBulkWriter(codec, encoder);
   }
 
-  private static final class NativeParquetBulkWriter implements BulkWriter<PartitionedArrowBatch> {
+  private static final class NativeFileBulkWriter implements BulkWriter<PartitionedArrowBatch> {
 
     private static final Cleaner ABANDONED = Cleaner.create();
 
+    private final ColumnarFileCodec codec;
     private final long encoder;
     private final Backstop backstop;
+    private final Cleaner.Cleanable cleanable;
 
-    private NativeParquetBulkWriter(long encoder) {
+    private NativeFileBulkWriter(ColumnarFileCodec codec, long encoder) {
+      this.codec = codec;
       this.encoder = encoder;
       // Flink disposes an in-progress part file by closing only its stream — the bulk writer is
       // dropped without finish() — so a backstop frees the native encoder when that happens.
-      this.backstop = new Backstop(encoder);
-      ABANDONED.register(this, backstop);
+      this.backstop = new Backstop(codec, encoder);
+      cleanable = ABANDONED.register(this, backstop);
     }
 
     @Override
@@ -94,7 +103,7 @@ public final class NativeParquetBulkWriterFactory
               : batch.getFieldVectors().get(0).getAllocator();
       try (ArrowArray array = ArrowArray.allocateNew(batchAllocator)) {
         Data.exportVectorSchemaRoot(batchAllocator, batch, NativeAllocator.DICTIONARIES, array);
-        NativeParquet.parquetEncoderWrite(encoder, array.memoryAddress(), new int[0], 0, -1);
+        codec.write(encoder, array.memoryAddress(), new int[0], 0, -1);
       } finally {
         batch.close();
       }
@@ -102,30 +111,37 @@ public final class NativeParquetBulkWriterFactory
 
     @Override
     public void flush() throws IOException {
-      // ArrowWriter owns row-group finalization; Flink calls finish before publishing a part file.
+      // The codec owns stripe or row-group finalization; Flink calls finish before publishing a
+      // part file.
     }
 
     @Override
     public void finish() throws IOException {
-      NativeParquet.parquetEncoderFinish(encoder);
-      backstop.released = true;
-      NativeParquet.closeParquetEncoder(encoder);
+      if (backstop.released) return;
+      try {
+        codec.finish(encoder);
+      } finally {
+        cleanable.clean();
+      }
     }
 
     /** Frees the encoder of a part file disposed without finish; must not reference its writer. */
     private static final class Backstop implements Runnable {
 
+      private final ColumnarFileCodec codec;
       private final long encoder;
       private volatile boolean released;
 
-      private Backstop(long encoder) {
+      private Backstop(ColumnarFileCodec codec, long encoder) {
+        this.codec = codec;
         this.encoder = encoder;
       }
 
       @Override
       public void run() {
         if (!released) {
-          NativeParquet.closeParquetEncoder(encoder);
+          released = true;
+          codec.closeEncoder(encoder);
         }
       }
     }

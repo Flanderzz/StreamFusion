@@ -3,9 +3,9 @@
 **[Kafka](kafka.md)** is the only connector StreamFusion considers production-grade today, across
 the native [formats](#formats) listed below. It's covered in depth in this section.
 
-[Parquet](parquet.md) (stock Flink reads plus native sink encoding to any filesystem Flink
+[Parquet](parquet.md) and [ORC](orc.md) (stock Flink filesystem reads plus native sink encoding to any filesystem Flink
 supports), [Delta Lake](delta.md) (path-based append and merge-on-read sinks), and
-[Apache Paimon](paimon.md) (append-only and primary-key table sinks, including fixed, dynamic,
+[Apache Paimon](paimon.md) (streaming sources and append-only and primary-key table sinks, including fixed, dynamic,
 and postpone buckets, with Paimon's own compaction)
 also have native paths, but they have not seen the same production hardening as Kafka — treat them
 as experimental.

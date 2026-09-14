@@ -347,7 +347,7 @@ class PaimonMergeEngineTest {
   static FileStoreTable table(Map<String, String> mode, RowType type) throws Exception {
     Map<String, String> options = new HashMap<>(mode);
     options.put("bucket", "2");
-    options.put("file.format", "parquet");
+    options.putIfAbsent("file.format", PaimonTestTables.fileFormat());
     options.put("num-sorted-run.compaction-trigger", "100");
     options.put("commit.force-compact", "true");
     Path path = new Path(Files.createTempDirectory("paimon-merge").toUri());

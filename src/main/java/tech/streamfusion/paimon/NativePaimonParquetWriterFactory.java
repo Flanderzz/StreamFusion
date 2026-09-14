@@ -8,7 +8,7 @@ import org.apache.paimon.options.Options;
 import org.apache.paimon.types.RowType;
 
 /**
- * Opens one {@link NativePaimonParquetWriter} per data file. A compression Paimon asks for that the
+ * Opens one {@link NativePaimonFileWriter} per data file. A compression Paimon asks for that the
  * native encoder cannot reproduce keeps that file on the stock writer.
  */
 final class NativePaimonParquetWriterFactory implements FormatWriterFactory {
@@ -17,7 +17,8 @@ final class NativePaimonParquetWriterFactory implements FormatWriterFactory {
   private final Options parquetOptions;
   private final FormatWriterFactory stock;
 
-  NativePaimonParquetWriterFactory(RowType writeType, Options parquetOptions, FormatWriterFactory stock) {
+  NativePaimonParquetWriterFactory(
+      RowType writeType, Options parquetOptions, FormatWriterFactory stock) {
     this.writeType = writeType;
     this.parquetOptions = parquetOptions;
     this.stock = stock;
@@ -29,6 +30,14 @@ final class NativePaimonParquetWriterFactory implements FormatWriterFactory {
     if (settings.fallbackReason() != null) {
       return stock.create(out, compression);
     }
-    return new NativePaimonParquetWriter(writeType, settings, out, compression, stock);
+    return new NativePaimonFileWriter(
+            writeType,
+            new tech.streamfusion.parquet.ParquetCodec(),
+            settings.keys(),
+            settings.values(),
+            out,
+            compression,
+            stock)
+        .withParquetFloatingStats();
   }
 }

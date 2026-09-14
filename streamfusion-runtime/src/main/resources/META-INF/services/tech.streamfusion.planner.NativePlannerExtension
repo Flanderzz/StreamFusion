@@ -1,2 +1,3 @@
 tech.streamfusion.planner.KafkaPlannerExtension
 tech.streamfusion.planner.ParquetPlannerExtension
+tech.streamfusion.planner.OrcPlannerExtension

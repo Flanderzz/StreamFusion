@@ -56,12 +56,14 @@ public final class NativePaimonKeyValueFileWriter {
     final long fileSize;
     final int start;
     final int end;
+    final Object writerMetadata;
 
-    WrittenFile(Path path, long fileSize, int start, int end) {
+    WrittenFile(Path path, long fileSize, int start, int end, Object writerMetadata) {
       this.path = path;
       this.fileSize = fileSize;
       this.start = start;
       this.end = end;
+      this.writerMetadata = writerMetadata;
     }
   }
 
@@ -154,22 +156,25 @@ public final class NativePaimonKeyValueFileWriter {
     int rows = root.getRowCount();
     int end = start;
     long fileSize;
+    Object writerMetadata;
     try (PositionOutputStream out = fileIO.newOutputStream(path, false)) {
       FormatWriter writer =
           writerFactory.create(out, changelog ? changelogCompression : compression);
-      while (end < rows) {
-        int count = Math.min(ROWS_PER_CHUNK, rows - end);
-        ((NativePaimonParquetWriter) writer)
-            .writeBundle(new ArrowBatchBundle(root, layout.flinkWriteType, end, count));
-        end += count;
-        if (end < rows && writer.reachTargetSize(true, targetFileSize)) {
-          break;
+      try (writer) {
+        while (end < rows) {
+          int count = Math.min(ROWS_PER_CHUNK, rows - end);
+          ((NativePaimonFileWriter) writer)
+              .writeBundle(new ArrowBatchBundle(root, layout.flinkWriteType, end, count));
+          end += count;
+          if (end < rows && writer.reachTargetSize(true, targetFileSize)) {
+            break;
+          }
         }
       }
-      writer.close();
+      writerMetadata = writer.writerMetadata();
       fileSize = out.getPos();
     }
-    return new WrittenFile(path, fileSize, start, end);
+    return new WrittenFile(path, fileSize, start, end, writerMetadata);
   }
 
   private DataFileMeta describe(
@@ -194,7 +199,8 @@ public final class NativePaimonKeyValueFileWriter {
         deleteRows++;
       }
     }
-    SimpleColStats[] rowStats = layout.statsProducer.extract(fileIO, file.path, file.fileSize);
+    SimpleColStats[] rowStats =
+        layout.statsProducer.extract(fileIO, file.path, file.fileSize, file.writerMetadata);
     SimpleStats keyStats =
         layout.keyStatsConverter.toBinaryAllMode(
             Arrays.copyOfRange(rowStats, 0, layout.keyFieldCount()));

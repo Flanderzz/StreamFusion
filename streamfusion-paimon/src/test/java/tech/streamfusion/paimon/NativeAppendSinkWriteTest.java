@@ -145,6 +145,18 @@ class NativeAppendSinkWriteTest {
     for (var split : table.newReadBuilder().newScan().plan().splits()) {
       DataSplit data = (DataSplit) split;
       for (DataFileMeta file : data.dataFiles()) {
+        if (file.fileFormat().equals("orc")) {
+          try (var reader =
+              org.apache.paimon.shade.org.apache.orc.OrcFile.createReader(
+                  new org.apache.hadoop.fs.Path(
+                      new Path(data.bucketPath(), file.fileName()).toUri()),
+                  org.apache.paimon.shade.org.apache.orc.OrcFile.readerOptions(
+                      new org.apache.hadoop.conf.Configuration()))) {
+            assertEquals(1, reader.getFileTail().getFooter().getWriter(), "ORC C++ writer ID");
+            count++;
+          }
+          continue;
+        }
         try (var reader =
             ParquetUtil.getParquetReader(
                 table.fileIO(),

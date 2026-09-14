@@ -2698,4 +2698,10 @@ public final class Native {
       int[] aggregateKinds,
       byte[][] snapshots,
       long memoryBudgetBytes);
+  /** Native columnar table-partition routing shared by file formats. */
+  public static native long splitByPartitionColumns(long array, long schema, int[] columns);
+
+  public static native boolean nextPartitionSlice(long handle, long array, long schema);
+
+  public static native void closePartitionSplit(long handle);
 }

@@ -53,14 +53,8 @@
                 <version>3.13.0</version>
                 <configuration><includes>
                     <include>tech/streamfusion/parquet/**/*.java</include>
-                    <include>tech/streamfusion/operator/NativeParquetBulkWriterFactory.java</include>
-                    <include>tech/streamfusion/operator/NativeParquetRollingPolicy.java</include>
-                    <include>tech/streamfusion/operator/ParquetPartitionSplitOperator.java</include>
-                    <include>tech/streamfusion/planner/NativeParquetSinkExecNode.java</include>
                     <include>tech/streamfusion/planner/ParquetPlannerExtension.java</include>
-                    <include>tech/streamfusion/planner/ParquetSinkMatcher.java</include>
                     <include>tech/streamfusion/planner/ParquetSinkTranslator.java</include>
-                    <include>tech/streamfusion/planner/StreamPhysicalNativeParquetSink.java</include>
                 </includes></configuration>
             </plugin>
         </plugins>

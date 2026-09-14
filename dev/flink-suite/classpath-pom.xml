@@ -54,6 +54,11 @@
         </dependency>
         <dependency>
             <groupId>tech.streamfusion</groupId>
+            <artifactId>streamfusion-orc</artifactId>
+            <version>0.1.0-rc2</version>
+        </dependency>
+        <dependency>
+            <groupId>tech.streamfusion</groupId>
             <artifactId>streamfusion-paimon</artifactId>
             <version>0.1.0-rc2</version>
         </dependency>

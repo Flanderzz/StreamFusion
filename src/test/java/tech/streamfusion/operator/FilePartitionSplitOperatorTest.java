@@ -23,7 +23,7 @@ import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
 @Tag("streamfusion-parquet")
-class ParquetPartitionSplitOperatorTest {
+class FilePartitionSplitOperatorTest {
 
   private static final RowType SCHEMA =
       RowType.of(
@@ -66,7 +66,7 @@ class ParquetPartitionSplitOperatorTest {
     try (BufferAllocator allocator = new RootAllocator();
         OneInputStreamOperatorTestHarness<ArrowBatch, PartitionedArrowBatch> harness =
             new OneInputStreamOperatorTestHarness<>(
-                new ParquetPartitionSplitOperator(SCHEMA, List.of("dt"), "__DEFAULT_PARTITION__"),
+                new FilePartitionSplitOperator(SCHEMA, List.of("dt"), "__DEFAULT_PARTITION__"),
                 new ArrowBatchSerializer())) {
       harness.setup(new PartitionedArrowBatchSerializer());
       harness.open();
@@ -98,7 +98,7 @@ class ParquetPartitionSplitOperatorTest {
     try (BufferAllocator allocator = new RootAllocator();
         OneInputStreamOperatorTestHarness<ArrowBatch, PartitionedArrowBatch> harness =
             new OneInputStreamOperatorTestHarness<>(
-                new ParquetPartitionSplitOperator(SCHEMA, List.of(), "__DEFAULT_PARTITION__"),
+                new FilePartitionSplitOperator(SCHEMA, List.of(), "__DEFAULT_PARTITION__"),
                 new ArrowBatchSerializer())) {
       harness.setup(new PartitionedArrowBatchSerializer());
       harness.open();

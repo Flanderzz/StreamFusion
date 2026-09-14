@@ -257,8 +257,7 @@ class PaimonSinkParityTest {
     FileStoreTable stockTable = insertAliasedFixture(warehouse, false);
 
     assertSameTables(stockTable, nativeTable, true, ROWS);
-    assertEquals(
-        List.of("id", "label", "nested", "pt"), nativeTable.rowType().getFieldNames());
+    assertEquals(List.of("id", "label", "nested", "pt"), nativeTable.rowType().getFieldNames());
   }
 
   @Test
@@ -267,7 +266,9 @@ class PaimonSinkParityTest {
     FileStoreTable stockTable = insertConstraintFixture(warehouse, false);
     FileStoreTable plannedTable = insertConstraintFixture(warehouse, true);
 
-    List<String> expected = List.of("1|x  |abc", "2|too|yz");
+    // Java ORC trims CHAR padding when reading; Parquet returns the stored padding.
+    List<String> expected =
+        List.of(PaimonTestTables.fileFormat().equals("orc") ? "1|x|abc" : "1|x  |abc", "2|too|yz");
     assertEquals(expected, PaimonTestTables.readRows(stockTable, stockTable.rowType()));
     assertEquals(expected, PaimonTestTables.readRows(plannedTable, plannedTable.rowType()));
   }
@@ -287,10 +288,7 @@ class PaimonSinkParityTest {
     DataStream<Row> stream =
         env.fromData(
             Types.ROW_NAMED(
-                new String[] {"id", "fixed", "limited"},
-                Types.LONG,
-                Types.STRING,
-                Types.STRING),
+                new String[] {"id", "fixed", "limited"}, Types.LONG, Types.STRING, Types.STRING),
             Row.of(null, "x", "abcdef"),
             Row.of(1L, "x", "abcdef"),
             Row.of(2L, "toolong", "yz"));
@@ -313,8 +311,8 @@ class PaimonSinkParityTest {
     return openTable(warehouse, name);
   }
 
-  private static FileStoreTable insertAliasedFixture(java.nio.file.Path warehouse, boolean nativeSink)
-      throws Exception {
+  private static FileStoreTable insertAliasedFixture(
+      java.nio.file.Path warehouse, boolean nativeSink) throws Exception {
     String name = nativeSink ? "renamed_native" : "renamed_stock";
     StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
     env.setParallelism(1);
@@ -364,7 +362,8 @@ class PaimonSinkParityTest {
     FileStoreTable table = openTable(warehouse, "compacted");
     assertEquals(600, PaimonTestTables.readRows(table, table.rowType()).size());
     List<Snapshot.CommitKind> kinds = new ArrayList<>();
-    for (Iterator<Snapshot> snapshots = table.snapshotManager().snapshots(); snapshots.hasNext(); ) {
+    for (Iterator<Snapshot> snapshots = table.snapshotManager().snapshots();
+        snapshots.hasNext(); ) {
       kinds.add(snapshots.next().commitKind());
     }
     assertTrue(kinds.contains(Snapshot.CommitKind.COMPACT), kinds::toString);
@@ -418,7 +417,6 @@ class PaimonSinkParityTest {
       return paths.filter(Files::isRegularFile).count();
     }
   }
-
 
   private static final int CHANGELOG_ROWS = 600;
   private static final int CHANGELOG_KEYS = 150;
@@ -922,7 +920,11 @@ class PaimonSinkParityTest {
   @Test
   void primaryKeyTableCompactsInJobAndContinuesSequenceNumbersAcrossJobs() throws Exception {
     java.nio.file.Path warehouse = Files.createTempDirectory("paimon-sink-pk-compact");
-    String options = "'bucket' = '2', 'num-sorted-run.compaction-trigger' = '2'";
+    // Equal row counts need not yield equal compressed sizes. Select both runs explicitly so
+    // this tests in-job compaction independently of the codec's compression ratio.
+    String options =
+        "'bucket' = '2', 'num-sorted-run.compaction-trigger' = '2', "
+            + "'compaction.max-size-amplification-percent' = '0'";
     upsertFixture(warehouse, "pk_native", options, 1, true, 0);
     upsertFixture(warehouse, "pk_stock", options, 1, false, 0);
     FileStoreTable nativeTable = upsertFixture(warehouse, "pk_native", options, 1, true, 1);
@@ -1312,7 +1314,7 @@ class PaimonSinkParityTest {
             "'bucket' = '2'",
             "DOUBLE"),
         Arguments.of(
-            "(id BIGINT, v INT)", "'bucket' = '-1', 'file.format' = 'orc'", "file.format orc"),
+            "(id BIGINT, v INT)", "'bucket' = '-1', 'file.format' = 'avro'", "file.format avro"),
         Arguments.of(
             "(id BIGINT, v INT)",
             "'bucket' = '-1', 'write-buffer-for-append' = 'true'",
@@ -1328,7 +1330,7 @@ class PaimonSinkParityTest {
         Arguments.of("(id BIGINT, v TIMESTAMP(9))", "'bucket' = '-1'", "INT96"),
         Arguments.of(
             "(id BIGINT, v INT)",
-            "'bucket' = '-1', 'parquet.bloom.filter.enabled' = 'true'",
+            "'bucket' = '-1', 'file.format' = 'parquet', 'parquet.bloom.filter.enabled' = 'true'",
             "bloom"));
   }
 
@@ -1423,6 +1425,8 @@ class PaimonSinkParityTest {
     tableEnv.executeSql(
         "CREATE CATALOG paimon WITH ('type' = 'paimon', 'warehouse' = '"
             + warehouse.toUri()
+            + "', 'table-default.file.format'='"
+            + PaimonTestTables.fileFormat()
             + "')");
     tableEnv.executeSql("USE CATALOG paimon");
     return tableEnv;
@@ -1471,7 +1475,10 @@ class PaimonSinkParityTest {
               v[1],
               v[2],
               v[3],
-              v[4] == null ? null : LocalDateTime.ofEpochSecond((Long) v[4] / 1000, (int) ((Long) v[4] % 1000) * 1_000_000, ZoneOffset.UTC),
+              v[4] == null
+                  ? null
+                  : LocalDateTime.ofEpochSecond(
+                      (Long) v[4] / 1000, (int) ((Long) v[4] % 1000) * 1_000_000, ZoneOffset.UTC),
               micros == null
                   ? null
                   : Instant.ofEpochSecond(
@@ -1520,7 +1527,8 @@ class PaimonSinkParityTest {
                     + file.rowCount()
                     + " seq="
                     + (absoluteSequenceNumbers ? file.minSequenceNumber() + ".." : "span ")
-                    + (file.maxSequenceNumber() - (absoluteSequenceNumbers ? 0 : file.minSequenceNumber()))
+                    + (file.maxSequenceNumber()
+                        - (absoluteSequenceNumbers ? 0 : file.minSequenceNumber()))
                     + " level="
                     + file.level()
                     + " schema="
@@ -1560,8 +1568,7 @@ class PaimonSinkParityTest {
 
   private static void assertAccelerated(PhysicalPlanScan scan) {
     assertTrue(
-        scan.substitutions() > 0,
-        () -> "Paimon sink did not accelerate: " + scan.explainSummary());
+        scan.substitutions() > 0, () -> "Paimon sink did not accelerate: " + scan.explainSummary());
   }
 
   private static void assertDeclined(PhysicalPlanScan scan, String reason) {

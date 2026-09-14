@@ -147,7 +147,7 @@ final class PaimonArrowFields {
     Integer precision = timestampPrecision(type);
     if (precision != null) {
       return precision > MAX_NATIVE_TIMESTAMP_PRECISION
-          ? "timestamp precision " + precision + " is written as INT96, which the native writer does not produce"
+          ? "timestamp precision " + precision + " exceeds the native Paimon limit of 6 (Parquet uses INT96)"
           : null;
     }
     DataTypeRoot root = type.getTypeRoot();

@@ -1,6 +1,8 @@
 package tech.streamfusion.operator;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.ByteArrayOutputStream;
@@ -33,15 +35,20 @@ import org.apache.flink.table.types.logical.VarCharType;
 import org.apache.parquet.hadoop.ParquetFileReader;
 import org.apache.parquet.hadoop.util.HadoopInputFile;
 import org.junit.jupiter.api.Tag;
-import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import tech.streamfusion.format.ColumnarFileCodec;
+import tech.streamfusion.orc.OrcCodec;
+import tech.streamfusion.parquet.ParquetCodec;
 
 /**
  * The native bulk writer inside Flink's own streaming file writer: part files stay invisible until
  * the recording checkpoint completes, restore commits exactly once, and each visible file is a
- * readable Parquet file with the group's rows.
+ * readable columnar file with the group's rows.
  */
 @Tag("streamfusion-parquet")
-class NativeParquetSinkWriterTest {
+@Tag("streamfusion-orc")
+class NativeFileSinkWriterTest {
 
   private static final RowType SCHEMA =
       RowType.of(
@@ -62,9 +69,17 @@ class NativeParquetSinkWriterTest {
   }
 
   private static StreamingFileWriter<PartitionedArrowBatch> writer(
-      java.nio.file.Path directory, List<String> partitionKeys, int[] partitionColumns) {
-    NativeParquetBulkWriterFactory factory =
-        new NativeParquetBulkWriterFactory(SCHEMA, partitionColumns, new String[0], new String[0]);
+      String format,
+      java.nio.file.Path directory,
+      List<String> partitionKeys,
+      int[] partitionColumns) {
+    NativeFileBulkWriterFactory factory =
+        new NativeFileBulkWriterFactory(
+            codec(format, partitionColumns),
+            SCHEMA,
+            partitionColumns,
+            new String[0],
+            new String[0]);
     StreamingFileSink.BucketsBuilder<
             PartitionedArrowBatch,
             String,
@@ -73,8 +88,9 @@ class NativeParquetSinkWriterTest {
             StreamingFileSink.forBulkFormat(new Path(directory.toUri()), factory)
                 .withBucketAssigner(new PartitionedBatchBucketAssigner())
                 .withRollingPolicy(
-                    new NativeParquetRollingPolicy(128 << 20, Long.MAX_VALUE, Long.MAX_VALUE))
-                .withOutputFileConfig(OutputFileConfig.builder().withPartPrefix("part-test").build());
+                    new NativeFileRollingPolicy(128 << 20, Long.MAX_VALUE, Long.MAX_VALUE))
+                .withOutputFileConfig(
+                    OutputFileConfig.builder().withPartPrefix("part-test").build());
     return new StreamingFileWriter<>(1000, buckets, partitionKeys, new Configuration());
   }
 
@@ -98,7 +114,21 @@ class NativeParquetSinkWriterTest {
     return visible;
   }
 
-  private static long rowCount(File file) throws IOException {
+  private static ColumnarFileCodec codec(String format, int[] partitions) {
+    return format.equals("parquet")
+        ? new ParquetCodec()
+        : new OrcCodec(partitions.length == 0 ? "struct<dt:string,v:int>" : "struct<v:int>");
+  }
+
+  private static long rowCount(String format, File file) throws IOException {
+    if (format.equals("orc")) {
+      try (var reader =
+          org.apache.orc.OrcFile.createReader(
+              new org.apache.hadoop.fs.Path(file.toURI()),
+              org.apache.orc.OrcFile.readerOptions(new org.apache.hadoop.conf.Configuration()))) {
+        return reader.getNumberOfRows();
+      }
+    }
     try (ParquetFileReader reader =
         ParquetFileReader.open(
             HadoopInputFile.fromPath(
@@ -108,11 +138,12 @@ class NativeParquetSinkWriterTest {
     }
   }
 
-  @Test
-  void standardArrowWriterProducesBoundedBridgeWrites() throws Exception {
-    NativeParquetBulkWriterFactory factory =
-        new NativeParquetBulkWriterFactory(
-            SCHEMA, new int[0], new String[] {"block.size"}, new String[] {"1"});
+  @ParameterizedTest
+  @ValueSource(strings = {"parquet", "orc"})
+  void standardArrowWriterProducesBoundedBridgeWrites(String format) throws Exception {
+    NativeFileBulkWriterFactory factory =
+        new NativeFileBulkWriterFactory(
+            codec(format, new int[0]), SCHEMA, new int[0], new String[0], new String[0]);
     RecordingOutputStream output = new RecordingOutputStream();
     try (BufferAllocator allocator = new RootAllocator()) {
       BulkWriter<PartitionedArrowBatch> writer = factory.create(output);
@@ -121,6 +152,10 @@ class NativeParquetSinkWriterTest {
     }
     assertTrue(output.maxWrite <= 1 << 20, "the native bridge must stay bounded to one MiB");
     byte[] file = output.bytes.toByteArray();
+    if (format.equals("orc")) {
+      assertEquals("ORC", new String(file, 0, 3, java.nio.charset.StandardCharsets.US_ASCII));
+      return;
+    }
     assertEquals('P', file[0]);
     assertEquals('A', file[1]);
     assertEquals('R', file[2]);
@@ -136,6 +171,8 @@ class NativeParquetSinkWriterTest {
 
     private final ByteArrayOutputStream bytes = new ByteArrayOutputStream();
     private int maxWrite;
+    private boolean fail;
+    private boolean closed;
 
     @Override
     public long getPos() {
@@ -143,13 +180,15 @@ class NativeParquetSinkWriterTest {
     }
 
     @Override
-    public void write(int value) {
+    public void write(int value) throws IOException {
+      if (fail) throw new IOException("injected output failure");
       bytes.write(value);
       maxWrite = Math.max(maxWrite, 1);
     }
 
     @Override
-    public void write(byte[] data, int offset, int length) {
+    public void write(byte[] data, int offset, int length) throws IOException {
+      if (fail) throw new IOException("injected output failure");
       bytes.write(data, offset, length);
       maxWrite = Math.max(maxWrite, length);
     }
@@ -161,16 +200,43 @@ class NativeParquetSinkWriterTest {
     public void sync() {}
 
     @Override
-    public void close() {}
+    public void close() {
+      closed = true;
+    }
   }
 
-  @Test
-  void publishesFilesOnlyWhenTheCheckpointCompletes() throws Exception {
+  @ParameterizedTest
+  @ValueSource(strings = {"parquet", "orc"})
+  void failedFooterReleasesTheEncoderButLeavesStreamOwnershipWithFlink(String format)
+      throws Exception {
+    var output = new RecordingOutputStream();
+    var factory =
+        new NativeFileBulkWriterFactory(
+            codec(format, new int[0]), SCHEMA, new int[0], new String[0], new String[0]);
+    try (BufferAllocator allocator = new RootAllocator()) {
+      var writer = factory.create(output);
+      writer.addElement(batch(allocator, "", row("data", 1)));
+      output.fail = true;
+      assertThrows(IOException.class, writer::finish);
+      writer.finish();
+      assertFalse(output.closed);
+    }
+    assertEquals(
+        "",
+        format.equals("orc")
+            ? tech.streamfusion.orc.NativeOrc.liveNativeHandles()
+            : tech.streamfusion.parquet.NativeParquet.liveNativeHandles());
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"parquet", "orc"})
+  void publishesFilesOnlyWhenTheCheckpointCompletes(String format) throws Exception {
     java.nio.file.Path directory = Files.createTempDirectory("streamfusion-writer");
     try (BufferAllocator allocator = new RootAllocator();
         OneInputStreamOperatorTestHarness<PartitionedArrowBatch, PartitionCommitInfo> harness =
             new OneInputStreamOperatorTestHarness<>(
-                writer(directory, List.of(), new int[0]), new PartitionedArrowBatchSerializer())) {
+                writer(format, directory, List.of(), new int[0]),
+                new PartitionedArrowBatchSerializer())) {
       harness.setup();
       harness.open();
       harness.processElement(new StreamRecord<>(batch(allocator, "", row("a", 1), row("a", 2))));
@@ -183,17 +249,18 @@ class NativeParquetSinkWriterTest {
       harness.notifyOfCompletedCheckpoint(1L);
       List<File> files = visibleFiles(directory.toFile());
       assertEquals(1, files.size(), "one part file commits on completion");
-      assertEquals(3, rowCount(files.get(0)));
+      assertEquals(3, rowCount(format, files.get(0)));
     }
   }
 
-  @Test
-  void writesEachBucketToItsPartitionDirectory() throws Exception {
+  @ParameterizedTest
+  @ValueSource(strings = {"parquet", "orc"})
+  void writesEachBucketToItsPartitionDirectory(String format) throws Exception {
     java.nio.file.Path directory = Files.createTempDirectory("streamfusion-writer");
     try (BufferAllocator allocator = new RootAllocator();
         OneInputStreamOperatorTestHarness<PartitionedArrowBatch, PartitionCommitInfo> harness =
             new OneInputStreamOperatorTestHarness<>(
-                writer(directory, List.of("dt"), new int[] {0}),
+                writer(format, directory, List.of("dt"), new int[] {0}),
                 new PartitionedArrowBatchSerializer())) {
       harness.setup();
       harness.open();
@@ -212,6 +279,16 @@ class NativeParquetSinkWriterTest {
       assertEquals(Arrays.asList("dt=a", "dt=b"), parents);
       // The partition column lives in the path only; the file carries the remaining column.
       for (File file : files) {
+        if (format.equals("orc")) {
+          try (var reader =
+              org.apache.orc.OrcFile.createReader(
+                  new org.apache.hadoop.fs.Path(file.toURI()),
+                  org.apache.orc.OrcFile.readerOptions(
+                      new org.apache.hadoop.conf.Configuration()))) {
+            assertEquals(List.of("v"), reader.getSchema().getFieldNames());
+          }
+          continue;
+        }
         try (ParquetFileReader reader =
             ParquetFileReader.open(
                 HadoopInputFile.fromPath(
@@ -227,14 +304,16 @@ class NativeParquetSinkWriterTest {
     }
   }
 
-  @Test
-  void restoreCommitsPendingFilesExactlyOnce() throws Exception {
+  @ParameterizedTest
+  @ValueSource(strings = {"parquet", "orc"})
+  void restoreCommitsPendingFilesExactlyOnce(String format) throws Exception {
     java.nio.file.Path directory = Files.createTempDirectory("streamfusion-writer");
     OperatorSubtaskState snapshot;
     try (BufferAllocator allocator = new RootAllocator();
         OneInputStreamOperatorTestHarness<PartitionedArrowBatch, PartitionCommitInfo> harness =
             new OneInputStreamOperatorTestHarness<>(
-                writer(directory, List.of(), new int[0]), new PartitionedArrowBatchSerializer())) {
+                writer(format, directory, List.of(), new int[0]),
+                new PartitionedArrowBatchSerializer())) {
       harness.setup();
       harness.open();
       harness.processElement(new StreamRecord<>(batch(allocator, "", row("a", 1), row("a", 2))));
@@ -247,12 +326,13 @@ class NativeParquetSinkWriterTest {
 
     try (OneInputStreamOperatorTestHarness<PartitionedArrowBatch, PartitionCommitInfo> restored =
         new OneInputStreamOperatorTestHarness<>(
-            writer(directory, List.of(), new int[0]), new PartitionedArrowBatchSerializer())) {
+            writer(format, directory, List.of(), new int[0]),
+            new PartitionedArrowBatchSerializer())) {
       restored.initializeState(snapshot);
       restored.open();
       List<File> files = visibleFiles(directory.toFile());
       assertEquals(1, files.size(), "the recovered checkpoint's file is committed");
-      assertEquals(2, rowCount(files.get(0)));
+      assertEquals(2, rowCount(format, files.get(0)));
     }
   }
 }

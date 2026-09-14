@@ -6,8 +6,9 @@ fallback to stock Flink as the normal, safe outcome.
 
 ## Source
 
-Parquet reads always use Flink's stock source. The incomplete native Parquet reader was removed;
-the optional StreamFusion Parquet module now accelerates only sink encoding.
+Filesystem Parquet scans use Flink's stock source. [Paimon streaming sources](paimon.md#streaming-source)
+use this module's native decoder over Java-owned FileIO, including admitted snapshot merges and
+changelog tailing. ORC uses the same file lifecycle through its separate [ORC module](orc.md).
 
 ## Sink
 

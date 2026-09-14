@@ -17,6 +17,7 @@ unchanged table SQL integration tests, and Paimon's unchanged append-table SQL i
 ```bash
 bin/flink-suite.sh formats
 bin/flink-suite.sh parquet
+bin/flink-suite.sh orc
 bin/flink-suite.sh kafka
 bin/flink-suite.sh paimon
 bin/flink-suite.sh all
@@ -26,7 +27,8 @@ bin/flink-suite.sh all
 tests and compiles the Confluent Avro module (the pinned release contains no integration test in
 that module). `parquet` runs Flink's unchanged `ParquetFsStreamingSinkITCase` and
 `ParquetTimestampITCase`, and fails unless the suite proves that a native Parquet writer was
-created. `kafka` covers `DynamicKafkaTableITCase`, `KafkaChangelogTableITCase`,
+created. `orc` runs `OrcFsStreamingSinkITCase` and `OrcFileSystemITCase` and requires a successful
+native ORC writer marker. The harness runs timestamp tests with a UTC JVM. `kafka` covers `DynamicKafkaTableITCase`, `KafkaChangelogTableITCase`,
 `KafkaTableITCase`, and `UpsertKafkaTableITCase` from the pinned Kafka connector release. The Kafka
 suite starts broker containers and therefore requires a working Docker daemon. `paimon` runs the
 Paimon Flink connector's `AppendOnlyTableITCase`, `AppendTableITCase`, `BatchFileStoreITCase`,
@@ -52,12 +54,12 @@ unsupported primary-key options, and compaction rewrites use stock Paimon. `Coor
 checks removal of the global committer, coordinator metrics, committed rows, and snapshot watermark
 parity for active and idle inputs. Because
 Surefire appends StreamFusion's classpath in no fixed order, the agent also resolves Paimon's
-`parquet` format identifier to the StreamFusion factory whenever the module is present, standing in
+`parquet` and `orc` format identifiers to the StreamFusion factories whenever the module is present, standing in
 for the `01-streamfusion-paimon.jar` ordering a deployment relies on. Paimon's module declares the
 planner test-jar before the planner itself, which would place stock Calcite ahead of Flink's patched
 validator classes (breaking `CALL` procedures and time travel in stock tests), so the runner drops
 the resolved calcite-core from that module's test classpath and appends it after the planner
-instead. `all` runs formats, Parquet,
+instead. `all` runs formats, Parquet, ORC,
 the planner runtime suite, Paimon, and Kafka in that order.
 
 The runner clones Flink `release-2.2.1`, Kafka connector `v5.0.0`, and Paimon `2.0.0` (its
@@ -111,7 +113,7 @@ FLINK_SUITE_TEST='org.apache.flink.table.planner.runtime.stream.sql.CalcITCase,o
 ```
 
 The same `FLINK_SUITE_TEST` and `FLINK_SUITE_REUSE_BUILD=true` controls apply to `formats`,
-`parquet`, `kafka`, and `paimon`. Reuse mode requires that the selected mode has been built once normally.
+`parquet`, `orc`, `kafka`, and `paimon`. Reuse mode requires that the selected mode has been built once normally.
 
 The focused Paimon coordinator run includes its four paged writer-restoration cases, three
 commit-coordinator cases, and a deterministic primary-key write to verify native file creation:

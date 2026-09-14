@@ -11,21 +11,31 @@ import org.apache.paimon.table.FileStoreTable;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 
-/** Committed file read, Parquet decode, and projected-column checksum; release builds only. */
+/**
+ * Committed file read, native columnar decode, and projected-column checksum; release builds only.
+ */
 class PaimonSourceBenchmark {
   @Test
   @EnabledIfEnvironmentVariable(named = "SF_PAIMON_SOURCE_BENCHMARK", matches = "true")
   void compareReleasedReader() throws Exception {
     int rows = Integer.parseInt(System.getenv().getOrDefault("SF_PAIMON_SOURCE_ROWS", "262144"));
+    String format = System.getenv().getOrDefault("SF_PAIMON_FILE_FORMAT", "parquet");
     for (boolean primaryKey : new boolean[] {false, true}) {
       FileStoreTable table =
           primaryKey
               ? PaimonMergeEngineTest.table(
                   Map.of(
-                      "changelog-producer", "input", "write-only", "true", "scan.mode", "latest"))
+                      "changelog-producer",
+                      "input",
+                      "write-only",
+                      "true",
+                      "scan.mode",
+                      "latest",
+                      "file.format",
+                      format))
               : PaimonTestTables.createTable(
                   Files.createTempDirectory("paimon-source-bench"),
-                  Map.of("bucket", "-1", "file.format", "parquet"));
+                  Map.of("bucket", "-1", "file.format", format));
       if (primaryKey) {
         try (var initial =
             new PaimonMergeEngineTest.Writer(
@@ -124,8 +134,8 @@ class PaimonSourceBenchmark {
         }
       }
       System.out.printf(
-          "PAIMON_SOURCE mode=%s rows=%d stock_s=%.3f native_s=%.3f speedup=%.2fx%n",
-          primaryKey ? "changelog" : "append", rows, best[0], best[1], best[0] / best[1]);
+          "PAIMON_SOURCE format=%s mode=%s rows=%d stock_s=%.3f native_s=%.3f speedup=%.2fx%n",
+          format, primaryKey ? "changelog" : "append", rows, best[0], best[1], best[0] / best[1]);
     }
   }
 }

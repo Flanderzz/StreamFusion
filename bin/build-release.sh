@@ -96,6 +96,7 @@ stage_darwin_libraries() {
     stage_darwin_library avro "$target" "$architecture"
     stage_darwin_library protobuf "$target" "$architecture"
     stage_darwin_library parquet "$target" "$architecture"
+    stage_darwin_library orc "$target" "$architecture"
     stage_darwin_library paimon "$target" "$architecture"
   done
 }
@@ -116,7 +117,7 @@ stage_linux_libraries() {
   docker build --platform "$platform" --tag "$image" \
     --file "$repo_root/docker/native-release.Dockerfile" "$native_dir"
   container=$(docker create --platform "$platform" "$image")
-  for extension in core kafka json csv raw avro protobuf parquet paimon; do
+  for extension in core kafka json csv raw avro protobuf parquet orc paimon; do
     case "$extension" in
       core)
         destination_directory=$stage_dir/linux/$architecture
@@ -184,6 +185,7 @@ if [ "$host_only" = true ]; then
   stage_host_library avro
   stage_host_library protobuf
   stage_host_library parquet
+  stage_host_library orc
   stage_host_library paimon
 else
   command -v docker >/dev/null 2>&1 || {

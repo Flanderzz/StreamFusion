@@ -1,7 +1,5 @@
 package tech.streamfusion.operator;
 
-import tech.streamfusion.parquet.NativeParquet;
-import tech.streamfusion.arrow.ArrowConversion;
 import java.util.List;
 import org.apache.arrow.c.ArrowArray;
 import org.apache.arrow.c.ArrowSchema;
@@ -9,16 +7,18 @@ import org.apache.arrow.c.CDataDictionaryProvider;
 import org.apache.arrow.c.Data;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.flink.connector.file.table.RowDataPartitionComputer;
+import org.apache.flink.metrics.Counter;
 import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
-import org.apache.flink.connector.file.table.RowDataPartitionComputer;
-import org.apache.flink.metrics.Counter;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.types.DataType;
 import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.table.types.utils.TypeConversions;
 import org.apache.flink.table.utils.PartitionPathUtils;
+import tech.streamfusion.Native;
+import tech.streamfusion.arrow.ArrowConversion;
 
 /**
  * Routes the sink's Arrow batches to filesystem buckets. An unpartitioned table passes each batch
@@ -28,7 +28,7 @@ import org.apache.flink.table.utils.PartitionPathUtils;
  * off its first row through Flink's own partition-path code — so escaping, null handling, and value
  * stringification match the host sink by construction.
  */
-public class ParquetPartitionSplitOperator extends AbstractStreamOperator<PartitionedArrowBatch>
+public class FilePartitionSplitOperator extends AbstractStreamOperator<PartitionedArrowBatch>
     implements OneInputStreamOperator<ArrowBatch, PartitionedArrowBatch> {
 
   private final RowType rowType;
@@ -41,7 +41,7 @@ public class ParquetPartitionSplitOperator extends AbstractStreamOperator<Partit
   private transient int[] partitionColumns;
   private transient Counter rowsWritten;
 
-  public ParquetPartitionSplitOperator(
+  public FilePartitionSplitOperator(
       RowType rowType, List<String> partitionKeys, String defaultPartitionName) {
     this.rowType = rowType;
     this.partitionKeys = partitionKeys;
@@ -63,8 +63,7 @@ public class ParquetPartitionSplitOperator extends AbstractStreamOperator<Partit
             rowType.getFieldNames().toArray(new String[0]),
             columnTypes,
             partitionKeys.toArray(new String[0]));
-    partitionColumns =
-        partitionKeys.stream().mapToInt(rowType.getFieldNames()::indexOf).toArray();
+    partitionColumns = partitionKeys.stream().mapToInt(rowType.getFieldNames()::indexOf).toArray();
     // Comet's native-write surface. The legacy StreamingFileSink writer owns part-file creation and
     // byte output, so those two counters remain zero until that writer exposes a metric context.
     getMetricGroup().counter("files_written");
@@ -91,13 +90,16 @@ public class ParquetPartitionSplitOperator extends AbstractStreamOperator<Partit
     // The batch's buffers belong to the upstream operator's allocator; export with that allocator
     // (buffers associate only within one allocator root).
     BufferAllocator batchAllocator =
-        batch.getFieldVectors().isEmpty() ? allocator : batch.getFieldVectors().get(0).getAllocator();
+        batch.getFieldVectors().isEmpty()
+            ? allocator
+            : batch.getFieldVectors().get(0).getAllocator();
     long split;
     try (ArrowArray array = ArrowArray.allocateNew(batchAllocator);
         ArrowSchema schema = ArrowSchema.allocateNew(batchAllocator)) {
       Data.exportVectorSchemaRoot(batchAllocator, batch, dictionaries, array, schema);
-      split = NativeParquet.splitByPartitionColumns(
-          array.memoryAddress(), schema.memoryAddress(), partitionColumns);
+      split =
+          Native.splitByPartitionColumns(
+              array.memoryAddress(), schema.memoryAddress(), partitionColumns);
     } finally {
       batch.close();
     }
@@ -107,7 +109,7 @@ public class ParquetPartitionSplitOperator extends AbstractStreamOperator<Partit
         VectorSchemaRoot group;
         try (ArrowArray outArray = ArrowArray.allocateNew(allocator);
             ArrowSchema outSchema = ArrowSchema.allocateNew(allocator)) {
-          if (!NativeParquet.nextPartitionSlice(
+          if (!Native.nextPartitionSlice(
               split, outArray.memoryAddress(), outSchema.memoryAddress())) {
             break;
           }
@@ -124,7 +126,7 @@ public class ParquetPartitionSplitOperator extends AbstractStreamOperator<Partit
             group.getRowCount());
       }
     } finally {
-      NativeParquet.closePartitionSplit(split);
+      Native.closePartitionSplit(split);
     }
   }
 }

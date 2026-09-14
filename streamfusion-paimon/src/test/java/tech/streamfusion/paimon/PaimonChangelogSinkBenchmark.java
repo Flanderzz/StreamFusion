@@ -20,6 +20,7 @@ class PaimonChangelogSinkBenchmark {
   void compareReleasedPaimonWriters() throws Exception {
     int count =
         Integer.parseInt(System.getenv().getOrDefault("SF_PAIMON_CHANGELOG_ROWS", "200000"));
+    String format = System.getenv().getOrDefault("SF_PAIMON_FILE_FORMAT", "parquet");
     List<Object[]> rows = PaimonTestTables.changelog(count, count / 10);
     for (String mode : List.of("input", "lookup", "full-compaction", "deletion-vectors")) {
       double[] best = {Double.POSITIVE_INFINITY, Double.POSITIVE_INFINITY};
@@ -30,6 +31,7 @@ class PaimonChangelogSinkBenchmark {
           int engine = (offset + iteration) % 2;
           Map<String, String> options = new HashMap<>();
           options.put("bucket", "4");
+          options.put("file.format", format);
           if (mode.equals("deletion-vectors")) {
             options.put("deletion-vectors.enabled", "true");
           } else {
@@ -58,8 +60,8 @@ class PaimonChangelogSinkBenchmark {
         }
       }
       System.out.printf(
-          "PAIMON_CHANGELOG mode=%s rows=%d stock_s=%.3f native_s=%.3f speedup=%.2fx%n",
-          mode, count, best[0], best[1], best[0] / best[1]);
+          "PAIMON_CHANGELOG format=%s mode=%s rows=%d stock_s=%.3f native_s=%.3f speedup=%.2fx%n",
+          format, mode, count, best[0], best[1], best[0] / best[1]);
     }
   }
 }

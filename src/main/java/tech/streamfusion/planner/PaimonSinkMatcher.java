@@ -28,7 +28,8 @@ import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.FileStoreTableFactory;
 import org.apache.paimon.table.Table;
-import tech.streamfusion.paimon.NativePaimonParquetFormat;
+import tech.streamfusion.paimon.NativePaimonFileFormat;
+import tech.streamfusion.paimon.PaimonCodecs;
 import tech.streamfusion.paimon.PaimonKeyValueLayout;
 import tech.streamfusion.paimon.PaimonMergeOptions;
 
@@ -114,7 +115,7 @@ final class PaimonSinkMatcher {
         return Planned.fallback(reason);
       }
     }
-    if (!"parquet".equalsIgnoreCase(coreOptions.fileFormatString())) {
+    if (!PaimonCodecs.available(coreOptions.fileFormatString())) {
       return Planned.fallback(
           "file.format " + coreOptions.fileFormatString() + " is not supported");
     }
@@ -207,7 +208,7 @@ final class PaimonSinkMatcher {
     }
     if (coreOptions.changelogProducer() == ChangelogProducer.INPUT
         && coreOptions.changelogFileFormat() != null
-        && !"parquet".equalsIgnoreCase(coreOptions.changelogFileFormat())) {
+        && !coreOptions.fileFormatString().equalsIgnoreCase(coreOptions.changelogFileFormat())) {
       return "changelog-file.format " + coreOptions.changelogFileFormat() + " is not supported";
     }
     if (coreOptions.primaryKeyVectorIndexEnabled()
@@ -244,20 +245,20 @@ final class PaimonSinkMatcher {
   }
 
   /**
-   * Paimon picks the first {@code parquet} format factory on the classpath. Writing natively needs
+   * Paimon picks the first matching file format factory on the classpath. Writing natively needs
    * ours to have won that discovery, so a table whose files would still be written by Paimon's own
    * format is declined loudly rather than silently left on the stock path.
    */
   static String formatFallbackReason(FileStoreTable table) {
     Options options = table.coreOptions().toConfiguration();
-    FileFormat format = FileFormat.fromIdentifier("parquet", options);
-    if (!(format instanceof NativePaimonParquetFormat)) {
-      return "Paimon resolved the parquet format to "
+    FileFormat format = FileFormat.fromIdentifier(table.coreOptions().fileFormatString(), options);
+    if (!(format instanceof NativePaimonFileFormat)) {
+      return "Paimon resolved the file format to "
           + format.getClass().getName()
           + "; streamfusion-paimon must precede paimon-flink on the classpath"
           + " (deploy it as 01-streamfusion-paimon.jar)";
     }
-    NativePaimonParquetFormat nativeFormat = (NativePaimonParquetFormat) format;
+    NativePaimonFileFormat nativeFormat = (NativePaimonFileFormat) format;
     String reason = nativeFormat.nativeWriterFallbackReason(table.rowType());
     if (reason == null && !table.primaryKeys().isEmpty()) {
       CoreOptions core = table.coreOptions();

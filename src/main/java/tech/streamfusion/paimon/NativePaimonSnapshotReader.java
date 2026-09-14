@@ -40,7 +40,7 @@ public final class NativePaimonSnapshotReader implements AutoCloseable {
   private final long budget;
   private int sectionIndex;
   private List<SortedRun> runs;
-  private NativePaimonParquetReader[] readers;
+  private NativePaimonFileReader[] readers;
   private int[] fileIndices;
   private long handle;
   private long peakBytes;
@@ -66,7 +66,7 @@ public final class NativePaimonSnapshotReader implements AutoCloseable {
             .anyMatch(
                 f ->
                     f.schemaId() != table.schema().id()
-                        || !f.fileFormat().equals("parquet")
+                        || !PaimonCodecs.available(f.fileFormat())
                         || f.minSequenceNumber() < 0
                         || f.maxSequenceNumber() < f.minSequenceNumber())) {
       return null;
@@ -76,6 +76,9 @@ public final class NativePaimonSnapshotReader implements AutoCloseable {
         || PaimonKeyValueLayout.unsupportedKeyReason(table) != null
         || PaimonArrowFields.unsupportedTypeReason(new RowType(keys)) != null) {
       return null;
+    }
+    for (DataFileMeta file : split.dataFiles()) {
+      if (orcTimestampOrderingRisk(file, new RowType(keys))) return null;
     }
     List<List<SortedRun>> sections =
         new IntervalPartition(
@@ -106,6 +109,27 @@ public final class NativePaimonSnapshotReader implements AutoCloseable {
     return reader;
   }
 
+  private static boolean orcTimestampOrderingRisk(DataFileMeta file, RowType keys) {
+    if (!file.fileFormat().equals("orc")) return false;
+    for (int i = 0; i < keys.getFieldCount(); i++) {
+      var type = keys.getTypeAt(i);
+      int precision =
+          type instanceof org.apache.paimon.types.TimestampType timestamp
+              ? timestamp.getPrecision()
+              : type instanceof org.apache.paimon.types.LocalZonedTimestampType timestamp
+                  ? timestamp.getPrecision()
+                  : 0;
+      // Java ORC aliases fractional timestamps in the last negative second to the first
+      // positive second. Decoded keys can therefore violate a sorted run's ordering.
+      if (precision > 0
+          && (i != 0
+              || (file.minKey().getTimestamp(i, precision).getMillisecond() < 0
+                  && file.maxKey().getTimestamp(i, precision).getMillisecond() >= -1000)))
+        return true;
+    }
+    return false;
+  }
+
   private NativePaimonSnapshotReader(
       FileStoreTable table,
       DataSplit split,
@@ -130,8 +154,14 @@ public final class NativePaimonSnapshotReader implements AutoCloseable {
     output = new Schema(fields);
   }
 
-  private NativePaimonParquetReader open(DataFileMeta file) throws IOException {
-    return new NativePaimonParquetReader(
+  private NativePaimonFileReader open(DataFileMeta file) throws IOException {
+    return new NativePaimonFileReader(
+        PaimonCodecs.reader(
+            file.fileFormat(),
+            table
+                .coreOptions()
+                .toConfiguration()
+                .get(org.apache.paimon.format.OrcOptions.ORC_TIMESTAMP_LTZ_LEGACY_TYPE)),
         table.fileIO(),
         new Path(file.externalPath().orElse(split.bucketPath() + "/" + file.fileName())),
         file.fileSize(),
@@ -146,8 +176,8 @@ public final class NativePaimonSnapshotReader implements AutoCloseable {
       for (SortedRun run : section) {
         long maximum = 0;
         for (DataFileMeta file : run.files()) {
-          try (NativePaimonParquetReader reader = open(file)) {
-            maximum = Math.max(maximum, reader.maxRowGroupBytes());
+          try (NativePaimonFileReader reader = open(file)) {
+            maximum = Math.max(maximum, reader.readerMemory());
           }
         }
         if (maximum > budget / 2 - total) {
@@ -166,7 +196,7 @@ public final class NativePaimonSnapshotReader implements AutoCloseable {
           return null;
         }
         runs = sections.get(sectionIndex++);
-        readers = new NativePaimonParquetReader[runs.size()];
+        readers = new NativePaimonFileReader[runs.size()];
         fileIndices = new int[runs.size()];
         try (ArrowSchema in = ArrowSchema.allocateNew(NativeAllocator.SHARED);
             ArrowSchema out = ArrowSchema.allocateNew(NativeAllocator.SHARED)) {
@@ -193,7 +223,7 @@ public final class NativePaimonSnapshotReader implements AutoCloseable {
         }
       }
       VectorSchemaRoot result =
-          NativePaimonParquetReader.importBatch(
+          NativePaimonFileReader.importBatch(
               (array, schema) -> NativePaimon.snapshotMergerNext(handle, array, schema));
       peakBytes = Math.max(peakBytes, NativePaimon.snapshotMergerPeakBytes(handle));
       if (result != null) {
@@ -237,7 +267,7 @@ public final class NativePaimonSnapshotReader implements AutoCloseable {
     } finally {
       IOException failure = null;
       if (readers != null) {
-        for (NativePaimonParquetReader reader : readers) {
+        for (NativePaimonFileReader reader : readers) {
           if (reader != null) {
             try {
               reader.close();

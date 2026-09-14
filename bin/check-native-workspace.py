@@ -24,6 +24,7 @@ def main():
         "streamfusion": "Java_tech_streamfusion_Native_",
         "streamfusion-kafka": "Java_tech_streamfusion_kafka_NativeKafka_",
         "streamfusion-paimon": "Java_tech_streamfusion_paimon_NativePaimon_",
+        "streamfusion-orc": "Java_tech_streamfusion_orc_NativeOrc_",
         "streamfusion-parquet": "Java_tech_streamfusion_parquet_NativeParquet_",
     }
     for name in ("json", "csv", "raw", "avro", "protobuf"):

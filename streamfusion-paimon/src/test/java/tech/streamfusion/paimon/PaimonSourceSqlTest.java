@@ -68,17 +68,25 @@ class PaimonSourceSqlTest {
 
   @ParameterizedTest
   @CsvSource({
-    "false,false,INT",
-    "true,false,INT",
-    "false,true,INT",
-    "true,true,INT",
-    "true,false,'DECIMAL(38, 2)'",
-    "true,false,DATE",
-    "true,false,TIMESTAMP(6)",
-    "true,false,VARBINARY(4)"
+    "false,false,INT,parquet",
+    "false,false,INT,orc",
+    "true,false,INT,parquet",
+    "true,false,INT,orc",
+    "false,true,INT,parquet",
+    "false,true,INT,orc",
+    "true,true,INT,parquet",
+    "true,true,INT,orc",
+    "true,false,'DECIMAL(38, 2)',parquet",
+    "true,false,'DECIMAL(38, 2)',orc",
+    "true,false,DATE,parquet",
+    "true,false,DATE,orc",
+    "true,false,TIMESTAMP(6),parquet",
+    "true,false,TIMESTAMP(6),orc",
+    "true,false,VARBINARY(4),parquet",
+    "true,false,VARBINARY(4),orc"
   })
-  void streamingSqlReadsSnapshotThenNewCommit(boolean primaryKey, boolean watermark, String keyType)
-      throws Exception {
+  void streamingSqlReadsSnapshotThenNewCommit(
+      boolean primaryKey, boolean watermark, String keyType, String format) throws Exception {
     List<List<String>> twins = new ArrayList<>();
     for (boolean nativeSource : new boolean[] {false, true}) {
       var warehouse = Files.createTempDirectory("paimon-source-sql");
@@ -97,7 +105,9 @@ class PaimonSourceSqlTest {
               + (primaryKey ? ", PRIMARY KEY (id, pt) NOT ENFORCED" : "")
               + ") PARTITIONED BY (pt) WITH ('bucket'='"
               + (primaryKey ? "2" : "-1")
-              + "', 'file.format'='parquet', 'changelog-producer'='"
+              + "', 'file.format'='"
+              + format
+              + "', 'changelog-producer'='"
               + (primaryKey ? "input" : "none")
               + "', 'write-only'='true', 'continuous.discovery-interval'='10 ms')");
       FileStoreTable table =

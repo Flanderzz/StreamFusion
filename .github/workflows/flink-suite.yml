@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [runtime, formats, parquet, kafka, paimon, state]
+        suite: [runtime, formats, parquet, orc, kafka, paimon, state]
     steps:
       - uses: actions/checkout@v6
 

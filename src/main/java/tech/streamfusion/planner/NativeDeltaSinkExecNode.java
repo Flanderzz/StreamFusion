@@ -32,7 +32,7 @@ import tech.streamfusion.delta.NativeDeltaSink;
 import tech.streamfusion.delta.PartitionedArrowToDeltaRowsOperator;
 import tech.streamfusion.delta.KernelBatchRowDataTypeInformation;
 import tech.streamfusion.operator.ArrowBatch;
-import tech.streamfusion.operator.ParquetPartitionSplitOperator;
+import tech.streamfusion.operator.FilePartitionSplitOperator;
 import tech.streamfusion.operator.PartitionedArrowBatch;
 import tech.streamfusion.operator.PartitionedArrowBatchTypeInformation;
 
@@ -83,8 +83,8 @@ public final class NativeDeltaSinkExecNode extends ExecNodeBase<Object>
               parallelismConfigured);
       rows = new DataStream<>(planner.getExecEnv(), views);
     } else {
-      ParquetPartitionSplitOperator splitter =
-          new ParquetPartitionSplitOperator(planned.rowType, planned.partitionKeys, "__DEFAULT_PARTITION__");
+      FilePartitionSplitOperator splitter =
+          new FilePartitionSplitOperator(planned.rowType, planned.partitionKeys, "__DEFAULT_PARTITION__");
       OneInputTransformation<ArrowBatch, PartitionedArrowBatch> split =
           new OneInputTransformation<>(
               input,

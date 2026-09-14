@@ -1,0 +1,26 @@
+[package]
+name = "streamfusion-orc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+streamfusion-bridge = { path = "../bridge" }
+arrow.workspace = true
+jni.workspace = true
+
+[dependencies.libmimalloc-sys]
+workspace = true
+optional = true
+
+[build-dependencies]
+streamfusion-native-build = { path = "../native-build" }
+cmake = "0.1"
+
+[features]
+default = []
+mimalloc = ["dep:libmimalloc-sys", "libmimalloc-sys/v2"]
