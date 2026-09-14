@@ -23,7 +23,8 @@ trickle streams — the role Flink's own mini-batch `allow-latency` plays. The t
 the opposite side before buffering a side, so the cross-side arrival order the join changelog
 depends on survives coalescing exactly. Only physical chunking changes: every operator still emits
 its per-record cascade, so the off-mode byte-parity contract is untouched (the parallelism-2 shuffle
-parity test runs its aggregate through an asserted-real merge).
+parity test asserts a merge with enough input to force multiple Arrow batches even when one source
+subtask reads every file; file boundaries do not flush the row-to-Arrow buffer).
 
 ## Measured
 

@@ -68,10 +68,11 @@ class FlinkColumnarShuffleParallelismTest {
 
   /**
    * A changelog aggregate at parallelism 2: the keyed exchange fragments every source batch into
-   * per-key-group sub-batches, and the post-exchange coalescer must reassemble processing-sized
+   * per-channel sub-batches, and the post-exchange coalescer must reassemble processing-sized
    * batches without changing the per-record changelog. No watermark is declared and the latency
-   * backstop is parked, so nothing flushes mid-stream and the engagement counter must observe an
-   * actual merge — the coalesced path is the one being parity-checked, not the pass-through.
+   * backstop is parked, so small batches accumulate until the row target or end of input.
+   * The engagement counter must observe an actual merge. The input exceeds several 1,024-row transpose batches even if one source subtask
+   * reads every file; file boundaries alone do not flush the transpose.
    * {@code COUNT(*)} keeps the intermediate changelog order-insensitive: at parallelism 2 the two
    * source subtasks race, so a value-accumulating aggregate's intermediates differ run to run in
    * both engines.
@@ -79,14 +80,16 @@ class FlinkColumnarShuffleParallelismTest {
   @Test
   void changelogAggregateAtParallelismTwoCoalescesSubBatches() throws Exception {
     Path input = Files.createTempDirectory("cshuffle-p2-agg-in");
-    writeInput(input);
+    writeInput(input, 8192);
     String latencyBefore =
         System.setProperty("streamfusion.exchange.coalesceLatencyMs", "600000");
     try {
       long mergedBefore = BatchCoalescer.merged();
       NativeParity.assertParity(
           () -> readChangelogEnvironment(input), "SELECT k, COUNT(*) AS total FROM t GROUP BY k");
-      assertTrue(BatchCoalescer.merged() > mergedBefore);
+      assertTrue(
+          BatchCoalescer.merged() > mergedBefore,
+          "the native aggregate must merge multiple shuffle batches");
     } finally {
       if (latencyBefore == null) {
         System.clearProperty("streamfusion.exchange.coalesceLatencyMs");
@@ -125,22 +128,20 @@ class FlinkColumnarShuffleParallelismTest {
     return tEnv;
   }
 
-  /**
-   * Writes the input as two Parquet files — one INSERT job per 24-row half — so the sharded read
-   * has work per subtask and every downstream channel sees at least two source batches. A single
-   * parallel write left the file count to scheduling: the sequence source assigns splits
-   * dynamically, so one write subtask can concede everything and collapse the input to one file —
-   * one source batch — and the coalescer engagement the changelog test asserts never happens.
-   */
   private static void writeInput(Path directory) throws Exception {
+    writeInput(directory, 48);
+  }
+
+  /** Writes two independent halves so the parallel reader has multiple files available. */
+  private static void writeInput(Path directory, int rows) throws Exception {
     StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
     env.setParallelism(2);
     env.enableCheckpointing(100);
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     tEnv.getConfig().setLocalTimeZone(ZoneId.of("UTC"));
-    // 48 rows: 8 keys, spread across a few 1-second windows.
+    // Eight keys; the default 48-row fixture spans a few 1-second windows.
     DataStream<Row> source =
-        env.fromSequence(0, 47)
+        env.fromSequence(0, rows - 1L)
             .map(
                 i ->
                     Row.of(
@@ -161,8 +162,8 @@ class FlinkColumnarShuffleParallelismTest {
             + "'filesystem', 'path' = '"
             + directory.toUri()
             + "', 'format' = 'parquet')");
-    tEnv.executeSql("INSERT INTO in_write SELECT * FROM s WHERE v < 24").await();
-    tEnv.executeSql("INSERT INTO in_write SELECT * FROM s WHERE v >= 24").await();
+    tEnv.executeSql("INSERT INTO in_write SELECT * FROM s WHERE v < " + rows / 2).await();
+    tEnv.executeSql("INSERT INTO in_write SELECT * FROM s WHERE v >= " + rows / 2).await();
   }
 
   private static TableEnvironment readEnvironment(
