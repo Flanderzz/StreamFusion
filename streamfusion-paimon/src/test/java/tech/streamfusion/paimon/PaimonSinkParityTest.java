@@ -1353,10 +1353,6 @@ class PaimonSinkParityTest {
                 + " 'collect'",
             "aggregate function collect"),
         Arguments.of(
-            PK_SCHEMA,
-            "'bucket' = '2', 'local-merge-buffer-size' = '1 mb'",
-            "local-merge-buffer-size"),
-        Arguments.of(
             "(id BIGINT NOT NULL, k DOUBLE NOT NULL, PRIMARY KEY (id, k) NOT ENFORCED)",
             "'bucket' = '2'",
             "DOUBLE"),

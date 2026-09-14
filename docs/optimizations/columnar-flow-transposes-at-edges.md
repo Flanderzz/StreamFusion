@@ -21,6 +21,15 @@ The [release writer diagnostic](../connectors/paimon.md#merge-engine-writer-diag
 1.20–1.27× throughput against stock ingestion for the four new modes, including routing and the
 ingress RowData-to-Arrow conversion. Unsupported merge combinations retain the stock writer.
 
+Local Paimon merging before shuffle reuses that native buffer for deduplicate and first-row tables
+with `changelog-producer=none`. It groups by the full table key, gathers surviving Arrow values,
+and transfers their vectors to routing without converting through Java rows. Field merges and
+changelog-producing tables retain Java's buffer grouping because their intermediate merges are
+observable. The [local merge diagnostic](../connectors/paimon.md#local-merge-diagnostic) measured
+4.78× deduplication and 2.93× first-row throughput between Arrow boundaries, versus Java local merge
+with its input/output conversions. Whole SQL jobs measured 1.20× with Parquet and 1.17× with ORC,
+including ingress, shuffle, writing and commit.
+
 Paimon's streaming source applies the same boundary in reverse: Java plans committed files and
 owns storage access, while native Parquet decoding emits Arrow directly for append files and
 primary-key changelog files. Admitted initial deduplication snapshots also merge in native code,

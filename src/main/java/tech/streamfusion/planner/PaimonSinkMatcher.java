@@ -212,9 +212,6 @@ final class PaimonSinkMatcher {
         || !coreOptions.primaryKeyBitmapIndexColumns().isEmpty()) {
       return "primary-key indexes are not supported";
     }
-    if (coreOptions.localMergeEnabled()) {
-      return "local-merge-buffer-size is not supported";
-    }
     return PaimonKeyValueLayout.unsupportedKeyReason(table);
   }
 

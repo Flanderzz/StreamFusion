@@ -388,6 +388,23 @@ changelogs, aggregation, and partial updates with aggregates. `precommit-compact
 stock changelog compaction coordinator, workers, and creation-time sort before commit. Its buffer
 and thread settings are parsed by those Java operators.
 
+`local-merge-buffer-size` combines updates by the full table primary key, including partition
+columns, before the bucket shuffle. With `changelog-producer=none`, `deduplicate` and `first-row`
+retain Arrow batches in the existing native sink merger, compare keys and user/arrival sequences,
+and gather surviving values directly into Arrow columns. The outgoing vectors transfer ownership
+without a Java row conversion. The configured size bounds retained input at batch boundaries;
+the batch that reaches the limit triggers a flush, so buffering can exceed the target by one input
+batch. Arrow storage can produce different intermediate flush groups from Java's row buffer.
+
+Field merges (`partial-update`, `aggregation`) and every changelog-producing mode retain Paimon's
+Java local merger and its exact buffer grouping. Those inputs are exposed as Arrow row views,
+copied into Paimon's row buffer, and merged results are written into new Arrow batches. This pays
+a row conversion cost to preserve aggregation/retraction results and intermediate input changelogs.
+Both paths keep row kinds, hold watermarks behind pending rows, flush before checkpoint barriers
+and end of input, and release uncommitted buffers on cancellation. Batch clustering remains on stock
+Paimon. `PaimonLocalMergeTest`, `PaimonLocalMergeBoundaryTest`, and `PaimonLocalMergeNativeTest` cover
+SQL writes and reopened jobs, released Java buffer boundaries, and Arrow ownership/checkpoint restore.
+
 ### Merge engines and input ordering
 
 - `deduplicate` keeps the last row in merge order; `first-row` keeps the first. Paimon's normal
@@ -584,7 +601,7 @@ Each of these declines at planning time with a reason visible in `NativePlanner.
   comparable-type whitelist; `sequence.field` combined with `partial-update` or `aggregation`;
   defaults on routing columns;
   input changelog with `changelog-file.format` differing from the table format or unsupported changelog
-  compression; primary-key vector, full-text, BTree, or bitmap indexes; `local-merge-buffer-size`;
+  compression; primary-key vector, full-text, BTree, or bitmap indexes;
   or a `FLOAT`/`DOUBLE` key column.
 - `file.format` other than installed `parquet` or `orc`, `file.format.per.level`, `write-buffer-for-append = true`,
   file indexes (`file-index.*`), `row-tracking.enabled`, `data-evolution.enabled`, `BLOB` columns.
@@ -725,6 +742,30 @@ for existing columnar pipelines and a boundary for future optimization; faster i
 Arrow source has not been measured. The default fixture size is 200,000 changes. The Nexmark
 harness is unchanged.
 
+### Local merge diagnostic
+
+`PaimonLocalMergeBenchmark` compares local merge with identical Arrow input and output boundaries,
+including Java's row-buffer conversion on its path. A release run over 131,072 rows, nine columns
+(including an array), 16,384 keys and a 4 MiB local buffer measured **0.107 s Java / 0.022 s native
+for deduplication (4.78×)** and **0.050 s / 0.017 s for first-row (2.93×)**. Input Arrow construction
+and output verification are outside this operator timer; both paths verify the selected values.
+
+The same benchmark separately runs whole streaming SQL jobs over 131,072 eleven-column changelog
+rows with two sink writers. This includes SQL planning, job startup, row-to-Arrow ingress, local
+merge, shuffle, file encoding and commit. Stock/native times were **0.712 / 0.594 s with Parquet
+(1.20×)** and **0.762 / 0.649 s with ORC (1.17×)**, with matching final tables. Both measurements
+use one warmup, three measured iterations and alternating engine order, reporting the best time.
+These are local fixtures, not distributed throughput claims. Run with:
+
+```bash
+SF_PAIMON_LOCAL_MERGE_BENCHMARK=true mvn -Pbench,paimon \
+  -pl :streamfusion-paimon -am -Dtest=PaimonLocalMergeBenchmark \
+  -Dsurefire.failIfNoSpecifiedTests=false test
+```
+
+Set `SF_PAIMON_FILE_FORMAT=orc` for the ORC SQL run, and `SF_PAIMON_LOCAL_MERGE_ROWS` to change row
+count. The Arrow-only comparison performs no file IO and does not depend on the file format.
+
 ## Cross-format validation
 
 `SF_PAIMON_FILE_FORMAT=orc` runs the shared Paimon table, SQL, spill, merge, bucket and recovery
@@ -767,8 +808,6 @@ Paimon.
 
 Each remaining gap has its own issue:
 [remaining merge combinations and specialized field aggregates](https://github.com/datafusion-contrib/StreamFusion/issues/47),
-[the remaining primary-key writer options](https://github.com/datafusion-contrib/StreamFusion/issues/48)
-(local merging before the bucket shuffle),
 [a Paimon bundle entry for the merge-tree writer](https://github.com/datafusion-contrib/StreamFusion/issues/49)
 that would remove the compaction hand-off and the idle-writer rescan.
 Released Paimon 2.0.0 walks a bundle row by row before the format writer; a Paimon release that

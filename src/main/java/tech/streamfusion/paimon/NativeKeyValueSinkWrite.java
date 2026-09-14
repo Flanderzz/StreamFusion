@@ -156,21 +156,27 @@ public final class NativeKeyValueSinkWrite implements StoreSinkWrite, AutoClosea
     }
   }
 
-  private static VectorSchemaRoot withInsertKinds(VectorSchemaRoot root) {
+  static VectorSchemaRoot withInsertKinds(VectorSchemaRoot root) {
     int rows = root.getRowCount();
     TinyIntVector kinds =
         new TinyIntVector(
             RowDataArrowConverter.ROW_KIND_COLUMN, root.getFieldVectors().get(0).getAllocator());
-    kinds.allocateNew(rows);
-    for (int row = 0; row < rows; row++) {
-      kinds.set(row, RowKind.INSERT.toByteValue());
+    try {
+      kinds.allocateNew(rows);
+      for (int row = 0; row < rows; row++) {
+        kinds.set(row, RowKind.INSERT.toByteValue());
+      }
+      kinds.setValueCount(rows);
+      List<FieldVector> columns = new ArrayList<>(root.getFieldVectors());
+      columns.add(kinds);
+      VectorSchemaRoot withKinds = new VectorSchemaRoot(columns);
+      withKinds.setRowCount(rows);
+      return withKinds;
+    } catch (Throwable failure) {
+      kinds.close();
+      root.close();
+      throw failure;
     }
-    kinds.setValueCount(rows);
-    List<FieldVector> columns = new ArrayList<>(root.getFieldVectors());
-    columns.add(kinds);
-    VectorSchemaRoot withKinds = new VectorSchemaRoot(columns);
-    withKinds.setRowCount(rows);
-    return withKinds;
   }
 
   private BucketBuffer open(BinaryRow partition, int bucket) {

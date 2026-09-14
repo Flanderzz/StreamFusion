@@ -90,6 +90,22 @@ compaction deliberately blocked before a checkpoint.
 
 ### Why not depend on paimon-rust here?
 
+Local merge follows Arroyo's flush-before-checkpoint lifecycle. Deduplicate and first-row tables
+without changelog production reuse our native sink buffer with the full table primary key. This
+uses the same select-indices-and-gather approach as paimon-rust's `KeyValueFileWriter::flush`; no
+additional paimon-rust dependency or source extraction is needed. Comet-style C Data ownership
+passes Arrow buffers into the reducer and transfers the gathered value and row-kind vectors to
+the shuffle. The retained-byte threshold is checked after each batch, allowing one input batch
+of overshoot and different intermediate flush groups from Java's row storage.
+
+Field aggregation and changelog-producing tables retain released Paimon's public `LocalMerger`.
+Different buffer geometry changed retract grouping and aggregate results in parity tests, and
+input changelogs expose intermediate local-merge outputs. The Java path keeps Paimon's memory
+segments, oversized-row handling and flush boundaries. It copies borrowed Arrow row views into
+its row buffer and writes merged results back into Arrow. Bucket routing and file encoding keep
+their native paths. A future extension must prove the relevant grouping contracts before removing
+this remaining conversion.
+
 Rechecked against Apache Paimon's canonical master and paimon-rust's canonical main on 2026-09-11,
 as well as Java's released `release-2.0.0` and Rust's released `v0.3.0`. The latest published Rust
 crate is 0.3.0; the 0.4.0 workspace is still in development.

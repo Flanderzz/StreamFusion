@@ -23,6 +23,7 @@ import org.apache.paimon.options.Options;
 import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.FileStoreTable;
 import tech.streamfusion.operator.ArrowBatch;
+import tech.streamfusion.operator.ArrowBatchTypeInformation;
 import tech.streamfusion.operator.ArrowBucketRouter;
 import tech.streamfusion.operator.BucketedArrowBatch;
 import tech.streamfusion.operator.BucketedArrowBatchTypeInformation;
@@ -31,6 +32,7 @@ import tech.streamfusion.paimon.NativePaimonAppendSink;
 import tech.streamfusion.paimon.NativePaimonBucketAssigner;
 import tech.streamfusion.paimon.NativePaimonBucketSink;
 import tech.streamfusion.paimon.NativePaimonDynamicPartitionOperator;
+import tech.streamfusion.paimon.NativePaimonLocalMergeOperator;
 import tech.streamfusion.paimon.NativePaimonPostponeSink;
 
 /**
@@ -68,6 +70,16 @@ public final class NativePaimonSinkExecNode extends ExecNodeBase<Object>
     Transformation<ArrowBatch> input =
         (Transformation<ArrowBatch>) getInputEdges().get(0).translateToPlan(planner);
     FileStoreTable table = planned.table;
+    if (planned.primaryKey && table.coreOptions().localMergeEnabled()) {
+      input =
+          new OneInputTransformation<>(
+              input,
+              "native-paimon-local-merge",
+              SimpleOperatorFactory.of(new NativePaimonLocalMergeOperator(table)),
+              ArrowBatchTypeInformation.INSTANCE,
+              input.getParallelism(),
+              false);
+    }
     boolean fixedBucket = table.bucketMode() == BucketMode.HASH_FIXED;
     boolean dynamicBucket = table.bucketMode() == BucketMode.HASH_DYNAMIC;
     boolean postpone = table.bucketMode() == BucketMode.POSTPONE_MODE;
