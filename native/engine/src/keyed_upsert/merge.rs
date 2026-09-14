@@ -2,6 +2,7 @@
 //! cells retain indices into Arrow columns. Only arithmetic and concatenation materialize values.
 //! The reducer shortcut, field iteration, and retract behavior follow released Java Paimon 2.0.
 use super::*;
+#[cfg(test)]
 use arrow::array::Float64Array;
 use arrow::compute::interleave;
 use serde::Deserialize;
@@ -93,7 +94,7 @@ impl Options {
         let columns: Vec<ArrayRef> = self
             .sequence_columns
             .iter()
-            .map(|&i| canonical_sequence(batch.column(i)))
+            .map(|&i| streamfusion_bridge::ordering::canonical_ordering_column(batch.column(i)))
             .collect();
         let converter = RowConverter::new(
             columns
@@ -397,29 +398,6 @@ fn canonical_f64(value: f64) -> f64 {
         f64::NAN
     } else {
         value
-    }
-}
-
-// Java Float/Double.compare canonicalize every NaN payload but distinguish signed zeros.
-fn canonical_sequence(column: &ArrayRef) -> ArrayRef {
-    match column.data_type() {
-        DataType::Float32 => Arc::new(Float32Array::from_iter(
-            column
-                .as_any()
-                .downcast_ref::<Float32Array>()
-                .unwrap()
-                .iter()
-                .map(|v| v.map(canonical_f32)),
-        )),
-        DataType::Float64 => Arc::new(Float64Array::from_iter(
-            column
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .unwrap()
-                .iter()
-                .map(|v| v.map(canonical_f64)),
-        )),
-        _ => column.clone(),
     }
 }
 

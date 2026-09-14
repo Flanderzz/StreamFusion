@@ -21,16 +21,36 @@ import org.apache.paimon.flink.source.FileStoreSourceSplit;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.source.Split;
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.params.provider.CsvSource;
 import tech.streamfusion.operator.ArrowBatch;
 import tech.streamfusion.operator.RowDataArrowConverter;
 
 class PaimonSourceRecoveryTest {
   @ParameterizedTest
-  @ValueSource(booleans = {false, true})
-  void checkpointOnlyAdvancesAfterEmissionAndRestoresInsideBatch(boolean tail) throws Exception {
-    FileStoreTable table = PaimonMergeEngineTest.table(
-        Map.of("changelog-producer", "input", "write-only", "true"));
+  @CsvSource({
+    "false,default",
+    "true,default",
+    "false,sequence",
+    "true,sequence",
+    "false,first-row",
+    "true,first-row"
+  })
+  void checkpointOnlyAdvancesAfterEmissionAndRestoresInsideBatch(boolean tail, String mode)
+      throws Exception {
+    var options = new java.util.HashMap<String, String>();
+    options.put("changelog-producer", "input");
+    options.put("write-only", Boolean.toString(!mode.equals("first-row")));
+    if (mode.equals("sequence")) options.put("sequence.field", "seq,seq2");
+    if (mode.equals("first-row"))
+      options.putAll(
+          Map.of(
+              "merge-engine",
+              "first-row",
+              "ignore-delete",
+              "true",
+              "changelog-producer",
+              "lookup"));
+    FileStoreTable table = PaimonMergeEngineTest.table(options);
     var read = table.newReadBuilder().withProjection(new int[] {0, 3});
     var scan = read.newStreamScan();
     List<Split> splits;
@@ -43,11 +63,17 @@ class PaimonSourceRecoveryTest {
       writer.commit(2);
       splits = scan.plan().splits();
       if (tail) {
-        writer.write(PaimonMergeEngineTest.rows(240, false));
+        var changes = PaimonMergeEngineTest.rows(240, false);
+        if (mode.equals("first-row")) {
+          for (var row : changes)
+            ((org.apache.paimon.data.GenericRow) row).setField(0, row.getInt(0) + 100);
+        }
+        writer.write(changes);
         writer.commit(3);
         splits = scan.plan().splits();
       }
     }
+    assertFalse(splits.isEmpty(), "fixture must have records to restore");
     var type = org.apache.paimon.flink.LogicalTypeConversion.toLogicalType(read.readType());
     List<FileStoreSourceSplit> assigned = new ArrayList<>();
     for (int i = 0; i < splits.size(); i++) {

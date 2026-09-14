@@ -68,25 +68,36 @@ class PaimonSourceSqlTest {
 
   @ParameterizedTest
   @CsvSource({
-    "false,false,INT,parquet",
-    "false,false,INT,orc",
-    "true,false,INT,parquet",
-    "true,false,INT,orc",
-    "false,true,INT,parquet",
-    "false,true,INT,orc",
-    "true,true,INT,parquet",
-    "true,true,INT,orc",
-    "true,false,'DECIMAL(38, 2)',parquet",
-    "true,false,'DECIMAL(38, 2)',orc",
-    "true,false,DATE,parquet",
-    "true,false,DATE,orc",
-    "true,false,TIMESTAMP(6),parquet",
-    "true,false,TIMESTAMP(6),orc",
-    "true,false,VARBINARY(4),parquet",
-    "true,false,VARBINARY(4),orc"
+    "false,false,INT,parquet,default",
+    "false,false,INT,orc,default",
+    "true,false,INT,parquet,default",
+    "true,false,INT,orc,default",
+    "false,true,INT,parquet,default",
+    "false,true,INT,orc,default",
+    "true,true,INT,parquet,default",
+    "true,true,INT,orc,default",
+    "true,false,'DECIMAL(38, 2)',parquet,default",
+    "true,false,'DECIMAL(38, 2)',orc,default",
+    "true,false,DATE,parquet,default",
+    "true,false,DATE,orc,default",
+    "true,false,TIMESTAMP(6),parquet,default",
+    "true,false,TIMESTAMP(6),orc,default",
+    "true,false,VARBINARY(4),parquet,default",
+    "true,false,VARBINARY(4),orc,default",
+    "true,false,INT,parquet,first-row",
+    "true,false,INT,orc,first-row",
+    "true,false,INT,parquet,sequence",
+    "true,false,INT,orc,sequence",
+    "true,false,INT,parquet,dynamic",
+    "true,false,INT,orc,dynamic",
+    "true,false,FLOAT,parquet,default",
+    "true,false,FLOAT,orc,default",
+    "true,false,DOUBLE,parquet,default",
+    "true,false,DOUBLE,orc,default"
   })
   void streamingSqlReadsSnapshotThenNewCommit(
-      boolean primaryKey, boolean watermark, String keyType, String format) throws Exception {
+      boolean primaryKey, boolean watermark, String keyType, String format, String mode)
+      throws Exception {
     List<List<String>> twins = new ArrayList<>();
     for (boolean nativeSource : new boolean[] {false, true}) {
       var warehouse = Files.createTempDirectory("paimon-source-sql");
@@ -104,20 +115,31 @@ class PaimonSourceSqlTest {
               + (watermark ? ", WATERMARK FOR ts AS ts - INTERVAL '1' SECOND" : "")
               + (primaryKey ? ", PRIMARY KEY (id, pt) NOT ENFORCED" : "")
               + ") PARTITIONED BY (pt) WITH ('bucket'='"
-              + (primaryKey ? "2" : "-1")
+              + (primaryKey && !mode.equals("dynamic") ? "2" : "-1")
               + "', 'file.format'='"
               + format
               + "', 'changelog-producer'='"
-              + (primaryKey ? "input" : "none")
-              + "', 'write-only'='true', 'continuous.discovery-interval'='10 ms')");
+              + (mode.equals("first-row") ? "lookup" : primaryKey ? "input" : "none")
+              + "', 'write-only'='"
+              + !mode.equals("first-row")
+              + "', 'continuous.discovery-interval'='10 ms'"
+              + (mode.equals("first-row") ? ", 'merge-engine'='first-row'" : "")
+              + (mode.equals("sequence") ? ", 'sequence.field'='ts'" : "")
+              + ")");
       FileStoreTable table =
           FileStoreTableFactory.create(
               LocalFileIO.create(), new Path(warehouse.resolve("default.db/t").toUri()));
       var builder = table.newStreamWriteBuilder().withCommitUser("test");
-      try (var writer = builder.newWrite();
+      try (var io =
+              new org.apache.paimon.disk.IOManagerImpl(
+                  Files.createTempDirectory("source-writer-io").toString());
+          var writer = builder.newWrite();
           var commit = builder.newCommit()) {
+        writer.withIOManager(io);
         for (int i = 0; i < 3; i++) {
-          writer.write(
+          writeSqlRow(
+              writer,
+              mode,
               GenericRow.of(
                   sqlKey(i, keyType),
                   BinaryString.fromString("before"),
@@ -127,7 +149,9 @@ class PaimonSourceSqlTest {
         commit.commit(1, writer.prepareCommit(true, 1));
         if (primaryKey) {
           for (int i = 0; i < 3; i++) {
-            writer.write(
+            writeSqlRow(
+                writer,
+                mode,
                 GenericRow.of(
                     sqlKey(i, keyType),
                     BinaryString.fromString("merged"),
@@ -157,7 +181,9 @@ class PaimonSourceSqlTest {
           try {
             assertTrue(initial.await(45, TimeUnit.SECONDS), "initial snapshot timed out");
             for (int i = 3; i < 6; i++) {
-              writer.write(
+              writeSqlRow(
+                  writer,
+                  mode,
                   GenericRow.of(
                       sqlKey(i, keyType),
                       BinaryString.fromString("after"),
@@ -183,12 +209,21 @@ class PaimonSourceSqlTest {
     assertEquals(twins.get(0), twins.get(1));
   }
 
+  private static void writeSqlRow(
+      org.apache.paimon.table.sink.StreamTableWrite writer, String mode, GenericRow row)
+      throws Exception {
+    if (mode.equals("dynamic")) writer.write(row, row.getInt(0) % 2);
+    else writer.write(row);
+  }
+
   private static Object sqlKey(int i, String type) {
     return switch (type) {
       case "DECIMAL(38, 2)" ->
           org.apache.paimon.data.Decimal.fromBigDecimal(
               java.math.BigDecimal.valueOf(i - 3, 2), 38, 2);
       case "DATE" -> i - 3;
+      case "FLOAT" -> (float) i;
+      case "DOUBLE" -> (double) i;
       case "TIMESTAMP(6)" -> org.apache.paimon.data.Timestamp.fromEpochMillis(-1, i * 1000);
       case "VARBINARY(4)" -> new byte[] {(byte) (i + 125)};
       default -> i;

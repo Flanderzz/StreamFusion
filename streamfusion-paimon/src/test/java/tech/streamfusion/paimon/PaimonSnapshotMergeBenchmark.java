@@ -20,9 +20,24 @@ import org.junit.jupiter.params.provider.ValueSource;
 /** Includes Java merge-to-Arrow or native merge, file opening, planning, and Arrow import. */
 class PaimonSnapshotMergeBenchmark {
   @ParameterizedTest
-  @ValueSource(strings = {"int", "decimal", "timestamp", "binary", "date"})
+  @ValueSource(
+      strings = {
+        "int",
+        "decimal",
+        "timestamp",
+        "binary",
+        "date",
+        "float",
+        "double",
+        "first-row",
+        "sequence",
+        "dynamic"
+      })
   @EnabledIfEnvironmentVariable(named = "SF_PAIMON_SNAPSHOT_BENCHMARK", matches = "true")
   void compareSnapshotCatchup(String keyType) throws Exception {
+    String selected = System.getenv("SF_PAIMON_SNAPSHOT_CASES");
+    org.junit.jupiter.api.Assumptions.assumeTrue(
+        selected == null || List.of(selected.split(",")).contains(keyType));
     int rows = Integer.parseInt(System.getenv().getOrDefault("SF_PAIMON_SNAPSHOT_ROWS", "65536"));
     var type =
         new RowType(
@@ -35,15 +50,35 @@ class PaimonSnapshotMergeBenchmark {
                       case "timestamp" -> DataTypes.TIMESTAMP(6).notNull();
                       case "binary" -> DataTypes.VARBINARY(4).notNull();
                       case "date" -> DataTypes.DATE().notNull();
+                      case "float" -> DataTypes.FLOAT().notNull();
+                      case "double" -> DataTypes.DOUBLE().notNull();
                       default -> DataTypes.INT().notNull();
                     }),
                 new DataField(1, "v", DataTypes.STRING()),
                 new DataField(2, "nested", DataTypes.ARRAY(DataTypes.INT())),
                 new DataField(3, "ordinal", DataTypes.INT().notNull())));
     for (int runs : (keyType.equals("int") ? new int[] {1, 4, 8} : new int[] {4})) {
-      var table =
-          PaimonMergeEngineTest.table(
-              Map.of("changelog-producer", "input", "write-only", "true"), type);
+      var options = new java.util.HashMap<String, String>();
+      options.put("changelog-producer", "input");
+      options.put("write-only", "true");
+      options.put(
+          "sort-spill-buffer-size",
+          System.getenv().getOrDefault("SF_PAIMON_SNAPSHOT_BUDGET", "64 mb"));
+      options.putAll(
+          switch (keyType) {
+            case "first-row" ->
+                Map.of(
+                    "merge-engine",
+                    "first-row",
+                    "changelog-producer",
+                    "none",
+                    "ignore-delete",
+                    "true");
+            case "sequence" -> Map.of("sequence.field", "ordinal");
+            case "dynamic" -> Map.of("bucket", "-1");
+            default -> Map.of();
+          });
+      var table = PaimonMergeEngineTest.table(options, type);
       var builder = table.newStreamWriteBuilder().withCommitUser("bench");
       try (var writer = builder.newWrite();
           var commit = builder.newCommit()) {
@@ -54,11 +89,12 @@ class PaimonSnapshotMergeBenchmark {
                     key(i - rows / 2, keyType),
                     BinaryString.fromString("value-" + checkpoint + "-" + i),
                     new GenericArray(new Integer[] {checkpoint, null, -i}),
-                    i);
+                    (runs - checkpoint) * rows + i);
             if (checkpoint == runs && i % 7 == 0) {
               row.setRowKind(RowKind.DELETE);
             }
-            writer.write(row);
+            if (keyType.equals("dynamic")) writer.write(row, i % 2);
+            else writer.write(row);
           }
           commit.commit(checkpoint, writer.prepareCommit(true, checkpoint));
         }
@@ -118,8 +154,14 @@ class PaimonSnapshotMergeBenchmark {
       }
       System.out.printf(
           "PAIMON_SNAPSHOT key=%s rows=%d commits=%d java_arrow_s=%.3f native_arrow_s=%.3f"
-              + " speedup=%.2fx%n",
-          keyType, rows, runs, best[0], best[1], best[0] / best[1]);
+              + " speedup=%.2fx budget_bytes=%d%n",
+          keyType,
+          rows,
+          runs,
+          best[0],
+          best[1],
+          best[0] / best[1],
+          table.coreOptions().sortSpillBufferSize());
     }
   }
 
@@ -131,6 +173,8 @@ class PaimonSnapshotMergeBenchmark {
           org.apache.paimon.data.Timestamp.fromEpochMillis(
               Math.floorDiv(i, 1000), Math.floorMod(i, 1000) * 1000);
       case "binary" -> java.nio.ByteBuffer.allocate(4).putInt(i).array();
+      case "float" -> (float) i;
+      case "double" -> (double) i;
       default -> i;
     };
   }

@@ -214,3 +214,27 @@ This confirms the Java planning interface on real files; it does not validate a 
 
 The design has a usable boundary on both sides. The remaining proof is an executable merge
 adapter with Java ordering parity and bounded retention, followed by a release catch-up benchmark.
+
+
+## Sequence, first-row and dynamic-bucket extension
+
+The Arrow cursor/tree boundary also supports dynamic hash buckets, first-row, ignore-delete and
+user-defined sequence columns. Bucket assignment remains Java's concern: each planned split still
+contains files from one table partition and bucket. With disjoint file sequence intervals,
+deduplication can select the maximum `(user sequence, stored sequence)` independently of tree tie
+traversal; first-row selects the minimum stored sequence. Equal stored-sequence ambiguity still
+retains Java. There is no need to port Java's more complex loser-tree state machine for these cases.
+
+User sequence columns omitted by SQL projection are included in decoding and removed from output.
+The comparator shares the writer's Arrow-only NaN canonicalization, preserving Java's distinction
+between signed zeros. Snapshot stored keys additionally admit floats; sink key admission is unchanged.
+Only the current winner and its encoded sequence are retained. Partial-update and aggregation need
+separate treatment because they combine cells and have different grouping/memory requirements.
+
+Released `UserDefinedSeqComparator`, `DeduplicateMergeFunction`, `FirstRowMergeFunction` and
+`ReducerMergeFunctionWrapper` supply the ordering and delete semantics. First-row without
+ignore-delete only admits files with a known zero delete count. The callback retains/clears a Java
+exception before Arrow release callbacks run, then rethrows that same throwable via the shared
+Comet-style JNI guard. Tests cover partial export failure, exact rows/kinds, projected-away sequence
+columns and Java/native checkpoint restoration for Parquet and ORC. See the connector page for
+release catch-up measurements and the remaining #53 gates.

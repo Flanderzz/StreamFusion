@@ -113,6 +113,40 @@ class PaimonSnapshotKeyTypesTest {
         }
       }
     }
+    for (String format : List.of("parquet", "orc")) {
+      cases.add(
+          Arguments.of(
+              DataTypes.FLOAT(),
+              List.of(
+                  Float.NaN,
+                  Float.intBitsToFloat(0xffc00001),
+                  Float.intBitsToFloat(0x7fc00001),
+                  Float.NEGATIVE_INFINITY,
+                  -Float.MAX_VALUE,
+                  -0.0f,
+                  0.0f,
+                  Float.MIN_VALUE,
+                  Float.MAX_VALUE,
+                  Float.POSITIVE_INFINITY),
+              false,
+              format));
+      cases.add(
+          Arguments.of(
+              DataTypes.DOUBLE(),
+              List.of(
+                  Double.NaN,
+                  Double.longBitsToDouble(0xfff8000000000001L),
+                  Double.longBitsToDouble(0x7ff8000000000001L),
+                  Double.NEGATIVE_INFINITY,
+                  -Double.MAX_VALUE,
+                  -0.0d,
+                  0.0d,
+                  Double.MIN_VALUE,
+                  Double.MAX_VALUE,
+                  Double.POSITIVE_INFINITY),
+              false,
+              format));
+    }
     return cases.stream();
   }
 
@@ -223,9 +257,6 @@ class PaimonSnapshotKeyTypesTest {
 
   static Stream<Arguments> unsupportedKeys() {
     return Stream.of(
-        Arguments.of(DataTypes.FLOAT(), List.of(Float.NaN, -0.0f, 0.0f, Float.NEGATIVE_INFINITY)),
-        Arguments.of(
-            DataTypes.DOUBLE(), List.of(Double.NaN, -0.0d, 0.0d, Double.POSITIVE_INFINITY)),
         Arguments.of(DataTypes.TIMESTAMP(9), List.of(Timestamp.fromEpochMillis(0, 1))),
         Arguments.of(
             DataTypes.TIMESTAMP_WITH_LOCAL_TIME_ZONE(9), List.of(Timestamp.fromEpochMillis(0, 1))));

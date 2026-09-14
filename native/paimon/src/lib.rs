@@ -35,6 +35,10 @@ pub extern "system" fn Java_tech_streamfusion_paimon_NativePaimon_createSnapshot
     runs: jint,
     rows: jint,
     budget: jlong,
+    sequence_columns: JIntArray<'a>,
+    sequence_ascending: jboolean,
+    first_row: jboolean,
+    ignore_delete: jboolean,
 ) -> jlong {
     bridge::jni_guard(env, |env| {
         let input = import_schema(input_schema);
@@ -48,6 +52,12 @@ pub extern "system" fn Java_tech_streamfusion_paimon_NativePaimon_createSnapshot
                 runs as usize,
                 rows as usize,
                 budget as usize,
+                merge::Options {
+                    sequence_columns: read_columns(env, &sequence_columns),
+                    sequence_ascending: sequence_ascending != 0,
+                    first_row: first_row != 0,
+                    ignore_delete: ignore_delete != 0,
+                },
             )
             .expect("snapshot merger"),
             provider: env
@@ -74,20 +84,34 @@ pub extern "system" fn Java_tech_streamfusion_paimon_NativePaimon_snapshotMerger
                 // Comet ownership pattern: the caller owns the structs; imported buffers retain
                 // producer release callbacks across the two native libraries.
                 let available = env
-                    .with_local_frame(4, |env| {
-                        env.call_method(
-                            state.provider.as_obj(),
-                            "nextRunBatch",
-                            "(IJJ)Z",
-                            &[
-                                JValue::Int(run as i32),
-                                JValue::Long((&mut input as *mut FFI_ArrowArray) as i64),
-                                JValue::Long((&mut input_schema as *mut FFI_ArrowSchema) as i64),
-                            ],
-                        )
-                        .and_then(|v| v.z())
-                    })
-                    .map_err(|e| e.to_string())?;
+                    .with_local_frame(
+                        4,
+                        |env| -> jni::errors::Result<Result<bool, JavaException>> {
+                            let called = env
+                                .call_method(
+                                    state.provider.as_obj(),
+                                    "nextRunBatch",
+                                    "(IJJ)Z",
+                                    &[
+                                        JValue::Int(run as i32),
+                                        JValue::Long((&mut input as *mut FFI_ArrowArray) as i64),
+                                        JValue::Long(
+                                            (&mut input_schema as *mut FFI_ArrowSchema) as i64,
+                                        ),
+                                    ],
+                                )
+                                .and_then(|v| v.z());
+                            // Clear and retain before Arrow release callbacks can reenter Java.
+                            if matches!(called, Err(jni::errors::Error::JavaException)) {
+                                let throwable = env.exception_occurred()?;
+                                env.exception_clear()?;
+                                return Ok(Err(JavaException(env.new_global_ref(throwable)?)));
+                            }
+                            called.map(Ok)
+                        },
+                    )
+                    .map_err(|e| e.to_string())?
+                    .unwrap_or_else(|failure| std::panic::resume_unwind(Box::new(failure)));
                 if !available {
                     return Ok(None);
                 }

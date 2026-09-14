@@ -36,6 +36,7 @@ public final class NativePaimonSnapshotReader implements AutoCloseable {
   private final Schema output;
   private final String[] names;
   private final int keyCount;
+  private final int[] sequenceColumns;
   private final int batchRows;
   private final long budget;
   private int sectionIndex;
@@ -56,10 +57,10 @@ public final class NativePaimonSnapshotReader implements AutoCloseable {
     if (!(table instanceof PrimaryKeyFileStoreTable)
         || split.isStreaming()
         || split.rawConvertible()
-        || table.bucketMode() != BucketMode.HASH_FIXED
-        || options.mergeEngine() != CoreOptions.MergeEngine.DEDUPLICATE
-        || !options.sequenceField().isEmpty()
-        || options.ignoreDelete()
+        || (table.bucketMode() != BucketMode.HASH_FIXED
+            && table.bucketMode() != BucketMode.HASH_DYNAMIC)
+        || (options.mergeEngine() != CoreOptions.MergeEngine.DEDUPLICATE
+            && options.mergeEngine() != CoreOptions.MergeEngine.FIRST_ROW)
         || options.sortEngine() != CoreOptions.SortEngine.LOSER_TREE
         || split.deletionFiles().isPresent()
         || split.dataFiles().stream()
@@ -68,14 +69,24 @@ public final class NativePaimonSnapshotReader implements AutoCloseable {
                     f.schemaId() != table.schema().id()
                         || !PaimonCodecs.available(f.fileFormat())
                         || f.minSequenceNumber() < 0
-                        || f.maxSequenceNumber() < f.minSequenceNumber())) {
+                        || f.maxSequenceNumber() < f.minSequenceNumber()
+                        || (options.mergeEngine() == CoreOptions.MergeEngine.FIRST_ROW
+                            && !options.ignoreDelete()
+                            && f.deleteRowCount().orElse(1L) != 0))) {
       return null;
     }
     var keys = table.schema().trimmedPrimaryKeysFields();
     if (keys.isEmpty()
-        || PaimonKeyValueLayout.unsupportedKeyReason(table) != null
+        || keys.stream().anyMatch(f -> !comparable(f.type()))
         || PaimonArrowFields.unsupportedTypeReason(new RowType(keys)) != null) {
       return null;
+    }
+    for (String name : options.sequenceField()) {
+      var type = table.rowType().getTypeAt(table.rowType().getFieldNames().indexOf(name));
+      if (!comparable(type)
+          || PaimonArrowFields.unsupportedTypeReason(
+                  new RowType(List.of(new org.apache.paimon.types.DataField(0, name, type))))
+              != null) return null;
     }
     for (DataFileMeta file : split.dataFiles()) {
       if (orcTimestampOrderingRisk(file, new RowType(keys))) return null;
@@ -107,6 +118,12 @@ public final class NativePaimonSnapshotReader implements AutoCloseable {
       return null;
     }
     return reader;
+  }
+
+  private static boolean comparable(org.apache.paimon.types.DataType type) {
+    return PaimonKeyValueLayout.comparableNatively(type)
+        || type.getTypeRoot() == org.apache.paimon.types.DataTypeRoot.FLOAT
+        || type.getTypeRoot() == org.apache.paimon.types.DataTypeRoot.DOUBLE;
   }
 
   private static boolean orcTimestampOrderingRisk(DataFileMeta file, RowType keys) {
@@ -146,6 +163,19 @@ public final class NativePaimonSnapshotReader implements AutoCloseable {
             PrimaryKeyTableUtils.PrimaryKeyFieldsExtractor.EXTRACTOR.keyFields(table.schema()));
     keyCount = keys.getFieldCount();
     RowType values = (RowType) LogicalTypeConversion.toDataType(outputType);
+    var valueFields = new ArrayList<>(values.getFields());
+    for (String name : table.coreOptions().sequenceField()) {
+      if (!outputType.getFieldNames().contains(name)) {
+        valueFields.add(
+            table.rowType().getFields().get(table.rowType().getFieldNames().indexOf(name)));
+      }
+    }
+    values = new RowType(valueFields);
+    var valueNames = values.getFieldNames();
+    sequenceColumns =
+        table.coreOptions().sequenceField().stream()
+            .mapToInt(name -> keyCount + 2 + valueNames.indexOf(name))
+            .toArray();
     RowType internal = KeyValue.schema(keys, values);
     input = ArrowConversion.toArrowSchema(LogicalTypeConversion.toLogicalType(internal));
     names = internal.getFieldNames().toArray(String[]::new);
@@ -211,7 +241,11 @@ public final class NativePaimonSnapshotReader implements AutoCloseable {
                     keyCount,
                     runs.size(),
                     batchRows,
-                    budget);
+                    budget,
+                    sequenceColumns,
+                    table.coreOptions().sequenceFieldSortOrderIsAscending(),
+                    table.coreOptions().mergeEngine() == CoreOptions.MergeEngine.FIRST_ROW,
+                    table.coreOptions().ignoreDelete());
           } finally {
             if (in.snapshot().release != 0) {
               in.release();

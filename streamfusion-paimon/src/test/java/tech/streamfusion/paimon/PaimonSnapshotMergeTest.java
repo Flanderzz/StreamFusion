@@ -137,11 +137,11 @@ class PaimonSnapshotMergeTest {
   }
 
   @ParameterizedTest
-  @ValueSource(strings = {"sequence", "partial", "memory", "fan-in", "ties"})
+  @ValueSource(strings = {"complex-sequence", "partial", "memory", "fan-in", "ties"})
   void unverifiedSnapshotsRetainJava(String reason) throws Exception {
     Map<String, String> extra =
         switch (reason) {
-          case "sequence" -> Map.of("sequence.field", "seq");
+          case "complex-sequence" -> Map.of("sequence.field", "nested");
           case "partial" -> Map.of("merge-engine", "partial-update", "ignore-delete", "true");
           case "memory" -> Map.of("sort-spill-buffer-size", "1 kb");
           case "fan-in" -> Map.of("sort-spill-threshold", "2");

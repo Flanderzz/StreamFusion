@@ -17,16 +17,19 @@
 
 //! Arrow cursor/key comparison and interleave output adapted from apache/paimon-rust
 //! 6824487813c69b1d4975e1add8c37343b3ead75b, table/sort_merge.rs (Apache-2.0).
+//! Sequence/first-row/delete policies follow Paimon 2.0.0 UserDefinedSeqComparator,
+//! DeduplicateMergeFunction and FirstRowMergeFunction.
 //! Keep only the current winner for a key; deleted keys never pin completed input batches.
 use crate::loser_tree::LoserTree;
 use arrow::array::{Array, Int64Array, Int8Array};
 use arrow::compute::interleave;
 use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
-use arrow::row::{RowConverter, Rows, SortField};
+use arrow::row::{OwnedRow, RowConverter, Rows, SortField};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::Arc;
+use streamfusion_bridge::ordering::canonical_ordering_column;
 
 type Result<T> = std::result::Result<T, String>;
 pub(crate) type Pull<'a> = dyn FnMut(usize) -> Result<Option<RecordBatch>> + 'a;
@@ -34,7 +37,33 @@ pub(crate) type Pull<'a> = dyn FnMut(usize) -> Result<Option<RecordBatch>> + 'a;
 struct Cursor {
     batch: Arc<RecordBatch>,
     keys: Rows,
+    sequences: Option<Rows>,
     row: usize,
+}
+
+pub(crate) struct Options {
+    pub sequence_columns: Vec<usize>,
+    pub sequence_ascending: bool,
+    pub first_row: bool,
+    pub ignore_delete: bool,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            sequence_columns: Vec::new(),
+            sequence_ascending: true,
+            first_row: false,
+            ignore_delete: false,
+        }
+    }
+}
+
+struct Winner {
+    batch: Arc<RecordBatch>,
+    row: usize,
+    sequence: i64,
+    user_sequence: Option<OwnedRow>,
 }
 
 #[cfg(test)]
@@ -69,7 +98,7 @@ mod tests {
             schema().field(3).clone(),
             schema().field(2).clone(),
         ]));
-        Merger::new(schema(), output, 1, runs, rows, budget).unwrap()
+        Merger::new(schema(), output, 1, runs, rows, budget, Options::default()).unwrap()
     }
 
     #[test]
@@ -138,6 +167,41 @@ mod tests {
     }
 
     #[test]
+    fn first_row_and_ignored_deletes_keep_only_one_winner_for_a_hot_key() {
+        for first_row in [false, true] {
+            let mut merger = merger(1, 4096, 32 * 1024);
+            merger.options.first_row = first_row;
+            merger.options.ignore_delete = true;
+            let mut next = 0;
+            let result = merger
+                .next(&mut |_| {
+                    next += 1;
+                    Ok((next <= 100_000).then(|| {
+                        batch(&[(
+                            1,
+                            next,
+                            if next % 3 == 0 { 2 } else { 3 },
+                            if next == 3 { "first" } else { "last" },
+                        )])
+                    }))
+                })
+                .unwrap()
+                .unwrap();
+            assert_eq!(result.num_rows(), 1);
+            assert_eq!(
+                result
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap()
+                    .value(0),
+                if first_row { "first" } else { "last" }
+            );
+            assert!(merger.peak_bytes < 16 * 1024, "{}", merger.peak_bytes);
+        }
+    }
+
+    #[test]
     fn retained_output_flushes_by_bytes_before_row_limit() {
         let mut merger = merger(1, 4096, 256 * 1024);
         let mut next = 0;
@@ -178,6 +242,8 @@ pub(crate) struct Merger {
     cursors: Vec<Option<Cursor>>,
     tree: LoserTree,
     converter: RowConverter,
+    sequence_converter: Option<RowConverter>,
+    options: Options,
     key_count: usize,
     output: SchemaRef,
     columns: Vec<usize>,
@@ -195,8 +261,14 @@ impl Merger {
         runs: usize,
         batch_rows: usize,
         budget: usize,
+        options: Options,
     ) -> Result<Self> {
-        if runs == 0 || batch_rows == 0 || budget == 0 || key_count + 2 > input.fields().len() {
+        if runs == 0
+            || batch_rows == 0
+            || budget == 0
+            || key_count + 2 > input.fields().len()
+            || output.fields().is_empty()
+        {
             return Err("Invalid snapshot merger configuration".into());
         }
         let converter = RowConverter::new(
@@ -206,15 +278,43 @@ impl Merger {
                 .collect(),
         )
         .map_err(|e| e.to_string())?;
-        let mut columns: Vec<usize> = (key_count + 2..input.fields().len()).collect();
+        let sequence_converter = if options.sequence_columns.is_empty() {
+            None
+        } else {
+            Some(
+                RowConverter::new(
+                    options
+                        .sequence_columns
+                        .iter()
+                        .map(|&column| {
+                            SortField::new_with_options(
+                                input.field(column).data_type().clone(),
+                                arrow::compute::SortOptions {
+                                    descending: !options.sequence_ascending,
+                                    nulls_first: true,
+                                },
+                            )
+                        })
+                        .collect(),
+                )
+                .map_err(|e| e.to_string())?,
+            )
+        };
+        let mut columns = output.fields()[..output.fields().len() - 1]
+            .iter()
+            .map(|field| {
+                (key_count + 2..input.fields().len())
+                    .find(|&i| input.field(i).name() == field.name())
+                    .ok_or_else(|| format!("Missing snapshot output column {}", field.name()))
+            })
+            .collect::<Result<Vec<_>>>()?;
         columns.push(key_count + 1);
-        if columns.len() != output.fields().len() {
-            return Err("Snapshot output schema does not match input values and kind".into());
-        }
         Ok(Self {
             cursors: (0..runs).map(|_| None).collect(),
             tree: LoserTree::new(runs),
             converter,
+            sequence_converter,
+            options,
             key_count,
             output,
             columns,
@@ -240,13 +340,33 @@ impl Merger {
             if batch.num_rows() == 0 {
                 continue;
             }
+            let key_columns = batch.columns()[..self.key_count]
+                .iter()
+                .map(canonical_ordering_column)
+                .collect::<Vec<_>>();
             let keys = self
                 .converter
-                .convert_columns(&batch.columns()[..self.key_count])
+                .convert_columns(&key_columns)
                 .map_err(|e| e.to_string())?;
+            let sequences = self
+                .sequence_converter
+                .as_mut()
+                .map(|converter| {
+                    let columns = self
+                        .options
+                        .sequence_columns
+                        .iter()
+                        .map(|&i| canonical_ordering_column(batch.column(i)))
+                        .collect::<Vec<_>>();
+                    converter
+                        .convert_columns(&columns)
+                        .map_err(|e| e.to_string())
+                })
+                .transpose()?;
             self.cursors[run] = Some(Cursor {
                 batch: Arc::new(batch),
                 keys,
+                sequences,
                 row: 0,
             });
             break;
@@ -254,19 +374,23 @@ impl Merger {
         Ok(())
     }
 
-    fn retained(
-        &mut self,
-        batches: &[Arc<RecordBatch>],
-        winner: Option<&Arc<RecordBatch>>,
-    ) -> Result<()> {
+    fn retained(&mut self, batches: &[Arc<RecordBatch>], winner: Option<&Winner>) -> Result<()> {
         let mut unique = HashMap::new();
-        for batch in batches.iter().chain(winner) {
+        for batch in batches.iter().chain(winner.map(|w| &w.batch)) {
             unique.insert(Arc::as_ptr(batch), batch.get_array_memory_size());
         }
-        let mut key_bytes = self.converter.size();
+        let mut key_bytes = self.converter.size()
+            + self
+                .sequence_converter
+                .as_ref()
+                .map_or(0, RowConverter::size)
+            + winner
+                .and_then(|w| w.user_sequence.as_ref())
+                .map_or(0, |r| r.row().as_ref().len());
         for c in self.cursors.iter().flatten() {
             unique.insert(Arc::as_ptr(&c.batch), c.batch.get_array_memory_size());
             key_bytes = key_bytes.saturating_add(c.keys.size());
+            key_bytes = key_bytes.saturating_add(c.sequences.as_ref().map_or(0, Rows::size));
         }
         let bytes = unique.values().fold(key_bytes, |n, b| n.saturating_add(*b));
         self.peak_bytes = self.peak_bytes.max(bytes);
@@ -295,7 +419,7 @@ impl Merger {
         let mut output_bytes = 0usize;
         while let Some(cursor) = &self.cursors[self.tree.winner()] {
             let key = cursor.keys.row(cursor.row).owned();
-            let mut best: Option<(Arc<RecordBatch>, usize, i64)> = None;
+            let mut best: Option<Winner> = None;
             loop {
                 let run = self.tree.winner();
                 let Some(cursor) = &mut self.cursors[run] else {
@@ -314,30 +438,39 @@ impl Merger {
                     return Err("Null snapshot sequence".into());
                 }
                 let seq = sequence.value(cursor.row);
-                if best
-                    .as_ref()
-                    .is_none_or(|(_, _, previous)| seq >= *previous)
+                let kind = Self::kind(&cursor.batch, self.key_count, cursor.row)?;
+                let user_sequence = cursor.sequences.as_ref().map(|s| s.row(cursor.row));
+                if !(self.options.ignore_delete && matches!(kind, 1 | 3))
+                    && best.as_ref().is_none_or(|previous| {
+                        let order = user_sequence
+                            .cmp(&previous.user_sequence.as_ref().map(|r| r.row()))
+                            .then(seq.cmp(&previous.sequence));
+                        if self.options.first_row {
+                            order.is_lt()
+                        } else {
+                            order.is_ge()
+                        }
+                    })
                 {
-                    best = Some((cursor.batch.clone(), cursor.row, seq));
+                    best = Some(Winner {
+                        batch: cursor.batch.clone(),
+                        row: cursor.row,
+                        sequence: seq,
+                        user_sequence: user_sequence.map(|r| r.owned()),
+                    });
                 }
                 cursor.row += 1;
                 if cursor.row == cursor.batch.num_rows() {
                     self.refill(run, pull)?;
-                    self.retained(&batches, best.as_ref().map(|(b, _, _)| b))?;
+                    self.retained(&batches, best.as_ref())?;
                 }
                 self.tree
                     .update(|a, b| Self::compare(&self.cursors, a, b).then(a.cmp(&b)).is_gt());
             }
-            let (batch, row, _) = best.expect("nonempty key group");
-            let kinds = batch
-                .column(self.key_count + 1)
-                .as_any()
-                .downcast_ref::<Int8Array>()
-                .ok_or("Snapshot kind column is not Int8")?;
-            if kinds.is_null(row) {
-                return Err("Null snapshot row kind".into());
-            }
-            match kinds.value(row) {
+            let Some(Winner { batch, row, .. }) = best else {
+                continue;
+            };
+            match Self::kind(&batch, self.key_count, row)? {
                 0 | 2 => {
                     let id = *batch_ids.entry(Arc::as_ptr(&batch)).or_insert_with(|| {
                         let id = batches.len();
@@ -370,5 +503,20 @@ impl Merger {
         RecordBatch::try_new(self.output.clone(), columns)
             .map(Some)
             .map_err(|e| e.to_string())
+    }
+
+    fn kind(batch: &RecordBatch, keys: usize, row: usize) -> Result<i8> {
+        let kinds = batch
+            .column(keys + 1)
+            .as_any()
+            .downcast_ref::<Int8Array>()
+            .ok_or("Snapshot kind column is not Int8")?;
+        if kinds.is_null(row) {
+            return Err("Null snapshot row kind".into());
+        }
+        match kinds.value(row) {
+            kind @ 0..=3 => Ok(kind),
+            kind => Err(format!("Invalid Paimon row kind {kind}")),
+        }
     }
 }

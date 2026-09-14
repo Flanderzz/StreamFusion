@@ -25,7 +25,11 @@ public final class NativePaimon {
       int keys,
       int runs,
       int rows,
-      long budget);
+      long budget,
+      int[] sequenceColumns,
+      boolean sequenceAscending,
+      boolean firstRow,
+      boolean ignoreDelete);
 
   public static native boolean snapshotMergerNext(long handle, long array, long schema);
 
