@@ -335,7 +335,8 @@ class FlinkColumnarWindowSqlHarnessTest {
   }
 
   private static TableEnvironment readEnvironment(Path directory, String phaseStrategy) {
-    return readEnvironment(directory, phaseStrategy, "rt - INTERVAL '2' SECOND");
+    // Files can be enumerated in any order; keep all 0..2500 ms rows ahead of the watermark.
+    return readEnvironment(directory, phaseStrategy, "rt - INTERVAL '10' SECOND");
   }
 
   private static TableEnvironment readEnvironment(
@@ -359,7 +360,6 @@ class FlinkColumnarWindowSqlHarnessTest {
   private static void writeOutOfOrderInput(Path directory) throws Exception {
     StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
     env.setParallelism(1);
-    env.enableCheckpointing(100);
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     tEnv.getConfig().setLocalTimeZone(ZoneId.of("UTC"));
     tEnv.executeSql(

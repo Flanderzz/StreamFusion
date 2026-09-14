@@ -9,6 +9,10 @@ type rather than being widened). `FIRST_VALUE`/`LAST_VALUE` and the window funct
 `ROW_NUMBER`/`RANK`/`DENSE_RANK` (no value column, unbounded frame) are admitted alongside the
 aggregates below.
 
+Event-time parity fixtures keep the watermark behind the entire input timestamp range until
+end of input, so file enumeration order cannot introduce accidental late rows. Late-row tests
+control the input order separately.
+
 ## Frame shapes
 
 ### Unbounded `RANGE … CURRENT ROW` (running fold)
