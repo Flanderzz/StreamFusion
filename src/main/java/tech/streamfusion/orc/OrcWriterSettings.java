@@ -5,7 +5,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
-/** Whitelist of released ORC C++ writer options shared by Flink and Paimon. */
+/** Whitelist of verified Java ORC writer options shared by Flink and Paimon. */
 public record OrcWriterSettings(Map<String, String> config, String fallbackReason) {
   public static String timestampFallback(org.apache.flink.table.types.logical.LogicalType type) {
     if (java.util.TimeZone.getDefault().hasSameRules(java.util.TimeZone.getTimeZone("UTC")))
@@ -63,7 +63,8 @@ public record OrcWriterSettings(Map<String, String> config, String fallbackReaso
     try {
       String compression = config.get("compression").toUpperCase(Locale.ROOT);
       if (!Set.of("NONE", "ZLIB", "SNAPPY", "LZ4", "ZSTD").contains(compression))
-        return fallback("ORC compression " + compression + " is not supported by ORC C++");
+        return fallback(
+            "ORC compression " + compression + " has not been verified with the Arrow writer");
       config.put("compression", compression);
       config.put("timezone", java.util.TimeZone.getDefault().getID());
       String legacy = effective.getOrDefault("orc.timestamp-ltz.legacy.type", "false");
@@ -75,11 +76,8 @@ public record OrcWriterSettings(Map<String, String> config, String fallbackReaso
         return fallback("invalid ORC compression strategy");
       if (compression.equals("ZSTD") && effective.containsKey("orc.compression.zstd.level")) {
         int level = Integer.parseInt(effective.get("orc.compression.zstd.level"));
-        if (level != 1 && level != 3) return fallback("ORC C++ supports ZSTD levels 1 and 3");
-        String needed = level == 1 ? "SPEED" : "COMPRESSION";
-        if (requested.containsKey("orc.compression.strategy") && !needed.equals(strategy))
-          return fallback("ORC C++ couples ZSTD compression strategy and level");
-        strategy = needed;
+        if (level < -131072 || level > 22) return fallback("invalid ORC ZSTD level");
+        config.put("compression.zstd.level", Integer.toString(level));
       }
       config.put("compression.strategy", strategy);
       long stripe = Long.parseLong(config.get("stripe.size"));

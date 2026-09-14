@@ -2,10 +2,6 @@ package tech.streamfusion.paimon;
 
 import java.io.IOException;
 import javax.annotation.Nullable;
-import org.apache.arrow.c.ArrowArray;
-import org.apache.arrow.c.ArrowSchema;
-import org.apache.arrow.c.Data;
-import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.format.BundleFormatWriter;
@@ -15,21 +11,19 @@ import org.apache.paimon.fs.PositionOutputStream;
 import org.apache.paimon.io.BundleRecords;
 import org.apache.paimon.types.RowType;
 import tech.streamfusion.format.ColumnarFileCodec;
-import tech.streamfusion.operator.NativeAllocator;
 
 /**
- * A Paimon data-file writer that encodes Arrow bundles natively. The first record decides the file:
- * an {@link ArrowBatchBundle} opens the native encoder over Paimon's output stream and every later
- * bundle is appended to it column-wise, while a plain row hands the whole file to Paimon's stock
- * file writer. Paimon's released append writer feeds a bundle to its format writer one cursor row
- * at a time, so the cursor path recognises each bundle once and encodes it whole; a Paimon that
- * passes the bundle through takes the direct path. Compaction rewrites arrive as plain rows and
- * take the stock path; the native append spill buffer drains Arrow bundles. The footer stays a
- * standard file footer, so Paimon extracts statistics from it exactly as from its own files.
+ * A Paimon data-file writer that encodes Arrow bundles column-wise. The first record decides the
+ * file: an {@link ArrowBatchBundle} opens the columnar encoder over Paimon's output stream and
+ * every later bundle is appended to it column-wise, while a plain row hands the whole file to
+ * Paimon's stock file writer. Paimon's released append writer feeds a bundle to its format writer
+ * one cursor row at a time, so the cursor path recognises each bundle once and encodes it whole; a
+ * Paimon that passes the bundle through takes the direct path. Compaction rewrites arrive as plain
+ * rows and take the stock path; the native append spill buffer drains Arrow bundles. The footer
+ * stays a standard file footer, so Paimon extracts statistics from it exactly as from its own
+ * files.
  */
 public final class NativePaimonFileWriter implements BundleFormatWriter {
-
-  private static final int DRAIN_CHUNK_BYTES = 1 << 20;
 
   private enum Mode {
     UNDECIDED,
@@ -46,7 +40,7 @@ public final class NativePaimonFileWriter implements BundleFormatWriter {
   @Nullable private PaimonParquetFloatingStats floatingStats;
 
   private Mode mode = Mode.UNDECIDED;
-  private long encoder;
+  private ColumnarFileCodec.Encoder encoder;
   private boolean closed;
   @Nullable private FormatWriter stock;
   @Nullable private ArrowBatchBundle lastBundle;
@@ -107,42 +101,22 @@ public final class NativePaimonFileWriter implements BundleFormatWriter {
     if (mode == Mode.UNDECIDED) {
       openEncoder(root);
     }
-    BufferAllocator allocator = allocatorOf(root);
-    try (ArrowArray array = ArrowArray.allocateNew(allocator)) {
-      Data.exportVectorSchemaRoot(allocator, root, NativeAllocator.DICTIONARIES, array);
-      codec.write(
-          encoder, array.memoryAddress(), new int[0], bundle.rowOffset(), (int) bundle.rowCount());
-    }
+    encoder.write(root, new int[0], bundle.rowOffset(), (int) bundle.rowCount());
     if (floatingStats != null)
       floatingStats.collect(root, bundle.rowOffset(), (int) bundle.rowCount());
     lastBundle = bundle;
   }
 
-  private void openEncoder(VectorSchemaRoot root) {
-    BufferAllocator allocator = allocatorOf(root);
-    try (ArrowSchema schema = ArrowSchema.allocateNew(allocator)) {
-      Data.exportSchema(
-          allocator,
-          PaimonArrowFields.annotate(root.getSchema(), writeType),
-          NativeAllocator.DICTIONARIES,
-          schema);
-      encoder =
-          codec.createEncoder(
-              schema.memoryAddress(),
-              new int[0],
-              keys,
-              values,
-              false,
-              out,
-              new byte[DRAIN_CHUNK_BYTES]);
-    }
+  private void openEncoder(VectorSchemaRoot root) throws IOException {
+    encoder =
+        codec.createEncoder(
+            PaimonArrowFields.annotate(root.getSchema(), writeType),
+            new int[0],
+            keys,
+            values,
+            false,
+            out);
     mode = Mode.NATIVE;
-  }
-
-  private static BufferAllocator allocatorOf(VectorSchemaRoot root) {
-    return root.getFieldVectors().isEmpty()
-        ? NativeAllocator.SHARED
-        : root.getFieldVectors().get(0).getAllocator();
   }
 
   private FormatWriter stock() throws IOException {
@@ -160,7 +134,7 @@ public final class NativePaimonFileWriter implements BundleFormatWriter {
   @Override
   public boolean reachTargetSize(boolean suggestedCheck, long targetSize) throws IOException {
     return switch (mode) {
-      case NATIVE -> suggestedCheck && codec.estimatedBytes(encoder) >= targetSize;
+      case NATIVE -> suggestedCheck && encoder.estimatedBytes() >= targetSize;
       case STOCK -> stock.reachTargetSize(suggestedCheck, targetSize);
       case UNDECIDED -> false;
     };
@@ -184,10 +158,10 @@ public final class NativePaimonFileWriter implements BundleFormatWriter {
     switch (mode) {
       case NATIVE -> {
         try {
-          codec.finish(encoder);
+          encoder.finish();
         } finally {
-          codec.closeEncoder(encoder);
-          encoder = 0;
+          encoder.close();
+          encoder = null;
         }
       }
       case STOCK -> stock.close();

@@ -1,25 +1,13 @@
-StreamFusion ORC native module
+StreamFusion ORC module
 
-This distribution statically includes Apache ORC 2.3.1, Apache Arrow nanoarrow 0.8.0,
-Protocol Buffers 3.5.1, Snappy 1.2.2, zlib 1.3.2, Zstandard 1.5.7, and LZ4 1.10.0.
-Their license texts are included under META-INF/licenses. Zstandard is used under
-its BSD license; LZ4 includes only its BSD-licensed library.
+The native reader uses orc-rust 0.9.0 (Apache-2.0) and Apache Arrow Rust 59,
+with Arrow C Data transfer into the runtime's Apache Arrow Rust 58.
 
-Apache ORC
-Copyright 2013 and onwards The Apache Software Foundation.
-
-This product includes software developed by The Apache Software
-Foundation (http://www.apache.org/).
-
-This product includes software developed by Hewlett-Packard:
-(c) Copyright [2014-2015] Hewlett-Packard Development Company, L.P
-
-
-Apache Arrow nanoarrow
-Copyright 2023 The Apache Software Foundation
+Apache Arrow
+Copyright 2016 and onwards The Apache Software Foundation.
 
 This product includes software developed at
 The Apache Software Foundation (http://www.apache.org/).
 
-The Rust reader uses orc-rust 0.9.0 (Apache-2.0) and Apache Arrow Rust 59,
-with Arrow C Data transfer into the runtime's Arrow Rust 58.
+Writing uses the Apache ORC Java libraries provided by Flink or Paimon.
+Those host libraries are not bundled in this artifact.

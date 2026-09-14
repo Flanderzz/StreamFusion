@@ -46,7 +46,7 @@ import tech.streamfusion.orc.NativeOrc;
 @EnabledIfEnvironmentVariable(named = "SF_ORC_WRITER_COMPARISON", matches = "true")
 class OrcWriterComparisonBenchmark {
   private static final int BATCH_ROWS = integer("SF_ORC_WRITER_BATCH_ROWS", 4096);
-  private static final String[] BACKENDS = {"cpp", "java_vectors", "stock_oracle"};
+  private static final String[] BACKENDS = {"java_arrow", "java_vectors", "stock_oracle"};
   private static final String STRATEGY =
       OrcFile.CompressionStrategy.valueOf(
               System.getenv().getOrDefault("SF_ORC_WRITER_STRATEGY", "SPEED"))
@@ -118,30 +118,34 @@ class OrcWriterComparisonBenchmark {
 
   private long write(Fixture fixture, String compression, int backend) throws Exception {
     long start = System.nanoTime();
+    long handoff = 0, conversion = 0, encoding = 0;
+    boolean profile = Boolean.parseBoolean(System.getenv("SF_ORC_WRITER_PROFILE"));
     var io = LocalFileIO.create();
     try (var out = io.newOutputStream(output(backend), true)) {
       if (backend == 0) {
         Map<String, String> options = new LinkedHashMap<>(SETTINGS);
         options.put("compression", compression);
-        long encoder;
-        try (var schema = ArrowSchema.allocateNew(NativeAllocator.SHARED)) {
-          Data.exportSchema(
-              NativeAllocator.SHARED, fixture.arrow, NativeAllocator.DICTIONARIES, schema);
-          encoder =
-              NativeOrc.createOrcEncoder(
-                  schema.memoryAddress(),
-                  fixture.orc.toString(),
-                  new int[0],
-                  options.keySet().toArray(String[]::new),
-                  options.values().toArray(String[]::new),
-                  out,
-                  new byte[1 << 20]);
-        }
-        try {
-          for (long batch : fixture.batches) NativeOrc.writeWriterComparisonBatch(batch, encoder);
-          NativeOrc.orcEncoderFinish(encoder);
-        } finally {
-          NativeOrc.closeOrcEncoder(encoder);
+        var codec =
+            new tech.streamfusion.orc.OrcCodec(
+                fixture.orc.toString(), false, new PaimonOrcWriter());
+        try (var encoder =
+                codec.createEncoder(
+                    fixture.arrow,
+                    new int[0],
+                    options.keySet().toArray(String[]::new),
+                    options.values().toArray(String[]::new),
+                    false,
+                    out);
+            var array = ArrowArray.allocateNew(NativeAllocator.SHARED)) {
+          for (long batch : fixture.batches) {
+            NativeOrc.exportWriterComparisonBatch(batch, array.memoryAddress());
+            try {
+              encoder.write(array.memoryAddress(), new int[0], 0, -1);
+            } finally {
+              if (array.snapshot().release != 0) array.release();
+            }
+          }
+          encoder.finish();
         }
       } else {
         var properties = new Properties();
@@ -173,6 +177,7 @@ class OrcWriterComparisonBenchmark {
             try (var root = VectorSchemaRoot.create(fixture.arrow, NativeAllocator.SHARED);
                 var array = ArrowArray.allocateNew(NativeAllocator.SHARED)) {
               for (long nativeBatch : fixture.batches) {
+                long stage = profile ? System.nanoTime() : 0;
                 NativeOrc.exportWriterComparisonBatch(nativeBatch, array.memoryAddress());
                 try {
                   Data.importIntoVectorSchemaRoot(
@@ -180,8 +185,17 @@ class OrcWriterComparisonBenchmark {
                       ArrowArray.wrap(array.memoryAddress()),
                       root,
                       NativeAllocator.DICTIONARIES);
+                  if (profile) {
+                    handoff += System.nanoTime() - stage;
+                    stage = System.nanoTime();
+                  }
                   converter.copy(root, batch);
+                  if (profile) {
+                    conversion += System.nanoTime() - stage;
+                    stage = System.nanoTime();
+                  }
                   writer.addRowBatch(batch);
+                  if (profile) encoding += System.nanoTime() - stage;
                 } finally {
                   if (array.snapshot().release != 0) array.release();
                 }
@@ -201,7 +215,18 @@ class OrcWriterComparisonBenchmark {
         }
       }
     }
-    return System.nanoTime() - start;
+    long elapsed = System.nanoTime() - start;
+    if (profile && backend == 1)
+      System.out.printf(
+          "JAVA_STAGES,%d,%s,%.3f,%.3f,%.3f,%.3f,%.3f%n",
+          fixture.type.getFieldCount(),
+          compression,
+          handoff / 1e6,
+          conversion / 1e6,
+          encoding / 1e6,
+          (elapsed - handoff - conversion - encoding) / 1e6,
+          elapsed / 1e6);
+    return elapsed;
   }
 
   private byte[] fingerprint(Fixture fixture, String compression, int backend) throws Exception {

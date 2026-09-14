@@ -19,6 +19,13 @@ class NativePaimonOrcTest {
   static java.util.stream.Stream<Map<String, String>> writerOptions() {
     return java.util.stream.Stream.of(
         Map.of(
+            "orc.compress",
+            "ZSTD",
+            "orc.compression.zstd.level",
+            "9",
+            "orc.compression.strategy",
+            "SPEED"),
+        Map.of(
             "orc.row.index.stride",
             "1000",
             "orc.compress.size",

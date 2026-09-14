@@ -121,20 +121,11 @@ bin/build-release.sh
 
 The release build enables `mimalloc` by default.
 
-The ORC module builds Apache ORC 2.3.1 and nanoarrow 0.8.0 statically through Cargo's CMake
-build step, invoked by the same Maven lifecycle. It downloads canonical, checksum-pinned release
-archives; no local ORC checkout or shared ORC/Arrow C++ installation is required. A C++17 toolchain,
-make, Python 3 with venv/pip, and normal platform development headers are required. It uses CMake
-3.25 or newer when available, otherwise bootstraps the pinned CMake 3.31.10 binary wheel into the
-Cargo target directory. macOS uses the Xcode command-line tools; Linux release containers include
-the C++ toolchain. Codec dependencies are static; only platform libraries remain dynamic.
-The pinned zlib archive is fetched from its official GitHub release, with zlib.net as a fallback;
-both locations must match the same published SHA-256. This avoids depending on a single download
-endpoint when fresh builds run concurrently in CI.
-The same build works for the supported macOS Apple Silicon and Linux x86_64 release targets;
-local Intel macOS cross-builds and Linux ARM64 builds use their corresponding toolchains.
-Build caches stay under the Cargo target/profile directory. Third-party license texts travel in
-`streamfusion-orc` under `META-INF/licenses`.
+The ORC module builds its released `orc-rust` reader through the normal Cargo/Maven lifecycle
+on macOS and Linux. Writing uses the Java ORC library supplied by Flink or Paimon, with a shared
+Arrow-to-Hive-vector converter. The ORC C++ adapter, CMake bootstrap and bundled C++ codec archives
+have been removed; no ORC/Arrow C++ installation is needed. Other modules retain their normal
+native build requirements. See [ORC](connectors/orc.md) for deployment and configuration details.
 
 ### Native workspace
 
@@ -145,7 +136,7 @@ Build caches stay under the Cargo target/profile directory. Third-party license 
 | `native/format-support` | Shared decoder lifecycle, parse-error isolation, key/value composition, CDC gathering, and format facade macros. No engine or third-party format implementation. |
 | `native/kafka` | Kafka-specific JNI entry points, source implementation and existing sink encoders. |
 | `native/parquet` | Parquet format encoding and decoding, including reads through host FileIO. |
-| `native/orc` | orc-rust decoding and Apache ORC C++ encoding, with host-owned I/O and Arrow C Data. |
+| `native/orc` | orc-rust decoding, with host-owned I/O and Arrow C Data. Java ORC writing lives in the format/connector JARs. |
 | `native/paimon` | Optional Paimon snapshot merge, bundled in `streamfusion-paimon`; consumes the selected file codec's Arrow C Data output. |
 | `native/json`, `native/csv`, `native/raw`, `native/avro`, `native/protobuf` | One decoder library per format JAR. Avro and Avro-Confluent-Registry continue to share the Avro native library. |
 | `native/native-build` | Shared build dependency for library-local mimalloc aliases and the checked free/realloc shim. |

@@ -60,13 +60,10 @@ final class OrcSinkTranslator {
       org.apache.orc.CompressionKind.valueOf(
           effective.get("orc.compress").toUpperCase(java.util.Locale.ROOT));
       String columns = effective.getOrDefault("orc.bloom.filter.columns", "");
-      String ids =
-          columns.isEmpty()
-              ? ""
-              : java.util.Arrays.stream(columns.split(","))
-                  .map(name -> Long.toString(schema.findSubtype(name.trim()).getId()))
-                  .collect(java.util.stream.Collectors.joining(","));
-      return OrcWriterSettings.translate(effective, requested, defaults, ids);
+      if (!columns.isEmpty())
+        java.util.Arrays.stream(columns.split(","))
+            .forEach(name -> schema.findSubtype(name.trim()));
+      return OrcWriterSettings.translate(effective, requested, defaults, columns);
     } catch (RuntimeException unsupported) {
       return OrcWriterSettings.fallback(unsupported.toString());
     }

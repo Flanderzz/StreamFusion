@@ -210,7 +210,7 @@ It verifies row counts and checksums across all three paths. One warmup and thre
 rotate execution order and report each path's best time. `speedup` compares native with Java rows;
 `arrow_speedup` compares native with Java-to-Arrow. Both Arrow endpoints in this older diagnostic
 are **Java Arrow**, including a native-to-Java import; they do not directly measure feeding our Rust
-operators. The [ORC reader comparison](orc.md#reading-into-arrow-rs) instead ends all four paths at
+operators. The [ORC reader comparison](orc.md#reading-into-arrow-rs) ends the production Rust reader and Java baseline at
 an arrow-rs `RecordBatch` consumed in Rust.
 This is a local file-reader diagnostic, not an end-to-end Flink or remote-storage benchmark.
 
@@ -245,7 +245,7 @@ layout and Murmur hash are Flink's, so the native key encoder already produces b
 routed batches are shuffled while still Arrow with Paimon's own channel formula. Each batch then
 enters Paimon's bundle write entry point for its bucket and reaches a StreamFusion
 `FileFormatFactory` registered under the selected `parquet` or `orc` identifier, whose writer encodes the whole batch
-with parquet-rs or Apache ORC C++ over Paimon's output stream. Paimon reads statistics
+with parquet-rs or Paimon's Java vectorized ORC writer over Paimon's output stream. Paimon reads statistics
 from the resulting footer. Native Parquet writers additionally collect top-level floating-point
 bounds with Paimon's collector and pass them through its writer-metadata API: parquet-rs excludes
 NaN from footer bounds, whereas Paimon's manifest bounds include it. No Java rows are materialized

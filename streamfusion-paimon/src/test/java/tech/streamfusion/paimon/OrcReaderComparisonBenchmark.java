@@ -42,7 +42,7 @@ import tech.streamfusion.orc.NativeOrc;
 /** File open through consumption in arrow-rs; never imports native batches into Java. */
 @EnabledIfEnvironmentVariable(named = "SF_ORC_READER_COMPARISON", matches = "true")
 class OrcReaderComparisonBenchmark {
-  private static final String[] BACKENDS = {"nanoarrow", "arrow_cpp", "orc_rust", "java"};
+  private static final String[] BACKENDS = {"orc_rust", "java"};
   private static final int BATCH_ROWS = 4096;
   @TempDir java.nio.file.Path directory;
 
@@ -94,36 +94,15 @@ class OrcReaderComparisonBenchmark {
     }
     var read = table.newReadBuilder();
     var fixture = new Fixture(table, read, read.newStreamScan().plan().splits(), false);
-    var expected = scan(fixture, 3, true);
-    var paddedChars = new Stats();
-    if (valueType instanceof org.apache.paimon.types.CharType charType) {
-      // Both released alternatives expose ORC's padded CHAR bytes. Paimon Java strips padding.
-      // Assert the exact known difference, rather than accepting any mismatch from these readers.
-      List<RowData> padded = new ArrayList<>();
-      padded.add(org.apache.flink.table.data.GenericRowData.of(0, null));
-      for (int i = 0; i < values.size(); i++) {
-        String text = values.get(i).toString();
-        text += " ".repeat(charType.getLength() - text.codePointCount(0, text.length()));
-        padded.add(
-            org.apache.flink.table.data.GenericRowData.of(
-                i + 1, org.apache.flink.table.data.StringData.fromString(text)));
-      }
-      consumeJava(padded, LogicalTypeConversion.toLogicalType(type), false, true, paddedChars);
-      assertNotEquals(expected.digest, paddedChars.digest);
-    }
+    var expected = scan(fixture, 1, true);
     List<org.junit.jupiter.api.function.Executable> checks = new ArrayList<>();
-    for (int backend = 0; backend < 3; backend++) {
+    for (int backend = 0; backend < 1; backend++) {
       int candidate = backend;
       checks.add(
           () -> {
             var actual = scan(fixture, candidate, true);
             assertEquals(expected.rows, actual.rows);
-            boolean padded =
-                candidate != 0 && valueType instanceof org.apache.paimon.types.CharType;
-            assertEquals(
-                padded ? paddedChars.digest : expected.digest,
-                actual.digest,
-                BACKENDS[candidate] + " " + valueType);
+            assertEquals(expected.digest, actual.digest, BACKENDS[candidate] + " " + valueType);
           });
     }
     assertAll(checks);
@@ -178,8 +157,8 @@ class OrcReaderComparisonBenchmark {
     for (String compression : List.of("none", "zlib", "snappy", "lz4", "zstd")) {
       for (boolean pk : new boolean[] {false, true}) {
         var fixture = fixture(257, pk, true, compression);
-        var expected = scan(fixture, 3, true);
-        for (int backend = 0; backend < 3; backend++) {
+        var expected = scan(fixture, 1, true);
+        for (int backend = 0; backend < 1; backend++) {
           var actual = scan(fixture, backend, true);
           assertEquals(expected.rows, actual.rows, BACKENDS[backend]);
           assertEquals(expected.checksum, actual.checksum, BACKENDS[backend]);
@@ -202,19 +181,19 @@ class OrcReaderComparisonBenchmark {
         var fixture =
             fixture(rows, shape.startsWith("changelog"), shape.endsWith("full"), compression);
         // Full-value fingerprints are deliberately outside the measured scans.
-        var expected = scan(fixture, 3, true);
+        var expected = scan(fixture, 1, true);
         assertEquals(rows, expected.rows);
-        for (int backend = 0; backend < 3; backend++) {
+        for (int backend = 0; backend < 1; backend++) {
           var actual = scan(fixture, backend, true);
           assertEquals(expected.digest, actual.digest, BACKENDS[backend] + " " + shape);
           assertEquals(rows, actual.rows);
         }
-        double[][] seconds = new double[4][trials];
-        long[] peakBatch = new long[4];
-        long[] bytesRead = new long[4];
+        double[][] seconds = new double[2][trials];
+        long[] peakBatch = new long[2];
+        long[] bytesRead = new long[2];
         for (int run = 0; run < trials + 2; run++) {
-          for (int offset = 0; offset < 4; offset++) {
-            int backend = (run + offset) % 4;
+          for (int offset = 0; offset < 2; offset++) {
+            int backend = (run + offset) % 2;
             long start = System.nanoTime();
             var actual = scan(fixture, backend, false);
             double elapsed = (System.nanoTime() - start) / 1e9;
@@ -225,7 +204,7 @@ class OrcReaderComparisonBenchmark {
             bytesRead[backend] = actual.bytesRead;
           }
         }
-        for (int backend = 0; backend < 4; backend++) {
+        for (int backend = 0; backend < 2; backend++) {
           Arrays.sort(seconds[backend]);
           System.out.printf(
               "ORC_TO_ARROW_RS shape=%s codec=%s rows=%d backend=%s median_s=%.6f"
@@ -258,7 +237,7 @@ class OrcReaderComparisonBenchmark {
   private static Stats scan(Fixture fixture, int backend, boolean verify) throws Exception {
     Stats stats = new Stats();
     RowType type = LogicalTypeConversion.toLogicalType(fixture.read.readType());
-    if (backend == 3) {
+    if (backend == 1) {
       stats.bytesRead = -1;
       var copy = new RowDataSerializer(type);
       List<RowData> pending = new ArrayList<>(BATCH_ROWS);
@@ -301,7 +280,6 @@ class OrcReaderComparisonBenchmark {
               NativeAllocator.SHARED, new Schema(fields), NativeAllocator.DICTIONARIES, schema);
           stats.add(
               NativeOrc.compareReaders(
-                  backend,
                   input,
                   file.fileSize(),
                   schema.memoryAddress(),

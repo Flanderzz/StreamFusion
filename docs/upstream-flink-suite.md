@@ -28,7 +28,7 @@ tests and compiles the Confluent Avro module (the pinned release contains no int
 that module). `parquet` runs Flink's unchanged `ParquetFsStreamingSinkITCase` and
 `ParquetTimestampITCase`, and fails unless the suite proves that a native Parquet writer was
 created. `orc` runs `OrcFsStreamingSinkITCase` and `OrcFileSystemITCase` and requires a successful
-native ORC writer marker. The harness runs timestamp tests with a UTC JVM. `kafka` covers `DynamicKafkaTableITCase`, `KafkaChangelogTableITCase`,
+columnar ORC writer marker (the writer now uses the host's Java ORC vectors). The harness runs timestamp tests with a UTC JVM. `kafka` covers `DynamicKafkaTableITCase`, `KafkaChangelogTableITCase`,
 `KafkaTableITCase`, and `UpsertKafkaTableITCase` from the pinned Kafka connector release. The Kafka
 suite starts broker containers and therefore requires a working Docker daemon. `paimon` runs the
 Paimon Flink connector's `AppendOnlyTableITCase`, `AppendTableITCase`, `BatchFileStoreITCase`,
@@ -141,3 +141,7 @@ The format baseline is 185 tests: 175 passed and 10 skipped by Flink. The Kafka 
 tests, all passed. The Parquet sink baseline is 8 tests, all passed, including the suite's explicit
 proof that Flink instantiated the native Parquet writer. The Paimon append-table baseline is 200
 tests, all passed, including the proof that a streaming insert wrote a native Paimon bundle.
+The ORC Java-writer validation on September 14, 2026 passed all 46 unchanged Flink ORC SQL tests.
+A targeted upstream Paimon run passed 22 continuous-read, partition-write and schema-change cases;
+the [ORC page](connectors/orc.md#build-and-verification) distinguishes that run from local tests
+that explicitly exercise ORC streaming.

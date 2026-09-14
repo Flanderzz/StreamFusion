@@ -41,24 +41,6 @@ pub extern "system" fn Java_tech_streamfusion_orc_NativeOrc_exportWriterComparis
 }
 
 #[no_mangle]
-pub extern "system" fn Java_tech_streamfusion_orc_NativeOrc_writeWriterComparisonBatch(
-    env: JNIEnv,
-    _class: JClass,
-    handle: jlong,
-    encoder: jlong,
-) {
-    bridge::jni_guard(env, |_| {
-        let batch = unsafe { &*(handle as *const RecordBatch) };
-        let writer = unsafe { &mut *(encoder as *mut Encoder) };
-        assert_eq!(batch.schema(), writer.input);
-        assert_eq!(writer.projection.len(), batch.num_columns());
-        let data = StructArray::from(batch.clone()).to_data();
-        let array = FFI_ArrowArray::new(&data);
-        check(unsafe { sf_orc_writer_write(writer.native.as_ptr(), &array) });
-    })
-}
-
-#[no_mangle]
 pub extern "system" fn Java_tech_streamfusion_orc_NativeOrc_closeWriterComparisonBatch(
     env: JNIEnv,
     _class: JClass,

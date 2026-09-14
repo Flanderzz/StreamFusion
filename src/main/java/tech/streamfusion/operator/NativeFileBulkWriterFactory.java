@@ -2,10 +2,6 @@ package tech.streamfusion.operator;
 
 import java.io.IOException;
 import java.lang.ref.Cleaner;
-import org.apache.arrow.c.ArrowArray;
-import org.apache.arrow.c.ArrowSchema;
-import org.apache.arrow.c.Data;
-import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.flink.api.common.serialization.BulkWriter;
 import org.apache.flink.core.fs.FSDataOutputStream;
@@ -21,8 +17,6 @@ import tech.streamfusion.format.ColumnarFileCodec;
  * array.
  */
 public class NativeFileBulkWriterFactory implements BulkWriter.Factory<PartitionedArrowBatch> {
-
-  private static final int DRAIN_CHUNK_BYTES = 1 << 20;
 
   private final ColumnarFileCodec codec;
   private final RowType rowType;
@@ -56,54 +50,39 @@ public class NativeFileBulkWriterFactory implements BulkWriter.Factory<Partition
   }
 
   @Override
-  public BulkWriter<PartitionedArrowBatch> create(FSDataOutputStream out) {
-    BufferAllocator allocator = NativeAllocator.SHARED;
-    byte[] chunk = new byte[DRAIN_CHUNK_BYTES];
-    long encoder;
-    try (ArrowSchema schema = ArrowSchema.allocateNew(allocator)) {
-      Data.exportSchema(
-          allocator, ArrowConversion.toArrowSchema(rowType), NativeAllocator.DICTIONARIES, schema);
-      encoder =
-          codec.createEncoder(
-              schema.memoryAddress(),
-              partitionColumns,
-              configKeys,
-              configValues,
-              changelog,
-              out,
-              chunk);
-    }
-    return new NativeFileBulkWriter(codec, encoder);
+  public BulkWriter<PartitionedArrowBatch> create(FSDataOutputStream out) throws IOException {
+    ColumnarFileCodec.Encoder encoder =
+        codec.createEncoder(
+            ArrowConversion.toArrowSchema(rowType),
+            partitionColumns,
+            configKeys,
+            configValues,
+            changelog,
+            out);
+    return new NativeFileBulkWriter(encoder);
   }
 
   private static final class NativeFileBulkWriter implements BulkWriter<PartitionedArrowBatch> {
 
     private static final Cleaner ABANDONED = Cleaner.create();
 
-    private final ColumnarFileCodec codec;
-    private final long encoder;
+    private final ColumnarFileCodec.Encoder encoder;
     private final Backstop backstop;
     private final Cleaner.Cleanable cleanable;
 
-    private NativeFileBulkWriter(ColumnarFileCodec codec, long encoder) {
-      this.codec = codec;
+    private NativeFileBulkWriter(ColumnarFileCodec.Encoder encoder) {
       this.encoder = encoder;
       // Flink disposes an in-progress part file by closing only its stream — the bulk writer is
-      // dropped without finish() — so a backstop frees the native encoder when that happens.
-      this.backstop = new Backstop(codec, encoder);
+      // dropped without finish() — so a backstop releases the encoder when that happens.
+      this.backstop = new Backstop(encoder);
       cleanable = ABANDONED.register(this, backstop);
     }
 
     @Override
     public void addElement(PartitionedArrowBatch element) throws IOException {
       VectorSchemaRoot batch = element.root();
-      BufferAllocator batchAllocator =
-          batch.getFieldVectors().isEmpty()
-              ? NativeAllocator.SHARED
-              : batch.getFieldVectors().get(0).getAllocator();
-      try (ArrowArray array = ArrowArray.allocateNew(batchAllocator)) {
-        Data.exportVectorSchemaRoot(batchAllocator, batch, NativeAllocator.DICTIONARIES, array);
-        codec.write(encoder, array.memoryAddress(), new int[0], 0, -1);
+      try {
+        encoder.write(batch, new int[0], 0, -1);
       } finally {
         batch.close();
       }
@@ -119,7 +98,7 @@ public class NativeFileBulkWriterFactory implements BulkWriter.Factory<Partition
     public void finish() throws IOException {
       if (backstop.released) return;
       try {
-        codec.finish(encoder);
+        encoder.finish();
       } finally {
         cleanable.clean();
       }
@@ -128,12 +107,10 @@ public class NativeFileBulkWriterFactory implements BulkWriter.Factory<Partition
     /** Frees the encoder of a part file disposed without finish; must not reference its writer. */
     private static final class Backstop implements Runnable {
 
-      private final ColumnarFileCodec codec;
-      private final long encoder;
+      private final ColumnarFileCodec.Encoder encoder;
       private volatile boolean released;
 
-      private Backstop(ColumnarFileCodec codec, long encoder) {
-        this.codec = codec;
+      private Backstop(ColumnarFileCodec.Encoder encoder) {
         this.encoder = encoder;
       }
 
@@ -141,7 +118,7 @@ public class NativeFileBulkWriterFactory implements BulkWriter.Factory<Partition
       public void run() {
         if (!released) {
           released = true;
-          codec.closeEncoder(encoder);
+          encoder.close();
         }
       }
     }

@@ -19,7 +19,10 @@ import org.apache.paimon.types.RowType;
 import tech.streamfusion.orc.OrcCodec;
 import tech.streamfusion.orc.OrcWriterSettings;
 
-/** ORC encoding is native; Paimon retains schema validation, row writers and footer statistics. */
+/**
+ * ORC encoding consumes Arrow columns; Paimon retains schema validation, row writers and footer
+ * statistics.
+ */
 public final class NativePaimonOrcFormat extends FileFormat
     implements SupportsFieldMetadata, NativePaimonFileFormat {
   private final OrcFileFormat delegate;
@@ -52,13 +55,9 @@ public final class NativePaimonOrcFormat extends FileFormat
     effective.put("orc.timestamp-ltz.legacy.type", Boolean.toString(legacyTimestamp));
     String columns = effective.getOrDefault("orc.bloom.filter.columns", "");
     TypeDescription schema = schema(type);
-    String ids =
-        columns.isEmpty()
-            ? ""
-            : java.util.Arrays.stream(columns.split(","))
-                .map(name -> Integer.toString(schema.findSubtype(name.trim()).getId()))
-                .collect(java.util.stream.Collectors.joining(","));
-    return OrcWriterSettings.translate(effective, requested, defaults, ids);
+    if (!columns.isEmpty())
+      java.util.Arrays.stream(columns.split(",")).forEach(name -> schema.findSubtype(name.trim()));
+    return OrcWriterSettings.translate(effective, requested, defaults, columns);
   }
 
   public String nativeWriterFallbackReason(RowType type) {
@@ -91,7 +90,7 @@ public final class NativePaimonOrcFormat extends FileFormat
       if (settings.fallbackReason() != null) return stock.create(out, compression);
       return new NativePaimonFileWriter(
           type,
-          new OrcCodec(description, legacyTimestamp),
+          new OrcCodec(description, legacyTimestamp, new PaimonOrcWriter()),
           settings.keys(),
           settings.values(),
           out,

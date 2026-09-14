@@ -2,7 +2,7 @@ package tech.streamfusion.orc;
 
 import tech.streamfusion.NativeExtensionLoader;
 
-/** JNI entry points for optional native Orc encoding and decoding. */
+/** JNI entry points for optional Rust ORC decoding. */
 public final class NativeOrc {
 
   static {
@@ -37,27 +37,8 @@ public final class NativeOrc {
 
   public static native long orcDecoderMaxStripeBytes(long handle);
 
-  public static native long createOrcEncoder(
-      long schemaAddress,
-      String orcSchema,
-      int[] partitionColumns,
-      String[] configKeys,
-      String[] configValues,
-      Object output,
-      byte[] chunk);
-
-  public static native void orcEncoderWrite(
-      long handle, long inArrayAddress, int[] selectedRows, int rowOffset, int rowCount);
-
-  public static native long orcEncoderEstimatedBytes(long handle);
-
-  public static native void orcEncoderFinish(long handle);
-
-  public static native void closeOrcEncoder(long handle);
-
   /** Benchmark-only entry points; require the opt-in reader-comparison native feature. */
   public static native long[] compareReaders(
-      int backend,
       Object input,
       long length,
       long schemaAddress,
@@ -72,8 +53,6 @@ public final class NativeOrc {
   public static native long importWriterComparisonBatch(long arrayAddress, long schemaAddress);
 
   public static native void exportWriterComparisonBatch(long batch, long arrayAddress);
-
-  public static native void writeWriterComparisonBatch(long batch, long encoder);
 
   public static native void closeWriterComparisonBatch(long batch);
 }

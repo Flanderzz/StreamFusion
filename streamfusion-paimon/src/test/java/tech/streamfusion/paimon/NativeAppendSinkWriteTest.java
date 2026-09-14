@@ -152,7 +152,15 @@ class NativeAppendSinkWriteTest {
                       new Path(data.bucketPath(), file.fileName()).toUri()),
                   org.apache.paimon.shade.org.apache.orc.OrcFile.readerOptions(
                       new org.apache.hadoop.conf.Configuration()))) {
-            assertEquals(1, reader.getFileTail().getFooter().getWriter(), "ORC C++ writer ID");
+            assertTrue(
+                reader.hasMetadataValue(
+                    tech.streamfusion.orc.OrcVectorWriter.ARROW_WRITER_METADATA),
+                "Every append file must have consumed Arrow columns");
+            assertEquals(
+                (byte) 1,
+                reader
+                    .getMetadataValue(tech.streamfusion.orc.OrcVectorWriter.ARROW_WRITER_METADATA)
+                    .get());
             count++;
           }
           continue;

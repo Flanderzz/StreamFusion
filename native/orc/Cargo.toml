@@ -23,7 +23,6 @@ optional = true
 
 [build-dependencies]
 streamfusion-native-build = { path = "../native-build" }
-cmake = "0.1"
 
 [features]
 default = []

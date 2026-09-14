@@ -57,7 +57,7 @@ class OrcSinkTranslatorTest {
     assertNull(settings.fallbackReason());
     assertEquals("SNAPPY", settings.config().get("compression"));
     assertEquals("10000", settings.config().get("row.index.stride"));
-    assertEquals("1", settings.config().get("bloom.filter.columns"));
+    assertEquals("f0", settings.config().get("bloom.filter.columns"));
   }
 
   @ParameterizedTest
@@ -81,7 +81,7 @@ class OrcSinkTranslatorTest {
   }
 
   @Test
-  void zstdLevelsOutsideReleasedCppApiFallBack() {
+  void filesystemZstdRemainsOutsideTheReleasedReader() {
     var options = options();
     options.putAll(Map.of("orc.compress", "ZSTD", "orc.compression.zstd.level", "9"));
     assertNotNull(OrcSinkTranslator.translate(options, TYPE, List.of()).fallbackReason());

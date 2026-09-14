@@ -16,7 +16,7 @@ import org.apache.paimon.types.RowType;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
-/** UTC timestamp parity and planning fallback where C++ and Java timezone rules differ. */
+/** UTC timestamp parity and planning fallback outside verified Arrow timestamp conversions. */
 class OrcTimestampParityTest {
   @ParameterizedTest
   @CsvSource({

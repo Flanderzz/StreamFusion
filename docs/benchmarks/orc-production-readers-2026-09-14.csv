@@ -1,0 +1,13 @@
+shape,codec,rows,backend,median_s,min_s,peak_batch_bytes,io_bytes
+append_projected,none,262144,orc_rust,0.017867,0.017005,241920,6797889
+append_projected,none,262144,java,0.114101,0.112239,241920,-1
+append_full,none,262144,orc_rust,0.057756,0.056693,807087,15545669
+append_full,none,262144,java,0.359697,0.358467,807087,-1
+changelog_projected,none,262144,orc_rust,0.010448,0.010128,140849,2839005
+changelog_projected,none,262144,java,0.121958,0.118914,140849,-1
+append_projected,zstd,262144,orc_rust,0.021785,0.021307,241920,2255042
+append_projected,zstd,262144,java,0.120315,0.118805,241920,-1
+append_full,zstd,262144,orc_rust,0.065815,0.065326,807087,3650918
+append_full,zstd,262144,java,0.381976,0.378173,807087,-1
+changelog_projected,zstd,262144,orc_rust,0.012658,0.012478,140849,1371287
+changelog_projected,zstd,262144,java,0.125431,0.122394,140849,-1

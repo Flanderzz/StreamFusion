@@ -1,41 +1,60 @@
 # ORC
 
-**Status:** experimental, partial. The optional `streamfusion-orc` module supplies native ORC
-encoding for streaming filesystem sinks and native decoding/encoding for [Paimon](paimon.md).
+**Status:** experimental, partial. The optional `streamfusion-orc` module supplies columnar ORC
+writing for streaming filesystem and Paimon sinks, and native decoding for Paimon streaming sources.
 Batch jobs retain the stock connector.
 
 ## Architecture
 
-Flink/Paimon keep file discovery, filesystem plugins, credentials, partition and bucket routing
-rules, commits, checkpoints, compaction and statistics extraction. Production reads use released
+Flink/Paimon keep file discovery, filesystem plugins, credentials, partition and bucket routing,
+commits, checkpoints, compaction and statistics extraction. Production reads use released
 `orc-rust` 0.9.0. Its Arrow 59 output crosses the standard C Data ABI into our Arrow 58 operators
 without copying buffers. Projection order and logical types are restored, and CHAR values are
-trimmed recursively in arrays, maps and rows to match Java. Apache ORC C++ still writes ORC
-vectors through the nanoarrow adapter. Java owns the seekable input and recoverable output
-streams, with bounded JNI transfers. ORC, Parquet and the engine remain separate native libraries.
+trimmed recursively in arrays, maps and rows to match Java.
+
+Writing uses each host's released Java vectorized writer: Flink's ORC 1.5.6 or Paimon 2.0.0's
+shaded ORC 1.9.8. Paimon relocates ORC and Hive classes into its own namespace, so both versions
+can coexist. Two small host factories supply the writer, physical output and Hive vectors; a
+shared converter accesses their public vector APIs and copies columns directly from Arrow.
+Primitive loops use plain Java arrays, strings/binary share a reusable heap payload buffer per
+column, and nested children are converted as whole spans. No intermediate rows, strings or
+BigDecimals are constructed. See [Arrow-to-ORC vectors](../optimizations/arrow-orc-vectors.md).
+
+The shared file codec owns an encoder object. Java ORC consumes an existing Arrow root directly;
+Parquet exports it through C Data to its Rust encoder. C Data inputs to ORC are imported into a
+reused Java Arrow root and released after each synchronous write. Paimon field IDs, projected
+partition columns, batch slices and selected rows are preserved. The file footer records
+`streamfusion.arrow.writer` after an Arrow batch is successfully written.
+
+Java owns the seekable input and recoverable output streams. Finishing closes ORC's footer and
+codec resources but leaves the host stream open. Abandoning a writer discards finalization bytes
+while releasing ORC resources. Java ORC buffers and conversion arrays use Java heap memory;
+Paimon's file-size estimate includes ORC's buffered estimate and conversion storage. This does
+not reserve those bytes from Flink managed memory. ORC, Parquet and the engine remain separate
+native libraries. There is no ORC C++ source, adapter, CMake step or Arrow C++ dependency.
 
 Filesystem source scans stay on stock Flink, as with Parquet. Paimon streaming sources use native
 Arrow decoding for append files and changelog files, and the existing native merger for admitted
-primary-key snapshots. The same Java split planning, row-kind handling, projection, restore offsets
-and fallback rules apply to both formats. ORC footers are inspected before a split emits data.
-LZO files, timestamp files written in an unverified timezone, encrypted files, and files without enough payload or collection-count statistics to estimate
-decoder memory retain Java reading. Rust checks all stripe footers before emitting data.
-Snapshot admission accounts for retained compressed streams, decompression scratch space and
+primary-key snapshots. Java retains split planning, row-kind handling, projection and restore
+offsets. ORC footers are inspected before a split emits data. LZO files, timestamp files written
+in an unverified timezone, encrypted files, and files without enough payload or collection-count
+statistics to estimate decoder memory retain Java reading.
+
+Snapshot admission accounts for retained compressed streams, decompression scratch and
 conservative whole-stripe decoded column/dictionary bounds, including null collection elements.
 Declared compression block sizes are upper bounds; tiny streams are bounded by their decoded
 column sizes plus encoding overhead. This is not a hard Flink managed-memory reservation.
 
 ## Configuration and types
 
-Use the normal `'format' = 'orc'` filesystem option or Paimon's `'file.format' = 'orc'`.
-There is no parallel StreamFusion ORC configuration namespace. Filesystem settings preserve
-DDL-over-Hadoop precedence, including Hive aliases. Paimon keeps its own option resolution;
-explicit `orc.compress` overrides per-file compression. Shared filesystem rolling,
-partition commit, naming and recovery are the same as the [Parquet sink](parquet.md#sink).
-`streamfusion.operator.orcSink.enabled=false` disables the filesystem sink substitution;
-Paimon's existing source and sink switches control its ORC paths.
+Use normal `'format' = 'orc'` filesystem settings or Paimon's `'file.format' = 'orc'`.
+Filesystem settings preserve DDL-over-Hadoop precedence, including Hive aliases. Paimon keeps its
+own option resolution; explicit `orc.compress` overrides per-file compression. Shared filesystem
+rolling, partition commit, naming and recovery follow the [Parquet sink](parquet.md#sink).
+`streamfusion.operator.orcSink.enabled=false` disables filesystem sink substitution; Paimon's
+existing source and sink switches control its ORC paths.
 
-| Writer option | Native support |
+| Writer option | Columnar support |
 |---|---|
 | `orc.compress` | NONE, ZLIB, SNAPPY, LZ4; also ZSTD for Paimon's newer Java reader |
 | `orc.stripe.size`, `orc.compress.size` | Stripe and compression block sizes |
@@ -43,122 +62,78 @@ Paimon's existing source and sink switches control its ORC paths.
 | `orc.dictionary.key.threshold` | Dictionary selection threshold |
 | `orc.compression.strategy` | SPEED or COMPRESSION |
 | `orc.write.format` | 0.11 or 0.12 |
-| `orc.bloom.filter.columns`, `orc.bloom.filter.fpp` | Java-resolved column IDs and false-positive probability |
-| Paimon `file.compression`, `file.block-size`, `file.compression.zstd-level` | Normal Paimon ORC mappings; ZSTD levels 1 and 3 |
+| `orc.bloom.filter.columns`, `orc.bloom.filter.fpp` | Host-validated column names and probability |
+| Paimon `file.compression`, `file.block-size`, `file.compression.zstd-level` | Normal Paimon ORC mappings; Java ZSTD levels, independent of strategy |
 | Paimon `orc.timestamp-ltz.legacy.type` | Both values in UTC; default remains Paimon's `true` |
 
-Unsupported codecs (including LZO), other ZSTD levels, contradictory ZSTD level/strategy settings,
-unknown options and non-default options without a C++ equivalent retain the stock writer.
-Flink 2.2's ORC 1.5.6 reader does not understand ZSTD, so filesystem ZSTD stays stock. Untranslated
-options are admitted only at the host default. The reader uses Java's configuration whitelist;
-query filters remain residual Flink filters.
+Unsupported codecs (including LZO), unknown options and unverified non-default settings retain the
+stock writer. Flink's ORC 1.5.6 reader cannot read ZSTD, so filesystem ZSTD remains stock.
+Untranslated options are admitted only at the host default. The reader uses Java's configuration
+whitelist; query filters remain residual Flink filters.
 
-Paimon 2.0.0's patched Java writer and Flink's released ORC 1.5.6 writer ignore `orc.create.index`;
-native writing preserves that behavior. Use `orc.row.index.stride = 0` to disable indexes.
+Both released hosts ignore `orc.create.index`; use `orc.row.index.stride = 0` to disable indexes.
+The previous C++ restriction coupling ZSTD strategy with levels 1/3 no longer applies to Paimon.
 
 Scalar booleans, integers, floating point, decimals through precision 38, strings, binary, dates
 and timestamps, plus recursive arrays, maps and rows, use the host's ORC type converter.
-CHAR/VARCHAR lengths and Paimon field IDs are preserved. CHAR reads remove trailing spaces like
-Java ORC. Null parent structs and null lists with retained child spans are handled explicitly.
-Paimon's type gate and snapshot-key gate are shared with Parquet, including the precision-6
-timestamp limit and Java fallback for floating-point snapshot keys. Filesystem ORC retains the
-released Flink converter's narrower type support.
+CHAR/VARCHAR lengths and Paimon field IDs are preserved. Null parent structs and null lists with
+retained child spans are supported. Paimon's type and snapshot-key gates are shared with Parquet,
+including the precision-6 timestamp limit and Java fallback for floating-point snapshot keys.
+Filesystem ORC retains the released Flink converter's narrower type support.
 
-Native timestamp paths require a UTC JVM timezone (`-Duser.timezone=UTC`). C++ and Java differ in
-DST gap resolution and historical timezone rules; other JVM zones retain the stock path when the
-schema contains timestamps. Historical NTZ files with non-UTC stripe writer timezones also retain
-Java. Timestamp values share the engine's signed 64-bit nanosecond range, approximately 1677–2262.
-The historical ORC last-negative-second encoding and its statistics follow Java's behavior.
+Arrow timestamp paths require a UTC JVM timezone (`-Duser.timezone=UTC`); other JVM zones retain
+the stock path for schemas containing timestamps. Historical NTZ files with non-UTC stripe writer
+timezones also retain Java. Timestamp values share the engine's signed 64-bit nanosecond range,
+approximately 1677–2262. ORC's historical last-negative-second encoding and statistics follow Java.
 That alias can make decoded timestamp keys unsorted. Native snapshot merging therefore retains
 Java when a fractional timestamp is a non-leading stored key, or when a leading timestamp key's
-file bounds intersect the final second before the Unix epoch. Decoding/tailing still preserves
-Java's encoded values; post-epoch leading timestamp keys use the native merger.
+file bounds intersect the final second before the Unix epoch. Decoding/tailing preserves Java's
+encoded values; post-epoch leading timestamp keys use the native merger.
 
-Other filesystem fallbacks are unchanged from Parquet: updating inputs, overwrite,
-auto-compaction, zero-column files, unsupported abilities, and sink constraints requiring stock
-nullability or length enforcement. Paimon preserves its existing table-mode/configuration gates.
+Other filesystem fallbacks match Parquet: updating inputs, overwrite, auto-compaction, zero-column
+files, unsupported abilities, and sink constraints requiring stock nullability or length enforcement.
+Paimon preserves its existing table-mode/configuration gates.
 
 ## Build and verification
 
 Install `streamfusion-core`, `streamfusion-orc`, and Flink's normal `flink-orc` JAR for filesystem
-sinks. Paimon supplies its own shaded Java ORC classes; install its connector, the Paimon module
-and the ORC module, following [Paimon's factory ordering](paimon.md#deployment).
-See [Deployment](../deployment.md#contributing-from-source) for the portable Maven/C++ build.
+sinks. Paimon supplies its shaded Java ORC classes; install its connector, Paimon module and ORC
+module, following [Paimon's factory ordering](paimon.md#deployment). The ORC Maven build invokes
+Cargo for its Rust reader on macOS and Linux, like the other format modules. There is no ORC
+C++ toolchain/bootstrap step. See [Deployment](../deployment.md#contributing-from-source).
 
-Run the untouched released Flink ORC SQL tests with:
+Run the unchanged released Flink ORC SQL tests with `bin/flink-suite.sh orc`.
+The harness requires a successful columnar ORC writer marker. Local tests compare rows, recursive
+field IDs and footer statistics with stock Java, across codecs, timestamps, nested slices and
+selections. Shared filesystem tests cover checkpoint visibility, partition directories, footer
+failure and exactly-once restoration. Paimon tests cover snapshot merging, changelogs and spilling.
 
-```bash
-bin/flink-suite.sh orc
-```
+The September 14, 2026 validation passed all 46 upstream Flink ORC SQL cases and 22 selected
+upstream Paimon cases covering continuous reads, snapshots, changelogs, partitioned writes and
+schema changes. Paimon's unchanged continuous tests use its default Parquet format; the local
+Paimon SQL tests explicitly select ORC for ORC streaming coverage. This was a targeted Paimon run,
+not the entire upstream suite; the existing source-reuse limitation remains documented in the
+[suite guide](../upstream-flink-suite.md).
 
-The UTC harness passed all 46 cases in `OrcFsStreamingSinkITCase` and `OrcFileSystemITCase`,
-including its required native-writer marker.
-Local tests compare Java/native rows and footer statistics across codecs, sliced nested batches,
-projection order, Paimon snapshot key types and streaming SQL. Shared file-writer harness tests
-cover checkpoint visibility, partition directories and exactly-once restoration for both codecs.
+The combined development test assembly runs ORC-tagged tests in a separate Surefire execution
+using ORC 1.5.6's protobuf 2.5 dependency. Flink's Protobuf format tests use protobuf 4.32.1 in the
+normal execution. This mirrors the upstream format suites' separate dependency classpaths; it
+does not change deployment dependencies.
 
-The Paimon file-reader and changelog-writer diagnostics accept `SF_PAIMON_FILE_FORMAT=orc`;
-run them with `mvn test -Pbench,paimon` so the native libraries are optimized. Their costs and
-validation remain identical to the Parquet diagnostics documented on the Paimon page.
+## Benchmarks
 
-On local Apple Silicon with release libraries and mimalloc, the 262,144-row reader diagnostic
-measured:
-
-| Path | Java rows | Java to Arrow | Native to Arrow | Native / Java-to-Arrow throughput |
-|---|---:|---:|---:|---:|
-| Append file read | 0.027 s | 0.104 s | 0.057 s | 1.82× |
-| Changelog file read | 0.020 s | 0.095 s | 0.047 s | 2.01× |
-
-The 200,000-change writer diagnostic measured:
-
-| Path | Java | Native | Throughput ratio |
-|---|---:|---:|---:|
-| Input changelog write | 0.567 s | 0.311 s | 1.82× |
-| Lookup changelog write | 0.474 s | 0.368 s | 1.29× |
-| Full-compaction changelog write | 0.314 s | 0.350 s | 0.90× |
-| Deletion-vector write | 0.374 s | 0.273 s | 1.37× |
-
-These are local diagnostics, not whole-job throughput claims. Native reading is slower than
-Java's row checksum scan but faster than Java reading followed by the existing row-to-Arrow
-converter. All paths project four columns, including nested data, but the checksum touches only
-the first integer column. Both Arrow paths materialize every projected column; the Java row scan
-does not construct Arrow output. The Java-to-Arrow baseline includes the production fallback's
-row ownership copy and uses the same 4,096-row batch size and changelog sidecar as native reading.
-The current ORC adapter appends values individually and allocates Arrow output for each batch.
-Host FileIO callbacks and Arrow import also occur within the timed native path. These are known
-additional operations, not a profile attributing the slowdown to any one of them. This older
-diagnostic imports native output into **Java Arrow** before checksumming it; its endpoint differs
-from consumption by our Rust operators. It does not establish that the C++ codec alone decodes
-faster than Java, or that an entire Flink job does.
-The writer includes row-to-Arrow conversion, routing, sorting, encoding,
-and Paimon's checkpoint/compaction work; full compaction remains Java.
-
-```bash
-SF_PAIMON_FILE_FORMAT=orc SF_PAIMON_SOURCE_BENCHMARK=true SF_PAIMON_CHANGELOG_BENCHMARK=true \
-  mvn test -Pbench,paimon -pl :streamfusion-paimon -am \
-  -Dtest=PaimonSourceBenchmark,PaimonChangelogSinkBenchmark \
-  -Dsurefire.failIfNoSpecifiedTests=false
-```
+These local diagnostics use release builds with mimalloc, warm local files and an Apple M1 Max,
+64 GiB RAM, Java 17 in UTC. They are not whole-job throughput or peak-memory claims.
 
 ### Reading into arrow-rs
 
-`OrcReaderComparisonBenchmark` compares four paths through consumption of an Arrow Rust 58
-`RecordBatch`: our ORC C++/nanoarrow adapter, Arrow C++ `ORCFileReader`, `orc-rust`, and Paimon's
-Java reader followed by the production row ownership copy, row-to-Arrow conversion and native
-C Data import. Native batches never return to Java in this measurement. Java owns file I/O for
-all readers; the three native decoders use the same synchronous seek/read callback and 64 KiB
-copy buffer. The timer includes file opening, decoding, projection, conversion to the operator
-schema, a common Rust integer checksum, and reader/batch destruction. Planning and writing
-fixtures are outside timing. Every projected column is materialized; the timed checksum touches
-the first integer column. Separate untimed scans compare order-independent full-row fingerprints
-with Java.
-
-The opt-in build uses released Arrow C++ 25.0.1 and orc-rust 0.9.0. Both C++ adapters link the
-same ORC 2.3.1 library. The build compiles the unchanged released Arrow ORC adapter sources
-against that library, avoiding two copies of ORC/protobuf. orc-rust uses Arrow Rust 59, so its
-output crosses the standard Arrow C Data ABI into our existing Arrow Rust 58 without copying
-the buffers. Any required schema casts are included in timing. All native paths use release
-optimization and the module's mimalloc allocator.
+`OrcReaderComparisonBenchmark` compares production orc-rust decoding with Paimon's Java reader
+followed by the production row ownership copy, row-to-Arrow conversion and C Data import into
+Arrow Rust 58. The native path includes metadata admission, recursive CHAR normalization and
+schema conversion. Both finish at a Rust `RecordBatch`; native batches do not return to Java.
+Timing includes opening, decoding, conversion, the common integer checksum and cleanup. Untimed
+scans compare full-row fingerprints. `peak_batch_bytes` describes output Arrow batches, not peak
+process/decoder memory; `io_bytes` counts native reader host-callback bytes.
 
 ```bash
 SF_ORC_READER_COMPARISON=true \
@@ -166,85 +141,43 @@ SF_ORC_READER_COMPARISON=true \
   -Dtest=OrcReaderComparisonBenchmark -Dsurefire.failIfNoSpecifiedTests=false
 ```
 
-`SF_ORC_COMPARISON_ROWS` defaults to 262144, `SF_ORC_COMPARISON_TRIALS` to five, and
-`SF_ORC_COMPARISON_CODECS` to `none,zstd` (also accepts `zlib,snappy,lz4`). Each case rotates the
-four readers through two warmups and the measured trials, reporting the median and minimum.
-Files are local and warm in the OS cache. `peak_batch_bytes` is Arrow's reported memory size of
-the largest output batch, **not peak decoder or process memory**. `io_bytes` counts bytes
-requested through the native readers' host callback; it is unavailable for the Java baseline.
+`SF_ORC_COMPARISON_ROWS` defaults to 262144, `SF_ORC_COMPARISON_TRIALS` to five and
+`SF_ORC_COMPARISON_CODECS` to `none,zstd`. Readers rotate through two warmups and measured trials.
 
-The C++ comparison adapters and diagnostic JNI entry points are enabled by `orc-reader-bench` /
-`reader-comparison`. Production reads use the separate orc-rust integration with metadata
-admission and recursive CHAR normalization. The comparison profile is for tests, not packaging.
+The [production reader measurements](../benchmarks/orc-production-readers-2026-09-14.csv) on
+September 14, 2026 produced these median times for 262,144 rows:
 
-On an Apple M1 Max (64 GiB RAM, Java 17, UTC), five-trial median times for 262,144 rows were:
+| Read shape | Codec | Java into arrow-rs | Production Rust | Speedup |
+|---|---|---:|---:|---:|
+| Projected append | NONE | 114.1 ms | 17.9 ms | 6.4× |
+| Full append | NONE | 359.7 ms | 57.8 ms | 6.2× |
+| Projected changelog | NONE | 122.0 ms | 10.4 ms | 11.7× |
+| Projected append | ZSTD | 120.3 ms | 21.8 ms | 5.5× |
+| Full append | ZSTD | 382.0 ms | 65.8 ms | 5.8× |
+| Projected changelog | ZSTD | 125.4 ms | 12.7 ms | 9.9× |
 
-| Codec | Columns / file mode | Our adapter | Arrow C++ | orc-rust | Java to arrow-rs |
-|---|---|---:|---:|---:|---:|
-| NONE | 4 / append | 45.0 ms | 19.4 ms | 18.0 ms | 114.5 ms |
-| NONE | 14 / append | 141.8 ms | 63.8 ms | 56.8 ms | 343.8 ms |
-| NONE | 4 + row kind / changelog | 37.4 ms | 12.3 ms | 10.7 ms | 104.7 ms |
-| ZLIB | 4 / append | 55.6 ms | 30.1 ms | 29.5 ms | 122.9 ms |
-| ZLIB | 14 / append | 165.5 ms | 87.5 ms | 84.0 ms | 365.1 ms |
-| ZLIB | 4 + row kind / changelog | 44.7 ms | 19.7 ms | 17.9 ms | 111.7 ms |
-| SNAPPY | 4 / append | 44.7 ms | 19.4 ms | 18.3 ms | 111.9 ms |
-| SNAPPY | 14 / append | 145.2 ms | 67.5 ms | 62.1 ms | 354.8 ms |
-| SNAPPY | 4 + row kind / changelog | 38.4 ms | 13.4 ms | 11.7 ms | 106.6 ms |
-| LZ4 | 4 / append | 44.4 ms | 19.3 ms | 17.6 ms | 107.6 ms |
-| LZ4 | 14 / append | 143.0 ms | 66.0 ms | 58.7 ms | 342.8 ms |
-| LZ4 | 4 + row kind / changelog | 37.9 ms | 12.8 ms | 10.7 ms | 104.3 ms |
-| ZSTD | 4 / append | 47.2 ms | 23.3 ms | 20.9 ms | 110.8 ms |
-| ZSTD | 14 / append | 149.1 ms | 72.9 ms | 64.5 ms | 346.7 ms |
-| ZSTD | 4 + row kind / changelog | 39.2 ms | 14.3 ms | 12.4 ms | 104.5 ms |
-
-[Detailed measurements](../benchmarks/orc-readers-2026-09-14.csv) include minimum times, reported
-output-batch memory and host I/O bytes. The widest output batch reports 807,087 bytes on all four
-paths; this does not rank their internal allocation peaks. These measurements do not include
-snapshot merging, Flink scheduling, checkpoints, or remote storage.
-
-Arrow C++ is 1.85–3.03× faster than our adapter, and orc-rust is 1.88–3.53× faster. orc-rust leads
-Arrow C++ by 2–19% in this sample. That supports evaluating orc-rust as the replacement reader;
-Arrow C++ is also a substantial improvement. There is no architectural requirement to avoid an
-Arrow C++ dependency. Its portable source build works here, at the cost of another C++ dependency.
-
-The candidates match Java on these timed datasets and on 21 scalar edge-case fixtures including
-integer limits, floating-point NaNs/infinities/signed zero, decimal precision 38, Unicode strings,
-binary, historical dates and fractional pre-epoch timestamps. The raw-reader fixture exposes a
-specific integration difference: **both candidates return padded CHAR strings**, whereas Java and
-our adapter strip trailing spaces. The raw comparison asserts the padded result separately. Production orc-rust reads now normalize
-CHAR recursively and pass the existing source admission, timezone, recovery and snapshot suites.
-The production reader switch passed 216 focused tests, including 136 snapshot-key cases,
-40 scalar-value cases, four nested-CHAR cases and source/ORC regressions. Arrow C++ remains only
-a benchmark candidate. Linux comparison-profile builds and peak decoder memory still need
-separate verification.
+The [historical four-reader measurements](../benchmarks/orc-readers-2026-09-14.csv) compared the
+removed nanoarrow and Arrow C++ adapters with raw orc-rust and Java. They motivated the production
+Rust switch. Those raw reader timings exclude the current metadata admission and recursive CHAR
+normalization; the old C++ benchmark implementations are no longer built.
 
 ### Writing from arrow-rs
 
-`OrcWriterComparisonBenchmark` compares our standard ORC C++ 2.3.1 writer and nanoarrow
-adapter with Paimon 2.0.0's shaded ORC Java 1.9.8 vectorized writer. Both start from the same
-Rust-owned Arrow 58 batches and end with a closed local ORC file. Fixture generation and its
-one-time copy into Rust-owned buffers happen before timing; the fixture's Java allocator is
-closed before either writer runs. The Java candidate imports those buffers through C Data and
-copies columns directly into reusable Hive vectors. Long/double columns and string/binary
-payloads use bulk copies; decimals through precision 18 use ORC’s `decimal64` vectors and
-larger decimals use reusable binary scratch space; nested columns recurse.
-There are no intermediate `RowData` objects in either timed path.
+`OrcWriterComparisonBenchmark` compares the production Java Arrow writer with the original Java
+vector adapter. Both start from the same Rust-owned Arrow 58 batches and finish with a closed
+local ORC file. Fixture generation and its one-time deep copy into Rust happen outside timing;
+the fixture's Java allocator is closed before either writer runs. Both timed paths include C Data
+import, column conversion, encoding, output creation, footer flush and resource cleanup. Output
+close does not include `fsync`.
 
-Timing includes opening the output, constructing the encoder, every batch conversion, encoding,
-footer/stripe flushes, output close and resource cleanup. Both use Paimon's local `FileIO`;
-C++ drains through the production 1 MiB JNI output buffer. Each uses 64 MiB stripes, 64 KiB
-compression buffers, row indexes every 10,000 rows, dictionary threshold 0.8, compression
-strategy SPEED by default, and ORC 0.12. Different ORC implementations can choose different encodings and
-stripe boundaries despite matching settings, so the harness also reports file size. Output
-close does not include `fsync`; these are local filesystem/OS-cache measurements.
+An untimed stock Paimon `RowDataVectorizer` writes the original rows as an independent oracle.
+Java ORC compares ordered fingerprints of every column, plus schema, recursive field IDs, codec,
+format version, index stride and row count, before timing and on the final timed files. Separate
+fixtures cover scalar limits, precision-38 decimals, Unicode, binary, null/empty nested values,
+CHAR/VARCHAR and fractional pre-epoch timestamps.
 
-Before timing, a third, untimed path writes the original fixture rows using Paimon's stock
-`RowDataVectorizer`. Paimon's Java ORC reader compares ordered fingerprints of every column
-against both candidates, and checks row counts, schema, field IDs, codec, format version and
-index stride. It checks the final timed outputs again. Scalar compatibility cases add integer
-extremes, floating special values, decimal precision 38, CHAR/VARCHAR, binary and pre-epoch
-microsecond timestamps. This is a writer microbenchmark, not a Paimon checkpoint or Flink job
-benchmark, and does not change the deployed writer.
+Both use 64 MiB stripes, 64 KiB compression buffers, index stride 10000, dictionary threshold 0.8,
+ORC 0.12 and compression strategy SPEED by default. The harness reports file sizes alongside time.
 
 ```bash
 SF_ORC_WRITER_COMPARISON=true \
@@ -252,49 +185,36 @@ SF_ORC_WRITER_COMPARISON=true \
   -Dtest=OrcWriterComparisonBenchmark -Dsurefire.failIfNoSpecifiedTests=false
 ```
 
-The test-only `orc-writer-bench` profile enables the native `writer-comparison` fixture helpers;
-it does not add Arrow C++ or orc-rust dependencies. Run it separately from `orc-reader-bench`.
 `SF_ORC_WRITER_ROWS` defaults to 262144, `SF_ORC_WRITER_BATCH_ROWS` to 4096,
-`SF_ORC_WRITER_TRIALS` to five and `SF_ORC_WRITER_WARMUPS` to two. The candidates alternate
-execution order. `SF_ORC_WRITER_CODECS` defaults to `NONE,ZLIB,SNAPPY,LZ4,ZSTD`;
-`SF_ORC_WRITER_STRATEGY` accepts `SPEED` (default) or `COMPRESSION`. Numeric,
-string/binary and full nested Paimon schemas use four, four and fourteen columns respectively.
+`SF_ORC_WRITER_TRIALS` to five and `SF_ORC_WRITER_WARMUPS` to two. Writers alternate order.
+`SF_ORC_WRITER_CODECS` defaults to `NONE,ZLIB,SNAPPY,LZ4,ZSTD`; `SF_ORC_WRITER_STRATEGY` accepts
+`SPEED` or `COMPRESSION`. Schemas are numeric (4 columns), string/binary (4), and nested Paimon (14).
+The opt-in native helpers only retain and export benchmark Arrow fixtures.
+`SF_ORC_WRITER_PROFILE=true` additionally prints handoff, conversion, encoding and residual time
+for the original Java adapter. Those instrumented stage diagnostics are separate from the
+uninstrumented measurements below.
 
-On an Apple M1 Max (64 GiB, Java 17 with an 8 GiB heap, UTC), release/mimalloc,
-five-trial median times for 262,144 rows were:
+The [production writer measurements](../benchmarks/orc-java-writers-2026-09-14.csv) on
+September 14, 2026 show 8–29% lower elapsed time than the original Java adapter across all 15
+shape/codec combinations. Selected median times for 262,144 rows are below. The C++ column is
+the earlier same-machine baseline, not a paired rerun of the removed writer.
 
-| Schema | Codec / strategy | C++ | Java vectors | Java time / C++ time |
+| Shape | Codec | Original Java | Production Java | Historical C++ |
 |---|---|---:|---:|---:|
-| Numeric, 4 columns | NONE / SPEED | 12.9 ms | 20.0 ms | 1.55× |
-| Strings/binary, 4 columns | NONE / SPEED | 28.8 ms | 49.0 ms | 1.70× |
-| Nested Paimon, 14 columns | NONE / SPEED | 189.1 ms | 172.1 ms | 0.91× |
-| Numeric, 4 columns | ZSTD / SPEED | 16.3 ms | 21.7 ms | 1.33× |
-| Strings/binary, 4 columns | ZSTD / SPEED | 36.0 ms | 57.2 ms | 1.59× |
-| Nested Paimon, 14 columns | ZSTD / SPEED | 207.6 ms | 198.1 ms | 0.95× |
+| Numeric, 4 columns | NONE | 20.491 ms | 14.641 ms | 12.934 ms |
+| Numeric, 4 columns | ZSTD | 22.602 ms | 16.572 ms | 16.333 ms |
+| Strings/binary, 4 columns | NONE | 48.316 ms | 43.127 ms | 28.844 ms |
+| Strings/binary, 4 columns | ZSTD | 57.125 ms | 51.511 ms | 36.004 ms |
+| Nested Paimon, 14 columns | NONE | 176.953 ms | 145.731 ms | 189.077 ms |
+| Nested Paimon, 14 columns | ZSTD | 204.179 ms | 175.646 ms | 207.601 ms |
 
-Java is competitive on this wider schema: across NONE, ZLIB, SNAPPY and ZSTD its median
-ranges from effectively tied to 9% less elapsed time. C++ wins on both narrow schemas, where
-Java takes 33–70% more time. This supports Java vectorized writing as a deployment tradeoff,
-without establishing a universal writer ranking. The experiment does not measure the two
-adapters separately from encoding, and the synthetic fixtures do not represent every data
-distribution. A Java writer would remove the ORC C++ writer build; removing the ORC C++ library
-entirely would also require replacing the deployed reader. Java's packaged compression
-libraries can still contain native code.
+Java is within 2% of historical C++ for numeric ZSTD and faster on the wide nested fixture.
+String-heavy NONE/ZSTD files still take 43–50% longer than historical C++; profiling the earlier
+baseline found costs in both conversion and ORC's string encoding. The optimized converter
+preserves host writer settings and leaves that encoding implementation unchanged.
 
-[Complete results](../benchmarks/orc-writers-2026-09-14.csv) include all five codecs, file sizes,
-minimum/maximum times and a separate LZ4 COMPRESSION run. LZ4 SPEED is a particularly different
-tradeoff between the implementations: ORC C++ 2.3.1 chooses acceleration 65537, producing almost
-uncompressed output on these fixtures. For the full schema it writes 15.41 MB versus Java's
-7.48 MB. Its SPEED timing should therefore not be read as equal compression work. The
-compression-oriented follow-up is reported separately below.
-
-| Schema | LZ4 COMPRESSION, C++ | LZ4 COMPRESSION, Java | C++ file | Java file |
-|---|---:|---:|---:|---:|
-| Numeric, 4 columns | 14.8 ms | 23.6 ms | 0.918 MB | 0.918 MB |
-| Strings/binary, 4 columns | 34.0 ms | 59.2 ms | 1.90 MB | 1.94 MB |
-| Nested Paimon, 14 columns | 197.1 ms | 191.4 ms | 7.25 MB | 7.48 MB |
-
-The main run passed all 24 comparison/type cases plus 17 existing ORC file and timestamp
-regressions. The separate LZ4 run also passed its stock-Java comparisons. Neither timing
-includes correctness rereads. These results apply to this machine and warmed process; they
-do not measure concurrent writers, checkpoint latency or peak heap/native memory.
+The [original writer measurements](../benchmarks/orc-writers-2026-09-14.csv) retain the C++ baseline.
+Its LZ4 SPEED mode used acceleration 65537 and produced almost uncompressed output, so its SPEED
+timing does not represent the same compression work as Java. That artifact includes a separate
+LZ4 COMPRESSION comparison. Other released native dependencies, such as Java compression codecs,
+are unaffected by removing the ORC C++ integration.

@@ -5,33 +5,52 @@ import tech.streamfusion.format.ColumnarFileCodec;
 /** Adapts the optional Parquet module to the shared columnar file lifecycle. */
 public final class ParquetCodec implements ColumnarFileCodec {
 
-  public long createEncoder(
-      long schema,
+  public Encoder createEncoder(
+      org.apache.arrow.vector.types.pojo.Schema schema,
       int[] partitions,
       String[] keys,
       String[] values,
       boolean changelog,
-      Object output,
-      byte[] chunk) {
+      java.io.OutputStream output) {
 
-    return NativeParquet.createParquetEncoder(
-        schema, partitions, keys, values, changelog, output, chunk);
-  }
+    long handle;
+    var allocator = tech.streamfusion.operator.NativeAllocator.SHARED;
+    try (var exported = org.apache.arrow.c.ArrowSchema.allocateNew(allocator)) {
+      org.apache.arrow.c.Data.exportSchema(
+          allocator, schema, tech.streamfusion.operator.NativeAllocator.DICTIONARIES, exported);
+      handle =
+          NativeParquet.createParquetEncoder(
+              exported.memoryAddress(),
+              partitions,
+              keys,
+              values,
+              changelog,
+              output,
+              new byte[1 << 20]);
+    }
+    return new Encoder() {
+      private boolean closed;
 
-  public void write(long h, long a, int[] rows, int offset, int count) {
-    NativeParquet.parquetEncoderWrite(h, a, rows, offset, count);
-  }
+      public void write(long array, int[] rows, int offset, int count) {
+        if (closed) throw new IllegalStateException("Parquet writer is closed");
+        NativeParquet.parquetEncoderWrite(handle, array, rows, offset, count);
+      }
 
-  public long estimatedBytes(long h) {
-    return NativeParquet.parquetEncoderEstimatedBytes(h);
-  }
+      public long estimatedBytes() {
+        return NativeParquet.parquetEncoderEstimatedBytes(handle);
+      }
 
-  public void finish(long h) {
-    NativeParquet.parquetEncoderFinish(h);
-  }
+      public void finish() {
+        NativeParquet.parquetEncoderFinish(handle);
+      }
 
-  public void closeEncoder(long h) {
-    NativeParquet.closeParquetEncoder(h);
+      public void close() {
+        if (!closed) {
+          closed = true;
+          NativeParquet.closeParquetEncoder(handle);
+        }
+      }
+    };
   }
 
   public long createDecoder(Object in, long length, long schema, String[] names, int rows) {
