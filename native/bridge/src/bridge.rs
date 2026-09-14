@@ -6,6 +6,9 @@ use crate::*;
 /// `JvmUdf` node can attach the (already JVM-owned) task thread and upcall the UDF bridge. Set once.
 pub static JVM: OnceLock<jni::JavaVM> = OnceLock::new();
 
+/// Keeps a callback's original throwable alive while Arrow release callbacks run during unwind.
+pub struct JavaException(pub jni::objects::GlobalRef);
+
 pub fn capture_jvm_raw(vm: *mut jni::sys::JavaVM) {
     if JVM.get().is_none() {
         if let Ok(vm) = unsafe { jni::JavaVM::from_raw(vm) } {
@@ -82,6 +85,10 @@ where
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&mut env))) {
         Ok(value) => value,
         Err(payload) => {
+            if let Some(JavaException(throwable)) = payload.downcast_ref::<JavaException>() {
+                let _ = env.throw(<&jni::objects::JThrowable>::from(throwable.as_obj()));
+                return T::jni_default();
+            }
             // Don't stack a second exception on a frame that already has one pending — the first
             // is the real cause and `throw_new` would replace it.
             if !matches!(env.exception_check(), Ok(true)) {

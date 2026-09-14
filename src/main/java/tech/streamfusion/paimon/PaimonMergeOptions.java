@@ -29,6 +29,38 @@ import tech.streamfusion.operator.RowDataArrowConverter;
 public final class PaimonMergeOptions {
   private PaimonMergeOptions() {}
 
+  private static final Set<String> HOST_AGGREGATES =
+      Set.of(
+          "collect",
+          "merge_map",
+          "merge_map_with_keytime",
+          "nested_update",
+          "nested_partial_update",
+          "hll_sketch",
+          "theta_sketch",
+          "rbm32",
+          "rbm64");
+
+  private record MergePlan(Map<String, Object> settings, List<Map<String, Object>> fields) {}
+
+  static Object[] aggregators(FileStoreTable table) {
+    MergePlan plan = plan(table);
+    Object[] kernels = new Object[plan.fields().size()];
+    boolean any = false;
+    for (int i = 0; i < kernels.length; i++) {
+      var field = plan.fields().get(i);
+      if (Boolean.TRUE.equals(field.get("host"))) {
+        kernels[i] =
+            new PaimonFieldAggregator(
+                table.rowType().getFields().get(i),
+                (String) field.get("function"),
+                table.coreOptions());
+        any = true;
+      }
+    }
+    return any ? kernels : null;
+  }
+
   public static String unsupportedReason(FileStoreTable table) {
     try {
       encode(table);
@@ -39,6 +71,10 @@ public final class PaimonMergeOptions {
   }
 
   public static String encode(FileStoreTable table) {
+    return JsonSerdeUtil.toJson(plan(table).settings());
+  }
+
+  private static MergePlan plan(FileStoreTable table) {
     CoreOptions options = table.coreOptions();
     var rowType = table.rowType();
     List<String> names = rowType.getFieldNames();
@@ -119,9 +155,11 @@ public final class PaimonMergeOptions {
       }
       Map<String, Object> field = new HashMap<>();
       field.put("function", function);
+      field.put("host", function != null && HOST_AGGREGATES.contains(function));
       field.put("ignore_retract", options.fieldAggIgnoreRetract(name));
       field.put("sequence_group", groups.getOrDefault(column, List.of()));
       field.put("delimiter", options.fieldListAggDelimiter(name));
+      field.put("distinct", options.fieldCollectAggDistinct(name));
       fields.add(field);
     }
     Map<String, Object> plan = new HashMap<>();
@@ -142,7 +180,7 @@ public final class PaimonMergeOptions {
     plan.put(
         "remove_on_sequence_group",
         removeGroup == null ? List.of() : ordinals(names, Arrays.asList(removeGroup.split(","))));
-    return JsonSerdeUtil.toJson(plan);
+    return new MergePlan(plan, fields);
   }
 
   private static List<Integer> ordinals(List<String> names, List<String> fields) {
@@ -164,7 +202,9 @@ public final class PaimonMergeOptions {
   }
 
   private static void requireComparable(DataField field, String option) {
-    if (!PaimonKeyValueLayout.comparableNatively(field.type())) {
+    if (!PaimonKeyValueLayout.comparableNatively(field.type())
+        && field.type().getTypeRoot() != DataTypeRoot.FLOAT
+        && field.type().getTypeRoot() != DataTypeRoot.DOUBLE) {
       throw new UnsupportedOperationException(
           option + " cannot order " + field.name() + " of type " + field.type());
     }
@@ -172,6 +212,11 @@ public final class PaimonMergeOptions {
 
   private static void requireAggregator(DataField field, String function, CoreOptions options) {
     DataType type = field.type();
+    if (HOST_AGGREGATES.contains(function)) {
+      org.apache.paimon.mergetree.compact.aggregate.factory.FieldAggregatorFactory.create(
+          type, field.name(), function, options);
+      return;
+    }
     DataTypeRoot root = type.getTypeRoot();
     switch (function) {
       case "primary-key":
@@ -195,7 +240,7 @@ public final class PaimonMergeOptions {
                     DataTypeRoot.FLOAT,
                     DataTypeRoot.DOUBLE)
                 .contains(root)
-            || function.equals("sum") && root == DataTypeRoot.DECIMAL) {
+            || root == DataTypeRoot.DECIMAL) {
           return;
         }
         break;
@@ -206,7 +251,7 @@ public final class PaimonMergeOptions {
         }
         break;
       case "listagg":
-        if (root == DataTypeRoot.VARCHAR && !options.fieldCollectAggDistinct(field.name())) {
+        if (root == DataTypeRoot.VARCHAR) {
           return;
         }
         break;

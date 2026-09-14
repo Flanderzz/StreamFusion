@@ -1302,6 +1302,47 @@ class PaimonSinkParityTest {
     assertEquals(contents.get(0), contents.get(1));
   }
 
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  void collectionAggregatesRunThroughTheNativeSqlSink(boolean distinct) throws Exception {
+    java.nio.file.Path warehouse = Files.createTempDirectory("paimon-collect-sql");
+    List<List<String>> contents = new ArrayList<>();
+    for (boolean nativeWriter : new boolean[] {false, true}) {
+      StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+      env.setParallelism(1);
+      StreamTableEnvironment tableEnv = catalogEnvironment(env, warehouse);
+      String name = nativeWriter ? "collect_native" : "collect_stock";
+      tableEnv.executeSql(
+          "CREATE TABLE "
+              + name
+              + " (id BIGINT NOT NULL, v ARRAY<INT>, PRIMARY KEY (id) NOT ENFORCED)"
+              + " WITH ('bucket' = '2', 'merge-engine' = 'aggregation',"
+              + " 'fields.v.aggregate-function' = 'collect', 'fields.v.distinct' = '"
+              + distinct
+              + "')");
+      tableEnv.createTemporaryView(
+          "collect_source",
+          tableEnv.fromDataStream(
+              env.fromData(
+                  Types.ROW_NAMED(
+                      new String[] {"id", "v"}, Types.LONG, Types.OBJECT_ARRAY(Types.INT)),
+                  Row.of(1L, new Integer[] {1, 2, 2}),
+                  Row.of(2L, new Integer[] {4, null}),
+                  Row.of(1L, new Integer[] {2, 3}),
+                  Row.of(2L, null)),
+              Schema.newBuilder()
+                  .column("id", "BIGINT NOT NULL")
+                  .column("v", "ARRAY<INT>")
+                  .build()));
+      PhysicalPlanScan scan = nativeWriter ? NativePlanner.install(tableEnv) : null;
+      tableEnv.executeSql("INSERT INTO " + name + " SELECT * FROM collect_source").await();
+      if (scan != null) assertAccelerated(scan);
+      FileStoreTable table = openTable(warehouse, name);
+      contents.add(PaimonTestTables.readRows(table, table.rowType()));
+    }
+    assertEquals(contents.get(0), contents.get(1));
+  }
+
   static Stream<Arguments> declinedTables() {
     return Stream.of(
         Arguments.of(
@@ -1336,10 +1377,6 @@ class PaimonSinkParityTest {
                 + " 'brotli'",
             "compression BROTLI"),
         Arguments.of(
-            "(id BIGINT NOT NULL, v DOUBLE, PRIMARY KEY (id) NOT ENFORCED)",
-            "'bucket' = '2', 'sequence.field' = 'v'",
-            "sequence.field"),
-        Arguments.of(
             PK_SCHEMA,
             "'bucket' = '2', 'merge-engine' = 'aggregation', 'sequence.field' = 'v'",
             "sequence.field with aggregation"),
@@ -1349,9 +1386,12 @@ class PaimonSinkParityTest {
             "sequence.field with partial-update"),
         Arguments.of(
             "(id BIGINT NOT NULL, v ARRAY<INT>, PRIMARY KEY (id) NOT ENFORCED)",
-            "'bucket' = '2', 'merge-engine' = 'aggregation', 'fields.v.aggregate-function' ="
-                + " 'collect'",
-            "aggregate function collect"),
+            "'bucket' = '2', 'sequence.field' = 'v'",
+            "sequence.field cannot order v"),
+        Arguments.of(
+            "(id BIGINT NOT NULL, v ARRAY<INT>, pt STRING, PRIMARY KEY (id) NOT ENFORCED)",
+            "'bucket' = '2', 'merge-engine' = 'partial-update', 'fields.v.sequence-group' = 'pt'",
+            "fields.v.sequence-group cannot order v"),
         Arguments.of(
             "(id BIGINT NOT NULL, k DOUBLE NOT NULL, PRIMARY KEY (id, k) NOT ENFORCED)",
             "'bucket' = '2'",
@@ -1417,7 +1457,7 @@ class PaimonSinkParityTest {
 
   private static String selectFor(String schema) {
     if (schema.contains("ARRAY<INT>")) {
-      return "ARRAY[v] AS v";
+      return schema.contains("pt STRING") ? "ARRAY[v] AS v, pt" : "ARRAY[v] AS v";
     }
     if (schema.contains("k DOUBLE")) {
       return "CAST(v AS DOUBLE) AS k";

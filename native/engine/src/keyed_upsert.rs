@@ -367,6 +367,33 @@ pub extern "system" fn Java_tech_streamfusion_Native_createKeyedUpsertBuffer<'lo
     })
 }
 
+/// Installs optional Java field kernels; buffers and ordinary reducers remain columnar in Rust.
+#[no_mangle]
+pub extern "system" fn Java_tech_streamfusion_Native_keyedUpsertBufferAggregates<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    aggregators: jni::objects::JObjectArray<'local>,
+) {
+    crate::bridge::jni_guard(env, move |env| {
+        let buffer = unsafe { &mut *(handle as *mut KeyedUpsertBuffer) };
+        buffer.merge.host_aggregates =
+            (0..env.get_array_length(&aggregators).expect("field kernels"))
+                .map(|index| {
+                    let object = env
+                        .get_object_array_element(&aggregators, index)
+                        .expect("field kernel");
+                    let object = env.auto_local(object);
+                    if object.is_null() {
+                        None
+                    } else {
+                        Some(env.new_global_ref(&*object).expect("retain field kernel"))
+                    }
+                })
+                .collect();
+    });
+}
+
 /// Takes ownership of a batch the JVM exported and assigns its rows the sequence numbers starting
 /// at `first_sequence` in arrival order; returns the number of rows retained.
 #[no_mangle]

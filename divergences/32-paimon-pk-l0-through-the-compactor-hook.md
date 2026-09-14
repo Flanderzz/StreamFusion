@@ -90,6 +90,17 @@ compaction deliberately blocked before a checkpoint.
 
 ### Why not depend on paimon-rust here?
 
+Specialized field aggregation keeps the released Java kernels for collection, map, nested-row, and
+sketch functions. The Rust reducer records a column's aggregate/retract operations with references
+to input rows and earlier results, then executes that program in one Java callback per column per
+flush. Comet's C Data ownership transfer carries only the affected column in and out; Java retains
+the imported nested schema and releases intermediate objects after their last use. Key ordering,
+ordinary field reducers, gathering, and file writing keep their existing paths. This preserves
+Java collection ordering and sketch bytes without a per-row JNI call or a full-row conversion.
+Callback failures follow Comet's retained-throwable pattern: clear and retain the original Java
+exception, release native Arrow state, then rethrow that same exception at the JNI boundary.
+Leaving it pending during cleanup lets Java release callbacks consume it and loses the real cause.
+
 Local merge follows Arroyo's flush-before-checkpoint lifecycle. Deduplicate and first-row tables
 without changelog production reuse our native sink buffer with the full table primary key. This
 uses the same select-indices-and-gather approach as paimon-rust's `KeyValueFileWriter::flush`; no

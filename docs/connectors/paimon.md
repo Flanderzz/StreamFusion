@@ -412,7 +412,8 @@ SQL writes and reopened jobs, released Java buffer boundaries, and Arrow ownersh
 - For `deduplicate`, `sequence.field` compares one or more value columns before the arrival number, including
   ascending or descending `sequence.field.sort-order`. Nulls sort first in both directions;
   equal user sequences are resolved by arrival. The stored `_SEQUENCE_NUMBER` continues to count
-  accepted arrivals. Sequence columns use the same type whitelist as primary keys above.
+  accepted arrivals. Sequence columns admit the primary-key types above plus `FLOAT` and `DOUBLE`.
+  Floating comparisons match Java's ordering of signed zero, infinities, and canonicalized NaNs.
 - `rowkind.field` reads `+I`, `-U`, `+U`, or `-D` from a string column. Filtering of ignored deletes
   and update-before rows happens after this override and before assigning sequence numbers.
   Null or invalid kind strings fail as in Paimon.
@@ -421,12 +422,21 @@ SQL writes and reopened jobs, released Java buffer boundaries, and Arrow ownersh
   aggregates. Both `partial-update.remove-record-on-delete` and
   `partial-update.remove-record-on-sequence-group` follow the released writer's behavior.
 - `aggregation` reduces each field with its configured aggregate. Supported functions are `sum`
-  on integer, floating-point and decimal columns; `product` on integer and floating-point columns;
-  `min`/`max` on the comparable types above; `bool_and`/`bool_or`; non-distinct string `listagg`
-  with `fields.<column>.list-agg-delimiter`; and `first_value`, `last_value`,
+  and `product` on integer, floating-point and decimal columns;
+  `min`/`max` on the comparable types above, including floats; `bool_and`/`bool_or`; string `listagg`
+  with `fields.<column>.list-agg-delimiter` and `fields.<column>.distinct`; and `first_value`, `last_value`,
   `first_non_null_value` (also `first_not_null_value`), and `last_non_null_value` on all supported
   value types, including nested columns. Paimon's default aggregate selection,
   `fields.<column>.ignore-retract`, and `aggregation.remove-record-on-delete` are preserved.
+- Specialized `collect`, `merge_map`, `merge_map_with_keytime`, `nested_update`,
+  `nested_partial_update`, `hll_sketch`, `theta_sketch`, `rbm32`, and `rbm64` use the released Java
+  field aggregators. Rust retains key grouping and ordinary field reductions, and passes each
+  specialized column's operations to Java in one C Data call per flush. This preserves Paimon's
+  collection ordering, nested-field options, and serialized sketch formats. It adds no dependency
+  on paimon-rust and does not claim these Java field computations are native.
+  Callback failures retain the original Java exception across Arrow cleanup, following Comet's
+  retained-throwable pattern. Unsupported retractions and malformed sketches fail as in Paimon,
+  even when a later delete would discard the intermediate result.
 - Column defaults are parsed by released Java Paimon and fill null values in Arrow before merging.
   Defaults on primary-key, partition or bucket-key columns fall back because they affect routing.
 
@@ -438,6 +448,13 @@ reads apply Paimon's merge functions to these files.
 `PaimonMergeEngineTest` compares native and stock writers over checkpoints and restarts, including
 file sequence ranges, delete counts, nested values, defaults, input changelogs and compaction.
 `PaimonSinkParityTest` also checks streaming SQL admission and results for each feature.
+`PaimonMergeAdditionalTypesTest` covers floating ordering and distinct concatenation;
+`PaimonSpecializedAggregateTest` compares collections, nested values, maps, and serialized sketches
+across checkpoints, compaction, and reopened writers on both file formats.
+`PaimonFieldAggregatorTest` checks released exceptions and Arrow cleanup on failure.
+A focused run of Paimon's unchanged SQL tests also covers collection retractions with lookup and
+full-compaction changelogs, map retractions, and the stock streaming-read restrictions for product
+and listagg tables without a changelog producer.
 
 ### Dynamic buckets
 
@@ -595,9 +612,8 @@ Each of these declines at planning time with a reason visible in `NativePlanner.
   `SinkUpsertMaterializer` (`table.exec.sink.upsert-materialize`; Paimon itself refuses that
   operator), `INSERT OVERWRITE`, and batch-mode inserts (the substitution only exists in the
   streaming planner).
-- Primary-key tables with field aggregate/type combinations outside the merge whitelist above
-  (including specialized collection/map/nested/sketch aggregates, distinct `listagg`, decimal
-  `product`, and floating-point `min`/`max`); sequence fields or sequence groups outside the
+- Primary-key tables with field aggregate/type combinations outside the merge whitelist above;
+  sequence fields or sequence groups outside the
   comparable-type whitelist; `sequence.field` combined with `partial-update` or `aggregation`;
   defaults on routing columns;
   input changelog with `changelog-file.format` differing from the table format or unsupported changelog
@@ -679,12 +695,12 @@ pipelines; these measurements do not establish a throughput improvement for that
 ### Merge-engine writer diagnostic
 
 `PaimonMergeBenchmark` measures row routing, the RowData-to-Arrow conversion, merging, level-0
-Parquet encoding and commit against the released stock writer. It uses 131,072 rows, 16,384 keys,
+file encoding and commit against the released stock writer. It uses 131,072 rows, 16,384 keys,
 two buckets and nine columns including nulls and nested arrays. `write-only` isolates ingestion
 from compaction. Writer setup, close and result verification are outside the timer. After one
 warmup per mode, three measured runs alternate engine order and report the best of each.
 
-On the same local machine with release native libraries:
+On the same local machine with release native libraries and Parquet:
 
 | Mode | Stock | Native | Throughput ratio |
 |---|---:|---:|---:|
@@ -697,6 +713,14 @@ With `SF_PAIMON_MERGE_THIN=true` on the same 131,072-row fixture, stock/native s
 0.109/0.092 for first row, 0.140/0.118 for partial update, 0.124/0.106 for aggregation, and
 0.104/0.087 for sequence-based deduplication: **1.17–1.20×** stock throughput with matching rows.
 
+With `SF_PAIMON_MERGE_MODES=collect`, distinct array collection uses the released Java field kernel
+inside the native writer. The final release fixture measured **0.212 s stock / 0.179 s native
+(1.18×)** with Parquet and **0.190 / 0.187 s (1.02×)** with ORC, which is roughly tied.
+Both include the ingress conversion and column callback and verify identical array contents and
+ordering. These measure the whole writer path, not a faster implementation of Java's collection
+function or a benchmark of every specialized aggregate. The environment variable accepts a
+comma-separated subset of the modes above plus `collect`.
+
 Every run verifies the final table contents against its stock twin. This is a writer diagnostic,
 not an end-to-end Flink job benchmark. Run it with:
 
@@ -706,7 +730,7 @@ SF_PAIMON_MERGE_BENCHMARK=true mvn test -Pbench,paimon \
   -Dsurefire.failIfNoSpecifiedTests=false
 ```
 
-`SF_PAIMON_MERGE_ROWS` changes the input count.
+`SF_PAIMON_MERGE_ROWS` changes the input count; `SF_PAIMON_FILE_FORMAT=orc` selects ORC.
 
 ### Dynamic and postpone SQL diagnostic
 
@@ -806,10 +830,13 @@ Paimon.
 
 ## Outlook
 
-Each remaining gap has its own issue:
-[remaining merge combinations and specialized field aggregates](https://github.com/datafusion-contrib/StreamFusion/issues/47),
-[a Paimon bundle entry for the merge-tree writer](https://github.com/datafusion-contrib/StreamFusion/issues/49)
-that would remove the compaction hand-off and the idle-writer rescan.
+The sequence/merge combinations, complex sequence types, and routing-column defaults listed above
+deliberately retain the stock sink. Their acceleration would require further ordering and routing
+work beyond the small ports and released-kernel reuse chosen for this implementation
+([decision](https://github.com/datafusion-contrib/StreamFusion/blob/main/.claude/wontdos/60-paimon-merge-fallbacks.md)).
+
+[A Paimon bundle entry for the merge-tree writer](https://github.com/datafusion-contrib/StreamFusion/issues/49)
+would remove the compaction hand-off and the idle-writer rescan.
 Released Paimon 2.0.0 walks a bundle row by row before the format writer; a Paimon release that
 passes bundles through takes the same writer's direct path with no change here
 ([#39](https://github.com/datafusion-contrib/StreamFusion/issues/39)). The jar-ordering requirement

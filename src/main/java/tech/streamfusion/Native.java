@@ -617,6 +617,9 @@ public final class Native {
       boolean ignoreRetracts,
       String mergeOptions);
 
+  /** Retains optional per-column host kernels until the upsert buffer closes. */
+  public static native void keyedUpsertBufferAggregates(long handle, Object[] aggregators);
+
   /** Takes ownership of one Arrow row containing parsed column defaults. */
   public static native void keyedUpsertBufferDefaults(
       long handle, long arrayAddress, long schemaAddress);

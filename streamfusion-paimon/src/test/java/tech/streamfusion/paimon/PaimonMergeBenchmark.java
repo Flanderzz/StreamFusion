@@ -35,7 +35,11 @@ class PaimonMergeBenchmark {
               new GenericArray(new Integer[] {i, null, -i}),
               BinaryString.fromString("+I")));
     }
-    for (String mode : List.of("first-row", "partial-update", "aggregation", "sequence")) {
+    String[] modes =
+        System.getenv()
+            .getOrDefault("SF_PAIMON_MERGE_MODES", "first-row,partial-update,aggregation,sequence")
+            .split(",");
+    for (String mode : modes) {
       double[] best = {Double.POSITIVE_INFINITY, Double.POSITIVE_INFINITY};
       for (int iteration = 0; iteration < 4; iteration++) {
         List<String> expected = null;
@@ -47,13 +51,17 @@ class PaimonMergeBenchmark {
           if (mode.equals("sequence")) {
             options.put("sequence.field", "seq,seq2");
           } else {
-            options.put("merge-engine", mode);
+            options.put("merge-engine", mode.equals("collect") ? "aggregation" : mode);
           }
           if (mode.equals("first-row")) {
             options.put("changelog-producer", "lookup");
           }
           if (mode.equals("aggregation")) {
             options.put("fields.v.aggregate-function", "sum");
+          }
+          if (mode.equals("collect")) {
+            options.put("fields.nested.aggregate-function", "collect");
+            options.put("fields.nested.distinct", "true");
           }
           if (mode.equals("partial-update")) {
             options.put("fields.seq.sequence-group", "v,txt");

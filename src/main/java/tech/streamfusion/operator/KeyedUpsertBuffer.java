@@ -98,6 +98,13 @@ public final class KeyedUpsertBuffer implements AutoCloseable {
     }
   }
 
+  /** Installs optional field kernels, called once per affected column when the buffer flushes. */
+  public void aggregators(Object[] aggregators) {
+    if (aggregators != null) {
+      Native.keyedUpsertBufferAggregates(handle, aggregators);
+    }
+  }
+
   /** Installs a single row of parsed column defaults, taking ownership of its buffers. */
   public void defaults(VectorSchemaRoot root) {
     if (root == null) {

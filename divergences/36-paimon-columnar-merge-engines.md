@@ -47,5 +47,5 @@ representative user sequence; changing which files compact together can reorder 
 combined within those files. Forcing both twins to compact at every checkpoint made the results
 agree, but would change the user's compaction policy. We therefore retain the stock writer for
 user-sequence partial/aggregation combinations instead. Partial-update's per-field sequence groups
-remain supported. The remaining coverage is tracked in
-[issue #47](https://github.com/datafusion-contrib/StreamFusion/issues/47).
+remain supported. These combinations, complex sequence types and routing defaults are
+[deliberate merge fallbacks](../.claude/wontdos/60-paimon-merge-fallbacks.md).

@@ -202,6 +202,7 @@ public final class NativeKeyValueSinkWrite implements StoreSinkWrite, AutoClosea
     buffer.index = index;
     buffer.postponeFileOrder = fileOrder;
     try {
+      buffer.buffer.aggregators(PaimonMergeOptions.aggregators(table));
       buffer.buffer.defaults(PaimonMergeOptions.defaults(table, NativeAllocator.SHARED));
     } catch (Throwable failure) {
       buffer.buffer.close();

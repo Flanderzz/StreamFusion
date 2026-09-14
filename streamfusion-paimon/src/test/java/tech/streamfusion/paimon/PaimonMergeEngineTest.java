@@ -245,10 +245,7 @@ class PaimonMergeEngineTest {
             DataTypes.DOUBLE(),
             DataTypes.DECIMAL(6, 2),
             DataTypes.DECIMAL(38, 2))) {
-      for (String function :
-          type.getTypeRoot() == org.apache.paimon.types.DataTypeRoot.DECIMAL
-              ? List.of("sum")
-              : List.of("sum", "product")) {
+      for (String function : List.of("sum", "product")) {
         RowType schema =
             new RowType(
                 List.of(
