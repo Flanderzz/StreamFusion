@@ -200,6 +200,10 @@ public final class StreamFusionSuiteAgent {
     INSTALLED_CONFIGS.remove(tableConfig);
   }
 
+  public static boolean installed(Object tableConfig) {
+    return INSTALLED_CONFIGS.contains(tableConfig);
+  }
+
   public static void enterUnmodifiedPlanSetup() {
     UNMODIFIED_PLAN_SETUP.set(Boolean.TRUE);
   }
@@ -211,6 +215,34 @@ public final class StreamFusionSuiteAgent {
   public static final class InstallStreamFusion {
 
     private InstallStreamFusion() {}
+
+    @Advice.OnMethodExit
+    static void exit(
+        @Advice.Argument(0) Object context,
+        @Advice.Return(readOnly = false, typing = Assigner.Typing.DYNAMIC) Object planner) {
+      if (!planner
+          .getClass()
+          .getName()
+          .equals("org.apache.flink.table.planner.delegation.StreamPlanner")) {
+        return;
+      }
+      try {
+        Class<?> contextClass =
+            Class.forName("org.apache.flink.table.delegation.PlannerFactory$Context");
+        Object tableConfig = contextClass.getMethod("getTableConfig").invoke(context);
+        if (StreamFusionSuiteAgent.installed(tableConfig)) {
+          planner =
+              Class.forName(
+                      "tech.streamfusion.planner.StreamFusionPlannerFactory",
+                      true,
+                      context.getClass().getClassLoader())
+                  .getMethod("createStreamingPlanner", contextClass)
+                  .invoke(null, context);
+        }
+      } catch (ReflectiveOperationException e) {
+        throw new IllegalStateException("StreamFusion complete-plan installation failed", e);
+      }
+    }
 
     @Advice.OnMethodEnter
     static void enter(@Advice.Argument(0) Object context) {

@@ -49,3 +49,15 @@ merge snapshots preserve the winning add kind. Recovery counts emitted merged ro
 the prefix, including when switching between Java and native readers. Apache attribution ships
 in the Paimon JAR's NOTICE. Current coverage, budgets and catch-up measurements are in the
 connector page.
+
+Finite-file completion flushes the split's final bounded watermark before releasing its Flink
+source output. Flink 2.2.1 removes a split's periodic generator in `releaseOutputForSplit`; an
+Arrow reader can prefetch EOF and release a small file before that generator's next tick. The
+three-row snapshot/one-row follow-up regression reproduced a stalled second window while stock
+Paimon advanced. The completion flush uses only the maximum timestamp already emitted by that
+split, minus the admitted watermark delay. It passes through Flink's existing split multiplexer,
+retaining its handling of other active splits and idleness. Active files still emit periodically;
+no watermark is inserted inside an Arrow batch. This is an explicit final-progress flush at file
+completion, rather than relying on the stock reader's slower iteration and single-batch pool to
+leave time for a periodic callback. Shared native window branches and stock Flink produce the same
+results across both commits for Parquet and ORC.

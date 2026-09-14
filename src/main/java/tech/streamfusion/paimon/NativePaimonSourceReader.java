@@ -1,10 +1,12 @@
 package tech.streamfusion.paimon;
 
 import java.util.Map;
+import org.apache.flink.api.connector.source.ReaderOutput;
 import org.apache.flink.api.connector.source.SourceReaderContext;
 import org.apache.flink.configuration.ConfigurationUtils;
 import org.apache.flink.configuration.CoreOptions;
 import org.apache.flink.connector.base.source.reader.SingleThreadMultiplexSourceReaderBase;
+import org.apache.flink.core.io.InputStatus;
 import org.apache.paimon.disk.IOManager;
 import org.apache.paimon.flink.metrics.FlinkMetricRegistry;
 import org.apache.paimon.flink.source.FileStoreSourceSplit;
@@ -22,19 +24,24 @@ final class NativePaimonSourceReader
         NativeSourceRecord, ArrowBatch, FileStoreSourceSplit, PaimonSourceSplitState> {
   private final IOManager io;
   private long lastSnapshot = Long.MIN_VALUE;
+  private final boolean watermarked;
+  private final long watermarkDelayMillis;
+  private PaimonSplitWatermarks watermarkOutput;
 
   NativePaimonSourceReader(
       FileStoreTable table,
       ReadBuilder read,
       SourceReaderContext context,
       int batchRows,
-      int rowtimeIndex) {
+      int rowtimeIndex,
+      long watermarkDelayMillis) {
     this(
         table,
         read,
         context,
         batchRows,
         rowtimeIndex,
+        watermarkDelayMillis,
         IOManager.create(
             ConfigurationUtils.splitPaths(context.getConfiguration().get(CoreOptions.TMP_DIRS))),
         new FileStoreSourceReaderMetrics(context.metricGroup()));
@@ -46,6 +53,7 @@ final class NativePaimonSourceReader
       SourceReaderContext context,
       int batchRows,
       int rowtimeIndex,
+      long watermarkDelayMillis,
       IOManager io,
       FileStoreSourceReaderMetrics metrics) {
     super(
@@ -70,6 +78,19 @@ final class NativePaimonSourceReader
         context.getConfiguration(),
         context);
     this.io = io;
+    this.watermarked = rowtimeIndex >= 0;
+    this.watermarkDelayMillis = watermarkDelayMillis;
+  }
+
+  @Override
+  public InputStatus pollNext(ReaderOutput<ArrowBatch> output) throws Exception {
+    if (!watermarked) {
+      return super.pollNext(output);
+    }
+    if (watermarkOutput == null) {
+      watermarkOutput = new PaimonSplitWatermarks(output, watermarkDelayMillis);
+    }
+    return super.pollNext(watermarkOutput);
   }
 
   @Override

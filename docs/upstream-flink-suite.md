@@ -41,10 +41,9 @@ built against the suite's Flink version, and fails unless it proves both that a 
 wrote an append-table data file from a native Arrow bundle and that one wrote a primary-key
 level-0 file natively, and that a native snapshot merger emitted an Arrow batch. The markers are
 emitted only after the corresponding write or read returns successfully.
-The source-reuse plan assertion in `ContinuousFileStoreITCase.testSourceReuseWithScanPushDown`
-currently fails with native sources enabled: the native node prevents Flink's projection-unifying
-scan reuse. The harness leaves this assertion enabled and reports the failure. Remaining source
-sharing coverage is tracked in [#27](https://github.com/datafusion-contrib/StreamFusion/issues/27).
+The agent selects the same complete-plan streaming hook as the deployed planner factory.
+`ContinuousFileStoreITCase.testSourceReuseWithScanPushDown` passes unchanged: compatible projected
+scans share one native source, while filtered and limited scans stay separate.
 Streaming inserts covered by the [Paimon connector whitelist](connectors/paimon.md)
 can take the native sink, including coordinated writers, coordinator commits, dynamic
 partition routing, and automatic append-buffer spilling. The regular StreamFusion SQL parity
@@ -139,8 +138,10 @@ The validated Flink 2.2.1 baseline is 8,619 tests: 8,570 passed, 48 skipped by F
 failures or errors, and the one independently reproduced `CURRENT_DATE` xfail described above.
 The format baseline is 185 tests: 175 passed and 10 skipped by Flink. The Kafka SQL baseline is 86
 tests, all passed. The Parquet sink baseline is 8 tests, all passed, including the suite's explicit
-proof that Flink instantiated the native Parquet writer. The Paimon append-table baseline is 200
-tests, all passed, including the proof that a streaming insert wrote a native Paimon bundle.
+proof that Flink instantiated the native Parquet writer. The complete Paimon baseline is 265
+tests, all passed with native source sharing, including native append-write, primary-key-write,
+and snapshot-merge markers. The complete-plan hook also passed 816 targeted Flink join, Calc and
+JSON function cases.
 The ORC Java-writer validation on September 14, 2026 passed all 46 unchanged Flink ORC SQL tests.
 A targeted upstream Paimon run passed 22 continuous-read, partition-write and schema-change cases;
 the [ORC page](connectors/orc.md#build-and-verification) distinguishes that run from local tests

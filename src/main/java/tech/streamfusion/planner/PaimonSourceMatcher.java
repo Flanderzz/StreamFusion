@@ -1,10 +1,12 @@
 package tech.streamfusion.planner;
 
 import java.util.Set;
+import java.util.TreeMap;
 import org.apache.calcite.rel.RelNode;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalTableSourceScan;
 import org.apache.flink.table.planner.plan.schema.TableSourceTable;
+import org.apache.flink.table.planner.plan.utils.FlinkRelOptUtil;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.flink.LogicalTypeConversion;
 import org.apache.paimon.flink.source.DataTableSource;
@@ -147,6 +149,11 @@ final class PaimonSourceMatcher {
         scan.getTraitSet(),
         scan.getRowType(),
         (FileStoreTable) source.getTable(),
-        ScanWatermarkSpec.of(scan));
+        ScanWatermarkSpec.of(scan),
+        FlinkRelOptUtil.getDigest(scan)
+            + "|"
+            + scan.getRowType().getFullTypeString()
+            + "|"
+            + new TreeMap<>(source.getTable().options()));
   }
 }

@@ -12,7 +12,10 @@ The fix keeps reuse enabled and adds a per-instance term to every native rel's d
 at the digest explain level, so `EXPLAIN` output is unchanged). Flink's post-optimize reuse pass
 merges by digest, so it can now merge the shared rowwise prefix under the islands exactly as stock
 Flink does — but it can never merge a columnar subtree, since each native instance's digest is
-unique.
+unique. Explicitly shared native sources are the exception: the source and its Arrow share node
+digest by one group token, and the share operator gives each declared consumer a retained buffer
+view. The whole-plan rewrite counts consumers across all admitted sink roots before Flink's final
+reuse pass. See [shared native sources](shared-native-sources.md).
 
 Measured on the generator profile loop: q3 +17%, q9 +9%, q20 +6%, with the conversion cost per
 iteration restored to parity with stock Flink's.

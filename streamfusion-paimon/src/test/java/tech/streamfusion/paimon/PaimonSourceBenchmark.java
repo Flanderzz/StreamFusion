@@ -24,6 +24,79 @@ import tech.streamfusion.operator.RowDataArrowConverter;
 
 /** Committed file reads to Java rows or Arrow, with an id checksum; release builds only. */
 class PaimonSourceBenchmark {
+  @Test
+  @EnabledIfEnvironmentVariable(named = "SF_PAIMON_SHARING_BENCHMARK", matches = "true")
+  void compareThreeArrowConsumers() throws Exception {
+    int rows = Integer.parseInt(System.getenv().getOrDefault("SF_PAIMON_SOURCE_ROWS", "262144"));
+    String format = System.getenv().getOrDefault("SF_PAIMON_FILE_FORMAT", "parquet");
+    FileStoreTable table =
+        PaimonTestTables.createTable(
+            Files.createTempDirectory("paimon-sharing-bench"),
+            Map.of("bucket", "-1", "file.format", format));
+    var builder = table.newStreamWriteBuilder().withCommitUser("sharing-bench");
+    try (var writer = builder.newWrite();
+        var commit = builder.newCommit()) {
+      for (var row : PaimonTestTables.values(rows)) writer.write(PaimonTestTables.paimonRow(row));
+      commit.commit(1, writer.prepareCommit(true, 1));
+    }
+    var read = table.newReadBuilder().withProjection(new int[] {0, 1, 2, 7});
+    var splits = read.newStreamScan().plan().splits();
+    double[] best = {Double.POSITIVE_INFINITY, Double.POSITIVE_INFINITY};
+    long[] files = new long[2];
+    Long expectedChecksum = null;
+    for (int run = 0; run < 4; run++) {
+      for (int offset = 0; offset < 2; offset++) {
+        int mode = (run + offset) % 2;
+        int readers = mode == 0 ? 3 : 1;
+        int consumers = mode == 0 ? 1 : 3;
+        long count = 0;
+        long checksum = 0;
+        long nativeFiles = 0;
+        long start = System.nanoTime();
+        for (int pass = 0; pass < readers; pass++) {
+          for (int split = 0; split < splits.size(); split++) {
+            try (var reader = new NativePaimonSplitReader(table, read, read.newRead(), 4096, -1)) {
+              reader.handleSplitsChanges(
+                  new SplitsAddition<>(
+                      List.of(new FileStoreSourceSplit("file-" + split, splits.get(split)))));
+              boolean finished = false;
+              while (!finished) {
+                var fetched = reader.fetch();
+                if (fetched.nextSplit() != null) {
+                  var record = fetched.nextRecordFromSplit();
+                  if (record != null) {
+                    record.batch().shareAcross(consumers);
+                    for (int consumer = 0; consumer < consumers; consumer++) {
+                      try (var root = record.batch().root()) {
+                        count += root.getRowCount();
+                        checksum += arrowChecksum(root, false);
+                      }
+                    }
+                  }
+                }
+                finished = !fetched.finishedSplits().isEmpty();
+                fetched.recycle();
+              }
+              nativeFiles += reader.nativeFilesRead();
+            }
+          }
+        }
+        double seconds = (System.nanoTime() - start) / 1e9;
+        if (run > 0) best[mode] = Math.min(best[mode], seconds);
+        files[mode] = nativeFiles;
+        assertEquals(3L * rows, count);
+        if (expectedChecksum == null) expectedChecksum = checksum;
+        else assertEquals(expectedChecksum.longValue(), checksum);
+      }
+    }
+    assertTrue(files[1] > 0);
+    assertEquals(3 * files[1], files[0]);
+    System.out.printf(
+        "PAIMON_SHARING format=%s rows=%d consumers=3 independent_s=%.4f shared_s=%.4f"
+            + " speedup=%.2fx independent_files=%d shared_files=%d%n",
+        format, rows, best[0], best[1], best[0] / best[1], files[0], files[1]);
+  }
+
   private enum ReadMode {
     JAVA_ROWS,
     JAVA_ARROW,

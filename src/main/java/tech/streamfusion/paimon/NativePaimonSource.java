@@ -24,9 +24,19 @@ public final class NativePaimonSource
   private final ContinuousFileStoreSource delegate;
   private final int batchRows;
   private final int rowtimeIndex;
+  private final long watermarkDelayMillis;
 
   public NativePaimonSource(
       FileStoreTable table, int[] projection, int batchRows, int rowtimeIndex) {
+    this(table, projection, batchRows, rowtimeIndex, 0);
+  }
+
+  public NativePaimonSource(
+      FileStoreTable table,
+      int[] projection,
+      int batchRows,
+      int rowtimeIndex,
+      long watermarkDelayMillis) {
     if (batchRows <= 0) {
       throw new IllegalArgumentException("Paimon source batch size must be positive");
     }
@@ -36,6 +46,7 @@ public final class NativePaimonSource
     this.delegate = new ContinuousFileStoreSource(read, table.options(), null);
     this.batchRows = batchRows;
     this.rowtimeIndex = rowtimeIndex;
+    this.watermarkDelayMillis = watermarkDelayMillis;
   }
 
   public static String unsupportedTypeReason(FileStoreTable table) {
@@ -49,7 +60,8 @@ public final class NativePaimonSource
 
   @Override
   public SourceReader<ArrowBatch, FileStoreSourceSplit> createReader(SourceReaderContext context) {
-    return new NativePaimonSourceReader(table, read, context, batchRows, rowtimeIndex);
+    return new NativePaimonSourceReader(
+        table, read, context, batchRows, rowtimeIndex, watermarkDelayMillis);
   }
 
   @Override

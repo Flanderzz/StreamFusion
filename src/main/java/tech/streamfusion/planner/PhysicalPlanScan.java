@@ -3,15 +3,14 @@ package tech.streamfusion.planner;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Iterator;
 import java.util.ServiceConfigurationError;
 import java.util.ServiceLoader;
 import java.util.Set;
 import org.apache.calcite.rel.RelNode;
-import org.apache.calcite.rel.core.Calc;
 import org.apache.flink.table.api.config.OptimizerConfigOptions;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalCalc;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalChangelogNormalize;
@@ -49,10 +48,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Optimizer program appended after the host engine's physical optimization. It rewrites the
- * optimized streaming physical plan, replacing supported operators with native ones and leaving
- * everything else for the host engine to execute, the planner-level counterpart to how batch
- * accelerators inject a post-optimization rewrite.
+ * Rewrites the host engine's optimized physical plan, replacing supported operators with native
+ * ones and leaving everything else for the host engine to execute. The deployed planner supplies
+ * all expanded sink roots together; the program hook supports an already constructed stock planner.
  *
  * <p>Only operators the native side reproduces exactly are substituted, so results are unchanged
  * and unsupported plans fall back cleanly.
@@ -69,66 +67,82 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
   private final List<String> operatorTypes = new ArrayList<>();
   private final List<String> fallbackReasons = new ArrayList<>();
   private int substitutions;
+  private boolean completePlan;
 
   private static final List<NativePlannerExtension> EXTENSIONS = loadExtensions();
   private static final List<Substitution<?>> REGISTRY = buildRegistry();
 
   @Override
   public RelNode optimize(RelNode root, StreamOptimizeContext context) {
+    if (completePlan) {
+      return root;
+    }
+    return optimizeRoots(List.of(root)).get(0);
+  }
+
+  void deferToCompletePlan() {
+    completePlan = true;
+  }
+
+  List<RelNode> optimizeRoots(List<RelNode> roots) {
     try (NativeConfig.Scope ignored =
-        NativeConfig.usePlannerConfig(ShortcutUtils.unwrapTableConfig(root).getConfiguration())) {
-      return optimizeConfigured(root);
+        NativeConfig.usePlannerConfig(
+            ShortcutUtils.unwrapTableConfig(roots.get(0)).getConfiguration())) {
+      return optimizeConfigured(roots);
     }
   }
 
-  private RelNode optimizeConfigured(RelNode root) {
+  private List<RelNode> optimizeConfigured(List<RelNode> roots) {
     operatorTypes.clear();
     fallbackReasons.clear();
     substitutions = 0;
-    record(root);
+    roots.forEach(this::record);
     // Master switch: with native acceleration off, substitute nothing — the query runs on the host.
     if (!NativeConfig.nativeEnabled()) {
       LOG.info("StreamFusion native acceleration is disabled; the plan runs on Flink");
-      return root;
+      return roots;
     }
-    RelNode optimized = substitute(root);
+    Set<String> repeatedSources =
+        sourceSharingEnabled(roots.get(0)) ? repeatedSourceKeys(roots) : Set.of();
+    List<RelNode> optimized = new ArrayList<>();
+    for (RelNode root : roots) {
+      optimized.add(substitute(root, repeatedSources));
+    }
+    optimized = shareIdenticalSources(optimized);
     // The one always-on plan-time summary; -Dstreamfusion.logFallbackReasons=true itemizes the
     // reasons and explainSummary() carries them into explain output.
     LOG.info(
-        "StreamFusion substituted {} of {} plan operators natively ({} fallback reason(s) recorded)",
+        "StreamFusion substituted {} of {} plan operators natively ({} fallback reason(s)"
+            + " recorded)",
         substitutions,
         operatorTypes.size(),
         fallbackReasons.size());
     return optimized;
   }
 
-  private RelNode substitute(RelNode root) {
+  private RelNode substitute(RelNode root, Set<String> repeatedSources) {
     // Pass 1 substitutes native (columnar) operators.
-    boolean sourceSharingEnabled =
-        NativeConfig.shareSources()
-            && ShortcutUtils.unwrapTableConfig(root)
-                .get(OptimizerConfigOptions.TABLE_OPTIMIZER_REUSE_SUB_PLAN_ENABLED);
-    Set<String> repeatedSources = sourceSharingEnabled ? repeatedSourceKeys(root) : Set.of();
-    RelNode substituted =
-        rewrite(root, new PlanContext(this, repeatedSources));
+    int previousSubstitutions = substitutions;
+    RelNode substituted = rewrite(root, new PlanContext(this, repeatedSources));
     // Whole-query all-or-nothing: every native operator but a source/sink is Arrow → Arrow.
-    // If any operator other than a source (a leaf) or the sink (the plan root) is still row-wise, the
-    // query cannot run as one columnar island, so accelerate nothing — it runs as stock Flink. The only
+    // If any operator other than a source (a leaf) or the sink (the plan root) is still row-wise,
+    // the
+    // query cannot run as one columnar island, so accelerate nothing — it runs as stock Flink. The
+    // only
     // row-wise operator allowed is a rowwise source/sink, bridged by a transpose at the perimeter.
-    if (substitutions > 0 && !fullyColumnar(substituted, true)) {
-      substitutions = 0; // reasons stay recorded for reporting; nothing is substituted
+    if (substitutions > previousSubstitutions && !fullyColumnar(substituted, true)) {
+      substitutions = previousSubstitutions; // retain counts from other admitted roots
       return root;
     }
-    // Pass 2 inserts a row↔columnar transpose at each perimeter edge (rowwise source/sink ↔ island).
-    // Pass 3 deduplicates identical native sources into one shared instance, so a multi-view query
-    // reads and decodes its topic once — the columnar counterpart of Flink's sub-plan reuse, which
-    // the digest barriers deliberately keep away from native nodes.
-    return shareIdenticalSources(insertTransitions(substituted));
+    // Pass 2 inserts a row↔columnar transpose at each perimeter edge (rowwise source/sink ↔
+    // island).
+    // Source sharing follows over every admitted root, after per-root fallbacks are settled.
+    return insertTransitions(substituted);
   }
 
-  private static Set<String> repeatedSourceKeys(RelNode root) {
+  private static Set<String> repeatedSourceKeys(List<RelNode> roots) {
     Map<String, Integer> counts = new LinkedHashMap<>();
-    collectSourceKeys(root, counts);
+    roots.forEach(root -> collectSourceKeys(root, counts));
     Set<String> repeated = new HashSet<>();
     counts.forEach(
         (key, count) -> {
@@ -534,25 +548,27 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
 
   // ---------------------------------------------------------------------------- island composition
 
+  static boolean sourceSharingEnabled(RelNode root) {
+    var config = ShortcutUtils.unwrapTableConfig(root);
+    return NativeConfig.shareSources()
+        && config.get(OptimizerConfigOptions.TABLE_OPTIMIZER_REUSE_SUB_PLAN_ENABLED)
+        && config.get(OptimizerConfigOptions.TABLE_OPTIMIZER_REUSE_SOURCE_ENABLED);
+  }
+
   /**
-   * Rewires every group of semantically identical native source/decode boundaries to one shared instance under
-   * a {@link StreamPhysicalNativeShare} carrying the branch count (the same DAG shape Flink's
-   * sub-plan reuse produces for the rowwise plan, and the source dedup Arroyo's named nodes and
-   * RisingWave's share operator perform). The share operator declares the count on each batch, so
-   * every branch takes its own retained view instead of the single-owner root.
+   * Groups identical source/decode boundaries under a share node carrying the final branch count.
+   * Like Arroyo's named source nodes, every branch receives its own retained Arrow view.
    */
-  private RelNode shareIdenticalSources(RelNode root) {
+  private List<RelNode> shareIdenticalSources(List<RelNode> roots) {
     // The DAG this pass builds only survives translation through Flink's digest-based sub-plan
     // reuse (SameRelObjectShuttle splits shared instances; SubplanReuseUtil re-merges them by
     // digest). With reuse disabled the clones would each keep an over-declared consumer count, so
     // leave the branches reading independently.
-    if (!NativeConfig.shareSources()
-        || !ShortcutUtils.unwrapTableConfig(root)
-            .get(OptimizerConfigOptions.TABLE_OPTIMIZER_REUSE_SUB_PLAN_ENABLED)) {
-      return root;
+    if (!sourceSharingEnabled(roots.get(0))) {
+      return roots;
     }
     Map<String, List<RelNode>> groups = new LinkedHashMap<>();
-    collectShareableScans(root, groups);
+    roots.forEach(root -> collectShareableScans(root, groups));
     Map<RelNode, RelNode> replacements = new IdentityHashMap<>();
     for (List<RelNode> group : groups.values()) {
       if (group.size() < 2) {
@@ -567,7 +583,9 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
         replacements.put(member, share);
       }
     }
-    return replacements.isEmpty() ? root : replaceInputs(root, replacements);
+    return replacements.isEmpty()
+        ? roots
+        : roots.stream().map(root -> replaceInputs(root, replacements)).toList();
   }
 
   private static void collectShareableScans(RelNode node, Map<String, List<RelNode>> groups) {

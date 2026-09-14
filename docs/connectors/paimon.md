@@ -115,12 +115,10 @@ The Rust tests cover keys spanning input batches, 100,000-version and delete-onl
 byte-triggered output flushes, and budget/storage failures. The SQL harness requires a marker
 proving that a native snapshot merger emitted a batch.
 
-The Paimon 2.0.0 SQL harness passed 83 distinct result/recovery cases: all cases in
-`ReadWriteTableITCase`, `PrimaryKeyFileStoreTableITCase` and `FlinkJobRecoveryITCase`, plus
-`ContinuousFileStoreITCase.testWithPrimaryKey` and `testProjectionWithPrimaryKey`. The focused
-continuous-reader run proved native snapshot emission; the other suites can finish without
-needing that path, so include those reader cases when checking the harness's required markers.
-The separate source-reuse plan assertion described below remains failing.
+The complete Paimon 2.0.0 SQL harness passed all 265 result, plan and recovery cases with the
+complete-plan native hook, including the unchanged source-reuse assertion. A focused subset is
+shown below. Include the continuous-reader cases when checking the harness's required native
+snapshot-emission marker; the other suites can finish without needing that path.
 
 ```bash
 FLINK_SUITE_TEST='org.apache.paimon.flink.ReadWriteTableITCase,org.apache.paimon.flink.PrimaryKeyFileStoreTableITCase,org.apache.paimon.flink.FlinkJobRecoveryITCase,org.apache.paimon.flink.ContinuousFileStoreITCase#testWithPrimaryKey+testProjectionWithPrimaryKey' \
@@ -183,11 +181,28 @@ source at planning time:
 must be installed alongside the Paimon module, as for the sink. Native format-factory discovery
 is not required for this reader: it calls the decoder directly on Java-planned files.
 
-Repeated native scans currently use independent readers. Flink's later projection-unifying source
-reuse pass does not recognize the native source node; safe Arrow sharing across these scans is
-remaining work in [#27](https://github.com/datafusion-contrib/StreamFusion/issues/27). Consequently,
-Paimon's `ContinuousFileStoreITCase.testSourceReuseWithScanPushDown` still fails its compiled-plan
-`Reused` assertion with native sources enabled. The default harness reports this planning failure.
+Repeated compatible native scans share one reader, including scans with different top-level
+projections and scans feeding different sinks in a statement set. The deployed streaming planner
+lets Flink union their projected columns before native substitution, then places the reader under
+an explicit Arrow share operator. Every branch takes a retained buffer view, preserving row kinds
+and the normal source watermark/checkpoint flow. Parquet and ORC use the same sharing path.
+When a watermarked split finishes, the reader flushes its final maximum timestamp minus the
+configured delay through Flink's split output before releasing it. Otherwise a tiny native file
+can finish before a periodic tick and lose its final watermark. Active files retain periodic
+emission, and Flink still combines concurrent splits and handles idleness.
+Filters, limits, startup hints, table options, schemas and other scan semantics must agree;
+different scans remain independent. A branch that falls back to Flink is excluded from the native
+consumer count. Disabling `streamfusion.plan.shareSources`, `table.optimizer.reuse-source-enabled`
+or `table.optimizer.reuse-sub-plan-enabled` restores independent native readers.
+
+`PaimonSourceSharingTest` checks three-sink projection union, identical projections, repeated
+compilation, disabled sharing, distinct scans, mixed native/Flink branches, and snapshot-to-tail
+results including deletes and nulls for both formats, with chained and network edges. It also
+checks window closure on every shared branch after a new commit.
+Paimon's unchanged `ContinuousFileStoreITCase.testSourceReuseWithScanPushDown` passes its `Reused`
+assertion and its filter/limit separation assertions. Cross-sink sharing requires the deployed
+planner hook; installing a program into an already constructed stock planner still optimizes each
+root separately. Other source gaps remain in [#27](https://github.com/datafusion-contrib/StreamFusion/issues/27).
 
 `PaimonSourceReadTest` checks append/primary-key twin readers, row kinds, nested values, partition
 values, historical schema mapping, projections, `latest` startup and within-batch resume.

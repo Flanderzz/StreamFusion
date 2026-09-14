@@ -10,11 +10,11 @@ import org.apache.flink.table.delegation.PlannerFactory;
 import org.apache.flink.table.planner.delegation.DefaultPlannerFactory;
 
 /**
- * Installs StreamFusion's stream optimizer stage, then delegates planner construction to Flink.
+ * Installs native substitution after Flink expands the complete streaming plan.
  *
  * <p>This class is instantiated by StreamFusion's planner-loader shim inside Flink's isolated
- * planner classloader. It intentionally composes the stock factory instead of copying Flink's
- * planner implementation.
+ * planner classloader. Streaming uses Flink's planner with a post-optimization hook; batch and
+ * disabled acceleration use its stock factory.
  */
 public final class StreamFusionPlannerFactory implements PlannerFactory {
 
@@ -42,9 +42,14 @@ public final class StreamFusionPlannerFactory implements PlannerFactory {
       if (NativeConfig.nativeEnabled()
           && context.getTableConfig().get(ExecutionOptions.RUNTIME_MODE)
               == RuntimeExecutionMode.STREAMING) {
-        NativePlanner.install(context.getTableConfig());
+        return createStreamingPlanner(context);
       }
     }
     return delegate.create(context);
+  }
+
+  /** Also used by the upstream SQL harness to exercise the deployed planner construction path. */
+  public static Planner createStreamingPlanner(Context context) {
+    return new NativeStreamPlanner(context);
   }
 }

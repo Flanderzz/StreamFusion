@@ -1,7 +1,7 @@
-# Shared native sources (read the topic once per query, not once per branch)
+# Shared native sources
 
-**Applies to:** any query joining two or more views over the same underlying topic (q3, q4, q8, q9,
-q20 in Nexmark)
+**Applies to:** repeated compatible Kafka or Paimon scans, including different sinks in one
+statement set (and q3, q4, q8, q9, q20's views over one Kafka topic in Nexmark).
 
 ## The problem
 
@@ -29,12 +29,20 @@ pushdown; when the branches need different columns, it retains their common writ
 split-aware Flink Kafka source performs one native decode and both branch Calcs project from the
 shared Arrow batch. A single-use source keeps decoder projection pushdown.
 
+The deployed planner runs the rewrite after Flink expands all sink roots. For Paimon it first
+calls Flink's `ScanReuser` on the stock scans, which unions their top-level projections and inserts
+branch projections. The native reader therefore decodes the union once for Parquet or ORC. Scan
+digests retain filters, limits, hints, schema and table options, so distinct reads cannot accidentally
+share. Consumer counts are computed only after each root's native admission/fallback decision.
+
 At runtime the share operator declares the consumer count on each batch, and every chained
 consumer's `root()` take returns its own zero-copy view over the same retained buffers (Arrow's
 buffer reference counts; the split-and-transfer share idiom), so each branch keeps its usual
 read-then-close contract and the buffers free on the last close. The single-consumer hand-off is
 unchanged.
-[`streamfusion.plan.shareSources=false`](../configuration.md) restores per-branch sources.
+[`streamfusion.plan.shareSources=false`](../configuration.md) restores per-branch sources, as do
+Flink's source-reuse and subplan-reuse switches. Cross-sink sharing requires the deployed planner
+hook; the embedded `NativePlanner.install` program on a stock planner only sees one root at a time.
 
 ## Measured
 
@@ -49,5 +57,30 @@ to 21% of samples; the keyed exchanges and updating join become the remaining pa
 The same dedup applies to every multi-view query — q4, q8, q9, and q20 all join two views of the one
 topic; their heavier downstream work amortized the doubled read, but they stop paying it all the
 same.
+
+Paimon's SQL regression verifies three native readers become one and all three sinks retain stock
+Flink results through an initial snapshot and later commits. A release-build reader microbenchmark
+on September 14, 2026 uses 262,144 rows, four files, and three consumers of the same projected
+bigint/string/decimal/array schema. It times native decoding, Arrow view retention/close and an id
+checksum, excluding fixture generation, SQL planning, network transport and downstream operators.
+Each format runs in a fresh JVM on an otherwise idle machine, one warmup plus the best of three
+alternating-order measured runs. Row counts and checksums must match, and native file-read counts
+must fall from 12 to 4.
+
+| Format | Three independent readers | One shared reader | Speedup |
+|---|---:|---:|---:|
+| Parquet | 65.7 ms | 23.8 ms | 2.76× |
+| ORC | 84.0 ms | 29.1 ms | 2.88× |
+
+These are file-reader measurements, not whole-job throughput. Reproduce each format separately:
+
+```bash
+SF_PAIMON_SHARING_BENCHMARK=true SF_PAIMON_FILE_FORMAT=parquet \
+  mvn test -Ppaimon,bench -pl :streamfusion-paimon -am \
+  -Dtest='PaimonSourceBenchmark#compareThreeArrowConsumers' \
+  -Dsurefire.failIfNoSpecifiedTests=false
+```
+
+Use `SF_PAIMON_FILE_FORMAT=orc` for the ORC comparison.
 
 See [Benchmarks](../benchmarks.md) for the full A/B methodology.

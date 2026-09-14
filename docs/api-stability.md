@@ -8,7 +8,8 @@ JARs; it does **not** by itself make a class a stable downstream API.
 The application-facing pre-1.0 surface is intentionally small:
 
 - `NativePlanner.install(...)` and `NativePlanner.explain(...)` for embedded clients that cannot use
-  the distribution loader;
+  the distribution loader (an already constructed stock planner optimizes one root at a time;
+  sharing across statement-set sinks requires the deployed planner hook);
 - the documented `streamfusion.*` configuration keys;
 - the documented state-backend factory identifier.
 

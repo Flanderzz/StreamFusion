@@ -1,8 +1,8 @@
 package tech.streamfusion.planner;
 
+import org.apache.flink.table.api.PlannerConfig;
 import org.apache.flink.table.api.TableConfig;
 import org.apache.flink.table.api.TableEnvironment;
-import org.apache.flink.table.api.PlannerConfig;
 import org.apache.flink.table.planner.calcite.CalciteConfig;
 import org.apache.flink.table.planner.calcite.CalciteConfig$;
 import org.apache.flink.table.planner.plan.optimize.program.FlinkChainedProgram;
@@ -11,8 +11,10 @@ import org.apache.flink.table.planner.plan.optimize.program.StreamOptimizeContex
 
 /**
  * Hooks native execution into the host engine's SQL optimizer. The engine exposes no append-only
- * extension point, so this rebuilds the default streaming optimization chain, adds a native stage
- * at the end, and installs the result as the configured planner program before any query runs.
+ * extension point, so this registers a native stage in the configured streaming program. The
+ * deployed planner defers that stage until all sink roots have been expanded, allowing source
+ * sharing across a statement set. Installing into an already constructed stock planner retains the
+ * per-root program hook.
  */
 public final class NativePlanner {
 
@@ -47,7 +49,10 @@ public final class NativePlanner {
         return (PhysicalPlanScan) installed;
       }
       throw new IllegalStateException(
-          "Planner program name '" + PROGRAM_NAME + "' is already owned by " + installed.getClass());
+          "Planner program name '"
+              + PROGRAM_NAME
+              + "' is already owned by "
+              + installed.getClass());
     }
     PhysicalPlanScan scan = new PhysicalPlanScan();
     program.addLast(PROGRAM_NAME, scan);

@@ -53,7 +53,11 @@ final class NativePaimonSourceExecNode extends ExecNodeBase<ArrowBatch>
             .toArray();
     var source =
         new NativePaimonSource(
-            table, projection, 4096, watermark == null ? -1 : watermark.rowtimeIndex);
+            table,
+            projection,
+            4096,
+            watermark == null ? -1 : watermark.rowtimeIndex,
+            watermark == null ? 0 : watermark.delayMillis);
     WatermarkStrategy<ArrowBatch> strategy =
         watermark == null
             ? WatermarkStrategy.noWatermarks()

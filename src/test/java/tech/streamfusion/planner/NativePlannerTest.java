@@ -21,6 +21,29 @@ import org.junit.jupiter.api.Test;
 class NativePlannerTest {
 
   @Test
+  void deployedPlannerSharesKafkaAcrossSinks() throws Exception {
+    var env =
+        org.apache.flink.streaming.api.environment.StreamExecutionEnvironment
+            .getExecutionEnvironment();
+    var sql = tech.streamfusion.NativePlannerTestEnvironment.create(env);
+    sql.executeSql(
+        "CREATE TABLE k (id BIGINT, name STRING, score DOUBLE) WITH ('connector'='kafka',"
+            + " 'topic'='shared', 'properties.bootstrap.servers'='localhost:9092',"
+            + " 'scan.startup.mode'='earliest-offset', 'format'='csv')");
+    sql.executeSql("CREATE TABLE names (name STRING) WITH ('connector'='blackhole')");
+    sql.executeSql("CREATE TABLE scores (score DOUBLE) WITH ('connector'='blackhole')");
+    var statements = sql.createStatementSet();
+    statements.addInsertSql("INSERT INTO names SELECT name FROM k WHERE id > 0");
+    statements.addInsertSql("INSERT INTO scores SELECT score FROM k WHERE id > 1");
+    String plan = statements.compilePlan().explain();
+    assertTrue(plan.contains("NativeShare(consumers=[2]"), plan);
+    assertTrue(plan.contains("Reused"), plan);
+    assertEquals(1, countOccurrences(plan, "NativeKafkaDecode("), plan);
+    sql.getConfig().set("streamfusion.native.enabled", "false");
+    assertFalse(statements.compilePlan().explain().contains("Native"));
+  }
+
+  @Test
   void plannerOptionsUseJobConfiguration() {
     Configuration config = new Configuration();
     config.setString("streamfusion.native.enabled", "false");
