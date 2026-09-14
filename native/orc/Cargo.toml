@@ -12,6 +12,8 @@ crate-type = ["cdylib", "rlib"]
 streamfusion-bridge = { path = "../bridge" }
 arrow.workspace = true
 jni.workspace = true
+orc-rust = { version = "=0.9.0", default-features = false, optional = true }
+arrow59 = { package = "arrow", version = "59", default-features = false, features = ["ffi"], optional = true }
 
 [dependencies.libmimalloc-sys]
 workspace = true
@@ -24,3 +26,4 @@ cmake = "0.1"
 [features]
 default = []
 mimalloc = ["dep:libmimalloc-sys", "libmimalloc-sys/v2"]
+reader-comparison = ["dep:orc-rust", "dep:arrow59"]

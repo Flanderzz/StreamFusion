@@ -54,4 +54,17 @@ public final class NativeOrc {
   public static native void orcEncoderFinish(long handle);
 
   public static native void closeOrcEncoder(long handle);
+
+  /** Benchmark-only entry points; require the opt-in reader-comparison native feature. */
+  public static native long[] compareReaders(
+      int backend,
+      Object input,
+      long length,
+      long schemaAddress,
+      String[] physicalNames,
+      int batchSize,
+      boolean verify);
+
+  public static native long[] consumeComparisonBatch(
+      long arrayAddress, long schemaAddress, boolean verify);
 }

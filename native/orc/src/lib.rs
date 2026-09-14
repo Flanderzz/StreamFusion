@@ -6,6 +6,9 @@ use streamfusion_bridge::prelude::*;
 use streamfusion_bridge::{self as bridge, *};
 streamfusion_bridge::link_allocator!();
 
+#[cfg(feature = "reader-comparison")]
+mod reader_comparison;
+
 unsafe extern "C" {
     fn sf_orc_error() -> *const c_char;
     fn sf_orc_writer_new(

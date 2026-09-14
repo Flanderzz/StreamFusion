@@ -208,7 +208,10 @@ reader. Both Arrow paths materialize every projected column and checksum the res
 The Java row scan checksums the id directly and does not construct Arrow output.
 It verifies row counts and checksums across all three paths. One warmup and three measured runs
 rotate execution order and report each path's best time. `speedup` compares native with Java rows;
-`arrow_speedup` compares native with Java-to-Arrow, the relevant boundary for a native pipeline.
+`arrow_speedup` compares native with Java-to-Arrow. Both Arrow endpoints in this older diagnostic
+are **Java Arrow**, including a native-to-Java import; they do not directly measure feeding our Rust
+operators. The [ORC reader comparison](orc.md#reading-into-arrow-rs) instead ends all four paths at
+an arrow-rs `RecordBatch` consumed in Rust.
 This is a local file-reader diagnostic, not an end-to-end Flink or remote-storage benchmark.
 
 Local Apple Silicon measurements with release libraries and mimalloc:

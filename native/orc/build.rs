@@ -5,7 +5,12 @@ fn main() {
     let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
     // Cargo feature combinations change build-script hashes but not this C++ ABI. Reuse the
     // CMake tree within the locked target/profile directory instead of rebuilding its dependencies.
-    let cpp_out = out.ancestors().nth(3).unwrap().join("orc-cpp");
+    let comparison = std::env::var_os("CARGO_FEATURE_READER_COMPARISON").is_some();
+    let cpp_out = out.ancestors().nth(3).unwrap().join(if comparison {
+        "orc-cpp-comparison"
+    } else {
+        "orc-cpp"
+    });
     if std::env::var_os("CMAKE").is_none() {
         let output = std::process::Command::new("python3")
             .arg("cmake.py")
@@ -19,6 +24,10 @@ fn main() {
     let mut build = cmake::Config::new("cpp");
     build.out_dir(cpp_out);
     build.define("CMAKE_INSTALL_LIBDIR", "lib");
+    build.define(
+        "SF_ORC_READER_COMPARISON",
+        if comparison { "ON" } else { "OFF" },
+    );
     let target = std::env::var("TARGET").unwrap();
     if target.contains("apple-darwin") {
         let host = std::env::var("HOST").unwrap();
@@ -41,6 +50,10 @@ fn main() {
     }
     let output = build.build();
     println!("cargo:rustc-link-search=native={}/lib", output.display());
+    if comparison {
+        println!("cargo:rustc-link-lib=static=streamfusion_orc_comparison");
+        println!("cargo:rustc-link-lib=static=arrow");
+    }
     for library in [
         "streamfusion_orc_cpp",
         "orc",

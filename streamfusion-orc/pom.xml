@@ -67,6 +67,12 @@
     <!-- Universal releases package the payloads staged for each supported platform. -->
     <profiles>
         <profile>
+            <id>orc-reader-bench</id>
+            <properties>
+                <native.cargo.args>build --release --features mimalloc,reader-comparison</native.cargo.args>
+            </properties>
+        </profile>
+        <profile>
             <id>universal</id>
             <build>
                 <resources>

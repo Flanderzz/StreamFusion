@@ -123,9 +123,10 @@ does not construct Arrow output. The Java-to-Arrow baseline includes the product
 row ownership copy and uses the same 4,096-row batch size and changelog sidecar as native reading.
 The current ORC adapter appends values individually and allocates Arrow output for each batch.
 Host FileIO callbacks and Arrow import also occur within the timed native path. These are known
-additional operations, not a profile attributing the slowdown to any one of them. The Arrow
-comparison measures the boundary needed by the native pipeline and snapshot merger; it does
-not establish that the C++ codec alone decodes faster than Java, or that an entire Flink job does.
+additional operations, not a profile attributing the slowdown to any one of them. This older
+diagnostic imports native output into **Java Arrow** before checksumming it; its endpoint differs
+from consumption by our Rust operators. It does not establish that the C++ codec alone decodes
+faster than Java, or that an entire Flink job does.
 The writer includes row-to-Arrow conversion, routing, sorting, encoding,
 and Paimon's checkpoint/compaction work; full compaction remains Java.
 
@@ -135,3 +136,80 @@ SF_PAIMON_FILE_FORMAT=orc SF_PAIMON_SOURCE_BENCHMARK=true SF_PAIMON_CHANGELOG_BE
   -Dtest=PaimonSourceBenchmark,PaimonChangelogSinkBenchmark \
   -Dsurefire.failIfNoSpecifiedTests=false
 ```
+
+### Reading into arrow-rs
+
+`OrcReaderComparisonBenchmark` compares four paths through consumption of an Arrow Rust 58
+`RecordBatch`: our ORC C++/nanoarrow adapter, Arrow C++ `ORCFileReader`, `orc-rust`, and Paimon's
+Java reader followed by the production row ownership copy, row-to-Arrow conversion and native
+C Data import. Native batches never return to Java in this measurement. Java owns file I/O for
+all readers; the three native decoders use the same synchronous seek/read callback and 64 KiB
+copy buffer. The timer includes file opening, decoding, projection, conversion to the operator
+schema, a common Rust integer checksum, and reader/batch destruction. Planning and writing
+fixtures are outside timing. Every projected column is materialized; the timed checksum touches
+the first integer column. Separate untimed scans compare order-independent full-row fingerprints
+with Java.
+
+The opt-in build uses released Arrow C++ 25.0.1 and orc-rust 0.9.0. Both C++ adapters link the
+same ORC 2.3.1 library. The build compiles the unchanged released Arrow ORC adapter sources
+against that library, avoiding two copies of ORC/protobuf. orc-rust uses Arrow Rust 59, so its
+output crosses the standard Arrow C Data ABI into our existing Arrow Rust 58 without copying
+the buffers. Any required schema casts are included in timing. All native paths use release
+optimization and the module's mimalloc allocator.
+
+```bash
+SF_ORC_READER_COMPARISON=true \
+  mvn test -Pbench,paimon,orc-reader-bench -pl :streamfusion-paimon -am \
+  -Dtest=OrcReaderComparisonBenchmark -Dsurefire.failIfNoSpecifiedTests=false
+```
+
+`SF_ORC_COMPARISON_ROWS` defaults to 262144, `SF_ORC_COMPARISON_TRIALS` to five, and
+`SF_ORC_COMPARISON_CODECS` to `none,zstd` (also accepts `zlib,snappy,lz4`). Each case rotates the
+four readers through two warmups and the measured trials, reporting the median and minimum.
+Files are local and warm in the OS cache. `peak_batch_bytes` is Arrow's reported memory size of
+the largest output batch, **not peak decoder or process memory**. `io_bytes` counts bytes
+requested through the native readers' host callback; it is unavailable for the Java baseline.
+
+The comparison dependencies and JNI entry points are enabled only by `orc-reader-bench` /
+`reader-comparison`; ordinary builds and deployments keep the existing nanoarrow adapter.
+The comparison profile is for tests, not release packaging.
+
+On an Apple M1 Max (64 GiB RAM, Java 17, UTC), five-trial median times for 262,144 rows were:
+
+| Codec | Columns / file mode | Our adapter | Arrow C++ | orc-rust | Java to arrow-rs |
+|---|---|---:|---:|---:|---:|
+| NONE | 4 / append | 45.0 ms | 19.4 ms | 18.0 ms | 114.5 ms |
+| NONE | 14 / append | 141.8 ms | 63.8 ms | 56.8 ms | 343.8 ms |
+| NONE | 4 + row kind / changelog | 37.4 ms | 12.3 ms | 10.7 ms | 104.7 ms |
+| ZLIB | 4 / append | 55.6 ms | 30.1 ms | 29.5 ms | 122.9 ms |
+| ZLIB | 14 / append | 165.5 ms | 87.5 ms | 84.0 ms | 365.1 ms |
+| ZLIB | 4 + row kind / changelog | 44.7 ms | 19.7 ms | 17.9 ms | 111.7 ms |
+| SNAPPY | 4 / append | 44.7 ms | 19.4 ms | 18.3 ms | 111.9 ms |
+| SNAPPY | 14 / append | 145.2 ms | 67.5 ms | 62.1 ms | 354.8 ms |
+| SNAPPY | 4 + row kind / changelog | 38.4 ms | 13.4 ms | 11.7 ms | 106.6 ms |
+| LZ4 | 4 / append | 44.4 ms | 19.3 ms | 17.6 ms | 107.6 ms |
+| LZ4 | 14 / append | 143.0 ms | 66.0 ms | 58.7 ms | 342.8 ms |
+| LZ4 | 4 + row kind / changelog | 37.9 ms | 12.8 ms | 10.7 ms | 104.3 ms |
+| ZSTD | 4 / append | 47.2 ms | 23.3 ms | 20.9 ms | 110.8 ms |
+| ZSTD | 14 / append | 149.1 ms | 72.9 ms | 64.5 ms | 346.7 ms |
+| ZSTD | 4 + row kind / changelog | 39.2 ms | 14.3 ms | 12.4 ms | 104.5 ms |
+
+[Detailed measurements](../benchmarks/orc-readers-2026-09-14.csv) include minimum times, reported
+output-batch memory and host I/O bytes. The widest output batch reports 807,087 bytes on all four
+paths; this does not rank their internal allocation peaks. These measurements do not include
+snapshot merging, Flink scheduling, checkpoints, or remote storage.
+
+Arrow C++ is 1.85–3.03× faster than our adapter, and orc-rust is 1.88–3.53× faster. orc-rust leads
+Arrow C++ by 2–19% in this sample. That supports evaluating orc-rust as the replacement reader;
+Arrow C++ is also a substantial improvement. There is no architectural requirement to avoid an
+Arrow C++ dependency. Its portable source build works here, at the cost of another C++ dependency.
+
+The candidates match Java on these timed datasets and on 21 scalar edge-case fixtures including
+integer limits, floating-point NaNs/infinities/signed zero, decimal precision 38, Unicode strings,
+binary, historical dates and fractional pre-epoch timestamps. The remaining fixture exposes a
+specific integration difference: **both candidates return padded CHAR strings**, whereas Java and
+our adapter strip trailing spaces. The test asserts the exact padded result separately, rather
+than treating it as Java parity. A production replacement must normalize CHAR, including nested
+CHAR, and pass the existing source admission, timezone, recovery and snapshot suites. Neither
+candidate is enabled for production by this benchmark change. Linux comparison-profile builds
+and peak decoder memory still need separate verification.

@@ -61,3 +61,8 @@ FetchContent_MakeAvailable(nanoarrow)
 add_library(streamfusion_orc_cpp STATIC bridge.cc)
 target_link_libraries(streamfusion_orc_cpp PRIVATE orc nanoarrow_static)
 install(TARGETS streamfusion_orc_cpp ARCHIVE DESTINATION lib)
+
+option(SF_ORC_READER_COMPARISON "Build opt-in reader comparison adapters" OFF)
+if(SF_ORC_READER_COMPARISON)
+  include(reader_comparison.cmake)
+endif()
