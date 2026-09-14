@@ -136,6 +136,13 @@
     </build>
     <profiles>
         <profile>
+            <id>orc-writer-bench</id>
+            <properties>
+                <!-- Preserve the ORC module's opt-in comparison payload. -->
+                <native.cargo.packages>-p streamfusion-paimon</native.cargo.packages>
+            </properties>
+        </profile>
+        <profile>
             <id>orc-reader-bench</id>
             <properties>
                 <!-- Preserve the ORC module's opt-in comparison payload. -->

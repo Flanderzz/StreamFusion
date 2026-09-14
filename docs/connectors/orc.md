@@ -213,3 +213,84 @@ than treating it as Java parity. A production replacement must normalize CHAR, i
 CHAR, and pass the existing source admission, timezone, recovery and snapshot suites. Neither
 candidate is enabled for production by this benchmark change. Linux comparison-profile builds
 and peak decoder memory still need separate verification.
+
+### Writing from arrow-rs
+
+`OrcWriterComparisonBenchmark` compares our standard ORC C++ 2.3.1 writer and nanoarrow
+adapter with Paimon 2.0.0's shaded ORC Java 1.9.8 vectorized writer. Both start from the same
+Rust-owned Arrow 58 batches and end with a closed local ORC file. Fixture generation and its
+one-time copy into Rust-owned buffers happen before timing; the fixture's Java allocator is
+closed before either writer runs. The Java candidate imports those buffers through C Data and
+copies columns directly into reusable Hive vectors. Long/double columns and string/binary
+payloads use bulk copies; decimals through precision 18 use ORC’s `decimal64` vectors and
+larger decimals use reusable binary scratch space; nested columns recurse.
+There are no intermediate `RowData` objects in either timed path.
+
+Timing includes opening the output, constructing the encoder, every batch conversion, encoding,
+footer/stripe flushes, output close and resource cleanup. Both use Paimon's local `FileIO`;
+C++ drains through the production 1 MiB JNI output buffer. Each uses 64 MiB stripes, 64 KiB
+compression buffers, row indexes every 10,000 rows, dictionary threshold 0.8, compression
+strategy SPEED by default, and ORC 0.12. Different ORC implementations can choose different encodings and
+stripe boundaries despite matching settings, so the harness also reports file size. Output
+close does not include `fsync`; these are local filesystem/OS-cache measurements.
+
+Before timing, a third, untimed path writes the original fixture rows using Paimon's stock
+`RowDataVectorizer`. Paimon's Java ORC reader compares ordered fingerprints of every column
+against both candidates, and checks row counts, schema, field IDs, codec, format version and
+index stride. It checks the final timed outputs again. Scalar compatibility cases add integer
+extremes, floating special values, decimal precision 38, CHAR/VARCHAR, binary and pre-epoch
+microsecond timestamps. This is a writer microbenchmark, not a Paimon checkpoint or Flink job
+benchmark, and does not change the deployed writer.
+
+```bash
+SF_ORC_WRITER_COMPARISON=true \
+  mvn test -Pbench,paimon,orc-writer-bench -pl :streamfusion-paimon -am \
+  -Dtest=OrcWriterComparisonBenchmark -Dsurefire.failIfNoSpecifiedTests=false
+```
+
+The test-only `orc-writer-bench` profile enables the native `writer-comparison` fixture helpers;
+it does not add Arrow C++ or orc-rust dependencies. Run it separately from `orc-reader-bench`.
+`SF_ORC_WRITER_ROWS` defaults to 262144, `SF_ORC_WRITER_BATCH_ROWS` to 4096,
+`SF_ORC_WRITER_TRIALS` to five and `SF_ORC_WRITER_WARMUPS` to two. The candidates alternate
+execution order. `SF_ORC_WRITER_CODECS` defaults to `NONE,ZLIB,SNAPPY,LZ4,ZSTD`;
+`SF_ORC_WRITER_STRATEGY` accepts `SPEED` (default) or `COMPRESSION`. Numeric,
+string/binary and full nested Paimon schemas use four, four and fourteen columns respectively.
+
+On an Apple M1 Max (64 GiB, Java 17 with an 8 GiB heap, UTC), release/mimalloc,
+five-trial median times for 262,144 rows were:
+
+| Schema | Codec / strategy | C++ | Java vectors | Java time / C++ time |
+|---|---|---:|---:|---:|
+| Numeric, 4 columns | NONE / SPEED | 12.9 ms | 20.0 ms | 1.55× |
+| Strings/binary, 4 columns | NONE / SPEED | 28.8 ms | 49.0 ms | 1.70× |
+| Nested Paimon, 14 columns | NONE / SPEED | 189.1 ms | 172.1 ms | 0.91× |
+| Numeric, 4 columns | ZSTD / SPEED | 16.3 ms | 21.7 ms | 1.33× |
+| Strings/binary, 4 columns | ZSTD / SPEED | 36.0 ms | 57.2 ms | 1.59× |
+| Nested Paimon, 14 columns | ZSTD / SPEED | 207.6 ms | 198.1 ms | 0.95× |
+
+Java is competitive on this wider schema: across NONE, ZLIB, SNAPPY and ZSTD its median
+ranges from effectively tied to 9% less elapsed time. C++ wins on both narrow schemas, where
+Java takes 33–70% more time. This supports Java vectorized writing as a deployment tradeoff,
+without establishing a universal writer ranking. The experiment does not measure the two
+adapters separately from encoding, and the synthetic fixtures do not represent every data
+distribution. A Java writer would remove the ORC C++ writer build; removing the ORC C++ library
+entirely would also require replacing the deployed reader. Java's packaged compression
+libraries can still contain native code.
+
+[Complete results](../benchmarks/orc-writers-2026-09-14.csv) include all five codecs, file sizes,
+minimum/maximum times and a separate LZ4 COMPRESSION run. LZ4 SPEED is a particularly different
+tradeoff between the implementations: ORC C++ 2.3.1 chooses acceleration 65537, producing almost
+uncompressed output on these fixtures. For the full schema it writes 15.41 MB versus Java's
+7.48 MB. Its SPEED timing should therefore not be read as equal compression work. The
+compression-oriented follow-up is reported separately below.
+
+| Schema | LZ4 COMPRESSION, C++ | LZ4 COMPRESSION, Java | C++ file | Java file |
+|---|---:|---:|---:|---:|
+| Numeric, 4 columns | 14.8 ms | 23.6 ms | 0.918 MB | 0.918 MB |
+| Strings/binary, 4 columns | 34.0 ms | 59.2 ms | 1.90 MB | 1.94 MB |
+| Nested Paimon, 14 columns | 197.1 ms | 191.4 ms | 7.25 MB | 7.48 MB |
+
+The main run passed all 24 comparison/type cases plus 17 existing ORC file and timestamp
+regressions. The separate LZ4 run also passed its stock-Java comparisons. Neither timing
+includes correctness rereads. These results apply to this machine and warmed process; they
+do not measure concurrent writers, checkpoint latency or peak heap/native memory.

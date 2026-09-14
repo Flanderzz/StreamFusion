@@ -27,3 +27,4 @@ cmake = "0.1"
 default = []
 mimalloc = ["dep:libmimalloc-sys", "libmimalloc-sys/v2"]
 reader-comparison = ["dep:orc-rust", "dep:arrow59"]
+writer-comparison = []

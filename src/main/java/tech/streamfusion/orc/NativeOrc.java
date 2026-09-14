@@ -67,4 +67,13 @@ public final class NativeOrc {
 
   public static native long[] consumeComparisonBatch(
       long arrayAddress, long schemaAddress, boolean verify);
+
+  /** Benchmark-only entry points; require the opt-in writer-comparison native feature. */
+  public static native long importWriterComparisonBatch(long arrayAddress, long schemaAddress);
+
+  public static native void exportWriterComparisonBatch(long batch, long arrayAddress);
+
+  public static native void writeWriterComparisonBatch(long batch, long encoder);
+
+  public static native void closeWriterComparisonBatch(long batch);
 }
