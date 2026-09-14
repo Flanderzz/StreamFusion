@@ -60,6 +60,11 @@ division emit.
 row-time (upstream event-time watermarks filtered to the mini-batch interval — a pure function of
 the input watermarks, so results stay deterministic).
 
+Tests that compare every intermediate update use ordered inputs and count-triggered bundles without
+processing-time markers. Independent file scheduling or clock-driven flushes can change the number
+of valid intermediate updates, even at parallelism one. The TTL fixtures assert the exact changelog
+with retention enabled and disabled, including the unchanged `-U`/`+U` pair emitted only with TTL.
+
 **Distinct aggregates ride the split natively** in the default (no-split) plan: the local's bundle
 set travels as a trailing view column — its distinct `(value, count)` entries as a list of
 structs, the Arrow form of Flink's serialized `MapView` partial — and the global folds the entries

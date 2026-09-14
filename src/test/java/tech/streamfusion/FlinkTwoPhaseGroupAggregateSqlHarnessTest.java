@@ -2,6 +2,7 @@ package tech.streamfusion;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.function.Supplier;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
@@ -316,32 +317,61 @@ class FlinkTwoPhaseGroupAggregateSqlHarnessTest {
             + " (SELECT k, u, MAX(v) AS mx FROM t GROUP BY k, u) GROUP BY u");
   }
 
-  @Test
-  void stateTtlEmitsUnsuppressedUpdatesAndMatchesHost() throws Exception {
-    // TTL lives on the global half (the local is transient). Bundle size 2 makes key 1's MIN see a
-    // later, non-improving bundle — an unchanged transition the TTL-off run suppresses and the
-    // TTL-on run (1h, nothing expires in-test) must emit as an identical -U/+U pair, kind-compared
-    // against the host.
-    Path input = Files.createTempDirectory("twophase-ttl-in");
-    writeInput(input);
-    Supplier<TableEnvironment> environment =
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  void stateTtlEmitsUnsuppressedUpdatesAndMatchesHost(boolean enabled) throws Exception {
+    NativeParity.assertKindedParity(
         () -> {
-          TableEnvironment tEnv = readEnvironment(input, 2).get();
-          tEnv.getConfig().set("table.exec.state.ttl", "1 h");
+          TableEnvironment tEnv = ttlEnvironment();
+          tEnv.getConfig().set("table.exec.state.ttl", enabled ? "1 h" : "0 ms");
           return tEnv;
-        };
-    NativeParity.assertKindedParity(environment, "SELECT k, MIN(v) AS m FROM t GROUP BY k");
+        },
+        "SELECT k, MIN(v) AS m FROM t GROUP BY k",
+        ttlChangelog(enabled));
   }
 
   @Test
   void stateTtlHintRoutesTheGlobalHalfAndMatchesHost() throws Exception {
     // A STATE_TTL hint with the job retention at 0 must switch the global merge into TTL emission,
     // mirroring Flink's hint-over-config precedence on the two-phase plan.
-    Path input = Files.createTempDirectory("twophase-ttl-hint-in");
-    writeInput(input);
     NativeParity.assertKindedParity(
-        readEnvironment(input, 2),
-        "SELECT /*+ STATE_TTL('t' = '1h') */ k, MIN(v) AS m FROM t GROUP BY k");
+        FlinkTwoPhaseGroupAggregateSqlHarnessTest::ttlEnvironment,
+        "SELECT /*+ STATE_TTL('t' = '1h') */ k, MIN(v) AS m FROM t GROUP BY k",
+        ttlChangelog(true));
+  }
+
+  private static TableEnvironment ttlEnvironment() {
+    StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+    env.setParallelism(1);
+    StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
+    tEnv.getConfig().set("table.optimizer.agg-phase-strategy", "TWO_PHASE");
+    tEnv.getConfig().set("table.exec.mini-batch.enabled", "true");
+    // Longer than the Unix epoch's age: no aligned processing-time boundary can split this fixture.
+    // The count trigger and EOF still flush both halves, independently of wall-clock scheduling.
+    tEnv.getConfig().set("table.exec.mini-batch.allow-latency", "100000 d");
+    tEnv.getConfig().set("table.exec.mini-batch.size", "2");
+    tEnv.getConfig().set("table.exec.state.ttl", "0 ms");
+    tEnv.createTemporaryView(
+        "t",
+        tEnv.fromDataStream(
+            env.fromData(
+                Types.ROW_NAMED(new String[] {"k", "v"}, Types.LONG, Types.LONG),
+                Row.of(1L, 10L),
+                Row.of(1L, 20L),
+                Row.of(1L, 30L),
+                Row.of(1L, 40L),
+                Row.of(1L, 50L),
+                Row.of(1L, 60L),
+                Row.of(1L, 70L),
+                Row.of(1L, 80L))));
+    return tEnv;
+  }
+
+  private static List<List<Object>> ttlChangelog(boolean enabled) {
+    // Four local partials become two global bundles with the same MIN. Only TTL emits the no-op.
+    return enabled
+        ? List.of(List.of("+I", 1L, 10L), List.of("-U", 1L, 10L), List.of("+U", 1L, 10L))
+        : List.of(List.of("+I", 1L, 10L));
   }
 
   @Test

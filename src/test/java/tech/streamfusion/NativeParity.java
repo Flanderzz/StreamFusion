@@ -47,12 +47,22 @@ final class NativeParity {
    * changelog must match change for change. This is the only assertion that can see an unsuppressed
    * no-op update: an identical {@code -U}/{@code +U} pair nets to zero in the collapsed changelog
    * and is invisible to a kind-blind row compare — yet with state TTL enabled Flink emits exactly
-   * such pairs where it would otherwise suppress. Sound for single-input operators at parallelism 1,
-   * whose emission order is deterministic (order-insensitivity still comes from the sort).
+   * such pairs where it would otherwise suppress. Requires deterministic input order and bundle
+   * boundaries; parallelism 1 alone does not prevent file scheduling or processing-time markers from
+   * changing intermediate updates (output order-insensitivity still comes from the sort).
    */
   static void assertKindedParity(Supplier<TableEnvironment> environment, String sql)
       throws Exception {
+    assertKindedParity(environment, sql, null);
+  }
+
+  static void assertKindedParity(
+      Supplier<TableEnvironment> environment, String sql, List<List<Object>> expected)
+      throws Exception {
     List<List<Object>> host = collectKinded(environment.get(), sql);
+    if (expected != null) {
+      assertEquals(sorted(new ArrayList<>(expected)), sorted(host), "unexpected host changelog");
+    }
 
     TableEnvironment nativeEnvironment = environment.get();
     PhysicalPlanScan scan = NativePlanner.install(nativeEnvironment);
