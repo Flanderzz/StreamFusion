@@ -1254,6 +1254,9 @@ final class RexExpression {
       return reject(
           "JSON_EXISTS UNKNOWN ON ERROR requires a direct projection; Flink unboxes null in boolean contexts");
     }
+    if ("ERROR".equals(error)) {
+      return emitJsonExistsError(args);
+    }
     add(KIND_CALL, 142, 4);
     if (!emit(args.get(0))) {
       return false;
@@ -1262,6 +1265,27 @@ final class RexExpression {
     emitString(error);
     emitString(JsonPathSpec.unicodeVersion());
     return true;
+  }
+
+  private boolean emitJsonExistsError(List<RexNode> args) {
+    Method implementation;
+    try {
+      implementation =
+          tech.streamfusion.operator.NativeBuiltinFunctions.class.getMethod(
+              "jsonExistsError", String.class, String.class);
+    } catch (ReflectiveOperationException unavailable) {
+      return reject("JSON_EXISTS host error handling unavailable: " + unavailable.getMessage());
+    }
+    int string = tech.streamfusion.operator.NativeUdf.TYPE_STRING;
+    int result = tech.streamfusion.operator.NativeUdf.TYPE_BOOLEAN;
+    int localIndex =
+        addUdf(
+            tech.streamfusion.operator.NativeUdf.Descriptor.forBuiltin(
+                implementation, new int[] {string, string}, result));
+    add(KIND_UDF, longs.size(), 2);
+    longs.add((long) localIndex);
+    longs.add((long) result);
+    return emit(args.get(0)) && emit(args.get(1));
   }
 
   private static String jsonPath(List<RexNode> args) {

@@ -1,6 +1,6 @@
 # SQL/JSON parsing
 
-JSON_VALUE, JSON_EXISTS and IS JSON use a shared native reader with two parsing paths. The streaming
+JSON_VALUE, non-throwing JSON_EXISTS policies and IS JSON use a shared native reader with two parsing paths. The streaming
 path borrows selected tokens and validates the first JSON document with Flink/Jackson rules.
 The SIMD path uses the existing `simd-json` dependency for documents containing many short
 members, where repeatedly scanning individual keys and values costs more than building a tape.

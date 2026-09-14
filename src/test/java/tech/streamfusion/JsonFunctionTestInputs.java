@@ -76,6 +76,34 @@ final class JsonFunctionTestInputs {
     assertFails(document, expression, nativeMessage, true);
   }
 
+  static void assertFailsLikeFlink(String document, String expression) {
+    Throwable expected = null;
+    for (boolean nativeEnabled : new boolean[] {false, true}) {
+      TableEnvironment tables = TextTimeFunctionTestInputs.textRows(document);
+      PhysicalPlanScan scan = nativeEnabled ? NativePlanner.install(tables) : null;
+      Exception error =
+          assertThrows(
+              Exception.class,
+              () -> {
+                try (var rows =
+                    tables.executeSql("SELECT " + expression + " FROM inputs").collect()) {
+                  while (rows.hasNext()) rows.next();
+                }
+              });
+      Throwable hostError = error;
+      while (hostError != null
+          && !(hostError instanceof org.apache.flink.table.api.TableRuntimeException)) {
+        hostError = hostError.getCause();
+      }
+      org.junit.jupiter.api.Assertions.assertNotNull(hostError, error.toString());
+      if (nativeEnabled) {
+        assertEquals(expected.getClass(), hostError.getClass());
+        assertEquals(expected.getMessage(), hostError.getMessage());
+        assertTrue(scan.substitutions() > 0, scan.fallbackReasons().toString());
+      } else expected = hostError;
+    }
+  }
+
   static void assertFallbackFails(String document, String expression, String message) {
     assertFails(document, expression, message, false);
   }

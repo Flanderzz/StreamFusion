@@ -407,6 +407,11 @@ boxed-null behavior described for BOOLEAN JSON_VALUE. ERROR ON ERROR under AND/O
 on Flink to preserve row short-circuiting. The default FALSE policy and TRUE ON ERROR
 remain native in predicates and nested expressions.
 
+Admitted ERROR ON ERROR calls use Flink's `SqlJsonUtils` through the existing columnar JVM
+upcall. This preserves its `TableRuntimeException` and exact parser/path diagnostic, including
+the missing member's path, while the surrounding expression stays in the native island.
+FALSE, TRUE and UNKNOWN policies continue to use the Rust parser.
+
 These JSON functions use native first-document parsing and validate unselected fields too.
 Admission first probes the shaded Jackson runtime once per class loader: version 2.18.2,
 the default thread-local recycler pool, and successful buffer acquisition, cross-factory

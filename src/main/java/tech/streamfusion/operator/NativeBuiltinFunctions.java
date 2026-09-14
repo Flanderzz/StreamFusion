@@ -26,6 +26,13 @@ public final class NativeBuiltinFunctions {
 
   private NativeBuiltinFunctions() {}
 
+  public static Boolean jsonExistsError(String input, String path) {
+    return input == null
+        ? null
+        : org.apache.flink.table.runtime.functions.SqlJsonUtils.jsonExists(
+            input, path, org.apache.flink.table.api.JsonExistsOnError.ERROR);
+  }
+
   // The ASCII fold is done here with a tight primitive loop rather than by calling
   // BinaryStringData.toLowerCase/toUpperCase: Flink's own "fast path" invokes
   // Character.toLowerCase per byte — a virtual call per character that profiled SLOWER than the

@@ -61,11 +61,19 @@ class FlinkJsonExistsSqlHarnessTest {
   }
 
   @Test
-  void errorPolicyFailsTheJob() {
-    JsonFunctionTestInputs.assertFails(
-        "{}", "JSON_EXISTS(s, '$.a' ERROR ON ERROR)", "JSON_EXISTS ERROR");
-    JsonFunctionTestInputs.assertFails(
-        "null", "JSON_EXISTS(s, 'lax $' ERROR ON ERROR)", "JSON_EXISTS ERROR");
+  void errorPolicyPreservesFlinkExceptionTypeAndMessage() {
+    JsonFunctionTestInputs.assertFailsLikeFlink("{}", "JSON_EXISTS(s, '$.a' ERROR ON ERROR)");
+    JsonFunctionTestInputs.assertFailsLikeFlink("null", "JSON_EXISTS(s, 'lax $' ERROR ON ERROR)");
+    JsonFunctionTestInputs.assertFailsLikeFlink("{", "JSON_EXISTS(s, '$.a' ERROR ON ERROR)");
+    JsonFunctionTestInputs.assertFailsLikeFlink(
+        "{\"a\":1}", "JSON_EXISTS(s, '$.a.b' ERROR ON ERROR)");
+  }
+
+  @Test
+  void errorPolicyPreservesSuccessfulAndNullRows() throws Exception {
+    assertParity(
+        () -> TextTimeFunctionTestInputs.textRows(null, "{\"a\":1}", "{\"a\":[]}", "{\"a\":{}}"),
+        "SELECT id, JSON_EXISTS(s, '$.a' ERROR ON ERROR) FROM inputs");
   }
 
   @Test
