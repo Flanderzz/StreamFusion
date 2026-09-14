@@ -3,10 +3,15 @@ package tech.streamfusion;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.function.Supplier;
+import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
+import org.apache.flink.types.Row;
+import org.apache.flink.types.RowKind;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 /**
  * Two-phase (mini-batch) non-windowed {@code GROUP BY}: the planner splits the aggregate into a
@@ -254,6 +259,34 @@ class FlinkTwoPhaseGroupAggregateSqlHarnessTest {
         readEnvironment(input, 2),
         "SELECT u, AVG(mx) AS av FROM"
             + " (SELECT k, u, MAX(v) AS mx FROM t GROUP BY k, u) GROUP BY u");
+  }
+
+  @ParameterizedTest
+  @ValueSource(ints = {1, 2, 3})
+  void averageUpdateWithZeroNetCountMatchesHost(int bundleSize) throws Exception {
+    NativeParity.assertChangelogParity(
+        () -> {
+          StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+          env.setParallelism(1);
+          StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
+          tEnv.getConfig().set("table.optimizer.agg-phase-strategy", "TWO_PHASE");
+          tEnv.getConfig().set("table.exec.mini-batch.enabled", "true");
+          tEnv.getConfig().set("table.exec.mini-batch.allow-latency", "1 h");
+          tEnv.getConfig().set("table.exec.mini-batch.size", String.valueOf(bundleSize));
+          // At size 2, the second bundle changes the sum by 10 while its count nets to zero.
+          tEnv.createTemporaryView(
+              "t",
+              tEnv.fromChangelogStream(
+                  env.fromData(
+                      Types.ROW_NAMED(new String[] {"k", "v"}, Types.LONG, Types.LONG),
+                      Row.of(1L, 10L),
+                      Row.of(2L, 5L),
+                      Row.ofKind(RowKind.UPDATE_BEFORE, 1L, 10L),
+                      Row.ofKind(RowKind.UPDATE_AFTER, 1L, 20L))));
+          return tEnv;
+        },
+        "SELECT k, AVG(v), AVG(CAST(v AS DOUBLE)), AVG(CAST(v AS DECIMAL(10, 2)))"
+            + " FROM t GROUP BY k");
   }
 
   @Test

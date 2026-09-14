@@ -80,6 +80,11 @@ retraction. The local subtracts `-U`/`-D` rows, and the appended (or reused) `co
 partial drives per-key liveness in the global (`-D` and state drop when the merged count reaches
 zero, Flink's `RecordCounter` semantics).
 
+AVG's local sum remains an accumulator even when the bundle's net count is zero: replacing `10`
+with `20` emits a sum adjustment of `10` and a count adjustment of `0`. The global merge applies
+both. All-null bundles emit `(0, 0)`; a NULL decimal sum means overflow and propagates regardless
+of the net count.
+
 **Checkpointing.** The durable global state stays as a Rust hot map but checkpoints through
 Flink's raw keyed state: each non-empty key group gets its own snapshot payload, and a rescaled
 task restores exactly the payloads assigned to its new key-group range, using the same BinaryRow

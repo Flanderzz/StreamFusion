@@ -593,7 +593,7 @@ impl GroupAggState {
         }
     }
 
-    /// Folds a decimal AVG partial whose bundle sum overflowed (a NULL sum with a live count): the
+    /// Folds a decimal AVG partial whose bundle sum overflowed (a NULL sum at any net count): the
     /// merged sum latches NULL — sticky, the lost magnitude cannot be recovered — while the count
     /// still moves, keeping the group's live-record bookkeeping exact.
     fn merge_overflowed(&mut self, count: i64, retract: bool) {
@@ -605,7 +605,7 @@ impl GroupAggState {
                 *overflow = true;
                 *non_null += if retract { -count } else { count };
             }
-            _ => unreachable!("a NULL sum partial with a live count is decimal-only"),
+            _ => unreachable!("a NULL AVG sum partial is decimal-only"),
         }
     }
 
@@ -764,7 +764,12 @@ impl GroupAggState {
     fn emit(&self, result_type: &DataType) -> ScalarValue {
         match self {
             GroupAggState::Running { agg, non_null } => match agg {
-                RunningAgg::Count(_) => agg.emit(),
+                // AVG partials carry an accumulator, not an evaluated result. A -U/+U bundle
+                // can have a zero net count but a nonzero sum adjustment for the global merge.
+                RunningAgg::Count(_)
+                | RunningAgg::AvgPartialSumInt(_)
+                | RunningAgg::AvgPartialSumFloat(_)
+                | RunningAgg::AvgPartialSumDecimal { .. } => agg.emit(),
                 _ if *non_null == 0 => null_scalar(result_type),
                 // AVG divides the running sum by the live non-null count, truncating toward zero for an
                 // integer result (Flink's div) and casting back to the input type — see AvgAggFunction.
@@ -1885,10 +1890,8 @@ impl<S: KeyedStateStore<GroupKeyState>> GroupAggregator<S> {
                         }
                     }
                     // Two-phase AVG merge: fold the pre-summed sum partial and bump the count by the
-                    // count partial. A NULL sum partial with count 0 means the local saw no non-null
-                    // input for the key — nothing to fold; a NULL sum with a LIVE count is a decimal
-                    // partial whose bundle sum overflowed DECIMAL(38, s), which latches the merged
-                    // sum NULL (the lost magnitude cannot be recovered).
+                    // count partial. Empty/all-null bundles carry (0, 0). A NULL sum is a decimal
+                    // overflow and must propagate even when retractions net the count to zero.
                     if let Some(counts) = merge_count_cols[i] {
                         if let Some(column) = &value_columns[i] {
                             let count = if counts.is_null(row) {
@@ -1904,8 +1907,7 @@ impl<S: KeyedStateStore<GroupKeyState>> GroupAggregator<S> {
                                         state.aggs[i].accumulate_merged(num, count);
                                     }
                                 }
-                                None if count > 0 => state.aggs[i].merge_overflowed(count, retract),
-                                None => {}
+                                None => state.aggs[i].merge_overflowed(count, retract),
                             }
                         }
                         continue;

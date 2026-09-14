@@ -3108,6 +3108,142 @@ fn local_group_extremes_preserve_append_only_and_retracting_results() {
     assert_eq!(values(&out, 2), vec![10]);
 }
 
+#[test]
+fn local_avg_preserves_zero_count_sum_adjustments() {
+    for (code, ten, twenty, average) in [
+        (
+            0,
+            ScalarValue::Int64(Some(10)),
+            ScalarValue::Int64(Some(20)),
+            ScalarValue::Int64(Some(20)),
+        ),
+        (
+            1,
+            ScalarValue::Float64(Some(10.0)),
+            ScalarValue::Float64(Some(20.0)),
+            ScalarValue::Float64(Some(20.0)),
+        ),
+        (
+            5802,
+            ScalarValue::Decimal128(Some(1000), 38, 2),
+            ScalarValue::Decimal128(Some(2000), 38, 2),
+            ScalarValue::Decimal128(Some(20_000_000), 38, 6),
+        ),
+    ] {
+        for single_row_batches in [false, true] {
+            let mut local = LocalGroupAggregator::new(
+                vec![8, 3],
+                vec![code, 0],
+                vec![1, 1],
+                vec![],
+                vec![0],
+                vec![],
+            );
+            let mut global = GroupAggregator::new(vec![4], vec![code], vec![1], vec![0], true)
+                .with_count_columns(vec![2])
+                .with_record_count_column(2);
+            let batch = |values: Vec<ScalarValue>, kinds: Vec<i8>| {
+                RecordBatch::try_from_iter(vec![
+                    (
+                        "key0",
+                        Arc::new(Int64Array::from(vec![1; kinds.len()])) as ArrayRef,
+                    ),
+                    ("value0", ScalarValue::iter_to_array(values).unwrap()),
+                    (
+                        ROW_KIND_COLUMN,
+                        Arc::new(Int8Array::from(kinds)) as ArrayRef,
+                    ),
+                ])
+                .unwrap()
+            };
+            local.update(&batch(vec![ten.clone()], vec![0])).unwrap();
+            global.update(&local.flush(), 0).unwrap();
+
+            let change = batch(vec![ten.clone(), twenty.clone()], vec![1, 2]);
+            if single_row_batches {
+                local.update(&change.slice(0, 1)).unwrap();
+                local.update(&change.slice(1, 1)).unwrap();
+            } else {
+                local.update(&change).unwrap();
+            }
+            let partial = local.flush();
+            assert_eq!(values(&partial, 2), vec![0]);
+            assert_eq!(
+                ScalarValue::try_from_array(partial.column(1), 0).unwrap(),
+                ten
+            );
+            let out = global.update(&partial, 0).unwrap();
+            assert_eq!(row_kinds(&out), vec![1, 2]);
+            assert_eq!(
+                ScalarValue::try_from_array(out.column(1), 1).unwrap(),
+                average
+            );
+
+            local.update(&batch(vec![twenty.clone()], vec![3])).unwrap();
+            let partial = local.flush();
+            assert_eq!(values(&partial, 2), vec![-1]);
+            assert_eq!(row_kinds(&global.update(&partial, 0).unwrap()), vec![3]);
+
+            let null = ScalarValue::try_from(&ten.data_type()).unwrap();
+            local.update(&batch(vec![null], vec![0])).unwrap();
+            let partial = local.flush();
+            assert_eq!(values(&partial, 2), vec![0]);
+            assert_eq!(partial.column(1).null_count(), 0);
+        }
+    }
+}
+
+#[test]
+fn local_avg_zero_count_decimal_overflow_propagates() {
+    let mut local = LocalGroupAggregator::new(
+        vec![8, 3],
+        vec![5800, 0],
+        vec![1, 1],
+        vec![],
+        vec![0],
+        vec![],
+    );
+    let mut global = GroupAggregator::new(vec![4], vec![5800], vec![1], vec![0], true)
+        .with_count_columns(vec![2])
+        .with_record_count_column(2);
+    let large = 9 * 10_i128.pow(37);
+    let batch = |values: Vec<i128>, kinds: Vec<i8>| {
+        RecordBatch::try_from_iter(vec![
+            (
+                "key0",
+                Arc::new(Int64Array::from(vec![1; kinds.len()])) as ArrayRef,
+            ),
+            (
+                "value0",
+                Arc::new(
+                    Decimal128Array::from(values)
+                        .with_precision_and_scale(38, 0)
+                        .unwrap(),
+                ) as ArrayRef,
+            ),
+            (
+                ROW_KIND_COLUMN,
+                Arc::new(Int8Array::from(kinds)) as ArrayRef,
+            ),
+        ])
+        .unwrap()
+    };
+    local
+        .update(&batch(vec![-large, large], vec![0, 0]))
+        .unwrap();
+    let initial = global.update(&local.flush(), 0).unwrap();
+    assert_eq!(initial.column(1).null_count(), 0);
+    local
+        .update(&batch(vec![-large, large], vec![1, 2]))
+        .unwrap();
+    let partial = local.flush();
+    assert_eq!(values(&partial, 2), vec![0]);
+    assert!(partial.column(1).is_null(0));
+    let out = global.update(&partial, 0).unwrap();
+    assert_eq!(row_kinds(&out), vec![1, 2]);
+    assert!(out.column(1).is_null(1));
+}
+
 fn row_kinds(batch: &RecordBatch) -> Vec<i8> {
     batch
         .column_by_name(ROW_KIND_COLUMN)
