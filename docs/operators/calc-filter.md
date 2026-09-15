@@ -217,6 +217,13 @@ Character input returns its first UTF-8 byte widened as a signed Java byte, not 
 code point. Empty strings return zero and NULL propagates. For example, `ASCII('é') = -61`.
 The native kernel preserves these rules in projections, predicates and group keys.
 
+### CHR
+
+Integer inputs use Flink's low-byte rule: negative values return an empty string;
+non-negative values produce the character at `value & 255`, including the NUL character
+when the low byte is zero. NULL propagates. All four signed integer widths are native;
+`CHR(353)` returns `a`, rather than the character at Unicode code point 353.
+
 ### BIN
 
 TINYINT, SMALLINT, INTEGER, and BIGINT inputs are admitted. Returns binary digits without leading zeros; zero is `0`. Negative values have 64 two's-complement digits even for narrow input types. NULL returns NULL. Folded string NULL literals retain their declared type.

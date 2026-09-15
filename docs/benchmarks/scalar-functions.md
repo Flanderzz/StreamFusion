@@ -732,3 +732,12 @@ Unicode inputs begin with a Chinese character or accented letter, exercising sig
 |---|---:|---:|
 | ASCII, no NULLs | 0.753 | 1.017 |
 | Unicode, NULL every eighth row | 0.532 | 0.774 |
+
+### CHR
+
+`CHR`: `CHR(n)` over BIGINT values, including negative values and repeated low bytes.
+
+| Input | Flink (s) | Native (s) |
+|---|---:|---:|
+| BIGINT, no NULLs | 0.294 | 0.458 |
+| BIGINT, NULL every eighth row | 0.292 | 0.431 |
