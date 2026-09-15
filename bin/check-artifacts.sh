@@ -25,7 +25,7 @@ fi
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(cd "$script_dir/.." && pwd)
 version=$(cd "$repo_root" && mvn -q -DforceStdout help:evaluate -Dexpression=project.version)
-modules="core kafka json csv raw avro avro-confluent-registry protobuf parquet orc"
+modules="core kafka json csv raw avro avro-confluent-registry protobuf parquet orc delta paimon"
 entries=$(mktemp)
 native_entries=$(mktemp)
 expected_native_entries=$(mktemp)
@@ -91,12 +91,12 @@ core_jar="$repo_root/streamfusion-core/target/streamfusion-core-$version-runtime
 core_main_jar="$repo_root/streamfusion-core/target/streamfusion-core-$version.jar"
 assert_native_payload "$core_main_jar" streamfusion-core libstreamfusion ""
 assert_native_payload "$core_jar" streamfusion-core libstreamfusion ""
-if jar tf "$core_jar" | grep -Eq '^tech/streamfusion/(kafka|parquet|orc|format/(json|csv|raw|avro|avroconfluent|protobuf))/'; then
+if jar tf "$core_jar" | grep -Eq '^tech/streamfusion/(kafka|parquet|orc|delta|paimon|format/(json|csv|raw|avro|avroconfluent|protobuf))/'; then
   echo "streamfusion-core contains optional connector or format classes" >&2
   exit 1
 fi
 
-for suffix in kafka json csv raw avro protobuf parquet orc; do
+for suffix in kafka json csv raw avro protobuf parquet orc paimon; do
   assert_native_payload \
     "$repo_root/streamfusion-$suffix/target/streamfusion-$suffix-$version.jar" \
     "streamfusion-$suffix" "libstreamfusion_$suffix" "$suffix"
@@ -108,6 +108,9 @@ assert_no_native_payload \
 assert_no_native_payload \
   "$repo_root/streamfusion-avro-confluent-registry/target/streamfusion-avro-confluent-registry-$version.jar" \
   streamfusion-avro-confluent-registry
+assert_no_native_payload \
+  "$repo_root/streamfusion-delta/target/streamfusion-delta-$version.jar" \
+  streamfusion-delta
 
 loader_jar="$repo_root/streamfusion-loader/target/streamfusion-loader-$version.jar"
 if [ ! -f "$loader_jar" ]; then

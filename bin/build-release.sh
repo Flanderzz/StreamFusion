@@ -203,4 +203,4 @@ fi
 # platform build. A release always starts from empty Java output directories. The release profile
 # builds the same source and javadoc attachments as the publish workflow, unsigned, so attachment
 # failures surface here instead of on the release runner.
-(cd "$repo_root" && mvn clean package -Pdist,universal,release -Dgpg.skip=true -DskipTests)
+(cd "$repo_root" && mvn clean package -Pdist,universal,release,delta,paimon -Dgpg.skip=true -DskipTests)

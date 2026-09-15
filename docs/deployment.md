@@ -13,7 +13,7 @@ libraries. Fetch the loader and the separate runtime-visible core payload direct
 distribution; installing StreamFusion does not require a source checkout, Rust, or a local build:
 
 ```sh
-STREAMFUSION_VERSION=0.1.0-rc2
+STREAMFUSION_VERSION=0.1.0-rc3
 curl --fail --location \
   "https://repo1.maven.org/maven2/tech/streamfusion/streamfusion-loader/$STREAMFUSION_VERSION/streamfusion-loader-$STREAMFUSION_VERSION.jar" \
   --output "$FLINK_HOME/lib/00-streamfusion-loader.jar"
@@ -23,9 +23,13 @@ curl --fail --location \
 ```
 
 Optional modules use their directory names as artifact IDs, for example
-`tech.streamfusion:streamfusion-kafka:0.1.0-rc2` and
-`tech.streamfusion:streamfusion-json:0.1.0-rc2`. Install the matching stock Flink connector and
+`tech.streamfusion:streamfusion-kafka:0.1.0-rc3` and
+`tech.streamfusion:streamfusion-json:0.1.0-rc3`. Install the matching stock Flink connector and
 format JARs alongside them as described below.
+
+The GitHub release archive includes all optional StreamFusion modules, including Delta and Paimon.
+Install only the modules your jobs use and their stock connector dependencies; the archive does
+not bundle the stock connectors.
 
 ## Kubernetes or Docker
 
@@ -35,7 +39,7 @@ Create a job-neutral image directly from the Maven Central artifacts:
 ARG FLINK_IMAGE=flink:2.2.1-scala_2.12-java17
 FROM ${FLINK_IMAGE}
 
-ARG STREAMFUSION_VERSION=0.1.0-rc2
+ARG STREAMFUSION_VERSION=0.1.0-rc3
 ADD https://repo1.maven.org/maven2/tech/streamfusion/streamfusion-loader/${STREAMFUSION_VERSION}/streamfusion-loader-${STREAMFUSION_VERSION}.jar /opt/flink/lib/00-streamfusion-loader.jar
 ADD https://repo1.maven.org/maven2/tech/streamfusion/streamfusion-core/${STREAMFUSION_VERSION}/streamfusion-core-${STREAMFUSION_VERSION}-runtime.jar /opt/flink/lib/streamfusion-core.jar
 
@@ -68,7 +72,7 @@ the JobManager, TaskManagers, and submission client. For example, JSON on Kafka 
 
 ```Dockerfile
 FROM registry.example/streamfusion-flink:dev
-ARG STREAMFUSION_VERSION=0.1.0-rc2
+ARG STREAMFUSION_VERSION=0.1.0-rc3
 ADD https://repo1.maven.org/maven2/tech/streamfusion/streamfusion-kafka/${STREAMFUSION_VERSION}/streamfusion-kafka-${STREAMFUSION_VERSION}.jar /opt/flink/lib/streamfusion-kafka.jar
 ADD https://repo1.maven.org/maven2/tech/streamfusion/streamfusion-json/${STREAMFUSION_VERSION}/streamfusion-json-${STREAMFUSION_VERSION}.jar /opt/flink/lib/streamfusion-json.jar
 COPY flink-connector-kafka-5.0.0-2.2.jar flink-json-2.2.1.jar /opt/flink/lib/
@@ -92,7 +96,7 @@ linkage failure — the core image doesn't require any of them.
 For a local Flink distribution instead:
 
 ```sh
-STREAMFUSION_VERSION=0.1.0-rc2
+STREAMFUSION_VERSION=0.1.0-rc3
 curl --fail --location \
   "https://repo1.maven.org/maven2/tech/streamfusion/streamfusion-loader/$STREAMFUSION_VERSION/streamfusion-loader-$STREAMFUSION_VERSION.jar" \
   --output "$FLINK_HOME/lib/00-streamfusion-loader.jar"

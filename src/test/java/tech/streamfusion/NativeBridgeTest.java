@@ -43,17 +43,17 @@ class NativeBridgeTest {
 
   @Test
   void versionMismatchNamesBothVersionsAndTheResolution() {
-    assertNull(BuildVersion.mismatch("streamfusion", "0.1.0-rc2", "0.1.0-rc2"));
+    assertNull(BuildVersion.mismatch("streamfusion", "0.1.0-rc3", "0.1.0-rc3"));
     // The suite explicitly runs in development mode; an unstamped IDE/source classpath is allowed.
     assertNull(BuildVersion.mismatch("streamfusion", "0.9", null));
 
-    String mismatch = BuildVersion.mismatch("streamfusion", "0.0.9", "0.1.0-rc2");
+    String mismatch = BuildVersion.mismatch("streamfusion", "0.0.9", "0.1.0-rc3");
     assertNotNull(mismatch);
     assertTrue(mismatch.contains("0.9"), mismatch);
-    assertTrue(mismatch.contains("0.1.0-rc2"), mismatch);
+    assertTrue(mismatch.contains("0.1.0-rc3"), mismatch);
     assertTrue(mismatch.contains(System.mapLibraryName("streamfusion")), mismatch);
 
-    String unstamped = BuildVersion.mismatch("streamfusion_kafka", null, "0.1.0-rc2");
+    String unstamped = BuildVersion.mismatch("streamfusion_kafka", null, "0.1.0-rc3");
     assertNotNull(unstamped);
     assertTrue(unstamped.contains("no build version"), unstamped);
   }
