@@ -2,8 +2,8 @@ use std::fmt::{self, Write};
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, BooleanArray, Int16Array, Int32Array, Int64Array, Int8Array, StringArray,
-    StringBuilder,
+    Array, ArrayRef, BooleanArray, Decimal128Array, Int16Array, Int32Array, Int64Array, Int8Array,
+    StringArray, StringBuilder,
 };
 use arrow::datatypes::DataType;
 use datafusion::common::{exec_err, Result, ScalarValue};
@@ -33,7 +33,9 @@ impl ScalarUDFImpl for JsonString {
 
     fn coerce_types(&self, types: &[DataType]) -> Result<Vec<DataType>> {
         if types.len() != 1 || !supported(&types[0]) {
-            return exec_err!("JSON_STRING requires a character, boolean, or signed integer input");
+            return exec_err!(
+                "JSON_STRING requires a character, boolean, integer, or decimal input"
+            );
         }
         Ok(types.to_vec())
     }
@@ -50,9 +52,10 @@ impl ScalarUDFImpl for JsonString {
         let scalar = matches!(input, ColumnarValue::Scalar(_));
         let input = input.to_array(if scalar { 1 } else { args.number_rows })?;
         let values = JsonColumn::new(&input)?;
+        let nulls = input.logical_nulls();
         let mut output = StringBuilder::with_capacity(input.len(), input.len() * 16);
         for row in 0..input.len() {
-            if input.is_null(row) {
+            if nulls.as_ref().is_some_and(|nulls| nulls.is_null(row)) {
                 output.append_null();
             } else {
                 values.write(row, &mut output).map_err(write_error)?;
@@ -74,6 +77,7 @@ pub(super) fn supported(datatype: &DataType) -> bool {
             | DataType::Int16
             | DataType::Int32
             | DataType::Int64
+            | DataType::Decimal128(_, 0..=38)
     )
 }
 
@@ -86,6 +90,11 @@ pub(super) enum JsonColumn<'a> {
     Int16(&'a Int16Array),
     Int32(&'a Int32Array),
     Int64(&'a Int64Array),
+    Decimal {
+        values: &'a Decimal128Array,
+        scale: usize,
+        divisor: u128,
+    },
 }
 
 impl<'a> JsonColumn<'a> {
@@ -99,6 +108,11 @@ impl<'a> JsonColumn<'a> {
             DataType::Int16 => Self::Int16(as_int16_array(input)?),
             DataType::Int32 => Self::Int32(as_int32_array(input)?),
             DataType::Int64 => Self::Int64(as_int64_array(input)?),
+            DataType::Decimal128(_, scale @ 0..=38) => Self::Decimal {
+                values: as_decimal128_array(input)?,
+                scale: *scale as usize,
+                divisor: 10u128.pow(*scale as u32),
+            },
             other => return exec_err!("Unverified JSON scalar type: {other}"),
         })
     }
@@ -114,7 +128,37 @@ impl<'a> JsonColumn<'a> {
             Self::Int16(values) => write!(out, "{}", values.value(row)),
             Self::Int32(values) => write!(out, "{}", values.value(row)),
             Self::Int64(values) => write!(out, "{}", values.value(row)),
+            Self::Decimal {
+                values,
+                scale,
+                divisor,
+            } => write_decimal(out, values.value(row), *scale, *divisor),
         }
+    }
+}
+
+fn write_decimal(out: &mut impl Write, value: i128, scale: usize, divisor: u128) -> fmt::Result {
+    let magnitude = value.unsigned_abs();
+    let digits = magnitude.checked_ilog10().unwrap_or(0) as usize + 1;
+    let exponent = digits as i32 - 1 - scale as i32;
+    if value < 0 {
+        out.write_char('-')?;
+    }
+    // BigDecimal.toString retains scale, switching to scientific notation below exponent -6.
+    if exponent < -6 {
+        let fraction_width = digits - 1;
+        let leading_divisor = 10u128.pow(fraction_width as u32);
+        write!(out, "{}", magnitude / leading_divisor)?;
+        if fraction_width > 0 {
+            write!(out, ".{:0fraction_width$}", magnitude % leading_divisor)?;
+        }
+        write!(out, "E{exponent}")
+    } else {
+        write!(out, "{}", magnitude / divisor)?;
+        if scale > 0 {
+            write!(out, ".{:0scale$}", magnitude % divisor)?;
+        }
+        Ok(())
     }
 }
 
@@ -198,5 +242,53 @@ mod tests {
         for types in [vec![], vec![DataType::Float64], vec![DataType::Utf8; 2]] {
             assert!(function().coerce_types(&types).is_err());
         }
+    }
+
+    #[test]
+    fn decimals_preserve_scale_and_scientific_notation() {
+        assert!(matches!(
+            invoke(ColumnarValue::Scalar(ScalarValue::Null)),
+            ColumnarValue::Scalar(ScalarValue::Utf8(None))
+        ));
+        for (value, scale, expected) in [
+            (12300, 4, "1.2300"),
+            (0, 6, "0.000000"),
+            (0, 7, "0E-7"),
+            (1, 7, "1E-7"),
+            (10, 7, "0.0000010"),
+            (-100, 9, "-1.00E-7"),
+            (100000, 2, "1000.00"),
+            (
+                10i128.pow(38) - 1,
+                0,
+                "99999999999999999999999999999999999999",
+            ),
+            (
+                10i128.pow(38) - 1,
+                38,
+                "0.99999999999999999999999999999999999999",
+            ),
+        ] {
+            let output = invoke(ColumnarValue::Scalar(ScalarValue::Decimal128(
+                Some(value),
+                38,
+                scale,
+            )));
+            assert!(
+                matches!(output, ColumnarValue::Scalar(ScalarValue::Utf8(Some(value))) if value == expected)
+            );
+        }
+        let input = Decimal128Array::from(vec![Some(999), None, Some(0), Some(-100)])
+            .with_precision_and_scale(38, 9)
+            .unwrap()
+            .slice(1, 3);
+        let ColumnarValue::Array(output) = invoke(ColumnarValue::Array(Arc::new(input))) else {
+            panic!("array input must remain an array");
+        };
+        assert_eq!(
+            datafusion::common::cast::as_string_array(&output).unwrap(),
+            &StringArray::from(vec![None, Some("0E-9"), Some("-1.00E-7")])
+        );
+        output.to_data().validate_full().unwrap();
     }
 }

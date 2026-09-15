@@ -115,6 +115,7 @@ class ScalarFunctionBenchmark {
                   new Query("JSON_STRING_TEXT", "tt_text", "JSON_STRING(s)"),
                   new Query("JSON_STRING_BOOLEAN", "tt_boolean", "JSON_STRING(b)"),
                   new Query("JSON_STRING_INTEGER", "bigint", "JSON_STRING(n)", "STRING"),
+                  new Query("JSON_STRING_DECIMAL", "tt_decimal", "JSON_STRING(n)", "STRING"),
                   new Query(
                       "JSON_OBJECT_NULL",
                       "tt_json_object",

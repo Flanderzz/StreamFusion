@@ -34,8 +34,13 @@ string writer also serves the existing native JSON decoder: it copies unescaped 
 bulk, following Comet's to_json.rs structure, and handles every ASCII control as Jackson
 does (including uppercase hex escapes). Flink's separate JSON_QUOTE is not this serializer.
 
+DECIMAL serialization writes BigDecimal's scale-preserving spelling directly into the same
+builder, including its exponent -6 boundary. Comet's general Spark cast path and Arrow's
+plain decimal formatting do not encode this Jackson contract. Integer division and padded
+fractional digits avoid a temporary string per row; the scale divisor is prepared per column.
+
 The core writer has no connector-feature dependency. Unlike Comet's general Spark cast
-path, unverified floating-point, decimal, binary, temporal and container types remain on
+path, unverified floating-point, binary, temporal and container types remain on
 Flink. Direct JSON constructors are excluded from scalar inputs because Flink's code
 generator inserts those as raw JSON instead of quoting their character result.
 

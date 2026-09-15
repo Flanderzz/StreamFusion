@@ -48,11 +48,22 @@ class FlinkJsonStringSqlHarnessTest {
   }
 
   @Test
+  void decimalsPreserveTrailingZerosAndExponentBoundaries() throws Exception {
+    for (int scale : new int[] {0, 2, 6, 7, 9, 18, 38}) {
+      NativeParity.assertParity(
+          () -> DecimalJsonTestInputs.decimals(38, scale),
+          "SELECT id, JSON_STRING(n), JSON_STRING(COALESCE(n, 0)),"
+              + " JSON_STRING(CAST(NULL AS DECIMAL(38,9))) FROM decimals");
+    }
+    NativeParity.assertParity(
+        () -> DecimalJsonTestInputs.decimals(18, 2),
+        "SELECT JSON_STRING(n), COUNT(*) FROM decimals GROUP BY JSON_STRING(n)");
+  }
+
+  @Test
   void unverifiedScalarAndContainerTypesFallBack() throws Exception {
     for (String expression :
-        new String[] {
-          "CAST(n AS DOUBLE)", "CAST(n AS DECIMAL(20,2))", "ARRAY[n]", "JSON_OBJECT('n' VALUE n)"
-        }) {
+        new String[] {"CAST(n AS DOUBLE)", "ARRAY[n]", "JSON_OBJECT('n' VALUE n)"}) {
       NativeParity.assertFallbackReasonContains(
           StringFunctionTestInputs::encodings,
           "SELECT id, JSON_STRING(" + expression + ") FROM encodings",

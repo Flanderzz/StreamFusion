@@ -663,8 +663,10 @@ final class RexExpression {
       return emitCharacterFunction(call, 123, 1, 1);
     }
     if ("JSON_STRING".equals(functionName)) {
-      if (call.getOperands().size() != 1 || !isJsonScalarValue(call.getOperands().get(0))) {
-        return reject("JSON_STRING requires a character, boolean, or signed integer scalar");
+      if (call.getOperands().size() != 1
+          || !(isJsonScalarValue(call.getOperands().get(0))
+              || call.getOperands().get(0).getType().getSqlTypeName() == SqlTypeName.DECIMAL)) {
+        return reject("JSON_STRING requires a character, boolean, integer, or decimal scalar");
       }
       return emitBuiltinCall(call, 152);
     }

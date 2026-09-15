@@ -741,3 +741,14 @@ Unicode inputs begin with a Chinese character or accented letter, exercising sig
 |---|---:|---:|
 | BIGINT, no NULLs | 0.294 | 0.458 |
 | BIGINT, NULL every eighth row | 0.292 | 0.431 |
+
+### JSON_STRING DECIMAL
+
+`JSON_STRING_DECIMAL`: `JSON_STRING(n)` over DECIMAL(38,9), alternating
+`12345678901234567890.123456700` and `-0.000000100` (scientific notation in JSON).
+The 264-byte string budget does not apply to decimal input.
+
+| Input | Flink (s) | Native (s) |
+|---|---:|---:|
+| DECIMAL(38,9), no NULLs | 0.434 | 0.640 |
+| DECIMAL(38,9), NULL every eighth row | 0.415 | 0.599 |

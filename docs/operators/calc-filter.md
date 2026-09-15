@@ -316,13 +316,17 @@ One character argument is native. Valid quoted values are unescaped with Flink/J
 
 ### JSON_STRING
 
-One character, BOOLEAN, TINYINT, SMALLINT, INTEGER, or BIGINT scalar is native by default.
+One character, BOOLEAN, TINYINT, SMALLINT, INTEGER, BIGINT, or DECIMAL scalar is native by default.
 SQL NULL returns SQL NULL; other scalars serialize to JSON text. Strings use Jackson's
 escaping: quote/backslash and ASCII controls are escaped, other controls use uppercase
 `\u00XX`, and slashes and Unicode remain unescaped. Integer widths retain their exact
 decimal spelling. Output is written directly into the Arrow string builder.
 
-Floating point, DECIMAL, binary, temporal, and collection inputs fall back. Direct nested
+DECIMAL retains its declared scale and trailing zeros, using Jackson's BigDecimal spelling:
+`1.2300` remains `1.2300`, while sufficiently small values use scientific notation
+(`0.000000100` becomes `1.00E-7`). Precision and scale through 38 are native, including NULLs.
+
+Floating point, binary, temporal, and collection inputs fall back. Direct nested
 JSON_OBJECT, JSON_ARRAY, and JSON(value) calls also fall back: Flink treats those as raw JSON,
 which is outside this scalar admission. JSON_STRING applied to an ordinary string column
 containing JSON text quotes it normally. No compatibility opt-in is needed.
