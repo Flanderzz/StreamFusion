@@ -17,6 +17,10 @@ Plain **INNER or LEFT** `UNNEST` of a single column of type:
 
 optionally with `WITH ORDINALITY`, and — for the INNER case — including a pushed element filter.
 
+NULL MAP keys and MULTISET elements remain nullable when expanded, even though Arrow marks the
+physical map key field as required. NULL values are preserved. Empty and NULL collections emit
+no rows for INNER UNNEST and one padded row for LEFT UNNEST.
+
 ## What's not
 
 - **Lateral table functions** — a user-defined table function applied per row — have no native

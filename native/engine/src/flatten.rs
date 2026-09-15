@@ -233,16 +233,18 @@ pub(crate) fn unnest_array(
         columns.push(take(input.column(i), &rows_idx, None).expect("failed to fan out column"));
     }
     for (index, (field, child)) in children.iter().enumerate() {
-        // A LEFT/outer null-pad makes every appended column nullable (even a map key or a
-        // non-nullable struct field), so relax nullability there.
+        // Flink permits NULL map keys despite Arrow's required-key field convention. LEFT
+        // padding also makes every appended column nullable.
         let field = field
             .clone()
             .with_name(format!("unnest_{data_end}_{index}"));
-        fields.push(if is_left {
-            field.with_nullable(true)
-        } else {
-            field
-        });
+        fields.push(
+            if is_left || (index == 0 && matches!(column.data_type(), DataType::Map(..))) {
+                field.with_nullable(true)
+            } else {
+                field
+            },
+        );
         columns
             .push(take(child.as_ref(), &elems_idx, None).expect("failed to take unnest element"));
     }
