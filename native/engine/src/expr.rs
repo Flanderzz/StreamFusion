@@ -117,7 +117,7 @@ pub(crate) fn build_expr(
                     cursor,
                 ));
             }
-            build_call(op, args)
+            build_typed_call(schema, op, args)
         }
         // A JVM UDF node: `arg` indexes the long pool at [udf id, return-type code]; the children are the
         // argument expressions. Builds a JvmUdf scalar function that upcalls the JVM per batch.
@@ -323,6 +323,25 @@ pub(crate) fn cast_data_type(code: usize) -> DataType {
 
 /// Combines decoded operands by op code: arithmetic, the six comparisons, AND/OR/NOT, the null
 /// predicates, and searched CASE.
+fn build_typed_call(
+    schema: &SchemaRef,
+    op: i64,
+    args: Vec<datafusion::prelude::Expr>,
+) -> datafusion::prelude::Expr {
+    use datafusion::logical_expr::ExprSchemable;
+    if (10..=15).contains(&op) {
+        let schema = DFSchema::try_from(Arc::clone(schema)).expect("comparison input schema");
+        let types: Vec<_> = args
+            .iter()
+            .map(|arg| arg.get_type(&schema).expect("operand type"))
+            .collect();
+        if let Some(function) = crate::flink_functions::numeric::comparison(op, &types) {
+            return function.call(args);
+        }
+    }
+    build_call(op, args)
+}
+
 pub(crate) fn build_call(
     op: i64,
     args: Vec<datafusion::prelude::Expr>,

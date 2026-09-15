@@ -116,6 +116,14 @@ for narrow integer literals, or the tree should be cast to the declared type), n
 rewrite. This check requires the native library in the planning JVM, which the standard deployment
 already provides (see [Deployment](../deployment.md)).
 
+## Floating comparisons
+
+FLOAT/DOUBLE `=`, `<>`, `<`, `<=`, `>`, and `>=` use Java primitive comparisons in
+projections and filters. Positive and negative zero compare equal. NaN compares unequal to
+every value, including itself; all four relational comparisons involving NaN return FALSE.
+NULL propagates. Mixed primitive numeric operands use Java's FLOAT/DOUBLE promotion.
+These scalar rules are separate from grouping-key equality and sort ordering.
+
 ## Casts
 
 Native, unconditionally, with no host involvement:

@@ -78,6 +78,11 @@ Some functions diverge from the host only at precision/locale edges, not in valu
 transcendental math below. A true value divergence must be corrected before admission, as with the
 strict NULL propagation applied to `CONCAT` below.
 
+- **Primitive floating comparisons:** The decoder selects an Arrow kernel using Java primitive
+  operators for FLOAT/DOUBLE operands, including mixed integer/floating comparisons. DataFusion's
+  total order distinguishes signed zero and orders NaN above finite values; those rules change
+  Flink predicates. Other comparison types retain DataFusion's existing path. State key encoding
+  and sorting have separate contracts and are not changed by scalar comparison dispatch.
 - **Integer `/` and `%`:** DataFusion and Flink (Java) agree for all finite operands —
   division truncates toward zero and modulo takes the sign of the dividend (verified with
   negative dividends, not just positives). Two edges are *not* silent divergences:

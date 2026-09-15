@@ -36,6 +36,7 @@ mod json_path;
 mod json_serialize;
 mod json_value;
 mod locate;
+pub(crate) mod numeric;
 mod scalar;
 mod temporal_round;
 mod timestamp_millis;
