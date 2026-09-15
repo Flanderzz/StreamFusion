@@ -693,3 +693,93 @@ identity controls pay more for native execution, so these measurements do not is
 upcall cost. This is coverage work: temporal expressions can now remain between native operators,
 and adjacent temporal calls can share one upcall. A longer pipeline needs its own benchmark before
 claiming a throughput improvement. The current results justify no standalone temporal speedup claim.
+
+## Byte characters and JSON extensions (2026-09-15)
+
+These results use the implementation based on `ab4a21c6`, Apple M4 Pro, JDK 17, UTC,
+Flink 2.2.1 and DataFusion 54.0.0. Each case/scenario runs in a fresh JVM with the standard
+Maven `bench` profile (release + mimalloc), parallelism 1 and 2,000,000 rows. Flink/native
+run serially and alternate order, with two warmups and five measured trials per engine.
+Tables contain the final median elapsed seconds, including planning, the rowwise source
+and sink, and both native transposes. No baseline time is subtracted. Other test suites
+and native builds are stopped during measurements.
+
+Small differences are subject to run-to-run variance. Standalone regressions remain
+admitted to preserve verified semantics and native composition; the character changes
+also correct existing DataFusion/Flink result differences. These are end-to-end results,
+not isolated kernel timings or comparisons with an earlier native implementation.
+
+Reproduce each named case separately, then repeat with `scalar.unicode=true` and
+`scalar.nullEvery=8`. For integer and decimal inputs, that changes only nullability.
+Generated trial CSVs remain local build output and are not versioned.
+
+```sh
+TZ=UTC SF_BENCHMARK=true mvn -pl :streamfusion-runtime test -Pbench \
+  -Dnative.cargo.packages='-p streamfusion' \
+  '-Dtest=ScalarFunctionBenchmark#individualFunctions' \
+  -Dscalar.functions=ASCII -Dscalar.engine=both \
+  -Dscalar.rows=2000000 -Dscalar.warmup=2 -Dscalar.runs=5 \
+  -Dscalar.bytes=264 -Dscalar.unicode=false -Dscalar.nullEvery=0 \
+  -Dscalar.output=target/scalar-ascii.csv
+```
+
+### ASCII
+
+`ASCII`: `ASCII(s)` over 264-byte strings. ASCII inputs begin with `a`/`c`;
+Unicode inputs begin with a Chinese character or accented letter, exercising signed bytes.
+
+| Input | Flink (s) | Native (s) |
+|---|---:|---:|
+| ASCII, no NULLs | 0.753 | 1.017 |
+| Unicode, NULL every eighth row | 0.532 | 0.774 |
+
+### CHR
+
+`CHR`: `CHR(n)` over BIGINT values, including negative values and repeated low bytes.
+
+| Input | Flink (s) | Native (s) |
+|---|---:|---:|
+| BIGINT, no NULLs | 0.294 | 0.458 |
+| BIGINT, NULL every eighth row | 0.292 | 0.431 |
+
+### JSON_STRING DECIMAL
+
+`JSON_STRING_DECIMAL`: `JSON_STRING(n)` over DECIMAL(38,9), alternating
+`12345678901234567890.123456700` and `-0.000000100` (scientific notation in JSON).
+The 264-byte string budget does not apply to decimal input.
+
+| Input | Flink (s) | Native (s) |
+|---|---:|---:|
+| DECIMAL(38,9), no NULLs | 0.434 | 0.640 |
+| DECIMAL(38,9), NULL every eighth row | 0.415 | 0.599 |
+
+### JSON_OBJECT DECIMAL
+
+`JSON_OBJECT_DECIMAL`: `JSON_OBJECT('n' VALUE n)` with the same two DECIMAL(38,9)
+values and default NULL ON NULL policy. The 264-byte string budget does not apply.
+
+| Input | Flink (s) | Native (s) |
+|---|---:|---:|
+| DECIMAL(38,9), no NULLs | 0.599 | 0.655 |
+| DECIMAL(38,9), NULL every eighth row | 0.591 | 0.611 |
+
+### Unicode JSON member paths
+
+`JSON_VALUE_UNICODE_PATH` and `JSON_EXISTS_UNICODE_PATH` select `lax $.用户["姓.名"]`,
+each in its own query. Both scenarios use Unicode member names. Documents alternate
+between a selected string and a missing member, with a 264-byte padding-string budget;
+the nullable scenario also uses Unicode selected values/padding and NULL every eighth row.
+
+JSON_VALUE:
+
+| Input | Flink (s) | Native (s) |
+|---|---:|---:|
+| ASCII values, no NULLs | 1.718 | 1.224 |
+| Unicode values, NULL every eighth row | 1.451 | 1.107 |
+
+JSON_EXISTS:
+
+| Input | Flink (s) | Native (s) |
+|---|---:|---:|
+| ASCII values, no NULLs | 1.703 | 1.226 |
+| Unicode values, NULL every eighth row | 1.445 | 1.097 |

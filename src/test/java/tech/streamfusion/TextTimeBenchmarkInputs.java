@@ -18,6 +18,7 @@ final class TextTimeBenchmarkInputs {
     return switch (input) {
       case "tt_bytes", "tt_utf16", "tt_utf16be", "tt_utf16le" -> "b";
       case "tt_boolean" -> "b";
+      case "tt_decimal" -> "n";
       case "tt_timestamp" -> "ts";
       default -> "s";
     };
@@ -27,6 +28,7 @@ final class TextTimeBenchmarkInputs {
     return switch (input) {
       case "tt_bytes", "tt_utf16", "tt_utf16be", "tt_utf16le" -> "BYTES";
       case "tt_boolean" -> "BOOLEAN";
+      case "tt_decimal" -> "DECIMAL(38,9)";
       case "tt_timestamp" -> "TIMESTAMP(9)";
       default -> "STRING";
     };
@@ -41,7 +43,18 @@ final class TextTimeBenchmarkInputs {
       payload(unicode ? " |\u4e2daB\ud83d\ude00| " : " |abCd| efGh| ", bytes),
       payload(unicode ? " |\u00e9dE\ud83d\ude42| " : " |deFg| abCd| ", bytes)
     };
-    if (input.equals("tt_json_object")) {
+    if (input.equals("tt_decimal")) {
+      java.math.BigDecimal[] values = {
+        new java.math.BigDecimal("12345678901234567890.123456700"),
+        new java.math.BigDecimal("-0.000000100")
+      };
+      tables.createTemporaryView(
+          "inputs",
+          env.fromSequence(0, rows - 1)
+              .map(i -> Row.of(isNull(i, nullEvery) ? null : values[(int) (i % 2)]))
+              .returns(Types.ROW_NAMED(new String[] {"n"}, Types.BIG_DEC)),
+          Schema.newBuilder().column("n", DataTypes.DECIMAL(38, 9)).build());
+    } else if (input.equals("tt_json_object")) {
       tables.createTemporaryView(
           "inputs",
           env.fromSequence(0, rows - 1)
@@ -189,6 +202,20 @@ final class TextTimeBenchmarkInputs {
                 "{\"v\":" + selected[1] + ",\"padding\":\"" + text[1] + "\"}"
               };
             }
+            case "tt_ascii" ->
+                new String[] {
+                  payload(unicode ? "\u4e2da" : "ab", bytes),
+                  payload(unicode ? "\u00e9b" : "cd", bytes)
+                };
+            case "tt_json_member" ->
+                new String[] {
+                  "{\"\u7528\u6237\":{\"\u59d3.\u540d\":\""
+                      + (unicode ? "\u4e2d\\n\ud83d\ude00" : "Alice")
+                      + "\"},\"padding\":\""
+                      + text[0]
+                      + "\"}",
+                  "{\"\u7528\u6237\":{},\"padding\":\"" + text[1] + "\"}"
+                };
             case "tt_json" -> {
               int fields = Integer.getInteger("scalar.json.fields", 0);
               if (fields < 0) {

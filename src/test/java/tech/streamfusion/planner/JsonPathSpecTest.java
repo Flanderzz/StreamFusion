@@ -16,7 +16,16 @@ import org.junit.jupiter.api.Test;
 class JsonPathSpecTest {
   @Test
   void onlyDefiniteMemberAndNonnegativeIndexPathsAreAdmitted() {
-    for (String path : List.of("$", "$.a.b[0]", "$['a b'][2147483647]", "$[01].a")) {
+    for (String path :
+        List.of(
+            "$",
+            "$.a.b[0]",
+            "$['a b'][2147483647]",
+            "$[01].a",
+            "$.\u7528\u6237['\u59d3.\u540d']",
+            "$[\"O'Reilly\"]",
+            "$['a\"b']",
+            "$['\ud83d\ude00']")) {
       assertEquals("strict " + path, JsonPathSpec.normalize(path));
     }
     assertEquals("lax $.a", JsonPathSpec.normalize(" \tLaX $.a"));
@@ -30,6 +39,9 @@ class JsonPathSpecTest {
             "$[2147483648]",
             "$['']",
             "$['a\\b']",
+            "$[\"a\",\"b\"]",
+            "$['\ud800']",
+            "$['a\n']",
             "$[?(@.a)]",
             "$.a ")) {
       assertNull(JsonPathSpec.normalize(path), path);

@@ -111,7 +111,13 @@ calls the removed `Subject.getSubject` API before any query is executed.
 ## Initial admission
 
 Only constant definite member/index paths are admitted. Wildcards, recursion, predicates,
-slices and dynamic paths remain on Flink. JSON_VALUE returns VARCHAR, BOOLEAN, INTEGER or
+slices and dynamic paths remain on Flink. Unicode dot members and single/double-quoted
+bracket members follow Flink's released Jayway parser. Quotes delimit a literal member:
+punctuation such as `.` or `*` inside them is part of the key. Backslash escapes, controls,
+empty names and unpaired surrogates are excluded before crossing JNI. The native grammar
+retains borrowed member slices, with no per-row path parsing or change to JSON validation.
+
+JSON_VALUE returns VARCHAR, BOOLEAN, INTEGER or
 DOUBLE. The latter three conversions in Flink are Java object casts outside ON ERROR, so
 reusing SQL CAST would be incorrect. Native extraction writes directly into the matching
 Arrow primitive builder, requiring a JSON boolean, a signed 32-bit integer token, or a

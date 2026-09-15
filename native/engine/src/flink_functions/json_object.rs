@@ -75,6 +75,11 @@ impl ScalarUDFImpl for JsonObject {
             .iter()
             .map(|(_, array)| JsonColumn::new(array))
             .collect::<Result<_>>()?;
+        // NullArray has no physical bitmap; logical nulls also cover folded typed NULL literals.
+        let nulls: Vec<_> = arrays
+            .iter()
+            .map(|(_, array)| array.logical_nulls())
+            .collect();
         // Jackson orders keys with String.compareTo (UTF-16), and the last inserted value wins.
         // Stable sorting retains insertion order within each duplicate-key group.
         let mut indices: Vec<usize> = (0..names.len()).collect();
@@ -98,8 +103,11 @@ impl ScalarUDFImpl for JsonObject {
             let mut first = true;
             for (key, indices) in &groups {
                 let selected = indices.iter().rev().find(|&&index| {
-                    let (constant, array) = &arrays[index];
-                    !absent || !array.is_null(if *constant { 0 } else { row })
+                    let value_row = if arrays[index].0 { 0 } else { row };
+                    !absent
+                        || !nulls[index]
+                            .as_ref()
+                            .is_some_and(|mask| mask.is_null(value_row))
                 });
                 let Some(&index) = selected else { continue };
                 if !first {
@@ -107,9 +115,12 @@ impl ScalarUDFImpl for JsonObject {
                 }
                 first = false;
                 output.write_str(key).map_err(write_error)?;
-                let (constant, array) = &arrays[index];
+                let (constant, _) = &arrays[index];
                 let value_row = if *constant { 0 } else { row };
-                if array.is_null(value_row) {
+                if nulls[index]
+                    .as_ref()
+                    .is_some_and(|mask| mask.is_null(value_row))
+                {
                     output.write_str("null").map_err(write_error)?;
                 } else {
                     values[index]
@@ -189,6 +200,22 @@ mod tests {
 
     #[test]
     fn empty_objects_are_non_null_scalars_and_bad_arguments_fail() {
+        for (policy, expected) in [("NULL", "{\"n\":null}"), ("ABSENT", "{\"n\":1.2300}")] {
+            let output = invoke(
+                vec![
+                    string(policy),
+                    string("n"),
+                    ColumnarValue::Scalar(ScalarValue::Decimal128(Some(12300), 38, 4)),
+                    string("n"),
+                    ColumnarValue::Scalar(ScalarValue::Null),
+                ],
+                1,
+            )
+            .unwrap();
+            assert!(
+                matches!(output, ColumnarValue::Scalar(ScalarValue::Utf8(Some(value))) if value == expected)
+            );
+        }
         assert!(matches!(invoke(vec![string("NULL")], 5).unwrap(),
             ColumnarValue::Scalar(ScalarValue::Utf8(Some(value))) if value == "{}"));
         assert!(invoke(vec![], 1).is_err());

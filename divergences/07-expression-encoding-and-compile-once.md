@@ -101,7 +101,13 @@ strict NULL propagation applied to `CONCAT` below.
   released Flink 2.2.1. Empty padding and negative length return NULL. DataFusion and newer Flink
   source count code points, so their kernels cannot reproduce supplementary-character truncation.
 - **`RPAD`:** Uses the same verified padding machinery on the right, including UTF-16 truncation.
-- **`CHR`:** Delegates to DataFusion chr.
+- **`CHR`:** Flink returns an empty string for negative values and the low-byte character
+  otherwise. DataFusion interprets the full integer as a Unicode scalar and can fail for
+  negative values. The registry uses a small Arrow kernel with a stack UTF-8 buffer instead.
+- **`ASCII`:** Flink's generated string call returns the first UTF-8 byte as a signed
+  Java byte widened to INTEGER. DataFusion returns a Unicode code point, so a small
+  Arrow kernel preserves the host's negative results for non-ASCII leading bytes.
+  It shares the function registry and preserves the input validity bitmap.
 - **`LTRIM`:** The one- and two-argument forms delegate to DataFusion's space/character-set kernel;
   two-argument trim sets must be literal, with strict NULL propagation.
 - **`RTRIM`:** Likewise delegates right trimming, with literal character sets.

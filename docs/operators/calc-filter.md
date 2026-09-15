@@ -211,6 +211,19 @@ Two character arguments only. Returns the first match as a 1-based Unicode codep
 
 Both LOCATE(needle, s) and LOCATE(needle, s, start) are native. Character inputs and TINYINT/SMALLINT/INTEGER starts are admitted; BIGINT starts fall back without narrowing. Positions count Unicode codepoints. Empty needles return 1 for every non-NULL start. Zero/negative starts search from the beginning, except INTEGER minimum: start - 1 wraps to maximum, matching Flink. Out-of-range starts return zero; any NULL argument returns NULL.
 
+### ASCII
+
+Character input returns its first UTF-8 byte widened as a signed Java byte, not a Unicode
+code point. Empty strings return zero and NULL propagates. For example, `ASCII('é') = -61`.
+The native kernel preserves these rules in projections, predicates and group keys.
+
+### CHR
+
+Integer inputs use Flink's low-byte rule: negative values return an empty string;
+non-negative values produce the character at `value & 255`, including the NUL character
+when the low byte is zero. NULL propagates. All four signed integer widths are native;
+`CHR(353)` returns `a`, rather than the character at Unicode code point 353.
+
 ### BIN
 
 TINYINT, SMALLINT, INTEGER, and BIGINT inputs are admitted. Returns binary digits without leading zeros; zero is `0`. Negative values have 64 two's-complement digits even for narrow input types. NULL returns NULL. Folded string NULL literals retain their declared type.
@@ -303,13 +316,17 @@ One character argument is native. Valid quoted values are unescaped with Flink/J
 
 ### JSON_STRING
 
-One character, BOOLEAN, TINYINT, SMALLINT, INTEGER, or BIGINT scalar is native by default.
+One character, BOOLEAN, TINYINT, SMALLINT, INTEGER, BIGINT, or DECIMAL scalar is native by default.
 SQL NULL returns SQL NULL; other scalars serialize to JSON text. Strings use Jackson's
 escaping: quote/backslash and ASCII controls are escaped, other controls use uppercase
 `\u00XX`, and slashes and Unicode remain unescaped. Integer widths retain their exact
 decimal spelling. Output is written directly into the Arrow string builder.
 
-Floating point, DECIMAL, binary, temporal, and collection inputs fall back. Direct nested
+DECIMAL retains its declared scale and trailing zeros, using Jackson's BigDecimal spelling:
+`1.2300` remains `1.2300`, while sufficiently small values use scientific notation
+(`0.000000100` becomes `1.00E-7`). Precision and scale through 38 are native, including NULLs.
+
+Floating point, binary, temporal, and collection inputs fall back. Direct nested
 JSON_OBJECT, JSON_ARRAY, and JSON(value) calls also fall back: Flink treats those as raw JSON,
 which is outside this scalar admission. JSON_STRING applied to an ordinary string column
 containing JSON text quotes it normally. No compatibility opt-in is needed.
@@ -321,8 +338,9 @@ serialize that type. The same typed-NULL rule applies to JSON_OBJECT values.
 ### JSON_OBJECT
 
 Literal, non-null character keys with character, BOOLEAN, TINYINT, SMALLINT, INTEGER,
-or BIGINT scalar values are native. Keys must contain well-formed Unicode. The default
-NULL ON NULL writes JSON null values; ABSENT ON NULL skips them. Duplicate keys retain
+BIGINT, or DECIMAL scalar values are native. DECIMAL uses the same scale-preserving
+formatting as JSON_STRING, including scientific notation. Keys must contain well-formed
+Unicode. The default NULL ON NULL writes JSON null values; ABSENT ON NULL skips them. Duplicate keys retain
 the last inserted value, so an absent NULL does not overwrite an earlier non-null value.
 Objects with no surviving entries produce `{}`, never SQL NULL.
 
@@ -352,10 +370,12 @@ Enabled by default for the following verified shapes; no compatibility opt-in is
 
 Character input with a non-null literal definite path is native. Supported paths are `$`,
 dot members such as `$.user.name`, bracket members such as `$['user name']`, and nonnegative
-32-bit array indexes such as `$.users[0].name`. Dot names use ASCII letters, digits and
-underscores, with a letter/underscore first; bracket names additionally allow spaces and
-hyphens. Member names are case-sensitive. Wildcards, recursive descent, filters, slices,
-negative indexes, escapes/Unicode in path member names and dynamic paths fall back.
+32-bit array indexes such as `$.users[0].name`. Dot names use Unicode letters, numbers and
+underscores, with a letter/underscore first. Bracket names use single or double quotes and
+accept well-formed Unicode, spaces and punctuation, including the other quote character.
+Member names are case-sensitive. Wildcards, recursive descent, filters, slices, negative
+indexes, empty names, backslash escapes, ASCII controls, unpaired surrogates and dynamic
+paths fall back. Quoted `'*'` is an ordinary member name, not a wildcard.
 
 The default return type and explicit `RETURNING VARCHAR(n)` are native; Flink 2.2.1 does
 not truncate this function's result to `n`. `RETURNING BOOLEAN`, `INTEGER` and `DOUBLE`

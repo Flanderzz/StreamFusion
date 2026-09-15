@@ -72,6 +72,21 @@ final class JsonFunctionTestInputs {
         prefix + "} trailing");
   }
 
+  static TableEnvironment memberNames() {
+    return TextTimeFunctionTestInputs.textRows(
+        null,
+        "{}",
+        "null",
+        "{\"\u7528\u6237\":{\"\u59d3.\u540d\":\"old\",\"\u59d3.\u540d\":\"new\"}}",
+        "{\"\u7528\u6237\":{\"\u59d3.\u540d\":null}}",
+        "{\"\u7528\u6237\":{\"\u59d3.\u540d\":[]}}",
+        "{\"\u7528\u6237\":{\"\u59d3.\u540d\":1},\"\u7528\u6237\":{}}",
+        "{\"O'Reilly\":\"publisher\",\"a\\\"b\":true,\"a]b\":42}",
+        "{\"\ud83d\ude00\":\"emoji\",\"*\":\"star\",\"$\":\"dollar\"}",
+        "{\"\u00e9\u0661\":\"numbered\",\"\\u7528\\u6237\":{\"\u59d3.\u540d\":\"escaped\"}}",
+        "{\"\u7528\u6237\":{\"\u59d3.\u540d\":\"ok\"},\"bad\":[}");
+  }
+
   static void assertFails(String document, String expression, String nativeMessage) {
     assertFails(document, expression, nativeMessage, true);
   }

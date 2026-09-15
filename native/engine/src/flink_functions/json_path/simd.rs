@@ -193,6 +193,21 @@ mod tests {
     }
 
     #[test]
+    fn unicode_and_quoted_paths_agree_on_the_simd_tape() {
+        let input = format!(
+            r#"{{"用户":{{"姓.名":"first","姓.名":"last"}},"O'Reilly":true,"a\"b":"quoted"{}}}"#,
+            fields()
+        );
+        assert!(candidate(&input));
+        let mut reader = Reader::new(4000);
+        for text in ["$.用户['姓.名']", "$[\"O'Reilly\"]", "$['a\"b']"] {
+            let path = Path::parse(text, "13.0").unwrap();
+            equivalent(&path, &input, &mut reader);
+        }
+        assert!(reader.tape.as_ref().unwrap().0.capacity() > 0);
+    }
+
+    #[test]
     fn jackson_edges_use_the_existing_parser() {
         let path = Path::parse("lax $.a", "13.0").unwrap();
         let mut reader = Reader::new(4000);

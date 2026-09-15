@@ -664,7 +664,7 @@ final class RexExpression {
     }
     if ("JSON_STRING".equals(functionName)) {
       if (call.getOperands().size() != 1 || !isJsonScalarValue(call.getOperands().get(0))) {
-        return reject("JSON_STRING requires a character, boolean, or signed integer scalar");
+        return reject("JSON_STRING requires a character, boolean, integer, or decimal scalar");
       }
       return emitBuiltinCall(call, 152);
     }
@@ -1012,7 +1012,7 @@ final class RexExpression {
         return reject("JSON_OBJECT requires keys with well-formed Unicode");
       }
       if (!isJsonScalarValue(args.get(index + 1))) {
-        return reject("JSON_OBJECT requires character, boolean, or signed integer scalar values");
+        return reject("JSON_OBJECT requires character, boolean, integer, or decimal scalar values");
       }
     }
     add(KIND_CALL, 153, args.size());
@@ -1034,7 +1034,7 @@ final class RexExpression {
       return false;
     }
     return switch (value.getType().getSqlTypeName()) {
-      case CHAR, VARCHAR, BOOLEAN, TINYINT, SMALLINT, INTEGER, BIGINT -> true;
+      case CHAR, VARCHAR, BOOLEAN, TINYINT, SMALLINT, INTEGER, BIGINT, DECIMAL -> true;
       default -> false;
     };
   }

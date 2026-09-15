@@ -32,6 +32,29 @@ class FlinkJsonValueSqlHarnessTest {
   }
 
   @Test
+  void unicodeAndQuotedMemberNamesKeepPathPolicies() throws Exception {
+    for (String path :
+        new String[] {
+          "$.\u7528\u6237['\u59d3.\u540d']", "$[\"O'Reilly\"]", "$['a\"b']", "$['a]b']",
+          "$['\ud83d\ude00']", "$['*']", "$['$']", "$.\u00e9\u0661"
+        }) {
+      String literal = path.replace("'", "''");
+      assertParity(
+          JsonFunctionTestInputs::memberNames,
+          "SELECT id, JSON_VALUE(s, '"
+              + literal
+              + "' DEFAULT 'error' ON ERROR), "
+              + "JSON_VALUE(s, 'lax "
+              + literal
+              + "' DEFAULT 'empty' ON EMPTY DEFAULT 'error' ON ERROR) FROM inputs");
+    }
+    assertParity(
+        JsonFunctionTestInputs::memberNames,
+        "SELECT JSON_VALUE(s, '$.\u7528\u6237[''\u59d3.\u540d'']'), COUNT(*) FROM inputs "
+            + "GROUP BY JSON_VALUE(s, '$.\u7528\u6237[''\u59d3.\u540d'']')");
+  }
+
+  @Test
   void wideDocumentsKeepDuplicateKeysAndUnselectedFieldValidation() throws Exception {
     assertParity(
         JsonFunctionTestInputs::wideDocuments,

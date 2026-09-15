@@ -54,6 +54,8 @@ class ScalarFunctionBenchmark {
 
   private static final List<Query> SCALAR_FUNCTIONS =
       List.of(
+          new Query("ASCII", "tt_ascii", "ASCII(s)", "INT"),
+          new Query("CHR", "bigint", "CHR(n)", "STRING"),
           new Query("GREATEST", "numbers", "GREATEST(n, m, 17)"),
           new Query("LEAST", "numbers", "LEAST(n, m, 17)"),
           new Query("INITCAP", "text", "INITCAP(s)"),
@@ -113,6 +115,9 @@ class ScalarFunctionBenchmark {
                   new Query("JSON_STRING_TEXT", "tt_text", "JSON_STRING(s)"),
                   new Query("JSON_STRING_BOOLEAN", "tt_boolean", "JSON_STRING(b)"),
                   new Query("JSON_STRING_INTEGER", "bigint", "JSON_STRING(n)", "STRING"),
+                  new Query("JSON_STRING_DECIMAL", "tt_decimal", "JSON_STRING(n)", "STRING"),
+                  new Query(
+                      "JSON_OBJECT_DECIMAL", "tt_decimal", "JSON_OBJECT('n' VALUE n)", "STRING"),
                   new Query(
                       "JSON_OBJECT_NULL",
                       "tt_json_object",
@@ -126,6 +131,16 @@ class ScalarFunctionBenchmark {
                   new Query("IS_JSON_ARRAY", "tt_json_predicate", "s IS JSON ARRAY", "BOOLEAN"),
                   new Query("IS_JSON_SCALAR", "tt_json_predicate", "s IS JSON SCALAR", "BOOLEAN"),
                   new Query("JSON_VALUE", "tt_json", "JSON_VALUE(s, 'lax $.user.name')", "STRING"),
+                  new Query(
+                      "JSON_VALUE_UNICODE_PATH",
+                      "tt_json_member",
+                      "JSON_VALUE(s, 'lax $.\u7528\u6237[\"\u59d3.\u540d\"]')",
+                      "STRING"),
+                  new Query(
+                      "JSON_EXISTS_UNICODE_PATH",
+                      "tt_json_member",
+                      "JSON_EXISTS(s, 'lax $.\u7528\u6237[\"\u59d3.\u540d\"]')",
+                      "BOOLEAN"),
                   new Query(
                       "JSON_VALUE_BOOLEAN",
                       "tt_json_boolean",

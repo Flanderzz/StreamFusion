@@ -24,8 +24,10 @@ pub(crate) mod split_index;
 pub(crate) mod substring;
 pub(crate) mod to_date;
 
+mod ascii;
 mod binary_strings;
 mod charset;
+mod chr;
 mod is_json;
 mod json_exists;
 mod json_object;
@@ -40,6 +42,8 @@ const HEX_DIGITS: &[u8; 16] = b"0123456789ABCDEF";
 
 pub(crate) fn function(op: i64, arity: usize) -> Option<ScalarUDF> {
     Some(match op {
+        67 => ascii::function(),
+        81 => chr::function(),
         100 => datafusion::functions::string::starts_with()
             .as_ref()
             .clone(),
