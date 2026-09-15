@@ -54,6 +54,7 @@ class ScalarFunctionBenchmark {
 
   private static final List<Query> SCALAR_FUNCTIONS =
       List.of(
+          new Query("ASCII", "tt_ascii", "ASCII(s)", "INT"),
           new Query("GREATEST", "numbers", "GREATEST(n, m, 17)"),
           new Query("LEAST", "numbers", "LEAST(n, m, 17)"),
           new Query("INITCAP", "text", "INITCAP(s)"),

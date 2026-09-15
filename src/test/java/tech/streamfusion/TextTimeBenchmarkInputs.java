@@ -189,6 +189,11 @@ final class TextTimeBenchmarkInputs {
                 "{\"v\":" + selected[1] + ",\"padding\":\"" + text[1] + "\"}"
               };
             }
+            case "tt_ascii" ->
+                new String[] {
+                  payload(unicode ? "\u4e2da" : "ab", bytes),
+                  payload(unicode ? "\u00e9b" : "cd", bytes)
+                };
             case "tt_json" -> {
               int fields = Integer.getInteger("scalar.json.fields", 0);
               if (fields < 0) {

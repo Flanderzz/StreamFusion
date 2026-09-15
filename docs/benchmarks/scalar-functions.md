@@ -693,3 +693,42 @@ identity controls pay more for native execution, so these measurements do not is
 upcall cost. This is coverage work: temporal expressions can now remain between native operators,
 and adjacent temporal calls can share one upcall. A longer pipeline needs its own benchmark before
 claiming a throughput improvement. The current results justify no standalone temporal speedup claim.
+
+## Byte characters and JSON extensions (2026-09-15)
+
+These results use the implementation based on `ab4a21c6`, Apple M4 Pro, JDK 17, UTC,
+Flink 2.2.1 and DataFusion 54.0.0. Each case/scenario runs in a fresh JVM with the standard
+Maven `bench` profile (release + mimalloc), parallelism 1 and 2,000,000 rows. Flink/native
+run serially and alternate order, with two warmups and five measured trials per engine.
+Tables contain the final median elapsed seconds, including planning, the rowwise source
+and sink, and both native transposes. No baseline time is subtracted. Other test suites
+and native builds are stopped during measurements.
+
+Small differences are subject to run-to-run variance. Standalone regressions remain
+admitted to preserve verified semantics and native composition; the character changes
+also correct existing DataFusion/Flink result differences. These are end-to-end results,
+not isolated kernel timings or comparisons with an earlier native implementation.
+
+Reproduce each named case separately, then repeat with `scalar.unicode=true` and
+`scalar.nullEvery=8`. For integer and decimal inputs, that changes only nullability.
+Generated trial CSVs remain local build output and are not versioned.
+
+```sh
+TZ=UTC SF_BENCHMARK=true mvn -pl :streamfusion-runtime test -Pbench \
+  -Dnative.cargo.packages='-p streamfusion' \
+  '-Dtest=ScalarFunctionBenchmark#individualFunctions' \
+  -Dscalar.functions=ASCII -Dscalar.engine=both \
+  -Dscalar.rows=2000000 -Dscalar.warmup=2 -Dscalar.runs=5 \
+  -Dscalar.bytes=264 -Dscalar.unicode=false -Dscalar.nullEvery=0 \
+  -Dscalar.output=target/scalar-ascii.csv
+```
+
+### ASCII
+
+`ASCII`: `ASCII(s)` over 264-byte strings. ASCII inputs begin with `a`/`c`;
+Unicode inputs begin with a Chinese character or accented letter, exercising signed bytes.
+
+| Input | Flink (s) | Native (s) |
+|---|---:|---:|
+| ASCII, no NULLs | 0.753 | 1.017 |
+| Unicode, NULL every eighth row | 0.532 | 0.774 |
