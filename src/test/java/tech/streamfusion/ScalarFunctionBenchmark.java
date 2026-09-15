@@ -132,6 +132,16 @@ class ScalarFunctionBenchmark {
                   new Query("IS_JSON_SCALAR", "tt_json_predicate", "s IS JSON SCALAR", "BOOLEAN"),
                   new Query("JSON_VALUE", "tt_json", "JSON_VALUE(s, 'lax $.user.name')", "STRING"),
                   new Query(
+                      "JSON_VALUE_UNICODE_PATH",
+                      "tt_json_member",
+                      "JSON_VALUE(s, 'lax $.\u7528\u6237[\"\u59d3.\u540d\"]')",
+                      "STRING"),
+                  new Query(
+                      "JSON_EXISTS_UNICODE_PATH",
+                      "tt_json_member",
+                      "JSON_EXISTS(s, 'lax $.\u7528\u6237[\"\u59d3.\u540d\"]')",
+                      "BOOLEAN"),
+                  new Query(
                       "JSON_VALUE_BOOLEAN",
                       "tt_json_boolean",
                       "JSON_VALUE(s, '$.v' RETURNING BOOLEAN)",

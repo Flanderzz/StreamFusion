@@ -370,10 +370,12 @@ Enabled by default for the following verified shapes; no compatibility opt-in is
 
 Character input with a non-null literal definite path is native. Supported paths are `$`,
 dot members such as `$.user.name`, bracket members such as `$['user name']`, and nonnegative
-32-bit array indexes such as `$.users[0].name`. Dot names use ASCII letters, digits and
-underscores, with a letter/underscore first; bracket names additionally allow spaces and
-hyphens. Member names are case-sensitive. Wildcards, recursive descent, filters, slices,
-negative indexes, escapes/Unicode in path member names and dynamic paths fall back.
+32-bit array indexes such as `$.users[0].name`. Dot names use Unicode letters, numbers and
+underscores, with a letter/underscore first. Bracket names use single or double quotes and
+accept well-formed Unicode, spaces and punctuation, including the other quote character.
+Member names are case-sensitive. Wildcards, recursive descent, filters, slices, negative
+indexes, empty names, backslash escapes, ASCII controls, unpaired surrogates and dynamic
+paths fall back. Quoted `'*'` is an ordinary member name, not a wildcard.
 
 The default return type and explicit `RETURNING VARCHAR(n)` are native; Flink 2.2.1 does
 not truncate this function's result to `n`. `RETURNING BOOLEAN`, `INTEGER` and `DOUBLE`

@@ -54,13 +54,14 @@ impl<'a> Path<'a> {
                 }
                 steps.push(Step::Member(name));
                 text = &rest[end..];
-            } else if let Some(rest) = text.strip_prefix("['") {
-                let end = rest.find("']")?;
+            } else if text.starts_with("['") || text.starts_with("[\"") {
+                let quote = text.as_bytes()[1] as char;
+                let rest = &text[2..];
+                let end = rest.find(quote)?;
                 let name = &rest[..end];
                 if name.is_empty()
-                    || !name
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b"_ -".contains(&b))
+                    || name.bytes().any(|b| b < 0x20 || b == b'\\')
+                    || !rest[end + 1..].starts_with(']')
                 {
                     return None;
                 }
@@ -122,10 +123,10 @@ impl<'a> Path<'a> {
 }
 
 fn is_identifier(name: &str) -> bool {
-    name.as_bytes()
-        .first()
-        .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_')
-        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    name.chars()
+        .next()
+        .is_some_and(|c| c.is_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_alphanumeric() || c == '_')
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -498,6 +499,9 @@ mod tests {
             "strict $.a.b[0]",
             "lax $['a b'][2147483647]",
             "$[01].a",
+            "$.\u{7528}\u{6237}['\u{59d3}.\u{540d}']",
+            "$[\"O'Reilly\"]",
+            "$['a\"b']",
         ] {
             assert!(Path::parse(text, "13.0").is_some(), "{text}");
         }
@@ -510,9 +514,25 @@ mod tests {
             "$[2147483648]",
             "$['']",
             "$['a\\b']",
+            "$[\"a\",\"b\"]",
+            "$['a\n']",
         ] {
             assert!(Path::parse(text, "13.0").is_none(), "{text}");
         }
+    }
+
+    #[test]
+    fn unicode_and_quoted_members_keep_last_duplicate_values() {
+        let input = r#"{"用户":{"姓.名":"old","姓.名":"new"},"O'Reilly":true,"a\"b":42}"#;
+        assert_eq!(
+            path("$.用户['姓.名']").read(input),
+            Ok(Value::String("new"))
+        );
+        assert_eq!(
+            path("$[\"O'Reilly\"]").read(input),
+            Ok(Value::Boolean(true))
+        );
+        assert_eq!(path("$['a\"b']").read(input), Ok(Value::Number("42")));
     }
 
     #[test]

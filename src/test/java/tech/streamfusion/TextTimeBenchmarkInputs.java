@@ -207,6 +207,15 @@ final class TextTimeBenchmarkInputs {
                   payload(unicode ? "\u4e2da" : "ab", bytes),
                   payload(unicode ? "\u00e9b" : "cd", bytes)
                 };
+            case "tt_json_member" ->
+                new String[] {
+                  "{\"\u7528\u6237\":{\"\u59d3.\u540d\":\""
+                      + (unicode ? "\u4e2d\\n\ud83d\ude00" : "Alice")
+                      + "\"},\"padding\":\""
+                      + text[0]
+                      + "\"}",
+                  "{\"\u7528\u6237\":{},\"padding\":\"" + text[1] + "\"}"
+                };
             case "tt_json" -> {
               int fields = Integer.getInteger("scalar.json.fields", 0);
               if (fields < 0) {

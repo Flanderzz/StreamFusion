@@ -762,3 +762,24 @@ values and default NULL ON NULL policy. The 264-byte string budget does not appl
 |---|---:|---:|
 | DECIMAL(38,9), no NULLs | 0.599 | 0.655 |
 | DECIMAL(38,9), NULL every eighth row | 0.591 | 0.611 |
+
+### Unicode JSON member paths
+
+`JSON_VALUE_UNICODE_PATH` and `JSON_EXISTS_UNICODE_PATH` select `lax $.用户["姓.名"]`,
+each in its own query. Both scenarios use Unicode member names. Documents alternate
+between a selected string and a missing member, with a 264-byte padding-string budget;
+the nullable scenario also uses Unicode selected values/padding and NULL every eighth row.
+
+JSON_VALUE:
+
+| Input | Flink (s) | Native (s) |
+|---|---:|---:|
+| ASCII values, no NULLs | 1.718 | 1.224 |
+| Unicode values, NULL every eighth row | 1.451 | 1.107 |
+
+JSON_EXISTS:
+
+| Input | Flink (s) | Native (s) |
+|---|---:|---:|
+| ASCII values, no NULLs | 1.703 | 1.226 |
+| Unicode values, NULL every eighth row | 1.445 | 1.097 |

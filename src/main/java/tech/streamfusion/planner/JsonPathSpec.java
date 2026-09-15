@@ -8,7 +8,9 @@ final class JsonPathSpec {
   private static final Pattern MODE =
       Pattern.compile("^\\s*(strict|lax)\\s+(.+)$", Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
   private static final Pattern STEP =
-      Pattern.compile("\\.[A-Za-z_][A-Za-z0-9_]*|\\['[A-Za-z0-9_ -]+'\\]|\\[([0-9]+)\\]");
+      Pattern.compile(
+          "\\.[\\p{L}_][\\p{L}\\p{N}_]*|\\['[^'\\\\\\x00-\\x1f]+'\\]"
+              + "|\\[\"[^\"\\\\\\x00-\\x1f]+\"\\]|\\[([0-9]+)\\]");
 
   private JsonPathSpec() {}
 
@@ -23,7 +25,7 @@ final class JsonPathSpec {
   }
 
   static String normalize(String path) {
-    if (unicodeVersion() == null) {
+    if (unicodeVersion() == null || path.codePoints().anyMatch(c -> c >= 0xd800 && c <= 0xdfff)) {
       return null;
     }
     var mode = MODE.matcher(path);

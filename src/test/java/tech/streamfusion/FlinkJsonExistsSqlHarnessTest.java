@@ -32,6 +32,30 @@ class FlinkJsonExistsSqlHarnessTest {
   }
 
   @Test
+  void unicodeAndQuotedMemberNamesKeepExistencePolicies() throws Exception {
+    for (String path :
+        new String[] {
+          "$.\u7528\u6237['\u59d3.\u540d']", "$[\"O'Reilly\"]", "$['a\"b']", "$['a]b']",
+          "$['\ud83d\ude00']", "$['*']", "$['$']", "$.\u00e9\u0661"
+        }) {
+      String literal = path.replace("'", "''");
+      assertParity(
+          JsonFunctionTestInputs::memberNames,
+          "SELECT id, JSON_EXISTS(s, '"
+              + literal
+              + "' UNKNOWN ON ERROR), "
+              + "JSON_EXISTS(s, 'lax "
+              + literal
+              + "') FROM inputs");
+    }
+    assertParity(
+        JsonFunctionTestInputs::memberNames,
+        "SELECT id FROM inputs WHERE JSON_EXISTS(s, 'lax $.\u7528\u6237[''\u59d3.\u540d'']')");
+    JsonFunctionTestInputs.assertFailsLikeFlink(
+        "{}", "JSON_EXISTS(s, '$.\u7528\u6237[''\u59d3.\u540d'']' ERROR ON ERROR)");
+  }
+
+  @Test
   void wideDocumentsKeepDuplicateKeysAndUnselectedFieldValidation() throws Exception {
     assertParity(
         JsonFunctionTestInputs::wideDocuments,
