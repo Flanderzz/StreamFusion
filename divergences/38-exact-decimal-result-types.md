@@ -34,3 +34,17 @@ existing arbitrary-precision HALF_UP implementation across scales and precision
 boundaries. Division retains its separate 38-significant-digit rounding stage;
 aggregate overflow state machines are unchanged. End-to-end per-expression
 measurements are recorded in `docs/benchmarks/decimal-expressions.md`.
+
+Modulo retains arbitrary-precision arithmetic because its scale alignment and
+quotient can exceed Decimal128. Flink applies `MathContext(38)` to the integral
+quotient as well: mathematical remainder alone is insufficient. A quotient
+needing more than 38 significant digits fails with `Division impossible`;
+trailing zeroes may be removed to represent large exact powers without an
+error. SQL tests exercise both failures and the allowed large quotients, and
+native tests cover negative signs and non-zero remainders. This is an error
+semantics fix; no modulo speedup is claimed.
+
+For non-nullable operands Flink may still declare arithmetic results `NOT NULL`.
+An overflow then reaches the shared downstream constraint enforcer and fails
+the job. SQL tests check the same failure on both engines; correcting the native
+NULL bitmap must not silently remove a Flink-declared constraint.

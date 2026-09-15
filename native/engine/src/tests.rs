@@ -7529,7 +7529,7 @@ fn decimal_divide_matches_bigdecimal() {
 #[test]
 fn decimal_mod_matches_bigdecimal() {
     fn modulo(a: i128, s1: i8, b: i128, s2: i8, p: u8, s: i8) -> Option<i128> {
-        let (unscaled, scale) = remainder_exact(a, s1, b, s2);
+        let (unscaled, scale) = remainder_38_digits(a, s1, b, s2).unwrap();
         rescale_half_up(unscaled, scale, p, s)
     }
     // 7.5 % 2.1 = 1.2; the sign follows the dividend (Java remainder), the divisor's sign is
@@ -7539,4 +7539,15 @@ fn decimal_mod_matches_bigdecimal() {
     assert_eq!(modulo(75, 1, -21, 1, 12, 6), Some(1_200_000));
     // Mixed scales: 5.75 % 0.50 = 0.25.
     assert_eq!(modulo(575, 2, 50, 2, 12, 6), Some(250_000));
+    assert_eq!(modulo(1, 0, 3, 38, 38, 38), Some(1));
+    assert_eq!(modulo(-1, 0, 3, 38, 38, 38), Some(-1));
+    // A 75-digit integer quotient is allowed if its significant part still fits the context.
+    assert_eq!(modulo(10_i128.pow(37), 0, 1, 38, 38, 38), Some(0));
+    assert_eq!(modulo(10_i128.pow(37), 0, 4, 38, 38, 38), Some(0));
+    for dividend in [10_i128.pow(37), -10_i128.pow(37)] {
+        for divisor in [3, -3] {
+            let error = remainder_38_digits(dividend, 0, divisor, 38).unwrap_err();
+            assert!(error.to_string().contains("Division impossible"));
+        }
+    }
 }

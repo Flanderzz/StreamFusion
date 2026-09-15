@@ -174,12 +174,21 @@ expressions; see [temporal functions](temporal-functions.md), including the time
   is rounded `HALF_UP` before checking precision and writing one `Decimal128` column. Overflow
   produces SQL `NULL`, including in `IS NULL`, CASE, filters, and group keys. A wide intermediate
   does not discard a result that fits after rounding.
-- **Division and modulo** (`/`, `%`) go through a fused native kernel that reproduces Flink's exact
-  runtime (`DecimalDataUtils.divide`/`mod`) rather than Arrow's own decimal division: the quotient is
+- **Division** (`/`) uses Flink's decimal rounding rather than Arrow's: the quotient is
   computed to 38 *significant* digits with `HALF_UP` rounding (matching `BigDecimal`'s
   `MathContext(38, HALF_UP)`), then rescaled to the declared `DECIMAL(p, s)` with `HALF_UP` again —
   producing `NULL` when the result would exceed `p` digits, and failing the job on division by zero,
   all exactly as the host does.
+- **Modulo** (`MOD`, `%`) computes the exact signed remainder with Flink's `MathContext(38)`
+  constraint on the integral quotient. A quotient that needs more than 38 significant digits
+  after removing trailing zeroes fails the job with `Division impossible`; for example,
+  `DECIMAL(38,0)` value `10^37` modulo `DECIMAL(38,38)` value `3 * 10^-38`. A large quotient
+  consisting of a power of ten remains valid. The remainder is rescaled `HALF_UP`, with NULL on
+  result-precision overflow and job failure on a zero divisor.
+
+Flink can retain a `NOT NULL` result declaration from non-nullable operands even
+when decimal arithmetic overflows. Its downstream constraint enforcer then fails
+the job on that NULL; the native path preserves this failure as well.
 
 The old `decimalArithmetic.approximate` flag is retired entirely: the float/double→`DECIMAL` cast it
 used to gate now runs host-exact through the cast upcall above.

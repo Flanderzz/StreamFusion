@@ -945,8 +945,8 @@ impl datafusion::logical_expr::ScalarUDFImpl for NarrowingCast {
 /// — the exact quotient rounded to 38 *significant digits* — then `fromBigDecimal(bd, p, s)` rescales
 /// to the declared `DECIMAL(p, s)` with HALF_UP and reports NULL when the result exceeds `p` digits.
 /// Both steps are reproduced here on big integers (the intermediate can exceed 38 digits, hence
-/// num-bigint). Modulo follows `BigDecimal.remainder`: subtract the truncated integral quotient times
-/// the divisor, exactly. A zero divisor fails the evaluation, as Flink's ArithmeticException fails
+/// num-bigint). Modulo follows `BigDecimal.remainder` with the same MathContext: the integral
+/// quotient must be representable with 38 significant digits. A zero divisor fails the evaluation, as Flink's ArithmeticException fails
 /// the job; a NULL operand yields NULL. Operands are Decimal128 columns or integers (scale 0).
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub(crate) struct DecimalDivide {
@@ -1067,17 +1067,30 @@ pub(crate) fn quotient_38_digits(a: i128, s1: i8, b: i128, s2: i8) -> (num_bigin
     }
 }
 
-/// `BigDecimal.remainder`: v1 − trunc(v1/v2)·v2, computed exactly at scale max(s1, s2). The sign
-/// follows the dividend, like Java's remainder.
-pub(crate) fn remainder_exact(a: i128, s1: i8, b: i128, s2: i8) -> (num_bigint::BigInt, i64) {
+/// `BigDecimal.remainder(..., MathContext(38))` for a non-zero divisor. The remainder is exact,
+/// but the integral quotient must fit the context after removing any trailing zeroes.
+pub(crate) fn remainder_38_digits(
+    a: i128,
+    s1: i8,
+    b: i128,
+    s2: i8,
+) -> datafusion::common::Result<(num_bigint::BigInt, i64)> {
     use num_bigint::BigInt;
+    use num_traits::ToPrimitive;
     let n = BigInt::from(a) * BigInt::from(10u8).pow(s2.max(0) as u32);
     let d = BigInt::from(b) * BigInt::from(10u8).pow(s1.max(0) as u32);
     let q = &n / &d; // BigInt division truncates toward zero, like divideToIntegralValue
+    if q.magnitude()
+        .to_u128()
+        .is_none_or(|value| value >= 10_u128.pow(38))
+        && q.magnitude().to_str_radix(10).trim_end_matches('0').len() > 38
+    {
+        return datafusion::common::exec_err!("Division impossible");
+    }
     let sm = s1.max(s2) as i64;
     let r = BigInt::from(a) * BigInt::from(10u8).pow((sm - s1 as i64) as u32)
         - q * BigInt::from(b) * BigInt::from(10u8).pow((sm - s2 as i64) as u32);
-    (r, sm)
+    Ok((r, sm))
 }
 
 impl datafusion::logical_expr::ScalarUDFImpl for DecimalDivide {
@@ -1116,7 +1129,7 @@ impl datafusion::logical_expr::ScalarUDFImpl for DecimalDivide {
                 ));
             }
             let (unscaled, scale) = if self.modulo {
-                remainder_exact(a, s1, b, s2)
+                remainder_38_digits(a, s1, b, s2)?
             } else {
                 quotient_38_digits(a, s1, b, s2)
             };

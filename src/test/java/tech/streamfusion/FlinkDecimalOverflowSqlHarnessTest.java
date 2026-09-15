@@ -1,5 +1,6 @@
 package tech.streamfusion;
 
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.math.BigDecimal;
@@ -103,7 +104,42 @@ class FlinkDecimalOverflowSqlHarnessTest {
     NativeParity.assertChangelogParity(environment, sql);
   }
 
+  @Test
+  void nonNullableResultsKeepFlinksConstraintFailure() {
+    String sql = "SELECT a + a FROM t";
+    for (boolean nativeRun : new boolean[] {false, true}) {
+      TableEnvironment table = decimalRows(38, 3, false, "99999999999999999999999999999999999.999");
+      if (nativeRun) {
+        assertTrue(NativePlanner.explain(table, sql).contains("NativeCalc"));
+        NativePlanner.install(table);
+      }
+      Exception failure =
+          assertThrows(
+              Exception.class,
+              () -> {
+                try (var rows = table.executeSql(sql).collect()) {
+                  while (rows.hasNext()) {
+                    rows.next();
+                  }
+                }
+              },
+              "native=" + nativeRun);
+      StringBuilder causes = new StringBuilder();
+      for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+        causes.append(cause.getMessage()).append('\n');
+      }
+      assertTrue(
+          causes.toString().contains("is NOT NULL, however, a null value is being written"),
+          causes.toString());
+    }
+  }
+
   private static TableEnvironment decimals(int precision, int scale, String... values) {
+    return decimalRows(precision, scale, true, values);
+  }
+
+  private static TableEnvironment decimalRows(
+      int precision, int scale, boolean nullable, String... values) {
     StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
     env.setParallelism(1);
     StreamTableEnvironment table = StreamTableEnvironment.create(env);
@@ -116,7 +152,11 @@ class FlinkDecimalOverflowSqlHarnessTest {
         env.fromData(Types.ROW_NAMED(new String[] {"id", "a"}, Types.LONG, Types.BIG_DEC), rows),
         Schema.newBuilder()
             .column("id", DataTypes.BIGINT())
-            .column("a", DataTypes.DECIMAL(precision, scale))
+            .column(
+                "a",
+                nullable
+                    ? DataTypes.DECIMAL(precision, scale)
+                    : DataTypes.DECIMAL(precision, scale).notNull())
             .build());
     return table;
   }
