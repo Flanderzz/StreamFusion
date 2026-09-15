@@ -364,4 +364,41 @@ mod tests {
         }
         assert_eq!(memory.flush(400).unwrap(), restored.flush(400).unwrap());
     }
+    #[test]
+    fn full_range_components_survive_native_and_canonical_checkpoints() {
+        use streamfusion_bridge::timestamp::{timestamp_array, TimestampValue};
+        let batch = RecordBatch::try_from_iter(vec![(
+            "rt",
+            Arc::new(timestamp_array([
+                Some(TimestampValue::new(253_402_300_799_999, 999999).unwrap()),
+                Some(TimestampValue::new(-62_135_596_800_000, 123456).unwrap()),
+                Some(TimestampValue::new(-1, 999999).unwrap()),
+            ])) as ArrayRef,
+        )])
+        .unwrap();
+        let schema = batch.schema();
+        let store = RocksTemporalSortBuffer::create(test_config("wide"), schema.clone()).unwrap();
+        let mut before = TemporalSorter::new(0).with_store(store);
+        before.push(batch.clone()).unwrap();
+        let mut canonical = TemporalSorter::restore(0, &before.store_snapshot().unwrap());
+        let snapshot = snapshot_dir("wide");
+        let manifest = before.store_mut().checkpoint(&snapshot).unwrap();
+        drop(before);
+        let store = RocksTemporalSortBuffer::open_merged(
+            test_config("wide-restored"),
+            schema,
+            &[(snapshot, manifest.snapshot_id)],
+            0..=0,
+            true,
+        )
+        .unwrap();
+        let mut restored = TemporalSorter::new(0).with_store(store);
+        let mut memory = TemporalSorter::new(0);
+        memory.push(batch).unwrap();
+        for watermark in [-1, i64::MAX] {
+            let expected = memory.flush(watermark).unwrap();
+            assert_eq!(canonical.flush(watermark).unwrap(), expected);
+            assert_eq!(restored.flush(watermark).unwrap(), expected);
+        }
+    }
 }

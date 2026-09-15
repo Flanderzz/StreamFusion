@@ -21,7 +21,6 @@ import org.apache.arrow.vector.Float4Vector;
 import org.apache.arrow.vector.Float8Vector;
 import org.apache.arrow.vector.IntVector;
 import org.apache.arrow.vector.SmallIntVector;
-import org.apache.arrow.vector.TimeStampNanoVector;
 import org.apache.arrow.vector.TinyIntVector;
 import org.apache.arrow.vector.VarCharVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
@@ -67,7 +66,7 @@ public abstract class NativeWindowOperatorCore<OUT> extends AbstractNativeStatef
   protected static final int TYPE_DATE = 8;
 
   // Parameterized type codes pack precision/scale into the code so they thread through the existing
-  // int[] without parallel arrays. Timestamp keys ride as int64 nanoseconds (lossless for any Flink
+  // int[] without parallel arrays. Timestamp keys keep their milliseconds and fractional nanos (any Flink
   // precision); decimal keys/values ride in an Arrow decimal vector of the given precision/scale.
   protected static final int TYPE_TIMESTAMP_BASE = 1000; // + precision (0..9)
   protected static final int TYPE_DECIMAL_BASE = 2000; // + precision * 100 + scale
@@ -345,7 +344,7 @@ public abstract class NativeWindowOperatorCore<OUT> extends AbstractNativeStatef
 
   /**
    * Folds an Arrow batch into the native aggregator, reading the event-time, value, and key columns
-   * positionally — the columnar analog of {@link #updateRaw}. The time column arrives as nanosecond
+   * positionally — the columnar analog of {@link #updateRaw}. The time column arrives as component-pair
    * timestamps (how the row→Arrow transpose encodes them) and is reduced to the epoch millis the
    * native aggregator expects.
    */
@@ -366,7 +365,7 @@ public abstract class NativeWindowOperatorCore<OUT> extends AbstractNativeStatef
 
   /**
    * Window-attached variant of {@link #updateColumnar}: the input rows already carry their window as
-   * {@code windowStartColumn}/{@code windowEndColumn} (nanosecond timestamps, as the transpose encodes
+   * {@code windowStartColumn}/{@code windowEndColumn} (timestamp components, as the transpose encodes
    * them) rather than a rowtime to slice — an upstream window aggregate's output re-aggregated per
    * window (Nexmark q5). Emits an Arrow batch with the canonical {@code window_start}/{@code window_end}
    * (epoch millis), {@code value{i}}, and {@code key{j}} columns the native window-attached fold reads.
@@ -561,8 +560,7 @@ public abstract class NativeWindowOperatorCore<OUT> extends AbstractNativeStatef
       return;
     }
     if (isTimestamp(keyType)) {
-      // Columnar timestamps arrive as nanosecond timestamps; carry the nanos as int64.
-      ((BigIntVector) target).setSafe(i, ((TimeStampNanoVector) source).get(i));
+      TimestampAccessor.set(target, i, new TimestampAccessor(source).getTimestamp(i));
       return;
     }
     if (isDecimal(keyType)) {
@@ -626,7 +624,7 @@ public abstract class NativeWindowOperatorCore<OUT> extends AbstractNativeStatef
   /** Creates the Arrow vector carrying a key column, in the key's natural type (int/bigint widen). */
   protected final FieldVector newKeyVector(String name, int keyType) {
     if (isTimestamp(keyType)) {
-      return new BigIntVector(name, allocator); // carried as int64 nanoseconds
+      return TimestampAccessor.field(name, true).createVector(allocator);
     }
     if (isDecimal(keyType)) {
       return new DecimalVector(name, allocator, decimalPrecision(keyType), decimalScale(keyType));
@@ -651,7 +649,7 @@ public abstract class NativeWindowOperatorCore<OUT> extends AbstractNativeStatef
     }
     if (isTimestamp(keyType)) {
       TimestampData t = row.getTimestamp(column, timestampPrecision(keyType));
-      ((BigIntVector) vector).setSafe(i, t.getMillisecond() * NANOS_PER_MILLI + t.getNanoOfMillisecond());
+      TimestampAccessor.set(vector, i, t);
       return;
     }
     if (isDecimal(keyType)) {
@@ -682,6 +680,7 @@ public abstract class NativeWindowOperatorCore<OUT> extends AbstractNativeStatef
       return null;
     }
     if (isTimestamp(keyType)) {
+      if (TimestampAccessor.isTimestamp(vector)) return new TimestampAccessor(vector).getTimestamp(i);
       long nanos = ((BigIntVector) vector).get(i);
       return TimestampData.fromEpochMillis(
           Math.floorDiv(nanos, NANOS_PER_MILLI), (int) Math.floorMod(nanos, NANOS_PER_MILLI));

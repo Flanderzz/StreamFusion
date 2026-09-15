@@ -79,6 +79,10 @@ class OrcTimestampParityTest {
               "1969-12-31T23:59:59.999999",
               "1969-12-31T23:59:58.999999",
               "1970-01-01T00:00:00.000001",
+              "0001-01-01T00:00:00.123456",
+              "1582-10-15T23:59:59.999999",
+              "2262-04-12T00:00:00.123456",
+              "9999-12-31T23:59:59.999999",
               "1900-01-01T00:00:00.123456",
               "1700-02-28T23:59:59.123456",
               "1800-10-04T12:00:00.123456",
@@ -106,6 +110,8 @@ class OrcTimestampParityTest {
       }
       assertEquals(
           PaimonTestTables.readRows(stock, type), PaimonTestTables.readRows(nativeTable, type));
+      var nativeRead = stock.newReadBuilder();
+      PaimonSourceReadTest.assertRead(stock, nativeRead, nativeRead.newScan().plan().splits(), true);
       var left = PaimonTestTables.dataFiles(stock).values().iterator().next().get(0);
       var right = PaimonTestTables.dataFiles(nativeTable).values().iterator().next().get(0);
       assertEquals(PaimonTestTables.describe(left, type), PaimonTestTables.describe(right, type));

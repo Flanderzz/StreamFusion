@@ -31,18 +31,13 @@ watermarks use the millisecond component. The JVM temporal-function bridge prese
 both components for generated expressions and reads milliseconds for millisecond-only builtins.
 Readers accept Arrow second, millisecond, microsecond and nanosecond timestamp
 columns without interpreting the Arrow timezone label as a timezone conversion.
-They also support a nullable timestamp struct containing non-null `millis: BIGINT` and
-`nano_of_milli: INT` buffers. Component metadata distinguishes that layout from user ROW values.
-Its millisecond view shares the original buffer, and its writer preserves hidden fractions even
-when the logical precision is three. Primitive timestamp writes now check overflow and fail
-explicitly instead of wrapping the date.
-
-This reader contract does **not** yet expand end-to-end timestamp range: row-to-Arrow
-writers, timestamp-producing expressions and several state/output paths still use
-nanosecond columns. The complete representation and consumer/state migration remain
-tracked in [#64](https://github.com/datafusion-contrib/StreamFusion/issues/64).
-Timestamp-producing functions are not enabled on the strength of reader compatibility
-alone. See [the timestamp contract](https://github.com/datafusion-contrib/StreamFusion/blob/main/divergences/39-timestamp-value-contract.md).
+The default SQL layout is a nullable timestamp struct containing non-null `millis: BIGINT` and
+`nano_of_milli: INT` buffers. Component metadata distinguishes it from user ROW values. This keeps
+Flink's full signed-millisecond range and fractional nanos in projections, expressions, keys,
+windows and saved state. Its millisecond view shares the original buffer, and its writer preserves
+hidden fractions even when the logical precision is three. Explicit Arrow unit casts check overflow;
+connector formats follow their host's documented precision and physical-unit limits.
+See [the timestamp contract](https://github.com/datafusion-contrib/StreamFusion/blob/main/divergences/39-timestamp-value-contract.md).
 
 ## Global switches
 

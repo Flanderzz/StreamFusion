@@ -18,13 +18,11 @@ payload retains its original components; only the interval lookup uses milliseco
 The direction of the lookup follows the arriving input, including Java long
 arithmetic at overflowing bounds.
 
-The native lookup accepts the four primitive Arrow timestamp units, BIGINT
-milliseconds. Memory snapshots retain
+The native lookup accepts the default millisecond/fraction pair, the four primitive Arrow
+timestamp units, and BIGINT milliseconds. Memory snapshots retain
 the original payload schema and outer-join match flags; INNER restore does not
-interpret a payload column as an outer-join row id. These consumer checks do not
-change the default SQL timestamp layout or enable wider-range producers; the
-remaining transport/state migration is tracked in
-[#64](https://github.com/datafusion-contrib/StreamFusion/issues/64).
+interpret a payload column as an outer-join row id. Timestamp payloads and keys preserve both
+components across checkpoints, including wide dates and sub-millisecond fractions.
 
 ## Admission
 

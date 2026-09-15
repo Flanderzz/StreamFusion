@@ -1,6 +1,7 @@
 package tech.streamfusion.orc;
 
 import java.lang.invoke.MethodHandle;
+import tech.streamfusion.arrow.TimestampAccessor;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 import java.nio.ByteOrder;
@@ -27,7 +28,7 @@ final class ArrowOrcVectors {
   private final Access access;
   private final int[] projection;
 
-  ArrowOrcVectors(List<Field> fields, Object batch, int[] projection) {
+  ArrowOrcVectors(List<Field> fields, Object batch, int[] projection, boolean legacyTimestampLtz) {
     this.batch = batch;
     this.access = ACCESS.get(batch.getClass());
     this.projection = projection.clone();
@@ -35,7 +36,7 @@ final class ArrowOrcVectors {
     if (vectors.length != projection.length) throw new IllegalArgumentException("ORC column count");
     columns = new Column[vectors.length];
     for (int c = 0; c < columns.length; c++)
-      columns[c] = new Column(fields.get(projection[c]), vectors[c]);
+      columns[c] = new Column(fields.get(projection[c]), vectors[c], legacyTimestampLtz);
   }
 
   void copy(VectorSchemaRoot input, int start, int count) {
@@ -92,6 +93,8 @@ final class ArrowOrcVectors {
 
   private static final class Column {
     private final ArrowType type;
+    private final boolean componentTimestamp;
+    private final boolean instantTimestamp;
     private final Column[] children;
     private byte[] bytes = new byte[16];
     private int[] integers = new int[0];
@@ -114,13 +117,17 @@ final class ArrowOrcVectors {
         bytes = new byte[Math.max(length, bytes.length + bytes.length / 2)];
     }
 
-    Column(Field field, Object output) {
+    Column(Field field, Object output, boolean legacyTimestampLtz) {
       this.output = output;
       access = ACCESS.get(output.getClass());
       type = field.getType();
+      componentTimestamp = TimestampAccessor.isComponentTimestamp(field);
+      instantTimestamp = !legacyTimestampLtz && (componentTimestamp
+          ? "UTC".equals(field.getChildren().get(0).getMetadata().get("streamfusion.timestamp.timezone"))
+          : type instanceof ArrowType.Timestamp timestamp && "UTC".equals(timestamp.getTimezone()));
       List<Field> fields = field.getChildren();
       Object[] nested =
-          switch (type.getTypeID()) {
+          componentTimestamp ? new Object[0] : switch (type.getTypeID()) {
             case Struct -> (Object[]) access.get(output, "fields");
             case List -> new Object[] {access.get(output, "child")};
             case Map -> new Object[] {access.get(output, "keys"), access.get(output, "values")};
@@ -128,7 +135,7 @@ final class ArrowOrcVectors {
           };
       if (type instanceof ArrowType.Map) fields = fields.get(0).getChildren();
       children = new Column[nested.length];
-      for (int i = 0; i < nested.length; i++) children[i] = new Column(fields.get(i), nested[i]);
+      for (int i = 0; i < nested.length; i++) children[i] = new Column(fields.get(i), nested[i], legacyTimestampLtz);
       if (type instanceof ArrowType.Decimal decimal
           && !(access.get(output, "vector") instanceof long[])) {
         var elementType = access.get(output, "vector").getClass().getComponentType();
@@ -150,7 +157,7 @@ final class ArrowOrcVectors {
           throw new IllegalStateException(e);
         }
       } else decimalSetter = null;
-      if (type instanceof ArrowType.Timestamp) access.invoke(output, "setIsUTC", true);
+      if (componentTimestamp || type instanceof ArrowType.Timestamp) access.invoke(output, "setIsUTC", true);
     }
 
     void copy(FieldVector input, int start, int count) {
@@ -172,6 +179,22 @@ final class ArrowOrcVectors {
       }
       access.set(output, "noNulls", noNulls);
       vectorBytes = (long) isNull.length * 128;
+      if (componentTimestamp || type instanceof ArrowType.Timestamp) {
+        TimestampAccessor timestamp = new TimestampAccessor(input);
+        long[] time = (long[]) access.get(output, "time");
+        int[] nanos = (int[]) access.get(output, "nanos");
+        for (int i = 0; i < count; i++) {
+          if (isNull[i]) continue;
+          long millis = timestamp.getMillis(start + i);
+          // Flink/Paimon's local timestamp writer passes through java.sql.Timestamp, whose
+          // pre-1582 calendar differs from java.time. Instant ORC columns keep epoch millis.
+          time[i] = !instantTimestamp && millis < -12_219_292_800_000L
+              ? timestamp.getTimestamp(start + i).toTimestamp().getTime() : millis;
+          nanos[i] = (int) Math.floorMod(millis, 1000L) * 1_000_000
+              + timestamp.getNanoOfMillisecond(start + i);
+        }
+        return;
+      }
       var data =
           switch (type.getTypeID()) {
             case List, Map, Struct -> null;
@@ -285,24 +308,6 @@ final class ArrowOrcVectors {
                 throw new IllegalStateException(e);
               }
             }
-          }
-        }
-        case Timestamp -> {
-          long units =
-              switch (((ArrowType.Timestamp) type).getUnit()) {
-                case SECOND -> 1;
-                case MILLISECOND -> 1000;
-                case MICROSECOND -> 1_000_000;
-                case NANOSECOND -> 1_000_000_000;
-              };
-          var time = (long[]) access.get(output, "time");
-          var nanosValues = (int[]) access.get(output, "nanos");
-          for (int i = 0; i < count; i++) {
-            long value = data.getLong((long) (start + i) * 8);
-            long seconds = Math.floorDiv(value, units);
-            int nanos = (int) (Math.floorMod(value, units) * (1_000_000_000 / units));
-            time[i] = seconds * 1000 + nanos / 1_000_000;
-            nanosValues[i] = nanos;
           }
         }
         case List, Map -> {

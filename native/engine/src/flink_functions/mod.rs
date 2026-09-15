@@ -194,6 +194,11 @@ pub(crate) fn map_timestamp_millis(
     map: impl Fn(i64) -> i64,
 ) -> Result<Int64Array> {
     match input.data_type() {
+        data_type if streamfusion_bridge::timestamp::is_component_timestamp(data_type) => Ok(
+            streamfusion_bridge::timestamp::TimestampColumn::try_new(input.as_ref())?
+                .to_millis()?
+                .unary(map),
+        ),
         DataType::Timestamp(TimeUnit::Second, None) => {
             Ok(as_primitive_array::<TimestampSecondType>(input)?
                 .unary::<_, Int64Type>(|value| map(value.wrapping_mul(1000))))

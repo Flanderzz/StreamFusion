@@ -75,7 +75,6 @@ import org.apache.arrow.vector.TimeMicroVector;
 import org.apache.arrow.vector.TimeMilliVector;
 import org.apache.arrow.vector.TimeNanoVector;
 import org.apache.arrow.vector.TimeSecVector;
-import org.apache.arrow.vector.TimeStampVector;
 import org.apache.arrow.vector.TinyIntVector;
 import org.apache.arrow.vector.ValueVector;
 import org.apache.arrow.vector.VarBinaryVector;
@@ -127,15 +126,14 @@ import org.apache.flink.table.types.logical.utils.LogicalTypeDefaultVisitor;
  * (this package), so a clean clone builds without it.
  *
  * <p>One deliberate divergence from upstream: a {@code TIMESTAMP}/{@code TIMESTAMP_LTZ} column maps to a
- * nanosecond Arrow timestamp regardless of declared precision (upstream picks a unit per precision). This
- * matches the unit the native side already produces and consumes, so the mapping needs no change across
- * the JNI boundary.
+ * struct of epoch milliseconds and nanos within the millisecond, regardless of declared precision.
+ * This preserves Flink's range and any fractional nanos already present in a runtime value.
  */
 public final class ArrowConversion {
 
   private ArrowConversion() {}
 
-  /** The Arrow schema for a row type, with the nanosecond-timestamp convention above. */
+  /** The Arrow schema for a row type, with the two-component timestamp convention above. */
   public static Schema toArrowSchema(RowType rowType) {
     List<Field> fields =
         rowType.getFields().stream()
@@ -163,7 +161,9 @@ public final class ArrowConversion {
         new FieldType(
             logicalType.isNullable(), logicalType.accept(TypeConverter.INSTANCE), null);
     List<Field> children = null;
-    if (logicalType instanceof ArrayType) {
+    if (logicalType instanceof TimestampType || logicalType instanceof LocalZonedTimestampType) {
+      children = TimestampAccessor.fields();
+    } else if (logicalType instanceof ArrayType) {
       children =
           Collections.singletonList(
               toArrowField("element", ((ArrayType) logicalType).getElementType()));
@@ -204,9 +204,12 @@ public final class ArrowConversion {
   private static boolean readsAs(Field actual, Field expected) {
     ArrowType actualType = actual.getType();
     ArrowType expectedType = expected.getType();
+    if ((actualType instanceof ArrowType.Timestamp || TimestampAccessor.isComponentTimestamp(actual))
+        && (expectedType instanceof ArrowType.Timestamp || TimestampAccessor.isComponentTimestamp(expected))) {
+      return true;
+    }
     boolean convertibleOnRead =
-        (actualType instanceof ArrowType.Timestamp && expectedType instanceof ArrowType.Timestamp)
-            || (actualType instanceof ArrowType.Time && expectedType instanceof ArrowType.Time);
+        actualType instanceof ArrowType.Time && expectedType instanceof ArrowType.Time;
     if (!convertibleOnRead && !actualType.equals(expectedType)) {
       return false;
     }
@@ -278,7 +281,7 @@ public final class ArrowConversion {
         || vector instanceof TimeMicroVector
         || vector instanceof TimeNanoVector) {
       return new ArrowTimeColumnVector(vector);
-    } else if (vector instanceof TimeStampVector) {
+    } else if (TimestampAccessor.isTimestamp(vector)) {
       return new ArrowTimestampColumnVector(vector);
     } else if (vector instanceof MapVector) {
       MapVector mapVector = (MapVector) vector;
@@ -342,7 +345,7 @@ public final class ArrowConversion {
         || vector instanceof TimeMicroVector
         || vector instanceof TimeNanoVector) {
       return TimeWriter.forRow(vector);
-    } else if (vector instanceof TimeStampVector) {
+    } else if (TimestampAccessor.isTimestamp(vector)) {
       int precision =
           fieldType instanceof LocalZonedTimestampType
               ? ((LocalZonedTimestampType) fieldType).getPrecision()
@@ -410,7 +413,7 @@ public final class ArrowConversion {
         || vector instanceof TimeMicroVector
         || vector instanceof TimeNanoVector) {
       return TimeWriter.forArray(vector);
-    } else if (vector instanceof TimeStampVector) {
+    } else if (TimestampAccessor.isTimestamp(vector)) {
       int precision =
           fieldType instanceof LocalZonedTimestampType
               ? ((LocalZonedTimestampType) fieldType).getPrecision()
@@ -453,7 +456,7 @@ public final class ArrowConversion {
   }
 
   /** Maps each Flink logical type to its Arrow type — see {@code ArrowUtils.LogicalTypeToArrowTypeConverter},
-   * with timestamps pinned to nanoseconds (the divergence documented on the class). */
+   * with lossless timestamp components (the divergence documented on the class). */
   private static final class TypeConverter extends LogicalTypeDefaultVisitor<ArrowType> {
     private static final TypeConverter INSTANCE = new TypeConverter();
 
@@ -540,16 +543,15 @@ public final class ArrowConversion {
       return new ArrowType.Int(8 * 8, true);
     }
 
-    // Timestamps are pinned to nanoseconds (no timezone) to match the unit the native side uses,
-    // rather than upstream's per-precision unit. See the class comment.
+    // TimestampAccessor supplies the component fields for both logical timestamp types.
     @Override
     public ArrowType visit(LocalZonedTimestampType localZonedTimestampType) {
-      return new ArrowType.Timestamp(TimeUnit.NANOSECOND, null);
+      return ArrowType.Struct.INSTANCE;
     }
 
     @Override
     public ArrowType visit(TimestampType timestampType) {
-      return new ArrowType.Timestamp(TimeUnit.NANOSECOND, null);
+      return ArrowType.Struct.INSTANCE;
     }
 
     @Override

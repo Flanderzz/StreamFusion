@@ -26,19 +26,12 @@ final class RawKeyedState {
    * https://github.com/datafusion-contrib/StreamFusion/issues/22 to bind a payload to the operator
    * configuration that wrote it).
    *
-   * <p>Pre-header payloads carry no stamp, so restore detects the header by magic and treats
-   * anything else as version 0 (the legacy layout, still readable). The magic bytes are
-   * {@code 53 46 53 81 52 4B 53 90} ("SFS"+0x81, "RKS"+0x90), chosen so no version-0 payload can
-   * begin with them: every legacy payload starts with either the "STFT" timer frame (differs in
-   * byte 1), an Arrow IPC stream (first byte 0xFF), a little-endian u32 section length whose
-   * fourth byte is at most 0x7F (lengths never exceed Integer.MAX_VALUE, and byte 3 here is 0x81),
-   * or a little-endian i64 that is a watermark or an arrival counter — read that way the magic is
-   * a large negative number, never a counter (they start at zero and grow) and not a watermark
-   * Flink emits (Long.MIN_VALUE, Long.MAX_VALUE, or a real event time).
+   * <p>Version 2 stores lossless timestamp components. Earlier layouts cannot be read with
+   * the new row codecs and fail before any payload is handed to native code.
    */
   static final long STATE_MAGIC = 0x53465381_524B5390L;
 
-  static final int STATE_FORMAT_VERSION = 1;
+  static final int STATE_FORMAT_VERSION = 2;
   private static final int STATE_HEADER_BYTES = Long.BYTES + Integer.BYTES + Integer.BYTES;
 
   private RawKeyedState() {}
@@ -202,22 +195,23 @@ final class RawKeyedState {
     return stripHeader(payload);
   }
 
-  /** Peels the versioned header off a payload; a payload without one restores as version 0. */
+  /** Validates the timestamp-layout version before handing any payload to native code. */
   private static byte[] stripHeader(byte[] payload) {
     if (payload.length < STATE_HEADER_BYTES || ByteBuffer.wrap(payload).getLong() != STATE_MAGIC) {
-      return payload;
+      throw new IllegalStateException("native raw keyed-state snapshot has legacy state-format version 0; "
+          + "this build requires version " + STATE_FORMAT_VERSION + " (docs/backends/canonical-state.md)");
     }
     ByteBuffer header = ByteBuffer.wrap(payload);
     header.getLong();
     int version = header.getInt();
-    if (version <= 0 || version > STATE_FORMAT_VERSION) {
+    if (version != STATE_FORMAT_VERSION) {
       throw new IllegalStateException(
           "native raw keyed-state snapshot was written as state-format version "
               + version
-              + ", but this StreamFusion build reads versions up to "
+              + ", but this StreamFusion build requires version "
               + STATE_FORMAT_VERSION
               + ": restore with the StreamFusion release that wrote the snapshot, or drain the job"
-              + " and start fresh (docs/coverage-and-fallbacks.md, state backend section)");
+              + " and start fresh (docs/backends/canonical-state.md)");
     }
     int fingerprintLength = header.getInt();
     if (fingerprintLength < 0 || fingerprintLength > header.remaining()) {

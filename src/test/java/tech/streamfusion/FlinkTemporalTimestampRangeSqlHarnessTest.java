@@ -19,19 +19,17 @@ class FlinkTemporalTimestampRangeSqlHarnessTest {
   }
 
   @Test
-  void unboundedTimestampResultsKeepFlinkByDefault() throws Exception {
-    NativeParity.assertFallbackReasonContains(
+  void unboundedTimestampResultsRemainNative() throws Exception {
+    NativeParity.assertParity(
         FlinkTemporalTimestampRangeSqlHarnessTest::environment,
-        "SELECT TO_TIMESTAMP(s) FROM dates",
-        "TIMESTAMP_RANGE.allowIncompatible");
+        "SELECT TO_TIMESTAMP(s) FROM dates");
   }
 
   @Test
-  void standaloneRoundingKeepsFlinkByDefault() throws Exception {
-    NativeParity.assertFallbackReasonContains(
+  void standaloneRoundingRemainsNative() throws Exception {
+    NativeParity.assertParity(
         FlinkTemporalFunctionsSqlHarnessTest::environment,
-        "SELECT FLOOR(ts TO MONTH) FROM temporal_inputs",
-        "TIMESTAMP_RANGE.allowIncompatible");
+        "SELECT FLOOR(ts TO MONTH) FROM temporal_inputs");
   }
 
   private static TableEnvironment environment() {

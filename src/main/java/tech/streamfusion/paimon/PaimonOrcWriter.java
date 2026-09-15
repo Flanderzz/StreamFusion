@@ -22,6 +22,7 @@ final class PaimonOrcWriter implements OrcVectorWriter.Factory {
   private static void attributes(Field field, TypeDescription type) {
     String id = field.getMetadata() == null ? null : field.getMetadata().get("PARQUET:field_id");
     if (id != null) type.setAttribute("paimon.id", id);
+    if (tech.streamfusion.arrow.TimestampAccessor.isComponentTimestamp(field)) return;
     var children = field.getChildren();
     if (field.getType() instanceof ArrowType.Map) children = children.get(0).getChildren();
     for (int c = 0; c < children.size(); c++)

@@ -66,8 +66,8 @@ final class RocksDBNativeSnapshotStrategy
 
   /** A backend discriminator followed by the metadata format version. */
   private static final int META_MAGIC = 0x5346524b; // SFRK
-  /** Version 2: typed-store values are arrow-row bytes with a TTL-timestamp prefix, not IPC. */
-  private static final int META_VERSION = 2;
+  /** Version 3: typed-store row bytes retain the lossless timestamp component layout. */
+  private static final int META_VERSION = 3;
 
   private static final int COPY_BUFFER_BYTES = 64 * 1024;
 
@@ -385,7 +385,8 @@ final class RocksDBNativeSnapshotStrategy
       }
       int version = data.readInt();
       if (version != META_VERSION) {
-        throw new IOException("unknown StreamFusion RocksDB state metadata version " + version);
+        throw new IOException("unsupported StreamFusion RocksDB state metadata version " + version
+            + "; this build requires " + META_VERSION + " (docs/backends/canonical-state.md)");
       }
       return data.readUTF();
     }

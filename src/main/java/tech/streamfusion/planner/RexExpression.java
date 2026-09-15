@@ -94,6 +94,7 @@ final class RexExpression {
   private static final int KIND_LIT_BINARY = 23;
   private static final int KIND_LIT_TEMPORAL = 24;
   private static final int KIND_CLOCK = 25;
+  private static final int KIND_LIT_TIMESTAMP = 29;
   // Fused exact arithmetic: payload is the declared result precision*100 + scale; two children.
   private static final int KIND_DECIMAL_ADD = 26;
   private static final int KIND_DECIMAL_SUBTRACT = 27;
@@ -473,6 +474,16 @@ final class RexExpression {
   private boolean emitLiteral(RexLiteral literal) {
     SqlTypeName type = literal.getType().getSqlTypeName();
     int temporalType = temporalTypeCode(literal.getType());
+    if (temporalType == 11) {
+      org.apache.flink.table.data.TimestampData timestamp = literal.isNull() ? null
+          : org.apache.flink.table.data.TimestampData.fromLocalDateTime(java.time.LocalDateTime.parse(
+              literal.getValueAs(org.apache.calcite.util.TimestampString.class).toString().replace(' ', 'T')));
+      add(KIND_LIT_TIMESTAMP, longs.size(), 0);
+      longs.add(timestamp == null ? 0L : 1L);
+      longs.add(timestamp == null ? 0L : timestamp.getMillisecond());
+      longs.add(timestamp == null ? 0L : (long) timestamp.getNanoOfMillisecond());
+      return true;
+    }
     if (temporalType >= 0) {
       long value = 0;
       if (!literal.isNull()) {
@@ -485,20 +496,12 @@ final class RexExpression {
                         .getDaysSinceEpoch();
                 case 10 ->
                     literal.getValueAs(org.apache.calcite.util.TimeString.class).getMillisOfDay();
-                case 11 -> {
-                  String text =
-                      literal.getValueAs(org.apache.calcite.util.TimestampString.class).toString();
-                  java.time.LocalDateTime timestamp =
-                      java.time.LocalDateTime.parse(text.replace(' ', 'T'));
-                  yield tech.streamfusion.arrow.TimestampConversion.toNanos(
-                      org.apache.flink.table.data.TimestampData.fromLocalDateTime(timestamp));
-                }
                 case 12, 13 -> literal.getValueAs(Long.class);
                 default ->
                     throw new IllegalArgumentException("unsupported temporal literal " + type);
               };
         } catch (ArithmeticException e) {
-          return reject("temporal literal exceeds the native nanosecond timestamp range");
+          return reject("temporal literal exceeds its integer range");
         }
       }
       add(KIND_LIT_TEMPORAL, longs.size(), 0);
@@ -642,9 +645,6 @@ final class RexExpression {
     }
     long roundingWidth = nativeRoundingWidth(call);
     if (roundingWidth > 0) {
-      if (!admitTemporalTimestampResult(call)) {
-        return false;
-      }
       add(KIND_CALL, 154, 3);
       if (!emit(call.getOperands().get(0))) {
         return false;
@@ -1868,40 +1868,7 @@ final class RexExpression {
         && call.getType().getPrecision() >= source.getPrecision();
   }
 
-  private boolean admitTemporalTimestampResult(RexCall call) {
-    if (temporalTypeCode(call.getType()) != 11
-        || NativeConfig.allowsIncompatible("TIMESTAMP_RANGE")) {
-      return true;
-    }
-    // Preserve existing epoch-millis conversion and elapsed-time interval arithmetic admission.
-    String name = call.getOperator().getName().toUpperCase(Locale.ROOT);
-    List<RexNode> args = call.getOperands();
-    if ("TO_TIMESTAMP_LTZ".equals(name)
-        && args.size() == 2
-        && java.util.Set.of(
-                SqlTypeName.TINYINT, SqlTypeName.SMALLINT, SqlTypeName.INTEGER, SqlTypeName.BIGINT)
-            .contains(args.get(0).getType().getSqlTypeName())
-        && args.get(1) instanceof RexLiteral precision
-        && Integer.valueOf(3).equals(precision.getValueAs(Integer.class))) {
-      return true;
-    }
-    if ((call.getKind() == SqlKind.PLUS
-            || call.getKind() == SqlKind.MINUS
-            || "DATETIME_PLUS".equals(name))
-        && args.size() == 2
-        && temporalTypeCode(args.get(0).getType()) == 11
-        && args.get(1).getType().getSqlTypeName().getFamily() == SqlTypeFamily.INTERVAL_DAY_TIME) {
-      return true;
-    }
-    return reject(
-        "timestamp result may exceed the native nanosecond range; requires "
-            + "streamfusion.expression.TIMESTAMP_RANGE.allowIncompatible=true");
-  }
-
   private boolean emitTemporalFunction(RexCall call) {
-    if (!admitTemporalTimestampResult(call)) {
-      return false;
-    }
     List<RexNode> arguments = new ArrayList<>();
     List<org.apache.flink.table.types.logical.LogicalType> types = new ArrayList<>();
     List<Integer> codes = new ArrayList<>();

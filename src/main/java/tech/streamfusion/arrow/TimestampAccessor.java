@@ -1,16 +1,18 @@
 package tech.streamfusion.arrow;
 
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import org.apache.arrow.vector.BigIntVector;
 import org.apache.arrow.vector.IntVector;
 import org.apache.arrow.vector.TimeStampVector;
-import org.apache.arrow.vector.complex.StructVector;
-import org.apache.arrow.vector.types.pojo.Field;
-import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.arrow.vector.ValueVector;
+import org.apache.arrow.vector.complex.StructVector;
 import org.apache.arrow.vector.types.TimeUnit;
 import org.apache.arrow.vector.types.pojo.ArrowType;
+import org.apache.arrow.vector.types.pojo.Field;
+import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.flink.table.data.TimestampData;
 
 /**
@@ -18,6 +20,7 @@ import org.apache.flink.table.data.TimestampData;
  */
 public final class TimestampAccessor {
   private static final String COMPONENT_KEY = "streamfusion.timestamp.component";
+  private static final String TIMEZONE_KEY = "streamfusion.timestamp.timezone";
   private static final List<Field> FIELDS = List.of(component("millis", 64), component("nano_of_milli", 32));
   private final ValueVector vector;
   private final TimeStampVector primitive;
@@ -37,7 +40,40 @@ public final class TimestampAccessor {
   }
 
   public static boolean isComponentTimestamp(Field field) {
-    return field.getType() instanceof ArrowType.Struct && field.getChildren().equals(FIELDS);
+    if (!(field.getType() instanceof ArrowType.Struct) || field.getChildren().size() != 2) return false;
+    for (int i = 0; i < 2; i++) {
+      Field actual = field.getChildren().get(i);
+      Field expected = FIELDS.get(i);
+      if (!actual.getName().equals(expected.getName())
+          || !actual.getType().equals(expected.getType())
+          || actual.isNullable()
+          || !expected.getName().equals(actual.getMetadata().get(COMPONENT_KEY))) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /** Annotates connector output without changing the timestamp's value or buffer layout. */
+  public static Field withTimezone(Field field, String timezone) {
+    if (isComponentTimestamp(field)) {
+      List<Field> children = new ArrayList<>(field.getChildren());
+      Field first = children.get(0);
+      Map<String, String> metadata = new HashMap<>(first.getMetadata());
+      if (timezone == null) {
+        metadata.remove(TIMEZONE_KEY);
+      } else {
+        metadata.put(TIMEZONE_KEY, timezone);
+      }
+      children.set(0, new Field(first.getName(),
+          new FieldType(false, first.getType(), null, metadata), null));
+      return new Field(field.getName(), field.getFieldType(), children);
+    }
+    ArrowType.Timestamp type = (ArrowType.Timestamp) field.getType();
+    FieldType target = new FieldType(field.isNullable(),
+        new ArrowType.Timestamp(type.getUnit(), timezone),
+        field.getFieldType().getDictionary(), field.getMetadata());
+    return new Field(field.getName(), target, null);
   }
 
   public static boolean isTimestamp(ValueVector vector) {
@@ -48,10 +84,15 @@ public final class TimestampAccessor {
   public static void set(ValueVector vector, int row, TimestampData value) {
     if (isComponentTimestamp(vector.getField())) {
       StructVector struct = (StructVector) vector;
-      ((BigIntVector) struct.getChild("millis")).setSafe(row, value == null ? 0 : value.getMillisecond());
-      ((IntVector) struct.getChild("nano_of_milli")).setSafe(row, value == null ? 0 : value.getNanoOfMillisecond());
-      if (value == null) struct.setNull(row);
-      else struct.setIndexDefined(row);
+      ((BigIntVector) struct.getChild("millis"))
+          .setSafe(row, value == null ? 0 : value.getMillisecond());
+      ((IntVector) struct.getChild("nano_of_milli"))
+          .setSafe(row, value == null ? 0 : value.getNanoOfMillisecond());
+      if (value == null) {
+        struct.setNull(row);
+      } else {
+        struct.setIndexDefined(row);
+      }
       return;
     }
     TimeStampVector target = (TimeStampVector) vector;
@@ -63,9 +104,7 @@ public final class TimestampAccessor {
       case SECOND: encoded = Math.floorDiv(millis, 1000L); break;
       case MILLISECOND: encoded = millis; break;
       case MICROSECOND:
-        encoded = millis < 0
-            ? Math.addExact(Math.multiplyExact(millis + 1, 1000L), fraction / 1000 - 1000)
-            : Math.addExact(Math.multiplyExact(millis, 1000L), fraction / 1000);
+        encoded = TimestampConversion.toMicros(millis, (int) fraction);
         break;
       case NANOSECOND: encoded = TimestampConversion.toNanos(value); break;
       default: throw new IllegalArgumentException("Unsupported timestamp unit");

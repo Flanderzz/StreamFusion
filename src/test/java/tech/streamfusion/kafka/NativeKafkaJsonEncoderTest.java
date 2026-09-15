@@ -124,6 +124,11 @@ class NativeKafkaJsonEncoderTest {
             timestampRow(TimestampData.fromEpochMillis(base + 120)), // .12
             timestampRow(TimestampData.fromEpochMillis(base + 100, 230_000))); // .10023
 
+    rows = new ArrayList<>(rows);
+    for (String value : List.of("0001-01-01T00:00:00.123456789", "1582-10-15T23:59:59.999999999",
+        "2262-04-12T00:00:00.123456789", "9999-12-31T23:59:59.999999999")) {
+      rows.add(timestampRow(TimestampData.fromLocalDateTime(java.time.LocalDateTime.parse(value))));
+    }
     assertMatchesFlink(rows, timestamps, TimestampFormat.SQL, false);
     assertMatchesFlink(rows, timestamps, TimestampFormat.ISO_8601, false);
   }

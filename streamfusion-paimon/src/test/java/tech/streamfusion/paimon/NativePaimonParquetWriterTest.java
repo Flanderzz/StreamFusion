@@ -43,6 +43,35 @@ import tech.streamfusion.operator.RowDataArrowConverter;
  */
 class NativePaimonParquetWriterTest {
 
+  @Test
+  void wideTimestampFilesAndStatisticsMatchTheStockWriter() throws Exception {
+    var type = RowType.of(
+        new org.apache.paimon.types.DataField(0, "id", org.apache.paimon.types.DataTypes.INT().notNull()),
+        new org.apache.paimon.types.DataField(1, "ts", org.apache.paimon.types.DataTypes.TIMESTAMP(6)),
+        new org.apache.paimon.types.DataField(2, "ltz", org.apache.paimon.types.DataTypes.TIMESTAMP_WITH_LOCAL_TIME_ZONE(6)));
+    var options = Map.of("file.format", "parquet", "write-only", "true", "changelog-producer", "input");
+    var stock = PaimonMergeEngineTest.table(options, type);
+    var nativeTable = PaimonMergeEngineTest.table(options, type);
+    List<InternalRow> rows = new ArrayList<>();
+    for (long millis : new long[] {-62_135_596_800_000L, -1, 9_223_459_200_000L, 253_402_300_799_999L}) {
+      var value = org.apache.paimon.data.Timestamp.fromEpochMillis(millis, 999000);
+      rows.add(org.apache.paimon.data.GenericRow.of(rows.size(), value, value));
+    }
+    for (boolean nativeWriter : new boolean[] {false, true}) {
+      try (var writer = new PaimonMergeEngineTest.Writer(nativeWriter ? nativeTable : stock,
+          nativeWriter, new PaimonChangelogSinkWriteTest.MemoryState(), 32)) {
+        writer.write(rows);
+        writer.commit(1);
+      }
+    }
+    assertEquals(PaimonTestTables.readRows(stock, type), PaimonTestTables.readRows(nativeTable, type));
+    var left = PaimonTestTables.dataFiles(stock).values().iterator().next().get(0);
+    var right = PaimonTestTables.dataFiles(nativeTable).values().iterator().next().get(0);
+    assertEquals(PaimonTestTables.describe(left, type), PaimonTestTables.describe(right, type));
+    var read = stock.newReadBuilder();
+    PaimonSourceReadTest.assertRead(stock, read, read.newScan().plan().splits(), true);
+  }
+
   private static final int ROWS = 200;
 
   @ParameterizedTest

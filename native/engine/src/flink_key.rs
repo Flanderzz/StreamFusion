@@ -5,7 +5,7 @@ use arrow::array::{
     Time32MillisecondArray, Time32SecondArray, Time64MicrosecondArray, Time64NanosecondArray,
 };
 use arrow::datatypes::TimeUnit;
-use streamfusion_bridge::timestamp::{TimestampColumn, TimestampValue};
+use streamfusion_bridge::timestamp::{is_timestamp, TimestampColumn, TimestampValue};
 
 const DEFAULT_SEED: u32 = 42;
 const MAX_INLINE_BYTES: usize = 7;
@@ -23,6 +23,7 @@ fn key_type_schema(data_type: &DataType, precisions: &[i32], cursor: &mut usize)
         .expect("missing Flink key type descriptor");
     *cursor += 1;
     let children = match data_type {
+        _ if is_timestamp(data_type) => Vec::new(),
         DataType::List(field) | DataType::LargeList(field) => {
             vec![key_type_schema(field.data_type(), precisions, cursor)]
         }
@@ -471,7 +472,7 @@ fn write_array_value(
                 writer.write_variable(pos, &unscaled_decimal_bytes(value), 16);
             }
         }
-        DataType::Timestamp(_, _) => {
+        data_type if is_timestamp(data_type) => {
             let value = timestamp_value(array, row);
             let millis = value.millis();
             if schema.timestamp_precision <= 3 {
@@ -659,7 +660,7 @@ fn write_value(
             *precision,
         ),
         DataType::Time32(_) | DataType::Time64(_) => writer.write_i32(pos, time_millis(array, row)),
-        DataType::Timestamp(_, _) => {
+        data_type if is_timestamp(data_type) => {
             writer.write_timestamp(pos, timestamp_value(array, row), schema.timestamp_precision)
         }
         DataType::List(_) => {

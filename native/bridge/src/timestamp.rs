@@ -32,7 +32,53 @@ pub fn timestamp_type() -> DataType {
 }
 
 pub fn is_component_timestamp(data_type: &DataType) -> bool {
-    matches!(data_type, DataType::Struct(fields) if fields == &*TIMESTAMP_FIELDS)
+    matches!(data_type, DataType::Struct(fields) if fields.len() == 2 && fields.iter().zip(TIMESTAMP_FIELDS.iter()).all(|(actual, expected)| {
+        actual.name() == expected.name() && actual.data_type() == expected.data_type()
+            && !actual.is_nullable() && actual.metadata().get(COMPONENT_KEY) == expected.metadata().get(COMPONENT_KEY)
+    }))
+}
+
+const TIMEZONE_KEY: &str = "streamfusion.timestamp.timezone";
+
+pub fn timestamp_timezone(data_type: &DataType) -> Option<&str> {
+    match data_type {
+        DataType::Timestamp(_, timezone) => timezone.as_deref(),
+        DataType::Struct(fields) if is_component_timestamp(data_type) => {
+            fields[0].metadata().get(TIMEZONE_KEY).map(String::as_str)
+        }
+        _ => None,
+    }
+}
+
+/// Connector-local LTZ annotation; the digits stay unchanged. This mirrors the timezone label
+/// on a primitive Arrow timestamp while keeping the full two-part value.
+pub fn with_timezone(array: &ArrayRef, timezone: &str) -> Result<ArrayRef, ArrowError> {
+    if is_component_timestamp(array.data_type()) {
+        let DataType::Struct(fields) = array.data_type() else {
+            unreachable!()
+        };
+        let mut fields: Vec<_> = fields.iter().cloned().collect();
+        let mut metadata = fields[0].metadata().clone();
+        metadata.insert(TIMEZONE_KEY.into(), timezone.into());
+        fields[0] = Arc::new(fields[0].as_ref().clone().with_metadata(metadata));
+        return Ok(arrow::array::make_array(
+            array
+                .to_data()
+                .into_builder()
+                .data_type(DataType::Struct(fields.into()))
+                .build()?,
+        ));
+    }
+    let DataType::Timestamp(unit, _) = array.data_type() else {
+        return Err(ArrowError::CastError("Expected timestamp column".into()));
+    };
+    Ok(arrow::array::make_array(
+        array
+            .to_data()
+            .into_builder()
+            .data_type(DataType::Timestamp(*unit, Some(timezone.into())))
+            .build()?,
+    ))
 }
 
 pub fn is_timestamp(data_type: &DataType) -> bool {
@@ -64,6 +110,98 @@ pub fn timestamps_from_millis(millis: &Int64Array) -> StructArray {
             .iter()
             .map(|value| value.map(TimestampValue::from_millis)),
     )
+}
+
+pub struct TimestampBuilder {
+    millis: arrow::array::Int64Builder,
+    nanos: arrow::array::Int32Builder,
+    valid: arrow::array::NullBufferBuilder,
+}
+
+impl TimestampBuilder {
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            millis: arrow::array::Int64Builder::with_capacity(capacity),
+            nanos: arrow::array::Int32Builder::with_capacity(capacity),
+            valid: arrow::array::NullBufferBuilder::new(capacity),
+        }
+    }
+
+    pub fn append_value(&mut self, value: TimestampValue) {
+        self.millis.append_value(value.millis);
+        self.nanos.append_value(value.nano_of_milli as i32);
+        self.valid.append_non_null();
+    }
+
+    pub fn append_null(&mut self) {
+        self.append_nulls(1);
+    }
+
+    pub fn append_nulls(&mut self, count: usize) {
+        self.millis.append_value_n(0, count);
+        self.nanos.append_value_n(0, count);
+        self.valid.append_n_nulls(count);
+    }
+
+    pub fn finish(&mut self) -> StructArray {
+        StructArray::new(
+            TIMESTAMP_FIELDS.clone(),
+            vec![
+                Arc::new(self.millis.finish()),
+                Arc::new(self.nanos.finish()),
+            ],
+            self.valid.finish(),
+        )
+    }
+}
+
+/// External formats choose their own unit. Floor fractional values exactly as Flink does,
+/// but report an unrepresentable range rather than overflowing the target integer.
+pub fn cast_timestamp(array: &ArrayRef, target: &DataType) -> Result<ArrayRef, ArrowError> {
+    if is_component_timestamp(target) {
+        let components = to_components(array)?;
+        return Ok(arrow::array::make_array(
+            components
+                .to_data()
+                .into_builder()
+                .data_type(target.clone())
+                .build()?,
+        ));
+    }
+    if array.data_type() == target {
+        return Ok(array.clone());
+    }
+    let DataType::Timestamp(unit, _) = target else {
+        return Err(ArrowError::CastError(format!(
+            "Expected timestamp output type, got {target}"
+        )));
+    };
+    let divisor = match unit {
+        TimeUnit::Second => 1_000_000_000,
+        TimeUnit::Millisecond => 1_000_000,
+        TimeUnit::Microsecond => 1_000,
+        TimeUnit::Nanosecond => 1,
+    };
+    let column = TimestampColumn::try_new(array.as_ref())?;
+    let values: Result<Int64Array, ArrowError> = (0..array.len())
+        .map(|row| {
+            if column.is_null(row) {
+                return Ok(None);
+            }
+            let raw = column.value(row)?.nanos().div_euclid(divisor);
+            i64::try_from(raw)
+                .map(Some)
+                .map_err(|_| ArrowError::ComputeError(format!("Timestamp exceeds {target} range")))
+        })
+        .collect();
+    // Int64 and primitive timestamps share the same physical buffers; only the type changes.
+    Ok(arrow::array::make_array(
+        values?
+            .to_data()
+            .into_builder()
+            .data_type(target.clone())
+            .build()?,
+    ))
 }
 
 /// Convert a legacy or external primitive timestamp without narrowing its range or precision.
@@ -290,9 +428,114 @@ impl<'a> TimestampColumn<'a> {
     }
 }
 
+/// Reconcile external Arrow schemas with the operator schema, including timestamp leaves inside
+/// containers. Ordinary conversions retain Arrow's existing cast behavior.
+pub fn cast_array(array: &ArrayRef, target: &DataType) -> Result<ArrayRef, ArrowError> {
+    use arrow::array::{FixedSizeListArray, LargeListArray, ListArray, MapArray};
+    if array.data_type() == target {
+        return Ok(array.clone());
+    }
+    if is_timestamp(array.data_type()) && is_timestamp(target) {
+        return cast_timestamp(array, target);
+    }
+    match (array.data_type(), target) {
+        (DataType::Struct(_), DataType::Struct(fields)) => {
+            let input = array.as_any().downcast_ref::<StructArray>().unwrap();
+            if input.num_columns() != fields.len() {
+                return Err(ArrowError::CastError("Struct field count differs".into()));
+            }
+            let children: Result<Vec<_>, _> = input
+                .columns()
+                .iter()
+                .zip(fields)
+                .map(|(column, field)| cast_array(column, field.data_type()))
+                .collect();
+            Ok(Arc::new(StructArray::try_new(
+                fields.clone(),
+                children?,
+                input.nulls().cloned(),
+            )?))
+        }
+        (DataType::List(_), DataType::List(field)) => {
+            let input = array.as_any().downcast_ref::<ListArray>().unwrap();
+            Ok(Arc::new(ListArray::try_new(
+                field.clone(),
+                input.offsets().clone(),
+                cast_array(input.values(), field.data_type())?,
+                input.nulls().cloned(),
+            )?))
+        }
+        (DataType::LargeList(_), DataType::LargeList(field)) => {
+            let input = array.as_any().downcast_ref::<LargeListArray>().unwrap();
+            Ok(Arc::new(LargeListArray::try_new(
+                field.clone(),
+                input.offsets().clone(),
+                cast_array(input.values(), field.data_type())?,
+                input.nulls().cloned(),
+            )?))
+        }
+        (DataType::FixedSizeList(_, size), DataType::FixedSizeList(field, target_size))
+            if size == target_size =>
+        {
+            let input = array.as_any().downcast_ref::<FixedSizeListArray>().unwrap();
+            Ok(Arc::new(FixedSizeListArray::try_new(
+                field.clone(),
+                *size,
+                cast_array(input.values(), field.data_type())?,
+                input.nulls().cloned(),
+            )?))
+        }
+        (DataType::Map(_, _), DataType::Map(field, sorted)) => {
+            let input = array.as_any().downcast_ref::<MapArray>().unwrap();
+            let entries = cast_array(
+                &(Arc::new(input.entries().clone()) as ArrayRef),
+                field.data_type(),
+            )?;
+            Ok(Arc::new(MapArray::try_new(
+                field.clone(),
+                input.offsets().clone(),
+                entries
+                    .as_any()
+                    .downcast_ref::<StructArray>()
+                    .unwrap()
+                    .clone(),
+                input.nulls().cloned(),
+                *sorted,
+            )?))
+        }
+        _ => arrow::compute::cast(array, target),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn component_cast_reconciles_connector_timezone_without_copying_values() {
+        let original: ArrayRef = Arc::new(timestamp_array([
+            Some(TimestampValue::new(i64::MAX, 999999).unwrap()),
+            None,
+        ]));
+        let zoned = with_timezone(&original, "UTC").unwrap();
+        assert_eq!(timestamp_timezone(zoned.data_type()), Some("UTC"));
+        let canonical = cast_timestamp(&zoned, &timestamp_type()).unwrap();
+        assert_eq!(canonical.as_ref(), original.as_ref());
+        assert_eq!(
+            TimestampColumn::try_new(canonical.as_ref())
+                .unwrap()
+                .to_millis()
+                .unwrap()
+                .values()
+                .as_ptr(),
+            TimestampColumn::try_new(original.as_ref())
+                .unwrap()
+                .to_millis()
+                .unwrap()
+                .values()
+                .as_ptr()
+        );
+    }
 
     #[test]
     fn component_columns_keep_full_range_fractions_and_parent_nulls() {

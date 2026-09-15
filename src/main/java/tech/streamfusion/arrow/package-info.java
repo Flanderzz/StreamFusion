@@ -21,7 +21,7 @@
  * (package {@code org.apache.flink.table.runtime.arrow}, Apache-2.0). The per-type column vectors and
  * field writers are copied verbatim (only repackaged); {@link
  * tech.streamfusion.arrow.ArrowConversion} is a trimmed extract of {@code ArrowUtils}'s
- * schema/reader/writer factories, with timestamps pinned to nanoseconds to match the native side.
+ * schema/reader/writer factories, with lossless timestamp component buffers shared with the native side.
  *
  * <p>Vendored rather than depended on because the upstream classes live in {@code flink-python}, which a
  * standard Java Flink deployment ships under {@code opt/} (not on the runtime classpath). They depend

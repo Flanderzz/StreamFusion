@@ -1,6 +1,5 @@
 use crate::*;
-use arrow::compute::unary;
-use arrow::datatypes::{TimeUnit, TimestampMillisecondType};
+use arrow::datatypes::TimeUnit;
 /// One Avro sink format instance's encode parameters: the writer schema the JVM derived with
 /// Flink's own schema converter (shipped verbatim so record names, union order, and logical types
 /// match Flink's bytes), and — for `avro-confluent` — the schema id the JVM registered at sink
@@ -188,12 +187,12 @@ fn flink_avro_array(array: ArrayRef) -> Result<ArrayRef, String> {
     use arrow::array::cast::AsArray;
 
     match array.data_type() {
-        DataType::Timestamp(TimeUnit::Nanosecond, _) => {
-            let nanos = array.as_primitive::<TimestampNanosecondType>();
-            Ok(Arc::new(unary::<_, _, TimestampMillisecondType>(
-                nanos,
-                |value: i64| value.div_euclid(1_000_000),
-            )))
+        data_type if streamfusion_bridge::timestamp::is_timestamp(data_type) => {
+            streamfusion_bridge::timestamp::cast_timestamp(
+                &array,
+                &DataType::Timestamp(TimeUnit::Millisecond, None),
+            )
+            .map_err(|error| error.to_string())
         }
         DataType::FixedSizeBinary(_) => arrow::compute::cast(&array, &DataType::Binary)
             .map_err(|error| format!("BINARY column does not widen to Avro bytes: {error}")),

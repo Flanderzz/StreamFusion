@@ -50,6 +50,18 @@ import org.junit.jupiter.api.Timeout;
 @Tag("streamfusion-json")
 class JsonDecodeParityTest {
 
+  @Test
+  void fullRangeTimestampsWithDecimalAndNestedValues() {
+    RowType type = RowType.of(new LogicalType[] {new TimestampType(3),
+        new DecimalType(5, 2), new ArrayType(new TimestampType(9))}, new String[] {"ts", "d", "a"});
+    for (String value : List.of("0001-01-01 00:00:00.123456789", "1582-10-15 23:59:59.999999999",
+        "1969-12-31 23:59:59.999999999", "2262-04-12 00:00:00.123456789", "9999-12-31 23:59:59.999999999")) {
+      String json = "{\"ts\":\"" + value + "\",\"d\":1.23,\"a\":[\"" + value + "\",null]}";
+      assertParity(type, json, TimestampFormat.SQL, "", false);
+      assertParity(type, json.replace(' ', 'T'), TimestampFormat.ISO_8601, "timestamp-format=ISO-8601\n", false);
+    }
+  }
+
   private static final RowType SCALAR_TYPE =
       RowType.of(
           new LogicalType[] {

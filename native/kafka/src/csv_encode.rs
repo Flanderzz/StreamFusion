@@ -40,7 +40,6 @@ use arrow::array::{Array, ArrayRef};
 use arrow::datatypes::{
     Decimal128Type, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type,
     Time32MillisecondType, Time32SecondType, Time64MicrosecondType, Time64NanosecondType,
-    TimestampNanosecondType,
 };
 
 /// One CSV format instance's encode-affecting options, defaults from Flink's `CsvSchema`.
@@ -150,7 +149,9 @@ fn encode_csv_field(
             join_elements(&list.value(row), options, scratch)?;
             write_csv_text(scratch, options, out);
         }
-        DataType::Struct(_) => {
+        DataType::Struct(_)
+            if !streamfusion_bridge::timestamp::is_component_timestamp(column.data_type()) =>
+        {
             let entries = column.as_struct();
             for (index, child) in entries.columns().iter().enumerate() {
                 if index > 0 {
@@ -323,10 +324,13 @@ fn render_csv_scalar(
             );
             Ok(CsvScalar::Text)
         }
-        DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, timezone) => {
+        data_type if streamfusion_bridge::timestamp::is_timestamp(data_type) => {
             sql_timestamp(
-                column.as_primitive::<TimestampNanosecondType>().value(row),
-                timezone.is_some(),
+                streamfusion_bridge::timestamp::TimestampColumn::try_new(column)
+                    .map_err(|error| error.to_string())?
+                    .value(row)
+                    .map_err(|error| error.to_string())?,
+                streamfusion_bridge::timestamp::timestamp_timezone(data_type).is_some(),
                 out,
             );
             Ok(CsvScalar::Text)
@@ -400,9 +404,13 @@ fn iso_local_time(millis: i64, out: &mut Vec<u8>) {
 /// Flink's SQL timestamp spelling: ISO date, a space, ISO time with the value-trimmed nanosecond
 /// fraction, and — for TIMESTAMP_LTZ — the `'Z'` designator
 /// (`TimeFormats.SQL_TIMESTAMP_WITH_LOCAL_TIMEZONE_FORMAT`).
-fn sql_timestamp(nanos: i64, zulu: bool, out: &mut Vec<u8>) {
-    let seconds = nanos.div_euclid(1_000_000_000);
-    let nano_of_second = nanos.rem_euclid(1_000_000_000) as u32;
+fn sql_timestamp(
+    value: streamfusion_bridge::timestamp::TimestampValue,
+    zulu: bool,
+    out: &mut Vec<u8>,
+) {
+    let seconds = value.millis().div_euclid(1000);
+    let nano_of_second = value.millis().rem_euclid(1000) as u32 * 1_000_000 + value.nano_of_milli();
     let days = seconds.div_euclid(86_400);
     let second_of_day = seconds.rem_euclid(86_400) as u32;
     iso_local_date(days, out);

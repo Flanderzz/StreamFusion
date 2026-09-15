@@ -118,7 +118,7 @@ the Arrow schema of its input and checks that the boundary would read each proje
 Arrow type as its declared column (and that the condition is `BOOLEAN`). "Read as" is the reader's
 own rule, not byte-equality of Arrow types: timestamps and times may carry any unit or zone, since
 the column vectors convert on read. New temporal expressions nevertheless preserve the engine's
-canonical nanosecond timestamp and millisecond TIME storage for downstream operators. Every other type — width, decimal precision and scale, string
+canonical two-component timestamp and millisecond TIME storage for downstream operators. Every other type — width, decimal precision and scale, string
 encoding, nested element types — must match exactly. Any disagreement, or a tree DataFusion cannot
 coerce at all, is a plain fallback whose recorded reason names the column and both types, e.g.
 `projection `EXPR$0` evaluates natively as FloatingPoint(SINGLE) but the plan declares DOUBLE`. Such
@@ -213,7 +213,7 @@ default cast the upcall reproduces.
 ### Still falling back
 
 Boolean↔string casts and other pairs not listed above. Temporal casts now use Flink-generated
-expressions; see [temporal functions](temporal-functions.md), including the timestamp-result range gate.
+expressions; see [temporal functions](temporal-functions.md).
 
 ## Decimal arithmetic
 
@@ -554,8 +554,8 @@ Character separators and TINYINT/SMALLINT/INTEGER indices may be dynamic. Indice
 
 `TO_DATE`, `TO_TIMESTAMP`, all `TO_TIMESTAMP_LTZ` overloads, calendar fields, and temporal
 `FLOOR`/`CEIL` now have expression implementations. Formatted parsing and LTZ calendar fields use
-Flink's own generated code. New timestamp-producing paths need the timestamp-range opt-in;
-fused text/numeric results can run by default. See the complete [temporal function inventory](temporal-functions.md).
+Flink's own generated code. Timestamp results retain the complete millisecond/fraction pair and run
+by default. See the complete [temporal function inventory](temporal-functions.md).
 
 ### LTRIM
 
@@ -593,9 +593,8 @@ Adjacent temporal calls fuse into one upcall, retaining intermediate TimestampDa
 Flink rather than converting each one to an Arrow timestamp.
 
 `DATE_FORMAT` and `EXTRACT` retain their existing opt-in Rust LTZ paths. Dynamic patterns, additional
-extraction fields and other temporal functions use Flink's implementation. The new
-`TIMESTAMP_RANGE.allowIncompatible` option separately admits timestamp-producing expressions for
-values representable by the engine's nanosecond timestamp columns.
+extraction fields and other temporal functions use Flink's implementation. Timestamp-producing
+expressions run by default with the full Flink millisecond range and fractional nanos.
 
 ## Opt-in math
 
@@ -617,7 +616,6 @@ implementation can't handle, even though the function itself is supported:
 - **`TRIM`** — dynamic trim sets; all directions with literal sets are native.
 - **`POSITION`** — a `FROM` start offset.
 - **`SPLIT_INDEX`** — the numeric separator overload.
-- **New temporal timestamp results** — require the [timestamp range opt-in](temporal-functions.md#timestamp-range-and-opt-in).
 - **`CURRENT_WATERMARK`** — requires a Calc watermark context; unsupported in standalone join or UNNEST residuals.
 - **A non-literal subscript** in `array[i]`/`map[key]` — at runtime a negative index counts from the
   end in DataFusion but is `NULL` in Flink, and the native map lookup binds its key at compile time,

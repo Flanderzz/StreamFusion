@@ -20,9 +20,9 @@ The planner encodes watermarks in the same expression format as native Calc and 
 output type before admission. The serialized plan contains typed operations and literals; each
 operator or source reader owns a separate runtime evaluator. Calendar and composed expressions
 run through the existing DataFusion projection engine and scalar registry, producing nullable
-BIGINT candidates in epoch milliseconds. These values are internal to watermark evaluation, so
-calendar intermediates can exceed the nanosecond timestamp range without introducing timestamp
-columns with a different unit downstream. A direct rowtime or single fixed-millisecond subtraction
+BIGINT candidates in epoch milliseconds. These values are internal to watermark evaluation;
+timestamp columns retain their complete millisecond/fraction pair downstream.
+A direct rowtime or single fixed-millisecond subtraction
 uses an Arrow value view without allocating a candidate column, behind the same evaluator interface.
 
 The independent assigner starts at watermark zero and slices batches at each eager watermark

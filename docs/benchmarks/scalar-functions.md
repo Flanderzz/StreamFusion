@@ -658,7 +658,8 @@ one warmup and three measured trials per engine/case. Cases run serially in one 
 engine order; no other tests or benchmarks run concurrently. Medians include SQL planning and
 execution. Every plan is checked for `NativeCalc`, `RowDataToArrow`, and `ArrowToRowData`.
 
-The timestamp-range opt-in is enabled. Inputs are non-null and fit the native range. Parsing uses
+That run enabled the former timestamp-range opt-in and used the previous nanosecond layout; it does
+not measure the current component layout. Inputs are non-null. Parsing uses
 `2000-02-29 12:34:56` and `1969-12-31 23:59:59`; other cases use the existing TIMESTAMP(9)
 fixtures, including negative fractional epochs. These cases do not measure dynamic formats, time
 zones, or every temporal overload. The 264-byte payload setting is inherited from the general
@@ -671,7 +672,6 @@ Reproduce in a fresh JVM:
 TZ=UTC SF_BENCHMARK=true mvn -pl :streamfusion-runtime test -Pbench \
   -Dnative.cargo.packages='-p streamfusion' \
   '-Dnative.cargo.args=build --release --features mimalloc' \
-  -Dstreamfusion.expression.TIMESTAMP_RANGE.allowIncompatible=true \
   '-Dtest=ScalarFunctionBenchmark#individualFunctions' \
   -Dscalar.functions=TO_TIMESTAMP,TIMESTAMP_FLOOR,TIMESTAMP_CEIL,TIMESTAMP_ADD,TIMESTAMP_DIFF \
   -Dscalar.rows=1000000 -Dscalar.warmup=1 -Dscalar.runs=3 \

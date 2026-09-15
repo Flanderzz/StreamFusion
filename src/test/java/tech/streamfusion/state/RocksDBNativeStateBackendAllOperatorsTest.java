@@ -1889,6 +1889,41 @@ class RocksDBNativeStateBackendAllOperatorsTest {
     return savepoint;
   }
 
+  @ParameterizedTest
+  @EnumSource(StateTransition.class)
+  void timestampDistinctRetainsFractionalElementsAcrossStateTransition(StateTransition transition)
+      throws Exception {
+    RowType input = RowType.of(new BigIntType(), new TimestampType(9));
+    TimestampData first = TimestampData.fromEpochMillis(253_402_300_799_999L, 1);
+    TimestampData second = TimestampData.fromEpochMillis(253_402_300_799_999L, 999999);
+    java.util.function.Supplier<NativeColumnarGroupAggregateOperator> operator = () ->
+        new NativeColumnarGroupAggregateOperator(new int[] {7}, new int[] {7}, new int[] {1},
+            new int[] {0}, new int[] {-1}, new int[] {-1}, new int[] {-1}, -1, true,
+            false, 0, 0, new int[] {-1}, MAX_PARALLELISM);
+    OperatorSubtaskState snapshot;
+    try (BufferAllocator allocator = new RootAllocator(); var before = harness(operator.get())) {
+      transition.configureSource(before);
+      before.setup(new ArrowBatchSerializer());
+      before.open();
+      before.processElement(new StreamRecord<>(new ArrowBatch(RowDataArrowConverter.write(
+          List.of(GenericRowData.of(1L, first)), input, allocator))));
+      assertEquals(List.of(insert(1, 1)), collect(before));
+      snapshot = transition.snapshot(before);
+    }
+    var imported = operator.get();
+    try (BufferAllocator allocator = new RootAllocator(); var after = harness(imported)) {
+      transition.configureRestore(after);
+      after.setup(new ArrowBatchSerializer());
+      after.initializeState(snapshot);
+      after.open();
+      if (transition != StateTransition.ROCKSDB_TO_MEMORY)
+        assertTrue(NativeStateRouteProbe.directRocksDBState(imported));
+      after.processElement(new StreamRecord<>(new ArrowBatch(RowDataArrowConverter.write(
+          List.of(GenericRowData.of(1L, first), GenericRowData.of(1L, second)), input, allocator))));
+      assertEquals(List.of(update(RowKind.UPDATE_BEFORE, 1, 1), update(RowKind.UPDATE_AFTER, 1, 2)), collect(after));
+    }
+  }
+
   private enum StateTransition {
     ROCKSDB_CHECKPOINT,
     MEMORY_TO_ROCKSDB,

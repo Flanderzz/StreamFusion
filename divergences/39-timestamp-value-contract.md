@@ -22,23 +22,21 @@ millisecond-only builtins consume the millisecond component. Function-specific c
 arithmetic remains separate: Flink's EXTRACT may intentionally divide a timestamp's
 milliseconds toward zero when selecting its calendar day.
 
-The shared timestamp representation now also supports an Arrow struct with `millis: Int64`
-and `nano_of_milli: Int32`, both non-null children under the timestamp's parent validity bitmap.
+The default SQL timestamp representation is an Arrow struct with `millis: Int64` and
+`nano_of_milli: Int32`, both non-null children under the timestamp's parent validity bitmap.
 Each child carries `streamfusion.timestamp.component` metadata naming the component; an ordinary
 ROW with the same field names is not a timestamp. This keeps Flink's two-part value in separate
-columnar buffers, with no nanosecond-count narrowing. Readers continue to borrow those buffers,
-and a millisecond projection shares the millis buffer and parent null bitmap. Java writers can
-populate the pair at any Flink precision, and legacy primitive writers check overflow. The wider
-layout's direct reader/writer tests cover both millisecond extremes, years 0001/9999, negative
-fractions, NULLs, and reuse. The SQL default layout and checkpoint encoding have not changed in
-this groundwork step.
-Old nanosecond sort snapshots are read through the same accessor and tested across
-restore. Full-range key tests construct Arrow columns directly and compare their
-bytes with Flink's runtime serializer; they are not evidence of full-range SQL
-support. The writer, remaining native consumers, expression outputs, connector
-boundaries and persisted row encodings still need coordinated migration before
-[#64](https://github.com/datafusion-contrib/StreamFusion/issues/64) can be closed
-or wide-range timestamp producers can be admitted.
+columnar buffers, without narrowing it to an i64 nanosecond count. Readers borrow those buffers,
+and a millisecond projection shares the millis buffer and parent null bitmap. Writers preserve
+fractions present in a runtime value regardless of declared precision. Timestamp literals, generated
+JVM results, clocks, rounding, window boundaries and native key codecs use the same representation.
+
+DataFusion orders the struct lexicographically: signed milliseconds first, non-negative fractional
+nanos second. That is timestamp order without an overflow-prone conversion. Arrow IPC and row-state
+codecs preserve both components. New memory/RocksDB and canonical checkpoint tests cover wide dates,
+fractional ordering and recovery. Snapshot versions changed because old Arrow row bytes describe a
+different layout. Old snapshots are rejected before decoding; there is no old-state conversion in
+this migration. See the [upgrade contract](../docs/backends/canonical-state.md#timestamp-layout-upgrade).
 
 Interval joins also consume milliseconds through this contract. Their interval
 filter remains inside the DataFusion hash join, following Arroyo's buffered-batch
@@ -54,9 +52,21 @@ The independent windowing TVF also reads the millisecond component, fixing pre-e
 that truncating nanosecond division assigned to the next window. It fans out payload columns with
 Arrow `take`, retaining the original layout/remainder. Boundary calculation stays in milliseconds;
 conversion to the caller's physical output type is explicit and checked for overflow. The SQL JNI
-entry point still requests nanoseconds. Primitive-boundary tests compose assignment with a
+entry point requests the component layout. Primitive-boundary tests compose assignment with a
 downstream window join and IPC snapshot restore. This keeps Arroyo's columnar batch structure but
 uses Flink's signed millisecond clock rather than Arroyo's SystemTime/nanosecond representation.
 
-This is correctness and migration groundwork, not a performance claim. It adds no
-SQL functions or opt-in compatibility setting.
+Connectors convert at their physical format boundary. JSON and CSV preserve the complete timestamp,
+including wide dates and hidden fractions. Avro retains Flink's millisecond wire semantics. ORC uses
+the released orc-rust Decimal128 nanosecond decoder before splitting into components. Parquet's
+released Arrow reader exposes INT96 through i64 units only, so INT96 columns use aligned millisecond
+and nanosecond reads. Wrapping subtraction of `millis * 1000000` from the nanosecond read recovers the
+fraction exactly while the millisecond read retains the date. This incurs a second column decode
+for INT96; other physical timestamps use one. The admission memory estimate includes both readers.
+No dependency forks or row transposes are introduced. Parquet sink unit conversion matches Flink's
+flooring and Java long overflow at the physical INT64 boundary; selecting nanoseconds still limits
+the file's date range to roughly 1677–2262. Internal values remain lossless. Connector-local timezone
+metadata labels LTZ without changing the value.
+
+This is a correctness change, with no performance claim. It removes the timestamp-result range
+opt-in; independent function and connector admission conditions remain in force.

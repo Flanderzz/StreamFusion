@@ -10,7 +10,7 @@ import org.apache.arrow.c.ArrowArray;
 import org.apache.arrow.c.ArrowSchema;
 import org.apache.arrow.c.Data;
 import org.apache.arrow.memory.BufferAllocator;
-import org.apache.arrow.vector.TimeStampNanoVector;
+import tech.streamfusion.arrow.TimestampAccessor;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.flink.api.common.operators.ProcessingTimeService.ProcessingTimeCallback;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
@@ -315,19 +315,17 @@ public class NativeColumnarWindowRankOperator extends AbstractNativeStatefulOper
 
   /** Rewrites a UTC-epoch timestamp column to the session-local wall-clock the host emits. */
   private void shiftToLocal(VectorSchemaRoot out, int column) {
-    if (!(out.getVector(column) instanceof TimeStampNanoVector)) {
-      return;
-    }
-    TimeStampNanoVector ts = (TimeStampNanoVector) out.getVector(column);
+    var vector = out.getVector(column);
+    if (!TimestampAccessor.isTimestamp(vector)) return;
+    TimestampAccessor ts = new TimestampAccessor(vector);
     for (int i = 0; i < out.getRowCount(); i++) {
-      if (ts.isNull(i)) {
-        continue;
-      }
-      long utcMillis = ts.get(i) / 1_000_000L;
-      long localMillis =
-          Instant.ofEpochMilli(utcMillis).atZone(zone).toLocalDateTime().toInstant(ZoneOffset.UTC).toEpochMilli();
-      ts.setSafe(i, localMillis * 1_000_000L);
+      if (ts.isNull(i)) continue;
+      long localMillis = Instant.ofEpochMilli(ts.getMillis(i)).atZone(zone).toLocalDateTime()
+          .toInstant(ZoneOffset.UTC).toEpochMilli();
+      TimestampAccessor.set(vector, i, org.apache.flink.table.data.TimestampData.fromEpochMillis(
+          localMillis, ts.getNanoOfMillisecond(i)));
     }
+
   }
 
 }

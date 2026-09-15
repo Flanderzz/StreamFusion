@@ -38,8 +38,13 @@ final class OrcEncoder implements ColumnarFileCodec.Encoder {
             .toArray();
     var fields = Arrays.stream(projection).mapToObj(schema.getFields()::get).toList();
     var properties = new Properties();
+    boolean legacyTimestampLtz = true;
     for (int i = 0; i < keys.length; i++) {
-      if (keys[i].equals("timezone") || keys[i].equals("legacy.timestamp-ltz")) continue;
+      if (keys[i].equals("legacy.timestamp-ltz")) {
+        legacyTimestampLtz = Boolean.parseBoolean(values[i]);
+        continue;
+      }
+      if (keys[i].equals("timezone")) continue;
       properties.setProperty(
           "orc." + (keys[i].equals("compression") ? "compress" : keys[i]), values[i]);
     }
@@ -48,7 +53,7 @@ final class OrcEncoder implements ColumnarFileCodec.Encoder {
     OrcVectorWriter opened = null;
     try {
       opened = factory.create(description, fields, properties, this.output);
-      vectors = new ArrowOrcVectors(schema.getFields(), opened.batch(), projection);
+      vectors = new ArrowOrcVectors(schema.getFields(), opened.batch(), projection, legacyTimestampLtz);
       writer = opened;
     } catch (IOException | RuntimeException | Error failure) {
       this.output.discard();

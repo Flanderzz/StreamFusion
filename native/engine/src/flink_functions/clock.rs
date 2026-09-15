@@ -49,7 +49,7 @@ impl ScalarUDFImpl for Clock {
 
     fn return_type(&self, _: &[DataType]) -> Result<DataType> {
         Ok(match self.field {
-            0 | 1 | 5 => DataType::Timestamp(TimeUnit::Nanosecond, None),
+            0 | 1 | 5 => streamfusion_bridge::timestamp::timestamp_type(),
             2 => DataType::Date32,
             3 => DataType::Time32(TimeUnit::Millisecond),
             4 => DataType::Int64,
@@ -62,29 +62,16 @@ impl ScalarUDFImpl for Clock {
         let value = match self.field {
             5 => {
                 let watermark = WATERMARK.get();
-                let nanos = if watermark == i64::MIN {
-                    None
-                } else {
-                    let Some(value) = watermark.checked_mul(1_000_000) else {
-                        return exec_err!(
-                            "Watermark exceeds the native nanosecond timestamp range"
-                        );
-                    };
-                    Some(value)
-                };
-                ScalarValue::TimestampNanosecond(nanos, None)
+                timestamp_scalar((watermark != i64::MIN).then_some(watermark))
             }
-            0 => ScalarValue::TimestampNanosecond(Some(millis * 1_000_000), None),
+            0 => timestamp_scalar(Some(millis)),
             4 => ScalarValue::Int64(Some(millis.div_euclid(1000))),
             _ => {
                 let Some(local) = crate::expr::instant_local(millis, &self.zone) else {
                     return exec_err!("Unsupported clock time zone {}", self.zone);
                 };
                 match self.field {
-                    1 => ScalarValue::TimestampNanosecond(
-                        local.and_utc().timestamp_nanos_opt(),
-                        None,
-                    ),
+                    1 => timestamp_scalar(Some(local.and_utc().timestamp_millis())),
                     2 => ScalarValue::Date32(Some(local.date().num_days_from_ce() - 719_163)),
                     3 => ScalarValue::Time32Millisecond(Some(
                         (local.time().num_seconds_from_midnight() * 1000) as i32,
@@ -95,6 +82,13 @@ impl ScalarUDFImpl for Clock {
         };
         Ok(ColumnarValue::Scalar(value))
     }
+}
+
+fn timestamp_scalar(millis: Option<i64>) -> ScalarValue {
+    use streamfusion_bridge::timestamp::{timestamp_array, TimestampValue};
+    ScalarValue::Struct(std::sync::Arc::new(timestamp_array([
+        millis.map(TimestampValue::from_millis)
+    ])))
 }
 
 #[cfg(test)]

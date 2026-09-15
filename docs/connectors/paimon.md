@@ -13,6 +13,10 @@ staging retains every accepted change for Paimon's separate compactor.
 Both file formats share the same Java lifecycle, native routing and merge paths. ORC's physical
 encoding options and UTC timestamp restrictions are detailed on the [ORC page](orc.md).
 
+Timestamp bundles use lossless millisecond/fraction columns, including years 0001–9999. Parquet
+unit selection still follows each Paimon field's precision, and ORC retains the stock writer's
+historical calendar and LTZ rules. Existing format/precision admission limits remain in force.
+
 ## Streaming source
 
 Streaming Parquet and ORC reads retain the released Java Paimon client for table/catalog resolution,

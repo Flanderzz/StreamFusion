@@ -171,21 +171,22 @@ pub(crate) trait RocksStateCodec {
 
 pub(crate) fn rocks_row_supported(types: &[DataType]) -> bool {
     types.iter().all(|data_type| {
-        matches!(
-            data_type,
-            DataType::Boolean
-                | DataType::Int8
-                | DataType::Int16
-                | DataType::Int32
-                | DataType::Int64
-                | DataType::Float32
-                | DataType::Float64
-                | DataType::Utf8
-                | DataType::Binary
-                | DataType::Date32
-                | DataType::Decimal128(_, _)
-                | DataType::Timestamp(_, None)
-        )
+        streamfusion_bridge::timestamp::is_component_timestamp(data_type)
+            || matches!(
+                data_type,
+                DataType::Boolean
+                    | DataType::Int8
+                    | DataType::Int16
+                    | DataType::Int32
+                    | DataType::Int64
+                    | DataType::Float32
+                    | DataType::Float64
+                    | DataType::Utf8
+                    | DataType::Binary
+                    | DataType::Date32
+                    | DataType::Decimal128(_, _)
+                    | DataType::Timestamp(_, None)
+            )
     })
 }
 

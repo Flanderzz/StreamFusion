@@ -3,6 +3,9 @@ package tech.streamfusion;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 
 import java.time.Instant;
+import tech.streamfusion.arrow.TimestampAccessor;
+import org.apache.arrow.vector.ValueVector;
+import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.stream.IntStream;
 import org.apache.arrow.c.ArrowArray;
@@ -34,6 +37,15 @@ class FlinkTimestampKeyParityTest {
   @ParameterizedTest
   @EnumSource(TimeUnit.class)
   void everyArrowUnitMatchesFlinksScalarAndNestedKeyBytes(TimeUnit unit) {
+    check(unit, false);
+  }
+
+  @Test
+  void componentTimestampsMatchFlinksScalarAndNestedKeyBytes() {
+    for (TimeUnit unit : TimeUnit.values()) check(unit, true);
+  }
+
+  private void check(TimeUnit unit, boolean components) {
     long[] values =
         unit == TimeUnit.SECOND
             ? new long[] {
@@ -48,7 +60,7 @@ class FlinkTimestampKeyParityTest {
     for (int precision : new int[] {0, 3, 6, 9}) {
       for (boolean nested : new boolean[] {false, true}) {
         Field timestamp =
-            new Field("ts", FieldType.nullable(new ArrowType.Timestamp(unit, "UTC")), List.of());
+            components ? TimestampAccessor.field("ts", true) : new Field("ts", FieldType.nullable(new ArrowType.Timestamp(unit, "UTC")), List.of());
         Field field =
             nested
                 ? new Field("k", FieldType.nullable(ArrowType.List.INSTANCE), List.of(timestamp))
@@ -64,17 +76,20 @@ class FlinkTimestampKeyParityTest {
             ArrowSchema schema = ArrowSchema.allocateNew(allocator)) {
           root.allocateNew();
           ListVector list = nested ? (ListVector) root.getVector(0) : null;
-          TimeStampVector timestamps =
-              (TimeStampVector) (nested ? list.getDataVector() : root.getVector(0));
+          ValueVector timestamps = nested ? list.getDataVector() : root.getVector(0);
           TimestampData[] expectedValues = new TimestampData[values.length + 1];
           if (nested) {
             list.startNewValue(0);
           }
           for (int i = 0; i < values.length; i++) {
-            timestamps.setSafe(i, values[i]);
             expectedValues[i] = reference(values[i], unit);
+            if (components) {
+              expectedValues[i] = TimestampData.fromEpochMillis(expectedValues[i].getMillisecond(),
+                  i % 2 == 0 ? 1 : 999999);
+              TimestampAccessor.set(timestamps, i, expectedValues[i]);
+            } else ((TimeStampVector) timestamps).setSafe(i, values[i]);
           }
-          timestamps.setNull(values.length);
+          TimestampAccessor.set(timestamps, values.length, null);
           if (nested) {
             list.endValue(0, expectedValues.length);
             list.setNull(1);

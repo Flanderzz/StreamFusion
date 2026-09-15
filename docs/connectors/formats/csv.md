@@ -70,3 +70,7 @@ scalars-only coverage.
 General sink-shape fallbacks that apply to every value format (an upsert-materialized sink, a
 keyed ordinary `kafka` table, `sink.parallelism` on a changelog input, and so on) are covered on the
 [Kafka](../kafka.md) page, not repeated here.
+
+Timestamp decode and encode retain years 0001–9999 and all runtime fractional nanos, including
+fractions present below the declared precision. The columnar timestamp uses separate millisecond
+and fractional buffers; no signed 64-bit nanosecond conversion sits on the format boundary.

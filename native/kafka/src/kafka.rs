@@ -675,8 +675,9 @@ impl LtzMarkPlan {
             Ok(children)
         };
         match data_type {
-            DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None)
-                if descriptor.starts_with("TIMESTAMP_LTZ") =>
+            data_type
+                if streamfusion_bridge::timestamp::is_timestamp(data_type)
+                    && descriptor.starts_with("TIMESTAMP_LTZ") =>
             {
                 Ok(Self::Timestamp)
             }
@@ -712,16 +713,11 @@ impl LtzMarkPlan {
     fn apply(&self, array: ArrayRef) -> Result<ArrayRef, String> {
         use arrow::array::cast::AsArray;
         use arrow::array::{LargeListArray, ListArray, MapArray, StructArray};
-        use arrow::datatypes::TimestampNanosecondType;
 
         match self {
             Self::Identity => Ok(array),
-            Self::Timestamp => Ok(Arc::new(
-                array
-                    .as_primitive::<TimestampNanosecondType>()
-                    .clone()
-                    .with_timezone("UTC"),
-            )),
+            Self::Timestamp => streamfusion_bridge::timestamp::with_timezone(&array, "UTC")
+                .map_err(|error| error.to_string()),
             Self::Struct(plans) => {
                 let (fields, columns, nulls) = array.as_struct().clone().into_parts();
                 let columns = columns
@@ -859,7 +855,7 @@ impl arrow::json::writer::EncoderFactory for FlinkJsonEncoderFactory {
         options: &'a arrow::json::writer::EncoderOptions,
     ) -> Result<Option<arrow::json::writer::NullableEncoder<'a>>, arrow::error::ArrowError> {
         use arrow::array::cast::AsArray;
-        use arrow::datatypes::{Decimal128Type, TimestampNanosecondType};
+        use arrow::datatypes::Decimal128Type;
         use arrow::json::writer::{Encoder, NullableEncoder};
 
         let encoder: Option<Box<dyn Encoder + 'a>> = match array.data_type() {
@@ -891,11 +887,11 @@ impl arrow::json::writer::EncoderFactory for FlinkJsonEncoderFactory {
             // boundary marks LTZ leaves with a UTC timezone (`mark_ltz_leaves`), so the Arrow type
             // alone selects the designator — at any nesting depth, since arrow-json's container
             // encoders consult this factory recursively.
-            DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, timezone) => {
+            data_type if streamfusion_bridge::timestamp::is_timestamp(data_type) => {
                 Some(Box::new(FlinkTimestampEncoder {
-                    array: array.as_primitive::<TimestampNanosecondType>(),
+                    array: streamfusion_bridge::timestamp::TimestampColumn::try_new(array)?,
                     iso_8601: self.iso_8601,
-                    zulu: timezone.is_some(),
+                    zulu: streamfusion_bridge::timestamp::timestamp_timezone(data_type).is_some(),
                 }))
             }
             // Flink's map converter differs from arrow-json's stock one in every null rule: null
@@ -1297,7 +1293,7 @@ fn encode_plain_decimal(unscaled: i128, scale: i64, output: &mut Vec<u8>) {
 }
 
 struct FlinkTimestampEncoder<'a> {
-    array: &'a arrow::array::TimestampNanosecondArray,
+    array: streamfusion_bridge::timestamp::TimestampColumn<'a>,
     iso_8601: bool,
     zulu: bool,
 }
@@ -1307,7 +1303,13 @@ impl arrow::json::writer::Encoder for FlinkTimestampEncoder<'_> {
         // Flink's formatters never consult the column's declared precision: the fraction is
         // whatever the value's nanoseconds carry, trimmed of trailing zeros, so the full
         // nine-digit width is always offered.
-        encode_flink_timestamp(self.array.value(index), 9, self.iso_8601, self.zulu, output);
+        encode_flink_timestamp_value(
+            self.array.value(index).expect("timestamp components"),
+            9,
+            self.iso_8601,
+            self.zulu,
+            output,
+        );
     }
 }
 
@@ -1327,8 +1329,28 @@ fn encode_flink_timestamp(
     zulu: bool,
     output: &mut Vec<u8>,
 ) {
-    let seconds = value.div_euclid(1_000_000_000);
-    let nanos = value.rem_euclid(1_000_000_000) as u32;
+    encode_flink_timestamp_value(
+        streamfusion_bridge::timestamp::TimestampValue::from_arrow(
+            value,
+            arrow::datatypes::TimeUnit::Nanosecond,
+        )
+        .expect("timestamp nanos"),
+        precision,
+        iso_8601,
+        zulu,
+        output,
+    );
+}
+
+fn encode_flink_timestamp_value(
+    value: streamfusion_bridge::timestamp::TimestampValue,
+    precision: usize,
+    iso_8601: bool,
+    zulu: bool,
+    output: &mut Vec<u8>,
+) {
+    let seconds = value.millis().div_euclid(1000);
+    let nanos = value.millis().rem_euclid(1000) as u32 * 1_000_000 + value.nano_of_milli();
     let days = seconds.div_euclid(86_400);
     let second_of_day = seconds.rem_euclid(86_400) as u32;
     let (year, month, day) = civil_date_from_epoch_days(days);

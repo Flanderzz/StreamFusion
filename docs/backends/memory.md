@@ -14,7 +14,8 @@ State is checkpointed as the backend-independent [canonical state format](canoni
 each barrier, an operator serializes its live state by key group into versioned, bounded managed-state
 chunks. There is no incremental upload and no manifest diffing — every checkpoint is a complete
 snapshot of the operator's current state, the same shape regardless of how much changed since the
-last barrier. Legacy raw keyed-state snapshots remain readable.
+last barrier. Snapshots from the earlier nanosecond timestamp layout are rejected; see the
+[timestamp layout upgrade](canonical-state.md#timestamp-layout-upgrade).
 
 This is the simplest possible durability story, and it is fast for the common case: no on-disk
 table, no compaction, no point-read join on the hot path. The tradeoff is checkpoint size and

@@ -83,8 +83,11 @@ Filesystem ORC retains the released Flink converter's narrower type support.
 
 Arrow timestamp paths require a UTC JVM timezone (`-Duser.timezone=UTC`); other JVM zones retain
 the stock path for schemas containing timestamps. Historical NTZ files with non-UTC stripe writer
-timezones also retain Java. Timestamp values share the engine's signed 64-bit nanosecond range,
-approximately 1677–2262. ORC's historical last-negative-second encoding and statistics follow Java.
+timezones also retain Java. The released ORC decoder reads timestamps through Decimal128 nanos
+before splitting them into milliseconds and a fractional remainder; years 0001–9999 retain their
+precision. The writer copies components into the host timestamp vectors and mirrors
+java.sql.Timestamp's historical calendar conversion for local timestamps before October 1582.
+True instant columns keep their epoch-millisecond value. ORC's historical last-negative-second encoding and statistics follow Java.
 That alias can make decoded timestamp keys unsorted. Native snapshot merging therefore retains
 Java when a fractional timestamp is a non-leading stored key, or when a leading timestamp key's
 file bounds intersect the final second before the Unix epoch. Decoding/tailing preserves Java's

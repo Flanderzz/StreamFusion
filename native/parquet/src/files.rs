@@ -265,13 +265,16 @@ fn write_field(source: &Field, timestamp_unit: arrow::datatypes::TimeUnit) -> Fi
     use arrow::datatypes::TimeUnit;
     let nested = |field: &Arc<Field>| Arc::new(write_field(field, timestamp_unit));
     let data_type = match source.data_type() {
-        DataType::Timestamp(_, timezone) => {
+        data_type if streamfusion_bridge::timestamp::is_timestamp(data_type) => {
             let unit = source
                 .metadata()
                 .get(TIMESTAMP_UNIT_META_KEY)
                 .map(|value| parse_timestamp_unit(value))
                 .unwrap_or(timestamp_unit);
-            DataType::Timestamp(unit, timezone.clone())
+            DataType::Timestamp(
+                unit,
+                streamfusion_bridge::timestamp::timestamp_timezone(data_type).map(Into::into),
+            )
         }
         DataType::Time32(_) | DataType::Time64(_) => DataType::Time32(TimeUnit::Millisecond),
         DataType::FixedSizeBinary(_) => DataType::Binary,
@@ -292,9 +295,7 @@ fn convert_column(column: &ArrayRef, target: &DataType) -> ArrayRef {
         Time64NanosecondArray,
     };
     use arrow::compute::kernels::arity::unary;
-    use arrow::datatypes::{
-        Time32MillisecondType, TimeUnit, TimestampMicrosecondType, TimestampMillisecondType,
-    };
+    use arrow::datatypes::{Time32MillisecondType, TimeUnit};
 
     if column.data_type() == target {
         return column.clone();
@@ -359,21 +360,50 @@ fn convert_column(column: &ArrayRef, target: &DataType) -> ArrayRef {
                 *sorted,
             ))
         }
-        (DataType::Timestamp(TimeUnit::Nanosecond, _), DataType::Timestamp(unit, timezone)) => {
-            let nanos = column
-                .as_any()
-                .downcast_ref::<TimestampNanosecondArray>()
-                .expect("timestamp column was not nanosecond");
+        (source, target)
+            if streamfusion_bridge::timestamp::is_timestamp(source)
+                && streamfusion_bridge::timestamp::is_timestamp(target) =>
+        {
+            // Flink's ParquetRowDataWriter floors fractions and uses Java long arithmetic.
+            // Overflow belongs to this physical INT64 format boundary, never the engine layout.
+            use arrow::array::{
+                TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+            };
+            use streamfusion_bridge::timestamp::TimestampColumn;
+            let source = TimestampColumn::try_new(column.as_ref()).unwrap();
+            let DataType::Timestamp(unit, timezone) = target else {
+                unreachable!("Parquet timestamp output must have a physical unit")
+            };
+            let values = (0..source.len()).map(|row| {
+                (!source.is_null(row)).then(|| {
+                    let value = source.value(row).unwrap();
+                    match unit {
+                        TimeUnit::Millisecond => value.millis(),
+                        TimeUnit::Microsecond => value
+                            .millis()
+                            .wrapping_mul(1_000)
+                            .wrapping_add(i64::from(value.nano_of_milli() / 1_000)),
+                        TimeUnit::Nanosecond => value
+                            .millis()
+                            .wrapping_mul(1_000_000)
+                            .wrapping_add(i64::from(value.nano_of_milli())),
+                        other => panic!("unsupported Parquet timestamp unit {other:?}"),
+                    }
+                })
+            });
             match unit {
-                TimeUnit::Microsecond => Arc::new(
-                    unary::<_, _, TimestampMicrosecondType>(nanos, |v| v.div_euclid(1_000))
-                        .with_timezone_opt(timezone.clone()),
-                ),
                 TimeUnit::Millisecond => Arc::new(
-                    unary::<_, _, TimestampMillisecondType>(nanos, |v| v.div_euclid(1_000_000))
+                    TimestampMillisecondArray::from_iter(values)
                         .with_timezone_opt(timezone.clone()),
                 ),
-                other => panic!("unsupported timestamp write unit {other:?}"),
+                TimeUnit::Microsecond => Arc::new(
+                    TimestampMicrosecondArray::from_iter(values)
+                        .with_timezone_opt(timezone.clone()),
+                ),
+                TimeUnit::Nanosecond => Arc::new(
+                    TimestampNanosecondArray::from_iter(values).with_timezone_opt(timezone.clone()),
+                ),
+                _ => unreachable!(),
             }
         }
         (DataType::Time32(TimeUnit::Second), DataType::Time32(TimeUnit::Millisecond)) => {

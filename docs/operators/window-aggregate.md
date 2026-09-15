@@ -64,10 +64,9 @@ In particular, `1969-12-31 23:59:59.999999999` belongs to the window before the 
 `TimestampData.getMillisecond() == -1`. NULL event-time rows are dropped; processing-time assignment
 uses the clock even when the payload's timestamp is NULL.
 
-The native assignment kernel reads all primitive Arrow timestamp units. SQL window boundaries
-remain nanosecond columns; conversion checks overflow rather than wrapping the boundary. Full-range
-SQL timestamps and any change to the output/state representation remain separate work tracked by
-[#64](https://github.com/datafusion-contrib/StreamFusion/issues/64).
+The native assignment kernel reads the timestamp pair and all primitive Arrow timestamp units.
+SQL window boundaries use the same lossless pair as input timestamps, so a daily window after
+2262 retains both its date and its correct millisecond boundaries.
 
 A downstream [window join](joins/window-join.md) or window Top-N/dedup consuming the TVF's output
 closes windows on a chained processing-time timer (the same next-slide-boundary model described

@@ -16,8 +16,50 @@ import org.apache.arrow.vector.BigIntVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 class ArrowKernelBatchTest {
+
+  @ParameterizedTest
+  @ValueSource(longs = {Long.MIN_VALUE, -1, 0, Long.MAX_VALUE})
+  void deltaMicrosRetainTheirEntirePhysicalRange(long micros) {
+    var timestamp = org.apache.flink.table.data.TimestampData.fromEpochMillis(
+        Math.floorDiv(micros, 1000), (int) Math.floorMod(micros, 1000) * 1000);
+    var logical = org.apache.flink.table.types.logical.RowType.of(
+        new org.apache.flink.table.types.logical.TimestampType(6));
+    try (RootAllocator allocator = new RootAllocator()) {
+      VectorSchemaRoot source = tech.streamfusion.operator.RowDataArrowConverter.write(
+          List.of(org.apache.flink.table.data.GenericRowData.of(timestamp)), logical, allocator);
+      try (ArrowKernelBatch batch = new ArrowKernelBatch(
+          source, new StructType().add("local", TimestampNTZType.TIMESTAMP_NTZ))) {
+        assertEquals(micros, batch.getColumnVector(0).getLong(0));
+      }
+    }
+  }
+
+  @Test
+  void fullRangeTimestampComponentsExposeDeltaMicrosAndTimezone() {
+    var timestamp = org.apache.flink.table.data.TimestampData.fromLocalDateTime(
+        java.time.LocalDateTime.parse("9999-12-31T23:59:59.999999999"));
+    var logical = org.apache.flink.table.types.logical.RowType.of(
+        new org.apache.flink.table.types.logical.LocalZonedTimestampType(6),
+        new org.apache.flink.table.types.logical.TimestampType(6));
+    try (RootAllocator allocator = new RootAllocator()) {
+      VectorSchemaRoot source = tech.streamfusion.operator.RowDataArrowConverter.write(
+          List.of(org.apache.flink.table.data.GenericRowData.of(timestamp, timestamp)), logical, allocator);
+      var deltaSchema = new StructType().add("instant", TimestampType.TIMESTAMP)
+          .add("local", TimestampNTZType.TIMESTAMP_NTZ);
+      try (ArrowKernelBatch batch = new ArrowKernelBatch(source, deltaSchema);
+           VectorSchemaRoot retained = batch.retainedRoot()) {
+        assertEquals(253_402_300_799_999_999L, batch.getColumnVector(0).getLong(0));
+        assertEquals(253_402_300_799_999_999L, batch.getColumnVector(1).getLong(0));
+        assertEquals("UTC", retained.getSchema().getFields().get(0).getChildren().get(0)
+            .getMetadata().get("streamfusion.timestamp.timezone"));
+        assertEquals(timestamp, new tech.streamfusion.arrow.TimestampAccessor(retained.getVector(0)).getTimestamp(0));
+      }
+    }
+  }
 
   @Test
   void selectedRowsRemainViewsUntilTheNativeGather() {

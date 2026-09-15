@@ -118,3 +118,7 @@ handle. A multiset group aggregate's import also spreads each blob's side batche
 companion element tables, and an over aggregate's import fans its buffer rows into the frames
 table and its seen-sets into the distinct element tables. Only the snapshot-path fallback shapes
 above restore such state into the generic snapshot store instead.
+
+The two-component timestamp layout changes native row bytes and increments the snapshot metadata
+version. Older snapshots fail with a format-version error; see the
+[timestamp layout upgrade](canonical-state.md#timestamp-layout-upgrade) before upgrading a stateful job.

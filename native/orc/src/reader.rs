@@ -105,6 +105,16 @@ impl Decoder {
             &names.iter().map(String::as_str).collect::<Vec<_>>(),
         );
         let builder = builder.with_projection(mask).with_batch_size(batch_rows);
+        // orc-rust's released Decimal128 timestamp decoder retains the full nanosecond range.
+        let decode_schema = Arc::new(arrow59::datatypes::Schema::new(
+            builder
+                .schema()
+                .fields()
+                .iter()
+                .map(|field| wide_timestamp_field(field))
+                .collect::<Vec<_>>(),
+        ));
+        let builder = builder.with_schema(decode_schema);
         let ffi59 = arrow59::ffi::FFI_ArrowSchema::try_from(builder.schema().as_ref()).unwrap();
         // Borrow the standard repr(C) schema while Arrow 58 copies its logical metadata.
         let ffi58 = unsafe { &*(&ffi59 as *const _ as *const FFI_ArrowSchema) };
@@ -152,9 +162,28 @@ impl Decoder {
     }
 }
 
+fn wide_timestamp_field(field: &arrow59::datatypes::Field) -> arrow59::datatypes::Field {
+    use arrow59::datatypes::DataType as D;
+    let child = |f: &Arc<arrow59::datatypes::Field>| Arc::new(wide_timestamp_field(f));
+    let data_type = match field.data_type() {
+        D::Timestamp(..) => D::Decimal128(38, 9),
+        D::Struct(fields) => D::Struct(fields.iter().map(child).collect()),
+        D::List(field) => D::List(child(field)),
+        D::LargeList(field) => D::LargeList(child(field)),
+        D::Map(field, sorted) => D::Map(child(field), *sorted),
+        other => other.clone(),
+    };
+    field.clone().with_data_type(data_type)
+}
+
 fn compatible(physical: &OrcType, target: &DataType) -> bool {
     use OrcType as O;
     match (physical, target) {
+        (O::Timestamp { .. } | O::TimestampWithLocalTimezone { .. }, data_type)
+            if streamfusion_bridge::timestamp::is_component_timestamp(data_type) =>
+        {
+            true
+        }
         (O::Boolean { .. }, DataType::Boolean)
         | (O::Byte { .. }, DataType::Int8)
         | (O::Short { .. }, DataType::Int16)
@@ -193,6 +222,25 @@ fn compatible(physical: &OrcType, target: &DataType) -> bool {
 }
 
 fn normalize(array: &ArrayRef, physical: &OrcType, target: &DataType) -> ArrayRef {
+    if matches!(
+        physical,
+        OrcType::Timestamp { .. } | OrcType::TimestampWithLocalTimezone { .. }
+    ) {
+        let nanos = array
+            .as_any()
+            .downcast_ref::<arrow::array::Decimal128Array>()
+            .expect("ORC full-range timestamp decoder");
+        let values = nanos.iter().map(|v| {
+            v.map(|n| {
+                streamfusion_bridge::timestamp::TimestampValue::from_nanos(n)
+                    .expect("ORC timestamp exceeds Flink's millisecond range")
+            })
+        });
+        let components: ArrayRef =
+            Arc::new(streamfusion_bridge::timestamp::timestamp_array(values));
+        return streamfusion_bridge::timestamp::cast_timestamp(&components, target)
+            .expect("ORC timestamp output type");
+    }
     match (physical, target) {
         (OrcType::Char { .. }, DataType::Utf8) => {
             let strings = array.as_any().downcast_ref::<StringArray>().unwrap();
@@ -245,7 +293,8 @@ fn normalize(array: &ArrayRef, physical: &OrcType, target: &DataType) -> ArrayRe
                 *sorted,
             ))
         }
-        _ => arrow::compute::cast(array, target).expect("Convert ORC field to operator type"),
+        _ => streamfusion_bridge::timestamp::cast_array(array, target)
+            .expect("Convert ORC field to operator type"),
     }
 }
 

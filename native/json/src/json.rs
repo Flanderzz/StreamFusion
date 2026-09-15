@@ -247,13 +247,13 @@ impl JsonAppend for DateJsonAppender {
     }
 }
 
-/// TIMESTAMP / TIMESTAMP_LTZ (nanosecond): strings parse per the table's
+/// TIMESTAMP / TIMESTAMP_LTZ (millisecond/fraction pair): strings parse per the table's
 /// `timestamp-format.standard` — Flink's SQL (`yyyy-MM-dd HH:mm:ss[.f]`) or ISO-8601
 /// (`yyyy-MM-dd'T'HH:mm[:ss[.f]]`) formatter, nothing else. A bare number fails, as it does in
 /// Flink (the converter renders the token to text and the formatter rejects digits). A trailing
 /// 'Z' is tolerated either way (divergences/21 — the boundary schema carries no LTZ marker).
 pub(crate) struct TimestampJsonAppender {
-    builder: PrimitiveBuilder<TimestampNanosecondType>,
+    builder: streamfusion_bridge::timestamp::TimestampBuilder,
     data_type: DataType,
     env: JsonEnv,
 }
@@ -261,7 +261,7 @@ pub(crate) struct TimestampJsonAppender {
 impl TimestampJsonAppender {
     fn new(data_type: &DataType, capacity: usize, env: JsonEnv) -> TimestampJsonAppender {
         TimestampJsonAppender {
-            builder: PrimitiveBuilder::with_capacity(capacity).with_data_type(data_type.clone()),
+            builder: streamfusion_bridge::timestamp::TimestampBuilder::with_capacity(capacity),
             data_type: data_type.clone(),
             env,
         }
@@ -284,7 +284,10 @@ impl JsonAppend for TimestampJsonAppender {
     }
 
     fn append_key(&mut self, key: &str) {
-        match flink_text::parse_flink_timestamp(key, self.env.mode) {
+        match flink_text::parse_flink_timestamp_value(key, self.env.mode).filter(|value| {
+            streamfusion_bridge::timestamp::is_component_timestamp(&self.data_type)
+                || i64::try_from(value.nanos()).is_ok()
+        }) {
             Some(nanos) => self.builder.append_value(nanos),
             None if self.env.lenient => self.builder.append_null(),
             None => panic!("failed to parse \"{key}\" as {}", self.data_type),
@@ -296,7 +299,11 @@ impl JsonAppend for TimestampJsonAppender {
     }
 
     fn finish(&mut self) -> ArrayRef {
-        Arc::new(self.builder.finish())
+        streamfusion_bridge::timestamp::cast_timestamp(
+            &(Arc::new(self.builder.finish()) as ArrayRef),
+            &self.data_type,
+        )
+        .expect("parsed timestamp output type")
     }
 }
 
@@ -980,7 +987,7 @@ pub(crate) fn make_json_appender(
             builder: PrimitiveBuilder::with_capacity(capacity),
             env,
         }),
-        DataType::Timestamp(TimeUnit::Nanosecond, None) => {
+        data_type if streamfusion_bridge::timestamp::is_timestamp(data_type) => {
             Box::new(TimestampJsonAppender::new(data_type, capacity, env))
         }
         // TIME(p)'s Arrow unit follows the declared precision; the value is always whole seconds.
@@ -1101,6 +1108,7 @@ impl StructDriftDetector {
 impl DriftDetector {
     fn new(data_type: &DataType) -> Self {
         match data_type {
+            data_type if streamfusion_bridge::timestamp::is_timestamp(data_type) => Self::Scalar,
             DataType::Utf8 => Self::Utf8,
             DataType::Float32 => Self::Float32,
             DataType::Struct(fields) => Self::Struct(StructDriftDetector::new(fields)),
@@ -1690,7 +1698,7 @@ impl JsonDecoder {
             .iter()
             .zip(decoded.columns())
             .map(|(field, column)| {
-                let column = restore_exact_leaves(column, field.data_type(), self.env.lenient);
+                let column = restore_exact_leaves(column, field.data_type(), self.env);
                 collapse_duplicate_map_keys(&column, field.data_type())
             })
             .collect();
@@ -1802,14 +1810,21 @@ fn top_level_array_elements(bytes: &[u8]) -> Vec<&[u8]> {
 /// arrow-json: DECIMAL (needs the raw number literal), TIME, and VARBINARY (arrow-json's own
 /// envelopes differ from Flink's).
 fn text_restored_leaf(data_type: &DataType) -> bool {
-    matches!(
-        data_type,
-        DataType::Decimal128(_, _) | DataType::Time32(_) | DataType::Time64(_) | DataType::Binary
-    )
+    streamfusion_bridge::timestamp::is_timestamp(data_type)
+        || matches!(
+            data_type,
+            DataType::Decimal128(_, _)
+                | DataType::Time32(_)
+                | DataType::Time64(_)
+                | DataType::Binary
+        )
 }
 
 /// Whether a (nested) leaf of this type is converted by [`restore_exact_leaves`].
 fn needs_text_restore(data_type: &DataType) -> bool {
+    if text_restored_leaf(data_type) {
+        return true;
+    }
     match data_type {
         DataType::Struct(fields) => fields.iter().any(|f| needs_text_restore(f.data_type())),
         DataType::List(field) => needs_text_restore(field.data_type()),
@@ -1844,11 +1859,28 @@ fn exact_leaves_as_text(field: &Field) -> Field {
 /// garbage fails), TIME with the `SQL_TIME_FORMAT`-and-truncate rule, VARBINARY with Jackson's
 /// base64 read; containers rebuild around their converted children; anything else is already its
 /// declared type.
-fn restore_exact_leaves(column: &ArrayRef, target: &DataType, lenient: bool) -> ArrayRef {
+fn restore_exact_leaves(column: &ArrayRef, target: &DataType, env: JsonEnv) -> ArrayRef {
     if !needs_text_restore(target) {
         return column.clone();
     }
     match target {
+        data_type if streamfusion_bridge::timestamp::is_timestamp(data_type) => {
+            let strings = column
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("timestamp text");
+            let values = strings.iter().map(|text| {
+                let text = text?;
+                match flink_text::parse_flink_timestamp_value(text, env.mode) {
+                    Some(value) => Some(value),
+                    None if env.lenient => None,
+                    None => panic!("failed to parse {text} as timestamp"),
+                }
+            });
+            let pair: ArrayRef = Arc::new(streamfusion_bridge::timestamp::timestamp_array(values));
+            streamfusion_bridge::timestamp::cast_timestamp(&pair, target)
+                .expect("timestamp output type")
+        }
         DataType::Time32(_) | DataType::Time64(_) => {
             let strings = column
                 .as_any()
@@ -1860,7 +1892,7 @@ fn restore_exact_leaves(column: &ArrayRef, target: &DataType, lenient: bool) -> 
                     let text = text?;
                     match flink_text::parse_sql_time_second_of_day(text) {
                         Some(seconds) => Some(seconds),
-                        None if lenient => None,
+                        None if env.lenient => None,
                         None => panic!("failed to parse \"{text}\" as {target}"),
                     }
                 })
@@ -1881,7 +1913,7 @@ fn restore_exact_leaves(column: &ArrayRef, target: &DataType, lenient: bool) -> 
                         // Message-drop granularity for a quote-consuming shape is not
                         // reproducible on this path (columns are already built) — the field
                         // nulls instead, a decimal-path residual noted in divergences/21.
-                        Err(_) if lenient => None,
+                        Err(_) if env.lenient => None,
                         Err(_) => panic!("failed to decode base64 \"{text}\" as VARBINARY"),
                     }
                 })
@@ -1901,7 +1933,7 @@ fn restore_exact_leaves(column: &ArrayRef, target: &DataType, lenient: bool) -> 
                     // so trimming both is exact.
                     match flink_text::parse_flink_decimal(text.trim(), *p, *s) {
                         Ok(value) => value,
-                        Err(()) if lenient => None,
+                        Err(()) if env.lenient => None,
                         Err(()) => panic!("failed to parse \"{text}\" as DECIMAL({p}, {s})"),
                     }
                 })
@@ -1920,7 +1952,7 @@ fn restore_exact_leaves(column: &ArrayRef, target: &DataType, lenient: bool) -> 
             let children = fields
                 .iter()
                 .zip(source.columns())
-                .map(|(field, child)| restore_exact_leaves(child, field.data_type(), lenient))
+                .map(|(field, child)| restore_exact_leaves(child, field.data_type(), env))
                 .collect();
             Arc::new(
                 StructArray::try_new(fields.clone(), children, source.nulls().cloned())
@@ -1932,7 +1964,7 @@ fn restore_exact_leaves(column: &ArrayRef, target: &DataType, lenient: bool) -> 
                 .as_any()
                 .downcast_ref::<ListArray>()
                 .expect("list column");
-            let values = restore_exact_leaves(source.values(), field.data_type(), lenient);
+            let values = restore_exact_leaves(source.values(), field.data_type(), env);
             Arc::new(
                 ListArray::try_new(
                     field.clone(),
@@ -1951,7 +1983,7 @@ fn restore_exact_leaves(column: &ArrayRef, target: &DataType, lenient: bool) -> 
             let entries = restore_exact_leaves(
                 &(Arc::new(source.entries().clone()) as ArrayRef),
                 entries_field.data_type(),
-                lenient,
+                env,
             );
             let entries = entries
                 .as_any()

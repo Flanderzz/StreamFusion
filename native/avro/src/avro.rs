@@ -275,6 +275,24 @@ fn reconcile_array(field: &Field, array: ArrayRef) -> ArrayRef {
         return array;
     }
     match field.data_type() {
+        data_type if streamfusion_bridge::timestamp::is_component_timestamp(data_type) => {
+            let raw: Int64Array = match array.data_type() {
+                DataType::Timestamp(TimeUnit::Millisecond, _) => array
+                    .as_any()
+                    .downcast_ref::<TimestampMillisecondArray>()
+                    .unwrap()
+                    .iter()
+                    .collect(),
+                DataType::Timestamp(TimeUnit::Microsecond, _) => array
+                    .as_any()
+                    .downcast_ref::<TimestampMicrosecondArray>()
+                    .unwrap()
+                    .iter()
+                    .collect(),
+                other => panic!("avro decode produced {other} for a timestamp"),
+            };
+            Arc::new(streamfusion_bridge::timestamp::timestamps_from_millis(&raw))
+        }
         DataType::Timestamp(TimeUnit::Nanosecond, None) => flink_timestamp_nanos(&array),
         DataType::Int8 => {
             let ints = array

@@ -44,3 +44,17 @@ the savepoint requires the corresponding StreamFusion operator. Stateful job upg
 when the new StreamFusion version still supports the saved format and the operator definition is
 compatible; changing keys, aggregate definitions, join shape, or other state schema is not implied
 safe merely because the savepoint is canonical.
+
+## Timestamp layout upgrade
+
+The lossless timestamp layout changes native row encodings. Current writers use canonical version 3
+(asynchronous Top-N version 4), raw keyed-state version 2 and RocksDB metadata version 3. Recovery
+checks these versions before interpreting native payloads. Earlier snapshots and savepoints require
+the StreamFusion binary that wrote them; this release does not convert old state in place. Existing
+stateful jobs must finish or replay from their durable inputs when upgrading. Keep their previous
+binary and checkpoints until that transition is complete. Already-wrapped values in an old snapshot
+cannot be reconstructed from that snapshot alone.
+
+New checkpoints preserve the millisecond component and fractional nanos on memory and RocksDB,
+including canonical transitions between those backends. Format changes do not alter Flink key-group
+assignment or the timestamp precision rules used by its BinaryRow key serializer.

@@ -79,3 +79,7 @@ instance.
 | `TIME(0)` column | Same second-vs-millisecond precision gap as decode. |
 | A NULL map key | Fails the record at runtime, matching Flink's converter — a data-dependent failure that can't gate at plan time. |
 | Missing `streamfusion-avro` JAR | The provider seam treats a missing optional format module as an absent native format, not a linkage failure. |
+
+Timestamp conversion preserves the full millisecond range in the engine's two-part representation.
+Avro still follows Flink's millisecond wire semantics described above; switching the internal layout
+does not add fractional precision that the host Avro converter does not serialize.

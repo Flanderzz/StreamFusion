@@ -13,7 +13,7 @@ import org.apache.flink.table.types.logical.RowType;
  * grammar ({@code ROW<...>}, {@code ARRAY<...>}, {@code MAP<key,value>}) so the descriptor parses
  * unambiguously — Flink's own summary strings interleave arbitrary user field names. Scalars keep
  * their Flink summary spelling, which carries the one distinction Arrow's own types drop: a
- * TIMESTAMP_LTZ leaf and a plain TIMESTAMP both arrive as timezone-less nanoseconds. A MULTISET is
+ * TIMESTAMP_LTZ leaf and a plain TIMESTAMP both arrive as unlabeled millisecond/fraction pairs. A MULTISET is
  * rendered as the {@code MAP<element,INT>} it crosses the boundary as.
  */
 public final class LogicalTypeDescriptors {

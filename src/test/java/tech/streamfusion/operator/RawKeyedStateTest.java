@@ -31,7 +31,7 @@ import org.junit.jupiter.api.Test;
 
 /**
  * The raw keyed-state framing: every payload snapshots behind the versioned header, a pre-header
- * payload still restores (version 0), and a payload from a newer state format fails with the
+ * payload is rejected, and an incompatible state format fails with the
  * writer's version named instead of misparsing.
  */
 class RawKeyedStateTest {
@@ -63,27 +63,18 @@ class RawKeyedStateTest {
   }
 
   @Test
-  void preHeaderPayloadRestoresAsVersionZero() throws Exception {
-    byte[] legacy = new byte[] {42, 43, 44};
-
-    List<byte[]> restored = RawKeyedState.restore(restoreContext(framed(legacy)));
-
-    assertEquals(1, restored.size());
-    assertArrayEquals(legacy, restored.get(0));
+  void preHeaderPayloadIsRejectedBeforeNativeDecode() {
+    assertThrows(IllegalStateException.class,
+        () -> RawKeyedState.restore(restoreContext(framed(new byte[] {42, 43, 44}))));
   }
 
   @Test
-  void preHeaderTimerFrameRestoresAsVersionZero() throws Exception {
-    ByteBuffer legacy = ByteBuffer.allocate(RawKeyedState.TIMER_FRAME_BYTES + 2);
-    legacy.putInt(RawKeyedState.TIMER_FRAME_MAGIC);
-    legacy.putLong(555L);
-    legacy.put(new byte[] {1, 2});
-
-    RawKeyedState.TimedRestore restored =
-        RawKeyedState.restoreWithTimer(restoreContext(framed(legacy.array())));
-
-    assertEquals(555L, restored.deadline());
-    assertArrayEquals(new byte[] {1, 2}, restored.snapshots().get(0));
+  void oldNanosecondLayoutIsRejectedBeforeNativeDecode() {
+    ByteBuffer payload = ByteBuffer.allocate(Long.BYTES + 2 * Integer.BYTES);
+    payload.putLong(RawKeyedState.STATE_MAGIC).putInt(1).putInt(0);
+    IllegalStateException failure = assertThrows(IllegalStateException.class,
+        () -> RawKeyedState.restore(restoreContext(framed(payload.array()))));
+    assertTrue(failure.getMessage().contains("version 1"));
   }
 
   @Test

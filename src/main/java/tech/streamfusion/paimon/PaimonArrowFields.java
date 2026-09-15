@@ -1,6 +1,7 @@
 package tech.streamfusion.paimon;
 
 import java.util.ArrayList;
+import tech.streamfusion.arrow.TimestampAccessor;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -112,11 +113,10 @@ final class PaimonArrowFields {
     }
     FieldType fieldType = arrow.getFieldType();
     ArrowType arrowType = fieldType.getType();
-    if (type instanceof LocalZonedTimestampType && arrowType instanceof ArrowType.Timestamp) {
-      arrowType = new ArrowType.Timestamp(((ArrowType.Timestamp) arrowType).getUnit(), "UTC");
-    }
-    return new Field(
+    Field result = new Field(
         name, new FieldType(type.isNullable(), arrowType, fieldType.getDictionary(), metadata), children);
+    return precision == null ? result : TimestampAccessor.withTimezone(result,
+        type instanceof LocalZonedTimestampType ? "UTC" : null);
   }
 
   @Nullable

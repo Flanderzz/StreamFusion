@@ -142,6 +142,13 @@ pub enum TimestampMode {
 /// strict: the mode's separator, padded two-digit fields, a real calendar date, 1–9 fraction
 /// digits after a mandatory '.', and full-string consumption.
 pub fn parse_flink_timestamp(s: &str, mode: TimestampMode) -> Option<i64> {
+    i64::try_from(parse_flink_timestamp_value(s, mode)?.nanos()).ok()
+}
+
+pub fn parse_flink_timestamp_value(
+    s: &str,
+    mode: TimestampMode,
+) -> Option<crate::timestamp::TimestampValue> {
     let b = s.as_bytes();
     if b.len() < 11 {
         return None;
@@ -153,8 +160,10 @@ pub fn parse_flink_timestamp(s: &str, mode: TimestampMode) -> Option<i64> {
     }
     let time = s[11..].strip_suffix('Z').unwrap_or(&s[11..]);
     let nanos_of_day = parse_flink_time(time, mode == TimestampMode::Iso8601)?;
-    days.checked_mul(86_400_000_000_000)?
-        .checked_add(nanos_of_day)
+    crate::timestamp::TimestampValue::from_nanos(
+        i128::from(days) * 86_400_000_000_000 + i128::from(nanos_of_day),
+    )
+    .ok()
 }
 
 /// A TIME column string per Flink's `SQL_TIME_FORMAT` (`HH:mm:ss[.f{0,9}]` — seconds required,

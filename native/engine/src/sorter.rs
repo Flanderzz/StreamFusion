@@ -199,7 +199,7 @@ impl TemporalSorter {
 /// Reads a timestamp column as epoch millis, regardless of its stored unit.
 pub(crate) fn rt_to_millis(array: &ArrayRef) -> Int64Array {
     match array.data_type() {
-        DataType::Timestamp(_, _) => {
+        data_type if streamfusion_bridge::timestamp::is_timestamp(data_type) => {
             streamfusion_bridge::timestamp::TimestampColumn::try_new(array.as_ref())
                 .expect("timestamp rowtime column")
                 .to_millis()

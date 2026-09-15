@@ -38,10 +38,8 @@ pub(crate) fn windows_for(
 /// Replaces the time column with a constant clock value (epoch millis) for every row, rendered in the
 /// joiner's declared column type. Used by the proctime interval join to time each row by the
 /// operator's processing-time clock instead of a rowtime column. The incoming batch carries the
-/// proctime attribute as a millisecond timestamp (PROCTIME() is TIMESTAMP_LTZ), whereas the joiner's
-/// schema (derived from the logical row type) declares the rowtime slot as a nanosecond timestamp, so
-/// the stamped column is cast to the target type and its schema field retyped to match — keeping the
-/// buffered batches concat-compatible with the joiner's schema.
+/// proctime attribute with the lossless timestamp layout. Stamping in the target schema keeps
+/// buffered batches concat-compatible, including legacy primitive timestamp callers.
 pub(crate) fn stamp_time_column(
     batch: &RecordBatch,
     col: usize,
@@ -52,8 +50,11 @@ pub(crate) fn stamp_time_column(
         now_millis;
         batch.num_rows()
     ]));
-    let array =
-        arrow::compute::cast(&base, target).expect("cast stamped interval time to target type");
+    let array = if streamfusion_bridge::timestamp::is_component_timestamp(target) {
+        streamfusion_bridge::timestamp::to_components(&base).expect("timestamp clock components")
+    } else {
+        arrow::compute::cast(&base, target).expect("cast stamped interval time to target type")
+    };
     let mut fields: Vec<Field> = batch
         .schema()
         .fields()
@@ -139,6 +140,13 @@ pub(crate) fn assign_windows(
         ("window_end", ends),
         ("window_time", window_time),
     ] {
+        if streamfusion_bridge::timestamp::is_component_timestamp(window_type) {
+            fields.push(Field::new(name, window_type.clone(), false));
+            columns.push(Arc::new(
+                streamfusion_bridge::timestamp::timestamps_from_millis(&Int64Array::from(values)),
+            ));
+            continue;
+        }
         let millis = TimestampMillisecondArray::from(values);
         // Seconds cannot represent window_time's end-minus-one-millisecond value.
         if !matches!(window_type, DataType::Timestamp(unit, _) if *unit != arrow::datatypes::TimeUnit::Second)
@@ -1335,7 +1343,7 @@ pub extern "system" fn Java_tech_streamfusion_Native_assignWindows<'local>(
             slide_millis,
             cumulative != 0,
             (proctime != 0).then_some(proctime_now_millis),
-            &DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None),
+            &streamfusion_bridge::timestamp::timestamp_type(),
         );
         match result {
             Ok(result) => export_record_batch(result, out_array_address, out_schema_address),

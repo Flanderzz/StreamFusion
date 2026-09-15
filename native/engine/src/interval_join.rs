@@ -1192,7 +1192,7 @@ impl ScalarUDFImpl for IntervalPredicate {
         if types.len() == 2
             && types
                 .iter()
-                .all(|t| matches!(t, DataType::Int64 | DataType::Timestamp(_, _)))
+                .all(|t| *t == DataType::Int64 || streamfusion_bridge::timestamp::is_timestamp(t))
         {
             Ok(DataType::Boolean)
         } else {

@@ -52,7 +52,7 @@ enum Converted {
     F64(f64),
     Str(String),
     Date(i32),
-    Timestamp(i64),
+    Timestamp(streamfusion_bridge::timestamp::TimestampValue),
     Decimal(i128),
 }
 
@@ -60,6 +60,7 @@ impl CsvDecoder {
     pub(crate) fn new(schema: SchemaRef, options: CsvOptions, skip_errors: bool) -> CsvDecoder {
         for field in schema.fields() {
             match field.data_type() {
+                data_type if streamfusion_bridge::timestamp::is_component_timestamp(data_type) => {}
                 DataType::Boolean
                 | DataType::Int8
                 | DataType::Int16
@@ -315,8 +316,17 @@ fn convert(data_type: &DataType, text: &str) -> Option<Converted> {
         DataType::Float64 => Converted::F64(parse_java_float(text)?),
         DataType::Utf8 => Converted::Str(text.to_string()),
         DataType::Date32 => Converted::Date(parse_java_sql_date(text)?),
-        DataType::Timestamp(_, _) => {
-            Converted::Timestamp(parse_flink_timestamp(text.trim(), TimestampMode::Sql)?)
+        data_type if streamfusion_bridge::timestamp::is_timestamp(data_type) => {
+            let value = streamfusion_bridge::flink_text::parse_flink_timestamp_value(
+                text.trim(),
+                TimestampMode::Sql,
+            )?;
+            if !streamfusion_bridge::timestamp::is_component_timestamp(data_type)
+                && i64::try_from(value.nanos()).is_err()
+            {
+                return None;
+            }
+            Converted::Timestamp(value)
         }
         DataType::Decimal128(p, s) => match parse_flink_decimal(text, *p, *s) {
             Err(()) => return None,
@@ -358,15 +368,18 @@ fn build_column(data_type: &DataType, rows: &[Vec<Converted>], i: usize) -> Arra
                 })
                 .collect::<StringArray>(),
         ) as ArrayRef,
-        DataType::Timestamp(_, _) => {
-            let values: TimestampNanosecondArray = rows
-                .iter()
-                .map(|r| match &r[i] {
-                    Converted::Timestamp(v) => Some(*v),
+        data_type if streamfusion_bridge::timestamp::is_timestamp(data_type) => {
+            let values = streamfusion_bridge::timestamp::timestamp_array(rows.iter().map(|row| {
+                match row[i] {
+                    Converted::Timestamp(value) => Some(value),
                     _ => None,
-                })
-                .collect();
-            Arc::new(values.with_data_type(data_type.clone())) as ArrayRef
+                }
+            }));
+            streamfusion_bridge::timestamp::cast_timestamp(
+                &(Arc::new(values) as ArrayRef),
+                data_type,
+            )
+            .expect("parsed timestamp output type")
         }
         DataType::Decimal128(p, s) => {
             let values: Decimal128Array = rows

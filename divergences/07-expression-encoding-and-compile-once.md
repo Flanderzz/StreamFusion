@@ -270,11 +270,9 @@ columns and final result cross JNI. Adjacent temporal calls fuse, preserving wid
 intermediates when their final result is text or numeric. This follows the existing Comet-style JVM
 scalar upcall rather than introducing row-based native operators.
 
-Timestamp results retain the engine's nanosecond column convention. New timestamp-producing
-expressions default to fallback because Flink's full range cannot fit it; the TIMESTAMP_RANGE
-allowIncompatible opt-in admits representable workloads. Checked result conversion reports overflow
-instead of silently wrapping. Extending the column representation requires coordinated changes to
-all consumers, not just a parser. See [the coverage and range contract](../docs/operators/temporal-functions.md).
+Timestamp inputs and results use the lossless millisecond/fraction pair across native boundaries.
+Timestamp-producing expressions run by default without a range opt-in, including years 0001 and
+9999. See [the coverage and range contract](../docs/operators/temporal-functions.md).
 
 ### QUARTER
 
@@ -294,10 +292,12 @@ Computes the Julian-day remainder with Sunday=1, directly in the shared primitiv
 
 ### Temporal FLOOR and CEIL
 
-Plain TIMESTAMP DAY/HOUR/MINUTE/SECOND/MILLISECOND rounding uses a primitive-array Rust kernel.
+Plain TIMESTAMP DAY/HOUR/MINUTE/SECOND/MILLISECOND rounding uses a columnar Rust kernel.
 It follows Flink's getMillisecond-based rounding, including negative epochs and the special handling
 of sub-millisecond fractions when rounding to MILLISECOND. Calendar units and LTZ rounding use the
-fused Flink evaluator. Timestamp outputs retain nanoseconds and require the range opt-in above.
+fused Flink evaluator. Timestamp outputs retain the complete millisecond/fraction pair.
+Integral CEIL adds the unit width before FLOOR, preserving Flink's Java long overflow at the
+millisecond limits; computing a floor first and adding a width would differ there.
 
 ### Clocks and watermarks
 

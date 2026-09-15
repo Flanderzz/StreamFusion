@@ -120,6 +120,14 @@ class CsvDecodeParityTest {
   };
 
   @Test
+  void fullRangeTimestampFractionsMatchFlink() throws Exception {
+    for (String value : List.of("0001-01-01 00:00:00.123456789", "1582-10-15 23:59:59.999999999",
+        "2262-04-12 00:00:00.123456789", "9999-12-31 23:59:59.999999999")) {
+      assertParity("x,42,2.5,true,2020-01-02," + value + ",1.23,9", b -> {}, "", false);
+    }
+  }
+
+  @Test
   void defaultOptionsMatchFlinkPerMessage() throws Exception {
     for (String scenario : DEFAULT_OPTION_SCENARIOS) {
       assertParity(scenario, b -> {}, "", false);

@@ -20,11 +20,6 @@ serialized operator configuration rather than process-global state before a stab
   `REGEXP_EXTRACT`, `DATE_FORMAT`/`EXTRACT` over `TIMESTAMP_LTZ`, `ROUND` on float, transcendental
   math). Off by default — parity-first. See the per-operator/expression pages under
   [Operators](operators/index.md) for exactly which functions this affects and how they can diverge.
-- **`streamfusion.expression.TIMESTAMP_RANGE.allowIncompatible=true`** — admit new temporal
-  expressions that export timestamp columns, provided all timestamp columns fit the existing
-  nanosecond range (approximately 1677–2262). Off by default. Values outside that range can fail
-  where Flink succeeds. Use Flink planner configuration or the same-named `-D` property; see
-  [Temporal functions](operators/temporal-functions.md#timestamp-range-and-opt-in).
 - **`-Dstreamfusion.plan.shareSources=false`** — disable the substitution pass's own source-sharing
   (two branches scanning the same native source normally collapse into one read); restores one
   source per branch. Flink's `table.optimizer.reuse-source-enabled=false` and

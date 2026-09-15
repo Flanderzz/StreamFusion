@@ -60,7 +60,7 @@ value — a job that runs on both engines produces identical results.
 
 - **A trailing `Z` is tolerated on any timestamp column.** Flink's `*_WITH_LOCAL_TIMEZONE` formats
   *require* the literal `Z` and the plain-timestamp formats *forbid* it, but the Arrow boundary
-  schema maps `TIMESTAMP` and `TIMESTAMP_LTZ` to the same nanosecond type, so the decoder cannot
+  schema maps `TIMESTAMP` and `TIMESTAMP_LTZ` to the same millisecond/fraction type, so the decoder cannot
   tell the columns apart. The parsed value is identical with or without the `Z`, so the union of
   both shapes is accepted rather than plumbing an LTZ marker through the boundary for a pure
   strictness gain.

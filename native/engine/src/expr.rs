@@ -46,12 +46,32 @@ pub(crate) fn build_expr(
                     .collect()
             })))
         }
+        29 => {
+            let value = (longs[arg] != 0).then(|| {
+                streamfusion_bridge::timestamp::TimestampValue::new(
+                    longs[arg + 1],
+                    longs[arg + 2] as u32,
+                )
+                .expect("timestamp literal")
+            });
+            logical_lit(ScalarValue::Struct(Arc::new(
+                streamfusion_bridge::timestamp::timestamp_array([value]),
+            )))
+        }
         24 => {
             let value = (longs[arg + 1] != 0).then_some(longs[arg + 2]);
             logical_lit(match longs[arg] {
                 9 => ScalarValue::Date32(value.map(|v| v as i32)),
                 10 => ScalarValue::Time32Millisecond(value.map(|v| v as i32)),
-                11 => ScalarValue::TimestampNanosecond(value, None),
+                11 => ScalarValue::Struct(Arc::new(
+                    streamfusion_bridge::timestamp::timestamp_array([value.map(|value| {
+                        streamfusion_bridge::timestamp::TimestampValue::from_arrow(
+                            value,
+                            TimeUnit::Nanosecond,
+                        )
+                        .expect("legacy timestamp literal")
+                    })]),
+                )),
                 12 => ScalarValue::Int32(value.map(|v| v as i32)),
                 13 => ScalarValue::Int64(value),
                 other => panic!("unsupported temporal literal type: {other}"),
@@ -443,20 +463,27 @@ pub(crate) fn build_call(
                 .call(args);
         }
         87 => {
-            // TO_TIMESTAMP_LTZ(millis, 3): the single operand is epoch millis (the Java side admits only
-            // the precision-3 form). Casting Int64 -> Timestamp(ms) reads the int as millis-since-epoch
-            // (the right instant); the second cast rescales to the nanosecond/no-tz unit ArrowConversion
-            // pins every TIMESTAMP/TIMESTAMP_LTZ column to.
-            let mut a = args.into_iter();
-            let millis = a.next().expect("to_timestamp_ltz operand");
-            let as_ms = datafusion::prelude::Expr::Cast(datafusion::logical_expr::Cast::new(
-                Box::new(millis),
-                DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
-            ));
-            return datafusion::prelude::Expr::Cast(datafusion::logical_expr::Cast::new(
-                Box::new(as_ms),
-                DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None),
-            ));
+            return datafusion::logical_expr::create_udf(
+                "flink_timestamp_from_millis",
+                vec![DataType::Int64],
+                streamfusion_bridge::timestamp::timestamp_type(),
+                datafusion::logical_expr::Volatility::Immutable,
+                Arc::new(datafusion::functions::utils::make_scalar_function(
+                    |arrays: &[ArrayRef]| {
+                        let millis = arrays[0]
+                            .as_any()
+                            .downcast_ref::<Int64Array>()
+                            .expect("timestamp millis");
+                        Ok(
+                            Arc::new(streamfusion_bridge::timestamp::timestamps_from_millis(
+                                millis,
+                            )) as ArrayRef,
+                        )
+                    },
+                    vec![],
+                )),
+            )
+            .call(args);
         }
         57 => {
             // POSITION(sub IN s): operands arrive [sub, s]; strpos takes (string, substring).
@@ -1685,7 +1712,7 @@ pub(crate) fn udf_data_type(code: i64) -> DataType {
         7 => DataType::Int8,
         9 => DataType::Date32,
         10 => DataType::Time32(TimeUnit::Millisecond),
-        11 => DataType::Timestamp(TimeUnit::Nanosecond, None),
+        11 => streamfusion_bridge::timestamp::timestamp_type(),
         12 => DataType::Int32,
         13 => DataType::Int64,
         code if code >= 1000 => {

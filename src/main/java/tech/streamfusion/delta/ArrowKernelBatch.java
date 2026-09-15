@@ -9,6 +9,7 @@ import io.delta.kernel.types.MapType;
 import io.delta.kernel.types.StructField;
 import io.delta.kernel.types.StructType;
 import java.math.BigDecimal;
+import tech.streamfusion.arrow.TimestampAccessor;
 import java.util.ArrayList;
 import java.util.List;
 import org.apache.arrow.vector.*;
@@ -16,7 +17,6 @@ import org.apache.arrow.vector.complex.ListVector;
 import org.apache.arrow.vector.complex.MapVector;
 import org.apache.arrow.vector.complex.StructVector;
 import org.apache.arrow.vector.util.TransferPair;
-import org.apache.arrow.vector.types.TimeUnit;
 import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
@@ -155,11 +155,9 @@ public final class ArrowKernelBatch implements ColumnarBatch, AutoCloseable {
     ArrowType arrowType = arrowField.getType();
     List<Field> children = arrowField.getChildren();
     if (deltaType instanceof io.delta.kernel.types.TimestampType) {
-      TimeUnit unit = ((ArrowType.Timestamp) arrowType).getUnit();
-      arrowType = new ArrowType.Timestamp(unit, "UTC");
+      return TimestampAccessor.withTimezone(arrowField, "UTC");
     } else if (deltaType instanceof io.delta.kernel.types.TimestampNTZType) {
-      TimeUnit unit = ((ArrowType.Timestamp) arrowType).getUnit();
-      arrowType = new ArrowType.Timestamp(unit, null);
+      return TimestampAccessor.withTimezone(arrowField, null);
     } else if (deltaType instanceof StructType) {
       StructType struct = (StructType) deltaType;
       List<Field> rewritten = new ArrayList<>(children.size());
@@ -269,6 +267,12 @@ public final class ArrowKernelBatch implements ColumnarBatch, AutoCloseable {
 
     @Override
     public long getLong(int rowId) {
+      if (TimestampAccessor.isComponentTimestamp(vector.getField())) {
+        TimestampAccessor timestamp = new TimestampAccessor(vector);
+        int row = index(rowId);
+        return tech.streamfusion.arrow.TimestampConversion.toMicros(
+            timestamp.getMillis(row), timestamp.getNanoOfMillisecond(row));
+      }
       int index = index(rowId);
       if (vector instanceof TimeStampVector) {
         long value = ((TimeStampVector) vector).get(index);

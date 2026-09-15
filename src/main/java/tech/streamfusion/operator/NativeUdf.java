@@ -20,7 +20,6 @@ import org.apache.arrow.vector.Float8Vector;
 import org.apache.arrow.vector.IntVector;
 import org.apache.arrow.vector.NullVector;
 import org.apache.arrow.vector.SmallIntVector;
-import org.apache.arrow.vector.TimeStampVector;
 import org.apache.arrow.vector.TinyIntVector;
 import org.apache.arrow.vector.VarCharVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
@@ -371,7 +370,9 @@ public final class NativeUdf {
 
 
   private static VectorSchemaRoot resultRoot(int returnType, int rows) {
-    Field field = new Field("result", FieldType.nullable(arrowType(returnType)), null);
+    Field field = returnType == TYPE_TIMESTAMP_DATA
+        ? tech.streamfusion.arrow.TimestampAccessor.field("result", true)
+        : new Field("result", FieldType.nullable(arrowType(returnType)), null);
     VectorSchemaRoot root =
         VectorSchemaRoot.create(new Schema(List.of(field)), NativeAllocator.SHARED);
     root.getFieldVectors().get(0).setInitialCapacity(rows);
@@ -394,7 +395,7 @@ public final class NativeUdf {
       case TYPE_TIME:
         return new ArrowType.Time(org.apache.arrow.vector.types.TimeUnit.MILLISECOND, 32);
       case TYPE_TIMESTAMP_DATA:
-        return new ArrowType.Timestamp(org.apache.arrow.vector.types.TimeUnit.NANOSECOND, null);
+        return ArrowType.Struct.INSTANCE;
       case TYPE_SHORT:
         return new ArrowType.Int(16, true);
       case TYPE_BYTE:
@@ -585,6 +586,10 @@ public final class NativeUdf {
   }
 
   private static void writeValue(FieldVector vector, int code, int row, Object value) {
+    if (code == TYPE_TIMESTAMP_DATA) {
+      tech.streamfusion.arrow.TimestampAccessor.set(vector, row, (org.apache.flink.table.data.TimestampData) value);
+      return;
+    }
     if (value == null) {
       vector.setNull(row);
       return;
@@ -629,13 +634,6 @@ public final class NativeUdf {
       case TYPE_TIME:
         ((org.apache.arrow.vector.TimeMilliVector) vector)
             .setSafe(row, ((Number) value).intValue());
-        break;
-      case TYPE_TIMESTAMP_DATA:
-        ((TimeStampVector) vector)
-            .setSafe(
-                row,
-                tech.streamfusion.arrow.TimestampConversion.toNanos(
-                    (org.apache.flink.table.data.TimestampData) value));
         break;
       default:
         if (code >= DECIMAL_BASE) {

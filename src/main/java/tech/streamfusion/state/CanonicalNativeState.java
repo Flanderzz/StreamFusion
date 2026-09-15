@@ -21,7 +21,8 @@ public final class CanonicalNativeState {
   static final String STATE_NAME = "__streamfusion_canonical_native_state_v1";
   static final String ASYNC_HEADER_STATE_NAME = "__streamfusion_canonical_native_state_v2_header";
   static final String ASYNC_PAYLOAD_STATE_NAME = "__streamfusion_canonical_native_state_v2_payload";
-  static final int FORMAT_VERSION = 1;
+  static final int FORMAT_VERSION = 3;
+  private static final int ASYNC_FORMAT_VERSION = 4;
   static final int CHUNK_BYTES = 4 * 1024 * 1024;
 
   private static final int MAGIC = 0x53464353; // SFCS
@@ -295,14 +296,20 @@ public final class CanonicalNativeState {
   private static byte[] asyncHeader(String operatorId, long timerDeadline) {
     byte[] operator = operatorId.getBytes(StandardCharsets.UTF_8);
     ByteBuffer header = ByteBuffer.allocate(4 + 4 + 4 + operator.length + 8);
-    header.putInt(MAGIC).putInt(2).putInt(operator.length).put(operator).putLong(timerDeadline);
+    header.putInt(MAGIC).putInt(ASYNC_FORMAT_VERSION).putInt(operator.length).put(operator).putLong(timerDeadline);
     return header.array();
   }
 
   private static long decodeAsyncHeader(byte[] bytes, String expectedOperator) {
     ByteBuffer in = ByteBuffer.wrap(bytes);
-    if (in.remaining() < 20 || in.getInt() != MAGIC || in.getInt() != 2) {
+    if (in.remaining() < 20 || in.getInt() != MAGIC) {
       throw new IllegalStateException("invalid StreamFusion asynchronous canonical state header");
+    }
+    int version = in.getInt();
+    if (version != ASYNC_FORMAT_VERSION) {
+      throw new IllegalStateException("unsupported StreamFusion asynchronous canonical state version "
+          + version + "; this build reads " + ASYNC_FORMAT_VERSION
+          + " (docs/backends/canonical-state.md)");
     }
     int operatorBytes = in.getInt();
     if (operatorBytes < 0 || operatorBytes != in.remaining() - 8) {
@@ -329,7 +336,7 @@ public final class CanonicalNativeState {
           "unsupported StreamFusion canonical state version "
               + version
               + "; this build reads "
-              + FORMAT_VERSION);
+              + FORMAT_VERSION + " (docs/backends/canonical-state.md)");
     }
     int operatorBytes = in.getInt();
     if (operatorBytes < 0 || operatorBytes > in.remaining() - 20) {

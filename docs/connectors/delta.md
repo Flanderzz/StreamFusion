@@ -61,6 +61,10 @@ binary, date, timestamp, `ROW`, `ARRAY`, and `MAP` columns recursively. Schema e
 connector path. Delta Lake data files remain Parquet: the transaction log and deletion-vector
 sidecars are protocol files, not alternative table data formats.
 
+Delta Kernel views read the engine's millisecond/fraction timestamp pair as microseconds, preserving
+Delta's supported timestamp range without an i64 nanosecond intermediate. The Parquet boundary
+restores TIMESTAMP versus TIMESTAMP_NTZ timezone metadata before writing.
+
 Sink constraints remain Flink-owned. A nullable query field assigned to a `NOT NULL` target keeps
 the Delta sink on the stock path so `table.exec.sink.not-null-enforcer` can fail or drop the row.
 When `table.exec.sink.type-length-enforcer` is enabled, bounded `CHAR`/`VARCHAR` and

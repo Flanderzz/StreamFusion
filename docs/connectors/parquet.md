@@ -62,3 +62,15 @@ geomean was **1.535×** the stock parquet-mr path. See [Benchmarks](../benchmark
 for the exact method and reproduction commands.
 
 See [Deployment](../deployment.md) for the JARs a Parquet sink needs.
+
+## Timestamp values
+
+The native reader converts physical timestamp units into the engine's millisecond/fraction pair.
+INT96 requires two aligned column reads with the released Arrow API: milliseconds retain the date,
+and wrapping subtraction of the nanosecond read recovers the fraction. This preserves wide dates,
+nested values and nulls without row materialization. INT64 timestamps need one read. The sink floors
+to its configured physical unit and matches Flink's Java `long` overflow at that file boundary.
+An explicitly selected INT64 nanosecond unit therefore still cannot represent dates outside roughly
+1677–2262; use microseconds for wide SQL dates when six fractional digits suffice. This physical
+format limit does not affect the lossless representation inside operators and checkpoints.
+The existing INT64/precision admission rules still apply.

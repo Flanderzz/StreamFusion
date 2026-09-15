@@ -7551,3 +7551,45 @@ fn decimal_mod_matches_bigdecimal() {
         }
     }
 }
+
+#[test]
+fn component_timestamp_topn_checkpoint_preserves_fractional_order_and_payload() {
+    use streamfusion_bridge::timestamp::{timestamp_array, TimestampColumn, TimestampValue};
+    let make = |fraction| {
+        RecordBatch::try_from_iter(vec![
+            (
+                "key",
+                Arc::new(timestamp_array([Some(
+                    TimestampValue::new(-62_135_596_800_000, 123456).unwrap(),
+                )])) as ArrayRef,
+            ),
+            (
+                "sort",
+                Arc::new(timestamp_array([Some(
+                    TimestampValue::new(253_402_300_799_999, fraction).unwrap(),
+                )])) as ArrayRef,
+            ),
+        ])
+        .unwrap()
+    };
+    let mut ranker = TopNRanker::new(vec![0], vec![asc(1)], 1, false, false)
+        .with_key_timestamp_precisions(vec![9]);
+    ranker.push(&make(999999), 0).unwrap();
+    let mut restored = TopNRanker::restore(
+        vec![0],
+        vec![9],
+        vec![asc(1)],
+        1,
+        false,
+        false,
+        &ranker.snapshot(),
+        0,
+    );
+    let next = make(1);
+    let actual = restored.push(&next, 0).unwrap();
+    assert_eq!(actual, ranker.push(&next, 0).unwrap());
+    assert_eq!(row_kinds(&actual), vec![3, 0]);
+    let sorted = TimestampColumn::try_new(actual.column(1).as_ref()).unwrap();
+    assert_eq!(sorted.value(0).unwrap().nano_of_milli(), 999999);
+    assert_eq!(sorted.value(1).unwrap().nano_of_milli(), 1);
+}

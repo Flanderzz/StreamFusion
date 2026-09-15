@@ -6,11 +6,13 @@ use streamfusion_bridge::timestamp::TimestampColumn;
 pub(crate) fn max_rowtime_millis(batch: &RecordBatch, index: usize) -> i64 {
     let column = batch.column(index);
     match column.data_type() {
-        DataType::Timestamp(_, _) => TimestampColumn::try_new(column.as_ref())
-            .expect("timestamp rowtime column")
-            .max_millis()
-            .expect("rowtime in Flink's millisecond range")
-            .unwrap_or(i64::MIN),
+        data_type if streamfusion_bridge::timestamp::is_timestamp(data_type) => {
+            TimestampColumn::try_new(column.as_ref())
+                .expect("timestamp rowtime column")
+                .max_millis()
+                .expect("rowtime in Flink's millisecond range")
+                .unwrap_or(i64::MIN)
+        }
         DataType::Int64 => {
             let array = column
                 .as_any()

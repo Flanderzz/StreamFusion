@@ -10,8 +10,6 @@ import org.apache.arrow.c.Data;
 import org.apache.arrow.vector.BigIntVector;
 import org.apache.arrow.vector.FieldVector;
 import org.apache.arrow.vector.IntVector;
-import org.apache.arrow.vector.TimeStampNanoTZVector;
-import org.apache.arrow.vector.TimeStampNanoVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.table.types.logical.RowType;
@@ -29,7 +27,6 @@ import org.apache.flink.table.types.logical.LogicalTypeRoot;
  */
 public abstract class NativeRowWindowOperatorCore extends NativeWindowOperatorCore<ArrowBatch> {
 
-  private static final long NANOS_PER_MILLI = 1_000_000L;
 
   private final RowType outputType;
   private final boolean inputTimestampLtz;
@@ -92,9 +89,9 @@ public abstract class NativeRowWindowOperatorCore extends NativeWindowOperatorCo
   /**
    * Emits the windows the watermark has closed as one Arrow batch in the output row order
    * {@code [key?, agg0..aggN-1, window_start, window_end]}. The native flush carries keys in their
-   * natural type (int widened to int64, timestamp keys as int64 nanos), the aggregate results already
+   * natural type (int widened to int64, timestamps as component pairs), the aggregate results already
    * in their output Arrow type, and the two window bounds as int64 epoch millis; this reshapes them
-   * into the output Arrow schema, narrowing int keys, carrying timestamp-key nanos through, and
+   * into the output Arrow schema, narrowing int keys, carrying timestamp-key components through, and
    * rendering the window bounds as session-local timestamps (matching the host). Nothing is emitted
    * for an empty flush.
    */
@@ -154,7 +151,7 @@ public abstract class NativeRowWindowOperatorCore extends NativeWindowOperatorCo
 
   /**
    * Copies a key column, undoing the native carriage: an int key widened to int64 narrows back to
-   * int32, and a timestamp key carried as int64 nanos rides into a timestamp vector; every other key
+   * int32, and timestamp keys retain their component buffers; every other key
    * type matches and copies verbatim.
    */
   private static void copyKeyColumn(FieldVector source, FieldVector target, int n) {
@@ -182,7 +179,7 @@ public abstract class NativeRowWindowOperatorCore extends NativeWindowOperatorCo
     }
   }
 
-  /** Renders int64 epoch-millis window bounds as session-local timestamp nanos, as the host does. */
+  /** Renders int64 epoch-millis window bounds as session-local timestamp components, as the host does. */
   private boolean isLtz(int field) {
     return outputType.getTypeAt(field).getTypeRoot()
         == LogicalTypeRoot.TIMESTAMP_WITH_LOCAL_TIME_ZONE;
@@ -225,29 +222,23 @@ public abstract class NativeRowWindowOperatorCore extends NativeWindowOperatorCo
                       .toEpochMilli()
                   : boundary;
         }
-        setTimestampNanos(target, i, rendered * NANOS_PER_MILLI);
+        tech.streamfusion.arrow.TimestampAccessor.set(target, i,
+            org.apache.flink.table.data.TimestampData.fromEpochMillis(rendered));
       }
     }
   }
 
   private static boolean isTimestampVector(FieldVector vector) {
-    return vector instanceof TimeStampNanoVector || vector instanceof TimeStampNanoTZVector;
+    return tech.streamfusion.arrow.TimestampAccessor.isTimestamp(vector);
   }
 
   private static void setTimestampNanos(FieldVector target, int i, long nanos) {
-    if (target instanceof TimeStampNanoVector) {
-      ((TimeStampNanoVector) target).setSafe(i, nanos);
-    } else {
-      ((TimeStampNanoTZVector) target).setSafe(i, nanos);
-    }
+    tech.streamfusion.arrow.TimestampAccessor.set(target, i,
+        org.apache.flink.table.data.TimestampData.fromEpochMillis(Math.floorDiv(nanos, 1000000L), (int) Math.floorMod(nanos, 1000000L)));
   }
 
   private static void setTimestampNull(FieldVector target, int i) {
-    if (target instanceof TimeStampNanoVector) {
-      ((TimeStampNanoVector) target).setNull(i);
-    } else {
-      ((TimeStampNanoTZVector) target).setNull(i);
-    }
+    tech.streamfusion.arrow.TimestampAccessor.set(target, i, null);
   }
 
   private static void fillTimestampNulls(FieldVector target, int n) {

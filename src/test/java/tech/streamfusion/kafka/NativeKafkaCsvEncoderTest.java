@@ -191,6 +191,8 @@ class NativeKafkaCsvEncoderTest {
     long base = 1_577_934_245_000L;
     List<RowData> rows =
         List.of(
+            temporalRow(0, 0, TimestampData.fromLocalDateTime(java.time.LocalDateTime.parse("0001-01-01T00:00:00.123456789"))),
+            temporalRow(0, 0, TimestampData.fromLocalDateTime(java.time.LocalDateTime.parse("9999-12-31T23:59:59.999999999"))),
             temporalRow(18321, 45_240_000, TimestampData.fromEpochMillis(base)),
             temporalRow(-1, 45_296_789, TimestampData.fromEpochMillis(base + 500)),
             temporalRow(0, 500, TimestampData.fromEpochMillis(base + 120)),

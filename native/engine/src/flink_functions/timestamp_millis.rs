@@ -45,18 +45,15 @@ impl ScalarUDFImpl for TimestampMillis {
     }
 
     fn return_type(&self, types: &[DataType]) -> Result<DataType> {
-        let valid = match (self.operation, types) {
-            (Operation::Millis, [DataType::Int64 | DataType::Timestamp(_, None)]) => true,
-            (
-                Operation::SubtractMillis,
-                [DataType::Int64 | DataType::Timestamp(_, None), DataType::Int64],
-            ) => true,
-            (
-                Operation::SubtractMonths,
-                [DataType::Int64 | DataType::Timestamp(_, None), DataType::Int32],
-            ) => true,
-            _ => false,
-        };
+        let temporal = types.first().is_some_and(|data_type| {
+            data_type == &DataType::Int64 || streamfusion_bridge::timestamp::is_timestamp(data_type)
+        });
+        let valid = temporal
+            && match self.operation {
+                Operation::Millis => types.len() == 1,
+                Operation::SubtractMillis => types.len() == 2 && types[1] == DataType::Int64,
+                Operation::SubtractMonths => types.len() == 2 && types[1] == DataType::Int32,
+            };
         if valid {
             Ok(DataType::Int64)
         } else {

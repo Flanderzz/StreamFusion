@@ -12,32 +12,11 @@ import org.apache.flink.table.api.Schema;
 import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.apache.flink.types.Row;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 class FlinkTemporalFunctionsSqlHarnessTest {
-  private static final String RANGE_OPTION =
-      "streamfusion.expression.TIMESTAMP_RANGE.allowIncompatible";
-  private String previousRangeOption;
-
-  @BeforeEach
-  void admitTimestampResultsForThisRepresentableCorpus() {
-    previousRangeOption = System.getProperty(RANGE_OPTION);
-    System.setProperty(RANGE_OPTION, "true");
-  }
-
-  @AfterEach
-  void restoreRangeOption() {
-    if (previousRangeOption == null) {
-      System.clearProperty(RANGE_OPTION);
-    } else {
-      System.setProperty(RANGE_OPTION, previousRangeOption);
-    }
-  }
-
   @Test
   void parsesTimestampsAndFormatsDynamicPatterns() throws Exception {
     parity(

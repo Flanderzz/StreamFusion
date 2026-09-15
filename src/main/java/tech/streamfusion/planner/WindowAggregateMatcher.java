@@ -458,7 +458,7 @@ final class WindowAggregateMatcher {
 
   /**
    * Grouping-key types a window aggregate carries: the join set plus boolean, date, timestamp
-   * (carried as int64 nanos), and decimal (an Arrow decimal column). The native key path is
+   * (carried as millisecond/fraction pairs), and decimal (an Arrow decimal column). The native key path is
    * type-general, so these are a JVM-side vector + boxing only.
    */
   static boolean supportedGroupingKeyType(SqlTypeName type) {

@@ -16,9 +16,9 @@ pub(crate) fn value_data_type(code: i64) -> DataType {
         4 => DataType::Int16,
         5 => DataType::Int8,
         6 => DataType::Float32,
-        // Both Flink TIMESTAMP and TIMESTAMP_LTZ cross the Arrow boundary as epoch nanoseconds;
+        // Both Flink TIMESTAMP and TIMESTAMP_LTZ retain milliseconds and fractional nanos;
         // the logical distinction is restored by the JVM output row type.
-        7 => DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None),
+        7 => streamfusion_bridge::timestamp::timestamp_type(),
         8 => DataType::Date32,
         // A COUNT(DISTINCT) value whose Flink type has no faithful code (TIME, BOOLEAN, complex
         // types): the fold reads the actual column and the distinct set keys scalars, so the

@@ -41,7 +41,12 @@ impl ScalarUDFImpl for CalendarField {
     }
     fn return_type(&self, types: &[DataType]) -> Result<DataType> {
         match types {
-            [DataType::Date32 | DataType::Timestamp(_, None)] => Ok(DataType::Int64),
+            [data_type]
+                if *data_type == DataType::Date32
+                    || streamfusion_bridge::timestamp::is_timestamp(data_type) =>
+            {
+                Ok(DataType::Int64)
+            }
             _ => exec_err!("Calendar field expects one DATE or plain TIMESTAMP"),
         }
     }
@@ -51,7 +56,7 @@ impl ScalarUDFImpl for CalendarField {
                 let [input] = arrays else {
                     return exec_err!("Calendar field expects one argument");
                 };
-                let output = if matches!(input.data_type(), DataType::Timestamp(_, _)) {
+                let output = if streamfusion_bridge::timestamp::is_timestamp(input.data_type()) {
                     // Flink divides epoch milliseconds towards zero when extracting calendar fields.
                     // A timestamp just before 1970-01-01 therefore uses that day's calendar fields.
                     super::map_timestamp_millis(input, |value| {

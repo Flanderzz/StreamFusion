@@ -47,7 +47,7 @@ reused, and input ownership stays with the producer via independently retained C
 The temporal scalar kernels return BIGINT epoch milliseconds, rather than Arroyo's
 nanosecond timestamp result: Flink's calendar arithmetic can produce values outside
 the nanosecond range. This is an internal expression representation; downstream data
-columns retain their existing timestamp units. Calendar subtraction ports Flink's
+columns retain their full millisecond/fraction pair. Calendar subtraction ports Flink's
 `DateTimeUtils.addMonths`, sharing the native calendar field extraction and preserving
 Java integer overflow, including outside chrono's year range. Random and boundary
 parity tests compare these results directly against the released Flink routine.
