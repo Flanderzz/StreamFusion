@@ -3,10 +3,9 @@ use arrow::array::{
     BinaryArray, Date32Array, Decimal128Array, FixedSizeBinaryArray, LargeBinaryArray,
     LargeListArray, LargeStringArray, ListArray, MapArray, StringArray, StructArray,
     Time32MillisecondArray, Time32SecondArray, Time64MicrosecondArray, Time64NanosecondArray,
-    TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
-    TimestampSecondArray,
 };
 use arrow::datatypes::TimeUnit;
+use streamfusion_bridge::timestamp::{TimestampColumn, TimestampValue};
 
 const DEFAULT_SEED: u32 = 42;
 const MAX_INLINE_BYTES: usize = 7;
@@ -140,13 +139,13 @@ impl BinaryRowWriter {
         self.write_variable(pos, &bytes, 16);
     }
 
-    fn write_timestamp(&mut self, pos: usize, nanos: i64, precision: i32) {
-        let millis = nanos.div_euclid(1_000_000);
+    fn write_timestamp(&mut self, pos: usize, value: TimestampValue, precision: i32) {
+        let millis = value.millis();
         if precision <= 3 {
             self.write_i64(pos, millis);
             return;
         }
-        let nanos_of_milli = nanos.rem_euclid(1_000_000);
+        let nanos_of_milli = value.nano_of_milli();
         let offset = self.cursor;
         self.bytes.resize(offset + 8, 0);
         self.bytes[offset..offset + 8].copy_from_slice(&millis.to_ne_bytes());
@@ -247,36 +246,11 @@ fn unscaled_decimal_bytes(value: i128) -> Vec<u8> {
     bytes[first..].to_vec()
 }
 
-fn timestamp_nanos(array: &ArrayRef, row: usize) -> i64 {
-    match array.data_type() {
-        DataType::Timestamp(TimeUnit::Second, _) => array
-            .as_any()
-            .downcast_ref::<TimestampSecondArray>()
-            .expect("timestamp second")
-            .value(row)
-            .checked_mul(1_000_000_000)
-            .expect("timestamp nanoseconds overflow"),
-        DataType::Timestamp(TimeUnit::Millisecond, _) => array
-            .as_any()
-            .downcast_ref::<TimestampMillisecondArray>()
-            .expect("timestamp millisecond")
-            .value(row)
-            .checked_mul(1_000_000)
-            .expect("timestamp nanoseconds overflow"),
-        DataType::Timestamp(TimeUnit::Microsecond, _) => array
-            .as_any()
-            .downcast_ref::<TimestampMicrosecondArray>()
-            .expect("timestamp microsecond")
-            .value(row)
-            .checked_mul(1_000)
-            .expect("timestamp nanoseconds overflow"),
-        DataType::Timestamp(TimeUnit::Nanosecond, _) => array
-            .as_any()
-            .downcast_ref::<TimestampNanosecondArray>()
-            .expect("timestamp nanosecond")
-            .value(row),
-        other => panic!("not a timestamp: {other:?}"),
-    }
+fn timestamp_value(array: &ArrayRef, row: usize) -> TimestampValue {
+    TimestampColumn::try_new(array.as_ref())
+        .expect("timestamp key column")
+        .value(row)
+        .expect("timestamp key in Flink's millisecond range")
 }
 
 fn time_millis(array: &ArrayRef, row: usize) -> i32 {
@@ -494,12 +468,12 @@ fn write_array_value(
             }
         }
         DataType::Timestamp(_, _) => {
-            let nanos = timestamp_nanos(array, row);
-            let millis = nanos.div_euclid(1_000_000);
+            let value = timestamp_value(array, row);
+            let millis = value.millis();
             if schema.timestamp_precision <= 3 {
                 writer.write_fixed(pos, &millis.to_ne_bytes());
             } else {
-                let nanos_of_milli = nanos.rem_euclid(1_000_000);
+                let nanos_of_milli = value.nano_of_milli();
                 let offset = writer.cursor;
                 writer.bytes.resize(offset + 8, 0);
                 writer.bytes[offset..offset + 8].copy_from_slice(&millis.to_ne_bytes());
@@ -682,7 +656,7 @@ fn write_value(
         ),
         DataType::Time32(_) | DataType::Time64(_) => writer.write_i32(pos, time_millis(array, row)),
         DataType::Timestamp(_, _) => {
-            writer.write_timestamp(pos, timestamp_nanos(array, row), schema.timestamp_precision)
+            writer.write_timestamp(pos, timestamp_value(array, row), schema.timestamp_precision)
         }
         DataType::List(_) => {
             let value = array

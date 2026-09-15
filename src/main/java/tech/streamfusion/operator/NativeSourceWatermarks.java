@@ -3,9 +3,8 @@ package tech.streamfusion.operator;
 import java.time.Duration;
 import org.apache.arrow.vector.BigIntVector;
 import org.apache.arrow.vector.FieldVector;
-import org.apache.arrow.vector.TimeStampVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
-import org.apache.arrow.vector.types.pojo.ArrowType;
+import tech.streamfusion.arrow.TimestampAccessor;
 import org.apache.flink.api.common.eventtime.Watermark;
 import org.apache.flink.api.common.eventtime.WatermarkGenerator;
 import org.apache.flink.api.common.eventtime.WatermarkOutput;
@@ -52,28 +51,8 @@ public final class NativeSourceWatermarks {
       }
       return max;
     }
-    TimeStampVector timestamps = (TimeStampVector) vector;
-    for (int i = 0; i < rows; i++) {
-      if (!timestamps.isNull(i)) {
-        max = Math.max(max, timestamps.get(i));
-      }
-    }
-    if (max == Long.MIN_VALUE) {
-      return max;
-    }
-    // Floor division is monotonic, so converting the max equals the max of conversions (and floors
-    // pre-epoch values toward the earlier millisecond, matching the native implementation).
-    switch (((ArrowType.Timestamp) timestamps.getField().getType()).getUnit()) {
-      case SECOND:
-        return max * 1_000L;
-      case MILLISECOND:
-        return max;
-      case MICROSECOND:
-        return Math.floorDiv(max, 1_000L);
-      case NANOSECOND:
-      default:
-        return Math.floorDiv(max, 1_000_000L);
-    }
+    Long timestamp = new TimestampAccessor(vector).maxMillis(rows);
+    return timestamp == null ? Long.MIN_VALUE : timestamp;
   }
 
   private static final class MaxRowtimeGenerator implements WatermarkGenerator<ArrowBatch> {
