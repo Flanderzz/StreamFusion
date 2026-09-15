@@ -85,6 +85,9 @@ computed rowtime windows, and watermark timing. Expanded-year tests cover fused 
 results and default fallback for unbounded timestamp outputs. Clock tests check execution-time
 bounds rather than equality between two runs.
 
+Regression tests also cover temporal admission alongside TRIM and JSON option symbols, text-field
+DATE_FORMAT patterns through the upcall, and the legacy native timestamp-minus-interval encoding.
+
 These changes expand the queries that can remain in an accelerated pipeline. They do not establish
 that isolated temporal projections are faster than stock Flink. Release-mode measurements, including
 both row/Arrow transposes, are on the [scalar benchmark page](../benchmarks/scalar-functions.md).

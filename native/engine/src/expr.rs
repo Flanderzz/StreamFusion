@@ -141,8 +141,17 @@ pub(crate) fn build_expr(
             datafusion::logical_expr::ScalarUDF::new_from_impl(JvmUdf::new(id, return_type))
                 .call(children)
         }
-        // Match the interval columns at the Arrow boundary: signed millisecond longs.
-        15 => logical_lit(longs[arg]),
+        // Preserve the legacy literal encoding used by native timestamp arithmetic. The generated
+        // temporal evaluator uses kind 24 for its signed millisecond interval arguments instead.
+        15 => {
+            let millis = longs[arg];
+            logical_lit(ScalarValue::IntervalDayTime(Some(
+                arrow::datatypes::IntervalDayTime {
+                    days: (millis / 86_400_000) as i32,
+                    milliseconds: (millis % 86_400_000) as i32,
+                },
+            )))
+        }
         // An exact DECIMAL literal, encoded "unscaled|precision|scale" in the string pool. Built as a
         // Decimal128 scalar so decimal arithmetic (q1's `0.908 * price`) stays exact.
         16 => {

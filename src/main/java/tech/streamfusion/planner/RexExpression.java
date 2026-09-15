@@ -1672,16 +1672,18 @@ final class RexExpression {
   }
 
   private static int temporalTypeCode(RelDataType type) {
-    return switch (type.getSqlTypeName()) {
+    SqlTypeName name = type.getSqlTypeName();
+    if (name.getFamily() == SqlTypeFamily.INTERVAL_YEAR_MONTH) {
+      return 12;
+    }
+    if (name.getFamily() == SqlTypeFamily.INTERVAL_DAY_TIME) {
+      return 13;
+    }
+    return switch (name) {
       case DATE -> 9;
       case TIME -> 10;
       case TIMESTAMP, TIMESTAMP_WITH_LOCAL_TIME_ZONE -> 11;
-      default ->
-          switch (type.getSqlTypeName().getFamily()) {
-            case INTERVAL_YEAR_MONTH -> 12;
-            case INTERVAL_DAY_TIME -> 13;
-            default -> -1;
-          };
+      default -> -1;
     };
   }
 

@@ -1,5 +1,6 @@
 package tech.streamfusion.planner;
 
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -15,6 +16,26 @@ import org.apache.calcite.sql.type.SqlTypeName;
 import org.junit.jupiter.api.Test;
 
 class RexExpressionScalarAdmissionTest {
+  @Test
+  void jsonOptionSymbolsRemainValidNonTemporalArguments() {
+    var types = new JavaTypeFactoryImpl();
+    var rex = new RexBuilder(types);
+    var object =
+        new SqlFunction(
+            "JSON_OBJECT", SqlKind.OTHER_FUNCTION, null, null, null, SqlFunctionCategory.STRING);
+    var nullPolicy = rex.makeFlag(SqlJsonConstructorNullClause.NULL_ON_NULL);
+    var call =
+        rex.makeCall(
+            types.createSqlType(SqlTypeName.VARCHAR),
+            object,
+            List.of(
+                nullPolicy,
+                rex.makeLiteral("value"),
+                rex.makeInputRef(types.createSqlType(SqlTypeName.INTEGER), 0)));
+    assertNull(nullPolicy.getType().getSqlTypeName().getFamily());
+    assertNotNull(RexExpression.encodeProjections(List.of(call), List.of("object")));
+  }
+
   @Test
   void jsonObjectDeclinesDynamicNullAndMalformedUnicodeKeys() {
     var types = new JavaTypeFactoryImpl();

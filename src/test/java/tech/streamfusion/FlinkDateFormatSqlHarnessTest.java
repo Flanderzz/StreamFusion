@@ -14,8 +14,8 @@ import org.junit.jupiter.api.Test;
 /**
  * {@code DATE_FORMAT} — Nexmark q10/q15/q16/q17's {@code DATE_FORMAT(`dateTime`, 'yyyy-MM-dd')} /
  * {@code 'HH:mm'}. The native UDF formats the timestamp's UTC wall-clock with a chrono pattern the
- * encoder translated from the Java pattern; value-compared to the host. An unsupported pattern (a text
- * field) must fall back cleanly.
+ * encoder translated from the Java pattern; value-compared to the host. Text fields use Flink's
+ * generated evaluator through the batched upcall.
  */
 class FlinkDateFormatSqlHarnessTest {
 
@@ -34,12 +34,10 @@ class FlinkDateFormatSqlHarnessTest {
   }
 
   @Test
-  void unsupportedPatternFallsBack() throws Exception {
-    // A text day-of-week field ('EEE') has no byte-identical chrono mapping → the Calc falls back.
-    NativeParity.assertFallbackReasonContains(
+  void textPatternMatchesHostThroughTheUpcall() throws Exception {
+    NativeParity.assertParity(
         FlinkDateFormatSqlHarnessTest::environment,
-        "SELECT id, DATE_FORMAT(ts, 'EEE yyyy') AS d FROM t",
-        "DATE_FORMAT: unsupported format pattern");
+        "SELECT id, DATE_FORMAT(ts, 'EEE yyyy') AS d FROM t");
   }
 
   private static TableEnvironment environment() {
