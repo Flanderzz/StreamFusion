@@ -232,6 +232,12 @@ fn decimal_sum_add(sum: Option<i128>, value: i128) -> Option<i128> {
     }
 }
 
+fn accumulate_decimal_sum(sum: &mut i128, overflow: &mut bool, value: i128) {
+    let next = decimal_sum_add((!*overflow).then_some(*sum), value);
+    *sum = next.unwrap_or(0);
+    *overflow = next.is_none();
+}
+
 impl Accumulator for DecimalSumAccumulator {
     fn update_batch(&mut self, values: &[ArrayRef]) -> datafusion::common::Result<()> {
         let array = values[0]
@@ -823,15 +829,15 @@ pub(crate) enum RunningAgg {
     MaxF64(Option<f64>),
     Count(i64),
     // SUM over DECIMAL(p, s): accumulate the unscaled i128 at the input scale; the result is
-    // DECIMAL(38, s) (Flink's findSumAggType). `overflow` latches once the running sum no longer
-    // fits DECIMAL(38, s) (|value| >= 10^38), at which point Flink reports NULL.
+    // DECIMAL(38, s) (Flink's findSumAggType). Overflow is a NULL accumulator, which the next
+    // non-null addition or subtraction replaces, matching SumAggFunction/SumWithRetractAggFunction.
     SumDecimal {
         sum: i128,
         scale: i8,
         overflow: bool,
     },
-    // AVG over DECIMAL(p, s): the running sum is SUM's DECIMAL(38, s) accumulator (overflow latches
-    // NULL, like SUM); the count lives in GroupAggState's `non_null`. The emit divides sum by count
+    // AVG over DECIMAL(p, s): the DECIMAL(38, s) running sum latches NULL on overflow;
+    // the count lives in GroupAggState's `non_null`. The emit divides sum by count
     // with Flink's exact decimal division and reports DECIMAL(38, max(6, s)) — findAvgAggType's
     // derivation, the type the planner declares for the call.
     AvgDecimal {
@@ -1007,7 +1013,7 @@ impl RunningAgg {
             (MaxF64(m), Num::F64(v)) => *m = Some(m.map_or(v, |x| x.max(v))),
             (Count(c), _) => *c += 1,
             (SumDecimal { sum, overflow, .. }, Num::I128(v)) => {
-                accumulate_decimal(sum, overflow, v)
+                accumulate_decimal_sum(sum, overflow, v)
             }
             (AvgDecimal { sum, overflow, .. }, Num::I128(v)) => {
                 accumulate_decimal(sum, overflow, v)
@@ -1068,7 +1074,7 @@ impl RunningAgg {
             (SumF32(s), Num::F32(v)) => *s = Some(s.unwrap_or(0.0) - v),
             (Count(c), _) => *c -= 1,
             (SumDecimal { sum, overflow, .. }, Num::I128(v)) => {
-                accumulate_decimal(sum, overflow, v.wrapping_neg())
+                accumulate_decimal_sum(sum, overflow, v.wrapping_neg())
             }
             (AvgDecimal { sum, overflow, .. }, Num::I128(v)) => {
                 accumulate_decimal(sum, overflow, v.wrapping_neg())
@@ -1302,5 +1308,29 @@ pub(crate) fn avg_float_scalar(value: f64, result: &DataType) -> ScalarValue {
         DataType::Float64 => ScalarValue::Float64(Some(value)),
         DataType::Float32 => ScalarValue::Float32(Some(value as f32)),
         other => panic!("unsupported float AVG result type {other:?}"),
+    }
+}
+
+#[cfg(test)]
+mod decimal_sum_tests {
+    use super::*;
+
+    #[test]
+    fn sum_restarts_after_overflow_and_restored_null_in_both_directions() {
+        let datatype = DataType::Decimal128(38, 3);
+        let mut sum = RunningAgg::new(0, &datatype);
+        let max = DECIMAL128_MAX - 1;
+        sum.fold(Num::I128(max));
+        sum.fold(Num::I128(max));
+        assert_eq!(sum.emit(), ScalarValue::Decimal128(None, 38, 3));
+        sum.fold(Num::I128(1000));
+        assert_eq!(sum.emit(), ScalarValue::Decimal128(Some(1000), 38, 3));
+        sum.restore_value(&ScalarValue::Decimal128(None, 38, 3));
+        sum.retract(Num::I128(2000));
+        assert_eq!(sum.emit(), ScalarValue::Decimal128(Some(-2000), 38, 3));
+        sum.fold(Num::I128(-max));
+        assert_eq!(sum.emit(), ScalarValue::Decimal128(None, 38, 3));
+        sum.fold(Num::I128(3000));
+        assert_eq!(sum.emit(), ScalarValue::Decimal128(Some(3000), 38, 3));
     }
 }

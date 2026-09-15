@@ -15,11 +15,16 @@ change — no batching. `SUM`/`MIN`/`MAX`/`COUNT` are native over `DECIMAL` (`SU
 `DECIMAL(38, s)` with overflow → NULL; `MIN`/`MAX` → `DECIMAL(p, s)`; carried as an i128 at scale
 `s`, matching Flink).
 
+Decimal SUM overflow makes the accumulator NULL. The next non-NULL input starts it again
+at that value; a retraction after overflow starts it at the negated value. NULL inputs leave
+the accumulator unchanged. This rule also applies after restore and to filtered SUMs.
+Decimal AVG has a separate accumulator whose overflow stays NULL.
+
 `AVG` is native: a running sum — widened to bigint for any integer input, double for float/double —
 plus the non-null count, emitting `count == 0 ? NULL : sum / count` cast back to the input type,
 with **integer division truncating toward zero**. This is a direct port of Flink's
 `AvgAggFunction`, over bigint/int/smallint/tinyint/float/double, and is retract-aware. Decimal
-`AVG` is native too: the sum reuses `SUM`'s `DECIMAL(38, s)` accumulator, and the emit divides by
+`AVG` is native too: the sum uses a `DECIMAL(38, s)` accumulator, and the emit divides by
 the non-null count using Flink's exact decimal division — a 38-significant-digit quotient then
 **HALF_UP** rescale — reporting `DECIMAL(38, max(6, s))`, `findAvgAggType`'s result type.
 
