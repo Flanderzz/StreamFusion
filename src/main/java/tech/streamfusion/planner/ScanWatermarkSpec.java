@@ -16,39 +16,45 @@ import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalT
 import org.apache.flink.table.planner.plan.schema.TableSourceTable;
 import org.apache.flink.table.planner.utils.ShortcutUtils;
 import org.apache.flink.util.TimeUtils;
+import tech.streamfusion.operator.WatermarkExpression;
 
 /**
  * A scan's pushed-down source watermark, in the shapes the native sources reproduce: bounded
- * out-of-orderness ({@code rt} or {@code rt - INTERVAL const}) where the rowtime read from the scan is
- * either a physical timestamp column or {@code TO_TIMESTAMP_LTZ(bigintCol, 3)} (a computed rowtime
- * over epoch millis — the common Kafka-table idiom), periodic emit, no alignment. Flink pushes the
- * table's {@code WATERMARK} clause into a scan whose connector supports watermark push-down (as
- * Kafka does), so no separate assigner node exists in the plan — whichever operator replaces the
- * scan must regenerate the watermarks or the query never fires its event-time timers. {@link
- * #UNSUPPORTED} marks a watermarked scan outside the reproducible shapes (any other computed
- * rowtime, on-event emit, alignment); the caller must then leave the whole scan on the host.
+ * out-of-orderness ({@code rt} or {@code rt - INTERVAL const}, with a day-time or year-month
+ * interval) where the rowtime read from the scan is either a physical timestamp column or {@code
+ * TO_TIMESTAMP_LTZ(bigintCol, 3)} (a computed rowtime over epoch millis — the common Kafka-table
+ * idiom), periodic emit, no alignment. Flink pushes the table's {@code WATERMARK} clause into a
+ * scan whose connector supports watermark push-down (as Kafka does), so no separate assigner node
+ * exists in the plan — whichever operator replaces the scan must regenerate the watermarks or the
+ * query never fires its event-time timers. {@link #UNSUPPORTED} marks a watermarked scan outside
+ * the reproducible shapes (any other computed rowtime, on-event emit, alignment); the caller must
+ * then leave the whole scan on the host.
  */
 final class ScanWatermarkSpec {
 
   /** Watermarked, but not in a shape the native source reproduces — leave the scan on the host. */
-  static final ScanWatermarkSpec UNSUPPORTED = new ScanWatermarkSpec(-1, null, 0, 0);
+  static final ScanWatermarkSpec UNSUPPORTED = new ScanWatermarkSpec(-1, null, null, 0);
 
   final int rowtimeIndex;
   final String rowtimeFieldName;
-  final long delayMillis;
+  final WatermarkExpression expression;
   final long idleTimeoutMillis;
 
   private ScanWatermarkSpec(
-      int rowtimeIndex, String rowtimeFieldName, long delayMillis, long idleTimeoutMillis) {
+      int rowtimeIndex,
+      String rowtimeFieldName,
+      WatermarkExpression expression,
+      long idleTimeoutMillis) {
     this.rowtimeIndex = rowtimeIndex;
     this.rowtimeFieldName = rowtimeFieldName;
-    this.delayMillis = delayMillis;
+    this.expression = expression;
     this.idleTimeoutMillis = idleTimeoutMillis;
   }
 
   /** This spec with the rowtime column re-indexed for a projected output type. */
   ScanWatermarkSpec withRowtimeIndex(int index) {
-    return new ScanWatermarkSpec(index, rowtimeFieldName, delayMillis, idleTimeoutMillis);
+    return new ScanWatermarkSpec(
+        index, rowtimeFieldName, expression.remapInput(rowtimeIndex, index), idleTimeoutMillis);
   }
 
   /**
@@ -89,32 +95,37 @@ final class ScanWatermarkSpec {
         || options.containsKey("scan.watermark.alignment.group")) {
       return UNSUPPORTED;
     }
-    Bounded bounded = parse(pushed.getWatermarkExpr());
-    if (bounded == null) {
+    RexNode term = rowtimeOperand(pushed.getWatermarkExpr());
+    Integer rowtimeIndex = rowtimeTerm(term);
+    if (rowtimeIndex == null) {
       return UNSUPPORTED;
     }
-    if (rowtimeFromExpr != null && !rowtimeFromExpr.equals(bounded.rowtimeIndex)) {
+    if (rowtimeFromExpr != null && !rowtimeFromExpr.equals(rowtimeIndex)) {
       return UNSUPPORTED; // the watermark reads a different column than the declared rowtime
     }
-    // The pushed expression indexes the scan's produced row type. A direct rowtime column carries the
-    // rowtime indicator there; the TO_TIMESTAMP_LTZ term reads a plain BIGINT (epoch millis). Anything
-    // else means an expression shape we misread — decline.
-    if (bounded.rowtimeIndex >= scan.getRowType().getFieldCount()) {
+    // Direct rowtime columns carry Flink's indicator; TO_TIMESTAMP_LTZ reads BIGINT epoch millis.
+    if (rowtimeIndex >= scan.getRowType().getFieldCount()) {
       return UNSUPPORTED;
     }
     org.apache.calcite.rel.type.RelDataType fieldType =
-        scan.getRowType().getFieldList().get(bounded.rowtimeIndex).getType();
+        scan.getRowType().getFieldList().get(rowtimeIndex).getType();
     boolean valid =
-        bounded.epochMillisColumn
+        isEpochMillisTerm(term)
             ? fieldType.getSqlTypeName() == org.apache.calcite.sql.type.SqlTypeName.BIGINT
             : FlinkTypeFactory$.MODULE$.isRowtimeIndicatorType(fieldType);
     if (!valid) {
       return UNSUPPORTED;
     }
+    WatermarkExpression expression =
+        WatermarkExpressionPlanner.encode(
+            pushed.getWatermarkExpr(), rowtimeIndex, isEpochMillisTerm(term), scan.getRowType());
+    if (expression == null) {
+      return UNSUPPORTED;
+    }
     return new ScanWatermarkSpec(
-        bounded.rowtimeIndex,
-        scan.getRowType().getFieldNames().get(bounded.rowtimeIndex),
-        bounded.delayMillis,
+        rowtimeIndex,
+        scan.getRowType().getFieldNames().get(rowtimeIndex),
+        expression,
         idleTimeoutMillis(scan, options));
   }
 
@@ -134,27 +145,19 @@ final class ScanWatermarkSpec {
     return global.toMillis();
   }
 
-  /** The bounded-out-of-orderness shape: a rowtime term (delay 0) or {@code term - INTERVAL const}. */
-  private static Bounded parse(RexNode expr) {
-    Integer direct = rowtimeTerm(expr);
-    if (direct != null) {
-      return new Bounded(direct, 0L, isEpochMillisTerm(expr));
-    }
-    if (expr instanceof RexCall) {
+  /**
+   * Locate the rowtime term; the shared expression encoder validates every operation and literal.
+   */
+  private static RexNode rowtimeOperand(RexNode expr) {
+    while (expr instanceof RexCall) {
       RexCall call = (RexCall) expr;
       if (call.getOperator().getKind() == SqlKind.MINUS && call.getOperands().size() == 2) {
-        RexNode left = call.getOperands().get(0);
-        RexNode right = call.getOperands().get(1);
-        Integer index = rowtimeTerm(left);
-        if (index != null && right instanceof RexLiteral) {
-          Long millis = ((RexLiteral) right).getValueAs(Long.class);
-          if (millis != null && millis >= 0) {
-            return new Bounded(index, millis, isEpochMillisTerm(left));
-          }
-        }
+        expr = call.getOperands().get(0);
+      } else {
+        break;
       }
     }
-    return null;
+    return expr;
   }
 
   /**
@@ -186,8 +189,9 @@ final class ScanWatermarkSpec {
         || !(call.getOperands().get(1) instanceof RexLiteral)) {
       return false;
     }
-    Long precision = ((RexLiteral) call.getOperands().get(1)).getValueAs(Long.class);
-    return precision != null && precision == 3L;
+    java.math.BigDecimal precision =
+        ((RexLiteral) call.getOperands().get(1)).getValueAs(java.math.BigDecimal.class);
+    return precision != null && precision.compareTo(java.math.BigDecimal.valueOf(3)) == 0;
   }
 
   /** Unwraps the {@code Reinterpret} cast the push-down rule puts around a computed rowtime. */
@@ -197,17 +201,5 @@ final class ScanWatermarkSpec {
       return ((RexCall) node).getOperands().get(0);
     }
     return node;
-  }
-
-  private static final class Bounded {
-    final int rowtimeIndex;
-    final long delayMillis;
-    final boolean epochMillisColumn;
-
-    Bounded(int rowtimeIndex, long delayMillis, boolean epochMillisColumn) {
-      this.rowtimeIndex = rowtimeIndex;
-      this.delayMillis = delayMillis;
-      this.epochMillisColumn = epochMillisColumn;
-    }
   }
 }

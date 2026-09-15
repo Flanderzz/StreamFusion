@@ -1,7 +1,6 @@
 package tech.streamfusion.operator;
 
 import org.apache.arrow.vector.VectorSchemaRoot;
-import tech.streamfusion.arrow.TimestampAccessor;
 import org.apache.flink.api.common.operators.ProcessingTimeService.ProcessingTimeCallback;
 import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
@@ -16,27 +15,29 @@ import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
  * without transposing to {@link org.apache.flink.table.data.RowData} just to assign watermarks.
  *
  * <p>It mirrors the host exactly for the {@code rt - INTERVAL} (bounded out-of-orderness) form: the
- * candidate watermark is {@code max(rowtime) - delay}, the running max never falls below 0, and the
- * watermark is emitted eagerly when it jumps by more than the auto-watermark interval and otherwise
- * on a periodic processing-time timer at that interval.
+ * candidate watermark is {@code max(rowtime - interval)}, the running max never falls below 0, and
+ * the watermark is emitted eagerly when it jumps by more than the auto-watermark interval and
+ * otherwise on a periodic processing-time timer at that interval.
  *
- * <p>To match the host's per-row late-data dropping byte for byte, the watermark must advance at the
- * same fine granularity within a batch — a row is dropped downstream only if a watermark closing its
- * window was emitted before it. The host advances per row; we replicate that by slicing a batch at
- * each point its running watermark jumps past the interval and emitting {@code (sub-batch,
- * watermark)} in order, so the fine-grained watermarks propagate through the shuffle and the
- * downstream drops exactly as the host would (the drop can't be done downstream: at parallelism > 1
- * a window's effective watermark is the min across its input channels, which a post-shuffle operator
- * cannot reconstruct). A monotonic-rowtime batch can have no within-batch late row — a later row's
- * window can never be closed by an earlier, smaller rowtime — so it takes a fast path that forwards
- * the whole batch with a single watermark (no slicing, the common in-order case). Idleness is not
- * modelled — the filesystem sources this accelerates are never idle.
+ * <p>To match the host's per-row late-data dropping byte for byte, the watermark must advance at
+ * the same fine granularity within a batch — a row is dropped downstream only if a watermark
+ * closing its window was emitted before it. The host advances per row; we replicate that by slicing
+ * a batch at each point its running watermark jumps past the interval and emitting {@code
+ * (sub-batch, watermark)} in order, so the fine-grained watermarks propagate through the shuffle
+ * and the downstream drops exactly as the host would (the drop can't be done downstream: at
+ * parallelism > 1 a window's effective watermark is the min across its input channels, which a
+ * post-shuffle operator cannot reconstruct). Even sorted rows retain these boundaries because a
+ * downstream {@code CURRENT_WATERMARK} can observe each eager emission. A batch without an internal
+ * emission boundary is forwarded whole.
+ * Idleness is not modelled for this assigner.
  */
 public class NativeColumnarWatermarkAssignerOperator extends AbstractStreamOperator<ArrowBatch>
     implements OneInputStreamOperator<ArrowBatch, ArrowBatch>, ProcessingTimeCallback {
 
   private final int rowtimeColumn;
-  private final long delayMillis;
+  private final WatermarkExpression expression;
+
+  private transient WatermarkExpression.Evaluator evaluator;
 
   private transient long currentWatermark;
   private transient long lastWatermark;
@@ -44,13 +45,20 @@ public class NativeColumnarWatermarkAssignerOperator extends AbstractStreamOpera
   private transient long lastWatermarkPeriodicEmitTime;
 
   public NativeColumnarWatermarkAssignerOperator(int rowtimeColumn, long delayMillis) {
+    this(rowtimeColumn, WatermarkExpression.subtractMillis(rowtimeColumn, delayMillis));
+  }
+
+  public NativeColumnarWatermarkAssignerOperator(
+      int rowtimeColumn, WatermarkExpression expression) {
     this.rowtimeColumn = rowtimeColumn;
-    this.delayMillis = delayMillis;
+    this.expression = expression;
   }
 
   @Override
   public void open() throws Exception {
     super.open();
+    NativeAllocator.initializeFor(this);
+    evaluator = expression.open();
     // Watermark and timestamp start from 0, as the host's assigner does.
     currentWatermark = 0;
     lastWatermark = 0;
@@ -59,6 +67,17 @@ public class NativeColumnarWatermarkAssignerOperator extends AbstractStreamOpera
       long now = getProcessingTimeService().getCurrentProcessingTime();
       lastWatermarkPeriodicEmitTime = now;
       getProcessingTimeService().registerTimer(now + watermarkInterval, this);
+    }
+  }
+
+  @Override
+  public void close() throws Exception {
+    try {
+      if (evaluator != null) {
+        evaluator.close();
+      }
+    } finally {
+      super.close();
     }
   }
 
@@ -74,50 +93,41 @@ public class NativeColumnarWatermarkAssignerOperator extends AbstractStreamOpera
           output, getMetricGroup(), element.replace(new ArrowBatch(root)), rows);
       return;
     }
-    TimestampAccessor rt = new TimestampAccessor(root.getVector(rowtimeColumn));
-    if (isMonotonic(rt, rows)) {
-      // No row can be late within a monotonic batch, so the host would drop nothing either: forward
-      // the whole batch (the max is the last row) with a single eager watermark.
-      currentWatermark = Math.max(currentWatermark, rt.getMillis(rows - 1) - delayMillis);
-      ColumnarRecordMetrics.forward(
-          output, getMetricGroup(), element.replace(new ArrowBatch(root)), rows);
-      if (currentWatermark - lastWatermark > watermarkInterval) {
-        advanceWatermark();
+    if (root.getVector(rowtimeColumn).getNullCount() > 0) {
+      root.close();
+      throw new RuntimeException(
+          "RowTime field should not be null, please convert it to a non-null long value.");
+    }
+    boolean forwarded = false;
+    try (WatermarkExpression.Values candidates = evaluator.evaluate(root)) {
+      int sliceStart = 0;
+      for (int i = 0; i < rows; i++) {
+        if (!candidates.isNull(i)) {
+          currentWatermark = Math.max(currentWatermark, candidates.getMillis(i));
+        }
+        boolean emitWatermark = currentWatermark - lastWatermark > watermarkInterval;
+        if (emitWatermark || i == rows - 1) {
+          int count = i - sliceStart + 1;
+          if (count == rows) {
+            forwarded = true;
+            ColumnarRecordMetrics.forward(
+                output, getMetricGroup(), element.replace(new ArrowBatch(root)), rows);
+          } else {
+            ColumnarRecordMetrics.emit(
+                output, getMetricGroup(), new ArrowBatch(root.slice(sliceStart, count)));
+          }
+          sliceStart = i + 1;
+          if (emitWatermark) {
+            advanceWatermark();
+          }
+        }
       }
-      return;
-    }
-    // Out-of-order: replicate the host's per-row eager emission, slicing the batch at each watermark
-    // jump so a window-closing watermark precedes any row it makes late (just as the host forwards a
-    // row before the watermark it triggers).
-    int sliceStart = 0;
-    for (int i = 0; i < rows; i++) {
-      currentWatermark = Math.max(currentWatermark, rt.getMillis(i) - delayMillis);
-      if (currentWatermark - lastWatermark > watermarkInterval) {
-        ColumnarRecordMetrics.emit(output, getMetricGroup(), new ArrowBatch(root.slice(sliceStart, i - sliceStart + 1)));
-        sliceStart = i + 1;
-        advanceWatermark();
+    } finally {
+      // Slices and native exports retain their own references. Whole-batch forwarding moves ours.
+      if (!forwarded) {
+        root.close();
       }
     }
-    if (sliceStart < rows) {
-      ColumnarRecordMetrics.emit(output, getMetricGroup(), new ArrowBatch(root.slice(sliceStart, rows - sliceStart)));
-    }
-    // The slices retain their own references to the shared buffers; release the original batch.
-    root.close();
-  }
-
-  /**
-   * Whether the rowtime column is non-decreasing — then no row is late relative to an earlier one.
-   */
-  private static boolean isMonotonic(TimestampAccessor rt, int rows) {
-    long prev = Long.MIN_VALUE;
-    for (int i = 0; i < rows; i++) {
-      long millis = rt.getMillis(i);
-      if (millis < prev) {
-        return false;
-      }
-      prev = millis;
-    }
-    return true;
   }
 
   private void advanceWatermark() {

@@ -103,6 +103,34 @@ fn calendar_date(julian: i32) -> (i32, i32, i32) {
     (year, month, day)
 }
 
+/// Flink DateTimeUtils.addMonths, including its Java integer overflow and month-end clamping.
+pub(super) fn add_months(timestamp: i64, months: i32) -> i64 {
+    const DAY: i64 = 86_400_000;
+    let time = timestamp.rem_euclid(DAY);
+    let days = (timestamp.wrapping_sub(time) / DAY) as i32;
+    let (mut year, month, mut day) = calendar_date(days.wrapping_add(2_440_588));
+    let month = month.wrapping_add(months);
+    year += month.div_euclid(12);
+    let mut month = month.rem_euclid(12);
+    if month == 0 {
+        year -= 1;
+        month = 12;
+    }
+    let last_day = match month {
+        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    day = day.min(last_day);
+    let a = (14 - month) / 12;
+    let y = i64::from(year) + 4800 - i64::from(a);
+    let m = i64::from(month + 12 * a - 3);
+    let julian =
+        (i64::from(day) + (153 * m + 2) / 5 + 365 * y + y / 4 - y / 100 + y / 400 - 32_045) as i32;
+    i64::from(julian.wrapping_sub(2_440_588)) * DAY + time
+}
+
 fn january_first(year: i32) -> i32 {
     let y = i64::from(year) + 4799;
     (1 + (153 * 10 + 2) / 5 + 365 * y + y / 4 - y / 100 + y / 400 - 32_045) as i32

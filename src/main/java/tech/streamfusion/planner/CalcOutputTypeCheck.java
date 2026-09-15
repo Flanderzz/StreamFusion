@@ -35,9 +35,12 @@ final class CalcOutputTypeCheck {
    * compiles to a boolean.
    */
   static String mismatch(RexExpression encoded, RelDataType inputType, RelDataType outputType) {
+    return mismatch(encoded, inputType, FlinkTypeFactory$.MODULE$.toLogicalRowType(outputType));
+  }
+
+  static String mismatch(RexExpression encoded, RelDataType inputType, RowType declared) {
     Schema input =
         ArrowConversion.toArrowSchema(FlinkTypeFactory$.MODULE$.toLogicalRowType(inputType));
-    RowType declared = FlinkTypeFactory$.MODULE$.toLogicalRowType(outputType);
     try (BufferAllocator allocator = new RootAllocator();
         ArrowSchema inputSchema = ArrowSchema.allocateNew(allocator);
         ArrowSchema outputSchema = ArrowSchema.allocateNew(allocator)) {

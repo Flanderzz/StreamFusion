@@ -237,8 +237,11 @@ source at planning time:
   and source abilities other than top-level projection, residual filters, and supported watermarks.
 - Consumer retention (`consumer-id`), dedicated split generation, checkpoint/snapshot alignment,
   and `postpone.merge-on-read`.
-- Source watermarks outside the shared periodic constant-delay contract, including on-event
-  emission and watermark alignment.
+- Source watermarks outside the shared periodic constant-interval expression contract, including on-event
+  emission and watermark alignment. Non-negative day-time and YEAR/MONTH/YEAR TO MONTH delays
+  are supported, including chained subtractions; calendar intervals use Flink's month-end and
+  leap-year arithmetic. Serialized expression plans are evaluated by each reader through the
+  shared watermark evaluator, with native handles closed when the reader closes.
 - Unverified `scan.*`, `streaming-read-*`, `log.*`, and custom `parquet.*`/`orc.*` settings. ORC also admits the boolean `orc.timestamp-ltz.legacy.type`; timestamp schemas require a UTC JVM timezone. The admitted scan settings are
   `scan.mode`, `scan.snapshot-id`, `scan.timestamp-millis`, `scan.timestamp`, `scan.tag-name`,
   `scan.watermark`, `scan.bounded.watermark`, `scan.parallelism`, `scan.infer-parallelism`,
@@ -253,8 +256,10 @@ projections and scans feeding different sinks in a statement set. The deployed s
 lets Flink union their projected columns before native substitution, then places the reader under
 an explicit Arrow share operator. Every branch takes a retained buffer view, preserving row kinds
 and the normal source watermark/checkpoint flow. Parquet and ORC use the same sharing path.
-When a watermarked split finishes, the reader flushes its final maximum timestamp minus the
-configured delay through Flink's split output before releasing it. Otherwise a tiny native file
+When a watermarked split finishes, the reader flushes its final maximum watermark candidate
+through Flink's split output before releasing it. Candidates are calculated per row before taking
+the maximum, including for calendar delays, and carried separately from event timestamps.
+Otherwise a tiny native file
 can finish before a periodic tick and lose its final watermark. Active files retain periodic
 emission, and Flink still combines concurrent splits and handles idleness.
 Filters, limits, startup hints, table options, schemas and other scan semantics must agree;

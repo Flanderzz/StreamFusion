@@ -3,11 +3,11 @@ package tech.streamfusion.kafka;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 
-import tech.streamfusion.operator.ArrowBatch;
-import tech.streamfusion.operator.NativeSourceRecord;
+import java.time.Instant;
 import java.util.List;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
+import org.apache.arrow.vector.BigIntVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.flink.api.common.eventtime.Watermark;
@@ -17,6 +17,9 @@ import org.apache.flink.connector.kafka.source.split.KafkaPartitionSplitState;
 import org.apache.kafka.common.TopicPartition;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
+import tech.streamfusion.operator.ArrowBatch;
+import tech.streamfusion.operator.NativeSourceRecord;
+import tech.streamfusion.operator.WatermarkExpression;
 
 /** Pins the native batch to Kafka's split-local output and checkpoint offset contract. */
 @Tag("streamfusion-kafka")
@@ -41,6 +44,31 @@ class NativeKafkaRecordEmitterTest {
       assertEquals(1_700_000_000_123L, output.timestamp);
       assertEquals(42L, splitState.getCurrentOffset());
       output.record.root().close();
+    }
+  }
+
+  @Test
+  void calendarCandidateDoesNotReplaceTheEventTimestampOrCheckpointOffset() throws Exception {
+    var split =
+        new KafkaPartitionSplitState(new KafkaPartitionSplit(new TopicPartition("events", 3), 11L));
+    CapturingOutput output = new CapturingOutput();
+    try (BufferAllocator allocator = new RootAllocator();
+        var evaluator = WatermarkExpression.subtractMonths(0, 1).open()) {
+      var vector = new BigIntVector("epoch", allocator);
+      vector.allocateNew(2);
+      vector.set(0, Instant.parse("2024-03-30T23:00:00Z").toEpochMilli());
+      long eventTimestamp = Instant.parse("2024-03-31T00:00:00Z").toEpochMilli();
+      vector.set(1, eventTimestamp);
+      var root = new VectorSchemaRoot(List.of(vector.getField()), List.of(vector), 2);
+      root.setRowCount(2);
+      var record = NativeSourceRecord.fromRoot(root, 42, 0, evaluator);
+      new NativeKafkaRecordEmitter().emitRecord(record, output, split);
+      assertEquals(eventTimestamp, output.timestamp);
+      assertEquals(42, split.getCurrentOffset());
+      output.record.root().close();
+      assertEquals(
+          Instant.parse("2024-02-29T23:00:00Z").toEpochMilli(),
+          output.record.sourceWatermarkMillis());
     }
   }
 

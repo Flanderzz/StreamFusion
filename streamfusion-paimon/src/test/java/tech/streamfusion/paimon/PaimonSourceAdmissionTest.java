@@ -8,6 +8,7 @@ import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import tech.streamfusion.planner.NativePlanner;
 
 class PaimonSourceAdmissionTest {
@@ -44,11 +45,18 @@ class PaimonSourceAdmissionTest {
     assertFalse(NativePlanner.explain(sql, "SELECT * FROM ns").contains("NativePaimonSource"));
   }
 
-  @Test
-  void watermarkProjectionAndFiltersAreAdmitted() throws Exception {
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "INTERVAL '1' SECOND",
+        "INTERVAL '1' MONTH",
+        "INTERVAL '1' YEAR",
+        "INTERVAL '1-1' YEAR TO MONTH"
+      })
+  void watermarkProjectionAndFiltersAreAdmitted(String interval) throws Exception {
     var sql = environment();
     sql.executeSql(
-        "CREATE TABLE t (id INT, ts TIMESTAMP(3), WATERMARK FOR ts AS ts - INTERVAL '1' SECOND)");
+        "CREATE TABLE t (id INT, ts TIMESTAMP(3), WATERMARK FOR ts AS ts - " + interval + ")");
     String plan = NativePlanner.explain(sql, "SELECT ts, id FROM t WHERE id > 10");
     assertTrue(plan.contains("NativePaimonSource"), plan);
   }

@@ -1,13 +1,5 @@
 package tech.streamfusion.planner;
 
-import tech.streamfusion.format.NativeFormatContext;
-import tech.streamfusion.format.NativeFormatOptions;
-import tech.streamfusion.format.NativeFormatProvider;
-import tech.streamfusion.format.NativeFormatProviders;
-import tech.streamfusion.kafka.NativeKafkaSource;
-import tech.streamfusion.operator.ArrowBatch;
-import tech.streamfusion.operator.ArrowBatchTypeInformation;
-import tech.streamfusion.operator.NativeSourceWatermarks;
 import java.util.Collections;
 import java.util.Map;
 import java.util.Properties;
@@ -23,6 +15,14 @@ import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeConfig;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeContext;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.StreamExecNode;
 import org.apache.flink.table.types.logical.RowType;
+import tech.streamfusion.format.NativeFormatContext;
+import tech.streamfusion.format.NativeFormatOptions;
+import tech.streamfusion.format.NativeFormatProvider;
+import tech.streamfusion.format.NativeFormatProviders;
+import tech.streamfusion.kafka.NativeKafkaSource;
+import tech.streamfusion.operator.ArrowBatch;
+import tech.streamfusion.operator.ArrowBatchTypeInformation;
+import tech.streamfusion.operator.NativeSourceWatermarks;
 
 /**
  * Zero-input exec node for the native-decode Kafka path. Flink's Kafka enumerator and split state
@@ -89,12 +89,12 @@ public class NativeKafkaDecodeExecNode extends ExecNodeBase<ArrowBatch>
             outputType,
             formatProvider.createDecoder(formatContext),
             keyed,
-            watermark == null ? -1 : watermark.rowtimeIndex);
+            watermark == null ? -1 : watermark.rowtimeIndex,
+            watermark == null ? null : watermark.expression);
     WatermarkStrategy<ArrowBatch> strategy =
         watermark == null
             ? WatermarkStrategy.noWatermarks()
-            : NativeSourceWatermarks.strategy(
-                watermark.delayMillis, watermark.idleTimeoutMillis);
+            : NativeSourceWatermarks.strategy(watermark.idleTimeoutMillis);
     DataStreamSource<ArrowBatch> stream =
         env.fromSource(
             source, strategy, SOURCE_TRANSFORMATION, ArrowBatchTypeInformation.INSTANCE);
