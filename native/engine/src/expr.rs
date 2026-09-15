@@ -755,8 +755,8 @@ fn append_digest_hex<D: sha2::Digest>(value: &str, output: &mut Vec<u8>) {
 
 /// A narrowing numeric cast to an integer type with Flink's primitive-Java-cast semantics: an integer
 /// source truncates to the low bits (two's-complement wraparound), a float/double source rounds toward
-/// zero and saturates to the target range with NaN→0. Rust's `as` reproduces both exactly — where
-/// arrow's own cast would error on overflow — so this kernel matches the host byte-for-byte. The JVM
+/// zero and saturates to int/long with NaN→0, then truncates the low bits for byte/short. Rust's
+/// staged `as` casts reproduce this where Arrow's own cast would error on overflow. The JVM
 /// encoder (KIND_CAST_NARROW) emits it only for a narrowing int→int or a float/double→int cast; see
 /// divergences/07.
 #[derive(Debug, PartialEq, Eq, Hash)]
@@ -896,8 +896,7 @@ impl datafusion::logical_expr::ScalarUDFImpl for NarrowingCast {
                     ),
                 }
             }
-            // Float source: widen to f64, then `as` the target, which rounds toward zero and saturates
-            // to the target range (NaN→0) exactly like Java's `(int)` primitive cast of a double.
+            // Java float→byte/short first saturates to int, then narrows by discarding high bits.
             DataType::Float16 | DataType::Float32 | DataType::Float64 => {
                 let widened = arrow::compute::cast(input, &DataType::Float64)?;
                 let vals = widened
@@ -907,12 +906,12 @@ impl datafusion::logical_expr::ScalarUDFImpl for NarrowingCast {
                 match &self.target {
                     DataType::Int8 => Arc::new(
                         vals.iter()
-                            .map(|o| o.map(|v| v as i8))
+                            .map(|o| o.map(|v| v as i32 as i8))
                             .collect::<Int8Array>(),
                     ),
                     DataType::Int16 => Arc::new(
                         vals.iter()
-                            .map(|o| o.map(|v| v as i16))
+                            .map(|o| o.map(|v| v as i32 as i16))
                             .collect::<Int16Array>(),
                     ),
                     DataType::Int32 => Arc::new(

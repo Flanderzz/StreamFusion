@@ -177,8 +177,8 @@ strict NULL propagation applied to `CONCAT` below.
   → `TINYINT`/`SMALLINT`/`INTEGER`/`BIGINT`) is *not* a plain Arrow cast — arrow's kernel errors on
   overflow, whereas Flink emits the primitive Java cast, which **wraps** (an integer source truncates to
   the low bits, two's-complement) or **saturates** (a float/double source rounds toward zero and clamps
-  to the target range, `NaN`→0). A dedicated `NarrowingCast` kernel uses Rust's `as`, which reproduces
-  both exactly (Rust's float→int `as` is saturating with `NaN`→0, matching Java since 1.45); parity is
+  to the INT/BIGINT range, `NaN`→0); byte/short targets then keep the low bits of that INT.
+  A dedicated kernel uses staged Rust `as` casts to reproduce the two-step Java conversion; parity is
   tested at the `2³¹`/`2³²+1` integer boundaries and the `NaN`/`±∞`/`±1e20` float boundaries. **String
   casts still fall back:** number→string / string→number (formatting/parsing diverges from Arrow),
   narrowing a `VARCHAR` (truncation), and casting *to* `CHAR(n)` (space-padding). A **`CHAR`/`VARCHAR`→

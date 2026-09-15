@@ -1690,12 +1690,9 @@ final class RexExpression {
       return emit(call.getOperands().get(0));
     }
     // A narrowing cast to an integer target (a wider integer, or a float/double, narrowed to an
-    // integer type). Flink emits the primitive Java cast: an integer source truncates to the low
-    // bits
-    // (two's-complement wraparound), a float/double source rounds toward zero and saturates to the
-    // target range with NaN→0. Rust's `as` reproduces both exactly, so a dedicated native wrapping
-    // kernel matches the host — where arrow's own cast would instead error on overflow. See
-    // divergences/07.
+    // integer type). Java keeps the low bits for integer sources. Floating sources saturate to
+    // INT/BIGINT with NaN→0, then discard high bits for byte/short targets. The native kernel
+    // uses staged Rust casts for the same conversion; see divergences/07.
     int narrowTarget = narrowingIntTargetCode(source, targetType);
     if (narrowTarget >= 0) {
       add(KIND_CAST_NARROW, narrowTarget, 1);

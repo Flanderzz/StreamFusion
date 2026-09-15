@@ -123,7 +123,7 @@ Native, unconditionally, with no host involvement:
 - **Widening numeric** — integer→wider integer, integer→float/double, float→double.
 - **Narrowing integer→integer and float/double→integer** — a purpose-built `NarrowingCast` kernel
   reproduces Flink's primitive Java cast semantics exactly: two's-complement wraparound for an
-  integer source, and round-toward-zero-with-saturation (`NaN`→0) for a float source. Arrow's own
+  integer source, and saturation to INT/BIGINT followed by low-bit narrowing for a float source. Arrow's own
   cast kernel can't do this — it errors on overflow instead of wrapping/saturating.
 - **`CHAR`/`VARCHAR` → `VARCHAR`** when the target length is ≥ the source length — an unpadded
   no-op (e.g. the common `COALESCE(s, 'x')` pattern).
@@ -133,6 +133,12 @@ Native, unconditionally, with no host involvement:
   before checking the target precision. Overflow produces SQL `NULL`, including a carry caused
   by rounding (`999.995` cast to `DECIMAL(5,2)`), scale increases, and integer inputs. NULLs remain
   visible to surrounding expressions and filters. The result stays an Arrow `Decimal128` column.
+
+Integer narrowing keeps the low bits, matching Java wraparound. FLOAT/DOUBLE to INT or
+BIGINT truncates toward zero, saturates at the destination bounds, and maps NaN to zero.
+FLOAT/DOUBLE to TINYINT or SMALLINT first performs that INT conversion, then keeps the
+low 8 or 16 bits. Thus `128.75` becomes TINYINT `-128`, and positive infinity becomes
+TINYINT/SMALLINT `-1`. NULL remains NULL for every target.
 
 ### The host-exact JVM upcall
 
