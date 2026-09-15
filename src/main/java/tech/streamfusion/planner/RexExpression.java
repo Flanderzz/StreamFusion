@@ -1218,7 +1218,10 @@ final class RexExpression {
     if (!(node instanceof RexCall call)) {
       return false;
     }
-    if (isDecimalArithmetic(call)
+    if (call.getType().getSqlTypeName().getFamily() == SqlTypeFamily.NUMERIC
+        && call.getType().getSqlTypeName() != SqlTypeName.FLOAT
+        && call.getType().getSqlTypeName() != SqlTypeName.REAL
+        && call.getType().getSqlTypeName() != SqlTypeName.DOUBLE
         && (call.getKind() == SqlKind.MOD || call.getKind() == SqlKind.DIVIDE)) {
       return true;
     }
