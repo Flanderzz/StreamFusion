@@ -210,6 +210,7 @@ final class TextTimeBenchmarkInputs {
               };
             }
             case "tt_date_text" -> new String[] {"2000-02-29", "1969-12-31"};
+            case "tt_timestamp_text" -> new String[] {"2000-02-29 12:34:56", "1969-12-31 23:59:59"};
             default -> throw new IllegalArgumentException("Unknown text/time input: " + input);
           };
       tables.createTemporaryView(

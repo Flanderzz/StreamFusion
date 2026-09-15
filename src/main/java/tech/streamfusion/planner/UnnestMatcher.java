@@ -125,7 +125,7 @@ final class UnnestMatcher {
     int inputArity = correlate.getInput().getRowType().getFieldCount();
     RexNode shifted = RexUtil.shift(correlate.condition().get(), inputArity);
     RexNode expanded = RexUtil.expandSearch(correlate.getCluster().getRexBuilder(), null, shifted);
-    return RexExpression.encode(expanded);
+    return RexExpression.encode(expanded, correlate);
   }
 
   /** Index of the unnested array column in the correlate's input row. */

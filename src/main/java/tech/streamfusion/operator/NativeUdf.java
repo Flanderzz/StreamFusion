@@ -20,8 +20,7 @@ import org.apache.arrow.vector.Float8Vector;
 import org.apache.arrow.vector.IntVector;
 import org.apache.arrow.vector.NullVector;
 import org.apache.arrow.vector.SmallIntVector;
-import org.apache.arrow.vector.TimeStampMilliVector;
-import org.apache.arrow.vector.TimeStampNanoVector;
+import org.apache.arrow.vector.TimeStampVector;
 import org.apache.arrow.vector.TinyIntVector;
 import org.apache.arrow.vector.VarCharVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
@@ -63,10 +62,13 @@ public final class NativeUdf {
   public static final int TYPE_FLOAT = 5;
   public static final int TYPE_SHORT = 6;
   public static final int TYPE_BYTE = 7;
-  // A TIMESTAMP argument, marshalled to the eval as epoch millis (a boxed Long). Native pins every
-  // timestamp column to Timestamp(nanos, no-tz); the upcall reads that instant as millis. Used by the
-  // LTZ DATE_FORMAT/EXTRACT parity path — an argument-only code (no UDF returns a timestamp today).
+  // Legacy LTZ formatting/extraction arguments marshal TimestampData as epoch-millis Longs.
   public static final int TYPE_TIMESTAMP = 8;
+  public static final int TYPE_DATE = 9;
+  public static final int TYPE_TIME = 10;
+  public static final int TYPE_TIMESTAMP_DATA = 11;
+  public static final int TYPE_INTERVAL_MONTHS = 12;
+  public static final int TYPE_INTERVAL_MILLIS = 13;
 
   // DECIMAL(p, s) argument/result values, marshalled as BigDecimal. The precision and scale ride in
   // the code itself so one int carries the full type: 1000 + p*100 + s. Used by the host-exact
@@ -382,9 +384,17 @@ public final class NativeUdf {
       case TYPE_STRING:
         return ArrowType.Utf8.INSTANCE;
       case TYPE_LONG:
+      case TYPE_INTERVAL_MILLIS:
         return new ArrowType.Int(64, true);
       case TYPE_INT:
+      case TYPE_INTERVAL_MONTHS:
         return new ArrowType.Int(32, true);
+      case TYPE_DATE:
+        return new ArrowType.Date(org.apache.arrow.vector.types.DateUnit.DAY);
+      case TYPE_TIME:
+        return new ArrowType.Time(org.apache.arrow.vector.types.TimeUnit.MILLISECOND, 32);
+      case TYPE_TIMESTAMP_DATA:
+        return new ArrowType.Timestamp(org.apache.arrow.vector.types.TimeUnit.NANOSECOND, null);
       case TYPE_SHORT:
         return new ArrowType.Int(16, true);
       case TYPE_BYTE:
@@ -429,7 +439,16 @@ public final class NativeUdf {
           return out;
         }
       case TYPE_LONG:
+      case TYPE_INTERVAL_MILLIS:
         {
+          if (vector instanceof org.apache.arrow.vector.IntervalDayVector intervals) {
+            for (int r = 0; r < rows; r++) {
+              if (!intervals.isNull(r)) {
+                out[r] = intervals.getObject(r).toMillis();
+              }
+            }
+            return out;
+          }
           BigIntVector v = (BigIntVector) vector;
           for (int r = 0; r < rows; r++) {
             if (!v.isNull(r)) {
@@ -439,6 +458,7 @@ public final class NativeUdf {
           return out;
         }
       case TYPE_INT:
+      case TYPE_INTERVAL_MONTHS:
         {
           IntVector v = (IntVector) vector;
           for (int r = 0; r < rows; r++) {
@@ -518,28 +538,38 @@ public final class NativeUdf {
           }
           return out;
         }
+      case TYPE_DATE:
+        {
+          var dates = (org.apache.arrow.vector.DateDayVector) vector;
+          for (int r = 0; r < rows; r++) {
+            if (!dates.isNull(r)) {
+              out[r] = dates.get(r);
+            }
+          }
+          return out;
+        }
+      case TYPE_TIME:
+        {
+          var times = new tech.streamfusion.arrow.vectors.ArrowTimeColumnVector(vector);
+          for (int r = 0; r < rows; r++) {
+            if (!times.isNullAt(r)) {
+              out[r] = times.getInt(r);
+            }
+          }
+          return out;
+        }
       case TYPE_TIMESTAMP:
-        // Native pins timestamps to Timestamp(nanos, no-tz); hand the eval epoch millis (its instant).
-        if (vector instanceof TimeStampNanoVector) {
-          TimeStampNanoVector v = (TimeStampNanoVector) vector;
+      case TYPE_TIMESTAMP_DATA:
+        {
+          var times = new tech.streamfusion.arrow.vectors.ArrowTimestampColumnVector(vector);
           for (int r = 0; r < rows; r++) {
-            if (!v.isNull(r)) {
-              out[r] = v.get(r) / 1_000_000L;
+            if (!times.isNullAt(r)) {
+              var timestamp = times.getTimestamp(r, 9);
+              out[r] = code == TYPE_TIMESTAMP ? timestamp.getMillisecond() : timestamp;
             }
           }
           return out;
         }
-        if (vector instanceof TimeStampMilliVector) {
-          TimeStampMilliVector v = (TimeStampMilliVector) vector;
-          for (int r = 0; r < rows; r++) {
-            if (!v.isNull(r)) {
-              out[r] = v.get(r);
-            }
-          }
-          return out;
-        }
-        throw new IllegalArgumentException(
-            "unexpected timestamp vector for a TIMESTAMP UDF arg: " + vector.getClass());
       default:
         if (code >= DECIMAL_BASE) {
           org.apache.arrow.vector.DecimalVector v = (org.apache.arrow.vector.DecimalVector) vector;
@@ -571,9 +601,11 @@ public final class NativeUdf {
                     : value.toString().getBytes(StandardCharsets.UTF_8));
         break;
       case TYPE_LONG:
+      case TYPE_INTERVAL_MILLIS:
         ((BigIntVector) vector).setSafe(row, ((Number) value).longValue());
         break;
       case TYPE_INT:
+      case TYPE_INTERVAL_MONTHS:
         ((IntVector) vector).setSafe(row, ((Number) value).intValue());
         break;
       case TYPE_SHORT:
@@ -590,6 +622,20 @@ public final class NativeUdf {
         break;
       case TYPE_BOOLEAN:
         ((BitVector) vector).setSafe(row, ((Boolean) value) ? 1 : 0);
+        break;
+      case TYPE_DATE:
+        ((org.apache.arrow.vector.DateDayVector) vector).setSafe(row, ((Number) value).intValue());
+        break;
+      case TYPE_TIME:
+        ((org.apache.arrow.vector.TimeMilliVector) vector)
+            .setSafe(row, ((Number) value).intValue());
+        break;
+      case TYPE_TIMESTAMP_DATA:
+        ((TimeStampVector) vector)
+            .setSafe(
+                row,
+                tech.streamfusion.arrow.TimestampConversion.toNanos(
+                    (org.apache.flink.table.data.TimestampData) value));
         break;
       default:
         if (code >= DECIMAL_BASE) {

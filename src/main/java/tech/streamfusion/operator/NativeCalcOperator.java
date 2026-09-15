@@ -1,6 +1,5 @@
 package tech.streamfusion.operator;
 
-import tech.streamfusion.Native;
 import org.apache.arrow.c.ArrowArray;
 import org.apache.arrow.c.ArrowSchema;
 import org.apache.arrow.c.CDataDictionaryProvider;
@@ -11,6 +10,7 @@ import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.table.functions.FunctionContext;
+import tech.streamfusion.Native;
 
 /**
  * Stateless native Calc, columnar in and out: applies an encoded Calc — an optional condition then
@@ -37,6 +37,7 @@ public class NativeCalcOperator extends AbstractStreamOperator<ArrowBatch>
   private transient CDataDictionaryProvider dictionaries;
   private transient long calc;
   private transient boolean inputSchemaEstablished;
+  private transient long watermark;
 
   public NativeCalcOperator(
       int[] kinds,
@@ -64,6 +65,7 @@ public class NativeCalcOperator extends AbstractStreamOperator<ArrowBatch>
   @Override
   public void open() throws Exception {
     super.open();
+    watermark = Long.MIN_VALUE;
     NativeAllocator.initializeFor(this);
     allocator = NativeAllocator.SHARED;
     dictionaries = NativeAllocator.DICTIONARIES;
@@ -87,6 +89,13 @@ public class NativeCalcOperator extends AbstractStreamOperator<ArrowBatch>
   }
 
   @Override
+  public void processWatermark(org.apache.flink.streaming.api.watermark.Watermark mark)
+      throws Exception {
+    watermark = Math.max(watermark, mark.getTimestamp());
+    super.processWatermark(mark);
+  }
+
+  @Override
   public void processElement(StreamRecord<ArrowBatch> element) {
     ColumnarRecordMetrics.countIngested(getMetricGroup(), element.getValue().rowCount());
     // A Calc can sit immediately after a columnar key-group exchange (for example, the planner
@@ -106,17 +115,22 @@ public class NativeCalcOperator extends AbstractStreamOperator<ArrowBatch>
       try {
         if (inputSchemaEstablished) {
           Data.exportVectorSchemaRoot(inAllocator, in, dictionaries, inArray);
-          Native.calcExpressionArray(
-              calc, inArray.memoryAddress(), outArray.memoryAddress(), outSchema.memoryAddress());
+          Native.calcExpressionArrayAtWatermark(
+              calc,
+              inArray.memoryAddress(),
+              outArray.memoryAddress(),
+              outSchema.memoryAddress(),
+              watermark);
         } else {
           try (ArrowSchema inSchema = ArrowSchema.allocateNew(inAllocator)) {
             Data.exportVectorSchemaRoot(inAllocator, in, dictionaries, inArray, inSchema);
-            Native.calcExpression(
+            Native.calcExpressionAtWatermark(
                 calc,
                 inArray.memoryAddress(),
                 inSchema.memoryAddress(),
                 outArray.memoryAddress(),
-                outSchema.memoryAddress());
+                outSchema.memoryAddress(),
+                watermark);
             inputSchemaEstablished = true;
           }
         }

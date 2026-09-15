@@ -1,4 +1,5 @@
 use crate::*;
+use arrow::datatypes::TimeUnit;
 
 /// Builds a DataFusion expression from the JVM's pre-order encoding (ticket 19): `kinds`, `payload`,
 /// and `child_counts` describe each node, with literals drawn from the typed pools by `payload`.
@@ -44,6 +45,26 @@ pub(crate) fn build_expr(
                     .map(|&byte| byte as u8)
                     .collect()
             })))
+        }
+        24 => {
+            let value = (longs[arg + 1] != 0).then_some(longs[arg + 2]);
+            logical_lit(match longs[arg] {
+                9 => ScalarValue::Date32(value.map(|v| v as i32)),
+                10 => ScalarValue::Time32Millisecond(value.map(|v| v as i32)),
+                11 => ScalarValue::TimestampNanosecond(value, None),
+                12 => ScalarValue::Int32(value.map(|v| v as i32)),
+                13 => ScalarValue::Int64(value),
+                other => panic!("unsupported temporal literal type: {other}"),
+            })
+        }
+        25 => {
+            let encoded = strings[arg].as_deref().expect("clock field and zone");
+            let (field, zone) = encoded.split_once('|').expect("clock field and zone");
+            crate::flink_functions::clock::function(
+                field.parse().expect("clock field"),
+                zone.into(),
+            )
+            .call(vec![])
         }
         11 => {
             // A widening numeric cast: build the single child, then wrap it. `arg` is the target code.
@@ -120,21 +141,8 @@ pub(crate) fn build_expr(
             datafusion::logical_expr::ScalarUDF::new_from_impl(JvmUdf::new(id, return_type))
                 .call(children)
         }
-        // A day-time INTERVAL literal (millis in the long pool), built as an Arrow IntervalDayTime so
-        // `timestamp - interval` (e.g. q7's join residual) evaluates to a timestamp. Split into
-        // days + milliseconds to keep each within i32 for multi-day intervals.
-        15 => {
-            let millis = longs[arg];
-            let days = (millis / 86_400_000) as i32;
-            let milliseconds = (millis % 86_400_000) as i32;
-            datafusion::prelude::Expr::Literal(
-                ScalarValue::IntervalDayTime(Some(arrow::datatypes::IntervalDayTime {
-                    days,
-                    milliseconds,
-                })),
-                None,
-            )
-        }
+        // Match the interval columns at the Arrow boundary: signed millisecond longs.
+        15 => logical_lit(longs[arg]),
         // An exact DECIMAL literal, encoded "unscaled|precision|scale" in the string pool. Built as a
         // Decimal128 scalar so decimal arithmetic (q1's `0.908 * price`) stays exact.
         16 => {
@@ -274,19 +282,7 @@ pub(crate) fn build_expr(
                 other => panic!("ITEM over unsupported collection type {other}"),
             }
         }
-        // PROCTIME(): the current processing time as a TIMESTAMP_LTZ(3) literal. Stamped once when the
-        // Calc is compiled; the proctime-ordered operators read it only as an arrival-order key (which
-        // they ignore) and project it away, so a fixed value per operator is correct for them.
-        12 => {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as i64)
-                .unwrap_or(0);
-            datafusion::prelude::Expr::Literal(
-                ScalarValue::TimestampMillisecond(Some(now), Some(Arc::from("UTC"))),
-                None,
-            )
-        }
+        12 => crate::flink_functions::clock::function(0, "UTC".into()).call(vec![]),
         other => panic!("unsupported expression kind: {other}"),
     }
 }
@@ -1276,14 +1272,7 @@ impl datafusion::logical_expr::ScalarUDFImpl for DateFormat {
         use datafusion::logical_expr::ColumnarValue;
         let rows = args.number_rows;
         let arrays = ColumnarValue::values_to_arrays(&args.args)?;
-        let times = arrow::compute::cast(
-            &arrays[0],
-            &DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
-        )?;
-        let times = times
-            .as_any()
-            .downcast_ref::<TimestampMillisecondArray>()
-            .expect("timestamp ms");
+        let times = crate::flink_functions::map_timestamp_millis(&arrays[0], |millis| millis)?;
         let formats = arrow::compute::cast(&arrays[1], &DataType::Utf8)?;
         let formats = formats
             .as_any()
@@ -1347,14 +1336,7 @@ impl datafusion::logical_expr::ScalarUDFImpl for ExtractField {
         use datafusion::logical_expr::ColumnarValue;
         let rows = args.number_rows;
         let arrays = ColumnarValue::values_to_arrays(&args.args)?;
-        let times = arrow::compute::cast(
-            &arrays[0],
-            &DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
-        )?;
-        let times = times
-            .as_any()
-            .downcast_ref::<TimestampMillisecondArray>()
-            .expect("timestamp ms");
+        let times = crate::flink_functions::map_timestamp_millis(&arrays[0], |millis| millis)?;
         let units = arrow::compute::cast(&arrays[1], &DataType::Utf8)?;
         let units = units
             .as_any()
@@ -1446,14 +1428,7 @@ impl datafusion::logical_expr::ScalarUDFImpl for DateFormatLtz {
         use datafusion::logical_expr::ColumnarValue;
         let rows = args.number_rows;
         let arrays = ColumnarValue::values_to_arrays(&args.args)?;
-        let times = arrow::compute::cast(
-            &arrays[0],
-            &DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
-        )?;
-        let times = times
-            .as_any()
-            .downcast_ref::<TimestampMillisecondArray>()
-            .expect("timestamp ms");
+        let times = crate::flink_functions::map_timestamp_millis(&arrays[0], |millis| millis)?;
         let formats = arrow::compute::cast(&arrays[1], &DataType::Utf8)?;
         let formats = formats
             .as_any()
@@ -1520,14 +1495,7 @@ impl datafusion::logical_expr::ScalarUDFImpl for ExtractFieldLtz {
         use datafusion::logical_expr::ColumnarValue;
         let rows = args.number_rows;
         let arrays = ColumnarValue::values_to_arrays(&args.args)?;
-        let times = arrow::compute::cast(
-            &arrays[0],
-            &DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
-        )?;
-        let times = times
-            .as_any()
-            .downcast_ref::<TimestampMillisecondArray>()
-            .expect("timestamp ms");
+        let times = crate::flink_functions::map_timestamp_millis(&arrays[0], |millis| millis)?;
         let units = arrow::compute::cast(&arrays[1], &DataType::Utf8)?;
         let units = units
             .as_any()
@@ -1660,6 +1628,11 @@ pub(crate) fn udf_data_type(code: i64) -> DataType {
         5 => DataType::Float32,
         6 => DataType::Int16,
         7 => DataType::Int8,
+        9 => DataType::Date32,
+        10 => DataType::Time32(TimeUnit::Millisecond),
+        11 => DataType::Timestamp(TimeUnit::Nanosecond, None),
+        12 => DataType::Int32,
+        13 => DataType::Int64,
         code if code >= 1000 => {
             DataType::Decimal128(((code - 1000) / 100) as u8, ((code - 1000) % 100) as i8)
         }

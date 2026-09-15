@@ -96,7 +96,7 @@ final class RegularJoinMatcher {
     }
     RexNode expanded =
         RexUtil.expandSearch(join.getCluster().getRexBuilder(), null, condition.get());
-    return RexExpression.encode(expanded);
+    return RexExpression.encode(expanded, join);
   }
 
   static int[] leftKeys(StreamPhysicalJoin join) {

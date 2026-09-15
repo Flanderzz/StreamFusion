@@ -249,12 +249,20 @@ Scans only as far as the requested token, retaining empty tokens, instead of con
 
 A native parser mirrors DateTimeUtils.parseDate rather than the stricter Arrow ISO parser. Calendar validation includes year 0 through 9999 and leap-year rules.
 
-### TO_TIMESTAMP (deferred)
+### Temporal parsing and generated evaluators
 
-Native parsing is withdrawn. Its millisecond timestamp result can represent expanded years,
-but downstream native windows and keyed operators assume nanoseconds. A standalone parsing
-benchmark does not establish safe composition. The expression encoder declines the function,
-so the existing all-or-nothing admission rule keeps its consumers on Flink as well.
+Temporal parsing, formatted dates, epoch conversion, timezone conversion, interval arithmetic and
+casts reuse Flink 2.2.1's ExprCodeGenerator through the existing batched scalar JVM bridge. A generated
+function is compiled at planning time and serialized to the task-side binding; only its argument
+columns and final result cross JNI. Adjacent temporal calls fuse, preserving wide TimestampData
+intermediates when their final result is text or numeric. This follows the existing Comet-style JVM
+scalar upcall rather than introducing row-based native operators.
+
+Timestamp results retain the engine's nanosecond column convention. New timestamp-producing
+expressions default to fallback because Flink's full range cannot fit it; the TIMESTAMP_RANGE
+allowIncompatible opt-in admits representable workloads. Checked result conversion reports overflow
+instead of silently wrapping. Extending the column representation requires coordinated changes to
+all consumers, not just a parser. See [the coverage and range contract](../docs/operators/temporal-functions.md).
 
 ### QUARTER
 
@@ -272,20 +280,19 @@ Subtracts the first Julian day of the year using Flink's integer arithmetic in t
 
 Computes the Julian-day remainder with Sunday=1, directly in the shared primitive-array mapping. Preserves Flink's timestamp-day conversion and integer overflow on expanded years.
 
-### FLOOR (timestamp, deferred)
+### Temporal FLOOR and CEIL
 
-Temporal FLOOR is withdrawn: its millisecond output does not satisfy downstream native
-operators' nanosecond contract. Rejecting the temporal expression keeps projection, grouping,
-formatting, comparison, and computed-rowtime window consumers on Flink. Numeric FLOOR retains
-its existing native implementation.
+Plain TIMESTAMP DAY/HOUR/MINUTE/SECOND/MILLISECOND rounding uses a primitive-array Rust kernel.
+It follows Flink's getMillisecond-based rounding, including negative epochs and the special handling
+of sub-millisecond fractions when rounding to MILLISECOND. Calendar units and LTZ rounding use the
+fused Flink evaluator. Timestamp outputs retain nanoseconds and require the range opt-in above.
 
-### CEIL (timestamp, deferred)
+### Clocks and watermarks
 
-Temporal CEIL/CEILING is withdrawn for the same timestamp-unit mismatch as FLOOR. The shared
-rounding kernel, resolution encoder, and millisecond-only extraction/coercion guards are
-removed with the last producer that required them. Existing numeric rounding is unaffected.
-The change stays within expression admission; it adds no timestamp metadata or checks to
-physical Calc operators or row/Arrow conversion.
+Clock expressions are volatile execution-time UDFs rather than literals captured at native
+expression compilation. CURRENT_WATERMARK reads operator-scoped context supplied by the Calc's
+watermark callback. The context is installed only for synchronous evaluation and restored by an
+RAII guard. Bare predicates without that operator context decline watermark access.
 
 ### LTRIM
 

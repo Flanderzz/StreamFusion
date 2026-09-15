@@ -6,10 +6,13 @@ to Flink entirely, per the [all-or-nothing island rule](index.md#the-all-or-noth
 | Operator | SQL surface | Why |
 |---|---|---|
 | `Correlate` (most shapes) | Lateral table functions; `UNNEST` with a pushed condition the expression engine can't encode, or any condition over a LEFT `UNNEST` | No native path yet. **Exception:** plain INNER or LEFT `UNNEST` of a single `ARRAY`/`MAP`/`MULTISET` column (optionally `WITH ORDINALITY`, INNER including a pushed element filter) **is** native — see [Unnest / Correlate](unnest-correlate.md). |
-| `Match` | `MATCH_RECOGNIZE` (CEP / row-pattern matching) | No native path. |
+| `Match` | `MATCH_RECOGNIZE` (CEP / row-pattern matching) | No native path; `MATCH_ROWTIME` and `MATCH_PROCTIME` require this operator and fall back with it. |
 | `GroupWindowTableAggregate` | A `TableAggregateFunction` inside a legacy group window | No native path. Ordinary legacy `TUMBLE`/`HOP` aggregates and event-time `SESSION` are native — see [Window aggregate](window-aggregate.md). |
 | `IncrementalGroupAggregate` | The five-node chain a distinct aggregate plans to only when `table.optimizer.distinct-agg.split.enabled` is on (partial local → incremental → final global over a bucket key) | Deliberate non-goal: the knob mitigates state-backend hot-key skew that an in-process distinct set doesn't exhibit. The default mini-batch plan for distinct aggregates — `LocalGroupAggregate` + `GlobalGroupAggregate` with a distinct `MapView` partial — **is** native; see [GROUP BY](group-by.md). |
 | `GroupTableAggregate` | `TableAggregateFunction` | No native path. |
 | `DropUpdateBefore`, `Values` | Misc | No native path. (A non-temporal `Sort` is parity, not a gap — Flink itself rejects it in streaming.) |
 | `LegacyTableSourceScan`, `LegacySink` | Legacy (pre-`DynamicTableSource`/`Sink`) connectors | No native path. |
 | `Python*` (`PythonCalc`, `PythonCorrelate`, `PythonGroupAggregate`, `PythonOverAggregate`, …) | PyFlink UDFs | No native path — a Python UDF can't run inside a native island. |
+
+Pattern matching, including `MATCH_ROWTIME` and `MATCH_PROCTIME`, is tracked in
+[issue #78](https://github.com/datafusion-contrib/StreamFusion/issues/78).

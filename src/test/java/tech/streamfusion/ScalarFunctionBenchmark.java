@@ -508,6 +508,16 @@ class ScalarFunctionBenchmark {
             new Query("RPAD_DYNAMIC", "tt_pad", "RPAD(s, n, p)", "STRING"),
             new Query("SPLIT_INDEX_DYNAMIC", "tt_split", "SPLIT_INDEX(s, p, n)", "STRING"),
             new Query("TO_DATE", "tt_date_text", "TO_DATE(s)", "DATE"),
+            new Query("TO_TIMESTAMP", "tt_timestamp_text", "TO_TIMESTAMP(s)", "TIMESTAMP(3)"),
+            new Query("TIMESTAMP_FLOOR", "tt_timestamp", "FLOOR(ts TO MINUTE)", "TIMESTAMP(9)"),
+            new Query("TIMESTAMP_CEIL", "tt_timestamp", "CEIL(ts TO SECOND)", "TIMESTAMP(9)"),
+            new Query(
+                "TIMESTAMP_ADD", "tt_timestamp", "TIMESTAMPADD(MONTH, 1, ts)", "TIMESTAMP(9)"),
+            new Query(
+                "TIMESTAMP_DIFF",
+                "tt_timestamp",
+                "TIMESTAMPDIFF(DAY, ts, TIMESTAMP '2024-01-01 00:00:00')",
+                "BIGINT"),
             new Query("QUARTER", "tt_timestamp", "QUARTER(ts)", "BIGINT"),
             new Query("WEEK", "tt_timestamp", "WEEK(ts)", "BIGINT"),
             new Query("DAYOFYEAR", "tt_timestamp", "DAYOFYEAR(ts)", "BIGINT"),

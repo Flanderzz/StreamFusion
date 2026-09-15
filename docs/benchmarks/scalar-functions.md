@@ -18,8 +18,9 @@ differences can be run-to-run noise, and these measurements do not isolate kerne
 The original 48 cases cover 35 retained functions, including integer widths and literal/column
 search parameters. All cases run with the 264-byte ASCII/non-null and Unicode/NULL scenarios;
 the ten search cases also run with 8-byte ASCII padding, giving 106 Flink/native comparisons.
-TO_TIMESTAMP and temporal FLOOR/CEIL/CEILING are outside the PR's native coverage and have no
-result rows. See [Calc / filter](../operators/calc-filter.md) for the complete argument gates.
+TO_TIMESTAMP and temporal FLOOR/CEIL/CEILING were outside that measurement's coverage. Their
+subsequent implementation is measured in the [temporal diagnostic below](#temporal-coverage-diagnostic-2026-09-15).
+See [Calc / filter](../operators/calc-filter.md) for the complete argument gates.
 
 ## Inputs
 
@@ -648,3 +649,47 @@ SQL NULL in that scenario. All non-null documents are valid and contain a matchi
 | BOOLEAN | Unicode, 264-byte padding, NULL/8 | 1.331 | 1.158 | 1.15x |
 | INTEGER | Unicode, 264-byte padding, NULL/8 | 1.198 | 1.065 | 1.12x |
 | DOUBLE | Unicode, 264-byte padding, NULL/8 | 1.296 | 1.158 | 1.12x |
+
+## Temporal coverage diagnostic (2026-09-15)
+
+This run measures the new temporal expression paths on Apple M4 Pro, JDK 17, UTC, Flink 2.2.1
+and DataFusion 54.0.0. It uses the release core library with mimalloc, 1,000,000 rows, parallelism 1,
+one warmup and three measured trials per engine/case. Cases run serially in one JVM with alternating
+engine order; no other tests or benchmarks run concurrently. Medians include SQL planning and
+execution. Every plan is checked for `NativeCalc`, `RowDataToArrow`, and `ArrowToRowData`.
+
+The timestamp-range opt-in is enabled. Inputs are non-null and fit the native range. Parsing uses
+`2000-02-29 12:34:56` and `1969-12-31 23:59:59`; other cases use the existing TIMESTAMP(9)
+fixtures, including negative fractional epochs. These cases do not measure dynamic formats, time
+zones, or every temporal overload. The 264-byte payload setting is inherited from the general
+harness and does not pad these date/time fixtures. Identity controls use the same input sources
+and are reported without subtraction.
+
+Reproduce in a fresh JVM:
+
+```sh
+TZ=UTC SF_BENCHMARK=true mvn -pl :streamfusion-runtime test -Pbench \
+  -Dnative.cargo.packages='-p streamfusion' \
+  '-Dnative.cargo.args=build --release --features mimalloc' \
+  -Dstreamfusion.expression.TIMESTAMP_RANGE.allowIncompatible=true \
+  '-Dtest=ScalarFunctionBenchmark#individualFunctions' \
+  -Dscalar.functions=TO_TIMESTAMP,TIMESTAMP_FLOOR,TIMESTAMP_CEIL,TIMESTAMP_ADD,TIMESTAMP_DIFF \
+  -Dscalar.rows=1000000 -Dscalar.warmup=1 -Dscalar.runs=3 \
+  -Dscalar.output=target/scalar-temporal.csv
+```
+
+| Case | Flink (s) | Native (s) | Flink / native |
+|---|---:|---:|---:|
+| Identity control: timestamp text | 0.328 | 0.549 | 0.598x |
+| Identity control: TIMESTAMP(9) | 0.304 | 0.440 | 0.692x |
+| `TO_TIMESTAMP(s)` | 1.965 | 2.219 | 0.886x |
+| `FLOOR(ts TO MINUTE)` | 0.298 | 0.435 | 0.684x |
+| `CEIL(ts TO SECOND)` | 0.300 | 0.428 | 0.701x |
+| `TIMESTAMPADD(MONTH, 1, ts)` | 0.350 | 0.584 | 0.600x |
+| `TIMESTAMPDIFF(DAY, ts, TIMESTAMP '2024-01-01 00:00:00')` | 0.302 | 0.528 | 0.572x |
+
+All five standalone temporal projections are slower than Flink in this diagnostic. Even the
+identity controls pay more for native execution, so these measurements do not isolate kernel or
+upcall cost. This is coverage work: temporal expressions can now remain between native operators,
+and adjacent temporal calls can share one upcall. A longer pipeline needs its own benchmark before
+claiming a throughput improvement. The current results justify no standalone temporal speedup claim.

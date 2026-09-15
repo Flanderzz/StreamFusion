@@ -49,11 +49,7 @@ final class RexExpression {
   private static final int KIND_LIT_TINY = 9;
   // A cast node: payload is the target type code, with one child (the casted expression).
   private static final int KIND_CAST = 11;
-  // PROCTIME(): a nullary call materializing the current processing time as a TIMESTAMP_LTZ(3)
-  // column. Admitting it keeps the planner's `PROCTIME() AS …` projection columnar, which is what
-  // unblocks proctime-ordered operators (dedup, OVER) — those use the column only as an
-  // arrival-order
-  // key and project it away, so its (non-deterministic) value is never observed in the output.
+  // PROCTIME materializes a volatile execution-time TIMESTAMP_LTZ(3) column.
   private static final int KIND_PROCTIME = 12;
   // Field access: extract a named field from a ROW/struct-typed child. payload is the string-pool
   // index of the field name, with one child (the struct-typed expression). Nested access (a.b.c)
@@ -65,10 +61,6 @@ final class RexExpression {
   // the
   // output column type matches — only under the approximate-decimal flag (not byte-exact to Flink).
   private static final int KIND_CAST_DECIMAL = 14;
-  // A day-time INTERVAL literal: payload is the long-pool index of its value in milliseconds. The
-  // native side builds an Arrow IntervalDayTime, so `timestamp - interval` evaluates to a
-  // timestamp.
-  private static final int KIND_LIT_INTERVAL = 15;
   // An exact DECIMAL literal: payload indexes the string pool, whose entry is
   // "unscaled|precision|scale"
   // (the unscaled integer as a string, as it can exceed i64). The native side builds a Decimal128
@@ -102,6 +94,8 @@ final class RexExpression {
   // A single-precision literal, so a FLOAT expression is not widened to double by its constants.
   private static final int KIND_LIT_FLOAT = 22;
   private static final int KIND_LIT_BINARY = 23;
+  private static final int KIND_LIT_TEMPORAL = 24;
+  private static final int KIND_CLOCK = 25;
 
   // Cast target type codes, mirrored on the native side.
   private static final int CAST_TINYINT = 0;
@@ -149,14 +143,13 @@ final class RexExpression {
   // Why the encode declined, set at the first (innermost) un-admitted node; null if it succeeded.
   private String reason;
   // The session time zone (table.local-time-zone) — needed to format/extract a TIMESTAMP_LTZ, whose
-  // calendar fields depend on it. Set only on the Calc path (where DATE_FORMAT/EXTRACT live); null
-  // elsewhere, so an LTZ date/extract in a bare-RexNode context (e.g. a join residual) safely falls
-  // back.
+  // calendar fields depend on it. Predicate encoders receive their owning relational node too.
   private String sessionZoneId;
-  // Whether table.exec.legacy-cast-behaviour is enabled — known only when encoding a Calc (the
-  // config
-  // rides the node). null (a bare predicate encode) declines the host-exact casts, conservatively.
+  // A bare predicate without a relational context conservatively declines host-exact numeric casts.
   private Boolean legacyCastBehaviour;
+  private boolean watermarkAvailable;
+  private org.apache.flink.configuration.Configuration temporalConfig =
+      new org.apache.flink.configuration.Configuration();
   // Root of the projection currently being encoded; null for conditions and bare predicates.
   private RexNode projectionRoot;
 
@@ -175,6 +168,13 @@ final class RexExpression {
   /** The encoded expression, or null if {@code node} contains an unsupported operation. */
   static RexExpression encode(RexNode node) {
     RexExpression encoder = new RexExpression();
+    return encoder.emit(node) ? encoder : null;
+  }
+
+  static RexExpression encode(RexNode node, org.apache.calcite.rel.RelNode context) {
+    RexExpression encoder = new RexExpression();
+    encoder.configure(
+        org.apache.flink.table.planner.utils.ShortcutUtils.unwrapTableConfig(context));
     return encoder.emit(node) ? encoder : null;
   }
 
@@ -229,15 +229,25 @@ final class RexExpression {
   }
 
   private boolean tryEncodeCalc(Calc calc) {
-    org.apache.flink.table.api.TableConfig tableConfig =
-        org.apache.flink.table.planner.utils.ShortcutUtils.unwrapTableConfig(calc);
+    configure(org.apache.flink.table.planner.utils.ShortcutUtils.unwrapTableConfig(calc));
+    watermarkAvailable = true;
+    return emitCalc(calc);
+  }
+
+  private void configure(org.apache.flink.table.api.TableConfig tableConfig) {
     sessionZoneId = tableConfig.getLocalTimeZone().getId();
+    temporalConfig =
+        org.apache.flink.configuration.Configuration.fromMap(tableConfig.toMap());
+    temporalConfig.setString("table.local-time-zone", sessionZoneId);
     legacyCastBehaviour =
         tableConfig
             .get(
                 org.apache.flink.table.api.config.ExecutionConfigOptions
                     .TABLE_EXEC_LEGACY_CAST_BEHAVIOUR)
             .isEnabled();
+  }
+
+  private boolean emitCalc(Calc calc) {
     RexProgram program = calc.getProgram();
     // A filter condition is never a direct projection, regardless of encoding order.
     projectionRoot = null;
@@ -381,6 +391,41 @@ final class RexExpression {
 
   private boolean emitLiteral(RexLiteral literal) {
     SqlTypeName type = literal.getType().getSqlTypeName();
+    int temporalType = temporalTypeCode(literal.getType());
+    if (temporalType >= 0) {
+      long value = 0;
+      if (!literal.isNull()) {
+        try {
+          value =
+              switch (temporalType) {
+                case 9 ->
+                    literal
+                        .getValueAs(org.apache.calcite.util.DateString.class)
+                        .getDaysSinceEpoch();
+                case 10 ->
+                    literal.getValueAs(org.apache.calcite.util.TimeString.class).getMillisOfDay();
+                case 11 -> {
+                  String text =
+                      literal.getValueAs(org.apache.calcite.util.TimestampString.class).toString();
+                  java.time.LocalDateTime timestamp =
+                      java.time.LocalDateTime.parse(text.replace(' ', 'T'));
+                  yield tech.streamfusion.arrow.TimestampConversion.toNanos(
+                      org.apache.flink.table.data.TimestampData.fromLocalDateTime(timestamp));
+                }
+                case 12, 13 -> literal.getValueAs(Long.class);
+                default ->
+                    throw new IllegalArgumentException("unsupported temporal literal " + type);
+              };
+        } catch (ArithmeticException e) {
+          return reject("temporal literal exceeds the native nanosecond timestamp range");
+        }
+      }
+      add(KIND_LIT_TEMPORAL, longs.size(), 0);
+      longs.add((long) temporalType);
+      longs.add(literal.isNull() ? 0L : 1L);
+      longs.add(value);
+      return true;
+    }
     if (literal.isNull()) {
       if (type == SqlTypeName.CHAR
           || type == SqlTypeName.VARCHAR
@@ -396,20 +441,6 @@ final class RexExpression {
       }
       // Other NULL types are inferred from the surrounding expression.
       add(KIND_LIT_NULL, -1, 0);
-      return true;
-    }
-    // A day-time INTERVAL literal (SECOND/MINUTE/HOUR/DAY) — Calcite stores its value in
-    // milliseconds.
-    // Admitted so datetime arithmetic like `ts - INTERVAL '10' SECOND` (Nexmark q7) is expressible;
-    // a
-    // year-month interval (value in months) falls back.
-    if (type.getFamily() == SqlTypeFamily.INTERVAL_DAY_TIME) {
-      Long millis = literal.getValueAs(Long.class);
-      if (millis == null) {
-        return reject("null interval literal");
-      }
-      add(KIND_LIT_INTERVAL, longs.size(), 0);
-      longs.add(millis);
       return true;
     }
     switch (type) {
@@ -517,6 +548,27 @@ final class RexExpression {
         && hasImplicitStringNumericCast(call)) {
       return reject("Flink rejects implicit VARCHAR/numeric equality during code generation");
     }
+    if (isTimestampIdentityCast(call)) {
+      return emit(call.getOperands().get(0));
+    }
+    long roundingWidth = nativeRoundingWidth(call);
+    if (roundingWidth > 0) {
+      if (!admitTemporalTimestampResult(call)) {
+        return false;
+      }
+      add(KIND_CALL, 154, 3);
+      if (!emit(call.getOperands().get(0))) {
+        return false;
+      }
+      add(KIND_LIT_LONG, longs.size(), 0);
+      longs.add(roundingWidth);
+      add(KIND_LIT_BOOL, longs.size(), 0);
+      longs.add("FLOOR".equals(call.getOperator().getName()) ? 0L : 1L);
+      return true;
+    }
+    if (needsTemporalFunction(call)) {
+      return emitTemporalFunction(call);
+    }
     if (call.getKind() == SqlKind.CAST) {
       return emitCast(call);
     }
@@ -528,15 +580,6 @@ final class RexExpression {
     }
     if (call.getKind() == SqlKind.EXTRACT) {
       return emitExtract(call);
-    }
-    if (call.getKind() == SqlKind.TIMES && isDayTimeIntervalMultiply(call)) {
-      List<RexNode> operands = call.getOperands();
-      int interval =
-          operands.get(0).getType().getSqlTypeName().getFamily() == SqlTypeFamily.INTERVAL_DAY_TIME
-              ? 0
-              : 1;
-      add(KIND_CALL, 92, 2);
-      return emit(operands.get(interval)) && emit(operands.get(1 - interval));
     }
     // Decimal-typed arithmetic, all exact. Add/subtract/multiply: the operands reach the native
     // side
@@ -567,8 +610,34 @@ final class RexExpression {
       // fall through: the arithmetic op is emitted next as this cast's single child.
     }
     String functionName = call.getOperator().getName().toUpperCase(Locale.ROOT);
+    int clockField =
+        switch (functionName) {
+          case "CURRENT_TIMESTAMP", "CURRENT_ROW_TIMESTAMP", "NOW" -> 0;
+          case "LOCALTIMESTAMP" -> 1;
+          case "CURRENT_DATE" -> 2;
+          case "CURRENT_TIME", "LOCALTIME" -> 3;
+          case "CURRENT_WATERMARK" -> 5;
+          case "UNIX_TIMESTAMP" -> call.getOperands().isEmpty() ? 4 : -1;
+          default -> -1;
+        };
+    if (clockField >= 0) {
+      if (clockField == 5 && !watermarkAvailable) {
+        return reject("CURRENT_WATERMARK requires a Calc runtime context");
+      }
+      String zone =
+          sessionZoneId == null ? "UTC" : java.time.ZoneId.of(sessionZoneId).normalized().getId();
+      if ("Z".equals(zone)) {
+        zone = "UTC";
+      }
+      if (clockField >= 1 && clockField <= 3 && !nativeZoneSupported(zone)) {
+        return reject("unsupported clock time zone " + zone);
+      }
+      add(KIND_CLOCK, strings.size(), 0);
+      strings.add(clockField + "|" + zone);
+      return true;
+    }
     // PROCTIME() / PROCTIME_MATERIALIZE(): a nullary current-processing-time column.
-    if (functionName.contains("PROCTIME")) {
+    if ("PROCTIME".equals(functionName) || "PROCTIME_MATERIALIZE".equals(functionName)) {
       add(KIND_PROCTIME, 0, 0);
       return true;
     }
@@ -586,9 +655,6 @@ final class RexExpression {
     }
     if ("TO_DATE".equals(functionName)) {
       return emitCharacterFunction(call, 131, 1, 1);
-    }
-    if ("TO_TIMESTAMP".equals(functionName)) {
-      return reject("TO_TIMESTAMP is deferred until native timestamp units are compatible");
     }
     if ("JSON_QUOTE".equals(functionName)) {
       return emitCharacterFunction(call, 122, 1, 1);
@@ -749,23 +815,13 @@ final class RexExpression {
     if ("DATE_FORMAT".equals(functionName)) {
       return emitDateFormat(call.getOperands());
     }
-    if ("TO_TIMESTAMP_LTZ".equals(functionName)) {
-      return emitToTimestampLtz(call.getOperands());
-    }
     if ("ABS".equals(functionName)) {
       return emitFloatUnary(call, 62);
     }
     if ("FLOOR".equals(functionName)) {
-      if (call.getOperands().size() == 2) {
-        return reject("Temporal FLOOR is deferred until native timestamp units are compatible");
-      }
       return emitFloatUnary(call, 63);
     }
-    if ("CEIL".equals(functionName)
-        || "CEILING".equals(functionName)) {
-      if (call.getOperands().size() == 2) {
-        return reject("Temporal CEIL is deferred until native timestamp units are compatible");
-      }
+    if ("CEIL".equals(functionName) || "CEILING".equals(functionName)) {
       return emitFloatUnary(call, 64);
     }
     if ("SIGN".equals(functionName)) {
@@ -1252,7 +1308,8 @@ final class RexExpression {
     }
     if ("UNKNOWN".equals(error) && call != projectionRoot) {
       return reject(
-          "JSON_EXISTS UNKNOWN ON ERROR requires a direct projection; Flink unboxes null in boolean contexts");
+          "JSON_EXISTS UNKNOWN ON ERROR requires a direct projection; Flink unboxes null in boolean"
+              + " contexts");
     }
     if ("ERROR".equals(error)) {
       return emitJsonExistsError(args);
@@ -1451,16 +1508,6 @@ final class RexExpression {
     return emit(args.get(0));
   }
 
-  private static boolean isDayTimeIntervalMultiply(RexCall call) {
-    if (call.getOperands().size() != 2) {
-      return false;
-    }
-    return call.getOperands().get(0).getType().getSqlTypeName().getFamily()
-            == SqlTypeFamily.INTERVAL_DAY_TIME
-        || call.getOperands().get(1).getType().getSqlTypeName().getFamily()
-            == SqlTypeFamily.INTERVAL_DAY_TIME;
-  }
-
   private static int arithmeticNarrowResult(RexCall call) {
     switch (call.getKind()) {
       case PLUS:
@@ -1535,14 +1582,6 @@ final class RexExpression {
     }
     SqlTypeName source = sourceType.getSqlTypeName();
     SqlTypeName targetType = resultType.getSqlTypeName();
-    // Arrow timestamps use nanoseconds at the columnar boundary regardless of the declared Flink
-    // precision. Widening the declared precision therefore changes neither values nor buffers; it
-    // only permits additional fractional digits that the source cannot contain.
-    if ((source == SqlTypeName.TIMESTAMP || source == SqlTypeName.TIMESTAMP_WITH_LOCAL_TIME_ZONE)
-        && source == targetType
-        && resultType.getPrecision() >= sourceType.getPrecision()) {
-      return emit(call.getOperands().get(0));
-    }
     // A non-narrowing cast to VARCHAR from a CHAR or VARCHAR source (target length ≥ source). Flink
     // stores both as unpadded StringData and neither pads nor truncates a widening string cast, so
     // the
@@ -1622,10 +1661,235 @@ final class RexExpression {
    * carry.
    */
   private static int hostCastTypeCode(RelDataType type) {
+    int temporal = temporalTypeCode(type);
+    if (temporal >= 0) {
+      return temporal;
+    }
     if (type.getSqlTypeName() == SqlTypeName.DECIMAL) {
       return tech.streamfusion.operator.NativeUdf.decimalType(type.getPrecision(), type.getScale());
     }
     return udfTypeCode(type.getSqlTypeName());
+  }
+
+  private static int temporalTypeCode(RelDataType type) {
+    return switch (type.getSqlTypeName()) {
+      case DATE -> 9;
+      case TIME -> 10;
+      case TIMESTAMP, TIMESTAMP_WITH_LOCAL_TIME_ZONE -> 11;
+      default ->
+          switch (type.getSqlTypeName().getFamily()) {
+            case INTERVAL_YEAR_MONTH -> 12;
+            case INTERVAL_DAY_TIME -> 13;
+            default -> -1;
+          };
+    };
+  }
+
+  private static boolean needsTemporalFunction(RexCall call) {
+    String name = call.getOperator().getName().toUpperCase(Locale.ROOT);
+    if (java.util.Set.of(
+            "TO_TIMESTAMP",
+            "TO_TIMESTAMP_LTZ",
+            "TIMESTAMPADD",
+            "TIMESTAMPDIFF",
+            "CONVERT_TZ",
+            "FROM_UNIXTIME")
+        .contains(name)) {
+      return true;
+    }
+    if ("TO_DATE".equals(name)) {
+      return call.getOperands().size() == 2;
+    }
+    if ("UNIX_TIMESTAMP".equals(name)) {
+      return !call.getOperands().isEmpty();
+    }
+    if ("DATE_FORMAT".equals(name)) {
+      if (NativeConfig.allowsIncompatible("DATE_FORMAT")
+          && call.getOperands().size() == 2
+          && call.getOperands().get(1) instanceof RexLiteral format
+          && call.getOperands().get(0).getType().getSqlTypeName()
+              == SqlTypeName.TIMESTAMP_WITH_LOCAL_TIME_ZONE
+          && toChronoFormat(format.getValueAs(String.class)) != null) {
+        return false;
+      }
+      return call.getOperands().size() != 2
+          || !(call.getOperands().get(1) instanceof RexLiteral format)
+          || call.getOperands().get(0).getType().getSqlTypeName() != SqlTypeName.TIMESTAMP
+          || call.getOperands().get(0) instanceof RexCall child && needsTemporalFunction(child)
+          || toChronoFormat(format.getValueAs(String.class)) == null;
+    }
+    if (call.getKind() == SqlKind.EXTRACT) {
+      String unit = String.valueOf(((RexLiteral) call.getOperands().get(0)).getValue());
+      SqlTypeName source = call.getOperands().get(1).getType().getSqlTypeName();
+      if (NativeConfig.allowsIncompatible("EXTRACT")
+          && source == SqlTypeName.TIMESTAMP_WITH_LOCAL_TIME_ZONE
+          && extractField(unit) != null) {
+        return false;
+      }
+      if (call.getOperands().get(1) instanceof RexCall child && needsTemporalFunction(child)) {
+        return true;
+      }
+      return !(java.util.Set.of("QUARTER", "WEEK", "DOY", "DOW").contains(unit)
+          && (source == SqlTypeName.DATE || source == SqlTypeName.TIMESTAMP));
+    }
+    if (("FLOOR".equals(name) || "CEIL".equals(name) || "CEILING".equals(name))
+        && call.getOperands().size() == 2) {
+      return true;
+    }
+    boolean temporalOperand =
+        call.getOperands().stream().anyMatch(operand -> temporalTypeCode(operand.getType()) >= 0);
+    return switch (call.getKind()) {
+      case CAST -> temporalOperand || temporalTypeCode(call.getType()) >= 0;
+      case EQUALS,
+              NOT_EQUALS,
+              LESS_THAN,
+              LESS_THAN_OR_EQUAL,
+              GREATER_THAN,
+              GREATER_THAN_OR_EQUAL,
+              IS_DISTINCT_FROM,
+              IS_NOT_DISTINCT_FROM ->
+          temporalOperand;
+      case PLUS, MINUS, TIMES, DIVIDE, MOD, MINUS_PREFIX -> temporalOperand;
+      default -> "DATETIME_PLUS".equals(name) || "-".equals(name) && temporalOperand;
+    };
+  }
+
+  private static long nativeRoundingWidth(RexCall call) {
+    String name = call.getOperator().getName();
+    if (!("FLOOR".equals(name) || "CEIL".equals(name) || "CEILING".equals(name))
+        || call.getOperands().size() != 2
+        || call.getOperands().get(0).getType().getSqlTypeName() != SqlTypeName.TIMESTAMP
+        || !(call.getOperands().get(1) instanceof RexLiteral unit)) {
+      return -1;
+    }
+    return switch (String.valueOf(unit.getValue())) {
+      case "DAY" -> 86_400_000L;
+      case "HOUR" -> 3_600_000L;
+      case "MINUTE" -> 60_000L;
+      case "SECOND" -> 1_000L;
+      case "MILLISECOND" -> 1L;
+      default -> -1L;
+    };
+  }
+
+  private static boolean isTimestampIdentityCast(RexCall call) {
+    if (call.getKind() != SqlKind.CAST || call.getOperands().size() != 1) {
+      return false;
+    }
+    RelDataType source = call.getOperands().get(0).getType();
+    return (source.getSqlTypeName() == SqlTypeName.TIMESTAMP
+            || source.getSqlTypeName() == SqlTypeName.TIMESTAMP_WITH_LOCAL_TIME_ZONE)
+        && source.getSqlTypeName() == call.getType().getSqlTypeName()
+        && call.getType().getPrecision() >= source.getPrecision();
+  }
+
+  private boolean admitTemporalTimestampResult(RexCall call) {
+    if (temporalTypeCode(call.getType()) != 11
+        || NativeConfig.allowsIncompatible("TIMESTAMP_RANGE")) {
+      return true;
+    }
+    // Preserve existing epoch-millis conversion and elapsed-time interval arithmetic admission.
+    String name = call.getOperator().getName().toUpperCase(Locale.ROOT);
+    List<RexNode> args = call.getOperands();
+    if ("TO_TIMESTAMP_LTZ".equals(name)
+        && args.size() == 2
+        && java.util.Set.of(
+                SqlTypeName.TINYINT, SqlTypeName.SMALLINT, SqlTypeName.INTEGER, SqlTypeName.BIGINT)
+            .contains(args.get(0).getType().getSqlTypeName())
+        && args.get(1) instanceof RexLiteral precision
+        && Integer.valueOf(3).equals(precision.getValueAs(Integer.class))) {
+      return true;
+    }
+    if ((call.getKind() == SqlKind.PLUS
+            || call.getKind() == SqlKind.MINUS
+            || "DATETIME_PLUS".equals(name))
+        && args.size() == 2
+        && temporalTypeCode(args.get(0).getType()) == 11
+        && args.get(1).getType().getSqlTypeName().getFamily() == SqlTypeFamily.INTERVAL_DAY_TIME) {
+      return true;
+    }
+    return reject(
+        "timestamp result may exceed the native nanosecond range; requires "
+            + "streamfusion.expression.TIMESTAMP_RANGE.allowIncompatible=true");
+  }
+
+  private boolean emitTemporalFunction(RexCall call) {
+    if (!admitTemporalTimestampResult(call)) {
+      return false;
+    }
+    List<RexNode> arguments = new ArrayList<>();
+    List<org.apache.flink.table.types.logical.LogicalType> types = new ArrayList<>();
+    List<Integer> codes = new ArrayList<>();
+    RexNode expression;
+    try {
+      expression = temporalArguments(call, arguments, types, codes);
+    } catch (IllegalArgumentException e) {
+      return reject(e.getMessage());
+    }
+    int returnCode = hostCastTypeCode(call.getType());
+    if (returnCode < 0) {
+      return reject("unsupported temporal result type " + call.getType());
+    }
+    if (arguments.isEmpty()) {
+      types.add(new org.apache.flink.table.types.logical.IntType());
+      codes.add(tech.streamfusion.operator.NativeUdf.TYPE_INT);
+    }
+    TemporalFunction function;
+    Method eval;
+    try {
+      function =
+          new TemporalFunction(
+              expression,
+              types.toArray(org.apache.flink.table.types.logical.LogicalType[]::new),
+              temporalConfig);
+      eval = TemporalFunction.class.getMethod("eval", Object[].class);
+    } catch (Exception e) {
+      return reject("temporal expression cannot be generated: " + e.getMessage());
+    }
+    int localIndex =
+        addUdf(
+            tech.streamfusion.operator.NativeUdf.Descriptor.forFunction(
+                function, eval, codes.stream().mapToInt(Integer::intValue).toArray(), returnCode));
+    add(KIND_UDF, longs.size(), Math.max(1, arguments.size()));
+    longs.add((long) localIndex);
+    longs.add((long) returnCode);
+    if (arguments.isEmpty()) {
+      add(KIND_LIT_INT, longs.size(), 0);
+      longs.add(0L);
+    }
+    for (RexNode argument : arguments) {
+      if (!emit(argument)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private static RexNode temporalArguments(
+      RexNode node,
+      List<RexNode> arguments,
+      List<org.apache.flink.table.types.logical.LogicalType> types,
+      List<Integer> codes) {
+    if (node instanceof RexLiteral) {
+      return node;
+    }
+    if (node instanceof RexCall call && needsTemporalFunction(call)) {
+      List<RexNode> operands = new ArrayList<>();
+      for (RexNode operand : call.getOperands()) {
+        operands.add(temporalArguments(operand, arguments, types, codes));
+      }
+      return call.clone(call.getType(), operands);
+    }
+    int code = hostCastTypeCode(node.getType());
+    if (code < 0) {
+      throw new IllegalArgumentException("unsupported temporal argument type " + node.getType());
+    }
+    RexInputRef reference = new RexInputRef(arguments.size(), node.getType());
+    arguments.add(node);
+    types.add(
+        org.apache.flink.table.planner.calcite.FlinkTypeFactory.toLogicalType(node.getType()));
+    codes.add(code);
+    return reference;
   }
 
   /** Emits a host-exact cast as a JVM-upcall node running Flink's own {@code CastExecutor}. */
@@ -2016,10 +2280,8 @@ final class RexExpression {
   }
 
   /**
-   * Emits integer calendar extraction. DATE/plain TIMESTAMP support QUARTER, WEEK, DOY and DOW
-   * through Flink's integer calendar kernel. YEAR through SECOND retain the existing timestamp
-   * path, including session-zone-aware LTZ extraction. Fractional results and unlisted fields fall
-   * back.
+   * Emits the retained Rust extraction paths. Other units and types are handled by the generated
+   * temporal evaluator before reaching this method.
    */
   private boolean emitExtract(RexCall call) {
     List<RexNode> operands = call.getOperands();
@@ -2214,32 +2476,11 @@ final class RexExpression {
   }
 
   /**
-   * Emits {@code TO_TIMESTAMP_LTZ(epoch, precision)} (op 87). Admitted only for the millisecond
-   * form ({@code precision} literal 3) over an integer epoch — the only shape the native side reads
-   * (epoch millis → the nanosecond/no-tz timestamp ArrowConversion pins every timestamp column to).
-   * Any other precision (seconds, micros) or a non-literal precision falls back.
-   */
-  private boolean emitToTimestampLtz(List<RexNode> args) {
-    if (args.size() != 2) {
-      return reject("TO_TIMESTAMP_LTZ requires 2 arguments");
-    }
-    if (!(args.get(1) instanceof RexLiteral)) {
-      return reject("TO_TIMESTAMP_LTZ requires a literal precision");
-    }
-    Object precision = ((RexLiteral) args.get(1)).getValueAs(Integer.class);
-    if (!Integer.valueOf(3).equals(precision)) {
-      return reject("TO_TIMESTAMP_LTZ: only millisecond precision (3) is supported");
-    }
-    add(KIND_CALL, 87, 1);
-    return emit(args.get(0));
-  }
-
-  /**
    * Emits {@code DATE_FORMAT(timestamp, format)} (op 86). Admitted only for a plain {@code
    * TIMESTAMP} (not local-zoned, whose formatting would depend on the session zone) with a literal
    * format whose Java pattern translates to a byte-identical chrono pattern (see {@link
-   * #toChronoFormat}); the translated pattern is passed to the native side. Anything else falls
-   * back.
+   * #toChronoFormat}); the translated pattern is passed to the native side. Other patterns use the
+   * generated temporal evaluator before reaching this method.
    */
   private boolean emitDateFormat(List<RexNode> args) {
     if (args.size() != 2) {

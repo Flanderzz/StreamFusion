@@ -100,7 +100,7 @@ final class TemporalJoinMatcher {
       return null;
     }
     RexNode expanded = RexUtil.expandSearch(join.getCluster().getRexBuilder(), null, residual);
-    return RexExpression.encode(expanded);
+    return RexExpression.encode(expanded, join);
   }
 
   /** The conjunction of the non-equi condition's conjuncts other than the temporal marker, or null. */

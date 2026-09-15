@@ -21,8 +21,11 @@ final class CalcMatcher {
 
   static boolean matches(Calc calc) {
     RexProgram program = calc.getProgram();
-    // A condition with an all-column-reference projection is the filter path's case; leave it there.
-    if (program.getCondition() != null && allInputRefs(program)) {
+    // A condition with an all-column-reference projection is the filter path's case; leave it
+    // there.
+    if (program.getCondition() != null
+        && allInputRefs(program)
+        && FilterCalcMatcher.matches(calc)) {
       return false;
     }
     if (!FilterCalcMatcher.convertibleRow(calc.getInput().getRowType())) {

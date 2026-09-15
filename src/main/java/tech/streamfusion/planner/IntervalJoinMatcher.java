@@ -81,7 +81,7 @@ final class IntervalJoinMatcher {
     }
     RexNode expanded =
         RexUtil.expandSearch(join.getCluster().getRexBuilder(), null, condition.get());
-    return RexExpression.encode(expanded);
+    return RexExpression.encode(expanded, join);
   }
 
   /** The native join-type code for a time-bounded join (0=INNER,1=LEFT,2=RIGHT,3=FULL), or -1. */

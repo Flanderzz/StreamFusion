@@ -524,15 +524,8 @@ public final class ArrowConversion {
 
     @Override
     public ArrowType visit(TimeType timeType) {
-      if (timeType.getPrecision() == 0) {
-        return new ArrowType.Time(TimeUnit.SECOND, 32);
-      } else if (timeType.getPrecision() <= 3) {
-        return new ArrowType.Time(TimeUnit.MILLISECOND, 32);
-      } else if (timeType.getPrecision() <= 6) {
-        return new ArrowType.Time(TimeUnit.MICROSECOND, 64);
-      } else {
-        return new ArrowType.Time(TimeUnit.NANOSECOND, 64);
-      }
+      // Calcite can declare TIME(0) while Flink's internal int still carries milliseconds.
+      return new ArrowType.Time(TimeUnit.MILLISECOND, 32);
     }
 
     @Override

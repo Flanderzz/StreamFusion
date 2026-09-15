@@ -10,6 +10,7 @@ use datafusion::logical_expr::{ScalarUDF, Volatility};
 use std::sync::Arc;
 
 pub(crate) mod calendar;
+pub(crate) mod clock;
 pub(crate) mod decode;
 pub(crate) mod encode;
 pub(crate) mod json_quote;
@@ -33,6 +34,7 @@ mod json_serialize;
 mod json_value;
 mod locate;
 mod scalar;
+mod temporal_round;
 
 const HEX_DIGITS: &[u8; 16] = b"0123456789ABCDEF";
 
@@ -150,6 +152,7 @@ pub(crate) fn function(op: i64, arity: usize) -> Option<ScalarUDF> {
         ),
         152 => json_serialize::function(),
         153 => json_object::function(),
+        154 => temporal_round::function(),
         _ => return None,
     })
 }
@@ -172,7 +175,10 @@ fn udf(
     )
 }
 
-fn map_timestamp_millis(input: &ArrayRef, map: impl Fn(i64) -> i64) -> Result<Int64Array> {
+pub(crate) fn map_timestamp_millis(
+    input: &ArrayRef,
+    map: impl Fn(i64) -> i64,
+) -> Result<Int64Array> {
     match input.data_type() {
         DataType::Timestamp(TimeUnit::Second, None) => {
             Ok(as_primitive_array::<TimestampSecondType>(input)?

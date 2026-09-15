@@ -32,8 +32,8 @@ class FlinkToDateSqlHarnessTest {
   }
 
   @Test
-  void unverifiedFormsFallBackBeforeExecution() throws Exception {
-    NativeParity.assertFallback(
+  void formattedDatesMatchHost() throws Exception {
+    NativeParity.assertParity(
         () -> TextTimeFunctionTestInputs.textRows("2020-01-01", null),
         "SELECT id, TO_DATE(s, 'yyyy-MM-dd') FROM inputs");
   }

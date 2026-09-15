@@ -91,7 +91,7 @@ final class WindowJoinMatcher {
     }
     RexNode expanded =
         RexUtil.expandSearch(join.getCluster().getRexBuilder(), null, condition.get());
-    return RexExpression.encode(expanded);
+    return RexExpression.encode(expanded, join);
   }
 
   /** The native join-type code (0=INNER,1=LEFT,2=RIGHT,3=FULL); never -1 once {@link #matches}. */

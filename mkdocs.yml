@@ -76,6 +76,7 @@ nav:
   - Operators:
       - operators/index.md
       - Calc / filter: operators/calc-filter.md
+      - Temporal functions: operators/temporal-functions.md
       - Union: operators/union.md
       - Expand: operators/expand.md
       - Changelog normalize: operators/changelog-normalize.md

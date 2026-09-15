@@ -41,7 +41,7 @@ final class FilterCalcMatcher {
     // comparisons the native engine evaluates. The native side handles arbitrary AND/OR/NOT trees,
     // so no disjunctive-normal-form rewrite is needed.
     RexNode expanded = RexUtil.expandSearch(calc.getCluster().getRexBuilder(), null, condition);
-    return RexExpression.encode(expanded);
+    return RexExpression.encode(expanded, calc);
   }
 
   /**

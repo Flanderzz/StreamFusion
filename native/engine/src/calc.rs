@@ -539,10 +539,34 @@ pub extern "system" fn Java_tech_streamfusion_Native_calcExpression<'local>(
     out_array_address: jlong,
     out_schema_address: jlong,
 ) {
+    Java_tech_streamfusion_Native_calcExpressionAtWatermark(
+        env,
+        _class,
+        handle,
+        in_array_address,
+        in_schema_address,
+        out_array_address,
+        out_schema_address,
+        i64::MIN,
+    );
+}
+
+#[no_mangle]
+pub extern "system" fn Java_tech_streamfusion_Native_calcExpressionAtWatermark<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    in_array_address: jlong,
+    in_schema_address: jlong,
+    out_array_address: jlong,
+    out_schema_address: jlong,
+    watermark: jlong,
+) {
     crate::bridge::jni_guard(env, move |_env| {
         let expression = unsafe { &mut *(handle as *mut CalcExpression) };
         let batch = import_record_batch(in_array_address, in_schema_address);
-        let result = expression.evaluate(batch);
+        let result =
+            crate::flink_functions::clock::with_watermark(watermark, || expression.evaluate(batch));
         export_record_batch(result, out_array_address, out_schema_address);
     })
 }
@@ -558,6 +582,27 @@ pub extern "system" fn Java_tech_streamfusion_Native_calcExpressionArray<'local>
     out_array_address: jlong,
     out_schema_address: jlong,
 ) {
+    Java_tech_streamfusion_Native_calcExpressionArrayAtWatermark(
+        env,
+        _class,
+        handle,
+        in_array_address,
+        out_array_address,
+        out_schema_address,
+        i64::MIN,
+    );
+}
+
+#[no_mangle]
+pub extern "system" fn Java_tech_streamfusion_Native_calcExpressionArrayAtWatermark<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    in_array_address: jlong,
+    out_array_address: jlong,
+    out_schema_address: jlong,
+    watermark: jlong,
+) {
     crate::bridge::jni_guard(env, move |_env| {
         let expression = unsafe { &mut *(handle as *mut CalcExpression) };
         let schema = expression
@@ -567,7 +612,8 @@ pub extern "system" fn Java_tech_streamfusion_Native_calcExpressionArray<'local>
             .input_schema
             .clone();
         let batch = import_record_batch_with_schema(in_array_address, &schema);
-        let result = expression.evaluate(batch);
+        let result =
+            crate::flink_functions::clock::with_watermark(watermark, || expression.evaluate(batch));
         export_record_batch(result, out_array_address, out_schema_address);
     })
 }

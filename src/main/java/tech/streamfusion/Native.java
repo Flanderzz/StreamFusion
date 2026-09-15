@@ -497,6 +497,21 @@ public final class Native {
   public static native void calcExpressionArray(
       long handle, long inArrayAddress, long outArrayAddress, long outSchemaAddress);
 
+  public static native void calcExpressionAtWatermark(
+      long handle,
+      long inArrayAddress,
+      long inSchemaAddress,
+      long outArrayAddress,
+      long outSchemaAddress,
+      long watermark);
+
+  public static native void calcExpressionArrayAtWatermark(
+      long handle,
+      long inArrayAddress,
+      long outArrayAddress,
+      long outSchemaAddress,
+      long watermark);
+
   /** Releases a compiled Calc handle and its native state. */
   public static native void closeCalcExpression(long handle);
 

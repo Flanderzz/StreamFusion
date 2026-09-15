@@ -106,8 +106,8 @@ The planner therefore compiles the encoded `Calc` at planning time — types onl
 the Arrow schema of its input and checks that the boundary would read each projection's inferred
 Arrow type as its declared column (and that the condition is `BOOLEAN`). "Read as" is the reader's
 own rule, not byte-equality of Arrow types: timestamps and times may carry any unit or zone, since
-the column vectors convert on read (`PROCTIME()` is stamped as millisecond UTC where the row type
-converts to nanoseconds), but every other type — width, decimal precision and scale, string
+the column vectors convert on read. New temporal expressions nevertheless preserve the engine's
+canonical nanosecond timestamp and millisecond TIME storage for downstream operators. Every other type — width, decimal precision and scale, string
 encoding, nested element types — must match exactly. Any disagreement, or a tree DataFusion cannot
 coerce at all, is a plain fallback whose recorded reason names the column and both types, e.g.
 `projection `EXPR$0` evaluates natively as FloatingPoint(SINGLE) but the plan declares DOUBLE`. Such
@@ -158,8 +158,8 @@ default cast the upcall reproduces.
 
 ### Still falling back
 
-Casts between strings and the non-numeric types (`boolean`/`date`/`time`/`timestamp` ↔ string), and
-any other pair not listed above.
+Boolean↔string casts and other pairs not listed above. Temporal casts now use Flink-generated
+expressions; see [temporal functions](temporal-functions.md), including the timestamp-result range gate.
 
 ## Decimal arithmetic
 
@@ -457,45 +457,12 @@ Same input and boundary rules as LPAD, with padding appended on the right. Dynam
 
 Character separators and TINYINT/SMALLINT/INTEGER indices may be dynamic. Indices are zero-based; negative/out-of-range indices, empty input, or any NULL produce NULL. Whole separators preserve empty tokens. An empty separator uses Java Character.isWhitespace, including tabs and line separators but excluding non-breaking spaces. Numeric separators and BIGINT indices fall back.
 
-### TO_DATE
+### Temporal parsing, extraction and rounding
 
-One character argument. Accepts Flink's partial year/year-month forms, field trimming, and a timestamp suffix after the first ASCII space. Impossible dates return NULL; an all-digit field overflowing INTEGER fails the job. Formatted two-argument calls fall back.
-
-### TO_TIMESTAMP
-
-Falls back to Flink for both the default and explicit-format forms. Native support is
-deferred: parsed timestamps can exceed the nanosecond range, while downstream native
-operators require nanosecond columns. A millisecond result is therefore unsafe even when
-standalone parsing succeeds. Computed-rowtime windows and parsed timestamp group keys
-also remain on Flink.
-
-### QUARTER
-
-QUARTER and EXTRACT(QUARTER) over DATE or plain TIMESTAMP return, for ordinary calendar dates, 1 through 4 as BIGINT. NULL propagates. TIMESTAMP_LTZ falls back for this newly admitted field.
-
-### WEEK
-
-WEEK and EXTRACT(WEEK) over DATE or plain TIMESTAMP use ISO week numbers, including weeks spanning calendar years. NULL propagates. TIMESTAMP_LTZ falls back for this field.
-
-### DAYOFYEAR
-
-DAYOFYEAR/EXTRACT(DOY) over DATE or plain TIMESTAMP return, for ordinary calendar dates, 1 through 365/366 as BIGINT. NULL propagates. TIMESTAMP_LTZ falls back for this field.
-
-### DAYOFWEEK
-
-DAYOFWEEK/EXTRACT(DOW) over DATE or plain TIMESTAMP return Sunday=1 through Saturday=7 as BIGINT. NULL propagates. TIMESTAMP_LTZ falls back for this field.
-
-### FLOOR (timestamp)
-
-Temporal FLOOR falls back to Flink for every unit and timestamp precision, including
-TIMESTAMP(3) and TIMESTAMP(9). Its former millisecond Arrow output is incompatible with
-downstream native timestamp columns. The one-argument numeric FLOOR admission is unchanged.
-
-### CEIL (timestamp)
-
-Temporal CEIL/CEILING falls back to Flink for every unit and timestamp precision, for the
-same timestamp-unit incompatibility as temporal FLOOR. One-argument numeric CEIL/CEILING
-keeps its existing native admission. No millisecond timestamp rounding kernel is registered.
+`TO_DATE`, `TO_TIMESTAMP`, all `TO_TIMESTAMP_LTZ` overloads, calendar fields, and temporal
+`FLOOR`/`CEIL` now have expression implementations. Formatted parsing and LTZ calendar fields use
+Flink's own generated code. New timestamp-producing paths need the timestamp-range opt-in;
+fused text/numeric results can run by default. See the complete [temporal function inventory](temporal-functions.md).
 
 ### LTRIM
 
@@ -526,23 +493,16 @@ pattern or index.
 
 ## Date/time
 
-**`DATE_FORMAT`/`EXTRACT` over `TIMESTAMP_LTZ` — native by default, not a fallback.** A local-zoned
-timestamp's calendar fields (year, hour, day-of-week, …) depend on the session time zone
-(`table.local-time-zone`), which a naive native formatter working in UTC wall-clock time can't
-reproduce correctly. So, exactly like case folding and regex above, the **default** path routes the
-`TIMESTAMP_LTZ` case through Flink's own zone-aware `DateTimeUtils.formatTimestamp`/
-`extractFromTimestamp` via the columnar JVM upcall — byte-identical to the host.
+The [temporal functions page](temporal-functions.md) lists every supported scalar family, clock,
+watermark and window helper, with the exact range and runtime-context gates. Temporal expressions
+use Flink's code through the batched JVM upcall unless a verified Rust kernel already exists.
+Adjacent temporal calls fuse into one upcall, retaining intermediate TimestampData values inside
+Flink rather than converting each one to an Arrow timestamp.
 
-A **pure-Rust `chrono-tz`** path is opt-in under
-`-Dstreamfusion.expression.<DATE_FORMAT|EXTRACT>.allowIncompatible=true` (or the blanket flag). It
-can diverge from the JVM at time-zone-database edges — bundled-tzdb-version skew, DST transitions
-beyond roughly 2100, and deep historical dates.
-
-A **legacy zone spelling** the native parser can't read (`GMT+1`, `PST`) makes the opt-in path fall
-back; the default upcall path handles any zone Flink itself accepts. A plain `TIMESTAMP` argument
-(no zone) uses the pure-native path when its Arrow representation is nanoseconds. Parsed or rounded
-millisecond results have a wider range than the legacy chrono formatting/extraction kernels and
-fall back for those consumers. The new QUARTER/WEEK/DAYOFYEAR/DAYOFWEEK kernels accept them.
+`DATE_FORMAT` and `EXTRACT` retain their existing opt-in Rust LTZ paths. Dynamic patterns, additional
+extraction fields and other temporal functions use Flink's implementation. The new
+`TIMESTAMP_RANGE.allowIncompatible` option separately admits timestamp-producing expressions for
+values representable by the engine's nanosecond timestamp columns.
 
 ## Opt-in math
 
@@ -564,13 +524,8 @@ implementation can't handle, even though the function itself is supported:
 - **`TRIM`** — dynamic trim sets; all directions with literal sets are native.
 - **`POSITION`** — a `FROM` start offset.
 - **`SPLIT_INDEX`** — the numeric separator overload.
-- **`DATE_FORMAT`** — a non-literal pattern, or (on the pure-native path only) a
-  non-translatable pattern (text, fraction, or zone fields) — the JVM-upcall `TIMESTAMP_LTZ` path
-  accepts any pattern Flink's own formatter does.
-- **`EXTRACT`** — a fractional result or a field outside the admitted set. The added
-  `QUARTER`/`WEEK`/`DOY`/`DOW` fields admit DATE and plain TIMESTAMP; their LTZ forms fall back.
-  Existing YEAR/MONTH/DAY/HOUR/MINUTE/SECOND LTZ extraction uses the host-exact upcall described above.
-- **`TO_TIMESTAMP_LTZ`** — a precision other than 3.
+- **New temporal timestamp results** — require the [timestamp range opt-in](temporal-functions.md#timestamp-range-and-opt-in).
+- **`CURRENT_WATERMARK`** — requires a Calc watermark context; unsupported in standalone join or UNNEST residuals.
 - **A non-literal subscript** in `array[i]`/`map[key]` — at runtime a negative index counts from the
   end in DataFusion but is `NULL` in Flink, and the native map lookup binds its key at compile time,
   so only a literal subscript is safe to run natively (`array[i]` additionally requires the literal
