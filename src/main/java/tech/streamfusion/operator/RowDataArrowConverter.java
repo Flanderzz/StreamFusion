@@ -37,7 +37,8 @@ public final class RowDataArrowConverter {
   private RowDataArrowConverter() {}
 
   /**
-   * Whether every column is a type a native <em>stateful</em> operator can carry through its row state.
+   * Whether every column can cross the row/Arrow boundary. Operators using a narrower retained-row
+   * codec must additionally check that codec's supported types.
    * This is deliberately aligned with {@link ArrowConversion}: an admitted type must make the full
    * RowData → Arrow → RowData round trip before an operator is allowed to retain or key it.
    */

@@ -18,6 +18,8 @@ expiry granularity, [TTL semantics](index.md#idle-state-ttl) for the general rul
 
 ## Gap
 
+- MAP/MULTISET fields in retained rows, including nested ARRAY/ROW fields, because the shared
+  Top-N row codec cannot store them. These queries fall back before operator initialization.
 - A `LIMIT`/`OFFSET` with no `FETCH` (row count) at all — an unbounded skip.
 - A retracting input — `LIMIT` requires insert-only (`OFFSET` is the one exception already
   described above, since it runs over the retracting ranker on top of that insert-only input).

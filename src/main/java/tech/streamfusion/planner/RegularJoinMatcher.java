@@ -57,6 +57,12 @@ final class RegularJoinMatcher {
             FlinkTypeFactory$.MODULE$.toLogicalRowType(join.getRight().getRowType()))) {
       return "regular join: an input column type is not supported";
     }
+    if (!ArrowRowTypeSupport.supports(
+            FlinkTypeFactory$.MODULE$.toLogicalRowType(join.getLeft().getRowType()))
+        || !ArrowRowTypeSupport.supports(
+            FlinkTypeFactory$.MODULE$.toLogicalRowType(join.getRight().getRowType()))) {
+      return "regular join: Arrow row codec cannot carry MAP or MULTISET payloads";
+    }
     return null;
   }
 

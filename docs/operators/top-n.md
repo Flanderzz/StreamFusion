@@ -5,6 +5,10 @@ columns decide their rank. Only sort-key copies normalize zero; emitted payloads
 keys keep the original bits. Snapshot restore normalizes retained sort keys as well, including
 older raw snapshots, before ranking new input.
 
+MAP and MULTISET fields in retained rows fall back at planning time, including fields nested
+inside ARRAY or ROW. Arrow's row codec cannot store them even when they are only payloads.
+This restriction also applies to LIMIT/SortLimit, which use the same state representation.
+
 **Status:** Native — all three rank strategies, idle-state TTL included; a small set of matcher
 gaps below.
 

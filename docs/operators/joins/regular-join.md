@@ -1,6 +1,6 @@
 # Regular join
 
-**Status:** Native. An ordinary equi-join over two full changelog inputs — the only one of the five
+**Status:** Native with the payload restrictions below. An ordinary equi-join over two full changelog inputs — the only one of the five
 join shapes that accepts a retracting/updating stream on *both* sides rather than requiring
 insert-only input (see the [insert-only guard](../index.md#global-switches)). Each side is held as
 keyed state so a later update or delete on either input can retract and re-emit downstream.
@@ -13,7 +13,9 @@ The native matcher requires:
 - for a non-INNER join, the key columns must be **null-dropping** in the way Flink's own planner
   expects (a non-preserved side's key nulls out correctly on a missed match);
 - any residual non-equi predicate must be **expressible by the native expression engine**;
-- every input column type must be one the Arrow converter can carry.
+- every input column type must be one the Arrow converter and retained-row codec can carry.
+  MAP and MULTISET fields fall back, including those nested inside ARRAY or ROW and those used
+  only as payloads. The Arrow row codec does not support these types.
 
 [Interval join](interval-join.md), [window join](window-join.md), [temporal table
 join](temporal-join.md), and [lookup join](lookup-join.md) all state their admission conditions as a
@@ -51,4 +53,5 @@ TTL](../index.md#idle-state-ttl) and [Configuration](../../configuration.md) for
 - there's no equi key;
 - the key columns aren't null-dropping for a non-INNER join;
 - the non-equi residual isn't expressible by the native expression engine;
-- an input column has a type the Arrow converter can't carry.
+- an input column has a type the Arrow converter or retained-row codec can't carry, including
+  MAP/MULTISET at any nesting depth.

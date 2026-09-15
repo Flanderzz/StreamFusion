@@ -33,7 +33,8 @@ final class LimitMatcher {
     if (sort.fetch == null) {
       return false; // a streaming FETCH/LIMIT must bound the output (Flink rejects an unbounded one)
     }
-    return RowDataArrowConverter.supports(
+    return ArrowRowTypeSupport.supports(FlinkTypeFactory$.MODULE$.toLogicalRowType(sort.getInput().getRowType()))
+        && RowDataArrowConverter.supports(
         FlinkTypeFactory$.MODULE$.toLogicalRowType(sort.getRowType()));
   }
 

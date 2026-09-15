@@ -42,6 +42,10 @@ final class TopNMatcher {
     }
     // The whole row crosses the boundary unchanged, so every column (incl. partition/order keys)
     // must be a type the conversion handles.
+    if (!ArrowRowTypeSupport.supports(
+        FlinkTypeFactory$.MODULE$.toLogicalRowType(rank.getInput().getRowType()))) {
+      return "Top-N: Arrow row codec cannot carry MAP or MULTISET payloads";
+    }
     if (!RowDataArrowConverter.supports(
         FlinkTypeFactory$.MODULE$.toLogicalRowType(rank.getRowType()))) {
       return "Top-N: a column type the boundary cannot carry";
