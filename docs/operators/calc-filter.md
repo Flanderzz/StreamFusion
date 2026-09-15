@@ -22,6 +22,17 @@ fallback.
   there's no partial evaluation of an expression tree, so one unknown function anywhere in it
   declines the whole `Calc`.
 
+## String ordering
+
+Relational character-string comparisons (`<`, `<=`, `>`, `>=`) fall back, including
+inside filters, CASE, and casts. Flink compares retained Java strings by UTF-16 code units,
+but serialized strings by UTF-8 bytes. These orders disagree for some supplementary Unicode
+characters. Arrow retains the UTF-8 value without the Java-representation information needed
+to select Flink's order, so admission cannot safely depend on the column's SQL type alone.
+The gate also applies to ASCII/BMP inputs and serialized sources because the planner cannot
+prove the representation and character range of every runtime operand. Equality and inequality
+(`=`, `<>`) remain native; this gate does not change Top-N's serialized sort order.
+
 ## String concatenation and hashes
 
 These functions run entirely in Rust by default, in projections, predicates, and nested expressions:

@@ -625,6 +625,14 @@ final class RexExpression {
   }
 
   private boolean emitCall(RexCall call) {
+    if (switch (call.getKind()) {
+      case LESS_THAN, LESS_THAN_OR_EQUAL, GREATER_THAN, GREATER_THAN_OR_EQUAL ->
+          call.getOperands().stream()
+              .anyMatch(operand -> SqlTypeFamily.CHARACTER.contains(operand.getType()));
+      default -> false;
+    }) {
+      return reject("Flink string ordering depends on its Java or serialized representation");
+    }
     if ((call.getKind() == SqlKind.EQUALS || call.getKind() == SqlKind.NOT_EQUALS)
         && hasImplicitStringNumericCast(call)) {
       return reject("Flink rejects implicit VARCHAR/numeric equality during code generation");
