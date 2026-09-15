@@ -891,8 +891,8 @@ final class RexExpression {
         return emit(operands.get(0));
       case AND:
       case OR:
-        if (operands.stream().anyMatch(RexExpression::containsFallibleJsonCall)) {
-          return reject("SQL/JSON under AND/OR requires Flink's row short-circuiting");
+        if (operands.stream().anyMatch(RexExpression::requiresRowShortCircuit)) {
+          return reject("Fallible expressions under AND/OR require Flink's row short-circuiting");
         }
         // Calcite leaves AND/OR n-ary; the native binary op needs a left-deep nesting, which a
         // pre-order stream encodes as (n-1) call headers followed by the operands in order.
@@ -1134,9 +1134,13 @@ final class RexExpression {
     return emitBuiltinCall(call, op);
   }
 
-  private static boolean containsFallibleJsonCall(RexNode node) {
+  private static boolean requiresRowShortCircuit(RexNode node) {
     if (!(node instanceof RexCall call)) {
       return false;
+    }
+    if (isDecimalArithmetic(call)
+        && (call.getKind() == SqlKind.MOD || call.getKind() == SqlKind.DIVIDE)) {
+      return true;
     }
     String name = call.getOperator().getName().toUpperCase(Locale.ROOT);
     List<RexNode> args = call.getOperands();
@@ -1157,7 +1161,7 @@ final class RexExpression {
         && "ERROR".equals(jsonSymbol(args.get(2)))) {
       return true;
     }
-    return args.stream().anyMatch(RexExpression::containsFallibleJsonCall);
+    return args.stream().anyMatch(RexExpression::requiresRowShortCircuit);
   }
 
   private boolean jsonRuntimeAvailable() {
@@ -2816,7 +2820,7 @@ final class RexExpression {
     return emit(call.getOperands().get(0));
   }
 
-  /** Whether {@code call} is an arithmetic operation whose result is a DECIMAL (not yet native). */
+  /** Whether {@code call} needs Flink's resolved decimal result precision and scale. */
   private static boolean isDecimalArithmetic(RexCall call) {
     switch (call.getKind()) {
       case PLUS:

@@ -166,7 +166,7 @@ expressions; see [temporal functions](temporal-functions.md), including the time
 
 ## Decimal arithmetic
 
-**All native and byte-exact by default — not a fallback.**
+**Native and byte-exact by default, with the boolean short-circuit restriction below.**
 
 - `+`/`-`/`*` whose result type is `DECIMAL` (e.g. Nexmark q1's `0.908 * price`) use fused native
   kernels with Flink's resolved result precision and scale. Operands stay `Decimal128` or signed
@@ -185,6 +185,14 @@ expressions; see [temporal functions](temporal-functions.md), including the time
   `DECIMAL(38,0)` value `10^37` modulo `DECIMAL(38,38)` value `3 * 10^-38`. A large quotient
   consisting of a power of ten remains valid. The remainder is rescaled `HALF_UP`, with NULL on
   result-precision overflow and job failure on a zero divisor.
+
+Decimal `/`, `MOD` and `%` nested under `AND` or `OR` fall back at planning time.
+DataFusion 54 can evaluate an operand for rows Flink skips in a mixed boolean batch,
+exposing division-by-zero or `Division impossible` errors on unevaluated rows.
+For example, `guard_value OR MOD(a, b) = 0` must skip MOD on rows whose guard is TRUE.
+This restriction applies to projections and filters, including nested expressions.
+Direct arithmetic and CASE result branches remain native; CASE selects the rows to
+evaluate before running the decimal kernel. Evaluated invalid operands still fail the job.
 
 Flink can retain a `NOT NULL` result declaration from non-nullable operands even
 when decimal arithmetic overflows. Its downstream constraint enforcer then fails

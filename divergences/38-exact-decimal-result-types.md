@@ -44,6 +44,18 @@ error. SQL tests exercise both failures and the allowed large quotients, and
 native tests cover negative signs and non-zero remainders. This is an error
 semantics fix; no modulo speedup is claimed.
 
+Flink 2.2.1 generates per-row AND/OR branches, whereas DataFusion 54's
+`BinaryExpr` can evaluate the right operand across a mixed batch (AND's selective
+filtering is only a heuristic, and OR has no mixed-row selection). A correct
+decimal error must not become an error on a row Flink never evaluates. The same
+recursive admission check used for fallible SQL/JSON therefore declines decimal
+MOD and division beneath AND/OR, including nested projections and filters.
+The restriction covers both the finite-quotient error and division by zero.
+CASE result branches retain native evaluation because DataFusion selects their
+rows before evaluating them. SQL regressions use mixed TRUE/FALSE/NULL guards,
+failing values on skipped rows, and valid values on evaluated rows; direct
+remainder error tests still verify Flink's `Division impossible` behavior.
+
 For non-nullable operands Flink may still declare arithmetic results `NOT NULL`.
 An overflow then reaches the shared downstream constraint enforcer and fails
 the job. SQL tests check the same failure on both engines; correcting the native
