@@ -37,6 +37,7 @@ mod json_path;
 mod json_serialize;
 mod json_value;
 mod locate;
+pub(crate) mod map_lookup;
 pub(crate) mod numeric;
 mod scalar;
 mod sign;

@@ -116,6 +116,14 @@ for narrow integer literals, or the tree should be cast to the declared type), n
 rewrite. This check requires the native library in the planning JVM, which the standard deployment
 already provides (see [Deployment](../deployment.md)).
 
+## Collection subscripts
+
+ARRAY subscripts require a non-NULL positive integer literal; MAP keys require a non-NULL
+literal. A missing key, out-of-range array position, or NULL collection returns NULL.
+MAP lookup skips NULL map entries' keys when looking for the non-NULL literal, and returns
+the first matching entry, preserving nullable values and their nested types.
+Dynamic or NULL subscripts fall back to Flink.
+
 ## Integer division
 
 Integer `/` truncates toward zero and wraps `MIN_VALUE / -1` back to `MIN_VALUE`,

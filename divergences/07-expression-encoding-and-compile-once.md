@@ -83,6 +83,10 @@ strict NULL propagation applied to `CONCAT` below.
   total order distinguishes signed zero and orders NaN above finite values; those rules change
   Flink predicates. Other comparison types retain DataFusion's existing path. State key encoding
   and sorting have separate contracts and are not changed by scalar comparison dispatch.
+- **MAP lookup:** Keep DataFusion's batch key comparison and first-match scan, but skip NULL
+  comparison results rather than unwrapping them. Flink allows NULL keys in its maps, whereas
+  DataFusion's map lookup assumes Arrow's non-null-key convention. Arrow take gathers the
+  selected values and preserves nested payload types and NULL maps without row reconstruction.
 - **Integer `/` and `%`:** Division truncates toward zero and modulo takes the dividend's
   sign. A typed Arrow kernel uses wrapping integer division, preserving Java's `MIN_VALUE / -1`
   result. NULL operands propagate before arithmetic, and evaluated division by zero fails the

@@ -259,11 +259,11 @@ pub(crate) fn build_expr(
             datafusion::functions::core::expr_fn::get_field(child, name)
         }
         // ITEM — the SQL subscript `array[i]` / `map[key]`, dispatched on the collection child's
-        // type. Both DataFusion functions reproduce Flink's subscript semantics: NULL for a null
+        // type. Both paths reproduce Flink's subscript semantics: NULL for a null
         // collection, an out-of-range (1-based) index, or an absent key, and map lookup takes the
         // first match like Flink's linear scan. The JVM encoder admits only literal subscripts —
         // a dynamic negative index counts from the end in DataFusion but is NULL in Flink, and map
-        // extraction requires a literal key — so a non-literal subscript never reaches here.
+        // lookup binds a literal key — so a non-literal subscript never reaches here.
         19 => {
             use datafusion::logical_expr::ExprSchemable;
             let collection = build_expr(
@@ -294,11 +294,12 @@ pub(crate) fn build_expr(
                 DataType::List(_) => {
                     datafusion::functions_nested::expr_fn::array_element(collection, subscript)
                 }
-                DataType::Map(_, _) => {
+                map_type @ DataType::Map(_, _) => {
                     let datafusion::prelude::Expr::Literal(key, _) = subscript else {
                         panic!("map subscript must be a literal")
                     };
-                    datafusion::functions::core::expr_fn::get_field(collection, key)
+                    crate::flink_functions::map_lookup::function(map_type, key)
+                        .call(vec![collection])
                 }
                 other => panic!("ITEM over unsupported collection type {other}"),
             }
