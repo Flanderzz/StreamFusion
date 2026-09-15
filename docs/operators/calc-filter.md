@@ -168,10 +168,12 @@ expressions; see [temporal functions](temporal-functions.md), including the time
 
 **All native and byte-exact by default — not a fallback.**
 
-- `+`/`-`/`*` whose result type is `DECIMAL` (e.g. Nexmark q1's `0.908 * price`) run entirely in
-  Arrow: operands are `Decimal128` (columns already are; literals emit as an exact `Decimal128`),
-  Arrow's `Decimal128` add/sub/mul carry Flink's scales, and the wrapping cast to the declared
-  `DECIMAL(p, s)` rounds `HALF_UP`, exactly as Flink does.
+- `+`/`-`/`*` whose result type is `DECIMAL` (e.g. Nexmark q1's `0.908 * price`) use fused native
+  kernels with Flink's resolved result precision and scale. Operands stay `Decimal128` or signed
+  integers; intermediates use checked i128 arithmetic and widen to i256 when needed. The result
+  is rounded `HALF_UP` before checking precision and writing one `Decimal128` column. Overflow
+  produces SQL `NULL`, including in `IS NULL`, CASE, filters, and group keys. A wide intermediate
+  does not discard a result that fits after rounding.
 - **Division and modulo** (`/`, `%`) go through a fused native kernel that reproduces Flink's exact
   runtime (`DecimalDataUtils.divide`/`mod`) rather than Arrow's own decimal division: the quotient is
   computed to 38 *significant* digits with `HALF_UP` rounding (matching `BigDecimal`'s

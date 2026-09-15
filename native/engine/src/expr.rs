@@ -173,11 +173,9 @@ pub(crate) fn build_expr(
                 None,
             )
         }
-        // Decimal `/` (20) and `%` (21): `arg` packs the declared result's precision*100 + scale; the
-        // two children are the operands (Decimal128 or integer). The fused kernel reproduces Flink's
-        // two rounding steps — the 38-significant-digit quotient, then the rescale to (p, s) — which
-        // a plain division + cast cannot (arrow derives a different quotient scale).
-        20 | 21 => {
+        // Decimal arithmetic carries Flink's declared result precision*100 + scale. The fused
+        // kernels rescale before checking overflow; division additionally rounds to 38 digits.
+        20 | 21 | 26..=28 => {
             let precision = (arg / 100) as u8;
             let scale = (arg % 100) as i8;
             let left = build_expr(
@@ -200,12 +198,29 @@ pub(crate) fn build_expr(
                 strings,
                 cursor,
             );
-            datafusion::logical_expr::ScalarUDF::new_from_impl(DecimalDivide::new(
-                precision,
-                scale,
-                kinds[node] == 21,
-            ))
-            .call(vec![left, right])
+            use crate::flink_functions::decimal::{DecimalBinary, DecimalOp};
+            use datafusion::logical_expr::ScalarUDF;
+            let function = match kinds[node] {
+                26 => {
+                    ScalarUDF::new_from_impl(DecimalBinary::new(DecimalOp::Add, precision, scale))
+                }
+                27 => ScalarUDF::new_from_impl(DecimalBinary::new(
+                    DecimalOp::Subtract,
+                    precision,
+                    scale,
+                )),
+                28 => ScalarUDF::new_from_impl(DecimalBinary::new(
+                    DecimalOp::Multiply,
+                    precision,
+                    scale,
+                )),
+                _ => ScalarUDF::new_from_impl(DecimalDivide::new(
+                    precision,
+                    scale,
+                    kinds[node] == 21,
+                )),
+            };
+            function.call(vec![left, right])
         }
         // Exact decimal cast: HALF_UP to the declared scale, then NULL on precision overflow.
         14 => {

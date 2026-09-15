@@ -93,6 +93,10 @@ final class RexExpression {
   private static final int KIND_LIT_BINARY = 23;
   private static final int KIND_LIT_TEMPORAL = 24;
   private static final int KIND_CLOCK = 25;
+  // Fused exact arithmetic: payload is the declared result precision*100 + scale; two children.
+  private static final int KIND_DECIMAL_ADD = 26;
+  private static final int KIND_DECIMAL_SUBTRACT = 27;
+  private static final int KIND_DECIMAL_MULTIPLY = 28;
 
   // Cast target type codes, mirrored on the native side.
   private static final int CAST_TINYINT = 0;
@@ -578,33 +582,26 @@ final class RexExpression {
     if (call.getKind() == SqlKind.EXTRACT) {
       return emitExtract(call);
     }
-    // Decimal-typed arithmetic, all exact. Add/subtract/multiply: the operands reach the native
-    // side
-    // as Decimal128 (columns already are; literals emit as exact Decimal128), and Arrow's
-    // Decimal128
-    // add/sub/multiply match Flink's — the products carry the full scale (sum of input scales for
-    // ×,
-    // aligned max scale for ±), and the wrapping cast to the declared DECIMAL(p, s) rounds HALF_UP,
-    // the same rounding Flink uses. Division/modulo need Flink's own two rounding steps (the
-    // 38-significant-digit quotient, then the rescale to the declared type), which Arrow's division
-    // cannot reproduce, so they run through a dedicated fused kernel.
+    // Transmit Flink's resolved result type to each fused decimal kernel. Generic arithmetic
+    // followed by a cast can overflow before rescaling, or infer a different intermediate scale.
     if (isDecimalArithmetic(call)) {
       int precision = call.getType().getPrecision();
       int scale = call.getType().getScale();
-      if (call.getKind() == SqlKind.DIVIDE || call.getKind() == SqlKind.MOD) {
-        add(
-            call.getKind() == SqlKind.DIVIDE ? KIND_DECIMAL_DIVIDE : KIND_DECIMAL_MOD,
-            precision * 100 + scale,
-            2);
-        for (RexNode operand : call.getOperands()) {
-          if (!emit(operand)) {
-            return false;
-          }
+      int kind = switch (call.getKind()) {
+        case PLUS -> KIND_DECIMAL_ADD;
+        case MINUS -> KIND_DECIMAL_SUBTRACT;
+        case TIMES -> KIND_DECIMAL_MULTIPLY;
+        case DIVIDE -> KIND_DECIMAL_DIVIDE;
+        case MOD -> KIND_DECIMAL_MOD;
+        default -> throw new IllegalStateException("not decimal arithmetic: " + call.getKind());
+      };
+      add(kind, precision * 100 + scale, 2);
+      for (RexNode operand : call.getOperands()) {
+        if (!emit(operand)) {
+          return false;
         }
-        return true;
       }
-      add(KIND_CAST_DECIMAL, precision * 100 + scale, 1);
-      // fall through: the arithmetic op is emitted next as this cast's single child.
+      return true;
     }
     String functionName = call.getOperator().getName().toUpperCase(Locale.ROOT);
     int clockField =

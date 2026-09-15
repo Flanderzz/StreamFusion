@@ -18,8 +18,19 @@ uses Flink's declared result type and NULL semantics rather than Spark's evaluat
 modes. Powers and precision bounds are prepared outside the row loop; integer
 and decimal inputs are downcast once, and scalar inputs stay scalar.
 
+Add, subtract, and multiply also bypass generic DataFusion arithmetic followed
+by CAST: a Decimal128 intermediate can overflow before that cast, and a product
+can have scale above 38 even when its final rounded value fits. Fused expressions
+first attempt checked i128 arithmetic, then widen to i256 when necessary. Two
+valid input decimals bound the wide intermediate by `2 * 10^76`, within i256.
+Only the final rounded result is checked against the declared precision. A
+precision overflow sets output validity to NULL; it never leaves an invalid
+decimal marked valid. Both-scalar expressions return a scalar for safe broadcast.
+
 Regression tests cover rounding carries of either sign, increased scale,
 integer inputs, sliced arrays, validity, empty batches, and SQL projections,
-`IS NULL`, and filters. The fixed-width rescale is also compared against the
+`IS NULL`, CASE, filters, and grouping. The fixed-width rescale and arithmetic are compared against the
 existing arbitrary-precision HALF_UP implementation across scales and precision
-boundaries. This is a correctness change; no throughput gain is claimed.
+boundaries. Division retains its separate 38-significant-digit rounding stage;
+aggregate overflow state machines are unchanged. End-to-end per-expression
+measurements are recorded in `docs/benchmarks/decimal-expressions.md`.
