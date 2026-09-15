@@ -58,12 +58,12 @@ engine and delete handling.
 
 Java Paimon's released `IntervalPartition` groups each snapshot split into disjoint key sections
 and sorted runs. Native code merges the runs in a section while opening each run's files in order.
-The optional Paimon native library adapts paimon-rust's loser tree, Arrow key comparison and batch
-output gathering. It requests Arrow batches from the separate Parquet or ORC library through a Java
+The optional Paimon native library adapts paimon-rust's Arrow key comparison, cell selection and
+batch output gathering. Its loser tree ports released Java Paimon's traversal and grouping rules. It requests Arrow batches from the separate Parquet or ORC library through a Java
 callback that forwards C Data addresses. No Java row or Java Arrow vector is materialized between
 decoding and merging. Java still owns file access, schemas, discovery and checkpoints.
 
-The native merger admits fixed and dynamic hash buckets with `deduplicate` or `first-row`,
+The native merger admits fixed and dynamic hash buckets with `deduplicate`, `first-row`, or basic `partial-update`,
 the default loser-tree sort engine, and nonempty stored scalar keys: `BOOLEAN`, `TINYINT` through
 `BIGINT`, `FLOAT`/`DOUBLE`, `DECIMAL`, `CHAR`/`VARCHAR`, `BINARY`/`VARBINARY`, `DATE`, and
 `TIMESTAMP`/`TIMESTAMP_LTZ` through precision 6. Composite keys use those same types after Java
@@ -77,25 +77,34 @@ Deduplication compares optional `sequence.field` columns in the configured
 Sequence columns use the comparable types above and are decoded even when projected away.
 First-row selects the earliest stored sequence. Both engines honor `ignore-delete`; otherwise
 first-row requires every file to report zero retracts, leaving Java to handle unsupported input.
-Only one winning row reference is retained per key, including for first-row and user sequences.
+Exact stored-sequence ties and overlapping file sequence intervals use Java's loser-tree leaf
+states, reverse initialization and equal-key traversal. Each group consumes one current record per
+run before any run advances, including at batch boundaries. Deduplication and first-row retain one
+winning row reference per key.
+
+Basic `partial-update` selects the latest non-null cell for each column. It supports `ignore-delete`
+and `partial-update.remove-record-on-delete`, including stored historical retracts and later
+reinsertion. Without either delete policy, files must have a known zero delete count. Multi-record
+partial reductions emit inserts or remove the key; singleton groups preserve their original row
+kind, matching Java's reducer wrapper. Nested values are selected as whole cells, preserving their
+internal nulls. Cell references are gathered into an output Arrow batch without Java rows or a
+one-row Arrow allocation per key. Sequence groups and configured field aggregates retain Java.
 
 ORC retains Java for fractional timestamp key bounds that can lose sorted order through its
 last-negative-second alias, and for non-leading fractional timestamp keys; see the
 [ORC timestamp restrictions](orc.md#configuration-and-types). These snapshot combinations retain Java:
 
-- Partial-update and aggregation, postpone and cross-partition key-dynamic buckets,
-  unsupported key/sequence types, and
-  specialized split representations.
-- Overlapping file sequence-number intervals within a section, even with user sequences.
-  This conservative check avoids importing a sequence-tie rule that might select a different
-  winner from released Java.
-- First-row files with nonzero or unknown delete counts when `ignore-delete` is false.
+- Aggregation; partial updates with sequence groups, removal by sequence group, or configured
+  field aggregates; postpone and cross-partition key-dynamic buckets; unsupported key/sequence
+  types; and specialized split representations.
+- First-row files with nonzero or unknown delete counts when `ignore-delete` is false, and basic
+  partial-update files with those counts when neither supported delete policy is enabled.
 - Sections exceeding `sort-spill-threshold`, or the encoded row-group admission budget below.
 
 For raw-convertible primary-key snapshot splits with known delete counts and no deletion vectors,
 the source follows Java's raw reader: native decoded values emit insert rows. This path does not
-need a merge. For admitted merge splits, it drops winning retracts and retains the winning add
-kind. Changelog tailing continues to preserve all stored changes.
+need a merge. Selection merges drop winning retracts and retain the winning add kind;
+partial-update reductions follow the row-kind rules above. Changelog tailing continues to preserve all stored changes.
 
 `sort-spill-buffer-size` supplies the snapshot merger's retained-buffer budget. Before emission,
 the reader inspects file footers and requires the sum of each run's largest compressed-plus-
@@ -105,7 +114,7 @@ pending output references; exceeding the budget fails the read. Output flushes b
 as rows, and completed batches are reclaimed even during long stretches of deleted keys.
 
 These are encoded-data admission and retained-buffer limits, not a strict total-process or Flink
-managed-memory reservation. Transient decoder/output allocations, an individual wide record,
+managed-memory reservation. Transient decoder/output allocations, selection-index vectors, an individual wide record,
 Java stream buffers and the source handover queue add memory. A resource or storage failure after
 emission fails the attempt; it never silently switches readers in the middle of a split.
 
@@ -123,17 +132,26 @@ projections and restoration in both Java/native directions. Nanosecond keys exer
 even when projected away. `PaimonSnapshotModesTest` compares fixed/dynamic buckets, first-row,
 stored retracts with ignore-delete, ascending/descending compound sequences, nulls, floating edge
 cases and scalar sequence types against Java, including projections and restoration in both directions.
-`PaimonSourceSqlTest` follows scalar keys, first-row, user sequences and dynamic buckets from
+`PaimonSnapshotMergeOracleTest` compares the same records directly with released Java's merge reader
+across 378 combinations of merge/delete policies, user sequences, 1–16 runs and batch sizes, including
+exact ties, empty runs and repeated keys within one run. `PaimonSnapshotPartialUpdateTest` covers
+actual Parquet/ORC files with tied stored sequences, different payloads, all supported scalar and
+nested value types, fixed/dynamic buckets, projections and restoration in both directions.
+`PaimonSourceSqlTest` follows scalar keys, first-row, partial updates, user sequences and dynamic buckets from
 snapshot into subsequent commits for both formats. Lookup changelog fixtures allow compaction
 and supply Java's temporary IO manager, as normal Flink writers do.
 `PaimonSourceRecoveryTest` restores the asynchronous reader before and after emission for
-snapshot and tail splits, including first-row and user sequences. `PaimonSnapshotCallbackTest`
+snapshot and tail splits, including first-row, partial updates and user sequences. `PaimonSnapshotCallbackTest`
 checks partial C Data export cleanup and preservation of the original storage exception.
-The Rust tests cover keys spanning input batches, 100,000-version and delete-only inputs,
+The Rust tests cover keys spanning input batches, 100,000-version and delete-only inputs (including
+partial-update groups),
 byte-triggered output flushes, and budget/storage failures. The SQL harness requires a marker
 proving that a native snapshot merger emitted a batch.
 
-The complete Paimon 2.0.0 SQL harness passed all 265 result, plan and recovery cases with the
+This extension passes 653 Paimon regression cases, including the added Parquet/ORC value and
+restore cases, plus eight unchanged upstream continuous-reader, partial-update and read/write SQL
+cases with required native snapshot and sink markers. The complete Paimon 2.0.0 SQL harness
+previously passed all 265 result, plan and recovery cases with the
 complete-plan native hook, including the unchanged source-reuse assertion. A focused subset is
 shown below. Include the continuous-reader cases when checking the harness's required native
 snapshot-emission marker; the other suites can finish without needing that path.
@@ -146,41 +164,48 @@ FLINK_SUITE_TEST='org.apache.paimon.flink.ReadWriteTableITCase,org.apache.paimon
 ### Snapshot catch-up diagnostic
 
 `PaimonSnapshotMergeBenchmark` writes 65,536 keys over one, four and eight commits for `INT`,
-and four commits for other scalar keys and first-row, sequence and dynamic-bucket cases, including
-updates, deletes, strings and nested arrays, before timing. It compares the existing Java
+and four commits for other scalar keys and first-row, partial-update, sequence and dynamic-bucket
+cases, including updates, deletes, strings and nested arrays, before timing. It compares the existing Java
 merge-to-Arrow path with native snapshot reading, including Java run planning and footer checks,
 file open/close, byte reads, decoding, merging, final Arrow import and an integer payload checksum.
 Keys span negative and positive values; a separate integer payload identifies both key and commit
 so the checksum checks version selection and uses the same work across key types. Both paths
 produce Arrow. One warmup and three measured runs alternate engine order and report best times.
-The sequence case orders by this payload so earlier commits can win; first-row ignores input
-retracts, and the dynamic case uses two explicitly assigned buckets. Counts and checksums must
+Partial-update cases alternate null string and array columns so output combines different commits,
+with default, ignore-delete and whole-record-delete policies. The sequence case orders by this
+payload so earlier commits can win; first-row ignores input retracts, and the dynamic case uses two explicitly assigned buckets. Counts and checksums must
 match, and every native run must exercise the merger.
 
 | Parquet case | Commits | Java merge to Arrow | Native merge to Arrow | Throughput ratio |
 |---|---:|---:|---:|---:|
-| INT | 1 | 0.043 s | 0.019 s | 2.28× |
-| INT | 4 | 0.074 s | 0.044 s | 1.67× |
-| INT | 8 | 0.118 s | 0.084 s | 1.40× |
-| DECIMAL(38,2) | 4 | 0.086 s | 0.046 s | 1.86× |
-| TIMESTAMP(6) | 4 | 0.064 s | 0.043 s | 1.49× |
-| VARBINARY(4) | 4 | 0.078 s | 0.049 s | 1.61× |
-| DATE | 4 | 0.069 s | 0.042 s | 1.67× |
-| FLOAT | 4 | 0.068 s | 0.042 s | 1.63× |
-| DOUBLE | 4 | 0.069 s | 0.044 s | 1.56× |
-| First-row + ignore-delete (INT) | 4 | 0.070 s | 0.039 s | 1.78× |
-| User sequence (INT) | 4 | 0.075 s | 0.046 s | 1.64× |
-| Dynamic buckets (INT) | 4 | 0.066 s | 0.040 s | 1.67× |
+| INT | 1 | 0.042 s | 0.018 s | 2.40× |
+| INT | 4 | 0.072 s | 0.041 s | 1.75× |
+| INT | 8 | 0.122 s | 0.078 s | 1.57× |
+| DECIMAL(38,2) | 4 | 0.088 s | 0.044 s | 1.99× |
+| TIMESTAMP(6) | 4 | 0.065 s | 0.042 s | 1.55× |
+| VARBINARY(4) | 4 | 0.079 s | 0.046 s | 1.72× |
+| DATE | 4 | 0.070 s | 0.039 s | 1.77× |
+| FLOAT | 4 | 0.067 s | 0.040 s | 1.69× |
+| DOUBLE | 4 | 0.067 s | 0.043 s | 1.58× |
+| First-row + ignore-delete (INT) | 4 | 0.074 s | 0.038 s | 1.96× |
+| User sequence (INT) | 4 | 0.082 s | 0.036 s | 2.24× |
+| Dynamic buckets (INT) | 4 | 0.072 s | 0.037 s | 1.97× |
+| Partial update (INT) | 4 | 0.071 s | 0.040 s | 1.78× |
+| Partial update + remove-record-on-delete (INT) | 4 | 0.069 s | 0.038 s | 1.82× |
+| Partial update + ignore-delete (INT) | 4 | 0.069 s | 0.039 s | 1.79× |
 
-The new four-commit cases with ORC and a `256 mb` admission budget:
+Four-commit cases with ORC and a `256 mb` admission budget:
 
 | ORC case | Java merge to Arrow | Native merge to Arrow | Throughput ratio |
 |---|---:|---:|---:|
-| FLOAT | 0.061 s | 0.039 s | 1.57× |
-| DOUBLE | 0.061 s | 0.038 s | 1.62× |
-| First-row + ignore-delete (INT) | 0.059 s | 0.035 s | 1.67× |
-| User sequence (INT) | 0.063 s | 0.040 s | 1.58× |
-| Dynamic buckets (INT) | 0.056 s | 0.031 s | 1.79× |
+| FLOAT | 0.064 s | 0.038 s | 1.68× |
+| DOUBLE | 0.062 s | 0.036 s | 1.72× |
+| First-row + ignore-delete (INT) | 0.066 s | 0.032 s | 2.06× |
+| User sequence (INT) | 0.066 s | 0.032 s | 2.03× |
+| Dynamic buckets (INT) | 0.059 s | 0.027 s | 2.18× |
+| Partial update (INT) | 0.063 s | 0.035 s | 1.79× |
+| Partial update + remove-record-on-delete (INT) | 0.061 s | 0.033 s | 1.83× |
+| Partial update + ignore-delete (INT) | 0.064 s | 0.034 s | 1.89× |
 
 These release measurements describe local snapshot catch-up, not whole-job or remote-storage
 performance. Run with:
@@ -192,7 +217,7 @@ SF_PAIMON_SNAPSHOT_BENCHMARK=true mvn test -Pbench,paimon \
 ```
 
 `SF_PAIMON_SNAPSHOT_ROWS` changes the key count; `SF_PAIMON_SNAPSHOT_CASES` selects comma-separated
-case names (for example `float,double,first-row,sequence,dynamic` for the ORC table above).
+case names (for example `partial-update,partial-delete,partial-ignore` for the new partial-update cases).
 `SF_PAIMON_FILE_FORMAT=orc` selects ORC. `SF_PAIMON_SNAPSHOT_BUDGET` sets
 `sort-spill-buffer-size` for both readers (default `64 mb`). The 65,536-key multi-run ORC fixture
 exceeds the default footer admission budget; the ORC measurements use `256 mb`. Native defaults

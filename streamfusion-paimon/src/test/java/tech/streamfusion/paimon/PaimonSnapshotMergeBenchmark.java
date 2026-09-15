@@ -31,7 +31,10 @@ class PaimonSnapshotMergeBenchmark {
         "double",
         "first-row",
         "sequence",
-        "dynamic"
+        "dynamic",
+        "partial-update",
+        "partial-delete",
+        "partial-ignore"
       })
   @EnabledIfEnvironmentVariable(named = "SF_PAIMON_SNAPSHOT_BENCHMARK", matches = "true")
   void compareSnapshotCatchup(String keyType) throws Exception {
@@ -76,6 +79,15 @@ class PaimonSnapshotMergeBenchmark {
                     "true");
             case "sequence" -> Map.of("sequence.field", "ordinal");
             case "dynamic" -> Map.of("bucket", "-1");
+            case "partial-update" -> Map.of("merge-engine", "partial-update");
+            case "partial-delete" ->
+                Map.of(
+                    "merge-engine",
+                    "partial-update",
+                    "partial-update.remove-record-on-delete",
+                    "true");
+            case "partial-ignore" ->
+                Map.of("merge-engine", "partial-update", "ignore-delete", "true");
             default -> Map.of();
           });
       var table = PaimonMergeEngineTest.table(options, type);
@@ -87,10 +99,14 @@ class PaimonSnapshotMergeBenchmark {
             var row =
                 GenericRow.of(
                     key(i - rows / 2, keyType),
-                    BinaryString.fromString("value-" + checkpoint + "-" + i),
-                    new GenericArray(new Integer[] {checkpoint, null, -i}),
+                    keyType.startsWith("partial") && checkpoint % 2 == 0
+                        ? null
+                        : BinaryString.fromString("value-" + checkpoint + "-" + i),
+                    keyType.startsWith("partial") && checkpoint % 2 != 0
+                        ? null
+                        : new GenericArray(new Integer[] {checkpoint, null, -i}),
                     (runs - checkpoint) * rows + i);
-            if (checkpoint == runs && i % 7 == 0) {
+            if (checkpoint == runs && i % 7 == 0 && !keyType.equals("partial-update")) {
               row.setRowKind(RowKind.DELETE);
             }
             if (keyType.equals("dynamic")) writer.write(row, i % 2);

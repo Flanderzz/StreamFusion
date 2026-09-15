@@ -55,6 +55,8 @@ class PaimonSnapshotCallbackTest {
                 new int[0],
                 true,
                 false,
+                false,
+                false,
                 false);
         try {
           assertSame(

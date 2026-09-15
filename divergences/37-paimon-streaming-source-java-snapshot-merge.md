@@ -24,8 +24,8 @@ reviewed. They couple Parquet decode with their own schema manager, filesystem a
 For file decoding, the already-released parquet-rs dependency is sufficient; no paimon-rust
 filesystem or table-reader dependency is imported. Java merges unsupported initial primary-key
 snapshot combinations and those logical rows are converted to Arrow. The first native
-deduplication snapshot increment now extracts the loser tree from paimon-rust and adapts its Arrow
-cursor/output algorithm into the optional Paimon library.
+snapshot merger adapts paimon-rust's Arrow cursor/output algorithm and partial-update cell
+selection into the optional Paimon library.
 [#53](https://github.com/datafusion-contrib/StreamFusion/issues/53) tracks broader snapshot merge
 coverage while retaining the Java table lifecycle. Batch SQL remains out of scope.
 
@@ -40,12 +40,15 @@ file-reader diagnostic (1.30x append and 2.18x changelog throughput on the local
 
 Native snapshot sections and sorted runs are planned by released Java `IntervalPartition`.
 A Java callback forwards Arrow C structs between the Parquet and Paimon libraries without a
-row conversion or a cross-library Rust handle. The extracted Rust tree is unchanged apart from
-visibility; cursors and output gathering are adapted to synchronous batch pulls and incremental
-winner retention. Completed batches can be reclaimed even when many keys produce no output.
-File sequence intervals that could contain ties retain Java, because the two reference mergers'
-tie traversal differs. Raw-convertible snapshots emit insert rows just like Java's raw reader;
-merge snapshots preserve the winning add kind. Recovery counts emitted merged rows and replays
+row conversion or a cross-library Rust handle. Cursors and output gathering use synchronous batch
+pulls and incremental winner retention. Completed batches can be reclaimed even when many keys
+produce no output. The tree ports released Java's leaf states and tie traversal because paimon-rust's
+simpler traversal selects different winners on exact sequence ties. Java also supplies partial-update
+delete and singleton-reducer semantics; paimon-rust supplies per-column cell selection. We gather
+those references by output batch instead of materializing a one-row batch for every key. Sequence
+groups and field aggregates still retain Java. Raw-convertible snapshots emit inserts; selection
+merges preserve the winning add kind, and multi-record partial reductions emit inserts or remove
+the key. Recovery counts emitted merged rows and replays
 the prefix, including when switching between Java and native readers. Apache attribution ships
 in the Paimon JAR's NOTICE. Current coverage, budgets and catch-up measurements are in the
 connector page.

@@ -5,10 +5,11 @@ The first deduplication increment is now implemented; [connector coverage](../..
 is the current behavior and validation reference. The original proposal below records the rationale.
 
 Implementation refinements: raw-convertible snapshots follow Java's insert-only raw path;
-ambiguous file sequence intervals retain Java; native merge keys share the sink's comparable
-scalar whitelist, including decimals, binary, dates and timestamps through precision 6. Footer
+exact sequence ties use a port of Java's loser-tree traversal. Native merge keys use the comparable
+scalar whitelist plus floating types, including decimals, binary, dates and timestamps through precision 6. Footer
 admission and retained-Arrow limits do not constitute a strict process-wide managed-memory
-reservation. Broader merge policies, sequence ties, schemas and deletion vectors remain #53.
+reservation. Basic partial-update cell selection is ported from paimon-rust with Java delete/singleton semantics.
+Sequence groups, aggregation, schemas and deletion vectors remain #53.
 
 ## Proposed flow
 
@@ -220,16 +221,20 @@ adapter with Java ordering parity and bounded retention, followed by a release c
 
 The Arrow cursor/tree boundary also supports dynamic hash buckets, first-row, ignore-delete and
 user-defined sequence columns. Bucket assignment remains Java's concern: each planned split still
-contains files from one table partition and bucket. With disjoint file sequence intervals,
-deduplication can select the maximum `(user sequence, stored sequence)` independently of tree tie
-traversal; first-row selects the minimum stored sequence. Equal stored-sequence ambiguity still
-retains Java. There is no need to port Java's more complex loser-tree state machine for these cases.
+contains files from one table partition and bucket. Deduplication selects the maximum
+`(user sequence, stored sequence)` and first-row selects the minimum stored sequence. Exact ties
+now follow a port of released Java's loser-tree leaf states, reverse initialization and group
+traversal. The original disjoint-file-sequence admission restriction is removed.
 
 User sequence columns omitted by SQL projection are included in decoding and removed from output.
 The comparator shares the writer's Arrow-only NaN canonicalization, preserving Java's distinction
 between signed zeros. Snapshot stored keys additionally admit floats; sink key admission is unchanged.
-Only the current winner and its encoded sequence are retained. Partial-update and aggregation need
-separate treatment because they combine cells and have different grouping/memory requirements.
+Selection engines retain only the current winner. Basic partial-update adapts paimon-rust's
+selected-cell references and gathers them per output column, without materializing one-row Arrow
+batches. The Java reducer's singleton bypass, first-retract initialization, ignore-delete and
+whole-record-delete behavior are preserved. Sequence groups and field aggregates retain Java.
+Direct Java-oracle tests cover ties and grouping; real files cover value types, projections and
+restoration. The connector page records the release benchmarks.
 
 Released `UserDefinedSeqComparator`, `DeduplicateMergeFunction`, `FirstRowMergeFunction` and
 `ReducerMergeFunctionWrapper` supply the ordering and delete semantics. First-row without

@@ -19,26 +19,28 @@
 //! 6824487813c69b1d4975e1add8c37343b3ead75b, table/sort_merge.rs (Apache-2.0).
 //! Sequence/first-row/delete policies follow Paimon 2.0.0 UserDefinedSeqComparator,
 //! DeduplicateMergeFunction and FirstRowMergeFunction.
-//! Keep only the current winner for a key; deleted keys never pin completed input batches.
+//! Selection keeps one winner; partial-update keeps one source cell per column.
+//! Deleted keys never pin completed input batches.
 use crate::loser_tree::LoserTree;
-use arrow::array::{Array, Int64Array, Int8Array};
+use crate::partial_update::PartialUpdate;
+use arrow::array::{new_null_array, Array, ArrayRef, Int64Array, Int8Array};
 use arrow::compute::interleave;
 use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
-use arrow::row::{OwnedRow, RowConverter, Rows, SortField};
+use arrow::row::{RowConverter, Rows, SortField};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::Arc;
 use streamfusion_bridge::ordering::canonical_ordering_column;
 
-type Result<T> = std::result::Result<T, String>;
+pub(crate) type Result<T> = std::result::Result<T, String>;
 pub(crate) type Pull<'a> = dyn FnMut(usize) -> Result<Option<RecordBatch>> + 'a;
 
-struct Cursor {
-    batch: Arc<RecordBatch>,
+pub(crate) struct Cursor {
+    pub batch: Arc<RecordBatch>,
     keys: Rows,
     sequences: Option<Rows>,
-    row: usize,
+    pub row: usize,
 }
 
 pub(crate) struct Options {
@@ -46,6 +48,8 @@ pub(crate) struct Options {
     pub sequence_ascending: bool,
     pub first_row: bool,
     pub ignore_delete: bool,
+    pub partial_update: bool,
+    pub remove_on_delete: bool,
 }
 
 impl Default for Options {
@@ -55,15 +59,10 @@ impl Default for Options {
             sequence_ascending: true,
             first_row: false,
             ignore_delete: false,
+            partial_update: false,
+            remove_on_delete: false,
         }
     }
-}
-
-struct Winner {
-    batch: Arc<RecordBatch>,
-    row: usize,
-    sequence: i64,
-    user_sequence: Option<OwnedRow>,
 }
 
 #[cfg(test)]
@@ -167,37 +166,25 @@ mod tests {
     }
 
     #[test]
-    fn first_row_and_ignored_deletes_keep_only_one_winner_for_a_hot_key() {
+    fn repeated_keys_in_one_run_follow_java_group_boundaries_without_retaining_old_batches() {
         for first_row in [false, true] {
             let mut merger = merger(1, 4096, 32 * 1024);
             merger.options.first_row = first_row;
             merger.options.ignore_delete = true;
             let mut next = 0;
-            let result = merger
+            let mut count = 0;
+            while let Some(result) = merger
                 .next(&mut |_| {
                     next += 1;
-                    Ok((next <= 100_000).then(|| {
-                        batch(&[(
-                            1,
-                            next,
-                            if next % 3 == 0 { 2 } else { 3 },
-                            if next == 3 { "first" } else { "last" },
-                        )])
-                    }))
+                    Ok((next <= 100_000)
+                        .then(|| batch(&[(1, next, if next % 3 == 0 { 2 } else { 3 }, "value")])))
                 })
                 .unwrap()
-                .unwrap();
-            assert_eq!(result.num_rows(), 1);
-            assert_eq!(
-                result
-                    .column(0)
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .unwrap()
-                    .value(0),
-                if first_row { "first" } else { "last" }
-            );
-            assert!(merger.peak_bytes < 16 * 1024, "{}", merger.peak_bytes);
+            {
+                count += result.num_rows();
+            }
+            assert_eq!(count, 33_333);
+            assert!(merger.peak_bytes < 32 * 1024, "{}", merger.peak_bytes);
         }
     }
 
@@ -219,6 +206,22 @@ mod tests {
         assert_eq!(count, 128);
         assert!(batches > 1);
         assert!(merger.peak_bytes < 256 * 1024);
+    }
+
+    #[test]
+    fn partial_update_delete_only_groups_reclaim_completed_batches() {
+        let mut merger = merger(3, 4096, 32 * 1024);
+        merger.partial = Some(PartialUpdate::new(4, 3, false, true));
+        let mut counts = [0; 3];
+        let output = merger
+            .next(&mut |run| {
+                counts[run] += 1;
+                Ok((counts[run] <= 10_000).then(|| batch(&[(counts[run], 0, 3, "deleted")])))
+            })
+            .unwrap();
+        assert!(output.is_none());
+        assert_eq!(counts, [10_001; 3]);
+        assert!(merger.peak_bytes < 16 * 1024, "{}", merger.peak_bytes);
     }
 
     #[test]
@@ -245,6 +248,7 @@ pub(crate) struct Merger {
     sequence_converter: Option<RowConverter>,
     options: Options,
     key_count: usize,
+    partial: Option<PartialUpdate>,
     output: SchemaRef,
     columns: Vec<usize>,
     batch_rows: usize,
@@ -314,6 +318,14 @@ impl Merger {
             tree: LoserTree::new(runs),
             converter,
             sequence_converter,
+            partial: options.partial_update.then(|| {
+                PartialUpdate::new(
+                    input.fields().len(),
+                    key_count + 2,
+                    options.ignore_delete,
+                    options.remove_on_delete,
+                )
+            }),
             options,
             key_count,
             output,
@@ -327,7 +339,6 @@ impl Merger {
 
     fn compare(cursors: &[Option<Cursor>], a: usize, b: usize) -> Ordering {
         match (&cursors[a], &cursors[b]) {
-            (None, None) => Ordering::Equal,
             (None, _) => Ordering::Greater,
             (_, None) => Ordering::Less,
             (Some(a), Some(b)) => a.keys.row(a.row).cmp(&b.keys.row(b.row)),
@@ -339,6 +350,14 @@ impl Merger {
         while let Some(batch) = pull(run)? {
             if batch.num_rows() == 0 {
                 continue;
+            }
+            let sequence = batch
+                .column(self.key_count)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .ok_or("Snapshot sequence column is not Int64")?;
+            if sequence.null_count() != 0 {
+                return Err("Null snapshot sequence".into());
             }
             let key_columns = batch.columns()[..self.key_count]
                 .iter()
@@ -374,19 +393,16 @@ impl Merger {
         Ok(())
     }
 
-    fn retained(&mut self, batches: &[Arc<RecordBatch>], winner: Option<&Winner>) -> Result<()> {
+    fn retained(&mut self, batches: &[Arc<RecordBatch>]) -> Result<()> {
         let mut unique = HashMap::new();
-        for batch in batches.iter().chain(winner.map(|w| &w.batch)) {
+        for batch in batches {
             unique.insert(Arc::as_ptr(batch), batch.get_array_memory_size());
         }
         let mut key_bytes = self.converter.size()
             + self
                 .sequence_converter
                 .as_ref()
-                .map_or(0, RowConverter::size)
-            + winner
-                .and_then(|w| w.user_sequence.as_ref())
-                .map_or(0, |r| r.row().as_ref().len());
+                .map_or(0, RowConverter::size);
         for c in self.cursors.iter().flatten() {
             unique.insert(Arc::as_ptr(&c.batch), c.batch.get_array_memory_size());
             key_bytes = key_bytes.saturating_add(c.keys.size());
@@ -403,103 +419,167 @@ impl Merger {
         Ok(())
     }
 
+    fn compare_sequence(cursors: &[Option<Cursor>], keys: usize, a: usize, b: usize) -> Ordering {
+        match (&cursors[a], &cursors[b]) {
+            (None, _) => Ordering::Greater,
+            (_, None) => Ordering::Less,
+            (Some(a), Some(b)) => {
+                let user = a
+                    .sequences
+                    .as_ref()
+                    .map(|s| s.row(a.row))
+                    .cmp(&b.sequences.as_ref().map(|s| s.row(b.row)));
+                user.then_with(|| {
+                    let value = |c: &Cursor| {
+                        c.batch
+                            .column(keys)
+                            .as_any()
+                            .downcast_ref::<Int64Array>()
+                            .expect("snapshot sequence Int64")
+                            .value(c.row)
+                    };
+                    value(a).cmp(&value(b))
+                })
+            }
+        }
+    }
+
+    fn advance_tree(&mut self, run: usize) {
+        self.tree.advance(
+            run,
+            |a, b| Self::compare(&self.cursors, a, b),
+            |a, b| Self::compare_sequence(&self.cursors, self.key_count, a, b),
+        );
+    }
+
     pub fn next(&mut self, pull: &mut Pull<'_>) -> Result<Option<RecordBatch>> {
         if !self.initialized {
-            for run in 0..self.cursors.len() {
+            // Released Java builds in reverse order; equal-sequence winners depend on this.
+            for run in (0..self.cursors.len()).rev() {
                 self.refill(run, pull)?;
-                self.retained(&[], None)?;
+                self.retained(&[])?;
+                self.advance_tree(run);
             }
-            self.tree
-                .init(|a, b| Self::compare(&self.cursors, a, b).then(a.cmp(&b)).is_gt());
             self.initialized = true;
         }
         let mut batches: Vec<Arc<RecordBatch>> = Vec::new();
         let mut batch_ids = HashMap::new();
         let mut indices = Vec::new();
         let mut output_bytes = 0usize;
-        while let Some(cursor) = &self.cursors[self.tree.winner()] {
-            let key = cursor.keys.row(cursor.row).owned();
-            let mut best: Option<Winner> = None;
-            loop {
+        let mut group = Vec::with_capacity(self.cursors.len());
+        let mut cell_indices = vec![
+            Vec::new();
+            if self.partial.is_some() {
+                self.columns.len() - 1
+            } else {
+                0
+            }
+        ];
+        let mut output_kinds = Vec::new();
+        loop {
+            // Java advances popped leaves only after reducing the entire current group.
+            while self.tree.popped() {
                 let run = self.tree.winner();
-                let Some(cursor) = &mut self.cursors[run] else {
-                    break;
-                };
-                if cursor.keys.row(cursor.row) != key.row() {
-                    break;
-                }
-                let sequence = cursor
-                    .batch
-                    .column(self.key_count)
-                    .as_any()
-                    .downcast_ref::<Int64Array>()
-                    .ok_or("Snapshot sequence column is not Int64")?;
-                if sequence.is_null(cursor.row) {
-                    return Err("Null snapshot sequence".into());
-                }
-                let seq = sequence.value(cursor.row);
-                let kind = Self::kind(&cursor.batch, self.key_count, cursor.row)?;
-                let user_sequence = cursor.sequences.as_ref().map(|s| s.row(cursor.row));
-                if !(self.options.ignore_delete && matches!(kind, 1 | 3))
-                    && best.as_ref().is_none_or(|previous| {
-                        let order = user_sequence
-                            .cmp(&previous.user_sequence.as_ref().map(|r| r.row()))
-                            .then(seq.cmp(&previous.sequence));
-                        if self.options.first_row {
-                            order.is_lt()
-                        } else {
-                            order.is_ge()
-                        }
-                    })
-                {
-                    best = Some(Winner {
-                        batch: cursor.batch.clone(),
-                        row: cursor.row,
-                        sequence: seq,
-                        user_sequence: user_sequence.map(|r| r.owned()),
-                    });
-                }
+                let cursor = self.cursors[run].as_mut().expect("popped cursor");
                 cursor.row += 1;
                 if cursor.row == cursor.batch.num_rows() {
                     self.refill(run, pull)?;
-                    self.retained(&batches, best.as_ref())?;
+                    self.retained(&batches)?;
                 }
-                self.tree
-                    .update(|a, b| Self::compare(&self.cursors, a, b).then(a.cmp(&b)).is_gt());
+                self.advance_tree(run);
             }
-            let Some(Winner { batch, row, .. }) = best else {
-                continue;
-            };
-            match Self::kind(&batch, self.key_count, row)? {
-                0 | 2 => {
-                    let id = *batch_ids.entry(Arc::as_ptr(&batch)).or_insert_with(|| {
+            if self.cursors[self.tree.winner()].is_none() {
+                break;
+            }
+            let mut best = None;
+            group.clear();
+            while !self.tree.popped() {
+                let run = self.tree.winner();
+                let cursor = self.cursors[run].as_ref().expect("group cursor");
+                let kind = Self::kind(&cursor.batch, self.key_count, cursor.row)?;
+                if self.partial.is_some() {
+                    group.push((run, kind));
+                }
+                if !(self.options.ignore_delete && matches!(kind, 1 | 3))
+                    && (!self.options.first_row || best.is_none())
+                {
+                    best = Some(run);
+                }
+                self.tree.pop(
+                    |a, b| Self::compare(&self.cursors, a, b),
+                    |a, b| Self::compare_sequence(&self.cursors, self.key_count, a, b),
+                );
+            }
+            if let Some(partial) = &mut self.partial {
+                let kind = partial.select(&group, &self.cursors)?;
+                if matches!(kind, 0 | 2) {
+                    for (i, &column) in self.columns[..self.columns.len() - 1].iter().enumerate() {
+                        let index = if let Some(run) = partial.cells[column - self.key_count - 2] {
+                            let cursor = self.cursors[run].as_ref().expect("selected cell cursor");
+                            let batch = &cursor.batch;
+                            let id = *batch_ids.entry(Arc::as_ptr(batch)).or_insert_with(|| {
+                                let id = batches.len();
+                                output_bytes =
+                                    output_bytes.saturating_add(batch.get_array_memory_size());
+                                batches.push(batch.clone());
+                                id
+                            });
+                            (id, cursor.row)
+                        } else {
+                            (usize::MAX, 0)
+                        };
+                        cell_indices[i].push(index);
+                    }
+                    output_kinds.push(kind);
+                }
+            } else if let Some(run) = best {
+                let cursor = self.cursors[run].as_ref().expect("winner cursor");
+                if matches!(
+                    Self::kind(&cursor.batch, self.key_count, cursor.row)?,
+                    0 | 2
+                ) {
+                    let batch = &cursor.batch;
+                    let id = *batch_ids.entry(Arc::as_ptr(batch)).or_insert_with(|| {
                         let id = batches.len();
                         output_bytes = output_bytes.saturating_add(batch.get_array_memory_size());
-                        batches.push(batch);
+                        batches.push(batch.clone());
                         id
                     });
-                    indices.push((id, row));
+                    indices.push((id, cursor.row));
                 }
-                1 | 3 => {}
-                kind => return Err(format!("Invalid Paimon row kind {kind}")),
             }
-            if indices.len() >= self.batch_rows || output_bytes >= self.budget / 4 {
+            if indices.len().max(output_kinds.len()) >= self.batch_rows
+                || output_bytes >= self.budget / 4
+            {
                 break;
             }
         }
-        if indices.is_empty() {
+        if indices.is_empty() && output_kinds.is_empty() {
             return Ok(None);
         }
-        self.retained(&batches, None)?;
-        let columns = self
-            .columns
-            .iter()
-            .map(|&column| {
-                let arrays: Vec<&dyn Array> =
-                    batches.iter().map(|b| b.column(column).as_ref()).collect();
-                interleave(&arrays, &indices).map_err(|e| e.to_string())
-            })
-            .collect::<Result<Vec<_>>>()?;
+        self.retained(&batches)?;
+        let mut columns = Vec::<ArrayRef>::with_capacity(self.columns.len());
+        for (i, &column) in self.columns.iter().enumerate() {
+            if self.partial.is_some() && i == self.columns.len() - 1 {
+                columns.push(Arc::new(Int8Array::from(std::mem::take(&mut output_kinds))));
+                break;
+            }
+            let mut arrays: Vec<&dyn Array> =
+                batches.iter().map(|b| b.column(column).as_ref()).collect();
+            let nulls = new_null_array(self.output.field(i).data_type(), 1);
+            let selected = if self.partial.is_some() {
+                for index in &mut cell_indices[i] {
+                    if index.0 == usize::MAX {
+                        index.0 = arrays.len();
+                    }
+                }
+                arrays.push(nulls.as_ref());
+                &cell_indices[i]
+            } else {
+                &indices
+            };
+            columns.push(interleave(&arrays, selected).map_err(|e| e.to_string())?);
+        }
         RecordBatch::try_new(self.output.clone(), columns)
             .map(Some)
             .map_err(|e| e.to_string())

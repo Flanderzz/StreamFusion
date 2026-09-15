@@ -4,6 +4,7 @@ use streamfusion_bridge::{self as bridge, *};
 streamfusion_bridge::link_allocator!();
 mod loser_tree;
 mod merge;
+mod partial_update;
 
 struct SnapshotMerger {
     merger: merge::Merger,
@@ -39,6 +40,8 @@ pub extern "system" fn Java_tech_streamfusion_paimon_NativePaimon_createSnapshot
     sequence_ascending: jboolean,
     first_row: jboolean,
     ignore_delete: jboolean,
+    partial_update: jboolean,
+    remove_on_delete: jboolean,
 ) -> jlong {
     bridge::jni_guard(env, |env| {
         let input = import_schema(input_schema);
@@ -57,6 +60,8 @@ pub extern "system" fn Java_tech_streamfusion_paimon_NativePaimon_createSnapshot
                     sequence_ascending: sequence_ascending != 0,
                     first_row: first_row != 0,
                     ignore_delete: ignore_delete != 0,
+                    partial_update: partial_update != 0,
+                    remove_on_delete: remove_on_delete != 0,
                 },
             )
             .expect("snapshot merger"),

@@ -137,12 +137,38 @@ class PaimonSnapshotMergeTest {
   }
 
   @ParameterizedTest
-  @ValueSource(strings = {"complex-sequence", "partial", "memory", "fan-in", "ties"})
+  @ValueSource(
+      strings = {
+        "complex-sequence",
+        "partial-groups",
+        "partial-aggregate",
+        "aggregate",
+        "memory",
+        "fan-in"
+      })
   void unverifiedSnapshotsRetainJava(String reason) throws Exception {
     Map<String, String> extra =
         switch (reason) {
           case "complex-sequence" -> Map.of("sequence.field", "nested");
-          case "partial" -> Map.of("merge-engine", "partial-update", "ignore-delete", "true");
+          case "partial-groups" ->
+              Map.of(
+                  "merge-engine",
+                  "partial-update",
+                  "ignore-delete",
+                  "true",
+                  "fields.seq.sequence-group",
+                  "txt");
+          case "partial-aggregate" ->
+              Map.of(
+                  "merge-engine",
+                  "partial-update",
+                  "ignore-delete",
+                  "true",
+                  "fields.v.aggregate-function",
+                  "sum",
+                  "fields.seq.sequence-group",
+                  "v");
+          case "aggregate" -> Map.of("merge-engine", "aggregation", "ignore-delete", "true");
           case "memory" -> Map.of("sort-spill-buffer-size", "1 kb");
           case "fan-in" -> Map.of("sort-spill-threshold", "2");
           default -> Map.of();
@@ -162,20 +188,6 @@ class PaimonSnapshotMergeTest {
     var read = table.newReadBuilder();
     for (var split : read.newStreamScan().plan().splits()) {
       DataSplit data = (DataSplit) split;
-      if (reason.equals("ties")) {
-        var duplicate = new ArrayList<>(data.dataFiles());
-        duplicate.add(data.dataFiles().get(0));
-        data =
-            DataSplit.builder()
-                .withSnapshot(data.snapshotId())
-                .withPartition(data.partition())
-                .withBucket(data.bucket())
-                .withBucketPath(data.bucketPath())
-                .withDataFiles(duplicate)
-                .isStreaming(false)
-                .rawConvertible(false)
-                .build();
-      }
       assertNull(
           NativePaimonSnapshotReader.create(
               table, data, LogicalTypeConversion.toLogicalType(read.readType()), 7),

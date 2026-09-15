@@ -2,7 +2,9 @@ This product contains code adapted from Apache Paimon Rust, specifically
 table/sort_merge.rs at commit 6824487813c69b1d4975e1add8c37343b3ead75b.
 
 Merge ordering and delete policies are adapted from Apache Paimon 2.0.0,
-specifically UserDefinedSeqComparator, DeduplicateMergeFunction and FirstRowMergeFunction.
+specifically LoserTree, SortMergeReaderWithLoserTree, UserDefinedSeqComparator,
+DeduplicateMergeFunction, FirstRowMergeFunction, PartialUpdateMergeFunction and
+ReducerMergeFunctionWrapper.
 
 Apache Paimon
 Copyright 2023-2026 The Apache Software Foundation

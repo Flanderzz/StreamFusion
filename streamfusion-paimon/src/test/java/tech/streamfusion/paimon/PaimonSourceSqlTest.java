@@ -93,7 +93,9 @@ class PaimonSourceSqlTest {
     "true,false,FLOAT,parquet,default",
     "true,false,FLOAT,orc,default",
     "true,false,DOUBLE,parquet,default",
-    "true,false,DOUBLE,orc,default"
+    "true,false,DOUBLE,orc,default",
+    "true,false,INT,parquet,partial-update",
+    "true,false,INT,orc,partial-update"
   })
   void streamingSqlReadsSnapshotThenNewCommit(
       boolean primaryKey, boolean watermark, String keyType, String format, String mode)
@@ -124,6 +126,7 @@ class PaimonSourceSqlTest {
               + !mode.equals("first-row")
               + "', 'continuous.discovery-interval'='10 ms'"
               + (mode.equals("first-row") ? ", 'merge-engine'='first-row'" : "")
+              + (mode.equals("partial-update") ? ", 'merge-engine'='partial-update'" : "")
               + (mode.equals("sequence") ? ", 'sequence.field'='ts'" : "")
               + ")");
       FileStoreTable table =
@@ -154,7 +157,7 @@ class PaimonSourceSqlTest {
                 mode,
                 GenericRow.of(
                     sqlKey(i, keyType),
-                    BinaryString.fromString("merged"),
+                    mode.equals("partial-update") ? null : BinaryString.fromString("merged"),
                     BinaryString.fromString("p"),
                     org.apache.paimon.data.Timestamp.fromEpochMillis(i * 2000L)));
           }

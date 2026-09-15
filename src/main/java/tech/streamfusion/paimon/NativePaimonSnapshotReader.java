@@ -2,7 +2,6 @@ package tech.streamfusion.paimon;
 
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
 import org.apache.arrow.c.ArrowSchema;
 import org.apache.arrow.c.Data;
@@ -17,6 +16,7 @@ import org.apache.paimon.fs.Path;
 import org.apache.paimon.io.DataFileMeta;
 import org.apache.paimon.mergetree.SortedRun;
 import org.apache.paimon.mergetree.compact.IntervalPartition;
+import org.apache.paimon.mergetree.compact.PartialUpdateMergeFunction;
 import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.PrimaryKeyFileStoreTable;
@@ -54,13 +54,25 @@ public final class NativePaimonSnapshotReader implements AutoCloseable {
       int batchRows)
       throws IOException {
     CoreOptions options = table.coreOptions();
+    boolean partial = options.mergeEngine() == CoreOptions.MergeEngine.PARTIAL_UPDATE;
+    boolean removeOnDelete =
+        options.toConfiguration().get(CoreOptions.PARTIAL_UPDATE_REMOVE_RECORD_ON_DELETE);
+    if (partial) {
+      if (options.toConfiguration().toMap().keySet().stream()
+          .anyMatch(k -> k.endsWith("sequence-group") || k.contains("aggregate-function")))
+        return null;
+      // Keep configuration validation with the released Java implementation.
+      PartialUpdateMergeFunction.factory(
+          options.toConfiguration(), table.rowType(), table.primaryKeys());
+    }
     if (!(table instanceof PrimaryKeyFileStoreTable)
         || split.isStreaming()
         || split.rawConvertible()
         || (table.bucketMode() != BucketMode.HASH_FIXED
             && table.bucketMode() != BucketMode.HASH_DYNAMIC)
         || (options.mergeEngine() != CoreOptions.MergeEngine.DEDUPLICATE
-            && options.mergeEngine() != CoreOptions.MergeEngine.FIRST_ROW)
+            && options.mergeEngine() != CoreOptions.MergeEngine.FIRST_ROW
+            && !partial)
         || options.sortEngine() != CoreOptions.SortEngine.LOSER_TREE
         || split.deletionFiles().isPresent()
         || split.dataFiles().stream()
@@ -70,7 +82,8 @@ public final class NativePaimonSnapshotReader implements AutoCloseable {
                         || !PaimonCodecs.available(f.fileFormat())
                         || f.minSequenceNumber() < 0
                         || f.maxSequenceNumber() < f.minSequenceNumber()
-                        || (options.mergeEngine() == CoreOptions.MergeEngine.FIRST_ROW
+                        || ((options.mergeEngine() == CoreOptions.MergeEngine.FIRST_ROW
+                                || (partial && !removeOnDelete))
                             && !options.ignoreDelete()
                             && f.deleteRowCount().orElse(1L) != 0))) {
       return null;
@@ -98,18 +111,6 @@ public final class NativePaimonSnapshotReader implements AutoCloseable {
     for (List<SortedRun> section : sections) {
       if (section.size() > options.sortSpillThreshold()) {
         return null;
-      }
-      // Distinct file sequence intervals prove that no cross-file sequence tie can change
-      // Java's winner. Ambiguous intervals retain Java, including equal-sequence copies.
-      List<DataFileMeta> ordered =
-          section.stream()
-              .flatMap(r -> r.files().stream())
-              .sorted(Comparator.comparingLong(DataFileMeta::minSequenceNumber))
-              .toList();
-      for (int i = 1; i < ordered.size(); i++) {
-        if (ordered.get(i - 1).maxSequenceNumber() >= ordered.get(i).minSequenceNumber()) {
-          return null;
-        }
       }
     }
     NativePaimonSnapshotReader reader =
@@ -245,7 +246,12 @@ public final class NativePaimonSnapshotReader implements AutoCloseable {
                     sequenceColumns,
                     table.coreOptions().sequenceFieldSortOrderIsAscending(),
                     table.coreOptions().mergeEngine() == CoreOptions.MergeEngine.FIRST_ROW,
-                    table.coreOptions().ignoreDelete());
+                    table.coreOptions().ignoreDelete(),
+                    table.coreOptions().mergeEngine() == CoreOptions.MergeEngine.PARTIAL_UPDATE,
+                    table
+                        .coreOptions()
+                        .toConfiguration()
+                        .get(CoreOptions.PARTIAL_UPDATE_REMOVE_RECORD_ON_DELETE));
           } finally {
             if (in.snapshot().release != 0) {
               in.release();

@@ -33,7 +33,9 @@ class PaimonSourceRecoveryTest {
     "false,sequence",
     "true,sequence",
     "false,first-row",
-    "true,first-row"
+    "true,first-row",
+    "false,partial-update",
+    "true,partial-update"
   })
   void checkpointOnlyAdvancesAfterEmissionAndRestoresInsideBatch(boolean tail, String mode)
       throws Exception {
@@ -50,6 +52,8 @@ class PaimonSourceRecoveryTest {
               "true",
               "changelog-producer",
               "lookup"));
+    if (mode.equals("partial-update"))
+      options.putAll(Map.of("merge-engine", "partial-update", "ignore-delete", "true"));
     FileStoreTable table = PaimonMergeEngineTest.table(options);
     var read = table.newReadBuilder().withProjection(new int[] {0, 3});
     var scan = read.newStreamScan();
