@@ -1,5 +1,10 @@
 # Top-N
 
+FLOAT/DOUBLE sort keys treat positive and negative zero as a tie, so following ORDER BY
+columns decide their rank. Only sort-key copies normalize zero; emitted payloads and partition
+keys keep the original bits. Snapshot restore normalizes retained sort keys as well, including
+older raw snapshots, before ranking new input.
+
 **Status:** Native — all three rank strategies, idle-state TTL included; a small set of matcher
 gaps below.
 

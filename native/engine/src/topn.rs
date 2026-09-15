@@ -1,5 +1,37 @@
 use crate::*;
 
+fn sort_array(array: &ArrayRef) -> ArrayRef {
+    use arrow::array::AsArray;
+    use arrow::datatypes::{Float32Type, Float64Type};
+    match array.data_type() {
+        DataType::Float32 => Arc::new(
+            array
+                .as_primitive::<Float32Type>()
+                .unary::<_, Float32Type>(|v| if v == 0.0 { 0.0 } else { v }),
+        ),
+        DataType::Float64 => Arc::new(
+            array
+                .as_primitive::<Float64Type>()
+                .unary::<_, Float64Type>(|v| if v == 0.0 { 0.0 } else { v }),
+        ),
+        _ => array.clone(),
+    }
+}
+
+fn normalize_restored_sort_keys(buffer: &mut [TopNRow], sort: &RowConverter) {
+    let arrays = sort
+        .convert_rows(buffer.iter().map(|entry| entry.sort.row()))
+        .expect("decode restored sort keys");
+    let arrays: Vec<_> = arrays.iter().map(sort_array).collect();
+    let keys = sort
+        .convert_columns(&arrays)
+        .expect("normalize restored sort keys");
+    for (row, entry) in buffer.iter_mut().enumerate() {
+        entry.sort = keys.row(row).owned();
+    }
+    buffer.sort_by(|a, b| a.sort.cmp(&b.sort));
+}
+
 /// One ORDER BY column for the Top-N comparator: which column, ascending vs descending, and whether
 /// nulls sort first (independent of direction, as in SQL `NULLS FIRST`/`LAST`).
 #[derive(Clone)]
@@ -36,7 +68,15 @@ pub(crate) fn compare_rows(
                 }
             }
             (false, false) => {
-                let c = x.partial_cmp(y).unwrap_or(Equal);
+                let c = match (x, y) {
+                    (ScalarValue::Float32(Some(x)), ScalarValue::Float32(Some(y))) => {
+                        x.partial_cmp(y).unwrap_or(Equal)
+                    }
+                    (ScalarValue::Float64(Some(x)), ScalarValue::Float64(Some(y))) => {
+                        x.partial_cmp(y).unwrap_or(Equal)
+                    }
+                    _ => x.partial_cmp(y).unwrap_or(Equal),
+                };
                 if s.ascending {
                     c
                 } else {
@@ -76,6 +116,7 @@ pub(crate) struct TopNConverters {
     // operator must literally share these two.
     sort: Arc<RowConverter>,
     payload: Arc<RowConverter>,
+    floating_sort: bool,
 }
 
 impl TopNConverters {
@@ -125,6 +166,12 @@ impl TopNConverters {
             partition,
             sort: Arc::new(sort),
             payload: Arc::new(payload),
+            floating_sort: sort_columns.iter().any(|s| {
+                matches!(
+                    batch.column(s.index).data_type(),
+                    DataType::Float32 | DataType::Float64
+                )
+            }),
         }
     }
 
@@ -227,6 +274,7 @@ pub(crate) type RocksTopNStore = crate::state::RocksStore<TopNStateCodec>;
 pub(crate) struct TopNStateCodec {
     sort: Arc<RowConverter>,
     payload: Arc<RowConverter>,
+    floating_sort: bool,
 }
 
 #[cfg(feature = "rocksdb-state")]
@@ -235,6 +283,7 @@ impl TopNStateCodec {
         TopNStateCodec {
             sort: Arc::clone(&converters.sort),
             payload: Arc::clone(&converters.payload),
+            floating_sort: converters.floating_sort,
         }
     }
 }
@@ -272,13 +321,17 @@ impl crate::state::RocksStateCodec for TopNStateCodec {
         let mut cursor = RawListCursor::new(bytes);
         let sort_parser = self.sort.parser();
         let payload_parser = self.payload.parser();
-        (0..cursor.u32())
+        let mut buffer: Vec<_> = (0..cursor.u32())
             .map(|_| TopNRow {
                 sort: sort_parser.parse(cursor.bytes()).owned(),
                 payload: Arc::new(payload_parser.parse(cursor.bytes()).owned()),
                 ts_ms: cursor.i64(),
             })
-            .collect()
+            .collect();
+        if self.floating_sort && !buffer.is_empty() {
+            normalize_restored_sort_keys(&mut buffer, &self.sort);
+        }
+        buffer
     }
 }
 
@@ -543,7 +596,7 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> TopNRanker<S> {
         let sort_arrays: Vec<ArrayRef> = self
             .sort_columns
             .iter()
-            .map(|s| batch.column(s.index).clone())
+            .map(|s| sort_array(batch.column(s.index)))
             .collect();
         let data_arrays: Vec<ArrayRef> = (0..arity).map(|i| batch.column(i).clone()).collect();
         let keys = encode_group_keys(&conv.sort, &sort_arrays, batch.num_rows());
@@ -722,7 +775,7 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> TopNRanker<S> {
         let sort_arrays: Vec<ArrayRef> = self
             .sort_columns
             .iter()
-            .map(|s| batch.column(s.index).clone())
+            .map(|s| sort_array(batch.column(s.index)))
             .collect();
         let data_arrays: Vec<ArrayRef> = (0..arity).map(|i| batch.column(i).clone()).collect();
         let keys = encode_group_keys(&conv.sort, &sort_arrays, batch.num_rows());
@@ -1192,7 +1245,7 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> TopNRanker<S> {
         let sort_arrays: Vec<ArrayRef> = self
             .sort_columns
             .iter()
-            .map(|s| batch.column(s.index).clone())
+            .map(|s| sort_array(batch.column(s.index)))
             .collect();
         let data_arrays: Vec<ArrayRef> = (0..arity).map(|i| batch.column(i).clone()).collect();
         let keys = encode_group_keys(&conv.sort, &sort_arrays, batch.num_rows());
@@ -1247,6 +1300,16 @@ fn load_topn_batch_raw(
     let payload_parser = conv.payload.parser();
     let keys = column_binary(batch, RAW_SNAPSHOT_KEY);
     let sorts = column_binary(batch, RAW_SNAPSHOT_SORT);
+    let normalized_sorts = conv.floating_sort.then(|| {
+        let arrays = conv
+            .sort
+            .convert_rows((0..batch.num_rows()).map(|row| sort_parser.parse(sorts.value(row))))
+            .expect("decode snapshot sort keys");
+        let arrays: Vec<_> = arrays.iter().map(sort_array).collect();
+        conv.sort
+            .convert_columns(&arrays)
+            .expect("normalize snapshot sort keys")
+    });
     let rows = column_binary(batch, RAW_SNAPSHOT_ROW);
     let write_timestamps = batch
         .column_by_name(TTL_TS_COLUMN)
@@ -1258,13 +1321,22 @@ fn load_topn_batch_raw(
             Some(buffer) => buffer,
             None => groups.insert(ByteKey::from(part), Vec::new()),
         };
-        buffer.push(TopNRow {
-            sort: sort_parser.parse(sorts.value(row)).owned(),
+        let entry = TopNRow {
+            sort: normalized_sorts.as_ref().map_or_else(
+                || sort_parser.parse(sorts.value(row)).owned(),
+                |keys| keys.row(row).owned(),
+            ),
             payload: Arc::new(payload_parser.parse(rows.value(row)).owned()),
             ts_ms: write_timestamps
                 .as_ref()
                 .map_or(restored_at_ms, |ts| ts.value(row)),
-        });
+        };
+        if conv.floating_sort {
+            let position = buffer.partition_point(|existing| existing.sort <= entry.sort);
+            buffer.insert(position, entry);
+        } else {
+            buffer.push(entry);
+        }
     }
 }
 
@@ -1556,7 +1628,7 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> RetractableTopNRanker<S> {
         let sort_arrays: Vec<ArrayRef> = self
             .sort_columns
             .iter()
-            .map(|s| batch.column(s.index).clone())
+            .map(|s| sort_array(batch.column(s.index)))
             .collect();
         let data_arrays: Vec<ArrayRef> = (0..arity).map(|i| batch.column(i).clone()).collect();
         let keys = encode_group_keys(&conv.sort, &sort_arrays, batch.num_rows());
@@ -1722,7 +1794,7 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> RetractableTopNRanker<S> {
         let sort_arrays: Vec<ArrayRef> = self
             .sort_columns
             .iter()
-            .map(|s| batch.column(s.index).clone())
+            .map(|s| sort_array(batch.column(s.index)))
             .collect();
         let data_arrays: Vec<ArrayRef> = (0..arity).map(|i| batch.column(i).clone()).collect();
         let keys = encode_group_keys(&conv.sort, &sort_arrays, batch.num_rows());
@@ -1986,7 +2058,7 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> RetractableTopNRanker<S> {
         let sort_arrays: Vec<ArrayRef> = self
             .sort_columns
             .iter()
-            .map(|s| batch.column(s.index).clone())
+            .map(|s| sort_array(batch.column(s.index)))
             .collect();
         let data_arrays: Vec<ArrayRef> = (0..arity).map(|i| batch.column(i).clone()).collect();
         let keys = encode_group_keys(&conv.sort, &sort_arrays, batch.num_rows());
@@ -2389,7 +2461,7 @@ impl<S: KeyedStateStore<Vec<UpdatableRow>>> UpdatableTopNRanker<S> {
         let sort_arrays: Vec<ArrayRef> = self
             .sort_columns
             .iter()
-            .map(|s| batch.column(s.index).clone())
+            .map(|s| sort_array(batch.column(s.index)))
             .collect();
         let data_arrays: Vec<ArrayRef> = (0..arity).map(|i| batch.column(i).clone()).collect();
         let keys = encode_group_keys(&conv.sort, &sort_arrays, batch.num_rows());
@@ -4247,6 +4319,68 @@ pub extern "system" fn Java_tech_streamfusion_Native_closeTopNRanker<'local>(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn restored_signed_zero_keys_use_secondary_order_without_changing_payload() {
+        use super::*;
+        use arrow::array::Float64Array;
+        let batch = RecordBatch::try_from_iter(vec![
+            (
+                "value",
+                Arc::new(Float64Array::from(vec![-0.0, 0.0])) as ArrayRef,
+            ),
+            ("id", Arc::new(Int64Array::from(vec![2, 1])) as ArrayRef),
+        ])
+        .unwrap();
+        let conv = TopNConverters::build(
+            &batch,
+            2,
+            &[],
+            &[
+                SortColumn {
+                    index: 0,
+                    ascending: true,
+                    nulls_first: true,
+                },
+                SortColumn {
+                    index: 1,
+                    ascending: true,
+                    nulls_first: true,
+                },
+            ],
+        );
+        // An old snapshot contains unnormalized Arrow sort keys in their old order.
+        let keys = conv.sort.convert_columns(batch.columns()).unwrap();
+        let payload = conv.payload.convert_columns(batch.columns()).unwrap();
+        let mut buffer: Vec<_> = (0..2)
+            .map(|i| TopNRow {
+                sort: keys.row(i).owned(),
+                payload: Arc::new(payload.row(i).owned()),
+                ts_ms: 0,
+            })
+            .collect();
+        normalize_restored_sort_keys(&mut buffer, &conv.sort);
+        let rows = conv
+            .payload
+            .convert_rows(buffer.iter().map(|r| r.payload.row()))
+            .unwrap();
+        assert_eq!(
+            rows[1]
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .values(),
+            &[1, 2]
+        );
+        assert_eq!(
+            rows[0]
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .value(1)
+                .to_bits(),
+            (-0.0f64).to_bits()
+        );
+    }
     use super::*;
 
     fn changelog(values: &[i64], kinds: &[i8]) -> RecordBatch {
