@@ -31,6 +31,11 @@ watermarks use the millisecond component. The JVM temporal-function bridge prese
 both components for generated expressions and reads milliseconds for millisecond-only builtins.
 Readers accept Arrow second, millisecond, microsecond and nanosecond timestamp
 columns without interpreting the Arrow timezone label as a timezone conversion.
+They also support a nullable timestamp struct containing non-null `millis: BIGINT` and
+`nano_of_milli: INT` buffers. Component metadata distinguishes that layout from user ROW values.
+Its millisecond view shares the original buffer, and its writer preserves hidden fractions even
+when the logical precision is three. Primitive timestamp writes now check overflow and fail
+explicitly instead of wrapping the date.
 
 This reader contract does **not** yet expand end-to-end timestamp range: row-to-Arrow
 writers, timestamp-producing expressions and several state/output paths still use

@@ -18,19 +18,14 @@
 
 package tech.streamfusion.arrow.writers;
 
+import tech.streamfusion.arrow.TimestampAccessor;
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.table.data.ArrayData;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.TimestampData;
 import org.apache.flink.util.Preconditions;
 
-import org.apache.arrow.vector.TimeStampMicroVector;
-import org.apache.arrow.vector.TimeStampMilliVector;
-import org.apache.arrow.vector.TimeStampNanoVector;
-import org.apache.arrow.vector.TimeStampSecVector;
-import org.apache.arrow.vector.TimeStampVector;
 import org.apache.arrow.vector.ValueVector;
-import org.apache.arrow.vector.types.pojo.ArrowType;
 
 /** {@link ArrowFieldWriter} for Timestamp. */
 @Internal
@@ -50,10 +45,7 @@ public abstract class TimestampWriter<T> extends ArrowFieldWriter<T> {
 
     private TimestampWriter(ValueVector valueVector, int precision) {
         super(valueVector);
-        Preconditions.checkState(
-                valueVector instanceof TimeStampVector
-                        && ((ArrowType.Timestamp) valueVector.getField().getType()).getTimezone()
-                                == null);
+        Preconditions.checkState(TimestampAccessor.isTimestamp(valueVector));
         this.precision = precision;
     }
 
@@ -63,32 +55,7 @@ public abstract class TimestampWriter<T> extends ArrowFieldWriter<T> {
 
     @Override
     public void doWrite(T in, int ordinal) {
-        ValueVector valueVector = getValueVector();
-        if (isNullAt(in, ordinal)) {
-            ((TimeStampVector) valueVector).setNull(getCount());
-        } else {
-            TimestampData timestamp = readTimestamp(in, ordinal);
-
-            if (valueVector instanceof TimeStampSecVector) {
-                ((TimeStampSecVector) valueVector)
-                        .setSafe(getCount(), timestamp.getMillisecond() / 1000);
-            } else if (valueVector instanceof TimeStampMilliVector) {
-                ((TimeStampMilliVector) valueVector)
-                        .setSafe(getCount(), timestamp.getMillisecond());
-            } else if (valueVector instanceof TimeStampMicroVector) {
-                ((TimeStampMicroVector) valueVector)
-                        .setSafe(
-                                getCount(),
-                                timestamp.getMillisecond() * 1000
-                                        + timestamp.getNanoOfMillisecond() / 1000);
-            } else {
-                ((TimeStampNanoVector) valueVector)
-                        .setSafe(
-                                getCount(),
-                                timestamp.getMillisecond() * 1_000_000
-                                        + timestamp.getNanoOfMillisecond());
-            }
-        }
+        TimestampAccessor.set(getValueVector(), getCount(), isNullAt(in, ordinal) ? null : readTimestamp(in, ordinal));
     }
 
     // ------------------------------------------------------------------------------------------

@@ -16,9 +16,56 @@ import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.flink.table.data.TimestampData;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.api.Test;
+import org.apache.arrow.vector.complex.StructVector;
+import org.apache.flink.table.data.GenericRowData;
+import tech.streamfusion.arrow.writers.TimestampWriter;
 import tech.streamfusion.arrow.vectors.ArrowTimestampColumnVector;
 
 class TimestampAccessorTest {
+  @Test
+  void componentWriterPreservesRangeAndHiddenFractions() {
+    try (BufferAllocator allocator = new RootAllocator();
+        StructVector vector = (StructVector) TimestampAccessor.field("ts", true).createVector(allocator)) {
+      vector.allocateNew();
+      var writer = TimestampWriter.forRow(vector, 3);
+      TimestampData[] values = {
+          TimestampData.fromEpochMillis(Long.MIN_VALUE, 999999), null,
+          TimestampData.fromEpochMillis(-62135596800000L, 123456),
+          TimestampData.fromEpochMillis(-1, 999999),
+          TimestampData.fromEpochMillis(253402300799999L, 999999),
+          TimestampData.fromEpochMillis(Long.MAX_VALUE, 999999)};
+      for (TimestampData value : values) writer.write(GenericRowData.of(value), 0);
+      writer.finish();
+      var reader = new TimestampAccessor(vector);
+      for (int i = 0; i < values.length; i++) {
+        assertEquals(values[i] == null, reader.isNull(i));
+        if (values[i] != null) assertEquals(values[i], reader.getTimestamp(i));
+      }
+      assertEquals(Long.MAX_VALUE, reader.maxMillis(values.length));
+      writer.reset();
+      writer.write(GenericRowData.of((Object) null), 0);
+      writer.finish();
+      assertNull(reader.maxMillis(1));
+    }
+  }
+
+  @Test
+  void primitiveWriterReportsOverflowInsteadOfWrapping() {
+    try (BufferAllocator allocator = new RootAllocator();
+        TimeStampVector vector = (TimeStampVector) new Field("ts",
+            FieldType.nullable(new ArrowType.Timestamp(TimeUnit.NANOSECOND, null)), List.of()).createVector(allocator)) {
+      vector.allocateNew();
+      TimestampData value = TimestampData.fromEpochMillis(-62135596800000L, 123456);
+      assertThrows(ArithmeticException.class, () -> TimestampWriter.forRow(vector, 9).write(GenericRowData.of(value), 0));
+      for (long nanos : new long[] {Long.MIN_VALUE, -1, 0, Long.MAX_VALUE}) {
+        TimestampData expected = TimestampData.fromEpochMillis(Math.floorDiv(nanos, 1000000), (int) Math.floorMod(nanos, 1000000));
+        TimestampAccessor.set(vector, 0, expected);
+        assertEquals(nanos, vector.get(0));
+      }
+    }
+  }
+
   @ParameterizedTest
   @EnumSource(TimeUnit.class)
   void readsFlinkValueWithoutNarrowingToNanoseconds(TimeUnit unit) {

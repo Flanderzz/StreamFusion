@@ -2,12 +2,87 @@
 //! Reading a key or event time must not narrow that range to an i64 nanosecond count.
 
 use arrow::array::{
-    Array, Int64Array, TimestampMicrosecondArray, TimestampMillisecondArray,
-    TimestampNanosecondArray, TimestampSecondArray,
+    Array, ArrayRef, Int32Array, Int64Array, StructArray, TimestampMicrosecondArray,
+    TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray,
 };
 use arrow::buffer::{NullBuffer, ScalarBuffer};
-use arrow::datatypes::{DataType, TimeUnit};
+use arrow::datatypes::{DataType, Field, Fields, TimeUnit};
 use arrow::error::ArrowError;
+use std::sync::{Arc, LazyLock};
+
+const COMPONENT_KEY: &str = "streamfusion.timestamp.component";
+
+static TIMESTAMP_FIELDS: LazyLock<Fields> = LazyLock::new(|| {
+    [
+        ("millis", DataType::Int64),
+        ("nano_of_milli", DataType::Int32),
+    ]
+    .into_iter()
+    .map(|(name, data_type)| {
+        Field::new(name, data_type, false)
+            .with_metadata([(COMPONENT_KEY.to_owned(), name.to_owned())].into())
+    })
+    .collect()
+});
+
+/// A timestamp is one nullable logical column with two non-null component buffers.
+/// Component metadata distinguishes it from an ordinary user ROW with the same field names.
+pub fn timestamp_type() -> DataType {
+    DataType::Struct(TIMESTAMP_FIELDS.clone())
+}
+
+pub fn is_component_timestamp(data_type: &DataType) -> bool {
+    matches!(data_type, DataType::Struct(fields) if fields == &*TIMESTAMP_FIELDS)
+}
+
+pub fn is_timestamp(data_type: &DataType) -> bool {
+    matches!(data_type, DataType::Timestamp(_, _)) || is_component_timestamp(data_type)
+}
+
+pub fn timestamp_array(values: impl IntoIterator<Item = Option<TimestampValue>>) -> StructArray {
+    let mut millis = Vec::new();
+    let mut nanos = Vec::new();
+    let mut valid = Vec::new();
+    for value in values {
+        valid.push(value.is_some());
+        millis.push(value.map_or(0, |v| v.millis));
+        nanos.push(value.map_or(0, |v| v.nano_of_milli as i32));
+    }
+    StructArray::new(
+        TIMESTAMP_FIELDS.clone(),
+        vec![
+            Arc::new(Int64Array::from(millis)),
+            Arc::new(Int32Array::from(nanos)),
+        ],
+        Some(NullBuffer::from(valid)),
+    )
+}
+
+pub fn timestamps_from_millis(millis: &Int64Array) -> StructArray {
+    timestamp_array(
+        millis
+            .iter()
+            .map(|value| value.map(TimestampValue::from_millis)),
+    )
+}
+
+/// Convert a legacy or external primitive timestamp without narrowing its range or precision.
+pub fn to_components(array: &ArrayRef) -> Result<ArrayRef, ArrowError> {
+    if is_component_timestamp(array.data_type()) {
+        return Ok(array.clone());
+    }
+    let column = TimestampColumn::try_new(array.as_ref())?;
+    let values: Result<Vec<_>, _> = (0..array.len())
+        .map(|row| {
+            if array.is_null(row) {
+                Ok(None)
+            } else {
+                column.value(row).map(Some)
+            }
+        })
+        .collect();
+    Ok(Arc::new(timestamp_array(values?)))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TimestampValue {
@@ -16,6 +91,36 @@ pub struct TimestampValue {
 }
 
 impl TimestampValue {
+    pub fn new(millis: i64, nano_of_milli: u32) -> Result<Self, ArrowError> {
+        if nano_of_milli >= 1_000_000 {
+            return Err(ArrowError::InvalidArgumentError(
+                "Timestamp nanosecond remainder must be in 0..1000000".into(),
+            ));
+        }
+        Ok(Self {
+            millis,
+            nano_of_milli,
+        })
+    }
+
+    pub fn from_millis(millis: i64) -> Self {
+        Self {
+            millis,
+            nano_of_milli: 0,
+        }
+    }
+
+    pub fn from_nanos(nanos: i128) -> Result<Self, ArrowError> {
+        let millis = i64::try_from(nanos.div_euclid(1_000_000)).map_err(|_| {
+            ArrowError::ComputeError("Timestamp exceeds Flink's millisecond range".into())
+        })?;
+        Self::new(millis, nanos.rem_euclid(1_000_000) as u32)
+    }
+
+    pub fn nanos(self) -> i128 {
+        i128::from(self.millis) * 1_000_000 + i128::from(self.nano_of_milli)
+    }
+
     pub fn millis(self) -> i64 {
         self.millis
     }
@@ -50,13 +155,38 @@ impl TimestampValue {
 
 /// A borrowed view; constructing it neither copies buffers nor takes ownership of the array.
 pub struct TimestampColumn<'a> {
-    values: &'a ScalarBuffer<i64>,
+    storage: TimestampStorage<'a>,
     nulls: Option<&'a NullBuffer>,
-    unit: TimeUnit,
+}
+
+enum TimestampStorage<'a> {
+    Primitive(&'a ScalarBuffer<i64>, TimeUnit),
+    Components(&'a Int64Array, &'a Int32Array),
 }
 
 impl<'a> TimestampColumn<'a> {
     pub fn try_new(array: &'a dyn Array) -> Result<Self, ArrowError> {
+        if is_component_timestamp(array.data_type()) {
+            let array = array
+                .as_any()
+                .downcast_ref::<StructArray>()
+                .expect("timestamp struct");
+            return Ok(Self {
+                storage: TimestampStorage::Components(
+                    array
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<Int64Array>()
+                        .expect("timestamp millis"),
+                    array
+                        .column(1)
+                        .as_any()
+                        .downcast_ref::<Int32Array>()
+                        .expect("timestamp nanos"),
+                ),
+                nulls: array.nulls(),
+            });
+        }
         let DataType::Timestamp(unit, _) = array.data_type() else {
             return Err(ArrowError::CastError(format!(
                 "Expected TIMESTAMP, got {}",
@@ -83,24 +213,54 @@ impl<'a> TimestampColumn<'a> {
             TimeUnit::Nanosecond => values!(TimestampNanosecondArray),
         };
         Ok(Self {
-            values,
+            storage: TimestampStorage::Primitive(values, *unit),
             nulls: array.nulls(),
-            unit: *unit,
         })
+    }
+
+    pub fn len(&self) -> usize {
+        match &self.storage {
+            TimestampStorage::Primitive(values, _) => values.len(),
+            TimestampStorage::Components(millis, _) => millis.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn is_null(&self, row: usize) -> bool {
+        self.nulls.is_some_and(|nulls| nulls.is_null(row))
     }
 
     /// The caller checks validity before reading a row, as with Arrow's primitive accessors.
     pub fn value(&self, row: usize) -> Result<TimestampValue, ArrowError> {
-        TimestampValue::from_arrow(self.values[row], self.unit)
+        match &self.storage {
+            TimestampStorage::Primitive(values, unit) => {
+                TimestampValue::from_arrow(values[row], *unit)
+            }
+            TimestampStorage::Components(millis, nanos) => {
+                TimestampValue::new(millis.value(row), nanos.value(row) as u32)
+            }
+        }
     }
 
     pub fn to_millis(&self) -> Result<Int64Array, ArrowError> {
-        if self.unit == TimeUnit::Millisecond {
-            return Ok(Int64Array::new(self.values.clone(), self.nulls.cloned()));
+        match &self.storage {
+            TimestampStorage::Primitive(values, TimeUnit::Millisecond) => {
+                return Ok(Int64Array::new((*values).clone(), self.nulls.cloned()));
+            }
+            TimestampStorage::Components(millis, _) => {
+                return Ok(Int64Array::new(
+                    millis.values().clone(),
+                    self.nulls.cloned(),
+                ));
+            }
+            _ => {}
         }
-        (0..self.values.len())
+        (0..self.len())
             .map(|row| {
-                if self.nulls.is_some_and(|nulls| nulls.is_null(row)) {
+                if self.is_null(row) {
                     Ok(None)
                 } else {
                     self.value(row).map(|value| Some(value.millis()))
@@ -110,21 +270,98 @@ impl<'a> TimestampColumn<'a> {
     }
 
     pub fn max_millis(&self) -> Result<Option<i64>, ArrowError> {
-        // Unit conversion is monotonic. Find the maximum before converting, without an output array.
-        self.values
-            .iter()
-            .enumerate()
-            .filter(|(row, _)| self.nulls.is_none_or(|nulls| nulls.is_valid(*row)))
-            .map(|(_, value)| *value)
-            .max()
-            .map(|raw| TimestampValue::from_arrow(raw, self.unit).map(TimestampValue::millis))
-            .transpose()
+        match &self.storage {
+            TimestampStorage::Primitive(values, unit) => values
+                .iter()
+                .enumerate()
+                .filter(|(row, _)| !self.is_null(*row))
+                .map(|(_, value)| *value)
+                .max()
+                .map(|raw| TimestampValue::from_arrow(raw, *unit).map(TimestampValue::millis))
+                .transpose(),
+            TimestampStorage::Components(millis, _) => Ok(millis
+                .values()
+                .iter()
+                .enumerate()
+                .filter(|(row, _)| !self.is_null(*row))
+                .map(|(_, value)| *value)
+                .max()),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn component_columns_keep_full_range_fractions_and_parent_nulls() {
+        let expected = [
+            Some(TimestampValue::new(i64::MIN, 999_999).unwrap()),
+            None,
+            Some(TimestampValue::new(-62_135_596_800_000, 123_456).unwrap()),
+            Some(TimestampValue::new(-1, 999_999).unwrap()),
+            Some(TimestampValue::new(253_402_300_799_999, 999_999).unwrap()),
+            Some(TimestampValue::new(i64::MAX, 999_999).unwrap()),
+        ];
+        let array = timestamp_array(expected);
+        let sliced = array.slice(1, 5);
+        let column = TimestampColumn::try_new(&sliced).unwrap();
+        for (row, value) in expected[1..].iter().enumerate() {
+            assert_eq!(column.is_null(row), value.is_none());
+            if let Some(value) = value {
+                assert_eq!(column.value(row).unwrap(), *value);
+            }
+        }
+        assert_eq!(column.max_millis().unwrap(), Some(i64::MAX));
+        let millis = column.to_millis().unwrap();
+        let component = sliced
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(millis.values().as_ptr(), component.values().as_ptr());
+        assert!(millis.is_null(0));
+        assert!(TimestampValue::new(0, 1_000_000).is_err());
+        for value in expected.into_iter().flatten() {
+            assert_eq!(TimestampValue::from_nanos(value.nanos()).unwrap(), value);
+        }
+    }
+
+    #[test]
+    fn legacy_arrays_convert_to_components_without_changing_the_value() {
+        for array in [
+            Arc::new(TimestampMillisecondArray::from(vec![
+                Some(i64::MIN),
+                None,
+                Some(i64::MAX),
+            ])) as ArrayRef,
+            Arc::new(TimestampNanosecondArray::from(vec![
+                Some(i64::MIN),
+                None,
+                Some(-1),
+                Some(i64::MAX),
+            ])),
+        ] {
+            let original = TimestampColumn::try_new(array.as_ref()).unwrap();
+            let converted = to_components(&array).unwrap();
+            let reader = TimestampColumn::try_new(converted.as_ref()).unwrap();
+            for row in 0..array.len() {
+                assert_eq!(reader.is_null(row), original.is_null(row));
+                if !reader.is_null(row) {
+                    assert_eq!(reader.value(row).unwrap(), original.value(row).unwrap());
+                }
+            }
+            assert!(Arc::ptr_eq(&converted, &to_components(&converted).unwrap()));
+        }
+        assert!(!is_component_timestamp(&DataType::Struct(
+            vec![
+                Field::new("millis", DataType::Int64, false),
+                Field::new("nano_of_milli", DataType::Int32, false),
+            ]
+            .into()
+        )));
+    }
 
     #[test]
     fn negative_fractions_keep_a_nonnegative_remainder() {

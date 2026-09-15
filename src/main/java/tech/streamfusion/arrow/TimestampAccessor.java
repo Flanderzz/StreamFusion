@@ -1,6 +1,13 @@
 package tech.streamfusion.arrow;
 
+import java.util.List;
+import java.util.Map;
+import org.apache.arrow.vector.BigIntVector;
+import org.apache.arrow.vector.IntVector;
 import org.apache.arrow.vector.TimeStampVector;
+import org.apache.arrow.vector.complex.StructVector;
+import org.apache.arrow.vector.types.pojo.Field;
+import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.arrow.vector.ValueVector;
 import org.apache.arrow.vector.types.TimeUnit;
 import org.apache.arrow.vector.types.pojo.ArrowType;
@@ -10,15 +17,79 @@ import org.apache.flink.table.data.TimestampData;
  * A borrowed timestamp view exposing Flink's milliseconds and nanoseconds within the millisecond.
  */
 public final class TimestampAccessor {
-  private final TimeStampVector vector;
+  private static final String COMPONENT_KEY = "streamfusion.timestamp.component";
+  private static final List<Field> FIELDS = List.of(component("millis", 64), component("nano_of_milli", 32));
+  private final ValueVector vector;
+  private final TimeStampVector primitive;
+  private final BigIntVector millis;
+  private final IntVector nanos;
   private final TimeUnit unit;
 
+  private static Field component(String name, int bits) {
+    return new Field(name, new FieldType(false, new ArrowType.Int(bits, true), null,
+        Map.of(COMPONENT_KEY, name)), null);
+  }
+
+  public static List<Field> fields() { return FIELDS; }
+
+  public static Field field(String name, boolean nullable) {
+    return new Field(name, new FieldType(nullable, ArrowType.Struct.INSTANCE, null), FIELDS);
+  }
+
+  public static boolean isComponentTimestamp(Field field) {
+    return field.getType() instanceof ArrowType.Struct && field.getChildren().equals(FIELDS);
+  }
+
+  public static boolean isTimestamp(ValueVector vector) {
+    return vector instanceof TimeStampVector || isComponentTimestamp(vector.getField());
+  }
+
+  /** Writes both components without changing the logical precision or range. */
+  public static void set(ValueVector vector, int row, TimestampData value) {
+    if (isComponentTimestamp(vector.getField())) {
+      StructVector struct = (StructVector) vector;
+      ((BigIntVector) struct.getChild("millis")).setSafe(row, value == null ? 0 : value.getMillisecond());
+      ((IntVector) struct.getChild("nano_of_milli")).setSafe(row, value == null ? 0 : value.getNanoOfMillisecond());
+      if (value == null) struct.setNull(row);
+      else struct.setIndexDefined(row);
+      return;
+    }
+    TimeStampVector target = (TimeStampVector) vector;
+    if (value == null) { target.setNull(row); return; }
+    long millis = value.getMillisecond();
+    long fraction = value.getNanoOfMillisecond();
+    long encoded;
+    switch (((ArrowType.Timestamp) vector.getField().getType()).getUnit()) {
+      case SECOND: encoded = Math.floorDiv(millis, 1000L); break;
+      case MILLISECOND: encoded = millis; break;
+      case MICROSECOND:
+        encoded = millis < 0
+            ? Math.addExact(Math.multiplyExact(millis + 1, 1000L), fraction / 1000 - 1000)
+            : Math.addExact(Math.multiplyExact(millis, 1000L), fraction / 1000);
+        break;
+      case NANOSECOND: encoded = TimestampConversion.toNanos(value); break;
+      default: throw new IllegalArgumentException("Unsupported timestamp unit");
+    }
+    target.setSafe(row, encoded);
+  }
+
   public TimestampAccessor(ValueVector vector) {
-    if (!(vector instanceof TimeStampVector)) {
+    if (!isTimestamp(vector)) {
       throw new IllegalArgumentException("Expected an Arrow timestamp, got " + vector.getField());
     }
-    this.vector = (TimeStampVector) vector;
-    this.unit = ((ArrowType.Timestamp) vector.getField().getType()).getUnit();
+    this.vector = vector;
+    if (vector instanceof TimeStampVector) {
+      primitive = (TimeStampVector) vector;
+      unit = ((ArrowType.Timestamp) vector.getField().getType()).getUnit();
+      millis = null;
+      nanos = null;
+    } else {
+      StructVector struct = (StructVector) vector;
+      primitive = null;
+      unit = null;
+      millis = (BigIntVector) struct.getChild("millis");
+      nanos = (IntVector) struct.getChild("nano_of_milli");
+    }
   }
 
   public boolean isNull(int row) {
@@ -26,15 +97,16 @@ public final class TimestampAccessor {
   }
 
   public long getMillis(int row) {
-    return toMillis(vector.get(row));
+    return millis != null ? millis.get(row) : toMillis(primitive.get(row));
   }
 
   public int getNanoOfMillisecond(int row) {
+    if (nanos != null) return nanos.get(row);
     switch (unit) {
       case MICROSECOND:
-        return (int) Math.floorMod(vector.get(row), 1000L) * 1000;
+        return (int) Math.floorMod(primitive.get(row), 1000L) * 1000;
       case NANOSECOND:
-        return (int) Math.floorMod(vector.get(row), 1_000_000L);
+        return (int) Math.floorMod(primitive.get(row), 1_000_000L);
       default:
         return 0;
     }
@@ -50,12 +122,12 @@ public final class TimestampAccessor {
     boolean found = false;
     for (int row = 0; row < rows; row++) {
       if (!isNull(row)) {
-        max = Math.max(max, vector.get(row));
+        max = Math.max(max, millis != null ? millis.get(row) : primitive.get(row));
         found = true;
       }
     }
     // Unit conversion is monotonic, so only the maximum needs conversion.
-    return found ? toMillis(max) : null;
+    return found ? (millis != null ? max : toMillis(max)) : null;
   }
 
   private long toMillis(long value) {

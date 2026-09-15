@@ -22,7 +22,16 @@ millisecond-only builtins consume the millisecond component. Function-specific c
 arithmetic remains separate: Flink's EXTRACT may intentionally divide a timestamp's
 milliseconds toward zero when selecting its calendar day.
 
-The SQL column layout and checkpoint encoding have not changed in this step.
+The shared timestamp representation now also supports an Arrow struct with `millis: Int64`
+and `nano_of_milli: Int32`, both non-null children under the timestamp's parent validity bitmap.
+Each child carries `streamfusion.timestamp.component` metadata naming the component; an ordinary
+ROW with the same field names is not a timestamp. This keeps Flink's two-part value in separate
+columnar buffers, with no nanosecond-count narrowing. Readers continue to borrow those buffers,
+and a millisecond projection shares the millis buffer and parent null bitmap. Java writers can
+populate the pair at any Flink precision, and legacy primitive writers check overflow. The wider
+layout's direct reader/writer tests cover both millisecond extremes, years 0001/9999, negative
+fractions, NULLs, and reuse. The SQL default layout and checkpoint encoding have not changed in
+this groundwork step.
 Old nanosecond sort snapshots are read through the same accessor and tested across
 restore. Full-range key tests construct Arrow columns directly and compare their
 bytes with Flink's runtime serializer; they are not evidence of full-range SQL
