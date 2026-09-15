@@ -1230,7 +1230,8 @@ final class RexExpression {
         && call.getType().getSqlTypeName() != SqlTypeName.FLOAT
         && call.getType().getSqlTypeName() != SqlTypeName.REAL
         && call.getType().getSqlTypeName() != SqlTypeName.DOUBLE
-        && (call.getKind() == SqlKind.MOD || call.getKind() == SqlKind.DIVIDE)) {
+        && (call.getKind() == SqlKind.MOD || call.getKind() == SqlKind.DIVIDE)
+        && !hasNonzeroIntegerDivisor(call)) {
       return true;
     }
     String name = call.getOperator().getName().toUpperCase(Locale.ROOT);
@@ -1253,6 +1254,16 @@ final class RexExpression {
       return true;
     }
     return args.stream().anyMatch(RexExpression::requiresRowShortCircuit);
+  }
+
+  private static boolean hasNonzeroIntegerDivisor(RexCall call) {
+    return SqlTypeFamily.INTEGER.getTypeNames().contains(call.getType().getSqlTypeName())
+        && call.getOperands().size() == 2
+        && call.getOperands().stream().allMatch(
+            arg -> SqlTypeFamily.INTEGER.getTypeNames().contains(arg.getType().getSqlTypeName()))
+        && call.getOperands().get(1) instanceof RexLiteral divisor
+        && !divisor.isNull()
+        && divisor.getValueAs(BigDecimal.class).signum() != 0;
   }
 
   private boolean jsonRuntimeAvailable() {

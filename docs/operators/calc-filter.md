@@ -141,9 +141,12 @@ Integer `/` truncates toward zero and wraps `MIN_VALUE / -1` back to `MIN_VALUE`
 matching Java. A non-NULL dividend divided by zero fails the job. A NULL operand
 produces NULL, including a NULL dividend with a zero divisor.
 
-Integer `/`, `MOD`, and `%` inside `AND` or `OR` fall back at planning time, including
-projections, filters, and nested expressions. DataFusion's batch evaluation may run the
-division on rows whose guard Flink short-circuits. CASE result branches stay native because
+Integer `/`, `MOD`, and `%` inside `AND` or `OR` stay native when the divisor is a nonzero
+integer literal and their operands contain no fallible division. Other divisor shapes fall back
+at planning time, including in projections, filters, and nested expressions. DataFusion's batch
+evaluation may run division on rows whose guard Flink short-circuits. Constant-divisor filters such
+as `event_type = 2 AND MOD(bid.auction, 2) = 0` are safe even when the nested ROW is NULL.
+CASE result branches stay native because
 CASE selects rows before evaluating them. Floating division remains native under boolean
 operators because zero divisors produce IEEE infinity/NaN instead of an exception.
 

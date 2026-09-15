@@ -186,10 +186,10 @@ class NativeOverAggregateOperatorTest {
       if (event instanceof StreamRecord) {
         VectorSchemaRoot root = ((ArrowBatch) ((StreamRecord<?>) event).getValue()).root();
         var v = (org.apache.arrow.vector.BigIntVector) root.getVector(0);
-        var rt = (org.apache.arrow.vector.TimeStampNanoVector) root.getVector(1);
+        var rt = new tech.streamfusion.arrow.TimestampAccessor(root.getVector(1));
         var sum = (org.apache.arrow.vector.BigIntVector) root.getVector(2);
         for (int i = 0; i < root.getRowCount(); i++) {
-          rows.add(List.of(v.get(i), rt.get(i) / 1_000_000L, sum.get(i)));
+          rows.add(List.of(v.get(i), rt.getMillis(i), sum.get(i)));
         }
       }
     }

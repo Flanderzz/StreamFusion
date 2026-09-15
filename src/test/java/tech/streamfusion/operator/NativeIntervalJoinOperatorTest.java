@@ -7,7 +7,7 @@ import java.util.List;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.BigIntVector;
-import org.apache.arrow.vector.TimeStampNanoVector;
+import tech.streamfusion.arrow.TimestampAccessor;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.runtime.checkpoint.OperatorSubtaskState;
@@ -192,19 +192,19 @@ class NativeIntervalJoinOperatorTest {
         VectorSchemaRoot root = ((ArrowBatch) ((StreamRecord<?>) event).getValue()).root();
         BigIntVector lk = (BigIntVector) root.getVector(0);
         BigIntVector lv = (BigIntVector) root.getVector(1);
-        TimeStampNanoVector lrt = (TimeStampNanoVector) root.getVector(2);
+        TimestampAccessor lrt = new TimestampAccessor(root.getVector(2));
         BigIntVector rk = (BigIntVector) root.getVector(3);
         BigIntVector rv = (BigIntVector) root.getVector(4);
-        TimeStampNanoVector rrt = (TimeStampNanoVector) root.getVector(5);
+        TimestampAccessor rrt = new TimestampAccessor(root.getVector(5));
         for (int i = 0; i < root.getRowCount(); i++) {
           rows.add(
               List.of(
                   lk.get(i),
                   lv.get(i),
-                  lrt.get(i) / 1_000_000L,
+                  lrt.getMillis(i),
                   rk.get(i),
                   rv.get(i),
-                  rrt.get(i) / 1_000_000L));
+                  rrt.getMillis(i)));
         }
       }
     }
@@ -220,10 +220,10 @@ class NativeIntervalJoinOperatorTest {
         try (VectorSchemaRoot root = ((ArrowBatch) ((StreamRecord<?>) event).getValue()).root()) {
           BigIntVector lk = (BigIntVector) root.getVector(0);
           BigIntVector lv = (BigIntVector) root.getVector(1);
-          TimeStampNanoVector lrt = (TimeStampNanoVector) root.getVector(2);
+          TimestampAccessor lrt = new TimestampAccessor(root.getVector(2));
           BigIntVector rk = (BigIntVector) root.getVector(3);
           BigIntVector rv = (BigIntVector) root.getVector(4);
-          TimeStampNanoVector rrt = (TimeStampNanoVector) root.getVector(5);
+          TimestampAccessor rrt = new TimestampAccessor(root.getVector(5));
           for (int i = 0; i < root.getRowCount(); i++) {
             rows.add(
                 java.util.Arrays.asList(
@@ -244,8 +244,8 @@ class NativeIntervalJoinOperatorTest {
     return vector.isNull(index) ? null : vector.get(index);
   }
 
-  private static Long nullableTimestamp(TimeStampNanoVector vector, int index) {
-    return vector.isNull(index) ? null : vector.get(index) / 1_000_000L;
+  private static Long nullableTimestamp(TimestampAccessor vector, int index) {
+    return vector.isNull(index) ? null : vector.getMillis(index);
   }
 
   private static void closeForwarded(
