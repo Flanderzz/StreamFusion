@@ -40,5 +40,13 @@ timestamp-plus-duration intermediates. The payload is not narrowed. Primitive
 layouts, both arrival orders, all four join types, and match flags across memory
 restore are tested; SQL probes cover both fractional interval endpoints.
 
+The independent windowing TVF also reads the millisecond component, fixing pre-epoch fractions
+that truncating nanosecond division assigned to the next window. It fans out payload columns with
+Arrow `take`, retaining the original layout/remainder. Boundary calculation stays in milliseconds;
+conversion to the caller's physical output type is explicit and checked for overflow. The SQL JNI
+entry point still requests nanoseconds. Primitive-boundary tests compose assignment with a
+downstream window join and IPC snapshot restore. This keeps Arroyo's columnar batch structure but
+uses Flink's signed millisecond clock rather than Arroyo's SystemTime/nanosecond representation.
+
 This is correctness and migration groundwork, not a performance claim. It adds no
 SQL functions or opt-in compatibility setting.
