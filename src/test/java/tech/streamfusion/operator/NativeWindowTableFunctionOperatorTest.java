@@ -164,8 +164,10 @@ class NativeWindowTableFunctionOperatorTest {
 
   private static Stream<Field> timestampFields() {
     return Stream.of(TimeUnit.values())
-        .map(unit -> new Field(
-            "rt", FieldType.nullable(new ArrowType.Timestamp(unit, null)), List.of()));
+        .map(
+            unit ->
+                new Field(
+                    "rt", FieldType.nullable(new ArrowType.Timestamp(unit, null)), List.of()));
   }
 
   @Test

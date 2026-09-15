@@ -1,9 +1,11 @@
 package tech.streamfusion;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.math.BigDecimal;
+import java.time.Instant;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.api.DataTypes;
@@ -18,6 +20,34 @@ import tech.streamfusion.planner.NativePlanner;
 
 /** Decimal overflow must be SQL NULL, including when observed by a downstream expression. */
 class FlinkDecimalOverflowSqlHarnessTest {
+
+  @Test
+  void decimalArithmeticComposesWithTemporalLiteralsAndEvaluation() throws Exception {
+    NativeParity.assertParity(
+        () -> decimals(6, 3, "999.995", "-999.995", "0", null),
+        "SELECT a + a, a - a, a * a, DATE '2024-02-29', TIME '12:34:56', "
+            + "INTERVAL '1' DAY, INTERVAL '1' MONTH, "
+            + "EXTRACT(YEAR FROM TO_TIMESTAMP(CAST(a AS STRING), 'yyyy')) FROM t");
+  }
+
+  @Test
+  void decimalAndClockKindsRemainDistinct() throws Exception {
+    var table = decimals(6, 3, "1.000");
+    String sql = "SELECT a + a, a - a, a * a, CURRENT_TIMESTAMP FROM t";
+    assertTrue(NativePlanner.explain(table, sql).contains("NativeCalc"));
+    NativePlanner.install(table);
+    Instant before = Instant.now().minusSeconds(1);
+    try (var rows = table.executeSql(sql).collect()) {
+      assertTrue(rows.hasNext());
+      Row row = rows.next();
+      assertEquals(new BigDecimal("2.000"), row.getField(0));
+      assertEquals(new BigDecimal("0.000"), row.getField(1));
+      assertEquals(new BigDecimal("1.000000"), row.getField(2));
+      Instant timestamp = (Instant) row.getField(3);
+      assertTrue(!timestamp.isBefore(before));
+      assertTrue(!timestamp.isAfter(Instant.now().plusSeconds(1)));
+    }
+  }
 
   @ParameterizedTest
   @ValueSource(

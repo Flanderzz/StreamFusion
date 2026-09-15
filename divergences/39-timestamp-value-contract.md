@@ -1,4 +1,4 @@
-# Timestamp values without a nanosecond range restriction
+# Timestamp components and event-time readers
 
 Flink 2.2.1 `TimestampData` stores signed milliseconds and a nanosecond remainder
 in `0..999999`. Converting that pair to an `i64` nanosecond count loses Flink's
@@ -16,8 +16,9 @@ the original buffers.
 Flink BinaryRow key serialization uses the components with the logical timestamp
 precision supplied by the planner. This preserves Flink's compact and non-compact
 key bytes, including timestamps nested in arrays, without a nanosecond intermediate.
-Temporal sorting, window-aggregate input, source/assigned watermarks and JVM temporal
-arguments read milliseconds through the same contract. Function-specific calendar
+Temporal sorting, window-aggregate input and source/assigned watermarks read milliseconds
+through the same contract. Generated JVM temporal arguments preserve both components;
+millisecond-only builtins consume the millisecond component. Function-specific calendar
 arithmetic remains separate: Flink's EXTRACT may intentionally divide a timestamp's
 milliseconds toward zero when selecting its calendar day.
 

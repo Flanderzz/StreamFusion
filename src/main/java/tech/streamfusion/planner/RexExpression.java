@@ -587,14 +587,15 @@ final class RexExpression {
     if (isDecimalArithmetic(call)) {
       int precision = call.getType().getPrecision();
       int scale = call.getType().getScale();
-      int kind = switch (call.getKind()) {
-        case PLUS -> KIND_DECIMAL_ADD;
-        case MINUS -> KIND_DECIMAL_SUBTRACT;
-        case TIMES -> KIND_DECIMAL_MULTIPLY;
-        case DIVIDE -> KIND_DECIMAL_DIVIDE;
-        case MOD -> KIND_DECIMAL_MOD;
-        default -> throw new IllegalStateException("not decimal arithmetic: " + call.getKind());
-      };
+      int kind =
+          switch (call.getKind()) {
+            case PLUS -> KIND_DECIMAL_ADD;
+            case MINUS -> KIND_DECIMAL_SUBTRACT;
+            case TIMES -> KIND_DECIMAL_MULTIPLY;
+            case DIVIDE -> KIND_DECIMAL_DIVIDE;
+            case MOD -> KIND_DECIMAL_MOD;
+            default -> throw new IllegalStateException("not decimal arithmetic: " + call.getKind());
+          };
       add(kind, precision * 100 + scale, 2);
       for (RexNode operand : call.getOperands()) {
         if (!emit(operand)) {

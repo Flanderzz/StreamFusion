@@ -26,8 +26,9 @@ Timestamp readers expose Flink's signed epoch milliseconds plus a non-negative
 nanosecond remainder within the millisecond. For example, `-1` nanosecond is
 `(-1, 999999)`, not `(0, -1)`. Flink BinaryRow key encoding reads these components
 directly, including nested timestamp keys; it does not multiply milliseconds into
-an `i64` nanosecond count. Event-time readers for sort, window-aggregate input,
-watermarks and the JVM temporal-function bridge use the millisecond component.
+an `i64` nanosecond count. Event-time readers for sort, window-aggregate input and
+watermarks use the millisecond component. The JVM temporal-function bridge preserves
+both components for generated expressions and reads milliseconds for millisecond-only builtins.
 Readers accept Arrow second, millisecond, microsecond and nanosecond timestamp
 columns without interpreting the Arrow timezone label as a timezone conversion.
 
