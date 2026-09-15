@@ -58,5 +58,9 @@ final Arrow string buffer. No per-row JSON tree, map, or temporary result string
 constructed. The initial admission is deliberately scalar: direct nested constructors
 and other Flink JsonNode conversions remain on Flink until independently verified.
 
+DECIMAL object values reuse the scalar writer, so their scale and exponent spelling match
+JSON_STRING without a second formatter. NULL policies and duplicate-key selection apply
+before the selected decimal is written.
+
 Coverage is listed in [Calc/filter](../docs/operators/calc-filter.md); independent
 Flink/native measurements are in [scalar benchmarks](../docs/benchmarks/scalar-functions.md).

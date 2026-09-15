@@ -752,3 +752,13 @@ The 264-byte string budget does not apply to decimal input.
 |---|---:|---:|
 | DECIMAL(38,9), no NULLs | 0.434 | 0.640 |
 | DECIMAL(38,9), NULL every eighth row | 0.415 | 0.599 |
+
+### JSON_OBJECT DECIMAL
+
+`JSON_OBJECT_DECIMAL`: `JSON_OBJECT('n' VALUE n)` with the same two DECIMAL(38,9)
+values and default NULL ON NULL policy. The 264-byte string budget does not apply.
+
+| Input | Flink (s) | Native (s) |
+|---|---:|---:|
+| DECIMAL(38,9), no NULLs | 0.599 | 0.655 |
+| DECIMAL(38,9), NULL every eighth row | 0.591 | 0.611 |

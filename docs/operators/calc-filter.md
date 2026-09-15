@@ -338,8 +338,9 @@ serialize that type. The same typed-NULL rule applies to JSON_OBJECT values.
 ### JSON_OBJECT
 
 Literal, non-null character keys with character, BOOLEAN, TINYINT, SMALLINT, INTEGER,
-or BIGINT scalar values are native. Keys must contain well-formed Unicode. The default
-NULL ON NULL writes JSON null values; ABSENT ON NULL skips them. Duplicate keys retain
+BIGINT, or DECIMAL scalar values are native. DECIMAL uses the same scale-preserving
+formatting as JSON_STRING, including scientific notation. Keys must contain well-formed
+Unicode. The default NULL ON NULL writes JSON null values; ABSENT ON NULL skips them. Duplicate keys retain
 the last inserted value, so an absent NULL does not overwrite an earlier non-null value.
 Objects with no surviving entries produce `{}`, never SQL NULL.
 

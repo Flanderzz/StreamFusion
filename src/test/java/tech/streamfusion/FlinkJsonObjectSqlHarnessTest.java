@@ -58,11 +58,25 @@ class FlinkJsonObjectSqlHarnessTest {
   }
 
   @Test
+  void decimalValuesShareExactScalarFormattingAndNullPolicies() throws Exception {
+    for (int scale : new int[] {0, 2, 7, 9, 38}) {
+      NativeParity.assertParity(
+          () -> DecimalJsonTestInputs.decimals(38, scale),
+          "SELECT id, JSON_OBJECT('n' VALUE n), JSON_OBJECT('n' VALUE n ABSENT ON NULL),"
+              + " JSON_OBJECT('n' VALUE n, 'n' VALUE CAST(NULL AS DECIMAL(38,9)) ABSENT ON NULL)"
+              + " FROM decimals");
+    }
+    NativeParity.assertParity(
+        () -> DecimalJsonTestInputs.decimals(18, 2),
+        "SELECT JSON_OBJECT('n' VALUE n), COUNT(*) FROM decimals GROUP BY JSON_OBJECT('n' VALUE"
+            + " n)");
+  }
+
+  @Test
   void unverifiedValuesAndNestedRawJsonFallBack() throws Exception {
     for (String expression :
         new String[] {
           "CAST(n AS DOUBLE)",
-          "CAST(n AS DECIMAL(20,2))",
           "ARRAY[n]",
           "JSON_OBJECT('n' VALUE n)",
           "JSON_ARRAY(n)",
