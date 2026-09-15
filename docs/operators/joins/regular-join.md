@@ -24,6 +24,10 @@ than repeating it.
 
 ## Mini-batch coalescing
 
+Equality joins canonicalize floating NaN elements inside ARRAY keys, matching Flink's binary
+array serializer. Different NaN payloads therefore match across inputs. Scalar floating keys
+retain their existing raw-bit equality, and signed-zero array elements remain distinct.
+
 Under mini-batch execution, a regular INNER/outer join uses one shared count boundary across both
 inputs and drains before either input watermark, a checkpoint, or end of input, matching Flink's
 two-input bundle contract. Two input shapes are native:

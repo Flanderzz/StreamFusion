@@ -394,21 +394,25 @@ fn write_array_value(
         ),
         DataType::Float32 => writer.write_fixed(
             pos,
-            &array
-                .as_any()
-                .downcast_ref::<Float32Array>()
-                .expect("float32")
-                .value(row)
-                .to_ne_bytes(),
+            &crate::flink_float::canonical_f32(
+                array
+                    .as_any()
+                    .downcast_ref::<Float32Array>()
+                    .expect("float32")
+                    .value(row),
+            )
+            .to_ne_bytes(),
         ),
         DataType::Float64 => writer.write_fixed(
             pos,
-            &array
-                .as_any()
-                .downcast_ref::<arrow::array::Float64Array>()
-                .expect("float64")
-                .value(row)
-                .to_ne_bytes(),
+            &crate::flink_float::canonical_f64(
+                array
+                    .as_any()
+                    .downcast_ref::<arrow::array::Float64Array>()
+                    .expect("float64")
+                    .value(row),
+            )
+            .to_ne_bytes(),
         ),
         DataType::Time32(_) | DataType::Time64(_) => {
             writer.write_fixed(pos, &time_millis(array, row).to_ne_bytes())
