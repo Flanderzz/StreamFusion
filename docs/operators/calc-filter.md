@@ -129,7 +129,10 @@ Native, unconditionally, with no host involvement:
   no-op (e.g. the common `COALESCE(s, 'x')` pattern).
 - **Widening timestamp precision** within `TIMESTAMP` or within `TIMESTAMP_LTZ` — Arrow stores both
   at nanosecond precision at the columnar boundary, so widening the Flink declaration is a no-op.
-- **`→ DECIMAL` from an exact source** — a `DECIMAL` or integer input, rescaled `HALF_UP`.
+- **`→ DECIMAL` from an exact source** — a `DECIMAL` or integer input, rescaled `HALF_UP`
+  before checking the target precision. Overflow produces SQL `NULL`, including a carry caused
+  by rounding (`999.995` cast to `DECIMAL(5,2)`), scale increases, and integer inputs. NULLs remain
+  visible to surrounding expressions and filters. The result stays an Arrow `Decimal128` column.
 
 ### The host-exact JVM upcall
 

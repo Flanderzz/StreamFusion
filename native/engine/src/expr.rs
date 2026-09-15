@@ -207,10 +207,7 @@ pub(crate) fn build_expr(
             ))
             .call(vec![left, right])
         }
-        // Decimal cast: `arg` packs precision*100 + scale; the one child is cast to DECIMAL(p, s). Arrow
-        // rescales Decimal128 with HALF_UP rounding (matching Flink), so from an exact source (decimal or
-        // integer) the result is byte-exact; from a float/double source it is approximate (flag-gated on
-        // the JVM side) since the binary value is already inexact.
+        // Exact decimal cast: HALF_UP to the declared scale, then NULL on precision overflow.
         14 => {
             let precision = (arg / 100) as u8;
             let scale = (arg % 100) as i8;
@@ -224,10 +221,10 @@ pub(crate) fn build_expr(
                 strings,
                 cursor,
             );
-            datafusion::prelude::Expr::Cast(datafusion::logical_expr::Cast::new(
-                Box::new(child),
-                DataType::Decimal128(precision, scale),
-            ))
+            datafusion::logical_expr::ScalarUDF::new_from_impl(
+                crate::flink_functions::decimal::DecimalCast::new(precision, scale),
+            )
+            .call(vec![child])
         }
         // Field access: extract a named field from a ROW/struct child. `arg` indexes the field name in
         // the string pool; the one child (built next) is the struct-typed expression. get_field returns

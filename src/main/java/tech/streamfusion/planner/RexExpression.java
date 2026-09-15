@@ -55,11 +55,8 @@ final class RexExpression {
   // index of the field name, with one child (the struct-typed expression). Nested access (a.b.c)
   // nests these, the child being itself a field access. Mirrors DataFusion's get_field.
   private static final int KIND_FIELD_ACCESS = 13;
-  // Approximate decimal cast: payload packs the target DECIMAL precision/scale (precision*100 +
-  // scale),
-  // one child. Wraps a (double-computed) arithmetic result, casting it to the declared DECIMAL so
-  // the
-  // output column type matches — only under the approximate-decimal flag (not byte-exact to Flink).
+  // Exact decimal cast: payload packs precision*100 + scale; one decimal or integer child.
+  // Rounds HALF_UP before checking precision, returning NULL on overflow.
   private static final int KIND_CAST_DECIMAL = 14;
   // An exact DECIMAL literal: payload indexes the string pool, whose entry is
   // "unscaled|precision|scale"
@@ -1595,12 +1592,8 @@ final class RexExpression {
         && resultType.getPrecision() >= sourceType.getPrecision()) {
       return emit(call.getOperands().get(0));
     }
-    // A cast to DECIMAL from an exact source (another DECIMAL, e.g. coercing q1's `0.908 * price`
-    // to
-    // the sink's DECIMAL(23,3), or an integer) is byte-exact natively: Arrow rescales Decimal128
-    // with
-    // HALF_UP rounding, the same mode Flink uses. A float/double or string source falls through to
-    // the host-exact cast upcall below.
+    // Exact-source casts round HALF_UP and return NULL on overflow. Float/double and string
+    // sources use the host-exact cast upcall below.
     if (targetType == SqlTypeName.DECIMAL) {
       boolean exactSource =
           source == SqlTypeName.DECIMAL || numericRank(source) >= 0 && numericRank(source) <= 3;
