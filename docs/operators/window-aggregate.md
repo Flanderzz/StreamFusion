@@ -7,6 +7,13 @@ and the two-phase local/global split — and the windowing-TVF operator that ass
 window(s) ahead of a downstream consumer (an aggregate, a [window join](joins/window-join.md), or
 window Top-N/dedup).
 
+## Floating extrema
+
+FLOAT/DOUBLE MIN/MAX initializes from the first non-NULL value and replaces it only when a
+later value is strictly smaller/larger using primitive comparisons. A first NaN remains;
+a later NaN does not replace a finite value. Signed zeros tie, preserving the earlier sign.
+Batch updates and partial-state merges use the same nullable accumulator rule.
+
 ## Legacy group windows
 
 The deprecated `GROUP BY TUMBLE(...)` and `GROUP BY HOP(...)` syntax is native for both event time

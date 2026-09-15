@@ -1,5 +1,7 @@
 use crate::*;
 
+mod floating_extreme;
+
 /// Builds a built-in aggregate over an int64 `value` column. SUM/MIN/MAX/COUNT all reduce an int64
 /// column to a single int64 with single-scalar partial state, driven through DataFusion's
 /// accumulator machinery.
@@ -608,6 +610,7 @@ pub(crate) enum WindowAggregate {
     FloatSum,
     FloatAvg,
     DoubleAvg,
+    FloatingExtreme { kind: i64, value_type: DataType },
     // Decimal SUM/AVG carry Flink's semantics, which DataFusion's decimal aggregates don't: SUM is
     // an i128 running sum at the input scale reported as DECIMAL(38, s) with overflow → NULL (not an
     // error), and AVG divides that sum by the non-null count with Flink's exact decimal division,
@@ -627,6 +630,10 @@ impl WindowAggregate {
             // SUM over float keeps the host's 4-byte precision rather than widening to double.
             (0, DataType::Float32) => WindowAggregate::FloatSum,
             (0, DataType::Decimal128(_, s)) => WindowAggregate::DecimalSum { scale: *s },
+            (1 | 2, DataType::Float32 | DataType::Float64) => WindowAggregate::FloatingExtreme {
+                kind,
+                value_type: value_type.clone(),
+            },
             (0..=3, _) => WindowAggregate::Builtin(build_builtin(kind, value_type)),
             // Float AVG sums in double and narrows to float; double AVG stays double; integer AVG
             // truncates to its type.
@@ -653,6 +660,9 @@ impl WindowAggregate {
             WindowAggregate::FloatSum => Box::<FloatSumAccumulator>::default(),
             WindowAggregate::FloatAvg => Box::<FloatAvgAccumulator>::default(),
             WindowAggregate::DoubleAvg => Box::<DoubleAvgAccumulator>::default(),
+            WindowAggregate::FloatingExtreme { kind, value_type } => Box::new(
+                floating_extreme::FloatingExtremeAccumulator::new(*kind, value_type),
+            ),
             WindowAggregate::DecimalSum { scale } => Box::new(DecimalSumAccumulator {
                 sum: None,
                 scale: *scale,
@@ -682,6 +692,9 @@ impl WindowAggregate {
                 vec![Field::new("sum", data_type.clone(), true)]
             }
             WindowAggregate::FloatSum => vec![Field::new("sum", DataType::Float32, true)],
+            WindowAggregate::FloatingExtreme { value_type, .. } => {
+                vec![Field::new("extreme", value_type.clone(), true)]
+            }
             WindowAggregate::DecimalSum { scale } => {
                 vec![Field::new("sum", DataType::Decimal128(38, *scale), true)]
             }
@@ -705,6 +718,7 @@ impl WindowAggregate {
             WindowAggregate::WrappingNarrowSum(data_type) => data_type.clone(),
             WindowAggregate::FloatSum | WindowAggregate::FloatAvg => DataType::Float32,
             WindowAggregate::DoubleAvg => DataType::Float64,
+            WindowAggregate::FloatingExtreme { value_type, .. } => value_type.clone(),
             WindowAggregate::DecimalSum { scale } => DataType::Decimal128(38, *scale),
             // Flink's findAvgAggType: DECIMAL(38, max(6, s)).
             WindowAggregate::DecimalAvg { scale } => DataType::Decimal128(38, (*scale).max(6)),
@@ -817,6 +831,7 @@ impl ValueColumn<'_> {
 /// accumulator call — matching DataFusion's accumulators exactly: integer SUM wraps on overflow (as
 /// `sum_udaf` and the int-sum accumulator do), and all four skip null values. The value type is
 /// fixed per aggregator, so each variant pairs a kind with that type. See divergences/11.
+#[derive(Debug)]
 pub(crate) enum RunningAgg {
     SumI64(Option<i64>),
     MinI64(Option<i64>),
@@ -1009,8 +1024,8 @@ impl RunningAgg {
             (MinI32(m), Num::I32(v)) => *m = Some(m.map_or(v, |x| x.min(v))),
             (MaxI32(m), Num::I32(v)) => *m = Some(m.map_or(v, |x| x.max(v))),
             (SumF64(s), Num::F64(v)) => *s = Some(s.unwrap_or(0.0) + v),
-            (MinF64(m), Num::F64(v)) => *m = Some(m.map_or(v, |x| x.min(v))),
-            (MaxF64(m), Num::F64(v)) => *m = Some(m.map_or(v, |x| x.max(v))),
+            (MinF64(m), Num::F64(v)) => *m = Some(m.map_or(v, |x| if v < x { v } else { x })),
+            (MaxF64(m), Num::F64(v)) => *m = Some(m.map_or(v, |x| if v > x { v } else { x })),
             (Count(c), _) => *c += 1,
             (SumDecimal { sum, overflow, .. }, Num::I128(v)) => {
                 accumulate_decimal_sum(sum, overflow, v)
@@ -1036,8 +1051,8 @@ impl RunningAgg {
             (FirstI8(f), Num::I8(v)) => *f = Some(f.unwrap_or(v)),
             (LastI8(l), Num::I8(v)) => *l = Some(v),
             (SumF32(s), Num::F32(v)) => *s = Some(s.unwrap_or(0.0) + v),
-            (MinF32(m), Num::F32(v)) => *m = Some(m.map_or(v, |x| x.min(v))),
-            (MaxF32(m), Num::F32(v)) => *m = Some(m.map_or(v, |x| x.max(v))),
+            (MinF32(m), Num::F32(v)) => *m = Some(m.map_or(v, |x| if v < x { v } else { x })),
+            (MaxF32(m), Num::F32(v)) => *m = Some(m.map_or(v, |x| if v > x { v } else { x })),
             (FirstF32(f), Num::F32(v)) => *f = Some(f.unwrap_or(v)),
             (LastF32(l), Num::F32(v)) => *l = Some(v),
             // AVG: sum widens to the running type; the count is tracked by GroupAggState's `non_null`.

@@ -20,6 +20,9 @@ at that value; a retraction after overflow starts it at the negated value. NULL 
 the accumulator unchanged. This rule also applies after restore and to filtered SUMs.
 Decimal AVG has a separate accumulator whose overflow stays NULL.
 
+Insert-only floating MIN/MAX uses primitive comparisons, retaining the first signed zero or
+NaN on a tie. Retracting floating extrema remain subject to the type admission below.
+
 `AVG` is native: a running sum — widened to bigint for any integer input, double for float/double —
 plus the non-null count, emitting `count == 0 ? NULL : sum / count` cast back to the input type,
 with **integer division truncating toward zero**. This is a direct port of Flink's
