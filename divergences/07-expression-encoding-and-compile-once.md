@@ -120,6 +120,8 @@ strict NULL propagation applied to `CONCAT` below.
   (Int32, matching Flink's INT); `REPEAT(s, n)` uses `repeat`. The numeric `ABS`/`FLOOR`/`CEIL`/`SIGN`
   forms admit float/double; incompatible integer behavior still falls back. Temporal FLOOR/CEIL
   remain on Flink; their millisecond-producing kernels are removed from this PR.
+  SIGN uses a native Arrow kernel preserving the input zero sign and NaN, like Java Math.signum;
+  DataFusion's signum zero branch always returns positive zero.
 - **`LIKE`/`REPLACE`/`REVERSE`:** `LIKE` maps to DataFusion's `Expr::Like` (case-sensitive, no
   explicit `ESCAPE` — a 3-operand `LIKE … ESCAPE` falls back); `REPLACE(s, from, to)` to `replace`;
   `REVERSE` to `reverse` (cast `Utf8View`→`Utf8`). ASCII-identical to the host.

@@ -38,6 +38,7 @@ mod json_value;
 mod locate;
 pub(crate) mod numeric;
 mod scalar;
+mod sign;
 mod temporal_round;
 mod timestamp_millis;
 
@@ -45,6 +46,7 @@ const HEX_DIGITS: &[u8; 16] = b"0123456789ABCDEF";
 
 pub(crate) fn function(op: i64, arity: usize) -> Option<ScalarUDF> {
     Some(match op {
+        65 => sign::function(),
         67 => ascii::function(),
         81 => chr::function(),
         100 => datafusion::functions::string::starts_with()

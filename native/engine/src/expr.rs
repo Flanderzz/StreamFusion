@@ -491,7 +491,6 @@ pub(crate) fn build_call(
                 62 => datafusion::functions::math::expr_fn::abs(next()),
                 63 => datafusion::functions::math::expr_fn::floor(next()),
                 64 => datafusion::functions::math::expr_fn::ceil(next()),
-                65 => datafusion::functions::math::expr_fn::signum(next()),
                 66 => datafusion::functions::string::expr_fn::repeat(next(), next()),
                 // Opt-in (allowIncompatible) functions: native results may differ from the host. The Java
                 // encoder admits these only under the per-function flag — see NativeConfig.

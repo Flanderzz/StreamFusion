@@ -116,6 +116,12 @@ for narrow integer literals, or the tree should be cast to the declared type), n
 rewrite. This check requires the native library in the planning JVM, which the standard deployment
 already provides (see [Deployment](../deployment.md)).
 
+## SIGN
+
+FLOAT/DOUBLE SIGN returns the input for signed zero and NaN, and `-1` or `1` for
+nonzero values, including infinities. NULL remains NULL. The result keeps the input's
+floating width; dividing by `SIGN(-0.0)` therefore retains negative infinity.
+
 ## Floating comparisons
 
 FLOAT/DOUBLE `=`, `<>`, `<`, `<=`, `>`, and `>=` use Java primitive comparisons in
