@@ -28,6 +28,21 @@ Recomputed over the row slice — a fixed count of preceding rows plus the curre
 
 Recomputed over the rowtime interval — every row within `n` of the current row's rowtime.
 
+## Late event-time rows
+
+Unbounded frames admit only timestamps strictly greater than the current watermark.
+Bounded ROWS and RANGE frames instead compare against that partition's last-fired timestamp,
+initially zero. Equality is late; an untouched partition can accept a positive timestamp behind
+the global watermark. Rows tied before their timer fires remain admissible together.
+
+The newest retained frame row preserves the last-fired timestamp through memory snapshots,
+RocksDB checkpoints, and backend transitions. A zero-width ROWS frame keeps one marker row,
+which is excluded from the next row's aggregate. RANGE eviction uses each partition's own
+last timestamp. Its event-time cleanup timer clears the whole partition and resets admission:
+Flink's deadline hysteresis registers `timestamp + floor(1.5 * interval) + 1` when the existing
+deadline precedes `timestamp + interval + 1`. Those deadlines are checkpointed alongside frames;
+pending-only partitions reconstruct them from their buffered arrivals on canonical restore.
+
 ## Proctime order
 
 The running and bounded-ROWS frames are native on proctime as well: arrival order, eager emit, no
@@ -69,7 +84,7 @@ by shape:
   write) directly on its accumulator. An expired key visibly restarts its running fold — and its
   `ROW_NUMBER`/`RANK` numbering — from zero, exactly as Flink's `NeverReturnExpired` state does.
 - **The bounded-RANGE rowtime frame** takes no retention at all: Flink's own function accepts none,
-  since its frame eviction already bounds state, so `table.exec.state.ttl` changes nothing there.
+  since event-time frame eviction and cleanup bound state, so `table.exec.state.ttl` changes nothing there.
 
 With that, nothing declines a nonzero retention setting. See [Configuration](../configuration.md) for
 the TTL flag surface, and [window aggregate](window-aggregate.md) for the (unaffected — no idle-state

@@ -422,6 +422,36 @@ impl RocksOverAggStore {
         Ok(out)
     }
 
+    /// The last fired timestamp is the newest retained frame row. Admission only needs its
+    /// ordered key, so a reverse seek avoids decoding or hydrating the frame values.
+    pub(crate) fn last_frame_times(
+        &self,
+        prefixes: &[Vec<u8>],
+    ) -> Result<Vec<i64>, DataFusionError> {
+        prefixes
+            .iter()
+            .map(|prefix| {
+                let mut end = prefix.clone();
+                end.extend_from_slice(&[0xff; FRAME_SUFFIX_LEN]);
+                let mut rows = self
+                    .db
+                    .iterator(IteratorMode::From(&end, Direction::Reverse));
+                let Some(row) = rows.next() else {
+                    return Ok(0);
+                };
+                let (key, _) = row.map_err(re)?;
+                if !key.starts_with(prefix) || key.len() != end.len() {
+                    return Ok(0);
+                }
+                let suffix = &key[key.len() - FRAME_SUFFIX_LEN..];
+                Ok(
+                    (u64::from_be_bytes(suffix[..8].try_into().expect("frame rt")) ^ RT_SIGN_FLIP)
+                        as i64,
+                )
+            })
+            .collect()
+    }
+
     /// Writes appended frame rows through in one columnar conversion; `entries` gives each row's
     /// key prefix and buffer position, `value_columns` its per-aggregate values in entry order.
     pub(crate) fn write_frames(
@@ -1031,6 +1061,113 @@ mod tests {
 
     // Bounded frames survive a native checkpoint: the restored buffer keeps its row order (ties
     // included), continues evicting, and new rows append after the restored ones.
+    #[test]
+    fn bounded_late_admission_survives_both_checkpoint_formats() {
+        for (frame, offset) in [(1, 0), (1, 1), (2, 1000)] {
+            let name = format!("late-{frame}-{offset}");
+            let (mut memory, mut rocks) =
+                shape_pair(&name, vec![0], vec![0], frame, offset, false, 0);
+            let first = over_batch(&[1, 1], &[10, 20], &[0, 1000]);
+            memory.push(first.clone(), 0).unwrap();
+            rocks.push(first, 0).unwrap();
+            assert_eq!(
+                memory.flush(1000, 0).unwrap(),
+                rocks.flush(1000, 0).unwrap()
+            );
+            assert_eq!(memory.late_drops, 1);
+            let snapshot = snapshot_dir(&name);
+            let manifest = rocks.checkpoint_store(&snapshot).unwrap();
+            let canonical: Vec<_> = rocks
+                .canonical_partitions(128, &[-1])
+                .unwrap()
+                .into_values()
+                .collect();
+            drop(rocks);
+            let store = reopen_shape_store(
+                &format!("{name}-reopen"),
+                &[0],
+                &[0],
+                frame,
+                false,
+                snapshot,
+                manifest.snapshot_id,
+            );
+            let mut restored = OverWindowAggregator::new(
+                vec![0],
+                vec![0],
+                2,
+                vec![1],
+                vec![0],
+                frame,
+                offset,
+                false,
+            )
+            .with_store(store, vec![DataType::Int64]);
+            restored.adopt_store_retention(0).unwrap();
+            let mut from_canonical = OverWindowAggregator::restore_partitions(
+                vec![0],
+                vec![0],
+                2,
+                vec![1],
+                vec![0],
+                frame,
+                offset,
+                false,
+                &canonical,
+                0,
+                0,
+            );
+            let tail = over_batch(&[1, 2, 1], &[99, 30, 40], &[1000, 500, 1001]);
+            for over in [&mut memory, &mut restored, &mut from_canonical] {
+                over.push(tail.clone(), 0).unwrap();
+            }
+            let expected = memory.flush(1001, 0).unwrap();
+            assert_eq!(column(&expected, 1), vec![30, 40]);
+            assert_eq!(
+                column(&expected, 3),
+                vec![30, if offset == 0 { 40 } else { 60 }]
+            );
+            assert_eq!(restored.flush(1001, 0).unwrap(), expected);
+            assert_eq!(from_canonical.flush(1001, 0).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn range_cleanup_deadline_survives_checkpoint_and_resets_last_trigger() {
+        let (mut memory, mut rocks) =
+            shape_pair("range-cleanup", vec![0], vec![0], 2, 1000, false, 0);
+        for (rt, value) in [(1000, 10), (1400, 20)] {
+            let batch = over_batch(&[1], &[value], &[rt]);
+            memory.push(batch.clone(), 0).unwrap();
+            rocks.push(batch, 0).unwrap();
+            assert_eq!(memory.flush(rt, 0).unwrap(), rocks.flush(rt, 0).unwrap());
+        }
+        let snapshots: Vec<_> = rocks
+            .canonical_partitions(128, &[-1])
+            .unwrap()
+            .into_values()
+            .collect();
+        let mut restored = OverWindowAggregator::restore_partitions(
+            vec![0],
+            vec![0],
+            2,
+            vec![1],
+            vec![0],
+            2,
+            1000,
+            false,
+            &snapshots,
+            0,
+            0,
+        );
+        for over in [&mut memory, &mut rocks, &mut restored] {
+            assert_eq!(over.flush(2501, 0).unwrap().num_rows(), 0);
+            over.push(over_batch(&[1], &[40], &[1300]), 0).unwrap();
+            let out = over.flush(3000, 0).unwrap();
+            assert_eq!(column(&out, 3), vec![40]);
+        }
+    }
+
     #[test]
     fn store_backed_bounded_frame_restores() {
         let snapshot = snapshot_dir("bounded-restore");

@@ -410,15 +410,13 @@ impl BoundedOverAggregator {
         let keys_encoded = encode_keys(&mut self.key_converter, &key_arrays, n);
 
         // Append the new rows to their per-key buffers in rowtime order (stable for ties). Every new
-        // row's rowtime is past the prior watermark, hence at or after all already-buffered rows, so
+        // row's rowtime is past its key's last trigger, hence at or after all already-buffered rows, so
         // appending in this order keeps each buffer sorted. Record where each input row landed.
         let mut order: Vec<usize> = (0..n).collect();
         order.sort_by_key(|&row| rt.value(row));
         let mut buffer_index = vec![0usize; n];
-        let mut max_rt = i64::MIN;
         for &row in &order {
             let row_rt = rt.value(row);
-            max_rt = max_rt.max(row_rt);
             let values: Vec<Option<Num>> = value_columns.iter().map(|c| c.at(row)).collect();
             let key = keys_encoded.row(row).data();
             let (row_bytes, track) = (self.row_bytes(), self.track);
@@ -470,7 +468,7 @@ impl BoundedOverAggregator {
             }
         }
 
-        self.evict(max_rt);
+        self.evict();
 
         let mut fields = Vec::with_capacity(num_agg);
         let mut columns: Vec<ArrayRef> = Vec::with_capacity(num_agg);
@@ -486,24 +484,25 @@ impl BoundedOverAggregator {
             .expect("failed to build bounded over result batch")
     }
 
-    /// Drops buffered rows that can no longer fall inside any future row's frame. A future row's
-    /// rowtime exceeds `max_rt` (it has not completed yet), so for RANGE keep rows whose rowtime is at
-    /// or after `max_rt - offset`; for ROWS keep the most recent `offset` rows (the deepest any future
-    /// frame can reach back). Empty partitions are removed to bound memory.
-    fn evict(&mut self, max_rt: i64) {
+    /// Eviction is per key: bounded frames can admit rows behind the global watermark.
+    /// Retain at least the last row as the last-trigger marker, including a zero-width frame.
+    /// Existing frame snapshots and persistent rows therefore preserve late admission too.
+    fn evict(&mut self) {
         let (rows_frame, offset) = (self.rows_frame, self.offset);
         let (track, row_bytes) = (self.track, self.row_bytes());
         let mut freed = 0usize;
         self.keys.retain(|key, buffer| {
             let dropped = if rows_frame {
-                let keep = offset as usize;
+                let keep = (offset as usize).max(1);
                 let dropped = buffer.len().saturating_sub(keep);
                 if dropped > 0 {
                     buffer.drain(0..dropped);
                 }
                 dropped
             } else {
-                let bound = max_rt - offset;
+                let bound = buffer
+                    .last()
+                    .map_or(i64::MIN, |row| row.rt.saturating_sub(offset));
                 let cut = buffer.partition_point(|r| r.rt < bound);
                 if cut > 0 {
                     buffer.drain(0..cut);
@@ -1263,8 +1262,8 @@ pub(crate) struct OverWindowAggregator {
     /// The planner-derived max deadline horizon, `min * 3 / 2` (Flink `TableConfigUtils`), saturating.
     max_retention_ms: i64,
     /// Per-key cleanup deadline (Flink's cleanup-time ValueState plus its registered timer),
-    /// enforced lazily at key touches plus the periodic sweep — firing emits nothing, so the
-    /// substitution is invisible (divergences/28). Keyed like the inner fold state.
+    /// enforced by event-time watermarks for bounded RANGE, otherwise processing-time touches
+    /// and sweeps (divergences/28). Keyed like the inner fold state.
     cleanup_state: HashMap<ByteKey, i64>,
     /// Per-key last-write wall clock for the proctime unbounded shape's per-value TTL
     /// (`StateTtlConfig`, OnCreateAndWrite / NeverReturnExpired — stamped on every processed row).
@@ -1634,6 +1633,28 @@ impl OverWindowAggregator {
             }
             return Ok(());
         }
+        if self.range_offset().is_some() {
+            let store = self.store.as_ref().expect("over rocksdb store");
+            let stamps = store.scan_stamps()?;
+            let frames = store.scan_frames()?;
+            let pending = store.scan_pending(&store.payload_schema())?;
+            for (key, stamp) in stamps {
+                self.retention_bytes += byte_key_bytes(&key);
+                self.cleanup_state.insert(ByteKey(key), stamp);
+            }
+            for (key, rows) in frames {
+                if !self.cleanup_state.contains_key(&*key) {
+                    for row in rows {
+                        self.register_range_cleanup(&key, row.rt);
+                    }
+                }
+            }
+            if let Some(pending) = pending {
+                self.register_range_batch(&pending);
+                self.persist_range_stamps(&pending)?;
+            }
+            return Ok(());
+        }
         if !self.deadline_cleaning() {
             return Ok(());
         }
@@ -1980,20 +2001,17 @@ impl OverWindowAggregator {
             batch
         };
         self.input_schema = Some(batch.schema());
-        let rowtimes = rt_to_millis(batch.column(self.rt_column));
-        let on_time: BooleanArray = rowtimes
-            .iter()
-            .map(|value| Some(value.is_some_and(|value| value >= self.watermark)))
-            .collect();
+        let on_time = self.admission_mask(&batch, now_ms)?;
         let input_rows = batch.num_rows();
         let batch = filter_record_batch(&batch, &on_time)?;
         self.late_drops += (input_rows - batch.num_rows()) as u64;
         if self.deadline_cleaning() {
-            self.maybe_sweep(now_ms);
             self.register_batch(&batch, now_ms);
         }
+        self.register_range_batch(&batch);
         #[cfg(feature = "rocksdb-state")]
         if self.store.is_some() {
+            self.persist_range_stamps(&batch)?;
             if batch.num_rows() > 0 {
                 let rowtimes = rt_to_millis(batch.column(self.rt_column));
                 self.store
@@ -2011,6 +2029,164 @@ impl OverWindowAggregator {
         }
         self.buffered.push(batch);
         self.account()
+    }
+
+    fn range_offset(&self) -> Option<i64> {
+        match &self.inner {
+            OverInner::Bounded(inner) if !inner.rows_frame && !self.proctime => Some(inner.offset),
+            _ => None,
+        }
+    }
+
+    fn register_range_cleanup(&mut self, key: &[u8], rt: i64) {
+        let Some(offset) = self.range_offset() else {
+            return;
+        };
+        let minimum = rt.saturating_add(offset).saturating_add(1);
+        let maximum = rt
+            .saturating_add((offset as f64 * 1.5) as i64)
+            .saturating_add(1);
+        match self.cleanup_state.get_mut(key) {
+            Some(deadline) => {
+                if *deadline < minimum {
+                    *deadline = maximum;
+                }
+            }
+            None => {
+                self.retention_bytes += byte_key_bytes(key);
+                self.cleanup_state.insert(ByteKey::from(key), maximum);
+            }
+        }
+    }
+
+    fn register_range_batch(&mut self, batch: &RecordBatch) {
+        if self.range_offset().is_none() {
+            return;
+        }
+        let arrays: Vec<&ArrayRef> = self.key_columns.iter().map(|&i| batch.column(i)).collect();
+        let keys = encode_keys(&mut self.key_converter, &arrays, batch.num_rows());
+        let rt = rt_to_millis(batch.column(self.rt_column));
+        for row in 0..batch.num_rows() {
+            self.register_range_cleanup(keys.row(row).data(), rt.value(row));
+        }
+    }
+
+    fn migrate_range_frames(&mut self) {
+        let OverInner::Bounded(inner) = &self.inner else {
+            return;
+        };
+        let missing: Vec<(ByteKey, Vec<i64>)> = inner
+            .keys
+            .iter()
+            .filter(|(key, _)| !self.cleanup_state.contains_key(*key))
+            .map(|(key, rows)| (key.clone(), rows.iter().map(|row| row.rt).collect()))
+            .collect();
+        for (key, times) in missing {
+            for rt in times {
+                self.register_range_cleanup(&key.0, rt);
+            }
+        }
+    }
+
+    fn expire_range(&mut self, watermark: i64) {
+        if self.range_offset().is_none() {
+            return;
+        }
+        let due: Vec<ByteKey> = self
+            .cleanup_state
+            .iter()
+            .filter(|(_, deadline)| **deadline <= watermark)
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in due {
+            self.clear_key(&key.0);
+        }
+    }
+
+    #[cfg(feature = "rocksdb-state")]
+    fn persist_range_stamps(&mut self, batch: &RecordBatch) -> Result<(), DataFusionError> {
+        if self.range_offset().is_none() {
+            return Ok(());
+        }
+        let (keys, _) = self.touched_keys(batch);
+        let store = self.store.as_ref().expect("over rocksdb store");
+        let entries: Vec<_> = keys
+            .iter()
+            .map(|key| {
+                (
+                    store.stamp_key(self.store_fold_key_group(&key.0), &key.0),
+                    self.cleanup_state.get(key).copied(),
+                )
+            })
+            .collect();
+        self.store
+            .as_mut()
+            .expect("over rocksdb store")
+            .write_stamps(&entries)
+    }
+
+    fn admission_mask(
+        &mut self,
+        batch: &RecordBatch,
+        now_ms: i64,
+    ) -> Result<BooleanArray, DataFusionError> {
+        let arrays: Vec<&ArrayRef> = self.key_columns.iter().map(|&i| batch.column(i)).collect();
+        let keys = encode_keys(&mut self.key_converter, &arrays, batch.num_rows());
+        if self.deadline_cleaning() {
+            self.maybe_sweep(now_ms);
+            for row in 0..batch.num_rows() {
+                let key = keys.row(row).data();
+                self.expire_if_due(key, now_ms);
+                self.register_cleanup(key, now_ms);
+            }
+        }
+        #[cfg(feature = "rocksdb-state")]
+        self.flush_tombstones()?;
+        let times = rt_to_millis(batch.column(self.rt_column));
+        let OverInner::Bounded(inner) = &self.inner else {
+            return Ok(times
+                .iter()
+                .map(|rt| Some(rt.is_some_and(|rt| rt > self.watermark)))
+                .collect());
+        };
+        #[cfg(feature = "rocksdb-state")]
+        if let Some(store) = &self.store {
+            let mut encoder = BinaryRowBatchEncoder::new(
+                batch,
+                &self.key_columns,
+                &self.key_timestamp_precisions,
+            );
+            let mut indexed: HashMap<ByteKey, usize> = HashMap::default();
+            let mut prefixes = Vec::new();
+            let owners: Vec<usize> = (0..batch.num_rows())
+                .map(|row| {
+                    let key = ByteKey::from(keys.row(row).data());
+                    *indexed.entry(key.clone()).or_insert_with(|| {
+                        prefixes
+                            .push(store.frame_prefix(store.key_group(encoder.hash(row)), &key.0));
+                        prefixes.len() - 1
+                    })
+                })
+                .collect();
+            let last = store.last_frame_times(&prefixes)?;
+            return Ok(times
+                .iter()
+                .zip(owners)
+                .map(|(rt, owner)| Some(rt.is_some_and(|rt| rt > last[owner])))
+                .collect());
+        }
+        Ok(times
+            .iter()
+            .enumerate()
+            .map(|(row, rt)| {
+                let last = inner
+                    .keys
+                    .get(keys.row(row).data())
+                    .and_then(|rows| rows.last())
+                    .map_or(0, |row| row.rt);
+                Some(rt.is_some_and(|rt| rt > last))
+            })
+            .collect())
     }
 
     /// One key's persisted retention stamp for a fold write-back: the cleanup deadline (rowtime
@@ -2366,7 +2542,7 @@ impl OverWindowAggregator {
         &mut self,
         touched: &[(ByteKey, Vec<u8>, usize)],
     ) -> Result<(), DataFusionError> {
-        if !self.deadline_cleaning() {
+        if !self.deadline_cleaning() && self.range_offset().is_none() {
             return Ok(());
         }
         let entries: Vec<(Vec<u8>, Option<i64>)> = touched
@@ -2421,6 +2597,8 @@ impl OverWindowAggregator {
             .expect("over rocksdb store")
             .take_complete(watermark, &schema)?;
         let Some(complete) = complete else {
+            self.expire_range(watermark);
+            self.flush_tombstones()?;
             self.account()?;
             return Ok(RecordBatch::new_empty(Arc::new(Schema::empty())));
         };
@@ -2439,6 +2617,7 @@ impl OverWindowAggregator {
             Self::append_aggregates(&complete, &aggregates)
         };
         self.inner.clear_resident();
+        self.expire_range(watermark);
         self.flush_tombstones()?;
         self.account()?;
         Ok(output)
@@ -2535,7 +2714,11 @@ impl OverWindowAggregator {
         }
         let schema = match &self.input_schema {
             Some(schema) => schema.clone(),
-            None => return Ok(RecordBatch::new_empty(Arc::new(Schema::empty()))),
+            None => {
+                self.expire_range(watermark);
+                self.account()?;
+                return Ok(RecordBatch::new_empty(Arc::new(Schema::empty())));
+            }
         };
         let all = concat_batches(&schema, &self.buffered).expect("failed to concat over buffer");
         let rt_millis = rt_to_millis(all.column(self.rt_column));
@@ -2553,6 +2736,7 @@ impl OverWindowAggregator {
             Vec::new()
         };
         if complete.num_rows() == 0 {
+            self.expire_range(watermark);
             self.account()?;
             return Ok(RecordBatch::new_empty(Arc::new(Schema::empty())));
         }
@@ -2564,6 +2748,7 @@ impl OverWindowAggregator {
         if self.deadline_cleaning() {
             self.settle_fired(&complete, now_ms);
         }
+        self.expire_range(watermark);
         self.account()?;
         Ok(Self::append_aggregates(&complete, &aggregates))
     }
@@ -2602,10 +2787,10 @@ impl OverWindowAggregator {
         Self::snapshot_parts(self.next_seq, accumulators, buffer)
     }
 
-    /// The per-key state batch, the retention stamp riding as a trailing column only while
-    /// retention is on — a retention-off checkpoint stays byte-identical to the pre-TTL format.
+    /// The per-key state batch, with a trailing cleanup stamp for bounded RANGE or enabled TTL.
+    /// RANGE stamps are event-time deadlines, independent of the processing-time TTL setting.
     fn snapshot_accumulators(&mut self) -> Vec<u8> {
-        if self.deadline_cleaning() {
+        if self.deadline_cleaning() || self.range_offset().is_some() {
             self.inner
                 .snapshot(Some((CLEANUP_AT_COLUMN, &self.cleanup_state)))
         } else if self.value_ttl_on() {
@@ -2721,7 +2906,8 @@ impl OverWindowAggregator {
     ) -> BTreeMap<i32, Vec<u8>> {
         // The retention stamp is one more trailing state column; it partitions with its row.
         let state_columns = self.inner.snapshot_state_columns()
-            + (self.deadline_cleaning() || self.value_ttl_on()) as usize;
+            + (self.deadline_cleaning() || self.range_offset().is_some() || self.value_ttl_on())
+                as usize;
         let accumulators = self.snapshot_accumulators();
         let accumulators = Self::partition_snapshot(
             &accumulators,
@@ -2933,7 +3119,18 @@ impl OverWindowAggregator {
     /// stamps are shed. Pending-row counts are never snapshotted; they re-derive from the
     /// restored buffer.
     fn adopt_restored_stamps(&mut self, stamps: HashMap<ByteKey, i64>, restored_at_ms: i64) {
-        if self.deadline_cleaning() {
+        if self.range_offset().is_some() {
+            self.cleanup_state = stamps;
+            self.retention_bytes = self
+                .cleanup_state
+                .keys()
+                .map(|key| byte_key_bytes(&key.0))
+                .sum();
+            self.migrate_range_frames();
+            for batch in self.buffered.clone() {
+                self.register_range_batch(&batch);
+            }
+        } else if self.deadline_cleaning() {
             self.cleanup_state = stamps;
             let stamp = restored_at_ms.saturating_add(self.max_retention_ms);
             for key in self.inner.state_keys() {

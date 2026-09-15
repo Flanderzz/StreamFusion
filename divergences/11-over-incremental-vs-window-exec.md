@@ -88,15 +88,20 @@ rather than once cumulatively. The slice is `buffer[i-n ..= i]` for ROWS; for RA
 is `[first rt ≥ cur−offset, last rt ≤ cur]`, found by binary search, and rows of equal
 rowtime share one frame (ending at the last tied row), matching Flink's RANGE
 semantics. Cost is O(frame size) per row, fine for a bounded frame; the trailing edge
-is evicted (ROWS: keep the last `n` rows per key; RANGE: drop rows older than
-`maxRowtime − offset`) so memory stays bounded. This is an **algorithmic** divergence
+is evicted (ROWS: keep the last `max(n, 1)` rows per key; RANGE: drop rows older than
+that key’s `lastRowtime − offset`) so memory stays bounded. This is an **algorithmic** divergence
 from Flink's retraction-based operator with **identical output** — chosen because it is
 simpler and correct where incremental retraction would need a MIN/MAX value multiset we
 do not keep.
 
 Flink seeds `lastTriggeringTs = 0` in these operators and drops a row whose rowtime is
-`<= 0` as late; with real epoch-millis rowtimes that never fires, and we do not
-reproduce the epoch-0 quirk (a rowtime-0 row is processed normally).
+`<= 0` as late. We preserve that rule and reject timestamps at or before the key's last firing,
+independently of the global watermark. The last retained frame row is also the admission marker,
+so the existing frame checkpoint preserves it without a second last-trigger state table. A
+zero-width ROWS frame retains one marker that never contributes to the next aggregate. RANGE
+keeps Flink's event-time cleanup deadline, including its hysteresis, alongside the frame; firing
+that timer clears the frame and admission marker. Unbounded frames use the stricter global
+watermark comparison. See the OVER coverage page for restore and expiry behavior.
 
 ## Scope
 Running aggregates (`SUM`/`MIN`/`MAX`/`COUNT`/`AVG`; `AVG` via Flink's

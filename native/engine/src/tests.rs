@@ -1087,13 +1087,13 @@ fn over_window_buffers_and_passes_through() {
 fn over_window_counts_rows_dropped_behind_the_watermark() {
     let mut over = OverWindowAggregator::new(vec![0], vec![0], 2, vec![1], vec![0], 0, 0, false);
     over.flush(1000, 0).unwrap();
-    over.push(join_batch(vec![1, 2], vec![10, 20], vec![999, 1000]), 0)
-        .unwrap();
-    // Flink drops timestamps strictly behind the current watermark. A row exactly on the
-    // watermark remains on time and must still be emitted by the next firing.
-    assert_eq!(over.late_drops, 1);
-    let out = over.flush(1000, 0).unwrap();
-    assert_eq!(values(&out, 1), vec![20]);
+    over.push(
+        join_batch(vec![1, 2, 3], vec![10, 20, 30], vec![999, 1000, 1001]),
+        0,
+    )
+    .unwrap();
+    assert_eq!(over.late_drops, 2);
+    assert_eq!(values(&over.flush(1001, 0).unwrap(), 1), vec![30]);
 }
 
 #[test]
@@ -1168,10 +1168,10 @@ fn bounded_rows_over_sums_the_frame_slice() {
     let mut over = OverWindowAggregator::new(vec![0], vec![0], 2, vec![1], vec![0], 1, 1, false);
     over.push(batch, 0).unwrap();
     let out = over.flush(2000, 0).unwrap();
-    assert_eq!(out.num_rows(), 4);
-    // SUM over {self, prev}: key 1 -> 10, 10+20, 20+30; key 2 (lone row) -> 100.
-    assert_eq!(values(&out, 1), vec![10, 20, 30, 100]); // v passed through
-    assert_eq!(values(&out, 3), vec![10, 30, 50, 100]);
+    assert_eq!(out.num_rows(), 3);
+    // Epoch zero is late. The remaining rows use their actual preceding frame.
+    assert_eq!(values(&out, 1), vec![20, 30, 100]); // v passed through
+    assert_eq!(values(&out, 3), vec![20, 50, 100]);
 }
 
 // Bounded RANGE frame (1 SECOND PRECEDING): each row's SUM covers the rows within 1000ms of it,
@@ -1199,9 +1199,9 @@ fn bounded_range_over_sums_the_time_interval() {
     let mut over = OverWindowAggregator::new(vec![0], vec![0], 2, vec![1], vec![0], 2, 1000, false);
     over.push(batch, 0).unwrap();
     let out = over.flush(2000, 0).unwrap();
-    assert_eq!(out.num_rows(), 3);
-    // SUM over rows within 1000ms: rt0 -> {10}, rt1000 -> {10,20}, rt2000 -> {20,30}.
-    assert_eq!(values(&out, 3), vec![10, 30, 50]);
+    assert_eq!(out.num_rows(), 2);
+    // Epoch zero is late: rt1000 -> {20}, rt2000 -> {20,30}.
+    assert_eq!(values(&out, 3), vec![20, 50]);
 }
 
 // Proctime OVER: rows fold in arrival order and emit immediately (no watermark). The running SUM
@@ -1570,16 +1570,16 @@ fn over_pre_retention_snapshot_stamps_a_full_deadline_at_restore() {
 #[test]
 fn bounded_range_over_ignores_retention() {
     let mut over = retention_over(2, 1000, false, 2000);
-    over.push(join_batch(vec![1], vec![10], vec![0]), 1000)
+    over.push(join_batch(vec![1], vec![10], vec![1]), 1000)
         .unwrap();
-    assert_eq!(values(&over.flush(0, 1000).unwrap(), 3), vec![10]);
+    assert_eq!(values(&over.flush(1, 1000).unwrap(), 3), vec![10]);
     // Far past any would-be deadline, the 1000ms frame still reaches the earlier row.
     over.push(join_batch(vec![1], vec![20], vec![1000]), 1_000_000)
         .unwrap();
     assert_eq!(values(&over.flush(1000, 1_000_000).unwrap(), 3), vec![30]);
     assert!(over_acc_batches(&over.snapshot())
         .iter()
-        .all(|b| retention_stamps(b).is_none()));
+        .all(|b| retention_stamps(b).unwrap().value(0) == 2501));
 }
 
 // The proctime unbounded fold runs Flink's per-value StateTtlConfig instead (OnCreateAndWrite /
