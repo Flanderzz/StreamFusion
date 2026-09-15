@@ -129,7 +129,10 @@ Native, unconditionally, with no host involvement:
   no-op (e.g. the common `COALESCE(s, 'x')` pattern).
 - **Widening timestamp precision** within `TIMESTAMP` or within `TIMESTAMP_LTZ` — Arrow stores both
   at nanosecond precision at the columnar boundary, so widening the Flink declaration is a no-op.
-- **`→ DECIMAL` from an exact source** — a `DECIMAL` or integer input, rescaled `HALF_UP`.
+- **`→ DECIMAL` from an exact source** — a `DECIMAL` or integer input, rescaled `HALF_UP`
+  before checking the target precision. Overflow produces SQL `NULL`, including a carry caused
+  by rounding (`999.995` cast to `DECIMAL(5,2)`), scale increases, and integer inputs. NULLs remain
+  visible to surrounding expressions and filters. The result stays an Arrow `Decimal128` column.
 
 ### The host-exact JVM upcall
 
@@ -163,18 +166,37 @@ expressions; see [temporal functions](temporal-functions.md), including the time
 
 ## Decimal arithmetic
 
-**All native and byte-exact by default — not a fallback.**
+**Native and byte-exact by default, with the boolean short-circuit restriction below.**
 
-- `+`/`-`/`*` whose result type is `DECIMAL` (e.g. Nexmark q1's `0.908 * price`) run entirely in
-  Arrow: operands are `Decimal128` (columns already are; literals emit as an exact `Decimal128`),
-  Arrow's `Decimal128` add/sub/mul carry Flink's scales, and the wrapping cast to the declared
-  `DECIMAL(p, s)` rounds `HALF_UP`, exactly as Flink does.
-- **Division and modulo** (`/`, `%`) go through a fused native kernel that reproduces Flink's exact
-  runtime (`DecimalDataUtils.divide`/`mod`) rather than Arrow's own decimal division: the quotient is
+- `+`/`-`/`*` whose result type is `DECIMAL` (e.g. Nexmark q1's `0.908 * price`) use fused native
+  kernels with Flink's resolved result precision and scale. Operands stay `Decimal128` or signed
+  integers; intermediates use checked i128 arithmetic and widen to i256 when needed. The result
+  is rounded `HALF_UP` before checking precision and writing one `Decimal128` column. Overflow
+  produces SQL `NULL`, including in `IS NULL`, CASE, filters, and group keys. A wide intermediate
+  does not discard a result that fits after rounding.
+- **Division** (`/`) uses Flink's decimal rounding rather than Arrow's: the quotient is
   computed to 38 *significant* digits with `HALF_UP` rounding (matching `BigDecimal`'s
   `MathContext(38, HALF_UP)`), then rescaled to the declared `DECIMAL(p, s)` with `HALF_UP` again —
   producing `NULL` when the result would exceed `p` digits, and failing the job on division by zero,
   all exactly as the host does.
+- **Modulo** (`MOD`, `%`) computes the exact signed remainder with Flink's `MathContext(38)`
+  constraint on the integral quotient. A quotient that needs more than 38 significant digits
+  after removing trailing zeroes fails the job with `Division impossible`; for example,
+  `DECIMAL(38,0)` value `10^37` modulo `DECIMAL(38,38)` value `3 * 10^-38`. A large quotient
+  consisting of a power of ten remains valid. The remainder is rescaled `HALF_UP`, with NULL on
+  result-precision overflow and job failure on a zero divisor.
+
+Decimal `/`, `MOD` and `%` nested under `AND` or `OR` fall back at planning time.
+DataFusion 54 can evaluate an operand for rows Flink skips in a mixed boolean batch,
+exposing division-by-zero or `Division impossible` errors on unevaluated rows.
+For example, `guard_value OR MOD(a, b) = 0` must skip MOD on rows whose guard is TRUE.
+This restriction applies to projections and filters, including nested expressions.
+Direct arithmetic and CASE result branches remain native; CASE selects the rows to
+evaluate before running the decimal kernel. Evaluated invalid operands still fail the job.
+
+Flink can retain a `NOT NULL` result declaration from non-nullable operands even
+when decimal arithmetic overflows. Its downstream constraint enforcer then fails
+the job on that NULL; the native path preserves this failure as well.
 
 The old `decimalArithmetic.approximate` flag is retired entirely: the float/double→`DECIMAL` cast it
 used to gate now runs host-exact through the cast upcall above.

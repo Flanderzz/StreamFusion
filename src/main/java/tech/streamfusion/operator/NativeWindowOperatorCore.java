@@ -1,6 +1,7 @@
 package tech.streamfusion.operator;
 
 import tech.streamfusion.Native;
+import tech.streamfusion.arrow.TimestampAccessor;
 import tech.streamfusion.state.RocksDBNativeStateSupport;
 import java.time.Instant;
 import java.time.LocalDateTime;
@@ -395,16 +396,16 @@ public abstract class NativeWindowOperatorCore<OUT> extends AbstractNativeStatef
       keys[j] = newKeyVector("key" + j, keyTypes[j]);
       vectors.add(keys[j]);
     }
-    TimeStampNanoVector srcStart = (TimeStampNanoVector) in.getVector(windowStartColumn);
-    TimeStampNanoVector srcEnd = (TimeStampNanoVector) in.getVector(windowEndColumn);
+    TimestampAccessor srcStart = new TimestampAccessor(in.getVector(windowStartColumn));
+    TimestampAccessor srcEnd = new TimestampAccessor(in.getVector(windowEndColumn));
     try (VectorSchemaRoot root = new VectorSchemaRoot(vectors);
         ArrowArray array = ArrowArray.allocateNew(allocator);
         ArrowSchema schema = ArrowSchema.allocateNew(allocator)) {
       for (int i = 0; i < rows; i++) {
         // The upstream boundaries are session-zone wall-clock (see toEpochFromLocal); fold on epoch
         // millis so this aggregate's own boundary rendering shifts them exactly once, not twice.
-        windowStart.setSafe(i, toEpochFromLocal(srcStart.get(i) / 1_000_000L));
-        windowEnd.setSafe(i, toEpochFromLocal(srcEnd.get(i) / 1_000_000L));
+        windowStart.setSafe(i, toEpochFromLocal(srcStart.getMillis(i)));
+        windowEnd.setSafe(i, toEpochFromLocal(srcEnd.getMillis(i)));
         for (int a = 0; a < valueColumns.length; a++) {
           if (valueColumns[a] < 0) {
             ((BigIntVector) values[a]).setSafe(i, 1L); // COUNT(*): a non-null constant counts rows
@@ -446,12 +447,12 @@ public abstract class NativeWindowOperatorCore<OUT> extends AbstractNativeStatef
       keys[j] = newKeyVector("key" + j, keyTypes[j]);
       vectors.add(keys[j]);
     }
-    TimeStampNanoVector srcTs = proctime ? null : (TimeStampNanoVector) in.getVector(timeColumn);
+    TimestampAccessor srcTs = proctime ? null : new TimestampAccessor(in.getVector(timeColumn));
     try (VectorSchemaRoot root = new VectorSchemaRoot(vectors);
         ArrowArray array = ArrowArray.allocateNew(allocator);
         ArrowSchema schema = ArrowSchema.allocateNew(allocator)) {
       for (int i = 0; i < rows; i++) {
-        ts.setSafe(i, proctime ? proctimeMillis : srcTs.get(i) / 1_000_000L);
+        ts.setSafe(i, proctime ? proctimeMillis : srcTs.getMillis(i));
         for (int a = 0; a < valueColumns.length; a++) {
           if (valueColumns[a] < 0) {
             ((BigIntVector) values[a]).setSafe(i, 1L); // COUNT(*): a non-null constant counts rows

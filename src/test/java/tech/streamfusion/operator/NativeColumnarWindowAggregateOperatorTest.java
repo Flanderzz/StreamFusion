@@ -5,6 +5,14 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import tech.streamfusion.planner.FlinkKeyGroupUtils;
+import org.apache.arrow.vector.BigIntVector;
+import org.apache.arrow.vector.TimeStampVector;
+import org.apache.arrow.vector.types.TimeUnit;
+import org.apache.arrow.vector.types.pojo.ArrowType;
+import org.apache.arrow.vector.types.pojo.Field;
+import org.apache.arrow.vector.types.pojo.FieldType;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import java.util.ArrayList;
 import java.util.List;
 import org.apache.arrow.memory.BufferAllocator;
@@ -131,6 +139,46 @@ class NativeColumnarWindowAggregateOperatorTest {
         assertEquals(999L, result.getTimestamp(3, 3).getMillisecond());
         assertTrue(result.isNullAt(4));
       }
+    }
+  }
+
+  @ParameterizedTest
+  @EnumSource(TimeUnit.class)
+  void negativeTimestampUsesItsMillisecondInEveryArrowUnit(TimeUnit unit) throws Exception {
+    NativeColumnarWindowAggregateOperator operator =
+        new NativeColumnarWindowAggregateOperator(
+            false,
+            1000,
+            1000,
+            1,
+            new int[] {0},
+            new int[0],
+            new int[0],
+            new int[] {0},
+            new int[] {0},
+            "UTC",
+            OUTPUT,
+            false,
+            new int[0],
+            MAX_PARALLELISM);
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness =
+            rawHarness(operator)) {
+      harness.setup(new ArrowBatchSerializer());
+      harness.open();
+      BigIntVector value = new BigIntVector("value", allocator);
+      TimeStampVector rt =
+          (TimeStampVector)
+              new Field("rt", FieldType.nullable(new ArrowType.Timestamp(unit, null)), List.of())
+                  .createVector(allocator);
+      VectorSchemaRoot root = VectorSchemaRoot.of(value, rt);
+      root.allocateNew();
+      value.setSafe(0, 7);
+      rt.setSafe(0, -1);
+      root.setRowCount(1);
+      harness.processElement(new StreamRecord<>(new ArrowBatch(root)));
+      harness.processWatermark(new Watermark(0));
+      assertEquals(List.of(row(7, -1000, 0)), collect(harness));
     }
   }
 

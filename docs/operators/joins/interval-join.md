@@ -9,6 +9,23 @@ Both **event-time and proctime** bounds are native. An event-time interval join 
 rowtime and evicts on the watermark; a proctime interval join times rows by the processing clock and
 evicts on a processing-time timer instead.
 
+Interval membership uses **epoch milliseconds**, matching Flink's interval-join
+runtime. It does not compare sub-millisecond fractions or scale the interval
+into nanoseconds. A runtime TIMESTAMP(3) can still carry such a fraction: with
+left time `2.000999999s`, right time `1.000000001s`, and inclusive bounds
+`[-1s, +1s]`, Flink matches the pair. Native execution now does too. The timestamp
+payload retains its original components; only the interval lookup uses milliseconds.
+The direction of the lookup follows the arriving input, including Java long
+arithmetic at overflowing bounds.
+
+The native lookup accepts the four primitive Arrow timestamp units, BIGINT
+milliseconds. Memory snapshots retain
+the original payload schema and outer-join match flags; INNER restore does not
+interpret a payload column as an outer-join row id. These consumer checks do not
+change the default SQL timestamp layout or enable wider-range producers; the
+remaining transport/state migration is tracked in
+[#64](https://github.com/datafusion-contrib/StreamFusion/issues/64).
+
 ## Admission
 
 Same equi-key/type/residual conditions as the [regular join](regular-join.md): a supported-type

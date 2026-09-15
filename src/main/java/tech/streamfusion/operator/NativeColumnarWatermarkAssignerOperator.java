@@ -1,8 +1,7 @@
 package tech.streamfusion.operator;
 
-import org.apache.arrow.vector.TimeStampVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
-import org.apache.arrow.vector.types.pojo.ArrowType;
+import tech.streamfusion.arrow.TimestampAccessor;
 import org.apache.flink.api.common.operators.ProcessingTimeService.ProcessingTimeCallback;
 import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
@@ -75,12 +74,11 @@ public class NativeColumnarWatermarkAssignerOperator extends AbstractStreamOpera
           output, getMetricGroup(), element.replace(new ArrowBatch(root)), rows);
       return;
     }
-    TimeStampVector rt = (TimeStampVector) root.getVector(rowtimeColumn);
-    ArrowType.Timestamp type = (ArrowType.Timestamp) rt.getField().getType();
-    if (isMonotonic(rt, type, rows)) {
+    TimestampAccessor rt = new TimestampAccessor(root.getVector(rowtimeColumn));
+    if (isMonotonic(rt, rows)) {
       // No row can be late within a monotonic batch, so the host would drop nothing either: forward
       // the whole batch (the max is the last row) with a single eager watermark.
-      currentWatermark = Math.max(currentWatermark, toMillis(rt.get(rows - 1), type) - delayMillis);
+      currentWatermark = Math.max(currentWatermark, rt.getMillis(rows - 1) - delayMillis);
       ColumnarRecordMetrics.forward(
           output, getMetricGroup(), element.replace(new ArrowBatch(root)), rows);
       if (currentWatermark - lastWatermark > watermarkInterval) {
@@ -93,7 +91,7 @@ public class NativeColumnarWatermarkAssignerOperator extends AbstractStreamOpera
     // row before the watermark it triggers).
     int sliceStart = 0;
     for (int i = 0; i < rows; i++) {
-      currentWatermark = Math.max(currentWatermark, toMillis(rt.get(i), type) - delayMillis);
+      currentWatermark = Math.max(currentWatermark, rt.getMillis(i) - delayMillis);
       if (currentWatermark - lastWatermark > watermarkInterval) {
         ColumnarRecordMetrics.emit(output, getMetricGroup(), new ArrowBatch(root.slice(sliceStart, i - sliceStart + 1)));
         sliceStart = i + 1;
@@ -107,32 +105,19 @@ public class NativeColumnarWatermarkAssignerOperator extends AbstractStreamOpera
     root.close();
   }
 
-  /** Whether the rowtime column is non-decreasing — then no row is late relative to an earlier one. */
-  private static boolean isMonotonic(TimeStampVector rt, ArrowType.Timestamp type, int rows) {
+  /**
+   * Whether the rowtime column is non-decreasing — then no row is late relative to an earlier one.
+   */
+  private static boolean isMonotonic(TimestampAccessor rt, int rows) {
     long prev = Long.MIN_VALUE;
     for (int i = 0; i < rows; i++) {
-      long millis = toMillis(rt.get(i), type);
+      long millis = rt.getMillis(i);
       if (millis < prev) {
         return false;
       }
       prev = millis;
     }
     return true;
-  }
-
-  /** Reduces a timestamp in the column's own unit to epoch millis (how watermarks are expressed). */
-  private static long toMillis(long raw, ArrowType.Timestamp type) {
-    switch (type.getUnit()) {
-      case SECOND:
-        return raw * 1_000L;
-      case MILLISECOND:
-        return raw;
-      case MICROSECOND:
-        return raw / 1_000L;
-      case NANOSECOND:
-      default:
-        return raw / 1_000_000L;
-    }
   }
 
   private void advanceWatermark() {

@@ -52,6 +52,16 @@ event-time, by the processing-time clock instead of a rowtime column for proctim
 under the same **zero-offset** `TUMBLE`/`HOP`/`CUMULATE` restriction; both its event-time and
 proctime assignment paths are native.
 
+Assignment reads Flink's millisecond component without changing the original timestamp payload.
+In particular, `1969-12-31 23:59:59.999999999` belongs to the window before the epoch, just like
+`TimestampData.getMillisecond() == -1`. NULL event-time rows are dropped; processing-time assignment
+uses the clock even when the payload's timestamp is NULL.
+
+The native assignment kernel reads all primitive Arrow timestamp units. SQL window boundaries
+remain nanosecond columns; conversion checks overflow rather than wrapping the boundary. Full-range
+SQL timestamps and any change to the output/state representation remain separate work tracked by
+[#64](https://github.com/datafusion-contrib/StreamFusion/issues/64).
+
 A downstream [window join](joins/window-join.md) or window Top-N/dedup consuming the TVF's output
 closes windows on a chained processing-time timer (the same next-slide-boundary model described
 above) rather than a watermark, under the same slide-divides-size constraint — see those operators'

@@ -20,6 +20,25 @@ accelerate* — a real gap that could be closed. It is **not** a fallback when F
 the query in streaming (e.g. `RANK`/`DENSE_RANK` Top-N, non-time `ORDER BY`) — matching Flink by
 also not running it is parity, not a gap.
 
+## Timestamp values and event time
+
+Timestamp readers expose Flink's signed epoch milliseconds plus a non-negative
+nanosecond remainder within the millisecond. For example, `-1` nanosecond is
+`(-1, 999999)`, not `(0, -1)`. Flink BinaryRow key encoding reads these components
+directly, including nested timestamp keys; it does not multiply milliseconds into
+an `i64` nanosecond count. Event-time readers for sort, window-aggregate input and
+watermarks use the millisecond component. The JVM temporal-function bridge preserves
+both components for generated expressions and reads milliseconds for millisecond-only builtins.
+Readers accept Arrow second, millisecond, microsecond and nanosecond timestamp
+columns without interpreting the Arrow timezone label as a timezone conversion.
+
+This reader contract does **not** yet expand end-to-end timestamp range: row-to-Arrow
+writers, timestamp-producing expressions and several state/output paths still use
+nanosecond columns. The complete representation and consumer/state migration remain
+tracked in [#64](https://github.com/datafusion-contrib/StreamFusion/issues/64).
+Timestamp-producing functions are not enabled on the strength of reader compatibility
+alone. See [the timestamp contract](https://github.com/datafusion-contrib/StreamFusion/blob/main/divergences/39-timestamp-value-contract.md).
+
 ## Global switches
 
 - **`-Dstreamfusion.native.enabled=false`** — master switch; run entirely on Flink.

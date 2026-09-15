@@ -198,28 +198,12 @@ impl TemporalSorter {
 
 /// Reads a timestamp column as epoch millis, regardless of its stored unit.
 pub(crate) fn rt_to_millis(array: &ArrayRef) -> Int64Array {
-    use arrow::datatypes::TimeUnit;
     match array.data_type() {
-        DataType::Timestamp(TimeUnit::Nanosecond, _) => {
-            let ts = array
-                .as_any()
-                .downcast_ref::<TimestampNanosecondArray>()
-                .expect("ts ns");
-            ts.iter().map(|v| v.map(|x| x / 1_000_000)).collect()
-        }
-        DataType::Timestamp(TimeUnit::Microsecond, _) => {
-            let ts = array
-                .as_any()
-                .downcast_ref::<TimestampMicrosecondArray>()
-                .expect("ts us");
-            ts.iter().map(|v| v.map(|x| x / 1_000)).collect()
-        }
-        DataType::Timestamp(TimeUnit::Millisecond, _) => {
-            let ts = array
-                .as_any()
-                .downcast_ref::<TimestampMillisecondArray>()
-                .expect("ts ms");
-            ts.iter().map(|v| v.map(|x| x)).collect()
+        DataType::Timestamp(_, _) => {
+            streamfusion_bridge::timestamp::TimestampColumn::try_new(array.as_ref())
+                .expect("timestamp rowtime column")
+                .to_millis()
+                .expect("rowtime in Flink's millisecond range")
         }
         DataType::Int64 => array
             .as_any()
@@ -227,6 +211,32 @@ pub(crate) fn rt_to_millis(array: &ArrayRef) -> Int64Array {
             .expect("i64")
             .clone(),
         other => panic!("unsupported rowtime column type: {other:?}"),
+    }
+}
+
+#[cfg(test)]
+mod timestamp_tests {
+    use super::*;
+    use arrow::array::TimestampSecondArray;
+
+    #[test]
+    fn negative_fraction_is_released_at_its_millisecond_after_restore() {
+        for times in [
+            Arc::new(TimestampNanosecondArray::from(vec![1, -1, -1_000_001])) as ArrayRef,
+            Arc::new(TimestampMicrosecondArray::from(vec![1, -1, -1001])),
+            Arc::new(TimestampMillisecondArray::from(vec![1, -1, -2])),
+            Arc::new(TimestampSecondArray::from(vec![1, -1, -2])),
+        ] {
+            let batch = RecordBatch::try_from_iter(vec![("rt", times.clone())]).unwrap();
+            let mut sorter = TemporalSorter::new(0);
+            sorter.push(batch).unwrap();
+            let mut restored = TemporalSorter::restore(0, &sorter.snapshot());
+            let released = restored.flush(-1).unwrap();
+            assert_eq!(released.num_rows(), 2, "{}", times.data_type());
+            let expected = take(times.as_ref(), &UInt32Array::from(vec![2, 1]), None).unwrap();
+            assert_eq!(released.column(0).as_ref(), expected.as_ref());
+            assert_eq!(restored.flush(i64::MAX).unwrap().num_rows(), 1);
+        }
     }
 }
 

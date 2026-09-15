@@ -9,6 +9,7 @@ pub mod jdk_decimal;
 pub mod jdk_double;
 pub mod json_string;
 pub mod ordering;
+pub mod timestamp;
 
 pub use {bridge::*, changelog::*, format_abi::*, format_codes::*, jdk_decimal::*, jdk_double::*};
 mod allocator;

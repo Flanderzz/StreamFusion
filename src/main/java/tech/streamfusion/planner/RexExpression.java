@@ -55,11 +55,8 @@ final class RexExpression {
   // index of the field name, with one child (the struct-typed expression). Nested access (a.b.c)
   // nests these, the child being itself a field access. Mirrors DataFusion's get_field.
   private static final int KIND_FIELD_ACCESS = 13;
-  // Approximate decimal cast: payload packs the target DECIMAL precision/scale (precision*100 +
-  // scale),
-  // one child. Wraps a (double-computed) arithmetic result, casting it to the declared DECIMAL so
-  // the
-  // output column type matches — only under the approximate-decimal flag (not byte-exact to Flink).
+  // Exact decimal cast: payload packs precision*100 + scale; one decimal or integer child.
+  // Rounds HALF_UP before checking precision, returning NULL on overflow.
   private static final int KIND_CAST_DECIMAL = 14;
   // An exact DECIMAL literal: payload indexes the string pool, whose entry is
   // "unscaled|precision|scale"
@@ -96,6 +93,10 @@ final class RexExpression {
   private static final int KIND_LIT_BINARY = 23;
   private static final int KIND_LIT_TEMPORAL = 24;
   private static final int KIND_CLOCK = 25;
+  // Fused exact arithmetic: payload is the declared result precision*100 + scale; two children.
+  private static final int KIND_DECIMAL_ADD = 26;
+  private static final int KIND_DECIMAL_SUBTRACT = 27;
+  private static final int KIND_DECIMAL_MULTIPLY = 28;
 
   // Cast target type codes, mirrored on the native side.
   private static final int CAST_TINYINT = 0;
@@ -581,33 +582,27 @@ final class RexExpression {
     if (call.getKind() == SqlKind.EXTRACT) {
       return emitExtract(call);
     }
-    // Decimal-typed arithmetic, all exact. Add/subtract/multiply: the operands reach the native
-    // side
-    // as Decimal128 (columns already are; literals emit as exact Decimal128), and Arrow's
-    // Decimal128
-    // add/sub/multiply match Flink's — the products carry the full scale (sum of input scales for
-    // ×,
-    // aligned max scale for ±), and the wrapping cast to the declared DECIMAL(p, s) rounds HALF_UP,
-    // the same rounding Flink uses. Division/modulo need Flink's own two rounding steps (the
-    // 38-significant-digit quotient, then the rescale to the declared type), which Arrow's division
-    // cannot reproduce, so they run through a dedicated fused kernel.
+    // Transmit Flink's resolved result type to each fused decimal kernel. Generic arithmetic
+    // followed by a cast can overflow before rescaling, or infer a different intermediate scale.
     if (isDecimalArithmetic(call)) {
       int precision = call.getType().getPrecision();
       int scale = call.getType().getScale();
-      if (call.getKind() == SqlKind.DIVIDE || call.getKind() == SqlKind.MOD) {
-        add(
-            call.getKind() == SqlKind.DIVIDE ? KIND_DECIMAL_DIVIDE : KIND_DECIMAL_MOD,
-            precision * 100 + scale,
-            2);
-        for (RexNode operand : call.getOperands()) {
-          if (!emit(operand)) {
-            return false;
-          }
+      int kind =
+          switch (call.getKind()) {
+            case PLUS -> KIND_DECIMAL_ADD;
+            case MINUS -> KIND_DECIMAL_SUBTRACT;
+            case TIMES -> KIND_DECIMAL_MULTIPLY;
+            case DIVIDE -> KIND_DECIMAL_DIVIDE;
+            case MOD -> KIND_DECIMAL_MOD;
+            default -> throw new IllegalStateException("not decimal arithmetic: " + call.getKind());
+          };
+      add(kind, precision * 100 + scale, 2);
+      for (RexNode operand : call.getOperands()) {
+        if (!emit(operand)) {
+          return false;
         }
-        return true;
       }
-      add(KIND_CAST_DECIMAL, precision * 100 + scale, 1);
-      // fall through: the arithmetic op is emitted next as this cast's single child.
+      return true;
     }
     String functionName = call.getOperator().getName().toUpperCase(Locale.ROOT);
     int clockField =
@@ -896,8 +891,8 @@ final class RexExpression {
         return emit(operands.get(0));
       case AND:
       case OR:
-        if (operands.stream().anyMatch(RexExpression::containsFallibleJsonCall)) {
-          return reject("SQL/JSON under AND/OR requires Flink's row short-circuiting");
+        if (operands.stream().anyMatch(RexExpression::requiresRowShortCircuit)) {
+          return reject("Fallible expressions under AND/OR require Flink's row short-circuiting");
         }
         // Calcite leaves AND/OR n-ary; the native binary op needs a left-deep nesting, which a
         // pre-order stream encodes as (n-1) call headers followed by the operands in order.
@@ -1139,9 +1134,13 @@ final class RexExpression {
     return emitBuiltinCall(call, op);
   }
 
-  private static boolean containsFallibleJsonCall(RexNode node) {
+  private static boolean requiresRowShortCircuit(RexNode node) {
     if (!(node instanceof RexCall call)) {
       return false;
+    }
+    if (isDecimalArithmetic(call)
+        && (call.getKind() == SqlKind.MOD || call.getKind() == SqlKind.DIVIDE)) {
+      return true;
     }
     String name = call.getOperator().getName().toUpperCase(Locale.ROOT);
     List<RexNode> args = call.getOperands();
@@ -1162,7 +1161,7 @@ final class RexExpression {
         && "ERROR".equals(jsonSymbol(args.get(2)))) {
       return true;
     }
-    return args.stream().anyMatch(RexExpression::containsFallibleJsonCall);
+    return args.stream().anyMatch(RexExpression::requiresRowShortCircuit);
   }
 
   private boolean jsonRuntimeAvailable() {
@@ -1595,12 +1594,8 @@ final class RexExpression {
         && resultType.getPrecision() >= sourceType.getPrecision()) {
       return emit(call.getOperands().get(0));
     }
-    // A cast to DECIMAL from an exact source (another DECIMAL, e.g. coercing q1's `0.908 * price`
-    // to
-    // the sink's DECIMAL(23,3), or an integer) is byte-exact natively: Arrow rescales Decimal128
-    // with
-    // HALF_UP rounding, the same mode Flink uses. A float/double or string source falls through to
-    // the host-exact cast upcall below.
+    // Exact-source casts round HALF_UP and return NULL on overflow. Float/double and string
+    // sources use the host-exact cast upcall below.
     if (targetType == SqlTypeName.DECIMAL) {
       boolean exactSource =
           source == SqlTypeName.DECIMAL || numericRank(source) >= 0 && numericRank(source) <= 3;
@@ -2825,7 +2820,7 @@ final class RexExpression {
     return emit(call.getOperands().get(0));
   }
 
-  /** Whether {@code call} is an arithmetic operation whose result is a DECIMAL (not yet native). */
+  /** Whether {@code call} needs Flink's resolved decimal result precision and scale. */
   private static boolean isDecimalArithmetic(RexCall call) {
     switch (call.getKind()) {
       case PLUS:

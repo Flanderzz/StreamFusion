@@ -42,6 +42,11 @@ class NativeSourceWatermarksTest {
       root.setRowCount(1);
       assertEquals(-1, NativeSourceWatermarks.maxRowtimeMillis(root, 0));
 
+      rowtimes.setSafe(0, Long.MIN_VALUE);
+      assertEquals(
+          Math.floorDiv(Long.MIN_VALUE, 1_000_000L),
+          NativeSourceWatermarks.maxRowtimeMillis(root, 0));
+
       rowtimes.setNull(0);
       root.setRowCount(1);
       assertEquals(Long.MIN_VALUE, NativeSourceWatermarks.maxRowtimeMillis(root, 0));

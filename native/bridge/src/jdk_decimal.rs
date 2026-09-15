@@ -1,6 +1,83 @@
 //! `java.math.BigDecimal` semantics shared by the engine's decimal arithmetic and the text formats'
 //! decimal parsing.
 
+use arrow::datatypes::i256;
+use arrow::error::ArrowError;
+
+/// A prepared HALF_UP rescale with Flink's declared precision bound. The column ABI stays
+/// Decimal128 even when an arithmetic intermediate requires 256 bits.
+pub struct DecimalRescale {
+    increase: bool,
+    factor: i256,
+    narrow_factor: Option<i128>,
+    limit: i128,
+}
+
+impl DecimalRescale {
+    pub fn new(source_scale: i16, precision: u8, scale: i8) -> Result<Self, ArrowError> {
+        if !(1..=38).contains(&precision)
+            || !(0..=precision as i8).contains(&scale)
+            || !(0..=76).contains(&source_scale)
+        {
+            return Err(ArrowError::InvalidArgumentError(format!(
+                "invalid Flink decimal rescale: scale {source_scale} to ({precision}, {scale})"
+            )));
+        }
+        let difference = scale as i16 - source_scale;
+        let factor = i256::from_i128(10).wrapping_pow(difference.unsigned_abs() as u32);
+        Ok(Self {
+            increase: difference >= 0,
+            factor,
+            narrow_factor: factor.to_i128(),
+            limit: 10_i128.pow(precision as u32),
+        })
+    }
+
+    pub fn narrow(&self, value: i128) -> Option<i128> {
+        let rounded = if self.increase {
+            value.checked_mul(self.narrow_factor?)?
+        } else if let Some(divisor) = self.narrow_factor {
+            let quotient = value / divisor;
+            let remainder = value % divisor;
+            quotient
+                + if remainder.abs() >= divisor / 2 {
+                    value.signum()
+                } else {
+                    0
+                }
+        } else {
+            // A divisor of at least 10^39 rounds every i128 value to zero.
+            0
+        };
+        self.check_precision(rounded)
+    }
+
+    pub fn wide(&self, value: i256) -> Option<i128> {
+        let rounded = if self.increase {
+            value.checked_mul(self.factor)?
+        } else {
+            let quotient = value / self.factor;
+            let remainder = value % self.factor;
+            let negative = value < i256::ZERO;
+            let magnitude = if negative { -remainder } else { remainder };
+            if magnitude >= self.factor / i256::from_i128(2) {
+                if negative {
+                    quotient - i256::ONE
+                } else {
+                    quotient + i256::ONE
+                }
+            } else {
+                quotient
+            }
+        };
+        self.check_precision(rounded.to_i128()?)
+    }
+
+    fn check_precision(&self, value: i128) -> Option<i128> {
+        (value > -self.limit && value < self.limit).then_some(value)
+    }
+}
+
 /// `BigDecimal.setScale(scale, HALF_UP)` + `DecimalData.fromBigDecimal`'s precision check: rescale an
 /// (unscaled, scale) big value to `target_scale`, rounding half away from zero, and return None (SQL
 /// NULL) when the result needs more than `precision` digits.
@@ -37,4 +114,90 @@ pub fn rescale_half_up(
         return None;
     }
     i128::try_from(&rescaled).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use num_bigint::BigInt;
+
+    #[test]
+    fn fixed_width_rescale_matches_big_integer_rounding_and_overflow() {
+        let values = [
+            i128::MIN,
+            -10_i128.pow(38) + 1,
+            -999995,
+            -15,
+            -5,
+            -1,
+            0,
+            1,
+            5,
+            15,
+            999995,
+            10_i128.pow(38) - 1,
+            i128::MAX,
+        ];
+        for precision in [1, 9, 18, 19, 28, 38] {
+            for scale in 0..=precision as i8 {
+                for source_scale in 0..=76 {
+                    let rescale = DecimalRescale::new(source_scale, precision, scale).unwrap();
+                    for value in values {
+                        let expected = rescale_half_up(
+                            BigInt::from(value),
+                            source_scale as i64,
+                            precision,
+                            scale,
+                        );
+                        assert_eq!(
+                            rescale.narrow(value),
+                            expected,
+                            "{value}, scale {source_scale} -> ({precision}, {scale})"
+                        );
+                        assert_eq!(rescale.wide(i256::from_i128(value)), expected);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn wide_rescale_keeps_values_whose_intermediate_exceeds_decimal128() {
+        let max = 10_i128.pow(38) - 1;
+        for left in [max, -max, max / 2] {
+            for right in [max, -max, 15] {
+                let wide = i256::from_i128(left) * i256::from_i128(right);
+                for source_scale in [0, 19, 38, 57, 76] {
+                    for scale in [0, 6, 19, 38] {
+                        let expected = rescale_half_up(
+                            BigInt::from(left) * BigInt::from(right),
+                            source_scale as i64,
+                            38,
+                            scale,
+                        );
+                        assert_eq!(
+                            DecimalRescale::new(source_scale, 38, scale)
+                                .unwrap()
+                                .wide(wide),
+                            expected
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rescale_rejects_non_flink_types() {
+        for (source, precision, scale) in [
+            (0, 0, 0),
+            (0, 39, 0),
+            (0, 3, 4),
+            (0, 3, -1),
+            (-1, 3, 0),
+            (77, 3, 0),
+        ] {
+            assert!(DecimalRescale::new(source, precision, scale).is_err());
+        }
+    }
 }

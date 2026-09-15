@@ -1,4 +1,8 @@
 use crate::*;
+use streamfusion_bridge::timestamp::TimestampColumn;
+
+#[cfg(test)]
+mod tests;
 
 /// Every aligned window a timestamp (millis) belongs to, as (start, end) millis pairs, appended to
 /// `windows` (cleared first) so the caller can reuse one buffer. Tumbling yields one window; hopping
@@ -31,16 +35,6 @@ pub(crate) fn windows_for(
     }
 }
 
-/// Stateless windowing table function (Flink's `WindowTableFunctionOperator`): assigns each input
-/// row to its window(s) and emits the input columns — fanned out, one copy per window for
-/// hopping/cumulative — with `window_start`, `window_end`, and `window_time` (= `window_end - 1ms`)
-/// appended. The downstream window join/aggregate does the event-time buffering; this is a pure
-/// per-row map, so watermarks pass straight through (the wrapper operator forwards them).
-///
-/// Timestamps are nanosecond / no time zone — the unit `ArrowConversion` pins both `TIMESTAMP` and
-/// `TIMESTAMP_LTZ` to — while the window math runs in millis, identical to the window aggregate
-/// (shared [`windows_for`]). A trailing `$row_kind$` changelog tag stays the last output column, so
-/// the window columns land at the input-column count (the indices the join/aggregate expect).
 /// Replaces the time column with a constant clock value (epoch millis) for every row, rendered in the
 /// joiner's declared column type. Used by the proctime interval join to time each row by the
 /// operator's processing-time clock instead of a rowtime column. The incoming batch carries the
@@ -77,6 +71,9 @@ pub(crate) fn stamp_time_column(
         .expect("stamp interval time column")
 }
 
+/// Stateless window assignment: compute bounds in milliseconds, fan out the original payload, and
+/// append start/end/time (end - 1ms) in the caller's declared physical timestamp type. The changelog
+/// tag remains last. The downstream join or aggregate owns buffering and watermark-driven firing.
 pub(crate) fn assign_windows(
     input: &RecordBatch,
     time_col: usize,
@@ -84,7 +81,8 @@ pub(crate) fn assign_windows(
     slide_millis: i64,
     cumulative: bool,
     proctime_now_millis: Option<i64>,
-) -> RecordBatch {
+    window_type: &DataType,
+) -> Result<RecordBatch, DataFusionError> {
     let schema = input.schema();
     let row_kind_idx = schema
         .fields()
@@ -94,28 +92,25 @@ pub(crate) fn assign_windows(
 
     // Event-time assigns each row by its rowtime column; proctime assigns every row to the window(s)
     // covering the operator's processing-time clock (passed in), ignoring the time column.
-    let times = proctime_now_millis.is_none().then(|| {
-        input
-            .column(time_col)
-            .as_any()
-            .downcast_ref::<TimestampNanosecondArray>()
-            .expect("windowing TVF time column must be timestamp(ns)")
-    });
+    let times = proctime_now_millis
+        .is_none()
+        .then(|| TimestampColumn::try_new(input.column(time_col).as_ref())?.to_millis())
+        .transpose()?;
 
-    // One take index per output row (the input row it copies), plus that row's window bounds in nanos.
+    // One take index per output row, plus that row's window bounds in milliseconds.
     let mut take_indices: Vec<u32> = Vec::with_capacity(input.num_rows());
     let mut starts: Vec<i64> = Vec::new();
     let mut ends: Vec<i64> = Vec::new();
     let mut windows: Vec<(i64, i64)> = Vec::new();
     for row in 0..input.num_rows() {
-        if times.is_some_and(|values| values.is_null(row)) {
+        if times.as_ref().is_some_and(|values| values.is_null(row)) {
             // AlignedWindowTableFunctionOperator drops null rowtime records and increments
             // numNullRowTimeRecordsDropped on the JVM side.
             continue;
         }
         let time_millis = match proctime_now_millis {
             Some(now) => now,
-            None => times.unwrap().value(row) / 1_000_000,
+            None => times.as_ref().unwrap().value(row),
         };
         windows_for(
             time_millis,
@@ -126,31 +121,51 @@ pub(crate) fn assign_windows(
         );
         for &(start, end) in &windows {
             take_indices.push(row as u32);
-            starts.push(start * 1_000_000);
-            ends.push(end * 1_000_000);
+            starts.push(start);
+            ends.push(end);
         }
     }
     let indices = UInt32Array::from(take_indices);
-    let timestamp = DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None);
 
     let mut fields: Vec<Field> = Vec::with_capacity(data_end + 4);
     let mut columns: Vec<ArrayRef> = Vec::with_capacity(data_end + 4);
     for i in 0..data_end {
         fields.push(schema.field(i).as_ref().clone());
-        columns.push(take(input.column(i), &indices, None).expect("failed to fan out column"));
+        columns.push(take(input.column(i), &indices, None)?);
     }
-    let window_time: Vec<i64> = ends.iter().map(|end| end - 1_000_000).collect();
-    for name in ["window_start", "window_end", "window_time"] {
-        fields.push(Field::new(name, timestamp.clone(), false));
+    let window_time = ends.iter().map(|end| end.wrapping_sub(1)).collect();
+    for (name, values) in [
+        ("window_start", starts),
+        ("window_end", ends),
+        ("window_time", window_time),
+    ] {
+        let millis = TimestampMillisecondArray::from(values);
+        // Seconds cannot represent window_time's end-minus-one-millisecond value.
+        if !matches!(window_type, DataType::Timestamp(unit, _) if *unit != arrow::datatypes::TimeUnit::Second)
+        {
+            return Err(DataFusionError::Plan(format!(
+                "Invalid window timestamp output type: {window_type}"
+            )));
+        }
+        let array = arrow::compute::cast_with_options(
+            &millis,
+            window_type,
+            &arrow::compute::CastOptions {
+                safe: false,
+                ..Default::default()
+            },
+        )?;
+        fields.push(Field::new(name, window_type.clone(), false));
+        columns.push(array);
     }
-    columns.push(Arc::new(TimestampNanosecondArray::from(starts)));
-    columns.push(Arc::new(TimestampNanosecondArray::from(ends)));
-    columns.push(Arc::new(TimestampNanosecondArray::from(window_time)));
     if let Some(idx) = row_kind_idx {
         fields.push(schema.field(idx).as_ref().clone());
-        columns.push(take(input.column(idx), &indices, None).expect("failed to fan out row kind"));
+        columns.push(take(input.column(idx), &indices, None)?);
     }
-    RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).expect("failed to build TVF batch")
+    Ok(RecordBatch::try_new(
+        Arc::new(Schema::new(fields)),
+        columns,
+    )?)
 }
 
 /// The positions of a batch's `key0..key{n-1}` columns — the columns the persistent store's
@@ -1311,7 +1326,7 @@ pub extern "system" fn Java_tech_streamfusion_Native_assignWindows<'local>(
     proctime: jboolean,
     proctime_now_millis: jlong,
 ) {
-    crate::bridge::jni_guard(env, move |_env| {
+    crate::bridge::jni_guard(env, move |env| {
         let batch = import_record_batch(in_array_address, in_schema_address);
         let result = assign_windows(
             &batch,
@@ -1320,8 +1335,14 @@ pub extern "system" fn Java_tech_streamfusion_Native_assignWindows<'local>(
             slide_millis,
             cumulative != 0,
             (proctime != 0).then_some(proctime_now_millis),
+            &DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None),
         );
-        export_record_batch(result, out_array_address, out_schema_address);
+        match result {
+            Ok(result) => export_record_batch(result, out_array_address, out_schema_address),
+            Err(error) => {
+                let _ = env.throw_new("tech/streamfusion/NativeException", error.to_string());
+            }
+        }
     })
 }
 

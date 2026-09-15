@@ -21,48 +21,26 @@ package tech.streamfusion.arrow.vectors;
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.table.data.TimestampData;
 import org.apache.flink.table.data.columnar.vector.TimestampColumnVector;
-import org.apache.flink.util.Preconditions;
-
-import org.apache.arrow.vector.TimeStampVector;
 import org.apache.arrow.vector.ValueVector;
-import org.apache.arrow.vector.types.TimeUnit;
-import org.apache.arrow.vector.types.pojo.ArrowType;
+import tech.streamfusion.arrow.TimestampAccessor;
 
 /** Arrow column vector for Timestamp. */
 @Internal
 public final class ArrowTimestampColumnVector implements TimestampColumnVector {
 
-    /** Container which is used to store the sequence of timestamp values of a column to read. */
-    private final ValueVector valueVector;
+    private final TimestampAccessor timestamps;
 
     public ArrowTimestampColumnVector(ValueVector valueVector) {
-        this.valueVector = Preconditions.checkNotNull(valueVector);
-        Preconditions.checkState(valueVector instanceof TimeStampVector);
+        this.timestamps = new TimestampAccessor(valueVector);
     }
 
     @Override
     public TimestampData getTimestamp(int i, int precision) {
-        TimeStampVector timestamps = (TimeStampVector) valueVector;
-        long value = timestamps.get(i);
-        TimeUnit unit = ((ArrowType.Timestamp) timestamps.getField().getType()).getUnit();
-        switch (unit) {
-            case SECOND:
-                return TimestampData.fromEpochMillis(value * 1000);
-            case MILLISECOND:
-                return TimestampData.fromEpochMillis(value);
-            case MICROSECOND:
-                return TimestampData.fromEpochMillis(
-                        Math.floorDiv(value, 1000), (int) Math.floorMod(value, 1000) * 1000);
-            case NANOSECOND:
-                return TimestampData.fromEpochMillis(
-                        Math.floorDiv(value, 1_000_000), (int) Math.floorMod(value, 1_000_000));
-            default:
-                throw new IllegalStateException("Unsupported Arrow timestamp unit " + unit);
-        }
+        return timestamps.getTimestamp(i);
     }
 
     @Override
     public boolean isNullAt(int i) {
-        return valueVector.isNull(i);
+        return timestamps.isNull(i);
     }
 }

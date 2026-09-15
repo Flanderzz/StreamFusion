@@ -112,6 +112,7 @@ nav:
   - Benchmarks:
       - benchmarks.md
       - Scalar functions: benchmarks/scalar-functions.md
+      - Decimal expressions: benchmarks/decimal-expressions.md
   - Optimizations:
       - optimizations/index.md
       - Foundational bets: optimizations/foundational-bets.md

@@ -1,4 +1,13 @@
 use crate::*;
+use datafusion::common::{exec_err, Result};
+use datafusion::logical_expr::{
+    ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
+};
+use datafusion::physical_expr::ScalarFunctionExpr;
+use streamfusion_bridge::timestamp::TimestampColumn;
+
+#[cfg(test)]
+mod tests;
 
 /// Event-time INNER interval join, Flink's
 /// `a JOIN b ON a.k = b.k AND a.rt BETWEEN b.rt + lower AND b.rt + upper`.
@@ -144,6 +153,16 @@ impl IntervalJoiner {
             .collect()
     }
 
+    fn bounds(&self, incoming_left: bool) -> IntervalBounds {
+        IntervalBounds {
+            left_time: self.left_time,
+            right_time: self.right_time,
+            lower: self.lower,
+            upper: self.upper,
+            incoming_left,
+        }
+    }
+
     /// A proctime join stamps every row's time column with the operator's clock before joining, so
     /// the interval is measured in processing time rather than read from a rowtime column.
     fn stamp(&self, batch: RecordBatch, is_left: bool, proctime_now: Option<i64>) -> RecordBatch {
@@ -187,7 +206,7 @@ impl IntervalJoiner {
         if self.store.is_some() {
             return self.push_store(batch, true);
         }
-        let interval = Some((self.left_time, self.right_time, self.lower, self.upper));
+        let interval = Some(self.bounds(true));
         let filter = residual_filter(
             &self.left_data_schema,
             &self.right_data_schema,
@@ -242,7 +261,7 @@ impl IntervalJoiner {
         if self.store.is_some() {
             return self.push_store(batch, false);
         }
-        let interval = Some((self.left_time, self.right_time, self.lower, self.upper));
+        let interval = Some(self.bounds(false));
         let filter = residual_filter(
             &self.left_data_schema,
             &self.right_data_schema,
@@ -352,7 +371,7 @@ impl IntervalJoiner {
         batch: RecordBatch,
         left: bool,
     ) -> Result<RecordBatch, DataFusionError> {
-        let interval = Some((self.left_time, self.right_time, self.lower, self.upper));
+        let interval = Some(self.bounds(left));
         let filter = residual_filter(
             &self.left_data_schema,
             &self.right_data_schema,
@@ -1016,9 +1035,11 @@ impl IntervalJoiner {
         joiner.right_buffered = read_ipc_if_present(&sections[1]);
         joiner.left_matched = deserialize_id_set(&sections[2]);
         joiner.right_matched = deserialize_id_set(&sections[3]);
-        // Resume the id counters past any live buffered row (evicted ids are gone, so reuse is safe).
-        joiner.left_next_id = max_rowid(&joiner.left_buffered) + 1;
-        joiner.right_next_id = max_rowid(&joiner.right_buffered) + 1;
+        // Only outer joins append row ids; an INNER buffer ends with an ordinary payload column.
+        if join_type != JoinKind::Inner {
+            joiner.left_next_id = max_rowid(&joiner.left_buffered) + 1;
+            joiner.right_next_id = max_rowid(&joiner.right_buffered) + 1;
+        }
         joiner
     }
 
@@ -1106,54 +1127,104 @@ fn tag_with_seqs(data: &RecordBatch, rows: &[&crate::state::BufferedIntervalRow]
         .expect("tag interval rows with sequences")
 }
 
-/// The interval-bounds conjunct `joined[left_rt] BETWEEN joined[right_rt] + lower AND + upper`, built
-/// against the joined intermediate schema. `right_type` is the right rowtime's type, which the bound
-/// offset must match (arrow rejects a timestamp plus a duration of a different unit).
-pub(crate) fn interval_bounds_expr(
-    intermediate: &SchemaRef,
-    left_rt: usize,
-    right_rt: usize,
-    right_type: &DataType,
+/// Flink's time-interval lookup is in milliseconds, independently of the payload's Arrow layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct IntervalBounds {
+    left_time: usize,
+    right_time: usize,
     lower: i64,
     upper: i64,
-) -> Arc<dyn PhysicalExpr> {
-    use arrow::datatypes::TimeUnit;
-    let offset = |millis: i64| -> ScalarValue {
-        match right_type {
-            DataType::Int64 => ScalarValue::Int64(Some(millis)),
-            DataType::Timestamp(TimeUnit::Second, _) => {
-                ScalarValue::DurationSecond(Some(millis / 1_000))
-            }
-            DataType::Timestamp(TimeUnit::Millisecond, _) => {
-                ScalarValue::DurationMillisecond(Some(millis))
-            }
-            DataType::Timestamp(TimeUnit::Microsecond, _) => {
-                ScalarValue::DurationMicrosecond(Some(millis * 1_000))
-            }
-            DataType::Timestamp(TimeUnit::Nanosecond, _) => {
-                ScalarValue::DurationNanosecond(Some(millis * 1_000_000))
-            }
-            other => panic!("unsupported interval-join rowtime type: {other:?}"),
-        }
-    };
-    let left_col: Arc<dyn PhysicalExpr> =
-        Arc::new(Column::new(intermediate.field(left_rt).name(), left_rt));
-    let right_col: Arc<dyn PhysicalExpr> =
-        Arc::new(Column::new(intermediate.field(right_rt).name(), right_rt));
-    let bound = |millis: i64| -> Arc<dyn PhysicalExpr> {
-        binary(
-            right_col.clone(),
-            Operator::Plus,
-            lit(offset(millis)),
-            intermediate,
+    incoming_left: bool,
+}
+
+impl IntervalBounds {
+    pub(crate) fn expression(
+        self,
+        intermediate: &SchemaRef,
+        left_arity: usize,
+    ) -> Arc<dyn PhysicalExpr> {
+        let columns: Vec<Arc<dyn PhysicalExpr>> = [self.left_time, left_arity + self.right_time]
+            .into_iter()
+            .map(|index| Arc::new(Column::new(intermediate.field(index).name(), index)) as _)
+            .collect();
+        let udf = ScalarUDF::new_from_impl(IntervalPredicate {
+            bounds: self,
+            signature: Signature::any(2, Volatility::Immutable),
+        });
+        Arc::new(
+            ScalarFunctionExpr::try_new(
+                Arc::new(udf),
+                columns,
+                intermediate,
+                Arc::new(Default::default()),
+            )
+            .expect("interval-join time columns"),
         )
-        .expect("failed to build interval bound")
-    };
-    let ge = binary(left_col.clone(), Operator::GtEq, bound(lower), intermediate)
-        .expect("failed to build lower bound");
-    let le = binary(left_col.clone(), Operator::LtEq, bound(upper), intermediate)
-        .expect("failed to build upper bound");
-    binary(ge, Operator::And, le, intermediate).expect("failed to build interval and")
+    }
+
+    fn contains(self, left: i64, right: i64) -> bool {
+        // TimeIntervalJoin probes the opposite cache from the arriving row. Preserve Java long
+        // arithmetic in that direction: moving terms across the inequality changes overflow.
+        if self.incoming_left {
+            right >= left.wrapping_sub(self.upper) && right <= left.wrapping_sub(self.lower)
+        } else {
+            left >= right.wrapping_add(self.lower) && left <= right.wrapping_add(self.upper)
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct IntervalPredicate {
+    bounds: IntervalBounds,
+    signature: Signature,
+}
+
+impl ScalarUDFImpl for IntervalPredicate {
+    fn name(&self) -> &str {
+        "flink_interval_bounds"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, types: &[DataType]) -> Result<DataType> {
+        if types.len() == 2
+            && types
+                .iter()
+                .all(|t| matches!(t, DataType::Int64 | DataType::Timestamp(_, _)))
+        {
+            Ok(DataType::Boolean)
+        } else {
+            exec_err!("Interval bounds require two timestamp or millisecond columns")
+        }
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
+        datafusion::functions::utils::make_scalar_function(
+            |arrays: &[ArrayRef]| {
+                let [left, right] = arrays else {
+                    return exec_err!("Interval bounds require two arguments");
+                };
+                let millis = |array: &ArrayRef| -> Result<Int64Array> {
+                    if let Some(values) = array.as_any().downcast_ref::<Int64Array>() {
+                        Ok(values.clone())
+                    } else {
+                        Ok(TimestampColumn::try_new(array.as_ref())?.to_millis()?)
+                    }
+                };
+                let left = millis(left)?;
+                let right = millis(right)?;
+                let matches: BooleanArray = left
+                    .iter()
+                    .zip(right.iter())
+                    .map(|(left, right)| Some(self.bounds.contains(left?, right?)))
+                    .collect();
+                Ok(Arc::new(matches) as ArrayRef)
+            },
+            vec![],
+        )(&args.args)
+    }
 }
 
 state_bytes_getter!(

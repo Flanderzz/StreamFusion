@@ -227,28 +227,20 @@ pub(crate) fn hash_join_right_anti(
 /// None when neither is present. The intermediate schema is the joined schema (columns `c0..`), so a
 /// predicate compiled against that schema and the interval bounds (referencing the two rowtime
 /// columns by their joined index) share one filter; `column_indices` maps each joined column back to
-/// its side. The interval bounds are `left.rt >= right.rt + lower AND left.rt <= right.rt + upper`,
-/// expressed over the rowtime columns directly so the comparison works on the timestamp type.
+/// its side. Interval bounds read milliseconds through the shared timestamp contract while the
+/// payload retains its physical layout and sub-millisecond remainder.
 pub(crate) fn residual_filter(
     left_schema: &SchemaRef,
     right_schema: &SchemaRef,
-    interval: Option<(usize, usize, i64, i64)>,
+    interval: Option<IntervalBounds>,
     predicate: Option<&mut JoinPredicate>,
 ) -> Option<JoinFilter> {
     let left_n = left_schema.fields().len();
     let right_n = right_schema.fields().len();
     let intermediate = joined_schema(left_schema, right_schema);
     let mut conjuncts: Vec<Arc<dyn PhysicalExpr>> = Vec::new();
-    if let Some((left_rt, right_rt, lower, upper)) = interval {
-        let right_type = right_schema.field(right_rt).data_type();
-        conjuncts.push(interval_bounds_expr(
-            &intermediate,
-            left_rt,
-            left_n + right_rt,
-            right_type,
-            lower,
-            upper,
-        ));
+    if let Some(bounds) = interval {
+        conjuncts.push(bounds.expression(&intermediate, left_n));
     }
     if let Some(predicate) = predicate {
         conjuncts.push(predicate.compiled(&intermediate));

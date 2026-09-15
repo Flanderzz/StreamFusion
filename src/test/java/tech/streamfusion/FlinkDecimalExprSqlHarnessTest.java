@@ -13,9 +13,8 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Decimal arithmetic in a Calc — Nexmark q1's {@code 0.908 * price}. All of it runs natively and
- * byte-exactly. Add/subtract/multiply: the operands reach the native side as Decimal128 (columns
- * already are; literals emit as exact Decimal128), Arrow's Decimal128 arithmetic matches Flink's, and
- * the wrapping cast to the declared DECIMAL rounds HALF_UP — the same rounding Flink uses.
+ * byte-exactly. Add/subtract/multiply use fused kernels with wide intermediates, rounding HALF_UP
+ * before checking the Flink-declared result precision and emitting Decimal128.
  * Division/modulo run through a fused native kernel reproducing Flink's two rounding steps: the
  * quotient to 38 significant digits (HALF_UP), then the rescale to the declared type.
  */

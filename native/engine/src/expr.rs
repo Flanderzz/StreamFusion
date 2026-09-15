@@ -173,11 +173,9 @@ pub(crate) fn build_expr(
                 None,
             )
         }
-        // Decimal `/` (20) and `%` (21): `arg` packs the declared result's precision*100 + scale; the
-        // two children are the operands (Decimal128 or integer). The fused kernel reproduces Flink's
-        // two rounding steps — the 38-significant-digit quotient, then the rescale to (p, s) — which
-        // a plain division + cast cannot (arrow derives a different quotient scale).
-        20 | 21 => {
+        // Decimal arithmetic carries Flink's declared result precision*100 + scale. The fused
+        // kernels rescale before checking overflow; division additionally rounds to 38 digits.
+        20 | 21 | 26..=28 => {
             let precision = (arg / 100) as u8;
             let scale = (arg % 100) as i8;
             let left = build_expr(
@@ -200,17 +198,31 @@ pub(crate) fn build_expr(
                 strings,
                 cursor,
             );
-            datafusion::logical_expr::ScalarUDF::new_from_impl(DecimalDivide::new(
-                precision,
-                scale,
-                kinds[node] == 21,
-            ))
-            .call(vec![left, right])
+            use crate::flink_functions::decimal::{DecimalBinary, DecimalOp};
+            use datafusion::logical_expr::ScalarUDF;
+            let function = match kinds[node] {
+                26 => {
+                    ScalarUDF::new_from_impl(DecimalBinary::new(DecimalOp::Add, precision, scale))
+                }
+                27 => ScalarUDF::new_from_impl(DecimalBinary::new(
+                    DecimalOp::Subtract,
+                    precision,
+                    scale,
+                )),
+                28 => ScalarUDF::new_from_impl(DecimalBinary::new(
+                    DecimalOp::Multiply,
+                    precision,
+                    scale,
+                )),
+                _ => ScalarUDF::new_from_impl(DecimalDivide::new(
+                    precision,
+                    scale,
+                    kinds[node] == 21,
+                )),
+            };
+            function.call(vec![left, right])
         }
-        // Decimal cast: `arg` packs precision*100 + scale; the one child is cast to DECIMAL(p, s). Arrow
-        // rescales Decimal128 with HALF_UP rounding (matching Flink), so from an exact source (decimal or
-        // integer) the result is byte-exact; from a float/double source it is approximate (flag-gated on
-        // the JVM side) since the binary value is already inexact.
+        // Exact decimal cast: HALF_UP to the declared scale, then NULL on precision overflow.
         14 => {
             let precision = (arg / 100) as u8;
             let scale = (arg % 100) as i8;
@@ -224,10 +236,10 @@ pub(crate) fn build_expr(
                 strings,
                 cursor,
             );
-            datafusion::prelude::Expr::Cast(datafusion::logical_expr::Cast::new(
-                Box::new(child),
-                DataType::Decimal128(precision, scale),
-            ))
+            datafusion::logical_expr::ScalarUDF::new_from_impl(
+                crate::flink_functions::decimal::DecimalCast::new(precision, scale),
+            )
+            .call(vec![child])
         }
         // Field access: extract a named field from a ROW/struct child. `arg` indexes the field name in
         // the string pool; the one child (built next) is the struct-typed expression. get_field returns
@@ -931,8 +943,8 @@ impl datafusion::logical_expr::ScalarUDFImpl for NarrowingCast {
 /// — the exact quotient rounded to 38 *significant digits* — then `fromBigDecimal(bd, p, s)` rescales
 /// to the declared `DECIMAL(p, s)` with HALF_UP and reports NULL when the result exceeds `p` digits.
 /// Both steps are reproduced here on big integers (the intermediate can exceed 38 digits, hence
-/// num-bigint). Modulo follows `BigDecimal.remainder`: subtract the truncated integral quotient times
-/// the divisor, exactly. A zero divisor fails the evaluation, as Flink's ArithmeticException fails
+/// num-bigint). Modulo follows `BigDecimal.remainder` with the same MathContext: the integral
+/// quotient must be representable with 38 significant digits. A zero divisor fails the evaluation, as Flink's ArithmeticException fails
 /// the job; a NULL operand yields NULL. Operands are Decimal128 columns or integers (scale 0).
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub(crate) struct DecimalDivide {
@@ -1053,17 +1065,30 @@ pub(crate) fn quotient_38_digits(a: i128, s1: i8, b: i128, s2: i8) -> (num_bigin
     }
 }
 
-/// `BigDecimal.remainder`: v1 − trunc(v1/v2)·v2, computed exactly at scale max(s1, s2). The sign
-/// follows the dividend, like Java's remainder.
-pub(crate) fn remainder_exact(a: i128, s1: i8, b: i128, s2: i8) -> (num_bigint::BigInt, i64) {
+/// `BigDecimal.remainder(..., MathContext(38))` for a non-zero divisor. The remainder is exact,
+/// but the integral quotient must fit the context after removing any trailing zeroes.
+pub(crate) fn remainder_38_digits(
+    a: i128,
+    s1: i8,
+    b: i128,
+    s2: i8,
+) -> datafusion::common::Result<(num_bigint::BigInt, i64)> {
     use num_bigint::BigInt;
+    use num_traits::ToPrimitive;
     let n = BigInt::from(a) * BigInt::from(10u8).pow(s2.max(0) as u32);
     let d = BigInt::from(b) * BigInt::from(10u8).pow(s1.max(0) as u32);
     let q = &n / &d; // BigInt division truncates toward zero, like divideToIntegralValue
+    if q.magnitude()
+        .to_u128()
+        .is_none_or(|value| value >= 10_u128.pow(38))
+        && q.magnitude().to_str_radix(10).trim_end_matches('0').len() > 38
+    {
+        return datafusion::common::exec_err!("Division impossible");
+    }
     let sm = s1.max(s2) as i64;
     let r = BigInt::from(a) * BigInt::from(10u8).pow((sm - s1 as i64) as u32)
         - q * BigInt::from(b) * BigInt::from(10u8).pow((sm - s2 as i64) as u32);
-    (r, sm)
+    Ok((r, sm))
 }
 
 impl datafusion::logical_expr::ScalarUDFImpl for DecimalDivide {
@@ -1102,7 +1127,7 @@ impl datafusion::logical_expr::ScalarUDFImpl for DecimalDivide {
                 ));
             }
             let (unscaled, scale) = if self.modulo {
-                remainder_exact(a, s1, b, s2)
+                remainder_38_digits(a, s1, b, s2)?
             } else {
                 quotient_38_digits(a, s1, b, s2)
             };

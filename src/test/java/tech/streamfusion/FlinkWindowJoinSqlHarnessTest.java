@@ -36,6 +36,39 @@ class FlinkWindowJoinSqlHarnessTest {
   }
 
   @Test
+  void windowJoinPreservesTheWindowBeforeTheEpoch() throws Exception {
+    NativeParity.assertParity(FlinkWindowJoinSqlHarnessTest::negativeFractionEnvironment, JOIN);
+  }
+
+  private static TableEnvironment negativeFractionEnvironment() {
+    StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+    env.setParallelism(1);
+    StreamTableEnvironment tables = StreamTableEnvironment.create(env);
+    tables.getConfig().setLocalTimeZone(ZoneId.of("UTC"));
+    Schema schema =
+        Schema.newBuilder()
+            .column("k", DataTypes.BIGINT())
+            .column("v", DataTypes.BIGINT())
+            .column("rt", DataTypes.TIMESTAMP_LTZ(3))
+            .watermark("rt", "SOURCE_WATERMARK()")
+            .build();
+    for (String side : new String[] {"A", "B"}) {
+      java.time.Instant time =
+          java.time.Instant.ofEpochSecond(-1, side.equals("A") ? 999999999 : 999000000);
+      DataStream<Row> input =
+          env.fromData(
+                  Types.ROW_NAMED(
+                      new String[] {"k", "v", "rt"}, Types.LONG, Types.LONG, Types.INSTANT),
+                  Row.of(1L, side.equals("A") ? 10L : 100L, time))
+              .assignTimestampsAndWatermarks(
+                  WatermarkStrategy.<Row>forBoundedOutOfOrderness(Duration.ofMinutes(1))
+                      .withTimestampAssigner((row, ignored) -> -1L));
+      tables.createTemporaryView(side, input, schema);
+    }
+    return tables;
+  }
+
+  @Test
   void booleanKeyWindowJoinMatchesHost() throws Exception {
     // Join on a boolean key (plus the window bounds) — exercises the wider equi-key set
     // (boolean/date/timestamp/decimal now admitted); the native key path is type-general.
@@ -73,17 +106,20 @@ class FlinkWindowJoinSqlHarnessTest {
 
   @Test
   void leftWindowJoinMatchesHost() throws Exception {
-    NativeParity.assertParity(FlinkWindowJoinSqlHarnessTest::dataStreamEnvironment, outerJoin("LEFT"));
+    NativeParity.assertParity(
+        FlinkWindowJoinSqlHarnessTest::dataStreamEnvironment, outerJoin("LEFT"));
   }
 
   @Test
   void rightWindowJoinMatchesHost() throws Exception {
-    NativeParity.assertParity(FlinkWindowJoinSqlHarnessTest::dataStreamEnvironment, outerJoin("RIGHT"));
+    NativeParity.assertParity(
+        FlinkWindowJoinSqlHarnessTest::dataStreamEnvironment, outerJoin("RIGHT"));
   }
 
   @Test
   void fullWindowJoinMatchesHost() throws Exception {
-    NativeParity.assertParity(FlinkWindowJoinSqlHarnessTest::dataStreamEnvironment, outerJoin("FULL"));
+    NativeParity.assertParity(
+        FlinkWindowJoinSqlHarnessTest::dataStreamEnvironment, outerJoin("FULL"));
   }
 
   // A window join over two TUMBLE inputs; an outer join is append-only (the unmatched row is
@@ -211,8 +247,8 @@ class FlinkWindowJoinSqlHarnessTest {
     tEnv.executeSql(
         "CREATE TABLE "
             + name
-            + " (k BIGINT, v BIGINT, rt TIMESTAMP_LTZ(3), WATERMARK FOR rt AS rt - INTERVAL '5' SECOND) "
-            + "WITH ('connector' = 'filesystem', 'path' = '"
+            + " (k BIGINT, v BIGINT, rt TIMESTAMP_LTZ(3), WATERMARK FOR rt AS rt - INTERVAL '5'"
+            + " SECOND) WITH ('connector' = 'filesystem', 'path' = '"
             + directory.toUri()
             + "', 'format' = 'parquet')");
   }
