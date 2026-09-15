@@ -33,11 +33,10 @@ import org.apache.paimon.table.source.DataSplit;
 import org.apache.paimon.table.source.ReadBuilder;
 import org.apache.paimon.table.source.TableRead;
 import tech.streamfusion.arrow.ArrowConversion;
-import tech.streamfusion.operator.ArrowBatch;
 import tech.streamfusion.operator.NativeAllocator;
 import tech.streamfusion.operator.NativeSourceRecord;
-import tech.streamfusion.operator.NativeSourceWatermarks;
 import tech.streamfusion.operator.RowDataArrowConverter;
+import tech.streamfusion.operator.WatermarkDelay;
 
 /** Native and Java Paimon split reads under one logical-row checkpoint. */
 public final class NativePaimonSplitReader
@@ -49,6 +48,7 @@ public final class NativePaimonSplitReader
   private final boolean primaryKey;
   private final int batchRows;
   private final int rowtimeIndex;
+  private final WatermarkDelay watermarkDelay;
   private final Queue<FileStoreSourceSplit> splits = new ArrayDeque<>();
   private final RowDataSerializer copy;
   private FileStoreSourceSplit current;
@@ -79,12 +79,23 @@ public final class NativePaimonSplitReader
 
   public NativePaimonSplitReader(
       FileStoreTable table, ReadBuilder read, TableRead stock, int batchRows, int rowtimeIndex) {
+    this(table, read, stock, batchRows, rowtimeIndex, WatermarkDelay.millis(0));
+  }
+
+  public NativePaimonSplitReader(
+      FileStoreTable table,
+      ReadBuilder read,
+      TableRead stock,
+      int batchRows,
+      int rowtimeIndex,
+      WatermarkDelay watermarkDelay) {
     this.table = table;
     this.stock = stock;
     this.outputType = LogicalTypeConversion.toLogicalType(read.readType());
     this.primaryKey = !table.primaryKeys().isEmpty();
     this.batchRows = batchRows;
     this.rowtimeIndex = rowtimeIndex;
+    this.watermarkDelay = watermarkDelay;
     this.copy = new RowDataSerializer(outputType);
   }
 
@@ -161,13 +172,9 @@ public final class NativePaimonSplitReader
         skip = 0;
       }
       position += root.getRowCount();
-      long timestamp =
-          rowtimeIndex < 0
-              ? Long.MIN_VALUE
-              : NativeSourceWatermarks.maxRowtimeMillis(root, rowtimeIndex);
       return new Records(
           current.splitId(),
-          new NativeSourceRecord(new ArrowBatch(root), position, timestamp),
+          NativeSourceRecord.fromRoot(root, position, rowtimeIndex, watermarkDelay),
           false);
     }
   }

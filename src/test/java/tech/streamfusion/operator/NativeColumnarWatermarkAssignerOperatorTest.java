@@ -1,7 +1,9 @@
 package tech.streamfusion.operator;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import org.apache.arrow.memory.BufferAllocator;
@@ -21,8 +23,8 @@ import org.junit.jupiter.api.Test;
 
 /**
  * The columnar watermark assigner forwards batches untouched and emits the same watermark sequence
- * the host's {@code WatermarkAssignerOperator} (bounded out-of-orderness) would: candidate =
- * {@code max(rowtime) - delay}, floored at 0, emitted eagerly on a large jump and otherwise on the
+ * the host's {@code WatermarkAssignerOperator} (bounded out-of-orderness) would: candidate = {@code
+ * max(rowtime - interval)}, floored at 0, emitted eagerly on a large jump and otherwise on the
  * periodic processing-time timer, with MAX forwarded at end of input.
  */
 class NativeColumnarWatermarkAssignerOperatorTest {
@@ -117,6 +119,75 @@ class NativeColumnarWatermarkAssignerOperatorTest {
       assertEquals(List.of(5000L), watermarks(harness));
       closeForwarded(harness);
     }
+  }
+
+  @Test
+  void monotonicMonthEndBatchUsesEveryCandidateAndKeepsTheMaximumAcrossBatches() throws Exception {
+    var operator = new NativeColumnarWatermarkAssignerOperator(1, WatermarkDelay.months(1));
+    try (BufferAllocator allocator = new RootAllocator();
+        var harness =
+            new OneInputStreamOperatorTestHarness<>(operator, new ArrowBatchSerializer())) {
+      harness.setup(new ArrowBatchSerializer());
+      harness.open();
+      harness.processElement(
+          new StreamRecord<>(
+              batch(
+                  allocator,
+                  event(1, millis("2024-03-30T23:00:00Z")),
+                  event(2, millis("2024-03-31T00:00:00Z")))));
+      assertEquals(List.of(2), forwardedRowCounts(harness));
+      assertEquals(List.of(millis("2024-02-29T23:00:00Z")), watermarks(harness));
+
+      harness.processElement(
+          new StreamRecord<>(batch(allocator, event(3, millis("2024-03-31T01:00:00Z")))));
+      harness.setProcessingTime(1000);
+      assertEquals(List.of(millis("2024-02-29T23:00:00Z")), watermarks(harness));
+      closeForwarded(harness);
+    }
+  }
+
+  @Test
+  void calendarDelaySlicesBeforeTheRowMadeLateByMonthEndClamping() throws Exception {
+    var operator = new NativeColumnarWatermarkAssignerOperator(1, WatermarkDelay.months(1));
+    try (BufferAllocator allocator = new RootAllocator();
+        var harness =
+            new OneInputStreamOperatorTestHarness<>(operator, new ArrowBatchSerializer())) {
+      harness.setup(new ArrowBatchSerializer());
+      harness.open();
+      harness.processElement(
+          new StreamRecord<>(
+              batch(
+                  allocator,
+                  event(1, millis("2024-03-30T23:00:00Z")),
+                  event(2, millis("2024-03-31T00:00:00Z")),
+                  event(3, millis("2024-02-29T12:00:00Z")))));
+      assertEquals(List.of(1, 2), forwardedRowCounts(harness));
+      assertEquals(List.of(millis("2024-02-29T23:00:00Z")), watermarks(harness));
+      List<Object> output = new ArrayList<>(harness.getOutput());
+      assertEquals(new Watermark(millis("2024-02-29T23:00:00Z")), output.get(1));
+      closeForwarded(harness);
+    }
+  }
+
+  @Test
+  void nullRowtimeFailsLikeFlinkAndReleasesTheBatch() throws Exception {
+    var operator = new NativeColumnarWatermarkAssignerOperator(1, WatermarkDelay.months(1));
+    try (BufferAllocator allocator = new RootAllocator();
+        var harness =
+            new OneInputStreamOperatorTestHarness<>(operator, new ArrowBatchSerializer())) {
+      harness.setup(new ArrowBatchSerializer());
+      harness.open();
+      assertThrows(
+          RuntimeException.class,
+          () ->
+              harness.processElement(
+                  new StreamRecord<>(batch(allocator, GenericRowData.of(1L, null)))));
+      assertEquals(0, allocator.getAllocatedMemory());
+    }
+  }
+
+  private static long millis(String timestamp) {
+    return Instant.parse(timestamp).toEpochMilli();
   }
 
   private static RowData event(long value, long eventTimeMillis) {

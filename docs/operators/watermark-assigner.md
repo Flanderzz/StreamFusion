@@ -1,15 +1,34 @@
 # Watermark assigner
 
-**Status:** native whenever it can help.
+**Status:** partial, for rowtime minus a constant day-time or year-month interval.
 
-The watermark assigner has no admission conditions of its own beyond one placement rule: it is
-substituted only when its input is **already** a columnar producer.
+Native admission accepts `WATERMARK FOR rt AS rt` and `rt - INTERVAL constant` when the constant
+is a non-negative **day-time** or **year-month** interval. DAY, HOUR, MINUTE, SECOND and composite
+forms such as DAY TO SECOND carry milliseconds; YEAR, MONTH and YEAR TO MONTH carry calendar
+months. Zero delay is supported.
 
-If the input is still row-wise, the assigner is left on the host on purpose — substituting it there
-would just insert a transpose immediately followed by another transpose back, a pure round-trip
-with no work done natively in between. That's a no-op, not a real fallback: nothing about the
-watermark logic itself is unsupported, and the moment an upstream operator in the same query starts
-producing Arrow batches, the assigner joins the native island with it.
+Calendar subtraction uses Flink's `DateTimeUtils.addMonths`, including month-end clamping and
+leap years. Each Arrow row's candidate is calculated **before** taking the running maximum:
+`MAX(rt - interval)`. For example, March 30 at 23:00 and March 31 at 00:00 both map to the last
+day of February when subtracting one month, but the first candidate is later. Taking the maximum
+rowtime first would lose that candidate. This also preserves Flink's signed integer arithmetic
+for fixed delays at the range limits. Rowtime columns keep their existing representation.
+
+The independent assigner starts at watermark zero and slices out-of-order batches when an eager
+watermark must precede a later row, matching Flink's late-row behavior. A NULL rowtime fails the
+job like Flink's assigner. Non-constant or negative delays, other watermark expressions, and
+expressions referring to a different column fall back.
+
+The assigner can follow a columnar producer or a rowwise source leaf. The transition pass inserts
+the source-edge transpose when needed; the whole query still has to satisfy the
+[all-or-nothing island rule](index.md#the-all-or-nothing-island).
+
+Watermarks pushed into a source use the same interval parsing and candidate evaluation. Source
+generators start at `Long.MIN_VALUE` and ignore NULL candidates, matching Flink's pushed generator.
+The maximum candidate is separate from the batch's event timestamp and remains available after
+downstream consumers release its Arrow buffers. Their additional
+admission rules are documented for [Kafka](../connectors/kafka.md#source-admission-and-fallbacks)
+and [Paimon](../connectors/paimon.md).
 
 ## Watermark expressions
 

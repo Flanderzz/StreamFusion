@@ -14,6 +14,7 @@ import org.apache.paimon.flink.utils.TableScanUtils;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.source.ReadBuilder;
 import tech.streamfusion.operator.ArrowBatch;
+import tech.streamfusion.operator.WatermarkDelay;
 
 /** Paimon's streaming enumerator and state formats with an Arrow-emitting task-side reader. */
 public final class NativePaimonSource
@@ -24,11 +25,11 @@ public final class NativePaimonSource
   private final ContinuousFileStoreSource delegate;
   private final int batchRows;
   private final int rowtimeIndex;
-  private final long watermarkDelayMillis;
+  private final WatermarkDelay watermarkDelay;
 
   public NativePaimonSource(
       FileStoreTable table, int[] projection, int batchRows, int rowtimeIndex) {
-    this(table, projection, batchRows, rowtimeIndex, 0);
+    this(table, projection, batchRows, rowtimeIndex, WatermarkDelay.millis(0));
   }
 
   public NativePaimonSource(
@@ -36,7 +37,7 @@ public final class NativePaimonSource
       int[] projection,
       int batchRows,
       int rowtimeIndex,
-      long watermarkDelayMillis) {
+      WatermarkDelay watermarkDelay) {
     if (batchRows <= 0) {
       throw new IllegalArgumentException("Paimon source batch size must be positive");
     }
@@ -46,7 +47,7 @@ public final class NativePaimonSource
     this.delegate = new ContinuousFileStoreSource(read, table.options(), null);
     this.batchRows = batchRows;
     this.rowtimeIndex = rowtimeIndex;
-    this.watermarkDelayMillis = watermarkDelayMillis;
+    this.watermarkDelay = watermarkDelay;
   }
 
   public static String unsupportedTypeReason(FileStoreTable table) {
@@ -61,7 +62,7 @@ public final class NativePaimonSource
   @Override
   public SourceReader<ArrowBatch, FileStoreSourceSplit> createReader(SourceReaderContext context) {
     return new NativePaimonSourceReader(
-        table, read, context, batchRows, rowtimeIndex, watermarkDelayMillis);
+        table, read, context, batchRows, rowtimeIndex, watermarkDelay);
   }
 
   @Override

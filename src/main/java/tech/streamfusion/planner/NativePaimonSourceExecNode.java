@@ -57,11 +57,11 @@ final class NativePaimonSourceExecNode extends ExecNodeBase<ArrowBatch>
             projection,
             4096,
             watermark == null ? -1 : watermark.rowtimeIndex,
-            watermark == null ? 0 : watermark.delayMillis);
+            watermark == null ? null : watermark.delay);
     WatermarkStrategy<ArrowBatch> strategy =
         watermark == null
             ? WatermarkStrategy.noWatermarks()
-            : NativeSourceWatermarks.strategy(watermark.delayMillis, watermark.idleTimeoutMillis);
+            : NativeSourceWatermarks.strategy(watermark.idleTimeoutMillis);
     var stream =
         env.fromSource(
             source, strategy, "native-paimon-source", ArrowBatchTypeInformation.INSTANCE);

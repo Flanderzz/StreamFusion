@@ -10,12 +10,10 @@ import tech.streamfusion.operator.ArrowBatch;
 /** Flushes a finite file's final watermark before Flink removes its periodic generator. */
 final class PaimonSplitWatermarks implements ReaderOutput<ArrowBatch> {
   private final ReaderOutput<ArrowBatch> delegate;
-  private final long delayMillis;
   private final Map<String, SplitOutput> splits = new HashMap<>();
 
-  PaimonSplitWatermarks(ReaderOutput<ArrowBatch> delegate, long delayMillis) {
+  PaimonSplitWatermarks(ReaderOutput<ArrowBatch> delegate) {
     this.delegate = delegate;
-    this.delayMillis = delayMillis;
   }
 
   @Override
@@ -28,7 +26,7 @@ final class PaimonSplitWatermarks implements ReaderOutput<ArrowBatch> {
   public void releaseOutputForSplit(String splitId) {
     SplitOutput output = splits.remove(splitId);
     if (output != null && output.maximum != Long.MIN_VALUE) {
-      output.emitWatermark(new Watermark(output.maximum - delayMillis));
+      output.emitWatermark(new Watermark(output.maximum));
     }
     delegate.releaseOutputForSplit(splitId);
   }
@@ -69,12 +67,13 @@ final class PaimonSplitWatermarks implements ReaderOutput<ArrowBatch> {
     @Override
     public void collect(ArrowBatch record) {
       delegate.collect(record);
+      maximum = Math.max(maximum, record.sourceWatermarkMillis());
     }
 
     @Override
     public void collect(ArrowBatch record, long timestamp) {
       delegate.collect(record, timestamp);
-      maximum = Math.max(maximum, timestamp);
+      maximum = Math.max(maximum, record.sourceWatermarkMillis());
     }
 
     @Override

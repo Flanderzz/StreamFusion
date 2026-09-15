@@ -54,9 +54,20 @@ public final class ArrowBatch {
   private int pendingConsumers = 1;
   private final LongConsumer encodeTiming;
   private final NativeScanMetrics nativeScanMetrics;
+  private final long sourceWatermarkMillis;
 
   public ArrowBatch(VectorSchemaRoot root) {
     this(root, -1, NO_HANDLE_OWNER, null, null, 0, 0, -1, null, null);
+  }
+
+  ArrowBatch(VectorSchemaRoot root, NativeSourceWatermarks.Summary watermarks) {
+    this(
+        root, -1, NO_HANDLE_OWNER, null, null, 0, 0, -1, null, null, watermarks.maxWatermarkMillis);
+  }
+
+  /** Source callback metadata; valid even after a chained consumer releases the Arrow root. */
+  public long sourceWatermarkMillis() {
+    return sourceWatermarkMillis;
   }
 
   public ArrowBatch(VectorSchemaRoot root, int keyGroup) {
@@ -110,11 +121,38 @@ public final class ArrowBatch {
       long parentSequence,
       int[] rowOrdinals,
       int[] parentKeyGroups) {
+    this(
+        root,
+        keyGroup,
+        handleOwner,
+        encodeTiming,
+        nativeScanMetrics,
+        parentEpochHigh,
+        parentEpochLow,
+        parentSequence,
+        rowOrdinals,
+        parentKeyGroups,
+        Long.MIN_VALUE);
+  }
+
+  private ArrowBatch(
+      VectorSchemaRoot root,
+      int keyGroup,
+      long handleOwner,
+      LongConsumer encodeTiming,
+      NativeScanMetrics nativeScanMetrics,
+      long parentEpochHigh,
+      long parentEpochLow,
+      long parentSequence,
+      int[] rowOrdinals,
+      int[] parentKeyGroups,
+      long sourceWatermarkMillis) {
     this.root = root;
     this.keyGroup = keyGroup;
     this.handleOwner = handleOwner;
     this.encodeTiming = encodeTiming;
     this.nativeScanMetrics = nativeScanMetrics;
+    this.sourceWatermarkMillis = sourceWatermarkMillis;
     this.parentEpochHigh = parentEpochHigh;
     this.parentEpochLow = parentEpochLow;
     this.parentSequence = parentSequence;

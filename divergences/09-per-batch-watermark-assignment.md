@@ -30,11 +30,33 @@ single assigner can't know — only fine-grained watermarks flowing through the
 shuffle reproduce it. That is why the assigner must slice rather than the window
 filter locally.
 
-A **monotonic-rowtime batch can have no within-batch late row** (a later row's
-window can't be closed by an earlier, smaller rowtime), so it takes a fast path:
-the whole batch is forwarded with a single watermark, no slicing. In-order data —
-every benchmark, the common case — therefore pays nothing, and the windowed
-benchmark is unchanged at 1.91×.
+A **monotonic-rowtime batch whose candidates do not exceed their rowtimes** can
+have no within-batch late row (a later row's window can't be closed by an earlier,
+smaller rowtime), so it takes a fast path:
+the whole batch is forwarded with a single watermark, avoiding slice allocation
+for the common in-order case.
+
+Calendar intervals retain their month count and use Flink's `DateTimeUtils.addMonths`
+directly while scanning Arrow timestamp values. The existing assigner and source
+scan run in Java; reusing Flink's integer calendar routine adds no RowData conversion
+or per-row JNI. We evaluate every candidate before reducing, even for monotonic
+rowtimes: March 30 at 23:00 minus one month is later than March 31 at 00:00 minus one
+month after both clamp to February's last day. Fixed-delay subtraction also stays
+inside the reduction to preserve Flink's long overflow behavior.
+
+Arroyo's `watermark_generator.rs` likewise evaluates its watermark expression on
+the Arrow batch, but reduces with a batch **minimum** before advancing its running
+maximum. We use a batch **maximum** and the eager slicing described here to match
+Flink's per-row candidate maximum. Flink's source generator starts at `Long.MIN_VALUE`
+and skips NULL candidates, whereas its standalone assigner starts at zero and rejects
+NULL rowtimes; those contracts remain distinct.
+
+Kafka and Paimon compute source candidates before handing off the Arrow root. Flink
+calls the source watermark generator after forwarding the batch downstream, so the
+root may already be closed. A source-local immutable candidate on the batch avoids
+reading released buffers and leaves the record's event timestamp unchanged. It is
+consumed at the source callback, not serialized as downstream row data. Paimon's final
+split flush uses that candidate too, before releasing Flink's per-split output.
 
 ## Residual: Flink's own non-determinism (two sources, neither ours)
 The drop depends on *when the watermark advances relative to a data row*, and two
@@ -67,7 +89,7 @@ rows, so neither source bites, at any parallelism (every parity test relies on
 this).
 
 ## Scope
-- The watermark *value* (`max(rowtime) - delay`, floored at 0, MAX at end of
+- The watermark *value* (`max(rowtime - interval)`, floored at 0, MAX at end of
   input) matches Flink exactly (`NativeColumnarWatermarkAssignerOperatorTest`).
 - Slicing reproduces the eager per-row emission; the aggregator's
   `window_end <= current_watermark` drop reproduces the late-data discard. Both

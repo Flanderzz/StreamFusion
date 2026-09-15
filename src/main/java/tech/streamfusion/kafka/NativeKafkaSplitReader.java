@@ -1,11 +1,5 @@
 package tech.streamfusion.kafka;
 
-import tech.streamfusion.format.NativeMessageDecoder;
-import tech.streamfusion.format.NativeMessageDecoderFactory;
-import tech.streamfusion.operator.ArrowBatch;
-import tech.streamfusion.operator.NativeAllocator;
-import tech.streamfusion.operator.NativeSourceRecord;
-import tech.streamfusion.operator.NativeSourceWatermarks;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
@@ -30,6 +24,11 @@ import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.clients.consumer.OffsetCommitCallback;
 import org.apache.kafka.common.TopicPartition;
+import tech.streamfusion.format.NativeMessageDecoder;
+import tech.streamfusion.format.NativeMessageDecoderFactory;
+import tech.streamfusion.operator.NativeAllocator;
+import tech.streamfusion.operator.NativeSourceRecord;
+import tech.streamfusion.operator.WatermarkDelay;
 
 /**
  * Kafka's stock partition reader with a split-local native decode boundary. Each poll is grouped by
@@ -47,6 +46,7 @@ final class NativeKafkaSplitReader
   private final BufferAllocator allocator = NativeAllocator.SHARED;
   private final boolean keyed;
   private final int rowtimeIndex;
+  private final WatermarkDelay watermarkDelay;
   private ArrowBuf decodeSlab;
 
   NativeKafkaSplitReader(
@@ -56,11 +56,13 @@ final class NativeKafkaSplitReader
       RowType outputType,
       NativeMessageDecoderFactory decoderFactory,
       boolean keyed,
-      int rowtimeIndex) {
+      int rowtimeIndex,
+      WatermarkDelay watermarkDelay) {
     this.delegate = new KafkaPartitionSplitReader(properties, context, metrics);
     this.outputType = outputType;
     this.keyed = keyed;
     this.rowtimeIndex = rowtimeIndex;
+    this.watermarkDelay = watermarkDelay;
     try {
       this.decoder = decoderFactory.create();
       this.decoder.open(allocator, outputType);
@@ -157,11 +159,7 @@ final class NativeKafkaSplitReader
           output.close();
           return new NativeSourceRecord(null, nextOffset, Long.MIN_VALUE);
         }
-        long maxRowtime =
-            rowtimeIndex < 0
-                ? Long.MIN_VALUE
-                : NativeSourceWatermarks.maxRowtimeMillis(output, rowtimeIndex);
-        return new NativeSourceRecord(new ArrowBatch(output), nextOffset, maxRowtime);
+        return NativeSourceRecord.fromRoot(output, nextOffset, rowtimeIndex, watermarkDelay);
       }
     }
   }
@@ -224,11 +222,7 @@ final class NativeKafkaSplitReader
       output.close();
       return new NativeSourceRecord(null, nextOffset, Long.MIN_VALUE);
     }
-    long maxRowtime =
-        rowtimeIndex < 0
-            ? Long.MIN_VALUE
-            : NativeSourceWatermarks.maxRowtimeMillis(output, rowtimeIndex);
-    return new NativeSourceRecord(new ArrowBatch(output), nextOffset, maxRowtime);
+    return NativeSourceRecord.fromRoot(output, nextOffset, rowtimeIndex, watermarkDelay);
   }
 
   private static void set(VarBinaryVector vector, int index, byte[] value) {

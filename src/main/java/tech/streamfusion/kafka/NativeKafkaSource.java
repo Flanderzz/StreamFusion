@@ -1,8 +1,5 @@
 package tech.streamfusion.kafka;
 
-import tech.streamfusion.format.NativeMessageDecoderFactory;
-import tech.streamfusion.operator.ArrowBatch;
-import tech.streamfusion.operator.NativeSourceRecord;
 import java.io.IOException;
 import java.util.Properties;
 import java.util.function.Supplier;
@@ -20,6 +17,10 @@ import org.apache.flink.connector.kafka.source.metrics.KafkaSourceReaderMetrics;
 import org.apache.flink.connector.kafka.source.split.KafkaPartitionSplit;
 import org.apache.flink.core.io.SimpleVersionedSerializer;
 import org.apache.flink.table.types.logical.RowType;
+import tech.streamfusion.format.NativeMessageDecoderFactory;
+import tech.streamfusion.operator.ArrowBatch;
+import tech.streamfusion.operator.NativeSourceRecord;
+import tech.streamfusion.operator.WatermarkDelay;
 
 /**
  * Split-aware native-decoding Kafka source. Flink's Kafka source still owns enumeration,
@@ -37,6 +38,7 @@ public final class NativeKafkaSource
   private final NativeMessageDecoderFactory decoderFactory;
   private final boolean keyed;
   private final int rowtimeIndex;
+  private final WatermarkDelay watermarkDelay;
 
   public NativeKafkaSource(
       KafkaSource<byte[]> delegate,
@@ -44,13 +46,15 @@ public final class NativeKafkaSource
       RowType outputType,
       NativeMessageDecoderFactory decoderFactory,
       boolean keyed,
-      int rowtimeIndex) {
+      int rowtimeIndex,
+      WatermarkDelay watermarkDelay) {
     this.delegate = delegate;
     this.properties = properties;
     this.outputType = outputType;
     this.decoderFactory = decoderFactory;
     this.keyed = keyed;
     this.rowtimeIndex = rowtimeIndex;
+    this.watermarkDelay = watermarkDelay;
   }
 
   @Override
@@ -70,7 +74,8 @@ public final class NativeKafkaSource
                 outputType,
                 decoderFactory,
                 keyed,
-                rowtimeIndex);
+                rowtimeIndex,
+                watermarkDelay);
     return new NativeKafkaSourceReader(
         reader, new NativeKafkaRecordEmitter(), configuration(), context, metrics);
   }

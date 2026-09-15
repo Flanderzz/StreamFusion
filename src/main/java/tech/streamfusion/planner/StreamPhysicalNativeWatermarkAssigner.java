@@ -9,6 +9,7 @@ import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNode;
 import org.apache.flink.table.planner.plan.nodes.exec.InputProperty;
 import org.apache.flink.table.planner.utils.ShortcutUtils;
+import tech.streamfusion.operator.WatermarkDelay;
 
 /**
  * Physical node standing in for a {@link
@@ -23,7 +24,7 @@ public class StreamPhysicalNativeWatermarkAssigner extends StreamPhysicalNativeS
     implements ColumnarInput, ColumnarOutput {
 
   private final int rowtimeColumn;
-  private final long delayMillis;
+  private final WatermarkDelay delay;
 
   public StreamPhysicalNativeWatermarkAssigner(
       RelOptCluster cluster,
@@ -31,10 +32,10 @@ public class StreamPhysicalNativeWatermarkAssigner extends StreamPhysicalNativeS
       RelNode input,
       RelDataType outputRowType,
       int rowtimeColumn,
-      long delayMillis) {
+      WatermarkDelay delay) {
     super(cluster, traitSet, input, outputRowType);
     this.rowtimeColumn = rowtimeColumn;
-    this.delayMillis = delayMillis;
+    this.delay = delay;
   }
 
   @Override
@@ -45,7 +46,7 @@ public class StreamPhysicalNativeWatermarkAssigner extends StreamPhysicalNativeS
   @Override
   public RelNode copy(RelTraitSet traitSet, List<RelNode> inputs) {
     return new StreamPhysicalNativeWatermarkAssigner(
-        getCluster(), traitSet, inputs.get(0), outputRowType, rowtimeColumn, delayMillis);
+        getCluster(), traitSet, inputs.get(0), outputRowType, rowtimeColumn, delay);
   }
 
   @Override
@@ -56,7 +57,7 @@ public class StreamPhysicalNativeWatermarkAssigner extends StreamPhysicalNativeS
         FlinkTypeFactory$.MODULE$.toLogicalRowType(getRowType()),
         getRelDetailedDescription(),
         rowtimeColumn,
-        delayMillis);
+        delay);
   }
 }
 

@@ -1,6 +1,7 @@
 package tech.streamfusion.operator;
 
 import java.util.function.LongConsumer;
+import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.flink.api.connector.source.SourceOutput;
 
 /**
@@ -20,6 +21,14 @@ public final class NativeSourceRecord {
     this.maxRowtimeMillis = maxRowtimeMillis;
   }
 
+  public static NativeSourceRecord fromRoot(
+      VectorSchemaRoot root, long nextOffset, int rowtimeIndex, WatermarkDelay delay) {
+    NativeSourceWatermarks.Summary watermarks =
+        NativeSourceWatermarks.summarize(root, rowtimeIndex, delay);
+    return new NativeSourceRecord(
+        new ArrowBatch(root, watermarks), nextOffset, watermarks.maxRowtimeMillis);
+  }
+
   public ArrowBatch batch() {
     return batch;
   }
@@ -31,8 +40,8 @@ public final class NativeSourceRecord {
 
   /**
    * Max of the batch's rowtime column in epoch millis, or {@code Long.MIN_VALUE} when the table has
-   * no watermark (or every rowtime in the batch is null). Emitted as the batch's record timestamp so
-   * the source operator's per-split watermark generator sees it.
+   * no watermark (or every rowtime in the batch is null). Emitted as the batch's record timestamp
+   * so downstream record timestamps retain event-time semantics.
    */
   public long maxRowtimeMillis() {
     return maxRowtimeMillis;
@@ -41,9 +50,8 @@ public final class NativeSourceRecord {
   /**
    * Collects the batch downstream, then advances the split's checkpoint offset. A batch-less record
    * (a fused decode dropped every document) still advances the offset. A watermarked table's batch
-   * is collected with its max rowtime as the record timestamp: the source operator's per-split
-   * watermark generator ({@link NativeSourceWatermarks}) folds it in, which is equivalent to
-   * feeding every row because the delay is constant and the generator keeps a max.
+   * is collected with its max rowtime as the record timestamp. The source operator's per-split
+   * generator separately folds the precomputed watermark candidate carried by the batch.
    */
   public void emit(SourceOutput<ArrowBatch> output, LongConsumer nextOffsetSetter) {
     if (batch != null) {

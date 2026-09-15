@@ -17,6 +17,7 @@ import org.apache.paimon.table.source.DataSplit;
 import org.apache.paimon.table.source.ReadBuilder;
 import tech.streamfusion.operator.ArrowBatch;
 import tech.streamfusion.operator.NativeSourceRecord;
+import tech.streamfusion.operator.WatermarkDelay;
 
 /** Mirrors released Paimon's split requests and consumer-progress events. */
 final class NativePaimonSourceReader
@@ -25,7 +26,6 @@ final class NativePaimonSourceReader
   private final IOManager io;
   private long lastSnapshot = Long.MIN_VALUE;
   private final boolean watermarked;
-  private final long watermarkDelayMillis;
   private PaimonSplitWatermarks watermarkOutput;
 
   NativePaimonSourceReader(
@@ -34,14 +34,14 @@ final class NativePaimonSourceReader
       SourceReaderContext context,
       int batchRows,
       int rowtimeIndex,
-      long watermarkDelayMillis) {
+      WatermarkDelay watermarkDelay) {
     this(
         table,
         read,
         context,
         batchRows,
         rowtimeIndex,
-        watermarkDelayMillis,
+        watermarkDelay,
         IOManager.create(
             ConfigurationUtils.splitPaths(context.getConfiguration().get(CoreOptions.TMP_DIRS))),
         new FileStoreSourceReaderMetrics(context.metricGroup()));
@@ -53,7 +53,7 @@ final class NativePaimonSourceReader
       SourceReaderContext context,
       int batchRows,
       int rowtimeIndex,
-      long watermarkDelayMillis,
+      WatermarkDelay watermarkDelay,
       IOManager io,
       FileStoreSourceReaderMetrics metrics) {
     super(
@@ -65,7 +65,8 @@ final class NativePaimonSourceReader
                         .withIOManager(io)
                         .withMetricRegistry(new FlinkMetricRegistry(context.metricGroup())),
                     batchRows,
-                    rowtimeIndex)
+                    rowtimeIndex,
+                    watermarkDelay)
                 .withMetrics(metrics),
         (record, output, state) -> {
           context
@@ -79,7 +80,6 @@ final class NativePaimonSourceReader
         context);
     this.io = io;
     this.watermarked = rowtimeIndex >= 0;
-    this.watermarkDelayMillis = watermarkDelayMillis;
   }
 
   @Override
@@ -88,7 +88,7 @@ final class NativePaimonSourceReader
       return super.pollNext(output);
     }
     if (watermarkOutput == null) {
-      watermarkOutput = new PaimonSplitWatermarks(output, watermarkDelayMillis);
+      watermarkOutput = new PaimonSplitWatermarks(output);
     }
     return super.pollNext(watermarkOutput);
   }
