@@ -30,5 +30,15 @@ boundaries and persisted row encodings still need coordinated migration before
 [#64](https://github.com/datafusion-contrib/StreamFusion/issues/64) can be closed
 or wide-range timestamp producers can be admitted.
 
+Interval joins also consume milliseconds through this contract. Their interval
+filter remains inside the DataFusion hash join, following Arroyo's buffered-batch
+join structure. Flink's `TimeIntervalJoin` determines bounds from the arriving
+row and probes the opposite cache in milliseconds, even when a TIMESTAMP(3)
+payload contains a sub-millisecond remainder. The native predicate mirrors those
+integer comparisons and Java long overflow in each arrival direction, without
+timestamp-plus-duration intermediates. The payload is not narrowed. Primitive
+layouts, both arrival orders, all four join types, and match flags across memory
+restore are tested; SQL probes cover both fractional interval endpoints.
+
 This is correctness and migration groundwork, not a performance claim. It adds no
 SQL functions or opt-in compatibility setting.

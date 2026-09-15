@@ -13,6 +13,8 @@ import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.apache.flink.types.Row;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 /**
  * Event-time INNER interval join
@@ -31,6 +33,50 @@ class FlinkIntervalJoinSqlHarnessTest {
   @Test
   void intervalJoinMatchesHost() throws Exception {
     NativeParity.assertParity(FlinkIntervalJoinSqlHarnessTest::dataStreamEnvironment, JOIN);
+  }
+
+  @ParameterizedTest
+  @ValueSource(ints = {0, 3})
+  void intervalBoundsUseMillisecondsAtFractionalEdges(int precision) throws Exception {
+    for (String kind : new String[] {"", "LEFT", "RIGHT", "FULL"}) {
+      NativeParity.assertParity(() -> fractionalEnvironment(precision), outerJoin(kind));
+    }
+  }
+
+  private static TableEnvironment fractionalEnvironment(int precision) {
+    StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+    env.setParallelism(1);
+    StreamTableEnvironment tables = StreamTableEnvironment.create(env);
+    Schema schema =
+        Schema.newBuilder()
+            .column("k", DataTypes.BIGINT())
+            .column("v", DataTypes.BIGINT())
+            .column("rt", DataTypes.TIMESTAMP(precision))
+            .watermark("rt", "SOURCE_WATERMARK()")
+            .build();
+    for (String side : new String[] {"A", "B"}) {
+      java.time.LocalDateTime time =
+          java.time.LocalDateTime.of(
+              1970, 1, 1, 0, 0, side.equals("A") ? 2 : 1, side.equals("A") ? 999999 : 1);
+      java.time.LocalDateTime reverse =
+          java.time.LocalDateTime.of(
+              1970, 1, 1, 0, 0, side.equals("A") ? 1 : 2, side.equals("A") ? 1 : 999999);
+      DataStream<Row> input =
+          env.fromData(
+                  Types.ROW_NAMED(
+                      new String[] {"k", "v", "rt"}, Types.LONG, Types.LONG, Types.LOCAL_DATE_TIME),
+                  Row.of(1L, side.equals("A") ? 10L : 100L, time),
+                  Row.of(2L, side.equals("A") ? 20L : 200L, reverse))
+              .assignTimestampsAndWatermarks(
+                  WatermarkStrategy.<Row>forBoundedOutOfOrderness(Duration.ofMinutes(1))
+                      .withTimestampAssigner(
+                          (row, ignored) ->
+                              ((java.time.LocalDateTime) row.getField(2))
+                                  .toInstant(java.time.ZoneOffset.UTC)
+                                  .toEpochMilli()));
+      tables.createTemporaryView(side, input, schema);
+    }
+    return tables;
   }
 
   @Test
@@ -254,8 +300,8 @@ class FlinkIntervalJoinSqlHarnessTest {
     tEnv.executeSql(
         "CREATE TABLE "
             + name
-            + " (k BIGINT, v BIGINT, rt TIMESTAMP_LTZ(3), WATERMARK FOR rt AS rt - INTERVAL '5' SECOND) "
-            + "WITH ('connector' = 'filesystem', 'path' = '"
+            + " (k BIGINT, v BIGINT, rt TIMESTAMP_LTZ(3), WATERMARK FOR rt AS rt - INTERVAL '5'"
+            + " SECOND) WITH ('connector' = 'filesystem', 'path' = '"
             + directory.toUri()
             + "', 'format' = 'parquet')");
   }
