@@ -39,6 +39,7 @@ mod exchange;
 mod expr;
 mod file_partition;
 mod flatten;
+mod flink_float;
 mod flink_functions;
 mod flink_key;
 mod group_agg;

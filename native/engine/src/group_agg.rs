@@ -236,6 +236,7 @@ impl DistinctSet {
     }
 
     pub(crate) fn add_scalar(&mut self, value: ScalarValue) -> bool {
+        let value = crate::flink_float::canonical_scalar(&value).unwrap_or(value);
         match self {
             DistinctSet::I64(..) => match value {
                 ScalarValue::Int64(Some(v)) => self.add_i64(v),
@@ -254,6 +255,8 @@ impl DistinctSet {
     }
 
     fn remove_scalar(&mut self, value: &ScalarValue) -> bool {
+        let canonical = crate::flink_float::canonical_scalar(value);
+        let value = canonical.as_ref().unwrap_or(value);
         match self {
             DistinctSet::I64(..) => match value {
                 ScalarValue::Int64(Some(v)) => self.remove_i64(*v),
@@ -294,6 +297,7 @@ impl DistinctSet {
 
     /// The scalar form of {@link add_i64_n}.
     fn add_scalar_n(&mut self, value: ScalarValue, n: i64) -> bool {
+        let value = crate::flink_float::canonical_scalar(&value).unwrap_or(value);
         match self {
             DistinctSet::I64(..) => match value {
                 ScalarValue::Int64(Some(v)) => self.add_i64_n(v, n),
@@ -326,6 +330,7 @@ impl DistinctSet {
     /// Restores one snapshot entry with its multiplicity (never journaled: a restored element is
     /// already persisted).
     fn insert_restored(&mut self, value: ScalarValue, count: i64) {
+        let value = crate::flink_float::canonical_scalar(&value).unwrap_or(value);
         match self {
             DistinctSet::I64(m, _) => match value {
                 ScalarValue::Int64(Some(v)) => {
@@ -345,6 +350,7 @@ impl DistinctSet {
     /// Imports one blob entry: like {@link insert_restored}, but journaled — a blob restored into
     /// a per-element persistent backend must write every element through at the import's commit.
     fn insert_imported(&mut self, value: ScalarValue, count: i64) {
+        let value = crate::flink_float::canonical_scalar(&value).unwrap_or(value);
         match self {
             DistinctSet::I64(m, journal) => match value {
                 ScalarValue::Int64(Some(v)) => {
@@ -369,6 +375,42 @@ impl DistinctSet {
 #[cfg(test)]
 mod distinct_set_tests {
     use super::*;
+
+    #[test]
+    fn nan_payloads_share_counts_through_merge_restore_and_retraction() {
+        for (datatype, first, second, zero, negative_zero) in [
+            (
+                DataType::Float64,
+                ScalarValue::Float64(Some(f64::from_bits(0x7ff8000000000001))),
+                ScalarValue::Float64(Some(f64::from_bits(0xfff8000000000002))),
+                ScalarValue::Float64(Some(0.0)),
+                ScalarValue::Float64(Some(-0.0)),
+            ),
+            (
+                DataType::Float32,
+                ScalarValue::Float32(Some(f32::from_bits(0x7fc00001))),
+                ScalarValue::Float32(Some(f32::from_bits(0xffc00002))),
+                ScalarValue::Float32(Some(0.0)),
+                ScalarValue::Float32(Some(-0.0)),
+            ),
+        ] {
+            let mut set = DistinctSet::new(&datatype);
+            assert!(set.add_scalar(first.clone()));
+            assert!(!set.add_scalar_n(second.clone(), 2));
+            assert_eq!(set.len(), 1);
+            let mut restored = DistinctSet::new(&datatype);
+            for (value, count) in set.scalar_entries() {
+                restored.insert_restored(value, count);
+            }
+            assert!(!restored.remove_scalar(&second));
+            assert!(!restored.remove_scalar(&first));
+            assert!(restored.remove_scalar(&second));
+            assert!(restored.is_empty());
+            assert!(restored.add_scalar(zero));
+            assert!(restored.add_scalar(negative_zero));
+            assert_eq!(restored.len(), 2);
+        }
+    }
 
     #[test]
     fn planner_default_i64_set_promotes_for_time_values() {
@@ -1124,7 +1166,7 @@ impl crate::state::RocksStateCodec for GroupStateCodec {
                 .as_any()
                 .downcast_ref::<arrow::array::StructArray>()
                 .expect("distinct view entries must be structs");
-            let values = entries.column(0).clone();
+            let values = crate::flink_float::canonical_array(entries.column(0));
             let mut rows = vec![u32::MAX; values.len()];
             let offsets = list.value_offsets();
             for row in 0..batch.num_rows() {
@@ -1137,7 +1179,12 @@ impl crate::state::RocksStateCodec for GroupStateCodec {
         if self.value_columns[agg] < 0 {
             return None;
         }
-        let column = batch.column(self.value_columns[agg] as usize).clone();
+        let column = batch.column(self.value_columns[agg] as usize);
+        let column = if matches!(self.kinds[agg], 7 | 9) {
+            crate::flink_float::canonical_array(column)
+        } else {
+            column.clone()
+        };
         let rows = (0..batch.num_rows() as u32).collect();
         Some((column, rows))
     }

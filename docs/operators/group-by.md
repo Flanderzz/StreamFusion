@@ -10,6 +10,11 @@ covers both, since a query only accelerates when whichever shape Flink chose is 
 
 ## Single-phase
 
+COUNT/SUM DISTINCT uses Java boxed floating equality: all NaN payloads count as one value,
+while positive and negative zero remain distinct. The same encoding is used for local/global
+merges, retractions, and persistent distinct-element lookups. Primitive FLOAT/DOUBLE GROUP BY
+keys retain Flink's raw-bit-sensitive equality; DISTINCT normalization does not change those keys.
+
 The immediate plan applies every input row to the keyed accumulator state and emits on every
 change — no batching. `SUM`/`MIN`/`MAX`/`COUNT` are native over `DECIMAL` (`SUM` →
 `DECIMAL(38, s)` with overflow → NULL; `MIN`/`MAX` → `DECIMAL(p, s)`; carried as an i128 at scale
