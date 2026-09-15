@@ -36,7 +36,7 @@ import tech.streamfusion.arrow.ArrowConversion;
 import tech.streamfusion.operator.NativeAllocator;
 import tech.streamfusion.operator.NativeSourceRecord;
 import tech.streamfusion.operator.RowDataArrowConverter;
-import tech.streamfusion.operator.WatermarkDelay;
+import tech.streamfusion.operator.WatermarkExpression;
 
 /** Native and Java Paimon split reads under one logical-row checkpoint. */
 public final class NativePaimonSplitReader
@@ -48,7 +48,7 @@ public final class NativePaimonSplitReader
   private final boolean primaryKey;
   private final int batchRows;
   private final int rowtimeIndex;
-  private final WatermarkDelay watermarkDelay;
+  private final WatermarkExpression.Evaluator watermarkExpression;
   private final Queue<FileStoreSourceSplit> splits = new ArrayDeque<>();
   private final RowDataSerializer copy;
   private FileStoreSourceSplit current;
@@ -79,7 +79,7 @@ public final class NativePaimonSplitReader
 
   public NativePaimonSplitReader(
       FileStoreTable table, ReadBuilder read, TableRead stock, int batchRows, int rowtimeIndex) {
-    this(table, read, stock, batchRows, rowtimeIndex, WatermarkDelay.millis(0));
+    this(table, read, stock, batchRows, rowtimeIndex, WatermarkExpression.rowtime(rowtimeIndex));
   }
 
   public NativePaimonSplitReader(
@@ -88,15 +88,15 @@ public final class NativePaimonSplitReader
       TableRead stock,
       int batchRows,
       int rowtimeIndex,
-      WatermarkDelay watermarkDelay) {
+      WatermarkExpression watermarkExpression) {
     this.table = table;
     this.stock = stock;
     this.outputType = LogicalTypeConversion.toLogicalType(read.readType());
     this.primaryKey = !table.primaryKeys().isEmpty();
     this.batchRows = batchRows;
     this.rowtimeIndex = rowtimeIndex;
-    this.watermarkDelay = watermarkDelay;
     this.copy = new RowDataSerializer(outputType);
+    this.watermarkExpression = watermarkExpression == null ? null : watermarkExpression.open();
   }
 
   NativePaimonSplitReader withMetrics(FileStoreSourceReaderMetrics metrics) {
@@ -174,7 +174,7 @@ public final class NativePaimonSplitReader
       position += root.getRowCount();
       return new Records(
           current.splitId(),
-          NativeSourceRecord.fromRoot(root, position, rowtimeIndex, watermarkDelay),
+          NativeSourceRecord.fromRoot(root, position, rowtimeIndex, watermarkExpression),
           false);
     }
   }
@@ -307,7 +307,13 @@ public final class NativePaimonSplitReader
 
   @Override
   public void close() throws Exception {
-    closeCurrent();
+    try {
+      closeCurrent();
+    } finally {
+      if (watermarkExpression != null) {
+        watermarkExpression.close();
+      }
+    }
   }
 
   @Override

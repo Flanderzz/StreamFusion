@@ -28,7 +28,7 @@ import tech.streamfusion.format.NativeMessageDecoder;
 import tech.streamfusion.format.NativeMessageDecoderFactory;
 import tech.streamfusion.operator.NativeAllocator;
 import tech.streamfusion.operator.NativeSourceRecord;
-import tech.streamfusion.operator.WatermarkDelay;
+import tech.streamfusion.operator.WatermarkExpression;
 
 /**
  * Kafka's stock partition reader with a split-local native decode boundary. Each poll is grouped by
@@ -46,7 +46,7 @@ final class NativeKafkaSplitReader
   private final BufferAllocator allocator = NativeAllocator.SHARED;
   private final boolean keyed;
   private final int rowtimeIndex;
-  private final WatermarkDelay watermarkDelay;
+  private final WatermarkExpression.Evaluator watermarkExpression;
   private ArrowBuf decodeSlab;
 
   NativeKafkaSplitReader(
@@ -57,18 +57,18 @@ final class NativeKafkaSplitReader
       NativeMessageDecoderFactory decoderFactory,
       boolean keyed,
       int rowtimeIndex,
-      WatermarkDelay watermarkDelay) {
+      WatermarkExpression watermarkExpression) {
     this.delegate = new KafkaPartitionSplitReader(properties, context, metrics);
     this.outputType = outputType;
     this.keyed = keyed;
     this.rowtimeIndex = rowtimeIndex;
-    this.watermarkDelay = watermarkDelay;
     try {
       this.decoder = decoderFactory.create();
       this.decoder.open(allocator, outputType);
     } catch (Exception e) {
       throw new IllegalStateException("native Kafka decoder initialization failed", e);
     }
+    this.watermarkExpression = watermarkExpression == null ? null : watermarkExpression.open();
   }
 
   @Override
@@ -159,7 +159,7 @@ final class NativeKafkaSplitReader
           output.close();
           return new NativeSourceRecord(null, nextOffset, Long.MIN_VALUE);
         }
-        return NativeSourceRecord.fromRoot(output, nextOffset, rowtimeIndex, watermarkDelay);
+        return NativeSourceRecord.fromRoot(output, nextOffset, rowtimeIndex, watermarkExpression);
       }
     }
   }
@@ -222,7 +222,7 @@ final class NativeKafkaSplitReader
       output.close();
       return new NativeSourceRecord(null, nextOffset, Long.MIN_VALUE);
     }
-    return NativeSourceRecord.fromRoot(output, nextOffset, rowtimeIndex, watermarkDelay);
+    return NativeSourceRecord.fromRoot(output, nextOffset, rowtimeIndex, watermarkExpression);
   }
 
   private static void set(VarBinaryVector vector, int index, byte[] value) {
@@ -246,16 +246,11 @@ final class NativeKafkaSplitReader
   @Override
   public void close() throws Exception {
     try {
-      delegate.close();
+      org.apache.flink.util.IOUtils.closeAll(
+          java.util.Arrays.asList(delegate, decoder, decodeSlab, watermarkExpression),
+          Throwable.class);
     } finally {
-      try {
-        decoder.close();
-      } finally {
-        if (decodeSlab != null) {
-          decodeSlab.close();
-          decodeSlab = null;
-        }
-      }
+      decodeSlab = null;
     }
   }
 

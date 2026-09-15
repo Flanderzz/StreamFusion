@@ -104,7 +104,7 @@ public class StreamPhysicalNativeKafkaDecode extends AbstractRelNode
                 + ":"
                 + watermark.rowtimeFieldName
                 + ":"
-                + watermark.delay
+                + watermark.expression.digest()
                 + ":"
                 + watermark.idleTimeoutMillis);
   }
@@ -181,7 +181,10 @@ public class StreamPhysicalNativeKafkaDecode extends AbstractRelNode
                 "watermarkColumn",
                 watermark == null ? null : watermark.rowtimeFieldName,
                 watermark != null)
-            .itemIf("watermarkDelay", watermark == null ? null : watermark.delay, watermark != null)
+            .itemIf(
+                "watermarkExpression",
+                watermark == null ? null : watermark.expression,
+                watermark != null)
             .itemIf("keyFormat", options.get("key.format"), options.containsKey("key.format"))
             .itemIf("keyFields", options.get("key.fields"), options.containsKey("key.fields"))
             .itemIf(

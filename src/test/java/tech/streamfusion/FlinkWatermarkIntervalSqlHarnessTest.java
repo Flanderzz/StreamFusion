@@ -41,6 +41,18 @@ class FlinkWatermarkIntervalSqlHarnessTest {
   @ParameterizedTest
   @ValueSource(
       strings = {
+        "INTERVAL '1' MONTH - INTERVAL '1' DAY",
+        "INTERVAL '1' DAY - INTERVAL '1' MONTH",
+        "INTERVAL '1' MONTH - INTERVAL '1' MONTH"
+      })
+  void composedWatermarkExpressionsStayNativeIntoWindows(String intervals) throws Exception {
+    assertNativeAssigner(environment(intervals), WINDOW_QUERY);
+    NativeParity.assertParity(() -> environment(intervals), WINDOW_QUERY);
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
         "INTERVAL '31' DAY",
         "INTERVAL '1' HOUR",
         "INTERVAL '0' SECOND",

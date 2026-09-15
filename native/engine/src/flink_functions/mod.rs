@@ -38,6 +38,7 @@ mod json_value;
 mod locate;
 mod scalar;
 mod temporal_round;
+mod timestamp_millis;
 
 const HEX_DIGITS: &[u8; 16] = b"0123456789ABCDEF";
 
@@ -158,6 +159,9 @@ pub(crate) fn function(op: i64, arity: usize) -> Option<ScalarUDF> {
         152 => json_serialize::function(),
         153 => json_object::function(),
         154 => temporal_round::function(),
+        155 => timestamp_millis::function(timestamp_millis::Operation::Millis),
+        156 => timestamp_millis::function(timestamp_millis::Operation::SubtractMillis),
+        157 => timestamp_millis::function(timestamp_millis::Operation::SubtractMonths),
         _ => return None,
     })
 }

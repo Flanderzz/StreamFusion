@@ -14,7 +14,7 @@ import org.apache.paimon.flink.utils.TableScanUtils;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.source.ReadBuilder;
 import tech.streamfusion.operator.ArrowBatch;
-import tech.streamfusion.operator.WatermarkDelay;
+import tech.streamfusion.operator.WatermarkExpression;
 
 /** Paimon's streaming enumerator and state formats with an Arrow-emitting task-side reader. */
 public final class NativePaimonSource
@@ -25,11 +25,11 @@ public final class NativePaimonSource
   private final ContinuousFileStoreSource delegate;
   private final int batchRows;
   private final int rowtimeIndex;
-  private final WatermarkDelay watermarkDelay;
+  private final WatermarkExpression watermarkExpression;
 
   public NativePaimonSource(
       FileStoreTable table, int[] projection, int batchRows, int rowtimeIndex) {
-    this(table, projection, batchRows, rowtimeIndex, WatermarkDelay.millis(0));
+    this(table, projection, batchRows, rowtimeIndex, WatermarkExpression.rowtime(rowtimeIndex));
   }
 
   public NativePaimonSource(
@@ -37,7 +37,7 @@ public final class NativePaimonSource
       int[] projection,
       int batchRows,
       int rowtimeIndex,
-      WatermarkDelay watermarkDelay) {
+      WatermarkExpression watermarkExpression) {
     if (batchRows <= 0) {
       throw new IllegalArgumentException("Paimon source batch size must be positive");
     }
@@ -47,7 +47,7 @@ public final class NativePaimonSource
     this.delegate = new ContinuousFileStoreSource(read, table.options(), null);
     this.batchRows = batchRows;
     this.rowtimeIndex = rowtimeIndex;
-    this.watermarkDelay = watermarkDelay;
+    this.watermarkExpression = watermarkExpression;
   }
 
   public static String unsupportedTypeReason(FileStoreTable table) {
@@ -62,7 +62,7 @@ public final class NativePaimonSource
   @Override
   public SourceReader<ArrowBatch, FileStoreSourceSplit> createReader(SourceReaderContext context) {
     return new NativePaimonSourceReader(
-        table, read, context, batchRows, rowtimeIndex, watermarkDelay);
+        table, read, context, batchRows, rowtimeIndex, watermarkExpression);
   }
 
   @Override

@@ -14,7 +14,7 @@ import org.apache.flink.api.connector.source.SourceOutput;
 import org.junit.jupiter.api.Test;
 import tech.streamfusion.operator.ArrowBatch;
 import tech.streamfusion.operator.NativeSourceRecord;
-import tech.streamfusion.operator.WatermarkDelay;
+import tech.streamfusion.operator.WatermarkExpression;
 
 class PaimonSplitWatermarksTest {
   @Test
@@ -27,12 +27,14 @@ class PaimonSplitWatermarksTest {
       var calendar =
           record(
               allocator,
-              WatermarkDelay.months(1),
+              WatermarkExpression.subtractMonths(0, 1),
               millis("2024-03-30T23:00:00Z"),
               millis("2024-03-31T00:00:00Z"));
       calendar.emit(first, offset -> assertEquals(2, offset));
-      record(allocator, WatermarkDelay.millis(100), 900L).emit(second, offset -> {});
-      record(allocator, WatermarkDelay.months(1), (Long) null).emit(first, offset -> {});
+      record(allocator, WatermarkExpression.subtractMillis(0, 100), 900L)
+          .emit(second, offset -> {});
+      record(allocator, WatermarkExpression.subtractMonths(0, 1), (Long) null)
+          .emit(first, offset -> {});
       assertEquals(0, allocator.getAllocatedMemory());
       assertEquals(3, output.events.size());
       watermarks.releaseOutputForSplit("second");
@@ -55,7 +57,7 @@ class PaimonSplitWatermarksTest {
     CapturingOutput output = new CapturingOutput();
     var watermarks = new PaimonSplitWatermarks(output);
     try (var allocator = new RootAllocator()) {
-      record(allocator, WatermarkDelay.months(1), (Long) null)
+      record(allocator, WatermarkExpression.subtractMonths(0, 1), (Long) null)
           .emit(watermarks.createOutputForSplit("nulls"), offset -> {});
       watermarks.releaseOutputForSplit("nulls");
       watermarks.createOutputForSplit("empty");
@@ -65,7 +67,7 @@ class PaimonSplitWatermarksTest {
   }
 
   private static NativeSourceRecord record(
-      RootAllocator allocator, WatermarkDelay delay, Long... values) {
+      RootAllocator allocator, WatermarkExpression expression, Long... values) {
     var vector = new BigIntVector("epoch", allocator);
     vector.allocateNew(values.length);
     for (int i = 0; i < values.length; i++) {
@@ -73,7 +75,10 @@ class PaimonSplitWatermarksTest {
       else vector.set(i, values[i]);
     }
     var root = new VectorSchemaRoot(List.of(vector.getField()), List.of(vector), values.length);
-    return NativeSourceRecord.fromRoot(root, values.length, 0, delay);
+    root.setRowCount(values.length);
+    try (var evaluator = expression.open()) {
+      return NativeSourceRecord.fromRoot(root, values.length, 0, evaluator);
+    }
   }
 
   private static long millis(String timestamp) {

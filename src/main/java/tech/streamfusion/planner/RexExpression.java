@@ -23,6 +23,7 @@ import org.apache.calcite.sql.SqlKind;
 import org.apache.calcite.sql.type.SqlTypeFamily;
 import org.apache.calcite.sql.type.SqlTypeName;
 import tech.streamfusion.operator.EncodedPredicate;
+import tech.streamfusion.operator.WatermarkExpression;
 
 /**
  * Encodes a {@link RexNode} into the compact pre-order form the native engine decodes (see {@link
@@ -218,6 +219,85 @@ final class RexExpression {
     }
     encoder.outputNames = names.toArray(new String[0]);
     return encoder;
+  }
+
+  /**
+   * A watermark projection uses millisecond-valued temporal kernels in the same expression tree as
+   * Calc. Its intermediate results never become timestamp columns in the data pipeline.
+   */
+  static RexExpression encodeWatermark(RexNode expression, int rowtimeColumn, boolean epochMillis) {
+    RexExpression encoder = new RexExpression();
+    encoder.projectionRoots.add(0);
+    encoder.outputNames = new String[] {"watermark_millis"};
+    return encoder.emitWatermark(expression, rowtimeColumn, epochMillis) ? encoder : null;
+  }
+
+  private boolean emitWatermark(RexNode expression, int rowtimeColumn, boolean epochMillis) {
+    if (isWatermarkRowtime(expression, rowtimeColumn, epochMillis)) {
+      add(KIND_CALL, WatermarkExpression.TIMESTAMP_MILLIS, 1);
+      add(KIND_INPUT_REF, rowtimeColumn, 0);
+      return true;
+    }
+    if (!(expression instanceof RexCall)) {
+      return reject("watermark requires a rowtime expression");
+    }
+    RexCall call = (RexCall) expression;
+    if (call.getKind() != SqlKind.MINUS
+        || call.getOperands().size() != 2
+        || !(call.getOperands().get(1) instanceof RexLiteral)) {
+      return reject("watermark admits subtraction of constant intervals");
+    }
+    RexLiteral interval = (RexLiteral) call.getOperands().get(1);
+    SqlTypeFamily family = interval.getType().getSqlTypeName().getFamily();
+    if (family != SqlTypeFamily.INTERVAL_DAY_TIME && family != SqlTypeFamily.INTERVAL_YEAR_MONTH) {
+      return reject("watermark subtraction requires an interval");
+    }
+    BigDecimal value = interval.getValueAs(BigDecimal.class);
+    if (value == null || value.signum() < 0) {
+      return reject("watermark requires a nonnegative interval literal");
+    }
+    boolean months = family == SqlTypeFamily.INTERVAL_YEAR_MONTH;
+    long amount;
+    try {
+      amount = months ? value.intValueExact() : value.longValueExact();
+    } catch (ArithmeticException outOfRange) {
+      return reject("watermark interval exceeds Flink's internal range");
+    }
+    add(
+        KIND_CALL,
+        months
+            ? WatermarkExpression.SUBTRACT_MONTHS
+            : WatermarkExpression.SUBTRACT_MILLIS,
+        2);
+    RexNode timestamp = call.getOperands().get(0);
+    // Fuse a direct timestamp read with the shift; composed expressions keep their original order.
+    if (isWatermarkRowtime(timestamp, rowtimeColumn, epochMillis)) {
+      add(KIND_INPUT_REF, rowtimeColumn, 0);
+    } else if (!emitWatermark(timestamp, rowtimeColumn, epochMillis)) {
+      return false;
+    }
+    add(months ? KIND_LIT_INT : KIND_LIT_LONG, longs.size(), 0);
+    longs.add(amount);
+    return true;
+  }
+
+  private static boolean isWatermarkRowtime(RexNode node, int column, boolean epochMillis) {
+    if (!epochMillis) {
+      return node instanceof RexInputRef && ((RexInputRef) node).getIndex() == column;
+    }
+    if (!(node instanceof RexCall)) {
+      return false;
+    }
+    RexCall call = (RexCall) node;
+    if (!"TO_TIMESTAMP_LTZ".equals(call.getOperator().getName())
+        || call.getOperands().size() != 2
+        || !(call.getOperands().get(0) instanceof RexInputRef)
+        || ((RexInputRef) call.getOperands().get(0)).getIndex() != column
+        || !(call.getOperands().get(1) instanceof RexLiteral)) {
+      return false;
+    }
+    BigDecimal precision = ((RexLiteral) call.getOperands().get(1)).getValueAs(BigDecimal.class);
+    return precision != null && precision.compareTo(BigDecimal.valueOf(3)) == 0;
   }
 
   /**

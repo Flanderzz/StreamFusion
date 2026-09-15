@@ -17,7 +17,7 @@ import org.apache.paimon.table.source.DataSplit;
 import org.apache.paimon.table.source.ReadBuilder;
 import tech.streamfusion.operator.ArrowBatch;
 import tech.streamfusion.operator.NativeSourceRecord;
-import tech.streamfusion.operator.WatermarkDelay;
+import tech.streamfusion.operator.WatermarkExpression;
 
 /** Mirrors released Paimon's split requests and consumer-progress events. */
 final class NativePaimonSourceReader
@@ -34,14 +34,14 @@ final class NativePaimonSourceReader
       SourceReaderContext context,
       int batchRows,
       int rowtimeIndex,
-      WatermarkDelay watermarkDelay) {
+      WatermarkExpression watermarkExpression) {
     this(
         table,
         read,
         context,
         batchRows,
         rowtimeIndex,
-        watermarkDelay,
+        watermarkExpression,
         IOManager.create(
             ConfigurationUtils.splitPaths(context.getConfiguration().get(CoreOptions.TMP_DIRS))),
         new FileStoreSourceReaderMetrics(context.metricGroup()));
@@ -53,7 +53,7 @@ final class NativePaimonSourceReader
       SourceReaderContext context,
       int batchRows,
       int rowtimeIndex,
-      WatermarkDelay watermarkDelay,
+      WatermarkExpression watermarkExpression,
       IOManager io,
       FileStoreSourceReaderMetrics metrics) {
     super(
@@ -66,7 +66,7 @@ final class NativePaimonSourceReader
                         .withMetricRegistry(new FlinkMetricRegistry(context.metricGroup())),
                     batchRows,
                     rowtimeIndex,
-                    watermarkDelay)
+                    watermarkExpression)
                 .withMetrics(metrics),
         (record, output, state) -> {
           context

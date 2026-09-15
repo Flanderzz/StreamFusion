@@ -237,9 +237,11 @@ source at planning time:
   and source abilities other than top-level projection, residual filters, and supported watermarks.
 - Consumer retention (`consumer-id`), dedicated split generation, checkpoint/snapshot alignment,
   and `postpone.merge-on-read`.
-- Source watermarks outside the shared periodic constant-interval contract, including on-event
+- Source watermarks outside the shared periodic constant-interval expression contract, including on-event
   emission and watermark alignment. Non-negative day-time and YEAR/MONTH/YEAR TO MONTH delays
-  are supported; calendar intervals use Flink's month-end and leap-year arithmetic.
+  are supported, including chained subtractions; calendar intervals use Flink's month-end and
+  leap-year arithmetic. Serialized expression plans are evaluated by each reader through the
+  shared watermark evaluator, with native handles closed when the reader closes.
 - Unverified `scan.*`, `streaming-read-*`, `log.*`, and custom `parquet.*`/`orc.*` settings. ORC also admits the boolean `orc.timestamp-ltz.legacy.type`; timestamp schemas require a UTC JVM timezone. The admitted scan settings are
   `scan.mode`, `scan.snapshot-id`, `scan.timestamp-millis`, `scan.timestamp`, `scan.tag-name`,
   `scan.watermark`, `scan.bounded.watermark`, `scan.parallelism`, `scan.infer-parallelism`,

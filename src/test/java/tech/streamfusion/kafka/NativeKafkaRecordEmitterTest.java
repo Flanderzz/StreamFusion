@@ -19,7 +19,7 @@ import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import tech.streamfusion.operator.ArrowBatch;
 import tech.streamfusion.operator.NativeSourceRecord;
-import tech.streamfusion.operator.WatermarkDelay;
+import tech.streamfusion.operator.WatermarkExpression;
 
 /** Pins the native batch to Kafka's split-local output and checkpoint offset contract. */
 @Tag("streamfusion-kafka")
@@ -52,14 +52,16 @@ class NativeKafkaRecordEmitterTest {
     var split =
         new KafkaPartitionSplitState(new KafkaPartitionSplit(new TopicPartition("events", 3), 11L));
     CapturingOutput output = new CapturingOutput();
-    try (BufferAllocator allocator = new RootAllocator()) {
+    try (BufferAllocator allocator = new RootAllocator();
+        var evaluator = WatermarkExpression.subtractMonths(0, 1).open()) {
       var vector = new BigIntVector("epoch", allocator);
       vector.allocateNew(2);
       vector.set(0, Instant.parse("2024-03-30T23:00:00Z").toEpochMilli());
       long eventTimestamp = Instant.parse("2024-03-31T00:00:00Z").toEpochMilli();
       vector.set(1, eventTimestamp);
       var root = new VectorSchemaRoot(List.of(vector.getField()), List.of(vector), 2);
-      var record = NativeSourceRecord.fromRoot(root, 42, 0, WatermarkDelay.months(1));
+      root.setRowCount(2);
+      var record = NativeSourceRecord.fromRoot(root, 42, 0, evaluator);
       new NativeKafkaRecordEmitter().emitRecord(record, output, split);
       assertEquals(eventTimestamp, output.timestamp);
       assertEquals(42, split.getCurrentOffset());

@@ -47,7 +47,7 @@ the full value record.
 - A metadata column falls back because connector metadata is not present in the message value.
 - A source bounded by anything other than `latest-offset` stays on Flink's stock source path.
 - Pushed periodic bounded-out-of-orderness watermarks (`rowtime` or `rowtime - INTERVAL constant`
-  with a non-negative day-time or year-month interval)
+  with non-negative day-time or year-month intervals, including chained subtractions)
   are regenerated from each partition's decoded Arrow batches, including the common
   `TO_TIMESTAMP_LTZ(epoch_millis, 3)` rowtime form. Flink runs one generator per Kafka split and
   combines them with its normal minimum/idleness logic. On-event emission, watermark alignment,
@@ -55,6 +55,9 @@ the full value record.
   YEAR, MONTH and YEAR TO MONTH use Flink's calendar subtraction. The decoder computes
   `MAX(rowtime - interval)` before forwarding the batch and carries this candidate separately
   from its maximum event timestamp, so month-end clamping cannot lose the maximum candidate.
+  The source serializes the shared native expression plan and creates one evaluator per split
+  reader. Projection remapping and source sharing retain the expression's typed literals and
+  column references; native handles remain local to the reader and are closed with it.
 - Keyed native decoding currently requires a single raw key field over a supported insert-only
   value format. Other key formats/shapes stay on Flink.
 - CDC values combined with `key.format` stay on Flink.

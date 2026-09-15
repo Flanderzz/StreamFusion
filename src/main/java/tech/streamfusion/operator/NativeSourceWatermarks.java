@@ -1,10 +1,8 @@
 package tech.streamfusion.operator;
 
 import java.time.Duration;
-import org.apache.arrow.vector.BigIntVector;
 import org.apache.arrow.vector.FieldVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
-import tech.streamfusion.arrow.TimestampAccessor;
 import org.apache.flink.api.common.eventtime.Watermark;
 import org.apache.flink.api.common.eventtime.WatermarkGenerator;
 import org.apache.flink.api.common.eventtime.WatermarkOutput;
@@ -36,36 +34,28 @@ public final class NativeSourceWatermarks {
    * Evaluate before reducing: calendar month-end clamping can reverse timestamp order. Rowtime is a
    * timestamp or a BIGINT carrying epoch millis for {@code TO_TIMESTAMP_LTZ(col, 3)}.
    */
-  static Summary summarize(VectorSchemaRoot root, int index, WatermarkDelay delay) {
+  static Summary summarize(
+      VectorSchemaRoot root, int index, WatermarkExpression.Evaluator expression) {
     if (index < 0) {
       return new Summary(Long.MIN_VALUE, Long.MIN_VALUE);
     }
     FieldVector vector = root.getVector(index);
+    WatermarkExpression.Values rowtimes = WatermarkExpression.timestampValues(vector);
     int rows = root.getRowCount();
     long max = Long.MIN_VALUE;
     long candidate = Long.MIN_VALUE;
-    if (vector instanceof BigIntVector) {
-      BigIntVector epochMillis = (BigIntVector) vector;
+    try (WatermarkExpression.Values candidates = expression.evaluate(root)) {
       for (int i = 0; i < rows; i++) {
-        if (!epochMillis.isNull(i)) {
-          long millis = epochMillis.get(i);
-          max = Math.max(max, millis);
-          candidate = Math.max(candidate, delay.subtractFrom(millis));
+        if (!vector.isNull(i)) {
+          max = Math.max(max, rowtimes.getMillis(i));
         }
-      }
-      return new Summary(max, candidate);
-    }
-    TimestampAccessor timestamps = new TimestampAccessor(vector);
-    for (int i = 0; i < rows; i++) {
-      if (!timestamps.isNull(i)) {
-        long millis = timestamps.getMillis(i);
-        max = Math.max(max, millis);
-        candidate = Math.max(candidate, delay.subtractFrom(millis));
+        if (!candidates.isNull(i)) {
+          candidate = Math.max(candidate, candidates.getMillis(i));
+        }
       }
     }
     return new Summary(max, candidate);
   }
-
 
   /**
    * Source-local values that remain readable after downstream releases the batch's Arrow buffers.

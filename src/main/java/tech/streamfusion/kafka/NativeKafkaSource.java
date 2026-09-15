@@ -20,7 +20,7 @@ import org.apache.flink.table.types.logical.RowType;
 import tech.streamfusion.format.NativeMessageDecoderFactory;
 import tech.streamfusion.operator.ArrowBatch;
 import tech.streamfusion.operator.NativeSourceRecord;
-import tech.streamfusion.operator.WatermarkDelay;
+import tech.streamfusion.operator.WatermarkExpression;
 
 /**
  * Split-aware native-decoding Kafka source. Flink's Kafka source still owns enumeration,
@@ -38,7 +38,7 @@ public final class NativeKafkaSource
   private final NativeMessageDecoderFactory decoderFactory;
   private final boolean keyed;
   private final int rowtimeIndex;
-  private final WatermarkDelay watermarkDelay;
+  private final WatermarkExpression watermarkExpression;
 
   public NativeKafkaSource(
       KafkaSource<byte[]> delegate,
@@ -47,14 +47,14 @@ public final class NativeKafkaSource
       NativeMessageDecoderFactory decoderFactory,
       boolean keyed,
       int rowtimeIndex,
-      WatermarkDelay watermarkDelay) {
+      WatermarkExpression watermarkExpression) {
     this.delegate = delegate;
     this.properties = properties;
     this.outputType = outputType;
     this.decoderFactory = decoderFactory;
     this.keyed = keyed;
     this.rowtimeIndex = rowtimeIndex;
-    this.watermarkDelay = watermarkDelay;
+    this.watermarkExpression = watermarkExpression;
   }
 
   @Override
@@ -75,7 +75,7 @@ public final class NativeKafkaSource
                 decoderFactory,
                 keyed,
                 rowtimeIndex,
-                watermarkDelay);
+                watermarkExpression);
     return new NativeKafkaSourceReader(
         reader, new NativeKafkaRecordEmitter(), configuration(), context, metrics);
   }

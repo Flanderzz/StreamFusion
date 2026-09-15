@@ -15,7 +15,7 @@ import org.apache.flink.table.types.logical.RowType;
 import tech.streamfusion.operator.ArrowBatch;
 import tech.streamfusion.operator.ArrowBatchTypeInformation;
 import tech.streamfusion.operator.NativeColumnarWatermarkAssignerOperator;
-import tech.streamfusion.operator.WatermarkDelay;
+import tech.streamfusion.operator.WatermarkExpression;
 
 /**
  * Wraps the columnar native watermark assigner into the plan; it consumes and produces Arrow
@@ -27,7 +27,7 @@ public class NativeWatermarkAssignerExecNode extends ExecNodeBase<ArrowBatch>
   private static final String TRANSFORMATION = "native-watermark-assigner";
 
   private final int rowtimeColumn;
-  private final WatermarkDelay delay;
+  private final WatermarkExpression expression;
 
   public NativeWatermarkAssignerExecNode(
       ReadableConfig tableConfig,
@@ -35,7 +35,7 @@ public class NativeWatermarkAssignerExecNode extends ExecNodeBase<ArrowBatch>
       RowType outputType,
       String description,
       int rowtimeColumn,
-      WatermarkDelay delay) {
+      WatermarkExpression expression) {
     super(
         ExecNodeContext.newNodeId(),
         new ExecNodeContext("stream-exec-native-watermark-assigner_1"),
@@ -44,7 +44,7 @@ public class NativeWatermarkAssignerExecNode extends ExecNodeBase<ArrowBatch>
         outputType,
         description);
     this.rowtimeColumn = rowtimeColumn;
-    this.delay = delay;
+    this.expression = expression;
   }
 
   @Override
@@ -56,7 +56,7 @@ public class NativeWatermarkAssignerExecNode extends ExecNodeBase<ArrowBatch>
     return ExecNodeUtil.createOneInputTransformation(
         input,
         createTransformationMeta(TRANSFORMATION, config),
-        new NativeColumnarWatermarkAssignerOperator(rowtimeColumn, delay),
+        new NativeColumnarWatermarkAssignerOperator(rowtimeColumn, expression),
         ArrowBatchTypeInformation.INSTANCE,
         input.getParallelism(),
         false);

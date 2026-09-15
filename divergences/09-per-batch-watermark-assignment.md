@@ -36,13 +36,27 @@ smaller rowtime), so it takes a fast path:
 the whole batch is forwarded with a single watermark, avoiding slice allocation
 for the common in-order case.
 
-Calendar intervals retain their month count and use Flink's `DateTimeUtils.addMonths`
-directly while scanning Arrow timestamp values. The existing assigner and source
-scan run in Java; reusing Flink's integer calendar routine adds no RowData conversion
-or per-row JNI. We evaluate every candidate before reducing, even for monotonic
+Watermark plans now use the same expression encoding, DataFusion projection executor,
+and scalar registry as Calc, following Arroyo's separation of expression evaluation
+from watermark coordination. The Java coordinator consumes nullable millisecond
+candidates rather than interpreting delay units. Direct rowtime and single fixed-delay
+expressions keep a borrowed Arrow value view as a fast implementation of that contract.
+Calendar and composed expressions cross JNI once per batch; their compiled plans are
+reused, and input ownership stays with the producer via independently retained C Data exports.
+
+The temporal scalar kernels return BIGINT epoch milliseconds, rather than Arroyo's
+nanosecond timestamp result: Flink's calendar arithmetic can produce values outside
+the nanosecond range. This is an internal expression representation; downstream data
+columns retain their existing timestamp units. Calendar subtraction ports Flink's
+`DateTimeUtils.addMonths`, sharing the native calendar field extraction and preserving
+Java integer overflow, including outside chrono's year range. Random and boundary
+parity tests compare these results directly against the released Flink routine.
+
+We evaluate every candidate before reducing, even for monotonic
 rowtimes: March 30 at 23:00 minus one month is later than March 31 at 00:00 minus one
 month after both clamp to February's last day. Fixed-delay subtraction also stays
-inside the reduction to preserve Flink's long overflow behavior.
+inside the reduction to preserve Flink's long overflow behavior. Chained subtractions
+retain expression order rather than being folded into one delay.
 
 Arroyo's `watermark_generator.rs` likewise evaluates its watermark expression on
 the Arrow batch, but reduces with a batch **minimum** before advancing its running

@@ -24,7 +24,7 @@ import org.apache.paimon.types.DataTypes;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import tech.streamfusion.operator.RowDataArrowConverter;
-import tech.streamfusion.operator.WatermarkDelay;
+import tech.streamfusion.operator.WatermarkExpression;
 
 class PaimonCalendarWatermarkReadTest {
   @ParameterizedTest
@@ -64,7 +64,7 @@ class PaimonCalendarWatermarkReadTest {
       List<Long> actual = new ArrayList<>();
       try (var reader =
           new NativePaimonSplitReader(
-              table, read, read.newRead(), 2, 0, WatermarkDelay.months(1))) {
+              table, read, read.newRead(), 2, 0, WatermarkExpression.subtractMonths(0, 1))) {
         reader.handleSplitsChanges(
             new SplitsAddition<>(List.of(new FileStoreSourceSplit("split", splits.get(0), skip))));
         boolean finished = false;

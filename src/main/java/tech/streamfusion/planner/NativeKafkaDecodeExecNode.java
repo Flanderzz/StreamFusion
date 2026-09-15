@@ -90,7 +90,7 @@ public class NativeKafkaDecodeExecNode extends ExecNodeBase<ArrowBatch>
             formatProvider.createDecoder(formatContext),
             keyed,
             watermark == null ? -1 : watermark.rowtimeIndex,
-            watermark == null ? null : watermark.delay);
+            watermark == null ? null : watermark.expression);
     WatermarkStrategy<ArrowBatch> strategy =
         watermark == null
             ? WatermarkStrategy.noWatermarks()

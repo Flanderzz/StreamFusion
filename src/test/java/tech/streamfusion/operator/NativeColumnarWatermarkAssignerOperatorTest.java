@@ -123,7 +123,8 @@ class NativeColumnarWatermarkAssignerOperatorTest {
 
   @Test
   void monotonicMonthEndBatchUsesEveryCandidateAndKeepsTheMaximumAcrossBatches() throws Exception {
-    var operator = new NativeColumnarWatermarkAssignerOperator(1, WatermarkDelay.months(1));
+    var operator =
+        new NativeColumnarWatermarkAssignerOperator(1, WatermarkExpression.subtractMonths(1, 1));
     try (BufferAllocator allocator = new RootAllocator();
         var harness =
             new OneInputStreamOperatorTestHarness<>(operator, new ArrowBatchSerializer())) {
@@ -148,7 +149,8 @@ class NativeColumnarWatermarkAssignerOperatorTest {
 
   @Test
   void calendarDelaySlicesBeforeTheRowMadeLateByMonthEndClamping() throws Exception {
-    var operator = new NativeColumnarWatermarkAssignerOperator(1, WatermarkDelay.months(1));
+    var operator =
+        new NativeColumnarWatermarkAssignerOperator(1, WatermarkExpression.subtractMonths(1, 1));
     try (BufferAllocator allocator = new RootAllocator();
         var harness =
             new OneInputStreamOperatorTestHarness<>(operator, new ArrowBatchSerializer())) {
@@ -171,7 +173,8 @@ class NativeColumnarWatermarkAssignerOperatorTest {
 
   @Test
   void nullRowtimeFailsLikeFlinkAndReleasesTheBatch() throws Exception {
-    var operator = new NativeColumnarWatermarkAssignerOperator(1, WatermarkDelay.months(1));
+    var operator =
+        new NativeColumnarWatermarkAssignerOperator(1, WatermarkExpression.subtractMonths(1, 1));
     try (BufferAllocator allocator = new RootAllocator();
         var harness =
             new OneInputStreamOperatorTestHarness<>(operator, new ArrowBatchSerializer())) {

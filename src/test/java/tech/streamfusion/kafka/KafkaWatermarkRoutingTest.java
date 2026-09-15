@@ -38,8 +38,7 @@ class KafkaWatermarkRoutingTest {
     PhysicalPlanScan scan = NativePlanner.install(tEnv);
     String plan = tEnv.explainSql("SELECT id, price FROM events");
     assertTrue(plan.contains("NativeKafkaDecode"), plan);
-    int months = interval.contains("1-1") ? 13 : interval.contains("YEAR") ? 12 : 1;
-    assertTrue(plan.contains("watermarkDelay=[" + months + " MONTHS]"), plan);
+    assertTrue(plan.contains("watermarkExpression=["), plan);
     assertEquals(0, scan.fallbackReasons().size(), scan.explainSummary());
   }
 

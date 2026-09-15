@@ -22,11 +22,19 @@ public final class NativeSourceRecord {
   }
 
   public static NativeSourceRecord fromRoot(
-      VectorSchemaRoot root, long nextOffset, int rowtimeIndex, WatermarkDelay delay) {
-    NativeSourceWatermarks.Summary watermarks =
-        NativeSourceWatermarks.summarize(root, rowtimeIndex, delay);
-    return new NativeSourceRecord(
-        new ArrowBatch(root, watermarks), nextOffset, watermarks.maxRowtimeMillis);
+      VectorSchemaRoot root,
+      long nextOffset,
+      int rowtimeIndex,
+      WatermarkExpression.Evaluator expression) {
+    try {
+      NativeSourceWatermarks.Summary watermarks =
+          NativeSourceWatermarks.summarize(root, rowtimeIndex, expression);
+      return new NativeSourceRecord(
+          new ArrowBatch(root, watermarks), nextOffset, watermarks.maxRowtimeMillis);
+    } catch (RuntimeException | Error failure) {
+      root.close();
+      throw failure;
+    }
   }
 
   public ArrowBatch batch() {
