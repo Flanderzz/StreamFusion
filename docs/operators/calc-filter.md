@@ -116,6 +116,12 @@ for narrow integer literals, or the tree should be cast to the declared type), n
 rewrite. This check requires the native library in the planning JVM, which the standard deployment
 already provides (see [Deployment](../deployment.md)).
 
+## Integer division
+
+Integer `/` truncates toward zero and wraps `MIN_VALUE / -1` back to `MIN_VALUE`,
+matching Java. A non-NULL dividend divided by zero fails the job. A NULL operand
+produces NULL, including a NULL dividend with a zero divisor.
+
 ## SIGN
 
 FLOAT/DOUBLE SIGN returns the input for signed zero and NaN, and `-1` or `1` for

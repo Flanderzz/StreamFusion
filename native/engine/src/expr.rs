@@ -329,13 +329,18 @@ fn build_typed_call(
     args: Vec<datafusion::prelude::Expr>,
 ) -> datafusion::prelude::Expr {
     use datafusion::logical_expr::ExprSchemable;
-    if (10..=15).contains(&op) {
+    if op == 3 || (10..=15).contains(&op) {
         let schema = DFSchema::try_from(Arc::clone(schema)).expect("comparison input schema");
         let types: Vec<_> = args
             .iter()
             .map(|arg| arg.get_type(&schema).expect("operand type"))
             .collect();
-        if let Some(function) = crate::flink_functions::numeric::comparison(op, &types) {
+        let function = if op == 3 {
+            crate::flink_functions::integer_divide::function(&types)
+        } else {
+            crate::flink_functions::numeric::comparison(op, &types)
+        };
+        if let Some(function) = function {
             return function.call(args);
         }
     }

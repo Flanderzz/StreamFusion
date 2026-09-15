@@ -83,16 +83,11 @@ strict NULL propagation applied to `CONCAT` below.
   total order distinguishes signed zero and orders NaN above finite values; those rules change
   Flink predicates. Other comparison types retain DataFusion's existing path. State key encoding
   and sorting have separate contracts and are not changed by scalar comparison dispatch.
-- **Integer `/` and `%`:** DataFusion and Flink (Java) agree for all finite operands —
-  division truncates toward zero and modulo takes the sign of the dividend (verified with
-  negative dividends, not just positives). Two edges are *not* silent divergences:
-  divide-by-zero fails the job on both sides (Flink throws, DataFusion's kernel errors and
-  the operator surfaces it — a query that divides by zero fails either way, never a wrong
-  answer); and the single pathological `INT_MIN / -1` (and `LONG_MIN / -1`) overflow, where
-  Java wraps to `MIN` but DataFusion's checked kernel errors. The latter is the one input we
-  do not reproduce bit-for-bit; it is astronomically rare and fails loudly rather than
-  silently, so we admit `/`/`%` and flag it here rather than forcing a fallback. (Contrast
-  `+ - *`, which use wrapping kernels on both sides and match even on overflow.)
+- **Integer `/` and `%`:** Division truncates toward zero and modulo takes the dividend's
+  sign. A typed Arrow kernel uses wrapping integer division, preserving Java's `MIN_VALUE / -1`
+  result. NULL operands propagate before arithmetic, and evaluated division by zero fails the
+  job. DataFusion's checked division errors on the overflow pair, so integer `/` uses this
+  kernel while `%` retains DataFusion's existing remainder implementation.
 - **`COALESCE`/`NULLIF`:** lowered on the encoder side to the searched `CASE` the host defines
   them as, so they inherit `CASE`'s parity exactly rather than relying on a separate native
   function.
