@@ -30,11 +30,11 @@ single assigner can't know — only fine-grained watermarks flowing through the
 shuffle reproduce it. That is why the assigner must slice rather than the window
 filter locally.
 
-A **monotonic-rowtime batch whose candidates do not exceed their rowtimes** can
-have no within-batch late row (a later row's window can't be closed by an earlier,
-smaller rowtime), so it takes a fast path:
-the whole batch is forwarded with a single watermark, avoiding slice allocation
-for the common in-order case.
+Sorted rows also retain the eager emission boundaries. Although they cannot make each
+other late when candidates lag rowtime, a downstream `CURRENT_WATERMARK` observes the
+watermark before each row. Coalescing emissions until the batch end changes those
+values. The original Arrow root is forwarded whole only when no emission splits the
+batch; otherwise the slices borrow its buffers without copying row payloads.
 
 Watermark plans now use the same expression encoding, DataFusion projection executor,
 and scalar registry as Calc, following Arroyo's separation of expression evaluation

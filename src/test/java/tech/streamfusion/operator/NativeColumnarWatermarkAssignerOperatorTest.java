@@ -36,8 +36,7 @@ class NativeColumnarWatermarkAssignerOperatorTest {
           new String[] {"value", "rt"});
 
   @Test
-  void forwardsBatchesAndEmitsWatermarkEagerly() throws Exception {
-    // Delay 100ms; each batch jumps the watermark by more than the 200ms interval, so it emits eagerly.
+  void sortedBatchesPreserveEveryEagerWatermarkBoundary() throws Exception {
     NativeColumnarWatermarkAssignerOperator operator =
         new NativeColumnarWatermarkAssignerOperator(1, 100);
     try (BufferAllocator allocator = new RootAllocator();
@@ -49,9 +48,8 @@ class NativeColumnarWatermarkAssignerOperatorTest {
       harness.processElement(new StreamRecord<>(batch(allocator, event(1, 0), event(2, 500), event(3, 1000))));
       harness.processElement(new StreamRecord<>(batch(allocator, event(4, 1500), event(5, 2500))));
 
-      // Both batches forwarded intact, and a watermark of max(rt)-delay after each.
-      assertEquals(List.of(3, 2), forwardedRowCounts(harness));
-      assertEquals(List.of(900L, 2400L), watermarks(harness));
+      assertEquals(List.of(2, 1, 1, 1), forwardedRowCounts(harness));
+      assertEquals(List.of(400L, 900L, 1400L, 2400L), watermarks(harness));
       closeForwarded(harness);
     }
   }
@@ -136,7 +134,7 @@ class NativeColumnarWatermarkAssignerOperatorTest {
                   allocator,
                   event(1, millis("2024-03-30T23:00:00Z")),
                   event(2, millis("2024-03-31T00:00:00Z")))));
-      assertEquals(List.of(2), forwardedRowCounts(harness));
+      assertEquals(List.of(1, 1), forwardedRowCounts(harness));
       assertEquals(List.of(millis("2024-02-29T23:00:00Z")), watermarks(harness));
 
       harness.processElement(

@@ -25,8 +25,10 @@ calendar intermediates can exceed the nanosecond timestamp range without introdu
 columns with a different unit downstream. A direct rowtime or single fixed-millisecond subtraction
 uses an Arrow value view without allocating a candidate column, behind the same evaluator interface.
 
-The independent assigner starts at watermark zero and slices out-of-order batches when an eager
-watermark must precede a later row, matching Flink's late-row behavior. A NULL rowtime fails the
+The independent assigner starts at watermark zero and slices batches at each eager watermark
+boundary, including sorted batches: later rows can observe the watermark through
+`CURRENT_WATERMARK` even when none is late. A batch without an internal emission boundary is
+forwarded whole. A NULL rowtime fails the
 job like Flink's assigner. Non-constant or negative delays, other watermark expressions, and
 expressions referring to a different column fall back.
 

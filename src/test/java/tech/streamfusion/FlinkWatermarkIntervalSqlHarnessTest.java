@@ -90,6 +90,17 @@ class FlinkWatermarkIntervalSqlHarnessTest {
         List.of(List.of("+I", rows[0], 1L), List.of("+I", rows[1], 1L)));
   }
 
+  @ParameterizedTest
+  @ValueSource(strings = {"INTERVAL '1' MONTH", "INTERVAL '1' SECOND"})
+  void currentWatermarkAdvancesBetweenSortedRows(String interval) throws Exception {
+    LocalDateTime[] rows = {
+      LocalDateTime.of(2024, 3, 1, 0, 0), LocalDateTime.of(2024, 3, 2, 0, 0)
+    };
+    String query = "SELECT rt, CURRENT_WATERMARK(rt) FROM t";
+    assertNativeAssigner(environment(interval, "UTC", false, rows), query);
+    NativeParity.assertParity(() -> environment(interval, "UTC", false, rows), query);
+  }
+
   private static void assertNativeAssigner(TableEnvironment table, String query) {
     NativePlanner.install(table);
     String plan = table.explainSql(query);

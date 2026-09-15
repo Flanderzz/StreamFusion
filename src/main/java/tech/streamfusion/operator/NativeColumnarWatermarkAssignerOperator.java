@@ -1,7 +1,6 @@
 package tech.streamfusion.operator;
 
 import org.apache.arrow.vector.VectorSchemaRoot;
-import tech.streamfusion.arrow.TimestampAccessor;
 import org.apache.flink.api.common.operators.ProcessingTimeService.ProcessingTimeCallback;
 import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
@@ -27,8 +26,9 @@ import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
  * (sub-batch, watermark)} in order, so the fine-grained watermarks propagate through the shuffle
  * and the downstream drops exactly as the host would (the drop can't be done downstream: at
  * parallelism > 1 a window's effective watermark is the min across its input channels, which a
- * post-shuffle operator cannot reconstruct). A monotonic-rowtime batch whose candidates never
- * exceed their rowtimes takes a fast path: it forwards the whole batch with one watermark.
+ * post-shuffle operator cannot reconstruct). Even sorted rows retain these boundaries because a
+ * downstream {@code CURRENT_WATERMARK} can observe each eager emission. A batch without an internal
+ * emission boundary is forwarded whole.
  * Idleness is not modelled for this assigner.
  */
 public class NativeColumnarWatermarkAssignerOperator extends AbstractStreamOperator<ArrowBatch>
@@ -93,7 +93,6 @@ public class NativeColumnarWatermarkAssignerOperator extends AbstractStreamOpera
           output, getMetricGroup(), element.replace(new ArrowBatch(root)), rows);
       return;
     }
-    TimestampAccessor rt = new TimestampAccessor(root.getVector(rowtimeColumn));
     if (root.getVector(rowtimeColumn).getNullCount() > 0) {
       root.close();
       throw new RuntimeException(
@@ -101,48 +100,27 @@ public class NativeColumnarWatermarkAssignerOperator extends AbstractStreamOpera
     }
     boolean forwarded = false;
     try (WatermarkExpression.Values candidates = evaluator.evaluate(root)) {
-      boolean canForwardWhole = true;
-      long previous = Long.MIN_VALUE;
-      long maximum = currentWatermark;
-      for (int i = 0; i < rows; i++) {
-        long millis = rt.getMillis(i);
-        canForwardWhole &= millis >= previous;
-        previous = millis;
-        if (!candidates.isNull(i)) {
-          long candidate = candidates.getMillis(i);
-          canForwardWhole &= candidate <= millis;
-          maximum = Math.max(maximum, candidate);
-        }
-      }
-      if (canForwardWhole) {
-        // These rows cannot make each other late. Month-end clamping means the maximum candidate
-        // need not come from the final row, even though rowtimes are sorted.
-        currentWatermark = maximum;
-        forwarded = true;
-        ColumnarRecordMetrics.forward(
-            output, getMetricGroup(), element.replace(new ArrowBatch(root)), rows);
-        if (currentWatermark - lastWatermark > watermarkInterval) {
-          advanceWatermark();
-        }
-        return;
-      }
-      // Match Flink's eager emission: each watermark follows its triggering row and precedes
-      // any later row it makes late.
       int sliceStart = 0;
       for (int i = 0; i < rows; i++) {
         if (!candidates.isNull(i)) {
           currentWatermark = Math.max(currentWatermark, candidates.getMillis(i));
         }
-        if (currentWatermark - lastWatermark > watermarkInterval) {
-          ColumnarRecordMetrics.emit(
-              output, getMetricGroup(), new ArrowBatch(root.slice(sliceStart, i - sliceStart + 1)));
+        boolean emitWatermark = currentWatermark - lastWatermark > watermarkInterval;
+        if (emitWatermark || i == rows - 1) {
+          int count = i - sliceStart + 1;
+          if (count == rows) {
+            forwarded = true;
+            ColumnarRecordMetrics.forward(
+                output, getMetricGroup(), element.replace(new ArrowBatch(root)), rows);
+          } else {
+            ColumnarRecordMetrics.emit(
+                output, getMetricGroup(), new ArrowBatch(root.slice(sliceStart, count)));
+          }
           sliceStart = i + 1;
-          advanceWatermark();
+          if (emitWatermark) {
+            advanceWatermark();
+          }
         }
-      }
-      if (sliceStart < rows) {
-        ColumnarRecordMetrics.emit(
-            output, getMetricGroup(), new ArrowBatch(root.slice(sliceStart, rows - sliceStart)));
       }
     } finally {
       // Slices and native exports retain their own references. Whole-batch forwarding moves ours.
