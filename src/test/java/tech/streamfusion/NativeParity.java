@@ -204,7 +204,7 @@ final class NativeParity {
   }
 
   /** Java arrays compare by identity; compare binary and collection outputs by content. */
-  private static Object comparableValue(Object value) {
+  static Object comparableValue(Object value) {
     if (value instanceof byte[] bytes) {
       return HexFormat.of().formatHex(bytes);
     }

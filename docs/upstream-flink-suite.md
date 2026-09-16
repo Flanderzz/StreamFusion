@@ -181,3 +181,43 @@ failures, rather than missing fixtures, native fallback, or successful result pa
 rewrite integer `1` to decimal `1.0` just to obtain a successful baseline. Native type-mismatch
 failures are covered separately; exact native/host exception diagnostics remain tracked in
 [#108](https://github.com/datafusion-contrib/StreamFusion/issues/108).
+
+## Comparing failed SQL executions
+
+`NativeFailureParity` runs stock Flink and the native-enabled query independently from fresh
+fixture factories. The host outcome is captured before the native attempt; no assertion or
+expected host error can skip that second attempt. Each outcome retains the exception chain,
+collected rows with RowKind, planner substitution/fallback status and fallback reasons.
+
+The helper records setup, planning, submission and collection boundaries separately. During
+submission or collection, the originating exception stack can identify operator initialization
+(`open`/`initializeState`) or row evaluation (`eval`, accumulation, processing, or end-of-input).
+Without that evidence it preserves the observed boundary, rather than claiming to know where a
+remote failure originated. A source failure delivered by the collect iterator is one such case.
+The route describes the plan: a native operator whose `open` fails has not evaluated any rows.
+
+Failure assertions require both executions to fail, matching root-cause classes and a meaningful
+message fragment, the expected phase, and an explicit native or fallback route. Success controls
+require both to succeed and compare collected results. Wrapper exception text and stack traces
+need not match. Partial output is retained for inspection, but asynchronous failed jobs do not
+promise identical delivered prefixes; tests assert prefixes only where the fixture defines them.
+The single malformed-decimal input, for example, yields no collected rows on either engine.
+
+`FlinkFailureParitySqlHarnessTest` covers:
+
+- SINGLE_VALUE cardinality errors through explicit planner fallback, and malformed runtime DECIMAL
+  casts with actual native substitution and identical NumberFormatException messages.
+- CASE short-circuiting, JSON NULL/DEFAULT ON ERROR, and TRY_CAST-to-DECIMAL's explicit fallback.
+- Planning rejection, UDF initialization failure and a source failure observed during collection.
+- Deliberate success/failure mismatches in either direction, which must fail the parity assertion.
+- JSON RETURNING BOOLEAN/DOUBLE on an integer token: both engines fail during row evaluation, but
+  Flink throws ClassCastException while native execution reports an incompatible-scalar
+  NativeException. These tests explicitly prove that strict exception parity rejects the mismatch;
+  they are tracked divergences, not successful native exception parity. Matching diagnostics
+  remains [#108](https://github.com/datafusion-contrib/StreamFusion/issues/108).
+
+Run the failure suite and independent host reproducer together:
+
+```bash
+mvn -pl streamfusion-runtime -am test -Dtest=FlinkFailureParitySqlHarnessTest,FlinkJsonReturningHostContractTest
+```
