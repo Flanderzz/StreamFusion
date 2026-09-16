@@ -37,6 +37,39 @@ its own implementation through the existing scalar-UDF bridge. Unsupported child
 still retain their normal fallback rules. SQL tests cover values, schemas, exception behavior,
 volatile argument evaluation and an IFNULL projection/filter composed with native Top-1.
 
+## RAND and RAND_INTEGER
+
+`RAND()`, `RAND(seed)`, `RAND_INTEGER(bound)` and `RAND_INTEGER(seed, bound)` run in Rust.
+Flink's resolved seed and bound arguments must be INT; other input widths use Flink's normal
+overload validation. RAND returns DOUBLE in `[0, 1)` and RAND_INTEGER returns INT in `[0, bound)`.
+NULL arguments return NULL without advancing the stream. An evaluated non-positive bound fails.
+
+Literal seeds use Java's 48-bit random algorithm and retain a separate stream per call site across
+batches. A column-dependent seed initializes a fresh generator per row, matching Flink's generated
+code. Unseeded calls produce execution-time streams; their individual values are not expected to
+match an independent Flink run. All forms are volatile and produce one result per input row, even
+with only literal arguments. CASE evaluates selected branches only. A RAND_INTEGER under AND/OR
+requires a positive literal bound; other bounds retain Flink's row short-circuiting through fallback.
+As with Flink's generated random fields, stream state belongs to the running operator instance,
+not keyed checkpoint state.
+
+Floating-point unary negation also runs natively, including `-RAND(seed)`, and preserves signed
+zero, infinities, NaN and NULL. Integer and DECIMAL unary negation retain their existing fallback.
+
+Release diagnostic on Apple M1 Max, JDK 17/Flink 2.2.1: two million rows, parallelism 1,
+two warmups and five interleaved trials, with rowwise source/sink and both transposes asserted:
+
+| Expression | Flink median | Native median | Flink/native |
+|---|---:|---:|---:|
+| `RAND(42)` | 0.554077s | 0.723574s | 0.766x |
+| `RAND(n)` | 0.562129s | 0.728834s | 0.771x |
+| `RAND_INTEGER(42, 100)` | 0.546426s | 0.734758s | 0.744x |
+
+These isolated projections are slower than Flink; the same integer-source identity control is
+0.546138s versus 0.706594s. This addition keeps random expressions inside larger native islands,
+without claiming a standalone speedup. Reproduce with the `bench` profile and
+`ScalarFunctionBenchmark#individualFunctions`, selecting `RAND_LITERAL,RAND_DYNAMIC,RAND_INTEGER_LITERAL`.
+
 ## User scalar functions
 
 Java `ScalarFunction` calls use the existing columnar JVM bridge: Arrow argument columns enter

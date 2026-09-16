@@ -86,6 +86,24 @@ pub(crate) fn build_expr(
             )
             .call(vec![])
         }
+        32 => {
+            let children = (0..child_counts[node])
+                .map(|_| {
+                    build_expr(
+                        schema,
+                        kinds,
+                        payload,
+                        child_counts,
+                        longs,
+                        doubles,
+                        strings,
+                        cursor,
+                    )
+                })
+                .collect();
+            crate::flink_functions::random::function(arg & 1 != 0, arg & 2 != 0, arg & 4 != 0)
+                .call(children)
+        }
         11 => {
             // A widening numeric cast: build the single child, then wrap it. `arg` is the target code.
             let child = build_expr(
@@ -527,6 +545,7 @@ pub(crate) fn build_call(
                 2 => next() * next(),
                 3 => next() / next(),
                 4 => next() % next(),
+                5 => datafusion::prelude::Expr::Negative(Box::new(next())),
                 10 => next().gt(next()),
                 11 => next().gt_eq(next()),
                 12 => next().lt(next()),

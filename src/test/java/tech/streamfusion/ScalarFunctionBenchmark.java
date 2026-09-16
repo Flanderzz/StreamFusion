@@ -58,6 +58,9 @@ class ScalarFunctionBenchmark {
 
   private static final List<Query> SCALAR_FUNCTIONS =
       List.of(
+          new Query("RAND_LITERAL", "integer", "RAND(42)", "DOUBLE"),
+          new Query("RAND_DYNAMIC", "integer", "RAND(n)", "DOUBLE"),
+          new Query("RAND_INTEGER_LITERAL", "integer", "RAND_INTEGER(42, 100)", "INT"),
           new Query("IFNULL_STRING", "text", "IFNULL(s, 'missing')", "STRING"),
           new Query("IFNULL_BIGINT", "bigint", "IFNULL(n, CAST(-1 AS BIGINT))", "BIGINT"),
           new Query(

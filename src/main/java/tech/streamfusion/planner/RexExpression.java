@@ -94,6 +94,7 @@ final class RexExpression {
   private static final int KIND_CLOCK = 25;
   private static final int KIND_LIT_TIMESTAMP = 29;
   private static final int KIND_DECIMAL_ROUND = 30;
+  private static final int KIND_RANDOM = 32;
   // Fused exact arithmetic: payload is the declared result precision*100 + scale; two children.
   private static final int KIND_DECIMAL_ADD = 26;
   private static final int KIND_DECIMAL_SUBTRACT = 27;
@@ -649,6 +650,11 @@ final class RexExpression {
     if (isTimestampIdentityCast(call)) {
       return emit(call.getOperands().get(0));
     }
+    if (call.getOperator() == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.RAND
+        || call.getOperator()
+            == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.RAND_INTEGER) {
+      return emitRandom(call);
+    }
     long roundingWidth = nativeRoundingWidth(call);
     if (roundingWidth > 0) {
       add(KIND_CALL, 154, 3);
@@ -663,6 +669,9 @@ final class RexExpression {
     }
     if (needsTemporalFunction(call)) {
       return emitTemporalFunction(call);
+    }
+    if (call.getKind() == SqlKind.MINUS_PREFIX) {
+      return emitFloatUnary(call, 5);
     }
     if (call.getKind() == SqlKind.CAST) {
       return emitCast(call);
@@ -1255,9 +1264,35 @@ final class RexExpression {
     return emitBuiltinCall(call, op);
   }
 
+  private boolean emitRandom(RexCall call) {
+    boolean integer = call.getOperator()
+        == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.RAND_INTEGER;
+    List<RexNode> args = call.getOperands();
+    int required = integer ? 1 : 0;
+    if (args.size() < required || args.size() > required + 1
+        || args.stream().anyMatch(arg -> arg.getType().getSqlTypeName() != SqlTypeName.INTEGER)) {
+      return reject("RAND/RAND_INTEGER require Flink's INT seed and bound overloads");
+    }
+    boolean seeded = args.size() > required;
+    int flags = (integer ? 1 : 0) | (seeded ? 2 : 0)
+        | (seeded && args.get(0) instanceof RexLiteral ? 4 : 0);
+    add(KIND_RANDOM, flags, args.size());
+    for (RexNode arg : args) {
+      if (!emit(arg)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   private boolean requiresRowShortCircuit(RexNode node) {
     if (!(node instanceof RexCall call)) {
       return false;
+    }
+    if (call.getOperator()
+            == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.RAND_INTEGER
+        && !isIntLiteralAtLeast(call.getOperands().get(call.getOperands().size() - 1), 1)) {
+      return true;
     }
     if (call.getType().getSqlTypeName().getFamily() == SqlTypeFamily.NUMERIC
         && call.getType().getSqlTypeName() != SqlTypeName.FLOAT

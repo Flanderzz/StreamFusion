@@ -18,6 +18,7 @@ pub(crate) mod json_quote;
 pub(crate) mod json_unquote;
 pub(crate) mod left;
 pub(crate) mod lpad;
+pub(crate) mod random;
 pub(crate) mod right;
 pub(crate) mod rpad;
 pub(crate) mod split;

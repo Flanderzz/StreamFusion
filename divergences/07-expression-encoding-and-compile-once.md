@@ -87,6 +87,12 @@ Some functions diverge from the host only at precision/locale edges, not in valu
 transcendental math below. A true value divergence must be corrected before admission, as with the
 strict NULL propagation applied to `CONCAT` below.
 
+- **RAND / RAND_INTEGER:** DataFusion's random function supplies unseeded doubles, while Flink
+  also exposes Java's seeded streams and bounded integer rejection sampling. A volatile Arrow
+  kernel mirrors Flink's generator contract: literal seeds retain call-site state; dynamic seeds
+  start per-row generators. Unique call-site identity prevents expression reuse from merging
+  separate streams, and the generator is locked once per batch. This preserves seeded results
+  without adding a JVM upcall; unseeded values follow the nondeterministic-function policy.
 - **IFNULL:** DataFusion's `nvl`/`ifnull` delegates to its conditional COALESCE implementation.
   Flink's `IfNullFunction` instead receives two already-evaluated arguments, so the native
   expression uses an eager scalar kernel and Arrow validity-based selection. This preserves
