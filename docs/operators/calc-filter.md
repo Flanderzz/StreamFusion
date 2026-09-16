@@ -22,6 +22,21 @@ fallback.
   there's no partial evaluation of an expression tree, so one unknown function anywhere in it
   declines the whole `Calc`.
 
+## IFNULL
+
+`IFNULL(value, replacement)` runs natively with Flink's resolved common operand type and
+result nullability, including STRING/VARCHAR, INT/BIGINT and DECIMAL. NULL selects the
+replacement; an empty string is a value. Typed NULLs and nested calls retain their resolved types.
+Both arguments are evaluated once before selection, matching Flink's scalar function: an error
+in the replacement still fails the query when the first argument is non-NULL. This differs from
+short-circuiting `COALESCE`/`CASE`, so IFNULL uses a separate eager columnar kernel. Selection
+uses Arrow validity and preserves decimal precision/scale; an all-valid input reuses its array.
+
+Admission checks the resolved built-in definition. A registered user function named IFNULL keeps
+its own implementation through the existing scalar-UDF bridge. Unsupported child expressions
+still retain their normal fallback rules. SQL tests cover values, schemas, exception behavior,
+volatile argument evaluation and an IFNULL projection/filter composed with native Top-1.
+
 ## String ordering
 
 Relational character-string comparisons (`<`, `<=`, `>`, `>=`) fall back, including
@@ -192,6 +207,24 @@ FLOAT/DOUBLE to TINYINT or SMALLINT first performs that INT conversion, then kee
 low 8 or 16 bits. Thus `128.75` becomes TINYINT `-128`, and positive infinity becomes
 TINYINT/SMALLINT `-1`. NULL remains NULL for every target.
 
+### STRING/VARCHAR/CHAR to BOOLEAN
+
+`CAST(s AS BOOLEAN)` uses a native Arrow Boolean builder. It accepts `t`, `true`, `y`,
+`yes`, `1` as TRUE and `f`, `false`, `n`, `no`, `0` as FALSE, ignoring ASCII case.
+It does not trim whitespace; empty strings, other numeric values and Unicode lookalikes
+are invalid. NULL remains NULL. Flink's resolved result type/nullability is retained.
+
+With the default cast behavior an invalid token fails the query, including for a NOT NULL
+source. With `table.exec.legacy-cast-behaviour=ENABLED` it produces NULL. For a NOT NULL
+source, Flink retains a NOT NULL result declaration even in legacy mode; the existing
+sink enforcer therefore rejects or drops malformed rows according to its ERROR/DROP setting.
+Both outcomes are tested against Flink. CASE can skip
+an unselected failing cast. Default-mode casts nested under AND/OR still fall back so
+that Flink's row short-circuiting suppresses errors on unselected rows; legacy-mode
+casts can compose under AND/OR because malformed input returns NULL. A bare expression
+encoder without table configuration declines this cast instead of guessing the mode.
+BOOLEAN-to-string and TRY_CAST are outside this addition.
+
 ### The host-exact JVM upcall
 
 A second group of casts is **native by default, and this is not a fallback** — it's a real JNI call
@@ -219,7 +252,7 @@ default cast the upcall reproduces.
 
 ### Still falling back
 
-Boolean↔string casts and other pairs not listed above. Temporal casts now use Flink-generated
+Boolean-to-string casts and other pairs not listed above. Temporal casts now use Flink-generated
 expressions; see [temporal functions](temporal-functions.md).
 
 ## Decimal arithmetic
@@ -308,7 +341,25 @@ suffix; an empty suffix matches every non-NULL string. Wildcards have no special
 
 ### INSTR
 
-Two character arguments only. Returns the first match as a 1-based Unicode codepoint position, or zero if absent. An empty needle returns 1; any NULL returns NULL. Three/four-argument INSTR falls back.
+`INSTR(string, needle[, start[, occurrence]])` supports two character strings and optional
+TINYINT/SMALLINT/INT start and occurrence arguments, including runtime columns. Positions
+are 1-based Unicode codepoints; missing matches return zero. A positive start searches
+forward, a negative start searches backward from the end, and zero returns zero. Matches
+can overlap. Defaults are start 1 and occurrence 1.
+
+Any NULL argument returns NULL before validating start/occurrence. A non-positive occurrence
+fails the query, even when start is zero. `INT_MIN` start also fails: its negation overflows
+in Flink's recursive reverse search; native reports the failure without recursive stack
+exhaustion. For an empty needle and positive occurrence, positive start returns 1 and negative
+start returns the string's codepoint length plus 1, even for starts outside the string.
+Zero start still returns zero.
+
+Two-argument calls continue using DataFusion's Unicode position kernel. Extended forms use
+forward/reverse byte search at codepoint boundaries, preserving overlapping matches without
+allocating reversed strings. Built-in admission uses the resolved SQL operator; user functions
+named INSTR retain their own behavior. BIGINT start/occurrence arguments remain unsupported.
+Extended calls under AND/OR stay native only when a literal start excludes `INT_MIN` and a
+literal/default occurrence is positive; otherwise Flink retains row short-circuiting for errors.
 
 ### LOCATE
 

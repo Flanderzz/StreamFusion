@@ -65,6 +65,68 @@ as `pr44-flink-native-benchmarks.zip`. The repository keeps benchmark code and f
 tables; generated CSVs are not versioned. Controls are retained for checking the run, and are
 not subtracted from function times because their result types and lengths can differ.
 
+## IFNULL coverage diagnostic (2026-09-16)
+
+Measured against `ebe550c6` plus IFNULL support, using the release `bench` profile with
+mimalloc, JDK 17, UTC and the same rowwise source/sink methodology above. The selection was
+`IFNULL_STRING,IFNULL_BIGINT,IFNULL_DECIMAL`, with 2,000,000 rows, two warmups, five measured
+trials, a 264-byte ASCII string budget and every eighth input NULL. Source-matched identity
+controls ran in the same JVM before the functions; both transpose operators and native Calc
+substitution were checked for every plan.
+
+| Case | Flink (s) | Native (s) | Flink / native |
+|---|---:|---:|---:|
+| STRING identity control | 0.755 | 1.079 | 0.700x |
+| BIGINT identity control | 0.259 | 0.419 | 0.618x |
+| DECIMAL(38,9) identity control | 0.290 | 0.639 | 0.453x |
+| `IFNULL(s, 'missing')` | 0.751 | 1.109 | 0.677x |
+| `IFNULL(n, CAST(-1 AS BIGINT))` | 0.267 | 0.436 | 0.612x |
+| `IFNULL(n, CAST(0 AS DECIMAL(38,9)))` | 0.283 | 0.642 | 0.441x |
+
+These isolated projections are slower natively, including the identity controls. IFNULL adds
+coverage so that a containing filter/Top-1 island can remain columnar; this measurement does
+not establish an end-to-end speedup for that larger query. Treat it as a coverage prerequisite,
+not a standalone scalar acceleration claim. Controls are not subtracted from function times.
+
+## STRING to BOOLEAN coverage diagnostic (2026-09-16)
+
+Measured against `ebe550c6` plus STRING-to-BOOLEAN support, using JDK 17, UTC and the
+release `bench` profile with mimalloc. The source cycles through `true`, `FALSE`, `t`,
+`0`, `yes`, `n`, with every eighth value NULL. The selection was `STRING_TO_BOOLEAN`,
+with 2,000,000 rows, two warmups and five measured trials. Both transpose operators,
+native Calc substitution and the source-matched identity control were checked.
+
+| Case | Flink (s) | Native (s) | Flink / native |
+|---|---:|---:|---:|
+| STRING identity control | 0.307 | 0.497 | 0.618x |
+| `CAST(s AS BOOLEAN)` | 0.316 | 0.473 | 0.667x |
+
+This isolated conversion is slower natively with rowwise input/output. Its purpose is to
+remove a cast coverage blocker inside larger native islands, where existing Arrow batches
+avoid additional boundaries; these measurements do not claim a speedup for that composition.
+The identity control returns STRING rather than BOOLEAN and is not subtracted from the cast.
+
+## INSTR overloads diagnostic (2026-09-16)
+
+Measured against `ebe550c6` plus extended INSTR support, with JDK 17, UTC and the release
+`bench` profile with mimalloc. The selection was `INSTR3_COLUMN,INSTR4_FORWARD,INSTR4_REVERSE`,
+with 2,000,000 rows, two warmups, five measured trials, a 264-byte ASCII padding budget and
+every eighth source value NULL. Both transpose operators and native Calc substitutions were
+checked. The existing search fixtures supply runtime needles/starts to the three-argument
+case and repeated `x` padding to the forward/reverse third-occurrence cases.
+
+| Case | Flink (s) | Native (s) | Flink / native |
+|---|---:|---:|---:|
+| Runtime needle/start identity control | 0.886 | 1.248 | 0.710x |
+| Literal search identity control | 0.742 | 1.000 | 0.742x |
+| `INSTR(s, needle, start_pos)` | 1.428 | 1.305 | 1.094x |
+| `INSTR(s, 'x', 1, 3)` | 0.773 | 0.998 | 0.774x |
+| `INSTR(s, 'x', -1, 3)` | 3.919 | 0.953 | 4.112x |
+
+Reverse search benefits from avoiding Flink's reversed-string allocations. The short forward
+search remains slower with rowwise input/output; these results do not establish a blanket
+INSTR speedup. Controls return STRING rather than INT and are not subtracted from timings.
+
 ## Exact DECIMAL coverage diagnostic (2026-09-16)
 
 Measured against `ebe550c6` plus exact decimal ROUND/literal/integer-cast support, using JDK 17,

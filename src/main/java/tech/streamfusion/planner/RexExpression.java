@@ -732,6 +732,12 @@ final class RexExpression {
     if ("COALESCE".equals(functionName)) {
       return emitCoalesceAsCase(call.getOperands());
     }
+    if (call.getOperator()
+            instanceof org.apache.flink.table.planner.functions.bridging.BridgingSqlFunction function
+        && function.getDefinition()
+            == org.apache.flink.table.functions.BuiltInFunctionDefinitions.IF_NULL) {
+      return emitBuiltinCall(call, 158);
+    }
     if ("ENCODE".equals(functionName)) {
       return emitCharsetFunction(call, 120, SqlTypeFamily.CHARACTER);
     }
@@ -792,8 +798,9 @@ final class RexExpression {
     if ("ENDSWITH".equals(functionName)) {
       return emitCharacterFunction(call, 101, 2, 2);
     }
-    if ("INSTR".equals(functionName)) {
-      return emitStringSearch(call, 102, false);
+    if (call.getOperator()
+        == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.INSTR) {
+      return emitInstr(call);
     }
     if ("LOCATE".equals(functionName)) {
       return emitStringSearch(call, 102, true);
@@ -986,7 +993,7 @@ final class RexExpression {
         return emit(operands.get(0));
       case AND:
       case OR:
-        if (operands.stream().anyMatch(RexExpression::requiresRowShortCircuit)) {
+        if (operands.stream().anyMatch(this::requiresRowShortCircuit)) {
           return reject("Fallible expressions under AND/OR require Flink's row short-circuiting");
         }
         // Calcite leaves AND/OR n-ary; the native binary op needs a left-deep nesting, which a
@@ -1048,6 +1055,21 @@ final class RexExpression {
       }
     }
     return character && numeric;
+  }
+
+  private boolean emitInstr(RexCall call) {
+    List<RexNode> args = call.getOperands();
+    if (args.size() == 2) {
+      return emitStringSearch(call, 102, false);
+    }
+    if (args.size() < 3
+        || args.size() > 4
+        || !isCharacter(args.get(0))
+        || !isCharacter(args.get(1))
+        || args.subList(2, args.size()).stream().anyMatch(arg -> !isInt32(arg))) {
+      return reject("INSTR requires two character strings and optional INT start/occurrence");
+    }
+    return emitBuiltinCall(call, 161);
   }
 
   private boolean emitStringSearch(RexCall call, int op, boolean locate) {
@@ -1229,7 +1251,7 @@ final class RexExpression {
     return emitBuiltinCall(call, op);
   }
 
-  private static boolean requiresRowShortCircuit(RexNode node) {
+  private boolean requiresRowShortCircuit(RexNode node) {
     if (!(node instanceof RexCall call)) {
       return false;
     }
@@ -1243,6 +1265,20 @@ final class RexExpression {
     }
     String name = call.getOperator().getName().toUpperCase(Locale.ROOT);
     List<RexNode> args = call.getOperands();
+    if (call.getKind() == SqlKind.CAST
+        && call.getType().getSqlTypeName() == SqlTypeName.BOOLEAN
+        && args.size() == 1
+        && isCharacter(args.get(0))
+        && !Boolean.TRUE.equals(legacyCastBehaviour)) {
+      return true;
+    }
+    if (call.getOperator()
+            == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.INSTR
+        && args.size() >= 3
+        && (!isIntLiteralAtLeast(args.get(2), Integer.MIN_VALUE + 1)
+            || args.size() == 4 && !isIntLiteralAtLeast(args.get(3), 1))) {
+      return true;
+    }
     if (call.getOperator()
             == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.ROUND
         && args.size() == 2
@@ -1269,7 +1305,7 @@ final class RexExpression {
         && "ERROR".equals(jsonSymbol(args.get(2)))) {
       return true;
     }
-    return args.stream().anyMatch(RexExpression::requiresRowShortCircuit);
+    return args.stream().anyMatch(this::requiresRowShortCircuit);
   }
 
   private static boolean hasNonzeroIntegerDivisor(RexCall call) {
@@ -1694,6 +1730,13 @@ final class RexExpression {
     }
     SqlTypeName source = sourceType.getSqlTypeName();
     SqlTypeName targetType = resultType.getSqlTypeName();
+    if ((source == SqlTypeName.VARCHAR || source == SqlTypeName.CHAR)
+        && targetType == SqlTypeName.BOOLEAN) {
+      if (legacyCastBehaviour == null) {
+        return reject("STRING to BOOLEAN requires the configured cast behavior");
+      }
+      return emitBuiltinCall(call, legacyCastBehaviour ? 160 : 159);
+    }
     // A non-narrowing cast to VARCHAR from a CHAR or VARCHAR source (target length ≥ source). Flink
     // stores both as unpadded StringData and neither pads nor truncates a widening string cast, so
     // the

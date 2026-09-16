@@ -54,6 +54,11 @@ class ScalarFunctionBenchmark {
 
   private static final List<Query> SCALAR_FUNCTIONS =
       List.of(
+          new Query("IFNULL_STRING", "text", "IFNULL(s, 'missing')", "STRING"),
+          new Query("IFNULL_BIGINT", "bigint", "IFNULL(n, CAST(-1 AS BIGINT))", "BIGINT"),
+          new Query(
+              "IFNULL_DECIMAL", "tt_decimal", "IFNULL(n, CAST(0 AS DECIMAL(38,9)))", "DECIMAL(38,9)"),
+          new Query("STRING_TO_BOOLEAN", "boolean_text", "CAST(s AS BOOLEAN)", "BOOLEAN"),
           new Query("DECIMAL_ROUND_POS", "tt_decimal", "ROUND(n, 2)", "DECIMAL(32,2)"),
           new Query("DECIMAL_ROUND_NEG", "tt_decimal", "ROUND(n, -3)", "DECIMAL(30,0)"),
           new Query("DECIMAL_ROUND_EXPAND", "tt_decimal", "ROUND(n, 12)", "DECIMAL(38,9)"),
@@ -81,6 +86,9 @@ class ScalarFunctionBenchmark {
           new Query("ENDSWITH_COLUMN", "search_needle", "ENDSWITH(s, needle)", "BOOLEAN"),
           new Query("INSTR_LITERAL", "search", "INSTR(s, ':match')", "INT"),
           new Query("INSTR_COLUMN", "search_needle", "INSTR(s, needle)", "INT"),
+          new Query("INSTR3_COLUMN", "search_needle_start", "INSTR(s, needle, start_pos)", "INT"),
+          new Query("INSTR4_FORWARD", "search", "INSTR(s, 'x', 1, 3)", "INT"),
+          new Query("INSTR4_REVERSE", "search", "INSTR(s, 'x', -1, 3)", "INT"),
           new Query("LOCATE2_LITERAL", "search", "LOCATE(':match', s)", "INT"),
           new Query("LOCATE2_COLUMN", "search_needle", "LOCATE(needle, s)", "INT"),
           new Query("LOCATE3_LITERAL", "search_start", "LOCATE(':match', s, start_pos)", "INT"),
@@ -376,7 +384,9 @@ class ScalarFunctionBenchmark {
     env.setParallelism(1);
     StreamTableEnvironment tables = StreamTableEnvironment.create(env);
     String[] text =
-        UNICODE
+        input.equals("boolean_text")
+            ? new String[] {"true", "FALSE", "t", "0", "yes", "n"}
+            : UNICODE
             ? new String[] {
               payload(" \u4e2dAbC \ud83d\ude00dEf "), payload(" \u00e9dEf \ud83d\ude42AbC ")
             }
@@ -505,7 +515,9 @@ class ScalarFunctionBenchmark {
                               ? null
                               : input.equals("encoded")
                                   ? encoded
-                                  : input.equals("hex") ? hex[(int) (i % 2)] : text[(int) (i % 2)]))
+                                  : input.equals("hex")
+                                      ? hex[(int) (i % 2)]
+                                      : text[(int) (i % text.length)]))
               .returns(Types.ROW_NAMED(new String[] {"s"}, Types.STRING)),
           Schema.newBuilder().column("s", DataTypes.STRING()).build());
     }
