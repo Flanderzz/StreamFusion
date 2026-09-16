@@ -65,6 +65,29 @@ as `pr44-flink-native-benchmarks.zip`. The repository keeps benchmark code and f
 tables; generated CSVs are not versioned. Controls are retained for checking the run, and are
 not subtracted from function times because their result types and lengths can differ.
 
+## IFNULL coverage diagnostic (2026-09-16)
+
+Measured against `ebe550c6` plus IFNULL support, using the release `bench` profile with
+mimalloc, JDK 17, UTC and the same rowwise source/sink methodology above. The selection was
+`IFNULL_STRING,IFNULL_BIGINT,IFNULL_DECIMAL`, with 2,000,000 rows, two warmups, five measured
+trials, a 264-byte ASCII string budget and every eighth input NULL. Source-matched identity
+controls ran in the same JVM before the functions; both transpose operators and native Calc
+substitution were checked for every plan.
+
+| Case | Flink (s) | Native (s) | Flink / native |
+|---|---:|---:|---:|
+| STRING identity control | 0.755 | 1.079 | 0.700x |
+| BIGINT identity control | 0.259 | 0.419 | 0.618x |
+| DECIMAL(38,9) identity control | 0.290 | 0.639 | 0.453x |
+| `IFNULL(s, 'missing')` | 0.751 | 1.109 | 0.677x |
+| `IFNULL(n, CAST(-1 AS BIGINT))` | 0.267 | 0.436 | 0.612x |
+| `IFNULL(n, CAST(0 AS DECIMAL(38,9)))` | 0.283 | 0.642 | 0.441x |
+
+These isolated projections are slower natively, including the identity controls. IFNULL adds
+coverage so that a containing filter/Top-1 island can remain columnar; this measurement does
+not establish an end-to-end speedup for that larger query. Treat it as a coverage prerequisite,
+not a standalone scalar acceleration claim. Controls are not subtracted from function times.
+
 ## STRING to BOOLEAN coverage diagnostic (2026-09-16)
 
 Measured against `ebe550c6` plus STRING-to-BOOLEAN support, using JDK 17, UTC and the

@@ -54,6 +54,10 @@ class ScalarFunctionBenchmark {
 
   private static final List<Query> SCALAR_FUNCTIONS =
       List.of(
+          new Query("IFNULL_STRING", "text", "IFNULL(s, 'missing')", "STRING"),
+          new Query("IFNULL_BIGINT", "bigint", "IFNULL(n, CAST(-1 AS BIGINT))", "BIGINT"),
+          new Query(
+              "IFNULL_DECIMAL", "tt_decimal", "IFNULL(n, CAST(0 AS DECIMAL(38,9)))", "DECIMAL(38,9)"),
           new Query("STRING_TO_BOOLEAN", "boolean_text", "CAST(s AS BOOLEAN)", "BOOLEAN"),
           new Query("ASCII", "tt_ascii", "ASCII(s)", "INT"),
           new Query("CHR", "bigint", "CHR(n)", "STRING"),
