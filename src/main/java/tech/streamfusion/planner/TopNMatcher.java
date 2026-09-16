@@ -10,11 +10,14 @@ import org.apache.calcite.rex.RexInputRef;
 import org.apache.calcite.rex.RexLiteral;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.util.ImmutableBitSet;
+import org.apache.flink.table.api.config.ExecutionConfigOptions;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
+import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalMiniBatchAssigner;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalRank;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalRel;
 import org.apache.flink.table.planner.plan.utils.ChangelogPlanUtils;
 import org.apache.flink.table.planner.plan.utils.RankProcessStrategy;
+import org.apache.flink.table.planner.utils.ShortcutUtils;
 import org.apache.flink.table.runtime.operators.rank.ConstantRankRange;
 import org.apache.flink.table.runtime.operators.rank.RankType;
 import org.apache.flink.table.runtime.operators.rank.VariableRankRange;
@@ -64,9 +67,9 @@ final class TopNMatcher {
       return "Top-N: a time-ordered rank is deduplication, not a value Top-N";
     }
     if (offset(rank) > 0 && !rank.outputRankNumber()
-        && !ChangelogPlanUtils.isInsertOnly((StreamPhysicalRel) rank.getInput())
         && !(rank.rankStrategy() instanceof RankProcessStrategy.UpdateFastStrategy)) {
-      return "Top-N: retracting OFFSET without projected rank requires Flink's stored-row-kind semantics";
+      String reason = retractingOffsetInputReason(rank.getInput());
+      if (reason != null) return reason;
     }
     // The whole row crosses the boundary unchanged, so every column (incl. partition/order keys)
     // must be a type the conversion handles.
@@ -79,6 +82,31 @@ final class TopNMatcher {
       return "Top-N: a column type the boundary cannot carry";
     }
     return null;
+  }
+
+  static String retractingOffsetInputReason(RelNode input) {
+    if (!ChangelogPlanUtils.isInsertOnly((StreamPhysicalRel) input)
+        && ShortcutUtils.unwrapTableConfig(input)
+            .get(ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_ENABLED)
+        && !preservesMiniBatchChangelog(input)) {
+      return "retracting OFFSET requires unchanged upstream mini-batch changelog order";
+    }
+    return null;
+  }
+
+  private static boolean preservesMiniBatchChangelog(RelNode input) {
+    if (input.getInputs().isEmpty()) return true;
+    // A net-equivalent upstream changelog is insufficient: hidden-rank emissions affect equality.
+    // Admit source changes through row-local projections, filters, exchanges and batch markers.
+    if (!(input instanceof Calc || input instanceof Exchange
+        || input instanceof StreamPhysicalNativeCalc
+        || input instanceof StreamPhysicalNativeFilter
+        || input instanceof StreamPhysicalNativeColumnarExchange
+        || input instanceof StreamPhysicalNativeMiniBatchAssigner
+        || input instanceof StreamPhysicalMiniBatchAssigner)) {
+      return false;
+    }
+    return input.getInputs().stream().allMatch(TopNMatcher::preservesMiniBatchChangelog);
   }
 
   static int[] partitionColumns(StreamPhysicalRank rank) {
@@ -211,6 +239,6 @@ final class TopNMatcher {
         TopNMatcher.outputRankNumber(rank),
         retracting,
         null,
-        false);
+        ChangelogPlanUtils.generateUpdateBefore(rank));
   }
 }

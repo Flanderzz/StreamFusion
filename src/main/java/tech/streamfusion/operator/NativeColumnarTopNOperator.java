@@ -149,7 +149,7 @@ public class NativeColumnarTopNOperator extends AbstractNativeStatefulOperator<A
         schemaAddress ->
             Native.createRocksDBTopNRanker(
                 partitionColumns, keyTimestampPrecisions(), sortIndices, sortAscending,
-                sortNullsFirst, offset, limit, rankEndColumn, outputRankNumber, retracting, netDiff,
+                sortNullsFirst, offset, limit, rankEndColumn, outputRankNumber, retracting, generateUpdateBefore, netDiff,
                 stateTtlMillis, now, memoryBudgetBytes(), schemaAddress, rocksdb.tableDirectory(),
                 maxParallelism(), rocksdb.optionsJson(), rocksdb.sharedResourcesHandle(),
                 rocksdb.sourceDirectories(), rocksdb.sourceSnapshotTokens(),
@@ -200,6 +200,7 @@ public class NativeColumnarTopNOperator extends AbstractNativeStatefulOperator<A
         rankEndColumn,
         outputRankNumber,
         retracting,
+        generateUpdateBefore,
         netDiff,
         stateTtlMillis,
         memoryBudgetBytes());
@@ -236,6 +237,7 @@ public class NativeColumnarTopNOperator extends AbstractNativeStatefulOperator<A
         rankEndColumn,
         outputRankNumber,
         retracting,
+        generateUpdateBefore,
         netDiff,
         stateTtlMillis,
         getProcessingTimeService().getCurrentProcessingTime(),

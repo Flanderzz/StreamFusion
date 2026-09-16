@@ -54,8 +54,9 @@ whose observable output is a hardcoded-lenient warn-and-skip. We model the treem
 the whole buffer expires atomically on a head-entry timestamp refreshed by every processed record.
 A partition idle past the retention loses everything at once (a stale retraction then finds
 nothing and emits nothing — the same observable as Flink's lenient path); a partition Flink would
-half-expire keeps its rows here. Replicating the half-expired output exactly would mean a second
-count structure whose only purpose is reproducing state corruption.
+half-expire keeps its rows here. Hidden-rank OFFSET now retains independent sort-key counts because failed full-row retractions
+change them even without TTL. Its expiry still follows the whole-buffer rule above; independent
+per-sort-key TTL clocks are not modeled.
 
 ## Proctime keep-last dedup: which Flink to match
 

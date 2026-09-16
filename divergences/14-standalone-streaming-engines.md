@@ -64,3 +64,15 @@ confirmed and where we deliberately differ.
   with the existing native keyed-state, TTL and checkpoint infrastructure. Output gathers
   selected rows from the input Arrow batch; neither sorting nor retained payload rows are needed.
   JNI ownership and exception handling follow the same Comet-derived bridge as the other operators.
+
+- **Retracting OFFSET retains Flink row kinds and independent counts.** The consulted Arroyo
+  datastream exposes windowed Top-N descriptions, but its worker has no matching four-kind
+  retracting OFFSET operator. We follow released Flink 2.2.1's `RetractableTopNFunction` cascade.
+  Its heap backend aliases emitted and retained rows, so an emitted kind affects later equality;
+  sort-key counts still decrease after failed removals. Compact row bytes remain immutable, with
+  mutable kind metadata and the independent count on each tie group's first row. Native RocksDB
+  persists the same logical state as native memory, following the established dedup choice to
+  preserve heap-backend behavior across native backends. Legacy snapshots infer INSERT kinds
+  and list-length counts; new snapshots retain the additional metadata. The planner's UPDATE_BEFORE flag travels through create and restore on both backends;
+  ownership and exception handling retain the Comet-derived JNI pattern, and retained metadata
+  uses the existing native memory budget.

@@ -87,7 +87,9 @@ public class NativeColumnarTopNExecNode extends ExecNodeBase<ArrowBatch>
     // Under mini-batch, both rankers emit the net logical-bundle rank diff instead of exposing
     // per-record intermediate rank windows. The final materialized Top-N is identical; with
     // mini-batch off, the per-input-row changelog remains byte-identical to the host path.
-    boolean netDiff = config.get(ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_ENABLED);
+    // Hidden-rank OFFSET mutates retained row kinds on each emission, affecting later equality.
+    boolean netDiff = config.get(ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_ENABLED)
+        && !(retracting && offset > 0 && !outputRankNumber && rowKeyColumns == null);
     long miniBatchSize = config.get(ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_SIZE);
     // The job-wide idle-state retention; Flink defines STATE_TTL hints only for joins and
     // aggregates, so ranks have no per-operator override to resolve.

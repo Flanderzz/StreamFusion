@@ -1952,6 +1952,7 @@ public final class Native {
       int rankEndColumn,
       boolean outputRankNumber,
       boolean retracting,
+      boolean generateUpdateBefore,
       boolean netDiff,
       long stateTtlMillis,
       long nowMillis,
@@ -2479,6 +2480,7 @@ public final class Native {
       int rankEndColumn,
       boolean outputRankNumber,
       boolean retracting,
+      boolean generateUpdateBefore,
       boolean netDiff,
       long stateTtlMillis,
       long memoryBudgetBytes);
@@ -2538,6 +2540,7 @@ public final class Native {
       int rankEndColumn,
       boolean outputRankNumber,
       boolean retracting,
+      boolean generateUpdateBefore,
       boolean netDiff,
       long stateTtlMillis,
       long nowMillis,

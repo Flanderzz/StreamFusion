@@ -1,5 +1,7 @@
 use crate::*;
 
+mod retract_offset;
+
 fn sort_array(array: &ArrayRef) -> ArrayRef {
     use arrow::array::AsArray;
     use arrow::datatypes::{Float32Type, Float64Type};
@@ -202,6 +204,10 @@ impl TopNConverters {
 pub(crate) struct TopNRow {
     pub(crate) sort: OwnedRow,
     pub(crate) payload: Arc<OwnedRow>,
+    // Hidden-rank emissions mutate Flink's retained RowData header. The first row of each
+    // sort-key list also carries its independent count; None denotes the legacy list length.
+    pub(crate) stored_kind: i8,
+    pub(crate) sort_count: Option<i64>,
     /// Wall-clock millis of the entry's last write (Flink state-TTL); stays 0 while TTL is off.
     /// Append-only granularity is the sort-key list (Flink's `MapState<sortKey, List<row>>`): every
     /// write to a list refreshes all its rows, so byte-equal sort keys always share one timestamp.
@@ -255,7 +261,10 @@ pub(crate) type MemoryTopNStore = MemoryStateStore<Vec<TopNRow>>;
 
 /// Estimated footprint of one buffered Top-N entry (sort key + payload row + container overhead).
 pub(crate) fn topn_entry_bytes(entry: &TopNRow) -> usize {
-    entry.sort.row().as_ref().len() + entry.payload.row().as_ref().len() + GROUP_ENTRY_OVERHEAD
+    entry.sort.row().as_ref().len()
+        + entry.payload.row().as_ref().len()
+        + GROUP_ENTRY_OVERHEAD
+        + std::mem::size_of::<(Option<i64>, i8)>()
 }
 
 /// The Top-N buffer's persistent backend: the generic persistent store under the raw whole-list
@@ -271,6 +280,8 @@ pub(crate) type RocksTopNStore = crate::state::RocksStore<TopNStateCodec>;
 /// instance). The store-level TTL prefix carries the buffer's NEWEST row clock, so compaction only
 /// drops a value once every row expired; per-row expiry stays the ranker's lazy prune, exactly as
 /// on the memory backend.
+/// Hidden-rank OFFSET appends a per-row `(kind: i8, sort_count: i64)` trailer; -1 means no explicit
+/// count. An absent trailer restores legacy INSERT kinds and implicit list-length counts.
 #[cfg(feature = "rocksdb-state")]
 pub(crate) struct TopNStateCodec {
     sort: Arc<RowConverter>,
@@ -303,6 +314,14 @@ impl crate::state::RocksStateCodec for TopNStateCodec {
             .iter()
             .map(|entry| 16 + entry.sort.row().data().len() + entry.payload.row().data().len())
             .sum::<usize>()
+            + if value
+                .iter()
+                .any(|row| row.sort_count.is_some() || row.stored_kind != 0)
+            {
+                9 * value.len()
+            } else {
+                0
+            }
     }
     fn write_ms(&self, value: &Vec<TopNRow>) -> i64 {
         value.iter().map(|entry| entry.ts_ms).max().unwrap_or(0)
@@ -317,6 +336,15 @@ impl crate::state::RocksStateCodec for TopNStateCodec {
             write_length_prefixed(out, entry.payload.row().data());
             out.extend_from_slice(&entry.ts_ms.to_le_bytes());
         }
+        if value
+            .iter()
+            .any(|row| row.sort_count.is_some() || row.stored_kind != 0)
+        {
+            for entry in value {
+                out.push(entry.stored_kind as u8);
+                out.extend_from_slice(&entry.sort_count.unwrap_or(-1).to_le_bytes());
+            }
+        }
     }
     fn from_raw(&self, bytes: &[u8]) -> Vec<TopNRow> {
         let mut cursor = RawListCursor::new(bytes);
@@ -324,11 +352,21 @@ impl crate::state::RocksStateCodec for TopNStateCodec {
         let payload_parser = self.payload.parser();
         let mut buffer: Vec<_> = (0..cursor.u32())
             .map(|_| TopNRow {
+                stored_kind: 0,
+                sort_count: None,
                 sort: sort_parser.parse(cursor.bytes()).owned(),
                 payload: Arc::new(payload_parser.parse(cursor.bytes()).owned()),
                 ts_ms: cursor.i64(),
             })
             .collect();
+        if !cursor.bytes.is_empty() {
+            for entry in &mut buffer {
+                entry.stored_kind = cursor.bytes[0] as i8;
+                cursor.bytes = &cursor.bytes[1..];
+                let count = cursor.i64();
+                entry.sort_count = (count >= 0).then_some(count);
+            }
+        }
         if self.floating_sort && !buffer.is_empty() {
             normalize_restored_sort_keys(&mut buffer, &self.sort);
         }
@@ -682,6 +720,8 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> TopNRanker<S> {
                 buffer.insert(
                     pos,
                     TopNRow {
+                        stored_kind: 0,
+                        sort_count: None,
                         sort: key_row.owned(),
                         payload: Arc::new(payloads.row(row).owned()),
                         ts_ms: 0,
@@ -723,6 +763,8 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> TopNRanker<S> {
                 buffer.insert(
                     pos,
                     TopNRow {
+                        stored_kind: 0,
+                        sort_count: None,
                         sort: key_row.owned(),
                         payload: Arc::clone(&payload),
                         ts_ms: 0,
@@ -869,6 +911,8 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> TopNRanker<S> {
             buffer.insert(
                 pos,
                 TopNRow {
+                    stored_kind: 0,
+                    sort_count: None,
                     sort: key_row.owned(),
                     payload: Arc::new(payloads.row(row).owned()),
                     ts_ms: 0,
@@ -1029,12 +1073,18 @@ fn write_raw_topn_snapshot_partition<'a>(
     let mut sorts = BinaryBuilder::new();
     let mut rows = BinaryBuilder::new();
     let mut write_timestamps = Int64Builder::new();
+    let mut stored_kinds = arrow::array::Int8Builder::new();
+    let mut sort_counts = Int64Builder::new();
+    let mut offset_state = false;
     for (key, buffer) in entries {
         for entry in buffer {
             keys.append_value(&key.0);
             sorts.append_value(entry.sort.row().data());
             rows.append_value(entry.payload.row().data());
             write_timestamps.append_value(entry.ts_ms);
+            stored_kinds.append_value(entry.stored_kind);
+            sort_counts.append_option(entry.sort_count);
+            offset_state |= entry.sort_count.is_some() || entry.stored_kind != 0;
         }
     }
     let mut fields = vec![
@@ -1044,6 +1094,10 @@ fn write_raw_topn_snapshot_partition<'a>(
     ];
     if ttl_on {
         fields.push(Field::new(TTL_TS_COLUMN, DataType::Int64, false));
+    }
+    if offset_state {
+        fields.push(Field::new("$stored_kind$", DataType::Int8, false));
+        fields.push(Field::new("$sort_count$", DataType::Int64, true));
     }
     let raw_schema = Arc::new(Schema::new_with_metadata(
         fields,
@@ -1059,6 +1113,10 @@ fn write_raw_topn_snapshot_partition<'a>(
     ];
     if ttl_on {
         columns.push(Arc::new(write_timestamps.finish()));
+    }
+    if offset_state {
+        columns.push(Arc::new(stored_kinds.finish()));
+        columns.push(Arc::new(sort_counts.finish()));
     }
     let batch = RecordBatch::try_new(raw_schema, columns).expect("raw top-n snapshot batch");
     write_ipc(&batch)
@@ -1304,6 +1362,8 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> TopNRanker<S> {
                 None => groups.insert(ByteKey::from(part), Vec::new()),
             };
             buffer.push(TopNRow {
+                stored_kind: 0,
+                sort_count: None,
                 sort: keys.row(row).owned(),
                 payload: Arc::new(payloads.row(row).owned()),
                 ts_ms: restored_at_ms,
@@ -1354,6 +1414,18 @@ fn load_topn_batch_raw(
             .expect("normalize snapshot sort keys")
     });
     let rows = column_binary(batch, RAW_SNAPSHOT_ROW);
+    let stored_kinds = batch.column_by_name("$stored_kind$").map(|array| {
+        array
+            .as_any()
+            .downcast_ref::<Int8Array>()
+            .expect("stored row kinds")
+    });
+    let sort_counts = batch.column_by_name("$sort_count$").map(|array| {
+        array
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("sort-key counts")
+    });
     let write_timestamps = batch
         .column_by_name(TTL_TS_COLUMN)
         .is_some()
@@ -1365,6 +1437,9 @@ fn load_topn_batch_raw(
             None => groups.insert(ByteKey::from(part), Vec::new()),
         };
         let entry = TopNRow {
+            stored_kind: stored_kinds.map_or(0, |kinds| kinds.value(row)),
+            sort_count: sort_counts
+                .and_then(|counts| (!counts.is_null(row)).then(|| counts.value(row))),
             sort: normalized_sorts.as_ref().map_or_else(
                 || sort_parser.parse(sorts.value(row)).owned(),
                 |keys| keys.row(row).owned(),
@@ -1436,7 +1511,9 @@ fn emit_changelog(
 /// append-only ranker it keeps the **full** sorted buffer per key (never truncated to N), so when a
 /// top-N row is retracted the row that was at rank N+1 can be promoted into the top-N.
 ///
-/// Each input row accumulates (`+I`/`+U`) by inserting into the sorted buffer or retracts (`-U`/`-D`)
+/// Hidden-rank OFFSET uses Flink's retained-kind cascade and independent sort-key counts (see
+/// `retract_offset`), since an output mutation changes later full-row equality. Other modes:
+/// each input row accumulates (`+I`/`+U`) by inserting into the sorted buffer or retracts (`-U`/`-D`)
 /// by removing the first full-row-equal match. The emitted changelog is then the **diff of the top-N
 /// before vs after** the mutation: with a projected rank or offset, compared by rank position (a
 /// changed occupant → `-U`(old)/`+U`(new), a newly-occupied rank → `+I`, a vacated rank → `-D`);
@@ -1452,6 +1529,7 @@ pub(crate) struct RetractableTopNRanker<S: KeyedStateStore<Vec<TopNRow>> = Memor
     offset: i64,
     limit: i64,
     output_rank_number: bool,
+    generate_update_before: bool,
     net_diff: bool,
     // Idle-state retention millis (0 = off). Expiry granularity is the WHOLE buffer, clocked on
     // the head entry's `ts_ms` — see the invariant documented on `push`.
@@ -1484,6 +1562,7 @@ impl RetractableTopNRanker {
             offset,
             limit,
             output_rank_number,
+            generate_update_before: true,
             net_diff: false,
             ttl_ms: 0,
             last_sweep_ms: 0,
@@ -1513,8 +1592,13 @@ impl RetractableTopNRanker {
 }
 
 impl<S: KeyedStateStore<Vec<TopNRow>>> RetractableTopNRanker<S> {
+    pub(crate) fn with_generate_update_before(mut self, enabled: bool) -> Self {
+        self.generate_update_before = enabled;
+        self
+    }
+
     pub(crate) fn with_net_diff(mut self, net_diff: bool) -> Self {
-        self.net_diff = net_diff;
+        self.net_diff = net_diff && (self.output_rank_number || self.offset == 0);
         self
     }
 
@@ -1531,6 +1615,7 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> RetractableTopNRanker<S> {
             offset: self.offset,
             limit: self.limit,
             output_rank_number: self.output_rank_number,
+            generate_update_before: self.generate_update_before,
             net_diff: self.net_diff,
             ttl_ms: self.ttl_ms,
             last_sweep_ms: self.last_sweep_ms,
@@ -1711,6 +1796,33 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> RetractableTopNRanker<S> {
             if ttl.enabled() {
                 delta -= Self::expire_whole_buffer(buffer, ttl, track);
             }
+            if self.offset > 0 && !self.output_rank_number {
+                let change = retract_offset::push(
+                    buffer,
+                    TopNRow {
+                        sort: keys.row(row).owned(),
+                        payload: Arc::new(payloads.row(row).owned()),
+                        stored_kind: 0,
+                        sort_count: None,
+                        ts_ms: 0,
+                    },
+                    matches!(row_kinds.map(|k| k.value(row)).unwrap_or(0), 1 | 3),
+                    self.offset,
+                    self.limit,
+                    self.generate_update_before,
+                    &mut out_rows,
+                    &mut out_kinds,
+                );
+                if track {
+                    delta += change;
+                }
+                if ttl.enabled() {
+                    if let Some(head) = buffer.first_mut() {
+                        head.ts_ms = ttl.now();
+                    }
+                }
+                continue;
+            }
             // The top-N window before the mutation: Arc bumps of the payloads, not row clones.
             let old_top: Vec<Arc<OwnedRow>> = buffer
                 [offset.min(buffer.len())..limit.min(buffer.len())]
@@ -1737,6 +1849,8 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> RetractableTopNRanker<S> {
                 buffer.insert(
                     pos,
                     TopNRow {
+                        stored_kind: 0,
+                        sort_count: None,
                         sort: key_row.owned(),
                         payload: Arc::new(payloads.row(row).owned()),
                         ts_ms: 0,
@@ -1899,6 +2013,8 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> RetractableTopNRanker<S> {
                 buffer.insert(
                     pos,
                     TopNRow {
+                        stored_kind: 0,
+                        sort_count: None,
                         sort: key_row.owned(),
                         payload: Arc::new(payloads.row(row).owned()),
                         ts_ms: 0,
@@ -2117,6 +2233,8 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> RetractableTopNRanker<S> {
                 None => groups.insert(ByteKey::from(part), Vec::new()),
             };
             buffer.push(TopNRow {
+                stored_kind: 0,
+                sort_count: None,
                 sort: keys.row(row).owned(),
                 payload: Arc::new(payloads.row(row).owned()),
                 ts_ms: restored_at_ms,
@@ -4076,6 +4194,7 @@ pub extern "system" fn Java_tech_streamfusion_Native_createTopNRanker<'local>(
     rank_end_column: jint,
     output_rank_number: jboolean,
     retracting: jboolean,
+    generate_update_before: jboolean,
     net_diff: jboolean,
     state_ttl_millis: jlong,
     memory_budget_bytes: jlong,
@@ -4094,6 +4213,7 @@ pub extern "system" fn Java_tech_streamfusion_Native_createTopNRanker<'local>(
                     output_rank_number != 0,
                 )
                 .with_key_timestamp_precisions(timestamp_precisions)
+                .with_generate_update_before(generate_update_before != 0)
                 .with_net_diff(net_diff != 0)
                 .with_state_ttl(state_ttl_millis),
             )
@@ -4255,6 +4375,7 @@ pub extern "system" fn Java_tech_streamfusion_Native_restoreTopNRankerPartitions
     rank_end_column: jint,
     output_rank_number: jboolean,
     retracting: jboolean,
+    generate_update_before: jboolean,
     net_diff: jboolean,
     state_ttl_millis: jlong,
     now_millis: jlong,
@@ -4292,6 +4413,9 @@ pub extern "system" fn Java_tech_streamfusion_Native_restoreTopNRankerPartitions
             &restored,
             now_millis,
         );
+        if let TopNHandle::Retract(retract) = &mut ranker {
+            retract.generate_update_before = generate_update_before != 0;
+        }
         if let TopNHandle::Append(append) = &mut ranker {
             append.rank_end_column = (rank_end_column >= 0).then_some(rank_end_column as usize);
         }
@@ -4572,6 +4696,8 @@ mod tests {
         let payload = conv.payload.convert_columns(batch.columns()).unwrap();
         let mut buffer: Vec<_> = (0..2)
             .map(|i| TopNRow {
+                stored_kind: 0,
+                sort_count: None,
                 sort: keys.row(i).owned(),
                 payload: Arc::new(payload.row(i).owned()),
                 ts_ms: 0,
