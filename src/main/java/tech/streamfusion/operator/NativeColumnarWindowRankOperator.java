@@ -45,6 +45,7 @@ public class NativeColumnarWindowRankOperator extends AbstractNativeStatefulOper
   private final long slideMillis;
   private final boolean cumulative;
   private final RowType rowType;
+  private final boolean keepLastOnTie;
 
   private transient long registeredTimer;
   private transient long maxOpenEnd;
@@ -83,7 +84,8 @@ public class NativeColumnarWindowRankOperator extends AbstractNativeStatefulOper
         slideMillis,
         cumulative,
         rowType,
-        maxParallelism);
+        maxParallelism,
+        false);
   }
 
   public NativeColumnarWindowRankOperator(
@@ -103,6 +105,44 @@ public class NativeColumnarWindowRankOperator extends AbstractNativeStatefulOper
       boolean cumulative,
       RowType rowType,
       int maxParallelism) {
+    this(
+        windowStartColumn,
+        windowEndColumn,
+        partitionColumns,
+        keyTimestampPrecisions,
+        sortIndices,
+        sortAscending,
+        sortNullsFirst,
+        limit,
+        outputRankNumber,
+        boundaryOffsetMillis,
+        proctime,
+        windowMillis,
+        slideMillis,
+        cumulative,
+        rowType,
+        maxParallelism,
+        false);
+  }
+
+  public NativeColumnarWindowRankOperator(
+      int windowStartColumn,
+      int windowEndColumn,
+      int[] partitionColumns,
+      int[] keyTimestampPrecisions,
+      int[] sortIndices,
+      int[] sortAscending,
+      int[] sortNullsFirst,
+      long limit,
+      boolean outputRankNumber,
+      long boundaryOffsetMillis,
+      boolean proctime,
+      long windowMillis,
+      long slideMillis,
+      boolean cumulative,
+      RowType rowType,
+      int maxParallelism,
+      boolean keepLastOnTie) {
     super("window rank", keyTimestampPrecisions, maxParallelism);
     this.windowStartColumn = windowStartColumn;
     this.windowEndColumn = windowEndColumn;
@@ -118,6 +158,7 @@ public class NativeColumnarWindowRankOperator extends AbstractNativeStatefulOper
     this.slideMillis = slideMillis;
     this.cumulative = cumulative;
     this.rowType = rowType;
+    this.keepLastOnTie = keepLastOnTie;
   }
 
   // A proctime window rank closes windows on processing-time timers, so the deadline must travel
@@ -233,6 +274,8 @@ public class NativeColumnarWindowRankOperator extends AbstractNativeStatefulOper
   @Override
   public void open() throws Exception {
     super.open();
+    // Plan configuration is reapplied after either memory or persistent-state restoration.
+    Native.setWindowRankerKeepLastOnTie(handle, keepLastOnTie);
     flinkWindowMetrics =
         new FlinkWindowMetrics(getMetricGroup(), getProcessingTimeService());
     registeredTimer = Long.MIN_VALUE;

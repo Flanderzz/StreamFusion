@@ -242,6 +242,27 @@ pub(crate) fn build_expr(
             };
             function.call(vec![left, right])
         }
+        30 => {
+            let precision = (arg / 100) as u8;
+            let scale = (arg % 100) as i8;
+            let mut children = Vec::with_capacity(2);
+            for _ in 0..2 {
+                children.push(build_expr(
+                    schema,
+                    kinds,
+                    payload,
+                    child_counts,
+                    longs,
+                    doubles,
+                    strings,
+                    cursor,
+                ));
+            }
+            datafusion::logical_expr::ScalarUDF::new_from_impl(
+                crate::flink_functions::decimal::DecimalRound::new(precision, scale),
+            )
+            .call(children)
+        }
         // Exact decimal cast: HALF_UP to the declared scale, then NULL on precision overflow.
         14 => {
             let precision = (arg / 100) as u8;
@@ -943,6 +964,36 @@ impl datafusion::logical_expr::ScalarUDFImpl for NarrowingCast {
                     _ => Arc::new(
                         vals.iter()
                             .map(|o| o.map(|v| v as i64))
+                            .collect::<Int64Array>(),
+                    ),
+                }
+            }
+            DataType::Decimal128(_, scale) if (0..=38).contains(scale) => {
+                let divisor = 10_i128.pow(*scale as u32);
+                let values = datafusion::common::cast::as_decimal128_array(input)?;
+                match &self.target {
+                    DataType::Int8 => Arc::new(
+                        values
+                            .iter()
+                            .map(|v| v.map(|v| (v / divisor) as i8))
+                            .collect::<Int8Array>(),
+                    ),
+                    DataType::Int16 => Arc::new(
+                        values
+                            .iter()
+                            .map(|v| v.map(|v| (v / divisor) as i16))
+                            .collect::<Int16Array>(),
+                    ),
+                    DataType::Int32 => Arc::new(
+                        values
+                            .iter()
+                            .map(|v| v.map(|v| (v / divisor) as i32))
+                            .collect::<Int32Array>(),
+                    ),
+                    _ => Arc::new(
+                        values
+                            .iter()
+                            .map(|v| v.map(|v| (v / divisor) as i64))
                             .collect::<Int64Array>(),
                     ),
                 }
@@ -1715,6 +1766,7 @@ pub(crate) fn udf_data_type(code: i64) -> DataType {
         11 => streamfusion_bridge::timestamp::timestamp_type(),
         12 => DataType::Int32,
         13 => DataType::Int64,
+        14 => DataType::Binary,
         code if code >= 1000 => {
             DataType::Decimal128(((code - 1000) / 100) as u8, ((code - 1000) % 100) as i8)
         }

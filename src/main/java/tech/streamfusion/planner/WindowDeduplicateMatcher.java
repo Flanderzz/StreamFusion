@@ -125,6 +125,7 @@ final class WindowDeduplicateMatcher {
         WindowDeduplicateMatcher.windowMillis(dedup),
         WindowDeduplicateMatcher.slideMillis(dedup),
         WindowDeduplicateMatcher.cumulative(dedup),
-        WindowZoneGate.boundaryOffsetMillis(dedup, dedup.getWindowingStrategy()));
+        WindowZoneGate.boundaryOffsetMillis(dedup, dedup.getWindowingStrategy()),
+        Boolean.TRUE.equals(keepLastRow(dedup)));
   }
 }

@@ -9,11 +9,10 @@ import org.apache.flink.table.planner.plan.logical.TumblingWindowSpec;
 import org.apache.flink.table.planner.plan.logical.WindowSpec;
 import org.apache.flink.table.planner.plan.logical.WindowingStrategy;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalWindowTableFunction;
-import org.apache.flink.table.types.logical.LogicalTypeRoot;
 
 /**
  * Recognizes the windowing table functions the native operator implements: an event-time
- * TUMBLE/HOP/CUMULATE (cumulative only with a zero offset) over a local-time-zone rowtime, whose
+ * TUMBLE/HOP/CUMULATE (zero offset) over a timestamp rowtime, whose
  * input columns the row/Arrow conversion can all carry. The window assignment math is shared with the
  * window aggregate ({@link WindowAggregateMatcher#windowSize}/{@link WindowAggregateMatcher#windowSlide}/
  * {@link WindowAggregateMatcher#isCumulative}/{@link WindowAggregateMatcher#timeColumn}), so a TVF
@@ -28,12 +27,7 @@ final class WindowTableFunctionMatcher {
     if (!(windowing instanceof TimeAttributeWindowingStrategy)) {
       return false;
     }
-    // Window bounds are emitted via the session zone, which matches the host only for a
-    // local-time-zone time attribute (the same constraint as the window aggregate). Both event-time
-    // (assign by rowtime) and proctime (assign by the clock) windowings are accepted; the downstream
-    // window join/rank closes the windows on a watermark or a processing-time timer respectively.
-    if (windowing.getTimeAttributeType().getTypeRoot()
-        != LogicalTypeRoot.TIMESTAMP_WITH_LOCAL_TIME_ZONE) {
+    if (!WindowAggregateMatcher.supportedTimeAttribute(windowing)) {
       return false;
     }
     if (!WindowZoneGate.admits(tvf, windowing)) {
@@ -47,16 +41,19 @@ final class WindowTableFunctionMatcher {
     return tvf.windowing().isProctime();
   }
 
-  /** Tumbling/hopping are always aligned to the epoch; cumulative only with a zero offset. */
+  /** The native assignment grid is anchored at the epoch. */
   private static boolean aligned(WindowSpec spec) {
-    if (spec instanceof TumblingWindowSpec || spec instanceof HoppingWindowSpec) {
-      return true;
+    Duration offset;
+    if (spec instanceof TumblingWindowSpec) {
+      offset = ((TumblingWindowSpec) spec).getOffset();
+    } else if (spec instanceof HoppingWindowSpec) {
+      offset = ((HoppingWindowSpec) spec).getOffset();
+    } else if (spec instanceof CumulativeWindowSpec) {
+      offset = ((CumulativeWindowSpec) spec).getOffset();
+    } else {
+      return false;
     }
-    if (spec instanceof CumulativeWindowSpec) {
-      Duration offset = ((CumulativeWindowSpec) spec).getOffset();
-      return offset == null || offset.isZero();
-    }
-    return false;
+    return offset == null || offset.isZero();
   }
 
   static int timeColumn(StreamPhysicalWindowTableFunction tvf) {
@@ -81,7 +78,7 @@ final class WindowTableFunctionMatcher {
       return "windowing table function: " + zoneReason;
     }
     return "windowing table function: needs an event-time TUMBLE/HOP/CUMULATE (zero offset) over a"
-        + " local-time-zone rowtime, with input columns the Arrow conversion supports";
+        + " TIMESTAMP or TIMESTAMP_LTZ rowtime, with input columns the Arrow conversion supports";
   }
 
   static RelNode substitute(StreamPhysicalWindowTableFunction tvf, PlanContext ctx) {

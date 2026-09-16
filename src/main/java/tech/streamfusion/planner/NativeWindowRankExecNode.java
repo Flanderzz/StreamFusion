@@ -40,6 +40,7 @@ public class NativeWindowRankExecNode extends ExecNodeBase<ArrowBatch>
   private final long slideMillis;
   private final boolean cumulative;
   private final long boundaryOffsetMillis;
+  private final boolean keepLastOnTie;
   private final int[] keyTimestampPrecisions;
 
   public NativeWindowRankExecNode(
@@ -60,6 +61,7 @@ public class NativeWindowRankExecNode extends ExecNodeBase<ArrowBatch>
       long slideMillis,
       boolean cumulative,
       long boundaryOffsetMillis,
+      boolean keepLastOnTie,
       int[] keyTimestampPrecisions) {
     super(
         ExecNodeContext.newNodeId(),
@@ -81,6 +83,7 @@ public class NativeWindowRankExecNode extends ExecNodeBase<ArrowBatch>
     this.slideMillis = slideMillis;
     this.cumulative = cumulative;
     this.boundaryOffsetMillis = boundaryOffsetMillis;
+    this.keepLastOnTie = keepLastOnTie;
     this.keyTimestampPrecisions = keyTimestampPrecisions;
   }
 
@@ -113,7 +116,8 @@ public class NativeWindowRankExecNode extends ExecNodeBase<ArrowBatch>
                 cumulative,
                 (org.apache.flink.table.types.logical.RowType)
                     getInputEdges().get(0).getOutputType(),
-                maxParallelism),
+                maxParallelism,
+                keepLastOnTie),
             ArrowBatchTypeInformation.INSTANCE,
             input.getParallelism(),
             false);

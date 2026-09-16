@@ -13,8 +13,8 @@ import org.apache.flink.table.planner.utils.ShortcutUtils;
 /**
  * Physical node standing in for a {@link
  * org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalWindowTableFunction} the
- * native operator runs: an event-time TUMBLE/HOP/CUMULATE windowing TVF over a local-time-zone
- * rowtime. Columnar on its input and output ({@link ColumnarInput} and {@link ColumnarOutput}): it
+ * native operator runs: an event-time TUMBLE/HOP/CUMULATE windowing TVF over a TIMESTAMP or
+ * TIMESTAMP_LTZ rowtime. Columnar on its input and output ({@link ColumnarInput} and {@link ColumnarOutput}): it
  * assigns each Arrow row to its window(s) and emits the input columns (fanned out one copy per window
  * for hopping/cumulative) with window_start/window_end/window_time appended. It does no buffering, so
  * watermarks pass straight through; it requires an upstream watermark because its rowtime windowing
@@ -85,4 +85,3 @@ public class StreamPhysicalNativeWindowTableFunction extends StreamPhysicalNativ
         boundaryOffsetMillis);
   }
 }
-

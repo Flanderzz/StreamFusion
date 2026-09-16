@@ -32,6 +32,13 @@ Decimal AVG has a separate accumulator whose overflow stays NULL.
 Insert-only floating MIN/MAX uses primitive comparisons, retaining the first signed zero or
 NaN on a tie. Retracting floating extrema remain subject to the type admission below.
 
+`MIN`/`MAX` over `TIMESTAMP(p)` and `TIMESTAMP_LTZ(p)` preserve both milliseconds and fractional
+nanoseconds. The single-phase path handles insertions and retractions with a value/multiplicity
+multiset: retracting one duplicate keeps the extreme, retracting the last occurrence reveals the
+next value, and deleting the last record removes the group. NULL values do not contribute; an
+all-NULL group reports NULL extrema. Local-zoned values compare as instants, independently of
+the session zone. The declared logical type and precision are retained on output.
+
 `AVG` is native: a running sum — widened to bigint for any integer input, double for float/double —
 plus the non-null count, emitting `count == 0 ? NULL : sum / count` cast back to the input type,
 with **integer division truncating toward zero**. This is a direct port of Flink's
@@ -66,6 +73,10 @@ float/double) plus the bigint non-null count. The local runs these as a widened-
 `COUNT` over the same column; the global folds the pre-summed pair into the ordinary `AVG` state
 (the count partial bumps the non-null count), so the final divide/truncate/cast-back — including
 the cast back to a narrow integer or float result — is byte-identical to the single-phase `AVG`.
+
+Insert-only two-phase `MIN`/`MAX` also admit `TIMESTAMP` and `TIMESTAMP_LTZ`. Both halves carry
+the complete timestamp components; a partial must retain the input's logical type and precision.
+Two-phase retracting extrema retain the shared COUNT/AVG-only gate described below.
 
 Decimal `SUM`/`MIN`/`MAX`/`AVG` carry through the split too: `SUM`'s partial is the i128 running
 sum as `DECIMAL(38, s)` (a bundle overflow emits NULL and latches the merged `AVG` NULL, skipped
@@ -135,6 +146,7 @@ agrees byte-for-byte with Flink's — this table is that guardrail; anything mar
 | FLOAT (REAL) | ✓ ³ | ✓ ³ | ✓ | ✓ | ✓ |
 | DECIMAL | ✓ ⁴ | ✓ ⁴ | ✓ | ✓ | ✓ |
 | CHAR / VARCHAR | ✗ | ✗ | ✓ ⁵ | ✓ ⁵ | ✓ |
+| TIMESTAMP / TIMESTAMP_LTZ | - | - | Yes | Yes | Yes |
 
 ¹ **Integer `AVG`** diverges from DataFusion's native `Float64` average; a custom accumulator sums
 in int64 and truncates the cast back to the input integer type, matching Flink's `AvgAggFunction`.
@@ -186,8 +198,8 @@ query back via the [all-or-nothing island](index.md#the-all-or-nothing-island) r
 **Local group aggregate (two-phase local half) only:**
 
 - Any aggregate other than SUM/MIN/MAX/COUNT/AVG.
-- A SUM/MIN/MAX value type outside bigint/int/double/decimal (MIN/MAX also admit a string, merged
-  byte-lexicographically on both halves), or an AVG value type outside
+- A SUM/MIN/MAX value type outside bigint/int/double/decimal (MIN/MAX also admit strings and
+  timestamps), or an AVG value type outside
   bigint/int/smallint/tinyint/float/double/decimal.
 - A `COUNT(DISTINCT)` value type outside bigint/int/smallint/tinyint/float/double/string/decimal,
   or a `SUM(DISTINCT)` value outside bigint/int; `MIN`/`MAX`/`AVG` over `DISTINCT`.
@@ -198,10 +210,42 @@ query back via the [all-or-nothing island](index.md#the-all-or-nothing-island) r
 **Global group aggregate (two-phase merge) only:**
 
 - Any merge other than SUM/MIN/MAX/COUNT/AVG.
-- A partial column outside bigint/int/double/decimal (strings allowed under MIN/MAX).
+- A partial column outside bigint/int/double/decimal (strings and timestamps allowed under MIN/MAX).
 - An AVG whose partial pair isn't `(bigint, bigint)` for an integer average, `(double, bigint)` for
   float/double, or `(decimal(38, s), bigint)` for decimal.
 - A distinct merge outside the local half's `COUNT`/`SUM(DISTINCT)` scope.
 - A retracting merge with any aggregate other than plain COUNT/AVG (those merge natively, the
   `count1` partial driving per-key liveness).
 - An unsupported grouping-key or output column type.
+
+## Timestamp extrema validation and timing
+
+SQL parity tests cover single-phase and insert-only two-phase timestamp extrema at precisions
+0, 3, 6 and 9 in UTC, Asia/Shanghai and America/Los_Angeles. Inputs include years 0001 and 9999,
+negative epochs, fractional ties, duplicate values, NULL/all-NULL groups, and filtered extrema.
+A retracting SQL case compares the complete changelog, including duplicate deletion and empty
+group removal. Native tests also cover the full i64-millisecond range plus fractional nanos,
+local/global merges, memory snapshots, and RocksDB checkpoint/reopen with subsequent retractions.
+
+Release diagnostics on Apple M4 Pro, JDK 17, Flink 2.2.1 (2026-09-16): two million generated
+rows, 64 groups, timestamp values cycling over 4,096 samples, one-eighth NULLs, parallelism 1,
+two warmups and five measured runs in alternating engine order. The two-phase bundle size is
+1,024. Both row/Arrow transposes remain in the measured plan, with a rowwise blackhole sink.
+
+```sh
+TZ=UTC SF_BENCHMARK=true mvn -pl streamfusion-runtime -am test -Pbench \
+  -Dtest=TimestampExtremaBenchmark -Dextrema.rows=2000000 \
+  -Dextrema.warmup=2 -Dextrema.runs=5
+```
+
+| MIN and MAX query | Flink median (s) | Native median (s) | Flink/native ratio |
+|---|---:|---:|---:|
+| Single-phase TIMESTAMP(9) | 0.467 | 3.037 | 0.154x |
+| Single-phase TIMESTAMP_LTZ(9) | 0.469 | 3.053 | 0.153x |
+| Two-phase TIMESTAMP(9) | 0.642 | 1.604 | 0.400x |
+| Two-phase TIMESTAMP_LTZ(9) | 0.684 | 1.614 | 0.424x |
+
+The standalone native aggregate is slower in all four cases. It currently retains the existing
+multiset/scalar-state machinery for exact timestamp ordering and recovery. This is coverage for
+larger native pipelines, not an aggregate speedup; an append-only timestamp accumulator and
+reduced scalar materialization remain performance opportunities.

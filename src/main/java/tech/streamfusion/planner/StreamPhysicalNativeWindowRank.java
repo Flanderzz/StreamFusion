@@ -34,6 +34,7 @@ public class StreamPhysicalNativeWindowRank extends StreamPhysicalNativeSingleRe
   private final long slideMillis;
   private final boolean cumulative;
   private final long boundaryOffsetMillis;
+  private final boolean keepLastOnTie;
 
   public StreamPhysicalNativeWindowRank(
       RelOptCluster cluster,
@@ -52,7 +53,8 @@ public class StreamPhysicalNativeWindowRank extends StreamPhysicalNativeSingleRe
       long windowMillis,
       long slideMillis,
       boolean cumulative,
-      long boundaryOffsetMillis) {
+      long boundaryOffsetMillis,
+      boolean keepLastOnTie) {
     super(cluster, traitSet, input, outputRowType);
     this.windowStartColumn = windowStartColumn;
     this.windowEndColumn = windowEndColumn;
@@ -67,6 +69,7 @@ public class StreamPhysicalNativeWindowRank extends StreamPhysicalNativeSingleRe
     this.slideMillis = slideMillis;
     this.cumulative = cumulative;
     this.boundaryOffsetMillis = boundaryOffsetMillis;
+    this.keepLastOnTie = keepLastOnTie;
   }
 
   @Override
@@ -93,7 +96,8 @@ public class StreamPhysicalNativeWindowRank extends StreamPhysicalNativeSingleRe
         windowMillis,
         slideMillis,
         cumulative,
-        boundaryOffsetMillis);
+        boundaryOffsetMillis,
+        keepLastOnTie);
   }
 
   @Override
@@ -116,6 +120,7 @@ public class StreamPhysicalNativeWindowRank extends StreamPhysicalNativeSingleRe
         slideMillis,
         cumulative,
         boundaryOffsetMillis,
+        keepLastOnTie,
         FlinkKeyGroupUtils.timestampPrecisions(getInput().getRowType(), partitionColumns));
   }
 }

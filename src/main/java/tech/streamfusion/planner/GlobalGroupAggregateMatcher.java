@@ -127,12 +127,13 @@ final class GlobalGroupAggregateMatcher {
       offset++;
       // A MIN/MAX partial may be a string (the extreme merges byte-lexicographically, matching
       // the local's fold); every other partial must be a numeric the merge folds.
-      if (LocalGroupAggregateMatcher.isStringExtreme(kind, partialRel.getSqlTypeName())) {
+      if (LocalGroupAggregateMatcher.isStringExtreme(kind, partialRel.getSqlTypeName())
+          || LocalGroupAggregateMatcher.isTimestampExtreme(kind, partialRel.getSqlTypeName())) {
         continue;
       }
       if (partialCode(partialRel) < 0) {
         return "global group aggregate: partial columns must be bigint/int/double/decimal, or a"
-            + " string under MIN/MAX";
+            + " string/timestamp under MIN/MAX";
       }
     }
     // Under retraction Flink appends a count1 COUNT(*) accumulator (unless a bare COUNT(*) is
@@ -279,7 +280,9 @@ final class GlobalGroupAggregateMatcher {
         codes.add(
             LocalGroupAggregateMatcher.isStringExtreme(kind, partialRel.getSqlTypeName())
                 ? 3
-                : partialCode(partialRel));
+                : LocalGroupAggregateMatcher.isTimestampExtreme(kind, partialRel.getSqlTypeName())
+                    ? 7
+                    : partialCode(partialRel));
       }
       offset += spanOf(agg, i);
     }

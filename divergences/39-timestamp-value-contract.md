@@ -78,3 +78,11 @@ metadata labels LTZ without changing the value.
 
 This is a correctness change, with no performance claim. It removes the timestamp-result range
 opt-in; independent function and connector admission conditions remain in force.
+
+Grouped timestamp MIN/MAX extend the existing retractable value/multiplicity multiset, following
+Arroyo's `IncrementalState::Batch` pattern for aggregates that need retained values on retraction.
+The ordering key uses i128 nanoseconds, which exactly covers Flink's full i64-millisecond range
+plus the fractional remainder. Outputs and checkpoint scalars continue to use the component Arrow
+layout. This avoids DataFusion's i64-nanosecond range restriction without changing operator or JNI
+boundaries. Single-phase retractions and insert-only local/global merges share the same key order;
+memory snapshots and RocksDB companion element tables preserve duplicate multiplicities.

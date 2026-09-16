@@ -22,6 +22,52 @@ fallback.
   there's no partial evaluation of an expression tree, so one unknown function anywhere in it
   declines the whole `Calc`.
 
+## IFNULL
+
+`IFNULL(value, replacement)` runs natively with Flink's resolved common operand type and
+result nullability, including STRING/VARCHAR, INT/BIGINT and DECIMAL. NULL selects the
+replacement; an empty string is a value. Typed NULLs and nested calls retain their resolved types.
+Both arguments are evaluated once before selection, matching Flink's scalar function: an error
+in the replacement still fails the query when the first argument is non-NULL. This differs from
+short-circuiting `COALESCE`/`CASE`, so IFNULL uses a separate eager columnar kernel. Selection
+uses Arrow validity and preserves decimal precision/scale; an all-valid input reuses its array.
+
+Admission checks the resolved built-in definition. A registered user function named IFNULL keeps
+its own implementation through the existing scalar-UDF bridge. Unsupported child expressions
+still retain their normal fallback rules. SQL tests cover values, schemas, exception behavior,
+volatile argument evaluation and an IFNULL projection/filter composed with native Top-1.
+
+## User scalar functions
+
+Java `ScalarFunction` calls use the existing columnar JVM bridge: Arrow argument columns enter
+the function once per batch and an Arrow result column returns to the native island. Supported
+external Java types are `String`, boxed/primitive numeric and boolean values, `BigDecimal` for
+`DECIMAL(p,s)`, and `byte[]` for `VARBINARY`/`BYTES`. Overload resolution must be unambiguous.
+Fixed-size `BINARY`, temporal UDF signatures, collections, and alternate Java conversion classes
+outside these mappings retain their existing fallback.
+
+`DECIMAL` UDF results are admitted as direct projections. Conversion uses Flink's
+`DecimalData.fromBigDecimal`: declared scale, `HALF_UP`, and NULL on precision overflow, including
+precision 38. Trailing zeros survive the round trip. A nested consumer or predicate falls back:
+Flink tracks a UDF's external null flag before decimal conversion, so an overflowing non-null
+`BigDecimal` can project NULL while `IS NULL` returns false. Arrow validity alone cannot express
+that distinction. The gate applies even when runtime values happen to fit; lifting it is tracked in
+[the decimal UDF nullness issue](https://github.com/datafusion-contrib/StreamFusion/issues/115).
+
+`VARBINARY` uses raw bytes, preserving empty values, embedded zeros, arbitrary non-text bytes, and
+NULL. Results are copied into Arrow before the next row is evaluated, so a single call can reuse
+its result buffer. More than one binary UDF call in a Calc, including nested calls, falls back:
+Flink may retain a shared mutable array between call sites until the row is emitted, which a
+column-at-a-time evaluation does not reproduce. Removing this gate is tracked in
+[the shared binary result issue](https://github.com/datafusion-contrib/StreamFusion/issues/116).
+
+The type bridge does not resolve the separate
+[builtin-name dispatch](https://github.com/datafusion-contrib/StreamFusion/issues/82) and
+[shared UDF lifecycle](https://github.com/datafusion-contrib/StreamFusion/issues/83) issues.
+Runtime parity tests cover mixed projections, repeated decimal calls, nullable precision-38
+values, scale normalization, overflow, typed NULL arguments, and 5,003-row inputs. C Data tests
+cover sliced inputs, output survival after input release, and reclamation of Arrow allocations.
+
 ## String ordering
 
 Relational character-string comparisons (`<`, `<=`, `>`, `>=`) fall back, including
@@ -173,6 +219,10 @@ Native, unconditionally, with no host involvement:
   reproduces Flink's primitive Java cast semantics exactly: two's-complement wraparound for an
   integer source, and saturation to INT/BIGINT followed by low-bit narrowing for a float source. Arrow's own
   cast kernel can't do this — it errors on overflow instead of wrapping/saturating.
+- **DECIMAL → TINYINT/SMALLINT/INT/BIGINT** — truncate toward zero, then keep the destination's
+  low bits, matching Flink's BigDecimal `longValue()` followed by the Java integer cast.
+  Overflow wraps rather than saturating or producing NULL; NULL input remains NULL.
+  This also admits casts above DECIMAL aggregates such as `CAST(AVG(d) AS BIGINT)`.
 - **`CHAR`/`VARCHAR` → `VARCHAR`** when the target length is ≥ the source length — an unpadded
   no-op (e.g. the common `COALESCE(s, 'x')` pattern).
 - **Widening timestamp precision** within `TIMESTAMP` or within `TIMESTAMP_LTZ` — Arrow stores both
@@ -187,6 +237,24 @@ BIGINT truncates toward zero, saturates at the destination bounds, and maps NaN 
 FLOAT/DOUBLE to TINYINT or SMALLINT first performs that INT conversion, then keeps the
 low 8 or 16 bits. Thus `128.75` becomes TINYINT `-128`, and positive infinity becomes
 TINYINT/SMALLINT `-1`. NULL remains NULL for every target.
+
+### STRING/VARCHAR/CHAR to BOOLEAN
+
+`CAST(s AS BOOLEAN)` uses a native Arrow Boolean builder. It accepts `t`, `true`, `y`,
+`yes`, `1` as TRUE and `f`, `false`, `n`, `no`, `0` as FALSE, ignoring ASCII case.
+It does not trim whitespace; empty strings, other numeric values and Unicode lookalikes
+are invalid. NULL remains NULL. Flink's resolved result type/nullability is retained.
+
+With the default cast behavior an invalid token fails the query, including for a NOT NULL
+source. With `table.exec.legacy-cast-behaviour=ENABLED` it produces NULL. For a NOT NULL
+source, Flink retains a NOT NULL result declaration even in legacy mode; the existing
+sink enforcer therefore rejects or drops malformed rows according to its ERROR/DROP setting.
+Both outcomes are tested against Flink. CASE can skip
+an unselected failing cast. Default-mode casts nested under AND/OR still fall back so
+that Flink's row short-circuiting suppresses errors on unselected rows; legacy-mode
+casts can compose under AND/OR because malformed input returns NULL. A bare expression
+encoder without table configuration declines this cast instead of guessing the mode.
+BOOLEAN-to-string and TRY_CAST are outside this addition.
 
 ### The host-exact JVM upcall
 
@@ -215,10 +283,33 @@ default cast the upcall reproduces.
 
 ### Still falling back
 
-Boolean↔string casts and other pairs not listed above. Temporal casts now use Flink-generated
+Boolean-to-string casts and other pairs not listed above. Temporal casts now use Flink-generated
 expressions; see [temporal functions](temporal-functions.md).
 
 ## Decimal arithmetic
+
+### Decimal ROUND and literals
+
+`ROUND(decimal_column[, literal_integer_scale])` runs with compatibility overrides disabled.
+It rounds ties away from zero (HALF_UP), preserves NULLs and Flink's inferred result precision,
+scale and nullability, and returns NULL when rounding exceeds the result precision. Negative
+positions round the integral part. A position at or above the source scale preserves its value
+and scale rather than appending zeroes. A NULL position returns a typed NULL.
+
+Positions from -38 upward use a prepared native decimal kernel. More negative literal positions
+use Flink's own decimal rounding through the existing columnar JVM upcall, so extreme BigDecimal
+scale/range exceptions match the host instead of being silently clamped to zero. These calls
+remain inside native Calc, but fall back when nested under AND/OR to preserve row short-circuiting.
+CASE can skip an unselected failing branch. Runtime scale columns and BIGINT scale arguments
+retain an explicit planner fallback; float/double ROUND keeps its existing compatibility gate.
+Flink 2.2.1 itself can fail when a runtime scale changes the returned DecimalData precision;
+the regression suite preserves the resulting binary-writer assertion failure through fallback.
+
+Decimal planner literals are rescaled HALF_UP to their declared scale before encoding their
+unscaled integer. A precision overflow becomes a typed decimal NULL. This handles constant-folded
+casts whose stored value retains more fractional digits than its resolved DECIMAL type.
+
+### Arithmetic operators
 
 **Native and byte-exact by default, with the boolean short-circuit restriction below.**
 
@@ -281,7 +372,25 @@ suffix; an empty suffix matches every non-NULL string. Wildcards have no special
 
 ### INSTR
 
-Two character arguments only. Returns the first match as a 1-based Unicode codepoint position, or zero if absent. An empty needle returns 1; any NULL returns NULL. Three/four-argument INSTR falls back.
+`INSTR(string, needle[, start[, occurrence]])` supports two character strings and optional
+TINYINT/SMALLINT/INT start and occurrence arguments, including runtime columns. Positions
+are 1-based Unicode codepoints; missing matches return zero. A positive start searches
+forward, a negative start searches backward from the end, and zero returns zero. Matches
+can overlap. Defaults are start 1 and occurrence 1.
+
+Any NULL argument returns NULL before validating start/occurrence. A non-positive occurrence
+fails the query, even when start is zero. `INT_MIN` start also fails: its negation overflows
+in Flink's recursive reverse search; native reports the failure without recursive stack
+exhaustion. For an empty needle and positive occurrence, positive start returns 1 and negative
+start returns the string's codepoint length plus 1, even for starts outside the string.
+Zero start still returns zero.
+
+Two-argument calls continue using DataFusion's Unicode position kernel. Extended forms use
+forward/reverse byte search at codepoint boundaries, preserving overlapping matches without
+allocating reversed strings. Built-in admission uses the resolved SQL operator; user functions
+named INSTR retain their own behavior. BIGINT start/occurrence arguments remain unsupported.
+Extended calls under AND/OR stay native only when a literal start excludes `INT_MIN` and a
+literal/default occurrence is positive; otherwise Flink retains row short-circuiting for errors.
 
 ### LOCATE
 

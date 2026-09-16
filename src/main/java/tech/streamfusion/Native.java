@@ -1115,6 +1115,9 @@ public final class Native {
       boolean outputRankNumber,
       long memoryBudgetBytes);
 
+  /** Selects the window dedup keep-last tie rule before accepting input, including after restore. */
+  public static native void setWindowRankerKeepLastOnTie(long handle, boolean keepLastOnTie);
+
   /** Buffers an input batch; each window's top-N rows are emitted when a watermark closes it. */
   public static native void pushWindowRanker(
       long handle, long inArrayAddress, long inSchemaAddress);

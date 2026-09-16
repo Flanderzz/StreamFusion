@@ -59,6 +59,13 @@ event-time, by the processing-time clock instead of a rowtime column for proctim
 under the same **zero-offset** `TUMBLE`/`HOP`/`CUMULATE` restriction; both its event-time and
 proctime assignment paths are native.
 
+Standalone event-time TVFs accept both `TIMESTAMP(3)` and `TIMESTAMP_LTZ(3)` rowtime.
+Plain `TIMESTAMP` retains its wall-clock boundaries in every session zone, including downstream
+window Top-N and window deduplication. Native assignment preserves hidden sub-millisecond input
+fractions while emitting millisecond window boundaries; negative epochs and years 0001/9999 are
+covered by runtime SQL parity tests. TUMBLE and HOP with an explicit nonzero offset fall back,
+matching the existing aggregate and CUMULATE restriction.
+
 The TVF emits `window_start`/`window_end` as local wall-clock TIMESTAMP values, while
 `window_time` stays an instant for LTZ input. The fixed session-zone offset participates in
 assignment itself, so projections, filters, joins and ranking observe the same boundary values
@@ -78,6 +85,24 @@ A downstream [window join](joins/window-join.md) or window Top-N/dedup consuming
 closes windows on a chained processing-time timer (the same next-slide-boundary model described
 above) rather than a watermark, under the same slide-divides-size constraint — see those operators'
 own pages for their admission conditions.
+
+### Standalone plain-TIMESTAMP measurement
+
+`PlainTimestampTvfBenchmark` measures a row source through standalone assignment to a rowwise
+blackhole sink, with both row/Arrow transposes verified in the native plan. On a local release
+build (`-Pbench`, mimalloc), 2 million input rows, parallelism 1, 4096 cyclic time samples, NULL
+every eighth row, two warm-ups and five interleaved measured runs per engine gave these medians:
+
+| Assignment | Flink seconds | Native seconds | Flink/native |
+| --- | ---: | ---: | ---: |
+| TUMBLE 10 s | 0.492 | 0.820 | 0.600x |
+| HOP 5 s / 10 s | 0.734 | 1.125 | 0.652x |
+| CUMULATE 5 s / 10 s | 0.614 | 0.958 | 0.640x |
+
+The plain timestamp session zone is America/Los_Angeles; the process runs with `TZ=UTC`.
+Sink rowtime insertion is disabled for both engines because the projection contains both the
+original rowtime and window_time. These standalone shapes are slower than Flink. The coverage
+enables columnar composition with downstream consumers; it is not a standalone throughput win.
 
 ## Matcher declines
 

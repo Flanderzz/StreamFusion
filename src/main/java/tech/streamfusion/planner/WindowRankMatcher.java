@@ -138,6 +138,7 @@ final class WindowRankMatcher {
         WindowRankMatcher.windowMillis(rank),
         WindowRankMatcher.slideMillis(rank),
         WindowRankMatcher.cumulative(rank),
-        WindowZoneGate.boundaryOffsetMillis(rank, rank.windowing()));
+        WindowZoneGate.boundaryOffsetMillis(rank, rank.windowing()),
+        false);
   }
 }

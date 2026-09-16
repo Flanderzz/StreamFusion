@@ -41,6 +41,8 @@ pub(crate) enum MinMaxKey {
     // BinaryStringData byte comparison (its common binary path) — see divergences/07 for the
     // supplementary-plane edge where Flink's materialized-Java-object path would differ.
     Str(String),
+    // i128 nanoseconds cover the complete Flink i64-millisecond range without truncation.
+    Timestamp(i128),
 }
 
 impl MinMaxKey {
@@ -68,6 +70,13 @@ impl MinMaxKey {
             ScalarValue::Utf8(Some(v))
             | ScalarValue::LargeUtf8(Some(v))
             | ScalarValue::Utf8View(Some(v)) => MinMaxKey::Str(v.clone()),
+            value if streamfusion_bridge::timestamp::is_timestamp(&value.data_type()) => {
+                let array = value.to_array().expect("timestamp extreme array");
+                let column =
+                    streamfusion_bridge::timestamp::TimestampColumn::try_new(array.as_ref())
+                        .expect("timestamp extreme column");
+                MinMaxKey::Timestamp(column.value(0).expect("timestamp extreme value").nanos())
+            }
             other => panic!("unexpected MIN/MAX value scalar: {other:?}"),
         }
     }
@@ -83,6 +92,14 @@ impl MinMaxKey {
                 other => panic!("decimal MIN/MAX result type must be Decimal128, got {other:?}"),
             },
             MinMaxKey::Str(v) => ScalarValue::Utf8(Some(v.clone())),
+            MinMaxKey::Timestamp(v) => {
+                ScalarValue::Struct(Arc::new(streamfusion_bridge::timestamp::timestamp_array([
+                    Some(
+                        streamfusion_bridge::timestamp::TimestampValue::from_nanos(*v)
+                            .expect("timestamp extreme range"),
+                    ),
+                ])))
+            }
         }
     }
 }
@@ -1782,16 +1799,17 @@ impl<S: KeyedStateStore<GroupKeyState>> GroupAggregator<S> {
                 distinct_cols[i].and_then(|c| batch.column(c).as_any().downcast_ref::<Int64Array>())
             })
             .collect();
-        // Per aggregate, a string MIN/MAX value column (kind 1/2 over Utf8) — folded as a scalar into
+        // Per aggregate, a string/timestamp MIN/MAX value column — folded as a scalar into
         // the Extremes multiset, not through the numeric Num path.
-        let extreme_str_cols: Vec<Option<usize>> = (0..num_agg)
+        let scalar_extreme_cols: Vec<Option<usize>> = (0..num_agg)
             .map(|i| {
                 if matches!(self.kinds[i], 1 | 2) && self.value_columns[i] >= 0 {
                     let col = self.value_columns[i] as usize;
-                    matches!(
-                        batch.column(col).data_type(),
+                    let data_type = batch.column(col).data_type();
+                    (matches!(
+                        data_type,
                         DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
-                    )
+                    ) || streamfusion_bridge::timestamp::is_timestamp(data_type))
                     .then_some(col)
                 } else {
                     None
@@ -1959,13 +1977,13 @@ impl<S: KeyedStateStore<GroupKeyState>> GroupAggregator<S> {
                         }
                         continue;
                     }
-                    // MIN/MAX over a string folds the value as a scalar into the Extremes multiset
+                    // String/timestamp MIN/MAX folds the value as a scalar into the Extremes multiset
                     // (skipping nulls — MIN/MAX ignore them), ordered by MinMaxKey.
-                    if let Some(col_idx) = extreme_str_cols[i] {
+                    if let Some(col_idx) = scalar_extreme_cols[i] {
                         let column = batch.column(col_idx);
                         if !column.is_null(row) {
                             let scalar = ScalarValue::try_from_array(column, row)
-                                .expect("extreme string scalar");
+                                .expect("non-numeric extreme scalar");
                             if retract {
                                 state.aggs[i].retract_extreme(scalar);
                             } else {
@@ -2788,16 +2806,17 @@ impl LocalGroupAggregator {
                 distinct_cols[i].and_then(|c| batch.column(c).as_any().downcast_ref::<Int64Array>())
             })
             .collect();
-        // Per aggregate, a string MIN/MAX value column (kind 1/2 over Utf8) — folded as a scalar
+        // Per aggregate, a string/timestamp MIN/MAX value column — folded as a scalar
         // into the Extremes multiset, not through the numeric Num path.
-        let extreme_str_cols: Vec<Option<usize>> = (0..num_agg)
+        let scalar_extreme_cols: Vec<Option<usize>> = (0..num_agg)
             .map(|i| {
                 if matches!(self.kinds[i], 1 | 2) && self.value_columns[i] >= 0 {
                     let col = self.value_columns[i] as usize;
-                    matches!(
-                        batch.column(col).data_type(),
+                    let data_type = batch.column(col).data_type();
+                    (matches!(
+                        data_type,
                         DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
-                    )
+                    ) || streamfusion_bridge::timestamp::is_timestamp(data_type))
                     .then_some(col)
                 } else {
                     None
@@ -2895,11 +2914,11 @@ impl LocalGroupAggregator {
                         continue;
                     }
                 }
-                if let Some(col_idx) = extreme_str_cols[i] {
+                if let Some(col_idx) = scalar_extreme_cols[i] {
                     let column = batch.column(col_idx);
                     if !column.is_null(row) {
                         let scalar = ScalarValue::try_from_array(column, row)
-                            .expect("extreme string scalar");
+                            .expect("non-numeric extreme scalar");
                         if retract {
                             entry.states[i].retract_extreme(scalar);
                         } else {
