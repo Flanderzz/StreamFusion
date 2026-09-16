@@ -12,6 +12,7 @@ use std::sync::Arc;
 pub(crate) mod calendar;
 pub(crate) mod clock;
 pub(crate) mod decimal;
+pub(crate) mod decimal_float;
 pub(crate) mod decode;
 pub(crate) mod encode;
 pub(crate) mod json_quote;

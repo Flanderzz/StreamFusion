@@ -72,6 +72,10 @@ class ScalarFunctionBenchmark {
           new Query("DECIMAL_ROUND_NEG", "tt_decimal", "ROUND(n, -3)", "DECIMAL(30,0)"),
           new Query("DECIMAL_ROUND_EXPAND", "tt_decimal", "ROUND(n, 12)", "DECIMAL(38,9)"),
           new Query("DECIMAL_TO_BIGINT", "tt_decimal", "CAST(n AS BIGINT)", "BIGINT"),
+          new Query("DECIMAL_TO_FLOAT", "tt_decimal", "CAST(n AS FLOAT)", "FLOAT"),
+          new Query(
+              "DECIMAL_ARRAY_TO_FLOAT", "tt_decimal_array", "CAST(a AS ARRAY<FLOAT>)", "ARRAY<FLOAT>"),
+          new Query("POWER_EXACT", "numbers", "POWER(CAST(n AS DOUBLE), 0.5)", "DOUBLE"),
           new Query("ASCII", "tt_ascii", "ASCII(s)", "INT"),
           new Query("CHR", "bigint", "CHR(n)", "STRING"),
           new Query("GREATEST", "numbers", "GREATEST(n, m, 17)"),
@@ -263,7 +267,7 @@ class ScalarFunctionBenchmark {
             csv.add(
                 String.format(
                     Locale.ROOT,
-                    "%s,%s,%s,%d,%d,%s,%d,%d,%s,%d,%.6f",
+                    "%s,%s,\"%s\",%d,%d,%s,%d,%d,%s,%d,%.6f",
                     query.name(),
                     query.input(),
                     query.outputType(),

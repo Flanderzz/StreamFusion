@@ -68,6 +68,20 @@ not a claim that the decimal UDF or its consumers execute as Rust kernels. The m
 includes both perimeter transposes; see the scalar benchmark page.
 
 ## Plan-time type verification (diverges from Comet)
+
+DECIMAL-to-FLOAT/DOUBLE casts follow released Flink's DecimalDataUtils: compact values divide
+the rounded long by the exact power of ten; non-compact values use a correctly rounded decimal
+parse to double. FLOAT then narrows that double. Direct decimal-to-float parsing or Arrow's
+generic decimal conversion can round differently. One Arrow kernel serves scalar columns and
+the child buffer of one-level decimal arrays, retaining the list's offsets and validity.
+The cast identity check includes nested element types, so an ARRAY element conversion cannot
+pass through unchanged just because both top-level types are ARRAY.
+
+Default POWER uses the same generated-expression dispatch as temporal functions, following
+Comet's JVM expression bridge rather than relying on platform libm matching Java Math.pow.
+Flink resolves decimal overloads before generation. Its existing opt-in Rust path is retained;
+the default path expands columnar-island coverage without claiming a pure Rust power kernel.
+
 The encoder admits nodes; DataFusion decides result types when the tree is compiled,
 and its coercion rules are not Calcite's (`FLOAT * DECIMAL` is `DOUBLE` to Flink, `Float32`
 to DataFusion). Comet resolves this on the JVM side: its serde mirrors Spark's type rules
@@ -209,12 +223,13 @@ strict NULL propagation applied to `CONCAT` below.
   Comet reached the same conclusion — it routes case conversion through the JVM by default and only
   uses the native path under an opt-in flag. We do the same: fall back by default, native under the
   `allowIncompatible` flag, rather than ship a silent non-ASCII divergence.
-- **Transcendental math falls back by default** (opt-in via the flag above): `EXP`/`LN`/`LOG10`/`SIN`/`COS`/`TAN`/`ASIN`/`ACOS`/
-  `ATAN`/`POWER`/`SQRT`, which Calcite lowers to `POWER`). These are not IEEE-correctly-rounded, so
+- **Remaining transcendental math falls back by default** (opt-in via the flag above):
+  `EXP`/`LN`/`LOG10`/`SIN`/`COS`/`TAN`/`ASIN`/`ACOS`/`ATAN`. These are not IEEE-correctly-rounded, so
   the JVM's `java.lang.Math` (Flink) and DataFusion's Rust libm differ at the last ULP — verified:
   `TAN`/`ATAN`/`ASIN`/`ACOS` mismatch on sampled values (e.g. `tan` `…2386603` vs `…2386602`).
   `SIN`/`COS`/`EXP`/`LN`/`POWER` happened to match those samples, but a passing sample is not parity
-  for a last-ULP-divergent family, so the whole family falls back. (Comet ships them as Compatible —
+  for a last-ULP-divergent family. POWER and SQRT now use Flink's generated JVM code by default;
+  their Rust alternative retains the flag. (Comet ships these kernels as Compatible —
   it tolerates last-ULP; our byte-exact harness does not. The IEEE-exact ops `+ - * /`, `ABS`,
   `FLOOR`, `CEIL`, `SIGN` are admitted.)
 - **`ROUND` falls back by default** (opt-in via the flag above; asserted by a test). Flink rounds float/double via

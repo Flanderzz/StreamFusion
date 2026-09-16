@@ -98,6 +98,7 @@ final class RexExpression {
   private static final int KIND_RANDOM = 32;
   private static final int KIND_STRING_TO_INTEGER = 33;
   private static final int KIND_INTEGER_TO_STRING = 34;
+  private static final int KIND_DECIMAL_FLOAT = 35;
   // A typed NULL carries a one-field Arrow IPC schema in the string pool.
   private static final int KIND_LIT_TYPED_NULL = 31;
   // Fused exact arithmetic: payload is the declared result precision*100 + scale; two children.
@@ -692,7 +693,7 @@ final class RexExpression {
       longs.add("FLOOR".equals(call.getOperator().getName()) ? 0L : 1L);
       return true;
     }
-    if (needsTemporalFunction(call)) {
+    if (needsTemporalFunction(call) || needsExactPower(call)) {
       return emitHostExpression(call, false);
     }
     if (call.getKind() == SqlKind.MINUS_PREFIX) {
@@ -1823,9 +1824,22 @@ final class RexExpression {
     // marks
     // the event-time column) — is an identity projection: emit the operand so the column passes
     // through.
-    if (sourceType.getSqlTypeName() == resultType.getSqlTypeName()
-        && sourceType.getPrecision() == resultType.getPrecision()
-        && sourceType.getScale() == resultType.getScale()) {
+    if (org.apache.calcite.sql.type.SqlTypeUtil.equalSansNullability(sourceType, resultType)) {
+      return emit(call.getOperands().get(0));
+    }
+    RelDataType decimalSource =
+        source == SqlTypeName.ARRAY ? sourceType.getComponentType() : sourceType;
+    RelDataType floatingTarget =
+        targetType == SqlTypeName.ARRAY ? resultType.getComponentType() : resultType;
+    if ((source == SqlTypeName.ARRAY) == (targetType == SqlTypeName.ARRAY)
+        && decimalSource.getSqlTypeName() == SqlTypeName.DECIMAL
+        && (floatingTarget.getSqlTypeName() == SqlTypeName.FLOAT
+            || floatingTarget.getSqlTypeName() == SqlTypeName.REAL
+            || floatingTarget.getSqlTypeName() == SqlTypeName.DOUBLE)) {
+      add(
+          KIND_DECIMAL_FLOAT,
+          floatingTarget.getSqlTypeName() == SqlTypeName.DOUBLE ? CAST_DOUBLE : CAST_FLOAT,
+          1);
       return emit(call.getOperands().get(0));
     }
     if ((source == SqlTypeName.VARCHAR || source == SqlTypeName.CHAR)
@@ -2101,7 +2115,8 @@ final class RexExpression {
     if (node instanceof RexLiteral) {
       return node;
     }
-    if (node instanceof RexCall call && (preserveDecimalNullness || needsTemporalFunction(call))) {
+    if (node instanceof RexCall call
+        && (preserveDecimalNullness || needsTemporalFunction(call) || needsExactPower(call))) {
       List<RexNode> operands = new ArrayList<>();
       for (RexNode operand : call.getOperands()) {
         operands.add(hostExpressionArguments(operand, arguments, types, codes, preserveDecimalNullness));
@@ -3018,7 +3033,13 @@ final class RexExpression {
     return emit(args.get(0));
   }
 
-  /** {@code POWER(base, exp)} (also the lowering of {@code SQRT}), native only under the flag. */
+  private static boolean needsExactPower(RexCall call) {
+    String name = call.getOperator().getName();
+    return ("POWER".equalsIgnoreCase(name) || "POW".equalsIgnoreCase(name))
+        && !NativeConfig.allowsIncompatible("POWER");
+  }
+
+  /** The opt-in Rust implementation; the default path uses Flink's generated Math.pow call. */
   private boolean emitIncompatiblePower(RexCall call) {
     if (!NativeConfig.allowsIncompatible("POWER")) {
       return reject(incompatibleReason("POWER"));

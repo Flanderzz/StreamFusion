@@ -140,6 +140,19 @@ pub(crate) fn build_expr(
             };
             function.call(vec![child])
         }
+        35 => {
+            let child = build_expr(
+                schema,
+                kinds,
+                payload,
+                child_counts,
+                longs,
+                doubles,
+                strings,
+                cursor,
+            );
+            crate::flink_functions::decimal_float::function(arg == 4).call(vec![child])
+        }
         11 => {
             // A widening numeric cast: build the single child, then wrap it. `arg` is the target code.
             let child = build_expr(

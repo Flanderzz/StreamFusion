@@ -90,6 +90,36 @@ The nested consumer returns DECIMAL(38,9). Controls are not subtracted from timi
 Reproduce with the command below, selecting
 `-Dscalar.functions=UDF_DECIMAL_IS_NULL,UDF_DECIMAL_NESTED` and `-Dscalar.nullEvery=8`.
 
+## Floating conversion and POWER diagnostic (2026-09-16)
+
+Measured with Apple M4 Pro, JDK 17, UTC, Flink 2.2.1 and the release `bench` profile
+with mimalloc. Each query processes 2,000,000 rows at parallelism 1, with two warmups and
+five alternating trials per engine. Both transposes and native Calc are asserted; the
+source and blackhole sink remain rowwise. No other local tests or benchmarks ran concurrently.
+
+The scalar DECIMAL(38,9) source alternates `12345678901234567890.123456700` and
+`-0.000000100`, with every eighth value NULL. Arrays contain both values and a NULL
+element, with every eighth container NULL. POWER uses the existing BIGINT number fixture
+with a runtime base cast to DOUBLE and exponent `0.5`. The three source-matched controls
+run in the same JVM before the functions; controls are not subtracted from timings.
+
+| Case | Flink (s) | Native (s) | Flink / native |
+|---|---:|---:|---:|
+| DECIMAL identity control | 0.550296 | 0.906067 | 0.607x |
+| ARRAY<DECIMAL> identity control | 0.645095 | 1.420928 | 0.454x |
+| BIGINT identity control | 0.613385 | 0.858960 | 0.714x |
+| `CAST(n AS FLOAT)` | 0.825372 | 1.019472 | 0.810x |
+| `CAST(a AS ARRAY<FLOAT>)` | 1.682023 | 1.603254 | 1.049x |
+| `POWER(CAST(n AS DOUBLE), 0.5)` | 0.619829 | 1.071053 | 0.579x |
+
+The array conversion has a small advantage in this workload; the scalar conversion and
+POWER are slower. The conversions execute in Rust, while default POWER uses Flink-generated
+JVM code to preserve its exact Math.pow contract. These results establish coverage costs,
+not a general speedup for floating expressions or larger composed pipelines. Reproduce with
+`-Dscalar.functions=DECIMAL_TO_FLOAT,DECIMAL_ARRAY_TO_FLOAT,POWER_EXACT` and
+`-Dscalar.nullEvery=8` in the command below. CSV output quotes the declared result type so
+precision/scale commas remain inside one field.
+
 ## Inputs
 
 - Search strings add `row:`/`other:` and `:match`/`:miss` around the padding: total lengths are

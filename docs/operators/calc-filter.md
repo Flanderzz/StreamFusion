@@ -326,6 +326,11 @@ Native, unconditionally, with no host involvement:
   low bits, matching Flink's BigDecimal `longValue()` followed by the Java integer cast.
   Overflow wraps rather than saturating or producing NULL; NULL input remains NULL.
   This also admits casts above DECIMAL aggregates such as `CAST(AVG(d) AS BIGINT)`.
+- **DECIMAL → FLOAT/DOUBLE** and **ARRAY<DECIMAL> → ARRAY<FLOAT/DOUBLE>** — retain Flink's
+  intermediate double conversion, including compact-decimal division and final FLOAT narrowing.
+  This can differ from rounding a decimal directly to FLOAT. Array casts convert the element
+  buffers and preserve offsets, empty arrays, nullable containers/elements and declared types.
+  Other changes of collection element type still require a separately supported cast.
 - **`CHAR`/`VARCHAR` → `VARCHAR`** when the target length is ≥ the source length — an unpadded
   no-op (e.g. the common `COALESCE(s, 'x')` pattern).
 - **Widening timestamp precision** within `TIMESTAMP` or within `TIMESTAMP_LTZ` — Arrow stores both
@@ -871,16 +876,26 @@ Flink rather than converting each one to an Arrow timestamp.
 extraction fields and other temporal functions use Flink's implementation. Timestamp-producing
 expressions run by default with the full Flink millisecond range and fractional nanos.
 
+## POWER and SQRT
+
+`POWER` (including Flink's lowering of `SQRT`) runs inside native Calc by default through
+Flink-generated JVM code in the existing batch UDF bridge. The resolved primitive/DECIMAL
+overload uses Flink's own conversion and `Math.pow`, preserving exact deterministic results,
+signed zeros, NaN, infinities, overflow/underflow and NULL propagation. Nested powers can fuse
+into one generated expression. The surrounding operator remains columnar; the power operation
+itself executes on the JVM. The Rust alternative remains available under
+`streamfusion.expression.POWER.allowIncompatible=true` or the blanket flag.
+
 ## Opt-in math
 
 **Off by default, native only under `-Dstreamfusion.expression.<NAME>.allowIncompatible=true`** (or
-the blanket flag): `EXP`, `LN`, `SIN`, `COS`, `TAN`, `ASIN`, `ACOS`, `ATAN`, `LOG10`, `POWER`/`SQRT`
-(last-ULP libm divergence from Java's `StrictMath`), and float/double `ROUND` (`BigDecimal`-based
+the blanket flag): `EXP`, `LN`, `SIN`, `COS`, `TAN`, `ASIN`, `ACOS`, `ATAN`, `LOG10`
+(last-ULP libm divergence from Java's `Math`), and float/double `ROUND` (`BigDecimal`-based
 rounding in Flink vs. binary-float rounding natively).
 
-Unlike case folding/regex/datetime above, there is no cheap byte-exact upcall available for these —
-so, unlike those, **these fall back to Flink by default** and only run natively once you've opted in
-and accepted the (typically last-bit) divergence.
+These remaining functions fall back to Flink by default and only run natively once you've opted
+in and accepted the (typically last-bit) divergence. POWER's generated JVM path does not widen
+their admission.
 
 ## Literal/arity guards
 
