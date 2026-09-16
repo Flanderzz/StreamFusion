@@ -22,6 +22,37 @@ fallback.
   there's no partial evaluation of an expression tree, so one unknown function anywhere in it
   declines the whole `Calc`.
 
+## User scalar functions
+
+Java `ScalarFunction` calls use the existing columnar JVM bridge: Arrow argument columns enter
+the function once per batch and an Arrow result column returns to the native island. Supported
+external Java types are `String`, boxed/primitive numeric and boolean values, `BigDecimal` for
+`DECIMAL(p,s)`, and `byte[]` for `VARBINARY`/`BYTES`. Overload resolution must be unambiguous.
+Fixed-size `BINARY`, temporal UDF signatures, collections, and alternate Java conversion classes
+outside these mappings retain their existing fallback.
+
+`DECIMAL` UDF results are admitted as direct projections. Conversion uses Flink's
+`DecimalData.fromBigDecimal`: declared scale, `HALF_UP`, and NULL on precision overflow, including
+precision 38. Trailing zeros survive the round trip. A nested consumer or predicate falls back:
+Flink tracks a UDF's external null flag before decimal conversion, so an overflowing non-null
+`BigDecimal` can project NULL while `IS NULL` returns false. Arrow validity alone cannot express
+that distinction. The gate applies even when runtime values happen to fit; lifting it is tracked in
+[the decimal UDF nullness issue](https://github.com/datafusion-contrib/StreamFusion/issues/115).
+
+`VARBINARY` uses raw bytes, preserving empty values, embedded zeros, arbitrary non-text bytes, and
+NULL. Results are copied into Arrow before the next row is evaluated, so a single call can reuse
+its result buffer. More than one binary UDF call in a Calc, including nested calls, falls back:
+Flink may retain a shared mutable array between call sites until the row is emitted, which a
+column-at-a-time evaluation does not reproduce. Removing this gate is tracked in
+[the shared binary result issue](https://github.com/datafusion-contrib/StreamFusion/issues/116).
+
+The type bridge does not resolve the separate
+[builtin-name dispatch](https://github.com/datafusion-contrib/StreamFusion/issues/82) and
+[shared UDF lifecycle](https://github.com/datafusion-contrib/StreamFusion/issues/83) issues.
+Runtime parity tests cover mixed projections, repeated decimal calls, nullable precision-38
+values, scale normalization, overflow, typed NULL arguments, and 5,003-row inputs. C Data tests
+cover sliced inputs, output survival after input release, and reclamation of Arrow allocations.
+
 ## String ordering
 
 Relational character-string comparisons (`<`, `<=`, `>`, `>=`) fall back, including

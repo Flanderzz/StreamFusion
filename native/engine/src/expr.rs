@@ -1715,6 +1715,7 @@ pub(crate) fn udf_data_type(code: i64) -> DataType {
         11 => streamfusion_bridge::timestamp::timestamp_type(),
         12 => DataType::Int32,
         13 => DataType::Int64,
+        14 => DataType::Binary,
         code if code >= 1000 => {
             DataType::Decimal128(((code - 1000) / 100) as u8, ((code - 1000) % 100) as i8)
         }

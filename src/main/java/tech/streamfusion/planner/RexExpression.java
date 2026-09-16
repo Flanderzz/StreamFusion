@@ -155,6 +155,7 @@ final class RexExpression {
       new org.apache.flink.configuration.Configuration();
   // Root of the projection currently being encoded; null for conditions and bare predicates.
   private RexNode projectionRoot;
+  private int binaryUdfCalls;
 
   private RexExpression() {}
 
@@ -2281,14 +2282,23 @@ final class RexExpression {
     }
     org.apache.flink.table.functions.ScalarFunction scalar =
         (org.apache.flink.table.functions.ScalarFunction) def;
-    int returnCode = udfTypeCode(call.getType().getSqlTypeName());
+    SqlTypeName resultType = call.getType().getSqlTypeName();
+    if (resultType == SqlTypeName.DECIMAL && call != projectionRoot) {
+      // Flink tracks external-result nullness before converting BigDecimal to DecimalData.
+      // Overflow can therefore produce a null value with a non-null expression flag.
+      return reject("DECIMAL UDF results are native only as direct projections");
+    }
+    if (resultType == SqlTypeName.VARBINARY && ++binaryUdfCalls > 1) {
+      return reject("multiple binary UDF calls may share mutable result buffers");
+    }
+    int returnCode = udfTypeCode(call.getType());
     if (returnCode < 0) {
       return reject("UDF return type not native: " + call.getType().getSqlTypeName());
     }
     List<RexNode> args = call.getOperands();
     int[] argCodes = new int[args.size()];
     for (int i = 0; i < args.size(); i++) {
-      argCodes[i] = udfTypeCode(args.get(i).getType().getSqlTypeName());
+      argCodes[i] = udfTypeCode(args.get(i).getType());
       if (argCodes[i] < 0) {
         return reject("UDF argument type not native: " + args.get(i).getType().getSqlTypeName());
       }
@@ -2297,6 +2307,10 @@ final class RexExpression {
     if (eval == null) {
       return reject(
           "UDF " + scalar.getClass().getName() + " has no single eval of arity " + args.size());
+    }
+    if ((resultType == SqlTypeName.DECIMAL && eval.getReturnType() != BigDecimal.class)
+        || (resultType == SqlTypeName.VARBINARY && eval.getReturnType() != byte[].class)) {
+      return reject("UDF result uses an unsupported Java conversion class");
     }
     int localIndex =
         addUdf(
@@ -2317,6 +2331,13 @@ final class RexExpression {
    * The native UDF marshalling type code for a SQL type (see NativeUdf.TYPE_*), or -1 if
    * unsupported.
    */
+  private static int udfTypeCode(RelDataType type) {
+    if (type.getSqlTypeName() == SqlTypeName.DECIMAL) {
+      return tech.streamfusion.operator.NativeUdf.decimalType(type.getPrecision(), type.getScale());
+    }
+    return udfTypeCode(type.getSqlTypeName());
+  }
+
   private static int udfTypeCode(SqlTypeName type) {
     switch (type) {
       case VARCHAR:
@@ -2337,6 +2358,8 @@ final class RexExpression {
         return 6; // TYPE_SHORT
       case TINYINT:
         return 7; // TYPE_BYTE
+      case VARBINARY:
+        return tech.streamfusion.operator.NativeUdf.TYPE_BINARY;
       default:
         return -1;
     }
@@ -2528,6 +2551,12 @@ final class RexExpression {
         break;
       case BOOLEAN:
         argument = Boolean.class;
+        break;
+      case DECIMAL:
+        argument = BigDecimal.class;
+        break;
+      case VARBINARY:
+        argument = byte[].class;
         break;
       default:
         return -1;

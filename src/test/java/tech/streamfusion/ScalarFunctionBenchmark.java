@@ -1,5 +1,6 @@
 package tech.streamfusion;
 
+import java.math.BigDecimal;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -12,10 +13,13 @@ import java.util.stream.Stream;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.table.annotation.DataTypeHint;
+import org.apache.flink.table.annotation.FunctionHint;
 import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.api.Schema;
 import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
+import org.apache.flink.table.functions.ScalarFunction;
 import org.apache.flink.table.types.DataType;
 import org.apache.flink.types.Row;
 import org.junit.jupiter.api.Test;
@@ -111,6 +115,8 @@ class ScalarFunctionBenchmark {
               ENCODING_FUNCTIONS,
               TextTimeFunctions.QUERIES,
               List.of(
+                  new Query("UDF_DECIMAL", "tt_decimal", "decimal_identity(n)", "DECIMAL(38,9)"),
+                  new Query("UDF_BINARY", "tt_bytes", "binary_identity(b)", "BYTES"),
                   new Query("SHA1", "tt_text", "SHA1(s)"),
                   new Query("JSON_STRING_TEXT", "tt_text", "JSON_STRING(s)"),
                   new Query("JSON_STRING_BOOLEAN", "tt_boolean", "JSON_STRING(b)"),
@@ -366,7 +372,11 @@ class ScalarFunctionBenchmark {
 
   private static TableEnvironment environment(String input) {
     if (input.startsWith("tt_")) {
-      return TextTimeBenchmarkInputs.environment(input, ROWS, BYTES, UNICODE, NULL_EVERY);
+      TableEnvironment tables =
+          TextTimeBenchmarkInputs.environment(input, ROWS, BYTES, UNICODE, NULL_EVERY);
+      tables.createTemporarySystemFunction("decimal_identity", DecimalIdentity.class);
+      tables.createTemporarySystemFunction("binary_identity", BinaryIdentity.class);
+      return tables;
     }
     StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
     env.setParallelism(1);
@@ -506,6 +516,19 @@ class ScalarFunctionBenchmark {
           Schema.newBuilder().column("s", DataTypes.STRING()).build());
     }
     return tables;
+  }
+
+  @FunctionHint(input = @DataTypeHint("DECIMAL(38,9)"), output = @DataTypeHint("DECIMAL(38,9)"))
+  public static class DecimalIdentity extends ScalarFunction {
+    public BigDecimal eval(BigDecimal value) {
+      return value;
+    }
+  }
+
+  public static class BinaryIdentity extends ScalarFunction {
+    public byte[] eval(byte[] value) {
+      return value;
+    }
   }
 
   private static final class TextTimeFunctions {

@@ -783,3 +783,32 @@ JSON_EXISTS:
 |---|---:|---:|
 | ASCII values, no NULLs | 1.703 | 1.226 |
 | Unicode values, NULL every eighth row | 1.445 | 1.097 |
+
+### DECIMAL and VARBINARY scalar UDFs
+
+Measured on Apple M4 Pro with JDK 17 and released Flink 2.2.1 on 2026-09-16. Each identity
+UDF has its own source-matched control. The source produces two million rows at parallelism 1,
+with NULL every eighth row; decimal input is `DECIMAL(38,9)` and binary input is 264 bytes.
+Results are medians of five measured runs after two warmups, alternating engine order. The native
+release build uses mimalloc, and the harness verifies both row/Arrow transposes before execution.
+
+```sh
+TZ=UTC SF_BENCHMARK=true mvn -pl streamfusion-runtime -am test -Pbench \
+  '-Dtest=ScalarFunctionBenchmark#individualFunctions' \
+  '-Dscalar.functions=UDF_DECIMAL,UDF_BINARY' \
+  -Dscalar.rows=2000000 -Dscalar.warmup=2 -Dscalar.runs=5 \
+  -Dscalar.bytes=264 -Dscalar.unicode=false -Dscalar.nullEvery=8 \
+  -Dscalar.output=target/udf-exact-types.csv
+```
+
+| Expression | Flink (s) | Native (s) | Flink/native ratio |
+|---|---:|---:|---:|
+| DECIMAL identity control | 0.247 | 0.596 | 0.414x |
+| Binary identity control | 0.282 | 0.529 | 0.534x |
+| DECIMAL identity UDF | 0.249 | 0.657 | 0.379x |
+| Binary identity UDF | 0.275 | 0.601 | 0.457x |
+
+These simple UDFs remain slower than stock Flink. The change extends coverage so a supported
+exact-type UDF can stay between native operators; it does not claim a standalone speedup.
+The controls show the conversion cost before adding the JVM callback, and larger native islands
+require their own measurements before claiming an end-to-end gain.
