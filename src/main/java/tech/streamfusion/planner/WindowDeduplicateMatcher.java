@@ -123,6 +123,8 @@ final class WindowDeduplicateMatcher {
         WindowDeduplicateMatcher.isProctime(dedup),
         WindowDeduplicateMatcher.windowMillis(dedup),
         WindowDeduplicateMatcher.slideMillis(dedup),
-        WindowDeduplicateMatcher.cumulative(dedup));
+        WindowDeduplicateMatcher.cumulative(dedup),
+        WindowAggregateMatcher.isLtz(dedup.getWindowingStrategy()),
+        Boolean.TRUE.equals(keepLastRow(dedup)));
   }
 }

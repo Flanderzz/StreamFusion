@@ -1,8 +1,5 @@
 package tech.streamfusion.operator;
 
-import tech.streamfusion.Native;
-import tech.streamfusion.planner.NativeConfig;
-import tech.streamfusion.state.RocksDBNativeStateSupport;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
@@ -10,13 +7,15 @@ import org.apache.arrow.c.ArrowArray;
 import org.apache.arrow.c.ArrowSchema;
 import org.apache.arrow.c.Data;
 import org.apache.arrow.memory.BufferAllocator;
-import tech.streamfusion.arrow.TimestampAccessor;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.flink.api.common.operators.ProcessingTimeService.ProcessingTimeCallback;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.table.types.logical.RowType;
+import tech.streamfusion.Native;
+import tech.streamfusion.arrow.TimestampAccessor;
+import tech.streamfusion.state.RocksDBNativeStateSupport;
 
 /**
  * Columnar window Top-N / window deduplication over a windowing-TVF input (the host's {@code
@@ -50,6 +49,7 @@ public class NativeColumnarWindowRankOperator extends AbstractNativeStatefulOper
   private final long slideMillis;
   private final boolean cumulative;
   private final RowType rowType;
+  private final boolean keepLastOnTie;
 
   private transient ZoneId zone;
   private transient long registeredTimer;
@@ -73,6 +73,44 @@ public class NativeColumnarWindowRankOperator extends AbstractNativeStatefulOper
       boolean cumulative,
       RowType rowType,
       int maxParallelism) {
+    this(
+        windowStartColumn,
+        windowEndColumn,
+        partitionColumns,
+        keyTimestampPrecisions,
+        sortIndices,
+        sortAscending,
+        sortNullsFirst,
+        limit,
+        outputRankNumber,
+        timeZoneId,
+        proctime,
+        windowMillis,
+        slideMillis,
+        cumulative,
+        rowType,
+        maxParallelism,
+        false);
+  }
+
+  public NativeColumnarWindowRankOperator(
+      int windowStartColumn,
+      int windowEndColumn,
+      int[] partitionColumns,
+      int[] keyTimestampPrecisions,
+      int[] sortIndices,
+      int[] sortAscending,
+      int[] sortNullsFirst,
+      long limit,
+      boolean outputRankNumber,
+      String timeZoneId,
+      boolean proctime,
+      long windowMillis,
+      long slideMillis,
+      boolean cumulative,
+      RowType rowType,
+      int maxParallelism,
+      boolean keepLastOnTie) {
     super("window rank", keyTimestampPrecisions, maxParallelism);
     this.windowStartColumn = windowStartColumn;
     this.windowEndColumn = windowEndColumn;
@@ -88,6 +126,7 @@ public class NativeColumnarWindowRankOperator extends AbstractNativeStatefulOper
     this.slideMillis = slideMillis;
     this.cumulative = cumulative;
     this.rowType = rowType;
+    this.keepLastOnTie = keepLastOnTie;
   }
 
   // A proctime window rank closes windows on processing-time timers, so the deadline must travel
@@ -203,6 +242,8 @@ public class NativeColumnarWindowRankOperator extends AbstractNativeStatefulOper
   @Override
   public void open() throws Exception {
     super.open();
+    // Plan configuration is reapplied after either memory or persistent-state restoration.
+    Native.setWindowRankerKeepLastOnTie(handle, keepLastOnTie);
     flinkWindowMetrics =
         new FlinkWindowMetrics(getMetricGroup(), getProcessingTimeService());
     zone = ZoneId.of(timeZoneId);

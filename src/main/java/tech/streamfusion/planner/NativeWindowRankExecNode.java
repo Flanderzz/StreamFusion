@@ -39,6 +39,8 @@ public class NativeWindowRankExecNode extends ExecNodeBase<ArrowBatch>
   private final long windowMillis;
   private final long slideMillis;
   private final boolean cumulative;
+  private final boolean ltz;
+  private final boolean keepLastOnTie;
   private final int[] keyTimestampPrecisions;
 
   public NativeWindowRankExecNode(
@@ -58,6 +60,8 @@ public class NativeWindowRankExecNode extends ExecNodeBase<ArrowBatch>
       long windowMillis,
       long slideMillis,
       boolean cumulative,
+      boolean ltz,
+      boolean keepLastOnTie,
       int[] keyTimestampPrecisions) {
     super(
         ExecNodeContext.newNodeId(),
@@ -78,6 +82,8 @@ public class NativeWindowRankExecNode extends ExecNodeBase<ArrowBatch>
     this.windowMillis = windowMillis;
     this.slideMillis = slideMillis;
     this.cumulative = cumulative;
+    this.ltz = ltz;
+    this.keepLastOnTie = keepLastOnTie;
     this.keyTimestampPrecisions = keyTimestampPrecisions;
   }
 
@@ -87,7 +93,7 @@ public class NativeWindowRankExecNode extends ExecNodeBase<ArrowBatch>
       PlannerBase planner, ExecNodeConfig config) {
     Transformation<ArrowBatch> input =
         (Transformation<ArrowBatch>) getInputEdges().get(0).translateToPlan(planner);
-    String timeZoneId = planner.getTableConfig().getLocalTimeZone().getId();
+    String timeZoneId = ltz ? planner.getTableConfig().getLocalTimeZone().getId() : "UTC";
     int maxParallelism =
         FlinkKeyGroupUtils.maxParallelism(planner.getExecEnv(), input.getParallelism());
     OneInputTransformation<ArrowBatch, ArrowBatch> transformation =
@@ -111,7 +117,8 @@ public class NativeWindowRankExecNode extends ExecNodeBase<ArrowBatch>
                 cumulative,
                 (org.apache.flink.table.types.logical.RowType)
                     getInputEdges().get(0).getOutputType(),
-                maxParallelism),
+                maxParallelism,
+                keepLastOnTie),
             ArrowBatchTypeInformation.INSTANCE,
             input.getParallelism(),
             false);

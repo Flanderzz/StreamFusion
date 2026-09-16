@@ -2,7 +2,6 @@ package tech.streamfusion.operator;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
-import tech.streamfusion.planner.FlinkKeyGroupUtils;
 import java.util.ArrayList;
 import java.util.List;
 import org.apache.arrow.memory.BufferAllocator;
@@ -25,6 +24,7 @@ import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.table.types.logical.TimestampType;
 import org.junit.jupiter.api.Test;
+import tech.streamfusion.planner.FlinkKeyGroupUtils;
 
 /**
  * The window-rank operator keeps the top-N rows by the order key per window and emits them — with
@@ -244,6 +244,62 @@ class NativeColumnarWindowRankOperatorTest {
     row.setField(1, TimestampData.fromEpochMillis(startMillis));
     row.setField(2, TimestampData.fromEpochMillis(endMillis));
     return row;
+  }
+
+  @Test
+  void windowDedupRestoresItsTieRuleBeforeAcceptingMoreRows() throws Exception {
+    for (boolean keepLast : new boolean[] {false, true}) {
+      OperatorSubtaskState snapshot;
+      try (BufferAllocator allocator = new RootAllocator();
+          var before = harness(dedupOperator(keepLast))) {
+        before.setup(new ArrowBatchSerializer());
+        before.open();
+        before.processElement(
+            new StreamRecord<>(batch(allocator, row(1, 0, 1000), row(2, 0, 1000))));
+        snapshot = before.snapshot(1L, 1L);
+      }
+      try (BufferAllocator allocator = new RootAllocator();
+          var restored = harness(dedupOperator(keepLast))) {
+        restored.setup(new ArrowBatchSerializer());
+        restored.initializeState(snapshot);
+        restored.open();
+        restored.processElement(new StreamRecord<>(batch(allocator, row(3, 0, 1000))));
+        restored.processWatermark(new Watermark(1000));
+        List<Long> ids = new ArrayList<>();
+        while (!restored.getOutput().isEmpty()) {
+          Object event = restored.getOutput().poll();
+          if (event instanceof StreamRecord<?> record) {
+            try (VectorSchemaRoot root = ((ArrowBatch) record.getValue()).root()) {
+              for (RowData r : RowDataArrowConverter.read(root, SCHEMA)) {
+                ids.add(r.getLong(0));
+              }
+            }
+          }
+        }
+        assertEquals(List.of(keepLast ? 3L : 1L), ids);
+      }
+    }
+  }
+
+  private static NativeColumnarWindowRankOperator dedupOperator(boolean keepLast) {
+    return new NativeColumnarWindowRankOperator(
+        1,
+        2,
+        new int[0],
+        new int[0],
+        new int[] {2},
+        new int[] {keepLast ? 0 : 1},
+        new int[] {0},
+        1,
+        false,
+        "UTC",
+        false,
+        0,
+        0,
+        false,
+        TEST_ROW_TYPE,
+        MAX_PARALLELISM,
+        keepLast);
   }
 
   private static ArrowBatch batch(BufferAllocator allocator, RowData... rows) {

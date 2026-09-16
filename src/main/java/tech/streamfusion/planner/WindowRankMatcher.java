@@ -137,6 +137,8 @@ final class WindowRankMatcher {
         WindowRankMatcher.isProctime(rank),
         WindowRankMatcher.windowMillis(rank),
         WindowRankMatcher.slideMillis(rank),
-        WindowRankMatcher.cumulative(rank));
+        WindowRankMatcher.cumulative(rank),
+        WindowAggregateMatcher.isLtz(rank.windowing()),
+        false);
   }
 }

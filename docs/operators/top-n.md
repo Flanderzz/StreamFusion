@@ -59,6 +59,11 @@ processing-time-timer model as the [window aggregate](window-aggregate.md) — t
 the size. As with the other proctime-driven window operators, this is non-deterministic, so it's
 tested for routing/execution but not byte-compared to the host.
 
+For plain `TIMESTAMP` rowtime, window start/end remain wall-clock values regardless of the session
+zone. A window dedup keep-last replaces a candidate with an equal rowtime; keep-first and general
+Top-N preserve the earlier arrival on a tie. This plan-level tie policy is reapplied after memory
+or RocksDB restoration, without changing the retained row or snapshot layout.
+
 The one shape gap is a rank that doesn't start at 1 — i.e. an `OFFSET` on the window rank. Both
 shapes also hold the [window-assignment zone gate](window-aggregate.md#matcher-declines): a
 `TIMESTAMP_LTZ` time attribute in a session zone with a post-1970 transition, or a fixed offset not
