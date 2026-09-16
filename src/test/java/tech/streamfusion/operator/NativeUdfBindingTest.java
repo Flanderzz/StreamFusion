@@ -2,6 +2,7 @@ package tech.streamfusion.operator;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.ByteArrayInputStream;
@@ -9,6 +10,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.lang.reflect.Method;
+import org.apache.flink.table.functions.FunctionContext;
 import org.apache.flink.table.functions.ScalarFunction;
 import org.junit.jupiter.api.Test;
 
@@ -78,5 +80,182 @@ class NativeUdfBindingTest {
     long[] longs = {7, 8, 9};
     assertEquals(longs, empty.bind(longs), "no UDFs -> the longs array is returned unchanged");
     empty.unbind();
+  }
+
+  @Test
+  void sharedInstanceOwnsOneLifecycleAcrossDifferentSignatures() throws Exception {
+    CountingFunction function = new CountingFunction();
+    NativeUdf.Binding binding = sharedBinding(function);
+    long[] ids = binding.bind(new long[] {0, 1});
+    assertEquals(1, function.opens);
+    assertNotEquals(ids[0], ids[1], "call sites retain their own signature registrations");
+    binding.unbind();
+    binding.unbind();
+    assertEquals(1, function.closes);
+    assertUnregistered(ids);
+
+    binding.bind(new long[] {0, 1});
+    binding.unbind();
+    assertEquals(2, function.opens);
+    assertEquals(2, function.closes);
+  }
+
+  @Test
+  void serializationPreservesSharedLifecycleOwnership() throws Exception {
+    NativeUdf.Binding binding = roundTrip(sharedBinding(new CountingFunction()));
+    binding.bind(new long[] {0, 1});
+    binding.unbind();
+  }
+
+  @Test
+  void distinctInstancesOfTheSameClassHaveSeparateLifecycles() throws Exception {
+    CountingFunction first = new CountingFunction();
+    CountingFunction second = new CountingFunction();
+    NativeUdf.Binding binding = binding(first, second);
+    binding.bind(new long[] {0, 1});
+    assertEquals(1, first.opens);
+    assertEquals(1, second.opens);
+    binding.unbind();
+    assertEquals(1, first.closes);
+    assertEquals(1, second.closes);
+  }
+
+  @Test
+  void failedOpenReleasesEarlierFunctionsAndCanBeRetried() throws Exception {
+    CountingFunction first = new CountingFunction();
+    CountingFunction second = new CountingFunction();
+    second.failOpen = true;
+    NativeUdf.Binding binding = binding(first, second);
+    IllegalStateException failure =
+        assertThrows(IllegalStateException.class, () -> binding.bind(new long[] {0, 1}));
+    assertEquals("open failure", failure.getCause().getMessage());
+    assertEquals(1, first.closes);
+    assertEquals(0, second.closes);
+    binding.unbind();
+    assertEquals(1, first.closes);
+    second.failOpen = false;
+    binding.bind(new long[] {0, 1});
+    binding.unbind();
+    assertEquals(2, first.closes);
+    assertEquals(1, second.closes);
+  }
+
+  @Test
+  void cleanupFailuresDoNotHideOpenFailure() throws Exception {
+    CountingFunction first = new CountingFunction();
+    first.failClose = true;
+    CountingFunction second = new CountingFunction();
+    second.failOpen = true;
+    NativeUdf.Binding binding = binding(first, second);
+    IllegalStateException failure =
+        assertThrows(IllegalStateException.class, () -> binding.bind(new long[] {0, 1}));
+    assertEquals("open failure", failure.getCause().getMessage());
+    assertEquals(1, failure.getSuppressed().length);
+    assertEquals("close failure", failure.getSuppressed()[0].getCause().getMessage());
+    binding.unbind();
+    assertEquals(1, first.closes);
+  }
+
+  @Test
+  void failedCloseStillReleasesEveryRegistrationAndFunction() throws Exception {
+    CountingFunction first = new CountingFunction();
+    first.failClose = true;
+    CountingFunction second = new CountingFunction();
+    second.failClose = true;
+    NativeUdf.Binding binding = binding(first, second);
+    long[] ids = binding.bind(new long[] {0, 1});
+    IllegalStateException failure = assertThrows(IllegalStateException.class, binding::unbind);
+    assertEquals(1, failure.getSuppressed().length);
+    assertEquals(1, first.closes);
+    assertEquals(1, second.closes);
+    assertUnregistered(ids);
+    binding.unbind();
+    assertEquals(1, first.closes);
+    assertEquals(1, second.closes);
+  }
+
+  @Test
+  void bindingCannotBeOpenedTwiceWithoutCleanup() throws Exception {
+    CountingFunction function = new CountingFunction();
+    NativeUdf.Binding binding = sharedBinding(function);
+    long[] ids = binding.bind(new long[] {0, 1});
+    assertThrows(IllegalStateException.class, () -> binding.bind(new long[] {0, 1}));
+    binding.unbind();
+    assertEquals(1, function.opens);
+    assertEquals(1, function.closes);
+    assertUnregistered(ids);
+  }
+
+  private static NativeUdf.Binding sharedBinding(CountingFunction function) throws Exception {
+    return new NativeUdf.Binding(
+        new NativeUdf.Descriptor[] {
+          descriptor(function),
+          NativeUdf.Descriptor.forFunction(
+              function,
+              CountingFunction.class.getMethod("eval", String.class),
+              new int[] {NativeUdf.TYPE_STRING},
+              NativeUdf.TYPE_STRING)
+        },
+        new int[] {0, 1});
+  }
+
+  private static NativeUdf.Binding binding(CountingFunction first, CountingFunction second)
+      throws Exception {
+    return new NativeUdf.Binding(
+        new NativeUdf.Descriptor[] {descriptor(first), descriptor(second)}, new int[] {0, 1});
+  }
+
+  private static NativeUdf.Descriptor descriptor(CountingFunction function) throws Exception {
+    return NativeUdf.Descriptor.forFunction(
+        function,
+        CountingFunction.class.getMethod("eval", Integer.class),
+        new int[] {NativeUdf.TYPE_INT},
+        NativeUdf.TYPE_INT);
+  }
+
+  private static void assertUnregistered(long[] ids) {
+    for (long id : ids) {
+      IllegalStateException failure =
+          assertThrows(
+              IllegalStateException.class, () -> NativeUdf.invokeUdf((int) id, 0, 0, 0, 0));
+      assertEquals("no registered UDF for id " + id, failure.getMessage());
+    }
+  }
+
+  public static class CountingFunction extends ScalarFunction {
+    private transient int opens;
+    private transient int closes;
+    private boolean failOpen;
+    private boolean failClose;
+
+    @Override
+    public void open(FunctionContext context) {
+      if (failOpen) {
+        throw new IllegalStateException("open failure");
+      }
+      if (opens != closes) {
+        throw new IllegalStateException("already open");
+      }
+      opens++;
+    }
+
+    @Override
+    public void close() {
+      if (opens != closes + 1) {
+        throw new IllegalStateException("not open");
+      }
+      closes++;
+      if (failClose) {
+        throw new IllegalStateException("close failure");
+      }
+    }
+
+    public Integer eval(Integer value) {
+      return value;
+    }
+
+    public String eval(String value) {
+      return value;
+    }
   }
 }

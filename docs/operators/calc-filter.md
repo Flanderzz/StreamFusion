@@ -64,10 +64,15 @@ column-at-a-time evaluation does not reproduce. Removing this gate is tracked in
 Registered scalar functions take precedence over builtin names, including in nested expressions
 and filters. A function registered as `UPPER`, for example, invokes the registered Java function
 through the bridge. Unsupported signatures fall back using the same UDF admission rules.
-The [shared UDF lifecycle issue](https://github.com/datafusion-contrib/StreamFusion/issues/83)
-remains separate from type admission and function dispatch.
+Within an operator, call sites sharing a function instance share one `open`/`close` lifecycle,
+including calls in both projections and predicates. Separate instances retain separate lifecycles.
+Serialization preserves shared references; task-local registrations retain each call's signature.
+Failed initialization releases earlier registrations and successfully opened functions, and a
+failing `close` does not prevent cleanup of the remaining instances.
+
 Runtime parity tests cover mixed projections, repeated decimal calls, nullable precision-38
-values, scale normalization, overflow, typed NULL arguments, and 5,003-row inputs. C Data tests
+values, scale normalization, overflow, typed NULL arguments, shadowed builtin names, shared
+lifecycle-dependent functions, and 5,003-row inputs. C Data tests
 cover sliced inputs, output survival after input release, and reclamation of Arrow allocations.
 
 ## String ordering

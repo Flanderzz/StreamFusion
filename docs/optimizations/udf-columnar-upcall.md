@@ -15,3 +15,7 @@ for nested decimal-result and repeated binary-call gates.
 Functions are serialized into the operator and registered per-task at `open()`, so this survives
 distributed execution, where the UDF instance must be reconstructed on each task's JVM rather than
 shared from the planner.
+Call-site registrations carry argument/result signatures, while the operator binding owns one
+lifecycle per distinct function instance. Repeated and nested calls share initialization and
+cleanup. A failed binding removes its registrations and closes successfully opened functions;
+cleanup continues through function-close exceptions and retains those failures for reporting.

@@ -6,6 +6,9 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -219,7 +222,7 @@ public final class NativeUdf {
     }
 
     /** Resolves the method on this JVM and registers it, returning the task-local runtime id. */
-    int registerLocally(FunctionContext context) {
+    int registerLocally() {
       Class<?> owner = function != null ? function.getClass() : methodClass;
       Method method;
       try {
@@ -229,11 +232,6 @@ public final class NativeUdf {
             "cannot resolve UDF method " + methodName + " on " + owner.getName(), e);
       }
       if (function != null) {
-        try {
-          function.open(context);
-        } catch (Exception e) {
-          throw new IllegalStateException("failed to open UDF " + owner.getName(), e);
-        }
         return register(function, method, argTypes, returnType);
       }
       return registerBuiltin(method, argTypes, returnType);
@@ -256,6 +254,7 @@ public final class NativeUdf {
     private final Descriptor[] descriptors; // indexed by local index
     private final int[] idSlots; // positions in the longs pool holding a local index
     private transient int[] runtimeIds;
+    private transient List<ScalarFunction> openedFunctions;
 
     public Binding(Descriptor[] descriptors, int[] idSlots) {
       this.descriptors = descriptors;
@@ -268,18 +267,45 @@ public final class NativeUdf {
      * re-open rebinds correctly). Returns {@code longs} unchanged when there are no UDFs.
      */
     public long[] bind(long[] longs, FunctionContext context) {
-      runtimeIds = new int[descriptors.length];
-      for (int i = 0; i < descriptors.length; i++) {
-        runtimeIds[i] = descriptors[i].registerLocally(context);
-      }
-      if (idSlots.length == 0) {
+      if (descriptors.length == 0) {
         return longs;
       }
-      long[] patched = longs.clone();
-      for (int slot : idSlots) {
-        patched[slot] = runtimeIds[(int) longs[slot]];
+      if (runtimeIds != null) {
+        throw new IllegalStateException("UDF binding is already open");
       }
-      return patched;
+      runtimeIds = new int[descriptors.length];
+      Arrays.fill(runtimeIds, -1);
+      openedFunctions = new ArrayList<>();
+      IdentityHashMap<ScalarFunction, Boolean> opened = new IdentityHashMap<>();
+      try {
+        for (int i = 0; i < descriptors.length; i++) {
+          ScalarFunction function = descriptors[i].function;
+          if (function != null && opened.put(function, Boolean.TRUE) == null) {
+            try {
+              function.open(context);
+            } catch (Exception e) {
+              throw new IllegalStateException("failed to open UDF " + function.getClass().getName(), e);
+            }
+            openedFunctions.add(function);
+          }
+          runtimeIds[i] = descriptors[i].registerLocally();
+        }
+        if (idSlots.length == 0) {
+          return longs;
+        }
+        long[] patched = longs.clone();
+        for (int slot : idSlots) {
+          patched[slot] = runtimeIds[(int) longs[slot]];
+        }
+        return patched;
+      } catch (RuntimeException | Error failure) {
+        try {
+          unbind();
+        } catch (RuntimeException | Error cleanupFailure) {
+          failure.addSuppressed(cleanupFailure);
+        }
+        throw failure;
+      }
     }
 
     /** Binds without task runtime information, for local expression/unit-test use. */
@@ -287,13 +313,37 @@ public final class NativeUdf {
       return bind(longs, new FunctionContext(null, null, null));
     }
 
-    /** Frees the registrations obtained by {@link #bind}. */
+    /** Frees call-site registrations and closes each successfully opened instance once. */
     public void unbind() {
-      if (runtimeIds != null) {
-        for (int id : runtimeIds) {
-          unregister(id);
+      if (runtimeIds == null) {
+        return;
+      }
+      int[] ids = runtimeIds;
+      List<ScalarFunction> functions = openedFunctions;
+      runtimeIds = null;
+      openedFunctions = null;
+      for (int id : ids) {
+        if (id >= 0) {
+          REGISTRY.remove(id);
         }
-        runtimeIds = null;
+      }
+      IllegalStateException failure = null;
+      for (int i = functions.size() - 1; i >= 0; i--) {
+        ScalarFunction function = functions.get(i);
+        try {
+          function.close();
+        } catch (Exception e) {
+          IllegalStateException closeFailure =
+              new IllegalStateException("failed to close UDF " + function.getClass().getName(), e);
+          if (failure == null) {
+            failure = closeFailure;
+          } else {
+            failure.addSuppressed(closeFailure);
+          }
+        }
+      }
+      if (failure != null) {
+        throw failure;
       }
     }
   }

@@ -70,6 +70,15 @@ JobManager — which the deployment already requires to be present everywhere.
 - The handle holds compiled native state and must be released on operator close, like
   the aggregator handles ([04](04-synchronous-stateful-execution.md)).
 
+## JVM scalar function ownership
+
+Follow Comet's task-scoped UDF bridge ownership, with Flink's per-instance lifecycle instead of
+Comet's per-dispatcher-class cache. Flink reuses each registered function across call sites, and
+separate instances of one class can carry different configuration. The serialized operator binding
+therefore opens and closes each function instance once, while retaining separate call-site
+registrations for their argument/result signatures. Binding failure rolls back earlier
+registrations and successful opens; close failures do not strand the remaining functions.
+
 ## Admitted-op semantics notes (parity edges)
 Some functions diverge from the host only at precision/locale edges, not in value. Those fall back
 **by default** but are opt-in via `NativeConfig` — `-Dstreamfusion.expression.<NAME>.allowIncompatible`
