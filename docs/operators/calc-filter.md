@@ -127,13 +127,32 @@ for narrow integer literals, or the tree should be cast to the declared type), n
 rewrite. This check requires the native library in the planning JVM, which the standard deployment
 already provides (see [Deployment](../deployment.md)).
 
+Typed NULL literals retain their declared Arrow type, including BOOLEAN, integer widths,
+DECIMAL precision/scale, fixed-width binary, and nested ARRAY/MAP/ROW/MULTISET fields.
+STRING and temporal NULLs retain their existing representations, including component-based
+TIMESTAMP/TIMESTAMP_LTZ storage. This also covers NULLs produced by constant folding, such
+as a MAP lookup with a literal NULL search key. These projections can share native Calc
+with runtime arithmetic or supported collection accesses without disabling the type guard.
+Nested field names and nullability are carried in a standard Arrow IPC schema during
+expression setup; no per-row schema serialization or host callback is needed.
+
+A release/mimalloc end-to-end diagnostic on Apple M4 Pro, JDK 17 and Flink 2.2.1 used
+2,000,000 rows at parallelism 1, two warmups and five interleaved trials per engine.
+`SELECT id + 1, CAST(NULL AS DECIMAL(38,18))` took 0.235819 s on Flink and 0.392874 s
+natively (0.600x); replacing the NULL type with `MAP<STRING, ARRAY<DECIMAL(38,18)>>`
+took 0.251582 s and 0.416719 s (0.604x). Both row/Arrow transposes are included and
+asserted. This small projection is slower natively; the change closes a type-coverage gap
+so folded NULLs can remain inside larger native islands, and claims no standalone speedup.
+Reproduce with `SF_BENCHMARK=true mvn -Pbench -pl :streamfusion-runtime test -Dtest=TypedNullBenchmark`.
+
 ## Collection subscripts
 
 ARRAY subscripts require a non-NULL positive integer literal; MAP keys require a non-NULL
 literal. A missing key, out-of-range array position, or NULL collection returns NULL.
 MAP lookup skips NULL map entries' keys when looking for the non-NULL literal, and returns
 the first matching entry, preserving nullable values and their nested types.
-Dynamic or NULL subscripts fall back to Flink.
+Dynamic subscripts and NULL subscripts that survive host constant folding fall back to Flink.
+When Flink folds a NULL-key lookup to a typed NULL literal, that literal is native.
 
 ## Integer division
 

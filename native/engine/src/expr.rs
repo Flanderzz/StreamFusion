@@ -29,6 +29,18 @@ pub(crate) fn build_expr(
         4 => logical_lit(longs[arg] != 0),
         // An untyped NULL; the surrounding expression's coercion (e.g. a CASE branch) types it.
         5 => datafusion::prelude::Expr::Literal(ScalarValue::Null, None),
+        30 => {
+            use base64::Engine;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(strings[arg].as_deref().expect("typed NULL schema"))
+                .expect("typed NULL schema encoding");
+            let schema = arrow::ipc::convert::try_schema_from_ipc_buffer(&bytes)
+                .expect("typed NULL Arrow schema");
+            assert_eq!(schema.fields().len(), 1, "typed NULL schema field count");
+            logical_lit(
+                ScalarValue::try_from(schema.field(0).data_type()).expect("typed NULL scalar type"),
+            )
+        }
         // Narrow integer literals carry their declared width so arithmetic evaluates in the same
         // type as the host (e.g. `int * 2` stays int32 and wraps), not a widened type.
         7 => logical_lit(longs[arg] as i32),
