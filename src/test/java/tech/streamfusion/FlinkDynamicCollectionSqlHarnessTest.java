@@ -166,9 +166,8 @@ class FlinkDynamicCollectionSqlHarnessTest {
             + " grouped['a'] FROM src",
         "SELECT id, nums[CAST(NULL AS INT)], grouped[CAST(NULL AS STRING)], nums[idx] FROM src"
       })
-  void foldedTypedNullStillFallsBack(String sql) throws Exception {
-    NativeParity.assertFallbackReasonContains(
-        FlinkDynamicCollectionSqlHarnessTest::collections, sql, "evaluates natively as Null");
+  void foldedTypedNullRemainsNativeAlongsideRuntimeLookups(String sql) throws Exception {
+    assertNativeParity(FlinkDynamicCollectionSqlHarnessTest::collections, sql);
   }
 
   private static void assertNativeParity(Supplier<TableEnvironment> factory, String sql)

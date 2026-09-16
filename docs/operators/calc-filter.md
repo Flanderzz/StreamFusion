@@ -213,6 +213,24 @@ for narrow integer literals, or the tree should be cast to the declared type), n
 rewrite. This check requires the native library in the planning JVM, which the standard deployment
 already provides (see [Deployment](../deployment.md)).
 
+Typed NULL literals retain their declared Arrow type, including BOOLEAN, integer widths,
+DECIMAL precision/scale, fixed-width binary, and nested ARRAY/MAP/ROW/MULTISET fields.
+STRING and temporal NULLs retain their existing representations, including component-based
+TIMESTAMP/TIMESTAMP_LTZ storage. This also covers NULLs produced by constant folding, such
+as a MAP lookup with a literal NULL search key. These projections can share native Calc
+with runtime arithmetic or supported collection accesses without disabling the type guard.
+Nested field names and nullability are carried in a standard Arrow IPC schema during
+expression setup; no per-row schema serialization or host callback is needed.
+
+A release/mimalloc end-to-end diagnostic on Apple M4 Pro, JDK 17 and Flink 2.2.1 used
+2,000,000 rows at parallelism 1, two warmups and five interleaved trials per engine.
+`SELECT id + 1, CAST(NULL AS DECIMAL(38,18))` took 0.235819 s on Flink and 0.392874 s
+natively (0.600x); replacing the NULL type with `MAP<STRING, ARRAY<DECIMAL(38,18)>>`
+took 0.251582 s and 0.416719 s (0.604x). Both row/Arrow transposes are included and
+asserted. This small projection is slower natively; the change closes a type-coverage gap
+so folded NULLs can remain inside larger native islands, and claims no standalone speedup.
+Reproduce with `SF_BENCHMARK=true mvn -Pbench -pl :streamfusion-runtime test -Dtest=TypedNullBenchmark`.
+
 ## Collection subscripts
 
 ARRAY subscripts accept runtime INT expressions with Flink's one-based indexing. A NULL
@@ -239,10 +257,8 @@ precision above 3: Flink's non-compact NULL slots have different read/error beha
 these key types declared NOT NULL remains eligible. This restriction applies to literal as well
 as runtime searches. Runtime NULL search keys and NULL containers are still supported.
 
-If Flink folds a constant NULL subscript into a top-level typed NULL projection, some result types
-still fail the native output-type preflight and fall back. This separate limitation is tracked in
-[#126](https://github.com/datafusion-contrib/StreamFusion/issues/126); it does not apply to NULL
-values in runtime index/key columns.
+When Flink folds a constant NULL subscript into a typed NULL projection, it retains its native
+Arrow type, including nested collection values. Folded NULLs can compose with runtime lookups.
 
 `DynamicCollectionBenchmark` measures this path with a release native build (`-Pbench`), 2 million
 rows, parallelism 1, two warmups and five interleaved trials. Both row/Arrow transposes and the
@@ -831,8 +847,7 @@ implementation can't handle, even though the function itself is supported:
 - **`CURRENT_WATERMARK`** — requires a Calc watermark context; unsupported in standalone join or UNNEST residuals.
 - **Collection subscripts:** non-INT ARRAY indexes and literal indexes below one; runtime MAP keys
   of floating, collection or mismatched types; nullable non-compact decimal/timestamp MAP keys.
-  Folded typed NULL projections may also fail the output-type check; see the
-  [collection contract](#collection-subscripts).
+  See the [collection contract](#collection-subscripts).
 - **Wrong arity** for any otherwise-admitted function.
 
 See [Configuration](../configuration.md) for the full `allowIncompatible` flag surface referenced

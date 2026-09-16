@@ -5,6 +5,7 @@ import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.math.RoundingMode;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -95,6 +96,8 @@ final class RexExpression {
   private static final int KIND_LIT_TIMESTAMP = 29;
   private static final int KIND_DECIMAL_ROUND = 30;
   private static final int KIND_RANDOM = 32;
+  // A typed NULL carries a one-field Arrow IPC schema in the string pool.
+  private static final int KIND_LIT_TYPED_NULL = 31;
   // Fused exact arithmetic: payload is the declared result precision*100 + scale; two children.
   private static final int KIND_DECIMAL_ADD = 26;
   private static final int KIND_DECIMAL_SUBTRACT = 27;
@@ -524,8 +527,23 @@ final class RexExpression {
         }
         return true;
       }
-      // Other NULL types are inferred from the surrounding expression.
-      add(KIND_LIT_NULL, -1, 0);
+      if (type == SqlTypeName.NULL) {
+        add(KIND_LIT_NULL, -1, 0);
+        return true;
+      }
+      try {
+        var logicalType =
+            org.apache.flink.table.planner.calcite.FlinkTypeFactory.toLogicalType(
+                literal.getType());
+        var schema =
+            tech.streamfusion.arrow.ArrowConversion.toArrowSchema(
+                org.apache.flink.table.types.logical.RowType.of(logicalType));
+        add(KIND_LIT_TYPED_NULL, strings.size(), 0);
+        strings.add(Base64.getEncoder().encodeToString(schema.serializeAsMessage()));
+      } catch (org.apache.flink.table.api.TableException
+          | UnsupportedOperationException unsupportedType) {
+        return reject("unsupported NULL literal type: " + literal.getType());
+      }
       return true;
     }
     switch (type) {
