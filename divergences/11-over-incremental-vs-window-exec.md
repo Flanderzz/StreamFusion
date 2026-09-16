@@ -16,13 +16,16 @@ This generalizes to any window function DataFusion supports (`ROW_NUMBER`, `LAG`
 `RANK`, …), because the plan does the work.
 
 ## What we do instead — which is what Flink itself does
-For the `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` running aggregate, we
+For the unbounded-preceding RANGE and ROWS running aggregates, we
 keep, per partition key, only the **incremental accumulators** (the same
 DataFusion `Accumulator`s the window aggregates use — `sum`/`min`/`max`/`count`,
 plus the int-semantics ones in [01](01-integer-truncating-avg.md)). Each row folds
 into its key's accumulators in rowtime order and emits the running value; raw rows
 are discarded once folded. This mirrors Flink's own `RowTimeUnboundedOver` operator,
-which keeps an accumulator per key, not the rows.
+which keeps an accumulator per key, not the rows. RANGE emits after folding the whole timestamp
+peer group; ROWS emits after each row, so tied rows have successive running results. The same
+accumulator layout and restore path serve both frames; the plan retains the emission mode.
+COUNT(*) projects a non-null BIGINT constant into the existing numeric count kernel.
 
 ## Why not delegate to a DataFusion window exec here
 The frame is **unbounded preceding** — every row's result depends on *all* prior
@@ -41,8 +44,7 @@ bounded-memory choice. This is the same reasoning as
 [03](03-incremental-window-merge.md), applied to OVER.
 
 ## General window functions — also incremental (investigated, not assumed)
-`ROW_NUMBER` (shipped), and `RANK`/`DENSE_RANK`/`FIRST_VALUE`/`LAST_VALUE` (to
-follow), are the same `OverAggregate` rel with `UNBOUNDED PRECEDING` frames
+`ROW_NUMBER`, `RANK`/`DENSE_RANK`/`FIRST_VALUE`/`LAST_VALUE` are the same `OverAggregate` rel with `UNBOUNDED PRECEDING` frames
 (`ROW_NUMBER` uses `ROWS`). An earlier version of this note predicted they would
 **delegate to a DataFusion window exec like Arroyo**. Investigating both sides
 showed that is wrong here:
@@ -106,7 +108,7 @@ watermark comparison. See the OVER coverage page for restore and expiry behavior
 ## Scope
 Running aggregates (`SUM`/`MIN`/`MAX`/`COUNT`/`AVG`; `AVG` via Flink's
 `$SUM0`+`COUNT` with the divide on the host), `FIRST_VALUE`/`LAST_VALUE`, and the
-window functions `ROW_NUMBER`/`RANK`/`DENSE_RANK`, over the unbounded `RANGE` frame, the
+window functions `ROW_NUMBER`/`RANK`/`DENSE_RANK`, over the unbounded `RANGE`/`ROWS` frames, the
 bounded `ROWS n PRECEDING` frame, or the bounded `RANGE INTERVAL n PRECEDING` frame.
 Both event-time and proctime orders are supported; under proctime the operator folds in
 arrival order and emits eagerly (no watermark), assigning a monotonic arrival sequence as

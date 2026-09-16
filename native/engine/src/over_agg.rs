@@ -74,6 +74,7 @@ impl OverAggState {
 }
 
 pub(crate) struct OverAggregator {
+    rows_frame: bool,
     kinds: Vec<i64>,
     /// One value type per aggregate (aggregates may read different value columns of different types).
     value_types: Vec<DataType>,
@@ -91,6 +92,7 @@ pub(crate) struct OverAggregator {
 impl OverAggregator {
     pub(crate) fn new(value_types: Vec<i64>, kinds: Vec<i64>) -> Self {
         OverAggregator {
+            rows_frame: false,
             value_types: value_types
                 .iter()
                 .map(|&code| value_data_type(code))
@@ -102,6 +104,11 @@ impl OverAggregator {
             track: false,
             bytes: 0,
         }
+    }
+
+    fn with_rows_frame(mut self, rows_frame: bool) -> Self {
+        self.rows_frame = rows_frame;
+        self
     }
 
     /// One key's fixed state footprint (the running aggregates plus the map entry).
@@ -155,8 +162,8 @@ impl OverAggregator {
         let mut results: Vec<Vec<ScalarValue>> = vec![vec![ScalarValue::Null; n]; num_agg];
         let mut start = 0;
         while start < n {
-            let mut end = start;
-            while end < n && rt.value(order[end]) == rt.value(order[start]) {
+            let mut end = start + 1;
+            while !self.rows_frame && end < n && rt.value(order[end]) == rt.value(order[start]) {
                 end += 1;
             }
             // Fold every row of this rt group into its key before reading any (RANGE: tied rows of a
@@ -940,8 +947,10 @@ impl OverInner {
     fn new(value_types: Vec<i64>, kinds: Vec<i64>, frame_kind: i64, frame_offset: i64) -> Self {
         if kinds.iter().all(|&k| is_window_function_kind(k)) {
             OverInner::WindowFunctions(WindowFunctionOver::new(kinds))
-        } else if frame_kind == 0 {
-            OverInner::Aggregates(OverAggregator::new(value_types, kinds))
+        } else if matches!(frame_kind, 0 | 3) {
+            OverInner::Aggregates(
+                OverAggregator::new(value_types, kinds).with_rows_frame(frame_kind == 3),
+            )
         } else {
             // frame_kind 1 = bounded ROWS, 2 = bounded RANGE.
             OverInner::Bounded(BoundedOverAggregator::new(
@@ -1038,8 +1047,11 @@ impl OverInner {
     ) -> Self {
         if kinds.iter().all(|&k| is_window_function_kind(k)) {
             OverInner::WindowFunctions(WindowFunctionOver::restore(kinds, bytes, stamps))
-        } else if frame_kind == 0 {
-            OverInner::Aggregates(OverAggregator::restore(value_types, kinds, bytes, stamps))
+        } else if matches!(frame_kind, 0 | 3) {
+            OverInner::Aggregates(
+                OverAggregator::restore(value_types, kinds, bytes, stamps)
+                    .with_rows_frame(frame_kind == 3),
+            )
         } else {
             OverInner::Bounded(BoundedOverAggregator::restore(
                 value_types,
@@ -1178,7 +1190,7 @@ pub(crate) fn rocks_over_state_types(
     frame_kind: i64,
     _proctime: bool,
 ) -> Option<Vec<DataType>> {
-    if frame_kind != 0 {
+    if !matches!(frame_kind, 0 | 3) {
         return Some(Vec::new());
     }
     if kinds.iter().all(|&kind| is_window_function_kind(kind)) {
@@ -1204,7 +1216,7 @@ pub(crate) fn rocks_over_state_types(
 /// The bounded shapes' frame-row value column types (empty for the unbounded shapes).
 #[cfg(feature = "rocksdb-state")]
 pub(crate) fn rocks_over_frame_value_types(value_types: &[i64], frame_kind: i64) -> Vec<DataType> {
-    if frame_kind == 0 {
+    if matches!(frame_kind, 0 | 3) {
         return Vec::new();
     }
     value_types
@@ -1222,7 +1234,7 @@ pub(crate) fn rocks_over_distinct_element_types(
     kinds: &[i64],
     frame_kind: i64,
 ) -> Vec<DataType> {
-    if frame_kind != 0 {
+    if !matches!(frame_kind, 0 | 3) {
         return Vec::new();
     }
     kinds
@@ -2772,7 +2784,7 @@ impl OverWindowAggregator {
             fields.push(Field::new(
                 format!("key{j}"),
                 complete.column(key).data_type().clone(),
-                false,
+                true,
             ));
             columns.push(complete.column(key).clone());
         }

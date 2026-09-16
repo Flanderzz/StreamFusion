@@ -840,9 +840,8 @@ public final class Native {
       long memoryBudgetBytes);
 
   /**
-   * Creates a columnar event-time OVER aggregator (RANGE between unbounded preceding and current
-   * row): it buffers input batches and, on a watermark, emits the completed rows with the running
-   * aggregate(s) appended. Released with {@link #closeOverAggregator}.
+   * Creates a columnar OVER aggregator: event-time frames buffer input until a watermark, while
+   * proctime frames emit eagerly. Each output row appends its frame aggregates. Released with {@link #closeOverAggregator}.
    *
    * @param valueTypes value column type per aggregate (see {@link #createTumblingAggregator}); empty
    *     for window-function OVER with no value argument
@@ -851,7 +850,8 @@ public final class Native {
    * @param valueColumns value column index per aggregate (each aggregate reads its own); empty for
    *     window-function OVER
    * @param keyColumns PARTITION BY column indices in the input batch (empty for no partition)
-   * @param frameKind frame shape: 0 = RANGE unbounded preceding, 1 = bounded ROWS, 2 = bounded RANGE
+   * @param frameKind frame shape: 0 = RANGE unbounded preceding, 1 = bounded ROWS, 2 = bounded RANGE,
+   *     3 = ROWS unbounded preceding
    * @param frameOffset n preceding rows (ROWS) or the preceding interval in millis (RANGE); 0 when
    *     unbounded
    * @param proctime whether the order is processing time (arrival order, eager emit) vs a rowtime

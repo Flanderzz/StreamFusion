@@ -19,15 +19,9 @@ import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalO
 import org.apache.flink.table.planner.plan.utils.ChangelogPlanUtils;
 
 /**
- * Recognizes the {@code OVER} aggregations the native operator implements: a single window group
- * ordered by a time attribute — a rowtime (local-time-zone) or a proctime — optional {@code PARTITION BY} on
- * bigint/int/string/boolean/date/timestamp/decimal keys, and one or more {@code SUM}/{@code MIN}/{@code
- * MAX}/{@code COUNT}/{@code FIRST_VALUE}/{@code LAST_VALUE} aggregates that each read a (possibly
- * different) bigint/int/smallint/tinyint/double/float value column, over one of three frames ending at the current row: {@code RANGE
- * UNBOUNDED PRECEDING} (a persistent running fold), {@code ROWS BETWEEN n PRECEDING AND CURRENT ROW}
- * (recomputed over the row slice), or {@code RANGE BETWEEN INTERVAL n PRECEDING AND CURRENT ROW}
- * (recomputed over the rowtime interval). Anything else (proctime, AVG, multiple value columns, an
- * unsupported key type) falls back.
+ * Recognizes one ascending time order and window group over supported partition keys. Numeric
+ * aggregates and COUNT(*) run over bounded or unbounded ROWS/RANGE frames ending at CURRENT ROW;
+ * bounded RANGE requires event time. Ranking functions require an unbounded frame.
  */
 final class OverAggregateMatcher {
 
@@ -82,19 +76,16 @@ final class OverAggregateMatcher {
       return "OVER: window functions need the UNBOUNDED PRECEDING .. CURRENT ROW frame";
     }
     if (valueColumns(window, group, inputType) == null) {
-      return "OVER: aggregates need a single bigint/int/double value-column argument each"
-          + " (AVG and COUNT(*) not supported)";
+      return "OVER: expected COUNT(*) or one numeric argument per aggregate; direct AVG is unsupported";
     }
-    // Every supported frame ends at CURRENT ROW with a preceding lower bound. ROWS must be a constant
-    // n PRECEDING (recomputed over the row slice); RANGE may be UNBOUNDED PRECEDING (the running fold)
-    // or a constant INTERVAL PRECEDING (recomputed over the rowtime interval).
+    // Running ROWS and RANGE share the persistent fold; bounded frames retain their input slice.
     if (!group.lowerBound.isPreceding()) {
       return "OVER: frame must have a PRECEDING lower bound";
     }
     if (group.isRows) {
-      if (group.lowerBound.isUnbounded()
-          || boundOffset(group.lowerBound, window, inputType.getFieldCount()) == null) {
-        return "OVER: ROWS frame must be BETWEEN n PRECEDING AND CURRENT ROW";
+      if (!group.lowerBound.isUnbounded()
+          && boundOffset(group.lowerBound, window, inputType.getFieldCount()) == null) {
+        return "OVER: ROWS lower bound must be UNBOUNDED PRECEDING or a constant preceding offset";
       }
     } else if (!group.lowerBound.isUnbounded()
         && boundOffset(group.lowerBound, window, inputType.getFieldCount()) == null) {
@@ -105,7 +96,7 @@ final class OverAggregateMatcher {
 
   /**
    * Frame shape code matching the native side: 0 = RANGE unbounded preceding (running fold), 1 =
-   * bounded ROWS (n preceding rows), 2 = bounded RANGE (a preceding rowtime interval).
+   * bounded ROWS, 2 = bounded RANGE, 3 = ROWS unbounded preceding (per-row running fold).
    */
   static int frameKind(StreamPhysicalOverAggregate over) {
     Window.Group group = over.logicWindow().groups.get(0);
@@ -113,7 +104,7 @@ final class OverAggregateMatcher {
       return 0;
     }
     if (group.isRows) {
-      return 1;
+      return group.lowerBound.isUnbounded() ? 3 : 1;
     }
     return group.lowerBound.isUnbounded() ? 0 : 2;
   }
@@ -122,7 +113,7 @@ final class OverAggregateMatcher {
   static long frameOffset(StreamPhysicalOverAggregate over) {
     Window window = over.logicWindow();
     Window.Group group = window.groups.get(0);
-    if (allWindowFunctions(group) || (!group.isRows && group.lowerBound.isUnbounded())) {
+    if (allWindowFunctions(group) || group.lowerBound.isUnbounded()) {
       return 0;
     }
     Long offset = boundOffset(group.lowerBound, window, over.getInput().getRowType().getFieldCount());
@@ -199,6 +190,10 @@ final class OverAggregateMatcher {
     for (int a = 0; a < aggCalls.size(); a++) {
       RexCall call = aggCalls.get(a);
       int kind = overKind(call.getOperator().getKind());
+      if (call.getKind() == SqlKind.COUNT && call.getOperands().isEmpty()) {
+        columns[a] = inputType.getFieldCount() + window.constants.size();
+        continue;
+      }
       if (call.getOperands().size() != 1
           || !(call.getOperands().get(0) instanceof RexInputRef)
           || kind < 0
@@ -275,6 +270,10 @@ final class OverAggregateMatcher {
     RelDataType inputType = over.getInput().getRowType();
     int[] codes = new int[columns.length];
     for (int a = 0; a < columns.length; a++) {
+      if (columns[a] == inputType.getFieldCount() + over.logicWindow().constants.size()) {
+        codes[a] = 0; // The synthetic non-null BIGINT one for COUNT(*).
+        continue;
+      }
       RelDataType valueType =
           columns[a] < inputType.getFieldCount()
               ? inputType.getFieldList().get(columns[a]).getType()
@@ -344,7 +343,12 @@ final class OverAggregateMatcher {
     int[] keyColumns = OverAggregateMatcher.keyColumns(over);
     RelNode input = ctx.columnarInput(over.getInputs().get(0), keyColumns);
     int inputArity = input.getRowType().getFieldCount();
-    int constantCount = over.logicWindow().constants.size();
+    List<RexLiteral> constants = new ArrayList<>(over.logicWindow().constants);
+    if (over.logicWindow().groups.get(0).aggCalls.stream()
+        .anyMatch(call -> call.getKind() == SqlKind.COUNT && call.getOperands().isEmpty())) {
+      constants.add(over.getCluster().getRexBuilder().makeBigintLiteral(java.math.BigDecimal.ONE));
+    }
+    int constantCount = constants.size();
     RelDataType physicalInputType = input.getRowType();
     if (constantCount > 0) {
       org.apache.calcite.rel.type.RelDataTypeFactory.Builder typeBuilder =
@@ -360,7 +364,7 @@ final class OverAggregateMatcher {
         names.add(input.getRowType().getFieldNames().get(i));
       }
       for (int i = 0; i < constantCount; i++) {
-        RexLiteral constant = over.logicWindow().constants.get(i);
+        RexLiteral constant = constants.get(i);
         String name = "$over_constant_" + i;
         typeBuilder.add(name, constant.getType());
         projections.add(constant);

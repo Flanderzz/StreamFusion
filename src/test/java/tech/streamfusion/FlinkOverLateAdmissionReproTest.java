@@ -62,6 +62,15 @@ class FlinkOverLateAdmissionReproTest {
             + "RANGE BETWEEN INTERVAL '1' SECOND PRECEDING AND CURRENT ROW) FROM n");
   }
 
+  @Test
+  void unboundedRowsRejectLateRowsAndCountEveryAdmittedRow() throws Exception {
+    for (boolean newPartition : new boolean[] {false, true}) {
+      NativeParity.assertParity(() -> input(newPartition),
+          "SELECT g, v, COUNT(*) OVER w, SUM(v) OVER w FROM n "
+              + "WINDOW w AS (PARTITION BY g ORDER BY rt ROWS UNBOUNDED PRECEDING)");
+    }
+  }
+
   private static void check(boolean newPartition, String frame) throws Exception {
     NativeParity.assertParity(() -> input(newPartition),
         "SELECT g, v, SUM(v) OVER (PARTITION BY g ORDER BY rt " + frame + ") FROM n");

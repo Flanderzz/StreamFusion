@@ -864,32 +864,28 @@ class RocksDBNativeStateBackendAllOperatorsTest {
     }
   }
 
-  /**
-   * A proctime OVER (unbounded fold, eager per-row emission) rides the typed store: the running
-   * fold and the arrival counter persist, so a restored operator continues the sum exactly, and
-   * on the RocksDB target it provably runs direct.
-   */
   @ParameterizedTest
   @EnumSource(StateTransition.class)
-  void stateTransitionPreservesProctimeOverAggregate(StateTransition transition) throws Exception {
+  void stateTransitionPreservesUnboundedRowsPeers(StateTransition transition) throws Exception {
     OperatorSubtaskState snapshot;
     try (BufferAllocator allocator = new RootAllocator();
         KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness =
-            overHarness(overOperator(new int[] {0}, 0, 0L, true, 0))) {
+            overHarness(overOperator(new int[] {0}, 3, 0L, false, 0))) {
       transition.configureSource(harness);
       harness.setup(new ArrowBatchSerializer());
       harness.open();
-      harness.processElement(new StreamRecord<>(overBatch(allocator, 10, 0)));
-      harness.processElement(new StreamRecord<>(overBatch(allocator, 5, 0)));
+      harness.processElement(new StreamRecord<>(overBatch(allocator, 10, 100)));
+      harness.processElement(new StreamRecord<>(overBatch(allocator, 20, 100)));
+      harness.processWatermark(new Watermark(200));
       assertEquals(
           List.of(
-              List.of(RowKind.INSERT, 1L, 10L, 0L, 10L),
-              List.of(RowKind.INSERT, 1L, 5L, 0L, 15L)),
+              List.of(RowKind.INSERT, 1L, 10L, 100L, 10L),
+              List.of(RowKind.INSERT, 1L, 20L, 100L, 30L)),
           collectOver(harness));
       snapshot = transition.snapshot(harness);
     }
 
-    NativeOverAggregateOperator imported = overOperator(new int[] {0}, 0, 0L, true, 0);
+    NativeOverAggregateOperator imported = overOperator(new int[] {0}, 3, 0L, false, 0);
     try (BufferAllocator allocator = new RootAllocator();
         KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness =
             overHarness(imported)) {
@@ -900,10 +896,87 @@ class RocksDBNativeStateBackendAllOperatorsTest {
       if (transition != StateTransition.ROCKSDB_TO_MEMORY) {
         assertTrue(
             NativeStateRouteProbe.directRocksDBState(imported),
-            "a proctime OVER must restore into the direct typed store");
+            "running ROWS must restore into the direct fold store");
       }
-      harness.processElement(new StreamRecord<>(overBatch(allocator, 2, 0)));
-      assertEquals(List.of(List.of(RowKind.INSERT, 1L, 2L, 0L, 17L)), collectOver(harness));
+      // Both pre-checkpoint rows remain in the restored running fold.
+      harness.processElement(new StreamRecord<>(overBatch(allocator, 5, 300)));
+      harness.processWatermark(new Watermark(400));
+      assertEquals(List.of(List.of(RowKind.INSERT, 1L, 5L, 300L, 35L)), collectOver(harness));
+    }
+  }
+
+  /**
+   * A proctime OVER (unbounded fold, eager per-row emission) rides the typed store: the running
+   * fold and the arrival counter persist, so a restored operator continues the sum exactly, and
+   * on the RocksDB target it provably runs direct.
+   */
+  @ParameterizedTest
+  @EnumSource(StateTransition.class)
+  void stateTransitionPreservesProctimeOverAggregate(StateTransition transition) throws Exception {
+    for (int frame : new int[] {0, 3}) {
+      OperatorSubtaskState snapshot;
+      try (BufferAllocator allocator = new RootAllocator();
+          KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness =
+              overHarness(overOperator(new int[] {0}, frame, 0L, true, 0))) {
+        transition.configureSource(harness);
+        harness.setup(new ArrowBatchSerializer());
+        harness.open();
+        harness.processElement(new StreamRecord<>(overBatch(allocator, 10, 0)));
+        harness.processElement(new StreamRecord<>(overBatch(allocator, 5, 0)));
+        assertEquals(
+            List.of(
+                List.of(RowKind.INSERT, 1L, 10L, 0L, 10L),
+                List.of(RowKind.INSERT, 1L, 5L, 0L, 15L)),
+            collectOver(harness));
+        snapshot = transition.snapshot(harness);
+      }
+
+      NativeOverAggregateOperator imported = overOperator(new int[] {0}, frame, 0L, true, 0);
+      try (BufferAllocator allocator = new RootAllocator();
+          KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness =
+              overHarness(imported)) {
+        transition.configureRestore(harness);
+        harness.setup(new ArrowBatchSerializer());
+        harness.initializeState(snapshot);
+        harness.open();
+        if (transition != StateTransition.ROCKSDB_TO_MEMORY) {
+          assertTrue(
+              NativeStateRouteProbe.directRocksDBState(imported),
+              "a proctime OVER must restore into the direct typed store");
+        }
+        harness.processElement(new StreamRecord<>(overBatch(allocator, 2, 0)));
+        assertEquals(List.of(List.of(RowKind.INSERT, 1L, 2L, 0L, 17L)), collectOver(harness));
+      }
+    }
+  }
+
+  @ParameterizedTest
+  @EnumSource(StateTransition.class)
+  void stateTransitionPreservesRunningRowsCountTtl(StateTransition transition) throws Exception {
+    OperatorSubtaskState snapshot;
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness =
+            overHarness(overOperator(new int[] {3}, 3, 0L, true, 1000))) {
+      transition.configureSource(harness);
+      harness.setup(new ArrowBatchSerializer());
+      harness.open();
+      harness.setProcessingTime(100);
+      harness.processElement(new StreamRecord<>(overBatch(allocator, 1, 0)));
+      harness.processElement(new StreamRecord<>(overBatch(allocator, 1, 0)));
+      assertEquals(List.of(List.of(RowKind.INSERT, 1L, 1L, 0L, 1L),
+          List.of(RowKind.INSERT, 1L, 1L, 0L, 2L)), collectOver(harness));
+      snapshot = transition.snapshot(harness);
+    }
+    try (BufferAllocator allocator = new RootAllocator();
+        KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness =
+            overHarness(overOperator(new int[] {3}, 3, 0L, true, 1000))) {
+      transition.configureRestore(harness);
+      harness.setup(new ArrowBatchSerializer());
+      harness.initializeState(snapshot);
+      harness.open();
+      harness.setProcessingTime(1100);
+      harness.processElement(new StreamRecord<>(overBatch(allocator, 1, 0)));
+      assertEquals(List.of(List.of(RowKind.INSERT, 1L, 1L, 0L, 1L)), collectOver(harness));
     }
   }
 

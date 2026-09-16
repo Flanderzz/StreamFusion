@@ -1,6 +1,6 @@
 # OVER
 
-**Status:** Native across all three frame shapes, with the gaps enumerated below.
+**Status:** Native across all four frame shapes, with the gaps enumerated below.
 
 `OVER` runs over one ascending order (rowtime or, where noted, proctime) and one window group. Each
 aggregate reads its own — possibly different — value column of type
@@ -15,10 +15,17 @@ control the input order separately.
 
 ## Frame shapes
 
-### Unbounded `RANGE … CURRENT ROW` (running fold)
+### Unbounded `RANGE … CURRENT ROW` and `ROWS … CURRENT ROW` (running folds)
 
-A running fold over the whole partition-to-date — every prior row is folded into the aggregate as
-the current row arrives.
+Both retain incremental aggregates per partition across batches. Event-time RANGE folds all
+rows tied at a timestamp before emitting their shared result. ROWS emits after each row,
+including separate running results for tied rows in their arrival order. Watermarks release
+buffered event-time rows in timestamp order; proctime folds eagerly in arrival order.
+
+`COUNT(*)` counts every row, while `COUNT(value)` skips NULL values. The planner materializes
+one non-null BIGINT constant for row counting and reuses the existing aggregate kernel, frame
+state, TTL and checkpoint paths. This works for all four admitted frame shapes, including
+mixed aggregates, nullable partition keys and unpartitioned input.
 
 ### Bounded `ROWS BETWEEN n PRECEDING AND CURRENT ROW`
 
@@ -55,11 +62,11 @@ per-batch timestamp, a wall-clock-interval frame has no meaningful definition.
 
 The matcher declines:
 
-- `AVG` and `COUNT(*)`.
+- Direct `AVG` calls. Flink can lower some SQL AVG forms to supported SUM/COUNT aggregates.
 - A decimal or other non-numeric value column.
 - A `PARTITION BY` key outside bigint/int/string/boolean/date/timestamp/decimal.
 - A frame not of the form `… PRECEDING .. CURRENT ROW` (a `ROWS`/`RANGE` lower bound that isn't a
-  constant preceding offset).
+  constant preceding offset or UNBOUNDED PRECEDING).
 - A bounded-RANGE frame over a proctime order.
 
 ## Parity, not gaps
@@ -70,7 +77,7 @@ frames, non-time or descending order, and `LAG`/`LEAD`.
 
 ## Idle-state TTL
 
-`OVER` runs `table.exec.state.ttl` natively across all three frame shapes, but the mechanics differ
+`OVER` runs `table.exec.state.ttl` natively across all four frame shapes, but the mechanics differ
 by shape:
 
 - **Rowtime frames and the proctime bounded-ROWS frame** share a per-key cleanup deadline (the same
@@ -89,3 +96,21 @@ by shape:
 With that, nothing declines a nonzero retention setting. See [Configuration](../configuration.md) for
 the TTL flag surface, and [window aggregate](window-aggregate.md) for the (unaffected — no idle-state
 TTL applies) window operators.
+
+## Running ROWS validation
+
+The focused Flink 2.2.1 suite covers COUNT(*) versus nullable COUNT, mixed aggregates, constant
+arguments, DISTINCT, empty/all-NULL input, multiple partitions, timestamp peers, late admission,
+and 5,003-row multi-batch input. Operator tests cover TTL expiry and running-state continuation
+across RocksDB checkpoints and memory/RocksDB backend transitions.
+
+`RunningRowsBenchmark` measures proctime COUNT(*), COUNT(value), SUM, MIN and MAX over one
+million rows and 64 keys, parallelism one, with both row/Arrow transposes and a row blackhole sink.
+On an Apple M1 Max/JDK 17, the September 16, 2026 release run used two warmups and five interleaved
+measurements: median Flink **0.605496 s**, native **0.591282 s** (**1.024x**). The difference is small;
+this establishes comparable end-to-end performance for the new coverage, not a substantial
+speedup. Keeping OVER columnar also lets it compose with adjacent native operators.
+
+```bash
+SF_BENCHMARK=true mvn -pl streamfusion-runtime -am test -Pbench -Dtest=RunningRowsBenchmark
+```
