@@ -19,9 +19,8 @@ import scala.collection.Seq;
  * to the input type — decimal AVG falls back), with any grouping keys and pass-through columns the
  * row/Arrow conversion supports. DISTINCT is native for COUNT (a per-key value set), SUM (the set plus
  * a running sum folded as values enter/leave), and MIN/MAX (semantically their plain forms); only
- * AVG(DISTINCT) falls back. The single-phase operator is not currently selected: unlike the
- * mini-batch local/global path, its immediate changelog emission does not yet reproduce Flink's
- * accumulator/output contract across every state-backend and async-state plan variant.
+ * AVG(DISTINCT) falls back. Timestamp extrema use the retractable multiset and preserve fractional
+ * nanoseconds, including for local-zoned timestamp values.
  */
 final class GroupAggregateMatcher {
 
@@ -90,7 +89,8 @@ final class GroupAggregateMatcher {
         } else if (kind == KIND_MIN || kind == KIND_MAX) {
           // MIN/MAX keep a value multiset; admit the running numerics, DECIMAL, and strings (ordered
           // byte-lexicographically, matching Flink's BinaryStringData comparison).
-          if (!isRunningType(valueType) && valueType != SqlTypeName.DECIMAL && !isStringType(valueType)) {
+          if (!isRunningType(valueType) && valueType != SqlTypeName.DECIMAL
+              && !isStringType(valueType) && !isTimestampType(valueType)) {
             return "GROUP BY: MIN/MAX over an unsupported value type";
           }
         } else if (!isRunningType(valueType) && valueType != SqlTypeName.DECIMAL) {
@@ -148,6 +148,10 @@ final class GroupAggregateMatcher {
   /** Character string types MIN/MAX admit (compared byte-lexicographically). */
   private static boolean isStringType(SqlTypeName type) {
     return type == SqlTypeName.CHAR || type == SqlTypeName.VARCHAR;
+  }
+
+  static boolean isTimestampType(SqlTypeName type) {
+    return type == SqlTypeName.TIMESTAMP || type == SqlTypeName.TIMESTAMP_WITH_LOCAL_TIME_ZONE;
   }
 
   static int[] kinds(StreamPhysicalGroupAggregate agg) {
