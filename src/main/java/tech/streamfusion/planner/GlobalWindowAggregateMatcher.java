@@ -14,13 +14,9 @@ import org.apache.flink.table.planner.plan.logical.WindowingStrategy;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalGlobalWindowAggregate;
 
 /**
- * Recognizes the global half of a two-phase aggregation: a slice-attached tumbling or hopping
- * window, no extra key or a single integer key, and one or more mergeable single-field aggregates
- * (SUM/MIN/MAX/COUNT over any single-phase-supported value type; no AVG, whose (sum, count) buffer
- * spans two partial columns). Its input is the local half's
- * {@code [key?, partial0..partialN-1, slice_end]}. For hopping, the planner appends a synthetic
- * {@code COUNT(*)} partial; it is merged like any count but excluded from the output (see
- * {@link #outputAggregateCount}).
+ * Matches a global window merge over flattened local accumulator fields. SUM/MIN/MAX/COUNT use
+ * one partial column; AVG uses a widened sum and count pair. Slice partials fan out into their
+ * containing windows; attached-window partials merge into the one window they name.
  */
 final class GlobalWindowAggregateMatcher {
 
@@ -76,11 +72,15 @@ final class GlobalWindowAggregateMatcher {
         return "global window aggregate: grouping keys must be bigint/int/string/boolean/date";
       }
     }
-    // Partials are positional ([grouping…, partial0..partialN-1, slice_end]); the i-th partial is
-    // the i-th aggregate's, so the merge agg's own argList is not used to locate it. A COUNT merge
+    // Partials are positional; AVG consumes two adjacent fields. The merge agg's own argList
+    // does not locate those fields. A COUNT merge
     // carries an empty argList for COUNT(*) and a single arg for COUNT(col); both sum the partial
     // counts via the count accumulator, so an empty argList is allowed only for COUNT.
-    int base = aggregate.grouping().length;
+    int requiredFields = grouping.length + WindowAggregateMatcher.partialFieldCount(aggregate.aggCalls()) + 1;
+    if (inputType.getFieldCount() < requiredFields) {
+      return "global window aggregate: missing accumulator partial fields";
+    }
+    int[] partialColumns = partialColumns(aggregate);
     for (int i = 0; i < aggregate.aggCalls().size(); i++) {
       AggregateCall call = aggregate.aggCalls().apply(i);
       int kind = WindowAggregateMatcher.aggregateKind(call.getAggregation().getKind());
@@ -88,37 +88,43 @@ final class GlobalWindowAggregateMatcher {
       if (call.isDistinct()) {
         return "global window aggregate: DISTINCT aggregates are not supported";
       }
-      // Single-field mergeable partial only: sum (also count's merge), min, max.
-      if (kind < 0 || kind == WindowAggregateMatcher.KIND_AVG || call.getArgList().size() > 1) {
-        return "global window aggregate: only single-field SUM/MIN/MAX/COUNT partials (no AVG)";
+      // Every admitted aggregate reads one original value (or none for COUNT(*)).
+      if (kind < 0 || call.getArgList().size() > 1) {
+        return "global window aggregate: requires SUM/MIN/MAX/COUNT or paired AVG partials";
       }
       if (call.getArgList().isEmpty() && kind != WindowAggregateMatcher.KIND_COUNT) {
-        return "global window aggregate: only single-field SUM/MIN/MAX/COUNT partials (no AVG)";
+        return "global window aggregate: requires SUM/MIN/MAX/COUNT or paired AVG partials";
       }
       // The partial column carries the aggregate's buffer type: the value type for SUM/MIN/MAX
       // (SUM's partial is Flink's nullable-sum buffer, DECIMAL(38, s) for a decimal SUM), bigint
       // for COUNT. Any single-phase-supported value type merges natively.
-      SqlTypeName partialType = inputType.getFieldList().get(base + i).getType().getSqlTypeName();
+      SqlTypeName partialType = inputType.getFieldList().get(partialColumns[i]).getType().getSqlTypeName();
       if (!WindowAggregateMatcher.supportedValueType(partialType)) {
         return "global window aggregate: unsupported partial column type " + partialType;
+      }
+      if (kind == WindowAggregateMatcher.KIND_AVG
+          && inputType.getFieldList().get(partialColumns[i] + 1).getType().getSqlTypeName()
+              != SqlTypeName.BIGINT) {
+        return "global window aggregate: AVG count partial must be BIGINT";
       }
     }
     return null;
   }
 
-  /**
-   * Value-type code per aggregate (matching the native side), recovered from each partial column —
-   * the native global builds the same accumulator the local flushed, so the partial's own type
-   * (bigint/double/int/narrow/float/decimal) selects it. Counts are bigint. The partials are
-   * positional ({@code [grouping…, partial0..partialN-1, slice_end]}), so the i-th partial column
-   * is the i-th aggregate's.
-   */
+  /** Value types select the accumulator, preserving AVG's result width and decimal sum scale. */
   static int[] valueTypes(StreamPhysicalGlobalWindowAggregate aggregate) {
     RelDataType inputType = aggregate.getInput().getRowType();
-    int base = aggregate.grouping().length;
+    int[] columns = partialColumns(aggregate);
     int[] types = new int[aggregate.aggCalls().size()];
     for (int i = 0; i < types.length; i++) {
-      types[i] = WindowAggregateMatcher.typeCode(inputType.getFieldList().get(base + i).getType());
+      AggregateCall call = aggregate.aggCalls().apply(i);
+      RelDataType partialType = inputType.getFieldList().get(columns[i]).getType();
+      // Integral and FLOAT AVG sums widen, but their result retains the original value type.
+      // Decimal AVG instead needs the partial sum's original scale for its exact division.
+      RelDataType valueType = WindowAggregateMatcher.partialWidth(call) == 2
+              && partialType.getSqlTypeName() != SqlTypeName.DECIMAL
+          ? call.getType() : partialType;
+      types[i] = WindowAggregateMatcher.typeCode(valueType);
     }
     return types;
   }
@@ -162,13 +168,12 @@ final class GlobalWindowAggregateMatcher {
   }
 
   static int[] partialColumns(StreamPhysicalGlobalWindowAggregate aggregate) {
-    // The global input is [grouping keys..., one partial per aggregate..., slice_end]; the partials
-    // are positional. (The agg calls' argLists are not usable here — Flink expresses each merge
-    // aggregate against a single intermediate ref, not the distinct partial columns.)
+    // Each aggregate starts after all preceding state fields, including both fields of each AVG.
     int base = aggregate.grouping().length;
     int[] columns = new int[aggregate.aggCalls().size()];
     for (int i = 0; i < columns.length; i++) {
-      columns[i] = base + i;
+      columns[i] = base;
+      base += WindowAggregateMatcher.partialWidth(aggregate.aggCalls().apply(i));
     }
     return columns;
   }

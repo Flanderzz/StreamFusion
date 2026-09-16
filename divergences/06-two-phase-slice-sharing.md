@@ -25,7 +25,10 @@ synthetic per-slice `COUNT(*)` the planner injects into the intermediate row (it
 is **not** an aggregate call); we fill it in the local and ignore it in the
 global. Its only Flink purpose — empty-window detection — cannot arise in our
 batch-flush model, where a window is materialized only from slices that carried
-rows.
+rows. AVG contributes two adjacent fields (widened sum and count), so the position of every later
+partial follows all preceding accumulator fields. The optional synthetic count follows those
+fields as well. Local emission and global merge use the same accumulator state schema already
+used by checkpoints, preserving decimal overflow and integer wrapping through the split.
 
 This is reverse-engineered from Flink's slicing runtime, not adapted from Arroyo,
 because Arroyo's raw-retain-and-recompute approach produces a different

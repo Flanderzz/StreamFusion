@@ -7,6 +7,24 @@ and the two-phase local/global split — and the windowing-TVF operator that ass
 window(s) ahead of a downstream consumer (an aggregate, a [window join](joins/window-join.md), or
 window Top-N/dedup).
 
+## Mixed aggregates and AVG partials
+
+SUM, MIN, MAX, COUNT and AVG can share a window and read the same or different numeric columns.
+AVG supports INT/BIGINT, SMALLINT/TINYINT, FLOAT/DOUBLE and DECIMAL in single-phase execution
+and the event-time two-phase split for TUMBLE, HOP, CUMULATE and admitted attached windows.
+
+The local emits every accumulator field in aggregate order. AVG contributes adjacent sum and
+count fields; later aggregates and an optional synthetic row count start after that pair.
+The global merges each pair together before dividing. Integral sums widen to BIGINT with Java's
+wrapping arithmetic, but the average retains its declared integral result type. FLOAT sums widen
+to DOUBLE and narrow only the result. DECIMAL preserves the sum scale, sticky overflow, exact
+division and Flink's result scale. Empty/all-NULL groups keep the host NULL/count behavior.
+
+Partials remain Arrow through the local, exchange and global operators. A checkpoint barrier
+drains local slices into the global before snapshotting; AVG pairs use the existing flattened
+accumulator checkpoint layout in memory and direct RocksDB state. Restore tests merge subsequent
+partials and verify every hopping window after RocksDB checkpoints and both backend transitions.
+
 ## Floating extrema
 
 FLOAT/DOUBLE MIN/MAX initializes from the first non-NULL value and replaces it only when a
@@ -132,8 +150,8 @@ enables columnar composition with downstream consumers; it is not a standalone t
 - Legacy processing-time `SESSION`.
 - Key type outside bigint/int/string/boolean/date/timestamp/decimal.
 - A value type/aggregate mismatch.
-- `AVG` under the two-phase split — its `(sum, count)` buffer spans two positional partial columns.
-  A single-phase `AVG` as a lone aggregate is native.
+- Single-phase aggregation over attached window bounds. Attached windows are native through
+  the two-phase local/global path.
 - A **windowed `DISTINCT` aggregate** (`SUM(DISTINCT …)` etc. inside a window) — it dedups per window,
   which the native window operators' every-row fold would over-count. Non-windowed `DISTINCT` is
   native; see [GROUP BY](group-by.md).
@@ -142,11 +160,27 @@ A **zero-aggregate grouping-only window** (`GROUP BY key + window`, no aggregate
 one of the gaps above — it's a windowed distinct, and is native (single- and two-phase), emitting one
 row per `(key, window)`. See [GROUP BY](group-by.md) for how the non-windowed case handles `DISTINCT`.
 
+## Mixed AVG benchmark
+
+`MixedWindowAvgBenchmark` compares mixed COUNT/AVG/SUM/MIN/MAX over a 2-second/10-second HOP
+with released Flink 2.2.1. A release build (`-Pbench`), 1 million rows, parallelism 2, 64 keys,
+nullable INT/BIGINT values, two warmups and five interleaved measured runs gave these medians.
+The row source, both row/Arrow transposes and the rowwise blackhole sink remain in the measured
+path; the test asserts the expected single- or two-phase native window plan.
+
+| Phase | Flink seconds | Native seconds | Flink/native |
+| --- | ---: | ---: | ---: |
+| Single | 0.501354 | 0.481034 | 1.042x |
+| Local/global | 0.569200 | 0.514087 | 1.107x |
+
+These are small local gains; the primary change is coverage for mixed aggregates and paired
+AVG partials, including narrow integer and FLOAT result types, decimal overflow, and restore.
+
 ## Idle-state TTL
 
 Flink applies no idle-state TTL to window operators — `table.exec.state.ttl` changes nothing here;
 windows are bounded by their own firing and eviction instead. Contrast with [`OVER`](over.md), which
-does run TTL natively across all three of its frame shapes. See [Configuration](../configuration.md)
+does run TTL natively across all four of its frame shapes. See [Configuration](../configuration.md)
 for the TTL flag surface.
 
 ## Fixed-offset TVF benchmark

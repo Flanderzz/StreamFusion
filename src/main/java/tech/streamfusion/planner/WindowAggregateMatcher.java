@@ -19,13 +19,7 @@ import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalL
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalWindowAggregate;
 import org.apache.flink.table.types.logical.LogicalTypeRoot;
 
-/**
- * Recognizes the window aggregations the native operator implements: an event-time tumbling window
- * over a local-time-zone attribute, with no extra grouping keys or a single integer key, and one or
- * more aggregates that all read the same bigint value column reducing it to an int
- * (SUM/MIN/MAX/COUNT, plus AVG only as a lone aggregate). Operates on the
- * windowing/grouping/aggregate components so the single-phase and local-phase nodes share it.
- */
+/** Shared admission and encoding for single-phase and local window aggregation. */
 final class WindowAggregateMatcher {
 
   static final int KIND_SUM = 0;
@@ -120,7 +114,7 @@ final class WindowAggregateMatcher {
 
   /**
    * The local half of a two-phase hopping aggregation: the same user aggregates as the single-phase
-   * matcher (single arg, no AVG) over a hopping window whose slide divides its size. The local
+   * matcher (one input per aggregate) over a hopping window whose slide divides its size. The local
    * pre-aggregates per slice (width = slide). The planner's intermediate also carries a synthetic
    * {@code COUNT(*)} column between the partials and the slice end; it is not an aggregate call
    * here, so {@link #hoppingLocalKinds} appends a count to fill that column (the global ignores
@@ -144,16 +138,15 @@ final class WindowAggregateMatcher {
     if (slide == 0 || hop.getSize().toMillis() % slide != 0) {
       return false;
     }
-    return supportedAggregation(windowing, grouping, aggCalls, inputType)
-        && !containsAvg(aggCalls);
+    return supportedAggregation(windowing, grouping, aggCalls, inputType);
   }
 
   /**
    * A window-attached local half (Nexmark q5): the input rows already carry their window as
    * {@code window_start}/{@code window_end} columns (an upstream window aggregate's output being
    * re-aggregated per window), so there is no rowtime to slice — the local folds each row into the one
-   * window it names. Restricted, like the hopping local, to single-field mergeable partials (no
-   * AVG, whose (sum, count) buffer spans two partial columns). Event-time only.
+   * window it names. AVG contributes two positional partial columns, like the hopping local.
+   * Event-time only.
    */
   static boolean matchesAttachedLocal(
       RelNode node,
@@ -167,7 +160,7 @@ final class WindowAggregateMatcher {
     if (!WindowZoneGate.admits(node, windowing)) {
       return false;
     }
-    return !containsAvg(aggCalls) && supportedAggregates(grouping, aggCalls, inputType);
+    return supportedAggregates(grouping, aggCalls, inputType);
   }
 
   /** The input-column index of the attached {@code window_start}. */
@@ -273,8 +266,7 @@ final class WindowAggregateMatcher {
     // Each aggregate reads its own value column (so SUM(a), SUM(b) over different columns is fine),
     // or none for COUNT(*) (which the operator counts over a synthesized non-null column). The
     // per-kind value-type gates below enforce the parity intersection in
-    // docs/aggregate-type-support.md.
-    boolean multiple = aggCalls.size() > 1;
+    // docs/operators/window-aggregate.md.
     for (int i = 0; i < aggCalls.size(); i++) {
       AggregateCall call = aggCalls.apply(i);
       int kind = aggregateKind(call.getAggregation().getKind());
@@ -314,8 +306,7 @@ final class WindowAggregateMatcher {
       if (kind == KIND_SUM && !numericSumAvg) {
         return false;
       }
-      // AVG has multi-field partial state, so it is only supported as a lone aggregate.
-      if (kind == KIND_AVG && (multiple || !numericSumAvg)) {
+      if (kind == KIND_AVG && !numericSumAvg) {
         return false;
       }
     }
@@ -374,13 +365,16 @@ final class WindowAggregateMatcher {
     }
   }
 
-  static boolean containsAvg(scala.collection.Seq<AggregateCall> aggCalls) {
+  static int partialFieldCount(scala.collection.Seq<AggregateCall> aggCalls) {
+    int fields = 0;
     for (int i = 0; i < aggCalls.size(); i++) {
-      if (aggregateKind(aggCalls.apply(i).getAggregation().getKind()) == KIND_AVG) {
-        return true;
-      }
+      fields += partialWidth(aggCalls.apply(i));
     }
-    return false;
+    return fields;
+  }
+
+  static int partialWidth(AggregateCall call) {
+    return aggregateKind(call.getAggregation().getKind()) == KIND_AVG ? 2 : 1;
   }
 
   static boolean isTumbling(WindowingStrategy windowing) {
@@ -500,8 +494,8 @@ final class WindowAggregateMatcher {
    * Which shape of local window pre-aggregate a node is, or null when the native operator handles
    * none of them. Tumbling, hopping and cumulative locals pre-aggregate per slice off a rowtime;
    * every non-AVG aggregate has a single-field mergeable partial (the custom SUMs mirror Flink's
-   * nullable-sum buffer), so the two-phase split admits the same value types as the single-phase
-   * path. AVG stays single-phase: its (sum, count) buffer spans two partial columns.
+   * nullable-sum buffer). AVG adds a (sum, count) pair, and the two-phase split admits the same
+   * value types as the single-phase path.
    */
   enum LocalWindowVariant {
     /** Pre-aggregates per slice; the global re-buckets slices into windows. */
@@ -563,8 +557,7 @@ final class WindowAggregateMatcher {
       return LocalWindowVariant.HOPPING;
     }
     boolean sliceable =
-        WindowAggregateMatcher.matches(agg, agg.windowing(), agg.grouping(), agg.aggCalls(), input)
-            && !WindowAggregateMatcher.containsAvg(agg.aggCalls());
+        WindowAggregateMatcher.matches(agg, agg.windowing(), agg.grouping(), agg.aggCalls(), input);
     if (sliceable && WindowAggregateMatcher.isTumbling(agg.windowing())) {
       return LocalWindowVariant.TUMBLING;
     }
@@ -588,7 +581,7 @@ final class WindowAggregateMatcher {
     // (its row type is [grouping?, partials.., slice_end]) rather than assuming hopping always
     // adds one — otherwise a hopping COUNT(*) local emits a column the global does not expect.
     int partialColumns = agg.getRowType().getFieldCount() - agg.grouping().length - 1;
-    boolean syntheticCount = partialColumns > agg.aggCalls().size();
+    boolean syntheticCount = partialColumns > partialFieldCount(agg.aggCalls());
     int[] kinds =
         syntheticCount
             ? WindowAggregateMatcher.hoppingLocalKinds(agg.aggCalls())
@@ -633,14 +626,14 @@ final class WindowAggregateMatcher {
    * operator-level reason naming the requirements.
    */
   static String unsupportedReason(RelNode node, WindowingStrategy windowing) {
+    if (windowing instanceof WindowAttachedWindowingStrategy) {
+      return "window aggregate: attached-window aggregation requires two-phase execution";
+    }
     String zoneReason = WindowZoneGate.unsupportedReason(node, windowing);
     if (zoneReason != null) {
       return "window aggregate: " + zoneReason;
     }
-    return "window aggregate: needs an event-time TUMBLE/HOP/CUMULATE (zero offset) over a"
-        + " local-time-zone or plain TIMESTAMP rowtime, one value column whose type matches the"
-        + " aggregate (bigint/int/double for SUM/AVG, also smallint/tinyint/float for"
-        + " MIN/MAX/COUNT), and bigint/int/string/boolean/date keys"
-        + " (docs/aggregate-type-support.md)";
+    return "window aggregate: requires a supported window/time and grouping-key type, and"
+        + " non-DISTINCT numeric SUM/MIN/MAX/COUNT/AVG (docs/operators/window-aggregate.md)";
   }
 }

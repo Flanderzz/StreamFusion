@@ -696,7 +696,7 @@ impl TumblingAggregator {
     }
 
     /// Local half of two-phase aggregation: emits each closed window's per-aggregate partial state
-    /// as `[key, partial0..partialN-1, slice_end]`. Single-field partials (sum/min/max/count).
+    /// as `[key, partial0.., slice_end]`, flattening every accumulator field (AVG: sum, count).
     pub(crate) fn flush_partial(&mut self, watermark: i64) -> RecordBatch {
         self.current_watermark = self.current_watermark.max(watermark);
         let ends = self.closed_windows(watermark);
@@ -715,10 +715,14 @@ impl TumblingAggregator {
 
     fn emit_partials(&mut self, ends: Vec<i64>) -> RecordBatch {
         self.snapshot_cache = None;
-        let n = self.aggregates.len();
+        let state_fields: Vec<Field> = self
+            .aggregates
+            .iter()
+            .flat_map(WindowAggregate::state_fields)
+            .collect();
         let mut keys: Vec<OwnedRow> = Vec::new();
         let mut slice_ends = Vec::new();
-        let mut partials: Vec<Vec<ScalarValue>> = vec![Vec::new(); n];
+        let mut partials: Vec<Vec<ScalarValue>> = vec![Vec::new(); state_fields.len()];
         for end in ends {
             let window = self.windows.remove(&end).expect("window present");
             let mut group: Vec<(OwnedRow, Vec<Box<dyn Accumulator>>)> =
@@ -728,9 +732,12 @@ impl TumblingAggregator {
                 self.forget_group_bytes(&key, &accumulators);
                 keys.push(key);
                 slice_ends.push(end);
-                for (i, accumulator) in accumulators.iter_mut().enumerate() {
-                    let state = accumulator.state().expect("state");
-                    partials[i].push(state.into_iter().next().expect("single-field partial"));
+                let mut field = 0;
+                for accumulator in &mut accumulators {
+                    for value in accumulator.state().expect("state") {
+                        partials[field].push(value);
+                        field += 1;
+                    }
                 }
             }
         }
@@ -741,7 +748,7 @@ impl TumblingAggregator {
         for (i, scalars) in partials.into_iter().enumerate() {
             // Nullable: a SUM partial is Flink's nullable-sum buffer — NULL for an all-NULL bundle
             // or an overflowed decimal bundle (the global's merge skips it, as the host's does).
-            let partial_type = self.aggregates[i].state_fields()[0].data_type().clone();
+            let partial_type = state_fields[i].data_type().clone();
             fields.push(Field::new(
                 format!("partial{i}"),
                 partial_type.clone(),
@@ -759,18 +766,28 @@ impl TumblingAggregator {
     /// `[key, partial0..partialN-1, slice_end]` into the window each slice belongs to.
     pub(crate) fn update_partial(&mut self, batch: &RecordBatch) -> Result<(), DataFusionError> {
         self.snapshot_cache = None;
-        let n = self.aggregates.len();
         let key_arrays = key_arrays(batch);
         self.key_types = key_types(&key_arrays);
         let keys_encoded = encode_keys(&mut self.key_converter, &key_arrays, batch.num_rows());
         let slice_ends = column_i64(batch, "slice_end");
         // Partials are read as whole columns and merged a row-slice at a time, so any partial type
         // (int64 sum/count, float64 sum, …) flows through without per-type handling here.
-        let partials: Vec<&ArrayRef> = (0..n)
-            .map(|i| {
-                batch
-                    .column_by_name(&format!("partial{i}"))
-                    .expect("partial")
+        let mut field = 0;
+        let partials: Vec<Vec<&ArrayRef>> = self
+            .aggregates
+            .iter()
+            .map(|aggregate| {
+                aggregate
+                    .state_fields()
+                    .iter()
+                    .map(|_| {
+                        let column = batch
+                            .column_by_name(&format!("partial{field}"))
+                            .expect("partial");
+                        field += 1;
+                        column
+                    })
+                    .collect()
             })
             .collect();
 
@@ -803,9 +820,11 @@ impl TumblingAggregator {
                 }
                 let accumulators = self.accumulators(start, end, key.clone());
                 for (i, accumulator) in accumulators.iter_mut().enumerate() {
-                    accumulator
-                        .merge_batch(&[partials[i].slice(row, 1)])
-                        .expect("failed to merge partial");
+                    let state: Vec<ArrayRef> = partials[i]
+                        .iter()
+                        .map(|column| column.slice(row, 1))
+                        .collect();
+                    accumulator.merge_batch(&state)?;
                 }
                 if track {
                     delta += accumulators_bytes(accumulators) as isize;

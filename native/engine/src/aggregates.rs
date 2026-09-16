@@ -88,7 +88,7 @@ impl Accumulator for IntegerAvgAccumulator {
                     .downcast_ref::<Int32Array>()
                     .expect("value int32");
                 for value in array.iter().flatten() {
-                    self.sum += i64::from(value);
+                    self.sum = self.sum.wrapping_add(i64::from(value));
                     self.count += 1;
                 }
             }
@@ -98,7 +98,7 @@ impl Accumulator for IntegerAvgAccumulator {
                     .downcast_ref::<Int16Array>()
                     .expect("value int16");
                 for value in array.iter().flatten() {
-                    self.sum += i64::from(value);
+                    self.sum = self.sum.wrapping_add(i64::from(value));
                     self.count += 1;
                 }
             }
@@ -108,7 +108,7 @@ impl Accumulator for IntegerAvgAccumulator {
                     .downcast_ref::<Int8Array>()
                     .expect("value int8");
                 for value in array.iter().flatten() {
-                    self.sum += i64::from(value);
+                    self.sum = self.sum.wrapping_add(i64::from(value));
                     self.count += 1;
                 }
             }
@@ -118,7 +118,7 @@ impl Accumulator for IntegerAvgAccumulator {
                     .downcast_ref::<Int64Array>()
                     .expect("value int64");
                 for value in array.iter().flatten() {
-                    self.sum += value;
+                    self.sum = self.sum.wrapping_add(value);
                     self.count += 1;
                 }
             }
@@ -135,7 +135,7 @@ impl Accumulator for IntegerAvgAccumulator {
             .as_any()
             .downcast_ref::<Int64Array>()
             .expect("count state int64");
-        self.sum += sums.iter().flatten().sum::<i64>();
+        self.sum = sums.iter().flatten().fold(self.sum, i64::wrapping_add);
         self.count += counts.iter().flatten().sum::<i64>();
         Ok(())
     }

@@ -113,6 +113,108 @@ class RocksDBNativeStateBackendAllOperatorsTest {
           new LogicalType[] {new BigIntType(), new TimestampType(3), new TimestampType(3)},
           new String[] {"total", "window_start", "window_end"});
 
+  private static final RowType MIXED_WINDOW_INPUT = RowType.of(
+      new LogicalType[] {new BigIntType(), new BigIntType(),
+          new org.apache.flink.table.types.logical.DecimalType(20, 2), new LocalZonedTimestampType(3)},
+      new String[] {"k", "v", "d", "rt"});
+  private static final RowType MIXED_WINDOW_OUTPUT = RowType.of(
+      new LogicalType[] {new BigIntType(), new BigIntType(), new BigIntType(),
+          new org.apache.flink.table.types.logical.DecimalType(38, 6), new BigIntType(),
+          new BigIntType(), new TimestampType(3), new TimestampType(3)},
+      new String[] {"k", "mn", "avg_v", "avg_d", "cnt", "sum_v", "window_start", "window_end"});
+  private static final int[] MIXED_WINDOW_KINDS = {1, 4, 4, 3, 0};
+  private static final int[] MIXED_WINDOW_TYPES = {0, 0,
+      tech.streamfusion.operator.NativeWindowOperatorCore.decimalCode(20, 2), 0, 0};
+
+  @ParameterizedTest
+  @EnumSource(StateTransition.class)
+  void stateTransitionPreservesMixedWindowAvgPartials(StateTransition transition) throws Exception {
+    OperatorSubtaskState snapshot;
+    try (KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness =
+        mixedWindowHarness(mixedWindowOperator())) {
+      transition.configureSource(harness);
+      harness.setup(new ArrowBatchSerializer());
+      harness.open();
+      feedMixedWindowPartial(harness, 10, "1.00", true);
+      snapshot = transition.snapshot(harness);
+    }
+    var operator = mixedWindowOperator();
+    try (KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> harness =
+        mixedWindowHarness(operator)) {
+      transition.configureRestore(harness);
+      harness.setup(new ArrowBatchSerializer());
+      harness.initializeState(snapshot);
+      harness.open();
+      if (transition != StateTransition.ROCKSDB_TO_MEMORY) {
+        assertTrue(NativeStateRouteProbe.directRocksDBState(operator));
+      }
+      feedMixedWindowPartial(harness, 20, "3.00", false);
+      harness.processWatermark(new Watermark(10000));
+      List<List<Object>> actual = new ArrayList<>();
+      while (!harness.getOutput().isEmpty()) {
+        Object event = harness.getOutput().poll();
+        if (event instanceof StreamRecord<?> record) {
+          try (VectorSchemaRoot root = ((ArrowBatch) record.getValue()).root()) {
+            for (RowData row : RowDataArrowConverter.read(root, MIXED_WINDOW_OUTPUT)) {
+              actual.add(List.of(row.getLong(0), row.getLong(1), row.getLong(2),
+                  row.getDecimal(3, 38, 6).toBigDecimal(), row.getLong(4), row.getLong(5),
+                  row.getTimestamp(6, 3).getMillisecond(), row.getTimestamp(7, 3).getMillisecond()));
+            }
+          }
+        }
+      }
+      List<List<Object>> expected = new ArrayList<>();
+      for (long end = 2000; end <= 10000; end += 2000) {
+        expected.add(List.of(1L, 10L, 15L, new java.math.BigDecimal("2.000000"),
+            2L, 30L, end - 10000, end));
+      }
+      assertEquals(expected, actual);
+    }
+  }
+
+  private static tech.streamfusion.operator.NativeColumnarGlobalWindowAggregateOperator mixedWindowOperator() {
+    return new tech.streamfusion.operator.NativeColumnarGlobalWindowAggregateOperator(
+        10000, 2000, false, new int[] {0}, MIXED_WINDOW_TYPES, MIXED_WINDOW_KINDS,
+        "UTC", MIXED_WINDOW_OUTPUT, new int[] {-1}, MAX_PARALLELISM);
+  }
+
+  private static KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> mixedWindowHarness(
+      tech.streamfusion.operator.NativeColumnarGlobalWindowAggregateOperator operator) throws Exception {
+    return new KeyedOneInputStreamOperatorTestHarness<>(operator, batch -> 0, Types.INT,
+        MAX_PARALLELISM, 1, 0);
+  }
+
+  private static void feedMixedWindowPartial(
+      KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> global,
+      long value, String decimal, boolean barrier) throws Exception {
+    var operator = new tech.streamfusion.operator.NativeColumnarLocalWindowAggregateOperator(
+        2000, 2000, 3, -1, -1, new int[] {1, 1, 2, -1, 1}, new int[] {0}, new int[] {0},
+        MIXED_WINDOW_TYPES, MIXED_WINDOW_KINDS, "UTC", new int[] {-1}, MAX_PARALLELISM);
+    try (BufferAllocator allocator = new RootAllocator();
+        var local = new KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch>(
+            operator, batch -> 0, Types.INT, MAX_PARALLELISM, 1, 0)) {
+      local.setup(new ArrowBatchSerializer());
+      local.open();
+      var row = GenericRowData.of(1L, value,
+          org.apache.flink.table.data.DecimalData.fromBigDecimal(new java.math.BigDecimal(decimal), 20, 2),
+          TimestampData.fromEpochMillis(500));
+      local.processElement(new StreamRecord<>(new ArrowBatch(
+          RowDataArrowConverter.write(List.of(row), MIXED_WINDOW_INPUT, allocator))));
+      if (barrier) operator.prepareSnapshotPreBarrier(1);
+      else local.processWatermark(new Watermark(2000));
+      int partialRows = 0;
+      while (!local.getOutput().isEmpty()) {
+        Object event = local.getOutput().poll();
+        if (event instanceof StreamRecord<?> record) {
+          ArrowBatch batch = (ArrowBatch) record.getValue();
+          partialRows += batch.rowCount();
+          global.processElement(new StreamRecord<>(batch));
+        }
+      }
+      assertEquals(1, partialRows);
+    }
+  }
+
   /**
    * A proctime tumbling window keeps its direct RocksDB store: the firing deadline rides the typed
    * store's reserved key, so after a checkpoint/restore cycle the restored deadline alone re-arms
