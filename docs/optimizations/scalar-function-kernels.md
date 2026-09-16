@@ -105,3 +105,37 @@ Reuses the same prefix and padding-span machinery on the right, including Flink'
 Fuses timestamp unit conversion, Flink's truncating day calculation, and integer Julian-calendar extraction into one primitive Arrow mapping. Besides eliminating intermediate arrays, this preserves Flink's expanded-year integer arithmetic outside chrono's range.
 
 [Complete-job Flink/native results](../benchmarks/scalar-functions.md#quarter).
+
+## Integer/string casts
+
+CAST and TRY_CAST between character strings and signed integers now build Arrow arrays directly.
+This removes the previous host cast's per-batch JNI callback and Arrow export/import. Parsing
+borrows each string, validates Flink's decimal-text grammar and appends the requested integer
+width without a temporary array. Formatting widens primitive inputs to BIGINT, then reuses one
+small decimal scratch string per batch before writing the final Arrow string buffer. Error mode
+and output length are part of the immutable expression, following Comet's cast dispatch pattern.
+The [coverage page](../operators/calc-filter.md#integerstring-casts) records Flink-specific semantics.
+
+On September 16, 2026, Apple M1 Max, JDK 17, Flink 2.2.1, release Rust with mimalloc and one
+codegen unit: 2,000,000 rows, parallelism 1, two warmups and five interleaved trials per engine,
+separate JVMs before/after. The before code is `baf2aa63` plus the same benchmark cases. All plans
+assert NativeCalc and both row/Arrow transposes; input remains a row source and output a row
+blackhole sink. Median complete-job seconds:
+
+| Expression | Flink before | Flink after | Native host cast before | Native kernel after | Native time reduction |
+|---|---:|---:|---:|---:|---:|
+| `CAST(s AS INT)` | 0.581 | 0.586 | 1.014 | 0.835 | 17.7% |
+| `CAST(n AS STRING)` | 0.740 | 0.751 | 1.222 | 1.142 | 6.6% |
+
+String-source native identity controls were 1.035s before and 1.049s after; integer-source controls
+were 0.789s and 0.819s. Both cast jobs improve relative to the previous native implementation,
+but remain slower than stock Flink (0.702x and 0.657x after). These figures do not isolate kernel
+cost or establish an overall workload speedup. The string input cycles through signed extrema,
+zero, ordinary digits and a space-padded signed decimal; its fixed values ignore `scalar.bytes`.
+
+```sh
+SF_BENCHMARK=true mvn -B -ntp -pl streamfusion-runtime -am test -Pbench \
+  '-Dtest=ScalarFunctionBenchmark#individualFunctions' \
+  -Dscalar.functions=STRING_TO_INT,INT_TO_STRING \
+  -Dscalar.output=target/integer-string-casts.csv
+```

@@ -116,6 +116,30 @@ pub(crate) fn build_expr(
             crate::flink_functions::random::function(arg & 1 != 0, arg & 2 != 0, arg & 4 != 0)
                 .call(children)
         }
+        33 | 34 => {
+            let child = build_expr(
+                schema,
+                kinds,
+                payload,
+                child_counts,
+                longs,
+                doubles,
+                strings,
+                cursor,
+            );
+            let function = if kinds[node] == 33 {
+                crate::flink_functions::integer_string::parse_function(
+                    cast_data_type(arg & 3),
+                    arg & 4 != 0,
+                )
+            } else {
+                crate::flink_functions::integer_string::format_function(
+                    payload[node].unsigned_abs() as usize,
+                    payload[node] < 0,
+                )
+            };
+            function.call(vec![child])
+        }
         11 => {
             // A widening numeric cast: build the single child, then wrap it. `arg` is the target code.
             let child = build_expr(

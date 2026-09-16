@@ -34,6 +34,7 @@ mod chr;
 mod if_null;
 mod instr;
 pub(crate) mod integer_divide;
+pub(crate) mod integer_string;
 mod is_json;
 mod json_exists;
 mod json_object;

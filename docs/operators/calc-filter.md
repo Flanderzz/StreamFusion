@@ -346,7 +346,31 @@ an unselected failing cast. Default-mode casts nested under AND/OR still fall ba
 that Flink's row short-circuiting suppresses errors on unselected rows; legacy-mode
 casts can compose under AND/OR because malformed input returns NULL. A bare expression
 encoder without table configuration declines this cast instead of guessing the mode.
-BOOLEAN-to-string and TRY_CAST are outside this addition.
+BOOLEAN-to-string and BOOLEAN TRY_CAST remain unsupported.
+
+### Integer/string casts
+
+`CAST` and `TRY_CAST` between `STRING`/`VARCHAR`/`CHAR` and
+`TINYINT`/`SMALLINT`/`INT`/`BIGINT` use native Arrow kernels without a JVM callback.
+Parsing removes only leading/trailing ASCII spaces, accepts an optional sign and ASCII
+digits, and truncates fractional decimal text toward zero after validating every digit.
+Like Flink, `.`, `+.`, and `-.9` yield zero. Tabs, newlines, Unicode whitespace/digits,
+exponents, internal spaces and additional decimal points are invalid. Values outside the
+target integer range fail; this string conversion does not wrap like an integer narrowing cast.
+
+NULL input remains NULL. Ordinary CAST fails on invalid input in default mode; TRY_CAST
+and legacy-mode CAST return NULL. CASE suppresses an unselected failing cast. Default CAST
+inside AND/OR stays on Flink to preserve row short-circuiting; TRY_CAST and legacy CAST
+can compose natively. NOT NULL sink enforcement remains Flink's ERROR/DROP policy.
+Native failures use the existing exception wrapper; exact host diagnostics remain
+[#108](https://github.com/datafusion-contrib/StreamFusion/issues/108).
+
+Integer formatting uses canonical decimal text, including signed minima and zero.
+`VARCHAR(n)` truncates to `n` characters; `CHAR(n)` also pads shorter results with spaces.
+Legacy mode leaves the formatted text unchanged regardless of the declared length, matching
+Flink. Other TRY_CAST pairs still fall back. Bare encoders without table configuration
+decline mode-dependent casts. See the [kernel ledger](../optimizations/scalar-function-kernels.md)
+for the release benchmark against the previous host-cast path.
 
 ### The host-exact JVM upcall
 
@@ -354,10 +378,9 @@ A second group of casts is **native by default, and this is not a fallback** —
 back into Flink's own cast machinery (`CastExecutor`/`CastRuleProvider`) for the one column being
 cast, with the rest of the expression tree still evaluated natively around it:
 
-- **Number ↔ string, both directions** — `CAST(x AS VARCHAR)`, `CAST(s AS INT)`, decimals
-  included.
+- **FLOAT/DOUBLE/DECIMAL ↔ string, both directions** — including bounded VARCHAR/CHAR targets.
 - **Narrowing a `VARCHAR`** (truncation).
-- **Casting to `CHAR(n)`** (space-padding).
+- **String to `CHAR(n)`** (space-padding).
 - **`→ DECIMAL` from a `float`/`double`.**
 
 These four are deliberately routed through the host rather than reimplemented, because the host's

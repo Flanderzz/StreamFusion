@@ -58,6 +58,8 @@ class ScalarFunctionBenchmark {
 
   private static final List<Query> SCALAR_FUNCTIONS =
       List.of(
+          new Query("STRING_TO_INT", "integer_text", "CAST(s AS INT)", "INT"),
+          new Query("INT_TO_STRING", "integer", "CAST(n AS STRING)", "STRING"),
           new Query("RAND_LITERAL", "integer", "RAND(42)", "DOUBLE"),
           new Query("RAND_DYNAMIC", "integer", "RAND(n)", "DOUBLE"),
           new Query("RAND_INTEGER_LITERAL", "integer", "RAND_INTEGER(42, 100)", "INT"),
@@ -407,7 +409,9 @@ class ScalarFunctionBenchmark {
     env.setParallelism(1);
     StreamTableEnvironment tables = StreamTableEnvironment.create(env);
     String[] text =
-        input.equals("boolean_text")
+        input.equals("integer_text")
+            ? new String[] {"123456789", "-2147483648", "  +0042.9  ", "0", "2147483647"}
+            : input.equals("boolean_text")
             ? new String[] {"true", "FALSE", "t", "0", "yes", "n"}
             : UNICODE
             ? new String[] {

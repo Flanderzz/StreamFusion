@@ -96,6 +96,8 @@ final class RexExpression {
   private static final int KIND_LIT_TIMESTAMP = 29;
   private static final int KIND_DECIMAL_ROUND = 30;
   private static final int KIND_RANDOM = 32;
+  private static final int KIND_STRING_TO_INTEGER = 33;
+  private static final int KIND_INTEGER_TO_STRING = 34;
   // A typed NULL carries a one-field Arrow IPC schema in the string pool.
   private static final int KIND_LIT_TYPED_NULL = 31;
   // Fused exact arithmetic: payload is the declared result precision*100 + scale; two children.
@@ -691,7 +693,9 @@ final class RexExpression {
     if (call.getKind() == SqlKind.MINUS_PREFIX) {
       return emitFloatUnary(call, 5);
     }
-    if (call.getKind() == SqlKind.CAST) {
+    if (call.getKind() == SqlKind.CAST
+        || call.getOperator()
+            == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.TRY_CAST) {
       return emitCast(call);
     }
     // Reinterpret only re-tags a value's type (e.g. stripping a time-attribute/ROWTIME marker),
@@ -1323,7 +1327,8 @@ final class RexExpression {
     String name = call.getOperator().getName().toUpperCase(Locale.ROOT);
     List<RexNode> args = call.getOperands();
     if (call.getKind() == SqlKind.CAST
-        && call.getType().getSqlTypeName() == SqlTypeName.BOOLEAN
+        && (call.getType().getSqlTypeName() == SqlTypeName.BOOLEAN
+            || SqlTypeFamily.INTEGER.getTypeNames().contains(call.getType().getSqlTypeName()))
         && args.size() == 1
         && isCharacter(args.get(0))
         && !Boolean.TRUE.equals(legacyCastBehaviour)) {
@@ -1774,6 +1779,39 @@ final class RexExpression {
     }
     RelDataType sourceType = call.getOperands().get(0).getType();
     RelDataType resultType = call.getType();
+    boolean tryCast =
+        call.getOperator()
+            == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.TRY_CAST;
+    SqlTypeName source = sourceType.getSqlTypeName();
+    SqlTypeName targetType = resultType.getSqlTypeName();
+    int sourceInteger = numericRank(source);
+    int targetInteger = numericRank(targetType);
+    if ((source == SqlTypeName.VARCHAR || source == SqlTypeName.CHAR)
+        && targetInteger >= 0
+        && targetInteger <= 3) {
+      if (!tryCast && legacyCastBehaviour == null) {
+        return reject("STRING to integer requires the configured cast behavior");
+      }
+      add(
+          KIND_STRING_TO_INTEGER,
+          targetInteger | (tryCast || Boolean.TRUE.equals(legacyCastBehaviour) ? 4 : 0),
+          1);
+      return emit(call.getOperands().get(0));
+    }
+    if (sourceInteger >= 0
+        && sourceInteger <= 3
+        && (targetType == SqlTypeName.VARCHAR || targetType == SqlTypeName.CHAR)) {
+      if (legacyCastBehaviour == null) {
+        return reject("Integer to STRING requires the configured cast behavior");
+      }
+      int length = legacyCastBehaviour ? Integer.MAX_VALUE : resultType.getPrecision();
+      boolean pad = !legacyCastBehaviour && targetType == SqlTypeName.CHAR;
+      add(KIND_INTEGER_TO_STRING, pad ? -length : length, 1);
+      return emit(call.getOperands().get(0));
+    }
+    if (tryCast) {
+      return reject("unsupported TRY_CAST " + source + "→" + targetType);
+    }
     // A cast that leaves the value unchanged — same base type and precision/scale, differing only
     // in
     // nullability or a time-attribute marker (Flink's `CAST(... ):TIMESTAMP_LTZ *ROWTIME*` that
@@ -1785,8 +1823,6 @@ final class RexExpression {
         && sourceType.getScale() == resultType.getScale()) {
       return emit(call.getOperands().get(0));
     }
-    SqlTypeName source = sourceType.getSqlTypeName();
-    SqlTypeName targetType = resultType.getSqlTypeName();
     if ((source == SqlTypeName.VARCHAR || source == SqlTypeName.CHAR)
         && targetType == SqlTypeName.BOOLEAN) {
       if (legacyCastBehaviour == null) {
@@ -1832,8 +1868,7 @@ final class RexExpression {
       return emit(call.getOperands().get(0));
     }
     // The casts whose formatting/parsing the native engine cannot reproduce byte-for-byte — a
-    // number
-    // (incl. decimal) to/from a string, narrowing a string / padding to CHAR(n), and the inexact
+    // float/double/decimal to/from a string, narrowing a string / padding to CHAR(n), and the inexact
     // float/double→DECIMAL — run Flink's own CastExecutor through the columnar JVM upcall, so
     // trailing zeros, scientific-notation thresholds, trim semantics, and failure behavior are the
     // host's own (see HostCastFunction).
