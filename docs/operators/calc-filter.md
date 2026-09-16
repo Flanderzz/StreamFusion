@@ -22,6 +22,21 @@ fallback.
   there's no partial evaluation of an expression tree, so one unknown function anywhere in it
   declines the whole `Calc`.
 
+## IFNULL
+
+`IFNULL(value, replacement)` runs natively with Flink's resolved common operand type and
+result nullability, including STRING/VARCHAR, INT/BIGINT and DECIMAL. NULL selects the
+replacement; an empty string is a value. Typed NULLs and nested calls retain their resolved types.
+Both arguments are evaluated once before selection, matching Flink's scalar function: an error
+in the replacement still fails the query when the first argument is non-NULL. This differs from
+short-circuiting `COALESCE`/`CASE`, so IFNULL uses a separate eager columnar kernel. Selection
+uses Arrow validity and preserves decimal precision/scale; an all-valid input reuses its array.
+
+Admission checks the resolved built-in definition. A registered user function named IFNULL keeps
+its own implementation through the existing scalar-UDF bridge. Unsupported child expressions
+still retain their normal fallback rules. SQL tests cover values, schemas, exception behavior,
+volatile argument evaluation and an IFNULL projection/filter composed with native Top-1.
+
 ## String ordering
 
 Relational character-string comparisons (`<`, `<=`, `>`, `>=`) fall back, including
