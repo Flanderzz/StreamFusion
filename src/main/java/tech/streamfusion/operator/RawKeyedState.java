@@ -26,12 +26,12 @@ final class RawKeyedState {
    * https://github.com/datafusion-contrib/StreamFusion/issues/22 to bind a payload to the operator
    * configuration that wrote it).
    *
-   * <p>Version 2 stores lossless timestamp components. Earlier layouts cannot be read with
-   * the new row codecs and fail before any payload is handed to native code.
+   * <p>Version 3 retains lossless timestamp components and local attached-window boundaries.
+   * Earlier layouts or window clock domains fail before payloads are handed to native code.
    */
   static final long STATE_MAGIC = 0x53465381_524B5390L;
 
-  static final int STATE_FORMAT_VERSION = 2;
+  static final int STATE_FORMAT_VERSION = 3;
   private static final int STATE_HEADER_BYTES = Long.BYTES + Integer.BYTES + Integer.BYTES;
 
   private RawKeyedState() {}
@@ -198,8 +198,11 @@ final class RawKeyedState {
   /** Validates the timestamp-layout version before handing any payload to native code. */
   private static byte[] stripHeader(byte[] payload) {
     if (payload.length < STATE_HEADER_BYTES || ByteBuffer.wrap(payload).getLong() != STATE_MAGIC) {
-      throw new IllegalStateException("native raw keyed-state snapshot has legacy state-format version 0; "
-          + "this build requires version " + STATE_FORMAT_VERSION + " (docs/backends/canonical-state.md)");
+      throw new IllegalStateException(
+          "native raw keyed-state snapshot has legacy state-format version 0; "
+              + "this build requires version "
+              + STATE_FORMAT_VERSION
+              + " (docs/backends/canonical-state.md)");
     }
     ByteBuffer header = ByteBuffer.wrap(payload);
     header.getLong();

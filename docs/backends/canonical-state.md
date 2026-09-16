@@ -47,8 +47,8 @@ safe merely because the savepoint is canonical.
 
 ## Timestamp layout upgrade
 
-The lossless timestamp layout changes native row encodings. Current writers use canonical version 3
-(asynchronous Top-N version 4), raw keyed-state version 2 and RocksDB metadata version 3. Recovery
+The lossless timestamp layout changes native row encodings. Current writers use canonical version 5
+(asynchronous Top-N version 6), raw keyed-state version 3 and RocksDB metadata version 4. Recovery
 checks these versions before interpreting native payloads. Earlier snapshots and savepoints require
 the StreamFusion binary that wrote them; this release does not convert old state in place. Existing
 stateful jobs must finish or replay from their durable inputs when upgrading. Keep their previous
@@ -58,3 +58,9 @@ cannot be reconstructed from that snapshot alone.
 New checkpoints preserve the millisecond component and fractional nanos on memory and RocksDB,
 including canonical transitions between those backends. Format changes do not alter Flink key-group
 assignment or the timestamp precision rules used by its BinaryRow key serializer.
+
+The local-window boundary correction also changes the meaning of retained window-rank/join
+payloads and their firing thresholds in nonzero-offset LTZ jobs. A previous epoch-boundary snapshot
+cannot be read as local-boundary state. The common checkpoint envelopes therefore advance together
+and reject earlier versions before decoding, including older asynchronous canonical state. This
+upgrade requires restarting from durable inputs; it does not provide an in-place state migration.

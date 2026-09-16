@@ -26,5 +26,11 @@ proctime window join closes it on a processing-time timer instead.
 - the non-equi residual isn't expressible by the native expression engine;
 - the two sides' windowing doesn't share time semantics (one event-time, one proctime);
 - either side's window rides a `TIMESTAMP_LTZ` time attribute in a session zone the
-  [window-assignment zone gate](../window-aggregate.md#matcher-declines) rejects (a post-1970
+  [window-assignment zone gate](../window-aggregate.md#matcher-declines) rejects (any historical or recurring
   transition, or a fixed offset not aligned with the window slide).
+
+Window start/end payload columns remain local wall-clock values. The join compares its watermark
+or processing-time clock after applying the fixed offset and fires at the window's final
+millisecond. Both inputs must use the same time domain. Late rows are rejected using that same
+threshold, including after recovery. See the [state upgrade contract](../../backends/canonical-state.md#timestamp-layout-upgrade)
+for checkpoints written before the boundary correction.

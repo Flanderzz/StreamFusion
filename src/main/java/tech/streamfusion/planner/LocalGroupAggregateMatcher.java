@@ -162,6 +162,12 @@ final class LocalGroupAggregateMatcher {
         }
         continue;
       }
+      if (isTimestampExtreme(kind, valueType)) {
+        if (partialType != valueType || partialRel.getPrecision() != valueRel.getPrecision()) {
+          return false;
+        }
+        continue;
+      }
       if (!isRunningType(valueType) || partialType != valueType) {
         return false;
       }
@@ -311,6 +317,11 @@ final class LocalGroupAggregateMatcher {
         && (valueType == SqlTypeName.CHAR || valueType == SqlTypeName.VARCHAR);
   }
 
+  static boolean isTimestampExtreme(int kind, SqlTypeName valueType) {
+    return (kind == WindowAggregateMatcher.KIND_MIN || kind == WindowAggregateMatcher.KIND_MAX)
+        && GroupAggregateMatcher.isTimestampType(valueType);
+  }
+
   /** Native aggregate kind 7 (COUNT(DISTINCT)); matches the convention in the Rust GroupAggState. */
   static final int KIND_COUNT_DISTINCT = 7;
 
@@ -409,7 +420,9 @@ final class LocalGroupAggregateMatcher {
                 ? decimalCode(valueRel)
                 : isStringExtreme(kind, valueType)
                     ? 3
-                    : valueType == SqlTypeName.DOUBLE ? 1 : valueType == SqlTypeName.INTEGER ? 2 : 0);
+                    : isTimestampExtreme(kind, valueType)
+                        ? 7
+                        : valueType == SqlTypeName.DOUBLE ? 1 : valueType == SqlTypeName.INTEGER ? 2 : 0);
       }
     }
     if (countStarInserted(agg)) {

@@ -21,8 +21,8 @@ public final class CanonicalNativeState {
   static final String STATE_NAME = "__streamfusion_canonical_native_state_v1";
   static final String ASYNC_HEADER_STATE_NAME = "__streamfusion_canonical_native_state_v2_header";
   static final String ASYNC_PAYLOAD_STATE_NAME = "__streamfusion_canonical_native_state_v2_payload";
-  static final int FORMAT_VERSION = 3;
-  private static final int ASYNC_FORMAT_VERSION = 4;
+  static final int FORMAT_VERSION = 5;
+  private static final int ASYNC_FORMAT_VERSION = 6;
   static final int CHUNK_BYTES = 4 * 1024 * 1024;
 
   private static final int MAGIC = 0x53464353; // SFCS
@@ -307,13 +307,17 @@ public final class CanonicalNativeState {
     }
     int version = in.getInt();
     if (version != ASYNC_FORMAT_VERSION) {
-      throw new IllegalStateException("unsupported StreamFusion asynchronous canonical state version "
-          + version + "; this build reads " + ASYNC_FORMAT_VERSION
-          + " (docs/backends/canonical-state.md)");
+      throw new IllegalStateException(
+          "unsupported StreamFusion asynchronous canonical state version "
+              + version
+              + "; this build reads "
+              + ASYNC_FORMAT_VERSION
+              + " (docs/backends/canonical-state.md)");
     }
     int operatorBytes = in.getInt();
     if (operatorBytes < 0 || operatorBytes != in.remaining() - 8) {
-      throw new IllegalStateException("invalid operator identifier in async canonical state header");
+      throw new IllegalStateException(
+          "invalid operator identifier in async canonical state header");
     }
     byte[] operator = new byte[operatorBytes];
     in.get(operator);

@@ -3119,6 +3119,7 @@ pub(crate) struct WindowRanker {
     sort_columns: Vec<SortColumn>,
     limit: i64,
     output_rank_number: bool,
+    keep_last_on_tie: bool,
     pub(crate) current_watermark: i64,
     pub(crate) late_drops: u64,
     /// Bounded, sorted top-N buffer per (window_end, window_start, partition key).
@@ -3141,6 +3142,11 @@ pub(crate) struct WindowRanker {
 }
 
 impl WindowRanker {
+    pub(crate) fn set_keep_last_on_tie(&mut self, enabled: bool) {
+        assert!(!enabled || self.limit == 1);
+        self.keep_last_on_tie = enabled;
+    }
+
     pub(crate) fn new(
         window_start_col: usize,
         window_end_col: usize,
@@ -3156,6 +3162,7 @@ impl WindowRanker {
             sort_columns,
             limit,
             output_rank_number,
+            keep_last_on_tie: false,
             current_watermark: i64::MIN,
             late_drops: 0,
             groups: HashMap::default(),
@@ -3316,10 +3323,11 @@ impl WindowRanker {
             if track && buffer.is_empty() {
                 delta += key_bytes as isize;
             }
-            // Insert after rows ordering equal-or-before, preserving arrival order for ties (the
-            // ROW_NUMBER tie-break), then drop anything past rank N.
+            // General Top-N preserves arrival order; window dedup keep-last replaces equal times.
             let pos = buffer.partition_point(|r| {
-                compare_rows(r, &full, &self.sort_columns) != std::cmp::Ordering::Greater
+                let order = compare_rows(r, &full, &self.sort_columns);
+                order == std::cmp::Ordering::Less
+                    || (!self.keep_last_on_tie && order == std::cmp::Ordering::Equal)
             });
             buffer.insert(pos, full);
             if buffer.len() as i64 > self.limit {
@@ -3824,6 +3832,20 @@ pub extern "system" fn Java_tech_streamfusion_Native_createWindowRanker<'local>(
     })
 }
 
+/// Applies the plan's window-dedup tie rule after creation or state restoration.
+#[no_mangle]
+pub extern "system" fn Java_tech_streamfusion_Native_setWindowRankerKeepLastOnTie<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    keep_last_on_tie: jboolean,
+) {
+    crate::bridge::jni_guard(env, move |_env| {
+        let ranker = unsafe { &mut *(handle as *mut WindowRanker) };
+        ranker.set_keep_last_on_tie(keep_last_on_tie != 0);
+    })
+}
+
 /// Buffers an input batch (no output); each window's top-N rows are emitted when the watermark
 /// closes the window.
 #[no_mangle]
@@ -4319,6 +4341,53 @@ pub extern "system" fn Java_tech_streamfusion_Native_closeTopNRanker<'local>(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn window_dedup_ties_across_batches_and_raw_restore() {
+        use super::*;
+        let batch = |ids: Vec<i64>| {
+            let len = ids.len();
+            RecordBatch::try_from_iter(vec![
+                ("id", Arc::new(Int64Array::from(ids)) as ArrayRef),
+                (
+                    "start",
+                    Arc::new(Int64Array::from(vec![0; len])) as ArrayRef,
+                ),
+                (
+                    "end",
+                    Arc::new(Int64Array::from(vec![100; len])) as ArrayRef,
+                ),
+            ])
+            .unwrap()
+        };
+        for keep_last in [false, true] {
+            let sort = vec![SortColumn {
+                index: 2,
+                ascending: !keep_last,
+                nulls_first: false,
+            }];
+            let mut ranker = WindowRanker::new(1, 2, vec![], sort.clone(), 1, false);
+            ranker.set_keep_last_on_tie(keep_last);
+            ranker.push(&batch(vec![1, 2])).unwrap();
+            ranker.push(&batch(vec![3])).unwrap();
+            let snapshots = ranker
+                .raw_snapshot_partitions(128, &[])
+                .into_values()
+                .collect::<Vec<_>>();
+            let mut restored =
+                WindowRanker::restore_partitions(1, 2, vec![], sort, 1, false, &snapshots);
+            restored.set_keep_last_on_tie(keep_last);
+            restored.push(&batch(vec![4])).unwrap();
+            let out = restored.flush(100).unwrap();
+            assert_eq!(out.num_rows(), 1);
+            assert_eq!(
+                ScalarValue::try_from_array(out.column(0), 0).unwrap(),
+                ScalarValue::Int64(Some(if keep_last { 4 } else { 1 }))
+            );
+            restored.push(&batch(vec![5])).unwrap();
+            assert_eq!(restored.late_drops, 1);
+        }
+    }
+
     #[test]
     fn restored_signed_zero_keys_use_secondary_order_without_changing_payload() {
         use super::*;
