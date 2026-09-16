@@ -131,12 +131,22 @@ FLINK_SUITE_TEST='org.apache.paimon.flink.AppendTableITCase#testPartitionDynamic
 ```
 
 The Flink checkout remains byte-for-byte unchanged. Every push to `main` and every pull request
-runs the full planner runtime integration suite and the selected state/recovery suite in GitHub
-Actions. The weekly schedule and manual dispatch also run all format and connector suites.
+runs all seven upstream suites in GitHub Actions: planner runtime, formats, Parquet, ORC, Kafka,
+Paimon and state/recovery. The weekly schedule and manual dispatch run the same complete matrix.
 Each run rebuilds StreamFusion from that revision in the isolated suite directory and uploads
 its complete build/test log with the commit SHA. These checks complement the released-artifact
 SQL parity tests in ordinary CI; a passing local Maven suite alone does not establish upstream
 integration compatibility.
+
+Merges to `main` require **All CI tests** and **All upstream integration tests**, enforced by
+the repository's **Require all test suites** ruleset with no bypass actors, including administrators.
+The first check waits for Rust, Java/SQL parity, every format/connector module, both Paimon formats,
+Delta and the deployed Flink image integration job. The second waits for all seven upstream suites.
+Each check runs even when a dependency fails and succeeds only when every dependency succeeds;
+failed, cancelled or unexpectedly skipped jobs cannot produce a green aggregate check. Matrix
+additions are included automatically; new independent test jobs must be added to the corresponding
+aggregate's `needs` list. These two check names are part of the merge contract and must stay aligned
+with the GitHub ruleset. The existing PR and other branch-protection rules remain in place.
 
 Before committing operator changes, run the relevant unchanged upstream integration classes
 alongside the local SQL parity and recovery tests. Record the class selection and actual result

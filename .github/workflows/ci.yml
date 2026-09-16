@@ -235,3 +235,15 @@ jobs:
         run: >
           mvn -B -ntp -pl :streamfusion-runtime test
           -Dgroups="${{ matrix.tag }}"
+
+  all-tests:
+    name: All CI tests
+    if: ${{ always() }}
+    needs: [native-tests, java-tests, lake-module-tests, image-integration, module-tests]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every test job to succeed
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: jq -e 'length > 0 and all(.[]; .result == "success")' <<< "$NEEDS_JSON"

@@ -23,7 +23,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: ${{ fromJSON((github.event_name == 'push' || github.event_name == 'pull_request') && '["runtime","state"]' || '["runtime","formats","parquet","orc","kafka","paimon","state"]') }}
+        suite: [runtime, formats, parquet, orc, kafka, paimon, state]
     steps:
       - uses: actions/checkout@v6
 
@@ -55,3 +55,15 @@ jobs:
           name: upstream-flink-${{ matrix.suite }}-${{ github.sha }}
           path: upstream-suite.log
           retention-days: 7
+
+  all-tests:
+    name: All upstream integration tests
+    if: ${{ always() }}
+    needs: upstream-suite
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every upstream suite to succeed
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: jq -e 'length > 0 and all(.[]; .result == "success")' <<< "$NEEDS_JSON"
