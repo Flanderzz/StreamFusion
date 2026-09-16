@@ -682,10 +682,12 @@ dot members such as `$.user.name`, bracket members such as `$['user name']`, and
 32-bit array indexes such as `$.users[0].name`. Dot names use Unicode letters, numbers and
 underscores, with a letter/underscore first. Bracket names use single or double quotes and
 accept well-formed Unicode, spaces and punctuation, including the other quote character.
+Empty bracket names (`$['']` and `$[""]`) select the empty object key, including in nested
+member/index paths. They remain distinct from a name containing a space (`$[' ']`).
 Member names are case-sensitive. Escaped document keys are compared as UTF-16 code units,
 so unpaired surrogates remain distinct from a literal `?` or replacement character, including
 when duplicate members occur before or after them. Wildcards, recursive descent, filters, slices, negative
-indexes, empty names, backslash escapes, ASCII controls, unpaired surrogates and dynamic
+indexes, backslash escapes, ASCII controls, unpaired surrogates and dynamic
 paths fall back. Quoted `'*'` is an ordinary member name, not a wildcard.
 
 ASCII spaces around a bracket member or index are native, for example `$[ 'user' ][ 01 ]`.
@@ -696,6 +698,12 @@ whitespace without a mode and tabs/newlines inside or after the path stay on Fli
 handles them differently depending on the preceding token, so general whitespace trimming
 would change the selected value. Remaining path extensions are tracked in
 [#91](https://github.com/datafusion-contrib/StreamFusion/issues/91).
+
+Empty-name SQL regressions execute against released Flink with native Calc assertions,
+covering both quote styles, bracket spaces, nested objects/arrays, duplicate ancestors,
+missing/null/scalar/container values, strict/lax policies, typed RETURNING, independent
+paths, downstream grouping and invalid unselected fields. Native reader tests also verify
+selection on both the streaming parser and SIMD tape.
 
 The default return type and explicit `RETURNING VARCHAR(n)` are native; Flink 2.2.1 does
 not truncate this function's result to `n`. `RETURNING BOOLEAN`, `INTEGER` and `DOUBLE`

@@ -48,7 +48,7 @@ class FlinkJsonPathGrammarSqlHarnessTest {
         "$[?(@.a)]",
         "$[2147483648]",
         "$[1 2]",
-        "$['']",
+        "$[]",
         "$[\t1\t]",
         "$[ \n1 ]",
         "$[\t'a']",

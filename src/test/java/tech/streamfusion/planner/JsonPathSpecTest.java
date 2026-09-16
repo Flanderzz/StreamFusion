@@ -25,6 +25,8 @@ class JsonPathSpecTest {
             "$.\u7528\u6237['\u59d3.\u540d']",
             "$[\"O'Reilly\"]",
             "$['a\"b']",
+            "$['']",
+            "$[\"\"][''].a[0]",
             "$['\ud83d\ude00']")) {
       assertEquals("strict " + path, JsonPathSpec.normalize(path));
     }
@@ -38,7 +40,7 @@ class JsonPathSpecTest {
             "$..a",
             "$[-1]",
             "$[2147483648]",
-            "$['']",
+            "$[]",
             "$['a\\b']",
             "$[\"a\",\"b\"]",
             "$['\ud800']",
@@ -53,6 +55,7 @@ class JsonPathSpecTest {
     assertEquals("strict $[0001]", JsonPathSpec.normalize("$[ 0001 ]"));
     assertEquals("lax $[' a b '][1]", JsonPathSpec.normalize(" \tLaX $[ ' a b ' ][ 1 ]  "));
     assertEquals("strict $[\"a'b\"]", JsonPathSpec.normalize("$[ \"a'b\" ]"));
+    assertEquals("strict $[''][\"\"]", JsonPathSpec.normalize("$[ '' ][ \"\" ]"));
     for (String path :
         List.of(" $[1]", "$[\t1]", "$[1\n]", "$[\t'a']", "$[1 2]", "$.a\t", "$[1]\t", "$[1] \n")) {
       assertNull(JsonPathSpec.normalize(path), path);

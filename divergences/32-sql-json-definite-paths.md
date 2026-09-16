@@ -113,8 +113,11 @@ calls the removed `Subject.getSubject` API before any query is executed.
 Only constant definite member/index paths are admitted. Wildcards, recursion, predicates,
 slices and dynamic paths remain on Flink. Unicode dot members and single/double-quoted
 bracket members follow Flink's released Jayway parser. Quotes delimit a literal member:
-punctuation such as `.` or `*` inside them is part of the key. Backslash escapes, controls,
-empty names and unpaired surrogates are excluded before crossing JNI. The native grammar
+punctuation such as `.` or `*` inside them is part of the key. Empty quoted names are ordinary
+object keys, distinct from names containing spaces. The existing streaming and SIMD member
+selectors handle them, including last-duplicate replacement and nested empty ancestors;
+only the planner and compact path grammar need to admit them. Backslash escapes, controls
+and unpaired surrogates are excluded before crossing JNI. The native grammar
 retains borrowed member slices, with no per-row path parsing or change to JSON validation.
 
 The planner normalizes ASCII spaces around bracket members/indexes and at the end of the

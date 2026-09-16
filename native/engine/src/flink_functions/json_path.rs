@@ -59,9 +59,7 @@ impl<'a> Path<'a> {
                 let rest = &text[2..];
                 let end = rest.find(quote)?;
                 let name = &rest[..end];
-                if name.is_empty()
-                    || name.bytes().any(|b| b < 0x20 || b == b'\\')
-                    || !rest[end + 1..].starts_with(']')
+                if name.bytes().any(|b| b < 0x20 || b == b'\\') || !rest[end + 1..].starts_with(']')
                 {
                     return None;
                 }
@@ -526,6 +524,8 @@ mod tests {
             "$.\u{7528}\u{6237}['\u{59d3}.\u{540d}']",
             "$[\"O'Reilly\"]",
             "$['a\"b']",
+            "$['']",
+            "$[\"\"][''].a[0]",
         ] {
             assert!(Path::parse(text, "13.0").is_some(), "{text}");
         }
@@ -536,7 +536,7 @@ mod tests {
             "$..a",
             "$[-1]",
             "$[2147483648]",
-            "$['']",
+            "$[]",
             "$['a\\b']",
             "$[\"a\",\"b\"]",
             "$['a\n']",

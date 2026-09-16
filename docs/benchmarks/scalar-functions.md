@@ -43,6 +43,28 @@ Reproduce with the command below, selecting
 Flink fallback; the change normalizes literal paths during planning and does not alter
 native JSON parsing. They do not establish a speedup for already admitted compact paths.
 
+## Empty JSON member diagnostic (2026-09-16)
+
+Empty quoted names now use native JSON_VALUE/JSON_EXISTS. On Apple M4 Pro, JDK 17, UTC
+and Flink 2.2.1, the release/mimalloc build measured these end-to-end medians over
+2,000,000 rows at parallelism 1, with 264-byte ASCII padding, NULL every eighth row,
+two warmups and five measured trials per engine. Both row/Arrow transposes are included
+and asserted. Engine order alternates; the source-matched identity control is reported
+without subtracting it. Documents alternate between an empty key containing `Alice`
+and a space-only key, which does not match the selected path.
+
+| Case | Flink (s) | Native (s) | Flink / native |
+|---|---:|---:|---:|
+| Identity control | 0.633615 | 1.102641 | 0.575x |
+| `JSON_VALUE(s, 'lax $['''']')` | 1.559965 | 1.290161 | 1.209x |
+| `JSON_EXISTS(s, 'lax $[""]')` | 1.574280 | 1.150832 | 1.368x |
+
+Reproduce with the command below, selecting
+`-Dscalar.functions=JSON_VALUE_EMPTY_MEMBER,JSON_EXISTS_EMPTY_MEMBER` and
+`-Dscalar.nullEvery=8`. These results compare newly admitted expressions with their
+previous Flink fallback. The change removes admission restrictions and reuses the existing
+native member selectors; it does not speed up previously admitted paths.
+
 ## Inputs
 
 - Search strings add `row:`/`other:` and `:match`/`:miss` around the padding: total lengths are
