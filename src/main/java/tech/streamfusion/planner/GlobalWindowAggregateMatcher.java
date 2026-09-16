@@ -84,9 +84,15 @@ final class GlobalWindowAggregateMatcher {
     for (int i = 0; i < aggregate.aggCalls().size(); i++) {
       AggregateCall call = aggregate.aggCalls().apply(i);
       int kind = WindowAggregateMatcher.aggregateKind(call.getAggregation().getKind());
-      // A DISTINCT merge dedups values the plain partial merge would double-count — fall back.
       if (call.isDistinct()) {
-        return "global window aggregate: DISTINCT aggregates are not supported";
+        RelDataType partial = inputType.getFieldList().get(partialColumns[i]).getType();
+        if (kind != WindowAggregateMatcher.KIND_COUNT
+            || partial.getSqlTypeName() != SqlTypeName.ARRAY
+            || !WindowAggregateMatcher.supportedDistinctValueType(
+                partial.getComponentType().getSqlTypeName())) {
+          return "global window aggregate: COUNT(DISTINCT) requires native value-set partials";
+        }
+        continue;
       }
       // Every admitted aggregate reads one original value (or none for COUNT(*)).
       if (kind < 0 || call.getArgList().size() > 1) {
@@ -119,6 +125,10 @@ final class GlobalWindowAggregateMatcher {
     for (int i = 0; i < types.length; i++) {
       AggregateCall call = aggregate.aggCalls().apply(i);
       RelDataType partialType = inputType.getFieldList().get(columns[i]).getType();
+      if (call.isDistinct()) {
+        types[i] = WindowAggregateMatcher.windowValueTypeCode(partialType.getComponentType());
+        continue;
+      }
       // Integral and FLOAT AVG sums widen, but their result retains the original value type.
       // Decimal AVG instead needs the partial sum's original scale for its exact division.
       RelDataType valueType = WindowAggregateMatcher.partialWidth(call) == 2
@@ -185,7 +195,11 @@ final class GlobalWindowAggregateMatcher {
   static int[] kinds(StreamPhysicalGlobalWindowAggregate aggregate) {
     int[] kinds = new int[aggregate.aggCalls().size()];
     for (int i = 0; i < kinds.length; i++) {
-      kinds[i] = WindowAggregateMatcher.aggregateKind(aggregate.aggCalls().apply(i).getAggregation().getKind());
+      AggregateCall call = aggregate.aggCalls().apply(i);
+      kinds[i] =
+          call.isDistinct()
+              ? WindowAggregateMatcher.KIND_COUNT_DISTINCT
+              : WindowAggregateMatcher.aggregateKind(call.getAggregation().getKind());
     }
     return kinds;
   }

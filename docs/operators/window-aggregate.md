@@ -25,6 +25,29 @@ drains local slices into the global before snapshotting; AVG pairs use the exist
 accumulator checkpoint layout in memory and direct RocksDB state. Restore tests merge subsequent
 partials and verify every hopping window after RocksDB checkpoints and both backend transitions.
 
+## Window COUNT(DISTINCT)
+
+Unfiltered `COUNT(DISTINCT value)` is native for integer, DECIMAL, CHAR/VARCHAR, DATE,
+TIMESTAMP and TIMESTAMP_LTZ values. It ignores NULLs and counts each value once per key/window.
+TUMBLE, HOP and CUMULATE support single-phase and local/global execution; attached window
+results use the existing two-phase path. SESSION and admitted legacy group windows reuse the
+same distinct accumulator. Processing-time windows retain their timer-driven lifetime.
+
+Each local partial carries an Arrow list of distinct values. The global unions those lists,
+so duplicates split across tasks or checkpoint barriers count once. Ordinary aggregates and
+AVG's two-field partials can share the same window. Flink's extra MapView partial fields are
+replaced by these lists throughout the native local/exchange/global pipeline.
+
+Timestamp distinct keys follow Flink's serialized key representation: precision 0–3 uses
+milliseconds; precision 4–9 retains the fractional nanos. This matters when an internal cast
+leaves fractions in a value declared as a compact timestamp.
+
+Distinct sets are included in checkpoints and key-group snapshots, then removed with their
+window on firing. Late raw input cannot recreate a closed window. Variable-sized list state
+uses the existing snapshot fallback when the RocksDB backend is selected, rather than direct
+per-window RocksDB rows. Tests cover checkpoint continuation and canonical savepoints in both
+backend directions.
+
 ## Floating extrema
 
 FLOAT/DOUBLE MIN/MAX initializes from the first non-NULL value and replaces it only when a
@@ -152,9 +175,11 @@ enables columnar composition with downstream consumers; it is not a standalone t
 - A value type/aggregate mismatch.
 - Single-phase aggregation over attached window bounds. Attached windows are native through
   the two-phase local/global path.
-- A **windowed `DISTINCT` aggregate** (`SUM(DISTINCT …)` etc. inside a window) — it dedups per window,
-  which the native window operators' every-row fold would over-count. Non-windowed `DISTINCT` is
-  native; see [GROUP BY](group-by.md).
+- Windowed DISTINCT other than unfiltered, single-argument COUNT over the types listed above:
+  SUM/AVG DISTINCT, filtered COUNT DISTINCT, FLOAT/DOUBLE, BOOLEAN, TIME and complex values.
+  Non-windowed DISTINCT has separate coverage; see [GROUP BY](group-by.md).
+- Retracting or updating window input, including input from updating Top-N; distinct windows
+  retain the same insert-only admission gate as ordinary window aggregates.
 
 A **zero-aggregate grouping-only window** (`GROUP BY key + window`, no aggregate function) is *not*
 one of the gaps above — it's a windowed distinct, and is native (single- and two-phase), emitting one
@@ -175,6 +200,19 @@ path; the test asserts the expected single- or two-phase native window plan.
 
 These are small local gains; the primary change is coverage for mixed aggregates and paired
 AVG partials, including narrow integer and FLOAT result types, decimal overflow, and restore.
+
+With `-Dwindow.distinct=true`, the same benchmark replaces COUNT(*) with COUNT(DISTINCT v),
+retaining the mixed ordinary aggregates and both transposes. On an M4 Pro with JDK 17 and
+`TZ=UTC`, a release build (`-Pbench`, mimalloc), 1 million rows, parallelism 2, 64 keys,
+two warmups and five interleaved measured runs gave:
+
+| Distinct phase | Flink seconds | Native seconds | Flink/native |
+| --- | ---: | ---: | ---: |
+| Single | 0.529093 | 0.512017 | 1.033x |
+| Local/global | 0.619048 | 0.542547 | 1.141x |
+
+These local measurements cover repeated nullable BIGINT values in overlapping windows;
+they do not establish a gain for every distinct value type or cardinality.
 
 ## Idle-state TTL
 

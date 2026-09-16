@@ -22,6 +22,17 @@ accumulator** to state — two-phase merges slice accumulators, session merges
 window accumulators. So for mergeable aggregates we match the host's strategy
 exactly; **only Arroyo differs**, by retaining raw batches and re-aggregating.
 
+## Window distinct state
+
+COUNT(DISTINCT) uses DataFusion's distinct count accumulator within the same window lifetime.
+Its mergeable partial is the set of values as an Arrow list, rather than a scalar count. The
+local/exchange/global pipeline unions these lists and snapshots the resulting set. This follows
+Arroyo's DataFusion partial/final aggregation boundary (`tumbling_aggregating_window.rs` and
+the planner's aggregate extension) while retaining our existing per-window accumulator layout.
+Flink's local MapView fields are replaced by the list partials, so both native stages share
+one explicit intermediate schema. Variable-sized sets currently use the existing snapshot
+fallback on RocksDB; they do not enter its fixed-field accumulator row codec.
+
 ## Why
 Every aggregate we support (`SUM`/`MIN`/`MAX`/`COUNT`, and integer `AVG`) has
 associative, commutative, mergeable partial state, so merging accumulators yields

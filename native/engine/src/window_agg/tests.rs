@@ -1,6 +1,67 @@
 use super::*;
 
 #[test]
+fn distinct_window_partials_restore_union_and_expire() {
+    fn batch(values: Vec<Option<&str>>) -> RecordBatch {
+        let rows = values.len();
+        RecordBatch::try_from_iter(vec![
+            (
+                "ts",
+                Arc::new(Int64Array::from_value(500, rows)) as ArrayRef,
+            ),
+            (
+                "key0",
+                Arc::new(Int64Array::from_value(7, rows)) as ArrayRef,
+            ),
+            ("value0", Arc::new(StringArray::from(values)) as ArrayRef),
+            (
+                "value1",
+                Arc::new(Int64Array::from_value(1, rows)) as ArrayRef,
+            ),
+        ])
+        .unwrap()
+    }
+    let mut local = TumblingAggregator::new(1000, 1000, false, vec![3, 0], vec![7, 3]);
+    let mut global = TumblingAggregator::new(2000, 1000, false, vec![3, 0], vec![7, 3]);
+    local
+        .update(&batch(vec![Some("a"), Some("a"), None, Some("b")]))
+        .unwrap();
+    let partial = local.drain_partial();
+    assert!(local.windows.is_empty());
+    global.update_partial(&partial).unwrap();
+    // A second local worker/barrier contributes the same values, which must not add to cardinality.
+    global.update_partial(&partial).unwrap();
+    let snapshot = global.snapshot();
+    let mut restored =
+        TumblingAggregator::restore(2000, 1000, false, vec![3, 0], vec![7, 3], &snapshot);
+    let partitions = restored.snapshot_partitions(128, &[-1]);
+    let mut restored = TumblingAggregator::restore_partitions(
+        2000,
+        1000,
+        false,
+        vec![3, 0],
+        vec![7, 3],
+        &partitions.into_values().collect::<Vec<_>>(),
+    );
+    local
+        .update(&batch(vec![Some("b"), Some("c"), None]))
+        .unwrap();
+    let final_partial = local.drain_partial();
+    restored.update_partial(&final_partial).unwrap();
+    let output = restored.flush(2000).unwrap();
+    assert_eq!(column_i64(&output, "result0").values(), &[3, 3]);
+    assert_eq!(column_i64(&output, "result1").values(), &[11, 11]);
+    assert!(restored.windows.is_empty());
+    let closed = restored.snapshot();
+    let mut restored =
+        TumblingAggregator::restore(2000, 1000, false, vec![3, 0], vec![7, 3], &closed);
+    restored.update(&batch(vec![Some("late")])).unwrap();
+    assert_eq!(restored.late_drops, 1);
+    assert_eq!(restored.flush(i64::MAX).unwrap().num_rows(), 0);
+    assert!(restored.windows.is_empty());
+}
+
+#[test]
 fn fixed_offset_assignment_preserves_payload_and_instant_window_time() {
     use streamfusion_bridge::timestamp::{timestamp_array, TimestampValue};
     let values = vec![

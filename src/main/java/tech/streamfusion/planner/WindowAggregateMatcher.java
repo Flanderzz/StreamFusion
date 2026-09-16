@@ -28,6 +28,8 @@ final class WindowAggregateMatcher {
   static final int KIND_MAX = 2;
   static final int KIND_COUNT = 3;
   static final int KIND_AVG = 4;
+  static final int KIND_COUNT_DISTINCT = 7;
+
   /** The local half of a two-phase AVG: the widened running sum alone (the count partial is a
    * separate {@link #KIND_COUNT} state); the global divides after merging. */
   static final int KIND_AVG_PARTIAL_SUM = 8;
@@ -273,11 +275,19 @@ final class WindowAggregateMatcher {
       if (kind < 0) {
         return false;
       }
-      // A windowed DISTINCT aggregate dedups values inside the window; the native window operators
-      // fold every row, so admitting it would silently over-count. Fall back (the non-windowed
-      // GROUP BY path handles DISTINCT natively).
       if (call.isDistinct()) {
-        return false;
+        if (kind != KIND_COUNT
+            || call.getArgList().size() != 1
+            || call.filterArg >= 0
+            || !supportedDistinctValueType(
+                inputType
+                    .getFieldList()
+                    .get(call.getArgList().get(0))
+                    .getType()
+                    .getSqlTypeName())) {
+          return false;
+        }
+        continue;
       }
       if (call.getArgList().isEmpty()) {
         continue; // COUNT(*) — only the zero-arg aggregate; the value column is synthesized
@@ -323,16 +333,35 @@ final class WindowAggregateMatcher {
         || type == SqlTypeName.DECIMAL;
   }
 
+  static boolean supportedDistinctValueType(SqlTypeName type) {
+    return switch (type) {
+      case TINYINT,
+          SMALLINT,
+          INTEGER,
+          BIGINT,
+          DECIMAL,
+          CHAR,
+          VARCHAR,
+          DATE,
+          TIMESTAMP,
+          TIMESTAMP_WITH_LOCAL_TIME_ZONE ->
+          true;
+      default -> false;
+    };
+  }
+
   /**
-   * Value-type code per aggregate, matching the native side: 0 = bigint, 1 = double, 2 = int,
-   * 4 = smallint, 5 = tinyint, 6 = float, and a packed code carrying precision/scale for decimal
-   * (3 is a key-only string code). COUNT(*) gets bigint (0), the type of its synthesized column.
+   * Value-type code per aggregate, matching the native side. Timestamp precision and decimal
+   * precision/scale are packed into their codes. COUNT(*) gets bigint (0), its synthesized column.
    */
   static int[] valueTypeCodes(scala.collection.Seq<AggregateCall> aggCalls, RelDataType inputType) {
     int[] columns = valueColumns(aggCalls);
     int[] codes = new int[columns.length];
     for (int i = 0; i < columns.length; i++) {
-      codes[i] = columns[i] < 0 ? 0 : typeCode(inputType.getFieldList().get(columns[i]).getType());
+      codes[i] =
+          columns[i] < 0
+              ? 0
+              : windowValueTypeCode(inputType.getFieldList().get(columns[i]).getType());
     }
     return codes;
   }
@@ -363,6 +392,12 @@ final class WindowAggregateMatcher {
       default:
         return 0;
     }
+  }
+
+  static int windowValueTypeCode(RelDataType type) {
+    return GroupAggregateMatcher.isTimestampType(type.getSqlTypeName())
+        ? 1000 + type.getPrecision()
+        : typeCode(type);
   }
 
   static int partialFieldCount(scala.collection.Seq<AggregateCall> aggCalls) {
@@ -467,7 +502,11 @@ final class WindowAggregateMatcher {
   static int[] kinds(scala.collection.Seq<AggregateCall> aggCalls) {
     int[] kinds = new int[aggCalls.size()];
     for (int i = 0; i < aggCalls.size(); i++) {
-      kinds[i] = aggregateKind(aggCalls.apply(i).getAggregation().getKind());
+      AggregateCall call = aggCalls.apply(i);
+      kinds[i] =
+          call.isDistinct()
+              ? WindowAggregateMatcher.KIND_COUNT_DISTINCT
+              : aggregateKind(call.getAggregation().getKind());
     }
     return kinds;
   }
@@ -581,7 +620,8 @@ final class WindowAggregateMatcher {
     // (its row type is [grouping?, partials.., slice_end]) rather than assuming hopping always
     // adds one — otherwise a hopping COUNT(*) local emits a column the global does not expect.
     int partialColumns = agg.getRowType().getFieldCount() - agg.grouping().length - 1;
-    boolean syntheticCount = partialColumns > partialFieldCount(agg.aggCalls());
+    boolean syntheticCount =
+        partialColumns > partialFieldCount(agg.aggCalls()) + distinctViewCount(agg.aggCalls());
     int[] kinds =
         syntheticCount
             ? WindowAggregateMatcher.hoppingLocalKinds(agg.aggCalls())
@@ -607,7 +647,7 @@ final class WindowAggregateMatcher {
         agg.getCluster(),
         agg.getTraitSet(),
         agg.getInputs().get(0),
-        agg.getRowType(),
+        nativeLocalRowType(agg, syntheticCount),
         WindowAggregateMatcher.sliceSize(agg.windowing()),
         timeColumn,
         windowStartColumn,
@@ -617,6 +657,37 @@ final class WindowAggregateMatcher {
         valueTypes,
         kinds,
         WindowAggregateMatcher.isLtz(agg.windowing()));
+  }
+
+  private static int distinctViewCount(scala.collection.Seq<AggregateCall> calls) {
+    java.util.Set<java.util.List<Integer>> arguments = new java.util.HashSet<>();
+    for (int i = 0; i < calls.size(); i++) {
+      if (calls.apply(i).isDistinct()) arguments.add(calls.apply(i).getArgList());
+    }
+    return arguments.size();
+  }
+
+  private static RelDataType nativeLocalRowType(
+      StreamPhysicalLocalWindowAggregate agg, boolean syntheticCount) {
+    if (distinctViewCount(agg.aggCalls()) == 0) return agg.getRowType();
+    var factory = agg.getCluster().getTypeFactory();
+    var fields = factory.builder();
+    var original = agg.getRowType().getFieldList();
+    int offset = agg.grouping().length;
+    for (int i = 0; i < offset; i++) fields.add(original.get(i));
+    for (int i = 0; i < agg.aggCalls().size(); i++) {
+      AggregateCall call = agg.aggCalls().apply(i);
+      if (call.isDistinct()) {
+        var value =
+            agg.getInput().getRowType().getFieldList().get(call.getArgList().get(0)).getType();
+        fields.add(original.get(offset++).getName(), factory.createArrayType(value, -1));
+      } else {
+        for (int j = 0; j < partialWidth(call); j++) fields.add(original.get(offset++));
+      }
+    }
+    if (syntheticCount) fields.add(original.get(offset));
+    fields.add(original.get(original.size() - 1));
+    return fields.build();
   }
 
   /**
@@ -634,6 +705,7 @@ final class WindowAggregateMatcher {
       return "window aggregate: " + zoneReason;
     }
     return "window aggregate: requires a supported window/time and grouping-key type, and"
-        + " non-DISTINCT numeric SUM/MIN/MAX/COUNT/AVG (docs/operators/window-aggregate.md)";
+        + " numeric SUM/MIN/MAX/COUNT/AVG or unfiltered COUNT(DISTINCT) over exact, string, or"
+        + " temporal values (docs/operators/window-aggregate.md)";
   }
 }

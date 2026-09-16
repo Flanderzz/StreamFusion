@@ -4,20 +4,17 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import tech.streamfusion.planner.FlinkKeyGroupUtils;
-import org.apache.arrow.vector.BigIntVector;
-import org.apache.arrow.vector.TimeStampVector;
-import org.apache.arrow.vector.types.TimeUnit;
-import org.apache.arrow.vector.types.pojo.ArrowType;
-import org.apache.arrow.vector.types.pojo.Field;
-import org.apache.arrow.vector.types.pojo.FieldType;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.EnumSource;
 import java.util.ArrayList;
 import java.util.List;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
+import org.apache.arrow.vector.BigIntVector;
+import org.apache.arrow.vector.TimeStampVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.arrow.vector.types.TimeUnit;
+import org.apache.arrow.vector.types.pojo.ArrowType;
+import org.apache.arrow.vector.types.pojo.Field;
+import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.runtime.checkpoint.OperatorSubtaskState;
 import org.apache.flink.runtime.state.KeyGroupRangeAssignment;
@@ -35,6 +32,9 @@ import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.table.types.logical.TimestampType;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
+import tech.streamfusion.planner.FlinkKeyGroupUtils;
 
 /**
  * The columnar window operator (Arrow-batch input) produces the same window aggregates the row-fed
@@ -268,6 +268,49 @@ class NativeColumnarWindowAggregateOperatorTest {
       harness.processElement(new StreamRecord<>(batch(allocator, event(4, 100), event(5, 8000))));
       harness.setProcessingTime(2000);
       assertEquals(List.of(row(9, 1000, 2000)), collect(harness));
+    }
+  }
+
+  @org.junit.jupiter.params.ParameterizedTest
+  @org.junit.jupiter.params.provider.CsvSource({
+    "false,1000,1000",
+    "false,1000,500",
+    "true,3000,1000"
+  })
+  void proctimeWindowsDeduplicateUntilTheirTimersClose(boolean cumulative, long size, long slide)
+      throws Exception {
+    var operator =
+        new NativeColumnarWindowAggregateOperator(
+            cumulative,
+            size,
+            slide,
+            1,
+            new int[] {0},
+            new int[0],
+            new int[0],
+            new int[] {0},
+            new int[] {7},
+            "UTC",
+            OUTPUT,
+            true,
+            new int[0],
+            MAX_PARALLELISM);
+    try (BufferAllocator allocator = new RootAllocator();
+        var harness = rawHarness(operator)) {
+      harness.setup(new ArrowBatchSerializer());
+      harness.open();
+      harness.setProcessingTime(1300);
+      harness.processElement(new StreamRecord<>(batch(allocator, event(1, 42), event(1, 0))));
+      harness.processElement(new StreamRecord<>(batch(allocator, event(1, 9000), event(2, 0))));
+      assertEquals(List.of(), collect(harness));
+      harness.setProcessingTime(3000);
+      var expected =
+          cumulative
+              ? List.of(row(2, 0, 2000), row(2, 0, 3000))
+              : slide == size
+                  ? List.of(row(2, 1000, 2000))
+                  : List.of(row(2, 500, 1500), row(2, 1000, 2000));
+      assertEquals(expected, collect(harness));
     }
   }
 

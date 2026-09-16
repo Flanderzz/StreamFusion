@@ -18,7 +18,7 @@ pub(crate) fn value_data_type(code: i64) -> DataType {
         6 => DataType::Float32,
         // Both Flink TIMESTAMP and TIMESTAMP_LTZ retain milliseconds and fractional nanos;
         // the logical distinction is restored by the JVM output row type.
-        7 => streamfusion_bridge::timestamp::timestamp_type(),
+        7 | 1000..=1009 => streamfusion_bridge::timestamp::timestamp_type(),
         8 => DataType::Date32,
         // A COUNT(DISTINCT) value whose Flink type has no faithful code (TIME, BOOLEAN, complex
         // types): the fold reads the actual column and the distinct set keys scalars, so the
@@ -40,7 +40,7 @@ pub(crate) fn build_builtin(kind: i64, value_type: &DataType) -> AggregateFuncti
         0 => sum_udaf(),
         1 => min_udaf(),
         2 => max_udaf(),
-        3 => count_udaf(),
+        3 | 7 => count_udaf(),
         other => panic!("unsupported builtin aggregate kind: {other}"),
     };
     let schema = Arc::new(Schema::new(vec![Field::new(
@@ -52,6 +52,7 @@ pub(crate) fn build_builtin(kind: i64, value_type: &DataType) -> AggregateFuncti
     AggregateExprBuilder::new(function, vec![value])
         .schema(schema)
         .alias("result")
+        .with_distinct(kind == 7)
         .build()
         .expect("failed to build aggregate")
 }
@@ -634,7 +635,7 @@ impl WindowAggregate {
                 kind,
                 value_type: value_type.clone(),
             },
-            (0..=3, _) => WindowAggregate::Builtin(build_builtin(kind, value_type)),
+            (0..=3 | 7, _) => WindowAggregate::Builtin(build_builtin(kind, value_type)),
             // Float AVG sums in double and narrows to float; double AVG stays double; integer AVG
             // truncates to its type.
             (4, DataType::Float32) => WindowAggregate::FloatAvg,

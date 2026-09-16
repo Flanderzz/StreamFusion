@@ -1,6 +1,5 @@
 package tech.streamfusion.planner;
 
-import tech.streamfusion.operator.RowDataArrowConverter;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.AggregateCall;
 import org.apache.calcite.rel.type.RelDataType;
@@ -10,6 +9,7 @@ import org.apache.flink.table.planner.hint.StateTtlHint;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalGroupAggregate;
 import org.apache.flink.table.planner.plan.utils.ChangelogPlanUtils;
 import scala.collection.Seq;
+import tech.streamfusion.operator.RowDataArrowConverter;
 
 /**
  * Describes the native single-phase non-windowed {@code GROUP BY} shape.
@@ -49,7 +49,10 @@ final class GroupAggregateMatcher {
       if (call.isApproximate()) {
         return "GROUP BY: an approximate aggregate";
       }
-      int kind = WindowAggregateMatcher.aggregateKind(call.getAggregation().getKind());
+      int kind = aggregateKind(agg, call);
+      if (kind < 0 && call.getAggregation().getKind() == org.apache.calcite.sql.SqlKind.SUM0) {
+        return "GROUP BY: SUM0 requires grouped, unfiltered non-null integer values";
+      }
       if (kind < 0) {
         return "GROUP BY: only SUM/MIN/MAX/COUNT/AVG aggregates";
       }
@@ -159,7 +162,7 @@ final class GroupAggregateMatcher {
     int[] kinds = new int[aggCalls.size()];
     for (int i = 0; i < aggCalls.size(); i++) {
       AggregateCall call = aggCalls.apply(i);
-      int kind = WindowAggregateMatcher.aggregateKind(call.getAggregation().getKind());
+      int kind = aggregateKind(agg, call);
       if (call.isDistinct() && kind == WindowAggregateMatcher.KIND_COUNT) {
         kind = KIND_COUNT_DISTINCT;
       } else if (call.isDistinct() && kind == WindowAggregateMatcher.KIND_SUM) {
@@ -181,6 +184,24 @@ final class GroupAggregateMatcher {
       kinds[i] = kind;
     }
     return kinds;
+  }
+
+  private static int aggregateKind(StreamPhysicalGroupAggregate agg, AggregateCall call) {
+    if (call.getAggregation().getKind() != org.apache.calcite.sql.SqlKind.SUM0) {
+      return WindowAggregateMatcher.aggregateKind(call.getAggregation().getKind());
+    }
+    // A live group has at least one contributing non-null integer, making SUM and SUM0
+    // identical. This includes SUM above a window's non-null COUNT result.
+    if (agg.grouping().length == 0
+        || call.getArgList().size() != 1
+        || call.filterArg >= 0
+        || call.isDistinct()) return -1;
+    var value = agg.getInput().getRowType().getFieldList().get(call.getArgList().get(0)).getType();
+    if (value.isNullable()) return -1;
+    return switch (value.getSqlTypeName()) {
+      case TINYINT, SMALLINT, INTEGER, BIGINT -> WindowAggregateMatcher.KIND_SUM;
+      default -> -1;
+    };
   }
 
   static int[] valueColumns(StreamPhysicalGroupAggregate agg) {

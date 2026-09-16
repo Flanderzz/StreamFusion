@@ -10,6 +10,11 @@ covers both, since a query only accelerates when whichever shape Flink chose is 
 
 ## Single-phase
 
+Flink's internal `SUM0` is also admitted when a nonempty grouping reads one unfiltered,
+non-null integer column. A live group then has at least one contributing value, making SUM
+and SUM0 equivalent. This includes an outer SUM over a window COUNT result. Nullable inputs,
+global aggregation, filtered or DISTINCT SUM0, and non-integer values remain outside this rule.
+
 COUNT/SUM DISTINCT uses Java boxed floating equality: all NaN payloads count as one value,
 while positive and negative zero remain distinct. The same encoding is used for local/global
 merges, retractions, and persistent distinct-element lookups. Primitive FLOAT/DOUBLE GROUP BY

@@ -128,6 +128,30 @@ class NativeColumnarSessionWindowAggregateOperatorTest {
 
   private static KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch>
       rawKeyedHarness(boolean proctime) throws Exception {
+    return rawKeyedHarness(proctime, 0);
+  }
+
+  @Test
+  void proctimeSessionMergesDistinctSetsAndResetsAfterExpiry() throws Exception {
+    try (BufferAllocator allocator = new RootAllocator();
+        var harness = rawKeyedHarness(true, 7)) {
+      harness.setup(new ArrowBatchSerializer());
+      harness.open();
+      harness.setProcessingTime(100);
+      harness.processElement(new StreamRecord<>(batch(allocator, event(1, 42), event(1, 0))));
+      harness.setProcessingTime(300);
+      harness.processElement(new StreamRecord<>(batch(allocator, event(1, 0), event(2, 0))));
+      harness.setProcessingTime(800);
+      assertEquals(List.of(row(2, 100, 800)), collect(harness));
+      harness.setProcessingTime(2000);
+      harness.processElement(new StreamRecord<>(batch(allocator, event(1, 0), event(1, 0))));
+      harness.setProcessingTime(2500);
+      assertEquals(List.of(row(1, 2000, 2500)), collect(harness));
+    }
+  }
+
+  private static KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch>
+      rawKeyedHarness(boolean proctime, int kind) throws Exception {
     return new KeyedOneInputStreamOperatorTestHarness<>(
         new NativeColumnarSessionWindowAggregateOperator(
             500,
@@ -136,7 +160,7 @@ class NativeColumnarSessionWindowAggregateOperatorTest {
             new int[0],
             new int[0],
             new int[] {0},
-            new int[] {0},
+            new int[] {kind},
             "UTC",
             OUTPUT,
             proctime,

@@ -1,39 +1,18 @@
 package tech.streamfusion.state;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import tech.streamfusion.operator.ArrowBatch;
-import tech.streamfusion.operator.ArrowBatchSerializer;
-import tech.streamfusion.operator.EncodedPredicate;
-import tech.streamfusion.operator.NativeColumnarChangelogNormalizeOperator;
-import tech.streamfusion.operator.NativeColumnarDeduplicateOperator;
-import tech.streamfusion.operator.NativeColumnarFirstNOperator;
-import tech.streamfusion.operator.NativeColumnarGroupAggregateOperator;
-import tech.streamfusion.operator.NativeColumnarKeepLastDeduplicateOperator;
-import tech.streamfusion.operator.NativeColumnarSessionWindowAggregateOperator;
-import tech.streamfusion.operator.NativeColumnarTemporalSortOperator;
-import tech.streamfusion.operator.NativeColumnarTopNOperator;
-import tech.streamfusion.operator.NativeColumnarUpdatingJoinOperator;
-import tech.streamfusion.operator.NativeColumnarWindowAggregateOperator;
-import tech.streamfusion.operator.NativeColumnarWindowRankOperator;
-import tech.streamfusion.operator.NativeIntervalJoinOperator;
-import tech.streamfusion.operator.NativeOverAggregateOperator;
-import tech.streamfusion.operator.NativeTemporalJoinOperator;
-import tech.streamfusion.operator.NativeWindowJoinOperator;
-import tech.streamfusion.operator.NativeStateRouteProbe;
-import tech.streamfusion.operator.RowDataArrowConverter;
-import tech.streamfusion.operator.TaskOffHeapMemory;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.flink.api.common.typeinfo.Types;
-import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.CheckpointingOptions;
+import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.configuration.TaskManagerOptions;
 import org.apache.flink.core.execution.SavepointFormatType;
@@ -63,7 +42,28 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
+import tech.streamfusion.operator.ArrowBatch;
+import tech.streamfusion.operator.ArrowBatchSerializer;
 import tech.streamfusion.operator.CoalescingOff;
+import tech.streamfusion.operator.EncodedPredicate;
+import tech.streamfusion.operator.NativeColumnarChangelogNormalizeOperator;
+import tech.streamfusion.operator.NativeColumnarDeduplicateOperator;
+import tech.streamfusion.operator.NativeColumnarFirstNOperator;
+import tech.streamfusion.operator.NativeColumnarGroupAggregateOperator;
+import tech.streamfusion.operator.NativeColumnarKeepLastDeduplicateOperator;
+import tech.streamfusion.operator.NativeColumnarSessionWindowAggregateOperator;
+import tech.streamfusion.operator.NativeColumnarTemporalSortOperator;
+import tech.streamfusion.operator.NativeColumnarTopNOperator;
+import tech.streamfusion.operator.NativeColumnarUpdatingJoinOperator;
+import tech.streamfusion.operator.NativeColumnarWindowAggregateOperator;
+import tech.streamfusion.operator.NativeColumnarWindowRankOperator;
+import tech.streamfusion.operator.NativeIntervalJoinOperator;
+import tech.streamfusion.operator.NativeOverAggregateOperator;
+import tech.streamfusion.operator.NativeStateRouteProbe;
+import tech.streamfusion.operator.NativeTemporalJoinOperator;
+import tech.streamfusion.operator.NativeWindowJoinOperator;
+import tech.streamfusion.operator.RowDataArrowConverter;
+import tech.streamfusion.operator.TaskOffHeapMemory;
 
 /**
  * Native operators on the RocksDB state backend: state lives in a local RocksDB table, snapshots go
@@ -71,8 +71,9 @@ import tech.streamfusion.operator.CoalescingOff;
  * state), a completed checkpoint's files are referenced by placeholders instead of re-uploaded
  * (incremental), and a fresh operator restored from the handle continues the changelog exactly.
  *
- * <p>Every run here is the production shape: Rust reads and writes its RocksDB instance directly,
- * while Java coordinates Flink checkpoint handles and uploads.
+ * <p>Direct-state cases let Rust read and write its RocksDB instance while Java coordinates
+ * checkpoint handles and uploads. Variable-sized window distinct sets explicitly verify the
+ * snapshot fallback instead.
  *
  * <p>State-transition cases run through an ordinary RocksDB checkpoint and through canonical
  * savepoints in both backend directions. This keeps the incremental lifecycle assertions while
@@ -113,6 +114,113 @@ class RocksDBNativeStateBackendAllOperatorsTest {
       RowType.of(
           new LogicalType[] {new BigIntType(), new TimestampType(3), new TimestampType(3)},
           new String[] {"total", "window_start", "window_end"});
+
+  @ParameterizedTest
+  @EnumSource(StateTransition.class)
+  void distinctWindowValueSetsSurviveBackendTransitions(StateTransition transition)
+      throws Exception {
+    OperatorSubtaskState snapshot;
+    try (var harness = mixedWindowHarness(distinctWindowOperator())) {
+      transition.configureSource(harness);
+      harness.setup(new ArrowBatchSerializer());
+      harness.open();
+      feedDistinctWindowPartial(harness, 1L, 1L, null);
+      snapshot =
+          transition == StateTransition.ROCKSDB_CHECKPOINT
+              ? harness.snapshot(1, 1)
+              : canonicalSavepoint(harness);
+      harness.notifyOfCompletedCheckpoint(1);
+    }
+    var operator = distinctWindowOperator();
+    try (var harness = mixedWindowHarness(operator)) {
+      transition.configureRestore(harness);
+      harness.setup(new ArrowBatchSerializer());
+      harness.initializeState(snapshot);
+      harness.open();
+      // Variable-sized value sets retain the existing snapshot-state fallback on RocksDB.
+      assertFalse(NativeStateRouteProbe.directRocksDBState(operator));
+      feedDistinctWindowPartial(harness, 1L, 2L, null);
+      harness.processWatermark(new Watermark(10000));
+      List<List<Long>> actual = new ArrayList<>();
+      while (!harness.getOutput().isEmpty()) {
+        Object event = harness.getOutput().poll();
+        if (event instanceof StreamRecord<?> record) {
+          try (VectorSchemaRoot root = ((ArrowBatch) record.getValue()).root()) {
+            for (RowData row : RowDataArrowConverter.read(root, WINDOW_OUTPUT)) {
+              actual.add(
+                  List.of(
+                      row.getLong(0),
+                      row.getTimestamp(1, 3).getMillisecond(),
+                      row.getTimestamp(2, 3).getMillisecond()));
+            }
+          }
+        }
+      }
+      List<List<Long>> expected = new ArrayList<>();
+      for (long end = 2000; end <= 10000; end += 2000) expected.add(List.of(2L, end - 10000, end));
+      assertEquals(expected, actual);
+    }
+  }
+
+  private static tech.streamfusion.operator.NativeColumnarGlobalWindowAggregateOperator
+      distinctWindowOperator() {
+    return new tech.streamfusion.operator.NativeColumnarGlobalWindowAggregateOperator(
+        10000,
+        2000,
+        false,
+        new int[0],
+        new int[] {0},
+        new int[] {7},
+        "UTC",
+        WINDOW_OUTPUT,
+        new int[0],
+        MAX_PARALLELISM);
+  }
+
+  private static void feedDistinctWindowPartial(
+      KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> global,
+      Long... values)
+      throws Exception {
+    var operator =
+        new tech.streamfusion.operator.NativeColumnarLocalWindowAggregateOperator(
+            2000,
+            2000,
+            1,
+            -1,
+            -1,
+            new int[] {0},
+            new int[0],
+            new int[0],
+            new int[] {0},
+            new int[] {7},
+            "UTC",
+            new int[0],
+            MAX_PARALLELISM);
+    try (BufferAllocator allocator = new RootAllocator();
+        var local =
+            new KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch>(
+                operator, batch -> 0, Types.INT, MAX_PARALLELISM, 1, 0)) {
+      local.setup(new ArrowBatchSerializer());
+      local.open();
+      List<RowData> rows = new ArrayList<>();
+      for (Long value : values)
+        rows.add(GenericRowData.of(value, TimestampData.fromEpochMillis(500)));
+      local.processElement(
+          new StreamRecord<>(
+              new ArrowBatch(RowDataArrowConverter.write(rows, WINDOW_INPUT, allocator))));
+      operator.prepareSnapshotPreBarrier(1);
+      int partialRows = 0;
+      while (!local.getOutput().isEmpty()) {
+        Object event = local.getOutput().poll();
+        if (event instanceof StreamRecord<?> record) {
+          ArrowBatch batch = (ArrowBatch) record.getValue();
+          partialRows += batch.rowCount();
+          global.processElement(new StreamRecord<>(batch));
+        }
+      }
+      assertEquals(1, partialRows);
+    }
+  }
 
   private static final RowType MIXED_WINDOW_INPUT = RowType.of(
       new LogicalType[] {new BigIntType(), new BigIntType(),
