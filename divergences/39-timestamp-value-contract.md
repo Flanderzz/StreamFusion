@@ -56,6 +56,14 @@ entry point requests the component layout. Primitive-boundary tests compose assi
 downstream window join and IPC snapshot restore. This keeps Arroyo's columnar batch structure but
 uses Flink's signed millisecond clock rather than Arroyo's SystemTime/nanosecond representation.
 
+For TIMESTAMP_LTZ window assignment, start/end are local wall-clock TIMESTAMP values throughout
+the native pipeline, while window_time retains the instant. This differs from keeping epoch
+boundaries until the final transpose: native filters and joins must observe Flink's actual values.
+Attached-window rank and join therefore shift their watermark or processing-time threshold into
+the local domain and fire at end minus one millisecond. The fixed-offset gate applies to the full
+timestamp range, including dates before 1970. Changing the retained boundary and threshold domain
+advances the common state envelopes; older snapshots are rejected before native decoding.
+
 Connectors convert at their physical format boundary. JSON and CSV preserve the complete timestamp,
 including wide dates and hidden fractions. Avro retains Flink's millisecond wire semantics. ORC uses
 the released orc-rust Decimal128 nanosecond decoder before splitting into components. Parquet's

@@ -59,6 +59,12 @@ event-time, by the processing-time clock instead of a rowtime column for proctim
 under the same **zero-offset** `TUMBLE`/`HOP`/`CUMULATE` restriction; both its event-time and
 proctime assignment paths are native.
 
+The TVF emits `window_start`/`window_end` as local wall-clock TIMESTAMP values, while
+`window_time` stays an instant for LTZ input. The fixed session-zone offset participates in
+assignment itself, so projections, filters, joins and ranking observe the same boundary values
+as Flink. Window rank and join translate their clock threshold into this local domain and close
+at `window_end - 1` millisecond, including processing-time timers and restored state.
+
 Assignment reads Flink's millisecond component without changing the original timestamp payload.
 In particular, `1969-12-31 23:59:59.999999999` belongs to the window before the epoch, just like
 `TimestampData.getMillisecond() == -1`. NULL event-time rows are dropped; processing-time assignment
@@ -86,15 +92,18 @@ own pages for their admission conditions.
 - Legacy proctime `HOP` when the slide does not divide the size. Event-time legacy `HOP` supports
   non-dividing and gapped windows.
 - Fixed-grid windows (TVF **and** legacy, event-time or proctime) over `TIMESTAMP_LTZ` unless the
-  session zone has one fixed post-1970 offset that is an integral multiple of the window slide
+  session zone has one fixed offset for the entire timestamp range that is an integral multiple of the window slide
   (the max size for `CUMULATE`). Flink assigns and fires on a DST-aware local-time grid while the
   native operators bucket on the epoch grid; the two coincide exactly under that condition. The gate
   applies uniformly to every consumer of the assignment — the windowing TVF, single- and two-phase
   window aggregates, window join, and window Top-N/dedup — so a whole window pipeline falls back
   together rather than mixing host-assigned and native-assigned bounds.
-- `SESSION` windows (TVF and legacy) over `TIMESTAMP_LTZ` when the session zone has a post-1970
-  transition; changing offsets can alter gap connectivity and session merges. A fixed offset cancels
+- `SESSION` windows (TVF and legacy) over `TIMESTAMP_LTZ` when the session zone has any historical
+  or recurring transition; changing offsets can alter gap connectivity and session merges. A fixed offset cancels
   out of the gap arithmetic, so fixed-offset zones stay native with no alignment requirement.
+- Region zones with only pre-1970 transitions also fall back: their earlier offsets may change
+  assignment and firing for negative epochs. Use a fixed zone such as `GMT+05:30` when fixed-offset
+  semantics are intended; it is not equivalent to `Asia/Kolkata` over the full timestamp range.
 - Legacy processing-time `SESSION`.
 - Key type outside bigint/int/string/boolean/date/timestamp/decimal.
 - A value type/aggregate mismatch.
@@ -114,3 +123,20 @@ Flink applies no idle-state TTL to window operators — `table.exec.state.ttl` c
 windows are bounded by their own firing and eviction instead. Contrast with [`OVER`](over.md), which
 does run TTL natively across all three of its frame shapes. See [Configuration](../configuration.md)
 for the TTL flag surface.
+
+## Fixed-offset TVF benchmark
+
+`LtzWindowTvfBenchmark` compares standalone assignment with Flink 2.2.1 using a release native
+build (`-Pbench`), 2 million rows, parallelism 1, two warmups and five interleaved measured runs.
+The session zone is `GMT+08:00`; every eighth timestamp is NULL and the other rows cycle across
+negative and positive epochs with fractional milliseconds. Both row/Arrow transposes and the
+blackhole sink remain in the measured path.
+
+| Shape | Flink median | Native median | Flink / native |
+| --- | ---: | ---: | ---: |
+| TUMBLE 10s | 0.755124s | 0.935219s | 0.807x |
+| HOP 5s / 10s | 1.092357s | 1.323315s | 0.825x |
+| CUMULATE 5s / 10s | 0.921502s | 1.123302s | 0.820x |
+
+These standalone native plans are slower than Flink. The boundary correction is required for
+correctness of the existing native path; these results do not establish a performance benefit.

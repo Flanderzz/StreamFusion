@@ -94,6 +94,7 @@ final class WindowTableFunctionMatcher {
         WindowTableFunctionMatcher.windowMillis(tvf),
         WindowTableFunctionMatcher.slideMillis(tvf),
         WindowTableFunctionMatcher.cumulative(tvf),
-        WindowTableFunctionMatcher.isProctime(tvf));
+        WindowTableFunctionMatcher.isProctime(tvf),
+        WindowZoneGate.boundaryOffsetMillis(tvf, tvf.windowing()));
   }
 }

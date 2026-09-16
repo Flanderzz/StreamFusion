@@ -27,6 +27,7 @@ public class StreamPhysicalNativeWindowTableFunction extends StreamPhysicalNativ
   private final long windowMillis;
   private final long slideMillis;
   private final boolean cumulative;
+  private final long boundaryOffsetMillis;
   private final boolean proctime;
 
   public StreamPhysicalNativeWindowTableFunction(
@@ -38,12 +39,14 @@ public class StreamPhysicalNativeWindowTableFunction extends StreamPhysicalNativ
       long windowMillis,
       long slideMillis,
       boolean cumulative,
-      boolean proctime) {
+      boolean proctime,
+      long boundaryOffsetMillis) {
     super(cluster, traitSet, input, outputRowType);
     this.timeColumn = timeColumn;
     this.windowMillis = windowMillis;
     this.slideMillis = slideMillis;
     this.cumulative = cumulative;
+    this.boundaryOffsetMillis = boundaryOffsetMillis;
     this.proctime = proctime;
   }
 
@@ -63,7 +66,8 @@ public class StreamPhysicalNativeWindowTableFunction extends StreamPhysicalNativ
         windowMillis,
         slideMillis,
         cumulative,
-        proctime);
+        proctime,
+        boundaryOffsetMillis);
   }
 
   @Override
@@ -77,7 +81,8 @@ public class StreamPhysicalNativeWindowTableFunction extends StreamPhysicalNativ
         windowMillis,
         slideMillis,
         cumulative,
-        proctime);
+        proctime,
+        boundaryOffsetMillis);
   }
 }
 

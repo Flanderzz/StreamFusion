@@ -1,22 +1,17 @@
 package tech.streamfusion.operator;
 
-import tech.streamfusion.Native;
-import tech.streamfusion.planner.NativeConfig;
-import tech.streamfusion.state.RocksDBNativeStateSupport;
-import java.time.Instant;
-import java.time.ZoneId;
-import java.time.ZoneOffset;
 import org.apache.arrow.c.ArrowArray;
 import org.apache.arrow.c.ArrowSchema;
 import org.apache.arrow.c.Data;
 import org.apache.arrow.memory.BufferAllocator;
-import tech.streamfusion.arrow.TimestampAccessor;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.flink.api.common.operators.ProcessingTimeService.ProcessingTimeCallback;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.table.types.logical.RowType;
+import tech.streamfusion.Native;
+import tech.streamfusion.state.RocksDBNativeStateSupport;
 
 /**
  * Columnar window Top-N / window deduplication over a windowing-TVF input (the host's {@code
@@ -44,14 +39,13 @@ public class NativeColumnarWindowRankOperator extends AbstractNativeStatefulOper
   private final int[] sortNullsFirst;
   private final long limit;
   private final boolean outputRankNumber;
-  private final String timeZoneId;
+  private final long boundaryOffsetMillis;
   private final boolean proctime;
   private final long windowMillis;
   private final long slideMillis;
   private final boolean cumulative;
   private final RowType rowType;
 
-  private transient ZoneId zone;
   private transient long registeredTimer;
   private transient long maxOpenEnd;
   private transient FlinkWindowMetrics flinkWindowMetrics;
@@ -73,6 +67,42 @@ public class NativeColumnarWindowRankOperator extends AbstractNativeStatefulOper
       boolean cumulative,
       RowType rowType,
       int maxParallelism) {
+    this(
+        windowStartColumn,
+        windowEndColumn,
+        partitionColumns,
+        keyTimestampPrecisions,
+        sortIndices,
+        sortAscending,
+        sortNullsFirst,
+        limit,
+        outputRankNumber,
+        WindowTimeDomain.offsetMillis(timeZoneId),
+        proctime,
+        windowMillis,
+        slideMillis,
+        cumulative,
+        rowType,
+        maxParallelism);
+  }
+
+  public NativeColumnarWindowRankOperator(
+      int windowStartColumn,
+      int windowEndColumn,
+      int[] partitionColumns,
+      int[] keyTimestampPrecisions,
+      int[] sortIndices,
+      int[] sortAscending,
+      int[] sortNullsFirst,
+      long limit,
+      boolean outputRankNumber,
+      long boundaryOffsetMillis,
+      boolean proctime,
+      long windowMillis,
+      long slideMillis,
+      boolean cumulative,
+      RowType rowType,
+      int maxParallelism) {
     super("window rank", keyTimestampPrecisions, maxParallelism);
     this.windowStartColumn = windowStartColumn;
     this.windowEndColumn = windowEndColumn;
@@ -82,7 +112,7 @@ public class NativeColumnarWindowRankOperator extends AbstractNativeStatefulOper
     this.sortNullsFirst = sortNullsFirst;
     this.limit = limit;
     this.outputRankNumber = outputRankNumber;
-    this.timeZoneId = timeZoneId;
+    this.boundaryOffsetMillis = boundaryOffsetMillis;
     this.proctime = proctime;
     this.windowMillis = windowMillis;
     this.slideMillis = slideMillis;
@@ -205,7 +235,6 @@ public class NativeColumnarWindowRankOperator extends AbstractNativeStatefulOper
     super.open();
     flinkWindowMetrics =
         new FlinkWindowMetrics(getMetricGroup(), getProcessingTimeService());
-    zone = ZoneId.of(timeZoneId);
     registeredTimer = Long.MIN_VALUE;
     maxOpenEnd = restoredProcessingTimeTimerDeadline();
     if (proctime && maxOpenEnd != Long.MIN_VALUE) {
@@ -275,7 +304,7 @@ public class NativeColumnarWindowRankOperator extends AbstractNativeStatefulOper
   }
 
   private void scheduleNextTimer(long now) {
-    long boundary = Math.floorDiv(now, slideMillis) * slideMillis + slideMillis;
+    long boundary = Math.floorDiv(now + 1, slideMillis) * slideMillis + slideMillis - 1;
     if (boundary <= maxOpenEnd && boundary > registeredTimer) {
       getProcessingTimeService().registerTimer(boundary, this);
       registeredTimer = boundary;
@@ -284,12 +313,13 @@ public class NativeColumnarWindowRankOperator extends AbstractNativeStatefulOper
 
   private long latestWindowEnd(long now) {
     return cumulative
-        ? Math.floorDiv(now, windowMillis) * windowMillis + windowMillis
-        : Math.floorDiv(now, slideMillis) * slideMillis + windowMillis;
+        ? Math.floorDiv(now, windowMillis) * windowMillis + windowMillis - 1
+        : Math.floorDiv(now, slideMillis) * slideMillis + windowMillis - 1;
   }
 
   /** Emits and evicts every window whose end the given threshold has passed. */
   private void flush(long threshold) {
+    threshold = WindowTimeDomain.closeThreshold(threshold, boundaryOffsetMillis);
     try (ArrowArray array = ArrowArray.allocateNew(allocator);
         ArrowSchema schema = ArrowSchema.allocateNew(allocator)) {
       if (directRocksDBState()) {
@@ -301,31 +331,11 @@ public class NativeColumnarWindowRankOperator extends AbstractNativeStatefulOper
       }
       VectorSchemaRoot out = Data.importVectorSchemaRoot(allocator, array, schema, dictionaries);
       if (out.getRowCount() > 0) {
-        // The native side keeps window_start/window_end as UTC epoch (so eviction compares against the
-        // UTC threshold); render them as session-local wall-clock TIMESTAMPs on emit, as the host does
-        // (window_time stays the UTC rowtime). Same toLocal shift as the window aggregate.
-        shiftToLocal(out, windowStartColumn);
-        shiftToLocal(out, windowEndColumn);
         ColumnarRecordMetrics.emit(output, getMetricGroup(), new ArrowBatch(out));
       } else {
         out.close(); // no window closed at this threshold
       }
     }
-  }
-
-  /** Rewrites a UTC-epoch timestamp column to the session-local wall-clock the host emits. */
-  private void shiftToLocal(VectorSchemaRoot out, int column) {
-    var vector = out.getVector(column);
-    if (!TimestampAccessor.isTimestamp(vector)) return;
-    TimestampAccessor ts = new TimestampAccessor(vector);
-    for (int i = 0; i < out.getRowCount(); i++) {
-      if (ts.isNull(i)) continue;
-      long localMillis = Instant.ofEpochMilli(ts.getMillis(i)).atZone(zone).toLocalDateTime()
-          .toInstant(ZoneOffset.UTC).toEpochMilli();
-      TimestampAccessor.set(vector, i, org.apache.flink.table.data.TimestampData.fromEpochMillis(
-          localMillis, ts.getNanoOfMillisecond(i)));
-    }
-
   }
 
 }

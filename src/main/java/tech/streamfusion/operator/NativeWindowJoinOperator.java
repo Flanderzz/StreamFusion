@@ -1,8 +1,5 @@
 package tech.streamfusion.operator;
 
-import tech.streamfusion.Native;
-import tech.streamfusion.planner.NativeConfig;
-import tech.streamfusion.state.RocksDBNativeStateSupport;
 import java.util.function.LongBinaryOperator;
 import org.apache.arrow.c.ArrowArray;
 import org.apache.arrow.c.ArrowSchema;
@@ -14,6 +11,8 @@ import org.apache.flink.streaming.api.operators.TwoInputStreamOperator;
 import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.table.types.logical.RowType;
+import tech.streamfusion.Native;
+import tech.streamfusion.state.RocksDBNativeStateSupport;
 
 /**
  * Columnar event-time INNER window join (Arrow in on both inputs, Arrow out): the join of two
@@ -50,6 +49,7 @@ public class NativeWindowJoinOperator extends AbstractNativeStatefulOperator<Arr
   private final long windowMillis;
   private final long slideMillis;
   private final boolean cumulative;
+  private final long boundaryOffsetMillis;
 
   private transient long registeredTimer;
   private transient long maxOpenEnd;
@@ -72,6 +72,44 @@ public class NativeWindowJoinOperator extends AbstractNativeStatefulOperator<Arr
       boolean cumulative,
       int[] keyTimestampPrecisions,
       int maxParallelism) {
+    this(
+        leftKeys,
+        rightKeys,
+        leftWindowStart,
+        leftWindowEnd,
+        rightWindowStart,
+        rightWindowEnd,
+        joinType,
+        leftType,
+        rightType,
+        predicate,
+        proctime,
+        windowMillis,
+        slideMillis,
+        cumulative,
+        keyTimestampPrecisions,
+        maxParallelism,
+        0);
+  }
+
+  public NativeWindowJoinOperator(
+      int[] leftKeys,
+      int[] rightKeys,
+      int leftWindowStart,
+      int leftWindowEnd,
+      int rightWindowStart,
+      int rightWindowEnd,
+      int joinType,
+      RowType leftType,
+      RowType rightType,
+      EncodedPredicate predicate,
+      boolean proctime,
+      long windowMillis,
+      long slideMillis,
+      boolean cumulative,
+      int[] keyTimestampPrecisions,
+      int maxParallelism,
+      long boundaryOffsetMillis) {
     super("window join", keyTimestampPrecisions, maxParallelism);
     this.leftKeys = leftKeys;
     this.rightKeys = rightKeys;
@@ -87,6 +125,7 @@ public class NativeWindowJoinOperator extends AbstractNativeStatefulOperator<Arr
     this.windowMillis = windowMillis;
     this.slideMillis = slideMillis;
     this.cumulative = cumulative;
+    this.boundaryOffsetMillis = boundaryOffsetMillis;
   }
 
   // A proctime window join closes on processing-time timers, so the deadline must travel in every
@@ -284,7 +323,7 @@ public class NativeWindowJoinOperator extends AbstractNativeStatefulOperator<Arr
   }
 
   private void scheduleNextTimer(long now) {
-    long boundary = Math.floorDiv(now, slideMillis) * slideMillis + slideMillis;
+    long boundary = Math.floorDiv(now + 1, slideMillis) * slideMillis + slideMillis - 1;
     if (boundary <= maxOpenEnd && boundary > registeredTimer) {
       getProcessingTimeService().registerTimer(boundary, this);
       registeredTimer = boundary;
@@ -293,8 +332,8 @@ public class NativeWindowJoinOperator extends AbstractNativeStatefulOperator<Arr
 
   private long latestWindowEnd(long now) {
     return cumulative
-        ? Math.floorDiv(now, windowMillis) * windowMillis + windowMillis
-        : Math.floorDiv(now, slideMillis) * slideMillis + windowMillis;
+        ? Math.floorDiv(now, windowMillis) * windowMillis + windowMillis - 1
+        : Math.floorDiv(now, slideMillis) * slideMillis + windowMillis - 1;
   }
 
   @Override
@@ -347,6 +386,7 @@ public class NativeWindowJoinOperator extends AbstractNativeStatefulOperator<Arr
 
   /** Emits and evicts every window whose end the given threshold has passed. */
   private void flush(long threshold) {
+    threshold = WindowTimeDomain.closeThreshold(threshold, boundaryOffsetMillis);
     try (ArrowArray array = ArrowArray.allocateNew(allocator);
         ArrowSchema schema = ArrowSchema.allocateNew(allocator)) {
       if (directRocksDBState()) {

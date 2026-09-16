@@ -170,7 +170,7 @@ class FlinkWindowSqlHarnessTest {
   @Test
   void legacyLtzRowtimePropertyMatchesHostInSessionZone() throws Exception {
     NativeParity.assertParity(
-        FlinkWindowSqlHarnessTest::environmentWithKolkataZone,
+        FlinkWindowSqlHarnessTest::environmentWithFixedOffsetZone,
         "SELECT k, SUM(`value`) AS s, "
             + "TUMBLE_START(rt, INTERVAL '1' SECOND) AS window_start, "
             + "TUMBLE_END(rt, INTERVAL '1' SECOND) AS window_end, "
@@ -181,7 +181,7 @@ class FlinkWindowSqlHarnessTest {
   @Test
   void legacyLtzWindowWithMisalignedSessionZoneFallsBack() throws Exception {
     NativeParity.assertFallbackReasonContains(
-        FlinkWindowSqlHarnessTest::environmentWithKolkataZone,
+        FlinkWindowSqlHarnessTest::environmentWithFixedOffsetZone,
         "SELECT k, SUM(`value`) AS s, "
             + "TUMBLE_START(rt, INTERVAL '1' HOUR) AS window_start "
             + "FROM src GROUP BY k, TUMBLE(rt, INTERVAL '1' HOUR)",
@@ -195,13 +195,13 @@ class FlinkWindowSqlHarnessTest {
         "SELECT k, SUM(`value`) AS s, "
             + "TUMBLE_START(rt, INTERVAL '1' SECOND) AS window_start "
             + "FROM src GROUP BY k, TUMBLE(rt, INTERVAL '1' SECOND)",
-        "fixed after 1970");
+        "fixed offset for the full timestamp range");
   }
 
   @Test
   void legacyLtzSessionMatchesHostInFixedOffsetZone() throws Exception {
     NativeParity.assertParity(
-        FlinkWindowSqlHarnessTest::environmentWithKolkataZone,
+        FlinkWindowSqlHarnessTest::environmentWithFixedOffsetZone,
         "SELECT k, SUM(`value`) AS s, "
             + "SESSION_START(rt, INTERVAL '1' SECOND) AS window_start, "
             + "SESSION_END(rt, INTERVAL '1' SECOND) AS window_end "
@@ -214,13 +214,13 @@ class FlinkWindowSqlHarnessTest {
         FlinkWindowSqlHarnessTest::environmentWithLosAngelesZone,
         "SELECT k, SUM(`value`) AS s FROM src "
             + "GROUP BY k, SESSION(rt, INTERVAL '1' SECOND)",
-        "legacy SESSION over TIMESTAMP_LTZ requires the session zone to remain fixed after 1970");
+        "legacy SESSION over TIMESTAMP_LTZ requires a fixed offset for the full timestamp range");
   }
 
   @Test
   void tvfLtzTumbleMatchesHostInAlignedFixedOffsetZone() throws Exception {
     NativeParity.assertParity(
-        FlinkWindowSqlHarnessTest::environmentWithKolkataZone,
+        FlinkWindowSqlHarnessTest::environmentWithFixedOffsetZone,
         "SELECT k, SUM(`value`) AS s, window_start, window_end "
             + "FROM TABLE(TUMBLE(TABLE src, DESCRIPTOR(rt), INTERVAL '1' SECOND)) "
             + "GROUP BY window_start, window_end, k");
@@ -229,7 +229,7 @@ class FlinkWindowSqlHarnessTest {
   @Test
   void tvfLtzTumbleWithMisalignedSessionZoneFallsBack() throws Exception {
     NativeParity.assertFallbackReasonContains(
-        FlinkWindowSqlHarnessTest::environmentWithKolkataZone,
+        FlinkWindowSqlHarnessTest::environmentWithFixedOffsetZone,
         "SELECT k, SUM(`value`) AS s "
             + "FROM TABLE(TUMBLE(TABLE src, DESCRIPTOR(rt), INTERVAL '1' HOUR)) "
             + "GROUP BY window_start, window_end, k",
@@ -243,7 +243,7 @@ class FlinkWindowSqlHarnessTest {
         "SELECT k, SUM(`value`) AS s "
             + "FROM TABLE(TUMBLE(TABLE src, DESCRIPTOR(rt), INTERVAL '1' SECOND)) "
             + "GROUP BY window_start, window_end, k",
-        "fixed after 1970");
+        "fixed offset for the full timestamp range");
   }
 
   @Test
@@ -253,13 +253,13 @@ class FlinkWindowSqlHarnessTest {
         "SELECT k, SUM(`value`) AS s, window_start, window_end "
             + "FROM TABLE(SESSION(TABLE src PARTITION BY k, DESCRIPTOR(rt), INTERVAL '1' SECOND)) "
             + "GROUP BY window_start, window_end, k",
-        "TIMESTAMP_LTZ session windows require the session zone to remain fixed after 1970");
+        "TIMESTAMP_LTZ session windows require a fixed offset for the full timestamp range");
   }
 
   @Test
   void twoPhaseLtzHopWithMisalignedSessionZoneFallsBack() throws Exception {
     NativeParity.assertFallbackReasonContains(
-        FlinkWindowSqlHarnessTest::twoPhaseEnvironmentWithKolkataZone,
+        FlinkWindowSqlHarnessTest::twoPhaseEnvironmentWithFixedOffsetZone,
         "SELECT k, SUM(`value`) AS s "
             + "FROM TABLE(HOP(TABLE src, DESCRIPTOR(rt), INTERVAL '1' HOUR, INTERVAL '2' HOUR)) "
             + "GROUP BY window_start, window_end, k",
@@ -808,15 +808,15 @@ class FlinkWindowSqlHarnessTest {
     return buildEnvironment(true);
   }
 
-  private static TableEnvironment environmentWithKolkataZone() {
+  private static TableEnvironment environmentWithFixedOffsetZone() {
     TableEnvironment tEnv = buildEnvironment(true);
-    tEnv.getConfig().setLocalTimeZone(ZoneId.of("Asia/Kolkata"));
+    tEnv.getConfig().setLocalTimeZone(ZoneId.of("GMT+05:30"));
     return tEnv;
   }
 
-  private static TableEnvironment twoPhaseEnvironmentWithKolkataZone() {
+  private static TableEnvironment twoPhaseEnvironmentWithFixedOffsetZone() {
     TableEnvironment tEnv = buildEnvironment(false);
-    tEnv.getConfig().setLocalTimeZone(ZoneId.of("Asia/Kolkata"));
+    tEnv.getConfig().setLocalTimeZone(ZoneId.of("GMT+05:30"));
     return tEnv;
   }
 

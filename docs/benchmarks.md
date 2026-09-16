@@ -196,7 +196,7 @@ TZ=UTC SF_BENCHMARK=true SF_MATRIX_DELTA_SINK=true SF_ROWS=2000000 \
 ```
 
 The explicit UTC setting is required for the timestamp-window queries: the native
-`TIMESTAMP_LTZ` window path accepts fixed-offset post-1970 zones, while a host-local DST zone is an
+`TIMESTAMP_LTZ` window path accepts zones with a fixed offset for the full timestamp range, while a host-local DST zone is an
 intentional planner fallback.
 
 The Paimon diagnostic compares the published Paimon 2.0.0 Flink 2.2 connector with StreamFusion's

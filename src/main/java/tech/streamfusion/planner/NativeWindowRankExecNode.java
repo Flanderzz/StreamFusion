@@ -1,8 +1,5 @@
 package tech.streamfusion.planner;
 
-import tech.streamfusion.operator.ArrowBatch;
-import tech.streamfusion.operator.ArrowBatchTypeInformation;
-import tech.streamfusion.operator.NativeColumnarWindowRankOperator;
 import java.util.Collections;
 import org.apache.flink.api.dag.Transformation;
 import org.apache.flink.configuration.ReadableConfig;
@@ -16,6 +13,9 @@ import org.apache.flink.table.planner.plan.nodes.exec.SingleTransformationTransl
 import org.apache.flink.table.planner.plan.nodes.exec.stream.StreamExecNode;
 import org.apache.flink.table.planner.plan.nodes.exec.utils.ExecNodeUtil;
 import org.apache.flink.table.types.logical.RowType;
+import tech.streamfusion.operator.ArrowBatch;
+import tech.streamfusion.operator.ArrowBatchTypeInformation;
+import tech.streamfusion.operator.NativeColumnarWindowRankOperator;
 
 /**
  * Wraps the native columnar window-rank operator (window Top-N / window deduplication) into the
@@ -39,6 +39,7 @@ public class NativeWindowRankExecNode extends ExecNodeBase<ArrowBatch>
   private final long windowMillis;
   private final long slideMillis;
   private final boolean cumulative;
+  private final long boundaryOffsetMillis;
   private final int[] keyTimestampPrecisions;
 
   public NativeWindowRankExecNode(
@@ -58,6 +59,7 @@ public class NativeWindowRankExecNode extends ExecNodeBase<ArrowBatch>
       long windowMillis,
       long slideMillis,
       boolean cumulative,
+      long boundaryOffsetMillis,
       int[] keyTimestampPrecisions) {
     super(
         ExecNodeContext.newNodeId(),
@@ -78,6 +80,7 @@ public class NativeWindowRankExecNode extends ExecNodeBase<ArrowBatch>
     this.windowMillis = windowMillis;
     this.slideMillis = slideMillis;
     this.cumulative = cumulative;
+    this.boundaryOffsetMillis = boundaryOffsetMillis;
     this.keyTimestampPrecisions = keyTimestampPrecisions;
   }
 
@@ -87,7 +90,6 @@ public class NativeWindowRankExecNode extends ExecNodeBase<ArrowBatch>
       PlannerBase planner, ExecNodeConfig config) {
     Transformation<ArrowBatch> input =
         (Transformation<ArrowBatch>) getInputEdges().get(0).translateToPlan(planner);
-    String timeZoneId = planner.getTableConfig().getLocalTimeZone().getId();
     int maxParallelism =
         FlinkKeyGroupUtils.maxParallelism(planner.getExecEnv(), input.getParallelism());
     OneInputTransformation<ArrowBatch, ArrowBatch> transformation =
@@ -104,7 +106,7 @@ public class NativeWindowRankExecNode extends ExecNodeBase<ArrowBatch>
                 sortNullsFirst,
                 limit,
                 outputRankNumber,
-                timeZoneId,
+                boundaryOffsetMillis,
                 proctime,
                 windowMillis,
                 slideMillis,

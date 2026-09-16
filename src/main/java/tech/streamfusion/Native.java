@@ -339,8 +339,8 @@ public final class Native {
   /**
    * Runs a batch the JVM exported through the stateless windowing table function, writing the
    * fanned-out batch (input columns, one copy per window for hopping/cumulative, plus appended
-   * {@code window_start}/{@code window_end}/{@code window_time}) into the consumer-allocated output C
-   * structs. Stateless — there is no handle to create or release.
+   * {@code window_start}/{@code window_end}/{@code window_time}) into the consumer-allocated output
+   * C structs. Stateless — there is no handle to create or release.
    *
    * @param inArrayAddress address of the input {@code ArrowArray} C struct
    * @param inSchemaAddress address of the input {@code ArrowSchema} C struct
@@ -353,6 +353,7 @@ public final class Native {
    * @param proctime whether to assign by the processing-time clock instead of the time column
    * @param proctimeNowMillis the processing-time clock (epoch millis) to assign every row by when
    *     {@code proctime} is set; ignored otherwise
+   * @param boundaryOffsetMillis fixed session-zone offset for LTZ, zero for plain timestamps
    */
   public static native void assignWindows(
       long inArrayAddress,
@@ -364,7 +365,8 @@ public final class Native {
       long slideMillis,
       boolean cumulative,
       boolean proctime,
-      long proctimeNowMillis);
+      long proctimeNowMillis,
+      long boundaryOffsetMillis);
 
   /**
    * Stateless GROUPING SETS / CUBE / ROLLUP expansion: fans each input row out to {@code

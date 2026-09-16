@@ -3,8 +3,6 @@ package tech.streamfusion;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import tech.streamfusion.planner.NativePlanner;
-import tech.streamfusion.planner.PhysicalPlanScan;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.ZoneId;
@@ -21,6 +19,8 @@ import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.apache.flink.types.Row;
 import org.apache.flink.util.CloseableIterator;
 import org.junit.jupiter.api.Test;
+import tech.streamfusion.planner.NativePlanner;
+import tech.streamfusion.planner.PhysicalPlanScan;
 
 /**
  * Flink's Parquet source transposes once into a native watermark assigner, columnar exchange, and
@@ -76,9 +76,9 @@ class FlinkColumnarWindowSqlHarnessTest {
     // nested cumulative windows — the whole local → shuffle → global path flows Arrow.
     NativeParity.assertParity(
         () -> readEnvironment(input, "TWO_PHASE"),
-        "SELECT k, window_start, window_end, SUM(v) AS total "
-            + "FROM TABLE(CUMULATE(TABLE t, DESCRIPTOR(rt), INTERVAL '1' SECOND, INTERVAL '3' SECOND)) "
-            + "GROUP BY k, window_start, window_end");
+        "SELECT k, window_start, window_end, SUM(v) AS total FROM TABLE(CUMULATE(TABLE t,"
+            + " DESCRIPTOR(rt), INTERVAL '1' SECOND, INTERVAL '3' SECOND)) GROUP BY k,"
+            + " window_start, window_end");
   }
 
   @Test
@@ -165,25 +165,27 @@ class FlinkColumnarWindowSqlHarnessTest {
 
   @Test
   void proctimeHopWindowRoutesToNative() throws Exception {
-    // A proctime HOP window (slide divides size): overlapping windows close on chained processing-time
+    // A proctime HOP window (slide divides size): overlapping windows close on chained
+    // processing-time
     // timers. Non-deterministic boundaries (see the CLAUDE.md note) — assert it routes and runs;
-    // NativeColumnarWindowAggregateOperatorTest pins the chained-timer correctness with a fixed clock.
+    // NativeColumnarWindowAggregateOperatorTest pins the chained-timer correctness with a fixed
+    // clock.
     NativeParity.assertRoutes(
         FlinkColumnarWindowSqlHarnessTest::proctimeEnvironment,
-        "SELECT window_start, window_end, k, SUM(v) AS s "
-            + "FROM TABLE(HOP(TABLE src, DESCRIPTOR(pt), INTERVAL '2' SECOND, INTERVAL '4' SECOND)) "
-            + "GROUP BY window_start, window_end, k");
+        "SELECT window_start, window_end, k, SUM(v) AS s FROM TABLE(HOP(TABLE src, DESCRIPTOR(pt),"
+            + " INTERVAL '2' SECOND, INTERVAL '4' SECOND)) GROUP BY window_start, window_end, k");
   }
 
   @Test
   void proctimeCumulateWindowRoutesToNative() throws Exception {
-    // A proctime CUMULATE window: nested windows sharing a start close on chained timers as the clock
+    // A proctime CUMULATE window: nested windows sharing a start close on chained timers as the
+    // clock
     // crosses each step. Non-deterministic boundaries — assert it routes and runs.
     NativeParity.assertRoutes(
         FlinkColumnarWindowSqlHarnessTest::proctimeEnvironment,
-        "SELECT window_start, window_end, k, SUM(v) AS s "
-            + "FROM TABLE(CUMULATE(TABLE src, DESCRIPTOR(pt), INTERVAL '1' SECOND, INTERVAL '3' SECOND)) "
-            + "GROUP BY window_start, window_end, k");
+        "SELECT window_start, window_end, k, SUM(v) AS s FROM TABLE(CUMULATE(TABLE src,"
+            + " DESCRIPTOR(pt), INTERVAL '1' SECOND, INTERVAL '3' SECOND)) GROUP BY window_start,"
+            + " window_end, k");
   }
 
   @Test
@@ -308,7 +310,7 @@ class FlinkColumnarWindowSqlHarnessTest {
 
   private static TableEnvironment proctimeKolkataEnvironment() {
     TableEnvironment tEnv = proctimeEnvironment();
-    tEnv.getConfig().setLocalTimeZone(ZoneId.of("Asia/Kolkata"));
+    tEnv.getConfig().setLocalTimeZone(ZoneId.of("GMT+05:30"));
     return tEnv;
   }
 

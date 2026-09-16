@@ -83,6 +83,7 @@ pub(crate) fn assign_windows(
     cumulative: bool,
     proctime_now_millis: Option<i64>,
     window_type: &DataType,
+    boundary_offset_millis: i64,
 ) -> Result<RecordBatch, DataFusionError> {
     let schema = input.schema();
     let row_kind_idx = schema
@@ -114,7 +115,11 @@ pub(crate) fn assign_windows(
             None => times.as_ref().unwrap().value(row),
         };
         windows_for(
-            time_millis,
+            time_millis
+                .checked_add(boundary_offset_millis)
+                .ok_or_else(|| {
+                    DataFusionError::Execution("Window local timestamp overflow".into())
+                })?,
             window_millis,
             slide_millis,
             cumulative,
@@ -134,7 +139,10 @@ pub(crate) fn assign_windows(
         fields.push(schema.field(i).as_ref().clone());
         columns.push(take(input.column(i), &indices, None)?);
     }
-    let window_time = ends.iter().map(|end| end.wrapping_sub(1)).collect();
+    let window_time = ends
+        .iter()
+        .map(|end| end.wrapping_sub(boundary_offset_millis).wrapping_sub(1))
+        .collect();
     for (name, values) in [
         ("window_start", starts),
         ("window_end", ends),
@@ -1333,18 +1341,23 @@ pub extern "system" fn Java_tech_streamfusion_Native_assignWindows<'local>(
     cumulative: jboolean,
     proctime: jboolean,
     proctime_now_millis: jlong,
+    boundary_offset_millis: jlong,
 ) {
     crate::bridge::jni_guard(env, move |env| {
-        let batch = import_record_batch(in_array_address, in_schema_address);
-        let result = assign_windows(
-            &batch,
-            time_col as usize,
-            window_millis,
-            slide_millis,
-            cumulative != 0,
-            (proctime != 0).then_some(proctime_now_millis),
-            &streamfusion_bridge::timestamp::timestamp_type(),
-        );
+        // Release the imported JVM buffers before installing a pending Java exception.
+        let result = {
+            let batch = import_record_batch(in_array_address, in_schema_address);
+            assign_windows(
+                &batch,
+                time_col as usize,
+                window_millis,
+                slide_millis,
+                cumulative != 0,
+                (proctime != 0).then_some(proctime_now_millis),
+                &streamfusion_bridge::timestamp::timestamp_type(),
+                boundary_offset_millis,
+            )
+        };
         match result {
             Ok(result) => export_record_batch(result, out_array_address, out_schema_address),
             Err(error) => {

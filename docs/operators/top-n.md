@@ -61,8 +61,14 @@ tested for routing/execution but not byte-compared to the host.
 
 The one shape gap is a rank that doesn't start at 1 — i.e. an `OFFSET` on the window rank. Both
 shapes also hold the [window-assignment zone gate](window-aggregate.md#matcher-declines): a
-`TIMESTAMP_LTZ` time attribute in a session zone with a post-1970 transition, or a fixed offset not
+`TIMESTAMP_LTZ` time attribute in a session zone with any historical or recurring transition, or a fixed offset not
 aligned with the window slide, falls back together with the windowing TVF that feeds them.
+
+Attached start/end columns are local wall-clock values, including inside native expressions.
+Window Top-N/dedup preserves these payload columns; it converts the watermark or processing-time
+threshold into their fixed-offset domain, firing at the last millisecond of the window. It does
+not apply another zone shift on output. Plain TIMESTAMP uses a zero offset. This also supports
+input from an aggregate whose boundaries are already rendered locally.
 
 The `-Dstreamfusion.operator.windowRank.enabled` switch covers both shapes; window dedup reuses the
 window-rank operator rather than getting its own switch — see [Configuration](../configuration.md).
