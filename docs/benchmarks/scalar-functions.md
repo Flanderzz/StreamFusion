@@ -65,6 +65,29 @@ as `pr44-flink-native-benchmarks.zip`. The repository keeps benchmark code and f
 tables; generated CSVs are not versioned. Controls are retained for checking the run, and are
 not subtracted from function times because their result types and lengths can differ.
 
+## Exact DECIMAL coverage diagnostic (2026-09-16)
+
+Measured against `ebe550c6` plus exact decimal ROUND/literal/integer-cast support, using JDK 17,
+UTC and the release `bench` profile with mimalloc. The selection was
+`DECIMAL_ROUND_POS,DECIMAL_ROUND_NEG,DECIMAL_ROUND_EXPAND,DECIMAL_TO_BIGINT`, with 2,000,000
+DECIMAL(38,9) source rows, two warmups, five measured trials and every eighth value NULL.
+Both transpose operators and native Calc substitutions were checked. The source-matched
+identity control ran in the same JVM before the functions.
+
+| Case | Flink (s) | Native (s) | Flink / native |
+|---|---:|---:|---:|
+| DECIMAL(38,9) identity control | 0.272 | 0.616 | 0.441x |
+| `ROUND(n, 2)` | 0.296 | 0.632 | 0.468x |
+| `ROUND(n, -3)` | 0.319 | 0.636 | 0.502x |
+| `ROUND(n, 12)` | 0.269 | 0.630 | 0.426x |
+| `CAST(n AS BIGINT)` | 0.311 | 0.523 | 0.596x |
+
+These isolated row-fed projections are slower natively, including the identity control. They
+remove expression blockers from larger native islands, including casts above AVG(DECIMAL),
+but this diagnostic does not establish an end-to-end speedup for those composed queries.
+Controls are not subtracted from timings. Extreme negative ROUND positions using the JVM
+upcall are covered by semantic tests rather than these timing cases.
+
 ## STARTSWITH
 
 `STARTSWITH_LITERAL`: `STARTSWITH(s, 'row:')`; `STARTSWITH_COLUMN`: `STARTSWITH(s, needle)`

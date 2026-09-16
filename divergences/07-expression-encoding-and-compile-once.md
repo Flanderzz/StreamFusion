@@ -78,6 +78,13 @@ Some functions diverge from the host only at precision/locale edges, not in valu
 transcendental math below. A true value divergence must be corrected before admission, as with the
 strict NULL propagation applied to `CONCAT` below.
 
+- **Exact decimal expressions:** ROUND uses Flink's resolved precision/scale and reports NULL
+  on rounding overflow, unlike DataFusion's different result inference and overflow errors.
+  Common literal positions use a prepared integer kernel; positions below -38 use Flink's
+  BigDecimal runtime through the existing columnar upcall to preserve extreme scale failures.
+  Decimal-to-integral casts truncate the fractional part and retain low bits, matching Java's
+  BigDecimal/primitive conversion rather than Arrow's checked integer conversion. Planner
+  decimal literals are also rounded HALF_UP to their declared scale before native encoding.
 - **Primitive floating comparisons:** The decoder selects an Arrow kernel using Java primitive
   operators for FLOAT/DOUBLE operands, including mixed integer/floating comparisons. DataFusion's
   total order distinguishes signed zero and orders NaN above finite values; those rules change

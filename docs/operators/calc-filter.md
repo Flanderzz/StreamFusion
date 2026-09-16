@@ -173,6 +173,10 @@ Native, unconditionally, with no host involvement:
   reproduces Flink's primitive Java cast semantics exactly: two's-complement wraparound for an
   integer source, and saturation to INT/BIGINT followed by low-bit narrowing for a float source. Arrow's own
   cast kernel can't do this — it errors on overflow instead of wrapping/saturating.
+- **DECIMAL → TINYINT/SMALLINT/INT/BIGINT** — truncate toward zero, then keep the destination's
+  low bits, matching Flink's BigDecimal `longValue()` followed by the Java integer cast.
+  Overflow wraps rather than saturating or producing NULL; NULL input remains NULL.
+  This also admits casts above DECIMAL aggregates such as `CAST(AVG(d) AS BIGINT)`.
 - **`CHAR`/`VARCHAR` → `VARCHAR`** when the target length is ≥ the source length — an unpadded
   no-op (e.g. the common `COALESCE(s, 'x')` pattern).
 - **Widening timestamp precision** within `TIMESTAMP` or within `TIMESTAMP_LTZ` — Arrow stores both
@@ -219,6 +223,29 @@ Boolean↔string casts and other pairs not listed above. Temporal casts now use 
 expressions; see [temporal functions](temporal-functions.md).
 
 ## Decimal arithmetic
+
+### Decimal ROUND and literals
+
+`ROUND(decimal_column[, literal_integer_scale])` runs with compatibility overrides disabled.
+It rounds ties away from zero (HALF_UP), preserves NULLs and Flink's inferred result precision,
+scale and nullability, and returns NULL when rounding exceeds the result precision. Negative
+positions round the integral part. A position at or above the source scale preserves its value
+and scale rather than appending zeroes. A NULL position returns a typed NULL.
+
+Positions from -38 upward use a prepared native decimal kernel. More negative literal positions
+use Flink's own decimal rounding through the existing columnar JVM upcall, so extreme BigDecimal
+scale/range exceptions match the host instead of being silently clamped to zero. These calls
+remain inside native Calc, but fall back when nested under AND/OR to preserve row short-circuiting.
+CASE can skip an unselected failing branch. Runtime scale columns and BIGINT scale arguments
+retain an explicit planner fallback; float/double ROUND keeps its existing compatibility gate.
+Flink 2.2.1 itself can fail when a runtime scale changes the returned DecimalData precision;
+the regression suite preserves the resulting binary-writer assertion failure through fallback.
+
+Decimal planner literals are rescaled HALF_UP to their declared scale before encoding their
+unscaled integer. A precision overflow becomes a typed decimal NULL. This handles constant-folded
+casts whose stored value retains more fractional digits than its resolved DECIMAL type.
+
+### Arithmetic operators
 
 **Native and byte-exact by default, with the boolean short-circuit restriction below.**
 

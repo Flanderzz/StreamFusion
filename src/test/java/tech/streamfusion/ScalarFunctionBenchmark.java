@@ -54,6 +54,10 @@ class ScalarFunctionBenchmark {
 
   private static final List<Query> SCALAR_FUNCTIONS =
       List.of(
+          new Query("DECIMAL_ROUND_POS", "tt_decimal", "ROUND(n, 2)", "DECIMAL(32,2)"),
+          new Query("DECIMAL_ROUND_NEG", "tt_decimal", "ROUND(n, -3)", "DECIMAL(30,0)"),
+          new Query("DECIMAL_ROUND_EXPAND", "tt_decimal", "ROUND(n, 12)", "DECIMAL(38,9)"),
+          new Query("DECIMAL_TO_BIGINT", "tt_decimal", "CAST(n AS BIGINT)", "BIGINT"),
           new Query("ASCII", "tt_ascii", "ASCII(s)", "INT"),
           new Query("CHR", "bigint", "CHR(n)", "STRING"),
           new Query("GREATEST", "numbers", "GREATEST(n, m, 17)"),
