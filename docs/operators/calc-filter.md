@@ -61,9 +61,11 @@ Flink may retain a shared mutable array between call sites until the row is emit
 column-at-a-time evaluation does not reproduce. Removing this gate is tracked in
 [the shared binary result issue](https://github.com/datafusion-contrib/StreamFusion/issues/116).
 
-The type bridge does not resolve the separate
-[builtin-name dispatch](https://github.com/datafusion-contrib/StreamFusion/issues/82) and
-[shared UDF lifecycle](https://github.com/datafusion-contrib/StreamFusion/issues/83) issues.
+Registered scalar functions take precedence over builtin names, including in nested expressions
+and filters. A function registered as `UPPER`, for example, invokes the registered Java function
+through the bridge. Unsupported signatures fall back using the same UDF admission rules.
+The [shared UDF lifecycle issue](https://github.com/datafusion-contrib/StreamFusion/issues/83)
+remains separate from type admission and function dispatch.
 Runtime parity tests cover mixed projections, repeated decimal calls, nullable precision-38
 values, scale normalization, overflow, typed NULL arguments, and 5,003-row inputs. C Data tests
 cover sliced inputs, output survival after input release, and reclamation of Arrow allocations.

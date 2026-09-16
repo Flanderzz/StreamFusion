@@ -629,6 +629,11 @@ final class RexExpression {
   }
 
   private boolean emitCall(RexCall call) {
+    if (call.getOperator()
+            instanceof org.apache.flink.table.planner.functions.bridging.BridgingSqlFunction function
+        && function.getDefinition() instanceof org.apache.flink.table.functions.ScalarFunction) {
+      return emitUdf(call);
+    }
     if (switch (call.getKind()) {
       case LESS_THAN, LESS_THAN_OR_EQUAL, GREATER_THAN, GREATER_THAN_OR_EQUAL ->
           call.getOperands().stream()
