@@ -38,6 +38,7 @@ mod dedup;
 mod exchange;
 mod expr;
 mod file_partition;
+mod first_n;
 mod flatten;
 mod flink_float;
 mod flink_functions;
@@ -66,10 +67,10 @@ mod window_join;
 pub(crate) use bridge::*;
 #[allow(unused_imports)]
 pub(crate) use {
-    aggregates::*, calc::*, dedup::*, exchange::*, expr::*, flatten::*, flink_key::*, group_agg::*,
-    interval_join::*, ipc::*, join_common::*, keyed_upsert::*, keys::*, memory::*, mini_batch::*,
-    normalizer::*, over_agg::*, rowtime::*, session_agg::*, sorter::*, state::*, temporal_join::*,
-    topn::*, updating_join::*, window_agg::*, window_join::*,
+    aggregates::*, calc::*, dedup::*, exchange::*, expr::*, first_n::*, flatten::*, flink_key::*,
+    group_agg::*, interval_join::*, ipc::*, join_common::*, keyed_upsert::*, keys::*, memory::*,
+    mini_batch::*, normalizer::*, over_agg::*, rowtime::*, session_agg::*, sorter::*, state::*,
+    temporal_join::*, topn::*, updating_join::*, window_agg::*, window_join::*,
 };
 
 pub mod bench;

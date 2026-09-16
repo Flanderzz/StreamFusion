@@ -21,6 +21,29 @@ public final class Native {
     verifyLoadedVersion();
   }
 
+  public static native long createFirstN(
+      int[] partitions, int[] precisions, int limit, boolean outputRank, long ttlMillis,
+      long nowMillis, byte[][] restoredPartitions, long memoryBudgetBytes);
+
+  public static native long createRocksDBFirstN(
+      int[] partitions, int[] precisions, int limit, boolean outputRank, long ttlMillis,
+      long nowMillis, long memoryBudgetBytes, String tableDirectory, int maxParallelism,
+      String optionsJson, long sharedResources, String[] sourceDirectories,
+      String[] sourceSnapshotTokens, int keyGroupStart, int keyGroupEnd, boolean aligned,
+      byte[][] restoredPartitions);
+
+  public static native void pushFirstN(
+      long handle, long inputArray, long inputSchema, long nowMillis,
+      long outputArray, long outputSchema);
+
+  public static native byte[][] snapshotFirstNPartitions(long handle, int maxParallelism);
+
+  public static native String[] checkpointRocksDBFirstN(long handle, String snapshotDirectory);
+
+  public static native long firstNStateBytes(long handle);
+
+  public static native void closeFirstN(long handle);
+
   private Native() {}
 
   /**

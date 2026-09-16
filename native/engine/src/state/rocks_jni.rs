@@ -624,6 +624,95 @@ pub extern "system" fn Java_tech_streamfusion_Native_closeRocksDBChangelogNormal
 }
 
 #[no_mangle]
+pub extern "system" fn Java_tech_streamfusion_Native_createRocksDBFirstN<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    partitions: JIntArray<'local>,
+    precisions: JIntArray<'local>,
+    limit: jint,
+    output_rank: jboolean,
+    ttl: jlong,
+    now: jlong,
+    budget: jlong,
+    table_directory: JString<'local>,
+    max_parallelism: jint,
+    options_json: JString<'local>,
+    shared_resources: jlong,
+    source_directories: JObjectArray<'local>,
+    source_snapshot_tokens: JObjectArray<'local>,
+    key_group_start: jint,
+    key_group_end: jint,
+    aligned: jboolean,
+    restored_partitions: JObjectArray<'local>,
+) -> jlong {
+    crate::bridge::jni_guard(env, move |mut env| {
+        let config = RocksStoreConfig {
+            table_dir: read_string(&mut env, &table_directory),
+            max_parallelism: max_parallelism as usize,
+            options_json: read_string(&mut env, &options_json),
+            ttl_ms: ttl.max(0),
+            shared_resources,
+        };
+        let result = open_store(
+            &mut env,
+            config,
+            FirstNCodec,
+            &source_directories,
+            &source_snapshot_tokens,
+            key_group_start,
+            key_group_end,
+            aligned,
+            now,
+        )
+        .and_then(|store| {
+            FirstN::new(
+                read_columns(&env, &partitions),
+                read_i32_array(&env, &precisions),
+                limit,
+                output_rank != 0,
+                ttl,
+                store,
+                budget,
+            )
+        })
+        .and_then(|mut ranker| {
+            ranker.rows.set_clock(now);
+            ranker.import_partitions(
+                &read_restored_partitions(&mut env, &restored_partitions),
+                now,
+            )?;
+            Ok(FirstNHandle::Rocks(ranker))
+        });
+        boxed_or_throw(&mut env, result)
+    })
+}
+
+#[no_mangle]
+pub extern "system" fn Java_tech_streamfusion_Native_checkpointRocksDBFirstN<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    snapshot_directory: JString<'local>,
+) -> jobjectArray {
+    crate::bridge::jni_guard(env, move |mut env| {
+        let path = read_string(&mut env, &snapshot_directory);
+        let FirstNHandle::Rocks(ranker) = (unsafe { &mut *(handle as *mut FirstNHandle) }) else {
+            panic!("first-N checkpoint requires RocksDB state");
+        };
+        match ranker.rows.checkpoint(&path) {
+            Ok(manifest) => manifest_array(&mut env, &manifest),
+            Err(e) => {
+                let _ = env.throw_new(
+                    "java/lang/RuntimeException",
+                    format!("first-N checkpoint failed: {e}"),
+                );
+                std::ptr::null_mut()
+            }
+        }
+    })
+}
+
+#[no_mangle]
 pub extern "system" fn Java_tech_streamfusion_Native_createRocksDBKeepLastDeduplicator<'local>(
     env: JNIEnv<'local>,
     _class: JClass<'local>,

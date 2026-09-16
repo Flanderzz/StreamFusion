@@ -9,6 +9,7 @@ import tech.streamfusion.operator.ArrowBatchSerializer;
 import tech.streamfusion.operator.EncodedPredicate;
 import tech.streamfusion.operator.NativeColumnarChangelogNormalizeOperator;
 import tech.streamfusion.operator.NativeColumnarDeduplicateOperator;
+import tech.streamfusion.operator.NativeColumnarFirstNOperator;
 import tech.streamfusion.operator.NativeColumnarGroupAggregateOperator;
 import tech.streamfusion.operator.NativeColumnarKeepLastDeduplicateOperator;
 import tech.streamfusion.operator.NativeColumnarSessionWindowAggregateOperator;
@@ -1626,6 +1627,40 @@ class RocksDBNativeStateBackendAllOperatorsTest {
         mode == 0 ? new int[] {0} : null, mode == 0 ? new int[] {-1} : null,
         true, false, -1, 0, 1);
     return new KeyedOneInputStreamOperatorTestHarness<>(operator, batch -> 0, Types.INT, 1, 1, 0);
+  }
+
+  @ParameterizedTest
+  @EnumSource(StateTransition.class)
+  void stateTransitionPreservesFirstNCounters(StateTransition transition) throws Exception {
+    OperatorSubtaskState snapshot;
+    try (BufferAllocator allocator = new RootAllocator(); var harness = firstNHarness()) {
+      transition.configureSource(harness);
+      harness.setup(new ArrowBatchSerializer());
+      harness.open();
+      harness.processElement(new StreamRecord<>(new ArrowBatch(RowDataArrowConverter.write(
+          List.of(GenericRowData.of(1L, 10L), GenericRowData.of(2L, 20L),
+              GenericRowData.of(2L, 21L)), TOPN_ROW, allocator))));
+      collectDedupless(harness);
+      snapshot = transition.snapshot(harness);
+    }
+    try (BufferAllocator allocator = new RootAllocator(); var harness = firstNHarness()) {
+      transition.configureRestore(harness);
+      harness.setup(new ArrowBatchSerializer());
+      harness.initializeState(snapshot);
+      harness.open();
+      harness.processElement(new StreamRecord<>(new ArrowBatch(RowDataArrowConverter.write(
+          List.of(GenericRowData.of(2L, 22L), GenericRowData.of(1L, 11L),
+              GenericRowData.of(1L, 12L), GenericRowData.of(3L, 30L)), TOPN_ROW, allocator))));
+      assertEquals(List.of(List.of(RowKind.INSERT, 1L, 11L), List.of(RowKind.INSERT, 3L, 30L)),
+          collectDedupless(harness));
+    }
+  }
+
+  private static KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch>
+      firstNHarness() throws Exception {
+    return new KeyedOneInputStreamOperatorTestHarness<>(
+        new NativeColumnarFirstNOperator(new int[] {0}, new int[] {-1}, 2, false, 0, MAX_PARALLELISM),
+        batch -> 0, Types.INT, MAX_PARALLELISM, 1, 0);
   }
 
   private static final RowType UPDATE_FAST_ROW =

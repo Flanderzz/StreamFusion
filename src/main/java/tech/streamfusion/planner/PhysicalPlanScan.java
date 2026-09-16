@@ -250,6 +250,11 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
             .reason(DeduplicateMatcher::unsupportedReason)
             .changelogSafe());
 
+    entries.add(
+        Substitution.of(StreamPhysicalRank.class, "topN", FirstNMatcher::substitute)
+            .matching(FirstNMatcher::matches)
+            .changelogSafe());
+
     // A streaming Top-N emits a changelog (it deletes a row when one is displaced), so it is exempt
     // from the insert-only guard. An insert-only input uses the append-only ranker; a changelog
     // input uses the retracting ranker (Flink's RetractableTopNFunction), which keeps the full buffer

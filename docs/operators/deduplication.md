@@ -52,3 +52,7 @@ firing — which is what lets the key emit a second "first" row once its earlier
 A rank-1 filter that is not time-ordered — i.e. ordered by a value column rather than rowtime or
 `PROCTIME()` — is not a fallback for Deduplication; it is a different query shape, handled by
 [Top-N](top-n.md).
+
+Processing-time ascending ranks beyond rank 1 are also handled by
+[Top-N's first-N counter](top-n.md#processing-time-first-n). They preserve arrival order and
+do not change this operator's rank-1 fast path.

@@ -58,3 +58,9 @@ confirmed and where we deliberately differ.
   at native↔host boundaries ([divergences/08](08-columnar-flow-transitions.md)),
   which is the source of our sub-1× row-fed operator numbers. The columnar-flow work
   is the path to parity there.
+- **Processing-time first-N uses Flink's counter state.** The consulted Arroyo worker and
+  planner do not provide this arrival-ordered rank operator. We follow Flink's
+  `AppendOnlyFirstNFunction`: one integer per partition, written only for an accepted arrival,
+  with the existing native keyed-state, TTL and checkpoint infrastructure. Output gathers
+  selected rows from the input Arrow batch; neither sorting nor retained payload rows are needed.
+  JNI ownership and exception handling follow the same Comet-derived bridge as the other operators.

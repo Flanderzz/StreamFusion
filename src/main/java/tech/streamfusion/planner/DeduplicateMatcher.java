@@ -92,6 +92,10 @@ final class DeduplicateMatcher {
   }
 
   static String unsupportedReason(StreamPhysicalRank rank) {
+    if (isProctime(rank) && !keepLast(rank)) {
+      return "time-ordered rank: needs insert-only proctime ASC with a constant rank range"
+          + " starting at 1 and ending at most 2147483647, and supported Arrow column types";
+    }
     return "deduplication: needs ROW_NUMBER() OVER (PARTITION BY … ORDER BY rowtime|proctime ASC|DESC)"
         + " = 1 (keep-first or keep-last) over an insert-only input";
   }

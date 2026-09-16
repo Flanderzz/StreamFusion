@@ -38,12 +38,44 @@ Also native: an `OFFSET` on any non-update-fast shape, a projected rank number, 
 insert-only and retracting changelog input. `RANK`/`DENSE_RANK` never reach the matcher at all —
 Flink itself rejects them in streaming, so that's parity, not a gap.
 
+## Processing-time first-N
+
+An insert-only `ROW_NUMBER() OVER (PARTITION BY key ORDER BY pt ASC)` filtered to
+`rn <= N`, where `pt` is a `PROCTIME()` attribute and N is a positive constant no greater
+than 2,147,483,647, runs as an arrival counter. The rank may be projected or omitted. Each key,
+including a NULL key, emits its first N rows in arrival order as inserts. No clock value is
+compared and no payload rows are retained: state is one integer counter per key, independent of N.
+The same column-type gates as value-ordered Top-N apply. The existing rank-1 deduplication
+path remains in use whenever Flink lowers the query to deduplication, including when it
+replaces a projected rank with the constant 1.
+
+This follows Flink's `AppendOnlyFirstNFunction`, including under mini-batch configuration.
+Accepted rows increment the counter and refresh its TTL; rejected rows do neither. After expiry,
+the next arrival starts again at rank 1 without retracting earlier output. Counters and TTL
+timestamps survive memory and RocksDB checkpoints, rescaling by Flink key group, and canonical
+savepoints across the two backends. The `streamfusion.operator.topN.enabled` switch controls
+this path; rank-1 dedup retains its own switch.
+
+The standalone row-fed release measurement on an Apple M1 Max used 1,000,000 rows,
+4,096 keys, N=2, projected rank, parallelism 1, two warmups and five alternating trials per
+engine. Median elapsed times were **0.378589 s Flink / 0.446913 s native (0.847x)**.
+The row source, both row/Arrow transposes and row blackhole sink remain in the measured path;
+the benchmark asserts the native first-N node and both transposes. This workload is slower
+natively. The feature is retained for coverage and composition inside native islands, where
+first-N previously forced a fallback, rather than as a standalone throughput improvement.
+
+Reproduce with `SF_BENCHMARK=true mvn -Pbench -pl :streamfusion-runtime -am test
+-Dtest=FirstNBenchmark -Dsurefire.failIfNoSpecifiedTests=false`.
+
 ## Gaps
 
 - A non-constant (variable) rank range.
 - A row type the native converter can't carry.
 - An **update-fast** rank paired with an `OFFSET` — every other update-fast shape, including plain
   `rn <= 1`, is native.
+- Time-ordered ranks beyond the existing rank-1 dedup forms and the processing-time first-N
+  form above: event-time N > 1, descending processing-time N > 1, updating first-N input,
+  first-N with an offset, or a first-N bound beyond the signed 32-bit counter range.
 
 [LIMIT](limit.md) reuses this same operator — a plain row-count limit is Top-N with a constant
 rank range starting at 1.
