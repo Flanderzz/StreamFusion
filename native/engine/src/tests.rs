@@ -1,5 +1,100 @@
 use super::*;
 
+fn group_timestamp_changelog(values: Vec<Option<i128>>, kinds: Vec<i8>) -> RecordBatch {
+    use streamfusion_bridge::timestamp::{timestamp_array, timestamp_type, TimestampValue};
+    RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("key0", DataType::Int64, false),
+            Field::new("value0", timestamp_type(), true),
+            Field::new(ROW_KIND_COLUMN, DataType::Int8, false),
+        ])),
+        vec![
+            Arc::new(Int64Array::from(vec![1; values.len()])),
+            Arc::new(timestamp_array(values.into_iter().map(|value| {
+                value.map(|nanos| TimestampValue::from_nanos(nanos).unwrap())
+            }))),
+            Arc::new(Int8Array::from(kinds)),
+        ],
+    )
+    .unwrap()
+}
+
+fn timestamp_values(batch: &RecordBatch, index: usize) -> Vec<Option<i128>> {
+    let column =
+        streamfusion_bridge::timestamp::TimestampColumn::try_new(batch.column(index).as_ref())
+            .unwrap();
+    (0..column.len())
+        .map(|row| (!column.is_null(row)).then(|| column.value(row).unwrap().nanos()))
+        .collect()
+}
+
+#[test]
+fn group_timestamp_extrema_restore_duplicates_and_full_millisecond_range() {
+    let low = i128::from(i64::MIN) * 1_000_000;
+    let high = i128::from(i64::MAX) * 1_000_000 + 999_999;
+    let mut agg = GroupAggregator::new(vec![1, 2], vec![7, 7], vec![1, 1], vec![0], true);
+    let out = agg
+        .update(
+            &group_timestamp_changelog(
+                vec![Some(high), Some(low), Some(low), Some(-1), None],
+                vec![0; 5],
+            ),
+            0,
+        )
+        .unwrap();
+    assert_eq!(timestamp_values(&out, 1).last(), Some(&Some(low)));
+    assert_eq!(timestamp_values(&out, 2).last(), Some(&Some(high)));
+    let snapshot = agg.snapshot();
+    let mut restored = GroupAggregator::restore(
+        vec![1, 2],
+        vec![7, 7],
+        vec![1, 1],
+        vec![0],
+        true,
+        &snapshot,
+        0,
+    );
+    let duplicate = group_timestamp_changelog(vec![Some(low)], vec![3]);
+    assert_eq!(restored.update(&duplicate, 0).unwrap().num_rows(), 0);
+    let changed = restored.update(&duplicate, 0).unwrap();
+    assert_eq!(row_kinds(&changed), vec![1, 2]);
+    assert_eq!(timestamp_values(&changed, 1), vec![Some(low), Some(-1)]);
+    let changed = restored
+        .update(&group_timestamp_changelog(vec![Some(high)], vec![3]), 0)
+        .unwrap();
+    assert_eq!(timestamp_values(&changed, 2), vec![Some(high), Some(-1)]);
+    let all_null = restored
+        .update(&group_timestamp_changelog(vec![Some(-1)], vec![3]), 0)
+        .unwrap();
+    assert_eq!(timestamp_values(&all_null, 1), vec![Some(-1), None]);
+    assert_eq!(timestamp_values(&all_null, 2), vec![Some(-1), None]);
+    let empty = restored
+        .update(&group_timestamp_changelog(vec![None], vec![3]), 0)
+        .unwrap();
+    assert_eq!(row_kinds(&empty), vec![3]);
+    assert_eq!(timestamp_values(&empty, 1), vec![None]);
+}
+
+#[test]
+fn group_timestamp_extrema_merge_partial_values_without_losing_nanos() {
+    let mut local =
+        LocalGroupAggregator::new(vec![1, 2], vec![7, 7], vec![1, 1], vec![], vec![0], vec![]);
+    let mut global = GroupAggregator::new(vec![1, 2], vec![7, 7], vec![1, 2], vec![0], true);
+    for (input, max) in [
+        (vec![Some(-1), Some(-999_999), None], -1),
+        (vec![Some(-999_998), Some(1), None], 1),
+    ] {
+        let len = input.len();
+        local
+            .update(&group_timestamp_changelog(input, vec![0; len]))
+            .unwrap();
+        let partial = local.flush();
+        let merged = global.update(&partial, 0).unwrap();
+        assert_eq!(timestamp_values(&merged, 1).last(), Some(&Some(-999_999)));
+        assert_eq!(timestamp_values(&merged, 2).last(), Some(&Some(max)));
+    }
+}
+
 #[test]
 fn binary_literal_encoding_preserves_all_bytes_empty_and_typed_null() {
     let schema = Arc::new(Schema::empty());
@@ -7460,6 +7555,64 @@ mod rocksdb_group_multisets {
             ],
         )
         .unwrap()
+    }
+
+    #[test]
+    fn group_timestamp_extrema_rocks_checkpoint_preserves_order_and_multiplicity() {
+        let make = || GroupAggregator::new(vec![1, 2], vec![7, 7], vec![1, 1], vec![0], true);
+        let codec = || {
+            GroupStateCodec::new(
+                vec![1, 2],
+                vec![streamfusion_bridge::timestamp::timestamp_type(); 2],
+                vec![1; 2],
+                vec![-1; 2],
+            )
+        };
+        let store = RocksGroupStore::create(store_config("timestamps", 0), codec()).unwrap();
+        let mut rocks = make().with_backend(store);
+        let mut memory = make();
+        let low = i128::from(i64::MIN) * 1_000_000;
+        let high = i128::from(i64::MAX) * 1_000_000 + 999_999;
+        let seed = group_timestamp_changelog(
+            vec![
+                Some(high),
+                Some(low),
+                Some(low),
+                Some(-999_999),
+                Some(-1),
+                None,
+            ],
+            vec![0; 6],
+        );
+        assert_parity(&mut rocks, &mut memory, &seed, 0);
+        let snapshot = snapshot_dir("timestamps");
+        let manifest = rocks.store_mut().checkpoint(&snapshot).unwrap();
+        drop(rocks);
+        let store = RocksGroupStore::open_merged(
+            store_config("timestamps-reopen", 0),
+            codec(),
+            &[(snapshot, manifest.snapshot_id)],
+            0..=127,
+            true,
+            0,
+        )
+        .unwrap();
+        let mut rocks = make().with_backend(store);
+        for value in [
+            Some(low),
+            Some(low),
+            Some(high),
+            Some(-999_999),
+            Some(-1),
+            None,
+        ] {
+            assert_parity(
+                &mut rocks,
+                &mut memory,
+                &group_timestamp_changelog(vec![value], vec![3]),
+                0,
+            );
+        }
     }
 
     // String MIN/MAX extremes: the companion element is the Utf8 state scalar.

@@ -59,6 +59,19 @@ event-time, by the processing-time clock instead of a rowtime column for proctim
 under the same **zero-offset** `TUMBLE`/`HOP`/`CUMULATE` restriction; both its event-time and
 proctime assignment paths are native.
 
+Standalone event-time TVFs accept both `TIMESTAMP(3)` and `TIMESTAMP_LTZ(3)` rowtime.
+Plain `TIMESTAMP` retains its wall-clock boundaries in every session zone, including downstream
+window Top-N and window deduplication. Native assignment preserves hidden sub-millisecond input
+fractions while emitting millisecond window boundaries; negative epochs and years 0001/9999 are
+covered by runtime SQL parity tests. TUMBLE and HOP with an explicit nonzero offset fall back,
+matching the existing aggregate and CUMULATE restriction.
+
+The TVF emits `window_start`/`window_end` as local wall-clock TIMESTAMP values, while
+`window_time` stays an instant for LTZ input. The fixed session-zone offset participates in
+assignment itself, so projections, filters, joins and ranking observe the same boundary values
+as Flink. Window rank and join translate their clock threshold into this local domain and close
+at `window_end - 1` millisecond, including processing-time timers and restored state.
+
 Assignment reads Flink's millisecond component without changing the original timestamp payload.
 In particular, `1969-12-31 23:59:59.999999999` belongs to the window before the epoch, just like
 `TimestampData.getMillisecond() == -1`. NULL event-time rows are dropped; processing-time assignment
@@ -73,6 +86,24 @@ closes windows on a chained processing-time timer (the same next-slide-boundary 
 above) rather than a watermark, under the same slide-divides-size constraint — see those operators'
 own pages for their admission conditions.
 
+### Standalone plain-TIMESTAMP measurement
+
+`PlainTimestampTvfBenchmark` measures a row source through standalone assignment to a rowwise
+blackhole sink, with both row/Arrow transposes verified in the native plan. On a local release
+build (`-Pbench`, mimalloc), 2 million input rows, parallelism 1, 4096 cyclic time samples, NULL
+every eighth row, two warm-ups and five interleaved measured runs per engine gave these medians:
+
+| Assignment | Flink seconds | Native seconds | Flink/native |
+| --- | ---: | ---: | ---: |
+| TUMBLE 10 s | 0.492 | 0.820 | 0.600x |
+| HOP 5 s / 10 s | 0.734 | 1.125 | 0.652x |
+| CUMULATE 5 s / 10 s | 0.614 | 0.958 | 0.640x |
+
+The plain timestamp session zone is America/Los_Angeles; the process runs with `TZ=UTC`.
+Sink rowtime insertion is disabled for both engines because the projection contains both the
+original rowtime and window_time. These standalone shapes are slower than Flink. The coverage
+enables columnar composition with downstream consumers; it is not a standalone throughput win.
+
 ## Matcher declines
 
 - Window not event-time `TUMBLE`/`HOP`/`CUMULATE` (zero offset) over a local-time-zone or plain
@@ -86,15 +117,18 @@ own pages for their admission conditions.
 - Legacy proctime `HOP` when the slide does not divide the size. Event-time legacy `HOP` supports
   non-dividing and gapped windows.
 - Fixed-grid windows (TVF **and** legacy, event-time or proctime) over `TIMESTAMP_LTZ` unless the
-  session zone has one fixed post-1970 offset that is an integral multiple of the window slide
+  session zone has one fixed offset for the entire timestamp range that is an integral multiple of the window slide
   (the max size for `CUMULATE`). Flink assigns and fires on a DST-aware local-time grid while the
   native operators bucket on the epoch grid; the two coincide exactly under that condition. The gate
   applies uniformly to every consumer of the assignment — the windowing TVF, single- and two-phase
   window aggregates, window join, and window Top-N/dedup — so a whole window pipeline falls back
   together rather than mixing host-assigned and native-assigned bounds.
-- `SESSION` windows (TVF and legacy) over `TIMESTAMP_LTZ` when the session zone has a post-1970
-  transition; changing offsets can alter gap connectivity and session merges. A fixed offset cancels
+- `SESSION` windows (TVF and legacy) over `TIMESTAMP_LTZ` when the session zone has any historical
+  or recurring transition; changing offsets can alter gap connectivity and session merges. A fixed offset cancels
   out of the gap arithmetic, so fixed-offset zones stay native with no alignment requirement.
+- Region zones with only pre-1970 transitions also fall back: their earlier offsets may change
+  assignment and firing for negative epochs. Use a fixed zone such as `GMT+05:30` when fixed-offset
+  semantics are intended; it is not equivalent to `Asia/Kolkata` over the full timestamp range.
 - Legacy processing-time `SESSION`.
 - Key type outside bigint/int/string/boolean/date/timestamp/decimal.
 - A value type/aggregate mismatch.
@@ -114,3 +148,20 @@ Flink applies no idle-state TTL to window operators — `table.exec.state.ttl` c
 windows are bounded by their own firing and eviction instead. Contrast with [`OVER`](over.md), which
 does run TTL natively across all three of its frame shapes. See [Configuration](../configuration.md)
 for the TTL flag surface.
+
+## Fixed-offset TVF benchmark
+
+`LtzWindowTvfBenchmark` compares standalone assignment with Flink 2.2.1 using a release native
+build (`-Pbench`), 2 million rows, parallelism 1, two warmups and five interleaved measured runs.
+The session zone is `GMT+08:00`; every eighth timestamp is NULL and the other rows cycle across
+negative and positive epochs with fractional milliseconds. Both row/Arrow transposes and the
+blackhole sink remain in the measured path.
+
+| Shape | Flink median | Native median | Flink / native |
+| --- | ---: | ---: | ---: |
+| TUMBLE 10s | 0.755124s | 0.935219s | 0.807x |
+| HOP 5s / 10s | 1.092357s | 1.323315s | 0.825x |
+| CUMULATE 5s / 10s | 0.921502s | 1.123302s | 0.820x |
+
+These standalone native plans are slower than Flink. The boundary correction is required for
+correctness of the existing native path; these results do not establish a performance benefit.

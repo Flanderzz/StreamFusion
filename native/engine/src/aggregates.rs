@@ -869,6 +869,7 @@ pub(crate) enum RunningAgg {
     // MIN/MAX over a string: likewise lives in the Extremes multiset; this only reports the result
     // type (the converter's Utf8). Never folded.
     MinMaxStr,
+    MinMaxTimestamp,
     // FIRST_VALUE / LAST_VALUE: hold the first / most-recent non-null value seen (None until one
     // arrives → emits NULL, matching Flink, which ignores nulls in these functions).
     FirstI64(Option<i64>),
@@ -1009,6 +1010,7 @@ impl RunningAgg {
             },
             // MIN/MAX(string) — the extreme lives in the multiset; result is the converter's Utf8.
             (1 | 2, DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View) => MinMaxStr,
+            (1 | 2, dt) if streamfusion_bridge::timestamp::is_timestamp(dt) => MinMaxTimestamp,
             (k, other) => panic!("unsupported OVER aggregate kind {k} for value type {other:?}"),
         }
     }
@@ -1137,6 +1139,11 @@ impl RunningAgg {
             // Never folded — MIN/MAX state is the Extremes multiset, which emits via MinMaxKey::scalar.
             MinMaxDecimal { precision, scale } => ScalarValue::Decimal128(None, *precision, *scale),
             MinMaxStr => ScalarValue::Utf8(None),
+            MinMaxTimestamp => {
+                ScalarValue::Struct(Arc::new(streamfusion_bridge::timestamp::timestamp_array([
+                    None,
+                ])))
+            }
             // The checkpointed state is the raw running sum (typed by state_type, wider than result);
             // the average itself is computed in GroupAggState::emit, where the count (non_null) lives.
             AvgInt { sum, .. } => ScalarValue::Int64(Some(*sum)),
@@ -1187,6 +1194,7 @@ impl RunningAgg {
             AvgDecimal { scale, .. } => DataType::Decimal128(38, (*scale).max(6)),
             MinMaxDecimal { precision, scale } => DataType::Decimal128(*precision, *scale),
             MinMaxStr => DataType::Utf8,
+            MinMaxTimestamp => streamfusion_bridge::timestamp::timestamp_type(),
             AvgInt { result, .. } | AvgFloat { result, .. } => result.clone(),
             AvgPartialSumInt(_) => DataType::Int64,
             AvgPartialSumFloat(_) => DataType::Float64,

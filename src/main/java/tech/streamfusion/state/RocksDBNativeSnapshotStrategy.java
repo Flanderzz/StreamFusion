@@ -1,28 +1,6 @@
 package tech.streamfusion.state;
 
 import java.io.DataInputStream;
-import java.util.Arrays;
-import org.apache.flink.core.fs.CloseableRegistry;
-import org.apache.flink.runtime.checkpoint.CheckpointOptions;
-import org.apache.flink.runtime.checkpoint.CheckpointType;
-import org.apache.flink.runtime.checkpoint.SnapshotType;
-import org.apache.flink.runtime.state.CheckpointStateOutputStream;
-import org.apache.flink.runtime.state.CheckpointStreamFactory;
-import org.apache.flink.runtime.state.CheckpointedStateScope;
-import org.apache.flink.runtime.state.IncrementalKeyedStateHandle.HandleAndLocalPath;
-import org.apache.flink.runtime.state.IncrementalRemoteKeyedStateHandle;
-import org.apache.flink.runtime.state.KeyGroupRange;
-import org.apache.flink.runtime.state.KeyedStateHandle;
-import org.apache.flink.runtime.state.PlaceholderStreamStateHandle;
-import org.apache.flink.runtime.state.SnapshotResources;
-import org.apache.flink.runtime.state.SnapshotResult;
-import org.apache.flink.runtime.state.SnapshotStrategy;
-import org.apache.flink.runtime.state.StreamStateHandle;
-import org.apache.flink.util.FileUtils;
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import java.io.DataOutputStream;
 import java.io.File;
 import java.io.IOException;
@@ -38,6 +16,24 @@ import java.util.Map;
 import java.util.SortedMap;
 import java.util.TreeMap;
 import java.util.UUID;
+import org.apache.flink.core.fs.CloseableRegistry;
+import org.apache.flink.runtime.checkpoint.CheckpointOptions;
+import org.apache.flink.runtime.checkpoint.SnapshotType;
+import org.apache.flink.runtime.state.CheckpointStateOutputStream;
+import org.apache.flink.runtime.state.CheckpointStreamFactory;
+import org.apache.flink.runtime.state.CheckpointedStateScope;
+import org.apache.flink.runtime.state.IncrementalKeyedStateHandle.HandleAndLocalPath;
+import org.apache.flink.runtime.state.IncrementalRemoteKeyedStateHandle;
+import org.apache.flink.runtime.state.KeyGroupRange;
+import org.apache.flink.runtime.state.KeyedStateHandle;
+import org.apache.flink.runtime.state.PlaceholderStreamStateHandle;
+import org.apache.flink.runtime.state.SnapshotResources;
+import org.apache.flink.runtime.state.SnapshotResult;
+import org.apache.flink.runtime.state.SnapshotStrategy;
+import org.apache.flink.runtime.state.StreamStateHandle;
+import org.apache.flink.util.FileUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Incremental snapshots of a native operator's local RocksDB table, mirroring the RocksDB
@@ -66,8 +62,9 @@ final class RocksDBNativeSnapshotStrategy
 
   /** A backend discriminator followed by the metadata format version. */
   private static final int META_MAGIC = 0x5346524b; // SFRK
-  /** Version 3: typed-store row bytes retain the lossless timestamp component layout. */
-  private static final int META_VERSION = 3;
+
+  /** Version 4: attached window state uses local boundaries and end-minus-one firing thresholds. */
+  private static final int META_VERSION = 4;
 
   private static final int COPY_BUFFER_BYTES = 64 * 1024;
 

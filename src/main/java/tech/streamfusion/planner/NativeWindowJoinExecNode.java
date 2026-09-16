@@ -1,8 +1,5 @@
 package tech.streamfusion.planner;
 
-import tech.streamfusion.operator.ArrowBatch;
-import tech.streamfusion.operator.ArrowBatchTypeInformation;
-import tech.streamfusion.operator.NativeWindowJoinOperator;
 import java.util.Arrays;
 import org.apache.flink.api.dag.Transformation;
 import org.apache.flink.configuration.ReadableConfig;
@@ -15,6 +12,9 @@ import org.apache.flink.table.planner.plan.nodes.exec.InputProperty;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.StreamExecNode;
 import org.apache.flink.table.planner.plan.nodes.exec.utils.ExecNodeUtil;
 import org.apache.flink.table.types.logical.RowType;
+import tech.streamfusion.operator.ArrowBatch;
+import tech.streamfusion.operator.ArrowBatchTypeInformation;
+import tech.streamfusion.operator.NativeWindowJoinOperator;
 
 /** Wraps the native columnar window-join operator into the plan; Arrow batches on both inputs and out. */
 public class NativeWindowJoinExecNode extends ExecNodeBase<ArrowBatch>
@@ -36,6 +36,7 @@ public class NativeWindowJoinExecNode extends ExecNodeBase<ArrowBatch>
   private final long windowMillis;
   private final long slideMillis;
   private final boolean cumulative;
+  private final long boundaryOffsetMillis;
   private final int[] keyTimestampPrecisions;
 
   public NativeWindowJoinExecNode(
@@ -58,6 +59,7 @@ public class NativeWindowJoinExecNode extends ExecNodeBase<ArrowBatch>
       long windowMillis,
       long slideMillis,
       boolean cumulative,
+      long boundaryOffsetMillis,
       int[] keyTimestampPrecisions) {
     super(
         ExecNodeContext.newNodeId(),
@@ -80,6 +82,7 @@ public class NativeWindowJoinExecNode extends ExecNodeBase<ArrowBatch>
     this.windowMillis = windowMillis;
     this.slideMillis = slideMillis;
     this.cumulative = cumulative;
+    this.boundaryOffsetMillis = boundaryOffsetMillis;
     this.keyTimestampPrecisions = keyTimestampPrecisions;
   }
 
@@ -114,7 +117,8 @@ public class NativeWindowJoinExecNode extends ExecNodeBase<ArrowBatch>
                 slideMillis,
                 cumulative,
                 keyTimestampPrecisions,
-                maxParallelism),
+                maxParallelism,
+                boundaryOffsetMillis),
             ArrowBatchTypeInformation.INSTANCE,
             left.getParallelism(),
             false);

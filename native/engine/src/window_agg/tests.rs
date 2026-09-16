@@ -1,4 +1,56 @@
 use super::*;
+
+#[test]
+fn fixed_offset_assignment_preserves_payload_and_instant_window_time() {
+    use streamfusion_bridge::timestamp::{timestamp_array, TimestampValue};
+    let values = vec![
+        Some(TimestampValue::new(-1, 999_999).unwrap()),
+        Some(TimestampValue::new(0, 123_456).unwrap()),
+        Some(TimestampValue::from_millis(253_402_300_790_000)),
+        None,
+    ];
+    let input = RecordBatch::try_from_iter(vec![(
+        "ts",
+        Arc::new(timestamp_array(values.clone())) as ArrayRef,
+    )])
+    .unwrap();
+    for offset in [0, 28_800_000, -19_800_000] {
+        for (slide, cumulative) in [(10_000, false), (5_000, false), (5_000, true)] {
+            let assigned = assign_windows(
+                &input,
+                0,
+                10_000,
+                slide,
+                cumulative,
+                None,
+                &streamfusion_bridge::timestamp::timestamp_type(),
+                offset,
+            )
+            .unwrap();
+            let payload = TimestampColumn::try_new(assigned.column(0).as_ref()).unwrap();
+            let starts = TimestampColumn::try_new(assigned.column(1).as_ref())
+                .unwrap()
+                .to_millis()
+                .unwrap();
+            let ends = TimestampColumn::try_new(assigned.column(2).as_ref())
+                .unwrap()
+                .to_millis()
+                .unwrap();
+            let times = TimestampColumn::try_new(assigned.column(3).as_ref())
+                .unwrap()
+                .to_millis()
+                .unwrap();
+            for row in 0..assigned.num_rows() {
+                let value = payload.value(row).unwrap();
+                assert!(values.contains(&Some(value)));
+                assert!(starts.value(row) <= value.millis() + offset);
+                assert!(value.millis() + offset < ends.value(row));
+                assert_eq!(times.value(row), ends.value(row) - offset - 1);
+                assert_eq!(starts.value(row) % slide, 0);
+            }
+        }
+    }
+}
 use arrow::array::TimestampSecondArray;
 use arrow::datatypes::TimeUnit;
 
@@ -50,6 +102,7 @@ fn assignment_reads_all_layouts_and_keeps_payload_and_changelog() {
                 cumulative,
                 None,
                 &DataType::Timestamp(TimeUnit::Nanosecond, None),
+                0,
             )
             .unwrap();
             let expected_indices = if cumulative || size == step {
@@ -98,7 +151,7 @@ fn boundary_output_layout_is_explicit_and_never_wraps() {
         TimeUnit::Nanosecond,
     ] {
         let ty = DataType::Timestamp(unit, None);
-        let out = assign_windows(&batch, 1, 1000, 1000, false, None, &ty).unwrap();
+        let out = assign_windows(&batch, 1, 1000, 1000, false, None, &ty, 0).unwrap();
         assert_eq!(out.column(2).data_type(), &ty);
         assert_eq!(
             TimestampColumn::try_new(out.column(4).as_ref())
@@ -116,7 +169,8 @@ fn boundary_output_layout_is_explicit_and_never_wraps() {
         1000,
         false,
         None,
-        &DataType::Timestamp(TimeUnit::Second, None)
+        &DataType::Timestamp(TimeUnit::Second, None),
+        0
     )
     .is_err());
     let wide = input(Arc::new(TimestampMillisecondArray::from(
@@ -129,7 +183,8 @@ fn boundary_output_layout_is_explicit_and_never_wraps() {
         1000,
         false,
         None,
-        &DataType::Timestamp(TimeUnit::Nanosecond, None)
+        &DataType::Timestamp(TimeUnit::Nanosecond, None),
+        0
     )
     .is_err());
 }
@@ -145,6 +200,7 @@ fn proctime_assignment_ignores_null_payload_time() {
         false,
         Some(-1),
         &DataType::Timestamp(TimeUnit::Nanosecond, None),
+        0,
     )
     .unwrap();
     assert_eq!(out.num_rows(), 3);
@@ -176,6 +232,7 @@ fn tvf_output_survives_downstream_window_join_restore() {
         false,
         None,
         &DataType::Timestamp(TimeUnit::Nanosecond, None),
+        0,
     )
     .unwrap();
     // Drop only the changelog sidecar, as the operator wrapper does before joining.

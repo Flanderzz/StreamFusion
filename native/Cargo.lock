@@ -3640,6 +3640,7 @@ version = "0.1.0-rc3"
 dependencies = [
  "ahash",
  "arrow 58.3.0",
+ "arrow-ord 58.3.0",
  "base64 0.22.1",
  "bytes",
  "chrono",

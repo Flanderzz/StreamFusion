@@ -1,5 +1,6 @@
 package tech.streamfusion;
 
+import java.math.BigDecimal;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -12,10 +13,13 @@ import java.util.stream.Stream;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.table.annotation.DataTypeHint;
+import org.apache.flink.table.annotation.FunctionHint;
 import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.api.Schema;
 import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
+import org.apache.flink.table.functions.ScalarFunction;
 import org.apache.flink.table.types.DataType;
 import org.apache.flink.types.Row;
 import org.junit.jupiter.api.Test;
@@ -54,6 +58,15 @@ class ScalarFunctionBenchmark {
 
   private static final List<Query> SCALAR_FUNCTIONS =
       List.of(
+          new Query("IFNULL_STRING", "text", "IFNULL(s, 'missing')", "STRING"),
+          new Query("IFNULL_BIGINT", "bigint", "IFNULL(n, CAST(-1 AS BIGINT))", "BIGINT"),
+          new Query(
+              "IFNULL_DECIMAL", "tt_decimal", "IFNULL(n, CAST(0 AS DECIMAL(38,9)))", "DECIMAL(38,9)"),
+          new Query("STRING_TO_BOOLEAN", "boolean_text", "CAST(s AS BOOLEAN)", "BOOLEAN"),
+          new Query("DECIMAL_ROUND_POS", "tt_decimal", "ROUND(n, 2)", "DECIMAL(32,2)"),
+          new Query("DECIMAL_ROUND_NEG", "tt_decimal", "ROUND(n, -3)", "DECIMAL(30,0)"),
+          new Query("DECIMAL_ROUND_EXPAND", "tt_decimal", "ROUND(n, 12)", "DECIMAL(38,9)"),
+          new Query("DECIMAL_TO_BIGINT", "tt_decimal", "CAST(n AS BIGINT)", "BIGINT"),
           new Query("ASCII", "tt_ascii", "ASCII(s)", "INT"),
           new Query("CHR", "bigint", "CHR(n)", "STRING"),
           new Query("GREATEST", "numbers", "GREATEST(n, m, 17)"),
@@ -77,6 +90,9 @@ class ScalarFunctionBenchmark {
           new Query("ENDSWITH_COLUMN", "search_needle", "ENDSWITH(s, needle)", "BOOLEAN"),
           new Query("INSTR_LITERAL", "search", "INSTR(s, ':match')", "INT"),
           new Query("INSTR_COLUMN", "search_needle", "INSTR(s, needle)", "INT"),
+          new Query("INSTR3_COLUMN", "search_needle_start", "INSTR(s, needle, start_pos)", "INT"),
+          new Query("INSTR4_FORWARD", "search", "INSTR(s, 'x', 1, 3)", "INT"),
+          new Query("INSTR4_REVERSE", "search", "INSTR(s, 'x', -1, 3)", "INT"),
           new Query("LOCATE2_LITERAL", "search", "LOCATE(':match', s)", "INT"),
           new Query("LOCATE2_COLUMN", "search_needle", "LOCATE(needle, s)", "INT"),
           new Query("LOCATE3_LITERAL", "search_start", "LOCATE(':match', s, start_pos)", "INT"),
@@ -111,6 +127,8 @@ class ScalarFunctionBenchmark {
               ENCODING_FUNCTIONS,
               TextTimeFunctions.QUERIES,
               List.of(
+                  new Query("UDF_DECIMAL", "tt_decimal", "decimal_identity(n)", "DECIMAL(38,9)"),
+                  new Query("UDF_BINARY", "tt_bytes", "binary_identity(b)", "BYTES"),
                   new Query("SHA1", "tt_text", "SHA1(s)"),
                   new Query("JSON_STRING_TEXT", "tt_text", "JSON_STRING(s)"),
                   new Query("JSON_STRING_BOOLEAN", "tt_boolean", "JSON_STRING(b)"),
@@ -376,13 +394,19 @@ class ScalarFunctionBenchmark {
 
   private static TableEnvironment environment(String input) {
     if (input.startsWith("tt_")) {
-      return TextTimeBenchmarkInputs.environment(input, ROWS, BYTES, UNICODE, NULL_EVERY);
+      TableEnvironment tables =
+          TextTimeBenchmarkInputs.environment(input, ROWS, BYTES, UNICODE, NULL_EVERY);
+      tables.createTemporarySystemFunction("decimal_identity", DecimalIdentity.class);
+      tables.createTemporarySystemFunction("binary_identity", BinaryIdentity.class);
+      return tables;
     }
     StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
     env.setParallelism(1);
     StreamTableEnvironment tables = StreamTableEnvironment.create(env);
     String[] text =
-        UNICODE
+        input.equals("boolean_text")
+            ? new String[] {"true", "FALSE", "t", "0", "yes", "n"}
+            : UNICODE
             ? new String[] {
               payload(" \u4e2dAbC \ud83d\ude00dEf "), payload(" \u00e9dEf \ud83d\ude42AbC ")
             }
@@ -511,11 +535,26 @@ class ScalarFunctionBenchmark {
                               ? null
                               : input.equals("encoded")
                                   ? encoded
-                                  : input.equals("hex") ? hex[(int) (i % 2)] : text[(int) (i % 2)]))
+                                  : input.equals("hex")
+                                      ? hex[(int) (i % 2)]
+                                      : text[(int) (i % text.length)]))
               .returns(Types.ROW_NAMED(new String[] {"s"}, Types.STRING)),
           Schema.newBuilder().column("s", DataTypes.STRING()).build());
     }
     return tables;
+  }
+
+  @FunctionHint(input = @DataTypeHint("DECIMAL(38,9)"), output = @DataTypeHint("DECIMAL(38,9)"))
+  public static class DecimalIdentity extends ScalarFunction {
+    public BigDecimal eval(BigDecimal value) {
+      return value;
+    }
+  }
+
+  public static class BinaryIdentity extends ScalarFunction {
+    public byte[] eval(byte[] value) {
+      return value;
+    }
   }
 
   private static final class TextTimeFunctions {

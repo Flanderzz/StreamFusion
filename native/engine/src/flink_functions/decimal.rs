@@ -69,6 +69,107 @@ impl ScalarUDFImpl for DecimalCast {
     }
 }
 
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub(crate) struct DecimalRound {
+    precision: u8,
+    scale: i8,
+    signature: Signature,
+}
+
+impl DecimalRound {
+    pub(crate) fn new(precision: u8, scale: i8) -> Self {
+        Self {
+            precision,
+            scale,
+            signature: Signature::any(2, Volatility::Immutable),
+        }
+    }
+}
+
+impl ScalarUDFImpl for DecimalRound {
+    fn name(&self) -> &str {
+        "flink_decimal_round"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, args: &[DataType]) -> Result<DataType> {
+        let [input, _] = args else {
+            return exec_err!("decimal ROUND requires two arguments");
+        };
+        DecimalRescale::new(source_scale(input)? as i16, self.precision, self.scale)?;
+        Ok(DataType::Decimal128(self.precision, self.scale))
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
+        let [source, round] = args.args.as_slice() else {
+            return exec_err!("decimal ROUND requires two arguments");
+        };
+        check_lengths(&args.args, args.number_rows)?;
+        let round = match round {
+            ColumnarValue::Scalar(ScalarValue::Int8(value)) => value.map(i32::from),
+            ColumnarValue::Scalar(ScalarValue::Int16(value)) => value.map(i32::from),
+            ColumnarValue::Scalar(ScalarValue::Int32(value)) => *value,
+            ColumnarValue::Scalar(ScalarValue::Null) => None,
+            _ => return exec_err!("decimal ROUND requires a literal INT scale"),
+        };
+        let source_scale = source_scale(&source.data_type())?;
+        let input = DecimalInput::new(source)?;
+        let identity = DecimalRescale::new(source_scale as i16, self.precision, self.scale)?;
+        let limit = 10_i128.pow(self.precision as u32);
+        // Negative positions outside this bound use Flink's own BigDecimal runtime.
+        if round.is_some_and(|round| round < -38) {
+            return exec_err!("decimal ROUND scale below -38 requires the host-exact path");
+        }
+        let factors = round
+            .filter(|round| *round < source_scale as i32)
+            .map(|round| {
+                (
+                    10_i128.checked_pow((source_scale as i32 - round) as u32),
+                    10_i128.checked_pow((self.scale as i32 - round) as u32),
+                )
+            });
+        let evaluate = |row| {
+            let value = input.value(row)?;
+            let round = round?;
+            if round >= source_scale as i32 {
+                return identity.narrow(value);
+            }
+            let (divisor, multiplier) = factors?;
+            let Some(divisor) = divisor else {
+                return Some(0);
+            };
+            let quotient = value / divisor;
+            let rounded = quotient
+                + if (value % divisor).abs() >= divisor / 2 {
+                    value.signum()
+                } else {
+                    0
+                };
+            let output = if rounded == 0 {
+                0
+            } else {
+                rounded.checked_mul(multiplier?)?
+            };
+            (output > -limit && output < limit).then_some(output)
+        };
+        if matches!(source, ColumnarValue::Scalar(_)) {
+            return Ok(ColumnarValue::Scalar(ScalarValue::Decimal128(
+                evaluate(0),
+                self.precision,
+                self.scale,
+            )));
+        }
+        let output = (0..args.number_rows)
+            .map(evaluate)
+            .collect::<Decimal128Array>()
+            .with_precision_and_scale(self.precision, self.scale)?;
+        Ok(ColumnarValue::Array(Arc::new(output)))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum DecimalOp {
     Add,
@@ -294,6 +395,82 @@ mod tests {
             return_field: Arc::new(Field::new("out", output, true)),
             config_options: Arc::new(ConfigOptions::new()),
         })
+    }
+
+    #[test]
+    fn round_preserves_half_up_ties_nulls_and_decimal_metadata() {
+        let values = Decimal128Array::from(vec![Some(1235), Some(-1235), None, Some(9999999)])
+            .with_precision_and_scale(7, 3)
+            .unwrap()
+            .slice(1, 3);
+        let function = DecimalRound::new(7, 2);
+        let output = invoke(
+            &function,
+            vec![
+                ColumnarValue::Array(Arc::new(values)),
+                ColumnarValue::Scalar(ScalarValue::Int32(Some(2))),
+            ],
+            3,
+        )
+        .unwrap();
+        let ColumnarValue::Array(output) = output else {
+            panic!("expected array")
+        };
+        let expected = Decimal128Array::from(vec![Some(-124), None, Some(1000000)])
+            .with_precision_and_scale(7, 2)
+            .unwrap();
+        assert_eq!(output.as_ref(), &expected);
+    }
+
+    #[test]
+    fn round_negative_positions_check_precision_after_carry() {
+        let function = DecimalRound::new(38, 0);
+        for (value, round, expected) in [
+            (10_i128.pow(38) - 1, -1, None),
+            (-10_i128.pow(38) + 1, -1, None),
+            (15, -1, Some(20)),
+            (-15, -1, Some(-20)),
+            (49, -2, Some(0)),
+            (50, -2, Some(100)),
+        ] {
+            let output = invoke(
+                &function,
+                vec![
+                    ColumnarValue::Scalar(ScalarValue::Decimal128(Some(value), 38, 0)),
+                    ColumnarValue::Scalar(ScalarValue::Int32(Some(round))),
+                ],
+                128,
+            )
+            .unwrap();
+            let ColumnarValue::Scalar(output) = output else {
+                panic!("expected scalar")
+            };
+            assert_eq!(output, ScalarValue::Decimal128(expected, 38, 0));
+        }
+    }
+
+    #[test]
+    fn round_null_and_scale_expansion_preserve_the_declared_type() {
+        let function = DecimalRound::new(7, 3);
+        for (round, expected) in [
+            (None, None),
+            (Some(6), Some(-1235)),
+            (Some(i32::MAX), Some(-1235)),
+        ] {
+            let output = invoke(
+                &function,
+                vec![
+                    ColumnarValue::Scalar(ScalarValue::Decimal128(Some(-1235), 7, 3)),
+                    ColumnarValue::Scalar(ScalarValue::Int32(round)),
+                ],
+                128,
+            )
+            .unwrap();
+            let ColumnarValue::Scalar(output) = output else {
+                panic!("expected scalar")
+            };
+            assert_eq!(output, ScalarValue::Decimal128(expected, 7, 3));
+        }
     }
 
     #[test]

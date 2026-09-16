@@ -1,7 +1,6 @@
 package tech.streamfusion.planner;
 
 import java.time.Instant;
-import java.time.zone.ZoneOffsetTransition;
 import java.time.zone.ZoneRules;
 import org.apache.calcite.rel.RelNode;
 import org.apache.flink.table.planner.plan.logical.CumulativeWindowSpec;
@@ -15,12 +14,11 @@ import org.apache.flink.table.types.logical.LogicalTypeRoot;
 /**
  * Admission gate for windows over a TIMESTAMP_LTZ time attribute (event-time or proctime). Flink
  * shifts such timestamps onto the session-zone timeline before assigning, merging, and firing
- * windows, while the native operators work on the raw epoch timeline and only render boundaries
- * through the zone at the island edge. The two agree exactly when the zone keeps one fixed offset
- * after 1970 and, for fixed-grid windows, that offset is a whole number of grids — then the shifted
- * grid and the epoch grid are the same instants. A zone with later transitions (DST) moves records
- * relative to one another across a transition, changing fixed-grid membership and session
- * connectivity, so those decline to Flink.
+ * windows. Native aggregates compute on the epoch grid and render local boundaries; attached-window
+ * consumers retain those local bounds and shift their firing threshold. These agree when the zone
+ * keeps one fixed offset for the full timestamp range and, for fixed-grid windows, that offset is a
+ * whole number of grids. Historical or recurring transitions change fixed-grid membership and
+ * session connectivity, so those zones decline to Flink.
  */
 final class WindowZoneGate {
 
@@ -34,15 +32,15 @@ final class WindowZoneGate {
     ZoneRules rules = ShortcutUtils.unwrapTableConfig(node).getLocalTimeZone().getRules();
     WindowSpec spec = windowing.getWindow();
     if (spec instanceof SessionWindowSpec) {
-      return fixedAfterEpoch(rules)
+      return rules.isFixedOffset()
           ? null
-          : "TIMESTAMP_LTZ session windows require the session zone to remain fixed after 1970";
+          : "TIMESTAMP_LTZ session windows require a fixed offset for the full timestamp range";
     }
-    if (fixedAfterEpoch(rules) && offsetAligns(rules, gridMillis(spec, windowing))) {
+    if (rules.isFixedOffset() && offsetAligns(rules, gridMillis(spec, windowing))) {
       return null;
     }
     return "TIMESTAMP_LTZ windows require the session-zone offset to align with the window slide"
-        + " (the max size for CUMULATE) and the zone to remain fixed after 1970";
+        + " (the max size for CUMULATE) and a fixed offset for the full timestamp range";
   }
 
   static boolean admits(RelNode node, WindowingStrategy windowing) {
@@ -63,13 +61,15 @@ final class WindowZoneGate {
         : WindowAggregateMatcher.windowSlide(windowing);
   }
 
-  static boolean fixedAfterEpoch(ZoneRules rules) {
-    for (ZoneOffsetTransition transition : rules.getTransitions()) {
-      if (!transition.getInstant().isBefore(Instant.EPOCH)) {
-        return false;
-      }
-    }
-    return rules.getTransitionRules().isEmpty();
+  static long boundaryOffsetMillis(RelNode node, WindowingStrategy windowing) {
+    return isLtz(windowing.getTimeAttributeType())
+        ? ShortcutUtils.unwrapTableConfig(node)
+                .getLocalTimeZone()
+                .getRules()
+                .getOffset(Instant.EPOCH)
+                .getTotalSeconds()
+            * 1000L
+        : 0;
   }
 
   static boolean offsetAligns(ZoneRules rules, long gridMillis) {

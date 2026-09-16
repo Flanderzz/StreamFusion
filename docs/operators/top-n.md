@@ -59,10 +59,21 @@ processing-time-timer model as the [window aggregate](window-aggregate.md) — t
 the size. As with the other proctime-driven window operators, this is non-deterministic, so it's
 tested for routing/execution but not byte-compared to the host.
 
+For plain `TIMESTAMP` rowtime, window start/end remain wall-clock values regardless of the session
+zone. A window dedup keep-last replaces a candidate with an equal rowtime; keep-first and general
+Top-N preserve the earlier arrival on a tie. This plan-level tie policy is reapplied after memory
+or RocksDB restoration, without changing the retained row or snapshot layout.
+
 The one shape gap is a rank that doesn't start at 1 — i.e. an `OFFSET` on the window rank. Both
 shapes also hold the [window-assignment zone gate](window-aggregate.md#matcher-declines): a
-`TIMESTAMP_LTZ` time attribute in a session zone with a post-1970 transition, or a fixed offset not
+`TIMESTAMP_LTZ` time attribute in a session zone with any historical or recurring transition, or a fixed offset not
 aligned with the window slide, falls back together with the windowing TVF that feeds them.
+
+Attached start/end columns are local wall-clock values, including inside native expressions.
+Window Top-N/dedup preserves these payload columns; it converts the watermark or processing-time
+threshold into their fixed-offset domain, firing at the last millisecond of the window. It does
+not apply another zone shift on output. Plain TIMESTAMP uses a zero offset. This also supports
+input from an aggregate whose boundaries are already rendered locally.
 
 The `-Dstreamfusion.operator.windowRank.enabled` switch covers both shapes; window dedup reuses the
 window-rank operator rather than getting its own switch — see [Configuration](../configuration.md).

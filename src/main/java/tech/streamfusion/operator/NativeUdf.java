@@ -21,12 +21,14 @@ import org.apache.arrow.vector.IntVector;
 import org.apache.arrow.vector.NullVector;
 import org.apache.arrow.vector.SmallIntVector;
 import org.apache.arrow.vector.TinyIntVector;
+import org.apache.arrow.vector.VarBinaryVector;
 import org.apache.arrow.vector.VarCharVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.arrow.vector.types.pojo.Schema;
+import org.apache.flink.table.data.DecimalData;
 import org.apache.flink.table.data.binary.BinaryStringData;
 import org.apache.flink.table.functions.FunctionContext;
 import org.apache.flink.table.functions.ScalarFunction;
@@ -68,6 +70,7 @@ public final class NativeUdf {
   public static final int TYPE_TIMESTAMP_DATA = 11;
   public static final int TYPE_INTERVAL_MONTHS = 12;
   public static final int TYPE_INTERVAL_MILLIS = 13;
+  public static final int TYPE_BINARY = 14;
 
   // DECIMAL(p, s) argument/result values, marshalled as BigDecimal. The precision and scale ride in
   // the code itself so one int carries the full type: 1000 + p*100 + s. Used by the host-exact
@@ -384,6 +387,8 @@ public final class NativeUdf {
     switch (code) {
       case TYPE_STRING:
         return ArrowType.Utf8.INSTANCE;
+      case TYPE_BINARY:
+        return ArrowType.Binary.INSTANCE;
       case TYPE_LONG:
       case TYPE_INTERVAL_MILLIS:
         return new ArrowType.Int(64, true);
@@ -435,6 +440,16 @@ public final class NativeUdf {
                   asStringData
                       ? BinaryStringData.fromBytes(v.get(r))
                       : new String(v.get(r), StandardCharsets.UTF_8);
+            }
+          }
+          return out;
+        }
+      case TYPE_BINARY:
+        {
+          VarBinaryVector v = (VarBinaryVector) vector;
+          for (int r = 0; r < rows; r++) {
+            if (!v.isNull(r)) {
+              out[r] = v.get(r);
             }
           }
           return out;
@@ -605,6 +620,9 @@ public final class NativeUdf {
                     ? ((BinaryStringData) value).toBytes()
                     : value.toString().getBytes(StandardCharsets.UTF_8));
         break;
+      case TYPE_BINARY:
+        ((VarBinaryVector) vector).setSafe(row, (byte[]) value);
+        break;
       case TYPE_LONG:
       case TYPE_INTERVAL_MILLIS:
         ((BigIntVector) vector).setSafe(row, ((Number) value).longValue());
@@ -637,7 +655,14 @@ public final class NativeUdf {
         break;
       default:
         if (code >= DECIMAL_BASE) {
-          ((org.apache.arrow.vector.DecimalVector) vector).setSafe(row, (BigDecimal) value);
+          DecimalData decimal =
+              DecimalData.fromBigDecimal(
+                  (BigDecimal) value, (code - DECIMAL_BASE) / 100, (code - DECIMAL_BASE) % 100);
+          if (decimal == null) {
+            vector.setNull(row);
+          } else {
+            ((org.apache.arrow.vector.DecimalVector) vector).setSafe(row, decimal.toBigDecimal());
+          }
           break;
         }
         throw new IllegalArgumentException("unsupported UDF type code " + code);
