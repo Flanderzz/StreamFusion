@@ -281,7 +281,25 @@ suffix; an empty suffix matches every non-NULL string. Wildcards have no special
 
 ### INSTR
 
-Two character arguments only. Returns the first match as a 1-based Unicode codepoint position, or zero if absent. An empty needle returns 1; any NULL returns NULL. Three/four-argument INSTR falls back.
+`INSTR(string, needle[, start[, occurrence]])` supports two character strings and optional
+TINYINT/SMALLINT/INT start and occurrence arguments, including runtime columns. Positions
+are 1-based Unicode codepoints; missing matches return zero. A positive start searches
+forward, a negative start searches backward from the end, and zero returns zero. Matches
+can overlap. Defaults are start 1 and occurrence 1.
+
+Any NULL argument returns NULL before validating start/occurrence. A non-positive occurrence
+fails the query, even when start is zero. `INT_MIN` start also fails: its negation overflows
+in Flink's recursive reverse search; native reports the failure without recursive stack
+exhaustion. For an empty needle and positive occurrence, positive start returns 1 and negative
+start returns the string's codepoint length plus 1, even for starts outside the string.
+Zero start still returns zero.
+
+Two-argument calls continue using DataFusion's Unicode position kernel. Extended forms use
+forward/reverse byte search at codepoint boundaries, preserving overlapping matches without
+allocating reversed strings. Built-in admission uses the resolved SQL operator; user functions
+named INSTR retain their own behavior. BIGINT start/occurrence arguments remain unsupported.
+Extended calls under AND/OR stay native only when a literal start excludes `INT_MIN` and a
+literal/default occurrence is positive; otherwise Flink retains row short-circuiting for errors.
 
 ### LOCATE
 

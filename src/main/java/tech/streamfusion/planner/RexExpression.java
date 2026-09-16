@@ -790,8 +790,9 @@ final class RexExpression {
     if ("ENDSWITH".equals(functionName)) {
       return emitCharacterFunction(call, 101, 2, 2);
     }
-    if ("INSTR".equals(functionName)) {
-      return emitStringSearch(call, 102, false);
+    if (call.getOperator()
+        == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.INSTR) {
+      return emitInstr(call);
     }
     if ("LOCATE".equals(functionName)) {
       return emitStringSearch(call, 102, true);
@@ -1043,6 +1044,21 @@ final class RexExpression {
     return character && numeric;
   }
 
+  private boolean emitInstr(RexCall call) {
+    List<RexNode> args = call.getOperands();
+    if (args.size() == 2) {
+      return emitStringSearch(call, 102, false);
+    }
+    if (args.size() < 3
+        || args.size() > 4
+        || !isCharacter(args.get(0))
+        || !isCharacter(args.get(1))
+        || args.subList(2, args.size()).stream().anyMatch(arg -> !isInt32(arg))) {
+      return reject("INSTR requires two character strings and optional INT start/occurrence");
+    }
+    return emitBuiltinCall(call, 161);
+  }
+
   private boolean emitStringSearch(RexCall call, int op, boolean locate) {
     List<RexNode> args = call.getOperands();
     String name = call.getOperator().getName();
@@ -1236,6 +1252,13 @@ final class RexExpression {
     }
     String name = call.getOperator().getName().toUpperCase(Locale.ROOT);
     List<RexNode> args = call.getOperands();
+    if (call.getOperator()
+            == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.INSTR
+        && args.size() >= 3
+        && (!isIntLiteralAtLeast(args.get(2), Integer.MIN_VALUE + 1)
+            || args.size() == 4 && !isIntLiteralAtLeast(args.get(3), 1))) {
+      return true;
+    }
     if ("JSON_VALUE".equals(name)) {
       if (call.getType().getSqlTypeName() != SqlTypeName.VARCHAR) {
         return true;

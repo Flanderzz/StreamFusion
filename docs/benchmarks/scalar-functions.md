@@ -65,6 +65,27 @@ as `pr44-flink-native-benchmarks.zip`. The repository keeps benchmark code and f
 tables; generated CSVs are not versioned. Controls are retained for checking the run, and are
 not subtracted from function times because their result types and lengths can differ.
 
+## INSTR overloads diagnostic (2026-09-16)
+
+Measured against `ebe550c6` plus extended INSTR support, with JDK 17, UTC and the release
+`bench` profile with mimalloc. The selection was `INSTR3_COLUMN,INSTR4_FORWARD,INSTR4_REVERSE`,
+with 2,000,000 rows, two warmups, five measured trials, a 264-byte ASCII padding budget and
+every eighth source value NULL. Both transpose operators and native Calc substitutions were
+checked. The existing search fixtures supply runtime needles/starts to the three-argument
+case and repeated `x` padding to the forward/reverse third-occurrence cases.
+
+| Case | Flink (s) | Native (s) | Flink / native |
+|---|---:|---:|---:|
+| Runtime needle/start identity control | 0.886 | 1.248 | 0.710x |
+| Literal search identity control | 0.742 | 1.000 | 0.742x |
+| `INSTR(s, needle, start_pos)` | 1.428 | 1.305 | 1.094x |
+| `INSTR(s, 'x', 1, 3)` | 0.773 | 0.998 | 0.774x |
+| `INSTR(s, 'x', -1, 3)` | 3.919 | 0.953 | 4.112x |
+
+Reverse search benefits from avoiding Flink's reversed-string allocations. The short forward
+search remains slower with rowwise input/output; these results do not establish a blanket
+INSTR speedup. Controls return STRING rather than INT and are not subtracted from timings.
+
 ## STARTSWITH
 
 `STARTSWITH_LITERAL`: `STARTSWITH(s, 'row:')`; `STARTSWITH_COLUMN`: `STARTSWITH(s, needle)`

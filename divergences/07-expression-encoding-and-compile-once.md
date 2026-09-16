@@ -78,6 +78,12 @@ Some functions diverge from the host only at precision/locale edges, not in valu
 transcendental math below. A true value divergence must be corrected before admission, as with the
 strict NULL propagation applied to `CONCAT` below.
 
+- **INSTR overloads:** DataFusion's position kernel implements only the two-string form.
+  Flink's additional start/occurrence forms use codepoint indexing, overlapping matches and
+  reverse search. The extended native kernel searches byte slices bounded by codepoints and
+  counts positions in codepoints, avoiding Flink's reversed-string allocations. It retains
+  empty-needle behavior and parameter failures, including overflowing `INT_MIN` negation,
+  without reproducing unbounded recursion. Fallible forms under AND/OR stay with Flink.
 - **Primitive floating comparisons:** The decoder selects an Arrow kernel using Java primitive
   operators for FLOAT/DOUBLE operands, including mixed integer/floating comparisons. DataFusion's
   total order distinguishes signed zero and orders NaN above finite values; those rules change
