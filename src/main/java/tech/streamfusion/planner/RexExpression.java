@@ -77,10 +77,7 @@ final class RexExpression {
   // Java cast, since arrow's own cast errors on overflow rather than wrapping.
   private static final int KIND_CAST_NARROW = 18;
 
-  // ARRAY[i] / MAP[key] subscript (Calcite's ITEM), two children: the collection, then the literal
-  // index/key. The native side dispatches on the collection type to DataFusion's array_element /
-  // map get_field, whose null-on-miss semantics match Flink's subscript. Only literal subscripts
-  // are admitted — see emitItem.
+  // ARRAY[i] / MAP[key] subscript (Calcite's ITEM): collection and runtime index/key children.
   private static final int KIND_ITEM = 19;
 
   // Decimal `/` and `%`: payload packs the declared result's precision*100 + scale; two children
@@ -2084,26 +2081,52 @@ final class RexExpression {
   }
 
   /**
-   * Emits the SQL subscript {@code array[i]} / {@code map[key]} (Calcite's ITEM). Admitted only
-   * with a literal subscript: DataFusion counts a runtime-negative array index from the end where
-   * Flink returns NULL, and the native map lookup binds the key at compile time — so a non-literal
-   * subscript falls back rather than risk a wrong answer. An array index literal below 1 also falls
-   * back, leaving the host to raise its plan-time validation error. NULL-on-miss semantics (null
-   * collection, index past the end, absent key) match Flink on the native side.
+   * Emits collection access with Flink's one-based array and first-matching map semantics. Invalid
+   * array literals remain on the host so its plan-time validation error is preserved.
    */
   private boolean emitItem(RexCall call) {
     RexNode collection = call.getOperands().get(0);
     RexNode subscript = call.getOperands().get(1);
-    if (!(subscript instanceof RexLiteral) || ((RexLiteral) subscript).isNull()) {
-      return reject("non-literal ARRAY index / MAP key");
-    }
     SqlTypeName collectionType = collection.getType().getSqlTypeName();
     if (collectionType == SqlTypeName.ARRAY) {
-      if (!isIntLiteralAtLeast(subscript, 1)) {
+      if (subscript.getType().getSqlTypeName() != SqlTypeName.INTEGER
+          && subscript.getType().getSqlTypeName() != SqlTypeName.NULL) {
+        return reject("ARRAY index must be INT");
+      }
+      if (subscript instanceof RexLiteral
+          && !((RexLiteral) subscript).isNull()
+          && !isIntLiteralAtLeast(subscript, 1)) {
         return reject("ARRAY index below 1");
       }
+    } else if (collectionType == SqlTypeName.MAP
+        && !(subscript instanceof RexLiteral)
+        && !List.of(
+                SqlTypeName.TINYINT,
+                SqlTypeName.SMALLINT,
+                SqlTypeName.INTEGER,
+                SqlTypeName.BIGINT,
+                SqlTypeName.DECIMAL,
+                SqlTypeName.CHAR,
+                SqlTypeName.VARCHAR,
+                SqlTypeName.BOOLEAN,
+                SqlTypeName.BINARY,
+                SqlTypeName.VARBINARY,
+                SqlTypeName.DATE,
+                SqlTypeName.TIME,
+                SqlTypeName.TIMESTAMP,
+                SqlTypeName.TIMESTAMP_WITH_LOCAL_TIME_ZONE)
+            .contains(collection.getType().getKeyType().getSqlTypeName())) {
+      return reject("dynamic MAP key type " + collection.getType().getKeyType());
     } else if (collectionType != SqlTypeName.MAP) {
       return reject("ITEM over " + collectionType + " (only ARRAY and MAP)");
+    }
+    if (collectionType == SqlTypeName.MAP
+        && !(subscript instanceof RexLiteral)
+        && !org.apache.calcite.sql.type.SqlTypeUtil.equalSansNullability(
+            collection.getType().getKeyType(), subscript.getType())
+        && !(collection.getType().getKeyType().getFamily() == SqlTypeFamily.CHARACTER
+            && subscript.getType().getFamily() == SqlTypeFamily.CHARACTER)) {
+      return reject("dynamic MAP lookup requires matching key types");
     }
     add(KIND_ITEM, 0, 2);
     return emit(collection) && emit(subscript);

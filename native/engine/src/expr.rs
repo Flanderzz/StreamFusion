@@ -281,9 +281,7 @@ pub(crate) fn build_expr(
         // ITEM — the SQL subscript `array[i]` / `map[key]`, dispatched on the collection child's
         // type. Both paths reproduce Flink's subscript semantics: NULL for a null
         // collection, an out-of-range (1-based) index, or an absent key, and map lookup takes the
-        // first match like Flink's linear scan. The JVM encoder admits only literal subscripts —
-        // a dynamic negative index counts from the end in DataFusion but is NULL in Flink, and map
-        // lookup binds a literal key — so a non-literal subscript never reaches here.
+        // first match like Flink's linear scan. Runtime subscripts are evaluated as columns.
         19 => {
             use datafusion::logical_expr::ExprSchemable;
             let collection = build_expr(
@@ -311,15 +309,22 @@ pub(crate) fn build_expr(
                 .get_type(&df_schema)
                 .expect("subscripted collection type");
             match collection_type {
-                DataType::List(_) => {
-                    datafusion::functions_nested::expr_fn::array_element(collection, subscript)
+                array_type @ DataType::List(_) => {
+                    crate::flink_functions::array_item::function(array_type)
+                        .call(vec![collection, subscript])
                 }
                 map_type @ DataType::Map(_, _) => {
-                    let datafusion::prelude::Expr::Literal(key, _) = subscript else {
-                        panic!("map subscript must be a literal")
-                    };
-                    crate::flink_functions::map_lookup::function(map_type, key)
-                        .call(vec![collection])
+                    if let datafusion::prelude::Expr::Literal(key, _) = &subscript {
+                        if !key.is_null() && !matches!(key, ScalarValue::Struct(_)) {
+                            return crate::flink_functions::map_lookup::function(
+                                map_type,
+                                key.clone(),
+                            )
+                            .call(vec![collection]);
+                        }
+                    }
+                    crate::flink_functions::map_lookup::dynamic_function(map_type)
+                        .call(vec![collection, subscript])
                 }
                 other => panic!("ITEM over unsupported collection type {other}"),
             }

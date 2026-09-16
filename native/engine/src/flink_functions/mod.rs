@@ -25,6 +25,7 @@ pub(crate) mod split_index;
 pub(crate) mod substring;
 pub(crate) mod to_date;
 
+pub(crate) mod array_item;
 mod ascii;
 mod binary_strings;
 mod charset;

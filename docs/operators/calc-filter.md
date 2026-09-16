@@ -129,11 +129,42 @@ already provides (see [Deployment](../deployment.md)).
 
 ## Collection subscripts
 
-ARRAY subscripts require a non-NULL positive integer literal; MAP keys require a non-NULL
-literal. A missing key, out-of-range array position, or NULL collection returns NULL.
-MAP lookup skips NULL map entries' keys when looking for the non-NULL literal, and returns
-the first matching entry, preserving nullable values and their nested types.
-Dynamic or NULL subscripts fall back to Flink.
+ARRAY subscripts accept runtime INT expressions with Flink's one-based indexing. A NULL
+container/index, zero, negative or out-of-range runtime index returns NULL. Literal indexes below
+one remain on Flink's path so its plan-time validation error is preserved. Elements keep their
+declared types, including DECIMAL, TIMESTAMP/LTZ and nested ARRAY/MAP/ROW values.
+
+MAP lookup accepts literal keys and runtime integer, decimal, character, boolean, binary, date,
+time and timestamp keys. It returns the first matching value and preserves nested output types.
+A NULL lookup key/container or a missing key returns NULL. Dynamic floating-point and collection
+keys remain on Flink. Runtime keys are evaluated once per row as an Arrow column; the lookup
+compares column entries directly without converting each value to a JVM object.
+The runtime search type must match the MAP key type, including decimal precision/scale and
+timestamp precision (character widths may differ). Mixed key types fall back so native coercion
+cannot narrow an integer or round a decimal search value into an incorrect match.
+
+Flink's BinaryMap string-key lookup reads a NULL stored key as an empty string when the search
+key is non-NULL; a DATE slot similarly reads as epoch day zero. Native lookup preserves this
+behavior, including the order between NULL and explicit empty/zero keys. A NULL search key still
+returns NULL. Other stored-key types retain their independent null/conversion constraints.
+
+If Flink folds a constant NULL subscript into a top-level typed NULL projection, some result types
+still fail the native output-type preflight and fall back. This separate limitation is tracked in
+[#126](https://github.com/datafusion-contrib/StreamFusion/issues/126); it does not apply to NULL
+values in runtime index/key columns.
+
+`DynamicCollectionBenchmark` measures this path with a release native build (`-Pbench`), 2 million
+rows, parallelism 1, two warmups and five interleaved trials. Both row/Arrow transposes and the
+blackhole sink are included. Containers have three entries, every eighth container is NULL, and
+runtime indexes/keys include NULLs, misses and invalid array positions.
+
+| Expression | Flink median | Native median | Flink / native |
+| --- | ---: | ---: | ---: |
+| ARRAY runtime index | 0.295695s | 0.513385s | 0.576x |
+| MAP runtime key | 0.829209s | 1.091945s | 0.759x |
+
+Standalone lookup is slower than Flink. This coverage keeps expressions available inside an
+existing native pipeline; these measurements do not establish an end-to-end speedup.
 
 ## Integer division
 
@@ -620,10 +651,9 @@ implementation can't handle, even though the function itself is supported:
 - **`POSITION`** — a `FROM` start offset.
 - **`SPLIT_INDEX`** — the numeric separator overload.
 - **`CURRENT_WATERMARK`** — requires a Calc watermark context; unsupported in standalone join or UNNEST residuals.
-- **A non-literal subscript** in `array[i]`/`map[key]` — at runtime a negative index counts from the
-  end in DataFusion but is `NULL` in Flink, and the native map lookup binds its key at compile time,
-  so only a literal subscript is safe to run natively (`array[i]` additionally requires the literal
-  to be ≥ 1).
+- **Collection subscripts:** literal ARRAY indexes below one; runtime MAP keys of floating or
+  collection types. Folded typed NULL projections may also fail the output-type check; see the
+  [collection contract](#collection-subscripts).
 - **Wrong arity** for any otherwise-admitted function.
 
 See [Configuration](../configuration.md) for the full `allowIncompatible` flag surface referenced

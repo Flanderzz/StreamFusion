@@ -25,6 +25,7 @@ license = "Apache-2.0"
 [workspace.dependencies]
 jni = "0.21"
 arrow = { version = "58", default-features = false, features = ["ffi"] }
+arrow-ord = "58"
 # Custom timestamp formatting (DATE_FORMAT) with a translated strftime pattern. Already in the tree
 # transitively via arrow; pinned here for direct use.
 chrono = "0.4"
