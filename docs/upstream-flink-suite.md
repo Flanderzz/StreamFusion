@@ -169,6 +169,13 @@ and exception causes. Separate controls with JSON `true`, `1.0`, and integer `1`
 BOOLEAN, DOUBLE, and INTEGER respectively succeed and match native execution. Run it with
 `mvn -pl streamfusion-runtime -am test -Dtest=FlinkJsonReturningHostContractTest`.
 
+Upstream tracking is [FLINK-40463](https://issues.apache.org/jira/browse/FLINK-40463) and
+[Flink PR #29063](https://github.com/apache/flink/pull/29063). The proposed conversion layer
+replaces exact Java object casts and brings conversion errors under ON ERROR handling;
+the PR explicitly reproduces DOUBLE conversion failing on integer JSON tokens. As of
+September 16, 2026 it is open. StreamFusion keeps released Flink 2.2.1 and its explicit
+exception expectations; a future released dependency upgrade must revalidate that contract.
+
 The audit must retain the original JSON tokens and classify these cases as expected host
 failures, rather than missing fixtures, native fallback, or successful result parity. Do not
 rewrite integer `1` to decimal `1.0` just to obtain a successful baseline. Native type-mismatch
