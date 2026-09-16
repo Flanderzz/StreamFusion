@@ -601,7 +601,9 @@ dot members such as `$.user.name`, bracket members such as `$['user name']`, and
 32-bit array indexes such as `$.users[0].name`. Dot names use Unicode letters, numbers and
 underscores, with a letter/underscore first. Bracket names use single or double quotes and
 accept well-formed Unicode, spaces and punctuation, including the other quote character.
-Member names are case-sensitive. Wildcards, recursive descent, filters, slices, negative
+Member names are case-sensitive. Escaped document keys are compared as UTF-16 code units,
+so unpaired surrogates remain distinct from a literal `?` or replacement character, including
+when duplicate members occur before or after them. Wildcards, recursive descent, filters, slices, negative
 indexes, empty names, backslash escapes, ASCII controls, unpaired surrogates and dynamic
 paths fall back. Quoted `'*'` is an ordinary member name, not a wildcard.
 
@@ -647,6 +649,10 @@ except a document containing the JSON literal `null`, which invokes ON ERROR in 
 SQL NULL input always returns SQL NULL. ERROR ON EMPTY fails directly, even with a default
 ON ERROR. Duplicate members keep the last value, decimal text retains Jackson's BigDecimal
 scale/exponent spelling, and unpaired escaped surrogates become `?` in UTF-8 output.
+Intermediate STRING results can still lose surrogate identity before equality, LIKE, CASE or
+other consumers; the same limitation affects JSON_UNQUOTE. That remaining correctness work is
+tracked in [#81](https://github.com/datafusion-contrib/StreamFusion/issues/81). Direct-output
+parity does not establish parity for such compositions.
 
 JSON_VALUE policy and scalar-conversion failures retain the existing native exception
 wrapper; exact host exception types/messages remain tracked in

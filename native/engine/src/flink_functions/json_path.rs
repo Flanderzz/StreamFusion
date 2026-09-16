@@ -400,14 +400,21 @@ fn key_matches(raw: &str, name: &str) -> bool {
     if !raw.contains('\\') {
         return raw == name;
     }
-    // Admitted member names are ASCII; surrogate replacement cannot alias one of them.
-    unescape(raw) == name
+    unescape_utf16(raw).into_iter().eq(name.encode_utf16())
 }
 
 fn unescape(raw: &str) -> Cow<'_, str> {
     if !raw.contains('\\') {
         return Cow::Borrowed(raw);
     }
+    Cow::Owned(
+        char::decode_utf16(unescape_utf16(raw))
+            .map(|ch| ch.unwrap_or('?'))
+            .collect(),
+    )
+}
+
+fn unescape_utf16(raw: &str) -> Vec<u16> {
     let mut units = Vec::with_capacity(raw.len());
     let mut chars = raw.chars();
     while let Some(ch) = chars.next() {
@@ -431,11 +438,7 @@ fn unescape(raw: &str) -> Cow<'_, str> {
         };
         units.push(unit);
     }
-    Cow::Owned(
-        char::decode_utf16(units)
-            .map(|ch| ch.unwrap_or('?'))
-            .collect(),
-    )
+    units
 }
 
 fn number_text(raw: &str) -> Cow<'_, str> {
@@ -490,6 +493,27 @@ mod tests {
 
     fn path(text: &str) -> Path<'_> {
         Path::parse(text, "13.0").unwrap()
+    }
+
+    #[test]
+    fn escaped_members_preserve_utf16_identity_before_output_conversion() {
+        let selected = path("lax $['?']");
+        for input in [r#"{"\uD800":1}"#, r#"{"\uDC00":2}"#] {
+            assert_eq!(selected.read(input), Ok(Value::Missing));
+        }
+        for (input, expected) in [
+            (r#"{"?":3}"#, "3"),
+            (r#"{"?":4,"\uD800":5}"#, "4"),
+            (r#"{"\uD800":6,"?":7}"#, "7"),
+            (r#"{"?":8,"\u003f":9}"#, "9"),
+            (r#"{"\u003f":10,"?":11}"#, "11"),
+        ] {
+            assert_eq!(selected.read(input), Ok(Value::Number(expected)));
+        }
+        assert!(key_matches(r"\uD83D\uDE00", "😀"));
+        assert!(!key_matches(r"\uD800", "�"));
+        assert!(!key_matches(r"\uD800x\uDC00", "?x?"));
+        assert!(key_matches(r"\u7528户", "用户"));
     }
 
     #[test]
