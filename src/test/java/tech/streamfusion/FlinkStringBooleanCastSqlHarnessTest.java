@@ -73,9 +73,8 @@ class FlinkStringBooleanCastSqlHarnessTest {
         for (Throwable cause = error; cause != null; cause = cause.getCause()) {
           causes.append(cause.getMessage()).append('\n');
         }
-        String renderedValue = nativeRun ? value.replace("\u0000", "\\0") : value;
         assertTrue(
-            causes.toString().contains("Cannot parse '" + renderedValue + "' as BOOLEAN."),
+            causes.toString().contains("Cannot parse '" + value + "' as BOOLEAN."),
             causes.toString());
         if (scan != null) {
           assertTrue(scan.substitutions() > 0, scan.fallbackReasons().toString());

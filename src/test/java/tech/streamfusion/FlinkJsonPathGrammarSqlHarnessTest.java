@@ -95,7 +95,7 @@ class FlinkJsonPathGrammarSqlHarnessTest {
   @ParameterizedTest
   @ValueSource(strings = {"$['a']", "$[ 'a' ]"})
   void valueErrorPolicyFailsForCompactAndSpacedPaths(String path) {
-    // JSON_VALUE keeps its existing native exception wrapper; exact parity is tracked in #108.
+    // ERROR-policy failures retain their native wrapper; scalar type mismatches preserve the host exception.
     JsonFunctionTestInputs.assertFails(
         "{}",
         "JSON_VALUE(s, '" + path.replace("'", "''") + "' ERROR ON ERROR)",
@@ -104,10 +104,9 @@ class FlinkJsonPathGrammarSqlHarnessTest {
 
   @Test
   void invalidIntegerScalarFailsOutsideErrorPolicy() {
-    JsonFunctionTestInputs.assertFails(
+    JsonFunctionTestInputs.assertFailsLikeFlink(
         "[0,\"text\"]",
-        "JSON_VALUE(s, '$[ 1 ]' RETURNING INTEGER NULL ON ERROR)",
-        "JSON_VALUE RETURNING INTEGER");
+        "JSON_VALUE(s, '$[ 1 ]' RETURNING INTEGER NULL ON ERROR)");
   }
 
   @ParameterizedTest
