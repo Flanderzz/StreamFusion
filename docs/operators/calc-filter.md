@@ -453,6 +453,15 @@ Member names are case-sensitive. Wildcards, recursive descent, filters, slices, 
 indexes, empty names, backslash escapes, ASCII controls, unpaired surrogates and dynamic
 paths fall back. Quoted `'*'` is an ordinary member name, not a wildcard.
 
+ASCII spaces around a bracket member or index are native, for example `$[ 'user' ][ 01 ]`.
+Trailing ASCII spaces after a complete path are also accepted. The planner removes only
+these syntactic spaces; spaces inside quoted names remain significant. An explicit
+case-insensitive `strict`/`lax` prefix accepts Flink's mode-separating whitespace. Leading
+whitespace without a mode and tabs/newlines inside or after the path stay on Flink: Jayway
+handles them differently depending on the preceding token, so general whitespace trimming
+would change the selected value. Remaining path extensions are tracked in
+[#91](https://github.com/datafusion-contrib/StreamFusion/issues/91).
+
 The default return type and explicit `RETURNING VARCHAR(n)` are native; Flink 2.2.1 does
 not truncate this function's result to `n`. `RETURNING BOOLEAN`, `INTEGER` and `DOUBLE`
 are also native with the following exact Flink object-type rules:
@@ -486,6 +495,11 @@ except a document containing the JSON literal `null`, which invokes ON ERROR in 
 SQL NULL input always returns SQL NULL. ERROR ON EMPTY fails directly, even with a default
 ON ERROR. Duplicate members keep the last value, decimal text retains Jackson's BigDecimal
 scale/exponent spelling, and unpaired escaped surrogates become `?` in UTF-8 output.
+
+JSON_VALUE policy and scalar-conversion failures retain the existing native exception
+wrapper; exact host exception types/messages remain tracked in
+[#108](https://github.com/datafusion-contrib/StreamFusion/issues/108). Successful result
+parity and both-engine failure tests do not imply identical exception diagnostics.
 
 ### JSON_EXISTS
 

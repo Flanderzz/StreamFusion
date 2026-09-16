@@ -9,8 +9,10 @@ final class JsonPathSpec {
       Pattern.compile("^\\s*(strict|lax)\\s+(.+)$", Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
   private static final Pattern STEP =
       Pattern.compile(
-          "\\.[\\p{L}_][\\p{L}\\p{N}_]*|\\['[^'\\\\\\x00-\\x1f]+'\\]"
-              + "|\\[\"[^\"\\\\\\x00-\\x1f]+\"\\]|\\[([0-9]+)\\]");
+          "\\.(?<dot>[\\p{L}_][\\p{L}\\p{N}_]*)"
+              + "|\\[ *'(?<single>[^'\\\\\\x00-\\x1f]+)' *\\]"
+              + "|\\[ *\"(?<quoted>[^\"\\\\\\x00-\\x1f]+)\" *\\]"
+              + "|\\[ *(?<index>[0-9]+) *\\]");
 
   private JsonPathSpec() {}
 
@@ -37,22 +39,36 @@ final class JsonPathSpec {
     if (!path.startsWith("$")) {
       return null;
     }
+    // Jayway trims ASCII spaces; other trailing whitespace can be part of a dot member.
+    int pathEnd = path.length();
+    while (pathEnd > 1 && path.charAt(pathEnd - 1) == ' ') {
+      pathEnd--;
+    }
+    path = path.substring(0, pathEnd);
     var step = STEP.matcher(path);
+    StringBuilder normalized = new StringBuilder(prefix).append('$');
     int end = 1;
     while (end < path.length()) {
       step.region(end, path.length());
       if (!step.lookingAt()) {
         return null;
       }
-      if (step.group(1) != null) {
+      if (step.group("index") != null) {
         try {
-          Integer.parseInt(step.group(1));
+          Integer.parseInt(step.group("index"));
         } catch (NumberFormatException e) {
           return null;
         }
+        normalized.append('[').append(step.group("index")).append(']');
+      } else if (step.group("dot") != null) {
+        normalized.append('.').append(step.group("dot"));
+      } else if (step.group("single") != null) {
+        normalized.append("['").append(step.group("single")).append("']");
+      } else {
+        normalized.append("[\"").append(step.group("quoted")).append("\"]");
       }
       end = step.end();
     }
-    return prefix + path;
+    return normalized.toString();
   }
 }

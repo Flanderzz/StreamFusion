@@ -117,6 +117,24 @@ punctuation such as `.` or `*` inside them is part of the key. Backslash escapes
 empty names and unpaired surrogates are excluded before crossing JNI. The native grammar
 retains borrowed member slices, with no per-row path parsing or change to JSON validation.
 
+The planner normalizes ASCII spaces around bracket members/indexes and at the end of the
+literal path before passing it to the compact native grammar. Quoted member content and
+leading-zero index spelling are preserved. No new native parsing or per-row allocation is
+needed. Arroyo registers `datafusion-functions-json`; its general JSON lookup contract does
+not supply Flink's SQL/JSON mode, error-policy or Jayway whitespace semantics, so the existing
+Flink-specific parser remains necessary.
+
+General whitespace trimming is deliberately excluded. Jayway trims ASCII spaces but can
+interpret a trailing tab as part of a dot member, ignore a single character after a bracket,
+or reject a longer trailing sequence. Tabs/newlines inside or after a path therefore remain
+outside native admission, as does leading whitespace without an explicit mode. Whitespace
+around the optional strict/lax mode continues to follow Flink's mode regex. SQL regressions
+compare compact/spaced selectors, quoted member spaces, missing/null/scalar/container values,
+duplicate members, invalid unselected fields, independent paths and INTEGER defaults.
+JSON_EXISTS ERROR diagnostics retain exact host comparison; JSON_VALUE failures still use
+the existing native wrapper, with diagnostic parity tracked in
+[#108](https://github.com/datafusion-contrib/StreamFusion/issues/108).
+
 JSON_VALUE returns VARCHAR, BOOLEAN, INTEGER or
 DOUBLE. The latter three conversions in Flink are Java object casts outside ON ERROR, so
 reusing SQL CAST would be incorrect. Native extraction writes directly into the matching

@@ -22,6 +22,27 @@ TO_TIMESTAMP and temporal FLOOR/CEIL/CEILING were outside that measurement's cov
 subsequent implementation is measured in the [temporal diagnostic below](#temporal-coverage-diagnostic-2026-09-15).
 See [Calc / filter](../operators/calc-filter.md) for the complete argument gates.
 
+## Spaced JSON paths diagnostic (2026-09-16)
+
+Definite bracket paths with ASCII spaces now stay in native Calc instead of falling back.
+On Apple M4 Pro, JDK 17, UTC and Flink 2.2.1, the release/mimalloc build measured the
+following end-to-end medians over 2,000,000 rows at parallelism 1, with a 264-byte ASCII
+payload budget, NULL every eighth row, two warmups and five measured trials per engine.
+Both row/Arrow transposes are included and asserted in the native plan. Engines alternate
+trial order; the source-matched identity control is reported without subtracting it.
+
+| Case | Flink (s) | Native (s) | Flink / native |
+|---|---:|---:|---:|
+| Identity control | 0.822841 | 1.153666 | 0.713x |
+| `JSON_VALUE(s, 'lax $[ ''user'' ][ ''name'' ]')` | 1.682775 | 1.248065 | 1.348x |
+| `JSON_EXISTS(s, 'lax $[ ''user'' ][ ''name'' ]')` | 1.652583 | 1.202643 | 1.374x |
+
+Reproduce with the command below, selecting
+`-Dscalar.functions=JSON_VALUE_SPACED_PATH,JSON_EXISTS_SPACED_PATH` and
+`-Dscalar.nullEvery=8`. These numbers compare newly admitted queries against their previous
+Flink fallback; the change normalizes literal paths during planning and does not alter
+native JSON parsing. They do not establish a speedup for already admitted compact paths.
+
 ## Inputs
 
 - Search strings add `row:`/`other:` and `:match`/`:miss` around the padding: total lengths are

@@ -29,6 +29,7 @@ class JsonPathSpecTest {
       assertEquals("strict " + path, JsonPathSpec.normalize(path));
     }
     assertEquals("lax $.a", JsonPathSpec.normalize(" \tLaX $.a"));
+    assertEquals("strict $.a", JsonPathSpec.normalize("$.a "));
     for (String path :
         List.of(
             "",
@@ -42,8 +43,18 @@ class JsonPathSpecTest {
             "$[\"a\",\"b\"]",
             "$['\ud800']",
             "$['a\n']",
-            "$[?(@.a)]",
-            "$.a ")) {
+            "$[?(@.a)]")) {
+      assertNull(JsonPathSpec.normalize(path), path);
+    }
+  }
+
+  @Test
+  void onlyVerifiedPathSpacesAreNormalized() {
+    assertEquals("strict $[0001]", JsonPathSpec.normalize("$[ 0001 ]"));
+    assertEquals("lax $[' a b '][1]", JsonPathSpec.normalize(" \tLaX $[ ' a b ' ][ 1 ]  "));
+    assertEquals("strict $[\"a'b\"]", JsonPathSpec.normalize("$[ \"a'b\" ]"));
+    for (String path :
+        List.of(" $[1]", "$[\t1]", "$[1\n]", "$[\t'a']", "$[1 2]", "$.a\t", "$[1]\t", "$[1] \n")) {
       assertNull(JsonPathSpec.normalize(path), path);
     }
   }
