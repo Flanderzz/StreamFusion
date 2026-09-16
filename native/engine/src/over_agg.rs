@@ -5,7 +5,8 @@ pub(crate) fn over_value_column<'a>(
     column: &'a ArrayRef,
     value_type: &DataType,
 ) -> ValueColumn<'a> {
-    if matches!(column.data_type(), DataType::Null) {
+    // Constant NULL arguments retain their declared Arrow type, including non-numeric types.
+    if matches!(column.data_type(), DataType::Null) || column.null_count() == column.len() {
         return ValueColumn::NullOnly(column);
     }
     match value_type {
