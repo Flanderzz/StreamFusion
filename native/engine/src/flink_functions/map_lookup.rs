@@ -5,7 +5,7 @@ use arrow::datatypes::DataType;
 use datafusion::common::{cast::as_map_array, Result, ScalarValue};
 use datafusion::logical_expr::{ScalarUDF, Volatility};
 
-pub(crate) fn dynamic_function(map_type: DataType) -> ScalarUDF {
+pub(crate) fn dynamic_function(map_type: DataType, compact_timestamp_key: bool) -> ScalarUDF {
     let DataType::Map(entries, _) = &map_type else {
         unreachable!("map lookup input")
     };
@@ -15,24 +15,32 @@ pub(crate) fn dynamic_function(map_type: DataType) -> ScalarUDF {
     let key_type = fields[0].data_type().clone();
     let output = fields[1].data_type().clone();
     datafusion::logical_expr::create_udf(
-        "flink_dynamic_map_lookup",
+        if compact_timestamp_key {
+            "flink_dynamic_map_lookup_compact_timestamp"
+        } else {
+            "flink_dynamic_map_lookup"
+        },
         vec![map_type, key_type],
         output,
         Volatility::Immutable,
         Arc::new(datafusion::functions::utils::make_scalar_function(
-            |args| dynamic_lookup(&args[0], &args[1]),
+            move |args| dynamic_lookup(&args[0], &args[1], compact_timestamp_key),
             vec![],
         )),
     )
 }
 
-fn dynamic_lookup(input: &ArrayRef, keys: &ArrayRef) -> Result<ArrayRef> {
+fn dynamic_lookup(
+    input: &ArrayRef,
+    keys: &ArrayRef,
+    compact_timestamp_key: bool,
+) -> Result<ArrayRef> {
     let map = as_map_array(input)?;
     let compare =
         arrow_ord::ord::make_comparator(map.keys().as_ref(), keys.as_ref(), Default::default())?;
     let offsets = map.value_offsets();
     let default = (map.keys().null_count() > 0)
-        .then(|| null_key_read_value(map.keys().data_type()))
+        .then(|| null_key_read_value(map.keys().data_type(), compact_timestamp_key))
         .flatten()
         .map(|value| value.to_array())
         .transpose()?;
@@ -85,7 +93,7 @@ pub(crate) fn function(map_type: DataType, key: ScalarValue) -> ScalarUDF {
 
 fn lookup(input: &ArrayRef, key: &ScalarValue) -> Result<ArrayRef> {
     let map = as_map_array(input)?;
-    let matches_null_key = null_key_read_value(map.keys().data_type()).as_ref() == Some(key);
+    let matches_null_key = null_key_read_value(map.keys().data_type(), false).as_ref() == Some(key);
     let key = Scalar::new(key.to_array()?);
     let matches = arrow::compute::kernels::cmp::eq(map.keys(), &key)?;
     let indices: UInt32Array = (0..map.len())
@@ -109,10 +117,27 @@ fn lookup(input: &ArrayRef, key: &ScalarValue) -> Result<ArrayRef> {
 }
 
 // Flink's BinaryMap lookup reads these slots without checking the stored key's null bit.
-fn null_key_read_value(data_type: &DataType) -> Option<ScalarValue> {
+fn null_key_read_value(data_type: &DataType, compact_timestamp_key: bool) -> Option<ScalarValue> {
+    if compact_timestamp_key {
+        return Some(ScalarValue::Struct(Arc::new(
+            streamfusion_bridge::timestamp::timestamp_array([Some(
+                streamfusion_bridge::timestamp::TimestampValue::new(0, 0).expect("epoch"),
+            )]),
+        )));
+    }
     match data_type {
         DataType::Utf8 => Some(ScalarValue::Utf8(Some(String::new()))),
-        DataType::Date32 => Some(ScalarValue::Date32(Some(0))),
+        DataType::Binary => Some(ScalarValue::Binary(Some(vec![]))),
+        DataType::Boolean
+        | DataType::Int8
+        | DataType::Int16
+        | DataType::Int32
+        | DataType::Int64
+        | DataType::Date32
+        | DataType::Time32(_) => ScalarValue::new_zero(data_type).ok(),
+        DataType::Decimal128(precision, _) if *precision <= 18 => {
+            ScalarValue::new_zero(data_type).ok()
+        }
         _ => None,
     }
 }
@@ -171,7 +196,7 @@ mod tests {
             None,
             Some("absent"),
         ]));
-        let result = dynamic_lookup(&map.slice(1, 6), &lookup_keys.slice(1, 6)).unwrap();
+        let result = dynamic_lookup(&map.slice(1, 6), &lookup_keys.slice(1, 6), false).unwrap();
         let expected = arrow::compute::take(
             &values,
             &UInt32Array::from(vec![Some(2), Some(4), Some(5), None, None, None]),
@@ -180,7 +205,7 @@ mod tests {
         .unwrap();
         assert_eq!(result.as_ref(), expected.as_ref());
         assert_eq!(
-            dynamic_lookup(&map.slice(0, 0), &lookup_keys.slice(0, 0))
+            dynamic_lookup(&map.slice(0, 0), &lookup_keys.slice(0, 0), false)
                 .unwrap()
                 .len(),
             0
@@ -208,7 +233,7 @@ mod tests {
         ));
         for (key, expected) in [(None, None), (Some("a"), Some(7)), (Some("missing"), None)] {
             let key: ArrayRef = Arc::new(StringArray::from(vec![key]));
-            let result = dynamic_lookup(&input, &key).unwrap();
+            let result = dynamic_lookup(&input, &key, false).unwrap();
             assert_eq!(result.as_ref(), &Int64Array::from(vec![expected]));
         }
     }

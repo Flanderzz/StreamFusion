@@ -323,7 +323,7 @@ pub(crate) fn build_expr(
                             .call(vec![collection]);
                         }
                     }
-                    crate::flink_functions::map_lookup::dynamic_function(map_type)
+                    crate::flink_functions::map_lookup::dynamic_function(map_type, arg == 1)
                         .call(vec![collection, subscript])
                 }
                 other => panic!("ITEM over unsupported collection type {other}"),

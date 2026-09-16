@@ -124,9 +124,32 @@ class FlinkDynamicCollectionSqlHarnessTest {
   }
 
   @ParameterizedTest
-  @ValueSource(strings = {"STRING", "DATE", "TIMESTAMP", "TIMESTAMP_LTZ"})
+  @ValueSource(strings = {"STRING", "DATE", "DECIMAL18", "TIMESTAMP3", "TIMESTAMP_LTZ3"})
   void runtimeNullableStoredKeysMatchFlink(String kind) throws Exception {
     assertNativeParity(() -> typedMaps(kind, true), "SELECT id, m[lookup_key] FROM src");
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"TIMESTAMP", "TIMESTAMP_LTZ"})
+  void nullableNonCompactKeysKeepHostLookup(String kind) throws Exception {
+    NativeParity.assertFallbackReasonContains(
+        () -> typedMaps(kind, true),
+        "SELECT id, m[lookup_key] FROM src",
+        "nullable non-compact MAP key");
+  }
+
+  @org.junit.jupiter.api.Test
+  void nullWideDecimalKeyKeepsHostFailure() {
+    String sql = "SELECT id, m[lookup_key] FROM src";
+    for (boolean nativeRun : new boolean[] {false, true}) {
+      TableEnvironment table = typedMaps("DECIMAL", true);
+      if (nativeRun) NativePlanner.install(table);
+      Exception failure = assertThrows(Exception.class, () -> collect(table, sql));
+      Throwable cause = failure;
+      while (cause.getCause() != null) cause = cause.getCause();
+      assertEquals(NumberFormatException.class, cause.getClass());
+      assertEquals("Zero length BigInteger", cause.getMessage());
+    }
   }
 
   @ParameterizedTest
@@ -289,6 +312,24 @@ class FlinkDynamicCollectionSqlHarnessTest {
 
   private static KeySpec keySpec(String kind) {
     return switch (kind) {
+      case "DECIMAL18" ->
+          new KeySpec(
+              Types.BIG_DEC,
+              DataTypes.DECIMAL(18, 2),
+              new BigDecimal("123456789.12"),
+              new BigDecimal("-0.01"));
+      case "TIMESTAMP3" ->
+          new KeySpec(
+              Types.LOCAL_DATE_TIME,
+              DataTypes.TIMESTAMP(3),
+              LocalDateTime.parse("0001-01-01T00:00:00.123"),
+              LocalDateTime.parse("9999-12-31T23:59:59.999"));
+      case "TIMESTAMP_LTZ3" ->
+          new KeySpec(
+              Types.INSTANT,
+              DataTypes.TIMESTAMP_LTZ(3),
+              Instant.parse("1969-12-31T23:59:59.999Z"),
+              Instant.parse("2000-01-01T00:00:00Z"));
       case "STRING" -> new KeySpec(Types.STRING, DataTypes.STRING(), "a", "missing");
       case "TINYINT" ->
           new KeySpec(Types.BYTE, DataTypes.TINYINT(), Byte.MIN_VALUE, Byte.MAX_VALUE);
@@ -424,7 +465,10 @@ class FlinkDynamicCollectionSqlHarnessTest {
             Row.of(6, map, defaultKey(kind))),
         Schema.newBuilder()
             .column("id", DataTypes.INT())
-            .column("m", DataTypes.MAP(spec.type(), DataTypes.DECIMAL(38, 9)))
+            .column(
+                "m",
+                DataTypes.MAP(
+                    nullStoredKey ? spec.type() : spec.type().notNull(), DataTypes.DECIMAL(38, 9)))
             .column("lookup_key", spec.type())
             .build());
     return table;
@@ -437,9 +481,9 @@ class FlinkDynamicCollectionSqlHarnessTest {
       case "SMALLINT" -> (short) 0;
       case "INT" -> 0;
       case "BIGINT" -> 0L;
-      case "DECIMAL" -> new BigDecimal("0.000000000");
-      case "TIMESTAMP" -> LocalDateTime.parse("1970-01-01T00:00:00");
-      case "TIMESTAMP_LTZ" -> Instant.EPOCH;
+      case "DECIMAL", "DECIMAL18" -> new BigDecimal("0.000000000");
+      case "TIMESTAMP", "TIMESTAMP3" -> LocalDateTime.parse("1970-01-01T00:00:00");
+      case "TIMESTAMP_LTZ", "TIMESTAMP_LTZ3" -> Instant.EPOCH;
       case "DATE" -> LocalDate.of(1970, 1, 1);
       case "TIME" -> LocalTime.MIDNIGHT;
       case "BOOLEAN" -> false;

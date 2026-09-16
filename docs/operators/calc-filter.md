@@ -143,10 +143,15 @@ The runtime search type must match the MAP key type, including decimal precision
 timestamp precision (character widths may differ). Mixed key types fall back so native coercion
 cannot narrow an integer or round a decimal search value into an incorrect match.
 
-Flink's BinaryMap string-key lookup reads a NULL stored key as an empty string when the search
-key is non-NULL; a DATE slot similarly reads as epoch day zero. Native lookup preserves this
-behavior, including the order between NULL and explicit empty/zero keys. A NULL search key still
-returns NULL. Other stored-key types retain their independent null/conversion constraints.
+Flink's BinaryMap lookup reads primitive stored NULL slots without checking their null bit when
+the search key is non-NULL: strings/binary read as empty, numbers/date/time as zero, boolean as
+false, and compact timestamps as epoch. Native lookup preserves this behavior, including the
+order between NULL and explicit empty/zero keys. A NULL search key still returns NULL.
+
+MAP keys declared nullable fall back when they use DECIMAL precision above 18 or timestamp
+precision above 3: Flink's non-compact NULL slots have different read/error behavior. A MAP with
+these key types declared NOT NULL remains eligible. This restriction applies to literal as well
+as runtime searches. Runtime NULL search keys and NULL containers are still supported.
 
 If Flink folds a constant NULL subscript into a top-level typed NULL projection, some result types
 still fail the native output-type preflight and fall back. This separate limitation is tracked in
@@ -160,8 +165,8 @@ runtime indexes/keys include NULLs, misses and invalid array positions.
 
 | Expression | Flink median | Native median | Flink / native |
 | --- | ---: | ---: | ---: |
-| ARRAY runtime index | 0.295695s | 0.513385s | 0.576x |
-| MAP runtime key | 0.829209s | 1.091945s | 0.759x |
+| ARRAY runtime index | 0.304111s | 0.505128s | 0.602x |
+| MAP runtime key | 0.813771s | 1.040418s | 0.782x |
 
 Standalone lookup is slower than Flink. This coverage keeps expressions available inside an
 existing native pipeline; these measurements do not establish an end-to-end speedup.
@@ -651,8 +656,9 @@ implementation can't handle, even though the function itself is supported:
 - **`POSITION`** — a `FROM` start offset.
 - **`SPLIT_INDEX`** — the numeric separator overload.
 - **`CURRENT_WATERMARK`** — requires a Calc watermark context; unsupported in standalone join or UNNEST residuals.
-- **Collection subscripts:** literal ARRAY indexes below one; runtime MAP keys of floating or
-  collection types. Folded typed NULL projections may also fail the output-type check; see the
+- **Collection subscripts:** non-INT ARRAY indexes and literal indexes below one; runtime MAP keys
+  of floating, collection or mismatched types; nullable non-compact decimal/timestamp MAP keys.
+  Folded typed NULL projections may also fail the output-type check; see the
   [collection contract](#collection-subscripts).
 - **Wrong arity** for any otherwise-admitted function.
 
