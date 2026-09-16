@@ -21,6 +21,59 @@ import org.junit.jupiter.api.Test;
 class FlinkTemporalSortSqlHarnessTest {
 
   @Test
+  void lateRowsAndTimestampTiesAreDroppedAfterEmission() throws Exception {
+    String sql = "SELECT k, v, rt, CURRENT_WATERMARK(rt) FROM src ORDER BY rt";
+    String plan = tech.streamfusion.planner.NativePlanner.explain(lateEnvironment(), sql);
+    org.junit.jupiter.api.Assertions.assertTrue(plan.contains("NativeTemporalSort"), plan);
+    NativeParity.assertOrderedKindedParity(FlinkTemporalSortSqlHarnessTest::lateEnvironment, sql);
+  }
+
+  private static TableEnvironment lateEnvironment() {
+    var env = StreamExecutionEnvironment.getExecutionEnvironment();
+    env.setParallelism(1);
+    var table = StreamTableEnvironment.create(env);
+    WatermarkStrategy<Row> watermarks =
+        context ->
+            new org.apache.flink.api.common.eventtime.WatermarkGenerator<>() {
+              private long maximum = Long.MIN_VALUE;
+
+              @Override
+              public void onEvent(
+                  Row row,
+                  long timestamp,
+                  org.apache.flink.api.common.eventtime.WatermarkOutput output) {
+                maximum = Math.max(maximum, timestamp);
+                output.emitWatermark(new org.apache.flink.api.common.eventtime.Watermark(maximum));
+              }
+
+              @Override
+              public void onPeriodicEmit(
+                  org.apache.flink.api.common.eventtime.WatermarkOutput output) {}
+            };
+    var source =
+        env.fromData(
+                Types.ROW_NAMED(new String[] {"k", "v", "ts"}, Types.LONG, Types.LONG, Types.LONG),
+                Row.of(1L, 1L, 100L),
+                Row.of(1L, 3L, 300L),
+                Row.of(1L, 2L, 200L),
+                Row.of(1L, 4L, 300L),
+                Row.of(1L, 5L, 400L))
+            .assignTimestampsAndWatermarks(
+                watermarks.withTimestampAssigner((row, previous) -> (Long) row.getField(2)));
+    table.createTemporaryView(
+        "src",
+        source,
+        Schema.newBuilder()
+            .column("k", DataTypes.BIGINT())
+            .column("v", DataTypes.BIGINT())
+            .column("ts", DataTypes.BIGINT())
+            .columnByMetadata("rt", DataTypes.TIMESTAMP_LTZ(3), "rowtime")
+            .watermark("rt", "SOURCE_WATERMARK()")
+            .build());
+    return table;
+  }
+
+  @Test
   void eventTimeSortMatchesHost() throws Exception {
     NativeParity.assertParity(
         FlinkTemporalSortSqlHarnessTest::environment, "SELECT k, v, rt FROM src ORDER BY rt");

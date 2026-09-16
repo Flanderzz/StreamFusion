@@ -90,6 +90,40 @@ class NativeColumnarTemporalSortOperatorTest {
         new NativeColumnarTemporalSortOperator(1, SCHEMA), batch -> 0, Types.INT, 1, 1, 0);
   }
 
+  @Test
+  void restoredEmptyBufferRejectsLateRowsUsingLastEmissionNotWatermark() throws Exception {
+    OperatorSubtaskState snapshot;
+    try (BufferAllocator allocator = new RootAllocator();
+        var before = harness()) {
+      before.setup(new ArrowBatchSerializer());
+      before.open();
+      before.processWatermark(new Watermark(100));
+      before.processElement(new StreamRecord<>(batch(allocator, event(1, 50), event(2, 50))));
+      before.processWatermark(new Watermark(200));
+      assertEquals(List.of(row(1, 50), row(2, 50)), collect(before));
+      snapshot = before.snapshot(1, 1);
+    }
+    try (BufferAllocator allocator = new RootAllocator();
+        var restored = harness()) {
+      restored.setup(new ArrowBatchSerializer());
+      restored.initializeState(snapshot);
+      restored.open();
+      restored.processElement(
+          new StreamRecord<>(
+              batch(
+                  allocator,
+                  event(3, 49),
+                  event(4, 50),
+                  event(5, 150),
+                  event(6, 150),
+                  event(7, 300))));
+      restored.processWatermark(new Watermark(200));
+      assertEquals(List.of(row(5, 150), row(6, 150)), collect(restored));
+      restored.processWatermark(new Watermark(400));
+      assertEquals(List.of(row(7, 300)), collect(restored));
+    }
+  }
+
   private static RowData event(long v, long rtMillis) {
     GenericRowData row = new GenericRowData(2);
     row.setField(0, v);
