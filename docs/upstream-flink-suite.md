@@ -130,9 +130,19 @@ FLINK_SUITE_TEST='org.apache.paimon.flink.AppendTableITCase#testPartitionDynamic
   bin/flink-suite.sh paimon
 ```
 
-The Flink checkout remains byte-for-byte unchanged. A scheduled and manually dispatchable GitHub
-Actions workflow runs the same command, keeping the full compatibility suite out of the pull-request
-critical path while still detecting upstream-contract regressions.
+The Flink checkout remains byte-for-byte unchanged. Every push to `main` and every pull request
+runs the full planner runtime integration suite and the selected state/recovery suite in GitHub
+Actions. The weekly schedule and manual dispatch also run all format and connector suites.
+Each run rebuilds StreamFusion from that revision in the isolated suite directory and uploads
+its complete build/test log with the commit SHA. These checks complement the released-artifact
+SQL parity tests in ordinary CI; a passing local Maven suite alone does not establish upstream
+integration compatibility.
+
+Before committing operator changes, run the relevant unchanged upstream integration classes
+alongside the local SQL parity and recovery tests. Record the class selection and actual result
+in the commit. A selected run is not the full upstream suite, and pending CI is not a passing result.
+`FLINK_SUITE_REUSE_BUILD=true` reuses the existing StreamFusion binaries as well as Flink's;
+omit it after source changes so the upstream tests execute the current implementation.
 
 The validated Flink 2.2.1 baseline is 8,619 tests: 8,570 passed, 48 skipped by Flink, zero unexpected
 failures or errors, and the one independently reproduced `CURRENT_DATE` xfail described above.
