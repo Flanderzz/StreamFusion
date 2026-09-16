@@ -1663,6 +1663,48 @@ class RocksDBNativeStateBackendAllOperatorsTest {
         batch -> 0, Types.INT, MAX_PARALLELISM, 1, 0);
   }
 
+  @ParameterizedTest
+  @EnumSource(StateTransition.class)
+  void stateTransitionPreservesUpdateFastOffsetPrefix(StateTransition transition) throws Exception {
+    OperatorSubtaskState snapshot;
+    try (BufferAllocator allocator = new RootAllocator(); var harness = updateFastOffsetHarness()) {
+      transition.configureSource(harness);
+      harness.setup(new ArrowBatchSerializer());
+      harness.open();
+      harness.processElement(new StreamRecord<>(new ArrowBatch(RowDataArrowConverter.write(
+          List.of(GenericRowData.of(1L, 10L), GenericRowData.of(2L, 20L),
+              GenericRowData.of(3L, 30L), GenericRowData.of(4L, 40L)), TOPN_ROW, allocator))));
+      assertEquals(List.of(List.of(RowKind.INSERT, 2L, 20L), List.of(RowKind.INSERT, 3L, 30L)),
+          collectDedupless(harness));
+      snapshot = transition.snapshot(harness);
+    }
+    try (BufferAllocator allocator = new RootAllocator(); var harness = updateFastOffsetHarness()) {
+      transition.configureRestore(harness);
+      harness.setup(new ArrowBatchSerializer());
+      harness.initializeState(snapshot);
+      harness.open();
+      harness.processElement(new StreamRecord<>(new ArrowBatch(RowDataArrowConverter.write(
+          List.of(rowOfKind(RowKind.UPDATE_AFTER, 3, 5)), TOPN_ROW, allocator, true))));
+      assertEquals(List.of(List.of(RowKind.UPDATE_BEFORE, 3L, 30L),
+          List.of(RowKind.UPDATE_BEFORE, 2L, 20L), List.of(RowKind.UPDATE_AFTER, 1L, 10L),
+          List.of(RowKind.UPDATE_AFTER, 2L, 20L)), collectDedupless(harness));
+      harness.processElement(new StreamRecord<>(new ArrowBatch(RowDataArrowConverter.write(
+          List.of(rowOfKind(RowKind.UPDATE_AFTER, 3, 4), rowOfKind(RowKind.UPDATE_AFTER, 2, 20)),
+          TOPN_ROW, allocator, true))));
+      assertEquals(List.of(List.of(RowKind.UPDATE_BEFORE, 2L, 20L),
+          List.of(RowKind.UPDATE_AFTER, 2L, 20L)), collectDedupless(harness));
+    }
+  }
+
+  private static KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch>
+      updateFastOffsetHarness() throws Exception {
+    return new KeyedOneInputStreamOperatorTestHarness<>(
+        new NativeColumnarTopNOperator(new int[0], new int[0], TOPN_ROW,
+            new int[] {1}, new int[] {1}, new int[] {0}, 1, 3, false, false,
+            new int[] {0}, new int[] {-1}, true, false, -1, 0, 1),
+        batch -> 0, Types.INT, 1, 1, 0);
+  }
+
   private static final RowType UPDATE_FAST_ROW =
       RowType.of(
           new LogicalType[] {new BigIntType(), new BigIntType(), new BigIntType()},

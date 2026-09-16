@@ -74,6 +74,16 @@ final class NativeParity {
     assertEquals(sorted(host), sorted(nativeRows), "kinded changelog differs from host");
   }
 
+  static void assertOrderedKindedParity(Supplier<TableEnvironment> environment, String sql)
+      throws Exception {
+    List<List<Object>> host = collectKinded(environment.get(), sql);
+    TableEnvironment nativeEnvironment = environment.get();
+    PhysicalPlanScan scan = NativePlanner.install(nativeEnvironment);
+    List<List<Object>> actual = collectKinded(nativeEnvironment, sql);
+    assertTrue(scan.substitutions() > 0, "query did not route to native: " + scan.fallbackReasons());
+    assertEquals(host, actual, "ordered changelog differs from Flink");
+  }
+
   /** {@link #collect} with the row's kind prepended, so ±U/±D changes are distinguishable. */
   private static List<List<Object>> collectKinded(TableEnvironment environment, String sql)
       throws Exception {

@@ -16,8 +16,9 @@ class UpdatingLimitBenchmark {
   private static final long ROWS = Long.getLong("limit.rows", 1_000_000L);
   private static final int WARMUP = Integer.getInteger("limit.warmup", 2);
   private static final int RUNS = Integer.getInteger("limit.runs", 5);
+  private static final long OFFSET = Long.getLong("limit.offset", 0L);
   private static final String SQL = "INSERT INTO sink SELECT k, COUNT(*) AS n FROM src "
-      + "GROUP BY k ORDER BY n DESC, k ASC LIMIT 100";
+      + "GROUP BY k ORDER BY n DESC, k ASC LIMIT 100 OFFSET " + OFFSET;
 
   @Test
   void updatingLimit() throws Exception {
@@ -42,8 +43,8 @@ class UpdatingLimitBenchmark {
     double host = median(times[0]);
     double nativeTime = median(times[1]);
     System.out.printf(Locale.ROOT,
-        "[updating-limit] rows=%d Flink=%.6fs Native=%.6fs ratio=%.3fx host_trials=%s native_trials=%s%n",
-        ROWS, host, nativeTime, host / nativeTime, Arrays.toString(times[0]), Arrays.toString(times[1]));
+        "[updating-limit] rows=%d offset=%d Flink=%.6fs Native=%.6fs ratio=%.3fx host_trials=%s native_trials=%s%n",
+        ROWS, OFFSET, host, nativeTime, host / nativeTime, Arrays.toString(times[0]), Arrays.toString(times[1]));
   }
 
   private static double median(double[] values) {

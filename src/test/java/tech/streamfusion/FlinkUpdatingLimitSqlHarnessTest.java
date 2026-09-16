@@ -47,19 +47,46 @@ class FlinkUpdatingLimitSqlHarnessTest {
         false, null);
   }
 
-  @Test
-  void updateFastOffsetRemainsExplicitFallback() throws Exception {
-    NativeParity.assertFallbackReasonContains(() -> environment(false, false),
-        "SELECT k, COUNT(*) AS n FROM src GROUP BY k ORDER BY n DESC, k ASC LIMIT 2 OFFSET 1",
-        "update-fast rank with OFFSET");
+  @ParameterizedTest
+  @ValueSource(ints = {1, 2, 100})
+  void updateFastOffsetMatchesHost(int offset) throws Exception {
+    String sql = "SELECT k, COUNT(*) AS n FROM src GROUP BY k "
+        + "ORDER BY n DESC, k ASC NULLS FIRST LIMIT 2 OFFSET " + offset;
+    assertNative(() -> environment(false, false), sql, true, "UpdateFastStrategy");
+    NativeParity.assertChangelogParity(() -> environment(false, false), sql);
   }
 
   @ParameterizedTest
   @ValueSource(strings = {"", "ORDER BY total DESC NULLS LAST, k ASC NULLS FIRST "})
-  void retractingOffsetPreservesHostChangelogThroughFallback(String order) throws Exception {
-    NativeParity.assertFallbackReasonContains(() -> environment(true, false),
-        "SELECT k, SUM(v) AS total FROM src GROUP BY k " + order + "LIMIT 2 OFFSET 1",
-        "updating input with OFFSET requires Flink's positional changelog");
+  void retractingOffsetPreservesHostStoredRowKinds(String order) throws Exception {
+    String sql = "SELECT k, SUM(v) AS total FROM src GROUP BY k " + order + "LIMIT 2 OFFSET 1";
+    NativeParity.assertFallbackReasonContains(() -> environment(true, false), sql,
+        "retracting OFFSET without projected rank requires Flink's stored-row-kind semantics");
+  }
+
+  @Test
+  void nullableDuplicatesWithOffsetMatchHost() throws Exception {
+    Supplier<TableEnvironment> input = () -> {
+      var env = StreamExecutionEnvironment.getExecutionEnvironment();
+      env.setParallelism(1);
+      var table = StreamTableEnvironment.create(env);
+      table.createTemporaryView("src", table.fromChangelogStream(env.fromData(
+          Types.ROW_NAMED(new String[] {"k", "v"}, Types.LONG, Types.LONG),
+          Row.of(1L, 20L), Row.of(1L, 20L), Row.of(2L, 10L), Row.of(null, null),
+          Row.ofKind(RowKind.DELETE, 1L, 20L), Row.of(3L, 5L),
+          Row.ofKind(RowKind.DELETE, 2L, 10L))));
+      return table;
+    };
+    String sql = "SELECT k, v FROM src ORDER BY v DESC NULLS LAST, k ASC LIMIT 2 OFFSET 1";
+    NativeParity.assertFallbackReasonContains(input, sql,
+        "retracting OFFSET without projected rank requires Flink's stored-row-kind semantics");
+    String ranked = "SELECT k, v, rn FROM (SELECT k, v, ROW_NUMBER() OVER "
+        + "(ORDER BY v DESC NULLS LAST, k ASC) AS rn FROM src) WHERE rn BETWEEN 2 AND 3";
+    assertTrue(NativePlanner.explain(input.get(), ranked).contains("NativeColumnarTopN"));
+    NativeParity.assertOrderedKindedParity(input, ranked);
+    NativeParity.assertChangelogParity(input, ranked);
+    NativeParity.assertFallbackReasonContains(input, ranked.replace("SELECT k, v, rn FROM", "SELECT k, v FROM"),
+        "retracting OFFSET without projected rank requires Flink's stored-row-kind semantics");
   }
 
   private static void assertNative(Supplier<TableEnvironment> environment, String sql,
@@ -70,7 +97,8 @@ class FlinkUpdatingLimitSqlHarnessTest {
     String plan = NativePlanner.explain(environment.get(), sql);
     assertTrue(plan.contains("NativeColumnarTopN"), plan);
     assertTrue(plan.contains("NativeColumnarGroupAggregate"), plan);
-    if (kinded) NativeParity.assertKindedParity(environment, sql);
+    if (kinded && sql.contains("OFFSET")) NativeParity.assertOrderedKindedParity(environment, sql);
+    else if (kinded) NativeParity.assertKindedParity(environment, sql);
     else NativeParity.assertChangelogParity(environment, sql);
   }
 

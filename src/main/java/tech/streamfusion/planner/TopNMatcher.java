@@ -40,6 +40,11 @@ final class TopNMatcher {
       // A time-ordered rank is deduplication (DeduplicateMatcher), not a value Top-N.
       return "Top-N: a time-ordered rank is deduplication, not a value Top-N";
     }
+    if (offset(rank) > 0 && !rank.outputRankNumber()
+        && !ChangelogPlanUtils.isInsertOnly((StreamPhysicalRel) rank.getInput())
+        && !(rank.rankStrategy() instanceof RankProcessStrategy.UpdateFastStrategy)) {
+      return "Top-N: retracting OFFSET without projected rank requires Flink's stored-row-kind semantics";
+    }
     // The whole row crosses the boundary unchanged, so every column (incl. partition/order keys)
     // must be a type the conversion handles.
     if (!ArrowRowTypeSupport.supports(
@@ -105,10 +110,6 @@ final class TopNMatcher {
     // accumulate every version). It routes to the update-fast ranker, which mirrors Flink's
     // UpdatableTopNFunction/FastTop1Function state shape.
     if (rank.rankStrategy() instanceof RankProcessStrategy.UpdateFastStrategy) {
-      if (TopNMatcher.offset(rank) > 0) {
-        ctx.decline("Top-N: update-fast rank with OFFSET runs on the host");
-        return null;
-      }
       int[] updateFastPartitions = TopNMatcher.partitionColumns(rank);
       return new StreamPhysicalNativeColumnarTopN(
           rank.getCluster(),
@@ -119,7 +120,7 @@ final class TopNMatcher {
           TopNMatcher.sortIndices(rank),
           TopNMatcher.sortAscending(rank),
           TopNMatcher.sortNullsFirst(rank),
-          0,
+          TopNMatcher.offset(rank),
           TopNMatcher.limit(rank),
           TopNMatcher.outputRankNumber(rank),
           false,

@@ -34,9 +34,16 @@ three natively:
 Idle-state TTL is native across all three — see [TTL semantics](index.md#idle-state-ttl) and
 [Configuration](../configuration.md) for the flag surface.
 
-Also native: an `OFFSET` on any non-update-fast shape, a projected rank number, and both
-insert-only and retracting changelog input. `RANK`/`DENSE_RANK` never reach the matcher at all —
+Also native: a projected rank number and both insert-only and retracting changelog input.
+`OFFSET` runs natively over insert-only and update-fast inputs; a general retracting input
+requires a projected rank when an offset is present. `RANK`/`DENSE_RANK` never reach the matcher at all —
 Flink itself rejects them in streaming, so that's parity, not a gap.
+
+An update-fast offset retains ranks 1 through rankEnd, including the hidden prefix, so unique-key
+updates can move rows across the visible boundary. Its output uses Flink's positional update
+cascades even when rank is not projected. An updated row moving into the hidden prefix retracts
+its former visible position before the remaining visible transitions. Checkpoints and canonical
+memory/RocksDB transitions retain the prefix and reapply the selected range on restore.
 
 ## Processing-time first-N
 
@@ -71,8 +78,10 @@ Reproduce with `SF_BENCHMARK=true mvn -Pbench -pl :streamfusion-runtime -am test
 
 - A non-constant (variable) rank range.
 - A row type the native converter can't carry.
-- An **update-fast** rank paired with an `OFFSET` — every other update-fast shape, including plain
-  `rn <= 1`, is native.
+- A general **retracting** input with an `OFFSET` and no projected rank. Flink's hidden-rank
+  emission mutates retained row kinds, affecting later retraction matching. The native immutable
+  row buffer does not yet reproduce that state contract; this case stays on Flink, as tracked in
+  [#102](https://github.com/datafusion-contrib/StreamFusion/issues/102).
 - Time-ordered ranks beyond the existing rank-1 dedup forms and the processing-time first-N
   form above: event-time N > 1, descending processing-time N > 1, updating first-N input,
   first-N with an offset, or a first-N bound beyond the signed 32-bit counter range.

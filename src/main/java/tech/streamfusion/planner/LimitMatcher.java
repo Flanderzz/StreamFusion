@@ -26,7 +26,7 @@ import org.apache.flink.table.planner.plan.utils.RankProcessStrategy;
  * conversion carries. The rank window is {@code [offset+1, offset+fetch]}; an {@code OFFSET} routes
  * through the retracting ranker (which keeps the full buffer), a no-offset limit through the
  * append-only one. Updating inputs reuse the host's selected retract or update-fast strategy;
- * the latter replaces rows by their unique key and currently requires a zero offset.
+ * the latter replaces rows by their unique key while retaining the skipped prefix.
  */
 final class LimitMatcher {
 
@@ -100,15 +100,11 @@ final class LimitMatcher {
       }
       int[] rowKeyColumns = null;
       if (strategy instanceof RankProcessStrategy.UpdateFastStrategy updateFast) {
-        if (offset > 0) {
-          ctx.decline("limit: update-fast rank with OFFSET runs on the host");
-          return null;
-        }
         rowKeyColumns = updateFast.getPrimaryKeys();
       }
-      if (offset > 0
+      if (offset > 0 && rowKeyColumns == null
           && !ChangelogPlanUtils.isInsertOnly((StreamPhysicalRel) sort.getInput())) {
-        ctx.decline("limit: updating input with OFFSET requires Flink's positional changelog");
+        ctx.decline("limit: retracting OFFSET without projected rank requires Flink's stored-row-kind semantics");
         return null;
       }
       return new StreamPhysicalNativeColumnarTopN(

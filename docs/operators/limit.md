@@ -1,14 +1,17 @@
 # LIMIT
 
 **Status:** Native — `LIMIT`/`FETCH` over insert-only or updating input. `OFFSET` is native over
-insert-only input; updating OFFSET shapes remain on Flink.
+insert-only and update-fast input; general retracting OFFSET remains on Flink.
 
 Flink lowers a `LIMIT`/`FETCH` clause to a rank filter and reuses the same rank operator family as
 [Top-N](top-n.md) — a plain `LIMIT n` is nothing more than a rank filter with a constant range
 starting at 1. Everything the Top-N page describes about ranker selection and idle-state TTL
 applies here unchanged, since it *is* the same operator underneath.
 
-`OFFSET` is handled: it runs over the retracting ranker, applied to the (insert-only) input.
+An insert-only `OFFSET` uses the full-buffer retracting ranker. An update-fast `OFFSET` uses
+unique-key replacement state, retaining ranks 1 through `offset + fetch` and emitting only
+the selected range. The hidden prefix must survive checkpoints because later updates can move
+its rows into view.
 
 ## Updating input
 
@@ -18,6 +21,11 @@ update-fast ranker and replaces prior versions by the planner's unique key. Reco
 strategy after substitution would be unsafe: that input may already omit UPDATE_BEFORE rows.
 General retracting aggregates and unordered updating `LIMIT` use the full-buffer retracting
 ranker, which can promote a row beyond the selected range when a current row is deleted.
+
+Update-fast OFFSET matches Flink's ordered positional UPDATE_BEFORE/UPDATE_AFTER cascades,
+including when an updated key moves into the hidden prefix and when a restored visible row
+receives an identical update. Tests cover projected and hidden rank, tied sort keys, NULL keys,
+offsets beyond the available rows, and memory/RocksDB restore of the hidden prefix.
 
 The grouped pipeline stays columnar across the singleton exchange. Tests compare raw row kinds
 with mini-batching disabled, including NULL ordering, decrements and complete group deletion.
@@ -46,13 +54,21 @@ the plan asserts native aggregation and Top-N. This row-fed composition is subst
 than Flink. The change adds verified composition through the existing rankers, not a throughput
 improvement; reducing the existing update-fast ranker's cost remains separate optimization work.
 
+The same workload with `LIMIT 100 OFFSET 1`, using the same release build and measurement
+method, gave medians of **0.400610s Flink / 0.785646s native (0.510x)**. This also expands verified
+native composition without a standalone throughput gain. Reproduce with
+`SF_BENCHMARK=true mvn -Pbench -pl :streamfusion-runtime -am test
+-Dtest=UpdatingLimitBenchmark -Dlimit.offset=1 -Dsurefire.failIfNoSpecifiedTests=false`.
+Omit `-Dlimit.offset=1` to measure the zero-offset case.
+
 ## Gap
 
 - MAP/MULTISET fields in retained rows, including nested ARRAY/ROW fields, because the shared
   Top-N row codec cannot store them. These queries fall back before operator initialization.
 - A `LIMIT`/`OFFSET` with no `FETCH` (row count) at all — an unbounded skip.
-- Updating input paired with `OFFSET`. Flink's offset path emits positional UPDATE_BEFORE /
-  UPDATE_AFTER cascades even without a projected rank; the native membership-diff path is not
-  equivalent. Update-fast OFFSET also needs explicit replacement-state support. These remain
-  tracked in [#102](https://github.com/datafusion-contrib/StreamFusion/issues/102).
+- General retracting input paired with `OFFSET`. In released Flink, hidden-rank emission mutates
+  stored row kinds and affects later retraction matching. A positional diff of immutable payloads
+  alone does not reproduce that behavior. The same shared Top-N shape falls back when its rank is
+  not projected; a projected rank avoids that stored-row mutation and remains native. This is the
+  remaining work in [#102](https://github.com/datafusion-contrib/StreamFusion/issues/102).
 - A SortLimit whose selected Flink rank strategy cannot be read or has not been resolved.

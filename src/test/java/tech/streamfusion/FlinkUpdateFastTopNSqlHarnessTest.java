@@ -61,16 +61,17 @@ class FlinkUpdateFastTopNSqlHarnessTest {
     NativeParity.assertChangelogParity(FlinkUpdateFastTopNSqlHarnessTest::environment, TOP_1);
   }
 
-  /** The OFFSET window is the one update-fast shape still on the host. */
-  @Test
-  void updateFastRankWithOffsetFallsBackToHost() throws Exception {
-    NativeParity.assertFallbackReasonContains(
-        FlinkUpdateFastTopNSqlHarnessTest::environment,
-        "SELECT g, k, cnt, rn FROM ("
-            + "  SELECT g, k, cnt, ROW_NUMBER() OVER (PARTITION BY g ORDER BY cnt DESC) AS rn"
-            + "  FROM (SELECT g, k, COUNT(*) AS cnt FROM src GROUP BY g, k)"
-            + ") WHERE rn > 1 AND rn <= 3",
-        "update-fast rank with OFFSET");
+  @org.junit.jupiter.params.ParameterizedTest
+  @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+  void updateFastRankWithOffsetMatchesHost(boolean outputRank) throws Exception {
+    String sql = "SELECT g, k, cnt" + (outputRank ? ", rn" : "") + " FROM ("
+        + "SELECT g, k, cnt, ROW_NUMBER() OVER (PARTITION BY g ORDER BY cnt DESC) AS rn"
+        + " FROM (SELECT g, k, COUNT(*) AS cnt FROM src GROUP BY g, k))"
+        + " WHERE rn > 1 AND rn <= 3";
+    String plan = tech.streamfusion.planner.NativePlanner.explain(environment(), sql);
+    org.junit.jupiter.api.Assertions.assertTrue(plan.contains("NativeColumnarTopN"), plan);
+    NativeParity.assertOrderedKindedParity(FlinkUpdateFastTopNSqlHarnessTest::environment, sql);
+    NativeParity.assertChangelogParity(FlinkUpdateFastTopNSqlHarnessTest::environment, sql);
   }
 
   @Test
