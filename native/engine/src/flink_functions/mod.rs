@@ -29,6 +29,7 @@ mod ascii;
 mod binary_strings;
 mod charset;
 mod chr;
+mod if_null;
 pub(crate) mod integer_divide;
 mod is_json;
 mod json_exists;
@@ -167,6 +168,7 @@ pub(crate) fn function(op: i64, arity: usize) -> Option<ScalarUDF> {
         155 => timestamp_millis::function(timestamp_millis::Operation::Millis),
         156 => timestamp_millis::function(timestamp_millis::Operation::SubtractMillis),
         157 => timestamp_millis::function(timestamp_millis::Operation::SubtractMonths),
+        158 => if_null::function(),
         _ => return None,
     })
 }

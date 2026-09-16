@@ -730,6 +730,12 @@ final class RexExpression {
     if ("COALESCE".equals(functionName)) {
       return emitCoalesceAsCase(call.getOperands());
     }
+    if (call.getOperator()
+            instanceof org.apache.flink.table.planner.functions.bridging.BridgingSqlFunction function
+        && function.getDefinition()
+            == org.apache.flink.table.functions.BuiltInFunctionDefinitions.IF_NULL) {
+      return emitBuiltinCall(call, 158);
+    }
     if ("ENCODE".equals(functionName)) {
       return emitCharsetFunction(call, 120, SqlTypeFamily.CHARACTER);
     }
