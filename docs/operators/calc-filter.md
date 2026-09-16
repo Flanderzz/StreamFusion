@@ -79,6 +79,10 @@ external Java types are `String`, boxed/primitive numeric and boolean values, `B
 Fixed-size `BINARY`, temporal UDF signatures, collections, and alternate Java conversion classes
 outside these mappings retain their existing fallback.
 
+Functions implementing Flink's `SpecializedFunction` also fall back. Their implementation must
+be created with the resolved call types and Flink's code-generation context; invoking the
+registered, unspecialized instance through the native bridge can produce incorrect results.
+
 `DECIMAL` UDF results are admitted as direct projections. Conversion uses Flink's
 `DecimalData.fromBigDecimal`: declared scale, `HALF_UP`, and NULL on precision overflow, including
 precision 38. Trailing zeros survive the round trip. A nested consumer or predicate falls back:
@@ -337,8 +341,9 @@ TINYINT/SMALLINT `-1`. NULL remains NULL for every target.
 It does not trim whitespace; empty strings, other numeric values and Unicode lookalikes
 are invalid. NULL remains NULL. Flink's resolved result type/nullability is retained.
 
-With the default cast behavior an invalid token fails the query, including for a NOT NULL
-source. With `table.exec.legacy-cast-behaviour=ENABLED` it produces NULL. For a NOT NULL
+With the default cast behavior an invalid token fails the query with Flink's `TableException`
+and parse message preserved through JNI, including for a NOT NULL source.
+With `table.exec.legacy-cast-behaviour=ENABLED` it produces NULL. For a NOT NULL
 source, Flink retains a NOT NULL result declaration even in legacy mode; the existing
 sink enforcer therefore rejects or drops malformed rows according to its ERROR/DROP setting.
 Both outcomes are tested against Flink. CASE can skip
@@ -362,8 +367,8 @@ NULL input remains NULL. Ordinary CAST fails on invalid input in default mode; T
 and legacy-mode CAST return NULL. CASE suppresses an unselected failing cast. Default CAST
 inside AND/OR stays on Flink to preserve row short-circuiting; TRY_CAST and legacy CAST
 can compose natively. NOT NULL sink enforcement remains Flink's ERROR/DROP policy.
-Native integer-parse failures use the existing NativeException wrapper; their exception class
-differs from Flink's NumberFormatException. Successful results and NULL-on-error policies match.
+Native integer-parse failures preserve Flink's `NumberFormatException` and parse message
+through JNI. Successful results and NULL-on-error policies match as well.
 
 Integer formatting uses canonical decimal text, including signed minima and zero.
 `VARCHAR(n)` truncates to `n` characters; `CHAR(n)` also pads shorter results with spaces.

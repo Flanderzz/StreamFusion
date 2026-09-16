@@ -55,9 +55,12 @@ class FlinkIntegerStringCastSqlHarnessTest {
       Exception failure = assertThrows(Exception.class, () -> collect(table,
           "SELECT CAST(s AS INT) FROM src"));
       StringBuilder messages = new StringBuilder();
+      boolean typedFailure = false;
       for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
         messages.append(cause.getMessage());
+        typedFailure |= cause instanceof NumberFormatException;
       }
+      assertTrue(typedFailure, messages.toString());
       assertTrue(messages.toString().contains("For input string:"), messages.toString());
       if (scan != null) assertTrue(scan.substitutions() > 0, scan::explainSummary);
     }

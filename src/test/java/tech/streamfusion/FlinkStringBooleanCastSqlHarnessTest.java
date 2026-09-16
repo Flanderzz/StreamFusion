@@ -70,9 +70,14 @@ class FlinkStringBooleanCastSqlHarnessTest {
                   }
                 });
         StringBuilder causes = new StringBuilder();
+        boolean typedFailure = false;
         for (Throwable cause = error; cause != null; cause = cause.getCause()) {
           causes.append(cause.getMessage()).append('\n');
+          typedFailure |=
+              cause instanceof org.apache.flink.table.api.TableException
+                  && cause.getMessage().contains("Cannot parse '");
         }
+        assertTrue(typedFailure, causes.toString());
         assertTrue(
             causes.toString().contains("Cannot parse '" + value + "' as BOOLEAN."),
             causes.toString());

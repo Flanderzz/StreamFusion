@@ -17,6 +17,20 @@ pub struct FlinkException {
 }
 
 impl FlinkException {
+    pub fn table(message: String) -> Self {
+        Self {
+            class: "org/apache/flink/table/api/TableException",
+            message,
+        }
+    }
+
+    pub fn number_format(message: String) -> Self {
+        Self {
+            class: "java/lang/NumberFormatException",
+            message,
+        }
+    }
+
     pub fn class_cast(source: &str, target: &str) -> Self {
         Self {
             class: "java/lang/ClassCastException",
