@@ -264,9 +264,8 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
     // (StreamPhysicalLimit). Both lower to a global (no-partition) ROW_NUMBER rank, so they reuse the
     // native columnar Top-N operator with an empty partition key: the sort-limit carries the order
     // keys and emits a changelog as the top set changes; the plain limit has no sort keys, so the
-    // ranker keeps the first n rows by arrival (the newest beyond n never enters — insert-only). Like
-    // the Top-N above it emits a changelog, so it is changelog-safe and requires an insert-only input
-    // (only the append-only ranker is implemented; a retracting input falls back). It always reports:
+    // ranker keeps the first n rows by arrival. Updating inputs use Flink's selected replacement or
+    // retract strategy; unsupported OFFSET shapes stay on the host. It always reports:
     // a sort-limit emits a changelog, so it would otherwise slip past the insert-only guard
     // unreported, leaving a non-accelerating query unable to explain itself (ticket 29).
     entries.add(

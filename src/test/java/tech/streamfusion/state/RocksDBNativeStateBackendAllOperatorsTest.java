@@ -1581,6 +1581,53 @@ class RocksDBNativeStateBackendAllOperatorsTest {
     }
   }
 
+  @ParameterizedTest
+  @EnumSource(StateTransition.class)
+  void stateTransitionPreservesGlobalUpdatingLimit(StateTransition transition) throws Exception {
+    for (int mode = 0; mode < 3; mode++) {
+      OperatorSubtaskState snapshot;
+      try (BufferAllocator allocator = new RootAllocator(); var harness = globalUpdatingLimitHarness(mode)) {
+        transition.configureSource(harness);
+        harness.setup(new ArrowBatchSerializer());
+        harness.open();
+        harness.processElement(new StreamRecord<>(new ArrowBatch(RowDataArrowConverter.write(
+            List.of(GenericRowData.of(1L, 30L), GenericRowData.of(2L, 20L),
+                GenericRowData.of(3L, 10L)), TOPN_ROW, allocator))));
+        collectDedupless(harness);
+        snapshot = transition.snapshot(harness);
+      }
+      try (BufferAllocator allocator = new RootAllocator(); var harness = globalUpdatingLimitHarness(mode)) {
+        transition.configureRestore(harness);
+        harness.setup(new ArrowBatchSerializer());
+        harness.initializeState(snapshot);
+        harness.open();
+        RowData change = mode == 0 ? rowOfKind(RowKind.UPDATE_AFTER, 2, 5)
+            : mode == 1 ? rowOfKind(RowKind.DELETE, 3, 10) : rowOfKind(RowKind.DELETE, 1, 30);
+        harness.processElement(new StreamRecord<>(new ArrowBatch(RowDataArrowConverter.write(
+            List.of(change), TOPN_ROW, allocator, true))));
+        List<List<Object>> expected = mode == 0
+            ? List.of(List.of(RowKind.UPDATE_BEFORE, 2L, 20L), List.of(RowKind.UPDATE_AFTER, 2L, 5L))
+            : mode == 1
+                ? List.of(List.of(RowKind.DELETE, 3L, 10L), List.of(RowKind.INSERT, 1L, 30L))
+                : List.of(List.of(RowKind.DELETE, 1L, 30L), List.of(RowKind.INSERT, 3L, 10L));
+        assertEquals(expected, collectDedupless(harness));
+      }
+    }
+  }
+
+  private static KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch>
+      globalUpdatingLimitHarness(int mode) throws Exception {
+    var operator = new NativeColumnarTopNOperator(
+        new int[0], new int[0], TOPN_ROW,
+        mode == 2 ? new int[0] : new int[] {1},
+        mode == 2 ? new int[0] : new int[] {1},
+        mode == 2 ? new int[0] : new int[] {0},
+        0, 2, false, mode != 0,
+        mode == 0 ? new int[] {0} : null, mode == 0 ? new int[] {-1} : null,
+        true, false, -1, 0, 1);
+    return new KeyedOneInputStreamOperatorTestHarness<>(operator, batch -> 0, Types.INT, 1, 1, 0);
+  }
+
   private static final RowType UPDATE_FAST_ROW =
       RowType.of(
           new LogicalType[] {new BigIntType(), new BigIntType(), new BigIntType()},
