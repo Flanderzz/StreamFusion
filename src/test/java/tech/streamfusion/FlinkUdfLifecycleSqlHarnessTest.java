@@ -11,6 +11,44 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 class FlinkUdfLifecycleSqlHarnessTest {
+  @org.junit.jupiter.api.Test
+  void specializedFunctionsRetainTheirHostCallContext() throws Exception {
+    NativeParity.assertFallbackReasonContains(
+        () -> {
+          var table = environment();
+          table.createTemporarySystemFunction("TYPE_OF", new SpecializedTypeOf());
+          return table;
+        },
+        "SELECT TYPE_OF(a), TYPE_OF(CAST(b AS DECIMAL(10, 2))) FROM inputs",
+        "UDF specialization requires Flink's code-generation context");
+  }
+
+  public static class SpecializedTypeOf extends ScalarFunction
+      implements org.apache.flink.table.functions.SpecializedFunction {
+    private final String type;
+
+    public SpecializedTypeOf() {
+      this("UNSPECIALIZED");
+    }
+
+    public SpecializedTypeOf(String type) {
+      this.type = type;
+    }
+
+    public String eval(
+        @org.apache.flink.table.annotation.DataTypeHint(
+                inputGroup = org.apache.flink.table.annotation.InputGroup.ANY)
+            Object value) {
+      return type;
+    }
+
+    @Override
+    public ScalarFunction specialize(SpecializedContext context) {
+      return new SpecializedTypeOf(
+          context.getCallContext().getArgumentDataTypes().get(0).toString());
+    }
+  }
+
   @ParameterizedTest
   @ValueSource(strings = {
     "SELECT MY_ADD(a) FROM inputs",
@@ -34,7 +72,8 @@ class FlinkUdfLifecycleSqlHarnessTest {
       rows[i] = Row.of(i % 5 == 0 ? null : i, i % 7 == 0 ? null : i * 100);
     }
     table.createTemporaryView(
-        "inputs", env.fromData(Types.ROW_NAMED(new String[] {"a", "b"}, Types.INT, Types.INT), rows));
+        "inputs",
+        env.fromData(Types.ROW_NAMED(new String[] {"a", "b"}, Types.INT, Types.INT), rows));
     return table;
   }
 

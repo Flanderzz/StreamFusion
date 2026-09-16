@@ -110,7 +110,13 @@ where
         match parsed {
             Ok(value) => result.append_value(value),
             Err(_) if null_on_error => result.append_null(),
-            Err(reason) => return exec_err!("For input string: '{trimmed}'. {reason}"),
+            Err(reason) => {
+                return Err(datafusion::common::DataFusionError::External(Box::new(
+                    streamfusion_bridge::FlinkException::number_format(format!(
+                        "For input string: '{trimmed}'. {reason}"
+                    )),
+                )))
+            }
         }
     }
     Ok(Arc::new(result.finish()))

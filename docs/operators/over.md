@@ -9,6 +9,12 @@ type rather than being widened). `FIRST_VALUE`/`LAST_VALUE` and the window funct
 `ROW_NUMBER`/`RANK`/`DENSE_RANK` (no value column, unbounded frame) are admitted alongside the
 aggregates below.
 
+Constant NULL arguments are also supported with their declared type, including
+`MIN(CAST(NULL AS VARCHAR))`, `MAX(CAST(NULL AS VARCHAR))`, and `COUNT(CAST(NULL AS VARCHAR))`.
+They can share a frame with numeric aggregates and `COUNT(*)`; typed NULL Arrow columns are
+handled without attempting a numeric conversion.
+Running MIN/MAX checkpoints preserve this typed NULL state alongside other aggregates.
+
 Event-time parity fixtures keep the watermark behind the entire input timestamp range until
 end of input, so file enumeration order cannot introduce accidental late rows. Late-row tests
 control the input order separately.
@@ -63,7 +69,7 @@ per-batch timestamp, a wall-clock-interval frame has no meaningful definition.
 The matcher declines:
 
 - Direct `AVG` calls. Flink can lower some SQL AVG forms to supported SUM/COUNT aggregates.
-- A decimal or other non-numeric value column.
+- A decimal or other non-numeric value column, except constant NULL arguments.
 - A `PARTITION BY` key outside bigint/int/string/boolean/date/timestamp/decimal.
 - A frame not of the form `… PRECEDING .. CURRENT ROW` (a `ROWS`/`RANGE` lower bound that isn't a
   constant preceding offset or UNBOUNDED PRECEDING).

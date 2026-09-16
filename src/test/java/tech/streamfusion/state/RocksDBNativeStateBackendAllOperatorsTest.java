@@ -2377,6 +2377,47 @@ class RocksDBNativeStateBackendAllOperatorsTest {
     }
   }
 
+  @ParameterizedTest
+  @EnumSource(StateTransition.class)
+  void temporalSortRetainsLateCutoffAcrossStateTransitions(StateTransition transition)
+      throws Exception {
+    for (boolean pending : new boolean[] {false, true}) {
+      OperatorSubtaskState snapshot;
+      try (BufferAllocator allocator = new RootAllocator();
+          var before = sorterHarness(new NativeColumnarTemporalSortOperator(1, SORT_ROW))) {
+        transition.configureSource(before);
+        before.setup(new ArrowBatchSerializer());
+        before.open();
+        before.processElement(new StreamRecord<>(sortBatch(allocator, sortRow(1, 50))));
+        if (pending)
+          before.processElement(new StreamRecord<>(sortBatch(allocator, sortRow(7, 300))));
+        before.processWatermark(new Watermark(200));
+        assertEquals(List.of(List.of(1L, 50L)), collectSorted(before));
+        snapshot = transition.snapshot(before);
+      }
+      var operator = new NativeColumnarTemporalSortOperator(1, SORT_ROW);
+      try (BufferAllocator allocator = new RootAllocator();
+          var after = sorterHarness(operator)) {
+        transition.configureRestore(after);
+        after.setup(new ArrowBatchSerializer());
+        after.initializeState(snapshot);
+        after.open();
+        if (transition != StateTransition.ROCKSDB_TO_MEMORY)
+          assertTrue(NativeStateRouteProbe.directRocksDBState(operator));
+        after.processElement(
+            new StreamRecord<>(
+                sortBatch(
+                    allocator, sortRow(3, 49), sortRow(4, 50), sortRow(5, 150), sortRow(6, 150))));
+        after.processWatermark(new Watermark(400));
+        assertEquals(
+            pending
+                ? List.of(List.of(5L, 150L), List.of(6L, 150L), List.of(7L, 300L))
+                : List.of(List.of(5L, 150L), List.of(6L, 150L)),
+            collectSorted(after));
+      }
+    }
+  }
+
   private enum StateTransition {
     ROCKSDB_CHECKPOINT,
     MEMORY_TO_ROCKSDB,

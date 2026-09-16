@@ -52,6 +52,25 @@ class FlinkRunningRowsSqlHarnessTest {
             + "SUM(DISTINCT v) OVER w FROM src WINDOW w AS (PARTITION BY k ORDER BY rt ROWS UNBOUNDED PRECEDING)");
   }
 
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "ROWS UNBOUNDED PRECEDING",
+        "RANGE UNBOUNDED PRECEDING",
+        "ROWS BETWEEN 3 PRECEDING AND CURRENT ROW",
+        "RANGE BETWEEN INTERVAL '1' SECOND PRECEDING AND CURRENT ROW"
+      })
+  void typedNullStringConstantsRetainTheirOverResultType(String frame) throws Exception {
+    String sql =
+        "SELECT id, COUNT(*) OVER w, MAX(CAST(NULL AS VARCHAR)) OVER w, "
+            + "MIN(CAST(NULL AS VARCHAR)) OVER w, COUNT(CAST(NULL AS VARCHAR)) OVER w "
+            + "FROM src WINDOW w AS (PARTITION BY k ORDER BY rt "
+            + frame
+            + ")";
+    assertNative(sql);
+    NativeParity.assertParity(() -> environment(100, false), sql);
+  }
+
   private static void assertNative(String sql) {
     String plan = NativePlanner.explain(environment(100, false), sql);
     assertTrue(plan.contains("NativeOverAggregate"), plan);

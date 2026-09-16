@@ -16,6 +16,7 @@ const SINGLETON_KEY_GROUP: i32 = 0;
 /// The arrival-sequence high-water mark, persisted at checkpoint under a reserved key whose
 /// leading bytes can never be a subtask's key group (the snapshot-timer key's convention).
 const SEQ_KEY: &[u8] = b"\xff\xff\xff\xffstreamfusion-temporal-sort-seq";
+const LAST_EMITTED_KEY: &[u8] = b"\xff\xff\xff\xffstreamfusion-temporal-sort-last-emitted";
 
 /// Bespoke persistent buffer for the event-time sort: rows append on arrival — the buffer IS
 /// RocksDB, with no resident copy — under a fresh arrival sequence, and a watermark firing
@@ -27,6 +28,7 @@ pub(crate) struct RocksTemporalSortBuffer {
     converter: RowConverter,
     schema: SchemaRef,
     next_seq: u64,
+    last_emitted: Option<i64>,
     generation: i64,
     write_batch_size: usize,
 }
@@ -86,6 +88,10 @@ impl RocksTemporalSortBuffer {
                             .next_seq
                             .max(u64::from_be_bytes(value[..8].try_into().unwrap()));
                     }
+                } else if key.as_ref() == LAST_EMITTED_KEY {
+                    let timestamp =
+                        i64::from_le_bytes(value[..8].try_into().expect("last emitted"));
+                    buffer.last_emitted = buffer.last_emitted.max(Some(timestamp));
                 } else if key.len() == KEY_LEN {
                     let kg = i32::from_be_bytes(key[..4].try_into().expect("key group prefix"));
                     if key_groups.contains(&kg) {
@@ -110,12 +116,18 @@ impl RocksTemporalSortBuffer {
                 .collect(),
         )
         .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        let last_emitted = opened
+            .db
+            .get(LAST_EMITTED_KEY)
+            .map_err(re)?
+            .map(|bytes| i64::from_le_bytes(bytes[..8].try_into().expect("last emitted")));
         Ok(Self {
             db: opened.db,
             _cache: opened.cache,
             converter,
             schema,
             next_seq: 0,
+            last_emitted,
             generation: 0,
             write_batch_size: opened.write_batch_size,
         })
@@ -123,6 +135,14 @@ impl RocksTemporalSortBuffer {
 
     pub(crate) fn schema(&self) -> SchemaRef {
         self.schema.clone()
+    }
+
+    pub(crate) fn last_emitted(&self) -> Option<i64> {
+        self.last_emitted
+    }
+
+    pub(crate) fn set_last_emitted(&mut self, timestamp: Option<i64>) {
+        self.last_emitted = timestamp;
     }
 
     /// Appends a batch's rows: one KV per row in arrival order, through a WAL-off write batch in
@@ -181,8 +201,8 @@ impl RocksTemporalSortBuffer {
             .map(Some)
     }
 
-    /// The full buffered contents in arrival order, for canonical savepoints — `None` when empty,
-    /// so the exported blob stays byte-compatible with the memory snapshot's "no rows, no bytes".
+    /// The full buffered contents in arrival order, for canonical savepoints — `None` when empty.
+    /// The sorter serializes the late-row cutoff separately from these pending rows.
     pub(crate) fn scan_buffered(&self) -> Result<Option<RecordBatch>, DataFusionError> {
         let mut rows: Vec<Box<[u8]>> = Vec::new();
         for row in self.db.iterator(IteratorMode::Start) {
@@ -218,6 +238,9 @@ impl RocksTemporalSortBuffer {
     ) -> Result<RocksCheckpointManifest, DataFusionError> {
         let mut writes = FlinkWriteBatch::new(&self.db, self.write_batch_size);
         writes.put(SEQ_KEY, self.next_seq.to_be_bytes())?;
+        if let Some(timestamp) = self.last_emitted {
+            writes.put(LAST_EMITTED_KEY, timestamp.to_le_bytes())?;
+        }
         writes.finish()?;
         if snapshot_dir.is_empty() {
             return Ok(RocksCheckpointManifest::absent());
@@ -335,7 +358,9 @@ mod tests {
         let blob = rocks.store_snapshot().unwrap();
         let mut memory = TemporalSorter::restore(1, &blob);
         assert_eq!(memory.flush(400).unwrap(), rocks.flush(400).unwrap());
-        assert!(rocks.store_snapshot().unwrap().is_empty());
+        let mut empty = TemporalSorter::restore(1, &rocks.store_snapshot().unwrap());
+        empty.push(batch(&[30], &[300])).unwrap();
+        assert_eq!(empty.flush(400).unwrap().num_rows(), 0);
     }
 
     #[test]

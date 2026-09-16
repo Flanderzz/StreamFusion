@@ -1318,6 +1318,56 @@ fn proctime_over_running_sum_in_arrival_order() {
     assert_eq!(values(&out, 2), vec![10, 100, 30]); // running SUM per key, in arrival order
 }
 
+#[test]
+fn over_typed_null_extrema_survive_checkpoint_restore() {
+    for frame in [0, 3] {
+        let batch = RecordBatch::try_from_iter(vec![
+            ("k", Arc::new(Int64Array::from(vec![1, 1])) as ArrayRef),
+            (
+                "v",
+                Arc::new(StringArray::from(vec![None::<&str>, None])) as ArrayRef,
+            ),
+        ])
+        .unwrap();
+        let mut writer = OverWindowAggregator::new(
+            vec![3, 3, 0],
+            vec![1, 2, 3],
+            0,
+            vec![1, 1, 0],
+            vec![0],
+            frame,
+            0,
+            true,
+        );
+        let before = writer.push_proctime(batch.clone(), 0).unwrap();
+        assert_eq!(before.column(2).null_count(), 2);
+        assert_eq!(before.column(3).null_count(), 2);
+        assert_eq!(values(&before, 4), vec![1, 2]);
+        let snapshots = writer
+            .snapshot_partitions(8, &[-1])
+            .into_values()
+            .collect::<Vec<_>>();
+        let mut restored = OverWindowAggregator::restore_partitions(
+            vec![3, 3, 0],
+            vec![1, 2, 3],
+            0,
+            vec![1, 1, 0],
+            vec![0],
+            frame,
+            0,
+            true,
+            &snapshots,
+            0,
+            0,
+        );
+        let after = restored.push_proctime(batch, 0).unwrap();
+        assert_eq!(after.column(2).data_type(), &DataType::Utf8);
+        assert_eq!(after.column(2).null_count(), 2);
+        assert_eq!(after.column(3).null_count(), 2);
+        assert_eq!(values(&after, 4), vec![3, 4]);
+    }
+}
+
 // Independent value columns in one OVER group: SUM(v0) and MAX(v1) read different input columns.
 #[test]
 fn over_independent_value_columns() {

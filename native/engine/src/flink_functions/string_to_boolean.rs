@@ -46,7 +46,11 @@ fn cast(args: &[ArrayRef], null_on_error: bool) -> Result<ArrayRef> {
             None
         };
         if parsed.is_none() && !null_on_error {
-            return exec_err!("Cannot parse '{value}' as BOOLEAN.");
+            return Err(datafusion::common::DataFusionError::External(Box::new(
+                streamfusion_bridge::FlinkException::table(format!(
+                    "Cannot parse '{value}' as BOOLEAN."
+                )),
+            )));
         }
         result.append_option(parsed);
     }

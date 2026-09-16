@@ -1,8 +1,21 @@
 use crate::*;
 
+const SNAPSHOT_PREFIX: &[u8] = b"SFTSORT1";
+
+fn snapshot_with_last_emitted(buffer: Vec<u8>, last_emitted: Option<i64>) -> Vec<u8> {
+    let Some(timestamp) = last_emitted else {
+        return buffer;
+    };
+    let mut bytes = Vec::with_capacity(SNAPSHOT_PREFIX.len() + 8 + buffer.len());
+    bytes.extend_from_slice(SNAPSHOT_PREFIX);
+    bytes.extend_from_slice(&timestamp.to_le_bytes());
+    bytes.extend_from_slice(&buffer);
+    bytes
+}
+
 /// Event-time sort (Flink's `RowTimeSortOperator`): buffers input rows and, on a watermark, emits
 /// the rows whose rowtime is at or before it in ascending rowtime order, keeping the rest. Insert-
-/// only — the watermark guarantees no earlier-rowtime row can still arrive, so the emitted order is
+/// only — arrivals at or before the last emitted timestamp are discarded, so the emitted order is
 /// final. Ties at the same rowtime keep arrival order (a stable sort), matching the host. There is no
 /// key (a single distribution gathers the stream), so this is the columnar analog of the host's
 /// single-input event-time sort.
@@ -10,6 +23,7 @@ pub(crate) struct TemporalSorter {
     rt_column: usize,
     buffered: Vec<RecordBatch>,
     input_schema: Option<SchemaRef>,
+    last_emitted: Option<i64>,
     /// Persistent-state mode: the buffered rows live in the persistent store — the in-memory
     /// buffer stays empty, and a watermark firing is a range read over the stored rowtimes.
     #[cfg(feature = "rocksdb-state")]
@@ -23,6 +37,7 @@ impl TemporalSorter {
             rt_column,
             buffered: Vec::new(),
             input_schema: None,
+            last_emitted: None,
             #[cfg(feature = "rocksdb-state")]
             store: None,
             memory: OperatorMemory::unaccounted(),
@@ -31,6 +46,7 @@ impl TemporalSorter {
 
     #[cfg(feature = "rocksdb-state")]
     pub(crate) fn with_store(mut self, store: crate::state::RocksTemporalSortBuffer) -> Self {
+        self.last_emitted = store.last_emitted();
         self.store = Some(store);
         self
     }
@@ -51,8 +67,8 @@ impl TemporalSorter {
     }
 
     /// Writes restored blob snapshots through the persistent buffer once at open, so a canonical
-    /// or raw restore continues on the direct persistent path. The blob is the memory snapshot's
-    /// plain IPC stream in arrival order, so appending under fresh sequences keeps the order.
+    /// or raw restore continues on the direct persistent path. Restores the late-row cutoff and
+    /// appends pending rows under fresh sequences to keep arrival order.
     #[cfg(feature = "rocksdb-state")]
     pub(crate) fn import_snapshots(
         &mut self,
@@ -63,26 +79,30 @@ impl TemporalSorter {
             if bytes.is_empty() {
                 continue;
             }
-            let reader = arrow::ipc::reader::StreamReader::try_new(bytes.as_slice(), None)
-                .expect("sort buffer reader");
-            for batch in reader {
-                let batch = batch.expect("read sort buffer");
+            let restored = Self::restore(rt_column, bytes);
+            self.last_emitted = self.last_emitted.max(restored.last_emitted);
+            for batch in restored.buffered {
                 let rowtimes = rt_to_millis(batch.column(rt_column));
                 self.store_mut().push(&batch, &rowtimes)?;
             }
         }
+        let last_emitted = self.last_emitted;
+        self.store_mut().set_last_emitted(last_emitted);
         Ok(())
     }
 
-    /// The persistent buffer serialized as the memory snapshot's own plain-IPC blob (empty bytes
-    /// when nothing is buffered), for backend-independent canonical savepoints.
+    /// The persistent buffer and late-row cutoff in the memory snapshot format, for
+    /// backend-independent canonical savepoints, including checkpoints with no pending rows.
     #[cfg(feature = "rocksdb-state")]
     pub(crate) fn store_snapshot(&self) -> Result<Vec<u8>, DataFusionError> {
         let store = self.store.as_ref().expect("temporal-sort rocksdb store");
-        Ok(store
-            .scan_buffered()?
-            .map(|batch| write_ipc(&batch))
-            .unwrap_or_default())
+        Ok(snapshot_with_last_emitted(
+            store
+                .scan_buffered()?
+                .map(|batch| write_ipc(&batch))
+                .unwrap_or_default(),
+            self.last_emitted,
+        ))
     }
 
     /// Bounds the sort buffer by the operator's task off-heap budget (negative = unaccounted),
@@ -93,8 +113,19 @@ impl TemporalSorter {
         Ok(self)
     }
 
-    pub(crate) fn push(&mut self, batch: RecordBatch) -> Result<(), DataFusionError> {
+    pub(crate) fn push(&mut self, mut batch: RecordBatch) -> Result<(), DataFusionError> {
         self.input_schema = Some(batch.schema());
+        if let Some(last_emitted) = self.last_emitted {
+            let rowtimes = rt_to_millis(batch.column(self.rt_column));
+            let admitted: BooleanArray = rowtimes
+                .iter()
+                .map(|value| value.map(|timestamp| timestamp > last_emitted))
+                .collect();
+            batch = filter_record_batch(&batch, &admitted)?;
+        }
+        if batch.num_rows() == 0 {
+            return Ok(());
+        }
         #[cfg(feature = "rocksdb-state")]
         if self.store.is_some() {
             let rowtimes = rt_to_millis(batch.column(self.rt_column));
@@ -112,14 +143,26 @@ impl TemporalSorter {
     /// persistent-state mode (the firing reads the committed table).
     pub(crate) fn flush(&mut self, watermark: i64) -> Result<RecordBatch, DataFusionError> {
         #[cfg(feature = "rocksdb-state")]
-        if self.store.is_some() {
+        let result = if self.store.is_some() {
             let store = self.store.as_mut().expect("temporal-sort rocksdb store");
             let schema = store.schema();
-            return Ok(store
+            store
                 .take_complete(watermark)?
-                .unwrap_or_else(|| RecordBatch::new_empty(schema)));
+                .unwrap_or_else(|| RecordBatch::new_empty(schema))
+        } else {
+            self.flush_memory(watermark)
+        };
+        #[cfg(not(feature = "rocksdb-state"))]
+        let result = self.flush_memory(watermark);
+        if result.num_rows() > 0 {
+            let rowtimes = rt_to_millis(result.column(self.rt_column));
+            self.last_emitted = Some(rowtimes.value(result.num_rows() - 1));
+            #[cfg(feature = "rocksdb-state")]
+            if let Some(store) = &mut self.store {
+                store.set_last_emitted(self.last_emitted);
+            }
         }
-        Ok(self.flush_memory(watermark))
+        Ok(result)
     }
 
     fn flush_memory(&mut self, watermark: i64) -> RecordBatch {
@@ -165,7 +208,7 @@ impl TemporalSorter {
     }
 
     fn snapshot(&mut self) -> Vec<u8> {
-        match (&self.input_schema, self.buffered.is_empty()) {
+        let buffer = match (&self.input_schema, self.buffered.is_empty()) {
             (Some(schema), false) => {
                 let all = concat_batches(schema, &self.buffered).expect("concat sort buffer");
                 let mut bytes = Vec::new();
@@ -178,11 +221,22 @@ impl TemporalSorter {
                 bytes
             }
             _ => Vec::new(),
-        }
+        };
+        snapshot_with_last_emitted(buffer, self.last_emitted)
     }
 
     pub(crate) fn restore(rt_column: usize, bytes: &[u8]) -> Self {
         let mut sorter = TemporalSorter::new(rt_column);
+        let bytes = if let Some(payload) = bytes.strip_prefix(SNAPSHOT_PREFIX) {
+            sorter.last_emitted = Some(i64::from_le_bytes(
+                payload[..8]
+                    .try_into()
+                    .expect("sort last-emitted timestamp"),
+            ));
+            &payload[8..]
+        } else {
+            bytes // Legacy snapshots contain only the pending Arrow IPC stream.
+        };
         if !bytes.is_empty() {
             let reader =
                 arrow::ipc::reader::StreamReader::try_new(bytes, None).expect("sort buffer reader");

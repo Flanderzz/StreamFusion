@@ -2464,6 +2464,9 @@ final class RexExpression {
     if (!(def instanceof org.apache.flink.table.functions.ScalarFunction)) {
       return reject("unsupported function/operator: " + call.getOperator().getName());
     }
+    if (def instanceof org.apache.flink.table.functions.SpecializedFunction) {
+      return reject("UDF specialization requires Flink's code-generation context");
+    }
     org.apache.flink.table.functions.ScalarFunction scalar =
         (org.apache.flink.table.functions.ScalarFunction) def;
     SqlTypeName resultType = call.getType().getSqlTypeName();
