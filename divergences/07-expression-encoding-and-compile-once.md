@@ -78,6 +78,29 @@ Some functions diverge from the host only at precision/locale edges, not in valu
 transcendental math below. A true value divergence must be corrected before admission, as with the
 strict NULL propagation applied to `CONCAT` below.
 
+- **IFNULL:** DataFusion's `nvl`/`ifnull` delegates to its conditional COALESCE implementation.
+  Flink's `IfNullFunction` instead receives two already-evaluated arguments, so the native
+  expression uses an eager scalar kernel and Arrow validity-based selection. This preserves
+  errors in the unselected replacement and evaluates volatile inputs once. The existing CASE
+  lowering remains appropriate for SQL COALESCE, whose evaluation contract differs.
+- **String to BOOLEAN:** Flink accepts ten case-insensitive ASCII tokens without trimming.
+  Use an Arrow Boolean builder with this explicit token set and error/NULL behavior selected
+  from Flink's cast configuration. This avoids depending on Arrow's parser contract or a JVM
+  cast upcall for a small fixed grammar. Default-mode casts under AND/OR retain the host's
+  row short-circuiting; legacy mode returns NULL on malformed input and can stay native.
+- **INSTR overloads:** DataFusion's position kernel implements only the two-string form.
+  Flink's additional start/occurrence forms use codepoint indexing, overlapping matches and
+  reverse search. The extended native kernel searches byte slices bounded by codepoints and
+  counts positions in codepoints, avoiding Flink's reversed-string allocations. It retains
+  empty-needle behavior and parameter failures, including overflowing `INT_MIN` negation,
+  without reproducing unbounded recursion. Fallible forms under AND/OR stay with Flink.
+- **Exact decimal expressions:** ROUND uses Flink's resolved precision/scale and reports NULL
+  on rounding overflow, unlike DataFusion's different result inference and overflow errors.
+  Common literal positions use a prepared integer kernel; positions below -38 use Flink's
+  BigDecimal runtime through the existing columnar upcall to preserve extreme scale failures.
+  Decimal-to-integral casts truncate the fractional part and retain low bits, matching Java's
+  BigDecimal/primitive conversion rather than Arrow's checked integer conversion. Planner
+  decimal literals are also rounded HALF_UP to their declared scale before native encoding.
 - **Primitive floating comparisons:** The decoder selects an Arrow kernel using Java primitive
   operators for FLOAT/DOUBLE operands, including mixed integer/floating comparisons. DataFusion's
   total order distinguishes signed zero and orders NaN above finite values; those rules change

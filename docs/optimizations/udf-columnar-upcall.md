@@ -7,8 +7,10 @@ falling the whole query back to Flink: the argument columns are packed into one 
 the C Data Interface, evaluated by the real function on the JVM, and the result column imported back
 — one JNI crossing per batch, never per row. The design is modelled on Comet's `JvmScalarUdfExpr`.
 
-Because Flink's own code computes the values, the result is byte-identical to Flink by construction
-— there is no reimplementation to diverge.
+The JVM runs the actual user function. Argument/result conversion and call ordering still need
+Flink parity checks: DECIMAL results use Flink's precision/scale conversion, and VARBINARY values
+cross as raw bytes. See the [UDF admission rules](../operators/calc-filter.md#user-scalar-functions)
+for nested decimal-result and repeated binary-call gates.
 
 Functions are serialized into the operator and registered per-task at `open()`, so this survives
 distributed execution, where the UDF instance must be reconstructed on each task's JVM rather than
