@@ -1665,6 +1665,42 @@ class RocksDBNativeStateBackendAllOperatorsTest {
 
   @ParameterizedTest
   @EnumSource(StateTransition.class)
+  void stateTransitionPreservesVariableRankBounds(StateTransition transition) throws Exception {
+    OperatorSubtaskState snapshot;
+    try (BufferAllocator allocator = new RootAllocator(); var harness = variableRankHarness()) {
+      transition.configureSource(harness);
+      harness.setup(new ArrowBatchSerializer());
+      harness.open();
+      harness.processElement(new StreamRecord<>(new ArrowBatch(RowDataArrowConverter.write(
+          List.of(GenericRowData.of(1L, 5L), GenericRowData.of(1L, 3L),
+              GenericRowData.of(2L, 5L), GenericRowData.of(2L, 3L)), TOPN_ROW, allocator))));
+      collectDedupless(harness);
+      snapshot = transition.snapshot(harness);
+    }
+    try (BufferAllocator allocator = new RootAllocator(); var harness = variableRankHarness()) {
+      transition.configureRestore(harness);
+      harness.setup(new ArrowBatchSerializer());
+      harness.initializeState(snapshot);
+      harness.open();
+      harness.processElement(new StreamRecord<>(new ArrowBatch(RowDataArrowConverter.write(
+          List.of(GenericRowData.of(1L, 1L), GenericRowData.of(2L, 2L)), TOPN_ROW, allocator))));
+      assertEquals(List.of(List.of(RowKind.DELETE, 1L, 3L), List.of(RowKind.INSERT, 1L, 1L),
+          List.of(RowKind.DELETE, 2L, 5L), List.of(RowKind.INSERT, 2L, 2L)),
+          collectDedupless(harness));
+    }
+  }
+
+  private static KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch>
+      variableRankHarness() throws Exception {
+    return new KeyedOneInputStreamOperatorTestHarness<>(
+        new NativeColumnarTopNOperator(new int[] {0}, new int[] {-1}, TOPN_ROW,
+            new int[] {1}, new int[] {1}, new int[] {0}, 0, Long.MAX_VALUE, false, false,
+            null, null, false, false, -1, 0, MAX_PARALLELISM, 0),
+        batch -> 0, Types.INT, MAX_PARALLELISM, 1, 0);
+  }
+
+  @ParameterizedTest
+  @EnumSource(StateTransition.class)
   void stateTransitionPreservesUpdateFastOffsetPrefix(StateTransition transition) throws Exception {
     OperatorSubtaskState snapshot;
     try (BufferAllocator allocator = new RootAllocator(); var harness = updateFastOffsetHarness()) {

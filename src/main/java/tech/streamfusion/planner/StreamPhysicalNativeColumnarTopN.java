@@ -26,6 +26,7 @@ public class StreamPhysicalNativeColumnarTopN extends StreamPhysicalNativeSingle
   private final int[] sortNullsFirst;
   private final long offset;
   private final long limit;
+  private final int rankEndColumn;
   private final boolean outputRankNumber;
   private final boolean retracting;
   // Update-fast mode: the unique-key columns identifying the row a record replaces (null otherwise).
@@ -43,6 +44,7 @@ public class StreamPhysicalNativeColumnarTopN extends StreamPhysicalNativeSingle
       int[] sortNullsFirst,
       long offset,
       long limit,
+      int rankEndColumn,
       boolean outputRankNumber,
       boolean retracting,
       int[] rowKeyColumns,
@@ -54,6 +56,7 @@ public class StreamPhysicalNativeColumnarTopN extends StreamPhysicalNativeSingle
     this.sortNullsFirst = sortNullsFirst;
     this.offset = offset;
     this.limit = limit;
+    this.rankEndColumn = rankEndColumn;
     this.outputRankNumber = outputRankNumber;
     this.retracting = retracting;
     this.rowKeyColumns = rowKeyColumns;
@@ -78,6 +81,7 @@ public class StreamPhysicalNativeColumnarTopN extends StreamPhysicalNativeSingle
         sortNullsFirst,
         offset,
         limit,
+        rankEndColumn,
         outputRankNumber,
         retracting,
         rowKeyColumns,
@@ -97,6 +101,7 @@ public class StreamPhysicalNativeColumnarTopN extends StreamPhysicalNativeSingle
         sortNullsFirst,
         offset,
         limit,
+        rankEndColumn,
         outputRankNumber,
         retracting,
         rowKeyColumns,

@@ -6,6 +6,7 @@ import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.plan.RelTraitSet;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.type.RelDataType;
+import org.apache.calcite.rex.RexProgram;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNode;
 import org.apache.flink.table.planner.plan.nodes.exec.InputProperty;
@@ -30,6 +31,9 @@ public class StreamPhysicalNativeCalc extends StreamPhysicalNativeSingleRel
   private final int conditionRoot;
   private final String[] outputNames;
   private final NativeUdf.Binding udfBinding;
+  // The original projection coordinates, before optional input pruning. Used only to prove
+  // relationships between output expressions; execution uses the encoded, remapped program.
+  private final RexProgram sourceProgram;
 
   public StreamPhysicalNativeCalc(
       RelOptCluster cluster,
@@ -37,6 +41,16 @@ public class StreamPhysicalNativeCalc extends StreamPhysicalNativeSingleRel
       RelNode input,
       RelDataType outputRowType,
       RexExpression encoded) {
+    this(cluster, traitSet, input, outputRowType, encoded, null);
+  }
+
+  public StreamPhysicalNativeCalc(
+      RelOptCluster cluster,
+      RelTraitSet traitSet,
+      RelNode input,
+      RelDataType outputRowType,
+      RexExpression encoded,
+      RexProgram sourceProgram) {
     this(
         cluster,
         traitSet,
@@ -51,7 +65,8 @@ public class StreamPhysicalNativeCalc extends StreamPhysicalNativeSingleRel
         encoded.projectionRoots(),
         encoded.conditionRoot(),
         encoded.outputNames(),
-        encoded.udfBinding());
+        encoded.udfBinding(),
+        sourceProgram);
   }
 
   private StreamPhysicalNativeCalc(
@@ -68,7 +83,8 @@ public class StreamPhysicalNativeCalc extends StreamPhysicalNativeSingleRel
       int[] projectionRoots,
       int conditionRoot,
       String[] outputNames,
-      NativeUdf.Binding udfBinding) {
+      NativeUdf.Binding udfBinding,
+      RexProgram sourceProgram) {
     super(cluster, traitSet, input, outputRowType);
     this.kinds = kinds;
     this.payload = payload;
@@ -80,6 +96,11 @@ public class StreamPhysicalNativeCalc extends StreamPhysicalNativeSingleRel
     this.conditionRoot = conditionRoot;
     this.outputNames = outputNames;
     this.udfBinding = udfBinding;
+    this.sourceProgram = sourceProgram;
+  }
+
+  RexProgram sourceProgram() {
+    return sourceProgram;
   }
 
   @Override
@@ -103,7 +124,8 @@ public class StreamPhysicalNativeCalc extends StreamPhysicalNativeSingleRel
         projectionRoots,
         conditionRoot,
         outputNames,
-        udfBinding);
+        udfBinding,
+        sourceProgram);
   }
 
   @Override

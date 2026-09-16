@@ -32,6 +32,7 @@ public class NativeColumnarTopNOperator extends AbstractNativeStatefulOperator<A
   private final int[] sortNullsFirst;
   private final long offset;
   private final long limit;
+  private final int rankEndColumn;
   private final boolean outputRankNumber;
   private final boolean retracting;
   // Update-fast mode (Flink's UpdatableTopNFunction shape): the unique-key columns identifying the
@@ -66,6 +67,31 @@ public class NativeColumnarTopNOperator extends AbstractNativeStatefulOperator<A
       long miniBatchSize,
       long stateTtlMillis,
       int maxParallelism) {
+    this(partitionColumns, keyTimestampPrecisions, rowType, sortIndices, sortAscending,
+        sortNullsFirst, offset, limit, outputRankNumber, retracting, rowKeyColumns,
+        rowKeyTimestampPrecisions, generateUpdateBefore, netDiff, miniBatchSize,
+        stateTtlMillis, maxParallelism, -1);
+  }
+
+  public NativeColumnarTopNOperator(
+      int[] partitionColumns,
+      int[] keyTimestampPrecisions,
+      RowType rowType,
+      int[] sortIndices,
+      int[] sortAscending,
+      int[] sortNullsFirst,
+      long offset,
+      long limit,
+      boolean outputRankNumber,
+      boolean retracting,
+      int[] rowKeyColumns,
+      int[] rowKeyTimestampPrecisions,
+      boolean generateUpdateBefore,
+      boolean netDiff,
+      long miniBatchSize,
+      long stateTtlMillis,
+      int maxParallelism,
+      int rankEndColumn) {
     super("top-n", keyTimestampPrecisions, maxParallelism);
     this.partitionColumns = partitionColumns;
     this.rowType = rowType;
@@ -74,6 +100,7 @@ public class NativeColumnarTopNOperator extends AbstractNativeStatefulOperator<A
     this.sortNullsFirst = sortNullsFirst;
     this.offset = offset;
     this.limit = limit;
+    this.rankEndColumn = rankEndColumn;
     this.outputRankNumber = outputRankNumber;
     this.retracting = retracting;
     this.rowKeyColumns = rowKeyColumns;
@@ -122,7 +149,7 @@ public class NativeColumnarTopNOperator extends AbstractNativeStatefulOperator<A
         schemaAddress ->
             Native.createRocksDBTopNRanker(
                 partitionColumns, keyTimestampPrecisions(), sortIndices, sortAscending,
-                sortNullsFirst, offset, limit, outputRankNumber, retracting, netDiff,
+                sortNullsFirst, offset, limit, rankEndColumn, outputRankNumber, retracting, netDiff,
                 stateTtlMillis, now, memoryBudgetBytes(), schemaAddress, rocksdb.tableDirectory(),
                 maxParallelism(), rocksdb.optionsJson(), rocksdb.sharedResourcesHandle(),
                 rocksdb.sourceDirectories(), rocksdb.sourceSnapshotTokens(),
@@ -170,6 +197,7 @@ public class NativeColumnarTopNOperator extends AbstractNativeStatefulOperator<A
         sortNullsFirst,
         offset,
         limit,
+        rankEndColumn,
         outputRankNumber,
         retracting,
         netDiff,
@@ -205,6 +233,7 @@ public class NativeColumnarTopNOperator extends AbstractNativeStatefulOperator<A
         sortNullsFirst,
         offset,
         limit,
+        rankEndColumn,
         outputRankNumber,
         retracting,
         netDiff,
@@ -248,7 +277,7 @@ public class NativeColumnarTopNOperator extends AbstractNativeStatefulOperator<A
   @Override
   public void open() throws Exception {
     super.open();
-    // Native matching accepts only ConstantRankRange, so this counter remains zero; Flink still
+    // Admitted variable bounds are partition-invariant, so this counter remains zero; Flink still
     // registers it for every Top-N strategy and dashboards rely on the identifier being present.
     getMetricGroup().counter("topn.invalidTopSize");
     if (!retracting) {

@@ -73,7 +73,7 @@ final class CalcMatcher {
             calc.getTraitSet(),
             source.withProjection(pruned.inputType),
             calc.getRowType(),
-            encoded.remapInputs(pruned.remap));
+            encoded.remapInputs(pruned.remap), calc.getProgram());
       }
     }
     if (pruned != null && !(input instanceof ColumnarOutput)) {
@@ -89,7 +89,7 @@ final class CalcMatcher {
           calc.getTraitSet(),
           prunedTranspose,
           calc.getRowType(),
-          encoded.remapInputs(pruned.remap));
+          encoded.remapInputs(pruned.remap), calc.getProgram());
     }
     // The mini-batch assigner is a pass-through (it forwards batches untouched), so it must not
     // hide a rowwise input from the pruning above: push the pruned entry transpose through it.
@@ -110,11 +110,11 @@ final class CalcMatcher {
             calc.getTraitSet(),
             assigner.withInput(prunedTranspose, pruned.inputType),
             calc.getRowType(),
-            encoded.remapInputs(pruned.remap));
+            encoded.remapInputs(pruned.remap), calc.getProgram());
       }
     }
     return new StreamPhysicalNativeCalc(
-        calc.getCluster(), calc.getTraitSet(), input, calc.getRowType(), encoded);
+        calc.getCluster(), calc.getTraitSet(), input, calc.getRowType(), encoded, calc.getProgram());
   }
 
   /**

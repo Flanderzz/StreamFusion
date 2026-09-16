@@ -3,6 +3,13 @@ package tech.streamfusion.planner;
 import tech.streamfusion.operator.RowDataArrowConverter;
 import org.apache.calcite.rel.RelFieldCollation;
 import org.apache.calcite.rel.RelNode;
+import org.apache.calcite.rel.core.Calc;
+import org.apache.calcite.rel.core.Exchange;
+import org.apache.calcite.rex.RexCall;
+import org.apache.calcite.rex.RexInputRef;
+import org.apache.calcite.rex.RexLiteral;
+import org.apache.calcite.rex.RexNode;
+import org.apache.calcite.util.ImmutableBitSet;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalRank;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalRel;
@@ -10,12 +17,13 @@ import org.apache.flink.table.planner.plan.utils.ChangelogPlanUtils;
 import org.apache.flink.table.planner.plan.utils.RankProcessStrategy;
 import org.apache.flink.table.runtime.operators.rank.ConstantRankRange;
 import org.apache.flink.table.runtime.operators.rank.RankType;
+import org.apache.flink.table.runtime.operators.rank.VariableRankRange;
 
 /**
  * Recognizes the streaming Top-N the native ranker implements:
  * {@code ROW_NUMBER() OVER (PARTITION BY … ORDER BY …) BETWEEN rankStart AND rankEnd}, with or
  * without the rank number projected. Requires {@code ROW_NUMBER} (Flink rejects streaming
- * RANK/DENSE_RANK), a constant rank range, and input/output column types the row/Arrow conversion
+ * RANK/DENSE_RANK), a constant or verified partition-invariant rank range, and column types the conversion
  * supports. The caller picks the ranker: the append-only one for an insert-only, no-offset query, or
  * the retracting one (full buffer, rank window {@code [offset+1, rankEnd]}) for a changelog input or
  * an {@code OFFSET} (rank start > 1).
@@ -33,8 +41,23 @@ final class TopNMatcher {
     if (rank.rankType() != RankType.ROW_NUMBER) {
       return "Top-N: only ROW_NUMBER ranks (RANK/DENSE_RANK fall back)";
     }
-    if (!(rank.rankRange() instanceof ConstantRankRange)) {
-      return "Top-N: only a constant rank range";
+    if (rank.rankRange() instanceof VariableRankRange variable) {
+      if (!ChangelogPlanUtils.isInsertOnly((StreamPhysicalRel) rank.getInput())) {
+        return "Top-N: variable rank bounds over updating input require first-bound state";
+      }
+      var type = rank.getInput().getRowType().getFieldList().get(variable.getRankEndIndex()).getType();
+      if (type.isNullable()) {
+        return "Top-N: nullable variable rank bounds require Flink's row-access semantics";
+      }
+      switch (type.getSqlTypeName()) {
+        case SMALLINT, INTEGER, BIGINT -> {}
+        default -> { return "Top-N: variable rank bounds require SMALLINT, INT or BIGINT"; }
+      }
+      if (!partitionInvariant(rank.getInput(), variable.getRankEndIndex(), rank.partitionKey())) {
+        return "Top-N: variable rank bound must be derived from partition keys";
+      }
+    } else if (!(rank.rankRange() instanceof ConstantRankRange)) {
+      return "Top-N: unsupported rank range";
     }
     if (DeduplicateMatcher.isTimeOrder(rank)) {
       // A time-ordered rank is deduplication (DeduplicateMatcher), not a value Top-N.
@@ -64,12 +87,49 @@ final class TopNMatcher {
 
   /** The rank window upper bound (rankEnd): the operator emits ranks {@code [offset+1, limit]}. */
   static long limit(StreamPhysicalRank rank) {
-    return ((ConstantRankRange) rank.rankRange()).getRankEnd();
+    return rank.rankRange() instanceof ConstantRankRange range ? range.getRankEnd() : Long.MAX_VALUE;
   }
 
   /** The 0-based offset (rankStart - 1); > 0 for an {@code OFFSET} (range not starting at rank 1). */
   static long offset(StreamPhysicalRank rank) {
-    return ((ConstantRankRange) rank.rankRange()).getRankStart() - 1;
+    return rank.rankRange() instanceof ConstantRankRange range ? range.getRankStart() - 1 : 0;
+  }
+
+  static int rankEndColumn(StreamPhysicalRank rank) {
+    return rank.rankRange() instanceof VariableRankRange range ? range.getRankEndIndex() : -1;
+  }
+
+  private static boolean partitionInvariant(RelNode input, int bound, ImmutableBitSet partitions) {
+    if (partitions.get(bound)) return true;
+    if (input instanceof Exchange exchange) {
+      return partitionInvariant(exchange.getInput(), bound, partitions);
+    }
+    var program = input instanceof Calc calc ? calc.getProgram()
+        : input instanceof StreamPhysicalNativeCalc calc ? calc.sourceProgram() : null;
+    if (program == null) return false;
+    ImmutableBitSet.Builder keys = ImmutableBitSet.builder();
+    for (int key : partitions) {
+      RexNode expression = program.expandLocalRef(program.getProjectList().get(key));
+      if (expression instanceof RexInputRef reference) keys.set(reference.getIndex());
+    }
+    RexNode expression = program.expandLocalRef(program.getProjectList().get(bound));
+    return partitionExpression(expression, keys.build());
+  }
+
+  private static boolean partitionExpression(RexNode expression, ImmutableBitSet keys) {
+    if (expression instanceof RexLiteral) return true;
+    if (expression instanceof RexInputRef reference) return keys.get(reference.getIndex());
+    if (!(expression instanceof RexCall call)) return false;
+    if (call.getOperator() == org.apache.calcite.sql.fun.SqlStdOperatorTable.MOD) {
+      return call.getOperands().stream().allMatch(operand -> partitionExpression(operand, keys));
+    }
+    // Restrict the proof to pure numeric expressions; an arbitrary UDF's declaration is not proof
+    // that repeated calls for the same partition return the same bound.
+    return switch (call.getKind()) {
+      case PLUS, MINUS, TIMES, DIVIDE, MOD, MINUS_PREFIX, CAST, COALESCE ->
+          call.getOperands().stream().allMatch(operand -> partitionExpression(operand, keys));
+      default -> false;
+    };
   }
 
   static boolean outputRankNumber(StreamPhysicalRank rank) {
@@ -122,6 +182,7 @@ final class TopNMatcher {
           TopNMatcher.sortNullsFirst(rank),
           TopNMatcher.offset(rank),
           TopNMatcher.limit(rank),
+          TopNMatcher.rankEndColumn(rank),
           TopNMatcher.outputRankNumber(rank),
           false,
           ((RankProcessStrategy.UpdateFastStrategy) rank.rankStrategy()).getPrimaryKeys(),
@@ -146,6 +207,7 @@ final class TopNMatcher {
         TopNMatcher.sortNullsFirst(rank),
         offset,
         TopNMatcher.limit(rank),
+        TopNMatcher.rankEndColumn(rank),
         TopNMatcher.outputRankNumber(rank),
         retracting,
         null,

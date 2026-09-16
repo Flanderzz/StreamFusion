@@ -29,6 +29,7 @@ public class NativeColumnarTopNExecNode extends ExecNodeBase<ArrowBatch>
   private final int[] sortNullsFirst;
   private final long offset;
   private final long limit;
+  private final int rankEndColumn;
   private final boolean outputRankNumber;
   private final boolean retracting;
   // Update-fast mode: the unique-key columns identifying the row a record replaces (null otherwise).
@@ -48,6 +49,7 @@ public class NativeColumnarTopNExecNode extends ExecNodeBase<ArrowBatch>
       int[] sortNullsFirst,
       long offset,
       long limit,
+      int rankEndColumn,
       boolean outputRankNumber,
       boolean retracting,
       int[] rowKeyColumns,
@@ -67,6 +69,7 @@ public class NativeColumnarTopNExecNode extends ExecNodeBase<ArrowBatch>
     this.sortNullsFirst = sortNullsFirst;
     this.offset = offset;
     this.limit = limit;
+    this.rankEndColumn = rankEndColumn;
     this.outputRankNumber = outputRankNumber;
     this.retracting = retracting;
     this.rowKeyColumns = rowKeyColumns;
@@ -113,7 +116,8 @@ public class NativeColumnarTopNExecNode extends ExecNodeBase<ArrowBatch>
                 netDiff,
                 miniBatchSize,
                 stateTtlMillis,
-                maxParallelism),
+                maxParallelism,
+                rankEndColumn),
             ArrowBatchTypeInformation.INSTANCE,
             input.getParallelism(),
             false);

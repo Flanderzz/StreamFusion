@@ -118,6 +118,7 @@ final class LimitMatcher {
           LimitMatcher.sortNullsFirst(sort),
           offset,
           LimitMatcher.limit(sort),
+          -1,
           false, // a global LIMIT never projects a rank column
           offset > 0 || strategy instanceof RankProcessStrategy.RetractStrategy,
           rowKeyColumns,

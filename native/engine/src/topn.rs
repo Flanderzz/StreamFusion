@@ -224,6 +224,7 @@ pub(crate) struct TopNRanker<S: KeyedStateStore<Vec<TopNRow>> = MemoryTopNStore>
     key_timestamp_precisions: Vec<i32>,
     sort_columns: Vec<SortColumn>,
     limit: i64,
+    rank_end_column: Option<usize>,
     output_rank_number: bool,
     // Mini-batch mode: emit the NET rank diff per logical bundle (old top-N vs new top-N for each
     // touched partition) instead of the host's per-record -U/+U cascade. Gated on the host plan
@@ -419,6 +420,15 @@ fn prune_expired_topn_rows(buffer: &mut Vec<TopNRow>, ttl: StateTtl, track: bool
     reclaimed
 }
 
+fn integral_rank_ends(array: &ArrayRef) -> Int64Array {
+    arrow::compute::cast(array, &DataType::Int64)
+        .expect("planner admitted an integral rank bound")
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .expect("cast rank bound to BIGINT")
+        .clone()
+}
+
 impl TopNRanker {
     pub(crate) fn new(
         partition_columns: Vec<usize>,
@@ -433,6 +443,7 @@ impl TopNRanker {
             key_timestamp_precisions: vec![-1; key_arity],
             sort_columns,
             limit,
+            rank_end_column: None,
             output_rank_number,
             net_diff,
             ttl_ms: 0,
@@ -462,6 +473,13 @@ impl TopNRanker {
 }
 
 impl<S: KeyedStateStore<Vec<TopNRow>>> TopNRanker<S> {
+    /// The planner proves this non-null integral column is constant within each partition.
+    /// Its value can be read from every row without an independent first-bound state entry.
+    pub(crate) fn with_rank_end_column(mut self, column: i32) -> Self {
+        self.rank_end_column = (column >= 0).then_some(column as usize);
+        self
+    }
+
     /// Moves this freshly built (empty, memory-backed) ranker's configuration onto another state
     /// backend; construction goes through `new` + builders first so backend choice stays
     /// orthogonal to the shape builders.
@@ -471,6 +489,7 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> TopNRanker<S> {
             key_timestamp_precisions: self.key_timestamp_precisions,
             sort_columns: self.sort_columns,
             limit: self.limit,
+            rank_end_column: self.rank_end_column,
             output_rank_number: self.output_rank_number,
             net_diff: self.net_diff,
             ttl_ms: self.ttl_ms,
@@ -605,7 +624,9 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> TopNRanker<S> {
             .convert_columns(&data_arrays)
             .expect("encode payload");
 
-        let limit = self.limit as usize;
+        let rank_ends = self
+            .rank_end_column
+            .map(|index| integral_rank_ends(batch.column(index)));
         let output_rank = self.output_rank_number;
         let track = self.memory.tracking();
         let mut delta = 0isize;
@@ -618,6 +639,10 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> TopNRanker<S> {
         let mut out_ranks: Vec<i64> = Vec::new();
 
         for row in 0..batch.num_rows() {
+            let limit = rank_ends
+                .as_ref()
+                .map_or(self.limit, |ends| ends.value(row))
+                .max(0) as usize;
             // Compare the memcomparable sort key by borrow — no per-row `owned()` alloc until the row
             // is known to enter (the common case for a bounded Top-N is a row that does not).
             let key_row = keys.row(row);
@@ -641,6 +666,12 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> TopNRanker<S> {
             }
             // Insert after any rows that order equal-or-before, preserving arrival order for ties
             // (byte compare of the memcomparable sort key).
+            if rank_ends.is_some()
+                && buffer.len() >= 100
+                && buffer.last().is_some_and(|last| key_row >= last.sort.row())
+            {
+                continue;
+            }
             let pos = buffer.partition_point(|e| e.sort.row() <= key_row);
 
             if output_rank {
@@ -784,7 +815,9 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> TopNRanker<S> {
             .convert_columns(&data_arrays)
             .expect("encode payload");
 
-        let limit = self.limit as usize;
+        let rank_ends = self
+            .rank_end_column
+            .map(|index| integral_rank_ends(batch.column(index)));
         let output_rank = self.output_rank_number;
         let track = self.memory.tracking();
         let mut delta = 0isize;
@@ -793,6 +826,10 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> TopNRanker<S> {
         let staged_order = &mut self.staged_order;
         let staged_old_tops = &mut self.staged_old_tops;
         for row in 0..batch.num_rows() {
+            let limit = rank_ends
+                .as_ref()
+                .map_or(self.limit, |ends| ends.value(row))
+                .max(0) as usize;
             let key_row = keys.row(row);
             let part = parts.encode(row);
             let buffer = match groups.get_mut(part) {
@@ -818,6 +855,12 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> TopNRanker<S> {
                 }
                 staged_order.push(key.clone());
                 staged_old_tops.insert(key, old);
+            }
+            if rank_ends.is_some()
+                && buffer.len() >= 100
+                && buffer.last().is_some_and(|last| key_row >= last.sort.row())
+            {
+                continue;
             }
             let pos = buffer.partition_point(|e| e.sort.row() <= key_row);
             if pos >= limit {
@@ -4030,6 +4073,7 @@ pub extern "system" fn Java_tech_streamfusion_Native_createTopNRanker<'local>(
     sort_nulls_first: JIntArray<'local>,
     offset: jlong,
     limit: jlong,
+    rank_end_column: jint,
     output_rank_number: jboolean,
     retracting: jboolean,
     net_diff: jboolean,
@@ -4064,6 +4108,7 @@ pub extern "system" fn Java_tech_streamfusion_Native_createTopNRanker<'local>(
                     net_diff != 0,
                 )
                 .with_key_timestamp_precisions(timestamp_precisions)
+                .with_rank_end_column(rank_end_column)
                 .with_state_ttl(state_ttl_millis),
             )
         };
@@ -4207,6 +4252,7 @@ pub extern "system" fn Java_tech_streamfusion_Native_restoreTopNRankerPartitions
     sort_nulls_first: JIntArray<'local>,
     offset: jlong,
     limit: jlong,
+    rank_end_column: jint,
     output_rank_number: jboolean,
     retracting: jboolean,
     net_diff: jboolean,
@@ -4233,7 +4279,7 @@ pub extern "system" fn Java_tech_streamfusion_Native_restoreTopNRankerPartitions
                     .expect("read top-n raw partition bytes"),
             );
         }
-        let ranker = TopNHandle::restore_partitions(
+        let mut ranker = TopNHandle::restore_partitions(
             partitions,
             timestamp_precisions,
             sort,
@@ -4245,9 +4291,11 @@ pub extern "system" fn Java_tech_streamfusion_Native_restoreTopNRankerPartitions
             state_ttl_millis,
             &restored,
             now_millis,
-        )
-        .with_memory_budget(memory_budget_bytes);
-        boxed_or_throw(&mut env, ranker)
+        );
+        if let TopNHandle::Append(append) = &mut ranker {
+            append.rank_end_column = (rank_end_column >= 0).then_some(rank_end_column as usize);
+        }
+        boxed_or_throw(&mut env, ranker.with_memory_budget(memory_budget_bytes))
     })
 }
 

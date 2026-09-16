@@ -3329,6 +3329,7 @@ pub extern "system" fn Java_tech_streamfusion_Native_createRocksDBTopNRanker<'lo
     sort_nulls_first: JIntArray<'local>,
     offset: jlong,
     limit: jlong,
+    rank_end_column: jint,
     output_rank_number: jboolean,
     retracting: jboolean,
     net_diff: jboolean,
@@ -3391,6 +3392,7 @@ pub extern "system" fn Java_tech_streamfusion_Native_createRocksDBTopNRanker<'lo
                     net_diff != 0,
                 )
                 .with_key_timestamp_precisions(timestamp_precisions)
+                .with_rank_end_column(rank_end_column)
                 .with_state_ttl(state_ttl_millis)
                 .with_converters(converters)
                 .with_payload_schema(schema)

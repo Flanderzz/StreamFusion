@@ -45,6 +45,45 @@ cascades even when rank is not projected. An updated row moving into the hidden 
 its former visible position before the remaining visible transitions. Checkpoints and canonical
 memory/RocksDB transitions retain the prefix and reapply the selected range on restore.
 
+## Data-dependent bounds
+
+Insert-only value-ordered `ROW_NUMBER` can use a non-null SMALLINT, INT or BIGINT upper bound
+that is fixed within each partition. The bound must be a partition key itself, or a pure numeric
+expression of directly projected partition keys in the preceding Calc. The current proof admits
+arithmetic, MOD, casts and COALESCE. For example, a non-null `k` supports
+`PARTITION BY k ... WHERE rn <= MOD(k, 3) + 1` without fixing one N for the entire operator.
+The rank column can be projected or omitted, and mini-batch materializations remain supported.
+
+Released Flink stores the first bound per partition and ignores later changes while incrementing
+`topn.invalidTopSize`. Proving the bound cannot change lets the native ranker read it from each
+Arrow row and reuse its existing bounded state, TTL and memory/RocksDB checkpoint formats.
+The proof retains Calc expressions through native substitution and input pruning. Independently
+changing bounds and all updating inputs retain an explicit fallback until their first-bound state
+and separate TTL contract are implemented. Nullable bounds also remain on Flink because its
+primitive row access does not express ordinary SQL null propagation here.
+
+Zero and negative bounds emit no rows. Large bounds preserve Flink 2.2.1's variable-range
+admission rule: after 100 retained rows, a new sort key must strictly improve on the current worst
+key, even when the selected bound is greater than 100. This is an admission threshold, not a
+100-row output cap; improving arrivals can grow the retained set up to the selected bound.
+SQL tests compare exact changelog order, NULL payloads, ties, integral widths and signed 64-bit
+boundaries. Checkpoint tests continue the selected windows across memory/RocksDB transitions.
+
+The unchanged Flink 2.2.1 `RankITCase`, `DeduplicateITCase`, `LimitITCase` and `SortLimitITCase`
+also pass with StreamFusion injected: 131 passed, seven skipped. The state-suite run verifies
+both native memory and RocksDB initialization. These are broader rank regressions; the local
+SQL tests explicitly assert native routing for the newly admitted variable-bound queries.
+
+A row-fed release measurement on an Apple M1 Max used 1,000,000 rows, 4,096 keys,
+`MOD(k, 3) + 1` bounds, descending value order, projected rank and parallelism 1.
+After two warmups, five alternating trials per engine measured median elapsed times of
+**2.053428 s Flink / 0.966069 s native (2.126x)**. The timed path includes the row source,
+both row/Arrow transposes and row blackhole sink; the benchmark asserts the native Top-N
+node and both transposes. This is a standalone coverage benchmark, not a Nexmark result.
+
+Reproduce with `SF_BENCHMARK=true mvn -Pbench -pl :streamfusion-runtime -am test
+-Dtest=VariableTopNBenchmark -Dsurefire.failIfNoSpecifiedTests=false`.
+
 ## Processing-time first-N
 
 An insert-only `ROW_NUMBER() OVER (PARTITION BY key ORDER BY pt ASC)` filtered to
@@ -76,7 +115,8 @@ Reproduce with `SF_BENCHMARK=true mvn -Pbench -pl :streamfusion-runtime -am test
 
 ## Gaps
 
-- A non-constant (variable) rank range.
+- A variable rank range outside the insert-only, non-null, partition-derived forms above. Updating
+  and independently changing bounds remain in [#104](https://github.com/datafusion-contrib/StreamFusion/issues/104).
 - A row type the native converter can't carry.
 - A general **retracting** input with an `OFFSET` and no projected rank. Flink's hidden-rank
   emission mutates retained row kinds, affecting later retraction matching. The native immutable
