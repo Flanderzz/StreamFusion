@@ -101,7 +101,8 @@ public class NativeColumnarUpdatingJoinExecNode extends ExecNodeBase<ArrowBatch>
     Transformation<ArrowBatch> right =
         (Transformation<ArrowBatch>) getInputEdges().get(1).translateToPlan(planner);
     int maxParallelism =
-        FlinkKeyGroupUtils.maxParallelism(planner.getExecEnv(), left.getParallelism());
+        leftKeys.length == 0 ? 1
+            : FlinkKeyGroupUtils.maxParallelism(planner.getExecEnv(), left.getParallelism());
     boolean miniBatch =
         joinType <= 3
             && (leftJoinKeyUnique && rightJoinKeyUnique

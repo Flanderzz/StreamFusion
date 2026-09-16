@@ -26,6 +26,12 @@ class StatefulMapPayloadParityTest {
   }
 
   @Test
+  void crossJoinWithMapPayloadFallsBack() throws Exception {
+    NativeParity.assertFallbackReasonContains(() -> maps(false),
+        "SELECT a.m, b.id FROM n a CROSS JOIN n b", "Arrow row codec cannot carry MAP");
+  }
+
+  @Test
   void mapJoinKey() throws Exception {
     NativeParity.assertFallback(() -> maps(false),
         "SELECT a.id, b.id FROM n a JOIN n b ON a.m = b.m");

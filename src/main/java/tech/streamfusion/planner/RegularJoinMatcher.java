@@ -21,8 +21,9 @@ import org.apache.flink.table.runtime.operators.join.FlinkJoinType;
  * Recognizes the regular (non-windowed) equi-joins the native updating join implements:
  * {@code a JOIN b ON a.k = b.k}, where both inputs may be changelogs. Supports INNER, LEFT/RIGHT/FULL
  * outer, and SEMI/ANTI (the native joiner tracks a per-row match-degree for the latter families).
- * Requires at least one equi-join key, an expressible residual predicate, and input/output types
- * the Arrow converter and retained-row codec support. Each equi-key retains its own ordinary or null-safe equality policy.
+ * Also admits keyless INNER joins over two insert-only inputs. Requires an expressible predicate
+ * and input/output types the Arrow converter and retained-row codec support. Each equi-key retains
+ * its own ordinary or null-safe equality policy.
  */
 final class RegularJoinMatcher {
 
@@ -38,8 +39,19 @@ final class RegularJoinMatcher {
       return "regular join: unsupported join type " + joinSpec.getJoinType();
     }
     int[] leftKeys = joinSpec.getLeftKeys();
-    if (leftKeys.length == 0 || leftKeys.length != joinSpec.getRightKeys().length) {
-      return "regular join: needs at least one equi-join key";
+    if (leftKeys.length != joinSpec.getRightKeys().length) {
+      return "regular join: mismatched join-key arity";
+    }
+    if (leftKeys.length == 0) {
+      if (joinSpec.getJoinType() != FlinkJoinType.INNER
+          || !ChangelogPlanUtils.isInsertOnly((StreamPhysicalRel) join.getLeft())
+          || !ChangelogPlanUtils.isInsertOnly((StreamPhysicalRel) join.getRight())) {
+        return "regular join: keyless joins require INNER and two insert-only inputs";
+      }
+      if (join.getLeft().getRowType().getFieldCount() == 0
+          || join.getRight().getRowType().getFieldCount() == 0) {
+        return "regular join: keyless joins require a payload column on each input";
+      }
     }
     if (joinSpec.getNonEquiCondition().isPresent() && nonEquiPredicate(join) == null) {
       return "regular join: the residual non-equi condition is not natively expressible";

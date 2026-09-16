@@ -1,6 +1,6 @@
 # Regular join
 
-**Status:** Native with the payload restrictions below. An ordinary equi-join over two full changelog inputs — the only one of the five
+**Status:** Native with the mode and payload restrictions below. An ordinary equi-join over two full changelog inputs — the only one of the five
 join shapes that accepts a retracting/updating stream on *both* sides rather than requiring
 insert-only input (see the [insert-only guard](../index.md#global-switches)). Each side is held as
 keyed state so a later update or delete on either input can retract and re-emit downstream.
@@ -9,13 +9,35 @@ keyed state so a later update or delete on either input can retract and re-emit 
 
 The native matcher requires:
 
-- an **equi-key** of a supported type on both sides;
+- an **equi-key** of a supported type on both sides, or a keyless INNER join over two insert-only
+  inputs (including `CROSS JOIN`);
 - each key uses Flink's ordinary or null-safe equality policy; mixed policies in composite keys
   are supported for INNER, LEFT/RIGHT/FULL, SEMI and ANTI joins;
 - any residual non-equi predicate must be **expressible by the native expression engine**;
 - every input column type must be one the Arrow converter and retained-row codec can carry.
   MAP and MULTISET fields fall back, including those nested inside ARRAY or ROW and those used
   only as payloads. The Arrow row codec does not support these types.
+
+## Keyless INNER joins
+
+`CROSS JOIN` and INNER joins whose entire condition is a supported non-equi predicate run
+natively when both physical inputs are insert-only and each retains at least one payload column.
+The columnar exchanges collapse both inputs onto one task and one key group. Empty key arrays
+identify one shared state bucket; no equality predicate or synthetic key is added. Each arriving
+row probes the other input's retained multiset, preserving duplicate multiplicities, NULL payloads,
+and the predicate's three-valued logic. Immediate and insert-only mini-batch execution use the
+same existing join state, including checkpoint restore and memory/RocksDB savepoint transitions.
+
+This initial scope excludes keyless outer, SEMI/ANTI and updating joins. Admission follows the
+physical plan: Flink can rewrite `COUNT(*)` over a cross product into a join of two updating
+counts, which falls back under that rule even when both original sources are insert-only.
+Zero-column physical inputs also fall back because the retained-row codec requires a payload.
+
+This is a singleton streaming join, not a broadcast or time-bounded join. Without configured
+state TTL it retains both sides indefinitely, as Flink does. It uses the existing native state
+memory budget; it has no separate cardinality cap or spillable candidate-pair buffer. A cross
+product can emit `left_count * right_count` rows, and a residual predicate is evaluated after
+candidate generation. The RocksDB backend does not remove this per-bucket matching cost.
 
 [Interval join](interval-join.md), [window join](window-join.md), [temporal table
 join](temporal-join.md), and [lookup join](lookup-join.md) all state their admission conditions as a
@@ -68,7 +90,7 @@ TTL](../index.md#idle-state-ttl) and [Configuration](../../configuration.md) for
 ## Falls back to Flink when
 
 - the join type isn't one the native operator covers;
-- there's no equi key;
+- there is no equi key and the join is not INNER over two insert-only, nonempty-payload inputs;
 - the non-equi residual isn't expressible by the native expression engine;
 - an input column has a type the Arrow converter or retained-row codec can't carry, including
   MAP/MULTISET at any nesting depth;
@@ -88,3 +110,15 @@ time was **0.940s Flink / 0.469s native (2.00x)**. This measures the admitted IN
 it does not establish the same speedup for SEMI/ANTI, outer, or retracting joins.
 
 Run `SF_BENCHMARK=true mvn -pl streamfusion-runtime -am test -Pbench -Dtest=NullSafeJoinBenchmark`.
+
+## Keyless join benchmark
+
+`CrossJoinBenchmark` measures 100,000 left rows crossed with 16 right rows (1.6 million output
+rows), parallelism 2 feeding the singleton join, row sources and a rowwise blackhole sink.
+The native plan asserts the join, columnar exchange and both row/Arrow transposes. A local
+release/mimalloc build against Flink 2.2.1, two warmups and five interleaved measured runs gave
+medians of **0.225364s Flink / 0.248805s native (0.906x)**. This standalone shape is slower than
+Flink. The initial admission adds verified composition with other native operators; it is not a
+standalone throughput optimization.
+
+Run `SF_BENCHMARK=true mvn -pl streamfusion-runtime -am test -Pbench -Dtest=CrossJoinBenchmark`.

@@ -1764,6 +1764,55 @@ class RocksDBNativeStateBackendAllOperatorsTest {
     }
   }
 
+  @ParameterizedTest
+  @EnumSource(StateTransition.class)
+  void stateTransitionPreservesKeylessJoinMultiplicity(StateTransition transition) throws Exception {
+    for (boolean miniBatch : new boolean[] {false, true}) {
+      OperatorSubtaskState snapshot;
+      try (BufferAllocator allocator = new RootAllocator(); var harness = crossJoinHarness(miniBatch)) {
+        transition.configureSource(harness);
+        harness.setup(new ArrowBatchSerializer());
+        harness.open();
+        harness.processElement1(new StreamRecord<>(new ArrowBatch(RowDataArrowConverter.write(
+            List.of(GenericRowData.of(1L, 10L), GenericRowData.of(1L, 10L)), INPUT, allocator))));
+        harness.processElement2(new StreamRecord<>(new ArrowBatch(RowDataArrowConverter.write(
+            List.of(GenericRowData.of(2L, 20L)), INPUT, allocator))));
+        harness.getOperator().prepareSnapshotPreBarrier(1);
+        assertEquals(List.of(List.of(RowKind.INSERT, 1L, 10L, 2L, 20L),
+            List.of(RowKind.INSERT, 1L, 10L, 2L, 20L)), collectJoin(harness));
+        snapshot = transition.snapshot(harness);
+      }
+      try (BufferAllocator allocator = new RootAllocator(); var harness = crossJoinHarness(miniBatch)) {
+        transition.configureRestore(harness);
+        harness.setup(new ArrowBatchSerializer());
+        harness.initializeState(snapshot);
+        harness.open();
+        harness.processElement1(new StreamRecord<>(new ArrowBatch(RowDataArrowConverter.write(
+            List.of(GenericRowData.of(3L, 30L)), INPUT, allocator))));
+        harness.processElement2(new StreamRecord<>(new ArrowBatch(RowDataArrowConverter.write(
+            List.of(GenericRowData.of(4L, 40L)), INPUT, allocator))));
+        harness.getOperator().prepareSnapshotPreBarrier(2);
+        List<List<Object>> rows = collectJoin(harness);
+        rows.sort(java.util.Comparator.comparing(Object::toString));
+        assertEquals(List.of(List.of(RowKind.INSERT, 1L, 10L, 4L, 40L),
+            List.of(RowKind.INSERT, 1L, 10L, 4L, 40L),
+            List.of(RowKind.INSERT, 3L, 30L, 2L, 20L),
+            List.of(RowKind.INSERT, 3L, 30L, 4L, 40L)), rows);
+      }
+    }
+  }
+
+  private static org.apache.flink.streaming.util.KeyedTwoInputStreamOperatorTestHarness<
+      Integer, ArrowBatch, ArrowBatch, ArrowBatch> crossJoinHarness(boolean miniBatch) throws Exception {
+    var operator = new NativeColumnarUpdatingJoinOperator(
+        new int[0], new int[0], new int[0], 0, INPUT, INPUT,
+        new int[0], new int[0], new int[0], new long[0], new double[0], new String[0],
+        tech.streamfusion.operator.NativeUdf.Binding.EMPTY, new int[0],
+        false, false, miniBatch, 100, 0, 0, 1);
+    return new org.apache.flink.streaming.util.KeyedTwoInputStreamOperatorTestHarness<>(
+        operator, batch -> 0, batch -> 0, Types.INT, 1, 1, 0);
+  }
+
   private static ArrowBatch nullKeyJoinBatch(BufferAllocator allocator, RowKind kind, long value) {
     GenericRowData row = GenericRowData.of(null, value);
     row.setRowKind(kind);

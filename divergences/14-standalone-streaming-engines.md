@@ -48,6 +48,11 @@ confirmed and where we deliberately differ.
   NullEquality flag, this preserves mixed ordinary/null-safe keys without adding synthetic
   key columns. The mask is immutable operator configuration passed through JNI on create and
   every restore route; snapshot row bytes and Arrow ownership are unchanged.
+  Keyless INNER joins over insert-only inputs reuse the same regular-join multiset and probe,
+  with empty key arrays and Flink's singleton distribution. This deliberately extends the
+  established incremental state path instead of adding an Arroyo-style batch execution plan:
+  duplicate counts, mini-batch flushing, state TTL and restore already share Flink's contract.
+  There is no invented equality key, broadcast build side or output-cardinality limit.
 - **Row↔Arrow transpose at host edges.** RisingWave (`StreamChunk`) and Proton
   (ClickHouse `Block`) are columnar end to end; we transpose to/from Flink `RowData`
   at native↔host boundaries ([divergences/08](08-columnar-flow-transitions.md)),
