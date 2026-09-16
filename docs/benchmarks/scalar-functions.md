@@ -65,6 +65,24 @@ as `pr44-flink-native-benchmarks.zip`. The repository keeps benchmark code and f
 tables; generated CSVs are not versioned. Controls are retained for checking the run, and are
 not subtracted from function times because their result types and lengths can differ.
 
+## STRING to BOOLEAN coverage diagnostic (2026-09-16)
+
+Measured against `ebe550c6` plus STRING-to-BOOLEAN support, using JDK 17, UTC and the
+release `bench` profile with mimalloc. The source cycles through `true`, `FALSE`, `t`,
+`0`, `yes`, `n`, with every eighth value NULL. The selection was `STRING_TO_BOOLEAN`,
+with 2,000,000 rows, two warmups and five measured trials. Both transpose operators,
+native Calc substitution and the source-matched identity control were checked.
+
+| Case | Flink (s) | Native (s) | Flink / native |
+|---|---:|---:|---:|
+| STRING identity control | 0.307 | 0.497 | 0.618x |
+| `CAST(s AS BOOLEAN)` | 0.316 | 0.473 | 0.667x |
+
+This isolated conversion is slower natively with rowwise input/output. Its purpose is to
+remove a cast coverage blocker inside larger native islands, where existing Arrow batches
+avoid additional boundaries; these measurements do not claim a speedup for that composition.
+The identity control returns STRING rather than BOOLEAN and is not subtracted from the cast.
+
 ## STARTSWITH
 
 `STARTSWITH_LITERAL`: `STARTSWITH(s, 'row:')`; `STARTSWITH_COLUMN`: `STARTSWITH(s, needle)`

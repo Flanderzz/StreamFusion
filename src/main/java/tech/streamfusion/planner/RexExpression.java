@@ -979,7 +979,7 @@ final class RexExpression {
         return emit(operands.get(0));
       case AND:
       case OR:
-        if (operands.stream().anyMatch(RexExpression::requiresRowShortCircuit)) {
+        if (operands.stream().anyMatch(this::requiresRowShortCircuit)) {
           return reject("Fallible expressions under AND/OR require Flink's row short-circuiting");
         }
         // Calcite leaves AND/OR n-ary; the native binary op needs a left-deep nesting, which a
@@ -1222,7 +1222,7 @@ final class RexExpression {
     return emitBuiltinCall(call, op);
   }
 
-  private static boolean requiresRowShortCircuit(RexNode node) {
+  private boolean requiresRowShortCircuit(RexNode node) {
     if (!(node instanceof RexCall call)) {
       return false;
     }
@@ -1236,6 +1236,13 @@ final class RexExpression {
     }
     String name = call.getOperator().getName().toUpperCase(Locale.ROOT);
     List<RexNode> args = call.getOperands();
+    if (call.getKind() == SqlKind.CAST
+        && call.getType().getSqlTypeName() == SqlTypeName.BOOLEAN
+        && args.size() == 1
+        && isCharacter(args.get(0))
+        && !Boolean.TRUE.equals(legacyCastBehaviour)) {
+      return true;
+    }
     if ("JSON_VALUE".equals(name)) {
       if (call.getType().getSqlTypeName() != SqlTypeName.VARCHAR) {
         return true;
@@ -1253,7 +1260,7 @@ final class RexExpression {
         && "ERROR".equals(jsonSymbol(args.get(2)))) {
       return true;
     }
-    return args.stream().anyMatch(RexExpression::requiresRowShortCircuit);
+    return args.stream().anyMatch(this::requiresRowShortCircuit);
   }
 
   private static boolean hasNonzeroIntegerDivisor(RexCall call) {
@@ -1658,12 +1665,7 @@ final class RexExpression {
     return emit(operands.get(n - 1));
   }
 
-  /**
-   * Emits a cast, but only a widening numeric one (integer to a wider integer, integer to
-   * float/double, float to double, or an identity cast). Those are lossless and evaluate
-   * identically on both sides; narrowing, float-to-integer, and string casts differ in
-   * overflow/rounding/parsing semantics, so they are not admitted and the expression falls back.
-   */
+  /** Emits only native or host-exact casts that preserve Flink's configured cast semantics. */
   private boolean emitCast(RexCall call) {
     if (call.getOperands().size() != 1) {
       return reject("unsupported CAST arity");
@@ -1683,6 +1685,13 @@ final class RexExpression {
     }
     SqlTypeName source = sourceType.getSqlTypeName();
     SqlTypeName targetType = resultType.getSqlTypeName();
+    if ((source == SqlTypeName.VARCHAR || source == SqlTypeName.CHAR)
+        && targetType == SqlTypeName.BOOLEAN) {
+      if (legacyCastBehaviour == null) {
+        return reject("STRING to BOOLEAN requires the configured cast behavior");
+      }
+      return emitBuiltinCall(call, legacyCastBehaviour ? 160 : 159);
+    }
     // A non-narrowing cast to VARCHAR from a CHAR or VARCHAR source (target length ≥ source). Flink
     // stores both as unpadded StringData and neither pads nor truncates a widening string cast, so
     // the

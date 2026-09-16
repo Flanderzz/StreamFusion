@@ -78,6 +78,11 @@ Some functions diverge from the host only at precision/locale edges, not in valu
 transcendental math below. A true value divergence must be corrected before admission, as with the
 strict NULL propagation applied to `CONCAT` below.
 
+- **String to BOOLEAN:** Flink accepts ten case-insensitive ASCII tokens without trimming.
+  Use an Arrow Boolean builder with this explicit token set and error/NULL behavior selected
+  from Flink's cast configuration. This avoids depending on Arrow's parser contract or a JVM
+  cast upcall for a small fixed grammar. Default-mode casts under AND/OR retain the host's
+  row short-circuiting; legacy mode returns NULL on malformed input and can stay native.
 - **Primitive floating comparisons:** The decoder selects an Arrow kernel using Java primitive
   operators for FLOAT/DOUBLE operands, including mixed integer/floating comparisons. DataFusion's
   total order distinguishes signed zero and orders NaN above finite values; those rules change

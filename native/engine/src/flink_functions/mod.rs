@@ -41,6 +41,7 @@ pub(crate) mod map_lookup;
 pub(crate) mod numeric;
 mod scalar;
 mod sign;
+mod string_to_boolean;
 mod temporal_round;
 mod timestamp_millis;
 
@@ -167,6 +168,8 @@ pub(crate) fn function(op: i64, arity: usize) -> Option<ScalarUDF> {
         155 => timestamp_millis::function(timestamp_millis::Operation::Millis),
         156 => timestamp_millis::function(timestamp_millis::Operation::SubtractMillis),
         157 => timestamp_millis::function(timestamp_millis::Operation::SubtractMonths),
+        159 => string_to_boolean::function(false),
+        160 => string_to_boolean::function(true),
         _ => return None,
     })
 }

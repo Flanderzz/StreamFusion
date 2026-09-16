@@ -54,6 +54,7 @@ class ScalarFunctionBenchmark {
 
   private static final List<Query> SCALAR_FUNCTIONS =
       List.of(
+          new Query("STRING_TO_BOOLEAN", "boolean_text", "CAST(s AS BOOLEAN)", "BOOLEAN"),
           new Query("ASCII", "tt_ascii", "ASCII(s)", "INT"),
           new Query("CHR", "bigint", "CHR(n)", "STRING"),
           new Query("GREATEST", "numbers", "GREATEST(n, m, 17)"),
@@ -372,7 +373,9 @@ class ScalarFunctionBenchmark {
     env.setParallelism(1);
     StreamTableEnvironment tables = StreamTableEnvironment.create(env);
     String[] text =
-        UNICODE
+        input.equals("boolean_text")
+            ? new String[] {"true", "FALSE", "t", "0", "yes", "n"}
+            : UNICODE
             ? new String[] {
               payload(" \u4e2dAbC \ud83d\ude00dEf "), payload(" \u00e9dEf \ud83d\ude42AbC ")
             }
@@ -501,7 +504,9 @@ class ScalarFunctionBenchmark {
                               ? null
                               : input.equals("encoded")
                                   ? encoded
-                                  : input.equals("hex") ? hex[(int) (i % 2)] : text[(int) (i % 2)]))
+                                  : input.equals("hex")
+                                      ? hex[(int) (i % 2)]
+                                      : text[(int) (i % text.length)]))
               .returns(Types.ROW_NAMED(new String[] {"s"}, Types.STRING)),
           Schema.newBuilder().column("s", DataTypes.STRING()).build());
     }

@@ -188,6 +188,24 @@ FLOAT/DOUBLE to TINYINT or SMALLINT first performs that INT conversion, then kee
 low 8 or 16 bits. Thus `128.75` becomes TINYINT `-128`, and positive infinity becomes
 TINYINT/SMALLINT `-1`. NULL remains NULL for every target.
 
+### STRING/VARCHAR/CHAR to BOOLEAN
+
+`CAST(s AS BOOLEAN)` uses a native Arrow Boolean builder. It accepts `t`, `true`, `y`,
+`yes`, `1` as TRUE and `f`, `false`, `n`, `no`, `0` as FALSE, ignoring ASCII case.
+It does not trim whitespace; empty strings, other numeric values and Unicode lookalikes
+are invalid. NULL remains NULL. Flink's resolved result type/nullability is retained.
+
+With the default cast behavior an invalid token fails the query, including for a NOT NULL
+source. With `table.exec.legacy-cast-behaviour=ENABLED` it produces NULL. For a NOT NULL
+source, Flink retains a NOT NULL result declaration even in legacy mode; the existing
+sink enforcer therefore rejects or drops malformed rows according to its ERROR/DROP setting.
+Both outcomes are tested against Flink. CASE can skip
+an unselected failing cast. Default-mode casts nested under AND/OR still fall back so
+that Flink's row short-circuiting suppresses errors on unselected rows; legacy-mode
+casts can compose under AND/OR because malformed input returns NULL. A bare expression
+encoder without table configuration declines this cast instead of guessing the mode.
+BOOLEAN-to-string and TRY_CAST are outside this addition.
+
 ### The host-exact JVM upcall
 
 A second group of casts is **native by default, and this is not a fallback** — it's a real JNI call
@@ -215,7 +233,7 @@ default cast the upcall reproduces.
 
 ### Still falling back
 
-Boolean↔string casts and other pairs not listed above. Temporal casts now use Flink-generated
+Boolean-to-string casts and other pairs not listed above. Temporal casts now use Flink-generated
 expressions; see [temporal functions](temporal-functions.md).
 
 ## Decimal arithmetic
