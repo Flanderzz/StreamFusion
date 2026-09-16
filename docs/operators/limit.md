@@ -1,7 +1,6 @@
 # LIMIT
 
-**Status:** Native — `LIMIT`/`FETCH` over insert-only or updating input. `OFFSET` is native over
-insert-only and update-fast input; general retracting OFFSET remains on Flink.
+**Status:** Native — `LIMIT`/`FETCH`, with or without `OFFSET`, over insert-only or updating input.
 
 Flink lowers a `LIMIT`/`FETCH` clause to a rank filter and reuses the same rank operator family as
 [Top-N](top-n.md) — a plain `LIMIT n` is nothing more than a rank filter with a constant range
@@ -29,7 +28,10 @@ offsets beyond the available rows, and memory/RocksDB restore of the hidden pref
 
 The grouped pipeline stays columnar across the singleton exchange. Tests compare raw row kinds
 with mini-batching disabled, including NULL ordering, decrements and complete group deletion.
-Mini-batch tests compare final materializations under the existing net-diff contract. The
+Mini-batch tests compare final materializations. Hidden-rank retracting OFFSET always preserves
+per-record cascades: emitting a row mutates its retained kind, affecting later full-row equality.
+Its sort-key counts advance independently of successful payload removals, exactly as in Flink's
+heap state backend. Checkpoints and memory/RocksDB transitions preserve both kinds and counts. The
 single-phase aggregate is used where a retracting two-phase SUM still has its own admission
 gap; enabling LIMIT does not bypass an upstream aggregate's gate.
 
@@ -61,14 +63,23 @@ native composition without a standalone throughput gain. Reproduce with
 -Dtest=UpdatingLimitBenchmark -Dlimit.offset=1 -Dsurefire.failIfNoSpecifiedTests=false`.
 Omit `-Dlimit.offset=1` to measure the zero-offset case.
 
+The retracting variant (`SUM(v)` with alternating positive and negative contributions) uses
+20,000 rows, 64 keys and `LIMIT 100 OFFSET 1`. On the same Apple M4 Pro / JDK 17 release setup,
+two warmups and five interleaved runs gave **0.182802s Flink / 0.455513s native (0.401x)**.
+This short end-to-end workload includes job setup, both transposes and the rowwise sink; it is
+coverage and composition work, not a standalone throughput improvement. Reproduce with
+`SF_BENCHMARK=true mvn -Pbench -pl :streamfusion-runtime -am test
+-Dtest=UpdatingLimitBenchmark -Dlimit.retract=true -Dlimit.rows=20000 -Dlimit.keys=64
+-Dlimit.offset=1 -Dsurefire.failIfNoSpecifiedTests=false`.
+
 ## Gap
+
+- Hidden-rank retracting OFFSET after an upstream mini-batch aggregate, rank or other operator
+  that can change intermediate changelog order. Source changelogs through projections, filters,
+  exchanges and batch markers remain native. Preserving the upstream bundle order is the
+  remaining composition work in [#102](https://github.com/datafusion-contrib/StreamFusion/issues/102).
 
 - MAP/MULTISET fields in retained rows, including nested ARRAY/ROW fields, because the shared
   Top-N row codec cannot store them. These queries fall back before operator initialization.
 - A `LIMIT`/`OFFSET` with no `FETCH` (row count) at all — an unbounded skip.
-- General retracting input paired with `OFFSET`. In released Flink, hidden-rank emission mutates
-  stored row kinds and affects later retraction matching. A positional diff of immutable payloads
-  alone does not reproduce that behavior. The same shared Top-N shape falls back when its rank is
-  not projected; a projected rank avoids that stored-row mutation and remains native. This is the
-  remaining work in [#102](https://github.com/datafusion-contrib/StreamFusion/issues/102).
 - A SortLimit whose selected Flink rank strategy cannot be read or has not been resolved.

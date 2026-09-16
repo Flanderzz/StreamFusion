@@ -43,4 +43,12 @@ pure `ROW_NUMBER() <= N` over a source) does have a deterministic stock-Flink ca
 mini-batch opts that query into the collapsed contract too. Users who want the exact per-record
 cascade run without mini-batch — the default.
 
-The retracting (changelog-input) ranker already emits a per-input-row diff and is unaffected.
+The retracting ranker also supports logical-bundle net diffs for zero-offset or projected-rank
+queries. Hidden-rank OFFSET is excluded: Flink mutates stored row kinds during each cascade,
+which affects later equality and sort-key counts. Suppressing those cascades would change the
+materialized result, so this path always emits each input record's transitions.
+
+An upstream mini-batch operator can also change the order or content of intermediate changes.
+Hidden-rank retracting OFFSET therefore admits mini-batch source changelogs only through
+projections, filters, exchanges and batch markers; other upstream mini-batch compositions stay
+on Flink until their complete changelog order is preserved.

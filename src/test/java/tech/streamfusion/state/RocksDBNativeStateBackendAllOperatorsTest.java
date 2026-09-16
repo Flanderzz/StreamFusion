@@ -1584,6 +1584,62 @@ class RocksDBNativeStateBackendAllOperatorsTest {
 
   @ParameterizedTest
   @EnumSource(StateTransition.class)
+  void stateTransitionPreservesOffsetKindsAndIndependentCounts(StateTransition transition)
+      throws Exception {
+    for (boolean generateUpdateBefore : new boolean[] {false, true}) {
+      offsetTransition(transition, generateUpdateBefore);
+    }
+  }
+
+  private void offsetTransition(StateTransition transition, boolean generateUpdateBefore)
+      throws Exception {
+    OperatorSubtaskState snapshot;
+    try (BufferAllocator allocator = new RootAllocator();
+        var harness = retractingTopNHarness(1, 3, generateUpdateBefore)) {
+      transition.configureSource(harness);
+      harness.setup(new ArrowBatchSerializer());
+      harness.open();
+      harness.processElement(new StreamRecord<>(new ArrowBatch(RowDataArrowConverter.write(
+          List.of(GenericRowData.of(9L, 10L), GenericRowData.of(9L, 20L),
+              GenericRowData.of(9L, 30L), GenericRowData.of(9L, 5L)), TOPN_ROW, allocator))));
+      assertEquals(List.of(
+          List.of(RowKind.INSERT, 9L, 20L), List.of(RowKind.INSERT, 9L, 30L),
+          List.of(RowKind.UPDATE_BEFORE, 9L, 20L), List.of(RowKind.UPDATE_AFTER, 9L, 10L),
+          List.of(RowKind.UPDATE_BEFORE, 9L, 30L), List.of(RowKind.UPDATE_AFTER, 9L, 20L))
+              .stream().filter(row -> generateUpdateBefore || row.get(0) != RowKind.UPDATE_BEFORE).toList(),
+          collectDedupless(harness));
+      // Emission changed row 10 to +U. Its retraction misses but removes its sort-key count.
+      harness.processElement(new StreamRecord<>(new ArrowBatch(RowDataArrowConverter.write(
+          List.of(rowOfKind(RowKind.DELETE, 9, 10)), TOPN_ROW, allocator, true))));
+      assertEquals(List.of(), collectDedupless(harness));
+      snapshot = transition.snapshot(harness);
+    }
+    try (BufferAllocator allocator = new RootAllocator();
+        var harness = retractingTopNHarness(1, 3, generateUpdateBefore)) {
+      transition.configureRestore(harness);
+      harness.setup(new ArrowBatchSerializer());
+      harness.initializeState(snapshot);
+      harness.open();
+      harness.processElement(new StreamRecord<>(new ArrowBatch(RowDataArrowConverter.write(
+          List.of(GenericRowData.of(9L, 15L)), TOPN_ROW, allocator))));
+      assertEquals(List.of(
+          List.of(RowKind.UPDATE_BEFORE, 9L, 20L), List.of(RowKind.UPDATE_AFTER, 9L, 15L),
+          List.of(RowKind.UPDATE_BEFORE, 9L, 30L), List.of(RowKind.UPDATE_AFTER, 9L, 20L))
+              .stream().filter(row -> generateUpdateBefore || row.get(0) != RowKind.UPDATE_BEFORE).toList(),
+          collectDedupless(harness));
+      // Row 20 must still retain +U after recovery and the following cascade.
+      harness.processElement(new StreamRecord<>(new ArrowBatch(RowDataArrowConverter.write(
+          List.of(rowOfKind(RowKind.UPDATE_BEFORE, 9, 20)), TOPN_ROW, allocator, true))));
+      assertEquals(List.of(), collectDedupless(harness));
+      harness.processElement(new StreamRecord<>(new ArrowBatch(RowDataArrowConverter.write(
+          List.of(rowOfKind(RowKind.DELETE, 9, 30)), TOPN_ROW, allocator, true))));
+      assertEquals(generateUpdateBefore ? List.of() : List.of(List.of(RowKind.DELETE, 9L, 30L)),
+          collectDedupless(harness));
+    }
+  }
+
+  @ParameterizedTest
+  @EnumSource(StateTransition.class)
   void stateTransitionPreservesGlobalUpdatingLimit(StateTransition transition) throws Exception {
     for (int mode = 0; mode < 3; mode++) {
       OperatorSubtaskState snapshot;
@@ -2092,6 +2148,11 @@ class RocksDBNativeStateBackendAllOperatorsTest {
 
   private static KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch>
       retractingTopNHarness() throws Exception {
+    return retractingTopNHarness(0, 2, true);
+  }
+
+  private static KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch>
+      retractingTopNHarness(long offset, long limit, boolean generateUpdateBefore) throws Exception {
     NativeColumnarTopNOperator operator =
         new NativeColumnarTopNOperator(
             new int[] {0},
@@ -2100,13 +2161,13 @@ class RocksDBNativeStateBackendAllOperatorsTest {
             new int[] {1},
             new int[] {1},
             new int[] {0},
-            0L,
-            2L,
+            offset,
+            limit,
             false,
             true,
             null,
             null,
-            false,
+            generateUpdateBefore,
             false,
             -1,
             0,

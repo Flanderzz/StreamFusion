@@ -3332,6 +3332,7 @@ pub extern "system" fn Java_tech_streamfusion_Native_createRocksDBTopNRanker<'lo
     rank_end_column: jint,
     output_rank_number: jboolean,
     retracting: jboolean,
+    generate_update_before: jboolean,
     net_diff: jboolean,
     state_ttl_millis: jlong,
     now_millis: jlong,
@@ -3376,6 +3377,7 @@ pub extern "system" fn Java_tech_streamfusion_Native_createRocksDBTopNRanker<'lo
             if retracting != 0 {
                 RetractableTopNRanker::new(partitions, sort, offset, limit, output_rank_number != 0)
                     .with_key_timestamp_precisions(timestamp_precisions)
+                    .with_generate_update_before(generate_update_before != 0)
                     .with_net_diff(net_diff != 0)
                     .with_state_ttl(state_ttl_millis)
                     .with_converters(converters)

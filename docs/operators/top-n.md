@@ -35,8 +35,8 @@ Idle-state TTL is native across all three — see [TTL semantics](index.md#idle-
 [Configuration](../configuration.md) for the flag surface.
 
 Also native: a projected rank number and both insert-only and retracting changelog input.
-`OFFSET` runs natively over insert-only and update-fast inputs; a general retracting input
-requires a projected rank when an offset is present. `RANK`/`DENSE_RANK` never reach the matcher at all —
+`OFFSET` runs natively over insert-only, update-fast and general retracting inputs, with either
+a projected or hidden rank. `RANK`/`DENSE_RANK` never reach the matcher at all —
 Flink itself rejects them in streaming, so that's parity, not a gap.
 
 An update-fast offset retains ranks 1 through rankEnd, including the hidden prefix, so unique-key
@@ -44,6 +44,13 @@ updates can move rows across the visible boundary. Its output uses Flink's posit
 cascades even when rank is not projected. An updated row moving into the hidden prefix retracts
 its former visible position before the remaining visible transitions. Checkpoints and canonical
 memory/RocksDB transitions retain the prefix and reapply the selected range on restore.
+
+A hidden-rank retracting offset follows Flink's heap-state emission semantics: a cascade mutates
+the retained row kinds, and later retractions compare those kinds along with the full payload.
+Sort-key counts advance even when a payload removal fails. Native memory and RocksDB state both
+persist the kinds and independent counts, including zero-count keys with retained payloads.
+This path preserves every per-record cascade even when mini-batching is enabled. Projected-rank
+and update-fast paths retain their existing behavior.
 
 ## Data-dependent bounds
 
@@ -115,13 +122,14 @@ Reproduce with `SF_BENCHMARK=true mvn -Pbench -pl :streamfusion-runtime -am test
 
 ## Gaps
 
+- Hidden-rank retracting OFFSET after an upstream mini-batch aggregate, rank or other operator
+  that can change intermediate changelog order. Source changelogs through projections, filters,
+  exchanges and batch markers remain native. Preserving the upstream bundle order is the
+  remaining composition work in [#102](https://github.com/datafusion-contrib/StreamFusion/issues/102).
+
 - A variable rank range outside the insert-only, non-null, partition-derived forms above. Updating
   and independently changing bounds remain in [#104](https://github.com/datafusion-contrib/StreamFusion/issues/104).
 - A row type the native converter can't carry.
-- A general **retracting** input with an `OFFSET` and no projected rank. Flink's hidden-rank
-  emission mutates retained row kinds, affecting later retraction matching. The native immutable
-  row buffer does not yet reproduce that state contract; this case stays on Flink, as tracked in
-  [#102](https://github.com/datafusion-contrib/StreamFusion/issues/102).
 - Time-ordered ranks beyond the existing rank-1 dedup forms and the processing-time first-N
   form above: event-time N > 1, descending processing-time N > 1, updating first-N input,
   first-N with an offset, or a first-N bound beyond the signed 32-bit counter range.

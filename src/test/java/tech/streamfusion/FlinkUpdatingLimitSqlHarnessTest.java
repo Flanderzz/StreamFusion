@@ -9,8 +9,8 @@ import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.apache.flink.types.Row;
 import org.apache.flink.types.RowKind;
-import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import tech.streamfusion.planner.NativePlanner;
 
@@ -57,19 +57,35 @@ class FlinkUpdatingLimitSqlHarnessTest {
   }
 
   @ParameterizedTest
-  @ValueSource(strings = {"", "ORDER BY total DESC NULLS LAST, k ASC NULLS FIRST "})
-  void retractingOffsetPreservesHostStoredRowKinds(String order) throws Exception {
-    String sql = "SELECT k, SUM(v) AS total FROM src GROUP BY k " + order + "LIMIT 2 OFFSET 1";
-    NativeParity.assertFallbackReasonContains(() -> environment(true, false), sql,
-        "retracting OFFSET without projected rank requires Flink's stored-row-kind semantics");
+  @CsvSource({"false,1", "true,1", "false,2", "true,2", "false,100", "true,100"})
+  void retractingOffsetPreservesHostStoredRowKinds(boolean ordered, int offset) throws Exception {
+    String order = ordered ? "ORDER BY total DESC NULLS LAST, k ASC NULLS FIRST " : "";
+    String sql = "SELECT k, SUM(v) AS total FROM src GROUP BY k " + order + "LIMIT 2 OFFSET " + offset;
+    assertNative(() -> environment(true, false), sql, true, null);
+    NativeParity.assertChangelogParity(() -> environment(true, false), sql);
   }
 
-  @Test
-  void nullableDuplicatesWithOffsetMatchHost() throws Exception {
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  void miniBatchAggregatesPreserveHostChangelogOrder(boolean ordered) throws Exception {
+    String order = ordered ? "ORDER BY total DESC NULLS LAST, k ASC NULLS FIRST " : "";
+    NativeParity.assertFallbackReasonContains(() -> environment(true, true),
+        "SELECT k, SUM(v) AS total FROM src GROUP BY k " + order + "LIMIT 2 OFFSET 1",
+        "retracting OFFSET requires unchanged upstream mini-batch changelog order");
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  void nullableDuplicatesWithOffsetMatchHost(boolean miniBatch) throws Exception {
     Supplier<TableEnvironment> input = () -> {
       var env = StreamExecutionEnvironment.getExecutionEnvironment();
       env.setParallelism(1);
       var table = StreamTableEnvironment.create(env);
+      if (miniBatch) {
+        table.getConfig().set("table.exec.mini-batch.enabled", "true");
+        table.getConfig().set("table.exec.mini-batch.allow-latency", "1 h");
+        table.getConfig().set("table.exec.mini-batch.size", "4");
+      }
       table.createTemporaryView("src", table.fromChangelogStream(env.fromData(
           Types.ROW_NAMED(new String[] {"k", "v"}, Types.LONG, Types.LONG),
           Row.of(1L, 20L), Row.of(1L, 20L), Row.of(2L, 10L), Row.of(null, null),
@@ -78,15 +94,18 @@ class FlinkUpdatingLimitSqlHarnessTest {
       return table;
     };
     String sql = "SELECT k, v FROM src ORDER BY v DESC NULLS LAST, k ASC LIMIT 2 OFFSET 1";
-    NativeParity.assertFallbackReasonContains(input, sql,
-        "retracting OFFSET without projected rank requires Flink's stored-row-kind semantics");
+    assertTrue(NativePlanner.explain(input.get(), sql).contains("NativeColumnarTopN"));
+    NativeParity.assertOrderedKindedParity(input, sql);
+    NativeParity.assertChangelogParity(input, sql);
     String ranked = "SELECT k, v, rn FROM (SELECT k, v, ROW_NUMBER() OVER "
         + "(ORDER BY v DESC NULLS LAST, k ASC) AS rn FROM src) WHERE rn BETWEEN 2 AND 3";
     assertTrue(NativePlanner.explain(input.get(), ranked).contains("NativeColumnarTopN"));
-    NativeParity.assertOrderedKindedParity(input, ranked);
+    if (!miniBatch) NativeParity.assertOrderedKindedParity(input, ranked);
     NativeParity.assertChangelogParity(input, ranked);
-    NativeParity.assertFallbackReasonContains(input, ranked.replace("SELECT k, v, rn FROM", "SELECT k, v FROM"),
-        "retracting OFFSET without projected rank requires Flink's stored-row-kind semantics");
+    String hidden = ranked.replace("SELECT k, v, rn FROM", "SELECT k, v FROM");
+    assertTrue(NativePlanner.explain(input.get(), hidden).contains("NativeColumnarTopN"));
+    NativeParity.assertOrderedKindedParity(input, hidden);
+    NativeParity.assertChangelogParity(input, hidden);
   }
 
   private static void assertNative(Supplier<TableEnvironment> environment, String sql,

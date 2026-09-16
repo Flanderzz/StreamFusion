@@ -102,10 +102,12 @@ final class LimitMatcher {
       if (strategy instanceof RankProcessStrategy.UpdateFastStrategy updateFast) {
         rowKeyColumns = updateFast.getPrimaryKeys();
       }
-      if (offset > 0 && rowKeyColumns == null
-          && !ChangelogPlanUtils.isInsertOnly((StreamPhysicalRel) sort.getInput())) {
-        ctx.decline("limit: retracting OFFSET without projected rank requires Flink's stored-row-kind semantics");
-        return null;
+      if (offset > 0 && rowKeyColumns == null) {
+        String reason = TopNMatcher.retractingOffsetInputReason(sort.getInput());
+        if (reason != null) {
+          ctx.decline(reason);
+          return null;
+        }
       }
       return new StreamPhysicalNativeColumnarTopN(
           sort.getCluster(),
