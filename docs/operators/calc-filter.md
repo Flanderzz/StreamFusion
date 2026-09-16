@@ -686,6 +686,8 @@ on Flink because generated Double/DecimalData defaults do not match its BigDecim
 Selected scalar type mismatches fail the job **outside ON ERROR**, matching Flink: a quoted
 `"12"` is not an INTEGER, `1.0` is not an INTEGER, and `1` is not a DOUBLE. Decimal-to-double
 conversion preserves rounding, infinity and underflow; a decimal zero has no negative sign.
+The [host failure reproducer](../upstream-flink-suite.md#expected-host-failures-in-sql-parity-audits)
+checks these conversion errors without native planning or the audit source adapter.
 
 A BOOLEAN form with either NULL policy is admitted only as a direct projection. Flink 2.2.1
 can unbox its boxed NULL result without checking the null flag in a bare WHERE condition,

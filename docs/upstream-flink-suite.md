@@ -146,3 +146,31 @@ The ORC Java-writer validation on September 14, 2026 passed all 46 unchanged Fli
 A targeted upstream Paimon run passed 22 continuous-read, partition-write and schema-change cases;
 the [ORC page](connectors/orc.md#build-and-verification) distinguishes that run from local tests
 that explicitly exercise ORC streaming.
+
+## Expected host failures in SQL parity audits
+
+Released Flink 2.2.1/JDK 17 fails these expressions even without StreamFusion or an audit source
+adapter. Both a one-row DataStream table containing `doc = '{"v":1}'` and a SQL VALUES table
+reproduce them:
+
+| Expression | Resolved SQL result type | Host conversion failure |
+|---|---|---|
+| `JSON_VALUE(doc, '$.v' RETURNING BOOLEAN NULL ON ERROR)` | BOOLEAN | `Integer` to `Boolean` |
+| `JSON_VALUE(doc, '$.v' RETURNING DOUBLE NULL ON ERROR)` | DOUBLE | `Integer` to `BigDecimal` |
+
+The failure is a `ClassCastException` during scalar result conversion, after JSON parsing and
+path evaluation succeed. Flink's generated BOOLEAN conversion casts the selected object directly
+to `Boolean`; DOUBLE casts it to `BigDecimal` before extracting a double. That conversion happens
+outside JSON_VALUE's ON ERROR policy. The source column is correctly typed STRING; matching the
+declared SQL result schema does not coerce the JSON token's Java object type.
+
+`FlinkJsonReturningHostContractTest` is the independent reproducer and checks the inferred types
+and exception causes. Separate controls with JSON `true`, `1.0`, and integer `1` for RETURNING
+BOOLEAN, DOUBLE, and INTEGER respectively succeed and match native execution. Run it with
+`mvn -pl streamfusion-runtime -am test -Dtest=FlinkJsonReturningHostContractTest`.
+
+The audit must retain the original JSON tokens and classify these cases as expected host
+failures, rather than missing fixtures, native fallback, or successful result parity. Do not
+rewrite integer `1` to decimal `1.0` just to obtain a successful baseline. Native type-mismatch
+failures are covered separately; exact native/host exception diagnostics remain tracked in
+[#108](https://github.com/datafusion-contrib/StreamFusion/issues/108).
