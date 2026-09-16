@@ -67,6 +67,10 @@ final class WindowJoinMatcher {
     if (zoneReason != null) {
       return "window join: " + zoneReason;
     }
+    if (WindowZoneGate.boundaryOffsetMillis(join, join.leftWindowing())
+        != WindowZoneGate.boundaryOffsetMillis(join, join.rightWindowing())) {
+      return "window join: both sides must use the same window time domain";
+    }
     RelDataType leftType = join.getLeft().getRowType();
     RelDataType rightType = join.getRight().getRowType();
     for (int i = 0; i < leftKeys.length; i++) {
@@ -74,7 +78,8 @@ final class WindowJoinMatcher {
               leftType.getFieldList().get(leftKeys[i]).getType().getSqlTypeName())
           || !WindowAggregateMatcher.supportedGroupingKeyType(
               rightType.getFieldList().get(rightKeys[i]).getType().getSqlTypeName())) {
-        return "window join: equi-join keys must be bigint/int/string/boolean/date/timestamp/decimal";
+        return "window join: equi-join keys must be"
+                   + " bigint/int/string/boolean/date/timestamp/decimal";
       }
     }
     return null;
@@ -166,6 +171,7 @@ final class WindowJoinMatcher {
         WindowJoinMatcher.isProctime(join),
         WindowJoinMatcher.windowMillis(join),
         WindowJoinMatcher.slideMillis(join),
-        WindowJoinMatcher.cumulative(join));
+        WindowJoinMatcher.cumulative(join),
+        WindowZoneGate.boundaryOffsetMillis(join, join.leftWindowing()));
   }
 }

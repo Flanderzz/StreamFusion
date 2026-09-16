@@ -1,8 +1,5 @@
 package tech.streamfusion.planner;
 
-import tech.streamfusion.operator.ArrowBatch;
-import tech.streamfusion.operator.ArrowBatchTypeInformation;
-import tech.streamfusion.operator.NativeWindowTableFunctionOperator;
 import java.util.Collections;
 import org.apache.flink.api.dag.Transformation;
 import org.apache.flink.configuration.ReadableConfig;
@@ -15,6 +12,9 @@ import org.apache.flink.table.planner.plan.nodes.exec.SingleTransformationTransl
 import org.apache.flink.table.planner.plan.nodes.exec.stream.StreamExecNode;
 import org.apache.flink.table.planner.plan.nodes.exec.utils.ExecNodeUtil;
 import org.apache.flink.table.types.logical.RowType;
+import tech.streamfusion.operator.ArrowBatch;
+import tech.streamfusion.operator.ArrowBatchTypeInformation;
+import tech.streamfusion.operator.NativeWindowTableFunctionOperator;
 
 /**
  * Wraps the stateless native windowing table function into the plan; it consumes and produces Arrow
@@ -29,6 +29,7 @@ public class NativeWindowTableFunctionExecNode extends ExecNodeBase<ArrowBatch>
   private final long windowMillis;
   private final long slideMillis;
   private final boolean cumulative;
+  private final long boundaryOffsetMillis;
   private final boolean proctime;
 
   public NativeWindowTableFunctionExecNode(
@@ -40,7 +41,8 @@ public class NativeWindowTableFunctionExecNode extends ExecNodeBase<ArrowBatch>
       long windowMillis,
       long slideMillis,
       boolean cumulative,
-      boolean proctime) {
+      boolean proctime,
+      long boundaryOffsetMillis) {
     super(
         ExecNodeContext.newNodeId(),
         new ExecNodeContext("stream-exec-native-window-table-function_1"),
@@ -52,6 +54,7 @@ public class NativeWindowTableFunctionExecNode extends ExecNodeBase<ArrowBatch>
     this.windowMillis = windowMillis;
     this.slideMillis = slideMillis;
     this.cumulative = cumulative;
+    this.boundaryOffsetMillis = boundaryOffsetMillis;
     this.proctime = proctime;
   }
 
@@ -65,7 +68,7 @@ public class NativeWindowTableFunctionExecNode extends ExecNodeBase<ArrowBatch>
         input,
         createTransformationMeta(TRANSFORMATION, config),
         new NativeWindowTableFunctionOperator(
-            timeColumn, windowMillis, slideMillis, cumulative, proctime),
+            timeColumn, windowMillis, slideMillis, cumulative, proctime, boundaryOffsetMillis),
         ArrowBatchTypeInformation.INSTANCE,
         input.getParallelism(),
         false);

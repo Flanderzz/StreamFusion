@@ -242,6 +242,27 @@ pub(crate) fn build_expr(
             };
             function.call(vec![left, right])
         }
+        30 => {
+            let precision = (arg / 100) as u8;
+            let scale = (arg % 100) as i8;
+            let mut children = Vec::with_capacity(2);
+            for _ in 0..2 {
+                children.push(build_expr(
+                    schema,
+                    kinds,
+                    payload,
+                    child_counts,
+                    longs,
+                    doubles,
+                    strings,
+                    cursor,
+                ));
+            }
+            datafusion::logical_expr::ScalarUDF::new_from_impl(
+                crate::flink_functions::decimal::DecimalRound::new(precision, scale),
+            )
+            .call(children)
+        }
         // Exact decimal cast: HALF_UP to the declared scale, then NULL on precision overflow.
         14 => {
             let precision = (arg / 100) as u8;
@@ -281,9 +302,7 @@ pub(crate) fn build_expr(
         // ITEM — the SQL subscript `array[i]` / `map[key]`, dispatched on the collection child's
         // type. Both paths reproduce Flink's subscript semantics: NULL for a null
         // collection, an out-of-range (1-based) index, or an absent key, and map lookup takes the
-        // first match like Flink's linear scan. The JVM encoder admits only literal subscripts —
-        // a dynamic negative index counts from the end in DataFusion but is NULL in Flink, and map
-        // lookup binds a literal key — so a non-literal subscript never reaches here.
+        // first match like Flink's linear scan. Runtime subscripts are evaluated as columns.
         19 => {
             use datafusion::logical_expr::ExprSchemable;
             let collection = build_expr(
@@ -311,15 +330,22 @@ pub(crate) fn build_expr(
                 .get_type(&df_schema)
                 .expect("subscripted collection type");
             match collection_type {
-                DataType::List(_) => {
-                    datafusion::functions_nested::expr_fn::array_element(collection, subscript)
+                array_type @ DataType::List(_) => {
+                    crate::flink_functions::array_item::function(array_type)
+                        .call(vec![collection, subscript])
                 }
                 map_type @ DataType::Map(_, _) => {
-                    let datafusion::prelude::Expr::Literal(key, _) = subscript else {
-                        panic!("map subscript must be a literal")
-                    };
-                    crate::flink_functions::map_lookup::function(map_type, key)
-                        .call(vec![collection])
+                    if let datafusion::prelude::Expr::Literal(key, _) = &subscript {
+                        if !key.is_null() && !matches!(key, ScalarValue::Struct(_)) {
+                            return crate::flink_functions::map_lookup::function(
+                                map_type,
+                                key.clone(),
+                            )
+                            .call(vec![collection]);
+                        }
+                    }
+                    crate::flink_functions::map_lookup::dynamic_function(map_type, arg == 1)
+                        .call(vec![collection, subscript])
                 }
                 other => panic!("ITEM over unsupported collection type {other}"),
             }
@@ -943,6 +969,36 @@ impl datafusion::logical_expr::ScalarUDFImpl for NarrowingCast {
                     _ => Arc::new(
                         vals.iter()
                             .map(|o| o.map(|v| v as i64))
+                            .collect::<Int64Array>(),
+                    ),
+                }
+            }
+            DataType::Decimal128(_, scale) if (0..=38).contains(scale) => {
+                let divisor = 10_i128.pow(*scale as u32);
+                let values = datafusion::common::cast::as_decimal128_array(input)?;
+                match &self.target {
+                    DataType::Int8 => Arc::new(
+                        values
+                            .iter()
+                            .map(|v| v.map(|v| (v / divisor) as i8))
+                            .collect::<Int8Array>(),
+                    ),
+                    DataType::Int16 => Arc::new(
+                        values
+                            .iter()
+                            .map(|v| v.map(|v| (v / divisor) as i16))
+                            .collect::<Int16Array>(),
+                    ),
+                    DataType::Int32 => Arc::new(
+                        values
+                            .iter()
+                            .map(|v| v.map(|v| (v / divisor) as i32))
+                            .collect::<Int32Array>(),
+                    ),
+                    _ => Arc::new(
+                        values
+                            .iter()
+                            .map(|v| v.map(|v| (v / divisor) as i64))
                             .collect::<Int64Array>(),
                     ),
                 }
@@ -1715,6 +1771,7 @@ pub(crate) fn udf_data_type(code: i64) -> DataType {
         11 => streamfusion_bridge::timestamp::timestamp_type(),
         12 => DataType::Int32,
         13 => DataType::Int64,
+        14 => DataType::Binary,
         code if code >= 1000 => {
             DataType::Decimal128(((code - 1000) / 100) as u8, ((code - 1000) % 100) as i8)
         }

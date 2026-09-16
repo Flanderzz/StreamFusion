@@ -22,6 +22,27 @@ TO_TIMESTAMP and temporal FLOOR/CEIL/CEILING were outside that measurement's cov
 subsequent implementation is measured in the [temporal diagnostic below](#temporal-coverage-diagnostic-2026-09-15).
 See [Calc / filter](../operators/calc-filter.md) for the complete argument gates.
 
+## Spaced JSON paths diagnostic (2026-09-16)
+
+Definite bracket paths with ASCII spaces now stay in native Calc instead of falling back.
+On Apple M4 Pro, JDK 17, UTC and Flink 2.2.1, the release/mimalloc build measured the
+following end-to-end medians over 2,000,000 rows at parallelism 1, with a 264-byte ASCII
+payload budget, NULL every eighth row, two warmups and five measured trials per engine.
+Both row/Arrow transposes are included and asserted in the native plan. Engines alternate
+trial order; the source-matched identity control is reported without subtracting it.
+
+| Case | Flink (s) | Native (s) | Flink / native |
+|---|---:|---:|---:|
+| Identity control | 0.822841 | 1.153666 | 0.713x |
+| `JSON_VALUE(s, 'lax $[ ''user'' ][ ''name'' ]')` | 1.682775 | 1.248065 | 1.348x |
+| `JSON_EXISTS(s, 'lax $[ ''user'' ][ ''name'' ]')` | 1.652583 | 1.202643 | 1.374x |
+
+Reproduce with the command below, selecting
+`-Dscalar.functions=JSON_VALUE_SPACED_PATH,JSON_EXISTS_SPACED_PATH` and
+`-Dscalar.nullEvery=8`. These numbers compare newly admitted queries against their previous
+Flink fallback; the change normalizes literal paths during planning and does not alter
+native JSON parsing. They do not establish a speedup for already admitted compact paths.
+
 ## Inputs
 
 - Search strings add `row:`/`other:` and `:match`/`:miss` around the padding: total lengths are
@@ -87,6 +108,68 @@ These isolated projections are slower natively, including the identity controls.
 coverage so that a containing filter/Top-1 island can remain columnar; this measurement does
 not establish an end-to-end speedup for that larger query. Treat it as a coverage prerequisite,
 not a standalone scalar acceleration claim. Controls are not subtracted from function times.
+
+## STRING to BOOLEAN coverage diagnostic (2026-09-16)
+
+Measured against `ebe550c6` plus STRING-to-BOOLEAN support, using JDK 17, UTC and the
+release `bench` profile with mimalloc. The source cycles through `true`, `FALSE`, `t`,
+`0`, `yes`, `n`, with every eighth value NULL. The selection was `STRING_TO_BOOLEAN`,
+with 2,000,000 rows, two warmups and five measured trials. Both transpose operators,
+native Calc substitution and the source-matched identity control were checked.
+
+| Case | Flink (s) | Native (s) | Flink / native |
+|---|---:|---:|---:|
+| STRING identity control | 0.307 | 0.497 | 0.618x |
+| `CAST(s AS BOOLEAN)` | 0.316 | 0.473 | 0.667x |
+
+This isolated conversion is slower natively with rowwise input/output. Its purpose is to
+remove a cast coverage blocker inside larger native islands, where existing Arrow batches
+avoid additional boundaries; these measurements do not claim a speedup for that composition.
+The identity control returns STRING rather than BOOLEAN and is not subtracted from the cast.
+
+## INSTR overloads diagnostic (2026-09-16)
+
+Measured against `ebe550c6` plus extended INSTR support, with JDK 17, UTC and the release
+`bench` profile with mimalloc. The selection was `INSTR3_COLUMN,INSTR4_FORWARD,INSTR4_REVERSE`,
+with 2,000,000 rows, two warmups, five measured trials, a 264-byte ASCII padding budget and
+every eighth source value NULL. Both transpose operators and native Calc substitutions were
+checked. The existing search fixtures supply runtime needles/starts to the three-argument
+case and repeated `x` padding to the forward/reverse third-occurrence cases.
+
+| Case | Flink (s) | Native (s) | Flink / native |
+|---|---:|---:|---:|
+| Runtime needle/start identity control | 0.886 | 1.248 | 0.710x |
+| Literal search identity control | 0.742 | 1.000 | 0.742x |
+| `INSTR(s, needle, start_pos)` | 1.428 | 1.305 | 1.094x |
+| `INSTR(s, 'x', 1, 3)` | 0.773 | 0.998 | 0.774x |
+| `INSTR(s, 'x', -1, 3)` | 3.919 | 0.953 | 4.112x |
+
+Reverse search benefits from avoiding Flink's reversed-string allocations. The short forward
+search remains slower with rowwise input/output; these results do not establish a blanket
+INSTR speedup. Controls return STRING rather than INT and are not subtracted from timings.
+
+## Exact DECIMAL coverage diagnostic (2026-09-16)
+
+Measured against `ebe550c6` plus exact decimal ROUND/literal/integer-cast support, using JDK 17,
+UTC and the release `bench` profile with mimalloc. The selection was
+`DECIMAL_ROUND_POS,DECIMAL_ROUND_NEG,DECIMAL_ROUND_EXPAND,DECIMAL_TO_BIGINT`, with 2,000,000
+DECIMAL(38,9) source rows, two warmups, five measured trials and every eighth value NULL.
+Both transpose operators and native Calc substitutions were checked. The source-matched
+identity control ran in the same JVM before the functions.
+
+| Case | Flink (s) | Native (s) | Flink / native |
+|---|---:|---:|---:|
+| DECIMAL(38,9) identity control | 0.272 | 0.616 | 0.441x |
+| `ROUND(n, 2)` | 0.296 | 0.632 | 0.468x |
+| `ROUND(n, -3)` | 0.319 | 0.636 | 0.502x |
+| `ROUND(n, 12)` | 0.269 | 0.630 | 0.426x |
+| `CAST(n AS BIGINT)` | 0.311 | 0.523 | 0.596x |
+
+These isolated row-fed projections are slower natively, including the identity control. They
+remove expression blockers from larger native islands, including casts above AVG(DECIMAL),
+but this diagnostic does not establish an end-to-end speedup for those composed queries.
+Controls are not subtracted from timings. Extreme negative ROUND positions using the JVM
+upcall are covered by semantic tests rather than these timing cases.
 
 ## STARTSWITH
 
@@ -806,3 +889,32 @@ JSON_EXISTS:
 |---|---:|---:|
 | ASCII values, no NULLs | 1.703 | 1.226 |
 | Unicode values, NULL every eighth row | 1.445 | 1.097 |
+
+### DECIMAL and VARBINARY scalar UDFs
+
+Measured on Apple M4 Pro with JDK 17 and released Flink 2.2.1 on 2026-09-16. Each identity
+UDF has its own source-matched control. The source produces two million rows at parallelism 1,
+with NULL every eighth row; decimal input is `DECIMAL(38,9)` and binary input is 264 bytes.
+Results are medians of five measured runs after two warmups, alternating engine order. The native
+release build uses mimalloc, and the harness verifies both row/Arrow transposes before execution.
+
+```sh
+TZ=UTC SF_BENCHMARK=true mvn -pl streamfusion-runtime -am test -Pbench \
+  '-Dtest=ScalarFunctionBenchmark#individualFunctions' \
+  '-Dscalar.functions=UDF_DECIMAL,UDF_BINARY' \
+  -Dscalar.rows=2000000 -Dscalar.warmup=2 -Dscalar.runs=5 \
+  -Dscalar.bytes=264 -Dscalar.unicode=false -Dscalar.nullEvery=8 \
+  -Dscalar.output=target/udf-exact-types.csv
+```
+
+| Expression | Flink (s) | Native (s) | Flink/native ratio |
+|---|---:|---:|---:|
+| DECIMAL identity control | 0.247 | 0.596 | 0.414x |
+| Binary identity control | 0.282 | 0.529 | 0.534x |
+| DECIMAL identity UDF | 0.249 | 0.657 | 0.379x |
+| Binary identity UDF | 0.275 | 0.601 | 0.457x |
+
+These simple UDFs remain slower than stock Flink. The change extends coverage so a supported
+exact-type UDF can stay between native operators; it does not claim a standalone speedup.
+The controls show the conversion cost before adding the JVM callback, and larger native islands
+require their own measurements before claiming an end-to-end gain.

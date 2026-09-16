@@ -25,11 +25,13 @@ pub(crate) mod split_index;
 pub(crate) mod substring;
 pub(crate) mod to_date;
 
+pub(crate) mod array_item;
 mod ascii;
 mod binary_strings;
 mod charset;
 mod chr;
 mod if_null;
+mod instr;
 pub(crate) mod integer_divide;
 mod is_json;
 mod json_exists;
@@ -42,6 +44,7 @@ pub(crate) mod map_lookup;
 pub(crate) mod numeric;
 mod scalar;
 mod sign;
+mod string_to_boolean;
 mod temporal_round;
 mod timestamp_millis;
 
@@ -169,6 +172,9 @@ pub(crate) fn function(op: i64, arity: usize) -> Option<ScalarUDF> {
         156 => timestamp_millis::function(timestamp_millis::Operation::SubtractMillis),
         157 => timestamp_millis::function(timestamp_millis::Operation::SubtractMonths),
         158 => if_null::function(),
+        159 => string_to_boolean::function(false),
+        160 => string_to_boolean::function(true),
+        161 => instr::function(arity),
         _ => return None,
     })
 }

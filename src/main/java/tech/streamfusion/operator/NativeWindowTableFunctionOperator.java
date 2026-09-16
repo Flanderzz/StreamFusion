@@ -1,16 +1,16 @@
 package tech.streamfusion.operator;
 
-import tech.streamfusion.Native;
 import org.apache.arrow.c.ArrowArray;
 import org.apache.arrow.c.ArrowSchema;
 import org.apache.arrow.c.CDataDictionaryProvider;
 import org.apache.arrow.c.Data;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.flink.metrics.Counter;
 import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
-import org.apache.flink.metrics.Counter;
+import tech.streamfusion.Native;
 
 /**
  * Stateless windowing table function, columnar in and out: the Arrow-batch analog of Flink's {@link
@@ -34,6 +34,7 @@ public class NativeWindowTableFunctionOperator extends AbstractStreamOperator<Ar
   private final long slideMillis;
   private final boolean cumulative;
   private final boolean proctime;
+  private final long boundaryOffsetMillis;
 
   private transient BufferAllocator allocator;
   private transient CDataDictionaryProvider dictionaries;
@@ -41,11 +42,22 @@ public class NativeWindowTableFunctionOperator extends AbstractStreamOperator<Ar
 
   public NativeWindowTableFunctionOperator(
       int timeColumn, long windowMillis, long slideMillis, boolean cumulative, boolean proctime) {
+    this(timeColumn, windowMillis, slideMillis, cumulative, proctime, 0);
+  }
+
+  public NativeWindowTableFunctionOperator(
+      int timeColumn,
+      long windowMillis,
+      long slideMillis,
+      boolean cumulative,
+      boolean proctime,
+      long boundaryOffsetMillis) {
     this.timeColumn = timeColumn;
     this.windowMillis = windowMillis;
     this.slideMillis = slideMillis;
     this.cumulative = cumulative;
     this.proctime = proctime;
+    this.boundaryOffsetMillis = boundaryOffsetMillis;
   }
 
   @Override
@@ -86,7 +98,8 @@ public class NativeWindowTableFunctionOperator extends AbstractStreamOperator<Ar
           slideMillis,
           cumulative,
           proctime,
-          now);
+          now,
+          boundaryOffsetMillis);
       assigned = Data.importVectorSchemaRoot(allocator, outArray, outSchema, dictionaries);
     } finally {
       in.close(); // the input batch is consumed

@@ -78,6 +78,17 @@ class RawKeyedStateTest {
   }
 
   @Test
+  void oldEpochWindowLayoutIsRejectedBeforeNativeDecode() {
+    ByteBuffer payload = ByteBuffer.allocate(Long.BYTES + 2 * Integer.BYTES);
+    payload.putLong(RawKeyedState.STATE_MAGIC).putInt(2).putInt(0);
+    IllegalStateException failure =
+        assertThrows(
+            IllegalStateException.class,
+            () -> RawKeyedState.restore(restoreContext(framed(payload.array()))));
+    assertTrue(failure.getMessage().contains("version 2"));
+  }
+
+  @Test
   void newerStateFormatVersionFailsNamingBothVersions() {
     int newerVersion = RawKeyedState.STATE_FORMAT_VERSION + 41;
     ByteBuffer payload = ByteBuffer.allocate(Long.BYTES + Integer.BYTES + Integer.BYTES + 1);

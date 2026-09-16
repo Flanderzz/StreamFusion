@@ -1,11 +1,11 @@
 package tech.streamfusion.planner;
 
-import tech.streamfusion.operator.RowDataArrowConverter;
 import java.lang.reflect.Field;
 import org.apache.calcite.rel.RelNode;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
 import org.apache.flink.table.planner.plan.logical.WindowAttachedWindowingStrategy;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalWindowDeduplicate;
+import tech.streamfusion.operator.RowDataArrowConverter;
 
 /**
  * Recognizes window deduplication — {@code ROW_NUMBER() OVER (PARTITION BY window, key ORDER BY
@@ -101,8 +101,9 @@ final class WindowDeduplicateMatcher {
     if (zoneReason != null) {
       return "window deduplication: " + zoneReason;
     }
-    return "window deduplication: needs ROW_NUMBER() OVER (PARTITION BY window, key ORDER BY rowtime)"
-        + " = 1 over a windowing-TVF input, with input columns the Arrow conversion supports";
+    return "window deduplication: needs ROW_NUMBER() OVER (PARTITION BY window, key ORDER BY"
+               + " rowtime) = 1 over a windowing-TVF input, with input columns the Arrow conversion"
+               + " supports";
   }
 
   static RelNode substitute(StreamPhysicalWindowDeduplicate dedup, PlanContext ctx) {
@@ -123,6 +124,8 @@ final class WindowDeduplicateMatcher {
         WindowDeduplicateMatcher.isProctime(dedup),
         WindowDeduplicateMatcher.windowMillis(dedup),
         WindowDeduplicateMatcher.slideMillis(dedup),
-        WindowDeduplicateMatcher.cumulative(dedup));
+        WindowDeduplicateMatcher.cumulative(dedup),
+        WindowZoneGate.boundaryOffsetMillis(dedup, dedup.getWindowingStrategy()),
+        Boolean.TRUE.equals(keepLastRow(dedup)));
   }
 }

@@ -1,15 +1,14 @@
 package tech.streamfusion.planner;
 
-import tech.streamfusion.operator.RowDataArrowConverter;
 import java.time.Duration;
 import java.time.zone.ZoneRules;
 import org.apache.calcite.rel.RelNode;
+import org.apache.flink.table.expressions.ValueLiteralExpression;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
 import org.apache.flink.table.planner.plan.logical.LogicalWindow;
 import org.apache.flink.table.planner.plan.logical.SessionGroupWindow;
 import org.apache.flink.table.planner.plan.logical.SlidingGroupWindow;
 import org.apache.flink.table.planner.plan.logical.TumblingGroupWindow;
-import org.apache.flink.table.expressions.ValueLiteralExpression;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalGroupWindowAggregate;
 import org.apache.flink.table.planner.plan.utils.AggregateUtil;
 import org.apache.flink.table.planner.plan.utils.ChangelogPlanUtils;
@@ -23,6 +22,7 @@ import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.LogicalTypeRoot;
 import org.apache.flink.table.types.logical.utils.LogicalTypeChecks;
 import scala.collection.Seq;
+import tech.streamfusion.operator.RowDataArrowConverter;
 
 /**
  * Routes supported legacy group-window aggregates onto the native window operators.
@@ -81,9 +81,9 @@ final class GroupWindowAggregateMatcher {
         return "legacy group-window: session gap must be a time interval";
       }
       if (timeType.getTypeRoot() == LogicalTypeRoot.TIMESTAMP_WITH_LOCAL_TIME_ZONE
-          && !sessionZoneFixedAfterEpoch(agg)) {
-        return "legacy SESSION over TIMESTAMP_LTZ requires the session zone to remain fixed after"
-            + " 1970";
+          && !sessionZoneFixedOffset(agg)) {
+        return "legacy SESSION over TIMESTAMP_LTZ requires a fixed offset for the full timestamp"
+            + " range";
       }
       return null;
     }
@@ -103,7 +103,7 @@ final class GroupWindowAggregateMatcher {
     if (timeType.getTypeRoot() == LogicalTypeRoot.TIMESTAMP_WITH_LOCAL_TIME_ZONE
         && !sessionZoneAlignsWithSlide(agg, slideMillis)) {
       return "legacy group-window: TIMESTAMP_LTZ requires every session-zone offset to align with"
-          + " the window slide and the zone to remain fixed after 1970";
+          + " the window slide and a fixed offset for the full timestamp range";
     }
     return null;
   }
@@ -111,12 +111,11 @@ final class GroupWindowAggregateMatcher {
   private static boolean sessionZoneAlignsWithSlide(
       StreamPhysicalGroupWindowAggregate agg, long slideMillis) {
     ZoneRules rules = sessionZoneRules(agg);
-    return WindowZoneGate.fixedAfterEpoch(rules)
-        && WindowZoneGate.offsetAligns(rules, slideMillis);
+    return rules.isFixedOffset() && WindowZoneGate.offsetAligns(rules, slideMillis);
   }
 
-  private static boolean sessionZoneFixedAfterEpoch(StreamPhysicalGroupWindowAggregate agg) {
-    return WindowZoneGate.fixedAfterEpoch(sessionZoneRules(agg));
+  private static boolean sessionZoneFixedOffset(StreamPhysicalGroupWindowAggregate agg) {
+    return sessionZoneRules(agg).isFixedOffset();
   }
 
   private static ZoneRules sessionZoneRules(StreamPhysicalGroupWindowAggregate agg) {

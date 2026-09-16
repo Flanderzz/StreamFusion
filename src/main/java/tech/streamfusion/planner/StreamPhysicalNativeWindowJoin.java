@@ -31,6 +31,7 @@ public class StreamPhysicalNativeWindowJoin extends StreamPhysicalNativeBiRel {
   private final long windowMillis;
   private final long slideMillis;
   private final boolean cumulative;
+  private final long boundaryOffsetMillis;
 
   public StreamPhysicalNativeWindowJoin(
       RelOptCluster cluster,
@@ -49,7 +50,8 @@ public class StreamPhysicalNativeWindowJoin extends StreamPhysicalNativeBiRel {
       boolean proctime,
       long windowMillis,
       long slideMillis,
-      boolean cumulative) {
+      boolean cumulative,
+      long boundaryOffsetMillis) {
     super(cluster, traitSet, left, right, outputRowType);
     this.leftKeys = leftKeys;
     this.rightKeys = rightKeys;
@@ -63,6 +65,7 @@ public class StreamPhysicalNativeWindowJoin extends StreamPhysicalNativeBiRel {
     this.windowMillis = windowMillis;
     this.slideMillis = slideMillis;
     this.cumulative = cumulative;
+    this.boundaryOffsetMillis = boundaryOffsetMillis;
   }
 
   @Override
@@ -89,7 +92,8 @@ public class StreamPhysicalNativeWindowJoin extends StreamPhysicalNativeBiRel {
         proctime,
         windowMillis,
         slideMillis,
-        cumulative);
+        cumulative,
+        boundaryOffsetMillis);
   }
 
   @Override
@@ -114,6 +118,7 @@ public class StreamPhysicalNativeWindowJoin extends StreamPhysicalNativeBiRel {
         windowMillis,
         slideMillis,
         cumulative,
+        boundaryOffsetMillis,
         FlinkKeyGroupUtils.timestampPrecisions(getLeft().getRowType(), leftKeys));
   }
 }

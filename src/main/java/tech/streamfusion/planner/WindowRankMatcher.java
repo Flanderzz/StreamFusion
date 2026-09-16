@@ -1,6 +1,5 @@
 package tech.streamfusion.planner;
 
-import tech.streamfusion.operator.RowDataArrowConverter;
 import org.apache.calcite.rel.RelFieldCollation;
 import org.apache.calcite.rel.RelNode;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
@@ -8,6 +7,7 @@ import org.apache.flink.table.planner.plan.logical.WindowAttachedWindowingStrate
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalWindowRank;
 import org.apache.flink.table.runtime.operators.rank.ConstantRankRange;
 import org.apache.flink.table.runtime.operators.rank.RankType;
+import tech.streamfusion.operator.RowDataArrowConverter;
 
 /**
  * Recognizes window Top-N — {@code ROW_NUMBER() OVER (PARTITION BY window[, key] ORDER BY …) <= N}
@@ -115,8 +115,8 @@ final class WindowRankMatcher {
     if (zoneReason != null) {
       return "window Top-N: " + zoneReason;
     }
-    return "window Top-N: needs ROW_NUMBER() OVER (PARTITION BY window[, key] ORDER BY …) <= N over a"
-        + " windowing-TVF input, with input columns the Arrow conversion supports";
+    return "window Top-N: needs ROW_NUMBER() OVER (PARTITION BY window[, key] ORDER BY …) <= N over"
+               + " a windowing-TVF input, with input columns the Arrow conversion supports";
   }
 
   static RelNode substitute(StreamPhysicalWindowRank rank, PlanContext ctx) {
@@ -137,6 +137,8 @@ final class WindowRankMatcher {
         WindowRankMatcher.isProctime(rank),
         WindowRankMatcher.windowMillis(rank),
         WindowRankMatcher.slideMillis(rank),
-        WindowRankMatcher.cumulative(rank));
+        WindowRankMatcher.cumulative(rank),
+        WindowZoneGate.boundaryOffsetMillis(rank, rank.windowing()),
+        false);
   }
 }

@@ -1,6 +1,7 @@
 package tech.streamfusion.operator;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.time.Duration;
 import java.util.ArrayList;
@@ -45,6 +46,23 @@ import tech.streamfusion.arrow.writers.TimestampWriter;
  * SQL harness; this exercises the fan-out the join tests do not.
  */
 class NativeWindowTableFunctionOperatorTest {
+
+  @Test
+  void overflowingLocalTimeReleasesInputBeforeThrowing() throws Exception {
+    try (BufferAllocator allocator = new RootAllocator()) {
+      try (var harness = new OneInputStreamOperatorTestHarness<>(
+          new NativeWindowTableFunctionOperator(1, 1000, 1000, false, false, 28_800_000))) {
+        harness.setup(new ArrowBatchSerializer());
+        harness.open();
+        ArrowBatch input = new ArrowBatch(RowDataArrowConverter.write(
+            List.of(GenericRowData.of(7L, TimestampData.fromEpochMillis(Long.MAX_VALUE))),
+            SCHEMA, allocator));
+        assertThrows(tech.streamfusion.NativeException.class,
+            () -> harness.processElement(new StreamRecord<>(input)));
+      }
+      assertEquals(0, allocator.getAllocatedMemory());
+    }
+  }
 
   // Input [k BIGINT, rt TIMESTAMP_LTZ(3)]; output appends window_start/end/time (read as
   // TIMESTAMP).

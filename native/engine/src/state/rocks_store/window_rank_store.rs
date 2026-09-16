@@ -677,6 +677,58 @@ mod tests {
         );
     }
 
+    #[test]
+    fn window_dedup_keep_last_ties_survive_persistent_restore() {
+        let make_ranker = || {
+            let mut ranker = WindowRanker::new(
+                0,
+                1,
+                vec![2],
+                vec![SortColumn {
+                    index: 2,
+                    ascending: false,
+                    nulls_first: false,
+                }],
+                1,
+                false,
+            );
+            ranker.set_keep_last_on_tie(true);
+            ranker.with_key_timestamp_precisions(vec![-1])
+        };
+        let row_types: Vec<_> = rank_schema()
+            .fields()
+            .iter()
+            .map(|f| f.data_type().clone())
+            .collect();
+        let store =
+            RocksWindowRankStore::create(test_config("dedup-tie"), &row_types, 0..=127).unwrap();
+        let mut before = make_ranker().with_store(store, rank_schema());
+        before
+            .push(&rank_batch(&[0, 0], &[100, 100], &[1, 1], &[10, 20]))
+            .unwrap();
+        let snapshot = snapshot_dir("dedup-tie");
+        let manifest = before.checkpoint_store(i64::MIN, &snapshot).unwrap();
+        drop(before);
+        let store = RocksWindowRankStore::open_merged(
+            test_config("dedup-tie-reopen"),
+            &row_types,
+            0..=127,
+            &[(snapshot, manifest.snapshot_id)],
+            true,
+        )
+        .unwrap();
+        let mut restored = make_ranker().with_store(store, rank_schema());
+        restored
+            .push(&rank_batch(&[0], &[100], &[1], &[30]))
+            .unwrap();
+        let out = restored.flush(100).unwrap();
+        assert_eq!(out.num_rows(), 1);
+        assert_eq!(
+            ScalarValue::try_from_array(out.column(3), 0).unwrap(),
+            ScalarValue::Int64(Some(30))
+        );
+    }
+
     // A canonical savepoint of the store-backed ranker is the memory path's own raw keyed
     // encoding, so it restores into a memory ranker that continues identically.
     #[test]
