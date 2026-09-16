@@ -208,6 +208,27 @@ mod tests {
     }
 
     #[test]
+    fn empty_members_select_on_both_readers_and_replace_duplicate_ancestors() {
+        let mut reader = Reader::new(4000);
+        for text in ["lax $['']['']", "lax $[\"\"][\"\"]"] {
+            let path = Path::parse(text, "13.0").unwrap();
+            for padding in [String::new(), fields()] {
+                let input =
+                    format!(r#"{{"":{{"":"first"}}{padding},"":{{" ":"space","":"last"}}}}"#);
+                assert_eq!(path.read(&input), Ok(Value::String("last")));
+                equivalent(&path, &input, &mut reader);
+                if !padding.is_empty() {
+                    assert!(candidate(&input));
+                    assert_eq!(reader.read(&path, &input), Ok(Value::DecodedString("last")));
+                }
+                let input = format!(r#"{{"":{{"":"first"}}{padding},"":{{}}}}"#);
+                assert_eq!(path.read(&input), Ok(Value::Missing));
+                equivalent(&path, &input, &mut reader);
+            }
+        }
+    }
+
+    #[test]
     fn jackson_edges_use_the_existing_parser() {
         let path = Path::parse("lax $.a", "13.0").unwrap();
         let mut reader = Reader::new(4000);

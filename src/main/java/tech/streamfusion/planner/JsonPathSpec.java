@@ -10,8 +10,8 @@ final class JsonPathSpec {
   private static final Pattern STEP =
       Pattern.compile(
           "\\.(?<dot>[\\p{L}_][\\p{L}\\p{N}_]*)"
-              + "|\\[ *'(?<single>[^'\\\\\\x00-\\x1f]+)' *\\]"
-              + "|\\[ *\"(?<quoted>[^\"\\\\\\x00-\\x1f]+)\" *\\]"
+              + "|\\[ *'(?<single>[^'\\\\\\x00-\\x1f]*)' *\\]"
+              + "|\\[ *\"(?<quoted>[^\"\\\\\\x00-\\x1f]*)\" *\\]"
               + "|\\[ *(?<index>[0-9]+) *\\]");
 
   private JsonPathSpec() {}

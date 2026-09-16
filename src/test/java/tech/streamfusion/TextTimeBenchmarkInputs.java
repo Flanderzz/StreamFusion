@@ -207,6 +207,11 @@ final class TextTimeBenchmarkInputs {
                   payload(unicode ? "\u4e2da" : "ab", bytes),
                   payload(unicode ? "\u00e9b" : "cd", bytes)
                 };
+            case "tt_json_empty_member" ->
+                new String[] {
+                  "{\"\":\"Alice\",\"padding\":\"" + text[0] + "\"}",
+                  "{\" \":\"space\",\"padding\":\"" + text[1] + "\"}"
+                };
             case "tt_json_member" ->
                 new String[] {
                   "{\"\u7528\u6237\":{\"\u59d3.\u540d\":\""
