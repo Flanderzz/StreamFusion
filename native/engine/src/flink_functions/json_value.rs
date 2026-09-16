@@ -166,14 +166,17 @@ impl Output {
             (Self::Double(output), Value::Null) => output.append_null(),
             (Self::Boolean(output), Value::Boolean(value)) => output.append_value(value),
             (Self::Integer(output), Value::Number(raw)) if !is_decimal(raw) => {
-                output.append_value(raw.parse::<i32>().map_err(|_| type_error("INTEGER"))?);
+                output.append_value(
+                    raw.parse::<i32>()
+                        .map_err(|_| type_error("java.lang.Integer", value))?,
+                );
             }
             (Self::Double(output), Value::Number(raw)) if is_decimal(raw) => {
                 output.append_value(decimal_double(raw)?);
             }
-            (Self::Boolean(_), _) => return Err(type_error("BOOLEAN")),
-            (Self::Integer(_), _) => return Err(type_error("INTEGER")),
-            (Self::Double(_), _) => return Err(type_error("DOUBLE")),
+            (Self::Boolean(_), value) => return Err(type_error("java.lang.Boolean", value)),
+            (Self::Integer(_), value) => return Err(type_error("java.lang.Integer", value)),
+            (Self::Double(_), value) => return Err(type_error("java.math.BigDecimal", value)),
         }
         Ok(())
     }
@@ -192,10 +195,19 @@ fn is_decimal(raw: &str) -> bool {
     raw.contains(['.', 'e', 'E'])
 }
 
-fn type_error(return_type: &str) -> datafusion::common::DataFusionError {
-    datafusion::common::exec_datafusion_err!(
-        "JSON_VALUE RETURNING {return_type}: incompatible JSON scalar type"
-    )
+fn type_error(target: &str, value: Value<'_>) -> datafusion::common::DataFusionError {
+    let source = match value {
+        Value::Boolean(_) => "java.lang.Boolean",
+        Value::String(_) | Value::DecodedString(_) => "java.lang.String",
+        Value::Number(raw) if is_decimal(raw) => "java.math.BigDecimal",
+        Value::Number(raw) if raw.parse::<i32>().is_ok() => "java.lang.Integer",
+        Value::Number(raw) if raw.parse::<i64>().is_ok() => "java.lang.Long",
+        Value::Number(_) => "java.math.BigInteger",
+        _ => unreachable!("only a non-null JSON scalar reaches the returning cast"),
+    };
+    datafusion::common::DataFusionError::External(Box::new(
+        streamfusion_bridge::FlinkException::class_cast(source, target),
+    ))
 }
 
 fn decimal_double(raw: &str) -> Result<f64> {
@@ -205,7 +217,8 @@ fn decimal_double(raw: &str) -> Result<f64> {
     if !mantissa.bytes().any(|byte| matches!(byte, b'1'..=b'9')) {
         return Ok(0.0);
     }
-    raw.parse::<f64>().map_err(|_| type_error("DOUBLE"))
+    raw.parse::<f64>()
+        .map_err(|_| datafusion::common::exec_datafusion_err!("invalid JSON decimal"))
 }
 
 pub(super) fn literal(value: &ColumnarValue) -> Result<Option<&str>> {
@@ -374,7 +387,7 @@ mod returning_tests {
                     ColumnarValue::Scalar(ScalarValue::Utf8(Some(document.into()))),
                 )
                 .unwrap_err();
-                assert!(error.to_string().contains("incompatible JSON scalar"));
+                assert!(error.to_string().contains("cannot be cast to class"));
             }
         }
     }

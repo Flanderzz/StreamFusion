@@ -77,7 +77,7 @@ class FlinkJsonReturningSqlHarnessTest {
     JsonFunctionTestInputs.assertFails(
         document,
         "JSON_VALUE(s, '$' RETURNING " + type + " NULL ON ERROR)",
-        "JSON_VALUE RETURNING " + type);
+        "cannot be cast to class");
   }
 
   @ParameterizedTest

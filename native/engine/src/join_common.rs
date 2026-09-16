@@ -418,7 +418,7 @@ impl JoinPredicate {
         let predicate = self.compiled(schema);
         let evaluated = predicate
             .evaluate(batch)
-            .expect("failed to evaluate join predicate")
+            .expect_flink("failed to evaluate join predicate")
             .into_array(batch.num_rows())
             .expect("failed to materialize join predicate");
         let mask = evaluated

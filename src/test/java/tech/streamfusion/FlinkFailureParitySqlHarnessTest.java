@@ -18,6 +18,7 @@ import org.apache.flink.types.Row;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.params.provider.CsvSource;
 
 class FlinkFailureParitySqlHarnessTest {
   @Test
@@ -100,19 +101,40 @@ class FlinkFailureParitySqlHarnessTest {
   }
 
   @ParameterizedTest
-  @ValueSource(strings = {"BOOLEAN", "DOUBLE"})
-  void jsonReturningDiagnosticMismatchRemainsExplicit(String type) {
-    var comparison = NativeFailureParity.run(() -> environment("{\"v\":1}"),
+  @CsvSource(delimiter = '|', value = {
+      "BOOLEAN|1|java.lang.Integer", "DOUBLE|1|java.lang.Integer",
+      "BOOLEAN|2147483648|java.lang.Long", "DOUBLE|9223372036854775808|java.math.BigInteger",
+      "BOOLEAN|1.5|java.math.BigDecimal", "INTEGER|1.5|java.math.BigDecimal",
+      "INTEGER|2147483648|java.lang.Long", "INTEGER|9223372036854775808|java.math.BigInteger",
+      "BOOLEAN|\"true\"|java.lang.String", "INTEGER|\"12\"|java.lang.String",
+      "DOUBLE|\"1.0\"|java.lang.String", "INTEGER|true|java.lang.Boolean",
+      "DOUBLE|true|java.lang.Boolean"
+  })
+  void jsonReturningConversionFailureMatchesHost(String type, String token, String source) {
+    var comparison = NativeFailureParity.run(() -> environment("{\"v\":" + token + "}"),
         "SELECT JSON_VALUE(v, '$.v' RETURNING " + type + " NULL ON ERROR) FROM src");
-    assertEquals(ClassCastException.class, comparison.host().rootCause().getClass());
-    assertEquals(NativeException.class, comparison.nativeRun().rootCause().getClass());
-    org.junit.jupiter.api.Assertions.assertTrue(
-        comparison.nativeRun().rootCause().getMessage().contains("incompatible JSON scalar"));
-    assertEquals(ROW_EVALUATION, comparison.host().phase());
-    assertEquals(ROW_EVALUATION, comparison.nativeRun().phase());
-    assertEquals(NATIVE, comparison.nativeRun().route());
-    assertThrows(AssertionError.class,
-        () -> comparison.assertFailure(ClassCastException.class, "", ROW_EVALUATION, NATIVE));
+    comparison.assertFailure(ClassCastException.class, "class " + source + " cannot be cast",
+        ROW_EVALUATION, NATIVE);
+    assertEquals(comparison.host().rootCause().getMessage(), comparison.nativeRun().rootCause().getMessage());
+  }
+
+  @Test
+  void jsonConversionFailureInFilterMatchesHost() {
+    var comparison = NativeFailureParity.run(() -> environment("{\"v\":1}"),
+        "SELECT v FROM src WHERE JSON_VALUE(v, '$.v' RETURNING BOOLEAN DEFAULT FALSE ON EMPTY DEFAULT FALSE ON ERROR)");
+    comparison.assertFailure(ClassCastException.class, "java.lang.Integer cannot be cast to class java.lang.Boolean",
+        ROW_EVALUATION, NATIVE);
+  }
+
+  @Test
+  void jsonConversionFailureAfterSeveralBatchesMatchesHost() {
+    String[] documents = new String[5003];
+    java.util.Arrays.fill(documents, "{\"v\":true}");
+    documents[5002] = "{\"v\":1}";
+    NativeFailureParity.run(() -> environment(documents),
+        "SELECT JSON_VALUE(v, '$.v' RETURNING BOOLEAN NULL ON ERROR) FROM src")
+        .assertFailure(ClassCastException.class, "java.lang.Integer cannot be cast to class java.lang.Boolean",
+            ROW_EVALUATION, NATIVE);
   }
 
   private static TableEnvironment environment(String... values) {

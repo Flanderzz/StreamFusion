@@ -362,8 +362,8 @@ NULL input remains NULL. Ordinary CAST fails on invalid input in default mode; T
 and legacy-mode CAST return NULL. CASE suppresses an unselected failing cast. Default CAST
 inside AND/OR stays on Flink to preserve row short-circuiting; TRY_CAST and legacy CAST
 can compose natively. NOT NULL sink enforcement remains Flink's ERROR/DROP policy.
-Native failures use the existing exception wrapper; exact host diagnostics remain
-[#108](https://github.com/datafusion-contrib/StreamFusion/issues/108).
+Native integer-parse failures use the existing NativeException wrapper; their exception class
+differs from Flink's NumberFormatException. Successful results and NULL-on-error policies match.
 
 Integer formatting uses canonical decimal text, including signed minima and zero.
 `VARCHAR(n)` truncates to `n` characters; `CHAR(n)` also pads shorter results with spaces.
@@ -732,10 +732,12 @@ other consumers; the same limitation affects JSON_UNQUOTE. That remaining correc
 tracked in [#81](https://github.com/datafusion-contrib/StreamFusion/issues/81). Direct-output
 parity does not establish parity for such compositions.
 
-JSON_VALUE policy and scalar-conversion failures retain the existing native exception
-wrapper; exact host exception types/messages remain tracked in
-[#108](https://github.com/datafusion-contrib/StreamFusion/issues/108). Successful result
-parity and both-engine failure tests do not imply identical exception diagnostics.
+JSON_VALUE scalar-conversion failures preserve Flink's ClassCastException, naming the source
+Java scalar class and the requested target class. This includes integer tokens returned as
+BOOLEAN or DOUBLE, and out-of-range integer tokens returned as INTEGER. The exception remains
+outside ON ERROR handling, matching released Flink 2.2.1. A typed DataFusion error reaches the
+JNI boundary without parsing messages or calling the JVM on successful rows. JSON ERROR policy
+failures retain the existing NativeException wrapper; their diagnostic parity is not established.
 
 ### JSON_EXISTS
 

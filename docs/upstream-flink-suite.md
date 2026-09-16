@@ -178,9 +178,8 @@ exception expectations; a future released dependency upgrade must revalidate tha
 
 The audit must retain the original JSON tokens and classify these cases as expected host
 failures, rather than missing fixtures, native fallback, or successful result parity. Do not
-rewrite integer `1` to decimal `1.0` just to obtain a successful baseline. Native type-mismatch
-failures are covered separately; exact native/host exception diagnostics remain tracked in
-[#108](https://github.com/datafusion-contrib/StreamFusion/issues/108).
+rewrite integer `1` to decimal `1.0` just to obtain a successful baseline. Native scalar-conversion failures preserve the host ClassCastException and its source/target
+Java types through a typed error channel, including in filters and across multiple batches.
 
 ## Comparing failed SQL executions
 
@@ -210,11 +209,14 @@ The single malformed-decimal input, for example, yields no collected rows on eit
 - CASE short-circuiting, JSON NULL/DEFAULT ON ERROR, and TRY_CAST-to-DECIMAL's explicit fallback.
 - Planning rejection, UDF initialization failure and a source failure observed during collection.
 - Deliberate success/failure mismatches in either direction, which must fail the parity assertion.
-- JSON RETURNING BOOLEAN/DOUBLE on an integer token: both engines fail during row evaluation, but
-  Flink throws ClassCastException while native execution reports an incompatible-scalar
-  NativeException. These tests explicitly prove that strict exception parity rejects the mismatch;
-  they are tracked divergences, not successful native exception parity. Matching diagnostics
-  remains [#108](https://github.com/datafusion-contrib/StreamFusion/issues/108).
+- JSON RETURNING scalar-conversion errors: both engines throw ClassCastException with identical
+  source/target type diagnostics on the tested JDK 17 baseline. Cases cover Integer, Long,
+  BigInteger, BigDecimal, Boolean and String input objects, native projections and filters,
+  and a failure after multiple batches. The native kernel carries a structured error through
+  DataFusion; the guarded JNI boundary raises the Java exception after Arrow buffers unwind.
+
+This does not establish identical diagnostics for every native error. JSON ERROR policies and
+native integer parsing still use their existing generic native exception wrapper.
 
 Run the failure suite and independent host reproducer together:
 

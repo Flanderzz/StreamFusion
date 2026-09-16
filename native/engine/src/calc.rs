@@ -124,7 +124,7 @@ impl FilterExpression {
         let predicate = self.predicate(&batch.schema());
         let evaluated = predicate
             .evaluate(&batch)
-            .expect("failed to evaluate predicate")
+            .expect_flink("failed to evaluate predicate")
             .into_array(batch.num_rows())
             .expect("failed to materialize predicate");
         let mask = evaluated
@@ -321,7 +321,7 @@ impl CalcExpression {
             Some(predicate) => {
                 let evaluated = predicate
                     .evaluate(&batch)
-                    .expect("failed to evaluate condition")
+                    .expect_flink("failed to evaluate condition")
                     .into_array(batch.num_rows())
                     .expect("failed to materialize condition");
                 let mask = evaluated
@@ -342,7 +342,7 @@ impl CalcExpression {
         for (i, projection) in projections.iter().enumerate() {
             let array = projection
                 .evaluate(&filtered)
-                .expect("failed to evaluate projection")
+                .expect_flink("failed to evaluate projection")
                 .into_array(rows)
                 .expect("failed to materialize projection");
             fields.push(Field::new(

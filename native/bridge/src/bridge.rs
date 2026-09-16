@@ -9,6 +9,53 @@ pub static JVM: OnceLock<jni::JavaVM> = OnceLock::new();
 /// Keeps a callback's original throwable alive while Arrow release callbacks run during unwind.
 pub struct JavaException(pub jni::objects::GlobalRef);
 
+/// A host SQL exception carried through an engine error without losing its Java type.
+#[derive(Debug, Clone)]
+pub struct FlinkException {
+    class: &'static str,
+    message: String,
+}
+
+impl FlinkException {
+    pub fn class_cast(source: &str, target: &str) -> Self {
+        Self {
+            class: "java/lang/ClassCastException",
+            message: format!(
+                "class {source} cannot be cast to class {target} ({source} and {target} \
+                 are in module java.base of loader 'bootstrap')"
+            ),
+        }
+    }
+}
+
+impl std::fmt::Display for FlinkException {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for FlinkException {}
+
+/// Keeps typed SQL errors intact until the guarded JNI entry can raise their Java exception.
+pub trait FlinkResultExt<T> {
+    fn expect_flink(self, context: &str) -> T;
+}
+
+impl<T, E: std::error::Error + 'static> FlinkResultExt<T> for Result<T, E> {
+    fn expect_flink(self, context: &str) -> T {
+        self.unwrap_or_else(|error| {
+            let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(&error);
+            while let Some(current) = cause {
+                if let Some(host) = current.downcast_ref::<FlinkException>() {
+                    std::panic::resume_unwind(Box::new(host.clone()));
+                }
+                cause = current.source();
+            }
+            panic!("{context}: {error}");
+        })
+    }
+}
+
 pub fn capture_jvm_raw(vm: *mut jni::sys::JavaVM) {
     if JVM.get().is_none() {
         if let Ok(vm) = unsafe { jni::JavaVM::from_raw(vm) } {
@@ -92,10 +139,14 @@ where
             // Don't stack a second exception on a frame that already has one pending — the first
             // is the real cause and `throw_new` would replace it.
             if !matches!(env.exception_check(), Ok(true)) {
-                let _ = env.throw_new(
-                    "tech/streamfusion/NativeException",
-                    format!("native panic: {}", panic_message(payload)),
-                );
+                if let Some(host) = payload.downcast_ref::<FlinkException>() {
+                    let _ = env.throw_new(host.class, &host.message);
+                } else {
+                    let _ = env.throw_new(
+                        "tech/streamfusion/NativeException",
+                        format!("native panic: {}", panic_message(payload)),
+                    );
+                }
             }
             T::jni_default()
         }
