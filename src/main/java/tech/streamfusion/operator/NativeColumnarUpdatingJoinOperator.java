@@ -34,6 +34,7 @@ public class NativeColumnarUpdatingJoinOperator
 
   private final int[] leftKeys;
   private final int[] rightKeys;
+  private final int[] filterNulls;
   private final int joinType;
   private final RowType leftType;
   private final RowType rightType;
@@ -66,6 +67,7 @@ public class NativeColumnarUpdatingJoinOperator
   public NativeColumnarUpdatingJoinOperator(
       int[] leftKeys,
       int[] rightKeys,
+      int[] filterNulls,
       int joinType,
       RowType leftType,
       RowType rightType,
@@ -87,6 +89,7 @@ public class NativeColumnarUpdatingJoinOperator
     super("updating join", keyTimestampPrecisions, maxParallelism);
     this.leftKeys = leftKeys;
     this.rightKeys = rightKeys;
+    this.filterNulls = filterNulls;
     this.joinType = joinType;
     this.leftType = leftType;
     this.rightType = rightType;
@@ -133,7 +136,7 @@ public class NativeColumnarUpdatingJoinOperator
         rightType,
         (left, right) ->
             Native.createRocksDBUpdatingJoiner(
-                leftKeys, rightKeys, keyTimestampPrecisions(), joinType, left, right,
+                leftKeys, rightKeys, filterNulls, keyTimestampPrecisions(), joinType, left, right,
                 predKinds, predPayload, predChildCounts, boundPredLongs, predDoubles, predStrings,
                 leftJoinKeyUnique, rightJoinKeyUnique, miniBatch,
                 leftStateTtlMillis, rightStateTtlMillis,
@@ -160,6 +163,7 @@ public class NativeColumnarUpdatingJoinOperator
             Native.createUpdatingJoiner(
                 leftKeys,
                 rightKeys,
+                filterNulls,
                 keyTimestampPrecisions(),
                 joinType,
                 left,
@@ -187,6 +191,7 @@ public class NativeColumnarUpdatingJoinOperator
             Native.restoreUpdatingJoinerPartitions(
                 leftKeys,
                 rightKeys,
+                filterNulls,
                 keyTimestampPrecisions(),
                 joinType,
                 left,

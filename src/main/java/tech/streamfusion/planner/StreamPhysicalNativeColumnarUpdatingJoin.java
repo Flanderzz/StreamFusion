@@ -21,6 +21,7 @@ public class StreamPhysicalNativeColumnarUpdatingJoin extends StreamPhysicalNati
 
   private final int[] leftKeys;
   private final int[] rightKeys;
+  private final int[] filterNulls;
   private final int joinType;
   private final RexExpression predicate;
   private final boolean leftJoinKeyUnique;
@@ -40,6 +41,7 @@ public class StreamPhysicalNativeColumnarUpdatingJoin extends StreamPhysicalNati
       RelDataType outputRowType,
       int[] leftKeys,
       int[] rightKeys,
+      int[] filterNulls,
       int joinType,
       RexExpression predicate,
       boolean leftJoinKeyUnique,
@@ -51,6 +53,7 @@ public class StreamPhysicalNativeColumnarUpdatingJoin extends StreamPhysicalNati
     super(cluster, traitSet, left, right, outputRowType);
     this.leftKeys = leftKeys;
     this.rightKeys = rightKeys;
+    this.filterNulls = filterNulls;
     this.joinType = joinType;
     this.predicate = predicate;
     this.leftJoinKeyUnique = leftJoinKeyUnique;
@@ -76,6 +79,7 @@ public class StreamPhysicalNativeColumnarUpdatingJoin extends StreamPhysicalNati
         outputRowType,
         leftKeys,
         rightKeys,
+        filterNulls,
         joinType,
         predicate,
         leftJoinKeyUnique,
@@ -96,6 +100,7 @@ public class StreamPhysicalNativeColumnarUpdatingJoin extends StreamPhysicalNati
         getRelDetailedDescription(),
         leftKeys,
         rightKeys,
+        filterNulls,
         joinType,
         FlinkTypeFactory$.MODULE$.toLogicalRowType(getLeft().getRowType()),
         FlinkTypeFactory$.MODULE$.toLogicalRowType(getRight().getRowType()),

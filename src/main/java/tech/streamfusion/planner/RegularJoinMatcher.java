@@ -21,10 +21,8 @@ import org.apache.flink.table.runtime.operators.join.FlinkJoinType;
  * Recognizes the regular (non-windowed) equi-joins the native updating join implements:
  * {@code a JOIN b ON a.k = b.k}, where both inputs may be changelogs. Supports INNER, LEFT/RIGHT/FULL
  * outer, and SEMI/ANTI (the native joiner tracks a per-row match-degree for the latter families).
- * Requires at least one null-filtering equi-join key, no residual non-equi predicate, and input/output
- * row types the row/Arrow conversion supports. A residual filter or an unsupported column type falls
- * back to the host. The join keys may be any converter-supported type (the join keys its state by
- * their scalar values).
+ * Requires at least one equi-join key, an expressible residual predicate, and input/output types
+ * the Arrow converter and retained-row codec support. Each equi-key retains its own ordinary or null-safe equality policy.
  */
 final class RegularJoinMatcher {
 
@@ -45,11 +43,6 @@ final class RegularJoinMatcher {
     }
     if (joinSpec.getNonEquiCondition().isPresent() && nonEquiPredicate(join) == null) {
       return "regular join: the residual non-equi condition is not natively expressible";
-    }
-    for (boolean filterNull : joinSpec.getFilterNulls()) {
-      if (!filterNull) {
-        return "regular join: requires null-dropping equi keys";
-      }
     }
     if (!RowDataArrowConverter.supports(
             FlinkTypeFactory$.MODULE$.toLogicalRowType(join.getLeft().getRowType()))
@@ -111,6 +104,12 @@ final class RegularJoinMatcher {
 
   static int[] rightKeys(StreamPhysicalJoin join) {
     return ((CommonPhysicalJoin) join).joinSpec().getRightKeys();
+  }
+
+  static int[] filterNulls(StreamPhysicalJoin join) {
+    boolean[] flags = ((CommonPhysicalJoin) join).joinSpec().getFilterNulls();
+    return java.util.stream.IntStream.range(0, flags.length)
+        .map(i -> flags[i] ? 1 : 0).toArray();
   }
 
   /** Whether the join keys contain a planner-proven upsert key for this input side. */
@@ -189,6 +188,7 @@ final class RegularJoinMatcher {
         join.getRowType(),
         leftKeys,
         rightKeys,
+        filterNulls(join),
         RegularJoinMatcher.joinTypeCode(join),
         RegularJoinMatcher.nonEquiPredicate(join),
         leftJoinKeyUnique,

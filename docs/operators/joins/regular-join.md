@@ -10,8 +10,8 @@ keyed state so a later update or delete on either input can retract and re-emit 
 The native matcher requires:
 
 - an **equi-key** of a supported type on both sides;
-- for a non-INNER join, the key columns must be **null-dropping** in the way Flink's own planner
-  expects (a non-preserved side's key nulls out correctly on a missed match);
+- each key uses Flink's ordinary or null-safe equality policy; mixed policies in composite keys
+  are supported for INNER, LEFT/RIGHT/FULL, SEMI and ANTI joins;
 - any residual non-equi predicate must be **expressible by the native expression engine**;
 - every input column type must be one the Arrow converter and retained-row codec can carry.
   MAP and MULTISET fields fall back, including those nested inside ARRAY or ROW and those used
@@ -21,6 +21,20 @@ The native matcher requires:
 join](temporal-join.md), and [lookup join](lookup-join.md) all state their admission conditions as a
 variant of this same list — this page is the fullest treatment; the others cross-reference it rather
 than repeating it.
+
+## Null-safe equality
+
+`IS NOT DISTINCT FROM` and equality expanded as `a.k = b.k OR (a.k IS NULL AND b.k IS NULL)`
+can match two NULL keys. A NULL in any ordinary `=` key still prevents a match. NULL-bearing
+keys keep the same BinaryRow encoding and key-group assignment on both sides; only the
+per-key match filter changes. Residual predicates and duplicate match counts retain their
+existing behavior. The policy travels with the operator through raw and RocksDB checkpoint
+restore, including transitions between the two state backends.
+
+Flink may decorrelate a null-safe EXISTS/NOT EXISTS query into INNER/outer joins and aggregation.
+Those plans are admitted under the same rules; native coverage is checked on the actual physical
+plan. Differential tests cover STRING, INT/BIGINT, DECIMAL and TIMESTAMP(9), mixed keys,
+residual predicates, duplicate matches and changelog updates/deletes at parallelism 2.
 
 ## Mini-batch coalescing
 
@@ -55,7 +69,6 @@ TTL](../index.md#idle-state-ttl) and [Configuration](../../configuration.md) for
 
 - the join type isn't one the native operator covers;
 - there's no equi key;
-- the key columns aren't null-dropping for a non-INNER join;
 - the non-equi residual isn't expressible by the native expression engine;
 - an input column has a type the Arrow converter or retained-row codec can't carry, including
   MAP/MULTISET at any nesting depth;
@@ -64,3 +77,14 @@ TTL](../index.md#idle-state-ttl) and [Configuration](../../configuration.md) for
   if a delta join exists in another block. A block containing a delta join is not rejected by the
   `FORCE` guard; ordinary admission and island checks still apply, and `DeltaJoin` remains
   unsupported. See [Global switches](../index.md#global-switches).
+
+## Null-safe join benchmark
+
+A release/mimalloc run on September 16, 2026 (Apple M1 Max, JDK 17, Flink 2.2.1) joined
+1,000,000 probe rows against 1,024 build keys, including NULL on both sides. Parallelism 1,
+two warmups and five interleaved trials per engine; row sources, native join, both row/Arrow
+transposes and a row blackhole sink are asserted in the measured plan. Median complete-job
+time was **0.940s Flink / 0.469s native (2.00x)**. This measures the admitted INNER shape;
+it does not establish the same speedup for SEMI/ANTI, outer, or retracting joins.
+
+Run `SF_BENCHMARK=true mvn -pl streamfusion-runtime -am test -Pbench -Dtest=NullSafeJoinBenchmark`.

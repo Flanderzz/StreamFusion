@@ -58,6 +58,7 @@ class NativeColumnarUpdatingJoinOperatorTest {
     return new NativeColumnarUpdatingJoinOperator(
         new int[] {0},
         new int[] {0},
+        new int[] {1},
         0,
         LEFT,
         RIGHT,

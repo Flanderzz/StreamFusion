@@ -42,6 +42,12 @@ confirmed and where we deliberately differ.
   and Proton's `MemoryHashJoin`, because retract correctness needs per-row-count
   bookkeeping a batch hash join does not give. So divergence 12 narrows: time-bounded
   append-only joins delegate; the updating join owns its probe.
+  Null-safe regular joins follow Flink's per-key `JoinConditionWithNullFilters` policy:
+  retained BinaryRow keys already encode NULL identity, so ordinary-equality fields alone
+  suppress a probe on NULL. Unlike Comet's Spark planner rewrite or a whole-join DataFusion
+  NullEquality flag, this preserves mixed ordinary/null-safe keys without adding synthetic
+  key columns. The mask is immutable operator configuration passed through JNI on create and
+  every restore route; snapshot row bytes and Arrow ownership are unchanged.
 - **Row↔Arrow transpose at host edges.** RisingWave (`StreamChunk`) and Proton
   (ClickHouse `Block`) are columnar end to end; we transpose to/from Flink `RowData`
   at native↔host boundaries ([divergences/08](08-columnar-flow-transitions.md)),

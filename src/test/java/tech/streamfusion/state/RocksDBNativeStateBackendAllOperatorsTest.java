@@ -1555,6 +1555,74 @@ class RocksDBNativeStateBackendAllOperatorsTest {
     }
   }
 
+  @ParameterizedTest
+  @EnumSource(StateTransition.class)
+  void stateTransitionPreservesNullSafeSemiAntiJoin(StateTransition transition) throws Exception {
+    for (int kind : new int[] {4, 5}) {
+      OperatorSubtaskState snapshot;
+      try (BufferAllocator allocator = new RootAllocator(); var harness = nullSafeJoinHarness(kind)) {
+        transition.configureSource(harness);
+        harness.setup(new ArrowBatchSerializer());
+        harness.open();
+        harness.processElement1(new StreamRecord<>(nullKeyJoinBatch(allocator, RowKind.INSERT, 10)));
+        harness.processElement2(new StreamRecord<>(nullKeyJoinBatch(allocator, RowKind.INSERT, 100)));
+        harness.processElement2(new StreamRecord<>(nullKeyJoinBatch(allocator, RowKind.INSERT, 100)));
+        assertEquals(kind == 4 ? List.of(List.of(RowKind.INSERT, 10L))
+            : List.of(List.of(RowKind.INSERT, 10L), List.of(RowKind.DELETE, 10L)),
+            collectNullSafeJoin(harness));
+        snapshot = transition.snapshot(harness);
+      }
+      try (BufferAllocator allocator = new RootAllocator(); var harness = nullSafeJoinHarness(kind)) {
+        transition.configureRestore(harness);
+        harness.setup(new ArrowBatchSerializer());
+        harness.initializeState(snapshot);
+        harness.open();
+        harness.processElement2(new StreamRecord<>(nullKeyJoinBatch(allocator, RowKind.DELETE, 100)));
+        assertEquals(List.of(), collectNullSafeJoin(harness));
+        harness.processElement2(new StreamRecord<>(nullKeyJoinBatch(allocator, RowKind.DELETE, 100)));
+        assertEquals(List.of(List.of(kind == 4 ? RowKind.DELETE : RowKind.INSERT, 10L)),
+            collectNullSafeJoin(harness));
+        harness.processElement1(new StreamRecord<>(nullKeyJoinBatch(allocator, RowKind.DELETE, 10)));
+        assertEquals(kind == 4 ? List.of() : List.of(List.of(RowKind.DELETE, 10L)),
+            collectNullSafeJoin(harness));
+      }
+    }
+  }
+
+  private static ArrowBatch nullKeyJoinBatch(BufferAllocator allocator, RowKind kind, long value) {
+    GenericRowData row = GenericRowData.of(null, value);
+    row.setRowKind(kind);
+    return new ArrowBatch(RowDataArrowConverter.write(List.of(row), INPUT, allocator, true));
+  }
+
+  private static List<List<Object>> collectNullSafeJoin(
+      org.apache.flink.streaming.util.TwoInputStreamOperatorTestHarness<ArrowBatch, ArrowBatch, ArrowBatch> harness) {
+    List<List<Object>> rows = new ArrayList<>();
+    while (!harness.getOutput().isEmpty()) {
+      Object event = harness.getOutput().poll();
+      if (event instanceof StreamRecord<?> record) {
+        try (VectorSchemaRoot root = ((ArrowBatch) record.getValue()).root()) {
+          for (RowData row : RowDataArrowConverter.read(root, INPUT)) {
+            assertTrue(row.isNullAt(0));
+            rows.add(List.of(row.getRowKind(), row.getLong(1)));
+          }
+        }
+      }
+    }
+    return rows;
+  }
+
+  private static org.apache.flink.streaming.util.KeyedTwoInputStreamOperatorTestHarness<
+      Integer, ArrowBatch, ArrowBatch, ArrowBatch> nullSafeJoinHarness(int kind) throws Exception {
+    var operator = new NativeColumnarUpdatingJoinOperator(
+        new int[] {0}, new int[] {0}, new int[] {0}, kind, INPUT, INPUT,
+        new int[0], new int[0], new int[0], new long[0], new double[0], new String[0],
+        tech.streamfusion.operator.NativeUdf.Binding.EMPTY, new int[] {-1},
+        false, false, false, 0, 0, 0, MAX_PARALLELISM);
+    return new org.apache.flink.streaming.util.KeyedTwoInputStreamOperatorTestHarness<>(
+        operator, batch -> 0, batch -> 0, Types.INT, MAX_PARALLELISM, 1, 0);
+  }
+
   private static org.apache.flink.streaming.util.KeyedTwoInputStreamOperatorTestHarness<
           Integer, ArrowBatch, ArrowBatch, ArrowBatch>
       joinHarness() throws Exception {
@@ -1562,6 +1630,7 @@ class RocksDBNativeStateBackendAllOperatorsTest {
         new NativeColumnarUpdatingJoinOperator(
             new int[] {0},
             new int[] {0},
+            new int[] {1},
             0, // INNER
             INPUT,
             INPUT,

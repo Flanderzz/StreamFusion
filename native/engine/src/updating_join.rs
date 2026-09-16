@@ -3,6 +3,7 @@ use crate::*;
 pub(crate) struct UpdatingJoiner<S: KeyedStateStore<JoinBucket> = MemoryJoinStore> {
     left_keys: Vec<usize>,
     right_keys: Vec<usize>,
+    filter_nulls: Vec<bool>,
     key_timestamp_precisions: Vec<i32>,
     kind: JoinKind,
     left_schema: SchemaRef,
@@ -190,6 +191,7 @@ impl UpdatingJoiner {
             left_keys,
             right_keys,
             key_timestamp_precisions: vec![-1; key_arity],
+            filter_nulls: vec![true; key_arity],
             kind,
             left_schema,
             right_schema,
@@ -238,6 +240,7 @@ impl<S: KeyedStateStore<JoinBucket>> UpdatingJoiner<S> {
         UpdatingJoiner {
             left_keys: self.left_keys,
             right_keys: self.right_keys,
+            filter_nulls: self.filter_nulls,
             key_timestamp_precisions: self.key_timestamp_precisions,
             kind: self.kind,
             left_schema: self.left_schema,
@@ -279,6 +282,16 @@ impl<S: KeyedStateStore<JoinBucket>> UpdatingJoiner<S> {
     /// The backing stores, for backend-specific control paths (checkpointing persistent stores).
     pub(crate) fn stores_mut(&mut self) -> (&mut S, &mut S) {
         (&mut self.left_state, &mut self.right_state)
+    }
+
+    pub(crate) fn with_filter_nulls(mut self, flags: Vec<i32>) -> Self {
+        assert_eq!(flags.len(), self.left_keys.len(), "join null-filter arity");
+        assert!(
+            flags.iter().all(|&flag| flag == 0 || flag == 1),
+            "join null-filter flag"
+        );
+        self.filter_nulls = flags.into_iter().map(|flag| flag != 0).collect();
+        self
     }
 
     pub(crate) fn with_key_timestamp_precisions(
@@ -698,10 +711,15 @@ impl<S: KeyedStateStore<JoinBucket>> UpdatingJoiner<S> {
         }
         .convert_columns(&data_arrays)
         .expect("encode join payload");
-        // A null in any equi-key column matches nothing; flagged per row off the key arrays (the null
-        // can't be recovered from the encoded key bytes).
+        // Only ordinary equality rejects nulls. Null-safe fields remain part of the encoded key
+        // and therefore share both a state bucket and Flink key group with an equal null key.
         let key_null: Vec<bool> = (0..batch.num_rows())
-            .map(|r| key_arrays.iter().any(|a| a.is_null(r)))
+            .map(|r| {
+                key_arrays
+                    .iter()
+                    .zip(&self.filter_nulls)
+                    .any(|(a, filter)| *filter && a.is_null(r))
+            })
             .collect();
 
         // INNER keeps no degree and never mutates the probe (other) side, so the whole batch's rows are
@@ -2018,6 +2036,7 @@ pub extern "system" fn Java_tech_streamfusion_Native_createUpdatingJoiner<'local
     _class: JClass<'local>,
     left_keys: JIntArray<'local>,
     right_keys: JIntArray<'local>,
+    filter_nulls: JIntArray<'local>,
     key_timestamp_precisions: JIntArray<'local>,
     join_type: jint,
     left_schema_address: jlong,
@@ -2059,6 +2078,7 @@ pub extern "system" fn Java_tech_streamfusion_Native_createUpdatingJoiner<'local
             predicate,
         )
         .with_key_timestamp_precisions(timestamp_precisions)
+        .with_filter_nulls(read_i32_array(&env, &filter_nulls))
         .with_unique_join_keys(left_join_key_unique != 0, right_join_key_unique != 0)
         .with_mini_batch(mini_batch != 0)
         .with_state_ttl(left_state_ttl_millis, right_state_ttl_millis)
@@ -2162,6 +2182,7 @@ pub extern "system" fn Java_tech_streamfusion_Native_restoreUpdatingJoinerPartit
     _class: JClass<'local>,
     left_keys: JIntArray<'local>,
     right_keys: JIntArray<'local>,
+    filter_nulls: JIntArray<'local>,
     key_timestamp_precisions: JIntArray<'local>,
     join_type: jint,
     left_schema_address: jlong,
@@ -2221,6 +2242,7 @@ pub extern "system" fn Java_tech_streamfusion_Native_restoreUpdatingJoinerPartit
             &restored,
             now_millis,
         )
+        .with_filter_nulls(read_i32_array(&env, &filter_nulls))
         .with_unique_join_keys(left_join_key_unique != 0, right_join_key_unique != 0)
         .with_mini_batch(mini_batch != 0)
         .with_state_ttl(left_state_ttl_millis, right_state_ttl_millis)

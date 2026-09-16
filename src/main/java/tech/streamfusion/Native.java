@@ -1448,6 +1448,7 @@ public final class Native {
   public static native long createRocksDBUpdatingJoiner(
       int[] leftKeys,
       int[] rightKeys,
+      int[] filterNulls,
       int[] keyTimestampPrecisions,
       int joinType,
       long leftSchemaAddress,
@@ -2340,6 +2341,7 @@ public final class Native {
   public static native long createUpdatingJoiner(
       int[] leftKeys,
       int[] rightKeys,
+      int[] filterNulls,
       int[] keyTimestampPrecisions,
       int joinType,
       long leftSchemaAddress,
@@ -2397,6 +2399,7 @@ public final class Native {
   public static native long restoreUpdatingJoinerPartitions(
       int[] leftKeys,
       int[] rightKeys,
+      int[] filterNulls,
       int[] keyTimestampPrecisions,
       int joinType,
       long leftSchemaAddress,

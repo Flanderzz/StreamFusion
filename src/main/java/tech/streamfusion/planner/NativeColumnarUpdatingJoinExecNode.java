@@ -33,6 +33,7 @@ public class NativeColumnarUpdatingJoinExecNode extends ExecNodeBase<ArrowBatch>
 
   private final int[] leftKeys;
   private final int[] rightKeys;
+  private final int[] filterNulls;
   private final int joinType;
   private final RowType leftType;
   private final RowType rightType;
@@ -56,6 +57,7 @@ public class NativeColumnarUpdatingJoinExecNode extends ExecNodeBase<ArrowBatch>
       String description,
       int[] leftKeys,
       int[] rightKeys,
+      int[] filterNulls,
       int joinType,
       RowType leftType,
       RowType rightType,
@@ -76,6 +78,7 @@ public class NativeColumnarUpdatingJoinExecNode extends ExecNodeBase<ArrowBatch>
         description);
     this.leftKeys = leftKeys;
     this.rightKeys = rightKeys;
+    this.filterNulls = filterNulls;
     this.joinType = joinType;
     this.leftType = leftType;
     this.rightType = rightType;
@@ -117,6 +120,7 @@ public class NativeColumnarUpdatingJoinExecNode extends ExecNodeBase<ArrowBatch>
             new NativeColumnarUpdatingJoinOperator(
                 leftKeys,
                 rightKeys,
+                filterNulls,
                 joinType,
                 leftType,
                 rightType,

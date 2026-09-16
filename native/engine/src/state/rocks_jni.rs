@@ -1068,6 +1068,7 @@ pub extern "system" fn Java_tech_streamfusion_Native_createRocksDBUpdatingJoiner
     _class: JClass<'local>,
     left_keys: JIntArray<'local>,
     right_keys: JIntArray<'local>,
+    filter_nulls: JIntArray<'local>,
     key_timestamp_precisions: JIntArray<'local>,
     join_type: jint,
     left_schema_address: jlong,
@@ -1139,6 +1140,7 @@ pub extern "system" fn Java_tech_streamfusion_Native_createRocksDBUpdatingJoiner
                 predicate,
             )
             .with_key_timestamp_precisions(read_i32_array(&env, &key_timestamp_precisions))
+            .with_filter_nulls(read_i32_array(&env, &filter_nulls))
             .with_unique_join_keys(left_join_key_unique != 0, right_join_key_unique != 0)
             .with_mini_batch(mini_batch != 0)
             .with_state_ttl(left_state_ttl_millis, right_state_ttl_millis)
