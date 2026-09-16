@@ -217,8 +217,9 @@ The single malformed-decimal input, for example, yields no collected rows on eit
 
 This does not establish identical diagnostics for every native error. JSON ERROR policies and
 native integer parsing still use their existing generic native exception wrapper.
-The JSON path grammar suite also checks scalar-conversion failures against Flink's exception
-chain. Malformed STRING-to-BOOLEAN tests preserve literal NUL characters in diagnostic text;
+The JSON path grammar suite also uses `NativeFailureParity` to check scalar-conversion failures
+against Flink's root exception, independently of its TableRuntimeException wrappers.
+Malformed STRING-to-BOOLEAN tests preserve literal NUL characters in diagnostic text;
 the JNI exception message no longer escapes them as a backslash and zero.
 
 Run the failure suite and independent host reproducer together:

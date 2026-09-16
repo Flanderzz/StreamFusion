@@ -104,9 +104,14 @@ class FlinkJsonPathGrammarSqlHarnessTest {
 
   @Test
   void invalidIntegerScalarFailsOutsideErrorPolicy() {
-    JsonFunctionTestInputs.assertFailsLikeFlink(
-        "[0,\"text\"]",
-        "JSON_VALUE(s, '$[ 1 ]' RETURNING INTEGER NULL ON ERROR)");
+    var comparison = NativeFailureParity.run(
+        () -> TextTimeFunctionTestInputs.textRows("[0,\"text\"]"),
+        "SELECT JSON_VALUE(s, '$[ 1 ]' RETURNING INTEGER NULL ON ERROR) FROM inputs");
+    comparison.assertFailure(ClassCastException.class,
+        "java.lang.String cannot be cast to class java.lang.Integer",
+        NativeFailureParity.Phase.ROW_EVALUATION, NativeFailureParity.Route.NATIVE);
+    org.junit.jupiter.api.Assertions.assertEquals(comparison.host().rootCause().getMessage(),
+        comparison.nativeRun().rootCause().getMessage());
   }
 
   @ParameterizedTest
