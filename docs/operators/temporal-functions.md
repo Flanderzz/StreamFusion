@@ -70,6 +70,11 @@ bounds rather than equality between two runs.
 
 Regression tests also cover temporal admission alongside TRIM and JSON option symbols, text-field
 DATE_FORMAT patterns through the upcall, and the legacy native timestamp-minus-interval encoding.
+The day-time interval regressions cover signed/subsecond literals, nullable grouping keys,
+filters after Top-N, and outer-join residual arithmetic. They retain canonical millisecond
+integers throughout the native pipeline. Timestamp subtraction with nanosecond payloads and
+year-month CASE results also pass released-Flink parity through the current temporal evaluator;
+these forms no longer require the older duration/interval output fallbacks.
 
 These changes expand the queries that can remain in an accelerated pipeline. They do not establish
 that isolated temporal projections are faster than stock Flink. Release-mode measurements, including

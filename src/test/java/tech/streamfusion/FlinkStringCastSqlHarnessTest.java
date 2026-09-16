@@ -23,6 +23,24 @@ import org.junit.jupiter.api.Test;
 class FlinkStringCastSqlHarnessTest {
 
   @Test
+  void nonNullableCharToDoubleInitializesAndMatchesHost() throws Exception {
+    NativeParity.assertParity(
+        () -> {
+          var env = StreamExecutionEnvironment.getExecutionEnvironment();
+          env.setParallelism(1);
+          var table = StreamTableEnvironment.create(env);
+          table.createTemporaryView(
+              "inputs",
+              env.fromData(
+                  Types.ROW_NAMED(new String[] {"s"}, Types.STRING),
+                  Row.of("1234.567"), Row.of("9876.543")),
+              Schema.newBuilder().column("s", DataTypes.CHAR(8).notNull()).build());
+          return table;
+        },
+        "SELECT CAST(s AS DOUBLE) FROM inputs");
+  }
+
+  @Test
   void numberToStringMatchesHost() throws Exception {
     // The double values include ones Java renders in scientific notation (1.0E-4, 1.23456789E8) and
     // a negative zero — the formatting corners a native port would get wrong.
