@@ -46,6 +46,27 @@ DataFusion query *per batch*; that path is superseded by the compiled handle. Th
 cost it removed was the first confirmed hot-path finding of the benchmark sweep
 (see `docs/optimizations.md`).
 
+## Generated consumers of DECIMAL user functions
+
+Following Comet's `CometScalaUDF` codegen-dispatch pattern, a consumer of a DECIMAL scalar UDF
+is compiled as one Flink expression and invoked through the existing Arrow batch UDF bridge.
+Flink's external BigDecimal null flag can disagree with the converted DecimalData null value
+after overflow. Keeping the consumer and its producer in one generated expression preserves
+both states, nested reuse of the external object, conditional evaluation and exceptions without
+inventing a second Arrow validity channel. This extends the evaluator already used for temporal
+expressions; it does not introduce a second operator or change the JNI ABI.
+
+Code generation uses the planner's user-code classloader, and task initialization uses Flink's
+FunctionContext classloader. The generated evaluator exposes its scalar-function dependencies
+to the existing task binding. Generated references preserve identity with direct call sites
+instead of retaining CodeGeneratorContext's independent copies; each function opens and closes
+once, including after operator serialization and failed initialization. The signature,
+specialization and shared-binary-buffer gates apply inside generated expressions as well.
+
+The expression itself still executes on the JVM. This is a parity and composition extension,
+not a claim that the decimal UDF or its consumers execute as Rust kernels. The measured cost
+includes both perimeter transposes; see the scalar benchmark page.
+
 ## Plan-time type verification (diverges from Comet)
 The encoder admits nodes; DataFusion decides result types when the tree is compiled,
 and its coercion rules are not Calcite's (`FLOAT * DECIMAL` is `DOUBLE` to Flink, `Float32`

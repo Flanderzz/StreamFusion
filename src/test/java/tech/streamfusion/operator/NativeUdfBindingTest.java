@@ -108,6 +108,45 @@ class NativeUdfBindingTest {
   }
 
   @Test
+  void generatedAndDirectCallsShareDependenciesAfterSerialization() throws Exception {
+    CountingFunction shared = new CountingFunction();
+    NativeUdf.Binding binding = roundTrip(binding(new CompositeFunction(shared), shared));
+    long[] ids = binding.bind(new long[] {0, 1});
+    binding.unbind();
+    assertUnregistered(ids);
+  }
+
+  @Test
+  void failedGeneratedInitializationClosesItsOpenedDependencies() throws Exception {
+    CountingFunction shared = new CountingFunction();
+    CountingFunction generated = new CompositeFunction(shared);
+    generated.failOpen = true;
+    NativeUdf.Binding binding = binding(generated, shared);
+    assertThrows(IllegalStateException.class, () -> binding.bind(new long[] {0, 1}));
+    assertEquals(1, shared.opens);
+    assertEquals(1, shared.closes);
+    generated.failOpen = false;
+    binding.bind(new long[] {0, 1});
+    binding.unbind();
+    assertEquals(2, shared.opens);
+    assertEquals(2, shared.closes);
+  }
+
+  public static class CompositeFunction extends CountingFunction
+      implements NativeUdf.FunctionDependencies {
+    private final ScalarFunction dependency;
+
+    CompositeFunction(ScalarFunction dependency) {
+      this.dependency = dependency;
+    }
+
+    @Override
+    public java.util.List<ScalarFunction> functions() {
+      return java.util.List.of(dependency);
+    }
+  }
+
+  @Test
   void distinctInstancesOfTheSameClassHaveSeparateLifecycles() throws Exception {
     CountingFunction first = new CountingFunction();
     CountingFunction second = new CountingFunction();

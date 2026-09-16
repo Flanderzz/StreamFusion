@@ -83,13 +83,19 @@ Functions implementing Flink's `SpecializedFunction` also fall back. Their imple
 be created with the resolved call types and Flink's code-generation context; invoking the
 registered, unspecialized instance through the native bridge can produce incorrect results.
 
-`DECIMAL` UDF results are admitted as direct projections. Conversion uses Flink's
-`DecimalData.fromBigDecimal`: declared scale, `HALF_UP`, and NULL on precision overflow, including
-precision 38. Trailing zeros survive the round trip. A nested consumer or predicate falls back:
-Flink tracks a UDF's external null flag before decimal conversion, so an overflowing non-null
-`BigDecimal` can project NULL while `IS NULL` returns false. Arrow validity alone cannot express
-that distinction. The gate applies even when runtime values happen to fit; lifting it is tracked in
-[the decimal UDF nullness issue](https://github.com/datafusion-contrib/StreamFusion/issues/115).
+`DECIMAL` UDF projections use Flink's `DecimalData.fromBigDecimal`: declared scale, `HALF_UP`,
+and NULL on precision overflow, including precision 38. Trailing zeros survive the round trip.
+Consumers and predicates also run inside native Calc/filter islands. Their complete expression is
+compiled with Flink's expression generator and invoked through the same Arrow batch bridge, so
+its external null flag and internal decimal conversion stay together. An overflowing non-null
+`BigDecimal` can therefore project NULL while `IS NULL` returns false, exactly as in Flink.
+
+The generated expression preserves CASE/COALESCE decisions, nested UDF reuse of the external
+BigDecimal, arithmetic and conversion exceptions, and the declared function signatures. It does
+not replace the external null flag with Arrow validity. These expressions execute on the JVM;
+the surrounding island stays columnar and the existing UDF type/specialization gates still apply.
+Generated and direct calls share function instances and a single task lifecycle, including after
+serialization. Code generation and runtime initialization use Flink's user-code classloader.
 
 `VARBINARY` uses raw bytes, preserving empty values, embedded zeros, arbitrary non-text bytes, and
 NULL. Results are copied into Arrow before the next row is evaluated, so a single call can reuse
@@ -108,7 +114,8 @@ Failed initialization releases earlier registrations and successfully opened fun
 failing `close` does not prevent cleanup of the remaining instances.
 
 Runtime parity tests cover mixed projections, repeated decimal calls, nullable precision-38
-values, scale normalization, overflow, typed NULL arguments, shadowed builtin names, shared
+values, scale normalization, overflow and its pre-conversion nullness, nested external values,
+conditional consumers, exception parity, typed NULL arguments, shadowed builtin names, shared
 lifecycle-dependent functions, and 5,003-row inputs. C Data tests
 cover sliced inputs, output survival after input release, and reclamation of Arrow allocations.
 

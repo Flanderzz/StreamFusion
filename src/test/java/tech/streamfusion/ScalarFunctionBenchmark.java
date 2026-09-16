@@ -133,6 +133,8 @@ class ScalarFunctionBenchmark {
               TextTimeFunctions.QUERIES,
               List.of(
                   new Query("UDF_DECIMAL", "tt_decimal", "decimal_identity(n)", "DECIMAL(38,9)"),
+                  new Query("UDF_DECIMAL_IS_NULL", "tt_udf_decimal", "decimal_from_text(s) IS NULL", "BOOLEAN"),
+                  new Query("UDF_DECIMAL_NESTED", "tt_udf_decimal", "decimal_external(decimal_from_text(s))", "DECIMAL(38,9)"),
                   new Query("UDF_BINARY", "tt_bytes", "binary_identity(b)", "BYTES"),
                   new Query("SHA1", "tt_text", "SHA1(s)"),
                   new Query("JSON_STRING_TEXT", "tt_text", "JSON_STRING(s)"),
@@ -412,6 +414,8 @@ class ScalarFunctionBenchmark {
       TableEnvironment tables =
           TextTimeBenchmarkInputs.environment(input, ROWS, BYTES, UNICODE, NULL_EVERY);
       tables.createTemporarySystemFunction("decimal_identity", DecimalIdentity.class);
+      tables.createTemporarySystemFunction("decimal_from_text", FlinkUdfExactTypesSqlHarnessTest.DecimalFromText.class);
+      tables.createTemporarySystemFunction("decimal_external", FlinkDecimalUdfConsumersSqlHarnessTest.ExternalDecimal.class);
       tables.createTemporarySystemFunction("binary_identity", BinaryIdentity.class);
       return tables;
     }

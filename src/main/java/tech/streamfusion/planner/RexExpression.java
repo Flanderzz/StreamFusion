@@ -161,6 +161,7 @@ final class RexExpression {
   // Root of the projection currently being encoded; null for conditions and bare predicates.
   private RexNode projectionRoot;
   private int binaryUdfCalls;
+  private ClassLoader expressionClassLoader = RexExpression.class.getClassLoader();
 
   private RexExpression() {}
 
@@ -182,6 +183,7 @@ final class RexExpression {
 
   static RexExpression encode(RexNode node, org.apache.calcite.rel.RelNode context) {
     RexExpression encoder = new RexExpression();
+    encoder.expressionClassLoader = org.apache.flink.table.planner.utils.ShortcutUtils.unwrapClassLoader(context);
     encoder.configure(
         org.apache.flink.table.planner.utils.ShortcutUtils.unwrapTableConfig(context));
     return encoder.emit(node) ? encoder : null;
@@ -317,6 +319,7 @@ final class RexExpression {
   }
 
   private boolean tryEncodeCalc(Calc calc) {
+    expressionClassLoader = org.apache.flink.table.planner.utils.ShortcutUtils.unwrapClassLoader(calc);
     configure(org.apache.flink.table.planner.utils.ShortcutUtils.unwrapTableConfig(calc));
     watermarkAvailable = true;
     return emitCalc(calc);
@@ -337,7 +340,6 @@ final class RexExpression {
 
   private boolean emitCalc(Calc calc) {
     RexProgram program = calc.getProgram();
-    // A filter condition is never a direct projection, regardless of encoding order.
     projectionRoot = null;
     if (program.getCondition() != null) {
       RexNode condition =
@@ -650,6 +652,9 @@ final class RexExpression {
   }
 
   private boolean emitCall(RexCall call) {
+    if (call.getOperands().stream().anyMatch(RexExpression::containsDecimalUdf)) {
+      return emitHostExpression(call, true);
+    }
     if (call.getOperator()
             instanceof org.apache.flink.table.planner.functions.bridging.BridgingSqlFunction function
         && function.getDefinition() instanceof org.apache.flink.table.functions.ScalarFunction) {
@@ -688,7 +693,7 @@ final class RexExpression {
       return true;
     }
     if (needsTemporalFunction(call)) {
-      return emitTemporalFunction(call);
+      return emitHostExpression(call, false);
     }
     if (call.getKind() == SqlKind.MINUS_PREFIX) {
       return emitFloatUnary(call, 5);
@@ -2025,35 +2030,48 @@ final class RexExpression {
         && call.getType().getPrecision() >= source.getPrecision();
   }
 
-  private boolean emitTemporalFunction(RexCall call) {
+  private static boolean containsDecimalUdf(RexNode node) {
+    if (!(node instanceof RexCall call)) return false;
+    if (call.getType().getSqlTypeName() == SqlTypeName.DECIMAL
+        && call.getOperator()
+            instanceof org.apache.flink.table.planner.functions.bridging.BridgingSqlFunction function
+        && function.getDefinition() instanceof org.apache.flink.table.functions.ScalarFunction) {
+      return true;
+    }
+    return call.getOperands().stream().anyMatch(RexExpression::containsDecimalUdf);
+  }
+
+  private boolean emitHostExpression(RexCall call, boolean preserveDecimalNullness) {
+    if (preserveDecimalNullness && !validateGeneratedExpression(call)) return false;
     List<RexNode> arguments = new ArrayList<>();
     List<org.apache.flink.table.types.logical.LogicalType> types = new ArrayList<>();
     List<Integer> codes = new ArrayList<>();
     RexNode expression;
     try {
-      expression = temporalArguments(call, arguments, types, codes);
+      expression = hostExpressionArguments(call, arguments, types, codes, preserveDecimalNullness);
     } catch (IllegalArgumentException e) {
       return reject(e.getMessage());
     }
     int returnCode = hostCastTypeCode(call.getType());
     if (returnCode < 0) {
-      return reject("unsupported temporal result type " + call.getType());
+      return reject("unsupported generated-expression result type " + call.getType());
     }
     if (arguments.isEmpty()) {
       types.add(new org.apache.flink.table.types.logical.IntType());
       codes.add(tech.streamfusion.operator.NativeUdf.TYPE_INT);
     }
-    TemporalFunction function;
+    FlinkExpressionFunction function;
     Method eval;
     try {
       function =
-          new TemporalFunction(
+          new FlinkExpressionFunction(
               expression,
               types.toArray(org.apache.flink.table.types.logical.LogicalType[]::new),
-              temporalConfig);
-      eval = TemporalFunction.class.getMethod("eval", Object[].class);
+              temporalConfig,
+              expressionClassLoader);
+      eval = FlinkExpressionFunction.class.getMethod("eval", Object[].class);
     } catch (Exception e) {
-      return reject("temporal expression cannot be generated: " + e.getMessage());
+      return reject("host expression cannot be generated: " + e.getMessage());
     }
     int localIndex =
         addUdf(
@@ -2074,24 +2092,25 @@ final class RexExpression {
     return true;
   }
 
-  private static RexNode temporalArguments(
+  private static RexNode hostExpressionArguments(
       RexNode node,
       List<RexNode> arguments,
       List<org.apache.flink.table.types.logical.LogicalType> types,
-      List<Integer> codes) {
+      List<Integer> codes,
+      boolean preserveDecimalNullness) {
     if (node instanceof RexLiteral) {
       return node;
     }
-    if (node instanceof RexCall call && needsTemporalFunction(call)) {
+    if (node instanceof RexCall call && (preserveDecimalNullness || needsTemporalFunction(call))) {
       List<RexNode> operands = new ArrayList<>();
       for (RexNode operand : call.getOperands()) {
-        operands.add(temporalArguments(operand, arguments, types, codes));
+        operands.add(hostExpressionArguments(operand, arguments, types, codes, preserveDecimalNullness));
       }
       return call.clone(call.getType(), operands);
     }
     int code = hostCastTypeCode(node.getType());
     if (code < 0) {
-      throw new IllegalArgumentException("unsupported temporal argument type " + node.getType());
+      throw new IllegalArgumentException("unsupported generated-expression argument type " + node.getType());
     }
     RexInputRef reference = new RexInputRef(arguments.size(), node.getType());
     arguments.add(node);
@@ -2447,6 +2466,60 @@ final class RexExpression {
     return true;
   }
 
+  private Method rejectUdfMethod(String reason) {
+    reject(reason);
+    return null;
+  }
+
+  private Method checkedUdfMethod(RexCall call) {
+    org.apache.flink.table.functions.FunctionDefinition def =
+        ((org.apache.flink.table.planner.functions.bridging.BridgingSqlFunction) call.getOperator())
+            .getDefinition();
+    if (!(def instanceof org.apache.flink.table.functions.ScalarFunction)) {
+      return rejectUdfMethod("unsupported function/operator: " + call.getOperator().getName());
+    }
+    if (def instanceof org.apache.flink.table.functions.SpecializedFunction) {
+      return rejectUdfMethod("UDF specialization requires Flink's code-generation context");
+    }
+    org.apache.flink.table.functions.ScalarFunction scalar =
+        (org.apache.flink.table.functions.ScalarFunction) def;
+    SqlTypeName resultType = call.getType().getSqlTypeName();
+    if (resultType == SqlTypeName.VARBINARY && ++binaryUdfCalls > 1) {
+      return rejectUdfMethod("multiple binary UDF calls may share mutable result buffers");
+    }
+    int returnCode = udfTypeCode(call.getType());
+    if (returnCode < 0) {
+      return rejectUdfMethod("UDF return type not native: " + call.getType().getSqlTypeName());
+    }
+    List<RexNode> args = call.getOperands();
+    for (RexNode argument : args) {
+      if (udfTypeCode(argument.getType()) < 0) {
+        return rejectUdfMethod("UDF argument type not native: " + argument.getType().getSqlTypeName());
+      }
+    }
+    Method eval = resolveEval(scalar, args);
+    if (eval == null) {
+      return rejectUdfMethod(
+          "UDF " + scalar.getClass().getName() + " has no single eval of arity " + args.size());
+    }
+    if ((resultType == SqlTypeName.DECIMAL && eval.getReturnType() != BigDecimal.class)
+        || (resultType == SqlTypeName.VARBINARY && eval.getReturnType() != byte[].class)) {
+      return rejectUdfMethod("UDF result uses an unsupported Java conversion class");
+    }
+    return eval;
+  }
+
+  private boolean validateGeneratedExpression(RexNode node) {
+    if (!(node instanceof RexCall call)) return true;
+    if (call.getOperator()
+            instanceof org.apache.flink.table.planner.functions.bridging.BridgingSqlFunction function
+        && function.getDefinition() instanceof org.apache.flink.table.functions.ScalarFunction
+        && checkedUdfMethod(call) == null) {
+      return false;
+    }
+    return call.getOperands().stream().allMatch(this::validateGeneratedExpression);
+  }
+
   /**
    * Emits a Flink user {@link org.apache.flink.table.functions.ScalarFunction} call as a JVM-upcall
    * node (op {@link #KIND_UDF}). The function is registered in {@link
@@ -2458,47 +2531,14 @@ final class RexExpression {
    * otherwise the call falls back.
    */
   private boolean emitUdf(RexCall call) {
-    org.apache.flink.table.functions.FunctionDefinition def =
+    Method eval = checkedUdfMethod(call);
+    if (eval == null) return false;
+    var scalar = (org.apache.flink.table.functions.ScalarFunction)
         ((org.apache.flink.table.planner.functions.bridging.BridgingSqlFunction) call.getOperator())
             .getDefinition();
-    if (!(def instanceof org.apache.flink.table.functions.ScalarFunction)) {
-      return reject("unsupported function/operator: " + call.getOperator().getName());
-    }
-    if (def instanceof org.apache.flink.table.functions.SpecializedFunction) {
-      return reject("UDF specialization requires Flink's code-generation context");
-    }
-    org.apache.flink.table.functions.ScalarFunction scalar =
-        (org.apache.flink.table.functions.ScalarFunction) def;
-    SqlTypeName resultType = call.getType().getSqlTypeName();
-    if (resultType == SqlTypeName.DECIMAL && call != projectionRoot) {
-      // Flink tracks external-result nullness before converting BigDecimal to DecimalData.
-      // Overflow can therefore produce a null value with a non-null expression flag.
-      return reject("DECIMAL UDF results are native only as direct projections");
-    }
-    if (resultType == SqlTypeName.VARBINARY && ++binaryUdfCalls > 1) {
-      return reject("multiple binary UDF calls may share mutable result buffers");
-    }
     int returnCode = udfTypeCode(call.getType());
-    if (returnCode < 0) {
-      return reject("UDF return type not native: " + call.getType().getSqlTypeName());
-    }
     List<RexNode> args = call.getOperands();
-    int[] argCodes = new int[args.size()];
-    for (int i = 0; i < args.size(); i++) {
-      argCodes[i] = udfTypeCode(args.get(i).getType());
-      if (argCodes[i] < 0) {
-        return reject("UDF argument type not native: " + args.get(i).getType().getSqlTypeName());
-      }
-    }
-    Method eval = resolveEval(scalar, args);
-    if (eval == null) {
-      return reject(
-          "UDF " + scalar.getClass().getName() + " has no single eval of arity " + args.size());
-    }
-    if ((resultType == SqlTypeName.DECIMAL && eval.getReturnType() != BigDecimal.class)
-        || (resultType == SqlTypeName.VARBINARY && eval.getReturnType() != byte[].class)) {
-      return reject("UDF result uses an unsupported Java conversion class");
-    }
+    int[] argCodes = args.stream().mapToInt(arg -> udfTypeCode(arg.getType())).toArray();
     int localIndex =
         addUdf(
             tech.streamfusion.operator.NativeUdf.Descriptor.forFunction(

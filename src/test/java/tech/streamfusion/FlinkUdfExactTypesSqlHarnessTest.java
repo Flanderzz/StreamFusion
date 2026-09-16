@@ -60,14 +60,12 @@ class FlinkUdfExactTypesSqlHarnessTest {
 
   @Test
   void decimalConsumersRetainHostPreConversionNullFlag() throws Exception {
-    NativeParity.assertFallbackReasonContains(
+    NativeParity.assertParity(
         () -> environment(32),
-        "SELECT id, decimal_from_text(s), decimal_from_text(s) IS NULL FROM src",
-        "DECIMAL UDF results are native only as direct projections");
-    NativeParity.assertFallbackReasonContains(
+        "SELECT id, decimal_from_text(s), decimal_from_text(s) IS NULL FROM src");
+    NativeParity.assertParity(
         () -> environment(32),
-        "SELECT id FROM src WHERE decimal_from_text(s) IS NULL",
-        "DECIMAL UDF results are native only as direct projections");
+        "SELECT id FROM src WHERE decimal_from_text(s) IS NULL");
   }
 
   @Test
@@ -152,7 +150,7 @@ class FlinkUdfExactTypesSqlHarnessTest {
     }
   }
 
-  private static TableEnvironment environment(int count) {
+  static TableEnvironment environment(int count) {
     StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
     env.setParallelism(1);
     StreamTableEnvironment table = StreamTableEnvironment.create(env);

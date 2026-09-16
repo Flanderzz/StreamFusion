@@ -65,6 +65,31 @@ Reproduce with the command below, selecting
 previous Flink fallback. The change removes admission restrictions and reuses the existing
 native member selectors; it does not speed up previously admitted paths.
 
+## DECIMAL UDF consumer diagnostic (2026-09-16)
+
+Measured against the retracting OFFSET implementation plus DECIMAL UDF consumer support,
+using Apple M4 Pro, JDK 17, UTC, Flink 2.2.1 and the release `bench` profile with mimalloc.
+The selection was `UDF_DECIMAL_IS_NULL,UDF_DECIMAL_NESTED`, with 2,000,000 rows,
+two warmups and five alternating measured trials per engine. Both transposes and native
+Calc substitution were asserted. The source cycles through `999.995`, `-999.995`,
+`1.235`, `-1.235`, `0` and `9.99E+8`, with every eighth value NULL. The UDF declares
+DECIMAL(5,2), so the inputs exercise rounding and overflow as well as ordinary values.
+
+| Case | Flink (s) | Native (s) | Flink / native |
+|---|---:|---:|---:|
+| STRING identity control | 0.504798 | 1.106419 | 0.456x |
+| `decimal_from_text(s) IS NULL` | 0.496819 | 1.205532 | 0.412x |
+| `decimal_external(decimal_from_text(s))` | 0.519048 | 1.362920 | 0.381x |
+
+These expressions are slower in isolation, including the identity control. The consumer
+expression uses Flink-generated JVM code through the existing batch UDF bridge so that
+external values, internal decimal overflow and generated null flags retain Flink's exact
+semantics. This removes an admission blocker inside larger columnar pipelines; it is not
+a Rust decimal-kernel optimization or evidence of a speedup for that composition.
+The nested consumer returns DECIMAL(38,9). Controls are not subtracted from timings.
+Reproduce with the command below, selecting
+`-Dscalar.functions=UDF_DECIMAL_IS_NULL,UDF_DECIMAL_NESTED` and `-Dscalar.nullEvery=8`.
+
 ## Inputs
 
 - Search strings add `row:`/`other:` and `:match`/`:miss` around the padding: total lengths are
