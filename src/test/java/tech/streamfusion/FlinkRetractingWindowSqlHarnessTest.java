@@ -3,6 +3,7 @@ package tech.streamfusion;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
@@ -92,7 +93,8 @@ class FlinkRetractingWindowSqlHarnessTest {
             + (groupingOnly
                 ? ""
                 : ", SUM(v), COUNT(*), AVG(v), AVG(CAST(v AS FLOAT)), AVG(CAST(v AS DOUBLE)),"
-                    + " SUM(CAST(v AS FLOAT)), SUM(CAST(v AS DOUBLE))")
+                    + " SUM(CAST(v AS FLOAT)), SUM(CAST(v AS DOUBLE)), SUM(CAST(v AS"
+                    + " DECIMAL(38,2)))")
             + " FROM TABLE("
             + window
             + ") GROUP BY k, window_start, window_end";
@@ -118,7 +120,8 @@ class FlinkRetractingWindowSqlHarnessTest {
                     value == null ? null : value.floatValue(),
                     value == null ? null : value.doubleValue(),
                     value == null ? null : value.floatValue(),
-                    value == null ? null : value.doubleValue()));
+                    value == null ? null : value.doubleValue(),
+                    value == null ? null : BigDecimal.valueOf(value).setScale(2)));
           });
     }
     expected.sort(Comparator.comparing(Row::toString));
@@ -240,10 +243,10 @@ class FlinkRetractingWindowSqlHarnessTest {
         "SELECT k, window_end"
             + (groupingOnly
                 ? ""
-                : ", SUM(v), COUNT(v), COUNT(*), AVG(v), AVG(CAST(v AS INT)),"
-                    + " AVG(CAST(v AS SMALLINT)), AVG(CAST(v AS TINYINT)),"
-                    + " AVG(CAST(v AS FLOAT)), AVG(CAST(v AS DOUBLE)),"
-                    + " SUM(CAST(v AS FLOAT)), SUM(CAST(v AS DOUBLE))")
+                : ", SUM(v), COUNT(v), COUNT(*), AVG(v), AVG(CAST(v AS INT)), AVG(CAST(v AS"
+                    + " SMALLINT)), AVG(CAST(v AS TINYINT)), AVG(CAST(v AS FLOAT)), AVG(CAST(v AS"
+                    + " DOUBLE)), SUM(CAST(v AS FLOAT)), SUM(CAST(v AS DOUBLE)), SUM(CAST(v AS"
+                    + " DECIMAL(38,2)))")
             + " FROM TABLE("
             + window
             + ") GROUP BY k, window_start, window_end";
@@ -282,7 +285,12 @@ class FlinkRetractingWindowSqlHarnessTest {
                     floating == null ? null : floating.floatValue(),
                     floating,
                     floating == null ? null : (float) (floating * (Long) row.getField(3)),
-                    floating == null ? null : floating * (Long) row.getField(3)));
+                    floating == null ? null : floating * (Long) row.getField(3),
+                    switch ((Integer) row.getField(0)) {
+                      case 6 -> new BigDecimal("9223372036854775808.00");
+                      case 7 -> new BigDecimal("18446744073709551614.00");
+                      default -> sum == null ? null : BigDecimal.valueOf(sum).setScale(2);
+                    }));
           });
     }
     expected.sort(Comparator.comparing(Row::toString));
@@ -622,6 +630,142 @@ class FlinkRetractingWindowSqlHarnessTest {
         assertWindowRows(result.job(), phase);
       }
     }
+  }
+
+  @ParameterizedTest
+  @CsvSource({
+    "ONE_PHASE,TUMBLE", "TWO_PHASE,TUMBLE",
+    "ONE_PHASE,HOP", "TWO_PHASE,HOP",
+    "ONE_PHASE,CUMULATE", "TWO_PHASE,CUMULATE"
+  })
+  void decimalSumRetractsTopRowsAndPreservesScale(String phase, String shape) throws Exception {
+    String window =
+        switch (shape) {
+          case "TUMBLE" -> "TUMBLE(TABLE ranked, DESCRIPTOR(rt), INTERVAL '5' SECOND)";
+          case "HOP" ->
+              "HOP(TABLE ranked, DESCRIPTOR(rt), INTERVAL '5' SECOND, INTERVAL '10' SECOND)";
+          default ->
+              "CUMULATE(TABLE ranked, DESCRIPTOR(rt), INTERVAL '5' SECOND, INTERVAL '15' SECOND)";
+        };
+    String sql =
+        "SELECT k, window_start, window_end, SUM(CAST(v AS DECIMAL(12,2))),"
+            + " SUM(CAST(v AS DECIMAL(38,18))) FROM TABLE("
+            + window
+            + ") GROUP BY k, window_start, window_end";
+    var host = collect(environment(phase), sql).rows();
+    assertEquals(shape.equals("HOP") ? 6 : shape.equals("TUMBLE") ? 3 : 8, host.size());
+    var table = environment(phase);
+    var scan = NativePlanner.install(table);
+    var actual = collect(table, sql);
+    assertEquals(host, actual.rows());
+    assertTrue(scan.substitutions() > 0, scan.fallbackReasons().toString());
+    assertTrue(scan.fallbackReasons().isEmpty(), scan.fallbackReasons().toString());
+    assertNativeRows(actual.job(), "NativeColumnarTopNExecNode");
+    assertWindowRows(actual.job(), phase);
+  }
+
+  @ParameterizedTest
+  @CsvSource({
+    "ONE_PHASE,TUMBLE", "TWO_PHASE,TUMBLE",
+    "ONE_PHASE,HOP", "TWO_PHASE,HOP",
+    "ONE_PHASE,CUMULATE", "TWO_PHASE,CUMULATE"
+  })
+  void decimalSumOverflowResetsOnTheNextSignedValue(String phase, String shape) throws Exception {
+    String window =
+        switch (shape) {
+          case "TUMBLE" -> "TUMBLE(TABLE changes, DESCRIPTOR(rt), INTERVAL '5' SECOND)";
+          case "HOP" ->
+              "HOP(TABLE changes, DESCRIPTOR(rt), INTERVAL '5' SECOND, INTERVAL '10' SECOND)";
+          default ->
+              "CUMULATE(TABLE changes, DESCRIPTOR(rt), INTERVAL '5' SECOND, INTERVAL '15' SECOND)";
+        };
+    String sql =
+        "SELECT k, window_end, SUM(v), COUNT(v), COUNT(*) FROM TABLE("
+            + window
+            + ") GROUP BY k, window_start, window_end";
+    String max = "9".repeat(36) + ".99";
+    List<Row> host = null;
+    for (boolean nativeEnabled : new boolean[] {false, true}) {
+      var env = new TestStreamEnvironment(cluster.getMiniCluster(), 1);
+      var table = StreamTableEnvironment.create(env);
+      table.getConfig().setLocalTimeZone(ZoneOffset.UTC);
+      table.getConfig().set("table.optimizer.agg-phase-strategy", phase);
+      var source =
+          env.fromData(
+                  Types.ROW_NAMED(
+                      new String[] {"k", "millis", "v"}, Types.INT, Types.LONG, Types.BIG_DEC),
+                  decimalRow(RowKind.INSERT, 1, max),
+                  decimalRow(RowKind.INSERT, 1, "0.01"),
+                  decimalRow(RowKind.INSERT, 2, max),
+                  decimalRow(RowKind.INSERT, 2, "0.01"),
+                  decimalRow(RowKind.INSERT, 2, "3.25"),
+                  decimalRow(RowKind.DELETE, 3, max),
+                  decimalRow(RowKind.DELETE, 3, "0.01"),
+                  decimalRow(RowKind.DELETE, 4, max),
+                  decimalRow(RowKind.DELETE, 4, "0.01"),
+                  decimalRow(RowKind.DELETE, 4, "0.25"),
+                  decimalRow(RowKind.INSERT, 5, "1.50"),
+                  decimalRow(RowKind.DELETE, 5, "1.00"),
+                  decimalRow(RowKind.INSERT, 5, null),
+                  decimalRow(RowKind.DELETE, 6, "3.00"),
+                  decimalRow(RowKind.UPDATE_BEFORE, 7, "1.00"),
+                  decimalRow(RowKind.UPDATE_AFTER, 7, "2.00"),
+                  decimalRow(RowKind.INSERT, 7, null),
+                  decimalRow(RowKind.INSERT, 8, max),
+                  decimalRow(RowKind.INSERT, 8, max),
+                  decimalRow(RowKind.DELETE, 8, "2.50"),
+                  decimalRow(RowKind.INSERT, 9, null))
+              .assignTimestampsAndWatermarks(
+                  WatermarkStrategy.<Row>forBoundedOutOfOrderness(Duration.ofDays(1))
+                      .withTimestampAssigner((row, previous) -> (Long) row.getField(1)));
+      table.createTemporaryView(
+          "changes",
+          table.fromChangelogStream(
+              source,
+              Schema.newBuilder()
+                  .column("k", DataTypes.INT())
+                  .column("millis", DataTypes.BIGINT())
+                  .column("v", DataTypes.DECIMAL(38, 2))
+                  .columnByMetadata("rt", DataTypes.TIMESTAMP_LTZ(3), "rowtime")
+                  .watermark("rt", "SOURCE_WATERMARK()")
+                  .build()));
+      var scan = nativeEnabled ? NativePlanner.install(table) : null;
+      var result = collect(table, sql);
+      if (!nativeEnabled) {
+        host = result.rows();
+        assertEquals(9 * (shape.equals("TUMBLE") ? 1 : shape.equals("HOP") ? 2 : 3), host.size());
+        for (Row row : host) {
+          BigDecimal expected =
+              switch ((Integer) row.getField(0)) {
+                case 2 -> new BigDecimal("3.25");
+                case 4 -> new BigDecimal("-0.25");
+                case 6 -> new BigDecimal("-3.00");
+                case 8 -> new BigDecimal("-2.50");
+                default -> null;
+              };
+          assertEquals(expected, row.getField(2), row.toString());
+        }
+      } else {
+        assertEquals(host, result.rows());
+        assertTrue(scan.substitutions() > 0, scan.fallbackReasons().toString());
+        assertTrue(scan.fallbackReasons().isEmpty(), scan.fallbackReasons().toString());
+        assertWindowRows(result.job(), phase);
+      }
+    }
+  }
+
+  private static Row decimalRow(RowKind kind, int key, String value) {
+    return Row.ofKind(kind, key, 1000L, value == null ? null : new BigDecimal(value));
+  }
+
+  @ParameterizedTest
+  @org.junit.jupiter.params.provider.ValueSource(strings = {"ONE_PHASE", "TWO_PHASE"})
+  void decimalAverageStillHasExplicitFallback(String phase) throws Exception {
+    NativeParity.assertFallbackReasonContains(
+        () -> environment(phase),
+        "SELECT k, AVG(CAST(v AS DECIMAL(12,2))) FROM TABLE(TUMBLE(TABLE ranked,"
+            + " DESCRIPTOR(rt), INTERVAL '5' SECOND)) GROUP BY k, window_start, window_end",
+        "window aggregate: retracting input supports only aligned event-time");
   }
 
   private static Row floatingRow(RowKind kind, int key, Double value) {

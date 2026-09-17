@@ -24,6 +24,8 @@ class RetractingWindowBenchmark {
   private static final boolean AVERAGE = Boolean.getBoolean("window.average");
   private static final String AVERAGE_TYPE = System.getProperty("window.averageType", "BIGINT");
   private static final String SUM_TYPE = System.getProperty("window.sumType", "BIGINT");
+  private static final String SUM_RESULT_TYPE =
+      SUM_TYPE.replaceFirst("DECIMAL\\(\\d+,", "DECIMAL(38,");
   private static final String SQL =
       "INSERT INTO sink SELECT k"
           + (GROUPING_ONLY
@@ -118,7 +120,7 @@ class RetractingWindowBenchmark {
                 + " DESC) AS rn FROM src) WHERE rn = 1"));
     table.executeSql(
         "CREATE TABLE sink (k BIGINT"
-            + (GROUPING_ONLY ? "" : ", c BIGINT, s " + (AVERAGE ? AVERAGE_TYPE : SUM_TYPE))
+            + (GROUPING_ONLY ? "" : ", c BIGINT, s " + (AVERAGE ? AVERAGE_TYPE : SUM_RESULT_TYPE))
             + ") WITH ('connector' = 'blackhole')");
     return table;
   }
