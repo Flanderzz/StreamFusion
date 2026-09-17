@@ -694,19 +694,22 @@ The direct Rust kernel is enabled by default for the following verified shapes; 
 opt-in is needed. The fused JVM consumer path below retains Flink's own selector and policy rules.
 
 Character input with a non-null literal definite path is native. Supported paths are `$`,
-dot members such as `$.user.name`, bracket members such as `$['user name']`, and nonnegative
-32-bit array indexes such as `$.users[0].name`. Dot names use Unicode letters, numbers and
+dot members such as `$.user.name`, bracket members such as `$['user name']`, and signed
+32-bit array indexes such as `$.users[0].name` and `$.users[-1].name`. Negative indexes count
+from the array end: `-1` selects the last element, while `-0` is index zero. Leading zeros
+are accepted, and an index beyond either end follows the normal missing-path policies.
+Dot names use Unicode letters, numbers and
 underscores, with a letter/underscore first. Bracket names use single or double quotes and
 accept well-formed Unicode, spaces and punctuation, including the other quote character.
 Empty bracket names (`$['']` and `$[""]`) select the empty object key, including in nested
 member/index paths. They remain distinct from a name containing a space (`$[' ']`).
 Member names are case-sensitive. Escaped document keys are compared as UTF-16 code units,
 so unpaired surrogates remain distinct from a literal `?` or replacement character, including
-when duplicate members occur before or after them. Wildcards, recursive descent, filters, slices, negative
-indexes, backslash escapes, ASCII controls, unpaired surrogates and dynamic
+when duplicate members occur before or after them. Wildcards, recursive descent, filters, slices,
+multi-selectors, backslash escapes, ASCII controls, unpaired surrogates and dynamic
 paths fall back. Quoted `'*'` is an ordinary member name, not a wildcard.
 
-ASCII spaces around a bracket member or index are native, for example `$[ 'user' ][ 01 ]`.
+ASCII spaces around a bracket member or index are native, for example `$[ 'user' ][ -01 ]`.
 Trailing ASCII spaces after a complete path are also accepted. The planner removes only
 these syntactic spaces; spaces inside quoted names remain significant. An explicit
 case-insensitive `strict`/`lax` prefix accepts Flink's mode-separating whitespace. Leading
@@ -721,6 +724,13 @@ missing/null/scalar/container values, strict/lax policies, typed RETURNING, inde
 paths and invalid unselected fields, plus explicit fallback for downstream string grouping.
 Native reader tests also verify
 selection on both the streaming parser and SIMD tape.
+
+Negative-index regressions cover nested arrays, minimum signed indexes, negative zero, leading
+zeros, all strict/lax policies, typed RETURNING and conversion failures, complete-document
+validation, and independent selections across multiple batches. The SIMD reader uses its existing
+array lengths; the streaming reader counts a negatively indexed array before selecting from it,
+without building a JSON object tree or retaining every element. Both are Rust paths with no
+generated-expression UDF binding for direct projections.
 
 The default return type and explicit `RETURNING VARCHAR(n)` are native; Flink 2.2.1 does
 not truncate this function's result to `n`. `RETURNING BOOLEAN`, `INTEGER` and `DOUBLE`

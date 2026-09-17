@@ -16,6 +16,7 @@ class FlinkJsonPathGrammarSqlHarnessTest {
         "$[1 ]",
         "$[ 1]",
         "$[ 0001 ]",
+        "$[ -1 ]",
         "$[ 'a' ]",
         "$[ \"a\" ]",
         "$['a' ]",
@@ -38,7 +39,7 @@ class FlinkJsonPathGrammarSqlHarnessTest {
   @ParameterizedTest
   @ValueSource(
       strings = {
-        "$[-1]",
+        "$[-2147483649]",
         "$[+1]",
         "$[1,2]",
         "$[1:2]",

@@ -18,7 +18,7 @@ pub(super) struct Path<'a> {
 #[derive(Debug)]
 enum Step<'a> {
     Member(&'a str),
-    Index(usize),
+    Index(i32),
 }
 
 impl<'a> Path<'a> {
@@ -69,11 +69,12 @@ impl<'a> Path<'a> {
                 let rest = text.strip_prefix('[')?;
                 let end = rest.find(']')?;
                 let index = &rest[..end];
-                if index.is_empty() || !index.bytes().all(|b| b.is_ascii_digit()) {
+                let digits = index.strip_prefix('-').unwrap_or(index);
+                if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
                     return None;
                 }
                 let index: i32 = index.parse().ok()?;
-                steps.push(Step::Index(index as usize));
+                steps.push(Step::Index(index));
                 text = &rest[end + 1..];
             }
         }
@@ -150,6 +151,7 @@ impl Value<'_> {
     }
 }
 
+#[derive(Clone)]
 struct Parser<'a> {
     input: &'a str,
     pos: usize,
@@ -226,6 +228,17 @@ impl<'a> Parser<'a> {
         if self.consume(end) {
             return Ok(result);
         }
+        let selected_index = match path.and_then(|steps| steps.first()) {
+            Some(Step::Index(index)) if !object => {
+                if *index < 0 {
+                    self.array_length(depth)?
+                        .checked_sub(index.unsigned_abs() as usize)
+                } else {
+                    Some(*index as usize)
+                }
+            }
+            _ => None,
+        };
         let mut index = 0;
         loop {
             self.whitespace();
@@ -240,7 +253,7 @@ impl<'a> Parser<'a> {
                     _ => false,
                 }
             } else {
-                matches!(path.and_then(|steps| steps.first()), Some(Step::Index(n)) if *n == index)
+                selected_index == Some(index)
             };
             let child = self.value(if matches { path.map(|p| &p[1..]) } else { None }, depth)?;
             if matches {
@@ -255,6 +268,24 @@ impl<'a> Parser<'a> {
                 return Err(());
             }
             index += 1;
+        }
+    }
+
+    // Count a negative-index array without retaining its values. The normal pass still selects
+    // the requested subtree and validates every member, including fields after the selected one.
+    fn array_length(&self, depth: usize) -> Result<usize, ()> {
+        let mut parser = self.clone();
+        let mut count = 0;
+        loop {
+            parser.value(None, depth)?;
+            count += 1;
+            parser.whitespace();
+            if parser.consume(b']') {
+                return Ok(count);
+            }
+            if !parser.consume(b',') {
+                return Err(());
+            }
         }
     }
 
@@ -534,7 +565,7 @@ mod tests {
             "a",
             "$.a.*",
             "$..a",
-            "$[-1]",
+            "$[-2147483649]",
             "$[2147483648]",
             "$[]",
             "$['a\\b']",
@@ -542,6 +573,41 @@ mod tests {
             "$['a\n']",
         ] {
             assert!(Path::parse(text, "13.0").is_none(), "{text}");
+        }
+    }
+
+    #[test]
+    fn negative_indexes_select_from_the_end_without_skipping_validation() {
+        let input = r#"["a",{"x":"b"},["c","d"]]"#;
+        for (text, value) in [
+            ("$[-3]", "a"),
+            ("$[-2].x", "b"),
+            ("$[-1][-1]", "d"),
+            ("$[-1][-0]", "c"),
+            ("$[-0003]", "a"),
+        ] {
+            assert_eq!(path(text).read(input), Ok(Value::String(value)));
+        }
+        for text in ["$[-4]", "$[-2147483648]", "$[2147483647]"] {
+            assert!(path(text).read(input).is_err());
+            assert_eq!(path(&format!("lax {text}")).read(input), Ok(Value::Missing));
+        }
+        for input in ["[]", "{}", "false", "42", r#""scalar""#] {
+            assert_eq!(path("lax $[-1]").read(input), Ok(Value::Missing));
+        }
+        assert_eq!(path("lax $[-1]").read("[null]"), Ok(Value::Null));
+        assert_eq!(
+            path("$[-1]").read(r#"["a","b"] trailing"#),
+            Ok(Value::String("b"))
+        );
+        assert_eq!(path("$[-1]").read(r#"[{"a":0},{}]"#), Ok(Value::Container));
+        for input in [
+            r#"["ok",{"bad":1e2147483648}]"#,
+            r#"[{"bad":1e2147483648},"ok"]"#,
+            r#"["ok",]"#,
+        ] {
+            assert!(path("$[-1]").read(input).is_err());
+            assert_eq!(path("lax $[-1]").read(input), Ok(Value::Missing));
         }
     }
 

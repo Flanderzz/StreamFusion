@@ -7,6 +7,13 @@ path is parsed once per batch, and unescaped selected strings borrow their input
 appended to the Arrow result. Every field is validated, including fields outside the selected
 path. JSON_VALUE, JSON_EXISTS and IS JSON share this parser under the scalar-function registry.
 
+Signed array indexes follow Flink's released Jayway evaluator: negative indexes add the array
+length, and negative zero is zero. The streaming path counts a negatively indexed array using
+a copied parser cursor, then selects while retaining complete-document validation. This pays
+an extra scan of that array instead of allocating Jackson's full object tree or retaining each
+element. The SIMD tape already records array lengths and needs no counting pass. This extends
+the shared definite-path reader; it does not use Comet's Spark-specific wildcard semantics.
+
 For documents with many short members, a shared `simd-json` reader reuses its input scratch,
 structural buffers and tape across rows. It validates the whole document before selecting a
 path, and scans all members of each selected object so the last duplicate wins. This differs

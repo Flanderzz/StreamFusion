@@ -1064,3 +1064,35 @@ TZ=UTC SF_BENCHMARK=true mvn -pl streamfusion-runtime -am test -Pbench \
   -Dscalar.rows=2000000 -Dscalar.nullEvery=8 -Dscalar.warmup=2 -Dscalar.runs=5 \
   -Dscalar.engine=both
 ```
+
+## Negative JSON array indexes
+
+`JSON_VALUE_NEGATIVE` and `JSON_EXISTS_NEGATIVE` select `$.a[-1]` from a 32-element
+string array. `JSON_VALUE_POSITIVE_CONTROL` selects the same value with `$.a[31]`.
+Documents alternate between final values `Alice` and `Bob`, with the usual 264-byte
+padding-string budget. Negative indexes previously declined the native JSON kernel.
+
+M4 Pro/JDK 17, release build (`-Pbench`, mimalloc), UTC, parallelism 1, 2m rows,
+NULL every eighth row, two warmups and five interleaved measurements per engine:
+
+| Query | Flink seconds | Native seconds | Flink/native |
+| --- | ---: | ---: | ---: |
+| Source-matched identity control | 0.774887 | 1.496905 | 0.518x |
+| `JSON_VALUE(s, '$.a[-1]')` | 2.955556 | 3.951091 | 0.748x |
+| `JSON_VALUE(s, '$.a[31]')` | 3.147889 | 3.069012 | 1.026x |
+| `JSON_EXISTS(s, '$.a[-1]')` | 2.926447 | 3.831098 | 0.764x |
+
+Both row/Arrow transposes are present and asserted. No other local tests ran during
+measurement. The negative-index implementation extends native coverage, but is slower
+than Flink in this short pipeline. The scalar reader counts the array in an extra pass;
+the SIMD reader uses its existing array length. The positive-index control exposes the
+additional cost on the same input. These numbers do not establish a speedup for negative
+indexes or for a larger native pipeline.
+
+```bash
+TZ=UTC SF_BENCHMARK=true mvn -pl streamfusion-runtime -am test -Pbench \
+  -Dtest=ScalarFunctionBenchmark -Dsurefire.failIfNoSpecifiedTests=false \
+  -Dscalar.functions=JSON_VALUE_NEGATIVE,JSON_VALUE_POSITIVE_CONTROL,JSON_EXISTS_NEGATIVE \
+  -Dscalar.rows=2000000 -Dscalar.nullEvery=8 -Dscalar.warmup=2 -Dscalar.runs=5 \
+  -Dscalar.engine=both
+```

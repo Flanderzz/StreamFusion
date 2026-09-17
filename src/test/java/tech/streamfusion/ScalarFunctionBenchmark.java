@@ -182,6 +182,21 @@ class ScalarFunctionBenchmark {
                   new Query("IS_JSON_SCALAR", "tt_json_predicate", "s IS JSON SCALAR", "BOOLEAN"),
                   new Query("JSON_VALUE", "tt_json", "JSON_VALUE(s, 'lax $.user.name')", "STRING"),
                   new Query(
+                      "JSON_VALUE_NEGATIVE",
+                      "tt_json_negative",
+                      "JSON_VALUE(s, '$.a[-1]')",
+                      "STRING"),
+                  new Query(
+                      "JSON_VALUE_POSITIVE_CONTROL",
+                      "tt_json_negative",
+                      "JSON_VALUE(s, '$.a[31]')",
+                      "STRING"),
+                  new Query(
+                      "JSON_EXISTS_NEGATIVE",
+                      "tt_json_negative",
+                      "JSON_EXISTS(s, '$.a[-1]')",
+                      "BOOLEAN"),
+                  new Query(
                       "JSON_VALUE_IDENTITY",
                       "tt_json_surrogate",
                       "JSON_VALUE(s, '$') = '?'",

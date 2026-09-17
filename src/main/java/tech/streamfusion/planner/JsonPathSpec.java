@@ -12,7 +12,7 @@ final class JsonPathSpec {
           "\\.(?<dot>[\\p{L}_][\\p{L}\\p{N}_]*)"
               + "|\\[ *'(?<single>[^'\\\\\\x00-\\x1f]*)' *\\]"
               + "|\\[ *\"(?<quoted>[^\"\\\\\\x00-\\x1f]*)\" *\\]"
-              + "|\\[ *(?<index>[0-9]+) *\\]");
+              + "|\\[ *(?<index>-?[0-9]+) *\\]");
 
   private JsonPathSpec() {}
 
