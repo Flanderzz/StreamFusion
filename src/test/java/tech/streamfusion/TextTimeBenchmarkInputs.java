@@ -43,7 +43,12 @@ final class TextTimeBenchmarkInputs {
       payload(unicode ? " |\u4e2daB\ud83d\ude00| " : " |abCd| efGh| ", bytes),
       payload(unicode ? " |\u00e9dE\ud83d\ude42| " : " |deFg| abCd| ", bytes)
     };
-    if (input.equals("tt_decimal")) {
+    if (input.equals("tt_udf_decimal")) {
+      String[] values = {"999.995", "-999.995", "1.235", "-1.235", "0", "9.99E+8"};
+      tables.createTemporaryView("inputs", env.fromSequence(0, rows - 1)
+          .map(i -> Row.of(isNull(i, nullEvery) ? null : values[(int) (i % values.length)]))
+          .returns(Types.ROW_NAMED(new String[] {"s"}, Types.STRING)));
+    } else if (input.equals("tt_decimal")) {
       java.math.BigDecimal[] values = {
         new java.math.BigDecimal("12345678901234567890.123456700"),
         new java.math.BigDecimal("-0.000000100")

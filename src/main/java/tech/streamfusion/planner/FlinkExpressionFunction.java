@@ -1,6 +1,7 @@
 package tech.streamfusion.planner;
 
 import java.math.BigDecimal;
+import java.util.List;
 import org.apache.calcite.rex.RexNode;
 import org.apache.flink.api.common.functions.Function;
 import org.apache.flink.configuration.ReadableConfig;
@@ -18,8 +19,9 @@ import org.apache.flink.table.types.logical.DecimalType;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.RowType;
 
-/** Flink's temporal expression code, called once per argument batch through the scalar bridge. */
-public final class TemporalFunction extends ScalarFunction {
+/** Flink's generated expression code, called once per argument batch through the scalar bridge. */
+public final class FlinkExpressionFunction extends ScalarFunction
+    implements tech.streamfusion.operator.NativeUdf.FunctionDependencies {
   private static final long serialVersionUID = 1L;
 
   public interface Evaluator extends Function {
@@ -32,16 +34,22 @@ public final class TemporalFunction extends ScalarFunction {
 
   private final GeneratedFunction<Evaluator> generated;
   private final LogicalType[] argumentTypes;
+  private final List<ScalarFunction> functions;
   private transient Evaluator evaluator;
   private transient GenericRowData input;
 
-  TemporalFunction(RexNode expression, LogicalType[] argumentTypes, ReadableConfig config) {
+  FlinkExpressionFunction(
+      RexNode expression,
+      LogicalType[] argumentTypes,
+      ReadableConfig config,
+      ClassLoader classLoader) {
     this.argumentTypes = argumentTypes;
-    var context = new Context(config);
+    var context = new Context(config, classLoader);
     var generator = new ExprCodeGenerator(context, false);
     generator.bindInput(RowType.of(argumentTypes), "input", scala.Option.empty());
     var result = generator.generateExpression(expression);
-    String className = "TemporalEvaluator" + context.getNameCounter().getAndIncrement();
+    functions = List.copyOf(context.functionInstances.values());
+    String className = "FlinkExpressionEvaluator" + context.getNameCounter().getAndIncrement();
     String code =
         "public final class "
             + className
@@ -80,12 +88,17 @@ public final class TemporalFunction extends ScalarFunction {
     Object[] references =
         scala.collection.JavaConverters.seqAsJavaList(context.references()).toArray();
     generated = new GeneratedFunction<>(className, code, references, config);
-    generated.compile(TemporalFunction.class.getClassLoader());
+    generated.compile(classLoader);
+  }
+
+  @Override
+  public List<ScalarFunction> functions() {
+    return functions;
   }
 
   @Override
   public void open(FunctionContext context) throws Exception {
-    evaluator = generated.newInstance(TemporalFunction.class.getClassLoader());
+    evaluator = generated.newInstance(context.getUserCodeClassLoader());
     evaluator.open(context);
     input = new GenericRowData(argumentTypes.length);
   }
@@ -114,8 +127,12 @@ public final class TemporalFunction extends ScalarFunction {
   }
 
   private static final class Context extends CodeGeneratorContext {
-    Context(ReadableConfig config) {
-      super(config, TemporalFunction.class.getClassLoader());
+    private final java.util.Map<String, String> functions = new java.util.HashMap<>();
+    private final java.util.Map<String, ScalarFunction> functionInstances =
+        new java.util.LinkedHashMap<>();
+
+    Context(ReadableConfig config, ClassLoader classLoader) {
+      super(config, classLoader);
     }
 
     @Override
@@ -123,11 +140,26 @@ public final class TemporalFunction extends ScalarFunction {
         UserDefinedFunction function,
         Class<? extends FunctionContext> contextClass,
         scala.collection.Seq<String> contextArguments) {
-      String name =
-          addReusableObject(function, "temporalFunction", function.getClass().getCanonicalName());
-      addReusableOpenStatement(name + ".open(context);");
-      addReusableCloseStatement(name + ".close();");
-      return name;
+      return functions.computeIfAbsent(
+          function.functionIdentifier(),
+          ignored -> {
+            int reference = references().size();
+            String name =
+                addReusableObject(function, "expressionFunction", function.getClass().getName());
+            // CodeGeneratorContext clones reusable objects. Retain the original reference here so
+            // generated and direct call sites serialize and open the same task-local function
+            // instance.
+            references().update(reference, function);
+            functionInstances.put(ignored, (ScalarFunction) function);
+            return name;
+          });
+    }
+
+    @Override
+    public String addReusableConverter(
+        org.apache.flink.table.types.DataType type, String classLoaderTerm) {
+      return super.addReusableConverter(
+          type, classLoaderTerm == null ? "context.getUserCodeClassLoader()" : classLoaderTerm);
     }
   }
 }

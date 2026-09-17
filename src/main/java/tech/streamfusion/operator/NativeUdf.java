@@ -56,6 +56,11 @@ public final class NativeUdf {
 
   private NativeUdf() {}
 
+  /** Functions embedded in generated expressions share the owning Calc's lifecycle. */
+  public interface FunctionDependencies {
+    List<ScalarFunction> functions();
+  }
+
   // Native value-type codes for a UDF argument or result column (mirrored by the JVM encoder in
   // RexExpression). Kept independent of the aggregate value codes — this is the UDF marshalling ABI.
   public static final int TYPE_STRING = 0;
@@ -280,14 +285,7 @@ public final class NativeUdf {
       try {
         for (int i = 0; i < descriptors.length; i++) {
           ScalarFunction function = descriptors[i].function;
-          if (function != null && opened.put(function, Boolean.TRUE) == null) {
-            try {
-              function.open(context);
-            } catch (Exception e) {
-              throw new IllegalStateException("failed to open UDF " + function.getClass().getName(), e);
-            }
-            openedFunctions.add(function);
-          }
+          openFunction(function, context, opened);
           runtimeIds[i] = descriptors[i].registerLocally();
         }
         if (idSlots.length == 0) {
@@ -306,6 +304,22 @@ public final class NativeUdf {
         }
         throw failure;
       }
+    }
+
+    private void openFunction(ScalarFunction function, FunctionContext context,
+        IdentityHashMap<ScalarFunction, Boolean> opened) {
+      if (function == null || opened.put(function, Boolean.TRUE) != null) return;
+      if (function instanceof FunctionDependencies dependencies) {
+        for (ScalarFunction dependency : dependencies.functions()) {
+          openFunction(dependency, context, opened);
+        }
+      }
+      try {
+        function.open(context);
+      } catch (Exception e) {
+        throw new IllegalStateException("failed to open UDF " + function.getClass().getName(), e);
+      }
+      openedFunctions.add(function);
     }
 
     /** Binds without task runtime information, for local expression/unit-test use. */
