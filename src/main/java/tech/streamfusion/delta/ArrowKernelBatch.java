@@ -116,7 +116,8 @@ public final class ArrowKernelBatch implements ColumnarBatch, AutoCloseable {
   public VectorSchemaRoot retainedRoot() {
     List<FieldVector> retained = new ArrayList<>(vectors.size());
     List<Field> fields = new ArrayList<>(vectors.size());
-    for (ArrowKernelVector vector : vectors) {
+    for (int i = 0; i < vectors.size(); i++) {
+      ArrowKernelVector vector = vectors.get(i);
       TransferPair transfer = vector.vector.getTransferPair(vector.vector.getAllocator());
       // A selected batch remains a view until Rust performs one gather for every column. Retain
       // the full top-level vector here: truncating it to selectedRows.length makes a sparse source
@@ -124,7 +125,7 @@ public final class ArrowKernelBatch implements ColumnarBatch, AutoCloseable {
       int retainedRows = selectedRows == null ? vector.size : vector.vector.getValueCount();
       transfer.splitAndTransfer(vector.offset, retainedRows);
       retained.add((FieldVector) transfer.getTo());
-      fields.add(deltaTimestampMetadata(vector.vector.getField(), vector.type));
+      fields.add(deltaField(vector.vector.getField(), schema.at(i)));
     }
     return new VectorSchemaRoot(fields, retained, root.getRowCount());
   }
@@ -133,9 +134,10 @@ public final class ArrowKernelBatch implements ColumnarBatch, AutoCloseable {
   VectorSchemaRoot borrowedRoot() {
     List<FieldVector> borrowed = new ArrayList<>(vectors.size());
     List<Field> fields = new ArrayList<>(vectors.size());
-    for (ArrowKernelVector vector : vectors) {
+    for (int i = 0; i < vectors.size(); i++) {
+      ArrowKernelVector vector = vectors.get(i);
       borrowed.add(vector.vector);
-      fields.add(deltaTimestampMetadata(vector.vector.getField(), vector.type));
+      fields.add(deltaField(vector.vector.getField(), schema.at(i)));
     }
     return new VectorSchemaRoot(fields, borrowed, root.getRowCount());
   }
@@ -149,7 +151,12 @@ public final class ArrowKernelBatch implements ColumnarBatch, AutoCloseable {
     return selectedRows != null && selectedRows.length < root.getRowCount();
   }
 
-  /** Restore the timezone distinction that Flink's internal Arrow representation intentionally loses. */
+  private static Field deltaField(Field arrowField, StructField deltaField) {
+    Field typed = deltaTimestampMetadata(arrowField, deltaField.getDataType());
+    return new Field(deltaField.getName(), typed.getFieldType(), typed.getChildren());
+  }
+
+  /** Restore Kernel's physical field names and Delta's timestamp timezone distinction. */
   private static Field deltaTimestampMetadata(
       Field arrowField, io.delta.kernel.types.DataType deltaType) {
     ArrowType arrowType = arrowField.getType();
@@ -162,7 +169,7 @@ public final class ArrowKernelBatch implements ColumnarBatch, AutoCloseable {
       StructType struct = (StructType) deltaType;
       List<Field> rewritten = new ArrayList<>(children.size());
       for (int i = 0; i < children.size(); i++) {
-        rewritten.add(deltaTimestampMetadata(children.get(i), struct.at(i).getDataType()));
+        rewritten.add(deltaField(children.get(i), struct.at(i)));
       }
       children = rewritten;
     } else if (deltaType instanceof ArrayType && !children.isEmpty()) {

@@ -69,7 +69,9 @@ sidecars are protocol files, not alternative table data formats.
 
 Delta Kernel views read the engine's millisecond/fraction timestamp pair as microseconds, preserving
 Delta's supported timestamp range without an i64 nanosecond intermediate. The Parquet boundary
-restores TIMESTAMP versus TIMESTAMP_NTZ timezone metadata before writing.
+uses Kernel's physical column names, including nested struct fields, and restores TIMESTAMP versus
+TIMESTAMP_NTZ timezone metadata before writing. SQL insertion binds columns by position, so input
+aliases and generated expression names must not become names in the table's Parquet files.
 
 Sink constraints remain Flink-owned. A nullable query field assigned to a `NOT NULL` target keeps
 the Delta sink on the stock path so `table.exec.sink.not-null-enforcer` can fail or drop the row.

@@ -202,7 +202,7 @@ class DeltaSinkParityTest {
     PhysicalPlanScan scan = NativePlanner.install(tableEnv);
 
     tableEnv.executeSql(
-            "INSERT INTO sink SELECT id, CAST(id AS INT) AS v, CAST('a' AS STRING) AS dt FROM src")
+            "INSERT INTO sink SELECT id, CAST(id AS INT), CAST('a' AS STRING) FROM src")
         .await();
 
     assertAccelerated(scan);
@@ -227,13 +227,14 @@ class DeltaSinkParityTest {
     assertTrue(hasDeletionVector(nativePath), "the published Java merge path did not publish a DV");
   }
 
-  @org.junit.jupiter.api.Test
-  void nestedStructListAndMapMatchTheConnector() throws Exception {
+  @org.junit.jupiter.params.ParameterizedTest
+  @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+  void nestedStructListAndMapMatchTheConnector(boolean renamed) throws Exception {
     Path host = Files.createTempDirectory("delta-nested-host");
     Path nativePath = Files.createTempDirectory("delta-nested-native");
 
-    runNestedAppend(host, false);
-    runNestedAppend(nativePath, true);
+    runNestedAppend(host, false, renamed);
+    runNestedAppend(nativePath, true, renamed);
 
     assertEquals(readNestedRows(host), readNestedRows(nativePath));
   }
@@ -292,17 +293,17 @@ class DeltaSinkParityTest {
     assertAccelerated(scan);
   }
 
-  private static void runNestedAppend(Path path, boolean nativeWriter) throws Exception {
+  private static void runNestedAppend(Path path, boolean nativeWriter, boolean renamed) throws Exception {
     StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
     env.setParallelism(2);
     StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env);
     DataStream<org.apache.flink.types.Row> source =
         env.fromData(
             Types.ROW_NAMED(
-                new String[] {"id", "details", "tags", "dt"},
+                new String[] {"id", renamed ? "source_details" : "details", "tags", "dt"},
                 Types.LONG,
                 Types.ROW_NAMED(
-                    new String[] {"name", "scores"},
+                    new String[] {renamed ? "source_name" : "name", "scores"},
                     Types.STRING,
                     Types.OBJECT_ARRAY(Types.INT)),
                 Types.MAP(Types.STRING, Types.LONG),
@@ -323,9 +324,9 @@ class DeltaSinkParityTest {
         Schema.newBuilder()
             .column("id", DataTypes.BIGINT().notNull())
             .column(
-                "details",
+                renamed ? "source_details" : "details",
                 DataTypes.ROW(
-                    DataTypes.FIELD("name", DataTypes.STRING()),
+                    DataTypes.FIELD(renamed ? "source_name" : "name", DataTypes.STRING()),
                     DataTypes.FIELD("scores", DataTypes.ARRAY(DataTypes.INT()))))
             .column("tags", DataTypes.MAP(DataTypes.STRING(), DataTypes.BIGINT()))
             .column("dt", DataTypes.STRING())
