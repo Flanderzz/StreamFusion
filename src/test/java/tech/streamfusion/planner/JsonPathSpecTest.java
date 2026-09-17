@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 
+import java.nio.charset.Charset;
 import java.util.List;
 import org.apache.calcite.jdbc.JavaTypeFactoryImpl;
 import org.apache.calcite.rex.RexBuilder;
@@ -12,6 +13,7 @@ import org.apache.calcite.sql.SqlFunction;
 import org.apache.calcite.sql.SqlFunctionCategory;
 import org.apache.calcite.sql.SqlKind;
 import org.apache.calcite.sql.type.SqlTypeName;
+import org.apache.calcite.util.ConversionUtil;
 import org.junit.jupiter.api.Test;
 
 class JsonPathSpecTest {
@@ -65,13 +67,16 @@ class JsonPathSpecTest {
     assertEquals("lax $[\"a/b\"][0]", JsonPathSpec.normalize("lax $[ 'a\\/b' ][ 0 ]"));
     assertEquals("strict $[\"用户\"]", JsonPathSpec.normalize("$['\\u7528\\u6237']"));
     assertEquals("strict $[\"😀\"]", JsonPathSpec.normalize("$['\\uD83D\\uDE00']"));
-    for (String name :
-        List.of("\\uD800", "\\uDC00", "\\uD800x\\uDC00", "\\u12", "\\uGGGG", "\\用户")) {
+    for (String name : List.of("\\uD800", "\\uDC00", "\\uD800x\\uDC00", "\\u12", "\\uGGGG")) {
       assertNull(JsonPathSpec.normalize("$['" + name + "']"), name);
     }
     assertEquals("strict $[\"aq\"]", JsonPathSpec.normalize("$['a\\q']"));
     assertEquals("strict $[\"x61\"]", JsonPathSpec.normalize("$['\\x61']"));
     assertEquals("strict $[\"*\"]", JsonPathSpec.normalize("$['\\*']"));
+    assertEquals("strict $[\"用户\"]", JsonPathSpec.normalize("$['\\用户']"));
+    assertEquals("strict $[\"😀\"]", JsonPathSpec.normalize("$['\\😀']"));
+    assertEquals("strict $[\"a\\nb\"]", JsonPathSpec.normalize("$['a\\\nb']"));
+    assertEquals("strict $[\"a\\u0000b\"]", JsonPathSpec.normalize("$['a\\\u0000b']"));
   }
 
   @Test
@@ -88,7 +93,13 @@ class JsonPathSpecTest {
 
   @Test
   void columnPathsFallBackBeforeNativeCompilation() {
-    var types = new JavaTypeFactoryImpl();
+    var types =
+        new JavaTypeFactoryImpl() {
+          @Override
+          public Charset getDefaultCharset() {
+            return Charset.forName(ConversionUtil.NATIVE_UTF16_CHARSET_NAME);
+          }
+        };
     var rex = new RexBuilder(types);
     var text = types.createSqlType(SqlTypeName.VARCHAR);
     for (String name : List.of("JSON_VALUE", "JSON_EXISTS")) {
@@ -110,6 +121,8 @@ class JsonPathSpecTest {
                 "$[-0]",
                 "$['a\\'b']",
                 "$['a\\\\b']",
+                "$['\\用户']",
+                "$['a\\\nb']",
                 "$['\\u0000']")) {
           var literalPath =
               rex.makeCall(
