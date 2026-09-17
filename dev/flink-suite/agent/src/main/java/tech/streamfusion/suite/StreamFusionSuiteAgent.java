@@ -1,6 +1,7 @@
 package tech.streamfusion.suite;
 
 import static net.bytebuddy.matcher.ElementMatchers.isAnnotatedWith;
+import static net.bytebuddy.matcher.ElementMatchers.isConstructor;
 import static net.bytebuddy.matcher.ElementMatchers.named;
 import static net.bytebuddy.matcher.ElementMatchers.namedOneOf;
 import static net.bytebuddy.matcher.ElementMatchers.takesArgument;
@@ -165,6 +166,14 @@ public final class StreamFusionSuiteAgent {
                 builder.visit(
                     Advice.to(PreferNativePaimonFormat.class)
                         .on(named("discoverFactory").and(takesArguments(2)))))
+        .type(named("tech.streamfusion.delta.NativeDeltaParquetHandler$NativeFile"))
+        .transform(
+            (builder, type, classLoader, module, protectionDomain) ->
+                builder
+                    .visit(Advice.to(BindNativeExecution.class).on(isConstructor()))
+                    .visit(
+                        Advice.to(RecordNativeDeltaWrite.class)
+                            .on(named("write").and(takesArguments(3)))))
         .type(named(NATIVE_PAIMON_PARQUET_WRITER))
         .transform(
             (builder, type, classLoader, module, protectionDomain) ->
@@ -240,6 +249,13 @@ public final class StreamFusionSuiteAgent {
     @Advice.OnMethodExit
     static void exit(@Advice.This Object operator) {
       NativeExecution.opened(operator);
+    }
+  }
+
+  public static final class RecordNativeDeltaWrite {
+    @Advice.OnMethodExit
+    static void exit(@Advice.This Object writer, @Advice.Argument(2) int rows) {
+      NativeExecution.completed(writer, rows);
     }
   }
 

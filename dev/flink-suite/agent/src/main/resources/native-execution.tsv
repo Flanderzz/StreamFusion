@@ -1,4 +1,4 @@
-# Unchanged Flink 2.2.1 method<TAB>fixture selector<TAB>expected route.
+# Unchanged upstream method<TAB>fixture selector<TAB>expected route.
 # * matches every invocation; field=true/false selects a pinned fixture parameter.
 # + requires every operator; | separates alternatives; ! requires full fallback and its reason.
 org.apache.flink.table.planner.runtime.stream.sql.CalcITCase#testNotIn	*	NativeFilterOperator|NativeCalcOperator
@@ -12,3 +12,6 @@ org.apache.flink.table.planner.runtime.stream.sql.WindowDistinctAggregateITCase#
 org.apache.flink.table.planner.runtime.stream.sql.WindowDistinctAggregateITCase#testHopWindow	splitDistinct=true	!Calc: unsupported function/operator: HASH_CODE
 org.apache.flink.table.planner.runtime.stream.sql.WindowDistinctAggregateITCase#testCumulateWindow	splitDistinct=false	NativeColumnarWindowAggregateOperator|NativeColumnarLocalWindowAggregateOperator+NativeColumnarGlobalWindowAggregateOperator
 org.apache.flink.table.planner.runtime.stream.sql.WindowDistinctAggregateITCase#testCumulateWindow	splitDistinct=true	!Calc: unsupported function/operator: HASH_CODE
+io.delta.flink.sink.sql.FlinkSqlTest#testLoadIntoHadoopTable	*	NativeFile
+io.delta.flink.sink.sql.FlinkSqlTest#testLoadIntoPartitionedHadoopTable	*	NativeFile
+io.delta.flink.sink.sql.FlinkSqlTest#testLoadIntoTableWithManyTypes	*	!delta sink: Delta column type TIME(0) is not verified by the native writer

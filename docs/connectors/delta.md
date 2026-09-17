@@ -47,6 +47,14 @@ the data-file payload is never transposed row-by-row. Dense selections pass thro
 sparse selections gather each Arrow column once immediately before the standard parquet-rs
 `ArrowWriter` encodes it. Ignored update-before and key-only delete records never reach a data file.
 
+The view operator and Delta writer run at the same sink parallelism. For unpartitioned tables,
+view creation starts a new operator chain: Flink's Sink V2 writer cannot chain behind a legacy
+source such as SQL datagen. This places any network boundary before view creation, while records
+are still serializable Arrow batches. Partitioned tables already have that boundary at their
+partition exchange. The Arrow-backed views stay within the writer task.
+Disabling operator chaining through the execution environment or
+`pipeline.operator-chaining.enabled=false` keeps the Delta writer on the stock path.
+
 The Arrow schema crosses the C Data Interface once when each data-file encoder opens; subsequent
 batches export only their arrays. Java opens and owns the Hadoop output stream, while encoded bytes
 return through the same bounded one-MiB bridge used by the plain Parquet sink. After Rust finalizes
@@ -63,7 +71,9 @@ sidecars are protocol files, not alternative table data formats.
 
 Delta Kernel views read the engine's millisecond/fraction timestamp pair as microseconds, preserving
 Delta's supported timestamp range without an i64 nanosecond intermediate. The Parquet boundary
-restores TIMESTAMP versus TIMESTAMP_NTZ timezone metadata before writing.
+uses Kernel's physical column names, including nested struct fields, and restores TIMESTAMP versus
+TIMESTAMP_NTZ timezone metadata before writing. SQL insertion binds columns by position, so input
+aliases and generated expression names must not become names in the table's Parquet files.
 
 Sink constraints remain Flink-owned. A nullable query field assigned to a `NOT NULL` target keeps
 the Delta sink on the stock path so `table.exec.sink.not-null-enforcer` can fail or drop the row.
@@ -89,6 +99,14 @@ size) delegates that data-file write to Delta Kernel's stock Parquet handler.
 Build with the `delta` Maven profile and deploy `streamfusion-delta`, `streamfusion-parquet`, and
 published `io.delta:delta-flink_2.2:4.4.0` together. The module has no snapshot, local-Maven, path, or
 forked Delta dependency.
+
+`bin/flink-suite.sh delta` runs all four unchanged portable SQL sink tests from Delta `v4.4.0`
+against its published connector and Kernel artifacts. It preserves upstream batch aggregation,
+committed-row, partition, and file-statistics assertions. The two supported streaming loads must
+also prove that native Parquet encoding processed rows; the many-types case includes `TIME(0)`
+and must prove stock fallback with that reason. The suite is part of the blocking upstream CI
+matrix. The separate remote Databricks/Unity Catalog integration test requires credentials and
+is outside this portable suite. See [Upstream Flink suite](../upstream-flink-suite.md).
 
 On the 2M-event, four-partition Kafka JSON Nexmark sink diagnostic (memory state, mini-batching off,
 one warmup, best of three), all 23 queries supported by Flink completed and StreamFusion's suite

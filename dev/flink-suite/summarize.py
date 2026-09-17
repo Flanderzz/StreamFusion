@@ -103,6 +103,8 @@ def main() -> int:
     parser.add_argument("--xfail", action="append", default=[])
     parser.add_argument("--native-reports", type=pathlib.Path)
     parser.add_argument("--require-all-contracts", action="store_true")
+    parser.add_argument("--require-contract-prefix", action="append", default=[])
+    parser.add_argument("--require-test", action="append", default=[])
     args = parser.parse_args()
 
     files = sorted(args.reports.rglob("TEST-*.xml"))
@@ -116,6 +118,7 @@ def main() -> int:
     malformed: list[tuple[pathlib.Path, str]] = []
     contracts = execution_contracts()
     executed = Counter()
+    executed_tests = Counter()
 
     for report in files:
         try:
@@ -134,8 +137,10 @@ def main() -> int:
                 + "#"
                 + case.attrib.get("name", "unknown")
             )
-            if case_key in contracts and case.find("skipped") is None:
-                executed[case_key] += 1
+            if case.find("skipped") is None:
+                executed_tests[case_key] += 1
+                if case_key in contracts:
+                    executed[case_key] += 1
             problem = case.find("failure")
             kind = "failure"
             if problem is None:
@@ -161,12 +166,22 @@ def main() -> int:
     proved, fallback, execution_problems = check_execution(
         args.native_reports, executed, contracts
     )
-    if args.require_all_contracts:
-        execution_problems.extend(
-            f"{test}: contracted test did not execute"
-            for test in sorted(contracts)
-            if not executed[test]
-        )
+    required = set(contracts) if args.require_all_contracts else set()
+    for prefix in args.require_contract_prefix:
+        matching = {test for test in contracts if test.startswith(prefix)}
+        if not matching:
+            execution_problems.append(f"No execution contracts match required prefix {prefix}")
+        required.update(matching)
+    execution_problems.extend(
+        f"{test}: contracted test did not execute"
+        for test in sorted(required)
+        if not executed[test]
+    )
+    execution_problems.extend(
+        f"{test}: required test did not execute"
+        for test in args.require_test
+        if not executed_tests[test]
+    )
 
     print("# StreamFusion upstream Flink suite")
     print()

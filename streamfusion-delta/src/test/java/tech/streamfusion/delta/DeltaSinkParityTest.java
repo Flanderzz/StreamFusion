@@ -172,6 +172,47 @@ class DeltaSinkParityTest {
     assertEquals(3, rows);
   }
 
+  @org.junit.jupiter.params.ParameterizedTest
+  @org.junit.jupiter.params.provider.CsvSource({
+    "2, 2, false", "1, 2, false", "2, 1, false",
+    "2, 2, true", "1, 2, true", "2, 1, true"
+  })
+  @org.junit.jupiter.api.Timeout(60)
+  void legacySourceKeepsArrowViewsChainedToWriter(
+      int sourceParallelism, int sinkParallelism, boolean partitioned) throws Exception {
+    Path path = Files.createTempDirectory("delta-native-legacy-source");
+    org.apache.flink.configuration.Configuration config =
+        new org.apache.flink.configuration.Configuration();
+    config.set(org.apache.flink.configuration.RestartStrategyOptions.RESTART_STRATEGY, "none");
+    StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment(config);
+    env.setParallelism(sourceParallelism);
+    StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env);
+    tableEnv.executeSql(
+        "CREATE TEMPORARY TABLE src (id BIGINT) WITH ('connector'='datagen', "
+            + "'fields.id.kind'='sequence', 'fields.id.start'='1', 'fields.id.end'='24')");
+    tableEnv.executeSql(
+        "CREATE TEMPORARY TABLE sink (id BIGINT, v INT, dt STRING) WITH ("
+            + "'connector'='delta', 'table_path'='"
+            + path.toUri()
+            + "', 'sink.parallelism'='"
+            + sinkParallelism
+            + "'"
+            + (partitioned ? ", 'partitions'='dt'" : "")
+            + ")");
+    PhysicalPlanScan scan = NativePlanner.install(tableEnv);
+
+    tableEnv.executeSql(
+            "INSERT INTO sink SELECT id, CAST(id AS INT), CAST('a' AS STRING) FROM src")
+        .await();
+
+    assertAccelerated(scan);
+    List<List<Object>> expected = new ArrayList<>();
+    for (long id = 1; id <= 24; id++) {
+      expected.add(List.of(id, (int) id, "a"));
+    }
+    assertEquals(sorted(expected), sorted(readLogicalRows(path)));
+  }
+
   @org.junit.jupiter.api.Test
   void partitionedMergeOnReadUsesPublishedStrategyAndKeepsJavaDeletionVectors() throws Exception {
     Path nativePath = Files.createTempDirectory("delta-native");
@@ -186,13 +227,44 @@ class DeltaSinkParityTest {
     assertTrue(hasDeletionVector(nativePath), "the published Java merge path did not publish a DV");
   }
 
-  @org.junit.jupiter.api.Test
-  void nestedStructListAndMapMatchTheConnector() throws Exception {
+  @org.junit.jupiter.params.ParameterizedTest
+  @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+  void disabledChainingKeepsTheStockWriter(boolean tableSetting) throws Exception {
+    Path path = Files.createTempDirectory("delta-no-chaining");
+    StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+    env.setParallelism(1);
+    if (!tableSetting) {
+      env.disableOperatorChaining();
+    }
+    StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env);
+    if (tableSetting) {
+      tableEnv.getConfig().set("pipeline.operator-chaining.enabled", "false");
+    }
+    tableEnv.executeSql(
+        "CREATE TEMPORARY TABLE src (id BIGINT, v INT, dt STRING) WITH ('connector'='datagen', "
+            + "'fields.id.kind'='sequence', 'fields.id.start'='1', 'fields.id.end'='3')");
+    tableEnv.executeSql(
+        "CREATE TEMPORARY TABLE sink (id BIGINT, v INT, dt STRING) WITH ("
+            + "'connector'='delta', 'table_path'='" + path.toUri() + "')");
+    PhysicalPlanScan scan = NativePlanner.install(tableEnv);
+
+    tableEnv.executeSql("INSERT INTO sink SELECT * FROM src").await();
+
+    assertEquals(3, readLogicalRows(path).size());
+    assertTrue(
+        scan.fallbackReasons().stream()
+            .anyMatch(reason -> reason.contains("Arrow-backed Delta views require operator chaining")),
+        scan::explainSummary);
+  }
+
+  @org.junit.jupiter.params.ParameterizedTest
+  @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+  void nestedStructListAndMapMatchTheConnector(boolean renamed) throws Exception {
     Path host = Files.createTempDirectory("delta-nested-host");
     Path nativePath = Files.createTempDirectory("delta-nested-native");
 
-    runNestedAppend(host, false);
-    runNestedAppend(nativePath, true);
+    runNestedAppend(host, false, renamed);
+    runNestedAppend(nativePath, true, renamed);
 
     assertEquals(readNestedRows(host), readNestedRows(nativePath));
   }
@@ -251,17 +323,17 @@ class DeltaSinkParityTest {
     assertAccelerated(scan);
   }
 
-  private static void runNestedAppend(Path path, boolean nativeWriter) throws Exception {
+  private static void runNestedAppend(Path path, boolean nativeWriter, boolean renamed) throws Exception {
     StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
     env.setParallelism(2);
     StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env);
     DataStream<org.apache.flink.types.Row> source =
         env.fromData(
             Types.ROW_NAMED(
-                new String[] {"id", "details", "tags", "dt"},
+                new String[] {"id", renamed ? "source_details" : "details", "tags", "dt"},
                 Types.LONG,
                 Types.ROW_NAMED(
-                    new String[] {"name", "scores"},
+                    new String[] {renamed ? "source_name" : "name", "scores"},
                     Types.STRING,
                     Types.OBJECT_ARRAY(Types.INT)),
                 Types.MAP(Types.STRING, Types.LONG),
@@ -282,9 +354,9 @@ class DeltaSinkParityTest {
         Schema.newBuilder()
             .column("id", DataTypes.BIGINT().notNull())
             .column(
-                "details",
+                renamed ? "source_details" : "details",
                 DataTypes.ROW(
-                    DataTypes.FIELD("name", DataTypes.STRING()),
+                    DataTypes.FIELD(renamed ? "source_name" : "name", DataTypes.STRING()),
                     DataTypes.FIELD("scores", DataTypes.ARRAY(DataTypes.INT()))))
             .column("tags", DataTypes.MAP(DataTypes.STRING(), DataTypes.BIGINT()))
             .column("dt", DataTypes.STRING())

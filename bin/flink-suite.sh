@@ -10,11 +10,15 @@ readonly KAFKA_CONNECTOR_TAG="v${KAFKA_CONNECTOR_VERSION}"
 readonly PAIMON_VERSION="${PAIMON_VERSION:-2.0.0}"
 # Paimon publishes its releases from the final release-candidate tag; 2.0.0 is release-2.0.0-rc10.
 readonly PAIMON_TAG="${PAIMON_TAG:-release-${PAIMON_VERSION}-rc10}"
+readonly DELTA_VERSION="${DELTA_VERSION:-4.4.0}"
 readonly SUITE_ROOT="${FLINK_SUITE_ROOT:-${REPO_ROOT}/.flink-suite}"
 readonly FLINK_ROOT="${SUITE_ROOT}/flink-${FLINK_VERSION}"
 readonly KAFKA_CONNECTOR_ROOT="${SUITE_ROOT}/flink-connector-kafka-${KAFKA_CONNECTOR_VERSION}"
 readonly PAIMON_ROOT="${SUITE_ROOT}/paimon-${PAIMON_VERSION}"
 readonly PAIMON_MODULE="paimon-flink/paimon-flink-common"
+readonly DELTA_ROOT="${SUITE_ROOT}/delta-${DELTA_VERSION}"
+readonly DELTA_TEST_POM="${REPO_ROOT}/dev/flink-suite/delta/pom.xml"
+readonly DELTA_TEST_OUTPUT="${SUITE_ROOT}/delta-tests/target"
 readonly STREAMFUSION_BUILD_ROOT="${SUITE_ROOT}/streamfusion-source"
 readonly AGENT_ROOT="${REPO_ROOT}/dev/flink-suite/agent"
 readonly AGENT_JAR="${AGENT_ROOT}/target/streamfusion-flink-suite-agent-1.0-SNAPSHOT.jar"
@@ -31,7 +35,7 @@ readonly SUITE_MODE="${1:-runtime}"
 readonly NATIVE_REPORT_ROOT="${SUITE_ROOT}/native-execution/${SUITE_MODE}"
 readonly DIAGNOSTIC_ROOT="${SUITE_ROOT}/diagnostics/${SUITE_MODE}"
 readonly FLINK_MODULE_CONFIG="-Duser.timezone=UTC -Djava.library.path=${STREAMFUSION_BUILD_ROOT}/native/target/debug --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED --add-opens=java.base/java.time=ALL-UNNAMED --add-opens=java.base/java.math=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED -Djunit.platform.reflection.search.useLegacySemantics=true -javaagent:${AGENT_JAR}"
-readonly PAIMON_MODULE_CONFIG="-XX:+IgnoreUnrecognizedVMOptions --add-opens=java.base/java.lang.invoke=ALL-UNNAMED --add-opens=java.base/java.lang.reflect=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED --add-opens=java.base/java.net=ALL-UNNAMED --add-opens=java.base/java.util.concurrent=ALL-UNNAMED --add-opens=java.base/jdk.internal.ref=ALL-UNNAMED --add-opens=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java.base/sun.nio.cs=ALL-UNNAMED --add-opens=java.base/sun.security.action=ALL-UNNAMED --add-opens=java.base/sun.util.calendar=ALL-UNNAMED --add-opens=java.security.jgss/sun.security.krb5=ALL-UNNAMED -Djdk.reflect.useDirectMethodHandle=false -Dio.netty.tryReflectionSetAccessible=true ${FLINK_MODULE_CONFIG}"
+readonly CONNECTOR_MODULE_CONFIG="-XX:+IgnoreUnrecognizedVMOptions --add-opens=java.base/java.lang.invoke=ALL-UNNAMED --add-opens=java.base/java.lang.reflect=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED --add-opens=java.base/java.net=ALL-UNNAMED --add-opens=java.base/java.util.concurrent=ALL-UNNAMED --add-opens=java.base/jdk.internal.ref=ALL-UNNAMED --add-opens=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java.base/sun.nio.cs=ALL-UNNAMED --add-opens=java.base/sun.security.action=ALL-UNNAMED --add-opens=java.base/sun.util.calendar=ALL-UNNAMED --add-opens=java.security.jgss/sun.security.krb5=ALL-UNNAMED -Djdk.reflect.useDirectMethodHandle=false -Dio.netty.tryReflectionSetAccessible=true ${FLINK_MODULE_CONFIG}"
 readonly PAIMON_BUILD_ARGS=(-Pflink2 "-Dpaimon-flink-common.flink.version=${FLINK_VERSION}" "-Dtest.flink.version=${FLINK_VERSION}" -Dspotless.check.skip=true -Dcheckstyle.skip=true -Drat.skip=true -Dmaven.javadoc.skip=true)
 readonly FORMAT_MODULES="flink-formats/flink-json,flink-formats/flink-csv,flink-formats/flink-avro,flink-formats/flink-avro-confluent-registry,flink-formats/flink-protobuf"
 readonly ORC_MODULE="flink-formats/flink-orc"
@@ -114,17 +118,23 @@ case "${SUITE_MODE}" in
       TEST_SELECTOR_ARGS=("-Dtest=${paimon_selector}")
     fi
     ;;
+  delta)
+    TEST_GOAL="test"
+    TEST_MODULES=":streamfusion-upstream-delta-tests"
+    REPORT_ROOT="${DELTA_TEST_OUTPUT}/surefire-reports"
+    ;;
   all)
     "${BASH_SOURCE[0]}" formats || exit $?
     FLINK_SUITE_REUSE_BUILD=true "${BASH_SOURCE[0]}" parquet || exit $?
     FLINK_SUITE_REUSE_BUILD=true "${BASH_SOURCE[0]}" orc || exit $?
     FLINK_SUITE_REUSE_BUILD=true "${BASH_SOURCE[0]}" runtime || exit $?
     "${BASH_SOURCE[0]}" paimon || exit $?
+    "${BASH_SOURCE[0]}" delta || exit $?
     "${BASH_SOURCE[0]}" kafka
     exit $?
     ;;
   *)
-    echo "Usage: $0 [runtime|diagnostic|state|formats|parquet|orc|kafka|paimon|all]" >&2
+    echo "Usage: $0 [runtime|diagnostic|state|formats|parquet|orc|kafka|paimon|delta|all]" >&2
     exit 2
     ;;
 esac
@@ -159,6 +169,18 @@ if [[ "${SUITE_MODE}" == "paimon" ]]; then
   fi
   if [[ -n "$(git -C "${PAIMON_ROOT}" status --short)" ]]; then
     echo "The upstream Paimon checkout is not clean: ${PAIMON_ROOT}" >&2
+    echo "Use a new FLINK_SUITE_ROOT or clean that disposable checkout manually." >&2
+    exit 2
+  fi
+fi
+
+if [[ "${SUITE_MODE}" == "delta" ]]; then
+  if [[ ! -d "${DELTA_ROOT}/.git" ]]; then
+    git clone --depth 1 --branch "v${DELTA_VERSION}" \
+      https://github.com/delta-io/delta.git "${DELTA_ROOT}" || exit $?
+  fi
+  if [[ -n "$(git -C "${DELTA_ROOT}" status --short)" ]]; then
+    echo "The upstream Delta checkout is not clean: ${DELTA_ROOT}" >&2
     echo "Use a new FLINK_SUITE_ROOT or clean that disposable checkout manually." >&2
     exit 2
   fi
@@ -259,10 +281,16 @@ else
   ) || exit $?
 
   echo "Building and installing StreamFusion and its supported connector/format modules against the source-suite planner..."
+  streamfusion_profiles="paimon"
+  streamfusion_modules=":streamfusion-core,:streamfusion-kafka,:streamfusion-json,:streamfusion-csv,:streamfusion-raw,:streamfusion-avro,:streamfusion-avro-confluent-registry,:streamfusion-protobuf,:streamfusion-parquet,:streamfusion-orc,:streamfusion-paimon"
+  if [[ "${SUITE_MODE}" == "delta" ]]; then
+    streamfusion_profiles+=",delta"
+    streamfusion_modules+=",:streamfusion-delta"
+  fi
   mvn -B -ntp -s "${MAVEN_SETTINGS}" -Dmaven.repo.local="${SUITE_MAVEN_REPO}" \
-    -Dstreamfusion.flink-source-suite -Ppaimon -Dnative.build.skip=true \
+    -Dstreamfusion.flink-source-suite "-P${streamfusion_profiles}" -Dnative.build.skip=true \
     -f "${STREAMFUSION_BUILD_ROOT}/pom.xml" \
-    -pl :streamfusion-core,:streamfusion-kafka,:streamfusion-json,:streamfusion-csv,:streamfusion-raw,:streamfusion-avro,:streamfusion-avro-confluent-registry,:streamfusion-protobuf,:streamfusion-parquet,:streamfusion-orc,:streamfusion-paimon \
+    -pl "${streamfusion_modules}" \
     -am -DskipTests clean install || exit $?
   mvn -B -ntp -s "${MAVEN_SETTINGS}" -Dmaven.repo.local="${SUITE_MAVEN_REPO}" \
     -f "${REPO_ROOT}/dev/flink-suite/classpath-pom.xml" \
@@ -350,6 +378,15 @@ if [[ "${SUITE_MODE}" == "kafka" ]]; then
     -Dflink.version="${FLINK_VERSION}"
     -Dflink.surefire.baseArgLine="${FLINK_MODULE_CONFIG}"
   )
+elif [[ "${SUITE_MODE}" == "delta" ]]; then
+  MAVEN_TEST_ARGS+=(
+    -f "${DELTA_TEST_POM}"
+    -Dflink.version="${FLINK_VERSION}"
+    -Ddelta.version="${DELTA_VERSION}"
+    -Ddelta.source.root="${DELTA_ROOT}"
+    -Ddelta.test.output="${DELTA_TEST_OUTPUT}"
+    -Ddelta.test.jvm.args="${CONNECTOR_MODULE_CONFIG}"
+  )
 elif [[ "${SUITE_MODE}" == "paimon" ]]; then
   MAVEN_TEST_ARGS+=(
     -f "${PAIMON_ROOT}/pom.xml"
@@ -360,7 +397,7 @@ elif [[ "${SUITE_MODE}" == "paimon" ]]; then
     -Dlog4j.configurationFile="${REPO_ROOT}/dev/flink-suite/paimon-log4j2.properties"
     -Dstreamfusion.flink-suite.diagnostics="${DIAGNOSTIC_ROOT}"
     -Dmaven.test.dependency.excludes=org.apache.calcite:calcite-core
-    -DextraJavaTestArgs="${PAIMON_MODULE_CONFIG}"
+    -DextraJavaTestArgs="${CONNECTOR_MODULE_CONFIG}"
   )
 else
   MAVEN_TEST_ARGS+=(
@@ -377,6 +414,8 @@ fi
 MAVEN_TEST_ARGS+=("${TEST_GOAL}")
 if [[ "${SUITE_MODE}" == "kafka" ]]; then
   "${KAFKA_CONNECTOR_ROOT}/mvnw" "${MAVEN_TEST_ARGS[@]}"
+elif [[ "${SUITE_MODE}" == "delta" ]]; then
+  mvn "${MAVEN_TEST_ARGS[@]}"
 elif [[ "${SUITE_MODE}" == "paimon" ]]; then
   mvn "${MAVEN_TEST_ARGS[@]}"
   paimon_status=$?
@@ -449,8 +488,14 @@ SUMMARY_ARGS=("${REPORT_ROOT}" --native-reports "${NATIVE_REPORT_ROOT}")
 if [[ "${SUITE_MODE}" == "runtime" || "${SUITE_MODE}" == "diagnostic" ]]; then
   SUMMARY_ARGS+=(--xfail "org.apache.flink.table.planner.runtime.batch.sql.CalcITCase#testCurrentDate")
   if [[ -z "${FLINK_SUITE_TEST:-}" ]]; then
-    SUMMARY_ARGS+=(--require-all-contracts)
+    SUMMARY_ARGS+=(--require-contract-prefix org.apache.flink.)
   fi
+fi
+if [[ "${SUITE_MODE}" == "delta" && -z "${FLINK_SUITE_TEST:-}" ]]; then
+  SUMMARY_ARGS+=(
+    --require-contract-prefix io.delta.
+    --require-test 'io.delta.flink.sink.sql.FlinkSqlTest#testGroupedAggregationPreservesEachRow'
+  )
 fi
 python3 "${REPO_ROOT}/dev/flink-suite/summarize.py" "${SUMMARY_ARGS[@]}"
 readonly SUMMARY_STATUS=$?

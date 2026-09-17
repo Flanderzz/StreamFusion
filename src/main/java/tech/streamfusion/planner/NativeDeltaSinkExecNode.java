@@ -15,6 +15,7 @@ import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.DataStreamSink;
 import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+import org.apache.flink.streaming.api.operators.ChainingStrategy;
 import org.apache.flink.streaming.api.operators.SimpleOperatorFactory;
 import org.apache.flink.streaming.api.transformations.OneInputTransformation;
 import org.apache.flink.table.data.RowData;
@@ -81,6 +82,9 @@ public final class NativeDeltaSinkExecNode extends ExecNodeBase<Object>
               KernelBatchRowDataTypeInformation.INSTANCE,
               parallelism,
               parallelismConfigured);
+      // Sink V2 writers cannot chain behind a legacy source. Start the writer chain while
+      // records are still serializable Arrow batches, before creating ownership-carrying views.
+      views.setChainingStrategy(ChainingStrategy.HEAD);
       rows = new DataStream<>(planner.getExecEnv(), views);
     } else {
       FilePartitionSplitOperator splitter =
