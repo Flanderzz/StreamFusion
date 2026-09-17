@@ -67,6 +67,8 @@ host — verified by the parity harness.
 - [32 - SQL/JSON definite paths](32-sql-json-definite-paths.md) - scalar path reuse and borrowed string scanning, with Flink-specific modes, number formatting and shared Jackson buffer state for default admission.
 - [33 - Scalar string serialization](33-scalar-string-serialization.md) - JDK UTF-16 byte-order and replacement rules, and Flink-compatible JSON scalar serialization using shared native string writing.
 
+- [42 — Ordered grouped values](42-ordered-group-values.md) — Flink NULL, arrival-order, duplicate-retraction and SINGLE_VALUE cardinality contracts within the existing Arrow aggregate.
+
 ## Resolved: early per-operator transposition (historical)
 
 Early on, native operators were substituted individually with Arrow↔RowData transposed at each

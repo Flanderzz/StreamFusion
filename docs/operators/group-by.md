@@ -52,6 +52,48 @@ with **integer division truncating toward zero**. This is a direct port of Flink
 the non-null count using Flink's exact decimal division — a 38-significant-digit quotient then
 **HALF_UP** rescale — reporting `DECIMAL(38, max(6, s))`, `findAvgAggType`'s result type.
 
+### FIRST_VALUE, LAST_VALUE and SINGLE_VALUE
+
+The one-argument forms run natively in the single-phase plan over TINYINT, SMALLINT,
+INT, BIGINT, DECIMAL, CHAR/VARCHAR, DATE, TIMESTAMP and TIMESTAMP_LTZ. Each preserves
+the input value's type and precision. Per-aggregate FILTER conditions are supported.
+
+FIRST_VALUE and LAST_VALUE skip NULLs and follow arrival order within a key. Append-only
+input retains one scalar. Retracting input retains the ordered non-NULL occurrences;
+a retraction removes the oldest matching occurrence, including when values repeat across
+Arrow batches. Removing every contributing value yields NULL, and removing the last
+record deletes the group. Results depend on arrival order, so SQL parity fixtures use a
+controlled source rather than asserting equal results from independently reordered inputs.
+
+SINGLE_VALUE counts every element, including NULL. Zero elements yield NULL; one element
+yields that value. A second element raises Flink's `TableRuntimeException` with the same
+cardinality diagnostic. Retraction clears the retained value and decrements the count;
+filtered-out records do not contribute to this aggregate's cardinality.
+
+Checkpoints preserve the scalar/count or ordered occurrences. Append-only first/last and
+SINGLE_VALUE support the enclosing group's TTL. Retracting FIRST_VALUE/LAST_VALUE with a
+positive retention, including a STATE_TTL hint, fall back: Flink independently expires its
+value-to-order and order-to-value map entries, which a single group lifetime does not model.
+These aggregate states use the existing raw keyed snapshot path with both memory and RocksDB
+backends; the direct RocksDB accumulator-row codec does not yet encode ordered occurrences.
+Two-phase local/global plans, DISTINCT forms, two-argument value/order dialects, and other
+value types retain explicit fallback gates.
+
+`GroupedValueBenchmark` measures append-only FIRST_VALUE/LAST_VALUE with a release native
+build (`-Pbench`, mimalloc), 2 million rows, 64 keys, one-eighth NULL values, parallelism 1,
+two warmups and five interleaved measured runs. The M4 Pro/JDK 17/UTC run against Flink 2.2.1
+kept the row source, both row/Arrow transposes and the rowwise blackhole sink. It asserted
+the native aggregate and both transposes before measuring.
+
+| Value type | Flink seconds | Native seconds | Flink/native |
+| --- | ---: | ---: | ---: |
+| BIGINT | 0.754073 | 0.711064 | 1.060x |
+| STRING | 1.119623 | 1.226295 | 0.913x |
+
+The integer case shows a small local gain; the string case is slower. This adds coverage
+within columnar pipelines and does not establish a general speedup. Retracting state and
+SINGLE_VALUE were validated for correctness but are not measured by this benchmark.
+
 **Idle-state TTL.** `table.exec.state.ttl` runs natively here (and on the two-phase global merge
 below — the local half is transient and holds no TTL-eligible state). Semantics match Flink
 exactly: every stored value carries its last-**write** wall-clock timestamp (reads never refresh
@@ -194,10 +236,13 @@ query back via the [all-or-nothing island](index.md#the-all-or-nothing-island) r
 
 - A UDAF (no native path for arbitrary user aggregation logic).
 - `AVG`/`SUM`/`MIN`/`MAX` over a value type outside [Type support](#type-support)'s ✓ set.
-- `AVG(DISTINCT)` — the only non-native `DISTINCT` form. (`COUNT(DISTINCT x)` keeps a per-key
+- `AVG(DISTINCT)` and DISTINCT FIRST_VALUE/LAST_VALUE/SINGLE_VALUE. (`COUNT(DISTINCT x)` keeps a per-key
   value set; `SUM(DISTINCT x)` adds a running sum folded as values enter/leave it; `MIN`/`MAX
   (DISTINCT)` run as their plain, multiplicity-blind forms.)
 - An approximate aggregate.
+- FIRST_VALUE/LAST_VALUE/SINGLE_VALUE over a value type outside the single-phase list above,
+  or with more than one argument.
+- Retracting FIRST_VALUE/LAST_VALUE with positive state TTL.
 - An unsupported grouping-key or value column type.
 
 **Local group aggregate (two-phase local half) only:**

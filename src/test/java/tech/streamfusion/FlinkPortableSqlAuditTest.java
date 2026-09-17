@@ -116,7 +116,7 @@ class FlinkPortableSqlAuditTest {
             "test_input",
             "test_aggregate",
             EXPLICIT_FALLBACK,
-            "only SUM/MIN/MAX/COUNT/AVG aggregates",
+            "only SUM/MIN/MAX/COUNT/AVG/FIRST_VALUE/LAST_VALUE/SINGLE_VALUE aggregates",
             List.of(row("A", 27L), row("B", 8L))));
     cases.add(
         success(
@@ -125,7 +125,7 @@ class FlinkPortableSqlAuditTest {
             "cdc_input",
             "test_aggregate",
             EXPLICIT_FALLBACK,
-            "only SUM/MIN/MAX/COUNT/AVG aggregates",
+            "only SUM/MIN/MAX/COUNT/AVG/FIRST_VALUE/LAST_VALUE/SINGLE_VALUE aggregates",
             List.of(row("A", 12L), row("B", 8L))));
     cases.add(
         success(
