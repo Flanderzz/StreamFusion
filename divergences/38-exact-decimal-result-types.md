@@ -74,3 +74,12 @@ contract first. External BigDecimal UDF results and changes of scale still under
 Flink's declared precision/scale conversion. Tests distinguish these contracts and
 check that compact rounding carries remain non-NULL through projections, filters,
 conditional expressions, and aggregation.
+
+DECIMAL TRUNCATE shares ROUND's fixed-width scaling kernel, omitting the HALF_UP
+increment to reproduce Flink's rounding toward zero. Arroyo delegates ordinary math
+expressions to DataFusion and has no matching Flink decimal truncation contract to
+reuse. Flink resolves the output precision/scale before execution and preserves the
+input for positions at or above its scale, including internal compact-parser carries.
+Positions below -38 call Flink's generated expression so BigDecimal range exceptions
+are preserved; native execution must not clamp those failures to zero. The existing
+AND/OR admission rule protects row short-circuiting for these fallible positions.

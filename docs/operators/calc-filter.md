@@ -455,7 +455,7 @@ expressions; see [temporal functions](temporal-functions.md).
 
 ## Decimal arithmetic
 
-### Decimal ROUND and literals
+### Decimal ROUND, TRUNCATE and literals
 
 `ROUND(decimal_column[, literal_integer_scale])` runs with compatibility overrides disabled.
 It rounds ties away from zero (HALF_UP), preserves NULLs and Flink's inferred result precision,
@@ -471,6 +471,15 @@ CASE can skip an unselected failing branch. Runtime scale columns and BIGINT sca
 retain an explicit planner fallback; float/double ROUND keeps its existing compatibility gate.
 Flink 2.2.1 itself can fail when a runtime scale changes the returned DecimalData precision;
 the regression suite preserves the resulting binary-writer assertion failure through fallback.
+
+`TRUNCATE(decimal_column[, literal_integer_scale])` uses the same native fixed-width
+kernel with rounding toward zero. Positive, zero and negative positions preserve Flink's
+resolved precision/scale and NULL behavior; a position at or above the source scale retains
+the input value. Positions below -38 use Flink's generated expression through the columnar
+callback, including its extreme-scale errors. They retain the same AND/OR short-circuit
+restriction as ROUND. Integer and floating-point inputs are not admitted for TRUNCATE;
+Flink 2.2.1 rejects nonliteral TRUNCATE positions during validation. SQL tests cover
+precision 38, multiple batches, filters, CASE, COALESCE and aggregate consumers.
 
 Decimal planner literals are rescaled HALF_UP to their declared scale before encoding their
 unscaled integer. A precision overflow becomes a typed decimal NULL. This handles constant-folded

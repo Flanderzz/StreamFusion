@@ -296,7 +296,7 @@ pub(crate) fn build_expr(
             };
             function.call(vec![left, right])
         }
-        30 => {
+        30 | 35 => {
             let precision = (arg / 100) as u8;
             let scale = (arg % 100) as i8;
             let mut children = Vec::with_capacity(2);
@@ -312,10 +312,13 @@ pub(crate) fn build_expr(
                     cursor,
                 ));
             }
-            datafusion::logical_expr::ScalarUDF::new_from_impl(
-                crate::flink_functions::decimal::DecimalRound::new(precision, scale),
-            )
-            .call(children)
+            use crate::flink_functions::decimal::DecimalRound;
+            let function = if kinds[node] == 35 {
+                DecimalRound::truncate(precision, scale)
+            } else {
+                DecimalRound::new(precision, scale)
+            };
+            datafusion::logical_expr::ScalarUDF::new_from_impl(function).call(children)
         }
         // Exact decimal cast: HALF_UP to the declared scale, then NULL on precision overflow.
         14 => {

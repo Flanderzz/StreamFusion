@@ -73,6 +73,7 @@ impl ScalarUDFImpl for DecimalCast {
 pub(crate) struct DecimalRound {
     precision: u8,
     scale: i8,
+    truncate: bool,
     signature: Signature,
 }
 
@@ -81,14 +82,26 @@ impl DecimalRound {
         Self {
             precision,
             scale,
+            truncate: false,
             signature: Signature::any(2, Volatility::Immutable),
+        }
+    }
+
+    pub(crate) fn truncate(precision: u8, scale: i8) -> Self {
+        Self {
+            truncate: true,
+            ..Self::new(precision, scale)
         }
     }
 }
 
 impl ScalarUDFImpl for DecimalRound {
     fn name(&self) -> &str {
-        "flink_decimal_round"
+        if self.truncate {
+            "flink_decimal_truncate"
+        } else {
+            "flink_decimal_round"
+        }
     }
 
     fn signature(&self) -> &Signature {
@@ -97,7 +110,7 @@ impl ScalarUDFImpl for DecimalRound {
 
     fn return_type(&self, args: &[DataType]) -> Result<DataType> {
         let [input, _] = args else {
-            return exec_err!("decimal ROUND requires two arguments");
+            return exec_err!("{} requires two arguments", self.name());
         };
         DecimalRescale::new(source_scale(input)? as i16, self.precision, self.scale)?;
         Ok(DataType::Decimal128(self.precision, self.scale))
@@ -105,7 +118,7 @@ impl ScalarUDFImpl for DecimalRound {
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
         let [source, round] = args.args.as_slice() else {
-            return exec_err!("decimal ROUND requires two arguments");
+            return exec_err!("{} requires two arguments", self.name());
         };
         check_lengths(&args.args, args.number_rows)?;
         let round = match round {
@@ -113,7 +126,7 @@ impl ScalarUDFImpl for DecimalRound {
             ColumnarValue::Scalar(ScalarValue::Int16(value)) => value.map(i32::from),
             ColumnarValue::Scalar(ScalarValue::Int32(value)) => *value,
             ColumnarValue::Scalar(ScalarValue::Null) => None,
-            _ => return exec_err!("decimal ROUND requires a literal INT scale"),
+            _ => return exec_err!("{} requires a literal INT scale", self.name()),
         };
         let source_scale = source_scale(&source.data_type())?;
         let input = DecimalInput::new(source)?;
@@ -121,7 +134,10 @@ impl ScalarUDFImpl for DecimalRound {
         let limit = 10_i128.pow(self.precision as u32);
         // Negative positions outside this bound use Flink's own BigDecimal runtime.
         if round.is_some_and(|round| round < -38) {
-            return exec_err!("decimal ROUND scale below -38 requires the host-exact path");
+            return exec_err!(
+                "{} scale below -38 requires the host-exact path",
+                self.name()
+            );
         }
         let factors = round
             .filter(|round| *round < source_scale as i32)
@@ -135,7 +151,11 @@ impl ScalarUDFImpl for DecimalRound {
             let value = input.value(row)?;
             let round = round?;
             if round >= source_scale as i32 {
-                return identity.narrow(value);
+                return if self.truncate {
+                    Some(value)
+                } else {
+                    identity.narrow(value)
+                };
             }
             let (divisor, multiplier) = factors?;
             let Some(divisor) = divisor else {
@@ -143,7 +163,7 @@ impl ScalarUDFImpl for DecimalRound {
             };
             let quotient = value / divisor;
             let rounded = quotient
-                + if (value % divisor).abs() >= divisor / 2 {
+                + if !self.truncate && (value % divisor).abs() >= divisor / 2 {
                     value.signum()
                 } else {
                     0
@@ -470,6 +490,81 @@ mod tests {
                 panic!("expected scalar")
             };
             assert_eq!(output, ScalarValue::Decimal128(expected, 7, 3));
+        }
+    }
+
+    #[test]
+    fn truncate_preserves_slices_nulls_and_toward_zero_rounding() {
+        let values = Decimal128Array::from(vec![Some(1), Some(1235), Some(-1235), None])
+            .with_precision_and_scale(7, 3)
+            .unwrap();
+        for length in [0, 3] {
+            let output = invoke(
+                &DecimalRound::truncate(7, 2),
+                vec![
+                    ColumnarValue::Array(Arc::new(values.slice(1, length))),
+                    ColumnarValue::Scalar(ScalarValue::Int32(Some(2))),
+                ],
+                length,
+            )
+            .unwrap();
+            let ColumnarValue::Array(output) = output else {
+                panic!("expected array")
+            };
+            let expected = Decimal128Array::from(vec![Some(123), Some(-123), None])
+                .with_precision_and_scale(7, 2)
+                .unwrap()
+                .slice(0, length);
+            assert_eq!(output.as_ref(), &expected);
+        }
+    }
+
+    #[test]
+    fn truncate_scalar_negative_positions_and_precision38() {
+        for (value, source_scale, position, expected) in [
+            (10_i128.pow(38) - 1, 0, -1, 10_i128.pow(38) - 10),
+            (-10_i128.pow(38) + 1, 0, -1, -10_i128.pow(38) + 10),
+            (15, 0, -1, 10),
+            (-15, 0, -1, -10),
+            (10_i128.pow(38) - 1, 0, -38, 0),
+            (10_i128.pow(38) - 1, 38, -38, 0),
+        ] {
+            let output = invoke(
+                &DecimalRound::truncate(38, 0),
+                vec![
+                    ColumnarValue::Scalar(ScalarValue::Decimal128(Some(value), 38, source_scale)),
+                    ColumnarValue::Scalar(ScalarValue::Int32(Some(position))),
+                ],
+                128,
+            )
+            .unwrap();
+            let ColumnarValue::Scalar(output) = output else {
+                panic!("expected scalar")
+            };
+            assert_eq!(output, ScalarValue::Decimal128(Some(expected), 38, 0));
+        }
+    }
+
+    #[test]
+    fn truncate_null_position_and_identity_keep_internal_values() {
+        for (position, expected) in [
+            (None, None),
+            (Some(2), Some(100000)),
+            (Some(i32::MAX), Some(100000)),
+        ] {
+            let output = invoke(
+                &DecimalRound::truncate(5, 2),
+                vec![
+                    ColumnarValue::Scalar(ScalarValue::Decimal128(Some(100000), 5, 2)),
+                    ColumnarValue::Scalar(ScalarValue::Int32(position)),
+                ],
+                128,
+            )
+            .unwrap();
+            let ColumnarValue::Scalar(output) = output else {
+                panic!("expected scalar")
+            };
+            assert_eq!(output, ScalarValue::Decimal128(expected, 5, 2));
         }
     }
 

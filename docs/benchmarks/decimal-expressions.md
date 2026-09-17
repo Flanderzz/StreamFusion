@@ -87,3 +87,19 @@ TZ=UTC SF_BENCHMARK=true mvn -pl :streamfusion-runtime test -Pbench \
   -Dscalar.functions=TRY_STRING_TO_DECIMAL,TRY_DECIMAL_NARROW \
   -Dscalar.rows=2000000 -Dscalar.warmup=2 -Dscalar.runs=5 -Dsf.testForks=1
 ```
+
+## TRUNCATE coverage
+
+The same run, source, release library and trial method produced these results
+for DECIMAL(38,9). The positive position returns DECIMAL(32,2); the negative
+position returns DECIMAL(30,0).
+
+| Expression | Flink median (s) | Native median (s) |
+| --- | ---: | ---: |
+| TRUNCATE(n, 2) | 0.282 | 0.601 |
+| TRUNCATE(n, -3) | 0.325 | 0.665 |
+
+These isolated row-fed queries also remain slower than the prior Flink fallback.
+The shared fixed-width kernel adds exact coverage for existing native islands;
+no standalone speedup is claimed. To reproduce, use the scalar command above
+with `-Dscalar.functions=DECIMAL_TRUNCATE_POS,DECIMAL_TRUNCATE_NEG`.
