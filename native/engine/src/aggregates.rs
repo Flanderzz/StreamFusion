@@ -62,8 +62,8 @@ pub(crate) fn build_builtin(kind: i64, value_type: &DataType) -> AggregateFuncti
 /// Average of an integer column matching the host engine's semantics: the sum accumulates in int64,
 /// then integer division by the count truncates toward zero and the result is cast back to the
 /// input integer type (Flink returns the integer type for AVG of integers, not a float). The
-/// two-field partial state (sum, count) rides the general checkpoint path. `result_type` is the
-/// input integer type (Int64 or Int32).
+/// two-field partial state (sum, count) rides the general checkpoint path. `result_type` preserves
+/// the declared integer width; an optional row-kind column supplies retraction signs.
 #[derive(Debug)]
 pub(crate) struct IntegerAvgAccumulator {
     sum: i64,
@@ -79,52 +79,49 @@ impl IntegerAvgAccumulator {
             result_type,
         }
     }
+
+    fn update_integers<T: arrow::datatypes::ArrowPrimitiveType>(
+        &mut self,
+        values: &ArrayRef,
+        changes: Option<&Int8Array>,
+    ) where
+        T::Native: Into<i64>,
+    {
+        let array = values
+            .as_any()
+            .downcast_ref::<arrow::array::PrimitiveArray<T>>()
+            .expect("integer AVG input");
+        for (row, value) in array.iter().enumerate() {
+            if let Some(value) = value {
+                let retract = changes.is_some_and(|kinds| matches!(kinds.value(row), 1 | 3));
+                if retract {
+                    self.sum = self.sum.wrapping_sub(value.into());
+                    self.count = self.count.wrapping_sub(1);
+                } else {
+                    self.sum = self.sum.wrapping_add(value.into());
+                    self.count = self.count.wrapping_add(1);
+                }
+            }
+        }
+    }
 }
 
 impl Accumulator for IntegerAvgAccumulator {
     fn update_batch(&mut self, values: &[ArrayRef]) -> datafusion::common::Result<()> {
-        // The value column is the input integer type; sum widens to int64 regardless (as Flink does).
+        let changes = values
+            .get(1)
+            .map(|kinds| kinds.as_any().downcast_ref::<Int8Array>().unwrap());
         match self.result_type {
-            DataType::Int32 => {
-                let array = values[0]
-                    .as_any()
-                    .downcast_ref::<Int32Array>()
-                    .expect("value int32");
-                for value in array.iter().flatten() {
-                    self.sum = self.sum.wrapping_add(i64::from(value));
-                    self.count += 1;
-                }
+            DataType::Int8 => {
+                self.update_integers::<arrow::datatypes::Int8Type>(&values[0], changes)
             }
             DataType::Int16 => {
-                let array = values[0]
-                    .as_any()
-                    .downcast_ref::<Int16Array>()
-                    .expect("value int16");
-                for value in array.iter().flatten() {
-                    self.sum = self.sum.wrapping_add(i64::from(value));
-                    self.count += 1;
-                }
+                self.update_integers::<arrow::datatypes::Int16Type>(&values[0], changes)
             }
-            DataType::Int8 => {
-                let array = values[0]
-                    .as_any()
-                    .downcast_ref::<Int8Array>()
-                    .expect("value int8");
-                for value in array.iter().flatten() {
-                    self.sum = self.sum.wrapping_add(i64::from(value));
-                    self.count += 1;
-                }
+            DataType::Int32 => {
+                self.update_integers::<arrow::datatypes::Int32Type>(&values[0], changes)
             }
-            _ => {
-                let array = values[0]
-                    .as_any()
-                    .downcast_ref::<Int64Array>()
-                    .expect("value int64");
-                for value in array.iter().flatten() {
-                    self.sum = self.sum.wrapping_add(value);
-                    self.count += 1;
-                }
-            }
+            _ => self.update_integers::<arrow::datatypes::Int64Type>(&values[0], changes),
         }
         Ok(())
     }
@@ -139,7 +136,7 @@ impl Accumulator for IntegerAvgAccumulator {
             .downcast_ref::<Int64Array>()
             .expect("count state int64");
         self.sum = sums.iter().flatten().fold(self.sum, i64::wrapping_add);
-        self.count += counts.iter().flatten().sum::<i64>();
+        self.count = counts.iter().flatten().fold(self.count, i64::wrapping_add);
         Ok(())
     }
 
@@ -153,7 +150,7 @@ impl Accumulator for IntegerAvgAccumulator {
     fn evaluate(&mut self) -> datafusion::common::Result<ScalarValue> {
         // Truncating integer division, then a narrowing cast back to the input type (the host's
         // `cast(sum / count, <type>)`), which wraps the low bits exactly like Rust's `as`.
-        let average = (self.count != 0).then(|| self.sum / self.count);
+        let average = (self.count != 0).then(|| self.sum.wrapping_div(self.count));
         Ok(match self.result_type {
             DataType::Int32 => ScalarValue::Int32(average.map(|a| a as i32)),
             DataType::Int16 => ScalarValue::Int16(average.map(|a| a as i16)),
@@ -1380,5 +1377,65 @@ mod decimal_sum_tests {
         assert_eq!(sum.emit(), ScalarValue::Decimal128(None, 38, 3));
         sum.fold(Num::I128(3000));
         assert_eq!(sum.emit(), ScalarValue::Decimal128(Some(3000), 38, 3));
+    }
+}
+
+#[cfg(test)]
+mod integer_avg_tests {
+    use super::*;
+
+    #[test]
+    fn signed_integer_average_restores_null_and_negative_counts_at_every_width() {
+        for datatype in [
+            DataType::Int8,
+            DataType::Int16,
+            DataType::Int32,
+            DataType::Int64,
+        ] {
+            let values = |values: Vec<Option<i64>>| {
+                arrow::compute::cast(&Int64Array::from(values), &datatype).unwrap()
+            };
+            let result =
+                |value: Option<i64>| ScalarValue::try_from_array(&values(vec![value]), 0).unwrap();
+            let mut avg = IntegerAvgAccumulator::new(datatype.clone());
+            avg.update_batch(&[
+                values(vec![Some(10), Some(11), None]),
+                Arc::new(Int8Array::from(vec![0, 0, 3])),
+            ])
+            .unwrap();
+            assert_eq!(avg.evaluate().unwrap(), result(Some(10)));
+            let states = avg
+                .state()
+                .unwrap()
+                .into_iter()
+                .map(|value| value.to_array_of_size(1).unwrap())
+                .collect::<Vec<_>>();
+            let mut restored = IntegerAvgAccumulator::new(datatype.clone());
+            restored.merge_batch(&states).unwrap();
+            for (value, kind, expected) in [(10, 1, Some(11)), (11, 3, None), (3, 3, Some(3))] {
+                restored
+                    .update_batch(&[
+                        values(vec![Some(value)]),
+                        Arc::new(Int8Array::from(vec![kind])),
+                    ])
+                    .unwrap();
+                assert_eq!(restored.evaluate().unwrap(), result(expected));
+            }
+            assert_eq!(
+                restored.state().unwrap(),
+                vec![ScalarValue::Int64(Some(-3)), ScalarValue::Int64(Some(-1)),]
+            );
+        }
+    }
+
+    #[test]
+    fn negative_average_division_keeps_java_long_overflow() {
+        let mut avg = IntegerAvgAccumulator::new(DataType::Int64);
+        avg.update_batch(&[
+            Arc::new(Int64Array::from(vec![i64::MIN])),
+            Arc::new(Int8Array::from(vec![3])),
+        ])
+        .unwrap();
+        assert_eq!(avg.evaluate().unwrap(), ScalarValue::Int64(Some(i64::MIN)));
     }
 }

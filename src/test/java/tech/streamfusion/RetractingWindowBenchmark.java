@@ -20,8 +20,12 @@ class RetractingWindowBenchmark {
   private static final long ROWS = Long.getLong("window.rows", 1_000_000L);
   private static final int WARMUP = Integer.getInteger("window.warmup", 2);
   private static final int RUNS = Integer.getInteger("window.runs", 5);
+  private static final boolean GROUPING_ONLY = Boolean.getBoolean("window.groupingOnly");
+  private static final boolean AVERAGE = Boolean.getBoolean("window.average");
   private static final String SQL =
-      "INSERT INTO sink SELECT k, COUNT(v), SUM(v) FROM TABLE(HOP(TABLE ranked, DESCRIPTOR(rt), "
+      "INSERT INTO sink SELECT k"
+          + (GROUPING_ONLY ? "" : AVERAGE ? ", COUNT(v), AVG(v)" : ", COUNT(v), SUM(v)")
+          + " FROM TABLE(HOP(TABLE ranked, DESCRIPTOR(rt), "
           + "INTERVAL '2' SECOND, INTERVAL '10' SECOND)) GROUP BY k, window_start, window_end";
 
   @ParameterizedTest
@@ -56,8 +60,10 @@ class RetractingWindowBenchmark {
     double nativeTime = median(times[1]);
     System.out.printf(
         Locale.ROOT,
-        "[retracting-window] phase=%s rows=%d Flink=%.6fs Native=%.6fs ratio=%.3fx"
-            + " host_trials=%s native_trials=%s%n",
+        "[retracting-window] groupingOnly=%s average=%s phase=%s rows=%d Flink=%.6fs Native=%.6fs"
+            + " ratio=%.3fx host_trials=%s native_trials=%s%n",
+        GROUPING_ONLY,
+        AVERAGE,
         phase,
         ROWS,
         host,
@@ -103,7 +109,9 @@ class RetractingWindowBenchmark {
             "SELECT k, v, rt FROM (SELECT k, v, rt, ROW_NUMBER() OVER (PARTITION BY k ORDER BY v"
                 + " DESC) AS rn FROM src) WHERE rn = 1"));
     table.executeSql(
-        "CREATE TABLE sink (k BIGINT, c BIGINT, s BIGINT) WITH ('connector' = 'blackhole')");
+        "CREATE TABLE sink (k BIGINT"
+            + (GROUPING_ONLY ? "" : ", c BIGINT, s BIGINT")
+            + ") WITH ('connector' = 'blackhole')");
     return table;
   }
 }
