@@ -460,6 +460,20 @@ impl TumblingAggregator {
     /// authoritative for anything touched this interval).
 
     pub(crate) fn update(&mut self, batch: &RecordBatch) -> Result<(), DataFusionError> {
+        self.update_window_batch(batch, true)
+    }
+
+    pub(crate) fn update_local(&mut self, batch: &RecordBatch) -> Result<(), DataFusionError> {
+        // A closed slice can still contribute to an open HOP/CUMULATE window. Only the global
+        // stage knows the final window bounds, including after restoring the local watermark.
+        self.update_window_batch(batch, false)
+    }
+
+    fn update_window_batch(
+        &mut self,
+        batch: &RecordBatch,
+        discard_closed_windows: bool,
+    ) -> Result<(), DataFusionError> {
         self.snapshot_cache = None;
         let ts = column_i64(batch, "ts");
         // One value column per aggregate (value0, value1, …), so aggregates can read different
@@ -487,7 +501,9 @@ impl TumblingAggregator {
             // Drop windows already closed by the watermark — the row is late for them. The host's
             // per-row assigner drops such rows; the columnar assigner slices batches so a closing
             // watermark precedes any row it makes late, and this is where that row is discarded.
-            windows.retain(|(_, end)| *end > self.current_watermark);
+            if discard_closed_windows {
+                windows.retain(|(_, end)| *end > self.current_watermark);
+            }
             if windows.is_empty() {
                 self.late_drops += 1;
             }
@@ -850,7 +866,9 @@ impl TumblingAggregator {
             let mut windows = Vec::new();
             let mut end = slice_end;
             while end <= base + self.window_millis {
-                windows.push((base, end));
+                if end > self.current_watermark {
+                    windows.push((base, end));
+                }
                 end += self.slide_millis;
             }
             windows
@@ -861,6 +879,7 @@ impl TumblingAggregator {
                     let end = slice_end + j * self.slide_millis;
                     (end - self.window_millis, end)
                 })
+                .filter(|(_, end)| *end > self.current_watermark)
                 .collect()
         }
     }
@@ -1518,6 +1537,28 @@ pub extern "system" fn Java_tech_streamfusion_Native_updateTumblingAggregator<'l
         let result = {
             let batch = import_record_batch(in_array_address, in_schema_address);
             aggregator.update(&batch)
+        };
+        if let Err(e) = result {
+            throw_memory_limit(&mut env, &e.to_string());
+        }
+    })
+}
+
+/// Local slice accumulation defers late-data admission to the final window merge.
+#[no_mangle]
+pub extern "system" fn Java_tech_streamfusion_Native_updateLocalTumblingAggregator<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    in_array_address: jlong,
+    in_schema_address: jlong,
+) {
+    crate::bridge::jni_guard(env, move |mut env| {
+        let aggregator = unsafe { &mut *(handle as *mut TumblingAggregator) };
+        // Release imported Arrow buffers before raising a JVM exception, as in the final update.
+        let result = {
+            let batch = import_record_batch(in_array_address, in_schema_address);
+            aggregator.update_local(&batch)
         };
         if let Err(e) = result {
             throw_memory_limit(&mut env, &e.to_string());
