@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
@@ -94,7 +95,7 @@ class FlinkRetractingWindowSqlHarnessTest {
                 ? ""
                 : ", SUM(v), COUNT(*), AVG(v), AVG(CAST(v AS FLOAT)), AVG(CAST(v AS DOUBLE)),"
                     + " SUM(CAST(v AS FLOAT)), SUM(CAST(v AS DOUBLE)), SUM(CAST(v AS"
-                    + " DECIMAL(38,2)))")
+                    + " DECIMAL(38,2))), AVG(CAST(v AS DECIMAL(38,3)))")
             + " FROM TABLE("
             + window
             + ") GROUP BY k, window_start, window_end";
@@ -121,7 +122,8 @@ class FlinkRetractingWindowSqlHarnessTest {
                     value == null ? null : value.doubleValue(),
                     value == null ? null : value.floatValue(),
                     value == null ? null : value.doubleValue(),
-                    value == null ? null : BigDecimal.valueOf(value).setScale(2)));
+                    value == null ? null : BigDecimal.valueOf(value).setScale(2),
+                    value == null ? null : BigDecimal.valueOf(value).setScale(6)));
           });
     }
     expected.sort(Comparator.comparing(Row::toString));
@@ -246,7 +248,7 @@ class FlinkRetractingWindowSqlHarnessTest {
                 : ", SUM(v), COUNT(v), COUNT(*), AVG(v), AVG(CAST(v AS INT)), AVG(CAST(v AS"
                     + " SMALLINT)), AVG(CAST(v AS TINYINT)), AVG(CAST(v AS FLOAT)), AVG(CAST(v AS"
                     + " DOUBLE)), SUM(CAST(v AS FLOAT)), SUM(CAST(v AS DOUBLE)), SUM(CAST(v AS"
-                    + " DECIMAL(38,2)))")
+                    + " DECIMAL(38,2))), AVG(CAST(v AS DECIMAL(38,3)))")
             + " FROM TABLE("
             + window
             + ") GROUP BY k, window_start, window_end";
@@ -275,6 +277,12 @@ class FlinkRetractingWindowSqlHarnessTest {
                   case 8 -> 10.5;
                   default -> avg == null ? null : avg.doubleValue();
                 };
+            BigDecimal decimalSum =
+                switch ((Integer) row.getField(0)) {
+                  case 6 -> new BigDecimal("9223372036854775808.00");
+                  case 7 -> new BigDecimal("18446744073709551614.00");
+                  default -> sum == null ? null : BigDecimal.valueOf(sum).setScale(2);
+                };
             return Row.join(
                 row,
                 Row.of(
@@ -286,11 +294,11 @@ class FlinkRetractingWindowSqlHarnessTest {
                     floating,
                     floating == null ? null : (float) (floating * (Long) row.getField(3)),
                     floating == null ? null : floating * (Long) row.getField(3),
-                    switch ((Integer) row.getField(0)) {
-                      case 6 -> new BigDecimal("9223372036854775808.00");
-                      case 7 -> new BigDecimal("18446744073709551614.00");
-                      default -> sum == null ? null : BigDecimal.valueOf(sum).setScale(2);
-                    }));
+                    decimalSum,
+                    decimalSum == null
+                        ? null
+                        : decimalSum.divide(
+                            BigDecimal.valueOf((Long) row.getField(3)), 6, RoundingMode.HALF_UP)));
           });
     }
     expected.sort(Comparator.comparing(Row::toString));
@@ -638,7 +646,8 @@ class FlinkRetractingWindowSqlHarnessTest {
     "ONE_PHASE,HOP", "TWO_PHASE,HOP",
     "ONE_PHASE,CUMULATE", "TWO_PHASE,CUMULATE"
   })
-  void decimalSumRetractsTopRowsAndPreservesScale(String phase, String shape) throws Exception {
+  void decimalSumAndAverageRetractTopRowsAndPreserveScale(String phase, String shape)
+      throws Exception {
     String window =
         switch (shape) {
           case "TUMBLE" -> "TUMBLE(TABLE ranked, DESCRIPTOR(rt), INTERVAL '5' SECOND)";
@@ -649,7 +658,8 @@ class FlinkRetractingWindowSqlHarnessTest {
         };
     String sql =
         "SELECT k, window_start, window_end, SUM(CAST(v AS DECIMAL(12,2))),"
-            + " SUM(CAST(v AS DECIMAL(38,18))) FROM TABLE("
+            + " SUM(CAST(v AS DECIMAL(38,18))), AVG(CAST(v AS DECIMAL(12,3))),"
+            + " AVG(CAST(v AS DECIMAL(38,17))) FROM TABLE("
             + window
             + ") GROUP BY k, window_start, window_end";
     var host = collect(environment(phase), sql).rows();
@@ -666,11 +676,15 @@ class FlinkRetractingWindowSqlHarnessTest {
 
   @ParameterizedTest
   @CsvSource({
-    "ONE_PHASE,TUMBLE", "TWO_PHASE,TUMBLE",
-    "ONE_PHASE,HOP", "TWO_PHASE,HOP",
-    "ONE_PHASE,CUMULATE", "TWO_PHASE,CUMULATE"
+    "ONE_PHASE,TUMBLE,SUM", "TWO_PHASE,TUMBLE,SUM",
+    "ONE_PHASE,HOP,SUM", "TWO_PHASE,HOP,SUM",
+    "ONE_PHASE,CUMULATE,SUM", "TWO_PHASE,CUMULATE,SUM",
+    "ONE_PHASE,TUMBLE,AVG", "TWO_PHASE,TUMBLE,AVG",
+    "ONE_PHASE,HOP,AVG", "TWO_PHASE,HOP,AVG",
+    "ONE_PHASE,CUMULATE,AVG", "TWO_PHASE,CUMULATE,AVG"
   })
-  void decimalSumOverflowResetsOnTheNextSignedValue(String phase, String shape) throws Exception {
+  void decimalSumAndAveragePreserveDifferentOverflowRules(
+      String phase, String shape, String function) throws Exception {
     String window =
         switch (shape) {
           case "TUMBLE" -> "TUMBLE(TABLE changes, DESCRIPTOR(rt), INTERVAL '5' SECOND)";
@@ -680,7 +694,9 @@ class FlinkRetractingWindowSqlHarnessTest {
               "CUMULATE(TABLE changes, DESCRIPTOR(rt), INTERVAL '5' SECOND, INTERVAL '15' SECOND)";
         };
     String sql =
-        "SELECT k, window_end, SUM(v), COUNT(v), COUNT(*) FROM TABLE("
+        "SELECT k, window_end, "
+            + function
+            + "(v), COUNT(v), COUNT(*) FROM TABLE("
             + window
             + ") GROUP BY k, window_start, window_end";
     String max = "9".repeat(36) + ".99";
@@ -714,7 +730,15 @@ class FlinkRetractingWindowSqlHarnessTest {
                   decimalRow(RowKind.INSERT, 8, max),
                   decimalRow(RowKind.INSERT, 8, max),
                   decimalRow(RowKind.DELETE, 8, "2.50"),
-                  decimalRow(RowKind.INSERT, 9, null))
+                  decimalRow(RowKind.INSERT, 9, null),
+                  decimalRow(RowKind.INSERT, 10, max),
+                  decimalRow(RowKind.INSERT, 10, "0.01"),
+                  decimalRow(RowKind.DELETE, 10, "0.00"),
+                  decimalRow(RowKind.DELETE, 10, "0.00"),
+                  decimalRow(RowKind.INSERT, 10, "0.25"),
+                  decimalRow(RowKind.INSERT, 11, "1.50"),
+                  decimalRow(RowKind.DELETE, 11, "1.00"),
+                  decimalRow(RowKind.INSERT, 11, "0.25"))
               .assignTimestampsAndWatermarks(
                   WatermarkStrategy.<Row>forBoundedOutOfOrderness(Duration.ofDays(1))
                       .withTimestampAssigner((row, previous) -> (Long) row.getField(1)));
@@ -733,7 +757,7 @@ class FlinkRetractingWindowSqlHarnessTest {
       var result = collect(table, sql);
       if (!nativeEnabled) {
         host = result.rows();
-        assertEquals(9 * (shape.equals("TUMBLE") ? 1 : shape.equals("HOP") ? 2 : 3), host.size());
+        assertEquals(11 * (shape.equals("TUMBLE") ? 1 : shape.equals("HOP") ? 2 : 3), host.size());
         for (Row row : host) {
           BigDecimal expected =
               switch ((Integer) row.getField(0)) {
@@ -741,8 +765,18 @@ class FlinkRetractingWindowSqlHarnessTest {
                 case 4 -> new BigDecimal("-0.25");
                 case 6 -> new BigDecimal("-3.00");
                 case 8 -> new BigDecimal("-2.50");
+                case 10 -> new BigDecimal("0.25");
+                case 11 -> new BigDecimal("0.75");
                 default -> null;
               };
+          if (function.equals("AVG")) {
+            expected =
+                switch ((Integer) row.getField(0)) {
+                  case 6 -> new BigDecimal("3.000000");
+                  case 11 -> new BigDecimal("0.750000");
+                  default -> null;
+                };
+          }
           assertEquals(expected, row.getField(2), row.toString());
         }
       } else {
@@ -758,30 +792,20 @@ class FlinkRetractingWindowSqlHarnessTest {
     return Row.ofKind(kind, key, 1000L, value == null ? null : new BigDecimal(value));
   }
 
-  @ParameterizedTest
-  @org.junit.jupiter.params.provider.ValueSource(strings = {"ONE_PHASE", "TWO_PHASE"})
-  void decimalAverageStillHasExplicitFallback(String phase) throws Exception {
-    NativeParity.assertFallbackReasonContains(
-        () -> environment(phase),
-        "SELECT k, AVG(CAST(v AS DECIMAL(12,2))) FROM TABLE(TUMBLE(TABLE ranked,"
-            + " DESCRIPTOR(rt), INTERVAL '5' SECOND)) GROUP BY k, window_start, window_end",
-        "window aggregate: retracting input supports only aligned event-time");
-  }
-
   private static Row floatingRow(RowKind kind, int key, Double value) {
     return Row.ofKind(kind, key, 1000L, value == null ? null : value.floatValue(), value);
   }
 
   @ParameterizedTest
   @CsvSource({
-    "ONE_PHASE,TUMBLE",
-    "TWO_PHASE,TUMBLE",
-    "ONE_PHASE,HOP",
-    "TWO_PHASE,HOP",
-    "ONE_PHASE,CUMULATE",
-    "TWO_PHASE,CUMULATE"
+    "ONE_PHASE,TUMBLE,BIGINT", "TWO_PHASE,TUMBLE,BIGINT",
+    "ONE_PHASE,HOP,BIGINT", "TWO_PHASE,HOP,BIGINT",
+    "ONE_PHASE,CUMULATE,BIGINT", "TWO_PHASE,CUMULATE,BIGINT",
+    "ONE_PHASE,TUMBLE,'DECIMAL(12,2)'", "TWO_PHASE,TUMBLE,'DECIMAL(12,2)'",
+    "ONE_PHASE,HOP,'DECIMAL(12,2)'", "TWO_PHASE,HOP,'DECIMAL(12,2)'",
+    "ONE_PHASE,CUMULATE,'DECIMAL(12,2)'", "TWO_PHASE,CUMULATE,'DECIMAL(12,2)'"
   })
-  void reducedIntegerSumAndAverageKeepExplicitFallback(String phase, String shape)
+  void reducedSumAndAverageKeepExplicitFallback(String phase, String shape, String type)
       throws Exception {
     String window =
         switch (shape) {
@@ -791,8 +815,15 @@ class FlinkRetractingWindowSqlHarnessTest {
           default ->
               "CUMULATE(TABLE ranked, DESCRIPTOR(rt), INTERVAL '5' SECOND, INTERVAL '15' SECOND)";
         };
+    String value = type.equals("BIGINT") ? "v" : "CAST(v AS " + type + ")";
     String sql =
-        "SELECT k, window_start, window_end, COUNT(v), AVG(v), SUM(v) FROM TABLE("
+        "SELECT k, window_start, window_end, COUNT("
+            + value
+            + "), AVG("
+            + value
+            + "), SUM("
+            + value
+            + ") FROM TABLE("
             + window
             + ") GROUP BY k, window_start, window_end";
     NativeParity.assertFallbackReasonContains(

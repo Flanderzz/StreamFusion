@@ -81,7 +81,7 @@ final class GlobalWindowAggregateMatcher {
           || !WindowAggregateMatcher.supportedRetractingAggregates(
               aggregate.aggCalls(), aggregate.inputRowTypeOfLocalAgg())) {
         return "global window aggregate: retracting input requires grouping-only, unfiltered"
-            + " numeric SUM, integer/FLOAT/DOUBLE AVG or numeric COUNT";
+            + " numeric SUM/AVG or numeric COUNT";
       }
       int fields = WindowAggregateMatcher.partialFieldCount(aggregate.aggCalls(), true);
       int[] retractKinds = WindowAggregateMatcher.retractingKinds(aggregate.aggCalls());
@@ -96,6 +96,7 @@ final class GlobalWindowAggregateMatcher {
             call.getAggregation().getKind() == SqlKind.AVG
                 ? switch (call.getType().getSqlTypeName()) {
                   case FLOAT, REAL, DOUBLE -> SqlTypeName.DOUBLE;
+                  case DECIMAL -> SqlTypeName.DECIMAL;
                   default -> SqlTypeName.BIGINT;
                 }
                 : call.getType().getSqlTypeName();

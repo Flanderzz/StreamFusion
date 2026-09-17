@@ -288,15 +288,17 @@ pub(crate) struct DecimalAvgAccumulator {
     count: i64,
     overflow: bool,
     scale: i8,
+    retracting: bool,
 }
 
 impl DecimalAvgAccumulator {
-    fn new(scale: i8) -> Self {
+    fn new(scale: i8, retracting: bool) -> Self {
         DecimalAvgAccumulator {
             sum: 0,
             count: 0,
             overflow: false,
             scale,
+            retracting,
         }
     }
 }
@@ -307,9 +309,23 @@ impl Accumulator for DecimalAvgAccumulator {
             .as_any()
             .downcast_ref::<Decimal128Array>()
             .expect("value decimal128");
-        for value in array.iter().flatten() {
-            accumulate_decimal(&mut self.sum, &mut self.overflow, value);
-            self.count += 1;
+        let changes = if self.retracting {
+            values
+                .get(1)
+                .map(|kinds| kinds.as_any().downcast_ref::<Int8Array>().unwrap())
+        } else {
+            None
+        };
+        for (row, value) in array.iter().enumerate() {
+            if let Some(value) = value {
+                let retract = changes.is_some_and(|kinds| matches!(kinds.value(row), 1 | 3));
+                accumulate_decimal(
+                    &mut self.sum,
+                    &mut self.overflow,
+                    if retract { -value } else { value },
+                );
+                self.count = self.count.wrapping_add(if retract { -1 } else { 1 });
+            }
         }
         Ok(())
     }
@@ -331,16 +347,18 @@ impl Accumulator for DecimalAvgAccumulator {
             };
             if sums.is_valid(row) {
                 accumulate_decimal(&mut self.sum, &mut self.overflow, sums.value(row));
-            } else if count > 0 {
-                self.overflow = true; // a live count with a NULL sum is an overflowed partial
+            } else if self.retracting || count > 0 {
+                self.overflow = true;
             }
-            self.count += count;
+            self.count = self.count.wrapping_add(count);
         }
         Ok(())
     }
 
     fn state(&mut self) -> datafusion::common::Result<Vec<ScalarValue>> {
-        let sum = (!self.overflow && self.count != 0).then_some(self.sum);
+        // Signed updates can leave a residual or overflow at count zero. An empty retracting
+        // state therefore carries numeric zero; NULL unambiguously preserves sticky overflow.
+        let sum = (!self.overflow && (self.retracting || self.count != 0)).then_some(self.sum);
         Ok(vec![
             ScalarValue::Decimal128(sum, 38, self.scale),
             ScalarValue::Int64(Some(self.count)),
@@ -642,7 +660,7 @@ pub(crate) enum WindowAggregate {
     // error), and AVG divides that sum by the non-null count with Flink's exact decimal division,
     // reported as findAvgAggType's DECIMAL(38, max(6, s)).
     DecimalSum { scale: i8 },
-    DecimalAvg { scale: i8 },
+    DecimalAvg { scale: i8, retracting: bool },
 }
 
 impl WindowAggregate {
@@ -678,7 +696,10 @@ impl WindowAggregate {
             // truncates to its type.
             (4, DataType::Float32) => WindowAggregate::FloatAvg,
             (4, DataType::Float64) => WindowAggregate::DoubleAvg,
-            (4, DataType::Decimal128(_, s)) => WindowAggregate::DecimalAvg { scale: *s },
+            (4, DataType::Decimal128(_, s)) => WindowAggregate::DecimalAvg {
+                scale: *s,
+                retracting: false,
+            },
             (4, _) => WindowAggregate::IntegerAvg(value_type.clone()),
             (other, _) => panic!("unsupported aggregate kind: {other}"),
         }
@@ -727,7 +748,9 @@ impl WindowAggregate {
                 sum: None,
                 scale: *scale,
             }),
-            WindowAggregate::DecimalAvg { scale } => Box::new(DecimalAvgAccumulator::new(*scale)),
+            WindowAggregate::DecimalAvg { scale, retracting } => {
+                Box::new(DecimalAvgAccumulator::new(*scale, *retracting))
+            }
         }
     }
 
@@ -767,7 +790,7 @@ impl WindowAggregate {
                 Field::new("sum", DataType::Float64, true),
                 Field::new("count", DataType::Int64, true),
             ],
-            WindowAggregate::DecimalAvg { scale } => vec![
+            WindowAggregate::DecimalAvg { scale, .. } => vec![
                 Field::new("sum", DataType::Decimal128(38, *scale), true),
                 Field::new("count", DataType::Int64, true),
             ],
@@ -788,7 +811,7 @@ impl WindowAggregate {
             WindowAggregate::FloatingExtreme { value_type, .. } => value_type.clone(),
             WindowAggregate::DecimalSum { scale } => DataType::Decimal128(38, *scale),
             // Flink's findAvgAggType: DECIMAL(38, max(6, s)).
-            WindowAggregate::DecimalAvg { scale } => DataType::Decimal128(38, (*scale).max(6)),
+            WindowAggregate::DecimalAvg { scale, .. } => DataType::Decimal128(38, (*scale).max(6)),
         }
     }
 }
@@ -796,10 +819,22 @@ impl WindowAggregate {
 /// Builds one aggregate per (kind, value-type code) pair, positionally. Per-aggregate value types
 /// let a single window aggregate compute over different value columns (e.g. `SUM(a), SUM(b)`).
 pub(crate) fn build_aggregates(kinds: &[i64], value_types: &[i64]) -> Vec<WindowAggregate> {
+    let retracting = kinds
+        .iter()
+        .any(|kind| matches!(*kind, LIVE_COUNT | HIDDEN_LIVE_COUNT));
     kinds
         .iter()
         .zip(value_types)
-        .map(|(&kind, &code)| WindowAggregate::new(kind, &value_data_type(code)))
+        .map(|(&kind, &code)| {
+            let mut aggregate = WindowAggregate::new(kind, &value_data_type(code));
+            if let WindowAggregate::DecimalAvg {
+                retracting: signed, ..
+            } = &mut aggregate
+            {
+                *signed = retracting;
+            }
+            aggregate
+        })
         .collect()
 }
 

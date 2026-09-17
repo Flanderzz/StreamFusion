@@ -29,6 +29,15 @@ preserving the input scale. Its arithmetic reuses the append-only decimal SUM pr
 overflow produces a NULL sum that the next signed value can reset. The signed count and
 zero-count residuals remain independent of that nullable sum, as in Flink's retracting SUM.
 
+DECIMAL AVG reuses its decimal sum/BIGINT count layout and exact division. Its overflow is
+sticky, including when the count returns to zero; a NULL sum must therefore remain distinct
+from an empty numeric-zero sum in both local partials and checkpoints. The existing live-row
+count in the aggregate configuration identifies retracting windows and selects that distinction.
+Append-only AVG retains its previous checkpoint interpretation. This extends the existing
+per-window accumulator architecture rather than adding a separate state entry or JNI argument.
+Flink's released `AvgAggFunction` and Arroyo's `arrow/incremental_aggregator.rs` were consulted
+before the extension; Flink's signed counts and decimal overflow determine the buffer semantics.
+
 The Arrow ownership pattern was checked against Comet's ColumnarBatchArrowReader:
 producer vectors must not be closed through a second owning root. The window projection
 therefore copies the change-kind byte into a vector owned by its exported root, just as

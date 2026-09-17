@@ -276,7 +276,7 @@ impl Accumulator for RetractingWindowAccumulator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aggregates::WindowAggregate;
+    use crate::aggregates::{build_aggregates, WindowAggregate};
 
     fn decimals(values: Vec<Option<i128>>, precision: u8, scale: i8) -> ArrayRef {
         Arc::new(
@@ -284,6 +284,127 @@ mod tests {
                 .with_precision_and_scale(precision, scale)
                 .unwrap(),
         )
+    }
+
+    #[test]
+    fn decimal_average_retains_zero_count_residuals_and_signed_division() {
+        for (precision, scale) in [(12, 2), (38, 18)] {
+            let aggregates = build_aggregates(
+                &[4, HIDDEN_LIVE_COUNT],
+                &[2000 + precision * 100 + scale, 0],
+            );
+            let mut avg = aggregates[0].create_accumulator();
+            avg.update_batch(&[
+                decimals(
+                    vec![Some(150), Some(100), None],
+                    precision as u8,
+                    scale as i8,
+                ),
+                Arc::new(Int8Array::from(vec![0, 1, 3])),
+            ])
+            .unwrap();
+            assert!(avg.evaluate().unwrap().is_null());
+            let saved = avg.state().unwrap();
+            assert_eq!(saved[0], ScalarValue::Decimal128(Some(50), 38, scale as i8));
+            let state = saved
+                .into_iter()
+                .map(|value| value.to_array_of_size(1).unwrap())
+                .collect::<Vec<_>>();
+            let mut restored = aggregates[0].create_accumulator();
+            restored.merge_batch(&state).unwrap();
+            restored
+                .update_batch(&[
+                    decimals(vec![Some(25)], precision as u8, scale as i8),
+                    Arc::new(Int8Array::from(vec![3])),
+                ])
+                .unwrap();
+            let result_scale = (scale as i8).max(6);
+            assert_eq!(
+                restored.evaluate().unwrap(),
+                ScalarValue::Decimal128(
+                    Some(-25 * 10_i128.pow((result_scale - scale as i8) as u32)),
+                    38,
+                    result_scale
+                )
+            );
+            assert_eq!(restored.state().unwrap()[1], ScalarValue::Int64(Some(-1)));
+        }
+    }
+
+    #[test]
+    fn decimal_average_overflow_stays_null_across_zero_count_restore() {
+        let aggregates = build_aggregates(&[4, HIDDEN_LIVE_COUNT], &[5802, 0]);
+        for sign in [1, -1] {
+            let mut avg = aggregates[0].create_accumulator();
+            avg.update_batch(&[
+                decimals(
+                    vec![
+                        Some(sign * (DECIMAL128_MAX - 1)),
+                        Some(sign),
+                        Some(0),
+                        Some(0),
+                    ],
+                    38,
+                    2,
+                ),
+                Arc::new(Int8Array::from(vec![0, 0, 1, 3])),
+            ])
+            .unwrap();
+            let saved = avg.state().unwrap();
+            assert_eq!(
+                saved,
+                vec![
+                    ScalarValue::Decimal128(None, 38, 2),
+                    ScalarValue::Int64(Some(0))
+                ]
+            );
+            let state = saved
+                .into_iter()
+                .map(|value| value.to_array_of_size(1).unwrap())
+                .collect::<Vec<_>>();
+            let mut restored = aggregates[0].create_accumulator();
+            restored.merge_batch(&state).unwrap();
+            restored
+                .update_batch(&[
+                    decimals(vec![Some(250)], 38, 2),
+                    Arc::new(Int8Array::from(vec![2])),
+                ])
+                .unwrap();
+            assert_eq!(
+                restored.evaluate().unwrap(),
+                ScalarValue::Decimal128(None, 38, 6)
+            );
+            assert_eq!(restored.state().unwrap()[1], ScalarValue::Int64(Some(1)));
+        }
+    }
+
+    #[test]
+    fn decimal_average_empty_partials_and_append_checkpoints_keep_their_contracts() {
+        let aggregates = build_aggregates(&[4, LIVE_COUNT], &[3202, 0]);
+        let mut avg = aggregates[0].create_accumulator();
+        let empty = avg.state().unwrap();
+        assert_eq!(empty[0], ScalarValue::Decimal128(Some(0), 38, 2));
+        avg.merge_batch(&[
+            decimals(vec![Some(0), Some(150), Some(0)], 38, 2),
+            Arc::new(Int64Array::from(vec![0, i64::MAX, 1])),
+        ])
+        .unwrap();
+        assert_eq!(avg.state().unwrap()[1], ScalarValue::Int64(Some(i64::MIN)));
+        let mut append = WindowAggregate::new(4, &DataType::Decimal128(12, 2)).create_accumulator();
+        assert_eq!(
+            append.state().unwrap()[0],
+            ScalarValue::Decimal128(None, 38, 2)
+        );
+        append
+            .merge_batch(&[
+                decimals(vec![None, Some(150)], 38, 2),
+                Arc::new(Int64Array::from(vec![0, 1])),
+            ])
+            .unwrap();
+        assert_eq!(
+            append.evaluate().unwrap(),
+            ScalarValue::Decimal128(Some(1_500_000), 38, 6)
+        );
     }
 
     #[test]
