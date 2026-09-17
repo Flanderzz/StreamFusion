@@ -99,6 +99,11 @@ public class NativeColumnarLocalWindowAggregateOperator extends NativeWindowOper
   }
 
   @Override
+  protected void updateHandle(long arrayAddress, long schemaAddress) {
+    Native.updateLocalTumblingAggregator(handle, arrayAddress, schemaAddress);
+  }
+
+  @Override
   public void prepareSnapshotPreBarrier(long checkpointId) {
     try (ArrowArray array = ArrowArray.allocateNew(allocator);
         ArrowSchema schema = ArrowSchema.allocateNew(allocator)) {

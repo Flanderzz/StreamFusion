@@ -33,6 +33,23 @@ Flink's local MapView fields are replaced by the list partials, so both native s
 one explicit intermediate schema. Variable-sized sets currently use the existing snapshot
 fallback on RocksDB; they do not enter its fixed-field accumulator row codec.
 
+## Late local slices
+
+Arroyo's sliding operator bins batches and skips a bin preceding its current watermark bin.
+That admission rule is narrower than Flink's overlapping-window contract: a slice can have
+fired while a larger window containing it remains open. Flink's local slicing aggregate
+accepts the row; its final processor checks the last containing window and updates only
+unfired windows. Our local Arrow partials likewise defer late-data admission to the final
+merge. The local update path is explicit, so a restored local watermark cannot suppress a
+still-useful slice. The global watermark remains checkpointed and prevents reopening a
+completed window. Arrow import/release and exception ordering retain the existing bridge
+pattern checked against Comet's JNI Arrow import path.
+
+RisingWave's `HopWindowExecutor` is a related reference, but expands each input into window
+rows and transforms window-column watermarks; its hash aggregate owns final emission and
+state cleanup. It does not supply a matching local-slice implementation to transplant here.
+We keep the existing partial-accumulator architecture and Flink's late-window semantics.
+
 ## Why
 Every aggregate we support (`SUM`/`MIN`/`MAX`/`COUNT`, and integer `AVG`) has
 associative, commutative, mergeable partial state, so merging accumulators yields
