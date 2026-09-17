@@ -759,8 +759,15 @@ Empty bracket names (`$['']` and `$[""]`) select the empty object key, including
 member/index paths. They remain distinct from a name containing a space (`$[' ']`).
 Member names are case-sensitive. Escaped document keys are compared as UTF-16 code units,
 so unpaired surrogates remain distinct from a literal `?` or replacement character, including
-when duplicate members occur before or after them. Wildcards, recursive descent, filters, slices,
-multi-selectors, backslash escapes, ASCII controls, unpaired surrogates and dynamic
+when duplicate members occur before or after them. Quoted names also accept escaped quotes,
+backslashes, slashes, `\b`, `\f`, `\n`, `\r`, `\t`, and four-hex-digit `\u` escapes.
+Unicode escapes may encode controls (including NUL) or paired surrogates; decoding happens
+once, so `\\u0061` names the literal six-character key `\u0061`, not `a`. Escaped quotes
+and brackets remain part of the member name. The planner uses Flink's released Jayway
+unescaper and sends a canonical JSON-escaped name to Rust; both native readers select
+against the decoded name without a per-row JVM call.
+Wildcards, recursive descent, filters, slices,
+multi-selectors, unknown or incomplete escapes, raw ASCII controls, unpaired surrogates and dynamic
 paths fall back. Quoted `'*'` is an ordinary member name, not a wildcard.
 
 ASCII spaces around a bracket member or index are native, for example `$[ 'user' ][ -01 ]`.
@@ -778,6 +785,23 @@ missing/null/scalar/container values, strict/lax policies, typed RETURNING, inde
 paths and invalid unselected fields, plus explicit fallback for downstream string grouping.
 Native reader tests also verify
 selection on both the streaming parser and SIMD tape.
+
+Escaped-name regressions execute both quote styles against released Flink, including every
+admitted escape, nested negative indexes, duplicate members, missing/null/scalar/container
+values, strict/lax policies, typed RETURNING and conversion failures, complete-document
+validation, independent selections across batches, and explicit fallback for unverified
+escapes. Direct projections are checked to register no JVM expression binding.
+
+The escaped-path scalar benchmark selects nested backslash/newline member names from
+1 million rowwise documents with 264 bytes of padding. On an Apple M1 Max, release +
+`mimalloc`, two warmups and five interleaved trials, JSON_VALUE took 1.016908 s on Flink
+and 0.936989 s natively (1.085×); JSON_EXISTS took 0.969056 s and 0.742654 s (1.305×).
+Both native transposes and the rowwise blackhole sink are included. The source-matched
+identity control took 0.384798 s / 0.653999 s (Flink/native), so these are full-pipeline
+measurements, not isolated parser timings. Reproduce with `ScalarFunctionBenchmark`,
+`-Pbench -Dscalar.functions=JSON_VALUE_ESCAPED_PATH,JSON_EXISTS_ESCAPED_PATH`,
+`-Dscalar.rows=1000000 -Dscalar.bytes=264 -Dscalar.warmup=2 -Dscalar.runs=5` and
+`SF_BENCHMARK=true`.
 
 Negative-index regressions cover nested arrays, minimum signed indexes, negative zero, leading
 zeros, all strict/lax policies, typed RETURNING and conversion failures, complete-document

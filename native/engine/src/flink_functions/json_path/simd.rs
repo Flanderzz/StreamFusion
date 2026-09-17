@@ -101,7 +101,7 @@ fn select<'a>(tape: &Tape<'a>, steps: &[Step<'_>]) -> Option<Value<'a>> {
                     };
                     rest = &rest[1..];
                     let (value, tail) = rest.split_at(width(rest.first()?));
-                    if key == name {
+                    if *key == name.as_ref() {
                         selected = Some(value);
                     }
                     rest = tail;
@@ -213,6 +213,42 @@ mod tests {
             equivalent(&path, &input, &mut reader);
         }
         assert!(reader.tape.as_ref().unwrap().0.capacity() > 0);
+    }
+
+    #[test]
+    fn escaped_member_names_select_identically_on_both_readers() {
+        let mut reader = Reader::new(4000);
+        for name in [
+            "a'b", "a\"b", "a\\b", "a\nb", "\0", "\u{1f}", "用户", "😀", "\\u0061",
+        ] {
+            let key = serde_json::to_string(name).unwrap();
+            let text = format!("lax $[{key}][-1][\"\\u007a\"]");
+            let path = Path::parse(&text, "13.0").unwrap();
+            for padding in [String::new(), fields()] {
+                let input = format!(r#"{{{key}:[{{"z":"old"}}]{padding},{key}:[{{"z":"last"}}]}}"#);
+                assert_eq!(path.read(&input), Ok(Value::String("last")));
+                equivalent(&path, &input, &mut reader);
+                if !padding.is_empty() && !key.contains(r"\u") {
+                    assert!(candidate(&input));
+                    assert_eq!(reader.read(&path, &input), Ok(Value::DecodedString("last")));
+                }
+                let input = format!(r#"{{{key}:[{{"z":"old"}}]{padding},{key}:[]}}"#);
+                assert_eq!(path.read(&input), Ok(Value::Missing));
+                equivalent(&path, &input, &mut reader);
+                let input = format!(r#"{{{key}:[{{"z":"old"}}]{padding},"bad":1e2147483648}}"#);
+                assert_eq!(path.read(&input), Ok(Value::Missing));
+                equivalent(&path, &input, &mut reader);
+            }
+        }
+        for text in [
+            r#"$["\uD800"]"#,
+            r#"$["\uDC00"]"#,
+            r#"$["\q"]"#,
+            r#"$["\u12"]"#,
+            r#"$["a\"]"#,
+        ] {
+            assert!(Path::parse(text, "13.0").is_none(), "{text}");
+        }
     }
 
     #[test]

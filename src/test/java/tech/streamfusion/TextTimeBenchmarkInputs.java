@@ -241,6 +241,11 @@ final class TextTimeBenchmarkInputs {
                   "{\" \":\"space\",\"padding\":\"" + text[1] + "\"}"
                 };
             case "tt_json_surrogate" -> new String[] {"\"\\uD800\"", "\"?\""};
+            case "tt_json_escaped" ->
+                new String[] {
+                  "{\"a\\\\b\":{\"a\\nb\":\"Alice\"},\"padding\":\"" + text[0] + "\"}",
+                  "{\"a\\\\b\":{\"a\\nb\":\"Bob\"},\"padding\":\"" + text[1] + "\"}"
+                };
             case "tt_json_negative" -> {
               StringBuilder elements = new StringBuilder();
               for (int i = 0; i < 31; i++) elements.append("\"value").append(i).append("\",");

@@ -17,7 +17,7 @@ pub(super) struct Path<'a> {
 
 #[derive(Debug)]
 enum Step<'a> {
-    Member(&'a str),
+    Member(Cow<'a, str>),
     Index(i32),
 }
 
@@ -52,17 +52,38 @@ impl<'a> Path<'a> {
                 if !is_identifier(name) {
                     return None;
                 }
-                steps.push(Step::Member(name));
+                steps.push(Step::Member(Cow::Borrowed(name)));
                 text = &rest[end..];
             } else if text.starts_with("['") || text.starts_with("[\"") {
                 let quote = text.as_bytes()[1] as char;
                 let rest = &text[2..];
-                let end = rest.find(quote)?;
-                let name = &rest[..end];
-                if name.bytes().any(|b| b < 0x20 || b == b'\\') || !rest[end + 1..].starts_with(']')
-                {
+                let mut escaped = false;
+                let mut end = 0;
+                while end < rest.len() {
+                    match rest.as_bytes()[end] {
+                        b'\\' => {
+                            escaped = true;
+                            end += 2;
+                        }
+                        byte if byte == quote as u8 => break,
+                        _ => end += 1,
+                    }
+                }
+                if end >= rest.len() || !rest[end + 1..].starts_with(']') {
                     return None;
                 }
+                let name = if escaped {
+                    if quote != '"' {
+                        return None;
+                    }
+                    Cow::Owned(serde_json::from_str::<String>(&text[1..end + 3]).ok()?)
+                } else {
+                    let name = &rest[..end];
+                    if name.bytes().any(|b| b < 0x20) {
+                        return None;
+                    }
+                    Cow::Borrowed(name)
+                };
                 steps.push(Step::Member(name));
                 text = &rest[end + 2..];
             } else {

@@ -48,12 +48,27 @@ class JsonPathSpecTest {
             "$[-]",
             "$[2147483648]",
             "$[]",
-            "$['a\\b']",
+            "$['a\\q']",
             "$[\"a\",\"b\"]",
             "$['\ud800']",
             "$['a\n']",
             "$[?(@.a)]")) {
       assertNull(JsonPathSpec.normalize(path), path);
+    }
+  }
+
+  @Test
+  void verifiedEscapesUseCanonicalJsonNamesWithoutLosingIdentity() {
+    assertEquals("strict $[\"a\\\\b\"]", JsonPathSpec.normalize("$['a\\\\b']"));
+    assertEquals("strict $[\"a'b\"]", JsonPathSpec.normalize("$['a\\'b']"));
+    assertEquals("strict $[\"a\\\"b\"]", JsonPathSpec.normalize("$[\"a\\\"b\"]"));
+    assertEquals("strict $[\"a\\bb\"]", JsonPathSpec.normalize("$['a\\bb']"));
+    assertEquals("lax $[\"a/b\"][0]", JsonPathSpec.normalize("lax $[ 'a\\/b' ][ 0 ]"));
+    assertEquals("strict $[\"用户\"]", JsonPathSpec.normalize("$['\\u7528\\u6237']"));
+    assertEquals("strict $[\"😀\"]", JsonPathSpec.normalize("$['\\uD83D\\uDE00']"));
+    for (String name :
+        List.of("\\uD800", "\\uDC00", "\\uD800x\\uDC00", "\\u12", "\\uGGGG", "\\x61")) {
+      assertNull(JsonPathSpec.normalize("$['" + name + "']"), name);
     }
   }
 
@@ -85,7 +100,15 @@ class JsonPathSpecTest {
       var config = new org.apache.flink.configuration.Configuration();
       try (var ignored = NativeConfig.usePlannerConfig(config)) {
         assertNull(RexExpression.encodeProjections(List.of(call), List.of("v")));
-        for (String path : List.of("$.a", "$[-1]", "$[-2147483648]", "$[-0]")) {
+        for (String path :
+            List.of(
+                "$.a",
+                "$[-1]",
+                "$[-2147483648]",
+                "$[-0]",
+                "$['a\\'b']",
+                "$['a\\\\b']",
+                "$['\\u0000']")) {
           var literalPath =
               rex.makeCall(
                   output, function, List.of(rex.makeInputRef(text, 0), rex.makeLiteral(path)));
