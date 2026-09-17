@@ -1854,6 +1854,102 @@ class RocksDBNativeStateBackendAllOperatorsTest {
     }
   }
 
+  @ParameterizedTest
+  @EnumSource(StateTransition.class)
+  void stateTransitionPreservesRetractingVariableRankBounds(StateTransition transition)
+      throws Exception {
+    for (boolean netDiff : new boolean[] {false, true}) {
+      OperatorSubtaskState snapshot;
+      try (BufferAllocator allocator = new RootAllocator();
+          var harness = retractingVariableRankHarness(netDiff)) {
+        transition.configureSource(harness);
+        harness.setup(new ArrowBatchSerializer());
+        harness.open();
+        harness.processElement(
+            new StreamRecord<>(
+                new ArrowBatch(
+                    RowDataArrowConverter.write(
+                        List.of(
+                            GenericRowData.of(1L, 5L),
+                            GenericRowData.of(1L, 3L),
+                            GenericRowData.of(1L, 7L),
+                            GenericRowData.of(2L, 5L),
+                            GenericRowData.of(2L, 3L),
+                            GenericRowData.of(2L, 7L)),
+                        TOPN_ROW,
+                        allocator))));
+        harness.getOperator().prepareSnapshotPreBarrier(1);
+        snapshot = transition.snapshot(harness);
+        collectDedupless(harness);
+      }
+      try (BufferAllocator allocator = new RootAllocator();
+          var harness = retractingVariableRankHarness(netDiff)) {
+        transition.configureRestore(harness);
+        harness.setup(new ArrowBatchSerializer());
+        harness.initializeState(snapshot);
+        harness.open();
+        harness.processElement(
+            new StreamRecord<>(
+                new ArrowBatch(
+                    RowDataArrowConverter.write(
+                        List.of(
+                            rowOfKind(RowKind.DELETE, 1, 3),
+                            rowOfKind(RowKind.DELETE, 2, 3),
+                            rowOfKind(RowKind.UPDATE_BEFORE, 2, 5),
+                            rowOfKind(RowKind.UPDATE_AFTER, 2, 1)),
+                        TOPN_ROW,
+                        allocator,
+                        true))));
+        var expected =
+            netDiff
+                ? List.of(
+                    List.of(RowKind.DELETE, 1L, 3L),
+                    List.of(RowKind.INSERT, 1L, 5L),
+                    List.of(RowKind.DELETE, 2L, 3L),
+                    List.of(RowKind.DELETE, 2L, 5L),
+                    List.of(RowKind.INSERT, 2L, 1L),
+                    List.of(RowKind.INSERT, 2L, 7L))
+                : List.of(
+                    List.of(RowKind.DELETE, 1L, 3L),
+                    List.of(RowKind.INSERT, 1L, 5L),
+                    List.of(RowKind.DELETE, 2L, 3L),
+                    List.of(RowKind.INSERT, 2L, 7L),
+                    List.of(RowKind.DELETE, 2L, 5L),
+                    List.of(RowKind.INSERT, 2L, 1L));
+        assertEquals(expected, collectDedupless(harness));
+      }
+    }
+  }
+
+  private static KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch>
+      retractingVariableRankHarness(boolean netDiff) throws Exception {
+    return new KeyedOneInputStreamOperatorTestHarness<>(
+        new NativeColumnarTopNOperator(
+            new int[] {0},
+            new int[] {-1},
+            TOPN_ROW,
+            new int[] {1},
+            new int[] {1},
+            new int[] {0},
+            0,
+            Long.MAX_VALUE,
+            false,
+            true,
+            null,
+            null,
+            false,
+            netDiff,
+            netDiff ? 4 : -1,
+            0,
+            MAX_PARALLELISM,
+            0),
+        batch -> 0,
+        Types.INT,
+        MAX_PARALLELISM,
+        1,
+        0);
+  }
+
   private static KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch>
       variableRankHarness() throws Exception {
     return new KeyedOneInputStreamOperatorTestHarness<>(

@@ -52,9 +52,15 @@ persist the kinds and independent counts, including zero-count keys with retaine
 This path preserves every per-record cascade even when mini-batching is enabled. Projected-rank
 and update-fast paths retain their existing behavior.
 
+Without OFFSET, each retraction of a selected row emits its removal and any promoted row,
+even when an identical duplicate replaces it. Projected ranks retain the corresponding
+UPDATE_BEFORE/UPDATE_AFTER pairs at every shifted position. These per-record transitions
+apply to constant and partition-derived bounds; mini-batch net diffs may still cancel pairs
+whose final materialized value is unchanged.
+
 ## Data-dependent bounds
 
-Insert-only value-ordered `ROW_NUMBER` can use a non-null SMALLINT, INT or BIGINT upper bound
+Insert-only and general retracting value-ordered `ROW_NUMBER` can use a non-null SMALLINT, INT or BIGINT upper bound
 that is fixed within each partition. The bound must be a partition key itself, or a pure numeric
 expression of directly projected partition keys in the preceding Calc. The current proof admits
 arithmetic, MOD, casts and COALESCE. For example, a non-null `k` supports
@@ -63,23 +69,35 @@ The rank column can be projected or omitted, and mini-batch materializations rem
 
 Released Flink stores the first bound per partition and ignores later changes while incrementing
 `topn.invalidTopSize`. Proving the bound cannot change lets the native ranker read it from each
-Arrow row and reuse its existing bounded state, TTL and memory/RocksDB checkpoint formats.
+Arrow row and reuse its existing rank-buffer state, TTL and memory/RocksDB checkpoint formats.
 The proof retains Calc expressions through native substitution and input pruning. Independently
-changing bounds and all updating inputs retain an explicit fallback until their first-bound state
-and separate TTL contract are implemented. Nullable bounds also remain on Flink because its
+changing bounds retain an explicit fallback until their first-bound state and separate TTL
+contract are implemented. Variable bounds on the unique-key update-fast strategy also retain
+a fallback pending verification of that ranker's bounded buffers. Nullable bounds remain on Flink because its
 primitive row access does not express ordinary SQL null propagation here.
 
-Zero and negative bounds emit no rows. Large bounds preserve Flink 2.2.1's variable-range
+Zero and negative bounds emit no rows. For insert-only input, large bounds preserve Flink 2.2.1's variable-range
 admission rule: after 100 retained rows, a new sort key must strictly improve on the current worst
 key, even when the selected bound is greater than 100. This is an admission threshold, not a
 100-row output cap; improving arrivals can grow the retained set up to the selected bound.
+The general retracting strategy retains the full sorted buffer, so a retraction can promote
+rows beyond the selected range. Its partition-derived bound applies to both per-record changes
+and mini-batch output. Every retained row carries that same bound; a bundle flush can recover
+it from the retained payload without a separate keyed state entry. Empty buffers emit the
+retractions for their former selected rows.
+
 SQL tests compare exact changelog order, NULL payloads, ties, integral widths and signed 64-bit
-boundaries. Checkpoint tests continue the selected windows across memory/RocksDB transitions.
+boundaries. Updating cases cover replacements, deletions, empty groups and mini-batch
+materializations. Checkpoint tests continue the selected windows across memory/RocksDB
+transitions, including a partially filled bundle flushed before the checkpoint barrier.
 
 The unchanged Flink 2.2.1 `RankITCase`, `DeduplicateITCase`, `LimitITCase` and `SortLimitITCase`
 also pass with StreamFusion injected: 131 passed, seven skipped. The state-suite run verifies
 both native memory and RocksDB initialization. These are broader rank regressions; the local
 SQL tests explicitly assert native routing for the newly admitted variable-bound queries.
+The upstream retracting GROUP BY/Top-N case additionally requires successful nonempty native
+updates from both operators. The upstream independently changing bound case must retain its
+explicit fallback; loading the agent or opening an operator alone cannot satisfy either contract.
 
 A row-fed release measurement on an Apple M1 Max used 1,000,000 rows, 4,096 keys,
 `MOD(k, 3) + 1` bounds, descending value order, projected rank and parallelism 1.
@@ -90,6 +108,11 @@ node and both transposes. This is a standalone coverage benchmark, not a Nexmark
 
 Reproduce with `SF_BENCHMARK=true mvn -Pbench -pl :streamfusion-runtime -am test
 -Dtest=VariableTopNBenchmark -Dsurefire.failIfNoSpecifiedTests=false`.
+
+The general retracting variant uses the same setup and one million changelog rows, alternating
+inserts and deletes in groups of 16,384 rows (four values per key). Release/mimalloc medians
+were **0.926187 s Flink / 0.447620 s native (2.069x)** with both transposes included.
+Add `-Dvariabletopn.retracting=true` to reproduce it.
 
 ## Processing-time first-N
 
@@ -127,8 +150,9 @@ Reproduce with `SF_BENCHMARK=true mvn -Pbench -pl :streamfusion-runtime -am test
   exchanges and batch markers remain native. Preserving the upstream bundle order is the
   remaining composition work in [#102](https://github.com/datafusion-contrib/StreamFusion/issues/102).
 
-- A variable rank range outside the insert-only, non-null, partition-derived forms above. Updating
-  and independently changing bounds remain in [#104](https://github.com/datafusion-contrib/StreamFusion/issues/104).
+- A variable rank range outside the insert-only or general retracting, non-null, partition-derived
+  forms above. Update-fast, nullable and independently changing bounds remain in
+  [#104](https://github.com/datafusion-contrib/StreamFusion/issues/104).
 - A row type the native converter can't carry.
 - Time-ordered ranks beyond the existing rank-1 dedup forms and the processing-time first-N
   form above: event-time N > 1, descending processing-time N > 1, updating first-N input,

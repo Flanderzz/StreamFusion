@@ -58,6 +58,17 @@ half-expire keeps its rows here. Hidden-rank OFFSET now retains independent sort
 change them even without TTL. Its expiry still follows the whole-buffer rule above; independent
 per-sort-key TTL clocks are not modeled.
 
+## Partition-derived variable Top-N bounds
+
+Flink gives a variable rank bound its own first-value state and TTL. For both insert-only and
+general retracting input, the planner can avoid that extra state when a non-null bound is proven
+to depend only on the partition keys: expiry and recreation must produce the same value. The
+ranker reads the bound from input or retained payloads and keeps its existing row-state TTL and
+checkpoint formats. Mini-batch flushes recover the bound from a retained row; an empty buffer
+has no selected output. Changing and nullable bounds remain gated, as does the update-fast
+variable-range path. This extension changes configuration passed through the existing JNI
+constructors, without changing Arrow ownership or the exported ABI.
+
 ## Proctime keep-last dedup: which Flink to match
 
 Flink's identical-row suppression in proctime keep-last dedup compares `RowKind` through its

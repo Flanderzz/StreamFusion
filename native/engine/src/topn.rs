@@ -1514,12 +1514,10 @@ fn emit_changelog(
 /// Hidden-rank OFFSET uses Flink's retained-kind cascade and independent sort-key counts (see
 /// `retract_offset`), since an output mutation changes later full-row equality. Other modes:
 /// each input row accumulates (`+I`/`+U`) by inserting into the sorted buffer or retracts (`-U`/`-D`)
-/// by removing the first full-row-equal match. The emitted changelog is then the **diff of the top-N
-/// before vs after** the mutation: with a projected rank or offset, compared by rank position (a
-/// changed occupant → `-U`(old)/`+U`(new), a newly-occupied rank → `+I`, a vacated rank → `-D`);
-/// otherwise, compared as a row multiset (rows that left → `-D`, rows that entered → `+I`). This
-/// single diff covers insert and retract and collapses to the same materialized result as Flink's
-/// per-case cascade.
+/// by removing the first full-row-equal match. Without OFFSET, each mutation emits the selected-row
+/// removal/promotion or every shifted rank's update pair, including byte-identical duplicate
+/// replacements. Projected OFFSET compares the visible positions. Logical mini-batches instead
+/// emit the net difference between the first preimage and the final selected rows.
 pub(crate) struct RetractableTopNRanker<S: KeyedStateStore<Vec<TopNRow>> = MemoryTopNStore> {
     partition_columns: Vec<usize>,
     key_timestamp_precisions: Vec<i32>,
@@ -1528,6 +1526,7 @@ pub(crate) struct RetractableTopNRanker<S: KeyedStateStore<Vec<TopNRow>> = Memor
     /// `offset = rankStart - 1` (0 for the common no-`OFFSET` case); `limit = rankEnd`.
     offset: i64,
     limit: i64,
+    rank_end_column: Option<usize>,
     output_rank_number: bool,
     generate_update_before: bool,
     net_diff: bool,
@@ -1561,6 +1560,7 @@ impl RetractableTopNRanker {
             sort_columns,
             offset,
             limit,
+            rank_end_column: None,
             output_rank_number,
             generate_update_before: true,
             net_diff: false,
@@ -1592,6 +1592,12 @@ impl RetractableTopNRanker {
 }
 
 impl<S: KeyedStateStore<Vec<TopNRow>>> RetractableTopNRanker<S> {
+    /// The planner proves the non-null bound is fixed by the partition keys.
+    pub(crate) fn with_rank_end_column(mut self, column: i32) -> Self {
+        self.rank_end_column = (column >= 0).then_some(column as usize);
+        self
+    }
+
     pub(crate) fn with_generate_update_before(mut self, enabled: bool) -> Self {
         self.generate_update_before = enabled;
         self
@@ -1614,6 +1620,7 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> RetractableTopNRanker<S> {
             sort_columns: self.sort_columns,
             offset: self.offset,
             limit: self.limit,
+            rank_end_column: self.rank_end_column,
             output_rank_number: self.output_rank_number,
             generate_update_before: self.generate_update_before,
             net_diff: self.net_diff,
@@ -1766,8 +1773,11 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> RetractableTopNRanker<S> {
             .expect("encode payload");
 
         let row_kinds = row_kind_column(batch);
+        let rank_ends = self
+            .rank_end_column
+            .map(|index| integral_rank_ends(batch.column(index)));
         // Output window: buffer indices [offset, limit) = ranks [offset+1, limit], clamped to len.
-        let (offset, limit) = (self.offset as usize, self.limit as usize);
+        let offset = self.offset as usize;
         let (rank_output, rank_base) = (self.output_rank_number || self.offset > 0, self.offset);
         let track = self.memory.tracking();
         let mut delta = 0isize;
@@ -1778,6 +1788,10 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> RetractableTopNRanker<S> {
         let mut out_ranks: Vec<i64> = Vec::new();
 
         for row in 0..batch.num_rows() {
+            let limit = rank_ends
+                .as_ref()
+                .map_or(self.limit, |ends| ends.value(row))
+                .max(0) as usize;
             // Borrowed partition-key probe; the key bytes are copied only when a partition first
             // appears (a full retracting buffer never removes its partition entry).
             let part = parts.encode(row);
@@ -1831,11 +1845,13 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> RetractableTopNRanker<S> {
                 .collect();
             // +I(0)/+U(2) accumulate; -U(1)/-D(3) retract.
             let retract = matches!(row_kinds.map(|k| k.value(row)).unwrap_or(0), 1 | 3);
+            let mut changed_position = None;
             if retract {
                 // Remove the first full-row-equal match — a byte compare of the value-encoded
                 // payload (the append-only ranker's equality trade).
                 let full = payloads.row(row);
                 if let Some(pos) = buffer.iter().position(|e| e.payload.row() == full) {
+                    changed_position = Some(pos);
                     if track {
                         delta -= topn_entry_bytes(&buffer[pos]) as isize;
                     }
@@ -1846,6 +1862,7 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> RetractableTopNRanker<S> {
                 // ties (byte compare of the memcomparable sort key).
                 let key_row = keys.row(row);
                 let pos = buffer.partition_point(|e| e.sort.row() <= key_row);
+                changed_position = Some(pos);
                 buffer.insert(
                     pos,
                     TopNRow {
@@ -1873,6 +1890,23 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> RetractableTopNRanker<S> {
                 .iter()
                 .map(|e| Arc::clone(&e.payload))
                 .collect();
+            if self.offset == 0 {
+                if let Some(position) = changed_position {
+                    emit_retracting_topn_mutation(
+                        position,
+                        retract,
+                        limit,
+                        self.output_rank_number,
+                        self.generate_update_before,
+                        &old_top,
+                        &new_top,
+                        &mut out_rows,
+                        &mut out_kinds,
+                        &mut out_ranks,
+                    );
+                }
+                continue;
+            }
             diff_top(
                 rank_output,
                 true,
@@ -1960,7 +1994,10 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> RetractableTopNRanker<S> {
             .convert_columns(&data_arrays)
             .expect("encode payload");
         let row_kinds = row_kind_column(batch);
-        let (offset, limit) = (self.offset as usize, self.limit as usize);
+        let rank_ends = self
+            .rank_end_column
+            .map(|index| integral_rank_ends(batch.column(index)));
+        let offset = self.offset as usize;
         let track = self.memory.tracking();
         let mut delta = 0isize;
         let groups = &mut self.groups;
@@ -1968,6 +2005,10 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> RetractableTopNRanker<S> {
         let staged_order = &mut self.staged_order;
         let staged_old_tops = &mut self.staged_old_tops;
         for row in 0..batch.num_rows() {
+            let limit = rank_ends
+                .as_ref()
+                .map_or(self.limit, |ends| ends.value(row))
+                .max(0) as usize;
             let part = parts.encode(row);
             let buffer = match groups.get_mut(part) {
                 Some(buffer) => buffer,
@@ -2061,12 +2102,26 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> RetractableTopNRanker<S> {
         };
         let touched = std::mem::take(&mut self.staged_order);
         let old_tops = std::mem::take(&mut self.staged_old_tops);
-        let (offset, limit) = (self.offset as usize, self.limit as usize);
+        let offset = self.offset as usize;
         let mut out_rows = Vec::new();
         let mut out_kinds = Vec::new();
         let mut out_ranks = Vec::new();
         for part in touched {
             let buffer = self.groups.get(&part.0).expect("staged partition resident");
+            let limit = if let Some(column) = self.rank_end_column {
+                buffer.first().map_or(0, |row| {
+                    let values = self
+                        .converters
+                        .as_ref()
+                        .expect("converters set")
+                        .payload
+                        .convert_rows(std::iter::once(row.payload.row()))
+                        .expect("decode rank bound");
+                    integral_rank_ends(&values[column]).value(0).max(0) as usize
+                })
+            } else {
+                self.limit.max(0) as usize
+            };
             let new_top: Vec<Arc<OwnedRow>> = buffer
                 [offset.min(buffer.len())..limit.min(buffer.len())]
                 .iter()
@@ -2240,6 +2295,58 @@ impl<S: KeyedStateStore<Vec<TopNRow>>> RetractableTopNRanker<S> {
                 ts_ms: restored_at_ms,
             }); // buffer order
         }
+    }
+}
+
+// Per-record membership changes remain observable when an identical duplicate takes the place
+// of a retracted row. Bundle-level diffs may cancel those pairs, but Flink's raw cascade does not.
+#[allow(clippy::too_many_arguments)]
+fn emit_retracting_topn_mutation(
+    position: usize,
+    retract: bool,
+    limit: usize,
+    output_rank: bool,
+    generate_update_before: bool,
+    old_top: &[Arc<OwnedRow>],
+    new_top: &[Arc<OwnedRow>],
+    rows: &mut Vec<Arc<OwnedRow>>,
+    kinds: &mut Vec<i8>,
+    ranks: &mut Vec<i64>,
+) {
+    if position >= limit {
+        return;
+    }
+    let mut emit = |row: &Arc<OwnedRow>, kind: i8, rank: usize| {
+        rows.push(Arc::clone(row));
+        kinds.push(kind);
+        if output_rank {
+            ranks.push(rank as i64 + 1);
+        }
+    };
+    if output_rank {
+        for rank in position..old_top.len().max(new_top.len()) {
+            match (old_top.get(rank), new_top.get(rank)) {
+                (Some(old), Some(new)) => {
+                    if generate_update_before {
+                        emit(old, 1, rank);
+                    }
+                    emit(new, 2, rank);
+                }
+                (Some(old), None) => emit(old, 3, rank),
+                (None, Some(new)) => emit(new, 0, rank),
+                (None, None) => {}
+            }
+        }
+    } else if retract {
+        emit(&old_top[position], 3, position);
+        if new_top.len() == limit {
+            emit(&new_top[limit - 1], 0, limit - 1);
+        }
+    } else {
+        if old_top.len() == limit {
+            emit(&old_top[limit - 1], 3, limit - 1);
+        }
+        emit(&new_top[position], 0, position);
     }
 }
 
@@ -4213,6 +4320,7 @@ pub extern "system" fn Java_tech_streamfusion_Native_createTopNRanker<'local>(
                     output_rank_number != 0,
                 )
                 .with_key_timestamp_precisions(timestamp_precisions)
+                .with_rank_end_column(rank_end_column)
                 .with_generate_update_before(generate_update_before != 0)
                 .with_net_diff(net_diff != 0)
                 .with_state_ttl(state_ttl_millis),
@@ -4415,6 +4523,7 @@ pub extern "system" fn Java_tech_streamfusion_Native_restoreTopNRankerPartitions
         );
         if let TopNHandle::Retract(retract) = &mut ranker {
             retract.generate_update_before = generate_update_before != 0;
+            retract.rank_end_column = (rank_end_column >= 0).then_some(rank_end_column as usize);
         }
         if let TopNHandle::Append(append) = &mut ranker {
             append.rank_end_column = (rank_end_column >= 0).then_some(rank_end_column as usize);

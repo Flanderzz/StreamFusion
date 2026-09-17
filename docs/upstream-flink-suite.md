@@ -109,6 +109,10 @@ one contract fails the test. Native and expected-fallback counts are reported se
 with the restricted retracting-aggregate diagnostic (the query also uses COUNT DISTINCT) for every phase, backend, timestamp and
 async-state variant. Its unchanged CDC input includes a delete whose final window has no prior
 insert; the upstream negative-count expectation remains intact.
+`RankITCase.testTopNWithGroupByAndRetract` requires nonempty native updates from both the
+grouped aggregate and Top-N. Its variable-size counterpart, `testTopNWithVariableTopSize`,
+requires the explicit update-fast variable-bound fallback. Top-N input is credited only
+after its native push returns, including when an input coalescer delays that call.
 Other upstream cases still check
 result parity without a per-test acceleration contract; planner installation alone does not prove
 that any particular query ran natively.

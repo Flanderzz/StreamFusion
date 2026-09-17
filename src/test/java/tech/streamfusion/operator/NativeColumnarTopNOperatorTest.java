@@ -2,7 +2,6 @@ package tech.streamfusion.operator;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
-import tech.streamfusion.planner.FlinkKeyGroupUtils;
 import java.util.ArrayList;
 import java.util.List;
 import org.apache.arrow.memory.BufferAllocator;
@@ -23,6 +22,7 @@ import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.types.RowKind;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import tech.streamfusion.planner.FlinkKeyGroupUtils;
 
 /** The columnar Top-N operator: Arrow batches in, a changelog of Arrow batches out. */
 @ExtendWith(CoalescingOff.class)
@@ -345,13 +345,86 @@ class NativeColumnarTopNOperatorTest {
     }
   }
 
+  @Test
+  void retractingVariableBoundsRescaleWithRetainedRows() throws Exception {
+    long[] keys = keysForBothSubtasks();
+    for (int task = 0; task < keys.length; task++) {
+      if (keys[task] == 0) {
+        long candidate = 1;
+        while (destinationForKey(candidate) != task) candidate++;
+        keys[task] = candidate;
+      }
+    }
+    OperatorSubtaskState snapshot;
+    try (BufferAllocator allocator = new RootAllocator();
+        var before = harness(retractingVariableOperator(), 1, 0)) {
+      before.setup(new ArrowBatchSerializer());
+      before.open();
+      List<RowData> initial = new ArrayList<>();
+      for (long key : keys)
+        for (long value = 0; value <= key; value++) initial.add(row(key, value));
+      before.processElement(
+          new StreamRecord<>(changelogBatch(allocator, initial.toArray(RowData[]::new))));
+      snapshot = before.snapshot(1, 1);
+      collect(before);
+    }
+    List<List<Object>> actual = new ArrayList<>();
+    for (int task = 0; task < 2; task++) {
+      try (BufferAllocator allocator = new RootAllocator();
+          var restored = harness(retractingVariableOperator(), 2, task)) {
+        restored.setup(new ArrowBatchSerializer());
+        restored.initializeState(
+            AbstractStreamOperatorTestHarness.repartitionOperatorState(
+                snapshot, MAX_PARALLELISM, 1, 2, task));
+        restored.open();
+        restored.processElement(
+            new StreamRecord<>(
+                new ArrowBatch(
+                    RowDataArrowConverter.write(
+                        List.of(row(RowKind.DELETE, keys[task], 0)), SCHEMA, allocator, true),
+                    task)));
+        actual.addAll(collect(restored));
+      }
+    }
+    assertEquals(
+        List.of(
+            change(RowKind.DELETE, keys[0], 0),
+            change(RowKind.INSERT, keys[0], keys[0]),
+            change(RowKind.DELETE, keys[1], 0),
+            change(RowKind.INSERT, keys[1], keys[1])),
+        actual);
+  }
+
+  private static NativeColumnarTopNOperator retractingVariableOperator() {
+    return new NativeColumnarTopNOperator(
+        new int[] {0},
+        new int[] {-1},
+        SCHEMA,
+        new int[] {1},
+        new int[] {1},
+        new int[] {0},
+        0,
+        Long.MAX_VALUE,
+        false,
+        true,
+        null,
+        null,
+        false,
+        false,
+        -1,
+        0,
+        MAX_PARALLELISM,
+        0);
+  }
+
   /** A parallelism-one restore receives several raw key-group streams, not just one per task. */
   @Test
   void rawKeyedStateRestoresMultipleKeyGroupsInOneTask() throws Exception {
     long[] keys = keysForBothSubtasks();
     OperatorSubtaskState snapshot;
     try (BufferAllocator allocator = new RootAllocator();
-        KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> before = harness()) {
+        KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch> before =
+            harness()) {
       before.setup(new ArrowBatchSerializer());
       before.open();
       before.processElement(

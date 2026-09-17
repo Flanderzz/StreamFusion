@@ -4149,6 +4149,97 @@ fn topn_ttl_sweep_reclaims_idle_partitions_silently() {
     assert_eq!(values(&out, 1), vec![50]);
 }
 
+#[test]
+fn retracting_partition_bounds_restore_ttl_and_promote_retained_rows() {
+    for net_diff in [false, true] {
+        let mut ranker = RetractableTopNRanker::new(vec![0], vec![asc(1)], 0, i64::MAX, false)
+            .with_rank_end_column(0)
+            .with_net_diff(net_diff)
+            .with_state_ttl(1000);
+        ranker
+            .push(
+                &topn_changelog(vec![2, 2, 2, 1, 1], vec![10, 20, 30, 10, 20], vec![0; 5]),
+                5000,
+            )
+            .unwrap();
+        if net_diff {
+            ranker.flush_net_diff();
+        }
+        let snapshot = ranker.snapshot();
+        let mut restored = RetractableTopNRanker::restore(
+            vec![0],
+            vec![-1],
+            vec![asc(1)],
+            0,
+            i64::MAX,
+            false,
+            &snapshot,
+            5500,
+        )
+        .with_rank_end_column(0)
+        .with_net_diff(net_diff)
+        .with_state_ttl(1000);
+        let rows = restored
+            .push(&topn_changelog(vec![2, 1], vec![10, 5], vec![3, 0]), 5999)
+            .unwrap();
+        let rows = if net_diff {
+            restored.flush_net_diff()
+        } else {
+            rows
+        };
+        assert_eq!(values(&rows, 0), vec![2, 2, 1, 1]);
+        assert_eq!(values(&rows, 1), vec![10, 30, 10, 5]);
+        assert_eq!(row_kinds(&rows), vec![3, 0, 3, 0]);
+        let rows = restored
+            .push(
+                &topn_changelog(vec![2, 2, 1], vec![20, 50, 40], vec![3, 0, 0]),
+                6999,
+            )
+            .unwrap();
+        let rows = if net_diff {
+            restored.flush_net_diff()
+        } else {
+            rows
+        };
+        assert_eq!(values(&rows, 0), vec![2, 1]);
+        assert_eq!(values(&rows, 1), vec![50, 40]);
+        assert_eq!(row_kinds(&rows), vec![0, 0]);
+    }
+}
+
+#[test]
+fn retracting_partition_bound_bundles_handle_empty_and_nonpositive_windows() {
+    let mut ranker = RetractableTopNRanker::new(vec![0], vec![asc(1)], 0, i64::MAX, false)
+        .with_rank_end_column(0)
+        .with_net_diff(true);
+    ranker
+        .push(
+            &topn_changelog(
+                vec![1, 1, 2, 2, 0, -1],
+                vec![10, 20, 10, 20, 1, 1],
+                vec![0; 6],
+            ),
+            0,
+        )
+        .unwrap();
+    let rows = ranker.flush_net_diff();
+    assert_eq!(values(&rows, 0), vec![1, 2, 2]);
+    ranker
+        .push(
+            &topn_changelog(
+                vec![1, 1, 2, 2, 0, -1],
+                vec![10, 20, 10, 20, 1, 1],
+                vec![3; 6],
+            ),
+            0,
+        )
+        .unwrap();
+    let rows = ranker.flush_net_diff();
+    assert_eq!(values(&rows, 0), vec![1, 2, 2]);
+    assert_eq!(row_kinds(&rows), vec![3, 3, 3]);
+    assert_eq!(ranker.staged_partitions(), 0);
+}
+
 // Retracting Top-N models Flink's every-record treemap write as a whole-buffer clock on the head
 // entry: an idle partition expires as one unit, a stale retraction then finds nothing and emits
 // nothing (Flink's lenient skip), and the next accumulate re-seeds through the normal diff.

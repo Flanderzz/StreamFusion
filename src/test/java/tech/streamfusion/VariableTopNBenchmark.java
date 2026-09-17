@@ -7,6 +7,7 @@ import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.apache.flink.types.Row;
+import org.apache.flink.types.RowKind;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import tech.streamfusion.planner.NativePlanner;
@@ -16,6 +17,7 @@ class VariableTopNBenchmark {
   private static final long ROWS = Long.getLong("variabletopn.rows", 1_000_000L);
   private static final int WARMUP = Integer.getInteger("variabletopn.warmup", 2);
   private static final int RUNS = Integer.getInteger("variabletopn.runs", 5);
+  private static final boolean RETRACTING = Boolean.getBoolean("variabletopn.retracting");
   private static final String SQL =
       "INSERT INTO sink SELECT k, v, rn FROM (SELECT k, v, MOD(k, 3) + 1 AS rank_end, ROW_NUMBER()"
           + " OVER (PARTITION BY k ORDER BY v DESC) AS rn FROM src) WHERE rn <= rank_end";
@@ -47,8 +49,9 @@ class VariableTopNBenchmark {
     double nativeTime = median(times[1]);
     System.out.printf(
         Locale.ROOT,
-        "[variable-top-n] rows=%d Flink=%.6fs Native=%.6fs ratio=%.3fx host_trials=%s"
+        "[variable-top-n] retracting=%s rows=%d Flink=%.6fs Native=%.6fs ratio=%.3fx host_trials=%s"
             + " native_trials=%s%n",
+        RETRACTING,
         ROWS,
         host,
         nativeTime,
@@ -67,15 +70,28 @@ class VariableTopNBenchmark {
     var env = StreamExecutionEnvironment.getExecutionEnvironment();
     env.setParallelism(1);
     var table = StreamTableEnvironment.create(env);
-    table.createTemporaryView(
-        "src",
+    var input =
         env.fromSequence(0, ROWS - 1)
-            .map(i -> Row.of(i % 4096, i))
-            .returns(Types.ROW_NAMED(new String[] {"k", "v"}, Types.LONG, Types.LONG)),
+            .map(
+                i -> {
+                  if (!RETRACTING) return Row.of(i % 4096, i);
+                  long cycle = i / 16384;
+                  return Row.ofKind(
+                      cycle % 2 == 0 ? RowKind.INSERT : RowKind.DELETE,
+                      i % 4096,
+                      (cycle / 2) * 16384 + i % 16384);
+                })
+            .returns(Types.ROW_NAMED(new String[] {"k", "v"}, Types.LONG, Types.LONG));
+    var schema =
         org.apache.flink.table.api.Schema.newBuilder()
             .column("k", org.apache.flink.table.api.DataTypes.BIGINT().notNull())
             .column("v", org.apache.flink.table.api.DataTypes.BIGINT())
-            .build());
+            .build();
+    table.createTemporaryView(
+        "src",
+        RETRACTING
+            ? table.fromChangelogStream(input, schema)
+            : table.fromDataStream(input, schema));
     table.executeSql(
         "CREATE TABLE sink (k BIGINT, v BIGINT, rn BIGINT) WITH ('connector' = 'blackhole')");
     return table;
