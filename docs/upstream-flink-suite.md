@@ -202,6 +202,13 @@ A targeted upstream Paimon run passed 22 continuous-read, partition-write and sc
 the [ORC page](connectors/orc.md#build-and-verification) distinguishes that run from local tests
 that explicitly exercise ORC streaming.
 
+The agent logs each unchanged `PrimaryKeyFileStoreTableITCase` invocation, its randomized table
+defaults, and its completion. If an invocation runs for two minutes, it emits all JVM thread stacks
+to the suite log before CI's job timeout can discard the active test's unwritten JUnit report.
+This diagnostic does not cancel jobs, retry tests, or change upstream timeout/result assertions.
+For local diagnosis, `-Dstreamfusion.flink-suite.diagnostic-delay-seconds=<seconds>` changes only
+when the one-time stack dump is emitted; the default is 120 seconds.
+
 ## Expected host failures in SQL parity audits
 
 Released Flink 2.2.1/JDK 17 fails these expressions even without StreamFusion or an audit source

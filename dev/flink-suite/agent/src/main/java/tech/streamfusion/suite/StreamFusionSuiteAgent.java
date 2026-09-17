@@ -1,5 +1,6 @@
 package tech.streamfusion.suite;
 
+import static net.bytebuddy.matcher.ElementMatchers.isAnnotatedWith;
 import static net.bytebuddy.matcher.ElementMatchers.named;
 import static net.bytebuddy.matcher.ElementMatchers.namedOneOf;
 import static net.bytebuddy.matcher.ElementMatchers.takesArgument;
@@ -64,8 +65,19 @@ public final class StreamFusionSuiteAgent {
   private StreamFusionSuiteAgent() {}
 
   public static void premain(String arguments, Instrumentation instrumentation) {
+    PaimonTestWatch.initialize(System.err);
     new AgentBuilder.Default()
         .with(AgentBuilder.Listener.StreamWriting.toSystemError().withTransformationsOnly())
+        .type(named("org.apache.paimon.flink.PrimaryKeyFileStoreTableITCase"))
+        .transform(
+            (builder, type, classLoader, module, protectionDomain) ->
+                builder.visit(
+                    Advice.to(WatchPaimonTest.class)
+                        .on(
+                            isAnnotatedWith(named("org.junit.jupiter.api.Test"))
+                                .or(
+                                    isAnnotatedWith(
+                                        named("org.junit.jupiter.params.ParameterizedTest"))))))
         .type(named("tech.streamfusion.planner.PhysicalPlanScan"))
         .transform(
             (builder, type, classLoader, module, protectionDomain) ->
@@ -188,6 +200,18 @@ public final class StreamFusionSuiteAgent {
         }
         failure.addSuppressed(proofFailure);
       }
+    }
+  }
+
+  public static final class WatchPaimonTest {
+    @Advice.OnMethodEnter
+    static PaimonTestWatch enter(@Advice.This Object fixture, @Advice.Origin("#t.#m") String test) {
+      return PaimonTestWatch.start(test, fixture);
+    }
+
+    @Advice.OnMethodExit(onThrowable = Throwable.class)
+    static void exit(@Advice.Enter PaimonTestWatch watch, @Advice.Thrown Throwable failure) {
+      watch.finish(failure);
     }
   }
 
