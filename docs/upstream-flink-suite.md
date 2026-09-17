@@ -219,14 +219,15 @@ turn a failed invocation into a skip.
 For local diagnosis, `-Dstreamfusion.flink-suite.diagnostic-delay-seconds=<seconds>` changes only
 when the one-time stack dump is emitted; the default is 120 seconds.
 
-The full Paimon run executes `testStandAloneLookupJobRandom` separately after the other tests.
+The full Paimon run executes `testStandAloneLookupJobRandom` and
+`testStandAloneFullCompactJobRandom` in separate JVMs after the other tests.
 Paimon 2.0.0's stock `StoreCompactOperator.close()` dereferences its writer even when cancellation
 interrupted initialization before the writer existed. This was reproduced without StreamFusion
-by closing an uninitialized stock compactor in Flink's operator harness. The randomized SQL test
-can pass its row assertions and hit that cleanup race while cancelling its conflicting compaction
+by closing an uninitialized stock compactor in Flink's operator harness. These randomized SQL tests
+can pass their row assertions and hit that cleanup race while cancelling their conflicting compaction
 jobs, killing the class's shared TaskManager and stranding subsequent tests. A separate JVM contains
 that upstream fixture failure without changing the test, its random options, or its assertions.
-Both invocations' reports contribute to the result and native execution checks; either Maven
+All invocations' reports contribute to the result and native execution checks; any Maven
 failure remains blocking, including a process timeout without a finished JUnit report.
 Explicit `FLINK_SUITE_TEST` selectors keep their requested grouping for diagnosis.
 

@@ -39,7 +39,10 @@ readonly ORC_SQL_TESTS="org.apache.flink.orc.OrcFsStreamingSinkITCase,org.apache
 readonly PARQUET_MODULE="flink-formats/flink-parquet"
 readonly PARQUET_SINK_TESTS="org.apache.flink.formats.parquet.ParquetFsStreamingSinkITCase,org.apache.flink.formats.parquet.ParquetTimestampITCase"
 readonly PAIMON_SQL_TESTS="org.apache.paimon.flink.AppendOnlyTableITCase,org.apache.paimon.flink.AppendTableITCase,org.apache.paimon.flink.BatchFileStoreITCase,org.apache.paimon.flink.ComputedColumnAndWatermarkTableITCase,org.apache.paimon.flink.ContinuousFileStoreITCase,org.apache.paimon.flink.ReadWriteTableITCase,org.apache.paimon.flink.PrimaryKeyFileStoreTableITCase,org.apache.paimon.flink.CompositePkAndMultiPartitionedTableITCase,org.apache.paimon.flink.FullCompactionFileStoreITCase,org.apache.paimon.flink.FlinkJobRecoveryITCase,org.apache.paimon.flink.RescaleBucketITCase,org.apache.paimon.flink.ScanBucketITCase,org.apache.paimon.flink.KeyOnlyDeletesITCase,org.apache.paimon.flink.FirstRowITCase,org.apache.paimon.flink.CoordinatorCommitITCase"
-readonly PAIMON_ISOLATED_TEST="org.apache.paimon.flink.PrimaryKeyFileStoreTableITCase#testStandAloneLookupJobRandom"
+readonly PAIMON_ISOLATED_TESTS=(
+  "org.apache.paimon.flink.PrimaryKeyFileStoreTableITCase#testStandAloneLookupJobRandom"
+  "org.apache.paimon.flink.PrimaryKeyFileStoreTableITCase#testStandAloneFullCompactJobRandom"
+)
 readonly KAFKA_SQL_TESTS="org.apache.flink.streaming.connectors.kafka.table.DynamicKafkaTableITCase,org.apache.flink.streaming.connectors.kafka.table.KafkaChangelogTableITCase,org.apache.flink.streaming.connectors.kafka.table.KafkaTableITCase,org.apache.flink.streaming.connectors.kafka.table.UpsertKafkaTableITCase"
 readonly ROCKSDB_STATE_SQL_TESTS="org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase,org.apache.flink.table.planner.runtime.stream.sql.DeduplicateITCase,org.apache.flink.table.planner.runtime.stream.sql.GroupWindowITCase,org.apache.flink.table.planner.runtime.stream.sql.IntervalJoinITCase,org.apache.flink.table.planner.runtime.stream.sql.JoinITCase,org.apache.flink.table.planner.runtime.stream.sql.OverAggregateITCase,org.apache.flink.table.planner.runtime.stream.sql.RankITCase,org.apache.flink.table.planner.runtime.stream.sql.TemporalJoinITCase,org.apache.flink.table.planner.runtime.stream.sql.WindowAggregateITCase,org.apache.flink.table.planner.runtime.stream.sql.WindowDeduplicateITCase,org.apache.flink.table.planner.runtime.stream.sql.WindowJoinITCase,org.apache.flink.table.planner.runtime.stream.sql.WindowRankITCase,org.apache.flink.table.planner.runtime.stream.table.AggregateITCase,org.apache.flink.table.planner.runtime.stream.table.JoinITCase,org.apache.flink.table.planner.runtime.stream.table.OverAggregateITCase,org.apache.flink.table.planner.runtime.stream.table.RetractionITCase"
 TEST_SELECTOR_ARGS=()
@@ -104,7 +107,11 @@ case "${SUITE_MODE}" in
     TEST_MODULES="${PAIMON_MODULE}"
     REPORT_ROOT="${PAIMON_ROOT}/${PAIMON_MODULE}/target/surefire-reports"
     if [[ -z "${FLINK_SUITE_TEST:-}" ]]; then
-      TEST_SELECTOR_ARGS=("-Dtest=${PAIMON_SQL_TESTS},!${PAIMON_ISOLATED_TEST}")
+      paimon_selector="${PAIMON_SQL_TESTS}"
+      for isolated_test in "${PAIMON_ISOLATED_TESTS[@]}"; do
+        paimon_selector+=",!${isolated_test}"
+      done
+      TEST_SELECTOR_ARGS=("-Dtest=${paimon_selector}")
     fi
     ;;
   all)
@@ -374,18 +381,27 @@ elif [[ "${SUITE_MODE}" == "paimon" ]]; then
   mvn "${MAVEN_TEST_ARGS[@]}"
   paimon_status=$?
   if [[ -z "${FLINK_SUITE_TEST:-}" ]]; then
-    # A cancelled upstream compactor can kill its shared MiniCluster during cleanup. Run its
-    # unchanged test in its own fork so later SQL tests still have a live TaskManager.
+    # Cancelled upstream compactors can kill their shared MiniCluster during cleanup. Run each
+    # unchanged standalone compaction test in its own fork to contain that lifecycle race.
     mkdir -p "${REPORT_ROOT}/shared-cluster"
     for report in "${REPORT_ROOT}/"*PrimaryKeyFileStoreTableITCase*; do
       if [[ -f "${report}" ]]; then
         mv "${report}" "${REPORT_ROOT}/shared-cluster/" || exit $?
       fi
     done
-    echo "Running unchanged Paimon standalone lookup test in a separate JVM..."
-    mvn "${MAVEN_TEST_ARGS[@]}" "-Dtest=${PAIMON_ISOLATED_TEST}" -Dsurefire.failIfNoSpecifiedTests=true
-    isolated_status=$?
-    if [[ ${isolated_status} -ne 0 ]]; then paimon_status=${isolated_status}; fi
+    for isolated_test in "${PAIMON_ISOLATED_TESTS[@]}"; do
+      echo "Running unchanged ${isolated_test} in a separate JVM..."
+      mvn "${MAVEN_TEST_ARGS[@]}" "-Dtest=${isolated_test}" -Dsurefire.failIfNoSpecifiedTests=true
+      isolated_status=$?
+      if [[ ${isolated_status} -ne 0 ]]; then paimon_status=${isolated_status}; fi
+      isolated_reports="${REPORT_ROOT}/${isolated_test#*#}"
+      mkdir -p "${isolated_reports}"
+      for report in "${REPORT_ROOT}/"*PrimaryKeyFileStoreTableITCase*; do
+        if [[ -f "${report}" ]]; then
+          mv "${report}" "${isolated_reports}/" || exit $?
+        fi
+      done
+    done
   fi
   # Keep either invocation's nonzero exit status for the common report checks below.
   (exit "${paimon_status}")
