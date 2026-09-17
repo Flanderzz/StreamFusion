@@ -15,6 +15,7 @@ pub(crate) mod decimal;
 pub(crate) mod decimal_float;
 pub(crate) mod decode;
 pub(crate) mod encode;
+pub(crate) mod from_unixtime;
 pub(crate) mod json_quote;
 pub(crate) mod json_unquote;
 pub(crate) mod left;

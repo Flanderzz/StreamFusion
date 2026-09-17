@@ -99,6 +99,7 @@ final class RexExpression {
   private static final int KIND_STRING_TO_INTEGER = 33;
   private static final int KIND_INTEGER_TO_STRING = 34;
   private static final int KIND_DECIMAL_FLOAT = 35;
+  private static final int KIND_FROM_UNIXTIME = 36;
   // A typed NULL carries a one-field Arrow IPC schema in the string pool.
   private static final int KIND_LIT_TYPED_NULL = 31;
   // Fused exact arithmetic: payload is the declared result precision*100 + scale; two children.
@@ -692,6 +693,12 @@ final class RexExpression {
       add(KIND_LIT_BOOL, longs.size(), 0);
       longs.add("FLOOR".equals(call.getOperator().getName()) ? 0L : 1L);
       return true;
+    }
+    String unixTimeFormat = nativeUnixTimeFormat(call);
+    if (unixTimeFormat != null) {
+      add(KIND_FROM_UNIXTIME, strings.size(), 1);
+      strings.add(unixTimeFormat);
+      return emit(call.getOperands().get(0));
     }
     if (needsTemporalFunction(call) || needsExactPower(call)) {
       return emitHostExpression(call, false);
@@ -1946,6 +1953,23 @@ final class RexExpression {
     };
   }
 
+  private String nativeUnixTimeFormat(RexCall call) {
+    if (!"FROM_UNIXTIME".equalsIgnoreCase(call.getOperator().getName())
+        || call.getOperands().isEmpty()
+        || call.getOperands().size() > 2) return null;
+    SqlTypeName input = call.getOperands().get(0).getType().getSqlTypeName();
+    if (input != SqlTypeName.BIGINT
+        && input != SqlTypeName.INTEGER
+        && input != SqlTypeName.SMALLINT
+        && input != SqlTypeName.TINYINT) return null;
+    String pattern = "yyyy-MM-dd HH:mm:ss";
+    if (call.getOperands().size() == 2) {
+      if (!(call.getOperands().get(1) instanceof RexLiteral literal)) return null;
+      pattern = literal.getValueAs(String.class);
+    }
+    return NativeUnixTimeFormat.encode(pattern, sessionZoneId);
+  }
+
   private static boolean needsTemporalFunction(RexCall call) {
     String name = call.getOperator().getName().toUpperCase(Locale.ROOT);
     if (java.util.Set.of(
@@ -2106,7 +2130,7 @@ final class RexExpression {
     return true;
   }
 
-  private static RexNode hostExpressionArguments(
+  private RexNode hostExpressionArguments(
       RexNode node,
       List<RexNode> arguments,
       List<org.apache.flink.table.types.logical.LogicalType> types,
@@ -2116,7 +2140,9 @@ final class RexExpression {
       return node;
     }
     if (node instanceof RexCall call
-        && (preserveDecimalNullness || needsTemporalFunction(call) || needsExactPower(call))) {
+        && (preserveDecimalNullness
+            || needsTemporalFunction(call) && nativeUnixTimeFormat(call) == null
+            || needsExactPower(call))) {
       List<RexNode> operands = new ArrayList<>();
       for (RexNode operand : call.getOperands()) {
         operands.add(hostExpressionArguments(operand, arguments, types, codes, preserveDecimalNullness));
@@ -2125,7 +2151,8 @@ final class RexExpression {
     }
     int code = hostCastTypeCode(node.getType());
     if (code < 0) {
-      throw new IllegalArgumentException("unsupported generated-expression argument type " + node.getType());
+      throw new IllegalArgumentException(
+          "unsupported generated-expression argument type " + node.getType());
     }
     RexInputRef reference = new RexInputRef(arguments.size(), node.getType());
     arguments.add(node);
@@ -2509,7 +2536,8 @@ final class RexExpression {
     List<RexNode> args = call.getOperands();
     for (RexNode argument : args) {
       if (udfTypeCode(argument.getType()) < 0) {
-        return rejectUdfMethod("UDF argument type not native: " + argument.getType().getSqlTypeName());
+        return rejectUdfMethod(
+            "UDF argument type not native: " + argument.getType().getSqlTypeName());
       }
     }
     Method eval = resolveEval(scalar, args);

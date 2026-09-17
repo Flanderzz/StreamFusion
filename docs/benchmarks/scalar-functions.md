@@ -995,3 +995,41 @@ These simple UDFs remain slower than stock Flink. The change extends coverage so
 exact-type UDF can stay between native operators; it does not claim a standalone speedup.
 The controls show the conversion cost before adding the JVM callback, and larger native islands
 require their own measurements before claiming an end-to-end gain.
+
+## FROM_UNIXTIME literal formats
+
+`ScalarFunctionBenchmark` selects `FROM_UNIXTIME_DEFAULT`, `FROM_UNIXTIME_LITERAL` and
+`FROM_UNIXTIME_BRIDGE`. The first two use the native fixed-zone formatter; the third reads
+`yyyyMMddHHmm` from a runtime pattern column and retains the JVM bridge. All use a nullable
+BIGINT source, modern epoch seconds varying over one day, UTC, parallelism 1 and a rowwise
+blackhole sink, with both row/Arrow transposes verified in the native plan.
+
+An M4 Pro/JDK 17 release build (`-Pbench`, mimalloc), 2 million rows, NULL every eighth row,
+two warmups and five interleaved Flink/native measurements gave:
+
+| Query | Flink seconds | Native seconds | Flink/native |
+| --- | ---: | ---: | ---: |
+| Identity control | 0.801519 | 0.900607 | 0.890x |
+| Default format | 1.542533 | 1.303721 | 1.183x |
+| Literal `yyyyMMddHHmm` | 1.245461 | 1.251630 | 0.995x |
+| Dynamic pattern, JVM bridge | 1.204726 | 2.209705 | 0.545x |
+
+The default native format is faster in this run; the compact literal is roughly tied with
+Flink. The dynamic control additionally carries a pattern column, so it does not isolate
+callback cost.
+
+A separate before/after run compared identical literal queries against the previous
+implementation at `a4b9902f`, using that revision's release binary and planner with the same
+benchmark fixtures. Each revision ran with `-Dscalar.engine=native`, two warmups and five
+measured trials, keeping all other settings unchanged:
+
+| Query | Previous JVM bridge seconds | Native formatter seconds | Before/after |
+| --- | ---: | ---: | ---: |
+| Identity control | 0.655586 | 0.651136 | 1.007x |
+| Default format | 1.696912 | 1.003518 | 1.691x |
+| Literal `yyyyMMddHHmm` | 1.543752 | 0.958994 | 1.610x |
+
+These are sequential native-only runs, separate from the interleaved Flink comparison above.
+The nearly unchanged identity control supports attributing the improvement to removing the
+formatting handoff, but the result remains a local end-to-end measurement rather than a
+kernel-only speed claim.

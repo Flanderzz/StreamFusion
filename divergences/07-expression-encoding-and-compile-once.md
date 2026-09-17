@@ -396,6 +396,14 @@ Delegates literal sets to DataFusion's right-trim kernel and scalar-pattern reus
 
 ## Review-driven admission and organization
 
+FROM_UNIXTIME's literal numeric-format subset uses a compiled DataFusion scalar expression,
+following Arroyo's scalar registry boundary. A small integer calendar kernel is needed instead
+of chrono formatting: Flink uses Java long multiplication overflow and SimpleDateFormat's
+Julian/Gregorian cutover, including dates outside chrono's range. Fixed-offset zones avoid a
+second, potentially different timezone database. Dynamic formats, transition zones and other
+calendar/locale formats keep the existing Flink-generated evaluator. The format parser compiles
+numeric fields and quoted literals once; admitted formatting makes no JVM expression callback.
+
 All scalar registrations added here live in `native/engine/src/flink_functions/mod.rs`, following
 Arroyo's registry pattern. The expression decoder consults that registry once, and all local
 kernels live beneath the same module. Unknown registrations return None; they never select an
