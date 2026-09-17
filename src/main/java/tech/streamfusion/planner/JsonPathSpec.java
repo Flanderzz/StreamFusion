@@ -2,16 +2,23 @@ package tech.streamfusion.planner;
 
 import java.util.Locale;
 import java.util.regex.Pattern;
+import org.apache.flink.shaded.com.jayway.jsonpath.internal.Utils;
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.core.io.JsonStringEncoder;
 
 /** Admission grammar shared with the native SQL/JSON definite-path reader. */
 final class JsonPathSpec {
   private static final Pattern MODE =
       Pattern.compile("^\\s*(strict|lax)\\s+(.+)$", Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
+  private static final String ESCAPE = "\\\\(?:u[0-9a-fA-F]{4}|[\\x20-\\x74\\x76-\\x7e])";
   private static final Pattern STEP =
       Pattern.compile(
           "\\.(?<dot>[\\p{L}_][\\p{L}\\p{N}_]*)"
-              + "|\\[ *'(?<single>[^'\\\\\\x00-\\x1f]*)' *\\]"
-              + "|\\[ *\"(?<quoted>[^\"\\\\\\x00-\\x1f]*)\" *\\]"
+              + "|\\[ *'(?<single>(?:[^'\\\\\\x00-\\x1f]|"
+              + ESCAPE
+              + ")*)' *\\]"
+              + "|\\[ *\"(?<quoted>(?:[^\"\\\\\\x00-\\x1f]|"
+              + ESCAPE
+              + ")*)\" *\\]"
               + "|\\[ *(?<index>-?[0-9]+) *\\]");
 
   private JsonPathSpec() {}
@@ -62,10 +69,21 @@ final class JsonPathSpec {
         normalized.append('[').append(step.group("index")).append(']');
       } else if (step.group("dot") != null) {
         normalized.append('.').append(step.group("dot"));
-      } else if (step.group("single") != null) {
-        normalized.append("['").append(step.group("single")).append("']");
       } else {
-        normalized.append("[\"").append(step.group("quoted")).append("\"]");
+        boolean single = step.group("single") != null;
+        String name = step.group(single ? "single" : "quoted");
+        if (name.indexOf('\\') >= 0) {
+          name = Utils.unescape(name);
+          if (name.codePoints().anyMatch(c -> c >= 0xd800 && c <= 0xdfff)) return null;
+          // The native wire grammar uses JSON escaping, independent of the SQL path's quote style.
+          normalized
+              .append("[\"")
+              .append(JsonStringEncoder.getInstance().quoteAsString(name))
+              .append("\"]");
+        } else {
+          char quote = single ? '\'' : '"';
+          normalized.append('[').append(quote).append(name).append(quote).append(']');
+        }
       }
       end = step.end();
     }

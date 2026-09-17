@@ -187,6 +187,16 @@ class ScalarFunctionBenchmark {
                   new Query("IS_JSON_SCALAR", "tt_json_predicate", "s IS JSON SCALAR", "BOOLEAN"),
                   new Query("JSON_VALUE", "tt_json", "JSON_VALUE(s, 'lax $.user.name')", "STRING"),
                   new Query(
+                      "JSON_VALUE_ESCAPED_PATH",
+                      "tt_json_escaped",
+                      "JSON_VALUE(s, '$[\"a\\\\b\"][\"a\\nb\"]')",
+                      "STRING"),
+                  new Query(
+                      "JSON_EXISTS_ESCAPED_PATH",
+                      "tt_json_escaped",
+                      "JSON_EXISTS(s, '$[\"a\\\\b\"][\"a\\nb\"]')",
+                      "BOOLEAN"),
+                  new Query(
                       "JSON_VALUE_NEGATIVE",
                       "tt_json_negative",
                       "JSON_VALUE(s, '$.a[-1]')",
@@ -226,6 +236,16 @@ class ScalarFunctionBenchmark {
                       "tt_json",
                       "JSON_VALUE(s, 'lax $[ ''user'' ][ ''name'' ]')",
                       "STRING"),
+                  new Query(
+                      "JSON_VALUE_NONSTANDARD_ESCAPE",
+                      "tt_json",
+                      "JSON_VALUE(s, 'lax $[\"u\\ser\"][\"na\\me\"]')",
+                      "STRING"),
+                  new Query(
+                      "JSON_EXISTS_NONSTANDARD_ESCAPE",
+                      "tt_json",
+                      "JSON_EXISTS(s, 'lax $[\"u\\ser\"][\"na\\me\"]')",
+                      "BOOLEAN"),
                   new Query(
                       "JSON_EXISTS_SPACED_PATH",
                       "tt_json",
