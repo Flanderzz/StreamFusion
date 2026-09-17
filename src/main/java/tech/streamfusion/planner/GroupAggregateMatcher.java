@@ -1,6 +1,5 @@
 package tech.streamfusion.planner;
 
-import tech.streamfusion.operator.RowDataArrowConverter;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.AggregateCall;
 import org.apache.calcite.rel.type.RelDataType;
@@ -10,17 +9,12 @@ import org.apache.flink.table.planner.hint.StateTtlHint;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalGroupAggregate;
 import org.apache.flink.table.planner.plan.utils.ChangelogPlanUtils;
 import scala.collection.Seq;
+import tech.streamfusion.operator.RowDataArrowConverter;
 
 /**
- * Describes the native single-phase non-windowed {@code GROUP BY} shape.
- *
- * <p>Scope: SUM/MIN/MAX/COUNT over bigint/int/double value columns (SUM/MIN/MAX also decimal), plus
- * AVG over bigint/int/smallint/tinyint/float/double (a running sum + non-null count, result cast back
- * to the input type — decimal AVG falls back), with any grouping keys and pass-through columns the
- * row/Arrow conversion supports. DISTINCT is native for COUNT (a per-key value set), SUM (the set plus
- * a running sum folded as values enter/leave), and MIN/MAX (semantically their plain forms); only
- * AVG(DISTINCT) falls back. Timestamp extrema use the retractable multiset and preserve fractional
- * nanoseconds, including for local-zoned timestamp values.
+ * Recognizes native single-phase grouped aggregation. Numeric and distinct aggregates retain their
+ * typed accumulators; FIRST_VALUE/LAST_VALUE preserve arrival order, and SINGLE_VALUE enforces
+ * cardinality. The admission checks below keep unsupported value types and aggregate forms on Flink.
  */
 final class GroupAggregateMatcher {
 
@@ -49,12 +43,40 @@ final class GroupAggregateMatcher {
       if (call.isApproximate()) {
         return "GROUP BY: an approximate aggregate";
       }
-      int kind = WindowAggregateMatcher.aggregateKind(call.getAggregation().getKind());
+      int kind = aggregateKind(agg, call);
+      if (kind < 0 && call.getAggregation().getKind() == org.apache.calcite.sql.SqlKind.SUM0) {
+        return "GROUP BY: SUM0 requires grouped, unfiltered non-null integer values";
+      }
       if (kind < 0) {
-        return "GROUP BY: only SUM/MIN/MAX/COUNT/AVG aggregates";
+        return "GROUP BY: only SUM/MIN/MAX/COUNT/AVG/FIRST_VALUE/LAST_VALUE/SINGLE_VALUE"
+            + " aggregates";
       }
       if (call.getArgList().size() > 1) {
         return "GROUP BY: only single-argument aggregates";
+      }
+      if (kind >= 12 && kind <= 16) {
+        if (kind >= 15) {
+          Long hint = StateTtlHint.getStateTtlFromHintOnSingleRel(agg.hints());
+          long retention =
+              hint == null
+                  ? org.apache.flink.table.planner.utils.ShortcutUtils.unwrapTableConfig(agg)
+                      .getIdleStateRetention()
+                      .toMillis()
+                  : hint;
+          if (retention > 0) {
+            return "GROUP BY: retracting FIRST_VALUE/LAST_VALUE with TTL require independently"
+                + " expiring value/order maps";
+          }
+        }
+        if (call.isDistinct() || call.getArgList().size() != 1) {
+          return "GROUP BY: FIRST_VALUE/LAST_VALUE/SINGLE_VALUE require one non-DISTINCT argument";
+        }
+        SqlTypeName valueType =
+            inputType.getFieldList().get(call.getArgList().get(0)).getType().getSqlTypeName();
+        if (!orderedValueType(valueType)) {
+          return "GROUP BY: FIRST_VALUE/LAST_VALUE/SINGLE_VALUE over an unsupported value type";
+        }
+        continue;
       }
       // DISTINCT: COUNT(DISTINCT x) keeps a value→multiplicity set (Flink's DistinctAccumulator) over
       // any type the row admits; SUM(DISTINCT x) adds a running sum folded as values enter/leave the
@@ -99,6 +121,23 @@ final class GroupAggregateMatcher {
       }
     }
     return null;
+  }
+
+  private static boolean orderedValueType(SqlTypeName type) {
+    return switch (type) {
+      case TINYINT,
+          SMALLINT,
+          INTEGER,
+          BIGINT,
+          DECIMAL,
+          CHAR,
+          VARCHAR,
+          DATE,
+          TIMESTAMP,
+          TIMESTAMP_WITH_LOCAL_TIME_ZONE ->
+          true;
+      default -> false;
+    };
   }
 
   /** The value types the native running aggregate folds directly: bigint, int, double. */
@@ -159,7 +198,7 @@ final class GroupAggregateMatcher {
     int[] kinds = new int[aggCalls.size()];
     for (int i = 0; i < aggCalls.size(); i++) {
       AggregateCall call = aggCalls.apply(i);
-      int kind = WindowAggregateMatcher.aggregateKind(call.getAggregation().getKind());
+      int kind = aggregateKind(agg, call);
       if (call.isDistinct() && kind == WindowAggregateMatcher.KIND_COUNT) {
         kind = KIND_COUNT_DISTINCT;
       } else if (call.isDistinct() && kind == WindowAggregateMatcher.KIND_SUM) {
@@ -181,6 +220,36 @@ final class GroupAggregateMatcher {
       kinds[i] = kind;
     }
     return kinds;
+  }
+
+  private static int aggregateKind(StreamPhysicalGroupAggregate agg, AggregateCall call) {
+    switch (call.getAggregation().getKind()) {
+      case FIRST_VALUE -> {
+        return ChangelogPlanUtils.inputInsertOnly(agg) ? 12 : 15;
+      }
+      case LAST_VALUE -> {
+        return ChangelogPlanUtils.inputInsertOnly(agg) ? 13 : 16;
+      }
+      case SINGLE_VALUE -> {
+        return 14;
+      }
+      default -> {}
+    }
+    if (call.getAggregation().getKind() != org.apache.calcite.sql.SqlKind.SUM0) {
+      return WindowAggregateMatcher.aggregateKind(call.getAggregation().getKind());
+    }
+    // A live group has at least one contributing non-null integer, making SUM and SUM0
+    // identical. This includes SUM above a window's non-null COUNT result.
+    if (agg.grouping().length == 0
+        || call.getArgList().size() != 1
+        || call.filterArg >= 0
+        || call.isDistinct()) return -1;
+    var value = agg.getInput().getRowType().getFieldList().get(call.getArgList().get(0)).getType();
+    if (value.isNullable()) return -1;
+    return switch (value.getSqlTypeName()) {
+      case TINYINT, SMALLINT, INTEGER, BIGINT -> WindowAggregateMatcher.KIND_SUM;
+      default -> -1;
+    };
   }
 
   static int[] valueColumns(StreamPhysicalGroupAggregate agg) {

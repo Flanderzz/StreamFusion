@@ -90,6 +90,36 @@ The nested consumer returns DECIMAL(38,9). Controls are not subtracted from timi
 Reproduce with the command below, selecting
 `-Dscalar.functions=UDF_DECIMAL_IS_NULL,UDF_DECIMAL_NESTED` and `-Dscalar.nullEvery=8`.
 
+## Floating conversion and POWER diagnostic (2026-09-16)
+
+Measured with Apple M4 Pro, JDK 17, UTC, Flink 2.2.1 and the release `bench` profile
+with mimalloc. Each query processes 2,000,000 rows at parallelism 1, with two warmups and
+five alternating trials per engine. Both transposes and native Calc are asserted; the
+source and blackhole sink remain rowwise. No other local tests or benchmarks ran concurrently.
+
+The scalar DECIMAL(38,9) source alternates `12345678901234567890.123456700` and
+`-0.000000100`, with every eighth value NULL. Arrays contain both values and a NULL
+element, with every eighth container NULL. POWER uses the existing BIGINT number fixture
+with a runtime base cast to DOUBLE and exponent `0.5`. The three source-matched controls
+run in the same JVM before the functions; controls are not subtracted from timings.
+
+| Case | Flink (s) | Native (s) | Flink / native |
+|---|---:|---:|---:|
+| DECIMAL identity control | 0.550296 | 0.906067 | 0.607x |
+| ARRAY<DECIMAL> identity control | 0.645095 | 1.420928 | 0.454x |
+| BIGINT identity control | 0.613385 | 0.858960 | 0.714x |
+| `CAST(n AS FLOAT)` | 0.825372 | 1.019472 | 0.810x |
+| `CAST(a AS ARRAY<FLOAT>)` | 1.682023 | 1.603254 | 1.049x |
+| `POWER(CAST(n AS DOUBLE), 0.5)` | 0.619829 | 1.071053 | 0.579x |
+
+The array conversion has a small advantage in this workload; the scalar conversion and
+POWER are slower. The conversions execute in Rust, while default POWER uses Flink-generated
+JVM code to preserve its exact Math.pow contract. These results establish coverage costs,
+not a general speedup for floating expressions or larger composed pipelines. Reproduce with
+`-Dscalar.functions=DECIMAL_TO_FLOAT,DECIMAL_ARRAY_TO_FLOAT,POWER_EXACT` and
+`-Dscalar.nullEvery=8` in the command below. CSV output quotes the declared result type so
+precision/scale commas remain inside one field.
+
 ## Inputs
 
 - Search strings add `row:`/`other:` and `:match`/`:miss` around the padding: total lengths are
@@ -965,3 +995,104 @@ These simple UDFs remain slower than stock Flink. The change extends coverage so
 exact-type UDF can stay between native operators; it does not claim a standalone speedup.
 The controls show the conversion cost before adding the JVM callback, and larger native islands
 require their own measurements before claiming an end-to-end gain.
+
+## FROM_UNIXTIME literal formats
+
+`ScalarFunctionBenchmark` selects `FROM_UNIXTIME_DEFAULT`, `FROM_UNIXTIME_LITERAL` and
+`FROM_UNIXTIME_BRIDGE`. The first two use the native fixed-zone formatter; the third reads
+`yyyyMMddHHmm` from a runtime pattern column and retains the JVM bridge. All use a nullable
+BIGINT source, modern epoch seconds varying over one day, UTC, parallelism 1 and a rowwise
+blackhole sink, with both row/Arrow transposes verified in the native plan.
+
+An M4 Pro/JDK 17 release build (`-Pbench`, mimalloc), 2 million rows, NULL every eighth row,
+two warmups and five interleaved Flink/native measurements gave:
+
+| Query | Flink seconds | Native seconds | Flink/native |
+| --- | ---: | ---: | ---: |
+| Identity control | 0.801519 | 0.900607 | 0.890x |
+| Default format | 1.542533 | 1.303721 | 1.183x |
+| Literal `yyyyMMddHHmm` | 1.245461 | 1.251630 | 0.995x |
+| Dynamic pattern, JVM bridge | 1.204726 | 2.209705 | 0.545x |
+
+The default native format is faster in this run; the compact literal is roughly tied with
+Flink. The dynamic control additionally carries a pattern column, so it does not isolate
+callback cost.
+
+A separate before/after run compared identical literal queries against the previous
+implementation at `a4b9902f`, using that revision's release binary and planner with the same
+benchmark fixtures. Each revision ran with `-Dscalar.engine=native`, two warmups and five
+measured trials, keeping all other settings unchanged:
+
+| Query | Previous JVM bridge seconds | Native formatter seconds | Before/after |
+| --- | ---: | ---: | ---: |
+| Identity control | 0.655586 | 0.651136 | 1.007x |
+| Default format | 1.696912 | 1.003518 | 1.691x |
+| Literal `yyyyMMddHHmm` | 1.543752 | 0.958994 | 1.610x |
+
+These are sequential native-only runs, separate from the interleaved Flink comparison above.
+The nearly unchanged identity control supports attributing the improvement to removing the
+formatting handoff, but the result remains a local end-to-end measurement rather than a
+kernel-only speed claim.
+
+## JSON string consumers
+
+The surrogate-identity fix evaluates a JSON string producer and its scalar consumers together
+in Flink-generated code within columnar Calc. This preserves correct comparisons before the
+final Arrow conversion; it is a correctness change, not a faster JSON parsing kernel.
+
+Release build (`-Pbench`), JDK 17, UTC, parallelism 1, 2m rows, NULL every eighth row, two
+warmups and five interleaved measurements per engine. The runtime source alternates ASCII
+JSON texts `"\uD800"` and `"?"`; their lengths are fixed at eight and three bytes. The generic
+payload-budget flag does not pad this fixture. Both source and blackhole sink are rowwise,
+and the benchmark asserts both transpose operators. No other tests ran during measurement.
+
+| Query | Flink seconds | Native Calc with JVM expression seconds | Flink/native |
+| --- | ---: | ---: | ---: |
+| Source-matched identity control | 0.511876 | 1.061221 | 0.482x |
+| `JSON_VALUE(s, '$') = '?'` | 0.771874 | 1.351576 | 0.571x |
+| `JSON_UNQUOTE(s) = '?'` | 0.620493 | 1.203020 | 0.516x |
+
+The fused path is slower than Flink in this short pipeline. The previous native comparisons
+returned incorrect answers for the surrogate row, so their timings are not a valid performance
+baseline for the corrected operation. Direct projections retain the existing Rust kernels.
+These measurements do not justify a speed claim for a larger columnar pipeline.
+
+```bash
+TZ=UTC SF_BENCHMARK=true mvn -pl streamfusion-runtime -am test -Pbench \
+  -Dtest=ScalarFunctionBenchmark -Dsurefire.failIfNoSpecifiedTests=false \
+  -Dscalar.functions=JSON_VALUE_IDENTITY,JSON_UNQUOTE_IDENTITY \
+  -Dscalar.rows=2000000 -Dscalar.nullEvery=8 -Dscalar.warmup=2 -Dscalar.runs=5 \
+  -Dscalar.engine=both
+```
+
+## Negative JSON array indexes
+
+`JSON_VALUE_NEGATIVE` and `JSON_EXISTS_NEGATIVE` select `$.a[-1]` from a 32-element
+string array. `JSON_VALUE_POSITIVE_CONTROL` selects the same value with `$.a[31]`.
+Documents alternate between final values `Alice` and `Bob`, with the usual 264-byte
+padding-string budget. Negative indexes previously declined the native JSON kernel.
+
+M4 Pro/JDK 17, release build (`-Pbench`, mimalloc), UTC, parallelism 1, 2m rows,
+NULL every eighth row, two warmups and five interleaved measurements per engine:
+
+| Query | Flink seconds | Native seconds | Flink/native |
+| --- | ---: | ---: | ---: |
+| Source-matched identity control | 0.774887 | 1.496905 | 0.518x |
+| `JSON_VALUE(s, '$.a[-1]')` | 2.955556 | 3.951091 | 0.748x |
+| `JSON_VALUE(s, '$.a[31]')` | 3.147889 | 3.069012 | 1.026x |
+| `JSON_EXISTS(s, '$.a[-1]')` | 2.926447 | 3.831098 | 0.764x |
+
+Both row/Arrow transposes are present and asserted. No other local tests ran during
+measurement. The negative-index implementation extends native coverage, but is slower
+than Flink in this short pipeline. The scalar reader counts the array in an extra pass;
+the SIMD reader uses its existing array length. The positive-index control exposes the
+additional cost on the same input. These numbers do not establish a speedup for negative
+indexes or for a larger native pipeline.
+
+```bash
+TZ=UTC SF_BENCHMARK=true mvn -pl streamfusion-runtime -am test -Pbench \
+  -Dtest=ScalarFunctionBenchmark -Dsurefire.failIfNoSpecifiedTests=false \
+  -Dscalar.functions=JSON_VALUE_NEGATIVE,JSON_VALUE_POSITIVE_CONTROL,JSON_EXISTS_NEGATIVE \
+  -Dscalar.rows=2000000 -Dscalar.nullEvery=8 -Dscalar.warmup=2 -Dscalar.runs=5 \
+  -Dscalar.engine=both
+```

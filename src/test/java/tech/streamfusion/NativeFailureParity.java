@@ -18,7 +18,7 @@ final class NativeFailureParity {
   enum Route { HOST, NATIVE, FALLBACK, UNPLANNED }
 
   record Outcome(List<List<Object>> rows, Exception failure, Phase phase, Route route,
-      List<String> fallbackReasons) {
+      List<String> fallbackReasons, List<String> operatorTypes, int substitutions) {
     @Override
     public String toString() {
       return "Outcome[phase=" + phase + ", route=" + route + ", cause=" + rootCause()
@@ -97,7 +97,9 @@ final class NativeFailureParity {
         : scan == null || scan.operatorTypes().isEmpty() ? Route.UNPLANNED
         : scan.substitutions() > 0 ? Route.NATIVE : Route.FALLBACK;
     return new Outcome(rows, failure, phase, route,
-        scan == null ? List.of() : List.copyOf(scan.fallbackReasons()));
+        scan == null ? List.of() : List.copyOf(scan.fallbackReasons()),
+        scan == null ? List.of() : List.copyOf(scan.operatorTypes()),
+        scan == null ? 0 : scan.substitutions());
   }
 
   /** Prefer the originating operator frame; the collect API also transports remote task failures. */

@@ -112,9 +112,17 @@ fn select<'a>(tape: &Tape<'a>, steps: &[Step<'_>]) -> Option<Value<'a>> {
                     None => return Some(Value::Missing),
                 }
             }
-            (Node::Array { len, .. }, Step::Index(index)) if index < len => {
+            (Node::Array { len, .. }, Step::Index(index)) => {
+                let offset = if *index < 0 {
+                    len.checked_sub(index.unsigned_abs() as usize)
+                } else {
+                    Some(*index as usize)
+                };
+                let Some(offset) = offset.filter(|offset| offset < len) else {
+                    return Some(Value::Missing);
+                };
                 let mut rest = &nodes[1..];
-                for _ in 0..*index {
+                for _ in 0..offset {
                     rest = &rest[width(rest.first()?)..];
                 }
                 &rest[..width(rest.first()?)]
@@ -226,6 +234,33 @@ mod tests {
                 equivalent(&path, &input, &mut reader);
             }
         }
+    }
+
+    #[test]
+    fn negative_indexes_use_tape_array_lengths_and_keep_independent_selections() {
+        let input = format!(r#"{{"a":["first",{{"b":["x","y"]}},"last"]{}}}"#, fields());
+        let mut reader = Reader::new(4000);
+        assert!(candidate(&input));
+        for (text, expected) in [
+            ("$.a[-1]", "last"),
+            ("$.a[-3]", "first"),
+            ("$.a[-2].b[-1]", "y"),
+            ("$.a[-0]", "first"),
+        ] {
+            let path = Path::parse(text, "13.0").unwrap();
+            assert_eq!(
+                reader.read(&path, &input),
+                Ok(Value::DecodedString(expected))
+            );
+            equivalent(&path, &input, &mut reader);
+        }
+        for text in ["lax $.a[-4]", "lax $.a[-2147483648]", "lax $.a[2147483647]"] {
+            let path = Path::parse(text, "13.0").unwrap();
+            assert_eq!(reader.read(&path, &input), Ok(Value::Missing));
+        }
+        let input = format!(r#"{{"a":["first"]{},"a":[]}}"#, fields());
+        let path = Path::parse("lax $.a[-1]", "13.0").unwrap();
+        assert_eq!(reader.read(&path, &input), Ok(Value::Missing));
     }
 
     #[test]

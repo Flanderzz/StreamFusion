@@ -25,6 +25,64 @@ drains local slices into the global before snapshotting; AVG pairs use the exist
 accumulator checkpoint layout in memory and direct RocksDB state. Restore tests merge subsequent
 partials and verify every hopping window after RocksDB checkpoints and both backend transitions.
 
+The local stage retains rows whose slice has already fired: that slice can still belong to
+an open HOP or CUMULATE window. The global merge admits each partial only into final windows
+that have not fired, so late partials cannot reopen completed windows. This also applies after
+checkpoint restore and when the late row introduces a new key. TUMBLE drops the partial once
+its single final window has closed. Tests compare explicit watermarks, mixed ordinary/distinct
+aggregates and both aggregation phases against released Flink.
+
+## Retracting COUNT/SUM windows
+
+Aligned event-time TUMBLE, HOP and CUMULATE accept updating input, including native Top-N,
+for unfiltered SUM over TINYINT/SMALLINT/INT/BIGINT, COUNT over the supported numeric value
+columns, and COUNT(*). Both single-phase and local/global execution remain columnar.
+
+Every input retains its INSERT/UPDATE_BEFORE/UPDATE_AFTER/DELETE sign. SUM carries Flink's
+nullable sum and signed non-NULL count; COUNT carries a signed count. A separate live-row
+count, or an existing COUNT(*), suppresses a final group only when that count equals zero.
+A live all-NULL group therefore emits COUNT 0/SUM NULL, while an unmatched delete can produce
+negative counts and sums as it does in released Flink. Integer sums preserve their declared
+width and wrapping behavior. Top-1 replacing 10 with 20 leaves SUM 20, and moving the last
+live row out of a window removes its old group.
+
+Local partials preserve the full (sum, count) pair and the live-row count in Flink's field
+order. A checkpoint can split an insertion from its retraction: the next local partial may
+be negative, and the global merges it into existing state. A zero-count partial must also
+survive: replacing a value can change SUM without changing group membership. Closed slices
+can still update
+open HOP/CUMULATE windows, but cannot reopen a final window that has fired. All state fields
+participate in memory checkpoints, raw keyed savepoints and direct RocksDB checkpoints.
+
+SQL tests force a failure after a checkpoint containing live groups, then verify restored
+updates, deletes, NULLs, duplicates and negative counts on both backends. Per-job operator
+metrics require nonempty input and output from the native Top-N and the expected window
+stages. Native tests also cover late changes after restore and canonical RocksDB-to-memory
+state transfer. Updating DISTINCT and other remaining forms stay on Flink.
+
+## Window COUNT(DISTINCT)
+
+Unfiltered `COUNT(DISTINCT value)` is native for integer, DECIMAL, CHAR/VARCHAR, DATE,
+TIMESTAMP and TIMESTAMP_LTZ values. It ignores NULLs and counts each value once per key/window.
+TUMBLE, HOP and CUMULATE support single-phase and local/global execution; attached window
+results use the existing two-phase path. SESSION and admitted legacy group windows reuse the
+same distinct accumulator. Processing-time windows retain their timer-driven lifetime.
+
+Each local partial carries an Arrow list of distinct values. The global unions those lists,
+so duplicates split across tasks or checkpoint barriers count once. Ordinary aggregates and
+AVG's two-field partials can share the same window. Flink's extra MapView partial fields are
+replaced by these lists throughout the native local/exchange/global pipeline.
+
+Timestamp distinct keys follow Flink's serialized key representation: precision 0–3 uses
+milliseconds; precision 4–9 retains the fractional nanos. This matters when an internal cast
+leaves fractions in a value declared as a compact timestamp.
+
+Distinct sets are included in checkpoints and key-group snapshots, then removed with their
+window on firing. Late raw input cannot recreate a closed window. Variable-sized list state
+uses the existing snapshot fallback when the RocksDB backend is selected, rather than direct
+per-window RocksDB rows. Tests cover checkpoint continuation and canonical savepoints in both
+backend directions.
+
 ## Floating extrema
 
 FLOAT/DOUBLE MIN/MAX initializes from the first non-NULL value and replaces it only when a
@@ -152,13 +210,44 @@ enables columnar composition with downstream consumers; it is not a standalone t
 - A value type/aggregate mismatch.
 - Single-phase aggregation over attached window bounds. Attached windows are native through
   the two-phase local/global path.
-- A **windowed `DISTINCT` aggregate** (`SUM(DISTINCT …)` etc. inside a window) — it dedups per window,
-  which the native window operators' every-row fold would over-count. Non-windowed `DISTINCT` is
-  native; see [GROUP BY](group-by.md).
+- Windowed DISTINCT other than unfiltered, single-argument COUNT over the types listed above:
+  SUM/AVG DISTINCT, filtered COUNT DISTINCT, FLOAT/DOUBLE, BOOLEAN, TIME and complex values.
+  Non-windowed DISTINCT has separate coverage; see [GROUP BY](group-by.md).
+- Retracting input outside aligned event-time TUMBLE/HOP/CUMULATE with unfiltered integer
+  SUM, numeric COUNT(value), and COUNT(*). DISTINCT, MIN/MAX/AVG, non-integer SUM, filters,
+  grouping-only, processing-time, attached, session and legacy windows still fall back on
+  updating input. Admission checks the **input** changelog even when final output is append-only.
+  The diagnostic names the supported retracting forms. Remaining coverage is tracked in
+  [#99](https://github.com/datafusion-contrib/StreamFusion/issues/99).
+- Flink's optional `table.optimizer.distinct-agg.split.enabled=true` rewrite. The unchanged
+  split-distinct IT variants introduce an unsupported `HASH_CODE` Calc and extra window layers,
+  including attached single-phase aggregation and partial layouts outside current admission.
+  Those variants fall back as a complete pipeline. The same queries with distinct splitting
+  disabled use the native value-set path; upstream execution contracts verify both routes.
 
 A **zero-aggregate grouping-only window** (`GROUP BY key + window`, no aggregate function) is *not*
-one of the gaps above — it's a windowed distinct, and is native (single- and two-phase), emitting one
+one of the gaps above for insert-only input — it's a windowed distinct, and is native (single- and two-phase), emitting one
 row per `(key, window)`. See [GROUP BY](group-by.md) for how the non-windowed case handles `DISTINCT`.
+
+## Retracting window benchmark
+
+`RetractingWindowBenchmark` runs Top-1 by descending nullable BIGINT, followed by COUNT/SUM
+in a 2-second/10-second HOP. Released Flink 2.2.1 is the baseline, matching the prior complete
+fallback path. Runs use `-Pbench`, parallelism 2, 64 keys, two warmups and five interleaved
+measurements per engine. The row source, native Top-N, native window stages, both transposes
+and rowwise blackhole sink stay in the measured path. No competing builds or tests ran during
+measurement. Medians:
+
+| Input rows | Strategy | Flink (s) | Native (s) | Flink / native |
+| --- | --- | ---: | ---: | ---: |
+| 1 million | Single-phase | 0.397698 | 0.472575 | 0.842× |
+| 1 million | Local/global | 0.445563 | 0.458983 | 0.971× |
+| 10 million | Single-phase | 2.712645 | 4.177479 | 0.649× |
+| 10 million | Local/global | 3.042152 | 3.860909 | 0.788× |
+
+Both sizes were slower than Flink. This implementation establishes native changelog and
+checkpoint coverage for complete updating pipelines and future batching improvements.
+These whole-query results do not isolate the cost of Top-N, window accumulation or exchanges.
 
 ## Mixed AVG benchmark
 
@@ -175,6 +264,21 @@ path; the test asserts the expected single- or two-phase native window plan.
 
 These are small local gains; the primary change is coverage for mixed aggregates and paired
 AVG partials, including narrow integer and FLOAT result types, decimal overflow, and restore.
+
+With `-Dwindow.distinct=true`, the same benchmark replaces COUNT(*) with COUNT(DISTINCT v),
+retaining the mixed ordinary aggregates and both transposes. On an M4 Pro with JDK 17 and
+`TZ=UTC`, a release build (`-Pbench`, mimalloc), 1 million rows, parallelism 2, 64 keys,
+two warmups and five interleaved measured runs gave:
+
+| Distinct phase | Flink seconds | Native seconds | Flink/native |
+| --- | ---: | ---: | ---: |
+| Single | 0.578242 | 0.536922 | 1.077x |
+| Local/global | 0.681199 | 0.583311 | 1.168x |
+
+These local measurements cover repeated nullable BIGINT values in overlapping windows;
+they do not establish a gain for every distinct value type or cardinality. They were rerun
+with the late-slice correction. This on-time workload is a performance control for that
+correctness fix, not a measurement of late-data throughput or a before/after speedup.
 
 ## Idle-state TTL
 

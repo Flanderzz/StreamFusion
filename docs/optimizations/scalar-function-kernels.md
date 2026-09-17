@@ -16,6 +16,20 @@ cargo bench --manifest-path native/Cargo.toml -p streamfusion --features mimallo
 
 Run one benchmark at a time. Kernel diagnostics and complete SQL jobs measure different work.
 
+## FROM_UNIXTIME
+
+Literal numeric patterns in fixed-offset zones compile to Rust formatting tokens once per
+expression. This removes the scalar JVM callback and its Arrow export/import from the
+formatting path. Integer calendar arithmetic preserves Java's historical calendar cutover
+and overflow range; unsupported formats and transition zones keep the Flink evaluator.
+
+For the same two-million-row queries with both transposes, two warmups and five measured
+runs, switching from the previous JVM bridge to native formatting reduced the default-format
+median from 1.696912s to 1.003518s (1.691x), and `yyyyMMddHHmm` from 1.543752s to 0.958994s
+(1.610x). The identity control remained 0.655586s versus 0.651136s. These sequential native-only
+comparisons are separate from the interleaved Flink/native measurements on the
+[scalar benchmark page](../benchmarks/scalar-functions.md).
+
 ## LOCATE
 
 The two-argument form reverses operands into DataFusion strpos. The three-argument Rust kernel follows DataFusion's batch ASCII detection, one reusable memmem::Finder for literal needles, and memmem searches for column needles. Constant needles/starts stay scalar, following Comet's contains pattern. Shared positioning code preserves Flink's empty-needle and signed-start rules; no JVM callback is added.
@@ -73,6 +87,10 @@ A successful safe Arrow Utf8 construction validates the BinaryArray once and reu
 ## JSON_UNQUOTE
 
 Combines first-token JSON validation and unescaping in one scan, writes UTF-8 directly, and retains only a pending high surrogate instead of a whole intermediate UTF-16 vector. Flink's treatment of trailing text remains covered by SQL differential tests.
+
+This kernel serves direct projections. JSON_UNQUOTE and its scalar consumers fuse into a Flink
+expression when intermediate UTF-16 identity is observable; strings passed to another operator
+fall back under the [Calc/filter restrictions](../operators/calc-filter.md#json_value).
 
 [Complete-job Flink/native results](../benchmarks/scalar-functions.md#json_unquote).
 

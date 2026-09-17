@@ -72,6 +72,45 @@ Flink. The default run executes the planner module's unchanged `*ITCase`
 runtime integration suite serially in one fork, then summarizes Surefire failures. Serial execution
 keeps concurrently created MiniClusters from exhausting a developer machine or CI runner.
 
+Selected upstream SQL tests also have **per-invocation native execution contracts**, declared in
+`dev/flink-suite/agent/src/main/resources/native-execution.tsv`. The unchanged `CalcITCase.testNotIn`
+must execute a native filter or Calc, and `testLongProjectionList` must execute a native Calc;
+`AggregateITCase.testGroupByAgg` must execute a native grouped aggregate;
+and `WindowDistinctAggregateITCase.testTumbleWindow`, `testHopWindow`, and `testCumulateWindow` must
+execute either a single-phase native window aggregate or **both** native local and global halves
+when the fixture's `splitDistinct` parameter is false.
+Each parameter variant must satisfy its own contract, including backend, mini-batch, async-state,
+and distinct-splitting variants selected by the pinned tests. The `splitDistinct=true` variants
+explicitly require full fallback with the unsupported `HASH_CODE` reason; their additional window
+layers also exceed current admission. `CalcITCase.testIfFunction` is a second fallback control,
+requiring the unsupported `IF` reason. A fixture parameter change that prevents selecting exactly
+one contract fails the test. Native and expected-fallback counts are reported separately.
+`WindowAggregateITCase.testRetractPreviousSlicingStateWithSlicingWindow` also requires fallback
+with the restricted retracting-aggregate diagnostic (the query also uses COUNT DISTINCT) for every phase, backend, timestamp and
+async-state variant. Its unchanged CDC input includes a delete whose final window has no prior
+insert; the upstream negative-count expectation remains intact.
+Other upstream cases still check
+result parity without a per-test acceleration contract; planner installation alone does not prove
+that any particular query ran natively.
+
+The agent binds each runtime operator to the test invocation in which it opens and counts nonempty
+input rows only after a method that performs native evaluation or aggregation returns successfully.
+Opening an operator, accepting an empty batch, or buffering input before a native update earns no
+credit. Task retries stay within the invocation; late work from an operator belonging to a finished
+invocation cannot satisfy a later one. Tests within a fork must remain serial. A missing required
+operator fails the JUnit test while retaining the upstream result assertions. The summarizer also
+matches invocation counts in JUnit XML to the evidence files, so a missing agent, a missing variant's
+proof, stale evidence, and execution failures hidden behind an expected-failure annotation all fail
+the suite. The runner clears the selected suite's evidence before every run. Evidence lives in
+`.flink-suite/native-execution/<suite>/` and is uploaded with the upstream CI log.
+The full planner suite also requires every contracted method to execute, so removing or renaming
+an upstream test cannot silently shrink this coverage. Focused selections require evidence only
+for their selected methods.
+
+These checks prove native data-path execution, not a speedup. Release benchmarks measure performance
+separately. The ordinary Java job also tests the evidence collector and summarizer, including
+missing/empty work, wrong operators, incomplete two-phase routes, and cross-invocation isolation.
+
 Flink's published planner artifact relocates its internal Calcite classes, while its source tests use
 the unshaded classes. The runner therefore keeps an isolated Maven repository and compiles
 an isolated copy of the StreamFusion source tree against the checkout's untouched parser, Calcite
@@ -167,6 +206,36 @@ A targeted upstream Paimon run passed 22 continuous-read, partition-write and sc
 the [ORC page](connectors/orc.md#build-and-verification) distinguishes that run from local tests
 that explicitly exercise ORC streaming.
 
+The agent logs each unchanged `PrimaryKeyFileStoreTableITCase` invocation, its randomized table
+defaults, and its completion, including the full exception on failure. Fatal MiniCluster errors
+are printed immediately, even when upstream logging is disabled. If an invocation runs for two
+minutes, it emits all JVM thread stacks to the suite log before CI's job timeout can discard the
+active test's unwritten JUnit report.
+Paimon also writes rolling cluster logs under `.flink-suite/diagnostics/paimon`; CI retains these
+and Surefire reports alongside the console log. Tests without an upstream timeout have a ten-minute
+JUnit timeout, and Surefire fails any Paimon class whose JVM exceeds thirty minutes. Existing upstream
+timeouts and result assertions remain in force. These limits report failure; they do not retry or
+turn a failed invocation into a skip.
+For local diagnosis, `-Dstreamfusion.flink-suite.diagnostic-delay-seconds=<seconds>` changes only
+when the one-time stack dump is emitted; the default is 120 seconds.
+
+The full Paimon run executes `testStandAloneLookupJobRandom` and
+`testStandAloneFullCompactJobRandom` in separate JVMs after the other tests.
+Paimon 2.0.0's stock `StoreCompactOperator.close()` dereferences its writer even when cancellation
+interrupted initialization before the writer existed. This was reproduced without StreamFusion
+by closing an uninitialized stock compactor in Flink's operator harness. These randomized SQL tests
+can pass their row assertions and hit that cleanup race while cancelling their conflicting compaction
+jobs, killing the class's shared TaskManager and stranding subsequent tests. A separate JVM contains
+that upstream fixture failure without changing the test, its random options, or its assertions.
+All invocations' reports contribute to the result and native execution checks; any Maven
+failure remains blocking, including a process timeout without a finished JUnit report.
+Explicit `FLINK_SUITE_TEST` selectors keep their requested grouping for diagnosis.
+
+The upstream workflow caches Rust dependencies in the isolated source build's native target
+directory, where this runner actually compiles them. It still rebuilds changed workspace crates.
+The runner builds the complete native workspace once before packaging Java modules; Maven then
+reuses those freshly built libraries instead of rebuilding Rust for each module's feature set.
+
 ## Expected host failures in SQL parity audits
 
 Released Flink 2.2.1/JDK 17 fails these expressions even without StreamFusion or an audit source
@@ -224,8 +293,9 @@ The single malformed-decimal input, for example, yields no collected rows on eit
 
 `FlinkFailureParitySqlHarnessTest` covers:
 
-- SINGLE_VALUE cardinality errors through explicit planner fallback, and malformed runtime DECIMAL
-  casts with actual native substitution and identical NumberFormatException messages.
+- SINGLE_VALUE cardinality errors through the native grouped aggregate with the same
+  TableRuntimeException, and malformed runtime DECIMAL casts with actual native substitution and
+  identical NumberFormatException messages.
 - CASE short-circuiting, JSON NULL/DEFAULT ON ERROR, and native TRY_CAST-to-DECIMAL conversion failures.
 - Planning rejection, UDF initialization failure and a source failure observed during collection.
 - Deliberate success/failure mismatches in either direction, which must fail the parity assertion.
@@ -247,3 +317,7 @@ Run the failure suite and independent host reproducer together:
 ```bash
 mvn -pl streamfusion-runtime -am test -Dtest=FlinkFailureParitySqlHarnessTest,FlinkJsonReturningHostContractTest
 ```
+
+The [portable SQL audit](sql-parity-audit.md) adds typed UDF/UDTF/UDAF and CDC fixtures,
+checkpoint failure/recovery, expanded parameter variants and explicit execution-mode accounting.
+Its public issue-derived matrix is independent of the unavailable private September audit corpus.

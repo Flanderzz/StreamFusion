@@ -1,5 +1,10 @@
 package tech.streamfusion.planner;
 
+import static tech.streamfusion.operator.NativeWindowOperatorCore.KIND_HIDDEN_LIVE_COUNT;
+import static tech.streamfusion.operator.NativeWindowOperatorCore.KIND_LIVE_COUNT;
+import static tech.streamfusion.operator.NativeWindowOperatorCore.KIND_RETRACT_COUNT;
+import static tech.streamfusion.operator.NativeWindowOperatorCore.KIND_RETRACT_SUM;
+
 import java.time.Duration;
 import java.util.Arrays;
 import org.apache.calcite.rel.RelNode;
@@ -16,7 +21,9 @@ import org.apache.flink.table.planner.plan.logical.WindowAttachedWindowingStrate
 import org.apache.flink.table.planner.plan.logical.WindowSpec;
 import org.apache.flink.table.planner.plan.logical.WindowingStrategy;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalLocalWindowAggregate;
+import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalRel;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalWindowAggregate;
+import org.apache.flink.table.planner.plan.utils.ChangelogPlanUtils;
 import org.apache.flink.table.types.logical.LogicalTypeRoot;
 
 /** Shared admission and encoding for single-phase and local window aggregation. */
@@ -28,6 +35,8 @@ final class WindowAggregateMatcher {
   static final int KIND_MAX = 2;
   static final int KIND_COUNT = 3;
   static final int KIND_AVG = 4;
+  static final int KIND_COUNT_DISTINCT = 7;
+
   /** The local half of a two-phase AVG: the widened running sum alone (the count partial is a
    * separate {@link #KIND_COUNT} state); the global divides after merging. */
   static final int KIND_AVG_PARTIAL_SUM = 8;
@@ -40,7 +49,8 @@ final class WindowAggregateMatcher {
       int[] grouping,
       scala.collection.Seq<AggregateCall> aggCalls,
       RelDataType inputType) {
-    if (!WindowZoneGate.admits(node, windowing)) {
+    if (!supportedInput(node, windowing, aggCalls, inputType)
+        || !WindowZoneGate.admits(node, windowing)) {
       return false;
     }
     WindowSpec spec = windowing.getWindow();
@@ -127,13 +137,17 @@ final class WindowAggregateMatcher {
       int[] grouping,
       scala.collection.Seq<AggregateCall> aggCalls,
       RelDataType inputType) {
-    if (!(windowing.getWindow() instanceof HoppingWindowSpec)) {
+    if (!supportedInput(node, windowing, aggCalls, inputType)
+        || !(windowing.getWindow() instanceof HoppingWindowSpec)) {
       return false;
     }
     if (!WindowZoneGate.admits(node, windowing)) {
       return false;
     }
     HoppingWindowSpec hop = (HoppingWindowSpec) windowing.getWindow();
+    if (hop.getOffset() != null && !hop.getOffset().isZero()) {
+      return false;
+    }
     long slide = hop.getSlide().toMillis();
     if (slide == 0 || hop.getSize().toMillis() % slide != 0) {
       return false;
@@ -154,7 +168,9 @@ final class WindowAggregateMatcher {
       int[] grouping,
       scala.collection.Seq<AggregateCall> aggCalls,
       RelDataType inputType) {
-    if (!(windowing instanceof WindowAttachedWindowingStrategy) || !windowing.isRowtime()) {
+    if (!insertOnlyInput(node)
+        || !(windowing instanceof WindowAttachedWindowingStrategy)
+        || !windowing.isRowtime()) {
       return false;
     }
     if (!WindowZoneGate.admits(node, windowing)) {
@@ -216,7 +232,7 @@ final class WindowAggregateMatcher {
       int[] grouping,
       scala.collection.Seq<AggregateCall> aggCalls,
       RelDataType inputType) {
-    if (!(windowing.getWindow() instanceof SessionWindowSpec)) {
+    if (!insertOnlyInput(node) || !(windowing.getWindow() instanceof SessionWindowSpec)) {
       return false;
     }
     if (!WindowZoneGate.admits(node, windowing)) {
@@ -273,11 +289,19 @@ final class WindowAggregateMatcher {
       if (kind < 0) {
         return false;
       }
-      // A windowed DISTINCT aggregate dedups values inside the window; the native window operators
-      // fold every row, so admitting it would silently over-count. Fall back (the non-windowed
-      // GROUP BY path handles DISTINCT natively).
       if (call.isDistinct()) {
-        return false;
+        if (kind != KIND_COUNT
+            || call.getArgList().size() != 1
+            || call.filterArg >= 0
+            || !supportedDistinctValueType(
+                inputType
+                    .getFieldList()
+                    .get(call.getArgList().get(0))
+                    .getType()
+                    .getSqlTypeName())) {
+          return false;
+        }
+        continue;
       }
       if (call.getArgList().isEmpty()) {
         continue; // COUNT(*) — only the zero-arg aggregate; the value column is synthesized
@@ -323,16 +347,35 @@ final class WindowAggregateMatcher {
         || type == SqlTypeName.DECIMAL;
   }
 
+  static boolean supportedDistinctValueType(SqlTypeName type) {
+    return switch (type) {
+      case TINYINT,
+          SMALLINT,
+          INTEGER,
+          BIGINT,
+          DECIMAL,
+          CHAR,
+          VARCHAR,
+          DATE,
+          TIMESTAMP,
+          TIMESTAMP_WITH_LOCAL_TIME_ZONE ->
+          true;
+      default -> false;
+    };
+  }
+
   /**
-   * Value-type code per aggregate, matching the native side: 0 = bigint, 1 = double, 2 = int,
-   * 4 = smallint, 5 = tinyint, 6 = float, and a packed code carrying precision/scale for decimal
-   * (3 is a key-only string code). COUNT(*) gets bigint (0), the type of its synthesized column.
+   * Value-type code per aggregate, matching the native side. Timestamp precision and decimal
+   * precision/scale are packed into their codes. COUNT(*) gets bigint (0), its synthesized column.
    */
   static int[] valueTypeCodes(scala.collection.Seq<AggregateCall> aggCalls, RelDataType inputType) {
     int[] columns = valueColumns(aggCalls);
     int[] codes = new int[columns.length];
     for (int i = 0; i < columns.length; i++) {
-      codes[i] = columns[i] < 0 ? 0 : typeCode(inputType.getFieldList().get(columns[i]).getType());
+      codes[i] =
+          columns[i] < 0
+              ? 0
+              : windowValueTypeCode(inputType.getFieldList().get(columns[i]).getType());
     }
     return codes;
   }
@@ -365,16 +408,31 @@ final class WindowAggregateMatcher {
     }
   }
 
+  static int windowValueTypeCode(RelDataType type) {
+    return GroupAggregateMatcher.isTimestampType(type.getSqlTypeName())
+        ? 1000 + type.getPrecision()
+        : typeCode(type);
+  }
+
   static int partialFieldCount(scala.collection.Seq<AggregateCall> aggCalls) {
+    return partialFieldCount(aggCalls, false);
+  }
+
+  static int partialFieldCount(scala.collection.Seq<AggregateCall> aggCalls, boolean retracting) {
     int fields = 0;
     for (int i = 0; i < aggCalls.size(); i++) {
-      fields += partialWidth(aggCalls.apply(i));
+      fields += partialWidth(aggCalls.apply(i), retracting);
     }
     return fields;
   }
 
   static int partialWidth(AggregateCall call) {
-    return aggregateKind(call.getAggregation().getKind()) == KIND_AVG ? 2 : 1;
+    return partialWidth(call, false);
+  }
+
+  static int partialWidth(AggregateCall call, boolean retracting) {
+    int kind = aggregateKind(call.getAggregation().getKind());
+    return kind == KIND_AVG || (retracting && kind == KIND_SUM) ? 2 : 1;
   }
 
   static boolean isTumbling(WindowingStrategy windowing) {
@@ -467,7 +525,11 @@ final class WindowAggregateMatcher {
   static int[] kinds(scala.collection.Seq<AggregateCall> aggCalls) {
     int[] kinds = new int[aggCalls.size()];
     for (int i = 0; i < aggCalls.size(); i++) {
-      kinds[i] = aggregateKind(aggCalls.apply(i).getAggregation().getKind());
+      AggregateCall call = aggCalls.apply(i);
+      kinds[i] =
+          call.isDistinct()
+              ? WindowAggregateMatcher.KIND_COUNT_DISTINCT
+              : aggregateKind(call.getAggregation().getKind());
     }
     return kinds;
   }
@@ -510,6 +572,15 @@ final class WindowAggregateMatcher {
 
   static RelNode substitute(StreamPhysicalWindowAggregate agg, PlanContext ctx) {
     int[] keyColumns = WindowAggregateMatcher.keyColumns(agg.grouping());
+    boolean retracting = !insertOnlyInput(agg);
+    int[] kinds = retracting ? retractingKinds(agg.aggCalls()) : kinds(agg.aggCalls());
+    int[] values = valueColumns(agg.aggCalls());
+    if (kinds.length > values.length) {
+      values = Arrays.copyOf(values, kinds.length);
+      values[values.length - 1] = -1;
+    }
+    int[] types =
+        Arrays.copyOf(valueTypeCodes(agg.aggCalls(), agg.getInput().getRowType()), kinds.length);
     // Always columnar: the keyed shuffle stays Arrow where it sits on a columnar
     // producer (a native exchange splits the batch by the grouping keys), otherwise the transition
     // pass inserts a row→Arrow transpose at the boundary. The exchange only co-locates each key's
@@ -523,10 +594,10 @@ final class WindowAggregateMatcher {
         WindowAggregateMatcher.windowSize(agg.windowing()),
         WindowAggregateMatcher.windowSlide(agg.windowing()),
         WindowAggregateMatcher.timeColumn(agg.windowing()),
-        WindowAggregateMatcher.valueColumns(agg.aggCalls()),
+        values,
         keyColumns,
-        WindowAggregateMatcher.valueTypeCodes(agg.aggCalls(), agg.getInput().getRowType()),
-        WindowAggregateMatcher.kinds(agg.aggCalls()),
+        types,
+        kinds,
         WindowAggregateMatcher.isProctime(agg.windowing()),
         WindowAggregateMatcher.isLtz(agg.windowing()));
   }
@@ -581,11 +652,16 @@ final class WindowAggregateMatcher {
     // (its row type is [grouping?, partials.., slice_end]) rather than assuming hopping always
     // adds one — otherwise a hopping COUNT(*) local emits a column the global does not expect.
     int partialColumns = agg.getRowType().getFieldCount() - agg.grouping().length - 1;
-    boolean syntheticCount = partialColumns > partialFieldCount(agg.aggCalls());
+    boolean retracting = !insertOnlyInput(agg);
+    boolean syntheticCount =
+        partialColumns
+            > partialFieldCount(agg.aggCalls(), retracting) + distinctViewCount(agg.aggCalls());
     int[] kinds =
-        syntheticCount
-            ? WindowAggregateMatcher.hoppingLocalKinds(agg.aggCalls())
-            : WindowAggregateMatcher.kinds(agg.aggCalls());
+        retracting
+            ? retractingKinds(agg.aggCalls())
+            : syntheticCount
+                ? WindowAggregateMatcher.hoppingLocalKinds(agg.aggCalls())
+                : WindowAggregateMatcher.kinds(agg.aggCalls());
     int[] valueColumns =
         syntheticCount
             ? WindowAggregateMatcher.hoppingLocalValueColumns(agg.aggCalls())
@@ -607,7 +683,7 @@ final class WindowAggregateMatcher {
         agg.getCluster(),
         agg.getTraitSet(),
         agg.getInputs().get(0),
-        agg.getRowType(),
+        nativeLocalRowType(agg, syntheticCount),
         WindowAggregateMatcher.sliceSize(agg.windowing()),
         timeColumn,
         windowStartColumn,
@@ -619,13 +695,48 @@ final class WindowAggregateMatcher {
         WindowAggregateMatcher.isLtz(agg.windowing()));
   }
 
+  private static int distinctViewCount(scala.collection.Seq<AggregateCall> calls) {
+    java.util.Set<java.util.List<Integer>> arguments = new java.util.HashSet<>();
+    for (int i = 0; i < calls.size(); i++) {
+      if (calls.apply(i).isDistinct()) arguments.add(calls.apply(i).getArgList());
+    }
+    return arguments.size();
+  }
+
+  private static RelDataType nativeLocalRowType(
+      StreamPhysicalLocalWindowAggregate agg, boolean syntheticCount) {
+    if (distinctViewCount(agg.aggCalls()) == 0) return agg.getRowType();
+    var factory = agg.getCluster().getTypeFactory();
+    var fields = factory.builder();
+    var original = agg.getRowType().getFieldList();
+    int offset = agg.grouping().length;
+    for (int i = 0; i < offset; i++) fields.add(original.get(i));
+    for (int i = 0; i < agg.aggCalls().size(); i++) {
+      AggregateCall call = agg.aggCalls().apply(i);
+      if (call.isDistinct()) {
+        var value =
+            agg.getInput().getRowType().getFieldList().get(call.getArgList().get(0)).getType();
+        fields.add(original.get(offset++).getName(), factory.createArrayType(value, -1));
+      } else {
+        for (int j = 0; j < partialWidth(call); j++) fields.add(original.get(offset++));
+      }
+    }
+    if (syntheticCount) fields.add(original.get(offset));
+    fields.add(original.get(original.size() - 1));
+    return fields.build();
+  }
+
   /**
    * The window-aggregate family matches several variants (tumbling/hopping/cumulative, local and
    * global) with extra gates, so a precise per-condition reason would be unreliable; report the
-   * session-zone gate when it is the blocker (it is decisive on its own), else a coarse
+   * input-changelog or session-zone gate when it is decisive, else a coarse
    * operator-level reason naming the requirements.
    */
   static String unsupportedReason(RelNode node, WindowingStrategy windowing) {
+    if (!insertOnlyInput(node)) {
+      return "window aggregate: retracting input supports only aligned event-time"
+          + " TUMBLE/HOP/CUMULATE with unfiltered integer SUM, numeric COUNT(value), or COUNT(*)";
+    }
     if (windowing instanceof WindowAttachedWindowingStrategy) {
       return "window aggregate: attached-window aggregation requires two-phase execution";
     }
@@ -634,6 +745,63 @@ final class WindowAggregateMatcher {
       return "window aggregate: " + zoneReason;
     }
     return "window aggregate: requires a supported window/time and grouping-key type, and"
-        + " non-DISTINCT numeric SUM/MIN/MAX/COUNT/AVG (docs/operators/window-aggregate.md)";
+        + " numeric SUM/MIN/MAX/COUNT/AVG or unfiltered COUNT(DISTINCT) over exact, string, or"
+        + " temporal values (docs/operators/window-aggregate.md)";
+  }
+
+  static boolean insertOnlyInput(RelNode node) {
+    return node instanceof StreamPhysicalRel physical
+        && ChangelogPlanUtils.inputInsertOnly(physical);
+  }
+
+  private static boolean supportedInput(
+      RelNode node,
+      WindowingStrategy windowing,
+      scala.collection.Seq<AggregateCall> calls,
+      RelDataType inputType) {
+    return insertOnlyInput(node)
+        || (windowing.isRowtime() && supportedRetractingAggregates(calls, inputType));
+  }
+
+  static boolean supportedRetractingAggregates(
+      scala.collection.Seq<AggregateCall> calls, RelDataType inputType) {
+    if (calls.isEmpty()) return false;
+    for (int i = 0; i < calls.size(); i++) {
+      AggregateCall call = calls.apply(i);
+      int kind = aggregateKind(call.getAggregation().getKind());
+      if (call.isDistinct() || call.filterArg >= 0 || (kind != KIND_SUM && kind != KIND_COUNT))
+        return false;
+      if (kind == KIND_COUNT && call.getArgList().isEmpty()) continue;
+      if (call.getArgList().size() != 1) return false;
+      SqlTypeName type =
+          inputType.getFieldList().get(call.getArgList().get(0)).getType().getSqlTypeName();
+      if (kind == KIND_SUM
+          && type != SqlTypeName.BIGINT
+          && type != SqlTypeName.INTEGER
+          && type != SqlTypeName.SMALLINT
+          && type != SqlTypeName.TINYINT) return false;
+      if (!supportedValueType(type)) return false;
+    }
+    return true;
+  }
+
+  static int[] retractingKinds(scala.collection.Seq<AggregateCall> calls) {
+    int[] kinds = new int[calls.size()];
+    boolean hasLiveCount = false;
+    for (int i = 0; i < kinds.length; i++) {
+      AggregateCall call = calls.apply(i);
+      if (call.getAggregation().getKind() == SqlKind.SUM) {
+        kinds[i] = KIND_RETRACT_SUM;
+      } else if (call.getArgList().isEmpty() && !hasLiveCount) {
+        kinds[i] = KIND_LIVE_COUNT;
+        hasLiveCount = true;
+      } else {
+        kinds[i] = KIND_RETRACT_COUNT;
+      }
+    }
+    if (hasLiveCount) return kinds;
+    kinds = Arrays.copyOf(kinds, kinds.length + 1);
+    kinds[kinds.length - 1] = KIND_HIDDEN_LIVE_COUNT;
+    return kinds;
   }
 }

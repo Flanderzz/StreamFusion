@@ -40,6 +40,15 @@ class FlinkDecimalTruncateSqlHarnessTest {
   }
 
   @Test
+  void truncationAndFloatingCastsComposeInOneNativeProjection() throws Exception {
+    NativeParity.assertParity(
+        FlinkDecimalTruncateSqlHarnessTest::ordinary,
+        "SELECT id, TRUNCATE(a, 2), CAST(a AS FLOAT), CAST(a AS DOUBLE),"
+            + " CAST(TRUNCATE(a, 2) AS DOUBLE),"
+            + " TRUNCATE(CAST(CAST(a AS DOUBLE) AS DECIMAL(7,3)), 2) FROM t");
+  }
+
+  @Test
   void preservesFlinksDeclaredResultTypes() throws Exception {
     String sql = "SELECT TRUNCATE(a), TRUNCATE(a, -1), TRUNCATE(a, 2), TRUNCATE(a, 6) FROM t";
     assertEquals(

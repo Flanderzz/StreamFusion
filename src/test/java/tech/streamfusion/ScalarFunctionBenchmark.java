@@ -69,7 +69,10 @@ class ScalarFunctionBenchmark {
           new Query("IFNULL_STRING", "text", "IFNULL(s, 'missing')", "STRING"),
           new Query("IFNULL_BIGINT", "bigint", "IFNULL(n, CAST(-1 AS BIGINT))", "BIGINT"),
           new Query(
-              "IFNULL_DECIMAL", "tt_decimal", "IFNULL(n, CAST(0 AS DECIMAL(38,9)))", "DECIMAL(38,9)"),
+              "IFNULL_DECIMAL",
+              "tt_decimal",
+              "IFNULL(n, CAST(0 AS DECIMAL(38,9)))",
+              "DECIMAL(38,9)"),
           new Query("STRING_TO_BOOLEAN", "boolean_text", "CAST(s AS BOOLEAN)", "BOOLEAN"),
           new Query("DECIMAL_ROUND_POS", "tt_decimal", "ROUND(n, 2)", "DECIMAL(32,2)"),
           new Query("DECIMAL_TRUNCATE_POS", "tt_decimal", "TRUNCATE(n, 2)", "DECIMAL(32,2)"),
@@ -77,6 +80,20 @@ class ScalarFunctionBenchmark {
           new Query("DECIMAL_ROUND_NEG", "tt_decimal", "ROUND(n, -3)", "DECIMAL(30,0)"),
           new Query("DECIMAL_ROUND_EXPAND", "tt_decimal", "ROUND(n, 12)", "DECIMAL(38,9)"),
           new Query("DECIMAL_TO_BIGINT", "tt_decimal", "CAST(n AS BIGINT)", "BIGINT"),
+          new Query("DECIMAL_TO_FLOAT", "tt_decimal", "CAST(n AS FLOAT)", "FLOAT"),
+          new Query(
+              "DECIMAL_ARRAY_TO_FLOAT",
+              "tt_decimal_array",
+              "CAST(a AS ARRAY<FLOAT>)",
+              "ARRAY<FLOAT>"),
+          new Query("POWER_EXACT", "numbers", "POWER(CAST(n AS DOUBLE), 0.5)", "DOUBLE"),
+          new Query("FROM_UNIXTIME_DEFAULT", "tt_unix_time", "FROM_UNIXTIME(n)", "STRING"),
+          new Query(
+              "FROM_UNIXTIME_LITERAL",
+              "tt_unix_time",
+              "FROM_UNIXTIME(n, 'yyyyMMddHHmm')",
+              "STRING"),
+          new Query("FROM_UNIXTIME_BRIDGE", "tt_unix_time", "FROM_UNIXTIME(n, p)", "STRING"),
           new Query("ASCII", "tt_ascii", "ASCII(s)", "INT"),
           new Query("CHR", "bigint", "CHR(n)", "STRING"),
           new Query("GREATEST", "numbers", "GREATEST(n, m, 17)"),
@@ -138,8 +155,16 @@ class ScalarFunctionBenchmark {
               TextTimeFunctions.QUERIES,
               List.of(
                   new Query("UDF_DECIMAL", "tt_decimal", "decimal_identity(n)", "DECIMAL(38,9)"),
-                  new Query("UDF_DECIMAL_IS_NULL", "tt_udf_decimal", "decimal_from_text(s) IS NULL", "BOOLEAN"),
-                  new Query("UDF_DECIMAL_NESTED", "tt_udf_decimal", "decimal_external(decimal_from_text(s))", "DECIMAL(38,9)"),
+                  new Query(
+                      "UDF_DECIMAL_IS_NULL",
+                      "tt_udf_decimal",
+                      "decimal_from_text(s) IS NULL",
+                      "BOOLEAN"),
+                  new Query(
+                      "UDF_DECIMAL_NESTED",
+                      "tt_udf_decimal",
+                      "decimal_external(decimal_from_text(s))",
+                      "DECIMAL(38,9)"),
                   new Query("UDF_BINARY", "tt_bytes", "binary_identity(b)", "BYTES"),
                   new Query("SHA1", "tt_text", "SHA1(s)"),
                   new Query("JSON_STRING_TEXT", "tt_text", "JSON_STRING(s)"),
@@ -161,6 +186,31 @@ class ScalarFunctionBenchmark {
                   new Query("IS_JSON_ARRAY", "tt_json_predicate", "s IS JSON ARRAY", "BOOLEAN"),
                   new Query("IS_JSON_SCALAR", "tt_json_predicate", "s IS JSON SCALAR", "BOOLEAN"),
                   new Query("JSON_VALUE", "tt_json", "JSON_VALUE(s, 'lax $.user.name')", "STRING"),
+                  new Query(
+                      "JSON_VALUE_NEGATIVE",
+                      "tt_json_negative",
+                      "JSON_VALUE(s, '$.a[-1]')",
+                      "STRING"),
+                  new Query(
+                      "JSON_VALUE_POSITIVE_CONTROL",
+                      "tt_json_negative",
+                      "JSON_VALUE(s, '$.a[31]')",
+                      "STRING"),
+                  new Query(
+                      "JSON_EXISTS_NEGATIVE",
+                      "tt_json_negative",
+                      "JSON_EXISTS(s, '$.a[-1]')",
+                      "BOOLEAN"),
+                  new Query(
+                      "JSON_VALUE_IDENTITY",
+                      "tt_json_surrogate",
+                      "JSON_VALUE(s, '$') = '?'",
+                      "BOOLEAN"),
+                  new Query(
+                      "JSON_UNQUOTE_IDENTITY",
+                      "tt_json_surrogate",
+                      "JSON_UNQUOTE(s) = '?'",
+                      "BOOLEAN"),
                   new Query(
                       "JSON_VALUE_EMPTY_MEMBER",
                       "tt_json_empty_member",
@@ -268,7 +318,7 @@ class ScalarFunctionBenchmark {
             csv.add(
                 String.format(
                     Locale.ROOT,
-                    "%s,%s,%s,%d,%d,%s,%d,%d,%s,%d,%.6f",
+                    "%s,%s,\"%s\",%d,%d,%s,%d,%d,%s,%d,%.6f",
                     query.name(),
                     query.input(),
                     query.outputType(),
@@ -419,8 +469,10 @@ class ScalarFunctionBenchmark {
       TableEnvironment tables =
           TextTimeBenchmarkInputs.environment(input, ROWS, BYTES, UNICODE, NULL_EVERY);
       tables.createTemporarySystemFunction("decimal_identity", DecimalIdentity.class);
-      tables.createTemporarySystemFunction("decimal_from_text", FlinkUdfExactTypesSqlHarnessTest.DecimalFromText.class);
-      tables.createTemporarySystemFunction("decimal_external", FlinkDecimalUdfConsumersSqlHarnessTest.ExternalDecimal.class);
+      tables.createTemporarySystemFunction(
+          "decimal_from_text", FlinkUdfExactTypesSqlHarnessTest.DecimalFromText.class);
+      tables.createTemporarySystemFunction(
+          "decimal_external", FlinkDecimalUdfConsumersSqlHarnessTest.ExternalDecimal.class);
       tables.createTemporarySystemFunction("binary_identity", BinaryIdentity.class);
       return tables;
     }

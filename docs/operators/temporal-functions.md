@@ -14,7 +14,8 @@ unsupported `MATCH_RECOGNIZE` operator.
 | `TO_DATE(text)`, `TO_DATE(text, format)` | The one-argument parser stays in Rust; formatted parsing uses Flink. Dynamic formats, NULL behavior and invalid-input failures follow Flink. |
 | `TO_TIMESTAMP(text[, format])` | Flink parsing, including dynamic formats and full-range timestamp results. |
 | `TO_TIMESTAMP_LTZ` | Flink's numeric and string overloads, including format and explicit-zone arguments. Flink validates numeric precision (0 or 3). |
-| `DATE_FORMAT`, `UNIX_TIMESTAMP(text[, format])`, `FROM_UNIXTIME`, `CONVERT_TZ` | Flink evaluation supports dynamic patterns and zones. The existing literal numeric-pattern DATE_FORMAT fast path for plain timestamps remains in Rust. |
+| `DATE_FORMAT`, `UNIX_TIMESTAMP(text[, format])`, `CONVERT_TZ` | Flink evaluation supports dynamic patterns and zones. The existing literal numeric-pattern DATE_FORMAT fast path for plain timestamps remains in Rust. |
+| `FROM_UNIXTIME` | Constant numeric formats in fixed-offset zones execute in Rust; other forms retain Flink's evaluator. See the exact subset below. |
 | `UNIX_TIMESTAMP()` | Rust current Unix-seconds clock. |
 | `TIMESTAMPADD`, `TIMESTAMPDIFF` | Flink calendar and elapsed-time arithmetic, including its month-end and precision rules. |
 | `FLOOR(timepoint TO unit)`, `CEIL`, `CEILING` | Flink rounding; plain TIMESTAMP DAY/HOUR/MINUTE/SECOND/MILLISECOND use a Rust kernel. Numeric FLOOR/CEIL admission is unchanged. |
@@ -28,9 +29,28 @@ unsupported `MATCH_RECOGNIZE` operator.
 Flink still rejects invalid signatures, invalid units and expressions outside their SQL context.
 The inventory describes Flink's functions, not extra overloads supplied by other SQL dialects.
 
+## Native FROM_UNIXTIME
+
+The default format and literal formats composed of `yyyy`, `MM`, `dd`, `HH`, `mm`, `ss`,
+punctuation and quoted literals execute in Rust for integer epoch seconds in a fixed-offset
+session zone. This includes `yyyyMMddHHmm`, Unicode literals and doubled apostrophes.
+The format is compiled once when constructing the expression; evaluation registers no JVM
+callback and performs no Arrow/JVM handoff for formatting.
+
+The native calendar reproduces Java's Julian/Gregorian cutover in October 1582, year-of-era
+formatting before year 1, and the full BIGINT input range. Seconds-to-milliseconds conversion
+wraps like Java long arithmetic; adding the zone offset retains the calendar's wider range.
+NULL seconds produce NULL, including when the format is empty.
+
+Dynamic or unsupported patterns, NULL patterns, invalid patterns and zones with historical
+or recurring transitions retain the existing Flink evaluator. The native subset also requires
+the planning JVM's default format locale to use a Gregorian calendar and ASCII digits;
+other locale calendars/digit systems stay on Flink. Supported native formatting can feed
+an outer host temporal evaluator without moving formatting itself back across the bridge.
+
 ## Exact evaluation and expression fusion
 
-Temporal functions use Flink 2.2.1's expression generator, compiled once when the native Calc is
+Temporal functions outside the native subsets use Flink 2.2.1's expression generator, compiled once when the native Calc is
 planned. The generated evaluator travels in the existing serializable scalar-function binding,
 opens on the task manager, and receives argument columns through the existing batched JVM upcall.
 Native operators continue to exchange Arrow batches. No additional row/Arrow operators are inserted.

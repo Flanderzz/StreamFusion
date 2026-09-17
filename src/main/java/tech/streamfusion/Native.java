@@ -768,7 +768,9 @@ public final class Native {
    * @param valueTypes one value-column type per aggregate (0=bigint, 1=double, 2=int, 4=smallint,
    *     5=tinyint, 6=float), positionally matching {@code aggregateKinds} so each aggregate reads its
    *     own value column
-   * @param aggregateKinds one code per aggregate: 0=SUM, 1=MIN, 2=MAX, 3=COUNT, 4=AVG
+   * @param aggregateKinds one code per aggregate: 0=SUM, 1=MIN, 2=MAX, 3=COUNT, 4=AVG,
+   *     7=COUNT DISTINCT, 9=retracting integer SUM, 10=retracting COUNT,
+   *     11=visible live-row COUNT, 12=hidden live-row COUNT
    * @param memoryBudgetBytes task off-heap budget bounding the open-window state (negative for
    *     unaccounted); exceeding it throws {@link NativeMemoryLimitException} from the violating call
    */
@@ -784,6 +786,10 @@ public final class Native {
    * Produces no output; closed windows are emitted by {@link #flushTumblingAggregator}.
    */
   public static native void updateTumblingAggregator(
+      long handle, long inArrayAddress, long inSchemaAddress);
+
+  /** Folds local slices without dropping rows that may still belong to an open final window. */
+  public static native void updateLocalTumblingAggregator(
       long handle, long inArrayAddress, long inSchemaAddress);
 
   /**

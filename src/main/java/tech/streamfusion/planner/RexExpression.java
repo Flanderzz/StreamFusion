@@ -99,6 +99,8 @@ final class RexExpression {
   private static final int KIND_STRING_TO_INTEGER = 33;
   private static final int KIND_INTEGER_TO_STRING = 34;
   private static final int KIND_DECIMAL_TRUNCATE = 35;
+  private static final int KIND_FROM_UNIXTIME = 36;
+  private static final int KIND_DECIMAL_FLOAT = 37;
   // A typed NULL carries a one-field Arrow IPC schema in the string pool.
   private static final int KIND_LIT_TYPED_NULL = 31;
   // Fused exact arithmetic: payload is the declared result precision*100 + scale; two children.
@@ -654,7 +656,11 @@ final class RexExpression {
   }
 
   private boolean emitCall(RexCall call) {
-    if (call.getOperands().stream().anyMatch(RexExpression::containsDecimalUdf)) {
+    if (call.getOperands().stream()
+        .anyMatch(
+            operand ->
+                containsDecimalUdf(operand)
+                    || JsonStringIdentity.containsSensitiveString(operand))) {
       return emitHostExpression(call, true);
     }
     if (call.getOperator()
@@ -694,7 +700,13 @@ final class RexExpression {
       longs.add("FLOOR".equals(call.getOperator().getName()) ? 0L : 1L);
       return true;
     }
-    if (needsTemporalFunction(call)) {
+    String unixTimeFormat = nativeUnixTimeFormat(call);
+    if (unixTimeFormat != null) {
+      add(KIND_FROM_UNIXTIME, strings.size(), 1);
+      strings.add(unixTimeFormat);
+      return emit(call.getOperands().get(0));
+    }
+    if (needsTemporalFunction(call) || needsExactPower(call)) {
       return emitHostExpression(call, false);
     }
     if (call.getKind() == SqlKind.MINUS_PREFIX) {
@@ -1840,9 +1852,22 @@ final class RexExpression {
     // marks
     // the event-time column) — is an identity projection: emit the operand so the column passes
     // through.
-    if (sourceType.getSqlTypeName() == resultType.getSqlTypeName()
-        && sourceType.getPrecision() == resultType.getPrecision()
-        && sourceType.getScale() == resultType.getScale()) {
+    if (org.apache.calcite.sql.type.SqlTypeUtil.equalSansNullability(sourceType, resultType)) {
+      return emit(call.getOperands().get(0));
+    }
+    RelDataType decimalSource =
+        source == SqlTypeName.ARRAY ? sourceType.getComponentType() : sourceType;
+    RelDataType floatingTarget =
+        targetType == SqlTypeName.ARRAY ? resultType.getComponentType() : resultType;
+    if ((source == SqlTypeName.ARRAY) == (targetType == SqlTypeName.ARRAY)
+        && decimalSource.getSqlTypeName() == SqlTypeName.DECIMAL
+        && (floatingTarget.getSqlTypeName() == SqlTypeName.FLOAT
+            || floatingTarget.getSqlTypeName() == SqlTypeName.REAL
+            || floatingTarget.getSqlTypeName() == SqlTypeName.DOUBLE)) {
+      add(
+          KIND_DECIMAL_FLOAT,
+          floatingTarget.getSqlTypeName() == SqlTypeName.DOUBLE ? CAST_DOUBLE : CAST_FLOAT,
+          1);
       return emit(call.getOperands().get(0));
     }
     if ((source == SqlTypeName.VARCHAR || source == SqlTypeName.CHAR)
@@ -1947,6 +1972,23 @@ final class RexExpression {
       case TIMESTAMP, TIMESTAMP_WITH_LOCAL_TIME_ZONE -> 11;
       default -> -1;
     };
+  }
+
+  private String nativeUnixTimeFormat(RexCall call) {
+    if (!"FROM_UNIXTIME".equalsIgnoreCase(call.getOperator().getName())
+        || call.getOperands().isEmpty()
+        || call.getOperands().size() > 2) return null;
+    SqlTypeName input = call.getOperands().get(0).getType().getSqlTypeName();
+    if (input != SqlTypeName.BIGINT
+        && input != SqlTypeName.INTEGER
+        && input != SqlTypeName.SMALLINT
+        && input != SqlTypeName.TINYINT) return null;
+    String pattern = "yyyy-MM-dd HH:mm:ss";
+    if (call.getOperands().size() == 2) {
+      if (!(call.getOperands().get(1) instanceof RexLiteral literal)) return null;
+      pattern = literal.getValueAs(String.class);
+    }
+    return NativeUnixTimeFormat.encode(pattern, sessionZoneId);
   }
 
   private static boolean needsTemporalFunction(RexCall call) {
@@ -2068,14 +2110,14 @@ final class RexExpression {
     return call.getOperands().stream().anyMatch(RexExpression::containsScalarUdf);
   }
 
-  private boolean emitHostExpression(RexCall call, boolean preserveDecimalNullness) {
-    if (preserveDecimalNullness && !validateGeneratedExpression(call)) return false;
+  private boolean emitHostExpression(RexCall call, boolean fuseConsumers) {
+    if (fuseConsumers && !validateGeneratedExpression(call)) return false;
     List<RexNode> arguments = new ArrayList<>();
     List<org.apache.flink.table.types.logical.LogicalType> types = new ArrayList<>();
     List<Integer> codes = new ArrayList<>();
     RexNode expression;
     try {
-      expression = hostExpressionArguments(call, arguments, types, codes, preserveDecimalNullness);
+      expression = hostExpressionArguments(call, arguments, types, codes, fuseConsumers);
     } catch (IllegalArgumentException e) {
       return reject(e.getMessage());
     }
@@ -2122,25 +2164,29 @@ final class RexExpression {
     return true;
   }
 
-  private static RexNode hostExpressionArguments(
+  private RexNode hostExpressionArguments(
       RexNode node,
       List<RexNode> arguments,
       List<org.apache.flink.table.types.logical.LogicalType> types,
       List<Integer> codes,
-      boolean preserveDecimalNullness) {
+      boolean fuseConsumers) {
     if (node instanceof RexLiteral) {
       return node;
     }
-    if (node instanceof RexCall call && (preserveDecimalNullness || needsTemporalFunction(call))) {
+    if (node instanceof RexCall call
+        && (fuseConsumers
+            || needsTemporalFunction(call) && nativeUnixTimeFormat(call) == null
+            || needsExactPower(call))) {
       List<RexNode> operands = new ArrayList<>();
       for (RexNode operand : call.getOperands()) {
-        operands.add(hostExpressionArguments(operand, arguments, types, codes, preserveDecimalNullness));
+        operands.add(hostExpressionArguments(operand, arguments, types, codes, fuseConsumers));
       }
       return call.clone(call.getType(), operands);
     }
     int code = hostCastTypeCode(node.getType());
     if (code < 0) {
-      throw new IllegalArgumentException("unsupported generated-expression argument type " + node.getType());
+      throw new IllegalArgumentException(
+          "unsupported generated-expression argument type " + node.getType());
     }
     RexInputRef reference = new RexInputRef(arguments.size(), node.getType());
     arguments.add(node);
@@ -2524,7 +2570,8 @@ final class RexExpression {
     List<RexNode> args = call.getOperands();
     for (RexNode argument : args) {
       if (udfTypeCode(argument.getType()) < 0) {
-        return rejectUdfMethod("UDF argument type not native: " + argument.getType().getSqlTypeName());
+        return rejectUdfMethod(
+            "UDF argument type not native: " + argument.getType().getSqlTypeName());
       }
     }
     Method eval = resolveEval(scalar, args);
@@ -3056,7 +3103,13 @@ final class RexExpression {
     return emit(args.get(0));
   }
 
-  /** {@code POWER(base, exp)} (also the lowering of {@code SQRT}), native only under the flag. */
+  private static boolean needsExactPower(RexCall call) {
+    String name = call.getOperator().getName();
+    return ("POWER".equalsIgnoreCase(name) || "POW".equalsIgnoreCase(name))
+        && !NativeConfig.allowsIncompatible("POWER");
+  }
+
+  /** The opt-in Rust implementation; the default path uses Flink's generated Math.pow call. */
   private boolean emitIncompatiblePower(RexCall call) {
     if (!NativeConfig.allowsIncompatible("POWER")) {
       return reject(incompatibleReason("POWER"));

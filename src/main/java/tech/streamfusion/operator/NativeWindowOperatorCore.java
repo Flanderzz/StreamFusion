@@ -1,8 +1,5 @@
 package tech.streamfusion.operator;
 
-import tech.streamfusion.Native;
-import tech.streamfusion.arrow.TimestampAccessor;
-import tech.streamfusion.state.RocksDBNativeStateSupport;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
@@ -32,6 +29,9 @@ import org.apache.flink.table.data.TimestampData;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.table.types.logical.utils.LogicalTypeChecks;
+import tech.streamfusion.Native;
+import tech.streamfusion.arrow.TimestampAccessor;
+import tech.streamfusion.state.RocksDBNativeStateSupport;
 
 /**
  * Input-agnostic core of the native window operators: it owns the native aggregator handle and its
@@ -46,14 +46,19 @@ import org.apache.flink.table.types.logical.utils.LogicalTypeChecks;
  */
 public abstract class NativeWindowOperatorCore<OUT> extends AbstractNativeStatefulOperator<OUT> {
 
+  public static final int KIND_RETRACT_SUM = 9;
+  public static final int KIND_RETRACT_COUNT = 10;
+  public static final int KIND_LIVE_COUNT = 11;
+  public static final int KIND_HIDDEN_LIVE_COUNT = 12;
+
   protected static final int TIMESTAMP_PRECISION = 3;
 
   /**
-   * Value-type codes matching the native side. 0-2 carry every aggregate; the narrow numeric types
-   * 4-6 carry only MIN/MAX/COUNT (their SUM/AVG would diverge from the host's narrow-type arithmetic
-   * — see docs/aggregate-type-support.md). 3 is a key-only string code (never a value type).
+   * Value-type codes matching the native side. Numeric types carry ordinary aggregates; strings,
+   * dates and timestamps also carry COUNT(DISTINCT) values.
    */
   protected static final int TYPE_BIGINT = 0;
+
   protected static final int TYPE_DOUBLE = 1;
   protected static final int TYPE_INT = 2;
   protected static final int TYPE_STRING = 3;
@@ -61,8 +66,9 @@ public abstract class NativeWindowOperatorCore<OUT> extends AbstractNativeStatef
   protected static final int TYPE_TINYINT = 5;
   protected static final int TYPE_FLOAT = 6;
 
-  /** Key-only type codes (carried in their natural Arrow type; the native key path is type-general). */
+  /** Boolean remains key-only; dates also carry distinct values. */
   protected static final int TYPE_BOOLEAN = 7;
+
   protected static final int TYPE_DATE = 8;
 
   // Parameterized type codes pack precision/scale into the code so they thread through the existing
@@ -131,9 +137,10 @@ public abstract class NativeWindowOperatorCore<OUT> extends AbstractNativeStatef
     this.timeZoneId = timeZoneId;
   }
 
-  /** Number of aggregates this window computes (and the partial columns it carries). */
+  /** Number of visible final aggregates, excluding an internal live-row count. */
   protected final int aggregateCount() {
-    return aggregateKinds.length;
+    int size = aggregateKinds.length;
+    return size > 0 && aggregateKinds[size - 1] == KIND_HIDDEN_LIVE_COUNT ? size - 1 : size;
   }
 
   /** Flushes any input buffered by the subclass into the native aggregator. */
@@ -447,11 +454,18 @@ public abstract class NativeWindowOperatorCore<OUT> extends AbstractNativeStatef
       vectors.add(keys[j]);
     }
     TimestampAccessor srcTs = proctime ? null : new TimestampAccessor(in.getVector(timeColumn));
+    TinyIntVector sourceKinds = (TinyIntVector) in.getVector(RowDataArrowConverter.ROW_KIND_COLUMN);
+    TinyIntVector changes =
+        sourceKinds == null
+            ? null
+            : new TinyIntVector(RowDataArrowConverter.ROW_KIND_COLUMN, allocator);
+    if (changes != null) vectors.add(changes);
     try (VectorSchemaRoot root = new VectorSchemaRoot(vectors);
         ArrowArray array = ArrowArray.allocateNew(allocator);
         ArrowSchema schema = ArrowSchema.allocateNew(allocator)) {
       for (int i = 0; i < rows; i++) {
         ts.setSafe(i, proctime ? proctimeMillis : srcTs.getMillis(i));
+        if (changes != null) changes.setSafe(i, sourceKinds.get(i));
         for (int a = 0; a < valueColumns.length; a++) {
           if (valueColumns[a] < 0) {
             ((BigIntVector) values[a]).setSafe(i, 1L); // COUNT(*): a non-null constant counts rows
@@ -471,10 +485,17 @@ public abstract class NativeWindowOperatorCore<OUT> extends AbstractNativeStatef
 
   /** Creates the Arrow vector carrying a value column, matching the native value-type code. */
   private FieldVector newValueVector(String name, int valueType) {
+    if (isTimestamp(valueType)) {
+      return TimestampAccessor.field(name, true).createVector(allocator);
+    }
     if (isDecimal(valueType)) {
       return new DecimalVector(name, allocator, decimalPrecision(valueType), decimalScale(valueType));
     }
     switch (valueType) {
+      case TYPE_STRING:
+        return new VarCharVector(name, allocator);
+      case TYPE_DATE:
+        return new DateDayVector(name, allocator);
       case TYPE_DOUBLE:
         return new Float8Vector(name, allocator);
       case TYPE_INT:
@@ -496,12 +517,23 @@ public abstract class NativeWindowOperatorCore<OUT> extends AbstractNativeStatef
       value.setNull(i);
       return;
     }
+    if (isTimestamp(valueType)) {
+      setTimestampValue(
+          value, i, row.getTimestamp(column, timestampPrecision(valueType)), valueType);
+      return;
+    }
     if (isDecimal(valueType)) {
       ((DecimalVector) value)
           .setSafe(i, row.getDecimal(column, decimalPrecision(valueType), decimalScale(valueType)).toBigDecimal());
       return;
     }
     switch (valueType) {
+      case TYPE_STRING:
+        ((VarCharVector) value).setSafe(i, row.getString(column).toBytes());
+        break;
+      case TYPE_DATE:
+        ((DateDayVector) value).setSafe(i, row.getInt(column));
+        break;
       case TYPE_DOUBLE:
         ((Float8Vector) value).setSafe(i, row.getDouble(column));
         break;
@@ -528,11 +560,21 @@ public abstract class NativeWindowOperatorCore<OUT> extends AbstractNativeStatef
       value.setNull(i);
       return;
     }
+    if (isTimestamp(valueType)) {
+      setTimestampValue(value, i, new TimestampAccessor(source).getTimestamp(i), valueType);
+      return;
+    }
     if (isDecimal(valueType)) {
       ((DecimalVector) value).setSafe(i, ((DecimalVector) source).getObject(i));
       return;
     }
     switch (valueType) {
+      case TYPE_STRING:
+        ((VarCharVector) value).setSafe(i, ((VarCharVector) source).get(i));
+        break;
+      case TYPE_DATE:
+        ((DateDayVector) value).setSafe(i, ((DateDayVector) source).get(i));
+        break;
       case TYPE_DOUBLE:
         ((Float8Vector) value).setSafe(i, ((Float8Vector) source).get(i));
         break;
@@ -551,6 +593,16 @@ public abstract class NativeWindowOperatorCore<OUT> extends AbstractNativeStatef
       default:
         ((BigIntVector) value).setSafe(i, ((BigIntVector) source).get(i));
     }
+  }
+
+  private static void setTimestampValue(
+      FieldVector vector, int row, TimestampData timestamp, int valueType) {
+    // Flink's distinct key serializer stores compact timestamps as milliseconds, even when
+    // the incoming internal value still carries a fraction left by an identity cast.
+    if (timestampPrecision(valueType) <= 3) {
+      timestamp = TimestampData.fromEpochMillis(timestamp.getMillisecond());
+    }
+    TimestampAccessor.set(vector, row, timestamp);
   }
 
   /** Copies row {@code i}'s key from a source Arrow vector into the key vector (int widens to int64). */

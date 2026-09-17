@@ -18,7 +18,8 @@ final class TextTimeBenchmarkInputs {
     return switch (input) {
       case "tt_bytes", "tt_utf16", "tt_utf16be", "tt_utf16le" -> "b";
       case "tt_boolean" -> "b";
-      case "tt_decimal" -> "n";
+      case "tt_decimal", "tt_unix_time" -> "n";
+      case "tt_decimal_array" -> "a";
       case "tt_timestamp" -> "ts";
       default -> "s";
     };
@@ -29,6 +30,8 @@ final class TextTimeBenchmarkInputs {
       case "tt_bytes", "tt_utf16", "tt_utf16be", "tt_utf16le" -> "BYTES";
       case "tt_boolean" -> "BOOLEAN";
       case "tt_decimal" -> "DECIMAL(38,9)";
+      case "tt_unix_time" -> "BIGINT";
+      case "tt_decimal_array" -> "ARRAY<DECIMAL(38,9)>";
       case "tt_timestamp" -> "TIMESTAMP(9)";
       default -> "STRING";
     };
@@ -43,11 +46,31 @@ final class TextTimeBenchmarkInputs {
       payload(unicode ? " |\u4e2daB\ud83d\ude00| " : " |abCd| efGh| ", bytes),
       payload(unicode ? " |\u00e9dE\ud83d\ude42| " : " |deFg| abCd| ", bytes)
     };
-    if (input.equals("tt_udf_decimal")) {
+    if (input.equals("tt_unix_time")) {
+      tables.getConfig().setLocalTimeZone(java.time.ZoneOffset.UTC);
+      tables.createTemporaryView(
+          "inputs",
+          env.fromSequence(0, rows - 1)
+              .map(
+                  i ->
+                      Row.of(
+                          isNull(i, nullEvery) ? null : 1_700_000_000L + i % 86400, "yyyyMMddHHmm"))
+              .returns(Types.ROW_NAMED(new String[] {"n", "p"}, Types.LONG, Types.STRING)));
+    } else if (input.equals("tt_udf_decimal")) {
       String[] values = {"999.995", "-999.995", "1.235", "-1.235", "0", "9.99E+8"};
       tables.createTemporaryView("inputs", env.fromSequence(0, rows - 1)
           .map(i -> Row.of(isNull(i, nullEvery) ? null : values[(int) (i % values.length)]))
           .returns(Types.ROW_NAMED(new String[] {"s"}, Types.STRING)));
+    } else if (input.equals("tt_decimal_array")) {
+      java.math.BigDecimal[] values = {
+        new java.math.BigDecimal("12345678901234567890.123456700"),
+        null,
+        new java.math.BigDecimal("-0.000000100")
+      };
+      tables.createTemporaryView("inputs", env.fromSequence(0, rows - 1)
+          .map(i -> Row.of((Object) (isNull(i, nullEvery) ? null : values)))
+          .returns(Types.ROW_NAMED(new String[] {"a"}, Types.OBJECT_ARRAY(Types.BIG_DEC))),
+          Schema.newBuilder().column("a", DataTypes.ARRAY(DataTypes.DECIMAL(38, 9))).build());
     } else if (input.equals("tt_decimal")) {
       java.math.BigDecimal[] values = {
         new java.math.BigDecimal("12345678901234567890.123456700"),
@@ -217,6 +240,15 @@ final class TextTimeBenchmarkInputs {
                   "{\"\":\"Alice\",\"padding\":\"" + text[0] + "\"}",
                   "{\" \":\"space\",\"padding\":\"" + text[1] + "\"}"
                 };
+            case "tt_json_surrogate" -> new String[] {"\"\\uD800\"", "\"?\""};
+            case "tt_json_negative" -> {
+              StringBuilder elements = new StringBuilder();
+              for (int i = 0; i < 31; i++) elements.append("\"value").append(i).append("\",");
+              yield new String[] {
+                "{\"a\":[" + elements + "\"Alice\"],\"padding\":\"" + text[0] + "\"}",
+                "{\"a\":[" + elements + "\"Bob\"],\"padding\":\"" + text[1] + "\"}"
+              };
+            }
             case "tt_json_member" ->
                 new String[] {
                   "{\"\u7528\u6237\":{\"\u59d3.\u540d\":\""

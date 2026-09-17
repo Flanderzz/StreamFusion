@@ -22,12 +22,17 @@ import org.junit.jupiter.params.provider.CsvSource;
 
 class FlinkFailureParitySqlHarnessTest {
   @Test
-  void cardinalityFailureIsComparedAsExplicitFallback() {
+  void cardinalityFailureIsComparedThroughNativeAggregation() {
     var comparison = NativeFailureParity.run(() -> environment("1", "2"),
         "SELECT SINGLE_VALUE(v) FROM src");
-    comparison.assertFailure(RuntimeException.class, "SingleValueAggFunction received more than one element",
-        ROW_EVALUATION, FALLBACK);
-    assertFalse(comparison.nativeRun().fallbackReasons().isEmpty());
+    comparison.assertFailure(
+        RuntimeException.class,
+        "SingleValueAggFunction received more than one element",
+        ROW_EVALUATION,
+        NATIVE);
+    org.junit.jupiter.api.Assertions.assertTrue(
+        java.util.Arrays.stream(comparison.nativeRun().rootCause().getStackTrace())
+            .anyMatch(frame -> frame.getMethodName().equals("updateGroupAggregator")));
   }
 
   @Test

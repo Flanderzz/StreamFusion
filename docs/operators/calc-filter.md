@@ -354,6 +354,11 @@ Native, unconditionally, with no host involvement:
   low bits, matching Flink's BigDecimal `longValue()` followed by the Java integer cast.
   Overflow wraps rather than saturating or producing NULL; NULL input remains NULL.
   This also admits casts above DECIMAL aggregates such as `CAST(AVG(d) AS BIGINT)`.
+- **DECIMAL → FLOAT/DOUBLE** and **ARRAY<DECIMAL> → ARRAY<FLOAT/DOUBLE>** — retain Flink's
+  intermediate double conversion, including compact-decimal division and final FLOAT narrowing.
+  This can differ from rounding a decimal directly to FLOAT. Array casts convert the element
+  buffers and preserve offsets, empty arrays, nullable containers/elements and declared types.
+  Other changes of collection element type still require a separately supported cast.
 - **`CHAR`/`VARCHAR` → `VARCHAR`** when the target length is ≥ the source length — an unpadded
   no-op (e.g. the common `COALESCE(s, 'x')` pattern).
 - **Widening timestamp precision** within `TIMESTAMP` or within `TIMESTAMP_LTZ` — Arrow stores both
@@ -487,7 +492,8 @@ the input value. Positions below -38 use Flink's generated expression through th
 callback, including its extreme-scale errors. They retain the same AND/OR short-circuit
 restriction as ROUND. Integer and floating-point inputs are not admitted for TRUNCATE;
 Flink 2.2.1 rejects nonliteral TRUNCATE positions during validation. SQL tests cover
-precision 38, multiple batches, filters, CASE, COALESCE and aggregate consumers.
+precision 38, multiple batches, filters, CASE, COALESCE and aggregate consumers, including
+projections that combine and nest truncation with DECIMAL-to-FLOAT/DOUBLE casts.
 
 Decimal planner literals are rescaled HALF_UP to their declared scale before encoding their
 unscaled integer. A precision overflow becomes a typed decimal NULL. This handles constant-folded
@@ -683,6 +689,9 @@ Character input, including NULL. Matches Flink 2.2.1's actual spelling: slash is
 
 One character argument is native. Valid quoted values are unescaped with Flink/Jackson first-token validation; invalid input is preserved and NULL propagates. A truncated Unicode escape after a valid first token fails the job, matching Flink 2.2.1's uncaught bounds exception. A truncated escape inside the first token is invalid JSON and is preserved.
 
+Scalar consumers use the fused JVM expression path, and strings passed to another operator
+fall back under the [JSON_VALUE identity restrictions](#json_value).
+
 ### JSON_STRING
 
 One character, BOOLEAN, TINYINT, SMALLINT, INTEGER, BIGINT, or DECIMAL scalar is native by default.
@@ -735,22 +744,26 @@ opt-in is needed. This validates the document directly, without applying JSON pa
 
 ### JSON_VALUE
 
-Enabled by default for the following verified shapes; no compatibility opt-in is needed.
+The direct Rust kernel is enabled by default for the following verified shapes; no compatibility
+opt-in is needed. The fused JVM consumer path below retains Flink's own selector and policy rules.
 
 Character input with a non-null literal definite path is native. Supported paths are `$`,
-dot members such as `$.user.name`, bracket members such as `$['user name']`, and nonnegative
-32-bit array indexes such as `$.users[0].name`. Dot names use Unicode letters, numbers and
+dot members such as `$.user.name`, bracket members such as `$['user name']`, and signed
+32-bit array indexes such as `$.users[0].name` and `$.users[-1].name`. Negative indexes count
+from the array end: `-1` selects the last element, while `-0` is index zero. Leading zeros
+are accepted, and an index beyond either end follows the normal missing-path policies.
+Dot names use Unicode letters, numbers and
 underscores, with a letter/underscore first. Bracket names use single or double quotes and
 accept well-formed Unicode, spaces and punctuation, including the other quote character.
 Empty bracket names (`$['']` and `$[""]`) select the empty object key, including in nested
 member/index paths. They remain distinct from a name containing a space (`$[' ']`).
 Member names are case-sensitive. Escaped document keys are compared as UTF-16 code units,
 so unpaired surrogates remain distinct from a literal `?` or replacement character, including
-when duplicate members occur before or after them. Wildcards, recursive descent, filters, slices, negative
-indexes, backslash escapes, ASCII controls, unpaired surrogates and dynamic
+when duplicate members occur before or after them. Wildcards, recursive descent, filters, slices,
+multi-selectors, backslash escapes, ASCII controls, unpaired surrogates and dynamic
 paths fall back. Quoted `'*'` is an ordinary member name, not a wildcard.
 
-ASCII spaces around a bracket member or index are native, for example `$[ 'user' ][ 01 ]`.
+ASCII spaces around a bracket member or index are native, for example `$[ 'user' ][ -01 ]`.
 Trailing ASCII spaces after a complete path are also accepted. The planner removes only
 these syntactic spaces; spaces inside quoted names remain significant. An explicit
 case-insensitive `strict`/`lax` prefix accepts Flink's mode-separating whitespace. Leading
@@ -762,8 +775,16 @@ would change the selected value. Remaining path extensions are tracked in
 Empty-name SQL regressions execute against released Flink with native Calc assertions,
 covering both quote styles, bracket spaces, nested objects/arrays, duplicate ancestors,
 missing/null/scalar/container values, strict/lax policies, typed RETURNING, independent
-paths, downstream grouping and invalid unselected fields. Native reader tests also verify
+paths and invalid unselected fields, plus explicit fallback for downstream string grouping.
+Native reader tests also verify
 selection on both the streaming parser and SIMD tape.
+
+Negative-index regressions cover nested arrays, minimum signed indexes, negative zero, leading
+zeros, all strict/lax policies, typed RETURNING and conversion failures, complete-document
+validation, and independent selections across multiple batches. The SIMD reader uses its existing
+array lengths; the streaming reader counts a negatively indexed array before selecting from it,
+without building a JSON object tree or retaining every element. Both are Rust paths with no
+generated-expression UDF binding for direct projections.
 
 The default return type and explicit `RETURNING VARCHAR(n)` are native; Flink 2.2.1 does
 not truncate this function's result to `n`. `RETURNING BOOLEAN`, `INTEGER` and `DOUBLE`
@@ -792,7 +813,8 @@ BOOLEAN forms with non-null DEFAULT or ERROR for both policies can compose nativ
 Typed JSON_VALUE calls nested under AND/OR stay on Flink: DataFusion may evaluate the
 unneeded side on some rows, exposing a scalar conversion failure that Flink short-circuits.
 CASE result branches retain native admission and evaluate only selected conversions.
-VARCHAR calls with an ERROR policy also stay on Flink when nested under AND/OR.
+VARCHAR calls and their consumers use the fused JVM path described below, preserving Flink's
+AND/OR short-circuiting even with an ERROR policy.
 
 The default path mode is **strict**. Missing members, selected JSON nulls, malformed JSON,
 and selected containers invoke ON ERROR in strict mode. In lax mode these invoke ON EMPTY,
@@ -800,10 +822,22 @@ except a document containing the JSON literal `null`, which invokes ON ERROR in 
 SQL NULL input always returns SQL NULL. ERROR ON EMPTY fails directly, even with a default
 ON ERROR. Duplicate members keep the last value, decimal text retains Jackson's BigDecimal
 scale/exponent spelling, and unpaired escaped surrogates become `?` in UTF-8 output.
-Intermediate STRING results can still lose surrogate identity before equality, LIKE, CASE or
-other consumers; the same limitation affects JSON_UNQUOTE. That remaining correctness work is
-tracked in [#81](https://github.com/datafusion-contrib/StreamFusion/issues/81). Direct-output
-parity does not establish parity for such compositions.
+Consumers of a STRING `JSON_VALUE` or `JSON_UNQUOTE` result execute together in one
+Flink-generated expression through the batch UDF bridge. Equality, inequality, LIKE, CASE,
+filters, nested scalar calls and scalar UDFs therefore observe the original Java UTF-16 value:
+an unpaired surrogate remains distinct from a literal `?`. Constant-folded JSON results containing
+unpaired surrogates receive the same treatment. These expressions run inside columnar Calc/filter,
+but their fused scalar computation runs on the JVM. Only the final result enters Arrow.
+
+Direct JSON string projections retain the Rust kernel. A Calc projecting a JSON-derived STRING
+(including nested character fields) into another operator makes the whole query fall back, with
+the reason `JSON string identity requires a final projection or a fused scalar consumer`. This
+includes grouping, DISTINCT, joins and sorting on those results, and intermediate optimizer blocks
+whose output is not final. The gate is conservative even when a particular document contains no
+surrogates or a scalar transformation happens to remove them. Final projections are allowed;
+non-string consumer results, such as a comparison or integer CASE, can feed native aggregation.
+Arrow strings always contain valid UTF-8; final-output replacement is never used to justify
+intermediate expression parity.
 
 JSON_VALUE scalar-conversion failures preserve Flink's ClassCastException, naming the source
 Java scalar class and the requested target class. This includes integer tokens returned as
@@ -924,16 +958,26 @@ Flink rather than converting each one to an Arrow timestamp.
 extraction fields and other temporal functions use Flink's implementation. Timestamp-producing
 expressions run by default with the full Flink millisecond range and fractional nanos.
 
+## POWER and SQRT
+
+`POWER` (including Flink's lowering of `SQRT`) runs inside native Calc by default through
+Flink-generated JVM code in the existing batch UDF bridge. The resolved primitive/DECIMAL
+overload uses Flink's own conversion and `Math.pow`, preserving exact deterministic results,
+signed zeros, NaN, infinities, overflow/underflow and NULL propagation. Nested powers can fuse
+into one generated expression. The surrounding operator remains columnar; the power operation
+itself executes on the JVM. The Rust alternative remains available under
+`streamfusion.expression.POWER.allowIncompatible=true` or the blanket flag.
+
 ## Opt-in math
 
 **Off by default, native only under `-Dstreamfusion.expression.<NAME>.allowIncompatible=true`** (or
-the blanket flag): `EXP`, `LN`, `SIN`, `COS`, `TAN`, `ASIN`, `ACOS`, `ATAN`, `LOG10`, `POWER`/`SQRT`
-(last-ULP libm divergence from Java's `StrictMath`), and float/double `ROUND` (`BigDecimal`-based
+the blanket flag): `EXP`, `LN`, `SIN`, `COS`, `TAN`, `ASIN`, `ACOS`, `ATAN`, `LOG10`
+(last-ULP libm divergence from Java's `Math`), and float/double `ROUND` (`BigDecimal`-based
 rounding in Flink vs. binary-float rounding natively).
 
-Unlike case folding/regex/datetime above, there is no cheap byte-exact upcall available for these —
-so, unlike those, **these fall back to Flink by default** and only run natively once you've opted in
-and accepted the (typically last-bit) divergence.
+These remaining functions fall back to Flink by default and only run natively once you've opted
+in and accepted the (typically last-bit) divergence. POWER's generated JVM path does not widen
+their admission.
 
 ## Literal/arity guards
 

@@ -3,6 +3,7 @@ package tech.streamfusion.planner;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 
 import java.util.List;
 import org.apache.calcite.jdbc.JavaTypeFactoryImpl;
@@ -15,13 +16,17 @@ import org.junit.jupiter.api.Test;
 
 class JsonPathSpecTest {
   @Test
-  void onlyDefiniteMemberAndNonnegativeIndexPathsAreAdmitted() {
+  void onlyDefiniteMemberAndSignedIndexPathsAreAdmitted() {
     for (String path :
         List.of(
             "$",
             "$.a.b[0]",
             "$['a b'][2147483647]",
             "$[01].a",
+            "$[-1]",
+            "$[-0]",
+            "$[-0001].a",
+            "$[-2147483648]",
             "$.\u7528\u6237['\u59d3.\u540d']",
             "$[\"O'Reilly\"]",
             "$['a\"b']",
@@ -38,7 +43,9 @@ class JsonPathSpecTest {
             "a",
             "$.*",
             "$..a",
-            "$[-1]",
+            "$[-2147483649]",
+            "$[--1]",
+            "$[-]",
             "$[2147483648]",
             "$[]",
             "$['a\\b']",
@@ -75,13 +82,24 @@ class JsonPathSpecTest {
       var call =
           rex.makeCall(
               output, function, List.of(rex.makeInputRef(text, 0), rex.makeInputRef(text, 1)));
-      var literalPath =
-          rex.makeCall(
-              output, function, List.of(rex.makeInputRef(text, 0), rex.makeLiteral("$.a")));
       var config = new org.apache.flink.configuration.Configuration();
       try (var ignored = NativeConfig.usePlannerConfig(config)) {
         assertNull(RexExpression.encodeProjections(List.of(call), List.of("v")));
-        assertNotNull(RexExpression.encodeProjections(List.of(literalPath), List.of("v")));
+        for (String path : List.of("$.a", "$[-1]", "$[-2147483648]", "$[-0]")) {
+          var literalPath =
+              rex.makeCall(
+                  output, function, List.of(rex.makeInputRef(text, 0), rex.makeLiteral(path)));
+          var encoded = RexExpression.encodeProjections(List.of(literalPath), List.of("v"));
+          assertNotNull(encoded);
+          var binding = encoded.udfBinding();
+          long[] constants = encoded.longs();
+          try {
+            assertSame(
+                constants, binding.bind(constants), "literal indexes must register no JVM UDF");
+          } finally {
+            binding.unbind();
+          }
+        }
       }
     }
   }

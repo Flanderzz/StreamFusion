@@ -42,7 +42,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: native
+          workspaces: native -> ../.flink-suite/streamfusion-source/native/target
 
       - name: Run unchanged upstream suite with StreamFusion
         run: |
@@ -53,7 +53,12 @@ jobs:
         if: always()
         with:
           name: upstream-flink-${{ matrix.suite }}-${{ github.sha }}
-          path: upstream-suite.log
+          path: |
+            upstream-suite.log
+            .flink-suite/native-execution/
+            .flink-suite/diagnostics/
+            .flink-suite/**/target/surefire-reports/
+          include-hidden-files: true
           retention-days: 7
 
   all-tests:

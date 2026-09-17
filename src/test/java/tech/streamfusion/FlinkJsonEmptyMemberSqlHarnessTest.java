@@ -94,10 +94,11 @@ class FlinkJsonEmptyMemberSqlHarnessTest {
         FlinkJsonEmptyMemberSqlHarnessTest::documents,
         "SELECT id, JSON_VALUE(s, '$['''']'), JSON_VALUE(s, '$['' '']'), "
             + "JSON_VALUE(s, '$.a'), JSON_VALUE(s, '$['''']['''']') FROM inputs");
-    NativeParity.assertParity(
+    NativeParity.assertFallbackReasonContains(
         FlinkJsonEmptyMemberSqlHarnessTest::documents,
         "SELECT JSON_VALUE(s, '$['''']'), COUNT(*) FROM inputs "
-            + "WHERE JSON_EXISTS(s, 'lax $['''']') GROUP BY JSON_VALUE(s, '$['''']')");
+            + "WHERE JSON_EXISTS(s, 'lax $['''']') GROUP BY JSON_VALUE(s, '$['''']')",
+        "JSON string identity requires a final projection");
   }
 
   @Test

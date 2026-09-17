@@ -140,6 +140,45 @@ pub(crate) fn build_expr(
             };
             function.call(vec![child])
         }
+        36 => {
+            let encoded = strings[arg]
+                .as_deref()
+                .expect("FROM_UNIXTIME format and offset");
+            let (offset, pattern) = encoded.split_once('|').expect("format and offset");
+            let child = build_expr(
+                schema,
+                kinds,
+                payload,
+                child_counts,
+                longs,
+                doubles,
+                strings,
+                cursor,
+            );
+            let input = datafusion::prelude::Expr::Cast(datafusion::logical_expr::Cast::new(
+                Box::new(child),
+                DataType::Int64,
+            ));
+            crate::flink_functions::from_unixtime::function(
+                offset.parse().expect("offset"),
+                pattern,
+            )
+            .expect("admitted FROM_UNIXTIME pattern")
+            .call(vec![input])
+        }
+        37 => {
+            let child = build_expr(
+                schema,
+                kinds,
+                payload,
+                child_counts,
+                longs,
+                doubles,
+                strings,
+                cursor,
+            );
+            crate::flink_functions::decimal_float::function(arg == 4).call(vec![child])
+        }
         11 => {
             // A widening numeric cast: build the single child, then wrap it. `arg` is the target code.
             let child = build_expr(
