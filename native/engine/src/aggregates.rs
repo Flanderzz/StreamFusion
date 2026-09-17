@@ -627,7 +627,7 @@ impl Accumulator for DoubleAvgAccumulator {
 /// exactly. All expose mergeable partial state, so windows accumulate incrementally and checkpoint
 /// uniformly.
 pub(crate) enum WindowAggregate {
-    RetractingIntegerSum(DataType),
+    RetractingSum(DataType),
     RetractingCount,
     Builtin(AggregateFunctionExpr),
     IntegerAvg(DataType),
@@ -648,9 +648,15 @@ pub(crate) enum WindowAggregate {
 impl WindowAggregate {
     fn new(kind: i64, value_type: &DataType) -> Self {
         match (kind, value_type) {
-            (RETRACT_SUM, DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64) => {
-                WindowAggregate::RetractingIntegerSum(value_type.clone())
-            }
+            (
+                RETRACT_SUM,
+                DataType::Int8
+                | DataType::Int16
+                | DataType::Int32
+                | DataType::Int64
+                | DataType::Float32
+                | DataType::Float64,
+            ) => WindowAggregate::RetractingSum(value_type.clone()),
             (RETRACT_COUNT | LIVE_COUNT | HIDDEN_LIVE_COUNT, _) => WindowAggregate::RetractingCount,
             // SUM over a narrow int keeps the host's narrow, wrapping semantics rather than widening.
             (0, DataType::Int32) => WindowAggregate::WrappingIntSum,
@@ -677,9 +683,21 @@ impl WindowAggregate {
 
     pub(crate) fn create_accumulator(&self) -> Box<dyn Accumulator> {
         match self {
-            WindowAggregate::RetractingIntegerSum(value_type) => Box::new(
-                retracting_window::RetractingWindowAccumulator::new(Some(value_type.clone())),
-            ),
+            WindowAggregate::RetractingSum(value_type) => match value_type {
+                DataType::Float32 => {
+                    Box::new(retracting_window::RetractingFloatingSumAccumulator::<
+                        arrow::datatypes::Float32Type,
+                    >::new(ScalarValue::Float32))
+                }
+                DataType::Float64 => {
+                    Box::new(retracting_window::RetractingFloatingSumAccumulator::<
+                        arrow::datatypes::Float64Type,
+                    >::new(ScalarValue::Float64))
+                }
+                _ => Box::new(retracting_window::RetractingWindowAccumulator::new(Some(
+                    value_type.clone(),
+                ))),
+            },
             WindowAggregate::RetractingCount => {
                 Box::new(retracting_window::RetractingWindowAccumulator::new(None))
             }
@@ -709,7 +727,7 @@ impl WindowAggregate {
 
     pub(crate) fn state_fields(&self) -> Vec<Field> {
         match self {
-            WindowAggregate::RetractingIntegerSum(value_type) => vec![
+            WindowAggregate::RetractingSum(value_type) => vec![
                 Field::new("sum", value_type.clone(), true),
                 Field::new("count", DataType::Int64, false),
             ],
@@ -753,7 +771,7 @@ impl WindowAggregate {
     /// The aggregate's output type (e.g. int64 for a sum of int64, float64 for a sum of float64).
     pub(crate) fn result_type(&self) -> DataType {
         match self {
-            WindowAggregate::RetractingIntegerSum(value_type) => value_type.clone(),
+            WindowAggregate::RetractingSum(value_type) => value_type.clone(),
             WindowAggregate::RetractingCount => DataType::Int64,
             WindowAggregate::Builtin(aggregate) => aggregate.field().data_type().clone(),
             WindowAggregate::IntegerAvg(result_type) => result_type.clone(),

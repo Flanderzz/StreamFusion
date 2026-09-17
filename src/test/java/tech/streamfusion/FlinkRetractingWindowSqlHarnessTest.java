@@ -91,7 +91,8 @@ class FlinkRetractingWindowSqlHarnessTest {
         "SELECT k, window_end"
             + (groupingOnly
                 ? ""
-                : ", SUM(v), COUNT(*), AVG(v), AVG(CAST(v AS FLOAT)), AVG(CAST(v AS DOUBLE))")
+                : ", SUM(v), COUNT(*), AVG(v), AVG(CAST(v AS FLOAT)), AVG(CAST(v AS DOUBLE)),"
+                    + " SUM(CAST(v AS FLOAT)), SUM(CAST(v AS DOUBLE))")
             + " FROM TABLE("
             + window
             + ") GROUP BY k, window_start, window_end";
@@ -114,6 +115,8 @@ class FlinkRetractingWindowSqlHarnessTest {
                 row,
                 Row.of(
                     value,
+                    value == null ? null : value.floatValue(),
+                    value == null ? null : value.doubleValue(),
                     value == null ? null : value.floatValue(),
                     value == null ? null : value.doubleValue()));
           });
@@ -239,7 +242,8 @@ class FlinkRetractingWindowSqlHarnessTest {
                 ? ""
                 : ", SUM(v), COUNT(v), COUNT(*), AVG(v), AVG(CAST(v AS INT)),"
                     + " AVG(CAST(v AS SMALLINT)), AVG(CAST(v AS TINYINT)),"
-                    + " AVG(CAST(v AS FLOAT)), AVG(CAST(v AS DOUBLE))")
+                    + " AVG(CAST(v AS FLOAT)), AVG(CAST(v AS DOUBLE)),"
+                    + " SUM(CAST(v AS FLOAT)), SUM(CAST(v AS DOUBLE))")
             + " FROM TABLE("
             + window
             + ") GROUP BY k, window_start, window_end";
@@ -276,7 +280,9 @@ class FlinkRetractingWindowSqlHarnessTest {
                     avg == null ? null : avg.shortValue(),
                     avg == null ? null : avg.byteValue(),
                     floating == null ? null : floating.floatValue(),
-                    floating));
+                    floating,
+                    floating == null ? null : (float) (floating * (Long) row.getField(3)),
+                    floating == null ? null : floating * (Long) row.getField(3)));
           });
     }
     expected.sort(Comparator.comparing(Row::toString));
@@ -468,7 +474,7 @@ class FlinkRetractingWindowSqlHarnessTest {
     "ONE_PHASE,HOP,DOUBLE", "TWO_PHASE,HOP,DOUBLE",
     "ONE_PHASE,CUMULATE,DOUBLE", "TWO_PHASE,CUMULATE,DOUBLE"
   })
-  void numericAverageRetractsReplacedTopRows(String phase, String shape, String type)
+  void numericAggregatesRetractReplacedTopRows(String phase, String shape, String type)
       throws Exception {
     String window =
         switch (shape) {
@@ -478,10 +484,13 @@ class FlinkRetractingWindowSqlHarnessTest {
           default ->
               "CUMULATE(TABLE ranked, DESCRIPTOR(rt), INTERVAL '5' SECOND, INTERVAL '15' SECOND)";
         };
+    boolean floating = type.equals("FLOAT") || type.equals("DOUBLE");
     String sql =
         "SELECT k, window_start, window_end, COUNT(v), AVG(CAST(v AS "
             + type
-            + ")) FROM TABLE("
+            + "))"
+            + (floating ? ", SUM(CAST(v AS " + type + "))" : "")
+            + " FROM TABLE("
             + window
             + ") GROUP BY k, window_start, window_end";
     List<Row> expected = expected(shape, false);
@@ -500,6 +509,7 @@ class FlinkRetractingWindowSqlHarnessTest {
             });
       }
     }
+    if (floating) expected.replaceAll(row -> Row.join(row, Row.of(row.getField(4))));
     assertEquals(expected, collect(environment(phase), sql).rows());
     var table = environment(phase);
     var scan = NativePlanner.install(table);
@@ -520,7 +530,7 @@ class FlinkRetractingWindowSqlHarnessTest {
     "ONE_PHASE,CUMULATE",
     "TWO_PHASE,CUMULATE"
   })
-  void floatingAveragesPreserveNonfiniteValuesAndSignedZero(String phase, String shape)
+  void floatingAggregatesPreserveNonfiniteValuesAndSignedZero(String phase, String shape)
       throws Exception {
     String window =
         switch (shape) {
@@ -531,7 +541,7 @@ class FlinkRetractingWindowSqlHarnessTest {
               "CUMULATE(TABLE changes, DESCRIPTOR(rt), INTERVAL '5' SECOND, INTERVAL '15' SECOND)";
         };
     String sql =
-        "SELECT k, window_end, AVG(f), AVG(v), COUNT(v), COUNT(*) FROM TABLE("
+        "SELECT k, window_end, AVG(f), AVG(v), COUNT(v), COUNT(*), SUM(f), SUM(v) FROM TABLE("
             + window
             + ") GROUP BY k, window_start, window_end";
     List<Row> host = null;
@@ -562,7 +572,11 @@ class FlinkRetractingWindowSqlHarnessTest {
                   floatingRow(RowKind.DELETE, 5, null),
                   floatingRow(RowKind.INSERT, 6, Double.NaN),
                   floatingRow(RowKind.INSERT, 6, 5.0),
-                  floatingRow(RowKind.DELETE, 6, Double.NaN))
+                  floatingRow(RowKind.DELETE, 6, Double.NaN),
+                  floatingRow(RowKind.INSERT, 7, -0.0),
+                  floatingRow(RowKind.INSERT, 8, 16777216.0),
+                  floatingRow(RowKind.INSERT, 8, 1.0),
+                  floatingRow(RowKind.DELETE, 8, 16777216.0))
               .assignTimestampsAndWatermarks(
                   WatermarkStrategy.<Row>forBoundedOutOfOrderness(Duration.ofDays(1))
                       .withTimestampAssigner((row, previous) -> (Long) row.getField(1)));
@@ -585,16 +599,22 @@ class FlinkRetractingWindowSqlHarnessTest {
               .map(
                   row -> {
                     Row copy = Row.copy(row);
-                    if (row.getField(2) != null)
-                      copy.setField(2, Float.floatToRawIntBits((Float) row.getField(2)));
-                    if (row.getField(3) != null)
-                      copy.setField(3, Double.doubleToRawLongBits((Double) row.getField(3)));
+                    for (int column : new int[] {2, 6}) {
+                      if (row.getField(column) != null)
+                        copy.setField(
+                            column, Float.floatToRawIntBits((Float) row.getField(column)));
+                    }
+                    for (int column : new int[] {3, 7}) {
+                      if (row.getField(column) != null)
+                        copy.setField(
+                            column, Double.doubleToRawLongBits((Double) row.getField(column)));
+                    }
                     return copy;
                   })
               .toList();
       if (!nativeEnabled) {
         host = bits;
-        assertEquals(5 * (shape.equals("TUMBLE") ? 1 : shape.equals("HOP") ? 2 : 3), host.size());
+        assertEquals(7 * (shape.equals("TUMBLE") ? 1 : shape.equals("HOP") ? 2 : 3), host.size());
       } else {
         assertEquals(host, bits);
         assertTrue(scan.substitutions() > 0, scan.fallbackReasons().toString());
@@ -606,6 +626,35 @@ class FlinkRetractingWindowSqlHarnessTest {
 
   private static Row floatingRow(RowKind kind, int key, Double value) {
     return Row.ofKind(kind, key, 1000L, value == null ? null : value.floatValue(), value);
+  }
+
+  @ParameterizedTest
+  @CsvSource({
+    "ONE_PHASE,TUMBLE",
+    "TWO_PHASE,TUMBLE",
+    "ONE_PHASE,HOP",
+    "TWO_PHASE,HOP",
+    "ONE_PHASE,CUMULATE",
+    "TWO_PHASE,CUMULATE"
+  })
+  void reducedIntegerSumAndAverageKeepExplicitFallback(String phase, String shape)
+      throws Exception {
+    String window =
+        switch (shape) {
+          case "TUMBLE" -> "TUMBLE(TABLE ranked, DESCRIPTOR(rt), INTERVAL '5' SECOND)";
+          case "HOP" ->
+              "HOP(TABLE ranked, DESCRIPTOR(rt), INTERVAL '5' SECOND, INTERVAL '10' SECOND)";
+          default ->
+              "CUMULATE(TABLE ranked, DESCRIPTOR(rt), INTERVAL '5' SECOND, INTERVAL '15' SECOND)";
+        };
+    String sql =
+        "SELECT k, window_start, window_end, COUNT(v), AVG(v), SUM(v) FROM TABLE("
+            + window
+            + ") GROUP BY k, window_start, window_end";
+    NativeParity.assertFallbackReasonContains(
+        () -> environment(phase),
+        sql,
+        "window aggregate: retracting input supports only aligned event-time");
   }
 
   private static List<Row> expected(String shape, boolean distinct) {

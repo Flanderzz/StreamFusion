@@ -35,7 +35,7 @@ aggregates and both aggregation phases against released Flink.
 ## Retracting COUNT/SUM/AVG and grouping-only windows
 
 Aligned event-time TUMBLE, HOP and CUMULATE accept updating input, including native Top-N,
-for unfiltered SUM/AVG over TINYINT/SMALLINT/INT/BIGINT, AVG over FLOAT/DOUBLE, COUNT over the
+for unfiltered SUM/AVG over TINYINT/SMALLINT/INT/BIGINT/FLOAT/DOUBLE, COUNT over the
 supported numeric value columns, COUNT(*), and grouping-only windows without aggregate
 functions. Both single-phase and local/global execution remain columnar.
 
@@ -46,6 +46,13 @@ A live all-NULL group therefore emits COUNT 0/SUM NULL, while an unmatched delet
 negative counts and sums as it does in released Flink. Integer sums preserve their declared
 width and wrapping behavior. Top-1 replacing 10 with 20 leaves SUM 20, and moving the last
 live row out of a window removes its old group.
+
+FLOAT SUM rounds every addition/subtraction at FLOAT precision; DOUBLE SUM uses DOUBLE
+precision. Both retain a nullable sum and signed BIGINT count. The first non-NULL insertion
+or partial is assigned directly, preserving an initial negative zero. An unmatched retraction
+starts from positive zero, as in Flink. Zero-count partials retain finite residual sums and
+NaN after infinity cancellation; emitting NULL for an empty aggregate does not erase that state.
+Local/global merging and checkpoint restore preserve these rules on both state backends.
 
 Integer AVG uses the existing BIGINT sum/count pair, subtracting values and non-NULL counts
 for retractions. A zero count produces NULL; negative counts still divide, matching Flink.
@@ -235,12 +242,15 @@ enables columnar composition with downstream consumers; it is not a standalone t
   SUM/AVG DISTINCT, filtered COUNT DISTINCT, FLOAT/DOUBLE, BOOLEAN, TIME and complex values.
   Non-windowed DISTINCT has separate coverage; see [GROUP BY](group-by.md).
 - Retracting input outside aligned event-time TUMBLE/HOP/CUMULATE with grouping-only,
-  unfiltered integer SUM, integer/FLOAT/DOUBLE AVG, numeric COUNT(value), and COUNT(*).
-  DISTINCT, MIN/MAX, non-integer SUM, DECIMAL AVG, filters, processing-time, attached, session
+  unfiltered integer/FLOAT/DOUBLE SUM/AVG, numeric COUNT(value), and COUNT(*).
+  DISTINCT, MIN/MAX, DECIMAL SUM/AVG, filters, processing-time, attached, session
   and legacy windows still fall back on updating input. Admission checks the **input**
   changelog even when final output is append-only.
   The diagnostic names the supported retracting forms. Remaining coverage is tracked in
   [#99](https://github.com/datafusion-contrib/StreamFusion/issues/99).
+- Flink's reduction of overlapping BIGINT `COUNT(v), AVG(v), SUM(v)` calls to internal
+  `$SUM0_RETRACT` over attached window bounds. This rewritten plan retains fallback in
+  both aggregation phases; the individual direct aggregate forms above remain supported.
 - Flink's optional `table.optimizer.distinct-agg.split.enabled=true` rewrite. The unchanged
   split-distinct IT variants introduce an unsupported `HASH_CODE` Calc and extra window layers,
   including attached single-phase aggregation and partial layouts outside current admission.
@@ -310,6 +320,22 @@ two warmups and five interleaved measured runs:
 Both transposes, Top-N and the rowwise sink remain timed; no competing local builds or tests
 ran. Local/global was faster for both types. Single-phase FLOAT was slower and DOUBLE was
 approximately even. These results describe the complete query rather than isolated AVG cost.
+
+With `-Dwindow.sumType=FLOAT` or `DOUBLE`, the same benchmark measures COUNT and SUM of
+the cast input. The same release/mimalloc setup, 1 million rows, two warmups and five
+interleaved measured runs gave:
+
+| SUM type | Strategy | Flink (s) | Native (s) | Flink / native |
+| --- | --- | ---: | ---: | ---: |
+| FLOAT | Single-phase | 0.496960 | 0.489965 | 1.014× |
+| FLOAT | Local/global | 0.627083 | 0.466394 | 1.345× |
+| DOUBLE | Single-phase | 0.451853 | 0.486156 | 0.929× |
+| DOUBLE | Local/global | 0.619748 | 0.478603 | 1.295× |
+
+Both transposes, Top-N and the rowwise sink remain timed; no competing local builds or tests
+ran. Local/global improved for both types. Single-phase FLOAT was approximately even and
+DOUBLE was slower. These are complete-query timings, not isolated SUM measurements.
+
 ## Mixed AVG benchmark
 
 `MixedWindowAvgBenchmark` compares mixed COUNT/AVG/SUM/MIN/MAX over a 2-second/10-second HOP
