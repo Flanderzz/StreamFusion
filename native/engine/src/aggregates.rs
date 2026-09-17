@@ -506,9 +506,19 @@ impl Accumulator for FloatAvgAccumulator {
             .as_any()
             .downcast_ref::<Float32Array>()
             .expect("value float32");
-        for value in array.iter().flatten() {
-            self.sum += f64::from(value);
-            self.count += 1;
+        let changes = values
+            .get(1)
+            .map(|kinds| kinds.as_any().downcast_ref::<Int8Array>().unwrap());
+        for (row, value) in array.iter().enumerate() {
+            if let Some(value) = value {
+                if changes.is_some_and(|kinds| matches!(kinds.value(row), 1 | 3)) {
+                    self.sum -= f64::from(value);
+                    self.count = self.count.wrapping_sub(1);
+                } else {
+                    self.sum += f64::from(value);
+                    self.count = self.count.wrapping_add(1);
+                }
+            }
         }
         Ok(())
     }
@@ -522,8 +532,10 @@ impl Accumulator for FloatAvgAccumulator {
             .as_any()
             .downcast_ref::<Int64Array>()
             .expect("count state int64");
-        self.sum += sums.iter().flatten().sum::<f64>();
-        self.count += counts.iter().flatten().sum::<i64>();
+        for sum in sums.iter().flatten() {
+            self.sum += sum;
+        }
+        self.count = counts.iter().flatten().fold(self.count, i64::wrapping_add);
         Ok(())
     }
 
@@ -559,9 +571,19 @@ impl Accumulator for DoubleAvgAccumulator {
             .as_any()
             .downcast_ref::<arrow::array::Float64Array>()
             .expect("f64");
-        for value in array.iter().flatten() {
-            self.sum += value;
-            self.count += 1;
+        let changes = values
+            .get(1)
+            .map(|kinds| kinds.as_any().downcast_ref::<Int8Array>().unwrap());
+        for (row, value) in array.iter().enumerate() {
+            if let Some(value) = value {
+                if changes.is_some_and(|kinds| matches!(kinds.value(row), 1 | 3)) {
+                    self.sum -= value;
+                    self.count = self.count.wrapping_sub(1);
+                } else {
+                    self.sum += value;
+                    self.count = self.count.wrapping_add(1);
+                }
+            }
         }
         Ok(())
     }
@@ -575,8 +597,10 @@ impl Accumulator for DoubleAvgAccumulator {
             .as_any()
             .downcast_ref::<Int64Array>()
             .expect("count state int64");
-        self.sum += sums.iter().flatten().sum::<f64>();
-        self.count += counts.iter().flatten().sum::<i64>();
+        for sum in sums.iter().flatten() {
+            self.sum += sum;
+        }
+        self.count = counts.iter().flatten().fold(self.count, i64::wrapping_add);
         Ok(())
     }
 
@@ -1381,8 +1405,111 @@ mod decimal_sum_tests {
 }
 
 #[cfg(test)]
-mod integer_avg_tests {
+mod avg_tests {
     use super::*;
+
+    #[test]
+    fn floating_average_merges_partials_in_host_order() {
+        for aggregate in [WindowAggregate::FloatAvg, WindowAggregate::DoubleAvg] {
+            let mut avg = aggregate.create_accumulator();
+            avg.merge_batch(&[
+                Arc::new(arrow::array::Float64Array::from(vec![2_f64.powi(54)])),
+                Arc::new(Int64Array::from(vec![1])),
+            ])
+            .unwrap();
+            avg.merge_batch(&[
+                Arc::new(arrow::array::Float64Array::from(vec![-2_f64.powi(54), 1.0])),
+                Arc::new(Int64Array::from(vec![-1, 1])),
+            ])
+            .unwrap();
+            assert_eq!(
+                avg.state().unwrap(),
+                vec![ScalarValue::Float64(Some(1.0)), ScalarValue::Int64(Some(1))]
+            );
+        }
+    }
+
+    #[test]
+    fn floating_average_restores_nan_from_a_zero_count_partial() {
+        for (datatype, aggregate) in [
+            (DataType::Float32, WindowAggregate::FloatAvg),
+            (DataType::Float64, WindowAggregate::DoubleAvg),
+        ] {
+            let values = |values: Vec<f64>| {
+                arrow::compute::cast(&arrow::array::Float64Array::from(values), &datatype).unwrap()
+            };
+            let mut avg = aggregate.create_accumulator();
+            avg.update_batch(&[
+                values(vec![f64::INFINITY, f64::INFINITY]),
+                Arc::new(Int8Array::from(vec![0, 3])),
+            ])
+            .unwrap();
+            assert!(avg.evaluate().unwrap().is_null());
+            let states = avg
+                .state()
+                .unwrap()
+                .into_iter()
+                .map(|value| value.to_array_of_size(1).unwrap())
+                .collect::<Vec<_>>();
+            let mut restored = aggregate.create_accumulator();
+            restored.merge_batch(&states).unwrap();
+            restored.update_batch(&[values(vec![3.0])]).unwrap();
+            match restored.evaluate().unwrap() {
+                ScalarValue::Float32(Some(value)) => assert!(value.is_nan()),
+                ScalarValue::Float64(Some(value)) => assert!(value.is_nan()),
+                other => panic!("expected NaN, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn floating_average_restores_zero_count_partial_and_retracts_after_restore() {
+        for (datatype, aggregate) in [
+            (DataType::Float32, WindowAggregate::FloatAvg),
+            (DataType::Float64, WindowAggregate::DoubleAvg),
+        ] {
+            let values = |values: Vec<Option<f64>>| {
+                arrow::compute::cast(&arrow::array::Float64Array::from(values), &datatype).unwrap()
+            };
+            let mut avg = aggregate.create_accumulator();
+            avg.update_batch(&[
+                values(vec![Some(2.0), Some(1.0), None]),
+                Arc::new(Int8Array::from(vec![0, 1, 3])),
+            ])
+            .unwrap();
+            assert!(avg.evaluate().unwrap().is_null());
+            let states = avg
+                .state()
+                .unwrap()
+                .into_iter()
+                .map(|value| value.to_array_of_size(1).unwrap())
+                .collect::<Vec<_>>();
+            let mut restored = aggregate.create_accumulator();
+            restored.merge_batch(&states).unwrap();
+            restored
+                .update_batch(&[values(vec![Some(3.0)]), Arc::new(Int8Array::from(vec![2]))])
+                .unwrap();
+            assert_eq!(
+                restored.evaluate().unwrap(),
+                ScalarValue::try_from_array(&values(vec![Some(4.0)]), 0).unwrap()
+            );
+            restored
+                .update_batch(&[
+                    values(vec![Some(1.0), Some(3.0)]),
+                    Arc::new(Int8Array::from(vec![3, 3])),
+                ])
+                .unwrap();
+            match restored.evaluate().unwrap() {
+                ScalarValue::Float32(Some(value)) => {
+                    assert_eq!(value.to_bits(), (-0.0_f32).to_bits())
+                }
+                ScalarValue::Float64(Some(value)) => {
+                    assert_eq!(value.to_bits(), (-0.0_f64).to_bits())
+                }
+                other => panic!("expected negative zero, got {other:?}"),
+            }
+        }
+    }
 
     #[test]
     fn signed_integer_average_restores_null_and_negative_counts_at_every_width() {
