@@ -28,7 +28,12 @@ offsets beyond the available rows, and memory/RocksDB restore of the hidden pref
 
 The grouped pipeline stays columnar across the singleton exchange. Tests compare raw row kinds
 with mini-batching disabled, including NULL ordering, decrements and complete group deletion.
-Mini-batch tests compare final materializations. Hidden-rank retracting OFFSET always preserves
+Mini-batch tests compare final materializations with size-four bundles and end-of-input
+flushes. The SQL fixture keeps processing-time batch markers at zero for both executions:
+crossing a wall-clock boundary can otherwise split identical rows into different bundles,
+changing the host's retained row kinds and even its final OFFSET result. The fallback case
+still executes both jobs and requires zero native substitutions and the precise reason.
+Hidden-rank retracting OFFSET always preserves
 per-record cascades: emitting a row mutates its retained kind, affecting later full-row equality.
 Its sort-key counts advance independently of successful payload removals, exactly as in Flink's
 heap state backend. Checkpoints and memory/RocksDB transitions preserve both kinds and counts. The
