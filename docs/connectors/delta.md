@@ -52,6 +52,8 @@ view creation starts a new operator chain: Flink's Sink V2 writer cannot chain b
 source such as SQL datagen. This places any network boundary before view creation, while records
 are still serializable Arrow batches. Partitioned tables already have that boundary at their
 partition exchange. The Arrow-backed views stay within the writer task.
+Disabling operator chaining through the execution environment or
+`pipeline.operator-chaining.enabled=false` keeps the Delta writer on the stock path.
 
 The Arrow schema crosses the C Data Interface once when each data-file encoder opens; subsequent
 batches export only their arrays. Java opens and owns the Hadoop output stream, while encoded bytes

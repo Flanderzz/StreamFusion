@@ -4,10 +4,12 @@ import io.delta.flink.sink.DeltaSinkConf;
 import java.util.*;
 import java.util.stream.Collectors;
 import org.apache.calcite.rel.RelNode;
+import org.apache.flink.configuration.PipelineOptions;
 import org.apache.flink.table.catalog.*;
 import org.apache.flink.table.planner.plan.abilities.sink.OverwriteSpec;
 import org.apache.flink.table.planner.plan.abilities.sink.SinkAbilitySpec;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalSink;
+import org.apache.flink.table.planner.utils.ShortcutUtils;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.LogicalTypeRoot;
 import org.apache.flink.table.types.logical.RowType;
@@ -56,6 +58,9 @@ final class DeltaSinkMatcher {
   }
 
   static Planned plan(StreamPhysicalSink sink) {
+    if (!ShortcutUtils.unwrapTableConfig(sink).get(PipelineOptions.OPERATOR_CHAINING)) {
+      return Planned.fallback("Arrow-backed Delta views require operator chaining");
+    }
     ResolvedCatalogTable table = table(sink);
     Map<String, String> options = new LinkedHashMap<>(table.getOptions());
     String path = options.get("table_path");

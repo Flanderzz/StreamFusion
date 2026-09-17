@@ -229,6 +229,36 @@ class DeltaSinkParityTest {
 
   @org.junit.jupiter.params.ParameterizedTest
   @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+  void disabledChainingKeepsTheStockWriter(boolean tableSetting) throws Exception {
+    Path path = Files.createTempDirectory("delta-no-chaining");
+    StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+    env.setParallelism(1);
+    if (!tableSetting) {
+      env.disableOperatorChaining();
+    }
+    StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env);
+    if (tableSetting) {
+      tableEnv.getConfig().set("pipeline.operator-chaining.enabled", "false");
+    }
+    tableEnv.executeSql(
+        "CREATE TEMPORARY TABLE src (id BIGINT, v INT, dt STRING) WITH ('connector'='datagen', "
+            + "'fields.id.kind'='sequence', 'fields.id.start'='1', 'fields.id.end'='3')");
+    tableEnv.executeSql(
+        "CREATE TEMPORARY TABLE sink (id BIGINT, v INT, dt STRING) WITH ("
+            + "'connector'='delta', 'table_path'='" + path.toUri() + "')");
+    PhysicalPlanScan scan = NativePlanner.install(tableEnv);
+
+    tableEnv.executeSql("INSERT INTO sink SELECT * FROM src").await();
+
+    assertEquals(3, readLogicalRows(path).size());
+    assertTrue(
+        scan.fallbackReasons().stream()
+            .anyMatch(reason -> reason.contains("Arrow-backed Delta views require operator chaining")),
+        scan::explainSummary);
+  }
+
+  @org.junit.jupiter.params.ParameterizedTest
+  @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
   void nestedStructListAndMapMatchTheConnector(boolean renamed) throws Exception {
     Path host = Files.createTempDirectory("delta-nested-host");
     Path nativePath = Files.createTempDirectory("delta-nested-native");
