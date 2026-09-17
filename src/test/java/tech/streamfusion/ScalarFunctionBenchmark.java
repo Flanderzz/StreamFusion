@@ -262,6 +262,16 @@ class ScalarFunctionBenchmark {
                       "JSON_EXISTS(s, 'lax $.\u7528\u6237[\"\u59d3.\u540d\"]')",
                       "BOOLEAN"),
                   new Query(
+                      "JSON_VALUE_UNICODE_ESCAPE",
+                      "tt_json_member",
+                      "JSON_VALUE(s, 'lax $[\"\\用户\"][\"\\姓.\\名\"]')",
+                      "STRING"),
+                  new Query(
+                      "JSON_EXISTS_UNICODE_ESCAPE",
+                      "tt_json_member",
+                      "JSON_EXISTS(s, 'lax $[\"\\用户\"][\"\\姓.\\名\"]')",
+                      "BOOLEAN"),
+                  new Query(
                       "JSON_VALUE_BOOLEAN",
                       "tt_json_boolean",
                       "JSON_VALUE(s, '$.v' RETURNING BOOLEAN)",

@@ -9,7 +9,7 @@ import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.core.io.JsonString
 final class JsonPathSpec {
   private static final Pattern MODE =
       Pattern.compile("^\\s*(strict|lax)\\s+(.+)$", Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
-  private static final String ESCAPE = "\\\\(?:u[0-9a-fA-F]{4}|[\\x20-\\x74\\x76-\\x7e])";
+  private static final String ESCAPE = "\\\\(?:u[0-9a-fA-F]{4}|[^u])";
   private static final Pattern STEP =
       Pattern.compile(
           "\\.(?<dot>[\\p{L}_][\\p{L}\\p{N}_]*)"

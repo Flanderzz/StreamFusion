@@ -766,12 +766,16 @@ once, so `\\u0061` names the literal six-character key `\u0061`, not `a`. Escape
 and brackets remain part of the member name. The planner uses Flink's released Jayway
 unescaper and sends a canonical JSON-escaped name to Rust; both native readers select
 against the decoded name without a per-row JVM call.
-An escaped printable ASCII character without a special meaning loses only its backslash,
+An escaped character without a special meaning loses only its backslash,
 as in released Flink: `\q` names `q`, `\x61` names `x61`, and `\*` names the literal `*`.
 This is not hexadecimal decoding or wildcard selection. Both quote styles have executed
-parity coverage for every printable ASCII escape, including strict/lax and error policies.
+parity coverage for every printable ASCII escape, ASCII controls and representative Unicode
+characters, including strict/lax and error policies. Backslashes before literal Unicode or
+control characters preserve those characters: `\用户` selects `用户`, and a backslash before
+a literal newline selects a newline in the member name. The decoded name must still be
+well-formed Unicode; the existing canonical encoding carries control characters safely to Rust.
 Wildcards, recursive descent, filters, slices, multi-selectors, invalid/incomplete Unicode
-escapes, backslashes before literal non-printable or non-ASCII characters, raw ASCII controls,
+escapes, unescaped ASCII controls,
 unpaired surrogates and dynamic paths fall back. Quoted `'*'` is an ordinary member name,
 not a wildcard.
 
@@ -816,6 +820,14 @@ control measured 0.378125 s / 0.645387 s (0.586×). Two warmups and five interle
 include both transposes and the rowwise sink, with no competing local builds or tests.
 Use `-Dscalar.functions=JSON_VALUE_NONSTANDARD_ESCAPE,JSON_EXISTS_NONSTANDARD_ESCAPE`
 with the benchmark options above to reproduce.
+
+The escaped-Unicode variant selects `$["\用户"]["\姓.\名"]` from the same row-fed
+Unicode-member fixture. With release/mimalloc, 1 million rows, 264 bytes of padding,
+two warmups and five interleaved trials, JSON_VALUE measured 1.346831 s / 1.055570 s
+(Flink/native, 1.276×), and JSON_EXISTS measured 1.322327 s / 0.961161 s (1.376×).
+The source-matched identity control measured 0.636006 s / 0.939120 s (0.677×).
+Both transposes and the row sink remain included. Use
+`-Dscalar.functions=JSON_VALUE_UNICODE_ESCAPE,JSON_EXISTS_UNICODE_ESCAPE` to reproduce.
 
 Negative-index regressions cover nested arrays, minimum signed indexes, negative zero, leading
 zeros, all strict/lax policies, typed RETURNING and conversion failures, complete-document

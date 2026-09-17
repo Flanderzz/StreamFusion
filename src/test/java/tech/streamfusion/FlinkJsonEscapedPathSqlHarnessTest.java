@@ -47,6 +47,23 @@ class FlinkJsonEscapedPathSqlHarnessTest {
     escapedNamesPreserveSelectionAndPolicies(escaped, name);
   }
 
+  static Stream<Arguments> unicodeAndControlNames() {
+    return IntStream.concat(
+            IntStream.rangeClosed(0, 0x1f),
+            IntStream.of(
+                0x7f, 0x85, 0xa0, 0xff, 0x301, 0x3a3, 0x7528, 0x2028, 0x2029, 0xfffd, 0xffff,
+                0x1f600, 0x1d11e, 0x10ffff))
+        .mapToObj(c -> new String(Character.toChars(c)))
+        .map(c -> Arguments.of("a\\" + c + "b", "a" + c + "b"));
+  }
+
+  @ParameterizedTest
+  @MethodSource("unicodeAndControlNames")
+  void unicodeAndControlEscapesPreserveMemberIdentity(String escaped, String name)
+      throws Exception {
+    escapedNamesPreserveSelectionAndPolicies(escaped, name);
+  }
+
   @ParameterizedTest
   @MethodSource("names")
   void escapedNamesPreserveSelectionAndPolicies(String escaped, String name) throws Exception {
@@ -86,7 +103,10 @@ class FlinkJsonEscapedPathSqlHarnessTest {
               + key
               + ":[{\"\\u0000\":"
               + i
-              + "}],\"a\\nb\":true,\"a/b\":1.25,\"aq\":true,\"x61\":1.25,\"*\":null}";
+              + "}],\"a\\nb\":true,\"a/b\":1.25,\"aq\":true,\"x61\":1.25,\"*\":null,"
+              + "\"用户\":{\"姓.名\":"
+              + i
+              + "}}";
     }
     NativeParity.assertParity(
         () -> TextTimeFunctionTestInputs.textRows(rows),
@@ -96,7 +116,9 @@ class FlinkJsonEscapedPathSqlHarnessTest {
             + "JSON_EXISTS(s, '$[\"a\\\\\\''b\"][-1][\"\\u0000\"]'), "
             + "JSON_VALUE(s, '$[\"a\\q\"]' RETURNING BOOLEAN), "
             + "JSON_VALUE(s, '$[\"\\x61\"]' RETURNING DOUBLE), "
-            + "JSON_EXISTS(s, '$[\"\\*\"]') FROM inputs");
+            + "JSON_EXISTS(s, '$[\"\\*\"]'), "
+            + "JSON_VALUE(s, '$[\"\\用户\"][\"\\姓.\\名\"]' RETURNING INTEGER), "
+            + "JSON_VALUE(s, '$[\"a\\\nb\"]' RETURNING BOOLEAN) FROM inputs");
   }
 
   @Test
@@ -122,8 +144,7 @@ class FlinkJsonEscapedPathSqlHarnessTest {
   }
 
   @ParameterizedTest
-  @ValueSource(
-      strings = {"\\uD800", "\\uDC00", "\\uD800x\\uDC00", "\\u12", "\\uGGGG", "\\用户", "\\\u007f"})
+  @ValueSource(strings = {"\\uD800", "\\uDC00", "\\uD800x\\uDC00", "\\u12", "\\uGGGG"})
   void unverifiedEscapesKeepExplicitFallback(String name) throws Exception {
     NativeParity.assertFallbackReasonContains(
         () -> documents("?", 19),
