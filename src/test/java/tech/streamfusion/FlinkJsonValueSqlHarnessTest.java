@@ -48,10 +48,11 @@ class FlinkJsonValueSqlHarnessTest {
               + literal
               + "' DEFAULT 'empty' ON EMPTY DEFAULT 'error' ON ERROR) FROM inputs");
     }
-    assertParity(
+    NativeParity.assertFallbackReasonContains(
         JsonFunctionTestInputs::memberNames,
         "SELECT JSON_VALUE(s, '$.\u7528\u6237[''\u59d3.\u540d'']'), COUNT(*) FROM inputs "
-            + "GROUP BY JSON_VALUE(s, '$.\u7528\u6237[''\u59d3.\u540d'']')");
+            + "GROUP BY JSON_VALUE(s, '$.\u7528\u6237[''\u59d3.\u540d'']')",
+        "JSON string identity requires a final projection");
   }
 
   @Test
@@ -89,16 +90,12 @@ class FlinkJsonValueSqlHarnessTest {
   }
 
   @Test
-  void composesWithPredicatesAndDownstreamGrouping() throws Exception {
+  void downstreamStringGroupingFallsBackUntilIdentityCanCrossArrow() throws Exception {
     String sql =
         "SELECT JSON_VALUE(s, '$.a'), COUNT(*) FROM inputs "
             + "WHERE JSON_VALUE(s, '$.a') IS NOT NULL GROUP BY JSON_VALUE(s, '$.a')";
-    String plan =
-        tech.streamfusion.planner.NativePlanner.explain(JsonFunctionTestInputs.documents(), sql);
-    org.junit.jupiter.api.Assertions.assertTrue(plan.contains("NativeCalc"), plan);
-    org.junit.jupiter.api.Assertions.assertTrue(
-        plan.contains("NativeColumnarGroupAggregate"), plan);
-    assertParity(JsonFunctionTestInputs::documents, sql);
+    NativeParity.assertFallbackReasonContains(
+        JsonFunctionTestInputs::documents, sql, "JSON string identity requires a final projection");
   }
 
   @Test
@@ -142,10 +139,9 @@ class FlinkJsonValueSqlHarnessTest {
 
   @Test
   void stringErrorPolicyKeepsFlinkRowShortCircuiting() throws Exception {
-    NativeParity.assertFallbackReasonContains(
+    NativeParity.assertParity(
         () -> TextTimeFunctionTestInputs.textRows("{\"a\":\"ok\"}", "invalid"),
-        "SELECT id, id = 1 OR JSON_VALUE(s, '$.a' ERROR ON ERROR) = 'ok' FROM inputs",
-        "row short-circuiting");
+        "SELECT id, id = 1 OR JSON_VALUE(s, '$.a' ERROR ON ERROR) = 'ok' FROM inputs");
   }
 
   @Test

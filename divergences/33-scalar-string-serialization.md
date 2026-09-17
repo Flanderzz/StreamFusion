@@ -64,3 +64,20 @@ before the selected decimal is written.
 
 Coverage is listed in [Calc/filter](../docs/operators/calc-filter.md); independent
 Flink/native measurements are in [scalar benchmarks](../docs/benchmarks/scalar-functions.md).
+
+## Intermediate JSON string identity
+
+Flink's JSON functions can return a Java String containing an unpaired UTF-16 surrogate.
+Comet's Arrow string writer transfers Spark's existing UTF-8 bytes; that representation cannot
+preserve Flink's distinction between an unpaired surrogate and a literal question mark. We retain
+the existing Arrow UDF bridge and fuse the JSON producer with its scalar consumers using Flink's
+generated expression code. No invalid UTF-8 or alternate string encoding enters an Arrow field.
+Only the final scalar result is marshalled. The shared function bindings retain the existing
+task lifecycle and scalar UDF admission checks.
+
+If a Calc must pass a JSON-derived string to another operator, the planner declines the whole
+island before substitution. This deliberately narrows grouping, joining and ordering coverage
+until Arrow boundaries can preserve the required identity. The legacy optimizer hook distinguishes
+final output from intermediate subgraph output using Flink's sink-block context; the deployed
+planner checks its expanded final roots. Runtime parity tests exercise both admitted consumers and
+explicit boundary fallback against released Flink, including escaped member-identity regressions.

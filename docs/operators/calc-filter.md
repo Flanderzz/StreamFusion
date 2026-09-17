@@ -635,6 +635,9 @@ Character input, including NULL. Matches Flink 2.2.1's actual spelling: slash is
 
 One character argument is native. Valid quoted values are unescaped with Flink/Jackson first-token validation; invalid input is preserved and NULL propagates. A truncated Unicode escape after a valid first token fails the job, matching Flink 2.2.1's uncaught bounds exception. A truncated escape inside the first token is invalid JSON and is preserved.
 
+Scalar consumers use the fused JVM expression path, and strings passed to another operator
+fall back under the [JSON_VALUE identity restrictions](#json_value).
+
 ### JSON_STRING
 
 One character, BOOLEAN, TINYINT, SMALLINT, INTEGER, BIGINT, or DECIMAL scalar is native by default.
@@ -687,7 +690,8 @@ opt-in is needed. This validates the document directly, without applying JSON pa
 
 ### JSON_VALUE
 
-Enabled by default for the following verified shapes; no compatibility opt-in is needed.
+The direct Rust kernel is enabled by default for the following verified shapes; no compatibility
+opt-in is needed. The fused JVM consumer path below retains Flink's own selector and policy rules.
 
 Character input with a non-null literal definite path is native. Supported paths are `$`,
 dot members such as `$.user.name`, bracket members such as `$['user name']`, and nonnegative
@@ -714,7 +718,8 @@ would change the selected value. Remaining path extensions are tracked in
 Empty-name SQL regressions execute against released Flink with native Calc assertions,
 covering both quote styles, bracket spaces, nested objects/arrays, duplicate ancestors,
 missing/null/scalar/container values, strict/lax policies, typed RETURNING, independent
-paths, downstream grouping and invalid unselected fields. Native reader tests also verify
+paths and invalid unselected fields, plus explicit fallback for downstream string grouping.
+Native reader tests also verify
 selection on both the streaming parser and SIMD tape.
 
 The default return type and explicit `RETURNING VARCHAR(n)` are native; Flink 2.2.1 does
@@ -744,7 +749,8 @@ BOOLEAN forms with non-null DEFAULT or ERROR for both policies can compose nativ
 Typed JSON_VALUE calls nested under AND/OR stay on Flink: DataFusion may evaluate the
 unneeded side on some rows, exposing a scalar conversion failure that Flink short-circuits.
 CASE result branches retain native admission and evaluate only selected conversions.
-VARCHAR calls with an ERROR policy also stay on Flink when nested under AND/OR.
+VARCHAR calls and their consumers use the fused JVM path described below, preserving Flink's
+AND/OR short-circuiting even with an ERROR policy.
 
 The default path mode is **strict**. Missing members, selected JSON nulls, malformed JSON,
 and selected containers invoke ON ERROR in strict mode. In lax mode these invoke ON EMPTY,
@@ -752,10 +758,22 @@ except a document containing the JSON literal `null`, which invokes ON ERROR in 
 SQL NULL input always returns SQL NULL. ERROR ON EMPTY fails directly, even with a default
 ON ERROR. Duplicate members keep the last value, decimal text retains Jackson's BigDecimal
 scale/exponent spelling, and unpaired escaped surrogates become `?` in UTF-8 output.
-Intermediate STRING results can still lose surrogate identity before equality, LIKE, CASE or
-other consumers; the same limitation affects JSON_UNQUOTE. That remaining correctness work is
-tracked in [#81](https://github.com/datafusion-contrib/StreamFusion/issues/81). Direct-output
-parity does not establish parity for such compositions.
+Consumers of a STRING `JSON_VALUE` or `JSON_UNQUOTE` result execute together in one
+Flink-generated expression through the batch UDF bridge. Equality, inequality, LIKE, CASE,
+filters, nested scalar calls and scalar UDFs therefore observe the original Java UTF-16 value:
+an unpaired surrogate remains distinct from a literal `?`. Constant-folded JSON results containing
+unpaired surrogates receive the same treatment. These expressions run inside columnar Calc/filter,
+but their fused scalar computation runs on the JVM. Only the final result enters Arrow.
+
+Direct JSON string projections retain the Rust kernel. A Calc projecting a JSON-derived STRING
+(including nested character fields) into another operator makes the whole query fall back, with
+the reason `JSON string identity requires a final projection or a fused scalar consumer`. This
+includes grouping, DISTINCT, joins and sorting on those results, and intermediate optimizer blocks
+whose output is not final. The gate is conservative even when a particular document contains no
+surrogates or a scalar transformation happens to remove them. Final projections are allowed;
+non-string consumer results, such as a comparison or integer CASE, can feed native aggregation.
+Arrow strings always contain valid UTF-8; final-output replacement is never used to justify
+intermediate expression parity.
 
 JSON_VALUE scalar-conversion failures preserve Flink's ClassCastException, naming the source
 Java scalar class and the requested target class. This includes integer tokens returned as

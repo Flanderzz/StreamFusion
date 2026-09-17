@@ -240,6 +240,7 @@ final class TextTimeBenchmarkInputs {
                   "{\"\":\"Alice\",\"padding\":\"" + text[0] + "\"}",
                   "{\" \":\"space\",\"padding\":\"" + text[1] + "\"}"
                 };
+            case "tt_json_surrogate" -> new String[] {"\"\\uD800\"", "\"?\""};
             case "tt_json_member" ->
                 new String[] {
                   "{\"\u7528\u6237\":{\"\u59d3.\u540d\":\""

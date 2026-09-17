@@ -79,7 +79,9 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
     if (completePlan) {
       return root;
     }
-    return optimizeRoots(List.of(root)).get(0);
+    return optimizeRoots(
+            List.of(root), context != null && context.needFinalTimeIndicatorConversion())
+        .get(0);
   }
 
   void deferToCompletePlan() {
@@ -87,14 +89,18 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
   }
 
   List<RelNode> optimizeRoots(List<RelNode> roots) {
+    return optimizeRoots(roots, true);
+  }
+
+  private List<RelNode> optimizeRoots(List<RelNode> roots, boolean finalOutput) {
     try (NativeConfig.Scope ignored =
         NativeConfig.usePlannerConfig(
             ShortcutUtils.unwrapTableConfig(roots.get(0)).getConfiguration())) {
-      return optimizeConfigured(roots);
+      return optimizeConfigured(roots, finalOutput);
     }
   }
 
-  private List<RelNode> optimizeConfigured(List<RelNode> roots) {
+  private List<RelNode> optimizeConfigured(List<RelNode> roots, boolean finalOutput) {
     operatorTypes.clear();
     fallbackReasons.clear();
     substitutions = 0;
@@ -116,7 +122,7 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
         sourceSharingEnabled(roots.get(0)) ? repeatedSourceKeys(roots) : Set.of();
     List<RelNode> optimized = new ArrayList<>();
     for (RelNode root : roots) {
-      optimized.add(substitute(root, repeatedSources));
+      optimized.add(substitute(root, repeatedSources, finalOutput));
     }
     optimized = shareIdenticalSources(optimized);
     // The one always-on plan-time summary; -Dstreamfusion.logFallbackReasons=true itemizes the
@@ -130,7 +136,11 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
     return optimized;
   }
 
-  private RelNode substitute(RelNode root, Set<String> repeatedSources) {
+  private RelNode substitute(RelNode root, Set<String> repeatedSources, boolean finalOutput) {
+    if (JsonStringIdentity.crossesOperatorBoundary(root, finalOutput)) {
+      recordFallback("JSON string identity requires a final projection or a fused scalar consumer");
+      return root;
+    }
     // Pass 1 substitutes native (columnar) operators.
     int previousSubstitutions = substitutions;
     RelNode substituted = rewrite(root, new PlanContext(this, repeatedSources));

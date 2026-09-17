@@ -16,6 +16,9 @@ Unicode escapes and selected numbers use the streaming path. Those bounds preser
 resource limits, BigDecimal spelling and UTF-16 escape behavior. Invalid SIMD input also goes
 through the streaming parser, retaining Flink's first-document and trailing-content behavior.
 These functions are admitted by default for their verified SQL shapes.
+Consumers of STRING JSON_VALUE results use a fused Flink expression to preserve intermediate
+UTF-16 identity; the native reader described here remains the direct-projection path. JSON-derived
+strings crossing operator boundaries fall back as described in [Calc/filter](../operators/calc-filter.md#json_value).
 A document rejected after tape construction is parsed again by the streaming path. The
 multi-member measurements use string members; they do not establish an improvement for
 workloads dominated by floating-point members or numeric selections.

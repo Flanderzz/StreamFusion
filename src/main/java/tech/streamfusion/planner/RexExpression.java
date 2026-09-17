@@ -654,7 +654,11 @@ final class RexExpression {
   }
 
   private boolean emitCall(RexCall call) {
-    if (call.getOperands().stream().anyMatch(RexExpression::containsDecimalUdf)) {
+    if (call.getOperands().stream()
+        .anyMatch(
+            operand ->
+                containsDecimalUdf(operand)
+                    || JsonStringIdentity.containsSensitiveString(operand))) {
       return emitHostExpression(call, true);
     }
     if (call.getOperator()
@@ -2079,14 +2083,14 @@ final class RexExpression {
     return call.getOperands().stream().anyMatch(RexExpression::containsDecimalUdf);
   }
 
-  private boolean emitHostExpression(RexCall call, boolean preserveDecimalNullness) {
-    if (preserveDecimalNullness && !validateGeneratedExpression(call)) return false;
+  private boolean emitHostExpression(RexCall call, boolean fuseConsumers) {
+    if (fuseConsumers && !validateGeneratedExpression(call)) return false;
     List<RexNode> arguments = new ArrayList<>();
     List<org.apache.flink.table.types.logical.LogicalType> types = new ArrayList<>();
     List<Integer> codes = new ArrayList<>();
     RexNode expression;
     try {
-      expression = hostExpressionArguments(call, arguments, types, codes, preserveDecimalNullness);
+      expression = hostExpressionArguments(call, arguments, types, codes, fuseConsumers);
     } catch (IllegalArgumentException e) {
       return reject(e.getMessage());
     }
@@ -2135,17 +2139,17 @@ final class RexExpression {
       List<RexNode> arguments,
       List<org.apache.flink.table.types.logical.LogicalType> types,
       List<Integer> codes,
-      boolean preserveDecimalNullness) {
+      boolean fuseConsumers) {
     if (node instanceof RexLiteral) {
       return node;
     }
     if (node instanceof RexCall call
-        && (preserveDecimalNullness
+        && (fuseConsumers
             || needsTemporalFunction(call) && nativeUnixTimeFormat(call) == null
             || needsExactPower(call))) {
       List<RexNode> operands = new ArrayList<>();
       for (RexNode operand : call.getOperands()) {
-        operands.add(hostExpressionArguments(operand, arguments, types, codes, preserveDecimalNullness));
+        operands.add(hostExpressionArguments(operand, arguments, types, codes, fuseConsumers));
       }
       return call.clone(call.getType(), operands);
     }

@@ -1033,3 +1033,34 @@ These are sequential native-only runs, separate from the interleaved Flink compa
 The nearly unchanged identity control supports attributing the improvement to removing the
 formatting handoff, but the result remains a local end-to-end measurement rather than a
 kernel-only speed claim.
+
+## JSON string consumers
+
+The surrogate-identity fix evaluates a JSON string producer and its scalar consumers together
+in Flink-generated code within columnar Calc. This preserves correct comparisons before the
+final Arrow conversion; it is a correctness change, not a faster JSON parsing kernel.
+
+Release build (`-Pbench`), JDK 17, UTC, parallelism 1, 2m rows, NULL every eighth row, two
+warmups and five interleaved measurements per engine. The runtime source alternates ASCII
+JSON texts `"\uD800"` and `"?"`; their lengths are fixed at eight and three bytes. The generic
+payload-budget flag does not pad this fixture. Both source and blackhole sink are rowwise,
+and the benchmark asserts both transpose operators. No other tests ran during measurement.
+
+| Query | Flink seconds | Native Calc with JVM expression seconds | Flink/native |
+| --- | ---: | ---: | ---: |
+| Source-matched identity control | 0.511876 | 1.061221 | 0.482x |
+| `JSON_VALUE(s, '$') = '?'` | 0.771874 | 1.351576 | 0.571x |
+| `JSON_UNQUOTE(s) = '?'` | 0.620493 | 1.203020 | 0.516x |
+
+The fused path is slower than Flink in this short pipeline. The previous native comparisons
+returned incorrect answers for the surrogate row, so their timings are not a valid performance
+baseline for the corrected operation. Direct projections retain the existing Rust kernels.
+These measurements do not justify a speed claim for a larger columnar pipeline.
+
+```bash
+TZ=UTC SF_BENCHMARK=true mvn -pl streamfusion-runtime -am test -Pbench \
+  -Dtest=ScalarFunctionBenchmark -Dsurefire.failIfNoSpecifiedTests=false \
+  -Dscalar.functions=JSON_VALUE_IDENTITY,JSON_UNQUOTE_IDENTITY \
+  -Dscalar.rows=2000000 -Dscalar.nullEvery=8 -Dscalar.warmup=2 -Dscalar.runs=5 \
+  -Dscalar.engine=both
+```
