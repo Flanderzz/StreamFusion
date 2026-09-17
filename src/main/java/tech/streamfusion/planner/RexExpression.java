@@ -770,6 +770,9 @@ final class RexExpression {
       return emitItem(call);
     }
     if ("COALESCE".equals(functionName)) {
+      if (!RexUtil.isDeterministic(call) || containsScalarUdf(call)) {
+        return emitHostExpression(call, true);
+      }
       return emitCoalesceAsCase(call.getOperands());
     }
     if (call.getOperator()
@@ -2039,6 +2042,16 @@ final class RexExpression {
       return true;
     }
     return call.getOperands().stream().anyMatch(RexExpression::containsDecimalUdf);
+  }
+
+  private static boolean containsScalarUdf(RexNode node) {
+    if (!(node instanceof RexCall call)) return false;
+    if (call.getOperator()
+            instanceof org.apache.flink.table.planner.functions.bridging.BridgingSqlFunction function
+        && function.getDefinition() instanceof org.apache.flink.table.functions.ScalarFunction) {
+      return true;
+    }
+    return call.getOperands().stream().anyMatch(RexExpression::containsScalarUdf);
   }
 
   private boolean emitHostExpression(RexCall call, boolean preserveDecimalNullness) {

@@ -22,6 +22,16 @@ fallback.
   there's no partial evaluation of an expression tree, so one unknown function anywhere in it
   declines the whole `Calc`.
 
+## COALESCE
+
+`COALESCE` retains the first non-NULL operand without evaluating it again. When an operand
+contains a scalar UDF or a volatile expression, the complete COALESCE expression uses Flink's
+generated code through the existing columnar JVM bridge. This preserves call counts, nullable
+results and Flink's evaluation of later operands inside native Calc, including failures from
+operands hoisted by host code generation. Pure expressions retain their
+existing native CASE lowering. Runtime tests cover INT/STRING stateful UDFs, predicates, nested
+expressions, seeded random calls and multiple batches, including NOT NULL output constraints.
+
 ## IFNULL
 
 `IFNULL(value, replacement)` runs natively with Flink's resolved common operand type and
