@@ -29,6 +29,7 @@ readonly UNSHADED_SQL_PARSER_JAR="${SUITE_ROOT}/flink-sql-parser-${FLINK_VERSION
 readonly UNSHADED_SQL_PARSER_POM="${SUITE_ROOT}/flink-sql-parser-${FLINK_VERSION}-effective.pom"
 readonly SUITE_MODE="${1:-runtime}"
 readonly NATIVE_REPORT_ROOT="${SUITE_ROOT}/native-execution/${SUITE_MODE}"
+readonly DIAGNOSTIC_ROOT="${SUITE_ROOT}/diagnostics/${SUITE_MODE}"
 readonly FLINK_MODULE_CONFIG="-Duser.timezone=UTC -Djava.library.path=${STREAMFUSION_BUILD_ROOT}/native/target/debug --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED --add-opens=java.base/java.time=ALL-UNNAMED --add-opens=java.base/java.math=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED -Djunit.platform.reflection.search.useLegacySemantics=true -javaagent:${AGENT_JAR}"
 readonly PAIMON_MODULE_CONFIG="-XX:+IgnoreUnrecognizedVMOptions --add-opens=java.base/java.lang.invoke=ALL-UNNAMED --add-opens=java.base/java.lang.reflect=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED --add-opens=java.base/java.net=ALL-UNNAMED --add-opens=java.base/java.util.concurrent=ALL-UNNAMED --add-opens=java.base/jdk.internal.ref=ALL-UNNAMED --add-opens=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java.base/sun.nio.cs=ALL-UNNAMED --add-opens=java.base/sun.security.action=ALL-UNNAMED --add-opens=java.base/sun.util.calendar=ALL-UNNAMED --add-opens=java.security.jgss/sun.security.krb5=ALL-UNNAMED -Djdk.reflect.useDirectMethodHandle=false -Dio.netty.tryReflectionSetAccessible=true ${FLINK_MODULE_CONFIG}"
 readonly PAIMON_BUILD_ARGS=(-Pflink2 "-Dpaimon-flink-common.flink.version=${FLINK_VERSION}" "-Dtest.flink.version=${FLINK_VERSION}" -Dspotless.check.skip=true -Dcheckstyle.skip=true -Drat.skip=true -Dmaven.javadoc.skip=true)
@@ -38,6 +39,7 @@ readonly ORC_SQL_TESTS="org.apache.flink.orc.OrcFsStreamingSinkITCase,org.apache
 readonly PARQUET_MODULE="flink-formats/flink-parquet"
 readonly PARQUET_SINK_TESTS="org.apache.flink.formats.parquet.ParquetFsStreamingSinkITCase,org.apache.flink.formats.parquet.ParquetTimestampITCase"
 readonly PAIMON_SQL_TESTS="org.apache.paimon.flink.AppendOnlyTableITCase,org.apache.paimon.flink.AppendTableITCase,org.apache.paimon.flink.BatchFileStoreITCase,org.apache.paimon.flink.ComputedColumnAndWatermarkTableITCase,org.apache.paimon.flink.ContinuousFileStoreITCase,org.apache.paimon.flink.ReadWriteTableITCase,org.apache.paimon.flink.PrimaryKeyFileStoreTableITCase,org.apache.paimon.flink.CompositePkAndMultiPartitionedTableITCase,org.apache.paimon.flink.FullCompactionFileStoreITCase,org.apache.paimon.flink.FlinkJobRecoveryITCase,org.apache.paimon.flink.RescaleBucketITCase,org.apache.paimon.flink.ScanBucketITCase,org.apache.paimon.flink.KeyOnlyDeletesITCase,org.apache.paimon.flink.FirstRowITCase,org.apache.paimon.flink.CoordinatorCommitITCase"
+readonly PAIMON_ISOLATED_TEST="org.apache.paimon.flink.PrimaryKeyFileStoreTableITCase#testStandAloneLookupJobRandom"
 readonly KAFKA_SQL_TESTS="org.apache.flink.streaming.connectors.kafka.table.DynamicKafkaTableITCase,org.apache.flink.streaming.connectors.kafka.table.KafkaChangelogTableITCase,org.apache.flink.streaming.connectors.kafka.table.KafkaTableITCase,org.apache.flink.streaming.connectors.kafka.table.UpsertKafkaTableITCase"
 readonly ROCKSDB_STATE_SQL_TESTS="org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase,org.apache.flink.table.planner.runtime.stream.sql.DeduplicateITCase,org.apache.flink.table.planner.runtime.stream.sql.GroupWindowITCase,org.apache.flink.table.planner.runtime.stream.sql.IntervalJoinITCase,org.apache.flink.table.planner.runtime.stream.sql.JoinITCase,org.apache.flink.table.planner.runtime.stream.sql.OverAggregateITCase,org.apache.flink.table.planner.runtime.stream.sql.RankITCase,org.apache.flink.table.planner.runtime.stream.sql.TemporalJoinITCase,org.apache.flink.table.planner.runtime.stream.sql.WindowAggregateITCase,org.apache.flink.table.planner.runtime.stream.sql.WindowDeduplicateITCase,org.apache.flink.table.planner.runtime.stream.sql.WindowJoinITCase,org.apache.flink.table.planner.runtime.stream.sql.WindowRankITCase,org.apache.flink.table.planner.runtime.stream.table.AggregateITCase,org.apache.flink.table.planner.runtime.stream.table.JoinITCase,org.apache.flink.table.planner.runtime.stream.table.OverAggregateITCase,org.apache.flink.table.planner.runtime.stream.table.RetractionITCase"
 TEST_SELECTOR_ARGS=()
@@ -102,7 +104,7 @@ case "${SUITE_MODE}" in
     TEST_MODULES="${PAIMON_MODULE}"
     REPORT_ROOT="${PAIMON_ROOT}/${PAIMON_MODULE}/target/surefire-reports"
     if [[ -z "${FLINK_SUITE_TEST:-}" ]]; then
-      TEST_SELECTOR_ARGS=("-Dtest=${PAIMON_SQL_TESTS}")
+      TEST_SELECTOR_ARGS=("-Dtest=${PAIMON_SQL_TESTS},!${PAIMON_ISOLATED_TEST}")
     fi
     ;;
   all)
@@ -251,7 +253,7 @@ else
 
   echo "Building and installing StreamFusion and its supported connector/format modules against the source-suite planner..."
   mvn -B -ntp -s "${MAVEN_SETTINGS}" -Dmaven.repo.local="${SUITE_MAVEN_REPO}" \
-    -Dstreamfusion.flink-source-suite -Ppaimon \
+    -Dstreamfusion.flink-source-suite -Ppaimon -Dnative.build.skip=true \
     -f "${STREAMFUSION_BUILD_ROOT}/pom.xml" \
     -pl :streamfusion-core,:streamfusion-kafka,:streamfusion-json,:streamfusion-csv,:streamfusion-raw,:streamfusion-avro,:streamfusion-avro-confluent-registry,:streamfusion-protobuf,:streamfusion-parquet,:streamfusion-orc,:streamfusion-paimon \
     -am -DskipTests clean install || exit $?
@@ -308,10 +310,14 @@ readonly STREAMFUSION_CLASSPATH
 
 echo "Running the upstream Flink ${SUITE_MODE} suite with StreamFusion enabled..."
 mkdir -p "${NATIVE_REPORT_ROOT}"
+mkdir -p "${DIAGNOSTIC_ROOT}"
+find "${DIAGNOSTIC_ROOT}" -maxdepth 1 -type f -delete
 find "${NATIVE_REPORT_ROOT}" -maxdepth 1 -type f -name '*.tsv' -delete
 mkdir -p "${REPORT_ROOT}"
 if [[ "${SUITE_MODE}" == "formats" ]]; then
   find "${REPORT_ROOT}" -type f -path '*/target/surefire-reports/*' -delete
+elif [[ "${SUITE_MODE}" == "paimon" ]]; then
+  find "${REPORT_ROOT}" -type f -delete
 else
   find "${REPORT_ROOT}" -mindepth 1 -maxdepth 1 -type f -delete
 fi
@@ -342,6 +348,10 @@ elif [[ "${SUITE_MODE}" == "paimon" ]]; then
     -f "${PAIMON_ROOT}/pom.xml"
     "${PAIMON_BUILD_ARGS[@]}"
     -Dflink.forkCount="${FLINK_SUITE_IT_FORKS:-1}"
+    -Djunit.jupiter.execution.timeout.default=10m
+    -Dsurefire.timeout=1800
+    -Dlog4j.configurationFile="${REPO_ROOT}/dev/flink-suite/paimon-log4j2.properties"
+    -Dstreamfusion.flink-suite.diagnostics="${DIAGNOSTIC_ROOT}"
     -Dmaven.test.dependency.excludes=org.apache.calcite:calcite-core
     -DextraJavaTestArgs="${PAIMON_MODULE_CONFIG}"
   )
@@ -362,6 +372,23 @@ if [[ "${SUITE_MODE}" == "kafka" ]]; then
   "${KAFKA_CONNECTOR_ROOT}/mvnw" "${MAVEN_TEST_ARGS[@]}"
 elif [[ "${SUITE_MODE}" == "paimon" ]]; then
   mvn "${MAVEN_TEST_ARGS[@]}"
+  paimon_status=$?
+  if [[ -z "${FLINK_SUITE_TEST:-}" ]]; then
+    # A cancelled upstream compactor can kill its shared MiniCluster during cleanup. Run its
+    # unchanged test in its own fork so later SQL tests still have a live TaskManager.
+    mkdir -p "${REPORT_ROOT}/shared-cluster"
+    for report in "${REPORT_ROOT}/"*PrimaryKeyFileStoreTableITCase*; do
+      if [[ -f "${report}" ]]; then
+        mv "${report}" "${REPORT_ROOT}/shared-cluster/" || exit $?
+      fi
+    done
+    echo "Running unchanged Paimon standalone lookup test in a separate JVM..."
+    mvn "${MAVEN_TEST_ARGS[@]}" "-Dtest=${PAIMON_ISOLATED_TEST}" -Dsurefire.failIfNoSpecifiedTests=true
+    isolated_status=$?
+    if [[ ${isolated_status} -ne 0 ]]; then paimon_status=${isolated_status}; fi
+  fi
+  # Keep either invocation's nonzero exit status for the common report checks below.
+  (exit "${paimon_status}")
 else
   "${FLINK_ROOT}/mvnw" "${MAVEN_TEST_ARGS[@]}"
 fi
@@ -412,7 +439,7 @@ fi
 python3 "${REPO_ROOT}/dev/flink-suite/summarize.py" "${SUMMARY_ARGS[@]}"
 readonly SUMMARY_STATUS=$?
 
-if [[ ${TEST_STATUS} -ne 0 && ${SUMMARY_STATUS} -ne 0 ]]; then
+if [[ ${TEST_STATUS} -ne 0 && ( ${SUMMARY_STATUS} -ne 0 || ( "${SUITE_MODE}" != "runtime" && "${SUITE_MODE}" != "diagnostic" ) ) ]]; then
   exit "${TEST_STATUS}"
 fi
 exit "${SUMMARY_STATUS}"

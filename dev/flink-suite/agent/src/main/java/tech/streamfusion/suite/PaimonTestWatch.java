@@ -56,6 +56,12 @@ public final class PaimonTestWatch {
     return new PaimonTestWatch(test, fixture);
   }
 
+  public static void clusterFailure(String handler, Throwable failure) {
+    diagnostics.println(
+        "StreamFusion upstream cluster failed in " + handler + " at " + Instant.now());
+    failure.printStackTrace(diagnostics);
+  }
+
   private synchronized void dumpThreads() {
     if (finished) {
       return;
@@ -91,6 +97,9 @@ public final class PaimonTestWatch {
             + elapsedSeconds()
             + " seconds: "
             + (failure == null ? "passed" : failure.getClass().getName()));
+    if (failure != null) {
+      failure.printStackTrace(diagnostics);
+    }
   }
 
   private long elapsedSeconds() {

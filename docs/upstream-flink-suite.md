@@ -207,11 +207,33 @@ the [ORC page](connectors/orc.md#build-and-verification) distinguishes that run 
 that explicitly exercise ORC streaming.
 
 The agent logs each unchanged `PrimaryKeyFileStoreTableITCase` invocation, its randomized table
-defaults, and its completion. If an invocation runs for two minutes, it emits all JVM thread stacks
-to the suite log before CI's job timeout can discard the active test's unwritten JUnit report.
-This diagnostic does not cancel jobs, retry tests, or change upstream timeout/result assertions.
+defaults, and its completion, including the full exception on failure. Fatal MiniCluster errors
+are printed immediately, even when upstream logging is disabled. If an invocation runs for two
+minutes, it emits all JVM thread stacks to the suite log before CI's job timeout can discard the
+active test's unwritten JUnit report.
+Paimon also writes rolling cluster logs under `.flink-suite/diagnostics/paimon`; CI retains these
+and Surefire reports alongside the console log. Tests without an upstream timeout have a ten-minute
+JUnit timeout, and Surefire fails any Paimon class whose JVM exceeds thirty minutes. Existing upstream
+timeouts and result assertions remain in force. These limits report failure; they do not retry or
+turn a failed invocation into a skip.
 For local diagnosis, `-Dstreamfusion.flink-suite.diagnostic-delay-seconds=<seconds>` changes only
 when the one-time stack dump is emitted; the default is 120 seconds.
+
+The full Paimon run executes `testStandAloneLookupJobRandom` separately after the other tests.
+Paimon 2.0.0's stock `StoreCompactOperator.close()` dereferences its writer even when cancellation
+interrupted initialization before the writer existed. This was reproduced without StreamFusion
+by closing an uninitialized stock compactor in Flink's operator harness. The randomized SQL test
+can pass its row assertions and hit that cleanup race while cancelling its conflicting compaction
+jobs, killing the class's shared TaskManager and stranding subsequent tests. A separate JVM contains
+that upstream fixture failure without changing the test, its random options, or its assertions.
+Both invocations' reports contribute to the result and native execution checks; either Maven
+failure remains blocking, including a process timeout without a finished JUnit report.
+Explicit `FLINK_SUITE_TEST` selectors keep their requested grouping for diagnosis.
+
+The upstream workflow caches Rust dependencies in the isolated source build's native target
+directory, where this runner actually compiles them. It still rebuilds changed workspace crates.
+The runner builds the complete native workspace once before packaging Java modules; Maven then
+reuses those freshly built libraries instead of rebuilding Rust for each module's feature set.
 
 ## Expected host failures in SQL parity audits
 

@@ -68,6 +68,13 @@ public final class StreamFusionSuiteAgent {
     PaimonTestWatch.initialize(System.err);
     new AgentBuilder.Default()
         .with(AgentBuilder.Listener.StreamWriting.toSystemError().withTransformationsOnly())
+        .type(
+            namedOneOf(
+                "org.apache.flink.runtime.minicluster.MiniCluster$TerminatingFatalErrorHandler",
+                "org.apache.flink.runtime.minicluster.MiniCluster$ShutDownFatalErrorHandler"))
+        .transform(
+            (builder, type, classLoader, module, protectionDomain) ->
+                builder.visit(Advice.to(ReportClusterFailure.class).on(named("onFatalError"))))
         .type(named("org.apache.paimon.flink.PrimaryKeyFileStoreTableITCase"))
         .transform(
             (builder, type, classLoader, module, protectionDomain) ->
@@ -212,6 +219,13 @@ public final class StreamFusionSuiteAgent {
     @Advice.OnMethodExit(onThrowable = Throwable.class)
     static void exit(@Advice.Enter PaimonTestWatch watch, @Advice.Thrown Throwable failure) {
       watch.finish(failure);
+    }
+  }
+
+  public static final class ReportClusterFailure {
+    @Advice.OnMethodEnter
+    static void enter(@Advice.Origin("#t") String handler, @Advice.Argument(0) Throwable failure) {
+      PaimonTestWatch.clusterFailure(handler, failure);
     }
   }
 
