@@ -786,6 +786,10 @@ public final class Native {
   public static native void updateTumblingAggregator(
       long handle, long inArrayAddress, long inSchemaAddress);
 
+  /** Folds local slices without dropping rows that may still belong to an open final window. */
+  public static native void updateLocalTumblingAggregator(
+      long handle, long inArrayAddress, long inSchemaAddress);
+
   /**
    * Window-attached local half: folds a batch whose rows carry explicit {@code window_start}/{@code
    * window_end} columns (epoch millis) — an upstream window aggregate's output being re-aggregated per

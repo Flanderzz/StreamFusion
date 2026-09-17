@@ -25,6 +25,13 @@ drains local slices into the global before snapshotting; AVG pairs use the exist
 accumulator checkpoint layout in memory and direct RocksDB state. Restore tests merge subsequent
 partials and verify every hopping window after RocksDB checkpoints and both backend transitions.
 
+The local stage retains rows whose slice has already fired: that slice can still belong to
+an open HOP or CUMULATE window. The global merge admits each partial only into final windows
+that have not fired, so late partials cannot reopen completed windows. This also applies after
+checkpoint restore and when the late row introduces a new key. TUMBLE drops the partial once
+its single final window has closed. Tests compare explicit watermarks, mixed ordinary/distinct
+aggregates and both aggregation phases against released Flink.
+
 ## Window COUNT(DISTINCT)
 
 Unfiltered `COUNT(DISTINCT value)` is native for integer, DECIMAL, CHAR/VARCHAR, DATE,
@@ -208,11 +215,13 @@ two warmups and five interleaved measured runs gave:
 
 | Distinct phase | Flink seconds | Native seconds | Flink/native |
 | --- | ---: | ---: | ---: |
-| Single | 0.529093 | 0.512017 | 1.033x |
-| Local/global | 0.619048 | 0.542547 | 1.141x |
+| Single | 0.578242 | 0.536922 | 1.077x |
+| Local/global | 0.681199 | 0.583311 | 1.168x |
 
 These local measurements cover repeated nullable BIGINT values in overlapping windows;
-they do not establish a gain for every distinct value type or cardinality.
+they do not establish a gain for every distinct value type or cardinality. They were rerun
+with the late-slice correction. This on-time workload is a performance control for that
+correctness fix, not a measurement of late-data throughput or a before/after speedup.
 
 ## Idle-state TTL
 

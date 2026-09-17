@@ -340,3 +340,78 @@ fn tvf_output_survives_downstream_window_join_restore() {
     restored.push_left(assigned).unwrap();
     assert_eq!(restored.left_late_drops, 1);
 }
+
+#[test]
+fn local_late_slices_update_only_unfired_final_windows_after_restore() {
+    fn batch(value: i64) -> RecordBatch {
+        RecordBatch::try_from_iter(vec![
+            ("ts", Arc::new(Int64Array::from(vec![4000])) as ArrayRef),
+            ("key0", Arc::new(Int64Array::from(vec![7])) as ArrayRef),
+            (
+                "value0",
+                Arc::new(Int64Array::from(vec![value])) as ArrayRef,
+            ),
+            (
+                "value1",
+                Arc::new(Int64Array::from(vec![value])) as ArrayRef,
+            ),
+        ])
+        .unwrap()
+    }
+    for (size, cumulative) in [(5000, false), (10000, false), (15000, true)] {
+        let mut local = TumblingAggregator::new(5000, 5000, false, vec![0, 0], vec![0, 7]);
+        let mut global = TumblingAggregator::new(size, 5000, cumulative, vec![0, 0], vec![0, 7]);
+        local.update_local(&batch(10)).unwrap();
+        global.update_partial(&local.flush_partial(5000)).unwrap();
+        let first = global.flush(5000).unwrap();
+        assert_eq!(column_i64(&first, "result0").values(), &[10]);
+        assert_eq!(column_i64(&first, "result1").values(), &[1]);
+        let mut local = TumblingAggregator::restore(
+            5000,
+            5000,
+            false,
+            vec![0, 0],
+            vec![0, 7],
+            &local.snapshot(),
+        );
+        let mut global = TumblingAggregator::restore(
+            size,
+            5000,
+            cumulative,
+            vec![0, 0],
+            vec![0, 7],
+            &global.snapshot(),
+        );
+        local.update_local(&batch(11)).unwrap();
+        assert_eq!(local.late_drops, 0);
+        let partial = local.flush_partial(7000);
+        assert_eq!(
+            partial.num_rows(),
+            1,
+            "a closed slice is not a closed final window"
+        );
+        global.update_partial(&partial).unwrap();
+        assert_eq!(
+            global.flush(7000).unwrap().num_rows(),
+            0,
+            "the fired window must not reopen"
+        );
+        let output = global.flush(size).unwrap();
+        let remaining = (size / 5000 - 1) as usize;
+        assert_eq!(output.num_rows(), remaining);
+        assert_eq!(
+            column_i64(&output, "result0").values().as_ref(),
+            vec![21; remaining].as_slice()
+        );
+        assert_eq!(
+            column_i64(&output, "result1").values().as_ref(),
+            vec![2; remaining].as_slice()
+        );
+        global.update_partial(&partial).unwrap();
+        assert_eq!(
+            global.flush(i64::MAX).unwrap().num_rows(),
+            0,
+            "fully expired partials must be dropped"
+        );
+    }
+}
