@@ -23,6 +23,7 @@ class RetractingWindowBenchmark {
   private static final boolean GROUPING_ONLY = Boolean.getBoolean("window.groupingOnly");
   private static final boolean AVERAGE = Boolean.getBoolean("window.average");
   private static final String AVERAGE_TYPE = System.getProperty("window.averageType", "BIGINT");
+  private static final String AVERAGE_RESULT_TYPE = averageResultType();
   private static final String SUM_TYPE = System.getProperty("window.sumType", "BIGINT");
   private static final String SUM_RESULT_TYPE =
       SUM_TYPE.replaceFirst("DECIMAL\\(\\d+,", "DECIMAL(38,");
@@ -83,6 +84,16 @@ class RetractingWindowBenchmark {
         Arrays.toString(times[1]));
   }
 
+  private static String averageResultType() {
+    if (!AVERAGE_TYPE.startsWith("DECIMAL(")) return AVERAGE_TYPE;
+    int scale =
+        Integer.parseInt(
+            AVERAGE_TYPE
+                .substring(AVERAGE_TYPE.indexOf(',') + 1, AVERAGE_TYPE.length() - 1)
+                .trim());
+    return "DECIMAL(38," + Math.max(6, scale) + ")";
+  }
+
   private static double median(double[] values) {
     double[] sorted = values.clone();
     Arrays.sort(sorted);
@@ -120,7 +131,9 @@ class RetractingWindowBenchmark {
                 + " DESC) AS rn FROM src) WHERE rn = 1"));
     table.executeSql(
         "CREATE TABLE sink (k BIGINT"
-            + (GROUPING_ONLY ? "" : ", c BIGINT, s " + (AVERAGE ? AVERAGE_TYPE : SUM_RESULT_TYPE))
+            + (GROUPING_ONLY
+                ? ""
+                : ", c BIGINT, s " + (AVERAGE ? AVERAGE_RESULT_TYPE : SUM_RESULT_TYPE))
             + ") WITH ('connector' = 'blackhole')");
     return table;
   }

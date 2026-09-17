@@ -735,7 +735,7 @@ final class WindowAggregateMatcher {
   static String unsupportedReason(RelNode node, WindowingStrategy windowing) {
     if (!insertOnlyInput(node)) {
       return "window aggregate: retracting input supports only aligned event-time"
-          + " TUMBLE/HOP/CUMULATE with grouping-only, unfiltered numeric SUM, integer/FLOAT/DOUBLE AVG,"
+          + " TUMBLE/HOP/CUMULATE with grouping-only, unfiltered numeric SUM/AVG,"
           + " numeric COUNT(value), or COUNT(*)";
     }
     if (windowing instanceof WindowAttachedWindowingStrategy) {
@@ -776,7 +776,7 @@ final class WindowAggregateMatcher {
       if (call.getArgList().size() != 1) return false;
       SqlTypeName type =
           inputType.getFieldList().get(call.getArgList().get(0)).getType().getSqlTypeName();
-      if (kind == KIND_SUM && type == SqlTypeName.DECIMAL) continue;
+      if ((kind == KIND_SUM || kind == KIND_AVG) && type == SqlTypeName.DECIMAL) continue;
       if ((kind == KIND_SUM || kind == KIND_AVG)
           && (type == SqlTypeName.FLOAT || type == SqlTypeName.REAL || type == SqlTypeName.DOUBLE)) {
         continue;
