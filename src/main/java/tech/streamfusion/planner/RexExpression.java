@@ -1818,7 +1818,12 @@ final class RexExpression {
       add(KIND_INTEGER_TO_STRING, pad ? -length : length, 1);
       return emit(call.getOperands().get(0));
     }
-    if (tryCast) {
+    if (tryCast
+        && targetType == SqlTypeName.DECIMAL
+        && (source == SqlTypeName.VARCHAR || source == SqlTypeName.CHAR)) {
+      return emitHostExpression(call, true);
+    }
+    if (tryCast && !(source == SqlTypeName.DECIMAL && targetType == SqlTypeName.DECIMAL)) {
       return reject("unsupported TRY_CAST " + source + "→" + targetType);
     }
     // A cast that leaves the value unchanged — same base type and precision/scale, differing only

@@ -25,10 +25,6 @@ import org.apache.flink.table.data.RowData;
 
 import org.apache.arrow.vector.DecimalVector;
 
-import java.math.BigDecimal;
-
-import java.math.RoundingMode;
-
 /** {@link ArrowFieldWriter} for Decimal. */
 @Internal
 public abstract class DecimalWriter<T> extends ArrowFieldWriter<T> {
@@ -58,30 +54,13 @@ public abstract class DecimalWriter<T> extends ArrowFieldWriter<T> {
 
     abstract DecimalData readDecimal(T in, int ordinal);
 
-    // Inlined from flink-python PythonTypeUtils.fromBigDecimal: adjust to the declared scale/precision,
-    // or null if it overflows the precision.
-    private static BigDecimal rescale(BigDecimal value, int precision, int scale) {
-        if (value.scale() != scale || value.precision() > precision) {
-            value = value.setScale(scale, RoundingMode.HALF_UP);
-            if (value.precision() > precision) {
-                return null;
-            }
-        }
-        return value;
-    }
-
     @Override
     public void doWrite(T in, int ordinal) {
         if (isNullAt(in, ordinal)) {
             ((DecimalVector) getValueVector()).setNull(getCount());
         } else {
-            BigDecimal bigDecimal = readDecimal(in, ordinal).toBigDecimal();
-            bigDecimal = rescale(bigDecimal, precision, scale);
-            if (bigDecimal == null) {
-                ((DecimalVector) getValueVector()).setNull(getCount());
-            } else {
-                ((DecimalVector) getValueVector()).setSafe(getCount(), bigDecimal);
-            }
+            tech.streamfusion.arrow.DecimalAccessor.set(
+                    (DecimalVector) getValueVector(), getCount(), readDecimal(in, ordinal));
         }
     }
 

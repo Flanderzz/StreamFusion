@@ -5,7 +5,6 @@ import java.util.List;
 import org.apache.calcite.rex.RexNode;
 import org.apache.flink.api.common.functions.Function;
 import org.apache.flink.configuration.ReadableConfig;
-import org.apache.flink.table.data.DecimalData;
 import org.apache.flink.table.data.GenericRowData;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.StringData;
@@ -110,12 +109,13 @@ public final class FlinkExpressionFunction extends ScalarFunction
         value = StringData.fromString(text);
       } else if (value instanceof BigDecimal decimal) {
         DecimalType type = (DecimalType) argumentTypes[i];
-        value = DecimalData.fromBigDecimal(decimal, type.getPrecision(), type.getScale());
+        value =
+            tech.streamfusion.arrow.DecimalAccessor.fromInternalValue(
+                decimal, type.getPrecision(), type.getScale());
       }
       input.setField(i, value);
     }
-    Object result = evaluator.eval(input);
-    return result instanceof DecimalData decimal ? decimal.toBigDecimal() : result;
+    return evaluator.eval(input);
   }
 
   @Override

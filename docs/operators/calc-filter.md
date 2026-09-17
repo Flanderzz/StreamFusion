@@ -400,9 +400,25 @@ through JNI. Successful results and NULL-on-error policies match as well.
 Integer formatting uses canonical decimal text, including signed minima and zero.
 `VARCHAR(n)` truncates to `n` characters; `CHAR(n)` also pads shorter results with spaces.
 Legacy mode leaves the formatted text unchanged regardless of the declared length, matching
-Flink. Other TRY_CAST pairs still fall back. Bare encoders without table configuration
+Flink. Other TRY_CAST pairs, except the DECIMAL forms below, still fall back. Bare encoders without table configuration
 decline mode-dependent casts. See the [kernel ledger](../optimizations/scalar-function-kernels.md)
 for the release benchmark against the previous host-cast path.
+
+### DECIMAL TRY_CAST
+
+`TRY_CAST` from STRING/VARCHAR/CHAR to DECIMAL uses Flink's generated conversion through the
+existing columnar callback. Malformed text and conversion failures become NULL; failures in
+operand expressions still propagate. Default and legacy modes follow the configured host rules.
+DECIMAL-to-DECIMAL TRY_CAST reuses the native exact rescaling kernel, including HALF_UP and
+NULL on narrowing overflow. Tests cover precision 38, invalid text, signs/exponents, whitespace,
+filters, conditional consumers, grouping and aggregation across multiple batches.
+
+Already-evaluated internal Flink decimals cross Arrow without another precision check. Flink's
+compact text parser can retain a rounding carry (`999.995` to DECIMAL(5,2) yields `1000.00`);
+the bridge preserves that internal unscaled value and its non-NULL status. External BigDecimal
+UDF returns still undergo the declared precision/scale conversion. This follows Comet's generated
+compact-decimal output pattern; the host-specific contract is recorded in
+[exact decimal results](https://github.com/datafusion-contrib/StreamFusion/blob/main/divergences/38-exact-decimal-result-types.md).
 
 ### The host-exact JVM upcall
 
