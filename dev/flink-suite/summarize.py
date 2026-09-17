@@ -4,15 +4,105 @@
 from __future__ import annotations
 
 import argparse
+import base64
+from collections import Counter
 import pathlib
+import re
 import sys
 import xml.etree.ElementTree as ET
+
+
+CONTRACT_FILE = (
+    pathlib.Path(__file__).parent / "agent/src/main/resources/native-execution.tsv"
+)
+
+
+def execution_contracts(
+    path: pathlib.Path = CONTRACT_FILE,
+) -> dict[str, dict[str, str]]:
+    contracts = {}
+    for line in path.read_text().splitlines():
+        if not line.strip() or line.startswith("#"):
+            continue
+        fields = line.split("\t")
+        if (
+            len(fields) != 3
+            or not re.fullmatch(r"[\w.$]+#[\w$]+", fields[0])
+            or not re.fullmatch(r"\*|\w+=(?:true|false)", fields[1])
+            or not re.fullmatch(r"\w+(?:[+|]\w+)*|!.+", fields[2])
+        ):
+            raise ValueError(f"Invalid native execution contract: {line}")
+        variants = contracts.setdefault(fields[0], {})
+        if fields[1] in variants:
+            raise ValueError(f"Duplicate native execution contract: {line}")
+        variants[fields[1]] = fields[2]
+    if not contracts:
+        raise ValueError("No native execution contracts")
+    return contracts
+
+
+def check_execution(
+    directory: pathlib.Path | None,
+    executed: Counter,
+    contracts: dict[str, dict[str, str]],
+) -> tuple[int, int, list[str]]:
+    observed = Counter()
+    problems = []
+    proved = 0
+    fallback = 0
+    for path in sorted(directory.glob("*.tsv")) if directory else []:
+        try:
+            fields = path.read_text().rstrip("\n").split("\t")
+            if (
+                len(fields) != 4
+                or fields[0] not in contracts
+                or fields[1] not in contracts[fields[0]]
+            ):
+                raise ValueError("unknown test or malformed record")
+            test, variant, raw_counts, raw_reasons = fields
+            reasons = base64.b64decode(raw_reasons, validate=True).decode().splitlines()
+            counts = {}
+            for item in raw_counts.split(",") if raw_counts else []:
+                if not re.fullmatch(r"\w+=\d+", item):
+                    raise ValueError(f"invalid operator count: {item}")
+                operator, count = item.split("=")
+                if operator in counts:
+                    raise ValueError(f"duplicate operator count: {operator}")
+                counts[operator] = int(count)
+            observed[test] += 1
+            contract = contracts[test][variant]
+            if contract.startswith("!"):
+                if not counts and contract[1:] in reasons:
+                    fallback += 1
+                else:
+                    problems.append(
+                        f"{test} [{variant}]: expected full fallback with reason {contract[1:]}"
+                    )
+            elif any(
+                all(counts.get(operator, 0) > 0 for operator in route.split("+"))
+                for route in contract.split("|")
+            ):
+                proved += 1
+            else:
+                problems.append(
+                    f"{test}: missing native execution; observed {counts} ({path.name})"
+                )
+        except (OSError, ValueError) as exc:
+            problems.append(f"{path}: invalid native execution evidence: {exc}")
+    for test in sorted(executed.keys() | observed.keys()):
+        if executed[test] != observed[test]:
+            problems.append(
+                f"{test}: {executed[test]} executed invocations but {observed[test]} native evidence records"
+            )
+    return proved, fallback, problems
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("reports", type=pathlib.Path)
     parser.add_argument("--xfail", action="append", default=[])
+    parser.add_argument("--native-reports", type=pathlib.Path)
+    parser.add_argument("--require-all-contracts", action="store_true")
     args = parser.parse_args()
 
     files = sorted(args.reports.rglob("TEST-*.xml"))
@@ -24,6 +114,8 @@ def main() -> int:
     problems: list[tuple[str, str, str, str]] = []
     expected: list[tuple[str, str, str, str]] = []
     malformed: list[tuple[pathlib.Path, str]] = []
+    contracts = execution_contracts()
+    executed = Counter()
 
     for report in files:
         try:
@@ -37,6 +129,13 @@ def main() -> int:
         errors += int(suite.attrib.get("errors", 0))
         skipped += int(suite.attrib.get("skipped", 0))
         for case in suite.findall("testcase"):
+            case_key = (
+                case.attrib.get("classname", suite.attrib.get("name", "unknown"))
+                + "#"
+                + case.attrib.get("name", "unknown")
+            )
+            if case_key in contracts and case.find("skipped") is None:
+                executed[case_key] += 1
             problem = case.find("failure")
             kind = "failure"
             if problem is None:
@@ -59,6 +158,15 @@ def main() -> int:
     expected_errors = sum(kind == "error" for _, _, kind, _ in expected)
     unexpected_failures = failures - expected_failures
     unexpected_errors = errors - expected_errors
+    proved, fallback, execution_problems = check_execution(
+        args.native_reports, executed, contracts
+    )
+    if args.require_all_contracts:
+        execution_problems.extend(
+            f"{test}: contracted test did not execute"
+            for test in sorted(contracts)
+            if not executed[test]
+        )
 
     print("# StreamFusion upstream Flink suite")
     print()
@@ -69,6 +177,9 @@ def main() -> int:
     print(f"- Errors: {unexpected_errors}")
     print(f"- Expected upstream failures: {len(expected)}")
     print(f"- Skipped: {skipped}")
+    print(
+        f"- Execution contracts: {sum(executed.values())} invocations, {proved} native, {fallback} expected fallback"
+    )
 
     if malformed:
         print(f"- Malformed reports: {len(malformed)}")
@@ -96,7 +207,17 @@ def main() -> int:
             if detail:
                 print(f"  - {detail}")
 
-    return 1 if unexpected_failures or unexpected_errors or malformed else 0
+    if execution_problems:
+        print()
+        print("## Native execution contract failures")
+        for problem in execution_problems:
+            print(f"- {problem}")
+
+    return (
+        1
+        if unexpected_failures or unexpected_errors or malformed or execution_problems
+        else 0
+    )
 
 
 if __name__ == "__main__":

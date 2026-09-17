@@ -1,6 +1,7 @@
 package tech.streamfusion.suite;
 
 import static net.bytebuddy.matcher.ElementMatchers.named;
+import static net.bytebuddy.matcher.ElementMatchers.namedOneOf;
 import static net.bytebuddy.matcher.ElementMatchers.takesArgument;
 import static net.bytebuddy.matcher.ElementMatchers.takesArguments;
 
@@ -65,6 +66,44 @@ public final class StreamFusionSuiteAgent {
   public static void premain(String arguments, Instrumentation instrumentation) {
     new AgentBuilder.Default()
         .with(AgentBuilder.Listener.StreamWriting.toSystemError().withTransformationsOnly())
+        .type(named("tech.streamfusion.planner.PhysicalPlanScan"))
+        .transform(
+            (builder, type, classLoader, module, protectionDomain) ->
+                builder.visit(Advice.to(RecordFallback.class).on(named("recordFallback"))))
+        .type(namedOneOf(NativeExecution.testClasses()))
+        .transform(
+            (builder, type, classLoader, module, protectionDomain) ->
+                builder.visit(
+                    Advice.to(RequireNativeExecution.class)
+                        .on(namedOneOf(NativeExecution.testMethods(type.getName())))))
+        .type(
+            namedOneOf(
+                "tech.streamfusion.operator.NativeCalcOperator",
+                "tech.streamfusion.operator.NativeFilterOperator",
+                "tech.streamfusion.operator.NativeColumnarGroupAggregateOperator",
+                "tech.streamfusion.operator.NativeWindowOperatorCore",
+                "tech.streamfusion.operator.NativeColumnarGlobalWindowAggregateOperator"))
+        .transform(
+            (builder, type, classLoader, module, protectionDomain) -> {
+              builder = builder.visit(Advice.to(BindNativeExecution.class).on(named("open")));
+              if (type.getName().endsWith("NativeColumnarGroupAggregateOperator")) {
+                return builder.visit(Advice.to(RecordNativeBatch.class).on(named("update")));
+              }
+              if (type.getName().endsWith("NativeWindowOperatorCore")) {
+                return builder.visit(
+                    Advice.to(RecordNativeBatch.class)
+                        .on(namedOneOf("updateColumnarInternal", "updateColumnarAttached")));
+              }
+              return builder.visit(
+                  Advice.to(RecordNativeElement.class)
+                      .on(
+                          named("processElement")
+                              .and(
+                                  takesArgument(
+                                      0,
+                                      named(
+                                          "org.apache.flink.streaming.runtime.streamrecord.StreamRecord")))));
+            })
         .type(named(PLANNER_FACTORY))
         .transform(
             (builder, type, classLoader, module, protectionDomain) ->
@@ -128,6 +167,68 @@ public final class StreamFusionSuiteAgent {
                     Advice.to(ReportNativePaimonSnapshot.class)
                         .on(named("next").and(takesArguments(0)))))
         .installOn(instrumentation);
+  }
+
+  public static final class RequireNativeExecution {
+    @Advice.OnMethodEnter
+    static NativeExecution.Scope enter(
+        @Advice.This Object fixture,
+        @Advice.Origin("#t") String type,
+        @Advice.Origin("#m") String method) {
+      return NativeExecution.begin(type + "#" + method, fixture);
+    }
+
+    @Advice.OnMethodExit(onThrowable = Throwable.class)
+    static void exit(@Advice.Enter NativeExecution.Scope scope, @Advice.Thrown Throwable failure) {
+      try {
+        NativeExecution.finish(scope);
+      } catch (AssertionError proofFailure) {
+        if (failure == null) {
+          throw proofFailure;
+        }
+        failure.addSuppressed(proofFailure);
+      }
+    }
+  }
+
+  public static final class RecordFallback {
+    @Advice.OnMethodExit
+    static void exit(@Advice.Argument(0) String reason) {
+      NativeExecution.fallback(reason);
+    }
+  }
+
+  public static final class BindNativeExecution {
+    @Advice.OnMethodExit
+    static void exit(@Advice.This Object operator) {
+      NativeExecution.opened(operator);
+    }
+  }
+
+  public static final class RecordNativeBatch {
+    @Advice.OnMethodEnter
+    static int enter(@Advice.This Object operator, @Advice.Argument(0) Object root)
+        throws ReflectiveOperationException {
+      return NativeExecution.batchRows(operator, root);
+    }
+
+    @Advice.OnMethodExit
+    static void exit(@Advice.This Object operator, @Advice.Enter int rows) {
+      NativeExecution.completed(operator, rows);
+    }
+  }
+
+  public static final class RecordNativeElement {
+    @Advice.OnMethodEnter
+    static int enter(@Advice.This Object operator, @Advice.Argument(0) Object record)
+        throws ReflectiveOperationException {
+      return NativeExecution.elementRows(operator, record);
+    }
+
+    @Advice.OnMethodExit
+    static void exit(@Advice.This Object operator, @Advice.Enter int rows) {
+      NativeExecution.completed(operator, rows);
+    }
   }
 
   public static boolean reportActivation() {

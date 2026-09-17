@@ -28,6 +28,7 @@ readonly UNSHADED_BRIDGE_POM="${SUITE_ROOT}/flink-table-calcite-bridge-${FLINK_V
 readonly UNSHADED_SQL_PARSER_JAR="${SUITE_ROOT}/flink-sql-parser-${FLINK_VERSION}-unshaded.jar"
 readonly UNSHADED_SQL_PARSER_POM="${SUITE_ROOT}/flink-sql-parser-${FLINK_VERSION}-effective.pom"
 readonly SUITE_MODE="${1:-runtime}"
+readonly NATIVE_REPORT_ROOT="${SUITE_ROOT}/native-execution/${SUITE_MODE}"
 readonly FLINK_MODULE_CONFIG="-Duser.timezone=UTC -Djava.library.path=${STREAMFUSION_BUILD_ROOT}/native/target/debug --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED --add-opens=java.base/java.time=ALL-UNNAMED --add-opens=java.base/java.math=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED -Djunit.platform.reflection.search.useLegacySemantics=true -javaagent:${AGENT_JAR}"
 readonly PAIMON_MODULE_CONFIG="-XX:+IgnoreUnrecognizedVMOptions --add-opens=java.base/java.lang.invoke=ALL-UNNAMED --add-opens=java.base/java.lang.reflect=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED --add-opens=java.base/java.net=ALL-UNNAMED --add-opens=java.base/java.util.concurrent=ALL-UNNAMED --add-opens=java.base/jdk.internal.ref=ALL-UNNAMED --add-opens=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java.base/sun.nio.cs=ALL-UNNAMED --add-opens=java.base/sun.security.action=ALL-UNNAMED --add-opens=java.base/sun.util.calendar=ALL-UNNAMED --add-opens=java.security.jgss/sun.security.krb5=ALL-UNNAMED -Djdk.reflect.useDirectMethodHandle=false -Dio.netty.tryReflectionSetAccessible=true ${FLINK_MODULE_CONFIG}"
 readonly PAIMON_BUILD_ARGS=(-Pflink2 "-Dpaimon-flink-common.flink.version=${FLINK_VERSION}" "-Dtest.flink.version=${FLINK_VERSION}" -Dspotless.check.skip=true -Dcheckstyle.skip=true -Drat.skip=true -Dmaven.javadoc.skip=true)
@@ -306,6 +307,8 @@ fi
 readonly STREAMFUSION_CLASSPATH
 
 echo "Running the upstream Flink ${SUITE_MODE} suite with StreamFusion enabled..."
+mkdir -p "${NATIVE_REPORT_ROOT}"
+find "${NATIVE_REPORT_ROOT}" -maxdepth 1 -type f -name '*.tsv' -delete
 mkdir -p "${REPORT_ROOT}"
 if [[ "${SUITE_MODE}" == "formats" ]]; then
   find "${REPORT_ROOT}" -type f -path '*/target/surefire-reports/*' -delete
@@ -319,6 +322,7 @@ MAVEN_TEST_ARGS=(
   -Dmaven.test.additionalClasspath="${STREAMFUSION_CLASSPATH}" \
   -Dstreamfusion.logFallbackReasons=true \
   -Dstreamfusion.native.development=true \
+  -Dstreamfusion.flink-suite.native-reports="${NATIVE_REPORT_ROOT}" \
   -Dfast \
   -Djunit.jupiter.execution.parallel.enabled=false \
   -Dflink.forkCountUnitTest="${FLINK_SUITE_UNIT_FORKS:-2}" \
@@ -398,9 +402,12 @@ if [[ "${SUITE_MODE}" == "paimon" && ${TEST_STATUS} -eq 0 ]]; then
   done
 fi
 
-SUMMARY_ARGS=("${REPORT_ROOT}")
+SUMMARY_ARGS=("${REPORT_ROOT}" --native-reports "${NATIVE_REPORT_ROOT}")
 if [[ "${SUITE_MODE}" == "runtime" || "${SUITE_MODE}" == "diagnostic" ]]; then
   SUMMARY_ARGS+=(--xfail "org.apache.flink.table.planner.runtime.batch.sql.CalcITCase#testCurrentDate")
+  if [[ -z "${FLINK_SUITE_TEST:-}" ]]; then
+    SUMMARY_ARGS+=(--require-all-contracts)
+  fi
 fi
 python3 "${REPO_ROOT}/dev/flink-suite/summarize.py" "${SUMMARY_ARGS[@]}"
 readonly SUMMARY_STATUS=$?

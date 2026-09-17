@@ -60,6 +60,11 @@ jobs:
           java-version: "17"
           cache: maven
 
+      - name: Test upstream execution evidence checks
+        run: |
+          mvn -B -ntp -f dev/flink-suite/agent/pom.xml test
+          python3 -m unittest discover -s dev/flink-suite -p 'test_*.py'
+
       - uses: dtolnay/rust-toolchain@1.94.0
 
       - uses: Swatinem/rust-cache@v2

@@ -187,6 +187,11 @@ enables columnar composition with downstream consumers; it is not a standalone t
   Non-windowed DISTINCT has separate coverage; see [GROUP BY](group-by.md).
 - Retracting or updating window input, including input from updating Top-N; distinct windows
   retain the same insert-only admission gate as ordinary window aggregates.
+- Flink's optional `table.optimizer.distinct-agg.split.enabled=true` rewrite. The unchanged
+  split-distinct IT variants introduce an unsupported `HASH_CODE` Calc and extra window layers,
+  including attached single-phase aggregation and partial layouts outside current admission.
+  Those variants fall back as a complete pipeline. The same queries with distinct splitting
+  disabled use the native value-set path; upstream execution contracts verify both routes.
 
 A **zero-aggregate grouping-only window** (`GROUP BY key + window`, no aggregate function) is *not*
 one of the gaps above — it's a windowed distinct, and is native (single- and two-phase), emitting one

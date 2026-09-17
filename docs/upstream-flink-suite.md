@@ -72,6 +72,41 @@ Flink. The default run executes the planner module's unchanged `*ITCase`
 runtime integration suite serially in one fork, then summarizes Surefire failures. Serial execution
 keeps concurrently created MiniClusters from exhausting a developer machine or CI runner.
 
+Selected upstream SQL tests also have **per-invocation native execution contracts**, declared in
+`dev/flink-suite/agent/src/main/resources/native-execution.tsv`. The unchanged `CalcITCase.testNotIn`
+must execute a native filter or Calc, and `testLongProjectionList` must execute a native Calc;
+`AggregateITCase.testGroupByAgg` must execute a native grouped aggregate;
+and `WindowDistinctAggregateITCase.testTumbleWindow`, `testHopWindow`, and `testCumulateWindow` must
+execute either a single-phase native window aggregate or **both** native local and global halves
+when the fixture's `splitDistinct` parameter is false.
+Each parameter variant must satisfy its own contract, including backend, mini-batch, async-state,
+and distinct-splitting variants selected by the pinned tests. The `splitDistinct=true` variants
+explicitly require full fallback with the unsupported `HASH_CODE` reason; their additional window
+layers also exceed current admission. `CalcITCase.testIfFunction` is a second fallback control,
+requiring the unsupported `IF` reason. A fixture parameter change that prevents selecting exactly
+one contract fails the test. Native and expected-fallback counts are reported separately.
+Other upstream cases still check
+result parity without a per-test acceleration contract; planner installation alone does not prove
+that any particular query ran natively.
+
+The agent binds each runtime operator to the test invocation in which it opens and counts nonempty
+input rows only after a method that performs native evaluation or aggregation returns successfully.
+Opening an operator, accepting an empty batch, or buffering input before a native update earns no
+credit. Task retries stay within the invocation; late work from an operator belonging to a finished
+invocation cannot satisfy a later one. Tests within a fork must remain serial. A missing required
+operator fails the JUnit test while retaining the upstream result assertions. The summarizer also
+matches invocation counts in JUnit XML to the evidence files, so a missing agent, a missing variant's
+proof, stale evidence, and execution failures hidden behind an expected-failure annotation all fail
+the suite. The runner clears the selected suite's evidence before every run. Evidence lives in
+`.flink-suite/native-execution/<suite>/` and is uploaded with the upstream CI log.
+The full planner suite also requires every contracted method to execute, so removing or renaming
+an upstream test cannot silently shrink this coverage. Focused selections require evidence only
+for their selected methods.
+
+These checks prove native data-path execution, not a speedup. Release benchmarks measure performance
+separately. The ordinary Java job also tests the evidence collector and summarizer, including
+missing/empty work, wrong operators, incomplete two-phase routes, and cross-invocation isolation.
+
 Flink's published planner artifact relocates its internal Calcite classes, while its source tests use
 the unshaded classes. The runner therefore keeps an isolated Maven repository and compiles
 an isolated copy of the StreamFusion source tree against the checkout's untouched parser, Calcite
@@ -224,8 +259,9 @@ The single malformed-decimal input, for example, yields no collected rows on eit
 
 `FlinkFailureParitySqlHarnessTest` covers:
 
-- SINGLE_VALUE cardinality errors through explicit planner fallback, and malformed runtime DECIMAL
-  casts with actual native substitution and identical NumberFormatException messages.
+- SINGLE_VALUE cardinality errors through the native grouped aggregate with the same
+  TableRuntimeException, and malformed runtime DECIMAL casts with actual native substitution and
+  identical NumberFormatException messages.
 - CASE short-circuiting, JSON NULL/DEFAULT ON ERROR, and TRY_CAST-to-DECIMAL's explicit fallback.
 - Planning rejection, UDF initialization failure and a source failure observed during collection.
 - Deliberate success/failure mismatches in either direction, which must fail the parity assertion.
