@@ -85,6 +85,10 @@ explicitly require full fallback with the unsupported `HASH_CODE` reason; their 
 layers also exceed current admission. `CalcITCase.testIfFunction` is a second fallback control,
 requiring the unsupported `IF` reason. A fixture parameter change that prevents selecting exactly
 one contract fails the test. Native and expected-fallback counts are reported separately.
+`WindowAggregateITCase.testRetractPreviousSlicingStateWithSlicingWindow` also requires fallback
+with the retractable-accumulator/group-liveness reason for every phase, backend, timestamp and
+async-state variant. Its unchanged CDC input includes a delete whose final window has no prior
+insert; the upstream negative-count expectation remains intact.
 Other upstream cases still check
 result parity without a per-test acceleration contract; planner installation alone does not prove
 that any particular query ran natively.

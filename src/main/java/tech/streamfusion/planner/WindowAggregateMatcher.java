@@ -16,7 +16,9 @@ import org.apache.flink.table.planner.plan.logical.WindowAttachedWindowingStrate
 import org.apache.flink.table.planner.plan.logical.WindowSpec;
 import org.apache.flink.table.planner.plan.logical.WindowingStrategy;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalLocalWindowAggregate;
+import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalRel;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalWindowAggregate;
+import org.apache.flink.table.planner.plan.utils.ChangelogPlanUtils;
 import org.apache.flink.table.types.logical.LogicalTypeRoot;
 
 /** Shared admission and encoding for single-phase and local window aggregation. */
@@ -42,7 +44,7 @@ final class WindowAggregateMatcher {
       int[] grouping,
       scala.collection.Seq<AggregateCall> aggCalls,
       RelDataType inputType) {
-    if (!WindowZoneGate.admits(node, windowing)) {
+    if (!insertOnlyInput(node) || !WindowZoneGate.admits(node, windowing)) {
       return false;
     }
     WindowSpec spec = windowing.getWindow();
@@ -129,7 +131,7 @@ final class WindowAggregateMatcher {
       int[] grouping,
       scala.collection.Seq<AggregateCall> aggCalls,
       RelDataType inputType) {
-    if (!(windowing.getWindow() instanceof HoppingWindowSpec)) {
+    if (!insertOnlyInput(node) || !(windowing.getWindow() instanceof HoppingWindowSpec)) {
       return false;
     }
     if (!WindowZoneGate.admits(node, windowing)) {
@@ -156,7 +158,9 @@ final class WindowAggregateMatcher {
       int[] grouping,
       scala.collection.Seq<AggregateCall> aggCalls,
       RelDataType inputType) {
-    if (!(windowing instanceof WindowAttachedWindowingStrategy) || !windowing.isRowtime()) {
+    if (!insertOnlyInput(node)
+        || !(windowing instanceof WindowAttachedWindowingStrategy)
+        || !windowing.isRowtime()) {
       return false;
     }
     if (!WindowZoneGate.admits(node, windowing)) {
@@ -218,7 +222,7 @@ final class WindowAggregateMatcher {
       int[] grouping,
       scala.collection.Seq<AggregateCall> aggCalls,
       RelDataType inputType) {
-    if (!(windowing.getWindow() instanceof SessionWindowSpec)) {
+    if (!insertOnlyInput(node) || !(windowing.getWindow() instanceof SessionWindowSpec)) {
       return false;
     }
     if (!WindowZoneGate.admits(node, windowing)) {
@@ -693,10 +697,14 @@ final class WindowAggregateMatcher {
   /**
    * The window-aggregate family matches several variants (tumbling/hopping/cumulative, local and
    * global) with extra gates, so a precise per-condition reason would be unreliable; report the
-   * session-zone gate when it is the blocker (it is decisive on its own), else a coarse
+   * input-changelog or session-zone gate when it is decisive, else a coarse
    * operator-level reason naming the requirements.
    */
   static String unsupportedReason(RelNode node, WindowingStrategy windowing) {
+    if (!insertOnlyInput(node)) {
+      return "window aggregate: retracting or updating input requires retractable accumulators and"
+          + " group liveness";
+    }
     if (windowing instanceof WindowAttachedWindowingStrategy) {
       return "window aggregate: attached-window aggregation requires two-phase execution";
     }
@@ -707,5 +715,10 @@ final class WindowAggregateMatcher {
     return "window aggregate: requires a supported window/time and grouping-key type, and"
         + " numeric SUM/MIN/MAX/COUNT/AVG or unfiltered COUNT(DISTINCT) over exact, string, or"
         + " temporal values (docs/operators/window-aggregate.md)";
+  }
+
+  private static boolean insertOnlyInput(RelNode node) {
+    return node instanceof StreamPhysicalRel physical
+        && ChangelogPlanUtils.inputInsertOnly(physical);
   }
 }

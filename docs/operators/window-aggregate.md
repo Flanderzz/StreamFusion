@@ -186,7 +186,16 @@ enables columnar composition with downstream consumers; it is not a standalone t
   SUM/AVG DISTINCT, filtered COUNT DISTINCT, FLOAT/DOUBLE, BOOLEAN, TIME and complex values.
   Non-windowed DISTINCT has separate coverage; see [GROUP BY](group-by.md).
 - Retracting or updating window input, including input from updating Top-N; distinct windows
-  retain the same insert-only admission gate as ordinary window aggregates.
+  retain the same insert-only admission gate as ordinary window aggregates. Admission checks
+  the **input** changelog for single-phase, local, attached and session paths: an append-only
+  final window result does not make its input append-only. The diagnostic is
+  `window aggregate: retracting or updating input requires retractable accumulators and group liveness`.
+  For example, Top-1 replacing a value of 10 with 20 must leave SUM 20, remove groups whose
+  last live row moved to another window, and retain a live all-NULL group with COUNT 0/SUM NULL.
+  Treating the old value's retraction as an insert would instead produce SUM 40. SQL regressions
+  cover TUMBLE, HOP and CUMULATE with ordinary and distinct aggregates in both phase strategies.
+  Native retract buffers and their checkpoint/liveness contracts remain tracked in
+  [#99](https://github.com/datafusion-contrib/StreamFusion/issues/99).
 - Flink's optional `table.optimizer.distinct-agg.split.enabled=true` rewrite. The unchanged
   split-distinct IT variants introduce an unsupported `HASH_CODE` Calc and extra window layers,
   including attached single-phase aggregation and partial layouts outside current admission.
