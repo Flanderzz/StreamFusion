@@ -35,7 +35,7 @@ aggregates and both aggregation phases against released Flink.
 ## Retracting COUNT/SUM/AVG and grouping-only windows
 
 Aligned event-time TUMBLE, HOP and CUMULATE accept updating input, including native Top-N,
-for unfiltered SUM/AVG over TINYINT/SMALLINT/INT/BIGINT/FLOAT/DOUBLE, COUNT over the
+for unfiltered SUM over all numeric types, AVG over TINYINT/SMALLINT/INT/BIGINT/FLOAT/DOUBLE, COUNT over the
 supported numeric value columns, COUNT(*), and grouping-only windows without aggregate
 functions. Both single-phase and local/global execution remain columnar.
 
@@ -53,6 +53,12 @@ or partial is assigned directly, preserving an initial negative zero. An unmatch
 starts from positive zero, as in Flink. Zero-count partials retain finite residual sums and
 NaN after infinity cancellation; emitting NULL for an empty aggregate does not erase that state.
 Local/global merging and checkpoint restore preserve these rules on both state backends.
+
+DECIMAL SUM widens the buffer and result to DECIMAL(38, input scale), with the same signed
+BIGINT count. Arithmetic overflow makes the sum NULL without changing the count; the next
+non-NULL insertion or retraction restarts the sum with that signed value. A NULL partial
+contributes its count but no sum. Zero-count partials retain their residual sum. These rules
+match Flink's retracting decimal SUM and survive local/global merging and checkpoint restore.
 
 Integer AVG uses the existing BIGINT sum/count pair, subtracting values and non-NULL counts
 for retractions. A zero count produces NULL; negative counts still divide, matching Flink.
@@ -242,8 +248,8 @@ enables columnar composition with downstream consumers; it is not a standalone t
   SUM/AVG DISTINCT, filtered COUNT DISTINCT, FLOAT/DOUBLE, BOOLEAN, TIME and complex values.
   Non-windowed DISTINCT has separate coverage; see [GROUP BY](group-by.md).
 - Retracting input outside aligned event-time TUMBLE/HOP/CUMULATE with grouping-only,
-  unfiltered integer/FLOAT/DOUBLE SUM/AVG, numeric COUNT(value), and COUNT(*).
-  DISTINCT, MIN/MAX, DECIMAL SUM/AVG, filters, processing-time, attached, session
+  unfiltered numeric SUM, integer/FLOAT/DOUBLE AVG, numeric COUNT(value), and COUNT(*).
+  DISTINCT, MIN/MAX, DECIMAL AVG, filters, processing-time, attached, session
   and legacy windows still fall back on updating input. Admission checks the **input**
   changelog even when final output is append-only.
   The diagnostic names the supported retracting forms. Remaining coverage is tracked in
@@ -335,6 +341,17 @@ interleaved measured runs gave:
 Both transposes, Top-N and the rowwise sink remain timed; no competing local builds or tests
 ran. Local/global improved for both types. Single-phase FLOAT was approximately even and
 DOUBLE was slower. These are complete-query timings, not isolated SUM measurements.
+
+With `-Dwindow.sumType=DECIMAL(12,2)`, SUM returns DECIMAL(38,2). Under the same
+release/mimalloc setup, 1 million rows, two warmups and five interleaved measured runs:
+
+| Strategy | Flink (s) | Native (s) | Flink / native |
+| --- | ---: | ---: | ---: |
+| Single-phase | 0.513898 | 0.496961 | 1.034× |
+| Local/global | 0.634582 | 0.488709 | 1.298× |
+
+Both transposes, Top-N and the rowwise sink remain timed, with no competing local builds or
+tests. Single-phase was approximately even; local/global improved on this workload.
 
 ## Mixed AVG benchmark
 

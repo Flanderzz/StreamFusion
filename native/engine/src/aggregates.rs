@@ -648,6 +648,9 @@ pub(crate) enum WindowAggregate {
 impl WindowAggregate {
     fn new(kind: i64, value_type: &DataType) -> Self {
         match (kind, value_type) {
+            (RETRACT_SUM, DataType::Decimal128(_, scale)) => {
+                WindowAggregate::RetractingSum(DataType::Decimal128(38, *scale))
+            }
             (
                 RETRACT_SUM,
                 DataType::Int8
@@ -684,6 +687,9 @@ impl WindowAggregate {
     pub(crate) fn create_accumulator(&self) -> Box<dyn Accumulator> {
         match self {
             WindowAggregate::RetractingSum(value_type) => match value_type {
+                DataType::Decimal128(_, scale) => Box::new(
+                    retracting_window::RetractingDecimalSumAccumulator::new(*scale),
+                ),
                 DataType::Float32 => {
                     Box::new(retracting_window::RetractingFloatingSumAccumulator::<
                         arrow::datatypes::Float32Type,
