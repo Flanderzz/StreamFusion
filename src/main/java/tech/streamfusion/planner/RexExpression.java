@@ -98,6 +98,7 @@ final class RexExpression {
   private static final int KIND_RANDOM = 32;
   private static final int KIND_STRING_TO_INTEGER = 33;
   private static final int KIND_INTEGER_TO_STRING = 34;
+  private static final int KIND_DECIMAL_TRUNCATE = 35;
   // A typed NULL carries a one-field Arrow IPC schema in the string pool.
   private static final int KIND_LIT_TYPED_NULL = 31;
   // Fused exact arithmetic: payload is the declared result precision*100 + scale; two children.
@@ -161,6 +162,7 @@ final class RexExpression {
   // Root of the projection currently being encoded; null for conditions and bare predicates.
   private RexNode projectionRoot;
   private int binaryUdfCalls;
+  private final java.util.Set<String> statefulUdfEvaluations = new java.util.HashSet<>();
   private ClassLoader expressionClassLoader = RexExpression.class.getClassLoader();
 
   private RexExpression() {}
@@ -770,6 +772,9 @@ final class RexExpression {
       return emitItem(call);
     }
     if ("COALESCE".equals(functionName)) {
+      if (!RexUtil.isDeterministic(call) || containsScalarUdf(call)) {
+        return emitHostExpression(call, true);
+      }
       return emitCoalesceAsCase(call.getOperands());
     }
     if (call.getOperator()
@@ -993,12 +998,17 @@ final class RexExpression {
       return emitIncompatiblePower(call);
     }
     if (call.getOperator()
-        == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.ROUND) {
+            == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.ROUND
+        || call.getOperator()
+            == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.TRUNCATE) {
       if (!call.getOperands().isEmpty()
           && call.getOperands().get(0).getType().getSqlTypeName() == SqlTypeName.DECIMAL) {
         return emitDecimalRound(call);
       }
-      return emitIncompatibleRound(call);
+      return call.getOperator()
+              == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.ROUND
+          ? emitIncompatibleRound(call)
+          : reject("TRUNCATE requires a DECIMAL operand");
     }
     int fnOp = functionOpCode(call.getOperator().getName());
     if (fnOp >= 0) {
@@ -1346,8 +1356,10 @@ final class RexExpression {
             || args.size() == 4 && !isIntLiteralAtLeast(args.get(3), 1))) {
       return true;
     }
-    if (call.getOperator()
-            == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.ROUND
+    if ((call.getOperator()
+                == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.ROUND
+            || call.getOperator()
+                == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.TRUNCATE)
         && args.size() == 2
         && args.get(0).getType().getSqlTypeName() == SqlTypeName.DECIMAL
         && args.get(1) instanceof RexLiteral round
@@ -1814,7 +1826,12 @@ final class RexExpression {
       add(KIND_INTEGER_TO_STRING, pad ? -length : length, 1);
       return emit(call.getOperands().get(0));
     }
-    if (tryCast) {
+    if (tryCast
+        && targetType == SqlTypeName.DECIMAL
+        && (source == SqlTypeName.VARCHAR || source == SqlTypeName.CHAR)) {
+      return emitHostExpression(call, true);
+    }
+    if (tryCast && !(source == SqlTypeName.DECIMAL && targetType == SqlTypeName.DECIMAL)) {
       return reject("unsupported TRY_CAST " + source + "→" + targetType);
     }
     // A cast that leaves the value unchanged — same base type and precision/scale, differing only
@@ -2041,6 +2058,16 @@ final class RexExpression {
     return call.getOperands().stream().anyMatch(RexExpression::containsDecimalUdf);
   }
 
+  private static boolean containsScalarUdf(RexNode node) {
+    if (!(node instanceof RexCall call)) return false;
+    if (call.getOperator()
+            instanceof org.apache.flink.table.planner.functions.bridging.BridgingSqlFunction function
+        && function.getDefinition() instanceof org.apache.flink.table.functions.ScalarFunction) {
+      return true;
+    }
+    return call.getOperands().stream().anyMatch(RexExpression::containsScalarUdf);
+  }
+
   private boolean emitHostExpression(RexCall call, boolean preserveDecimalNullness) {
     if (preserveDecimalNullness && !validateGeneratedExpression(call)) return false;
     List<RexNode> arguments = new ArrayList<>();
@@ -2072,6 +2099,9 @@ final class RexExpression {
       eval = FlinkExpressionFunction.class.getMethod("eval", Object[].class);
     } catch (Exception e) {
       return reject("host expression cannot be generated: " + e.getMessage());
+    }
+    for (org.apache.flink.table.functions.ScalarFunction dependency : function.functions()) {
+      if (!claimUdfEvaluation(dependency)) return false;
     }
     int localIndex =
         addUdf(
@@ -2536,6 +2566,7 @@ final class RexExpression {
     var scalar = (org.apache.flink.table.functions.ScalarFunction)
         ((org.apache.flink.table.planner.functions.bridging.BridgingSqlFunction) call.getOperator())
             .getDefinition();
+    if (!claimUdfEvaluation(scalar)) return false;
     int returnCode = udfTypeCode(call.getType());
     List<RexNode> args = call.getOperands();
     int[] argCodes = args.stream().mapToInt(arg -> udfTypeCode(arg.getType())).toArray();
@@ -2550,6 +2581,13 @@ final class RexExpression {
       if (!emit(arg)) {
         return false;
       }
+    }
+    return true;
+  }
+
+  private boolean claimUdfEvaluation(org.apache.flink.table.functions.ScalarFunction function) {
+    if (!function.isDeterministic() && !statefulUdfEvaluations.add(function.functionIdentifier())) {
+      return reject("shared stateful scalar UDF requires Flink's per-row invocation order");
     }
     return true;
   }
@@ -3032,11 +3070,14 @@ final class RexExpression {
   }
 
   private boolean emitDecimalRound(RexCall call) {
+    boolean truncate =
+        call.getOperator()
+            == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.TRUNCATE;
     List<RexNode> args = call.getOperands();
     if (args.isEmpty()
         || args.size() > 2
         || args.size() == 2 && (!(args.get(1) instanceof RexLiteral) || !isInt32(args.get(1)))) {
-      return reject("DECIMAL ROUND requires a literal INT scale");
+      return reject("DECIMAL " + call.getOperator().getName() + " requires a literal INT scale");
     }
     Integer round =
         args.size() == 1
@@ -3045,6 +3086,9 @@ final class RexExpression {
     RelDataType input = args.get(0).getType();
     RelDataType output = call.getType();
     if (round != null && round < -38) {
+      if (truncate) {
+        return emitHostExpression(call, true);
+      }
       HostDecimalRoundFunction function =
           new HostDecimalRoundFunction(input.getPrecision(), input.getScale(), round);
       Method eval;
@@ -3063,7 +3107,10 @@ final class RexExpression {
       longs.add((long) returnCode);
       return emit(args.get(0));
     }
-    add(KIND_DECIMAL_ROUND, output.getPrecision() * 100 + output.getScale(), 2);
+    add(
+        truncate ? KIND_DECIMAL_TRUNCATE : KIND_DECIMAL_ROUND,
+        output.getPrecision() * 100 + output.getScale(),
+        2);
     if (!emit(args.get(0))) {
       return false;
     }

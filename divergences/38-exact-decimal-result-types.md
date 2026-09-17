@@ -60,3 +60,26 @@ For non-nullable operands Flink may still declare arithmetic results `NOT NULL`.
 An overflow then reaches the shared downstream constraint enforcer and fails
 the job. SQL tests check the same failure on both engines; correcting the native
 NULL bitmap must not silently remove a Flink-declared constraint.
+
+String-to-decimal TRY_CAST uses Flink's generated expression so that only conversion
+failures become NULL; an error evaluating its operand still propagates. Decimal-to-decimal
+TRY_CAST uses the same native rescale as CAST. One host exception to precision checking
+is the compact string parser: parsing `999.995` as DECIMAL(5,2) retains `1000.00` in
+released Flink 2.2.1. Already-evaluated internal DecimalData therefore crosses Arrow
+without a second precision check. As in Comet's generated compact-decimal output
+(`CometBatchKernelCodegenOutput`), the writer stores the unscaled long directly;
+the reader reconstructs the internal decimal from the unscaled value. This differs
+from Comet's ordinary Spark Arrow writer, which applies Spark's changePrecision
+contract first. External BigDecimal UDF results and changes of scale still undergo
+Flink's declared precision/scale conversion. Tests distinguish these contracts and
+check that compact rounding carries remain non-NULL through projections, filters,
+conditional expressions, and aggregation.
+
+DECIMAL TRUNCATE shares ROUND's fixed-width scaling kernel, omitting the HALF_UP
+increment to reproduce Flink's rounding toward zero. Arroyo delegates ordinary math
+expressions to DataFusion and has no matching Flink decimal truncation contract to
+reuse. Flink resolves the output precision/scale before execution and preserves the
+input for positions at or above its scale, including internal compact-parser carries.
+Positions below -38 call Flink's generated expression so BigDecimal range exceptions
+are preserved; native execution must not clamp those failures to zero. The existing
+AND/OR admission rule protects row short-circuiting for these fallible positions.

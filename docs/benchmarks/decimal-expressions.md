@@ -52,3 +52,54 @@ The harness prints individual trials for inspection; raw output is not
 versioned as documentation. See [Calc / filter](../operators/calc-filter.md)
 for admission and [the decimal semantics note](https://github.com/datafusion-contrib/StreamFusion/blob/main/divergences/38-exact-decimal-result-types.md)
 for the result-type and overflow contract.
+
+## TRY_CAST coverage
+
+Measured on 2026-09-17 with Apple M4 Pro, JDK 17, UTC, Flink 2.2.1 and a
+release native library with mimalloc. The scalar harness uses 2,000,000 rows,
+parallelism 1, two warmups and five measured runs per engine, alternating
+engine order. Native plans assert both transposes and NativeCalc. No other
+test or benchmark process ran alongside these measurements; ordinary desktop
+background activity was present. Times include the row source and blackhole sink.
+
+| Expression / control | Flink median (s) | Native median (s) |
+| --- | ---: | ---: |
+| STRING identity, matched source | 0.366 | 0.564 |
+| DECIMAL(38,9) identity, matched source | 0.254 | 0.629 |
+| TRY_CAST(s AS DECIMAL(38,9)) | 0.402 | 0.961 |
+| TRY_CAST(n AS DECIMAL(20,2)) | 0.256 | 0.572 |
+
+The string source cycles through `123456789`, `-2147483648`, `  +0042.9  `,
+`0`, and `2147483647`. Decimal input alternates
+`12345678901234567890.123456700` and `-0.000000100`, so narrowing also measures
+overflow-to-NULL. These timing inputs have no NULLs; malformed strings and NULLs
+are covered separately by SQL correctness tests.
+
+Both standalone native queries are slower than the previous Flink fallback.
+The support retains exact conversions inside larger native islands; it is not
+a demonstrated standalone speedup. The identity controls show the end-to-end
+baseline but do not isolate kernel or transpose costs.
+
+```sh
+TZ=UTC SF_BENCHMARK=true mvn -pl :streamfusion-runtime test -Pbench \
+  '-Dnative.cargo.packages=-p streamfusion' \
+  '-Dtest=ScalarFunctionBenchmark#individualFunctions' \
+  -Dscalar.functions=TRY_STRING_TO_DECIMAL,TRY_DECIMAL_NARROW \
+  -Dscalar.rows=2000000 -Dscalar.warmup=2 -Dscalar.runs=5 -Dsf.testForks=1
+```
+
+## TRUNCATE coverage
+
+The same run, source, release library and trial method produced these results
+for DECIMAL(38,9). The positive position returns DECIMAL(32,2); the negative
+position returns DECIMAL(30,0).
+
+| Expression | Flink median (s) | Native median (s) |
+| --- | ---: | ---: |
+| TRUNCATE(n, 2) | 0.282 | 0.601 |
+| TRUNCATE(n, -3) | 0.325 | 0.665 |
+
+These isolated row-fed queries also remain slower than the prior Flink fallback.
+The shared fixed-width kernel adds exact coverage for existing native islands;
+no standalone speedup is claimed. To reproduce, use the scalar command above
+with `-Dscalar.functions=DECIMAL_TRUNCATE_POS,DECIMAL_TRUNCATE_NEG`.

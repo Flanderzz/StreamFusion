@@ -720,13 +720,14 @@ public final class NativeUdf {
       default:
         if (code >= DECIMAL_BASE) {
           DecimalData decimal =
-              DecimalData.fromBigDecimal(
-                  (BigDecimal) value, (code - DECIMAL_BASE) / 100, (code - DECIMAL_BASE) % 100);
-          if (decimal == null) {
-            vector.setNull(row);
-          } else {
-            ((org.apache.arrow.vector.DecimalVector) vector).setSafe(row, decimal.toBigDecimal());
-          }
+              value instanceof DecimalData internal
+                  ? internal
+                  : DecimalData.fromBigDecimal(
+                      (BigDecimal) value,
+                      (code - DECIMAL_BASE) / 100,
+                      (code - DECIMAL_BASE) % 100);
+          tech.streamfusion.arrow.DecimalAccessor.set(
+              (org.apache.arrow.vector.DecimalVector) vector, row, decimal);
           break;
         }
         throw new IllegalArgumentException("unsupported UDF type code " + code);

@@ -22,6 +22,16 @@ fallback.
   there's no partial evaluation of an expression tree, so one unknown function anywhere in it
   declines the whole `Calc`.
 
+## COALESCE
+
+`COALESCE` retains the first non-NULL operand without evaluating it again. When an operand
+contains a scalar UDF or a volatile expression, the complete COALESCE expression uses Flink's
+generated code through the existing columnar JVM bridge. This preserves call counts, nullable
+results and Flink's evaluation of later operands inside native Calc, including failures from
+operands hoisted by host code generation. Pure expressions retain their
+existing native CASE lowering. Runtime tests cover INT/STRING stateful UDFs, predicates, nested
+expressions, seeded random calls and multiple batches, including NOT NULL output constraints.
+
 ## IFNULL
 
 `IFNULL(value, replacement)` runs natively with Flink's resolved common operand type and
@@ -126,6 +136,16 @@ values, scale normalization, overflow and its pre-conversion nullness, nested ex
 conditional consumers, exception parity, typed NULL arguments, shadowed builtin names, shared
 lifecycle-dependent functions, and 5,003-row inputs. C Data tests
 cover sliced inputs, output survival after input release, and reclamation of Arrow allocations.
+
+Non-deterministic scalar UDF instances shared by multiple independently evaluated expression
+nodes fall back with a per-row invocation-order diagnostic. This covers separate projections,
+predicate/projection sharing, nested calls and CASE branches: column-at-a-time evaluation can
+otherwise change a function's state before another call observes it. The identity is Flink's
+function identifier, as used by generated expressions. Repeated calls contained in one complete
+generated expression remain native because that callback preserves row order. Single calls,
+independent instances and deterministic scalar functions retain native admission. Builtin random
+and clock functions are unaffected. Tests compare values and filtered rows across native batches
+and retain lifecycle checks on both native and fallback paths.
 
 ## String ordering
 
@@ -388,9 +408,25 @@ through JNI. Successful results and NULL-on-error policies match as well.
 Integer formatting uses canonical decimal text, including signed minima and zero.
 `VARCHAR(n)` truncates to `n` characters; `CHAR(n)` also pads shorter results with spaces.
 Legacy mode leaves the formatted text unchanged regardless of the declared length, matching
-Flink. Other TRY_CAST pairs still fall back. Bare encoders without table configuration
+Flink. Other TRY_CAST pairs, except the DECIMAL forms below, still fall back. Bare encoders without table configuration
 decline mode-dependent casts. See the [kernel ledger](../optimizations/scalar-function-kernels.md)
 for the release benchmark against the previous host-cast path.
+
+### DECIMAL TRY_CAST
+
+`TRY_CAST` from STRING/VARCHAR/CHAR to DECIMAL uses Flink's generated conversion through the
+existing columnar callback. Malformed text and conversion failures become NULL; failures in
+operand expressions still propagate. Default and legacy modes follow the configured host rules.
+DECIMAL-to-DECIMAL TRY_CAST reuses the native exact rescaling kernel, including HALF_UP and
+NULL on narrowing overflow. Tests cover precision 38, invalid text, signs/exponents, whitespace,
+filters, conditional consumers, grouping and aggregation across multiple batches.
+
+Already-evaluated internal Flink decimals cross Arrow without another precision check. Flink's
+compact text parser can retain a rounding carry (`999.995` to DECIMAL(5,2) yields `1000.00`);
+the bridge preserves that internal unscaled value and its non-NULL status. External BigDecimal
+UDF returns still undergo the declared precision/scale conversion. This follows Comet's generated
+compact-decimal output pattern; the host-specific contract is recorded in
+[exact decimal results](https://github.com/datafusion-contrib/StreamFusion/blob/main/divergences/38-exact-decimal-result-types.md).
 
 ### The host-exact JVM upcall
 
@@ -427,7 +463,7 @@ expressions; see [temporal functions](temporal-functions.md).
 
 ## Decimal arithmetic
 
-### Decimal ROUND and literals
+### Decimal ROUND, TRUNCATE and literals
 
 `ROUND(decimal_column[, literal_integer_scale])` runs with compatibility overrides disabled.
 It rounds ties away from zero (HALF_UP), preserves NULLs and Flink's inferred result precision,
@@ -443,6 +479,15 @@ CASE can skip an unselected failing branch. Runtime scale columns and BIGINT sca
 retain an explicit planner fallback; float/double ROUND keeps its existing compatibility gate.
 Flink 2.2.1 itself can fail when a runtime scale changes the returned DecimalData precision;
 the regression suite preserves the resulting binary-writer assertion failure through fallback.
+
+`TRUNCATE(decimal_column[, literal_integer_scale])` uses the same native fixed-width
+kernel with rounding toward zero. Positive, zero and negative positions preserve Flink's
+resolved precision/scale and NULL behavior; a position at or above the source scale retains
+the input value. Positions below -38 use Flink's generated expression through the columnar
+callback, including its extreme-scale errors. They retain the same AND/OR short-circuit
+restriction as ROUND. Integer and floating-point inputs are not admitted for TRUNCATE;
+Flink 2.2.1 rejects nonliteral TRUNCATE positions during validation. SQL tests cover
+precision 38, multiple batches, filters, CASE, COALESCE and aggregate consumers.
 
 Decimal planner literals are rescaled HALF_UP to their declared scale before encoding their
 unscaled integer. A precision overflow becomes a typed decimal NULL. This handles constant-folded
