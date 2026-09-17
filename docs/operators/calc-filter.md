@@ -129,6 +129,16 @@ conditional consumers, exception parity, typed NULL arguments, shadowed builtin 
 lifecycle-dependent functions, and 5,003-row inputs. C Data tests
 cover sliced inputs, output survival after input release, and reclamation of Arrow allocations.
 
+Non-deterministic scalar UDF instances shared by multiple independently evaluated expression
+nodes fall back with a per-row invocation-order diagnostic. This covers separate projections,
+predicate/projection sharing, nested calls and CASE branches: column-at-a-time evaluation can
+otherwise change a function's state before another call observes it. The identity is Flink's
+function identifier, as used by generated expressions. Repeated calls contained in one complete
+generated expression remain native because that callback preserves row order. Single calls,
+independent instances and deterministic scalar functions retain native admission. Builtin random
+and clock functions are unaffected. Tests compare values and filtered rows across native batches
+and retain lifecycle checks on both native and fallback paths.
+
 ## String ordering
 
 Relational character-string comparisons (`<`, `<=`, `>`, `>=`) fall back, including

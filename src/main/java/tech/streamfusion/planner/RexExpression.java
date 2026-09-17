@@ -161,6 +161,7 @@ final class RexExpression {
   // Root of the projection currently being encoded; null for conditions and bare predicates.
   private RexNode projectionRoot;
   private int binaryUdfCalls;
+  private final java.util.Set<String> statefulUdfEvaluations = new java.util.HashSet<>();
   private ClassLoader expressionClassLoader = RexExpression.class.getClassLoader();
 
   private RexExpression() {}
@@ -2086,6 +2087,9 @@ final class RexExpression {
     } catch (Exception e) {
       return reject("host expression cannot be generated: " + e.getMessage());
     }
+    for (org.apache.flink.table.functions.ScalarFunction dependency : function.functions()) {
+      if (!claimUdfEvaluation(dependency)) return false;
+    }
     int localIndex =
         addUdf(
             tech.streamfusion.operator.NativeUdf.Descriptor.forFunction(
@@ -2549,6 +2553,7 @@ final class RexExpression {
     var scalar = (org.apache.flink.table.functions.ScalarFunction)
         ((org.apache.flink.table.planner.functions.bridging.BridgingSqlFunction) call.getOperator())
             .getDefinition();
+    if (!claimUdfEvaluation(scalar)) return false;
     int returnCode = udfTypeCode(call.getType());
     List<RexNode> args = call.getOperands();
     int[] argCodes = args.stream().mapToInt(arg -> udfTypeCode(arg.getType())).toArray();
@@ -2563,6 +2568,13 @@ final class RexExpression {
       if (!emit(arg)) {
         return false;
       }
+    }
+    return true;
+  }
+
+  private boolean claimUdfEvaluation(org.apache.flink.table.functions.ScalarFunction function) {
+    if (!function.isDeterministic() && !statefulUdfEvaluations.add(function.functionIdentifier())) {
+      return reject("shared stateful scalar UDF requires Flink's per-row invocation order");
     }
     return true;
   }

@@ -52,13 +52,21 @@ class FlinkUdfLifecycleSqlHarnessTest {
   @ParameterizedTest
   @ValueSource(strings = {
     "SELECT MY_ADD(a) FROM inputs",
-    "SELECT MY_ADD(a), MY_ADD(b) FROM inputs",
-    "SELECT MY_ADD(MY_ADD(a)), MY_ADD(b) FROM inputs",
-    "SELECT MY_ADD(a), MY_ADD(b) FROM inputs WHERE MY_ADD(a) > 10",
     "SELECT MY_ADD(a), OTHER_ADD(b) FROM inputs"
   })
   void lifecycleMatchesHostAcrossCallSitesAndBatches(String sql) throws Exception {
     NativeParity.assertParity(FlinkUdfLifecycleSqlHarnessTest::environment, sql);
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {
+    "SELECT MY_ADD(a), MY_ADD(b) FROM inputs",
+    "SELECT MY_ADD(MY_ADD(a)), MY_ADD(b) FROM inputs",
+    "SELECT MY_ADD(a), MY_ADD(b) FROM inputs WHERE MY_ADD(a) > 10"
+  })
+  void sharedNondeterministicFunctionsRetainHostLifecycleAndOrder(String sql) throws Exception {
+    NativeParity.assertFallbackReasonContains(FlinkUdfLifecycleSqlHarnessTest::environment, sql,
+        "shared stateful scalar UDF");
   }
 
   private static TableEnvironment environment() {

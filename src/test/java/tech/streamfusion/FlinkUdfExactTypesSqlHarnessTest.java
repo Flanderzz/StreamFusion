@@ -38,11 +38,11 @@ class FlinkUdfExactTypesSqlHarnessTest {
 
   @Test
   void repeatedCallsAndFiltersSpanMultipleBatches() throws Exception {
-    NativeParity.assertParity(
+    NativeParity.assertFallbackReasonContains(
         () -> environment(5003),
         "SELECT id, decimal_identity(d), decimal_identity(d), binary_identity(b), "
             + "decimal_from_text(s) FROM src "
-            + "WHERE MOD(id, 3) <> 0");
+            + "WHERE MOD(id, 3) <> 0", "shared stateful scalar UDF");
   }
 
   @Test
