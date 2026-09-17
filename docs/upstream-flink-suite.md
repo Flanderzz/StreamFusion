@@ -247,3 +247,7 @@ Run the failure suite and independent host reproducer together:
 ```bash
 mvn -pl streamfusion-runtime -am test -Dtest=FlinkFailureParitySqlHarnessTest,FlinkJsonReturningHostContractTest
 ```
+
+The [portable SQL audit](sql-parity-audit.md) adds typed UDF/UDTF/UDAF and CDC fixtures,
+checkpoint failure/recovery, expanded parameter variants and explicit execution-mode accounting.
+Its public issue-derived matrix is independent of the unavailable private September audit corpus.

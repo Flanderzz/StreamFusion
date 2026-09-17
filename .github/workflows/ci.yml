@@ -72,6 +72,14 @@ jobs:
       - name: Run Java test suite
         run: mvn -B -ntp test
 
+      - name: Upload portable SQL audit outcomes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: portable-sql-audit
+          path: streamfusion-runtime/target/sql-audit/*.json
+          if-no-files-found: error
+
       - name: Verify native JNI exports
         run: python3 bin/check-native-workspace.py --libraries native/target/debug
 
