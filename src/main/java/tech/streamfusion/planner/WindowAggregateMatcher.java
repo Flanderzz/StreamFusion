@@ -735,7 +735,8 @@ final class WindowAggregateMatcher {
   static String unsupportedReason(RelNode node, WindowingStrategy windowing) {
     if (!insertOnlyInput(node)) {
       return "window aggregate: retracting input supports only aligned event-time"
-          + " TUMBLE/HOP/CUMULATE with grouping-only, unfiltered integer SUM, numeric COUNT(value), or COUNT(*)";
+          + " TUMBLE/HOP/CUMULATE with grouping-only, unfiltered integer SUM/AVG, numeric"
+          + " COUNT(value), or COUNT(*)";
     }
     if (windowing instanceof WindowAttachedWindowingStrategy) {
       return "window aggregate: attached-window aggregation requires two-phase execution";
@@ -768,13 +769,14 @@ final class WindowAggregateMatcher {
     for (int i = 0; i < calls.size(); i++) {
       AggregateCall call = calls.apply(i);
       int kind = aggregateKind(call.getAggregation().getKind());
-      if (call.isDistinct() || call.filterArg >= 0 || (kind != KIND_SUM && kind != KIND_COUNT))
-        return false;
+      if (call.isDistinct()
+          || call.filterArg >= 0
+          || (kind != KIND_SUM && kind != KIND_AVG && kind != KIND_COUNT)) return false;
       if (kind == KIND_COUNT && call.getArgList().isEmpty()) continue;
       if (call.getArgList().size() != 1) return false;
       SqlTypeName type =
           inputType.getFieldList().get(call.getArgList().get(0)).getType().getSqlTypeName();
-      if (kind == KIND_SUM
+      if ((kind == KIND_SUM || kind == KIND_AVG)
           && type != SqlTypeName.BIGINT
           && type != SqlTypeName.INTEGER
           && type != SqlTypeName.SMALLINT
@@ -791,6 +793,8 @@ final class WindowAggregateMatcher {
       AggregateCall call = calls.apply(i);
       if (call.getAggregation().getKind() == SqlKind.SUM) {
         kinds[i] = KIND_RETRACT_SUM;
+      } else if (call.getAggregation().getKind() == SqlKind.AVG) {
+        kinds[i] = KIND_AVG;
       } else if (call.getArgList().isEmpty() && !hasLiveCount) {
         kinds[i] = KIND_LIVE_COUNT;
         hasLiveCount = true;

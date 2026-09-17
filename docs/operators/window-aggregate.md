@@ -32,10 +32,10 @@ checkpoint restore and when the late row introduces a new key. TUMBLE drops the 
 its single final window has closed. Tests compare explicit watermarks, mixed ordinary/distinct
 aggregates and both aggregation phases against released Flink.
 
-## Retracting COUNT/SUM and grouping-only windows
+## Retracting COUNT/SUM/AVG and grouping-only windows
 
 Aligned event-time TUMBLE, HOP and CUMULATE accept updating input, including native Top-N,
-for unfiltered SUM over TINYINT/SMALLINT/INT/BIGINT, COUNT over the supported numeric value
+for unfiltered SUM/AVG over TINYINT/SMALLINT/INT/BIGINT, COUNT over the supported numeric value
 columns, COUNT(*), and grouping-only windows without aggregate functions. Both single-phase
 and local/global execution remain columnar.
 
@@ -46,6 +46,12 @@ A live all-NULL group therefore emits COUNT 0/SUM NULL, while an unmatched delet
 negative counts and sums as it does in released Flink. Integer sums preserve their declared
 width and wrapping behavior. Top-1 replacing 10 with 20 leaves SUM 20, and moving the last
 live row out of a window removes its old group.
+
+Integer AVG uses the existing BIGINT sum/count pair, subtracting values and non-NULL counts
+for retractions. A zero count produces NULL; negative counts still divide, matching Flink.
+The sum wraps at 64 bits, division truncates toward zero, and the result narrows to its declared
+integer type. Java's `Long.MIN_VALUE / -1` overflow is preserved. AVG partials, hidden group
+liveness and checkpoints use the same layouts as append-only AVG and retracting COUNT/SUM.
 
 A grouping-only window uses the same signed live-row count as COUNT/SUM, but keeps that
 count out of the SQL result. It emits one row per nonzero `(key, window)` group, including
@@ -222,8 +228,8 @@ enables columnar composition with downstream consumers; it is not a standalone t
   SUM/AVG DISTINCT, filtered COUNT DISTINCT, FLOAT/DOUBLE, BOOLEAN, TIME and complex values.
   Non-windowed DISTINCT has separate coverage; see [GROUP BY](group-by.md).
 - Retracting input outside aligned event-time TUMBLE/HOP/CUMULATE with grouping-only,
-  unfiltered integer SUM, numeric COUNT(value), and COUNT(*). DISTINCT, MIN/MAX/AVG,
-  non-integer SUM, filters, processing-time, attached, session and legacy windows still fall back on
+  unfiltered integer SUM/AVG, numeric COUNT(value), and COUNT(*). DISTINCT, MIN/MAX,
+  non-integer SUM/AVG, filters, processing-time, attached, session and legacy windows still fall back on
   updating input. Admission checks the **input** changelog even when final output is append-only.
   The diagnostic names the supported retracting forms. Remaining coverage is tracked in
   [#99](https://github.com/datafusion-contrib/StreamFusion/issues/99).
@@ -270,6 +276,17 @@ Top-N, both transposes and the rowwise sink. On an M1 Max, a release build (`-Pb
 No competing builds or tests ran during measurement. Single-phase was slightly slower and
 local/global was approximately even. Grouping-only admission extends the existing changelog
 and checkpoint foundation; this measurement does not establish a throughput improvement.
+
+With `-Dwindow.average=true`, the benchmark selects COUNT and integer AVG. Under the same
+release/mimalloc setup, 1 million rows, two warmups and five interleaved measured runs gave:
+
+| Strategy | Flink (s) | Native (s) | Flink / native |
+| --- | ---: | ---: | ---: |
+| Single-phase | 0.420240 | 0.509358 | 0.825× |
+| Local/global | 0.532535 | 0.485407 | 1.097× |
+
+Both transposes, Top-N and the rowwise sink remain timed, with no competing local builds or
+tests. Local/global improved on this workload; single-phase remained slower than Flink.
 
 ## Mixed AVG benchmark
 

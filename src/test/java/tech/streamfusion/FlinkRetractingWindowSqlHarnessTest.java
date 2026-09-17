@@ -88,7 +88,7 @@ class FlinkRetractingWindowSqlHarnessTest {
         };
     String sql =
         "SELECT k, window_end"
-            + (groupingOnly ? "" : ", SUM(v), COUNT(*)")
+            + (groupingOnly ? "" : ", SUM(v), COUNT(*), AVG(v)")
             + " FROM TABLE("
             + window
             + ") GROUP BY k, window_start, window_end";
@@ -103,6 +103,8 @@ class FlinkRetractingWindowSqlHarnessTest {
     }
     if (groupingOnly) {
       expected.replaceAll(row -> Row.project(row, new int[] {0, 1}));
+    } else {
+      expected.replaceAll(row -> Row.join(row, Row.of(row.getField(2))));
     }
     expected.sort(Comparator.comparing(Row::toString));
     for (boolean nativeEnabled : new boolean[] {false, true}) {
@@ -221,7 +223,10 @@ class FlinkRetractingWindowSqlHarnessTest {
         };
     String sql =
         "SELECT k, window_end"
-            + (groupingOnly ? "" : ", SUM(v), COUNT(v), COUNT(*)")
+            + (groupingOnly
+                ? ""
+                : ", SUM(v), COUNT(v), COUNT(*), AVG(v), AVG(CAST(v AS INT)),"
+                    + " AVG(CAST(v AS SMALLINT)), AVG(CAST(v AS TINYINT))")
             + " FROM TABLE("
             + window
             + ") GROUP BY k, window_start, window_end";
@@ -233,9 +238,25 @@ class FlinkRetractingWindowSqlHarnessTest {
       expected.add(Row.of(2, timestamp, null, 0L, 1L));
       expected.add(Row.of(4, timestamp, 5L, 1L, 1L));
       expected.add(Row.of(5, timestamp, -3L, -1L, -1L));
+      expected.add(Row.of(6, timestamp, Long.MIN_VALUE, -1L, -1L));
+      expected.add(Row.of(7, timestamp, -2L, 2L, 2L));
+      expected.add(Row.of(8, timestamp, 21L, 2L, 2L));
     }
     if (groupingOnly) {
       expected.replaceAll(row -> Row.project(row, new int[] {0, 1}));
+    } else {
+      expected.replaceAll(
+          row -> {
+            Long sum = (Long) row.getField(2);
+            Long avg = sum == null ? null : sum / (Long) row.getField(3);
+            return Row.join(
+                row,
+                Row.of(
+                    avg,
+                    avg == null ? null : avg.intValue(),
+                    avg == null ? null : avg.shortValue(),
+                    avg == null ? null : avg.byteValue()));
+          });
     }
     expected.sort(Comparator.comparing(Row::toString));
     for (boolean nativeEnabled : new boolean[] {false, true}) {
@@ -405,6 +426,62 @@ class FlinkRetractingWindowSqlHarnessTest {
     assertWindowRows(result.job(), phase);
   }
 
+  @ParameterizedTest
+  @CsvSource({
+    "ONE_PHASE,TUMBLE,TINYINT", "TWO_PHASE,TUMBLE,TINYINT",
+    "ONE_PHASE,HOP,TINYINT", "TWO_PHASE,HOP,TINYINT",
+    "ONE_PHASE,CUMULATE,TINYINT", "TWO_PHASE,CUMULATE,TINYINT",
+    "ONE_PHASE,TUMBLE,SMALLINT", "TWO_PHASE,TUMBLE,SMALLINT",
+    "ONE_PHASE,HOP,SMALLINT", "TWO_PHASE,HOP,SMALLINT",
+    "ONE_PHASE,CUMULATE,SMALLINT", "TWO_PHASE,CUMULATE,SMALLINT",
+    "ONE_PHASE,TUMBLE,INT", "TWO_PHASE,TUMBLE,INT",
+    "ONE_PHASE,HOP,INT", "TWO_PHASE,HOP,INT",
+    "ONE_PHASE,CUMULATE,INT", "TWO_PHASE,CUMULATE,INT",
+    "ONE_PHASE,TUMBLE,BIGINT", "TWO_PHASE,TUMBLE,BIGINT",
+    "ONE_PHASE,HOP,BIGINT", "TWO_PHASE,HOP,BIGINT",
+    "ONE_PHASE,CUMULATE,BIGINT", "TWO_PHASE,CUMULATE,BIGINT"
+  })
+  void integerAverageRetractsReplacedTopRows(String phase, String shape, String type)
+      throws Exception {
+    String window =
+        switch (shape) {
+          case "TUMBLE" -> "TUMBLE(TABLE ranked, DESCRIPTOR(rt), INTERVAL '5' SECOND)";
+          case "HOP" ->
+              "HOP(TABLE ranked, DESCRIPTOR(rt), INTERVAL '5' SECOND, INTERVAL '10' SECOND)";
+          default ->
+              "CUMULATE(TABLE ranked, DESCRIPTOR(rt), INTERVAL '5' SECOND, INTERVAL '15' SECOND)";
+        };
+    String sql =
+        "SELECT k, window_start, window_end, COUNT(v), AVG(CAST(v AS "
+            + type
+            + ")) FROM TABLE("
+            + window
+            + ") GROUP BY k, window_start, window_end";
+    List<Row> expected = expected(shape, false);
+    for (Row row : expected) {
+      Long value = (Long) row.getField(4);
+      if (value != null) {
+        row.setField(
+            4,
+            switch (type) {
+              case "TINYINT" -> value.byteValue();
+              case "SMALLINT" -> value.shortValue();
+              case "INT" -> value.intValue();
+              default -> value;
+            });
+      }
+    }
+    assertEquals(expected, collect(environment(phase), sql).rows());
+    var table = environment(phase);
+    var scan = NativePlanner.install(table);
+    var result = collect(table, sql);
+    assertEquals(expected, result.rows());
+    assertTrue(scan.substitutions() > 0, scan.fallbackReasons().toString());
+    assertTrue(scan.fallbackReasons().isEmpty(), scan.fallbackReasons().toString());
+    assertNativeRows(result.job(), "NativeColumnarTopNExecNode");
+    assertWindowRows(result.job(), phase);
+  }
+
   private static List<Row> expected(String shape, boolean distinct) {
     var rows = new ArrayList<Row>();
     if (shape.equals("HOP")) {
@@ -559,7 +636,7 @@ class FlinkRetractingWindowSqlHarnessTest {
           throw new IllegalStateException("window source failure after completed checkpoint");
         }
       }
-      emit(context, 10);
+      emit(context, 15);
     }
 
     private void emit(SourceContext<Row> context, int end) {
@@ -574,7 +651,12 @@ class FlinkRetractingWindowSqlHarnessTest {
               Row.ofKind(RowKind.INSERT, 4, 1000L, 5L),
               Row.ofKind(RowKind.INSERT, 4, 1000L, 5L),
               Row.ofKind(RowKind.DELETE, 4, 1000L, 5L),
-              Row.ofKind(RowKind.DELETE, 5, 1000L, 3L));
+              Row.ofKind(RowKind.DELETE, 5, 1000L, 3L),
+              Row.ofKind(RowKind.DELETE, 6, 1000L, Long.MIN_VALUE),
+              Row.ofKind(RowKind.INSERT, 7, 1000L, Long.MAX_VALUE),
+              Row.ofKind(RowKind.INSERT, 7, 1000L, Long.MAX_VALUE),
+              Row.ofKind(RowKind.INSERT, 8, 1000L, 10L),
+              Row.ofKind(RowKind.INSERT, 8, 1000L, 11L));
       synchronized (context.getCheckpointLock()) {
         while (running && next < end) context.collect(changes.get(next++));
       }

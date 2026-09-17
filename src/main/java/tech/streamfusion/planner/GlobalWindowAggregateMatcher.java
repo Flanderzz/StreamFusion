@@ -4,6 +4,7 @@ import java.util.Arrays;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.AggregateCall;
 import org.apache.calcite.rel.type.RelDataType;
+import org.apache.calcite.sql.SqlKind;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.apache.flink.table.planner.plan.logical.CumulativeWindowSpec;
 import org.apache.flink.table.planner.plan.logical.HoppingWindowSpec;
@@ -79,8 +80,8 @@ final class GlobalWindowAggregateMatcher {
           || !windowing.isRowtime()
           || !WindowAggregateMatcher.supportedRetractingAggregates(
               aggregate.aggCalls(), aggregate.inputRowTypeOfLocalAgg())) {
-        return "global window aggregate: retracting input requires grouping-only, unfiltered integer SUM or"
-            + " numeric COUNT";
+        return "global window aggregate: retracting input requires grouping-only, unfiltered"
+            + " integer SUM/AVG or numeric COUNT";
       }
       int fields = WindowAggregateMatcher.partialFieldCount(aggregate.aggCalls(), true);
       int[] retractKinds = WindowAggregateMatcher.retractingKinds(aggregate.aggCalls());
@@ -91,14 +92,17 @@ final class GlobalWindowAggregateMatcher {
       int[] columns = partialColumns(aggregate);
       for (int i = 0; i < aggregate.aggCalls().size(); i++) {
         AggregateCall call = aggregate.aggCalls().apply(i);
-        if (inputType.getFieldList().get(columns[i]).getType().getSqlTypeName()
-            != call.getType().getSqlTypeName()) {
+        SqlTypeName partialType =
+            call.getAggregation().getKind() == SqlKind.AVG
+                ? SqlTypeName.BIGINT
+                : call.getType().getSqlTypeName();
+        if (inputType.getFieldList().get(columns[i]).getType().getSqlTypeName() != partialType) {
           return "global window aggregate: retracting result partial has an unexpected type";
         }
         if (WindowAggregateMatcher.partialWidth(call, true) == 2
             && inputType.getFieldList().get(columns[i] + 1).getType().getSqlTypeName()
                 != SqlTypeName.BIGINT) {
-          return "global window aggregate: retracting SUM requires a BIGINT count partial";
+          return "global window aggregate: retracting SUM/AVG requires a BIGINT count partial";
         }
       }
       if (retractKinds.length > aggregate.aggCalls().size()

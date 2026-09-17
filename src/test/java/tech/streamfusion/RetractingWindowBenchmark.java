@@ -21,9 +21,10 @@ class RetractingWindowBenchmark {
   private static final int WARMUP = Integer.getInteger("window.warmup", 2);
   private static final int RUNS = Integer.getInteger("window.runs", 5);
   private static final boolean GROUPING_ONLY = Boolean.getBoolean("window.groupingOnly");
+  private static final boolean AVERAGE = Boolean.getBoolean("window.average");
   private static final String SQL =
       "INSERT INTO sink SELECT k"
-          + (GROUPING_ONLY ? "" : ", COUNT(v), SUM(v)")
+          + (GROUPING_ONLY ? "" : AVERAGE ? ", COUNT(v), AVG(v)" : ", COUNT(v), SUM(v)")
           + " FROM TABLE(HOP(TABLE ranked, DESCRIPTOR(rt), "
           + "INTERVAL '2' SECOND, INTERVAL '10' SECOND)) GROUP BY k, window_start, window_end";
 
@@ -59,9 +60,10 @@ class RetractingWindowBenchmark {
     double nativeTime = median(times[1]);
     System.out.printf(
         Locale.ROOT,
-        "[retracting-window] groupingOnly=%s phase=%s rows=%d Flink=%.6fs Native=%.6fs ratio=%.3fx"
-            + " host_trials=%s native_trials=%s%n",
+        "[retracting-window] groupingOnly=%s average=%s phase=%s rows=%d Flink=%.6fs Native=%.6fs"
+            + " ratio=%.3fx host_trials=%s native_trials=%s%n",
         GROUPING_ONLY,
+        AVERAGE,
         phase,
         ROWS,
         host,
