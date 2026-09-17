@@ -45,8 +45,8 @@ final class TopNMatcher {
       return "Top-N: only ROW_NUMBER ranks (RANK/DENSE_RANK fall back)";
     }
     if (rank.rankRange() instanceof VariableRankRange variable) {
-      if (!ChangelogPlanUtils.isInsertOnly((StreamPhysicalRel) rank.getInput())) {
-        return "Top-N: variable rank bounds over updating input require first-bound state";
+      if (rank.rankStrategy() instanceof RankProcessStrategy.UpdateFastStrategy) {
+        return "Top-N: variable rank bounds over update-fast input require verified rank buffers";
       }
       var type = rank.getInput().getRowType().getFieldList().get(variable.getRankEndIndex()).getType();
       if (type.isNullable()) {

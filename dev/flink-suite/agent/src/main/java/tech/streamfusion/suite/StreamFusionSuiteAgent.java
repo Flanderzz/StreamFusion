@@ -101,6 +101,7 @@ public final class StreamFusionSuiteAgent {
                 "tech.streamfusion.operator.NativeCalcOperator",
                 "tech.streamfusion.operator.NativeFilterOperator",
                 "tech.streamfusion.operator.NativeColumnarGroupAggregateOperator",
+                "tech.streamfusion.operator.NativeColumnarTopNOperator",
                 "tech.streamfusion.operator.NativeWindowOperatorCore",
                 "tech.streamfusion.operator.NativeColumnarGlobalWindowAggregateOperator"))
         .transform(
@@ -108,6 +109,9 @@ public final class StreamFusionSuiteAgent {
               builder = builder.visit(Advice.to(BindNativeExecution.class).on(named("open")));
               if (type.getName().endsWith("NativeColumnarGroupAggregateOperator")) {
                 return builder.visit(Advice.to(RecordNativeBatch.class).on(named("update")));
+              }
+              if (type.getName().endsWith("NativeColumnarTopNOperator")) {
+                return builder.visit(Advice.to(RecordNativeBatch.class).on(named("push")));
               }
               if (type.getName().endsWith("NativeWindowOperatorCore")) {
                 return builder.visit(

@@ -44,7 +44,10 @@ mini-batch opts that query into the collapsed contract too. Users who want the e
 cascade run without mini-batch — the default.
 
 The retracting ranker also supports logical-bundle net diffs for zero-offset or projected-rank
-queries. Hidden-rank OFFSET is excluded: Flink mutates stored row kinds during each cascade,
+queries. Outside mini-batching, zero-offset retractions emit the selected-row removal and
+promotion directly, or each affected rank's update pair. A byte-identical duplicate promotion
+is still observable in Flink's raw stream, so per-record output cannot use the bundle-level
+equality cancellation. Hidden-rank OFFSET is excluded: Flink mutates stored row kinds during each cascade,
 which affects later equality and sort-key counts. Suppressing those cascades would change the
 materialized result, so this path always emits each input record's transitions.
 

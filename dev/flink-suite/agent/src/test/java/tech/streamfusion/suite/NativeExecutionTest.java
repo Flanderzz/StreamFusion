@@ -102,6 +102,26 @@ class NativeExecutionTest {
   }
 
   @Test
+  void retractingRankRequiresWorkFromBothAggregateAndTopN() {
+    String test =
+        "org.apache.flink.table.planner.runtime.stream.sql.RankITCase#testTopNWithGroupByAndRetract";
+    NativeExecution.Scope scope = begin(test);
+    Object aggregate = new NativeColumnarGroupAggregateOperator();
+    Object rank = new NativeColumnarTopNOperator();
+    NativeExecution.opened(aggregate);
+    NativeExecution.opened(rank);
+    NativeExecution.completed(aggregate, 8);
+    NativeExecution.Scope missingRank = scope;
+    assertThrows(AssertionError.class, () -> NativeExecution.finish(missingRank));
+    scope = begin(test);
+    NativeExecution.opened(aggregate);
+    NativeExecution.opened(rank);
+    NativeExecution.completed(aggregate, 8);
+    NativeExecution.completed(rank, 12);
+    NativeExecution.finish(scope);
+  }
+
+  @Test
   void rejectsOverlappingInvocations() {
     NativeExecution.Scope scope = begin(CALC);
     assertThrows(AssertionError.class, () -> begin(WINDOW));
@@ -157,6 +177,10 @@ class NativeExecutionTest {
   }
 
   private static class NativeCalcOperator {}
+
+  private static class NativeColumnarGroupAggregateOperator {}
+
+  private static class NativeColumnarTopNOperator {}
 
   private static class NativeColumnarWindowAggregateOperator {}
 
