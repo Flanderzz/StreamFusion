@@ -38,7 +38,8 @@ public final class ArrowDecimalColumnVector implements DecimalColumnVector {
 
     @Override
     public DecimalData getDecimal(int i, int precision, int scale) {
-        return DecimalData.fromBigDecimal(decimalVector.getObject(i), precision, scale);
+        return tech.streamfusion.arrow.DecimalAccessor.fromInternalValue(
+                decimalVector.getObject(i), precision, scale);
     }
 
     @Override

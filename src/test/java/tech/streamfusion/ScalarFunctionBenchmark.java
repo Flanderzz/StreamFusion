@@ -59,6 +59,9 @@ class ScalarFunctionBenchmark {
   private static final List<Query> SCALAR_FUNCTIONS =
       List.of(
           new Query("STRING_TO_INT", "integer_text", "CAST(s AS INT)", "INT"),
+          new Query(
+              "TRY_STRING_TO_DECIMAL", "integer_text", "TRY_CAST(s AS DECIMAL(38,9))", "DECIMAL(38,9)"),
+          new Query("TRY_DECIMAL_NARROW", "tt_decimal", "TRY_CAST(n AS DECIMAL(20,2))", "DECIMAL(20,2)"),
           new Query("INT_TO_STRING", "integer", "CAST(n AS STRING)", "STRING"),
           new Query("RAND_LITERAL", "integer", "RAND(42)", "DOUBLE"),
           new Query("RAND_DYNAMIC", "integer", "RAND(n)", "DOUBLE"),
@@ -72,6 +75,8 @@ class ScalarFunctionBenchmark {
               "DECIMAL(38,9)"),
           new Query("STRING_TO_BOOLEAN", "boolean_text", "CAST(s AS BOOLEAN)", "BOOLEAN"),
           new Query("DECIMAL_ROUND_POS", "tt_decimal", "ROUND(n, 2)", "DECIMAL(32,2)"),
+          new Query("DECIMAL_TRUNCATE_POS", "tt_decimal", "TRUNCATE(n, 2)", "DECIMAL(32,2)"),
+          new Query("DECIMAL_TRUNCATE_NEG", "tt_decimal", "TRUNCATE(n, -3)", "DECIMAL(30,0)"),
           new Query("DECIMAL_ROUND_NEG", "tt_decimal", "ROUND(n, -3)", "DECIMAL(30,0)"),
           new Query("DECIMAL_ROUND_EXPAND", "tt_decimal", "ROUND(n, 12)", "DECIMAL(38,9)"),
           new Query("DECIMAL_TO_BIGINT", "tt_decimal", "CAST(n AS BIGINT)", "BIGINT"),

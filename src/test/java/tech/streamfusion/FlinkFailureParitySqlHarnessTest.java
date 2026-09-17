@@ -60,11 +60,10 @@ class FlinkFailureParitySqlHarnessTest {
   }
 
   @Test
-  void tryDecimalControlIsExplicitFallback() {
+  void tryDecimalControlRunsNatively() {
     var comparison = NativeFailureParity.run(() -> environment("1.2.3"),
         "SELECT TRY_CAST(v AS DECIMAL(10,2)) FROM src");
-    comparison.assertSuccess(FALLBACK);
-    assertFalse(comparison.nativeRun().fallbackReasons().isEmpty());
+    comparison.assertSuccess(NATIVE);
   }
 
   @ParameterizedTest

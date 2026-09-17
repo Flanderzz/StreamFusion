@@ -273,7 +273,7 @@ The single malformed-decimal input, for example, yields no collected rows on eit
 - SINGLE_VALUE cardinality errors through the native grouped aggregate with the same
   TableRuntimeException, and malformed runtime DECIMAL casts with actual native substitution and
   identical NumberFormatException messages.
-- CASE short-circuiting, JSON NULL/DEFAULT ON ERROR, and TRY_CAST-to-DECIMAL's explicit fallback.
+- CASE short-circuiting, JSON NULL/DEFAULT ON ERROR, and native TRY_CAST-to-DECIMAL conversion failures.
 - Planning rejection, UDF initialization failure and a source failure observed during collection.
 - Deliberate success/failure mismatches in either direction, which must fail the parity assertion.
 - JSON RETURNING scalar-conversion errors: both engines throw ClassCastException with identical
