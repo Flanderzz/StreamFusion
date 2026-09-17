@@ -48,7 +48,6 @@ class JsonPathSpecTest {
             "$[-]",
             "$[2147483648]",
             "$[]",
-            "$['a\\q']",
             "$[\"a\",\"b\"]",
             "$['\ud800']",
             "$['a\n']",
@@ -67,9 +66,12 @@ class JsonPathSpecTest {
     assertEquals("strict $[\"用户\"]", JsonPathSpec.normalize("$['\\u7528\\u6237']"));
     assertEquals("strict $[\"😀\"]", JsonPathSpec.normalize("$['\\uD83D\\uDE00']"));
     for (String name :
-        List.of("\\uD800", "\\uDC00", "\\uD800x\\uDC00", "\\u12", "\\uGGGG", "\\x61")) {
+        List.of("\\uD800", "\\uDC00", "\\uD800x\\uDC00", "\\u12", "\\uGGGG", "\\用户")) {
       assertNull(JsonPathSpec.normalize("$['" + name + "']"), name);
     }
+    assertEquals("strict $[\"aq\"]", JsonPathSpec.normalize("$['a\\q']"));
+    assertEquals("strict $[\"x61\"]", JsonPathSpec.normalize("$['\\x61']"));
+    assertEquals("strict $[\"*\"]", JsonPathSpec.normalize("$['\\*']"));
   }
 
   @Test

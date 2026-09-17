@@ -766,9 +766,14 @@ once, so `\\u0061` names the literal six-character key `\u0061`, not `a`. Escape
 and brackets remain part of the member name. The planner uses Flink's released Jayway
 unescaper and sends a canonical JSON-escaped name to Rust; both native readers select
 against the decoded name without a per-row JVM call.
-Wildcards, recursive descent, filters, slices,
-multi-selectors, unknown or incomplete escapes, raw ASCII controls, unpaired surrogates and dynamic
-paths fall back. Quoted `'*'` is an ordinary member name, not a wildcard.
+An escaped printable ASCII character without a special meaning loses only its backslash,
+as in released Flink: `\q` names `q`, `\x61` names `x61`, and `\*` names the literal `*`.
+This is not hexadecimal decoding or wildcard selection. Both quote styles have executed
+parity coverage for every printable ASCII escape, including strict/lax and error policies.
+Wildcards, recursive descent, filters, slices, multi-selectors, invalid/incomplete Unicode
+escapes, backslashes before literal non-printable or non-ASCII characters, raw ASCII controls,
+unpaired surrogates and dynamic paths fall back. Quoted `'*'` is an ordinary member name,
+not a wildcard.
 
 ASCII spaces around a bracket member or index are native, for example `$[ 'user' ][ -01 ]`.
 Trailing ASCII spaces after a complete path are also accepted. The planner removes only
@@ -802,6 +807,15 @@ measurements, not isolated parser timings. Reproduce with `ScalarFunctionBenchma
 `-Pbench -Dscalar.functions=JSON_VALUE_ESCAPED_PATH,JSON_EXISTS_ESCAPED_PATH`,
 `-Dscalar.rows=1000000 -Dscalar.bytes=264 -Dscalar.warmup=2 -Dscalar.runs=5` and
 `SF_BENCHMARK=true`.
+
+The printable-ASCII escape extension uses the same native member reader after planning.
+With the same release/mimalloc settings, 1 million rows and 264 bytes of padding, selecting
+`$["u\ser"]["na\me"]` measured 1.075870 s / 0.776419 s for JSON_VALUE (Flink/native,
+1.386×) and 1.070222 s / 0.690900 s for JSON_EXISTS (1.549×). The source-matched identity
+control measured 0.378125 s / 0.645387 s (0.586×). Two warmups and five interleaved trials
+include both transposes and the rowwise sink, with no competing local builds or tests.
+Use `-Dscalar.functions=JSON_VALUE_NONSTANDARD_ESCAPE,JSON_EXISTS_NONSTANDARD_ESCAPE`
+with the benchmark options above to reproduce.
 
 Negative-index regressions cover nested arrays, minimum signed indexes, negative zero, leading
 zeros, all strict/lax policies, typed RETURNING and conversion failures, complete-document

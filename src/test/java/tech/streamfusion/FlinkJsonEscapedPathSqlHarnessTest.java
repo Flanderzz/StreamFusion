@@ -1,5 +1,6 @@
 package tech.streamfusion;
 
+import java.util.stream.IntStream;
 import java.util.stream.Stream;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.core.io.JsonStringEncoder;
 import org.apache.flink.table.api.TableEnvironment;
@@ -32,6 +33,18 @@ class FlinkJsonEscapedPathSqlHarnessTest {
         Arguments.of("a\\\\\\'b", "a\\'b"),
         Arguments.of("\\u002a", "*"),
         Arguments.of("\\u005d\\u002e", "]."));
+  }
+
+  static Stream<Arguments> nonstandardAsciiNames() {
+    return IntStream.rangeClosed(0x20, 0x7e)
+        .filter(c -> "\"'\\/bfnrtu".indexOf(c) < 0)
+        .mapToObj(c -> Arguments.of("a\\" + (char) c + "b", "a" + (char) c + "b"));
+  }
+
+  @ParameterizedTest
+  @MethodSource("nonstandardAsciiNames")
+  void nonstandardAsciiEscapesDropOnlyTheBackslash(String escaped, String name) throws Exception {
+    escapedNamesPreserveSelectionAndPolicies(escaped, name);
   }
 
   @ParameterizedTest
@@ -68,14 +81,22 @@ class FlinkJsonEscapedPathSqlHarnessTest {
     String key = json("a\\'b");
     String[] rows = new String[5003];
     for (int i = 0; i < rows.length; i++) {
-      rows[i] = "{" + key + ":[{\"\\u0000\":" + i + "}],\"a\\nb\":true,\"a/b\":1.25}";
+      rows[i] =
+          "{"
+              + key
+              + ":[{\"\\u0000\":"
+              + i
+              + "}],\"a\\nb\":true,\"a/b\":1.25,\"aq\":true,\"x61\":1.25,\"*\":null}";
     }
     NativeParity.assertParity(
         () -> TextTimeFunctionTestInputs.textRows(rows),
         "SELECT id, JSON_VALUE(s, '$[\"a\\\\\\''b\"][-1][\"\\u0000\"]' RETURNING INTEGER), "
             + "JSON_VALUE(s, '$[\"a\\nb\"]' RETURNING BOOLEAN), "
             + "JSON_VALUE(s, '$[\"a\\/b\"]' RETURNING DOUBLE), "
-            + "JSON_EXISTS(s, '$[\"a\\\\\\''b\"][-1][\"\\u0000\"]') FROM inputs");
+            + "JSON_EXISTS(s, '$[\"a\\\\\\''b\"][-1][\"\\u0000\"]'), "
+            + "JSON_VALUE(s, '$[\"a\\q\"]' RETURNING BOOLEAN), "
+            + "JSON_VALUE(s, '$[\"\\x61\"]' RETURNING DOUBLE), "
+            + "JSON_EXISTS(s, '$[\"\\*\"]') FROM inputs");
   }
 
   @Test
@@ -102,7 +123,7 @@ class FlinkJsonEscapedPathSqlHarnessTest {
 
   @ParameterizedTest
   @ValueSource(
-      strings = {"\\uD800", "\\uDC00", "\\uD800x\\uDC00", "\\u12", "\\uGGGG", "\\q", "\\x61"})
+      strings = {"\\uD800", "\\uDC00", "\\uD800x\\uDC00", "\\u12", "\\uGGGG", "\\用户", "\\\u007f"})
   void unverifiedEscapesKeepExplicitFallback(String name) throws Exception {
     NativeParity.assertFallbackReasonContains(
         () -> documents("?", 19),
