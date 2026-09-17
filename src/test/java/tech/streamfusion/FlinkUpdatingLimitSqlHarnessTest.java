@@ -2,6 +2,7 @@ package tech.streamfusion;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.time.Duration;
 import java.util.function.Supplier;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
@@ -15,6 +16,11 @@ import org.junit.jupiter.params.provider.ValueSource;
 import tech.streamfusion.planner.NativePlanner;
 
 class FlinkUpdatingLimitSqlHarnessTest {
+  // Keep Flink's epoch-aligned processing-time batch at zero for both executions.
+  // Size-four bundles and bounded end-of-input supply the flushes under comparison.
+  private static final String MINI_BATCH_LATENCY =
+      Duration.ofMillis(System.currentTimeMillis()).plusDays(1).toMillis() + " ms";
+
   @ParameterizedTest
   @ValueSource(ints = {1, 2, 100})
   void monotonicCountsUseUpdateFastRank(int limit) throws Exception {
@@ -83,7 +89,7 @@ class FlinkUpdatingLimitSqlHarnessTest {
       var table = StreamTableEnvironment.create(env);
       if (miniBatch) {
         table.getConfig().set("table.exec.mini-batch.enabled", "true");
-        table.getConfig().set("table.exec.mini-batch.allow-latency", "1 h");
+        table.getConfig().set("table.exec.mini-batch.allow-latency", MINI_BATCH_LATENCY);
         table.getConfig().set("table.exec.mini-batch.size", "4");
       }
       table.createTemporaryView("src", table.fromChangelogStream(env.fromData(
@@ -128,7 +134,7 @@ class FlinkUpdatingLimitSqlHarnessTest {
     if (miniBatch) {
       table.getConfig().set("table.optimizer.agg-phase-strategy", "ONE_PHASE");
       table.getConfig().set("table.exec.mini-batch.enabled", "true");
-      table.getConfig().set("table.exec.mini-batch.allow-latency", "1 s");
+      table.getConfig().set("table.exec.mini-batch.allow-latency", MINI_BATCH_LATENCY);
       table.getConfig().set("table.exec.mini-batch.size", "4");
     }
     var type = Types.ROW_NAMED(new String[] {"k", "v"}, Types.LONG, Types.LONG);
