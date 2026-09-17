@@ -5,7 +5,7 @@ org.apache.flink.table.planner.runtime.stream.sql.CalcITCase#testNotIn	*	NativeF
 org.apache.flink.table.planner.runtime.stream.sql.CalcITCase#testLongProjectionList	*	NativeCalcOperator
 org.apache.flink.table.planner.runtime.stream.sql.CalcITCase#testIfFunction	*	!Calc: unsupported function/operator: IF
 org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testGroupByAgg	*	NativeColumnarGroupAggregateOperator
-org.apache.flink.table.planner.runtime.stream.sql.WindowAggregateITCase#testRetractPreviousSlicingStateWithSlicingWindow	*	!window aggregate: retracting input supports only aligned event-time TUMBLE/HOP/CUMULATE with unfiltered integer SUM, numeric COUNT(value), or COUNT(*)
+org.apache.flink.table.planner.runtime.stream.sql.WindowAggregateITCase#testRetractPreviousSlicingStateWithSlicingWindow	*	!window aggregate: retracting input supports only aligned event-time TUMBLE/HOP/CUMULATE with grouping-only, unfiltered integer SUM, numeric COUNT(value), or COUNT(*)
 org.apache.flink.table.planner.runtime.stream.sql.WindowDistinctAggregateITCase#testTumbleWindow	splitDistinct=false	NativeColumnarWindowAggregateOperator|NativeColumnarLocalWindowAggregateOperator+NativeColumnarGlobalWindowAggregateOperator
 org.apache.flink.table.planner.runtime.stream.sql.WindowDistinctAggregateITCase#testTumbleWindow	splitDistinct=true	!Calc: unsupported function/operator: HASH_CODE
 org.apache.flink.table.planner.runtime.stream.sql.WindowDistinctAggregateITCase#testHopWindow	splitDistinct=false	NativeColumnarWindowAggregateOperator|NativeColumnarLocalWindowAggregateOperator+NativeColumnarGlobalWindowAggregateOperator

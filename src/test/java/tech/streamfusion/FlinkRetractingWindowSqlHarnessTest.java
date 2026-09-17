@@ -70,11 +70,14 @@ class FlinkRetractingWindowSqlHarnessTest {
 
   @ParameterizedTest
   @CsvSource({
-    "ONE_PHASE,TUMBLE", "TWO_PHASE,TUMBLE",
-    "ONE_PHASE,HOP", "TWO_PHASE,HOP",
-    "ONE_PHASE,CUMULATE", "TWO_PHASE,CUMULATE"
+    "ONE_PHASE,TUMBLE,false", "TWO_PHASE,TUMBLE,false",
+    "ONE_PHASE,HOP,false", "TWO_PHASE,HOP,false",
+    "ONE_PHASE,CUMULATE,false", "TWO_PHASE,CUMULATE,false",
+    "ONE_PHASE,TUMBLE,true", "TWO_PHASE,TUMBLE,true",
+    "ONE_PHASE,HOP,true", "TWO_PHASE,HOP,true",
+    "ONE_PHASE,CUMULATE,true", "TWO_PHASE,CUMULATE,true"
   })
-  void lateRetractionsChangeOnlyUnfiredWindows(String phase, String shape) throws Exception {
+  void lateRetractionsChangeOnlyUnfiredWindows(String phase, String shape, boolean groupingOnly) throws Exception {
     String window =
         switch (shape) {
           case "TUMBLE" -> "TUMBLE(TABLE changes, DESCRIPTOR(rt), INTERVAL '5' SECOND)";
@@ -84,7 +87,9 @@ class FlinkRetractingWindowSqlHarnessTest {
               "CUMULATE(TABLE changes, DESCRIPTOR(rt), INTERVAL '5' SECOND, INTERVAL '15' SECOND)";
         };
     String sql =
-        "SELECT k, window_end, SUM(v), COUNT(*) FROM TABLE("
+        "SELECT k, window_end"
+            + (groupingOnly ? "" : ", SUM(v), COUNT(*)")
+            + " FROM TABLE("
             + window
             + ") GROUP BY k, window_start, window_end";
     var expected = new ArrayList<Row>();
@@ -95,6 +100,9 @@ class FlinkRetractingWindowSqlHarnessTest {
     }
     if (shape.equals("CUMULATE")) {
       expected.add(Row.of(2, LocalDateTime.ofEpochSecond(15, 0, ZoneOffset.UTC), null, 1L));
+    }
+    if (groupingOnly) {
+      expected.replaceAll(row -> Row.project(row, new int[] {0, 1}));
     }
     expected.sort(Comparator.comparing(Row::toString));
     for (boolean nativeEnabled : new boolean[] {false, true}) {
@@ -188,15 +196,21 @@ class FlinkRetractingWindowSqlHarnessTest {
 
   @ParameterizedTest
   @CsvSource({
-    "ONE_PHASE,TUMBLE,false", "TWO_PHASE,TUMBLE,false",
-    "ONE_PHASE,HOP,false", "TWO_PHASE,HOP,false",
-    "ONE_PHASE,CUMULATE,false", "TWO_PHASE,CUMULATE,false",
-    "ONE_PHASE,TUMBLE,true", "TWO_PHASE,TUMBLE,true",
-    "ONE_PHASE,HOP,true", "TWO_PHASE,HOP,true",
-    "ONE_PHASE,CUMULATE,true", "TWO_PHASE,CUMULATE,true"
+    "ONE_PHASE,TUMBLE,false,false", "TWO_PHASE,TUMBLE,false,false",
+    "ONE_PHASE,HOP,false,false", "TWO_PHASE,HOP,false,false",
+    "ONE_PHASE,CUMULATE,false,false", "TWO_PHASE,CUMULATE,false,false",
+    "ONE_PHASE,TUMBLE,true,false", "TWO_PHASE,TUMBLE,true,false",
+    "ONE_PHASE,HOP,true,false", "TWO_PHASE,HOP,true,false",
+    "ONE_PHASE,CUMULATE,true,false", "TWO_PHASE,CUMULATE,true,false",
+    "ONE_PHASE,TUMBLE,false,true", "TWO_PHASE,TUMBLE,false,true",
+    "ONE_PHASE,HOP,false,true", "TWO_PHASE,HOP,false,true",
+    "ONE_PHASE,CUMULATE,false,true", "TWO_PHASE,CUMULATE,false,true",
+    "ONE_PHASE,TUMBLE,true,true", "TWO_PHASE,TUMBLE,true,true",
+    "ONE_PHASE,HOP,true,true", "TWO_PHASE,HOP,true,true",
+    "ONE_PHASE,CUMULATE,true,true", "TWO_PHASE,CUMULATE,true,true"
   })
   void signedChangesAfterCheckpointPreserveEmptyNullAndNegativeGroups(
-      String phase, String shape, boolean rocks) throws Exception {
+      String phase, String shape, boolean rocks, boolean groupingOnly) throws Exception {
     String window =
         switch (shape) {
           case "TUMBLE" -> "TUMBLE(TABLE changes, DESCRIPTOR(rt), INTERVAL '5' SECOND)";
@@ -206,7 +220,9 @@ class FlinkRetractingWindowSqlHarnessTest {
               "CUMULATE(TABLE changes, DESCRIPTOR(rt), INTERVAL '5' SECOND, INTERVAL '15' SECOND)";
         };
     String sql =
-        "SELECT k, window_end, SUM(v), COUNT(v), COUNT(*) FROM TABLE("
+        "SELECT k, window_end"
+            + (groupingOnly ? "" : ", SUM(v), COUNT(v), COUNT(*)")
+            + " FROM TABLE("
             + window
             + ") GROUP BY k, window_start, window_end";
     List<Row> expected = new ArrayList<>();
@@ -217,6 +233,9 @@ class FlinkRetractingWindowSqlHarnessTest {
       expected.add(Row.of(2, timestamp, null, 0L, 1L));
       expected.add(Row.of(4, timestamp, 5L, 1L, 1L));
       expected.add(Row.of(5, timestamp, -3L, -1L, -1L));
+    }
+    if (groupingOnly) {
+      expected.replaceAll(row -> Row.project(row, new int[] {0, 1}));
     }
     expected.sort(Comparator.comparing(Row::toString));
     for (boolean nativeEnabled : new boolean[] {false, true}) {
@@ -320,6 +339,70 @@ class FlinkRetractingWindowSqlHarnessTest {
                     reason.contains(
                         "retracting input supports only aligned event-time TUMBLE/HOP/CUMULATE")),
         scan.fallbackReasons().toString());
+  }
+
+  @ParameterizedTest
+  @CsvSource({
+    "ONE_PHASE,TUMBLE,KEYED", "TWO_PHASE,TUMBLE,KEYED",
+    "ONE_PHASE,HOP,KEYED", "TWO_PHASE,HOP,KEYED",
+    "ONE_PHASE,CUMULATE,KEYED", "TWO_PHASE,CUMULATE,KEYED",
+    "ONE_PHASE,TUMBLE,NULLABLE", "TWO_PHASE,TUMBLE,NULLABLE",
+    "ONE_PHASE,HOP,NULLABLE", "TWO_PHASE,HOP,NULLABLE",
+    "ONE_PHASE,CUMULATE,NULLABLE", "TWO_PHASE,CUMULATE,NULLABLE",
+    "ONE_PHASE,TUMBLE,NONE", "TWO_PHASE,TUMBLE,NONE",
+    "ONE_PHASE,HOP,NONE", "TWO_PHASE,HOP,NONE",
+    "ONE_PHASE,CUMULATE,NONE", "TWO_PHASE,CUMULATE,NONE"
+  })
+  void groupingOnlyWindowsFollowTopOneMovingBetweenWindows(String phase, String shape, String keyMode)
+      throws Exception {
+    String window =
+        switch (shape) {
+          case "TUMBLE" -> "TUMBLE(TABLE ranked, DESCRIPTOR(rt), INTERVAL '5' SECOND)";
+          case "HOP" ->
+              "HOP(TABLE ranked, DESCRIPTOR(rt), INTERVAL '5' SECOND, INTERVAL '10' SECOND)";
+          default ->
+              "CUMULATE(TABLE ranked, DESCRIPTOR(rt), INTERVAL '5' SECOND, INTERVAL '15' SECOND)";
+        };
+    String key =
+        switch (keyMode) {
+          case "NULLABLE" -> "CASE WHEN k = 1 THEN CAST(NULL AS INT) ELSE k END";
+          case "NONE" -> "";
+          default -> "k";
+        };
+    String prefix = key.isEmpty() ? "" : key + ", ";
+    String sql =
+        "SELECT "
+            + prefix
+            + "window_start, window_end FROM TABLE("
+            + window
+            + ") GROUP BY "
+            + prefix
+            + "window_start, window_end";
+    List<Row> expected =
+        new ArrayList<>(
+            expected(shape, false).stream()
+                .map(
+                    row -> {
+                      Row projected =
+                          Row.project(
+                              row, keyMode.equals("NONE") ? new int[] {1, 2} : new int[] {0, 1, 2});
+                      if (keyMode.equals("NULLABLE") && projected.getField(0).equals(1)) {
+                        projected.setField(0, null);
+                      }
+                      return projected;
+                    })
+                .distinct()
+                .toList());
+    expected.sort(Comparator.comparing(Row::toString));
+    assertEquals(expected, collect(environment(phase), sql).rows());
+    var table = environment(phase);
+    var scan = NativePlanner.install(table);
+    var result = collect(table, sql);
+    assertEquals(expected, result.rows());
+    assertTrue(scan.substitutions() > 0, scan.fallbackReasons().toString());
+    assertTrue(scan.fallbackReasons().isEmpty(), scan.fallbackReasons().toString());
+    assertNativeRows(result.job(), "NativeColumnarTopNExecNode");
+    assertWindowRows(result.job(), phase);
   }
 
   private static List<Row> expected(String shape, boolean distinct) {

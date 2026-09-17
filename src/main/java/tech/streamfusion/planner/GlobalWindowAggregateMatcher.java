@@ -79,7 +79,7 @@ final class GlobalWindowAggregateMatcher {
           || !windowing.isRowtime()
           || !WindowAggregateMatcher.supportedRetractingAggregates(
               aggregate.aggCalls(), aggregate.inputRowTypeOfLocalAgg())) {
-        return "global window aggregate: retracting input requires unfiltered integer SUM and"
+        return "global window aggregate: retracting input requires grouping-only, unfiltered integer SUM or"
             + " numeric COUNT";
       }
       int fields = WindowAggregateMatcher.partialFieldCount(aggregate.aggCalls(), true);

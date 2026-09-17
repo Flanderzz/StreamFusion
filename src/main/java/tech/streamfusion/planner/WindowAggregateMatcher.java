@@ -735,7 +735,7 @@ final class WindowAggregateMatcher {
   static String unsupportedReason(RelNode node, WindowingStrategy windowing) {
     if (!insertOnlyInput(node)) {
       return "window aggregate: retracting input supports only aligned event-time"
-          + " TUMBLE/HOP/CUMULATE with unfiltered integer SUM, numeric COUNT(value), or COUNT(*)";
+          + " TUMBLE/HOP/CUMULATE with grouping-only, unfiltered integer SUM, numeric COUNT(value), or COUNT(*)";
     }
     if (windowing instanceof WindowAttachedWindowingStrategy) {
       return "window aggregate: attached-window aggregation requires two-phase execution";
@@ -765,7 +765,6 @@ final class WindowAggregateMatcher {
 
   static boolean supportedRetractingAggregates(
       scala.collection.Seq<AggregateCall> calls, RelDataType inputType) {
-    if (calls.isEmpty()) return false;
     for (int i = 0; i < calls.size(); i++) {
       AggregateCall call = calls.apply(i);
       int kind = aggregateKind(call.getAggregation().getKind());
