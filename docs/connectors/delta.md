@@ -47,6 +47,12 @@ the data-file payload is never transposed row-by-row. Dense selections pass thro
 sparse selections gather each Arrow column once immediately before the standard parquet-rs
 `ArrowWriter` encodes it. Ignored update-before and key-only delete records never reach a data file.
 
+The view operator and Delta writer run at the same sink parallelism. For unpartitioned tables,
+view creation starts a new operator chain: Flink's Sink V2 writer cannot chain behind a legacy
+source such as SQL datagen. This places any network boundary before view creation, while records
+are still serializable Arrow batches. Partitioned tables already have that boundary at their
+partition exchange. The Arrow-backed views stay within the writer task.
+
 The Arrow schema crosses the C Data Interface once when each data-file encoder opens; subsequent
 batches export only their arrays. Java opens and owns the Hadoop output stream, while encoded bytes
 return through the same bounded one-MiB bridge used by the plain Parquet sink. After Rust finalizes

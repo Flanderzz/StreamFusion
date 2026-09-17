@@ -172,6 +172,47 @@ class DeltaSinkParityTest {
     assertEquals(3, rows);
   }
 
+  @org.junit.jupiter.params.ParameterizedTest
+  @org.junit.jupiter.params.provider.CsvSource({
+    "2, 2, false", "1, 2, false", "2, 1, false",
+    "2, 2, true", "1, 2, true", "2, 1, true"
+  })
+  @org.junit.jupiter.api.Timeout(60)
+  void legacySourceKeepsArrowViewsChainedToWriter(
+      int sourceParallelism, int sinkParallelism, boolean partitioned) throws Exception {
+    Path path = Files.createTempDirectory("delta-native-legacy-source");
+    org.apache.flink.configuration.Configuration config =
+        new org.apache.flink.configuration.Configuration();
+    config.set(org.apache.flink.configuration.RestartStrategyOptions.RESTART_STRATEGY, "none");
+    StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment(config);
+    env.setParallelism(sourceParallelism);
+    StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env);
+    tableEnv.executeSql(
+        "CREATE TEMPORARY TABLE src (id BIGINT) WITH ('connector'='datagen', "
+            + "'fields.id.kind'='sequence', 'fields.id.start'='1', 'fields.id.end'='24')");
+    tableEnv.executeSql(
+        "CREATE TEMPORARY TABLE sink (id BIGINT, v INT, dt STRING) WITH ("
+            + "'connector'='delta', 'table_path'='"
+            + path.toUri()
+            + "', 'sink.parallelism'='"
+            + sinkParallelism
+            + "'"
+            + (partitioned ? ", 'partitions'='dt'" : "")
+            + ")");
+    PhysicalPlanScan scan = NativePlanner.install(tableEnv);
+
+    tableEnv.executeSql(
+            "INSERT INTO sink SELECT id, CAST(id AS INT) AS v, CAST('a' AS STRING) AS dt FROM src")
+        .await();
+
+    assertAccelerated(scan);
+    List<List<Object>> expected = new ArrayList<>();
+    for (long id = 1; id <= 24; id++) {
+      expected.add(List.of(id, (int) id, "a"));
+    }
+    assertEquals(sorted(expected), sorted(readLogicalRows(path)));
+  }
+
   @org.junit.jupiter.api.Test
   void partitionedMergeOnReadUsesPublishedStrategyAndKeepsJavaDeletionVectors() throws Exception {
     Path nativePath = Files.createTempDirectory("delta-native");
