@@ -32,6 +32,34 @@ checkpoint restore and when the late row introduces a new key. TUMBLE drops the 
 its single final window has closed. Tests compare explicit watermarks, mixed ordinary/distinct
 aggregates and both aggregation phases against released Flink.
 
+## Retracting COUNT/SUM windows
+
+Aligned event-time TUMBLE, HOP and CUMULATE accept updating input, including native Top-N,
+for unfiltered SUM over TINYINT/SMALLINT/INT/BIGINT, COUNT over the supported numeric value
+columns, and COUNT(*). Both single-phase and local/global execution remain columnar.
+
+Every input retains its INSERT/UPDATE_BEFORE/UPDATE_AFTER/DELETE sign. SUM carries Flink's
+nullable sum and signed non-NULL count; COUNT carries a signed count. A separate live-row
+count, or an existing COUNT(*), suppresses a final group only when that count equals zero.
+A live all-NULL group therefore emits COUNT 0/SUM NULL, while an unmatched delete can produce
+negative counts and sums as it does in released Flink. Integer sums preserve their declared
+width and wrapping behavior. Top-1 replacing 10 with 20 leaves SUM 20, and moving the last
+live row out of a window removes its old group.
+
+Local partials preserve the full (sum, count) pair and the live-row count in Flink's field
+order. A checkpoint can split an insertion from its retraction: the next local partial may
+be negative, and the global merges it into existing state. A zero-count partial must also
+survive: replacing a value can change SUM without changing group membership. Closed slices
+can still update
+open HOP/CUMULATE windows, but cannot reopen a final window that has fired. All state fields
+participate in memory checkpoints, raw keyed savepoints and direct RocksDB checkpoints.
+
+SQL tests force a failure after a checkpoint containing live groups, then verify restored
+updates, deletes, NULLs, duplicates and negative counts on both backends. Per-job operator
+metrics require nonempty input and output from the native Top-N and the expected window
+stages. Native tests also cover late changes after restore and canonical RocksDB-to-memory
+state transfer. Updating DISTINCT and other remaining forms stay on Flink.
+
 ## Window COUNT(DISTINCT)
 
 Unfiltered `COUNT(DISTINCT value)` is native for integer, DECIMAL, CHAR/VARCHAR, DATE,
@@ -185,16 +213,11 @@ enables columnar composition with downstream consumers; it is not a standalone t
 - Windowed DISTINCT other than unfiltered, single-argument COUNT over the types listed above:
   SUM/AVG DISTINCT, filtered COUNT DISTINCT, FLOAT/DOUBLE, BOOLEAN, TIME and complex values.
   Non-windowed DISTINCT has separate coverage; see [GROUP BY](group-by.md).
-- Retracting or updating window input, including input from updating Top-N; distinct windows
-  retain the same insert-only admission gate as ordinary window aggregates. Admission checks
-  the **input** changelog for single-phase, local, attached and session paths: an append-only
-  final window result does not make its input append-only. The diagnostic is
-  `window aggregate: retracting or updating input requires retractable accumulators and group liveness`.
-  For example, Top-1 replacing a value of 10 with 20 must leave SUM 20, remove groups whose
-  last live row moved to another window, and retain a live all-NULL group with COUNT 0/SUM NULL.
-  Treating the old value's retraction as an insert would instead produce SUM 40. SQL regressions
-  cover TUMBLE, HOP and CUMULATE with ordinary and distinct aggregates in both phase strategies.
-  Native retract buffers and their checkpoint/liveness contracts remain tracked in
+- Retracting input outside aligned event-time TUMBLE/HOP/CUMULATE with unfiltered integer
+  SUM, numeric COUNT(value), and COUNT(*). DISTINCT, MIN/MAX/AVG, non-integer SUM, filters,
+  grouping-only, processing-time, attached, session and legacy windows still fall back on
+  updating input. Admission checks the **input** changelog even when final output is append-only.
+  The diagnostic names the supported retracting forms. Remaining coverage is tracked in
   [#99](https://github.com/datafusion-contrib/StreamFusion/issues/99).
 - Flink's optional `table.optimizer.distinct-agg.split.enabled=true` rewrite. The unchanged
   split-distinct IT variants introduce an unsupported `HASH_CODE` Calc and extra window layers,
@@ -203,8 +226,28 @@ enables columnar composition with downstream consumers; it is not a standalone t
   disabled use the native value-set path; upstream execution contracts verify both routes.
 
 A **zero-aggregate grouping-only window** (`GROUP BY key + window`, no aggregate function) is *not*
-one of the gaps above — it's a windowed distinct, and is native (single- and two-phase), emitting one
+one of the gaps above for insert-only input — it's a windowed distinct, and is native (single- and two-phase), emitting one
 row per `(key, window)`. See [GROUP BY](group-by.md) for how the non-windowed case handles `DISTINCT`.
+
+## Retracting window benchmark
+
+`RetractingWindowBenchmark` runs Top-1 by descending nullable BIGINT, followed by COUNT/SUM
+in a 2-second/10-second HOP. Released Flink 2.2.1 is the baseline, matching the prior complete
+fallback path. Runs use `-Pbench`, parallelism 2, 64 keys, two warmups and five interleaved
+measurements per engine. The row source, native Top-N, native window stages, both transposes
+and rowwise blackhole sink stay in the measured path. No competing builds or tests ran during
+measurement. Medians:
+
+| Input rows | Strategy | Flink (s) | Native (s) | Flink / native |
+| --- | --- | ---: | ---: | ---: |
+| 1 million | Single-phase | 0.397698 | 0.472575 | 0.842× |
+| 1 million | Local/global | 0.445563 | 0.458983 | 0.971× |
+| 10 million | Single-phase | 2.712645 | 4.177479 | 0.649× |
+| 10 million | Local/global | 3.042152 | 3.860909 | 0.788× |
+
+Both sizes were slower than Flink. This implementation establishes native changelog and
+checkpoint coverage for complete updating pipelines and future batching improvements.
+These whole-query results do not isolate the cost of Top-N, window accumulation or exchanges.
 
 ## Mixed AVG benchmark
 

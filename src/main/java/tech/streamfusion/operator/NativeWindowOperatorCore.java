@@ -46,6 +46,11 @@ import tech.streamfusion.state.RocksDBNativeStateSupport;
  */
 public abstract class NativeWindowOperatorCore<OUT> extends AbstractNativeStatefulOperator<OUT> {
 
+  public static final int KIND_RETRACT_SUM = 9;
+  public static final int KIND_RETRACT_COUNT = 10;
+  public static final int KIND_LIVE_COUNT = 11;
+  public static final int KIND_HIDDEN_LIVE_COUNT = 12;
+
   protected static final int TIMESTAMP_PRECISION = 3;
 
   /**
@@ -132,9 +137,10 @@ public abstract class NativeWindowOperatorCore<OUT> extends AbstractNativeStatef
     this.timeZoneId = timeZoneId;
   }
 
-  /** Number of aggregates this window computes (and the partial columns it carries). */
+  /** Number of visible final aggregates, excluding an internal live-row count. */
   protected final int aggregateCount() {
-    return aggregateKinds.length;
+    int size = aggregateKinds.length;
+    return size > 0 && aggregateKinds[size - 1] == KIND_HIDDEN_LIVE_COUNT ? size - 1 : size;
   }
 
   /** Flushes any input buffered by the subclass into the native aggregator. */
@@ -448,11 +454,18 @@ public abstract class NativeWindowOperatorCore<OUT> extends AbstractNativeStatef
       vectors.add(keys[j]);
     }
     TimestampAccessor srcTs = proctime ? null : new TimestampAccessor(in.getVector(timeColumn));
+    TinyIntVector sourceKinds = (TinyIntVector) in.getVector(RowDataArrowConverter.ROW_KIND_COLUMN);
+    TinyIntVector changes =
+        sourceKinds == null
+            ? null
+            : new TinyIntVector(RowDataArrowConverter.ROW_KIND_COLUMN, allocator);
+    if (changes != null) vectors.add(changes);
     try (VectorSchemaRoot root = new VectorSchemaRoot(vectors);
         ArrowArray array = ArrowArray.allocateNew(allocator);
         ArrowSchema schema = ArrowSchema.allocateNew(allocator)) {
       for (int i = 0; i < rows; i++) {
         ts.setSafe(i, proctime ? proctimeMillis : srcTs.getMillis(i));
+        if (changes != null) changes.setSafe(i, sourceKinds.get(i));
         for (int a = 0; a < valueColumns.length; a++) {
           if (valueColumns[a] < 0) {
             ((BigIntVector) values[a]).setSafe(i, 1L); // COUNT(*): a non-null constant counts rows

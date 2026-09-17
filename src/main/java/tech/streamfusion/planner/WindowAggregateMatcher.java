@@ -1,5 +1,10 @@
 package tech.streamfusion.planner;
 
+import static tech.streamfusion.operator.NativeWindowOperatorCore.KIND_HIDDEN_LIVE_COUNT;
+import static tech.streamfusion.operator.NativeWindowOperatorCore.KIND_LIVE_COUNT;
+import static tech.streamfusion.operator.NativeWindowOperatorCore.KIND_RETRACT_COUNT;
+import static tech.streamfusion.operator.NativeWindowOperatorCore.KIND_RETRACT_SUM;
+
 import java.time.Duration;
 import java.util.Arrays;
 import org.apache.calcite.rel.RelNode;
@@ -44,7 +49,8 @@ final class WindowAggregateMatcher {
       int[] grouping,
       scala.collection.Seq<AggregateCall> aggCalls,
       RelDataType inputType) {
-    if (!insertOnlyInput(node) || !WindowZoneGate.admits(node, windowing)) {
+    if (!supportedInput(node, windowing, aggCalls, inputType)
+        || !WindowZoneGate.admits(node, windowing)) {
       return false;
     }
     WindowSpec spec = windowing.getWindow();
@@ -131,13 +137,17 @@ final class WindowAggregateMatcher {
       int[] grouping,
       scala.collection.Seq<AggregateCall> aggCalls,
       RelDataType inputType) {
-    if (!insertOnlyInput(node) || !(windowing.getWindow() instanceof HoppingWindowSpec)) {
+    if (!supportedInput(node, windowing, aggCalls, inputType)
+        || !(windowing.getWindow() instanceof HoppingWindowSpec)) {
       return false;
     }
     if (!WindowZoneGate.admits(node, windowing)) {
       return false;
     }
     HoppingWindowSpec hop = (HoppingWindowSpec) windowing.getWindow();
+    if (hop.getOffset() != null && !hop.getOffset().isZero()) {
+      return false;
+    }
     long slide = hop.getSlide().toMillis();
     if (slide == 0 || hop.getSize().toMillis() % slide != 0) {
       return false;
@@ -405,15 +415,24 @@ final class WindowAggregateMatcher {
   }
 
   static int partialFieldCount(scala.collection.Seq<AggregateCall> aggCalls) {
+    return partialFieldCount(aggCalls, false);
+  }
+
+  static int partialFieldCount(scala.collection.Seq<AggregateCall> aggCalls, boolean retracting) {
     int fields = 0;
     for (int i = 0; i < aggCalls.size(); i++) {
-      fields += partialWidth(aggCalls.apply(i));
+      fields += partialWidth(aggCalls.apply(i), retracting);
     }
     return fields;
   }
 
   static int partialWidth(AggregateCall call) {
-    return aggregateKind(call.getAggregation().getKind()) == KIND_AVG ? 2 : 1;
+    return partialWidth(call, false);
+  }
+
+  static int partialWidth(AggregateCall call, boolean retracting) {
+    int kind = aggregateKind(call.getAggregation().getKind());
+    return kind == KIND_AVG || (retracting && kind == KIND_SUM) ? 2 : 1;
   }
 
   static boolean isTumbling(WindowingStrategy windowing) {
@@ -553,6 +572,15 @@ final class WindowAggregateMatcher {
 
   static RelNode substitute(StreamPhysicalWindowAggregate agg, PlanContext ctx) {
     int[] keyColumns = WindowAggregateMatcher.keyColumns(agg.grouping());
+    boolean retracting = !insertOnlyInput(agg);
+    int[] kinds = retracting ? retractingKinds(agg.aggCalls()) : kinds(agg.aggCalls());
+    int[] values = valueColumns(agg.aggCalls());
+    if (kinds.length > values.length) {
+      values = Arrays.copyOf(values, kinds.length);
+      values[values.length - 1] = -1;
+    }
+    int[] types =
+        Arrays.copyOf(valueTypeCodes(agg.aggCalls(), agg.getInput().getRowType()), kinds.length);
     // Always columnar: the keyed shuffle stays Arrow where it sits on a columnar
     // producer (a native exchange splits the batch by the grouping keys), otherwise the transition
     // pass inserts a row→Arrow transpose at the boundary. The exchange only co-locates each key's
@@ -566,10 +594,10 @@ final class WindowAggregateMatcher {
         WindowAggregateMatcher.windowSize(agg.windowing()),
         WindowAggregateMatcher.windowSlide(agg.windowing()),
         WindowAggregateMatcher.timeColumn(agg.windowing()),
-        WindowAggregateMatcher.valueColumns(agg.aggCalls()),
+        values,
         keyColumns,
-        WindowAggregateMatcher.valueTypeCodes(agg.aggCalls(), agg.getInput().getRowType()),
-        WindowAggregateMatcher.kinds(agg.aggCalls()),
+        types,
+        kinds,
         WindowAggregateMatcher.isProctime(agg.windowing()),
         WindowAggregateMatcher.isLtz(agg.windowing()));
   }
@@ -624,12 +652,16 @@ final class WindowAggregateMatcher {
     // (its row type is [grouping?, partials.., slice_end]) rather than assuming hopping always
     // adds one — otherwise a hopping COUNT(*) local emits a column the global does not expect.
     int partialColumns = agg.getRowType().getFieldCount() - agg.grouping().length - 1;
+    boolean retracting = !insertOnlyInput(agg);
     boolean syntheticCount =
-        partialColumns > partialFieldCount(agg.aggCalls()) + distinctViewCount(agg.aggCalls());
+        partialColumns
+            > partialFieldCount(agg.aggCalls(), retracting) + distinctViewCount(agg.aggCalls());
     int[] kinds =
-        syntheticCount
-            ? WindowAggregateMatcher.hoppingLocalKinds(agg.aggCalls())
-            : WindowAggregateMatcher.kinds(agg.aggCalls());
+        retracting
+            ? retractingKinds(agg.aggCalls())
+            : syntheticCount
+                ? WindowAggregateMatcher.hoppingLocalKinds(agg.aggCalls())
+                : WindowAggregateMatcher.kinds(agg.aggCalls());
     int[] valueColumns =
         syntheticCount
             ? WindowAggregateMatcher.hoppingLocalValueColumns(agg.aggCalls())
@@ -702,8 +734,8 @@ final class WindowAggregateMatcher {
    */
   static String unsupportedReason(RelNode node, WindowingStrategy windowing) {
     if (!insertOnlyInput(node)) {
-      return "window aggregate: retracting or updating input requires retractable accumulators and"
-          + " group liveness";
+      return "window aggregate: retracting input supports only aligned event-time"
+          + " TUMBLE/HOP/CUMULATE with unfiltered integer SUM, numeric COUNT(value), or COUNT(*)";
     }
     if (windowing instanceof WindowAttachedWindowingStrategy) {
       return "window aggregate: attached-window aggregation requires two-phase execution";
@@ -717,8 +749,59 @@ final class WindowAggregateMatcher {
         + " temporal values (docs/operators/window-aggregate.md)";
   }
 
-  private static boolean insertOnlyInput(RelNode node) {
+  static boolean insertOnlyInput(RelNode node) {
     return node instanceof StreamPhysicalRel physical
         && ChangelogPlanUtils.inputInsertOnly(physical);
+  }
+
+  private static boolean supportedInput(
+      RelNode node,
+      WindowingStrategy windowing,
+      scala.collection.Seq<AggregateCall> calls,
+      RelDataType inputType) {
+    return insertOnlyInput(node)
+        || (windowing.isRowtime() && supportedRetractingAggregates(calls, inputType));
+  }
+
+  static boolean supportedRetractingAggregates(
+      scala.collection.Seq<AggregateCall> calls, RelDataType inputType) {
+    if (calls.isEmpty()) return false;
+    for (int i = 0; i < calls.size(); i++) {
+      AggregateCall call = calls.apply(i);
+      int kind = aggregateKind(call.getAggregation().getKind());
+      if (call.isDistinct() || call.filterArg >= 0 || (kind != KIND_SUM && kind != KIND_COUNT))
+        return false;
+      if (kind == KIND_COUNT && call.getArgList().isEmpty()) continue;
+      if (call.getArgList().size() != 1) return false;
+      SqlTypeName type =
+          inputType.getFieldList().get(call.getArgList().get(0)).getType().getSqlTypeName();
+      if (kind == KIND_SUM
+          && type != SqlTypeName.BIGINT
+          && type != SqlTypeName.INTEGER
+          && type != SqlTypeName.SMALLINT
+          && type != SqlTypeName.TINYINT) return false;
+      if (!supportedValueType(type)) return false;
+    }
+    return true;
+  }
+
+  static int[] retractingKinds(scala.collection.Seq<AggregateCall> calls) {
+    int[] kinds = new int[calls.size()];
+    boolean hasLiveCount = false;
+    for (int i = 0; i < kinds.length; i++) {
+      AggregateCall call = calls.apply(i);
+      if (call.getAggregation().getKind() == SqlKind.SUM) {
+        kinds[i] = KIND_RETRACT_SUM;
+      } else if (call.getArgList().isEmpty() && !hasLiveCount) {
+        kinds[i] = KIND_LIVE_COUNT;
+        hasLiveCount = true;
+      } else {
+        kinds[i] = KIND_RETRACT_COUNT;
+      }
+    }
+    if (hasLiveCount) return kinds;
+    kinds = Arrays.copyOf(kinds, kinds.length + 1);
+    kinds[kinds.length - 1] = KIND_HIDDEN_LIVE_COUNT;
+    return kinds;
   }
 }

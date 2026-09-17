@@ -86,7 +86,7 @@ layers also exceed current admission. `CalcITCase.testIfFunction` is a second fa
 requiring the unsupported `IF` reason. A fixture parameter change that prevents selecting exactly
 one contract fails the test. Native and expected-fallback counts are reported separately.
 `WindowAggregateITCase.testRetractPreviousSlicingStateWithSlicingWindow` also requires fallback
-with the retractable-accumulator/group-liveness reason for every phase, backend, timestamp and
+with the restricted retracting-aggregate diagnostic (the query also uses COUNT DISTINCT) for every phase, backend, timestamp and
 async-state variant. Its unchanged CDC input includes a delete whose final window has no prior
 insert; the upstream negative-count expectation remains intact.
 Other upstream cases still check

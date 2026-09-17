@@ -2,7 +2,7 @@ use crate::*;
 use streamfusion_bridge::timestamp::TimestampColumn;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 /// Every aligned window a timestamp (millis) belongs to, as (start, end) millis pairs, appended to
 /// `windows` (cleared first) so the caller can reuse one buffer. Tumbling yields one window; hopping
@@ -220,6 +220,7 @@ pub(crate) struct TumblingAggregator {
     slide_millis: i64,
     cumulative: bool,
     aggregates: Vec<WindowAggregate>,
+    live_count: Option<usize>,
     windows: BTreeMap<i64, AlignedWindow>,
     // Groups are keyed by the arrow-row memcomparable encoding of the key columns, not a
     // `Vec<ScalarValue>` — the same trade the non-windowed GROUP BY made: the scalar key's per-row
@@ -265,6 +266,9 @@ impl TumblingAggregator {
             slide_millis,
             cumulative,
             aggregates: build_aggregates(&kinds, &value_types),
+            live_count: kinds
+                .iter()
+                .position(|kind| matches!(*kind, LIVE_COUNT | HIDDEN_LIVE_COUNT)),
             windows: BTreeMap::new(),
             key_converter: None,
             key_types: Vec::new(),
@@ -569,12 +573,10 @@ impl TumblingAggregator {
                 .map(|(&(start, end, key), rows)| (start, end, key, rows[0]))
                 .collect();
             self.hydrate_store_groups(batch, &touched)?;
-            self.accumulate_grouped(grouped, values)?;
+            self.accumulate_grouped(grouped, values, batch.column_by_name(ROW_KIND_COLUMN))?;
             return self.write_through_store();
         }
-        #[cfg(not(feature = "rocksdb-state"))]
-        let _ = batch;
-        self.accumulate_grouped(grouped, values)
+        self.accumulate_grouped(grouped, values, batch.column_by_name(ROW_KIND_COLUMN))
     }
 
     /// Folds the grouped row positions into their (window, key) accumulators. The value columns are
@@ -585,6 +587,7 @@ impl TumblingAggregator {
         &mut self,
         grouped: ahash::HashMap<(i64, i64, Row<'_>), Vec<u32>>,
         values: &[&ArrayRef],
+        changes: Option<&ArrayRef>,
     ) -> Result<(), DataFusionError> {
         let track = self.memory.tracking();
         for ((start, end, key), rows) in grouped {
@@ -593,6 +596,13 @@ impl TumblingAggregator {
                 .iter()
                 .map(|v| take(v, &indices, None).expect("failed to take values"))
                 .collect();
+            let changes = if self.live_count.is_some() {
+                changes
+                    .map(|kinds| take(kinds, &indices, None))
+                    .transpose()?
+            } else {
+                None
+            };
             let key = key.owned();
             let mut delta = 0isize;
             if track {
@@ -603,9 +613,12 @@ impl TumblingAggregator {
             }
             let accumulators = self.accumulators(start, end, key);
             for (i, accumulator) in accumulators.iter_mut().enumerate() {
-                accumulator
-                    .update_batch(std::slice::from_ref(&columns[i]))
-                    .expect("failed to update");
+                match &changes {
+                    Some(kinds) => {
+                        accumulator.update_batch(&[columns[i].clone(), kinds.clone()])?
+                    }
+                    None => accumulator.update_batch(std::slice::from_ref(&columns[i]))?,
+                }
             }
             if track {
                 delta += accumulators_bytes(accumulators) as isize;
@@ -639,6 +652,9 @@ impl TumblingAggregator {
             group.sort_by(|(a, _), (b, _)| a.cmp(b));
             for (key, mut accumulators) in group {
                 self.forget_group_bytes(&key, &accumulators);
+                if !Self::group_is_live(self.live_count, &mut accumulators)? {
+                    continue;
+                }
                 keys.push(key);
                 starts.push(start);
                 ends.push(end);
@@ -672,15 +688,28 @@ impl TumblingAggregator {
             .expect("window store key converter");
         let parser = converter.parser();
         for group in &fired {
+            let mut accumulators = self.accumulators_from_scalars(&group.state);
+            if !Self::group_is_live(self.live_count, &mut accumulators)? {
+                continue;
+            }
             keys.push(parser.parse(&group.key).owned());
             starts.push(group.start);
             ends.push(group.end);
-            let mut accumulators = self.accumulators_from_scalars(&group.state);
             for (i, accumulator) in accumulators.iter_mut().enumerate() {
                 results[i].push(accumulator.evaluate().expect("failed to finalize"));
             }
         }
         Ok(self.final_batch(keys, starts, ends, results))
+    }
+
+    fn group_is_live(
+        live_count: Option<usize>,
+        accumulators: &mut [Box<dyn Accumulator>],
+    ) -> Result<bool, DataFusionError> {
+        match live_count {
+            Some(index) => Ok(accumulators[index].evaluate()? != ScalarValue::Int64(Some(0))),
+            None => Ok(true),
+        }
     }
 
     /// The fired-window output batch `[key.., window_start, window_end, result0..]`.

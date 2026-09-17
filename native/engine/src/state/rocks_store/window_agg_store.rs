@@ -644,6 +644,82 @@ mod tests {
     }
 
     #[test]
+    fn retracting_windows_restore_signed_buffers_from_native_and_canonical_checkpoints() {
+        use crate::window_agg::tests::retracting_batch;
+        let kinds = vec![RETRACT_SUM, RETRACT_COUNT, HIDDEN_LIVE_COUNT];
+        let types = window_state_types(&kinds, &[0; 3]);
+        let create = || {
+            TumblingAggregator::new(10000, 5000, false, vec![0; 3], kinds.clone())
+                .with_key_timestamp_precisions(vec![-1])
+        };
+        for partial in [false, true] {
+            let name = format!("retract-{partial}");
+            let store = RocksWindowAggStore::create(test_config(&name), &types, 0..=127).unwrap();
+            let mut rocks = create().with_store(store, vec![DataType::Int64]);
+            let mut memory = create();
+            let mut local = TumblingAggregator::new(5000, 5000, false, vec![0; 3], kinds.clone());
+            let first = retracting_batch(&[
+                (1000, 1, Some(10), 0),
+                (1000, 2, None, 0),
+                (1000, 3, Some(7), 0),
+            ]);
+            memory.update(&first).unwrap();
+            if partial {
+                local.update_local(&first).unwrap();
+                rocks.update_partial(&local.drain_partial()).unwrap();
+            } else {
+                rocks.update(&first).unwrap();
+            }
+            let snapshot = snapshot_dir(&name);
+            let manifest = rocks.checkpoint_store(i64::MIN, &snapshot).unwrap();
+            drop(rocks);
+            let store = RocksWindowAggStore::open_merged(
+                test_config(&format!("{name}-restore")),
+                &types,
+                0..=127,
+                &[(snapshot, manifest.snapshot_id)],
+                true,
+            )
+            .unwrap();
+            let mut rocks = create().with_store(store, vec![DataType::Int64]);
+            let changes = retracting_batch(&[
+                (1000, 1, Some(10), 1),
+                (2000, 1, Some(20), 2),
+                (1000, 3, Some(7), 3),
+                (1000, 4, Some(3), 3),
+            ]);
+            memory.update(&changes).unwrap();
+            if partial {
+                local.update_local(&changes).unwrap();
+                rocks.update_partial(&local.drain_partial()).unwrap();
+            } else {
+                rocks.update(&changes).unwrap();
+            }
+            let partitions = rocks
+                .canonical_partitions(128, &[-1])
+                .unwrap()
+                .into_values()
+                .collect::<Vec<_>>();
+            let mut canonical = TumblingAggregator::restore_partitions(
+                10000,
+                5000,
+                false,
+                vec![0; 3],
+                kinds.clone(),
+                &partitions,
+            );
+            let expected = memory.flush(i64::MAX).unwrap();
+            assert_eq!(expected, rocks.flush(i64::MAX).unwrap());
+            assert_eq!(expected, canonical.flush(i64::MAX).unwrap());
+            assert_eq!(column_i64(&expected, "key0").values(), &[1, 2, 4, 1, 2, 4]);
+            assert_eq!(
+                column_i64(&expected, "result0").iter().collect::<Vec<_>>(),
+                vec![Some(20), None, Some(-3), Some(20), None, Some(-3)]
+            );
+        }
+    }
+
+    #[test]
     fn checkpoint_persists_the_watermark_and_restore_clips_key_groups() {
         let snapshot = snapshot_dir("restore");
         let mut store = store("restore");

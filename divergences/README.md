@@ -68,6 +68,7 @@ host — verified by the parity harness.
 - [33 - Scalar string serialization](33-scalar-string-serialization.md) - JDK UTF-16 byte-order and replacement rules, and Flink-compatible JSON scalar serialization using shared native string writing.
 
 - [42 — Ordered grouped values](42-ordered-group-values.md) — Flink NULL, arrival-order, duplicate-retraction and SINGLE_VALUE cardinality contracts within the existing Arrow aggregate.
+- [43 — Retracting window buffers](43-retracting-window-buffers.md) — preserve change signs through window assignment and match Flink's signed partials, NULL counts and group liveness.
 
 ## Resolved: early per-operator transposition (historical)
 

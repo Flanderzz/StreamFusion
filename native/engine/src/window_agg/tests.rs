@@ -1,5 +1,134 @@
 use super::*;
 
+pub(crate) fn retracting_batch(rows: &[(i64, i64, Option<i64>, i8)]) -> RecordBatch {
+    let values: ArrayRef = Arc::new(Int64Array::from(
+        rows.iter().map(|r| r.2).collect::<Vec<_>>(),
+    ));
+    RecordBatch::try_from_iter(vec![
+        (
+            "ts",
+            Arc::new(Int64Array::from(
+                rows.iter().map(|r| r.0).collect::<Vec<_>>(),
+            )) as ArrayRef,
+        ),
+        (
+            "key0",
+            Arc::new(Int64Array::from(
+                rows.iter().map(|r| r.1).collect::<Vec<_>>(),
+            )) as ArrayRef,
+        ),
+        ("value0", values.clone()),
+        ("value1", values),
+        (
+            "value2",
+            Arc::new(Int64Array::from_value(1, rows.len())) as ArrayRef,
+        ),
+        (
+            ROW_KIND_COLUMN,
+            Arc::new(Int8Array::from(
+                rows.iter().map(|r| r.3).collect::<Vec<_>>(),
+            )) as ArrayRef,
+        ),
+    ])
+    .unwrap()
+}
+
+#[test]
+fn retracting_windows_preserve_signed_partials_liveness_and_late_changes_after_restore() {
+    let kinds = vec![RETRACT_SUM, RETRACT_COUNT, HIDDEN_LIVE_COUNT];
+    for (size, cumulative) in [(5000, false), (10000, false), (15000, true)] {
+        let create = |size, cumulative| {
+            TumblingAggregator::new(size, 5000, cumulative, vec![0; 3], kinds.clone())
+        };
+        let mut single = create(size, cumulative);
+        let mut local = create(5000, false);
+        let mut global = create(size, cumulative);
+        for rows in [
+            vec![
+                (1000, 1, Some(10), 0),
+                (4000, 2, Some(7), 0),
+                (2000, 3, None, 0),
+                (1000, 4, Some(5), 0),
+                (1000, 4, Some(5), 0),
+            ],
+            vec![
+                (1000, 1, Some(10), 1),
+                (2000, 1, Some(20), 2),
+                (4000, 2, Some(7), 1),
+                (6000, 2, Some(8), 2),
+                (1000, 4, Some(5), 3),
+                (1000, 5, Some(3), 3),
+            ],
+            vec![(1000, 4, Some(5), 3)],
+        ] {
+            let batch = retracting_batch(&rows);
+            single.update(&batch).unwrap();
+            local.update_local(&batch).unwrap();
+            global.update_partial(&local.drain_partial()).unwrap();
+            assert!(local.windows.is_empty());
+            single = TumblingAggregator::restore(
+                size,
+                5000,
+                cumulative,
+                vec![0; 3],
+                kinds.clone(),
+                &single.snapshot(),
+            );
+            let partitions = global.snapshot_partitions(128, &[-1]);
+            global = TumblingAggregator::restore_partitions(
+                size,
+                5000,
+                cumulative,
+                vec![0; 3],
+                kinds.clone(),
+                &partitions.into_values().collect::<Vec<_>>(),
+            );
+        }
+        let first = single.flush(5000).unwrap();
+        assert_eq!(first, global.flush(5000).unwrap());
+        assert_eq!(column_i64(&first, "key0").values(), &[1, 3, 5]);
+        assert_eq!(
+            column_i64(&first, "result0").iter().collect::<Vec<_>>(),
+            vec![Some(20), None, Some(-3)]
+        );
+        assert_eq!(column_i64(&first, "result1").values(), &[1, 0, -1]);
+        assert_eq!(column_i64(&first, "result2").values(), &[1, 1, -1]);
+        local = TumblingAggregator::restore(
+            5000,
+            5000,
+            false,
+            vec![0; 3],
+            kinds.clone(),
+            &local.snapshot(),
+        );
+        global = TumblingAggregator::restore(
+            size,
+            5000,
+            cumulative,
+            vec![0; 3],
+            kinds.clone(),
+            &global.snapshot(),
+        );
+        let late = retracting_batch(&[(2000, 1, Some(20), 1), (2000, 1, Some(30), 2)]);
+        single.update(&late).unwrap();
+        local.update_local(&late).unwrap();
+        global.update_partial(&local.flush_partial(7000)).unwrap();
+        let rest = single.flush(i64::MAX).unwrap();
+        assert_eq!(rest, global.flush(i64::MAX).unwrap());
+        for row in 0..rest.num_rows() {
+            let key = column_i64(&rest, "key0").value(row);
+            assert_ne!(key, 4, "a group with no live rows must disappear");
+            if key == 1 {
+                assert_eq!(column_i64(&rest, "result0").value(row), 30);
+            }
+        }
+        global.update_partial(&local.drain_partial()).unwrap();
+        assert_eq!(global.flush(i64::MAX).unwrap().num_rows(), 0);
+        assert!(single.windows.is_empty());
+        assert!(global.windows.is_empty());
+    }
+}
+
 #[test]
 fn distinct_window_partials_restore_union_and_expire() {
     fn batch(values: Vec<Option<&str>>) -> RecordBatch {

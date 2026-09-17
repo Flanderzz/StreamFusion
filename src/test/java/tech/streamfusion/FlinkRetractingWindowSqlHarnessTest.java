@@ -9,19 +9,270 @@ import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import org.apache.flink.api.common.JobID;
+import org.apache.flink.api.common.eventtime.Watermark;
+import org.apache.flink.api.common.eventtime.WatermarkGenerator;
+import org.apache.flink.api.common.eventtime.WatermarkOutput;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
+import org.apache.flink.api.common.state.CheckpointListener;
+import org.apache.flink.api.common.state.ListState;
+import org.apache.flink.api.common.state.ListStateDescriptor;
 import org.apache.flink.api.common.typeinfo.Types;
-import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.configuration.Configuration;
+import org.apache.flink.configuration.RestartStrategyOptions;
+import org.apache.flink.metrics.Counter;
+import org.apache.flink.runtime.state.FunctionInitializationContext;
+import org.apache.flink.runtime.state.FunctionSnapshotContext;
+import org.apache.flink.runtime.testutils.InMemoryReporter;
+import org.apache.flink.runtime.testutils.MiniClusterResource;
+import org.apache.flink.runtime.testutils.MiniClusterResourceConfiguration;
+import org.apache.flink.streaming.api.checkpoint.CheckpointedFunction;
+import org.apache.flink.streaming.api.functions.source.legacy.SourceFunction;
+import org.apache.flink.streaming.util.TestStreamEnvironment;
 import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.api.Schema;
 import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.apache.flink.types.Row;
+import org.apache.flink.types.RowKind;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import tech.streamfusion.planner.NativePlanner;
 
 class FlinkRetractingWindowSqlHarnessTest {
+  private static InMemoryReporter reporter;
+  private static MiniClusterResource cluster;
+  private static final Map<String, RecoveryProof> RECOVERY = new ConcurrentHashMap<>();
+
+  @ParameterizedTest
+  @org.junit.jupiter.params.provider.ValueSource(strings = {"ONE_PHASE", "TWO_PHASE"})
+  void updatingWindowsWithNonzeroOffsetStayOnFlink(String phase) throws Exception {
+    String sql =
+        "SELECT k, window_end, SUM(v) FROM TABLE(HOP(TABLE ranked, DESCRIPTOR(rt),"
+            + " INTERVAL '5' SECOND, INTERVAL '10' SECOND, INTERVAL '1' SECOND))"
+            + " GROUP BY k, window_start, window_end";
+    var host = collect(environment(phase), sql);
+    var table = environment(phase);
+    var scan = NativePlanner.install(table);
+    assertEquals(host.rows(), collect(table, sql).rows());
+    assertEquals(0, scan.substitutions());
+    assertTrue(
+        scan.fallbackReasons().stream().anyMatch(reason -> reason.contains("aligned event-time")),
+        scan.fallbackReasons().toString());
+  }
+
+  @ParameterizedTest
+  @CsvSource({
+    "ONE_PHASE,TUMBLE", "TWO_PHASE,TUMBLE",
+    "ONE_PHASE,HOP", "TWO_PHASE,HOP",
+    "ONE_PHASE,CUMULATE", "TWO_PHASE,CUMULATE"
+  })
+  void lateRetractionsChangeOnlyUnfiredWindows(String phase, String shape) throws Exception {
+    String window =
+        switch (shape) {
+          case "TUMBLE" -> "TUMBLE(TABLE changes, DESCRIPTOR(rt), INTERVAL '5' SECOND)";
+          case "HOP" ->
+              "HOP(TABLE changes, DESCRIPTOR(rt), INTERVAL '5' SECOND, INTERVAL '10' SECOND)";
+          default ->
+              "CUMULATE(TABLE changes, DESCRIPTOR(rt), INTERVAL '5' SECOND, INTERVAL '15' SECOND)";
+        };
+    String sql =
+        "SELECT k, window_end, SUM(v), COUNT(*) FROM TABLE("
+            + window
+            + ") GROUP BY k, window_start, window_end";
+    var expected = new ArrayList<Row>();
+    expected.add(Row.of(1, LocalDateTime.ofEpochSecond(5, 0, ZoneOffset.UTC), 10L, 1L));
+    if (!shape.equals("TUMBLE")) {
+      expected.add(Row.of(1, LocalDateTime.ofEpochSecond(10, 0, ZoneOffset.UTC), 20L, 1L));
+      expected.add(Row.of(2, LocalDateTime.ofEpochSecond(10, 0, ZoneOffset.UTC), null, 1L));
+    }
+    if (shape.equals("CUMULATE")) {
+      expected.add(Row.of(2, LocalDateTime.ofEpochSecond(15, 0, ZoneOffset.UTC), null, 1L));
+    }
+    expected.sort(Comparator.comparing(Row::toString));
+    for (boolean nativeEnabled : new boolean[] {false, true}) {
+      var env = new TestStreamEnvironment(cluster.getMiniCluster(), 1);
+      var table = StreamTableEnvironment.create(env);
+      table.getConfig().setLocalTimeZone(ZoneOffset.UTC);
+      table.getConfig().set("table.optimizer.agg-phase-strategy", phase);
+      var source =
+          env.fromData(
+                  Types.ROW_NAMED(
+                      new String[] {"k", "millis", "v", "wm"},
+                      Types.INT,
+                      Types.LONG,
+                      Types.LONG,
+                      Types.LONG),
+                  Row.ofKind(RowKind.INSERT, 1, 4000L, 10L, 5000L),
+                  Row.ofKind(RowKind.UPDATE_BEFORE, 1, 4000L, 10L, 6000L),
+                  Row.ofKind(RowKind.UPDATE_AFTER, 1, 4000L, 20L, 7000L),
+                  Row.ofKind(RowKind.INSERT, 2, 4000L, null, 10000L),
+                  Row.ofKind(RowKind.DELETE, 1, 4000L, 20L, 15000L),
+                  Row.ofKind(RowKind.INSERT, 1, 4000L, 99L, 20000L))
+              .assignTimestampsAndWatermarks(
+                  WatermarkStrategy.<Row>forGenerator(context -> new ExplicitWatermarks())
+                      .withTimestampAssigner((row, previous) -> (Long) row.getField(1)));
+      table.createTemporaryView(
+          "changes",
+          table.fromChangelogStream(
+              source,
+              Schema.newBuilder()
+                  .column("k", DataTypes.INT())
+                  .column("millis", DataTypes.BIGINT())
+                  .column("v", DataTypes.BIGINT())
+                  .column("wm", DataTypes.BIGINT())
+                  .columnByMetadata("rt", DataTypes.TIMESTAMP_LTZ(3), "rowtime")
+                  .watermark("rt", "SOURCE_WATERMARK()")
+                  .build()));
+      var scan = nativeEnabled ? NativePlanner.install(table) : null;
+      Result result = collect(table, sql);
+      assertEquals(expected, result.rows());
+      if (nativeEnabled) {
+        assertTrue(scan.substitutions() > 0, scan.fallbackReasons().toString());
+        assertWindowRows(result.job(), phase);
+      }
+    }
+  }
+
+  @ParameterizedTest
+  @CsvSource({
+    "ONE_PHASE,TINYINT", "TWO_PHASE,TINYINT",
+    "ONE_PHASE,SMALLINT", "TWO_PHASE,SMALLINT",
+    "ONE_PHASE,INT", "TWO_PHASE,INT",
+    "ONE_PHASE,BIGINT", "TWO_PHASE,BIGINT"
+  })
+  void retractingBuffersPreserveIntegerWidthsAndNumericCountTypes(String phase, String type)
+      throws Exception {
+    String sql =
+        "SELECT k, SUM(CAST(v AS "
+            + type
+            + ")), COUNT(CAST(v AS FLOAT)),"
+            + " COUNT(CAST(v AS DOUBLE)), COUNT(CAST(v AS DECIMAL(12,2)))"
+            + " FROM TABLE(TUMBLE(TABLE ranked, DESCRIPTOR(rt), INTERVAL '5' SECOND))"
+            + " GROUP BY k, window_start, window_end";
+    List<Row> host = collect(environment(phase), sql).rows();
+    var table = environment(phase);
+    var scan = NativePlanner.install(table);
+    Result nativeResult = collect(table, sql);
+    assertEquals(host, nativeResult.rows());
+    assertEquals(3, host.size());
+    assertTrue(scan.substitutions() > 0, scan.fallbackReasons().toString());
+    assertTrue(scan.fallbackReasons().isEmpty(), scan.fallbackReasons().toString());
+    assertWindowRows(nativeResult.job(), phase);
+  }
+
+  @BeforeAll
+  static void startCluster() throws Exception {
+    reporter = InMemoryReporter.createWithRetainedMetrics();
+    cluster =
+        new MiniClusterResource(
+            new MiniClusterResourceConfiguration.Builder()
+                .setConfiguration(reporter.addToConfiguration(new Configuration()))
+                .setNumberTaskManagers(1)
+                .setNumberSlotsPerTaskManager(2)
+                .build());
+    cluster.before();
+  }
+
+  @AfterAll
+  static void stopCluster() {
+    if (cluster != null) cluster.after();
+  }
+
+  @ParameterizedTest
+  @CsvSource({
+    "ONE_PHASE,TUMBLE,false", "TWO_PHASE,TUMBLE,false",
+    "ONE_PHASE,HOP,false", "TWO_PHASE,HOP,false",
+    "ONE_PHASE,CUMULATE,false", "TWO_PHASE,CUMULATE,false",
+    "ONE_PHASE,TUMBLE,true", "TWO_PHASE,TUMBLE,true",
+    "ONE_PHASE,HOP,true", "TWO_PHASE,HOP,true",
+    "ONE_PHASE,CUMULATE,true", "TWO_PHASE,CUMULATE,true"
+  })
+  void signedChangesAfterCheckpointPreserveEmptyNullAndNegativeGroups(
+      String phase, String shape, boolean rocks) throws Exception {
+    String window =
+        switch (shape) {
+          case "TUMBLE" -> "TUMBLE(TABLE changes, DESCRIPTOR(rt), INTERVAL '5' SECOND)";
+          case "HOP" ->
+              "HOP(TABLE changes, DESCRIPTOR(rt), INTERVAL '5' SECOND, INTERVAL '10' SECOND)";
+          default ->
+              "CUMULATE(TABLE changes, DESCRIPTOR(rt), INTERVAL '5' SECOND, INTERVAL '15' SECOND)";
+        };
+    String sql =
+        "SELECT k, window_end, SUM(v), COUNT(v), COUNT(*) FROM TABLE("
+            + window
+            + ") GROUP BY k, window_start, window_end";
+    List<Row> expected = new ArrayList<>();
+    int end = shape.equals("TUMBLE") ? 5 : shape.equals("HOP") ? 10 : 15;
+    for (int boundary = 5; boundary <= end; boundary += 5) {
+      LocalDateTime timestamp = LocalDateTime.ofEpochSecond(boundary, 0, ZoneOffset.UTC);
+      expected.add(Row.of(1, timestamp, 20L, 1L, 1L));
+      expected.add(Row.of(2, timestamp, null, 0L, 1L));
+      expected.add(Row.of(4, timestamp, 5L, 1L, 1L));
+      expected.add(Row.of(5, timestamp, -3L, -1L, -1L));
+    }
+    expected.sort(Comparator.comparing(Row::toString));
+    for (boolean nativeEnabled : new boolean[] {false, true}) {
+      String id = UUID.randomUUID().toString();
+      RecoveryProof proof = new RecoveryProof();
+      RECOVERY.put(id, proof);
+      try {
+        Configuration config = new Configuration();
+        config.set(RestartStrategyOptions.RESTART_STRATEGY, "fixed-delay");
+        config.set(RestartStrategyOptions.RESTART_STRATEGY_FIXED_DELAY_ATTEMPTS, 1);
+        config.set(
+            RestartStrategyOptions.RESTART_STRATEGY_FIXED_DELAY_DELAY, Duration.ofMillis(10));
+        if (rocks)
+          config.setString(
+              "state.backend.type", "tech.streamfusion.state.RocksDBNativeStateBackendFactory");
+        var env = new TestStreamEnvironment(cluster.getMiniCluster(), 1);
+        env.configure(config, getClass().getClassLoader());
+        env.enableCheckpointing(50);
+        var table = StreamTableEnvironment.create(env);
+        table.getConfig().setLocalTimeZone(ZoneOffset.UTC);
+        table.getConfig().set("table.optimizer.agg-phase-strategy", phase);
+        var source =
+            env.addSource(new RecoveringChanges(id))
+                .returns(
+                    Types.ROW_NAMED(
+                        new String[] {"k", "millis", "v"}, Types.INT, Types.LONG, Types.LONG))
+                .assignTimestampsAndWatermarks(
+                    WatermarkStrategy.<Row>forBoundedOutOfOrderness(Duration.ofDays(1))
+                        .withTimestampAssigner((row, previous) -> (Long) row.getField(1)));
+        table.createTemporaryView(
+            "changes",
+            table.fromChangelogStream(
+                source,
+                Schema.newBuilder()
+                    .column("k", DataTypes.INT())
+                    .column("millis", DataTypes.BIGINT())
+                    .column("v", DataTypes.BIGINT())
+                    .columnByMetadata("rt", DataTypes.TIMESTAMP_LTZ(3), "rowtime")
+                    .watermark("rt", "SOURCE_WATERMARK()")
+                    .build()));
+        var scan = nativeEnabled ? NativePlanner.install(table) : null;
+        Result result = collect(table, sql);
+        assertEquals(expected, result.rows());
+        assertTrue(proof.failed.get(), "failure must follow a completed checkpoint");
+        assertEquals(3, proof.restored.get(), "source prefix must restore from checkpoint");
+        if (nativeEnabled) {
+          assertTrue(scan.substitutions() > 0, scan.fallbackReasons().toString());
+          assertTrue(scan.fallbackReasons().isEmpty(), scan.fallbackReasons().toString());
+          assertWindowRows(result.job(), phase);
+        }
+      } finally {
+        RECOVERY.remove(id);
+      }
+    }
+  }
+
   @ParameterizedTest
   @CsvSource({
     "ONE_PHASE,TUMBLE,false", "TWO_PHASE,TUMBLE,false",
@@ -47,20 +298,27 @@ class FlinkRetractingWindowSqlHarnessTest {
             + " FROM TABLE("
             + window
             + ") GROUP BY k, window_start, window_end";
-    List<Row> host = collect(environment(phase), sql);
+    List<Row> host = collect(environment(phase), sql).rows();
     assertEquals(expected(shape, distinct), host, "unexpected released Flink result");
 
     TableEnvironment accelerated = environment(phase);
     var scan = NativePlanner.install(accelerated);
-    assertEquals(host, collect(accelerated, sql), "raw window changelog differs from Flink");
-    assertEquals(0, scan.substitutions(), "retracting window pipeline must stay on Flink");
+    var result = collect(accelerated, sql);
+    assertEquals(host, result.rows(), "raw window changelog differs from Flink");
+    if (!distinct) {
+      assertTrue(scan.substitutions() > 0, scan.fallbackReasons().toString());
+      assertTrue(scan.fallbackReasons().isEmpty(), scan.fallbackReasons().toString());
+      assertNativeRows(result.job(), "NativeColumnarTopNExecNode");
+      assertWindowRows(result.job(), phase);
+      return;
+    }
+    assertEquals(0, scan.substitutions(), "retracting distinct window must stay on Flink");
     assertTrue(
         scan.fallbackReasons().stream()
             .anyMatch(
                 reason ->
                     reason.contains(
-                        "retracting or updating input requires retractable accumulators and group"
-                            + " liveness")),
+                        "retracting input supports only aligned event-time TUMBLE/HOP/CUMULATE")),
         scan.fallbackReasons().toString());
   }
 
@@ -97,17 +355,50 @@ class FlinkRetractingWindowSqlHarnessTest {
     return distinct ? Row.of(key, left, right, count) : Row.of(key, left, right, count, value);
   }
 
-  private static List<Row> collect(TableEnvironment table, String sql) throws Exception {
+  private record Result(List<Row> rows, JobID job) {}
+
+  private static void assertWindowRows(JobID job, String phase) {
+    if (phase.equals("TWO_PHASE")) {
+      assertNativeRows(job, "NativeColumnarLocalWindowAggExecNode");
+      assertNativeRows(job, "NativeColumnarGlobalWindowAggExecNode");
+    } else {
+      assertNativeRows(job, "NativeColumnarWindowAggExecNode");
+    }
+  }
+
+  private static void assertNativeRows(JobID job, String operator) {
+    var groups = reporter.findOperatorMetricGroups(job, "(?i)" + operator);
+    assertTrue(
+        !groups.isEmpty(),
+        () ->
+            "missing native operator "
+                + operator
+                + ": "
+                + reporter.findOperatorMetricGroups(job, "Native").stream()
+                    .map(g -> g.getAllVariables().get("<operator_name>"))
+                    .toList());
+    long inputs = 0, outputs = 0;
+    for (var group : groups) {
+      var metrics = reporter.getMetricsByGroup(group);
+      inputs += ((Counter) metrics.get("numRecordsIn")).getCount();
+      outputs += ((Counter) metrics.get("numRecordsOut")).getCount();
+    }
+    assertTrue(inputs > 0, operator + " consumed no rows");
+    assertTrue(outputs > 0, operator + " emitted no rows");
+  }
+
+  private static Result collect(TableEnvironment table, String sql) throws Exception {
     var rows = new ArrayList<Row>();
-    try (var iterator = table.executeSql(sql).collect()) {
+    var result = table.executeSql(sql);
+    try (var iterator = result.collect()) {
       iterator.forEachRemaining(rows::add);
     }
     rows.sort(Comparator.comparing(Row::toString));
-    return rows;
+    return new Result(rows, result.getJobClient().orElseThrow().getJobID());
   }
 
   private static TableEnvironment environment(String phase) {
-    var env = StreamExecutionEnvironment.getExecutionEnvironment();
+    var env = new TestStreamEnvironment(cluster.getMiniCluster(), 1);
     env.setParallelism(1);
     var table = StreamTableEnvironment.create(env);
     table.getConfig().setLocalTimeZone(ZoneOffset.UTC);
@@ -142,5 +433,99 @@ class FlinkRetractingWindowSqlHarnessTest {
             "SELECT k, rt, v FROM (SELECT k, rt, v, ROW_NUMBER() OVER (PARTITION BY k ORDER BY v"
                 + " DESC) AS rn FROM src) WHERE rn = 1"));
     return table;
+  }
+
+  private static final class RecoveryProof {
+    final AtomicBoolean failed = new AtomicBoolean();
+    final AtomicInteger restored = new AtomicInteger(-1);
+  }
+
+  private static final class ExplicitWatermarks implements WatermarkGenerator<Row> {
+    @Override
+    public void onEvent(Row row, long timestamp, WatermarkOutput output) {
+      output.emitWatermark(new Watermark((Long) row.getField(3)));
+    }
+
+    @Override
+    public void onPeriodicEmit(WatermarkOutput output) {}
+  }
+
+  private static final class RecoveringChanges
+      implements SourceFunction<Row>, CheckpointedFunction, CheckpointListener {
+    private final String id;
+    private int next;
+    private boolean restored;
+    private volatile boolean running = true;
+    private volatile boolean completed;
+    private transient ListState<Integer> state;
+    private transient Map<Long, Integer> snapshots;
+
+    RecoveringChanges(String id) {
+      this.id = id;
+    }
+
+    @Override
+    public void run(SourceContext<Row> context) throws Exception {
+      if (!restored) {
+        emit(context, 3);
+        long deadline = System.nanoTime() + Duration.ofSeconds(60).toNanos();
+        while (running && !completed && System.nanoTime() < deadline) Thread.sleep(5);
+        if (!running) return;
+        if (!completed) throw new IllegalStateException("no completed window checkpoint");
+        if (RECOVERY.get(id).failed.compareAndSet(false, true)) {
+          throw new IllegalStateException("window source failure after completed checkpoint");
+        }
+      }
+      emit(context, 10);
+    }
+
+    private void emit(SourceContext<Row> context, int end) {
+      List<Row> changes =
+          List.of(
+              Row.ofKind(RowKind.INSERT, 1, 1000L, 10L),
+              Row.ofKind(RowKind.INSERT, 2, 1000L, null),
+              Row.ofKind(RowKind.INSERT, 3, 1000L, 7L),
+              Row.ofKind(RowKind.UPDATE_BEFORE, 1, 1000L, 10L),
+              Row.ofKind(RowKind.UPDATE_AFTER, 1, 2000L, 20L),
+              Row.ofKind(RowKind.DELETE, 3, 1000L, 7L),
+              Row.ofKind(RowKind.INSERT, 4, 1000L, 5L),
+              Row.ofKind(RowKind.INSERT, 4, 1000L, 5L),
+              Row.ofKind(RowKind.DELETE, 4, 1000L, 5L),
+              Row.ofKind(RowKind.DELETE, 5, 1000L, 3L));
+      synchronized (context.getCheckpointLock()) {
+        while (running && next < end) context.collect(changes.get(next++));
+      }
+    }
+
+    @Override
+    public void cancel() {
+      running = false;
+    }
+
+    @Override
+    public void snapshotState(FunctionSnapshotContext context) throws Exception {
+      state.update(List.of(next));
+      snapshots.put(context.getCheckpointId(), next);
+    }
+
+    @Override
+    public void initializeState(FunctionInitializationContext context) throws Exception {
+      state =
+          context
+              .getOperatorStateStore()
+              .getListState(new ListStateDescriptor<>("window-source-offset", Integer.class));
+      snapshots = new ConcurrentHashMap<>();
+      restored = context.isRestored();
+      if (restored) {
+        for (int offset : state.get()) next = offset;
+        RECOVERY.get(id).restored.set(next);
+      }
+    }
+
+    @Override
+    public void notifyCheckpointComplete(long checkpoint) {
+      if (snapshots.getOrDefault(checkpoint, 0) == 3) completed = true;
+      snapshots.keySet().removeIf(id -> id <= checkpoint);
+    }
   }
 }

@@ -1,5 +1,6 @@
 package tech.streamfusion.planner;
 
+import java.util.Arrays;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.AggregateCall;
 import org.apache.calcite.rel.type.RelDataType;
@@ -72,6 +73,41 @@ final class GlobalWindowAggregateMatcher {
         return "global window aggregate: grouping keys must be bigint/int/string/boolean/date";
       }
     }
+    boolean retracting = !WindowAggregateMatcher.insertOnlyInput(aggregate);
+    if (retracting) {
+      if (attached
+          || !windowing.isRowtime()
+          || !WindowAggregateMatcher.supportedRetractingAggregates(
+              aggregate.aggCalls(), aggregate.inputRowTypeOfLocalAgg())) {
+        return "global window aggregate: retracting input requires unfiltered integer SUM and"
+            + " numeric COUNT";
+      }
+      int fields = WindowAggregateMatcher.partialFieldCount(aggregate.aggCalls(), true);
+      int[] retractKinds = WindowAggregateMatcher.retractingKinds(aggregate.aggCalls());
+      fields += retractKinds.length - aggregate.aggCalls().size();
+      if (inputType.getFieldCount() != grouping.length + fields + 1) {
+        return "global window aggregate: retracting accumulator partial layout differs from Flink";
+      }
+      int[] columns = partialColumns(aggregate);
+      for (int i = 0; i < aggregate.aggCalls().size(); i++) {
+        AggregateCall call = aggregate.aggCalls().apply(i);
+        if (inputType.getFieldList().get(columns[i]).getType().getSqlTypeName()
+            != call.getType().getSqlTypeName()) {
+          return "global window aggregate: retracting result partial has an unexpected type";
+        }
+        if (WindowAggregateMatcher.partialWidth(call, true) == 2
+            && inputType.getFieldList().get(columns[i] + 1).getType().getSqlTypeName()
+                != SqlTypeName.BIGINT) {
+          return "global window aggregate: retracting SUM requires a BIGINT count partial";
+        }
+      }
+      if (retractKinds.length > aggregate.aggCalls().size()
+          && inputType.getFieldList().get(inputType.getFieldCount() - 2).getType().getSqlTypeName()
+              != SqlTypeName.BIGINT) {
+        return "global window aggregate: live-row count partial must be BIGINT";
+      }
+      return null;
+    }
     // Partials are positional; AVG consumes two adjacent fields. The merge agg's own argList
     // does not locate those fields. A COUNT merge
     // carries an empty argList for COUNT(*) and a single arg for COUNT(col); both sum the partial
@@ -136,7 +172,7 @@ final class GlobalWindowAggregateMatcher {
           ? call.getType() : partialType;
       types[i] = WindowAggregateMatcher.typeCode(valueType);
     }
-    return types;
+    return Arrays.copyOf(types, kinds(aggregate).length);
   }
 
   /** Whether the global merges a cumulative window (nested windows sharing a bucket start). */
@@ -183,7 +219,9 @@ final class GlobalWindowAggregateMatcher {
     int[] columns = new int[aggregate.aggCalls().size()];
     for (int i = 0; i < columns.length; i++) {
       columns[i] = base;
-      base += WindowAggregateMatcher.partialWidth(aggregate.aggCalls().apply(i));
+      base +=
+          WindowAggregateMatcher.partialWidth(
+              aggregate.aggCalls().apply(i), !WindowAggregateMatcher.insertOnlyInput(aggregate));
     }
     return columns;
   }
@@ -193,6 +231,9 @@ final class GlobalWindowAggregateMatcher {
   }
 
   static int[] kinds(StreamPhysicalGlobalWindowAggregate aggregate) {
+    if (!WindowAggregateMatcher.insertOnlyInput(aggregate)) {
+      return WindowAggregateMatcher.retractingKinds(aggregate.aggCalls());
+    }
     int[] kinds = new int[aggregate.aggCalls().size()];
     for (int i = 0; i < kinds.length; i++) {
       AggregateCall call = aggregate.aggCalls().apply(i);
