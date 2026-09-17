@@ -90,6 +90,14 @@ Build with the `delta` Maven profile and deploy `streamfusion-delta`, `streamfus
 published `io.delta:delta-flink_2.2:4.4.0` together. The module has no snapshot, local-Maven, path, or
 forked Delta dependency.
 
+`bin/flink-suite.sh delta` runs all four unchanged portable SQL sink tests from Delta `v4.4.0`
+against its published connector and Kernel artifacts. It preserves upstream batch aggregation,
+committed-row, partition, and file-statistics assertions. The two supported streaming loads must
+also prove that native Parquet encoding processed rows; the many-types case includes `TIME(0)`
+and must prove stock fallback with that reason. The suite is part of the blocking upstream CI
+matrix. The separate remote Databricks/Unity Catalog integration test requires credentials and
+is outside this portable suite. See [Upstream Flink suite](../upstream-flink-suite.md).
+
 On the 2M-event, four-partition Kafka JSON Nexmark sink diagnostic (memory state, mini-batching off,
 one warmup, best of three), all 23 queries supported by Flink completed and StreamFusion's suite
 geomean was **1.522×** the stock published-Delta path. Updating queries used Delta 4.4 merge-on-read

@@ -147,6 +147,39 @@ class NativeExecutionSummaryTest(unittest.TestCase):
         ), redirect_stdout(io.StringIO()):
             self.assertEqual(1, summarize.main())
 
+    def test_required_contracts_are_scoped_to_the_selected_suite(self):
+        self.record(self.CALC, "NativeCalcOperator=6")
+        (self.root / "TEST-calc.xml").write_text(
+            f'<testsuite tests="1"><testcase classname="{self.CALC.split("#")[0]}" name="testLongProjectionList"/></testsuite>'
+        )
+        for prefix, status in ((self.CALC, 0), ("io.delta.", 1), ("misspelled.", 1)):
+            with self.subTest(prefix=prefix), patch.object(
+                sys,
+                "argv",
+                [
+                    "summarize.py", str(self.root), "--native-reports", str(self.root),
+                    "--require-contract-prefix", prefix,
+                ],
+            ), redirect_stdout(io.StringIO()):
+                self.assertEqual(status, summarize.main())
+
+    def test_required_stock_test_cannot_be_missing_or_skipped(self):
+        for case, status in (
+            ("", 1),
+            ('<testcase classname="Batch" name="testRows"><skipped/></testcase>', 1),
+            ('<testcase classname="Batch" name="testRows"/>', 0),
+        ):
+            with self.subTest(case=case):
+                (self.root / "TEST-batch.xml").write_text(
+                    f'<testsuite tests="1">{case}</testsuite>'
+                )
+                with patch.object(
+                    sys,
+                    "argv",
+                    ["summarize.py", str(self.root), "--require-test", "Batch#testRows"],
+                ), redirect_stdout(io.StringIO()):
+                    self.assertEqual(status, summarize.main())
+
 
 if __name__ == "__main__":
     unittest.main()

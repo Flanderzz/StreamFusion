@@ -12,7 +12,8 @@ bin/flink-suite.sh
 ```
 
 The same harness also runs Flink's unchanged format integration tests, the Kafka connector's
-unchanged table SQL integration tests, and Paimon's unchanged append-table SQL integration tests:
+unchanged table SQL integration tests, Paimon's unchanged table SQL integration tests, and
+Delta's unchanged portable SQL sink tests:
 
 ```bash
 bin/flink-suite.sh formats
@@ -20,17 +21,24 @@ bin/flink-suite.sh parquet
 bin/flink-suite.sh orc
 bin/flink-suite.sh kafka
 bin/flink-suite.sh paimon
+bin/flink-suite.sh delta
 bin/flink-suite.sh all
 ```
 
 `formats` covers Flink's JSON (including Debezium and Ogg CDC), CSV, Avro, and Protobuf integration
-tests and compiles the Confluent Avro module (the pinned release contains no integration test in
-that module). `parquet` runs Flink's unchanged `ParquetFsStreamingSinkITCase` and
+tests and compiles the Confluent Avro module (the pinned release contains only unit tests in
+that module). The Kafka repository's separate `SQLClientSchemaRegistryITCase` exercises Confluent
+reads, writes and schema evolution using real Schema Registry, Kafka and Flink containers; it is
+not yet selected by this runner. Protobuf's SQL integration fixture uses batch mode and remains
+stock Flink. These suites do not yet require per-format native codec execution evidence.
+`parquet` runs Flink's unchanged `ParquetFsStreamingSinkITCase` and
 `ParquetTimestampITCase`, and fails unless the suite proves that a native Parquet writer was
 created. `orc` runs `OrcFsStreamingSinkITCase` and `OrcFileSystemITCase` and requires a successful
 columnar ORC writer marker (the writer now uses the host's Java ORC vectors). The harness runs timestamp tests with a UTC JVM. `kafka` covers `DynamicKafkaTableITCase`, `KafkaChangelogTableITCase`,
 `KafkaTableITCase`, and `UpsertKafkaTableITCase` from the pinned Kafka connector release. The Kafka
-suite starts broker containers and therefore requires a working Docker daemon. `paimon` runs the
+suite starts broker containers and therefore requires a working Docker daemon. Its changelog
+tests replay Debezium, Canal and Maxwell events through SQL; the format suite also replays Ogg
+events. These test change-event handling, not capture from a live database. `paimon` runs the
 Paimon Flink connector's `AppendOnlyTableITCase`, `AppendTableITCase`, `BatchFileStoreITCase`,
 `ComputedColumnAndWatermarkTableITCase`, `ContinuousFileStoreITCase`, `ReadWriteTableITCase`,
 `PrimaryKeyFileStoreTableITCase`, `CompositePkAndMultiPartitionedTableITCase`,
@@ -59,10 +67,22 @@ planner test-jar before the planner itself, which would place stock Calcite ahea
 validator classes (breaking `CALL` procedures and time travel in stock tests), so the runner drops
 the resolved calcite-core from that module's test classpath and appends it after the planner
 instead. `all` runs formats, Parquet, ORC,
-the planner runtime suite, Paimon, and Kafka in that order.
+the planner runtime suite, Paimon, Delta, and Kafka in that order.
+
+`delta` compiles the unchanged `FlinkSqlTest` and its `TestHelper` from Delta `v4.4.0`
+against published `delta-flink_2.2:4.4.0` and Delta Kernel artifacts. It does not build or
+publish Delta or Unity Catalog production code from source. The four SQL cases cover batch
+grouped aggregation, streaming path-table writes, partitioned streaming writes, and a
+many-types streaming write. The original committed-row and file-statistics assertions remain
+intact. The two supported streaming loads additionally require positive native Parquet encoding
+counts for each test invocation. The many-types case includes `TIME(0)` and requires full
+fallback with that unsupported-type reason. Batch aggregation uses stock Flink. All four cases
+must execute in a full run; a missing or skipped case fails the summary. This portable suite
+does not include the separate `FlinkSqlIntTest`, which requires remote Databricks and Unity
+Catalog credentials.
 
 The runner clones Flink `release-2.2.1`, Kafka connector `v5.0.0`, and Paimon `2.0.0` (its
-`release-2.0.0-rc10` tag) under `.flink-suite`, verifies that each checkout is clean, builds and
+`release-2.0.0-rc10` tag), plus Delta `v4.4.0` for its SQL tests, under `.flink-suite`, verifies that each checkout is clean, builds and
 installs StreamFusion and its supported format/connector modules, and builds the required upstream
 reactors with tests skipped. A test-only
 Java agent then installs StreamFusion whenever an upstream test creates a streaming planner, and
@@ -103,7 +123,7 @@ matches invocation counts in JUnit XML to the evidence files, so a missing agent
 proof, stale evidence, and execution failures hidden behind an expected-failure annotation all fail
 the suite. The runner clears the selected suite's evidence before every run. Evidence lives in
 `.flink-suite/native-execution/<suite>/` and is uploaded with the upstream CI log.
-The full planner suite also requires every contracted method to execute, so removing or renaming
+Each full suite also requires every method contracted for that suite to execute, so removing or renaming
 an upstream test cannot silently shrink this coverage. Focused selections require evidence only
 for their selected methods.
 
@@ -151,7 +171,7 @@ FLINK_SUITE_TEST='org.apache.flink.table.planner.runtime.stream.sql.CalcITCase,o
 ```
 
 The same `FLINK_SUITE_TEST` and `FLINK_SUITE_REUSE_BUILD=true` controls apply to `formats`,
-`parquet`, `orc`, `kafka`, and `paimon`. Reuse mode requires that the selected mode has been built once normally.
+`parquet`, `orc`, `kafka`, `paimon`, and `delta`. Reuse mode requires that the selected mode has been built once normally.
 
 The focused Paimon coordinator run includes its four paged writer-restoration cases, three
 commit-coordinator cases, and a deterministic primary-key write to verify native file creation:
@@ -170,8 +190,8 @@ FLINK_SUITE_TEST='org.apache.paimon.flink.AppendTableITCase#testPartitionDynamic
 ```
 
 The Flink checkout remains byte-for-byte unchanged. Every push to `main` and every pull request
-runs all seven upstream suites in GitHub Actions: planner runtime, formats, Parquet, ORC, Kafka,
-Paimon and state/recovery. The weekly schedule and manual dispatch run the same complete matrix.
+runs all eight upstream suites in GitHub Actions: planner runtime, formats, Parquet, ORC, Kafka,
+Paimon, Delta and state/recovery. The weekly schedule and manual dispatch run the same complete matrix.
 Each run rebuilds StreamFusion from that revision in the isolated suite directory and uploads
 its complete build/test log with the commit SHA. These checks complement the released-artifact
 SQL parity tests in ordinary CI; a passing local Maven suite alone does not establish upstream
@@ -180,7 +200,7 @@ integration compatibility.
 Merges to `main` require **All CI tests** and **All upstream integration tests**, enforced by
 the repository's **Require all test suites** ruleset with no bypass actors, including administrators.
 The first check waits for Rust, Java/SQL parity, every format/connector module, both Paimon formats,
-Delta and the deployed Flink image integration job. The second waits for all seven upstream suites.
+Delta and the deployed Flink image integration job. The second waits for all eight upstream suites.
 Each check runs even when a dependency fails and succeeds only when every dependency succeeds;
 failed, cancelled or unexpectedly skipped jobs cannot produce a green aggregate check. Matrix
 additions are included automatically; new independent test jobs must be added to the corresponding
@@ -201,6 +221,8 @@ proof that Flink instantiated the native Parquet writer. The complete Paimon bas
 tests, all passed with native source sharing, including native append-write, primary-key-write,
 and snapshot-merge markers. The complete-plan hook also passed 816 targeted Flink join, Calc and
 JSON function cases.
+The portable Delta SQL baseline is four tests, all passed: native write evidence covers 5,000
+unpartitioned rows and 1,000 partitioned rows, with one explicit `TIME(0)` fallback contract.
 The ORC Java-writer validation on September 14, 2026 passed all 46 unchanged Flink ORC SQL tests.
 A targeted upstream Paimon run passed 22 continuous-read, partition-write and schema-change cases;
 the [ORC page](connectors/orc.md#build-and-verification) distinguishes that run from local tests
