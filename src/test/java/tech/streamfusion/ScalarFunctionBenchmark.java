@@ -237,6 +237,16 @@ class ScalarFunctionBenchmark {
                       "JSON_VALUE(s, 'lax $[ ''user'' ][ ''name'' ]')",
                       "STRING"),
                   new Query(
+                      "JSON_VALUE_NONSTANDARD_ESCAPE",
+                      "tt_json",
+                      "JSON_VALUE(s, 'lax $[\"u\\ser\"][\"na\\me\"]')",
+                      "STRING"),
+                  new Query(
+                      "JSON_EXISTS_NONSTANDARD_ESCAPE",
+                      "tt_json",
+                      "JSON_EXISTS(s, 'lax $[\"u\\ser\"][\"na\\me\"]')",
+                      "BOOLEAN"),
+                  new Query(
                       "JSON_EXISTS_SPACED_PATH",
                       "tt_json",
                       "JSON_EXISTS(s, 'lax $[ ''user'' ][ ''name'' ]')",

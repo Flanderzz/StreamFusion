@@ -3,6 +3,7 @@ package tech.streamfusion;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
@@ -70,11 +71,15 @@ class FlinkRetractingWindowSqlHarnessTest {
 
   @ParameterizedTest
   @CsvSource({
-    "ONE_PHASE,TUMBLE", "TWO_PHASE,TUMBLE",
-    "ONE_PHASE,HOP", "TWO_PHASE,HOP",
-    "ONE_PHASE,CUMULATE", "TWO_PHASE,CUMULATE"
+    "ONE_PHASE,TUMBLE,false", "TWO_PHASE,TUMBLE,false",
+    "ONE_PHASE,HOP,false", "TWO_PHASE,HOP,false",
+    "ONE_PHASE,CUMULATE,false", "TWO_PHASE,CUMULATE,false",
+    "ONE_PHASE,TUMBLE,true", "TWO_PHASE,TUMBLE,true",
+    "ONE_PHASE,HOP,true", "TWO_PHASE,HOP,true",
+    "ONE_PHASE,CUMULATE,true", "TWO_PHASE,CUMULATE,true"
   })
-  void lateRetractionsChangeOnlyUnfiredWindows(String phase, String shape) throws Exception {
+  void lateRetractionsChangeOnlyUnfiredWindows(String phase, String shape, boolean groupingOnly)
+      throws Exception {
     String window =
         switch (shape) {
           case "TUMBLE" -> "TUMBLE(TABLE changes, DESCRIPTOR(rt), INTERVAL '5' SECOND)";
@@ -84,7 +89,13 @@ class FlinkRetractingWindowSqlHarnessTest {
               "CUMULATE(TABLE changes, DESCRIPTOR(rt), INTERVAL '5' SECOND, INTERVAL '15' SECOND)";
         };
     String sql =
-        "SELECT k, window_end, SUM(v), COUNT(*) FROM TABLE("
+        "SELECT k, window_end"
+            + (groupingOnly
+                ? ""
+                : ", SUM(v), COUNT(*), AVG(v), AVG(CAST(v AS FLOAT)), AVG(CAST(v AS DOUBLE)),"
+                    + " SUM(CAST(v AS FLOAT)), SUM(CAST(v AS DOUBLE)), SUM(CAST(v AS"
+                    + " DECIMAL(38,2)))")
+            + " FROM TABLE("
             + window
             + ") GROUP BY k, window_start, window_end";
     var expected = new ArrayList<Row>();
@@ -95,6 +106,23 @@ class FlinkRetractingWindowSqlHarnessTest {
     }
     if (shape.equals("CUMULATE")) {
       expected.add(Row.of(2, LocalDateTime.ofEpochSecond(15, 0, ZoneOffset.UTC), null, 1L));
+    }
+    if (groupingOnly) {
+      expected.replaceAll(row -> Row.project(row, new int[] {0, 1}));
+    } else {
+      expected.replaceAll(
+          row -> {
+            Long value = (Long) row.getField(2);
+            return Row.join(
+                row,
+                Row.of(
+                    value,
+                    value == null ? null : value.floatValue(),
+                    value == null ? null : value.doubleValue(),
+                    value == null ? null : value.floatValue(),
+                    value == null ? null : value.doubleValue(),
+                    value == null ? null : BigDecimal.valueOf(value).setScale(2)));
+          });
     }
     expected.sort(Comparator.comparing(Row::toString));
     for (boolean nativeEnabled : new boolean[] {false, true}) {
@@ -188,15 +216,21 @@ class FlinkRetractingWindowSqlHarnessTest {
 
   @ParameterizedTest
   @CsvSource({
-    "ONE_PHASE,TUMBLE,false", "TWO_PHASE,TUMBLE,false",
-    "ONE_PHASE,HOP,false", "TWO_PHASE,HOP,false",
-    "ONE_PHASE,CUMULATE,false", "TWO_PHASE,CUMULATE,false",
-    "ONE_PHASE,TUMBLE,true", "TWO_PHASE,TUMBLE,true",
-    "ONE_PHASE,HOP,true", "TWO_PHASE,HOP,true",
-    "ONE_PHASE,CUMULATE,true", "TWO_PHASE,CUMULATE,true"
+    "ONE_PHASE,TUMBLE,false,false", "TWO_PHASE,TUMBLE,false,false",
+    "ONE_PHASE,HOP,false,false", "TWO_PHASE,HOP,false,false",
+    "ONE_PHASE,CUMULATE,false,false", "TWO_PHASE,CUMULATE,false,false",
+    "ONE_PHASE,TUMBLE,true,false", "TWO_PHASE,TUMBLE,true,false",
+    "ONE_PHASE,HOP,true,false", "TWO_PHASE,HOP,true,false",
+    "ONE_PHASE,CUMULATE,true,false", "TWO_PHASE,CUMULATE,true,false",
+    "ONE_PHASE,TUMBLE,false,true", "TWO_PHASE,TUMBLE,false,true",
+    "ONE_PHASE,HOP,false,true", "TWO_PHASE,HOP,false,true",
+    "ONE_PHASE,CUMULATE,false,true", "TWO_PHASE,CUMULATE,false,true",
+    "ONE_PHASE,TUMBLE,true,true", "TWO_PHASE,TUMBLE,true,true",
+    "ONE_PHASE,HOP,true,true", "TWO_PHASE,HOP,true,true",
+    "ONE_PHASE,CUMULATE,true,true", "TWO_PHASE,CUMULATE,true,true"
   })
   void signedChangesAfterCheckpointPreserveEmptyNullAndNegativeGroups(
-      String phase, String shape, boolean rocks) throws Exception {
+      String phase, String shape, boolean rocks, boolean groupingOnly) throws Exception {
     String window =
         switch (shape) {
           case "TUMBLE" -> "TUMBLE(TABLE changes, DESCRIPTOR(rt), INTERVAL '5' SECOND)";
@@ -206,7 +240,14 @@ class FlinkRetractingWindowSqlHarnessTest {
               "CUMULATE(TABLE changes, DESCRIPTOR(rt), INTERVAL '5' SECOND, INTERVAL '15' SECOND)";
         };
     String sql =
-        "SELECT k, window_end, SUM(v), COUNT(v), COUNT(*) FROM TABLE("
+        "SELECT k, window_end"
+            + (groupingOnly
+                ? ""
+                : ", SUM(v), COUNT(v), COUNT(*), AVG(v), AVG(CAST(v AS INT)), AVG(CAST(v AS"
+                    + " SMALLINT)), AVG(CAST(v AS TINYINT)), AVG(CAST(v AS FLOAT)), AVG(CAST(v AS"
+                    + " DOUBLE)), SUM(CAST(v AS FLOAT)), SUM(CAST(v AS DOUBLE)), SUM(CAST(v AS"
+                    + " DECIMAL(38,2)))")
+            + " FROM TABLE("
             + window
             + ") GROUP BY k, window_start, window_end";
     List<Row> expected = new ArrayList<>();
@@ -217,6 +258,40 @@ class FlinkRetractingWindowSqlHarnessTest {
       expected.add(Row.of(2, timestamp, null, 0L, 1L));
       expected.add(Row.of(4, timestamp, 5L, 1L, 1L));
       expected.add(Row.of(5, timestamp, -3L, -1L, -1L));
+      expected.add(Row.of(6, timestamp, Long.MIN_VALUE, -1L, -1L));
+      expected.add(Row.of(7, timestamp, -2L, 2L, 2L));
+      expected.add(Row.of(8, timestamp, 21L, 2L, 2L));
+    }
+    if (groupingOnly) {
+      expected.replaceAll(row -> Row.project(row, new int[] {0, 1}));
+    } else {
+      expected.replaceAll(
+          row -> {
+            Long sum = (Long) row.getField(2);
+            Long avg = sum == null ? null : sum / (Long) row.getField(3);
+            Double floating =
+                switch ((Integer) row.getField(0)) {
+                  case 7 -> (double) Long.MAX_VALUE;
+                  case 8 -> 10.5;
+                  default -> avg == null ? null : avg.doubleValue();
+                };
+            return Row.join(
+                row,
+                Row.of(
+                    avg,
+                    avg == null ? null : avg.intValue(),
+                    avg == null ? null : avg.shortValue(),
+                    avg == null ? null : avg.byteValue(),
+                    floating == null ? null : floating.floatValue(),
+                    floating,
+                    floating == null ? null : (float) (floating * (Long) row.getField(3)),
+                    floating == null ? null : floating * (Long) row.getField(3),
+                    switch ((Integer) row.getField(0)) {
+                      case 6 -> new BigDecimal("9223372036854775808.00");
+                      case 7 -> new BigDecimal("18446744073709551614.00");
+                      default -> sum == null ? null : BigDecimal.valueOf(sum).setScale(2);
+                    }));
+          });
     }
     expected.sort(Comparator.comparing(Row::toString));
     for (boolean nativeEnabled : new boolean[] {false, true}) {
@@ -320,6 +395,410 @@ class FlinkRetractingWindowSqlHarnessTest {
                     reason.contains(
                         "retracting input supports only aligned event-time TUMBLE/HOP/CUMULATE")),
         scan.fallbackReasons().toString());
+  }
+
+  @ParameterizedTest
+  @CsvSource({
+    "ONE_PHASE,TUMBLE,KEYED", "TWO_PHASE,TUMBLE,KEYED",
+    "ONE_PHASE,HOP,KEYED", "TWO_PHASE,HOP,KEYED",
+    "ONE_PHASE,CUMULATE,KEYED", "TWO_PHASE,CUMULATE,KEYED",
+    "ONE_PHASE,TUMBLE,NULLABLE", "TWO_PHASE,TUMBLE,NULLABLE",
+    "ONE_PHASE,HOP,NULLABLE", "TWO_PHASE,HOP,NULLABLE",
+    "ONE_PHASE,CUMULATE,NULLABLE", "TWO_PHASE,CUMULATE,NULLABLE",
+    "ONE_PHASE,TUMBLE,NONE", "TWO_PHASE,TUMBLE,NONE",
+    "ONE_PHASE,HOP,NONE", "TWO_PHASE,HOP,NONE",
+    "ONE_PHASE,CUMULATE,NONE", "TWO_PHASE,CUMULATE,NONE"
+  })
+  void groupingOnlyWindowsFollowTopOneMovingBetweenWindows(
+      String phase, String shape, String keyMode) throws Exception {
+    String window =
+        switch (shape) {
+          case "TUMBLE" -> "TUMBLE(TABLE ranked, DESCRIPTOR(rt), INTERVAL '5' SECOND)";
+          case "HOP" ->
+              "HOP(TABLE ranked, DESCRIPTOR(rt), INTERVAL '5' SECOND, INTERVAL '10' SECOND)";
+          default ->
+              "CUMULATE(TABLE ranked, DESCRIPTOR(rt), INTERVAL '5' SECOND, INTERVAL '15' SECOND)";
+        };
+    String key =
+        switch (keyMode) {
+          case "NULLABLE" -> "CASE WHEN k = 1 THEN CAST(NULL AS INT) ELSE k END";
+          case "NONE" -> "";
+          default -> "k";
+        };
+    String prefix = key.isEmpty() ? "" : key + ", ";
+    String sql =
+        "SELECT "
+            + prefix
+            + "window_start, window_end FROM TABLE("
+            + window
+            + ") GROUP BY "
+            + prefix
+            + "window_start, window_end";
+    List<Row> expected =
+        new ArrayList<>(
+            expected(shape, false).stream()
+                .map(
+                    row -> {
+                      Row projected =
+                          Row.project(
+                              row, keyMode.equals("NONE") ? new int[] {1, 2} : new int[] {0, 1, 2});
+                      if (keyMode.equals("NULLABLE") && projected.getField(0).equals(1)) {
+                        projected.setField(0, null);
+                      }
+                      return projected;
+                    })
+                .distinct()
+                .toList());
+    expected.sort(Comparator.comparing(Row::toString));
+    assertEquals(expected, collect(environment(phase), sql).rows());
+    var table = environment(phase);
+    var scan = NativePlanner.install(table);
+    var result = collect(table, sql);
+    assertEquals(expected, result.rows());
+    assertTrue(scan.substitutions() > 0, scan.fallbackReasons().toString());
+    assertTrue(scan.fallbackReasons().isEmpty(), scan.fallbackReasons().toString());
+    assertNativeRows(result.job(), "NativeColumnarTopNExecNode");
+    assertWindowRows(result.job(), phase);
+  }
+
+  @ParameterizedTest
+  @CsvSource({
+    "ONE_PHASE,TUMBLE,TINYINT", "TWO_PHASE,TUMBLE,TINYINT",
+    "ONE_PHASE,HOP,TINYINT", "TWO_PHASE,HOP,TINYINT",
+    "ONE_PHASE,CUMULATE,TINYINT", "TWO_PHASE,CUMULATE,TINYINT",
+    "ONE_PHASE,TUMBLE,SMALLINT", "TWO_PHASE,TUMBLE,SMALLINT",
+    "ONE_PHASE,HOP,SMALLINT", "TWO_PHASE,HOP,SMALLINT",
+    "ONE_PHASE,CUMULATE,SMALLINT", "TWO_PHASE,CUMULATE,SMALLINT",
+    "ONE_PHASE,TUMBLE,INT", "TWO_PHASE,TUMBLE,INT",
+    "ONE_PHASE,HOP,INT", "TWO_PHASE,HOP,INT",
+    "ONE_PHASE,CUMULATE,INT", "TWO_PHASE,CUMULATE,INT",
+    "ONE_PHASE,TUMBLE,BIGINT", "TWO_PHASE,TUMBLE,BIGINT",
+    "ONE_PHASE,HOP,BIGINT", "TWO_PHASE,HOP,BIGINT",
+    "ONE_PHASE,CUMULATE,BIGINT", "TWO_PHASE,CUMULATE,BIGINT",
+    "ONE_PHASE,TUMBLE,FLOAT", "TWO_PHASE,TUMBLE,FLOAT",
+    "ONE_PHASE,HOP,FLOAT", "TWO_PHASE,HOP,FLOAT",
+    "ONE_PHASE,CUMULATE,FLOAT", "TWO_PHASE,CUMULATE,FLOAT",
+    "ONE_PHASE,TUMBLE,DOUBLE", "TWO_PHASE,TUMBLE,DOUBLE",
+    "ONE_PHASE,HOP,DOUBLE", "TWO_PHASE,HOP,DOUBLE",
+    "ONE_PHASE,CUMULATE,DOUBLE", "TWO_PHASE,CUMULATE,DOUBLE"
+  })
+  void numericAggregatesRetractReplacedTopRows(String phase, String shape, String type)
+      throws Exception {
+    String window =
+        switch (shape) {
+          case "TUMBLE" -> "TUMBLE(TABLE ranked, DESCRIPTOR(rt), INTERVAL '5' SECOND)";
+          case "HOP" ->
+              "HOP(TABLE ranked, DESCRIPTOR(rt), INTERVAL '5' SECOND, INTERVAL '10' SECOND)";
+          default ->
+              "CUMULATE(TABLE ranked, DESCRIPTOR(rt), INTERVAL '5' SECOND, INTERVAL '15' SECOND)";
+        };
+    boolean floating = type.equals("FLOAT") || type.equals("DOUBLE");
+    String sql =
+        "SELECT k, window_start, window_end, COUNT(v), AVG(CAST(v AS "
+            + type
+            + "))"
+            + (floating ? ", SUM(CAST(v AS " + type + "))" : "")
+            + " FROM TABLE("
+            + window
+            + ") GROUP BY k, window_start, window_end";
+    List<Row> expected = expected(shape, false);
+    for (Row row : expected) {
+      Long value = (Long) row.getField(4);
+      if (value != null) {
+        row.setField(
+            4,
+            switch (type) {
+              case "TINYINT" -> value.byteValue();
+              case "SMALLINT" -> value.shortValue();
+              case "INT" -> value.intValue();
+              case "FLOAT" -> value.floatValue();
+              case "DOUBLE" -> value.doubleValue();
+              default -> value;
+            });
+      }
+    }
+    if (floating) expected.replaceAll(row -> Row.join(row, Row.of(row.getField(4))));
+    assertEquals(expected, collect(environment(phase), sql).rows());
+    var table = environment(phase);
+    var scan = NativePlanner.install(table);
+    var result = collect(table, sql);
+    assertEquals(expected, result.rows());
+    assertTrue(scan.substitutions() > 0, scan.fallbackReasons().toString());
+    assertTrue(scan.fallbackReasons().isEmpty(), scan.fallbackReasons().toString());
+    assertNativeRows(result.job(), "NativeColumnarTopNExecNode");
+    assertWindowRows(result.job(), phase);
+  }
+
+  @ParameterizedTest
+  @CsvSource({
+    "ONE_PHASE,TUMBLE",
+    "TWO_PHASE,TUMBLE",
+    "ONE_PHASE,HOP",
+    "TWO_PHASE,HOP",
+    "ONE_PHASE,CUMULATE",
+    "TWO_PHASE,CUMULATE"
+  })
+  void floatingAggregatesPreserveNonfiniteValuesAndSignedZero(String phase, String shape)
+      throws Exception {
+    String window =
+        switch (shape) {
+          case "TUMBLE" -> "TUMBLE(TABLE changes, DESCRIPTOR(rt), INTERVAL '5' SECOND)";
+          case "HOP" ->
+              "HOP(TABLE changes, DESCRIPTOR(rt), INTERVAL '5' SECOND, INTERVAL '10' SECOND)";
+          default ->
+              "CUMULATE(TABLE changes, DESCRIPTOR(rt), INTERVAL '5' SECOND, INTERVAL '15' SECOND)";
+        };
+    String sql =
+        "SELECT k, window_end, AVG(f), AVG(v), COUNT(v), COUNT(*), SUM(f), SUM(v) FROM TABLE("
+            + window
+            + ") GROUP BY k, window_start, window_end";
+    List<Row> host = null;
+    for (boolean nativeEnabled : new boolean[] {false, true}) {
+      var env = new TestStreamEnvironment(cluster.getMiniCluster(), 1);
+      var table = StreamTableEnvironment.create(env);
+      table.getConfig().setLocalTimeZone(ZoneOffset.UTC);
+      table.getConfig().set("table.optimizer.agg-phase-strategy", phase);
+      var source =
+          env.fromData(
+                  Types.ROW_NAMED(
+                      new String[] {"k", "millis", "f", "v"},
+                      Types.INT,
+                      Types.LONG,
+                      Types.FLOAT,
+                      Types.DOUBLE),
+                  floatingRow(RowKind.INSERT, 1, 1e16),
+                  floatingRow(RowKind.INSERT, 1, 1.0),
+                  floatingRow(RowKind.DELETE, 1, 1e16),
+                  floatingRow(RowKind.DELETE, 2, 0.0),
+                  floatingRow(RowKind.INSERT, 3, Double.POSITIVE_INFINITY),
+                  floatingRow(RowKind.DELETE, 3, Double.POSITIVE_INFINITY),
+                  floatingRow(RowKind.INSERT, 3, 3.0),
+                  floatingRow(RowKind.INSERT, 4, Double.NEGATIVE_INFINITY),
+                  floatingRow(RowKind.DELETE, 4, Double.NEGATIVE_INFINITY),
+                  floatingRow(RowKind.INSERT, 4, null),
+                  floatingRow(RowKind.INSERT, 5, null),
+                  floatingRow(RowKind.DELETE, 5, null),
+                  floatingRow(RowKind.INSERT, 6, Double.NaN),
+                  floatingRow(RowKind.INSERT, 6, 5.0),
+                  floatingRow(RowKind.DELETE, 6, Double.NaN),
+                  floatingRow(RowKind.INSERT, 7, -0.0),
+                  floatingRow(RowKind.INSERT, 8, 16777216.0),
+                  floatingRow(RowKind.INSERT, 8, 1.0),
+                  floatingRow(RowKind.DELETE, 8, 16777216.0))
+              .assignTimestampsAndWatermarks(
+                  WatermarkStrategy.<Row>forBoundedOutOfOrderness(Duration.ofDays(1))
+                      .withTimestampAssigner((row, previous) -> (Long) row.getField(1)));
+      table.createTemporaryView(
+          "changes",
+          table.fromChangelogStream(
+              source,
+              Schema.newBuilder()
+                  .column("k", DataTypes.INT())
+                  .column("millis", DataTypes.BIGINT())
+                  .column("f", DataTypes.FLOAT())
+                  .column("v", DataTypes.DOUBLE())
+                  .columnByMetadata("rt", DataTypes.TIMESTAMP_LTZ(3), "rowtime")
+                  .watermark("rt", "SOURCE_WATERMARK()")
+                  .build()));
+      var scan = nativeEnabled ? NativePlanner.install(table) : null;
+      Result result = collect(table, sql);
+      List<Row> bits =
+          result.rows().stream()
+              .map(
+                  row -> {
+                    Row copy = Row.copy(row);
+                    for (int column : new int[] {2, 6}) {
+                      if (row.getField(column) != null)
+                        copy.setField(
+                            column, Float.floatToRawIntBits((Float) row.getField(column)));
+                    }
+                    for (int column : new int[] {3, 7}) {
+                      if (row.getField(column) != null)
+                        copy.setField(
+                            column, Double.doubleToRawLongBits((Double) row.getField(column)));
+                    }
+                    return copy;
+                  })
+              .toList();
+      if (!nativeEnabled) {
+        host = bits;
+        assertEquals(7 * (shape.equals("TUMBLE") ? 1 : shape.equals("HOP") ? 2 : 3), host.size());
+      } else {
+        assertEquals(host, bits);
+        assertTrue(scan.substitutions() > 0, scan.fallbackReasons().toString());
+        assertTrue(scan.fallbackReasons().isEmpty(), scan.fallbackReasons().toString());
+        assertWindowRows(result.job(), phase);
+      }
+    }
+  }
+
+  @ParameterizedTest
+  @CsvSource({
+    "ONE_PHASE,TUMBLE", "TWO_PHASE,TUMBLE",
+    "ONE_PHASE,HOP", "TWO_PHASE,HOP",
+    "ONE_PHASE,CUMULATE", "TWO_PHASE,CUMULATE"
+  })
+  void decimalSumRetractsTopRowsAndPreservesScale(String phase, String shape) throws Exception {
+    String window =
+        switch (shape) {
+          case "TUMBLE" -> "TUMBLE(TABLE ranked, DESCRIPTOR(rt), INTERVAL '5' SECOND)";
+          case "HOP" ->
+              "HOP(TABLE ranked, DESCRIPTOR(rt), INTERVAL '5' SECOND, INTERVAL '10' SECOND)";
+          default ->
+              "CUMULATE(TABLE ranked, DESCRIPTOR(rt), INTERVAL '5' SECOND, INTERVAL '15' SECOND)";
+        };
+    String sql =
+        "SELECT k, window_start, window_end, SUM(CAST(v AS DECIMAL(12,2))),"
+            + " SUM(CAST(v AS DECIMAL(38,18))) FROM TABLE("
+            + window
+            + ") GROUP BY k, window_start, window_end";
+    var host = collect(environment(phase), sql).rows();
+    assertEquals(shape.equals("HOP") ? 6 : shape.equals("TUMBLE") ? 3 : 8, host.size());
+    var table = environment(phase);
+    var scan = NativePlanner.install(table);
+    var actual = collect(table, sql);
+    assertEquals(host, actual.rows());
+    assertTrue(scan.substitutions() > 0, scan.fallbackReasons().toString());
+    assertTrue(scan.fallbackReasons().isEmpty(), scan.fallbackReasons().toString());
+    assertNativeRows(actual.job(), "NativeColumnarTopNExecNode");
+    assertWindowRows(actual.job(), phase);
+  }
+
+  @ParameterizedTest
+  @CsvSource({
+    "ONE_PHASE,TUMBLE", "TWO_PHASE,TUMBLE",
+    "ONE_PHASE,HOP", "TWO_PHASE,HOP",
+    "ONE_PHASE,CUMULATE", "TWO_PHASE,CUMULATE"
+  })
+  void decimalSumOverflowResetsOnTheNextSignedValue(String phase, String shape) throws Exception {
+    String window =
+        switch (shape) {
+          case "TUMBLE" -> "TUMBLE(TABLE changes, DESCRIPTOR(rt), INTERVAL '5' SECOND)";
+          case "HOP" ->
+              "HOP(TABLE changes, DESCRIPTOR(rt), INTERVAL '5' SECOND, INTERVAL '10' SECOND)";
+          default ->
+              "CUMULATE(TABLE changes, DESCRIPTOR(rt), INTERVAL '5' SECOND, INTERVAL '15' SECOND)";
+        };
+    String sql =
+        "SELECT k, window_end, SUM(v), COUNT(v), COUNT(*) FROM TABLE("
+            + window
+            + ") GROUP BY k, window_start, window_end";
+    String max = "9".repeat(36) + ".99";
+    List<Row> host = null;
+    for (boolean nativeEnabled : new boolean[] {false, true}) {
+      var env = new TestStreamEnvironment(cluster.getMiniCluster(), 1);
+      var table = StreamTableEnvironment.create(env);
+      table.getConfig().setLocalTimeZone(ZoneOffset.UTC);
+      table.getConfig().set("table.optimizer.agg-phase-strategy", phase);
+      var source =
+          env.fromData(
+                  Types.ROW_NAMED(
+                      new String[] {"k", "millis", "v"}, Types.INT, Types.LONG, Types.BIG_DEC),
+                  decimalRow(RowKind.INSERT, 1, max),
+                  decimalRow(RowKind.INSERT, 1, "0.01"),
+                  decimalRow(RowKind.INSERT, 2, max),
+                  decimalRow(RowKind.INSERT, 2, "0.01"),
+                  decimalRow(RowKind.INSERT, 2, "3.25"),
+                  decimalRow(RowKind.DELETE, 3, max),
+                  decimalRow(RowKind.DELETE, 3, "0.01"),
+                  decimalRow(RowKind.DELETE, 4, max),
+                  decimalRow(RowKind.DELETE, 4, "0.01"),
+                  decimalRow(RowKind.DELETE, 4, "0.25"),
+                  decimalRow(RowKind.INSERT, 5, "1.50"),
+                  decimalRow(RowKind.DELETE, 5, "1.00"),
+                  decimalRow(RowKind.INSERT, 5, null),
+                  decimalRow(RowKind.DELETE, 6, "3.00"),
+                  decimalRow(RowKind.UPDATE_BEFORE, 7, "1.00"),
+                  decimalRow(RowKind.UPDATE_AFTER, 7, "2.00"),
+                  decimalRow(RowKind.INSERT, 7, null),
+                  decimalRow(RowKind.INSERT, 8, max),
+                  decimalRow(RowKind.INSERT, 8, max),
+                  decimalRow(RowKind.DELETE, 8, "2.50"),
+                  decimalRow(RowKind.INSERT, 9, null))
+              .assignTimestampsAndWatermarks(
+                  WatermarkStrategy.<Row>forBoundedOutOfOrderness(Duration.ofDays(1))
+                      .withTimestampAssigner((row, previous) -> (Long) row.getField(1)));
+      table.createTemporaryView(
+          "changes",
+          table.fromChangelogStream(
+              source,
+              Schema.newBuilder()
+                  .column("k", DataTypes.INT())
+                  .column("millis", DataTypes.BIGINT())
+                  .column("v", DataTypes.DECIMAL(38, 2))
+                  .columnByMetadata("rt", DataTypes.TIMESTAMP_LTZ(3), "rowtime")
+                  .watermark("rt", "SOURCE_WATERMARK()")
+                  .build()));
+      var scan = nativeEnabled ? NativePlanner.install(table) : null;
+      var result = collect(table, sql);
+      if (!nativeEnabled) {
+        host = result.rows();
+        assertEquals(9 * (shape.equals("TUMBLE") ? 1 : shape.equals("HOP") ? 2 : 3), host.size());
+        for (Row row : host) {
+          BigDecimal expected =
+              switch ((Integer) row.getField(0)) {
+                case 2 -> new BigDecimal("3.25");
+                case 4 -> new BigDecimal("-0.25");
+                case 6 -> new BigDecimal("-3.00");
+                case 8 -> new BigDecimal("-2.50");
+                default -> null;
+              };
+          assertEquals(expected, row.getField(2), row.toString());
+        }
+      } else {
+        assertEquals(host, result.rows());
+        assertTrue(scan.substitutions() > 0, scan.fallbackReasons().toString());
+        assertTrue(scan.fallbackReasons().isEmpty(), scan.fallbackReasons().toString());
+        assertWindowRows(result.job(), phase);
+      }
+    }
+  }
+
+  private static Row decimalRow(RowKind kind, int key, String value) {
+    return Row.ofKind(kind, key, 1000L, value == null ? null : new BigDecimal(value));
+  }
+
+  @ParameterizedTest
+  @org.junit.jupiter.params.provider.ValueSource(strings = {"ONE_PHASE", "TWO_PHASE"})
+  void decimalAverageStillHasExplicitFallback(String phase) throws Exception {
+    NativeParity.assertFallbackReasonContains(
+        () -> environment(phase),
+        "SELECT k, AVG(CAST(v AS DECIMAL(12,2))) FROM TABLE(TUMBLE(TABLE ranked,"
+            + " DESCRIPTOR(rt), INTERVAL '5' SECOND)) GROUP BY k, window_start, window_end",
+        "window aggregate: retracting input supports only aligned event-time");
+  }
+
+  private static Row floatingRow(RowKind kind, int key, Double value) {
+    return Row.ofKind(kind, key, 1000L, value == null ? null : value.floatValue(), value);
+  }
+
+  @ParameterizedTest
+  @CsvSource({
+    "ONE_PHASE,TUMBLE",
+    "TWO_PHASE,TUMBLE",
+    "ONE_PHASE,HOP",
+    "TWO_PHASE,HOP",
+    "ONE_PHASE,CUMULATE",
+    "TWO_PHASE,CUMULATE"
+  })
+  void reducedIntegerSumAndAverageKeepExplicitFallback(String phase, String shape)
+      throws Exception {
+    String window =
+        switch (shape) {
+          case "TUMBLE" -> "TUMBLE(TABLE ranked, DESCRIPTOR(rt), INTERVAL '5' SECOND)";
+          case "HOP" ->
+              "HOP(TABLE ranked, DESCRIPTOR(rt), INTERVAL '5' SECOND, INTERVAL '10' SECOND)";
+          default ->
+              "CUMULATE(TABLE ranked, DESCRIPTOR(rt), INTERVAL '5' SECOND, INTERVAL '15' SECOND)";
+        };
+    String sql =
+        "SELECT k, window_start, window_end, COUNT(v), AVG(v), SUM(v) FROM TABLE("
+            + window
+            + ") GROUP BY k, window_start, window_end";
+    NativeParity.assertFallbackReasonContains(
+        () -> environment(phase),
+        sql,
+        "window aggregate: retracting input supports only aligned event-time");
   }
 
   private static List<Row> expected(String shape, boolean distinct) {
@@ -476,7 +955,7 @@ class FlinkRetractingWindowSqlHarnessTest {
           throw new IllegalStateException("window source failure after completed checkpoint");
         }
       }
-      emit(context, 10);
+      emit(context, 15);
     }
 
     private void emit(SourceContext<Row> context, int end) {
@@ -491,7 +970,12 @@ class FlinkRetractingWindowSqlHarnessTest {
               Row.ofKind(RowKind.INSERT, 4, 1000L, 5L),
               Row.ofKind(RowKind.INSERT, 4, 1000L, 5L),
               Row.ofKind(RowKind.DELETE, 4, 1000L, 5L),
-              Row.ofKind(RowKind.DELETE, 5, 1000L, 3L));
+              Row.ofKind(RowKind.DELETE, 5, 1000L, 3L),
+              Row.ofKind(RowKind.DELETE, 6, 1000L, Long.MIN_VALUE),
+              Row.ofKind(RowKind.INSERT, 7, 1000L, Long.MAX_VALUE),
+              Row.ofKind(RowKind.INSERT, 7, 1000L, Long.MAX_VALUE),
+              Row.ofKind(RowKind.INSERT, 8, 1000L, 10L),
+              Row.ofKind(RowKind.INSERT, 8, 1000L, 11L));
       synchronized (context.getCheckpointLock()) {
         while (running && next < end) context.collect(changes.get(next++));
       }

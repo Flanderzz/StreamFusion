@@ -32,11 +32,12 @@ checkpoint restore and when the late row introduces a new key. TUMBLE drops the 
 its single final window has closed. Tests compare explicit watermarks, mixed ordinary/distinct
 aggregates and both aggregation phases against released Flink.
 
-## Retracting COUNT/SUM windows
+## Retracting COUNT/SUM/AVG and grouping-only windows
 
 Aligned event-time TUMBLE, HOP and CUMULATE accept updating input, including native Top-N,
-for unfiltered SUM over TINYINT/SMALLINT/INT/BIGINT, COUNT over the supported numeric value
-columns, and COUNT(*). Both single-phase and local/global execution remain columnar.
+for unfiltered SUM over all numeric types, AVG over TINYINT/SMALLINT/INT/BIGINT/FLOAT/DOUBLE, COUNT over the
+supported numeric value columns, COUNT(*), and grouping-only windows without aggregate
+functions. Both single-phase and local/global execution remain columnar.
 
 Every input retains its INSERT/UPDATE_BEFORE/UPDATE_AFTER/DELETE sign. SUM carries Flink's
 nullable sum and signed non-NULL count; COUNT carries a signed count. A separate live-row
@@ -45,6 +46,39 @@ A live all-NULL group therefore emits COUNT 0/SUM NULL, while an unmatched delet
 negative counts and sums as it does in released Flink. Integer sums preserve their declared
 width and wrapping behavior. Top-1 replacing 10 with 20 leaves SUM 20, and moving the last
 live row out of a window removes its old group.
+
+FLOAT SUM rounds every addition/subtraction at FLOAT precision; DOUBLE SUM uses DOUBLE
+precision. Both retain a nullable sum and signed BIGINT count. The first non-NULL insertion
+or partial is assigned directly, preserving an initial negative zero. An unmatched retraction
+starts from positive zero, as in Flink. Zero-count partials retain finite residual sums and
+NaN after infinity cancellation; emitting NULL for an empty aggregate does not erase that state.
+Local/global merging and checkpoint restore preserve these rules on both state backends.
+
+DECIMAL SUM widens the buffer and result to DECIMAL(38, input scale), with the same signed
+BIGINT count. Arithmetic overflow makes the sum NULL without changing the count; the next
+non-NULL insertion or retraction restarts the sum with that signed value. A NULL partial
+contributes its count but no sum. Zero-count partials retain their residual sum. These rules
+match Flink's retracting decimal SUM and survive local/global merging and checkpoint restore.
+
+Integer AVG uses the existing BIGINT sum/count pair, subtracting values and non-NULL counts
+for retractions. A zero count produces NULL; negative counts still divide, matching Flink.
+The sum wraps at 64 bits, division truncates toward zero, and the result narrows to its declared
+integer type. Java's `Long.MIN_VALUE / -1` overflow is preserved. AVG partials, hidden group
+liveness and checkpoints use the same layouts as append-only AVG and retracting COUNT/SUM.
+
+FLOAT and DOUBLE AVG use a DOUBLE sum and signed BIGINT count, applying each insertion or
+retraction in input order. FLOAT narrows only the final result. Partial sums merge in order
+into the existing sum rather than being added together first; regrouping floating additions
+can change the result. Zero-count partials preserve their sum, including NaN after retracting
+an infinity. Checkpoints retain both fields. Tests compare signed-zero and nonfinite results
+with Flink and restore mixed integer/floating averages on both state backends.
+
+A grouping-only window uses the same signed live-row count as COUNT/SUM, but keeps that
+count out of the SQL result. It emits one row per nonzero `(key, window)` group, including
+Flink's negative-count behavior after an unmatched delete. Deleting the last occurrence
+removes the group; duplicates, NULL payloads and updates that move rows between windows
+retain their normal membership semantics. The existing count partial and checkpoint layout
+are shared by both aggregation phases and both state backends.
 
 Local partials preserve the full (sum, count) pair and the live-row count in Flink's field
 order. A checkpoint can split an insertion from its retraction: the next local partial may
@@ -213,21 +247,26 @@ enables columnar composition with downstream consumers; it is not a standalone t
 - Windowed DISTINCT other than unfiltered, single-argument COUNT over the types listed above:
   SUM/AVG DISTINCT, filtered COUNT DISTINCT, FLOAT/DOUBLE, BOOLEAN, TIME and complex values.
   Non-windowed DISTINCT has separate coverage; see [GROUP BY](group-by.md).
-- Retracting input outside aligned event-time TUMBLE/HOP/CUMULATE with unfiltered integer
-  SUM, numeric COUNT(value), and COUNT(*). DISTINCT, MIN/MAX/AVG, non-integer SUM, filters,
-  grouping-only, processing-time, attached, session and legacy windows still fall back on
-  updating input. Admission checks the **input** changelog even when final output is append-only.
+- Retracting input outside aligned event-time TUMBLE/HOP/CUMULATE with grouping-only,
+  unfiltered numeric SUM, integer/FLOAT/DOUBLE AVG, numeric COUNT(value), and COUNT(*).
+  DISTINCT, MIN/MAX, DECIMAL AVG, filters, processing-time, attached, session
+  and legacy windows still fall back on updating input. Admission checks the **input**
+  changelog even when final output is append-only.
   The diagnostic names the supported retracting forms. Remaining coverage is tracked in
   [#99](https://github.com/datafusion-contrib/StreamFusion/issues/99).
+- Flink's reduction of overlapping BIGINT `COUNT(v), AVG(v), SUM(v)` calls to internal
+  `$SUM0_RETRACT` over attached window bounds. This rewritten plan retains fallback in
+  both aggregation phases; the individual direct aggregate forms above remain supported.
 - Flink's optional `table.optimizer.distinct-agg.split.enabled=true` rewrite. The unchanged
   split-distinct IT variants introduce an unsupported `HASH_CODE` Calc and extra window layers,
   including attached single-phase aggregation and partial layouts outside current admission.
   Those variants fall back as a complete pipeline. The same queries with distinct splitting
   disabled use the native value-set path; upstream execution contracts verify both routes.
 
-A **zero-aggregate grouping-only window** (`GROUP BY key + window`, no aggregate function) is *not*
-one of the gaps above for insert-only input — it's a windowed distinct, and is native (single- and two-phase), emitting one
-row per `(key, window)`. See [GROUP BY](group-by.md) for how the non-windowed case handles `DISTINCT`.
+A **zero-aggregate grouping-only window** (`GROUP BY key + window`, no aggregate function)
+is a windowed distinct, emitting one row per `(key, window)`. It supports insert-only input
+and the aligned retracting event-time forms above, in single- and two-phase execution.
+See [GROUP BY](group-by.md) for how the non-windowed case handles `DISTINCT`.
 
 ## Retracting window benchmark
 
@@ -248,6 +287,71 @@ measurement. Medians:
 Both sizes were slower than Flink. This implementation establishes native changelog and
 checkpoint coverage for complete updating pipelines and future batching improvements.
 These whole-query results do not isolate the cost of Top-N, window accumulation or exchanges.
+
+With `-Dwindow.groupingOnly=true`, the same benchmark selects only the grouping key, retaining
+Top-N, both transposes and the rowwise sink. On an M1 Max, a release build (`-Pbench`, mimalloc),
+1 million rows, parallelism 2, 64 keys, two warmups and five interleaved measured runs gave:
+
+| Strategy | Flink (s) | Native (s) | Flink / native |
+| --- | ---: | ---: | ---: |
+| Single-phase | 0.456570 | 0.487513 | 0.937× |
+| Local/global | 0.477981 | 0.468305 | 1.021× |
+
+No competing builds or tests ran during measurement. Single-phase was slightly slower and
+local/global was approximately even. Grouping-only admission extends the existing changelog
+and checkpoint foundation; this measurement does not establish a throughput improvement.
+
+With `-Dwindow.average=true`, the benchmark selects COUNT and integer AVG. Under the same
+release/mimalloc setup, 1 million rows, two warmups and five interleaved measured runs gave:
+
+| Strategy | Flink (s) | Native (s) | Flink / native |
+| --- | ---: | ---: | ---: |
+| Single-phase | 0.420240 | 0.509358 | 0.825× |
+| Local/global | 0.532535 | 0.485407 | 1.097× |
+
+Both transposes, Top-N and the rowwise sink remain timed, with no competing local builds or
+tests. Local/global improved on this workload; single-phase remained slower than Flink.
+
+The same benchmark with `-Dwindow.average=true -Dwindow.averageType=FLOAT` or `DOUBLE`
+casts the input to that type before AVG. With the same release/mimalloc setup, 1 million rows,
+two warmups and five interleaved measured runs:
+
+| AVG type | Strategy | Flink (s) | Native (s) | Flink / native |
+| --- | --- | ---: | ---: | ---: |
+| FLOAT | Single-phase | 0.427617 | 0.473997 | 0.902× |
+| FLOAT | Local/global | 0.572479 | 0.465843 | 1.229× |
+| DOUBLE | Single-phase | 0.500904 | 0.496658 | 1.009× |
+| DOUBLE | Local/global | 0.613188 | 0.487260 | 1.258× |
+
+Both transposes, Top-N and the rowwise sink remain timed; no competing local builds or tests
+ran. Local/global was faster for both types. Single-phase FLOAT was slower and DOUBLE was
+approximately even. These results describe the complete query rather than isolated AVG cost.
+
+With `-Dwindow.sumType=FLOAT` or `DOUBLE`, the same benchmark measures COUNT and SUM of
+the cast input. The same release/mimalloc setup, 1 million rows, two warmups and five
+interleaved measured runs gave:
+
+| SUM type | Strategy | Flink (s) | Native (s) | Flink / native |
+| --- | --- | ---: | ---: | ---: |
+| FLOAT | Single-phase | 0.496960 | 0.489965 | 1.014× |
+| FLOAT | Local/global | 0.627083 | 0.466394 | 1.345× |
+| DOUBLE | Single-phase | 0.451853 | 0.486156 | 0.929× |
+| DOUBLE | Local/global | 0.619748 | 0.478603 | 1.295× |
+
+Both transposes, Top-N and the rowwise sink remain timed; no competing local builds or tests
+ran. Local/global improved for both types. Single-phase FLOAT was approximately even and
+DOUBLE was slower. These are complete-query timings, not isolated SUM measurements.
+
+With `-Dwindow.sumType=DECIMAL(12,2)`, SUM returns DECIMAL(38,2). Under the same
+release/mimalloc setup, 1 million rows, two warmups and five interleaved measured runs:
+
+| Strategy | Flink (s) | Native (s) | Flink / native |
+| --- | ---: | ---: | ---: |
+| Single-phase | 0.513898 | 0.496961 | 1.034× |
+| Local/global | 0.634582 | 0.488709 | 1.298× |
+
+Both transposes, Top-N and the rowwise sink remain timed, with no competing local builds or
+tests. Single-phase was approximately even; local/global improved on this workload.
 
 ## Mixed AVG benchmark
 

@@ -18,6 +18,17 @@ barrier drain, and use the existing raw-keyed and direct RocksDB checkpoint path
 Integral SUM/COUNT are admitted first; unsupported retracting forms remain explicit
 planner fallbacks rather than borrowing append-only accumulator semantics.
 
+FLOAT/DOUBLE SUM extends the same nullable sum/count layout. It follows Flink's declared
+sum precision and assigns the first non-NULL value directly to retain negative zero.
+Subsequent arithmetic and partial merges stay ordered; a zero-count partial can carry a
+nonzero or nonfinite sum that must survive checkpointing. No new window/state architecture
+is needed for these types.
+
+DECIMAL SUM also keeps this two-field layout, widening the sum to precision 38 while
+preserving the input scale. Its arithmetic reuses the append-only decimal SUM primitive:
+overflow produces a NULL sum that the next signed value can reset. The signed count and
+zero-count residuals remain independent of that nullable sum, as in Flink's retracting SUM.
+
 The Arrow ownership pattern was checked against Comet's ColumnarBatchArrowReader:
 producer vectors must not be closed through a second owning root. The window projection
 therefore copies the change-kind byte into a vector owned by its exported root, just as
