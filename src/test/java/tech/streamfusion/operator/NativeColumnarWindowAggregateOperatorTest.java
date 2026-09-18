@@ -168,8 +168,14 @@ class NativeColumnarWindowAggregateOperatorTest {
   }
 
   @ParameterizedTest
-  @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
-  void filteredExtremaRestoreIndependentStateAndEmptySelections(boolean rocks) throws Exception {
+  @org.junit.jupiter.params.provider.CsvSource({
+    "false,false",
+    "true,false",
+    "false,true",
+    "true,true"
+  })
+  void filteredAggregatesRestoreIndependentStateAndEmptySelections(boolean rocks, boolean distinct)
+      throws Exception {
     RowType input =
         RowType.of(
             new BigIntType(),
@@ -180,7 +186,7 @@ class NativeColumnarWindowAggregateOperatorTest {
         RowType.of(new BigIntType(), new BigIntType(), new TimestampType(3), new TimestampType(3));
     OperatorSubtaskState checkpoint;
     try (BufferAllocator allocator = new RootAllocator();
-        var before = extremaHarness(output, rocks)) {
+        var before = filteredHarness(output, rocks, distinct)) {
       before.setup(new ArrowBatchSerializer());
       before.open();
       before.processElement(
@@ -197,7 +203,7 @@ class NativeColumnarWindowAggregateOperatorTest {
       checkpoint = before.snapshot(1L, 1L);
     }
     try (BufferAllocator allocator = new RootAllocator();
-        var restored = extremaHarness(output, rocks)) {
+        var restored = filteredHarness(output, rocks, distinct)) {
       restored.setup(new ArrowBatchSerializer());
       restored.initializeState(checkpoint);
       restored.open();
@@ -207,6 +213,7 @@ class NativeColumnarWindowAggregateOperatorTest {
                   RowDataArrowConverter.write(
                       List.of(
                           GenericRowData.of(5L, TimestampData.fromEpochMillis(1), true, false),
+                          GenericRowData.of(10L, TimestampData.fromEpochMillis(1), true, true),
                           GenericRowData.of(999L, TimestampData.fromEpochMillis(1), false, null)),
                       input,
                       allocator))));
@@ -222,17 +229,22 @@ class NativeColumnarWindowAggregateOperatorTest {
       }
       rows.sort(java.util.Comparator.comparingLong(row -> row.getTimestamp(2, 3).getMillisecond()));
       assertEquals(2, rows.size());
-      assertEquals(5L, rows.get(0).getLong(0));
-      assertEquals(20L, rows.get(0).getLong(1));
+      assertEquals(distinct ? 2L : 5L, rows.get(0).getLong(0));
+      assertEquals(distinct ? 2L : 20L, rows.get(0).getLong(1));
       assertEquals(0L, rows.get(0).getTimestamp(2, 3).getMillisecond());
-      assertTrue(rows.get(1).isNullAt(0));
-      assertTrue(rows.get(1).isNullAt(1));
+      if (distinct) {
+        assertEquals(0L, rows.get(1).getLong(0));
+        assertEquals(0L, rows.get(1).getLong(1));
+      } else {
+        assertTrue(rows.get(1).isNullAt(0));
+        assertTrue(rows.get(1).isNullAt(1));
+      }
       assertEquals(1000L, rows.get(1).getTimestamp(2, 3).getMillisecond());
     }
   }
 
   private static KeyedOneInputStreamOperatorTestHarness<Integer, ArrowBatch, ArrowBatch>
-      extremaHarness(RowType output, boolean rocks) throws Exception {
+      filteredHarness(RowType output, boolean rocks, boolean distinct) throws Exception {
     var operator =
         new NativeColumnarWindowAggregateOperator(
             false,
@@ -244,7 +256,7 @@ class NativeColumnarWindowAggregateOperatorTest {
             new int[0],
             new int[0],
             new int[] {0, 0},
-            new int[] {1, 2},
+            distinct ? new int[] {7, 7} : new int[] {1, 2},
             "UTC",
             true,
             "UTC",

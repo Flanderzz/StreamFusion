@@ -24,12 +24,15 @@ import tech.streamfusion.planner.NativePlanner;
 class FlinkWindowLateSliceSqlHarnessTest {
   @ParameterizedTest
   @CsvSource({
-    "ONE_PHASE,TUMBLE", "TWO_PHASE,TUMBLE",
-    "ONE_PHASE,HOP", "TWO_PHASE,HOP",
-    "ONE_PHASE,CUMULATE", "TWO_PHASE,CUMULATE"
+    "ONE_PHASE,TUMBLE,false", "TWO_PHASE,TUMBLE,false",
+    "ONE_PHASE,HOP,false", "TWO_PHASE,HOP,false",
+    "ONE_PHASE,CUMULATE,false", "TWO_PHASE,CUMULATE,false",
+    "ONE_PHASE,TUMBLE,true", "TWO_PHASE,TUMBLE,true",
+    "ONE_PHASE,HOP,true", "TWO_PHASE,HOP,true",
+    "ONE_PHASE,CUMULATE,true", "TWO_PHASE,CUMULATE,true"
   })
-  void aClosedSliceCanStillContributeToOpenFinalWindows(String phase, String shape)
-      throws Exception {
+  void aClosedSliceCanStillContributeToOpenFinalWindows(
+      String phase, String shape, boolean filtered) throws Exception {
     String window =
         switch (shape) {
           case "TUMBLE" -> "TUMBLE(TABLE src, DESCRIPTOR(rt), INTERVAL '5' SECOND)";
@@ -38,7 +41,9 @@ class FlinkWindowLateSliceSqlHarnessTest {
               "CUMULATE(TABLE src, DESCRIPTOR(rt), INTERVAL '5' SECOND, INTERVAL '15' SECOND)";
         };
     String sql =
-        "SELECT k, window_end, SUM(v), COUNT(*), COUNT(DISTINCT v) FROM TABLE("
+        "SELECT k, window_end, SUM(v), COUNT(*), COUNT(DISTINCT v)"
+            + (filtered ? " FILTER (WHERE v >= 11)" : "")
+            + " FROM TABLE("
             + window
             + ") GROUP BY k, window_start, window_end";
     String plan = NativePlanner.explain(environment(phase), sql);
@@ -49,13 +54,13 @@ class FlinkWindowLateSliceSqlHarnessTest {
                 : "NativeColumnarWindowAggregate"),
         plan);
     List<List<Object>> expected = new ArrayList<>();
-    expected.add(result(1, 5, 10, 1, 1));
+    expected.add(result(1, 5, 10, 1, filtered ? 0 : 1));
     if (!shape.equals("TUMBLE")) {
-      expected.add(result(1, 10, 31, 3, 2));
+      expected.add(result(1, 10, 31, 3, filtered ? 1 : 2));
       expected.add(result(2, 10, 13, 1, 1));
     }
     if (shape.equals("CUMULATE")) {
-      expected.add(result(1, 15, 48, 4, 3));
+      expected.add(result(1, 15, 48, 4, filtered ? 2 : 3));
       expected.add(result(2, 15, 13, 1, 1));
     }
     NativeParity.assertKindedParity(() -> environment(phase), sql, expected);

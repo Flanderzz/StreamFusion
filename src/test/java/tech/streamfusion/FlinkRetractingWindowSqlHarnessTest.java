@@ -308,12 +308,48 @@ class FlinkRetractingWindowSqlHarnessTest {
 
   @ParameterizedTest
   @org.junit.jupiter.params.provider.ValueSource(strings = {"ONE_PHASE", "TWO_PHASE"})
+  void filteredDistinctPreservesIndependentSetsAndRejectedGroups(String phase) throws Exception {
+    for (String window :
+        List.of(
+            "TUMBLE(TABLE src, DESCRIPTOR(rt), INTERVAL '5' SECOND)",
+            "HOP(TABLE src, DESCRIPTOR(rt), INTERVAL '5' SECOND, INTERVAL '10' SECOND)",
+            "CUMULATE(TABLE src, DESCRIPTOR(rt), INTERVAL '5' SECOND, INTERVAL '15' SECOND)")) {
+      String sql =
+          "SELECT k, window_end, COUNT(DISTINCT v) FILTER (WHERE v > 10), "
+              + "COUNT(DISTINCT v) FILTER (WHERE v < 20), COUNT(DISTINCT v) FILTER (WHERE v < 0), "
+              + "COUNT(DISTINCT v), SUM(v) FROM TABLE("
+              + window
+              + ") GROUP BY k, window_start, window_end";
+      var host = collect(environment(phase), sql).rows();
+      assertTrue(
+          host.stream()
+              .anyMatch(
+                  row ->
+                      (Integer) row.getField(0) == 3
+                          && row.getField(2).equals(0L)
+                          && row.getField(3).equals(0L)
+                          && row.getField(4).equals(0L)
+                          && row.getField(5).equals(0L)));
+      assertTrue(host.stream().allMatch(row -> row.getField(4).equals(0L)));
+      var table = environment(phase);
+      var scan = NativePlanner.install(table);
+      var result = collect(table, sql);
+      assertEquals(host, result.rows());
+      assertTrue(scan.fallbackReasons().isEmpty(), scan.explainSummary());
+      assertWindowRows(result.job(), phase);
+    }
+  }
+
+  @ParameterizedTest
+  @org.junit.jupiter.params.provider.ValueSource(strings = {"ONE_PHASE", "TWO_PHASE"})
   void unsupportedFilteredWindowsRemainOnFlink(String phase) throws Exception {
     for (String sql :
         List.of(
             "SELECT k, MIN(v) FILTER (WHERE v > 10) FROM TABLE(TUMBLE(TABLE ranked,"
                 + " DESCRIPTOR(rt), INTERVAL '5' SECOND)) GROUP BY k, window_start, window_end",
             "SELECT k, MAX(v) FILTER (WHERE v > 10) FROM TABLE(TUMBLE(TABLE ranked,"
+                + " DESCRIPTOR(rt), INTERVAL '5' SECOND)) GROUP BY k, window_start, window_end",
+            "SELECT k, COUNT(DISTINCT v) FILTER (WHERE v > 10) FROM TABLE(TUMBLE(TABLE ranked,"
                 + " DESCRIPTOR(rt), INTERVAL '5' SECOND)) GROUP BY k, window_start, window_end",
             "SELECT k, COUNT(*) FILTER (WHERE v > 10) FROM TABLE(SESSION(TABLE src PARTITION BY k,"
                 + " DESCRIPTOR(rt), INTERVAL '5' SECOND)) GROUP BY k, window_start, window_end",
@@ -489,6 +525,50 @@ class FlinkRetractingWindowSqlHarnessTest {
 
   private void assertRecoveredWindowRows(
       String phase, boolean rocks, String sql, List<Row> expected) throws Exception {
+    assertRecoveredWindowRows(phase, rocks, sql, expected, false);
+  }
+
+  @ParameterizedTest
+  @CsvSource({
+    "ONE_PHASE,TUMBLE,false", "TWO_PHASE,TUMBLE,false",
+    "ONE_PHASE,HOP,false", "TWO_PHASE,HOP,false",
+    "ONE_PHASE,CUMULATE,false", "TWO_PHASE,CUMULATE,false",
+    "ONE_PHASE,TUMBLE,true", "TWO_PHASE,TUMBLE,true",
+    "ONE_PHASE,HOP,true", "TWO_PHASE,HOP,true",
+    "ONE_PHASE,CUMULATE,true", "TWO_PHASE,CUMULATE,true"
+  })
+  void appendOnlyFilteredDistinctKeepsIndependentSetsAcrossCheckpoint(
+      String phase, String shape, boolean rocks) throws Exception {
+    String interval =
+        shape.equals("TUMBLE")
+            ? "INTERVAL '5' SECOND"
+            : "INTERVAL '5' SECOND, INTERVAL '" + (shape.equals("HOP") ? 10 : 15) + "' SECOND";
+    String sql =
+        "SELECT k, window_end, COUNT(DISTINCT v) FILTER (WHERE v > 10), "
+            + "COUNT(DISTINCT v) FILTER (WHERE v < 20), COUNT(DISTINCT v) FROM TABLE("
+            + shape
+            + "(TABLE changes, DESCRIPTOR(rt), "
+            + interval
+            + ")) "
+            + "GROUP BY k, window_start, window_end";
+    List<Row> expected = new ArrayList<>();
+    int end = shape.equals("TUMBLE") ? 5 : shape.equals("HOP") ? 10 : 15;
+    for (int boundary = 5; boundary <= end; boundary += 5) {
+      LocalDateTime timestamp = LocalDateTime.ofEpochSecond(boundary, 0, ZoneOffset.UTC);
+      expected.addAll(
+          List.of(
+              Row.of(1, timestamp, 1L, 1L, 2L), Row.of(2, timestamp, 0L, 0L, 0L),
+              Row.of(3, timestamp, 0L, 1L, 1L), Row.of(4, timestamp, 0L, 1L, 1L),
+              Row.of(5, timestamp, 0L, 1L, 1L), Row.of(6, timestamp, 0L, 1L, 1L),
+              Row.of(7, timestamp, 1L, 0L, 1L), Row.of(8, timestamp, 1L, 2L, 2L)));
+    }
+    expected.sort(Comparator.comparing(Row::toString));
+    assertRecoveredWindowRows(phase, rocks, sql, expected, true);
+  }
+
+  private void assertRecoveredWindowRows(
+      String phase, boolean rocks, String sql, List<Row> expected, boolean insertOnly)
+      throws Exception {
     for (boolean nativeEnabled : new boolean[] {false, true}) {
       String id = UUID.randomUUID().toString();
       RecoveryProof proof = new RecoveryProof();
@@ -509,7 +589,7 @@ class FlinkRetractingWindowSqlHarnessTest {
         table.getConfig().setLocalTimeZone(ZoneOffset.UTC);
         table.getConfig().set("table.optimizer.agg-phase-strategy", phase);
         var source =
-            env.addSource(new RecoveringChanges(id))
+            env.addSource(new RecoveringChanges(id, insertOnly))
                 .returns(
                     Types.ROW_NAMED(
                         new String[] {"k", "millis", "v"}, Types.INT, Types.LONG, Types.LONG))
@@ -526,7 +606,10 @@ class FlinkRetractingWindowSqlHarnessTest {
                     .column("v", DataTypes.BIGINT())
                     .columnByMetadata("rt", DataTypes.TIMESTAMP_LTZ(3), "rowtime")
                     .watermark("rt", "SOURCE_WATERMARK()")
-                    .build()));
+                    .build(),
+                insertOnly
+                    ? org.apache.flink.table.connector.ChangelogMode.insertOnly()
+                    : org.apache.flink.table.connector.ChangelogMode.all()));
         var scan = nativeEnabled ? NativePlanner.install(table) : null;
         Result result = collect(table, sql);
         assertEquals(expected, result.rows());
@@ -1150,6 +1233,7 @@ class FlinkRetractingWindowSqlHarnessTest {
   private static final class RecoveringChanges
       implements SourceFunction<Row>, CheckpointedFunction, CheckpointListener {
     private final String id;
+    private final boolean insertOnly;
     private int next;
     private boolean restored;
     private volatile boolean running = true;
@@ -1157,8 +1241,9 @@ class FlinkRetractingWindowSqlHarnessTest {
     private transient ListState<Integer> state;
     private transient Map<Long, Integer> snapshots;
 
-    RecoveringChanges(String id) {
+    RecoveringChanges(String id, boolean insertOnly) {
       this.id = id;
+      this.insertOnly = insertOnly;
     }
 
     @Override
@@ -1195,7 +1280,11 @@ class FlinkRetractingWindowSqlHarnessTest {
               Row.ofKind(RowKind.INSERT, 8, 1000L, 10L),
               Row.ofKind(RowKind.INSERT, 8, 1000L, 11L));
       synchronized (context.getCheckpointLock()) {
-        while (running && next < end) context.collect(changes.get(next++));
+        while (running && next < end) {
+          Row row = changes.get(next++);
+          if (insertOnly) row.setKind(RowKind.INSERT);
+          context.collect(row);
+        }
       }
     }
 
