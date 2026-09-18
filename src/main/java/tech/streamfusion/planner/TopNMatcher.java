@@ -1,6 +1,7 @@
 package tech.streamfusion.planner;
 
-import tech.streamfusion.operator.RowDataArrowConverter;
+import java.util.HashSet;
+import java.util.Set;
 import org.apache.calcite.rel.RelFieldCollation;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.Calc;
@@ -11,7 +12,9 @@ import org.apache.calcite.rex.RexLiteral;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.util.ImmutableBitSet;
 import org.apache.flink.table.api.config.ExecutionConfigOptions;
+import org.apache.flink.table.functions.BuiltInFunctionDefinitions;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
+import org.apache.flink.table.planner.functions.bridging.BridgingSqlFunction;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalMiniBatchAssigner;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalRank;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalRel;
@@ -21,6 +24,7 @@ import org.apache.flink.table.planner.utils.ShortcutUtils;
 import org.apache.flink.table.runtime.operators.rank.ConstantRankRange;
 import org.apache.flink.table.runtime.operators.rank.RankType;
 import org.apache.flink.table.runtime.operators.rank.VariableRankRange;
+import tech.streamfusion.operator.RowDataArrowConverter;
 
 /**
  * Recognizes the streaming Top-N the native ranker implements:
@@ -132,27 +136,38 @@ final class TopNMatcher {
     var program = input instanceof Calc calc ? calc.getProgram()
         : input instanceof StreamPhysicalNativeCalc calc ? calc.sourceProgram() : null;
     if (program == null) return false;
-    ImmutableBitSet.Builder keys = ImmutableBitSet.builder();
+    // A computed key is invariant as a whole; MOD(k, 3) does not make k itself invariant.
+    Set<RexNode> keys = new HashSet<>();
     for (int key : partitions) {
       RexNode expression = program.expandLocalRef(program.getProjectList().get(key));
-      if (expression instanceof RexInputRef reference) keys.set(reference.getIndex());
+      if (purePartitionExpression(expression)) keys.add(expression);
     }
     RexNode expression = program.expandLocalRef(program.getProjectList().get(bound));
-    return partitionExpression(expression, keys.build());
+    return partitionExpression(expression, keys);
   }
 
-  private static boolean partitionExpression(RexNode expression, ImmutableBitSet keys) {
-    if (expression instanceof RexLiteral) return true;
-    if (expression instanceof RexInputRef reference) return keys.get(reference.getIndex());
+  private static boolean partitionExpression(RexNode expression, Set<RexNode> keys) {
+    if (expression instanceof RexLiteral || keys.contains(expression)) return true;
     if (!(expression instanceof RexCall call)) return false;
-    if (call.getOperator() == org.apache.calcite.sql.fun.SqlStdOperatorTable.MOD) {
-      return call.getOperands().stream().allMatch(operand -> partitionExpression(operand, keys));
-    }
+    return partitionArithmetic(call)
+        && call.getOperands().stream().allMatch(operand -> partitionExpression(operand, keys));
+  }
+
+  private static boolean purePartitionExpression(RexNode expression) {
+    if (expression instanceof RexLiteral || expression instanceof RexInputRef) return true;
+    return expression instanceof RexCall call
+        && partitionArithmetic(call)
+        && call.getOperands().stream().allMatch(TopNMatcher::purePartitionExpression);
+  }
+
+  private static boolean partitionArithmetic(RexCall call) {
     // Restrict the proof to pure numeric expressions; an arbitrary UDF's declaration is not proof
     // that repeated calls for the same partition return the same bound.
+    if (call.getOperator() == org.apache.calcite.sql.fun.SqlStdOperatorTable.MOD) return true;
+    if (call.getOperator() instanceof BridgingSqlFunction function
+        && function.getDefinition() == BuiltInFunctionDefinitions.COALESCE) return true;
     return switch (call.getKind()) {
-      case PLUS, MINUS, TIMES, DIVIDE, MOD, MINUS_PREFIX, CAST, COALESCE ->
-          call.getOperands().stream().allMatch(operand -> partitionExpression(operand, keys));
+      case PLUS, MINUS, TIMES, DIVIDE, MOD, MINUS_PREFIX, CAST, COALESCE -> true;
       default -> false;
     };
   }

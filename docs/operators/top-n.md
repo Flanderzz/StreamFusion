@@ -62,10 +62,22 @@ whose final materialized value is unchanged.
 
 All three value-ordered `ROW_NUMBER` strategies can use a non-null SMALLINT, INT or BIGINT upper bound
 that is fixed within each partition. The bound must be a partition key itself, or a pure numeric
-expression of directly projected partition keys in the preceding Calc. The current proof admits
-arithmetic, MOD, casts and COALESCE. For example, a non-null `k` supports
-`PARTITION BY k ... WHERE rn <= MOD(k, 3) + 1` without fixing one N for the entire operator.
+expression of the projected partition keys in the preceding Calc. Keys may be direct columns or
+computed expressions using arithmetic, MOD, casts and Flink's built-in COALESCE. For example, a
+non-null `k` supports both `PARTITION BY k ... WHERE rn <= MOD(k, 3) + 1` and
+`PARTITION BY MOD(k, 3) ... WHERE rn <= MOD(k, 3) + 1`. Several computed keys can jointly determine
+the bound, and COALESCE can supply a non-null bound for partitions derived from nullable columns.
 The rank column can be projected or omitted, and mini-batch materializations remain supported.
+
+The proof recognizes an entire computed key as invariant; it does not infer that the key's inputs
+are constant. `PARTITION BY MOD(k, 3) ... WHERE rn <= k` still falls back because several different
+values of `k` share the same partition. Repeated UDF calls do not establish invariance, even when
+the function declares itself deterministic. The whitelist checks the built-in COALESCE identity,
+rather than accepting a function by name.
+
+Flink may select its general retracting strategy for a computed partition key over a grouped input,
+because its metadata cannot prove the required upsert key through that expression. StreamFusion
+preserves Flink's strategy choice; a computed key does not force update-fast execution.
 
 Released Flink stores the first bound per partition and ignores later changes while incrementing
 `topn.invalidTopSize`. Proving the bound cannot change lets the native ranker read it from each
@@ -99,12 +111,17 @@ Update-fast coverage also verifies rescaling, restored TTL timestamps, equal-sor
 N=1, and retained overflow ties. A retained-metrics SQL test requires nonempty native Top-N
 input and output. Mini-batch aggregate comparisons use an explicit tie-breaker because each
 engine may emit a bundle's groups in a different map order; tied arrivals are checked with
-ordered per-record changelogs.
+ordered per-record changelogs. Computed-key tests additionally compare exact ordered changelogs
+and mini-batch materializations for arithmetic, integral casts, COALESCE and composite partitions.
+Forced SQL failures after a completed checkpoint verify continuation on memory and RocksDB for
+append-only input and grouped retractions. Native operator metrics require nonempty Top-N input
+and output, with zero bound mismatches for these proven invariant expressions.
 
 The unchanged Flink 2.2.1 streaming `RankITCase`, `DeduplicateITCase`, `LimitITCase` and
 `SortLimitITCase` also pass with StreamFusion injected: 131 passed, seven skipped. The matching
-batch rank/limit classes add 27 passing cases. The state-suite run verifies
-both native memory and RocksDB initialization. These are broader rank regressions; the local
+batch SQL rank/limit classes add 24 passing cases. The separate upstream rank state-suite run
+passes 75 cases with one skip and verifies both native memory and RocksDB initialization. Each
+suite run enforces six execution contracts: three native and three expected fallback invocations. These are broader rank regressions; the local
 SQL tests explicitly assert native routing for the newly admitted variable-bound queries.
 The upstream retracting GROUP BY/Top-N case additionally requires successful nonempty native
 updates from both operators. The upstream nullable, independently changing bound case must retain its
@@ -119,6 +136,14 @@ node and both transposes. This is a standalone coverage benchmark, not a Nexmark
 
 Reproduce with `SF_BENCHMARK=true mvn -Pbench -pl :streamfusion-runtime -am test
 -Dtest=VariableTopNBenchmark -Dsurefire.failIfNoSpecifiedTests=false`.
+
+A separate computed-key measurement on the same machine used 8,192 source keys mapped to
+4,096 partitions by `MOD(k, 4096)`, with `MOD(MOD(k, 4096), 3) + 1` bounds. One million
+append-only rows, projected rank, both transposes and the row blackhole sink remained in the
+measured path. Release/mimalloc medians after two warmups and five alternating trials were
+**1.985225 s Flink / 0.977894 s native (2.030x)**. Add
+`-Dvariabletopn.computedPartition=true` to reproduce this variant. The
+[raw trials](../benchmarks/computed-partition-topn-2026-09-18.csv) record the individual times.
 
 The general retracting variant uses the same setup and one million changelog rows, alternating
 inserts and deletes in groups of 16,384 rows (four values per key). Release/mimalloc medians

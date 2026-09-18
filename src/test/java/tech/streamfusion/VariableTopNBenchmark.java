@@ -19,14 +19,27 @@ class VariableTopNBenchmark {
   private static final int RUNS = Integer.getInteger("variabletopn.runs", 5);
   private static final boolean RETRACTING = Boolean.getBoolean("variabletopn.retracting");
   private static final boolean UPDATE_FAST = Boolean.getBoolean("variabletopn.updateFast");
+  private static final boolean COMPUTED_PARTITION =
+      Boolean.getBoolean("variabletopn.computedPartition");
+  private static final int SOURCE_KEYS = COMPUTED_PARTITION ? 8192 : 4096;
+  private static final String PARTITION = COMPUTED_PARTITION ? "MOD(k, 4096)" : "k";
+  private static final String BOUND = "MOD(" + PARTITION + ", 3) + 1";
   private static final String SQL =
       UPDATE_FAST
-          ? "INSERT INTO sink SELECT k, n AS v, rn FROM (SELECT k, v, n, MOD(k, 3) + 1 AS rank_end,"
-              + " ROW_NUMBER() OVER (PARTITION BY k ORDER BY n DESC, v ASC) AS rn"
+          ? "INSERT INTO sink SELECT k, n AS v, rn FROM (SELECT k, v, n, "
+              + BOUND
+              + " AS rank_end,"
+              + " ROW_NUMBER() OVER (PARTITION BY "
+              + PARTITION
+              + " ORDER BY n DESC, v ASC) AS rn"
               + " FROM (SELECT k, v, COUNT(*) AS n FROM src GROUP BY k, v)) WHERE rn <= rank_end"
-          : "INSERT INTO sink SELECT k, v, rn FROM (SELECT k, v, MOD(k, 3) + 1 AS rank_end,"
-                + " ROW_NUMBER() OVER (PARTITION BY k ORDER BY v DESC) AS rn FROM src) WHERE rn <="
-                + " rank_end";
+          : "INSERT INTO sink SELECT k, v, rn FROM (SELECT k, v, "
+              + BOUND
+              + " AS rank_end,"
+              + " ROW_NUMBER() OVER (PARTITION BY "
+              + PARTITION
+              + " ORDER BY v DESC) AS rn FROM src) WHERE rn <="
+              + " rank_end";
 
   @Test
   void variableTopN() throws Exception {
@@ -58,8 +71,9 @@ class VariableTopNBenchmark {
     double nativeTime = median(times[1]);
     System.out.printf(
         Locale.ROOT,
-        "[variable-top-n] retracting=%s update_fast=%s rows=%d Flink=%.6fs Native=%.6fs ratio=%.3fx"
-            + " host_trials=%s native_trials=%s%n",
+        "[variable-top-n] computed_partition=%s retracting=%s update_fast=%s rows=%d Flink=%.6fs"
+            + " Native=%.6fs ratio=%.3fx host_trials=%s native_trials=%s%n",
+        COMPUTED_PARTITION,
         RETRACTING,
         UPDATE_FAST,
         ROWS,
@@ -84,12 +98,12 @@ class VariableTopNBenchmark {
         env.fromSequence(0, ROWS - 1)
             .map(
                 i -> {
-                  if (UPDATE_FAST) return Row.of(i % 4096, (i / 4096) % 16);
-                  if (!RETRACTING) return Row.of(i % 4096, i);
+                  if (UPDATE_FAST) return Row.of(i % SOURCE_KEYS, (i / 4096) % 16);
+                  if (!RETRACTING) return Row.of(i % SOURCE_KEYS, i);
                   long cycle = i / 16384;
                   return Row.ofKind(
                       cycle % 2 == 0 ? RowKind.INSERT : RowKind.DELETE,
-                      i % 4096,
+                      i % SOURCE_KEYS,
                       (cycle / 2) * 16384 + i % 16384);
                 })
             .returns(Types.ROW_NAMED(new String[] {"k", "v"}, Types.LONG, Types.LONG));

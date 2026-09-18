@@ -19,10 +19,10 @@ import org.apache.flink.table.api.Schema;
 import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.apache.flink.types.Row;
-import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import tech.streamfusion.planner.NativePlanner;
 
 class FlinkUpdateFastVariableTopNSqlHarnessTest {
@@ -50,6 +50,33 @@ class FlinkUpdateFastVariableTopNSqlHarnessTest {
     NativeParity.assertChangelogParity(() -> environment(false), sql);
   }
 
+  @ParameterizedTest
+  @MethodSource("computedPartitions")
+  void computedPartitionBoundsOverGroupsMatchReleasedFlink(String partition, String bound)
+      throws Exception {
+    for (boolean rank : new boolean[] {false, true}) {
+      String sql =
+          query(bound, rank, false)
+              .replace("PARTITION BY k", "PARTITION BY " + partition)
+              .replace("n DESC, id ASC", "n DESC, k ASC, id ASC");
+      String hostPlan = environment(false).explainSql(sql);
+      // Flink cannot carry the grouped upsert key through these computed partition keys.
+      assertTrue(hostPlan.contains("RetractStrategy"), hostPlan);
+      String plan = NativePlanner.explain(environment(false), sql);
+      assertTrue(plan.contains("NativeColumnarTopN"), plan);
+      NativeParity.assertOrderedKindedParity(() -> environment(false), sql);
+      NativeParity.assertChangelogParity(() -> environment(false), sql);
+      NativeParity.assertChangelogParity(() -> environment(true), sql);
+    }
+  }
+
+  static Stream<Arguments> computedPartitions() {
+    return Stream.of(
+        Arguments.of("MOD(k, 3)", "MOD(k, 3) + 1"),
+        Arguments.of("CAST(MOD(k, 3) AS SMALLINT)", "CAST(MOD(k, 3) AS SMALLINT) + 1"),
+        Arguments.of("MOD(k, 3), MOD(id, 2)", "MOD(k, 3) + MOD(id, 2) + 1"));
+  }
+
   static Stream<Arguments> orderedQueries() {
     return queries().filter(args -> !(boolean) args.get()[2]);
   }
@@ -63,8 +90,9 @@ class FlinkUpdateFastVariableTopNSqlHarnessTest {
     NativeParity.assertChangelogParity(() -> environment(true), query(bound, rank, ties));
   }
 
-  @Test
-  void variableUpdateFastActuallyProcessesNativeRows() throws Exception {
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  void variableBoundsActuallyProcessNativeRows(boolean computedPartition) throws Exception {
     var reporter = InMemoryReporter.createWithRetainedMetrics();
     var cluster =
         new MiniClusterResource(
@@ -76,8 +104,14 @@ class FlinkUpdateFastVariableTopNSqlHarnessTest {
     cluster.before();
     try {
       var table = environment(new TestStreamEnvironment(cluster.getMiniCluster(), 1), false);
+      String sql = query("MOD(k, 3) + 1", true, false);
+      if (computedPartition) sql = sql.replace("PARTITION BY k", "PARTITION BY MOD(k, 3)");
+      String hostPlan = table.explainSql(sql);
+      assertTrue(
+          hostPlan.contains(computedPartition ? "RetractStrategy" : "UpdateFastStrategy"),
+          hostPlan);
       var scan = NativePlanner.install(table);
-      var result = table.executeSql(query("MOD(k, 3) + 1", true, false));
+      var result = table.executeSql(sql);
       try (var rows = result.collect()) {
         while (rows.hasNext()) rows.next();
       }
@@ -85,10 +119,11 @@ class FlinkUpdateFastVariableTopNSqlHarnessTest {
       var groups =
           reporter.findOperatorMetricGroups(
               result.getJobClient().orElseThrow().getJobID(), "(?i)NativeColumnarTopN");
-      assertEquals(1, groups.size(), "the variable update-fast rank must execute natively");
+      assertEquals(1, groups.size(), "the variable rank must execute natively");
       var metrics = reporter.getMetricsByGroup(groups.iterator().next());
       assertTrue(((Counter) metrics.get("numRecordsIn")).getCount() > 0);
       assertTrue(((Counter) metrics.get("numRecordsOut")).getCount() > 0);
+      assertEquals(0, ((Counter) metrics.get("topn.invalidTopSize")).getCount());
     } finally {
       cluster.after();
     }
