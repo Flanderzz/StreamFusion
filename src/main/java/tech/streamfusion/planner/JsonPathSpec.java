@@ -10,6 +10,7 @@ final class JsonPathSpec {
   private static final Pattern MODE =
       Pattern.compile("^\\s*(strict|lax)\\s+(.+)$", Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
   private static final String ESCAPE = "\\\\(?:u[0-9a-fA-F]{4}|[^u])";
+  // Jayway skips only spaces before an index, then String.trim() removes trailing ASCII controls.
   private static final Pattern STEP =
       Pattern.compile(
           "\\.(?<dot>[\\p{L}_][\\p{L}\\p{N}_]*)"
@@ -19,7 +20,7 @@ final class JsonPathSpec {
               + "|\\[ *\"(?<quoted>(?:[^\"\\\\\\x00-\\x1f]|"
               + ESCAPE
               + ")*)\" *\\]"
-              + "|\\[ *(?<index>-?[0-9]+) *\\]");
+              + "|\\[ *(?<index>-?[0-9]+)[\\x00-\\x20]*\\]");
 
   private JsonPathSpec() {}
 

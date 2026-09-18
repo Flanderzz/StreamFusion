@@ -780,13 +780,34 @@ unpaired surrogates and dynamic paths fall back. Quoted `'*'` is an ordinary mem
 not a wildcard.
 
 ASCII spaces around a bracket member or index are native, for example `$[ 'user' ][ -01 ]`.
-Trailing ASCII spaces after a complete path are also accepted. The planner removes only
-these syntactic spaces; spaces inside quoted names remain significant. An explicit
-case-insensitive `strict`/`lax` prefix accepts Flink's mode-separating whitespace. Leading
-whitespace without a mode and tabs/newlines inside or after the path stay on Flink: Jayway
-handles them differently depending on the preceding token, so general whitespace trimming
-would change the selected value. Remaining path extensions are tracked in
+Trailing ASCII spaces after a complete path are also accepted. After an array index's final
+digit and before its closing `]`, the planner also removes any sequence of characters U+0000
+through U+0020, matching Jayway's `String.trim()` on the index expression. Thus `$[1\t\n ]`
+(where `\t` and `\n` stand for literal tab and newline) uses the same native selector as `$[1]`.
+This works with negative indexes, leading zeros and nested paths. Before the index, only ASCII
+spaces are admitted; controls within digits, before an index, after a quoted member, or outside
+the brackets still fall back. DEL, non-breaking space and other Unicode whitespace also remain
+outside this index suffix grammar.
+
+The planner removes only these verified syntactic characters; spaces inside quoted names
+remain significant. An explicit case-insensitive `strict`/`lax` prefix accepts Flink's
+mode-separating whitespace. Leading whitespace without a mode and other tabs/newlines in the
+path stay on Flink: Jayway handles them differently depending on the preceding token, so general
+whitespace trimming would change the selected value. Runtime tests exercise every ASCII control
+suffix against released Flink, preserve strict/lax and error policies, and verify 5,003 rows
+consumed and emitted by native Calc. Normalized literal paths register no JVM UDF callback.
+Remaining path extensions are tracked in
 [#91](https://github.com/datafusion-contrib/StreamFusion/issues/91).
+
+The trailing-index-control benchmark selects `$.a[31\t\n ]` from 32-element arrays with
+264 bytes of padding. Release/mimalloc, one million rowwise inputs, two warmups and five
+alternating trials measured **1.705216s / 1.665379s** for JSON_VALUE (Flink/native, 1.024×)
+and **1.672195s / 1.480013s** for JSON_EXISTS (1.130×). The same-source identity control
+measured 0.465055s / 0.861789s (0.540×). Both transposes and the rowwise blackhole sink are
+included. Reproduce with `ScalarFunctionBenchmark#individualFunctions`, the `bench` profile,
+`-Dscalar.functions=JSON_VALUE_INDEX_WHITESPACE,JSON_EXISTS_INDEX_WHITESPACE`,
+`-Dscalar.rows=1000000 -Dscalar.bytes=264 -Dscalar.warmup=2 -Dscalar.runs=5`, and
+`SF_BENCHMARK=true`.
 
 Empty-name SQL regressions execute against released Flink with native Calc assertions,
 covering both quote styles, bracket spaces, nested objects/arrays, duplicate ancestors,

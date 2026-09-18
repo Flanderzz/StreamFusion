@@ -86,7 +86,29 @@ class JsonPathSpecTest {
     assertEquals("strict $[\"a'b\"]", JsonPathSpec.normalize("$[ \"a'b\" ]"));
     assertEquals("strict $[''][\"\"]", JsonPathSpec.normalize("$[ '' ][ \"\" ]"));
     for (String path :
-        List.of(" $[1]", "$[\t1]", "$[1\n]", "$[\t'a']", "$[1 2]", "$.a\t", "$[1]\t", "$[1] \n")) {
+        List.of(" $[1]", "$[\t1]", "$[\t'a']", "$[1 2]", "$.a\t", "$[1]\t", "$[1] \n")) {
+      assertNull(JsonPathSpec.normalize(path), path);
+    }
+  }
+
+  @Test
+  void arrayIndexesTrimOnlyTrailingAsciiControlsInsideTheBrackets() {
+    for (int c = 0; c <= 0x20; c++) {
+      assertEquals("strict $[-0001]", JsonPathSpec.normalize("$[ -0001 " + (char) c + " ]"));
+      assertEquals("lax $.a[0]['q']", JsonPathSpec.normalize("lax $.a[0" + (char) c + "]['q']"));
+    }
+    for (String path :
+        List.of(
+            "$[1\u0021]",
+            "$[1\u007f]",
+            "$[1\u0085]",
+            "$[1\u00a0]",
+            "$[1\u2003]",
+            "$[1\u2028]",
+            "$[1\t2]",
+            "$[-\t1]",
+            "$[\t1]",
+            "$[1]\t")) {
       assertNull(JsonPathSpec.normalize(path), path);
     }
   }
@@ -119,6 +141,7 @@ class JsonPathSpecTest {
                 "$[-1]",
                 "$[-2147483648]",
                 "$[-0]",
+                "$[ 01\t\n ]",
                 "$['a\\'b']",
                 "$['a\\\\b']",
                 "$['\\用户']",
