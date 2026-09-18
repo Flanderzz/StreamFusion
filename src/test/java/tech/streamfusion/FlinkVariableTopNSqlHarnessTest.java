@@ -83,7 +83,7 @@ class FlinkVariableTopNSqlHarnessTest {
   @ValueSource(strings = {"k", "MOD(k, 4) + 1", "id"})
   void computedPartitionDoesNotMakeItsInputsInvariant(String bound) throws Exception {
     NativeParity.assertFallbackReasonContains(
-        () -> environment(false, false),
+        () -> retractingEnvironment(false),
         query(bound, true).replace("PARTITION BY k", "PARTITION BY MOD(k, 3)"),
         "variable rank bound must be derived from partition keys");
   }
@@ -111,7 +111,7 @@ class FlinkVariableTopNSqlHarnessTest {
   void declaredDeterministicUdfIsNotProofOfPartitionInvariance() throws Exception {
     NativeParity.assertFallbackReasonContains(
         () -> {
-          TableEnvironment table = environment(false, false);
+          TableEnvironment table = retractingEnvironment(false);
           table.createTemporarySystemFunction("custom_bound", BoundFunction.class);
           return table;
         },
@@ -158,11 +158,11 @@ class FlinkVariableTopNSqlHarnessTest {
   }
 
   @Test
-  void independentlyChangingBoundsRetainFirstBoundFallback() throws Exception {
-    NativeParity.assertFallbackReasonContains(
-        () -> environment(false, false),
-        query("id", true),
-        "variable rank bound must be derived from partition keys");
+  void independentlyChangingAppendOnlyBoundsUseTheFirstValue() throws Exception {
+    for (boolean rank : new boolean[] {false, true}) {
+      NativeParity.assertOrderedKindedParity(() -> environment(false, false), query("id", rank));
+      NativeParity.assertChangelogParity(() -> environment(false, true), query("id", rank));
+    }
   }
 
   @Test

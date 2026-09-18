@@ -21,9 +21,11 @@ class VariableTopNBenchmark {
   private static final boolean UPDATE_FAST = Boolean.getBoolean("variabletopn.updateFast");
   private static final boolean COMPUTED_PARTITION =
       Boolean.getBoolean("variabletopn.computedPartition");
+  private static final boolean CHANGING_BOUND = Boolean.getBoolean("variabletopn.changingBound");
   private static final int SOURCE_KEYS = COMPUTED_PARTITION ? 8192 : 4096;
   private static final String PARTITION = COMPUTED_PARTITION ? "MOD(k, 4096)" : "k";
-  private static final String BOUND = "MOD(" + PARTITION + ", 3) + 1";
+  private static final String BOUND =
+      CHANGING_BOUND ? "MOD(COALESCE(v, 0), 3) + 1" : "MOD(" + PARTITION + ", 3) + 1";
   private static final String SQL =
       UPDATE_FAST
           ? "INSERT INTO sink SELECT k, n AS v, rn FROM (SELECT k, v, n, "
@@ -43,6 +45,9 @@ class VariableTopNBenchmark {
 
   @Test
   void variableTopN() throws Exception {
+    if (CHANGING_BOUND && (UPDATE_FAST || RETRACTING)) {
+      throw new IllegalArgumentException("Changing bounds require append-only input");
+    }
     if (UPDATE_FAST && !environment().explainSql(SQL).contains("UpdateFastStrategy")) {
       throw new IllegalStateException("Expected Flink's update-fast strategy");
     }
@@ -71,11 +76,12 @@ class VariableTopNBenchmark {
     double nativeTime = median(times[1]);
     System.out.printf(
         Locale.ROOT,
-        "[variable-top-n] computed_partition=%s retracting=%s update_fast=%s rows=%d Flink=%.6fs"
-            + " Native=%.6fs ratio=%.3fx host_trials=%s native_trials=%s%n",
+        "[variable-top-n] computed_partition=%s retracting=%s update_fast=%s changing_bound=%s"
+            + " rows=%d Flink=%.6fs Native=%.6fs ratio=%.3fx host_trials=%s native_trials=%s%n",
         COMPUTED_PARTITION,
         RETRACTING,
         UPDATE_FAST,
+        CHANGING_BOUND,
         ROWS,
         host,
         nativeTime,

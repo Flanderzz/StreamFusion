@@ -70,8 +70,9 @@ the bound, and COALESCE can supply a non-null bound for partitions derived from 
 The rank column can be projected or omitted, and mini-batch materializations remain supported.
 
 The proof recognizes an entire computed key as invariant; it does not infer that the key's inputs
-are constant. `PARTITION BY MOD(k, 3) ... WHERE rn <= k` still falls back because several different
-values of `k` share the same partition. Repeated UDF calls do not establish invariance, even when
+are constant. Several different values of `k` can share `PARTITION BY MOD(k, 3)`, so a bound of
+`k` requires first-bound state for append-only input and still falls back for updating input.
+Repeated UDF calls do not establish invariance, even when
 the function declares itself deterministic. The whitelist checks the built-in COALESCE identity,
 rather than accepting a function by name.
 
@@ -82,11 +83,29 @@ preserves Flink's strategy choice; a computed key does not force update-fast exe
 Released Flink stores the first bound per partition and ignores later changes while incrementing
 `topn.invalidTopSize`. Proving the bound cannot change lets the native ranker read it from each
 Arrow row and reuse its existing rank-buffer state, TTL and memory/RocksDB checkpoint formats.
-The proof retains Calc expressions through native substitution and input pruning. Independently
-changing bounds retain an explicit fallback until their first-bound state and separate TTL
-contract are implemented. Nullable bounds remain on Flink because its primitive row access does not express ordinary SQL null propagation here.
+The proof retains Calc expressions through native substitution and input pruning.
 
-Zero and negative bounds select no materialized rows. For insert-only and update-fast input,
+Append-only input also admits a non-null integral bound that changes independently of the
+partition keys. Native state retains the first bound per partition, ignores later proposals,
+and increments `topn.invalidTopSize` for every mismatch, including rows that fail rank admission.
+The emitted payload keeps each row's actual proposed bound. The bound's TTL starts when it is
+created; later reads and row-state writes do not refresh it. After expiry the next proposal
+becomes the new bound, while any live ranked rows remain available. A nonpositive bound still
+has state even when its row buffer is empty. With projected ranks, the buffer retains the entire
+first sort-key group extending beyond N, including at N=0, matching Flink's later positional
+updates when the bound expires and widens.
+
+This changing-bound path honors the plan's UPDATE_BEFORE setting and emits per-record
+transitions even with mini-batching enabled;
+naive net diffs would introduce deletions that Flink does not emit when an expired bound shrinks.
+Memory checkpoints, RocksDB checkpoints, canonical savepoints and rescaling preserve both the
+bound and its independent timestamp. Mismatch counts return through the existing batch JNI call;
+there is no JNI call per row. Partition-invariant bounds keep their existing net-diff optimization
+and row-only checkpoint layout. Nullable bounds remain on Flink because its primitive row access
+does not express ordinary SQL null propagation here. Independently changing bounds on updating
+or retracting input remain in [#104](https://github.com/datafusion-contrib/StreamFusion/issues/104).
+
+Initially zero and negative bounds select no materialized rows. For insert-only and update-fast input,
 large bounds preserve Flink 2.2.1's variable-range admission rule: after 100 retained rows, a new sort key must strictly improve on the current worst
 key, even when the selected bound is greater than 100. This is an admission threshold, not a
 100-row output cap; improving arrivals can fill the selected range.
@@ -115,7 +134,12 @@ ordered per-record changelogs. Computed-key tests additionally compare exact ord
 and mini-batch materializations for arithmetic, integral casts, COALESCE and composite partitions.
 Forced SQL failures after a completed checkpoint verify continuation on memory and RocksDB for
 append-only input and grouped retractions. Native operator metrics require nonempty Top-N input
-and output, with zero bound mismatches for these proven invariant expressions.
+and output, with zero bound mismatches for these proven invariant expressions. Changing-bound
+SQL tests additionally require the exact mismatch count and the original proposed bounds in
+emitted payloads. Controlled-clock tests compare against the released Flink Top-N operator
+with and without UPDATE_BEFORE through bound expiry, row refresh, shrinking bounds, empty
+buffers, checkpoint restoration and
+canonical memory/RocksDB transitions; a separate rescale test preserves bound-only keys.
 
 The unchanged Flink 2.2.1 streaming `RankITCase`, `DeduplicateITCase`, `LimitITCase` and
 `SortLimitITCase` also pass with StreamFusion injected: 131 passed, seven skipped. The matching
@@ -136,6 +160,14 @@ node and both transposes. This is a standalone coverage benchmark, not a Nexmark
 
 Reproduce with `SF_BENCHMARK=true mvn -Pbench -pl :streamfusion-runtime -am test
 -Dtest=VariableTopNBenchmark -Dsurefire.failIfNoSpecifiedTests=false`.
+
+The independently changing append-only case uses `MOD(COALESCE(v, 0), 3) + 1` instead, with
+one million rows, 4,096 partitions, projected rank and parallelism 1. On the same Apple M1 Max,
+release/mimalloc medians after two warmups and five alternating trials were **2.047443 s Flink /
+0.681449 s native (3.005x)**, with both transposes and the row blackhole sink. Add
+`-Dvariabletopn.changingBound=true` to reproduce it. An invariant-bound control run with the
+same build measured **2.012879 s Flink / 0.966614 s native (2.082x)**, retaining the existing
+path's approximately 0.966 s native median.
 
 A separate computed-key measurement on the same machine used 8,192 source keys mapped to
 4,096 partitions by `MOD(k, 4096)`, with `MOD(MOD(k, 4096), 3) + 1` bounds. One million
@@ -193,8 +225,8 @@ Reproduce with `SF_BENCHMARK=true mvn -Pbench -pl :streamfusion-runtime -am test
   exchanges and batch markers remain native. Preserving the upstream bundle order is the
   remaining composition work in [#102](https://github.com/datafusion-contrib/StreamFusion/issues/102).
 
-- A variable rank range outside the non-null, partition-derived forms above.
-  Nullable and independently changing bounds remain in
+- Nullable variable bounds, and independently changing bounds on updating/retracting input,
+  remain in
   [#104](https://github.com/datafusion-contrib/StreamFusion/issues/104).
 - A row type the native converter can't carry.
 - Time-ordered ranks beyond the existing rank-1 dedup forms and the processing-time first-N

@@ -1,8 +1,5 @@
 package tech.streamfusion.planner;
 
-import tech.streamfusion.operator.ArrowBatch;
-import tech.streamfusion.operator.ArrowBatchTypeInformation;
-import tech.streamfusion.operator.NativeColumnarTopNOperator;
 import java.util.Collections;
 import org.apache.flink.api.dag.Transformation;
 import org.apache.flink.configuration.ReadableConfig;
@@ -16,6 +13,9 @@ import org.apache.flink.table.planner.plan.nodes.exec.InputProperty;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.StreamExecNode;
 import org.apache.flink.table.planner.plan.nodes.exec.utils.ExecNodeUtil;
 import org.apache.flink.table.types.logical.RowType;
+import tech.streamfusion.operator.ArrowBatch;
+import tech.streamfusion.operator.ArrowBatchTypeInformation;
+import tech.streamfusion.operator.NativeColumnarTopNOperator;
 
 /** Wraps the columnar append-only Top-N operator into the plan; Arrow batches in and out. */
 public class NativeColumnarTopNExecNode extends ExecNodeBase<ArrowBatch>
@@ -30,6 +30,7 @@ public class NativeColumnarTopNExecNode extends ExecNodeBase<ArrowBatch>
   private final long offset;
   private final long limit;
   private final int rankEndColumn;
+  private final boolean firstBound;
   private final boolean outputRankNumber;
   private final boolean retracting;
   // Update-fast mode: the unique-key columns identifying the row a record replaces (null otherwise).
@@ -55,7 +56,8 @@ public class NativeColumnarTopNExecNode extends ExecNodeBase<ArrowBatch>
       int[] rowKeyColumns,
       boolean generateUpdateBefore,
       int[] rowKeyTimestampPrecisions,
-      int[] keyTimestampPrecisions) {
+      int[] keyTimestampPrecisions,
+      boolean firstBound) {
     super(
         ExecNodeContext.newNodeId(),
         new ExecNodeContext("stream-exec-native-columnar-top-n_1"),
@@ -70,6 +72,7 @@ public class NativeColumnarTopNExecNode extends ExecNodeBase<ArrowBatch>
     this.offset = offset;
     this.limit = limit;
     this.rankEndColumn = rankEndColumn;
+    this.firstBound = firstBound;
     this.outputRankNumber = outputRankNumber;
     this.retracting = retracting;
     this.rowKeyColumns = rowKeyColumns;
@@ -88,8 +91,10 @@ public class NativeColumnarTopNExecNode extends ExecNodeBase<ArrowBatch>
     // per-record intermediate rank windows. The final materialized Top-N is identical; with
     // mini-batch off, the per-input-row changelog remains byte-identical to the host path.
     // Hidden-rank OFFSET mutates retained row kinds on each emission, affecting later equality.
-    boolean netDiff = config.get(ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_ENABLED)
-        && !(retracting && offset > 0 && !outputRankNumber && rowKeyColumns == null);
+    boolean netDiff =
+        !firstBound
+            && config.get(ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_ENABLED)
+            && !(retracting && offset > 0 && !outputRankNumber && rowKeyColumns == null);
     long miniBatchSize = config.get(ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_SIZE);
     // The job-wide idle-state retention; Flink defines STATE_TTL hints only for joins and
     // aggregates, so ranks have no per-operator override to resolve.
@@ -119,7 +124,8 @@ public class NativeColumnarTopNExecNode extends ExecNodeBase<ArrowBatch>
                 miniBatchSize,
                 stateTtlMillis,
                 maxParallelism,
-                rankEndColumn),
+                rankEndColumn,
+                firstBound),
             ArrowBatchTypeInformation.INSTANCE,
             input.getParallelism(),
             false);

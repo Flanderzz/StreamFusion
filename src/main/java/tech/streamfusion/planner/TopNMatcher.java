@@ -27,13 +27,13 @@ import org.apache.flink.table.runtime.operators.rank.VariableRankRange;
 import tech.streamfusion.operator.RowDataArrowConverter;
 
 /**
- * Recognizes the streaming Top-N the native ranker implements:
- * {@code ROW_NUMBER() OVER (PARTITION BY … ORDER BY …) BETWEEN rankStart AND rankEnd}, with or
- * without the rank number projected. Requires {@code ROW_NUMBER} (Flink rejects streaming
- * RANK/DENSE_RANK), a constant or verified partition-invariant rank range, and column types the conversion
- * supports. The caller picks the ranker: the append-only one for an insert-only, no-offset query, or
- * the retracting one (full buffer, rank window {@code [offset+1, rankEnd]}) for a changelog input or
- * an {@code OFFSET} (rank start > 1).
+ * Recognizes the streaming Top-N the native ranker implements: {@code ROW_NUMBER() OVER (PARTITION
+ * BY … ORDER BY …) BETWEEN rankStart AND rankEnd}, with or without the rank number projected.
+ * Requires {@code ROW_NUMBER} (Flink rejects streaming RANK/DENSE_RANK), a constant or supported
+ * variable rank range, and column types the conversion supports. Independently changing variable
+ * bounds require insert-only input. The caller picks the ranker: the append-only one for an
+ * insert-only, no-offset query, or the retracting one (full buffer, rank window {@code [offset+1,
+ * rankEnd]}) for a changelog input or an {@code OFFSET} (rank start > 1).
  */
 final class TopNMatcher {
 
@@ -57,7 +57,8 @@ final class TopNMatcher {
         case SMALLINT, INTEGER, BIGINT -> {}
         default -> { return "Top-N: variable rank bounds require SMALLINT, INT or BIGINT"; }
       }
-      if (!partitionInvariant(rank.getInput(), variable.getRankEndIndex(), rank.partitionKey())) {
+      if (!partitionInvariant(rank.getInput(), variable.getRankEndIndex(), rank.partitionKey())
+          && !ChangelogPlanUtils.isInsertOnly((StreamPhysicalRel) rank.getInput())) {
         return "Top-N: variable rank bound must be derived from partition keys";
       }
     } else if (!(rank.rankRange() instanceof ConstantRankRange)) {
@@ -251,6 +252,9 @@ final class TopNMatcher {
         TopNMatcher.outputRankNumber(rank),
         retracting,
         null,
-        ChangelogPlanUtils.generateUpdateBefore(rank));
+        ChangelogPlanUtils.generateUpdateBefore(rank),
+        rank.rankRange() instanceof VariableRankRange variable
+            && !partitionInvariant(
+                rank.getInput(), variable.getRankEndIndex(), rank.partitionKey()));
   }
 }

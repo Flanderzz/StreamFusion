@@ -3510,7 +3510,7 @@ pub extern "system" fn Java_tech_streamfusion_Native_pushRocksDBTopNRanker<'loca
     now: jlong,
     out_array: jlong,
     out_schema: jlong,
-) {
+) -> jlong {
     crate::bridge::jni_guard(env, move |mut env| {
         let ranker = unsafe { &mut *(handle as *mut RocksTopNHandle) };
         // See updateTumblingAggregator: the batch's JVM release upcall must precede any throw.
@@ -3522,6 +3522,7 @@ pub extern "system" fn Java_tech_streamfusion_Native_pushRocksDBTopNRanker<'loca
             Ok(out) => export_record_batch(out, out_array, out_schema),
             Err(e) => throw_memory_limit(&mut env, &e.to_string()),
         }
+        ranker.take_invalid_top_size() as jlong
     })
 }
 

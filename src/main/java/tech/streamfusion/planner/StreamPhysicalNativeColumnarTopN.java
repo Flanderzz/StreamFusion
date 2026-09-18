@@ -27,6 +27,7 @@ public class StreamPhysicalNativeColumnarTopN extends StreamPhysicalNativeSingle
   private final long offset;
   private final long limit;
   private final int rankEndColumn;
+  private final boolean firstBound;
   private final boolean outputRankNumber;
   private final boolean retracting;
   // Update-fast mode: the unique-key columns identifying the row a record replaces (null otherwise).
@@ -49,6 +50,42 @@ public class StreamPhysicalNativeColumnarTopN extends StreamPhysicalNativeSingle
       boolean retracting,
       int[] rowKeyColumns,
       boolean generateUpdateBefore) {
+    this(
+        cluster,
+        traitSet,
+        input,
+        outputRowType,
+        partitionColumns,
+        sortIndices,
+        sortAscending,
+        sortNullsFirst,
+        offset,
+        limit,
+        rankEndColumn,
+        outputRankNumber,
+        retracting,
+        rowKeyColumns,
+        generateUpdateBefore,
+        false);
+  }
+
+  public StreamPhysicalNativeColumnarTopN(
+      RelOptCluster cluster,
+      RelTraitSet traitSet,
+      RelNode input,
+      RelDataType outputRowType,
+      int[] partitionColumns,
+      int[] sortIndices,
+      int[] sortAscending,
+      int[] sortNullsFirst,
+      long offset,
+      long limit,
+      int rankEndColumn,
+      boolean outputRankNumber,
+      boolean retracting,
+      int[] rowKeyColumns,
+      boolean generateUpdateBefore,
+      boolean firstBound) {
     super(cluster, traitSet, input, outputRowType);
     this.partitionColumns = partitionColumns;
     this.sortIndices = sortIndices;
@@ -57,6 +94,7 @@ public class StreamPhysicalNativeColumnarTopN extends StreamPhysicalNativeSingle
     this.offset = offset;
     this.limit = limit;
     this.rankEndColumn = rankEndColumn;
+    this.firstBound = firstBound;
     this.outputRankNumber = outputRankNumber;
     this.retracting = retracting;
     this.rowKeyColumns = rowKeyColumns;
@@ -85,7 +123,8 @@ public class StreamPhysicalNativeColumnarTopN extends StreamPhysicalNativeSingle
         outputRankNumber,
         retracting,
         rowKeyColumns,
-        generateUpdateBefore);
+        generateUpdateBefore,
+        firstBound);
   }
 
   @Override
@@ -109,6 +148,7 @@ public class StreamPhysicalNativeColumnarTopN extends StreamPhysicalNativeSingle
         rowKeyColumns == null
             ? null
             : FlinkKeyGroupUtils.timestampPrecisions(getInput().getRowType(), rowKeyColumns),
-        FlinkKeyGroupUtils.timestampPrecisions(getInput().getRowType(), partitionColumns));
+        FlinkKeyGroupUtils.timestampPrecisions(getInput().getRowType(), partitionColumns),
+        firstBound);
   }
 }
