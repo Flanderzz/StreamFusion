@@ -32,6 +32,47 @@ operands hoisted by host code generation. Pure expressions retain their
 existing native CASE lowering. Runtime tests cover INT/STRING stateful UDFs, predicates, nested
 expressions, seeded random calls and multiple batches, including NOT NULL output constraints.
 
+## IF
+
+`IF(condition, then_value, else_value)` is admitted by resolved built-in identity. A true
+condition selects the first value; false or NULL selects the second. Pure branches whose
+types already match Flink's result type use the existing native searched-CASE expression,
+so unselected branches are not evaluated. Empty filtered batches skip the projection.
+
+When Flink must normalize branch types, or the expression contains scalar UDFs or volatile
+calls, the complete IF uses the existing generated-expression bridge inside native Calc.
+This retains Flink's branch casts, call counts and code-generation evaluation order. A
+user-defined function named IF retains its own implementation. Unsupported children retain
+the existing admission rules. SQL parity tests cover exact numerics, strings, temporal and
+binary values, nullable conditions, nested expressions, errors and multiple batches.
+The admitted result types are numeric, character, DATE, TIME, plain TIMESTAMP and binary.
+BOOLEAN, TIMESTAMP_LTZ and complex result types retain fallback because their IF overloads
+are not registered by the released Flink code generator.
+
+The release benchmark below measures this coverage change against the previous full Flink
+fallback, using `ScalarFunctionBenchmark` on Apple Silicon/JDK 17 with mimalloc,
+parallelism 1, 2,000,000 runtime rows, NULL every seventh row, two warmups and five
+interleaved measurements per engine. Both row/Arrow transposes are asserted; the string
+payload budget is 264 bytes. Medians in seconds:
+
+| Expression | Flink | Native | Flink/native |
+| --- | ---: | ---: | ---: |
+| String identity control | 0.667389 | 0.947148 | 0.705x |
+| BIGINT identity control | 0.272022 | 0.406177 | 0.670x |
+| `IF(s IS NULL, 'missing', s)` | 0.731814 | 2.237345 | 0.327x |
+| `IF(n > 0, n, CAST(0 AS BIGINT))` | 0.298706 | 0.453794 | 0.658x |
+
+These short row-fed pipelines are slower than Flink. This is expression coverage that
+allows IF to remain within a larger native pipeline, not a standalone speed improvement;
+no larger-pipeline gain is established by these measurements. Reproduce with:
+
+```bash
+SF_BENCHMARK=true mvn -pl streamfusion-runtime -am test -Pbench \
+  -Dtest=ScalarFunctionBenchmark -Dsurefire.failIfNoSpecifiedTests=false \
+  -Dscalar.functions=IF_STRING,IF_BIGINT -Dscalar.rows=2000000 \
+  -Dscalar.nullEvery=7 -Dscalar.warmup=2 -Dscalar.runs=5
+```
+
 ## IFNULL
 
 `IFNULL(value, replacement)` runs natively with Flink's resolved common operand type and
