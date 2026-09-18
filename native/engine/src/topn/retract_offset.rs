@@ -139,7 +139,11 @@ mod tests {
         };
         let mut ranker = restore(&legacy.snapshot());
         ranker.push(&batch(vec![5, 5], vec![0, 3]), 0).unwrap();
-        let retained: Vec<_> = ranker.groups.iter().flat_map(|(_, rows)| rows.iter()).collect();
+        let retained: Vec<_> = ranker
+            .groups
+            .iter()
+            .flat_map(|(_, rows)| rows.iter())
+            .collect();
         assert!(retained.iter().all(|row| row.sort_count.is_none()));
         assert!(retained.iter().any(|row| row.stored_kind != 0));
         let mut restored = restore(&ranker.snapshot());

@@ -1,8 +1,8 @@
 use crate::*;
 
-mod retract_offset;
 #[cfg(test)]
 mod first_bound_tests;
+mod retract_offset;
 
 fn sort_array(array: &ArrayRef) -> ArrayRef {
     use arrow::array::AsArray;
@@ -373,11 +373,14 @@ impl crate::state::RocksStateCodec for TopNStateCodec {
         vec![("rows".to_string(), DataType::Binary)]
     }
     fn value_bytes(&self, value: &TopNPartition) -> usize {
-        4 + if value.first_rank_end.is_some() { 24 } else { 0 }
-            + value
-                .iter()
-                .map(|entry| 16 + entry.sort.row().data().len() + entry.payload.row().data().len())
-                .sum::<usize>()
+        4 + if value.first_rank_end.is_some() {
+            24
+        } else {
+            0
+        } + value
+            .iter()
+            .map(|entry| 16 + entry.sort.row().data().len() + entry.payload.row().data().len())
+            .sum::<usize>()
             + if value
                 .iter()
                 .any(|row| row.sort_count.is_some() || row.stored_kind != 0)
@@ -449,7 +452,8 @@ impl crate::state::RocksStateCodec for TopNStateCodec {
         } else {
             assert_eq!(cursor.bytes.len(), 24, "invalid first-bound state trailer");
             assert_eq!(
-                &cursor.bytes[..8], FIRST_BOUND_MAGIC,
+                &cursor.bytes[..8],
+                FIRST_BOUND_MAGIC,
                 "unknown first-bound state version"
             );
             cursor.bytes = &cursor.bytes[8..];
@@ -630,7 +634,10 @@ impl<S: KeyedStateStore<TopNPartition>> TopNRanker<S> {
     /// Moves this freshly built (empty, memory-backed) ranker's configuration onto another state
     /// backend; construction goes through `new` + builders first so backend choice stays
     /// orthogonal to the shape builders.
-    pub(crate) fn with_backend<T: KeyedStateStore<TopNPartition>>(self, groups: T) -> TopNRanker<T> {
+    pub(crate) fn with_backend<T: KeyedStateStore<TopNPartition>>(
+        self,
+        groups: T,
+    ) -> TopNRanker<T> {
         TopNRanker {
             partition_columns: self.partition_columns,
             key_timestamp_precisions: self.key_timestamp_precisions,
@@ -790,7 +797,9 @@ impl<S: KeyedStateStore<TopNPartition>> TopNRanker<S> {
         let mut out_ranks: Vec<i64> = Vec::new();
 
         for row in 0..batch.num_rows() {
-            let proposed = rank_ends.as_ref().map_or(self.limit, |ends| ends.value(row));
+            let proposed = rank_ends
+                .as_ref()
+                .map_or(self.limit, |ends| ends.value(row));
             // Compare the memcomparable sort key by borrow — no per-row `owned()` alloc until the row
             // is known to enter (the common case for a bounded Top-N is a row that does not).
             let key_row = keys.row(row);
@@ -1206,7 +1215,9 @@ fn write_raw_topn_snapshot_partition<'a>(
     ttl_on: bool,
 ) -> Vec<u8> {
     let entries: Vec<_> = entries.collect();
-    let has_bounds = entries.iter().any(|(_, state)| state.first_rank_end.is_some());
+    let has_bounds = entries
+        .iter()
+        .any(|(_, state)| state.first_rank_end.is_some());
     let mut bounds = Int64Builder::new();
     let mut bound_timestamps = Int64Builder::new();
     let mut keys = BinaryBuilder::new();
@@ -1291,8 +1302,7 @@ fn rocks_canonical_partitions<C: crate::state::RocksStateCodec>(
     groups: &mut crate::state::RocksStore<C>,
     has_state: impl Fn(&C::Value) -> bool,
     write_partition: impl Fn(&[(&ByteKey, &C::Value)]) -> Vec<u8>,
-) -> Result<BTreeMap<i32, Vec<u8>>, DataFusionError>
-{
+) -> Result<BTreeMap<i32, Vec<u8>>, DataFusionError> {
     let keys = groups.canonical_keys_by_group()?;
     let mut partitions = BTreeMap::new();
     for (&group, selected) in &keys {
@@ -1566,8 +1576,11 @@ fn load_topn_batch_raw(
     let normalized_sorts = conv.floating_sort.then(|| {
         let arrays = conv
             .sort
-            .convert_rows((0..batch.num_rows()).filter(|&row| !sorts.is_null(row))
-                .map(|row| sort_parser.parse(sorts.value(row))))
+            .convert_rows(
+                (0..batch.num_rows())
+                    .filter(|&row| !sorts.is_null(row))
+                    .map(|row| sort_parser.parse(sorts.value(row))),
+            )
             .expect("decode snapshot sort keys");
         let arrays: Vec<_> = arrays.iter().map(sort_array).collect();
         conv.sort
@@ -1591,7 +1604,9 @@ fn load_topn_batch_raw(
         .column_by_name(TTL_TS_COLUMN)
         .is_some()
         .then(|| column_i64(batch, TTL_TS_COLUMN));
-    let bounds = batch.column_by_name(RAW_RANK_END).map(|_| column_i64(batch, RAW_RANK_END));
+    let bounds = batch
+        .column_by_name(RAW_RANK_END)
+        .map(|_| column_i64(batch, RAW_RANK_END));
     let bound_timestamps = batch
         .column_by_name(RAW_RANK_END_TS)
         .map(|_| column_i64(batch, RAW_RANK_END_TS));
@@ -1606,7 +1621,10 @@ fn load_topn_batch_raw(
             buffer.first_rank_end = Some(FirstRankEnd {
                 value: bounds.value(row),
                 written_at: if write_timestamps.is_some() {
-                    bound_timestamps.as_ref().expect("rank bound clock").value(row)
+                    bound_timestamps
+                        .as_ref()
+                        .expect("rank bound clock")
+                        .value(row)
                 } else {
                     restored_at_ms
                 },
@@ -3286,13 +3304,17 @@ impl UpdatableTopNRanker<RocksUpdatableTopNStore> {
             .clone()
             .expect("declared schema installed on the persistent path");
         let ttl_on = self.ttl_ms > 0;
-        rocks_canonical_partitions(&mut self.groups, |rows| !rows.is_empty(), |entries| {
-            write_raw_updatable_snapshot_partition(
-                entries.iter().map(|&(key, buffer)| (key, buffer)),
-                &schema,
-                ttl_on,
-            )
-        })
+        rocks_canonical_partitions(
+            &mut self.groups,
+            |rows| !rows.is_empty(),
+            |entries| {
+                write_raw_updatable_snapshot_partition(
+                    entries.iter().map(|&(key, buffer)| (key, buffer)),
+                    &schema,
+                    ttl_on,
+                )
+            },
+        )
     }
 }
 
@@ -4629,7 +4651,8 @@ pub extern "system" fn Java_tech_streamfusion_Native_enableTopNFirstBound<'local
             #[cfg(not(feature = "rocksdb-state"))]
             panic!("native RocksDB support is unavailable");
         } else {
-            unsafe { &mut *(handle as *mut TopNHandle) }.enable_first_bound(generate_update_before != 0);
+            unsafe { &mut *(handle as *mut TopNHandle) }
+                .enable_first_bound(generate_update_before != 0);
         }
     })
 }
