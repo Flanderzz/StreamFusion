@@ -18,9 +18,9 @@ The rest of this page is the exact admission list: what's unconditionally native
 default via a JVM upcall (and why that's not a fallback), what's opt-in, and what's a straight
 fallback.
 
-- **Unsupported function/operator** outside the admitted set (e.g. `PARSE_URL`) is a plain fallback —
-  there's no partial evaluation of an expression tree, so one unknown function anywhere in it
-  declines the whole `Calc`.
+- **Unsupported function/operator** outside the admitted set normally declines the whole Calc.
+  A [SQL/JSON Calc](#sqljson-evaluation) can instead use Flink generation for its complete program,
+  subject to the host code generator and scalar bridge boundary.
 
 ## COALESCE
 
@@ -796,6 +796,45 @@ use their fixed byte order and retain the BOM as a character. Malformed surrogat
 odd trailing bytes follow JDK UnicodeDecoder grouping, including consuming a high surrogate
 and a following non-low code unit together. NULL stays NULL. Other or dynamic charsets fall back.
 
+### SQL/JSON evaluation
+
+SQL/JSON first tries the verified native expressions below. When a Calc containing JSON
+cannot be encoded through that route, StreamFusion generates its complete filter and
+projection list with released Flink code through the batch JVM bridge. Native fast paths
+remain unchanged; new grammar does not require another Rust parser extension. EXPLAIN
+marks the generated route with `jsonEvaluation=[JVM]`. A native Calc marker identifies the
+columnar operator, not the language evaluating its JSON expressions.
+
+The generated route covers JSON_QUERY, dynamic JSON_VALUE/JSON_QUERY paths, recursive
+descent, filters, slices, multi-selectors, path functions, and invalid paths handled by
+Flink's policies. It also admits additional JSON_STRING/JSON_OBJECT scalar types and nested
+constructors, dynamic defaults, nullable-boolean consumers, and short-circuited error or
+typed-conversion expressions that the native encoder declines. A mixed Calc moves together
+to preserve Flink's row order, shared UDF instances, filter-before-projection behavior and
+Jackson buffer history. There is one JSON JVM callback per Arrow batch per Calc; row
+iteration happens inside that callback. Rejected rows and changelog tags share a filter mask
+before Arrow validates nonnullable result fields.
+
+All referenced input and projected output columns must fit the scalar bridge: character,
+binary, boolean, numeric/decimal, date/time, interval, or supported timestamp types.
+ARRAY/MAP/ROW boundary columns still fall back. Constructing containers internally is
+allowed when the resulting boundary columns are scalars. Unsupported host code generation
+and UDF signatures retain explicit fallback. Flink 2.2.1 rejects dynamic JSON_EXISTS paths;
+that host failure is preserved. No configuration opt-in is required.
+
+The JSON string identity gate below still applies, including to JSON_QUERY. Non-Calc
+expression contexts, such as residual join predicates, retain their existing narrower
+native/fused-expression admission. JSON connector decoding is unaffected. This is general
+coverage, not a JSON speed optimization: the [release comparison](../benchmarks/scalar-functions.md#sqljson-jvm-bridge-prototype-2026-09-18)
+rejected replacing the measured native fast paths wholesale. The following function sections
+describe those retained fast paths and call out when the generated Calc extends them.
+
+### JSON_QUERY
+
+JSON_QUERY uses the generated Calc with literal or dynamic paths, conditional/unconditional
+array wrappers and EMPTY/ERROR policies. Its output has the same intermediate STRING
+identity restriction as JSON_VALUE.
+
 ### JSON_QUOTE
 
 Character input, including NULL. Matches Flink 2.2.1's actual spelling: slash is escaped, non-ASCII values use lowercase Unicode escapes, and supplementary characters emit a full code-point escape followed by a low-surrogate escape. Unlisted ASCII controls are retained.
@@ -819,9 +858,9 @@ DECIMAL retains its declared scale and trailing zeros, using Jackson's BigDecima
 `1.2300` remains `1.2300`, while sufficiently small values use scientific notation
 (`0.000000100` becomes `1.00E-7`). Precision and scale through 38 are native, including NULLs.
 
-Floating point, binary, temporal, and collection inputs fall back. Direct nested
-JSON_OBJECT, JSON_ARRAY, and JSON(value) calls also fall back: Flink treats those as raw JSON,
-which is outside this scalar admission. JSON_STRING applied to an ordinary string column
+Additional scalar inputs and direct nested JSON_OBJECT, JSON_ARRAY and JSON(value) calls
+use the generated Calc, preserving Flink's raw-JSON handling. Collection input columns still
+fall back at the scalar bridge boundary. JSON_STRING applied to an ordinary string column
 containing JSON text quotes it normally. No compatibility opt-in is needed.
 
 NULL values must have a supported scalar type, for example `CAST(NULL AS STRING)`.
@@ -841,8 +880,8 @@ Keys are sorted in Java UTF-16 order, matching Flink's Jackson serializer even w
 and supplementary characters mix. Keys and values use the same escaping as JSON_STRING.
 Each batch reuses escaped keys and scalar parameters while writing directly to Arrow.
 
-Dynamic/NULL keys, other value types, and direct nested JSON_OBJECT, JSON_ARRAY or
-JSON(value) inputs fall back. An ordinary string containing JSON text is quoted.
+Dynamic/NULL keys, additional scalar value types, and direct nested JSON_OBJECT, JSON_ARRAY
+or JSON(value) expressions use the generated Calc, including the host's failures. An ordinary string containing JSON text is quoted.
 No compatibility opt-in is needed.
 
 ### IS JSON
@@ -919,7 +958,7 @@ JSON_VALUE nor JSON_EXISTS exposes them. SQL parity covers empty/single/multiple
 scalar/null inputs, nested signed indexes, duplicate ancestors, escaped names, typed defaults,
 all error policies, predicates and independent definite/wildcard projections. Retained operator
 metrics verify 5,003 rows entering and leaving native Calc. Recursive descent, filters, slices,
-member-name unions, path functions and JSON_QUERY remain outside this extension.
+member-name unions, path functions and JSON_QUERY use the generated Calc described above.
 
 The wildcard benchmark reads `$.a[*]` from 32-element arrays with 264 bytes of padding.
 Release/mimalloc on an Apple M1 Max, one million rowwise inputs, two warmups and five alternating
@@ -1070,8 +1109,8 @@ are also native with the following exact Flink object-type rules:
 | DOUBLE | JSON number with a decimal point or exponent (Jackson BigDecimal) | Not admitted |
 
 `NULL` and `ERROR` behaviors are supported independently for ON EMPTY and ON ERROR.
-Other default types, NULL defaults and non-literal defaults fall back. DOUBLE defaults stay
-on Flink because generated Double/DecimalData defaults do not match its BigDecimal cast.
+Other default types, NULL defaults and non-literal defaults use the generated Calc. DOUBLE
+defaults retain Flink's generated Double/DecimalData-to-BigDecimal conversion failures.
 Selected scalar type mismatches fail the job **outside ON ERROR**, matching Flink: a quoted
 `"12"` is not an INTEGER, `1.0` is not an INTEGER, and `1` is not a DOUBLE. Decimal-to-double
 conversion preserves rounding, infinity and underflow; a decimal zero has no negative sign.
@@ -1080,9 +1119,9 @@ checks these conversion errors without native planning or the audit source adapt
 
 A BOOLEAN form with either NULL policy is admitted only as a direct projection. Flink 2.2.1
 can unbox its boxed NULL result without checking the null flag in a bare WHERE condition,
-truth predicate or CASE condition, failing the job. Such compositions stay on Flink.
+truth predicate or CASE condition, failing the job. Such compositions use the generated Calc and preserve that failure.
 BOOLEAN forms with non-null DEFAULT or ERROR for both policies can compose natively.
-Typed JSON_VALUE calls nested under AND/OR stay on Flink: DataFusion may evaluate the
+Typed JSON_VALUE calls nested under AND/OR use the generated Calc: DataFusion may evaluate the
 unneeded side on some rows, exposing a scalar conversion failure that Flink short-circuits.
 CASE result branches retain native admission and evaluate only selected conversions.
 VARCHAR calls and their consumers use the fused JVM path described below, preserving Flink's
@@ -1129,9 +1168,9 @@ strict missing/null paths invoke ON ERROR. Malformed JSON invokes ON ERROR in st
 and returns FALSE in lax mode. A document containing the JSON literal `null` invokes ON ERROR
 in both modes. SQL NULL input returns SQL NULL.
 
-UNKNOWN ON ERROR is admitted only as a direct projection, preserving the same Flink
-boxed-null behavior described for BOOLEAN JSON_VALUE. ERROR ON ERROR under AND/OR stays
-on Flink to preserve row short-circuiting. The default FALSE policy and TRUE ON ERROR
+UNKNOWN ON ERROR uses the native path only as a direct projection; its other contexts use
+the generated Calc to preserve the same boxed-null behavior as BOOLEAN JSON_VALUE. ERROR
+ON ERROR under AND/OR also uses the generated Calc to preserve row short-circuiting. The default FALSE policy and TRUE ON ERROR
 remain native in predicates and nested expressions.
 
 Admitted ERROR ON ERROR calls use Flink's `SqlJsonUtils` through the existing columnar JVM
@@ -1143,10 +1182,11 @@ These JSON functions use native first-document parsing and validate unselected f
 Admission first probes the shaded Jackson runtime once per class loader: version 2.18.2,
 the default thread-local recycler pool, and successful buffer acquisition, cross-factory
 reuse and release are required. Missing methods/classes, a different version or pool,
-or probe failure cause planning-time fallback for JSON_VALUE, JSON_EXISTS and IS JSON.
+or probe failure decline the native parser for JSON_VALUE, JSON_EXISTS and IS JSON; Calc
+can use Flink generation when the host runtime and scalar boundary support it.
 JobManagers and TaskManagers must use the same verified shaded Jackson runtime.
 They currently admit JDK 17, 21, 24 and 25, selecting the corresponding Unicode version for
-Jackson's token-termination rules; other JDKs fall back. The profile is selected on the
+Jackson's token-termination rules; other JDKs use Flink generation in Calc. The profile is selected on the
 JobManager, so TaskManagers must use the same JSON parsing rules. Jackson's resource limits
 (1000 nesting levels, 1000 number digits, 20 million UTF-16 string units, 50,000 member-name
 units) also apply to unselected values. Its numeric boundary has a buffer-dependent exception:

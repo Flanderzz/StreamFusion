@@ -1,5 +1,11 @@
 # SQL/JSON parsing
 
+The native techniques below remain the first choice for verified expressions. SQL/JSON
+Calcs that exceed native admission use Flink-generated evaluation through the batch JVM
+bridge. The [comparison](../benchmarks/scalar-functions.md#sqljson-jvm-bridge-prototype-2026-09-18)
+found a 2.09–3.02× elapsed-time cost for replacing the measured native fast paths, so they
+are retained. See [coverage and bridge limits](../operators/calc-filter.md#sqljson-evaluation).
+
 JSON_VALUE, non-throwing JSON_EXISTS policies and IS JSON use a shared native reader with two parsing paths. The streaming
 path borrows selected tokens and validates the first JSON document with Flink/Jackson rules.
 The SIMD path uses the existing `simd-json` dependency for documents containing many short

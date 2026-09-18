@@ -22,6 +22,100 @@ TO_TIMESTAMP and temporal FLOOR/CEIL/CEILING were outside that measurement's cov
 subsequent implementation is measured in the [temporal diagnostic below](#temporal-coverage-diagnostic-2026-09-15).
 See [Calc / filter](../operators/calc-filter.md) for the complete argument gates.
 
+## SQL/JSON native-first routing (2026-09-18)
+
+The production admission policy tries the existing native encoding first, then generates
+an entire JSON Calc with Flink when that fails. Existing simple paths retain their Rust
+kernels; slices and JSON_QUERY below use one JVM callback per Arrow batch. The scalar
+bridge boundary and intermediate JSON string identity restrictions still apply.
+
+This release/mimalloc measurement ran on Apple M1 Max with the same Flink/JDK versions,
+1,000,000 rows, 264-byte budget, two warmups, five alternating trials and row source/sink
+with both transposes as the prototype below. No other local test or benchmark ran concurrently.
+The unchanged simple functions act as regression controls; their small differences from
+the earlier native measurements are not an optimization claim.
+
+| Case | Flink (s) | StreamFusion (s) | Flink / StreamFusion | JSON evaluator |
+|---|---:|---:|---:|---|
+| Simple-source identity | 0.390342 | 0.655438 | 0.596x | none |
+| Array-source identity | 0.474533 | 0.852896 | 0.556x | none |
+| JSON_VALUE, simple path | 1.106959 | 0.796195 | 1.390x | Rust |
+| JSON_EXISTS, simple path | 1.093376 | 0.739060 | 1.479x | Rust |
+| `JSON_QUERY(s, '$.a[0:2]')` | 1.951007 | 2.823455 | 0.691x | JVM |
+| `JSON_EXISTS(s, '$.a[0:2]')` | 1.744556 | 2.484502 | 0.702x | JVM |
+
+The newly admitted functions are slower than stock Flink in isolation. This is a coverage
+route that avoids more handwritten parser semantics and permits surrounding operators to
+remain columnar; it is not evidence of a whole-query speedup. A larger stateful pipeline
+has not been benchmarked here. Identity controls are reported without subtraction.
+[Raw trials](sql-json-hybrid-2026-09-18.csv) retain every measured iteration.
+
+Use the reproduction command below with
+`-Dscalar.functions=JSON_VALUE,JSON_EXISTS,JSON_QUERY_SLICE,JSON_EXISTS_SLICE`.
+
+## SQL/JSON JVM bridge prototype (2026-09-18)
+
+This experiment routes a complete SQL/JSON Calc through Flink-generated JVM code using
+StreamFusion's existing batch UDF bridge. It preserves row evaluation order and removes
+Calc's native path-grammar gate. It does **not** remove the Rust kernels, alter JSON format
+connectors, or establish that a whole-query JVM replacement should ship.
+
+On Apple Silicon, JDK 17, UTC and Flink 2.2.1, each case processes 1,000,000 rows at
+parallelism 1, with a 264-byte payload budget, no injected NULLs, two warmups and five
+measured trials. The common native library is built in release mode with mimalloc. Each
+route runs in a separate JVM, alternating against stock Flink within that JVM. The JVM
+route was measured first, then the existing native route. Both row/Arrow transposes,
+rowwise source and blackhole sink remain in the measured path; plans assert native Calc
+and both transposes. No other local tests or benchmarks ran concurrently. These are
+whole-job elapsed medians, including planning, not isolated JSON kernel timings.
+
+| Case | Flink, native run (s) | Rust route (s) | Flink, JVM run (s) | JVM bridge (s) | JVM / Rust time |
+|---|---:|---:|---:|---:|---:|
+| Simple-path identity | 0.387916 | 0.659267 | 0.391868 | 0.660814 | 1.002x |
+| Wildcard-source identity | 0.482458 | 0.900425 | 0.472690 | 0.872888 | 0.969x |
+| JSON_VALUE, simple path | 1.108530 | 0.838918 | 1.112615 | 1.755095 | 2.092x |
+| JSON_EXISTS, simple path | 1.115314 | 0.748365 | 1.107832 | 1.669865 | 2.231x |
+| JSON_VALUE, wildcard | 4.207545 | 1.721668 | 4.243582 | 5.190559 | 3.015x |
+| JSON_EXISTS, wildcard | 3.677213 | 1.565452 | 3.683537 | 4.477114 | 2.860x |
+
+The JVM prototype costs 2.09–3.02 times the existing Rust route on these cases and
+1.22–1.58 times its paired stock Flink control. Controls are not subtracted. Wildcard
+JSON_VALUE takes the lax EMPTY path; this is not a scalar-extraction speedup comparison.
+The steady paired Flink and identity controls help compare the separate JVMs, but the
+experiment does not measure stateful downstream pipelines or wider/more complex JSON.
+
+The blanket replacement was rejected. Current routing retains native encoding first and
+uses the generated JVM Calc only when a JSON Calc exceeds that admission. The bridge adds
+dynamic paths, JSON_QUERY, complex selectors and exact error handling without more native
+parser extensions. A representative larger-pipeline benchmark remains future work. The
+table above records the rejected blanket replacement, not the current routing of those
+four cases.
+
+Raw trials: [JVM route](sql-json-jvm-2026-09-18.csv) and
+[existing native route](sql-json-native-2026-09-18.csv). In each CSV, `engine=native`
+means StreamFusion enabled; in the first file its JSON evaluator runs on the JVM.
+The existing route uses planner `c0677de0` and the prototype's common release DSO:
+its only native change is filtered row-UDF output handling, which the existing JSON
+kernels do not call. The selected simple/wildcard grammar is shared with `286c5b88`;
+no union/slice extension is exercised. The benchmark harness is unchanged between runs.
+
+Build the library with `cargo build --manifest-path native/Cargo.toml -p streamfusion
+--release --features mimalloc`, then run this in each planner checkout with that same
+release library (using distinct output paths):
+
+```bash
+SF_BENCHMARK=true mvn -B -ntp -Pbench -pl :streamfusion-runtime -am \
+  -Dnative.build.skip=true '-Dtest=ScalarFunctionBenchmark#individualFunctions' \
+  -Dsurefire.failIfNoSpecifiedTests=false \
+  -Dscalar.functions=JSON_VALUE,JSON_EXISTS,JSON_VALUE_WILDCARD,JSON_EXISTS_WILDCARD \
+  -Dscalar.rows=1000000 -Dscalar.bytes=264 -Dscalar.warmup=2 -Dscalar.runs=5 \
+  -Dscalar.output=target/sql-json-comparison.csv test
+```
+
+Earlier SQL/JSON tables below describe the Rust route before this prototype, including
+its former direct-projection admission. Current branch coverage is on
+[Calc/filter](../operators/calc-filter.md#sqljson-evaluation).
+
 ## Spaced JSON paths diagnostic (2026-09-16)
 
 Definite bracket paths with ASCII spaces now stay in native Calc instead of falling back.
