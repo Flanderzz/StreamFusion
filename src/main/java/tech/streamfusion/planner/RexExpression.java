@@ -911,6 +911,31 @@ final class RexExpression {
       return emitCoalesceAsCase(call.getOperands());
     }
     if (call.getOperator()
+        == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.IF) {
+      if (call.getOperands().size() != 3) return reject("IF requires three operands");
+      boolean supportedType = switch (call.getType().getSqlTypeName()) {
+        case TINYINT, SMALLINT, INTEGER, BIGINT, FLOAT, REAL, DOUBLE, DECIMAL,
+            CHAR, VARCHAR, DATE, TIME, TIMESTAMP, BINARY, VARBINARY -> true;
+        default -> false;
+      };
+      if (!supportedType) return reject("IF requires a verified scalar result type");
+      if (!RexUtil.isDeterministic(call)
+          || containsScalarUdf(call)
+          || call.getOperands().subList(1, 3).stream()
+              .anyMatch(
+                  operand ->
+                      !org.apache.calcite.sql.type.SqlTypeUtil.equalSansNullability(
+                          operand.getType(), call.getType()))) {
+        // Flink inserts branch casts in codegen and can hoist volatile/UDF evaluation.
+        return emitHostExpression(call, true);
+      }
+      add(KIND_CALL, opCode(SqlKind.CASE), 3);
+      for (RexNode operand : call.getOperands()) {
+        if (!emit(operand)) return false;
+      }
+      return true;
+    }
+    if (call.getOperator()
             instanceof org.apache.flink.table.planner.functions.bridging.BridgingSqlFunction function
         && function.getDefinition()
             == org.apache.flink.table.functions.BuiltInFunctionDefinitions.IF_NULL) {

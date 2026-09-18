@@ -3,7 +3,7 @@
 # + requires every operator; | separates alternatives; ! requires full fallback and its reason.
 org.apache.flink.table.planner.runtime.stream.sql.CalcITCase#testNotIn	*	NativeFilterOperator|NativeCalcOperator
 org.apache.flink.table.planner.runtime.stream.sql.CalcITCase#testLongProjectionList	*	NativeCalcOperator
-org.apache.flink.table.planner.runtime.stream.sql.CalcITCase#testIfFunction	*	!Calc: unsupported function/operator: IF
+org.apache.flink.table.planner.runtime.stream.sql.CalcITCase#testIfFunction	*	NativeCalcOperator
 org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testGroupByAgg	*	NativeColumnarGroupAggregateOperator
 org.apache.flink.table.planner.runtime.stream.sql.RankITCase#testTopNWithGroupByAndRetract	*	NativeColumnarGroupAggregateOperator+NativeColumnarTopNOperator
 org.apache.flink.table.planner.runtime.stream.sql.RankITCase#testTopNWithVariableTopSize	*	!Top-N: variable rank bounds over update-fast input require verified rank buffers

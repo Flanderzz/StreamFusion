@@ -67,6 +67,8 @@ class ScalarFunctionBenchmark {
           new Query("RAND_DYNAMIC", "integer", "RAND(n)", "DOUBLE"),
           new Query("RAND_INTEGER_LITERAL", "integer", "RAND_INTEGER(42, 100)", "INT"),
           new Query("IFNULL_STRING", "text", "IFNULL(s, 'missing')", "STRING"),
+          new Query("IF_STRING", "text", "IF(s IS NULL, 'missing', s)", "STRING"),
+          new Query("IF_BIGINT", "bigint", "IF(n > 0, n, CAST(0 AS BIGINT))", "BIGINT"),
           new Query("IFNULL_BIGINT", "bigint", "IFNULL(n, CAST(-1 AS BIGINT))", "BIGINT"),
           new Query(
               "IFNULL_DECIMAL",
