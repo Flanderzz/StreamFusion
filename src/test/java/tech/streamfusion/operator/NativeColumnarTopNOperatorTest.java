@@ -22,6 +22,8 @@ import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.types.RowKind;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import tech.streamfusion.planner.FlinkKeyGroupUtils;
 
 /** The columnar Top-N operator: Arrow batches in, a changelog of Arrow batches out. */
@@ -740,13 +742,15 @@ class NativeColumnarTopNOperatorTest {
     return rows;
   }
 
-  @Test
-  void independentlyChangingBoundsSurviveRescaleIncludingBoundOnlyKeys() throws Exception {
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  void independentlyChangingBoundsSurviveRescaleIncludingBoundOnlyKeys(boolean retracting)
+      throws Exception {
     long[] keys = keysForBothSubtasks();
     for (long bound : new long[] {0, 2}) {
       OperatorSubtaskState snapshot;
       try (var allocator = new RootAllocator();
-          var before = harness(firstBoundOperator(), 1, 0)) {
+          var before = harness(firstBoundOperator(retracting), 1, 0)) {
         before.setup(new ArrowBatchSerializer());
         before.open();
         before.processElement(
@@ -757,13 +761,27 @@ class NativeColumnarTopNOperatorTest {
                     row3(keys[0], 10, bound),
                     row3(keys[1], 20, bound),
                     row3(keys[1], 10, bound))));
+        if (retracting) {
+          List<RowData> removed = new ArrayList<>();
+          for (long key : keys) {
+            for (long score : new long[] {20, 10}) {
+              RowData row = row3(key, score, bound);
+              row.setRowKind(RowKind.DELETE);
+              removed.add(row);
+            }
+          }
+          before.processElement(
+              new StreamRecord<>(
+                  new ArrowBatch(
+                      RowDataArrowConverter.write(removed, UPDATE_FAST_SCHEMA, allocator, true))));
+        }
         snapshot = before.snapshot(1, 1);
         collect3(before);
       }
       for (int task = 0; task < 2; task++) {
         long key = keys[task];
         try (var allocator = new RootAllocator();
-            var restored = harness(firstBoundOperator(), 2, task)) {
+            var restored = harness(firstBoundOperator(retracting), 2, task)) {
           restored.setup(new ArrowBatchSerializer());
           restored.initializeState(
               AbstractStreamOperatorTestHarness.repartitionOperatorState(
@@ -778,15 +796,18 @@ class NativeColumnarTopNOperatorTest {
           assertEquals(
               bound == 0
                   ? List.of()
-                  : List.of(
-                      change3(RowKind.DELETE, key, 20, bound), change3(RowKind.INSERT, key, 5, 9)),
+                  : retracting
+                      ? List.of(change3(RowKind.INSERT, key, 5, 9))
+                      : List.of(
+                          change3(RowKind.DELETE, key, 20, bound),
+                          change3(RowKind.INSERT, key, 5, 9)),
               collect3(restored));
         }
       }
     }
   }
 
-  private static NativeColumnarTopNOperator firstBoundOperator() {
+  private static NativeColumnarTopNOperator firstBoundOperator(boolean retracting) {
     return new NativeColumnarTopNOperator(
         new int[] {0},
         new int[] {-1},
@@ -797,7 +818,7 @@ class NativeColumnarTopNOperatorTest {
         0,
         Long.MAX_VALUE,
         false,
-        false,
+        retracting,
         null,
         null,
         false,

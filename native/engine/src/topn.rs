@@ -1725,6 +1725,8 @@ pub(crate) struct RetractableTopNRanker<S: KeyedStateStore<TopNPartition> = Memo
     offset: i64,
     limit: i64,
     rank_end_column: Option<usize>,
+    first_bound: bool,
+    invalid_top_size: u64,
     output_rank_number: bool,
     generate_update_before: bool,
     net_diff: bool,
@@ -1759,6 +1761,8 @@ impl RetractableTopNRanker {
             offset,
             limit,
             rank_end_column: None,
+            first_bound: false,
+            invalid_top_size: 0,
             output_rank_number,
             generate_update_before: true,
             net_diff: false,
@@ -1792,10 +1796,17 @@ impl RetractableTopNRanker {
 }
 
 impl<S: KeyedStateStore<TopNPartition>> RetractableTopNRanker<S> {
-    /// The planner proves the non-null bound is fixed by the partition keys.
+    /// Variable bounds are partition-invariant unless first-bound state is enabled.
     pub(crate) fn with_rank_end_column(mut self, column: i32) -> Self {
         self.rank_end_column = (column >= 0).then_some(column as usize);
         self
+    }
+
+    pub(crate) fn enable_first_bound(&mut self, generate_update_before: bool) {
+        assert!(self.rank_end_column.is_some() && self.offset == 0);
+        self.first_bound = true;
+        self.generate_update_before = generate_update_before;
+        self.net_diff = false;
     }
 
     pub(crate) fn with_generate_update_before(mut self, enabled: bool) -> Self {
@@ -1821,6 +1832,8 @@ impl<S: KeyedStateStore<TopNPartition>> RetractableTopNRanker<S> {
             offset: self.offset,
             limit: self.limit,
             rank_end_column: self.rank_end_column,
+            first_bound: self.first_bound,
+            invalid_top_size: self.invalid_top_size,
             output_rank_number: self.output_rank_number,
             generate_update_before: self.generate_update_before,
             net_diff: self.net_diff,
@@ -1879,16 +1892,16 @@ impl<S: KeyedStateStore<TopNPartition>> RetractableTopNRanker<S> {
         self
     }
 
-    /// Reclaims every buffer whose head clock expired with no further touch of its partition.
-    /// Silent, like Flink's background cleanup.
+    /// Reclaims expired rows and independently expired bounds, including empty partitions.
     fn sweep_expired(&mut self, ttl: StateTtl) {
         let track = self.memory.tracking();
         let mut reclaimed = 0isize;
         self.groups.retain_live(&mut |key, buffer| {
-            if buffer.first().is_some_and(|head| ttl.expired(head.ts_ms)) {
+            reclaimed += Self::expire_whole_buffer(buffer, ttl, track);
+            buffer.expire_rank_end(ttl);
+            if !buffer.has_state() {
                 if track {
                     reclaimed += (key.len() + GROUP_ENTRY_OVERHEAD + TOPN_BOUND_BYTES) as isize;
-                    reclaimed += buffer.iter().map(topn_entry_bytes).sum::<usize>() as isize;
                 }
                 false
             } else {
@@ -1988,10 +2001,9 @@ impl<S: KeyedStateStore<TopNPartition>> RetractableTopNRanker<S> {
         let mut out_ranks: Vec<i64> = Vec::new();
 
         for row in 0..batch.num_rows() {
-            let limit = rank_ends
+            let proposed = rank_ends
                 .as_ref()
-                .map_or(self.limit, |ends| ends.value(row))
-                .max(0) as usize;
+                .map_or(self.limit, |ends| ends.value(row));
             // Borrowed partition-key probe; the key bytes are copied only when a partition first
             // appears (a full retracting buffer never removes its partition entry).
             let part = parts.encode(row);
@@ -2004,6 +2016,12 @@ impl<S: KeyedStateStore<TopNPartition>> RetractableTopNRanker<S> {
                     groups.insert(ByteKey::from(part), TopNPartition::default())
                 }
             };
+            let limit = if self.first_bound {
+                buffer.rank_end(proposed, ttl, &mut self.invalid_top_size)
+            } else {
+                proposed
+            }
+            .max(0) as usize;
             // Whole-buffer expiry precedes the preimage capture, so the diff never surfaces the
             // expired rows. Re-checking per row is a head compare and stays a no-op once any
             // mutation refreshed the head to this call's clock.
@@ -3455,13 +3473,15 @@ impl TopNHandle {
     fn enable_first_bound(&mut self, generate_update_before: bool) {
         match self {
             Self::Append(ranker) => ranker.enable_first_bound(generate_update_before),
-            _ => panic!("changing bounds require append-only Top-N"),
+            Self::Retract(ranker) => ranker.enable_first_bound(generate_update_before),
+            Self::UpdateFast(_) => panic!("changing bounds are unsupported for update-fast Top-N"),
         }
     }
 
     fn take_invalid_top_size(&mut self) -> u64 {
         match self {
             Self::Append(ranker) => std::mem::take(&mut ranker.invalid_top_size),
+            Self::Retract(ranker) => std::mem::take(&mut ranker.invalid_top_size),
             _ => 0,
         }
     }
@@ -3580,13 +3600,15 @@ impl RocksTopNHandle {
     pub(crate) fn enable_first_bound(&mut self, generate_update_before: bool) {
         match self {
             Self::Append(ranker) => ranker.enable_first_bound(generate_update_before),
-            _ => panic!("changing bounds require append-only Top-N"),
+            Self::Retract(ranker) => ranker.enable_first_bound(generate_update_before),
+            Self::UpdateFast(_) => panic!("changing bounds are unsupported for update-fast Top-N"),
         }
     }
 
     pub(crate) fn take_invalid_top_size(&mut self) -> u64 {
         match self {
             Self::Append(ranker) => std::mem::take(&mut ranker.invalid_top_size),
+            Self::Retract(ranker) => std::mem::take(&mut ranker.invalid_top_size),
             _ => 0,
         }
     }

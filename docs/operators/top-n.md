@@ -71,9 +71,9 @@ The rank column can be projected or omitted, and mini-batch materializations rem
 
 The proof recognizes an entire computed key as invariant; it does not infer that the key's inputs
 are constant. Several different values of `k` can share `PARTITION BY MOD(k, 3)`, so a bound of
-`k` requires first-bound state for append-only input and still falls back for updating input.
-Repeated UDF calls do not establish invariance, even when
-the function declares itself deterministic. The whitelist checks the built-in COALESCE identity,
+`k` requires first-bound state for append-only or general retracting input and still falls back
+for update-fast input. Repeated UDF calls do not establish invariance, even when the function
+declares itself deterministic. The whitelist checks the built-in COALESCE identity,
 rather than accepting a function by name.
 
 Flink may select its general retracting strategy for a computed partition key over a grouped input,
@@ -85,14 +85,16 @@ Released Flink stores the first bound per partition and ignores later changes wh
 Arrow row and reuse its existing rank-buffer state, TTL and memory/RocksDB checkpoint formats.
 The proof retains Calc expressions through native substitution and input pruning.
 
-Append-only input also admits a non-null integral bound that changes independently of the
-partition keys. Native state retains the first bound per partition, ignores later proposals,
+Append-only and general retracting input also admit a non-null integral bound that changes
+independently of the partition keys. Native state retains the first bound per partition, ignores later proposals,
 and increments `topn.invalidTopSize` for every mismatch, including rows that fail rank admission.
-The emitted payload keeps each row's actual proposed bound. The bound's TTL starts when it is
-created; later reads and row-state writes do not refresh it. After expiry the next proposal
+Retractions count mismatches too, and deleting the last row leaves the bound intact. Even a
+first retraction with no matching row establishes the bound. The emitted payload keeps each row's
+actual proposed bound, allowing later full-row retractions to find the original payload. The bound's
+TTL starts when it is created; later reads and row-state writes do not refresh it. After expiry the next proposal
 becomes the new bound, while any live ranked rows remain available. A nonpositive bound still
-has state even when its row buffer is empty. With projected ranks, the buffer retains the entire
-first sort-key group extending beyond N, including at N=0, matching Flink's later positional
+has state even when its row buffer is empty. For append-only input with projected ranks, the buffer
+retains the entire first sort-key group extending beyond N, including at N=0, matching Flink's later positional
 updates when the bound expires and widens.
 
 This changing-bound path honors the plan's UPDATE_BEFORE setting and emits per-record
@@ -102,15 +104,22 @@ Memory checkpoints, RocksDB checkpoints, canonical savepoints and rescaling pres
 bound and its independent timestamp. Mismatch counts return through the existing batch JNI call;
 there is no JNI call per row. Partition-invariant bounds keep their existing net-diff optimization
 and row-only checkpoint layout. Nullable bounds remain on Flink because its primitive row access
-does not express ordinary SQL null propagation here. Independently changing bounds on updating
-or retracting input remain in [#104](https://github.com/datafusion-contrib/StreamFusion/issues/104).
+does not express ordinary SQL null propagation here. Independently changing update-fast bounds
+remain in [#104](https://github.com/datafusion-contrib/StreamFusion/issues/104).
+
+With mini-batching, independently changing retracting bounds require input whose per-record order
+is preserved: changelog sources through projections, filters, exchanges and batch markers qualify.
+Upstream aggregates or other stateful operators fall back because their bundle emission order can
+change which row establishes the first bound. Without mini-batching, grouped retractions are
+supported. Retracting row-state expiry still uses the whole-buffer model described above; the
+bound's independent clock does not add per-sort-key TTL to that model.
 
 Initially zero and negative bounds select no materialized rows. For insert-only and update-fast input,
 large bounds preserve Flink 2.2.1's variable-range admission rule: after 100 retained rows, a new sort key must strictly improve on the current worst
 key, even when the selected bound is greater than 100. This is an admission threshold, not a
 100-row output cap; improving arrivals can fill the selected range.
 The general retracting strategy retains the full sorted buffer, so a retraction can promote
-rows beyond the selected range. Its partition-derived bound applies to both per-record changes
+rows beyond the selected range. A partition-derived bound applies to both per-record changes
 and mini-batch output. Every retained row carries that same bound; a bundle flush can recover
 it from the retained payload without a separate keyed state entry. Empty buffers emit the
 retractions for their former selected rows.
@@ -139,7 +148,8 @@ SQL tests additionally require the exact mismatch count and the original propose
 emitted payloads. Controlled-clock tests compare against the released Flink Top-N operator
 with and without UPDATE_BEFORE through bound expiry, row refresh, shrinking bounds, empty
 buffers, checkpoint restoration and
-canonical memory/RocksDB transitions; a separate rescale test preserves bound-only keys.
+canonical memory/RocksDB transitions. Rescale tests preserve bound-only keys after deleting
+every ranked row as well as keys whose initial bound selected no rows.
 
 The unchanged Flink 2.2.1 streaming `RankITCase`, `DeduplicateITCase`, `LimitITCase` and
 `SortLimitITCase` also pass with StreamFusion injected: 131 passed, seven skipped. The matching
@@ -181,6 +191,13 @@ The general retracting variant uses the same setup and one million changelog row
 inserts and deletes in groups of 16,384 rows (four values per key). Release/mimalloc medians
 were **0.926187 s Flink / 0.447620 s native (2.069x)** with both transposes included.
 Add `-Dvariabletopn.retracting=true` to reproduce it.
+
+With independently changing `MOD(COALESCE(v, 0), 3) + 1` bounds, the same retracting setup
+measured **0.857261 s Flink / 0.448346 s native (1.912x)** after two warmups and five alternating
+release/mimalloc trials. Emptying each partition between insert cycles exercises retention of its
+first bound. Add both `-Dvariabletopn.retracting=true` and `-Dvariabletopn.changingBound=true`
+to reproduce this variant. The [raw trials](../benchmarks/retracting-changing-bound-topn-2026-09-18.csv)
+record individual times; both transposes and the row blackhole sink remain in the measured path.
 
 The update-fast variant ranks a grouped `COUNT(*)` with 16 row IDs per partition and an ID
 sort tie-breaker, using the same one million rows, 4,096 partitions and variable bounds.
@@ -225,9 +242,9 @@ Reproduce with `SF_BENCHMARK=true mvn -Pbench -pl :streamfusion-runtime -am test
   exchanges and batch markers remain native. Preserving the upstream bundle order is the
   remaining composition work in [#102](https://github.com/datafusion-contrib/StreamFusion/issues/102).
 
-- Nullable variable bounds, and independently changing bounds on updating/retracting input,
-  remain in
-  [#104](https://github.com/datafusion-contrib/StreamFusion/issues/104).
+- Nullable variable bounds, independently changing bounds on update-fast input, and changing
+  retracting bounds after upstream stateful mini-batch operators that can reorder proposals.
+  These remain in [#104](https://github.com/datafusion-contrib/StreamFusion/issues/104).
 - A row type the native converter can't carry.
 - Time-ordered ranks beyond the existing rank-1 dedup forms and the processing-time first-N
   form above: event-time N > 1, descending processing-time N > 1, updating first-N input,

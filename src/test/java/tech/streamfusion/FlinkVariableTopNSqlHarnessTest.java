@@ -81,11 +81,14 @@ class FlinkVariableTopNSqlHarnessTest {
 
   @ParameterizedTest
   @ValueSource(strings = {"k", "MOD(k, 4) + 1", "id"})
-  void computedPartitionDoesNotMakeItsInputsInvariant(String bound) throws Exception {
-    NativeParity.assertFallbackReasonContains(
-        () -> retractingEnvironment(false),
-        query(bound, true).replace("PARTITION BY k", "PARTITION BY MOD(k, 3)"),
-        "variable rank bound must be derived from partition keys");
+  void changingBoundsAcrossCollapsedPartitionsMatchOrderedChangelog(String bound) throws Exception {
+    for (boolean rank : new boolean[] {false, true}) {
+      String sql = query(bound, rank).replace("PARTITION BY k", "PARTITION BY MOD(k, 3)");
+      String plan = NativePlanner.explain(retractingEnvironment(false), sql);
+      assertTrue(plan.contains("NativeColumnarTopN"), plan);
+      NativeParity.assertOrderedKindedParity(() -> retractingEnvironment(false), sql);
+      NativeParity.assertChangelogParity(() -> retractingEnvironment(true), sql);
+    }
   }
 
   @ParameterizedTest
@@ -108,16 +111,54 @@ class FlinkVariableTopNSqlHarnessTest {
   }
 
   @Test
-  void declaredDeterministicUdfIsNotProofOfPartitionInvariance() throws Exception {
-    NativeParity.assertFallbackReasonContains(
+  void deterministicUdfBoundsUseFirstBoundState() throws Exception {
+    Supplier<TableEnvironment> input =
         () -> {
           TableEnvironment table = retractingEnvironment(false);
           table.createTemporarySystemFunction("custom_bound", BoundFunction.class);
           return table;
-        },
+        };
+    NativeParity.assertOrderedKindedParity(
+        input,
         query("MOD(custom_bound(k), 3) + 1", true)
-            .replace("PARTITION BY k", "PARTITION BY custom_bound(k)"),
-        "variable rank bound must be derived from partition keys");
+            .replace("PARTITION BY k", "PARTITION BY custom_bound(k)"));
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"hashmap", "tech.streamfusion.state.RocksDBNativeStateBackendFactory"})
+  void changingRetractingBoundsSurviveSqlRecovery(String backend) throws Exception {
+    for (boolean rank : new boolean[] {false, true}) {
+      String sql = changingGroupedQuery(rank);
+      var planInput = environment(false, false);
+      planInput.executeSql("CREATE TEMPORARY VIEW recovery_input AS SELECT k, v FROM src");
+      String plan = NativePlanner.explain(planInput, sql);
+      assertTrue(plan.contains("NativeColumnarTopN"), plan);
+      try (var recovery = new PortableSqlRecovery(backend)) {
+        NativeParity.assertChangelogParity(recovery, sql);
+        recovery.verify();
+      }
+    }
+  }
+
+  @Test
+  void changingBoundsOverMiniBatchAggregatesRequireStableInputOrder() throws Exception {
+    NativeParity.assertFallbackReasonContains(
+        () -> {
+          var table = environment(false, true);
+          table.executeSql("CREATE TEMPORARY VIEW recovery_input AS SELECT k, v FROM src");
+          return table;
+        },
+        changingGroupedQuery(true),
+        "changing bounds require unchanged upstream mini-batch changelog order");
+  }
+
+  private static String changingGroupedQuery(boolean rank) {
+    return "SELECT k, v"
+        + (rank ? ", rn" : "")
+        + " FROM (SELECT k, v, MOD(COALESCE(v, 0), 5) + 1 AS rank_end,"
+        + " ROW_NUMBER() OVER (PARTITION BY MOD(COALESCE(k, 0), 2) ORDER BY v DESC, k ASC)"
+        + " AS rn FROM (SELECT k, SUM(v) AS v FROM recovery_input GROUP BY k))"
+        + " WHERE rn <= rank_end";
   }
 
   public static class BoundFunction extends ScalarFunction {
@@ -173,7 +214,7 @@ class FlinkVariableTopNSqlHarnessTest {
     NativeParity.assertFallbackReasonContains(
         () -> environment(false, false),
         sql,
-        "variable rank bound must be derived from partition keys");
+        "update-fast variable rank bound must be derived from partition keys");
   }
 
   @ParameterizedTest
@@ -181,6 +222,9 @@ class FlinkVariableTopNSqlHarnessTest {
       strings = {
         "1",
         "2",
+        "id",
+        "CAST(MOD(id, 3) AS INT)",
+        "CAST(MOD(id, 3) AS SMALLINT)",
         "k",
         "MOD(k, 3) + 1",
         "CAST(MOD(k, 3) + 1 AS INT)",
@@ -198,7 +242,7 @@ class FlinkVariableTopNSqlHarnessTest {
   }
 
   @ParameterizedTest
-  @ValueSource(strings = {"k", "MOD(k, 3) + 1"})
+  @ValueSource(strings = {"k", "MOD(k, 3) + 1", "id"})
   void retractingMiniBatchKeepsIndependentPartitionBounds(String bound) throws Exception {
     for (boolean outputRank : new boolean[] {false, true}) {
       NativeParity.assertChangelogParity(
@@ -206,11 +250,12 @@ class FlinkVariableTopNSqlHarnessTest {
     }
   }
 
-  @Test
-  void retractingTiedSortKeysMatchOrderedChangelog() throws Exception {
+  @ParameterizedTest
+  @ValueSource(strings = {"k", "id"})
+  void retractingTiedSortKeysMatchOrderedChangelog(String bound) throws Exception {
     for (boolean outputRank : new boolean[] {false, true}) {
       NativeParity.assertOrderedKindedParity(
-          () -> retractingEnvironment(false), query("k", outputRank).replace(", id ASC", ""));
+          () -> retractingEnvironment(false), query(bound, outputRank).replace(", id ASC", ""));
     }
   }
 

@@ -18,7 +18,7 @@ import org.apache.flink.table.api.Schema;
 import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.apache.flink.types.Row;
-import org.junit.jupiter.api.Test;
+import org.apache.flink.types.RowKind;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import tech.streamfusion.planner.NativePlanner;
@@ -28,13 +28,17 @@ class FlinkChangingTopNSqlHarnessTest {
   @ValueSource(
       strings = {"bound", "CAST(MOD(bound, 32767) AS INT)", "CAST(MOD(bound, 32767) AS SMALLINT)"})
   void changingBoundsPreserveOriginalPayloadAndOrderedChangelog(String bound) throws Exception {
-    for (boolean rank : new boolean[] {false, true}) {
-      String sql = query(bound, rank);
-      String plan = NativePlanner.explain(environment(false), sql);
-      assertTrue(plan.contains("NativeColumnarTopN"), plan);
-      NativeParity.assertOrderedKindedParity(() -> environment(false), sql);
-      NativeParity.assertChangelogParity(() -> environment(false), sql);
-      NativeParity.assertOrderedKindedParity(() -> environment(true), sql);
+    for (boolean retracting : new boolean[] {false, true}) {
+      for (boolean rank : new boolean[] {false, true}) {
+        String sql = query(bound, rank);
+        String plan = NativePlanner.explain(environment(false, retracting), sql);
+        assertTrue(plan.contains("NativeColumnarTopN"), plan);
+        NativeParity.assertOrderedKindedParity(() -> environment(false, retracting), sql);
+        NativeParity.assertChangelogParity(() -> environment(false, retracting), sql);
+        String miniBatchPlan = NativePlanner.explain(environment(true, retracting), sql);
+        assertTrue(miniBatchPlan.contains("NativeColumnarTopN"), miniBatchPlan);
+        NativeParity.assertOrderedKindedParity(() -> environment(true, retracting), sql);
+      }
     }
   }
 
@@ -55,8 +59,10 @@ class FlinkChangingTopNSqlHarnessTest {
     }
   }
 
-  @Test
-  void mismatchesAreCountedWhileNativeRowsKeepTheirActualBounds() throws Exception {
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  void mismatchesAreCountedWhileNativeRowsKeepTheirActualBounds(boolean retracting)
+      throws Exception {
     var reporter = InMemoryReporter.createWithRetainedMetrics();
     var cluster =
         new MiniClusterResource(
@@ -67,10 +73,8 @@ class FlinkChangingTopNSqlHarnessTest {
                 .build());
     cluster.before();
     try {
-      var table =
-          environment(
-              new TestStreamEnvironment(cluster.getMiniCluster(), 1),
-              false,
+      var input =
+          new ArrayList<>(
               List.of(
                   Row.of(1L, 30L, 2L),
                   Row.of(1L, 20L, 1L),
@@ -78,6 +82,14 @@ class FlinkChangingTopNSqlHarnessTest {
                   Row.of(1L, 0L, 3L),
                   Row.of(2L, 10L, 0L),
                   Row.of(2L, 0L, 2L)));
+      if (retracting) {
+        input.add(Row.ofKind(RowKind.UPDATE_BEFORE, 1L, 0L, 3L));
+        input.add(Row.ofKind(RowKind.UPDATE_AFTER, 1L, -1L, 5L));
+        input.add(Row.ofKind(RowKind.DELETE, 1L, 20L, 1L));
+      }
+      var table =
+          environment(
+              new TestStreamEnvironment(cluster.getMiniCluster(), 1), false, input, retracting);
       var scan = NativePlanner.install(table);
       var result = table.executeSql(query("bound", true));
       List<Row> rows = new ArrayList<>();
@@ -93,8 +105,8 @@ class FlinkChangingTopNSqlHarnessTest {
               result.getJobClient().orElseThrow().getJobID(), "(?i)NativeColumnarTopN");
       assertEquals(1, groups.size());
       var metrics = reporter.getMetricsByGroup(groups.iterator().next());
-      assertEquals(3, ((Counter) metrics.get("topn.invalidTopSize")).getCount());
-      assertEquals(6, ((Counter) metrics.get("numRecordsIn")).getCount());
+      assertEquals(retracting ? 6 : 3, ((Counter) metrics.get("topn.invalidTopSize")).getCount());
+      assertEquals(input.size(), ((Counter) metrics.get("numRecordsIn")).getCount());
       assertTrue(((Counter) metrics.get("numRecordsOut")).getCount() > 0);
     } finally {
       cluster.after();
@@ -111,7 +123,7 @@ class FlinkChangingTopNSqlHarnessTest {
         + " WHERE rn <= rank_end";
   }
 
-  private static TableEnvironment environment(boolean miniBatch) {
+  private static TableEnvironment environment(boolean miniBatch, boolean retracting) {
     List<Row> rows = new ArrayList<>();
     long key = 0;
     for (long first : new long[] {Long.MIN_VALUE, -2, 0, 1, 2, 200, Long.MAX_VALUE}) {
@@ -120,13 +132,23 @@ class FlinkChangingTopNSqlHarnessTest {
         Long score = i % 37 == 0 ? null : (i < 110 ? 1000L + i : 1000L - i);
         rows.add(Row.of(key, score, i % 3 == 0 ? first : (long) (i % 5)));
       }
+      if (retracting) {
+        List<Row> removed = new ArrayList<>();
+        for (int i = rows.size() - 231; i < rows.size(); i += 13) {
+          Row copy = Row.copy(rows.get(i));
+          copy.setKind(RowKind.DELETE);
+          removed.add(copy);
+        }
+        rows.addAll(removed);
+      }
       key++;
     }
-    return environment(StreamExecutionEnvironment.getExecutionEnvironment(), miniBatch, rows);
+    return environment(
+        StreamExecutionEnvironment.getExecutionEnvironment(), miniBatch, rows, retracting);
   }
 
   private static TableEnvironment environment(
-      StreamExecutionEnvironment env, boolean miniBatch, List<Row> rows) {
+      StreamExecutionEnvironment env, boolean miniBatch, List<Row> rows, boolean retracting) {
     env.setParallelism(1);
     var table = StreamTableEnvironment.create(env);
     if (miniBatch) {
@@ -139,15 +161,17 @@ class FlinkChangingTopNSqlHarnessTest {
             rows,
             Types.ROW_NAMED(
                 new String[] {"k", "score", "bound"}, Types.LONG, Types.LONG, Types.LONG));
+    var schema =
+        Schema.newBuilder()
+            .column("k", DataTypes.BIGINT().notNull())
+            .column("score", DataTypes.BIGINT())
+            .column("bound", DataTypes.BIGINT().notNull())
+            .build();
     table.createTemporaryView(
         "src",
-        table.fromDataStream(
-            source,
-            Schema.newBuilder()
-                .column("k", DataTypes.BIGINT().notNull())
-                .column("score", DataTypes.BIGINT())
-                .column("bound", DataTypes.BIGINT().notNull())
-                .build()));
+        retracting
+            ? table.fromChangelogStream(source, schema)
+            : table.fromDataStream(source, schema));
     return table;
   }
 }

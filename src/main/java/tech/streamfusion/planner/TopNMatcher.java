@@ -31,9 +31,9 @@ import tech.streamfusion.operator.RowDataArrowConverter;
  * BY … ORDER BY …) BETWEEN rankStart AND rankEnd}, with or without the rank number projected.
  * Requires {@code ROW_NUMBER} (Flink rejects streaming RANK/DENSE_RANK), a constant or supported
  * variable rank range, and column types the conversion supports. Independently changing variable
- * bounds require insert-only input. The caller picks the ranker: the append-only one for an
- * insert-only, no-offset query, or the retracting one (full buffer, rank window {@code [offset+1,
- * rankEnd]}) for a changelog input or an {@code OFFSET} (rank start > 1).
+ * bounds require append-only or general retracting input. The caller picks the ranker: the
+ * append-only one for an insert-only, no-offset query, or the retracting one (full buffer, rank
+ * window {@code [offset+1, rankEnd]}) for a changelog input or an {@code OFFSET} (rank start > 1).
  */
 final class TopNMatcher {
 
@@ -57,9 +57,13 @@ final class TopNMatcher {
         case SMALLINT, INTEGER, BIGINT -> {}
         default -> { return "Top-N: variable rank bounds require SMALLINT, INT or BIGINT"; }
       }
-      if (!partitionInvariant(rank.getInput(), variable.getRankEndIndex(), rank.partitionKey())
-          && !ChangelogPlanUtils.isInsertOnly((StreamPhysicalRel) rank.getInput())) {
-        return "Top-N: variable rank bound must be derived from partition keys";
+      if (!partitionInvariant(rank.getInput(), variable.getRankEndIndex(), rank.partitionKey())) {
+        if (rank.rankStrategy() instanceof RankProcessStrategy.UpdateFastStrategy) {
+          return "Top-N: update-fast variable rank bound must be derived from partition keys";
+        }
+        if (mayReorderMiniBatchChangelog(rank.getInput())) {
+          return "Top-N: changing bounds require unchanged upstream mini-batch changelog order";
+        }
       }
     } else if (!(rank.rankRange() instanceof ConstantRankRange)) {
       return "Top-N: unsupported rank range";
@@ -87,18 +91,22 @@ final class TopNMatcher {
   }
 
   static String retractingOffsetInputReason(RelNode input) {
-    if (!ChangelogPlanUtils.isInsertOnly((StreamPhysicalRel) input)
-        && ShortcutUtils.unwrapTableConfig(input)
-            .get(ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_ENABLED)
-        && !preservesMiniBatchChangelog(input)) {
+    if (mayReorderMiniBatchChangelog(input)) {
       return "retracting OFFSET requires unchanged upstream mini-batch changelog order";
     }
     return null;
   }
 
+  private static boolean mayReorderMiniBatchChangelog(RelNode input) {
+    return !ChangelogPlanUtils.isInsertOnly((StreamPhysicalRel) input)
+        && ShortcutUtils.unwrapTableConfig(input)
+            .get(ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_ENABLED)
+        && !preservesMiniBatchChangelog(input);
+  }
+
   private static boolean preservesMiniBatchChangelog(RelNode input) {
     if (input.getInputs().isEmpty()) return true;
-    // A net-equivalent upstream changelog is insufficient: hidden-rank emissions affect equality.
+    // First bounds and retained row kinds depend on input order, not just the final materialization.
     // Admit source changes through row-local projections, filters, exchanges and batch markers.
     if (!(input instanceof Calc || input instanceof Exchange
         || input instanceof StreamPhysicalNativeCalc

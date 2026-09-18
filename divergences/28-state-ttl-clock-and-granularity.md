@@ -66,21 +66,26 @@ ranker reads the bound from input or retained payloads and keeps its existing ro
 checkpoint formats. Mini-batch flushes recover the bound from a retained row; an empty buffer
 has no selected output.
 
-Independently changing non-null bounds now use first-bound state for append-only input. There is
-no corresponding Arroyo Top-N operator to reuse. The native store packs the bound and its creation
+Independently changing non-null bounds use first-bound state for append-only and general retracting
+input. There is no corresponding Arroyo Top-N operator to reuse. The native store packs the bound and its creation
 timestamp beside the ranked rows in one partition value, while preserving Flink's independently
 expiring clocks. Bound-only values survive checkpoints and rescaling. The RocksDB storage TTL
 prefix uses the newest row or bound write: only when both have expired may it drop the whole value.
 Per-value checks still expire the bound without refreshing it when rows change. The canonical
 snapshot carries optional bound metadata and a key-only row for an empty ranked buffer; row-only
 snapshots retain their existing layout. Projected ranks retain Flink's overflow tie group because
-an independently expiring bound may subsequently widen.
+an independently expiring bound may subsequently widen. The general retracting buffer retains
+all rows, and a last-row deletion preserves the bound-only value. A first retraction initializes
+the bound even when it finds no row. Its row TTL still uses the whole-buffer model above, while
+the bound expires independently.
 
 Following Comet's batch JNI boundary, each ingest returns the bound-mismatch count alongside
 its existing Arrow export instead of calling Java for each row. Arrow ownership is unchanged.
 This path preserves per-record output even under mini-batching: a net diff after bound expiry
-would manufacture deletions absent from Flink's stream. Nullable bounds and independently changing
-bounds on updating/retracting input remain gated under [#104](https://github.com/datafusion-contrib/StreamFusion/issues/104).
+would manufacture deletions absent from Flink's stream. Mini-batched stateful producers also stay
+on Flink when they can reorder which proposal establishes the bound; source changelogs through
+row-local transformations and exchanges are supported. Nullable bounds and independently changing
+update-fast bounds remain gated under [#104](https://github.com/datafusion-contrib/StreamFusion/issues/104).
 
 ## Proctime keep-last dedup: which Flink to match
 
