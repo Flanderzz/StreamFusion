@@ -28,7 +28,16 @@ import org.apache.flink.types.Row;
 /** Fail only after a checkpoint containing a nonempty aggregate prefix has completed. */
 final class PortableSqlRecovery implements Supplier<TableEnvironment>, AutoCloseable {
   private static final Map<String, Proof> PROOFS = new ConcurrentHashMap<>();
+  private final String stateBackend;
   private final List<String> runIds = new java.util.ArrayList<>();
+
+  PortableSqlRecovery() {
+    this("hashmap");
+  }
+
+  PortableSqlRecovery(String stateBackend) {
+    this.stateBackend = stateBackend;
+  }
 
   static final class Proof {
     final AtomicBoolean failed = new AtomicBoolean();
@@ -42,6 +51,7 @@ final class PortableSqlRecovery implements Supplier<TableEnvironment>, AutoClose
     runIds.add(runId);
     PROOFS.put(runId, new Proof());
     Configuration config = new Configuration();
+    config.setString("state.backend.type", stateBackend);
     config.set(RestartStrategyOptions.RESTART_STRATEGY, "fixed-delay");
     config.set(RestartStrategyOptions.RESTART_STRATEGY_FIXED_DELAY_ATTEMPTS, 1);
     config.set(RestartStrategyOptions.RESTART_STRATEGY_FIXED_DELAY_DELAY, Duration.ofMillis(10));

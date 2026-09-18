@@ -5,16 +5,21 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Supplier;
+import java.util.stream.Stream;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.table.annotation.DataTypeHint;
 import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.api.Schema;
 import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
+import org.apache.flink.table.functions.ScalarFunction;
 import org.apache.flink.types.Row;
 import org.apache.flink.types.RowKind;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import tech.streamfusion.planner.NativePlanner;
 
@@ -36,6 +41,98 @@ class FlinkVariableTopNSqlHarnessTest {
       NativeParity.assertOrderedKindedParity(input, sql);
       NativeParity.assertChangelogParity(input, sql);
     }
+  }
+
+  static Stream<Arguments> computedPartitions() {
+    return Stream.of(
+        Arguments.of("MOD(k, 3)", "MOD(k, 3) + 1"),
+        Arguments.of("k + 1", "MOD(k + 1, 3) + 1"),
+        Arguments.of("CAST(MOD(k, 3) AS INT)", "CAST(MOD(k, 3) AS INT) + 1"),
+        Arguments.of("COALESCE(v, 0)", "MOD(COALESCE(v, 0), 3) + 1"),
+        Arguments.of("MOD(k, 3), MOD(id, 2)", "MOD(k, 3) + MOD(id, 2) + 1"));
+  }
+
+  @ParameterizedTest
+  @MethodSource("computedPartitions")
+  void computedPartitionBoundsMatchOrderedChangelog(String partition, String bound)
+      throws Exception {
+    for (boolean retracting : new boolean[] {false, true}) {
+      for (boolean outputRank : new boolean[] {false, true}) {
+        String sql =
+            query(bound, outputRank).replace("PARTITION BY k", "PARTITION BY " + partition);
+        Supplier<TableEnvironment> input =
+            () -> retracting ? retractingEnvironment(false) : environment(false, false);
+        String plan = NativePlanner.explain(input.get(), sql);
+        assertTrue(plan.contains("NativeColumnarTopN"), plan);
+        NativeParity.assertOrderedKindedParity(input, sql);
+        NativeParity.assertChangelogParity(input, sql);
+      }
+    }
+  }
+
+  @ParameterizedTest
+  @MethodSource("computedPartitions")
+  void computedPartitionBoundsKeepMiniBatchMaterialization(String partition, String bound)
+      throws Exception {
+    String sql = query(bound, true).replace("PARTITION BY k", "PARTITION BY " + partition);
+    NativeParity.assertChangelogParity(() -> environment(false, true), sql);
+    NativeParity.assertChangelogParity(() -> retractingEnvironment(true), sql);
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"k", "MOD(k, 4) + 1", "id"})
+  void computedPartitionDoesNotMakeItsInputsInvariant(String bound) throws Exception {
+    NativeParity.assertFallbackReasonContains(
+        () -> environment(false, false),
+        query(bound, true).replace("PARTITION BY k", "PARTITION BY MOD(k, 3)"),
+        "variable rank bound must be derived from partition keys");
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"hashmap", "tech.streamfusion.state.RocksDBNativeStateBackendFactory"})
+  void computedPartitionBoundsSurviveSqlRecovery(String backend) throws Exception {
+    for (boolean grouped : new boolean[] {false, true}) {
+      String input =
+          grouped ? "(SELECT k, SUM(v) AS v FROM recovery_input GROUP BY k)" : "recovery_input";
+      String sql =
+          "SELECT k, v, rn FROM (SELECT k, v, MOD(COALESCE(k, 0), 2) + 1 AS rank_end,"
+              + " ROW_NUMBER() OVER (PARTITION BY MOD(COALESCE(k, 0), 2) ORDER BY v DESC, k ASC)"
+              + " AS rn FROM "
+              + input
+              + ") WHERE rn <= rank_end";
+      try (var recovery = new PortableSqlRecovery(backend)) {
+        NativeParity.assertChangelogParity(recovery, sql);
+        recovery.verify();
+      }
+    }
+  }
+
+  @Test
+  void declaredDeterministicUdfIsNotProofOfPartitionInvariance() throws Exception {
+    NativeParity.assertFallbackReasonContains(
+        () -> {
+          TableEnvironment table = environment(false, false);
+          table.createTemporarySystemFunction("custom_bound", BoundFunction.class);
+          return table;
+        },
+        query("MOD(custom_bound(k), 3) + 1", true)
+            .replace("PARTITION BY k", "PARTITION BY custom_bound(k)"),
+        "variable rank bound must be derived from partition keys");
+  }
+
+  public static class BoundFunction extends ScalarFunction {
+    @DataTypeHint("BIGINT NOT NULL")
+    public long eval(long value) {
+      return value;
+    }
+  }
+
+  @Test
+  void nullableComputedBoundRetainsHostRowAccess() throws Exception {
+    NativeParity.assertFallbackReasonContains(
+        () -> environment(false, false),
+        query("MOD(v, 3) + 1", true).replace("PARTITION BY k", "PARTITION BY MOD(v, 3)"),
+        "nullable variable rank bounds require Flink's row-access semantics");
   }
 
   @Test
