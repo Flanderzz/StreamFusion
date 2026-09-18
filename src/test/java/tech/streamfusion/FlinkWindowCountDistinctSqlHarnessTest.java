@@ -98,6 +98,57 @@ class FlinkWindowCountDistinctSqlHarnessTest {
   }
 
   @ParameterizedTest
+  @CsvSource({
+    "ONE_PHASE,TUMBLE", "TWO_PHASE,TUMBLE",
+    "ONE_PHASE,HOP", "TWO_PHASE,HOP",
+    "ONE_PHASE,CUMULATE", "TWO_PHASE,CUMULATE"
+  })
+  void filteredSetsRemainIndependentWhenArgumentsAreShared(String phase, String shape)
+      throws Exception {
+    check(
+        phase,
+        "SELECT k, window_start, window_end, "
+            + "COUNT(DISTINCT i) FILTER (WHERE v > 0), "
+            + "COUNT(DISTINCT i) FILTER (WHERE v < 0), COUNT(DISTINCT i), "
+            + "COUNT(DISTINCT s) FILTER (WHERE i > 0), "
+            + "COUNT(DISTINCT d) FILTER (WHERE i < 0), "
+            + "COUNT(DISTINCT t) FILTER (WHERE v > 0), "
+            + "SUM(v), AVG(v), COUNT(*) FROM TABLE("
+            + window(shape)
+            + ") GROUP BY k, window_start, window_end");
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"ONE_PHASE", "TWO_PHASE"})
+  void filteredExactAndTemporalTypesRetainTheirEquality(String phase) throws Exception {
+    String[] values = {
+      "CAST(i AS TINYINT)",
+      "CAST(i AS SMALLINT)",
+      "i",
+      "v",
+      "d",
+      "s",
+      "CAST(s AS CHAR(12))",
+      "CAST(t AS DATE)",
+      "rt",
+      "t",
+      "CAST(t AS TIMESTAMP(3))",
+      "CAST(t AS TIMESTAMP(6))"
+    };
+    String aggregates =
+        java.util.Arrays.stream(values)
+            .map(value -> "COUNT(DISTINCT " + value + ") FILTER (WHERE v >= 0)")
+            .collect(java.util.stream.Collectors.joining(", "));
+    check(
+        phase,
+        "SELECT k, window_start, window_end, "
+            + aggregates
+            + " FROM TABLE("
+            + window("HOP")
+            + ") GROUP BY k, window_start, window_end");
+  }
+
+  @ParameterizedTest
   @ValueSource(strings = {"ONE_PHASE", "TWO_PHASE"})
   void attachedWindowsDeduplicateInnerCounts(String phase) throws Exception {
     String sql =
@@ -159,7 +210,9 @@ class FlinkWindowCountDistinctSqlHarnessTest {
         "SUM(DISTINCT i)",
         "AVG(DISTINCT i)",
         "COUNT(DISTINCT CAST(i AS DOUBLE))",
-        "COUNT(DISTINCT i) FILTER (WHERE i > 0)"
+        "COUNT(DISTINCT CAST(i AS DOUBLE)) FILTER (WHERE i > 0)",
+        "SUM(DISTINCT i) FILTER (WHERE i > 0)",
+        "AVG(DISTINCT i) FILTER (WHERE i > 0)"
       })
   void unverifiedDistinctFormsFallBack(String expression) throws Exception {
     String sql =

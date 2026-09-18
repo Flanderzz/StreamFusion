@@ -147,6 +147,21 @@ so duplicates split across tasks or checkpoint barriers count once. Ordinary agg
 AVG's two-field partials can share the same window. Flink's extra MapView partial fields are
 replaced by these lists throughout the native local/exchange/global pipeline.
 
+`COUNT(DISTINCT value) FILTER (WHERE predicate)` is also native for the same value types
+on append-only, aligned event-time TUMBLE/HOP/CUMULATE, in both aggregation phases.
+FALSE/NULL predicates mask only that aggregate's value. Each distinct call keeps its own
+selected set, including when several calls share an argument with different predicates.
+The global stage unions the already-filtered local sets without applying the predicate
+again. Rejected rows still establish groups; a live group with no selected non-NULL values
+emits zero. Filtered distinct counts can share a window with ordinary aggregates.
+
+This uses the existing Arrow validity masks and distinct list state, without a new JNI or
+checkpoint format. SQL tests cover the admitted types, independent filters, nullable keys
+and values, duplicates across batches and tasks, late watermarks, both aggregation phases,
+and checkpoint continuation on memory and RocksDB. Native work is required from each window
+stage. Updating input, filtered processing-time/attached/session/legacy windows, and the
+split-distinct rewrite remain outside this extension.
+
 Timestamp distinct keys follow Flink's serialized key representation: precision 0–3 uses
 milliseconds; precision 4–9 retains the fractional nanos. This matters when an internal cast
 leaves fractions in a value declared as a compact timestamp.
@@ -284,11 +299,11 @@ enables columnar composition with downstream consumers; it is not a standalone t
 - A value type/aggregate mismatch.
 - Single-phase aggregation over attached window bounds. Attached windows are native through
   the two-phase local/global path.
-- Windowed DISTINCT other than unfiltered, single-argument COUNT over the types listed above:
-  SUM/AVG DISTINCT, filtered COUNT DISTINCT, FLOAT/DOUBLE, BOOLEAN, TIME and complex values.
+- Windowed DISTINCT other than single-argument COUNT over the types listed above:
+  SUM/AVG DISTINCT, FLOAT/DOUBLE, BOOLEAN, TIME and complex values.
   Non-windowed DISTINCT has separate coverage; see [GROUP BY](group-by.md).
 - Filtered MIN/MAX on updating input, and filtered aggregates in processing-time, attached,
-  session or legacy windows. Filtered DISTINCT remains outside the value-set path described above.
+  session or legacy windows.
 - Retracting input outside aligned event-time TUMBLE/HOP/CUMULATE with grouping-only,
   numeric SUM/AVG, numeric COUNT(value), and COUNT(*) with optional FILTER.
   DISTINCT, MIN/MAX, processing-time, attached, session
@@ -480,6 +495,32 @@ Reproduce after building the release native library with:
 SF_BENCHMARK=true mvn -B -ntp -Pbench -pl :streamfusion-runtime -am \
   -Dnative.build.skip=true -Dtest=MixedWindowAvgBenchmark \
   -Dsurefire.failIfNoSpecifiedTests=false -Dwindow.filteredExtrema=true \
+  -Dwindow.rows=1000000 -Dwindow.warmup=2 -Dwindow.runs=5 test
+```
+
+### Filtered COUNT(DISTINCT) benchmark (2026-09-18)
+
+`-Dwindow.filteredDistinct=true` selects `COUNT(DISTINCT v) FILTER (WHERE MOD(v, 3) = 0)`
+in the same mixed-aggregate HOP workload, retaining ordinary AVG/SUM/MIN/MAX. On Apple M1
+Max, JDK 17 and released Flink 2.2.1, release/mimalloc, 1 million rows, parallelism 2,
+64 keys, two warmups and five alternating measured trials gave:
+
+| Filtered distinct phase | Flink seconds | Native seconds | Flink/native |
+| --- | ---: | ---: | ---: |
+| Single | 0.587880 | 0.557623 | 1.054× |
+| Local/global | 0.685695 | 0.582893 | 1.176× |
+
+The single-phase difference is small and trial ranges overlap. These local medians measure
+complete mixed queries with nullable BIGINT values, the row source, both transposes and
+the rowwise blackhole sink; no other local build or test competed with the benchmark.
+They do not isolate distinct filtering cost or establish a gain for other cardinalities,
+selectivities or value types. [Raw trials](../benchmarks/filtered-window-distinct-2026-09-18.csv)
+retain every measured iteration. Reproduce with the release library and:
+
+```sh
+SF_BENCHMARK=true mvn -B -ntp -Pbench -pl :streamfusion-runtime -am \
+  -Dnative.build.skip=true -Dtest=MixedWindowAvgBenchmark \
+  -Dsurefire.failIfNoSpecifiedTests=false -Dwindow.filteredDistinct=true \
   -Dwindow.rows=1000000 -Dwindow.warmup=2 -Dwindow.runs=5 test
 ```
 

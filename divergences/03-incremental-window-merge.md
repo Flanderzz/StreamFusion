@@ -33,6 +33,15 @@ Flink's local MapView fields are replaced by the list partials, so both native s
 one explicit intermediate schema. Variable-sized sets currently use the existing snapshot
 fallback on RocksDB; they do not enter its fixed-field accumulator row codec.
 
+Filtered COUNT(DISTINCT) in append-only aligned event-time windows reuses that same partial/final
+boundary. The existing per-aggregate validity mask rejects values before they enter a set,
+without dropping the row that establishes a live window. Each call carries its own list,
+even when Flink combines calls sharing an argument into one MapView with per-filter bits
+(`AggregateUtil.extractDistinctInformation` and `DistinctAggCodeGen` in released Flink 2.2.1).
+Global merging unions selected sets without re-evaluating filters. There is no new native
+state or Arrow ownership protocol. Arroyo's tumbling partial/final implementation was
+consulted before extending admission; its structure remains unchanged here.
+
 ## Late local slices
 
 Arroyo's sliding operator bins batches and skips a bin preceding its current watermark bin.

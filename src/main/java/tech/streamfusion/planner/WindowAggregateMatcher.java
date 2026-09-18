@@ -295,7 +295,6 @@ final class WindowAggregateMatcher {
       if (call.isDistinct()) {
         if (kind != KIND_COUNT
             || call.getArgList().size() != 1
-            || call.filterArg >= 0
             || !supportedDistinctValueType(
                 inputType
                     .getFieldList()
@@ -752,7 +751,7 @@ final class WindowAggregateMatcher {
       return "window aggregate: " + zoneReason;
     }
     return "window aggregate: requires a supported window/time and grouping-key type, and"
-        + " numeric SUM/MIN/MAX/COUNT/AVG or unfiltered COUNT(DISTINCT) over exact, string, or"
+        + " numeric SUM/MIN/MAX/COUNT/AVG or COUNT(DISTINCT) over exact, string, or"
         + " temporal values (docs/operators/window-aggregate.md)";
   }
 
@@ -808,7 +807,7 @@ final class WindowAggregateMatcher {
   private static boolean supportedFilter(AggregateCall call, RelDataType inputType) {
     if (call.filterArg < 0) return true;
     int kind = aggregateKind(call.getAggregation().getKind());
-    return !call.isDistinct()
+    return (!call.isDistinct() || kind == KIND_COUNT)
         && (kind == KIND_SUM
             || kind == KIND_AVG
             || kind == KIND_COUNT

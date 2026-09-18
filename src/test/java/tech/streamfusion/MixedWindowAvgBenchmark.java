@@ -21,10 +21,13 @@ class MixedWindowAvgBenchmark {
   private static final int WARMUP = Integer.getInteger("window.warmup", 2);
   private static final int RUNS = Integer.getInteger("window.runs", 5);
   private static final boolean FILTERED_EXTREMA = Boolean.getBoolean("window.filteredExtrema");
+  private static final boolean FILTERED_DISTINCT = Boolean.getBoolean("window.filteredDistinct");
   private static final boolean DISTINCT = Boolean.getBoolean("window.distinct");
   private static final String SQL =
       "INSERT INTO sink SELECT k, "
-          + (DISTINCT ? "COUNT(DISTINCT v)" : "COUNT(*)")
+          + (FILTERED_DISTINCT
+              ? "COUNT(DISTINCT v) FILTER (WHERE MOD(v, 3) = 0)"
+              : DISTINCT ? "COUNT(DISTINCT v)" : "COUNT(*)")
           + ", AVG(v), SUM(v), "
           + (FILTERED_EXTREMA
               ? "MIN(v) FILTER (WHERE MOD(v, 2) = 0), MAX(v) FILTER (WHERE MOD(v, 3) = 0)"
@@ -62,10 +65,11 @@ class MixedWindowAvgBenchmark {
     double nativeTime = median(times[1]);
     System.out.printf(
         Locale.ROOT,
-        "[mixed-window-avg] distinct=%s filteredExtrema=%s phase=%s rows=%d Flink=%.6fs"
-            + " Native=%.6fs ratio=%.3fx host_trials=%s native_trials=%s%n",
+        "[mixed-window-avg] distinct=%s filteredExtrema=%s filteredDistinct=%s phase=%s rows=%d"
+            + " Flink=%.6fs Native=%.6fs ratio=%.3fx host_trials=%s native_trials=%s%n",
         DISTINCT,
         FILTERED_EXTREMA,
+        FILTERED_DISTINCT,
         phase,
         ROWS,
         host,
