@@ -10,12 +10,13 @@ import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.jar.JarFile;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.Network;
 import org.testcontainers.containers.wait.strategy.Wait;
-import org.testcontainers.utility.MountableFile;
 import org.testcontainers.utility.DockerImageName;
+import org.testcontainers.utility.MountableFile;
 
 /** Runs a normal Session-cluster submission against the locally built Flink image. */
 class FlinkImageIT {
@@ -27,13 +28,26 @@ class FlinkImageIT {
           + "jobmanager.memory.process.size: 1024m\n"
           + "taskmanager.memory.process.size: 2048m\n"
           + "taskmanager.memory.task.off-heap.size: 256m\n"
-          + "state.backend.type: tech.streamfusion.state.RocksDBNativeStateBackendFactory\n"
+          + ("1.18".equals(System.getProperty("streamfusion.flink.line"))
+              ? "state.backend: "
+              : "state.backend.type: ")
+          + "tech.streamfusion.state.RocksDBNativeStateBackendFactory\n"
           + "taskmanager.numberOfTaskSlots: 1";
 
   @Test
   void baseImageRunsAUserSqlJobThroughTheNativePlannerAndRuntime() throws Exception {
     Path jobJar = Path.of(requiredProperty("streamfusion.image.job.jar"));
     assertTrue(Files.isRegularFile(jobJar), "missing user job JAR: " + jobJar);
+    try (JarFile jar = new JarFile(jobJar.toFile())) {
+      assertTrue(
+          jar.stream()
+              .noneMatch(
+                  entry ->
+                      entry.getName().startsWith("tech/streamfusion/native/")
+                          || (entry.getName().endsWith(".class")
+                              && !entry.getName().startsWith("tech/streamfusion/imageit/"))),
+          "Image validation requires a thin user job without embedded engine classes or libraries");
+    }
 
     DockerImageName image = DockerImageName.parse(requiredProperty("streamfusion.image.name"));
     try (Network network = Network.newNetwork();
@@ -100,7 +114,8 @@ class FlinkImageIT {
       try {
         HttpResponse<String> response =
             client.send(
-                HttpRequest.newBuilder(taskManagers).GET().build(), HttpResponse.BodyHandlers.ofString());
+                HttpRequest.newBuilder(taskManagers).GET().build(),
+                HttpResponse.BodyHandlers.ofString());
         lastResponse = response.body();
         if (response.statusCode() == 200 && !lastResponse.contains("\"taskmanagers\":[]")) {
           return;

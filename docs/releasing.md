@@ -119,8 +119,9 @@ bin/check-artifacts.sh --host-only --flink-line 1.18
 bin/package-release.sh --flink-line 1.18
 ```
 
-The 1.18 archive has a `streamfusion-flink1.18-` prefix and contains only qualified payloads;
-Delta is excluded from its build and archive. The automated release workflow and base-image
-validation still target 2.2 until the remaining gates pass.
+Release archives omit macOS metadata sidecars so they contain the same intended files on every
+build host. The 1.18 archive has a `streamfusion-flink1.18-` prefix and contains only qualified payloads;
+Delta is excluded from its build and archive. Base-image smoke validation covers both lines;
+the automated publication workflow still targets 2.2 until the remaining gates pass.
 No 1.18 Delta artifact is currently admitted. See
 [Flink line compatibility](flink-compatibility.md) for the exact development scope.

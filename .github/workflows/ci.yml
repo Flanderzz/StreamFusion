@@ -159,9 +159,19 @@ jobs:
           -pl ${{ matrix.module }} -am test -Dsf.runtime.tests.skip=true
 
   image-integration:
-    name: Flink image integration (optimized native build)
+    name: Flink image integration (optimized native build)${{ matrix.suffix }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - line: '2.2'
+            profile: image-it
+            suffix: ''
+          - line: '1.18'
+            profile: image-it,flink-1.18
+            suffix: ' (Flink 1.18)'
     steps:
       - uses: actions/checkout@v6
 
@@ -187,26 +197,16 @@ jobs:
       # Host-only is still a production Linux/x86_64 release (including mimalloc); cross-platform
       # manifest assembly is covered by the release builder, but does not belong on this smoke path.
       - name: Build optimized core image
+        env:
+          FLINK_LINE: ${{ matrix.line }}
         run: |
-          bin/build-release.sh --host-only
-          version="$(mvn -q -DforceStdout help:evaluate -Dexpression=project.version)"
-          jar tf "streamfusion-kafka/target/streamfusion-kafka-${version}.jar" | grep -q 'native/kafka/linux/x86_64/libstreamfusion_kafka.so'
-          jar tf "streamfusion-json/target/streamfusion-json-${version}.jar" | grep -q 'native/json/linux/x86_64/libstreamfusion_json.so'
-          jar tf "streamfusion-csv/target/streamfusion-csv-${version}.jar" | grep -q 'native/csv/linux/x86_64/libstreamfusion_csv.so'
-          jar tf "streamfusion-raw/target/streamfusion-raw-${version}.jar" | grep -q 'native/raw/linux/x86_64/libstreamfusion_raw.so'
-          jar tf "streamfusion-avro/target/streamfusion-avro-${version}.jar" | grep -q 'native/avro/linux/x86_64/libstreamfusion_avro.so'
-          if jar tf "streamfusion-avro-confluent-registry/target/streamfusion-avro-confluent-registry-${version}.jar" | grep -q 'libstreamfusion_avro'; then
-            exit 1
-          fi
-          jar tf "streamfusion-protobuf/target/streamfusion-protobuf-${version}.jar" | grep -q 'native/protobuf/linux/x86_64/libstreamfusion_protobuf.so'
-          jar tf "streamfusion-parquet/target/streamfusion-parquet-${version}.jar" | grep -q 'native/parquet/linux/x86_64/libstreamfusion_parquet.so'
-          jar tf "streamfusion-orc/target/streamfusion-orc-${version}.jar" | grep -q 'native/orc/linux/x86_64/libstreamfusion_orc.so'
-          bin/check-artifacts.sh --host-only
-          bin/build-flink-image.sh --tag streamfusion-flink:image-it --load --skip-release-build
+          bin/build-release.sh --host-only --flink-line "$FLINK_LINE"
+          bin/check-artifacts.sh --host-only --flink-line "$FLINK_LINE"
+          bin/build-flink-image.sh --flink-line "$FLINK_LINE" --tag streamfusion-flink:image-it --load --skip-release-build
 
       - name: Run Flink Session-cluster image smoke test
         run: >
-          mvn -B -ntp -Pimage-it -pl :streamfusion-image-it verify
+          mvn -B -ntp -P${{ matrix.profile }} -pl streamfusion-image-it verify
           -Dstreamfusion.image.name=streamfusion-flink:image-it
 
   module-tests:
@@ -338,6 +338,12 @@ jobs:
           mvn -B -ntp -Pflink-1.18,universal -pl streamfusion-loader -am test
           -Dtest=FlinkPayloadIdentityTest,StreamFusionPlannerLoaderTest
           -Dsurefire.failIfNoSpecifiedTests=false
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flink1.18-optimized-linux-payloads
+          path: target/release/streamfusion-flink1.18-*-bin.tar.gz*
+          if-no-files-found: error
 
   all-tests:
     name: All CI tests

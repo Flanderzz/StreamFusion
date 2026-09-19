@@ -46,7 +46,7 @@ for suffix in $modules; do
 done
 
 archive=$output_dir/$bundle_name-bin.tar.gz
-(cd "$stage_dir" && tar -czf "$archive" "$bundle_name")
+(cd "$stage_dir" && COPYFILE_DISABLE=1 tar -czf "$archive" "$bundle_name")
 (cd "$output_dir" && shasum -a 256 "$(basename "$archive")" > "$(basename "$archive").sha256")
 
 printf '%s\n' "$archive"

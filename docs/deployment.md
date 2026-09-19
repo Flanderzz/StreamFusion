@@ -191,3 +191,24 @@ roughly a third of the transpose CPU was per-accessor bounds/refcount checks:
 
 See [Configuration](configuration.md) for the full `-Dstreamfusion.*` runtime flag surface,
 including off-heap sizing for Arrow batches and native operator state.
+
+## Experimental Flink 1.18 images
+
+The development image builder selects the matching official Flink base and qualified payloads:
+
+```sh
+bin/build-flink-image.sh --flink-line 1.18 --tag streamfusion-flink:1.18-dev --load --platform linux/amd64
+mvn -Pimage-it,flink-1.18 -pl streamfusion-image-it verify \
+  -Dstreamfusion.image.name=streamfusion-flink:1.18-dev
+```
+
+For an unpacked official distribution, use `bin/install-flink.sh --flink-line 1.18 <FLINK_HOME>`.
+The installer checks the supported distribution version and both payload manifests before
+copying either JAR. Its default remains the 2.2 line.
+
+Both CI image jobs build optimized native libraries and submit a normal thin user JAR to a
+Session cluster. They verify native Calc and grouped aggregation with the native RocksDB backend,
+and load each packaged format/connector extension in its own JVM. Flink 1.18 uses the
+`state.backend` configuration key; 2.2 uses `state.backend.type`.
+The 1.18 line remains experimental: these smoke jobs do not establish cross-line savepoint
+upgrade support, which is tracked in [#188](https://github.com/datafusion-contrib/StreamFusion/issues/188).
