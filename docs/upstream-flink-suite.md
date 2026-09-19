@@ -117,6 +117,9 @@ after its native push returns, including when an input coalescer delays that cal
 require completed native async lookup batches across every executed backend, object-reuse,
 output-order and cache variant. These counters are recorded after the host-delegating columnar
 operator completes its batch; merely opening the operator earns no credit.
+Calc contracts also cover numeric-to-boolean predicates, IN and SEARCH predicates, quoted LIKE
+patterns, and reuse of one RAND value across expressions. Each requires nonempty native Calc or
+filter work while retaining the unchanged upstream result assertions.
 Other upstream cases still check
 result parity without a per-test acceleration contract; planner installation alone does not prove
 that any particular query ran natively.
@@ -139,8 +142,8 @@ The summary also writes `.flink-suite/diagnostics/<suite>/execution-audit.json`,
 those CI diagnostics. Schema version 1 retains every parsed Surefire case (including duplicates,
 skips and failures), its report-relative location, and whether that method is contracted. The
 summary reports the complete executed denominator, the contracted subset, and the executed
-cases outside that scope. For example, 32 passing Calc cases with three execution witnesses mean
-three contracted executions and 29 unclassified executions, not 32 accelerated tests.
+cases outside that scope. For example, 32 passing Calc cases with eight execution witnesses mean
+eight contracted executions and 24 unclassified executions, not 32 accelerated tests.
 
 Validated evidence retains the fixture selector, per-operator native input counts, expected
 contract and recorded fallback reasons. Routes distinguish native work, mixed native work plus
@@ -218,18 +221,19 @@ The same `FLINK_SUITE_TEST` and `FLINK_SUITE_REUSE_BUILD=true` controls apply to
 `parquet`, `orc`, `kafka`, `paimon`, and `delta`. Reuse mode requires that the selected mode has been built once normally.
 
 The focused Paimon coordinator run includes its four paged writer-restoration cases, three
-commit-coordinator cases, and a deterministic primary-key write to verify native file creation:
+commit-coordinator cases, a deterministic primary-key write to verify native file creation,
+and continuous-read cases to exercise native snapshot merging:
 
 ```bash
-FLINK_SUITE_TEST='org.apache.paimon.flink.CoordinatorCommitITCase,org.apache.paimon.flink.BatchFileStoreITCase#testWriteRestoreCoordinator*,org.apache.paimon.flink.ReadWriteTableITCase#testStreamingReadWriteWithPartitionedRecordsWithPk' \
+FLINK_SUITE_TEST='org.apache.paimon.flink.CoordinatorCommitITCase,org.apache.paimon.flink.BatchFileStoreITCase#testWriteRestoreCoordinator*,org.apache.paimon.flink.ReadWriteTableITCase#testStreamingReadWriteWithPartitionedRecordsWithPk,org.apache.paimon.flink.ContinuousFileStoreITCase' \
   bin/flink-suite.sh paimon
 ```
 
 The focused streaming dynamic-partition run uses Paimon's unchanged skewed-input SQL test,
-alongside a primary-key write to satisfy the suite's two native-write checks:
+alongside a primary-key write and continuous-read cases to satisfy all three native write/read checks:
 
 ```bash
-FLINK_SUITE_TEST='org.apache.paimon.flink.AppendTableITCase#testPartitionDynamicStreaming,org.apache.paimon.flink.ReadWriteTableITCase#testStreamingReadWriteWithPartitionedRecordsWithPk' \
+FLINK_SUITE_TEST='org.apache.paimon.flink.AppendTableITCase#testPartitionDynamicStreaming,org.apache.paimon.flink.ReadWriteTableITCase#testStreamingReadWriteWithPartitionedRecordsWithPk,org.apache.paimon.flink.ContinuousFileStoreITCase' \
   bin/flink-suite.sh paimon
 ```
 
