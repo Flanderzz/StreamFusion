@@ -160,7 +160,7 @@ jobs:
 
   image-integration:
     name: Flink image integration (optimized native build)${{ matrix.suffix }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -311,7 +311,7 @@ jobs:
 
   flink118-artifacts:
     name: Flink 1.18 qualified artifacts and loader
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v6

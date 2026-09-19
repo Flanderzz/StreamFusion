@@ -87,7 +87,12 @@ and Maven artifact names remain the same, including the single Avro native paylo
 Avro-Confluent-Registry. Extension libraries are checked for foreign JNI entry points before shipping.
 
 Following DataFusion Comet's runner-native pattern, it builds the Linux x86_64 payload on an Ubuntu
-runner and the Apple Silicon payload on a macOS runner. It merges those binaries into the release
+22.04 runner and the Apple Silicon payload on a macOS runner. The Linux image checks use that same
+glibc 2.35 build baseline, which loads in the official Flink 1.18 and 2.2 images. The containerized
+cross-platform builder uses Rust 1.94 on Debian Bullseye to stay below that ABI floor. A `--host-only`
+build inherits its host's libc requirements; do not build a deployment for an older distribution
+on Ubuntu 24.04. The 1.18 Java payload also uses the host SLF4J 1.7 API and provider, avoiding a
+conflicting SLF4J 2 API in Flink’s global classpath. The workflow merges those binaries into the release
 JARs, validates the artifact boundaries, signs and publishes the reactor through the Central Portal,
 and only then creates the GitHub release. A version containing a hyphen, such as `0.1.0-rc3`, becomes
 a GitHub prerelease.
