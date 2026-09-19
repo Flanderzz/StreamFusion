@@ -106,12 +106,40 @@ class StreamFusionPlannerLoaderTest {
         PlannerModule.class.getResource("/streamfusion-planner.jar"),
         "the loader artifact must embed the StreamFusion runtime payload");
 
-    TableEnvironment tableEnvironment = TableEnvironment.create(EnvironmentSettings.inStreamingMode());
+    TableEnvironment tableEnvironment =
+        TableEnvironment.create(EnvironmentSettings.inStreamingMode());
     String sql = "SELECT c0 * 2 AS doubled FROM (VALUES (3), (4), (5)) AS t(c0)";
 
     String explain = tableEnvironment.explainSql(sql);
     assertTrue(explain.contains("NativeCalc"), "StreamFusion was not installed:\n" + explain);
     assertEquals(List.of(6, 8, 10), collectInts(tableEnvironment.executeSql(sql)));
+  }
+
+  @Test
+  void installsNativeStatefulPlannerWithConfiguredHostBackend() throws Exception {
+    org.apache.flink.configuration.Configuration configuration =
+        new org.apache.flink.configuration.Configuration();
+    configuration.set(
+        org.apache.flink.configuration.StateBackendOptions.STATE_BACKEND,
+        "tech.streamfusion.state.RocksDBNativeStateBackendFactory");
+    TableEnvironment table =
+        TableEnvironment.create(
+            EnvironmentSettings.newInstance()
+                .inStreamingMode()
+                .withConfiguration(configuration)
+                .build());
+    String sql = "SELECT c0, SUM(c1) FROM (VALUES (1, 2), (1, 3), (2, 4)) AS t(c0, c1) GROUP BY c0";
+    Class<?> planner =
+        Class.forName(
+            "tech.streamfusion.planner.NativePlanner",
+            true,
+            PlannerModule.getInstance().getSubmoduleClassLoader());
+    String explain =
+        (String)
+            planner
+                .getMethod("explain", TableEnvironment.class, String.class)
+                .invoke(null, table, sql);
+    assertTrue(explain.contains("NativeColumnarGroupAggregate"), explain);
   }
 
   private static String loaderLine() throws Exception {
