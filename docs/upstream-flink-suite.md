@@ -287,8 +287,9 @@ A targeted upstream Paimon run passed 22 continuous-read, partition-write and sc
 the [ORC page](connectors/orc.md#build-and-verification) distinguishes that run from local tests
 that explicitly exercise ORC streaming.
 
-The agent logs each unchanged `PrimaryKeyFileStoreTableITCase` invocation, its randomized table
-defaults, and its completion, including the full exception on failure. Fatal MiniCluster errors
+The agent logs each unchanged Paimon SQL `ITCase` test invocation and its completion, including
+the full exception on failure. It includes randomized table defaults when the fixture supplies
+them, including inherited defaults; other fixtures report `none`. Fatal MiniCluster errors
 are printed immediately, even when upstream logging is disabled. If an invocation runs for two
 minutes, it emits all JVM thread stacks to the suite log before CI's job timeout can discard the
 active test's unwritten JUnit report.
@@ -434,3 +435,32 @@ The versioned JAR supplies both missing compatibility types (`CatalogMaterialize
 `OpenContext`) and replacements for helpers whose managed-memory signatures differ by line.
 Appending that JAR after the 1.20 common classes leaves those incompatible helpers in control.
 The runner does not add Flink 1.20 runtime JARs or modify upstream sources or assertions.
+
+Paimon's shared programmatic catalog fixture also calls `CatalogTable.newBuilder()`, an API
+absent from Flink 1.18. On that line only, the agent constructs the same resolved catalog table
+through `CatalogTable.of`: identical columns, primary-key name/columns, partition keys, options
+and comment. This adapts fixture construction, not its SQL or result assertions; the eight
+sink-parallelism variants remain in the blocking suite. Flink 2.2 executes the original helper.
+The recovery fixture also maps its three moved checkpoint-setting field references to the
+released 1.18 option and enum locations. Both recovery and bucket-rescaling fixtures map their
+restore-path key to `execution.savepoint.path`.
+The agent also applies those restore settings to the generated stream graph only while this
+a recovery or bucket-rescaling fixture is executing: the 1.18 executor does not propagate restore options from mutable
+table configuration into its execution environment. Without both adaptations, the source starts
+again without restoring its checkpoint. Retention values and the ignore-unclaimed-state behavior
+are preserved; setup SQL, savepoint operations and recovery assertions are retained. Neither fixture adapter is applied
+on 2.2.
+
+The 1.18 Paimon matrix is still experimental and blocking. Its complete local baseline has
+262 invocations: 238 pass, 22 fail, and 2 are upstream skips. A combined focused rerun passes
+22 cases covering catalog construction, checkpoint restore, bucket rescaling, statement hints,
+historical schemas and native writer/reader evidence; it does not establish a complete-suite pass. The remaining
+named-procedure and overwrite-layout failures require resolution before this line is supported.
+A control run with StreamFusion's agent and all its JARs removed reproduces
+`BatchFileStoreITCase.testIgnoreDelete`, `testIgnoreUpdateBeforeWithRowKindField`, and
+`testNoOverwriteUpgradeWhenFilesOverlapped`. The first two fail in Flink's named-procedure
+operand validation; the third retains the upstream file-layout assertion failure. The full
+baseline also failed `RescaleBucketITCase.testRescaleCatalogTable` on its randomized named-CALL
+path. `ContinuousFileStoreITCase.testScanFromOldSchema` timed out in the full baseline and passes
+focused reruns, so its full-suite reliability remains unverified. These cases remain selected
+and failures have not been converted to skips or expected failures.
