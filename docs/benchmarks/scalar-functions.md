@@ -1190,3 +1190,37 @@ TZ=UTC SF_BENCHMARK=true mvn -pl streamfusion-runtime -am test -Pbench \
   -Dscalar.rows=2000000 -Dscalar.nullEvery=8 -Dscalar.warmup=2 -Dscalar.runs=5 \
   -Dscalar.engine=both
 ```
+
+## JSON_VALUE exception parity (2026-09-19)
+
+`JSON_VALUE_ERROR` selects `lax $.user.active` with `ERROR ON EMPTY ERROR ON ERROR`.
+`JSON_VALUE_ACTIVE` selects the same field with the default NULL policies. Both use
+the unchanged `tt_json` row source, whose non-null documents contain that boolean field.
+These are successful-path measurements; the error policies still affect which evaluator runs.
+
+Apple M1 Max, JDK 17, Flink 2.2.1, release build with mimalloc (`-Pbench`), parallelism 1,
+one million rows, 264-byte padding budget, NULL every eighth row, two warmups and five
+interleaved trials per engine. Each before/after run uses a fresh JVM. No other test suite
+or native build runs during measurement. Medians include planning, the row source and sink,
+and both row/Arrow transposes, which the harness asserts in the plan.
+
+| Query | Before Flink (s) | Before native (s) | After Flink (s) | After native (s) |
+| --- | ---: | ---: | ---: | ---: |
+| Source-matched identity | 0.354 | 0.608 | 0.355 | 0.592 |
+| Default NULL policies | 0.994 | 0.812 | 1.006 | 0.799 |
+| ERROR policies | 1.004 | 0.809 | 0.988 | 1.604 |
+
+The before implementation is `762efc8`, with only the two benchmark queries added.
+Routing ERROR policies through Flink's generated batch evaluator costs 1.98× elapsed time
+relative to the previous native kernel and takes 1.62× Flink's time in this short pipeline.
+This corrects the previous exception-class/message mismatch; it is not a performance improvement.
+Non-throwing policies retain the native path. The generated route performs one JVM callback
+per Arrow batch, with row iteration inside that callback.
+
+```bash
+SF_BENCHMARK=true mvn -pl streamfusion-runtime -am test -Pbench \
+  '-Dtest=ScalarFunctionBenchmark#individualFunctions' \
+  -Dscalar.functions=JSON_VALUE_ACTIVE,JSON_VALUE_ERROR \
+  -Dscalar.rows=1000000 -Dscalar.bytes=264 -Dscalar.nullEvery=8 \
+  -Dscalar.warmup=2 -Dscalar.runs=5 -Dscalar.engine=both
+```

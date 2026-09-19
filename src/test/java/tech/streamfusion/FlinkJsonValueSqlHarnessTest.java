@@ -1,8 +1,10 @@
 package tech.streamfusion;
 
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static tech.streamfusion.NativeParity.assertParity;
 
 import org.junit.jupiter.api.Test;
+import tech.streamfusion.planner.NativePlanner;
 
 class FlinkJsonValueSqlHarnessTest {
   @Test
@@ -127,13 +129,21 @@ class FlinkJsonValueSqlHarnessTest {
   }
 
   @Test
+  void errorPoliciesUseTheGeneratedBatchRoute() throws Exception {
+    String sql =
+        "SELECT JSON_VALUE(s, 'lax $.a' ERROR ON EMPTY DEFAULT 'error' ON ERROR) FROM inputs";
+    var environment = TextTimeFunctionTestInputs.textRows("{\"a\":\"ok\"}");
+    String plan = NativePlanner.explain(environment, sql);
+    assertTrue(plan.contains("jsonEvaluation=[JVM]"), plan);
+    NativeParity.assertParity(() -> TextTimeFunctionTestInputs.textRows("{\"a\":\"ok\"}"), sql);
+  }
+
+  @Test
   void emptyErrorIsNotSwallowedByOnErrorDefault() {
     JsonFunctionTestInputs.assertFails(
-        "{}",
-        "JSON_VALUE(s, 'lax $.a' ERROR ON EMPTY DEFAULT 'error' ON ERROR)",
-        "JSON_VALUE EMPTY");
+        "{}", "JSON_VALUE(s, 'lax $.a' ERROR ON EMPTY DEFAULT 'error' ON ERROR)");
     JsonFunctionTestInputs.assertFails(
-        "{\"a\":null}", "JSON_VALUE(s, 'strict $.a' ERROR ON ERROR)", "JSON_VALUE ERROR");
+        "{\"a\":null}", "JSON_VALUE(s, 'strict $.a' ERROR ON ERROR)");
   }
 
   @Test

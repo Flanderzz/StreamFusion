@@ -809,7 +809,9 @@ The generated route covers JSON_QUERY, dynamic JSON_VALUE/JSON_QUERY paths, recu
 descent, filters, slices, multi-selectors, path functions, and invalid paths handled by
 Flink's policies. It also admits additional JSON_STRING/JSON_OBJECT scalar types and nested
 constructors, dynamic defaults, nullable-boolean consumers, and short-circuited error or
-typed-conversion expressions that the native encoder declines. A mixed Calc moves together
+typed-conversion expressions that the native encoder declines. JSON_VALUE with `ERROR ON EMPTY`
+or `ERROR ON ERROR` always uses this generated route, including direct projections, so its
+exception class, message and policy precedence match Flink. A mixed Calc moves together
 to preserve Flink's row order, shared UDF instances, filter-before-projection behavior and
 Jackson buffer history. There is one JSON JVM callback per Arrow batch per Calc; row
 iteration happens inside that callback. Rejected rows and changelog tags share a filter mask
@@ -899,7 +901,9 @@ opt-in is needed. This validates the document directly, without applying JSON pa
 ### JSON_VALUE
 
 The direct Rust kernel is enabled by default for the following verified shapes; no compatibility
-opt-in is needed. The fused JVM consumer path below retains Flink's own selector and policy rules.
+opt-in is needed. `ERROR ON EMPTY` and `ERROR ON ERROR` use the generated Calc so failures retain
+Flink's exact exception class and message. Outside a Calc, these throwing policies stay on the host.
+The fused JVM consumer path below retains Flink's own selector and policy rules.
 
 Character input with a non-null literal path is native for the following selectors.
 Definite paths support `$`,
