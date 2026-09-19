@@ -2007,7 +2007,7 @@ public final class Native {
   /** Materializes direct RocksDB Top-N state as backend-independent key-group partitions. */
   public static native byte[][] snapshotRocksDBTopNRankerPartitions(long handle);
 
-  public static native void pushRocksDBTopNRanker(
+  public static native long pushRocksDBTopNRanker(
       long handle,
       long inArrayAddress,
       long inSchemaAddress,
@@ -2492,11 +2492,16 @@ public final class Native {
       long stateTtlMillis,
       long memoryBudgetBytes);
 
+  /** Retains each partition's first variable bound independently of its ranked rows. */
+  public static native void enableTopNFirstBound(
+      long handle, boolean persistent, boolean generateUpdateBefore);
+
   /**
-   * Pushes an input batch, exporting the top-N changelog (input columns plus the row kind).
-   * {@code nowMillis} is the operator's processing-time reading — the state-TTL clock.
+   * Pushes an input batch, exporting the top-N changelog (input columns plus the row kind). {@code
+   * nowMillis} is the operator's processing-time reading — the state-TTL clock. Returns the number
+   * of proposed bounds that differed from the retained first bound.
    */
-  public static native void pushTopNRanker(
+  public static native long pushTopNRanker(
       long handle,
       long inArrayAddress,
       long inSchemaAddress,

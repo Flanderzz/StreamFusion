@@ -740,6 +740,75 @@ class NativeColumnarTopNOperatorTest {
     return rows;
   }
 
+  @Test
+  void independentlyChangingBoundsSurviveRescaleIncludingBoundOnlyKeys() throws Exception {
+    long[] keys = keysForBothSubtasks();
+    for (long bound : new long[] {0, 2}) {
+      OperatorSubtaskState snapshot;
+      try (var allocator = new RootAllocator();
+          var before = harness(firstBoundOperator(), 1, 0)) {
+        before.setup(new ArrowBatchSerializer());
+        before.open();
+        before.processElement(
+            new StreamRecord<>(
+                updateFastBatch(
+                    allocator,
+                    row3(keys[0], 20, bound),
+                    row3(keys[0], 10, bound),
+                    row3(keys[1], 20, bound),
+                    row3(keys[1], 10, bound))));
+        snapshot = before.snapshot(1, 1);
+        collect3(before);
+      }
+      for (int task = 0; task < 2; task++) {
+        long key = keys[task];
+        try (var allocator = new RootAllocator();
+            var restored = harness(firstBoundOperator(), 2, task)) {
+          restored.setup(new ArrowBatchSerializer());
+          restored.initializeState(
+              AbstractStreamOperatorTestHarness.repartitionOperatorState(
+                  snapshot, MAX_PARALLELISM, 1, 2, task));
+          restored.open();
+          restored.processElement(
+              new StreamRecord<>(
+                  new ArrowBatch(
+                      RowDataArrowConverter.write(
+                          List.of(row3(key, 5, 9)), UPDATE_FAST_SCHEMA, allocator),
+                      task)));
+          assertEquals(
+              bound == 0
+                  ? List.of()
+                  : List.of(
+                      change3(RowKind.DELETE, key, 20, bound), change3(RowKind.INSERT, key, 5, 9)),
+              collect3(restored));
+        }
+      }
+    }
+  }
+
+  private static NativeColumnarTopNOperator firstBoundOperator() {
+    return new NativeColumnarTopNOperator(
+        new int[] {0},
+        new int[] {-1},
+        UPDATE_FAST_SCHEMA,
+        new int[] {1},
+        new int[] {1},
+        new int[] {0},
+        0,
+        Long.MAX_VALUE,
+        false,
+        false,
+        null,
+        null,
+        false,
+        false,
+        -1,
+        0,
+        MAX_PARALLELISM,
+        2,
+        true);
+  }
+
   private static long[] keysForBothSubtasks() {
     long[] keys = new long[] {Long.MIN_VALUE, Long.MIN_VALUE};
     for (long candidate = 0;

@@ -1,20 +1,21 @@
 package tech.streamfusion.operator;
 
-import tech.streamfusion.Native;
-import tech.streamfusion.operator.MiniBatchMetrics.FlushReason;
-import tech.streamfusion.planner.NativeConfig;
-import tech.streamfusion.state.CanonicalNativeState;
-import tech.streamfusion.state.RocksDBNativeStateSupport;
 import org.apache.arrow.c.ArrowArray;
 import org.apache.arrow.c.ArrowSchema;
 import org.apache.arrow.c.Data;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.flink.metrics.Counter;
 import org.apache.flink.runtime.state.CheckpointableKeyedStateBackend;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.table.types.logical.RowType;
+import tech.streamfusion.Native;
+import tech.streamfusion.operator.MiniBatchMetrics.FlushReason;
+import tech.streamfusion.planner.NativeConfig;
+import tech.streamfusion.state.CanonicalNativeState;
+import tech.streamfusion.state.RocksDBNativeStateSupport;
 
 /**
  * Append-only streaming Top-N, fed Arrow batches and emitting Arrow batches. The changelog flows
@@ -33,6 +34,7 @@ public class NativeColumnarTopNOperator extends AbstractNativeStatefulOperator<A
   private final long offset;
   private final long limit;
   private final int rankEndColumn;
+  private final boolean firstBound;
   private final boolean outputRankNumber;
   private final boolean retracting;
   // Update-fast mode (Flink's UpdatableTopNFunction shape): the unique-key columns identifying the
@@ -48,6 +50,7 @@ public class NativeColumnarTopNOperator extends AbstractNativeStatefulOperator<A
   private transient MiniBatchMetrics miniBatchMetrics;
   private transient BatchCoalescer coalescer;
   private transient long cacheSize;
+  private transient Counter invalidTopSize;
 
   public NativeColumnarTopNOperator(
       int[] partitionColumns,
@@ -92,6 +95,48 @@ public class NativeColumnarTopNOperator extends AbstractNativeStatefulOperator<A
       long stateTtlMillis,
       int maxParallelism,
       int rankEndColumn) {
+    this(
+        partitionColumns,
+        keyTimestampPrecisions,
+        rowType,
+        sortIndices,
+        sortAscending,
+        sortNullsFirst,
+        offset,
+        limit,
+        outputRankNumber,
+        retracting,
+        rowKeyColumns,
+        rowKeyTimestampPrecisions,
+        generateUpdateBefore,
+        netDiff,
+        miniBatchSize,
+        stateTtlMillis,
+        maxParallelism,
+        rankEndColumn,
+        false);
+  }
+
+  public NativeColumnarTopNOperator(
+      int[] partitionColumns,
+      int[] keyTimestampPrecisions,
+      RowType rowType,
+      int[] sortIndices,
+      int[] sortAscending,
+      int[] sortNullsFirst,
+      long offset,
+      long limit,
+      boolean outputRankNumber,
+      boolean retracting,
+      int[] rowKeyColumns,
+      int[] rowKeyTimestampPrecisions,
+      boolean generateUpdateBefore,
+      boolean netDiff,
+      long miniBatchSize,
+      long stateTtlMillis,
+      int maxParallelism,
+      int rankEndColumn,
+      boolean firstBound) {
     super("top-n", keyTimestampPrecisions, maxParallelism);
     this.partitionColumns = partitionColumns;
     this.rowType = rowType;
@@ -100,13 +145,17 @@ public class NativeColumnarTopNOperator extends AbstractNativeStatefulOperator<A
     this.sortNullsFirst = sortNullsFirst;
     this.offset = offset;
     this.limit = limit;
+    if (firstBound && (rankEndColumn < 0 || retracting || rowKeyColumns != null)) {
+      throw new IllegalArgumentException("first-bound state requires append-only variable Top-N");
+    }
     this.rankEndColumn = rankEndColumn;
+    this.firstBound = firstBound;
     this.outputRankNumber = outputRankNumber;
     this.retracting = retracting;
     this.rowKeyColumns = rowKeyColumns;
     this.rowKeyTimestampPrecisions = rowKeyTimestampPrecisions;
     this.generateUpdateBefore = generateUpdateBefore;
-    this.netDiff = netDiff;
+    this.netDiff = netDiff && !firstBound;
     this.miniBatchSize = miniBatchSize;
     this.stateTtlMillis = stateTtlMillis;
   }
@@ -281,9 +330,8 @@ public class NativeColumnarTopNOperator extends AbstractNativeStatefulOperator<A
   @Override
   public void open() throws Exception {
     super.open();
-    // Admitted variable bounds are partition-invariant, so this counter remains zero; Flink still
-    // registers it for every Top-N strategy and dashboards rely on the identifier being present.
-    getMetricGroup().counter("topn.invalidTopSize");
+    if (firstBound) Native.enableTopNFirstBound(handle, directRocksDBState(), generateUpdateBefore);
+    invalidTopSize = getMetricGroup().counter("topn.invalidTopSize");
     if (!retracting) {
       getMetricGroup().gauge("topn.cache.hitRate", () -> 1.0);
       getMetricGroup().gauge("topn.cache.size", () -> cacheSize);
@@ -372,21 +420,23 @@ public class NativeColumnarTopNOperator extends AbstractNativeStatefulOperator<A
       // production and harness-controlled in tests, so expiry is deterministic to test.
       long now = getProcessingTimeService().getCurrentProcessingTime();
       if (directRocksDBState()) {
-        Native.pushRocksDBTopNRanker(
-            handle,
-            inArray.memoryAddress(),
-            inSchema.memoryAddress(),
-            now,
-            outArray.memoryAddress(),
-            outSchema.memoryAddress());
+        invalidTopSize.inc(
+            Native.pushRocksDBTopNRanker(
+                handle,
+                inArray.memoryAddress(),
+                inSchema.memoryAddress(),
+                now,
+                outArray.memoryAddress(),
+                outSchema.memoryAddress()));
       } else {
-        Native.pushTopNRanker(
-            handle,
-            inArray.memoryAddress(),
-            inSchema.memoryAddress(),
-            now,
-            outArray.memoryAddress(),
-            outSchema.memoryAddress());
+        invalidTopSize.inc(
+            Native.pushTopNRanker(
+                handle,
+                inArray.memoryAddress(),
+                inSchema.memoryAddress(),
+                now,
+                outArray.memoryAddress(),
+                outSchema.memoryAddress()));
       }
       VectorSchemaRoot out =
           Data.importVectorSchemaRoot(allocator, outArray, outSchema, dictionaries);
