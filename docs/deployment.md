@@ -8,6 +8,14 @@ unknown or unversioned planner ABI. Install the loader and core JARs into Flink'
 so the JARs must be present on the submission client or JobManager as well as the TaskManagers —
 which installing them into `lib` on one shared image already ensures.
 
+Builds record the target Flink line and module identity in every payload's manifest. The loader
+checks its embedded core and installed StreamFusion JARs before creating the planner classloader,
+including renamed extensions. A different line or a missing marker fails startup with an explicit
+compatibility error; rebuild or upgrade the loader, core and extensions together. The artifact
+coordinates remain unchanged. Flink 1.18 support is still being implemented in
+[#182](https://github.com/datafusion-contrib/StreamFusion/issues/182); these identity checks do not
+add it to the supported set. Builds and deployments require Java 17.
+
 Release artifacts are available from Maven Central and already contain the optimized native
 libraries. Fetch the loader and the separate runtime-visible core payload directly into a Flink
 distribution; installing StreamFusion does not require a source checkout, Rust, or a local build:
