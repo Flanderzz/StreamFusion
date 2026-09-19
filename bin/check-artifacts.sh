@@ -96,6 +96,10 @@ for suffix in $modules; do
     python3 "$script_dir/check-native-tls.py" "$jar_file"
     python3 "$script_dir/check-native-glibc.py" "$jar_file"
   fi
+  if jar tf "$jar_file" | grep -q '^org/slf4j/'; then
+    echo "$module must use Flink's logging API instead of bundling SLF4J" >&2
+    exit 1
+  fi
   jar tf "$jar_file" | awk -v module="$module" \
     '/^tech\/streamfusion\/.*\.class$/ { print $0, module }' >>"$entries"
   if [ "$suffix" != core ] && jar tf "$jar_file" \
