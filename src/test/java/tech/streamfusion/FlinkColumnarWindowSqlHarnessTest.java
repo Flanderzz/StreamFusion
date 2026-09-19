@@ -2,6 +2,7 @@ package tech.streamfusion;
 
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -104,6 +105,7 @@ class FlinkColumnarWindowSqlHarnessTest {
 
   @Test
   void keyedSessionOverColumnarSourceMatchesHost() throws Exception {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireSessionTableFunction();
     Path input = Files.createTempDirectory("csession-in");
     writeInput(input);
     // After the source-edge transpose: watermark assigner → columnar keyed exchange → columnar
@@ -190,6 +192,7 @@ class FlinkColumnarWindowSqlHarnessTest {
 
   @Test
   void proctimeSessionWindowRoutesToNative() throws Exception {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireSessionTableFunction();
     // A proctime SESSION window: the gap is timed on the clock and a session closes on a
     // processing-time timer at the last element's `now + gap`. Non-deterministic boundaries (see the
     // CLAUDE.md note) — assert it routes and runs; NativeColumnarSessionWindowAggregateOperatorTest
@@ -292,7 +295,8 @@ class FlinkColumnarWindowSqlHarnessTest {
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     tEnv.getConfig().setLocalTimeZone(ZoneId.of("UTC"));
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(new String[] {"k", "v"}, Types.LONG, Types.LONG),
             Row.of(1L, 10L),
             Row.of(2L, 20L),

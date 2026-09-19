@@ -6,60 +6,73 @@
     <groupId>tech.streamfusion</groupId>
     <artifactId>streamfusion-flink-suite-classpath</artifactId>
     <version>1.0-SNAPSHOT</version>
+    <properties>
+        <streamfusion.artifact.suffix></streamfusion.artifact.suffix>
+        <flink.connector.kafka.version>5.0.0-2.2</flink.connector.kafka.version>
+    </properties>
+    <profiles>
+        <profile>
+            <id>flink-1.18</id>
+            <properties>
+                <streamfusion.artifact.suffix>-flink1.18</streamfusion.artifact.suffix>
+                <flink.connector.kafka.version>3.2.0-1.18</flink.connector.kafka.version>
+            </properties>
+        </profile>
+    </profiles>
     <dependencies>
         <dependency>
             <groupId>tech.streamfusion</groupId>
-            <artifactId>streamfusion-core</artifactId>
+            <artifactId>streamfusion-core${streamfusion.artifact.suffix}</artifactId>
             <version>0.1.0-rc3</version>
         </dependency>
         <dependency>
             <groupId>tech.streamfusion</groupId>
-            <artifactId>streamfusion-kafka</artifactId>
+            <artifactId>streamfusion-kafka${streamfusion.artifact.suffix}</artifactId>
             <version>0.1.0-rc3</version>
         </dependency>
         <dependency>
             <groupId>tech.streamfusion</groupId>
-            <artifactId>streamfusion-json</artifactId>
+            <artifactId>streamfusion-json${streamfusion.artifact.suffix}</artifactId>
             <version>0.1.0-rc3</version>
         </dependency>
         <dependency>
             <groupId>tech.streamfusion</groupId>
-            <artifactId>streamfusion-csv</artifactId>
+            <artifactId>streamfusion-csv${streamfusion.artifact.suffix}</artifactId>
             <version>0.1.0-rc3</version>
         </dependency>
         <dependency>
             <groupId>tech.streamfusion</groupId>
-            <artifactId>streamfusion-raw</artifactId>
+            <artifactId>streamfusion-raw${streamfusion.artifact.suffix}</artifactId>
             <version>0.1.0-rc3</version>
         </dependency>
         <dependency>
             <groupId>tech.streamfusion</groupId>
-            <artifactId>streamfusion-avro</artifactId>
+            <artifactId>streamfusion-avro${streamfusion.artifact.suffix}</artifactId>
             <version>0.1.0-rc3</version>
         </dependency>
         <dependency>
             <groupId>tech.streamfusion</groupId>
-            <artifactId>streamfusion-avro-confluent-registry</artifactId>
+            <artifactId>streamfusion-avro-confluent-registry${streamfusion.artifact.suffix}</artifactId>
             <version>0.1.0-rc3</version>
         </dependency>
         <dependency>
             <groupId>tech.streamfusion</groupId>
-            <artifactId>streamfusion-protobuf</artifactId>
+            <artifactId>streamfusion-protobuf${streamfusion.artifact.suffix}</artifactId>
             <version>0.1.0-rc3</version>
         </dependency>
         <dependency>
             <groupId>tech.streamfusion</groupId>
-            <artifactId>streamfusion-parquet</artifactId>
+            <artifactId>streamfusion-parquet${streamfusion.artifact.suffix}</artifactId>
             <version>0.1.0-rc3</version>
         </dependency>
         <dependency>
             <groupId>tech.streamfusion</groupId>
-            <artifactId>streamfusion-orc</artifactId>
+            <artifactId>streamfusion-orc${streamfusion.artifact.suffix}</artifactId>
             <version>0.1.0-rc3</version>
         </dependency>
         <dependency>
             <groupId>tech.streamfusion</groupId>
-            <artifactId>streamfusion-paimon</artifactId>
+            <artifactId>streamfusion-paimon${streamfusion.artifact.suffix}</artifactId>
             <version>0.1.0-rc3</version>
         </dependency>
         <!-- StreamFusion discovers connector planner extensions at startup. Connector APIs are
@@ -68,7 +81,7 @@
         <dependency>
             <groupId>org.apache.flink</groupId>
             <artifactId>flink-connector-kafka</artifactId>
-            <version>5.0.0-2.2</version>
+            <version>${flink.connector.kafka.version}</version>
         </dependency>
     </dependencies>
 </project>

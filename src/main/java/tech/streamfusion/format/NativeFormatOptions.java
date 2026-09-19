@@ -65,6 +65,9 @@ public final class NativeFormatOptions {
     }
     StringBuilder encoded = new StringBuilder();
     if (FormatCodes.isJsonFamily(format)) {
+      if (!tech.streamfusion.compat.JsonRuntimeCompat.ACCEPTS_ARRAY_ROOTS) {
+        encoded.append("json.reject-array-roots=true\n");
+      }
       // A missing field is null natively (Flink's default); the fail mode isn't modeled.
       if ("true".equalsIgnoreCase(option(options, "fail-on-missing-field"))) {
         return null;
@@ -79,7 +82,9 @@ public final class NativeFormatOptions {
         return encoded.toString();
       }
       // The factory validates the value, so returning null for anything else is defensive.
-      return "ISO-8601".equals(timestampFormat) ? "timestamp-format=ISO-8601\n" : null;
+      if (!"ISO-8601".equals(timestampFormat)) return null;
+      encoded.append("timestamp-format=ISO-8601\n");
+      return encoded.toString();
     }
     if (!"csv".equals(format)) {
       return encoded.toString();

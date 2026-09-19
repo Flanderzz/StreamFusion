@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import java.util.function.Supplier;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.datastream.DataStream;
@@ -99,7 +101,8 @@ class FlinkLookupJoinSqlHarnessTest {
       env.setParallelism(1);
       StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
       DataStream<Row> bid =
-          env.fromData(
+          fromData(
+              env,
               Types.ROW_NAMED(new String[] {"auction", "price"}, Types.LONG, Types.LONG),
               Row.of(1L, 100L),
               Row.of(2L, 200L),

@@ -1,6 +1,5 @@
 package tech.streamfusion.planner;
 
-import tech.streamfusion.operator.RowDataArrowConverter;
 import java.util.ArrayList;
 import java.util.List;
 import org.apache.calcite.rel.RelNode;
@@ -8,9 +7,10 @@ import org.apache.calcite.rel.core.AggregateCall;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
-import org.apache.flink.table.planner.hint.StateTtlHint;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalGlobalGroupAggregate;
 import org.apache.flink.table.planner.plan.utils.ChangelogPlanUtils;
+import tech.streamfusion.compat.FlinkCompat;
+import tech.streamfusion.operator.RowDataArrowConverter;
 
 /**
  * Recognizes the global half of a two-phase non-windowed {@code GROUP BY}: it merges the local
@@ -389,7 +389,7 @@ final class GlobalGroupAggregateMatcher {
     int[] keyColumns = GlobalGroupAggregateMatcher.keyColumns(agg);
     // TTL lives on the stateful global half only (the local is a transient per-bundle buffer);
     // a STATE_TTL hint on the aggregate overrides the job-wide retention, as single-phase.
-    Long stateTtlHint = StateTtlHint.getStateTtlFromHintOnSingleRel(agg.hints());
+    Long stateTtlHint = FlinkCompat.singleStateTtl(agg);
     return new StreamPhysicalNativeColumnarGroupAggregate(
         agg.getCluster(),
         agg.getTraitSet(),

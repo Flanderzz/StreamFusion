@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
@@ -95,7 +97,8 @@ class FlinkUpdateFastTopNSqlHarnessTest {
     // Two groups; counts tie (k=10 and k=30 both reach 2 in group 1) and cross (k=30 passes k=10),
     // so the top-2 re-sorts, a full top-N rejects a low count, and an eviction promotes.
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(new String[] {"g", "k"}, Types.LONG, Types.LONG),
             Row.of(1L, 10L),
             Row.of(1L, 20L),

@@ -216,7 +216,7 @@ public final class CanonicalNativeState {
       ValueStateDescriptor<T> descriptor)
       throws Exception {
     CheckpointableKeyedStateBackend raw = backend;
-    raw.setCurrentKeyAndKeyGroup(keyGroup, keyGroup);
+    tech.streamfusion.compat.StateCompat.setCurrentKeyAndGroup(raw, keyGroup, keyGroup);
     return (ValueState<T>)
         raw.getPartitionedState(
             VoidNamespace.INSTANCE, VoidNamespaceSerializer.INSTANCE, descriptor);
@@ -251,8 +251,8 @@ public final class CanonicalNativeState {
       clearCurrentKey(backend);
       return;
     }
-    ((CheckpointableKeyedStateBackend) backend)
-        .setCurrentKeyAndKeyGroup(previous.key, previous.keyGroup);
+    tech.streamfusion.compat.StateCompat.setCurrentKeyAndGroup(
+        (CheckpointableKeyedStateBackend) backend, previous.key, previous.keyGroup);
   }
 
   private static void clearCurrentKey(CheckpointableKeyedStateBackend<?> backend) {

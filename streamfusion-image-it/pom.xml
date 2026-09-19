@@ -10,7 +10,11 @@
         <version>${revision}</version>
     </parent>
 
-    <artifactId>streamfusion-image-it</artifactId>
+    <artifactId>streamfusion-image-it${streamfusion.artifact.suffix}</artifactId>
+
+    <properties>
+        <native.test.resource.skip>true</native.test.resource.skip>
+    </properties>
 
     <dependencies>
         <dependency>
@@ -28,6 +32,19 @@
             </resource>
         </resources>
         <plugins>
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>build-helper-maven-plugin</artifactId>
+                <executions><execution>
+                    <id>flink-compatibility-sources</id>
+                    <phase>none</phase>
+                </execution></executions>
+            </plugin>
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>flatten-maven-plugin</artifactId>
+                <configuration><flattenMode>ossrh</flattenMode></configuration>
+            </plugin>
             <!-- The job JAR is intentionally thin: it represents a normal user job and must rely
                  on the Flink distribution plus StreamFusion's lib-directory extensions. -->
             <plugin>
@@ -48,6 +65,8 @@
                         <streamfusion.image.job.jar>${project.build.directory}/${project.build.finalName}.jar</streamfusion.image.job.jar>
                         <streamfusion.project.dir>${project.basedir}/..</streamfusion.project.dir>
                         <streamfusion.version>${project.version}</streamfusion.version>
+                        <streamfusion.flink.line>${flink.line}</streamfusion.flink.line>
+                        <streamfusion.artifact.suffix>${streamfusion.artifact.suffix}</streamfusion.artifact.suffix>
                     </systemPropertyVariables>
                 </configuration>
             </plugin>

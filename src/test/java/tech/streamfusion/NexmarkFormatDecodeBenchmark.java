@@ -31,7 +31,6 @@ import org.apache.avro.generic.GenericRecord;
 import org.apache.avro.io.BinaryEncoder;
 import org.apache.avro.io.EncoderFactory;
 import org.apache.flink.api.common.serialization.DeserializationSchema;
-import org.apache.flink.formats.avro.AvroFormatOptions.AvroEncoding;
 import org.apache.flink.formats.avro.AvroRowDataDeserializationSchema;
 import org.apache.flink.formats.avro.typeutils.AvroSchemaConverter;
 import org.apache.flink.formats.common.TimestampFormat;
@@ -225,8 +224,8 @@ class NexmarkFormatDecodeBenchmark {
         };
       case "avro":
         AvroRowDataDeserializationSchema avro =
-            new AvroRowDataDeserializationSchema(
-                physicalType, typeInfo, AvroEncoding.BINARY, true);
+            tech.streamfusion.format.avro.compat.AvroTestSchemas.decoder(
+                physicalType, typeInfo, true);
         avro.open(initializationContext());
         return rowDecoder(avro);
       case "protobuf":

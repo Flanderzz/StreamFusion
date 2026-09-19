@@ -1,9 +1,5 @@
 package tech.streamfusion.planner;
 
-import tech.streamfusion.format.EncodeFormat;
-import tech.streamfusion.format.FormatCodes;
-import tech.streamfusion.kafka.JdkFloatSpelling;
-import tech.streamfusion.kafka.NativeKafka;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -23,6 +19,10 @@ import org.apache.flink.table.types.logical.LogicalTypeFamily;
 import org.apache.flink.table.types.logical.LogicalTypeRoot;
 import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.table.types.logical.TimeType;
+import tech.streamfusion.format.EncodeFormat;
+import tech.streamfusion.format.FormatCodes;
+import tech.streamfusion.kafka.JdkFloatSpelling;
+import tech.streamfusion.kafka.NativeKafka;
 
 /** Conservative match boundary for native JSON serialization into Flink's Kafka sink. */
 final class KafkaSinkMatcher {
@@ -93,8 +93,8 @@ final class KafkaSinkMatcher {
       return Planned.fallback(
           "an upsert-materialized sink (SinkUpsertMaterializer) is not natively reproduced");
     }
-    if (sink.abilitySpecs().length != 0) {
-      SinkAbilitySpec spec = sink.abilitySpecs()[0];
+    if (!tech.streamfusion.compat.FlinkCompat.sinkAbilities(sink).isEmpty()) {
+      SinkAbilitySpec spec = tech.streamfusion.compat.FlinkCompat.sinkAbilities(sink).get(0);
       return Planned.fallback("sink ability " + spec.getClass().getSimpleName());
     }
     KafkaSinkTranslator.Result translated = KafkaSinkTranslator.translate(options(sink));

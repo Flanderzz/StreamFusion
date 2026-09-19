@@ -2,6 +2,7 @@ package tech.streamfusion;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -218,7 +219,8 @@ class FlinkUpdateFastVariableTopNSqlHarnessTest {
       }
     }
     var source =
-        env.fromData(
+        fromData(
+            env,
             rows,
             Types.ROW_NAMED(new String[] {"k", "id", "v"}, Types.LONG, Types.LONG, Types.LONG));
     table.createTemporaryView(

@@ -14,7 +14,6 @@ import org.apache.calcite.sql.SqlKind;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.apache.flink.table.planner.plan.logical.CumulativeWindowSpec;
 import org.apache.flink.table.planner.plan.logical.HoppingWindowSpec;
-import org.apache.flink.table.planner.plan.logical.SessionWindowSpec;
 import org.apache.flink.table.planner.plan.logical.TimeAttributeWindowingStrategy;
 import org.apache.flink.table.planner.plan.logical.TumblingWindowSpec;
 import org.apache.flink.table.planner.plan.logical.WindowAttachedWindowingStrategy;
@@ -25,6 +24,7 @@ import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalR
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalWindowAggregate;
 import org.apache.flink.table.planner.plan.utils.ChangelogPlanUtils;
 import org.apache.flink.table.types.logical.LogicalTypeRoot;
+import tech.streamfusion.compat.FlinkCompat;
 
 /** Shared admission and encoding for single-phase and local window aggregation. */
 final class WindowAggregateMatcher {
@@ -235,7 +235,7 @@ final class WindowAggregateMatcher {
       RelDataType inputType) {
     if (hasFilters(aggCalls)
         || !insertOnlyInput(node)
-        || !(windowing.getWindow() instanceof SessionWindowSpec)) {
+        || !(FlinkCompat.isSessionWindow(windowing.getWindow()))) {
       return false;
     }
     if (!WindowZoneGate.admits(node, windowing)) {
@@ -466,7 +466,7 @@ final class WindowAggregateMatcher {
   }
 
   static long gapMillis(WindowingStrategy windowing) {
-    return ((SessionWindowSpec) windowing.getWindow()).getGap().toMillis();
+    return FlinkCompat.sessionGapMillis(windowing.getWindow());
   }
 
   static int timeColumn(WindowingStrategy windowing) {

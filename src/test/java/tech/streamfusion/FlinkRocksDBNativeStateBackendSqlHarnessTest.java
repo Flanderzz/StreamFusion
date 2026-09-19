@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -40,7 +42,8 @@ class FlinkRocksDBNativeStateBackendSqlHarnessTest {
     Path input = Files.createTempDirectory("rocksdb-sum-in");
     writeInput(input);
     NativeParity.assertChangelogParity(
-        () -> rocksdbEnvironment(input), "SELECT k, SUM(v) AS total, COUNT(*) AS c FROM t GROUP BY k");
+        () -> rocksdbEnvironment(input),
+        "SELECT k, SUM(v) AS total, COUNT(*) AS c FROM t GROUP BY k");
   }
 
   @Test
@@ -285,6 +288,7 @@ class FlinkRocksDBNativeStateBackendSqlHarnessTest {
 
   @Test
   void sessionAggregateOnRocksDBBackendMatchesHost() throws Exception {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireSessionTableFunction();
     // Event-time session aggregate: sessions extend and merge across 50 ms barriers — an
     // extension rewrites the same start, a merge tombstones the consumed start — and a watermark
     // firing merges the decoded sessions with a committed range scan.
@@ -370,7 +374,8 @@ class FlinkRocksDBNativeStateBackendSqlHarnessTest {
                 .watermark("rt", "SOURCE_WATERMARK()")
                 .build();
     DataStream<Row> orders =
-        env.fromData(
+        fromData(
+                env,
                 Types.ROW_NAMED(
                     new String[] {"currency", "amount", "ts"},
                     Types.STRING,
@@ -382,12 +387,10 @@ class FlinkRocksDBNativeStateBackendSqlHarnessTest {
                 Row.of("USD", 3L, 450L))
             .assignTimestampsAndWatermarks(watermarks);
     DataStream<Row> rates =
-        env.fromData(
+        fromData(
+                env,
                 Types.ROW_NAMED(
-                    new String[] {"currency", "rate", "ts"},
-                    Types.STRING,
-                    Types.LONG,
-                    Types.LONG),
+                    new String[] {"currency", "rate", "ts"}, Types.STRING, Types.LONG, Types.LONG),
                 Row.of("USD", 10L, 100L),
                 Row.of("EUR", 99L, 100L),
                 Row.of("USD", 20L, 300L))
@@ -511,7 +514,8 @@ class FlinkRocksDBNativeStateBackendSqlHarnessTest {
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     tEnv.getConfig().setLocalTimeZone(ZoneId.of("UTC"));
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+                env,
                 Types.ROW_NAMED(new String[] {"k", "v", "ts"}, Types.LONG, Types.LONG, Types.LONG),
                 Row.of(1L, 30L, 2000L),
                 Row.of(2L, 50L, 1500L),
@@ -551,7 +555,8 @@ class FlinkRocksDBNativeStateBackendSqlHarnessTest {
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     tEnv.getConfig().setLocalTimeZone(ZoneId.of("UTC"));
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+                env,
                 Types.ROW_NAMED(new String[] {"k", "v", "ts"}, Types.LONG, Types.LONG, Types.LONG),
                 Row.of(1L, 30L, 2001L),
                 Row.of(2L, 50L, 1501L),
@@ -585,7 +590,8 @@ class FlinkRocksDBNativeStateBackendSqlHarnessTest {
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     tEnv.getConfig().setLocalTimeZone(ZoneId.of("UTC"));
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(new String[] {"k", "v"}, Types.LONG, Types.LONG),
             Row.of(1L, 10L),
             Row.of(2L, 100L),

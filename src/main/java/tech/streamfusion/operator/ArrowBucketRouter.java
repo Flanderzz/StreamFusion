@@ -7,10 +7,10 @@ import org.apache.arrow.c.Data;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.FieldVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
-import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import tech.streamfusion.Native;
+import tech.streamfusion.compat.FlinkStreamOperator;
 
 /**
  * Routes a sink's Arrow batches to Paimon write destinations. Each incoming batch is split natively
@@ -26,7 +26,7 @@ import tech.streamfusion.Native;
  * the router keeps the column for its writer to merge by; it trails the table's columns, so the
  * routing ordinals are the same either way.
  */
-public class ArrowBucketRouter extends AbstractStreamOperator<BucketedArrowBatch>
+public class ArrowBucketRouter extends FlinkStreamOperator<BucketedArrowBatch>
     implements OneInputStreamOperator<ArrowBatch, BucketedArrowBatch> {
 
   private final int[] partitionColumns;

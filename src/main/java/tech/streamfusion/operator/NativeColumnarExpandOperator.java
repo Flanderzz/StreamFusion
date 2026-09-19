@@ -1,26 +1,26 @@
 package tech.streamfusion.operator;
 
-import tech.streamfusion.Native;
 import org.apache.arrow.c.ArrowArray;
 import org.apache.arrow.c.ArrowSchema;
 import org.apache.arrow.c.CDataDictionaryProvider;
 import org.apache.arrow.c.Data;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
-import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
+import tech.streamfusion.Native;
+import tech.streamfusion.compat.FlinkStreamOperator;
 
 /**
  * Stateless GROUPING SETS / CUBE / ROLLUP expansion, columnar in and out: the Arrow-batch analog of
- * Flink's generated {@code ExpandFunction}. Each incoming batch is fanned out natively to one output
- * row per grouping set — copying the grouped-in columns, nulling the grouped-out ones, and stamping
- * the per-set expand id — then forwarded to the downstream native GROUP BY (over the keys plus the
- * expand-id column). It does no buffering, so it forwards watermarks unchanged (the default {@link
- * AbstractStreamOperator} behavior); carrying Arrow lets it chain with the native aggregate without a
- * transpose.
+ * Flink's generated {@code ExpandFunction}. Each incoming batch is fanned out natively to one
+ * output row per grouping set — copying the grouped-in columns, nulling the grouped-out ones, and
+ * stamping the per-set expand id — then forwarded to the downstream native GROUP BY (over the keys
+ * plus the expand-id column). It does no buffering, so it forwards watermarks unchanged (the
+ * default {@link AbstractStreamOperator} behavior); carrying Arrow lets it chain with the native
+ * aggregate without a transpose.
  */
-public class NativeColumnarExpandOperator extends AbstractStreamOperator<ArrowBatch>
+public class NativeColumnarExpandOperator extends FlinkStreamOperator<ArrowBatch>
     implements OneInputStreamOperator<ArrowBatch, ArrowBatch> {
 
   private final int numExpandRows;

@@ -23,7 +23,6 @@ import java.util.List;
 import org.apache.arrow.vector.FieldVector;
 import org.apache.arrow.vector.TinyIntVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
-import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.BoundedOneInput;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.api.watermark.Watermark;
@@ -52,6 +51,7 @@ import org.apache.paimon.utils.RowKindFilter;
 import org.apache.paimon.utils.UserDefinedSeqComparator;
 import tech.streamfusion.arrow.ArrowConversion;
 import tech.streamfusion.arrow.ArrowWriter;
+import tech.streamfusion.compat.FlinkStreamOperator;
 import tech.streamfusion.operator.ArrowBatch;
 import tech.streamfusion.operator.KeyedUpsertBuffer;
 import tech.streamfusion.operator.NativeAllocator;
@@ -60,7 +60,7 @@ import tech.streamfusion.operator.RowDataArrowConverter;
 /**
  * Merges updates before shuffle, retaining Java grouping where the intermediate rows are visible.
  */
-public final class NativePaimonLocalMergeOperator extends AbstractStreamOperator<ArrowBatch>
+public final class NativePaimonLocalMergeOperator extends FlinkStreamOperator<ArrowBatch>
     implements OneInputStreamOperator<ArrowBatch, ArrowBatch>, BoundedOneInput {
   private final FileStoreTable table;
   private final boolean nativeMerge;

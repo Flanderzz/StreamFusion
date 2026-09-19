@@ -46,23 +46,31 @@ class DeltaJoinForceGateTest {
     env.setParallelism(1);
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     DataStream<Row> a =
-        env.fromData(
+        tech.streamfusion.compat.FlinkTestSources.fromData(
+            env,
             Types.ROW_NAMED(new String[] {"k", "v"}, Types.LONG, Types.LONG),
             Row.of(1L, 10L),
             Row.of(2L, 20L));
     DataStream<Row> b =
-        env.fromData(
+        tech.streamfusion.compat.FlinkTestSources.fromData(
+            env,
             Types.ROW_NAMED(new String[] {"k", "w"}, Types.LONG, Types.LONG),
             Row.of(1L, 100L),
             Row.of(2L, 200L));
     tEnv.createTemporaryView(
         "A",
         a,
-        Schema.newBuilder().column("k", DataTypes.BIGINT()).column("v", DataTypes.BIGINT()).build());
+        Schema.newBuilder()
+            .column("k", DataTypes.BIGINT())
+            .column("v", DataTypes.BIGINT())
+            .build());
     tEnv.createTemporaryView(
         "B",
         b,
-        Schema.newBuilder().column("k", DataTypes.BIGINT()).column("w", DataTypes.BIGINT()).build());
+        Schema.newBuilder()
+            .column("k", DataTypes.BIGINT())
+            .column("w", DataTypes.BIGINT())
+            .build());
     PhysicalPlanScan scan = NativePlanner.install(tEnv);
     tEnv.getConfig()
         .set(
@@ -90,14 +98,18 @@ class DeltaJoinForceGateTest {
     env.setParallelism(1);
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     DataStream<Row> a =
-        env.fromData(
+        tech.streamfusion.compat.FlinkTestSources.fromData(
+            env,
             Types.ROW_NAMED(new String[] {"k", "v"}, Types.LONG, Types.LONG),
             Row.of(1L, 10L),
             Row.of(2L, 20L));
     tEnv.createTemporaryView(
         "A",
         a,
-        Schema.newBuilder().column("k", DataTypes.BIGINT()).column("v", DataTypes.BIGINT()).build());
+        Schema.newBuilder()
+            .column("k", DataTypes.BIGINT())
+            .column("v", DataTypes.BIGINT())
+            .build());
     PhysicalPlanScan scan = NativePlanner.install(tEnv);
     tEnv.getConfig()
         .set(
@@ -115,23 +127,31 @@ class DeltaJoinForceGateTest {
     env.setParallelism(1);
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     DataStream<Row> a =
-        env.fromData(
+        tech.streamfusion.compat.FlinkTestSources.fromData(
+            env,
             Types.ROW_NAMED(new String[] {"k", "v"}, Types.LONG, Types.LONG),
             Row.of(1L, 10L),
             Row.of(2L, 20L));
     DataStream<Row> b =
-        env.fromData(
+        tech.streamfusion.compat.FlinkTestSources.fromData(
+            env,
             Types.ROW_NAMED(new String[] {"k", "w"}, Types.LONG, Types.LONG),
             Row.of(1L, 100L),
             Row.of(2L, 200L));
     tEnv.createTemporaryView(
         "A",
         a,
-        Schema.newBuilder().column("k", DataTypes.BIGINT()).column("v", DataTypes.BIGINT()).build());
+        Schema.newBuilder()
+            .column("k", DataTypes.BIGINT())
+            .column("v", DataTypes.BIGINT())
+            .build());
     tEnv.createTemporaryView(
         "B",
         b,
-        Schema.newBuilder().column("k", DataTypes.BIGINT()).column("w", DataTypes.BIGINT()).build());
+        Schema.newBuilder()
+            .column("k", DataTypes.BIGINT())
+            .column("w", DataTypes.BIGINT())
+            .build());
     PhysicalPlanScan scan = NativePlanner.install(tEnv);
 
     tEnv.explainSql(JOIN_QUERY);
@@ -148,23 +168,31 @@ class DeltaJoinForceGateTest {
     env.setParallelism(1);
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     DataStream<Row> a =
-        env.fromData(
+        tech.streamfusion.compat.FlinkTestSources.fromData(
+            env,
             Types.ROW_NAMED(new String[] {"k", "v"}, Types.LONG, Types.LONG),
             Row.of(1L, 10L),
             Row.of(2L, 20L));
     DataStream<Row> b =
-        env.fromData(
+        tech.streamfusion.compat.FlinkTestSources.fromData(
+            env,
             Types.ROW_NAMED(new String[] {"k", "w"}, Types.LONG, Types.LONG),
             Row.of(1L, 100L),
             Row.of(2L, 200L));
     tEnv.createTemporaryView(
         "A",
         a,
-        Schema.newBuilder().column("k", DataTypes.BIGINT()).column("v", DataTypes.BIGINT()).build());
+        Schema.newBuilder()
+            .column("k", DataTypes.BIGINT())
+            .column("v", DataTypes.BIGINT())
+            .build());
     tEnv.createTemporaryView(
         "B",
         b,
-        Schema.newBuilder().column("k", DataTypes.BIGINT()).column("w", DataTypes.BIGINT()).build());
+        Schema.newBuilder()
+            .column("k", DataTypes.BIGINT())
+            .column("w", DataTypes.BIGINT())
+            .build());
     PhysicalPlanScan scan = NativePlanner.install(tEnv);
     tEnv.getConfig()
         .set(

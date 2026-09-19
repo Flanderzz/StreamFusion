@@ -37,6 +37,7 @@ final class Substitution<T extends RelNode> {
   private Predicate<T> owns = node -> true;
   private Function<T, String> reason;
   private boolean changelogSafe;
+  private boolean keyedState;
   private OnDecline onDecline = OnDecline.STOP;
 
   private Substitution(Class<T> shape, String operatorKey, Planner<T> planner) {
@@ -68,6 +69,11 @@ final class Substitution<T extends RelNode> {
   /** Places this entry before the insert-only guard, for an operator that carries a changelog. */
   Substitution<T> changelogSafe() {
     this.changelogSafe = true;
+    return this;
+  }
+
+  Substitution<T> keyedState() {
+    this.keyedState = true;
     return this;
   }
 
@@ -111,6 +117,10 @@ final class Substitution<T extends RelNode> {
     }
     if (operatorKey != null && !NativeConfig.operatorEnabled(operatorKey)) {
       ctx.decline(disabledReason(operatorKey));
+      return node;
+    }
+    if (keyedState && ctx.keyedStateUnsupportedReason() != null) {
+      ctx.decline(ctx.keyedStateUnsupportedReason());
       return node;
     }
     RelNode planned = planner.plan(typed, ctx);

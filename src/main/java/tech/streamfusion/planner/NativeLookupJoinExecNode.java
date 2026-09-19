@@ -1,9 +1,7 @@
 package tech.streamfusion.planner;
 
-import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
 import javax.annotation.Nullable;
 import org.apache.calcite.plan.RelOptTable;
@@ -13,7 +11,6 @@ import org.apache.calcite.rex.RexUtil;
 import org.apache.flink.api.common.functions.FlatMapFunction;
 import org.apache.flink.api.dag.Transformation;
 import org.apache.flink.configuration.ReadableConfig;
-import org.apache.flink.streaming.api.functions.async.AsyncFunction;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.table.catalog.DataTypeFactory;
 import org.apache.flink.table.connector.ChangelogMode;
@@ -25,8 +22,6 @@ import org.apache.flink.table.functions.TableFunction;
 import org.apache.flink.table.functions.UserDefinedFunction;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory;
 import org.apache.flink.table.planner.codegen.CodeGeneratorContext;
-import org.apache.flink.table.planner.codegen.FilterCodeGenerator;
-import org.apache.flink.table.planner.codegen.FunctionCallCodeGenerator;
 import org.apache.flink.table.planner.codegen.LookupJoinCodeGenerator;
 import org.apache.flink.table.planner.delegation.PlannerBase;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeBase;
@@ -36,25 +31,24 @@ import org.apache.flink.table.planner.plan.nodes.exec.InputProperty;
 import org.apache.flink.table.planner.plan.nodes.exec.SingleTransformationTranslator;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.StreamExecNode;
 import org.apache.flink.table.planner.plan.nodes.exec.utils.ExecNodeUtil;
-import org.apache.flink.table.planner.plan.utils.FunctionCallUtil;
 import org.apache.flink.table.planner.plan.utils.LookupJoinUtil;
 import org.apache.flink.table.planner.utils.JavaScalaConversionUtil;
 import org.apache.flink.table.planner.utils.ShortcutUtils;
 import org.apache.flink.table.runtime.collector.ListenableCollector;
 import org.apache.flink.table.runtime.collector.TableFunctionResultFuture;
 import org.apache.flink.table.runtime.generated.GeneratedCollector;
-import org.apache.flink.table.runtime.generated.GeneratedFilterCondition;
 import org.apache.flink.table.runtime.generated.GeneratedFunction;
 import org.apache.flink.table.runtime.generated.GeneratedResultFuture;
 import org.apache.flink.table.runtime.operators.join.lookup.AsyncLookupJoinRunner;
-import org.apache.flink.table.runtime.operators.join.lookup.AsyncLookupJoinWithCalcRunner;
 import org.apache.flink.table.runtime.operators.join.lookup.LookupJoinRunner;
-import org.apache.flink.table.runtime.operators.join.lookup.LookupJoinWithCalcRunner;
 import org.apache.flink.table.runtime.operators.join.lookup.ResultRetryStrategy;
 import org.apache.flink.table.runtime.typeutils.InternalSerializers;
 import org.apache.flink.table.runtime.typeutils.InternalTypeInfo;
 import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.types.RowKind;
+import tech.streamfusion.compat.FlinkLookupCompat;
+import tech.streamfusion.compat.LookupAsyncOptions;
+import tech.streamfusion.compat.LookupKeys;
 import tech.streamfusion.operator.ArrowBatch;
 import tech.streamfusion.operator.ArrowBatchTypeInformation;
 import tech.streamfusion.operator.ArrowToRowDataOperator;
@@ -81,13 +75,13 @@ public class NativeLookupJoinExecNode extends ExecNodeBase<ArrowBatch>
 
   private final RelOptTable temporalTable;
   private final RowType probeType;
-  private final Map<Integer, FunctionCallUtil.FunctionParam> lookupKeys;
+  private final LookupKeys lookupKeys;
   private final @Nullable List<RexNode> projectionOnTemporalTable;
   private final @Nullable RexNode filterOnTemporalTable;
   private final @Nullable RexNode preFilterCondition;
   private final @Nullable RexNode remainingJoinCondition;
   private final boolean leftOuterJoin;
-  private final @Nullable FunctionCallUtil.AsyncOptions asyncOptions;
+  private final @Nullable LookupAsyncOptions asyncOptions;
   private final @Nullable LookupJoinUtil.RetryLookupOptions retryOptions;
   private final boolean preferCustomShuffle;
   private final ChangelogMode inputChangelogMode;
@@ -99,13 +93,13 @@ public class NativeLookupJoinExecNode extends ExecNodeBase<ArrowBatch>
       String description,
       RelOptTable temporalTable,
       RowType probeType,
-      Map<Integer, FunctionCallUtil.FunctionParam> lookupKeys,
+      LookupKeys lookupKeys,
       @Nullable List<RexNode> projectionOnTemporalTable,
       @Nullable RexNode filterOnTemporalTable,
       @Nullable RexNode preFilterCondition,
       @Nullable RexNode remainingJoinCondition,
       boolean leftOuterJoin,
-      @Nullable FunctionCallUtil.AsyncOptions asyncOptions,
+      @Nullable LookupAsyncOptions asyncOptions,
       @Nullable LookupJoinUtil.RetryLookupOptions retryOptions,
       boolean preferCustomShuffle,
       ChangelogMode inputChangelogMode) {
@@ -144,21 +138,12 @@ public class NativeLookupJoinExecNode extends ExecNodeBase<ArrowBatch>
     RowType resultRowType = (RowType) getOutputType();
     String tableName = String.join(".", temporalTable.getQualifiedName());
 
-    List<FunctionCallUtil.FunctionParam> orderedKeys = new ArrayList<>(lookupKeys.size());
-    for (int key : LookupJoinUtil.getOrderedLookupKeys(lookupKeys.keySet())) {
-      orderedKeys.add(lookupKeys.get(key));
-    }
     boolean async = asyncOptions != null;
     ResultRetryStrategy retryStrategy =
         retryOptions == null ? ResultRetryStrategy.NO_RETRY_STRATEGY : retryOptions.toRetryStrategy();
     UserDefinedFunction lookupFunction =
-        LookupJoinUtil.getLookupFunction(
-            temporalTable,
-            lookupKeys.keySet(),
-            classLoader,
-            async,
-            retryStrategy,
-            preferCustomShuffle);
+        FlinkLookupCompat.lookupFunction(
+            temporalTable, lookupKeys, classLoader, async, retryStrategy, preferCustomShuffle);
 
     if (preferCustomShuffle) {
       // The connector owns this partitioning contract and receives the projected lookup-key
@@ -173,7 +158,7 @@ public class NativeLookupJoinExecNode extends ExecNodeBase<ArrowBatch>
               input.getParallelism(),
               false);
       rows =
-          LookupJoinUtil.tryApplyCustomShufflePartitioner(
+          FlinkLookupCompat.customShuffle(
               planner,
               temporalTable,
               probeType,
@@ -206,9 +191,6 @@ public class NativeLookupJoinExecNode extends ExecNodeBase<ArrowBatch>
         projectionOutputRelDataType != null
             ? (RowType) FlinkTypeFactory.toLogicalType(projectionOutputRelDataType)
             : tableSourceRowType;
-    GeneratedFilterCondition generatedPreFilter =
-        FilterCodeGenerator.generateFilterCondition(
-            config, classLoader, preFilterCondition, probeType);
     GeneratedFunction<FlatMapFunction<RowData, RowData>> generatedCalc =
         projectionOnTemporalTable != null
             ? LookupJoinCodeGenerator.generateCalcMapFunction(
@@ -222,18 +204,17 @@ public class NativeLookupJoinExecNode extends ExecNodeBase<ArrowBatch>
 
     OneInputStreamOperator<ArrowBatch, ArrowBatch> operator;
     if (async) {
-      FunctionCallCodeGenerator.GeneratedTableFunctionWithDataType<AsyncFunction<RowData, Object>>
-          generatedFetcher =
-              LookupJoinCodeGenerator.generateAsyncLookupFunction(
-                  config,
-                  classLoader,
-                  dataTypeFactory,
-                  probeType,
-                  tableSourceRowType,
-                  resultRowType,
-                  orderedKeys,
-                  (AsyncTableFunction<Object>) lookupFunction,
-                  tableName);
+      var generatedFetcher =
+          FlinkLookupCompat.asyncFetcher(
+              config,
+              classLoader,
+              dataTypeFactory,
+              probeType,
+              tableSourceRowType,
+              resultRowType,
+              lookupKeys,
+              (AsyncTableFunction<Object>) lookupFunction,
+              tableName);
       GeneratedResultFuture<TableFunctionResultFuture<RowData>> generatedResultFuture =
           LookupJoinCodeGenerator.generateTableAsyncCollector(
               config,
@@ -247,41 +228,35 @@ public class NativeLookupJoinExecNode extends ExecNodeBase<ArrowBatch>
               (DataStructureConverter<?, ?>)
                   DataStructureConverters.getConverter(generatedFetcher.dataType());
       AsyncLookupJoinRunner runner =
-          generatedCalc != null
-              ? new AsyncLookupJoinWithCalcRunner(
-                  generatedFetcher.tableFunc(),
-                  fetcherConverter,
-                  generatedCalc,
-                  generatedResultFuture,
-                  generatedPreFilter,
-                  InternalSerializers.create(rightRowType),
-                  leftOuterJoin,
-                  asyncOptions.asyncBufferCapacity)
-              : new AsyncLookupJoinRunner(
-                  generatedFetcher.tableFunc(),
-                  fetcherConverter,
-                  generatedResultFuture,
-                  generatedPreFilter,
-                  InternalSerializers.create(rightRowType),
-                  leftOuterJoin,
-                  asyncOptions.asyncBufferCapacity);
+          FlinkLookupCompat.asyncRunner(
+              generatedFetcher.tableFunc(),
+              fetcherConverter,
+              generatedCalc,
+              generatedResultFuture,
+              config,
+              classLoader,
+              preFilterCondition,
+              probeType,
+              InternalSerializers.create(rightRowType),
+              leftOuterJoin,
+              asyncOptions.asyncBufferCapacity());
       operator =
           new NativeAsyncLookupJoinOperator(
               runner,
               probeType,
               resultRowType,
-              asyncOptions.asyncBufferCapacity,
-              asyncOptions.asyncTimeout);
+              asyncOptions.asyncBufferCapacity(),
+              asyncOptions.asyncTimeout());
     } else {
       GeneratedFunction<FlatMapFunction<RowData, RowData>> generatedFetcher =
-          LookupJoinCodeGenerator.generateSyncLookupFunction(
+          FlinkLookupCompat.syncFetcher(
               config,
               classLoader,
               dataTypeFactory,
               probeType,
               tableSourceRowType,
               resultRowType,
-              orderedKeys,
+              lookupKeys,
               (TableFunction<Object>) lookupFunction,
               tableName,
               planner.getExecEnv().getConfig().isObjectReuseEnabled());
@@ -295,20 +270,16 @@ public class NativeLookupJoinExecNode extends ExecNodeBase<ArrowBatch>
               JavaScalaConversionUtil.toScala(Optional.empty()),
               true);
       LookupJoinRunner runner =
-          generatedCalc != null
-              ? new LookupJoinWithCalcRunner(
-                  generatedFetcher,
-                  generatedCalc,
-                  generatedCollector,
-                  generatedPreFilter,
-                  leftOuterJoin,
-                  rightRowType.getFieldCount())
-              : new LookupJoinRunner(
-                  generatedFetcher,
-                  generatedCollector,
-                  generatedPreFilter,
-                  leftOuterJoin,
-                  rightRowType.getFieldCount());
+          FlinkLookupCompat.syncRunner(
+              generatedFetcher,
+              generatedCalc,
+              generatedCollector,
+              config,
+              classLoader,
+              preFilterCondition,
+              probeType,
+              leftOuterJoin,
+              rightRowType.getFieldCount());
       operator = new NativeLookupJoinOperator(runner, probeType, resultRowType);
     }
 

@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
 
 import java.math.BigDecimal;
 import java.util.List;
@@ -229,7 +230,7 @@ class FlinkExactDecimalFunctionsSqlHarnessTest {
             .toArray(Row[]::new);
     table.createTemporaryView(
         "t",
-        env.fromData(Types.ROW_NAMED(new String[] {"id", "a"}, Types.INT, Types.BIG_DEC), rows),
+        fromData(env, Types.ROW_NAMED(new String[] {"id", "a"}, Types.INT, Types.BIG_DEC), rows),
         Schema.newBuilder()
             .column("id", DataTypes.INT().notNull())
             .column("a", DataTypes.DECIMAL(precision, scale))

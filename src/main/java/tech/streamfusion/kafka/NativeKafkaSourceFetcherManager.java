@@ -1,11 +1,9 @@
 package tech.streamfusion.kafka;
 
-import tech.streamfusion.operator.NativeSourceRecord;
 import java.io.IOException;
 import java.util.Map;
 import java.util.function.Supplier;
 import org.apache.flink.configuration.Configuration;
-import org.apache.flink.connector.base.source.reader.fetcher.SingleThreadFetcherManager;
 import org.apache.flink.connector.base.source.reader.fetcher.SplitFetcher;
 import org.apache.flink.connector.base.source.reader.fetcher.SplitFetcherTask;
 import org.apache.flink.connector.base.source.reader.splitreader.SplitReader;
@@ -13,10 +11,11 @@ import org.apache.flink.connector.kafka.source.split.KafkaPartitionSplit;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.clients.consumer.OffsetCommitCallback;
 import org.apache.kafka.common.TopicPartition;
+import tech.streamfusion.operator.NativeSourceRecord;
 
 /** Single-thread native Kafka fetcher manager with Flink's checkpoint-offset commit hook. */
 final class NativeKafkaSourceFetcherManager
-    extends SingleThreadFetcherManager<NativeSourceRecord, KafkaPartitionSplit> {
+    extends tech.streamfusion.kafka.compat.KafkaFetcherManagerCompat {
 
   NativeKafkaSourceFetcherManager(
       Supplier<SplitReader<NativeSourceRecord, KafkaPartitionSplit>> splitReaderSupplier,

@@ -3,6 +3,11 @@ package tech.streamfusion;
 import org.junit.jupiter.api.Test;
 
 class FlinkTranslateSqlHarnessTest {
+  @org.junit.jupiter.api.BeforeEach
+  void requireReleasedHostFunction() {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction("TRANSLATE3");
+  }
+
   @Test
   void translateUsesCodepointsFirstDuplicateAndSpecialNullRules() throws Exception {
     parity(

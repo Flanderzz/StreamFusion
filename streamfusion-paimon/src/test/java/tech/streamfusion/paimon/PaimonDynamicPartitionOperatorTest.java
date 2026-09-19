@@ -269,11 +269,9 @@ class PaimonDynamicPartitionOperatorTest {
     public <T extends StreamOperator<OUT>> T createStreamOperator(
         StreamOperatorParameters<OUT> parameters) {
       return delegate.createStreamOperator(
-          new StreamOperatorParameters<>(
-              parameters.getContainingTask(),
-              parameters.getStreamConfig(),
+          tech.streamfusion.compat.RuntimeCompat.withOutput(
+              parameters,
               parameters.getOutput(),
-              parameters::getProcessingTimeService,
               new OperatorEventDispatcher() {
                 @Override
                 public void registerEventHandler(OperatorID id, OperatorEventHandler registered) {
@@ -284,8 +282,7 @@ class PaimonDynamicPartitionOperatorTest {
                 public OperatorEventGateway getOperatorEventGateway(OperatorID id) {
                   return events::add;
                 }
-              },
-              parameters.getMailboxExecutor()));
+              }));
     }
 
     @Override

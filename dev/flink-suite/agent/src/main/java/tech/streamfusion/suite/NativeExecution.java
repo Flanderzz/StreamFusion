@@ -29,12 +29,23 @@ public final class NativeExecution {
   private NativeExecution() {}
 
   private static Map<String, Map<String, String>> loadContracts() {
+    String flinkLine = System.getProperty("streamfusion.flink-suite.flink-line", "2.2");
+    String resource =
+        switch (flinkLine) {
+          case "2.2" -> "/native-execution.tsv";
+          case "1.18" ->
+              Boolean.getBoolean("streamfusion.flink-suite.native-rocksdb")
+                  ? "/native-execution-flink1.18-state.tsv"
+                  : "/native-execution-flink1.18.tsv";
+          default ->
+              throw new IllegalArgumentException(
+                  "Unknown native execution contract line: " + flinkLine);
+        };
     Map<String, Map<String, String>> contracts = new LinkedHashMap<>();
     try (BufferedReader reader =
         new BufferedReader(
             new InputStreamReader(
-                NativeExecution.class.getResourceAsStream("/native-execution.tsv"),
-                StandardCharsets.UTF_8))) {
+                NativeExecution.class.getResourceAsStream(resource), StandardCharsets.UTF_8))) {
       for (String line; (line = reader.readLine()) != null; ) {
         if (line.isBlank() || line.startsWith("#")) {
           continue;
@@ -42,7 +53,7 @@ public final class NativeExecution {
         String[] fields = line.split("\t", -1);
         if (fields.length != 3
             || !fields[0].matches("[\\w.$]+#[\\w$]+")
-            || !fields[1].matches("\\*|\\w+=(?:true|false)")
+            || !fields[1].matches("\\*|\\w+=\\w+(?:&\\w+=\\w+)*")
             || !(fields[2].matches("\\w+(?:[+|]\\w+)*") || fields[2].matches("!.+"))) {
           throw new IllegalStateException("Invalid native execution contract: " + line);
         }
@@ -94,17 +105,44 @@ public final class NativeExecution {
     return active;
   }
 
-  private static boolean matches(String selector, Object fixture) {
-    if (selector.equals("*")) {
-      return true;
+  static boolean matches(String selector, Object fixture) {
+    if (selector.equals("*")) return true;
+    for (String condition : selector.split("&")) {
+      String[] parts = condition.split("=", 2);
+      Object value =
+          parts[0].equals("changelog") ? changelogEnabled(fixture) : field(fixture, parts[0]);
+      if (!String.valueOf(value).equals(parts[1])) return false;
     }
-    String[] parts = selector.split("=");
+    return true;
+  }
+
+  private static Object field(Object fixture, String name) {
+    for (Class<?> type = fixture.getClass(); type != null; type = type.getSuperclass()) {
+      try {
+        var field = type.getDeclaredField(name);
+        field.setAccessible(true);
+        return field.get(fixture);
+      } catch (NoSuchFieldException ignored) {
+        // Pinned fixture parameters may belong to the upstream base class.
+      } catch (ReflectiveOperationException e) {
+        throw new AssertionError("Cannot read pinned upstream fixture selector " + name, e);
+      }
+    }
+    throw new AssertionError("Cannot read pinned upstream fixture selector " + name);
+  }
+
+  private static boolean changelogEnabled(Object fixture) {
     try {
-      var field = fixture.getClass().getDeclaredField(parts[0]);
-      field.setAccessible(true);
-      return Boolean.toString(field.getBoolean(fixture)).equals(parts[1]);
+      Object environment = field(fixture, "env");
+      Object javaEnvironment = environment.getClass().getMethod("getJavaEnv").invoke(environment);
+      return javaEnvironment
+          .getClass()
+          .getMethod("isChangelogStateBackendEnabled")
+          .invoke(javaEnvironment)
+          .toString()
+          .equals("TRUE");
     } catch (ReflectiveOperationException e) {
-      throw new AssertionError("Cannot read pinned upstream fixture selector " + selector, e);
+      throw new AssertionError("Cannot read pinned upstream changelog configuration", e);
     }
   }
 

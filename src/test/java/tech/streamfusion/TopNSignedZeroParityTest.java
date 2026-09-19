@@ -2,6 +2,7 @@ package tech.streamfusion;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
 
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
@@ -63,9 +64,13 @@ class TopNSignedZeroParityTest {
     StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
     env.setParallelism(1);
     StreamTableEnvironment table = StreamTableEnvironment.create(env);
-    table.createTemporaryView("n", env.fromData(
-        Types.ROW_NAMED(new String[] {"id", "d", "f"}, Types.INT, Types.DOUBLE, Types.FLOAT),
-        Row.of(1, 0.0d, 0.0f), Row.of(2, -0.0d, -0.0f)));
+    table.createTemporaryView(
+        "n",
+        fromData(
+            env,
+            Types.ROW_NAMED(new String[] {"id", "d", "f"}, Types.INT, Types.DOUBLE, Types.FLOAT),
+            Row.of(1, 0.0d, 0.0f),
+            Row.of(2, -0.0d, -0.0f)));
     return table;
   }
 }

@@ -31,7 +31,7 @@ def execution_contracts(
         if (
             len(fields) != 3
             or not re.fullmatch(r"[\w.$]+#[\w$]+", fields[0])
-            or not re.fullmatch(r"\*|\w+=(?:true|false)", fields[1])
+            or not re.fullmatch(r"\*|\w+=\w+(?:&\w+=\w+)*", fields[1])
             or not re.fullmatch(r"\w+(?:[+|]\w+)*|!.+", fields[2])
         ):
             raise ValueError(f"Invalid native execution contract: {line}")
@@ -176,9 +176,12 @@ def main() -> int:
     parser.add_argument("reports", type=pathlib.Path)
     parser.add_argument("--xfail", action="append", default=[])
     parser.add_argument("--native-reports", type=pathlib.Path)
+    parser.add_argument("--contracts", type=pathlib.Path, default=CONTRACT_FILE)
     parser.add_argument("--require-all-contracts", action="store_true")
     parser.add_argument("--require-contract-prefix", action="append", default=[])
     parser.add_argument("--require-test", action="append", default=[])
+    parser.add_argument("--require-test-class", action="append", default=[])
+    parser.add_argument("--require-test-method", action="append", default=[])
     parser.add_argument("--process-exit", type=int, default=0)
     parser.add_argument("--maven-result", type=pathlib.Path)
     parser.add_argument("--audit-output", type=pathlib.Path)
@@ -197,9 +200,11 @@ def main() -> int:
     problems: list[tuple[str, str, str, str]] = []
     expected: list[tuple[str, str, str, str]] = []
     malformed: list[tuple[pathlib.Path, str]] = []
-    contracts = execution_contracts()
+    contracts = execution_contracts(args.contracts)
     executed = Counter()
     executed_tests = Counter()
+    executed_methods = Counter()
+    executed_classes = Counter()
 
     for report in files:
         try:
@@ -221,8 +226,13 @@ def main() -> int:
         errors += int(suite.attrib.get("errors", 0))
         skipped += int(suite.attrib.get("skipped", 0))
         for case_index, case in enumerate(suite.findall("testcase")):
+            suite_name = suite.attrib.get("name", "unknown")
+            class_name = case.attrib.get("classname", suite_name)
+            # Surefire 3.0.0-M5 emits simple class names for JUnit 4 parameterized tests.
+            if "." not in class_name and suite_name.endswith("." + class_name):
+                class_name = suite_name
             case_key = (
-                case.attrib.get("classname", suite.attrib.get("name", "unknown"))
+                class_name
                 + "#"
                 + case.attrib.get("name", "unknown")
             )
@@ -240,6 +250,8 @@ def main() -> int:
             })
             if case.find("skipped") is None:
                 executed_tests[case_key] += 1
+                executed_methods[case_key.split("(", 1)[0].split("[", 1)[0]] += 1
+                executed_classes[class_name] += 1
                 if case_key in contracts:
                     executed[case_key] += 1
             problem = case.find("failure")
@@ -252,7 +264,7 @@ def main() -> int:
             detail = (problem.attrib.get("message") or problem.text or "").strip()
             detail = " ".join(detail.split())[:800]
             item = (
-                case.attrib.get("classname", suite.attrib.get("name", "unknown")),
+                class_name,
                 case.attrib.get("name", "unknown"),
                 kind,
                 detail,
@@ -282,6 +294,18 @@ def main() -> int:
         f"{test}: required test did not execute"
         for test in args.require_test
         if not executed_tests[test]
+    )
+
+    execution_problems.extend(
+        f"{test}: required test method did not execute"
+        for test in args.require_test_method
+        if not executed_methods[test]
+    )
+
+    execution_problems.extend(
+        f"{class_name}: required test class did not execute"
+        for class_name in args.require_test_class
+        if not executed_classes[class_name]
     )
 
     print("# StreamFusion upstream Flink suite")

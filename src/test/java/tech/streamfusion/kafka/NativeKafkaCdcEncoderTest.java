@@ -5,9 +5,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
-import tech.streamfusion.format.EncodeFormat;
-import tech.streamfusion.format.LogicalTypeDescriptors;
-import tech.streamfusion.operator.RowDataArrowConverter;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -24,10 +21,6 @@ import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.flink.api.common.serialization.SerializationSchema;
 import org.apache.flink.formats.common.TimestampFormat;
 import org.apache.flink.formats.json.JsonFormatOptions;
-import org.apache.flink.formats.json.canal.CanalJsonSerializationSchema;
-import org.apache.flink.formats.json.debezium.DebeziumJsonSerializationSchema;
-import org.apache.flink.formats.json.maxwell.MaxwellJsonSerializationSchema;
-import org.apache.flink.formats.json.ogg.OggJsonSerializationSchema;
 import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.metrics.groups.UnregisteredMetricsGroup;
 import org.apache.flink.table.data.DecimalData;
@@ -47,6 +40,9 @@ import org.apache.flink.util.SimpleUserCodeClassLoader;
 import org.apache.flink.util.UserCodeClassLoader;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
+import tech.streamfusion.format.EncodeFormat;
+import tech.streamfusion.format.LogicalTypeDescriptors;
+import tech.streamfusion.operator.RowDataArrowConverter;
 
 /**
  * Byte-level referee for the four CDC JSON envelope encoders against Flink's own serialization
@@ -122,7 +118,7 @@ class NativeKafkaCdcEncoderTest {
       String literal,
       boolean plainDecimal,
       boolean ignoreNulls) {
-    return new DebeziumJsonSerializationSchema(
+    return tech.streamfusion.compat.JsonTestSchemas.debezium(
         rowType, timestampFormat, mode, literal, plainDecimal, ignoreNulls);
   }
 
@@ -133,7 +129,7 @@ class NativeKafkaCdcEncoderTest {
       String literal,
       boolean plainDecimal,
       boolean ignoreNulls) {
-    return new CanalJsonSerializationSchema(
+    return tech.streamfusion.compat.JsonTestSchemas.canal(
         rowType, timestampFormat, mode, literal, plainDecimal, ignoreNulls);
   }
 
@@ -144,7 +140,7 @@ class NativeKafkaCdcEncoderTest {
       String literal,
       boolean plainDecimal,
       boolean ignoreNulls) {
-    return new MaxwellJsonSerializationSchema(
+    return tech.streamfusion.compat.JsonTestSchemas.maxwell(
         rowType, timestampFormat, mode, literal, plainDecimal, ignoreNulls);
   }
 
@@ -155,7 +151,7 @@ class NativeKafkaCdcEncoderTest {
       String literal,
       boolean plainDecimal,
       boolean ignoreNulls) {
-    return new OggJsonSerializationSchema(
+    return tech.streamfusion.compat.JsonTestSchemas.ogg(
         rowType, timestampFormat, mode, literal, plainDecimal, ignoreNulls);
   }
 
@@ -184,7 +180,8 @@ class NativeKafkaCdcEncoderTest {
       throws Exception {
     for (TimestampFormat timestampFormat :
         new TimestampFormat[] {TimestampFormat.SQL, TimestampFormat.ISO_8601}) {
-      for (boolean ignoreNullFields : new boolean[] {false, true}) {
+      for (boolean ignoreNullFields :
+          tech.streamfusion.compat.JsonTestSchemas.IGNORE_NULL_FIELD_MODES) {
         assertMatchesFlink(identifier, flinkSchema, timestampFormat, ignoreNullFields);
       }
     }

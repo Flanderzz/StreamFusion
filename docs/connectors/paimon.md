@@ -360,6 +360,10 @@ Supported:
   `ROW` of those, recursively, with Paimon's field ids on every column.
 - Hint options (`/*+ OPTIONS(...) */`) and the `paimon.<catalog>.<db>.<table>.<option>` dynamic
   options from the job configuration, resolved the way Paimon's own factory resolves them.
+  Statement hints are read explicitly from the physical sink, including on Flink 1.18 where
+  the resolved catalog table retains its original options. They affect both admission and the
+  writer destination: a `branch` hint must leave the main branch unchanged. Table-scoped job
+  configuration overrides the hinted options, matching Paimon's factory precedence.
 - `sink.writer-refresh-detectors`: the writer re-reads the refreshed option groups (external data
   paths) after each checkpoint's commit preparation, exactly when the stock operator does.
 - Any insert-only query shape: columns bind to the table by position as in Flink's own sink, so
@@ -922,3 +926,15 @@ source coverage is [issue #27](https://github.com/datafusion-contrib/StreamFusio
 
 Build with the `paimon` Maven profile. The module has no snapshot, local-Maven, path, or forked
 Paimon dependency.
+
+### Flink 1.18 nested fallback batches
+
+The experimental 1.18 Java reader copies each fallback row into owned binary storage before
+collecting an Arrow batch. Flink 1.18's serializer can otherwise reuse a nested custom-array
+buffer across rows, corrupting values when restoring a split between Java and native readers.
+Snapshot parity checks cover nested arrays, projections, and restore offsets on both lines.
+Compaction parity fixtures pass all eight positional procedure arguments on both lines, using
+empty strings for optional filters and the explicit `full` batch-compaction strategy. This avoids depending on named/optional
+argument annotations and null argument conversion that Flink 1.18 cannot interpret. Batch mode
+is explicit in the table configuration because 1.18 constructs the procedure’s execution
+environment from that configuration.

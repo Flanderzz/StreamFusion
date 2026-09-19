@@ -1,9 +1,9 @@
 package tech.streamfusion.operator;
 
-import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
+import tech.streamfusion.compat.FlinkStreamOperator;
 
 /**
  * Columnar analog of Flink's {@code RowTimeMiniBatchAssginerOperator}: forwards each Arrow batch
@@ -13,7 +13,7 @@ import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
  * proc-time assigner it generates nothing itself; the filtered watermark sequence is a pure
  * function of the input watermarks, so the operator is deterministic.
  */
-public class NativeColumnarRowTimeMiniBatchAssignerOperator extends AbstractStreamOperator<ArrowBatch>
+public class NativeColumnarRowTimeMiniBatchAssignerOperator extends FlinkStreamOperator<ArrowBatch>
     implements OneInputStreamOperator<ArrowBatch, ArrowBatch> {
 
   private final long intervalMs;

@@ -1,12 +1,5 @@
 package tech.streamfusion.operator;
 
-import tech.streamfusion.Native;
-import tech.streamfusion.arrow.ArrowConversion;
-import tech.streamfusion.planner.NativeConfig;
-import tech.streamfusion.state.CanonicalNativeState;
-import tech.streamfusion.state.RocksDBNativeKeyedStateBackend;
-import tech.streamfusion.state.RocksDBNativeState;
-import tech.streamfusion.state.RocksDBNativeStateSupport;
 import java.util.List;
 import java.util.function.BooleanSupplier;
 import java.util.function.LongBinaryOperator;
@@ -18,12 +11,18 @@ import org.apache.arrow.memory.BufferAllocator;
 import org.apache.flink.runtime.state.CheckpointableKeyedStateBackend;
 import org.apache.flink.runtime.state.StateInitializationContext;
 import org.apache.flink.runtime.state.StateSnapshotContext;
-import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.table.types.logical.RowType;
+import tech.streamfusion.Native;
+import tech.streamfusion.arrow.ArrowConversion;
+import tech.streamfusion.compat.FlinkStreamOperator;
+import tech.streamfusion.state.CanonicalNativeState;
+import tech.streamfusion.state.RocksDBNativeKeyedStateBackend;
+import tech.streamfusion.state.RocksDBNativeState;
+import tech.streamfusion.state.RocksDBNativeStateSupport;
 
 /**
- * Lifecycle shared by every native operator whose hot state lives in Rust: the handle, its
- * task off-heap reservation, and the two ways that state can be checkpointed.
+ * Lifecycle shared by every native operator whose hot state lives in Rust: the handle, its task
+ * off-heap reservation, and the two ways that state can be checkpointed.
  *
  * <p>State travels one of two routes, decided once at {@link #initializeState}. On the native
  * RocksDB backend it checkpoints incrementally through the keyed state backend. Otherwise state
@@ -32,11 +31,11 @@ import org.apache.flink.table.types.logical.RowType;
  * state remains readable.
  *
  * <p>Subclasses supply only the native calls that differ — create, restore, snapshot, close, and
- * the state-size probe — plus optional direct-RocksDB and processing-time-timer hooks. Everything else
- * (budget reservation, restore/snapshot plumbing, handle release) is identical across operators and
- * lives here.
+ * the state-size probe — plus optional direct-RocksDB and processing-time-timer hooks. Everything
+ * else (budget reservation, restore/snapshot plumbing, handle release) is identical across
+ * operators and lives here.
  */
-public abstract class AbstractNativeStatefulOperator<OUT> extends AbstractStreamOperator<OUT> {
+public abstract class AbstractNativeStatefulOperator<OUT> extends FlinkStreamOperator<OUT> {
 
   private final String stateLabel;
   private final int[] keyTimestampPrecisions;

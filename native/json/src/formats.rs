@@ -33,12 +33,17 @@ fn build_decoder(
     let decoder: Box<dyn Decoder> = match format {
         FORMAT_JSON => {
             return MessageDecoder {
-                decoder: Box::new(JsonDecoder::new(
+                decoder: Box::new(JsonDecoder::plain(
                     output_schema,
                     crate::json::JsonEnv {
                         mode: options.timestamp_mode,
                         lenient: skip_errors,
                         tree_duplicates: false,
+                    },
+                    if options.json_reject_array_roots {
+                        ArrayRootPolicy::Corrupt
+                    } else {
+                        ArrayRootPolicy::FanOut
                     },
                 )),
                 skip_errors: false,
@@ -53,6 +58,7 @@ fn build_decoder(
                 tree_duplicates: true,
             },
             skip_errors,
+            options.json_reject_array_roots,
         )),
         _ => panic!("unsupported JSON format {format}"),
     };
@@ -117,6 +123,7 @@ impl CdcJsonDecoder {
         dialect: CdcDialect,
         env: crate::json::JsonEnv,
         skip_errors: bool,
+        reject_array_roots: bool,
     ) -> CdcJsonDecoder {
         let spec = dialect.spec();
         // The images are null on the absent side / for unchanged fields, so the nested physical fields
@@ -152,9 +159,13 @@ impl CdcJsonDecoder {
         // Maxwell/Canal hand the root to the tree converter (any array is corrupt), while
         // Debezium/OGG decode through Flink's deprecated one-row entry, which unwraps an array
         // holding exactly one envelope — see `ArrayRootPolicy`.
-        let array_roots = match dialect {
-            CdcDialect::Debezium | CdcDialect::Ogg => ArrayRootPolicy::UnwrapSingle,
-            CdcDialect::Maxwell | CdcDialect::Canal => ArrayRootPolicy::Corrupt,
+        let array_roots = if reject_array_roots {
+            ArrayRootPolicy::Corrupt
+        } else {
+            match dialect {
+                CdcDialect::Debezium | CdcDialect::Ogg => ArrayRootPolicy::UnwrapSingle,
+                CdcDialect::Maxwell | CdcDialect::Canal => ArrayRootPolicy::Corrupt,
+            }
         };
         CdcJsonDecoder {
             envelope: JsonDecoder::single_object(

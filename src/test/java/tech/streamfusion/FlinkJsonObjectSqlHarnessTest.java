@@ -74,6 +74,7 @@ class FlinkJsonObjectSqlHarnessTest {
 
   @Test
   void containersAndNestedRawJsonUseHostSemantics() throws Exception {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction("JSON");
     for (String expression :
         new String[] {
           "CAST(n AS DOUBLE)",

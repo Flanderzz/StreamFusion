@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
@@ -182,6 +184,7 @@ class FlinkGroupAggregateSqlHarnessTest {
 
   @Test
   void stateTtlHintOverridesJobRetention() throws Exception {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireStateTtlHint();
     // STATE_TTL('kv' = '1h') with the job retention at 0: the hint alone must switch the operator
     // into TTL emission (unsuppressed -U/+U pairs), matching Flink's hint-over-config precedence.
     NativeParity.assertKindedParity(
@@ -206,7 +209,8 @@ class FlinkGroupAggregateSqlHarnessTest {
     // The 0-value row leaves key 7's sum unchanged: suppressed with TTL off, an identical -U/+U
     // pair with TTL on — the emission difference the TTL tests above pin.
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(new String[] {"k", "value"}, Types.LONG, Types.LONG),
             Row.of(7L, 1L),
             Row.of(7L, 2L),
@@ -247,7 +251,8 @@ class FlinkGroupAggregateSqlHarnessTest {
     tEnv.getConfig().set("table.optimizer.agg-phase-strategy", "ONE_PHASE");
 
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(
                 new String[] {"k", "s", "value", "qty", "price", "vs", "vt", "vf"},
                 Types.LONG,

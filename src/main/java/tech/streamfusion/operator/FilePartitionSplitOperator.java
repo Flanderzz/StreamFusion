@@ -9,7 +9,6 @@ import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.flink.connector.file.table.RowDataPartitionComputer;
 import org.apache.flink.metrics.Counter;
-import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.table.data.RowData;
@@ -19,6 +18,7 @@ import org.apache.flink.table.types.utils.TypeConversions;
 import org.apache.flink.table.utils.PartitionPathUtils;
 import tech.streamfusion.Native;
 import tech.streamfusion.arrow.ArrowConversion;
+import tech.streamfusion.compat.FlinkStreamOperator;
 
 /**
  * Routes the sink's Arrow batches to filesystem buckets. An unpartitioned table passes each batch
@@ -28,7 +28,7 @@ import tech.streamfusion.arrow.ArrowConversion;
  * off its first row through Flink's own partition-path code — so escaping, null handling, and value
  * stringification match the host sink by construction.
  */
-public class FilePartitionSplitOperator extends AbstractStreamOperator<PartitionedArrowBatch>
+public class FilePartitionSplitOperator extends FlinkStreamOperator<PartitionedArrowBatch>
     implements OneInputStreamOperator<ArrowBatch, PartitionedArrowBatch> {
 
   private final RowType rowType;

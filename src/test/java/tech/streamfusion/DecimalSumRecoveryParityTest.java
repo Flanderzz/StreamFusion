@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import java.math.BigDecimal;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
@@ -28,12 +30,21 @@ class DecimalSumRecoveryParityTest {
     var table = StreamTableEnvironment.create(env);
     table.getConfig().set("table.optimizer.agg-phase-strategy", "ONE_PHASE");
     BigDecimal max = new BigDecimal("99999999999999999999999999999999999.999");
-    table.createTemporaryView("n", env.fromData(
-        Types.ROW_NAMED(new String[] {"g", "d", "keep_value"}, Types.INT, Types.BIG_DEC, Types.BOOLEAN),
-        Row.of(1, max, true), Row.of(1, max, true), Row.of(1, null, true),
-        Row.of(1, BigDecimal.ONE, true)),
-        Schema.newBuilder().column("g", DataTypes.INT()).column("d", DataTypes.DECIMAL(38, 3))
-            .column("keep_value", DataTypes.BOOLEAN()).build());
+    table.createTemporaryView(
+        "n",
+        fromData(
+            env,
+            Types.ROW_NAMED(
+                new String[] {"g", "d", "keep_value"}, Types.INT, Types.BIG_DEC, Types.BOOLEAN),
+            Row.of(1, max, true),
+            Row.of(1, max, true),
+            Row.of(1, null, true),
+            Row.of(1, BigDecimal.ONE, true)),
+        Schema.newBuilder()
+            .column("g", DataTypes.INT())
+            .column("d", DataTypes.DECIMAL(38, 3))
+            .column("keep_value", DataTypes.BOOLEAN())
+            .build());
     return table;
   }
 }

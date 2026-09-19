@@ -1,28 +1,28 @@
 package tech.streamfusion.operator;
 
-import tech.streamfusion.arrow.ArrowConversion;
-import tech.streamfusion.arrow.ArrowReader;
 import org.apache.arrow.vector.TinyIntVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
-import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
+import org.apache.flink.metrics.Counter;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.runtime.typeutils.RowDataSerializer;
 import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.types.RowKind;
-import org.apache.flink.metrics.Counter;
+import tech.streamfusion.arrow.ArrowConversion;
+import tech.streamfusion.arrow.ArrowReader;
+import tech.streamfusion.compat.FlinkStreamOperator;
 
 /**
  * Transpose leaving a columnar region: reads each {@link ArrowBatch} back into rows. Sits where a
  * native columnar operator feeds a rowwise (host) one, so the Arrow→row conversion happens once at
  * the boundary. It consumes (and closes) each batch it receives.
  *
- * <p>The Arrow reader exposes a reusable view backed by the input batch. Chained Flink operators are
- * allowed to retain a collected {@code RowData}, and closing this batch invalidates every such view,
- * so the boundary deep-copies each row before handing it back to the rowwise runtime.
+ * <p>The Arrow reader exposes a reusable view backed by the input batch. Chained Flink operators
+ * are allowed to retain a collected {@code RowData}, and closing this batch invalidates every such
+ * view, so the boundary deep-copies each row before handing it back to the rowwise runtime.
  */
-public class ArrowToRowDataOperator extends AbstractStreamOperator<RowData>
+public class ArrowToRowDataOperator extends FlinkStreamOperator<RowData>
     implements OneInputStreamOperator<ArrowBatch, RowData> {
 
   private final RowType rowType;

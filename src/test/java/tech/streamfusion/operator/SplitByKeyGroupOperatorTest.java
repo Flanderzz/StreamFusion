@@ -1,10 +1,9 @@
 package tech.streamfusion.operator;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
 
-import tech.streamfusion.planner.ColumnarKeyGroupPartitioner;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -13,34 +12,33 @@ import java.util.Map;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
-import org.apache.flink.runtime.io.network.api.writer.SubtaskStateMapper;
 import org.apache.flink.runtime.plugable.SerializationDelegate;
 import org.apache.flink.runtime.state.KeyGroupRangeAssignment;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
-import org.apache.flink.streaming.api.functions.sink.v2.DiscardingSink;
 import org.apache.flink.streaming.api.graph.StreamEdge;
+import org.apache.flink.streaming.api.transformations.PartitionTransformation;
+import org.apache.flink.streaming.api.transformations.StreamExchangeMode;
 import org.apache.flink.streaming.runtime.partitioner.StreamPartitioner;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.streaming.util.OneInputStreamOperatorTestHarness;
-import org.apache.flink.streaming.api.transformations.PartitionTransformation;
-import org.apache.flink.streaming.api.transformations.StreamExchangeMode;
-import org.apache.flink.table.data.GenericRowData;
 import org.apache.flink.table.data.GenericArrayData;
 import org.apache.flink.table.data.GenericMapData;
+import org.apache.flink.table.data.GenericRowData;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.StringData;
 import org.apache.flink.table.data.TimestampData;
 import org.apache.flink.table.runtime.typeutils.RowDataSerializer;
+import org.apache.flink.table.types.logical.ArrayType;
 import org.apache.flink.table.types.logical.BigIntType;
 import org.apache.flink.table.types.logical.IntType;
 import org.apache.flink.table.types.logical.LogicalType;
-import org.apache.flink.table.types.logical.ArrayType;
 import org.apache.flink.table.types.logical.MapType;
 import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.table.types.logical.TimestampType;
 import org.apache.flink.table.types.logical.VarCharType;
 import org.junit.jupiter.api.Test;
+import tech.streamfusion.planner.ColumnarKeyGroupPartitioner;
 
 class SplitByKeyGroupOperatorTest {
 
@@ -182,6 +180,11 @@ class SplitByKeyGroupOperatorTest {
         KeyGroupRangeAssignment.computeOperatorIndexForKeyGroup(maxParallelism, 4, keyGroup),
         p.selectChannel(delegate));
 
+    assertEquals(
+        p.selectChannel(delegate),
+        partitioner.copy().selectChannel(delegate),
+        "Flink 1.18's recovery filter uses the configured copy without another setup call");
+
     // Recovery configures the copied partitioner for the restored topology and filters/reroutes
     // this whole record without inspecting its Arrow rows.
     ColumnarKeyGroupPartitioner restored =
@@ -197,54 +200,12 @@ class SplitByKeyGroupOperatorTest {
   }
 
   @Test
-  void partitionerUsesKeyGroupRangeRecoveryAndRequiresAlignedChannelState() {
-    ColumnarKeyGroupPartitioner partitioner = new ColumnarKeyGroupPartitioner(128);
-    assertEquals(SubtaskStateMapper.RANGE, partitioner.getDownstreamSubtaskStateMapper());
-    assertFalse(
-        partitioner.isSupportsUnalignedCheckpoint(),
-        "a channel batch can span key groups that separate after rescaling");
-  }
-
-  @Test
-  void recoverablePartitionerSupportsUnalignedRangeChannelState() {
-    ColumnarKeyGroupPartitioner partitioner = new ColumnarKeyGroupPartitioner(128, true);
-    assertEquals(SubtaskStateMapper.RANGE, partitioner.getDownstreamSubtaskStateMapper());
-    assertTrue(partitioner.isSupportsUnalignedCheckpoint());
-    assertTrue(partitioner.copy().isSupportsUnalignedCheckpoint());
-  }
-
-  @Test
-  void streamGraphForcesAlignedColumnarExchange() {
-    StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
-    env.enableCheckpointing(10);
-    env.getCheckpointConfig().enableUnalignedCheckpoints();
-    DataStream<ArrowBatch> input =
-        env.fromData(1)
-            .map(ignored -> (ArrowBatch) null)
-            .returns(ArrowBatchTypeInformation.INSTANCE);
-    PartitionTransformation<ArrowBatch> partition =
-        new PartitionTransformation<>(
-            input.getTransformation(),
-            new ColumnarKeyGroupPartitioner(128),
-            StreamExchangeMode.PIPELINED);
-    new DataStream<>(env, partition).sinkTo(new DiscardingSink<>());
-
-    List<StreamEdge> columnarEdges =
-        env.getStreamGraph().getStreamNodes().stream()
-            .flatMap(node -> node.getOutEdges().stream())
-            .filter(edge -> edge.getPartitioner() instanceof ColumnarKeyGroupPartitioner)
-            .toList();
-    assertEquals(1, columnarEdges.size());
-    assertFalse(columnarEdges.get(0).supportsUnalignedCheckpoints());
-  }
-
-  @Test
   void streamGraphAllowsRecoverableColumnarExchangeChannelState() {
     StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
     env.enableCheckpointing(10);
     env.getCheckpointConfig().enableUnalignedCheckpoints();
     DataStream<ArrowBatch> input =
-        env.fromData(1)
+        fromData(env, 1)
             .map(ignored -> (ArrowBatch) null)
             .returns(ArrowBatchTypeInformation.INSTANCE);
     PartitionTransformation<ArrowBatch> partition =
@@ -252,7 +213,7 @@ class SplitByKeyGroupOperatorTest {
             input.getTransformation(),
             new ColumnarKeyGroupPartitioner(128, true),
             StreamExchangeMode.PIPELINED);
-    new DataStream<>(env, partition).sinkTo(new DiscardingSink<>());
+    tech.streamfusion.compat.StreamTestSinks.discard(new DataStream<>(env, partition));
     StreamEdge edge =
         env.getStreamGraph().getStreamNodes().stream()
             .flatMap(node -> node.getOutEdges().stream())

@@ -2,8 +2,8 @@ package tech.streamfusion.planner;
 
 import java.util.Locale;
 import java.util.regex.Pattern;
-import org.apache.flink.shaded.com.jayway.jsonpath.internal.Utils;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.core.io.JsonStringEncoder;
+import tech.streamfusion.compat.FlinkCompat;
 
 /** Admission grammar shared with the native SQL/JSON path reader. */
 final class JsonPathSpec {
@@ -92,7 +92,7 @@ final class JsonPathSpec {
         boolean single = step.group("single") != null;
         String name = step.group(single ? "single" : "quoted");
         if (name.indexOf('\\') >= 0) {
-          name = Utils.unescape(name);
+          name = FlinkCompat.unescapeJsonPath(name);
           if (name.codePoints().anyMatch(c -> c >= 0xd800 && c <= 0xdfff)) return null;
           // The native wire grammar uses JSON escaping, independent of the SQL path's quote style.
           normalized

@@ -6,14 +6,13 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import tech.streamfusion.format.EncodeFormat;
 import java.util.Map;
 import org.apache.flink.connector.base.DeliveryGuarantee;
-import org.apache.flink.connector.kafka.sink.TransactionNamingStrategy;
 import org.apache.flink.table.types.logical.BigIntType;
 import org.apache.flink.table.types.logical.LocalZonedTimestampType;
 import org.apache.flink.table.types.logical.RowType;
 import org.junit.jupiter.api.Test;
+import tech.streamfusion.format.EncodeFormat;
 
 class KafkaSinkTranslatorTest {
 
@@ -86,7 +85,9 @@ class KafkaSinkTranslatorTest {
     // Legacy mapping (the default) cannot derive TIMESTAMP_LTZ; the corrected mapping can.
     RowType ltz = RowType.of(false, new LocalZonedTimestampType(3));
     assertNull(EncodeFormat.of("avro", Map.of(), ltz));
-    assertNotNull(EncodeFormat.of("avro", Map.of("timestamp_mapping.legacy", "false"), ltz));
+    assertEquals(
+        tech.streamfusion.compat.FlinkTestCapabilities.CORRECTED_AVRO_TIMESTAMPS,
+        EncodeFormat.of("avro", Map.of("timestamp_mapping.legacy", "false"), ltz) != null);
 
     Map<String, String> confluent =
         Map.of("url", "http://registry:8081", "schema-registry.subject", "t-value");
@@ -172,6 +173,9 @@ class KafkaSinkTranslatorTest {
 
   @Test
   void leavesPoolingTransactionNamingToFlinksKafkaSink() {
+    org.junit.jupiter.api.Assumptions.assumeTrue(
+        tech.streamfusion.compat.FlinkTestCapabilities.KAFKA_TRANSACTION_NAMING,
+        "Transaction naming strategies are absent from the 1.18 Kafka connector");
     KafkaSinkTranslator.Result result =
         KafkaSinkTranslator.translate(
             Map.of(
@@ -182,7 +186,7 @@ class KafkaSinkTranslatorTest {
                 "sink.transactional-id-prefix", "orders",
                 "sink.transaction-naming-strategy", "pooling"));
     assertNull(result.fallbackReason);
-    assertEquals(TransactionNamingStrategy.POOLING, result.planned().transactionNamingStrategy);
+    assertEquals("POOLING", result.planned().transactionNamingStrategy);
   }
 
   @Test

@@ -13,18 +13,19 @@ import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.types.RowKind;
 
 /**
- * A reusable, zero-copy view that presents a wide source {@link RowData} as a narrower pruned schema,
- * recursively — top-level columns and, within {@code ROW} columns, nested sub-fields. Each field is
- * matched to the source by name (names are unique within a row type), so {@link #getRow} returns a
- * child {@code PrunedRowData} over the source struct rather than the full struct.
+ * A reusable, zero-copy view that presents a wide source {@link RowData} as a narrower pruned
+ * schema, recursively — top-level columns and, within {@code ROW} columns, nested sub-fields. Each
+ * field is matched to the source by name (names are unique within a row type), so {@link #getRow}
+ * returns a child {@code PrunedRowData} over the source struct rather than the full struct.
  *
- * <p>Used by the entry transpose for nested projection pushdown: the converter, driven by the pruned
- * schema, builds and fills only the Arrow columns the native region actually reads — the unread fields
- * of a wide source row (e.g. a Nexmark {@code bid.channel}/{@code bid.url}) never touch Arrow. Reusable
- * like Flink's {@link org.apache.flink.table.data.utils.ProjectedRowData} (which is top-level only):
- * {@link #replaceRow} repoints it, and the converter reads each row inline before the next.
+ * <p>Used by the entry transpose for nested projection pushdown: the converter, driven by the
+ * pruned schema, builds and fills only the Arrow columns the native region actually reads — the
+ * unread fields of a wide source row (e.g. a Nexmark {@code bid.channel}/{@code bid.url}) never
+ * touch Arrow. Reusable like Flink's {@link org.apache.flink.table.data.utils.ProjectedRowData}
+ * (which is top-level only): {@link #replaceRow} repoints it, and the converter reads each row
+ * inline before the next.
  */
-public final class PrunedRowData implements RowData {
+public final class PrunedRowData extends tech.streamfusion.compat.ProjectedRowDataCompat {
 
   private final int[] indexMapping;
   private final PrunedRowData[] children; // non-null only for nested ROW fields
@@ -151,8 +152,13 @@ public final class PrunedRowData implements RowData {
   }
 
   @Override
-  public org.apache.flink.types.variant.Variant getVariant(int pos) {
-    return row.getVariant(indexMapping[pos]);
+  protected RowData sourceRow() {
+    return row;
+  }
+
+  @Override
+  protected int sourceIndex(int pos) {
+    return indexMapping[pos];
   }
 
   @Override

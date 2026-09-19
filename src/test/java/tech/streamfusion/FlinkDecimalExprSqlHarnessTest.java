@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import java.math.BigDecimal;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.datastream.DataStream;
@@ -87,9 +89,9 @@ class FlinkDecimalExprSqlHarnessTest {
     env.setParallelism(1);
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     DataStream<Row> source =
-        env.fromData(
-            Types.ROW_NAMED(
-                new String[] {"auction", "price"}, Types.LONG, Types.BIG_DEC),
+        fromData(
+            env,
+            Types.ROW_NAMED(new String[] {"auction", "price"}, Types.LONG, Types.BIG_DEC),
             Row.of(1L, new BigDecimal("100.000")),
             Row.of(2L, new BigDecimal("999.999")),
             Row.of(3L, new BigDecimal("0.001")),
@@ -109,7 +111,8 @@ class FlinkDecimalExprSqlHarnessTest {
     env.setParallelism(1);
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(new String[] {"auction", "price"}, Types.LONG, Types.LONG),
             Row.of(1L, 100L),
             Row.of(2L, 999L),

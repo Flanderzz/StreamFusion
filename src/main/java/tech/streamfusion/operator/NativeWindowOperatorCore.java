@@ -448,6 +448,7 @@ public abstract class NativeWindowOperatorCore<OUT> extends AbstractNativeStatef
       int[] keyColumns,
       int[] keyTypes) {
     boolean proctime = timeColumn < 0;
+    TimestampAccessor srcTs = proctime ? null : new TimestampAccessor(in.getVector(timeColumn));
     int rows = in.getRowCount();
     BigIntVector ts = new BigIntVector("ts", allocator);
     FieldVector[] values = new FieldVector[valueColumns.length];
@@ -468,7 +469,6 @@ public abstract class NativeWindowOperatorCore<OUT> extends AbstractNativeStatef
       keys[j] = newKeyVector("key" + j, keyTypes[j]);
       vectors.add(keys[j]);
     }
-    TimestampAccessor srcTs = proctime ? null : new TimestampAccessor(in.getVector(timeColumn));
     TinyIntVector sourceKinds = (TinyIntVector) in.getVector(RowDataArrowConverter.ROW_KIND_COLUMN);
     TinyIntVector changes =
         sourceKinds == null

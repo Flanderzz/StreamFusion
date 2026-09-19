@@ -1,8 +1,5 @@
 package tech.streamfusion.operator;
 
-import tech.streamfusion.Native;
-import tech.streamfusion.planner.NativeConfig;
-import tech.streamfusion.state.RocksDBNativeStateSupport;
 import org.apache.arrow.c.ArrowArray;
 import org.apache.arrow.c.ArrowSchema;
 import org.apache.arrow.c.Data;
@@ -12,8 +9,9 @@ import org.apache.flink.metrics.Counter;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
-import org.apache.flink.table.runtime.operators.over.AbstractRowTimeUnboundedPrecedingOver;
 import org.apache.flink.table.types.logical.RowType;
+import tech.streamfusion.Native;
+import tech.streamfusion.state.RocksDBNativeStateSupport;
 
 /**
  * Columnar append-only keep-first deduplication (`ROW_NUMBER() OVER (PARTITION BY … ORDER BY rowtime
@@ -146,9 +144,7 @@ public class NativeColumnarDeduplicateOperator extends AbstractNativeStatefulOpe
     super.open();
     // Flink's RowTimeDeduplicateKeepFirstRowFunction counts every late-dropped row under this
     // exact name; the native late filter accumulates the total and each push syncs the delta.
-    numLateRecordsDropped =
-        getMetricGroup()
-            .counter(AbstractRowTimeUnboundedPrecedingOver.LATE_ELEMENTS_DROPPED_METRIC_NAME);
+    numLateRecordsDropped = getMetricGroup().counter("numLateRecordsDropped");
     reportedLateDrops = 0;
   }
 

@@ -12,9 +12,11 @@ Builds record the target Flink line and module identity in every payload's manif
 checks its embedded core and installed StreamFusion JARs before creating the planner classloader,
 including renamed extensions. A different line or a missing marker fails startup with an explicit
 compatibility error; rebuild or upgrade the loader, core and extensions together. The artifact
-coordinates remain unchanged. Flink 1.18 support is still being implemented in
-[#182](https://github.com/datafusion-contrib/StreamFusion/issues/182); these identity checks do not
-add it to the supported set. Builds and deployments require Java 17.
+coordinates for 2.2 remain unchanged. The `flink-1.18` development profile produces separate
+`streamfusion-*-flink1.18` coordinates and admits only Flink 1.18.1; release support remains gated
+by the outstanding validation in [#182](https://github.com/datafusion-contrib/StreamFusion/issues/182).
+See [Flink line compatibility](flink-compatibility.md) for build commands, dependency selections and
+known host differences. Builds and deployments require Java 17.
 
 Release artifacts are available from Maven Central and already contain the optimized native
 libraries. Fetch the loader and the separate runtime-visible core payload directly into a Flink
@@ -192,6 +194,27 @@ roughly a third of the transpose CPU was per-accessor bounds/refcount checks:
 
 See [Configuration](configuration.md) for the full `-Dstreamfusion.*` runtime flag surface,
 including off-heap sizing for Arrow batches and native operator state.
+
+## Experimental Flink 1.18 images
+
+The development image builder selects the matching official Flink base and qualified payloads:
+
+```sh
+bin/build-flink-image.sh --flink-line 1.18 --tag streamfusion-flink:1.18-dev --load --platform linux/amd64
+mvn -Pimage-it,flink-1.18 -pl streamfusion-image-it verify \
+  -Dstreamfusion.image.name=streamfusion-flink:1.18-dev
+```
+
+For an unpacked official distribution, use `bin/install-flink.sh --flink-line 1.18 <FLINK_HOME>`.
+The installer checks the supported distribution version and both payload manifests before
+copying either JAR. Its default remains the 2.2 line.
+
+Both CI image jobs build optimized native libraries and submit a normal thin user JAR to a
+Session cluster. They verify native Calc and grouped aggregation with the native RocksDB backend,
+and load each packaged format/connector extension in its own JVM. Flink 1.18 uses the
+`state.backend` configuration key; 2.2 uses `state.backend.type`.
+The 1.18 line remains experimental: these smoke jobs do not establish cross-line savepoint
+upgrade support, which is tracked in [#188](https://github.com/datafusion-contrib/StreamFusion/issues/188).
 
 ## Host logging ownership
 

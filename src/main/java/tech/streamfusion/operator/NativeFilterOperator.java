@@ -1,6 +1,5 @@
 package tech.streamfusion.operator;
 
-import tech.streamfusion.Native;
 import java.util.ArrayList;
 import java.util.List;
 import org.apache.arrow.c.ArrowArray;
@@ -11,18 +10,19 @@ import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.FieldVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.util.TransferPair;
-import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.table.functions.FunctionContext;
+import tech.streamfusion.Native;
+import tech.streamfusion.compat.FlinkStreamOperator;
 
 /**
- * Stateless native filter, columnar in and out: applies the encoded predicate to each incoming Arrow
- * batch natively and emits the surviving rows (projected to an input-column subset/reorder) as a
- * batch. The predicate is compiled once into a native handle reused across batches. Carrying Arrow
- * lets this chain with other native operators without converting to rows between them.
+ * Stateless native filter, columnar in and out: applies the encoded predicate to each incoming
+ * Arrow batch natively and emits the surviving rows (projected to an input-column subset/reorder)
+ * as a batch. The predicate is compiled once into a native handle reused across batches. Carrying
+ * Arrow lets this chain with other native operators without converting to rows between them.
  */
-public class NativeFilterOperator extends AbstractStreamOperator<ArrowBatch>
+public class NativeFilterOperator extends FlinkStreamOperator<ArrowBatch>
     implements OneInputStreamOperator<ArrowBatch, ArrowBatch> {
 
   private final int[] projection;

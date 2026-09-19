@@ -1,10 +1,5 @@
 package tech.streamfusion.planner;
 
-import tech.streamfusion.format.LogicalTypeDescriptors;
-import tech.streamfusion.kafka.NativeKafkaSerializationOperator;
-import tech.streamfusion.kafka.PreSerializedKafkaRecord;
-import tech.streamfusion.kafka.PreSerializedKafkaRecordSchema;
-import tech.streamfusion.operator.ArrowBatch;
 import java.util.Collections;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.dag.Transformation;
@@ -23,6 +18,11 @@ import org.apache.flink.table.planner.plan.nodes.exec.InputProperty;
 import org.apache.flink.table.planner.plan.nodes.exec.SingleTransformationTranslator;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.StreamExecNode;
 import org.apache.flink.table.types.logical.RowType;
+import tech.streamfusion.format.LogicalTypeDescriptors;
+import tech.streamfusion.kafka.NativeKafkaSerializationOperator;
+import tech.streamfusion.kafka.PreSerializedKafkaRecord;
+import tech.streamfusion.kafka.PreSerializedKafkaRecordSchema;
+import tech.streamfusion.operator.ArrowBatch;
 
 /** Builds native batch serialization followed by Flink's unmodified Kafka sink. */
 public final class NativeKafkaSinkExecNode extends ExecNodeBase<Object>
@@ -75,8 +75,9 @@ public final class NativeKafkaSinkExecNode extends ExecNodeBase<Object>
         KafkaSink.<PreSerializedKafkaRecord>builder()
             .setKafkaProducerConfig(planned.sink.producerProperties)
             .setRecordSerializer(new PreSerializedKafkaRecordSchema(planned.sink.topic))
-            .setDeliveryGuarantee(planned.sink.deliveryGuarantee)
-            .setTransactionNamingStrategy(planned.sink.transactionNamingStrategy);
+            .setDeliveryGuarantee(planned.sink.deliveryGuarantee);
+    tech.streamfusion.kafka.compat.KafkaSinkCompat.setTransactionNaming(
+        builder, planned.sink.transactionNamingStrategy);
     if (planned.sink.transactionalIdPrefix != null) {
       builder.setTransactionalIdPrefix(planned.sink.transactionalIdPrefix);
     }

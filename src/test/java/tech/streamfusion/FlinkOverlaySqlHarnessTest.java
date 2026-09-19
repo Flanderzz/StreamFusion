@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import java.util.ArrayList;
 import java.util.List;
 import org.apache.flink.api.common.typeinfo.Types;
@@ -47,7 +49,8 @@ class FlinkOverlaySqlHarnessTest {
           StreamTableEnvironment tables = StreamTableEnvironment.create(env);
           tables.createTemporaryView(
               "overlays",
-              env.fromData(
+              fromData(
+                  env,
                   rows,
                   Types.ROW_NAMED(
                       new String[] {"id", "s", "t", "p", "n"},

@@ -1,24 +1,24 @@
 package tech.streamfusion.operator;
 
-import tech.streamfusion.Native;
 import org.apache.arrow.c.ArrowArray;
 import org.apache.arrow.c.ArrowSchema;
 import org.apache.arrow.c.CDataDictionaryProvider;
 import org.apache.arrow.c.Data;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
-import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
+import tech.streamfusion.Native;
+import tech.streamfusion.compat.FlinkStreamOperator;
 
 /**
  * Stateless INNER UNNEST of an ARRAY column, columnar in and out: the Arrow-batch analog of Flink's
  * {@code Correlate} over {@code $UNNEST_ROWS$}. Each incoming batch is fanned out natively to one
- * output row per array element — the input columns repeated and the element appended — then forwarded.
- * It does no buffering, so watermarks pass straight through; carrying Arrow lets it chain with the
- * other native operators without a transpose.
+ * output row per array element — the input columns repeated and the element appended — then
+ * forwarded. It does no buffering, so watermarks pass straight through; carrying Arrow lets it
+ * chain with the other native operators without a transpose.
  */
-public class NativeColumnarUnnestOperator extends AbstractStreamOperator<ArrowBatch>
+public class NativeColumnarUnnestOperator extends FlinkStreamOperator<ArrowBatch>
     implements OneInputStreamOperator<ArrowBatch, ArrowBatch> {
 
   private final int arrayColumn;

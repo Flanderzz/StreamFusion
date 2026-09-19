@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import org.apache.flink.api.common.eventtime.Watermark;
 import org.apache.flink.api.common.eventtime.WatermarkGenerator;
 import org.apache.flink.api.common.eventtime.WatermarkOutput;
@@ -89,18 +91,26 @@ class FlinkOverLateAdmissionReproTest {
     env.setParallelism(1);
     StreamTableEnvironment table = StreamTableEnvironment.create(env);
     table.getConfig().setLocalTimeZone(java.time.ZoneOffset.UTC);
-    var stream = env.fromData(
-        Types.ROW_NAMED(new String[] {"g", "millis", "v"}, Types.INT, Types.LONG, Types.LONG), rows)
-        .assignTimestampsAndWatermarks(WatermarkStrategy.<Row>forGenerator(context ->
-            new WatermarkGenerator<Row>() {
-              @Override
-              public void onEvent(Row event, long timestamp, WatermarkOutput output) {
-                output.emitWatermark(new Watermark(timestamp));
-              }
+    var stream =
+        fromData(
+                env,
+                Types.ROW_NAMED(
+                    new String[] {"g", "millis", "v"}, Types.INT, Types.LONG, Types.LONG),
+                rows)
+            .assignTimestampsAndWatermarks(
+                WatermarkStrategy.<Row>forGenerator(
+                        context ->
+                            new WatermarkGenerator<Row>() {
+                              @Override
+                              public void onEvent(
+                                  Row event, long timestamp, WatermarkOutput output) {
+                                output.emitWatermark(new Watermark(timestamp));
+                              }
 
-              @Override
-              public void onPeriodicEmit(WatermarkOutput output) {}
-            }).withTimestampAssigner((event, previous) -> (Long) event.getField(1)));
+                              @Override
+                              public void onPeriodicEmit(WatermarkOutput output) {}
+                            })
+                    .withTimestampAssigner((event, previous) -> (Long) event.getField(1)));
     table.createTemporaryView("n", stream,
         Schema.newBuilder().column("g", DataTypes.INT()).column("millis", DataTypes.BIGINT())
             .column("v", DataTypes.BIGINT())

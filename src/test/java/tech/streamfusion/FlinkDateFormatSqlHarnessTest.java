@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import java.time.LocalDateTime;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.datastream.DataStream;
@@ -45,7 +47,8 @@ class FlinkDateFormatSqlHarnessTest {
     env.setParallelism(1);
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(new String[] {"id", "ts"}, Types.LONG, Types.LOCAL_DATE_TIME),
             Row.of(1L, LocalDateTime.of(2024, 3, 5, 8, 30, 15)),
             Row.of(2L, LocalDateTime.of(2024, 12, 31, 23, 59, 59)),

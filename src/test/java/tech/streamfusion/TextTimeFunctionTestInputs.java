@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import java.util.ArrayList;
 import java.util.List;
 import org.apache.flink.api.common.typeinfo.Types;
@@ -49,7 +51,8 @@ final class TextTimeFunctionTestInputs {
     StreamTableEnvironment tables = StreamTableEnvironment.create(env);
     tables.createTemporaryView(
         "inputs",
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(new String[] {"id", "s"}, Types.INT, Types.STRING),
             rows.toArray(Row[]::new)),
         Schema.newBuilder().column("id", DataTypes.INT()).column("s", DataTypes.STRING()).build());
@@ -75,7 +78,8 @@ final class TextTimeFunctionTestInputs {
     StreamTableEnvironment tables = StreamTableEnvironment.create(env);
     tables.createTemporaryView(
         "inputs",
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(
                 new String[] {"id", "s", "n", "p"},
                 Types.INT,
@@ -132,7 +136,8 @@ final class TextTimeFunctionTestInputs {
     StreamTableEnvironment tables = StreamTableEnvironment.create(env);
     tables.createTemporaryView(
         "inputs",
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(new String[] {"id", "s"}, Types.INT, Types.STRING),
             rows.toArray(Row[]::new)),
         Schema.newBuilder().column("id", DataTypes.INT()).column("s", DataTypes.STRING()).build());
@@ -169,7 +174,8 @@ final class TextTimeFunctionTestInputs {
     StreamTableEnvironment tables = StreamTableEnvironment.create(env);
     tables.createTemporaryView(
         "inputs",
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(
                 new String[] {"id", "d", "ts"}, Types.INT, Types.LOCAL_DATE, Types.LOCAL_DATE_TIME),
             rows.toArray(Row[]::new)),
@@ -195,7 +201,8 @@ final class TextTimeFunctionTestInputs {
     StreamTableEnvironment tables = StreamTableEnvironment.create(env);
     tables.createTemporaryView(
         "inputs",
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(new String[] {"id", "b"}, Types.INT, Types.PRIMITIVE_ARRAY(Types.BYTE)),
             rows.toArray(Row[]::new)),
         Schema.newBuilder().column("id", DataTypes.INT()).column("b", DataTypes.BYTES()).build());

@@ -3,6 +3,7 @@ package tech.streamfusion;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
 
 import java.lang.reflect.Array;
 import java.math.BigDecimal;
@@ -84,6 +85,10 @@ class FlinkDynamicCollectionSqlHarnessTest {
         "VARBINARY"
       })
   void runtimeArrayValuesKeepTheirTypes(String kind) throws Exception {
+    org.junit.jupiter.api.Assumptions.assumeTrue(
+        tech.streamfusion.compat.FlinkTestCapabilities.SMALL_INTEGER_ARRAY_LOOKUP
+            || !(kind.equals("TINYINT") || kind.equals("SMALLINT")),
+        "Flink 1.18 generates an invalid int-to-byte/short conditional for nullable array lookup");
     assertNativeParity(() -> typedArrays(kind), "SELECT id, arr[idx] FROM src");
   }
 
@@ -255,7 +260,8 @@ class FlinkDynamicCollectionSqlHarnessTest {
             Map.of()));
     table.createTemporaryView(
         "src",
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(
                 new String[] {
                   "id", "idx", "lookup_key", "nums", "texts", "nested", "mappings", "grouped"
@@ -281,7 +287,8 @@ class FlinkDynamicCollectionSqlHarnessTest {
     if (kind.equals("INT")) {
       table.createTemporaryView(
           "src",
-          env.fromData(
+          fromData(
+              env,
               Types.ROW_NAMED(
                   new String[] {"id", "m", "lookup_key"},
                   Types.INT,
@@ -292,7 +299,8 @@ class FlinkDynamicCollectionSqlHarnessTest {
     } else {
       table.createTemporaryView(
           "src",
-          env.fromData(
+          fromData(
+              env,
               Types.ROW_NAMED(
                   new String[] {"id", "m", "lookup_key"},
                   Types.INT,
@@ -391,7 +399,8 @@ class FlinkDynamicCollectionSqlHarnessTest {
     rows.add(Row.of(rows.size(), null, 1));
     table.createTemporaryView(
         "src",
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(
                 new String[] {"id", "arr", "idx"},
                 Types.INT,
@@ -417,7 +426,8 @@ class FlinkDynamicCollectionSqlHarnessTest {
     map.put("a", 7);
     table.createTemporaryView(
         "src",
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(
                 new String[] {"id", "m", "lookup_key"},
                 Types.INT,
@@ -449,7 +459,8 @@ class FlinkDynamicCollectionSqlHarnessTest {
     nullable.put(spec.present(), null);
     table.createTemporaryView(
         "src",
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(
                 new String[] {"id", "m", "lookup_key"},
                 Types.INT,

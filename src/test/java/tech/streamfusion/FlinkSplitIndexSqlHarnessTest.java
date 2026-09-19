@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
@@ -46,7 +48,8 @@ class FlinkSplitIndexSqlHarnessTest {
     env.setParallelism(1);
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(new String[] {"auction", "url"}, Types.LONG, Types.STRING),
             Row.of(1L, "https://www.nexmark.com/path/to/item.html"),
             Row.of(2L, "http://x.com/a"),

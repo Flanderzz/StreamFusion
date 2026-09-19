@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
@@ -186,6 +188,7 @@ class FlinkRegularJoinSqlHarnessTest {
 
   @Test
   void perSideStateTtlHintRoutesAndMatchesHost() throws Exception {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireStateTtlHint();
     // A per-side STATE_TTL hint (KV syntax keyed by table alias, 0 = left / 1 = right internally)
     // with the job retention at 0: the hint alone must switch each side's retention on the native
     // operator, matching Flink's hint-over-config precedence.
@@ -214,13 +217,15 @@ class FlinkRegularJoinSqlHarnessTest {
     tEnv.getConfig().set("table.optimizer.agg-phase-strategy", "ONE_PHASE");
 
     DataStream<Row> a =
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(new String[] {"k", "v"}, Types.LONG, Types.LONG),
             Row.of(1L, 10L),
             Row.of(1L, 20L),
             Row.of(2L, 30L));
     DataStream<Row> b =
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(new String[] {"k", "w"}, Types.LONG, Types.LONG),
             Row.of(1L, 100L),
             Row.of(2L, 200L),
@@ -229,11 +234,17 @@ class FlinkRegularJoinSqlHarnessTest {
     tEnv.createTemporaryView(
         "A",
         a,
-        Schema.newBuilder().column("k", DataTypes.BIGINT()).column("v", DataTypes.BIGINT()).build());
+        Schema.newBuilder()
+            .column("k", DataTypes.BIGINT())
+            .column("v", DataTypes.BIGINT())
+            .build());
     tEnv.createTemporaryView(
         "B",
         b,
-        Schema.newBuilder().column("k", DataTypes.BIGINT()).column("w", DataTypes.BIGINT()).build());
+        Schema.newBuilder()
+            .column("k", DataTypes.BIGINT())
+            .column("w", DataTypes.BIGINT())
+            .build());
     return tEnv;
   }
 

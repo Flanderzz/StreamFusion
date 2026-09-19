@@ -2,6 +2,8 @@ package tech.streamfusion.suite;
 
 import static net.bytebuddy.matcher.ElementMatchers.isAnnotatedWith;
 import static net.bytebuddy.matcher.ElementMatchers.isConstructor;
+import static net.bytebuddy.matcher.ElementMatchers.nameEndsWith;
+import static net.bytebuddy.matcher.ElementMatchers.nameStartsWith;
 import static net.bytebuddy.matcher.ElementMatchers.named;
 import static net.bytebuddy.matcher.ElementMatchers.namedOneOf;
 import static net.bytebuddy.matcher.ElementMatchers.takesArgument;
@@ -69,6 +71,15 @@ public final class StreamFusionSuiteAgent {
     PaimonTestWatch.initialize(System.err);
     new AgentBuilder.Default()
         .with(AgentBuilder.Listener.StreamWriting.toSystemError().withTransformationsOnly())
+        .type(named("org.apache.paimon.flink.FlinkTestBase"))
+        .transform(
+            (builder, type, classLoader, module, protectionDomain) ->
+                builder.visit(
+                    Advice.to(BuildLegacyPaimonCatalog.class)
+                        .on(
+                            named("createResolvedTable")
+                                .and(takesArguments(4))
+                                .and(takesArgument(1, java.util.List.class)))))
         .type(
             namedOneOf(
                 "org.apache.flink.runtime.minicluster.MiniCluster$TerminatingFatalErrorHandler",
@@ -76,16 +87,29 @@ public final class StreamFusionSuiteAgent {
         .transform(
             (builder, type, classLoader, module, protectionDomain) ->
                 builder.visit(Advice.to(ReportClusterFailure.class).on(named("onFatalError"))))
-        .type(named("org.apache.paimon.flink.PrimaryKeyFileStoreTableITCase"))
+        .type(
+            nameStartsWith("org.apache.paimon.flink.")
+                .and(nameEndsWith("ITCase").or(nameEndsWith("ITCaseBase"))))
+        .transform(
+            (builder, type, classLoader, module, protectionDomain) -> {
+              if (System.getProperty("streamfusion.flink-suite.flink-line", "2.2").equals("1.18")
+                  && PaimonCheckpointFixture.supports(type.getName())) {
+                builder = builder.visit(PaimonCheckpointFixture.adapter());
+              }
+              return builder.visit(
+                  Advice.to(WatchPaimonTest.class)
+                      .on(
+                          isAnnotatedWith(named("org.junit.jupiter.api.Test"))
+                              .or(
+                                  isAnnotatedWith(
+                                      named("org.junit.jupiter.params.ParameterizedTest")))));
+            })
+        .type(named("org.apache.flink.table.planner.delegation.DefaultExecutor"))
         .transform(
             (builder, type, classLoader, module, protectionDomain) ->
                 builder.visit(
-                    Advice.to(WatchPaimonTest.class)
-                        .on(
-                            isAnnotatedWith(named("org.junit.jupiter.api.Test"))
-                                .or(
-                                    isAnnotatedWith(
-                                        named("org.junit.jupiter.params.ParameterizedTest"))))))
+                    Advice.to(ApplyLegacyPaimonRestore.class)
+                        .on(named("createPipeline").and(takesArguments(4)))))
         .type(named("tech.streamfusion.planner.PhysicalPlanScan"))
         .transform(
             (builder, type, classLoader, module, protectionDomain) ->
@@ -103,6 +127,7 @@ public final class StreamFusionSuiteAgent {
                 "tech.streamfusion.operator.NativeAsyncLookupJoinOperator",
                 "tech.streamfusion.operator.NativeFilterOperator",
                 "tech.streamfusion.operator.NativeColumnarGroupAggregateOperator",
+                "tech.streamfusion.operator.NativeColumnarUpdatingJoinOperator",
                 "tech.streamfusion.operator.NativeColumnarTopNOperator",
                 "tech.streamfusion.operator.NativeWindowOperatorCore",
                 "tech.streamfusion.operator.NativeColumnarGlobalWindowAggregateOperator"))
@@ -114,6 +139,9 @@ public final class StreamFusionSuiteAgent {
               }
               if (type.getName().endsWith("NativeColumnarTopNOperator")) {
                 return builder.visit(Advice.to(RecordNativeBatch.class).on(named("push")));
+              }
+              if (type.getName().endsWith("NativeColumnarUpdatingJoinOperator")) {
+                return builder.visit(Advice.to(RecordNativeBatch.class).on(named("joinOpen")));
               }
               if (type.getName().endsWith("NativeWindowOperatorCore")) {
                 return builder.visit(
@@ -151,9 +179,13 @@ public final class StreamFusionSuiteAgent {
         .type(named(STREAM_EXECUTION_ENVIRONMENT))
         .transform(
             (builder, type, classLoader, module, protectionDomain) ->
-                builder.visit(
-                    Advice.to(InstallNativeRocksDB.class)
-                        .on(named("configure").and(takesArguments(2)))))
+                builder
+                    .visit(
+                        Advice.to(InstallNativeRocksDB.class)
+                            .on(named("configure").and(takesArguments(2))))
+                    .visit(
+                        Advice.to(InstallLegacyNativeRocksDB.class)
+                            .on(named("setStateBackend").and(takesArguments(1)))))
         .type(named(NATIVE_STATEFUL_OPERATOR))
         .transform(
             (builder, type, classLoader, module, protectionDomain) ->
@@ -502,6 +534,17 @@ public final class StreamFusionSuiteAgent {
       }
       try {
         Class<?> configOption = Class.forName("org.apache.flink.configuration.ConfigOption");
+        if (System.getProperty("streamfusion.flink-suite.flink-line", "2.2").equals("1.18")) {
+          Object changelogOption =
+              Class.forName("org.apache.flink.configuration.StateChangelogOptions")
+                  .getField("ENABLE_STATE_CHANGE_LOG")
+                  .get(null);
+          if (Boolean.TRUE.equals(
+              configuration
+                  .getClass()
+                  .getMethod("get", configOption)
+                  .invoke(configuration, changelogOption))) return;
+        }
         Object backendOption =
             Class.forName("org.apache.flink.configuration.StateBackendOptions")
                 .getField("STATE_BACKEND")
@@ -533,6 +576,20 @@ public final class StreamFusionSuiteAgent {
       } catch (ReflectiveOperationException e) {
         throw new IllegalStateException("native RocksDB suite backend installation failed", e);
       }
+    }
+  }
+
+  /** Flink 1.18 upstream fixtures still use the legacy programmatic backend API. */
+  public static final class InstallLegacyNativeRocksDB {
+    @Advice.OnMethodEnter
+    static void enter(
+        @Advice.This Object environment,
+        @Advice.Argument(
+                value = 0,
+                readOnly = false,
+                typing = net.bytebuddy.implementation.bytecode.assign.Assigner.Typing.DYNAMIC)
+            Object backend) {
+      backend = LegacyStateBackend.replace(environment, backend);
     }
   }
 
@@ -618,6 +675,38 @@ public final class StreamFusionSuiteAgent {
       if (batch != null && StreamFusionSuiteAgent.reportNativePaimonSnapshot()) {
         System.err.println("StreamFusion upstream Paimon suite merged a native snapshot batch");
       }
+    }
+  }
+
+  public static final class ApplyLegacyPaimonRestore {
+    @Advice.OnMethodExit
+    static void exit(@Advice.Argument(1) Object configuration, @Advice.Return Object pipeline) {
+      if (System.getProperty("streamfusion.flink-suite.flink-line", "2.2").equals("1.18")
+          && PaimonCheckpointFixture.isRecoveryTest()) {
+        PaimonCheckpointFixture.applyRestoreSettings(configuration, pipeline);
+      }
+    }
+  }
+
+  public static final class BuildLegacyPaimonCatalog {
+    @Advice.OnMethodEnter(skipOn = Advice.OnNonDefaultValue.class)
+    static Object enter(@Advice.Origin Class<?> fixture, @Advice.AllArguments Object[] arguments) {
+      if (!System.getProperty("streamfusion.flink-suite.flink-line", "2.2").equals("1.18")) {
+        return null;
+      }
+      return PaimonCatalogFixture.create(
+          fixture.getClassLoader(),
+          (java.util.Map<?, ?>) arguments[0],
+          (java.util.List<?>) arguments[1],
+          (java.util.List<?>) arguments[2],
+          (java.util.List<?>) arguments[3]);
+    }
+
+    @Advice.OnMethodExit
+    static void exit(
+        @Advice.Enter Object replacement,
+        @Advice.Return(readOnly = false, typing = Assigner.Typing.DYNAMIC) Object result) {
+      if (replacement != null) result = replacement;
     }
   }
 }

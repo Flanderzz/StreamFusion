@@ -2,6 +2,7 @@ package tech.streamfusion;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -38,7 +39,8 @@ class ChangelogParquetTableFactoryTest {
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     tEnv.createTemporaryView(
         "insert_rows",
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(new String[] {"k", "v"}, Types.LONG, Types.LONG),
             Row.of(1L, 10L),
             Row.of(2L, 20L)),
@@ -79,7 +81,8 @@ class ChangelogParquetTableFactoryTest {
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     tEnv.createTemporaryView(
         "input_rows",
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(new String[] {"k", "v"}, Types.LONG, Types.LONG),
             Row.of(1L, 10L),
             Row.of(1L, 20L),

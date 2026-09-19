@@ -17,13 +17,24 @@ concurrency:
 
 jobs:
   upstream-suite:
-    name: ${{ matrix.suite }} suite
+    name: ${{ matrix.suite }} suite${{ matrix.suffix }}
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
         suite: [runtime, formats, parquet, orc, kafka, paimon, delta, state]
+        line: ['2.2', '1.18']
+        exclude:
+          - suite: delta
+            line: '1.18'
+        include:
+          - line: '2.2'
+            version: '2.2.1'
+            suffix: ''
+          - line: '1.18'
+            version: '1.18.1'
+            suffix: ' (Flink 1.18)'
     steps:
       - uses: actions/checkout@v6
 
@@ -42,9 +53,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: native -> ../.flink-suite/streamfusion-source/native/target
+          workspaces: native -> ../.flink-suite/${{ matrix.line }}/streamfusion-source/native/target
 
       - name: Run unchanged upstream suite with StreamFusion
+        env:
+          FLINK_VERSION: ${{ matrix.version }}
         run: |
           set -o pipefail
           bin/flink-suite.sh "${{ matrix.suite }}" 2>&1 | tee upstream-suite.log
@@ -52,11 +65,11 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: upstream-flink-${{ matrix.suite }}-${{ github.sha }}
+          name: upstream-flink-${{ matrix.line }}-${{ matrix.suite }}-${{ github.sha }}
           path: |
             upstream-suite.log
-            .flink-suite/native-execution/
-            .flink-suite/diagnostics/
+            .flink-suite/**/native-execution/
+            .flink-suite/**/diagnostics/
             .flink-suite/**/target/surefire-reports/
           include-hidden-files: true
           retention-days: 7

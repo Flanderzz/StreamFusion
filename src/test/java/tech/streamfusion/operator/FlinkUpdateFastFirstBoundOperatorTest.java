@@ -413,7 +413,6 @@ class FlinkUpdateFastFirstBoundOperatorTest {
       return InternalTypeInfo.ofFields(new BigIntType());
     }
 
-    @Override
     public RowDataKeySelector copy() {
       return new LongKey(index);
     }

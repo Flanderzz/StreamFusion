@@ -1,32 +1,32 @@
 package tech.streamfusion.operator;
 
-import tech.streamfusion.Native;
-import tech.streamfusion.operator.MiniBatchMetrics.FlushReason;
 import org.apache.arrow.c.ArrowArray;
 import org.apache.arrow.c.ArrowSchema;
 import org.apache.arrow.c.CDataDictionaryProvider;
 import org.apache.arrow.c.Data;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
-import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
+import tech.streamfusion.Native;
+import tech.streamfusion.compat.FlinkStreamOperator;
+import tech.streamfusion.operator.MiniBatchMetrics.FlushReason;
 
 /**
- * Local half of a two-phase non-windowed {@code GROUP BY}, columnar in and out — the Arrow analog of
- * Flink's {@code MapBundleOperator} wrapping {@code MiniBatchLocalGroupAggFunction}. It buffers a
- * mini-batch of rows into per-key accumulators (held in the native handle) and flushes one partial
- * row per key downstream to the native global merge.
+ * Local half of a two-phase non-windowed {@code GROUP BY}, columnar in and out — the Arrow analog
+ * of Flink's {@code MapBundleOperator} wrapping {@code MiniBatchLocalGroupAggFunction}. It buffers
+ * a mini-batch of rows into per-key accumulators (held in the native handle) and flushes one
+ * partial row per key downstream to the native global merge.
  *
  * <p>Flush is driven exactly like Flink's bundle: the mini-batch marker the {@link
  * NativeColumnarMiniBatchAssignerOperator} emits arrives as a {@link Watermark} ({@link
  * #processWatermark}), a size trigger caps the buffer at {@code miniBatchSize} rows, and the buffer
  * is always drained before a checkpoint ({@link #prepareSnapshotPreBarrier}) and at end of input
- * ({@link #finish}). Because it is drained ahead of every barrier the buffer is transient — there is
- * no checkpointed state here; the durable state lives in the global half.
+ * ({@link #finish}). Because it is drained ahead of every barrier the buffer is transient — there
+ * is no checkpointed state here; the durable state lives in the global half.
  */
-public class NativeColumnarLocalGroupAggregateOperator extends AbstractStreamOperator<ArrowBatch>
+public class NativeColumnarLocalGroupAggregateOperator extends FlinkStreamOperator<ArrowBatch>
     implements OneInputStreamOperator<ArrowBatch, ArrowBatch> {
 
   private final int[] aggregateKinds;

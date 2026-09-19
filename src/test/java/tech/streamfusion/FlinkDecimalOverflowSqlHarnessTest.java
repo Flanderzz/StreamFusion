@@ -3,6 +3,7 @@ package tech.streamfusion;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -179,7 +180,7 @@ class FlinkDecimalOverflowSqlHarnessTest {
     }
     table.createTemporaryView(
         "t",
-        env.fromData(Types.ROW_NAMED(new String[] {"id", "a"}, Types.LONG, Types.BIG_DEC), rows),
+        fromData(env, Types.ROW_NAMED(new String[] {"id", "a"}, Types.LONG, Types.BIG_DEC), rows),
         Schema.newBuilder()
             .column("id", DataTypes.BIGINT())
             .column(

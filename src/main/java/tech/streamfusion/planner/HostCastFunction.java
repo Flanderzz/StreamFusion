@@ -1,15 +1,11 @@
 package tech.streamfusion.planner;
 
 import java.math.BigDecimal;
-import java.time.ZoneId;
-import org.apache.flink.configuration.Configuration;
 import org.apache.flink.table.data.DecimalData;
 import org.apache.flink.table.data.StringData;
-import org.apache.flink.table.functions.ScalarFunction;
-import org.apache.flink.table.functions.FunctionContext;
 import org.apache.flink.table.data.utils.CastExecutor;
-import org.apache.flink.table.planner.codegen.CodeGeneratorContext;
-import org.apache.flink.table.planner.functions.casting.CastRule;
+import org.apache.flink.table.functions.FunctionContext;
+import org.apache.flink.table.functions.ScalarFunction;
 import org.apache.flink.table.planner.functions.casting.CastRuleProvider;
 import org.apache.flink.table.types.logical.DecimalType;
 import org.apache.flink.table.types.logical.LogicalType;
@@ -72,16 +68,12 @@ public final class HostCastFunction extends ScalarFunction {
       if (classLoader == null) {
         classLoader = ClassLoader.getSystemClassLoader();
       }
-      // The admitted casts (number↔string, string length) never consult the zone; UTC is a placeholder.
+      // The admitted casts (number↔string, string length) never consult the zone; UTC is a
+      // placeholder.
       executor =
           (CastExecutor<Object, Object>)
               CastRuleProvider.create(
-                  CastRule.Context.create(
-                      false,
-                      false,
-                      ZoneId.of("UTC"),
-                      classLoader,
-                      new CodeGeneratorContext(new Configuration(), classLoader)),
+                  tech.streamfusion.compat.FlinkCompat.castContext(classLoader),
                   inputType,
                   targetType);
       if (executor == null) {

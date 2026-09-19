@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import java.util.function.Supplier;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.datastream.DataStream;
@@ -32,7 +34,8 @@ class FlinkStringCaseSqlHarnessTest {
       env.setParallelism(1);
       StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
       DataStream<Row> t =
-          env.fromData(
+          fromData(
+              env,
               Types.ROW_NAMED(new String[] {"s"}, Types.STRING),
               Row.of("Apple"),
               Row.of("GOOGLE"),
@@ -40,8 +43,7 @@ class FlinkStringCaseSqlHarnessTest {
               Row.of("Grüße"),
               Row.of("MAÑANA"),
               Row.of("straße"));
-      tEnv.createTemporaryView(
-          "t", t, Schema.newBuilder().column("s", DataTypes.STRING()).build());
+      tEnv.createTemporaryView("t", t, Schema.newBuilder().column("s", DataTypes.STRING()).build());
       return tEnv;
     };
   }

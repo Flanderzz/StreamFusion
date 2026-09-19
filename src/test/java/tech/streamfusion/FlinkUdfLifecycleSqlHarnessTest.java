@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.api.TableEnvironment;
@@ -81,7 +83,7 @@ class FlinkUdfLifecycleSqlHarnessTest {
     }
     table.createTemporaryView(
         "inputs",
-        env.fromData(Types.ROW_NAMED(new String[] {"a", "b"}, Types.INT, Types.INT), rows));
+        fromData(env, Types.ROW_NAMED(new String[] {"a", "b"}, Types.INT, Types.INT), rows));
     return table;
   }
 

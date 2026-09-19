@@ -180,8 +180,8 @@ class NativeSourceWatermarksTest {
   void splitMinimumAndIdlenessStillUseFlinksCoordination() {
     CapturingOutput output = new CapturingOutput();
     var multiplexer = new WatermarkOutputMultiplexer(output);
-    multiplexer.registerNewOutput("a");
-    multiplexer.registerNewOutput("b");
+    tech.streamfusion.compat.WatermarkTestOutputs.register(multiplexer, "a");
+    tech.streamfusion.compat.WatermarkTestOutputs.register(multiplexer, "b");
     var first = NativeSourceWatermarks.strategy(0).createWatermarkGenerator(null);
     var second = NativeSourceWatermarks.strategy(0).createWatermarkGenerator(null);
     try (BufferAllocator allocator = new RootAllocator()) {

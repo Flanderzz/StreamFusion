@@ -44,6 +44,20 @@ class NativeExecutionSummaryTest(unittest.TestCase):
         ), redirect_stdout(io.StringIO()):
             self.assertEqual(1, summarize.main())
 
+    def test_old_surefire_simple_class_name_still_requires_every_invocation(self):
+        full_class, method = self.CALC.split("#")
+        xml = (f'<testsuite name="{full_class}" tests="2">'
+               f'<testcase classname="CalcITCase" name="{method}"/>'
+               f'<testcase classname="CalcITCase" name="{method}"/></testsuite>')
+        (self.root / "TEST-calc.xml").write_text(xml)
+        self.record(self.CALC, "NativeCalcOperator=3")
+        arguments = ["summarize.py", str(self.root), "--native-reports", str(self.root)]
+        with patch.object(sys, "argv", arguments), redirect_stdout(io.StringIO()):
+            self.assertEqual(1, summarize.main())
+        self.record(self.CALC, "NativeCalcOperator=4", name="second")
+        with patch.object(sys, "argv", arguments), redirect_stdout(io.StringIO()):
+            self.assertEqual(0, summarize.main())
+
     def test_xfail_cannot_hide_missing_execution(self):
         xml = f'<testsuite tests="1" failures="1"><testcase classname="{self.CALC.split("#")[0]}" name="testLongProjectionList"><failure message="expected"/></testcase></testsuite>'
         (self.root / "TEST-calc.xml").write_text(xml)
@@ -51,6 +65,39 @@ class NativeExecutionSummaryTest(unittest.TestCase):
             sys, "argv", ["summarize.py", str(self.root), "--xfail", self.CALC]
         ), redirect_stdout(io.StringIO()):
             self.assertEqual(1, summarize.main())
+
+    def test_required_uncontracted_class_must_execute_not_only_skip(self):
+        full_class = "org.apache.flink.UncontractedITCase"
+        arguments = ["summarize.py", str(self.root), "--require-test-class", full_class]
+        for actual_class, skipped, expected in (
+            (full_class, False, 0), (full_class, True, 1),
+            ("org.apache.flink.DifferentITCase", False, 1),
+        ):
+            with self.subTest(actual_class=actual_class, skipped=skipped):
+                (self.root / "TEST-class.xml").write_text(
+                    f'<testsuite tests="1" skipped="{int(skipped)}">'
+                    f'<testcase classname="{actual_class}" name="testRows">'
+                    + ('<skipped/>' if skipped else '') + '</testcase></testsuite>'
+                )
+                with patch.object(sys, "argv", arguments), redirect_stdout(io.StringIO()):
+                    self.assertEqual(expected, summarize.main())
+
+    def test_required_method_includes_parameters_but_not_skips_or_similar_names(self):
+        full_class = "org.apache.paimon.flink.ReadWriteTableITCase"
+        arguments = ["summarize.py", str(self.root), "--require-test-method", full_class + "#testRows"]
+        for name, skipped, expected in (
+            ("testRows", False, 0), ("testRows(boolean)[1]", False, 0),
+            ("testRows[HEAP]", False, 0), ("testRows(boolean)[1]", True, 1),
+            ("testRowsOther", False, 1),
+        ):
+            with self.subTest(name=name, skipped=skipped):
+                (self.root / "TEST-method.xml").write_text(
+                    f'<testsuite tests="1" skipped="{int(skipped)}">'
+                    f'<testcase classname="{full_class}" name="{name}">'
+                    + ('<skipped/>' if skipped else '') + '</testcase></testsuite>'
+                )
+                with patch.object(sys, "argv", arguments), redirect_stdout(io.StringIO()):
+                    self.assertEqual(expected, summarize.main())
 
     def test_zero_rows_and_wrong_operator_fail(self):
         for counts in (

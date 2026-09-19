@@ -224,6 +224,10 @@ class JsonPathSpecTest {
               rex.makeCall(
                   output, function, List.of(rex.makeInputRef(text, 0), rex.makeLiteral(path)));
           var encoded = RexExpression.encodeProjections(List.of(literalPath), List.of("v"));
+          if (!tech.streamfusion.operator.NativeJsonRuntime.available()) {
+            assertNull(encoded);
+            continue;
+          }
           assertNotNull(encoded);
           var binding = encoded.udfBinding();
           long[] constants = encoded.longs();

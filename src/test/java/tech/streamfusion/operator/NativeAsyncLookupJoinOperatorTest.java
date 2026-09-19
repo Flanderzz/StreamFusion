@@ -21,9 +21,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.apache.arrow.vector.VectorSchemaRoot;
-import org.apache.flink.api.common.functions.OpenContext;
 import org.apache.flink.streaming.api.functions.async.ResultFuture;
-import org.apache.flink.streaming.api.functions.async.RichAsyncFunction;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.streaming.util.OneInputStreamOperatorTestHarness;
 import org.apache.flink.table.data.GenericRowData;
@@ -32,6 +30,7 @@ import org.apache.flink.table.types.logical.BigIntType;
 import org.apache.flink.table.types.logical.RowType;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import tech.streamfusion.compat.RichAsyncFunction;
 
 @Timeout(10)
 class NativeAsyncLookupJoinOperatorTest {
@@ -250,7 +249,7 @@ class NativeAsyncLookupJoinOperatorTest {
     IOException invokeFailure;
 
     @Override
-    public void open(OpenContext context) throws Exception {
+    protected void initialize() throws Exception {
       opens++;
       if (openFailure != null) throw openFailure;
     }

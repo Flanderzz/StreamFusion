@@ -1,6 +1,7 @@
 package tech.streamfusion;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -290,7 +291,8 @@ class FlinkVariableTopNSqlHarnessTest {
     for (int i = 0; i < 210; i++) rows.add(Row.ofKind(RowKind.INSERT, 200L, 1000L + i, 100L + i));
     for (int i = 0; i < 20; i++) rows.add(Row.ofKind(RowKind.DELETE, 200L, 1000L + i, 100L + i));
     var source =
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(new String[] {"k", "v", "id"}, Types.LONG, Types.LONG, Types.LONG),
             rows.toArray(Row[]::new));
     table.createTemporaryView(
@@ -343,7 +345,8 @@ class FlinkVariableTopNSqlHarnessTest {
     }
     if (nullable) rows.add(Row.of(null, 1L, id));
     var source =
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(new String[] {"k", "v", "id"}, Types.LONG, Types.LONG, Types.LONG),
             rows.toArray(Row[]::new));
     table.createTemporaryView(

@@ -2,6 +2,7 @@ package tech.streamfusion;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
@@ -44,6 +45,10 @@ class FlinkIfSqlHarnessTest {
         "IF(flag, IF(i > 0, s, other), IF(i IS NULL, 'missing', s))"
       })
   void resolvedValuesAndTypesMatchFlink(String expression) throws Exception {
+    org.junit.jupiter.api.Assumptions.assumeTrue(
+        tech.streamfusion.compat.FlinkTestCapabilities.NEGATIVE_TIMESTAMP_TO_TIME
+            || !expression.contains("AS TIME)"),
+        "Flink 1.18 external TIME conversion rejects a negative pre-epoch fraction");
     NativeParity.assertParity(
         FlinkIfSqlHarnessTest::environment, "SELECT id, " + expression + " FROM src");
   }
@@ -151,7 +156,8 @@ class FlinkIfSqlHarnessTest {
     var timestamp = LocalDateTime.of(1969, 12, 31, 23, 59, 59, 999999999);
     table.createTemporaryView(
         "src",
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(
                 new String[] {"id", "flag", "i", "n", "d", "s", "other", "t", "bytes"},
                 Types.INT,

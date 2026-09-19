@@ -2,6 +2,7 @@ package tech.streamfusion;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -82,7 +83,8 @@ class FlinkFirstNSqlHarnessTest {
     }
     table.createTemporaryView(
         "src",
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(new String[] {"k", "v"}, Types.LONG, Types.LONG),
             Row.of(1L, 30L),
             Row.of(null, 90L),

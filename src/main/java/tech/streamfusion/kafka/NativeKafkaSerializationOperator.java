@@ -1,21 +1,21 @@
 package tech.streamfusion.kafka;
 
-import tech.streamfusion.format.EncodeFormat;
-import tech.streamfusion.operator.ArrowBatch;
-import tech.streamfusion.operator.NativeAllocator;
 import org.apache.arrow.c.ArrowArray;
 import org.apache.arrow.c.ArrowSchema;
 import org.apache.arrow.c.Data;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.flink.metrics.Counter;
-import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
+import tech.streamfusion.compat.FlinkStreamOperator;
+import tech.streamfusion.format.EncodeFormat;
+import tech.streamfusion.operator.ArrowBatch;
+import tech.streamfusion.operator.NativeAllocator;
 
 /** Encodes each input Arrow batch once and emits the final Kafka value bytes for its rows. */
 public final class NativeKafkaSerializationOperator
-    extends AbstractStreamOperator<PreSerializedKafkaRecord>
+    extends FlinkStreamOperator<PreSerializedKafkaRecord>
     implements OneInputStreamOperator<ArrowBatch, PreSerializedKafkaRecord> {
 
   private final EncodeFormat valueFormat;

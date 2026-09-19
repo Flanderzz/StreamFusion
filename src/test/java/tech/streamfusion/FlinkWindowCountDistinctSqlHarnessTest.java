@@ -194,6 +194,7 @@ class FlinkWindowCountDistinctSqlHarnessTest {
 
   @Test
   void sessionWindowsMergeDistinctValues() throws Exception {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireSessionTableFunction();
     String sql =
         "SELECT k, window_start, window_end, COUNT(DISTINCT s), COUNT(DISTINCT t) "
             + "FROM TABLE(SESSION(TABLE src PARTITION BY k, DESCRIPTOR(rt), INTERVAL '2' SECOND)) "

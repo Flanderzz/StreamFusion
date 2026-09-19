@@ -2,15 +2,20 @@
 <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
     <parent><groupId>tech.streamfusion</groupId><artifactId>StreamFusion</artifactId><version>${revision}</version></parent>
-    <artifactId>streamfusion-csv</artifactId>
+    <artifactId>streamfusion-csv${streamfusion.artifact.suffix}</artifactId>
     <name>StreamFusion CSV</name>
     <properties>
         <native.cargo.packages>-p streamfusion-csv</native.cargo.packages>
         <native.library>streamfusion_csv</native.library>
         <native.resource.path>tech/streamfusion/native/csv</native.resource.path>
     </properties>
-    <dependencies><dependency><groupId>tech.streamfusion</groupId><artifactId>streamfusion-core</artifactId><version>${project.version}</version><scope>provided</scope></dependency></dependencies>
+    <dependencies><dependency><groupId>tech.streamfusion</groupId><artifactId>streamfusion-core${streamfusion.artifact.suffix}</artifactId><version>${project.version}</version><scope>provided</scope></dependency></dependencies>
     <build><sourceDirectory>${project.basedir}/../src/main/java</sourceDirectory><resources combine.self="override"><resource><directory>${project.basedir}/src/main/resources</directory></resource></resources><plugins>
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>flatten-maven-plugin</artifactId>
+                <configuration><flattenMode>ossrh</flattenMode></configuration>
+            </plugin>
             <plugin>
                 <groupId>org.codehaus.mojo</groupId>
                 <artifactId>exec-maven-plugin</artifactId>

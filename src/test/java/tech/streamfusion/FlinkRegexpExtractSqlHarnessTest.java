@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import java.util.function.Supplier;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.datastream.DataStream;
@@ -50,7 +52,8 @@ class FlinkRegexpExtractSqlHarnessTest {
       env.setParallelism(1);
       StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
       DataStream<Row> bid =
-          env.fromData(
+          fromData(
+              env,
               Types.ROW_NAMED(new String[] {"channel", "url"}, Types.STRING, Types.STRING),
               Row.of("Apple", "https://site/x?channel_id=apple_1&foo=1"),
               Row.of("Google", "https://site/y?a=1&channel_id=goog_2"),

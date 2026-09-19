@@ -3,6 +3,7 @@ package tech.streamfusion;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
 
 import java.util.List;
 import java.util.stream.IntStream;
@@ -35,11 +36,41 @@ class FlinkIntegerStringCastSqlHarnessTest {
   @ParameterizedTest
   @ValueSource(strings = {"TINYINT", "SMALLINT", "INT", "BIGINT"})
   void tryCastAndLegacyHandleBoundariesMalformedTextAndNulls(String type) throws Exception {
-    String[] values = {"-128", "127", "128", "-129", "-32768", "32767", "32768", "-32769",
-      "-2147483648.9", "2147483647.9", "2147483648", "-2147483649",
-      "-9223372036854775808.9", "9223372036854775807.9", "9223372036854775808", "-9223372036854775809",
-      "", " ", "+", "-", "1e2", "1.2.3", "1.2x", "\t1", "1\n", "\u00a01", "1\u2003",
-      "\u0661", "\uff11", "1\u0000", " 42 ", "1 2", null};
+    String[] values = {
+      "-128",
+      "127",
+      "128",
+      "-129",
+      "-32768",
+      "32767",
+      "32768",
+      "-32769",
+      "-2147483648.9",
+      "2147483647.9",
+      "2147483648",
+      "-2147483649",
+      "-9223372036854775808.9",
+      "9223372036854775807.9",
+      "9223372036854775808",
+      "-9223372036854775809",
+      "",
+      " ",
+      "+",
+      "-",
+      "1e2",
+      "1.2.3",
+      "1.2x",
+      "\t1",
+      "1\n",
+      "\u00a01",
+      "1\u2003",
+      "\u0661",
+      "\uff11",
+      "1\u0000",
+      " 42 ",
+      "1 2",
+      null
+    };
     NativeParity.assertParity(() -> input(false, DataTypes.STRING(), values),
         "SELECT id, TRY_CAST(s AS " + type + ") FROM src");
     NativeParity.assertParity(() -> input(true, DataTypes.STRING(), values),
@@ -68,7 +99,8 @@ class FlinkIntegerStringCastSqlHarnessTest {
 
   @Test
   void nonNullableInputAndCaseRetainHostBehavior() throws Exception {
-    NativeParity.assertParity(() -> input(false, DataTypes.VARCHAR(12).notNull(), "1", "-2147483648"),
+    NativeParity.assertParity(
+        () -> input(false, DataTypes.VARCHAR(12).notNull(), "1", "-2147483648"),
         "SELECT id, CAST(s AS INT), CAST(CAST(s AS INT) AS STRING) FROM src");
     NativeParity.assertParity(() -> input(false, DataTypes.STRING(), "skip", "42", null),
         "SELECT id, CASE WHEN s = 'skip' THEN 0 ELSE CAST(s AS INT) END FROM src");
@@ -78,7 +110,8 @@ class FlinkIntegerStringCastSqlHarnessTest {
 
   @Test
   void fallibleConjunctionsKeepHostShortCircuiting() throws Exception {
-    for (String predicate : List.of("s = 'skip' OR CAST(s AS INT) > 0", "s <> 'skip' AND CAST(s AS INT) > 0")) {
+    for (String predicate :
+        List.of("s = 'skip' OR CAST(s AS INT) > 0", "s <> 'skip' AND CAST(s AS INT) > 0")) {
       NativeParity.assertFallbackReasonContains(
           () -> input(false, DataTypes.STRING(), "skip", "42", "-1"),
           "SELECT id, " + predicate + " FROM src", "short-circuit");
@@ -103,7 +136,10 @@ class FlinkIntegerStringCastSqlHarnessTest {
     for (String enforcement : List.of("ERROR", "DROP")) {
       for (boolean nativeRun : new boolean[] {false, true}) {
         TableEnvironment table = input(true, DataTypes.STRING().notNull(), "invalid");
-        table.getConfig().getConfiguration().setString("table.exec.sink.not-null-enforcer", enforcement);
+        table
+            .getConfig()
+            .getConfiguration()
+            .setString("table.exec.sink.not-null-enforcer", enforcement);
         var scan = nativeRun ? NativePlanner.install(table) : null;
         if (enforcement.equals("ERROR")) {
           assertThrows(Exception.class, () -> collect(table, "SELECT CAST(s AS INT) FROM src"));
@@ -127,12 +163,20 @@ class FlinkIntegerStringCastSqlHarnessTest {
     var env = StreamExecutionEnvironment.getExecutionEnvironment();
     env.setParallelism(1);
     var table = StreamTableEnvironment.create(env);
-    table.getConfig().getConfiguration().setString("table.exec.legacy-cast-behaviour", legacy ? "ENABLED" : "DISABLED");
-    table.createTemporaryView("nums", env.fromData(
-        Types.ROW_NAMED(new String[] {"b", "s", "i", "l"}, Types.BYTE, Types.SHORT, Types.INT, Types.LONG),
-        Row.of(Byte.MIN_VALUE, Short.MIN_VALUE, Integer.MIN_VALUE, Long.MIN_VALUE),
-        Row.of(Byte.MAX_VALUE, Short.MAX_VALUE, Integer.MAX_VALUE, Long.MAX_VALUE),
-        Row.of((byte) 0, (short) 0, 0, 0L), Row.of(null, null, null, null)));
+    table
+        .getConfig()
+        .getConfiguration()
+        .setString("table.exec.legacy-cast-behaviour", legacy ? "ENABLED" : "DISABLED");
+    table.createTemporaryView(
+        "nums",
+        fromData(
+            env,
+            Types.ROW_NAMED(
+                new String[] {"b", "s", "i", "l"}, Types.BYTE, Types.SHORT, Types.INT, Types.LONG),
+            Row.of(Byte.MIN_VALUE, Short.MIN_VALUE, Integer.MIN_VALUE, Long.MIN_VALUE),
+            Row.of(Byte.MAX_VALUE, Short.MAX_VALUE, Integer.MAX_VALUE, Long.MAX_VALUE),
+            Row.of((byte) 0, (short) 0, 0, 0L),
+            Row.of(null, null, null, null)));
     return table;
   }
 
@@ -140,10 +184,14 @@ class FlinkIntegerStringCastSqlHarnessTest {
     var env = StreamExecutionEnvironment.getExecutionEnvironment();
     env.setParallelism(1);
     var table = StreamTableEnvironment.create(env);
-    table.getConfig().getConfiguration().setString("table.exec.legacy-cast-behaviour", legacy ? "ENABLED" : "DISABLED");
+    table
+        .getConfig()
+        .getConfiguration()
+        .setString("table.exec.legacy-cast-behaviour", legacy ? "ENABLED" : "DISABLED");
     Row[] rows = IntStream.range(0, values.length).mapToObj(i -> Row.of(i, values[i])).toArray(Row[]::new);
-    table.createTemporaryView("src", env.fromData(
-        Types.ROW_NAMED(new String[] {"id", "s"}, Types.INT, Types.STRING), rows),
+    table.createTemporaryView(
+        "src",
+        fromData(env, Types.ROW_NAMED(new String[] {"id", "s"}, Types.INT, Types.STRING), rows),
         Schema.newBuilder().column("id", DataTypes.INT().notNull()).column("s", type).build());
     return table;
   }

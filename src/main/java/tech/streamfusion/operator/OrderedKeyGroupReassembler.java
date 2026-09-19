@@ -21,10 +21,10 @@ import org.apache.flink.runtime.state.KeyGroupRangeAssignment;
 import org.apache.flink.runtime.state.StateInitializationContext;
 import org.apache.flink.runtime.state.StateSnapshotContext;
 import org.apache.flink.streaming.api.operators.BoundedOneInput;
-import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
+import tech.streamfusion.compat.FlinkStreamOperator;
 
 /**
  * Reconstructs destination-local parent batches after the unaligned-safe shuffle emits one record
@@ -32,14 +32,15 @@ import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
  * independently processable because some siblings may already live in downstream operator state;
  * the new producer attempt gets a fresh epoch and resumes ordered parent reassembly.
  */
-public final class OrderedKeyGroupReassembler extends AbstractStreamOperator<ArrowBatch>
+public final class OrderedKeyGroupReassembler extends FlinkStreamOperator<ArrowBatch>
     implements OneInputStreamOperator<ArrowBatch, ArrowBatch>, BoundedOneInput {
 
   private static final ListStateDescriptor<byte[]> STATE =
       new ListStateDescriptor<>(
           "streamfusion-ordered-key-group-fragments", BytePrimitiveArraySerializer.INSTANCE);
   private static final ListStateDescriptor<Long> WATERMARK_STATE =
-      new ListStateDescriptor<>("streamfusion-ordered-key-group-watermark", LongSerializer.INSTANCE);
+      new ListStateDescriptor<>(
+          "streamfusion-ordered-key-group-watermark", LongSerializer.INSTANCE);
   private static final ListStateDescriptor<byte[]> EPOCH_STATE =
       new ListStateDescriptor<>(
           "streamfusion-ordered-key-group-epochs", BytePrimitiveArraySerializer.INSTANCE);
@@ -157,8 +158,10 @@ public final class OrderedKeyGroupReassembler extends AbstractStreamOperator<Arr
 
   private boolean owns(int keyGroup) {
     return KeyGroupRangeAssignment.computeOperatorIndexForKeyGroup(
-            maxParallelism, getRuntimeContext().getTaskInfo().getNumberOfParallelSubtasks(), keyGroup)
-        == getRuntimeContext().getTaskInfo().getIndexOfThisSubtask();
+            maxParallelism,
+            tech.streamfusion.compat.RuntimeCompat.parallelism(getRuntimeContext()),
+            keyGroup)
+        == tech.streamfusion.compat.RuntimeCompat.subtask(getRuntimeContext());
   }
 
   private int expectedFragments(int[] keyGroups) {

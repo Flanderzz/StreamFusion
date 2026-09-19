@@ -3,7 +3,7 @@ package tech.streamfusion.operator;
 import java.util.function.Supplier;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.core.JsonFactory;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.core.util.BufferRecycler;
-import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.core.util.JsonRecyclerPools;
+import tech.streamfusion.compat.JsonRuntimeCompat;
 
 /**
  * Jackson input-buffer state shared with Flink's SQL/JSON parser on the task thread. Flink's
@@ -63,11 +63,7 @@ public final class NativeJsonRuntime {
   }
 
   private static boolean verifiedFactory(JsonFactory factory) {
-    var version = factory.version();
-    return version.getMajorVersion() == 2
-        && version.getMinorVersion() == 18
-        && version.getPatchLevel() == 2
-        && factory._getRecyclerPool() instanceof JsonRecyclerPools.ThreadLocalPool;
+    return JsonRuntimeCompat.verifiedFactory(factory);
   }
 
   public int bufferSize() {
@@ -80,6 +76,6 @@ public final class NativeJsonRuntime {
     recycler.releaseCharBuffer(
         BufferRecycler.CHAR_TOKEN_BUFFER,
         requiredSize > buffer.length ? new char[requiredSize] : buffer);
-    recycler.releaseToPool();
+    JsonRuntimeCompat.releaseToPool(recycler);
   }
 }

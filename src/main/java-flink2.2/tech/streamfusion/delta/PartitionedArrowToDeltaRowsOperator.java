@@ -3,16 +3,15 @@ package tech.streamfusion.delta;
 import io.delta.flink.sink.Conversions;
 import io.delta.kernel.types.StructType;
 import org.apache.arrow.vector.VectorSchemaRoot;
-import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.types.logical.RowType;
+import tech.streamfusion.compat.FlinkStreamOperator;
 import tech.streamfusion.operator.PartitionedArrowBatch;
 
 /** Converts partition-routed Arrow batches into retained Delta row views. */
-public final class PartitionedArrowToDeltaRowsOperator
-    extends AbstractStreamOperator<RowData>
+public final class PartitionedArrowToDeltaRowsOperator extends FlinkStreamOperator<RowData>
     implements OneInputStreamOperator<PartitionedArrowBatch, RowData> {
   private final RowType rowType;
   private transient StructType deltaSchema;

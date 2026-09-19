@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
@@ -82,7 +84,8 @@ class FlinkTimestampExtractSqlHarnessTest {
     withNull[rows.length] = Row.of("null", (LocalDateTime) null, (Instant) null);
     tables.createTemporaryView(
         "timestamps",
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(
                 new String[] {"id", "ts", "ltz"},
                 Types.STRING,

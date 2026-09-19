@@ -1,21 +1,21 @@
 package tech.streamfusion.planner;
 
-import tech.streamfusion.operator.RowDataArrowConverter;
 import java.util.Map;
 import java.util.Optional;
-import org.apache.calcite.rel.core.Exchange;
 import org.apache.calcite.rel.RelNode;
+import org.apache.calcite.rel.core.Exchange;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.rex.RexUtil;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
-import org.apache.flink.table.planner.hint.StateTtlHint;
 import org.apache.flink.table.planner.plan.nodes.exec.spec.JoinSpec;
 import org.apache.flink.table.planner.plan.nodes.physical.common.CommonPhysicalJoin;
-import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalJoin;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalGroupAggregateBase;
+import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalJoin;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalRel;
 import org.apache.flink.table.planner.plan.utils.ChangelogPlanUtils;
 import org.apache.flink.table.runtime.operators.join.FlinkJoinType;
+import tech.streamfusion.compat.FlinkCompat;
+import tech.streamfusion.operator.RowDataArrowConverter;
 
 /**
  * Recognizes the regular (non-windowed) equi-joins the native updating join implements:
@@ -189,7 +189,7 @@ final class RegularJoinMatcher {
     // A STATE_TTL hint sets each side's retention independently (0 = left, 1 = right —
     // Flink's FlinkHints.LEFT_INPUT convention), overriding the job-wide retention for that
     // side alone; -1 means no hint, resolved at translate time.
-    Map<Integer, Long> hintTtls = StateTtlHint.getStateTtlFromHintOnBiRel(join.getHints());
+    Map<Integer, Long> hintTtls = FlinkCompat.joinStateTtl(join.getHints());
     // Columnar (Arrow in/out); keep each side's keyed shuffle columnar where it sits on a
     // columnar producer, else the transition pass transposes at the boundary.
     return new StreamPhysicalNativeColumnarUpdatingJoin(

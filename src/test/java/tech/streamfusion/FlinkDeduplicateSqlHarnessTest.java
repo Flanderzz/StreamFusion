@@ -2,9 +2,8 @@ package tech.streamfusion;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
 
-import tech.streamfusion.planner.NativePlanner;
-import tech.streamfusion.planner.PhysicalPlanScan;
 import java.time.Duration;
 import java.util.List;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
@@ -17,6 +16,8 @@ import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.apache.flink.types.Row;
 import org.junit.jupiter.api.Test;
+import tech.streamfusion.planner.NativePlanner;
+import tech.streamfusion.planner.PhysicalPlanScan;
 
 /**
  * Row-time deduplication: per key the native operator keeps either the minimum-rowtime row
@@ -26,12 +27,12 @@ import org.junit.jupiter.api.Test;
 class FlinkDeduplicateSqlHarnessTest {
 
   private static final String KEEP_FIRST =
-      "SELECT k, v, rt FROM ("
-          + "SELECT *, ROW_NUMBER() OVER (PARTITION BY k ORDER BY rt ASC) AS rn FROM src) WHERE rn = 1";
+      "SELECT k, v, rt FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY k ORDER BY rt ASC) AS rn"
+          + " FROM src) WHERE rn = 1";
 
   private static final String KEEP_LAST =
-      "SELECT k, v, rt FROM ("
-          + "SELECT *, ROW_NUMBER() OVER (PARTITION BY k ORDER BY rt DESC) AS rn FROM src) WHERE rn = 1";
+      "SELECT k, v, rt FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY k ORDER BY rt DESC) AS rn"
+          + " FROM src) WHERE rn = 1";
 
   @Test
   void keepFirstDeduplicationMatchesHost() throws Exception {
@@ -49,12 +50,12 @@ class FlinkDeduplicateSqlHarnessTest {
   // Proctime dedup orders by arrival (no rowtime). Only k,v are projected (the PROCTIME() column is
   // wall-clock, hence non-deterministic) so the comparison is deterministic at parallelism 1.
   private static final String KEEP_FIRST_PROCTIME =
-      "SELECT k, v FROM ("
-          + "SELECT *, ROW_NUMBER() OVER (PARTITION BY k ORDER BY pt ASC) AS rn FROM src) WHERE rn = 1";
+      "SELECT k, v FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY k ORDER BY pt ASC) AS rn FROM"
+          + " src) WHERE rn = 1";
 
   private static final String KEEP_LAST_PROCTIME =
-      "SELECT k, v FROM ("
-          + "SELECT *, ROW_NUMBER() OVER (PARTITION BY k ORDER BY pt DESC) AS rn FROM src) WHERE rn = 1";
+      "SELECT k, v FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY k ORDER BY pt DESC) AS rn FROM"
+          + " src) WHERE rn = 1";
 
   @Test
   void keepFirstProctimeDeduplicationMatchesHost() throws Exception {
@@ -83,7 +84,8 @@ class FlinkDeduplicateSqlHarnessTest {
     // (Flink's heap-state aliasing) — so it emits an identical -U/+U pair even with TTL off.
     // With TTL on the suppression is disabled and both duplicates emit.
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(new String[] {"k", "v"}, Types.LONG, Types.LONG),
             Row.of(1L, 30L),
             Row.of(2L, 50L),
@@ -345,7 +347,8 @@ class FlinkDeduplicateSqlHarnessTest {
     env.setParallelism(1);
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+                env,
                 Types.ROW_NAMED(new String[] {"k", "v", "ts"}, Types.LONG, Types.LONG, Types.LONG),
                 Row.of(1L, 10L, 300L),
                 Row.of(2L, 7L, 500L),
@@ -381,7 +384,8 @@ class FlinkDeduplicateSqlHarnessTest {
     env.setParallelism(1);
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+                env,
                 Types.ROW_NAMED(new String[] {"k", "v", "ts"}, Types.LONG, Types.LONG, Types.LONG),
                 Row.of(1L, 10L, 100L),
                 Row.of(2L, 7L, 500L),
@@ -416,7 +420,8 @@ class FlinkDeduplicateSqlHarnessTest {
     // Multiple rows per key, out of order, so "first by rowtime" is not "first to arrive": key 1's
     // minimum-rowtime row is (v=20, rt=0); key 2's is (v=40, rt=1000).
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+                env,
                 Types.ROW_NAMED(new String[] {"k", "v", "ts"}, Types.LONG, Types.LONG, Types.LONG),
                 Row.of(1L, 30L, 2000L),
                 Row.of(2L, 50L, 1500L),

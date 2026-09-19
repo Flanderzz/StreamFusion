@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.datastream.DataStream;
@@ -53,6 +55,9 @@ class FlinkOverAggregateSqlHarnessTest {
 
   @Test
   void rankAndDenseRankMatchHost() throws Exception {
+    org.junit.jupiter.api.Assumptions.assumeTrue(
+        tech.streamfusion.compat.FlinkTestCapabilities.RANK_OVER_AGGREGATE,
+        "Flink 1.18 fails to construct its OVER rank aggregate: null order-key array");
     // RANK and DENSE_RANK over (PARTITION BY k ORDER BY rt). Tied rowtimes would share a rank;
     // tie semantics are covered by the native test, here we verify routing + host parity.
     NativeParity.assertParity(
@@ -103,11 +108,13 @@ class FlinkOverAggregateSqlHarnessTest {
 
   @Test
   void boundedRowsFrameUnpartitionedMatchesHost() throws Exception {
-    // ROWS BETWEEN 2 PRECEDING over the whole stream: with globally distinct rowtimes the frame is the
+    // ROWS BETWEEN 2 PRECEDING over the whole stream: with globally distinct rowtimes the frame is
+    // the
     // current row and the two before it in rowtime order.
     NativeParity.assertParity(
         FlinkOverAggregateSqlHarnessTest::boundedEnvironment,
-        "SELECT v, SUM(v) OVER (ORDER BY rt ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) AS s FROM src");
+        "SELECT v, SUM(v) OVER (ORDER BY rt ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) AS s FROM"
+            + " src");
   }
 
   @Test
@@ -185,9 +192,9 @@ class FlinkOverAggregateSqlHarnessTest {
     env.setParallelism(1);
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     DataStream<Row> source =
-        env.fromData(
-                Types.ROW_NAMED(
-                    new String[] {"k", "v", "ts"}, Types.LONG, Types.LONG, Types.LONG),
+        fromData(
+                env,
+                Types.ROW_NAMED(new String[] {"k", "v", "ts"}, Types.LONG, Types.LONG, Types.LONG),
                 Row.of(1L, 10L, 1000L),
                 Row.of(2L, 20L, 1500L),
                 Row.of(1L, 30L, 2000L),
@@ -218,7 +225,8 @@ class FlinkOverAggregateSqlHarnessTest {
     env.setParallelism(1);
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+                env,
                 Types.ROW_NAMED(
                     new String[] {"k", "si", "ti", "fl", "ts"},
                     Types.LONG,
@@ -274,7 +282,8 @@ class FlinkOverAggregateSqlHarnessTest {
     env.setParallelism(1);
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(new String[] {"k", "v"}, Types.LONG, Types.LONG),
             Row.of(1L, 10L),
             Row.of(2L, 100L),
@@ -325,7 +334,8 @@ class FlinkOverAggregateSqlHarnessTest {
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     // Out-of-order within the bound so the running totals exercise rowtime ordering and ties.
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+                env,
                 Types.ROW_NAMED(
                     new String[] {"k", "v", "ts", "b"},
                     Types.LONG,

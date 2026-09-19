@@ -2,6 +2,7 @@ package tech.streamfusion;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -34,6 +35,17 @@ class FlinkJsonJvmSqlHarnessTest {
             + " ERROR)"
       })
   void dynamicPathsUseReleasedFlinkForSelectionAndErrors(String expression) throws Exception {
+    if (expression.startsWith("JSON_QUERY")
+        && !tech.streamfusion.compat.FlinkTestCapabilities.DYNAMIC_JSON_QUERY) {
+      NativeFailureParity.run(
+              FlinkJsonJvmSqlHarnessTest::dynamicPaths, "SELECT id, " + expression + " FROM inputs")
+          .assertFailure(
+              org.apache.flink.table.planner.codegen.CodeGenException.class,
+              "Unsupported call: JSON_QUERY",
+              NativeFailureParity.Phase.PLANNING,
+              NativeFailureParity.Route.FALLBACK);
+      return;
+    }
     NativeParity.assertParity(
         FlinkJsonJvmSqlHarnessTest::dynamicPaths, "SELECT id, " + expression + " FROM inputs");
   }
@@ -66,7 +78,8 @@ class FlinkJsonJvmSqlHarnessTest {
           env.setParallelism(1);
           var table = StreamTableEnvironment.create(env);
           var source =
-              env.fromData(
+              fromData(
+                  env,
                   List.of(
                       Row.ofKind(RowKind.INSERT, 1, "{\"n\":1}"),
                       Row.ofKind(RowKind.INSERT, 0, "invalid"),
@@ -100,7 +113,7 @@ class FlinkJsonJvmSqlHarnessTest {
   void planIdentifiesTheJvmEvaluatorInsideNativeCalc() {
     String plan =
         tech.streamfusion.planner.NativePlanner.explain(
-            dynamicPaths(), "SELECT JSON_QUERY(s, p) FROM inputs");
+            dynamicPaths(), "SELECT JSON_QUERY(s, '$.a[0:2]') FROM inputs");
     org.junit.jupiter.api.Assertions.assertTrue(plan.contains("NativeCalc"), plan);
     org.junit.jupiter.api.Assertions.assertTrue(plan.contains("jsonEvaluation=[JVM]"), plan);
   }
@@ -117,10 +130,18 @@ class FlinkJsonJvmSqlHarnessTest {
         "JSON_OBJECT('a' VALUE s)"
       })
   void verifiedFastPathsKeepTheirNativeEvaluator(String expression) throws Exception {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireJsonFunctions(expression);
     String sql = "SELECT " + expression + " FROM inputs";
     String plan = tech.streamfusion.planner.NativePlanner.explain(dynamicPaths(), sql);
     org.junit.jupiter.api.Assertions.assertTrue(plan.contains("NativeCalc"), plan);
-    org.junit.jupiter.api.Assertions.assertFalse(plan.contains("jsonEvaluation=[JVM]"), plan);
+    boolean parser =
+        expression.startsWith("JSON_VALUE")
+            || expression.startsWith("JSON_EXISTS")
+            || expression.contains("IS JSON");
+    assertEquals(
+        parser && !tech.streamfusion.operator.NativeJsonRuntime.available(),
+        plan.contains("jsonEvaluation=[JVM]"),
+        plan);
     NativeParity.assertParity(FlinkJsonJvmSqlHarnessTest::dynamicPaths, sql);
   }
 
@@ -128,7 +149,11 @@ class FlinkJsonJvmSqlHarnessTest {
   void simpleJsonPredicateKeepsTheNativeFilter() throws Exception {
     String sql = "SELECT id FROM inputs WHERE JSON_EXISTS(s, '$.a')";
     String plan = tech.streamfusion.planner.NativePlanner.explain(dynamicPaths(), sql);
-    org.junit.jupiter.api.Assertions.assertTrue(plan.contains("NativeFilter"), plan);
+    if (tech.streamfusion.operator.NativeJsonRuntime.available()) {
+      assertTrue(plan.contains("NativeFilter"), plan);
+    } else {
+      assertTrue(plan.contains("NativeCalc") && plan.contains("jsonEvaluation=[JVM]"), plan);
+    }
     NativeParity.assertParity(FlinkJsonJvmSqlHarnessTest::dynamicPaths, sql);
   }
 
@@ -141,7 +166,8 @@ class FlinkJsonJvmSqlHarnessTest {
           var table = StreamTableEnvironment.create(env);
           table.createTemporaryView(
               "inputs",
-              env.fromData(
+              fromData(
+                  env,
                   List.of(Row.of((Object) new String[] {"value", null})),
                   Types.ROW_NAMED(new String[] {"a"}, Types.OBJECT_ARRAY(Types.STRING))));
           return table;
@@ -264,7 +290,8 @@ class FlinkJsonJvmSqlHarnessTest {
     }
     table.createTemporaryView(
         "inputs",
-        env.fromData(
+        fromData(
+            env,
             rows,
             Types.ROW_NAMED(new String[] {"id", "s", "p"}, Types.INT, Types.STRING, Types.STRING)));
     return table;

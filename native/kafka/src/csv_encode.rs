@@ -54,6 +54,7 @@ pub(crate) struct CsvEncodeOptions {
     /// `write-bigdecimal-in-scientific-notation`: strip trailing zeros and use Java's
     /// `BigDecimal.toString()`; the default keeps the column scale as `toPlainString()`.
     pub(crate) scientific_decimal: bool,
+    pub(crate) legacy_decimal_nodes: bool,
 }
 
 impl Default for CsvEncodeOptions {
@@ -65,6 +66,7 @@ impl Default for CsvEncodeOptions {
             escape: None,
             null_literal: Vec::new(),
             scientific_decimal: false,
+            legacy_decimal_nodes: false,
         }
     }
 }
@@ -93,6 +95,7 @@ pub(crate) fn parse_csv_encode_options(encoded: &str) -> Result<CsvEncodeOptions
             "array-element-delimiter" => options.array_separator = single_byte()?,
             "escape-character" => options.escape = Some(single_byte()?),
             "null-literal" => options.null_literal = value.as_bytes().to_vec(),
+            "legacy-decimal-nodes" => options.legacy_decimal_nodes = value == "true",
             "write-bigdecimal-in-scientific-notation" => {
                 options.scientific_decimal = value == "true"
             }
@@ -196,6 +199,19 @@ fn render_element(
         scratch.extend_from_slice(&options.null_literal);
         return Ok(());
     }
+    if options.legacy_decimal_nodes {
+        if let DataType::Decimal128(_, scale) = values.data_type() {
+            // Container elements use JsonNode.asText(), independently of the CSV writer's
+            // plain/scientific number option.
+            encode_java_big_decimal(
+                values.as_primitive::<Decimal128Type>().value(index),
+                *scale,
+                false,
+                scratch,
+            );
+            return Ok(());
+        }
+    }
     render_csv_scalar(values, index, options, scratch).map(|_| ())
 }
 
@@ -257,13 +273,19 @@ fn render_csv_scalar(
             Ok(CsvScalar::Raw)
         }
         DataType::Decimal128(_, scale) => {
-            encode_java_big_decimal(
-                column.as_primitive::<Decimal128Type>().value(row),
-                *scale,
-                !options.scientific_decimal,
-                out,
-            );
-            Ok(CsvScalar::Raw)
+            let value = column.as_primitive::<Decimal128Type>().value(row);
+            if options.legacy_decimal_nodes {
+                crate::kafka::encode_legacy_decimal_node(
+                    value,
+                    *scale,
+                    !options.scientific_decimal,
+                    out,
+                );
+                Ok(CsvScalar::Text)
+            } else {
+                encode_java_big_decimal(value, *scale, !options.scientific_decimal, out);
+                Ok(CsvScalar::Raw)
+            }
         }
         DataType::Utf8 => {
             out.extend_from_slice(column.as_string::<i32>().value(row).as_bytes());

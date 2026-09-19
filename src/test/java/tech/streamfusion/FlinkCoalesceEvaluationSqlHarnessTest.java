@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import java.util.stream.Stream;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
@@ -67,7 +69,7 @@ class FlinkCoalesceEvaluationSqlHarnessTest {
     Row[] rows = new Row[count];
     for (int i = 0; i < count; i++) rows[i] = Row.of(i + 1);
     table.createTemporaryView(
-        "src", env.fromData(Types.ROW_NAMED(new String[] {"id"}, Types.INT), rows));
+        "src", fromData(env, Types.ROW_NAMED(new String[] {"id"}, Types.INT), rows));
     table.createTemporarySystemFunction("tick", new Tick());
     table.createTemporarySystemFunction("text_tick", new TextTick());
     table.createTemporarySystemFunction("null_tick", new NullTick());

@@ -1,7 +1,8 @@
 package tech.streamfusion;
 
-import tech.streamfusion.planner.NativePlanner;
-import tech.streamfusion.planner.PhysicalPlanScan;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
@@ -11,7 +12,8 @@ import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.apache.flink.types.Row;
 import org.junit.jupiter.api.Test;
-import static org.junit.jupiter.api.Assertions.assertEquals;
+import tech.streamfusion.planner.NativePlanner;
+import tech.streamfusion.planner.PhysicalPlanScan;
 
 /**
  * UNION ALL matches the host. A union is a pure stream merge — the native node carries no operator
@@ -96,7 +98,8 @@ class FlinkUnionSqlHarnessTest {
   private static void register(
       StreamTableEnvironment tEnv, StreamExecutionEnvironment env, String name) {
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(new String[] {"k", "v", "s"}, Types.LONG, Types.INT, Types.STRING),
             Row.of(1L, 10, "a"),
             Row.of(2L, 30, "b"),

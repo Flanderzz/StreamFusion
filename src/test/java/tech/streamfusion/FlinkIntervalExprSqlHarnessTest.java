@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import java.time.LocalDateTime;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.datastream.DataStream;
@@ -20,7 +22,8 @@ class FlinkIntervalExprSqlHarnessTest {
           env.setParallelism(1);
           StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
           DataStream<Row> source =
-              env.fromData(
+              fromData(
+                  env,
                   Types.ROW_NAMED(new String[] {"k"}, Types.LONG),
                   Row.of(1L),
                   Row.of(2L),
@@ -42,7 +45,8 @@ class FlinkIntervalExprSqlHarnessTest {
           env.setParallelism(1);
           StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
           DataStream<Row> source =
-              env.fromData(
+              fromData(
+                  env,
                   Types.ROW_NAMED(new String[] {"k"}, Types.LONG),
                   Row.of(1L),
                   Row.of(2L),
@@ -65,7 +69,8 @@ class FlinkIntervalExprSqlHarnessTest {
           env.setParallelism(1);
           StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
           DataStream<Row> source =
-              env.fromData(
+              fromData(
+                  env,
                   Types.ROW_NAMED(new String[] {"k"}, Types.LONG),
                   Row.of(1L),
                   Row.of(2L),
@@ -88,7 +93,8 @@ class FlinkIntervalExprSqlHarnessTest {
           env.setParallelism(1);
           StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
           DataStream<Row> source =
-              env.fromData(
+              fromData(
+                  env,
                   Types.ROW_NAMED(new String[] {"k"}, Types.LONG),
                   Row.of(1L),
                   Row.of(2L),
@@ -113,7 +119,8 @@ class FlinkIntervalExprSqlHarnessTest {
           env.setParallelism(1);
           StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
           DataStream<Row> source =
-              env.fromData(
+              fromData(
+                  env,
                   Types.ROW_NAMED(new String[] {"k"}, Types.LONG),
                   Row.of(1L),
                   Row.of(2L),
@@ -139,7 +146,8 @@ class FlinkIntervalExprSqlHarnessTest {
           env.setParallelism(1);
           StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
           DataStream<Row> source =
-              env.fromData(
+              fromData(
+                  env,
                   Types.ROW_NAMED(new String[] {"k"}, Types.LONG),
                   Row.of(1L),
                   Row.of(2L),
@@ -163,19 +171,35 @@ class FlinkIntervalExprSqlHarnessTest {
           env.setParallelism(1);
           StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
           DataStream<Row> left =
-              env.fromData(
+              fromData(
+                  env,
                   Types.ROW_NAMED(new String[] {"k", "v"}, Types.LONG, Types.LONG),
-                  Row.of(1L, 1L), Row.of(2L, 3L), Row.of(3L, 1L), Row.of(4L, null));
+                  Row.of(1L, 1L),
+                  Row.of(2L, 3L),
+                  Row.of(3L, 1L),
+                  Row.of(4L, null));
           DataStream<Row> right =
-              env.fromData(
+              fromData(
+                  env,
                   Types.ROW_NAMED(new String[] {"k", "v"}, Types.LONG, Types.LONG),
-                  Row.of(1L, 1L), Row.of(2L, 3L), Row.of(4L, null), Row.of(5L, 3L));
+                  Row.of(1L, 1L),
+                  Row.of(2L, 3L),
+                  Row.of(4L, null),
+                  Row.of(5L, 3L));
           tEnv.createTemporaryView(
-              "a", left,
-              Schema.newBuilder().column("k", DataTypes.BIGINT()).column("v", DataTypes.BIGINT()).build());
+              "a",
+              left,
+              Schema.newBuilder()
+                  .column("k", DataTypes.BIGINT())
+                  .column("v", DataTypes.BIGINT())
+                  .build());
           tEnv.createTemporaryView(
-              "b", right,
-              Schema.newBuilder().column("k", DataTypes.BIGINT()).column("v", DataTypes.BIGINT()).build());
+              "b",
+              right,
+              Schema.newBuilder()
+                  .column("k", DataTypes.BIGINT())
+                  .column("v", DataTypes.BIGINT())
+                  .build());
           return tEnv;
         },
         "SELECT l.k, l.d, r.k, r.d FROM "
@@ -195,19 +219,35 @@ class FlinkIntervalExprSqlHarnessTest {
           env.setParallelism(1);
           StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
           DataStream<Row> left =
-              env.fromData(
+              fromData(
+                  env,
                   Types.ROW_NAMED(new String[] {"k", "v"}, Types.LONG, Types.LONG),
-                  Row.of(1L, 1L), Row.of(2L, 3L), Row.of(3L, 1L), Row.of(4L, null));
+                  Row.of(1L, 1L),
+                  Row.of(2L, 3L),
+                  Row.of(3L, 1L),
+                  Row.of(4L, null));
           DataStream<Row> right =
-              env.fromData(
+              fromData(
+                  env,
                   Types.ROW_NAMED(new String[] {"k", "v"}, Types.LONG, Types.LONG),
-                  Row.of(1L, 1L), Row.of(2L, 3L), Row.of(4L, null), Row.of(5L, 3L));
+                  Row.of(1L, 1L),
+                  Row.of(2L, 3L),
+                  Row.of(4L, null),
+                  Row.of(5L, 3L));
           tEnv.createTemporaryView(
-              "a", left,
-              Schema.newBuilder().column("k", DataTypes.BIGINT()).column("v", DataTypes.BIGINT()).build());
+              "a",
+              left,
+              Schema.newBuilder()
+                  .column("k", DataTypes.BIGINT())
+                  .column("v", DataTypes.BIGINT())
+                  .build());
           tEnv.createTemporaryView(
-              "b", right,
-              Schema.newBuilder().column("k", DataTypes.BIGINT()).column("v", DataTypes.BIGINT()).build());
+              "b",
+              right,
+              Schema.newBuilder()
+                  .column("k", DataTypes.BIGINT())
+                  .column("v", DataTypes.BIGINT())
+                  .build());
           return tEnv;
         },
         "SELECT l.k, l.d, r.k, r.d FROM "
@@ -228,7 +268,8 @@ class FlinkIntervalExprSqlHarnessTest {
           env.setParallelism(1);
           StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
           DataStream<Row> source =
-              env.fromData(
+              fromData(
+                  env,
                   Types.ROW_NAMED(
                       new String[] {"k", "a", "b"},
                       Types.LONG,
@@ -274,7 +315,8 @@ class FlinkIntervalExprSqlHarnessTest {
           env.setParallelism(1);
           StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
           DataStream<Row> source =
-              env.fromData(
+              fromData(
+                  env,
                   Types.ROW_NAMED(new String[] {"k"}, Types.LONG),
                   Row.of(1L),
                   Row.of(2L),

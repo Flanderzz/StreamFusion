@@ -204,7 +204,9 @@ pub extern "system" fn Java_tech_streamfusion_Native_rocksdbGroupAggregatorSuppo
 }
 
 #[no_mangle]
-pub extern "system" fn Java_tech_streamfusion_Native_createRocksDBGroupAggregator<'local>(
+pub extern "system" fn Java_tech_streamfusion_Native_createRocksDBGroupAggregatorWithTtlEmission<
+    'local,
+>(
     env: JNIEnv<'local>,
     _class: JClass<'local>,
     aggregate_kinds: JIntArray<'local>,
@@ -231,6 +233,7 @@ pub extern "system" fn Java_tech_streamfusion_Native_createRocksDBGroupAggregato
     key_group_end: jint,
     aligned: jboolean,
     restored_partitions: JObjectArray<'local>,
+    emit_unchanged_with_ttl: jboolean,
 ) -> jlong {
     crate::bridge::jni_guard(env, move |mut env| {
         let kinds = read_int_array(&env, &aggregate_kinds);
@@ -276,7 +279,8 @@ pub extern "system" fn Java_tech_streamfusion_Native_createRocksDBGroupAggregato
             .with_count_columns(read_int_array(&env, &count_columns))
             .with_record_count_column(record_count_column as i64)
             .with_distinct_view_columns(read_int_array(&env, &distinct_view_columns))
-            .with_state_ttl(state_ttl_millis);
+            .with_state_ttl(state_ttl_millis)
+            .with_ttl_emission(emit_unchanged_with_ttl != 0);
             if mini_batch != 0 {
                 base = base.with_mini_batch();
             }

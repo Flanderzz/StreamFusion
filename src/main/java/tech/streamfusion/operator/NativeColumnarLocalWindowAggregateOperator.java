@@ -4,7 +4,6 @@ import org.apache.arrow.c.ArrowArray;
 import org.apache.arrow.c.ArrowSchema;
 import org.apache.arrow.c.Data;
 import org.apache.arrow.vector.VectorSchemaRoot;
-import org.apache.flink.api.common.TaskInfo;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import tech.streamfusion.Native;
@@ -106,10 +105,11 @@ public class NativeColumnarLocalWindowAggregateOperator extends NativeWindowOper
   @Override
   public void open() throws Exception {
     super.open();
-    TaskInfo task = getRuntimeContext().getTaskInfo();
+    var task = getRuntimeContext();
     setCurrentKey(
         ArrowBatchSubtaskKeySelector.stateKeysForSubtasks(
-            maxParallelism(), task.getNumberOfParallelSubtasks())[task.getIndexOfThisSubtask()]);
+            maxParallelism(), tech.streamfusion.compat.RuntimeCompat.parallelism(task))[
+            tech.streamfusion.compat.RuntimeCompat.subtask(task)]);
   }
 
   @Override

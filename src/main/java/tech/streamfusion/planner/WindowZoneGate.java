@@ -4,12 +4,12 @@ import java.time.Instant;
 import java.time.zone.ZoneRules;
 import org.apache.calcite.rel.RelNode;
 import org.apache.flink.table.planner.plan.logical.CumulativeWindowSpec;
-import org.apache.flink.table.planner.plan.logical.SessionWindowSpec;
 import org.apache.flink.table.planner.plan.logical.WindowSpec;
 import org.apache.flink.table.planner.plan.logical.WindowingStrategy;
 import org.apache.flink.table.planner.utils.ShortcutUtils;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.LogicalTypeRoot;
+import tech.streamfusion.compat.FlinkCompat;
 
 /**
  * Admission gate for windows over a TIMESTAMP_LTZ time attribute (event-time or proctime). Flink
@@ -31,7 +31,7 @@ final class WindowZoneGate {
     }
     ZoneRules rules = ShortcutUtils.unwrapTableConfig(node).getLocalTimeZone().getRules();
     WindowSpec spec = windowing.getWindow();
-    if (spec instanceof SessionWindowSpec) {
+    if (FlinkCompat.isSessionWindow(spec)) {
       return rules.isFixedOffset()
           ? null
           : "TIMESTAMP_LTZ session windows require a fixed offset for the full timestamp range";

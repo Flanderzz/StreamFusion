@@ -11,12 +11,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
-import org.apache.flink.api.common.functions.DefaultOpenContext;
 import org.apache.flink.api.common.functions.util.FunctionUtils;
-import org.apache.flink.streaming.api.functions.async.CollectionSupplier;
-import org.apache.flink.streaming.api.functions.async.ResultFuture;
 import org.apache.flink.streaming.api.functions.async.RichAsyncFunction;
-import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.table.data.RowData;
@@ -25,6 +21,8 @@ import org.apache.flink.table.runtime.typeutils.RowDataSerializer;
 import org.apache.flink.table.types.logical.RowType;
 import tech.streamfusion.arrow.ArrowConversion;
 import tech.streamfusion.arrow.ArrowReader;
+import tech.streamfusion.compat.FlinkLookupCompat;
+import tech.streamfusion.compat.FlinkStreamOperator;
 
 /**
  * Processing-time lookup join against an <b>async</b> connector, columnar in and out. The async
@@ -52,7 +50,7 @@ import tech.streamfusion.arrow.ArrowReader;
  * timeout and the runner's timeout callback. Results retain probe order, which also satisfies the
  * unordered mode's relaxed output contract.
  */
-public class NativeAsyncLookupJoinOperator extends AbstractStreamOperator<ArrowBatch>
+public class NativeAsyncLookupJoinOperator extends FlinkStreamOperator<ArrowBatch>
     implements OneInputStreamOperator<ArrowBatch, ArrowBatch> {
 
   private final RichAsyncFunction<RowData, RowData> runner;
@@ -89,7 +87,7 @@ public class NativeAsyncLookupJoinOperator extends AbstractStreamOperator<ArrowB
     FunctionUtils.setFunctionRuntimeContext(runner, getRuntimeContext());
     runnerNeedsClose = true;
     try {
-      FunctionUtils.openFunction(runner, DefaultOpenContext.INSTANCE);
+      FlinkLookupCompat.open(runner);
     } catch (Exception | Error failure) {
       try {
         closeRunner();
@@ -147,7 +145,7 @@ public class NativeAsyncLookupJoinOperator extends AbstractStreamOperator<ArrowB
               (rows, error) -> {
                 if (error != null) failure.completeExceptionally(error);
               });
-          runner.asyncInvoke(probe, adapt(result));
+          runner.asyncInvoke(probe, FlinkLookupCompat.resultFuture(result));
         }
         PendingLookup lookup = pending.getFirst();
         await(lookup, failure);
@@ -184,31 +182,11 @@ public class NativeAsyncLookupJoinOperator extends AbstractStreamOperator<ArrowB
     try {
       completion.get(Math.max(0, remaining), TimeUnit.NANOSECONDS);
     } catch (TimeoutException timeout) {
-      runner.timeout(lookup.probe(), adapt(lookup.result()));
+      runner.timeout(lookup.probe(), FlinkLookupCompat.resultFuture(lookup.result()));
       completion.get();
     }
   }
 
   private record PendingLookup(
       RowData probe, CompletableFuture<Collection<RowData>> result, long startedNanos) {}
-
-  /** The runner completes each row's joined results through Flink's {@link ResultFuture} shape. */
-  private static ResultFuture<RowData> adapt(CompletableFuture<Collection<RowData>> future) {
-    return new ResultFuture<>() {
-      @Override
-      public void complete(Collection<RowData> result) {
-        future.complete(result);
-      }
-
-      @Override
-      public void completeExceptionally(Throwable error) {
-        future.completeExceptionally(error);
-      }
-
-      @Override
-      public void complete(CollectionSupplier<RowData> supplier) {
-        throw new UnsupportedOperationException();
-      }
-    };
-  }
 }

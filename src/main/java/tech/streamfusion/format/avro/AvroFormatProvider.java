@@ -1,5 +1,7 @@
 package tech.streamfusion.format.avro;
 
+import java.util.Map;
+import org.apache.flink.table.types.logical.RowType;
 import tech.streamfusion.format.EncodeFormat;
 import tech.streamfusion.format.FormatCodes;
 import tech.streamfusion.format.NativeFormatContext;
@@ -7,9 +9,6 @@ import tech.streamfusion.format.NativeFormatOptions;
 import tech.streamfusion.format.NativeFormatProvider;
 import tech.streamfusion.format.NativeMessageDecoderFactory;
 import tech.streamfusion.format.NativeSchemaMessageDecoder;
-import java.util.Map;
-import org.apache.flink.formats.avro.typeutils.AvroSchemaConverter;
-import org.apache.flink.table.types.logical.RowType;
 
 /** Native provider for Flink's schema-embedded {@code avro} format. */
 public final class AvroFormatProvider implements NativeFormatProvider {
@@ -44,7 +43,8 @@ public final class AvroFormatProvider implements NativeFormatProvider {
 
   /** Flink's {@code avro.timestamp_mapping.legacy}, default true. */
   private static boolean legacyTimestampMapping(Map<String, String> options) {
-    return !"false".equalsIgnoreCase(NativeFormatOptions.option(options, "timestamp_mapping.legacy"));
+    return !"false"
+        .equalsIgnoreCase(NativeFormatOptions.option(options, "timestamp_mapping.legacy"));
   }
 
   @Override
@@ -70,11 +70,15 @@ public final class AvroFormatProvider implements NativeFormatProvider {
   public NativeMessageDecoderFactory createDecoder(NativeFormatContext context) {
     boolean legacy = legacyTimestampMapping(context.options());
     String writerSchema =
-        AvroSchemaConverter.convertToSchema(context.writerType().copy(false), legacy).toString();
+        tech.streamfusion.format.avro.compat.AvroCompat.schema(
+                context.writerType().copy(false), legacy)
+            .toString();
     String readerSchema =
         context.writerType().equals(context.outputType())
             ? ""
-            : AvroSchemaConverter.convertToSchema(context.outputType().copy(false), legacy).toString();
+            : tech.streamfusion.format.avro.compat.AvroCompat.schema(
+                    context.outputType().copy(false), legacy)
+                .toString();
     return () -> new Decoder(writerSchema, readerSchema);
   }
 

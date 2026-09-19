@@ -3638,6 +3638,36 @@ fn group_by_ttl_emits_the_unchanged_update_it_would_otherwise_suppress() {
     assert_eq!(values(&out, 1), vec![10, 10]);
 }
 
+#[test]
+fn group_by_mini_batch_ttl_emission_policy_preserves_refresh_and_expiry() {
+    for emit_unchanged in [false, true] {
+        let mut agg = GroupAggregator::new(vec![0], vec![0], vec![1], vec![0], true)
+            .with_mini_batch()
+            .with_state_ttl(1000)
+            .with_ttl_emission(emit_unchanged);
+        agg.update(&group_batch(vec![1], vec![10]), 5000).unwrap();
+        assert_eq!(row_kinds(&agg.flush_mini_batch().unwrap()), vec![0]);
+
+        agg.update(&group_batch(vec![1], vec![0]), 5900).unwrap();
+        let out = agg.flush_mini_batch().unwrap();
+        assert_eq!(
+            row_kinds(&out),
+            if emit_unchanged { vec![1, 2] } else { vec![] }
+        );
+
+        // A suppressed output still refreshes state, so the original expiry at 6000 is obsolete.
+        agg.update(&group_batch(vec![1], vec![5]), 6800).unwrap();
+        let out = agg.flush_mini_batch().unwrap();
+        assert_eq!(row_kinds(&out), vec![1, 2]);
+        assert_eq!(values(&out, 1), vec![10, 15]);
+
+        agg.update(&group_batch(vec![1], vec![7]), 7800).unwrap();
+        let out = agg.flush_mini_batch().unwrap();
+        assert_eq!(row_kinds(&out), vec![0]);
+        assert_eq!(values(&out, 1), vec![7]);
+    }
+}
+
 // TTL timestamps ride the snapshot as absolute millis: expiry after a restore is timed from the
 // original write, not from the restore.
 #[test]

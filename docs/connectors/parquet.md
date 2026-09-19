@@ -74,3 +74,11 @@ An explicitly selected INT64 nanosecond unit therefore still cannot represent da
 1677–2262; use microseconds for wide SQL dates when six fractional digits suffice. This physical
 format limit does not affect the lossless representation inside operators and checkpoints.
 The existing INT64/precision admission rules still apply.
+
+## Flink 1.18 file schema
+
+The development profile preserves the older host writer's declared map-key nullability. The native
+file encoder applies that property to the Arrow write schema and the Parquet descriptor together,
+so definition levels agree and keys survive readback. Operator batches retain their existing Arrow
+representation. The partitioned SQL sink parity check compares data, directories, success markers
+and complete footer schemas. See [Flink line compatibility](../flink-compatibility.md).

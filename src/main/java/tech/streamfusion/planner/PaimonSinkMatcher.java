@@ -78,7 +78,7 @@ final class PaimonSinkMatcher {
   }
 
   static Planned plan(StreamPhysicalSink sink) {
-    for (SinkAbilitySpec ability : sink.abilitySpecs()) {
+    for (SinkAbilitySpec ability : tech.streamfusion.compat.FlinkCompat.sinkAbilities(sink)) {
       if (ability instanceof OverwriteSpec) {
         return Planned.fallback("INSERT OVERWRITE is not supported");
       }
@@ -252,6 +252,7 @@ final class PaimonSinkMatcher {
     ResolvedCatalogBaseTable<?> resolvedTable = resolved.getResolvedTable();
     CatalogBaseTable origin = resolvedTable.getOrigin();
     Map<String, String> options = new HashMap<>(resolvedTable.getOptions());
+    options.putAll(org.apache.flink.table.planner.hint.FlinkHints.getHintedOptions(sink.hints()));
     options.putAll(PaimonDynamicOptions.forTable(sink, resolved.getIdentifier()));
     FileStoreTable table;
     if (origin instanceof DataCatalogTable) {

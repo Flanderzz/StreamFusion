@@ -2,6 +2,7 @@ package tech.streamfusion;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -37,7 +38,8 @@ class FlinkParquetSinkSmokeTest {
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
 
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(new String[] {"k", "v"}, Types.LONG, Types.INT),
             Row.of(1L, 10),
             Row.of(2L, 20),
@@ -74,20 +76,16 @@ class FlinkParquetSinkSmokeTest {
     String columns =
         "id BIGINT, details ROW<name STRING, scores ARRAY<INT>>, tags MAP<STRING, BIGINT>";
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(
                 new String[] {"id", "details", "tags"},
                 Types.LONG,
                 Types.ROW_NAMED(
-                    new String[] {"name", "scores"},
-                    Types.STRING,
-                    Types.OBJECT_ARRAY(Types.INT)),
+                    new String[] {"name", "scores"}, Types.STRING, Types.OBJECT_ARRAY(Types.INT)),
                 Types.MAP(Types.STRING, Types.LONG)),
             Row.of(1L, Row.of("first", new Integer[] {1, 2}), Map.of("x", 10L)),
-            Row.of(
-                2L,
-                Row.of(null, new Integer[] {3, null}),
-                Collections.singletonMap("y", null)));
+            Row.of(2L, Row.of(null, new Integer[] {3, null}), Collections.singletonMap("y", null)));
     tEnv.createTemporaryView(
         "nested_source",
         source,

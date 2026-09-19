@@ -1,19 +1,14 @@
 package tech.streamfusion.state;
 
-import static org.apache.flink.state.rocksdb.RocksDBConfigurableOptions.*;
-import static org.apache.flink.state.rocksdb.RocksDBOptions.OPTIONS_FACTORY;
-import static org.apache.flink.state.rocksdb.RocksDBOptions.PREDEFINED_OPTIONS;
+import static tech.streamfusion.compat.RocksDBOptionsCompat.*;
 
+import java.io.Serializable;
+import java.util.Locale;
+import java.util.stream.Collectors;
 import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.configuration.ReadableConfig;
-import org.rocksdb.CompactionStyle;
 import org.rocksdb.CompressionType;
-
-import java.io.Serializable;
-import java.util.List;
-import java.util.Locale;
-import java.util.stream.Collectors;
 
 /**
  * Flink's resolved public RocksDB options, serialized once at backend construction and handed to
@@ -71,7 +66,7 @@ public final class FlinkRocksDBOptions implements Serializable {
         profileValue(config, BLOCK_CACHE_SIZE, profile, MemorySize.parse("256mb")).getBytes();
 
     String compression =
-        config.get(COMPRESSION_PER_LEVEL).stream()
+        compressionPerLevel(config).stream()
             .map(CompressionType::name)
             .map(FlinkRocksDBOptions::quote)
             .collect(Collectors.joining(","));
@@ -96,12 +91,8 @@ public final class FlinkRocksDBOptions implements Serializable {
             + field("maxWriteBufferNumber", buffers)
             + field("minWriteBufferNumberToMerge", mergeBuffers)
             + field("writeBatchSize", config.get(WRITE_BATCH_SIZE).getBytes())
-            + field(
-                "compactionFilterQueryTimeAfterNumEntries",
-                config.get(COMPACT_FILTER_QUERY_TIME_AFTER_NUM_ENTRIES))
-            + field(
-                "periodicCompactionSeconds",
-                config.get(COMPACT_FILTER_PERIODIC_COMPACTION_TIME).getSeconds())
+            + field("compactionFilterQueryTimeAfterNumEntries", compactionQueryEntries(config))
+            + field("periodicCompactionSeconds", periodicCompactionSeconds(config))
             + field("blockSize", blockSize)
             + field("metadataBlockSize", config.get(METADATA_BLOCK_SIZE).getBytes())
             + field("blockCacheSize", cacheSize)

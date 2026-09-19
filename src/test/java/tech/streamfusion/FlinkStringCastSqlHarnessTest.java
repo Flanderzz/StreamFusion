@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import java.math.BigDecimal;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.datastream.DataStream;
@@ -30,9 +32,11 @@ class FlinkStringCastSqlHarnessTest {
           var table = StreamTableEnvironment.create(env);
           table.createTemporaryView(
               "inputs",
-              env.fromData(
+              fromData(
+                  env,
                   Types.ROW_NAMED(new String[] {"s"}, Types.STRING),
-                  Row.of("1234.567"), Row.of("9876.543")),
+                  Row.of("1234.567"),
+                  Row.of("9876.543")),
               Schema.newBuilder().column("s", DataTypes.CHAR(8).notNull()).build());
           return table;
         },
@@ -80,7 +84,8 @@ class FlinkStringCastSqlHarnessTest {
     env.setParallelism(1);
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(
                 new String[] {"l", "i", "sm", "ty", "d", "f", "dm", "sl", "si", "sd", "sdec"},
                 Types.LONG,

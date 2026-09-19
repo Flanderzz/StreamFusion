@@ -1,17 +1,10 @@
 package tech.streamfusion.kafka;
 
-import java.util.List;
-import java.util.Optional;
-import org.apache.flink.connector.kafka.lineage.DefaultKafkaDatasetFacet;
-import org.apache.flink.connector.kafka.lineage.DefaultKafkaDatasetIdentifier;
-import org.apache.flink.connector.kafka.lineage.KafkaDatasetFacet;
-import org.apache.flink.connector.kafka.lineage.KafkaDatasetFacetProvider;
-import org.apache.flink.connector.kafka.sink.KafkaRecordSerializationSchema;
 import org.apache.kafka.clients.producer.ProducerRecord;
 
 /** Hands native-serialized values to Flink's Kafka writer without another serialization pass. */
 public final class PreSerializedKafkaRecordSchema
-    implements KafkaRecordSerializationSchema<PreSerializedKafkaRecord>, KafkaDatasetFacetProvider {
+    extends tech.streamfusion.kafka.compat.KafkaRecordSchemaCompat {
 
   private final String topic;
 
@@ -26,8 +19,7 @@ public final class PreSerializedKafkaRecordSchema
   }
 
   @Override
-  public Optional<KafkaDatasetFacet> getKafkaDatasetFacet() {
-    return Optional.of(
-        new DefaultKafkaDatasetFacet(DefaultKafkaDatasetIdentifier.ofTopics(List.of(topic))));
+  protected String topic() {
+    return topic;
   }
 }

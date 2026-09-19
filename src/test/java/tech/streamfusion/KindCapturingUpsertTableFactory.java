@@ -5,12 +5,12 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Set;
 import org.apache.flink.configuration.ConfigOption;
-import org.apache.flink.streaming.api.functions.sink.legacy.RichSinkFunction;
 import org.apache.flink.table.connector.ChangelogMode;
 import org.apache.flink.table.connector.sink.DynamicTableSink;
-import org.apache.flink.table.connector.sink.legacy.SinkFunctionProvider;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.factories.DynamicTableSinkFactory;
+import tech.streamfusion.compat.RichSinkFunction;
+import tech.streamfusion.compat.SinkFunctionProvider;
 
 /**
  * An upsert sink over two BIGINT columns that records each arriving change as {@code "kind:k,v"}

@@ -83,3 +83,10 @@ instance.
 Timestamp conversion preserves the full millisecond range in the engine's two-part representation.
 Avro still follows Flink's millisecond wire semantics described above; switching the internal layout
 does not add fractional precision that the host Avro converter does not serialize.
+
+## Flink 1.18 availability
+
+The development profile uses the released 1.18 format's legacy timestamp mapping. Corrected
+timestamp mapping and the newer encoding option are absent from that host API. A descriptor
+requesting corrected mapping is declined. See
+[Flink line compatibility](../../flink-compatibility.md) for the validation status.

@@ -2,6 +2,7 @@ package tech.streamfusion;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -176,7 +177,8 @@ class FlinkLtzWindowBoundarySqlHarnessTest {
     if (includeNull) rows.add(Row.of(9, 1L, null));
     table.createTemporaryView(
         "src",
-        env.fromData(
+        fromData(
+                env,
                 rows,
                 Types.ROW_NAMED(
                     new String[] {"id", "k", "ts"}, Types.INT, Types.LONG, Types.INSTANT))

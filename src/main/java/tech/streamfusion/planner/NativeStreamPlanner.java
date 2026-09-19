@@ -24,6 +24,7 @@ final class NativeStreamPlanner extends StreamPlanner {
         context.getCatalogManager(),
         context.getClassLoader());
     scan = NativePlanner.install(context.getTableConfig());
+    scan.executionEnvironment(getExecEnv());
     scan.deferToCompletePlan();
   }
 

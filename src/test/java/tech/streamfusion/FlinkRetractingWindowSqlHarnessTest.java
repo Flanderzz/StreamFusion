@@ -2,6 +2,7 @@ package tech.streamfusion;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -34,7 +35,6 @@ import org.apache.flink.runtime.testutils.InMemoryReporter;
 import org.apache.flink.runtime.testutils.MiniClusterResource;
 import org.apache.flink.runtime.testutils.MiniClusterResourceConfiguration;
 import org.apache.flink.streaming.api.checkpoint.CheckpointedFunction;
-import org.apache.flink.streaming.api.functions.source.legacy.SourceFunction;
 import org.apache.flink.streaming.util.TestStreamEnvironment;
 import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.api.Schema;
@@ -46,9 +46,17 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import tech.streamfusion.compat.SourceFunction;
 import tech.streamfusion.planner.NativePlanner;
 
 class FlinkRetractingWindowSqlHarnessTest {
+  @org.junit.jupiter.api.BeforeEach
+  void requireHostRetractingWindow() {
+    org.junit.jupiter.api.Assumptions.assumeTrue(
+        tech.streamfusion.compat.FlinkTestCapabilities.RETRACTING_WINDOW_TVF,
+        "Flink 1.18 window table aggregates cannot consume update/delete changes");
+  }
+
   private static InMemoryReporter reporter;
   private static MiniClusterResource cluster;
   private static final Map<String, RecoveryProof> RECOVERY = new ConcurrentHashMap<>();
@@ -158,7 +166,8 @@ class FlinkRetractingWindowSqlHarnessTest {
       table.getConfig().setLocalTimeZone(ZoneOffset.UTC);
       table.getConfig().set("table.optimizer.agg-phase-strategy", phase);
       var source =
-          env.fromData(
+          fromData(
+                  env,
                   Types.ROW_NAMED(
                       new String[] {"k", "millis", "v", "wm"},
                       Types.INT,
@@ -837,7 +846,8 @@ class FlinkRetractingWindowSqlHarnessTest {
       table.getConfig().setLocalTimeZone(ZoneOffset.UTC);
       table.getConfig().set("table.optimizer.agg-phase-strategy", phase);
       var source =
-          env.fromData(
+          fromData(
+                  env,
                   Types.ROW_NAMED(
                       new String[] {"k", "millis", "f", "v"},
                       Types.INT,
@@ -977,7 +987,8 @@ class FlinkRetractingWindowSqlHarnessTest {
       table.getConfig().setLocalTimeZone(ZoneOffset.UTC);
       table.getConfig().set("table.optimizer.agg-phase-strategy", phase);
       var source =
-          env.fromData(
+          fromData(
+                  env,
                   Types.ROW_NAMED(
                       new String[] {"k", "millis", "v"}, Types.INT, Types.LONG, Types.BIG_DEC),
                   decimalRow(RowKind.INSERT, 1, max),
@@ -1184,7 +1195,8 @@ class FlinkRetractingWindowSqlHarnessTest {
     table.getConfig().setLocalTimeZone(ZoneOffset.UTC);
     table.getConfig().set("table.optimizer.agg-phase-strategy", phase);
     var source =
-        env.fromData(
+        fromData(
+                env,
                 Types.ROW_NAMED(
                     new String[] {"k", "millis", "v"}, Types.INT, Types.LONG, Types.LONG),
                 Row.of(1, 1000L, 10L),

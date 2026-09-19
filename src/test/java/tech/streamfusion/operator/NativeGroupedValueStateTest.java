@@ -15,7 +15,6 @@ import org.apache.flink.configuration.TaskManagerOptions;
 import org.apache.flink.runtime.checkpoint.OperatorSubtaskState;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.streaming.util.KeyedOneInputStreamOperatorTestHarness;
-import org.apache.flink.table.api.TableRuntimeException;
 import org.apache.flink.table.data.GenericRowData;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.types.logical.BigIntType;
@@ -150,7 +149,8 @@ class NativeGroupedValueStateTest {
           List.of(Arrays.asList(RowKind.DELETE, 1L, null), Arrays.asList(RowKind.INSERT, 1L, 7L)),
           drain(restored, output));
       assertThrows(
-          TableRuntimeException.class, () -> push(restored, allocator, row(RowKind.INSERT, null)));
+          tech.streamfusion.compat.TableErrors.exceptionType(),
+          () -> push(restored, allocator, row(RowKind.INSERT, null)));
     }
     try (var allocator = new RootAllocator();
         var restored = harness(rocks, 14, -1, 0)) {
@@ -158,7 +158,8 @@ class NativeGroupedValueStateTest {
       restored.initializeState(snapshot);
       restored.open();
       assertThrows(
-          TableRuntimeException.class, () -> push(restored, allocator, row(RowKind.INSERT, null)));
+          tech.streamfusion.compat.TableErrors.exceptionType(),
+          () -> push(restored, allocator, row(RowKind.INSERT, null)));
     }
   }
 

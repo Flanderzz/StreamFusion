@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.api.TableEnvironment;
@@ -23,12 +25,18 @@ class FlinkIntegerDivisionSqlHarnessTest {
     var env = StreamExecutionEnvironment.getExecutionEnvironment();
     env.setParallelism(1);
     var table = StreamTableEnvironment.create(env);
-    table.createTemporaryView("n", env.fromData(Types.ROW_NAMED(
-        new String[] {"i", "l", "j", "k"}, Types.INT, Types.LONG, Types.INT, Types.LONG),
-        Row.of(Integer.MIN_VALUE, Long.MIN_VALUE, -1, -1L),
-        Row.of(Integer.MAX_VALUE, Long.MAX_VALUE, -1, -1L),
-        Row.of(-7, -7L, 2, 2L), Row.of(7, 7L, -2, -2L),
-        Row.of(null, null, 0, 0L), Row.of(1, 1L, null, null)));
+    table.createTemporaryView(
+        "n",
+        fromData(
+            env,
+            Types.ROW_NAMED(
+                new String[] {"i", "l", "j", "k"}, Types.INT, Types.LONG, Types.INT, Types.LONG),
+            Row.of(Integer.MIN_VALUE, Long.MIN_VALUE, -1, -1L),
+            Row.of(Integer.MAX_VALUE, Long.MAX_VALUE, -1, -1L),
+            Row.of(-7, -7L, 2, 2L),
+            Row.of(7, 7L, -2, -2L),
+            Row.of(null, null, 0, 0L),
+            Row.of(1, 1L, null, null)));
     return table;
   }
 }

@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
@@ -82,7 +84,8 @@ class FlinkTimestampExtremaSqlHarnessTest {
     table.createTemporaryView(
         "src",
         table.fromChangelogStream(
-            env.fromData(
+            fromData(
+                env,
                 rows,
                 Types.ROW_NAMED(
                     new String[] {"k", "ts", "ltz"},
@@ -129,7 +132,8 @@ class FlinkTimestampExtremaSqlHarnessTest {
     }
     table.createTemporaryView(
         "src",
-        env.fromData(
+        fromData(
+            env,
             rows,
             Types.ROW_NAMED(
                 new String[] {"k", "ts", "ltz"}, Types.INT, Types.LOCAL_DATE_TIME, Types.INSTANT)),

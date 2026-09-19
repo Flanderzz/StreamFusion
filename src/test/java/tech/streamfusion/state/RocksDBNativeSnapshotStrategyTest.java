@@ -40,7 +40,9 @@ class RocksDBNativeSnapshotStrategyTest {
     failNativeSnapshot = false;
     IncrementalRemoteKeyedStateHandle next = snapshot(strategy, storage, 2);
     assertEquals(
-        "token", RocksDBNativeSnapshotStrategy.readMetaDocument(next.getMetaDataStateHandle()));
+        "token",
+        RocksDBNativeSnapshotStrategy.readMetaDocument(
+            tech.streamfusion.compat.StateCompat.metaHandle(next)));
     next.discardState();
     assertEquals(0, storage.files());
   }
@@ -85,6 +87,9 @@ class RocksDBNativeSnapshotStrategyTest {
 
   @Test
   void failedReuseNotificationCleansNewFilesWithoutDiscardingConfirmedState() throws Exception {
+    org.junit.jupiter.api.Assumptions.assumeTrue(
+        tech.streamfusion.compat.FlinkTestCapabilities.CHECKPOINT_REUSE_NOTIFICATION,
+        "Flink 1.18 has no checkpoint-storage reuse callback");
     RocksDBNativeSnapshotStrategy strategy = strategy();
     TrackingFactory confirmedStorage = new TrackingFactory(directory.resolve("confirmed"));
     IncrementalRemoteKeyedStateHandle confirmed = snapshot(strategy, confirmedStorage, 1);
@@ -251,7 +256,6 @@ class RocksDBNativeSnapshotStrategyTest {
       throw new UnsupportedOperationException();
     }
 
-    @Override
     public void reusePreviousStateHandle(Collection<? extends StreamStateHandle> handles) {
       if (failReuse) throw new IllegalStateException("reuse notification failed");
     }

@@ -3,7 +3,6 @@ package tech.streamfusion.operator;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import tech.streamfusion.planner.ColumnarKeyGroupPartitioner;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashSet;
@@ -12,18 +11,13 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.LockSupport;
 import org.apache.flink.api.common.functions.RichMapFunction;
-import org.apache.flink.api.common.serialization.SimpleStringEncoder;
 import org.apache.flink.api.common.state.CheckpointListener;
 import org.apache.flink.configuration.CheckpointingOptions;
 import org.apache.flink.configuration.Configuration;
-import org.apache.flink.configuration.ExternalizedCheckpointRetention;
 import org.apache.flink.configuration.RestartStrategyOptions;
-import org.apache.flink.configuration.StateRecoveryOptions;
-import org.apache.flink.connector.file.sink.FileSink;
 import org.apache.flink.runtime.checkpoint.metadata.CheckpointMetadata;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
-import org.apache.flink.streaming.api.functions.sink.filesystem.rollingpolicies.OnCheckpointRollingPolicy;
 import org.apache.flink.streaming.api.transformations.PartitionTransformation;
 import org.apache.flink.streaming.api.transformations.StreamExchangeMode;
 import org.apache.flink.table.data.GenericRowData;
@@ -34,8 +28,11 @@ import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.RowType;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import tech.streamfusion.planner.ColumnarKeyGroupPartitioner;
 
 class AlignedColumnarExchangeRecoveryTest {
+  private static final java.util.Map<String, org.apache.flink.runtime.jobgraph.OperatorID>
+      OPERATOR_IDS = new java.util.HashMap<>();
 
   private static final int ROWS = 12_000;
   private static final int MAX_PARALLELISM = 257;
@@ -61,8 +58,8 @@ class AlignedColumnarExchangeRecoveryTest {
         metadata.getOperatorStates().stream()
             .filter(
                 operator ->
-                    operator.getOperatorName().orElse("").contains("key-group-split")
-                        || operator.getOperatorName().orElse("").contains("arrow-to-row"))
+                    operator.getOperatorID().equals(OPERATOR_IDS.get("key-group-split"))
+                        || operator.getOperatorID().equals(OPERATOR_IDS.get("arrow-to-row")))
             .flatMap(operator -> operator.getStates().stream())
             .noneMatch(
                 state ->
@@ -125,8 +122,10 @@ class AlignedColumnarExchangeRecoveryTest {
         metadata.getOperatorStates().stream()
             .filter(
                 operator ->
-                    operator.getOperatorName().orElse("").contains("key-group-split")
-                        || operator.getOperatorName().orElse("").contains("key-group-reassemble"))
+                    operator.getOperatorID().equals(OPERATOR_IDS.get("key-group-split"))
+                        || operator
+                            .getOperatorID()
+                            .equals(OPERATOR_IDS.get("key-group-reassemble")))
             .flatMap(operator -> operator.getStates().stream())
             .anyMatch(
                 state ->
@@ -149,18 +148,17 @@ class AlignedColumnarExchangeRecoveryTest {
     configuration.set(RestartStrategyOptions.RESTART_STRATEGY, "disable");
     configuration.set(
         CheckpointingOptions.CHECKPOINTS_DIRECTORY, checkpoints.toUri().toString());
-    configuration.set(
-        CheckpointingOptions.EXTERNALIZED_CHECKPOINT_RETENTION,
-        ExternalizedCheckpointRetention.RETAIN_ON_CANCELLATION);
+    tech.streamfusion.compat.CheckpointTestConfig.retainOnCancellation(configuration);
     if (restoreFrom != null) {
-      configuration.set(StateRecoveryOptions.SAVEPOINT_PATH, restoreFrom.toUri().toString());
+      tech.streamfusion.compat.CheckpointTestConfig.restore(
+          configuration, restoreFrom.toUri().toString());
     }
     StreamExecutionEnvironment env =
         StreamExecutionEnvironment.getExecutionEnvironment(configuration);
     env.setParallelism(parallelism);
     env.setMaxParallelism(MAX_PARALLELISM);
     env.enableCheckpointing(50);
-    env.getCheckpointConfig().enableUnalignedCheckpoints();
+    tech.streamfusion.compat.CheckpointTestCapabilities.configure(env, recoverable);
 
     DataStream<RowData> rows =
         env.fromSequence(0, ROWS - 1)
@@ -215,18 +213,25 @@ class AlignedColumnarExchangeRecoveryTest {
             .uid("aligned-arrow-to-row")
             .setMaxParallelism(MAX_PARALLELISM);
 
-    FileSink<String> sink =
-        FileSink.forRowFormat(
-                new org.apache.flink.core.fs.Path(output.toUri()),
-                new SimpleStringEncoder<String>("UTF-8"))
-            .withRollingPolicy(OnCheckpointRollingPolicy.build())
-            .build();
-    restoredRows
-        .map(new SlowCheckpointFailingMap())
-        .uid("aligned-failing-map")
-        .sinkTo(sink)
-        .uid("aligned-file-sink");
-    env.execute("aligned-columnar-exchange-recovery");
+    tech.streamfusion.compat.CheckpointFileSink.attach(
+        restoredRows.map(new SlowCheckpointFailingMap()).uid("aligned-failing-map"),
+        output,
+        "aligned-file-sink");
+    var graph = env.getStreamGraph();
+    var hashes =
+        new org.apache.flink.streaming.api.graph.StreamGraphHasherV2()
+            .traverseStreamGraphAndGenerateHashes(graph);
+    OPERATOR_IDS.clear();
+    for (var node : graph.getStreamNodes()) {
+      for (String name : new String[] {"key-group-split", "key-group-reassemble", "arrow-to-row"}) {
+        if (node.getOperatorName().equals(name))
+          OPERATOR_IDS.put(
+              name, new org.apache.flink.runtime.jobgraph.OperatorID(hashes.get(node.getId())));
+      }
+    }
+    assertTrue(OPERATOR_IDS.containsKey("key-group-split"));
+    assertTrue(OPERATOR_IDS.containsKey(recoverable ? "key-group-reassemble" : "arrow-to-row"));
+    env.execute(graph);
   }
 
   private static void assertExactlyOnceOutput(Path output, String message) throws Exception {

@@ -2,8 +2,8 @@ package tech.streamfusion.planner;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
 
-import tech.streamfusion.operator.NativeColumnarGroupAggregateOperator;
 import java.util.List;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.runtime.state.KeyGroupRangeAssignment;
@@ -13,6 +13,7 @@ import org.apache.flink.table.api.Schema;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.apache.flink.types.Row;
 import org.junit.jupiter.api.Test;
+import tech.streamfusion.operator.NativeColumnarGroupAggregateOperator;
 
 class FlinkKeyGroupUtilsTest {
 
@@ -42,7 +43,8 @@ class FlinkKeyGroupUtilsTest {
     StreamTableEnvironment table = StreamTableEnvironment.create(env);
     table.createTemporaryView(
         "src",
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(new String[] {"k", "v"}, Types.LONG, Types.LONG),
             Row.of(1L, 1L),
             Row.of(1L, 2L),
@@ -54,8 +56,9 @@ class FlinkKeyGroupUtilsTest {
     NativePlanner.install(table);
     table.toChangelogStream(table.sqlQuery("SELECT k, SUM(v) FROM src GROUP BY k"));
 
+    var graph = env.getStreamGraph();
     List<org.apache.flink.streaming.api.graph.StreamNode> nativeKeyedNodes =
-        env.getStreamGraph().getStreamNodes().stream()
+        graph.getStreamNodes().stream()
             .filter(node -> node.getOperatorFactory() != null)
             .filter(
                 node ->
@@ -64,8 +67,21 @@ class FlinkKeyGroupUtilsTest {
                         .equals(NativeColumnarGroupAggregateOperator.class))
             .toList();
     assertFalse(nativeKeyedNodes.isEmpty(), "group aggregate was not planned natively");
+    var hashes =
+        new org.apache.flink.streaming.api.graph.StreamGraphHasherV2()
+            .traverseStreamGraphAndGenerateHashes(graph);
+    var job = graph.getJobGraph();
     for (var node : nativeKeyedNodes) {
-      assertEquals(257, node.getMaxParallelism(), node.getOperatorName());
+      var id = new org.apache.flink.runtime.jobgraph.OperatorID(hashes.get(node.getId()));
+      var vertex =
+          java.util.stream.StreamSupport.stream(job.getVertices().spliterator(), false)
+              .filter(
+                  candidate ->
+                      candidate.getOperatorIDs().stream()
+                          .anyMatch(pair -> pair.getGeneratedOperatorID().equals(id)))
+              .findFirst()
+              .orElseThrow();
+      assertEquals(257, vertex.getMaxParallelism(), node.getOperatorName());
     }
   }
 }

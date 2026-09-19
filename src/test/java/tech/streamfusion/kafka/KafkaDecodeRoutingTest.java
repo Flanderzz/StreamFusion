@@ -3,12 +3,12 @@ package tech.streamfusion.kafka;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import tech.streamfusion.planner.NativePlanner;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.api.EnvironmentSettings;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
+import tech.streamfusion.planner.NativePlanner;
 
 /**
  * Plan-time gating for the native Kafka decode paths (no broker needed): a table whose schema or
@@ -90,6 +90,9 @@ class KafkaDecodeRoutingTest {
 
   @Test
   void treeDeserializerOptionKeepsTheScanOnFlink() {
+    org.junit.jupiter.api.Assumptions.assumeTrue(
+        tech.streamfusion.compat.FlinkTestCapabilities.JSON_PARSER_OPTION,
+        "Flink 1.18 omits json.decode.json-parser.enabled from its factory option whitelist");
     // decode.json-parser.enabled = false switches Flink to its tree deserializer, whose coercions
     // differ from the parser path the native decode mirrors.
     StreamTableEnvironment tEnv = env();
@@ -113,7 +116,8 @@ class KafkaDecodeRoutingTest {
         table("id BIGINT, name STRING", "debezium-avro-confluent")
             .replace(
                 "'debezium-avro-confluent')",
-                "'debezium-avro-confluent', 'debezium-avro-confluent.url' = 'http://localhost:8081')"));
+                "'debezium-avro-confluent', 'debezium-avro-confluent.url' ="
+                    + " 'http://localhost:8081')"));
     String plan = NativePlanner.explain(tEnv, "SELECT id, name FROM t");
     assertTrue(
         plan.contains("NativeKafkaDecode"),
@@ -129,7 +133,8 @@ class KafkaDecodeRoutingTest {
         table("id BIGINT, name STRING", "debezium-avro-confluent")
             .replace(
                 "'debezium-avro-confluent')",
-                "'debezium-avro-confluent', 'debezium-avro-confluent.url' = 'http://localhost:8081',"
+                "'debezium-avro-confluent', 'debezium-avro-confluent.url' ="
+                    + " 'http://localhost:8081',"
                     + " 'debezium-avro-confluent.basic-auth.credentials-source' = 'USER_INFO',"
                     + " 'debezium-avro-confluent.basic-auth.user-info' = 'user:pw')"));
     String plan = NativePlanner.explain(tEnv, "SELECT id, name FROM t");
@@ -148,7 +153,8 @@ class KafkaDecodeRoutingTest {
         table("id BIGINT, name STRING", "debezium-avro-confluent")
             .replace(
                 "'debezium-avro-confluent')",
-                "'debezium-avro-confluent', 'debezium-avro-confluent.url' = 'http://localhost:8081',"
+                "'debezium-avro-confluent', 'debezium-avro-confluent.url' ="
+                    + " 'http://localhost:8081',"
                     + " 'debezium-avro-confluent.basic-auth.credentials-source' = 'URL')"));
     assertStaysOnFlink(tEnv, "SELECT id, name FROM t");
   }

@@ -83,6 +83,9 @@ public final class EncodeFormat implements Serializable {
   /** JSON encode options resolved with Flink's json format factory defaults. */
   public static EncodeFormat json(Map<String, String> options) {
     StringBuilder encoded = new StringBuilder();
+    if (!tech.streamfusion.compat.JsonRuntimeCompat.PRESERVES_DECIMAL_SCALE) {
+      encoded.append("legacy-decimal-nodes=true\n");
+    }
     String timestampFormat = options.getOrDefault("timestamp-format.standard", "SQL");
     if ("ISO-8601".equals(timestampFormat)) {
       encoded.append("timestamp-format=ISO-8601\n");
@@ -136,6 +139,9 @@ public final class EncodeFormat implements Serializable {
       return null;
     }
     StringBuilder encoded = new StringBuilder();
+    if (!tech.streamfusion.compat.JsonRuntimeCompat.PRESERVES_DECIMAL_SCALE) {
+      encoded.append("legacy-decimal-nodes=true\n");
+    }
     String delimiter = options.get("field-delimiter");
     if (delimiter != null) {
       Character unescaped = NativeFormatOptions.unescapedDelimiter(delimiter);

@@ -57,6 +57,7 @@ pub(crate) struct JsonEncodeOptions {
     pub(crate) ignore_null_fields: bool,
     pub(crate) iso_8601: bool,
     pub(crate) decimal_as_plain_number: bool,
+    pub(crate) legacy_decimal_nodes: bool,
     pub(crate) map_null_key_mode: MapNullKeyMode,
     pub(crate) map_null_key_literal: String,
 }
@@ -67,6 +68,7 @@ impl Default for JsonEncodeOptions {
             ignore_null_fields: false,
             iso_8601: false,
             decimal_as_plain_number: false,
+            legacy_decimal_nodes: false,
             map_null_key_mode: MapNullKeyMode::Fail,
             map_null_key_literal: "null".to_string(),
         }
@@ -93,6 +95,7 @@ fn parse_json_encode_options(encoded: &str) -> Result<JsonEncodeOptions, String>
             "timestamp-format" => options.iso_8601 = value == "ISO-8601",
             "encode.ignore-null-fields" => options.ignore_null_fields = value == "true",
             "encode.decimal-as-plain-number" => options.decimal_as_plain_number = value == "true",
+            "legacy-decimal-nodes" => options.legacy_decimal_nodes = value == "true",
             "map-null-key.mode" => {
                 options.map_null_key_mode = match value {
                     "FAIL" => MapNullKeyMode::Fail,
@@ -195,6 +198,7 @@ fn json_encoder_options(options: &JsonEncodeOptions) -> arrow::json::writer::Enc
         .with_encoder_factory(Arc::new(FlinkJsonEncoderFactory {
             iso_8601: options.iso_8601,
             decimal_as_plain_number: options.decimal_as_plain_number,
+            legacy_decimal_nodes: options.legacy_decimal_nodes,
             map_null_key_mode: options.map_null_key_mode,
             map_null_key_literal: {
                 let mut literal = Vec::new();
@@ -842,6 +846,7 @@ fn descriptor_children(descriptor: &str) -> Option<Vec<&str>> {
 struct FlinkJsonEncoderFactory {
     iso_8601: bool,
     decimal_as_plain_number: bool,
+    legacy_decimal_nodes: bool,
     map_null_key_mode: MapNullKeyMode,
     /// The `map-null-key.literal` pre-rendered as a quoted, escaped JSON field name.
     map_null_key_literal: Vec<u8>,
@@ -880,6 +885,7 @@ impl arrow::json::writer::EncoderFactory for FlinkJsonEncoderFactory {
                 array: array.as_primitive::<Decimal128Type>(),
                 scale: *scale,
                 plain: self.decimal_as_plain_number,
+                legacy_decimal_nodes: self.legacy_decimal_nodes,
             })),
             // TIMESTAMP_LTZ is an instant Flink renders at UTC with a 'Z' designator; plain
             // TIMESTAMP is the same wall-clock digit layout without any zone. Both trim the
@@ -1214,11 +1220,16 @@ struct FlinkDecimal128Encoder<'a> {
     array: &'a arrow::array::Decimal128Array,
     scale: i8,
     plain: bool,
+    legacy_decimal_nodes: bool,
 }
 
 impl arrow::json::writer::Encoder for FlinkDecimal128Encoder<'_> {
     fn encode(&mut self, index: usize, output: &mut Vec<u8>) {
-        encode_java_big_decimal(self.array.value(index), self.scale, self.plain, output);
+        if self.legacy_decimal_nodes {
+            encode_legacy_decimal_node(self.array.value(index), self.scale, self.plain, output);
+        } else {
+            encode_java_big_decimal(self.array.value(index), self.scale, self.plain, output);
+        }
     }
 }
 
@@ -1233,18 +1244,38 @@ pub(crate) fn encode_java_big_decimal(
     plain: bool,
     output: &mut Vec<u8>,
 ) {
-    if plain {
-        return encode_plain_decimal(unscaled, i64::from(scale), output);
-    }
-    let mut unscaled = unscaled;
-    let mut scale = i64::from(scale);
-    if unscaled == 0 {
-        scale = 0;
-    } else {
-        while unscaled % 10 == 0 {
-            unscaled /= 10;
-            scale -= 1;
+    encode_decimal(unscaled, i64::from(scale), plain, !plain, output);
+}
+
+/// Older Jackson node factories normalize decimals before either serializer spelling is chosen.
+pub(crate) fn encode_legacy_decimal_node(
+    unscaled: i128,
+    scale: i8,
+    plain: bool,
+    output: &mut Vec<u8>,
+) {
+    encode_decimal(unscaled, i64::from(scale), plain, true, output);
+}
+
+fn encode_decimal(
+    mut unscaled: i128,
+    mut scale: i64,
+    plain: bool,
+    normalize: bool,
+    output: &mut Vec<u8>,
+) {
+    if normalize {
+        if unscaled == 0 {
+            scale = 0;
+        } else {
+            while unscaled % 10 == 0 {
+                unscaled /= 10;
+                scale -= 1;
+            }
         }
+    }
+    if plain {
+        return encode_plain_decimal(unscaled, scale, output);
     }
     let digits = unscaled.unsigned_abs().to_string();
     let adjusted_exponent = digits.len() as i64 - 1 - scale;
@@ -2009,4 +2040,30 @@ pub extern "system" fn Java_tech_streamfusion_kafka_NativeKafka_encodeKafkaRecor
             .map_err(|error| format!("failed to construct Kafka encoded batch: {error}"))?;
         Ok(result.into_raw())
     })
+}
+
+#[cfg(test)]
+mod decimal_node_tests {
+    use super::{encode_java_big_decimal, encode_legacy_decimal_node};
+
+    #[test]
+    fn old_jackson_normalizes_before_plain_and_scientific_rendering() {
+        for (unscaled, scale, modern_plain, legacy_plain, scientific) in [
+            (123_450, 3, "123.450", "123.45", "123.45"),
+            (10_000, 2, "100.00", "100", "1E+2"),
+            (0, 9, "0.000000000", "0", "0"),
+            (-100, 9, "-0.000000100", "-0.0000001", "-1E-7"),
+            (100, -2, "10000", "10000", "1E+4"),
+        ] {
+            let mut actual = Vec::new();
+            encode_java_big_decimal(unscaled, scale, true, &mut actual);
+            assert_eq!(actual, modern_plain.as_bytes());
+            actual.clear();
+            encode_legacy_decimal_node(unscaled, scale, true, &mut actual);
+            assert_eq!(actual, legacy_plain.as_bytes());
+            actual.clear();
+            encode_legacy_decimal_node(unscaled, scale, false, &mut actual);
+            assert_eq!(actual, scientific.as_bytes());
+        }
+    }
 }

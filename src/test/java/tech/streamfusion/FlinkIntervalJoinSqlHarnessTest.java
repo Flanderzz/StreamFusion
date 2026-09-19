@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -62,7 +64,8 @@ class FlinkIntervalJoinSqlHarnessTest {
           java.time.LocalDateTime.of(
               1970, 1, 1, 0, 0, side.equals("A") ? 1 : 2, side.equals("A") ? 1 : 999999);
       DataStream<Row> input =
-          env.fromData(
+          fromData(
+                  env,
                   Types.ROW_NAMED(
                       new String[] {"k", "v", "rt"}, Types.LONG, Types.LONG, Types.LOCAL_DATE_TIME),
                   Row.of(1L, side.equals("A") ? 10L : 100L, time),
@@ -182,7 +185,8 @@ class FlinkIntervalJoinSqlHarnessTest {
   }
 
   private static DataStream<Row> proctimeStream(StreamExecutionEnvironment env) {
-    return env.fromData(
+    return fromData(
+        env,
         Types.ROW_NAMED(new String[] {"k", "v"}, Types.LONG, Types.LONG),
         Row.of(1L, 10L),
         Row.of(2L, 30L),
@@ -200,7 +204,8 @@ class FlinkIntervalJoinSqlHarnessTest {
   }
 
   private static DataStream<Row> stream(StreamExecutionEnvironment env) {
-    return env.fromData(
+    return fromData(
+            env,
             Types.ROW_NAMED(
                 new String[] {"k", "v", "ts", "d"},
                 Types.LONG,

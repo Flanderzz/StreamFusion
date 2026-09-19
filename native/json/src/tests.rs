@@ -31,6 +31,64 @@ fn bodies(docs: Vec<Option<&[u8]>>) -> RecordBatch {
     .unwrap()
 }
 
+#[test]
+fn legacy_array_rejection_keeps_plain_json_parser_retries() {
+    let schema = Arc::new(Schema::new(vec![Field::new("f", DataType::Float32, true)]));
+    let decoder = new_decoder(
+        FORMAT_JSON,
+        schema,
+        "",
+        "",
+        0,
+        false,
+        "json.reject-array-roots=true\n",
+    );
+    let out = decoder.decode(&bodies(vec![
+        Some(br#"{"f":7.038531e-26}"#),
+        Some(br#"{"f":18446744073709551616}"#),
+    ]));
+    let floats = out
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Float32Array>()
+        .unwrap();
+    assert_eq!(
+        floats.values(),
+        &[
+            "7.038531e-26".parse::<f32>().unwrap(),
+            18446744073709551616_f32
+        ]
+    );
+}
+
+#[test]
+fn legacy_array_rejection_applies_before_parser_retry() {
+    for input in [
+        br#"[{"id":1}]"#.as_slice(),
+        br#"[{"id":18446744073709551616}] trailing"#,
+    ] {
+        for skip_errors in [false, true] {
+            let decoder = new_decoder(
+                FORMAT_JSON,
+                json_schema(),
+                "",
+                "",
+                0,
+                skip_errors,
+                "json.reject-array-roots=true\n",
+            );
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                decoder.decode(&bodies(vec![Some(input)]))
+            }));
+            if skip_errors {
+                assert_eq!(result.unwrap().num_rows(), 0);
+            } else {
+                assert!(result.is_err());
+            }
+        }
+    }
+}
+
 /// Keyed decode: the raw Kafka key composes with the value decode per record — Flink's key/value
 /// merge with the raw key format's exactly-one key row. A JSON value fanning a top-level array
 /// into N rows repeats the record's key N times; a dropped record (skip mode) contributes nothing;

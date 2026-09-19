@@ -161,7 +161,7 @@ final class RexExpression {
   // A bare predicate without a relational context conservatively declines host-exact numeric casts.
   private Boolean legacyCastBehaviour;
   private boolean watermarkAvailable;
-  private org.apache.flink.configuration.Configuration temporalConfig =
+  private org.apache.flink.configuration.ReadableConfig temporalConfig =
       new org.apache.flink.configuration.Configuration();
   // Root of the projection currently being encoded; null for conditions and bare predicates.
   private RexNode projectionRoot;
@@ -354,9 +354,11 @@ final class RexExpression {
 
   private void configure(org.apache.flink.table.api.TableConfig tableConfig) {
     sessionZoneId = tableConfig.getLocalTimeZone().getId();
-    temporalConfig =
-        org.apache.flink.configuration.Configuration.fromMap(tableConfig.toMap());
-    temporalConfig.setString("table.local-time-zone", sessionZoneId);
+    var expressionConfig = org.apache.flink.table.api.TableConfig.getDefault();
+    expressionConfig.setRootConfiguration(tableConfig.getRootConfiguration());
+    expressionConfig.addConfiguration(tableConfig.getConfiguration());
+    expressionConfig.setLocalTimeZone(tableConfig.getLocalTimeZone());
+    temporalConfig = expressionConfig;
     legacyCastBehaviour =
         tableConfig
             .get(
@@ -1030,6 +1032,13 @@ final class RexExpression {
     }
     if ("JSON_UNQUOTE".equals(functionName)) {
       return emitCharacterFunction(call, 123, 1, 1);
+    }
+    if (("JSON_STRING".equals(functionName) || "JSON_OBJECT".equals(functionName))
+        && !tech.streamfusion.compat.JsonRuntimeCompat.PRESERVES_DECIMAL_SCALE
+        && call.getOperands().stream()
+            .anyMatch(operand -> operand.getType().getSqlTypeName() == SqlTypeName.DECIMAL)) {
+      return reject(
+          "JSON decimal rendering requires the selected Flink line's generated evaluator");
     }
     if ("JSON_STRING".equals(functionName)) {
       if (call.getOperands().size() != 1 || !isJsonScalarValue(call.getOperands().get(0))) {

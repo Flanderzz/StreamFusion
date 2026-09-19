@@ -1,19 +1,20 @@
 package tech.streamfusion.planner;
 
-import tech.streamfusion.operator.ArrowBatch;
 import org.apache.flink.runtime.io.network.api.writer.SubtaskStateMapper;
 import org.apache.flink.runtime.plugable.SerializationDelegate;
 import org.apache.flink.runtime.state.KeyGroupRangeAssignment;
 import org.apache.flink.streaming.runtime.partitioner.ConfigurableStreamPartitioner;
 import org.apache.flink.streaming.runtime.partitioner.StreamPartitioner;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
+import tech.streamfusion.operator.ArrowBatch;
 
 /**
  * Routes an Arrow shuffle record using its key-group tag. Destination-batched records force the
  * edge aligned; recovery-mode records contain exactly one key group and support Flink's ordinary
  * unaligned {@link SubtaskStateMapper#RANGE} filtering after rescaling.
  */
-public class ColumnarKeyGroupPartitioner extends StreamPartitioner<ArrowBatch>
+public class ColumnarKeyGroupPartitioner
+    extends tech.streamfusion.compat.ColumnarPartitionerCompat<ArrowBatch>
     implements ConfigurableStreamPartitioner {
 
   private static final long serialVersionUID = 1L;
@@ -49,7 +50,10 @@ public class ColumnarKeyGroupPartitioner extends StreamPartitioner<ArrowBatch>
 
   @Override
   public StreamPartitioner<ArrowBatch> copy() {
-    return new ColumnarKeyGroupPartitioner(maxParallelism, recoverable);
+    ColumnarKeyGroupPartitioner copy = new ColumnarKeyGroupPartitioner(maxParallelism, recoverable);
+    // Flink 1.18's recovery filter copies after setup and does not configure the copy again.
+    copy.setup(numberOfChannels);
+    return copy;
   }
 
   @Override

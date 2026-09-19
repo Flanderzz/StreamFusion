@@ -21,6 +21,10 @@ final class PlanContext {
     this.repeatedSources = repeatedSources;
   }
 
+  String keyedStateUnsupportedReason() {
+    return scan.keyedStateUnsupportedReason();
+  }
+
   /** Counts one host node replaced by a native one. */
   void substituted() {
     scan.countSubstitution();

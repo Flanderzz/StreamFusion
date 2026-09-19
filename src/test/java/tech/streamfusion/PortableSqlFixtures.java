@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import java.time.ZoneId;
 import java.util.Map;
 import org.apache.flink.api.common.RuntimeExecutionMode;
@@ -55,7 +57,8 @@ final class PortableSqlFixtures {
             Types.STRING);
     table.createTemporaryView(
         "test_input",
-        env.fromData(
+        fromData(
+            env,
             type,
             Row.of(
                 1, "A", 10L, "red,blue", 30L, "[\"first\",\"last\"]", "2020-01-02 03:04:05", "1"),
@@ -75,11 +78,12 @@ final class PortableSqlFixtures {
             .build());
     table.createTemporaryView(
         "right_input",
-        env.fromData(Types.ROW_NAMED(new String[] {"int_key"}, Types.INT), Row.of(1), Row.of(2)),
+        fromData(env, Types.ROW_NAMED(new String[] {"int_key"}, Types.INT), Row.of(1), Row.of(2)),
         Schema.newBuilder().column("int_key", DataTypes.INT()).build());
     table.createTemporaryView(
         "nested_input",
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(
                 new String[] {"id", "nested"},
                 Types.INT,
@@ -100,7 +104,8 @@ final class PortableSqlFixtures {
       table.createTemporaryView(
           "cdc_input",
           table.fromChangelogStream(
-              env.fromData(
+              fromData(
+                  env,
                   Types.ROW_NAMED(
                       new String[] {"id", "k", "v"}, Types.INT, Types.STRING, Types.LONG),
                   Row.ofKind(RowKind.INSERT, 1, "A", 10L),

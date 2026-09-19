@@ -3,6 +3,11 @@ package tech.streamfusion;
 import org.junit.jupiter.api.Test;
 
 class FlinkEndsWithSqlHarnessTest {
+  @org.junit.jupiter.api.BeforeEach
+  void requireReleasedHostFunction() {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction("ENDSWITH");
+  }
+
   @Test
   void suffixArgumentsAndWildcards() throws Exception {
     parity(

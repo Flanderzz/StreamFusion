@@ -3,6 +3,7 @@ package tech.streamfusion;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
 
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
@@ -14,8 +15,12 @@ import org.junit.jupiter.params.provider.CsvSource;
 
 class FlinkJsonReturningHostContractTest {
   @ParameterizedTest
-  @CsvSource({"BOOLEAN,java.lang.Boolean", "DOUBLE,java.math.BigDecimal"})
-  void integerJsonTokenFailsHostReturningConversion(String type, String targetClass) {
+  @org.junit.jupiter.params.provider.ValueSource(strings = {"BOOLEAN", "DOUBLE"})
+  void integerJsonTokenFailsHostReturningConversion(String type) {
+    String targetClass =
+        type.equals("DOUBLE")
+            ? tech.streamfusion.compat.FlinkTestCapabilities.JSON_FRACTION_CLASS
+            : "java.lang.Boolean";
     TableEnvironment table = runtimeInput("{\"v\":1}");
     String expression = "JSON_VALUE(doc, '$.v' RETURNING " + type + " NULL ON ERROR)";
     String runtimeSql = "SELECT " + expression + " FROM inputs";
@@ -58,8 +63,9 @@ class FlinkJsonReturningHostContractTest {
     var env = StreamExecutionEnvironment.getExecutionEnvironment();
     env.setParallelism(1);
     var table = StreamTableEnvironment.create(env);
-    table.createTemporaryView("inputs", env.fromData(
-        Types.ROW_NAMED(new String[] {"doc"}, Types.STRING), Row.of(document)));
+    table.createTemporaryView(
+        "inputs",
+        fromData(env, Types.ROW_NAMED(new String[] {"doc"}, Types.STRING), Row.of(document)));
     return table;
   }
 }

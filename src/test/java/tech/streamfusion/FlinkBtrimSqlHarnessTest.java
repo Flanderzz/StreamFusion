@@ -3,6 +3,11 @@ package tech.streamfusion;
 import org.junit.jupiter.api.Test;
 
 class FlinkBtrimSqlHarnessTest {
+  @org.junit.jupiter.api.BeforeEach
+  void requireReleasedHostFunction() {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction("BTRIM");
+  }
+
   @Test
   void btrimUsesCharacterSetsAndPreservesNonSpaceWhitespace() throws Exception {
     parity(

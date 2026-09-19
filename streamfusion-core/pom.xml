@@ -10,12 +10,17 @@
         <version>${revision}</version>
     </parent>
 
-    <artifactId>streamfusion-core</artifactId>
+    <artifactId>streamfusion-core${streamfusion.artifact.suffix}</artifactId>
     <name>StreamFusion Core</name>
 
     <build>
         <sourceDirectory>${project.basedir}/../src/main/java</sourceDirectory>
         <plugins>
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>flatten-maven-plugin</artifactId>
+                <configuration><flattenMode>ossrh</flattenMode></configuration>
+            </plugin>
             <plugin>
                 <groupId>org.codehaus.mojo</groupId>
                 <artifactId>exec-maven-plugin</artifactId>

@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import java.time.Duration;
 import java.time.ZoneId;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
@@ -23,21 +25,16 @@ import org.junit.jupiter.api.Test;
 class FlinkHotItemsSqlHarnessTest {
 
   private static final String HOT_ITEMS =
-      "SELECT AuctionBids.auction, AuctionBids.num FROM ("
-          + "  SELECT auction, count(*) AS num, window_start AS starttime, window_end AS endtime"
-          + "  FROM TABLE(HOP(TABLE bid, DESCRIPTOR(rt), INTERVAL '2' SECOND, INTERVAL '10' SECOND))"
-          + "  GROUP BY auction, window_start, window_end"
-          + ") AS AuctionBids "
-          + "JOIN ("
-          + "  SELECT max(CountBids.num) AS maxn, CountBids.starttime, CountBids.endtime FROM ("
-          + "    SELECT auction, count(*) AS num, window_start AS starttime, window_end AS endtime"
-          + "    FROM TABLE(HOP(TABLE bid, DESCRIPTOR(rt), INTERVAL '2' SECOND, INTERVAL '10' SECOND))"
-          + "    GROUP BY auction, window_start, window_end"
-          + "  ) AS CountBids GROUP BY CountBids.starttime, CountBids.endtime"
-          + ") AS MaxBids "
-          + "ON AuctionBids.starttime = MaxBids.starttime"
-          + "  AND AuctionBids.endtime = MaxBids.endtime"
-          + "  AND AuctionBids.num >= MaxBids.maxn";
+      "SELECT AuctionBids.auction, AuctionBids.num FROM (  SELECT auction, count(*) AS num,"
+          + " window_start AS starttime, window_end AS endtime  FROM TABLE(HOP(TABLE bid,"
+          + " DESCRIPTOR(rt), INTERVAL '2' SECOND, INTERVAL '10' SECOND))  GROUP BY auction,"
+          + " window_start, window_end) AS AuctionBids JOIN (  SELECT max(CountBids.num) AS maxn,"
+          + " CountBids.starttime, CountBids.endtime FROM (    SELECT auction, count(*) AS num,"
+          + " window_start AS starttime, window_end AS endtime    FROM TABLE(HOP(TABLE bid,"
+          + " DESCRIPTOR(rt), INTERVAL '2' SECOND, INTERVAL '10' SECOND))    GROUP BY auction,"
+          + " window_start, window_end  ) AS CountBids GROUP BY CountBids.starttime,"
+          + " CountBids.endtime) AS MaxBids ON AuctionBids.starttime = MaxBids.starttime  AND"
+          + " AuctionBids.endtime = MaxBids.endtime  AND AuctionBids.num >= MaxBids.maxn";
 
   @Test
   void hotItemsMatchesHost() throws Exception {
@@ -54,9 +51,11 @@ class FlinkHotItemsSqlHarnessTest {
   }
 
   private static DataStream<Row> bids(StreamExecutionEnvironment env) {
-    // Bids for auctions 1/2/3 spread across time so several overlapping 10s/2s windows form; auction 1
+    // Bids for auctions 1/2/3 spread across time so several overlapping 10s/2s windows form;
+    // auction 1
     // is the hot item in the early windows, auction 2 later — the per-window MAX picks the leaders.
-    return env.fromData(
+    return fromData(
+            env,
             Types.ROW_NAMED(new String[] {"auction", "ts"}, Types.LONG, Types.LONG),
             Row.of(1L, 1000L),
             Row.of(1L, 1500L),

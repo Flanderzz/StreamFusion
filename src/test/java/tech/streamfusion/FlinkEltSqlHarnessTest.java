@@ -3,6 +3,11 @@ package tech.streamfusion;
 import org.junit.jupiter.api.Test;
 
 class FlinkEltSqlHarnessTest {
+  @org.junit.jupiter.api.BeforeEach
+  void requireReleasedHostFunction() {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction("ELT");
+  }
+
   @Test
   void eltOnlyPropagatesSelectedNullAndBoundsChecksIndex() throws Exception {
     parity(

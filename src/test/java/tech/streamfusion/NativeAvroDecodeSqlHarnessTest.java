@@ -61,7 +61,8 @@ class NativeAvroDecodeSqlHarnessTest {
                   .getLogicalType();
       produce(brokers, "avro-flat", flat, NativeAvroDecodeSqlHarnessTest::flatRecord);
       NativeParity.assertParity(
-          environment(brokers, "avro-flat", "id BIGINT, name STRING, score DOUBLE"), "SELECT * FROM t");
+          environment(brokers, "avro-flat", "id BIGINT, name STRING, score DOUBLE"),
+          "SELECT * FROM t");
 
       RowType complex =
           (RowType)
@@ -73,14 +74,16 @@ class NativeAvroDecodeSqlHarnessTest {
                               DataTypes.FIELD("a", DataTypes.BIGINT()),
                               DataTypes.FIELD("b", DataTypes.STRING()))),
                       DataTypes.FIELD("nums", DataTypes.ARRAY(DataTypes.BIGINT())),
-                      DataTypes.FIELD("tags", DataTypes.MAP(DataTypes.STRING(), DataTypes.BIGINT())))
+                      DataTypes.FIELD(
+                          "tags", DataTypes.MAP(DataTypes.STRING(), DataTypes.BIGINT())))
                   .getLogicalType();
       produce(brokers, "avro-complex", complex, NativeAvroDecodeSqlHarnessTest::complexRecord);
       NativeParity.assertParity(
           environment(
               brokers,
               "avro-complex",
-              "id BIGINT, nested ROW<a BIGINT, b STRING>, nums ARRAY<BIGINT>, tags MAP<STRING, BIGINT>"),
+              "id BIGINT, nested ROW<a BIGINT, b STRING>, nums ARRAY<BIGINT>, tags MAP<STRING,"
+                  + " BIGINT>"),
           "SELECT id, nested.a, nested.b, nums[1], nums[2], tags['a'], tags['b'] FROM t");
     }
   }
@@ -146,9 +149,22 @@ class NativeAvroDecodeSqlHarnessTest {
       produce(brokers, "avro-temporal", temporal, NativeAvroDecodeSqlHarnessTest::temporalRecord);
       NativeParity.assertParity(
           environment(
-              brokers, "avro-temporal", "id BIGINT, price DECIMAL(10, 2), dt DATE, ts TIMESTAMP(3)"),
+              brokers,
+              "avro-temporal",
+              "id BIGINT, price DECIMAL(10, 2), dt DATE, ts TIMESTAMP(3)"),
           "SELECT * FROM t");
+    }
+  }
 
+  @Test
+  void correctedTimestampMappingDecodesNativelyThroughTheFullPlan() throws Exception {
+    org.junit.jupiter.api.Assumptions.assumeTrue(
+        tech.streamfusion.format.avro.compat.AvroTestSchemas.CORRECTED_TIMESTAMP_MAPPING,
+        "Corrected Avro timestamp mapping is absent from Flink 1.18");
+    try (KafkaContainer kafka =
+        new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.6.1"))) {
+      kafka.start();
+      String brokers = kafka.getBootstrapServers();
       // The corrected timestamp mapping: TIMESTAMP_LTZ is only representable with
       // avro.timestamp_mapping.legacy = false, and the writer schema derives differently.
       RowType corrected =
@@ -161,7 +177,7 @@ class NativeAvroDecodeSqlHarnessTest {
       produce(
           brokers,
           "avro-corrected",
-          AvroSchemaConverter.convertToSchema(corrected.copy(false), false),
+          tech.streamfusion.format.avro.compat.AvroCompat.schema(corrected.copy(false), false),
           NativeAvroDecodeSqlHarnessTest::correctedRecord);
       NativeParity.assertParity(
           environment(
@@ -192,7 +208,8 @@ class NativeAvroDecodeSqlHarnessTest {
     int eventType = i % 2 == 0 ? 0 : 2;
     record.put("event_type", eventType);
     if (eventType == 0) {
-      GenericRecord person = new GenericData.Record(recordBranch(schema.getField("person").schema()));
+      GenericRecord person =
+          new GenericData.Record(recordBranch(schema.getField("person").schema()));
       person.put("id", (long) i);
       person.put("name", "n-" + i);
       person.put("email", "e-" + i);
@@ -299,8 +316,8 @@ class NativeAvroDecodeSqlHarnessTest {
               + brokers
               + "', 'properties.group.id' = '"
               + topic
-              + "', 'scan.startup.mode' = 'earliest-offset', 'scan.bounded.mode' = 'latest-offset', "
-              + "'format' = 'avro'"
+              + "', 'scan.startup.mode' = 'earliest-offset', 'scan.bounded.mode' = 'latest-offset',"
+              + " 'format' = 'avro'"
               + extraOptions
               + ")");
       return tEnv;

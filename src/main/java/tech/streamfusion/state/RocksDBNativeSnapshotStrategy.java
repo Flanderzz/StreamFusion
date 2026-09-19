@@ -171,7 +171,8 @@ final class RocksDBNativeSnapshotStrategy
     if (System.getenv("SF_STATE_PROFILE") != null) {
       System.err.printf(
           "SFPROF rocksdb barrier chk=%d sync_ms=%d%n",
-          checkpointId, (System.nanoTime() - profileStart) / 1_000_000);
+          checkpointId,
+          (System.nanoTime() - profileStart) / 1_000_000);
     }
     String snapshotToken = manifest[0];
     List<String> dataFiles = new ArrayList<>();
@@ -205,7 +206,7 @@ final class RocksDBNativeSnapshotStrategy
         StreamStateHandle confirmed = mayReuse ? confirmedBase.get(rel) : null;
         if (confirmed != null
             && currentStreamFactory != null
-            && currentStreamFactory.couldReuseStateHandle(confirmed)) {
+            && tech.streamfusion.compat.StateCompat.couldReuse(currentStreamFactory, confirmed)) {
           reusable.put(rel, confirmed);
           continue;
         }
@@ -274,8 +275,7 @@ final class RocksDBNativeSnapshotStrategy
           StreamStateHandle confirmed = reuseBase.get(relPath);
           if (confirmed != null) {
             StreamStateHandle placeholder =
-                new PlaceholderStreamStateHandle(
-                    confirmed.getStreamStateHandleID(), confirmed.getStateSize(), false);
+                tech.streamfusion.compat.StateCompat.placeholder(confirmed);
             sharedState.add(HandleAndLocalPath.of(placeholder, relPath));
             reused.add(confirmed);
           } else {
@@ -301,7 +301,7 @@ final class RocksDBNativeSnapshotStrategy
         checkpointedSize += metaHandle.getStateSize();
 
         // Reuse registration can fail. Keep ownership until the factory accepts the snapshot.
-        streamFactory.reusePreviousStateHandle(reused);
+        tech.streamfusion.compat.StateCompat.reused(streamFactory, reused);
         if (sharing != SnapshotType.SharingFilesStrategy.NO_SHARING) {
           synchronized (uploadedFiles) {
             uploadedFiles.put(checkpointId, Collections.unmodifiableList(sharedState));

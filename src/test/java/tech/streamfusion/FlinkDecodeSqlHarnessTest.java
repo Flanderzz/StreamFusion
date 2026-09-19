@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
@@ -74,9 +76,9 @@ class FlinkDecodeSqlHarnessTest {
     StreamTableEnvironment tables = StreamTableEnvironment.create(env);
     tables.createTemporaryView(
         "inputs",
-        env.fromData(
-            Types.ROW_NAMED(
-                new String[] {"id", "b"}, Types.INT, Types.PRIMITIVE_ARRAY(Types.BYTE)),
+        fromData(
+            env,
+            Types.ROW_NAMED(new String[] {"id", "b"}, Types.INT, Types.PRIMITIVE_ARRAY(Types.BYTE)),
             rows.toArray(Row[]::new)),
         Schema.newBuilder().column("id", DataTypes.INT()).column("b", DataTypes.BYTES()).build());
     return tables;

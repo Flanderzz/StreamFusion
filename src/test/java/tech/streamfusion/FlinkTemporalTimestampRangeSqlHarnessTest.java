@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.api.TableEnvironment;
@@ -38,7 +40,8 @@ class FlinkTemporalTimestampRangeSqlHarnessTest {
     var tables = StreamTableEnvironment.create(env);
     tables.createTemporaryView(
         "dates",
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(new String[] {"s"}, Types.STRING),
             Row.of("0001-01-01 00:00:00.123456"),
             Row.of("1582-10-15 23:59:59.999999"),

@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.api.TableEnvironment;
@@ -26,8 +28,9 @@ class FlinkSignSqlHarnessTest {
       Double value = values[i];
       rows[i] = Row.of(value, value == null ? null : value.floatValue());
     }
-    table.createTemporaryView("n", env.fromData(Types.ROW_NAMED(
-        new String[] {"d", "f"}, Types.DOUBLE, Types.FLOAT), rows));
+    table.createTemporaryView(
+        "n",
+        fromData(env, Types.ROW_NAMED(new String[] {"d", "f"}, Types.DOUBLE, Types.FLOAT), rows));
     return table;
   }
 }

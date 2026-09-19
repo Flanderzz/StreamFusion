@@ -3,6 +3,7 @@ package tech.streamfusion;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static tech.streamfusion.NativeFailureParity.Phase.ROW_EVALUATION;
 import static tech.streamfusion.NativeFailureParity.Route.NATIVE;
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
 
 import java.time.ZoneOffset;
 import java.util.ArrayList;
@@ -33,6 +34,7 @@ class FlinkGroupedValueSqlHarnessTest {
         "TIMESTAMP_LTZ(3)"
       })
   void firstAndLastPreserveArrivalOrderAndIgnoreNulls(String type) throws Exception {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireFirstLastType(type);
     compare(
         () -> environment(type, false),
         "SELECT k, FIRST_VALUE(v), LAST_VALUE(v), COUNT(*) FROM src GROUP BY k");
@@ -50,6 +52,7 @@ class FlinkGroupedValueSqlHarnessTest {
         "TIMESTAMP_LTZ(3)"
       })
   void retractionsRemoveTheOldestMatchingOccurrence(String type) throws Exception {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireFirstLastType(type);
     compare(
         () -> environment(type, true),
         "SELECT k, FIRST_VALUE(v), LAST_VALUE(v), COUNT(*) FROM src GROUP BY k");
@@ -108,6 +111,7 @@ class FlinkGroupedValueSqlHarnessTest {
   @ParameterizedTest
   @ValueSource(booleans = {false, true})
   void retractingFirstLastWithIndependentMapTtlFallBack(boolean hint) throws Exception {
+    if (hint) tech.streamfusion.compat.FlinkTestCapabilities.requireStateTtlHint();
     Supplier<TableEnvironment> source =
         () -> {
           var table = environment("BIGINT", true);
@@ -124,6 +128,7 @@ class FlinkGroupedValueSqlHarnessTest {
 
   @org.junit.jupiter.api.Test
   void zeroRetentionHintAdmitsRetractionsDespiteGlobalTtl() throws Exception {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireStateTtlHint();
     compare(
         () -> {
           var table = environment("BIGINT", true);
@@ -172,7 +177,8 @@ class FlinkGroupedValueSqlHarnessTest {
               Row.of(9, 1, c)));
     }
     var source =
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(
                 new String[] {"id", "k", "raw_value"}, Types.INT, Types.INT, Types.STRING),
             rows.toArray(Row[]::new));

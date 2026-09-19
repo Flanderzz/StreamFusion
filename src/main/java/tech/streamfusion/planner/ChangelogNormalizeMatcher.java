@@ -1,10 +1,10 @@
 package tech.streamfusion.planner;
 
-import tech.streamfusion.operator.RowDataArrowConverter;
 import org.apache.calcite.rel.RelNode;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalChangelogNormalize;
 import org.apache.flink.table.planner.plan.utils.ChangelogPlanUtils;
+import tech.streamfusion.operator.RowDataArrowConverter;
 
 /**
  * Recognizes the changelog normalization the native operator reproduces: a {@link
@@ -20,10 +20,10 @@ final class ChangelogNormalizeMatcher {
   private ChangelogNormalizeMatcher() {}
 
   static boolean matches(StreamPhysicalChangelogNormalize node) {
-    if (node.filterCondition() != null) {
+    if (tech.streamfusion.compat.FlinkCompat.normalizeHasFilter(node)) {
       return false; // a pushed filter condition is not yet reproduced
     }
-    if (node.sourceReused() || node.commonFilter().length > 0) {
+    if (tech.streamfusion.compat.FlinkCompat.normalizeSharesSource(node)) {
       return false; // the source-reuse rewrite changes the operator's contract
     }
     return RowDataArrowConverter.supports(
@@ -39,10 +39,10 @@ final class ChangelogNormalizeMatcher {
   }
 
   static String unsupportedReason(StreamPhysicalChangelogNormalize node) {
-    if (node.filterCondition() != null) {
+    if (tech.streamfusion.compat.FlinkCompat.normalizeHasFilter(node)) {
       return "changelog normalize: a pushed filter condition is not supported";
     }
-    if (node.sourceReused() || node.commonFilter().length > 0) {
+    if (tech.streamfusion.compat.FlinkCompat.normalizeSharesSource(node)) {
       return "changelog normalize: the source-reuse variant is not supported";
     }
     return "changelog normalize: needs a row type the Arrow conversion supports";

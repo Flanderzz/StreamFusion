@@ -1,6 +1,7 @@
 package tech.streamfusion.suite;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -146,6 +147,8 @@ class NativeExecutionTest {
   }
 
   private static class WindowFixture {
+    private final String state = "HEAP";
+    private final FakeScalaEnvironment env = new FakeScalaEnvironment(false);
     private final boolean splitDistinct;
 
     WindowFixture(boolean splitDistinct) {
@@ -156,14 +159,16 @@ class NativeExecutionTest {
   @Test
   void expectedFallbackRequiresItsSpecificReasonAndNoNativeWork() {
     NativeExecution.Scope scope = NativeExecution.begin(WINDOW, new WindowFixture(true));
-    NativeExecution.fallback("window aggregate: attached-window aggregation requires two-phase execution");
+    NativeExecution.fallback(
+        "window aggregate: attached-window aggregation requires two-phase execution");
     NativeExecution.finish(scope);
     scope = NativeExecution.begin(WINDOW, new WindowFixture(true));
     NativeExecution.fallback("different unsupported function");
     NativeExecution.Scope wrongReason = scope;
     assertThrows(AssertionError.class, () -> NativeExecution.finish(wrongReason));
     scope = NativeExecution.begin(WINDOW, new WindowFixture(true));
-    NativeExecution.fallback("window aggregate: attached-window aggregation requires two-phase execution");
+    NativeExecution.fallback(
+        "window aggregate: attached-window aggregation requires two-phase execution");
     Object window = new NativeColumnarWindowAggregateOperator();
     NativeExecution.opened(window);
     NativeExecution.completed(window, 1);
@@ -174,6 +179,61 @@ class NativeExecutionTest {
   @Test
   void aChangedUpstreamFixtureFailsInsteadOfSkippingItsContract() {
     assertThrows(AssertionError.class, () -> NativeExecution.begin(WINDOW, new Object()));
+  }
+
+  @Test
+  void selectorsReadInheritedStateAndConjoinFixtureParameters() {
+    class BackendFixture {
+      private final String state = "HEAP";
+    }
+    class WindowBackendFixture extends BackendFixture {
+      private final boolean splitDistinct = false;
+    }
+    Object fixture = new WindowBackendFixture();
+    assertTrue(NativeExecution.matches("state=HEAP&splitDistinct=false", fixture));
+    assertFalse(NativeExecution.matches("state=ROCKSDB&splitDistinct=false", fixture));
+    assertFalse(NativeExecution.matches("state=HEAP&splitDistinct=true", fixture));
+    assertThrows(AssertionError.class, () -> NativeExecution.matches("missing=true", fixture));
+  }
+
+  @Test
+  void selectorsObserveTheFixturesActualRandomizedChangelogConfiguration() {
+    class Fixture {
+      private final FakeScalaEnvironment env;
+
+      Fixture(boolean enabled) {
+        env = new FakeScalaEnvironment(enabled);
+      }
+    }
+    assertTrue(NativeExecution.matches("changelog=true", new Fixture(true)));
+    assertFalse(NativeExecution.matches("changelog=false", new Fixture(true)));
+    assertTrue(NativeExecution.matches("changelog=false", new Fixture(false)));
+    assertThrows(
+        AssertionError.class, () -> NativeExecution.matches("changelog=true", new Object()));
+  }
+
+  public static final class FakeScalaEnvironment {
+    private final FakeJavaEnvironment javaEnvironment;
+
+    FakeScalaEnvironment(boolean enabled) {
+      javaEnvironment = new FakeJavaEnvironment(enabled);
+    }
+
+    public FakeJavaEnvironment getJavaEnv() {
+      return javaEnvironment;
+    }
+  }
+
+  public static final class FakeJavaEnvironment {
+    private final boolean enabled;
+
+    FakeJavaEnvironment(boolean enabled) {
+      this.enabled = enabled;
+    }
+
+    public String isChangelogStateBackendEnabled() {
+      return enabled ? "TRUE" : "FALSE";
+    }
   }
 
   private static class NativeCalcOperator {}

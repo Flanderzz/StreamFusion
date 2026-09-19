@@ -1,9 +1,5 @@
 package tech.streamfusion.planner;
 
-import tech.streamfusion.operator.ArrowBatch;
-import tech.streamfusion.operator.ArrowBatchTypeInformation;
-import tech.streamfusion.operator.NativeColumnarDeduplicateOperator;
-import tech.streamfusion.operator.NativeColumnarKeepLastDeduplicateOperator;
 import java.util.Collections;
 import org.apache.flink.api.dag.Transformation;
 import org.apache.flink.configuration.ReadableConfig;
@@ -19,6 +15,10 @@ import org.apache.flink.table.planner.plan.nodes.exec.SingleTransformationTransl
 import org.apache.flink.table.planner.plan.nodes.exec.stream.StreamExecNode;
 import org.apache.flink.table.planner.plan.nodes.exec.utils.ExecNodeUtil;
 import org.apache.flink.table.types.logical.RowType;
+import tech.streamfusion.operator.ArrowBatch;
+import tech.streamfusion.operator.ArrowBatchTypeInformation;
+import tech.streamfusion.operator.NativeColumnarDeduplicateOperator;
+import tech.streamfusion.operator.NativeColumnarKeepLastDeduplicateOperator;
 
 /**
  * Wraps the native columnar keep-first deduplicator into the plan; it consumes and produces Arrow
@@ -75,7 +75,11 @@ public class NativeDeduplicateExecNode extends ExecNodeBase<ArrowBatch>
     // row once a watermark completes it). Under mini-batch Flink always plans a rowtime dedup as
     // its bundled retracting function — keep-first merely flips the comparator — so that shape
     // routes to the eager operator too.
-    boolean eager = proctime || keepLast || miniBatchEnabled;
+    boolean eager =
+        proctime
+            || keepLast
+            || miniBatchEnabled
+            || tech.streamfusion.compat.FlinkCompat.EAGER_ROWTIME_KEEP_FIRST;
     int maxParallelism =
         FlinkKeyGroupUtils.maxParallelism(planner.getExecEnv(), input.getParallelism());
     // Proctime keep-first stays eager (its bundled function emits the same insert-only rows);

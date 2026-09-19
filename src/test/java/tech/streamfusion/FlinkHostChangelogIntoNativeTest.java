@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import java.math.BigDecimal;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.datastream.DataStream;
@@ -36,7 +38,8 @@ class FlinkHostChangelogIntoNativeTest {
     // Repeated g so the inner SUM updates (emitting -U/+U); the outer COUNT(*) must retract the old
     // total's count each time.
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(new String[] {"g", "d"}, Types.LONG, Types.BIG_DEC),
             Row.of(1L, new BigDecimal("1.00")),
             Row.of(1L, new BigDecimal("2.00")),

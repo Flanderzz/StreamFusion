@@ -3,15 +3,15 @@ package tech.streamfusion.delta;
 import io.delta.flink.sink.Conversions;
 import io.delta.kernel.types.StructType;
 import org.apache.arrow.vector.VectorSchemaRoot;
-import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.types.logical.RowType;
+import tech.streamfusion.compat.FlinkStreamOperator;
 import tech.streamfusion.operator.ArrowBatch;
 
 /** Emits retained RowData views for Delta bookkeeping without materializing Arrow rows. */
-public final class ArrowToDeltaRowsOperator extends AbstractStreamOperator<RowData>
+public final class ArrowToDeltaRowsOperator extends FlinkStreamOperator<RowData>
     implements OneInputStreamOperator<ArrowBatch, RowData> {
 
   private final RowType rowType;

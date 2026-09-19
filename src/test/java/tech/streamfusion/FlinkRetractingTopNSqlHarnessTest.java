@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
@@ -19,16 +21,14 @@ import org.junit.jupiter.api.Test;
 class FlinkRetractingTopNSqlHarnessTest {
 
   private static final String TOP_N =
-      "SELECT g, k, total FROM ("
-          + "  SELECT g, k, total, ROW_NUMBER() OVER (PARTITION BY g ORDER BY total DESC, k DESC) AS rn"
-          + "  FROM (SELECT g, k, SUM(v) AS total FROM src GROUP BY g, k)"
-          + ") WHERE rn <= 2";
+      "SELECT g, k, total FROM (  SELECT g, k, total, ROW_NUMBER() OVER (PARTITION BY g ORDER BY"
+          + " total DESC, k DESC) AS rn  FROM (SELECT g, k, SUM(v) AS total FROM src GROUP BY g,"
+          + " k)) WHERE rn <= 2";
 
   private static final String TOP_N_WITH_RANK =
-      "SELECT g, k, total, rn FROM ("
-          + "  SELECT g, k, total, ROW_NUMBER() OVER (PARTITION BY g ORDER BY total DESC, k DESC) AS rn"
-          + "  FROM (SELECT g, k, SUM(v) AS total FROM src GROUP BY g, k)"
-          + ") WHERE rn <= 2";
+      "SELECT g, k, total, rn FROM (  SELECT g, k, total, ROW_NUMBER() OVER (PARTITION BY g ORDER"
+          + " BY total DESC, k DESC) AS rn  FROM (SELECT g, k, SUM(v) AS total FROM src GROUP BY g,"
+          + " k)) WHERE rn <= 2";
 
   @Test
   void retractingTopNMatchesHost() throws Exception {
@@ -75,9 +75,9 @@ class FlinkRetractingTopNSqlHarnessTest {
     // Two groups; within each, several keys whose running totals cross as v accumulates, so the
     // per-group top-2 by total changes over the stream (exercising retraction + promotion).
     DataStream<Row> source =
-        env.fromData(
-            Types.ROW_NAMED(
-                new String[] {"g", "k", "v"}, Types.LONG, Types.LONG, Types.LONG),
+        fromData(
+            env,
+            Types.ROW_NAMED(new String[] {"g", "k", "v"}, Types.LONG, Types.LONG, Types.LONG),
             Row.of(1L, 10L, 5L),
             Row.of(1L, 20L, 3L),
             Row.of(1L, 30L, 1L),

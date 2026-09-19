@@ -34,7 +34,8 @@ class NativeExtensionJarIT {
             "parquet")) {
       Process process = extensionProcess(extension);
       assertTrue(
-          process.waitFor(LOAD_TIMEOUT.toSeconds(), TimeUnit.SECONDS), extension + " probe timed out");
+          process.waitFor(LOAD_TIMEOUT.toSeconds(), TimeUnit.SECONDS),
+          extension + " probe timed out");
       String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
       assertEquals(0, process.exitValue(), () -> extension + " probe failed:\n" + output);
     }
@@ -50,13 +51,16 @@ class NativeExtensionJarIT {
                 ExtensionProbe.class.getName(),
                 requiredProperty("streamfusion.project.dir"),
                 requiredProperty("streamfusion.version"),
-                extension)
+                extension,
+                System.getProperty("streamfusion.artifact.suffix", ""))
             .redirectErrorStream(true);
     process.environment().put("GLIBC_TUNABLES", "glibc.rtld.optional_static_tls=131072");
     return process.start();
   }
 
-  /** Runs in a fresh JVM so each extension gets its own isolated core/native-library class loader. */
+  /**
+   * Runs in a fresh JVM so each extension gets its own isolated core/native-library class loader.
+   */
   public static final class ExtensionProbe {
 
     private ExtensionProbe() {}
@@ -65,16 +69,18 @@ class NativeExtensionJarIT {
       Path projectDirectory = Path.of(args[0]);
       String version = args[1];
       String extension = args[2];
+      System.setProperty("streamfusion.artifact.suffix", args[3]);
       Path core = artifact(projectDirectory, "streamfusion-core", version);
       Path extensionJar = artifact(projectDirectory, "streamfusion-" + extension, version);
-      URL[] classpath = extensionClasspath(projectDirectory, version, extension, core, extensionJar);
+      URL[] classpath =
+          extensionClasspath(projectDirectory, version, extension, core, extensionJar);
       try (URLClassLoader loader =
-          new URLClassLoader(
-              classpath, ClassLoader.getPlatformClassLoader())) {
+          new URLClassLoader(classpath, ClassLoader.getPlatformClassLoader())) {
         Class<?> facade = Class.forName(facadeClass(extension), true, loader);
         Object loaded = facade.getMethod("isLoaded").invoke(null);
         if (!Boolean.TRUE.equals(loaded)) {
-          throw new IllegalStateException("Native " + extension + " extension did not report loaded");
+          throw new IllegalStateException(
+              "Native " + extension + " extension did not report loaded");
         }
         String format = formatIdentifier(extension);
         if (format != null && !providesFormat(loader, format)) {
@@ -106,7 +112,12 @@ class NativeExtensionJarIT {
           projectDirectory
               .resolve(module)
               .resolve("target")
-              .resolve(module + "-" + version + ".jar");
+              .resolve(
+                  module
+                      + System.getProperty("streamfusion.artifact.suffix", "")
+                      + "-"
+                      + version
+                      + ".jar");
       if (!Files.isRegularFile(artifact)) {
         throw new IllegalStateException("Missing packaged extension artifact: " + artifact);
       }

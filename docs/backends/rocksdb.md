@@ -123,6 +123,17 @@ The two-component timestamp layout changes native row bytes and increments the s
 version. Older snapshots fail with a format-version error; see the
 [timestamp layout upgrade](canonical-state.md#timestamp-layout-upgrade) before upgrading a stateful job.
 
+## Flink 1.18 canonical projection
+
+The 1.18 development profile keeps native incremental checkpoints and ordinary host operators on
+RocksDB. Native canonical savepoints use a temporary heap backend to preserve independent
+synthetic keys and key-group IDs through the released host API. The snapshot takes ownership
+before live projection entries are cleared; temporary heap use scales with serialized canonical
+state. The native snapshot layout is unchanged. Use the StreamFusion native backend for this
+path. With an unwrapped stock 1.18 RocksDB delegate, native keyed operators decline during
+planning with an explicit backend diagnostic; stateless operators remain eligible. See
+[Flink line compatibility](../flink-compatibility.md) for outstanding recovery validation.
+
 ## Failed and aborted checkpoints
 
 If the native snapshot fails before returning its manifest, the backend removes its partial
@@ -134,3 +145,8 @@ can succeed without reopening the operator.
 
 Regression tests inject failures after the first upload, during native snapshot preparation and
 in the storage factory's reuse callback, and check both file cleanup and the next checkpoint.
+
+The 1.18 changelog state wrapper is also outside native keyed-state admission. Its replay assigns
+key groups from key hashes, while canonical native partitions require the saved explicit group.
+The planner declines these keyed operators with a changelog-specific reason; it does not unwrap
+the backend or bypass the changelog. Use `state.changelog.enabled=false` for native keyed jobs.

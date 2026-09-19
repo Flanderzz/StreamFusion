@@ -86,13 +86,15 @@ same packages for each target. Shared dependencies are reused by Cargo. The stag
 and Maven artifact names remain the same, including the single Avro native payload shared with
 Avro-Confluent-Registry. Extension libraries are checked for foreign JNI entry points before shipping.
 
-Following DataFusion Comet's runner-native pattern, it builds the Linux x86_64 payload on Ubuntu
-22.04 and the Apple Silicon payload on a macOS runner. The Linux image smoke test uses the same
-build baseline. Linux Rust caches have an explicit `ubuntu-22.04-glibc-2.35` key so a prior newer
-runner cannot contaminate deployment artifacts. Container builds use the released Rust Bullseye
-image; artifact validation rejects glibc requirements above 2.35 or unknown/private requirements.
-This keeps JNI payloads loadable in the official Flink Java 17 image, independently of the newer
-runner used for ordinary debug tests. It merges those binaries into the release
+Following DataFusion Comet's runner-native pattern, it builds the Linux x86_64 payload on an Ubuntu
+22.04 runner and the Apple Silicon payload on a macOS runner. The Linux image checks use that same
+glibc 2.35 build baseline with a separate Rust cache key, preventing reuse of Ubuntu 24.04
+objects. Linux artifact validation rejects packaged libraries requiring a newer glibc before
+image execution. This baseline loads in the official Flink 1.18 and 2.2 images. The containerized
+cross-platform builder uses Rust 1.94 on Debian Bullseye to stay below that ABI floor. A `--host-only`
+build inherits its host's libc requirements; do not build a deployment for an older distribution
+on Ubuntu 24.04. Both Java payload lines use the host SLF4J 1.7 API and provider, avoiding a
+conflicting SLF4J 2 API in Flink’s global classpath. The workflow merges those binaries into the release
 JARs, validates the artifact boundaries, signs and publishes the reactor through the Central Portal,
 and only then creates the GitHub release. A version containing a hyphen, such as `0.1.0-rc3`, becomes
 a GitHub prerelease.
@@ -100,3 +102,33 @@ a GitHub prerelease.
 If a release fails before Central reports it as published, fix the cause, delete the unpublished tag,
 and prepare a new candidate version. Once Central has published a coordinate, never reuse it; advance
 to the next candidate or patch version.
+
+## Flink 1.18 development artifacts
+
+`-Pflink-1.18` selects Flink 1.18.1 and adds `-flink1.18` to each deployment artifact ID. Build
+the line in a clean output tree and check it with
+`bin/check-artifacts.sh --flink-line 1.18` (`--host-only` for a local single-platform build).
+The default 2.2 artifacts keep their existing coordinates. Never combine outputs from the two
+profiles into one archive or installation. The published POMs must contain the resolved qualified
+coordinates and selected dependency versions, including inherited Arrow dependencies. The
+flattened module POMs are checked alongside the JARs so a successful reactor build cannot hide
+missing dependencies from downstream consumers.
+
+Publication of the 1.18 line remains gated on
+[dual-line CI and release validation](https://github.com/datafusion-contrib/StreamFusion/issues/189),
+the [connector matrix](https://github.com/datafusion-contrib/StreamFusion/issues/187) and
+[real-cluster recovery checks](https://github.com/datafusion-contrib/StreamFusion/issues/188).
+The local release tools accept the same line explicitly:
+
+```sh
+bin/build-release.sh --host-only --flink-line 1.18
+bin/check-artifacts.sh --host-only --flink-line 1.18
+bin/package-release.sh --flink-line 1.18
+```
+
+Release archives omit macOS metadata sidecars so they contain the same intended files on every
+build host. The 1.18 archive has a `streamfusion-flink1.18-` prefix and contains only qualified payloads;
+Delta is excluded from its build and archive. Base-image smoke validation covers both lines;
+the automated publication workflow still targets 2.2 until the remaining gates pass.
+No 1.18 Delta artifact is currently admitted. See
+[Flink line compatibility](flink-compatibility.md) for the exact development scope.
