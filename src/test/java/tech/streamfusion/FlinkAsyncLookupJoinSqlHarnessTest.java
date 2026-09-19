@@ -1,5 +1,9 @@
 package tech.streamfusion;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+
+import java.util.concurrent.TimeoutException;
 import java.util.function.Supplier;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.datastream.DataStream;
@@ -9,7 +13,10 @@ import org.apache.flink.table.api.Schema;
 import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.apache.flink.types.Row;
+import org.apache.flink.types.RowKind;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 /**
  * Nexmark q13's shape against an <b>async</b> lookup connector: the planner picks the async path, and
@@ -71,11 +78,84 @@ class FlinkAsyncLookupJoinSqlHarnessTest {
             + " ON MOD(B.auction, 5) = D.k AND B.price < 400");
   }
 
+  @Test
+  void neverCompletingConnectorUsesTheConfiguredHostTimeout() {
+    String sql =
+        "SELECT B.auction, D.val FROM bid AS B"
+            + " JOIN dim FOR SYSTEM_TIME AS OF B.p AS D ON MOD(B.auction, 5) = D.k";
+    var comparison = NativeFailureParity.run(environment("never"), sql);
+    Throwable host = comparison.host().rootCause();
+    Throwable nativeError = comparison.nativeRun().rootCause();
+    assertInstanceOf(TimeoutException.class, host, comparison.toString());
+    assertEquals(host.getClass(), nativeError.getClass(), comparison.toString());
+    assertEquals(host.getMessage(), nativeError.getMessage(), comparison.toString());
+    assertEquals(NativeFailureParity.Route.NATIVE, comparison.nativeRun().route());
+  }
+
+  @Test
+  void asynchronousLookupMissRetriesUseFlinksRetryWrapper() {
+    String sql =
+        "SELECT /*+ LOOKUP('table'='D', 'retry-predicate'='lookup_miss',"
+            + " 'retry-strategy'='fixed_delay', 'fixed-delay'='1 ms', 'max-attempts'='2') */"
+            + " B.auction, D.val FROM bid AS B"
+            + " JOIN dim FOR SYSTEM_TIME AS OF B.p AS D ON MOD(B.auction, 5) = D.k";
+    var comparison = NativeFailureParity.run(environment("miss-once"), sql);
+    comparison.assertSuccess(NativeFailureParity.Route.NATIVE);
+    assertEquals(6, comparison.host().rows().size(), comparison.toString());
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  void updatingProbesRetainFlinksChangelogAndKeyedScheduling(boolean keyOrdered) throws Exception {
+    NativeParity.assertFallbackReasonContains(
+        () -> {
+          var env = StreamExecutionEnvironment.getExecutionEnvironment();
+          env.setParallelism(1);
+          var table = StreamTableEnvironment.create(env);
+          table
+              .getConfig()
+              .set("table.exec.async-lookup.key-ordered-enabled", Boolean.toString(keyOrdered));
+          table.getConfig().set("table.exec.async-lookup.output-mode", "ALLOW_UNORDERED");
+          var changes =
+              env.fromData(
+                  Types.ROW_NAMED(new String[] {"auction", "price"}, Types.LONG, Types.LONG),
+                  Row.ofKind(RowKind.INSERT, 1L, 100L),
+                  Row.ofKind(RowKind.DELETE, 1L, 100L),
+                  Row.ofKind(RowKind.INSERT, 1L, 200L));
+          table.createTemporaryView(
+              "bid",
+              table.fromChangelogStream(
+                  changes,
+                  Schema.newBuilder()
+                      .column("auction", DataTypes.BIGINT())
+                      .column("price", DataTypes.BIGINT())
+                      .columnByExpression("p", "PROCTIME()")
+                      .build()));
+          table.executeSql(
+              "CREATE TABLE dim (k BIGINT, val STRING)"
+                  + " WITH ('connector' = 'test-lookup-async')");
+          return table;
+        },
+        "SELECT B.price, D.val FROM bid AS B"
+            + " JOIN dim FOR SYSTEM_TIME AS OF B.p AS D ON B.auction = D.k",
+        keyOrdered
+            ? "lookup join: key-ordered asynchronous lookup requires Flink's keyed scheduling"
+            : "lookup join: updating probes require Flink's changelog-aware lookup operator");
+  }
+
   private static Supplier<TableEnvironment> environment() {
+    return environment("normal");
+  }
+
+  private static Supplier<TableEnvironment> environment(String mode) {
     return () -> {
       StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
       env.setParallelism(1);
       StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
+      tEnv.getConfig().set("table.exec.async-lookup.buffer-capacity", "2");
+      if (mode.equals("never")) {
+        tEnv.getConfig().set("table.exec.async-lookup.timeout", "30 ms");
+      }
       DataStream<Row> bid =
           env.fromData(
               Types.ROW_NAMED(new String[] {"auction", "price"}, Types.LONG, Types.LONG),
@@ -94,7 +174,10 @@ class FlinkAsyncLookupJoinSqlHarnessTest {
               .columnByExpression("p", "PROCTIME()")
               .build());
       tEnv.executeSql(
-          "CREATE TABLE dim (k BIGINT, val STRING) WITH ('connector' = 'test-lookup-async')");
+          "CREATE TABLE dim (k BIGINT, val STRING) WITH ('connector' = 'test-lookup-async',"
+              + " 'test-mode' = '"
+              + mode
+              + "')");
       return tEnv;
     };
   }

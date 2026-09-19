@@ -101,9 +101,8 @@ execute either a single-phase native window aggregate or **both** native local a
 when the fixture's `splitDistinct` parameter is false.
 Each parameter variant must satisfy its own contract, including backend, mini-batch, async-state,
 and distinct-splitting variants selected by the pinned tests. The `splitDistinct=true` variants
-explicitly require full fallback with the unsupported `HASH_CODE` reason; their additional window
-layers also exceed current admission. `CalcITCase.testIfFunction` is a second fallback control,
-requiring the unsupported `IF` reason. A fixture parameter change that prevents selecting exactly
+explicitly require full fallback because attached-window aggregation needs two-phase execution.
+`CalcITCase.testIfFunction` requires a native Calc. A fixture parameter change that prevents selecting exactly
 one contract fails the test. Native and expected-fallback counts are reported separately.
 `WindowAggregateITCase.testRetractPreviousSlicingStateWithSlicingWindow` also requires fallback
 with the restricted retracting-aggregate diagnostic (the query also uses COUNT DISTINCT) for every phase, backend, timestamp and
@@ -113,6 +112,11 @@ insert; the upstream negative-count expectation remains intact.
 grouped aggregate and Top-N. Its variable-size counterpart, `testTopNWithVariableTopSize`,
 requires the explicit nullable-bound fallback; its aggregated bound also lacks a partition-invariance proof. Top-N input is credited only
 after its native push returns, including when an input coalescer delays that call.
+`LookupJoinITCase.testJoinTemporalTable` requires a completed native synchronous lookup batch.
+`AsyncLookupJoinITCase.testAsyncJoinTemporalTable` and `testAsyncJoinTemporalTableWithRetry`
+require completed native async lookup batches across every executed backend, object-reuse,
+output-order and cache variant. These counters are recorded after the host-delegating columnar
+operator completes its batch; merely opening the operator earns no credit.
 Other upstream cases still check
 result parity without a per-test acceleration contract; planner installation alone does not prove
 that any particular query ran natively.

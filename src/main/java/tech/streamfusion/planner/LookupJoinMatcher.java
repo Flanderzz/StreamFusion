@@ -8,6 +8,7 @@ import org.apache.calcite.rel.core.JoinRelType;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalLookupJoin;
 import org.apache.flink.table.planner.plan.schema.TableSourceTable;
 import org.apache.flink.table.planner.plan.utils.FunctionCallUtil;
+import org.apache.flink.types.RowKind;
 
 /**
  * Recognizes the processing-time lookup joins the native operator runs: {@code probe JOIN dim FOR
@@ -31,6 +32,12 @@ final class LookupJoinMatcher {
   }
 
   static String unsupportedReason(StreamPhysicalLookupJoin join) {
+    if (join.asyncOptions().isDefined() && join.asyncOptions().get().keyOrdered) {
+      return "lookup join: key-ordered asynchronous lookup requires Flink's keyed scheduling";
+    }
+    if (!join.inputChangelogMode().containsOnly(RowKind.INSERT)) {
+      return "lookup join: updating probes require Flink's changelog-aware lookup operator";
+    }
     if (join.upsertMaterialize()) {
       return "lookup join: upsert-materialized (keyed-state) lookup not supported";
     }
