@@ -27,18 +27,18 @@ import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
-import java.util.LinkedHashSet;
+import java.util.jar.Attributes;
 import java.util.stream.Stream;
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.ConfigurationUtils;
 import org.apache.flink.configuration.CoreOptions;
 import org.apache.flink.core.classloading.ComponentClassLoader;
-import org.apache.flink.core.classloading.SubmoduleClassLoader;
 import org.apache.flink.table.api.TableException;
 import org.apache.flink.table.delegation.ExecutorFactory;
 import org.apache.flink.table.delegation.PlannerFactory;
@@ -60,15 +60,16 @@ public class PlannerModule {
   static final String FLINK_TABLE_PLANNER_FAT_JAR = "flink-table-planner.jar";
   private static final Set<String> SUPPORTED_FLINK_VERSIONS = Set.of("2.2.0", "2.2.1");
   private static final String STREAMFUSION_PLANNER_JAR = "streamfusion-planner.jar";
-  private static final String[] STREAMFUSION_EXTENSION_PREFIXES = {
-    "streamfusion-kafka-",
-    "streamfusion-json-",
-    "streamfusion-csv-",
-    "streamfusion-raw-",
-    "streamfusion-avro-",
-    "streamfusion-protobuf-",
-    "streamfusion-parquet-"
-  };
+  private static final Set<String> STREAMFUSION_PLANNER_EXTENSIONS =
+      Set.of(
+          "streamfusion-kafka",
+          "streamfusion-json",
+          "streamfusion-csv",
+          "streamfusion-raw",
+          "streamfusion-avro",
+          "streamfusion-avro-confluent-registry",
+          "streamfusion-protobuf",
+          "streamfusion-parquet");
   private static final String STREAMFUSION_PLANNER_FACTORY =
       "tech.streamfusion.planner.StreamFusionPlannerFactory";
 
@@ -111,11 +112,14 @@ public class PlannerModule {
 
       URL streamFusionPlanner =
           extractResource(flinkClassLoader, temporaryDirectory, STREAMFUSION_PLANNER_JAR);
+      String flinkLine = FlinkPayloadIdentity.loaderLine();
+      FlinkPayloadIdentity.verify(
+          streamFusionPlanner, FlinkPayloadIdentity.attributes(streamFusionPlanner), flinkLine);
       URL flinkPlanner =
           extractResource(flinkClassLoader, temporaryDirectory, FLINK_TABLE_PLANNER_FAT_JAR);
       List<URL> plannerClasspath = new ArrayList<>();
       plannerClasspath.add(streamFusionPlanner);
-      plannerClasspath.addAll(extensionJars());
+      plannerClasspath.addAll(extensionJars(flinkLine));
       plannerClasspath.add(flinkPlanner);
       this.submoduleClassLoader =
           new PlannerComponentClassLoader(
@@ -190,7 +194,7 @@ public class PlannerModule {
   }
 
   /** Returns explicitly installed connector extensions, never arbitrary user or connector JARs. */
-  private static List<URL> extensionJars() throws IOException {
+  private static List<URL> extensionJars(String flinkLine) throws IOException {
     LinkedHashSet<Path> installed = new LinkedHashSet<>();
     String flinkHome = System.getenv("FLINK_HOME");
     if (flinkHome != null && !flinkHome.isBlank()) {
@@ -199,15 +203,28 @@ public class PlannerModule {
     // Embedded/local clients commonly start without FLINK_HOME. Respect extension artifacts that
     // are actual classpath entries as well; directory trees and arbitrary connector JARs remain
     // excluded.
-    for (String entry : System.getProperty("java.class.path", "").split(java.io.File.pathSeparator)) {
+    for (String entry :
+        System.getProperty("java.class.path", "").split(java.io.File.pathSeparator)) {
       if (!entry.isBlank()) {
         Path path = Paths.get(entry).toAbsolutePath().normalize();
-        if (Files.isRegularFile(path) && isExtensionJar(path.getFileName().toString())) {
+        if (Files.isRegularFile(path) && path.getFileName().toString().endsWith(".jar")) {
           installed.add(path);
         }
       }
     }
-    return installed.stream().sorted().map(PlannerModule::toUrl).toList();
+    List<URL> extensions = new ArrayList<>();
+    for (Path path : installed.stream().sorted().toList()) {
+      URL url = toUrl(path);
+      Attributes attributes = FlinkPayloadIdentity.attributes(url);
+      String module = attributes.getValue(FlinkPayloadIdentity.MODULE_ATTRIBUTE);
+      if (module != null && module.startsWith("streamfusion-")
+          || attributes.getValue(FlinkPayloadIdentity.LINE_ATTRIBUTE) != null
+          || path.getFileName().toString().matches("(?:[0-9]+-)?streamfusion-.*\\.jar")) {
+        FlinkPayloadIdentity.verify(url, attributes, flinkLine);
+        if (module != null && STREAMFUSION_PLANNER_EXTENSIONS.contains(module)) extensions.add(url);
+      }
+    }
+    return extensions;
   }
 
   private static void collectExtensions(Path directory, Set<Path> installed) throws IOException {
@@ -217,7 +234,6 @@ public class PlannerModule {
     try (Stream<Path> jars = Files.list(directory)) {
       jars
           .filter(Files::isRegularFile)
-          .filter(path -> isExtensionJar(path.getFileName().toString()))
           .filter(path -> path.getFileName().toString().endsWith(".jar"))
           .map(path -> path.toAbsolutePath().normalize())
           .forEach(installed::add);
@@ -230,15 +246,6 @@ public class PlannerModule {
     } catch (IOException e) {
       throw new TableException("Could not load StreamFusion extension '" + path + "'.", e);
     }
-  }
-
-  private static boolean isExtensionJar(String fileName) {
-    for (String prefix : STREAMFUSION_EXTENSION_PREFIXES) {
-      if (fileName.startsWith(prefix)) {
-        return true;
-      }
-    }
-    return false;
   }
 
   private static class PlannerComponentsHolder {

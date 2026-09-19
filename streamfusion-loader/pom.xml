@@ -48,6 +48,7 @@
              admitted planner ABI patch versions. -->
         <flink.loader.test.version>2.2.0</flink.loader.test.version>
         <flink.runtime.version>2.2.1</flink.runtime.version>
+        <flink.line>2.2</flink.line>
         <junit.version>5.10.2</junit.version>
     </properties>
 
@@ -129,7 +130,24 @@
     </dependencies>
 
     <build>
+        <resources>
+            <resource>
+                <directory>src/main/resources-filtered</directory>
+                <filtering>true</filtering>
+            </resource>
+        </resources>
         <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>3.4.1</version>
+                <configuration>
+                    <archive><manifestEntries>
+                        <StreamFusion-Module>${project.artifactId}</StreamFusion-Module>
+                        <StreamFusion-Flink-Line>${flink.line}</StreamFusion-Flink-Line>
+                    </manifestEntries></archive>
+                </configuration>
+            </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-dependency-plugin</artifactId>

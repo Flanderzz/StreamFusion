@@ -60,6 +60,7 @@
         <junit.version>5.10.2</junit.version>
         <arrow.version>18.3.0</arrow.version>
         <flink.version>2.2.1</flink.version>
+        <flink.line>2.2</flink.line>
         <!-- Keep the runtime Kafka client aligned with flink-connector-kafka 5.0.0-2.2. A direct
              dependency is necessary for source compilation, but pinning an older version here
              silently overrides the connector's transitive client and changes producer semantics. -->
@@ -361,6 +362,17 @@
         </plugins>
         <pluginManagement>
         <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>3.4.1</version>
+                <configuration>
+                    <archive><manifestEntries>
+                        <StreamFusion-Module>${project.artifactId}</StreamFusion-Module>
+                        <StreamFusion-Flink-Line>${flink.line}</StreamFusion-Flink-Line>
+                    </manifestEntries></archive>
+                </configuration>
+            </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-javadoc-plugin</artifactId>

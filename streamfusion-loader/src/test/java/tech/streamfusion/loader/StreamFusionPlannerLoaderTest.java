@@ -5,8 +5,14 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.lang.reflect.InvocationTargetException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.jar.Attributes;
+import java.util.jar.JarOutputStream;
+import java.util.jar.Manifest;
 import org.apache.flink.table.api.EnvironmentSettings;
 import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.TableResult;
@@ -14,9 +20,67 @@ import org.apache.flink.table.planner.loader.PlannerModule;
 import org.apache.flink.types.Row;
 import org.apache.flink.util.CloseableIterator;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 /** Verifies planner installation from the classpath, without an application-side hook. */
 class StreamFusionPlannerLoaderTest {
+  @TempDir Path directory;
+
+  @Test
+  void acceptsARenamedMatchingExtensionAndRejectsAnUnmarkedLegacyExtension() throws Exception {
+    Path renamed = directory.resolve("renamed.jar");
+    Manifest manifest = new Manifest();
+    manifest.getMainAttributes().put(Attributes.Name.MANIFEST_VERSION, "1.0");
+    manifest.getMainAttributes().putValue("StreamFusion-Module", "streamfusion-json");
+    manifest.getMainAttributes().putValue("StreamFusion-Flink-Line", "2.2");
+    try (var ignored = new JarOutputStream(Files.newOutputStream(renamed), manifest)) {}
+    Path legacy = directory.resolve("01-streamfusion-paimon.jar");
+    try (var ignored = new JarOutputStream(Files.newOutputStream(legacy))) {}
+    String original = System.getProperty("java.class.path");
+    var constructor = PlannerModule.class.getDeclaredConstructor();
+    constructor.setAccessible(true);
+
+    try {
+      System.setProperty("java.class.path", original + java.io.File.pathSeparator + renamed);
+      var module = constructor.newInstance();
+      try (var classLoader = module.getSubmoduleClassLoader()) {
+        assertTrue(List.of(classLoader.getURLs()).contains(renamed.toUri().toURL()));
+      }
+
+      System.setProperty("java.class.path", original + java.io.File.pathSeparator + legacy);
+      var failure = assertThrows(InvocationTargetException.class, constructor::newInstance);
+      assertTrue(failure.getCause().getMessage().contains("missing marker"));
+    } finally {
+      System.setProperty("java.class.path", original);
+    }
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"streamfusion-core", "streamfusion-json", "streamfusion-paimon"})
+  void rejectsMixedInstalledPayloadsBeforeCreatingThePlanner(String module) throws Exception {
+    // A renamed JAR must retain its identity, including modules loaded by Flink's host classloader.
+    Path jar = directory.resolve("renamed.jar");
+    Manifest manifest = new Manifest();
+    manifest.getMainAttributes().put(Attributes.Name.MANIFEST_VERSION, "1.0");
+    manifest.getMainAttributes().putValue("StreamFusion-Module", module);
+    manifest.getMainAttributes().putValue("StreamFusion-Flink-Line", "1.18");
+    try (var ignored = new JarOutputStream(Files.newOutputStream(jar), manifest)) {}
+    String original = System.getProperty("java.class.path");
+    var constructor = PlannerModule.class.getDeclaredConstructor();
+    constructor.setAccessible(true);
+
+    try {
+      System.setProperty("java.class.path", original + java.io.File.pathSeparator + jar);
+      var failure = assertThrows(InvocationTargetException.class, constructor::newInstance);
+
+      assertTrue(failure.getCause().getMessage().contains("loader targets Flink 2.2"));
+      assertTrue(failure.getCause().getMessage().contains("targets Flink 1.18"));
+    } finally {
+      System.setProperty("java.class.path", original);
+    }
+  }
 
   @Test
   void corePayloadDoesNotContainOptionalConnectorIntegrations() {

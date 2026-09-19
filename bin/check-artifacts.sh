@@ -25,11 +25,24 @@ fi
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(cd "$script_dir/.." && pwd)
 version=$(cd "$repo_root" && mvn -q -DforceStdout help:evaluate -Dexpression=project.version)
+flink_line=$(cd "$repo_root" && mvn -q -DforceStdout help:evaluate -Dexpression=flink.line)
 modules="core kafka json csv raw avro avro-confluent-registry protobuf parquet orc delta paimon"
 entries=$(mktemp)
 native_entries=$(mktemp)
 expected_native_entries=$(mktemp)
 trap 'rm -f "$entries" "$native_entries" "$expected_native_entries"' EXIT HUP INT TERM
+
+assert_flink_identity() {
+  jar_file=$1
+  module=$2
+  manifest=$(unzip -p "$jar_file" META-INF/MANIFEST.MF | tr -d '\r')
+  actual_line=$(printf '%s\n' "$manifest" | sed -n 's/^StreamFusion-Flink-Line: //p')
+  actual_module=$(printf '%s\n' "$manifest" | sed -n 's/^StreamFusion-Module: //p')
+  if [ "$actual_line" != "$flink_line" ] || [ "$actual_module" != "$module" ]; then
+    echo "$jar_file has identity '$actual_module' / Flink '$actual_line', expected '$module' / Flink '$flink_line'" >&2
+    exit 1
+  fi
+}
 
 assert_native_payload() {
   jar_file=$1
@@ -78,6 +91,7 @@ for suffix in $modules; do
     echo "missing artifact: $jar_file" >&2
     exit 1
   fi
+  assert_flink_identity "$jar_file" "$module"
   jar tf "$jar_file" | awk -v module="$module" \
     '/^tech\/streamfusion\/.*\.class$/ { print $0, module }' >>"$entries"
   if [ "$suffix" != core ] && jar tf "$jar_file" \
@@ -89,6 +103,7 @@ done
 
 core_jar="$repo_root/streamfusion-core/target/streamfusion-core-$version-runtime.jar"
 core_main_jar="$repo_root/streamfusion-core/target/streamfusion-core-$version.jar"
+assert_flink_identity "$core_main_jar" streamfusion-core
 assert_native_payload "$core_main_jar" streamfusion-core libstreamfusion ""
 assert_native_payload "$core_jar" streamfusion-core libstreamfusion ""
 if jar tf "$core_jar" | grep -Eq '^tech/streamfusion/(kafka|parquet|orc|delta|paimon|format/(json|csv|raw|avro|avroconfluent|protobuf))/'; then
@@ -105,6 +120,9 @@ done
 assert_no_native_payload \
   "$repo_root/streamfusion-runtime/target/streamfusion-runtime-$version.jar" \
   streamfusion-runtime
+assert_flink_identity \
+  "$repo_root/streamfusion-runtime/target/streamfusion-runtime-$version.jar" \
+  streamfusion-runtime
 assert_no_native_payload \
   "$repo_root/streamfusion-avro-confluent-registry/target/streamfusion-avro-confluent-registry-$version.jar" \
   streamfusion-avro-confluent-registry
@@ -118,6 +136,7 @@ if [ ! -f "$loader_jar" ]; then
   exit 1
 fi
 assert_no_native_payload "$loader_jar" streamfusion-loader
+assert_flink_identity "$loader_jar" streamfusion-loader
 if ! unzip -p "$loader_jar" streamfusion-planner.jar | cmp -s - "$core_jar"; then
   echo "streamfusion-loader does not embed the exact core runtime payload" >&2
   exit 1
