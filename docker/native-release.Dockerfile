@@ -1,4 +1,5 @@
-FROM rust:1.94-bookworm
+# Keep the libc and C++ symbol floor below the official Flink 1.18 image (Ubuntu 22.04).
+FROM rust:1.94-bullseye
 
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \

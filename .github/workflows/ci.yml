@@ -65,6 +65,7 @@ jobs:
           mvn -B -ntp -f dev/flink-suite/agent/pom.xml package
           python3 -m unittest discover -s dev/flink-suite -p 'test_*.py'
           python3 -m unittest discover -s bin -p 'test_check_native_tls.py'
+          python3 -m unittest discover -s bin -p 'test_check_native_glibc.py'
 
       - uses: dtolnay/rust-toolchain@1.94.0
 
@@ -137,7 +138,7 @@ jobs:
 
   image-integration:
     name: Flink image integration (optimized native build)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v6
@@ -159,6 +160,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
+          key: ubuntu-22.04-glibc-2.35
           workspaces: native
 
       # Host-only is still a production Linux/x86_64 release (including mimalloc); cross-platform

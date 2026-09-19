@@ -94,6 +94,7 @@ for suffix in $modules; do
   assert_flink_identity "$jar_file" "$module"
   if [ "$(uname -s)" = Linux ]; then
     python3 "$script_dir/check-native-tls.py" "$jar_file"
+    python3 "$script_dir/check-native-glibc.py" "$jar_file"
   fi
   jar tf "$jar_file" | awk -v module="$module" \
     '/^tech\/streamfusion\/.*\.class$/ { print $0, module }' >>"$entries"
