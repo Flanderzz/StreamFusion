@@ -1,6 +1,7 @@
 package tech.streamfusion;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -49,7 +50,7 @@ class FlinkNestedJsonJvmSqlHarnessTest {
         "JSON_QUERY(s, p), ARRAY[id, CAST(NULL AS INT), id + 1]"
       })
   void nestedInputsAndOutputsMatchTheGeneratedHostCalc(String projection) throws Exception {
-    String sql = "SELECT id, " + projection + " FROM inputs";
+    String sql = compatibleQuery("SELECT id, " + projection + " FROM inputs", false);
     String plan = NativePlanner.explain(environment(false), sql);
     assertTrue(plan.contains("NativeCalc") && plan.contains("jsonEvaluation=[JVM]"), plan);
     NativeParity.assertParity(() -> environment(false), sql);
@@ -64,7 +65,8 @@ class FlinkNestedJsonJvmSqlHarnessTest {
           var table = StreamTableEnvironment.create(env);
           table.createTemporaryView(
               "inputs",
-              env.fromData(
+              fromData(
+                  env,
                   List.of(
                       Row.of(
                           new java.math.BigDecimal[] {new java.math.BigDecimal("12.345"), null},
@@ -90,7 +92,8 @@ class FlinkNestedJsonJvmSqlHarnessTest {
   @Test
   void nestedResultsKeepRawChangelogKindsAfterFiltering() throws Exception {
     NativeParity.assertKindedParity(
-        () -> environment(true), "SELECT id, a, r, JSON_QUERY(s, p) FROM inputs WHERE id <> 2");
+        () -> environment(true),
+        compatibleQuery("SELECT id, a, r, JSON_QUERY(s, p) FROM inputs WHERE id <> 2", true));
   }
 
   @ParameterizedTest
@@ -103,7 +106,8 @@ class FlinkNestedJsonJvmSqlHarnessTest {
           var table = StreamTableEnvironment.create(env);
           table.createTemporaryView(
               "inputs",
-              env.fromData(
+              fromData(
+                  env,
                   List.of(Row.of(Map.of("a", 1), "{}")),
                   Types.ROW_NAMED(
                       new String[] {"m", "s"}, Types.MAP(Types.STRING, Types.INT), Types.STRING)));
@@ -111,6 +115,20 @@ class FlinkNestedJsonJvmSqlHarnessTest {
         },
         "SELECT " + projection + " FROM inputs",
         "row-fused UDF");
+  }
+
+  private static String compatibleQuery(String sql, boolean changelog) {
+    if (tech.streamfusion.compat.FlinkTestCapabilities.DYNAMIC_JSON_QUERY
+        || !sql.contains("JSON_QUERY(s, p)")) {
+      return sql;
+    }
+    NativeFailureParity.run(() -> environment(changelog), sql)
+        .assertFailure(
+            org.apache.flink.table.planner.codegen.CodeGenException.class,
+            "Unsupported call: JSON_QUERY",
+            NativeFailureParity.Phase.PLANNING,
+            NativeFailureParity.Route.FALLBACK);
+    return sql.replace("JSON_QUERY(s, p)", "JSON_QUERY(s, '$.items')");
   }
 
   private static TableEnvironment environment(boolean changelog) {
@@ -157,9 +175,9 @@ class FlinkNestedJsonJvmSqlHarnessTest {
       Row deleted = Row.copy(rows.get(3));
       deleted.setKind(RowKind.DELETE);
       rows.add(deleted);
-      table.createTemporaryView("inputs", table.fromChangelogStream(env.fromData(rows, INPUT)));
+      table.createTemporaryView("inputs", table.fromChangelogStream(fromData(env, rows, INPUT)));
     } else {
-      table.createTemporaryView("inputs", env.fromData(rows, INPUT));
+      table.createTemporaryView("inputs", fromData(env, rows, INPUT));
     }
     return table;
   }
