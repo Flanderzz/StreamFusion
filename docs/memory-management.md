@@ -23,6 +23,10 @@ Reservations are acquired before the corresponding native capacity is made avail
 released with their owner. Arrow allocations are charged and released at their actual allocation
 lifetime; operator and zero-copy batch handles also release ownership on normal close and task
 cancellation.
+Before a row-to-Arrow conversion hands its batch to a consumer, the converter owns every allocated
+vector. A rejected allocation or a row conversion error closes those vectors, including the
+changelog sidecar, before propagating the original failure. Cleanup errors are attached as
+suppressed exceptions so they cannot hide the allocation or conversion error.
 
 Parquet sink writer allocations are not yet connected to this authority. Small allocations made
 inside native libraries, allocator metadata, thread stacks, loaded libraries, and other process
