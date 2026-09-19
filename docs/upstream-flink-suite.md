@@ -399,7 +399,14 @@ Its public issue-derived matrix is independent of the unavailable private Septem
 The 1.18 runtime suite preserves the upstream fixture's heap or stock RocksDB selection.
 Its execution contracts require native work for admitted heap cases and the explicit backend
 fallback for stock RocksDB cases. Selectors can combine inherited fixture parameters, such as
-`state=HEAP&splitDistinct=false`; a missing field or ambiguous match fails the invocation.
+`state=HEAP&splitDistinct=false&changelog=false`; a missing field or ambiguous match fails the
+invocation. `changelog` reads the fixture's actual randomized execution-environment setting.
+Enabled changelog state requires its explicit planning fallback; the suite does not turn off
+upstream checkpoint randomization. Legacy lookup-source variants likewise require the existing
+legacy-source fallback, while modern source variants must process rows natively. The summarizer
+resolves old Surefire simple class names against the enclosing fully qualified suite name and
+still requires one evidence record per executed invocation.
 The separate state suite replaces legacy programmatic RocksDB selection with StreamFusion's
-backend while preserving the fixture's checkpoint storage and incremental-checkpoint setting.
-Its own contract manifest requires native work for those replaced cases as well.
+backend for configurations without changelog state, preserving the fixture's checkpoint storage
+and incremental-checkpoint setting. Changelog-enabled fixtures retain the stock backend.
+Its own contract manifest requires native work for admitted replaced cases as well.

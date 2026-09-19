@@ -148,6 +148,7 @@ class NativeExecutionTest {
 
   private static class WindowFixture {
     private final String state = "HEAP";
+    private final FakeScalaEnvironment env = new FakeScalaEnvironment(false);
     private final boolean splitDistinct;
 
     WindowFixture(boolean splitDistinct) {
@@ -193,6 +194,46 @@ class NativeExecutionTest {
     assertFalse(NativeExecution.matches("state=ROCKSDB&splitDistinct=false", fixture));
     assertFalse(NativeExecution.matches("state=HEAP&splitDistinct=true", fixture));
     assertThrows(AssertionError.class, () -> NativeExecution.matches("missing=true", fixture));
+  }
+
+  @Test
+  void selectorsObserveTheFixturesActualRandomizedChangelogConfiguration() {
+    class Fixture {
+      private final FakeScalaEnvironment env;
+
+      Fixture(boolean enabled) {
+        env = new FakeScalaEnvironment(enabled);
+      }
+    }
+    assertTrue(NativeExecution.matches("changelog=true", new Fixture(true)));
+    assertFalse(NativeExecution.matches("changelog=false", new Fixture(true)));
+    assertTrue(NativeExecution.matches("changelog=false", new Fixture(false)));
+    assertThrows(
+        AssertionError.class, () -> NativeExecution.matches("changelog=true", new Object()));
+  }
+
+  public static final class FakeScalaEnvironment {
+    private final FakeJavaEnvironment javaEnvironment;
+
+    FakeScalaEnvironment(boolean enabled) {
+      javaEnvironment = new FakeJavaEnvironment(enabled);
+    }
+
+    public FakeJavaEnvironment getJavaEnv() {
+      return javaEnvironment;
+    }
+  }
+
+  public static final class FakeJavaEnvironment {
+    private final boolean enabled;
+
+    FakeJavaEnvironment(boolean enabled) {
+      this.enabled = enabled;
+    }
+
+    public String isChangelogStateBackendEnabled() {
+      return enabled ? "TRUE" : "FALSE";
+    }
   }
 
   private static class NativeCalcOperator {}

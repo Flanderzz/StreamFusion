@@ -109,24 +109,41 @@ public final class NativeExecution {
     if (selector.equals("*")) return true;
     for (String condition : selector.split("&")) {
       String[] parts = condition.split("=", 2);
-      Class<?> type = fixture.getClass();
-      while (type != null) {
-        try {
-          var field = type.getDeclaredField(parts[0]);
-          field.setAccessible(true);
-          if (!String.valueOf(field.get(fixture)).equals(parts[1])) return false;
-          break;
-        } catch (NoSuchFieldException e) {
-          type = type.getSuperclass();
-        } catch (ReflectiveOperationException e) {
-          throw new AssertionError("Cannot read pinned upstream fixture selector " + selector, e);
-        }
-      }
-      if (type == null) {
-        throw new AssertionError("Cannot read pinned upstream fixture selector " + selector);
-      }
+      Object value =
+          parts[0].equals("changelog") ? changelogEnabled(fixture) : field(fixture, parts[0]);
+      if (!String.valueOf(value).equals(parts[1])) return false;
     }
     return true;
+  }
+
+  private static Object field(Object fixture, String name) {
+    for (Class<?> type = fixture.getClass(); type != null; type = type.getSuperclass()) {
+      try {
+        var field = type.getDeclaredField(name);
+        field.setAccessible(true);
+        return field.get(fixture);
+      } catch (NoSuchFieldException ignored) {
+        // Pinned fixture parameters may belong to the upstream base class.
+      } catch (ReflectiveOperationException e) {
+        throw new AssertionError("Cannot read pinned upstream fixture selector " + name, e);
+      }
+    }
+    throw new AssertionError("Cannot read pinned upstream fixture selector " + name);
+  }
+
+  private static boolean changelogEnabled(Object fixture) {
+    try {
+      Object environment = field(fixture, "env");
+      Object javaEnvironment = environment.getClass().getMethod("getJavaEnv").invoke(environment);
+      return javaEnvironment
+          .getClass()
+          .getMethod("isChangelogStateBackendEnabled")
+          .invoke(javaEnvironment)
+          .toString()
+          .equals("TRUE");
+    } catch (ReflectiveOperationException e) {
+      throw new AssertionError("Cannot read pinned upstream changelog configuration", e);
+    }
   }
 
   public static synchronized void opened(Object operator) {

@@ -16,7 +16,11 @@ a temporary Flink heap backend for its canonical projection, retaining the relea
 protocol and clearing live projection state after the snapshot owns its copy. Ordinary JVM
 operators keep their RocksDB delegate. The cost is temporary JVM heap proportional to serialized
 canonical state. A stock RocksDB delegate is not an admitted native canonical-state carrier on
-1.18; the native memory and StreamFusion RocksDB backends are the supported choices.
+1.18; the native memory and StreamFusion RocksDB backends are the supported choices. The 1.18
+changelog wrapper also recomputes groups from serialized keys during log replay. Native keyed
+planning therefore declines changelog-enabled environments instead of unwrapping their backend
+and bypassing the durability log. Upstream randomization remains enabled and its actual selected
+configuration determines the expected native or fallback contract.
 
 Host semantics that differ remain explicit policy inputs: eager rowtime keep-first, unchanged
 mini-batch output with TTL, Jackson decimal normalization, and Parquet map-key nullability. They do

@@ -19,6 +19,17 @@ public abstract class FlinkStateBackendCompat implements StateBackend {
   public static String unsupportedNativeStateReason(
       org.apache.flink.streaming.api.environment.StreamExecutionEnvironment environment,
       ReadableConfig tableConfig) {
+    boolean changelog =
+        environment == null
+            ? tableConfig
+                .getOptional(
+                    org.apache.flink.configuration.StateChangelogOptions.ENABLE_STATE_CHANGE_LOG)
+                .orElse(false)
+            : environment.isChangelogStateBackendEnabled()
+                == org.apache.flink.util.TernaryBoolean.TRUE;
+    if (changelog) {
+      return "state backend: Flink 1.18 changelog state is not verified for native keyed state";
+    }
     StateBackend backend = environment == null ? null : environment.getStateBackend();
     if (backend instanceof org.apache.flink.runtime.state.hashmap.HashMapStateBackend
         || backend instanceof org.apache.flink.runtime.state.memory.MemoryStateBackend
@@ -45,7 +56,7 @@ public abstract class FlinkStateBackendCompat implements StateBackend {
       return null;
     }
     return "state backend: Flink 1.18 native keyed state requires heap state or the StreamFusion"
-               + " RocksDB backend";
+        + " RocksDB backend";
   }
 
   protected FlinkStateBackendCompat(ReadableConfig config, ClassLoader classLoader) {

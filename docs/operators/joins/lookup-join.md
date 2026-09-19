@@ -80,5 +80,7 @@ SF_BENCHMARK=true mvn -pl streamfusion-runtime -am test -Pbench \
 
 The development profile adapts Flink 1.18's generated lookup runners and lifecycle to the same
 Arrow batch operators. Async capacity, timeout and cleanup remain enforced. Key-ordered async
-lookup is N/A on that host line; it is not counted as a planner fallback. See
+lookup is N/A on that host line; it is not counted as a planner fallback. Legacy table-source
+lookup providers stay on Flink. The unchanged 1.18 upstream lookup suites include both legacy
+and modern providers; execution contracts distinguish their fallback and native routes. See
 [Flink line compatibility](../../flink-compatibility.md) for validation status.

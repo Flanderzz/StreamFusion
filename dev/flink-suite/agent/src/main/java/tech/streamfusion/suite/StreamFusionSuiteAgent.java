@@ -506,6 +506,17 @@ public final class StreamFusionSuiteAgent {
       }
       try {
         Class<?> configOption = Class.forName("org.apache.flink.configuration.ConfigOption");
+        if (System.getProperty("streamfusion.flink-suite.flink-line", "2.2").equals("1.18")) {
+          Object changelogOption =
+              Class.forName("org.apache.flink.configuration.StateChangelogOptions")
+                  .getField("ENABLE_STATE_CHANGE_LOG")
+                  .get(null);
+          if (Boolean.TRUE.equals(
+              configuration
+                  .getClass()
+                  .getMethod("get", configOption)
+                  .invoke(configuration, changelogOption))) return;
+        }
         Object backendOption =
             Class.forName("org.apache.flink.configuration.StateBackendOptions")
                 .getField("STATE_BACKEND")

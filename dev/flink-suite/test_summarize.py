@@ -44,6 +44,20 @@ class NativeExecutionSummaryTest(unittest.TestCase):
         ), redirect_stdout(io.StringIO()):
             self.assertEqual(1, summarize.main())
 
+    def test_old_surefire_simple_class_name_still_requires_every_invocation(self):
+        full_class, method = self.CALC.split("#")
+        xml = (f'<testsuite name="{full_class}" tests="2">'
+               f'<testcase classname="CalcITCase" name="{method}"/>'
+               f'<testcase classname="CalcITCase" name="{method}"/></testsuite>')
+        (self.root / "TEST-calc.xml").write_text(xml)
+        self.record(self.CALC, "NativeCalcOperator=3")
+        arguments = ["summarize.py", str(self.root), "--native-reports", str(self.root)]
+        with patch.object(sys, "argv", arguments), redirect_stdout(io.StringIO()):
+            self.assertEqual(1, summarize.main())
+        self.record(self.CALC, "NativeCalcOperator=4", name="second")
+        with patch.object(sys, "argv", arguments), redirect_stdout(io.StringIO()):
+            self.assertEqual(0, summarize.main())
+
     def test_xfail_cannot_hide_missing_execution(self):
         xml = f'<testsuite tests="1" failures="1"><testcase classname="{self.CALC.split("#")[0]}" name="testLongProjectionList"><failure message="expected"/></testcase></testsuite>'
         (self.root / "TEST-calc.xml").write_text(xml)

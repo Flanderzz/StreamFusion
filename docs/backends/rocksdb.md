@@ -145,3 +145,8 @@ can succeed without reopening the operator.
 
 Regression tests inject failures after the first upload, during native snapshot preparation and
 in the storage factory's reuse callback, and check both file cleanup and the next checkpoint.
+
+The 1.18 changelog state wrapper is also outside native keyed-state admission. Its replay assigns
+key groups from key hashes, while canonical native partitions require the saved explicit group.
+The planner declines these keyed operators with a changelog-specific reason; it does not unwrap
+the backend or bypass the changelog. Use `state.changelog.enabled=false` for native keyed jobs.

@@ -161,8 +161,13 @@ def main() -> int:
         errors += int(suite.attrib.get("errors", 0))
         skipped += int(suite.attrib.get("skipped", 0))
         for case in suite.findall("testcase"):
+            suite_name = suite.attrib.get("name", "unknown")
+            class_name = case.attrib.get("classname", suite_name)
+            # Surefire 3.0.0-M5 emits simple class names for JUnit 4 parameterized tests.
+            if "." not in class_name and suite_name.endswith("." + class_name):
+                class_name = suite_name
             case_key = (
-                case.attrib.get("classname", suite.attrib.get("name", "unknown"))
+                class_name
                 + "#"
                 + case.attrib.get("name", "unknown")
             )
@@ -180,7 +185,7 @@ def main() -> int:
             detail = (problem.attrib.get("message") or problem.text or "").strip()
             detail = " ".join(detail.split())[:800]
             item = (
-                case.attrib.get("classname", suite.attrib.get("name", "unknown")),
+                class_name,
                 case.attrib.get("name", "unknown"),
                 kind,
                 detail,

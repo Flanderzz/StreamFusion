@@ -124,3 +124,9 @@ RocksDB delegate cannot carry StreamFusion's synthetic canonical key-group keys 
 The planner keeps keyed operators on Flink for that backend and other unverified custom backends,
 with an explicit fallback reason; stateless operators remain eligible.
 The full real-cluster recovery and cross-line upgrade matrix remains tracked in the issues above.
+
+Flink 1.18's changelog state wrapper remains a planning fallback for keyed native operators,
+even when it wraps heap state. Its log replay recomputes key groups from serialized keys, which
+does not preserve StreamFusion's explicit canonical partition/group pairing. Stateless native
+operators remain admitted. Keep `state.changelog.enabled=false` for native keyed execution;
+the upstream suite retains Flink's randomization and asserts this fallback when it is enabled.

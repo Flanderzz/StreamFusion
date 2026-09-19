@@ -21,6 +21,14 @@ public final class LegacyStateBackend {
       return backend;
     }
     try {
+      if (environment
+          .getClass()
+          .getMethod("isChangelogStateBackendEnabled")
+          .invoke(environment)
+          .toString()
+          .equals("TRUE")) {
+        return backend;
+      }
       Object checkpointConfig =
           environment.getClass().getMethod("getCheckpointConfig").invoke(environment);
       Object storage = backend.getClass().getMethod("getCheckpointBackend").invoke(backend);
