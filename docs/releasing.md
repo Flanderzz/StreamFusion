@@ -88,7 +88,9 @@ Avro-Confluent-Registry. Extension libraries are checked for foreign JNI entry p
 
 Following DataFusion Comet's runner-native pattern, it builds the Linux x86_64 payload on an Ubuntu
 22.04 runner and the Apple Silicon payload on a macOS runner. The Linux image checks use that same
-glibc 2.35 build baseline, which loads in the official Flink 1.18 and 2.2 images. The containerized
+glibc 2.35 build baseline with a separate Rust cache key, preventing reuse of Ubuntu 24.04
+objects. Linux artifact validation rejects packaged libraries requiring a newer glibc before
+image execution. This baseline loads in the official Flink 1.18 and 2.2 images. The containerized
 cross-platform builder uses Rust 1.94 on Debian Bullseye to stay below that ABI floor. A `--host-only`
 build inherits its host's libc requirements; do not build a deployment for an older distribution
 on Ubuntu 24.04. The 1.18 Java payload also uses the host SLF4J 1.7 API and provider, avoiding a

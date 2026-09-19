@@ -80,6 +80,9 @@ assert_native_payload() {
     diff -u "$expected_native_entries" "$native_entries" >&2 || true
     exit 1
   fi
+  if [ "$(uname -s)" = Linux ]; then
+    python3 "$script_dir/check-native-glibc.py" "$jar_file"
+  fi
 }
 
 assert_no_native_payload() {
