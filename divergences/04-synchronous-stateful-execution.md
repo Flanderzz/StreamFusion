@@ -28,9 +28,14 @@ how Comet executes within Spark's task threads rather than spinning up its own
 scheduler.
 
 ## Scope / consequences
-- Async is still the right tool for the *stateless* cases Flink itself makes
-  async: native sources awaiting availability futures, and async I/O / lookup
-  joins. Those will use Flink's async patterns, not a bespoke one.
+- Native sources use Flink's availability futures. Async lookup joins follow Arroyo's
+  `crates/arroyo-worker/src/arrow/lookup_join.rs` batch-scoped await structure, but invoke Flink's
+  generated row lookup runner rather than Arroyo's deduplicated batch connector call. This keeps
+  Flink's duplicate-key, cache, retry and timeout semantics. The operator admits at most the host's
+  configured capacity and waits on the task thread with per-request deadlines; no request survives
+  a successful batch boundary. It therefore needs neither a separate scheduler nor an in-flight
+  checkpoint format. Updating probes, including key-ordered async lookup, remain on Flink's host
+  operator because their keyed scheduling and changelog contract is not implemented at this boundary.
 - The guarantee is pinned by the checkpoint-interleaving window-aggregate test
   (buffered input survives a mid-stream snapshot/restore). The one remaining
   async candidate, the async scalar UDF, is tracked — with the within-batch

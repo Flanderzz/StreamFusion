@@ -1,6 +1,6 @@
 # Lookup join
 
-**Status:** Native for INNER and LEFT, both sync and async connectors. `FOR SYSTEM_TIME AS OF
+**Status:** Native for append-only probes with INNER and LEFT, both sync and async connectors. `FOR SYSTEM_TIME AS OF
 probe.proctime` against a dimension table (Nexmark q13) — each probe row looks the key up in an
 external table as of "now," rather than holding versioned state the way the [temporal table
 join](temporal-join.md) does. There is no build-side state in the Flink sense at all: the lookup goes
@@ -15,12 +15,23 @@ condition, and LEFT null-padding — all driven by the native operator per batch
 host's generated code invoked per batch rather than a reimplementation, it is byte-identical to Flink
 by construction.
 
-The **async** path fires every distinct key in a batch concurrently and awaits before emitting the
-batch — the Arroyo/RisingWave within-batch model, needing no operator mailbox since nothing is left
-in flight across a batch boundary. Concurrency is bounded by Flink's own
-`table.exec.async-lookup.buffer-capacity`. This isn't vectorizable compute — it's a JVM upcall into
-the host connector — but it keeps the island unbroken, and the async form overlaps a batch's I/O
-instead of serializing it.
+The **async** path overlaps lookups within an Arrow batch and awaits before emitting it, following
+Arroyo's batch-scoped lookup model. No requests remain in flight across a successful batch boundary.
+Admission is bounded by `table.exec.async-lookup.buffer-capacity` before invoking Flink's runner,
+so its internal result buffer cannot block timeout handling. Results retain probe order in both
+ordered and unordered modes; unordered mode permits this stronger ordering. Duplicate keys still
+invoke the host connector independently, preserving its cache and retry behavior.
+
+Each request uses `table.exec.async-lookup.timeout`, measured from its invocation, and Flink's own
+timeout callback. A non-positive timeout disables the deadline, as on Flink. Lookup-miss retries
+remain in Flink's generated retry wrapper and share the request's deadline. Any failed request
+stops the batch, even if an earlier request is still pending. Failure or interruption cancels the
+operator's outstanding completion handles; late results cannot emit a failed batch. The connector
+owns cancellation of its external I/O and is closed during task cleanup. A partially failed open
+also closes the runner, retaining the original exception and any cleanup failure.
+
+This preserves the Arrow boundary around a row-oriented connector call. It overlaps I/O within a
+batch; it does not overlap I/O across batches or claim that a connector performs vectorized lookups.
 
 ## Admission
 
@@ -34,5 +45,33 @@ runner, so none of these narrow admission further.
 
 - the planner produces an **upsert-materialized** (keyed-state) lookup rather than a plain
   per-row lookup;
+- the probe carries updates or deletes: the current columnar lookup output is append-only;
+- Flink requests **key-ordered async lookup** for updating probes, which requires its keyed
+  partitioning and scheduling contract;
 - the join type isn't INNER or LEFT;
 - the temporal table is a legacy (pre-`TableSourceTable`) connector.
+
+## Bounded async queue diagnostic
+
+The timeout/cancellation correction was measured against `762efc8` using a separate synthetic
+async lookup fixture: 200,000 row-source probes, five dimension keys served on four Java worker
+threads, capacity 100, parallelism 1, and a rowwise blackhole sink. The release build uses mimalloc
+(`-Pbench`) on Apple M1 Max/JDK 17. Both row/Arrow transposes and the native lookup are asserted in
+the plan. Two warmups precede five interleaved trials per engine; before/after runs use separate
+JVMs, with no other tests or native builds running during measurement.
+
+| Implementation | Flink median (s) | Native median (s) |
+| --- | ---: | ---: |
+| Before bounded admission/deadlines | 0.328 | 0.288 |
+| With bounded admission/deadlines | 0.301 | 0.284 |
+
+The native difference is within run-to-run variation. This is a correctness change with no
+measurable overhead in this fixture, not evidence of a speed improvement. The fixture has no
+network latency and does not establish connector I/O throughput. Times include planning and the
+complete row-to-columnar-to-row pipeline.
+
+```sh
+SF_BENCHMARK=true mvn -pl streamfusion-runtime -am test -Pbench \
+  -Dtest=AsyncLookupBenchmark -Dlookup.rows=200000 -Dlookup.capacity=100 \
+  -Dlookup.warmup=2 -Dlookup.runs=5
+```

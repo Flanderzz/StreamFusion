@@ -7,9 +7,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.flink.configuration.ConfigOption;
+import org.apache.flink.configuration.ConfigOptions;
 import org.apache.flink.table.connector.source.DynamicTableSource;
 import org.apache.flink.table.connector.source.LookupTableSource;
 import org.apache.flink.table.connector.source.lookup.AsyncLookupFunctionProvider;
@@ -29,6 +32,9 @@ import org.apache.flink.table.functions.FunctionContext;
  * function drives the host run, so parity is byte-exact.
  */
 public class TestAsyncLookupTableFactory implements DynamicTableSourceFactory {
+
+  private static final ConfigOption<String> TEST_MODE =
+      ConfigOptions.key("test-mode").stringType().defaultValue("normal");
 
   static final Map<Long, String> DATA = new HashMap<>();
 
@@ -52,23 +58,30 @@ public class TestAsyncLookupTableFactory implements DynamicTableSourceFactory {
 
   @Override
   public Set<ConfigOption<?>> optionalOptions() {
-    return Collections.emptySet();
+    return Set.of(TEST_MODE);
   }
 
   @Override
   public DynamicTableSource createDynamicTableSource(Context context) {
-    return new TestAsyncLookupSource();
+    return new TestAsyncLookupSource(
+        context.getCatalogTable().getOptions().getOrDefault(TEST_MODE.key(), "normal"));
   }
 
   private static final class TestAsyncLookupSource implements LookupTableSource {
+    private final String mode;
+
+    private TestAsyncLookupSource(String mode) {
+      this.mode = mode;
+    }
+
     @Override
     public LookupRuntimeProvider getLookupRuntimeProvider(LookupContext context) {
-      return AsyncLookupFunctionProvider.of(new TestAsyncLookupFunction());
+      return AsyncLookupFunctionProvider.of(new TestAsyncLookupFunction(mode));
     }
 
     @Override
     public DynamicTableSource copy() {
-      return new TestAsyncLookupSource();
+      return new TestAsyncLookupSource(mode);
     }
 
     @Override
@@ -79,16 +92,28 @@ public class TestAsyncLookupTableFactory implements DynamicTableSourceFactory {
 
   /** Returns the single dimension row for a key, completed on a worker thread — the async q13 dim. */
   public static final class TestAsyncLookupFunction extends AsyncLookupFunction {
+    private final String mode;
     private transient ExecutorService executor;
+    private transient Map<Long, AtomicInteger> attempts;
+
+    public TestAsyncLookupFunction(String mode) {
+      this.mode = mode;
+    }
 
     @Override
     public void open(FunctionContext context) {
       executor = Executors.newFixedThreadPool(4);
+      attempts = new ConcurrentHashMap<>();
     }
 
     @Override
     public CompletableFuture<Collection<RowData>> asyncLookup(RowData keyRow) {
       long key = keyRow.getLong(0);
+      if (mode.equals("never")) return new CompletableFuture<>();
+      if (mode.equals("miss-once")
+          && attempts.computeIfAbsent(key, ignored -> new AtomicInteger()).getAndIncrement() == 0) {
+        return CompletableFuture.completedFuture(List.of());
+      }
       return CompletableFuture.supplyAsync(
           () -> {
             String value = DATA.get(key);

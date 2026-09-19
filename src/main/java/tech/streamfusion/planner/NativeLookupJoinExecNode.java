@@ -1,11 +1,5 @@
 package tech.streamfusion.planner;
 
-import tech.streamfusion.operator.ArrowBatch;
-import tech.streamfusion.operator.ArrowBatchTypeInformation;
-import tech.streamfusion.operator.ArrowToRowDataOperator;
-import tech.streamfusion.operator.NativeAsyncLookupJoinOperator;
-import tech.streamfusion.operator.NativeLookupJoinOperator;
-import tech.streamfusion.operator.RowDataToArrowOperator;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -16,8 +10,8 @@ import org.apache.calcite.plan.RelOptTable;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.rex.RexUtil;
-import org.apache.flink.api.dag.Transformation;
 import org.apache.flink.api.common.functions.FlatMapFunction;
+import org.apache.flink.api.dag.Transformation;
 import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.streaming.api.functions.async.AsyncFunction;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
@@ -61,6 +55,12 @@ import org.apache.flink.table.runtime.typeutils.InternalSerializers;
 import org.apache.flink.table.runtime.typeutils.InternalTypeInfo;
 import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.types.RowKind;
+import tech.streamfusion.operator.ArrowBatch;
+import tech.streamfusion.operator.ArrowBatchTypeInformation;
+import tech.streamfusion.operator.ArrowToRowDataOperator;
+import tech.streamfusion.operator.NativeAsyncLookupJoinOperator;
+import tech.streamfusion.operator.NativeLookupJoinOperator;
+import tech.streamfusion.operator.RowDataToArrowOperator;
 
 /**
  * Wraps the native lookup-join operator into the plan. The row-level join core is Flink's own: this
@@ -267,7 +267,11 @@ public class NativeLookupJoinExecNode extends ExecNodeBase<ArrowBatch>
                   asyncOptions.asyncBufferCapacity);
       operator =
           new NativeAsyncLookupJoinOperator(
-              runner, probeType, resultRowType, asyncOptions.keyOrdered);
+              runner,
+              probeType,
+              resultRowType,
+              asyncOptions.asyncBufferCapacity,
+              asyncOptions.asyncTimeout);
     } else {
       GeneratedFunction<FlatMapFunction<RowData, RowData>> generatedFetcher =
           LookupJoinCodeGenerator.generateSyncLookupFunction(

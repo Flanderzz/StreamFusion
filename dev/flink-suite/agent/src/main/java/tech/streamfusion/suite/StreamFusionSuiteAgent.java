@@ -99,6 +99,8 @@ public final class StreamFusionSuiteAgent {
         .type(
             namedOneOf(
                 "tech.streamfusion.operator.NativeCalcOperator",
+                "tech.streamfusion.operator.NativeLookupJoinOperator",
+                "tech.streamfusion.operator.NativeAsyncLookupJoinOperator",
                 "tech.streamfusion.operator.NativeFilterOperator",
                 "tech.streamfusion.operator.NativeColumnarGroupAggregateOperator",
                 "tech.streamfusion.operator.NativeColumnarTopNOperator",

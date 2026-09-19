@@ -1,19 +1,21 @@
 package tech.streamfusion.operator;
 
-import tech.streamfusion.arrow.ArrowConversion;
-import tech.streamfusion.arrow.ArrowReader;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Deque;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.flink.api.common.functions.DefaultOpenContext;
 import org.apache.flink.api.common.functions.util.FunctionUtils;
 import org.apache.flink.streaming.api.functions.async.CollectionSupplier;
 import org.apache.flink.streaming.api.functions.async.ResultFuture;
+import org.apache.flink.streaming.api.functions.async.RichAsyncFunction;
 import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
@@ -21,51 +23,61 @@ import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.runtime.operators.join.lookup.AsyncLookupJoinRunner;
 import org.apache.flink.table.runtime.typeutils.RowDataSerializer;
 import org.apache.flink.table.types.logical.RowType;
+import tech.streamfusion.arrow.ArrowConversion;
+import tech.streamfusion.arrow.ArrowReader;
 
 /**
  * Processing-time lookup join against an <b>async</b> connector, columnar in and out. The async
- * sibling of {@link NativeLookupJoinOperator}: for each probe {@link ArrowBatch} it materialises the
- * rows and drives Flink's own {@link AsyncLookupJoinRunner} — the exact generated pipeline the host's
- * async lookup join executes: pre-filter, key building (field references and constants), the
+ * sibling of {@link NativeLookupJoinOperator}: for each probe {@link ArrowBatch} it materialises
+ * the rows and drives Flink's own {@link AsyncLookupJoinRunner} — the exact generated pipeline the
+ * host's async lookup join executes: pre-filter, key building (field references and constants), the
  * connector's real {@code asyncLookup}, the optional projection/filter on the dimension table, the
- * residual join condition, and LEFT null-padding — firing every probe row's lookup before awaiting any
- * of them, so the batch's lookup I/O overlaps rather than being paid serially. Byte-identical to the
- * host by construction, since the row-level core <em>is</em> the host's code.
+ * residual join condition, and LEFT null-padding. Lookups overlap within the configured capacity;
+ * updating probes remain on Flink's changelog-aware operator. Byte-identical to the host by
+ * construction, since the row-level core <em>is</em> the host's code.
  *
- * <p><b>No mailbox, no in-flight state across batches.</b> Unlike Flink's {@code AsyncWaitOperator} —
- * which keeps lookups in flight across records and therefore needs the operator mailbox, an ordered
- * result queue, and a snapshot/replay of in-flight rows at checkpoint — this operator does all of a
- * batch's concurrent lookups <em>inside</em> {@link #processElement} and blocks on the task thread
- * until they finish (RisingWave's temporal-join and Arroyo's {@code lookup_join} do the same: overlap
- * within a batch, await before emitting). The Arrow batch is already the overlap unit, so a checkpoint
- * barrier — itself a task-thread action — can only run between batches, when nothing is in flight;
- * there is no in-flight state to persist, exactly as for the synchronous operator. The cost is that
- * I/O does not overlap <em>across</em> batches, which is the standard bounded-work-per-batch bargain
- * every synchronous operator makes.
+ * <p><b>No mailbox, no in-flight state across batches.</b> Unlike Flink's {@code AsyncWaitOperator}
+ * — which keeps lookups in flight across records and therefore needs the operator mailbox, an
+ * ordered result queue, and a snapshot/replay of in-flight rows at checkpoint — this operator does
+ * all of a batch's concurrent lookups <em>inside</em> {@link #processElement} and blocks on the
+ * task thread until they finish (RisingWave's temporal-join and Arroyo's {@code lookup_join} do the
+ * same: overlap within a batch, await before emitting). The Arrow batch is already the overlap
+ * unit, so a checkpoint barrier — itself a task-thread action — can only run between batches, when
+ * nothing is in flight; there is no in-flight state to persist, exactly as for the synchronous
+ * operator. The cost is that I/O does not overlap <em>across</em> batches, which is the standard
+ * bounded-work-per-batch bargain every synchronous operator makes.
  *
- * <p>In-flight concurrency is bounded by the runner's buffer (Flink's
- * {@code table.exec.async-lookup.buffer-capacity}, as on the host): past that many outstanding
- * lookups, firing the next blocks until one completes — the same backpressure the host applies.
+ * <p>In-flight concurrency is bounded before invoking the runner, so exhausting its internal result
+ * buffer cannot block the task before timeout handling runs. Each lookup uses Flink's configured
+ * timeout and the runner's timeout callback. Results retain probe order, which also satisfies the
+ * unordered mode's relaxed output contract.
  */
 public class NativeAsyncLookupJoinOperator extends AbstractStreamOperator<ArrowBatch>
     implements OneInputStreamOperator<ArrowBatch, ArrowBatch> {
 
-  private final AsyncLookupJoinRunner runner;
+  private final RichAsyncFunction<RowData, RowData> runner;
   private final RowType probeType;
   private final RowType outputType;
-  private final boolean keyOrdered;
+  private final int capacity;
+  private final long timeoutMillis;
+
+  private transient boolean runnerNeedsClose;
 
   private transient BufferAllocator allocator;
   private transient RowDataSerializer probeSerializer;
-  private transient AtomicInteger inflight;
-  private transient AtomicInteger finished;
 
   public NativeAsyncLookupJoinOperator(
-      AsyncLookupJoinRunner runner, RowType probeType, RowType outputType, boolean keyOrdered) {
+      RichAsyncFunction<RowData, RowData> runner,
+      RowType probeType,
+      RowType outputType,
+      int capacity,
+      long timeoutMillis) {
+    if (capacity < 1) throw new IllegalArgumentException("Async lookup capacity must be positive");
     this.runner = runner;
     this.probeType = probeType;
     this.outputType = outputType;
-    this.keyOrdered = keyOrdered;
+    this.capacity = capacity;
+    this.timeoutMillis = timeoutMillis;
   }
 
   @Override
@@ -74,23 +86,34 @@ public class NativeAsyncLookupJoinOperator extends AbstractStreamOperator<ArrowB
     NativeAllocator.initializeFor(this);
     allocator = NativeAllocator.SHARED;
     probeSerializer = new RowDataSerializer(probeType);
-    if (keyOrdered) {
-      inflight = new AtomicInteger();
-      finished = new AtomicInteger();
-      getMetricGroup().gauge("aec_inflight_size", inflight::get);
-      // This batch-scoped implementation never admits a later same-key record while an earlier
-      // batch is pending, so the key-blocking queue is always empty.
-      getMetricGroup().gauge("aec_blocking_size", () -> 0);
-      getMetricGroup().gauge("aec_finish_size", finished::get);
-    }
     FunctionUtils.setFunctionRuntimeContext(runner, getRuntimeContext());
-    FunctionUtils.openFunction(runner, DefaultOpenContext.INSTANCE);
+    runnerNeedsClose = true;
+    try {
+      FunctionUtils.openFunction(runner, DefaultOpenContext.INSTANCE);
+    } catch (Exception | Error failure) {
+      try {
+        closeRunner();
+      } catch (Exception | Error cleanupFailure) {
+        failure.addSuppressed(cleanupFailure);
+      }
+      throw failure;
+    }
   }
 
   @Override
   public void close() throws Exception {
-    FunctionUtils.closeFunction(runner);
-    super.close();
+    try {
+      closeRunner();
+    } finally {
+      super.close();
+    }
+  }
+
+  private void closeRunner() throws Exception {
+    if (runnerNeedsClose) {
+      runnerNeedsClose = false;
+      FunctionUtils.closeFunction(runner);
+    }
   }
 
   @Override
@@ -108,37 +131,66 @@ public class NativeAsyncLookupJoinOperator extends AbstractStreamOperator<ArrowB
       }
     }
 
-    // Fire every row's lookup (the runner joins, filters, and null-pads into each future's rows),
-    // then wait for them all; assembly in probe order keeps the emitted batch deterministic.
-    List<CompletableFuture<Collection<RowData>>> futures = new ArrayList<>(probes.size());
-    for (RowData probe : probes) {
-      CompletableFuture<Collection<RowData>> future = new CompletableFuture<>();
-      futures.add(future);
-      if (keyOrdered) {
-        inflight.incrementAndGet();
-        future.whenComplete(
-            (ignored, error) -> {
-              inflight.decrementAndGet();
-              finished.incrementAndGet();
-            });
-      }
-      runner.asyncInvoke(probe, adapt(future));
-    }
+    Deque<PendingLookup> pending = new ArrayDeque<>();
+    CompletableFuture<Collection<RowData>> failure = new CompletableFuture<>();
     List<RowData> outRows = new ArrayList<>();
+    int nextProbe = 0;
     try {
-      for (CompletableFuture<Collection<RowData>> future : futures) {
-        outRows.addAll(future.get());
-        if (keyOrdered) {
-          finished.decrementAndGet();
+      while (nextProbe < probes.size() || !pending.isEmpty()) {
+        while (nextProbe < probes.size() && pending.size() < capacity) {
+          if (failure.isDone()) failure.get();
+          RowData probe = probes.get(nextProbe++);
+          CompletableFuture<Collection<RowData>> result = new CompletableFuture<>();
+          PendingLookup lookup = new PendingLookup(probe, result, System.nanoTime());
+          pending.addLast(lookup);
+          result.whenComplete(
+              (rows, error) -> {
+                if (error != null) failure.completeExceptionally(error);
+              });
+          runner.asyncInvoke(probe, adapt(result));
         }
+        PendingLookup lookup = pending.getFirst();
+        await(lookup, failure);
+        outRows.addAll(lookup.result().get());
+        pending.removeFirst();
       }
-    } catch (ExecutionException e) {
-      throw e.getCause() instanceof Exception ? (Exception) e.getCause() : e;
+    } catch (ExecutionException error) {
+      if (error.getCause() instanceof Exception cause) throw cause;
+      if (error.getCause() instanceof Error cause) throw cause;
+      throw error;
+    } catch (InterruptedException error) {
+      Thread.currentThread().interrupt();
+      throw error;
+    } finally {
+      // The connector owns its I/O; cancelling our completion handles prevents stale callbacks
+      // from becoming output for a failed batch. Flink closes the connector when the task tears
+      // down.
+      for (PendingLookup lookup : pending) lookup.result().cancel(true);
     }
     // Insert-only: a processing-time lookup requires an append-only probe, so no row-kind column.
     VectorSchemaRoot out = RowDataArrowConverter.write(outRows, outputType, allocator, false);
     ColumnarRecordMetrics.emit(output, getMetricGroup(), new ArrowBatch(out));
   }
+
+  private void await(PendingLookup lookup, CompletableFuture<Collection<RowData>> failure)
+      throws Exception {
+    CompletableFuture<Object> completion = CompletableFuture.anyOf(lookup.result(), failure);
+    if (timeoutMillis <= 0) {
+      completion.get();
+      return;
+    }
+    long remaining =
+        TimeUnit.MILLISECONDS.toNanos(timeoutMillis) - (System.nanoTime() - lookup.startedNanos());
+    try {
+      completion.get(Math.max(0, remaining), TimeUnit.NANOSECONDS);
+    } catch (TimeoutException timeout) {
+      runner.timeout(lookup.probe(), adapt(lookup.result()));
+      completion.get();
+    }
+  }
+
+  private record PendingLookup(
+      RowData probe, CompletableFuture<Collection<RowData>> result, long startedNanos) {}
 
   /** The runner completes each row's joined results through Flink's {@link ResultFuture} shape. */
   private static ResultFuture<RowData> adapt(CompletableFuture<Collection<RowData>> future) {
