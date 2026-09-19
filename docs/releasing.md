@@ -6,6 +6,12 @@ builder and publisher explicitly enable the `delta,paimon` profiles. Artifact ch
 separate native library and that Delta shares the Parquet module without bundling another library.
 Releases are immutable: prepare and verify a version in a commit before creating its tag.
 
+Every runtime payload carries `StreamFusion-Module` and `StreamFusion-Flink-Line` manifest entries.
+`bin/check-artifacts.sh` verifies them against the artifact name and the selected build line, in
+addition to checking native payload boundaries. The loader also validates the line at startup, so
+release all modules from the same build; an unmarked older payload cannot be mixed into a newly
+built installation. The current release target remains Flink 2.2.
+
 ## One-time GitHub setup
 
 Create a `release` environment in the canonical GitHub repository. It may have required reviewers;
