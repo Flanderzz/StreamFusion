@@ -87,11 +87,11 @@ final class JsonFunctionTestInputs {
         "{\"\u7528\u6237\":{\"\u59d3.\u540d\":\"ok\"},\"bad\":[}");
   }
 
-  static void assertFails(String document, String expression, String nativeMessage) {
-    assertFails(document, expression, nativeMessage, true);
+  static void assertFailsLikeFlink(String document, String expression) {
+    assertFails(document, expression);
   }
 
-  static void assertFailsLikeFlink(String document, String expression) {
+  static void assertFails(String document, String expression) {
     Throwable expected = null;
     for (boolean nativeEnabled : new boolean[] {false, true}) {
       TableEnvironment tables = TextTimeFunctionTestInputs.textRows(document);
@@ -105,49 +105,13 @@ final class JsonFunctionTestInputs {
                   while (rows.hasNext()) rows.next();
                 }
               });
-      Throwable hostError = error;
-      while (hostError != null
-          && !(hostError instanceof org.apache.flink.table.api.TableRuntimeException)) {
-        hostError = hostError.getCause();
-      }
-      org.junit.jupiter.api.Assertions.assertNotNull(hostError, error.toString());
+      Throwable root = error;
+      while (root.getCause() != null) root = root.getCause();
       if (nativeEnabled) {
-        assertEquals(expected.getClass(), hostError.getClass());
-        assertEquals(expected.getMessage(), hostError.getMessage());
+        assertEquals(expected.getClass(), root.getClass(), error.toString());
+        assertEquals(expected.getMessage(), root.getMessage(), error.toString());
         assertTrue(scan.substitutions() > 0, scan.fallbackReasons().toString());
-      } else expected = hostError;
-    }
-  }
-
-  static void assertFallbackFails(String document, String expression, String message) {
-    assertFails(document, expression, message, false);
-  }
-
-  private static void assertFails(
-      String document, String expression, String nativeMessage, boolean admitted) {
-    for (boolean nativeEnabled : new boolean[] {false, true}) {
-      TableEnvironment tables = TextTimeFunctionTestInputs.textRows(document);
-      PhysicalPlanScan scan = nativeEnabled ? NativePlanner.install(tables) : null;
-      Exception error =
-          assertThrows(
-              Exception.class,
-              () -> {
-                try (var rows =
-                    tables.executeSql("SELECT " + expression + " FROM inputs").collect()) {
-                  while (rows.hasNext()) {
-                    rows.next();
-                  }
-                }
-              });
-      if (nativeEnabled) {
-        StringBuilder causes = new StringBuilder();
-        for (Throwable cause = error; cause != null; cause = cause.getCause()) {
-          causes.append(cause).append('\n');
-        }
-        assertTrue(causes.toString().contains(nativeMessage), causes.toString());
-        assertEquals(
-            admitted, scan.substitutions() > 0, scan.fallbackReasons().toString());
-      }
+      } else expected = root;
     }
   }
 }

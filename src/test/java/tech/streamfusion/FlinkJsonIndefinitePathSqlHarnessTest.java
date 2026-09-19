@@ -146,10 +146,8 @@ class FlinkJsonIndefinitePathSqlHarnessTest {
     }
     JsonFunctionTestInputs.assertFailsLikeFlink(
         "null", "JSON_EXISTS(s, 'lax $[*]' ERROR ON ERROR)");
-    JsonFunctionTestInputs.assertFails(
-        "[]", "JSON_VALUE(s, '$[*]' ERROR ON ERROR)", "JSON_VALUE ERROR");
-    JsonFunctionTestInputs.assertFails(
-        "{}", "JSON_VALUE(s, 'lax $.a[*]' ERROR ON EMPTY)", "JSON_VALUE EMPTY");
+    JsonFunctionTestInputs.assertFails("[]", "JSON_VALUE(s, '$[*]' ERROR ON ERROR)");
+    JsonFunctionTestInputs.assertFails("{}", "JSON_VALUE(s, 'lax $.a[*]' ERROR ON EMPTY)");
   }
 
   @Test
@@ -166,10 +164,8 @@ class FlinkJsonIndefinitePathSqlHarnessTest {
     }
     JsonFunctionTestInputs.assertFailsLikeFlink(
         "null", "JSON_EXISTS(s, 'lax $[0,1]' ERROR ON ERROR)");
-    JsonFunctionTestInputs.assertFails(
-        "[1]", "JSON_VALUE(s, '$[0,0]' ERROR ON ERROR)", "JSON_VALUE ERROR");
-    JsonFunctionTestInputs.assertFails(
-        "{}", "JSON_VALUE(s, 'lax $.a[0,1]' ERROR ON EMPTY)", "JSON_VALUE EMPTY");
+    JsonFunctionTestInputs.assertFails("[1]", "JSON_VALUE(s, '$[0,0]' ERROR ON ERROR)");
+    JsonFunctionTestInputs.assertFails("{}", "JSON_VALUE(s, 'lax $.a[0,1]' ERROR ON EMPTY)");
   }
 
   @Test

@@ -90,8 +90,7 @@ class FlinkJsonDotMemberSqlHarnessTest {
   void errorPoliciesAndTypedFailuresRemainNative() {
     JsonFunctionTestInputs.assertFailsLikeFlink(
         "{}", "JSON_EXISTS(s, '$.order-id' ERROR ON ERROR)");
-    JsonFunctionTestInputs.assertFails(
-        "{}", "JSON_VALUE(s, 'lax $.123' ERROR ON EMPTY)", "JSON_VALUE EMPTY");
+    JsonFunctionTestInputs.assertFails("{}", "JSON_VALUE(s, 'lax $.123' ERROR ON EMPTY)");
     NativeFailureParity.run(
             () -> TextTimeFunctionTestInputs.textRows("{\"order-id\":\"bad\"}"),
             "SELECT JSON_VALUE(s, '$.order-id' RETURNING INTEGER NULL ON ERROR) FROM inputs")

@@ -137,10 +137,8 @@ class FlinkJsonEscapedPathSqlHarnessTest {
   void missingEscapedNamesRetainErrorPolicies() {
     JsonFunctionTestInputs.assertFailsLikeFlink(
         "{}", "JSON_EXISTS(s, '$[\"a\\nb\"]' ERROR ON ERROR)");
-    JsonFunctionTestInputs.assertFails(
-        "{}", "JSON_VALUE(s, '$[\"a\\nb\"]' ERROR ON ERROR)", "JSON_VALUE ERROR");
-    JsonFunctionTestInputs.assertFails(
-        "{}", "JSON_VALUE(s, 'lax $[\"a\\nb\"]' ERROR ON EMPTY)", "JSON_VALUE EMPTY");
+    JsonFunctionTestInputs.assertFails("{}", "JSON_VALUE(s, '$[\"a\\nb\"]' ERROR ON ERROR)");
+    JsonFunctionTestInputs.assertFails("{}", "JSON_VALUE(s, 'lax $[\"a\\nb\"]' ERROR ON EMPTY)");
   }
 
   @ParameterizedTest

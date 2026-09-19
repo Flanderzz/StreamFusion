@@ -1686,6 +1686,9 @@ final class RexExpression {
         return reject("JSON_VALUE has an unsupported behavior target");
       }
     }
+    if ("ERROR".equals(empty) || "ERROR".equals(error)) {
+      return reject("JSON_VALUE ERROR policies require Flink's generated exception handling");
+    }
     if (returnType == SqlTypeName.BOOLEAN
         && ("NULL".equals(empty) || "NULL".equals(error))
         && call != projectionRoot) {

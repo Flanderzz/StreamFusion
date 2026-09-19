@@ -139,10 +139,8 @@ class FlinkJsonPathGrammarSqlHarnessTest {
   @Test
   void trailingIndexControlsKeepFailurePolicies() {
     JsonFunctionTestInputs.assertFailsLikeFlink("[]", "JSON_EXISTS(s, '$[1\n]' ERROR ON ERROR)");
-    JsonFunctionTestInputs.assertFails(
-        "[0]", "JSON_VALUE(s, '$[1\t]' ERROR ON ERROR)", "JSON_VALUE ERROR");
-    JsonFunctionTestInputs.assertFails(
-        "[0]", "JSON_VALUE(s, 'lax $[-2\r]' ERROR ON EMPTY)", "JSON_VALUE EMPTY");
+    JsonFunctionTestInputs.assertFails("[0]", "JSON_VALUE(s, '$[1\t]' ERROR ON ERROR)");
+    JsonFunctionTestInputs.assertFails("[0]", "JSON_VALUE(s, 'lax $[-2\r]' ERROR ON EMPTY)");
     NativeFailureParity.run(
             () -> TextTimeFunctionTestInputs.textRows("[0,\"bad\"]"),
             "SELECT JSON_VALUE(s, '$[1\f]' RETURNING INTEGER NULL ON ERROR) FROM inputs")
@@ -218,9 +216,7 @@ class FlinkJsonPathGrammarSqlHarnessTest {
     // ERROR-policy failures retain their native wrapper; scalar type mismatches preserve the host
     // exception.
     JsonFunctionTestInputs.assertFails(
-        "{}",
-        "JSON_VALUE(s, '" + path.replace("'", "''") + "' ERROR ON ERROR)",
-        "JSON_VALUE ERROR");
+        "{}", "JSON_VALUE(s, '" + path.replace("'", "''") + "' ERROR ON ERROR)");
   }
 
   @Test

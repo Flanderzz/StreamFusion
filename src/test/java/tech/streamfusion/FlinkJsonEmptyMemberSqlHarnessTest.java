@@ -104,10 +104,8 @@ class FlinkJsonEmptyMemberSqlHarnessTest {
   @Test
   void missingEmptyMemberPreservesErrorPolicies() {
     JsonFunctionTestInputs.assertFailsLikeFlink("{}", "JSON_EXISTS(s, '$['''']' ERROR ON ERROR)");
-    JsonFunctionTestInputs.assertFails(
-        "{}", "JSON_VALUE(s, '$['''']' ERROR ON ERROR)", "JSON_VALUE ERROR");
-    JsonFunctionTestInputs.assertFails(
-        "{}", "JSON_VALUE(s, 'lax $['''']' ERROR ON EMPTY)", "JSON_VALUE EMPTY");
+    JsonFunctionTestInputs.assertFails("{}", "JSON_VALUE(s, '$['''']' ERROR ON ERROR)");
+    JsonFunctionTestInputs.assertFails("{}", "JSON_VALUE(s, 'lax $['''']' ERROR ON EMPTY)");
   }
 
   private static TableEnvironment documents() {

@@ -74,18 +74,14 @@ class FlinkJsonReturningSqlHarnessTest {
   })
   void scalarTypeMismatchIsNotCaughtByNullOnError(String type, String document) {
     JsonFunctionTestInputs.assertFails(
-        document,
-        "JSON_VALUE(s, '$' RETURNING " + type + " NULL ON ERROR)",
-        "cannot be cast to class");
+        document, "JSON_VALUE(s, '$' RETURNING " + type + " NULL ON ERROR)");
   }
 
   @ParameterizedTest
   @ValueSource(strings = {"BOOLEAN", "INTEGER", "DOUBLE"})
   void errorOnEmptyStillFailsOutsideOnError(String type) {
     JsonFunctionTestInputs.assertFails(
-        "{}",
-        "JSON_VALUE(s, 'lax $.a' RETURNING " + type + " ERROR ON EMPTY NULL ON ERROR)",
-        "JSON_VALUE EMPTY");
+        "{}", "JSON_VALUE(s, 'lax $.a' RETURNING " + type + " ERROR ON EMPTY NULL ON ERROR)");
   }
 
   @Test

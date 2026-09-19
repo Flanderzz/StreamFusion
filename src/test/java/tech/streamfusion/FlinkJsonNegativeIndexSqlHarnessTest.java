@@ -105,10 +105,8 @@ class FlinkJsonNegativeIndexSqlHarnessTest {
   @Test
   void missingNegativeIndexesKeepErrorBehavior() {
     JsonFunctionTestInputs.assertFailsLikeFlink("[]", "JSON_EXISTS(s, '$[-1]' ERROR ON ERROR)");
-    JsonFunctionTestInputs.assertFails(
-        "[1]", "JSON_VALUE(s, '$[-2]' ERROR ON ERROR)", "JSON_VALUE ERROR");
-    JsonFunctionTestInputs.assertFails(
-        "[1]", "JSON_VALUE(s, 'lax $[-2]' ERROR ON EMPTY)", "JSON_VALUE EMPTY");
+    JsonFunctionTestInputs.assertFails("[1]", "JSON_VALUE(s, '$[-2]' ERROR ON ERROR)");
+    JsonFunctionTestInputs.assertFails("[1]", "JSON_VALUE(s, 'lax $[-2]' ERROR ON EMPTY)");
   }
 
   private static TableEnvironment documents(int count) {
