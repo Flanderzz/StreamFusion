@@ -1,8 +1,5 @@
 package tech.streamfusion.operator;
 
-import tech.streamfusion.arrow.ArrowConversion;
-import tech.streamfusion.arrow.ArrowReader;
-import tech.streamfusion.arrow.ArrowWriter;
 import java.util.ArrayList;
 import java.util.List;
 import org.apache.arrow.memory.BufferAllocator;
@@ -14,6 +11,9 @@ import org.apache.flink.table.runtime.typeutils.RowDataSerializer;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.types.RowKind;
+import tech.streamfusion.arrow.ArrowConversion;
+import tech.streamfusion.arrow.ArrowReader;
+import tech.streamfusion.arrow.ArrowWriter;
 
 /**
  * Converts whole {@link RowData} rows of a fixed schema to and from an Arrow {@link VectorSchemaRoot},
@@ -89,44 +89,55 @@ public final class RowDataArrowConverter {
   }
 
   /**
-   * As {@link #write(List, RowType, BufferAllocator)}, but when {@code withRowKind} also appends the
-   * {@link #ROW_KIND_COLUMN} so a changelog stream's {@link RowKind} survives the boundary.
+   * As {@link #write(List, RowType, BufferAllocator)}, but when {@code withRowKind} also appends
+   * the {@link #ROW_KIND_COLUMN} so a changelog stream's {@link RowKind} survives the boundary.
    */
   public static VectorSchemaRoot write(
       List<RowData> rows, RowType rowType, BufferAllocator allocator, boolean withRowKind) {
     VectorSchemaRoot dataRoot =
         VectorSchemaRoot.create(ArrowConversion.toArrowSchema(rowType), allocator);
-    ArrowWriter<RowData> writer = ArrowConversion.createRowDataArrowWriter(dataRoot, rowType);
-    for (RowData row : rows) {
-      writer.write(row);
+    TinyIntVector kinds = null;
+    try {
+      ArrowWriter<RowData> writer = ArrowConversion.createRowDataArrowWriter(dataRoot, rowType);
+      for (RowData row : rows) {
+        writer.write(row);
+      }
+      writer.finish();
+      if (!withRowKind) {
+        return dataRoot;
+      }
+      // Append the hidden RowKind byte column alongside the data vectors (a fresh root over the
+      // same
+      // vectors plus the kinds vector — the caller closes this root, freeing them all once).
+      kinds = new TinyIntVector(ROW_KIND_COLUMN, allocator);
+      kinds.allocateNew(rows.size());
+      for (int i = 0; i < rows.size(); i++) {
+        kinds.set(i, rows.get(i).getRowKind().toByteValue());
+      }
+      kinds.setValueCount(rows.size());
+      List<FieldVector> columns = new ArrayList<>(dataRoot.getFieldVectors());
+      columns.add(kinds);
+      VectorSchemaRoot root = new VectorSchemaRoot(columns);
+      root.setRowCount(rows.size());
+      return root;
+    } catch (RuntimeException | Error failure) {
+      try {
+        org.apache.flink.util.IOUtils.closeAll(dataRoot, kinds);
+      } catch (Exception | Error closeFailure) {
+        failure.addSuppressed(closeFailure);
+      }
+      throw failure;
     }
-    writer.finish();
-    if (!withRowKind) {
-      return dataRoot;
-    }
-    // Append the hidden RowKind byte column alongside the data vectors (a fresh root over the same
-    // vectors plus the kinds vector — the caller closes this root, freeing them all once).
-    TinyIntVector kinds = new TinyIntVector(ROW_KIND_COLUMN, allocator);
-    kinds.allocateNew(rows.size());
-    for (int i = 0; i < rows.size(); i++) {
-      kinds.set(i, rows.get(i).getRowKind().toByteValue());
-    }
-    kinds.setValueCount(rows.size());
-    List<FieldVector> columns = new ArrayList<>(dataRoot.getFieldVectors());
-    columns.add(kinds);
-    VectorSchemaRoot root = new VectorSchemaRoot(columns);
-    root.setRowCount(rows.size());
-    return root;
   }
 
   /**
-   * Reads the rows of an Arrow batch back into independent {@link RowData}s under {@code rowType}. The
-   * Arrow buffers are read through the vendored columnar reader (no per-cell hand-copy), then each row is
-   * deep-copied off the buffers so it stays valid after the batch is released — the caller (a transpose
-   * at a columnar→rowwise edge) owns and closes the batch as soon as it has read it. A trailing {@link
-   * #ROW_KIND_COLUMN}, if present, is read back onto each row's {@link RowKind}. (A true zero-copy view
-   * would require the batch to outlive the rows, which a native columnar sink would allow —
-   * https://github.com/datafusion-contrib/StreamFusion/issues/17.)
+   * Reads the rows of an Arrow batch back into independent {@link RowData}s under {@code rowType}.
+   * The Arrow buffers are read through the vendored columnar reader (no per-cell hand-copy), then
+   * each row is deep-copied off the buffers so it stays valid after the batch is released — the
+   * caller (a transpose at a columnar→rowwise edge) owns and closes the batch as soon as it has
+   * read it. A trailing {@link #ROW_KIND_COLUMN}, if present, is read back onto each row's {@link
+   * RowKind}. (A true zero-copy view would require the batch to outlive the rows, which a native
+   * columnar sink would allow — https://github.com/datafusion-contrib/StreamFusion/issues/17.)
    */
   public static List<RowData> read(VectorSchemaRoot root, RowType rowType) {
     ArrowReader reader = ArrowConversion.createArrowReader(root, rowType);
