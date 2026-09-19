@@ -410,6 +410,10 @@ Its public issue-derived matrix is independent of the unavailable private Septem
 
 ### Flink 1.18 state fixtures
 
+Shared Top-N fixtures retain a key-selector copy method on both lines without requiring the
+newer interface declaration, so changing-bound checkpoint and rescaling comparisons compile
+against the released 1.18 API too.
+
 The 1.18 runtime suite preserves the upstream fixture's heap or stock RocksDB selection.
 Its execution contracts require native work for admitted heap cases and the explicit backend
 fallback for stock RocksDB cases. Selectors can combine inherited fixture parameters, such as
