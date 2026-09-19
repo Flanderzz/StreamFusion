@@ -1,0 +1,9 @@
+<component-set>
+  <components>
+    <component>
+      <role>org.apache.maven.eventspy.EventSpy</role>
+      <role-hint>streamfusion-suite-result</role-hint>
+      <implementation>tech.streamfusion.suite.MavenResultSpy</implementation>
+    </component>
+  </components>
+</component-set>

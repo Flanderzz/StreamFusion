@@ -168,6 +168,20 @@ and operator names are outside those tests' contract. All other streaming planne
 StreamFusion. The runner also reports Flink's independently reproducible batch `CURRENT_DATE`
 timezone failure as an expected upstream failure instead of attributing it to StreamFusion.
 
+Every mode propagates a failed Maven process even when the available XML reports pass. Runtime
+and diagnostic modes permit one narrow exception: a completed Maven session must report only
+Surefire 3.2.2 assertion failures, and every failed XML case must be explicitly allowed (currently
+only batch `CalcITCase#testCurrentDate`). Errors in that method are not allowed failures. The
+Maven event listener records the completed session result in `diagnostics/<mode>/maven-result.tsv`;
+it does not change Maven or JUnit outcomes. Missing or inconsistent session evidence, fork crashes,
+timeouts, incomplete or malformed XML, and unexpected test failures all fail the runner. Passing
+partial reports cannot establish process success. Native execution contracts remain independently
+required, including when an expected assertion failed.
+
+The harness checks include real Maven subprocesses with an allowed assertion followed by a fork
+crash or timeout. Run them with `mvn -f dev/flink-suite/agent/pom.xml package` followed by
+`python3 -m unittest discover -s dev/flink-suite -p 'test_*.py'`.
+
 During development, select one or more Surefire test classes without changing the upstream checkout:
 
 ```bash
