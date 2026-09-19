@@ -210,3 +210,84 @@ fn persistent_codec_preserves_independent_clocks_and_empty_buffers() {
         }
     }
 }
+
+fn retracting_ranker(ttl: i64) -> RetractableTopNRanker {
+    let mut ranker = RetractableTopNRanker::new(
+        vec![0],
+        vec![SortColumn {
+            index: 1,
+            ascending: true,
+            nulls_first: true,
+        }],
+        0,
+        i64::MAX,
+        false,
+    )
+    .with_rank_end_column(2)
+    .with_state_ttl(ttl);
+    ranker.enable_first_bound(true);
+    ranker
+}
+
+fn changes(rows: &[(i64, f64, i64)], kinds: &[i8]) -> RecordBatch {
+    let batch = batch(rows);
+    let mut fields = batch.schema().fields().to_vec();
+    fields.push(Arc::new(Field::new(ROW_KIND_COLUMN, DataType::Int8, false)));
+    let mut columns = batch.columns().to_vec();
+    columns.push(Arc::new(Int8Array::from(kinds.to_vec())));
+    RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap()
+}
+
+#[test]
+fn retracting_bound_only_partition_is_accounted_and_survives_sweeps_and_restore() {
+    let mut ranker = retracting_ranker(1000).with_memory_budget(1).unwrap();
+    // A first retraction initializes the bound even when no ranked row exists.
+    assert!(ranker.push(&changes(&[(1, 1.0, 0)], &[3]), 5000).is_err());
+    let mut ranker = retracting_ranker(1000);
+    ranker.push(&changes(&[(1, 1.0, 0)], &[3]), 5000).unwrap();
+    ranker.sweep_expired(StateTtl::new(1000, 5999));
+    assert_eq!(ranker.groups.iter().count(), 1);
+    let snapshot = ranker.snapshot();
+    let mut restored = retracting_ranker(1000);
+    restored.load_snapshot(&snapshot, 5500);
+    assert_eq!(
+        restored
+            .push(&batch(&[(1, 10.0, 2)]), 5999)
+            .unwrap()
+            .num_rows(),
+        0
+    );
+    assert_eq!(restored.invalid_top_size, 1);
+    // Bound expiry must not discard rows whose whole-buffer clock is still live.
+    let output = restored.push(&batch(&[(1, 5.0, 2)]), 6000).unwrap();
+    assert_eq!(output.num_rows(), 1);
+    assert_eq!(restored.groups.iter().next().unwrap().1.len(), 2);
+    restored.sweep_expired(StateTtl::new(1000, 7000));
+    assert_eq!(restored.groups.iter().count(), 0);
+}
+
+#[test]
+fn deleting_the_last_row_does_not_reset_the_first_bound_or_its_clock() {
+    let mut ranker = retracting_ranker(1000);
+    ranker
+        .push(&changes(&[(1, 10.0, 1), (1, 10.0, 1)], &[0, 3]), 5000)
+        .unwrap();
+    assert!(ranker.groups.iter().next().unwrap().1.is_empty());
+    let output = ranker
+        .push(&batch(&[(1, 20.0, 3), (1, 30.0, 3)]), 5999)
+        .unwrap();
+    assert_eq!(output.num_rows(), 1);
+    assert_eq!(ranker.invalid_top_size, 2);
+    assert_eq!(
+        ranker
+            .groups
+            .iter()
+            .next()
+            .unwrap()
+            .1
+            .first_rank_end
+            .unwrap()
+            .written_at,
+        5000
+    );
+}
