@@ -64,6 +64,7 @@ jobs:
         run: |
           mvn -B -ntp -f dev/flink-suite/agent/pom.xml package
           python3 -m unittest discover -s dev/flink-suite -p 'test_*.py'
+          python3 -m unittest discover -s bin -p 'test_check_native_tls.py'
 
       - uses: dtolnay/rust-toolchain@1.94.0
 
