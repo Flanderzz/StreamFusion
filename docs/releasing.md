@@ -86,8 +86,13 @@ same packages for each target. Shared dependencies are reused by Cargo. The stag
 and Maven artifact names remain the same, including the single Avro native payload shared with
 Avro-Confluent-Registry. Extension libraries are checked for foreign JNI entry points before shipping.
 
-Following DataFusion Comet's runner-native pattern, it builds the Linux x86_64 payload on an Ubuntu
-runner and the Apple Silicon payload on a macOS runner. It merges those binaries into the release
+Following DataFusion Comet's runner-native pattern, it builds the Linux x86_64 payload on Ubuntu
+22.04 and the Apple Silicon payload on a macOS runner. The Linux image smoke test uses the same
+build baseline. Linux Rust caches have an explicit `ubuntu-22.04-glibc-2.35` key so a prior newer
+runner cannot contaminate deployment artifacts. Container builds use the released Rust Bullseye
+image; artifact validation rejects glibc requirements above 2.35 or unknown/private requirements.
+This keeps JNI payloads loadable in the official Flink Java 17 image, independently of the newer
+runner used for ordinary debug tests. It merges those binaries into the release
 JARs, validates the artifact boundaries, signs and publishes the reactor through the Central Portal,
 and only then creates the GitHub release. A version containing a hyphen, such as `0.1.0-rc3`, becomes
 a GitHub prerelease.

@@ -92,6 +92,10 @@ for suffix in $modules; do
     exit 1
   fi
   assert_flink_identity "$jar_file" "$module"
+  if [ "$(uname -s)" = Linux ]; then
+    python3 "$script_dir/check-native-tls.py" "$jar_file"
+    python3 "$script_dir/check-native-glibc.py" "$jar_file"
+  fi
   if jar tf "$jar_file" | grep -q '^org/slf4j/'; then
     echo "$module must use Flink's logging API instead of bundling SLF4J" >&2
     exit 1
