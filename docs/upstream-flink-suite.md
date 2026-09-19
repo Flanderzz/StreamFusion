@@ -143,6 +143,9 @@ The 1.18 contracts also cover legacy upsert sinks after joins and Top-N: native 
 RocksDB variants must perform join/rank work, while stock RocksDB or changelog-state variants
 must report their explicit backend fallback. The host still validates and consumes the original
 proven sink keys.
+Calc contracts also cover numeric-to-boolean predicates, IN and SEARCH predicates, quoted LIKE
+patterns, and reuse of one RAND value across expressions. Each requires nonempty native Calc or
+filter work while retaining the unchanged upstream result assertions.
 Other upstream cases still check
 result parity without a per-test acceleration contract; planner installation alone does not prove
 that any particular query ran natively.
@@ -162,6 +165,28 @@ an upstream test cannot silently shrink this coverage. Focused selections requir
 for their selected methods.
 The full `state` run requires at least one executed, non-skipped test in every selected stateful class and every contracted method in those classes. Native witnesses remain explicitly bounded to the methods in the contract resource; classes without contracts still retain their unchanged result assertions,
 and `all` includes that native RocksDB run as well as the ordinary runtime suite.
+
+The summary also writes `.flink-suite/<line>/diagnostics/<suite>/execution-audit.json`, uploaded with
+those CI diagnostics. Schema version 1 retains every parsed Surefire case (including duplicates,
+skips and failures), its report-relative location, and whether that method is contracted. The
+summary reports the complete executed denominator, the contracted subset, and the executed
+cases outside that scope. For example, 32 passing Calc cases with eight execution witnesses mean
+eight contracted executions and 24 unclassified executions, not 32 accelerated tests.
+
+Validated evidence retains the fixture selector, per-operator native input counts, expected
+contract and recorded fallback reasons. Routes distinguish native work, mixed native work plus
+recorded fallback, full fallback, and unclassified evidence. Counts are explicitly evidence-record
+counts: parameterized XML cases and witness files share method-level totals but do not have a
+common invocation identifier, so the artifact does not invent one-to-one matches. A satisfied
+individual record cannot override stale/duplicate evidence or a failed overall summary.
+
+Outside the declared contracts, passing cases remain unclassified. The artifact does not infer
+batch-only, deliberately unmodified, scan-only or host-failure routes from class names or JUnit
+outcomes. Those classifications and broader per-invocation collection remain
+[#168](https://github.com/datafusion-contrib/StreamFusion/issues/168). Agent unit-test output is
+outside the suite's report/evidence directories and contributes no SQL cases. The summary writes
+failed artifacts for missing or malformed reports/evidence and retains process failures; an
+earlier build or installation failure can stop the runner before the summary is reached.
 
 These checks prove native data-path execution, not a speedup. Release benchmarks measure performance
 separately. The ordinary Java job also tests the evidence collector and summarizer, including
@@ -224,18 +249,19 @@ The same `FLINK_SUITE_TEST` and `FLINK_SUITE_REUSE_BUILD=true` controls apply to
 `parquet`, `orc`, `kafka`, `paimon`, and `delta`. Reuse mode requires that the selected mode has been built once normally.
 
 The focused Paimon coordinator run includes its four paged writer-restoration cases, three
-commit-coordinator cases, and a deterministic primary-key write to verify native file creation:
+commit-coordinator cases, a deterministic primary-key write to verify native file creation,
+and continuous-read cases to exercise native snapshot merging:
 
 ```bash
-FLINK_SUITE_TEST='org.apache.paimon.flink.CoordinatorCommitITCase,org.apache.paimon.flink.BatchFileStoreITCase#testWriteRestoreCoordinator*,org.apache.paimon.flink.ReadWriteTableITCase#testStreamingReadWriteWithPartitionedRecordsWithPk' \
+FLINK_SUITE_TEST='org.apache.paimon.flink.CoordinatorCommitITCase,org.apache.paimon.flink.BatchFileStoreITCase#testWriteRestoreCoordinator*,org.apache.paimon.flink.ReadWriteTableITCase#testStreamingReadWriteWithPartitionedRecordsWithPk,org.apache.paimon.flink.ContinuousFileStoreITCase' \
   bin/flink-suite.sh paimon
 ```
 
 The focused streaming dynamic-partition run uses Paimon's unchanged skewed-input SQL test,
-alongside a primary-key write to satisfy the suite's two native-write checks:
+alongside a primary-key write and continuous-read cases to satisfy all three native write/read checks:
 
 ```bash
-FLINK_SUITE_TEST='org.apache.paimon.flink.AppendTableITCase#testPartitionDynamicStreaming,org.apache.paimon.flink.ReadWriteTableITCase#testStreamingReadWriteWithPartitionedRecordsWithPk' \
+FLINK_SUITE_TEST='org.apache.paimon.flink.AppendTableITCase#testPartitionDynamicStreaming,org.apache.paimon.flink.ReadWriteTableITCase#testStreamingReadWriteWithPartitionedRecordsWithPk,org.apache.paimon.flink.ContinuousFileStoreITCase' \
   bin/flink-suite.sh paimon
 ```
 
