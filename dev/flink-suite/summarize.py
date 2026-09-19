@@ -181,6 +181,7 @@ def main() -> int:
     parser.add_argument("--require-contract-prefix", action="append", default=[])
     parser.add_argument("--require-test", action="append", default=[])
     parser.add_argument("--require-test-class", action="append", default=[])
+    parser.add_argument("--require-test-method", action="append", default=[])
     parser.add_argument("--process-exit", type=int, default=0)
     parser.add_argument("--maven-result", type=pathlib.Path)
     parser.add_argument("--audit-output", type=pathlib.Path)
@@ -202,6 +203,7 @@ def main() -> int:
     contracts = execution_contracts(args.contracts)
     executed = Counter()
     executed_tests = Counter()
+    executed_methods = Counter()
     executed_classes = Counter()
 
     for report in files:
@@ -248,6 +250,7 @@ def main() -> int:
             })
             if case.find("skipped") is None:
                 executed_tests[case_key] += 1
+                executed_methods[case_key.split("(", 1)[0].split("[", 1)[0]] += 1
                 executed_classes[class_name] += 1
                 if case_key in contracts:
                     executed[case_key] += 1
@@ -291,6 +294,12 @@ def main() -> int:
         f"{test}: required test did not execute"
         for test in args.require_test
         if not executed_tests[test]
+    )
+
+    execution_problems.extend(
+        f"{test}: required test method did not execute"
+        for test in args.require_test_method
+        if not executed_methods[test]
     )
 
     execution_problems.extend(
