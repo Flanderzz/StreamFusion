@@ -133,7 +133,10 @@ benchmarks. Build the portable optimized artifacts when developing or preparing 
 bin/build-release.sh
 ```
 
-The release build enables `mimalloc` by default.
+The release build enables `mimalloc` by default. Its thread-local allocator state uses dynamic
+TLS because the JVM loads JNI libraries after startup, potentially through more than one
+classloader. Linux artifact validation rejects libraries that require a reserved static TLS
+block; deployment does not require preloading libraries or changing glibc tunables.
 
 The ORC module builds its released `orc-rust` reader through the normal Cargo/Maven lifecycle
 on macOS and Linux. Writing uses the Java ORC library supplied by Flink or Paimon, with a shared

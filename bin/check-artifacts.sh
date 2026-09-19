@@ -82,6 +82,7 @@ assert_native_payload() {
   fi
   if [ "$(uname -s)" = Linux ]; then
     python3 "$script_dir/check-native-glibc.py" "$jar_file"
+    python3 "$script_dir/check-native-tls.py" "$jar_file"
   fi
 }
 
