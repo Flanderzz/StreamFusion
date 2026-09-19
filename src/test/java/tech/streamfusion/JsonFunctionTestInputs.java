@@ -1,12 +1,9 @@
 package tech.streamfusion;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 import org.apache.flink.table.api.TableEnvironment;
-import tech.streamfusion.planner.NativePlanner;
-import tech.streamfusion.planner.PhysicalPlanScan;
 
 final class JsonFunctionTestInputs {
   private JsonFunctionTestInputs() {}
@@ -92,26 +89,17 @@ final class JsonFunctionTestInputs {
   }
 
   static void assertFails(String document, String expression) {
-    Throwable expected = null;
-    for (boolean nativeEnabled : new boolean[] {false, true}) {
-      TableEnvironment tables = TextTimeFunctionTestInputs.textRows(document);
-      PhysicalPlanScan scan = nativeEnabled ? NativePlanner.install(tables) : null;
-      Exception error =
-          assertThrows(
-              Exception.class,
-              () -> {
-                try (var rows =
-                    tables.executeSql("SELECT " + expression + " FROM inputs").collect()) {
-                  while (rows.hasNext()) rows.next();
-                }
-              });
-      Throwable root = error;
-      while (root.getCause() != null) root = root.getCause();
-      if (nativeEnabled) {
-        assertEquals(expected.getClass(), root.getClass(), error.toString());
-        assertEquals(expected.getMessage(), root.getMessage(), error.toString());
-        assertTrue(scan.substitutions() > 0, scan.fallbackReasons().toString());
-      } else expected = root;
-    }
+    var comparison =
+        NativeFailureParity.run(
+            () -> TextTimeFunctionTestInputs.textRows(document),
+            "SELECT " + expression + " FROM inputs");
+    Throwable host = comparison.host().rootCause();
+    Throwable nativeError = comparison.nativeRun().rootCause();
+    assertNotNull(host, comparison.toString());
+    assertNotNull(nativeError, comparison.toString());
+    assertEquals(host.getClass(), nativeError.getClass(), comparison.toString());
+    assertEquals(host.getMessage(), nativeError.getMessage(), comparison.toString());
+    assertEquals(
+        NativeFailureParity.Route.NATIVE, comparison.nativeRun().route(), comparison.toString());
   }
 }

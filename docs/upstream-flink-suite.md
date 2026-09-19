@@ -316,6 +316,10 @@ Java types through a typed error channel, including in filters and across multip
 fixture factories. The host outcome is captured before the native attempt; no assertion or
 expected host error can skip that second attempt. Each outcome retains the exception chain,
 collected rows with RowKind, planner substitution/fallback status and fallback reasons.
+For a submitted job, a failed collection also reads the terminal job result. This preserves the
+operator exception when the collect transport instead reports that its task has already failed.
+Local collection errors remain authoritative if the job succeeded, was cancelled by iterator
+cleanup, or does not return a terminal result within 30 seconds. Interrupts remain set.
 
 The helper records setup, planning, submission and collection boundaries separately. During
 submission or collection, the originating exception stack can identify operator initialization

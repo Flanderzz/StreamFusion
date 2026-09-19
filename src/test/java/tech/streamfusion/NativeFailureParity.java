@@ -7,8 +7,15 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.Supplier;
+import org.apache.flink.runtime.client.JobCancellationException;
 import org.apache.flink.table.api.TableEnvironment;
+import org.apache.flink.table.api.TableResult;
 import tech.streamfusion.planner.NativePlanner;
 import tech.streamfusion.planner.PhysicalPlanScan;
 
@@ -67,6 +74,7 @@ final class NativeFailureParity {
     PhysicalPlanScan scan = null;
     Phase phase = Phase.SETUP;
     Exception failure = null;
+    TableResult result = null;
     try {
       TableEnvironment table = environment.get();
       if (nativeRun) scan = NativePlanner.install(table);
@@ -74,7 +82,7 @@ final class NativeFailureParity {
       var query = table.sqlQuery(sql);
       query.explain();
       phase = Phase.SUBMISSION;
-      var result = query.execute();
+      result = query.execute();
       phase = Phase.COLLECTION;
       try (var iterator = result.collect()) {
         while (iterator.hasNext()) {
@@ -89,8 +97,12 @@ final class NativeFailureParity {
       }
     } catch (Exception error) {
       failure = error;
+      if (result != null && result.getJobClient().isPresent()) {
+        failure =
+            terminalFailure(result.getJobClient().orElseThrow().getJobExecutionResult(), error);
+      }
       if (phase == Phase.SUBMISSION || phase == Phase.COLLECTION) {
-        phase = failurePhase(error, phase);
+        phase = failurePhase(failure, phase);
       }
     }
     Route route = !nativeRun ? Route.HOST
@@ -100,6 +112,24 @@ final class NativeFailureParity {
         scan == null ? List.of() : List.copyOf(scan.fallbackReasons()),
         scan == null ? List.of() : List.copyOf(scan.operatorTypes()),
         scan == null ? 0 : scan.substitutions());
+  }
+
+  static Exception terminalFailure(CompletableFuture<?> completion, Exception collectionFailure) {
+    try {
+      completion.get(30, TimeUnit.SECONDS);
+    } catch (ExecutionException jobFailure) {
+      // Closing the iterator can cancel an otherwise running job after a local collection error.
+      for (Throwable cause = jobFailure; cause != null; cause = cause.getCause()) {
+        if (cause instanceof JobCancellationException) return collectionFailure;
+      }
+      return jobFailure;
+    } catch (InterruptedException interrupted) {
+      Thread.currentThread().interrupt();
+      collectionFailure.addSuppressed(interrupted);
+    } catch (TimeoutException | CancellationException unavailable) {
+      collectionFailure.addSuppressed(unavailable);
+    }
+    return collectionFailure;
   }
 
   /** Prefer the originating operator frame; the collect API also transports remote task failures. */
