@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.util.Random;
@@ -70,7 +72,8 @@ class FlinkDecimalFloatingSqlHarnessTest {
     }
     table.createTemporaryView(
         "src",
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(
                 new String[] {"id", "d", "a", "idx"},
                 Types.INT,

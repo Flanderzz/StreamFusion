@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
@@ -7,6 +9,11 @@ import org.apache.flink.types.Row;
 import org.junit.jupiter.api.Test;
 
 class FlinkUnhexSqlHarnessTest {
+  @org.junit.jupiter.api.BeforeEach
+  void requireReleasedHostFunction() {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction("UNHEX");
+  }
+
   @Test
   void oddLengthsAndInvalidInputNulls() throws Exception {
     parity("SELECT id, UNHEX(hex_text) FROM encodings");
@@ -28,7 +35,8 @@ class FlinkUnhexSqlHarnessTest {
           StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
           tEnv.createTemporaryView(
               "unhex_inputs",
-              env.fromData(
+              fromData(
+                  env,
                   Types.ROW_NAMED(new String[] {"s"}, Types.STRING),
                   Row.of("aF0012GG"),
                   Row.of("Af"),

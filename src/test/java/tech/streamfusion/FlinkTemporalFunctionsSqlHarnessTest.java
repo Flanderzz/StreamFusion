@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -20,15 +22,14 @@ class FlinkTemporalFunctionsSqlHarnessTest {
   @Test
   void parsesTimestampsAndFormatsDynamicPatterns() throws Exception {
     parity(
-        "TO_TIMESTAMP(s), TO_TIMESTAMP(s, p), TO_TIMESTAMP_LTZ(s), TO_TIMESTAMP_LTZ(s, p),"
-            + " TO_TIMESTAMP_LTZ(s, p, z), DATE_FORMAT(ts, p), DATE_FORMAT(ltz, p), DATE_FORMAT(ts,"
-            + " 'EEEE MMMM dd yyyy'), DATE_FORMAT(ts, 'yyyy-MM-dd HH:mm:ss')");
+        "TO_TIMESTAMP(s), TO_TIMESTAMP(s, p), DATE_FORMAT(ts, p), DATE_FORMAT(ltz, p),"
+            + " DATE_FORMAT(ts, 'EEEE MMMM dd yyyy'), DATE_FORMAT(ts, 'yyyy-MM-dd HH:mm:ss')");
   }
 
   @Test
   void epochConversionsComposeWithTimestampExpressions() throws Exception {
     parity(
-        "TO_TIMESTAMP_LTZ(epoch), TO_TIMESTAMP_LTZ(epoch, 3), "
+        "TO_TIMESTAMP_LTZ(epoch, 3), "
             + "TO_TIMESTAMP_LTZ(n, 0), TO_TIMESTAMP_LTZ(CAST(epoch AS DECIMAL(18, 3)), 3), "
             + "EXTRACT(SECOND FROM TO_TIMESTAMP_LTZ(epoch, 3)), "
             + "UNIX_TIMESTAMP(s), UNIX_TIMESTAMP(s, p), FROM_UNIXTIME(n), FROM_UNIXTIME(n, p)");
@@ -42,6 +43,10 @@ class FlinkTemporalFunctionsSqlHarnessTest {
   @ParameterizedTest
   @ValueSource(strings = {"YEAR", "MONTH", "DAY", "HOUR", "MINUTE", "SECOND", "MILLISECOND"})
   void temporalRoundingPreservesTypesAndNestedExpressions(String unit) throws Exception {
+    org.junit.jupiter.api.Assumptions.assumeTrue(
+        tech.streamfusion.compat.FlinkTestCapabilities.SUB_HOUR_TIMESTAMP_ROUNDING
+            || java.util.Set.of("YEAR", "MONTH", "DAY", "HOUR").contains(unit),
+        "Flink 1.18 emits an invalid TimestampData floor/ceil call below HOUR precision");
     parity(
         "FLOOR(ts TO "
             + unit
@@ -87,7 +92,7 @@ class FlinkTemporalFunctionsSqlHarnessTest {
   @Test
   void castsTemporalValuesAndKeepsSubMillisecondPrecision() throws Exception {
     parity(
-        "CAST(ts AS TIMESTAMP(3)), CAST(ts AS DATE), CAST(ts AS TIME), "
+        "CAST(ts AS TIMESTAMP(3)), CAST(ts AS DATE), "
             + "CAST(ts AS STRING), CAST(d AS STRING), CAST(tm AS STRING), CAST(ltz AS STRING), "
             + "CAST(ts AS TIMESTAMP_LTZ(9)), CAST(ltz AS TIMESTAMP(9)), CAST(s AS TIMESTAMP(3))");
   }
@@ -97,10 +102,9 @@ class FlinkTemporalFunctionsSqlHarnessTest {
     NativeParity.assertParity(
         () -> {
           var tables = environment();
-          var root =
-              org.apache.flink.configuration.Configuration.fromMap(
-                  tables.getConfig().getRootConfiguration().toMap());
-          root.setString("table.exec.legacy-cast-behaviour", "ENABLED");
+          var root = org.apache.flink.table.api.TableConfig.getDefault();
+          root.setRootConfiguration(tables.getConfig().getRootConfiguration());
+          root.set("table.exec.legacy-cast-behaviour", "ENABLED");
           tables.getConfig().setRootConfiguration(root);
           return tables;
         },
@@ -148,7 +152,8 @@ class FlinkTemporalFunctionsSqlHarnessTest {
           var tables = StreamTableEnvironment.create(env);
           tables.createTemporaryView(
               "parsed",
-              env.fromData(
+              fromData(
+                  env,
                   Types.ROW_NAMED(new String[] {"s"}, Types.STRING),
                   Row.of("2024-01-01 00:00:00"),
                   Row.of("2024-01-01 00:00:01"),
@@ -168,24 +173,61 @@ class FlinkTemporalFunctionsSqlHarnessTest {
   @Test
   void invalidTextAndPatternsRetainFlinksNullAndSentinelResults() throws Exception {
     NativeParity.assertParity(
-        () -> {
+        FlinkTemporalFunctionsSqlHarnessTest::invalidDates,
+        "SELECT TO_DATE(s, p), TO_TIMESTAMP(s, p), "
+            + "UNIX_TIMESTAMP(s, p), CONVERT_TZ(s, z, 'UTC') FROM invalid_dates");
+  }
+
+  @Test
+  void invalidLocalTimeZoneTimestampTextKeepsHostResults() throws Exception {
+    org.junit.jupiter.api.Assumptions.assumeTrue(
+        tech.streamfusion.compat.FlinkTestCapabilities.TIMESTAMP_LTZ_TEXT_OVERLOADS,
+        "Flink 1.18 TO_TIMESTAMP_LTZ has no string overloads");
+    NativeParity.assertParity(
+        FlinkTemporalFunctionsSqlHarnessTest::invalidDates,
+        "SELECT TO_TIMESTAMP_LTZ(s, p, z) FROM invalid_dates");
+  }
+
+  private static TableEnvironment invalidDates() {
           var env = StreamExecutionEnvironment.getExecutionEnvironment();
           env.setParallelism(1);
           var tables = StreamTableEnvironment.create(env);
-          tables.createTemporaryView(
-              "invalid_dates",
-              env.fromData(
-                  Types.ROW_NAMED(
-                      new String[] {"s", "p", "z"}, Types.STRING, Types.STRING, Types.STRING),
-                  Row.of("not a date", "yyyy-MM-dd HH:mm:ss", "UTC"),
-                  Row.of("2024-02-30 12:00:00", "yyyy-MM-dd HH:mm:ss", "unknown/timezone"),
-                  Row.of("2024-01-01 12:00:00", "yyyy/MM/dd", "UTC"),
-                  Row.of("", "", ""),
-                  Row.of(null, null, null)));
+    tables.createTemporaryView(
+        "invalid_dates",
+        fromData(
+            env,
+            Types.ROW_NAMED(new String[] {"s", "p", "z"}, Types.STRING, Types.STRING, Types.STRING),
+            Row.of("not a date", "yyyy-MM-dd HH:mm:ss", "UTC"),
+            Row.of("2024-02-30 12:00:00", "yyyy-MM-dd HH:mm:ss", "unknown/timezone"),
+            Row.of("2024-01-01 12:00:00", "yyyy/MM/dd", "UTC"),
+            Row.of("", "", ""),
+            Row.of(null, null, null)));
           return tables;
-        },
-        "SELECT TO_DATE(s, p), TO_TIMESTAMP(s, p), TO_TIMESTAMP_LTZ(s, p, z), "
-            + "UNIX_TIMESTAMP(s, p), CONVERT_TZ(s, z, 'UTC') FROM invalid_dates");
+  }
+
+  @Test
+  void parsesLocalTimeZoneTimestampsFromText() throws Exception {
+    org.junit.jupiter.api.Assumptions.assumeTrue(
+        tech.streamfusion.compat.FlinkTestCapabilities.TIMESTAMP_LTZ_TEXT_OVERLOADS,
+        "Flink 1.18 TO_TIMESTAMP_LTZ only accepts numeric epochs with explicit precision");
+    parity("TO_TIMESTAMP_LTZ(s), TO_TIMESTAMP_LTZ(s, p), TO_TIMESTAMP_LTZ(s, p, z)");
+  }
+
+  @Test
+  void epochConversionsUseDefaultPrecision() throws Exception {
+    org.junit.jupiter.api.Assumptions.assumeTrue(
+        tech.streamfusion.compat.FlinkTestCapabilities.TIMESTAMP_LTZ_DEFAULT_PRECISION,
+        "Flink 1.18 TO_TIMESTAMP_LTZ requires the precision argument");
+    parity("TO_TIMESTAMP_LTZ(epoch)");
+  }
+
+  @Test
+  void castsPreEpochTimestampToTime() throws Exception {
+    org.junit.jupiter.api.Assumptions.assumeTrue(
+        tech.streamfusion.compat.FlinkTestCapabilities.NEGATIVE_TIMESTAMP_TO_TIME,
+        "Flink 1.18 emits a negative millisecond fraction which its external TIME converter"
+            + " rejects");
+    parity("CAST(ts AS TIME)");
   }
 
   @Test
@@ -270,7 +312,8 @@ class FlinkTemporalFunctionsSqlHarnessTest {
             (Instant) null);
     tables.createTemporaryView(
         "temporal_inputs",
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(
                 new String[] {"id", "s", "p", "z", "n", "epoch", "d", "tm", "ts", "ltz"},
                 Types.INT,

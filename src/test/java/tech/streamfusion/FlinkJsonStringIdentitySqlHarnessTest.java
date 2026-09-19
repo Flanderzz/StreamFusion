@@ -16,6 +16,8 @@ class FlinkJsonStringIdentitySqlHarnessTest {
   @ParameterizedTest
   @ValueSource(strings = {"JSON_VALUE(s, '$')", "JSON_UNQUOTE(s)"})
   void consumersKeepSurrogatesDistinctFromQuestionMarks(String value) throws Exception {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction("JSON_QUOTE");
+    tech.streamfusion.compat.FlinkTestCapabilities.requireJsonFunctions(value);
     NativeParity.assertParity(
         () -> environment(5003),
         "SELECT id, "
@@ -43,6 +45,7 @@ class FlinkJsonStringIdentitySqlHarnessTest {
   @ParameterizedTest
   @ValueSource(strings = {"JSON_VALUE(s, '$')", "JSON_UNQUOTE(s)"})
   void filtersKeepOnlyTheActualQuestionMark(String value) throws Exception {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireJsonFunctions(value);
     String sql = "SELECT id FROM inputs WHERE " + value + " = '?'";
     for (boolean nativeEnabled : new boolean[] {false, true}) {
       TableEnvironment tables = environment(4);
@@ -68,6 +71,7 @@ class FlinkJsonStringIdentitySqlHarnessTest {
         "JSON_VALUE(s, '$') IS NULL"
       })
   void nestedConsumersRemainInOneGeneratedExpression(String expression) throws Exception {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireJsonFunctions(expression);
     NativeParity.assertParity(() -> environment(5003), "SELECT id, " + expression + " FROM inputs");
   }
 
@@ -84,6 +88,7 @@ class FlinkJsonStringIdentitySqlHarnessTest {
             + "GROUP BY LOWER(JSON_VALUE(s, '$'))"
       })
   void stringResultsCrossingOperatorsFallBackExplicitly(String sql) throws Exception {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireJsonFunctions(sql);
     NativeParity.assertFallbackReasonContains(
         () -> environment(32), sql, "JSON string identity requires a final projection");
   }
@@ -98,6 +103,7 @@ class FlinkJsonStringIdentitySqlHarnessTest {
 
   @Test
   void fusedUnquoteConsumerPreservesTheHostException() {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction("JSON_UNQUOTE");
     NativeFailureParity.run(
             () -> TextTimeFunctionTestInputs.textRows("\"a\" \\u1\""),
             "SELECT JSON_UNQUOTE(s) = '?' FROM inputs")
@@ -133,6 +139,7 @@ class FlinkJsonStringIdentitySqlHarnessTest {
   @ParameterizedTest
   @ValueSource(strings = {"\\uD800", "\\uDC00", "\\uD83D\\uDE00"})
   void constantFoldedJsonResultsKeepTheirIdentity(String escaped) throws Exception {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction("JSON_UNQUOTE");
     NativeParity.assertParity(
         () -> TextTimeFunctionTestInputs.textRows("?", "😀", "", null),
         "SELECT id, JSON_VALUE('\""

@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import java.math.BigDecimal;
 import java.util.stream.Stream;
 import org.apache.flink.api.common.typeinfo.Types;
@@ -112,7 +114,7 @@ class FlinkTryDecimalSqlHarnessTest {
     for (int i = 0; i < rows.length; i++) rows[i] = Row.of(i, values[i % values.length]);
     table.createTemporaryView(
         "src",
-        env.fromData(Types.ROW_NAMED(new String[] {"id", "s"}, Types.INT, Types.STRING), rows));
+        fromData(env, Types.ROW_NAMED(new String[] {"id", "s"}, Types.INT, Types.STRING), rows));
     return table;
   }
 
@@ -122,7 +124,8 @@ class FlinkTryDecimalSqlHarnessTest {
     var table = StreamTableEnvironment.create(env);
     table.createTemporaryView(
         "src",
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(new String[] {"id", "d"}, Types.INT, Types.BIG_DEC),
             Row.of(1, new BigDecimal("999.995")),
             Row.of(2, new BigDecimal("-1.255")),

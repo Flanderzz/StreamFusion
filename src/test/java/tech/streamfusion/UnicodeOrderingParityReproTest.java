@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.api.TableEnvironment;
@@ -58,8 +60,10 @@ class UnicodeOrderingParityReproTest {
 
   @Test
   void topNControl() throws Exception {
-    NativeParity.assertChangelogParity(UnicodeOrderingParityReproTest::unicode,
-        "SELECT id, rn FROM (SELECT id, ROW_NUMBER() OVER (ORDER BY s, id) rn FROM n) WHERE rn <= 2");
+    NativeParity.assertChangelogParity(
+        UnicodeOrderingParityReproTest::unicode,
+        "SELECT id, rn FROM (SELECT id, ROW_NUMBER() OVER (ORDER BY s, id) rn FROM n) WHERE rn <="
+            + " 2");
   }
 
   private static void assertOrderingFallback(
@@ -76,9 +80,13 @@ class UnicodeOrderingParityReproTest {
     env.setParallelism(1);
     if (serialized) env.disableOperatorChaining();
     StreamTableEnvironment table = StreamTableEnvironment.create(env);
-    table.createTemporaryView("n", env.fromData(Types.ROW_NAMED(
-        new String[] {"id", "s", "t"}, Types.INT, Types.STRING, Types.STRING),
-        Row.of(1, first, second), Row.of(2, second, first)));
+    table.createTemporaryView(
+        "n",
+        fromData(
+            env,
+            Types.ROW_NAMED(new String[] {"id", "s", "t"}, Types.INT, Types.STRING, Types.STRING),
+            Row.of(1, first, second),
+            Row.of(2, second, first)));
     return table;
   }
 }

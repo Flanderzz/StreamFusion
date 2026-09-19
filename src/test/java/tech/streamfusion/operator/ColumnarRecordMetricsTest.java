@@ -8,12 +8,9 @@ import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.flink.metrics.groups.OperatorMetricGroup;
-import org.apache.flink.runtime.event.WatermarkEvent;
 import org.apache.flink.runtime.metrics.groups.UnregisteredMetricGroups;
-import org.apache.flink.streaming.api.operators.Output;
 import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.runtime.streamrecord.LatencyMarker;
-import org.apache.flink.streaming.runtime.streamrecord.RecordAttributes;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.streaming.runtime.watermarkstatus.WatermarkStatus;
 import org.apache.flink.table.data.GenericRowData;
@@ -49,7 +46,8 @@ class ColumnarRecordMetricsTest {
   }
 
   /** Stands in for the runtime's own counting output, which charges exactly one per collect. */
-  private static final class CountingCollector implements Output<StreamRecord<ArrowBatch>> {
+  private static final class CountingCollector
+      extends tech.streamfusion.compat.TestOutput<StreamRecord<ArrowBatch>> {
     private final OperatorMetricGroup metrics;
     private final List<ArrowBatch> collected = new ArrayList<>();
 
@@ -76,12 +74,6 @@ class ColumnarRecordMetricsTest {
     public void emitLatencyMarker(LatencyMarker marker) {}
 
     @Override
-    public void emitWatermark(WatermarkEvent watermark) {}
-
-    @Override
-    public void emitRecordAttributes(RecordAttributes attributes) {}
-
-    @Override
     public void close() {}
   }
 
@@ -94,7 +86,9 @@ class ColumnarRecordMetricsTest {
       ColumnarRecordMetrics.emit(output, metrics, batch);
 
       assertEquals(
-          4096, metrics.getIOMetricGroup().getNumRecordsOutCounter().getCount(), "rows, not batches");
+          4096,
+          metrics.getIOMetricGroup().getNumRecordsOutCounter().getCount(),
+          "rows, not batches");
       assertEquals(1, output.collected.size(), "the batch is emitted exactly once");
       try (VectorSchemaRoot root = output.collected.get(0).root()) {
         assertEquals(4096, root.getRowCount(), "the consumer still gets to take the batch");

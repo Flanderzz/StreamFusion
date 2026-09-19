@@ -1,6 +1,7 @@
 package tech.streamfusion;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
 
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
@@ -87,7 +88,7 @@ class FlinkTypedNullSqlHarnessTest {
     for (int i = 0; i < count; i++) rows[i] = Row.of(i);
     tables.createTemporaryView(
         "inputs",
-        env.fromData(Types.ROW_NAMED(new String[] {"id"}, Types.INT), rows),
+        fromData(env, Types.ROW_NAMED(new String[] {"id"}, Types.INT), rows),
         Schema.newBuilder().column("id", DataTypes.INT()).build());
     return tables;
   }
@@ -98,7 +99,8 @@ class FlinkTypedNullSqlHarnessTest {
     StreamTableEnvironment tables = StreamTableEnvironment.create(env);
     tables.createTemporaryView(
         "inputs",
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(
                 new String[] {"id", "arr", "m", "am"},
                 Types.INT,

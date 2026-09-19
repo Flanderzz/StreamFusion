@@ -12,9 +12,11 @@ Builds record the target Flink line and module identity in every payload's manif
 checks its embedded core and installed StreamFusion JARs before creating the planner classloader,
 including renamed extensions. A different line or a missing marker fails startup with an explicit
 compatibility error; rebuild or upgrade the loader, core and extensions together. The artifact
-coordinates remain unchanged. Flink 1.18 support is still being implemented in
-[#182](https://github.com/datafusion-contrib/StreamFusion/issues/182); these identity checks do not
-add it to the supported set. Builds and deployments require Java 17.
+coordinates for 2.2 remain unchanged. The `flink-1.18` development profile produces separate
+`streamfusion-*-flink1.18` coordinates and admits only Flink 1.18.1; release support remains gated
+by the outstanding validation in [#182](https://github.com/datafusion-contrib/StreamFusion/issues/182).
+See [Flink line compatibility](flink-compatibility.md) for build commands, dependency selections and
+known host differences. Builds and deployments require Java 17.
 
 Release artifacts are available from Maven Central and already contain the optimized native
 libraries. Fetch the loader and the separate runtime-visible core payload directly into a Flink

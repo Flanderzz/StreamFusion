@@ -3,9 +3,8 @@ package tech.streamfusion.kafka;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
 
-import tech.streamfusion.planner.NativePlanner;
-import tech.streamfusion.planner.PhysicalPlanScan;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -26,9 +25,7 @@ import org.apache.flink.api.common.state.ListStateDescriptor;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.configuration.CheckpointingOptions;
 import org.apache.flink.configuration.Configuration;
-import org.apache.flink.configuration.ExternalizedCheckpointRetention;
 import org.apache.flink.configuration.RestartStrategyOptions;
-import org.apache.flink.configuration.StateRecoveryOptions;
 import org.apache.flink.runtime.state.FunctionInitializationContext;
 import org.apache.flink.runtime.state.FunctionSnapshotContext;
 import org.apache.flink.streaming.api.checkpoint.CheckpointedFunction;
@@ -39,9 +36,9 @@ import org.apache.flink.table.api.Schema;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.apache.flink.types.Row;
 import org.apache.flink.util.CloseableIterator;
+import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.admin.AdminClient;
 import org.apache.kafka.clients.admin.AdminClientConfig;
-import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.clients.admin.TransactionListing;
 import org.apache.kafka.clients.admin.TransactionState;
@@ -59,6 +56,8 @@ import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.junit.jupiter.api.io.TempDir;
 import org.testcontainers.containers.KafkaContainer;
 import org.testcontainers.utility.DockerImageName;
+import tech.streamfusion.planner.NativePlanner;
+import tech.streamfusion.planner.PhysicalPlanScan;
 
 /** Broker-level proof that native values remain governed by Flink's exactly-once Kafka writer. */
 @Tag("streamfusion-kafka")
@@ -299,7 +298,8 @@ class NativeKafkaSinkIntegrationTest {
         }
         table.createTemporaryView(
             "src",
-            environment.fromData(
+            fromData(
+                environment,
                 Types.ROW_NAMED(new String[] {"id", "name"}, Types.LONG, Types.STRING),
                 input.toArray(Row[]::new)),
             Schema.newBuilder()
@@ -345,8 +345,7 @@ class NativeKafkaSinkIntegrationTest {
       }
       table.createTemporaryView(
           "src",
-          environment.fromData(
-              Types.ROW_NAMED(new String[] {"id"}, Types.LONG), input),
+          fromData(environment, Types.ROW_NAMED(new String[] {"id"}, Types.LONG), input),
           Schema.newBuilder().column("id", DataTypes.BIGINT()).build());
       table.executeSql(
           "CREATE TABLE output (id BIGINT, total BIGINT, PRIMARY KEY (id) NOT ENFORCED) WITH ("
@@ -402,7 +401,8 @@ class NativeKafkaSinkIntegrationTest {
       }
       table.createTemporaryView(
           "src",
-          environment.fromData(
+          fromData(
+              environment,
               Types.ROW_NAMED(new String[] {"id", "name"}, Types.LONG, Types.STRING),
               input.toArray(Row[]::new)),
           Schema.newBuilder()
@@ -452,7 +452,8 @@ class NativeKafkaSinkIntegrationTest {
         input.add(Row.of(id, "row-" + id));
       }
       DataStream<Row> source =
-          environment.fromData(
+          fromData(
+              environment,
               Types.ROW_NAMED(new String[] {"id", "name"}, Types.LONG, Types.STRING),
               input.toArray(Row[]::new));
       table.createTemporaryView(
@@ -509,15 +510,12 @@ class NativeKafkaSinkIntegrationTest {
         input.add(Row.of(id, "row-" + id));
       }
       DataStream<Row> source =
-          environment
-              .fromData(
-                  Types.ROW_NAMED(
-                      new String[] {"id", "name"}, Types.LONG, Types.STRING),
+          fromData(
+                  environment,
+                  Types.ROW_NAMED(new String[] {"id", "name"}, Types.LONG, Types.STRING),
                   input.toArray(Row[]::new))
               .map(new CheckpointFailingMap())
-              .returns(
-                  Types.ROW_NAMED(
-                      new String[] {"id", "name"}, Types.LONG, Types.STRING));
+              .returns(Types.ROW_NAMED(new String[] {"id", "name"}, Types.LONG, Types.STRING));
       table.createTemporaryView(
           "src",
           source,
@@ -567,13 +565,12 @@ class NativeKafkaSinkIntegrationTest {
       environment.configure(configuration);
       StreamTableEnvironment table = StreamTableEnvironment.create(environment);
       DataStream<Row> source =
-          environment
-              .fromData(
+          fromData(
+                  environment,
                   Types.ROW_NAMED(new String[] {"id", "name"}, Types.LONG, Types.STRING),
                   rowRange(rows).toArray(Row[]::new))
               .map(new CommitPhaseFailingMap())
-              .returns(
-                  Types.ROW_NAMED(new String[] {"id", "name"}, Types.LONG, Types.STRING));
+              .returns(Types.ROW_NAMED(new String[] {"id", "name"}, Types.LONG, Types.STRING));
       table.createTemporaryView(
           "src",
           source,
@@ -649,11 +646,10 @@ class NativeKafkaSinkIntegrationTest {
     configuration.set(RestartStrategyOptions.RESTART_STRATEGY, "disable");
     configuration.set(
         CheckpointingOptions.CHECKPOINTS_DIRECTORY, checkpoints.toUri().toString());
-    configuration.set(
-        CheckpointingOptions.EXTERNALIZED_CHECKPOINT_RETENTION,
-        ExternalizedCheckpointRetention.RETAIN_ON_CANCELLATION);
+    tech.streamfusion.compat.CheckpointTestConfig.retainOnCancellation(configuration);
     if (restoreFrom != null) {
-      configuration.set(StateRecoveryOptions.SAVEPOINT_PATH, restoreFrom.toUri().toString());
+      tech.streamfusion.compat.CheckpointTestConfig.restore(
+          configuration, restoreFrom.toUri().toString());
     }
     StreamExecutionEnvironment environment =
         StreamExecutionEnvironment.getExecutionEnvironment(configuration);
@@ -661,8 +657,8 @@ class NativeKafkaSinkIntegrationTest {
     environment.enableCheckpointing(50);
     StreamTableEnvironment table = StreamTableEnvironment.create(environment);
     DataStream<Row> source =
-        environment
-            .fromData(
+        fromData(
+                environment,
                 Types.ROW_NAMED(new String[] {"id", "name"}, Types.LONG, Types.STRING),
                 rowRange(rows).toArray(Row[]::new))
             .uid("downscale-source")

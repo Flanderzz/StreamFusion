@@ -156,6 +156,7 @@ struct EncoderConfig {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum SchemaShape {
     Flink,
+    Flink118,
     Paimon,
 }
 
@@ -209,6 +210,7 @@ impl EncoderConfig {
                 "schema.shape" => {
                     config.schema_shape = match value.as_str() {
                         "flink" => SchemaShape::Flink,
+                        "flink1.18" => SchemaShape::Flink118,
                         "paimon" => SchemaShape::Paimon,
                         other => panic!("unsupported parquet schema shape {other}"),
                     }
@@ -261,9 +263,13 @@ fn parse_timestamp_unit(value: &str) -> arrow::datatypes::TimeUnit {
 /// (Arrow timezone set, Parquet adjusted-to-UTC) or a local timestamp. TIME narrows to millisecond
 /// INT32. Fixed-size binary uses BYTE_ARRAY, as both host converters require. Field
 /// metadata is preserved so nested field ids and units survive into the descriptor.
-fn write_field(source: &Field, timestamp_unit: arrow::datatypes::TimeUnit) -> Field {
+fn write_field(
+    source: &Field,
+    timestamp_unit: arrow::datatypes::TimeUnit,
+    shape: SchemaShape,
+) -> Field {
     use arrow::datatypes::TimeUnit;
-    let nested = |field: &Arc<Field>| Arc::new(write_field(field, timestamp_unit));
+    let nested = |field: &Arc<Field>| Arc::new(write_field(field, timestamp_unit, shape));
     let data_type = match source.data_type() {
         data_type if streamfusion_bridge::timestamp::is_timestamp(data_type) => {
             let unit = source
@@ -280,7 +286,29 @@ fn write_field(source: &Field, timestamp_unit: arrow::datatypes::TimeUnit) -> Fi
         DataType::FixedSizeBinary(_) => DataType::Binary,
         DataType::Struct(fields) => DataType::Struct(fields.iter().map(nested).collect()),
         DataType::List(field) => DataType::List(nested(field)),
-        DataType::Map(field, sorted) => DataType::Map(nested(field), *sorted),
+        DataType::Map(field, sorted) => {
+            let entries = nested(field);
+            if shape == SchemaShape::Flink118 && nullable_map_key(source) {
+                let DataType::Struct(fields) = entries.data_type() else {
+                    panic!("map entries were not a struct");
+                };
+                let fields = vec![
+                    Arc::new(fields[0].as_ref().clone().with_nullable(true)),
+                    fields[1].clone(),
+                ];
+                DataType::Map(
+                    Arc::new(
+                        entries
+                            .as_ref()
+                            .clone()
+                            .with_data_type(DataType::Struct(fields.into())),
+                    ),
+                    *sorted,
+                )
+            } else {
+                DataType::Map(entries, *sorted)
+            }
+        }
         other => other.clone(),
     };
     source.clone().with_data_type(data_type)
@@ -577,7 +605,7 @@ fn host_parquet_type(field: &Field, shape: SchemaShape) -> parquet::schema::type
                 .as_ref()
                 .clone()
                 .with_name("key")
-                .with_nullable(false);
+                .with_nullable(shape == SchemaShape::Flink118 && nullable_map_key(field));
             let value = fields[1].as_ref().clone().with_name("value");
             // Both Flink and Paimon use parquet-mr's ConversionPatterns.mapType, which stamps
             // the legacy MAP_KEY_VALUE converted type on the repeated group.
@@ -610,6 +638,13 @@ fn host_parquet_type(field: &Field, shape: SchemaShape) -> parquet::schema::type
         .with_repetition(repetition)
         .build()
         .expect("failed to build parquet leaf")
+}
+
+fn nullable_map_key(field: &Field) -> bool {
+    field
+        .metadata()
+        .get("streamfusion:parquet_nullable_map_key")
+        .is_some_and(|value| value == "true")
 }
 
 fn field_id(field: &Field) -> Option<i32> {
@@ -666,7 +701,13 @@ impl<W: std::io::Write + Send> ParquetEncoder<W> {
             .collect();
         let data_fields = projection
             .iter()
-            .map(|&index| write_field(full_schema.field(index), config.timestamp_unit))
+            .map(|&index| {
+                write_field(
+                    full_schema.field(index),
+                    config.timestamp_unit,
+                    config.schema_shape,
+                )
+            })
             .collect::<Vec<_>>();
         let write_fields: Vec<Field> = if changelog {
             std::iter::once(Field::new(
@@ -700,7 +741,7 @@ impl<W: std::io::Write + Send> ParquetEncoder<W> {
         let input_schema = full_schema.clone();
 
         let root_name = match config.schema_shape {
-            SchemaShape::Flink => "flink_schema",
+            SchemaShape::Flink | SchemaShape::Flink118 => "flink_schema",
             SchemaShape::Paimon => "paimon_schema",
         };
         let root = parquet::schema::types::Type::group_type_builder(root_name)
@@ -1513,6 +1554,95 @@ mod parquet_encoder_tests {
         assert_eq!(arr.get_basic_info().id(), 5);
         assert_eq!(leaf(5).name(), "element");
         assert_eq!(leaf(5).get_basic_info().id(), 536_871_936);
+    }
+
+    #[test]
+    fn flink118_map_key_nullability_survives_nested_roundtrips() {
+        for nullable_keys in [false, true] {
+            for nested in [false, true] {
+                let mut map = arrow::array::MapBuilder::new(
+                    None,
+                    arrow::array::StringBuilder::new(),
+                    arrow::array::Int64Builder::new(),
+                );
+                map.keys().append_value("x");
+                map.values().append_value(10);
+                map.keys().append_value("y");
+                map.values().append_null();
+                map.append(true).unwrap();
+                map.append(true).unwrap();
+                map.append(false).unwrap();
+                let map = map.finish();
+                let field = Field::new("attrs", map.data_type().clone(), true).with_metadata(
+                    std::collections::HashMap::from([(
+                        "streamfusion:parquet_nullable_map_key".into(),
+                        nullable_keys.to_string(),
+                    )]),
+                );
+                let (field, column): (Field, ArrayRef) = if nested {
+                    let fields: Fields = vec![Arc::new(field)].into();
+                    let array =
+                        arrow::array::StructArray::new(fields.clone(), vec![Arc::new(map)], None);
+                    (
+                        Field::new("outer", DataType::Struct(fields), true),
+                        Arc::new(array),
+                    )
+                } else {
+                    (field, Arc::new(map))
+                };
+                let schema = Arc::new(Schema::new(vec![field]));
+                let batch = RecordBatch::try_new(schema.clone(), vec![column]).unwrap();
+                let bytes = encode(schema, &[], &[("schema.shape", "flink1.18")], &[batch]);
+                let reader =
+                    ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(bytes)).unwrap();
+                assert_eq!(
+                    reader
+                        .metadata()
+                        .file_metadata()
+                        .schema_descr()
+                        .column(0)
+                        .self_type()
+                        .get_basic_info()
+                        .repetition(),
+                    if nullable_keys {
+                        Repetition::OPTIONAL
+                    } else {
+                        Repetition::REQUIRED
+                    }
+                );
+                let batches = reader
+                    .build()
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 3);
+                let column = if nested {
+                    batches[0]
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<arrow::array::StructArray>()
+                        .unwrap()
+                        .column(0)
+                } else {
+                    batches[0].column(0)
+                };
+                let map = column
+                    .as_any()
+                    .downcast_ref::<arrow::array::MapArray>()
+                    .unwrap();
+                let keys = map
+                    .keys()
+                    .as_any()
+                    .downcast_ref::<arrow::array::StringArray>()
+                    .unwrap();
+                assert_eq!(keys.null_count(), 0);
+                assert_eq!(keys.value(0), "x");
+                assert_eq!(keys.value(1), "y");
+                assert!(map.values().is_null(1));
+                assert_eq!(map.value_length(1), 0);
+                assert!(map.is_null(2));
+            }
+        }
     }
 
     #[test]

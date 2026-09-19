@@ -1,7 +1,5 @@
 package tech.streamfusion.format.avro;
 
-import org.apache.flink.formats.avro.RowDataToAvroConverters;
-import org.apache.flink.formats.avro.typeutils.AvroSchemaConverter;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.table.types.logical.TimeType;
@@ -25,8 +23,9 @@ public final class AvroEncodeGate {
    */
   public static boolean supports(RowType rowType, boolean legacyTimestampMapping) {
     try {
-      AvroSchemaConverter.convertToSchema(rowType, legacyTimestampMapping);
-      RowDataToAvroConverters.createConverter(rowType, legacyTimestampMapping);
+      tech.streamfusion.format.avro.compat.AvroCompat.schema(rowType, legacyTimestampMapping);
+      tech.streamfusion.format.avro.compat.AvroCompat.validateEncoder(
+          rowType, legacyTimestampMapping);
     } catch (RuntimeException e) {
       return false;
     }
@@ -42,7 +41,8 @@ public final class AvroEncodeGate {
    * a planner JVM that has Flink.
    */
   public static String derivedSchema(RowType rowType, boolean legacyTimestampMapping) {
-    return AvroSchemaConverter.convertToSchema(rowType, legacyTimestampMapping).toString();
+    return tech.streamfusion.format.avro.compat.AvroCompat.schema(rowType, legacyTimestampMapping)
+        .toString();
   }
 
   private static boolean encodableColumn(LogicalType type) {

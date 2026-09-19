@@ -81,8 +81,11 @@ final class ScanWatermarkSpec {
     // computed rowtime); it must be one of the supported terms and agree with the watermark
     // expression's column.
     Integer rowtimeFromExpr = null;
-    if (pushed.getRowtimeExpr().isPresent()) {
-      Integer index = rowtimeTerm(stripReinterpret(pushed.getRowtimeExpr().get()));
+    if (tech.streamfusion.compat.FlinkCompat.watermarkRowtime(pushed).isPresent()) {
+      Integer index =
+          rowtimeTerm(
+              stripReinterpret(
+                  tech.streamfusion.compat.FlinkCompat.watermarkRowtime(pushed).get()));
       if (index == null) {
         return UNSUPPORTED;
       }

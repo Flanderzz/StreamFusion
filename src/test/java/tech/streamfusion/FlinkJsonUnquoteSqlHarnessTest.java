@@ -3,6 +3,11 @@ package tech.streamfusion;
 import org.junit.jupiter.api.Test;
 
 class FlinkJsonUnquoteSqlHarnessTest {
+  @org.junit.jupiter.api.BeforeEach
+  void requireReleasedHostFunction() {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction("JSON_UNQUOTE");
+  }
+
   @Test
   void jacksonPrefixValidationKeepsTheTrailingTextBehavior() throws Exception {
     NativeParity.assertParity(

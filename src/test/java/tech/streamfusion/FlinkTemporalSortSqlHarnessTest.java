@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import java.time.Duration;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.typeinfo.Types;
@@ -51,7 +53,8 @@ class FlinkTemporalSortSqlHarnessTest {
                   org.apache.flink.api.common.eventtime.WatermarkOutput output) {}
             };
     var source =
-        env.fromData(
+        fromData(
+                env,
                 Types.ROW_NAMED(new String[] {"k", "v", "ts"}, Types.LONG, Types.LONG, Types.LONG),
                 Row.of(1L, 1L, 100L),
                 Row.of(1L, 3L, 300L),
@@ -105,7 +108,8 @@ class FlinkTemporalSortSqlHarnessTest {
     // Out-of-order timestamps so the sort actually reorders; the 2s bounded-out-of-orderness keeps
     // every row open until end-of-input MAX, so all rows are released together (no mid-stream cut).
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+                env,
                 Types.ROW_NAMED(new String[] {"k", "v", "ts"}, Types.LONG, Types.LONG, Types.LONG),
                 Row.of(1L, 30L, 2000L),
                 Row.of(2L, 10L, 500L),

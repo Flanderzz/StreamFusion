@@ -1,10 +1,9 @@
 package tech.streamfusion.operator;
 
-import org.apache.flink.api.common.serialization.SerializerConfig;
-import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.common.typeutils.base.array.BytePrimitiveArraySerializer;
 import org.apache.flink.api.java.typeutils.runtime.NullableSerializer;
+import tech.streamfusion.compat.FixedSerializerTypeInformation;
 
 /**
  * The stream element type for the raw-message edge between Flink's byte source and the native
@@ -13,7 +12,7 @@ import org.apache.flink.api.java.typeutils.runtime.NullableSerializer;
  * it, raw decodes it to a null field — so the edge must carry null through the chain's serializer
  * copy, which Flink's plain {@code byte[]} serializer cannot.
  */
-public final class NullableBytesTypeInformation extends TypeInformation<byte[]> {
+public final class NullableBytesTypeInformation extends FixedSerializerTypeInformation<byte[]> {
 
   public static final NullableBytesTypeInformation INSTANCE = new NullableBytesTypeInformation();
 
@@ -50,7 +49,7 @@ public final class NullableBytesTypeInformation extends TypeInformation<byte[]> 
   }
 
   @Override
-  public TypeSerializer<byte[]> createSerializer(SerializerConfig config) {
+  public TypeSerializer<byte[]> createSerializer() {
     return NullableSerializer.wrap(BytePrimitiveArraySerializer.INSTANCE, false);
   }
 

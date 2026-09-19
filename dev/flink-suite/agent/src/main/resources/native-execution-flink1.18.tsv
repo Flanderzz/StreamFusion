@@ -1,0 +1,26 @@
+# Flink release-1.18.1 methods and fixture parameters, read from unchanged source.
+# Retracting window TVF and Delta SQL cases are absent on this host line.
+# Unchanged upstream method<TAB>fixture selector<TAB>expected route.
+# * matches every invocation; field=true/false selects a pinned fixture parameter.
+# + requires every operator; | separates alternatives; ! requires full fallback and its reason.
+org.apache.flink.table.planner.runtime.stream.sql.CalcITCase#testNotIn	*	NativeFilterOperator|NativeCalcOperator
+org.apache.flink.table.planner.runtime.stream.sql.CalcITCase#testLongProjectionList	*	NativeCalcOperator
+org.apache.flink.table.planner.runtime.stream.sql.CalcITCase#testIfFunction	*	NativeCalcOperator
+org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testGroupByAgg	state=HEAP	NativeColumnarGroupAggregateOperator
+org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testGroupByAgg	state=ROCKSDB	!state backend: Flink 1.18 native keyed state requires heap state or the StreamFusion RocksDB backend
+org.apache.flink.table.planner.runtime.stream.sql.RankITCase#testTopNWithGroupByAndRetract	state=HEAP	NativeColumnarGroupAggregateOperator+NativeColumnarTopNOperator
+org.apache.flink.table.planner.runtime.stream.sql.RankITCase#testTopNWithGroupByAndRetract	state=ROCKSDB	!state backend: Flink 1.18 native keyed state requires heap state or the StreamFusion RocksDB backend
+org.apache.flink.table.planner.runtime.stream.sql.RankITCase#testTopNWithVariableTopSize	state=HEAP	!Top-N: nullable variable rank bounds require Flink's row-access semantics
+org.apache.flink.table.planner.runtime.stream.sql.RankITCase#testTopNWithVariableTopSize	state=ROCKSDB	!state backend: Flink 1.18 native keyed state requires heap state or the StreamFusion RocksDB backend
+org.apache.flink.table.planner.runtime.stream.sql.WindowDistinctAggregateITCase#testTumbleWindow	state=HEAP&splitDistinct=false	NativeColumnarWindowAggregateOperator|NativeColumnarLocalWindowAggregateOperator+NativeColumnarGlobalWindowAggregateOperator
+org.apache.flink.table.planner.runtime.stream.sql.WindowDistinctAggregateITCase#testTumbleWindow	state=ROCKSDB	!state backend: Flink 1.18 native keyed state requires heap state or the StreamFusion RocksDB backend
+org.apache.flink.table.planner.runtime.stream.sql.WindowDistinctAggregateITCase#testTumbleWindow	state=HEAP&splitDistinct=true	!window aggregate: attached-window aggregation requires two-phase execution
+org.apache.flink.table.planner.runtime.stream.sql.WindowDistinctAggregateITCase#testHopWindow	state=HEAP&splitDistinct=false	NativeColumnarWindowAggregateOperator|NativeColumnarLocalWindowAggregateOperator+NativeColumnarGlobalWindowAggregateOperator
+org.apache.flink.table.planner.runtime.stream.sql.WindowDistinctAggregateITCase#testHopWindow	state=ROCKSDB	!state backend: Flink 1.18 native keyed state requires heap state or the StreamFusion RocksDB backend
+org.apache.flink.table.planner.runtime.stream.sql.WindowDistinctAggregateITCase#testHopWindow	state=HEAP&splitDistinct=true	!window aggregate: attached-window aggregation requires two-phase execution
+org.apache.flink.table.planner.runtime.stream.sql.WindowDistinctAggregateITCase#testCumulateWindow	state=HEAP&splitDistinct=false	NativeColumnarWindowAggregateOperator|NativeColumnarLocalWindowAggregateOperator+NativeColumnarGlobalWindowAggregateOperator
+org.apache.flink.table.planner.runtime.stream.sql.WindowDistinctAggregateITCase#testCumulateWindow	state=ROCKSDB	!state backend: Flink 1.18 native keyed state requires heap state or the StreamFusion RocksDB backend
+org.apache.flink.table.planner.runtime.stream.sql.WindowDistinctAggregateITCase#testCumulateWindow	state=HEAP&splitDistinct=true	!window aggregate: attached-window aggregation requires two-phase execution
+org.apache.flink.table.planner.runtime.stream.sql.AsyncLookupJoinITCase#testAsyncJoinTemporalTable	*	NativeAsyncLookupJoinOperator
+org.apache.flink.table.planner.runtime.stream.sql.AsyncLookupJoinITCase#testAsyncJoinTemporalTableWithRetry	*	NativeAsyncLookupJoinOperator
+org.apache.flink.table.planner.runtime.stream.sql.LookupJoinITCase#testJoinTemporalTable	*	NativeLookupJoinOperator

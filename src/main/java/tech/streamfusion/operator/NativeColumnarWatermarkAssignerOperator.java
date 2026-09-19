@@ -2,10 +2,10 @@ package tech.streamfusion.operator;
 
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.flink.api.common.operators.ProcessingTimeService.ProcessingTimeCallback;
-import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
+import tech.streamfusion.compat.FlinkStreamOperator;
 
 /**
  * Columnar event-time watermark assigner: the Arrow-batch analog of the host's {@link
@@ -28,10 +28,9 @@ import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
  * parallelism > 1 a window's effective watermark is the min across its input channels, which a
  * post-shuffle operator cannot reconstruct). Even sorted rows retain these boundaries because a
  * downstream {@code CURRENT_WATERMARK} can observe each eager emission. A batch without an internal
- * emission boundary is forwarded whole.
- * Idleness is not modelled for this assigner.
+ * emission boundary is forwarded whole. Idleness is not modelled for this assigner.
  */
-public class NativeColumnarWatermarkAssignerOperator extends AbstractStreamOperator<ArrowBatch>
+public class NativeColumnarWatermarkAssignerOperator extends FlinkStreamOperator<ArrowBatch>
     implements OneInputStreamOperator<ArrowBatch, ArrowBatch>, ProcessingTimeCallback {
 
   private final int rowtimeColumn;

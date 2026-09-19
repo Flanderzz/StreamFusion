@@ -2,23 +2,33 @@
 
 set -eu
 
-if [ "$#" -gt 1 ] || { [ "$#" -eq 1 ] && [ "$1" != "--host-only" ] && [ "$1" != "--linux-only" ]; }; then
-  echo "usage: $0 [--host-only | --linux-only]" >&2
+host_only=false
+linux_only=false
+flink_line=2.2
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --host-only) host_only=true; shift ;;
+    --linux-only) linux_only=true; shift ;;
+    --flink-line)
+      if [ "$#" -lt 2 ]; then echo "--flink-line requires 2.2 or 1.18" >&2; exit 64; fi
+      flink_line=$2; shift 2 ;;
+    *) echo "usage: $0 [--host-only | --linux-only] [--flink-line 2.2|1.18]" >&2; exit 64 ;;
+  esac
+done
+if [ "$host_only" = true ] && [ "$linux_only" = true ]; then
+  echo "--host-only and --linux-only are mutually exclusive" >&2
   exit 64
 fi
+case "$flink_line" in
+  2.2) maven_profiles=dist,universal,release,delta,paimon ;;
+  1.18) maven_profiles=dist,universal,release,paimon,flink-1.18 ;;
+  *) echo "unsupported Flink line: $flink_line" >&2; exit 64 ;;
+esac
 
 script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(cd "$script_dir/.." && pwd)
 native_dir=$repo_root/native
 stage_dir=$native_dir/target/universal
-host_only=false
-linux_only=false
-
-if [ "$#" -eq 1 ] && [ "$1" = "--host-only" ]; then
-  host_only=true
-elif [ "$#" -eq 1 ]; then
-  linux_only=true
-fi
 
 host_platform() {
   case "$(uname -s)" in
@@ -203,4 +213,4 @@ fi
 # platform build. A release always starts from empty Java output directories. The release profile
 # builds the same source and javadoc attachments as the publish workflow, unsigned, so attachment
 # failures surface here instead of on the release runner.
-(cd "$repo_root" && mvn clean package -Pdist,universal,release,delta,paimon -Dgpg.skip=true -DskipTests)
+(cd "$repo_root" && mvn clean package "-P$maven_profiles" -Dgpg.skip=true -DskipTests)

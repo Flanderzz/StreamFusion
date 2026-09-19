@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import java.time.Duration;
 import java.time.ZoneId;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
@@ -101,11 +103,12 @@ class FlinkWindowSqlHarnessTest {
 
   @Test
   void twoKeySessionMatchesHost() throws Exception {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireSessionTableFunction();
     NativeParity.assertParity(
         FlinkWindowSqlHarnessTest::environmentWithSource,
-        "SELECT k, g, window_start, window_end, SUM(`value`) AS s "
-            + "FROM TABLE(SESSION(TABLE src PARTITION BY (k, g), DESCRIPTOR(rt), INTERVAL '1' SECOND)) "
-            + "GROUP BY k, g, window_start, window_end");
+        "SELECT k, g, window_start, window_end, SUM(`value`) AS s FROM TABLE(SESSION(TABLE src"
+            + " PARTITION BY (k, g), DESCRIPTOR(rt), INTERVAL '1' SECOND)) GROUP BY k, g,"
+            + " window_start, window_end");
   }
 
   @Test
@@ -142,9 +145,9 @@ class FlinkWindowSqlHarnessTest {
     // One-phase HOP: a row falls in two overlapping 2s windows sliding every 1s.
     NativeParity.assertParity(
         FlinkWindowSqlHarnessTest::environmentWithSource,
-        "SELECT window_start, window_end, SUM(`value`) AS s "
-            + "FROM TABLE(HOP(TABLE src, DESCRIPTOR(rt), INTERVAL '1' SECOND, INTERVAL '2' SECOND)) "
-            + "GROUP BY window_start, window_end");
+        "SELECT window_start, window_end, SUM(`value`) AS s FROM TABLE(HOP(TABLE src,"
+            + " DESCRIPTOR(rt), INTERVAL '1' SECOND, INTERVAL '2' SECOND)) GROUP BY window_start,"
+            + " window_end");
   }
 
   @Test
@@ -248,6 +251,7 @@ class FlinkWindowSqlHarnessTest {
 
   @Test
   void tvfLtzSessionWithDstSessionZoneFallsBack() throws Exception {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireSessionTableFunction();
     NativeParity.assertFallbackReasonContains(
         FlinkWindowSqlHarnessTest::environmentWithLosAngelesZone,
         "SELECT k, SUM(`value`) AS s, window_start, window_end "
@@ -270,9 +274,9 @@ class FlinkWindowSqlHarnessTest {
   void keyedHoppingMultiAggregateMatchesHost() throws Exception {
     NativeParity.assertParity(
         FlinkWindowSqlHarnessTest::environmentWithSource,
-        "SELECT k, window_start, window_end, SUM(`value`) AS s, COUNT(`value`) AS c "
-            + "FROM TABLE(HOP(TABLE src, DESCRIPTOR(rt), INTERVAL '1' SECOND, INTERVAL '2' SECOND)) "
-            + "GROUP BY k, window_start, window_end");
+        "SELECT k, window_start, window_end, SUM(`value`) AS s, COUNT(`value`) AS c FROM"
+            + " TABLE(HOP(TABLE src, DESCRIPTOR(rt), INTERVAL '1' SECOND, INTERVAL '2' SECOND))"
+            + " GROUP BY k, window_start, window_end");
   }
 
   @Test
@@ -297,6 +301,7 @@ class FlinkWindowSqlHarnessTest {
 
   @Test
   void sessionSumMatchesHost() throws Exception {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireSessionTableFunction();
     // Session windows: consecutive rows within the gap form one window; a larger gap splits them.
     NativeParity.assertParity(
         FlinkWindowSqlHarnessTest::environmentWithSource,
@@ -307,6 +312,7 @@ class FlinkWindowSqlHarnessTest {
 
   @Test
   void keyedSessionMultiAggregateMatchesHost() throws Exception {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireSessionTableFunction();
     // Per-key sessions: each key's gaps are independent, partitioned by the session TVF.
     NativeParity.assertParity(
         FlinkWindowSqlHarnessTest::environmentWithSource,
@@ -317,6 +323,7 @@ class FlinkWindowSqlHarnessTest {
 
   @Test
   void perOperatorFlagKeepsSessionOnHost() throws Exception {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireSessionTableFunction();
     // A session is a window aggregate, so it answers to the windowAggregate kill switch like the
     // fixed-bin windows — it reached the native operator ungated until the registry gave every
     // substitution its own gate.
@@ -335,6 +342,7 @@ class FlinkWindowSqlHarnessTest {
 
   @Test
   void sessionMergeMatchesHost() throws Exception {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireSessionTableFunction();
     // An out-of-order element lands between two open sessions and bridges them into one; the native
     // merge of the two windows' accumulators must match the host's merging assigner.
     NativeParity.assertParity(
@@ -349,39 +357,41 @@ class FlinkWindowSqlHarnessTest {
     // Cumulative windows: nested windows sharing a bucket start, ends growing by the step.
     NativeParity.assertParity(
         FlinkWindowSqlHarnessTest::environmentWithSource,
-        "SELECT window_start, window_end, SUM(`value`) AS s, COUNT(`value`) AS c "
-            + "FROM TABLE(CUMULATE(TABLE src, DESCRIPTOR(rt), INTERVAL '1' SECOND, INTERVAL '2' SECOND)) "
-            + "GROUP BY window_start, window_end");
+        "SELECT window_start, window_end, SUM(`value`) AS s, COUNT(`value`) AS c FROM"
+            + " TABLE(CUMULATE(TABLE src, DESCRIPTOR(rt), INTERVAL '1' SECOND, INTERVAL '2'"
+            + " SECOND)) GROUP BY window_start, window_end");
   }
 
   @Test
   void keyedCumulativeMultiAggregateMatchesHost() throws Exception {
     NativeParity.assertParity(
         FlinkWindowSqlHarnessTest::environmentWithSource,
-        "SELECT k, window_start, window_end, SUM(`value`) AS s, MAX(`value`) AS m "
-            + "FROM TABLE(CUMULATE(TABLE src, DESCRIPTOR(rt), INTERVAL '1' SECOND, INTERVAL '2' SECOND)) "
-            + "GROUP BY k, window_start, window_end");
+        "SELECT k, window_start, window_end, SUM(`value`) AS s, MAX(`value`) AS m FROM"
+            + " TABLE(CUMULATE(TABLE src, DESCRIPTOR(rt), INTERVAL '1' SECOND, INTERVAL '2'"
+            + " SECOND)) GROUP BY k, window_start, window_end");
   }
 
   @Test
   void twoPhaseCumulativeMatchesHost() throws Exception {
-    // Two-phase (the default plan): a native local pre-aggregates per 1s slice, the host shuffles by
-    // key, and a native global re-buckets each slice into the nested cumulative windows up to the 3s
+    // Two-phase (the default plan): a native local pre-aggregates per 1s slice, the host shuffles
+    // by
+    // key, and a native global re-buckets each slice into the nested cumulative windows up to the
+    // 3s
     // max size. Both halves substitute (unlike one-phase, which is a single window operator).
     NativeParity.assertParity(
         FlinkWindowSqlHarnessTest::environmentTwoPhase,
-        "SELECT k, window_start, window_end, SUM(`value`) AS s, COUNT(`value`) AS c "
-            + "FROM TABLE(CUMULATE(TABLE src, DESCRIPTOR(rt), INTERVAL '1' SECOND, INTERVAL '3' SECOND)) "
-            + "GROUP BY k, window_start, window_end");
+        "SELECT k, window_start, window_end, SUM(`value`) AS s, COUNT(`value`) AS c FROM"
+            + " TABLE(CUMULATE(TABLE src, DESCRIPTOR(rt), INTERVAL '1' SECOND, INTERVAL '3'"
+            + " SECOND)) GROUP BY k, window_start, window_end");
   }
 
   @Test
   void multiAggregateMatchesHost() throws Exception {
     NativeParity.assertParity(
         FlinkWindowSqlHarnessTest::environmentWithSource,
-        "SELECT window_start, window_end, SUM(`value`) AS s, COUNT(`value`) AS c, MAX(`value`) AS m "
-            + "FROM TABLE(TUMBLE(TABLE src, DESCRIPTOR(rt), INTERVAL '1' SECOND)) "
-            + "GROUP BY window_start, window_end");
+        "SELECT window_start, window_end, SUM(`value`) AS s, COUNT(`value`) AS c, MAX(`value`) AS m"
+            + " FROM TABLE(TUMBLE(TABLE src, DESCRIPTOR(rt), INTERVAL '1' SECOND)) GROUP BY"
+            + " window_start, window_end");
   }
 
   @Test
@@ -390,18 +400,18 @@ class FlinkWindowSqlHarnessTest {
     // shuffle, and a global that combines each window's slices must agree with the host.
     NativeParity.assertParity(
         FlinkWindowSqlHarnessTest::environmentTwoPhase,
-        "SELECT window_start, window_end, SUM(`value`) AS s "
-            + "FROM TABLE(HOP(TABLE src, DESCRIPTOR(rt), INTERVAL '1' SECOND, INTERVAL '2' SECOND)) "
-            + "GROUP BY window_start, window_end");
+        "SELECT window_start, window_end, SUM(`value`) AS s FROM TABLE(HOP(TABLE src,"
+            + " DESCRIPTOR(rt), INTERVAL '1' SECOND, INTERVAL '2' SECOND)) GROUP BY window_start,"
+            + " window_end");
   }
 
   @Test
   void twoPhaseKeyedHoppingMultiAggregateMatchesHost() throws Exception {
     NativeParity.assertParity(
         FlinkWindowSqlHarnessTest::environmentTwoPhase,
-        "SELECT k, window_start, window_end, SUM(`value`) AS s, COUNT(`value`) AS c "
-            + "FROM TABLE(HOP(TABLE src, DESCRIPTOR(rt), INTERVAL '1' SECOND, INTERVAL '2' SECOND)) "
-            + "GROUP BY k, window_start, window_end");
+        "SELECT k, window_start, window_end, SUM(`value`) AS s, COUNT(`value`) AS c FROM"
+            + " TABLE(HOP(TABLE src, DESCRIPTOR(rt), INTERVAL '1' SECOND, INTERVAL '2' SECOND))"
+            + " GROUP BY k, window_start, window_end");
   }
 
   @Test
@@ -500,18 +510,17 @@ class FlinkWindowSqlHarnessTest {
     // counts fanned into each window.
     NativeParity.assertParity(
         FlinkWindowSqlHarnessTest::environmentTwoPhase,
-        "SELECT window_start, window_end, COUNT(*) AS n "
-            + "FROM TABLE(HOP(TABLE src, DESCRIPTOR(rt), INTERVAL '1' SECOND, INTERVAL '2' SECOND)) "
-            + "GROUP BY window_start, window_end");
+        "SELECT window_start, window_end, COUNT(*) AS n FROM TABLE(HOP(TABLE src, DESCRIPTOR(rt),"
+            + " INTERVAL '1' SECOND, INTERVAL '2' SECOND)) GROUP BY window_start, window_end");
   }
 
   @Test
   void twoPhaseHoppingCountStarWithSumMatchesHost() throws Exception {
     NativeParity.assertParity(
         FlinkWindowSqlHarnessTest::environmentTwoPhase,
-        "SELECT window_start, window_end, COUNT(*) AS n, SUM(`value`) AS s "
-            + "FROM TABLE(HOP(TABLE src, DESCRIPTOR(rt), INTERVAL '1' SECOND, INTERVAL '2' SECOND)) "
-            + "GROUP BY window_start, window_end");
+        "SELECT window_start, window_end, COUNT(*) AS n, SUM(`value`) AS s FROM TABLE(HOP(TABLE"
+            + " src, DESCRIPTOR(rt), INTERVAL '1' SECOND, INTERVAL '2' SECOND)) GROUP BY"
+            + " window_start, window_end");
   }
 
   @Test
@@ -711,9 +720,8 @@ class FlinkWindowSqlHarnessTest {
     // host's merge expression (a SMALLINT plus) does.
     NativeParity.assertParity(
         FlinkWindowSqlHarnessTest::narrowTwoPhaseOverflowEnvironment,
-        "SELECT window_start, window_end, SUM(sm) AS s "
-            + "FROM TABLE(HOP(TABLE src, DESCRIPTOR(rt), INTERVAL '1' SECOND, INTERVAL '2' SECOND)) "
-            + "GROUP BY window_start, window_end");
+        "SELECT window_start, window_end, SUM(sm) AS s FROM TABLE(HOP(TABLE src, DESCRIPTOR(rt),"
+            + " INTERVAL '1' SECOND, INTERVAL '2' SECOND)) GROUP BY window_start, window_end");
   }
 
   @Test
@@ -738,9 +746,8 @@ class FlinkWindowSqlHarnessTest {
     // [0s,2s) is 5 (NULL partial skipped), [−1s,1s) is NULL, [1s,3s) is 5.
     NativeParity.assertParity(
         FlinkWindowSqlHarnessTest::decimalTwoPhaseOverflowEnvironment,
-        "SELECT window_start, window_end, SUM(pr) AS s "
-            + "FROM TABLE(HOP(TABLE src, DESCRIPTOR(rt), INTERVAL '1' SECOND, INTERVAL '2' SECOND)) "
-            + "GROUP BY window_start, window_end");
+        "SELECT window_start, window_end, SUM(pr) AS s FROM TABLE(HOP(TABLE src, DESCRIPTOR(rt),"
+            + " INTERVAL '1' SECOND, INTERVAL '2' SECOND)) GROUP BY window_start, window_end");
   }
 
   private static void assertNarrowSumAvgMatchHost(String column) throws Exception {
@@ -841,7 +848,8 @@ class FlinkWindowSqlHarnessTest {
     // Out-of-order: the row at ts=700 arrives after the rows at 0 and 1500, which would otherwise
     // be separate sessions (gap 1s), and its [700, 1700) window bridges them into [0, 2500).
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+                env,
                 Types.ROW_NAMED(new String[] {"value", "ts"}, Types.LONG, Types.LONG),
                 Row.of(1L, 0L),
                 Row.of(2L, 1500L),
@@ -879,7 +887,8 @@ class FlinkWindowSqlHarnessTest {
     // Eight 0.1f's in one 1s window: their float running sum is not 0.8f (rounding accumulates),
     // so the result distinguishes a float accumulation (the host's) from a double one.
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+                env,
                 Types.ROW_NAMED(new String[] {"fl", "ts"}, Types.FLOAT, Types.LONG),
                 Row.of(0.1f, 0L),
                 Row.of(0.1f, 100L),
@@ -916,7 +925,8 @@ class FlinkWindowSqlHarnessTest {
 
     // Two values per 1s window that overflow the narrow width when summed.
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+                env,
                 Types.ROW_NAMED(
                     new String[] {"tn", "sm", "ts"}, Types.BYTE, Types.SHORT, Types.LONG),
                 Row.of((byte) 100, (short) 30000, 0L),
@@ -949,7 +959,8 @@ class FlinkWindowSqlHarnessTest {
     }
 
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+                env,
                 Types.ROW_NAMED(
                     new String[] {
                       "k", "value", "ts", "amount", "qty", "g", "s", "sm", "tn", "fl", "b", "d",
@@ -969,11 +980,81 @@ class FlinkWindowSqlHarnessTest {
                     Types.LOCAL_DATE,
                     Types.BIG_DEC,
                     Types.LOCAL_DATE_TIME),
-                Row.of(7L, 1L, 0L, 1.5, 10, 100L, "a", (short) 10, (byte) 1, 1.5f, true, DAY_ONE, dec("1.10"), T0),
-                Row.of(7L, 2L, 500L, 2.5, 20, 100L, "a", (short) 20, (byte) 2, 2.5f, true, DAY_ONE, dec("2.20"), T0),
-                Row.of(9L, 3L, 600L, 3.0, 30, 200L, "b", (short) 30, (byte) 3, 3.5f, false, DAY_TWO, dec("3.30"), T1),
-                Row.of(7L, 4L, 1500L, 4.5, 40, 100L, "a", (short) 40, (byte) 4, 4.5f, true, DAY_ONE, dec("4.40"), T0),
-                Row.of(9L, 5L, 2500L, 5.5, 50, 200L, "b", (short) 50, (byte) 5, 5.5f, false, DAY_TWO, dec("5.50"), T1))
+                Row.of(
+                    7L,
+                    1L,
+                    0L,
+                    1.5,
+                    10,
+                    100L,
+                    "a",
+                    (short) 10,
+                    (byte) 1,
+                    1.5f,
+                    true,
+                    DAY_ONE,
+                    dec("1.10"),
+                    T0),
+                Row.of(
+                    7L,
+                    2L,
+                    500L,
+                    2.5,
+                    20,
+                    100L,
+                    "a",
+                    (short) 20,
+                    (byte) 2,
+                    2.5f,
+                    true,
+                    DAY_ONE,
+                    dec("2.20"),
+                    T0),
+                Row.of(
+                    9L,
+                    3L,
+                    600L,
+                    3.0,
+                    30,
+                    200L,
+                    "b",
+                    (short) 30,
+                    (byte) 3,
+                    3.5f,
+                    false,
+                    DAY_TWO,
+                    dec("3.30"),
+                    T1),
+                Row.of(
+                    7L,
+                    4L,
+                    1500L,
+                    4.5,
+                    40,
+                    100L,
+                    "a",
+                    (short) 40,
+                    (byte) 4,
+                    4.5f,
+                    true,
+                    DAY_ONE,
+                    dec("4.40"),
+                    T0),
+                Row.of(
+                    9L,
+                    5L,
+                    2500L,
+                    5.5,
+                    50,
+                    200L,
+                    "b",
+                    (short) 50,
+                    (byte) 5,
+                    5.5f,
+                    false,
+                    DAY_TWO,
+                    dec("5.50"),
+                    T1))
             .assignTimestampsAndWatermarks(
                 WatermarkStrategy.<Row>forMonotonousTimestamps()
                     .withTimestampAssigner((row, ts) -> (Long) row.getField(2)));
@@ -1012,7 +1093,8 @@ class FlinkWindowSqlHarnessTest {
     // One in-range value per 1s slice; a 2s hopping window merges two slice partials and the merge
     // itself overflows the SMALLINT width (30000 + 30000 → -5536).
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+                env,
                 Types.ROW_NAMED(new String[] {"sm", "ts"}, Types.SHORT, Types.LONG),
                 Row.of((short) 30000, 0L),
                 Row.of((short) 30000, 1500L))
@@ -1054,7 +1136,8 @@ class FlinkWindowSqlHarnessTest {
 
     java.math.BigDecimal big = new java.math.BigDecimal("99000000000000000000000000000000000000");
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+                env,
                 Types.ROW_NAMED(new String[] {"pr", "ts"}, Types.BIG_DEC, Types.LONG),
                 Row.of(big, 0L),
                 Row.of(big, secondTs),

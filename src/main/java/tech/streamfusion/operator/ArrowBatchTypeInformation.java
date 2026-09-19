@@ -1,15 +1,14 @@
 package tech.streamfusion.operator;
 
-import org.apache.flink.api.common.serialization.SerializerConfig;
-import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
+import tech.streamfusion.compat.FixedSerializerTypeInformation;
 
 /**
  * The stream element type for the columnar edges between native operators: one {@link ArrowBatch}
  * per record. Declaring this on a native operator's output transformation is what tells Flink to
  * carry Arrow batches (via {@link ArrowBatchSerializer}) rather than rows on that edge.
  */
-public final class ArrowBatchTypeInformation extends TypeInformation<ArrowBatch> {
+public final class ArrowBatchTypeInformation extends FixedSerializerTypeInformation<ArrowBatch> {
 
   public static final ArrowBatchTypeInformation INSTANCE = new ArrowBatchTypeInformation(false);
 
@@ -57,7 +56,7 @@ public final class ArrowBatchTypeInformation extends TypeInformation<ArrowBatch>
   }
 
   @Override
-  public TypeSerializer<ArrowBatch> createSerializer(SerializerConfig config) {
+  public TypeSerializer<ArrowBatch> createSerializer() {
     return new ArrowBatchSerializer(zeroCopy);
   }
 

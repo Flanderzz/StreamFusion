@@ -53,6 +53,9 @@ final class GroupWindowAggregateMatcher {
       return "legacy group-window: the time attribute must be TIMESTAMP or TIMESTAMP_LTZ";
     }
     boolean proctime = LogicalTypeChecks.isProctimeAttribute(timeType);
+    if (!proctime && timeColumn(agg) < 0) {
+      return "legacy group-window: host input time attribute is unavailable";
+    }
     if (session && proctime) {
       return "legacy group-window: processing-time SESSION is not native";
     }
@@ -182,7 +185,7 @@ final class GroupWindowAggregateMatcher {
   }
 
   private static int timeColumn(StreamPhysicalGroupWindowAggregate agg) {
-    return agg.window().timeAttribute().getFieldIndex();
+    return tech.streamfusion.compat.FlinkCompat.groupWindowTimeColumn(agg);
   }
 
   private static boolean isProctime(StreamPhysicalGroupWindowAggregate agg) {

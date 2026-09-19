@@ -1435,6 +1435,7 @@ pub(crate) struct GroupAggregator<S: KeyedStateStore<GroupKeyState> = MemoryGrou
     // `ttl_ms` after its last write, and the no-change output suppression is disabled: Flink always
     // emits -U/+U under TTL to keep refreshing downstream state.
     ttl_ms: i64,
+    ttl_emit_unchanged: bool,
     // When the last full expiry sweep ran; the sweep reclaims groups never touched again, once per
     // TTL period (expiry itself is enforced lazily at each touch).
     last_sweep_ms: i64,
@@ -1541,6 +1542,7 @@ impl GroupAggregator {
             key_columns,
             generate_update_before,
             ttl_ms: 0,
+            ttl_emit_unchanged: true,
             last_sweep_ms: 0,
             store: MemoryGroupStore::default(),
             snapshot_cache: None,
@@ -1591,6 +1593,7 @@ impl GroupAggregator {
             key_timestamp_precisions: self.key_timestamp_precisions,
             generate_update_before: self.generate_update_before,
             ttl_ms: self.ttl_ms,
+            ttl_emit_unchanged: self.ttl_emit_unchanged,
             last_sweep_ms: self.last_sweep_ms,
             store,
             snapshot_cache: None,
@@ -1677,6 +1680,11 @@ impl<S: KeyedStateStore<GroupKeyState>> GroupAggregator<S> {
 
     /// Sets the idle-state retention (`table.exec.state.ttl`) in millis; 0 (Flink's default)
     /// disables expiry. A builder for the same reason as {@link with_filter_columns}.
+    pub(crate) fn with_ttl_emission(mut self, emit_unchanged: bool) -> Self {
+        self.ttl_emit_unchanged = emit_unchanged;
+        self
+    }
+
     pub(crate) fn with_state_ttl(mut self, ttl_ms: i64) -> Self {
         self.ttl_ms = ttl_ms.max(0);
         self
@@ -2253,7 +2261,7 @@ impl<S: KeyedStateStore<GroupKeyState>> GroupAggregator<S> {
 
         // Staged keys were all written this bundle, so none can be expired here; a TTL shorter
         // than the bundle interval is degenerate and still only delays expiry to the next touch.
-        let ttl_on = self.ttl_ms > 0;
+        let ttl_on = self.ttl_ms > 0 && self.ttl_emit_unchanged;
         for key in order {
             let staged = &changes[&key];
             let new = self
@@ -3296,7 +3304,9 @@ pub extern "system" fn Java_tech_streamfusion_Native_closeLocalGroupAggregator<'
 /// and per-aggregate value-type codes are positional; `generate_update_before` is the host's
 /// per-node changelog flag. Grouping keys travel as `key0..` columns on each input batch.
 #[no_mangle]
-pub extern "system" fn Java_tech_streamfusion_Native_createGroupAggregator<'local>(
+pub extern "system" fn Java_tech_streamfusion_Native_createGroupAggregatorWithTtlEmission<
+    'local,
+>(
     env: JNIEnv<'local>,
     _class: JClass<'local>,
     aggregate_kinds: JIntArray<'local>,
@@ -3312,6 +3322,7 @@ pub extern "system" fn Java_tech_streamfusion_Native_createGroupAggregator<'loca
     mini_batch: jboolean,
     state_ttl_millis: jlong,
     memory_budget_bytes: jlong,
+    emit_unchanged_with_ttl: jboolean,
 ) -> jlong {
     crate::bridge::jni_guard(env, move |mut env| {
         let kinds = read_int_array(&env, &aggregate_kinds);
@@ -3334,7 +3345,8 @@ pub extern "system" fn Java_tech_streamfusion_Native_createGroupAggregator<'loca
         .with_count_columns(count_columns)
         .with_distinct_view_columns(distinct_view_columns)
         .with_record_count_column(record_count_column as i64)
-        .with_state_ttl(state_ttl_millis);
+        .with_state_ttl(state_ttl_millis)
+        .with_ttl_emission(emit_unchanged_with_ttl != 0);
         if mini_batch != 0 {
             aggregator = aggregator.with_mini_batch();
         }
@@ -3366,7 +3378,14 @@ pub extern "system" fn Java_tech_streamfusion_Native_updateGroupAggregator<'loca
         match result {
             Ok(out) => export_record_batch(out, out_array_address, out_schema_address),
             Err(DataFusionError::Execution(message)) => {
-                let _ = env.throw_new("org/apache/flink/table/api/TableRuntimeException", message);
+                if let Ok(message) = env.new_string(message) {
+                    let _ = env.call_static_method(
+                        "tech/streamfusion/compat/TableErrors",
+                        "fail",
+                        "(Ljava/lang/String;)V",
+                        &[jni::objects::JValue::Object(&message)],
+                    );
+                }
             }
             Err(e) => throw_memory_limit(&mut env, &e.to_string()),
         }
@@ -3412,7 +3431,9 @@ pub extern "system" fn Java_tech_streamfusion_Native_snapshotGroupAggregatorPart
 
 /// Rebuilds a `GROUP BY` aggregator from all raw keyed-state partitions assigned to this subtask.
 #[no_mangle]
-pub extern "system" fn Java_tech_streamfusion_Native_restoreGroupAggregatorPartitions<'local>(
+pub extern "system" fn Java_tech_streamfusion_Native_restoreGroupAggregatorPartitionsWithTtlEmission<
+    'local,
+>(
     env: JNIEnv<'local>,
     _class: JClass<'local>,
     aggregate_kinds: JIntArray<'local>,
@@ -3430,6 +3451,7 @@ pub extern "system" fn Java_tech_streamfusion_Native_restoreGroupAggregatorParti
     now_millis: jlong,
     snapshots: JObjectArray<'local>,
     memory_budget_bytes: jlong,
+    emit_unchanged_with_ttl: jboolean,
 ) -> jlong {
     crate::bridge::jni_guard(env, move |mut env| {
         let kinds = read_int_array(&env, &aggregate_kinds);
@@ -3468,7 +3490,8 @@ pub extern "system" fn Java_tech_streamfusion_Native_restoreGroupAggregatorParti
         .with_count_columns(count_columns)
         .with_distinct_view_columns(distinct_view_columns)
         .with_record_count_column(record_count_column as i64)
-        .with_state_ttl(state_ttl_millis);
+        .with_state_ttl(state_ttl_millis)
+        .with_ttl_emission(emit_unchanged_with_ttl != 0);
         if mini_batch != 0 {
             aggregator = aggregator.with_mini_batch();
         }

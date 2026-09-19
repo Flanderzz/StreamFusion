@@ -1176,19 +1176,21 @@ public final class Native {
       long memoryBudgetBytes);
 
   /**
-   * Creates a non-windowed {@code GROUP BY} aggregator and returns an opaque handle. Each input batch
-   * folds into per-key state and the aggregator exports the changelog rows it produces, with the row
-   * kinds carried on the {@code $row_kind$} column. Released with {@link #closeGroupAggregator}.
+   * Creates a non-windowed {@code GROUP BY} aggregator and returns an opaque handle. Each input
+   * batch folds into per-key state and the aggregator exports the changelog rows it produces, with
+   * the row kinds carried on the {@code $row_kind$} column. Released with {@link
+   * #closeGroupAggregator}.
    *
    * @param aggregateKinds aggregate codes (see {@link #createTumblingAggregator})
    * @param valueTypes per-aggregate value-column types (see {@link #createTumblingAggregator})
-   * @param valueColumns per-aggregate value-column index in the input batch ({@code -1} for COUNT(*))
+   * @param valueColumns per-aggregate value-column index in the input batch ({@code -1} for
+   *     COUNT(*))
    * @param keyColumns grouping-key column indices in the input batch (empty for global aggregation)
    * @param keyTimestampPrecisions pre-order logical key type descriptors (timestamp precision or
    *     {@code -1}); this lets the native BinaryRow codec preserve nested timestamp layout
-   * @param countColumns per-aggregate two-phase AVG count-partial column ({@code -1} otherwise): the
-   *     value column is then the local's pre-summed sum partial, and each row bumps the count by this
-   *     column instead of by one
+   * @param countColumns per-aggregate two-phase AVG count-partial column ({@code -1} otherwise):
+   *     the value column is then the local's pre-summed sum partial, and each row bumps the count
+   *     by this column instead of by one
    * @param distinctViewColumns per-aggregate two-phase distinct-view column ({@code -1} otherwise):
    *     the column carries a local bundle's distinct (value, count) entries as a list of structs,
    *     folded into the per-key distinct set with multiplicities instead of one value per row
@@ -1201,7 +1203,7 @@ public final class Native {
    *     absent, and the unchanged-result suppression is disabled — Flink's TTL'd emission
    * @param memoryBudgetBytes task off-heap budget (see {@link #createTumblingAggregator})
    */
-  public static native long createGroupAggregator(
+  public static long createGroupAggregator(
       int[] aggregateKinds,
       int[] valueTypes,
       int[] valueColumns,
@@ -1214,7 +1216,41 @@ public final class Native {
       boolean generateUpdateBefore,
       boolean miniBatch,
       long stateTtlMillis,
-      long memoryBudgetBytes);
+      long memoryBudgetBytes) {
+    return createGroupAggregatorWithTtlEmission(
+        aggregateKinds,
+        valueTypes,
+        valueColumns,
+        keyColumns,
+        keyTimestampPrecisions,
+        filterColumns,
+        countColumns,
+        distinctViewColumns,
+        recordCountColumn,
+        generateUpdateBefore,
+        miniBatch,
+        stateTtlMillis,
+        memoryBudgetBytes,
+        !miniBatch
+            || countColumns.length == 0
+            || tech.streamfusion.compat.FlinkCompat.GLOBAL_TTL_EMITS_UNCHANGED);
+  }
+
+  private static native long createGroupAggregatorWithTtlEmission(
+      int[] aggregateKinds,
+      int[] valueTypes,
+      int[] valueColumns,
+      int[] keyColumns,
+      int[] keyTimestampPrecisions,
+      int[] filterColumns,
+      int[] countColumns,
+      int[] distinctViewColumns,
+      int recordCountColumn,
+      boolean generateUpdateBefore,
+      boolean miniBatch,
+      long stateTtlMillis,
+      long memoryBudgetBytes,
+      boolean emitUnchangedWithTtl);
 
   /**
    * Folds an input batch into per-key state, exporting the changelog rows it produces (grouping keys,
@@ -1246,7 +1282,7 @@ public final class Native {
    * pre-TTL writer), granting them a full retention from the restore — Flink's enable-TTL
    * migration.
    */
-  public static native long restoreGroupAggregatorPartitions(
+  public static long restoreGroupAggregatorPartitions(
       int[] aggregateKinds,
       int[] valueTypes,
       int[] valueColumns,
@@ -1261,7 +1297,45 @@ public final class Native {
       long stateTtlMillis,
       long nowMillis,
       byte[][] snapshots,
-      long memoryBudgetBytes);
+      long memoryBudgetBytes) {
+    return restoreGroupAggregatorPartitionsWithTtlEmission(
+        aggregateKinds,
+        valueTypes,
+        valueColumns,
+        keyColumns,
+        keyTimestampPrecisions,
+        filterColumns,
+        countColumns,
+        distinctViewColumns,
+        recordCountColumn,
+        generateUpdateBefore,
+        miniBatch,
+        stateTtlMillis,
+        nowMillis,
+        snapshots,
+        memoryBudgetBytes,
+        !miniBatch
+            || countColumns.length == 0
+            || tech.streamfusion.compat.FlinkCompat.GLOBAL_TTL_EMITS_UNCHANGED);
+  }
+
+  private static native long restoreGroupAggregatorPartitionsWithTtlEmission(
+      int[] aggregateKinds,
+      int[] valueTypes,
+      int[] valueColumns,
+      int[] keyColumns,
+      int[] keyTimestampPrecisions,
+      int[] filterColumns,
+      int[] countColumns,
+      int[] distinctViewColumns,
+      int recordCountColumn,
+      boolean generateUpdateBefore,
+      boolean miniBatch,
+      long stateTtlMillis,
+      long nowMillis,
+      byte[][] snapshots,
+      long memoryBudgetBytes,
+      boolean emitUnchangedWithTtl);
 
   /** Whether this native build carries direct Rust RocksDB state. */
   public static native boolean rocksdbStateAvailable();
@@ -1280,7 +1354,7 @@ public final class Native {
       int[] aggregateKinds, int[] valueTypes);
 
   /** Creates a group aggregator backed directly by a Rust-owned RocksDB instance. */
-  public static native long createRocksDBGroupAggregator(
+  public static long createRocksDBGroupAggregator(
       int[] aggregateKinds,
       int[] valueTypes,
       int[] valueColumns,
@@ -1304,7 +1378,63 @@ public final class Native {
       int keyGroupStart,
       int keyGroupEnd,
       boolean aligned,
-      byte[][] restoredPartitions);
+      byte[][] restoredPartitions) {
+    return createRocksDBGroupAggregatorWithTtlEmission(
+        aggregateKinds,
+        valueTypes,
+        valueColumns,
+        keyColumns,
+        keyTimestampPrecisions,
+        filterColumns,
+        countColumns,
+        distinctViewColumns,
+        recordCountColumn,
+        generateUpdateBefore,
+        miniBatch,
+        stateTtlMillis,
+        nowMillis,
+        memoryBudgetBytes,
+        databaseDirectory,
+        maxParallelism,
+        optionsJson,
+        sharedResources,
+        sourceDirectories,
+        sourceSnapshotTokens,
+        keyGroupStart,
+        keyGroupEnd,
+        aligned,
+        restoredPartitions,
+        !miniBatch
+            || countColumns.length == 0
+            || tech.streamfusion.compat.FlinkCompat.GLOBAL_TTL_EMITS_UNCHANGED);
+  }
+
+  private static native long createRocksDBGroupAggregatorWithTtlEmission(
+      int[] aggregateKinds,
+      int[] valueTypes,
+      int[] valueColumns,
+      int[] keyColumns,
+      int[] keyTimestampPrecisions,
+      int[] filterColumns,
+      int[] countColumns,
+      int[] distinctViewColumns,
+      int recordCountColumn,
+      boolean generateUpdateBefore,
+      boolean miniBatch,
+      long stateTtlMillis,
+      long nowMillis,
+      long memoryBudgetBytes,
+      String databaseDirectory,
+      int maxParallelism,
+      String optionsJson,
+      long sharedResources,
+      String[] sourceDirectories,
+      String[] sourceSnapshotTokens,
+      int keyGroupStart,
+      int keyGroupEnd,
+      boolean aligned,
+      byte[][] restoredPartitions,
+      boolean emitUnchangedWithTtl);
 
   /** Materializes direct RocksDB aggregate state as backend-independent key-group partitions. */
   public static native byte[][] snapshotRocksDBGroupAggregatorPartitions(long handle);

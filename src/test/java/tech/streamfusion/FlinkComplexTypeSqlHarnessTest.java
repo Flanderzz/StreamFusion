@@ -2,9 +2,8 @@ package tech.streamfusion;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
 
-import tech.streamfusion.planner.NativePlanner;
-import tech.streamfusion.planner.PhysicalPlanScan;
 import java.lang.reflect.Array;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -22,6 +21,8 @@ import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.apache.flink.types.Row;
 import org.apache.flink.util.CloseableIterator;
 import org.junit.jupiter.api.Test;
+import tech.streamfusion.planner.NativePlanner;
+import tech.streamfusion.planner.PhysicalPlanScan;
 
 /**
  * A filter/projection that passes a complex (ARRAY/MAP/ROW) column through matches the host. The
@@ -197,7 +198,8 @@ class FlinkComplexTypeSqlHarnessTest {
     env.setParallelism(1);
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(new String[] {"k", "arr"}, Types.LONG, Types.OBJECT_ARRAY(Types.LONG)),
             Row.of(1L, new Long[] {10L, 20L}),
             Row.of(2L, new Long[] {30L}),
@@ -218,7 +220,8 @@ class FlinkComplexTypeSqlHarnessTest {
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     // Two rows share the array [10,20] so grouping/joining by the array key is actually exercised.
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(new String[] {"k", "arr"}, Types.LONG, Types.OBJECT_ARRAY(Types.LONG)),
             Row.of(1L, new Long[] {10L, 20L}),
             Row.of(2L, new Long[] {10L, 20L}),
@@ -238,7 +241,8 @@ class FlinkComplexTypeSqlHarnessTest {
     env.setParallelism(1);
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(
                 new String[] {"k", "m"}, Types.LONG, Types.MAP(Types.STRING, Types.LONG)),
             Row.of(1L, Map.of("a", 1L)),
@@ -259,7 +263,8 @@ class FlinkComplexTypeSqlHarnessTest {
     env.setParallelism(1);
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(
                 new String[] {"k", "r"},
                 Types.LONG,

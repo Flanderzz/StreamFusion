@@ -10,7 +10,7 @@
         <version>${revision}</version>
     </parent>
 
-    <artifactId>streamfusion-orc</artifactId>
+    <artifactId>streamfusion-orc${streamfusion.artifact.suffix}</artifactId>
     <name>StreamFusion Orc</name>
     <properties>
         <native.cargo.packages>-p streamfusion-orc</native.cargo.packages>
@@ -21,7 +21,7 @@
     <dependencies>
         <dependency>
             <groupId>tech.streamfusion</groupId>
-            <artifactId>streamfusion-core</artifactId>
+            <artifactId>streamfusion-core${streamfusion.artifact.suffix}</artifactId>
             <version>${project.version}</version>
             <scope>provided</scope>
         </dependency>
@@ -47,6 +47,11 @@
             </resource>
         </resources>
         <plugins>
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>flatten-maven-plugin</artifactId>
+                <configuration><flattenMode>ossrh</flattenMode></configuration>
+            </plugin>
             <plugin>
                 <groupId>org.codehaus.mojo</groupId>
                 <artifactId>exec-maven-plugin</artifactId>

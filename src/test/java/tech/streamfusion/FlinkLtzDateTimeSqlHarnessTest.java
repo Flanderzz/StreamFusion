@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import java.time.Instant;
 import java.time.ZoneId;
 import org.apache.flink.api.common.typeinfo.Types;
@@ -30,8 +32,8 @@ class FlinkLtzDateTimeSqlHarnessTest {
   void dateFormatLtzDefaultMatchesHost() throws Exception {
     NativeParity.assertParity(
         FlinkLtzDateTimeSqlHarnessTest::environment,
-        "SELECT id, DATE_FORMAT(rt, 'yyyy-MM-dd') AS d, DATE_FORMAT(rt, 'yyyy-MM-dd HH:mm:ss') AS dt"
-            + " FROM t");
+        "SELECT id, DATE_FORMAT(rt, 'yyyy-MM-dd') AS d, DATE_FORMAT(rt, 'yyyy-MM-dd HH:mm:ss') AS"
+            + " dt FROM t");
   }
 
   @Test
@@ -86,11 +88,14 @@ class FlinkLtzDateTimeSqlHarnessTest {
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     tEnv.getConfig().setLocalTimeZone(ZoneId.of("America/New_York"));
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(new String[] {"id", "rt"}, Types.LONG, Types.INSTANT),
             Row.of(1L, Instant.parse("2024-07-01T12:00:00Z")), // DST: NY = 08:00, UTC−4
             Row.of(2L, Instant.parse("2024-01-01T12:00:00Z")), // standard: NY = 07:00, UTC−5
-            Row.of(3L, Instant.parse("2024-07-01T02:30:00Z")), // NY = prior day 22:30 — date shifts back
+            Row.of(
+                3L,
+                Instant.parse("2024-07-01T02:30:00Z")), // NY = prior day 22:30 — date shifts back
             Row.of(4L, (Instant) null));
     tEnv.createTemporaryView(
         "t",

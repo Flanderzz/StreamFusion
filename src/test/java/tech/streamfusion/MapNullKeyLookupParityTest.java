@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import java.util.LinkedHashMap;
 import java.util.Map;
 import org.apache.flink.api.common.typeinfo.Types;
@@ -12,7 +14,8 @@ import org.junit.jupiter.api.Test;
 class MapNullKeyLookupParityTest {
   @Test
   void lookupMapWithNullKey() throws Exception {
-    NativeParity.assertParity(() -> maps(true), "SELECT id, m['a'], m['missing'], m['nullable'] FROM n");
+    NativeParity.assertParity(
+        () -> maps(true), "SELECT id, m['a'], m['missing'], m['nullable'] FROM n");
   }
 
   private static TableEnvironment maps(boolean withNullKey) {
@@ -23,9 +26,15 @@ class MapNullKeyLookupParityTest {
     if (withNullKey) map.put(null, 7);
     map.put("a", 1);
     map.put("nullable", null);
-    table.createTemporaryView("n", env.fromData(
-        Types.ROW_NAMED(new String[] {"id", "m"}, Types.INT, Types.MAP(Types.STRING, Types.INT)),
-        Row.of(1, map), Row.of(2, Map.of()), Row.of(3, null)));
+    table.createTemporaryView(
+        "n",
+        fromData(
+            env,
+            Types.ROW_NAMED(
+                new String[] {"id", "m"}, Types.INT, Types.MAP(Types.STRING, Types.INT)),
+            Row.of(1, map),
+            Row.of(2, Map.of()),
+            Row.of(3, null)));
     return table;
   }
 }

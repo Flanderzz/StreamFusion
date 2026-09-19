@@ -5,7 +5,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Properties;
 import org.apache.flink.connector.base.DeliveryGuarantee;
-import org.apache.flink.connector.kafka.sink.TransactionNamingStrategy;
+import tech.streamfusion.kafka.compat.KafkaSinkCompat;
 
 /** Conservative table-option boundary for the native-serialization/stock-KafkaSink hybrid. */
 final class KafkaSinkTranslator {
@@ -39,7 +39,7 @@ final class KafkaSinkTranslator {
     final Properties producerProperties;
     final DeliveryGuarantee deliveryGuarantee;
     final String transactionalIdPrefix;
-    final TransactionNamingStrategy transactionNamingStrategy;
+    final String transactionNamingStrategy;
     final Integer parallelism;
     final String valueFormat;
     final String keyFormat;
@@ -52,7 +52,7 @@ final class KafkaSinkTranslator {
         Properties producerProperties,
         DeliveryGuarantee deliveryGuarantee,
         String transactionalIdPrefix,
-        TransactionNamingStrategy transactionNamingStrategy,
+        String transactionNamingStrategy,
         Integer parallelism,
         String valueFormat,
         String keyFormat,
@@ -104,7 +104,7 @@ final class KafkaSinkTranslator {
     }
 
     DeliveryGuarantee guarantee;
-    TransactionNamingStrategy naming;
+    String naming;
     try {
       guarantee =
           DeliveryGuarantee.valueOf(
@@ -112,12 +112,7 @@ final class KafkaSinkTranslator {
                   .getOrDefault("sink.delivery-guarantee", "at-least-once")
                   .replace('-', '_')
                   .toUpperCase(Locale.ROOT));
-      String namingOption = options.get("sink.transaction-naming-strategy");
-      naming =
-          namingOption == null || "default".equalsIgnoreCase(namingOption)
-              ? TransactionNamingStrategy.DEFAULT
-              : TransactionNamingStrategy.valueOf(
-                  namingOption.replace('-', '_').toUpperCase(Locale.ROOT));
+      naming = KafkaSinkCompat.transactionNaming(options.get("sink.transaction-naming-strategy"));
     } catch (IllegalArgumentException invalid) {
       return Result.fallback("invalid Kafka sink delivery or transaction option");
     }

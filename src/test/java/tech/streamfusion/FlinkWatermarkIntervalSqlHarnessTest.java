@@ -1,6 +1,7 @@
 package tech.streamfusion;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
 
 import java.time.LocalDateTime;
 import java.time.ZoneId;
@@ -128,7 +129,8 @@ class FlinkWatermarkIntervalSqlHarnessTest {
     // Both rows survive a month of lateness; interpreting one month as 1 ms drops January.
     table.createTemporaryView(
         "t",
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(
                 new String[] {"rt"}, localZoned ? Types.INSTANT : Types.LOCAL_DATE_TIME),
             Arrays.stream(values)

@@ -1,6 +1,5 @@
 package tech.streamfusion.operator;
 
-import tech.streamfusion.Native;
 import java.util.UUID;
 import org.apache.arrow.c.ArrowArray;
 import org.apache.arrow.c.ArrowSchema;
@@ -9,16 +8,17 @@ import org.apache.arrow.c.Data;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.flink.metrics.Counter;
-import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
+import tech.streamfusion.Native;
+import tech.streamfusion.compat.FlinkStreamOperator;
 
 /**
  * Splits each incoming Arrow batch for a keyed shuffle. Aligned-only jobs emit one sub-batch per
  * destination channel. Unaligned-enabled jobs emit one independently recoverable fragment per key
  * group with the metadata {@link OrderedKeyGroupReassembler} needs to restore parent order.
  */
-public class SplitByKeyGroupOperator extends AbstractStreamOperator<ArrowBatch>
+public class SplitByKeyGroupOperator extends FlinkStreamOperator<ArrowBatch>
     implements OneInputStreamOperator<ArrowBatch, ArrowBatch> {
 
   private final int[] keyColumns;

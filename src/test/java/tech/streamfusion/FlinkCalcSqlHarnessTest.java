@@ -1,9 +1,9 @@
 package tech.streamfusion;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
 
 import java.time.Instant;
-import tech.streamfusion.planner.NativePlanner;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
@@ -13,6 +13,7 @@ import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.apache.flink.types.Row;
 import org.junit.jupiter.api.Test;
+import tech.streamfusion.planner.NativePlanner;
 
 /** General Calc (computed/constant projections, with and without a filter) matches the host. */
 class FlinkCalcSqlHarnessTest {
@@ -38,7 +39,8 @@ class FlinkCalcSqlHarnessTest {
 
   @Test
   void floatColumnArithmeticMatchesHost() throws Exception {
-    NativeParity.assertParity(FlinkCalcSqlHarnessTest::environment, "SELECT f4 + f4, f4 - f4 FROM f");
+    NativeParity.assertParity(
+        FlinkCalcSqlHarnessTest::environment, "SELECT f4 + f4, f4 - f4 FROM f");
   }
 
   @Test
@@ -99,7 +101,8 @@ class FlinkCalcSqlHarnessTest {
 
   @Test
   void wideningCastMatchesHost() throws Exception {
-    NativeParity.assertParity(FlinkCalcSqlHarnessTest::environment, "SELECT CAST(v AS BIGINT) FROM f");
+    NativeParity.assertParity(
+        FlinkCalcSqlHarnessTest::environment, "SELECT CAST(v AS BIGINT) FROM f");
   }
 
   @Test
@@ -111,7 +114,8 @@ class FlinkCalcSqlHarnessTest {
 
   @Test
   void castToDoubleMatchesHost() throws Exception {
-    NativeParity.assertParity(FlinkCalcSqlHarnessTest::environment, "SELECT CAST(v AS DOUBLE) FROM f");
+    NativeParity.assertParity(
+        FlinkCalcSqlHarnessTest::environment, "SELECT CAST(v AS DOUBLE) FROM f");
   }
 
   @Test
@@ -123,10 +127,14 @@ class FlinkCalcSqlHarnessTest {
 
   @Test
   void narrowingIntCastMatchesHost() throws Exception {
-    // BIGINT → INT narrows: Flink's primitive Java cast truncates to the low 32 bits (two's-complement
-    // wraparound), which the native wrapping kernel reproduces. The environment includes values past
-    // the INT range (2^31 and 2^32+1), so this pins the overflow behavior, not just the in-range case.
-    NativeParity.assertParity(FlinkCalcSqlHarnessTest::castEnvironment, "SELECT CAST(big AS INT) FROM c");
+    // BIGINT → INT narrows: Flink's primitive Java cast truncates to the low 32 bits
+    // (two's-complement
+    // wraparound), which the native wrapping kernel reproduces. The environment includes values
+    // past
+    // the INT range (2^31 and 2^32+1), so this pins the overflow behavior, not just the in-range
+    // case.
+    NativeParity.assertParity(
+        FlinkCalcSqlHarnessTest::castEnvironment, "SELECT CAST(big AS INT) FROM c");
   }
 
   @Test
@@ -139,9 +147,11 @@ class FlinkCalcSqlHarnessTest {
   @Test
   void floatToIntCastMatchesHost() throws Exception {
     // DOUBLE → INT: Flink's primitive Java cast rounds toward zero and saturates to the INT range
-    // (NaN → 0, ±overflow → Integer.MIN/MAX), which Rust's `as` reproduces. The environment includes
+    // (NaN → 0, ±overflow → Integer.MIN/MAX), which Rust's `as` reproduces. The environment
+    // includes
     // NaN, ±infinity and ±1e20 to pin the saturation edges.
-    NativeParity.assertParity(FlinkCalcSqlHarnessTest::castEnvironment, "SELECT CAST(dbl AS INT) FROM c");
+    NativeParity.assertParity(
+        FlinkCalcSqlHarnessTest::castEnvironment, "SELECT CAST(dbl AS INT) FROM c");
   }
 
   @Test
@@ -154,18 +164,21 @@ class FlinkCalcSqlHarnessTest {
 
   @Test
   void isNullFilterMatchesHost() throws Exception {
-    NativeParity.assertParity(FlinkCalcSqlHarnessTest::nullableEnvironment, "SELECT k FROM g WHERE s IS NULL");
+    NativeParity.assertParity(
+        FlinkCalcSqlHarnessTest::nullableEnvironment, "SELECT k FROM g WHERE s IS NULL");
   }
 
   @Test
   void isNotNullFilterMatchesHost() throws Exception {
-    NativeParity.assertParity(FlinkCalcSqlHarnessTest::nullableEnvironment, "SELECT k FROM g WHERE v IS NOT NULL");
+    NativeParity.assertParity(
+        FlinkCalcSqlHarnessTest::nullableEnvironment, "SELECT k FROM g WHERE v IS NOT NULL");
   }
 
   @Test
   void coalesceMatchesHost() throws Exception {
     // COALESCE lowers to CASE in sql-to-rel, so it rides the admitted CASE path (numeric branches).
-    NativeParity.assertParity(FlinkCalcSqlHarnessTest::nullableEnvironment, "SELECT COALESCE(v, 0) FROM g");
+    NativeParity.assertParity(
+        FlinkCalcSqlHarnessTest::nullableEnvironment, "SELECT COALESCE(v, 0) FROM g");
   }
 
   @Test
@@ -186,7 +199,8 @@ class FlinkCalcSqlHarnessTest {
   @Test
   void nullifMatchesHost() throws Exception {
     // NULLIF lowers to CASE WHEN a = b THEN NULL ELSE a, exercising a NULL literal in a branch.
-    NativeParity.assertParity(FlinkCalcSqlHarnessTest::nullableEnvironment, "SELECT NULLIF(v, 30) FROM g");
+    NativeParity.assertParity(
+        FlinkCalcSqlHarnessTest::nullableEnvironment, "SELECT NULLIF(v, 30) FROM g");
   }
 
   @Test
@@ -210,7 +224,8 @@ class FlinkCalcSqlHarnessTest {
 
   @Test
   void divisionInFilterMatchesHost() throws Exception {
-    NativeParity.assertParity(FlinkCalcSqlHarnessTest::environment, "SELECT k FROM f WHERE v / 3 > 5");
+    NativeParity.assertParity(
+        FlinkCalcSqlHarnessTest::environment, "SELECT k FROM f WHERE v / 3 > 5");
   }
 
   @Test
@@ -266,7 +281,8 @@ class FlinkCalcSqlHarnessTest {
   @Test
   void trimMatchesHost() throws Exception {
     // Default whitespace both-sides trim maps to DataFusion btrim; spaced values exercise it.
-    NativeParity.assertParity(FlinkCalcSqlHarnessTest::spacedStringEnvironment, "SELECT TRIM(s) FROM ss");
+    NativeParity.assertParity(
+        FlinkCalcSqlHarnessTest::spacedStringEnvironment, "SELECT TRIM(s) FROM ss");
   }
 
   @Test
@@ -284,13 +300,15 @@ class FlinkCalcSqlHarnessTest {
   @Test
   void substringFromForMatchesHost() throws Exception {
     NativeParity.assertParity(
-        FlinkCalcSqlHarnessTest::spacedStringEnvironment, "SELECT SUBSTRING(s FROM 2 FOR 3) FROM ss");
+        FlinkCalcSqlHarnessTest::spacedStringEnvironment,
+        "SELECT SUBSTRING(s FROM 2 FOR 3) FROM ss");
   }
 
   @Test
   void substringStartBelowOneMatchesHost() throws Exception {
     NativeParity.assertParity(
-        FlinkCalcSqlHarnessTest::spacedStringEnvironment, "SELECT SUBSTRING(s FROM 0 FOR 3) FROM ss");
+        FlinkCalcSqlHarnessTest::spacedStringEnvironment,
+        "SELECT SUBSTRING(s FROM 0 FOR 3) FROM ss");
   }
 
   @Test
@@ -301,7 +319,8 @@ class FlinkCalcSqlHarnessTest {
 
   @Test
   void likeFilterMatchesHost() throws Exception {
-    NativeParity.assertParity(FlinkCalcSqlHarnessTest::environment, "SELECT k FROM f WHERE s LIKE '%a%'");
+    NativeParity.assertParity(
+        FlinkCalcSqlHarnessTest::environment, "SELECT k FROM f WHERE s LIKE '%a%'");
   }
 
   @Test
@@ -322,19 +341,22 @@ class FlinkCalcSqlHarnessTest {
 
   @Test
   void ltrimRtrimMatchHost() throws Exception {
-    NativeParity.assertParity(FlinkCalcSqlHarnessTest::spacedStringEnvironment, "SELECT LTRIM(s), RTRIM(s) FROM ss");
+    NativeParity.assertParity(
+        FlinkCalcSqlHarnessTest::spacedStringEnvironment, "SELECT LTRIM(s), RTRIM(s) FROM ss");
   }
 
   @Test
   void positionMatchesHost() throws Exception {
-    NativeParity.assertParity(FlinkCalcSqlHarnessTest::environment, "SELECT POSITION('c' IN s) FROM f");
+    NativeParity.assertParity(
+        FlinkCalcSqlHarnessTest::environment, "SELECT POSITION('c' IN s) FROM f");
   }
 
   @Test
   void absFloatMatchesHost() throws Exception {
     // ABS over a double expression (the E-notation literal forces DOUBLE; goes negative for some
     // rows). Integer ABS stays on host (overflow edge).
-    NativeParity.assertParity(FlinkCalcSqlHarnessTest::environment, "SELECT ABS(v - 25.5E0) FROM f");
+    NativeParity.assertParity(
+        FlinkCalcSqlHarnessTest::environment, "SELECT ABS(v - 25.5E0) FROM f");
   }
 
   @Test
@@ -352,7 +374,8 @@ class FlinkCalcSqlHarnessTest {
 
   @Test
   void signFloatMatchesHost() throws Exception {
-    NativeParity.assertParity(FlinkCalcSqlHarnessTest::environment, "SELECT SIGN(v - 25.5E0) FROM f");
+    NativeParity.assertParity(
+        FlinkCalcSqlHarnessTest::environment, "SELECT SIGN(v - 25.5E0) FROM f");
   }
 
   @Test
@@ -371,7 +394,8 @@ class FlinkCalcSqlHarnessTest {
     System.setProperty("streamfusion.expression.ROUND.allowIncompatible", "true");
     try {
       // Sampled values happen to agree; the flag is the user accepting the input-dependent risk.
-      NativeParity.assertParity(FlinkCalcSqlHarnessTest::doubleEnvironment, "SELECT ROUND(d, 2) FROM dd");
+      NativeParity.assertParity(
+          FlinkCalcSqlHarnessTest::doubleEnvironment, "SELECT ROUND(d, 2) FROM dd");
     } finally {
       System.clearProperty("streamfusion.expression.ROUND.allowIncompatible");
     }
@@ -382,7 +406,8 @@ class FlinkCalcSqlHarnessTest {
     // TAN diverges at the last ULP, so only assert it routes (not value parity) under the flag.
     System.setProperty("streamfusion.expression.TAN.allowIncompatible", "true");
     try {
-      NativeParity.assertRoutes(FlinkCalcSqlHarnessTest::doubleEnvironment, "SELECT TAN(d) FROM dd");
+      NativeParity.assertRoutes(
+          FlinkCalcSqlHarnessTest::doubleEnvironment, "SELECT TAN(d) FROM dd");
     } finally {
       System.clearProperty("streamfusion.expression.TAN.allowIncompatible");
     }
@@ -393,7 +418,8 @@ class FlinkCalcSqlHarnessTest {
     // With native acceleration off, a normally-accelerated filter runs entirely on the host.
     System.setProperty("streamfusion.native.enabled", "false");
     try {
-      NativeParity.assertFallback(FlinkCalcSqlHarnessTest::environment, "SELECT k FROM f WHERE v > 15");
+      NativeParity.assertFallback(
+          FlinkCalcSqlHarnessTest::environment, "SELECT k FROM f WHERE v > 15");
     } finally {
       System.clearProperty("streamfusion.native.enabled");
     }
@@ -405,7 +431,9 @@ class FlinkCalcSqlHarnessTest {
     System.setProperty("streamfusion.operator.filter.enabled", "false");
     try {
       NativeParity.assertFallbackReasonContains(
-          FlinkCalcSqlHarnessTest::environment, "SELECT k FROM f WHERE v > 15", "filter: disabled by config");
+          FlinkCalcSqlHarnessTest::environment,
+          "SELECT k FROM f WHERE v > 15",
+          "filter: disabled by config");
     } finally {
       System.clearProperty("streamfusion.operator.filter.enabled");
     }
@@ -416,7 +444,8 @@ class FlinkCalcSqlHarnessTest {
     // The blanket flag enables any incompatible function (here SIN) without naming it.
     System.setProperty("streamfusion.expression.allowIncompatible", "true");
     try {
-      NativeParity.assertRoutes(FlinkCalcSqlHarnessTest::doubleEnvironment, "SELECT SIN(d) FROM dd");
+      NativeParity.assertRoutes(
+          FlinkCalcSqlHarnessTest::doubleEnvironment, "SELECT SIN(d) FROM dd");
     } finally {
       System.clearProperty("streamfusion.expression.allowIncompatible");
     }
@@ -460,7 +489,8 @@ class FlinkCalcSqlHarnessTest {
   @Test
   void lpadRpadMatchHost() throws Exception {
     NativeParity.assertParity(
-        FlinkCalcSqlHarnessTest::spacedStringEnvironment, "SELECT LPAD(s, 8, '*'), RPAD(s, 8, '*') FROM ss");
+        FlinkCalcSqlHarnessTest::spacedStringEnvironment,
+        "SELECT LPAD(s, 8, '*'), RPAD(s, 8, '*') FROM ss");
   }
 
   @Test
@@ -495,7 +525,8 @@ class FlinkCalcSqlHarnessTest {
     env.setParallelism(1);
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(
                 new String[] {"k", "v", "s", "f4"},
                 Types.LONG,
@@ -523,7 +554,8 @@ class FlinkCalcSqlHarnessTest {
     env.setParallelism(1);
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(new String[] {"ts"}, Types.INSTANT),
             Row.of(Instant.parse("2026-08-21T12:34:56.789Z")),
             Row.of(Instant.parse("1969-12-31T23:59:59.001Z")));
@@ -539,7 +571,8 @@ class FlinkCalcSqlHarnessTest {
     env.setParallelism(1);
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(new String[] {"d"}, Types.DOUBLE),
             Row.of(0.5),
             Row.of(2.5),
@@ -556,7 +589,8 @@ class FlinkCalcSqlHarnessTest {
     env.setParallelism(1);
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(new String[] {"s"}, Types.STRING),
             Row.of("  pad  "),
             Row.of("x"),
@@ -572,9 +606,9 @@ class FlinkCalcSqlHarnessTest {
     env.setParallelism(1);
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     DataStream<Row> source =
-        env.fromData(
-            Types.ROW_NAMED(
-                new String[] {"a", "b", "c"}, Types.BYTE, Types.BYTE, Types.SHORT),
+        fromData(
+            env,
+            Types.ROW_NAMED(new String[] {"a", "b", "c"}, Types.BYTE, Types.BYTE, Types.SHORT),
             Row.of((byte) 100, (byte) 100, (short) 300),
             Row.of((byte) 1, (byte) 2, (short) 3));
     tEnv.createTemporaryView(
@@ -593,7 +627,8 @@ class FlinkCalcSqlHarnessTest {
     env.setParallelism(1);
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(new String[] {"big", "dbl"}, Types.LONG, Types.DOUBLE),
             Row.of(300L, 3.9),
             Row.of(2147483648L, -3.9),
@@ -617,7 +652,8 @@ class FlinkCalcSqlHarnessTest {
     env.setParallelism(1);
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(new String[] {"k", "v", "s"}, Types.LONG, Types.INT, Types.STRING),
             Row.of(1L, 10, "a"),
             Row.of(2L, 30, null),

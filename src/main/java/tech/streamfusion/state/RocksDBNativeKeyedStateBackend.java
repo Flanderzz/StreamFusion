@@ -1,13 +1,21 @@
 package tech.streamfusion.state;
 
+import static org.apache.flink.runtime.state.SnapshotExecutionType.ASYNCHRONOUS;
+
+import java.io.File;
+import java.io.IOException;
+import java.util.List;
+import java.util.concurrent.RunnableFuture;
+import java.util.stream.Stream;
+import javax.annotation.Nonnull;
 import org.apache.flink.api.common.state.CheckpointListener;
 import org.apache.flink.api.common.state.State;
 import org.apache.flink.api.common.state.StateDescriptor;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.core.fs.CloseableRegistry;
-import org.apache.flink.runtime.memory.OpaqueMemoryResource;
 import org.apache.flink.runtime.checkpoint.CheckpointOptions;
+import org.apache.flink.runtime.memory.OpaqueMemoryResource;
 import org.apache.flink.runtime.state.AbstractKeyedStateBackend;
 import org.apache.flink.runtime.state.CheckpointStreamFactory;
 import org.apache.flink.runtime.state.CheckpointableKeyedStateBackend;
@@ -26,16 +34,6 @@ import org.apache.flink.runtime.state.heap.HeapPriorityQueueElement;
 import org.apache.flink.util.FileUtils;
 import org.apache.flink.util.FlinkRuntimeException;
 import org.apache.flink.util.function.SupplierWithException;
-
-import javax.annotation.Nonnull;
-
-import java.io.File;
-import java.io.IOException;
-import java.util.List;
-import java.util.concurrent.RunnableFuture;
-import java.util.stream.Stream;
-
-import static org.apache.flink.runtime.state.SnapshotExecutionType.ASYNCHRONOUS;
 
 /**
  * The keyed state backend given to every keyed operator when the RocksDB state backend is selected.
@@ -71,6 +69,9 @@ public final class RocksDBNativeKeyedStateBackend<K>
 
   private SupplierWithException<CheckpointableKeyedStateBackend<K>, Exception> delegateSupplier;
   private CheckpointableKeyedStateBackend<K> delegate;
+  private SupplierWithException<CheckpointableKeyedStateBackend<K>, Exception>
+      canonicalProjectionFactory;
+  private boolean canonicalProjection;
   private K bufferedKey;
   private int bufferedKeyGroup;
 
@@ -108,7 +109,8 @@ public final class RocksDBNativeKeyedStateBackend<K>
       delegate = delegateSupplier.get();
       delegateSupplier = null;
       if (bufferedKey != null) {
-        delegate.setCurrentKeyAndKeyGroup(bufferedKey, bufferedKeyGroup);
+        tech.streamfusion.compat.StateCompat.setCurrentKeyAndGroup(
+            delegate, bufferedKey, bufferedKeyGroup);
       }
     }
     return delegate;
@@ -124,6 +126,42 @@ public final class RocksDBNativeKeyedStateBackend<K>
 
   void materializeDelegate() throws Exception {
     delegate();
+  }
+
+  void setCanonicalProjectionFactory(
+      SupplierWithException<CheckpointableKeyedStateBackend<K>, Exception> factory) {
+    canonicalProjectionFactory = factory;
+  }
+
+  private CheckpointableKeyedStateBackend<K> canonicalDelegate() throws Exception {
+    if (canonicalProjectionFactory == null) return delegate();
+    if (delegateStateUsed) {
+      throw new IllegalStateException(
+          "canonical native state cannot replace an active JVM state backend");
+    }
+    var projection = canonicalProjectionFactory.get();
+    try {
+      if (delegate != null) {
+        try {
+          delegate.close();
+        } finally {
+          delegate.dispose();
+        }
+      }
+    } catch (Exception failure) {
+      try {
+        projection.close();
+      } catch (Exception cleanup) {
+        failure.addSuppressed(cleanup);
+      }
+      projection.dispose();
+      throw failure;
+    }
+    delegate = projection;
+    delegateSupplier = null;
+    canonicalProjectionFactory = null;
+    canonicalProjection = true;
+    return delegate;
   }
 
   // ---- The native operator's surface -----------------------------------------------------------
@@ -173,7 +211,8 @@ public final class RocksDBNativeKeyedStateBackend<K>
     if (delegate == null) {
       return new CanonicalRestore(List.of(), Long.MIN_VALUE);
     }
-    CanonicalNativeState.Restore restored = CanonicalNativeState.readAndClear(delegate, operatorId);
+    CanonicalNativeState.Restore restored =
+        CanonicalNativeState.readAndClear(canonicalDelegate(), operatorId);
     return new CanonicalRestore(restored.partitions, restored.timerDeadline);
   }
 
@@ -221,15 +260,26 @@ public final class RocksDBNativeKeyedStateBackend<K>
   @Nonnull
   @Override
   public SavepointResources<K> savepoint() throws Exception {
-    if (snapshotStrategy.hasNativeState()) {
-      RocksDBNativeState nativeState = snapshotStrategy.nativeState();
-      CanonicalNativeState.write(
-          delegate(),
-          nativeState.canonicalPartitions(),
-          nativeState.canonicalOperatorId(),
-          nativeState.canonicalTimerDeadline());
+    if (!snapshotStrategy.hasNativeState()) return delegate().savepoint();
+    RocksDBNativeState nativeState = snapshotStrategy.nativeState();
+    var projection = canonicalDelegate();
+    CanonicalNativeState.write(
+        projection,
+        nativeState.canonicalPartitions(),
+        nativeState.canonicalOperatorId(),
+        nativeState.canonicalTimerDeadline());
+    var resources = projection.savepoint();
+    if (canonicalProjection) {
+      // The heap snapshot owns its stable view. Release the live staging entries immediately.
+      try {
+        CanonicalNativeState.write(
+            projection, new byte[0][], nativeState.canonicalOperatorId(), Long.MIN_VALUE);
+      } catch (Exception failure) {
+        resources.getSnapshotResources().release();
+        throw failure;
+      }
     }
-    return delegate().savepoint();
+    return resources;
   }
 
   public static final class CanonicalRestore {
@@ -342,14 +392,13 @@ public final class RocksDBNativeKeyedStateBackend<K>
             + delegate.getClass().getName());
   }
 
-  @Override
   public void setCurrentKeyAndKeyGroup(K newKey, int newKeyGroupIndex) {
     if (delegate == null) {
       bufferedKey = newKey;
       bufferedKeyGroup = newKeyGroupIndex;
       return;
     }
-    delegate.setCurrentKeyAndKeyGroup(newKey, newKeyGroupIndex);
+    tech.streamfusion.compat.StateCompat.setCurrentKeyAndGroup(delegate, newKey, newKeyGroupIndex);
   }
 
   // ---- Delegate-materializing state access ------------------------------------------------------
@@ -370,9 +419,8 @@ public final class RocksDBNativeKeyedStateBackend<K>
     return delegateUnchecked().getKeys(state, namespace);
   }
 
-  @Override
   public <N> Stream<K> getKeys(List<String> states, N namespace) {
-    return delegateUnchecked().getKeys(states, namespace);
+    return tech.streamfusion.compat.StateCompat.keys(delegateUnchecked(), states, namespace);
   }
 
   @Override
@@ -432,8 +480,7 @@ public final class RocksDBNativeKeyedStateBackend<K>
     return delegateUnchecked().isSafeToReuseKVState();
   }
 
-  @Override
   public String getBackendTypeIdentifier() {
-    return delegateUnchecked().getBackendTypeIdentifier();
+    return tech.streamfusion.compat.StateCompat.backendType(delegateUnchecked());
   }
 }

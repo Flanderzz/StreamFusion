@@ -151,9 +151,13 @@ public final class StreamFusionSuiteAgent {
         .type(named(STREAM_EXECUTION_ENVIRONMENT))
         .transform(
             (builder, type, classLoader, module, protectionDomain) ->
-                builder.visit(
-                    Advice.to(InstallNativeRocksDB.class)
-                        .on(named("configure").and(takesArguments(2)))))
+                builder
+                    .visit(
+                        Advice.to(InstallNativeRocksDB.class)
+                            .on(named("configure").and(takesArguments(2))))
+                    .visit(
+                        Advice.to(InstallLegacyNativeRocksDB.class)
+                            .on(named("setStateBackend").and(takesArguments(1)))))
         .type(named(NATIVE_STATEFUL_OPERATOR))
         .transform(
             (builder, type, classLoader, module, protectionDomain) ->
@@ -533,6 +537,20 @@ public final class StreamFusionSuiteAgent {
       } catch (ReflectiveOperationException e) {
         throw new IllegalStateException("native RocksDB suite backend installation failed", e);
       }
+    }
+  }
+
+  /** Flink 1.18 upstream fixtures still use the legacy programmatic backend API. */
+  public static final class InstallLegacyNativeRocksDB {
+    @Advice.OnMethodEnter
+    static void enter(
+        @Advice.This Object environment,
+        @Advice.Argument(
+                value = 0,
+                readOnly = false,
+                typing = net.bytebuddy.implementation.bytecode.assign.Assigner.Typing.DYNAMIC)
+            Object backend) {
+      backend = LegacyStateBackend.replace(environment, backend);
     }
   }
 

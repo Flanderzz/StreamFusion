@@ -1,6 +1,7 @@
 package tech.streamfusion;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
 
 import java.time.Instant;
 import java.time.ZoneId;
@@ -69,7 +70,8 @@ class FlinkCurrentTimeSqlHarnessTest {
     tables.getConfig().setLocalTimeZone(ZoneId.of("America/New_York"));
     var type = Types.ROW_NAMED(new String[] {"id", "rt"}, Types.INT, Types.INSTANT);
     var source =
-        env.fromData(
+        fromData(
+                env,
                 type,
                 Row.of(0, Instant.ofEpochMilli(1000)),
                 Row.of(1, Instant.ofEpochMilli(3000)),

@@ -118,7 +118,7 @@ public final class FlinkExpressionFunction extends ScalarFunction
     this.rowResultType = body.rowType();
     var context = body.context();
     functions = List.copyOf(context.functionInstances.values());
-    String className = "FlinkExpressionEvaluator" + context.getNameCounter().getAndIncrement();
+    String className = tech.streamfusion.compat.FlinkCompat.expressionClassName(context);
     String code =
         "public final class "
             + className

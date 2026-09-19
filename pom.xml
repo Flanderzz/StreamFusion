@@ -61,6 +61,10 @@
         <arrow.version>18.3.0</arrow.version>
         <flink.version>2.2.1</flink.version>
         <flink.line>2.2</flink.line>
+        <streamfusion.artifact.suffix></streamfusion.artifact.suffix>
+        <flink.dependency.range>[2.2.0,2.3.0)</flink.dependency.range>
+        <flink.connector.kafka.version>5.0.0-2.2</flink.connector.kafka.version>
+        <calcite.version>1.36.0</calcite.version>
         <!-- Keep the runtime Kafka client aligned with flink-connector-kafka 5.0.0-2.2. A direct
              dependency is necessary for source compilation, but pinning an older version here
              silently overrides the connector's transitive client and changes producer semantics. -->
@@ -188,7 +192,7 @@
         <dependency>
             <groupId>org.apache.flink</groupId>
             <artifactId>flink-connector-kafka</artifactId>
-            <version>5.0.0-2.2</version>
+            <version>${flink.connector.kafka.version}</version>
             <scope>provided</scope>
         </dependency>
         <!-- The JSON format factory. Flink instantiates the original kafka+json table source during SQL
@@ -350,6 +354,41 @@
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-enforcer-plugin</artifactId>
+                <version>3.6.3</version>
+                <executions><execution>
+                    <id>target-flink-line</id>
+                    <goals><goal>enforce</goal></goals>
+                    <configuration><rules><bannedDependencies>
+                        <searchTransitive>true</searchTransitive>
+                        <message>StreamFusion dependencies must target Flink ${flink.line}; select matching connector and format releases.</message>
+                        <excludes><exclude>org.apache.flink:*</exclude></excludes>
+                        <includes>
+                            <include>org.apache.flink:*:${flink.dependency.range}</include>
+                            <include>org.apache.flink:flink-shaded-*</include>
+                            <include>org.apache.flink:flink-connector-kafka:[${flink.connector.kafka.version}]</include>
+                        </includes>
+                    </bannedDependencies></rules></configuration>
+                </execution></executions>
+            </plugin>
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>build-helper-maven-plugin</artifactId>
+                <version>3.6.0</version>
+                <executions>
+                    <execution>
+                        <id>flink-compatibility-sources</id>
+                        <phase>generate-sources</phase>
+                        <goals><goal>add-source</goal></goals>
+                        <configuration><sources>
+                            <source>${project.basedir}/../src/main/java-flink${flink.line}</source>
+                        </sources></configuration>
+                    </execution>
+
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-javadoc-plugin</artifactId>
                 <executions>
                     <execution>
@@ -362,6 +401,11 @@
         </plugins>
         <pluginManagement>
         <plugins>
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>flatten-maven-plugin</artifactId>
+                <version>1.6.0</version>
+            </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-jar-plugin</artifactId>
@@ -417,7 +461,7 @@
                         </additionalDependency>
                         <additionalDependency>
                             <groupId>org.apache.paimon</groupId>
-                            <artifactId>paimon-flink-2.2</artifactId>
+                            <artifactId>paimon-flink-${flink.line}</artifactId>
                             <version>${paimon.version}</version>
                         </additionalDependency>
                     </additionalDependencies>
@@ -553,6 +597,65 @@
     </build>
 
     <profiles>
+        <profile>
+            <id>flink-1.18</id>
+            <properties>
+                <flink.version>1.18.1</flink.version>
+                <flink.line>1.18</flink.line>
+                <streamfusion.artifact.suffix>-flink1.18</streamfusion.artifact.suffix>
+                <flink.dependency.range>[1.18.0,1.19.0)</flink.dependency.range>
+                <flink.connector.kafka.version>3.2.0-1.18</flink.connector.kafka.version>
+                <kafka.clients.version>3.4.0</kafka.clients.version>
+                <!-- Released flink-table:1.18.1 and flink-parent:1.18.1 pin these versions. -->
+                <calcite.version>1.32.0</calcite.version>
+                <protobuf.version>3.21.7</protobuf.version>
+            </properties>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.codehaus.mojo</groupId>
+                        <artifactId>flatten-maven-plugin</artifactId>
+                        <version>1.6.0</version>
+                        <configuration>
+                            <flattenMode>resolveCiFriendliesOnly</flattenMode>
+                            <updatePomFile>true</updatePomFile>
+                        </configuration>
+                        <executions>
+                            <execution>
+                                <id>flatten-release-pom</id>
+                                <phase>process-resources</phase>
+                                <goals>
+                                    <goal>flatten</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-javadoc-plugin</artifactId>
+                        <configuration>
+                            <additionalDependencies combine.self="override">
+                                <additionalDependency>
+                                    <groupId>org.apache.parquet</groupId>
+                                    <artifactId>parquet-hadoop</artifactId>
+                                    <version>1.16.0</version>
+                                </additionalDependency>
+                                <additionalDependency>
+                                    <groupId>org.apache.hadoop</groupId>
+                                    <artifactId>hadoop-common</artifactId>
+                                    <version>3.3.4</version>
+                                </additionalDependency>
+                                <additionalDependency>
+                                    <groupId>org.apache.paimon</groupId>
+                                    <artifactId>paimon-flink-1.18</artifactId>
+                                    <version>${paimon.version}</version>
+                                </additionalDependency>
+                            </additionalDependencies>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
         <!-- Central releases are deliberately opt-in. The tag-driven release workflow activates
              this profile after assembling the universal native payload. -->
         <profile>
@@ -670,7 +773,7 @@
                 <dependency>
                     <groupId>org.apache.calcite</groupId>
                     <artifactId>calcite-core</artifactId>
-                    <version>1.36.0</version>
+                    <version>${calcite.version}</version>
                     <scope>provided</scope>
                 </dependency>
             </dependencies>

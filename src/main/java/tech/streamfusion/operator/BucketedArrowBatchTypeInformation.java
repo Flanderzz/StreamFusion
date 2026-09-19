@@ -1,14 +1,14 @@
 package tech.streamfusion.operator;
 
-import org.apache.flink.api.common.serialization.SerializerConfig;
-import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
+import tech.streamfusion.compat.FixedSerializerTypeInformation;
 
 /**
  * The stream element type on the edge from a sink's bucket router to its writer: one
  * destination-routed {@link BucketedArrowBatch} per record.
  */
-public final class BucketedArrowBatchTypeInformation extends TypeInformation<BucketedArrowBatch> {
+public final class BucketedArrowBatchTypeInformation
+    extends FixedSerializerTypeInformation<BucketedArrowBatch> {
 
   public static final BucketedArrowBatchTypeInformation INSTANCE =
       new BucketedArrowBatchTypeInformation();
@@ -44,7 +44,7 @@ public final class BucketedArrowBatchTypeInformation extends TypeInformation<Buc
   }
 
   @Override
-  public TypeSerializer<BucketedArrowBatch> createSerializer(SerializerConfig config) {
+  public TypeSerializer<BucketedArrowBatch> createSerializer() {
     return new BucketedArrowBatchSerializer();
   }
 

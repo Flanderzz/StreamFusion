@@ -2,6 +2,7 @@ package tech.streamfusion;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -157,7 +158,8 @@ class FlinkChangingTopNSqlHarnessTest {
       table.getConfig().set("table.exec.mini-batch.size", "37");
     }
     var source =
-        env.fromData(
+        fromData(
+            env,
             rows,
             Types.ROW_NAMED(
                 new String[] {"k", "score", "bound"}, Types.LONG, Types.LONG, Types.LONG));

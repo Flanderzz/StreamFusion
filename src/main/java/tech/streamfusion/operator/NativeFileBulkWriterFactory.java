@@ -6,7 +6,7 @@ import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.flink.api.common.serialization.BulkWriter;
 import org.apache.flink.core.fs.FSDataOutputStream;
 import org.apache.flink.table.types.logical.RowType;
-import tech.streamfusion.arrow.ArrowConversion;
+import tech.streamfusion.compat.FileSinkCompat;
 import tech.streamfusion.format.ColumnarFileCodec;
 
 /**
@@ -53,7 +53,7 @@ public class NativeFileBulkWriterFactory implements BulkWriter.Factory<Partition
   public BulkWriter<PartitionedArrowBatch> create(FSDataOutputStream out) throws IOException {
     ColumnarFileCodec.Encoder encoder =
         codec.createEncoder(
-            ArrowConversion.toArrowSchema(rowType),
+            FileSinkCompat.encoderSchema(rowType),
             partitionColumns,
             configKeys,
             configValues,

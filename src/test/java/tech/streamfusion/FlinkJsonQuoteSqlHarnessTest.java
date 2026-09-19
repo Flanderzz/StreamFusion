@@ -3,6 +3,11 @@ package tech.streamfusion;
 import org.junit.jupiter.api.Test;
 
 class FlinkJsonQuoteSqlHarnessTest {
+  @org.junit.jupiter.api.BeforeEach
+  void requireReleasedHostFunction() {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction("JSON_QUOTE");
+  }
+
   @Test
   void functionAlsoRunsInsideTheNativePredicate() throws Exception {
     NativeParity.assertParity(

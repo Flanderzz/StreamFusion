@@ -7,9 +7,6 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import tech.streamfusion.format.EncodeFormat;
-import tech.streamfusion.format.LogicalTypeDescriptors;
-import tech.streamfusion.operator.RowDataArrowConverter;
 import java.math.BigDecimal;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -21,7 +18,6 @@ import org.apache.arrow.c.Data;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
-import org.apache.flink.formats.avro.AvroFormatOptions.AvroEncoding;
 import org.apache.flink.formats.avro.AvroRowDataSerializationSchema;
 import org.apache.flink.table.data.DecimalData;
 import org.apache.flink.table.data.GenericArrayData;
@@ -52,6 +48,9 @@ import org.apache.flink.table.types.logical.VarBinaryType;
 import org.apache.flink.table.types.logical.VarCharType;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
+import tech.streamfusion.format.EncodeFormat;
+import tech.streamfusion.format.LogicalTypeDescriptors;
+import tech.streamfusion.operator.RowDataArrowConverter;
 
 /**
  * Byte-level referee against Flink's own Avro serializer: the native encode must produce the exact
@@ -291,7 +290,7 @@ class NativeKafkaAvroEncoderTest {
   private static AvroRowDataSerializationSchema referee(RowType rowType, boolean legacy)
       throws Exception {
     AvroRowDataSerializationSchema referee =
-        new AvroRowDataSerializationSchema(rowType, AvroEncoding.BINARY, legacy);
+        tech.streamfusion.format.avro.compat.AvroTestSchemas.encoder(rowType, legacy);
     referee.open(null);
     return referee;
   }

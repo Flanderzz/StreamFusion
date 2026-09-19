@@ -10,7 +10,7 @@
         <version>${revision}</version>
     </parent>
 
-    <artifactId>streamfusion-image-it</artifactId>
+    <artifactId>streamfusion-image-it${streamfusion.artifact.suffix}</artifactId>
 
     <dependencies>
         <dependency>
@@ -28,6 +28,11 @@
             </resource>
         </resources>
         <plugins>
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>flatten-maven-plugin</artifactId>
+                <configuration><flattenMode>ossrh</flattenMode></configuration>
+            </plugin>
             <!-- The job JAR is intentionally thin: it represents a normal user job and must rely
                  on the Flink distribution plus StreamFusion's lib-directory extensions. -->
             <plugin>

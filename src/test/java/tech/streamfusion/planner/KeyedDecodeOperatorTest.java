@@ -4,12 +4,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import tech.streamfusion.format.NativeFormatContext;
-import tech.streamfusion.format.json.JsonFormatProvider;
-import tech.streamfusion.operator.ArrowBatch;
-import tech.streamfusion.operator.ArrowBatchSerializer;
-import tech.streamfusion.operator.NativeBytesDecodeOperator;
-import tech.streamfusion.operator.RowDataArrowConverter;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -25,6 +19,12 @@ import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.table.types.logical.VarCharType;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
+import tech.streamfusion.format.NativeFormatContext;
+import tech.streamfusion.format.json.JsonFormatProvider;
+import tech.streamfusion.operator.ArrowBatch;
+import tech.streamfusion.operator.ArrowBatchSerializer;
+import tech.streamfusion.operator.NativeBytesDecodeOperator;
+import tech.streamfusion.operator.RowDataArrowConverter;
 
 /**
  * The keyed composition through the real operator and native JSON decoder (so it runs in the
@@ -65,7 +65,7 @@ class KeyedDecodeOperatorTest {
     List<byte[]> frames =
         List.of(
             frame(7L, "{\"id\": 1, \"name\": \"a\"}"),
-            // A top-level array fans out into two rows sharing record 1's key.
+            // Current Flink fans out this array; 1.18 rejects it and drops the whole record.
             frame(8L, "[{\"id\": 2, \"name\": \"b\"}, {\"id\": 3, \"name\": \"c\"}]"),
             // A null Kafka key keeps the record with a NULL key column.
             NativeBytesDecodeOperator.frame(
@@ -102,11 +102,13 @@ class KeyedDecodeOperatorTest {
     }
 
     assertEquals(
-        List.of(
-            List.of("1", "a", "7"),
-            List.of("2", "b", "8"),
-            List.of("3", "c", "8"),
-            List.of("4", "d", "null")),
+        tech.streamfusion.compat.JsonRuntimeCompat.ACCEPTS_ARRAY_ROOTS
+            ? List.of(
+                List.of("1", "a", "7"),
+                List.of("2", "b", "8"),
+                List.of("3", "c", "8"),
+                List.of("4", "d", "null"))
+            : List.of(List.of("1", "a", "7"), List.of("4", "d", "null")),
         rows);
   }
 

@@ -35,6 +35,9 @@ in this mode because its handles cannot survive restore. Native keyed operators 
 
 Recovery tests cover both protocols. The aligned test proves that destination batches leave no
 Arrow channel state. The unaligned test creates backpressure, proves that the checkpoint captured
-Arrow channel state, fails the job, restores from parallelism 2 to 3, and verifies every source id
+Arrow channel state, fails the job, restores from parallelism 2 to 3 and 3 to 2, and verifies every source id
 exactly once. Operator-harness tests separately restore a partially assembled parent and hold a
 watermark until all of its key-group fragments arrive.
+
+Partitioner copies retain their configured channel count. This is required by Flink 1.18's
+recovery filter, which sets up a partitioner before copying it and uses that copy directly.

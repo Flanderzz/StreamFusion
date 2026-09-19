@@ -3,11 +3,11 @@ package tech.streamfusion;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import tech.streamfusion.planner.NativePlanner;
-import tech.streamfusion.planner.PhysicalPlanScan;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.junit.jupiter.api.Test;
+import tech.streamfusion.planner.NativePlanner;
+import tech.streamfusion.planner.PhysicalPlanScan;
 
 /**
  * Every filesystem sink configuration the native writer cannot honor 1:1 declines with a recorded
@@ -91,6 +91,9 @@ class FlinkParquetSinkFallbackTest {
 
   @Test
   void enforcedBinaryLengthFallsBackToFlinksEnforcer() {
+    org.junit.jupiter.api.Assumptions.assumeTrue(
+        tech.streamfusion.compat.FlinkTestCapabilities.SINK_LENGTH_ERROR,
+        "Flink 1.18 only provides IGNORE and TRIM_PAD sink length policies");
     assertConstraintFallsBack(
         "fixed BINARY(3), limited VARBINARY(3)",
         "fixed BINARY(3), limited VARBINARY(3)",

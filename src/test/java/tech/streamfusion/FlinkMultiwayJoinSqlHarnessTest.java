@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import java.time.LocalDateTime;
 import java.util.function.Supplier;
 import org.apache.flink.api.common.typeinfo.Types;
@@ -39,7 +41,8 @@ class FlinkMultiwayJoinSqlHarnessTest {
       StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
 
       DataStream<Row> bid =
-          env.fromData(
+          fromData(
+              env,
               Types.ROW_NAMED(
                   new String[] {"bidder", "price", "channel"},
                   Types.LONG,
@@ -50,12 +53,14 @@ class FlinkMultiwayJoinSqlHarnessTest {
               Row.of(2L, 200L, "baidu"),
               Row.of(3L, 300L, "facebook"));
       DataStream<Row> person =
-          env.fromData(
+          fromData(
+              env,
               Types.ROW_NAMED(new String[] {"id", "name"}, Types.LONG, Types.STRING),
               Row.of(1L, "alice"),
               Row.of(2L, "bob"));
       DataStream<Row> auction =
-          env.fromData(
+          fromData(
+              env,
               Types.ROW_NAMED(
                   new String[] {"seller", "itemName", "dateTime"},
                   Types.LONG,

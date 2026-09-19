@@ -3,6 +3,7 @@ package tech.streamfusion;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
 
 import java.util.List;
 import java.util.stream.IntStream;
@@ -63,7 +64,8 @@ class FlinkStringBooleanCastSqlHarnessTest {
             assertThrows(
                 Exception.class,
                 () -> {
-                  try (var rows = table.executeSql("SELECT CAST(s AS BOOLEAN) FROM src").collect()) {
+                  try (var rows =
+                      table.executeSql("SELECT CAST(s AS BOOLEAN) FROM src").collect()) {
                     while (rows.hasNext()) {
                       rows.next();
                     }
@@ -91,7 +93,9 @@ class FlinkStringBooleanCastSqlHarnessTest {
   @Test
   void legacyModeReturnsNullForMalformedInput() throws Exception {
     NativeParity.assertParity(
-        () -> environment(DataTypes.STRING(), true, "true", "false", "", " true", "2", "\u662f", null),
+        () ->
+            environment(
+                DataTypes.STRING(), true, "true", "false", "", " true", "2", "\u662f", null),
         "SELECT id, CAST(s AS BOOLEAN) FROM src");
     NativeParity.assertParity(
         () -> environment(DataTypes.STRING().notNull(), true, "TRUE", "no"),
@@ -143,7 +147,8 @@ class FlinkStringBooleanCastSqlHarnessTest {
         "SELECT id, s = 'skip' OR CAST(s AS BOOLEAN) FROM src",
         "SELECT id, s <> 'skip' AND CAST(s AS BOOLEAN) FROM src")) {
       TableEnvironment host = environment(DataTypes.STRING(), false, "skip", "true", "false");
-      TableEnvironment nativeTable = environment(DataTypes.STRING(), false, "skip", "true", "false");
+      TableEnvironment nativeTable =
+          environment(DataTypes.STRING(), false, "skip", "true", "false");
       PhysicalPlanScan scan = NativePlanner.install(nativeTable);
       assertEquals(collect(host, sql), collect(nativeTable, sql));
       assertEquals(0, scan.substitutions());
@@ -179,8 +184,7 @@ class FlinkStringBooleanCastSqlHarnessTest {
         IntStream.range(0, values.length).mapToObj(i -> Row.of(i, values[i])).toArray(Row[]::new);
     table.createTemporaryView(
         "src",
-        env.fromData(
-            Types.ROW_NAMED(new String[] {"id", "s"}, Types.INT, Types.STRING), rows),
+        fromData(env, Types.ROW_NAMED(new String[] {"id", "s"}, Types.INT, Types.STRING), rows),
         Schema.newBuilder().column("id", DataTypes.INT().notNull()).column("s", type).build());
     return table;
   }

@@ -65,3 +65,10 @@ wall-clock timestamp (reads never refresh it), expiry happens at `last_write + t
 expired state reads as absent and is deleted on read. Each operator's page notes any
 operator-specific expiry-granularity wrinkle (e.g. the temporal join's single per-key deadline
 instead of per-row TTL).
+
+## Flink line availability
+
+The 1.18 development profile retains global idle-state retention but has no per-relation
+`STATE_TTL` hints, `VARIANT`, delta join or `SESSION` table function. Grouped session windows
+remain available. See [Flink line compatibility](../flink-compatibility.md) for the explicit host
+N/A cases and validation status.

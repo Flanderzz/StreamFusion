@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import java.time.LocalDateTime;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.datastream.DataStream;
@@ -41,13 +43,15 @@ class FlinkTimestampIntervalSqlHarnessTest {
     env.setParallelism(1);
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     DataStream<Row> a =
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(new String[] {"id", "tsa"}, Types.LONG, Types.LOCAL_DATE_TIME),
             Row.of(1L, LocalDateTime.of(2024, 6, 1, 12, 0, 5)),
             Row.of(1L, LocalDateTime.of(2024, 6, 1, 12, 0, 30)),
             Row.of(2L, LocalDateTime.of(2024, 6, 1, 12, 0, 8)));
     DataStream<Row> b =
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(new String[] {"id", "tsb"}, Types.LONG, Types.LOCAL_DATE_TIME),
             Row.of(1L, LocalDateTime.of(2024, 6, 1, 12, 0, 12)),
             Row.of(2L, LocalDateTime.of(2024, 6, 1, 12, 0, 9)));

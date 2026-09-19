@@ -12,7 +12,7 @@
         <flink.version>2.2.1</flink.version>
         <delta.version>4.4.0</delta.version>
         <streamfusion.version>0.1.0-rc3</streamfusion.version>
-        <delta.source.root>${project.basedir}/../../../.flink-suite/delta-${delta.version}</delta.source.root>
+        <delta.source.root>${project.basedir}/../../../.flink-suite/2.2/delta-${delta.version}</delta.source.root>
         <delta.test.output>${project.basedir}/target</delta.test.output>
         <delta.test.jvm.args></delta.test.jvm.args>
     </properties>

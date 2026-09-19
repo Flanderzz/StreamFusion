@@ -1,12 +1,12 @@
 package tech.streamfusion.delta;
 
-import org.apache.flink.api.common.serialization.SerializerConfig;
-import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.table.data.RowData;
+import tech.streamfusion.compat.FixedSerializerTypeInformation;
 
 /** Ownership-transfer type used only on the chained Arrow-view-to-Delta-writer edge. */
-public final class KernelBatchRowDataTypeInformation extends TypeInformation<RowData> {
+public final class KernelBatchRowDataTypeInformation
+    extends FixedSerializerTypeInformation<RowData> {
   public static final KernelBatchRowDataTypeInformation INSTANCE =
       new KernelBatchRowDataTypeInformation();
 
@@ -18,7 +18,9 @@ public final class KernelBatchRowDataTypeInformation extends TypeInformation<Row
   @Override public int getTotalFields() { return 1; }
   @Override public Class<RowData> getTypeClass() { return RowData.class; }
   @Override public boolean isKeyType() { return false; }
-  @Override public TypeSerializer<RowData> createSerializer(SerializerConfig config) {
+
+  @Override
+  public TypeSerializer<RowData> createSerializer() {
     return new KernelBatchRowDataSerializer();
   }
   @Override public String toString() { return "KernelBatchRowData"; }

@@ -5,10 +5,10 @@ import org.apache.calcite.rel.core.AggregateCall;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
-import org.apache.flink.table.planner.hint.StateTtlHint;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalGroupAggregate;
 import org.apache.flink.table.planner.plan.utils.ChangelogPlanUtils;
 import scala.collection.Seq;
+import tech.streamfusion.compat.FlinkCompat;
 import tech.streamfusion.operator.RowDataArrowConverter;
 
 /**
@@ -56,7 +56,7 @@ final class GroupAggregateMatcher {
       }
       if (kind >= 12 && kind <= 16) {
         if (kind >= 15) {
-          Long hint = StateTtlHint.getStateTtlFromHintOnSingleRel(agg.hints());
+          Long hint = FlinkCompat.singleStateTtl(agg);
           long retention =
               hint == null
                   ? org.apache.flink.table.planner.utils.ShortcutUtils.unwrapTableConfig(agg)
@@ -306,7 +306,7 @@ final class GroupAggregateMatcher {
     int[] keyColumns = GroupAggregateMatcher.keyColumns(agg);
     // A STATE_TTL hint overrides the job-wide retention for this aggregate alone (Flink's
     // StateMetadata precedence); null means no hint, resolved at translate time.
-    Long stateTtlHint = StateTtlHint.getStateTtlFromHintOnSingleRel(agg.hints());
+    Long stateTtlHint = FlinkCompat.singleStateTtl(agg);
     // The aggregate is columnar (Arrow in/out). Keep the keyed shuffle columnar where the input
     // sits on a columnar producer (a native exchange splits the batch by the grouping keys);
     // otherwise the transition pass inserts a transpose at the host exchange boundary. Same key

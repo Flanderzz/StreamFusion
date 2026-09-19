@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import org.apache.flink.api.common.typeinfo.Types;
@@ -75,7 +77,8 @@ class FlinkHashCodeSqlHarnessTest {
     var beforeEpoch = LocalDateTime.of(1969, 12, 31, 23, 59, 59, 999999999);
     table.createTemporaryView(
         "src",
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(
                 new String[] {"id", "s", "i", "n", "b", "d", "t"},
                 Types.INT,

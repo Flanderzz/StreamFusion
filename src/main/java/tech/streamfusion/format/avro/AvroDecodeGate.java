@@ -1,7 +1,5 @@
 package tech.streamfusion.format.avro;
 
-import org.apache.flink.formats.avro.AvroToRowDataConverters;
-import org.apache.flink.formats.avro.typeutils.AvroSchemaConverter;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.table.types.logical.TimeType;
@@ -30,8 +28,10 @@ public final class AvroDecodeGate {
       return true;
     }
     try {
-      AvroSchemaConverter.convertToSchema(rowType.copy(false), legacyTimestampMapping);
-      AvroToRowDataConverters.createRowConverter(rowType, legacyTimestampMapping);
+      tech.streamfusion.format.avro.compat.AvroCompat.schema(
+          rowType.copy(false), legacyTimestampMapping);
+      tech.streamfusion.format.avro.compat.AvroCompat.validateDecoder(
+          rowType, legacyTimestampMapping);
     } catch (RuntimeException e) {
       return false;
     }

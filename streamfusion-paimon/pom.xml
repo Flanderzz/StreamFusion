@@ -8,7 +8,7 @@
         <artifactId>StreamFusion</artifactId>
         <version>${revision}</version>
     </parent>
-    <artifactId>streamfusion-paimon</artifactId>
+    <artifactId>streamfusion-paimon${streamfusion.artifact.suffix}</artifactId>
     <name>StreamFusion Paimon</name>
     <properties>
         <native.cargo.packages>-p streamfusion -p streamfusion-parquet -p streamfusion-orc -p streamfusion-paimon</native.cargo.packages>
@@ -18,42 +18,42 @@
     <dependencies>
         <dependency>
             <groupId>tech.streamfusion</groupId>
-            <artifactId>streamfusion-runtime</artifactId>
+            <artifactId>streamfusion-runtime${streamfusion.artifact.suffix}</artifactId>
             <version>${project.version}</version>
             <type>test-jar</type>
             <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>tech.streamfusion</groupId>
-            <artifactId>streamfusion-kafka</artifactId>
+            <artifactId>streamfusion-kafka${streamfusion.artifact.suffix}</artifactId>
             <version>${project.version}</version>
             <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>tech.streamfusion</groupId>
-            <artifactId>streamfusion-json</artifactId>
+            <artifactId>streamfusion-json${streamfusion.artifact.suffix}</artifactId>
             <version>${project.version}</version>
             <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>tech.streamfusion</groupId>
-            <artifactId>streamfusion-core</artifactId>
+            <artifactId>streamfusion-core${streamfusion.artifact.suffix}</artifactId>
             <version>${project.version}</version>
             <scope>provided</scope>
         </dependency>
         <dependency>
             <groupId>tech.streamfusion</groupId>
-            <artifactId>streamfusion-parquet</artifactId>
+            <artifactId>streamfusion-parquet${streamfusion.artifact.suffix}</artifactId>
             <version>${project.version}</version>
             <scope>provided</scope>
         </dependency>
         <dependency>
-            <groupId>tech.streamfusion</groupId><artifactId>streamfusion-orc</artifactId>
+            <groupId>tech.streamfusion</groupId><artifactId>streamfusion-orc${streamfusion.artifact.suffix}</artifactId>
             <version>${project.version}</version><scope>provided</scope>
         </dependency>
         <dependency>
             <groupId>org.apache.paimon</groupId>
-            <artifactId>paimon-flink-2.2</artifactId>
+            <artifactId>paimon-flink-${flink.line}</artifactId>
             <version>${paimon.version}</version>
             <scope>provided</scope>
         </dependency>
@@ -108,6 +108,11 @@
             </resource>
         </resources>
         <plugins>
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>flatten-maven-plugin</artifactId>
+                <configuration><flattenMode>ossrh</flattenMode></configuration>
+            </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>

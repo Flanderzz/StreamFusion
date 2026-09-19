@@ -1,7 +1,5 @@
 package tech.streamfusion.kafka;
 
-import tech.streamfusion.operator.ArrowBatch;
-import tech.streamfusion.operator.NativeSourceRecord;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -14,7 +12,6 @@ import java.util.function.Supplier;
 import org.apache.flink.api.connector.source.SourceReaderContext;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.connector.base.source.reader.RecordEmitter;
-import org.apache.flink.connector.base.source.reader.SingleThreadMultiplexSourceReaderBase;
 import org.apache.flink.connector.base.source.reader.splitreader.SplitReader;
 import org.apache.flink.connector.kafka.source.KafkaSourceOptions;
 import org.apache.flink.connector.kafka.source.metrics.KafkaSourceReaderMetrics;
@@ -24,11 +21,11 @@ import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.TopicPartition;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import tech.streamfusion.operator.ArrowBatch;
+import tech.streamfusion.operator.NativeSourceRecord;
 
 /** Kafka source reader retaining Flink's split state and checkpoint offset-commit contract. */
-final class NativeKafkaSourceReader
-    extends SingleThreadMultiplexSourceReaderBase<
-        NativeSourceRecord, ArrowBatch, KafkaPartitionSplit, KafkaPartitionSplitState> {
+final class NativeKafkaSourceReader extends tech.streamfusion.kafka.compat.KafkaSourceReaderCompat {
 
   private static final Logger LOG = LoggerFactory.getLogger(NativeKafkaSourceReader.class);
 

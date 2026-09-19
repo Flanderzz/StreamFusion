@@ -16,13 +16,9 @@ import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.flink.api.common.serialization.BulkWriter;
-import org.apache.flink.configuration.Configuration;
 import org.apache.flink.connector.file.table.stream.PartitionCommitInfo;
 import org.apache.flink.connector.file.table.stream.StreamingFileWriter;
-import org.apache.flink.core.fs.Path;
 import org.apache.flink.runtime.checkpoint.OperatorSubtaskState;
-import org.apache.flink.streaming.api.functions.sink.filesystem.OutputFileConfig;
-import org.apache.flink.streaming.api.functions.sink.filesystem.legacy.StreamingFileSink;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.streaming.util.OneInputStreamOperatorTestHarness;
 import org.apache.flink.table.data.GenericRowData;
@@ -80,18 +76,7 @@ class NativeFileSinkWriterTest {
             partitionColumns,
             new String[0],
             new String[0]);
-    StreamingFileSink.BucketsBuilder<
-            PartitionedArrowBatch,
-            String,
-            ? extends StreamingFileSink.BucketsBuilder<PartitionedArrowBatch, String, ?>>
-        buckets =
-            StreamingFileSink.forBulkFormat(new Path(directory.toUri()), factory)
-                .withBucketAssigner(new PartitionedBatchBucketAssigner())
-                .withRollingPolicy(
-                    new NativeFileRollingPolicy(128 << 20, Long.MAX_VALUE, Long.MAX_VALUE))
-                .withOutputFileConfig(
-                    OutputFileConfig.builder().withPartPrefix("part-test").build());
-    return new StreamingFileWriter<>(1000, buckets, partitionKeys, new Configuration());
+    return tech.streamfusion.compat.FileWriterTestFactory.writer(directory, factory, partitionKeys);
   }
 
   /** Committed (visible) files under the directory, recursively; in-progress files are hidden. */

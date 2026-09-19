@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
@@ -87,9 +89,11 @@ class FlinkCountDistinctSqlHarnessTest {
     env.setParallelism(1);
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     tEnv.getConfig().set("table.optimizer.agg-phase-strategy", "ONE_PHASE");
-    // Repeats per key so distinct < total: k=1 has v {10,20} (10 twice), s {a,b}; k=2 has v {5}, s {c}.
+    // Repeats per key so distinct < total: k=1 has v {10,20} (10 twice), s {a,b}; k=2 has v {5}, s
+    // {c}.
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(
                 new String[] {"k", "v", "s", "d", "dcm", "millis"},
                 Types.LONG,

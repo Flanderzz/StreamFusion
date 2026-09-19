@@ -6,11 +6,11 @@ import org.apache.arrow.c.CDataDictionaryProvider;
 import org.apache.arrow.c.Data;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
-import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.table.functions.FunctionContext;
 import tech.streamfusion.Native;
+import tech.streamfusion.compat.FlinkStreamOperator;
 
 /**
  * Stateless native Calc, columnar in and out: applies an encoded Calc — an optional condition then
@@ -19,7 +19,7 @@ import tech.streamfusion.Native;
  * columns and constants). The Calc is compiled once into a native handle reused across batches;
  * carrying Arrow lets it chain with other native operators without converting to rows.
  */
-public class NativeCalcOperator extends AbstractStreamOperator<ArrowBatch>
+public class NativeCalcOperator extends FlinkStreamOperator<ArrowBatch>
     implements OneInputStreamOperator<ArrowBatch, ArrowBatch> {
 
   private final int[] kinds;

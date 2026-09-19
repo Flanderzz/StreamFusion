@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
@@ -278,7 +280,8 @@ class FlinkTwoPhaseGroupAggregateSqlHarnessTest {
           tEnv.createTemporaryView(
               "t",
               tEnv.fromChangelogStream(
-                  env.fromData(
+                  fromData(
+                      env,
                       Types.ROW_NAMED(new String[] {"k", "v"}, Types.LONG, Types.LONG),
                       Row.of(1L, 10L),
                       Row.of(2L, 5L),
@@ -332,6 +335,7 @@ class FlinkTwoPhaseGroupAggregateSqlHarnessTest {
 
   @Test
   void stateTtlHintRoutesTheGlobalHalfAndMatchesHost() throws Exception {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireStateTtlHint();
     // A STATE_TTL hint with the job retention at 0 must switch the global merge into TTL emission,
     // mirroring Flink's hint-over-config precedence on the two-phase plan.
     NativeParity.assertKindedParity(
@@ -354,7 +358,8 @@ class FlinkTwoPhaseGroupAggregateSqlHarnessTest {
     tEnv.createTemporaryView(
         "t",
         tEnv.fromDataStream(
-            env.fromData(
+            fromData(
+                env,
                 Types.ROW_NAMED(new String[] {"k", "v"}, Types.LONG, Types.LONG),
                 Row.of(1L, 10L),
                 Row.of(1L, 20L),
@@ -369,7 +374,7 @@ class FlinkTwoPhaseGroupAggregateSqlHarnessTest {
 
   private static List<List<Object>> ttlChangelog(boolean enabled) {
     // Four local partials become two global bundles with the same MIN. Only TTL emits the no-op.
-    return enabled
+    return enabled && tech.streamfusion.compat.FlinkCompat.GLOBAL_TTL_EMITS_UNCHANGED
         ? List.of(List.of("+I", 1L, 10L), List.of("-U", 1L, 10L), List.of("+U", 1L, 10L))
         : List.of(List.of("+I", 1L, 10L));
   }
@@ -423,19 +428,14 @@ class FlinkTwoPhaseGroupAggregateSqlHarnessTest {
     // over key 2 divides negatively at some prefixes of the changelog). The u/us columns repeat
     // values within and across keys so distinct aggregates see real multiplicities.
     tEnv.executeSql(
-            "INSERT INTO in_write VALUES"
-                + " (1, 10, 1.5, 7, CAST(100 AS SMALLINT), CAST(3 AS TINYINT), CAST(1.25 AS FLOAT),"
-                + " 12.34, 10, 'a'),"
-                + " (1, 20, 2.5, 3, CAST(-7 AS SMALLINT), CAST(-2 AS TINYINT), CAST(2.5 AS FLOAT),"
-                + " -0.07, 10, 'b'),"
-                + " (2, 5, 0.5, 9, CAST(250 AS SMALLINT), CAST(9 AS TINYINT), CAST(-0.75 AS FLOAT),"
-                + " 99999999.99, 30, 'x'),"
-                + " (1, 30, 3.5, 1, CAST(42 AS SMALLINT), CAST(5 AS TINYINT), CAST(4.5 AS FLOAT),"
-                + " 3.00, 20, 'a'),"
-                + " (2, 15, 1.0, 4, CAST(-11 AS SMALLINT), CAST(-4 AS TINYINT), CAST(5.125 AS FLOAT),"
-                + " -42.42, 30, 'x'),"
-                + " (2, -7, -1.25, -8, CAST(-3 AS SMALLINT), CAST(-7 AS TINYINT), CAST(0.5 AS FLOAT),"
-                + " 0.01, 30, 'y')")
+            "INSERT INTO in_write VALUES (1, 10, 1.5, 7, CAST(100 AS SMALLINT), CAST(3 AS TINYINT),"
+                + " CAST(1.25 AS FLOAT), 12.34, 10, 'a'), (1, 20, 2.5, 3, CAST(-7 AS SMALLINT),"
+                + " CAST(-2 AS TINYINT), CAST(2.5 AS FLOAT), -0.07, 10, 'b'), (2, 5, 0.5, 9,"
+                + " CAST(250 AS SMALLINT), CAST(9 AS TINYINT), CAST(-0.75 AS FLOAT), 99999999.99,"
+                + " 30, 'x'), (1, 30, 3.5, 1, CAST(42 AS SMALLINT), CAST(5 AS TINYINT), CAST(4.5 AS"
+                + " FLOAT), 3.00, 20, 'a'), (2, 15, 1.0, 4, CAST(-11 AS SMALLINT), CAST(-4 AS"
+                + " TINYINT), CAST(5.125 AS FLOAT), -42.42, 30, 'x'), (2, -7, -1.25, -8, CAST(-3 AS"
+                + " SMALLINT), CAST(-7 AS TINYINT), CAST(0.5 AS FLOAT), 0.01, 30, 'y')")
         .await();
   }
 

@@ -16,7 +16,6 @@ import org.apache.flink.table.api.config.OptimizerConfigOptions;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalCalc;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalChangelogNormalize;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalCorrelate;
-import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalDeltaJoin;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalExpand;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalGlobalGroupAggregate;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalGlobalWindowAggregate;
@@ -48,6 +47,7 @@ import org.apache.flink.table.planner.plan.utils.ChangelogPlanUtils;
 import org.apache.flink.table.planner.utils.ShortcutUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import tech.streamfusion.compat.FlinkCompat;
 
 /**
  * Rewrites the host engine's optimized physical plan, replacing supported operators with native
@@ -70,6 +70,18 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
   private final List<String> fallbackReasons = new ArrayList<>();
   private int substitutions;
   private boolean completePlan;
+  private org.apache.flink.streaming.api.environment.StreamExecutionEnvironment
+      executionEnvironment;
+  private String keyedStateUnsupportedReason;
+
+  void executionEnvironment(
+      org.apache.flink.streaming.api.environment.StreamExecutionEnvironment environment) {
+    executionEnvironment = environment;
+  }
+
+  String keyedStateUnsupportedReason() {
+    return keyedStateUnsupportedReason;
+  }
 
   private static final List<NativePlannerExtension> EXTENSIONS = loadExtensions();
   private static final List<Substitution<?>> REGISTRY = buildRegistry();
@@ -104,6 +116,9 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
     operatorTypes.clear();
     fallbackReasons.clear();
     substitutions = 0;
+    keyedStateUnsupportedReason =
+        tech.streamfusion.compat.FlinkStateBackendCompat.unsupportedNativeStateReason(
+            executionEnvironment, ShortcutUtils.unwrapTableConfig(roots.get(0)));
     roots.forEach(this::record);
     // Master switch: with native acceleration off, substitute nothing — the query runs on the host.
     if (!NativeConfig.nativeEnabled()) {
@@ -115,7 +130,8 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
           "delta join: table.optimizer.delta-join.strategy is FORCE but this optimizer block"
               + " contains a regular join and no delta join");
       LOG.info(
-          "StreamFusion declined the optimizer block so Flink can enforce its FORCE delta-join strategy");
+          "StreamFusion declined the optimizer block so Flink can enforce its FORCE delta-join"
+              + " strategy");
       return roots;
     }
     Set<String> repeatedSources =
@@ -208,19 +224,23 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
                 StreamPhysicalGroupAggregate.class,
                 "groupAggregate",
                 GroupAggregateMatcher::substitute)
+            .keyedState()
             .matching(GroupAggregateMatcher::matches)
             .reason(GroupAggregateMatcher::unsupportedReason)
             .changelogSafe());
 
-    // The global half of a two-phase non-windowed GROUP BY. It merges the local half's partials into
+    // The global half of a two-phase non-windowed GROUP BY. It merges the local half's partials
+    // into
     // the final per-key result and emits a changelog exactly like the single-phase GROUP BY above —
     // so it reuses the same native group-aggregate operator, fed positional partial columns (COUNT
-    // merges as a SUM over its partial counts). Exempt from the insert-only guard for the same reason.
+    // merges as a SUM over its partial counts). Exempt from the insert-only guard for the same
+    // reason.
     entries.add(
         Substitution.of(
                 StreamPhysicalGlobalGroupAggregate.class,
                 "groupAggregate",
                 GlobalGroupAggregateMatcher::substitute)
+            .keyedState()
             .matching(GlobalGroupAggregateMatcher::matches)
             .reason(GlobalGroupAggregateMatcher::unsupportedReason)
             .changelogSafe());
@@ -239,8 +259,8 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
     // A regular (non-windowed) join emits a changelog and consumes one on either side, so it is
     // exempt from the insert-only guard (like the GROUP BY above).
     entries.add(
-        Substitution.of(
-                StreamPhysicalJoin.class, "updatingJoin", RegularJoinMatcher::substitute)
+        Substitution.of(StreamPhysicalJoin.class, "updatingJoin", RegularJoinMatcher::substitute)
+            .keyedState()
             .matching(RegularJoinMatcher::matches)
             .reason(RegularJoinMatcher::unsupportedReason)
             .changelogSafe());
@@ -252,6 +272,7 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
     // StreamPhysicalRank, but a rowtime-ordered rank is deduplication, which TopNMatcher declines.
     entries.add(
         Substitution.of(StreamPhysicalRank.class, "deduplicate", DeduplicateMatcher::substitute)
+            .keyedState()
             .matching(
                 rank ->
                     DeduplicateMatcher.matches(rank)
@@ -262,21 +283,25 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
 
     entries.add(
         Substitution.of(StreamPhysicalRank.class, "topN", FirstNMatcher::substitute)
+            .keyedState()
             .matching(FirstNMatcher::matches)
             .changelogSafe());
 
     // A streaming Top-N emits a changelog (it deletes a row when one is displaced), so it is exempt
     // from the insert-only guard. An insert-only input uses the append-only ranker; a changelog
-    // input uses the retracting ranker (Flink's RetractableTopNFunction), which keeps the full buffer
+    // input uses the retracting ranker (Flink's RetractableTopNFunction), which keeps the full
+    // buffer
     // so a deleted top-N row can be replaced by promoting rank N+1.
     entries.add(
         Substitution.of(StreamPhysicalRank.class, "topN", TopNMatcher::substitute)
+            .keyedState()
             .matching(TopNMatcher::matches)
             .reason(TopNMatcher::unsupportedReason)
             .changelogSafe());
 
     // A global FETCH/LIMIT — ORDER BY … LIMIT n (StreamPhysicalSortLimit) or plain LIMIT n
-    // (StreamPhysicalLimit). Both lower to a global (no-partition) ROW_NUMBER rank, so they reuse the
+    // (StreamPhysicalLimit). Both lower to a global (no-partition) ROW_NUMBER rank, so they reuse
+    // the
     // native columnar Top-N operator with an empty partition key: the sort-limit carries the order
     // keys and emits a changelog as the top set changes; the plain limit has no sort keys, so the
     // ranker keeps the first n rows by arrival. Updating inputs use Flink's selected replacement or
@@ -284,9 +309,13 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
     // a sort-limit emits a changelog, so it would otherwise slip past the insert-only guard
     // unreported, leaving a non-accelerating query unable to explain itself (ticket 29).
     entries.add(
-        Substitution.of(StreamPhysicalSortLimit.class, LimitMatcher::substitute).changelogSafe());
+        Substitution.of(StreamPhysicalSortLimit.class, LimitMatcher::substitute)
+            .keyedState()
+            .changelogSafe());
     entries.add(
-        Substitution.of(StreamPhysicalLimit.class, LimitMatcher::substitute).changelogSafe());
+        Substitution.of(StreamPhysicalLimit.class, LimitMatcher::substitute)
+            .keyedState()
+            .changelogSafe());
 
     // A Calc transforms each row independently — a per-row projection plus an optional deterministic
     // filter — and the native operator carries the `$row_kind$` tag through unchanged, so it is
@@ -303,8 +332,10 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
             .reason(CalcMatcher::unsupportedReason)
             .changelogSafe());
 
-    // Changelog normalization (upsert / duplicate-bearing source → regular changelog): keep the last
-    // row per unique key, emitting INSERT/UPDATE_BEFORE/UPDATE_AFTER/DELETE. Both consumes and emits a
+    // Changelog normalization (upsert / duplicate-bearing source → regular changelog): keep the
+    // last
+    // row per unique key, emitting INSERT/UPDATE_BEFORE/UPDATE_AFTER/DELETE. Both consumes and
+    // emits a
     // changelog, so (like the GROUP BY) it is exempt from the insert-only guard. The keyed
     // shuffle (by the unique key) stays columnar where the input sits on a columnar producer.
     entries.add(
@@ -312,6 +343,7 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
                 StreamPhysicalChangelogNormalize.class,
                 "changelogNormalize",
                 ChangelogNormalizeMatcher::substitute)
+            .keyedState()
             .matching(ChangelogNormalizeMatcher::matches)
             .reason(ChangelogNormalizeMatcher::unsupportedReason)
             .changelogSafe());
@@ -365,14 +397,15 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
                             || wm.getInputs().get(0).getInputs().isEmpty())
                         && WatermarkAssignerMatcher.matches(wm)));
 
-    // Event-time sort (ORDER BY rowtime): buffer rows, release them in rowtime order as the watermark
-    // advances. Insert-only. Its single (gather) exchange becomes a native columnar exchange with no
+    // Event-time sort (ORDER BY rowtime): buffer rows, release them in rowtime order as the
+    // watermark
+    // advances. Insert-only. Its single (gather) exchange becomes a native columnar exchange with
+    // no
     // key (an empty key list, like the non-partitioned OVER), so the whole thing stays columnar.
     entries.add(
         Substitution.of(
-                StreamPhysicalTemporalSort.class,
-                "temporalSort",
-                TemporalSortMatcher::substitute)
+                StreamPhysicalTemporalSort.class, "temporalSort", TemporalSortMatcher::substitute)
+            .keyedState()
             .matching(TemporalSortMatcher::matches)
             .reason(TemporalSortMatcher::unsupportedReason));
 
@@ -390,11 +423,12 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
             .reason(WindowTableFunctionMatcher::unsupportedReason));
 
     // Window Top-N over a windowing-TVF input: per window and partition key, keep the top-N rows by
-    // the order key and emit them when a watermark closes the window. Append-only; the keyed shuffle
+    // the order key and emit them when a watermark closes the window. Append-only; the keyed
+    // shuffle
     // (or single gather when there is no partition key) stays columnar via columnarInput.
     entries.add(
-        Substitution.of(
-                StreamPhysicalWindowRank.class, "windowRank", WindowRankMatcher::substitute)
+        Substitution.of(StreamPhysicalWindowRank.class, "windowRank", WindowRankMatcher::substitute)
+            .keyedState()
             .matching(WindowRankMatcher::matches)
             .reason(WindowRankMatcher::unsupportedReason));
 
@@ -405,6 +439,7 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
                 StreamPhysicalWindowDeduplicate.class,
                 "windowRank",
                 WindowDeduplicateMatcher::substitute)
+            .keyedState()
             .matching(WindowDeduplicateMatcher::matches)
             .reason(WindowDeduplicateMatcher::unsupportedReason));
 
@@ -413,6 +448,7 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
                 StreamPhysicalWindowAggregate.class,
                 "windowAggregate",
                 WindowAggregateMatcher::substitute)
+            .keyedState()
             .matching(
                 agg ->
                     WindowAggregateMatcher.matches(
@@ -430,6 +466,7 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
                 StreamPhysicalWindowAggregate.class,
                 "windowAggregate",
                 WindowAggregateMatcher::substituteSession)
+            .keyedState()
             .matching(
                 agg ->
                     WindowAggregateMatcher.matchesSession(
@@ -446,6 +483,7 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
                 StreamPhysicalGroupWindowAggregate.class,
                 "windowAggregate",
                 GroupWindowAggregateMatcher::substitute)
+            .keyedState()
             .matching(GroupWindowAggregateMatcher::matches)
             .reason(GroupWindowAggregateMatcher::unsupportedReason));
 
@@ -466,6 +504,7 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
                 StreamPhysicalLocalWindowAggregate.class,
                 "localWindowAggregate",
                 WindowAggregateMatcher::substituteLocal)
+            .keyedState()
             .matching(agg -> WindowAggregateMatcher.localWindowVariant(agg) != null)
             .reason(agg -> WindowAggregateMatcher.unsupportedReason(agg, agg.windowing()))
             .changelogSafe());
@@ -476,29 +515,28 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
     // planners route the same physical shape.
     entries.add(
         Substitution.of(StreamPhysicalOverAggregate.class, "over", OverAggregateMatcher::substitute)
+            .keyedState()
             .matching(OverAggregateMatcher::matches)
             .reason(OverAggregateMatcher::unsupportedReason)
             .changelogSafe());
 
     entries.add(
         Substitution.of(
-                StreamPhysicalIntervalJoin.class,
-                "intervalJoin",
-                IntervalJoinMatcher::substitute)
+                StreamPhysicalIntervalJoin.class, "intervalJoin", IntervalJoinMatcher::substitute)
+            .keyedState()
             .matching(IntervalJoinMatcher::matches)
             .reason(IntervalJoinMatcher::unsupportedReason));
 
     entries.add(
-        Substitution.of(
-                StreamPhysicalWindowJoin.class, "windowJoin", WindowJoinMatcher::substitute)
+        Substitution.of(StreamPhysicalWindowJoin.class, "windowJoin", WindowJoinMatcher::substitute)
+            .keyedState()
             .matching(WindowJoinMatcher::matches)
             .reason(WindowJoinMatcher::unsupportedReason));
 
     entries.add(
         Substitution.of(
-                StreamPhysicalTemporalJoin.class,
-                "temporalJoin",
-                TemporalJoinMatcher::substitute)
+                StreamPhysicalTemporalJoin.class, "temporalJoin", TemporalJoinMatcher::substitute)
+            .keyedState()
             .matching(TemporalJoinMatcher::matches)
             .reason(TemporalJoinMatcher::unsupportedReason));
 
@@ -513,14 +551,17 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
                 StreamPhysicalGlobalWindowAggregate.class,
                 "globalWindowAggregate",
                 GlobalWindowAggregateMatcher::substitute)
+            .keyedState()
             .matching(GlobalWindowAggregateMatcher::matches)
             .reason(GlobalWindowAggregateMatcher::unsupportedReason));
 
+    FlinkPlannerCompat.addSubstitutions(entries);
     EXTENSIONS.forEach(extension -> extension.addSubstitutions(entries));
     return List.copyOf(entries);
   }
 
   private RelNode rewrite(RelNode node, PlanContext ctx) {
+    node = FlinkPlannerCompat.prepareForRewrite(node);
     List<RelNode> inputs = new ArrayList<>(node.getInputs().size());
     boolean changed = false;
     for (RelNode input : node.getInputs()) {
@@ -766,9 +807,7 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
 
   // Unlike Flink's statement-wide validation, this guard is conservative per optimizer block.
   static boolean deltaJoinForceWouldReject(RelNode root) {
-    if (ShortcutUtils.unwrapTableConfig(root)
-            .get(OptimizerConfigOptions.TABLE_OPTIMIZER_DELTA_JOIN_STRATEGY)
-        != OptimizerConfigOptions.DeltaJoinStrategy.FORCE) {
+    if (!FlinkCompat.forceDeltaJoin(root)) {
       return false;
     }
     class JoinFinder extends RelVisitor {
@@ -780,7 +819,7 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
         if (deltaJoinExists) {
           return;
         }
-        if (node instanceof StreamPhysicalDeltaJoin) {
+        if (FlinkCompat.isDeltaJoin(node)) {
           deltaJoinExists = true;
           return;
         }

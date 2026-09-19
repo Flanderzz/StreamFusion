@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import java.time.LocalDateTime;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
@@ -33,6 +35,7 @@ class FlinkFloatingWindowReproTest {
 
   @Test
   void sessionNanFirst() throws Exception {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireSessionTableFunction();
     check("SESSION", Double.NaN, 2.0);
   }
 
@@ -72,7 +75,8 @@ class FlinkFloatingWindowReproTest {
             var ts = LocalDateTime.of(2026, 1, 1, 0, 0);
             table.createTemporaryView(
                 "n",
-                env.fromData(
+                fromData(
+                    env,
                     Types.ROW_NAMED(
                         new String[] {"ts", "d", "f", "keep"},
                         Types.LOCAL_DATE_TIME,
@@ -119,13 +123,20 @@ class FlinkFloatingWindowReproTest {
     table.getConfig().setLocalTimeZone(java.time.ZoneId.of("UTC"));
     table.getConfig().set("table.optimizer.agg-phase-strategy", "ONE_PHASE");
     LocalDateTime ts = LocalDateTime.of(2026, 1, 1, 0, 0);
-    table.createTemporaryView("n", env.fromData(
-        Types.ROW_NAMED(new String[] {"ts", "d", "f"},
-            Types.LOCAL_DATE_TIME, Types.DOUBLE, Types.FLOAT),
-        Row.of(ts, first, (float) first), Row.of(ts, second, (float) second)),
-        Schema.newBuilder().column("ts", DataTypes.TIMESTAMP(3))
-            .column("d", DataTypes.DOUBLE()).column("f", DataTypes.FLOAT())
-            .watermark("ts", "ts - INTERVAL '1' SECOND").build());
+    table.createTemporaryView(
+        "n",
+        fromData(
+            env,
+            Types.ROW_NAMED(
+                new String[] {"ts", "d", "f"}, Types.LOCAL_DATE_TIME, Types.DOUBLE, Types.FLOAT),
+            Row.of(ts, first, (float) first),
+            Row.of(ts, second, (float) second)),
+        Schema.newBuilder()
+            .column("ts", DataTypes.TIMESTAMP(3))
+            .column("d", DataTypes.DOUBLE())
+            .column("f", DataTypes.FLOAT())
+            .watermark("ts", "ts - INTERVAL '1' SECOND")
+            .build());
     return table;
   }
 }

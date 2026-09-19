@@ -302,7 +302,8 @@ class PaimonSinkParityTest {
             + name
             + " (id BIGINT NOT NULL, fixed CHAR(3), limited VARCHAR(3)) WITH ('bucket' = '-1')");
     DataStream<Row> stream =
-        env.fromData(
+        tech.streamfusion.compat.FlinkTestSources.fromData(
+            env,
             Types.ROW_NAMED(
                 new String[] {"id", "fixed", "limited"}, Types.LONG, Types.STRING, Types.STRING),
             Row.of(null, "x", "abcdef"),
@@ -338,7 +339,9 @@ class PaimonSinkParityTest {
             + name
             + " (id BIGINT NOT NULL, label STRING, nested ROW<x INT, y STRING>, pt STRING)"
             + " PARTITIONED BY (pt) WITH ('bucket' = '2', 'bucket-key' = 'id')");
-    DataStream<Row> stream = env.fromData(fixtureTypeInformation(), fixtureRows());
+    DataStream<Row> stream =
+        tech.streamfusion.compat.FlinkTestSources.fromData(
+            env, fixtureTypeInformation(), fixtureRows());
     tableEnv.createTemporaryView(
         "fixture_source", tableEnv.fromDataStream(stream, fixtureSchema()));
     PhysicalPlanScan scan = nativeSink ? NativePlanner.install(tableEnv) : null;
@@ -584,7 +587,7 @@ class PaimonSinkParityTest {
     @Override
     public Row map(Long id) {
       seen++;
-      if (getRuntimeContext().getTaskInfo().getAttemptNumber() > 0) {
+      if (tech.streamfusion.compat.RuntimeCompat.attempt(getRuntimeContext()) > 0) {
         COORDINATED_JOB_RESTARTED.set(true);
       }
       LockSupport.parkNanos(2_000_000);
@@ -1134,7 +1137,9 @@ class PaimonSinkParityTest {
             + name
             + " (id BIGINT NOT NULL, name STRING, price DECIMAL(10, 2), pt STRING NOT NULL,"
             + " PRIMARY KEY (id, pt) NOT ENFORCED) PARTITIONED BY (pt) WITH ('bucket' = '2')");
-    DataStream<Row> stream = env.fromData(fixtureTypeInformation(), fixtureRows());
+    DataStream<Row> stream =
+        tech.streamfusion.compat.FlinkTestSources.fromData(
+            env, fixtureTypeInformation(), fixtureRows());
     tableEnv.createTemporaryView(
         "fixture_source", tableEnv.fromDataStream(stream, fixtureSchema()));
     PhysicalPlanScan scan = nativeSink ? NativePlanner.install(tableEnv) : null;
@@ -1209,7 +1214,8 @@ class PaimonSinkParityTest {
               v[11]));
     }
     DataStream<Row> stream =
-        env.fromData(
+        tech.streamfusion.compat.FlinkTestSources.fromData(
+            env,
             Types.ROW_NAMED(
                 new String[] {
                   "id", "cat", "name", "price", "ts", "dt", "flag", "dbl", "bin", "small", "pt"
@@ -1278,7 +1284,8 @@ class PaimonSinkParityTest {
       tableEnv.createTemporaryView(
           "merge_source",
           tableEnv.fromDataStream(
-              env.fromData(
+              tech.streamfusion.compat.FlinkTestSources.fromData(
+                  env,
                   Types.ROW_NAMED(
                       new String[] {"id", "v", "op"}, Types.LONG, Types.INT, Types.STRING),
                   Row.of(1L, 9, "+I"),
@@ -1323,7 +1330,8 @@ class PaimonSinkParityTest {
       tableEnv.createTemporaryView(
           "collect_source",
           tableEnv.fromDataStream(
-              env.fromData(
+              tech.streamfusion.compat.FlinkTestSources.fromData(
+                  env,
                   Types.ROW_NAMED(
                       new String[] {"id", "v"}, Types.LONG, Types.OBJECT_ARRAY(Types.INT)),
                   Row.of(1L, new Integer[] {1, 2, 2}),
@@ -1489,7 +1497,9 @@ class PaimonSinkParityTest {
             + " WITH ("
             + options
             + ")");
-    DataStream<Row> stream = env.fromData(fixtureTypeInformation(), fixtureRows());
+    DataStream<Row> stream =
+        tech.streamfusion.compat.FlinkTestSources.fromData(
+            env, fixtureTypeInformation(), fixtureRows());
     Table source = tableEnv.fromDataStream(stream, fixtureSchema());
     tableEnv.createTemporaryView("fixture_source", source);
     PhysicalPlanScan scan = nativeSink ? NativePlanner.install(tableEnv) : null;

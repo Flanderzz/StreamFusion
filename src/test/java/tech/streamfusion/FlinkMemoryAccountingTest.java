@@ -3,11 +3,9 @@ package tech.streamfusion;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import tech.streamfusion.planner.NativePlanner;
-import tech.streamfusion.planner.PhysicalPlanScan;
-import java.time.ZoneId;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.ZoneId;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.DeploymentOptions;
 import org.apache.flink.configuration.MemorySize;
@@ -18,6 +16,8 @@ import org.apache.flink.types.Row;
 import org.apache.flink.util.CloseableIterator;
 import org.apache.flink.util.ExceptionUtils;
 import org.junit.jupiter.api.Test;
+import tech.streamfusion.planner.NativePlanner;
+import tech.streamfusion.planner.PhysicalPlanScan;
 
 /**
  * End-to-end task-off-heap accounting: native state draws from the TaskManager-wide StreamFusion
@@ -98,10 +98,14 @@ class FlinkMemoryAccountingTest {
   }
 
   private static void drain(StreamTableEnvironment tEnv, String sql) throws Exception {
-    try (CloseableIterator<Row> iterator = tEnv.executeSql(sql).collect()) {
+    var result = tEnv.executeSql(sql);
+    try (CloseableIterator<Row> iterator = result.collect()) {
       while (iterator.hasNext()) {
         iterator.next();
       }
+    } catch (Exception failure) {
+      throw NativeFailureParity.terminalFailure(
+          result.getJobClient().orElseThrow().getJobExecutionResult(), failure);
     }
   }
 }

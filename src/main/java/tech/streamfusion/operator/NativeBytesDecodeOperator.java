@@ -1,7 +1,5 @@
 package tech.streamfusion.operator;
 
-import tech.streamfusion.format.NativeMessageDecoder;
-import tech.streamfusion.format.NativeMessageDecoderFactory;
 import java.util.List;
 import org.apache.arrow.c.ArrowArray;
 import org.apache.arrow.c.ArrowSchema;
@@ -9,24 +7,26 @@ import org.apache.arrow.c.Data;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.VarBinaryVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
-import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.BoundedOneInput;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
-import org.apache.flink.streaming.runtime.tasks.ProcessingTimeService;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
+import org.apache.flink.streaming.runtime.tasks.ProcessingTimeService;
 import org.apache.flink.table.types.logical.RowType;
+import tech.streamfusion.compat.FlinkStreamOperator;
+import tech.streamfusion.format.NativeMessageDecoder;
+import tech.streamfusion.format.NativeMessageDecoderFactory;
 
 /**
- * The shallow ingest path's format-neutral decode core. It turns raw message bodies into typed Arrow
- * batches while a format extension supplies the native decoder through the provider SPI. This class
- * owns batching, checkpoint flushing, and the Arrow C Data Interface bridge, so connector and format
- * artifacts can be installed independently.
+ * The shallow ingest path's format-neutral decode core. It turns raw message bodies into typed
+ * Arrow batches while a format extension supplies the native decoder through the provider SPI. This
+ * class owns batching, checkpoint flushing, and the Arrow C Data Interface bridge, so connector and
+ * format artifacts can be installed independently.
  *
  * <p>The operator is stateless across batches. It flushes partial batches at end of input, before a
  * checkpoint barrier, and on a processing-time timer; this preserves Flink's source-checkpoint
  * contract while bounding low-volume ingest latency.
  */
-public class NativeBytesDecodeOperator extends AbstractStreamOperator<ArrowBatch>
+public class NativeBytesDecodeOperator extends FlinkStreamOperator<ArrowBatch>
     implements OneInputStreamOperator<byte[], ArrowBatch>, BoundedOneInput {
 
   private final RowType outputType;

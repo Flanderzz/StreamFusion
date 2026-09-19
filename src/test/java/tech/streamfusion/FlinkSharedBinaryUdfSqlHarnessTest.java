@@ -2,6 +2,7 @@ package tech.streamfusion;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
@@ -180,7 +181,7 @@ class FlinkSharedBinaryUdfSqlHarnessTest {
       for (int i = 0; i < count; i++) rows.add(Row.of(i, decimals[i % decimals.length]));
     }
     var source =
-        env.fromData(rows, Types.ROW_NAMED(new String[] {"id", "s"}, Types.INT, Types.STRING));
+        fromData(env, rows, Types.ROW_NAMED(new String[] {"id", "s"}, Types.INT, Types.STRING));
     var schema =
         Schema.newBuilder().column("id", DataTypes.INT()).column("s", DataTypes.STRING()).build();
     table.createTemporaryView(

@@ -317,6 +317,127 @@ class ScalarFunctionBenchmark {
                       "JSON_EXISTS(s, 'lax $[ ''user'' ][ ''name'' ]')",
                       "BOOLEAN"),
                   new Query(
+                      "JSON_VALUE_ACTIVE",
+                      "tt_json",
+                      "JSON_VALUE(s, 'lax $.user.active')",
+                      "STRING"),
+                  new Query(
+                      "JSON_VALUE_ERROR",
+                      "tt_json",
+                      "JSON_VALUE(s, 'lax $.user.active' ERROR ON EMPTY ERROR ON ERROR)",
+                      "STRING"),
+                  new Query(
+                      "JSON_VALUE_ESCAPED_PATH",
+                      "tt_json_escaped",
+                      "JSON_VALUE(s, '$[\"a\\\\b\"][\"a\\nb\"]')",
+                      "STRING"),
+                  new Query(
+                      "JSON_EXISTS_ESCAPED_PATH",
+                      "tt_json_escaped",
+                      "JSON_EXISTS(s, '$[\"a\\\\b\"][\"a\\nb\"]')",
+                      "BOOLEAN"),
+                  new Query(
+                      "JSON_VALUE_NEGATIVE",
+                      "tt_json_negative",
+                      "JSON_VALUE(s, '$.a[-1]')",
+                      "STRING"),
+                  new Query(
+                      "JSON_VALUE_DOT_MEMBER",
+                      "tt_json_dot_member",
+                      "JSON_VALUE(s, '$.order-id.123.a\tb')",
+                      "STRING"),
+                  new Query(
+                      "JSON_EXISTS_DOT_MEMBER",
+                      "tt_json_dot_member",
+                      "JSON_EXISTS(s, '$.order-id.123.a\tb')",
+                      "BOOLEAN"),
+                  new Query("JSON_QUERY_SLICE", "tt_json_negative", "JSON_QUERY(s, '$.a[0:2]')"),
+                  new Query(
+                      "JSON_EXISTS_SLICE",
+                      "tt_json_negative",
+                      "JSON_EXISTS(s, '$.a[0:2]')",
+                      "BOOLEAN"),
+                  new Query(
+                      "JSON_VALUE_WILDCARD",
+                      "tt_json_negative",
+                      "JSON_VALUE(s, 'lax $.a[*]' DEFAULT 'empty' ON EMPTY)",
+                      "STRING"),
+                  new Query(
+                      "JSON_EXISTS_WILDCARD",
+                      "tt_json_negative",
+                      "JSON_EXISTS(s, '$.a[*]')",
+                      "BOOLEAN"),
+                  new Query(
+                      "JSON_VALUE_INDEX_UNION",
+                      "tt_json_negative",
+                      "JSON_VALUE(s, 'lax $.a[0,16,-1]' DEFAULT 'empty' ON EMPTY)",
+                      "STRING"),
+                  new Query(
+                      "JSON_EXISTS_INDEX_UNION",
+                      "tt_json_negative",
+                      "JSON_EXISTS(s, '$.a[0,16,-1]')",
+                      "BOOLEAN"),
+                  new Query(
+                      "JSON_VALUE_INDEX_WHITESPACE",
+                      "tt_json_negative",
+                      "JSON_VALUE(s, '$.a[31\t\n ]')",
+                      "STRING"),
+                  new Query(
+                      "JSON_EXISTS_INDEX_WHITESPACE",
+                      "tt_json_negative",
+                      "JSON_EXISTS(s, '$.a[31\t\n ]')",
+                      "BOOLEAN"),
+                  new Query(
+                      "JSON_VALUE_POSITIVE_CONTROL",
+                      "tt_json_negative",
+                      "JSON_VALUE(s, '$.a[31]')",
+                      "STRING"),
+                  new Query(
+                      "JSON_EXISTS_NEGATIVE",
+                      "tt_json_negative",
+                      "JSON_EXISTS(s, '$.a[-1]')",
+                      "BOOLEAN"),
+                  new Query(
+                      "JSON_VALUE_IDENTITY",
+                      "tt_json_surrogate",
+                      "JSON_VALUE(s, '$') = '?'",
+                      "BOOLEAN"),
+                  new Query(
+                      "JSON_UNQUOTE_IDENTITY",
+                      "tt_json_surrogate",
+                      "JSON_UNQUOTE(s) = '?'",
+                      "BOOLEAN"),
+                  new Query(
+                      "JSON_VALUE_EMPTY_MEMBER",
+                      "tt_json_empty_member",
+                      "JSON_VALUE(s, 'lax $['''']')",
+                      "STRING"),
+                  new Query(
+                      "JSON_EXISTS_EMPTY_MEMBER",
+                      "tt_json_empty_member",
+                      "JSON_EXISTS(s, 'lax $[\"\"]')",
+                      "BOOLEAN"),
+                  new Query(
+                      "JSON_VALUE_SPACED_PATH",
+                      "tt_json",
+                      "JSON_VALUE(s, 'lax $[ ''user'' ][ ''name'' ]')",
+                      "STRING"),
+                  new Query(
+                      "JSON_VALUE_NONSTANDARD_ESCAPE",
+                      "tt_json",
+                      "JSON_VALUE(s, 'lax $[\"u\\ser\"][\"na\\me\"]')",
+                      "STRING"),
+                  new Query(
+                      "JSON_EXISTS_NONSTANDARD_ESCAPE",
+                      "tt_json",
+                      "JSON_EXISTS(s, 'lax $[\"u\\ser\"][\"na\\me\"]')",
+                      "BOOLEAN"),
+                  new Query(
+                      "JSON_EXISTS_SPACED_PATH",
+                      "tt_json",
+                      "JSON_EXISTS(s, 'lax $[ ''user'' ][ ''name'' ]')",
+                      "BOOLEAN"),
+                  new Query(
                       "JSON_VALUE_UNICODE_PATH",
                       "tt_json_member",
                       "JSON_VALUE(s, 'lax $.\u7528\u6237[\"\u59d3.\u540d\"]')",

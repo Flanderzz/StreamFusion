@@ -1,20 +1,21 @@
 package tech.streamfusion.operator;
 
 import org.apache.flink.api.common.operators.ProcessingTimeService;
-import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
+import tech.streamfusion.compat.FlinkStreamOperator;
 
 /**
- * Columnar analog of Flink's {@code ProcTimeMiniBatchAssignerOperator}: it forwards each Arrow batch
- * unchanged and, on a processing-time timer every {@code intervalMs} (and lazily when a batch crosses
- * an interval boundary), emits a {@link Watermark} that marks a mini-batch boundary. Downstream native
- * mini-batch operators — the local GROUP BY aggregate — flush their bundle on that marker, exactly as
- * Flink's {@code MapBundleOperator} does, so the whole columnar island shares one mini-batch cadence.
- * Carries no per-row work and no state; Arrow in and out keeps it inside the island.
+ * Columnar analog of Flink's {@code ProcTimeMiniBatchAssignerOperator}: it forwards each Arrow
+ * batch unchanged and, on a processing-time timer every {@code intervalMs} (and lazily when a batch
+ * crosses an interval boundary), emits a {@link Watermark} that marks a mini-batch boundary.
+ * Downstream native mini-batch operators — the local GROUP BY aggregate — flush their bundle on
+ * that marker, exactly as Flink's {@code MapBundleOperator} does, so the whole columnar island
+ * shares one mini-batch cadence. Carries no per-row work and no state; Arrow in and out keeps it
+ * inside the island.
  */
-public class NativeColumnarMiniBatchAssignerOperator extends AbstractStreamOperator<ArrowBatch>
+public class NativeColumnarMiniBatchAssignerOperator extends FlinkStreamOperator<ArrowBatch>
     implements OneInputStreamOperator<ArrowBatch, ArrowBatch>,
         ProcessingTimeService.ProcessingTimeCallback {
 

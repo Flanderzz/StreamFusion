@@ -1,6 +1,7 @@
 package tech.streamfusion;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
 
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
@@ -78,7 +79,8 @@ class FlinkWindowLateSliceSqlHarnessTest {
     table.getConfig().setLocalTimeZone(ZoneOffset.UTC);
     table.getConfig().set("table.optimizer.agg-phase-strategy", phase);
     var source =
-        env.fromData(
+        fromData(
+                env,
                 Types.ROW_NAMED(
                     new String[] {"k", "millis", "v", "wm"},
                     Types.INT,

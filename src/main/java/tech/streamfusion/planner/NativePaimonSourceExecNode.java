@@ -74,10 +74,12 @@ final class NativePaimonSourceExecNode extends ExecNodeBase<ArrowBatch>
     boolean infer =
         Boolean.parseBoolean(
             env.getConfiguration()
-                .toMap()
-                .getOrDefault(
-                    "paimon.scan.infer-parallelism",
-                    String.valueOf(options.get(FlinkConnectorOptions.INFER_SCAN_PARALLELISM))));
+                .getOptional(
+                    org.apache.flink.configuration.ConfigOptions.key(
+                            "paimon.scan.infer-parallelism")
+                        .stringType()
+                        .noDefaultValue())
+                .orElse(String.valueOf(options.get(FlinkConnectorOptions.INFER_SCAN_PARALLELISM))));
     if (parallelism == null
         && env.getParallelism() == -1
         && infer

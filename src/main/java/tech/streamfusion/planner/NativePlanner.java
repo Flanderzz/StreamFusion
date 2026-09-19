@@ -71,7 +71,13 @@ public final class NativePlanner {
    * first optimizes.
    */
   public static PhysicalPlanScan install(TableEnvironment tableEnv) {
-    return install(tableEnv.getConfig());
+    PhysicalPlanScan scan = install(tableEnv.getConfig());
+    if (tableEnv instanceof org.apache.flink.table.api.internal.TableEnvironmentImpl internal
+        && internal.getPlanner()
+            instanceof org.apache.flink.table.planner.delegation.PlannerBase planner) {
+      scan.executionEnvironment(planner.getExecEnv());
+    }
+    return scan;
   }
 
   /**

@@ -3,6 +3,7 @@ package tech.streamfusion;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
 
 import java.math.BigDecimal;
 import java.util.List;
@@ -46,7 +47,7 @@ class FlinkIfNullSqlHarnessTest {
             + "IFNULL(d, CAST(0 AS DECIMAL(12,3))), IFNULL(i, n) FROM src";
     var types = environment().sqlQuery(sql).getResolvedSchema().getColumnDataTypes();
     assertEquals(DataTypes.INT().notNull(), types.get(0));
-    assertEquals(DataTypes.STRING().notNull(), types.get(1));
+    assertEquals(tech.streamfusion.compat.FlinkTestCapabilities.ifNullStringType(), types.get(1));
     assertEquals(DataTypes.DECIMAL(12, 3).notNull(), types.get(2));
     assertEquals(DataTypes.BIGINT(), types.get(3));
     NativeParity.assertParity(FlinkIfNullSqlHarnessTest::environment, sql);
@@ -112,7 +113,8 @@ class FlinkIfNullSqlHarnessTest {
     StreamTableEnvironment table = StreamTableEnvironment.create(env);
     table.createTemporaryView(
         "src",
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(new String[] {"id"}, Types.INT),
             Row.of(2),
             Row.of(0),
@@ -182,10 +184,17 @@ class FlinkIfNullSqlHarnessTest {
     StreamTableEnvironment table = StreamTableEnvironment.create(env);
     table.createTemporaryView(
         "src",
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(
                 new String[] {"id", "i", "n", "s", "d", "z", "b"},
-                Types.INT, Types.INT, Types.LONG, Types.STRING, Types.BIG_DEC, Types.INT, Types.BOOLEAN),
+                Types.INT,
+                Types.INT,
+                Types.LONG,
+                Types.STRING,
+                Types.BIG_DEC,
+                Types.INT,
+                Types.BOOLEAN),
             rows),
         Schema.newBuilder()
             .column("id", DataTypes.INT().notNull())

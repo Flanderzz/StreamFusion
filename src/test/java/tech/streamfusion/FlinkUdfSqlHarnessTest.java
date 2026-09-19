@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import java.util.function.Supplier;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.datastream.DataStream;
@@ -47,7 +49,8 @@ class FlinkUdfSqlHarnessTest {
     // The UDF alongside a native scalar/arithmetic projection — the whole Calc stays native.
     NativeParity.assertParity(
         environment(),
-        "SELECT k, UPPER_LEN(s), count_char(s, 'c') AS c FROM t".replace("UPPER_LEN(s)", "CHAR_LENGTH(s)"));
+        "SELECT k, UPPER_LEN(s), count_char(s, 'c') AS c FROM t"
+            .replace("UPPER_LEN(s)", "CHAR_LENGTH(s)"));
   }
 
   private static Supplier<TableEnvironment> environment() {
@@ -57,7 +60,8 @@ class FlinkUdfSqlHarnessTest {
       StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
       tEnv.createTemporarySystemFunction("count_char", CountChar.class);
       DataStream<Row> source =
-          env.fromData(
+          fromData(
+              env,
               Types.ROW_NAMED(new String[] {"k", "s"}, Types.LONG, Types.STRING),
               Row.of(1L, "abccc"),
               Row.of(2L, "cccc"),

@@ -29,6 +29,7 @@ impl Default for CsvOptions {
 pub struct FormatOptions {
     pub csv: CsvOptions,
     pub timestamp_mode: flink_text::TimestampMode,
+    pub json_reject_array_roots: bool,
     pub raw_little_endian: bool,
     pub keyed: Option<KeyedSpec>,
 }
@@ -48,6 +49,7 @@ pub fn parse_format_options(encoded: &str) -> FormatOptions {
     let mut csv = CsvOptions::default();
     let mut timestamp_mode = flink_text::TimestampMode::default();
     let mut raw_little_endian = false;
+    let mut json_reject_array_roots = false;
     let mut keyed_key_position = None;
     let mut keyed_value_positions = None;
     let mut keyed_key_little_endian = false;
@@ -65,6 +67,7 @@ pub fn parse_format_options(encoded: &str) -> FormatOptions {
             "csv.disable-quote-character" => csv.quote = None,
             "csv.allow-comments" => csv.comments = true,
             "csv.null-literal" => csv.null_literal = Some(value.to_string()),
+            "json.reject-array-roots" => json_reject_array_roots = value == "true",
             "timestamp-format" => {
                 timestamp_mode = match value {
                     "ISO-8601" => flink_text::TimestampMode::Iso8601,
@@ -110,6 +113,7 @@ pub fn parse_format_options(encoded: &str) -> FormatOptions {
     FormatOptions {
         csv,
         timestamp_mode,
+        json_reject_array_roots,
         raw_little_endian,
         keyed,
     }

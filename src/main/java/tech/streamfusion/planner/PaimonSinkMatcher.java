@@ -78,7 +78,7 @@ final class PaimonSinkMatcher {
   }
 
   static Planned plan(StreamPhysicalSink sink) {
-    for (SinkAbilitySpec ability : sink.abilitySpecs()) {
+    for (SinkAbilitySpec ability : tech.streamfusion.compat.FlinkCompat.sinkAbilities(sink)) {
       if (ability instanceof OverwriteSpec) {
         return Planned.fallback("INSERT OVERWRITE is not supported");
       }

@@ -21,7 +21,8 @@ public final class NativeMemoryBudget implements AutoCloseable {
     StreamingRuntimeContext context = operator.getRuntimeContext();
     TaskOffHeapMemory.initialize(context.getTaskManagerRuntimeInfo().getConfiguration());
     long ownerId =
-        TaskOffHeapMemory.registerOwner("operator", context.getTaskInfo().getTaskNameWithSubtasks());
+        TaskOffHeapMemory.registerOwner(
+            "operator", tech.streamfusion.compat.RuntimeCompat.taskName(context));
     TaskOffHeapMemory.registerMetrics(operator.getMetricGroup());
     return new NativeMemoryBudget(ownerId);
   }

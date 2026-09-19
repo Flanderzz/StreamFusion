@@ -2,7 +2,6 @@ package tech.streamfusion.planner;
 
 import java.util.Collections;
 import java.util.Optional;
-import java.util.UUID;
 import org.apache.flink.api.dag.Transformation;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.ReadableConfig;
@@ -14,8 +13,6 @@ import org.apache.flink.core.fs.FileSystem;
 import org.apache.flink.core.fs.Path;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.DataStreamSink;
-import org.apache.flink.streaming.api.functions.sink.filesystem.OutputFileConfig;
-import org.apache.flink.streaming.api.functions.sink.filesystem.legacy.StreamingFileSink;
 import org.apache.flink.streaming.api.operators.SimpleOperatorFactory;
 import org.apache.flink.streaming.api.transformations.OneInputTransformation;
 import org.apache.flink.table.planner.delegation.PlannerBase;
@@ -29,10 +26,8 @@ import org.apache.flink.table.types.logical.RowType;
 import tech.streamfusion.operator.ArrowBatch;
 import tech.streamfusion.operator.FilePartitionSplitOperator;
 import tech.streamfusion.operator.NativeFileBulkWriterFactory;
-import tech.streamfusion.operator.NativeFileRollingPolicy;
 import tech.streamfusion.operator.PartitionedArrowBatch;
 import tech.streamfusion.operator.PartitionedArrowBatchTypeInformation;
-import tech.streamfusion.operator.PartitionedBatchBucketAssigner;
 
 /**
  * Builds the native columnar sink's operator chain, mirroring the host's own streaming filesystem
@@ -98,35 +93,15 @@ public class NativeFileSinkExecNode extends ExecNodeBase<Object>
             planned.encoderValues,
             planned.changelog);
     Path location = new Path(planned.path);
-    StreamingFileSink.DefaultBulkFormatBuilder<PartitionedArrowBatch> buckets =
-        StreamingFileSink.forBulkFormat(location, writerFactory)
-            .withBucketAssigner(new PartitionedBatchBucketAssigner())
-            .withRollingPolicy(
-                new NativeFileRollingPolicy(
-                    options
-                        .get(FileSystemConnectorOptions.SINK_ROLLING_POLICY_FILE_SIZE)
-                        .getBytes(),
-                    options
-                        .get(FileSystemConnectorOptions.SINK_ROLLING_POLICY_ROLLOVER_INTERVAL)
-                        .toMillis(),
-                    options
-                        .get(FileSystemConnectorOptions.SINK_ROLLING_POLICY_INACTIVITY_INTERVAL)
-                        .toMillis()))
-            // The host's exact naming: a fresh UUID per sink keeps restarted or parallel writers
-            // from colliding on part-file names within a bucket.
-            .withOutputFileConfig(
-                OutputFileConfig.builder().withPartPrefix("part-" + UUID.randomUUID()).build());
-
     DataStream<PartitionedArrowBatch> stream = new DataStream<>(planner.getExecEnv(), split);
     DataStream<PartitionCommitInfo> writer =
-        StreamingSink.writer(
-            name -> Optional.empty(),
+        tech.streamfusion.compat.FileSinkCompat.writer(
+            options,
+            location,
+            writerFactory,
             stream,
-            options.get(FileSystemConnectorOptions.SINK_ROLLING_POLICY_CHECK_INTERVAL).toMillis(),
-            buckets,
             parallelism,
             planned.partitionKeys,
-            options,
             parallelismConfigured);
     DataStreamSink<?> end =
         StreamingSink.sink(

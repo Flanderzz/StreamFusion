@@ -3,9 +3,6 @@ package tech.streamfusion.format;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import tech.streamfusion.format.avro.AvroFormatProvider;
-import tech.streamfusion.format.avroconfluent.AvroConfluentFormatProvider;
-import tech.streamfusion.format.avroconfluent.DebeziumAvroConfluentFormatProvider;
 import java.util.Map;
 import org.apache.flink.table.types.logical.ArrayType;
 import org.apache.flink.table.types.logical.BigIntType;
@@ -26,6 +23,9 @@ import org.apache.flink.table.types.logical.TinyIntType;
 import org.apache.flink.table.types.logical.VarBinaryType;
 import org.apache.flink.table.types.logical.VarCharType;
 import org.junit.jupiter.api.Test;
+import tech.streamfusion.format.avro.AvroFormatProvider;
+import tech.streamfusion.format.avroconfluent.AvroConfluentFormatProvider;
+import tech.streamfusion.format.avroconfluent.DebeziumAvroConfluentFormatProvider;
 
 /**
  * The Avro providers must decline — not crash job submission for — every table whose type or
@@ -165,6 +165,10 @@ class AvroDecodeGateTest {
   void correctedTimestampMappingFollowsFlinksOwnAcceptance() {
     Map<String, String> nonLegacy =
         Map.of("format", "avro", "avro.timestamp_mapping.legacy", "false");
+    if (!tech.streamfusion.compat.FlinkTestCapabilities.CORRECTED_AVRO_TIMESTAMPS) {
+      assertFalse(bareAvro(SUPPORTED, nonLegacy, false));
+      return;
+    }
     assertTrue(bareAvro(SUPPORTED, nonLegacy, false));
     // The corrected mapping unlocks TIMESTAMP_LTZ and micros-precision timestamps at the top level.
     LogicalType[] corrected = {

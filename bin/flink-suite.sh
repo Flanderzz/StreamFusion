@@ -5,13 +5,32 @@ set -uo pipefail
 readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly FLINK_VERSION="${FLINK_VERSION:-2.2.1}"
 readonly FLINK_TAG="release-${FLINK_VERSION}"
-readonly KAFKA_CONNECTOR_VERSION="${KAFKA_CONNECTOR_VERSION:-5.0.0}"
+case "${FLINK_VERSION}" in
+  2.2.0|2.2.1)
+    FLINK_LINE=2.2
+    STREAMFUSION_LINE_PROFILES=()
+    STREAMFUSION_ARTIFACT_SUFFIX=""
+    KAFKA_DEFAULT_VERSION=5.0.0
+    PAIMON_FLINK_PROFILE=flink2
+    ;;
+  1.18.1)
+    FLINK_LINE=1.18
+    STREAMFUSION_LINE_PROFILES=(-Pflink-1.18)
+    STREAMFUSION_ARTIFACT_SUFFIX=-flink1.18
+    KAFKA_DEFAULT_VERSION=3.2.0
+    PAIMON_FLINK_PROFILE=flink1
+    ;;
+  *) echo "Unsupported Flink suite version: ${FLINK_VERSION}" >&2; exit 2 ;;
+esac
+readonly FLINK_LINE STREAMFUSION_ARTIFACT_SUFFIX KAFKA_DEFAULT_VERSION PAIMON_FLINK_PROFILE
+readonly KAFKA_CONNECTOR_VERSION="${KAFKA_CONNECTOR_VERSION:-${KAFKA_DEFAULT_VERSION}}"
 readonly KAFKA_CONNECTOR_TAG="v${KAFKA_CONNECTOR_VERSION}"
 readonly PAIMON_VERSION="${PAIMON_VERSION:-2.0.0}"
 # Paimon publishes its releases from the final release-candidate tag; 2.0.0 is release-2.0.0-rc10.
 readonly PAIMON_TAG="${PAIMON_TAG:-release-${PAIMON_VERSION}-rc10}"
 readonly DELTA_VERSION="${DELTA_VERSION:-4.4.0}"
-readonly SUITE_ROOT="${FLINK_SUITE_ROOT:-${REPO_ROOT}/.flink-suite}"
+readonly SUITE_BASE_ROOT="${FLINK_SUITE_ROOT:-${REPO_ROOT}/.flink-suite}"
+readonly SUITE_ROOT="${SUITE_BASE_ROOT}/${FLINK_LINE}"
 readonly FLINK_ROOT="${SUITE_ROOT}/flink-${FLINK_VERSION}"
 readonly KAFKA_CONNECTOR_ROOT="${SUITE_ROOT}/flink-connector-kafka-${KAFKA_CONNECTOR_VERSION}"
 readonly PAIMON_ROOT="${SUITE_ROOT}/paimon-${PAIMON_VERSION}"
@@ -21,7 +40,8 @@ readonly DELTA_TEST_POM="${REPO_ROOT}/dev/flink-suite/delta/pom.xml"
 readonly DELTA_TEST_OUTPUT="${SUITE_ROOT}/delta-tests/target"
 readonly STREAMFUSION_BUILD_ROOT="${SUITE_ROOT}/streamfusion-source"
 readonly AGENT_ROOT="${REPO_ROOT}/dev/flink-suite/agent"
-readonly AGENT_JAR="${AGENT_ROOT}/target/streamfusion-flink-suite-agent-1.0-SNAPSHOT.jar"
+readonly AGENT_OUTPUT="${SUITE_ROOT}/agent/target"
+readonly AGENT_JAR="${AGENT_OUTPUT}/streamfusion-flink-suite-agent-1.0-SNAPSHOT.jar"
 readonly CLASSPATH_FILE="${SUITE_ROOT}/streamfusion-classpath.txt"
 readonly MAVEN_SETTINGS="${REPO_ROOT}/dev/flink-suite/settings.xml"
 readonly SUITE_MAVEN_REPO="${SUITE_ROOT}/m2"
@@ -32,11 +52,16 @@ readonly UNSHADED_BRIDGE_POM="${SUITE_ROOT}/flink-table-calcite-bridge-${FLINK_V
 readonly UNSHADED_SQL_PARSER_JAR="${SUITE_ROOT}/flink-sql-parser-${FLINK_VERSION}-unshaded.jar"
 readonly UNSHADED_SQL_PARSER_POM="${SUITE_ROOT}/flink-sql-parser-${FLINK_VERSION}-effective.pom"
 readonly SUITE_MODE="${1:-runtime}"
+CONTRACT_SUFFIX="${STREAMFUSION_ARTIFACT_SUFFIX}"
+if [[ "${FLINK_LINE}" == "1.18" && "${SUITE_MODE}" == "state" ]]; then
+  CONTRACT_SUFFIX="${CONTRACT_SUFFIX}-state"
+fi
+readonly CONTRACT_FILE="${AGENT_ROOT}/src/main/resources/native-execution${CONTRACT_SUFFIX}.tsv"
 readonly NATIVE_REPORT_ROOT="${SUITE_ROOT}/native-execution/${SUITE_MODE}"
 readonly DIAGNOSTIC_ROOT="${SUITE_ROOT}/diagnostics/${SUITE_MODE}"
-readonly FLINK_MODULE_CONFIG="-Duser.timezone=UTC -Djava.library.path=${STREAMFUSION_BUILD_ROOT}/native/target/debug --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED --add-opens=java.base/java.time=ALL-UNNAMED --add-opens=java.base/java.math=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED -Djunit.platform.reflection.search.useLegacySemantics=true -javaagent:${AGENT_JAR}"
+readonly FLINK_MODULE_CONFIG="-Dstreamfusion.flink-suite.flink-line=${FLINK_LINE} -Duser.timezone=UTC -Djava.library.path=${STREAMFUSION_BUILD_ROOT}/native/target/debug --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED --add-opens=java.base/java.time=ALL-UNNAMED --add-opens=java.base/java.math=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED -Djunit.platform.reflection.search.useLegacySemantics=true -javaagent:${AGENT_JAR}"
 readonly CONNECTOR_MODULE_CONFIG="-XX:+IgnoreUnrecognizedVMOptions --add-opens=java.base/java.lang.invoke=ALL-UNNAMED --add-opens=java.base/java.lang.reflect=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED --add-opens=java.base/java.net=ALL-UNNAMED --add-opens=java.base/java.util.concurrent=ALL-UNNAMED --add-opens=java.base/jdk.internal.ref=ALL-UNNAMED --add-opens=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java.base/sun.nio.cs=ALL-UNNAMED --add-opens=java.base/sun.security.action=ALL-UNNAMED --add-opens=java.base/sun.util.calendar=ALL-UNNAMED --add-opens=java.security.jgss/sun.security.krb5=ALL-UNNAMED -Djdk.reflect.useDirectMethodHandle=false -Dio.netty.tryReflectionSetAccessible=true ${FLINK_MODULE_CONFIG}"
-readonly PAIMON_BUILD_ARGS=(-Pflink2 "-Dpaimon-flink-common.flink.version=${FLINK_VERSION}" "-Dtest.flink.version=${FLINK_VERSION}" -Dspotless.check.skip=true -Dcheckstyle.skip=true -Drat.skip=true -Dmaven.javadoc.skip=true)
+readonly PAIMON_BUILD_ARGS=("-P${PAIMON_FLINK_PROFILE}" "-Dtest.flink.main.version=${FLINK_LINE}" "-Dpaimon-flink-common.flink.version=${FLINK_VERSION}" "-Dtest.flink.version=${FLINK_VERSION}" -Dspotless.check.skip=true -Dcheckstyle.skip=true -Drat.skip=true -Dmaven.javadoc.skip=true)
 readonly FORMAT_MODULES="flink-formats/flink-json,flink-formats/flink-csv,flink-formats/flink-avro,flink-formats/flink-avro-confluent-registry,flink-formats/flink-protobuf"
 readonly ORC_MODULE="flink-formats/flink-orc"
 readonly ORC_SQL_TESTS="org.apache.flink.orc.OrcFsStreamingSinkITCase,org.apache.flink.orc.OrcFileSystemITCase"
@@ -56,6 +81,14 @@ if [[ -n "${FLINK_SUITE_TEST:-}" ]]; then
 fi
 
 case "${SUITE_MODE}" in
+  config)
+    printf '%s\n' "flink.version=${FLINK_VERSION}" "flink.line=${FLINK_LINE}" \
+      "kafka.version=${KAFKA_CONNECTOR_VERSION}" "paimon.profile=${PAIMON_FLINK_PROFILE}" \
+      "suite.root=${SUITE_ROOT}" "streamfusion.source=${STREAMFUSION_BUILD_ROOT}" \
+      "maven.repo=${SUITE_MAVEN_REPO}" "agent.jar=${AGENT_JAR}" \
+      "classpath=${CLASSPATH_FILE}" "contracts=${CONTRACT_FILE}"
+    exit 0
+    ;;
   runtime)
     TEST_GOAL="surefire:test@integration-tests"
     TEST_MODULES="flink-table/flink-table-planner"
@@ -119,6 +152,10 @@ case "${SUITE_MODE}" in
     fi
     ;;
   delta)
+    if [[ "${FLINK_LINE}" != "2.2" ]]; then
+      echo "Delta acceleration is not admitted on Flink ${FLINK_LINE}; no suite payload is available." >&2
+      exit 2
+    fi
     TEST_GOAL="test"
     TEST_MODULES=":streamfusion-upstream-delta-tests"
     REPORT_ROOT="${DELTA_TEST_OUTPUT}/surefire-reports"
@@ -129,15 +166,25 @@ case "${SUITE_MODE}" in
     FLINK_SUITE_REUSE_BUILD=true "${BASH_SOURCE[0]}" orc || exit $?
     FLINK_SUITE_REUSE_BUILD=true "${BASH_SOURCE[0]}" runtime || exit $?
     "${BASH_SOURCE[0]}" paimon || exit $?
-    "${BASH_SOURCE[0]}" delta || exit $?
+    if [[ "${FLINK_LINE}" == "2.2" ]]; then
+      "${BASH_SOURCE[0]}" delta || exit $?
+    fi
     "${BASH_SOURCE[0]}" kafka
     exit $?
     ;;
   *)
-    echo "Usage: $0 [runtime|diagnostic|state|formats|parquet|orc|kafka|paimon|delta|all]" >&2
+    echo "Usage: $0 [config|runtime|diagnostic|state|formats|parquet|orc|kafka|paimon|delta|all]" >&2
     exit 2
     ;;
 esac
+
+flink_mvn() {
+  (cd "${FLINK_ROOT}" && ./mvnw "$@")
+}
+
+kafka_mvn() {
+  (cd "${KAFKA_CONNECTOR_ROOT}" && ./mvnw "$@")
+}
 
 mkdir -p "${SUITE_ROOT}"
 if [[ ! -d "${FLINK_ROOT}/.git" ]]; then
@@ -224,17 +271,17 @@ if [[ "${FLINK_SUITE_REUSE_BUILD:-false}" == "true" ]]; then
   echo "Reusing the existing Flink suite and StreamFusion build artifacts..."
 else
   echo "Building the test-JVM planner injection agent..."
-  mvn -B -ntp -s "${MAVEN_SETTINGS}" -f "${AGENT_ROOT}/pom.xml" package || exit $?
+  mvn -B -ntp -s "${MAVEN_SETTINGS}" -f "${AGENT_ROOT}/pom.xml" "-Dsuite.agent.output=${AGENT_OUTPUT}" package || exit $?
 
   echo "Building the pinned Flink planner and its reactor dependencies..."
-  "${FLINK_ROOT}/mvnw" -B -ntp -s "${MAVEN_SETTINGS}" -f "${FLINK_ROOT}/pom.xml" \
+  flink_mvn -B -ntp -s "${MAVEN_SETTINGS}" -f "${FLINK_ROOT}/pom.xml" \
     -Dmaven.repo.local="${SUITE_MAVEN_REPO}" \
     -pl flink-table/flink-table-planner -am -DskipTests -Dfast install || exit $?
 
   echo "Installing the untouched planner classes for StreamFusion's source-suite build..."
   jar --create --file "${UNSHADED_SQL_PARSER_JAR}" \
     -C "${FLINK_ROOT}/flink-table/flink-sql-parser/target/classes" . || exit $?
-  "${FLINK_ROOT}/mvnw" -B -ntp -s "${MAVEN_SETTINGS}" -f "${FLINK_ROOT}/pom.xml" \
+  flink_mvn -B -ntp -s "${MAVEN_SETTINGS}" -f "${FLINK_ROOT}/pom.xml" \
     -Dmaven.repo.local="${SUITE_MAVEN_REPO}" -Didea.version=streamfusion-suite \
     -pl flink-table/flink-sql-parser \
     help:effective-pom -Doutput="${UNSHADED_SQL_PARSER_POM}" || exit $?
@@ -244,7 +291,7 @@ else
     -DpomFile="${UNSHADED_SQL_PARSER_POM}" || exit $?
   jar --create --file "${UNSHADED_BRIDGE_JAR}" \
     -C "${FLINK_ROOT}/flink-table/flink-table-calcite-bridge/target/classes" . || exit $?
-  "${FLINK_ROOT}/mvnw" -B -ntp -s "${MAVEN_SETTINGS}" -f "${FLINK_ROOT}/pom.xml" \
+  flink_mvn -B -ntp -s "${MAVEN_SETTINGS}" -f "${FLINK_ROOT}/pom.xml" \
     -Dmaven.repo.local="${SUITE_MAVEN_REPO}" -Didea.version=streamfusion-suite \
     -pl flink-table/flink-table-calcite-bridge \
     help:effective-pom -Doutput="${UNSHADED_BRIDGE_POM}" || exit $?
@@ -254,7 +301,7 @@ else
     -DpomFile="${UNSHADED_BRIDGE_POM}" || exit $?
   jar --create --file "${UNSHADED_PLANNER_JAR}" \
     -C "${FLINK_ROOT}/flink-table/flink-table-planner/target/classes" . || exit $?
-  "${FLINK_ROOT}/mvnw" -B -ntp -s "${MAVEN_SETTINGS}" -f "${FLINK_ROOT}/pom.xml" \
+  flink_mvn -B -ntp -s "${MAVEN_SETTINGS}" -f "${FLINK_ROOT}/pom.xml" \
     -Dmaven.repo.local="${SUITE_MAVEN_REPO}" -Didea.version=streamfusion-suite \
     -pl flink-table/flink-table-planner \
     help:effective-pom -Doutput="${UNSHADED_PLANNER_POM}" || exit $?
@@ -282,23 +329,24 @@ else
 
   echo "Building and installing StreamFusion and its supported connector/format modules against the source-suite planner..."
   streamfusion_profiles="paimon"
-  streamfusion_modules=":streamfusion-core,:streamfusion-kafka,:streamfusion-json,:streamfusion-csv,:streamfusion-raw,:streamfusion-avro,:streamfusion-avro-confluent-registry,:streamfusion-protobuf,:streamfusion-parquet,:streamfusion-orc,:streamfusion-paimon"
+  streamfusion_modules="streamfusion-core,streamfusion-kafka,streamfusion-json,streamfusion-csv,streamfusion-raw,streamfusion-avro,streamfusion-avro-confluent-registry,streamfusion-protobuf,streamfusion-parquet,streamfusion-orc,streamfusion-paimon"
   if [[ "${SUITE_MODE}" == "delta" ]]; then
     streamfusion_profiles+=",delta"
-    streamfusion_modules+=",:streamfusion-delta"
+    streamfusion_modules+=",streamfusion-delta"
   fi
   mvn -B -ntp -s "${MAVEN_SETTINGS}" -Dmaven.repo.local="${SUITE_MAVEN_REPO}" \
-    -Dstreamfusion.flink-source-suite "-P${streamfusion_profiles}" -Dnative.build.skip=true \
+    -Dstreamfusion.flink-source-suite "-P${streamfusion_profiles}" "${STREAMFUSION_LINE_PROFILES[@]}" \
+    "-Dflink.version=${FLINK_VERSION}" -Dnative.build.skip=true \
     -f "${STREAMFUSION_BUILD_ROOT}/pom.xml" \
     -pl "${streamfusion_modules}" \
     -am -DskipTests clean install || exit $?
   mvn -B -ntp -s "${MAVEN_SETTINGS}" -Dmaven.repo.local="${SUITE_MAVEN_REPO}" \
-    -f "${REPO_ROOT}/dev/flink-suite/classpath-pom.xml" \
+    -f "${REPO_ROOT}/dev/flink-suite/classpath-pom.xml" "${STREAMFUSION_LINE_PROFILES[@]}" \
     dependency:build-classpath -Dmdep.outputFile="${CLASSPATH_FILE}" || exit $?
 
   if [[ "${SUITE_MODE}" == "formats" || "${SUITE_MODE}" == "parquet" || "${SUITE_MODE}" == "orc" ]]; then
     echo "Compiling the untouched upstream Flink format integration tests..."
-    "${FLINK_ROOT}/mvnw" -B -ntp -s "${MAVEN_SETTINGS}" -f "${FLINK_ROOT}/pom.xml" \
+    flink_mvn -B -ntp -s "${MAVEN_SETTINGS}" -f "${FLINK_ROOT}/pom.xml" \
       -Dmaven.repo.local="${SUITE_MAVEN_REPO}" -Didea.version=streamfusion-suite \
       -pl "${FORMAT_COMPILE_MODULES}" \
       -am -Dfast -DskipTests process-test-classes || exit $?
@@ -306,7 +354,7 @@ else
 
   if [[ "${SUITE_MODE}" == "kafka" ]]; then
     echo "Compiling the untouched upstream Kafka connector SQL integration tests..."
-    "${KAFKA_CONNECTOR_ROOT}/mvnw" -B -ntp -s "${MAVEN_SETTINGS}" \
+    kafka_mvn -B -ntp -s "${MAVEN_SETTINGS}" \
       -f "${KAFKA_CONNECTOR_ROOT}/pom.xml" -Dmaven.repo.local="${SUITE_MAVEN_REPO}" \
       -Dflink.version="${FLINK_VERSION}" -pl flink-connector-kafka \
       -DskipTests test-compile || exit $?
@@ -325,7 +373,7 @@ if [[ "${SUITE_MODE}" != "paimon" ]]; then
   # planner extension into unrelated Flink test JVMs that do not have that connector.
   STREAMFUSION_CLASSPATH="$(python3 - "${STREAMFUSION_CLASSPATH}" <<'PY'
 import sys
-print(','.join(p for p in sys.argv[1].split(',') if '/tech/streamfusion/streamfusion-paimon/' not in p))
+print(','.join(p for p in sys.argv[1].split(',') if not any(part == 'streamfusion-paimon' or part.startswith('streamfusion-paimon-flink') for part in p.split('/'))))
 PY
 )"
 fi
@@ -420,7 +468,7 @@ if [[ ${#TEST_SELECTOR_ARGS[@]} -gt 0 ]]; then
 fi
 MAVEN_TEST_ARGS+=("${TEST_GOAL}")
 if [[ "${SUITE_MODE}" == "kafka" ]]; then
-  "${KAFKA_CONNECTOR_ROOT}/mvnw" "${MAVEN_TEST_ARGS[@]}"
+  kafka_mvn "${MAVEN_TEST_ARGS[@]}"
 elif [[ "${SUITE_MODE}" == "delta" ]]; then
   mvn "${MAVEN_TEST_ARGS[@]}"
 elif [[ "${SUITE_MODE}" == "paimon" ]]; then
@@ -452,7 +500,7 @@ elif [[ "${SUITE_MODE}" == "paimon" ]]; then
   # Keep either invocation's nonzero exit status for the common report checks below.
   (exit "${paimon_status}")
 else
-  "${FLINK_ROOT}/mvnw" "${MAVEN_TEST_ARGS[@]}"
+  flink_mvn "${MAVEN_TEST_ARGS[@]}"
 fi
 readonly TEST_STATUS=$?
 
@@ -491,12 +539,12 @@ if [[ "${SUITE_MODE}" == "paimon" && ${TEST_STATUS} -eq 0 ]]; then
   done
 fi
 
-SUMMARY_ARGS=("${REPORT_ROOT}" --native-reports "${NATIVE_REPORT_ROOT}" --process-exit "${TEST_STATUS}")
+SUMMARY_ARGS=("${REPORT_ROOT}" --contracts "${CONTRACT_FILE}" --native-reports "${NATIVE_REPORT_ROOT}" --process-exit "${TEST_STATUS}")
 if [[ "${SUITE_MODE}" == "runtime" || "${SUITE_MODE}" == "diagnostic" ]]; then
-  SUMMARY_ARGS+=(
-    --xfail "org.apache.flink.table.planner.runtime.batch.sql.CalcITCase#testCurrentDate"
-    --maven-result "${DIAGNOSTIC_ROOT}/maven-result.tsv"
-  )
+  SUMMARY_ARGS+=(--maven-result "${DIAGNOSTIC_ROOT}/maven-result.tsv")
+  if [[ "${FLINK_LINE}" == "2.2" ]]; then
+    SUMMARY_ARGS+=(--xfail "org.apache.flink.table.planner.runtime.batch.sql.CalcITCase#testCurrentDate")
+  fi
   if [[ -z "${FLINK_SUITE_TEST:-}" ]]; then
     SUMMARY_ARGS+=(--require-contract-prefix org.apache.flink.)
   fi

@@ -82,7 +82,7 @@ does not include the separate `FlinkSqlIntTest`, which requires remote Databrick
 Catalog credentials.
 
 The runner clones Flink `release-2.2.1`, Kafka connector `v5.0.0`, and Paimon `2.0.0` (its
-`release-2.0.0-rc10` tag), plus Delta `v4.4.0` for its SQL tests, under `.flink-suite`, verifies that each checkout is clean, builds and
+`release-2.0.0-rc10` tag), plus Delta `v4.4.0` for its SQL tests, under `.flink-suite/2.2`, verifies that each checkout is clean, builds and
 installs StreamFusion and its supported format/connector modules, and builds the required upstream
 reactors with tests skipped. A test-only
 Java agent then installs StreamFusion whenever an upstream test creates a streaming planner, and
@@ -91,6 +91,21 @@ upstream job pays the first-load latency inside its first native task; batch pla
 Flink. The default run executes the planner module's unchanged `*ITCase`
 runtime integration suite serially in one fork, then summarizes Surefire failures. Serial execution
 keeps concurrently created MiniClusters from exhausting a developer machine or CI runner.
+
+The experimental 1.18 runner selects Flink `release-1.18.1`, Kafka connector `v3.2.0`, and
+Paimon's `flink1` profile against 1.18.1. Run `FLINK_VERSION=1.18.1 bin/flink-suite.sh config`
+to inspect the selection, then replace `config` with the desired suite. Each line has separate
+checkouts, Maven repository, StreamFusion source/build outputs, injection-agent JAR, classpath,
+native-execution reports and diagnostics under `.flink-suite/<line>/`. `FLINK_SUITE_ROOT`
+changes that parent directory without removing the per-line separation. Build reuse only reads
+the selected line's artifacts. Delta has no admitted 1.18 payload and is rejected before cloning.
+
+The 1.18 execution contract resource names methods verified in that release's unchanged source.
+It retains scalar, aggregate, rank, distinct-window and lookup witnesses; it excludes the
+retracting window TVF method absent from that release and the unavailable Delta suite. Agent and
+report summarizer select the same resource. The upstream CI matrix remains on 2.2 until the
+separate 1.18 suites have been verified, as tracked in #189. The ordinary Java, module and
+qualified-artifact jobs already exercise both lines as blocking checks.
 
 Selected upstream SQL tests also have **per-invocation native execution contracts**, declared in
 `dev/flink-suite/agent/src/main/resources/native-execution.tsv`. The unchanged `CalcITCase.testNotIn`
@@ -130,7 +145,7 @@ operator fails the JUnit test while retaining the upstream result assertions. Th
 matches invocation counts in JUnit XML to the evidence files, so a missing agent, a missing variant's
 proof, stale evidence, and execution failures hidden behind an expected-failure annotation all fail
 the suite. The runner clears the selected suite's evidence before every run. Evidence lives in
-`.flink-suite/native-execution/<suite>/` and is uploaded with the upstream CI log.
+`.flink-suite/<line>/native-execution/<suite>/` and is uploaded with the upstream CI log.
 Each full suite also requires every method contracted for that suite to execute, so removing or renaming
 an upstream test cannot silently shrink this coverage. Focused selections require evidence only
 for their selected methods.
@@ -264,7 +279,7 @@ defaults, and its completion, including the full exception on failure. Fatal Min
 are printed immediately, even when upstream logging is disabled. If an invocation runs for two
 minutes, it emits all JVM thread stacks to the suite log before CI's job timeout can discard the
 active test's unwritten JUnit report.
-Paimon also writes rolling cluster logs under `.flink-suite/diagnostics/paimon`; CI retains these
+Paimon also writes rolling cluster logs under `.flink-suite/<line>/diagnostics/paimon`; CI retains these
 and Surefire reports alongside the console log. Tests without an upstream timeout have a ten-minute
 JUnit timeout, and Surefire fails any Paimon class whose JVM exceeds thirty minutes. Existing upstream
 timeouts and result assertions remain in force. These limits report failure; they do not retry or
@@ -378,3 +393,13 @@ mvn -pl streamfusion-runtime -am test -Dtest=FlinkFailureParitySqlHarnessTest,Fl
 The [portable SQL audit](sql-parity-audit.md) adds typed UDF/UDTF/UDAF and CDC fixtures,
 checkpoint failure/recovery, expanded parameter variants and explicit execution-mode accounting.
 Its public issue-derived matrix is independent of the unavailable private September audit corpus.
+
+### Flink 1.18 state fixtures
+
+The 1.18 runtime suite preserves the upstream fixture's heap or stock RocksDB selection.
+Its execution contracts require native work for admitted heap cases and the explicit backend
+fallback for stock RocksDB cases. Selectors can combine inherited fixture parameters, such as
+`state=HEAP&splitDistinct=false`; a missing field or ambiguous match fails the invocation.
+The separate state suite replaces legacy programmatic RocksDB selection with StreamFusion's
+backend while preserving the fixture's checkpoint storage and incremental-checkpoint setting.
+Its own contract manifest requires native work for those replaced cases as well.

@@ -4,8 +4,6 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Set;
-import org.apache.flink.api.common.functions.OpenContext;
-import org.apache.flink.api.common.functions.RichMapFunction;
 import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.ConfigOptions;
 import org.apache.flink.connector.file.sink.FileSink;
@@ -24,6 +22,7 @@ import org.apache.flink.table.runtime.typeutils.InternalTypeInfo;
 import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.table.types.logical.VarCharType;
 import org.apache.hadoop.conf.Configuration;
+import tech.streamfusion.compat.RichMapFunction;
 
 /** Benchmark sink that persists every change as a Parquet row with its {@code RowKind}. */
 public final class ChangelogParquetTableFactory implements DynamicTableSinkFactory {
@@ -82,21 +81,22 @@ public final class ChangelogParquetTableFactory implements DynamicTableSinkFacto
                   ParquetRowDataBuilder.createWriterFactory(
                       outputType, parquetConfiguration(), true))
               .build();
-      return (DataStreamSinkProvider)
-          (providerContext, input) -> {
-            SingleOutputStreamOperator<RowData> changes =
-                input
-                    .map(new AppendRowKind(inputType))
-                    .returns(InternalTypeInfo.of(outputType))
-                    .name("Append Parquet changelog row kind");
-            providerContext
-                .generateUid("changelog-parquet-row-kind")
-                .ifPresent(changes::uid);
-            DataStreamSink<RowData> files =
-                changes.sinkTo(sink).name("Changelog Parquet files");
-            providerContext.generateUid("changelog-parquet-files").ifPresent(files::uid);
-            return files;
-          };
+      return new DataStreamSinkProvider() {
+        @Override
+        public DataStreamSink<?> consumeDataStream(
+            org.apache.flink.table.connector.ProviderContext providerContext,
+            org.apache.flink.streaming.api.datastream.DataStream<RowData> input) {
+          SingleOutputStreamOperator<RowData> changes =
+              input
+                  .map(new AppendRowKind(inputType))
+                  .returns(InternalTypeInfo.of(outputType))
+                  .name("Append Parquet changelog row kind");
+          providerContext.generateUid("changelog-parquet-row-kind").ifPresent(changes::uid);
+          DataStreamSink<RowData> files = changes.sinkTo(sink).name("Changelog Parquet files");
+          providerContext.generateUid("changelog-parquet-files").ifPresent(files::uid);
+          return files;
+        }
+      };
     }
 
     @Override
@@ -132,7 +132,7 @@ public final class ChangelogParquetTableFactory implements DynamicTableSinkFacto
     }
 
     @Override
-    public void open(OpenContext openContext) {
+    protected void initialize() {
       getters = new RowData.FieldGetter[inputType.getFieldCount()];
       for (int i = 0; i < getters.length; i++) {
         getters[i] = RowData.createFieldGetter(inputType.getTypeAt(i), i);

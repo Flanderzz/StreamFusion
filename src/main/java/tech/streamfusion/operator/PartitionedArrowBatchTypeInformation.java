@@ -1,15 +1,14 @@
 package tech.streamfusion.operator;
 
-import org.apache.flink.api.common.serialization.SerializerConfig;
-import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
+import tech.streamfusion.compat.FixedSerializerTypeInformation;
 
 /**
  * The stream element type on the edge from the sink's partition splitter to its file writer: one
  * bucket-routed {@link PartitionedArrowBatch} per record.
  */
 public final class PartitionedArrowBatchTypeInformation
-    extends TypeInformation<PartitionedArrowBatch> {
+    extends FixedSerializerTypeInformation<PartitionedArrowBatch> {
 
   public static final PartitionedArrowBatchTypeInformation INSTANCE =
       new PartitionedArrowBatchTypeInformation();
@@ -45,7 +44,7 @@ public final class PartitionedArrowBatchTypeInformation
   }
 
   @Override
-  public TypeSerializer<PartitionedArrowBatch> createSerializer(SerializerConfig config) {
+  public TypeSerializer<PartitionedArrowBatch> createSerializer() {
     return new PartitionedArrowBatchSerializer();
   }
 

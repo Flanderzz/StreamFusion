@@ -10,6 +10,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Properties;
 import java.util.jar.Attributes;
 import java.util.jar.JarOutputStream;
 import java.util.jar.Manifest;
@@ -33,8 +34,13 @@ class StreamFusionPlannerLoaderTest {
     Path renamed = directory.resolve("renamed.jar");
     Manifest manifest = new Manifest();
     manifest.getMainAttributes().put(Attributes.Name.MANIFEST_VERSION, "1.0");
-    manifest.getMainAttributes().putValue("StreamFusion-Module", "streamfusion-json");
-    manifest.getMainAttributes().putValue("StreamFusion-Flink-Line", "2.2");
+    String line = loaderLine();
+    manifest
+        .getMainAttributes()
+        .putValue(
+            "StreamFusion-Module",
+            "streamfusion-json" + (line.equals("2.2") ? "" : "-flink" + line));
+    manifest.getMainAttributes().putValue("StreamFusion-Flink-Line", line);
     try (var ignored = new JarOutputStream(Files.newOutputStream(renamed), manifest)) {}
     Path legacy = directory.resolve("01-streamfusion-paimon.jar");
     try (var ignored = new JarOutputStream(Files.newOutputStream(legacy))) {}
@@ -65,7 +71,9 @@ class StreamFusionPlannerLoaderTest {
     Manifest manifest = new Manifest();
     manifest.getMainAttributes().put(Attributes.Name.MANIFEST_VERSION, "1.0");
     manifest.getMainAttributes().putValue("StreamFusion-Module", module);
-    manifest.getMainAttributes().putValue("StreamFusion-Flink-Line", "1.18");
+    String line = loaderLine();
+    String otherLine = line.equals("2.2") ? "1.18" : "2.2";
+    manifest.getMainAttributes().putValue("StreamFusion-Flink-Line", otherLine);
     try (var ignored = new JarOutputStream(Files.newOutputStream(jar), manifest)) {}
     String original = System.getProperty("java.class.path");
     var constructor = PlannerModule.class.getDeclaredConstructor();
@@ -75,8 +83,8 @@ class StreamFusionPlannerLoaderTest {
       System.setProperty("java.class.path", original + java.io.File.pathSeparator + jar);
       var failure = assertThrows(InvocationTargetException.class, constructor::newInstance);
 
-      assertTrue(failure.getCause().getMessage().contains("loader targets Flink 2.2"));
-      assertTrue(failure.getCause().getMessage().contains("targets Flink 1.18"));
+      assertTrue(failure.getCause().getMessage().contains("loader targets Flink " + line));
+      assertTrue(failure.getCause().getMessage().contains("targets Flink " + otherLine));
     } finally {
       System.setProperty("java.class.path", original);
     }
@@ -104,6 +112,15 @@ class StreamFusionPlannerLoaderTest {
     String explain = tableEnvironment.explainSql(sql);
     assertTrue(explain.contains("NativeCalc"), "StreamFusion was not installed:\n" + explain);
     assertEquals(List.of(6, 8, 10), collectInts(tableEnvironment.executeSql(sql)));
+  }
+
+  private static String loaderLine() throws Exception {
+    Properties properties = new Properties();
+    try (var input = PlannerModule.class.getResourceAsStream("streamfusion-loader.properties")) {
+      assertNotNull(input);
+      properties.load(input);
+    }
+    return properties.getProperty("flink.line");
   }
 
   private static List<Integer> collectInts(TableResult result) throws Exception {

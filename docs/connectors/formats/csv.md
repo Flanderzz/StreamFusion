@@ -74,3 +74,10 @@ keyed ordinary `kafka` table, `sink.parallelism` on a changelog input, and so on
 Timestamp decode and encode retain years 0001–9999 and all runtime fractional nanos, including
 fractions present below the declared precision. The columnar timestamp uses separate millisecond
 and fractional buffers; no signed 64-bit nanosecond conversion sits on the format boundary.
+
+## Flink 1.18 decimal encoding
+
+The development profile reproduces the released host's older Jackson decimal-node normalization,
+including trailing-zero removal before plain output and nested CSV decimal text. The current-line
+encoding remains unchanged. See [Flink line compatibility](../../flink-compatibility.md) for the
+per-line admission and validation status.

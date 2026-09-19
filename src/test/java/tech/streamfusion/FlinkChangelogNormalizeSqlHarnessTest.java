@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.api.DataTypes;
@@ -76,7 +78,8 @@ class FlinkChangelogNormalizeSqlHarnessTest {
     // An upsert stream keyed by f0: insert, update (same key), insert another key, then a delete,
     // and a no-op update (same value) to exercise the unchanged-row suppression.
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+            env,
             Row.ofKind(RowKind.INSERT, 1L, 10L),
             Row.ofKind(RowKind.UPDATE_AFTER, 1L, 20L),
             Row.ofKind(RowKind.INSERT, 2L, 5L),

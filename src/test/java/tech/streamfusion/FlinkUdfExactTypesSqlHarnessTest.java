@@ -1,6 +1,7 @@
 package tech.streamfusion;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
@@ -183,7 +184,8 @@ class FlinkUdfExactTypesSqlHarnessTest {
     }
     table.createTemporaryView(
         "src",
-        env.fromData(
+        fromData(
+            env,
             rows,
             Types.ROW_NAMED(
                 new String[] {"id", "d", "b", "s"},

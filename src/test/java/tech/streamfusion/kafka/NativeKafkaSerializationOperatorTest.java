@@ -5,10 +5,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
 import com.sun.net.httpserver.HttpServer;
-import tech.streamfusion.format.EncodeFormat;
-import tech.streamfusion.operator.ArrowBatch;
-import tech.streamfusion.operator.ArrowBatchSerializer;
-import tech.streamfusion.operator.RowDataArrowConverter;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -31,6 +27,10 @@ import org.apache.flink.types.RowKind;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
+import tech.streamfusion.format.EncodeFormat;
+import tech.streamfusion.operator.ArrowBatch;
+import tech.streamfusion.operator.ArrowBatchSerializer;
+import tech.streamfusion.operator.RowDataArrowConverter;
 
 @Tag("streamfusion-kafka")
 class NativeKafkaSerializationOperatorTest {
@@ -139,9 +139,7 @@ class NativeKafkaSerializationOperatorTest {
     assertArrayEquals(key, record.key());
     assertNull(record.timestamp());
     assertArrayEquals(value, record.value());
-    assertEquals(
-        List.of("output"),
-        schema.getKafkaDatasetFacet().orElseThrow().getTopicIdentifier().getTopics());
+    KafkaLineageAssertions.assertTopic(schema, "output");
   }
 
   @Test

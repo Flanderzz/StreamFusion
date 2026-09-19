@@ -5,25 +5,17 @@ import org.apache.arrow.c.ArrowSchema;
 import org.apache.arrow.c.Data;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
-import org.apache.flink.runtime.event.WatermarkEvent;
 import org.apache.flink.runtime.jobgraph.OperatorID;
 import org.apache.flink.runtime.operators.coordination.OperatorCoordinator;
 import org.apache.flink.runtime.state.StateInitializationContext;
 import org.apache.flink.runtime.state.StateSnapshotContext;
-import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.AbstractStreamOperatorFactory;
 import org.apache.flink.streaming.api.operators.CoordinatedOperatorFactory;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperatorFactory;
-import org.apache.flink.streaming.api.operators.Output;
 import org.apache.flink.streaming.api.operators.StreamOperator;
 import org.apache.flink.streaming.api.operators.StreamOperatorParameters;
-import org.apache.flink.streaming.api.watermark.Watermark;
-import org.apache.flink.streaming.runtime.streamrecord.LatencyMarker;
-import org.apache.flink.streaming.runtime.streamrecord.RecordAttributes;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
-import org.apache.flink.streaming.runtime.watermarkstatus.WatermarkStatus;
-import org.apache.flink.util.OutputTag;
 import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.flink.sink.partition.DataStatisticsOperator;
 import org.apache.paimon.flink.sink.partition.DataStatisticsOperatorFactory;
@@ -31,13 +23,14 @@ import org.apache.paimon.flink.sink.partition.StatisticsOrRecord;
 import org.apache.paimon.flink.sink.partition.StatisticsOrRecordChannelComputer;
 import org.apache.paimon.schema.TableSchema;
 import tech.streamfusion.Native;
+import tech.streamfusion.compat.FlinkStreamOperator;
 import tech.streamfusion.operator.BucketedArrowBatch;
 import tech.streamfusion.operator.ColumnarRecordMetrics;
 import tech.streamfusion.operator.NativeAllocator;
 
 /** Paimon's adaptive partition shuffle over Arrow payloads and partition-only metadata. */
 public final class NativePaimonDynamicPartitionOperator
-    extends AbstractStreamOperator<BucketedArrowBatch>
+    extends FlinkStreamOperator<BucketedArrowBatch>
     implements OneInputStreamOperator<BucketedArrowBatch, BucketedArrowBatch> {
 
   private final int partitionArity;
@@ -57,13 +50,8 @@ public final class NativePaimonDynamicPartitionOperator
     this.statistics =
         new DataStatisticsOperatorFactory(partitionSchema)
             .createStreamOperator(
-                new StreamOperatorParameters<>(
-                    parameters.getContainingTask(),
-                    parameters.getStreamConfig(),
-                    new StatisticsOutput(),
-                    parameters::getProcessingTimeService,
-                    parameters.getOperatorEventDispatcher(),
-                    parameters.getMailboxExecutor()));
+                tech.streamfusion.compat.RuntimeCompat.withOutput(
+                    parameters, new StatisticsOutput()));
   }
 
   @Override
@@ -136,46 +124,18 @@ public final class NativePaimonDynamicPartitionOperator
     }
   }
 
-  private final class StatisticsOutput implements Output<StreamRecord<StatisticsOrRecord>> {
+  private final class StatisticsOutput
+      extends tech.streamfusion.compat.FlinkOutput<StatisticsOrRecord> {
+    StatisticsOutput() {
+      super(NativePaimonDynamicPartitionOperator.this.output);
+    }
+
     @Override
     public void collect(StreamRecord<StatisticsOrRecord> record) {
       // Statistics events replace the stock assignment map. Their arbitrary output channel is
       // discarded, as it is by Paimon's downstream Strip Statistics operator.
       selectedChannel = channels.channel(record.getValue());
     }
-
-    @Override
-    public void emitWatermark(Watermark watermark) {
-      output.emitWatermark(watermark);
-    }
-
-    @Override
-    public void emitWatermark(WatermarkEvent watermark) {
-      output.emitWatermark(watermark);
-    }
-
-    @Override
-    public void emitWatermarkStatus(WatermarkStatus status) {
-      output.emitWatermarkStatus(status);
-    }
-
-    @Override
-    public <X> void collect(OutputTag<X> tag, StreamRecord<X> record) {
-      output.collect(tag, record);
-    }
-
-    @Override
-    public void emitLatencyMarker(LatencyMarker marker) {
-      output.emitLatencyMarker(marker);
-    }
-
-    @Override
-    public void emitRecordAttributes(RecordAttributes attributes) {
-      output.emitRecordAttributes(attributes);
-    }
-
-    @Override
-    public void close() {}
   }
 
   public static final class Factory extends AbstractStreamOperatorFactory<BucketedArrowBatch>

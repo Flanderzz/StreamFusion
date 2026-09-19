@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.api.TableEnvironment;
@@ -54,9 +56,17 @@ class FlinkGuardedDivisionSqlHarnessTest {
     var env = StreamExecutionEnvironment.getExecutionEnvironment();
     env.setParallelism(1);
     var table = StreamTableEnvironment.create(env);
-    table.createTemporaryView("n", env.fromData(Types.ROW_NAMED(
-        new String[] {"i"}, Types.INT), Row.of(0), Row.of(2), Row.of(-3),
-        Row.of(Integer.MIN_VALUE), Row.of(Integer.MAX_VALUE), Row.of((Object) null)));
+    table.createTemporaryView(
+        "n",
+        fromData(
+            env,
+            Types.ROW_NAMED(new String[] {"i"}, Types.INT),
+            Row.of(0),
+            Row.of(2),
+            Row.of(-3),
+            Row.of(Integer.MIN_VALUE),
+            Row.of(Integer.MAX_VALUE),
+            Row.of((Object) null)));
     return table;
   }
 }

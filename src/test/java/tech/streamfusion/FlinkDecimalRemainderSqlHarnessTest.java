@@ -3,6 +3,7 @@ package tech.streamfusion;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
 
 import java.math.BigDecimal;
 import java.util.function.Supplier;
@@ -153,7 +154,8 @@ class FlinkDecimalRemainderSqlHarnessTest {
     StreamTableEnvironment table = StreamTableEnvironment.create(env);
     table.createTemporaryView(
         "t",
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(new String[] {"a", "b"}, Types.BIG_DEC, Types.BIG_DEC),
             Row.of(new BigDecimal(left), new BigDecimal(right))),
         Schema.newBuilder()
@@ -176,7 +178,8 @@ class FlinkDecimalRemainderSqlHarnessTest {
     StreamTableEnvironment table = StreamTableEnvironment.create(env);
     table.createTemporaryView(
         "t",
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(
                 new String[] {"id", "guard_value", "a", "b"},
                 Types.INT,

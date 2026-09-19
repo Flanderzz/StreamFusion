@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import java.time.Duration;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.typeinfo.Types;
@@ -86,7 +88,8 @@ class FlinkTemporalJoinSqlHarnessTest {
 
   // Orders: USD@150, EUR@250, USD@450, GBP@260 (GBP has no rate).
   private static DataStream<Row> orders(StreamExecutionEnvironment env) {
-    return env.fromData(
+    return fromData(
+            env,
             Types.ROW_NAMED(
                 new String[] {"currency", "amount", "ts"}, Types.STRING, Types.LONG, Types.LONG),
             Row.of("USD", 1L, 150L),
@@ -98,7 +101,8 @@ class FlinkTemporalJoinSqlHarnessTest {
 
   // Rates versions: USD 10@100 then 20@300; EUR 99@100.
   private static DataStream<Row> rates(StreamExecutionEnvironment env) {
-    return env.fromData(
+    return fromData(
+            env,
             Types.ROW_NAMED(
                 new String[] {"currency", "rate", "ts"}, Types.STRING, Types.LONG, Types.LONG),
             Row.of("USD", 10L, 100L),

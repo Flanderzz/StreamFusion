@@ -228,6 +228,7 @@ final class ParquetSinkTranslator {
   private static Result encoderConfig(
       Map<String, String> options, HadoopConfigLookup hadoopConfig) {
     Map<String, String> config = new LinkedHashMap<>();
+    config.put("schema.shape", tech.streamfusion.compat.FileSinkCompat.parquetSchemaShape());
 
     for (String booleanOption :
         List.of("parquet.write.int64.timestamp", "parquet.utc-timezone")) {

@@ -5,7 +5,7 @@
     <modelVersion>4.0.0</modelVersion>
 
     <groupId>tech.streamfusion</groupId>
-    <artifactId>streamfusion-loader</artifactId>
+    <artifactId>streamfusion-loader${streamfusion.artifact.suffix}</artifactId>
     <version>${revision}</version>
 
     <name>StreamFusion Loader</name>
@@ -49,6 +49,9 @@
         <flink.loader.test.version>2.2.0</flink.loader.test.version>
         <flink.runtime.version>2.2.1</flink.runtime.version>
         <flink.line>2.2</flink.line>
+        <streamfusion.artifact.suffix></streamfusion.artifact.suffix>
+        <flink.dependency.range>[2.2.0,2.3.0)</flink.dependency.range>
+        <flink.connector.kafka.version>5.0.0-2.2</flink.connector.kafka.version>
         <junit.version>5.10.2</junit.version>
     </properties>
 
@@ -63,7 +66,7 @@
              are separate lib-directory JARs, matching Flink's connector packaging model. -->
         <dependency>
             <groupId>tech.streamfusion</groupId>
-            <artifactId>streamfusion-core</artifactId>
+            <artifactId>streamfusion-core${streamfusion.artifact.suffix}</artifactId>
             <version>${project.version}</version>
             <scope>runtime</scope>
         </dependency>
@@ -100,7 +103,7 @@
         <dependency>
             <groupId>org.apache.flink</groupId>
             <artifactId>flink-connector-kafka</artifactId>
-            <version>5.0.0-2.2</version>
+            <version>${flink.connector.kafka.version}</version>
             <scope>test</scope>
         </dependency>
         <dependency>
@@ -139,6 +142,25 @@
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-enforcer-plugin</artifactId>
+                <version>3.6.3</version>
+                <executions><execution>
+                    <id>target-flink-line</id>
+                    <goals><goal>enforce</goal></goals>
+                    <configuration><rules><bannedDependencies>
+                        <searchTransitive>true</searchTransitive>
+                        <message>StreamFusion dependencies must target Flink ${flink.line}; select matching connector and format releases.</message>
+                        <excludes><exclude>org.apache.flink:*</exclude></excludes>
+                        <includes>
+                            <include>org.apache.flink:*:${flink.dependency.range}</include>
+                            <include>org.apache.flink:flink-shaded-*</include>
+                            <include>org.apache.flink:flink-connector-kafka:[${flink.connector.kafka.version}]</include>
+                        </includes>
+                    </bannedDependencies></rules></configuration>
+                </execution></executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-jar-plugin</artifactId>
                 <version>3.4.1</version>
                 <configuration>
@@ -163,7 +185,7 @@
                             <artifactItems>
                                 <artifactItem>
                                     <groupId>tech.streamfusion</groupId>
-                                    <artifactId>streamfusion-core</artifactId>
+                                    <artifactId>streamfusion-core${streamfusion.artifact.suffix}</artifactId>
                                     <version>${project.version}</version>
                                     <classifier>runtime</classifier>
                                     <destFileName>streamfusion-planner.jar</destFileName>
@@ -189,6 +211,31 @@
     </build>
 
     <profiles>
+        <profile>
+            <id>flink-1.18</id>
+            <properties>
+                <flink.loader.test.version>1.18.1</flink.loader.test.version>
+                <flink.runtime.version>1.18.1</flink.runtime.version>
+                <flink.line>1.18</flink.line>
+                <streamfusion.artifact.suffix>-flink1.18</streamfusion.artifact.suffix>
+                <flink.dependency.range>[1.18.0,1.19.0)</flink.dependency.range>
+                <flink.connector.kafka.version>3.2.0-1.18</flink.connector.kafka.version>
+            </properties>
+            <build><plugins><plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>flatten-maven-plugin</artifactId>
+                <version>1.6.0</version>
+                <configuration>
+                    <flattenMode>ossrh</flattenMode>
+                    <updatePomFile>true</updatePomFile>
+                </configuration>
+                <executions><execution>
+                    <id>flatten-release-pom</id>
+                    <phase>process-resources</phase>
+                    <goals><goal>flatten</goal></goals>
+                </execution></executions>
+            </plugin></plugins></build>
+        </profile>
         <!-- This module is intentionally standalone from the reactor parent because it executes in
              Flink's isolated planner classloader. Repeat the release attachments it cannot inherit. -->
         <profile>
@@ -200,7 +247,7 @@
                         <artifactId>flatten-maven-plugin</artifactId>
                         <version>1.6.0</version>
                         <configuration>
-                            <flattenMode>resolveCiFriendliesOnly</flattenMode>
+                            <flattenMode>ossrh</flattenMode>
                             <updatePomFile>true</updatePomFile>
                         </configuration>
                         <executions>

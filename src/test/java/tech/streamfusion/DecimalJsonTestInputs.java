@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import org.apache.flink.api.common.typeinfo.Types;
@@ -34,7 +36,8 @@ final class DecimalJsonTestInputs {
     var tables = StreamTableEnvironment.create(env);
     tables.createTemporaryView(
         "decimals",
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(new String[] {"id", "n"}, Types.INT, Types.BIG_DEC),
             rows.toArray(Row[]::new)),
         Schema.newBuilder()

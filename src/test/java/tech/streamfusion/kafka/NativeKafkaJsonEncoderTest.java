@@ -6,9 +6,6 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import tech.streamfusion.format.EncodeFormat;
-import tech.streamfusion.format.LogicalTypeDescriptors;
-import tech.streamfusion.operator.RowDataArrowConverter;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
@@ -60,6 +57,9 @@ import org.apache.flink.util.SimpleUserCodeClassLoader;
 import org.apache.flink.util.UserCodeClassLoader;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
+import tech.streamfusion.format.EncodeFormat;
+import tech.streamfusion.format.LogicalTypeDescriptors;
+import tech.streamfusion.operator.RowDataArrowConverter;
 
 @Tag("streamfusion-kafka")
 class NativeKafkaJsonEncoderTest {
@@ -76,7 +76,8 @@ class NativeKafkaJsonEncoderTest {
 
   @Test
   void matchesFlinkForWholeBatchesWithAndWithoutNullFields() throws Exception {
-    GenericRowData first = GenericRowData.of(1, StringData.fromString("quote: \" and 雪"), true, 25L);
+    GenericRowData first =
+        GenericRowData.of(1, StringData.fromString("quote: \" and 雪"), true, 25L);
     GenericRowData nulls = GenericRowData.of(2, null, false, null);
     List<RowData> rows = List.of(first, nulls);
 
@@ -538,7 +539,7 @@ class NativeKafkaJsonEncoderTest {
     List<RowData> rows = List.of(GenericRowData.of(new GenericMapData(data)));
 
     JsonRowDataSerializationSchema flink =
-        new JsonRowDataSerializationSchema(
+        tech.streamfusion.compat.JsonTestSchemas.json(
             rowType,
             TimestampFormat.SQL,
             JsonFormatOptions.MapNullKeyMode.FAIL,
@@ -616,7 +617,7 @@ class NativeKafkaJsonEncoderTest {
     List<RowData> rows = List.of(insert, delete);
 
     JsonRowDataSerializationSchema flinkKey =
-        new JsonRowDataSerializationSchema(
+        tech.streamfusion.compat.JsonTestSchemas.json(
             keyType,
             TimestampFormat.ISO_8601,
             JsonFormatOptions.MapNullKeyMode.LITERAL,
@@ -625,7 +626,7 @@ class NativeKafkaJsonEncoderTest {
             false);
     flinkKey.open(initializationContext());
     JsonRowDataSerializationSchema flinkValue =
-        new JsonRowDataSerializationSchema(
+        tech.streamfusion.compat.JsonTestSchemas.json(
             rowType,
             TimestampFormat.SQL,
             JsonFormatOptions.MapNullKeyMode.LITERAL,
@@ -685,7 +686,7 @@ class NativeKafkaJsonEncoderTest {
             GenericRowData.of(2L, null));
 
     JsonRowDataSerializationSchema flinkKey =
-        new JsonRowDataSerializationSchema(
+        tech.streamfusion.compat.JsonTestSchemas.json(
             RowType.of(new LogicalType[] {new BigIntType()}, new String[] {"id"}),
             TimestampFormat.SQL,
             JsonFormatOptions.MapNullKeyMode.FAIL,
@@ -694,8 +695,12 @@ class NativeKafkaJsonEncoderTest {
             false);
     flinkKey.open(initializationContext());
     JsonRowDataSerializationSchema flinkValue =
-        new JsonRowDataSerializationSchema(
-            rowType, TimestampFormat.SQL, JsonFormatOptions.MapNullKeyMode.FAIL, "null", false,
+        tech.streamfusion.compat.JsonTestSchemas.json(
+            rowType,
+            TimestampFormat.SQL,
+            JsonFormatOptions.MapNullKeyMode.FAIL,
+            "null",
+            false,
             false);
     flinkValue.open(initializationContext());
 
@@ -771,7 +776,7 @@ class NativeKafkaJsonEncoderTest {
       String mapNullKeyLiteral)
       throws Exception {
     JsonRowDataSerializationSchema flink =
-        new JsonRowDataSerializationSchema(
+        tech.streamfusion.compat.JsonTestSchemas.json(
             rowType,
             timestampFormat,
             mapNullKeyMode,

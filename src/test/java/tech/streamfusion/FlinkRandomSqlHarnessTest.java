@@ -3,6 +3,7 @@ package tech.streamfusion;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
 
 import java.util.HashSet;
 import java.util.Set;
@@ -40,12 +41,16 @@ class FlinkRandomSqlHarnessTest {
           var env = StreamExecutionEnvironment.getExecutionEnvironment();
           env.setParallelism(1);
           var table = StreamTableEnvironment.create(env);
-          table.createTemporaryView("numbers", env.fromData(
-              Types.ROW_NAMED(new String[] {"d", "f"}, Types.DOUBLE, Types.FLOAT),
-              Row.of(0.0, 0.0f), Row.of(-0.0, -0.0f),
-              Row.of(Double.NaN, Float.NaN),
-              Row.of(Double.POSITIVE_INFINITY, Float.NEGATIVE_INFINITY),
-              Row.of(null, null)));
+          table.createTemporaryView(
+              "numbers",
+              fromData(
+                  env,
+                  Types.ROW_NAMED(new String[] {"d", "f"}, Types.DOUBLE, Types.FLOAT),
+                  Row.of(0.0, 0.0f),
+                  Row.of(-0.0, -0.0f),
+                  Row.of(Double.NaN, Float.NaN),
+                  Row.of(Double.POSITIVE_INFINITY, Float.NEGATIVE_INFINITY),
+                  Row.of(null, null)));
           return table;
         },
         "SELECT -d, -f FROM numbers");
@@ -92,11 +97,15 @@ class FlinkRandomSqlHarnessTest {
     for (boolean nativeRun : new boolean[] {false, true}) {
       TableEnvironment table = input(Row.of(1, 42, bound));
       var scan = nativeRun ? NativePlanner.install(table) : null;
-      Exception failure = assertThrows(Exception.class, () -> {
-        try (var rows = table.executeSql("SELECT RAND_INTEGER(seed, bound) FROM inputs").collect()) {
-          while (rows.hasNext()) rows.next();
-        }
-      });
+      Exception failure =
+          assertThrows(
+              Exception.class,
+              () -> {
+                try (var rows =
+                    table.executeSql("SELECT RAND_INTEGER(seed, bound) FROM inputs").collect()) {
+                  while (rows.hasNext()) rows.next();
+                }
+              });
       StringBuilder messages = new StringBuilder();
       for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
         messages.append(cause.getMessage());
@@ -138,8 +147,12 @@ class FlinkRandomSqlHarnessTest {
     var env = StreamExecutionEnvironment.getExecutionEnvironment();
     env.setParallelism(1);
     var table = StreamTableEnvironment.create(env);
-    table.createTemporaryView("inputs", env.fromData(
-        Types.ROW_NAMED(new String[] {"id", "seed", "bound"}, Types.INT, Types.INT, Types.INT), rows));
+    table.createTemporaryView(
+        "inputs",
+        fromData(
+            env,
+            Types.ROW_NAMED(new String[] {"id", "seed", "bound"}, Types.INT, Types.INT, Types.INT),
+            rows));
     return table;
   }
 }

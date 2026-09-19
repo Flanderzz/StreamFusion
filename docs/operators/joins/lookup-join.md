@@ -75,3 +75,10 @@ SF_BENCHMARK=true mvn -pl streamfusion-runtime -am test -Pbench \
   -Dtest=AsyncLookupBenchmark -Dlookup.rows=200000 -Dlookup.capacity=100 \
   -Dlookup.warmup=2 -Dlookup.runs=5
 ```
+
+## Flink 1.18 compatibility
+
+The development profile adapts Flink 1.18's generated lookup runners and lifecycle to the same
+Arrow batch operators. Async capacity, timeout and cleanup remain enforced. Key-ordered async
+lookup is N/A on that host line; it is not counted as a planner fallback. See
+[Flink line compatibility](../../flink-compatibility.md) for validation status.

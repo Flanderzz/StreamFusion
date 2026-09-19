@@ -47,18 +47,17 @@ import org.apache.flink.util.FileUtils;
 import org.apache.flink.util.IOUtils;
 
 /**
- * StreamFusion's Flink 2.2 planner loader shim.
+ * StreamFusion's planner loader shim for its declared Flink line.
  *
  * <p>The class intentionally has Flink's loader name so it is selected before Flink's bundled
- * loader when installed first in {@code $FLINK_HOME/lib}. It adds a StreamFusion planner payload
- * to the isolated component classloader and directly instantiates that payload's factory. All
- * other planner behavior continues through Flink's normal implementation.
+ * loader when installed first in {@code $FLINK_HOME/lib}. It adds a StreamFusion planner payload to
+ * the isolated component classloader and directly instantiates that payload's factory. All other
+ * planner behavior continues through Flink's normal implementation.
  */
 @Internal
 public class PlannerModule {
 
   static final String FLINK_TABLE_PLANNER_FAT_JAR = "flink-table-planner.jar";
-  private static final Set<String> SUPPORTED_FLINK_VERSIONS = Set.of("2.2.0", "2.2.1");
   private static final String STREAMFUSION_PLANNER_JAR = "streamfusion-planner.jar";
   private static final Set<String> STREAMFUSION_PLANNER_EXTENSIONS =
       Set.of(
@@ -166,15 +165,23 @@ public class PlannerModule {
     return PlannerComponentsHolder.INSTANCE;
   }
 
-  private static void verifyFlinkVersion() {
+  private static void verifyFlinkVersion() throws IOException {
+    String line = FlinkPayloadIdentity.loaderLine();
+    Set<String> supportedVersions =
+        switch (line) {
+          case "2.2" -> Set.of("2.2.0", "2.2.1");
+          case "1.18" -> Set.of("1.18.1");
+          default -> throw new TableException("Unverified StreamFusion target Flink line: " + line);
+        };
     Package flinkApiPackage = PlannerFactory.class.getPackage();
     String version = flinkApiPackage == null ? null : flinkApiPackage.getImplementationVersion();
-    if (version == null || !SUPPORTED_FLINK_VERSIONS.contains(version)) {
+    if (version == null || !supportedVersions.contains(version)) {
       throw new TableException(
           String.format(
               "StreamFusion's planner loader supports exactly Flink %s, but found %s."
                   + " Refusing to cross an unverified planner ABI boundary.",
-              SUPPORTED_FLINK_VERSIONS, version == null ? "an unversioned Flink API" : "Flink " + version));
+              supportedVersions,
+              version == null ? "an unversioned Flink API" : "Flink " + version));
     }
   }
 
@@ -185,7 +192,8 @@ public class PlannerModule {
       throw new TableException("Could not find planner resource '" + resource + "'.");
     }
 
-    Path output = Files.createFile(temporaryDirectory.resolve(resource + "_" + UUID.randomUUID() + ".jar"));
+    Path output =
+        Files.createFile(temporaryDirectory.resolve(resource + "_" + UUID.randomUUID() + ".jar"));
     try (InputStream resourceStream = input) {
       IOUtils.copyBytes(resourceStream, Files.newOutputStream(output));
     }
@@ -221,7 +229,13 @@ public class PlannerModule {
           || attributes.getValue(FlinkPayloadIdentity.LINE_ATTRIBUTE) != null
           || path.getFileName().toString().matches("(?:[0-9]+-)?streamfusion-.*\\.jar")) {
         FlinkPayloadIdentity.verify(url, attributes, flinkLine);
-        if (module != null && STREAMFUSION_PLANNER_EXTENSIONS.contains(module)) extensions.add(url);
+        String suffix = "-flink" + flinkLine;
+        String logicalModule =
+            module != null && module.endsWith(suffix)
+                ? module.substring(0, module.length() - suffix.length())
+                : module;
+        if (logicalModule != null && STREAMFUSION_PLANNER_EXTENSIONS.contains(logicalModule))
+          extensions.add(url);
       }
     }
     return extensions;

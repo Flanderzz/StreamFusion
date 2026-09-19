@@ -5,8 +5,6 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import tech.streamfusion.planner.NativePlanner;
-import tech.streamfusion.planner.PhysicalPlanScan;
 import java.util.List;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.api.ExplainDetail;
@@ -14,6 +12,8 @@ import org.apache.flink.table.api.ValidationException;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
+import tech.streamfusion.planner.NativePlanner;
+import tech.streamfusion.planner.PhysicalPlanScan;
 
 @Tag("streamfusion-kafka")
 class NativeKafkaSinkSqlPlanTest {
@@ -786,13 +786,21 @@ class NativeKafkaSinkSqlPlanTest {
    */
   @Test
   void keepsUnreproducedAvroShapesOnFlink() {
-    assertAvroFallback("(id BIGINT)", "'format' = 'avro', 'avro.encoding' = 'json'");
+
     assertAvroFallback("(id BIGINT, tod TIME(0))", "'format' = 'avro'");
     assertAvroFallback(
         "(id BIGINT)",
         "'format' = 'avro-confluent', "
             + "'avro-confluent.url' = 'http://registry:8081', "
             + "'avro-confluent.basic-auth.credentials-source' = 'SASL_INHERIT'");
+  }
+
+  @Test
+  void jsonAvroEncodingStaysOnFlink() {
+    org.junit.jupiter.api.Assumptions.assumeTrue(
+        tech.streamfusion.compat.FlinkTestCapabilities.AVRO_ENCODING_OPTION,
+        "Flink 1.18 Avro has no encoding option");
+    assertAvroFallback("(id BIGINT)", "'format' = 'avro', 'avro.encoding' = 'json'");
   }
 
   private static void assertAvroFallback(String columns, String formatOptions) {

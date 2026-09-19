@@ -1,8 +1,8 @@
 package tech.streamfusion.operator;
 
-import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
+import tech.streamfusion.compat.FlinkStreamOperator;
 
 /**
  * Fan-out point for a shared native sub-plan: declares on each passing batch how many chained
@@ -13,7 +13,7 @@ import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
  * consumer count RisingWave's {@code StreamShare} carries; the sharing itself is Arrow buffer
  * reference counting, the analog of Arroyo's {@code Arc<RecordBatch>} clone.
  */
-public class NativeColumnarShareOperator extends AbstractStreamOperator<ArrowBatch>
+public class NativeColumnarShareOperator extends FlinkStreamOperator<ArrowBatch>
     implements OneInputStreamOperator<ArrowBatch, ArrowBatch> {
 
   private final int consumers;

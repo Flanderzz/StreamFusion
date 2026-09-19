@@ -3,7 +3,6 @@ package tech.streamfusion.operator;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -24,10 +23,6 @@ import org.apache.flink.table.data.GenericRowData;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.TimestampData;
 import org.apache.flink.table.runtime.operators.window.TimeWindow;
-import org.apache.flink.table.runtime.operators.window.groupwindow.assigners.CumulativeWindowAssigner;
-import org.apache.flink.table.runtime.operators.window.groupwindow.assigners.GroupWindowAssigner;
-import org.apache.flink.table.runtime.operators.window.groupwindow.assigners.SlidingWindowAssigner;
-import org.apache.flink.table.runtime.operators.window.groupwindow.assigners.TumblingWindowAssigner;
 import org.apache.flink.table.types.logical.BigIntType;
 import org.apache.flink.table.types.logical.LocalZonedTimestampType;
 import org.apache.flink.table.types.logical.LogicalType;
@@ -103,12 +98,6 @@ class NativeWindowTableFunctionOperatorTest {
   void timestampLayoutsMatchFlinkWindowAssignment(Field field) throws Exception {
     for (int kind = 0; kind < 3; kind++) {
       long size = kind == 0 ? 1000 : 2000;
-      GroupWindowAssigner<TimeWindow> flink =
-          kind == 0
-              ? TumblingWindowAssigner.of(Duration.ofMillis(size))
-              : kind == 1
-                  ? SlidingWindowAssigner.of(Duration.ofMillis(size), Duration.ofMillis(1000))
-                  : CumulativeWindowAssigner.of(Duration.ofMillis(size), Duration.ofMillis(1000));
       try (BufferAllocator allocator = new RootAllocator();
           OneInputStreamOperatorTestHarness<ArrowBatch, ArrowBatch> harness =
               new OneInputStreamOperatorTestHarness<>(
@@ -142,7 +131,9 @@ class NativeWindowTableFunctionOperatorTest {
         List<List<Long>> expected = new ArrayList<>();
         TimestampAccessor timestamps = new TimestampAccessor(time);
         for (int i = 0; i < values.length - 1; i++) {
-          for (TimeWindow window : flink.assignWindows(null, timestamps.getMillis(i))) {
+          for (TimeWindow window :
+              tech.streamfusion.compat.WindowTestAssigner.assign(
+                  kind, size, timestamps.getMillis(i))) {
             expected.add(
                 List.of(
                     timestamps.getMillis(i),

@@ -1312,3 +1312,11 @@ implementation can't handle, even though the function itself is supported:
 
 See [Configuration](../configuration.md) for the full `allowIncompatible` flag surface referenced
 throughout this page.
+
+## Flink 1.18 compatibility
+
+The 1.18 development build disables unverified Jackson buffer emulation and runs SQL/JSON through
+the whole-Calc JVM route, once per Arrow batch. Decimal JSON constructors use that route as well.
+`ENCODE` stays on Flink because that release declares `BINARY(1)` for a variable-length result;
+UTF-8 and UTF-16 fallback tests retain the complete host bytes. See
+[Flink line compatibility](../flink-compatibility.md) for host-only syntax differences.

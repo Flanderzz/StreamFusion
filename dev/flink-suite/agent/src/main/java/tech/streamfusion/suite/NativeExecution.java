@@ -29,12 +29,23 @@ public final class NativeExecution {
   private NativeExecution() {}
 
   private static Map<String, Map<String, String>> loadContracts() {
+    String flinkLine = System.getProperty("streamfusion.flink-suite.flink-line", "2.2");
+    String resource =
+        switch (flinkLine) {
+          case "2.2" -> "/native-execution.tsv";
+          case "1.18" ->
+              Boolean.getBoolean("streamfusion.flink-suite.native-rocksdb")
+                  ? "/native-execution-flink1.18-state.tsv"
+                  : "/native-execution-flink1.18.tsv";
+          default ->
+              throw new IllegalArgumentException(
+                  "Unknown native execution contract line: " + flinkLine);
+        };
     Map<String, Map<String, String>> contracts = new LinkedHashMap<>();
     try (BufferedReader reader =
         new BufferedReader(
             new InputStreamReader(
-                NativeExecution.class.getResourceAsStream("/native-execution.tsv"),
-                StandardCharsets.UTF_8))) {
+                NativeExecution.class.getResourceAsStream(resource), StandardCharsets.UTF_8))) {
       for (String line; (line = reader.readLine()) != null; ) {
         if (line.isBlank() || line.startsWith("#")) {
           continue;
@@ -42,7 +53,7 @@ public final class NativeExecution {
         String[] fields = line.split("\t", -1);
         if (fields.length != 3
             || !fields[0].matches("[\\w.$]+#[\\w$]+")
-            || !fields[1].matches("\\*|\\w+=(?:true|false)")
+            || !fields[1].matches("\\*|\\w+=\\w+(?:&\\w+=\\w+)*")
             || !(fields[2].matches("\\w+(?:[+|]\\w+)*") || fields[2].matches("!.+"))) {
           throw new IllegalStateException("Invalid native execution contract: " + line);
         }
@@ -94,18 +105,28 @@ public final class NativeExecution {
     return active;
   }
 
-  private static boolean matches(String selector, Object fixture) {
-    if (selector.equals("*")) {
-      return true;
+  static boolean matches(String selector, Object fixture) {
+    if (selector.equals("*")) return true;
+    for (String condition : selector.split("&")) {
+      String[] parts = condition.split("=", 2);
+      Class<?> type = fixture.getClass();
+      while (type != null) {
+        try {
+          var field = type.getDeclaredField(parts[0]);
+          field.setAccessible(true);
+          if (!String.valueOf(field.get(fixture)).equals(parts[1])) return false;
+          break;
+        } catch (NoSuchFieldException e) {
+          type = type.getSuperclass();
+        } catch (ReflectiveOperationException e) {
+          throw new AssertionError("Cannot read pinned upstream fixture selector " + selector, e);
+        }
+      }
+      if (type == null) {
+        throw new AssertionError("Cannot read pinned upstream fixture selector " + selector);
+      }
     }
-    String[] parts = selector.split("=");
-    try {
-      var field = fixture.getClass().getDeclaredField(parts[0]);
-      field.setAccessible(true);
-      return Boolean.toString(field.getBoolean(fixture)).equals(parts[1]);
-    } catch (ReflectiveOperationException e) {
-      throw new AssertionError("Cannot read pinned upstream fixture selector " + selector, e);
-    }
+    return true;
   }
 
   public static synchronized void opened(Object operator) {

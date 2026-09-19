@@ -1,6 +1,7 @@
 package tech.streamfusion.suite;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -146,6 +147,7 @@ class NativeExecutionTest {
   }
 
   private static class WindowFixture {
+    private final String state = "HEAP";
     private final boolean splitDistinct;
 
     WindowFixture(boolean splitDistinct) {
@@ -156,14 +158,16 @@ class NativeExecutionTest {
   @Test
   void expectedFallbackRequiresItsSpecificReasonAndNoNativeWork() {
     NativeExecution.Scope scope = NativeExecution.begin(WINDOW, new WindowFixture(true));
-    NativeExecution.fallback("window aggregate: attached-window aggregation requires two-phase execution");
+    NativeExecution.fallback(
+        "window aggregate: attached-window aggregation requires two-phase execution");
     NativeExecution.finish(scope);
     scope = NativeExecution.begin(WINDOW, new WindowFixture(true));
     NativeExecution.fallback("different unsupported function");
     NativeExecution.Scope wrongReason = scope;
     assertThrows(AssertionError.class, () -> NativeExecution.finish(wrongReason));
     scope = NativeExecution.begin(WINDOW, new WindowFixture(true));
-    NativeExecution.fallback("window aggregate: attached-window aggregation requires two-phase execution");
+    NativeExecution.fallback(
+        "window aggregate: attached-window aggregation requires two-phase execution");
     Object window = new NativeColumnarWindowAggregateOperator();
     NativeExecution.opened(window);
     NativeExecution.completed(window, 1);
@@ -174,6 +178,21 @@ class NativeExecutionTest {
   @Test
   void aChangedUpstreamFixtureFailsInsteadOfSkippingItsContract() {
     assertThrows(AssertionError.class, () -> NativeExecution.begin(WINDOW, new Object()));
+  }
+
+  @Test
+  void selectorsReadInheritedStateAndConjoinFixtureParameters() {
+    class BackendFixture {
+      private final String state = "HEAP";
+    }
+    class WindowBackendFixture extends BackendFixture {
+      private final boolean splitDistinct = false;
+    }
+    Object fixture = new WindowBackendFixture();
+    assertTrue(NativeExecution.matches("state=HEAP&splitDistinct=false", fixture));
+    assertFalse(NativeExecution.matches("state=ROCKSDB&splitDistinct=false", fixture));
+    assertFalse(NativeExecution.matches("state=HEAP&splitDistinct=true", fixture));
+    assertThrows(AssertionError.class, () -> NativeExecution.matches("missing=true", fixture));
   }
 
   private static class NativeCalcOperator {}

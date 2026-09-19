@@ -24,13 +24,15 @@ final class WindowDeduplicateMatcher {
   private WindowDeduplicateMatcher() {}
 
   static boolean matches(StreamPhysicalWindowDeduplicate dedup) {
-    if (!(dedup.getWindowingStrategy() instanceof WindowAttachedWindowingStrategy)) {
+    if (!(tech.streamfusion.compat.FlinkCompat.windowDedupWindowing(dedup)
+        instanceof WindowAttachedWindowingStrategy)) {
       return false; // the window must be attached as columns (the windowing-TVF output)
     }
     if (keepLastRow(dedup) == null) {
       return false; // cannot determine keep-first/keep-last → fall back
     }
-    if (!WindowZoneGate.admits(dedup, dedup.getWindowingStrategy())) {
+    if (!WindowZoneGate.admits(
+        dedup, tech.streamfusion.compat.FlinkCompat.windowDedupWindowing(dedup))) {
       return false;
     }
     return RowDataArrowConverter.supports(
@@ -38,7 +40,8 @@ final class WindowDeduplicateMatcher {
   }
 
   private static WindowAttachedWindowingStrategy windowing(StreamPhysicalWindowDeduplicate dedup) {
-    return (WindowAttachedWindowingStrategy) dedup.getWindowingStrategy();
+    return (WindowAttachedWindowingStrategy)
+        tech.streamfusion.compat.FlinkCompat.windowDedupWindowing(dedup);
   }
 
   static int windowStartColumn(StreamPhysicalWindowDeduplicate dedup) {
@@ -94,9 +97,14 @@ final class WindowDeduplicateMatcher {
   }
 
   static String unsupportedReason(StreamPhysicalWindowDeduplicate dedup) {
+    if (tech.streamfusion.compat.FlinkCompat.windowDedupWindowing(dedup) == null) {
+      return "window deduplication: host window metadata is unavailable";
+    }
     String zoneReason =
-        dedup.getWindowingStrategy() instanceof WindowAttachedWindowingStrategy
-            ? WindowZoneGate.unsupportedReason(dedup, dedup.getWindowingStrategy())
+        tech.streamfusion.compat.FlinkCompat.windowDedupWindowing(dedup)
+                instanceof WindowAttachedWindowingStrategy
+            ? WindowZoneGate.unsupportedReason(
+                dedup, tech.streamfusion.compat.FlinkCompat.windowDedupWindowing(dedup))
             : null;
     if (zoneReason != null) {
       return "window deduplication: " + zoneReason;
@@ -125,7 +133,8 @@ final class WindowDeduplicateMatcher {
         WindowDeduplicateMatcher.windowMillis(dedup),
         WindowDeduplicateMatcher.slideMillis(dedup),
         WindowDeduplicateMatcher.cumulative(dedup),
-        WindowZoneGate.boundaryOffsetMillis(dedup, dedup.getWindowingStrategy()),
+        WindowZoneGate.boundaryOffsetMillis(
+            dedup, tech.streamfusion.compat.FlinkCompat.windowDedupWindowing(dedup)),
         Boolean.TRUE.equals(keepLastRow(dedup)));
   }
 }

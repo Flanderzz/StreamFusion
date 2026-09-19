@@ -17,6 +17,8 @@ import org.apache.flink.types.RowKind;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import tech.streamfusion.compat.FlinkTestCapabilities;
+import tech.streamfusion.compat.FlinkTestSources;
 
 /**
  * Nexmark q13's shape against an <b>async</b> lookup connector: the planner picks the async path, and
@@ -107,6 +109,9 @@ class FlinkAsyncLookupJoinSqlHarnessTest {
   @ParameterizedTest
   @ValueSource(booleans = {false, true})
   void updatingProbesRetainFlinksChangelogAndKeyedScheduling(boolean keyOrdered) throws Exception {
+    org.junit.jupiter.api.Assumptions.assumeTrue(
+        !keyOrdered || FlinkTestCapabilities.KEY_ORDERED_ASYNC_LOOKUP,
+        "Flink 1.18 has no key-ordered async lookup mode");
     NativeParity.assertFallbackReasonContains(
         () -> {
           var env = StreamExecutionEnvironment.getExecutionEnvironment();
@@ -117,7 +122,8 @@ class FlinkAsyncLookupJoinSqlHarnessTest {
               .set("table.exec.async-lookup.key-ordered-enabled", Boolean.toString(keyOrdered));
           table.getConfig().set("table.exec.async-lookup.output-mode", "ALLOW_UNORDERED");
           var changes =
-              env.fromData(
+              FlinkTestSources.fromData(
+                  env,
                   Types.ROW_NAMED(new String[] {"auction", "price"}, Types.LONG, Types.LONG),
                   Row.ofKind(RowKind.INSERT, 1L, 100L),
                   Row.ofKind(RowKind.DELETE, 1L, 100L),
@@ -157,7 +163,8 @@ class FlinkAsyncLookupJoinSqlHarnessTest {
         tEnv.getConfig().set("table.exec.async-lookup.timeout", "30 ms");
       }
       DataStream<Row> bid =
-          env.fromData(
+          FlinkTestSources.fromData(
+              env,
               Types.ROW_NAMED(new String[] {"auction", "price"}, Types.LONG, Types.LONG),
               Row.of(1L, 100L),
               Row.of(2L, 200L),

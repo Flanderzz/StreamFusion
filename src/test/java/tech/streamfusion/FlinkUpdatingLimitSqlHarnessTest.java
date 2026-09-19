@@ -1,6 +1,7 @@
 package tech.streamfusion;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
 
 import java.time.Duration;
 import java.util.function.Supplier;
@@ -24,9 +25,12 @@ class FlinkUpdatingLimitSqlHarnessTest {
   @ParameterizedTest
   @ValueSource(ints = {1, 2, 100})
   void monotonicCountsUseUpdateFastRank(int limit) throws Exception {
-    assertNative(() -> environment(false, false),
-        "SELECT k, COUNT(*) AS n FROM src GROUP BY k ORDER BY n DESC, k ASC NULLS FIRST LIMIT " + limit,
-        true, "UpdateFastStrategy");
+    assertNative(
+        () -> environment(false, false),
+        "SELECT k, COUNT(*) AS n FROM src GROUP BY k ORDER BY n DESC, k ASC NULLS FIRST LIMIT "
+            + limit,
+        true,
+        "UpdateFastStrategy");
   }
 
   @ParameterizedTest
@@ -48,9 +52,12 @@ class FlinkUpdatingLimitSqlHarnessTest {
   @ParameterizedTest
   @ValueSource(booleans = {false, true})
   void miniBatchPreservesMaterializedSelection(boolean changes) throws Exception {
-    assertNative(() -> environment(changes, true),
-        "SELECT k, SUM(v) AS total FROM src GROUP BY k ORDER BY total DESC NULLS LAST, k ASC LIMIT 2",
-        false, null);
+    assertNative(
+        () -> environment(changes, true),
+        "SELECT k, SUM(v) AS total FROM src GROUP BY k ORDER BY total DESC NULLS LAST, k ASC LIMIT"
+            + " 2",
+        false,
+        null);
   }
 
   @ParameterizedTest
@@ -66,7 +73,8 @@ class FlinkUpdatingLimitSqlHarnessTest {
   @CsvSource({"false,1", "true,1", "false,2", "true,2", "false,100", "true,100"})
   void retractingOffsetPreservesHostStoredRowKinds(boolean ordered, int offset) throws Exception {
     String order = ordered ? "ORDER BY total DESC NULLS LAST, k ASC NULLS FIRST " : "";
-    String sql = "SELECT k, SUM(v) AS total FROM src GROUP BY k " + order + "LIMIT 2 OFFSET " + offset;
+    String sql =
+        "SELECT k, SUM(v) AS total FROM src GROUP BY k " + order + "LIMIT 2 OFFSET " + offset;
     assertNative(() -> environment(true, false), sql, true, null);
     NativeParity.assertChangelogParity(() -> environment(true, false), sql);
   }
@@ -83,22 +91,31 @@ class FlinkUpdatingLimitSqlHarnessTest {
   @ParameterizedTest
   @ValueSource(booleans = {false, true})
   void nullableDuplicatesWithOffsetMatchHost(boolean miniBatch) throws Exception {
-    Supplier<TableEnvironment> input = () -> {
-      var env = StreamExecutionEnvironment.getExecutionEnvironment();
-      env.setParallelism(1);
-      var table = StreamTableEnvironment.create(env);
-      if (miniBatch) {
-        table.getConfig().set("table.exec.mini-batch.enabled", "true");
-        table.getConfig().set("table.exec.mini-batch.allow-latency", MINI_BATCH_LATENCY);
-        table.getConfig().set("table.exec.mini-batch.size", "4");
-      }
-      table.createTemporaryView("src", table.fromChangelogStream(env.fromData(
-          Types.ROW_NAMED(new String[] {"k", "v"}, Types.LONG, Types.LONG),
-          Row.of(1L, 20L), Row.of(1L, 20L), Row.of(2L, 10L), Row.of(null, null),
-          Row.ofKind(RowKind.DELETE, 1L, 20L), Row.of(3L, 5L),
-          Row.ofKind(RowKind.DELETE, 2L, 10L))));
-      return table;
-    };
+    Supplier<TableEnvironment> input =
+        () -> {
+          var env = StreamExecutionEnvironment.getExecutionEnvironment();
+          env.setParallelism(1);
+          var table = StreamTableEnvironment.create(env);
+          if (miniBatch) {
+            table.getConfig().set("table.exec.mini-batch.enabled", "true");
+            table.getConfig().set("table.exec.mini-batch.allow-latency", MINI_BATCH_LATENCY);
+            table.getConfig().set("table.exec.mini-batch.size", "4");
+          }
+          table.createTemporaryView(
+              "src",
+              table.fromChangelogStream(
+                  fromData(
+                      env,
+                      Types.ROW_NAMED(new String[] {"k", "v"}, Types.LONG, Types.LONG),
+                      Row.of(1L, 20L),
+                      Row.of(1L, 20L),
+                      Row.of(2L, 10L),
+                      Row.of(null, null),
+                      Row.ofKind(RowKind.DELETE, 1L, 20L),
+                      Row.of(3L, 5L),
+                      Row.ofKind(RowKind.DELETE, 2L, 10L))));
+          return table;
+        };
     String sql = "SELECT k, v FROM src ORDER BY v DESC NULLS LAST, k ASC LIMIT 2 OFFSET 1";
     assertTrue(NativePlanner.explain(input.get(), sql).contains("NativeColumnarTopN"));
     NativeParity.assertOrderedKindedParity(input, sql);
@@ -149,9 +166,9 @@ class FlinkUpdatingLimitSqlHarnessTest {
       updates[rows.length + 3] = Row.ofKind(RowKind.UPDATE_BEFORE, 2L, 9L);
       updates[rows.length + 4] = Row.ofKind(RowKind.UPDATE_AFTER, 2L, -9L);
       updates[rows.length + 5] = Row.of(4L, 20L);
-      table.createTemporaryView("src", table.fromChangelogStream(env.fromData(type, updates)));
+      table.createTemporaryView("src", table.fromChangelogStream(fromData(env, type, updates)));
     } else {
-      table.createTemporaryView("src", env.fromData(type, rows));
+      table.createTemporaryView("src", fromData(env, type, rows));
     }
     return table;
   }

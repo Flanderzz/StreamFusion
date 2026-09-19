@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import java.time.LocalDateTime;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.datastream.DataStream;
@@ -126,7 +128,8 @@ class FlinkFilterSqlHarnessTest {
     env.setParallelism(1);
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(new String[] {"k", "v"}, Types.LONG, Types.INT),
             Row.of(1L, 10),
             Row.of(2L, null),
@@ -143,7 +146,8 @@ class FlinkFilterSqlHarnessTest {
     env.setParallelism(1);
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     DataStream<Row> source =
-        env.fromData(Types.ROW_NAMED(new String[] {"v"}, Types.INT), Row.of(30), Row.of(2_000_000_000));
+        fromData(
+            env, Types.ROW_NAMED(new String[] {"v"}, Types.INT), Row.of(30), Row.of(2_000_000_000));
     tEnv.createTemporaryView(
         "o", source, Schema.newBuilder().column("v", DataTypes.INT()).build());
     return tEnv;
@@ -154,9 +158,9 @@ class FlinkFilterSqlHarnessTest {
     env.setParallelism(1);
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     DataStream<Row> source =
-        env.fromData(
-            Types.ROW_NAMED(
-                new String[] {"v", "t"}, Types.INT, Types.LOCAL_DATE_TIME),
+        fromData(
+            env,
+            Types.ROW_NAMED(new String[] {"v", "t"}, Types.INT, Types.LOCAL_DATE_TIME),
             Row.of(10, LocalDateTime.of(2020, 1, 1, 0, 0, 0)),
             Row.of(30, LocalDateTime.of(2020, 1, 2, 12, 30, 0)),
             Row.of(20, LocalDateTime.of(2020, 1, 3, 6, 15, 45)));
@@ -175,9 +179,9 @@ class FlinkFilterSqlHarnessTest {
     env.setParallelism(1);
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     DataStream<Row> source =
-        env.fromData(
-            Types.ROW_NAMED(
-                new String[] {"k", "v", "s"}, Types.LONG, Types.INT, Types.STRING),
+        fromData(
+            env,
+            Types.ROW_NAMED(new String[] {"k", "v", "s"}, Types.LONG, Types.INT, Types.STRING),
             Row.of(1L, 10, "a"),
             Row.of(2L, 30, "b"),
             Row.of(3L, 20, "c"),

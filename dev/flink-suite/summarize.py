@@ -28,7 +28,7 @@ def execution_contracts(
         if (
             len(fields) != 3
             or not re.fullmatch(r"[\w.$]+#[\w$]+", fields[0])
-            or not re.fullmatch(r"\*|\w+=(?:true|false)", fields[1])
+            or not re.fullmatch(r"\*|\w+=\w+(?:&\w+=\w+)*", fields[1])
             or not re.fullmatch(r"\w+(?:[+|]\w+)*|!.+", fields[2])
         ):
             raise ValueError(f"Invalid native execution contract: {line}")
@@ -120,6 +120,7 @@ def main() -> int:
     parser.add_argument("reports", type=pathlib.Path)
     parser.add_argument("--xfail", action="append", default=[])
     parser.add_argument("--native-reports", type=pathlib.Path)
+    parser.add_argument("--contracts", type=pathlib.Path, default=CONTRACT_FILE)
     parser.add_argument("--require-all-contracts", action="store_true")
     parser.add_argument("--require-contract-prefix", action="append", default=[])
     parser.add_argument("--require-test", action="append", default=[])
@@ -136,7 +137,7 @@ def main() -> int:
     problems: list[tuple[str, str, str, str]] = []
     expected: list[tuple[str, str, str, str]] = []
     malformed: list[tuple[pathlib.Path, str]] = []
-    contracts = execution_contracts()
+    contracts = execution_contracts(args.contracts)
     executed = Counter()
     executed_tests = Counter()
 

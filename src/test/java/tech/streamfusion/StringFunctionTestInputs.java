@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
@@ -20,7 +22,8 @@ final class StringFunctionTestInputs {
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     tEnv.createTemporaryView(
         "searches",
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(
                 new String[] {"id", "s", "needle", "start_pos", "binary_value"},
                 Types.INT,
@@ -132,7 +135,8 @@ final class StringFunctionTestInputs {
     }
     tEnv.createTemporaryView(
         "encodings",
-        env.fromData(
+        fromData(
+            env,
             rows,
             Types.ROW_NAMED(
                 new String[] {"id", "s", "hex_text", "n", "i", "sh", "t"},
@@ -276,7 +280,8 @@ final class StringFunctionTestInputs {
     }
     tables.createTemporaryView(
         "texts",
-        env.fromData(
+        fromData(
+            env,
             rows,
             Types.ROW_NAMED(
                 new String[] {"id", "s", "f", "t", "n", "i", "p", "b", "d", "u"},
@@ -356,7 +361,7 @@ final class StringFunctionTestInputs {
     StreamTableEnvironment tables = StreamTableEnvironment.create(env);
     tables.createTemporaryView(
         "urls",
-        env.fromData(rows, Types.ROW_NAMED(new String[] {"id", "s"}, Types.INT, Types.STRING)),
+        fromData(env, rows, Types.ROW_NAMED(new String[] {"id", "s"}, Types.INT, Types.STRING)),
         Schema.newBuilder().column("id", DataTypes.INT()).column("s", DataTypes.STRING()).build());
     return tables;
   }

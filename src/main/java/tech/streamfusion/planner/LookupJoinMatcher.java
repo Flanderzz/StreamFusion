@@ -1,14 +1,13 @@
 package tech.streamfusion.planner;
 
-import java.util.HashMap;
-import java.util.Map;
 import org.apache.calcite.plan.RelOptTable;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.JoinRelType;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalLookupJoin;
 import org.apache.flink.table.planner.plan.schema.TableSourceTable;
-import org.apache.flink.table.planner.plan.utils.FunctionCallUtil;
 import org.apache.flink.types.RowKind;
+import tech.streamfusion.compat.FlinkLookupCompat;
+import tech.streamfusion.compat.LookupKeys;
 
 /**
  * Recognizes the processing-time lookup joins the native operator runs: {@code probe JOIN dim FOR
@@ -32,7 +31,8 @@ final class LookupJoinMatcher {
   }
 
   static String unsupportedReason(StreamPhysicalLookupJoin join) {
-    if (join.asyncOptions().isDefined() && join.asyncOptions().get().keyOrdered) {
+    var asyncOptions = FlinkLookupCompat.asyncOptions(join);
+    if (asyncOptions != null && asyncOptions.keyOrdered()) {
       return "lookup join: key-ordered asynchronous lookup requires Flink's keyed scheduling";
     }
     if (!join.inputChangelogMode().containsOnly(RowKind.INSERT)) {
@@ -47,22 +47,11 @@ final class LookupJoinMatcher {
     if (!(unwrapTable(join.temporalTable()) instanceof TableSourceTable)) {
       return "lookup join: temporal table is not a (non-legacy) table source";
     }
-    for (FunctionCallUtil.FunctionParam param : lookupKeys(join).values()) {
-      if (!(param instanceof FunctionCallUtil.FieldRef)
-          && !(param instanceof FunctionCallUtil.Constant)) {
-        return "lookup join: unsupported lookup key shape " + param.getClass().getSimpleName();
-      }
-    }
-    return null;
+    return FlinkLookupCompat.unsupportedKeyShape(lookupKeys(join));
   }
 
-  /** The dimension key → probe field/constant map the generated fetcher builds its key row from. */
-  static Map<Integer, FunctionCallUtil.FunctionParam> lookupKeys(StreamPhysicalLookupJoin join) {
-    Map<Integer, FunctionCallUtil.FunctionParam> keys = new HashMap<>();
-    scala.collection.JavaConverters.mapAsJavaMapConverter(join.allLookupKeys())
-        .asJava()
-        .forEach((index, param) -> keys.put((Integer) index, param));
-    return keys;
+  static LookupKeys lookupKeys(StreamPhysicalLookupJoin join) {
+    return FlinkLookupCompat.lookupKeys(join);
   }
 
   static boolean isLeftOuterJoin(StreamPhysicalLookupJoin join) {
@@ -89,12 +78,12 @@ final class LookupJoinMatcher {
         LookupJoinMatcher.temporalTable(join),
         LookupJoinMatcher.lookupKeys(join),
         join.calcOnTemporalTable().isDefined() ? join.calcOnTemporalTable().get() : null,
-        join.finalPreFilterCondition().isDefined() ? join.finalPreFilterCondition().get() : null,
-        join.finalRemainingCondition().isDefined() ? join.finalRemainingCondition().get() : null,
+        FlinkLookupCompat.preFilter(join),
+        FlinkLookupCompat.remainingCondition(join),
         LookupJoinMatcher.isLeftOuterJoin(join),
-        join.asyncOptions().isDefined() ? join.asyncOptions().get() : null,
+        FlinkLookupCompat.asyncOptions(join),
         join.retryOptions().isDefined() ? join.retryOptions().get() : null,
-        join.preferCustomShuffle(),
+        FlinkLookupCompat.preferCustomShuffle(join),
         join.inputChangelogMode());
   }
 }

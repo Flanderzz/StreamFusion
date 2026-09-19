@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
@@ -228,18 +230,16 @@ class FlinkTimestampWindowSqlHarnessTest {
     env.setParallelism(1);
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+                env,
                 Types.ROW_NAMED(
                     new String[] {"k", "value", "ts"},
                     Types.LONG,
                     Types.LONG,
                     Types.LOCAL_DATE_TIME),
-                Row.ofKind(
-                    RowKind.INSERT, 1L, 5L, LocalDateTime.of(2024, 6, 1, 12, 0, 1)),
-                Row.ofKind(
-                    RowKind.UPDATE_BEFORE, 1L, 5L, LocalDateTime.of(2024, 6, 1, 12, 0, 1)),
-                Row.ofKind(
-                    RowKind.UPDATE_AFTER, 1L, 7L, LocalDateTime.of(2024, 6, 1, 12, 0, 1)))
+                Row.ofKind(RowKind.INSERT, 1L, 5L, LocalDateTime.of(2024, 6, 1, 12, 0, 1)),
+                Row.ofKind(RowKind.UPDATE_BEFORE, 1L, 5L, LocalDateTime.of(2024, 6, 1, 12, 0, 1)),
+                Row.ofKind(RowKind.UPDATE_AFTER, 1L, 7L, LocalDateTime.of(2024, 6, 1, 12, 0, 1)))
             .assignTimestampsAndWatermarks(
                 WatermarkStrategy.<Row>forBoundedOutOfOrderness(Duration.ZERO)
                     .withTimestampAssigner((row, timestamp) -> timestampMillis(row)));
@@ -265,7 +265,8 @@ class FlinkTimestampWindowSqlHarnessTest {
     // ts is a plain TIMESTAMP(3) rowtime attribute (not local-time-zone); the source carries the
     // watermarks (SOURCE_WATERMARK), so no interior watermark-assigner breaks the columnar island.
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+                env,
                 Types.ROW_NAMED(
                     new String[] {"k", "value", "ts"},
                     Types.LONG,

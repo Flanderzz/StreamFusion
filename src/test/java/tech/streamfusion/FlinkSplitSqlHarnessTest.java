@@ -3,6 +3,11 @@ package tech.streamfusion;
 import org.junit.jupiter.api.Test;
 
 class FlinkSplitSqlHarnessTest {
+  @org.junit.jupiter.api.BeforeEach
+  void requireReleasedHostFunction() {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction("SPLIT");
+  }
+
   @Test
   void splitsLiteralSeparatorsAndPreservesEmptyTokens() throws Exception {
     NativeParity.assertParity(

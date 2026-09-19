@@ -6,7 +6,6 @@ import org.apache.arrow.c.Data;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.flink.runtime.state.StateInitializationContext;
-import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.paimon.data.BinaryRow;
@@ -15,12 +14,13 @@ import org.apache.paimon.flink.utils.RuntimeContextUtils;
 import org.apache.paimon.index.HashBucketAssigner;
 import org.apache.paimon.table.FileStoreTable;
 import tech.streamfusion.Native;
+import tech.streamfusion.compat.FlinkStreamOperator;
 import tech.streamfusion.operator.BucketedArrowBatch;
 import tech.streamfusion.operator.ColumnarRecordMetrics;
 import tech.streamfusion.operator.NativeAllocator;
 
 /** Paimon's released dynamic bucket index applied to native key hashes without unpacking rows. */
-public final class NativePaimonBucketAssigner extends AbstractStreamOperator<BucketedArrowBatch>
+public final class NativePaimonBucketAssigner extends FlinkStreamOperator<BucketedArrowBatch>
     implements OneInputStreamOperator<BucketedArrowBatch, BucketedArrowBatch> {
   private final FileStoreTable table;
   private final String initialCommitUser;

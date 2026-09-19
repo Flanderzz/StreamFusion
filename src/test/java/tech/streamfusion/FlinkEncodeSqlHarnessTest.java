@@ -5,7 +5,7 @@ import org.junit.jupiter.api.Test;
 class FlinkEncodeSqlHarnessTest {
   @Test
   void encodesUnicodeNullsAndUnmappableCharacters() throws Exception {
-    NativeParity.assertParity(
+    assertEncodingParity(
         StringFunctionTestInputs::encodings,
         "SELECT id, ENCODE(s, 'UTF-8'), ENCODE(s, 'ASCII'), ENCODE(s, 'latin1') FROM encodings");
   }
@@ -18,10 +18,18 @@ class FlinkEncodeSqlHarnessTest {
 
   @Test
   void utf16EncodesBomEndianAliasesAndSupplementaryCharacters() throws Exception {
-    NativeParity.assertParity(
-        () -> TextTimeFunctionTestInputs.textRows(
-            null, "", "a\u0000b", "\ufeff", "\ufffe", "\u007f\u0080",
-            "\u4e2d\ud83d\ude00", "\ud7ff\ue000\uffff", "\ud83d\ude00".repeat(2048)),
+    assertEncodingParity(
+        () ->
+            TextTimeFunctionTestInputs.textRows(
+                null,
+                "",
+                "a\u0000b",
+                "\ufeff",
+                "\ufffe",
+                "\u007f\u0080",
+                "\u4e2d\ud83d\ude00",
+                "\ud7ff\ue000\uffff",
+                "\ud83d\ude00".repeat(2048)),
         "SELECT id, ENCODE(s, 'UTF-16'), ENCODE(s, 'UnicodeBigUnmarked'),"
             + " ENCODE(s, 'UnicodeLittleUnmarked'), ENCODE(s, 'Unicode') FROM inputs");
   }
@@ -32,5 +40,16 @@ class FlinkEncodeSqlHarnessTest {
         TextTimeFunctionTestInputs::parameters,
         "SELECT id, ENCODE(s, CASE WHEN n > 0 THEN 'UTF-8' ELSE 'ASCII' END) FROM inputs",
         "literal charset");
+  }
+
+  private static void assertEncodingParity(
+      java.util.function.Supplier<org.apache.flink.table.api.TableEnvironment> environment,
+      String sql)
+      throws Exception {
+    if (tech.streamfusion.compat.FlinkTestCapabilities.VARIABLE_LENGTH_ENCODE) {
+      NativeParity.assertParity(environment, sql);
+    } else {
+      NativeParity.assertFallbackReasonContains(environment, sql, "plan declares BINARY(1)");
+    }
   }
 }

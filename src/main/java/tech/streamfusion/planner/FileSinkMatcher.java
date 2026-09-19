@@ -110,7 +110,7 @@ final class FileSinkMatcher {
     Map<String, String> catalogOptions = table.getOptions();
     boolean changelog = format.changelog(catalogOptions);
     Map<String, String> options = format.writerOptions(catalogOptions);
-    for (SinkAbilitySpec spec : sink.abilitySpecs()) {
+    for (SinkAbilitySpec spec : tech.streamfusion.compat.FlinkCompat.sinkAbilities(sink)) {
       if (spec instanceof OverwriteSpec) {
         // Falling back reproduces the host's own error: streaming INSERT OVERWRITE is rejected.
         return Planned.fallback("INSERT OVERWRITE is not supported in streaming mode");

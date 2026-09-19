@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
@@ -79,6 +81,9 @@ class FlinkUnnestSqlHarnessTest {
 
   @Test
   void leftUnnestWithOrdinalityMatchesHost() throws Exception {
+    org.junit.jupiter.api.Assumptions.assumeTrue(
+        tech.streamfusion.compat.FlinkTestCapabilities.UNNEST_ORDINALITY,
+        "Flink 1.18 cannot plan UNNEST WITH ORDINALITY");
     // A LEFT null-pad row carries a null ordinal too.
     NativeParity.assertParity(
         FlinkUnnestSqlHarnessTest::environment,
@@ -87,6 +92,9 @@ class FlinkUnnestSqlHarnessTest {
 
   @Test
   void unnestWithOrdinalityMatchesHost() throws Exception {
+    org.junit.jupiter.api.Assumptions.assumeTrue(
+        tech.streamfusion.compat.FlinkTestCapabilities.UNNEST_ORDINALITY,
+        "Flink 1.18 cannot plan UNNEST WITH ORDINALITY");
     // WITH ORDINALITY appends a 1-based position column (the element's index in its array).
     NativeParity.assertParity(
         FlinkUnnestSqlHarnessTest::environment,
@@ -95,6 +103,9 @@ class FlinkUnnestSqlHarnessTest {
 
   @Test
   void unnestMapWithOrdinalityMatchesHost() throws Exception {
+    org.junit.jupiter.api.Assumptions.assumeTrue(
+        tech.streamfusion.compat.FlinkTestCapabilities.UNNEST_ORDINALITY,
+        "Flink 1.18 cannot plan UNNEST WITH ORDINALITY");
     NativeParity.assertParity(
         FlinkUnnestSqlHarnessTest::mapEnvironment,
         "SELECT k, mk, mv, o FROM t CROSS JOIN UNNEST(m) WITH ORDINALITY AS u(mk, mv, o)");
@@ -134,7 +145,8 @@ class FlinkUnnestSqlHarnessTest {
     env.setParallelism(1);
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(new String[] {"k", "vs"}, Types.LONG, Types.OBJECT_ARRAY(Types.LONG)),
             Row.of(1L, new Long[] {10L, 20L}),
             Row.of(2L, new Long[] {30L}),
@@ -156,7 +168,8 @@ class FlinkUnnestSqlHarnessTest {
     env.setParallelism(1);
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(
                 new String[] {"k", "m"}, Types.LONG, Types.MAP(Types.STRING, Types.LONG)),
             Row.of(1L, java.util.Map.of("a", 10L, "b", 20L)),
@@ -177,7 +190,8 @@ class FlinkUnnestSqlHarnessTest {
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     // A MULTISET<STRING> is carried as a MAP<element, count>.
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(
                 new String[] {"k", "ms"}, Types.LONG, Types.MAP(Types.STRING, Types.INT)),
             Row.of(1L, java.util.Map.of("a", 2, "b", 1)),
@@ -197,7 +211,8 @@ class FlinkUnnestSqlHarnessTest {
     env.setParallelism(1);
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(
                 new String[] {"k", "rs"},
                 Types.LONG,
@@ -226,9 +241,9 @@ class FlinkUnnestSqlHarnessTest {
     env.setParallelism(1);
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     DataStream<Row> source =
-        env.fromData(
-            Types.ROW_NAMED(
-                new String[] {"k", "ss"}, Types.LONG, Types.OBJECT_ARRAY(Types.STRING)),
+        fromData(
+            env,
+            Types.ROW_NAMED(new String[] {"k", "ss"}, Types.LONG, Types.OBJECT_ARRAY(Types.STRING)),
             Row.of(1L, new String[] {"a", "b"}),
             Row.of(2L, new String[] {"c"}));
     tEnv.createTemporaryView(

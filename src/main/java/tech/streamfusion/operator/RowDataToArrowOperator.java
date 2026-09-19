@@ -1,12 +1,11 @@
 package tech.streamfusion.operator;
 
-import tech.streamfusion.planner.NativeConfig;
 import java.util.AbstractList;
 import java.util.ArrayList;
 import java.util.List;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
-import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
+import org.apache.flink.metrics.Counter;
 import org.apache.flink.streaming.api.operators.BoundedOneInput;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.api.watermark.Watermark;
@@ -14,7 +13,8 @@ import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.runtime.typeutils.RowDataSerializer;
 import org.apache.flink.table.types.logical.RowType;
-import org.apache.flink.metrics.Counter;
+import tech.streamfusion.compat.FlinkStreamOperator;
+import tech.streamfusion.planner.NativeConfig;
 
 /**
  * Transpose entering a columnar region: buffers rows and emits them as {@link ArrowBatch}es. Sits
@@ -22,9 +22,10 @@ import org.apache.flink.metrics.Counter;
  * once at the boundary rather than inside every native operator.
  *
  * <p>Ownership of an emitted batch passes to the downstream operator, which closes it once read (in
- * a chained task the downstream consumes it inline). Watermarks pass through after the buffer flushes.
+ * a chained task the downstream consumes it inline). Watermarks pass through after the buffer
+ * flushes.
  */
-public class RowDataToArrowOperator extends AbstractStreamOperator<ArrowBatch>
+public class RowDataToArrowOperator extends FlinkStreamOperator<ArrowBatch>
     implements OneInputStreamOperator<RowData, ArrowBatch>, BoundedOneInput {
 
   private final RowType rowType;

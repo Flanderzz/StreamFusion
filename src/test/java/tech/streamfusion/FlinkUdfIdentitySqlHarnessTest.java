@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.api.TableEnvironment;
@@ -11,7 +13,16 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 class FlinkUdfIdentitySqlHarnessTest {
   @ParameterizedTest
-  @ValueSource(strings = {"REV", "UPPER", "LOWER", "CHAR_LENGTH", "JSON_UNQUOTE", "TO_DATE", "FROM_UNIXTIME"})
+  @ValueSource(
+      strings = {
+        "REV",
+        "UPPER",
+        "LOWER",
+        "CHAR_LENGTH",
+        "JSON_UNQUOTE",
+        "TO_DATE",
+        "FROM_UNIXTIME"
+      })
   void registeredFunctionTakesPrecedenceOverBuiltinName(String name) throws Exception {
     NativeParity.assertParity(
         () -> environment(name), "SELECT id, " + name + "(s) FROM inputs");
@@ -32,7 +43,8 @@ class FlinkUdfIdentitySqlHarnessTest {
     table.createTemporarySystemFunction(name, Reverse.class);
     table.createTemporaryView(
         "inputs",
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(new String[] {"id", "s"}, Types.INT, Types.STRING),
             Row.of(1, "Alice"),
             Row.of(2, "Bob"),

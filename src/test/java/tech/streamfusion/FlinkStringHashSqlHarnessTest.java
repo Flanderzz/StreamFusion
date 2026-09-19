@@ -2,6 +2,7 @@ package tech.streamfusion;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
 
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
@@ -88,10 +89,15 @@ class FlinkStringHashSqlHarnessTest {
     StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
     tEnv.createTemporaryView(
         "strings",
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(
                 new String[] {"id", "s", "other", "sep", "bits"},
-                Types.INT, Types.STRING, Types.STRING, Types.STRING, Types.INT),
+                Types.INT,
+                Types.STRING,
+                Types.STRING,
+                Types.STRING,
+                Types.INT),
             Row.of(0, "abc", "", ":", 224),
             Row.of(1, "", "abc", "", 256),
             Row.of(2, null, "abc", ":", 384),

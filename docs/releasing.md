@@ -95,3 +95,30 @@ a GitHub prerelease.
 If a release fails before Central reports it as published, fix the cause, delete the unpublished tag,
 and prepare a new candidate version. Once Central has published a coordinate, never reuse it; advance
 to the next candidate or patch version.
+
+## Flink 1.18 development artifacts
+
+`-Pflink-1.18` selects Flink 1.18.1 and adds `-flink1.18` to each deployment artifact ID. Build
+the line in a clean output tree and check it with
+`bin/check-artifacts.sh --flink-line 1.18` (`--host-only` for a local single-platform build).
+The default 2.2 artifacts keep their existing coordinates. Never combine outputs from the two
+profiles into one archive or installation. The published POMs must contain the resolved qualified
+coordinates and selected dependency versions, not unresolved profile-dependent artifact IDs.
+
+Publication of the 1.18 line remains gated on
+[dual-line CI and release validation](https://github.com/datafusion-contrib/StreamFusion/issues/189),
+the [connector matrix](https://github.com/datafusion-contrib/StreamFusion/issues/187) and
+[real-cluster recovery checks](https://github.com/datafusion-contrib/StreamFusion/issues/188).
+The local release tools accept the same line explicitly:
+
+```sh
+bin/build-release.sh --host-only --flink-line 1.18
+bin/check-artifacts.sh --host-only --flink-line 1.18
+bin/package-release.sh --flink-line 1.18
+```
+
+The 1.18 archive has a `streamfusion-flink1.18-` prefix and contains only qualified payloads;
+Delta is excluded from its build and archive. The automated release workflow and base-image
+validation still target 2.2 until the remaining gates pass.
+No 1.18 Delta artifact is currently admitted. See
+[Flink line compatibility](flink-compatibility.md) for the exact development scope.

@@ -1,6 +1,7 @@
 package tech.streamfusion;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
@@ -42,9 +43,12 @@ class FlinkNullSafeSemiAntiJoinSqlHarnessTest {
   @ParameterizedTest
   @ValueSource(booleans = {false, true})
   void changelogSourcesPreserveDuplicateMatchCountsAndDeletes(boolean anti) throws Exception {
-    assertNative("SELECT a.s, a.i, a.v FROM A a WHERE " + (anti ? "NOT " : "")
-        + "EXISTS (SELECT 1 FROM B b WHERE a.s IS NOT DISTINCT FROM b.s "
-        + "AND a.d IS NOT DISTINCT FROM b.d AND a.ts IS NOT DISTINCT FROM b.ts AND a.v < b.v)", true);
+    assertNative(
+        "SELECT a.s, a.i, a.v FROM A a WHERE "
+            + (anti ? "NOT " : "")
+            + "EXISTS (SELECT 1 FROM B b WHERE a.s IS NOT DISTINCT FROM b.s "
+            + "AND a.d IS NOT DISTINCT FROM b.d AND a.ts IS NOT DISTINCT FROM b.ts AND a.v < b.v)",
+        true);
   }
 
   @ParameterizedTest
@@ -71,14 +75,29 @@ class FlinkNullSafeSemiAntiJoinSqlHarnessTest {
     var schema = Schema.newBuilder().column("s", DataTypes.STRING()).column("i", DataTypes.INT())
         .column("l", DataTypes.BIGINT()).column("d", DataTypes.DECIMAL(12, 2))
         .column("ts", DataTypes.TIMESTAMP(9)).column("v", DataTypes.INT()).build();
-    Row[] left = {row(null, null, 1), row(null, 1, 2), row("a", 1, 3), row("a", 1, 3), row("missing", 3, 4)};
-    Row[] right = changes
-        ? new Row[] {row(null, null, 8), row(null, null, 8), row("a", 1, 9),
-            change(RowKind.DELETE, null, null, 8), change(RowKind.UPDATE_BEFORE, "a", 1, 9),
-            change(RowKind.UPDATE_AFTER, "a", 1, 1), row("right", 4, 9)}
-        : new Row[] {row(null, null, 8), row(null, 1, 8), row("a", 1, 9), row("a", 1, 9), row("right", 4, 9)};
-    table.createTemporaryView("A", table.fromChangelogStream(env.fromData(type, left), schema));
-    table.createTemporaryView("B", table.fromChangelogStream(env.fromData(type, right), schema));
+    Row[] left = {
+      row(null, null, 1), row(null, 1, 2), row("a", 1, 3), row("a", 1, 3), row("missing", 3, 4)
+    };
+    Row[] right =
+        changes
+            ? new Row[] {
+              row(null, null, 8),
+              row(null, null, 8),
+              row("a", 1, 9),
+              change(RowKind.DELETE, null, null, 8),
+              change(RowKind.UPDATE_BEFORE, "a", 1, 9),
+              change(RowKind.UPDATE_AFTER, "a", 1, 1),
+              row("right", 4, 9)
+            }
+            : new Row[] {
+              row(null, null, 8),
+              row(null, 1, 8),
+              row("a", 1, 9),
+              row("a", 1, 9),
+              row("right", 4, 9)
+            };
+    table.createTemporaryView("A", table.fromChangelogStream(fromData(env, type, left), schema));
+    table.createTemporaryView("B", table.fromChangelogStream(fromData(env, type, right), schema));
     return table;
   }
 

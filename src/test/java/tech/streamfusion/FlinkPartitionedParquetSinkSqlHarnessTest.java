@@ -2,9 +2,8 @@ package tech.streamfusion;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
 
-import tech.streamfusion.planner.NativePlanner;
-import tech.streamfusion.planner.PhysicalPlanScan;
 import java.io.File;
 import java.math.BigDecimal;
 import java.nio.file.Files;
@@ -28,6 +27,8 @@ import org.apache.flink.util.CloseableIterator;
 import org.apache.parquet.hadoop.ParquetFileReader;
 import org.apache.parquet.hadoop.util.HadoopInputFile;
 import org.junit.jupiter.api.Test;
+import tech.streamfusion.planner.NativePlanner;
+import tech.streamfusion.planner.PhysicalPlanScan;
 
 /**
  * A PARTITIONED BY table through the native sink matches the host end to end: the same rows read
@@ -80,7 +81,8 @@ class FlinkPartitionedParquetSinkSqlHarnessTest {
     // test). The 1969-12-31T23:59:59.998500 timestamp lands between milliseconds: written at
     // millis precision it must floor to .998, not truncate toward zero to .999.
     DataStream<Row> source =
-        env.fromData(
+        fromData(
+            env,
             Types.ROW_NAMED(
                 new String[] {
                   "source_partition",
@@ -205,7 +207,8 @@ class FlinkPartitionedParquetSinkSqlHarnessTest {
   /** The Parquet message type of one committed part file — identical schemas prove type parity. */
   private static String footerSchema(Path directory) throws Exception {
     File partition = new File(directory.toFile(), "dt=a");
-    File[] parts = partition.listFiles((dir, name) -> !name.startsWith(".") && !name.startsWith("_"));
+    File[] parts =
+        partition.listFiles((dir, name) -> !name.startsWith(".") && !name.startsWith("_"));
     assertTrue(parts != null && parts.length > 0, "no committed part file under dt=a");
     try (ParquetFileReader reader =
         ParquetFileReader.open(

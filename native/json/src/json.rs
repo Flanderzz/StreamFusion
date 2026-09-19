@@ -1269,6 +1269,7 @@ fn decode_json_bodies_simd(
     bodies: &RecordBatch,
     env: JsonEnv,
     array_roots: ArrayRootPolicy,
+    retryable: bool,
     drift: &StructDriftDetector,
     root: &mut StructJsonAppender,
     scratch: &mut Vec<u8>,
@@ -1282,15 +1283,17 @@ fn decode_json_bodies_simd(
             .fields()
             .iter()
             .any(|f| contains_binary(f.data_type()));
-    // Only the plain `json` format re-decodes a message through the Jackson-faithful walk (on a
-    // failed fast parse or a cursor drift); the CDC envelopes keep the spec-strict fast parse —
-    // their `old`-presence pre-scans mirror its skip conditions row for row.
-    let retryable = array_roots == ArrayRootPolicy::FanOut;
     for row in 0..bodies.num_rows() {
         let Some(bytes) = binary_body(column, row) else {
             continue;
         };
         if skip_blank_body(bytes, env.lenient) {
+            continue;
+        }
+        if array_roots == ArrayRootPolicy::Corrupt
+            && bytes.iter().copied().find(|b| !b.is_ascii_whitespace()) == Some(b'[')
+        {
+            assert!(env.lenient, "JSON body was not a single object");
             continue;
         }
         scratch.clear();
@@ -1507,6 +1510,8 @@ pub(crate) struct JsonDecoder {
     /// never fan out — an array root is corrupt outright, or unwrapped when it holds exactly one
     /// envelope (see [`ArrayRootPolicy`]).
     array_roots: ArrayRootPolicy,
+    /// Plain JSON retries through the parser-compatible walk; CDC keeps its envelope scan.
+    retryable: bool,
     /// Schema-compiled cursor-drift checks shared across all decoded batches.
     drift: StructDriftDetector,
     /// Schema-compiled appender tree. Its builders reset after each finished batch, while the
@@ -1521,7 +1526,15 @@ pub(crate) struct JsonDecoder {
 
 impl JsonDecoder {
     pub(crate) fn new(schema: SchemaRef, env: JsonEnv) -> JsonDecoder {
-        JsonDecoder::build(schema, env, ArrayRootPolicy::FanOut)
+        JsonDecoder::plain(schema, env, ArrayRootPolicy::FanOut)
+    }
+
+    pub(crate) fn plain(
+        schema: SchemaRef,
+        env: JsonEnv,
+        array_roots: ArrayRootPolicy,
+    ) -> JsonDecoder {
+        JsonDecoder::build(schema, env, array_roots, true)
     }
 
     /// The CDC-envelope shape: a top-level array is never a fan-out — `array_roots` picks the
@@ -1531,10 +1544,15 @@ impl JsonDecoder {
         env: JsonEnv,
         array_roots: ArrayRootPolicy,
     ) -> JsonDecoder {
-        JsonDecoder::build(schema, env, array_roots)
+        JsonDecoder::build(schema, env, array_roots, false)
     }
 
-    fn build(schema: SchemaRef, env: JsonEnv, array_roots: ArrayRootPolicy) -> JsonDecoder {
+    fn build(
+        schema: SchemaRef,
+        env: JsonEnv,
+        array_roots: ArrayRootPolicy,
+        retryable: bool,
+    ) -> JsonDecoder {
         let raw_literals = schema
             .fields()
             .iter()
@@ -1547,6 +1565,7 @@ impl JsonDecoder {
             raw_literals,
             env,
             array_roots,
+            retryable,
             drift,
             root,
             buffers: std::cell::RefCell::new(simd_json::Buffers::default()),
@@ -1575,6 +1594,7 @@ impl JsonDecoder {
             bodies,
             self.env,
             self.array_roots,
+            self.retryable,
             &self.drift,
             &mut root,
             &mut scratch,

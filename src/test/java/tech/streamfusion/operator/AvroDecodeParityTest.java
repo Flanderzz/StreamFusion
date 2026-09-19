@@ -1,6 +1,5 @@
 package tech.streamfusion.operator;
 
-import tech.streamfusion.format.avro.AvroFormatProvider;
 import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
@@ -15,7 +14,6 @@ import org.apache.avro.generic.GenericRecord;
 import org.apache.avro.io.BinaryEncoder;
 import org.apache.avro.io.EncoderFactory;
 import org.apache.flink.api.common.serialization.DeserializationSchema;
-import org.apache.flink.formats.avro.AvroFormatOptions.AvroEncoding;
 import org.apache.flink.formats.avro.AvroRowDataDeserializationSchema;
 import org.apache.flink.formats.avro.typeutils.AvroSchemaConverter;
 import org.apache.flink.metrics.MetricGroup;
@@ -45,6 +43,7 @@ import org.apache.flink.util.SimpleUserCodeClassLoader;
 import org.apache.flink.util.UserCodeClassLoader;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
+import tech.streamfusion.format.avro.AvroFormatProvider;
 
 /**
  * Pins the native bare-Avro decode to Flink's own {@link AvroRowDataDeserializationSchema},
@@ -204,7 +203,10 @@ class AvroDecodeParityTest {
                     },
                     new String[] {"ts3", "ts6", "ltz3", "ltz6"})
                 .copy(false);
-    Schema writer = AvroSchemaConverter.convertToSchema(corrected, false);
+    org.junit.jupiter.api.Assumptions.assumeTrue(
+        tech.streamfusion.format.avro.compat.AvroTestSchemas.CORRECTED_TIMESTAMP_MAPPING,
+        "Corrected Avro timestamp mapping is absent from Flink 1.18");
+    Schema writer = tech.streamfusion.format.avro.compat.AvroCompat.schema(corrected, false);
     Map<String, String> options =
         Map.of("format", "avro", "avro.timestamp_mapping.legacy", "false");
     Consumer<GenericRecord> filler =
@@ -290,8 +292,8 @@ class AvroDecodeParityTest {
       DecodeParityHarness harness, RowType rowType, byte[] message, boolean legacyTimestampMapping)
       throws Exception {
     AvroRowDataDeserializationSchema schema =
-        new AvroRowDataDeserializationSchema(
-            rowType, InternalTypeInfo.of(rowType), AvroEncoding.BINARY, legacyTimestampMapping);
+        tech.streamfusion.format.avro.compat.AvroTestSchemas.decoder(
+            rowType, InternalTypeInfo.of(rowType), legacyTimestampMapping);
     schema.open(
         new DeserializationSchema.InitializationContext() {
           @Override

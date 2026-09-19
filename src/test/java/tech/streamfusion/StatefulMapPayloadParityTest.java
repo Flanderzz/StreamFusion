@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static tech.streamfusion.compat.FlinkTestSources.fromData;
+
 import java.util.LinkedHashMap;
 import java.util.Map;
 import org.apache.flink.api.common.typeinfo.Types;
@@ -51,9 +53,13 @@ class StatefulMapPayloadParityTest {
     Map<String, Integer> map = new LinkedHashMap<>();
     if (withNullKey) map.put(null, 7);
     map.put("a", 1);
-    table.createTemporaryView("n", env.fromData(
-        Types.ROW_NAMED(new String[] {"id", "m"}, Types.INT, Types.MAP(Types.STRING, Types.INT)),
-        Row.of(1, map)));
+    table.createTemporaryView(
+        "n",
+        fromData(
+            env,
+            Types.ROW_NAMED(
+                new String[] {"id", "m"}, Types.INT, Types.MAP(Types.STRING, Types.INT)),
+            Row.of(1, map)));
     return table;
   }
 }
