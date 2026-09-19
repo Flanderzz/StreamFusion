@@ -33,3 +33,29 @@ org.apache.flink.table.planner.runtime.stream.sql.AsyncLookupJoinITCase#testAsyn
 org.apache.flink.table.planner.runtime.stream.sql.AsyncLookupJoinITCase#testAsyncJoinTemporalTableWithRetry	legacyTableSource=true	!lookup join: temporal table is not a (non-legacy) table source
 org.apache.flink.table.planner.runtime.stream.sql.LookupJoinITCase#testJoinTemporalTable	legacyTableSource=false	NativeLookupJoinOperator
 org.apache.flink.table.planner.runtime.stream.sql.LookupJoinITCase#testJoinTemporalTable	legacyTableSource=true	!lookup join: temporal table is not a (non-legacy) table source
+
+# Legacy upsert sinks must retain planner-proven keys after native replacement.
+org.apache.flink.table.planner.runtime.stream.table.JoinITCase#testJoinKeyEqualsGroupByKey	changelog=true	!state backend: Flink 1.18 changelog state is not verified for native keyed state
+org.apache.flink.table.planner.runtime.stream.table.JoinITCase#testJoinKeyEqualsGroupByKey	state=HEAP&changelog=false	NativeColumnarUpdatingJoinOperator
+org.apache.flink.table.planner.runtime.stream.table.JoinITCase#testJoinKeyEqualsGroupByKey	state=ROCKSDB&changelog=false	!state backend: Flink 1.18 native keyed state requires heap state or the StreamFusion RocksDB backend
+org.apache.flink.table.planner.runtime.stream.table.JoinITCase#testJoinKeyNotEqualPrimaryKey	changelog=true	!state backend: Flink 1.18 changelog state is not verified for native keyed state
+org.apache.flink.table.planner.runtime.stream.table.JoinITCase#testJoinKeyNotEqualPrimaryKey	state=HEAP&changelog=false	NativeColumnarUpdatingJoinOperator
+org.apache.flink.table.planner.runtime.stream.table.JoinITCase#testJoinKeyNotEqualPrimaryKey	state=ROCKSDB&changelog=false	!state backend: Flink 1.18 native keyed state requires heap state or the StreamFusion RocksDB backend
+org.apache.flink.table.planner.runtime.stream.sql.RankITCase#testTopNWithUpsertSink	changelog=true	!state backend: Flink 1.18 changelog state is not verified for native keyed state
+org.apache.flink.table.planner.runtime.stream.sql.RankITCase#testTopNWithUpsertSink	state=HEAP&changelog=false	NativeColumnarTopNOperator
+org.apache.flink.table.planner.runtime.stream.sql.RankITCase#testTopNWithUpsertSink	state=ROCKSDB&changelog=false	!state backend: Flink 1.18 native keyed state requires heap state or the StreamFusion RocksDB backend
+org.apache.flink.table.planner.runtime.stream.sql.RankITCase#testNestedTopN	changelog=true	!state backend: Flink 1.18 changelog state is not verified for native keyed state
+org.apache.flink.table.planner.runtime.stream.sql.RankITCase#testNestedTopN	state=HEAP&changelog=false	NativeColumnarTopNOperator
+org.apache.flink.table.planner.runtime.stream.sql.RankITCase#testNestedTopN	state=ROCKSDB&changelog=false	!state backend: Flink 1.18 native keyed state requires heap state or the StreamFusion RocksDB backend
+org.apache.flink.table.planner.runtime.stream.sql.RankITCase#testMultipleUnaryTopNAfterAgg	changelog=true	!state backend: Flink 1.18 changelog state is not verified for native keyed state
+org.apache.flink.table.planner.runtime.stream.sql.RankITCase#testMultipleUnaryTopNAfterAgg	state=HEAP&changelog=false	NativeColumnarTopNOperator
+org.apache.flink.table.planner.runtime.stream.sql.RankITCase#testMultipleUnaryTopNAfterAgg	state=ROCKSDB&changelog=false	!state backend: Flink 1.18 native keyed state requires heap state or the StreamFusion RocksDB backend
+org.apache.flink.table.planner.runtime.stream.sql.RankITCase#testTop1WithGroupByCount	changelog=true	!state backend: Flink 1.18 changelog state is not verified for native keyed state
+org.apache.flink.table.planner.runtime.stream.sql.RankITCase#testTop1WithGroupByCount	state=HEAP&changelog=false	NativeColumnarTopNOperator
+org.apache.flink.table.planner.runtime.stream.sql.RankITCase#testTop1WithGroupByCount	state=ROCKSDB&changelog=false	!state backend: Flink 1.18 native keyed state requires heap state or the StreamFusion RocksDB backend
+org.apache.flink.table.planner.runtime.stream.sql.RankITCase#testUnarySortTopNOnString	changelog=true	!state backend: Flink 1.18 changelog state is not verified for native keyed state
+org.apache.flink.table.planner.runtime.stream.sql.RankITCase#testUnarySortTopNOnString	state=HEAP&changelog=false	NativeColumnarTopNOperator
+org.apache.flink.table.planner.runtime.stream.sql.RankITCase#testUnarySortTopNOnString	state=ROCKSDB&changelog=false	!state backend: Flink 1.18 native keyed state requires heap state or the StreamFusion RocksDB backend
+org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testConstantGroupKeyWithUpsertSink	changelog=true	!state backend: Flink 1.18 changelog state is not verified for native keyed state
+org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testConstantGroupKeyWithUpsertSink	state=HEAP&changelog=false	NativeColumnarGroupAggregateOperator
+org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testConstantGroupKeyWithUpsertSink	state=ROCKSDB&changelog=false	!state backend: Flink 1.18 native keyed state requires heap state or the StreamFusion RocksDB backend

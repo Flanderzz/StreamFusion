@@ -24,7 +24,13 @@ case "${FLINK_VERSION}" in
 esac
 readonly FLINK_LINE STREAMFUSION_ARTIFACT_SUFFIX KAFKA_DEFAULT_VERSION PAIMON_FLINK_PROFILE
 readonly KAFKA_CONNECTOR_VERSION="${KAFKA_CONNECTOR_VERSION:-${KAFKA_DEFAULT_VERSION}}"
-readonly KAFKA_CONNECTOR_TAG="v${KAFKA_CONNECTOR_VERSION}"
+# The published 3.2.0 source archive matches the final candidate; no v3.2.0 tag exists.
+if [[ "${KAFKA_CONNECTOR_VERSION}" == "3.2.0" ]]; then
+  KAFKA_CONNECTOR_TAG=v3.2.0-rc1
+else
+  KAFKA_CONNECTOR_TAG="v${KAFKA_CONNECTOR_VERSION}"
+fi
+readonly KAFKA_CONNECTOR_TAG
 readonly PAIMON_VERSION="${PAIMON_VERSION:-2.0.0}"
 # Paimon publishes its releases from the final release-candidate tag; 2.0.0 is release-2.0.0-rc10.
 readonly PAIMON_TAG="${PAIMON_TAG:-release-${PAIMON_VERSION}-rc10}"
@@ -85,7 +91,8 @@ fi
 case "${SUITE_MODE}" in
   config)
     printf '%s\n' "flink.version=${FLINK_VERSION}" "flink.line=${FLINK_LINE}" \
-      "kafka.version=${KAFKA_CONNECTOR_VERSION}" "paimon.profile=${PAIMON_FLINK_PROFILE}" \
+      "kafka.version=${KAFKA_CONNECTOR_VERSION}" "kafka.tag=${KAFKA_CONNECTOR_TAG}" \
+      "paimon.profile=${PAIMON_FLINK_PROFILE}" \
       "suite.root=${SUITE_ROOT}" "streamfusion.source=${STREAMFUSION_BUILD_ROOT}" \
       "maven.repo=${SUITE_MAVEN_REPO}" "agent.jar=${AGENT_JAR}" \
       "classpath=${CLASSPATH_FILE}" "contracts=${CONTRACT_FILE}"
@@ -167,6 +174,7 @@ case "${SUITE_MODE}" in
     FLINK_SUITE_REUSE_BUILD=true "${BASH_SOURCE[0]}" parquet || exit $?
     FLINK_SUITE_REUSE_BUILD=true "${BASH_SOURCE[0]}" orc || exit $?
     FLINK_SUITE_REUSE_BUILD=true "${BASH_SOURCE[0]}" runtime || exit $?
+    FLINK_SUITE_REUSE_BUILD=true "${BASH_SOURCE[0]}" state || exit $?
     "${BASH_SOURCE[0]}" paimon || exit $?
     if [[ "${FLINK_LINE}" == "2.2" ]]; then
       "${BASH_SOURCE[0]}" delta || exit $?
@@ -369,6 +377,7 @@ else
       -pl "${PAIMON_MODULE}" -am -DskipTests install || exit $?
   fi
 fi
+python3 "${REPO_ROOT}/bin/check-flink-suite-classpath.py" "${CLASSPATH_FILE}" "${FLINK_LINE}" || exit $?
 STREAMFUSION_CLASSPATH="$(tr ':' ',' < "${CLASSPATH_FILE}")"
 if [[ "${SUITE_MODE}" != "paimon" ]]; then
   # Paimon's provided connector API is supplied by its own suite. Do not install its optional
@@ -556,6 +565,11 @@ if [[ "${SUITE_MODE}" == "delta" && -z "${FLINK_SUITE_TEST:-}" ]]; then
     --require-contract-prefix io.delta.
     --require-test 'io.delta.flink.sink.sql.FlinkSqlTest#testGroupedAggregationPreservesEachRow'
   )
+fi
+if [[ "${SUITE_MODE}" == "state" && -z "${FLINK_SUITE_TEST:-}" ]]; then
+  for state_test in ${ROCKSDB_STATE_SQL_TESTS//,/ }; do
+    SUMMARY_ARGS+=(--require-contract-prefix "${state_test}#")
+  done
 fi
 python3 "${REPO_ROOT}/dev/flink-suite/summarize.py" "${SUMMARY_ARGS[@]}"
 exit $?

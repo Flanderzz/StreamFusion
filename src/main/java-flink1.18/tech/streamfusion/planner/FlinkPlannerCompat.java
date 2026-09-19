@@ -15,6 +15,12 @@ final class FlinkPlannerCompat {
   static RelNode prepareForRewrite(RelNode node) {
     if (node
         instanceof
+        org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalLegacySink<?>
+            sink) {
+      return PreparedLegacySink.prepare(sink);
+    }
+    if (node
+        instanceof
         org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalWindowDeduplicate
             dedup) {
       Boolean keepLast = WindowDeduplicateMatcher.keepLastRow(dedup);

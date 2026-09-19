@@ -92,20 +92,27 @@ Flink. The default run executes the planner module's unchanged `*ITCase`
 runtime integration suite serially in one fork, then summarizes Surefire failures. Serial execution
 keeps concurrently created MiniClusters from exhausting a developer machine or CI runner.
 
-The experimental 1.18 runner selects Flink `release-1.18.1`, Kafka connector `v3.2.0`, and
-Paimon's `flink1` profile against 1.18.1. Run `FLINK_VERSION=1.18.1 bin/flink-suite.sh config`
+The experimental 1.18 runner selects Flink `release-1.18.1`, Kafka connector `v3.2.0-rc1`, and
+Paimon's `flink1` profile against 1.18.1. Kafka's final candidate tag (`d12f73c8`) matches the
+[official 3.2.0 source archive](https://archive.apache.org/dist/flink/flink-connector-kafka-3.2.0/);
+that release has no `v3.2.0` tag. Run `FLINK_VERSION=1.18.1 bin/flink-suite.sh config`
 to inspect the selection, then replace `config` with the desired suite. Each line has separate
 checkouts, Maven repository, StreamFusion source/build outputs, injection-agent JAR, classpath,
 native-execution reports and diagnostics under `.flink-suite/<line>/`. `FLINK_SUITE_ROOT`
 changes that parent directory without removing the per-line separation. Build reuse only reads
-the selected line's artifacts. Delta has no admitted 1.18 payload and is rejected before cloning.
+the selected line's artifacts. Before any suite starts, every StreamFusion classpath JAR must
+identify its module and requested Flink line in its manifest; renaming or copying a payload from
+the other line is rejected. Duplicate payloads and a missing core also fail this check.
+Delta has no admitted 1.18 payload and is rejected before cloning.
 
 The 1.18 execution contract resource names methods verified in that release's unchanged source.
 It retains scalar, aggregate, rank, distinct-window and lookup witnesses; it excludes the
 retracting window TVF method absent from that release and the unavailable Delta suite. Agent and
-report summarizer select the same resource. The upstream CI matrix remains on 2.2 until the
-separate 1.18 suites have been verified, as tracked in #189. The ordinary Java, module and
-qualified-artifact jobs already exercise both lines as blocking checks.
+report summarizer select the same resource. The upstream CI matrix includes both lines and its
+required aggregate check requires every leg to succeed. Full 1.18 baselines remain under
+verification in [#189](https://github.com/datafusion-contrib/StreamFusion/issues/189); adding the
+matrix does not announce production support. Java, module, image and qualified-artifact jobs
+also exercise both lines as blocking checks.
 
 Selected upstream SQL tests also have **per-invocation native execution contracts**, declared in
 `dev/flink-suite/agent/src/main/resources/native-execution.tsv`. The unchanged `CalcITCase.testNotIn`
@@ -132,6 +139,10 @@ after its native push returns, including when an input coalescer delays that cal
 require completed native async lookup batches across every executed backend, object-reuse,
 output-order and cache variant. These counters are recorded after the host-delegating columnar
 operator completes its batch; merely opening the operator earns no credit.
+The 1.18 contracts also cover legacy upsert sinks after joins and Top-N: native heap/native
+RocksDB variants must perform join/rank work, while stock RocksDB or changelog-state variants
+must report their explicit backend fallback. The host still validates and consumes the original
+proven sink keys.
 Other upstream cases still check
 result parity without a per-test acceleration contract; planner installation alone does not prove
 that any particular query ran natively.
@@ -149,6 +160,8 @@ the suite. The runner clears the selected suite's evidence before every run. Evi
 Each full suite also requires every method contracted for that suite to execute, so removing or renaming
 an upstream test cannot silently shrink this coverage. Focused selections require evidence only
 for their selected methods.
+The full `state` run requires every contracted method in its selected stateful test classes,
+and `all` includes that native RocksDB run as well as the ordinary runtime suite.
 
 These checks prove native data-path execution, not a speedup. Release benchmarks measure performance
 separately. The ordinary Java job also tests the evidence collector and summarizer, including

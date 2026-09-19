@@ -27,3 +27,21 @@ org.apache.flink.table.planner.runtime.stream.sql.AsyncLookupJoinITCase#testAsyn
 org.apache.flink.table.planner.runtime.stream.sql.AsyncLookupJoinITCase#testAsyncJoinTemporalTableWithRetry	legacyTableSource=true	!lookup join: temporal table is not a (non-legacy) table source
 org.apache.flink.table.planner.runtime.stream.sql.LookupJoinITCase#testJoinTemporalTable	legacyTableSource=false	NativeLookupJoinOperator
 org.apache.flink.table.planner.runtime.stream.sql.LookupJoinITCase#testJoinTemporalTable	legacyTableSource=true	!lookup join: temporal table is not a (non-legacy) table source
+
+# Legacy upsert sinks must retain planner-proven keys after native replacement.
+org.apache.flink.table.planner.runtime.stream.table.JoinITCase#testJoinKeyEqualsGroupByKey	changelog=true	!state backend: Flink 1.18 changelog state is not verified for native keyed state
+org.apache.flink.table.planner.runtime.stream.table.JoinITCase#testJoinKeyEqualsGroupByKey	changelog=false	NativeColumnarUpdatingJoinOperator
+org.apache.flink.table.planner.runtime.stream.table.JoinITCase#testJoinKeyNotEqualPrimaryKey	changelog=true	!state backend: Flink 1.18 changelog state is not verified for native keyed state
+org.apache.flink.table.planner.runtime.stream.table.JoinITCase#testJoinKeyNotEqualPrimaryKey	changelog=false	NativeColumnarUpdatingJoinOperator
+org.apache.flink.table.planner.runtime.stream.sql.RankITCase#testTopNWithUpsertSink	changelog=true	!state backend: Flink 1.18 changelog state is not verified for native keyed state
+org.apache.flink.table.planner.runtime.stream.sql.RankITCase#testTopNWithUpsertSink	changelog=false	NativeColumnarTopNOperator
+org.apache.flink.table.planner.runtime.stream.sql.RankITCase#testNestedTopN	changelog=true	!state backend: Flink 1.18 changelog state is not verified for native keyed state
+org.apache.flink.table.planner.runtime.stream.sql.RankITCase#testNestedTopN	changelog=false	NativeColumnarTopNOperator
+org.apache.flink.table.planner.runtime.stream.sql.RankITCase#testMultipleUnaryTopNAfterAgg	changelog=true	!state backend: Flink 1.18 changelog state is not verified for native keyed state
+org.apache.flink.table.planner.runtime.stream.sql.RankITCase#testMultipleUnaryTopNAfterAgg	changelog=false	NativeColumnarTopNOperator
+org.apache.flink.table.planner.runtime.stream.sql.RankITCase#testTop1WithGroupByCount	changelog=true	!state backend: Flink 1.18 changelog state is not verified for native keyed state
+org.apache.flink.table.planner.runtime.stream.sql.RankITCase#testTop1WithGroupByCount	changelog=false	NativeColumnarTopNOperator
+org.apache.flink.table.planner.runtime.stream.sql.RankITCase#testUnarySortTopNOnString	changelog=true	!state backend: Flink 1.18 changelog state is not verified for native keyed state
+org.apache.flink.table.planner.runtime.stream.sql.RankITCase#testUnarySortTopNOnString	changelog=false	NativeColumnarTopNOperator
+org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testConstantGroupKeyWithUpsertSink	changelog=true	!state backend: Flink 1.18 changelog state is not verified for native keyed state
+org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testConstantGroupKeyWithUpsertSink	changelog=false	NativeColumnarGroupAggregateOperator

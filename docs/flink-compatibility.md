@@ -8,8 +8,9 @@ real-cluster upgrade checks and required CI/release matrix in
 [#188](https://github.com/datafusion-contrib/StreamFusion/issues/188) and
 [#189](https://github.com/datafusion-contrib/StreamFusion/issues/189) are complete.
 The blocking CI matrix covers both Java lines, each native format/connector module, Paimon
-Parquet and ORC, and the optimized qualified artifacts with real-loader tests. Full upstream
-1.18 suites and real-cluster upgrade validation are still being verified.
+Parquet and ORC, and the optimized qualified artifacts with real-loader tests. The upstream matrix
+runs both lines, with Delta acceleration restricted to 2.2 and a separate 1.18 host-only Delta
+audit. Full 1.18 baselines and real-cluster upgrade validation are still being verified.
 
 ## Building and installing
 
@@ -40,6 +41,8 @@ loader admission together. Dependency enforcement rejects other Flink lines. Eac
 manifest records its module and line, and the loader checks the embedded core and installed
 extensions before implementation classes are loaded. Renaming a JAR cannot bypass this check.
 Install one complete line; a mixed install is an error.
+The 1.18 payload uses the host's SLF4J 1.7 API and binding; it does not bundle Arrow's transitive
+SLF4J 2 API into Flink's global classpath.
 
 The Kernel-based Delta implementation belongs only to the 2.2 source root and does not enter
 the 1.18 compilation, Javadoc or source artifacts. There is no admitted native Delta connector on 1.18 yet. Do not build or install a 1.18 Delta payload;
@@ -56,6 +59,8 @@ The 1.18 planner represents deduplication with its own physical relation. Its ad
 relation onto the shared native deduplicator. Rowtime keep-first follows that line's eager
 changelog behavior. Window deduplication captures the host's public window metadata before
 native relation replacement; it does not reflect into private planner fields.
+Legacy upsert sinks likewise retain the keys proven by Flink before the input is rewritten;
+the sink still uses Flink's released execution node and changelog contract.
 
 The following are host-line differences, not missing native substitutions:
 

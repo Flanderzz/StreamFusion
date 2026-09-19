@@ -103,6 +103,7 @@ public final class StreamFusionSuiteAgent {
                 "tech.streamfusion.operator.NativeAsyncLookupJoinOperator",
                 "tech.streamfusion.operator.NativeFilterOperator",
                 "tech.streamfusion.operator.NativeColumnarGroupAggregateOperator",
+                "tech.streamfusion.operator.NativeColumnarUpdatingJoinOperator",
                 "tech.streamfusion.operator.NativeColumnarTopNOperator",
                 "tech.streamfusion.operator.NativeWindowOperatorCore",
                 "tech.streamfusion.operator.NativeColumnarGlobalWindowAggregateOperator"))
@@ -114,6 +115,9 @@ public final class StreamFusionSuiteAgent {
               }
               if (type.getName().endsWith("NativeColumnarTopNOperator")) {
                 return builder.visit(Advice.to(RecordNativeBatch.class).on(named("push")));
+              }
+              if (type.getName().endsWith("NativeColumnarUpdatingJoinOperator")) {
+                return builder.visit(Advice.to(RecordNativeBatch.class).on(named("joinOpen")));
               }
               if (type.getName().endsWith("NativeWindowOperatorCore")) {
                 return builder.visit(
