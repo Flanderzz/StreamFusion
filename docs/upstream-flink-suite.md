@@ -156,7 +156,6 @@ The complete Table API Calc class passes 56 of 57 reported cases, with one upstr
 12 executed cases have contracts (6 native, 6 explicit fallback), leaving 44 executed cases
 unclassified. This is the audit denominator, not an overall acceleration percentage.
 
-
 Validated evidence retains the fixture selector, per-operator native input counts, expected
 contract and recorded fallback reasons. Routes distinguish native work, mixed native work plus
 recorded fallback, full fallback, and unclassified evidence. Counts are explicitly evidence-record
