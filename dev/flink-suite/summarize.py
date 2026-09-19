@@ -97,6 +97,24 @@ def check_execution(
     return proved, fallback, problems
 
 
+def process_result(status: int, evidence: pathlib.Path | None, expected_only: bool) -> int:
+    if evidence is None:
+        return status
+    try:
+        result = evidence.read_text().strip()
+    except OSError as exc:
+        print(f"Missing Maven session result: {exc}")
+        return status or 1
+    prefix = "streamfusion-maven-result-v1\t"
+    if status == 0 and result == prefix + "success":
+        return 0
+    if status == 1 and expected_only and result == prefix + "test-failures":
+        print("Maven failed only for explicitly allowed upstream test assertions.")
+        return 0
+    print(f"Maven/process failure: exit {status}, session result {result!r}")
+    return status or 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("reports", type=pathlib.Path)
@@ -105,12 +123,14 @@ def main() -> int:
     parser.add_argument("--require-all-contracts", action="store_true")
     parser.add_argument("--require-contract-prefix", action="append", default=[])
     parser.add_argument("--require-test", action="append", default=[])
+    parser.add_argument("--process-exit", type=int, default=0)
+    parser.add_argument("--maven-result", type=pathlib.Path)
     args = parser.parse_args()
 
     files = sorted(args.reports.rglob("TEST-*.xml"))
     if not files:
         print("No Surefire XML reports found.")
-        return 2
+        return args.process_exit or 2
 
     tests = failures = errors = skipped = 0
     problems: list[tuple[str, str, str, str]] = []
@@ -123,7 +143,15 @@ def main() -> int:
     for report in files:
         try:
             suite = ET.parse(report).getroot()
-        except (ET.ParseError, OSError) as exc:
+            if suite.tag != "testsuite":
+                raise ValueError("expected a Surefire testsuite root")
+            totals = [int(suite.attrib.get(name, 0)) for name in ("tests", "failures", "errors", "skipped")]
+            cases = suite.findall("testcase")
+            observed = [len(cases)] + [sum(case.find(kind) is not None for case in cases)
+                                      for kind in ("failure", "error", "skipped")]
+            if totals != observed or any(value < 0 for value in totals):
+                raise ValueError(f"test counts {totals} disagree with test cases {observed}")
+        except (ET.ParseError, OSError, ValueError) as exc:
             malformed.append((report, str(exc)))
             continue
 
@@ -157,7 +185,7 @@ def main() -> int:
                 detail,
             )
             key = f"{item[0]}#{item[1]}"
-            (expected if key in args.xfail else problems).append(item)
+            (expected if key in args.xfail and kind == "failure" else problems).append(item)
 
     expected_failures = sum(kind == "failure" for _, _, kind, _ in expected)
     expected_errors = sum(kind == "error" for _, _, kind, _ in expected)
@@ -228,11 +256,13 @@ def main() -> int:
         for problem in execution_problems:
             print(f"- {problem}")
 
-    return (
-        1
-        if unexpected_failures or unexpected_errors or malformed or execution_problems
-        else 0
+    summary_failed = bool(
+        unexpected_failures or unexpected_errors or malformed or execution_problems
     )
+    status = process_result(
+        args.process_exit, args.maven_result, bool(expected) and not summary_failed
+    )
+    return status or int(summary_failed)
 
 
 if __name__ == "__main__":

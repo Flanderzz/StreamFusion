@@ -181,5 +181,56 @@ class NativeExecutionSummaryTest(unittest.TestCase):
                     self.assertEqual(status, summarize.main())
 
 
+class ProcessExitSummaryTest(unittest.TestCase):
+    PASS = '<testsuite tests="1"><testcase classname="Probe" name="passes"/></testsuite>'
+    EXPECTED = '<testsuite tests="1" failures="1"><testcase classname="Probe" name="expected"><failure message="known upstream assertion"/></testcase></testsuite>'
+
+    def summarize(self, xml, status, marker=None):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            if xml is not None:
+                (root / "TEST-probe.xml").write_text(xml)
+            result = root / "maven-result.tsv"
+            if marker is not None:
+                result.write_text(marker)
+            args = ["summarize.py", str(root), "--process-exit", str(status),
+                    "--maven-result", str(result), "--xfail", "Probe#expected"]
+            with patch.object(sys, "argv", args), redirect_stdout(io.StringIO()):
+                return summarize.main()
+
+    def test_nonzero_process_with_passing_partial_reports_never_passes(self):
+        for status in (1, 2, 124, 137, 143):
+            for marker in (None, "streamfusion-maven-result-v1\tsuccess\n",
+                           "streamfusion-maven-result-v1\ttest-failures\n"):
+                with self.subTest(status=status, marker=marker):
+                    self.assertEqual(status, self.summarize(self.PASS, status, marker))
+
+    def test_only_completed_allowed_assertion_failure_can_excuse_exit_one(self):
+        marker = "streamfusion-maven-result-v1\ttest-failures\n"
+        self.assertEqual(0, self.summarize(self.EXPECTED, 1, marker))
+        for status in (2, 124, 137, 143):
+            self.assertEqual(status, self.summarize(self.EXPECTED, status, marker))
+        for marker in (None, "garbage", "streamfusion-maven-result-v1\tfailure\n"):
+            self.assertEqual(1, self.summarize(self.EXPECTED, 1, marker))
+
+    def test_allowed_method_cannot_hide_errors_or_unexpected_assertions(self):
+        marker = "streamfusion-maven-result-v1\ttest-failures\n"
+        error = self.EXPECTED.replace('failures="1"', 'errors="1"').replace('<failure ', '<error ')
+        unexpected = self.EXPECTED.replace('name="expected"', 'name="other"')
+        for xml in (error, unexpected):
+            self.assertEqual(1, self.summarize(xml, 1, marker))
+
+    def test_success_requires_a_completed_session_when_evidence_is_requested(self):
+        self.assertEqual(0, self.summarize(self.PASS, 0, "streamfusion-maven-result-v1\tsuccess\n"))
+        for marker in (None, "garbage", "streamfusion-maven-result-v1\tfailure\n"):
+            self.assertEqual(1, self.summarize(self.PASS, 0, marker))
+
+    def test_missing_malformed_and_incomplete_reports_fail(self):
+        marker = "streamfusion-maven-result-v1\tsuccess\n"
+        for xml in (None, "<broken", "<other/>", '<testsuite tests="2"><testcase/></testsuite>',
+                    '<testsuite tests="NaN"/>', '<testsuite tests="-1"/>'):
+            self.assertNotEqual(0, self.summarize(xml, 0, marker))
+
+
 if __name__ == "__main__":
     unittest.main()

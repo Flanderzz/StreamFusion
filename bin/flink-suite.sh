@@ -365,10 +365,17 @@ MAVEN_TEST_ARGS=(
   -Dstreamfusion.native.development=true \
   -Dstreamfusion.flink-suite.native-reports="${NATIVE_REPORT_ROOT}" \
   -Dfast \
+  -Dmaven.test.failure.ignore=false \
   -Djunit.jupiter.execution.parallel.enabled=false \
   -Dflink.forkCountUnitTest="${FLINK_SUITE_UNIT_FORKS:-2}" \
   -Dflink.forkCountITCase="${FLINK_SUITE_IT_FORKS:-1}"
 )
+if [[ "${SUITE_MODE}" == "runtime" || "${SUITE_MODE}" == "diagnostic" ]]; then
+  MAVEN_TEST_ARGS+=(
+    -Dmaven.ext.class.path="${AGENT_JAR}"
+    -Dstreamfusion.flink-suite.maven-result="${DIAGNOSTIC_ROOT}/maven-result.tsv"
+  )
+fi
 if [[ "${SUITE_MODE}" == "state" ]]; then
   MAVEN_TEST_ARGS+=("-Dstreamfusion.flink-suite.native-rocksdb=true")
 fi
@@ -484,9 +491,12 @@ if [[ "${SUITE_MODE}" == "paimon" && ${TEST_STATUS} -eq 0 ]]; then
   done
 fi
 
-SUMMARY_ARGS=("${REPORT_ROOT}" --native-reports "${NATIVE_REPORT_ROOT}")
+SUMMARY_ARGS=("${REPORT_ROOT}" --native-reports "${NATIVE_REPORT_ROOT}" --process-exit "${TEST_STATUS}")
 if [[ "${SUITE_MODE}" == "runtime" || "${SUITE_MODE}" == "diagnostic" ]]; then
-  SUMMARY_ARGS+=(--xfail "org.apache.flink.table.planner.runtime.batch.sql.CalcITCase#testCurrentDate")
+  SUMMARY_ARGS+=(
+    --xfail "org.apache.flink.table.planner.runtime.batch.sql.CalcITCase#testCurrentDate"
+    --maven-result "${DIAGNOSTIC_ROOT}/maven-result.tsv"
+  )
   if [[ -z "${FLINK_SUITE_TEST:-}" ]]; then
     SUMMARY_ARGS+=(--require-contract-prefix org.apache.flink.)
   fi
@@ -498,9 +508,4 @@ if [[ "${SUITE_MODE}" == "delta" && -z "${FLINK_SUITE_TEST:-}" ]]; then
   )
 fi
 python3 "${REPO_ROOT}/dev/flink-suite/summarize.py" "${SUMMARY_ARGS[@]}"
-readonly SUMMARY_STATUS=$?
-
-if [[ ${TEST_STATUS} -ne 0 && ( ${SUMMARY_STATUS} -ne 0 || ( "${SUITE_MODE}" != "runtime" && "${SUITE_MODE}" != "diagnostic" ) ) ]]; then
-  exit "${TEST_STATUS}"
-fi
-exit "${SUMMARY_STATUS}"
+exit $?
