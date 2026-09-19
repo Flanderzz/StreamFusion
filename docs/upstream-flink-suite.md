@@ -135,6 +135,28 @@ Each full suite also requires every method contracted for that suite to execute,
 an upstream test cannot silently shrink this coverage. Focused selections require evidence only
 for their selected methods.
 
+The summary also writes `.flink-suite/diagnostics/<suite>/execution-audit.json`, uploaded with
+those CI diagnostics. Schema version 1 retains every parsed Surefire case (including duplicates,
+skips and failures), its report-relative location, and whether that method is contracted. The
+summary reports the complete executed denominator, the contracted subset, and the executed
+cases outside that scope. For example, 32 passing Calc cases with three execution witnesses mean
+three contracted executions and 29 unclassified executions, not 32 accelerated tests.
+
+Validated evidence retains the fixture selector, per-operator native input counts, expected
+contract and recorded fallback reasons. Routes distinguish native work, mixed native work plus
+recorded fallback, full fallback, and unclassified evidence. Counts are explicitly evidence-record
+counts: parameterized XML cases and witness files share method-level totals but do not have a
+common invocation identifier, so the artifact does not invent one-to-one matches. A satisfied
+individual record cannot override stale/duplicate evidence or a failed overall summary.
+
+Outside the declared contracts, passing cases remain unclassified. The artifact does not infer
+batch-only, deliberately unmodified, scan-only or host-failure routes from class names or JUnit
+outcomes. Those classifications and broader per-invocation collection remain
+[#168](https://github.com/datafusion-contrib/StreamFusion/issues/168). Agent unit-test output is
+outside the suite's report/evidence directories and contributes no SQL cases. The summary writes
+failed artifacts for missing or malformed reports/evidence and retains process failures; an
+earlier build or installation failure can stop the runner before the summary is reached.
+
 These checks prove native data-path execution, not a speedup. Release benchmarks measure performance
 separately. The ordinary Java job also tests the evidence collector and summarizer, including
 missing/empty work, wrong operators, incomplete two-phase routes, and cross-invocation isolation.
