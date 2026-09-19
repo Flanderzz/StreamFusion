@@ -107,8 +107,8 @@ for suffix in $modules; do
     exit 1
   fi
   assert_flink_identity "$jar_file" "$artifact"
-  if [ "$flink_line" = 1.18 ] && jar tf "$jar_file" | grep -q '^org/slf4j/'; then
-    echo "$artifact must use Flink 1.18's logging API instead of bundling SLF4J" >&2
+  if jar tf "$jar_file" | grep -q '^org/slf4j/'; then
+    echo "$artifact must use Flink's logging API instead of bundling SLF4J" >&2
     exit 1
   fi
   jar tf "$jar_file" | awk -v module="$module" \
