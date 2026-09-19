@@ -425,8 +425,12 @@ and incremental-checkpoint setting. Changelog-enabled fixtures retain the stock 
 Its own contract manifest requires native work for admitted replaced cases as well.
 
 The 1.18 Paimon suite compiles the unchanged common tests against their declared 1.20 API,
-then runs them on Flink 1.18.1 with the released `paimon-flink-1.18:2.0.0` compatibility classes
-on the additional classpath. Paimon's versioned artifact supplies types such as
-`CatalogMaterializedTable` and `OpenContext` that do not exist in Flink 1.18 itself. Omitting
-that released artifact causes linkage failures before SQL can run. The runner does not add
-Flink 1.20 runtime JARs or modify the upstream tests to bridge that gap.
+then runs them on Flink 1.18.1 with the released `paimon-flink-1.18:2.0.0` production JAR
+in place of the common module's production classes. A generated test POM under diagnostics
+puts that released Maven dependency first and retains the original dependencies, compiled test
+directory, resources and working directory. The common main output is an empty directory, so
+its 1.20 helpers cannot shadow the released runtime; the published JAR is loaded directly.
+The versioned JAR supplies both missing compatibility types (`CatalogMaterializedTable`,
+`OpenContext`) and replacements for helpers whose managed-memory signatures differ by line.
+Appending that JAR after the 1.20 common classes leaves those incompatible helpers in control.
+The runner does not add Flink 1.20 runtime JARs or modify upstream sources or assertions.
