@@ -171,4 +171,45 @@ if jar tf "$confluent_jar" | grep -q 'libstreamfusion_avro'; then
   exit 1
 fi
 
-echo "StreamFusion artifact boundaries are clean for $version / Flink $flink_line"
+python3 - "$repo_root" "$version" "$flink_line" "$artifact_suffix" "$modules" <<'PYTHON'
+import sys
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+root, version, line, suffix, modules = sys.argv[1:]
+namespace = {"p": "http://maven.apache.org/POM/4.0.0"}
+for module in [*modules.split(), "runtime", "loader"]:
+    path = Path(root) / f"streamfusion-{module}" / ".flattened-pom.xml"
+    pom = ET.parse(path).getroot()
+    def value(element, name):
+        return element.findtext(f"p:{name}", namespaces=namespace)
+    identity = (value(pom, "groupId"), value(pom, "artifactId"), value(pom, "version"))
+    expected = ("tech.streamfusion", f"streamfusion-{module}{suffix}", version)
+    if identity != expected or "${" in path.read_text():
+        raise SystemExit(f"{path}: unresolved or wrong artifact identity {identity}; expected {expected}")
+    dependencies = {
+        (value(dep, "groupId"), value(dep, "artifactId")): dep
+        for dep in pom.findall("p:dependencies/p:dependency", namespace)
+    }
+    if module != "loader":
+        for artifact, scope in [("arrow-vector", "compile"), ("arrow-c-data", "compile"),
+                                ("arrow-memory-unsafe", "runtime")]:
+            dep = dependencies.get(("org.apache.arrow", artifact))
+            if dep is None or (value(dep, "scope") or "compile") != scope:
+                raise SystemExit(f"{path}: missing inherited {artifact} dependency in {scope} scope")
+    for (group, artifact), dep in dependencies.items():
+        dep_version = value(dep, "version")
+        if group == "tech.streamfusion" and artifact.startswith("streamfusion-"):
+            actual_suffix = "-flink1.18" if artifact.endswith("-flink1.18") else ""
+            if actual_suffix != suffix or dep_version != version:
+                raise SystemExit(f"{path}: mismatched StreamFusion dependency {artifact}:{dep_version}")
+        if group == "org.apache.flink" and not artifact.startswith("flink-shaded-"):
+            expected_version = line + "."
+            if artifact == "flink-connector-kafka":
+                if not dep_version.endswith("-" + line):
+                    raise SystemExit(f"{path}: mismatched Kafka connector line {dep_version}")
+            elif not dep_version.startswith(expected_version):
+                raise SystemExit(f"{path}: mismatched Flink dependency {artifact}:{dep_version}")
+PYTHON
+
+echo "StreamFusion artifact boundaries and consumer POMs are clean for $version / Flink $flink_line"

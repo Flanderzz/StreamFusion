@@ -103,7 +103,9 @@ the line in a clean output tree and check it with
 `bin/check-artifacts.sh --flink-line 1.18` (`--host-only` for a local single-platform build).
 The default 2.2 artifacts keep their existing coordinates. Never combine outputs from the two
 profiles into one archive or installation. The published POMs must contain the resolved qualified
-coordinates and selected dependency versions, not unresolved profile-dependent artifact IDs.
+coordinates and selected dependency versions, including inherited Arrow dependencies. The
+flattened module POMs are checked alongside the JARs so a successful reactor build cannot hide
+missing dependencies from downstream consumers.
 
 Publication of the 1.18 line remains gated on
 [dual-line CI and release validation](https://github.com/datafusion-contrib/StreamFusion/issues/189),
