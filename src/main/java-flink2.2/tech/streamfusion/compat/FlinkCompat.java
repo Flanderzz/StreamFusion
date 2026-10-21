@@ -15,6 +15,7 @@ public final class FlinkCompat {
   public static final boolean ORDERED_MAP_CONSTRUCTORS = true;
 
   public static final boolean TABLE_RUNTIME_ELEMENT_EXCEPTION = true;
+  public static final boolean GENERIC_ORDERED_VALUES = true;
 
   public static long miniBatchSize(org.apache.flink.configuration.ReadableConfig config) {
     return org.apache.flink.table.planner.plan.utils.MinibatchUtil.miniBatchSize(config);
