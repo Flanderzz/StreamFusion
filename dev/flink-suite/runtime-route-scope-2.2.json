@@ -246,7 +246,7 @@
       "test": "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testMinAggRetractWithCondition",
       "display_name": "LocalGlobal=ON, MiniBatch=ON, StateBackend=HEAP, EnableAsyncState=false",
       "count": 1,
-      "route": "full_fallback"
+      "route": "native"
     },
     {
       "test": "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testMinAggRetractWithCondition",
@@ -264,7 +264,7 @@
       "test": "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testMinAggRetractWithCondition",
       "display_name": "LocalGlobal=ON, MiniBatch=ON, StateBackend=ROCKSDB, EnableAsyncState=false",
       "count": 1,
-      "route": "full_fallback"
+      "route": "native"
     },
     {
       "test": "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testMaxAggRetractWithCondition",
@@ -288,7 +288,7 @@
       "test": "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testMaxAggRetractWithCondition",
       "display_name": "LocalGlobal=ON, MiniBatch=ON, StateBackend=HEAP, EnableAsyncState=false",
       "count": 1,
-      "route": "full_fallback"
+      "route": "native"
     },
     {
       "test": "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testMaxAggRetractWithCondition",
@@ -306,7 +306,7 @@
       "test": "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testMaxAggRetractWithCondition",
       "display_name": "LocalGlobal=ON, MiniBatch=ON, StateBackend=ROCKSDB, EnableAsyncState=false",
       "count": 1,
-      "route": "full_fallback"
+      "route": "native"
     },
     {
       "test": "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testPrecisionForSumWithRetractAggregationOnDecimal",
@@ -468,7 +468,7 @@
       "test": "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testDistinctWithRetract",
       "display_name": "LocalGlobal=ON, MiniBatch=ON, StateBackend=HEAP, EnableAsyncState=false",
       "count": 1,
-      "route": "full_fallback"
+      "route": "native"
     },
     {
       "test": "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testDistinctWithRetract",
@@ -486,7 +486,7 @@
       "test": "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testDistinctWithRetract",
       "display_name": "LocalGlobal=ON, MiniBatch=ON, StateBackend=ROCKSDB, EnableAsyncState=false",
       "count": 1,
-      "route": "full_fallback"
+      "route": "native"
     },
     {
       "test": "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testListAggWithRetraction",
