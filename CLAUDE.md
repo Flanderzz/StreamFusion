@@ -170,9 +170,10 @@ passes. The maintainer has accepted shipping correctness-verified groundwork aft
 including slower cases, without another permission request or a performance-only opt-in. Record
 the stock/previous/native measurements, remaining bottleneck and follow-up work; do not describe
 a slower path as accelerated. Keep correctness, native-execution, recovery and required CI checks.
-Close each bounded implementation item, consolidate broad validation, and deliver the eleven-item
-scope in one PR merged into canonical main. This agreement does not expand the scope into user
-functions or unrelated catalog features.
+Close each bounded implementation item and consolidate broad validation. The maintainer has
+requested that fully completed items A/B/C/D/G/K ship first in one PR merged into canonical main;
+keep unfinished E/F/H/I/J work separate and do not claim the eleven-item goal is complete. This
+agreement does not expand the scope into user functions or unrelated catalog features.
 
 The `readme.md` is a **lean landing page**, not the full spec. Keep it to: what we accelerate (a short prose
 overview, not a per-operator chart), where we take inspiration from, the headline Nexmark benchmark table, how to
