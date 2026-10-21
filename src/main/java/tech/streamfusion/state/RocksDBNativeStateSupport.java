@@ -15,7 +15,7 @@ import org.slf4j.LoggerFactory;
  * native create call, and the native checkpoint method — and branches its hot paths on whether
  * this resolved.
  */
-public final class RocksDBNativeStateSupport {
+public final class RocksDBNativeStateSupport implements AutoCloseable {
 
   private static final Logger LOG = LoggerFactory.getLogger(RocksDBNativeStateSupport.class);
 
@@ -24,6 +24,7 @@ public final class RocksDBNativeStateSupport {
   private final String[] sourceSnapshotTokens;
   private final boolean aligned;
   private final long stateTtlMillis;
+  private final NativeRocksSharedResources.Lease sharedResources;
 
   private RocksDBNativeStateSupport(RocksDBNativeKeyedStateBackend<?> backend, long stateTtlMillis) {
     this.backend = backend;
@@ -39,6 +40,7 @@ public final class RocksDBNativeStateSupport {
       sourceDirectories[i] = sources.get(i).directory();
       sourceSnapshotTokens[i] = sources.get(i).snapshotToken();
     }
+    this.sharedResources = backend.retainSharedResources();
   }
 
   /**
@@ -88,7 +90,14 @@ public final class RocksDBNativeStateSupport {
 
   /** The slot's shared native RocksDB memory pool, or 0 when the job runs without one. */
   public long sharedResourcesHandle() {
-    return backend.sharedResourcesHandle();
+    return sharedResources == null ? 0 : sharedResources.nativeHandle();
+  }
+
+  @Override
+  public void close() {
+    if (sharedResources != null) {
+      sharedResources.close();
+    }
   }
 
   public String[] sourceDirectories() {

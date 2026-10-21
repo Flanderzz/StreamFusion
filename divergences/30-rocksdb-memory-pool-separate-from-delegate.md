@@ -17,6 +17,14 @@ leased under a separate resource id. The delegate `EmbeddedRocksDBStateBackend`
 (JVM keyed state, timers, host fallback operators) keeps its own frocksdbjni
 pool.
 
+Native operators retain their own pool lease through handle initialization, recovery and
+close. Flink can close the keyed backend concurrently with canceled-task initialization;
+its slot lease alone does not cover the native lifetime. As with Comet's explicit native
+memory acquisition/release through `CometTaskMemoryManager`, the operation's owner retains
+the resource until native work has ended. The existing slot allocation is reference-counted,
+without allocating or charging another pool. Closing the final backend lease prevents new
+operator leases; the native objects are freed after the final existing operator closes.
+
 ## Why
 
 A C++ `Cache`/`WriteBufferManager` cannot be handed across two independently
