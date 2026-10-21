@@ -1207,3 +1207,11 @@ The per-invocation contracts for `CalcITCase.testInlineScalarFunction`,
 check constructor-bound and instance function values with positive native input metrics.
 The exact heap/RocksDB runtime scope records its mixed native/host route on both release lines.
 An obsolete `AS` fallback expectation must not mask that native execution.
+
+
+`AggregateITCase#testGroupBySingleValue` now has an explicit native grouped-aggregate
+contract and exact released heap/RocksDB/mini-batch fixture scope. That unchanged method
+covers scalar-subquery aggregation and CHAR single-value results; it does not by itself
+prove every retracting scalar partial. The focused signed SINGLE_VALUE suite supplements
+it with raw changelogs at controlled bundle boundaries, keyless empty results, materialized
+interleaved relations and two restores on each backend and released Flink line.
