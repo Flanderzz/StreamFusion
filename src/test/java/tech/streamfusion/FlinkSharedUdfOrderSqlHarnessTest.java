@@ -16,8 +16,16 @@ class FlinkSharedUdfOrderSqlHarnessTest {
                 Stream.of(
                         "SELECT id, tick(id), tick(id + 10) FROM src",
                         "SELECT id, text_tick(id), text_tick(id + 10) FROM src",
+                        "SELECT id, long_tick(id), long_tick(id + 10) FROM src",
                         "SELECT id, null_tick(id), null_tick(id + 10) FROM src",
+                        "SELECT id, long_tick(CASE WHEN MOD(id, 7) = 0 THEN id END),"
+                            + " long_tick(id + 10) FROM src",
+                        "SELECT id, nullable_text_tick(CASE WHEN MOD(id, 7) = 0 THEN id END),"
+                            + " nullable_text_tick(id + 10) FROM src",
                         "SELECT id, tick(id) FROM src WHERE tick(id) <= 3",
+                        "SELECT id, tick(id), tick(id + 10) FROM src WHERE tick(id) < 0",
+                        "SELECT id, tick(id), tick(id + 10) FROM src"
+                            + " WHERE MOD(tick(id), 2048) = 0",
                         "SELECT id, CASE WHEN MOD(id, 2) = 0 THEN tick(id) ELSE tick(id + 10) END"
                             + " FROM src",
                         "SELECT id, tick(tick(id)) FROM src",
@@ -67,9 +75,35 @@ class FlinkSharedUdfOrderSqlHarnessTest {
         "SELECT id, tick(id), tick(id + 10) FROM src");
   }
 
+  @Test
+  void explicitFalseKeepsTheSharedCallFallback() throws Exception {
+    NativeParity.assertFallbackReasonContains(
+        () -> {
+          var table = environment(2051);
+          table.getConfig().set("streamfusion.calc.sharedStatefulUdf.enabled", "false");
+          return table;
+        },
+        "SELECT id, tick(id), tick(id + 10) FROM src",
+        "shared stateful scalar UDF");
+  }
+
+  @Test
+  void sharedCallsKeepProjectionFailureOrder() {
+    NativeFailureParity.run(
+            () -> environment(3),
+            "SELECT tick(id), fail_if_called(id), tick(id + 10) FROM src")
+        .assertFailure(
+            IllegalStateException.class,
+            "unselected operand evaluated",
+            NativeFailureParity.Phase.ROW_EVALUATION,
+            NativeFailureParity.Route.NATIVE);
+  }
+
   private static TableEnvironment environment(int count) {
     var table = FlinkCoalesceEvaluationSqlHarnessTest.environment(count);
-    table.getConfig().set("streamfusion.calc.sharedStatefulUdf.enabled", "true");
+    table.createTemporarySystemFunction("long_tick", new SharedStatefulScalarBenchmark.LongTick());
+    table.createTemporarySystemFunction(
+        "nullable_text_tick", new SharedStatefulScalarBenchmark.TextTick());
     return table;
   }
 

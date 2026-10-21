@@ -18,6 +18,8 @@ import org.apache.flink.table.planner.codegen.GeneratedExpression;
 import org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable;
 import org.apache.flink.table.runtime.generated.GeneratedFunction;
 import org.apache.flink.table.types.logical.LogicalType;
+import org.apache.flink.table.types.logical.LogicalTypeFamily;
+import org.apache.flink.table.types.logical.LogicalTypeRoot;
 import org.apache.flink.table.types.logical.RowType;
 import tech.streamfusion.planner.FlinkExpressionFunction.Evaluator;
 import tech.streamfusion.planner.FlinkExpressionFunction.ProcessingTimeContext;
@@ -426,6 +428,13 @@ final class FlinkExpressionGenerator {
                 .serializeAsMessage();
     List<ScalarFunction> functions = List.copyOf(context.functionInstances.values());
     String className = tech.streamfusion.compat.FlinkCompat.expressionClassName(context);
+    boolean numericBatch =
+        rowResultType != null
+            && rowResultType.getFieldCount() > 0
+            && java.util.Arrays.stream(argumentTypes)
+                .allMatch(FlinkExpressionGenerator::numericOrBoolean)
+            && rowResultType.getChildren().stream()
+                .allMatch(FlinkExpressionGenerator::numericOrBoolean);
     String code =
         "public final class "
             + className
@@ -466,6 +475,17 @@ final class FlinkExpressionGenerator {
             + context.reuseLocalVariableCode(context.reuseLocalVariableCode$default$1())
             + body.code()
             + "}\n"
+            + (!numericBatch
+                ? ""
+                : "public boolean tryEvalBatch("
+                    + "tech.streamfusion.arrow.ArrowReader reader, "
+                    + "tech.streamfusion.arrow.ArrowWriter writer, int rows) throws Exception {\n"
+                    + "for (int row = 0; row < rows; row++) {\n"
+                    + RowData.class.getCanonicalName()
+                    + " value = ("
+                    + RowData.class.getCanonicalName()
+                    + ") eval(reader.read(row));\n"
+                    + "if (value != null) writer.write(value);\n}\nreturn true;\n}\n")
             + "public void close() throws Exception {\n"
             + context.reuseCloseCode()
             + "}\n"
@@ -478,6 +498,10 @@ final class FlinkExpressionGenerator {
     generated.compile(classLoader);
     return new FlinkExpressionFunction(
         generated, argumentTypes, functions, rowResultType, arrowResultSchema, rowFilter);
+  }
+
+  private static boolean numericOrBoolean(LogicalType type) {
+    return type.is(LogicalTypeFamily.NUMERIC) || type.getTypeRoot() == LogicalTypeRoot.BOOLEAN;
   }
 
   private static final class ExactExpressionGenerator extends ExprCodeGenerator {

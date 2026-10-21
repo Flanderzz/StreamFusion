@@ -18,12 +18,15 @@ class SharedStatefulScalarBenchmark {
   private static final long ROWS = Long.getLong("sharedscalar.rows", 1_000_000L);
   private static final int WARMUP = Integer.getInteger("sharedscalar.warmup", 2);
   private static final int RUNS = Integer.getInteger("sharedscalar.runs", 3);
+  private static final int BATCH_ROWS = Integer.getInteger("sharedscalar.batchRows", 1024);
+  private static final int NULL_EVERY = Integer.getInteger("sharedscalar.nullEvery", 0);
   private static final boolean EXPECT_NATIVE =
       Boolean.parseBoolean(System.getProperty("sharedscalar.expectNative", "true"));
 
   @Test
   void sharedCallsKeepBothTransposesAndOneInstance() throws Exception {
-    for (String type : new String[] {"INT", "BIGINT", "STRING"}) {
+    assertEquals("false", System.getProperty("streamfusion.exchange.zeroCopyLocal"), "Use -Pbench");
+    for (String type : System.getProperty("sharedscalar.types", "INT,BIGINT,STRING").split(",")) {
       String sql = "INSERT INTO sink SELECT id, tick(id), tick(id + 1) FROM src";
       double[][] times = new double[2][RUNS];
       try (var metrics = new RecoveryExecutionMetrics()) {
@@ -35,7 +38,7 @@ class SharedStatefulScalarBenchmark {
             table.createTemporaryView(
                 "src",
                 env.fromSequence(0L, ROWS - 1)
-                    .map(i -> Row.of(i.intValue()))
+                    .map(i -> Row.of(NULL_EVERY > 0 && i % NULL_EVERY == 0 ? null : i.intValue()))
                     .returns(Types.ROW_NAMED(new String[] {"id"}, Types.INT)));
             table.createTemporarySystemFunction(
                 "tick",
@@ -49,11 +52,13 @@ class SharedStatefulScalarBenchmark {
                     + type
                     + ") WITH ('connector'='blackhole')");
             table.getConfig().set("streamfusion.native.enabled", Boolean.toString(engine == 1));
-            table
-                .getConfig()
-                .set(
-                    "streamfusion.calc.sharedStatefulUdf.enabled",
-                    System.getProperty("sharedscalar.enabled", "true"));
+            table.getConfig().set("streamfusion.transpose.batchRows", Integer.toString(BATCH_ROWS));
+            if (System.getProperty("sharedscalar.enabled") != null)
+              table
+                  .getConfig()
+                  .set(
+                      "streamfusion.calc.sharedStatefulUdf.enabled",
+                      System.getProperty("sharedscalar.enabled"));
             var scan = NativePlanner.install(table);
             String plan = table.explainSql(sql);
             if (engine == 1 && EXPECT_NATIVE)
@@ -63,6 +68,7 @@ class SharedStatefulScalarBenchmark {
                       && plan.contains("ArrowToRowData"),
                   plan);
             else assertFalse(plan.contains("NativeCalc"), plan);
+            long directRowsBefore = metrics.counterValue("directPrimitiveCalcRows");
             System.out.println(
                 "[shared-scalar-trial-begin] type="
                     + type
@@ -70,16 +76,24 @@ class SharedStatefulScalarBenchmark {
                     + engine
                     + " trial="
                     + trial);
+            long startMillis = System.currentTimeMillis();
             long start = System.nanoTime();
             var result = table.executeSql(sql);
             result.await();
             double seconds = (System.nanoTime() - start) / 1e9;
-            System.out.println(
-                "[shared-scalar-trial-end] type=" + type + " engine=" + engine + " trial=" + trial);
+            System.out.printf(
+                Locale.ROOT,
+                "[shared-scalar-trial-end] type=%s engine=%d trial=%d start_ms=%d seconds=%.9f%n",
+                type,
+                engine,
+                trial,
+                startMillis,
+                seconds);
             if (engine == 1 && EXPECT_NATIVE) {
               if (Boolean.getBoolean("sharedscalar.expectDirect"))
-                assertTrue(
-                    metrics.counterValue("directPrimitiveCalcRows") > 0,
+                assertEquals(
+                    ROWS,
+                    metrics.counterValue("directPrimitiveCalcRows") - directRowsBefore,
                     "complete Calc did not use the direct columnar evaluation path");
               assertTrue(
                   scan.substitutions() > 0 && scan.fallbackReasons().isEmpty(),
@@ -103,11 +117,13 @@ class SharedStatefulScalarBenchmark {
       }
       System.out.printf(
           Locale.ROOT,
-          "[shared-stateful-scalar] rows=%d type=%s native_route=%s stock_trials=%s"
+          "[shared-stateful-scalar] rows=%d type=%s native_route=%s batch_rows=%d null_every=%d stock_trials=%s"
               + " enabled_trials=%s%n",
           ROWS,
           type,
           EXPECT_NATIVE,
+          BATCH_ROWS,
+          NULL_EVERY,
           Arrays.toString(times[0]),
           Arrays.toString(times[1]));
     }

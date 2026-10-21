@@ -29,6 +29,15 @@ public final class FlinkExpressionFunction extends ScalarFunction
   public interface Evaluator extends Function {
     Object eval(RowData input) throws Exception;
 
+    /** False leaves evaluation to the caller, including for older serialized evaluators. */
+    default boolean tryEvalBatch(
+        tech.streamfusion.arrow.ArrowReader reader,
+        tech.streamfusion.arrow.ArrowWriter<RowData> writer,
+        int rows)
+        throws Exception {
+      return false;
+    }
+
     default void bindProcessingTime(ProcessingTimeService service) {}
 
     void open(FunctionContext context) throws Exception;
@@ -146,6 +155,15 @@ public final class FlinkExpressionFunction extends ScalarFunction
   /** The imported Arrow batch owns this row for the duration of synchronous evaluation. */
   public Object evalRow(RowData row) throws Exception {
     return evaluator.eval(row);
+  }
+
+  /** Try the generated batch loop without evaluating any rows when it is unavailable. */
+  public boolean tryEvalBatch(
+      tech.streamfusion.arrow.ArrowReader reader,
+      tech.streamfusion.arrow.ArrowWriter<RowData> writer,
+      int rows)
+      throws Exception {
+    return evaluator.tryEvalBatch(reader, writer, rows);
   }
 
   private void setArgument(int position, Object value) {

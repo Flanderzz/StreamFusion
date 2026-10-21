@@ -348,8 +348,9 @@ This follows the existing borrowed-row evaluation contract. Unlike Comet's gener
 expression callback, the complete generated program has no remaining native expressions to
 compose; see the [boundary decision](https://github.com/datafusion-contrib/StreamFusion/blob/main/divergences/47-complete-jvm-calc-without-native-roundtrip.md).
 String arguments, represented values, binary/decimal/temporal outputs and batches carrying
-RowKind metadata retain the previous bridge. No expression or shared-stateful default gate is
-broadened. The existing temporal experiments keep their separate eligibility.
+RowKind metadata retain the previous bridge. Expression and signature admission are unchanged.
+Shared stateful UDFs now default on under the accepted UDF performance exception; the historical
+comparison below predates that default change. The temporal experiments keep their separate eligibility.
 
 The release/mimalloc comparison uses main `4222bc0c`, released Flink 2.2.1, JDK 11.0.27 for
 both compilation and runtime,
@@ -372,9 +373,9 @@ The headline uses the final-source JDK 11 cohort; earlier candidate and final-so
 diagnostics remain labeled separately. The final direct trials range from 0.516-0.556 s for INT,
 0.522-0.540 s for BIGINT and 1.389-1.433 s for STRING. Their paired stock ranges are 0.394-0.433 s,
 0.432-0.464 s and 0.953-0.969 s, respectively.
-The direct path remains 31%, 17% and 48% slower than its paired stock controls. It improves the
-existing opt-in implementation but does not establish default performance admission for
-[issue #398](https://github.com/datafusion-contrib/StreamFusion/issues/398).
+The direct path remains 31%, 17% and 48% slower than its paired stock controls. These historical
+results improve the preceding opt-in implementation. Verified UDF execution now defaults on
+under the accepted UDF performance exception; it does not require a standalone speedup.
 
 ```sh
 SF_BENCHMARK=true mvn -Pbench -pl :streamfusion-runtime -am test \
@@ -383,10 +384,11 @@ SF_BENCHMARK=true mvn -Pbench -pl :streamfusion-runtime -am test \
   -Dsharedscalar.expectDirect=true -Dsf.extraJvmArgs=-Xmx2g
 ```
 
-Use the same candidate benchmark source in each worktree; its additional switches and assertions
-are test-only. On the preceding main checkout, omit `sharedscalar.expectDirect` to measure its opt-in bridge.
-To measure the unchanged default fallback, also pass `-Dsharedscalar.enabled=false
--Dsharedscalar.expectNative=false`. The benchmark asserts the native plan, both transposes,
+Use the same benchmark source in each worktree; its additional switches and assertions are
+test-only. Historical checkouts whose shared-stateful default was false also need
+`-Dsharedscalar.enabled=true`. On the checkout preceding direct evaluation, omit
+`sharedscalar.expectDirect` to measure its opt-in bridge. To reproduce the stock-fallback control,
+pass `-Dsharedscalar.enabled=false -Dsharedscalar.expectNative=false`. The benchmark asserts the native plan, both transposes,
 consumed row counts and the direct-evaluation counter for the candidate.
 
 
@@ -394,3 +396,82 @@ Shared stateful and temporal UDF coverage now defaults on under the maintainer-a
 performance exception. The earlier opt-in/fallback controls above retain their original scope;
 they establish optimization effects, not a faster-than-Flink claim. The alternative direct-temporal
 and timestamp-alias execution experiments retain their own defaults and type guards.
+
+
+### Generated batch loops for shared stateful calls
+
+Complete JVM Calcs with the existing direct primitive-input eligibility and numeric/boolean
+results enter their generated evaluator once per Arrow batch. The generated class owns the row
+loop and calls its existing row evaluator in order, writing each accepted result before evaluating
+the next row. This removes repeated interface dispatch through the shared evaluator wrapper
+without splitting predicates from projections or changing function instances, lifecycle, NULLs or
+exception handling. Older serialized evaluators use the existing row loop. The generated batch
+method reports completion even when every row is filtered, preventing a second evaluation of
+stateful calls. STRING-result programs keep their existing direct row loop because the measured
+batch-loop prototypes did not establish a repeatable STRING benefit. Changelog batches and other
+layouts retain their existing JNI route. Signature admission and configuration defaults are unchanged.
+
+The bounded #398 investigation compares main `c5fd8dd1` with this change on Linux x86-64,
+JDK 17, released Flink 2.2.1 and 1.18.1, release+mimalloc, parallelism one, a 2 GiB heap and
+1,024-row batches. Each final JVM cohort runs five million runtime-source rows per job, two warmups
+and five alternating stock/native pairs for INT, BIGINT and STRING. The preceding and current
+implementations run serially, with identical benchmark sources and native libraries; compiled
+production classes select the revision. Every complete job retains both transposes and the rowwise
+blackhole sink. The benchmark verifies actual Calc consumption and the exact direct-evaluation
+row-count delta for every native job, leaving the shared-stateful option at its default.
+No external Java/Rust/C build or javadoc processes were observed during these final cohorts.
+
+| Flink | Two shared calls | Previous native (s) | Current native (s) | Previous paired stock (s) | Current paired stock (s) |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 2.2.1 | INT | 0.616466 | 0.609197 | 0.443351 | 0.446468 |
+| 2.2.1 | BIGINT | 0.601337 | 0.567549 | 0.475448 | 0.494892 |
+| 2.2.1 | STRING | 1.334913 | 1.290989 | 1.124278 | 1.090521 |
+| 1.18.1 | INT | 0.630854 | 0.627694 | 0.454156 | 0.452564 |
+| 1.18.1 | BIGINT | 0.596902 | 0.576945 | 0.462691 | 0.482146 |
+| 1.18.1 | STRING | 1.285901 | 1.293444 | 1.098261 | 1.112885 |
+
+These are five-trial medians. BIGINT improves about 5.6% on Flink 2.2 and 3.3% on 1.18; INT changes
+by about 1.2% and 0.5%, with overlapping ranges. Paired stock controls drift, including about 4%
+for BIGINT, so these are modest complete-job observations rather than isolated kernel estimates.
+STRING retains the preceding evaluation loop; its timing differences should not be attributed to
+an optimized STRING kernel. Every native median remains slower than stock Flink. Default UDF
+admission follows the accepted performance exception, not a standalone speedup claim.
+
+Separate one-million-row comparisons use 64-row batches, NULL every seventh input, two warmups
+and three alternating engine pairs on both Flink lines. They verify the same default route and
+retain previous/current/stock trials and variability in the results artifact. Earlier all-result
+batch-loop comparisons and a small-batch cohort that overlapped external Java builds, including
+a 14.146 s stock outlier, remain labeled diagnostic; no unfavorable measurements are removed.
+
+Separate async-profiler 4.0 CPU/allocation recordings use ten million rows, two warmups and three
+pairs, a 1 ms software CPU timer, DWARF stacks and 512 KiB Java allocation sampling. Among stacks
+inside direct Calc evaluation, sampled interface-dispatch leaves are 392 in the baseline and 207
+in the retained variant. Java allocation estimates remain roughly unchanged at 16.94 versus
+16.82 GB. These are sampled observations and allocation estimates, not exact allocation requests,
+copied bytes or an additive cost breakdown. Profiles include both engines, warmup, setup and JIT;
+profiled durations are excluded from performance claims. Earlier diagnostic recordings overlapped
+external Java work. Inlined UDF work can be charged to generated evaluator frames, so sampled
+stacks do not cleanly separate useful user-function execution from argument/result boxing.
+
+Two broader prototypes were removed: an all-result batch loop did not establish a repeatable
+STRING benefit, and embedding the generated row body directly into the loop added no convincing
+complete-job improvement or allocation reduction. The retained numeric/boolean specialization
+follows Comet's generated batch-kernel structure while keeping Flink's existing row evaluator and
+StreamFusion's Arrow writer. Broad buffer pooling or ownership changes remain outside this bounded
+investigation; evidence-gated JNI/Arrow boundary work is tracked in
+[#248](https://github.com/datafusion-contrib/StreamFusion/issues/248).
+
+Both released lines pass 223 focused checks plus six isolated-worker cases without planner or
+Calcite classes. Coverage includes default and explicit-false routes, shared and independent
+instances, predicate/projection ordering, nested and conditional calls, nullable INT/BIGINT/STRING
+results, empty/all-filtered batches followed by later matches, all changelog tags, lifecycle,
+checked/runtime/error failures, sliced input and independently owned outputs. Worker class-loading
+provenance confirms the measured runtime loads the selected compiled production classes.
+
+All measured timing trials, diagnostic profiles' summaries, source/library hashes, commands,
+rejected prototype patches and validation results are retained in
+[the #398 results](../benchmarks/results/shared-stateful-scalar-2026-10-21.json).
+The benchmark accepts `sharedscalar.types`, `sharedscalar.batchRows` and `sharedscalar.nullEvery`
+for focused and nullable-input comparisons. Set `sharedscalar.enabled=false` together with
+`sharedscalar.expectNative=false` for the stock-fallback control; otherwise leave the option unset
+and use `sharedscalar.expectDirect=true` to require the default direct route.

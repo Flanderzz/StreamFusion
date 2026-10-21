@@ -564,10 +564,15 @@ projections and shared function calls still execute together in Flink's row orde
 function lifecycle. Empty results and exceptional partial outputs release their Arrow buffers.
 `directPrimitiveCalcRows` counts input rows actually evaluated by this path.
 
-The [release comparison](../optimizations/udf-columnar-upcall.md#complete-generated-calcs-with-primitive-inputs)
-reduces the existing opt-in INT/BIGINT/STRING job times by about 28%/32%/10%. These isolated jobs
+The [historical release comparison](../optimizations/udf-columnar-upcall.md#complete-generated-calcs-with-primitive-inputs)
+reduced the then-opt-in INT/BIGINT/STRING job times by about 28%/32%/10%. These isolated jobs
 remain slower than stock Flink. Default admission now follows the accepted UDF exception;
-this does not complete [issue #398](https://github.com/datafusion-contrib/StreamFusion/issues/398).
+the [bounded shared-call optimization](../optimizations/udf-columnar-upcall.md#generated-batch-loops-for-shared-stateful-calls)
+adds a generated batch loop for numeric/boolean programs while retaining the existing row
+evaluator, writer and admission rules. STRING-result programs keep the existing direct row loop.
+Older serialized evaluators retain row evaluation. Both Flink lines pass 223 focused checks and
+six isolated-worker checks; final release trials and their variability are linked from the
+optimization page. These complete jobs still trail stock Flink.
 
 Runtime tests compare ordered values, types, every changelog tag and invocation counts, including
 nullable inputs/results, nested and conditional calls, all-filtered and empty inputs, exceptions,
