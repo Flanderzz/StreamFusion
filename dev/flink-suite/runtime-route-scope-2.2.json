@@ -18,13 +18,13 @@
       "test": "org.apache.flink.table.planner.runtime.stream.table.CalcITCase#testInlineScalarFunction",
       "display_name": "StateBackend=HEAP",
       "count": 1,
-      "route": "mixed"
+      "route": "native"
     },
     {
       "test": "org.apache.flink.table.planner.runtime.stream.table.CalcITCase#testInlineScalarFunction",
       "display_name": "StateBackend=ROCKSDB",
       "count": 1,
-      "route": "mixed"
+      "route": "native"
     },
     {
       "test": "org.apache.flink.table.api.TableEnvironmentITCase#testFromToDataStreamAndExecuteSql",
@@ -186,43 +186,43 @@
       "test": "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testGroupBySingleValue",
       "display_name": "LocalGlobal=OFF, MiniBatch=OFF, StateBackend=HEAP, EnableAsyncState=false",
       "count": 1,
-      "route": "native"
+      "route": "mixed"
     },
     {
       "test": "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testGroupBySingleValue",
       "display_name": "LocalGlobal=OFF, MiniBatch=OFF, StateBackend=HEAP, EnableAsyncState=true",
       "count": 1,
-      "route": "native"
+      "route": "mixed"
     },
     {
       "test": "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testGroupBySingleValue",
       "display_name": "LocalGlobal=OFF, MiniBatch=ON, StateBackend=HEAP, EnableAsyncState=false",
       "count": 1,
-      "route": "native"
+      "route": "mixed"
     },
     {
       "test": "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testGroupBySingleValue",
       "display_name": "LocalGlobal=ON, MiniBatch=ON, StateBackend=HEAP, EnableAsyncState=false",
       "count": 1,
-      "route": "native"
+      "route": "mixed"
     },
     {
       "test": "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testGroupBySingleValue",
       "display_name": "LocalGlobal=OFF, MiniBatch=OFF, StateBackend=ROCKSDB, EnableAsyncState=false",
       "count": 1,
-      "route": "native"
+      "route": "mixed"
     },
     {
       "test": "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testGroupBySingleValue",
       "display_name": "LocalGlobal=OFF, MiniBatch=ON, StateBackend=ROCKSDB, EnableAsyncState=false",
       "count": 1,
-      "route": "native"
+      "route": "mixed"
     },
     {
       "test": "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testGroupBySingleValue",
       "display_name": "LocalGlobal=ON, MiniBatch=ON, StateBackend=ROCKSDB, EnableAsyncState=false",
       "count": 1,
-      "route": "native"
+      "route": "mixed"
     },
     {
       "test": "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testMinAggRetractWithCondition",

@@ -18,13 +18,13 @@
       "test": "org.apache.flink.table.planner.runtime.stream.table.CalcITCase#testInlineScalarFunction",
       "display_name": "testInlineScalarFunction[StateBackend=HEAP]",
       "count": 1,
-      "route": "mixed"
+      "route": "native"
     },
     {
       "test": "org.apache.flink.table.planner.runtime.stream.table.CalcITCase#testInlineScalarFunction",
       "display_name": "testInlineScalarFunction[StateBackend=ROCKSDB]",
       "count": 1,
-      "route": "mixed"
+      "route": "native"
     },
     {
       "test": "org.apache.flink.table.api.TableEnvironmentITCase#testFromToDataStreamAndExecuteSql",
@@ -223,7 +223,7 @@
       "display_name": "testGroupBySingleValue[LocalGlobal=OFF, MiniBatch=OFF, StateBackend=HEAP]",
       "count": 1,
       "route_by_contract_variant": {
-        "changelog=false": "native",
+        "changelog=false": "mixed",
         "changelog=true": "full_fallback"
       }
     },
@@ -232,7 +232,7 @@
       "display_name": "testGroupBySingleValue[LocalGlobal=OFF, MiniBatch=ON, StateBackend=HEAP]",
       "count": 1,
       "route_by_contract_variant": {
-        "changelog=false": "native",
+        "changelog=false": "mixed",
         "changelog=true": "full_fallback"
       }
     },
@@ -241,7 +241,7 @@
       "display_name": "testGroupBySingleValue[LocalGlobal=ON, MiniBatch=ON, StateBackend=HEAP]",
       "count": 1,
       "route_by_contract_variant": {
-        "changelog=false": "native",
+        "changelog=false": "mixed",
         "changelog=true": "full_fallback"
       }
     },
@@ -250,7 +250,7 @@
       "display_name": "testGroupBySingleValue[LocalGlobal=OFF, MiniBatch=OFF, StateBackend=ROCKSDB]",
       "count": 1,
       "route_by_contract_variant": {
-        "changelog=false": "native",
+        "changelog=false": "mixed",
         "changelog=true": "full_fallback"
       }
     },
@@ -259,7 +259,7 @@
       "display_name": "testGroupBySingleValue[LocalGlobal=OFF, MiniBatch=ON, StateBackend=ROCKSDB]",
       "count": 1,
       "route_by_contract_variant": {
-        "changelog=false": "native",
+        "changelog=false": "mixed",
         "changelog=true": "full_fallback"
       }
     },
@@ -268,7 +268,7 @@
       "display_name": "testGroupBySingleValue[LocalGlobal=ON, MiniBatch=ON, StateBackend=ROCKSDB]",
       "count": 1,
       "route_by_contract_variant": {
-        "changelog=false": "native",
+        "changelog=false": "mixed",
         "changelog=true": "full_fallback"
       }
     },
@@ -346,7 +346,7 @@
     },
     {
       "test": "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testJsonArrayAggAndJsonObjectAggWithOtherAggs",
-      "display_name": "testGroupBySingleValue[LocalGlobal=OFF, MiniBatch=OFF, StateBackend=HEAP]",
+      "display_name": "testJsonArrayAggAndJsonObjectAggWithOtherAggs[LocalGlobal=OFF, MiniBatch=OFF, StateBackend=HEAP]",
       "count": 1,
       "route_by_contract_variant": {
         "changelog=false": "native",
@@ -355,7 +355,7 @@
     },
     {
       "test": "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testJsonArrayAggAndJsonObjectAggWithOtherAggs",
-      "display_name": "testGroupBySingleValue[LocalGlobal=OFF, MiniBatch=ON, StateBackend=HEAP]",
+      "display_name": "testJsonArrayAggAndJsonObjectAggWithOtherAggs[LocalGlobal=OFF, MiniBatch=ON, StateBackend=HEAP]",
       "count": 1,
       "route_by_contract_variant": {
         "changelog=false": "native",
@@ -364,7 +364,7 @@
     },
     {
       "test": "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testJsonArrayAggAndJsonObjectAggWithOtherAggs",
-      "display_name": "testGroupBySingleValue[LocalGlobal=ON, MiniBatch=ON, StateBackend=HEAP]",
+      "display_name": "testJsonArrayAggAndJsonObjectAggWithOtherAggs[LocalGlobal=ON, MiniBatch=ON, StateBackend=HEAP]",
       "count": 1,
       "route_by_contract_variant": {
         "changelog=false": "native",
@@ -373,7 +373,7 @@
     },
     {
       "test": "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testJsonArrayAggAndJsonObjectAggWithOtherAggs",
-      "display_name": "testGroupBySingleValue[LocalGlobal=OFF, MiniBatch=OFF, StateBackend=ROCKSDB]",
+      "display_name": "testJsonArrayAggAndJsonObjectAggWithOtherAggs[LocalGlobal=OFF, MiniBatch=OFF, StateBackend=ROCKSDB]",
       "count": 1,
       "route_by_contract_variant": {
         "changelog=false": "native",
@@ -382,7 +382,7 @@
     },
     {
       "test": "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testJsonArrayAggAndJsonObjectAggWithOtherAggs",
-      "display_name": "testGroupBySingleValue[LocalGlobal=OFF, MiniBatch=ON, StateBackend=ROCKSDB]",
+      "display_name": "testJsonArrayAggAndJsonObjectAggWithOtherAggs[LocalGlobal=OFF, MiniBatch=ON, StateBackend=ROCKSDB]",
       "count": 1,
       "route_by_contract_variant": {
         "changelog=false": "native",
@@ -391,7 +391,7 @@
     },
     {
       "test": "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testJsonArrayAggAndJsonObjectAggWithOtherAggs",
-      "display_name": "testGroupBySingleValue[LocalGlobal=ON, MiniBatch=ON, StateBackend=ROCKSDB]",
+      "display_name": "testJsonArrayAggAndJsonObjectAggWithOtherAggs[LocalGlobal=ON, MiniBatch=ON, StateBackend=ROCKSDB]",
       "count": 1,
       "route_by_contract_variant": {
         "changelog=false": "native",
@@ -400,7 +400,7 @@
     },
     {
       "test": "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testGroupJsonArrayAggAndJsonObjectAggWithOtherAggs",
-      "display_name": "testGroupBySingleValue[LocalGlobal=OFF, MiniBatch=OFF, StateBackend=HEAP]",
+      "display_name": "testGroupJsonArrayAggAndJsonObjectAggWithOtherAggs[LocalGlobal=OFF, MiniBatch=OFF, StateBackend=HEAP]",
       "count": 1,
       "route_by_contract_variant": {
         "changelog=false": "native",
@@ -409,7 +409,7 @@
     },
     {
       "test": "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testGroupJsonArrayAggAndJsonObjectAggWithOtherAggs",
-      "display_name": "testGroupBySingleValue[LocalGlobal=OFF, MiniBatch=ON, StateBackend=HEAP]",
+      "display_name": "testGroupJsonArrayAggAndJsonObjectAggWithOtherAggs[LocalGlobal=OFF, MiniBatch=ON, StateBackend=HEAP]",
       "count": 1,
       "route_by_contract_variant": {
         "changelog=false": "native",
@@ -418,7 +418,7 @@
     },
     {
       "test": "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testGroupJsonArrayAggAndJsonObjectAggWithOtherAggs",
-      "display_name": "testGroupBySingleValue[LocalGlobal=ON, MiniBatch=ON, StateBackend=HEAP]",
+      "display_name": "testGroupJsonArrayAggAndJsonObjectAggWithOtherAggs[LocalGlobal=ON, MiniBatch=ON, StateBackend=HEAP]",
       "count": 1,
       "route_by_contract_variant": {
         "changelog=false": "native",
@@ -427,7 +427,7 @@
     },
     {
       "test": "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testGroupJsonArrayAggAndJsonObjectAggWithOtherAggs",
-      "display_name": "testGroupBySingleValue[LocalGlobal=OFF, MiniBatch=OFF, StateBackend=ROCKSDB]",
+      "display_name": "testGroupJsonArrayAggAndJsonObjectAggWithOtherAggs[LocalGlobal=OFF, MiniBatch=OFF, StateBackend=ROCKSDB]",
       "count": 1,
       "route_by_contract_variant": {
         "changelog=false": "native",
@@ -436,7 +436,7 @@
     },
     {
       "test": "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testGroupJsonArrayAggAndJsonObjectAggWithOtherAggs",
-      "display_name": "testGroupBySingleValue[LocalGlobal=OFF, MiniBatch=ON, StateBackend=ROCKSDB]",
+      "display_name": "testGroupJsonArrayAggAndJsonObjectAggWithOtherAggs[LocalGlobal=OFF, MiniBatch=ON, StateBackend=ROCKSDB]",
       "count": 1,
       "route_by_contract_variant": {
         "changelog=false": "native",
@@ -445,7 +445,7 @@
     },
     {
       "test": "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testGroupJsonArrayAggAndJsonObjectAggWithOtherAggs",
-      "display_name": "testGroupBySingleValue[LocalGlobal=ON, MiniBatch=ON, StateBackend=ROCKSDB]",
+      "display_name": "testGroupJsonArrayAggAndJsonObjectAggWithOtherAggs[LocalGlobal=ON, MiniBatch=ON, StateBackend=ROCKSDB]",
       "count": 1,
       "route_by_contract_variant": {
         "changelog=false": "native",
@@ -670,7 +670,7 @@
     },
     {
       "test": "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testListAggWithDistinct",
-      "display_name": "testListAggWithRetraction[LocalGlobal=OFF, MiniBatch=OFF, StateBackend=HEAP]",
+      "display_name": "testListAggWithDistinct[LocalGlobal=OFF, MiniBatch=OFF, StateBackend=HEAP]",
       "count": 1,
       "route_by_contract_variant": {
         "changelog=false&aggMode=OFF": "native",
@@ -679,7 +679,7 @@
     },
     {
       "test": "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testListAggWithDistinct",
-      "display_name": "testListAggWithRetraction[LocalGlobal=OFF, MiniBatch=ON, StateBackend=HEAP]",
+      "display_name": "testListAggWithDistinct[LocalGlobal=OFF, MiniBatch=ON, StateBackend=HEAP]",
       "count": 1,
       "route_by_contract_variant": {
         "changelog=false&aggMode=OFF": "native",
@@ -688,7 +688,7 @@
     },
     {
       "test": "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testListAggWithDistinct",
-      "display_name": "testListAggWithRetraction[LocalGlobal=ON, MiniBatch=ON, StateBackend=HEAP]",
+      "display_name": "testListAggWithDistinct[LocalGlobal=ON, MiniBatch=ON, StateBackend=HEAP]",
       "count": 1,
       "route_by_contract_variant": {
         "changelog=false&aggMode=ON": "native",
@@ -697,7 +697,7 @@
     },
     {
       "test": "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testListAggWithDistinct",
-      "display_name": "testListAggWithRetraction[LocalGlobal=OFF, MiniBatch=OFF, StateBackend=ROCKSDB]",
+      "display_name": "testListAggWithDistinct[LocalGlobal=OFF, MiniBatch=OFF, StateBackend=ROCKSDB]",
       "count": 1,
       "route_by_contract_variant": {
         "changelog=false&aggMode=OFF": "native",
@@ -706,7 +706,7 @@
     },
     {
       "test": "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testListAggWithDistinct",
-      "display_name": "testListAggWithRetraction[LocalGlobal=OFF, MiniBatch=ON, StateBackend=ROCKSDB]",
+      "display_name": "testListAggWithDistinct[LocalGlobal=OFF, MiniBatch=ON, StateBackend=ROCKSDB]",
       "count": 1,
       "route_by_contract_variant": {
         "changelog=false&aggMode=OFF": "native",
@@ -715,7 +715,7 @@
     },
     {
       "test": "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testListAggWithDistinct",
-      "display_name": "testListAggWithRetraction[LocalGlobal=ON, MiniBatch=ON, StateBackend=ROCKSDB]",
+      "display_name": "testListAggWithDistinct[LocalGlobal=ON, MiniBatch=ON, StateBackend=ROCKSDB]",
       "count": 1,
       "route_by_contract_variant": {
         "changelog=false&aggMode=ON": "native",

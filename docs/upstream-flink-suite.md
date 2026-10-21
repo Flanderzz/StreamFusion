@@ -1224,3 +1224,13 @@ contracts. Its one-hour-retention single-phase variants require native grouped a
 the two-phase variants retain the explicit append-only LISTAGG partial-layout fallback until
 the retracting merge is implemented. Focused operator tests add independent list-entry and
 pending-retraction deadlines, survivor refresh and repeated recovery on both state backends.
+
+
+Runtime route scopes use each released fixture's exact display name; Vintage method prefixes
+must match the selected method. The SINGLE_VALUE upstream fixture also runs a retracting
+keyless-join probe that retains its existing host fallback before its independent native
+scalar query. Its whole-fixture route is therefore mixed, while the grouped-aggregate
+contract still requires consumed native input. Flink 1.18 changelog-state variants retain
+explicit full fallback. DataStream `InputConversionOperator` is counted as source conversion
+only when its graph inputs lead directly to a verified source boundary. The same class
+inside computation remains host work; no native-work or local/global requirement is relaxed.

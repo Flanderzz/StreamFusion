@@ -80,6 +80,9 @@ BOUNDARY_OPERATORS = SOURCE_OPERATORS | SINK_OPERATORS | {
 
 
 GENERATED_FACTORY = 'org.apache.flink.table.runtime.operators.CodeGenOperatorFactory'
+SOURCE_ADAPTERS = {
+    'org.apache.flink.table.runtime.operators.source.InputConversionOperator',
+}
 SINK_ADAPTERS = {
     'org.apache.flink.table.runtime.operators.sink.OutputConversionOperator',
     'org.apache.flink.table.runtime.operators.sink.constraint.ConstraintEnforcer',
@@ -115,8 +118,10 @@ def boundary_adapters(nodes):
         endpoints = SOURCE_OPERATORS if source_side else SINK_OPERATORS
         if node['operator_class'] in endpoints:
             return not links
-        allowed = (generated(node, 'SourceConversion') if source_side else
-                   node['operator_class'] in SINK_ADAPTERS or generated(node, 'SinkConversion'))
+        if source_side:
+            allowed = node['operator_class'] in SOURCE_ADAPTERS or generated(node, 'SourceConversion')
+        else:
+            allowed = node['operator_class'] in SINK_ADAPTERS or generated(node, 'SinkConversion')
         return bool(allowed and links and all(
             reaches_boundary(parent, source_side, visiting | {identity}) for parent in links))
 
