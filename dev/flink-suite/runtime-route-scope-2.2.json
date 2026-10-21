@@ -594,7 +594,7 @@
       "test": "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testListAggWithDistinct",
       "display_name": "LocalGlobal=ON, MiniBatch=ON, StateBackend=HEAP, EnableAsyncState=false",
       "count": 1,
-      "route": "full_fallback"
+      "route": "native"
     },
     {
       "test": "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testListAggWithDistinct",
@@ -612,7 +612,7 @@
       "test": "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testListAggWithDistinct",
       "display_name": "LocalGlobal=ON, MiniBatch=ON, StateBackend=ROCKSDB, EnableAsyncState=false",
       "count": 1,
-      "route": "full_fallback"
+      "route": "native"
     }
   ]
 }
