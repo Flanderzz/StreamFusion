@@ -133,7 +133,10 @@ final class RecoveryExecutionMetrics implements AutoCloseable {
   }
 
   static void assertConsumed(List<Map<String, Object>> observations, String planOperator) {
-    String metricOperator = planOperator.replace("Aggregate", "Agg") + "ExecNode";
+    String metricOperator =
+        planOperator.equals("NativeCalc") || planOperator.equals("NativeFilter")
+            ? planOperator + "("
+            : planOperator.replace("Aggregate", "Agg") + "ExecNode";
     long consumed =
         observations.stream()
             .filter(row -> row.get("operator").toString().startsWith(metricOperator))

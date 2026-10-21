@@ -26,8 +26,9 @@ public final class StreamPhysicalNativeFlussSink extends StreamPhysicalNativeSin
       RowType type,
       Configuration config,
       TablePath path,
-      List<String> partitionKeys) {
-    super(cluster, traits, input, outputType);
+      List<String> partitionKeys,
+      NativePlanDetails planDetails) {
+    super(cluster, traits, input, outputType, planDetails);
     this.type = type;
     this.config = config;
     this.path = path;
@@ -42,7 +43,15 @@ public final class StreamPhysicalNativeFlussSink extends StreamPhysicalNativeSin
   @Override
   public RelNode copy(RelTraitSet traits, List<RelNode> inputs) {
     return new StreamPhysicalNativeFlussSink(
-        getCluster(), traits, inputs.get(0), outputRowType, type, config, path, partitionKeys);
+        getCluster(),
+        traits,
+        inputs.get(0),
+        outputRowType,
+        type,
+        config,
+        path,
+        partitionKeys,
+        planDetails);
   }
 
   @Override

@@ -23,6 +23,7 @@ public final class StreamPhysicalNativeFlussSource extends AbstractRelNode
   private final Predicate filter;
   private final Configuration config;
   private final TablePath path;
+  private final NativePlanDetails planDetails;
   private final ScanWatermarkSpec watermark;
   private final String sourceKey;
   private final boolean preserveSchemaForSharing;
@@ -40,12 +41,14 @@ public final class StreamPhysicalNativeFlussSource extends AbstractRelNode
       ScanWatermarkSpec watermark,
       String sourceKey,
       boolean preserveSchemaForSharing,
-      long shareToken) {
+      long shareToken,
+      NativePlanDetails planDetails) {
     super(cluster, traits);
     this.outputType = outputType;
     this.delegate = delegate;
     this.config = config;
     this.path = path;
+    this.planDetails = planDetails;
     this.filter = filter;
     this.watermark = watermark;
     this.sourceKey = sourceKey;
@@ -76,14 +79,15 @@ public final class StreamPhysicalNativeFlussSource extends AbstractRelNode
         watermark,
         sourceKey,
         preserveSchemaForSharing,
-        shareToken);
+        shareToken,
+        planDetails);
   }
 
   @Override
   public RelWriter explainTerms(RelWriter writer) {
     RelWriter explained =
-        super.explainTerms(writer)
-            .item("table", path)
+        planDetails
+            .explain(super.explainTerms(writer), outputType)
             .itemIf("batchFilter", filter, filter != null);
     return shareToken == 0
         ? NativeRelDigests.withBarrier(explained, reuseBarrier)
@@ -111,7 +115,8 @@ public final class StreamPhysicalNativeFlussSource extends AbstractRelNode
         watermark,
         sourceKey,
         preserveSchemaForSharing,
-        token);
+        token,
+        planDetails);
   }
 
   @Override
@@ -146,7 +151,8 @@ public final class StreamPhysicalNativeFlussSource extends AbstractRelNode
         next,
         sourceKey,
         preserveSchemaForSharing,
-        shareToken);
+        shareToken,
+        planDetails);
   }
 
   @Override

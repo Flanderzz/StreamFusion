@@ -131,7 +131,8 @@ final class FlussTables {
               readWatermark,
               sourceKey,
               shared,
-              0);
+              0,
+              NativePlanDetails.from(scan));
       if (!readType.equals(scan.getRowType())) {
         List<org.apache.calcite.rex.RexNode> projections = new java.util.ArrayList<>();
         for (var output : scan.getRowType().getFieldList()) {
@@ -278,7 +279,8 @@ final class FlussTables {
               (Configuration) field(tableSink, "flussConfig"),
               sink.contextResolvedTable().getResolvedTable().getOptions()),
           (TablePath) field(tableSink, "tablePath"),
-          (List<String>) field(tableSink, "partitionKeys"));
+          (List<String>) field(tableSink, "partitionKeys"),
+          NativePlanDetails.from(sink));
     } catch (ReflectiveOperationException | LinkageError incompatible) {
       context.decline("fluss sink: installed Java connector is outside the verified 1.0 API");
       return null;

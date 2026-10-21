@@ -57,7 +57,7 @@ class PaimonSourceSqlTest {
         assertEquals(1, sources.size());
         assertNotNull(sources.get(0).getUid());
         if (nativeSource) {
-          assertEquals("native-paimon-source", sources.get(0).getName());
+          assertTrue(sources.get(0).getName().startsWith("NativeSource("));
         }
         uids.add(sources.get(0).getUid());
       }

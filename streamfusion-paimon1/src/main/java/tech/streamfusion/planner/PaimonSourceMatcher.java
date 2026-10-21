@@ -147,10 +147,12 @@ final class PaimonSourceMatcher {
         scan.getRowType(),
         (FileStoreTable) source.getTable(),
         ScanWatermarkSpec.of(scan),
+        null,
         FlinkRelOptUtil.getDigest(scan)
             + "|"
             + scan.getRowType().getFullTypeString()
             + "|"
-            + new TreeMap<>(source.getTable().options()));
+            + new TreeMap<>(source.getTable().options()),
+        NativePlanDetails.from(scan));
   }
 }

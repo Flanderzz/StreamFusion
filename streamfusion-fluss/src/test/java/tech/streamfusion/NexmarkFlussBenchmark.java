@@ -322,11 +322,9 @@ class NexmarkFlussBenchmark {
     Files.writeString(
         plans.resolve(query.label + (nativeRun ? "-native" : "-stock") + ".txt"), plan);
     if (nativeRun) {
-      assertTrue(plan.contains("native-fluss-source"), scan.explainSummary());
-      if (key == null) assertTrue(plan.contains("native-fluss-append-sink"), scan.explainSummary());
-      else
-        assertFalse(
-            plan.contains("native-fluss-append-sink"), "Primary-key production must stay stock");
+      assertTrue(plan.contains("NativeSource("), scan.explainSummary());
+      if (key == null) assertTrue(plan.contains("NativeSink("), scan.explainSummary());
+      else assertFalse(plan.contains("NativeSink("), "Primary-key production must stay stock");
       assertFalse(plan.contains("RowDataToArrow"), scan.explainSummary());
       if (key == null) assertFalse(plan.contains("ArrowToRowData"), scan.explainSummary());
       int physical = plan.indexOf("== Physical Execution Plan ==");
@@ -334,10 +332,7 @@ class NexmarkFlussBenchmark {
       FlussPlanAssertions.assertNativeInterior(execution, key != null, query.label);
       if (query.label.equals("q3")) {
         assertTrue(plan.contains("NativeShare(consumers=[2])"), scan.explainSummary());
-        assertEquals(
-            1,
-            plan.split("\"contents\" : \"Source: native-fluss-source\"", -1).length - 1,
-            "q3 must share one columnar source between both join branches");
+        FlussPlanAssertions.assertSingleNativeSource(execution, query.label);
       }
     }
     String profiler = System.getProperty("profile.asprof");

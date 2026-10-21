@@ -88,7 +88,7 @@ class SharedStatefulScalarBenchmark {
                   ROWS,
                   metrics.recordsIn(
                       result.getJobClient().orElseThrow().getJobID().toString(),
-                      "NativeCalcExecNode"));
+                      "NativeCalc("));
             } else {
               assertEquals(0, scan.substitutions());
               if (engine == 1)

@@ -82,7 +82,7 @@ class PaimonPartitionSqlBenchmark {
     assertEquals(1, sources.size());
     assertEquals(
         nativeSource,
-        sources.get(0).getName().equals("native-paimon-source"),
+        sources.get(0).getName().startsWith("NativeSource("),
         "the native candidate must execute the Paimon source, and stock must use the released"
             + " source");
     long expectedRows = selective ? inputRows / 32 : inputRows;

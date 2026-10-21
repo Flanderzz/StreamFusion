@@ -119,7 +119,7 @@ class FlinkGeneratedProcessingTimeSqlHarnessTest {
                   .filter(
                       row ->
                           row.get("jobId").equals(jobId)
-                              && row.get("operator").toString().startsWith("NativeCalcExecNode"))
+                              && row.get("operator").toString().startsWith("NativeCalc("))
                   .collect(tech.streamfusion.compat.ListCollectors.toList());
           assertEquals(1, observations.size(), "clock marker should fuse into its consumer");
           for (var observation : observations)

@@ -175,7 +175,8 @@ final class PaimonSourceMatcher {
             + "|"
             + scan.getRowType().getFullTypeString()
             + "|"
-            + new TreeMap<>(source.getTable().options()));
+            + new TreeMap<>(source.getTable().options()),
+        NativePlanDetails.from(scan));
   }
 
   private static Predicate partitionPredicate(StreamPhysicalTableSourceScan scan, FileStoreTable table) {

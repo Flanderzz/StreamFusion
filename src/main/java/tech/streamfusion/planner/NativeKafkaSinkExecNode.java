@@ -71,6 +71,7 @@ public final class NativeKafkaSinkExecNode extends ExecNodeBase<Object>
             parallelism,
             parallelismConfigured);
 
+    serialization.setDescription(getDescription());
     KafkaSinkBuilder<PreSerializedKafkaRecord> builder =
         KafkaSink.<PreSerializedKafkaRecord>builder()
             .setKafkaProducerConfig(planned.sink.producerProperties)
@@ -84,7 +85,11 @@ public final class NativeKafkaSinkExecNode extends ExecNodeBase<Object>
     DataStream<PreSerializedKafkaRecord> stream =
         new DataStream<>(planner.getExecEnv(), serialization);
     DataStreamSink<PreSerializedKafkaRecord> sink =
-        stream.sinkTo(builder.build()).name("flink-kafka-sink").setParallelism(parallelism);
+        stream
+            .sinkTo(builder.build())
+            .name(NativePlanDetails.name("NativeSink", getDescription()))
+            .setParallelism(parallelism);
+    sink.getTransformation().setDescription(getDescription());
     return (Transformation<Object>) (Transformation<?>) sink.getTransformation();
   }
 }

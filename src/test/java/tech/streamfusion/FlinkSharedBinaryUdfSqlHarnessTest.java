@@ -127,7 +127,7 @@ class FlinkSharedBinaryUdfSqlHarnessTest {
     assertTrue(scan.substitutions() > 0, scan.fallbackReasons().toString());
     assertTrue(scan.fallbackReasons().isEmpty(), scan.fallbackReasons().toString());
     assertEquals(host.rows(), actual.rows(), "ordered raw changelog differs from Flink");
-    var groups = reporter.findOperatorMetricGroups(actual.job(), "(?i)NativeCalcExecNode");
+    var groups = reporter.findOperatorMetricGroups(actual.job(), "(?i)NativeCalc\\(");
     assertTrue(!groups.isEmpty(), "native Calc did not execute");
     long inputs = 0, outputs = 0;
     for (var group : groups) {

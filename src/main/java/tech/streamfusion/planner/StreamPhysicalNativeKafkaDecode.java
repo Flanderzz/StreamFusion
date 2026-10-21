@@ -29,6 +29,7 @@ public class StreamPhysicalNativeKafkaDecode extends AbstractRelNode
   // it as the writer schema (its datums are schema-less) and resolves the pruned output as the reader.
   private final RelDataType writerRowType;
   private final Map<String, String> options;
+  private final NativePlanDetails planDetails;
   private final ScanWatermarkSpec watermark;
   private final long shareToken;
   private final boolean preserveFullSchemaForSharing;
@@ -44,11 +45,30 @@ public class StreamPhysicalNativeKafkaDecode extends AbstractRelNode
         cluster,
         traitSet,
         outputRowType,
+        options,
+        watermark,
+        preserveFullSchemaForSharing,
+        NativePlanDetails.EMPTY);
+  }
+
+  StreamPhysicalNativeKafkaDecode(
+      RelOptCluster cluster,
+      RelTraitSet traitSet,
+      RelDataType outputRowType,
+      Map<String, String> options,
+      ScanWatermarkSpec watermark,
+      boolean preserveFullSchemaForSharing,
+      NativePlanDetails planDetails) {
+    this(
+        cluster,
+        traitSet,
+        outputRowType,
         outputRowType,
         options,
         watermark,
         0,
-        preserveFullSchemaForSharing);
+        preserveFullSchemaForSharing,
+        planDetails);
   }
 
   private StreamPhysicalNativeKafkaDecode(
@@ -59,11 +79,13 @@ public class StreamPhysicalNativeKafkaDecode extends AbstractRelNode
       Map<String, String> options,
       ScanWatermarkSpec watermark,
       long shareToken,
-      boolean preserveFullSchemaForSharing) {
+      boolean preserveFullSchemaForSharing,
+      NativePlanDetails planDetails) {
     super(cluster, traitSet);
     this.outputRowType = outputRowType;
     this.writerRowType = writerRowType;
     this.options = options;
+    this.planDetails = planDetails;
     this.watermark = watermark;
     this.shareToken = shareToken;
     this.preserveFullSchemaForSharing = preserveFullSchemaForSharing;
@@ -79,7 +101,8 @@ public class StreamPhysicalNativeKafkaDecode extends AbstractRelNode
         options,
         watermark,
         token,
-        preserveFullSchemaForSharing);
+        preserveFullSchemaForSharing,
+        planDetails);
   }
 
   @Override
@@ -132,7 +155,8 @@ public class StreamPhysicalNativeKafkaDecode extends AbstractRelNode
         options,
         projectedWatermark,
         shareToken,
-        preserveFullSchemaForSharing);
+        preserveFullSchemaForSharing,
+        planDetails);
   }
 
   /** Whether decode projection preserves the physical column used by per-split watermarks. */
@@ -163,7 +187,8 @@ public class StreamPhysicalNativeKafkaDecode extends AbstractRelNode
         options,
         watermark,
         shareToken,
-        preserveFullSchemaForSharing);
+        preserveFullSchemaForSharing,
+        planDetails);
   }
 
 
@@ -174,7 +199,8 @@ public class StreamPhysicalNativeKafkaDecode extends AbstractRelNode
     // The keyed items must be part of the digest: two tables differing only in their key format
     // or key projection would otherwise digest identically and be wrongly share-reused.
     RelWriter explained =
-        super.explainTerms(writer)
+        planDetails
+            .explain(super.explainTerms(writer), outputRowType)
             .item("topic", options.get("topic"))
             .item("format", options.getOrDefault("value.format", options.get("format")))
             .itemIf(

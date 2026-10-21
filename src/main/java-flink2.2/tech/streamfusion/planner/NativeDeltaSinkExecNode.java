@@ -85,6 +85,7 @@ public final class NativeDeltaSinkExecNode extends ExecNodeBase<Object>
       // Sink V2 writers cannot chain behind a legacy source. Start the writer chain while
       // records are still serializable Arrow batches, before creating ownership-carrying views.
       views.setChainingStrategy(ChainingStrategy.HEAD);
+      views.setDescription(getDescription());
       rows = new DataStream<>(planner.getExecEnv(), views);
     } else {
       FilePartitionSplitOperator splitter =
@@ -97,6 +98,7 @@ public final class NativeDeltaSinkExecNode extends ExecNodeBase<Object>
               PartitionedArrowBatchTypeInformation.INSTANCE,
               input.getParallelism(),
               false);
+      split.setDescription(getDescription());
       DataStream<PartitionedArrowBatch> routed =
           new DataStream<>(planner.getExecEnv(), split)
               .keyBy(PartitionedArrowBatch::bucketId);
@@ -109,6 +111,7 @@ public final class NativeDeltaSinkExecNode extends ExecNodeBase<Object>
       // view creation, and the writer at one explicit parallelism even when the input inherited a
       // non-default parallelism from an upstream source or global operator.
       views.setParallelism(parallelism);
+      views.getTransformation().setDescription(getDescription());
       rows = views;
     }
 
@@ -146,8 +149,10 @@ public final class NativeDeltaSinkExecNode extends ExecNodeBase<Object>
             DeltaDynamicTableSinkFactory.UID.key(), UUID.randomUUID().toString());
     String name =
         planned.options.getOrDefault(
-            DeltaDynamicTableSinkFactory.NAME.key(), "native-delta-sink");
+            DeltaDynamicTableSinkFactory.NAME.key(),
+            NativePlanDetails.name("NativeSink", getDescription()));
     DataStreamSink<RowData> end = rows.sinkTo(sink).uid(uid).name(name);
+    end.getTransformation().setDescription(getDescription());
     // Arrow-backed RowData is an ownership-carrying view and deliberately has no byte serializer.
     // Keep the writer at the view operator's parallelism even when an upstream global aggregate
     // reduced it below the environment default; otherwise Sink V2 inserts a network edge between

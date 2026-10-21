@@ -69,7 +69,11 @@ final class NativePaimonSourceExecNode extends ExecNodeBase<ArrowBatch>
             : NativeSourceWatermarks.strategy(watermark.idleTimeoutMillis);
     var stream =
         env.fromSource(
-            source, strategy, "native-paimon-source", ArrowBatchTypeInformation.INSTANCE);
+            source,
+            strategy,
+            NativePlanDetails.name("NativeSource", getDescription()),
+            ArrowBatchTypeInformation.INSTANCE);
+    stream.getTransformation().setDescription(getDescription());
     Options options = Options.fromMap(table.options());
     String uidSuffix = options.get(FlinkConnectorOptions.SOURCE_OPERATOR_UID_SUFFIX);
     if (!org.apache.flink.util.StringUtils.isNullOrWhitespaceOnly(uidSuffix)) {

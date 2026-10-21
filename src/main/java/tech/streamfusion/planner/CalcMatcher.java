@@ -108,12 +108,7 @@ final class CalcMatcher {
       ProjectableNativeSource source = (ProjectableNativeSource) input;
       if (source.supportsProjection(pruned.inputType)) {
         return new StreamPhysicalNativeCalc(
-            calc.getCluster(),
-            calc.getTraitSet(),
-            source.withProjection(pruned.inputType),
-            calc.getRowType(),
-            encoded.remapInputs(pruned.remap),
-            calc.getProgram());
+            calc, source.withProjection(pruned.inputType), encoded.remapInputs(pruned.remap));
       }
     }
     if (pruned != null && !(input instanceof ColumnarOutput)) {
@@ -129,13 +124,7 @@ final class CalcMatcher {
               carryRowKind,
               pruned.inputType,
               encoded.requiresCollectionRepresentation());
-      return new StreamPhysicalNativeCalc(
-          calc.getCluster(),
-          calc.getTraitSet(),
-          prunedTranspose,
-          calc.getRowType(),
-          encoded.remapInputs(pruned.remap),
-          calc.getProgram());
+      return new StreamPhysicalNativeCalc(calc, prunedTranspose, encoded.remapInputs(pruned.remap));
     }
     // The mini-batch assigner is a pass-through (it forwards batches untouched), so it must not
     // hide a rowwise input from the pruning above: push the pruned entry transpose through it.
@@ -158,21 +147,12 @@ final class CalcMatcher {
                 pruned.inputType,
                 encoded.requiresCollectionRepresentation());
         return new StreamPhysicalNativeCalc(
-            calc.getCluster(),
-            calc.getTraitSet(),
+            calc,
             assigner.withInput(prunedTranspose, pruned.inputType),
-            calc.getRowType(),
-            encoded.remapInputs(pruned.remap),
-            calc.getProgram());
+            encoded.remapInputs(pruned.remap));
       }
     }
-    return new StreamPhysicalNativeCalc(
-        calc.getCluster(),
-        calc.getTraitSet(),
-        input,
-        calc.getRowType(),
-        encoded,
-        calc.getProgram());
+    return new StreamPhysicalNativeCalc(calc, input, encoded);
   }
 
   private static Calc mergeProcessingTimeProjection(Calc calc) {

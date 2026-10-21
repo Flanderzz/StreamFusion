@@ -22,14 +22,25 @@ import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalR
 public abstract class StreamPhysicalNativeSingleRel extends SingleRel implements StreamPhysicalRel {
 
   protected final RelDataType outputRowType;
+  protected final NativePlanDetails planDetails;
 
   /** Digest-only reuse barrier — see {@link NativeRelDigests}. */
   private final long reuseBarrier = NativeRelDigests.nextId();
 
   protected StreamPhysicalNativeSingleRel(
       RelOptCluster cluster, RelTraitSet traitSet, RelNode input, RelDataType outputRowType) {
+    this(cluster, traitSet, input, outputRowType, NativePlanDetails.EMPTY);
+  }
+
+  protected StreamPhysicalNativeSingleRel(
+      RelOptCluster cluster,
+      RelTraitSet traitSet,
+      RelNode input,
+      RelDataType outputRowType,
+      NativePlanDetails planDetails) {
     super(cluster, traitSet, input);
     this.outputRowType = outputRowType;
+    this.planDetails = planDetails;
   }
 
   protected StreamPhysicalNativeSingleRel(
@@ -44,6 +55,6 @@ public abstract class StreamPhysicalNativeSingleRel extends SingleRel implements
 
   @Override
   public RelWriter explainTerms(RelWriter pw) {
-    return NativeRelDigests.withBarrier(super.explainTerms(pw), reuseBarrier);
+    return NativeRelDigests.withBarrier(planDetails.explain(super.explainTerms(pw)), reuseBarrier);
   }
 }

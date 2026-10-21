@@ -4,6 +4,7 @@ import java.util.List;
 import org.apache.flink.api.dag.Transformation;
 import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.datastream.DataStreamSink;
 import org.apache.flink.table.planner.delegation.PlannerBase;
 import org.apache.flink.table.planner.plan.nodes.exec.*;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.StreamExecNode;
@@ -51,23 +52,21 @@ public final class NativeFlussSinkExecNode extends ExecNodeBase<Object>
       PlannerBase planner, ExecNodeConfig config) {
     Transformation<ArrowBatch> input =
         (Transformation<ArrowBatch>) getInputEdges().get(0).translateToPlan(planner);
+    DataStreamSink<?> end;
     if (!partitionKeys.isEmpty()) {
-      return (Transformation<Object>)
-          (Transformation<?>)
-              new DataStream<>(planner.getExecEnv(), input)
-                  .transform(
-                      "native-fluss-partition-split",
-                      PartitionedArrowBatchTypeInformation.INSTANCE,
-                      new FlussPartitionSplitOperator(type, partitionKeys))
-                  .sinkTo(new FlussPartitionedArrowSink(clientConfig, path, type))
-                  .name("native-fluss-append-sink")
-                  .getTransformation();
+      var split =
+          new DataStream<>(planner.getExecEnv(), input)
+              .transform(
+                  "native-fluss-partition-split",
+                  PartitionedArrowBatchTypeInformation.INSTANCE,
+                  new FlussPartitionSplitOperator(type, partitionKeys));
+      split.getTransformation().setDescription(getDescription());
+      end = split.sinkTo(new FlussPartitionedArrowSink(clientConfig, path, type));
+    } else {
+      end = new DataStream<>(planner.getExecEnv(), input).sinkTo(sink);
     }
-    return (Transformation<Object>)
-        (Transformation<?>)
-            new DataStream<>(planner.getExecEnv(), input)
-                .sinkTo(sink)
-                .name("native-fluss-append-sink")
-                .getTransformation();
+    end.name(NativePlanDetails.name("NativeSink", getDescription()));
+    end.getTransformation().setDescription(getDescription());
+    return (Transformation<Object>) (Transformation<?>) end.getTransformation();
   }
 }

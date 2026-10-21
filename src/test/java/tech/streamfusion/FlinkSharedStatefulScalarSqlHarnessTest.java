@@ -165,7 +165,7 @@ class FlinkSharedStatefulScalarSqlHarnessTest {
             assertTrue(scan.substitutions() > 0, scan.explainSummary());
             assertTrue(scan.fallbackReasons().isEmpty(), scan.explainSummary());
             String job = result.getJobClient().orElseThrow().getJobID().toString();
-            assertEquals(count, metrics.recordsIn(job, "NativeCalcExecNode"));
+            assertEquals(count, metrics.recordsIn(job, "NativeCalc("));
           }
         } finally {
           ids.forEach(AUDITS::remove);

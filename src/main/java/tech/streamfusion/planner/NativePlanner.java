@@ -85,10 +85,11 @@ public final class NativePlanner {
   }
 
   /**
-   * Installs native execution, then returns Flink's {@code explainSql} output for {@code sql} with a
-   * native-acceleration section appended — the optimized physical plan shows the substituted native
-   * operators by name, and the appended section lists how many ran natively and why any candidate
-   * fell back (ticket 29). A convenience for inspecting whether and why a query accelerates.
+   * Installs native execution, then returns Flink's {@code explainSql} output for {@code sql} with
+   * a native-acceleration section appended — the optimized physical plan shows the substituted
+   * native operators by name, and the appended section lists how many ran natively and why any
+   * candidate fell back (ticket 29), plus the final Calc/filter function-engine assignments. A
+   * convenience for inspecting whether and why a query accelerates.
    */
   public static String explain(TableEnvironment tableEnv, String sql) {
     PhysicalPlanScan scan = install(tableEnv);

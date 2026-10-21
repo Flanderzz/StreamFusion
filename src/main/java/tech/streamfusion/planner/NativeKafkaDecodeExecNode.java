@@ -32,7 +32,6 @@ import tech.streamfusion.operator.NativeSourceWatermarks;
 public class NativeKafkaDecodeExecNode extends ExecNodeBase<ArrowBatch>
     implements StreamExecNode<ArrowBatch> {
 
-  private static final String SOURCE_TRANSFORMATION = "native-kafka-source";
   private final RowType outputType;
   private final RowType writerType;
   private final Map<String, String> options;
@@ -97,7 +96,11 @@ public class NativeKafkaDecodeExecNode extends ExecNodeBase<ArrowBatch>
             : NativeSourceWatermarks.strategy(watermark.idleTimeoutMillis);
     DataStreamSource<ArrowBatch> stream =
         env.fromSource(
-            source, strategy, SOURCE_TRANSFORMATION, ArrowBatchTypeInformation.INSTANCE);
+            source,
+            strategy,
+            NativePlanDetails.name("NativeSource", getDescription()),
+            ArrowBatchTypeInformation.INSTANCE);
+    stream.getTransformation().setDescription(getDescription());
     return stream.getTransformation();
   }
 

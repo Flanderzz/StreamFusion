@@ -205,6 +205,13 @@ class DeltaSinkParityTest {
             + ")");
     PhysicalPlanScan scan = NativePlanner.install(tableEnv);
 
+    String plan =
+        tableEnv.explainSql(
+            "INSERT INTO sink SELECT id, CAST(id AS INT), CAST('a' AS STRING) FROM src",
+            org.apache.flink.table.api.ExplainDetail.JSON_EXECUTION_PLAN);
+    assertTrue(plan.contains("NativeSink(table=[default_catalog.default_database.sink]"), plan);
+    assertTrue(plan.contains("fields=[id, EXPR$1, EXPR$2]"), plan);
+
     tableEnv.executeSql(
             "INSERT INTO sink SELECT id, CAST(id AS INT), CAST('a' AS STRING) FROM src")
         .await();

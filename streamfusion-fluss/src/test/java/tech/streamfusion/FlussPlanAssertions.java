@@ -10,6 +10,15 @@ import java.util.Map;
 final class FlussPlanAssertions {
   private FlussPlanAssertions() {}
 
+  static void assertSingleNativeSource(JsonNode execution, String query) {
+    assertEquals(
+        1,
+        execution.get("nodes").findValuesAsText("type").stream()
+            .filter(type -> type.startsWith("Source: NativeSource("))
+            .count(),
+        query + " must share one columnar source between both join branches");
+  }
+
   static void assertNativeInterior(JsonNode execution, boolean primaryKeySink, String query) {
     Map<Integer, JsonNode> nodes = new HashMap<>();
     for (JsonNode node : execution.get("nodes")) nodes.put(node.get("id").asInt(), node);
@@ -39,9 +48,7 @@ final class FlussPlanAssertions {
   }
 
   private static boolean isNative(String type) {
-    return type.startsWith("Native")
-        || type.equals("Source: native-fluss-source")
-        || type.startsWith("native-fluss-append-sink:");
+    return type.startsWith("Native") || type.startsWith("Source: NativeSource(");
   }
 
   private static boolean isSinkBoundary(String type) {

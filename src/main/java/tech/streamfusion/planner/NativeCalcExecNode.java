@@ -79,7 +79,7 @@ public class NativeCalcExecNode extends ExecNodeBase<ArrowBatch>
         (Transformation<ArrowBatch>) getInputEdges().get(0).translateToPlan(planner);
     return ExecNodeUtil.createOneInputTransformation(
         input,
-        createTransformationMeta(TRANSFORMATION, config),
+        createTransformationMeta(TRANSFORMATION, getDescription(), getDescription(), config),
         new NativeCalcOperator(
             kinds, payload, childCounts, longs, doubles, strings, projectionRoots, conditionRoot,
             outputNames, udfBinding),

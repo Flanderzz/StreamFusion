@@ -364,6 +364,7 @@ final class KafkaSinkMatcher {
         sink.getTraitSet(),
         sink.getInputs().get(0),
         sink.getRowType(),
-        planned);
+        planned,
+        NativePlanDetails.from(sink));
   }
 }

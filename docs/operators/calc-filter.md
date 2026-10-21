@@ -37,9 +37,14 @@ for each admitted Calc/filter. Distinct SQL function, UDF and cast calls appear 
 `jvm`; casts are retained because they can select JVM evaluation, while arithmetic, comparison and
 boolean operators are omitted. A mixed node can list functions in both groups; a whole-Calc
 generated evaluator lists every function under `jvm` and retains the reason that selected
-row-at-a-time Flink evaluation. This is the reliable way to distinguish a fully native scalar plan
-from JVM work inside a `NativeCalc`. The always-on planning summary separately counts Calc/filter
-nodes containing JVM functions.
+row-at-a-time Flink evaluation. Ordinary `EXPLAIN` and submitted Calc/filter names also retain
+Flink's original `select` and `where` expressions and show these final assignments as
+`nativeFunctions=[...]` and `jvmFunctions=[...]`, even with simplified operator names enabled.
+No diagnostic flag is required for these plan attributes. The acceleration summary returned by
+`PhysicalPlanScan.explainSummary()` includes the function assignments and JVM selection reasons;
+the always-on planning log also counts Calc/filter nodes containing JVM functions.
+Flink's operator metrics use these detailed names as well; select Calc/filter metric groups by the
+`NativeCalc(` or `NativeFilter(` prefix rather than their execution-node class names.
 
 Generated expression code is built entirely in the planner. Serialized Calc/filter bindings
 carry only the generated function, runtime types/schema and user-function references; workers

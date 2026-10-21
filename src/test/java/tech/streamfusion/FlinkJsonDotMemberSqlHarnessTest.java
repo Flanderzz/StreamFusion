@@ -133,7 +133,7 @@ class FlinkJsonDotMemberSqlHarnessTest {
       assertTrue(scan.fallbackReasons().isEmpty(), scan.explainSummary());
       var groups =
           reporter.findOperatorMetricGroups(
-              result.getJobClient().orElseThrow().getJobID(), "(?i)NativeCalcExecNode");
+              result.getJobClient().orElseThrow().getJobID(), "(?i)NativeCalc\\(");
       assertEquals(1, groups.size());
       var metrics = reporter.getMetricsByGroup(groups.iterator().next());
       assertEquals(5003, ((Counter) metrics.get("numRecordsIn")).getCount());

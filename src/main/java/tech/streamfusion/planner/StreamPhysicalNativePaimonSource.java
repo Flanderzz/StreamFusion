@@ -20,6 +20,7 @@ public final class StreamPhysicalNativePaimonSource extends AbstractRelNode
     implements StreamPhysicalRel, ColumnarOutput, ShareableScan {
   private final RelDataType output;
   private final FileStoreTable table;
+  private final NativePlanDetails planDetails;
   private final ScanWatermarkSpec watermark;
   private final Predicate partitionPredicate;
   private final String scanIdentity;
@@ -44,7 +45,36 @@ public final class StreamPhysicalNativePaimonSource extends AbstractRelNode
       ScanWatermarkSpec watermark,
       Predicate partitionPredicate,
       String scanIdentity) {
-    this(cluster, traits, output, table, watermark, partitionPredicate, scanIdentity, 0);
+    this(
+        cluster,
+        traits,
+        output,
+        table,
+        watermark,
+        partitionPredicate,
+        scanIdentity,
+        NativePlanDetails.EMPTY);
+  }
+
+  StreamPhysicalNativePaimonSource(
+      RelOptCluster cluster,
+      RelTraitSet traits,
+      RelDataType output,
+      FileStoreTable table,
+      ScanWatermarkSpec watermark,
+      Predicate partitionPredicate,
+      String scanIdentity,
+      NativePlanDetails planDetails) {
+    this(
+        cluster,
+        traits,
+        output,
+        table,
+        watermark,
+        partitionPredicate,
+        scanIdentity,
+        0,
+        planDetails);
   }
 
   private StreamPhysicalNativePaimonSource(
@@ -55,10 +85,12 @@ public final class StreamPhysicalNativePaimonSource extends AbstractRelNode
       ScanWatermarkSpec watermark,
       Predicate partitionPredicate,
       String scanIdentity,
-      long shareToken) {
+      long shareToken,
+      NativePlanDetails planDetails) {
     super(cluster, traits);
     this.output = output;
     this.table = table;
+    this.planDetails = planDetails;
     this.watermark = watermark;
     this.partitionPredicate = partitionPredicate;
     this.scanIdentity = scanIdentity;
@@ -73,7 +105,15 @@ public final class StreamPhysicalNativePaimonSource extends AbstractRelNode
   @Override
   public RelNode withShareToken(long token) {
     return new StreamPhysicalNativePaimonSource(
-        getCluster(), getTraitSet(), output, table, watermark, partitionPredicate, scanIdentity, token);
+        getCluster(),
+        getTraitSet(),
+        output,
+        table,
+        watermark,
+        partitionPredicate,
+        scanIdentity,
+        token,
+        planDetails);
   }
 
   @Override
@@ -89,14 +129,23 @@ public final class StreamPhysicalNativePaimonSource extends AbstractRelNode
   @Override
   public RelNode copy(RelTraitSet traits, List<RelNode> inputs) {
     return new StreamPhysicalNativePaimonSource(
-        getCluster(), traits, output, table, watermark, partitionPredicate, scanIdentity, shareToken);
+        getCluster(),
+        traits,
+        output,
+        table,
+        watermark,
+        partitionPredicate,
+        scanIdentity,
+        shareToken,
+        planDetails);
   }
 
   @Override
   public RelWriter explainTerms(RelWriter writer) {
     RelWriter explained =
-        super.explainTerms(writer)
-            .item("table", table.name())
+        planDetails
+            .explain(super.explainTerms(writer))
+            .itemIf("table", table.name(), planDetails == NativePlanDetails.EMPTY)
             .itemIf("partitionPredicate", partitionPredicate, partitionPredicate != null)
             .item("snapshotMerge", "native deduplicate / Java fallback")
             .item("fileDecode", "native " + table.coreOptions().fileFormatString());

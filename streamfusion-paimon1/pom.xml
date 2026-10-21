@@ -203,6 +203,7 @@
                                     <filtering>false</filtering>
                                     <includes>
                                         <include>**/PaimonSourceSqlTest.java</include>
+                                        <include>**/PaimonOperatorDescriptionTest.java</include>
                                         <include>**/PaimonSplitWatermarksTest.java</include>
                                         <include>**/PaimonFetcherLifecycleTest.java</include>
                                     </includes>

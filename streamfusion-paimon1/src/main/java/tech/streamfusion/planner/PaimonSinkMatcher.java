@@ -271,6 +271,11 @@ final class PaimonSinkMatcher {
       return null;
     }
     return new StreamPhysicalNativePaimonSink(
-        sink.getCluster(), sink.getTraitSet(), sink.getInput(), sink.getRowType(), planned);
+        sink.getCluster(),
+        sink.getTraitSet(),
+        sink.getInput(),
+        sink.getRowType(),
+        planned,
+        NativePlanDetails.from(sink));
   }
 }

@@ -20,8 +20,9 @@ public final class StreamPhysicalNativePaimonSink extends StreamPhysicalNativeSi
       RelTraitSet traits,
       RelNode input,
       RelDataType outputType,
-      PaimonSinkMatcher.Planned planned) {
-    super(cluster, traits, input, outputType);
+      PaimonSinkMatcher.Planned planned,
+      NativePlanDetails planDetails) {
+    super(cluster, traits, input, outputType, planDetails);
     this.planned = planned;
   }
 
@@ -33,7 +34,7 @@ public final class StreamPhysicalNativePaimonSink extends StreamPhysicalNativeSi
   @Override
   public RelNode copy(RelTraitSet traits, List<RelNode> inputs) {
     return new StreamPhysicalNativePaimonSink(
-        getCluster(), traits, inputs.get(0), outputRowType, planned);
+        getCluster(), traits, inputs.get(0), outputRowType, planned, planDetails);
   }
 
   @Override

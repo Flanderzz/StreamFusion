@@ -208,8 +208,8 @@ class FlussCoverageBenchmark {
                     String plan = tables.tables.explainSql(sql, ExplainDetail.JSON_EXECUTION_PLAN);
                     Files.writeString(directory.resolve(output + ".plan.txt"), plan);
                     if (mode.equals("native")) {
-                      assertTrue(plan.contains("native-fluss-source"), plan);
-                      assertTrue(plan.contains("native-fluss-append-sink"), plan);
+                      assertTrue(plan.contains("NativeSource("), plan);
+                      assertTrue(plan.contains("NativeSink("), plan);
                       if (partitioned)
                         assertTrue(plan.contains("native-fluss-partition-split"), plan);
                       if (workload.equals("filtered-read"))

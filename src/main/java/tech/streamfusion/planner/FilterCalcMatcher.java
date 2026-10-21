@@ -124,20 +124,7 @@ final class FilterCalcMatcher {
   static RelNode substitute(Calc calc, PlanContext ctx) {
     RexExpression condition = FilterCalcMatcher.encodedCondition(calc);
     ctx.functionExecution("NativeFilter", condition);
-    StreamPhysicalNativeFilter filter =
-        new StreamPhysicalNativeFilter(
-            calc.getCluster(),
-            calc.getTraitSet(),
-            calc.getInputs().get(0),
-            calc.getRowType(),
-            FilterCalcMatcher.projection(calc),
-            condition.kinds(),
-            condition.payload(),
-            condition.childCounts(),
-            condition.longs(),
-            condition.doubles(),
-            condition.strings(),
-            condition.udfBinding());
+    StreamPhysicalNativeFilter filter = new StreamPhysicalNativeFilter(calc, condition);
     if (filter.getInput() instanceof StreamPhysicalNativeUnnest) {
       int[] identity =
           java.util.stream.IntStream.range(0, calc.getRowType().getFieldCount()).toArray();

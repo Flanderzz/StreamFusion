@@ -239,6 +239,11 @@ final class FileSinkMatcher {
       return null;
     }
     return new StreamPhysicalNativeFileSink(
-        sink.getCluster(), sink.getTraitSet(), sink.getInputs().get(0), sink.getRowType(), planned);
+        sink.getCluster(),
+        sink.getTraitSet(),
+        sink.getInputs().get(0),
+        sink.getRowType(),
+        planned,
+        NativePlanDetails.from(sink));
   }
 }

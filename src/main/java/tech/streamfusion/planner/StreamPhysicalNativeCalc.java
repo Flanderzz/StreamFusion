@@ -5,6 +5,7 @@ import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.plan.RelTraitSet;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.RelWriter;
+import org.apache.calcite.rel.core.Calc;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rex.RexProgram;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
@@ -53,6 +54,28 @@ public class StreamPhysicalNativeCalc extends StreamPhysicalNativeSingleRel
       RelDataType outputRowType,
       RexExpression encoded,
       RexProgram sourceProgram) {
+    this(cluster, traitSet, input, outputRowType, encoded, sourceProgram, NativePlanDetails.EMPTY);
+  }
+
+  StreamPhysicalNativeCalc(Calc original, RelNode input, RexExpression encoded) {
+    this(
+        original.getCluster(),
+        original.getTraitSet(),
+        input,
+        original.getRowType(),
+        encoded,
+        original.getProgram(),
+        NativePlanDetails.from(original));
+  }
+
+  private StreamPhysicalNativeCalc(
+      RelOptCluster cluster,
+      RelTraitSet traitSet,
+      RelNode input,
+      RelDataType outputRowType,
+      RexExpression encoded,
+      RexProgram sourceProgram,
+      NativePlanDetails planDetails) {
     this(
         cluster,
         traitSet,
@@ -69,7 +92,8 @@ public class StreamPhysicalNativeCalc extends StreamPhysicalNativeSingleRel
         encoded.outputNames(),
         encoded.udfBinding(),
         sourceProgram,
-        encoded.requiresCollectionRepresentation());
+        encoded.requiresCollectionRepresentation(),
+        planDetails.withFunctions(encoded));
   }
 
   private StreamPhysicalNativeCalc(
@@ -88,8 +112,9 @@ public class StreamPhysicalNativeCalc extends StreamPhysicalNativeSingleRel
       String[] outputNames,
       NativeUdf.Binding udfBinding,
       RexProgram sourceProgram,
-      boolean preserveCollections) {
-    super(cluster, traitSet, input, outputRowType);
+      boolean preserveCollections,
+      NativePlanDetails planDetails) {
+    super(cluster, traitSet, input, outputRowType, planDetails);
     this.kinds = kinds;
     this.payload = payload;
     this.childCounts = childCounts;
@@ -147,7 +172,8 @@ public class StreamPhysicalNativeCalc extends StreamPhysicalNativeSingleRel
         outputNames,
         udfBinding,
         sourceProgram,
-        preserveCollections);
+        preserveCollections,
+        planDetails);
   }
 
   @Override

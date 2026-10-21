@@ -82,6 +82,7 @@ public class NativeFileSinkExecNode extends ExecNodeBase<Object>
             parallelism,
             parallelismConfigured);
 
+    split.setDescription(getDescription());
     int[] partitionColumns =
         planned.partitionKeys.stream().mapToInt(planned.rowType.getFieldNames()::indexOf).toArray();
     NativeFileBulkWriterFactory writerFactory =
@@ -113,6 +114,8 @@ public class NativeFileSinkExecNode extends ExecNodeBase<Object>
             new EmptyMetaStoreFactory(location),
             FileSystem::get,
             options);
+    end.name(NativePlanDetails.name("NativeSink", getDescription()));
+    end.getTransformation().setDescription(getDescription());
     return (Transformation<Object>) end.getTransformation();
   }
 }

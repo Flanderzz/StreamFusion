@@ -25,8 +25,9 @@ public class StreamPhysicalNativeFileSink extends StreamPhysicalNativeSingleRel
       RelTraitSet traitSet,
       RelNode input,
       RelDataType outputRowType,
-      FileSinkMatcher.Planned planned) {
-    super(cluster, traitSet, input, outputRowType);
+      FileSinkMatcher.Planned planned,
+      NativePlanDetails planDetails) {
+    super(cluster, traitSet, input, outputRowType, planDetails);
     this.planned = planned;
   }
 
@@ -47,7 +48,7 @@ public class StreamPhysicalNativeFileSink extends StreamPhysicalNativeSingleRel
   @Override
   public RelNode copy(RelTraitSet traitSet, List<RelNode> inputs) {
     return new StreamPhysicalNativeFileSink(
-        getCluster(), traitSet, inputs.get(0), outputRowType, planned);
+        getCluster(), traitSet, inputs.get(0), outputRowType, planned, planDetails);
   }
 
   @Override

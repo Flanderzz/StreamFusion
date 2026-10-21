@@ -3,8 +3,6 @@ package tech.streamfusion.kafka;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import tech.streamfusion.planner.NativePlanner;
-import tech.streamfusion.planner.PhysicalPlanScan;
 import java.nio.charset.StandardCharsets;
 import java.util.HashSet;
 import java.util.Properties;
@@ -23,6 +21,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.testcontainers.containers.KafkaContainer;
 import org.testcontainers.utility.DockerImageName;
+import tech.streamfusion.planner.NativePlanner;
+import tech.streamfusion.planner.PhysicalPlanScan;
 
 /**
  * End-to-end SQL test for the shallow native-decode path (Phase 2): a {@code CREATE TABLE ...
@@ -94,7 +94,7 @@ class NativeKafkaDecodeSqlHarnessTest {
       assertTrue(plan.contains("NativeShare(consumers=[2])"), "share point missing:\n" + plan);
       assertEquals(
           1,
-          count(plan, "\"contents\" : \"Source: native-kafka-source\""),
+          count(plan, "\"contents\" : \"Source: NativeSource("),
           "expected exactly one Kafka source in the stream graph:\n" + plan);
 
       Set<String> joined = new HashSet<>();

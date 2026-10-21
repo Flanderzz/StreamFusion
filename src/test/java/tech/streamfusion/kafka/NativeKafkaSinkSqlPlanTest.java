@@ -40,8 +40,12 @@ class NativeKafkaSinkSqlPlanTest {
 
     assertTrue(scan.substitutions() > 0, scan::explainSummary);
     assertTrue(plan.contains("NativeKafkaSink"), plan);
-    assertTrue(plan.contains("flink-kafka-sink: Writer"), plan);
-    assertTrue(plan.contains("flink-kafka-sink: Committer"), plan);
+    assertTrue(
+        plan.lines().anyMatch(line -> line.contains("NativeSink(") && line.contains(": Writer")),
+        plan);
+    assertTrue(
+        plan.lines().anyMatch(line -> line.contains("NativeSink(") && line.contains(": Committer")),
+        plan);
   }
 
   @Test
@@ -66,7 +70,9 @@ class NativeKafkaSinkSqlPlanTest {
 
     assertTrue(scan.substitutions() > 0, scan::explainSummary);
     assertTrue(plan.contains("native-kafka-serialization"), plan);
-    assertTrue(plan.contains("flink-kafka-sink: Writer"), plan);
+    assertTrue(
+        plan.lines().anyMatch(line -> line.contains("NativeSink(") && line.contains(": Writer")),
+        plan);
   }
 
   /**

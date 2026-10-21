@@ -145,9 +145,17 @@ remain separate evidence, including retained slower wide-overlap jobs.
   `jvm`; casts are retained because their type and failure semantics can select JVM evaluation,
   while arithmetic, comparison and boolean operators are omitted. A JVM assignment also records why
   a host-exact upcall or whole-Calc generated evaluator was selected. The always-on summary counts
-  both operator fallbacks and Calc/filter nodes containing JVM functions. `EXPLAIN` still shows the
-  surrounding native node (for example `NativeCalc`), which by itself does not prove that every
-  scalar function runs in Rust.
+  both operator fallbacks and Calc/filter nodes containing JVM functions.
+
+Ordinary SQL `EXPLAIN` and submitted operator descriptions retain the original Flink details:
+native sources and sinks keep table identifiers, fields and source/sink abilities; Calc/filter
+nodes keep `select` and `where`. Native source/sink transformation names use `NativeSource(...)`
+and `NativeSink(...)`, including those details. Intermediate serialization/routing stages keep
+their existing names. Calc/filter names also include `nativeFunctions` and `jvmFunctions`, even when
+`table.exec.simplify-operator-name-enabled` is enabled. These lists describe the final expression
+encoding, including a whole-Calc JVM evaluator when required for Flink's error order. A surrounding
+`NativeCalc` node alone does not prove that every scalar function runs in Rust. Detailed JVM
+selection reasons remain available in the diagnostic log and `NativePlanner.explain(...)` summary.
 
 See [Benchmarks](benchmarks.md) for how to reproduce the throughput numbers, and
 [Optimizations](optimizations/index.md) for how these flags map to specific performance techniques.

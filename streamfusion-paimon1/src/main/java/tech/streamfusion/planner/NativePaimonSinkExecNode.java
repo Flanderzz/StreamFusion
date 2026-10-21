@@ -126,6 +126,7 @@ public final class NativePaimonSinkExecNode extends ExecNodeBase<Object>
             BucketedArrowBatchTypeInformation.INSTANCE,
             input.getParallelism(),
             false);
+    route.setDescription(getDescription());
     DataStream<BucketedArrowBatch> routed = new DataStream<>(planner.getExecEnv(), route);
     int partitionArity = table.partitionKeys().size();
 
@@ -170,6 +171,8 @@ public final class NativePaimonSinkExecNode extends ExecNodeBase<Object>
       DataStream<BucketedArrowBatch> shuffled = routed;
       end = new NativePaimonAppendSink(table, parallelism).sinkFrom(shuffled);
     }
+    end.name(NativePlanDetails.name("NativeSink", getDescription()));
+    end.getTransformation().setDescription(getDescription());
     return (Transformation<Object>) (Transformation<?>) end.getTransformation();
   }
 }

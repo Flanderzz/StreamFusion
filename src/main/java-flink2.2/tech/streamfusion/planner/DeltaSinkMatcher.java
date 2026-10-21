@@ -176,7 +176,12 @@ final class DeltaSinkMatcher {
       return null;
     }
     return new StreamPhysicalNativeDeltaSink(
-        sink.getCluster(), sink.getTraitSet(), sink.getInput(), sink.getRowType(), planned);
+        sink.getCluster(),
+        sink.getTraitSet(),
+        sink.getInput(),
+        sink.getRowType(),
+        planned,
+        NativePlanDetails.from(sink));
   }
 
   private static ResolvedCatalogTable table(StreamPhysicalSink sink) {

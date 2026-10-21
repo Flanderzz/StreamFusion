@@ -20,8 +20,9 @@ public final class StreamPhysicalNativeKafkaSink extends StreamPhysicalNativeSin
       RelTraitSet traitSet,
       RelNode input,
       RelDataType outputRowType,
-      KafkaSinkMatcher.Planned planned) {
-    super(cluster, traitSet, input, outputRowType);
+      KafkaSinkMatcher.Planned planned,
+      NativePlanDetails planDetails) {
+    super(cluster, traitSet, input, outputRowType, planDetails);
     this.planned = planned;
   }
 
@@ -33,7 +34,7 @@ public final class StreamPhysicalNativeKafkaSink extends StreamPhysicalNativeSin
   @Override
   public RelNode copy(RelTraitSet traitSet, List<RelNode> inputs) {
     return new StreamPhysicalNativeKafkaSink(
-        getCluster(), traitSet, inputs.get(0), outputRowType, planned);
+        getCluster(), traitSet, inputs.get(0), outputRowType, planned, planDetails);
   }
 
   @Override

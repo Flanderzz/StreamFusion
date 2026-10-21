@@ -56,9 +56,16 @@ public final class NativeFlussSourceExecNode extends ExecNodeBase<ArrowBatch>
         watermark == null
             ? WatermarkStrategy.noWatermarks()
             : NativeSourceWatermarks.strategy(watermark.idleTimeoutMillis);
-    return planner
-        .getExecEnv()
-        .fromSource(source, strategy, "native-fluss-source", ArrowBatchTypeInformation.INSTANCE)
-        .getTransformation();
+    Transformation<ArrowBatch> result =
+        planner
+            .getExecEnv()
+            .fromSource(
+                source,
+                strategy,
+                NativePlanDetails.name("NativeSource", getDescription()),
+                ArrowBatchTypeInformation.INSTANCE)
+            .getTransformation();
+    result.setDescription(getDescription());
+    return result;
   }
 }

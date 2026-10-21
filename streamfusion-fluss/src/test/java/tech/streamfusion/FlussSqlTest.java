@@ -610,8 +610,16 @@ class FlussSqlTest {
     Path directory = Path.of("target", "fluss-sql-plans");
     Files.createDirectories(directory);
     Files.writeString(directory.resolve(name + ".txt"), plan);
-    assertEquals(nativeSource, plan.contains("native-fluss-source"), plan);
-    assertEquals(nativeSink, plan.contains("native-fluss-append-sink"), plan);
+    assertEquals(nativeSource, plan.contains("NativeSource("), plan);
+    assertEquals(nativeSink, plan.contains("NativeSink("), plan);
+    if (nativeSource) {
+      assertTrue(plan.contains("NativeSource(table=[[fluss, sqltests, "), plan);
+      assertTrue(plan.contains("fields=["), plan);
+    }
+    if (nativeSink) {
+      assertTrue(plan.contains("NativeSink(table=[fluss.sqltests."), plan);
+      assertTrue(plan.contains("fields=["), plan);
+    }
   }
 
   private static StreamTableEnvironment environment(boolean nativeRun) {

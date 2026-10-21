@@ -4,6 +4,7 @@ import java.util.List;
 import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.plan.RelTraitSet;
 import org.apache.calcite.rel.RelNode;
+import org.apache.calcite.rel.core.Calc;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNode;
@@ -29,6 +30,23 @@ public class StreamPhysicalNativeFilter extends StreamPhysicalNativeSingleRel
   private final String[] strings;
   private final NativeUdf.Binding udfBinding;
 
+  StreamPhysicalNativeFilter(Calc calc, RexExpression condition) {
+    this(
+        calc.getCluster(),
+        calc.getTraitSet(),
+        calc.getInput(),
+        calc.getRowType(),
+        FilterCalcMatcher.projection(calc),
+        condition.kinds(),
+        condition.payload(),
+        condition.childCounts(),
+        condition.longs(),
+        condition.doubles(),
+        condition.strings(),
+        condition.udfBinding(),
+        NativePlanDetails.from(calc).withFunctions(condition));
+  }
+
   public StreamPhysicalNativeFilter(
       RelOptCluster cluster,
       RelTraitSet traitSet,
@@ -42,7 +60,37 @@ public class StreamPhysicalNativeFilter extends StreamPhysicalNativeSingleRel
       double[] doubles,
       String[] strings,
       NativeUdf.Binding udfBinding) {
-    super(cluster, traitSet, input, outputRowType);
+    this(
+        cluster,
+        traitSet,
+        input,
+        outputRowType,
+        projection,
+        kinds,
+        payload,
+        childCounts,
+        longs,
+        doubles,
+        strings,
+        udfBinding,
+        NativePlanDetails.EMPTY);
+  }
+
+  private StreamPhysicalNativeFilter(
+      RelOptCluster cluster,
+      RelTraitSet traitSet,
+      RelNode input,
+      RelDataType outputRowType,
+      int[] projection,
+      int[] kinds,
+      int[] payload,
+      int[] childCounts,
+      long[] longs,
+      double[] doubles,
+      String[] strings,
+      NativeUdf.Binding udfBinding,
+      NativePlanDetails planDetails) {
+    super(cluster, traitSet, input, outputRowType, planDetails);
     this.projection = projection;
     this.kinds = kinds;
     this.payload = payload;
@@ -96,7 +144,8 @@ public class StreamPhysicalNativeFilter extends StreamPhysicalNativeSingleRel
         longs,
         doubles,
         strings,
-        udfBinding);
+        udfBinding,
+        planDetails.withProjection(input.getRowType(), output, combined));
   }
 
   @Override
@@ -113,7 +162,8 @@ public class StreamPhysicalNativeFilter extends StreamPhysicalNativeSingleRel
         longs,
         doubles,
         strings,
-        udfBinding);
+        udfBinding,
+        planDetails);
   }
 
   @Override

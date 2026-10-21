@@ -1165,7 +1165,7 @@ class NexmarkMatrixBenchmark {
     }
     if (nativeRun
         && (!plan.contains("NativeKafkaDecode")
-            || !plan.contains("native-kafka-source")
+            || !plan.contains("NativeSource(")
             || plan.contains("RowDataToArrow")
             || plan.contains("ArrowToRowData")
             || !plan.contains(sink.nativePlanMarker())
@@ -1177,7 +1177,7 @@ class NexmarkMatrixBenchmark {
               + " path did not engage (decode="
               + plan.contains("NativeKafkaDecode")
               + ", source="
-              + plan.contains("native-kafka-source")
+              + plan.contains("NativeSource(")
               + ", row-to-arrow="
               + plan.contains("RowDataToArrow")
               + ", arrow-to-row="
@@ -1539,7 +1539,7 @@ class NexmarkMatrixBenchmark {
     double seconds = (System.nanoTime() - start) / 1e9;
     if (nativeRun
         && (!plan.contains("NativeKafkaDecode")
-            || !plan.contains("native-kafka-source")
+            || !plan.contains("NativeSource(")
             || plan.contains("RowDataToArrow")
             || plan.contains("ArrowToRowData")
             || !plan.contains("native-parquet-partition-split")
@@ -1853,14 +1853,13 @@ class NexmarkMatrixBenchmark {
     // The exec-node and transformation names pin native serialization feeding Flink's KafkaSink.
     if (nativeRun
         && (!plan.contains("NativeKafkaDecode")
-            || !plan.contains("native-kafka-source")
+            || !plan.contains("NativeSource(")
             || plan.contains("RowDataToArrow")
             || (requireNativeSink && !plan.contains("NativeKafkaSink"))
-            || (requireNativeSink && !plan.contains("flink-kafka-sink"))
+            || (requireNativeSink && !plan.contains("NativeSink("))
             || ("q3".equals(q.label)
                 && (!plan.contains("NativeShare(consumers=[2])")
-                    || countOccurrences(plan, "\"contents\" : \"Source: native-kafka-source\"")
-                        != 1))
+                    || countOccurrences(plan, "\"contents\" : \"Source: NativeSource(") != 1))
             || scan.substitutions() < 2)) {
       throw new IllegalStateException(
           q.label

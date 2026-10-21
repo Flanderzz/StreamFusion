@@ -19,8 +19,9 @@ public final class StreamPhysicalNativeDeltaSink extends StreamPhysicalNativeSin
       RelTraitSet traits,
       RelNode input,
       RelDataType outputType,
-      DeltaSinkMatcher.Planned planned) {
-    super(cluster, traits, input, outputType);
+      DeltaSinkMatcher.Planned planned,
+      NativePlanDetails planDetails) {
+    super(cluster, traits, input, outputType, planDetails);
     this.planned = planned;
   }
 
@@ -34,7 +35,7 @@ public final class StreamPhysicalNativeDeltaSink extends StreamPhysicalNativeSin
   @Override
   public RelNode copy(RelTraitSet traits, List<RelNode> inputs) {
     return new StreamPhysicalNativeDeltaSink(
-        getCluster(), traits, inputs.get(0), outputRowType, planned);
+        getCluster(), traits, inputs.get(0), outputRowType, planned, planDetails);
   }
 
   @Override

@@ -70,7 +70,7 @@ public class NativeFilterExecNode extends ExecNodeBase<ArrowBatch>
         (Transformation<ArrowBatch>) getInputEdges().get(0).translateToPlan(planner);
     return ExecNodeUtil.createOneInputTransformation(
         input,
-        createTransformationMeta(TRANSFORMATION, config),
+        createTransformationMeta(TRANSFORMATION, getDescription(), getDescription(), config),
         new NativeFilterOperator(
             projection, kinds, payload, childCounts, longs, doubles, strings, udfBinding),
         ArrowBatchTypeInformation.INSTANCE,
