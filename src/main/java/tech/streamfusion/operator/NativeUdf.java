@@ -572,8 +572,9 @@ public final class NativeUdf {
         && udf.generated != null
         && udf.returnType == TYPE_ROW
         && hasFlatRowResult(udf)
-        && udf.argTypes.length > 0
-        && Arrays.stream(udf.argTypes).allMatch(type -> type == TYPE_TIMESTAMP_DATA);
+        && Arrays.stream(udf.argTypes).anyMatch(type -> type == TYPE_TIMESTAMP_DATA)
+        && Arrays.stream(udf.argTypes)
+            .allMatch(type -> type == TYPE_TIMESTAMP_DATA || isPrimitiveArgument(type));
   }
 
   private static boolean hasFlatRowResult(Registered udf) {
@@ -586,6 +587,16 @@ public final class NativeUdf {
                 .getFields());
   }
 
+  private static boolean isPrimitiveArgument(int type) {
+    return type == TYPE_INT
+        || type == TYPE_LONG
+        || type == TYPE_BYTE
+        || type == TYPE_SHORT
+        || type == TYPE_FLOAT
+        || type == TYPE_DOUBLE
+        || type == TYPE_BOOLEAN;
+  }
+
   static boolean canEvaluatePrimitiveRowCalc(int id) {
     Registered udf = REGISTRY.get(id);
     if (udf == null
@@ -593,15 +604,7 @@ public final class NativeUdf {
         || udf.returnType != TYPE_ROW
         || udf.generated.rowResultType().getFieldCount() == 0) return false;
     if (!hasFlatRowResult(udf)) return false;
-    for (int type : udf.argTypes) {
-      if (type != TYPE_INT
-          && type != TYPE_LONG
-          && type != TYPE_BYTE
-          && type != TYPE_SHORT
-          && type != TYPE_FLOAT
-          && type != TYPE_DOUBLE
-          && type != TYPE_BOOLEAN) return false;
-    }
+    if (!Arrays.stream(udf.argTypes).allMatch(NativeUdf::isPrimitiveArgument)) return false;
     return udf.generated.rowResultType().getChildren().stream()
         .allMatch(
             type -> {

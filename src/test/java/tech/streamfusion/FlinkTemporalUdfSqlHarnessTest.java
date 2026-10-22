@@ -44,6 +44,9 @@ class FlinkTemporalUdfSqlHarnessTest {
       assertEquals(1031, comparison.nativeRun().rows().size());
       var nativeMetrics = metrics.nativeOperators();
       RecoveryExecutionMetrics.assertConsumed(nativeMetrics, "NativeCalc");
+      if (Boolean.parseBoolean(
+          System.getProperty("streamfusion.experimental.directTemporalCalc", "true")))
+        assertTrue(metrics.counterValue("directTemporalRows") > 0);
       assertTrue(
           nativeMetrics.stream()
                   .filter(row -> row.get("operator").toString().startsWith("NativeCalc"))
@@ -196,6 +199,19 @@ class FlinkTemporalUdfSqlHarnessTest {
       NativeParity.assertOrderedKindedParity(
           () -> environment(9, "UTC", 1031, metrics),
           "SELECT ts_tick(t), ts_tick(t) FROM src WHERE ts_tick(t) IS NOT NULL");
+      if (Boolean.parseBoolean(
+          System.getProperty("streamfusion.experimental.directTemporalCalc", "true")))
+        assertTrue(metrics.counterValue("directTemporalRows") > 0);
+      RecoveryExecutionMetrics.assertConsumed(metrics.nativeOperators(), "NativeCalc");
+    }
+  }
+
+  @Test
+  void directTemporalMixedColumnsKeepTheirInputMapping() throws Exception {
+    try (var metrics = new RecoveryExecutionMetrics()) {
+      NativeParity.assertOrderedKindedParity(
+          () -> environment(9, "UTC", 1031, metrics),
+          "SELECT ltz_identity(z), id, ts_identity(t), CAST(id AS BIGINT) FROM src");
       if (Boolean.parseBoolean(
           System.getProperty("streamfusion.experimental.directTemporalCalc", "true")))
         assertTrue(metrics.counterValue("directTemporalRows") > 0);

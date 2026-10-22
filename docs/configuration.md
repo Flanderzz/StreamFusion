@@ -41,7 +41,8 @@ serialized operator configuration rather than process-global state before a stab
   slower UDF execution alone does not block coverage. See
   [temporal UDF coverage](operators/calc-filter.md#temporal-scalar-functions).
 - **`streamfusion.experimental.directTemporalCalc`** (system property, default true) — evaluate
-  complete JVM Calcs with timestamp-only input columns directly on Arrow batches. Explicit false
+  complete JVM Calcs with timestamp inputs and optional BOOLEAN, TINYINT, SMALLINT, INT, BIGINT,
+  FLOAT or DOUBLE columns directly on Arrow batches. Explicit false
   restores the previous JNI callback; changelog input and represented output schemas always use
   that callback. This does not change temporal UDF type coverage.
 - **`streamfusion.experimental.temporalAliases`** (system property, default true) — share

@@ -1,612 +1,3678 @@
 {
-  "scope": "Initial complete-job identity/perimeter measurements; full two-line/cardinality matrix is still being collected. Other fixtures in this attempt overlapped unrelated tests and are excluded from claims.",
-  "baseline_revision": "47bbc8b080e8cece29540e2f739ddbfdc6bc7111",
-  "native_sha256": "cb4f2a344b0e4cc9c548b32caae3c67696dc715bba2be592ee08f4fc7c5d4dbb",
+  "purpose": "Temporal scalar UDF conversion optimization (#389), including mixed basic columns. Complete jobs retain runtime row input, both row/Arrow transposes, production IPC/JNI/state costs and rowwise blackhole output.",
   "environment": {
-    "flink": "2.2.1",
-    "jdk": "17.0.20.1",
-    "native": "release + mimalloc",
+    "baseline_revision": "47bbc8b080e8cece29540e2f739ddbfdc6bc7111",
+    "candidate_revision": "db6def47288f47ead9c3f755cc608cb45e6a00e2",
+    "native_sha256": "cb4f2a344b0e4cc9c548b32caae3c67696dc715bba2be592ee08f4fc7c5d4dbb",
+    "java": "openjdk version \"17.0.20.1\" 2026-08-18\nOpenJDK Runtime Environment (build 17.0.20.1+1-1-22.04-Ubuntu)\nOpenJDK 64-Bit Server VM (build 17.0.20.1+1-1-22.04-Ubuntu, mixed mode, sharing)\n",
+    "architecture": "x86_64",
+    "cpu": "12th Gen Intel(R) Core(TM) i7-12650H",
+    "production_source_sha256": {
+      "src/main/java/tech/streamfusion/operator/NativeUdf.java": "47c345d404bfb73464135079e576a5872f65e301922164b711218a8fd6f163a5",
+      "src/main/java/tech/streamfusion/operator/NativeCalcOperator.java": "98cc01b6ac596e5e08034254c4607e2ef3e5550272966b6496d7f0c068a31c21"
+    }
+  },
+  "configuration": {
     "rows": 2000000,
-    "cardinality": 8,
     "precision": 9,
     "zone": "UTC",
     "parallelism": 1,
     "heap": "2 GiB",
     "batch_rows": 1024,
-    "warmup": 2,
-    "runs": 5,
-    "boundaries": "Runtime row source, both row/Arrow transposes, production JNI/state, rowwise blackhole sink"
+    "warmups": 2,
+    "measured_trials": 5,
+    "cardinalities": [
+      8,
+      16384
+    ],
+    "engines": {
+      "FLINK": "Stock planner/runtime.",
+      "PREVIOUS": "Actual preceding native callback, selected with directTemporalCalc=false. No synthetic wrapper.",
+      "NATIVE": "Direct JVM evaluation and unchanged timestamp buffer sharing enabled by default; includes verified mixed basic input columns.",
+      "FALLBACK": "Native planner installed with temporalUdf.enabled=false. Full stock fallback is asserted; perimeter control has no UDF and remains native."
+    },
+    "local_exchange": "Production IPC: -Pbench sets streamfusion.exchange.zeroCopyLocal=false."
   },
-  "command": [
-    "mvn",
-    "-B",
-    "-ntp",
-    "-pl",
-    "streamfusion-runtime",
-    "-Pbench",
-    "surefire:test@default-test",
-    "-Dtest=TemporalUdfBenchmark",
-    "-Dtemporal.rows=2000000",
-    "-Dtemporal.cases=perimeter,identity,text,epoch,pipeline",
-    "-Dtemporal.warmup=2",
-    "-Dtemporal.runs=5",
-    "-Dtemporal.cardinality=8",
-    "-Dsf.extraJvmArgs=-Xmx2g"
-  ],
-  "trials": [
+  "methodology": {
+    "order": "Each fixture rotates all four routes per trial in one JVM. Most fixtures use a fresh JVM per shape; each has matched stock/previous/current/fallback controls.",
+    "noise": "Shared 16-logical-CPU host, not an isolated machine. One-second samples record other Java/Doris activity, load and available memory. Retained final fixtures have no external rustc/cc1plus/cargo/javac processes, no outside-process set changes, and less than two outside logical CPUs per sample. Small differences and overlapping trial ranges are inconclusive.",
+    "selection": "Only complete mixed-stage fixtures selected independently of timings are used for current claims. Earlier prototypes, competing-work attempts, all warmups, and unfavorable observations are retained.",
+    "native_evidence": "Benchmark assertions require NativeCalc input consumption and both transposes. Current direct routes additionally require directTemporalRows; identity requires actual shared timestamp buffers. Pipeline additionally requires native GROUP BY consumption.",
+    "timing": "Monotonic complete-job wall time around executeSql().await(). Planning and fixture preparation precede timing. No conversion cost is subtracted."
+  },
+  "validation": {
+    "jdk": "17",
+    "native": "release + mimalloc",
+    "jni_checking": true,
+    "flink22": {
+      "tests": 163,
+      "failures": 0,
+      "errors": 0
+    },
+    "flink118": {
+      "tests": 163,
+      "failures": 0,
+      "errors": 0
+    },
+    "controls": "Callback-only and copy-only ownership controls pass; all six shapes pass smoke.",
+    "notes": "Released Arrow 18.3 emits a JNI loader class-descriptor warning under -Xcheck:jni, producing a Surefire dumpstream warning; all checks pass."
+  },
+  "raw_trials_file": "temporal-direct-calc-2026-10-22-trials.csv",
+  "host_observations_file": "temporal-direct-calc-2026-10-22-host.json.gz",
+  "fixtures": [
     {
-      "case": "perimeter",
-      "engine": "FLINK",
-      "trial": 0,
-      "warmup": true,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634633830,
-      "seconds": 1.201204
+      "flink": "1.18.1",
+      "cardinality": 8,
+      "case": "epoch",
+      "selected_run": "bench-118-card8-epoch-attempt1",
+      "routes": {
+        "FLINK": {
+          "median_seconds": 0.51756,
+          "min_seconds": 0.500395,
+          "max_seconds": 0.53043,
+          "measured_seconds": [
+            0.525156,
+            0.51756,
+            0.503527,
+            0.500395,
+            0.53043
+          ]
+        },
+        "PREVIOUS": {
+          "median_seconds": 0.668971,
+          "min_seconds": 0.646943,
+          "max_seconds": 0.672098,
+          "measured_seconds": [
+            0.668971,
+            0.664901,
+            0.671148,
+            0.646943,
+            0.672098
+          ]
+        },
+        "NATIVE": {
+          "median_seconds": 0.55539,
+          "min_seconds": 0.537732,
+          "max_seconds": 0.558676,
+          "measured_seconds": [
+            0.558676,
+            0.540884,
+            0.55539,
+            0.558275,
+            0.537732
+          ]
+        },
+        "FALLBACK": {
+          "median_seconds": 0.516121,
+          "min_seconds": 0.494222,
+          "max_seconds": 0.548967,
+          "measured_seconds": [
+            0.548967,
+            0.516121,
+            0.501076,
+            0.522838,
+            0.494222
+          ]
+        }
+      },
+      "time_reduction_vs_previous": 0.16978463939393473,
+      "native_vs_stock_ratio": 1.073092974727568,
+      "max_outside_cpu_cores": 0.4588865997717,
+      "host_observations": 26
     },
     {
-      "case": "perimeter",
-      "engine": "PREVIOUS",
-      "trial": 0,
-      "warmup": true,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634635417,
-      "seconds": 1.033976
-    },
-    {
-      "case": "perimeter",
-      "engine": "NATIVE",
-      "trial": 0,
-      "warmup": true,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634636561,
-      "seconds": 0.68583
-    },
-    {
-      "case": "perimeter",
-      "engine": "FALLBACK",
-      "trial": 0,
-      "warmup": true,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634637351,
-      "seconds": 0.741663
-    },
-    {
-      "case": "perimeter",
-      "engine": "PREVIOUS",
-      "trial": 1,
-      "warmup": true,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634638198,
-      "seconds": 0.637326
-    },
-    {
-      "case": "perimeter",
-      "engine": "NATIVE",
-      "trial": 1,
-      "warmup": true,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634638921,
-      "seconds": 0.646193
-    },
-    {
-      "case": "perimeter",
-      "engine": "FALLBACK",
-      "trial": 1,
-      "warmup": true,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634639672,
-      "seconds": 0.646218
-    },
-    {
-      "case": "perimeter",
-      "engine": "FLINK",
-      "trial": 1,
-      "warmup": true,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634640412,
-      "seconds": 0.590267
-    },
-    {
-      "case": "perimeter",
-      "engine": "NATIVE",
-      "trial": 2,
-      "warmup": false,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634641093,
-      "seconds": 0.638886
-    },
-    {
-      "case": "perimeter",
-      "engine": "FALLBACK",
-      "trial": 2,
-      "warmup": false,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634641816,
-      "seconds": 0.659447
-    },
-    {
-      "case": "perimeter",
-      "engine": "FLINK",
-      "trial": 2,
-      "warmup": false,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634642554,
-      "seconds": 0.584962
-    },
-    {
-      "case": "perimeter",
-      "engine": "PREVIOUS",
-      "trial": 2,
-      "warmup": false,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634643212,
-      "seconds": 0.652244
-    },
-    {
-      "case": "perimeter",
-      "engine": "FALLBACK",
-      "trial": 3,
-      "warmup": false,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634643942,
-      "seconds": 0.650524
-    },
-    {
-      "case": "perimeter",
-      "engine": "FLINK",
-      "trial": 3,
-      "warmup": false,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634644663,
-      "seconds": 0.582064
-    },
-    {
-      "case": "perimeter",
-      "engine": "PREVIOUS",
-      "trial": 3,
-      "warmup": false,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634645327,
-      "seconds": 0.64492
-    },
-    {
-      "case": "perimeter",
-      "engine": "NATIVE",
-      "trial": 3,
-      "warmup": false,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634646045,
-      "seconds": 0.640219
-    },
-    {
-      "case": "perimeter",
-      "engine": "FLINK",
-      "trial": 4,
-      "warmup": false,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634646751,
-      "seconds": 0.576688
-    },
-    {
-      "case": "perimeter",
-      "engine": "PREVIOUS",
-      "trial": 4,
-      "warmup": false,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634647404,
-      "seconds": 0.645583
-    },
-    {
-      "case": "perimeter",
-      "engine": "NATIVE",
-      "trial": 4,
-      "warmup": false,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634648120,
-      "seconds": 0.638866
-    },
-    {
-      "case": "perimeter",
-      "engine": "FALLBACK",
-      "trial": 4,
-      "warmup": false,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634648830,
-      "seconds": 0.651261
-    },
-    {
-      "case": "perimeter",
-      "engine": "PREVIOUS",
-      "trial": 5,
-      "warmup": false,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634649547,
-      "seconds": 0.651605
-    },
-    {
-      "case": "perimeter",
-      "engine": "NATIVE",
-      "trial": 5,
-      "warmup": false,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634650275,
-      "seconds": 0.638435
-    },
-    {
-      "case": "perimeter",
-      "engine": "FALLBACK",
-      "trial": 5,
-      "warmup": false,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634650984,
-      "seconds": 0.640912
-    },
-    {
-      "case": "perimeter",
-      "engine": "FLINK",
-      "trial": 5,
-      "warmup": false,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634651698,
-      "seconds": 0.57104
-    },
-    {
-      "case": "perimeter",
-      "engine": "NATIVE",
-      "trial": 6,
-      "warmup": false,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634652340,
-      "seconds": 0.659835
-    },
-    {
-      "case": "perimeter",
-      "engine": "FALLBACK",
-      "trial": 6,
-      "warmup": false,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634653066,
-      "seconds": 0.657807
-    },
-    {
-      "case": "perimeter",
-      "engine": "FLINK",
-      "trial": 6,
-      "warmup": false,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634653786,
-      "seconds": 0.588824
-    },
-    {
-      "case": "perimeter",
-      "engine": "PREVIOUS",
-      "trial": 6,
-      "warmup": false,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634654442,
-      "seconds": 0.655097
-    },
-    {
+      "flink": "1.18.1",
+      "cardinality": 8,
       "case": "identity",
-      "engine": "FLINK",
-      "trial": 0,
-      "warmup": true,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634655280,
-      "seconds": 0.694503
+      "selected_run": "bench-118-card8-identity-attempt3",
+      "routes": {
+        "FLINK": {
+          "median_seconds": 0.615707,
+          "min_seconds": 0.595863,
+          "max_seconds": 0.697682,
+          "measured_seconds": [
+            0.683718,
+            0.615707,
+            0.602123,
+            0.697682,
+            0.595863
+          ]
+        },
+        "PREVIOUS": {
+          "median_seconds": 0.916241,
+          "min_seconds": 0.906898,
+          "max_seconds": 0.943547,
+          "measured_seconds": [
+            0.943547,
+            0.906898,
+            0.919993,
+            0.916241,
+            0.914792
+          ]
+        },
+        "NATIVE": {
+          "median_seconds": 0.678095,
+          "min_seconds": 0.662738,
+          "max_seconds": 0.690126,
+          "measured_seconds": [
+            0.671015,
+            0.678578,
+            0.662738,
+            0.690126,
+            0.678095
+          ]
+        },
+        "FALLBACK": {
+          "median_seconds": 0.608433,
+          "min_seconds": 0.600411,
+          "max_seconds": 0.61838,
+          "measured_seconds": [
+            0.608433,
+            0.61838,
+            0.610349,
+            0.600411,
+            0.601898
+          ]
+        }
+      },
+      "time_reduction_vs_previous": 0.2599163320567405,
+      "native_vs_stock_ratio": 1.101327417099367,
+      "max_outside_cpu_cores": 1.1473187367638191,
+      "host_observations": 30
     },
     {
-      "case": "identity",
-      "engine": "PREVIOUS",
-      "trial": 0,
-      "warmup": true,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634656079,
-      "seconds": 1.02863
+      "flink": "1.18.1",
+      "cardinality": 8,
+      "case": "mixed",
+      "selected_run": "bench-118-card8-mixed-attempt2",
+      "routes": {
+        "FLINK": {
+          "median_seconds": 0.706688,
+          "min_seconds": 0.701642,
+          "max_seconds": 0.721746,
+          "measured_seconds": [
+            0.703271,
+            0.706688,
+            0.701642,
+            0.721746,
+            0.720134
+          ]
+        },
+        "PREVIOUS": {
+          "median_seconds": 1.001359,
+          "min_seconds": 0.986611,
+          "max_seconds": 1.071401,
+          "measured_seconds": [
+            1.071401,
+            1.022403,
+            0.986611,
+            0.988487,
+            1.001359
+          ]
+        },
+        "NATIVE": {
+          "median_seconds": 0.768459,
+          "min_seconds": 0.760132,
+          "max_seconds": 0.851052,
+          "measured_seconds": [
+            0.851052,
+            0.768459,
+            0.760132,
+            0.765329,
+            0.775673
+          ]
+        },
+        "FALLBACK": {
+          "median_seconds": 0.712445,
+          "min_seconds": 0.694486,
+          "max_seconds": 0.72361,
+          "measured_seconds": [
+            0.718004,
+            0.72361,
+            0.701984,
+            0.694486,
+            0.712445
+          ]
+        }
+      },
+      "time_reduction_vs_previous": 0.23258391845481996,
+      "native_vs_stock_ratio": 1.0874091536859265,
+      "max_outside_cpu_cores": 0.0,
+      "host_observations": 32
     },
     {
-      "case": "identity",
-      "engine": "NATIVE",
-      "trial": 0,
-      "warmup": true,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634657180,
-      "seconds": 0.733043
+      "flink": "1.18.1",
+      "cardinality": 8,
+      "case": "perimeter",
+      "selected_run": "bench-118-card8-perimeter-attempt1",
+      "routes": {
+        "FLINK": {
+          "median_seconds": 0.546435,
+          "min_seconds": 0.52731,
+          "max_seconds": 0.571045,
+          "measured_seconds": [
+            0.571045,
+            0.545475,
+            0.546435,
+            0.52731,
+            0.563039
+          ]
+        },
+        "PREVIOUS": {
+          "median_seconds": 0.647929,
+          "min_seconds": 0.631606,
+          "max_seconds": 0.65351,
+          "measured_seconds": [
+            0.65351,
+            0.631606,
+            0.650447,
+            0.638025,
+            0.647929
+          ]
+        },
+        "NATIVE": {
+          "median_seconds": 0.64533,
+          "min_seconds": 0.628177,
+          "max_seconds": 0.679558,
+          "measured_seconds": [
+            0.642496,
+            0.64533,
+            0.679558,
+            0.628177,
+            0.649584
+          ]
+        },
+        "FALLBACK": {
+          "median_seconds": 0.656894,
+          "min_seconds": 0.633056,
+          "max_seconds": 0.660992,
+          "measured_seconds": [
+            0.659186,
+            0.638904,
+            0.660992,
+            0.656894,
+            0.633056
+          ]
+        }
+      },
+      "time_reduction_vs_previous": 0.004011241972500135,
+      "native_vs_stock_ratio": 1.1809821845233193,
+      "max_outside_cpu_cores": 1.0673256544073382,
+      "host_observations": 27
     },
     {
-      "case": "identity",
-      "engine": "FALLBACK",
-      "trial": 0,
-      "warmup": true,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634657980,
-      "seconds": 0.630414
+      "flink": "1.18.1",
+      "cardinality": 8,
+      "case": "pipeline",
+      "selected_run": "bench-118-card8-pipeline-attempt1",
+      "routes": {
+        "FLINK": {
+          "median_seconds": 0.8495,
+          "min_seconds": 0.845488,
+          "max_seconds": 0.855217,
+          "measured_seconds": [
+            0.855217,
+            0.852581,
+            0.847122,
+            0.8495,
+            0.845488
+          ]
+        },
+        "PREVIOUS": {
+          "median_seconds": 0.977936,
+          "min_seconds": 0.966012,
+          "max_seconds": 1.003068,
+          "measured_seconds": [
+            1.003068,
+            0.985208,
+            0.966012,
+            0.967087,
+            0.977936
+          ]
+        },
+        "NATIVE": {
+          "median_seconds": 0.976542,
+          "min_seconds": 0.950077,
+          "max_seconds": 0.981109,
+          "measured_seconds": [
+            0.976542,
+            0.981109,
+            0.976367,
+            0.980698,
+            0.950077
+          ]
+        },
+        "FALLBACK": {
+          "median_seconds": 0.830228,
+          "min_seconds": 0.819731,
+          "max_seconds": 0.860468,
+          "measured_seconds": [
+            0.825145,
+            0.860468,
+            0.830228,
+            0.819731,
+            0.841225
+          ]
+        }
+      },
+      "time_reduction_vs_previous": 0.0014254511542677317,
+      "native_vs_stock_ratio": 1.1495491465567982,
+      "max_outside_cpu_cores": 1.3766416208171222,
+      "host_observations": 36
     },
     {
-      "case": "identity",
-      "engine": "PREVIOUS",
-      "trial": 1,
-      "warmup": true,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634658693,
-      "seconds": 0.911892
+      "flink": "1.18.1",
+      "cardinality": 8,
+      "case": "text",
+      "selected_run": "bench-118-card8-text-attempt3",
+      "routes": {
+        "FLINK": {
+          "median_seconds": 1.012707,
+          "min_seconds": 0.98315,
+          "max_seconds": 1.059264,
+          "measured_seconds": [
+            0.98315,
+            1.059264,
+            1.012707,
+            1.010549,
+            1.013589
+          ]
+        },
+        "PREVIOUS": {
+          "median_seconds": 1.075385,
+          "min_seconds": 1.055644,
+          "max_seconds": 1.103399,
+          "measured_seconds": [
+            1.096814,
+            1.103399,
+            1.075385,
+            1.055644,
+            1.056931
+          ]
+        },
+        "NATIVE": {
+          "median_seconds": 0.923865,
+          "min_seconds": 0.915976,
+          "max_seconds": 1.013385,
+          "measured_seconds": [
+            1.013385,
+            0.915976,
+            0.952226,
+            0.923865,
+            0.918788
+          ]
+        },
+        "FALLBACK": {
+          "median_seconds": 1.004198,
+          "min_seconds": 0.992879,
+          "max_seconds": 1.065683,
+          "measured_seconds": [
+            1.065683,
+            0.992879,
+            1.010387,
+            1.004198,
+            0.998798
+          ]
+        }
+      },
+      "time_reduction_vs_previous": 0.1408983759304807,
+      "native_vs_stock_ratio": 0.9122727501636703,
+      "max_outside_cpu_cores": 1.4865177251993125,
+      "host_observations": 38
     },
     {
-      "case": "identity",
-      "engine": "NATIVE",
-      "trial": 1,
-      "warmup": true,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634659673,
-      "seconds": 0.684487
+      "flink": "1.18.1",
+      "cardinality": 16384,
+      "case": "epoch",
+      "selected_run": "bench-118-card16384-epoch-attempt1",
+      "routes": {
+        "FLINK": {
+          "median_seconds": 0.513625,
+          "min_seconds": 0.502762,
+          "max_seconds": 0.51909,
+          "measured_seconds": [
+            0.51909,
+            0.513625,
+            0.519042,
+            0.502762,
+            0.508816
+          ]
+        },
+        "PREVIOUS": {
+          "median_seconds": 0.645747,
+          "min_seconds": 0.639815,
+          "max_seconds": 0.649097,
+          "measured_seconds": [
+            0.639815,
+            0.648823,
+            0.645747,
+            0.641338,
+            0.649097
+          ]
+        },
+        "NATIVE": {
+          "median_seconds": 0.543074,
+          "min_seconds": 0.519396,
+          "max_seconds": 0.607146,
+          "measured_seconds": [
+            0.607146,
+            0.543074,
+            0.519396,
+            0.530055,
+            0.544745
+          ]
+        },
+        "FALLBACK": {
+          "median_seconds": 0.514911,
+          "min_seconds": 0.495396,
+          "max_seconds": 0.517642,
+          "measured_seconds": [
+            0.508804,
+            0.495396,
+            0.516085,
+            0.514911,
+            0.517642
+          ]
+        }
+      },
+      "time_reduction_vs_previous": 0.15899880293675395,
+      "native_vs_stock_ratio": 1.0573356047700169,
+      "max_outside_cpu_cores": 1.7653135497420196,
+      "host_observations": 26
     },
     {
+      "flink": "1.18.1",
+      "cardinality": 16384,
       "case": "identity",
-      "engine": "FALLBACK",
-      "trial": 1,
-      "warmup": true,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634660425,
-      "seconds": 0.619764
+      "selected_run": "bench-118-card16384-identity-attempt2",
+      "routes": {
+        "FLINK": {
+          "median_seconds": 0.610417,
+          "min_seconds": 0.593554,
+          "max_seconds": 0.738864,
+          "measured_seconds": [
+            0.738864,
+            0.610417,
+            0.593554,
+            0.661409,
+            0.59811
+          ]
+        },
+        "PREVIOUS": {
+          "median_seconds": 0.980038,
+          "min_seconds": 0.902645,
+          "max_seconds": 1.020073,
+          "measured_seconds": [
+            0.981787,
+            0.980038,
+            1.020073,
+            0.915152,
+            0.902645
+          ]
+        },
+        "NATIVE": {
+          "median_seconds": 0.676501,
+          "min_seconds": 0.6681,
+          "max_seconds": 0.751349,
+          "measured_seconds": [
+            0.751349,
+            0.676501,
+            0.668576,
+            0.697637,
+            0.6681
+          ]
+        },
+        "FALLBACK": {
+          "median_seconds": 0.61357,
+          "min_seconds": 0.597828,
+          "max_seconds": 0.643021,
+          "measured_seconds": [
+            0.618742,
+            0.61357,
+            0.597828,
+            0.643021,
+            0.610888
+          ]
+        }
+      },
+      "time_reduction_vs_previous": 0.3097196231166546,
+      "native_vs_stock_ratio": 1.1082604186973823,
+      "max_outside_cpu_cores": 1.1668652305603557,
+      "host_observations": 31
     },
     {
-      "case": "identity",
-      "engine": "FLINK",
-      "trial": 1,
-      "warmup": true,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634661115,
-      "seconds": 0.620773
+      "flink": "1.18.1",
+      "cardinality": 16384,
+      "case": "mixed",
+      "selected_run": "bench-118-card16384-mixed-attempt1",
+      "routes": {
+        "FLINK": {
+          "median_seconds": 0.734832,
+          "min_seconds": 0.72066,
+          "max_seconds": 0.825306,
+          "measured_seconds": [
+            0.825306,
+            0.726816,
+            0.72066,
+            0.744803,
+            0.734832
+          ]
+        },
+        "PREVIOUS": {
+          "median_seconds": 1.094801,
+          "min_seconds": 1.075111,
+          "max_seconds": 1.236233,
+          "measured_seconds": [
+            1.236233,
+            1.094801,
+            1.095158,
+            1.075111,
+            1.086187
+          ]
+        },
+        "NATIVE": {
+          "median_seconds": 0.870739,
+          "min_seconds": 0.849454,
+          "max_seconds": 0.935753,
+          "measured_seconds": [
+            0.935753,
+            0.870739,
+            0.899073,
+            0.849454,
+            0.851643
+          ]
+        },
+        "FALLBACK": {
+          "median_seconds": 0.743405,
+          "min_seconds": 0.725772,
+          "max_seconds": 0.789776,
+          "measured_seconds": [
+            0.747583,
+            0.789776,
+            0.743405,
+            0.725772,
+            0.733732
+          ]
+        }
+      },
+      "time_reduction_vs_previous": 0.20466002497257485,
+      "native_vs_stock_ratio": 1.1849497572234198,
+      "max_outside_cpu_cores": 0.867828802550843,
+      "host_observations": 35
     },
     {
-      "case": "identity",
-      "engine": "NATIVE",
-      "trial": 2,
-      "warmup": false,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634661808,
-      "seconds": 0.674493
+      "flink": "1.18.1",
+      "cardinality": 16384,
+      "case": "perimeter",
+      "selected_run": "bench-118-card16384-perimeter-attempt1",
+      "routes": {
+        "FLINK": {
+          "median_seconds": 0.513575,
+          "min_seconds": 0.507426,
+          "max_seconds": 0.521461,
+          "measured_seconds": [
+            0.517673,
+            0.513575,
+            0.510393,
+            0.507426,
+            0.521461
+          ]
+        },
+        "PREVIOUS": {
+          "median_seconds": 0.54408,
+          "min_seconds": 0.535791,
+          "max_seconds": 0.563963,
+          "measured_seconds": [
+            0.535791,
+            0.546887,
+            0.54408,
+            0.539798,
+            0.563963
+          ]
+        },
+        "NATIVE": {
+          "median_seconds": 0.553816,
+          "min_seconds": 0.546665,
+          "max_seconds": 0.556134,
+          "measured_seconds": [
+            0.55474,
+            0.549831,
+            0.546665,
+            0.553816,
+            0.556134
+          ]
+        },
+        "FALLBACK": {
+          "median_seconds": 0.55055,
+          "min_seconds": 0.540943,
+          "max_seconds": 0.561933,
+          "measured_seconds": [
+            0.540943,
+            0.556489,
+            0.561933,
+            0.55055,
+            0.548362
+          ]
+        }
+      },
+      "time_reduction_vs_previous": -0.017894427290104264,
+      "native_vs_stock_ratio": 1.078354670690746,
+      "max_outside_cpu_cores": 0.0,
+      "host_observations": 24
     },
     {
-      "case": "identity",
-      "engine": "FALLBACK",
-      "trial": 2,
-      "warmup": false,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634662544,
-      "seconds": 0.63826
+      "flink": "1.18.1",
+      "cardinality": 16384,
+      "case": "pipeline",
+      "selected_run": "bench-118-card16384-pipeline-attempt2",
+      "routes": {
+        "FLINK": {
+          "median_seconds": 0.798026,
+          "min_seconds": 0.789641,
+          "max_seconds": 0.871905,
+          "measured_seconds": [
+            0.871905,
+            0.789641,
+            0.794874,
+            0.798026,
+            0.82905
+          ]
+        },
+        "PREVIOUS": {
+          "median_seconds": 1.045632,
+          "min_seconds": 1.036852,
+          "max_seconds": 1.115579,
+          "measured_seconds": [
+            1.115579,
+            1.114421,
+            1.045632,
+            1.036852,
+            1.038504
+          ]
+        },
+        "NATIVE": {
+          "median_seconds": 1.103815,
+          "min_seconds": 1.028536,
+          "max_seconds": 1.156669,
+          "measured_seconds": [
+            1.156669,
+            1.126814,
+            1.096092,
+            1.028536,
+            1.103815
+          ]
+        },
+        "FALLBACK": {
+          "median_seconds": 0.877072,
+          "min_seconds": 0.792033,
+          "max_seconds": 0.946671,
+          "measured_seconds": [
+            0.889072,
+            0.877072,
+            0.792033,
+            0.805351,
+            0.946671
+          ]
+        }
+      },
+      "time_reduction_vs_previous": -0.05564385940751637,
+      "native_vs_stock_ratio": 1.3831817509705198,
+      "max_outside_cpu_cores": 0.0,
+      "host_observations": 39
     },
     {
-      "case": "identity",
-      "engine": "FLINK",
-      "trial": 2,
-      "warmup": false,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634663253,
-      "seconds": 0.628252
+      "flink": "1.18.1",
+      "cardinality": 16384,
+      "case": "text",
+      "selected_run": "bench-118-card16384-text-attempt1",
+      "routes": {
+        "FLINK": {
+          "median_seconds": 0.965445,
+          "min_seconds": 0.95098,
+          "max_seconds": 0.972006,
+          "measured_seconds": [
+            0.966117,
+            0.95098,
+            0.965445,
+            0.960934,
+            0.972006
+          ]
+        },
+        "PREVIOUS": {
+          "median_seconds": 0.98186,
+          "min_seconds": 0.964947,
+          "max_seconds": 1.065757,
+          "measured_seconds": [
+            1.029342,
+            1.065757,
+            0.980275,
+            0.964947,
+            0.98186
+          ]
+        },
+        "NATIVE": {
+          "median_seconds": 0.87153,
+          "min_seconds": 0.84428,
+          "max_seconds": 0.980915,
+          "measured_seconds": [
+            0.945629,
+            0.84428,
+            0.864219,
+            0.980915,
+            0.87153
+          ]
+        },
+        "FALLBACK": {
+          "median_seconds": 0.962128,
+          "min_seconds": 0.95493,
+          "max_seconds": 0.973132,
+          "measured_seconds": [
+            0.966938,
+            0.95493,
+            0.973132,
+            0.962128,
+            0.961185
+          ]
+        }
+      },
+      "time_reduction_vs_previous": 0.11236836208828138,
+      "native_vs_stock_ratio": 0.9027236144990134,
+      "max_outside_cpu_cores": 0.788089077069935,
+      "host_observations": 37
     },
     {
-      "case": "identity",
-      "engine": "PREVIOUS",
-      "trial": 2,
-      "warmup": false,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634663953,
-      "seconds": 0.914912
+      "flink": "2.2.1",
+      "cardinality": 8,
+      "case": "epoch",
+      "selected_run": "bench-22-card8-epoch-attempt1",
+      "routes": {
+        "FLINK": {
+          "median_seconds": 0.48218,
+          "min_seconds": 0.475783,
+          "max_seconds": 0.486232,
+          "measured_seconds": [
+            0.48218,
+            0.475783,
+            0.477003,
+            0.482209,
+            0.486232
+          ]
+        },
+        "PREVIOUS": {
+          "median_seconds": 0.610077,
+          "min_seconds": 0.600942,
+          "max_seconds": 0.616647,
+          "measured_seconds": [
+            0.616647,
+            0.600942,
+            0.616333,
+            0.606493,
+            0.610077
+          ]
+        },
+        "NATIVE": {
+          "median_seconds": 0.509908,
+          "min_seconds": 0.500795,
+          "max_seconds": 0.516916,
+          "measured_seconds": [
+            0.514595,
+            0.505768,
+            0.509908,
+            0.500795,
+            0.516916
+          ]
+        },
+        "FALLBACK": {
+          "median_seconds": 0.479378,
+          "min_seconds": 0.469942,
+          "max_seconds": 0.4945,
+          "measured_seconds": [
+            0.469942,
+            0.4945,
+            0.479378,
+            0.475423,
+            0.48848
+          ]
+        }
+      },
+      "time_reduction_vs_previous": 0.1641907496922519,
+      "native_vs_stock_ratio": 1.0575054958729107,
+      "max_outside_cpu_cores": 0.0,
+      "host_observations": 25
     },
     {
+      "flink": "2.2.1",
+      "cardinality": 8,
       "case": "identity",
-      "engine": "FALLBACK",
-      "trial": 3,
-      "warmup": false,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634664936,
-      "seconds": 0.633067
+      "selected_run": "bench-22-card8-identity-attempt1",
+      "routes": {
+        "FLINK": {
+          "median_seconds": 0.626486,
+          "min_seconds": 0.611058,
+          "max_seconds": 0.637978,
+          "measured_seconds": [
+            0.626486,
+            0.634925,
+            0.611058,
+            0.637978,
+            0.615418
+          ]
+        },
+        "PREVIOUS": {
+          "median_seconds": 0.876332,
+          "min_seconds": 0.860658,
+          "max_seconds": 0.879964,
+          "measured_seconds": [
+            0.879964,
+            0.876332,
+            0.873164,
+            0.860658,
+            0.877382
+          ]
+        },
+        "NATIVE": {
+          "median_seconds": 0.65584,
+          "min_seconds": 0.640313,
+          "max_seconds": 0.659005,
+          "measured_seconds": [
+            0.659005,
+            0.653197,
+            0.65584,
+            0.640313,
+            0.656829
+          ]
+        },
+        "FALLBACK": {
+          "median_seconds": 0.621821,
+          "min_seconds": 0.6172,
+          "max_seconds": 0.648846,
+          "measured_seconds": [
+            0.621821,
+            0.6172,
+            0.644689,
+            0.618831,
+            0.648846
+          ]
+        }
+      },
+      "time_reduction_vs_previous": 0.25160783812527676,
+      "native_vs_stock_ratio": 1.0468549975578065,
+      "max_outside_cpu_cores": 0.0,
+      "host_observations": 30
     },
     {
-      "case": "identity",
-      "engine": "FLINK",
-      "trial": 3,
-      "warmup": false,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634665647,
-      "seconds": 0.613625
+      "flink": "2.2.1",
+      "cardinality": 8,
+      "case": "mixed",
+      "selected_run": "bench-22-card8-mixed-attempt1",
+      "routes": {
+        "FLINK": {
+          "median_seconds": 0.784143,
+          "min_seconds": 0.775322,
+          "max_seconds": 0.799203,
+          "measured_seconds": [
+            0.799203,
+            0.777153,
+            0.775322,
+            0.784143,
+            0.78719
+          ]
+        },
+        "PREVIOUS": {
+          "median_seconds": 1.061744,
+          "min_seconds": 1.059867,
+          "max_seconds": 1.079506,
+          "measured_seconds": [
+            1.061744,
+            1.061412,
+            1.075972,
+            1.059867,
+            1.079506
+          ]
+        },
+        "NATIVE": {
+          "median_seconds": 0.835392,
+          "min_seconds": 0.821444,
+          "max_seconds": 0.857175,
+          "measured_seconds": [
+            0.840668,
+            0.857175,
+            0.821444,
+            0.827163,
+            0.835392
+          ]
+        },
+        "FALLBACK": {
+          "median_seconds": 0.792814,
+          "min_seconds": 0.778121,
+          "max_seconds": 0.800737,
+          "measured_seconds": [
+            0.778121,
+            0.79091,
+            0.796749,
+            0.792814,
+            0.800737
+          ]
+        }
+      },
+      "time_reduction_vs_previous": 0.2131888666194488,
+      "native_vs_stock_ratio": 1.0653567015200034,
+      "max_outside_cpu_cores": 0.0,
+      "host_observations": 39
     },
     {
-      "case": "identity",
-      "engine": "PREVIOUS",
-      "trial": 3,
-      "warmup": false,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634666339,
-      "seconds": 0.89767
+      "flink": "2.2.1",
+      "cardinality": 8,
+      "case": "perimeter",
+      "selected_run": "bench-22-card8-perimeter-attempt3",
+      "routes": {
+        "FLINK": {
+          "median_seconds": 0.548423,
+          "min_seconds": 0.543768,
+          "max_seconds": 0.560096,
+          "measured_seconds": [
+            0.543768,
+            0.548423,
+            0.548151,
+            0.553191,
+            0.560096
+          ]
+        },
+        "PREVIOUS": {
+          "median_seconds": 0.609138,
+          "min_seconds": 0.598753,
+          "max_seconds": 0.614685,
+          "measured_seconds": [
+            0.598753,
+            0.614685,
+            0.608842,
+            0.609138,
+            0.609821
+          ]
+        },
+        "NATIVE": {
+          "median_seconds": 0.603545,
+          "min_seconds": 0.595824,
+          "max_seconds": 0.641074,
+          "measured_seconds": [
+            0.595824,
+            0.641074,
+            0.603365,
+            0.603545,
+            0.625462
+          ]
+        },
+        "FALLBACK": {
+          "median_seconds": 0.608395,
+          "min_seconds": 0.604834,
+          "max_seconds": 0.614725,
+          "measured_seconds": [
+            0.608395,
+            0.60568,
+            0.614725,
+            0.609715,
+            0.604834
+          ]
+        }
+      },
+      "time_reduction_vs_previous": 0.009181827434834089,
+      "native_vs_stock_ratio": 1.1005100077859609,
+      "max_outside_cpu_cores": 0.0,
+      "host_observations": 26
     },
     {
-      "case": "identity",
-      "engine": "NATIVE",
-      "trial": 3,
-      "warmup": false,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634667308,
-      "seconds": 0.675887
+      "flink": "2.2.1",
+      "cardinality": 8,
+      "case": "pipeline",
+      "selected_run": "bench-22-card8-pipeline-attempt2",
+      "routes": {
+        "FLINK": {
+          "median_seconds": 0.821139,
+          "min_seconds": 0.803439,
+          "max_seconds": 0.890423,
+          "measured_seconds": [
+            0.890423,
+            0.803439,
+            0.834067,
+            0.821139,
+            0.816243
+          ]
+        },
+        "PREVIOUS": {
+          "median_seconds": 0.931297,
+          "min_seconds": 0.923214,
+          "max_seconds": 0.997188,
+          "measured_seconds": [
+            0.997188,
+            0.923214,
+            0.941886,
+            0.931297,
+            0.92632
+          ]
+        },
+        "NATIVE": {
+          "median_seconds": 0.931894,
+          "min_seconds": 0.925633,
+          "max_seconds": 1.006618,
+          "measured_seconds": [
+            1.006618,
+            0.931894,
+            0.966033,
+            0.925633,
+            0.928835
+          ]
+        },
+        "FALLBACK": {
+          "median_seconds": 0.835589,
+          "min_seconds": 0.809269,
+          "max_seconds": 0.903634,
+          "measured_seconds": [
+            0.886841,
+            0.903634,
+            0.835589,
+            0.809269,
+            0.815718
+          ]
+        }
+      },
+      "time_reduction_vs_previous": -0.0006410414722692881,
+      "native_vs_stock_ratio": 1.1348797219471978,
+      "max_outside_cpu_cores": 0.0,
+      "host_observations": 38
     },
     {
-      "case": "identity",
-      "engine": "FLINK",
-      "trial": 4,
-      "warmup": false,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634668043,
-      "seconds": 0.638126
+      "flink": "2.2.1",
+      "cardinality": 8,
+      "case": "text",
+      "selected_run": "bench-22-card8-text-attempt4",
+      "routes": {
+        "FLINK": {
+          "median_seconds": 0.984974,
+          "min_seconds": 0.973215,
+          "max_seconds": 0.988452,
+          "measured_seconds": [
+            0.973215,
+            0.979776,
+            0.985171,
+            0.988452,
+            0.984974
+          ]
+        },
+        "PREVIOUS": {
+          "median_seconds": 0.999364,
+          "min_seconds": 0.993704,
+          "max_seconds": 1.014878,
+          "measured_seconds": [
+            1.014878,
+            0.999364,
+            0.993704,
+            1.001638,
+            0.996035
+          ]
+        },
+        "NATIVE": {
+          "median_seconds": 0.870664,
+          "min_seconds": 0.867098,
+          "max_seconds": 0.888242,
+          "measured_seconds": [
+            0.886658,
+            0.888242,
+            0.867098,
+            0.868588,
+            0.870664
+          ]
+        },
+        "FALLBACK": {
+          "median_seconds": 0.987015,
+          "min_seconds": 0.973436,
+          "max_seconds": 1.025508,
+          "measured_seconds": [
+            0.992268,
+            0.973436,
+            1.025508,
+            0.987015,
+            0.985314
+          ]
+        }
+      },
+      "time_reduction_vs_previous": 0.12878190529176559,
+      "native_vs_stock_ratio": 0.8839461752289908,
+      "max_outside_cpu_cores": 0.0,
+      "host_observations": 37
     },
     {
-      "case": "identity",
-      "engine": "PREVIOUS",
-      "trial": 4,
-      "warmup": false,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634668748,
-      "seconds": 0.896986
+      "flink": "2.2.1",
+      "cardinality": 16384,
+      "case": "epoch",
+      "selected_run": "bench-22-card16384-epoch-attempt4",
+      "routes": {
+        "FLINK": {
+          "median_seconds": 0.489568,
+          "min_seconds": 0.480782,
+          "max_seconds": 0.501256,
+          "measured_seconds": [
+            0.501256,
+            0.480782,
+            0.483226,
+            0.489568,
+            0.491711
+          ]
+        },
+        "PREVIOUS": {
+          "median_seconds": 0.633479,
+          "min_seconds": 0.617774,
+          "max_seconds": 0.675008,
+          "measured_seconds": [
+            0.633479,
+            0.675008,
+            0.617774,
+            0.61997,
+            0.645587
+          ]
+        },
+        "NATIVE": {
+          "median_seconds": 0.519975,
+          "min_seconds": 0.514739,
+          "max_seconds": 0.5908,
+          "measured_seconds": [
+            0.5908,
+            0.519975,
+            0.589786,
+            0.514739,
+            0.517118
+          ]
+        },
+        "FALLBACK": {
+          "median_seconds": 0.488483,
+          "min_seconds": 0.483988,
+          "max_seconds": 0.491406,
+          "measured_seconds": [
+            0.484811,
+            0.488483,
+            0.491406,
+            0.48936,
+            0.483988
+          ]
+        }
+      },
+      "time_reduction_vs_previous": 0.17917563170996997,
+      "native_vs_stock_ratio": 1.0621098601215766,
+      "max_outside_cpu_cores": 0.0,
+      "host_observations": 30
     },
     {
+      "flink": "2.2.1",
+      "cardinality": 16384,
       "case": "identity",
-      "engine": "NATIVE",
-      "trial": 4,
-      "warmup": false,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634669711,
-      "seconds": 0.684499
+      "selected_run": "bench-22-card16384-identity-attempt2",
+      "routes": {
+        "FLINK": {
+          "median_seconds": 0.601491,
+          "min_seconds": 0.592912,
+          "max_seconds": 0.60532,
+          "measured_seconds": [
+            0.60532,
+            0.592912,
+            0.597088,
+            0.601491,
+            0.602436
+          ]
+        },
+        "PREVIOUS": {
+          "median_seconds": 0.889786,
+          "min_seconds": 0.872894,
+          "max_seconds": 0.945376,
+          "measured_seconds": [
+            0.945376,
+            0.941067,
+            0.877279,
+            0.889786,
+            0.872894
+          ]
+        },
+        "NATIVE": {
+          "median_seconds": 0.728874,
+          "min_seconds": 0.66044,
+          "max_seconds": 0.731833,
+          "measured_seconds": [
+            0.728874,
+            0.731833,
+            0.731272,
+            0.661114,
+            0.66044
+          ]
+        },
+        "FALLBACK": {
+          "median_seconds": 0.638969,
+          "min_seconds": 0.600857,
+          "max_seconds": 0.676551,
+          "measured_seconds": [
+            0.676551,
+            0.600857,
+            0.641005,
+            0.638969,
+            0.613438
+          ]
+        }
+      },
+      "time_reduction_vs_previous": 0.18084348371406156,
+      "native_vs_stock_ratio": 1.2117787298563072,
+      "max_outside_cpu_cores": 0.0,
+      "host_observations": 34
     },
     {
-      "case": "identity",
-      "engine": "FALLBACK",
-      "trial": 4,
-      "warmup": false,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634670460,
-      "seconds": 0.647552
+      "flink": "2.2.1",
+      "cardinality": 16384,
+      "case": "mixed",
+      "selected_run": "bench-22-card16384-mixed-attempt1",
+      "routes": {
+        "FLINK": {
+          "median_seconds": 0.7473,
+          "min_seconds": 0.720997,
+          "max_seconds": 0.786518,
+          "measured_seconds": [
+            0.786518,
+            0.723045,
+            0.720997,
+            0.7557,
+            0.7473
+          ]
+        },
+        "PREVIOUS": {
+          "median_seconds": 1.116912,
+          "min_seconds": 1.029971,
+          "max_seconds": 1.124529,
+          "measured_seconds": [
+            1.124529,
+            1.118411,
+            1.116912,
+            1.046228,
+            1.029971
+          ]
+        },
+        "NATIVE": {
+          "median_seconds": 0.885804,
+          "min_seconds": 0.829212,
+          "max_seconds": 0.904098,
+          "measured_seconds": [
+            0.904098,
+            0.885804,
+            0.888561,
+            0.86846,
+            0.829212
+          ]
+        },
+        "FALLBACK": {
+          "median_seconds": 0.726614,
+          "min_seconds": 0.722565,
+          "max_seconds": 0.738397,
+          "measured_seconds": [
+            0.726614,
+            0.738397,
+            0.723575,
+            0.729609,
+            0.722565
+          ]
+        }
+      },
+      "time_reduction_vs_previous": 0.2069169281017662,
+      "native_vs_stock_ratio": 1.1853392211963067,
+      "max_outside_cpu_cores": 0.0,
+      "host_observations": 34
     },
     {
-      "case": "identity",
-      "engine": "PREVIOUS",
-      "trial": 5,
-      "warmup": false,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634671174,
-      "seconds": 0.891465
+      "flink": "2.2.1",
+      "cardinality": 16384,
+      "case": "perimeter",
+      "selected_run": "bench-22-card16384-perimeter-attempt1",
+      "routes": {
+        "FLINK": {
+          "median_seconds": 0.56301,
+          "min_seconds": 0.560149,
+          "max_seconds": 0.567217,
+          "measured_seconds": [
+            0.560149,
+            0.567217,
+            0.560881,
+            0.56301,
+            0.564371
+          ]
+        },
+        "PREVIOUS": {
+          "median_seconds": 0.624952,
+          "min_seconds": 0.62159,
+          "max_seconds": 0.666409,
+          "measured_seconds": [
+            0.621716,
+            0.666409,
+            0.62159,
+            0.624952,
+            0.631021
+          ]
+        },
+        "NATIVE": {
+          "median_seconds": 0.620714,
+          "min_seconds": 0.618008,
+          "max_seconds": 0.628209,
+          "measured_seconds": [
+            0.618113,
+            0.628209,
+            0.620959,
+            0.618008,
+            0.620714
+          ]
+        },
+        "FALLBACK": {
+          "median_seconds": 0.629874,
+          "min_seconds": 0.621308,
+          "max_seconds": 0.632816,
+          "measured_seconds": [
+            0.632816,
+            0.621308,
+            0.632165,
+            0.629874,
+            0.628684
+          ]
+        }
+      },
+      "time_reduction_vs_previous": 0.006781320805437807,
+      "native_vs_stock_ratio": 1.1024919628425782,
+      "max_outside_cpu_cores": 0.0,
+      "host_observations": 31
     },
     {
-      "case": "identity",
-      "engine": "NATIVE",
-      "trial": 5,
-      "warmup": false,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634672135,
-      "seconds": 0.679348
+      "flink": "2.2.1",
+      "cardinality": 16384,
+      "case": "pipeline",
+      "selected_run": "bench-22-card16384-pipeline-attempt1",
+      "routes": {
+        "FLINK": {
+          "median_seconds": 0.890517,
+          "min_seconds": 0.818857,
+          "max_seconds": 0.910215,
+          "measured_seconds": [
+            0.899447,
+            0.890517,
+            0.910215,
+            0.818857,
+            0.862359
+          ]
+        },
+        "PREVIOUS": {
+          "median_seconds": 1.14879,
+          "min_seconds": 1.072798,
+          "max_seconds": 1.172199,
+          "measured_seconds": [
+            1.172199,
+            1.152513,
+            1.14879,
+            1.079848,
+            1.072798
+          ]
+        },
+        "NATIVE": {
+          "median_seconds": 1.125059,
+          "min_seconds": 1.072099,
+          "max_seconds": 1.165504,
+          "measured_seconds": [
+            1.165504,
+            1.126871,
+            1.125059,
+            1.090996,
+            1.072099
+          ]
+        },
+        "FALLBACK": {
+          "median_seconds": 0.893769,
+          "min_seconds": 0.82922,
+          "max_seconds": 0.965764,
+          "measured_seconds": [
+            0.893769,
+            0.965764,
+            0.82922,
+            0.831647,
+            0.918323
+          ]
+        }
+      },
+      "time_reduction_vs_previous": 0.020657387337981614,
+      "native_vs_stock_ratio": 1.2633773414769174,
+      "max_outside_cpu_cores": 0.0,
+      "host_observations": 40
     },
     {
-      "case": "identity",
-      "engine": "FALLBACK",
-      "trial": 5,
-      "warmup": false,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634672877,
-      "seconds": 0.660523
-    },
-    {
-      "case": "identity",
-      "engine": "FLINK",
-      "trial": 5,
-      "warmup": false,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634673605,
-      "seconds": 0.682761
-    },
-    {
-      "case": "identity",
-      "engine": "NATIVE",
-      "trial": 6,
-      "warmup": false,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634674353,
-      "seconds": 0.738521
-    },
-    {
-      "case": "identity",
-      "engine": "FALLBACK",
-      "trial": 6,
-      "warmup": false,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634675165,
-      "seconds": 0.674845
-    },
-    {
-      "case": "identity",
-      "engine": "FLINK",
-      "trial": 6,
-      "warmup": false,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634675911,
-      "seconds": 0.686723
-    },
-    {
-      "case": "identity",
-      "engine": "PREVIOUS",
-      "trial": 6,
-      "warmup": false,
-      "rows": 2000000,
-      "precision": 9,
-      "start_ms": 1792634676671,
-      "seconds": 1.033259
+      "flink": "2.2.1",
+      "cardinality": 16384,
+      "case": "text",
+      "selected_run": "bench-22-card16384-text-attempt1",
+      "routes": {
+        "FLINK": {
+          "median_seconds": 0.912428,
+          "min_seconds": 0.90336,
+          "max_seconds": 0.93358,
+          "measured_seconds": [
+            0.921245,
+            0.912428,
+            0.93358,
+            0.90336,
+            0.908543
+          ]
+        },
+        "PREVIOUS": {
+          "median_seconds": 0.944967,
+          "min_seconds": 0.931544,
+          "max_seconds": 1.163052,
+          "measured_seconds": [
+            1.017114,
+            1.163052,
+            0.931544,
+            0.944967,
+            0.938802
+          ]
+        },
+        "NATIVE": {
+          "median_seconds": 0.829954,
+          "min_seconds": 0.824161,
+          "max_seconds": 0.941062,
+          "measured_seconds": [
+            0.828244,
+            0.941062,
+            0.886037,
+            0.824161,
+            0.829954
+          ]
+        },
+        "FALLBACK": {
+          "median_seconds": 0.907935,
+          "min_seconds": 0.897796,
+          "max_seconds": 0.91429,
+          "measured_seconds": [
+            0.907935,
+            0.897796,
+            0.909948,
+            0.91429,
+            0.905391
+          ]
+        }
+      },
+      "time_reduction_vs_previous": 0.1217111285367638,
+      "native_vs_stock_ratio": 0.9096104021358397,
+      "max_outside_cpu_cores": 0.0,
+      "host_observations": 36
     }
   ],
-  "medians": {
-    "identity": {
-      "FLINK": 0.638126,
-      "PREVIOUS": 0.89767,
-      "NATIVE": 0.679348,
-      "FALLBACK": 0.647552
+  "all_attempts": [
+    {
+      "label": "bench-22-card8-attempt1",
+      "line": "22",
+      "cardinality": 8,
+      "started": 1792634628.285711,
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=TemporalUdfBenchmark",
+        "-Dtemporal.rows=2000000",
+        "-Dtemporal.cases=perimeter,identity,text,epoch,pipeline",
+        "-Dtemporal.warmup=2",
+        "-Dtemporal.runs=5",
+        "-Dtemporal.cardinality=8",
+        "-Dsf.extraJvmArgs=-Xmx2g"
+      ],
+      "status": "finished",
+      "exit_code": 0,
+      "finished": 1792634764.2693453,
+      "contaminated": true,
+      "route_evidence": [
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000"
+      ],
+      "medians": {
+        "perimeter": {
+          "FLINK": 0.582064,
+          "PREVIOUS": 0.651605,
+          "NATIVE": 0.638886,
+          "FALLBACK": 0.651261
+        },
+        "identity": {
+          "FLINK": 0.638126,
+          "PREVIOUS": 0.89767,
+          "NATIVE": 0.679348,
+          "FALLBACK": 0.647552
+        },
+        "text": {
+          "FLINK": 1.036776,
+          "PREVIOUS": 1.113519,
+          "NATIVE": 0.955628,
+          "FALLBACK": 1.054334
+        },
+        "epoch": {
+          "FLINK": 0.61054,
+          "PREVIOUS": 0.74756,
+          "NATIVE": 0.622014,
+          "FALLBACK": 0.617411
+        },
+        "pipeline": {
+          "FLINK": 0.962275,
+          "PREVIOUS": 1.1448,
+          "NATIVE": 1.231248,
+          "FALLBACK": 1.000862
+        }
+      },
+      "valid_cases": [
+        "identity"
+      ]
     },
-    "perimeter": {
-      "FLINK": 0.582064,
-      "PREVIOUS": 0.651605,
-      "NATIVE": 0.638886,
-      "FALLBACK": 0.651261
+    {
+      "label": "bench-22-card8-attempt2",
+      "line": "22",
+      "cardinality": 8,
+      "started": 1792634959.5752974,
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=TemporalUdfBenchmark",
+        "-Dtemporal.rows=2000000",
+        "-Dtemporal.cases=perimeter,identity,text,epoch,pipeline",
+        "-Dtemporal.warmup=2",
+        "-Dtemporal.runs=5",
+        "-Dtemporal.cardinality=8",
+        "-Dsf.extraJvmArgs=-Xmx2g"
+      ],
+      "status": "finished",
+      "exit_code": 0,
+      "finished": 1792635095.821338,
+      "contaminated": true,
+      "route_evidence": [
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000"
+      ],
+      "medians": {
+        "perimeter": {
+          "FLINK": 0.65328,
+          "PREVIOUS": 0.738468,
+          "NATIVE": 0.720944,
+          "FALLBACK": 0.718205
+        },
+        "identity": {
+          "FLINK": 0.665361,
+          "PREVIOUS": 0.966413,
+          "NATIVE": 0.706222,
+          "FALLBACK": 0.663958
+        },
+        "text": {
+          "FLINK": 1.064593,
+          "PREVIOUS": 1.284002,
+          "NATIVE": 0.955255,
+          "FALLBACK": 1.090445
+        },
+        "epoch": {
+          "FLINK": 0.601612,
+          "PREVIOUS": 0.699091,
+          "NATIVE": 0.582231,
+          "FALLBACK": 0.589388
+        },
+        "pipeline": {
+          "FLINK": 0.849922,
+          "PREVIOUS": 1.025658,
+          "NATIVE": 1.016567,
+          "FALLBACK": 0.855553
+        }
+      },
+      "valid_cases": []
+    },
+    {
+      "label": "bench-22-card8-perimeter-attempt1",
+      "line": "22",
+      "cardinality": 8,
+      "case": "perimeter",
+      "started": 1792635721.0956848,
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=TemporalUdfBenchmark",
+        "-Dtemporal.rows=2000000",
+        "-Dtemporal.cases=perimeter",
+        "-Dtemporal.warmup=2",
+        "-Dtemporal.runs=5",
+        "-Dtemporal.cardinality=8",
+        "-Dsf.extraJvmArgs=-Xmx2g"
+      ],
+      "status": "finished",
+      "exit_code": 0,
+      "finished": 1792635750.8474147,
+      "contaminated": false,
+      "route_evidence": [],
+      "medians": {
+        "perimeter": {
+          "FLINK": 0.569727,
+          "PREVIOUS": 0.619197,
+          "NATIVE": 0.612667,
+          "FALLBACK": 0.621666
+        }
+      },
+      "valid_cases": [
+        "perimeter"
+      ]
+    },
+    {
+      "label": "bench-22-card8-text-attempt1",
+      "line": "22",
+      "cardinality": 8,
+      "case": "text",
+      "started": 1792635760.8667586,
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=TemporalUdfBenchmark",
+        "-Dtemporal.rows=2000000",
+        "-Dtemporal.cases=text",
+        "-Dtemporal.warmup=2",
+        "-Dtemporal.runs=5",
+        "-Dtemporal.cardinality=8",
+        "-Dsf.extraJvmArgs=-Xmx2g"
+      ],
+      "status": "finished",
+      "exit_code": 0,
+      "finished": 1792635801.2778723,
+      "contaminated": true,
+      "route_evidence": [
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000"
+      ],
+      "medians": {
+        "text": {
+          "FLINK": 1.037883,
+          "PREVIOUS": 1.082572,
+          "NATIVE": 0.945776,
+          "FALLBACK": 1.036265
+        }
+      },
+      "valid_cases": []
+    },
+    {
+      "label": "bench-22-card8-text-attempt2",
+      "line": "22",
+      "cardinality": 8,
+      "case": "text",
+      "started": 1792635851.3715074,
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=TemporalUdfBenchmark",
+        "-Dtemporal.rows=2000000",
+        "-Dtemporal.cases=text",
+        "-Dtemporal.warmup=2",
+        "-Dtemporal.runs=5",
+        "-Dtemporal.cardinality=8",
+        "-Dsf.extraJvmArgs=-Xmx2g"
+      ],
+      "status": "finished",
+      "exit_code": 0,
+      "finished": 1792635890.7893877,
+      "contaminated": true,
+      "route_evidence": [
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000"
+      ],
+      "medians": {
+        "text": {
+          "FLINK": 1.063983,
+          "PREVIOUS": 1.122908,
+          "NATIVE": 0.945299,
+          "FALLBACK": 1.03251
+        }
+      },
+      "valid_cases": []
+    },
+    {
+      "label": "bench-22-card8-text-attempt3",
+      "line": "22",
+      "cardinality": 8,
+      "case": "text",
+      "started": 1792636152.7338722,
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=TemporalUdfBenchmark",
+        "-Dtemporal.rows=2000000",
+        "-Dtemporal.cases=text",
+        "-Dtemporal.warmup=2",
+        "-Dtemporal.runs=5",
+        "-Dtemporal.cardinality=8",
+        "-Dsf.extraJvmArgs=-Xmx2g"
+      ],
+      "status": "finished",
+      "noise_policy": "No compilers or changing external process set; aggregate outside Java/Doris CPU below 0.25 of one logical CPU per sample. Idle services/test JVMs are recorded, not treated as active competition.",
+      "exit_code": 0,
+      "finished": 1792636190.346085,
+      "contaminated": true,
+      "route_evidence": [
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000"
+      ],
+      "medians": {
+        "text": {
+          "FLINK": 0.998662,
+          "PREVIOUS": 0.987097,
+          "NATIVE": 0.870925,
+          "FALLBACK": 0.995403
+        }
+      },
+      "valid_cases": []
+    },
+    {
+      "label": "bench-22-card8-mixed-attempt1",
+      "line": "22",
+      "cardinality": 8,
+      "case": "mixed",
+      "started": 1792637085.4373965,
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=TemporalUdfBenchmark",
+        "-Dtemporal.rows=2000000",
+        "-Dtemporal.cases=mixed",
+        "-Dtemporal.warmup=2",
+        "-Dtemporal.runs=5",
+        "-Dtemporal.cardinality=8",
+        "-Dsf.extraJvmArgs=-Xmx2g"
+      ],
+      "status": "finished",
+      "candidate_stage": "mixed",
+      "noise_policy": "Shared 16-CPU host. No external rustc/cc1plus/cargo/javac processes or changing outside process set; aggregate outside Java/Doris CPU below two logical CPUs per sample. Outside services/test JVMs and CPU samples are retained; small timing differences are inconclusive.",
+      "exit_code": 0,
+      "finished": 1792637123.500121,
+      "contaminated": false,
+      "route_evidence": [
+        "[temporal-direct-calc] case=mixed rows=2000000",
+        "[temporal-direct-calc] case=mixed rows=2000000",
+        "[temporal-direct-calc] case=mixed rows=2000000",
+        "[temporal-direct-calc] case=mixed rows=2000000",
+        "[temporal-direct-calc] case=mixed rows=2000000",
+        "[temporal-direct-calc] case=mixed rows=2000000",
+        "[temporal-direct-calc] case=mixed rows=2000000"
+      ],
+      "medians": {
+        "mixed": {
+          "FLINK": 0.784143,
+          "PREVIOUS": 1.061744,
+          "NATIVE": 0.835392,
+          "FALLBACK": 0.792814
+        }
+      },
+      "valid_cases": [
+        "mixed"
+      ]
+    },
+    {
+      "label": "bench-22-card8-identity-attempt1",
+      "line": "22",
+      "cardinality": 8,
+      "case": "identity",
+      "started": 1792637133.5248642,
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=TemporalUdfBenchmark",
+        "-Dtemporal.rows=2000000",
+        "-Dtemporal.cases=identity",
+        "-Dtemporal.warmup=2",
+        "-Dtemporal.runs=5",
+        "-Dtemporal.cardinality=8",
+        "-Dsf.extraJvmArgs=-Xmx2g"
+      ],
+      "status": "finished",
+      "candidate_stage": "mixed",
+      "noise_policy": "Shared 16-CPU host. No external rustc/cc1plus/cargo/javac processes or changing outside process set; aggregate outside Java/Doris CPU below two logical CPUs per sample. Outside services/test JVMs and CPU samples are retained; small timing differences are inconclusive.",
+      "exit_code": 0,
+      "finished": 1792637162.827268,
+      "contaminated": false,
+      "route_evidence": [
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000"
+      ],
+      "medians": {
+        "identity": {
+          "FLINK": 0.626486,
+          "PREVIOUS": 0.876332,
+          "NATIVE": 0.65584,
+          "FALLBACK": 0.621821
+        }
+      },
+      "valid_cases": [
+        "identity"
+      ]
+    },
+    {
+      "label": "bench-22-card8-text-attempt4",
+      "line": "22",
+      "cardinality": 8,
+      "case": "text",
+      "started": 1792637172.85451,
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=TemporalUdfBenchmark",
+        "-Dtemporal.rows=2000000",
+        "-Dtemporal.cases=text",
+        "-Dtemporal.warmup=2",
+        "-Dtemporal.runs=5",
+        "-Dtemporal.cardinality=8",
+        "-Dsf.extraJvmArgs=-Xmx2g"
+      ],
+      "status": "finished",
+      "candidate_stage": "mixed",
+      "noise_policy": "Shared 16-CPU host. No external rustc/cc1plus/cargo/javac processes or changing outside process set; aggregate outside Java/Doris CPU below two logical CPUs per sample. Outside services/test JVMs and CPU samples are retained; small timing differences are inconclusive.",
+      "exit_code": 0,
+      "finished": 1792637209.3378406,
+      "contaminated": false,
+      "route_evidence": [
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000"
+      ],
+      "medians": {
+        "text": {
+          "FLINK": 0.984974,
+          "PREVIOUS": 0.999364,
+          "NATIVE": 0.870664,
+          "FALLBACK": 0.987015
+        }
+      },
+      "valid_cases": [
+        "text"
+      ]
+    },
+    {
+      "label": "bench-22-card8-epoch-attempt1",
+      "line": "22",
+      "cardinality": 8,
+      "case": "epoch",
+      "started": 1792637219.3648863,
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=TemporalUdfBenchmark",
+        "-Dtemporal.rows=2000000",
+        "-Dtemporal.cases=epoch",
+        "-Dtemporal.warmup=2",
+        "-Dtemporal.runs=5",
+        "-Dtemporal.cardinality=8",
+        "-Dsf.extraJvmArgs=-Xmx2g"
+      ],
+      "status": "finished",
+      "candidate_stage": "mixed",
+      "noise_policy": "Shared 16-CPU host. No external rustc/cc1plus/cargo/javac processes or changing outside process set; aggregate outside Java/Doris CPU below two logical CPUs per sample. Outside services/test JVMs and CPU samples are retained; small timing differences are inconclusive.",
+      "exit_code": 0,
+      "finished": 1792637243.4592686,
+      "contaminated": false,
+      "route_evidence": [
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000"
+      ],
+      "medians": {
+        "epoch": {
+          "FLINK": 0.48218,
+          "PREVIOUS": 0.610077,
+          "NATIVE": 0.509908,
+          "FALLBACK": 0.479378
+        }
+      },
+      "valid_cases": [
+        "epoch"
+      ]
+    },
+    {
+      "label": "bench-22-card8-pipeline-attempt1",
+      "line": "22",
+      "cardinality": 8,
+      "case": "pipeline",
+      "started": 1792637253.490506,
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=TemporalUdfBenchmark",
+        "-Dtemporal.rows=2000000",
+        "-Dtemporal.cases=pipeline",
+        "-Dtemporal.warmup=2",
+        "-Dtemporal.runs=5",
+        "-Dtemporal.cardinality=8",
+        "-Dsf.extraJvmArgs=-Xmx2g"
+      ],
+      "status": "finished",
+      "candidate_stage": "mixed",
+      "noise_policy": "Shared 16-CPU host. No external rustc/cc1plus/cargo/javac processes or changing outside process set; aggregate outside Java/Doris CPU below two logical CPUs per sample. Outside services/test JVMs and CPU samples are retained; small timing differences are inconclusive.",
+      "exit_code": 0,
+      "finished": 1792637291.1703584,
+      "contaminated": true,
+      "route_evidence": [
+        "[temporal-direct-calc] case=pipeline rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000"
+      ],
+      "medians": {
+        "pipeline": {
+          "FLINK": 0.87184,
+          "PREVIOUS": 1.083868,
+          "NATIVE": 1.137682,
+          "FALLBACK": 0.856792
+        }
+      },
+      "valid_cases": []
+    },
+    {
+      "label": "bench-22-card8-pipeline-attempt2",
+      "line": "22",
+      "cardinality": 8,
+      "case": "pipeline",
+      "started": 1792637445.6722996,
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=TemporalUdfBenchmark",
+        "-Dtemporal.rows=2000000",
+        "-Dtemporal.cases=pipeline",
+        "-Dtemporal.warmup=2",
+        "-Dtemporal.runs=5",
+        "-Dtemporal.cardinality=8",
+        "-Dsf.extraJvmArgs=-Xmx2g"
+      ],
+      "status": "finished",
+      "candidate_stage": "mixed",
+      "noise_policy": "Shared 16-CPU host. No external rustc/cc1plus/cargo/javac processes or changing outside process set; aggregate outside Java/Doris CPU below two logical CPUs per sample. Outside services/test JVMs and CPU samples are retained; small timing differences are inconclusive.",
+      "exit_code": 0,
+      "finished": 1792637483.3420327,
+      "contaminated": false,
+      "route_evidence": [
+        "[temporal-direct-calc] case=pipeline rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000"
+      ],
+      "medians": {
+        "pipeline": {
+          "FLINK": 0.821139,
+          "PREVIOUS": 0.931297,
+          "NATIVE": 0.931894,
+          "FALLBACK": 0.835589
+        }
+      },
+      "valid_cases": [
+        "pipeline"
+      ]
+    },
+    {
+      "label": "bench-22-card8-perimeter-attempt2",
+      "line": "22",
+      "cardinality": 8,
+      "case": "perimeter",
+      "started": 1792637493.371981,
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=TemporalUdfBenchmark",
+        "-Dtemporal.rows=2000000",
+        "-Dtemporal.cases=perimeter",
+        "-Dtemporal.warmup=2",
+        "-Dtemporal.runs=5",
+        "-Dtemporal.cardinality=8",
+        "-Dsf.extraJvmArgs=-Xmx2g"
+      ],
+      "status": "finished",
+      "candidate_stage": "mixed",
+      "noise_policy": "Shared 16-CPU host. No external rustc/cc1plus/cargo/javac processes or changing outside process set; aggregate outside Java/Doris CPU below two logical CPUs per sample. Outside services/test JVMs and CPU samples are retained; small timing differences are inconclusive.",
+      "exit_code": 0,
+      "finished": 1792637520.7529697,
+      "contaminated": true,
+      "route_evidence": [],
+      "medians": {
+        "perimeter": {
+          "FLINK": 0.582824,
+          "PREVIOUS": 0.644409,
+          "NATIVE": 0.642934,
+          "FALLBACK": 0.646926
+        }
+      },
+      "valid_cases": []
+    },
+    {
+      "label": "bench-22-card8-perimeter-attempt3",
+      "line": "22",
+      "cardinality": 8,
+      "case": "perimeter",
+      "started": 1792637546.8133307,
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=TemporalUdfBenchmark",
+        "-Dtemporal.rows=2000000",
+        "-Dtemporal.cases=perimeter",
+        "-Dtemporal.warmup=2",
+        "-Dtemporal.runs=5",
+        "-Dtemporal.cardinality=8",
+        "-Dsf.extraJvmArgs=-Xmx2g"
+      ],
+      "status": "finished",
+      "candidate_stage": "mixed",
+      "noise_policy": "Shared 16-CPU host. No external rustc/cc1plus/cargo/javac processes or changing outside process set; aggregate outside Java/Doris CPU below two logical CPUs per sample. Outside services/test JVMs and CPU samples are retained; small timing differences are inconclusive.",
+      "exit_code": 0,
+      "finished": 1792637572.406463,
+      "contaminated": false,
+      "route_evidence": [],
+      "medians": {
+        "perimeter": {
+          "FLINK": 0.548423,
+          "PREVIOUS": 0.609138,
+          "NATIVE": 0.603545,
+          "FALLBACK": 0.608395
+        }
+      },
+      "valid_cases": [
+        "perimeter"
+      ]
+    },
+    {
+      "label": "bench-22-card16384-mixed-attempt1",
+      "line": "22",
+      "cardinality": 16384,
+      "case": "mixed",
+      "started": 1792637582.4360862,
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=TemporalUdfBenchmark",
+        "-Dtemporal.rows=2000000",
+        "-Dtemporal.cases=mixed",
+        "-Dtemporal.warmup=2",
+        "-Dtemporal.runs=5",
+        "-Dtemporal.cardinality=16384",
+        "-Dsf.extraJvmArgs=-Xmx2g"
+      ],
+      "status": "finished",
+      "candidate_stage": "mixed",
+      "noise_policy": "Shared 16-CPU host. No external rustc/cc1plus/cargo/javac processes or changing outside process set; aggregate outside Java/Doris CPU below two logical CPUs per sample. Outside services/test JVMs and CPU samples are retained; small timing differences are inconclusive.",
+      "exit_code": 0,
+      "finished": 1792637616.327953,
+      "contaminated": false,
+      "route_evidence": [
+        "[temporal-direct-calc] case=mixed rows=2000000",
+        "[temporal-direct-calc] case=mixed rows=2000000",
+        "[temporal-direct-calc] case=mixed rows=2000000",
+        "[temporal-direct-calc] case=mixed rows=2000000",
+        "[temporal-direct-calc] case=mixed rows=2000000",
+        "[temporal-direct-calc] case=mixed rows=2000000",
+        "[temporal-direct-calc] case=mixed rows=2000000"
+      ],
+      "medians": {
+        "mixed": {
+          "FLINK": 0.7473,
+          "PREVIOUS": 1.116912,
+          "NATIVE": 0.885804,
+          "FALLBACK": 0.726614
+        }
+      },
+      "valid_cases": [
+        "mixed"
+      ]
+    },
+    {
+      "label": "bench-22-card16384-identity-attempt1",
+      "line": "22",
+      "cardinality": 16384,
+      "case": "identity",
+      "started": 1792637626.35565,
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=TemporalUdfBenchmark",
+        "-Dtemporal.rows=2000000",
+        "-Dtemporal.cases=identity",
+        "-Dtemporal.warmup=2",
+        "-Dtemporal.runs=5",
+        "-Dtemporal.cardinality=16384",
+        "-Dsf.extraJvmArgs=-Xmx2g"
+      ],
+      "status": "finished",
+      "candidate_stage": "mixed",
+      "noise_policy": "Shared 16-CPU host. No external rustc/cc1plus/cargo/javac processes or changing outside process set; aggregate outside Java/Doris CPU below two logical CPUs per sample. Outside services/test JVMs and CPU samples are retained; small timing differences are inconclusive.",
+      "exit_code": 0,
+      "finished": 1792637658.9698603,
+      "contaminated": true,
+      "route_evidence": [
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000"
+      ],
+      "medians": {
+        "identity": {
+          "FLINK": 0.673649,
+          "PREVIOUS": 1.078174,
+          "NATIVE": 0.836201,
+          "FALLBACK": 0.730469
+        }
+      },
+      "valid_cases": []
+    },
+    {
+      "label": "bench-22-card16384-identity-attempt2",
+      "line": "22",
+      "cardinality": 16384,
+      "case": "identity",
+      "started": 1792637780.7390463,
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=TemporalUdfBenchmark",
+        "-Dtemporal.rows=2000000",
+        "-Dtemporal.cases=identity",
+        "-Dtemporal.warmup=2",
+        "-Dtemporal.runs=5",
+        "-Dtemporal.cardinality=16384",
+        "-Dsf.extraJvmArgs=-Xmx2g"
+      ],
+      "status": "finished",
+      "candidate_stage": "mixed",
+      "noise_policy": "Shared 16-CPU host. No external rustc/cc1plus/cargo/javac processes or changing outside process set; aggregate outside Java/Doris CPU below two logical CPUs per sample. Outside services/test JVMs and CPU samples are retained; small timing differences are inconclusive.",
+      "exit_code": 0,
+      "finished": 1792637814.3317842,
+      "contaminated": false,
+      "route_evidence": [
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000"
+      ],
+      "medians": {
+        "identity": {
+          "FLINK": 0.601491,
+          "PREVIOUS": 0.889786,
+          "NATIVE": 0.728874,
+          "FALLBACK": 0.638969
+        }
+      },
+      "valid_cases": [
+        "identity"
+      ]
+    },
+    {
+      "label": "bench-22-card16384-text-attempt1",
+      "line": "22",
+      "cardinality": 16384,
+      "case": "text",
+      "started": 1792637824.3633764,
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=TemporalUdfBenchmark",
+        "-Dtemporal.rows=2000000",
+        "-Dtemporal.cases=text",
+        "-Dtemporal.warmup=2",
+        "-Dtemporal.runs=5",
+        "-Dtemporal.cardinality=16384",
+        "-Dsf.extraJvmArgs=-Xmx2g"
+      ],
+      "status": "finished",
+      "candidate_stage": "mixed",
+      "noise_policy": "Shared 16-CPU host. No external rustc/cc1plus/cargo/javac processes or changing outside process set; aggregate outside Java/Doris CPU below two logical CPUs per sample. Outside services/test JVMs and CPU samples are retained; small timing differences are inconclusive.",
+      "exit_code": 0,
+      "finished": 1792637860.0601943,
+      "contaminated": false,
+      "route_evidence": [
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000"
+      ],
+      "medians": {
+        "text": {
+          "FLINK": 0.912428,
+          "PREVIOUS": 0.944967,
+          "NATIVE": 0.829954,
+          "FALLBACK": 0.907935
+        }
+      },
+      "valid_cases": [
+        "text"
+      ]
+    },
+    {
+      "label": "bench-22-card16384-epoch-attempt1",
+      "line": "22",
+      "cardinality": 16384,
+      "case": "epoch",
+      "started": 1792637870.0901089,
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=TemporalUdfBenchmark",
+        "-Dtemporal.rows=2000000",
+        "-Dtemporal.cases=epoch",
+        "-Dtemporal.warmup=2",
+        "-Dtemporal.runs=5",
+        "-Dtemporal.cardinality=16384",
+        "-Dsf.extraJvmArgs=-Xmx2g"
+      ],
+      "status": "finished",
+      "candidate_stage": "mixed",
+      "noise_policy": "Shared 16-CPU host. No external rustc/cc1plus/cargo/javac processes or changing outside process set; aggregate outside Java/Doris CPU below two logical CPUs per sample. Outside services/test JVMs and CPU samples are retained; small timing differences are inconclusive.",
+      "exit_code": 0,
+      "finished": 1792637898.8634527,
+      "contaminated": true,
+      "route_evidence": [
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000"
+      ],
+      "medians": {
+        "epoch": {
+          "FLINK": 0.553922,
+          "PREVIOUS": 0.764331,
+          "NATIVE": 0.637527,
+          "FALLBACK": 0.539024
+        }
+      },
+      "valid_cases": []
+    },
+    {
+      "label": "bench-22-card16384-epoch-attempt2",
+      "line": "22",
+      "cardinality": 16384,
+      "case": "epoch",
+      "started": 1792637959.143856,
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=TemporalUdfBenchmark",
+        "-Dtemporal.rows=2000000",
+        "-Dtemporal.cases=epoch",
+        "-Dtemporal.warmup=2",
+        "-Dtemporal.runs=5",
+        "-Dtemporal.cardinality=16384",
+        "-Dsf.extraJvmArgs=-Xmx2g"
+      ],
+      "status": "finished",
+      "candidate_stage": "mixed",
+      "noise_policy": "Shared 16-CPU host. No external rustc/cc1plus/cargo/javac processes or changing outside process set; aggregate outside Java/Doris CPU below two logical CPUs per sample. Outside services/test JVMs and CPU samples are retained; small timing differences are inconclusive.",
+      "exit_code": 0,
+      "finished": 1792638001.0971596,
+      "contaminated": true,
+      "route_evidence": [
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000"
+      ],
+      "medians": {
+        "epoch": {
+          "FLINK": 0.552858,
+          "PREVIOUS": 0.687769,
+          "NATIVE": 0.605843,
+          "FALLBACK": 0.521313
+        }
+      },
+      "valid_cases": []
+    },
+    {
+      "label": "bench-22-card16384-epoch-attempt3",
+      "line": "22",
+      "cardinality": 16384,
+      "case": "epoch",
+      "started": 1792638040.5559602,
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=TemporalUdfBenchmark",
+        "-Dtemporal.rows=2000000",
+        "-Dtemporal.cases=epoch",
+        "-Dtemporal.warmup=2",
+        "-Dtemporal.runs=5",
+        "-Dtemporal.cardinality=16384",
+        "-Dsf.extraJvmArgs=-Xmx2g"
+      ],
+      "status": "finished",
+      "candidate_stage": "mixed",
+      "noise_policy": "Shared 16-CPU host. No external rustc/cc1plus/cargo/javac processes or changing outside process set; aggregate outside Java/Doris CPU below two logical CPUs per sample. Outside services/test JVMs and CPU samples are retained; small timing differences are inconclusive.",
+      "exit_code": 0,
+      "finished": 1792638125.580948,
+      "contaminated": true,
+      "route_evidence": [
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000"
+      ],
+      "medians": {
+        "epoch": {
+          "FLINK": 0.481829,
+          "PREVIOUS": 0.712034,
+          "NATIVE": 0.522365,
+          "FALLBACK": 0.524786
+        }
+      },
+      "valid_cases": []
+    },
+    {
+      "label": "bench-22-card16384-epoch-attempt4",
+      "line": "22",
+      "cardinality": 16384,
+      "case": "epoch",
+      "started": 1792638135.630258,
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=TemporalUdfBenchmark",
+        "-Dtemporal.rows=2000000",
+        "-Dtemporal.cases=epoch",
+        "-Dtemporal.warmup=2",
+        "-Dtemporal.runs=5",
+        "-Dtemporal.cardinality=16384",
+        "-Dsf.extraJvmArgs=-Xmx2g"
+      ],
+      "status": "finished",
+      "candidate_stage": "mixed",
+      "noise_policy": "Shared 16-CPU host. No external rustc/cc1plus/cargo/javac processes or changing outside process set; aggregate outside Java/Doris CPU below two logical CPUs per sample. Outside services/test JVMs and CPU samples are retained; small timing differences are inconclusive.",
+      "exit_code": 0,
+      "finished": 1792638164.7149205,
+      "contaminated": false,
+      "route_evidence": [
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000"
+      ],
+      "medians": {
+        "epoch": {
+          "FLINK": 0.489568,
+          "PREVIOUS": 0.633479,
+          "NATIVE": 0.519975,
+          "FALLBACK": 0.488483
+        }
+      },
+      "valid_cases": [
+        "epoch"
+      ]
+    },
+    {
+      "label": "bench-22-card16384-pipeline-attempt1",
+      "line": "22",
+      "cardinality": 16384,
+      "case": "pipeline",
+      "started": 1792638174.746926,
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=TemporalUdfBenchmark",
+        "-Dtemporal.rows=2000000",
+        "-Dtemporal.cases=pipeline",
+        "-Dtemporal.warmup=2",
+        "-Dtemporal.runs=5",
+        "-Dtemporal.cardinality=16384",
+        "-Dsf.extraJvmArgs=-Xmx2g"
+      ],
+      "status": "finished",
+      "candidate_stage": "mixed",
+      "noise_policy": "Shared 16-CPU host. No external rustc/cc1plus/cargo/javac processes or changing outside process set; aggregate outside Java/Doris CPU below two logical CPUs per sample. Outside services/test JVMs and CPU samples are retained; small timing differences are inconclusive.",
+      "exit_code": 0,
+      "finished": 1792638214.7249608,
+      "contaminated": false,
+      "route_evidence": [
+        "[temporal-direct-calc] case=pipeline rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000"
+      ],
+      "medians": {
+        "pipeline": {
+          "FLINK": 0.890517,
+          "PREVIOUS": 1.14879,
+          "NATIVE": 1.125059,
+          "FALLBACK": 0.893769
+        }
+      },
+      "valid_cases": [
+        "pipeline"
+      ]
+    },
+    {
+      "label": "bench-22-card16384-perimeter-attempt1",
+      "line": "22",
+      "cardinality": 16384,
+      "case": "perimeter",
+      "started": 1792638480.4254327,
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=TemporalUdfBenchmark",
+        "-Dtemporal.rows=2000000",
+        "-Dtemporal.cases=perimeter",
+        "-Dtemporal.warmup=2",
+        "-Dtemporal.runs=5",
+        "-Dtemporal.cardinality=16384",
+        "-Dsf.extraJvmArgs=-Xmx2g"
+      ],
+      "status": "finished",
+      "candidate_stage": "mixed",
+      "noise_policy": "Shared 16-CPU host. No external rustc/cc1plus/cargo/javac processes or changing outside process set; aggregate outside Java/Doris CPU below two logical CPUs per sample. Outside services/test JVMs and CPU samples are retained; small timing differences are inconclusive.",
+      "exit_code": 0,
+      "finished": 1792638511.2135575,
+      "contaminated": false,
+      "route_evidence": [],
+      "medians": {
+        "perimeter": {
+          "FLINK": 0.56301,
+          "PREVIOUS": 0.624952,
+          "NATIVE": 0.620714,
+          "FALLBACK": 0.629874
+        }
+      },
+      "valid_cases": [
+        "perimeter"
+      ]
+    },
+    {
+      "label": "bench-118-card8-mixed-attempt1",
+      "line": "118",
+      "cardinality": 8,
+      "case": "mixed",
+      "started": 1792638521.2525423,
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench,flink-1.18",
+        "surefire:test@default-test",
+        "-Dtest=TemporalUdfBenchmark",
+        "-Dtemporal.rows=2000000",
+        "-Dtemporal.cases=mixed",
+        "-Dtemporal.warmup=2",
+        "-Dtemporal.runs=5",
+        "-Dtemporal.cardinality=8",
+        "-Dsf.extraJvmArgs=-Xmx2g"
+      ],
+      "status": "finished",
+      "candidate_stage": "mixed",
+      "noise_policy": "Shared 16-CPU host. No external rustc/cc1plus/cargo/javac processes or changing outside process set; aggregate outside Java/Doris CPU below two logical CPUs per sample. Outside services/test JVMs and CPU samples are retained; small timing differences are inconclusive.",
+      "exit_code": 0,
+      "finished": 1792638556.0357084,
+      "contaminated": true,
+      "route_evidence": [
+        "[temporal-direct-calc] case=mixed rows=2000000",
+        "[temporal-direct-calc] case=mixed rows=2000000",
+        "[temporal-direct-calc] case=mixed rows=2000000",
+        "[temporal-direct-calc] case=mixed rows=2000000",
+        "[temporal-direct-calc] case=mixed rows=2000000",
+        "[temporal-direct-calc] case=mixed rows=2000000",
+        "[temporal-direct-calc] case=mixed rows=2000000"
+      ],
+      "medians": {
+        "mixed": {
+          "FLINK": 0.678917,
+          "PREVIOUS": 0.974212,
+          "NATIVE": 0.73415,
+          "FALLBACK": 0.658075
+        }
+      },
+      "valid_cases": []
+    },
+    {
+      "label": "bench-118-card8-mixed-attempt2",
+      "line": "118",
+      "cardinality": 8,
+      "case": "mixed",
+      "started": 1792638576.0926833,
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench,flink-1.18",
+        "surefire:test@default-test",
+        "-Dtest=TemporalUdfBenchmark",
+        "-Dtemporal.rows=2000000",
+        "-Dtemporal.cases=mixed",
+        "-Dtemporal.warmup=2",
+        "-Dtemporal.runs=5",
+        "-Dtemporal.cardinality=8",
+        "-Dsf.extraJvmArgs=-Xmx2g"
+      ],
+      "status": "finished",
+      "candidate_stage": "mixed",
+      "noise_policy": "Shared 16-CPU host. No external rustc/cc1plus/cargo/javac processes or changing outside process set; aggregate outside Java/Doris CPU below two logical CPUs per sample. Outside services/test JVMs and CPU samples are retained; small timing differences are inconclusive.",
+      "exit_code": 0,
+      "finished": 1792638608.0262325,
+      "contaminated": false,
+      "route_evidence": [
+        "[temporal-direct-calc] case=mixed rows=2000000",
+        "[temporal-direct-calc] case=mixed rows=2000000",
+        "[temporal-direct-calc] case=mixed rows=2000000",
+        "[temporal-direct-calc] case=mixed rows=2000000",
+        "[temporal-direct-calc] case=mixed rows=2000000",
+        "[temporal-direct-calc] case=mixed rows=2000000",
+        "[temporal-direct-calc] case=mixed rows=2000000"
+      ],
+      "medians": {
+        "mixed": {
+          "FLINK": 0.706688,
+          "PREVIOUS": 1.001359,
+          "NATIVE": 0.768459,
+          "FALLBACK": 0.712445
+        }
+      },
+      "valid_cases": [
+        "mixed"
+      ]
+    },
+    {
+      "label": "bench-118-card8-identity-attempt1",
+      "line": "118",
+      "cardinality": 8,
+      "case": "identity",
+      "started": 1792638618.0576625,
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench,flink-1.18",
+        "surefire:test@default-test",
+        "-Dtest=TemporalUdfBenchmark",
+        "-Dtemporal.rows=2000000",
+        "-Dtemporal.cases=identity",
+        "-Dtemporal.warmup=2",
+        "-Dtemporal.runs=5",
+        "-Dtemporal.cardinality=8",
+        "-Dsf.extraJvmArgs=-Xmx2g"
+      ],
+      "status": "finished",
+      "candidate_stage": "mixed",
+      "noise_policy": "Shared 16-CPU host. No external rustc/cc1plus/cargo/javac processes or changing outside process set; aggregate outside Java/Doris CPU below two logical CPUs per sample. Outside services/test JVMs and CPU samples are retained; small timing differences are inconclusive.",
+      "exit_code": 0,
+      "finished": 1792638647.1942267,
+      "contaminated": true,
+      "route_evidence": [
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000"
+      ],
+      "medians": {
+        "identity": {
+          "FLINK": 0.585266,
+          "PREVIOUS": 0.942221,
+          "NATIVE": 0.639368,
+          "FALLBACK": 0.585265
+        }
+      },
+      "valid_cases": []
+    },
+    {
+      "label": "bench-118-card8-identity-attempt2",
+      "line": "118",
+      "cardinality": 8,
+      "case": "identity",
+      "started": 1792638737.3823042,
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench,flink-1.18",
+        "surefire:test@default-test",
+        "-Dtest=TemporalUdfBenchmark",
+        "-Dtemporal.rows=2000000",
+        "-Dtemporal.cases=identity",
+        "-Dtemporal.warmup=2",
+        "-Dtemporal.runs=5",
+        "-Dtemporal.cardinality=8",
+        "-Dsf.extraJvmArgs=-Xmx2g"
+      ],
+      "status": "finished",
+      "candidate_stage": "mixed",
+      "noise_policy": "Shared 16-CPU host. No external rustc/cc1plus/cargo/javac processes or changing outside process set; aggregate outside Java/Doris CPU below two logical CPUs per sample. Outside services/test JVMs and CPU samples are retained; small timing differences are inconclusive.",
+      "exit_code": 0,
+      "finished": 1792638767.9556808,
+      "contaminated": true,
+      "route_evidence": [
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000"
+      ],
+      "medians": {
+        "identity": {
+          "FLINK": 0.615006,
+          "PREVIOUS": 0.9076,
+          "NATIVE": 0.690868,
+          "FALLBACK": 0.61358
+        }
+      },
+      "valid_cases": []
+    },
+    {
+      "label": "bench-118-card8-identity-attempt3",
+      "line": "118",
+      "cardinality": 8,
+      "case": "identity",
+      "started": 1792638777.9880662,
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench,flink-1.18",
+        "surefire:test@default-test",
+        "-Dtest=TemporalUdfBenchmark",
+        "-Dtemporal.rows=2000000",
+        "-Dtemporal.cases=identity",
+        "-Dtemporal.warmup=2",
+        "-Dtemporal.runs=5",
+        "-Dtemporal.cardinality=8",
+        "-Dsf.extraJvmArgs=-Xmx2g"
+      ],
+      "status": "finished",
+      "candidate_stage": "mixed",
+      "noise_policy": "Shared 16-CPU host. No external rustc/cc1plus/cargo/javac processes or changing outside process set; aggregate outside Java/Doris CPU below two logical CPUs per sample. Outside services/test JVMs and CPU samples are retained; small timing differences are inconclusive.",
+      "exit_code": 0,
+      "finished": 1792638807.500479,
+      "contaminated": false,
+      "route_evidence": [
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000"
+      ],
+      "medians": {
+        "identity": {
+          "FLINK": 0.615707,
+          "PREVIOUS": 0.916241,
+          "NATIVE": 0.678095,
+          "FALLBACK": 0.608433
+        }
+      },
+      "valid_cases": [
+        "identity"
+      ]
+    },
+    {
+      "label": "bench-118-card8-text-attempt1",
+      "line": "118",
+      "cardinality": 8,
+      "case": "text",
+      "started": 1792638817.5308547,
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench,flink-1.18",
+        "surefire:test@default-test",
+        "-Dtest=TemporalUdfBenchmark",
+        "-Dtemporal.rows=2000000",
+        "-Dtemporal.cases=text",
+        "-Dtemporal.warmup=2",
+        "-Dtemporal.runs=5",
+        "-Dtemporal.cardinality=8",
+        "-Dsf.extraJvmArgs=-Xmx2g"
+      ],
+      "status": "finished",
+      "candidate_stage": "mixed",
+      "noise_policy": "Shared 16-CPU host. No external rustc/cc1plus/cargo/javac processes or changing outside process set; aggregate outside Java/Doris CPU below two logical CPUs per sample. Outside services/test JVMs and CPU samples are retained; small timing differences are inconclusive.",
+      "exit_code": 0,
+      "finished": 1792638854.6059468,
+      "contaminated": true,
+      "route_evidence": [
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000"
+      ],
+      "medians": {
+        "text": {
+          "FLINK": 0.999046,
+          "PREVIOUS": 1.017105,
+          "NATIVE": 0.878151,
+          "FALLBACK": 0.993409
+        }
+      },
+      "valid_cases": []
+    },
+    {
+      "label": "bench-118-card8-text-attempt2",
+      "line": "118",
+      "cardinality": 8,
+      "case": "text",
+      "started": 1792638864.636352,
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench,flink-1.18",
+        "surefire:test@default-test",
+        "-Dtest=TemporalUdfBenchmark",
+        "-Dtemporal.rows=2000000",
+        "-Dtemporal.cases=text",
+        "-Dtemporal.warmup=2",
+        "-Dtemporal.runs=5",
+        "-Dtemporal.cardinality=8",
+        "-Dsf.extraJvmArgs=-Xmx2g"
+      ],
+      "status": "finished",
+      "candidate_stage": "mixed",
+      "noise_policy": "Shared 16-CPU host. No external rustc/cc1plus/cargo/javac processes or changing outside process set; aggregate outside Java/Doris CPU below two logical CPUs per sample. Outside services/test JVMs and CPU samples are retained; small timing differences are inconclusive.",
+      "exit_code": 0,
+      "finished": 1792638902.9399598,
+      "contaminated": true,
+      "route_evidence": [
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000"
+      ],
+      "medians": {
+        "text": {
+          "FLINK": 1.009978,
+          "PREVIOUS": 1.035597,
+          "NATIVE": 0.908647,
+          "FALLBACK": 1.006376
+        }
+      },
+      "valid_cases": []
+    },
+    {
+      "label": "bench-118-card8-text-attempt3",
+      "line": "118",
+      "cardinality": 8,
+      "case": "text",
+      "started": 1792638912.9679258,
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench,flink-1.18",
+        "surefire:test@default-test",
+        "-Dtest=TemporalUdfBenchmark",
+        "-Dtemporal.rows=2000000",
+        "-Dtemporal.cases=text",
+        "-Dtemporal.warmup=2",
+        "-Dtemporal.runs=5",
+        "-Dtemporal.cardinality=8",
+        "-Dsf.extraJvmArgs=-Xmx2g"
+      ],
+      "status": "finished",
+      "candidate_stage": "mixed",
+      "noise_policy": "Shared 16-CPU host. No external rustc/cc1plus/cargo/javac processes or changing outside process set; aggregate outside Java/Doris CPU below two logical CPUs per sample. Outside services/test JVMs and CPU samples are retained; small timing differences are inconclusive.",
+      "exit_code": 0,
+      "finished": 1792638950.8819616,
+      "contaminated": false,
+      "route_evidence": [
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000"
+      ],
+      "medians": {
+        "text": {
+          "FLINK": 1.012707,
+          "PREVIOUS": 1.075385,
+          "NATIVE": 0.923865,
+          "FALLBACK": 1.004198
+        }
+      },
+      "valid_cases": [
+        "text"
+      ]
+    },
+    {
+      "label": "bench-118-card8-epoch-attempt1",
+      "line": "118",
+      "cardinality": 8,
+      "case": "epoch",
+      "started": 1792638960.9104805,
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench,flink-1.18",
+        "surefire:test@default-test",
+        "-Dtest=TemporalUdfBenchmark",
+        "-Dtemporal.rows=2000000",
+        "-Dtemporal.cases=epoch",
+        "-Dtemporal.warmup=2",
+        "-Dtemporal.runs=5",
+        "-Dtemporal.cardinality=8",
+        "-Dsf.extraJvmArgs=-Xmx2g"
+      ],
+      "status": "finished",
+      "candidate_stage": "mixed",
+      "noise_policy": "Shared 16-CPU host. No external rustc/cc1plus/cargo/javac processes or changing outside process set; aggregate outside Java/Doris CPU below two logical CPUs per sample. Outside services/test JVMs and CPU samples are retained; small timing differences are inconclusive.",
+      "exit_code": 0,
+      "finished": 1792638986.0293841,
+      "contaminated": false,
+      "route_evidence": [
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000"
+      ],
+      "medians": {
+        "epoch": {
+          "FLINK": 0.51756,
+          "PREVIOUS": 0.668971,
+          "NATIVE": 0.55539,
+          "FALLBACK": 0.516121
+        }
+      },
+      "valid_cases": [
+        "epoch"
+      ]
+    },
+    {
+      "label": "bench-118-card8-pipeline-attempt1",
+      "line": "118",
+      "cardinality": 8,
+      "case": "pipeline",
+      "started": 1792638996.0599403,
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench,flink-1.18",
+        "surefire:test@default-test",
+        "-Dtest=TemporalUdfBenchmark",
+        "-Dtemporal.rows=2000000",
+        "-Dtemporal.cases=pipeline",
+        "-Dtemporal.warmup=2",
+        "-Dtemporal.runs=5",
+        "-Dtemporal.cardinality=8",
+        "-Dsf.extraJvmArgs=-Xmx2g"
+      ],
+      "status": "finished",
+      "candidate_stage": "mixed",
+      "noise_policy": "Shared 16-CPU host. No external rustc/cc1plus/cargo/javac processes or changing outside process set; aggregate outside Java/Doris CPU below two logical CPUs per sample. Outside services/test JVMs and CPU samples are retained; small timing differences are inconclusive.",
+      "exit_code": 0,
+      "finished": 1792639031.933635,
+      "contaminated": false,
+      "route_evidence": [
+        "[temporal-direct-calc] case=pipeline rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000"
+      ],
+      "medians": {
+        "pipeline": {
+          "FLINK": 0.8495,
+          "PREVIOUS": 0.977936,
+          "NATIVE": 0.976542,
+          "FALLBACK": 0.830228
+        }
+      },
+      "valid_cases": [
+        "pipeline"
+      ]
+    },
+    {
+      "label": "bench-118-card8-perimeter-attempt1",
+      "line": "118",
+      "cardinality": 8,
+      "case": "perimeter",
+      "started": 1792639041.9692118,
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench,flink-1.18",
+        "surefire:test@default-test",
+        "-Dtest=TemporalUdfBenchmark",
+        "-Dtemporal.rows=2000000",
+        "-Dtemporal.cases=perimeter",
+        "-Dtemporal.warmup=2",
+        "-Dtemporal.runs=5",
+        "-Dtemporal.cardinality=8",
+        "-Dsf.extraJvmArgs=-Xmx2g"
+      ],
+      "status": "finished",
+      "candidate_stage": "mixed",
+      "noise_policy": "Shared 16-CPU host. No external rustc/cc1plus/cargo/javac processes or changing outside process set; aggregate outside Java/Doris CPU below two logical CPUs per sample. Outside services/test JVMs and CPU samples are retained; small timing differences are inconclusive.",
+      "exit_code": 0,
+      "finished": 1792639068.1752195,
+      "contaminated": false,
+      "route_evidence": [],
+      "medians": {
+        "perimeter": {
+          "FLINK": 0.546435,
+          "PREVIOUS": 0.647929,
+          "NATIVE": 0.64533,
+          "FALLBACK": 0.656894
+        }
+      },
+      "valid_cases": [
+        "perimeter"
+      ]
+    },
+    {
+      "label": "bench-118-card16384-mixed-attempt1",
+      "line": "118",
+      "cardinality": 16384,
+      "case": "mixed",
+      "started": 1792639078.2080598,
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench,flink-1.18",
+        "surefire:test@default-test",
+        "-Dtest=TemporalUdfBenchmark",
+        "-Dtemporal.rows=2000000",
+        "-Dtemporal.cases=mixed",
+        "-Dtemporal.warmup=2",
+        "-Dtemporal.runs=5",
+        "-Dtemporal.cardinality=16384",
+        "-Dsf.extraJvmArgs=-Xmx2g"
+      ],
+      "status": "finished",
+      "candidate_stage": "mixed",
+      "noise_policy": "Shared 16-CPU host. No external rustc/cc1plus/cargo/javac processes or changing outside process set; aggregate outside Java/Doris CPU below two logical CPUs per sample. Outside services/test JVMs and CPU samples are retained; small timing differences are inconclusive.",
+      "exit_code": 0,
+      "finished": 1792639112.6830535,
+      "contaminated": false,
+      "route_evidence": [
+        "[temporal-direct-calc] case=mixed rows=2000000",
+        "[temporal-direct-calc] case=mixed rows=2000000",
+        "[temporal-direct-calc] case=mixed rows=2000000",
+        "[temporal-direct-calc] case=mixed rows=2000000",
+        "[temporal-direct-calc] case=mixed rows=2000000",
+        "[temporal-direct-calc] case=mixed rows=2000000",
+        "[temporal-direct-calc] case=mixed rows=2000000"
+      ],
+      "medians": {
+        "mixed": {
+          "FLINK": 0.734832,
+          "PREVIOUS": 1.094801,
+          "NATIVE": 0.870739,
+          "FALLBACK": 0.743405
+        }
+      },
+      "valid_cases": [
+        "mixed"
+      ]
+    },
+    {
+      "label": "bench-118-card16384-identity-attempt1",
+      "line": "118",
+      "cardinality": 16384,
+      "case": "identity",
+      "started": 1792639122.71192,
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench,flink-1.18",
+        "surefire:test@default-test",
+        "-Dtest=TemporalUdfBenchmark",
+        "-Dtemporal.rows=2000000",
+        "-Dtemporal.cases=identity",
+        "-Dtemporal.warmup=2",
+        "-Dtemporal.runs=5",
+        "-Dtemporal.cardinality=16384",
+        "-Dsf.extraJvmArgs=-Xmx2g"
+      ],
+      "status": "finished",
+      "candidate_stage": "mixed",
+      "noise_policy": "Shared 16-CPU host. No external rustc/cc1plus/cargo/javac processes or changing outside process set; aggregate outside Java/Doris CPU below two logical CPUs per sample. Outside services/test JVMs and CPU samples are retained; small timing differences are inconclusive.",
+      "exit_code": 0,
+      "finished": 1792639154.5860426,
+      "contaminated": true,
+      "route_evidence": [
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000"
+      ],
+      "medians": {
+        "identity": {
+          "FLINK": 0.602496,
+          "PREVIOUS": 0.916308,
+          "NATIVE": 0.689314,
+          "FALLBACK": 0.585747
+        }
+      },
+      "valid_cases": []
+    },
+    {
+      "label": "bench-118-card16384-identity-attempt2",
+      "line": "118",
+      "cardinality": 16384,
+      "case": "identity",
+      "started": 1792639164.6212823,
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench,flink-1.18",
+        "surefire:test@default-test",
+        "-Dtest=TemporalUdfBenchmark",
+        "-Dtemporal.rows=2000000",
+        "-Dtemporal.cases=identity",
+        "-Dtemporal.warmup=2",
+        "-Dtemporal.runs=5",
+        "-Dtemporal.cardinality=16384",
+        "-Dsf.extraJvmArgs=-Xmx2g"
+      ],
+      "status": "finished",
+      "candidate_stage": "mixed",
+      "noise_policy": "Shared 16-CPU host. No external rustc/cc1plus/cargo/javac processes or changing outside process set; aggregate outside Java/Doris CPU below two logical CPUs per sample. Outside services/test JVMs and CPU samples are retained; small timing differences are inconclusive.",
+      "exit_code": 0,
+      "finished": 1792639194.9761364,
+      "contaminated": false,
+      "route_evidence": [
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000",
+        "[temporal-direct-calc] case=identity rows=2000000",
+        "[temporal-direct-aliases] values=4000000"
+      ],
+      "medians": {
+        "identity": {
+          "FLINK": 0.610417,
+          "PREVIOUS": 0.980038,
+          "NATIVE": 0.676501,
+          "FALLBACK": 0.61357
+        }
+      },
+      "valid_cases": [
+        "identity"
+      ]
+    },
+    {
+      "label": "bench-118-card16384-text-attempt1",
+      "line": "118",
+      "cardinality": 16384,
+      "case": "text",
+      "started": 1792639205.011979,
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench,flink-1.18",
+        "surefire:test@default-test",
+        "-Dtest=TemporalUdfBenchmark",
+        "-Dtemporal.rows=2000000",
+        "-Dtemporal.cases=text",
+        "-Dtemporal.warmup=2",
+        "-Dtemporal.runs=5",
+        "-Dtemporal.cardinality=16384",
+        "-Dsf.extraJvmArgs=-Xmx2g"
+      ],
+      "status": "finished",
+      "candidate_stage": "mixed",
+      "noise_policy": "Shared 16-CPU host. No external rustc/cc1plus/cargo/javac processes or changing outside process set; aggregate outside Java/Doris CPU below two logical CPUs per sample. Outside services/test JVMs and CPU samples are retained; small timing differences are inconclusive.",
+      "exit_code": 0,
+      "finished": 1792639241.5798864,
+      "contaminated": false,
+      "route_evidence": [
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000",
+        "[temporal-direct-calc] case=text rows=2000000"
+      ],
+      "medians": {
+        "text": {
+          "FLINK": 0.965445,
+          "PREVIOUS": 0.98186,
+          "NATIVE": 0.87153,
+          "FALLBACK": 0.962128
+        }
+      },
+      "valid_cases": [
+        "text"
+      ]
+    },
+    {
+      "label": "bench-118-card16384-epoch-attempt1",
+      "line": "118",
+      "cardinality": 16384,
+      "case": "epoch",
+      "started": 1792639251.6160457,
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench,flink-1.18",
+        "surefire:test@default-test",
+        "-Dtest=TemporalUdfBenchmark",
+        "-Dtemporal.rows=2000000",
+        "-Dtemporal.cases=epoch",
+        "-Dtemporal.warmup=2",
+        "-Dtemporal.runs=5",
+        "-Dtemporal.cardinality=16384",
+        "-Dsf.extraJvmArgs=-Xmx2g"
+      ],
+      "status": "finished",
+      "candidate_stage": "mixed",
+      "noise_policy": "Shared 16-CPU host. No external rustc/cc1plus/cargo/javac processes or changing outside process set; aggregate outside Java/Doris CPU below two logical CPUs per sample. Outside services/test JVMs and CPU samples are retained; small timing differences are inconclusive.",
+      "exit_code": 0,
+      "finished": 1792639276.9780784,
+      "contaminated": false,
+      "route_evidence": [
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000",
+        "[temporal-direct-calc] case=epoch rows=2000000"
+      ],
+      "medians": {
+        "epoch": {
+          "FLINK": 0.513625,
+          "PREVIOUS": 0.645747,
+          "NATIVE": 0.543074,
+          "FALLBACK": 0.514911
+        }
+      },
+      "valid_cases": [
+        "epoch"
+      ]
+    },
+    {
+      "label": "bench-118-card16384-pipeline-attempt1",
+      "line": "118",
+      "cardinality": 16384,
+      "case": "pipeline",
+      "started": 1792639287.0116134,
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench,flink-1.18",
+        "surefire:test@default-test",
+        "-Dtest=TemporalUdfBenchmark",
+        "-Dtemporal.rows=2000000",
+        "-Dtemporal.cases=pipeline",
+        "-Dtemporal.warmup=2",
+        "-Dtemporal.runs=5",
+        "-Dtemporal.cardinality=16384",
+        "-Dsf.extraJvmArgs=-Xmx2g"
+      ],
+      "status": "finished",
+      "candidate_stage": "mixed",
+      "noise_policy": "Shared 16-CPU host. No external rustc/cc1plus/cargo/javac processes or changing outside process set; aggregate outside Java/Doris CPU below two logical CPUs per sample. Outside services/test JVMs and CPU samples are retained; small timing differences are inconclusive.",
+      "exit_code": 0,
+      "finished": 1792639328.8740306,
+      "contaminated": true,
+      "route_evidence": [
+        "[temporal-direct-calc] case=pipeline rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000"
+      ],
+      "medians": {
+        "pipeline": {
+          "FLINK": 1.058226,
+          "PREVIOUS": 1.310631,
+          "NATIVE": 1.27696,
+          "FALLBACK": 0.97805
+        }
+      },
+      "valid_cases": []
+    },
+    {
+      "label": "bench-118-card16384-pipeline-attempt2",
+      "line": "118",
+      "cardinality": 16384,
+      "case": "pipeline",
+      "started": 1792639348.9371169,
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench,flink-1.18",
+        "surefire:test@default-test",
+        "-Dtest=TemporalUdfBenchmark",
+        "-Dtemporal.rows=2000000",
+        "-Dtemporal.cases=pipeline",
+        "-Dtemporal.warmup=2",
+        "-Dtemporal.runs=5",
+        "-Dtemporal.cardinality=16384",
+        "-Dsf.extraJvmArgs=-Xmx2g"
+      ],
+      "status": "finished",
+      "candidate_stage": "mixed",
+      "noise_policy": "Shared 16-CPU host. No external rustc/cc1plus/cargo/javac processes or changing outside process set; aggregate outside Java/Doris CPU below two logical CPUs per sample. Outside services/test JVMs and CPU samples are retained; small timing differences are inconclusive.",
+      "exit_code": 0,
+      "finished": 1792639387.482509,
+      "contaminated": false,
+      "route_evidence": [
+        "[temporal-direct-calc] case=pipeline rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000",
+        "[temporal-direct-calc] case=pipeline rows=2000000"
+      ],
+      "medians": {
+        "pipeline": {
+          "FLINK": 0.798026,
+          "PREVIOUS": 1.045632,
+          "NATIVE": 1.103815,
+          "FALLBACK": 0.877072
+        }
+      },
+      "valid_cases": [
+        "pipeline"
+      ]
+    },
+    {
+      "label": "bench-118-card16384-perimeter-attempt1",
+      "line": "118",
+      "cardinality": 16384,
+      "case": "perimeter",
+      "started": 1792639397.5163803,
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench,flink-1.18",
+        "surefire:test@default-test",
+        "-Dtest=TemporalUdfBenchmark",
+        "-Dtemporal.rows=2000000",
+        "-Dtemporal.cases=perimeter",
+        "-Dtemporal.warmup=2",
+        "-Dtemporal.runs=5",
+        "-Dtemporal.cardinality=16384",
+        "-Dsf.extraJvmArgs=-Xmx2g"
+      ],
+      "status": "finished",
+      "candidate_stage": "mixed",
+      "noise_policy": "Shared 16-CPU host. No external rustc/cc1plus/cargo/javac processes or changing outside process set; aggregate outside Java/Doris CPU below two logical CPUs per sample. Outside services/test JVMs and CPU samples are retained; small timing differences are inconclusive.",
+      "exit_code": 0,
+      "finished": 1792639421.5306852,
+      "contaminated": false,
+      "route_evidence": [],
+      "medians": {
+        "perimeter": {
+          "FLINK": 0.513575,
+          "PREVIOUS": 0.54408,
+          "NATIVE": 0.553816,
+          "FALLBACK": 0.55055
+        }
+      },
+      "valid_cases": [
+        "perimeter"
+      ]
     }
-  }
+  ]
 }

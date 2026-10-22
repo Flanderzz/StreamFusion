@@ -48,6 +48,9 @@ class TemporalUdfBenchmark {
       case "identity":
         sql = "SELECT ts_identity(t), ltz_identity(z) FROM src";
         break;
+      case "mixed":
+        sql = "SELECT id, ts_identity(t), ltz_identity(z) FROM src";
+        break;
       case "text":
         sql = "SELECT ts_text(t) FROM src";
         break;
