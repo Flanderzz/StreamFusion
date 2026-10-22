@@ -1707,3 +1707,65 @@ Reproduce with `SF_BENCHMARK=true`, `-Pbench`, `-Dtest=JsonStringUnionBenchmark`
 with `-Djsonunion.expectNative=false`; add `-Pflink-1.18` for the older released line.
 See [Union coverage](../operators/union.md#final-json_value-projections)
 and [parse-only entry caches](../optimizations/projection-pruning-transpose.md#parse-only-json-document-caches).
+
+## Exact numeric ARRAY casts
+
+The functionality gate compares released Flink 2.2.1's generated Calc with the previous
+StreamFusion fallback at `d951a838` and the new Rust ARRAY cast. Measurements use JDK 11,
+Apple M4 Pro, release Rust with mimalloc, one active benchmark, 131,072 rows, five warmups
+and nine measured trials. The Arrow input and Flink BinaryRowData contain identical integer
+or DECIMAL values, NULL containers, empty arrays and NULL elements. Every trial consumes
+every output element; all three engines have identical checksums for each shape.
+
+This is the repository's small-functionality boundary: stock/previous start on prepared
+RowData in Java, and native starts on prepared Arrow batches of 1,024 rows in Rust. Setup,
+input IPC loading, initial/final JNI and perimeter transposes are outside timing. Generated
+evaluation, native Calc evaluation, allocation and equivalent output consumption are inside.
+These measurements do not establish an end-to-end job speedup. DECIMAL rescale is
+DECIMAL(18,2) to DECIMAL(18,1); integer-to-DECIMAL targets DECIMAL(18,2).
+
+Median milliseconds; speedup is stock divided by Rust:
+
+| Conversion / array width | Stock | Previous fallback | Rust | Speedup |
+| --- | ---: | ---: | ---: | ---: |
+| INT to BIGINT / 4 | 10.003 | 6.681 | 0.992 | 10.08x |
+| INT to BIGINT / 32 | 17.828 | 17.958 | 6.629 | 2.69x |
+| INT to BIGINT / 128 | 58.470 | 60.420 | 24.851 | 2.35x |
+| INT to DECIMAL / 4 | 10.589 | 13.155 | 2.322 | 4.56x |
+| INT to DECIMAL / 32 | 50.672 | 37.684 | 16.713 | 3.03x |
+| INT to DECIMAL / 128 | 203.839 | 186.003 | 68.721 | 2.97x |
+| DECIMAL rescale / 4 | 10.629 | 10.119 | 3.426 | 3.10x |
+| DECIMAL rescale / 32 | 49.437 | 45.040 | 24.884 | 1.99x |
+| DECIMAL rescale / 128 | 178.626 | 152.197 | 98.925 | 1.81x |
+
+[Raw warmup/measured times, ranges and checksums](results/exact-array-casts-2026-10-22.json)
+retain the JVM trial variation; short stock trials are noisier than the Rust batch loop.
+The initial sliced-input prototype repeatedly converted the complete shared child buffer.
+Restricting conversion to each slice's referenced values removes that amplification, including
+at nested array levels.
+
+Run the Java half with:
+
+```sh
+SF_BENCHMARK=true mvn -pl streamfusion-runtime -Pbench \
+  -Dtest=ArrayCastAdmissionBenchmark -Darray.cast.mode=stock \
+  -Darray.cast.shape=int-bigint -Darray.cast.rows=131072 -Darray.cast.width=32 \
+  -Darray.cast.warmups=5 -Darray.cast.runs=9 -Darray.cast.export=/tmp/array-cast.arrow test
+```
+
+Use `int-decimal` and `decimal-rescale` for the other shapes. Copy the same benchmark test
+to a separate checkout of the baseline and use `-Darray.cast.mode=previous` to require the
+old planner's whole-Calc ARRAY cast fallback. The new benchmark class is disabled unless
+`SF_BENCHMARK=true`. Build and run the native half on the exported input:
+
+```sh
+cd native
+cargo build -p streamfusion --release --no-default-features --features mimalloc --example array_cast
+target/release/examples/array_cast /tmp/array-cast.arrow 5 9
+```
+
+The native example uses the production Calc decoder and cast, times inside Rust and verifies
+the same output digest. Ordinary SQL regressions separately establish released-Flink result
+and type parity and positive consumed native work on both supported Flink lines.
+Numeric ARRAY TRY_CAST invokes the identical total conversion kernel; these measurements use
+CAST SQL and do not claim a separate TRY_CAST measurement.

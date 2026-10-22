@@ -83,6 +83,7 @@ final class RexExpression {
   private static final int KIND_DECIMAL_ROUND_TEXT = 41;
   // Proven numeric cast batches avoid an upcall; exceptional batches retain Flink's evaluator.
   private static final int KIND_NUMERIC_CAST = 42;
+  private static final int KIND_ARRAY_CAST = 43;
   // A narrowing cast to an integer type: payload is the target integer type code (CAST_TINYINT..
   // CAST_BIGINT), one child. Built natively as a wrapping/saturating kernel matching Flink's
   // primitive
@@ -3334,6 +3335,21 @@ final class RexExpression {
             == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.TRY_CAST;
     SqlTypeName source = sourceType.getSqlTypeName();
     SqlTypeName targetType = resultType.getSqlTypeName();
+    if (NativeConfig.collectionExpressionsEnabled()
+        && source == SqlTypeName.ARRAY
+        && targetType == SqlTypeName.ARRAY
+        && nativeExactArrayCast(sourceType, resultType)) {
+      if (requiresRowShortCircuit(call.getOperands().get(0)))
+        return reject("ARRAY cast arguments require Flink's row evaluation");
+      var logicalType =
+          org.apache.flink.table.planner.calcite.FlinkTypeFactory.toLogicalType(resultType);
+      var schema =
+          tech.streamfusion.arrow.ArrowConversion.toArrowSchema(
+              org.apache.flink.table.types.logical.RowType.of(logicalType));
+      add(KIND_ARRAY_CAST, strings.size(), 1);
+      strings.add(Base64.getEncoder().encodeToString(schema.serializeAsMessage()));
+      return emit(call.getOperands().get(0));
+    }
     if (unnestOperand && !tryCast && isNativeUnnestTemporalCast(call)) {
       boolean utc =
           java.time.ZoneId.of(sessionZoneId).normalized().equals(java.time.ZoneOffset.UTC);
@@ -3496,6 +3512,19 @@ final class RexExpression {
       return emitHostCast(call, sourceType, resultType);
     }
     return reject("unsupported CAST " + source + "→" + targetType);
+  }
+
+  private static boolean nativeExactArrayCast(RelDataType source, RelDataType target) {
+    if (source.getSqlTypeName() == SqlTypeName.ARRAY
+        && target.getSqlTypeName() == SqlTypeName.ARRAY) {
+      return source.getComponentType().isNullable()
+          && target.getComponentType().isNullable()
+          && nativeExactArrayCast(source.getComponentType(), target.getComponentType());
+    }
+    return (SqlTypeFamily.INTEGER.contains(source)
+            || source.getSqlTypeName() == SqlTypeName.DECIMAL)
+        && (SqlTypeFamily.INTEGER.contains(target)
+            || target.getSqlTypeName() == SqlTypeName.DECIMAL);
   }
 
   /**

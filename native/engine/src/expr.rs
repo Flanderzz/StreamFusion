@@ -217,6 +217,20 @@ pub(crate) fn build_expr(
             );
             crate::flink_functions::decimal_float::function(arg == 4).call(vec![child])
         }
+        43 => {
+            let target = encoded_field_type(strings[arg].as_deref().expect("ARRAY cast schema"));
+            let child = build_expr(
+                schema,
+                kinds,
+                payload,
+                child_counts,
+                longs,
+                doubles,
+                strings,
+                cursor,
+            );
+            crate::flink_functions::array_cast::function(target).call(vec![child])
+        }
         11 => {
             // A widening numeric cast: build the single child, then wrap it. `arg` is the target code.
             let child = build_expr(
@@ -1066,7 +1080,7 @@ impl datafusion::logical_expr::ScalarUDFImpl for IntervalScale {
 }
 
 impl NarrowingCast {
-    fn new(target: DataType) -> Self {
+    pub(crate) fn new(target: DataType) -> Self {
         Self {
             target,
             signature: datafusion::logical_expr::Signature::variadic_any(
