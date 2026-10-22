@@ -2132,7 +2132,8 @@ and [per-function benchmarks](../benchmarks/scalar-functions.md).
 The following extensions are enabled by default. Set
 `streamfusion.experimental.collectionExpressions=false` to disable them. The maintainer accepted
 the measured standalone regressions on 2026-10-17;
-[issue #392](https://github.com/datafusion-contrib/StreamFusion/issues/392) tracks performance improvements.
+[collection representation work](../optimizations/collection-representation-work.md) records
+the measured boundary improvements and remaining standalone costs.
 Existing admitted collection subscripts and Boolean/integer ARRAY_DISTINCT retain their ordinary paths.
 
 | Functions | Execution inside NativeCalc |
@@ -2151,9 +2152,9 @@ Existing admitted collection subscripts and Boolean/integer ARRAY_DISTINCT retai
 | ARRAY_JOIN | Rust UTF-8 join for total nullable string arrays and string options, including strict explicit NULL replacement; co-projected sensitive values and unverified consumers remain generated |
 | ELEMENT | Rust extraction for nullable BOOLEAN/integer/DECIMAL arrays; NULL/empty arrays return NULL, a singleton returns its element, longer arrays raise the selected Flink line's exception with the released message; sensitive/fallible operands retain generated evaluation |
 | MAP_FROM_ARRAYS | Rust construction for nullable basic key/value arrays, preserving duplicate and NULL keys, entry order and strict parent NULLs; mismatched lengths retain Flink's typed exception; other signatures remain generated |
-| MAP_KEYS | Rust shared-key view for total maps with nullable BOOLEAN/integer/DECIMAL keys and values; other signatures retain generated evaluation |
-| MAP_VALUES | Rust shared-value view under the same verified basic-map admission |
-| MAP_ENTRIES | Rust shared entry-row list for verified basic maps; representation-sensitive row consumers remain generated |
+| MAP_KEYS | Rust shared-key view for total maps with nullable BOOLEAN/integer/DECIMAL keys and values; a direct final projection of an input-reference MAP with STRING/VARCHAR keys and nullable basic values also shares the represented key buffers; other signatures retain generated evaluation |
+| MAP_VALUES | Rust shared-value view under the same verified map-projection admission; a value-only Calc with no condition or sensitive co-projection need not preserve the unused keys' Java caches |
+| MAP_ENTRIES | Rust shared entry-row list for verified basic maps and the direct STRING/VARCHAR-key input projections above; fresh entry rows have INSERT kind, while representation-sensitive row consumers remain generated |
 | MAP_UNION | Rust stable typed membership/gather for total matching nullable basic maps, preserving right ordering/duplicates and Flink NULL-key behavior |
 | Runtime ARRAY[...] | Rust construction for matching nullable BOOLEAN/integer/DECIMAL/DATE/TIME/TIMESTAMP/LTZ elements and total arguments; other projected signatures retain the generated program; UNNEST retains its existing wider scalar-specific admission |
 | Runtime MAP[...] | Rust construction for total nullable basic keys/values and distinct literal/input-reference key expressions; repeated/generated keys and fallible arguments remain generated; Flink 1.18 multi-entry constructors retain generated grouping order |
@@ -2764,16 +2765,24 @@ whose keys and values are nullable BOOLEAN, integer or DECIMAL. Parent NULLs,
 NULL keys, duplicates and entry order survive as a shared Arrow list view. Other
 signatures retain generated Flink evaluation, including representation-sensitive
 nested/string values and fallible arguments. This does not change default
-collection admission or the standalone conversion limitations tracked by #392.
+collection admission or the standalone conversion limitations recorded in the
+[collection representation ledger](../optimizations/collection-representation-work.md).
 
-MAP_VALUES uses the same verified basic-map admission and shared-buffer view, selecting the value child without changing NULLs or entry order.
+Direct final projections of input-reference MAPs with STRING/VARCHAR keys and nullable
+BOOLEAN/integer/DECIMAL values also use these shared views. Key and entry outputs preserve
+the represented string buffers. A value-only Calc without a condition or sensitive
+co-projection can omit the unused keys' Java caches. Composed consumers and unverified
+state, exchange and sink boundaries retain their existing representation guards.
 
-MAP_ENTRIES uses the same verified basic-map admission and reuses entry children
+MAP_VALUES uses the same verified map-projection admission and shared-buffer view, selecting the value child without changing NULLs or entry order.
+
+MAP_ENTRIES uses the same verified map-projection admission and reuses entry children
 as a list of nullable key/value rows, preserving order and parent NULLs. Consumers
 that inspect row representation or RowKind retain generated evaluation. A direct
 projection creates fresh INSERT-kind entry rows, so it does not require the
 whole-Calc ROW metadata callback. This exception applies only to the verified
-basic-map signature; nested ROW maps and ROW-valued consumers keep that callback.
+basic maps and direct string-key input projections; nested ROW maps and ROW-valued
+consumers keep that callback.
 
 MAP_UNION folds verified total basic maps left to right, propagating any NULL
 parent. Each nonempty right map emits all its entries first; unmatched non-NULL

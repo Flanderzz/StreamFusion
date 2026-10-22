@@ -1,6 +1,6 @@
 # Reduce collection representation work
 
-The experimental collection evaluator must preserve Flink's Java string caches, nested row kinds
+The default-enabled collection evaluator must preserve Flink's Java string caches, nested row kinds
 and generic/binary array copy category. Those details require extra physical children for sensitive
 types; nullable primitive-only programs keep the ordinary layout and avoid serializer snapshots
 that preserve no additional identity. This also leaves their final arrays as ordinary columnar
@@ -9,6 +9,8 @@ views instead of rebuilding generic arrays at the exit transpose.
 Represented nested-row vectors retain one reader for the batch lifetime. Each returned row is
 copied before that reader can move to the next index, preserving ownership without allocating a
 new column-batch wrapper and reusable row wrapper for every nested element.
+
+## Initial comparison (2026-10-17)
 
 The initial release profiles use async-profiler CPU sampling at 1 ms and allocation sampling at
 1 MiB. They include planning, warmups, stock and StreamFusion trials in one process; counts are
@@ -34,8 +36,9 @@ Rows are two million except width-64 sort at 500,000.
 The reduction is 5–11% of the initial StreamFusion time in these runs. None of these isolated
 jobs beats Flink. Both collection and metadata extensions are enabled by default under the
 maintainer's explicit acceptance of the measured regressions on 2026-10-17.
-[Issue #392](https://github.com/datafusion-contrib/StreamFusion/issues/392) tracks the remaining performance work. These results do
-not establish a sustained-throughput gain. Full comparisons against previous StreamFusion,
+The later [standalone comparison](../benchmarks/collections-392-2026-10-22.md) records
+the profiled improvement pass for #392. These historical results do not establish a
+sustained-throughput gain. Full comparisons against previous StreamFusion,
 longer workloads, reproducible commands and every trial belong in the
 [scalar benchmark ledger](../benchmarks/scalar-functions.md#extended-function-coverage).
 
@@ -43,6 +46,88 @@ For profiling, add `-Dsf.extraJvmArgs="-Xmx2g -agentpath:$ASPROF_LIBRARY=start,e
 to the reproduction command, pointing `ASPROF_LIBRARY` at the profiler installation. Keep the PID
 suffix: Maven's separate ORC test execution can launch another JVM even when that execution has
 no selected benchmark tests. Profiled timings are excluded from the elapsed-time tables.
+
+## Shared views of string-keyed maps
+
+Direct final MAP_KEYS, MAP_VALUES and MAP_ENTRIES projections of an input-reference
+MAP<STRING/VARCHAR, nullable basic value> use the existing Arrow view kernels. Basic values
+are BOOLEAN, signed integers and DECIMAL. The kernels retain list offsets, parent validity
+and the selected entry buffers instead of constructing JVM collections and writing a second
+set of Arrow buffers. NULL keys, duplicate entries and their order remain part of the input.
+
+Key and entry projections keep the represented string children, including their original
+UTF-16 cache and generic/binary array-copy category. Fresh entry ROWs have INSERT kind.
+Nested consumers retain the complete generated evaluator; the existing guards for unverified
+columnar producers, state/exchange boundaries and native sinks remain in force. This changes
+execution of already-supported expressions rather than adding new SQL signatures.
+
+A Calc containing only direct MAP_VALUES projections and insensitive input-reference/literal
+co-projections, with no condition, does not observe the keys' caches. Its entry transpose can
+therefore use ordinary UTF-8 key storage while retaining the original map offsets and value
+columns. A projection exposing the map, its keys, another sensitive value, or a condition
+retains the represented input schema. This decision is captured during planning.
+
+Plain nested ROW views share their immutable column-batch wrapper. Each row view still has its
+own position, so retaining one view and reading another cannot retarget the first. Represented
+generic ROWs with only the known owning Arrow scalar getters construct a fresh owned row once;
+they avoid a second deep copy of values that already own their bytes and objects. Rows containing
+nested views and binary row representations retain their existing serializer copies. Tests retain
+strings and their UTF-16 caches, binary payloads, wide decimals, full-range timestamps and row kinds
+after the reader advances and the entire Arrow batch closes.
+
+## Reserve BIGINT array capacity once
+
+The entry transpose reserves the entire visible BIGINT child range before writing an array,
+following Comet's fixed-width writer pattern and the existing INT array path. Nullable boxed
+GenericArrayData reads its object storage once rather than redispatching primitive/boxed getters
+for every element. Primitive and other ArrayData implementations retain their typed getters.
+All paths copy into owned Arrow buffers before upstream can mutate the source. Empty arrays,
+NULL parents/elements, count reset and buffer growth retain the ordinary writer contract.
+
+## Standalone materialization comparison (2026-10-22)
+
+Two-million-row release/mimalloc jobs compare actual preceding revision `d951a838`
+with implementation `3c47a89d` for collection/BIGINT work and `f7867f55` for the
+final generic-row string exit, compiled with the same metrics-enabled harness.
+Both transposes, production JNI/IPC, runtime row source and row sink remain timed;
+cluster construction and the initial explain are outside. Each expression/cohort
+has two warmup pairs and five alternating measured pairs, JDK 17, parallelism one,
+a 2 GiB heap and 1,024-row batches. Separate runners serve the two Flink lines and
+the follow-up controls and final strings; cross-runner durations are not comparable.
+
+| Flink / case | Prior StreamFusion, s | Current StreamFusion, s | Paired current stock, s |
+| --- | ---: | ---: | ---: |
+| 2.2 / MAP_VALUES | 2.654 | 1.518 | 1.587 |
+| 2.2 / MAP_ENTRIES | 5.260 | 2.677 | 2.150 |
+| 2.2 / reverse BIGINT, width 64 | 2.573 | 2.173 | 2.283 |
+| 2.2 / prepend BIGINT, width 64 | 2.429 | 1.962 | 2.360 |
+| 2.2 / TYPEOF | 0.623 | 0.617 | 0.753 |
+| 1.18 / MAP_VALUES | 2.362 | 1.381 | 1.430 |
+| 1.18 / MAP_ENTRIES | 4.856 | 2.382 | 1.886 |
+| 1.18 / reverse BIGINT, width 64 | 2.364 | 1.962 | 1.797 |
+| 1.18 / TYPEOF | 0.630 | 0.587 | 0.651 |
+
+Map projections reduce native medians by 36–51% across both lines. The 2.2 wide
+reverse and prepend ranges are below both stock and prior native ranges. Value-only
+map ranges overlap stock, while keys/entries remain 25–34% slower than stock and
+1.18 reverse remains slower. ROW and ARRAY controls show little benefit or some
+regression. TYPEOF prior/current and stock ranges overlap, so no isolated metadata
+throughput gain is established.
+
+Paired profiles remove the generated map expression upcalls and unused value-only
+key-cache writer. MAP_ENTRIES NativeCalc sampled Java allocations on 2.2 fall from
+16.465 to 6.109 GB; the final generic-row TYPEOF exit falls from 1.674 to
+1.034 GB, a 38.2% reduction (41.9% on 1.18). BIGINT writer CPU
+samples decrease on both lines, while reverse's whole-NativeCalc allocations do
+not improve. These inclusive sampled weights are not copied bytes or isolated
+transition costs. Required UTF-16 transport and row output materialization remain.
+
+The [complete two-line report](../benchmarks/collections-392-2026-10-22.md) retains
+all 420 primary measured jobs and 168 warmups, prior paired stock controls, ranges,
+all unfavorable cases, twenty CPU/allocation captures (four rejected), revisions and reproduction
+commands. It also retains the interrupted controls and rejected collection-exit
+packing prototype separately. The measurements pin their source snapshots around integration onto main
+`717b8d94`; their recorded revisions identify the exact binaries tested.
 
 ## Arrays consumed immediately by UNNEST
 

@@ -25,8 +25,9 @@ repeated string consumers, NULLs in declared NOT NULL elements and every nested 
 
 Programs containing only nullable primitive collection types keep ordinary layouts and avoid
 serializer snapshots that preserve no additional identity. Represented nested-row vectors reuse
-their reader for the lifetime of the batch; each returned row is still copied before that reader
-can move to another index.
+their reader for the lifetime of the batch. Each returned row owns its fields before that reader
+can move to another index: known owning scalar getters need no second serializer copy, while
+nested views retain the deep copy.
 
 The planner captures the entry and generated-result Arrow schemas in serialized operator/function
 specifications. Task JVM properties cannot change those layouts after planning. Connector schemas
@@ -34,7 +35,8 @@ retain their ordinary layouts. Representation-sensitive inputs from other column
 string/ROW/MAP-bearing or NOT NULL-element array results crossing unverified operator boundaries
 keep the host route. Represented final results also require a row sink: native writer substitutions
 are declined until they verify the extended physical schema. Ordinary nullable primitive array
-outputs retain native sinks. These schemas are scoped to generated collection programs; merely enabling
+outputs retain native sinks. These schemas are scoped to generated collection programs and verified
+direct string-keyed map projections; merely enabling
 the experimental switch does not change other operators' schemas.
 
 Arrow Java 18.3 requires a non-nullable map-key field declaration. The existing declaration stays,
@@ -45,7 +47,8 @@ values, empty/NULL maps and runtime constructors.
 
 The switch defaults on under the maintainer's explicit acceptance on 2026-10-17, despite slower
 full row-source jobs. Setting it false restores host execution for the extension.
-[Issue #392](https://github.com/datafusion-contrib/StreamFusion/issues/392) tracks performance improvements. Coverage, restrictions and
+The [collection representation ledger](../docs/optimizations/collection-representation-work.md)
+records measured boundary improvements and remaining costs. Coverage, restrictions and
 performance evidence belong in [Calc/filter](../docs/operators/calc-filter.md#collection-expressions)
 and the [scalar benchmark page](../docs/benchmarks/scalar-functions.md#extended-function-coverage).
 
@@ -111,3 +114,11 @@ verified map-list carrier retained for NULL keys. MAP_UNION cannot use ordinary
 hash-map overwrite semantics: Flink preserves right duplicates, special-cases
 empty right maps and treats left NULL keys differently from other duplicates.
 A typed stable gather preserves those released behaviors.
+
+
+Scalar string exits also retain the generic row representation expected by released legacy
+`RowData` consumers. Canonical strings may borrow Arrow bytes only during the synchronous
+ownership copy; cached or represented strings keep their existing reader. Packing these
+outputs into binary rows changes legacy debug rendering, even though typed getters agree,
+and is therefore excluded. The [string exit ledger](../docs/optimizations/zero-copy-exit-transpose.md#synchronous-copies-of-cache-free-scalar-strings)
+records the retained boundary and its compatibility regression coverage.

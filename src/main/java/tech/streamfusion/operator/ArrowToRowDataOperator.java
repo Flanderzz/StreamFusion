@@ -26,8 +26,9 @@ import tech.streamfusion.compat.FlinkStreamOperator;
  * native columnar operator feeds a rowwise (host) one, so the Arrow→row conversion happens once at
  * the boundary. It consumes (and closes) each batch it receives.
  *
- * <p>Primitive and binary outputs use Flink's generated binary-row projection so downstream copying
- * avoids generic field getters and boxing. Other outputs retain the reusable Arrow-backed row view.
+ * <p>Primitive and binary outputs use Flink's generated binary-row projection so downstream
+ * copying avoids generic field getters and boxing. Cache-free scalar strings borrow bytes only
+ * during the synchronous ownership copy, retaining the generic row representation.
  * Chained Flink operators may retain a collected {@code RowData}. With object reuse disabled,
  * Flink's chained output copies the reusable row synchronously; with reuse enabled this boundary
  * supplies the owned copy. Network outputs serialize synchronously before the batch closes.
@@ -39,6 +40,7 @@ public class ArrowToRowDataOperator extends FlinkStreamOperator<RowData>
       Boolean.getBoolean("streamfusion.experimental.borrowedStringExit");
   private final GeneratedProjection generatedProjection;
   private final boolean requiresBinaryRowCache;
+  private final boolean borrowCanonicalStrings;
   private transient Projection<RowData, BinaryRowData> projection;
   private transient RowDataSerializer outputSerializer;
   private transient Counter numInputBatches;
@@ -51,6 +53,9 @@ public class ArrowToRowDataOperator extends FlinkStreamOperator<RowData>
 
   public ArrowToRowDataOperator(RowType rowType, boolean cachedBinaryRows) {
     this.rowType = rowType;
+    boolean hasStringFields = rowType.getChildren().stream().anyMatch(type ->
+        type.getTypeRoot() == org.apache.flink.table.types.logical.LogicalTypeRoot.CHAR
+            || type.getTypeRoot() == org.apache.flink.table.types.logical.LogicalTypeRoot.VARCHAR);
     requiresBinaryRowCache =
         cachedBinaryRows
             && rowType.getChildren().stream()
@@ -67,6 +72,8 @@ public class ArrowToRowDataOperator extends FlinkStreamOperator<RowData>
                       return cachedBinaryRows;
                     case BINARY:
                     case VARBINARY:
+                    case CHAR:
+                    case VARCHAR:
                     case BOOLEAN:
                     case TINYINT:
                     case SMALLINT:
@@ -85,8 +92,10 @@ public class ArrowToRowDataOperator extends FlinkStreamOperator<RowData>
                       return false;
                   }
                 });
+    // String outputs retain generic rows for legacy RowData consumers.
+    borrowCanonicalStrings = projectBinaryRow && hasStringFields && !requiresBinaryRowCache;
     generatedProjection =
-        projectBinaryRow
+        projectBinaryRow && !hasStringFields
             ? ProjectionCodeGenerator.generateProjection(
                 new CodeGeneratorContext(new Configuration(), getClass().getClassLoader()),
                 "NativeExitRow",
@@ -117,8 +126,12 @@ public class ArrowToRowDataOperator extends FlinkStreamOperator<RowData>
     long started = System.nanoTime();
     try (VectorSchemaRoot root = element.getValue().root()) {
       boolean project = projection != null && (!requiresBinaryRowCache || hasBinaryRowCaches(root));
+      boolean canonicalStrings = borrowCanonicalStrings
+          && tech.streamfusion.arrow.StringCacheColumns.readers(root, rowType.getFieldCount()) == null
+          && root.getFieldVectors().stream().limit(rowType.getFieldCount())
+              .noneMatch(vector -> tech.streamfusion.arrow.NestedRepresentation.contains(vector.getField()));
       ArrowReader reader =
-          borrowStrings
+          borrowStrings || canonicalStrings
               ? ArrowConversion.createBorrowedStringReader(root, rowType)
               : ArrowConversion.createArrowReader(root, rowType, project && requiresBinaryRowCache);
       TinyIntVector kinds = (TinyIntVector) root.getVector(RowDataArrowConverter.ROW_KIND_COLUMN);

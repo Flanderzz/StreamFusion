@@ -73,8 +73,8 @@ not establish a sustained gain over stock Flink. BOOLEAN and DECIMAL still lose
 to stock. This improves evaluation inside the already-admitted experimental
 extension; it does not establish a universally accelerated standalone collection
 path. Its existing default and switch are unchanged. The previously accepted
-standalone losses remain tracked by
-[issue #392](https://github.com/datafusion-contrib/StreamFusion/issues/392).
+standalone losses remain in these historical measurements; subsequent boundary improvements
+are measured in the [collection representation ledger](collection-representation-work.md).
 
 The DECIMAL setter alone reduces the ten-million-row native median from 5.041354
 to 4.360048 seconds (-13.51%), with paired stock medians 3.774383 and 3.774973.
@@ -182,8 +182,8 @@ an advantage over stock Flink. Wide-value DECIMAL still loses to paired stock,
 despite improving the previous evaluator. Its stock control also shifts materially
 between cohorts, so the before/after columns must remain visible. The existing
 experimental extension and its previously accepted standalone limits are unchanged;
-[issue #392](https://github.com/datafusion-contrib/StreamFusion/issues/392) remains
-open. These trials do not isolate the remaining bottleneck. The earlier decimal
+the [collection representation ledger](collection-representation-work.md) records subsequent
+boundary improvements. These trials do not isolate the remaining bottleneck. The earlier decimal
 profile identifies entry costs, and truly wide values still use the BigDecimal
 setter, but no new causal profile or universal acceleration claim is made here.
 

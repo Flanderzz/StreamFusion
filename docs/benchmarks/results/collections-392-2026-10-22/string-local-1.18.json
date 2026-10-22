@@ -1,0 +1,1557 @@
+{
+  "environment": {
+    "line": "1.18",
+    "cpu": "12th Gen Intel(R) Core(TM) i7-12650H",
+    "platform": "Linux-6.18.54.1-microsoft-standard-WSL2-x86_64-with-glibc2.35",
+    "java": "openjdk version \"17.0.20.1\" 2026-08-18\nOpenJDK Runtime Environment (build 17.0.20.1+1-1-22.04-Ubuntu)\nOpenJDK 64-Bit Server VM (build 17.0.20.1+1-1-22.04-Ubuntu, mixed mode, sharing)\n",
+    "baseline_java": "d951a83808425f9e7df7c0f6fc3fdb082443885f",
+    "candidate_java": "8a490951 plus generic string exit from f7867f55",
+    "shared_native": "Integrated 717b8d94 release core; affected string/literal kernels unchanged. Same DSO for both Java cohorts, hash retained per record.",
+    "rows": 2000000,
+    "warmup": 2,
+    "runs": 5,
+    "heap": "2 GiB",
+    "parallelism": 1,
+    "method": "Sequential fresh JVMs by cohort/case, alternating stock/native pairs. No detected competing builds/tests; continuous CPU/process/memory/I/O observations retained. Same source/transposes/JNI/row-sink timing boundary as primary."
+  },
+  "records": [
+    {
+      "cohort": "previous",
+      "case": "join",
+      "expression": "ARRAY_JOIN(arr,'|','?')",
+      "map_source": false,
+      "type": "STRING",
+      "width": 8,
+      "stock_trials": [
+        1.922425103,
+        1.881036488,
+        1.926494663,
+        1.914394953,
+        1.924500717
+      ],
+      "native_trials": [
+        1.739682314,
+        1.736155321,
+        1.705994667,
+        1.725547084,
+        1.714202768
+      ],
+      "route_evidence": [
+        "[collection-engine] [NativeCalc functions: native=[ARRAY_JOIN], jvm=[]]",
+        "[collection-route] [{recordsIn=2000000, operator=NativeCalc(select=[ARRAY_JOIN(arr, '|', '?') AS v, true AS anchor], nativeFuncti, recordsOut=2000000, subtask=0, attempt=0, jobId=9ad5a97075a1208f56c2a05f703f190f}]",
+        "[collection-route] [{recordsIn=2000000, operator=NativeCalc(select=[ARRAY_JOIN(arr, '|', '?') AS v, true AS anchor], nativeFuncti, recordsOut=2000000, subtask=0, attempt=0, jobId=c5bb43449325f1d71128e1d014d64d2f}]",
+        "[collection-route] [{recordsIn=2000000, operator=NativeCalc(select=[ARRAY_JOIN(arr, '|', '?') AS v, true AS anchor], nativeFuncti, recordsOut=2000000, subtask=0, attempt=0, jobId=c225bb37e920f013749f574ef887d1e4}]",
+        "[collection-route] [{recordsIn=2000000, operator=NativeCalc(select=[ARRAY_JOIN(arr, '|', '?') AS v, true AS anchor], nativeFuncti, recordsOut=2000000, subtask=0, attempt=0, jobId=9296ae3bf9837e61cabe8717319b4516}]",
+        "[collection-route] [{recordsIn=2000000, operator=NativeCalc(select=[ARRAY_JOIN(arr, '|', '?') AS v, true AS anchor], nativeFuncti, recordsOut=2000000, subtask=0, attempt=0, jobId=0c35acbd220b2c42cde230356d73b94b}]",
+        "[collection-route] [{recordsIn=2000000, operator=NativeCalc(select=[ARRAY_JOIN(arr, '|', '?') AS v, true AS anchor], nativeFuncti, recordsOut=2000000, subtask=0, attempt=0, jobId=c4a1707a735f595735ddb9f018bc9820}]",
+        "[collection-route] [{recordsIn=2000000, operator=NativeCalc(select=[ARRAY_JOIN(arr, '|', '?') AS v, true AS anchor], nativeFuncti, recordsOut=2000000, subtask=0, attempt=0, jobId=7f36f5a633d0b7a1da81cef9c429090b}]"
+      ],
+      "all_trials": [
+        "[collection-trial] engine=flink trial=0 warmup=true rows=2000000 seconds=2.679874204",
+        "[collection-trial] engine=native trial=0 warmup=true rows=2000000 seconds=2.090165592",
+        "[collection-trial] engine=native trial=1 warmup=true rows=2000000 seconds=1.781366227",
+        "[collection-trial] engine=flink trial=1 warmup=true rows=2000000 seconds=1.994470680",
+        "[collection-trial] engine=flink trial=2 warmup=false rows=2000000 seconds=1.922425103",
+        "[collection-trial] engine=native trial=2 warmup=false rows=2000000 seconds=1.739682314",
+        "[collection-trial] engine=native trial=3 warmup=false rows=2000000 seconds=1.736155321",
+        "[collection-trial] engine=flink trial=3 warmup=false rows=2000000 seconds=1.881036488",
+        "[collection-trial] engine=flink trial=4 warmup=false rows=2000000 seconds=1.926494663",
+        "[collection-trial] engine=native trial=4 warmup=false rows=2000000 seconds=1.705994667",
+        "[collection-trial] engine=native trial=5 warmup=false rows=2000000 seconds=1.725547084",
+        "[collection-trial] engine=flink trial=5 warmup=false rows=2000000 seconds=1.914394953",
+        "[collection-trial] engine=flink trial=6 warmup=false rows=2000000 seconds=1.924500717",
+        "[collection-trial] engine=native trial=6 warmup=false rows=2000000 seconds=1.714202768"
+      ],
+      "validation": {
+        "cohort": "baseline",
+        "case": "join",
+        "expression": "ARRAY_JOIN(arr,'|','?')",
+        "rows": 2000000,
+        "width": 8,
+        "type": "STRING",
+        "map": false,
+        "warmup": 2,
+        "runs": 5,
+        "command": [
+          "mvn",
+          "-o",
+          "-q",
+          "-Pbench,flink-1.18",
+          "-pl",
+          "streamfusion-runtime",
+          "surefire:test@default-test",
+          "-Dtest=DynamicCollectionBenchmark",
+          "-Dcollection.expression=ARRAY_JOIN(arr,'|','?')",
+          "-Dcollection.map=false",
+          "-Dcollection.type=STRING",
+          "-Dcollection.width=8",
+          "-Dcollection.rows=2000000",
+          "-Dcollection.warmup=2",
+          "-Dcollection.runs=5",
+          "-Dcollection.bytes=64",
+          "-Dcollection.rustFunction=ARRAY_JOIN",
+          "-Dsf.extraJvmArgs=-Xmx2g"
+        ],
+        "exitCode": 0,
+        "elapsed": 33.24829053878784,
+        "profiled": false,
+        "contaminated": false,
+        "classesSha256": "ca390287c527e44e83ffdc08ada7852e56645c6775dd2e553bdc5047b7c79632",
+        "dsoSha256": "b574f02abc8a286c1f295b6cc1660f9764ce4d77fa5d88c940e1347f0755856f",
+        "stockMedian": 1.922425,
+        "nativeMedian": 1.725547,
+        "stockTrials": [
+          1.922425103,
+          1.881036488,
+          1.926494663,
+          1.914394953,
+          1.924500717
+        ],
+        "nativeTrials": [
+          1.739682314,
+          1.736155321,
+          1.705994667,
+          1.725547084,
+          1.714202768
+        ]
+      },
+      "host_observations": [
+        {
+          "time": 1792682324.603799,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 9148720,
+            "SwapFree": 2669572
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682325.6066985,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 8966932,
+            "SwapFree": 2669572
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682326.6079261,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 8743788,
+            "SwapFree": 2669572
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682327.609241,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 8669768,
+            "SwapFree": 2669572
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682328.610542,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 8481612,
+            "SwapFree": 2669572
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682329.6117318,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 8398976,
+            "SwapFree": 2669572
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682330.6130772,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 8152404,
+            "SwapFree": 2669572
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682331.6144915,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7796068,
+            "SwapFree": 2669572
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682332.615655,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 8132192,
+            "SwapFree": 2669572
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682333.6168866,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7901820,
+            "SwapFree": 2669572
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682334.6182292,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7901316,
+            "SwapFree": 2669572
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682335.6194918,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7752632,
+            "SwapFree": 2669572
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682336.6209056,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7653496,
+            "SwapFree": 2669572
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682337.6222453,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7520596,
+            "SwapFree": 2669572
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682338.6236327,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7523760,
+            "SwapFree": 2669572
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682339.6250677,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7458508,
+            "SwapFree": 2669572
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682340.6266193,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7458540,
+            "SwapFree": 2669572
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682341.6279557,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7370216,
+            "SwapFree": 2669572
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682342.630184,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7311000,
+            "SwapFree": 2669572
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682343.6314728,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7312312,
+            "SwapFree": 2669572
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682344.6326659,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7249016,
+            "SwapFree": 2669572
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682345.6338773,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7252756,
+            "SwapFree": 2669572
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682346.6351898,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7168476,
+            "SwapFree": 2669572
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682347.6364698,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7172808,
+            "SwapFree": 2669572
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682348.6377778,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7105308,
+            "SwapFree": 2669572
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682349.6392305,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7108112,
+            "SwapFree": 2669600
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682350.6404314,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7039448,
+            "SwapFree": 2669600
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682351.6415884,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7047396,
+            "SwapFree": 2669600
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682352.643012,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 6976828,
+            "SwapFree": 2669600
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682353.6442938,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 6981404,
+            "SwapFree": 2669600
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682354.64542,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 6912324,
+            "SwapFree": 2669608
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682355.646711,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 6913180,
+            "SwapFree": 2669608
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682356.6478736,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 6860292,
+            "SwapFree": 2669664
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682357.6491804,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 6862072,
+            "SwapFree": 2669664
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        }
+      ]
+    },
+    {
+      "cohort": "previous",
+      "case": "typeof",
+      "expression": "TYPEOF(idx)",
+      "map_source": false,
+      "type": "BIGINT",
+      "width": 8,
+      "stock_trials": [
+        0.412502586,
+        0.534410481,
+        0.467647328,
+        0.396338608,
+        0.398425543
+      ],
+      "native_trials": [
+        0.391067058,
+        0.400328737,
+        0.363812587,
+        0.373562815,
+        0.361295691
+      ],
+      "route_evidence": [
+        "[collection-engine] [NativeCalc functions: native=[TYPEOF], jvm=[]]",
+        "[collection-route] [{jobId=aad4d71fe0f57a82366f3aed3886e6cb, attempt=0, subtask=0, recordsOut=2000000, operator=NativeCalc(select=[TYPEOF(idx) AS v, true AS anchor], nativeFunctions=[TYPEOF], , recordsIn=2000000}]",
+        "[collection-route] [{jobId=3d3d4992432afbc3c2ac2e68612557b3, attempt=0, subtask=0, recordsOut=2000000, operator=NativeCalc(select=[TYPEOF(idx) AS v, true AS anchor], nativeFunctions=[TYPEOF], , recordsIn=2000000}]",
+        "[collection-route] [{jobId=64f1683270f78d0699dde6891ad27095, attempt=0, subtask=0, recordsOut=2000000, operator=NativeCalc(select=[TYPEOF(idx) AS v, true AS anchor], nativeFunctions=[TYPEOF], , recordsIn=2000000}]",
+        "[collection-route] [{jobId=1d76f8329ffa5e8db5750aa03fad0c50, attempt=0, subtask=0, recordsOut=2000000, operator=NativeCalc(select=[TYPEOF(idx) AS v, true AS anchor], nativeFunctions=[TYPEOF], , recordsIn=2000000}]",
+        "[collection-route] [{jobId=bc25e17547de50cdecd2b8e52785554e, attempt=0, subtask=0, recordsOut=2000000, operator=NativeCalc(select=[TYPEOF(idx) AS v, true AS anchor], nativeFunctions=[TYPEOF], , recordsIn=2000000}]",
+        "[collection-route] [{jobId=b2660cdde1c6e46de80730026bd4feff, attempt=0, subtask=0, recordsOut=2000000, operator=NativeCalc(select=[TYPEOF(idx) AS v, true AS anchor], nativeFunctions=[TYPEOF], , recordsIn=2000000}]",
+        "[collection-route] [{jobId=2c621fcf812344a15a505d278d686501, attempt=0, subtask=0, recordsOut=2000000, operator=NativeCalc(select=[TYPEOF(idx) AS v, true AS anchor], nativeFunctions=[TYPEOF], , recordsIn=2000000}]"
+      ],
+      "all_trials": [
+        "[collection-trial] engine=flink trial=0 warmup=true rows=2000000 seconds=0.975079226",
+        "[collection-trial] engine=native trial=0 warmup=true rows=2000000 seconds=0.730374595",
+        "[collection-trial] engine=native trial=1 warmup=true rows=2000000 seconds=0.442940514",
+        "[collection-trial] engine=flink trial=1 warmup=true rows=2000000 seconds=0.385958454",
+        "[collection-trial] engine=flink trial=2 warmup=false rows=2000000 seconds=0.412502586",
+        "[collection-trial] engine=native trial=2 warmup=false rows=2000000 seconds=0.391067058",
+        "[collection-trial] engine=native trial=3 warmup=false rows=2000000 seconds=0.400328737",
+        "[collection-trial] engine=flink trial=3 warmup=false rows=2000000 seconds=0.534410481",
+        "[collection-trial] engine=flink trial=4 warmup=false rows=2000000 seconds=0.467647328",
+        "[collection-trial] engine=native trial=4 warmup=false rows=2000000 seconds=0.363812587",
+        "[collection-trial] engine=native trial=5 warmup=false rows=2000000 seconds=0.373562815",
+        "[collection-trial] engine=flink trial=5 warmup=false rows=2000000 seconds=0.396338608",
+        "[collection-trial] engine=flink trial=6 warmup=false rows=2000000 seconds=0.398425543",
+        "[collection-trial] engine=native trial=6 warmup=false rows=2000000 seconds=0.361295691"
+      ],
+      "validation": {
+        "cohort": "baseline",
+        "case": "typeof",
+        "expression": "TYPEOF(idx)",
+        "rows": 2000000,
+        "width": 8,
+        "type": "BIGINT",
+        "map": false,
+        "warmup": 2,
+        "runs": 5,
+        "command": [
+          "mvn",
+          "-o",
+          "-q",
+          "-Pbench,flink-1.18",
+          "-pl",
+          "streamfusion-runtime",
+          "surefire:test@default-test",
+          "-Dtest=DynamicCollectionBenchmark",
+          "-Dcollection.expression=TYPEOF(idx)",
+          "-Dcollection.map=false",
+          "-Dcollection.type=BIGINT",
+          "-Dcollection.width=8",
+          "-Dcollection.rows=2000000",
+          "-Dcollection.warmup=2",
+          "-Dcollection.runs=5",
+          "-Dcollection.bytes=64",
+          "-Dsf.extraJvmArgs=-Xmx2g"
+        ],
+        "exitCode": 0,
+        "elapsed": 12.981768608093262,
+        "profiled": false,
+        "contaminated": false,
+        "classesSha256": "ca390287c527e44e83ffdc08ada7852e56645c6775dd2e553bdc5047b7c79632",
+        "dsoSha256": "b574f02abc8a286c1f295b6cc1660f9764ce4d77fa5d88c940e1347f0755856f",
+        "stockMedian": 0.412503,
+        "nativeMedian": 0.373563,
+        "stockTrials": [
+          0.412502586,
+          0.534410481,
+          0.467647328,
+          0.396338608,
+          0.398425543
+        ],
+        "nativeTrials": [
+          0.391067058,
+          0.400328737,
+          0.363812587,
+          0.373562815,
+          0.361295691
+        ]
+      },
+      "host_observations": [
+        {
+          "time": 1792682362.952239,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 9071984,
+            "SwapFree": 2669672
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682363.9533722,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 8950052,
+            "SwapFree": 2669672
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682364.954825,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 8733856,
+            "SwapFree": 2669672
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682365.9559553,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 8617988,
+            "SwapFree": 2669672
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682366.957249,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 8430748,
+            "SwapFree": 2669672
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682367.9583547,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 8349432,
+            "SwapFree": 2669672
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682368.9596703,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 8025568,
+            "SwapFree": 2669672
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682369.9618196,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7877492,
+            "SwapFree": 2669672
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682370.9631321,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7763324,
+            "SwapFree": 2669672
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682371.9644852,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7750272,
+            "SwapFree": 2669672
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682372.9656415,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7694376,
+            "SwapFree": 2669672
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682373.9668763,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7631884,
+            "SwapFree": 2669672
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682374.9681776,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7622560,
+            "SwapFree": 2669672
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        }
+      ]
+    },
+    {
+      "cohort": "candidate",
+      "case": "join",
+      "expression": "ARRAY_JOIN(arr,'|','?')",
+      "map_source": false,
+      "type": "STRING",
+      "width": 8,
+      "stock_trials": [
+        1.95542711,
+        2.012248843,
+        2.044383778,
+        1.930679126,
+        1.999290531
+      ],
+      "native_trials": [
+        1.71324482,
+        1.692031989,
+        1.684142275,
+        1.695208243,
+        1.692226503
+      ],
+      "route_evidence": [
+        "[collection-engine] [NativeCalc functions: native=[ARRAY_JOIN], jvm=[]]",
+        "[collection-route] [{recordsIn=2000000, jobId=0c65e017b43a0ce74b8dc5ecd5bb7a80, attempt=0, subtask=0, recordsOut=2000000, operator=NativeCalc(select=[ARRAY_JOIN(arr, '|', '?') AS v, true AS anchor], nativeFuncti}]",
+        "[collection-route] [{recordsIn=2000000, jobId=cd23b103a8b69201cbff5de56fee961d, attempt=0, subtask=0, recordsOut=2000000, operator=NativeCalc(select=[ARRAY_JOIN(arr, '|', '?') AS v, true AS anchor], nativeFuncti}]",
+        "[collection-route] [{recordsIn=2000000, jobId=8921f8b0f26c0f1c486ed24cdc9bbdb9, attempt=0, subtask=0, recordsOut=2000000, operator=NativeCalc(select=[ARRAY_JOIN(arr, '|', '?') AS v, true AS anchor], nativeFuncti}]",
+        "[collection-route] [{recordsIn=2000000, jobId=729f03137237c30efe9f17d46d90fcd7, attempt=0, subtask=0, recordsOut=2000000, operator=NativeCalc(select=[ARRAY_JOIN(arr, '|', '?') AS v, true AS anchor], nativeFuncti}]",
+        "[collection-route] [{recordsIn=2000000, jobId=e46a0c38a9ed717b356d215a34ba1438, attempt=0, subtask=0, recordsOut=2000000, operator=NativeCalc(select=[ARRAY_JOIN(arr, '|', '?') AS v, true AS anchor], nativeFuncti}]",
+        "[collection-route] [{recordsIn=2000000, jobId=b9363eab5ea747d64f76f59982e711b9, attempt=0, subtask=0, recordsOut=2000000, operator=NativeCalc(select=[ARRAY_JOIN(arr, '|', '?') AS v, true AS anchor], nativeFuncti}]",
+        "[collection-route] [{recordsIn=2000000, jobId=3ab80a97e213c9cb9aeb293c030abd05, attempt=0, subtask=0, recordsOut=2000000, operator=NativeCalc(select=[ARRAY_JOIN(arr, '|', '?') AS v, true AS anchor], nativeFuncti}]"
+      ],
+      "all_trials": [
+        "[collection-trial] engine=flink trial=0 warmup=true rows=2000000 seconds=2.690009435",
+        "[collection-trial] engine=native trial=0 warmup=true rows=2000000 seconds=2.017272367",
+        "[collection-trial] engine=native trial=1 warmup=true rows=2000000 seconds=1.722595677",
+        "[collection-trial] engine=flink trial=1 warmup=true rows=2000000 seconds=1.937791130",
+        "[collection-trial] engine=flink trial=2 warmup=false rows=2000000 seconds=1.955427110",
+        "[collection-trial] engine=native trial=2 warmup=false rows=2000000 seconds=1.713244820",
+        "[collection-trial] engine=native trial=3 warmup=false rows=2000000 seconds=1.692031989",
+        "[collection-trial] engine=flink trial=3 warmup=false rows=2000000 seconds=2.012248843",
+        "[collection-trial] engine=flink trial=4 warmup=false rows=2000000 seconds=2.044383778",
+        "[collection-trial] engine=native trial=4 warmup=false rows=2000000 seconds=1.684142275",
+        "[collection-trial] engine=native trial=5 warmup=false rows=2000000 seconds=1.695208243",
+        "[collection-trial] engine=flink trial=5 warmup=false rows=2000000 seconds=1.930679126",
+        "[collection-trial] engine=flink trial=6 warmup=false rows=2000000 seconds=1.999290531",
+        "[collection-trial] engine=native trial=6 warmup=false rows=2000000 seconds=1.692226503"
+      ],
+      "validation": {
+        "cohort": "candidate",
+        "case": "join",
+        "expression": "ARRAY_JOIN(arr,'|','?')",
+        "rows": 2000000,
+        "width": 8,
+        "type": "STRING",
+        "map": false,
+        "warmup": 2,
+        "runs": 5,
+        "command": [
+          "mvn",
+          "-o",
+          "-q",
+          "-Pbench,flink-1.18",
+          "-pl",
+          "streamfusion-runtime",
+          "surefire:test@default-test",
+          "-Dtest=DynamicCollectionBenchmark",
+          "-Dcollection.expression=ARRAY_JOIN(arr,'|','?')",
+          "-Dcollection.map=false",
+          "-Dcollection.type=STRING",
+          "-Dcollection.width=8",
+          "-Dcollection.rows=2000000",
+          "-Dcollection.warmup=2",
+          "-Dcollection.runs=5",
+          "-Dcollection.bytes=64",
+          "-Dcollection.rustFunction=ARRAY_JOIN",
+          "-Dsf.extraJvmArgs=-Xmx2g"
+        ],
+        "exitCode": 0,
+        "elapsed": 33.30007243156433,
+        "profiled": false,
+        "contaminated": false,
+        "classesSha256": "672339c7d222cb287bb6648e5b116660309e1324f3ffc6f90cffc3e16433d1f0",
+        "dsoSha256": "b574f02abc8a286c1f295b6cc1660f9764ce4d77fa5d88c940e1347f0755856f",
+        "stockMedian": 1.999291,
+        "nativeMedian": 1.692227,
+        "stockTrials": [
+          1.95542711,
+          2.012248843,
+          2.044383778,
+          1.930679126,
+          1.999290531
+        ],
+        "nativeTrials": [
+          1.71324482,
+          1.692031989,
+          1.684142275,
+          1.695208243,
+          1.692226503
+        ]
+      },
+      "host_observations": [
+        {
+          "time": 1792682381.1190248,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 9079072,
+            "SwapFree": 2669672
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682382.1212077,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 8949384,
+            "SwapFree": 2669672
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682383.1226513,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 8716884,
+            "SwapFree": 2669672
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682384.1237996,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 8638844,
+            "SwapFree": 2669672
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682385.1251254,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 8396628,
+            "SwapFree": 2669672
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682386.1265655,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 8350752,
+            "SwapFree": 2669672
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682387.1278427,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 8110436,
+            "SwapFree": 2669672
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682388.1291144,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7714592,
+            "SwapFree": 2669672
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682389.1303782,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 8092668,
+            "SwapFree": 2669672
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682390.1316445,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7845208,
+            "SwapFree": 2669672
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682391.1327574,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7849128,
+            "SwapFree": 2669672
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682392.1340048,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7774024,
+            "SwapFree": 2669672
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682393.135354,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7625660,
+            "SwapFree": 2669672
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682394.1366482,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7562272,
+            "SwapFree": 2669672
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682395.1378498,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7500828,
+            "SwapFree": 2669672
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682396.1391191,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7502432,
+            "SwapFree": 2669672
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682397.1403494,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7444620,
+            "SwapFree": 2669672
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682398.1416223,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7452632,
+            "SwapFree": 2669672
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682399.142919,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7391256,
+            "SwapFree": 2669672
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682400.144125,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7382884,
+            "SwapFree": 2669672
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682401.1455054,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7299360,
+            "SwapFree": 2669672
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682402.1467545,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7303896,
+            "SwapFree": 2669672
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682403.1479502,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7232860,
+            "SwapFree": 2669676
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682404.149197,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7236032,
+            "SwapFree": 2669676
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682405.1505406,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7171920,
+            "SwapFree": 2669676
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682406.1517518,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7174356,
+            "SwapFree": 2669704
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682407.1530118,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7104704,
+            "SwapFree": 2669704
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682408.1542904,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7107632,
+            "SwapFree": 2669704
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682409.1556916,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7042856,
+            "SwapFree": 2669704
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682410.157026,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7045992,
+            "SwapFree": 2669704
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682411.1581702,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 6979444,
+            "SwapFree": 2669704
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682412.1593783,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 6984792,
+            "SwapFree": 2669704
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682413.1605873,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 6919976,
+            "SwapFree": 2669704
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682414.161944,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 6932204,
+            "SwapFree": 2669756
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        }
+      ]
+    },
+    {
+      "cohort": "candidate",
+      "case": "typeof",
+      "expression": "TYPEOF(idx)",
+      "map_source": false,
+      "type": "BIGINT",
+      "width": 8,
+      "stock_trials": [
+        0.398628802,
+        0.513205702,
+        0.392253279,
+        0.382153706,
+        0.391367308
+      ],
+      "native_trials": [
+        0.367070319,
+        0.364912533,
+        0.377976529,
+        0.345480571,
+        0.350218713
+      ],
+      "route_evidence": [
+        "[collection-engine] [NativeCalc functions: native=[TYPEOF], jvm=[]]",
+        "[collection-route] [{recordsIn=2000000, operator=NativeCalc(select=[TYPEOF(idx) AS v, true AS anchor], nativeFunctions=[TYPEOF], , recordsOut=2000000, subtask=0, attempt=0, jobId=25943946560d8f04e567de16e4ee4e18}]",
+        "[collection-route] [{recordsIn=2000000, operator=NativeCalc(select=[TYPEOF(idx) AS v, true AS anchor], nativeFunctions=[TYPEOF], , recordsOut=2000000, subtask=0, attempt=0, jobId=d928e27bed41486ebae61355b8b0055a}]",
+        "[collection-route] [{recordsIn=2000000, operator=NativeCalc(select=[TYPEOF(idx) AS v, true AS anchor], nativeFunctions=[TYPEOF], , recordsOut=2000000, subtask=0, attempt=0, jobId=27a463261be25341579cc7e1bce07d1a}]",
+        "[collection-route] [{recordsIn=2000000, operator=NativeCalc(select=[TYPEOF(idx) AS v, true AS anchor], nativeFunctions=[TYPEOF], , recordsOut=2000000, subtask=0, attempt=0, jobId=6efa3fa5bc2112c719eb6aa4f9584ac2}]",
+        "[collection-route] [{recordsIn=2000000, operator=NativeCalc(select=[TYPEOF(idx) AS v, true AS anchor], nativeFunctions=[TYPEOF], , recordsOut=2000000, subtask=0, attempt=0, jobId=d7a57244b5421bb9d97a2f2b02efa9f3}]",
+        "[collection-route] [{recordsIn=2000000, operator=NativeCalc(select=[TYPEOF(idx) AS v, true AS anchor], nativeFunctions=[TYPEOF], , recordsOut=2000000, subtask=0, attempt=0, jobId=add9d2a97a698eec2e85529b7d9172e1}]",
+        "[collection-route] [{recordsIn=2000000, operator=NativeCalc(select=[TYPEOF(idx) AS v, true AS anchor], nativeFunctions=[TYPEOF], , recordsOut=2000000, subtask=0, attempt=0, jobId=547a5e8aed6ae6320ac6d21a4a72bbaa}]"
+      ],
+      "all_trials": [
+        "[collection-trial] engine=flink trial=0 warmup=true rows=2000000 seconds=0.946411271",
+        "[collection-trial] engine=native trial=0 warmup=true rows=2000000 seconds=0.714627644",
+        "[collection-trial] engine=native trial=1 warmup=true rows=2000000 seconds=0.417833403",
+        "[collection-trial] engine=flink trial=1 warmup=true rows=2000000 seconds=0.432452482",
+        "[collection-trial] engine=flink trial=2 warmup=false rows=2000000 seconds=0.398628802",
+        "[collection-trial] engine=native trial=2 warmup=false rows=2000000 seconds=0.367070319",
+        "[collection-trial] engine=native trial=3 warmup=false rows=2000000 seconds=0.364912533",
+        "[collection-trial] engine=flink trial=3 warmup=false rows=2000000 seconds=0.513205702",
+        "[collection-trial] engine=flink trial=4 warmup=false rows=2000000 seconds=0.392253279",
+        "[collection-trial] engine=native trial=4 warmup=false rows=2000000 seconds=0.377976529",
+        "[collection-trial] engine=native trial=5 warmup=false rows=2000000 seconds=0.345480571",
+        "[collection-trial] engine=flink trial=5 warmup=false rows=2000000 seconds=0.382153706",
+        "[collection-trial] engine=flink trial=6 warmup=false rows=2000000 seconds=0.391367308",
+        "[collection-trial] engine=native trial=6 warmup=false rows=2000000 seconds=0.350218713"
+      ],
+      "validation": {
+        "cohort": "candidate",
+        "case": "typeof",
+        "expression": "TYPEOF(idx)",
+        "rows": 2000000,
+        "width": 8,
+        "type": "BIGINT",
+        "map": false,
+        "warmup": 2,
+        "runs": 5,
+        "command": [
+          "mvn",
+          "-o",
+          "-q",
+          "-Pbench,flink-1.18",
+          "-pl",
+          "streamfusion-runtime",
+          "surefire:test@default-test",
+          "-Dtest=DynamicCollectionBenchmark",
+          "-Dcollection.expression=TYPEOF(idx)",
+          "-Dcollection.map=false",
+          "-Dcollection.type=BIGINT",
+          "-Dcollection.width=8",
+          "-Dcollection.rows=2000000",
+          "-Dcollection.warmup=2",
+          "-Dcollection.runs=5",
+          "-Dcollection.bytes=64",
+          "-Dsf.extraJvmArgs=-Xmx2g"
+        ],
+        "exitCode": 0,
+        "elapsed": 12.618827104568481,
+        "profiled": false,
+        "contaminated": false,
+        "classesSha256": "672339c7d222cb287bb6648e5b116660309e1324f3ffc6f90cffc3e16433d1f0",
+        "dsoSha256": "b574f02abc8a286c1f295b6cc1660f9764ce4d77fa5d88c940e1347f0755856f",
+        "stockMedian": 0.392253,
+        "nativeMedian": 0.364913,
+        "stockTrials": [
+          0.398628802,
+          0.513205702,
+          0.392253279,
+          0.382153706,
+          0.391367308
+        ],
+        "nativeTrials": [
+          0.367070319,
+          0.364912533,
+          0.377976529,
+          0.345480571,
+          0.350218713
+        ]
+      },
+      "host_observations": [
+        {
+          "time": 1792682419.5226243,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 9095344,
+            "SwapFree": 2669756
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682420.524844,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 8939900,
+            "SwapFree": 2669764
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682421.52622,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 8719540,
+            "SwapFree": 2669772
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682422.5274591,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 8593188,
+            "SwapFree": 2669772
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682423.5286994,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 8398488,
+            "SwapFree": 2669772
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682424.5300207,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 8343080,
+            "SwapFree": 2669772
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682425.5313282,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7871168,
+            "SwapFree": 2669772
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682426.5324862,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7926304,
+            "SwapFree": 2669772
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682427.5336397,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7743644,
+            "SwapFree": 2669772
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682428.534936,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7733804,
+            "SwapFree": 2669772
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682429.5362191,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7724712,
+            "SwapFree": 2669772
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682430.537397,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7661796,
+            "SwapFree": 2669772
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        },
+        {
+          "time": 1792682431.538744,
+          "cpuCores": 0.0,
+          "processes": [],
+          "jobs": [],
+          "memoryKiB": {
+            "MemAvailable": 7648188,
+            "SwapFree": 2669772
+          },
+          "ioFullAvg10": 0.0,
+          "reasons": []
+        }
+      ]
+    }
+  ]
+}
