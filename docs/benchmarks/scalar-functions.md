@@ -1637,3 +1637,73 @@ Reproduce with `SF_BENCHMARK=true`, `-Pbench`, `-Dtest=MapScalarUdfBenchmark`,
 `-Dmapbench.rows=16384 -Dmapbench.width=4` or `65536/64`, and
 `-Dsf.extraJvmArgs="-Xmx2g -Dstreamfusion.exchange.zeroCopyLocal=false"`. The old revision uses
 the same benchmark source with `-Dmapbench.expectNative=false`.
+
+## Final JSON_VALUE and UNION ALL (2026-10-22)
+
+These are complete-job measurements of two filtered JSON_VALUE branches feeding a final UNION ALL
+and row blackhole sink. The source constructs runtime rows; both entry transposes, the exit transpose,
+JNI/C Data and Arrow IPC remain in the timed path. Timing starts at `executeSql` and ends after job
+completion, including execution planning and deployment. Environment creation and the separate EXPLAIN
+are outside timing. Each native trial asserts native Calc/Union plans, both perimeter conversion
+directions, positive NativeCalc input counts and no fallback. Correctness uses separate typed collectors
+and a sink that captures UTF-16 units before result serialization.
+
+Apple M4 Pro, macOS/aarch64, released Flink 2.2.1, JDK 11.0.27, release/mimalloc, one task manager,
+parallelism one, 8 GiB maximum JVM heap and 1,024-row transpose batches. There are two warmups and five
+measured trials with alternating engine order. The metrics harness grants the same 48 GiB off-heap
+accounting budget to both engines; it is a limit, not allocated or measured resident memory.
+
+The previous behavior is canonical main `47bbc8b080e8cece29540e2f739ddbfdc6bc7111`, using its own rebuilt
+release library and the same benchmark source. It declines the complete query with zero substitutions.
+Previous and candidate processes run serially with separate stock controls; their differences must not
+be attributed entirely to the implementation. Medians in seconds:
+
+| Input | Rows | Candidate stock | Native | Previous stock | Previous fallback |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Short ASCII | 2,000,000 | 1.042780 | 0.687971 | 0.967463 | 0.965541 |
+| Nine-member ASCII | 2,000,000 | 1.537207 | 1.022508 | 1.574752 | 1.572480 |
+| Escaped Unicode/empty/NULL | 2,000,000 | 1.214878 | 0.743581 | 1.132274 | 1.133687 |
+| Raw Chinese/supplementary/NULL | 2,000,000 | 0.830042 | 0.652332 | 0.790804 | 0.787202 |
+| Unique ASCII document per row | 2,000,000 | 1.001590 | 0.721988 | 0.982541 | 0.964158 |
+| Short ASCII | 20,000,000 | 9.497192 | 5.962004 | -- | -- |
+
+The five two-million-row fixtures reduce time by 21.4%-38.8% versus their paired stock controls.
+The larger ASCII job reduces time by 37.2%; previous-main performance was not separately measured
+at that size. These results establish the tested final row-sink composition, not performance or
+semantic admission for grouping, joins, sorting, JSON_QUERY or native columnar sinks.
+
+The same five two-million-row fixtures also execute natively on released Flink 1.18.1/JDK 11 with
+the same resources, warmups, interleaving and release library. Their paired medians are:
+
+| Input | Flink 1.18 stock (s) | Native (s) |
+| --- | ---: | ---: |
+| Short ASCII | 1.050900 | 0.796418 |
+| Nine-member ASCII | 1.697440 | 1.355543 |
+| Escaped Unicode/empty/NULL | 1.143719 | 0.681589 |
+| Raw Chinese/supplementary/NULL | 0.831848 | 0.646050 |
+| Unique ASCII document per row | 1.055666 | 0.825663 |
+
+The unique fixture constructs a distinct document and extracted value for every row inside the
+timed job. Its gains therefore do not depend on repeated-document encoding reuse.
+
+Previous-main performance was not separately remeasured on 1.18. The JDK 11 correctness selection
+passes 85 checks on 2.2 and 74 checks with 11 explicit catalog skips on 1.18. All 23 issue-specific
+SQL checks execute on both lines, including duplicate/mixed branches, sink-side code-unit capture,
+four changelog kinds, two checkpoint restores at parallelism one/three and explicit fallback cases.
+A further JDK 17 selection passes 96 SQL/JNI/Arrow ownership, partial-batch close and failure-cleanup
+checks on 2.2. The connector-free Rust core passes all 758 library tests. These are selected JVM
+suites rather than a full JVM-suite run.
+
+The initial input-cache prototype was slower than stock on short and wide ASCII. Profiling identified
+duplicated UTF-16 documents and entry encoding work. The final transpose omits only redundant caches
+for parse-only JSON inputs, retaining malformed UTF-16 and differing cached/byte values. A Unicode
+diagnostic with ASCII-only cache omission also regressed; retaining lazy encoding and omitting valid
+lazy Unicode caches removes that measured gap. These intermediate results are retained with the
+[raw trials, ranges, native library identities and validation counts](results/json-final-union-2026-10-22.json).
+
+Reproduce with `SF_BENCHMARK=true`, `-Pbench`, `-Dtest=JsonStringUnionBenchmark` and
+`-Djsonunion.fixture=ascii|wide|unicode|raw-unicode|unique`. Select one fixture per invocation; use
+`-Djsonunion.rows=20000000` for the larger job. Previous main uses the identical benchmark source
+with `-Djsonunion.expectNative=false`; add `-Pflink-1.18` for the older released line.
+See [Union coverage](../operators/union.md#final-json_value-projections)
+and [parse-only entry caches](../optimizations/projection-pruning-transpose.md#parse-only-json-document-caches).

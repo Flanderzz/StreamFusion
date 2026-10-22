@@ -31,6 +31,7 @@ public class StreamPhysicalRowDataToArrow extends StreamPhysicalNativeSingleRel
   private final RelDataType prunedType;
   private final boolean preserveCollections;
   private final int preferredBatchRows;
+  private final boolean jsonDocuments;
 
   public StreamPhysicalRowDataToArrow(
       RelOptCluster cluster, RelTraitSet traitSet, RelNode input, boolean carryRowKind) {
@@ -64,11 +65,24 @@ public class StreamPhysicalRowDataToArrow extends StreamPhysicalNativeSingleRel
       RelDataType prunedType,
       boolean preserveCollections,
       int preferredBatchRows) {
+    this(cluster, traitSet, input, carryRowKind, prunedType, preserveCollections,
+        preferredBatchRows, false);
+  }
+
+  private StreamPhysicalRowDataToArrow(RelOptCluster cluster, RelTraitSet traitSet, RelNode input,
+      boolean carryRowKind, RelDataType prunedType, boolean preserveCollections,
+      int preferredBatchRows, boolean jsonDocuments) {
     super(cluster, traitSet, input);
     this.preferredBatchRows = preferredBatchRows;
     this.carryRowKind = carryRowKind;
     this.prunedType = prunedType;
     this.preserveCollections = preserveCollections;
+    this.jsonDocuments = jsonDocuments;
+  }
+
+  StreamPhysicalRowDataToArrow withJsonDocuments() {
+    return jsonDocuments ? this : new StreamPhysicalRowDataToArrow(getCluster(), getTraitSet(),
+        getInput(), carryRowKind, prunedType, preserveCollections, preferredBatchRows, true);
   }
 
   StreamPhysicalRowDataToArrow withPreferredBatchRows(int rows) {
@@ -81,7 +95,8 @@ public class StreamPhysicalRowDataToArrow extends StreamPhysicalNativeSingleRel
             carryRowKind,
             prunedType,
             preserveCollections,
-            rows);
+            rows,
+            jsonDocuments);
   }
 
   boolean preservesCollections() {
@@ -107,7 +122,8 @@ public class StreamPhysicalRowDataToArrow extends StreamPhysicalNativeSingleRel
         carryRowKind,
         prunedType,
         preserveCollections,
-        preferredBatchRows);
+        preferredBatchRows,
+        jsonDocuments);
   }
 
   @Override
@@ -122,7 +138,8 @@ public class StreamPhysicalRowDataToArrow extends StreamPhysicalNativeSingleRel
             ? null
             : FlinkTypeFactory$.MODULE$.toLogicalRowType(getInput().getRowType()),
         preserveCollections,
-        preferredBatchRows);
+        preferredBatchRows,
+        jsonDocuments);
   }
 
   @Override
@@ -131,6 +148,7 @@ public class StreamPhysicalRowDataToArrow extends StreamPhysicalNativeSingleRel
     // display-only — the digest already carries the full row type.
     return super.explainTerms(pw)
         .itemIf("collectionRepresentation", true, preserveCollections)
+        .itemIf("jsonDocuments", true, jsonDocuments)
         .itemIf("preferredBatchRows", preferredBatchRows, preferredBatchRows != 1024)
         .itemIf(
             "fields",

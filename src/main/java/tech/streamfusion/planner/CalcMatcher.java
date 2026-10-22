@@ -21,6 +21,10 @@ final class CalcMatcher {
   private CalcMatcher() {}
 
   static boolean matches(Calc calc) {
+    return matches(calc, false);
+  }
+
+  static boolean matches(Calc calc, boolean javaJsonInput) {
     if (CollectionValueIdentity.unverifiedInput(calc)) return false;
     RexProgram program = calc.getProgram();
     // A condition with an all-column-reference projection is the filter path's case; leave it
@@ -33,7 +37,7 @@ final class CalcMatcher {
     if (!FilterCalcMatcher.convertibleRow(calc.getInput().getRowType())) {
       return false;
     }
-    RexExpression encoded = RexExpression.encodeCalc(calc);
+    RexExpression encoded = RexExpression.encodeCalc(calc, javaJsonInput);
     return encoded != null && outputTypeMismatch(calc, encoded) == null;
   }
 
@@ -58,6 +62,7 @@ final class CalcMatcher {
   }
 
   static RelNode substitute(Calc calc, PlanContext ctx) {
+    boolean javaJsonInput = ctx.requiresJavaJsonInput(calc);
     calc = mergeProcessingTimeProjection(calc);
     RelNode input = calc.getInputs().get(0);
     if (input instanceof StreamPhysicalNativeFilter
@@ -93,7 +98,7 @@ final class CalcMatcher {
             .withProjection(calc.getTraitSet(), calc.getRowType(), projection);
       }
     }
-    RexExpression encoded = CalcMatcher.encode(calc);
+    RexExpression encoded = RexExpression.encodeCalc(calc, javaJsonInput);
     ctx.functionExecution("NativeCalc", encoded);
     // Nested projection pushdown: when the input is rowwise (about to be transposed) and the calc
     // reads only some of its columns / struct sub-fields, prune the entry transpose to just those

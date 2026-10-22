@@ -14,6 +14,7 @@ public final class NestedRepresentation {
   private static final String BINARY_ROW_BYTES = "streamfusion.nested-row-binary";
   private static final String KIND = "streamfusion.nested-row-kind";
   public static final String ARRAY = "streamfusion.array-copy";
+  public static final String JSON_DOCUMENT = "streamfusion.json-document";
   private static final String ELEMENT = "streamfusion.array-element";
   public static final int BINARY_ROW = 4;
   public static final int BINARY_ARRAY = 8;

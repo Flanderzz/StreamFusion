@@ -38,6 +38,26 @@ impl Reader {
         path.apply_policy(self.parse(path, input))
     }
 
+    pub fn read_escaped<'a>(
+        &mut self,
+        path: &Path<'_>,
+        input: &'a str,
+        surrogate_escapes: &'a [usize],
+    ) -> Result<Value<'a>, ()> {
+        // Each synthetic \\uXXXX occupies one original Java unit. Jackson's buffer
+        // growth and number-token limits must observe those original positions.
+        let units = input.encode_utf16().count() - 5 * surrogate_escapes.len();
+        if units <= 32768 {
+            self.buffer_size = self.buffer_size.max(units);
+        }
+        path.apply_policy(path.parse_escaped_with_profile(
+            input,
+            self.buffer_size,
+            self.legacy,
+            surrogate_escapes,
+        ))
+    }
+
     /// IS JSON validates the first document without Jayway's root-null or path-mode policy.
     pub fn read_document<'a>(
         &'a mut self,

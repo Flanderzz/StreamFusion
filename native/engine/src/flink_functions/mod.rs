@@ -251,6 +251,7 @@ pub(crate) fn function(op: i64, arity: usize) -> Option<ScalarUDF> {
         199 => datafusion::functions::core::named_struct().as_ref().clone(),
         200 => array_join::function(arity),
         201 => element::function(true),
+        202 => json_value::java_input_function(),
         _ => return None,
     })
 }

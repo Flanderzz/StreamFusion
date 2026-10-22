@@ -1,11 +1,16 @@
 package tech.streamfusion.planner;
 
+import java.util.Collections;
+import java.util.IdentityHashMap;
+import java.util.Set;
 import org.apache.calcite.rel.RelNode;
+import org.apache.calcite.rel.core.Union;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rex.RexCall;
 import org.apache.calcite.rex.RexFieldAccess;
 import org.apache.calcite.rex.RexLiteral;
 import org.apache.calcite.rex.RexNode;
+import org.apache.calcite.rex.RexInputRef;
 import org.apache.calcite.sql.type.SqlTypeFamily;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalCalc;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalSink;
@@ -60,11 +65,16 @@ final class JsonStringIdentity {
   }
 
   static boolean crossesOperatorBoundary(RelNode root, boolean finalOutput) {
-    return crossesOperatorBoundary(root, null, finalOutput);
+    return finalUnionJsonInputs(root, finalOutput) == null;
   }
 
-  private static boolean crossesOperatorBoundary(
-      RelNode node, RelNode parent, boolean finalOutput) {
+  static Set<RelNode> finalUnionJsonInputs(RelNode root, boolean finalOutput) {
+    Set<RelNode> calcs = Collections.newSetFromMap(new IdentityHashMap<>());
+    return collectUnionProjections(root, null, finalOutput, finalOutput, calcs) ? calcs : null;
+  }
+
+  private static boolean collectUnionProjections(
+      RelNode node, RelNode parent, boolean finalOutput, boolean forwarding, Set<RelNode> calcs) {
     if (node instanceof StreamPhysicalCalc
         && !(parent == null && finalOutput)
         && !(parent instanceof StreamPhysicalSink)) {
@@ -73,14 +83,46 @@ final class JsonStringIdentity {
       var program = calc.getProgram();
       for (var projection : program.getProjectList()) {
         RexNode expression = program.expandLocalRef(projection);
-        if (containsCharacter(expression.getType()) && containsSensitiveString(expression))
-          return true;
+        if (containsCharacter(expression.getType()) && containsSensitiveString(expression)) {
+          if (!forwarding || !preservableJsonValue(expression)) return false;
+          calcs.add(node);
+        }
+      }
+      if (calcs.contains(node)) {
+        for (var projection : program.getProjectList()) {
+          RexNode expression = program.expandLocalRef(projection);
+          if (preservableJsonValue(expression)
+              || expression instanceof RexLiteral && ((RexLiteral) expression).isNull()) continue;
+          if (containsCharacter(expression.getType()) || hasCharacterInput(expression)) return false;
+        }
+        if (program.getCondition() != null
+            && hasCharacterInput(program.expandLocalRef(program.getCondition()))) return false;
       }
     }
+    boolean next = node instanceof StreamPhysicalSink
+        || forwarding && node instanceof Union && ((Union) node).all;
     for (RelNode input : node.getInputs()) {
-      if (crossesOperatorBoundary(input, node, false)) return true;
+      if (!collectUnionProjections(input, node, false, next, calcs)) return false;
     }
-    return false;
+    return true;
+  }
+
+  private static boolean hasCharacterInput(RexNode expression) {
+    if (expression instanceof RexInputRef) return containsCharacter(expression.getType());
+    if (expression instanceof RexFieldAccess)
+      return hasCharacterInput(((RexFieldAccess) expression).getReferenceExpr());
+    return expression instanceof RexCall
+        && ((RexCall) expression).getOperands().stream().anyMatch(JsonStringIdentity::hasCharacterInput);
+  }
+
+  private static boolean preservableJsonValue(RexNode expression) {
+    if (!(expression instanceof RexCall)
+        || !SqlTypeFamily.CHARACTER.contains(expression.getType())) return false;
+    var call = (RexCall) expression;
+    return call.getOperator().getName().equals("JSON_VALUE")
+        && call.getOperands().get(0) instanceof RexInputRef
+        && call.getOperands().stream().noneMatch(operand -> operand instanceof RexLiteral
+            && containsSensitiveString(operand));
   }
 
   static boolean containsBinaryString(RexNode expression) {

@@ -1,5 +1,6 @@
 package tech.streamfusion.planner;
 
+import java.util.function.BiPredicate;
 import java.util.function.Function;
 import java.util.function.Predicate;
 import org.apache.calcite.rel.RelNode;
@@ -34,7 +35,7 @@ final class Substitution<T extends RelNode> {
   private final String operatorKey;
   private final Planner<T> planner;
   private Predicate<T> shapeMatching = node -> true;
-  private Predicate<T> matching = node -> true;
+  private BiPredicate<T, PlanContext> matching = (node, ctx) -> true;
   private Predicate<T> owns = node -> true;
   private Function<T, String> reason;
   private boolean changelogSafe;
@@ -72,6 +73,10 @@ final class Substitution<T extends RelNode> {
    * construct an admitted replacement here; a declined node passes to later entries.
    */
   Substitution<T> matching(Predicate<T> matching) {
+    return matchingWithContext((node, ctx) -> matching.test(node));
+  }
+
+  Substitution<T> matchingWithContext(BiPredicate<T, PlanContext> matching) {
     this.matching = matching;
     return this;
   }
@@ -139,7 +144,7 @@ final class Substitution<T extends RelNode> {
       return node;
     }
     try {
-      if (!matching.test(typed)) {
+      if (!matching.test(typed, ctx)) {
         return null;
       }
     } catch (NoClassDefFoundError

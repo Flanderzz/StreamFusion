@@ -84,6 +84,38 @@ Unicode age, and supplementary code points are tested as UTF-16 surrogate units,
 Jackson. This avoids treating a newly assigned character as a token suffix on an older JDK.
 Unmapped JDK versions are declined rather than silently using the build machine's rules.
 
+## Final UNION forwarding
+
+The final UNION ALL admission follows Arroyo's forwarding structure, with a Flink-specific
+input contract. JSON_VALUE reads an ordinary UTF-8 document or the existing represented-string
+struct carrying its original Java cache. A raw unpaired surrogate is synthetically escaped
+for native parsing, with an offset map retaining the original Java character positions for
+Jackson's buffer growth and numeric limits. A backslash followed by a raw surrogate remains
+invalid JSON. The existing Comet-style batch import/export owns these buffers; parsing performs
+no per-row JVM callbacks.
+
+Output is ordinary UTF-8. Released-Flink jobs with two branches demonstrate that row serialization
+on the UNION fan-in edge drops Java caches and replaces isolated surrogates before the row sink.
+A prototype that retained the original output cache through Arrow IPC produced different UTF-16
+units at that sink even though ordinary result collection passed. It is therefore not used.
+The permanent sink-side capture compares code units before accumulator/result serialization;
+collect parity alone cannot prove this boundary.
+
+Admission is restricted to final forwarding into row sinks. It does not remove the identity
+guard from grouping, joins, sorting, composed character results or non-final optimizer blocks.
+The JSON-producing Calc cannot expose another character input alongside its extracted result,
+because that represented input would otherwise escape with its original cache. Ordinary STRING
+branches retain their existing UTF-8 route. JSON_QUERY and native columnar sinks remain unverified.
+Other consumers of character inputs in the producing Calc, including non-character projections
+and filters, remain outside this whitelist, as do JVM function callbacks.
+
+The entry transpose tags these parse-only document fields in its Arrow schema and planner digest.
+For lazy Java strings containing only valid UTF-16, UTF-8 encoding preserves every parsing character,
+so their cache is redundant. Already-materialized ASCII strings omit the cache only after comparing
+every byte. Other materialized strings, differing cached/byte values and isolated surrogates retain
+the original cache. The check leaves lazy strings unmaterialized so the existing JDK encoder and
+bounded repeated-value encoding cache remain effective. It does not widen general string semantics.
+
 ## Resource-limit boundary
 
 For the Jackson 2.18.2 profile, published limits are 1000 number digits, 1000 nesting levels, 20 million UTF-16

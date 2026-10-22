@@ -188,7 +188,8 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
           "legacy binary variable bytes require a final projection or fused scalar consumer");
       return root;
     }
-    if (JsonStringIdentity.crossesOperatorBoundary(root, finalOutput)) {
+    Set<RelNode> javaJsonInputs = JsonStringIdentity.finalUnionJsonInputs(root, finalOutput);
+    if (javaJsonInputs == null) {
       recordFallback("JSON string identity requires a final projection or a fused scalar consumer");
       return root;
     }
@@ -196,7 +197,13 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
     int previousSubstitutions = substitutions;
     int previousFunctionExecutions = functionExecutions.size();
     int previousJvmFunctionOperators = jvmFunctionOperators;
-    RelNode substituted = rewrite(root, new PlanContext(this, repeatedSources));
+    RelNode substituted = rewrite(root, new PlanContext(this, repeatedSources, javaJsonInputs));
+    if (!javaJsonInputs.isEmpty() && substituted instanceof ColumnarInput) {
+      substitutions = previousSubstitutions;
+      rollbackFunctionExecutions(previousFunctionExecutions, previousJvmFunctionOperators);
+      recordFallback("JSON string identity across UNION requires a row sink");
+      return root;
+    }
     if (root instanceof org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalSink
         && substituted instanceof ColumnarInput
         && (JsonStringIdentity.projectsBinaryString(root)
@@ -421,7 +428,7 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
             .changelogSafe());
     entries.add(
         Substitution.of(StreamPhysicalCalc.class, "calc", CalcMatcher::substitute)
-            .matching(CalcMatcher::matches)
+            .matchingWithContext((calc, ctx) -> CalcMatcher.matches(calc, ctx.requiresJavaJsonInput(calc)))
             .reason(CalcMatcher::unsupportedReason)
             .changelogSafe());
 
@@ -858,6 +865,9 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
       if (adapted instanceof StreamPhysicalRowDataToArrow) {
         adapted =
             ((StreamPhysicalRowDataToArrow) adapted).withPreferredBatchRows(preferredBatchRows);
+        if (node instanceof StreamPhysicalNativeCalc
+            && ((StreamPhysicalNativeCalc) node).usesJavaJsonInput())
+          adapted = ((StreamPhysicalRowDataToArrow) adapted).withJsonDocuments();
       }
       inputs.add(adapted);
       changed |= adapted != input;

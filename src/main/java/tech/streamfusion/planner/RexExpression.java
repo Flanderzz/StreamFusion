@@ -275,7 +275,20 @@ final class RexExpression {
    * operation the native engine does not admit, so the Calc falls back to the host.
    */
   static RexExpression encodeCalc(Calc calc) {
+    return encodeCalc(calc, false);
+  }
+
+  static RexExpression encodeCalc(Calc calc, boolean javaJsonInput) {
     CalcEncoding encoded = tryEncodeCalc(calc);
+    if (javaJsonInput && encoded.supported()) {
+      RexExpression encoder = encoded.encoder();
+      if (encoder.rowFusion || !encoder.jvmFunctionCalls.isEmpty()) return null;
+      for (int root : encoder.projectionRoots) {
+        if (encoder.kinds.get(root) == KIND_CALL && encoder.payload.get(root) == 141)
+          encoder.payload.set(root, 202);
+      }
+      encoder.preserveCollections = true;
+    }
     return encoded.supported() ? encoded.encoder() : null;
   }
 
