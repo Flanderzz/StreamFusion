@@ -73,8 +73,10 @@ class FeatureAdmissionBenchmark {
         name,
         System.getProperty("admission.backend", "memory"),
         System.getProperty("admission.stockLayout", "binary"),
-        Boolean.getBoolean("streamfusion.experimental.directTemporalCalc"),
-        Boolean.getBoolean("streamfusion.experimental.temporalAliases"));
+        Boolean.parseBoolean(
+            System.getProperty("streamfusion.experimental.directTemporalCalc", "true")),
+        Boolean.parseBoolean(
+            System.getProperty("streamfusion.experimental.temporalAliases", "true")));
     int count = Integer.getInteger("admission.rows", 131072);
     int batchRows = Integer.getInteger("admission.batchRows", 1024);
     int keys = Integer.getInteger("admission.keys", 64);
