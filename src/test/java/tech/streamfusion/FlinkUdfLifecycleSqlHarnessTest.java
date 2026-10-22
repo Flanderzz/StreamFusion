@@ -75,7 +75,6 @@ class FlinkUdfLifecycleSqlHarnessTest {
     var env = StreamExecutionEnvironment.getExecutionEnvironment();
     env.setParallelism(1);
     var table = StreamTableEnvironment.create(env);
-    table.getConfig().set("streamfusion.calc.sharedStatefulUdf.enabled", "true");
     table.createTemporarySystemFunction("MY_ADD", new LifecycleAdd(10));
     table.createTemporarySystemFunction("OTHER_ADD", new LifecycleAdd(100));
     Row[] rows = new Row[5003];

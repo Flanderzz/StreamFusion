@@ -653,9 +653,11 @@ public final class NativeUdf {
     try {
       for (FieldVector vector : out.getFieldVectors()) vector.setInitialCapacity(in.getRowCount());
       var writer = tech.streamfusion.arrow.ArrowConversion.createRowDataArrowWriter(out, type);
-      for (int row = 0; row < in.getRowCount(); row++) {
-        var value = (org.apache.flink.table.data.RowData) udf.generated.evalRow(reader.read(row));
-        if (value != null) writer.write(value);
+      if (!udf.generated.tryEvalBatch(reader, writer, in.getRowCount())) {
+        for (int row = 0; row < in.getRowCount(); row++) {
+          var value = (org.apache.flink.table.data.RowData) udf.generated.evalRow(reader.read(row));
+          if (value != null) writer.write(value);
+        }
       }
       writer.finish();
       return out;
