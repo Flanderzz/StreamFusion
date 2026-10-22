@@ -198,6 +198,8 @@ existing generated schedule because their call order affects values and lifecycl
 Regression tests require failure when invalid expressions are reached, rather than choosing
 the same winner among competing failures. They also verify successful filters, NULLs,
 untaken branches, nested inputs and independent binary-backed STRING projections.
+Selected integer division errors are checked by cause and evaluation phase: the JVM's
+`ArithmeticException` and the Rust engine's division-by-zero error both fail the native job.
 
 ## FROM_UNIXTIME literal formats
 
