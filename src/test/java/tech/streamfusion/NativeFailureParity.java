@@ -189,14 +189,20 @@ final class NativeFailureParity {
       assertEquals(nativeRoute, nativeRun.route(), this::toString);
     }
 
-    void assertNullUnboxingFailure(Phase phase, Route nativeRoute) {
+    void assertNullDereferenceFailure(String operation, Phase phase, Route nativeRoute) {
       assertFailure(NullPointerException.class, phase, nativeRoute);
       for (Outcome outcome : List.of(host, nativeRun)) {
-        assertEquals(List.of(), outcome.rows(), this::toString);
         // Helpful NPE text is optional on every JDK, independently of SQL failure semantics.
         if (outcome.rootCauseMessage != null) {
-          assertTrue(outcome.rootCauseMessage.contains("booleanValue"), this::toString);
+          assertTrue(outcome.rootCauseMessage.contains(operation), this::toString);
         }
+      }
+    }
+
+    void assertNullUnboxingFailure(Phase phase, Route nativeRoute) {
+      assertNullDereferenceFailure("booleanValue", phase, nativeRoute);
+      for (Outcome outcome : List.of(host, nativeRun)) {
+        assertEquals(List.of(), outcome.rows(), this::toString);
       }
     }
 

@@ -12,6 +12,9 @@ mod zero_sum;
 pub(crate) use retracting_window::{HIDDEN_LIVE_COUNT, LIVE_COUNT, RETRACT_COUNT, RETRACT_SUM};
 pub(crate) use timestamp_extreme::TimestampExtremeAccumulator;
 
+pub(crate) const RETRACTING_DECIMAL_SUM: i64 = 40;
+pub(crate) const RAW_SUM_PARTIAL: i64 = 41;
+
 /// Builds a built-in aggregate over an int64 `value` column. SUM/MIN/MAX/COUNT all reduce an int64
 /// column to a single int64 with single-scalar partial state, driven through DataFusion's
 /// accumulator machinery.
@@ -32,10 +35,9 @@ pub(crate) fn value_data_type(code: i64) -> DataType {
         8 => DataType::Date32,
         9 => DataType::Time32(arrow::datatypes::TimeUnit::Millisecond),
         10 => DataType::Boolean,
-        // A COUNT(DISTINCT) value whose Flink type has no faithful code (TIME, BOOLEAN, complex
-        // types): the fold reads the actual column and the distinct set keys scalars, so the
-        // declared type is immaterial there — but a fixed-type persistent element codec cannot be
-        // built for it, and Null keeps such aggregates off the per-element RocksDB path.
+        // A retained value whose full type travels in Arrow. DISTINCT keys the actual scalar;
+        // FIRST/LAST bind their schema from input or checkpoint fields before creating state.
+        // Null also keeps these states off a fixed-type persistent element codec.
         100 => DataType::Null,
         // Decimal packs precision/scale into the code (2000 + precision*100 + scale), matching the
         // JVM side, so the per-aggregate value type carries them without a wider signature.
@@ -969,6 +971,17 @@ pub(crate) fn compact_timestamp_scalar(
     )
 }
 
+fn nested_scalar_type(value: &ScalarValue) -> Option<&DataType> {
+    match value {
+        ScalarValue::List(a) => Some(a.data_type()),
+        ScalarValue::LargeList(a) => Some(a.data_type()),
+        ScalarValue::FixedSizeList(a) => Some(a.data_type()),
+        ScalarValue::Struct(a) => Some(a.data_type()),
+        ScalarValue::Map(a) => Some(a.data_type()),
+        _ => None,
+    }
+}
+
 /// Builds an array from per-row scalars, using the given type for the empty case (where the
 /// element type cannot be inferred from the values).
 pub(crate) fn scalars_to_array(scalars: Vec<ScalarValue>, data_type: &DataType) -> ArrayRef {
@@ -999,6 +1012,38 @@ pub(crate) fn scalars_to_array(scalars: Vec<ScalarValue>, data_type: &DataType) 
                 .expect("timestamp scalar schema"),
         );
     }
+    let uniform_nested_schema = scalars
+        .first()
+        .and_then(nested_scalar_type)
+        .is_some_and(|ty| {
+            scalars
+                .iter()
+                .all(|value| nested_scalar_type(value) == Some(ty))
+        });
+    let scalars = if !uniform_nested_schema
+        && matches!(
+            data_type,
+            DataType::List(_)
+                | DataType::LargeList(_)
+                | DataType::FixedSizeList(_, _)
+                | DataType::Struct(_)
+                | DataType::Map(_, _)
+        ) {
+        scalars
+            .into_iter()
+            .map(|value| {
+                if value.data_type() == *data_type {
+                    value
+                } else {
+                    let array = arrow::compute::cast(&value.to_array().unwrap(), data_type)
+                        .expect("nested scalar schema");
+                    ScalarValue::try_from_array(&array, 0).unwrap()
+                }
+            })
+            .collect()
+    } else {
+        scalars
+    };
     let array = ScalarValue::iter_to_array(scalars).expect("failed to build array");
     // For scalars the reconstructed type already equals `data_type` (no-op). For a nested type
     // (List/Struct/Map), ScalarValue reconstruction names the inner field generically (e.g. "item",
@@ -1273,7 +1318,20 @@ impl RunningAgg {
 
     pub(crate) fn new(kind: i64, value_type: &DataType) -> Self {
         use RunningAgg::*;
-        if matches!(kind, 22 | 23) {
+        if kind == RAW_SUM_PARTIAL {
+            return Self::new(0, value_type);
+        }
+        if kind == RETRACTING_DECIMAL_SUM {
+            let DataType::Decimal128(_, scale) = value_type else {
+                panic!("retracting decimal sum requires a decimal value");
+            };
+            return SumDecimal {
+                sum: 0,
+                scale: *scale,
+                overflow: true,
+            };
+        }
+        if matches!(kind, 22 | 23 | 34) {
             return match value_type {
                 DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 => {
                     ZeroSumInt {
@@ -1297,30 +1355,7 @@ impl RunningAgg {
                     DataType::Int64
                 }
                 DataType::Decimal128(_, scale) => DataType::Decimal128(38, *scale),
-                other => panic!("unsupported distinct average partial type: {other:?}"),
-            };
-            return Self::new(8, &sum_type);
-        }
-        if matches!(kind, 10 | 11)
-            && matches!(
-                value_type,
-                DataType::Date32
-                    | DataType::Time32(arrow::datatypes::TimeUnit::Millisecond)
-                    | DataType::Boolean
-            )
-        {
-            return TypedExtreme {
-                value: None,
-                is_min: kind == 10,
-                data_type: value_type.clone(),
-            };
-        }
-        if kind == 18 {
-            let sum_type = match value_type {
-                DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 => {
-                    DataType::Int64
-                }
-                DataType::Decimal128(_, scale) => DataType::Decimal128(38, *scale),
+                DataType::Float32 | DataType::Float64 => DataType::Float64,
                 other => panic!("unsupported distinct average partial type: {other:?}"),
             };
             return Self::new(8, &sum_type);

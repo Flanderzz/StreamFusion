@@ -8,6 +8,14 @@ import execution_scope
 
 
 class ExecutionScopeTest(unittest.TestCase):
+    def test_pinned_vintage_fixture_names_use_the_selected_method(self):
+        scope = json.loads(Path(__file__).with_name('runtime-route-scope-1.18.json').read_text())
+        for case in scope['cases']:
+            name = case['display_name']
+            if name.startswith('test') and '[' in name:
+                with self.subTest(test=case['test'], display_name=name):
+                    self.assertEqual(case['test'].split('#')[1], name.split('[', 1)[0])
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

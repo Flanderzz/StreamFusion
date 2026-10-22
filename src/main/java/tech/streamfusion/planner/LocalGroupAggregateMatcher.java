@@ -26,10 +26,10 @@ import tech.streamfusion.operator.RowDataArrowConverter;
  * the value's own type (Flink's SUM partial does not widen — verified against the planner), COUNT
  * is bigint, and an AVG contributes <em>two</em> partial columns — the widened running sum (bigint
  * for integer inputs, double for double, Flink's {@code AvgAggFunction}) and the bigint non-null
- * count. Retracting integer SUM also carries a bigint non-null count beside its typed sum. Partials
- * are positional, so the accessors below expand an AVG into its two native states (a widened-sum
- * state plus a COUNT over the same column) and the type checks walk the output row with a
- * per-aggregate offset. The global reads each partial by its declared (Flink) type, so every
+ * count. Retracting integer/FLOAT/DOUBLE SUM also carries a bigint non-null count beside its typed
+ * sum. Partials are positional, so the accessors below expand an AVG into its two native states (a
+ * widened-sum state plus a COUNT over the same column) and the type checks walk the output row with
+ * a per-aggregate offset. The global reads each partial by its declared (Flink) type, so every
  * declared partial column must equal what the native side emits — anything else falls back cleanly
  * rather than mismatching at the boundary.
  */
@@ -37,7 +37,22 @@ final class LocalGroupAggregateMatcher {
 
   private LocalGroupAggregateMatcher() {}
 
+  static boolean preservesComplexValues(StreamPhysicalLocalGroupAggregate agg) {
+    if (!matches(agg)) return false;
+    RelDataType input = agg.getInput().getRowType();
+    for (int i = 0; i < agg.aggCalls().size(); i++) {
+      AggregateCall call = agg.aggCalls().apply(i);
+      if (call.isDistinct()
+          && call.getAggregation().getKind() == org.apache.calcite.sql.SqlKind.COUNT
+          && call.getArgList().size() == 1
+          && input.getFieldList().get(call.getArgList().get(0)).getType().getSqlTypeName()
+              == SqlTypeName.ARRAY) return true;
+    }
+    return false;
+  }
+
   static int aggregateKind(org.apache.calcite.sql.SqlKind kind) {
+    if (kind == org.apache.calcite.sql.SqlKind.JSON_OBJECTAGG) return 42;
     if (kind == org.apache.calcite.sql.SqlKind.LISTAGG)
       return GroupAggregateMatcher.KIND_LISTAGG_APPEND;
     if (kind == org.apache.calcite.sql.SqlKind.SUM0) return GroupAggregateMatcher.KIND_SUM_ZERO;
@@ -46,8 +61,41 @@ final class LocalGroupAggregateMatcher {
         : WindowAggregateMatcher.aggregateKind(kind);
   }
 
+  static int jsonObjectKind(AggregateCall call) {
+    return 42
+        + (tech.streamfusion.compat.JsonRuntimeCompat.LEGACY_SQL_JSON ? 2 : 0)
+        + (((org.apache.calcite.sql.fun.SqlJsonObjectAggAggFunction) call.getAggregation())
+                    .getNullClause()
+                == org.apache.calcite.sql.SqlJsonConstructorNullClause.ABSENT_ON_NULL
+            ? 0
+            : 1);
+  }
+
+  static boolean supportedJsonObjectPartial(RelDataType partial) {
+    if (partial.isStruct()) {
+      if (partial.getFieldCount() != 1 || !partial.getFieldList().get(0).getName().equals("map"))
+        return false;
+      partial = partial.getFieldList().get(0).getType();
+    }
+    SqlTypeName type = partial.getSqlTypeName();
+    return type == SqlTypeName.OTHER || type == SqlTypeName.ANY || type == SqlTypeName.MAP;
+  }
+
+  static boolean supportedJsonObjectCall(AggregateCall call, RelDataType input) {
+    return !call.isDistinct()
+        && call.filterArg < 0
+        && call.getArgList().size() == 2
+        && call.getCollation().getFieldCollations().isEmpty()
+        && call.getArgList().stream()
+            .allMatch(
+                column ->
+                    GroupAggregateMatcher.isStringType(
+                        input.getFieldList().get(column).getType().getSqlTypeName()));
+  }
+
   static int partialWidth(AggregateCall call, boolean retracting) {
     int kind = aggregateKind(call.getAggregation().getKind());
+    if (kind == GroupAggregateMatcher.KIND_LISTAGG_APPEND && retracting) return 1;
     return kind == GroupAggregateMatcher.KIND_LISTAGG_APPEND
             || kind == 14
             || kind == WindowAggregateMatcher.KIND_AVG
@@ -58,7 +106,8 @@ final class LocalGroupAggregateMatcher {
 
   private static int stateWidth(AggregateCall call, boolean retracting) {
     return aggregateKind(call.getAggregation().getKind())
-            == GroupAggregateMatcher.KIND_LISTAGG_APPEND
+                == GroupAggregateMatcher.KIND_LISTAGG_APPEND
+            || isRetractingExtreme(call, retracting)
         ? 1
         : partialWidth(call, retracting);
   }
@@ -68,16 +117,57 @@ final class LocalGroupAggregateMatcher {
         && GroupAggregateMatcher.isStringType(prefix.getSqlTypeName());
   }
 
-  static boolean isRetractingSum(AggregateCall call, boolean retracting) {
+  static boolean supportedRetractingListPartial(RelDataType partial, boolean separator) {
+    if (!partial.isStruct() || partial.getFieldCount() != (separator ? 3 : 2)) return false;
+    if (!partial.getFieldList().get(0).getName().equals("list")
+        || !partial.getFieldList().get(1).getName().equals("retractList")) return false;
+    for (int i = 0; i < 2; i++) {
+      SqlTypeName type = partial.getFieldList().get(i).getType().getSqlTypeName();
+      if (type != SqlTypeName.ARRAY && type != SqlTypeName.OTHER && type != SqlTypeName.ANY)
+        return false;
+    }
+    return !separator
+        || GroupAggregateMatcher.isStringType(
+            partial.getFieldList().get(2).getType().getSqlTypeName());
+  }
+
+  static boolean isRetractingExtreme(AggregateCall call, boolean retracting) {
+    int kind = aggregateKind(call.getAggregation().getKind());
     return retracting
         && !call.isDistinct()
+        && (kind == WindowAggregateMatcher.KIND_MIN || kind == WindowAggregateMatcher.KIND_MAX);
+  }
+
+  private static boolean mappedExtreme(StreamPhysicalLocalGroupAggregate agg, int index) {
+    int offset = agg.grouping().length;
+    for (int i = 0; i < index; i++)
+      offset += partialWidth(agg.aggCalls().apply(i), needRetraction(agg));
+    return isRetractingExtreme(agg.aggCalls().apply(index), needRetraction(agg))
+        && agg.getRowType().getFieldList().get(offset).getType().isStruct();
+  }
+
+  static boolean supportedExtremePartials(RelDataType value, RelDataType partial) {
+    if (!partial.isStruct() || partial.getFieldCount() != 3) return false;
+    RelDataType selected = partial.getFieldList().get(0).getType();
+    RelDataType size = partial.getFieldList().get(1).getType();
+    SqlTypeName map = partial.getFieldList().get(2).getType().getSqlTypeName();
+    return WindowAggregateMatcher.supportedAggregateValueType(
+            WindowAggregateMatcher.KIND_MIN, value.getSqlTypeName())
+        && org.apache.calcite.sql.type.SqlTypeUtil.equalSansNullability(value, selected)
+        && size.getSqlTypeName() == SqlTypeName.BIGINT
+        && (map == SqlTypeName.OTHER || map == SqlTypeName.ANY || map == SqlTypeName.MAP);
+  }
+
+  static boolean isRetractingSum(AggregateCall call, boolean retracting) {
+    return retracting
         && aggregateKind(call.getAggregation().getKind()) == WindowAggregateMatcher.KIND_SUM;
   }
 
   static boolean supportedRetractingSumPartials(
       RelDataType value, RelDataType sum, RelDataType count) {
-    return GroupAggregateMatcher.isIntegerType(value.getSqlTypeName())
-        && org.apache.calcite.sql.type.SqlTypeUtil.equalSansNullability(value, sum)
+    return (GroupAggregateMatcher.isRunningType(value.getSqlTypeName())
+                && org.apache.calcite.sql.type.SqlTypeUtil.equalSansNullability(value, sum)
+            || value.getSqlTypeName() == SqlTypeName.DECIMAL && isWidenedDecimal(sum, value))
         && count.getSqlTypeName() == SqlTypeName.BIGINT;
   }
 
@@ -104,8 +194,9 @@ final class LocalGroupAggregateMatcher {
     Seq<AggregateCall> aggCalls = agg.aggCalls();
     // A retracting input (the aggregate consumes another aggregate's changelog, Nexmark q4's
     // shape): the local folds -U/-D rows by subtracting. COUNT, AVG and exact SUM0 use their
-    // append-only layouts, while Flink's retract variants of
-    // MIN/MAX declare value maps the positional walk does not model. SUM_RETRACT carries a
+    // append-only layouts, while retracting MIN/MAX declare a structured signed value map.
+    // SINGLE_VALUE keeps its
+    // typed value and signed INT count; SUM_RETRACT carries a
     // separate non-null count; a distinct view's map value switches to per-filter counts.
     boolean needRetraction = needRetraction(agg);
     int offset = grouping.length;
@@ -116,11 +207,15 @@ final class LocalGroupAggregateMatcher {
       }
       int retractKind = aggregateKind(call.getAggregation().getKind());
       if (needRetraction
-          && (call.isDistinct()
-              || (retractKind != WindowAggregateMatcher.KIND_COUNT
-                  && retractKind != WindowAggregateMatcher.KIND_AVG
-                  && retractKind != GroupAggregateMatcher.KIND_SUM_ZERO
-                  && retractKind != WindowAggregateMatcher.KIND_SUM))) {
+          && (retractKind != WindowAggregateMatcher.KIND_COUNT
+              && retractKind != WindowAggregateMatcher.KIND_AVG
+              && retractKind != GroupAggregateMatcher.KIND_SUM_ZERO
+              && retractKind != WindowAggregateMatcher.KIND_SUM
+              && retractKind != GroupAggregateMatcher.KIND_LISTAGG_APPEND
+              && retractKind != 42
+              && retractKind != 14
+              && retractKind != WindowAggregateMatcher.KIND_MIN
+              && retractKind != WindowAggregateMatcher.KIND_MAX)) {
         return false;
       }
       // A FILTER is a boolean input column (the planner materializes `IS TRUE(p)` in the Calc
@@ -133,21 +228,36 @@ final class LocalGroupAggregateMatcher {
         return false;
       }
       int kind = aggregateKind(call.getAggregation().getKind());
+      if (kind == 42) {
+        if (!supportedJsonObjectCall(call, inputType)
+            || offset >= outputType.getFieldCount()
+            || !supportedJsonObjectPartial(outputType.getFieldList().get(offset).getType()))
+          return false;
+        offset++;
+        continue;
+      }
       if (kind == GroupAggregateMatcher.KIND_LISTAGG_APPEND) {
-        if (call.isDistinct()
-            || !call.getCollation().getFieldCollations().isEmpty()
+        if (!call.getCollation().getFieldCollations().isEmpty()
             || call.getArgList().isEmpty()
             || call.getArgList().size() > 2
             || !GroupAggregateMatcher.isStringType(
                 inputType.getFieldList().get(call.getArgList().get(0)).getType().getSqlTypeName())
             || call.getArgList().size() == 2
                 && !GroupAggregateMatcher.literalStringColumn(
-                    agg.getInput(), call.getArgList().get(1))
-            || offset + 1 >= outputType.getFieldCount()
-            || !supportedListAggPartials(
-                outputType.getFieldList().get(offset).getType(),
-                outputType.getFieldList().get(offset + 1).getType())) return false;
-        offset += 2;
+                    agg.getInput(), call.getArgList().get(1))) return false;
+        if (needRetraction) {
+          if (offset >= outputType.getFieldCount()
+              || !supportedRetractingListPartial(
+                  outputType.getFieldList().get(offset).getType(), call.getArgList().size() == 2))
+            return false;
+          offset++;
+        } else {
+          if (offset + 1 >= outputType.getFieldCount()
+              || !supportedListAggPartials(
+                  outputType.getFieldList().get(offset).getType(),
+                  outputType.getFieldList().get(offset + 1).getType())) return false;
+          offset += 2;
+        }
         continue;
       }
       if (kind < 0 || call.getArgList().size() > 1) {
@@ -159,23 +269,21 @@ final class LocalGroupAggregateMatcher {
         if (value.getSqlTypeName() == SqlTypeName.DECIMAL && value.getScale() == 38) return false;
       }
       if (kind == GroupAggregateMatcher.KIND_SUM_ZERO
-          && (call.isDistinct()
-              || call.getArgList().size() != 1
+          && (call.getArgList().size() != 1
               || !WindowAggregateMatcher.supportedZeroSumValue(
                   inputType.getFieldList().get(call.getArgList().get(0)).getType()))) return false;
       // COUNT/SUM/AVG(DISTINCT x): the partial is the bundle's distinct count / distinct sum, and
       // the
       // bundle's (value, count) set rides a trailing view column (Flink's MapView partial) that the
-      // global merges with multiplicities. SUM/AVG admit exact arithmetic only — the merge folds in
-      // set-iteration order, so floating sums/averages and wide decimal sums/averages stay on
-      // the host. MIN/MAX DISTINCT still fall back two-phase.
+      // global merges with multiplicities. Floating and wide decimal reductions retain the host's
+      // membership-map iteration order. MIN/MAX DISTINCT still fall back two-phase.
       if (call.isDistinct()) {
         if (call.getArgList().size() != 1) {
           return false;
         }
         RelDataType value = inputType.getFieldList().get(call.getArgList().get(0)).getType();
         SqlTypeName valueType = value.getSqlTypeName();
-        int width = kind == WindowAggregateMatcher.KIND_AVG ? 2 : 1;
+        int width = partialWidth(call, needRetraction);
         if (offset + width > outputType.getFieldCount()) return false;
         RelDataType partial = outputType.getFieldList().get(offset).getType();
         SqlTypeName partialType = partial.getSqlTypeName();
@@ -185,8 +293,10 @@ final class LocalGroupAggregateMatcher {
           if (partialType != SqlTypeName.BIGINT || !supportedDistinctValueType(valueType)) {
             return false;
           }
-        } else if (kind == WindowAggregateMatcher.KIND_SUM) {
-          if (!supportedDistinctSumPartial(value, partial)) return false;
+        } else if (kind == WindowAggregateMatcher.KIND_SUM
+            || kind == GroupAggregateMatcher.KIND_SUM_ZERO) {
+          if (!supportedDistinctSumPartial(value, partial)
+              || count != null && count.getSqlTypeName() != SqlTypeName.BIGINT) return false;
         } else if (kind == WindowAggregateMatcher.KIND_AVG) {
           if (!supportedDistinctAveragePartials(value, partial, count)) return false;
         } else {
@@ -202,6 +312,17 @@ final class LocalGroupAggregateMatcher {
                 outputType.getFieldList().get(offset).getType(),
                 outputType.getFieldList().get(offset + 1).getType())) return false;
         offset += 2;
+        continue;
+      }
+      if (isRetractingExtreme(call, needRetraction)
+          && offset < outputType.getFieldCount()
+          && outputType.getFieldList().get(offset).getType().isStruct()) {
+        if (call.getArgList().size() != 1
+            || offset >= outputType.getFieldCount()
+            || !supportedExtremePartials(
+                inputType.getFieldList().get(call.getArgList().get(0)).getType(),
+                outputType.getFieldList().get(offset).getType())) return false;
+        offset++;
         continue;
       }
       if (isRetractingSum(call, needRetraction)) {
@@ -355,7 +476,11 @@ final class LocalGroupAggregateMatcher {
    * types would mis-key the specialized set, so they decline).
    */
   static boolean supportedDistinctValueType(SqlTypeName type) {
+    if (type.getFamily() == org.apache.calcite.sql.type.SqlTypeFamily.INTERVAL_DAY_TIME
+        || type.getFamily() == org.apache.calcite.sql.type.SqlTypeFamily.INTERVAL_YEAR_MONTH)
+      return true;
     switch (type) {
+      case ARRAY:
       case BIGINT:
       case INTEGER:
       case SMALLINT:
@@ -414,6 +539,9 @@ final class LocalGroupAggregateMatcher {
   static boolean supportedDistinctSumPartial(RelDataType value, RelDataType partial) {
     return (GroupAggregateMatcher.isIntegerType(value.getSqlTypeName())
             && partial.getSqlTypeName() == value.getSqlTypeName())
+        || ((value.getSqlTypeName() == SqlTypeName.FLOAT
+                || value.getSqlTypeName() == SqlTypeName.DOUBLE)
+            && partial.getSqlTypeName() == value.getSqlTypeName())
         || (value.getSqlTypeName() == SqlTypeName.DECIMAL && isWidenedDecimal(partial, value));
   }
 
@@ -422,6 +550,9 @@ final class LocalGroupAggregateMatcher {
     return count.getSqlTypeName() == SqlTypeName.BIGINT
         && ((GroupAggregateMatcher.isIntegerType(value.getSqlTypeName())
                 && sum.getSqlTypeName() == SqlTypeName.BIGINT)
+            || ((value.getSqlTypeName() == SqlTypeName.FLOAT
+                    || value.getSqlTypeName() == SqlTypeName.DOUBLE)
+                && sum.getSqlTypeName() == SqlTypeName.DOUBLE)
             || (value.getSqlTypeName() == SqlTypeName.DECIMAL && isWidenedDecimal(sum, value)));
   }
 
@@ -477,26 +608,55 @@ final class LocalGroupAggregateMatcher {
     for (int i = 0; i < aggCalls.size(); i++) {
       AggregateCall call = aggCalls.apply(i);
       int kind = aggregateKind(call.getAggregation().getKind());
-      if (call.isDistinct()) {
+      if (kind == GroupAggregateMatcher.KIND_LISTAGG_APPEND && call.isDistinct()) {
+        kinds.add(needRetraction(agg) ? 33 : 32);
+      } else if (kind == GroupAggregateMatcher.KIND_LISTAGG_APPEND && needRetraction(agg)) {
+        kinds.add(call.getArgList().size() == 2 ? 47 : 46);
+      } else if (kind == 42) {
+        kinds.add(jsonObjectKind(call));
+      } else if (call.isDistinct()) {
         if (kind == WindowAggregateMatcher.KIND_AVG) {
           kinds.add(18); // DISTINCT widened sum partial; its value set retains the input type.
           kinds.add(KIND_COUNT_DISTINCT);
         } else {
           kinds.add(
-              kind == WindowAggregateMatcher.KIND_COUNT ? KIND_COUNT_DISTINCT : KIND_SUM_DISTINCT);
+              kind == WindowAggregateMatcher.KIND_COUNT
+                  ? KIND_COUNT_DISTINCT
+                  : kind == GroupAggregateMatcher.KIND_SUM_ZERO
+                      ? GroupAggregateMatcher.KIND_SUM_ZERO_DISTINCT
+                      : KIND_SUM_DISTINCT);
+          if (isRetractingSum(call, needRetraction(agg))) kinds.add(KIND_COUNT_DISTINCT);
         }
+      } else if (mappedExtreme(agg, i)) {
+        kinds.add(kind == WindowAggregateMatcher.KIND_MIN ? 38 : 39);
       } else if (kind == 14) {
         kinds.add(14);
         kinds.add(21); // SINGLE_VALUE count is INT and includes NULL inputs.
       } else if (isRetractingSum(call, needRetraction(agg))) {
         // A zero net contribution count must not erase the bundle's sum adjustment.
-        kinds.add(GroupAggregateMatcher.KIND_SUM_ZERO);
+        kinds.add(
+            agg.getInput()
+                        .getRowType()
+                        .getFieldList()
+                        .get(call.getArgList().get(0))
+                        .getType()
+                        .getSqlTypeName()
+                    == SqlTypeName.DECIMAL
+                ? GroupAggregateMatcher.KIND_RETRACTING_DECIMAL_SUM
+                : GroupAggregateMatcher.KIND_RAW_SUM_PARTIAL);
         kinds.add(WindowAggregateMatcher.KIND_COUNT);
       } else if (kind == WindowAggregateMatcher.KIND_AVG) {
         kinds.add(WindowAggregateMatcher.KIND_AVG_PARTIAL_SUM);
         kinds.add(WindowAggregateMatcher.KIND_COUNT);
       } else {
-        kinds.add(kind);
+        kinds.add(
+            needRetraction(agg)
+                    && (kind == WindowAggregateMatcher.KIND_MIN
+                        || kind == WindowAggregateMatcher.KIND_MAX)
+                ? (kind == WindowAggregateMatcher.KIND_MIN
+                    ? GroupAggregateMatcher.KIND_MIN_APPEND
+                    : GroupAggregateMatcher.KIND_MAX_APPEND)
+                : kind);
       }
     }
     if (countStarInserted(agg)) {
@@ -528,7 +688,15 @@ final class LocalGroupAggregateMatcher {
     Seq<AggregateCall> aggCalls = agg.aggCalls();
     for (int i = 0; i < aggCalls.size(); i++) {
       AggregateCall call = aggCalls.apply(i);
-      int column = call.getArgList().isEmpty() ? -1 : call.getArgList().get(0);
+      int column =
+          call.getArgList().isEmpty()
+              ? -1
+              : call.getArgList()
+                  .get(
+                      call.getAggregation().getKind()
+                              == org.apache.calcite.sql.SqlKind.JSON_OBJECTAGG
+                          ? 1
+                          : 0);
       columns.add(column);
       if (stateWidth(call, needRetraction(agg)) == 2) {
         columns.add(column);
@@ -554,8 +722,8 @@ final class LocalGroupAggregateMatcher {
             GroupAggregateMatcher.retainedValueTypeCode(
                 inputType.getFieldList().get(call.getArgList().get(0)).getType());
         codes.add(code);
-        if (kind == WindowAggregateMatcher.KIND_AVG) codes.add(code);
-      } else if (kind == GroupAggregateMatcher.KIND_LISTAGG_APPEND) {
+        if (stateWidth(call, needRetraction(agg)) == 2) codes.add(code);
+      } else if (kind == GroupAggregateMatcher.KIND_LISTAGG_APPEND || kind == 42) {
         codes.add(3);
       } else if (kind == 14) {
         int code =
@@ -616,10 +784,12 @@ final class LocalGroupAggregateMatcher {
     for (int i = 0; i < agg.aggCalls().size(); i++) {
       var call = agg.aggCalls().apply(i);
       columns.add(
-          call.getAggregation().getKind() == org.apache.calcite.sql.SqlKind.LISTAGG
-                  && call.getArgList().size() == 2
-              ? call.getArgList().get(1)
-              : -1);
+          call.getAggregation().getKind() == org.apache.calcite.sql.SqlKind.JSON_OBJECTAGG
+              ? call.getArgList().get(0)
+              : call.getAggregation().getKind() == org.apache.calcite.sql.SqlKind.LISTAGG
+                      && call.getArgList().size() == 2
+                  ? call.getArgList().get(1)
+                  : -1);
       if (stateWidth(call, needRetraction(agg)) == 2) columns.add(-1);
     }
     if (countStarInserted(agg)) columns.add(-1);
@@ -655,9 +825,9 @@ final class LocalGroupAggregateMatcher {
       }
     }
     return "local group aggregate: needs SUM/MIN/MAX/COUNT over integer/float/double/decimal values"
-               + " with no widening of the partial, MIN/MAX over"
-               + " string/date/time/boolean/timestamp, AVG over any AvgAggFunction numeric, or"
-               + " insert-only SINGLE_VALUE over supported scalar values, and"
-               + " bigint/int/string/boolean/date/timestamp/decimal grouping keys";
+        + " with no widening of the partial, MIN/MAX over"
+        + " string/date/time/boolean/timestamp, AVG over any AvgAggFunction numeric, or"
+        + " SINGLE_VALUE over supported scalar values, and"
+        + " bigint/int/string/boolean/date/timestamp/decimal grouping keys";
   }
 }

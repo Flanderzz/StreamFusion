@@ -11,18 +11,71 @@ import tech.streamfusion.Native;
  */
 public final class NativeRocksSharedResources implements AutoCloseable {
 
-  private final long nativeHandle;
+  private long nativeHandle;
+  private int leases;
+  private boolean closed;
 
   NativeRocksSharedResources(long totalBytes, double writeBufferRatio) {
     this.nativeHandle = Native.createRocksDBSharedResources(totalBytes, writeBufferRatio);
   }
 
-  long nativeHandle() {
+  synchronized long nativeHandle() {
+    if (closed) {
+      throw new IllegalStateException("native RocksDB memory pool is closed");
+    }
     return nativeHandle;
   }
 
+  synchronized Lease retain() {
+    long handle = nativeHandle();
+    leases++;
+    return new Lease(this, handle);
+  }
+
   @Override
-  public void close() {
-    Native.releaseRocksDBSharedResources(nativeHandle);
+  public synchronized void close() {
+    closed = true;
+    releaseIfUnused();
+  }
+
+  private synchronized void releaseLease() {
+    leases--;
+    releaseIfUnused();
+  }
+
+  private void releaseIfUnused() {
+    if (closed && leases == 0 && nativeHandle != 0) {
+      Native.releaseRocksDBSharedResources(nativeHandle);
+      nativeHandle = 0;
+    }
+  }
+
+  static final class Lease implements AutoCloseable {
+    private NativeRocksSharedResources owner;
+    private final long handle;
+
+    private Lease(NativeRocksSharedResources owner, long handle) {
+      this.owner = owner;
+      this.handle = handle;
+    }
+
+    synchronized long nativeHandle() {
+      if (owner == null) {
+        throw new IllegalStateException("native RocksDB memory lease is closed");
+      }
+      return handle;
+    }
+
+    @Override
+    public void close() {
+      NativeRocksSharedResources resource;
+      synchronized (this) {
+        resource = owner;
+        owner = null;
+      }
+      if (resource != null) {
+        resource.releaseLease();
+      }
+    }
   }
 }

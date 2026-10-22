@@ -185,6 +185,10 @@ public final class RocksDBNativeKeyedStateBackend<K>
     return sharedResources == null ? 0 : sharedResources.getResourceHandle().nativeHandle();
   }
 
+  NativeRocksSharedResources.Lease retainSharedResources() {
+    return sharedResources == null ? null : sharedResources.getResourceHandle().retain();
+  }
+
   /**
    * Registers the operator's native checkpoint hook; snapshots then go through RocksDB commits.
    * The operator's idle-state retention (0 = off) rides along so table maintenance can

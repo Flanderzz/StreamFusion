@@ -15,6 +15,16 @@ native work and unexpected fallback fails. The exhaustive native Criterion smoke
 not a CI gate; see the [CI policy](ci.md#native-execution-checks-instead-of-exhaustive-benchmark-smoke).
 Native execution evidence does not measure throughput.
 
+The unchanged `AggregateITCase.testDistinctGroupBy` and `testDistinctWithMultiFilter`
+fixtures require consumed native group-aggregate work, including both local and global
+stages when their released fixture enables splitting. Runtime-route scopes retain every
+backend/phase invocation and Flink 1.18's explicit changelog-backend fallback. These upstream
+fixtures exercise shared DISTINCT infrastructure with integer/string inputs. Floating
+SUM/AVG DISTINCT additionally uses focused SQL, map-order and repeated-recovery contracts
+against each released Flink line; the upstream fixtures alone do not establish floating parity.
+The unchanged released `testDistinctWithMultiFilter` fixture has also been executed locally
+against this ordered-retraction extension: seven invocations pass on Flink 2.2 and six on 1.18, all with positive native work.
+
 ## Runner and suite selection
 
 StreamFusion can run Flink's own table planner runtime integration tests with native acceleration
@@ -1199,3 +1209,28 @@ The per-invocation contracts for `CalcITCase.testInlineScalarFunction`,
 check constructor-bound and instance function values with positive native input metrics.
 The exact heap/RocksDB runtime scope records its mixed native/host route on both release lines.
 An obsolete `AS` fallback expectation must not mask that native execution.
+
+
+`AggregateITCase#testGroupBySingleValue` now has an explicit native grouped-aggregate
+contract and exact released heap/RocksDB/mini-batch fixture scope. That unchanged method
+covers scalar-subquery aggregation and CHAR single-value results; it does not by itself
+prove every retracting scalar partial. The focused signed SINGLE_VALUE suite supplements
+it with raw changelogs at controlled bundle boundaries, keyless empty results, materialized
+interleaved relations and two restores on each backend and released Flink line.
+
+
+The unchanged `AggregateITCase.testListAggWithRetraction` also has per-phase consumed-work
+contracts. Its one-hour-retention single-phase variants require native grouped aggregation;
+the two-phase variants retain the explicit append-only LISTAGG partial-layout fallback until
+the retracting merge is implemented. Focused operator tests add independent list-entry and
+pending-retraction deadlines, survivor refresh and repeated recovery on both state backends.
+
+
+Runtime route scopes use each released fixture's exact display name; Vintage method prefixes
+must match the selected method. The SINGLE_VALUE upstream fixture also runs a retracting
+keyless-join probe that retains its existing host fallback before its independent native
+scalar query. Its whole-fixture route is therefore mixed, while the grouped-aggregate
+contract still requires consumed native input. Flink 1.18 changelog-state variants retain
+explicit full fallback. DataStream `InputConversionOperator` is counted as source conversion
+only when its graph inputs lead directly to a verified source boundary. The same class
+inside computation remains host work; no native-work or local/global requirement is relaxed.

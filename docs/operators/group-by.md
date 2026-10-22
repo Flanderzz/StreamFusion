@@ -21,8 +21,9 @@ including global aggregation and per-aggregate FILTER. This lets shared `COUNT(v
 at zero and emits zero when no non-NULL input contributes; the host-planned Calc uses
 COUNT to restore NULL for AVG/SUM. Integer accumulation wraps at the declared width.
 DECIMAL uses a widened `(38, input-scale)` accumulator whose overflow stays NULL;
-ordinary SUM's reset-after-overflow rule is deliberately different. DISTINCT SUM0 remains
-unsupported. Floating SUM0 starts from positive zero and rounds each addition/subtraction at
+ordinary SUM's reset-after-overflow rule is deliberately different. DISTINCT SUM0 uses the
+same accumulator with distinct membership, including the shared SUM0/COUNT lowering of
+DISTINCT averages. Floating SUM0 starts from positive zero and rounds each addition/subtraction at
 the declared FLOAT/DOUBLE width; ordinary floating SUM still starts at the first non-NULL value.
 Released Flink's invalid DECIMAL(38,38) SUM0 initializer remains on the host.
 
@@ -55,16 +56,16 @@ The running sum and distinct count are checkpointed directly alongside membershi
 does not refold an overflow-sensitive decimal sum in map order. Both memory and typed RocksDB
 state retain this contract, including migrations between the two. Floating averages accumulate
 in DOUBLE and retain the input result width; DISTINCT uses Java boxed equality, canonicalizing
-NaNs and distinguishing opposite zero signs. Insert-only two-phase AVG DISTINCT supports integers and DECIMAL precision
-up to 38, as described below.
+NaNs and distinguishing opposite zero signs. Insert-only two-phase SUM/AVG DISTINCT supports
+integers, FLOAT, DOUBLE and DECIMAL precision up to 38, as described below.
 
 `TINYINT` and `SMALLINT` `SUM`/`MIN`/`MAX` retain their input width, including the local
 partials of an insert-only two-phase plan. SUM wraps on overflow at 8 or 16 bits rather
 than widening to BIGINT. Single-phase retractions subtract at the same width; MIN/MAX
 retain duplicate multiplicities until the last occurrence is removed. NULL inputs are
 ignored and all-NULL groups return NULL. FILTER and integer SUM(DISTINCT) preserve these
-rules across batches and checkpoint restore. Retracting two-phase exact integer SUM carries a separate non-null count. Retracting
-two-phase MIN/MAX and non-integer SUM retain the general fallback described below.
+rules across batches and checkpoint restore. Retracting two-phase numeric SUM carries a separate non-null count. Decimal overflow and
+typed mapped MIN/MAX are described below.
 
 FLOAT SUM/MIN/MAX preserve FLOAT input, partial and result widths; FLOAT SUM rounds at
 that width after every addition. Floating SUM starts from its first non-NULL input, preserving
@@ -135,10 +136,10 @@ secondary input metadata does not determine the emission mode.
 ### LISTAGG
 
 Single-phase LISTAGG runs over CHAR/VARCHAR for append and retracting input, and
-ordinary append LISTAGG also admits local/global plans. Both forms use an
+ordinary and DISTINCT LISTAGG also admit local/global plans for both input modes. Both forms use an
 omitted comma separator or a verified non-null character literal. Empty, quoted and
-multi-byte separators are supported. NULL values are skipped; empty strings and
-duplicates contribute in arrival order. A retraction removes the first matching
+multi-byte separators are supported. NULL values are skipped. In ordinary LISTAGG, empty strings
+and duplicates contribute in arrival order. A retraction removes the first matching
 occurrence. FILTER, numeric aggregate composition and single-phase mini-batching
 retain Flink's result types and changelog behavior.
 
@@ -156,11 +157,22 @@ native retained-memory accounting includes owned membership keys and table capac
 Ordinary append LISTAGG admits positive state TTL in single-phase, single-phase mini-batch
 and local/global plans. Its separator/prefix accumulator is one TTL value state, so existing
 whole-group expiry and write refresh preserve released behavior, including NULL writes.
-DISTINCT or retracting LISTAGG with positive retention remains fallback because its supporting
-MapView/ListView state has independent lifetimes. DISTINCT/retracting local/global merges
-also remain fallback without retention.
+Ordinary retracting LISTAGG also admits positive retention. Its value list and pending
+retraction list retain per-entry write clocks independently of the enclosing group. A successful
+removal rewrites surviving value timestamps; an absent removal only appends a separately timed
+pending retraction. NULL rows refresh the group without reviving old list entries. Both lists
+and their original deadlines survive memory and direct-RocksDB snapshots. DISTINCT LISTAGG
+also admits positive retention. Membership expires independently of the cached prefix or
+inner value/pending lists. Append duplicates do not refresh the shared membership clock;
+retracting counters refresh on each admitted non-NULL update. Filtered aggregates with the
+same argument list share this clock, including one-argument COUNT DISTINCT. An explicit
+separator makes a two-argument DISTINCT key and therefore a separate membership view.
+Restoring a snapshot without membership deadlines seeds each argument view from the saved
+group-write time, or the restore time when the snapshot had no TTL clock.
+DISTINCT local/global merges replay the ordered shared membership view, including filtered
+consumers and the full value/separator argument identity.
 Released Flink rejects LISTAGG WITHIN GROUP ordering. Both releases produce real
-local/global plans under TWO_PHASE; ordinary append input now accelerates. The local
+local/global plans under TWO_PHASE. For ordinary append input, the local
 emits the declared pair of STRING fields (separator, prefix), and the global concatenates
 prefixes using each incoming separator. FILTER, default and literal separators, CHAR
 casts, mixed numeric aggregates and adjacent DISTINCT-count views retain their positional
@@ -318,14 +330,57 @@ the existing binary state representation; ordered arrays are not stored as unord
 multisets. JSON_ARRAYAGG also admits inline ORDER BY and WITHIN GROUP ordering clauses.
 Released Flink 2.2.1 and 1.18.1 retain arrival order for these clauses rather than sorting;
 the native accumulator preserves that released behavior, including retractions. These
-clauses therefore do not promise sorted JSON arrays. Positive state TTL remains a
-native restriction for both functions. JSON_OBJECTAGG local/global aggregation also
-falls back. JSON_ARRAYAGG has no merge method in either released version: even a
+clauses therefore do not promise sorted JSON arrays. Positive state TTL is native for
+both functions in immediate and single-phase mini-batch plans. Each array element and
+object key retains its own last-write time; NULL-omitting updates refresh the enclosing
+accumulator without refreshing older entries. A successful array retraction refreshes
+every surviving element, matching the released ListView rewrite; an unsuccessful
+retraction does not. Expired views are read before computing the previous output, so
+UPDATE_BEFORE also reflects expiry. Checkpoints retain entry deadlines on memory and
+native RocksDB backends. JSON_OBJECTAGG also admits real local/global plans for append
+and retracting input. Locals emit Arrow lists of serialized key/value map entries; globals
+merge only the entries that survive each local map. Both NULL policies retain the released
+rules: an omitted local NULL leaves no key for the global duplicate check, while duplicate
+keys still fail inside a local map or across nonempty partials. Local maps admit NULL keys. Released 1.18's split MapView conversion reads a heap NULL
+key as an empty STRING and rebuilds a map, including collapse with a real empty key in the
+same partial; the native partial preserves that behavior. Released 2.2 retains its global
+NULL-key failure. Duplicate NULL keys still fail within a local map on both lines. Positive TTL applies
+when the global bundle flushes, independently for each merged field.
+JSON_ARRAYAGG has no merge method in either released version: even a
 TWO_PHASE request retains a single-phase plan, which runs natively. Released Flink
 2.2.1 and 1.18.1 reject DISTINCT JSON aggregates, JSON_OBJECTAGG WITHIN GROUP ordering,
 and JSON aggregate FILTER syntax; these are host limitations rather than acceleration
 gaps. Eight additional released-SQL checks pin the actual phase plans, native execution,
 NULL modes, and parser/validator failures.
+
+The retention implementation passes 67 SQL/operator checks on each released line,
+including both NULL policies, append and retract input, immediate and mini-batch
+execution, exact inclusive expiry, key reuse and two successive restores on memory
+and native RocksDB. Six focused Rust checks cover JSON state and expiry; the complete
+native suite passes 832 checks (two diagnostic tests ignored). Upstream execution
+contracts include both mixed JSON aggregate tests; consolidated unchanged-upstream
+runtime validation remains required before delivery.
+
+Release+mimalloc/JDK 17 complete jobs with p=1, memory state, 2 GiB heap, one-hour TTL,
+65,536 keys and 16-character values retain sources, both transposes, JNI and rowwise
+sinks. Two warmups and three interleaved trials give:
+
+| Release | Function | Rows | Stock seconds | Native seconds |
+| --- | --- | ---: | ---: | ---: |
+| 2.2.1 | JSON_ARRAYAGG | 1,000,000 | 8.719 | 1.062 |
+| 2.2.1 | JSON_OBJECTAGG | 131,072 | 2.017 | 0.223 |
+| 1.18.1 | JSON_ARRAYAGG | 1,000,000 | 10.350 | 1.033 |
+| 1.18.1 | JSON_OBJECTAGG | 131,072 | 1.962 | 0.213 |
+
+Every candidate trial requires consumed native aggregate work. The million-row object
+warmup was time-boxed after more than two minutes in stock TTL incremental cleanup;
+a warmup thread dump locates `TtlIncrementalCleanup` through `TtlMapState.get` and
+`JsonObjectAggFunction.getValue`. Both engines use the smaller object fixture above.
+The matched canonical `d13e9dc4` planner fallback takes 8.688 s for arrays and 2.060 s
+for objects (stock 8.925 and 1.993 s). It requires zero planner substitutions and uses
+the same compatible library; no affected aggregate executes natively in that control.
+The [raw artifact](../benchmarks/results/json-view-retention-2026-10-21.json) retains
+all completed trials, the previous fallback control, hashes and the abandoned diagnostic.
 Flink 1.18 decimal JSON_STRING expressions use the existing generated evaluator
 inside Calc because that line strips decimal scale; the grouped accumulator still runs
 natively. The 2.2 expression retains scale.
@@ -457,7 +512,11 @@ stock, previous fallback and native comparison, raw trials, workload limits and 
 The one-argument forms run natively in the single-phase plan over TINYINT, SMALLINT,
 INT, BIGINT, FLOAT, DOUBLE, DECIMAL, CHAR/VARCHAR, DATE, TIME, BOOLEAN, TIMESTAMP and
 TIMESTAMP_LTZ. Results follow Flink's declared type, precision and value semantics.
-FIRST_VALUE/LAST_VALUE support per-aggregate FILTER.
+FIRST_VALUE/LAST_VALUE support per-aggregate FILTER. On Flink 2.2, they additionally admit
+BINARY/VARBINARY, ARRAY, MAP, ROW, MULTISET and both interval families through the existing
+Arrow bridge. DISTINCT additionally admits ARRAY and intervals; the released planner rejects
+DISTINCT binary, MAP, ROW and MULTISET values. SINGLE_VALUE retains its released scalar factory
+limits. These additions preserve the single-phase plan even when TWO_PHASE is requested.
 Flink 1.18.1 cannot plan CHAR or temporal FIRST_VALUE/LAST_VALUE and fails a type assertion for
 SINGLE_VALUE over TIME(0), including string casts to TIME(3) that resolve to TIME(0);
 those host limitations remain unavailable on that release. Typed TIME(3) input is supported.
@@ -465,13 +524,14 @@ those host limitations remain unavailable on that release. Typed TIME(3) input i
 FIRST_VALUE and LAST_VALUE skip NULLs and follow arrival order within a key. Append-only
 input retains one scalar. Retracting input retains the ordered non-NULL occurrences;
 a retraction removes the oldest matching occurrence, including when values repeat across
-Arrow batches. Floating retractions use Java boxed equality: NaN payloads match, while opposite
+Arrow batches. Generic binary FIRST/LAST follow the released byte-array identity behavior:
+in the verified plans, equal newly decoded binary values do not remove a cached occurrence. Floating retractions use Java boxed equality: NaN payloads match, while opposite
 zero signs do not. Removing every contributing value yields NULL, and removing the last
 record deletes the group. Results depend on arrival order, so SQL parity fixtures use a
 controlled source rather than asserting equal results from independently reordered inputs.
 
 `FIRST_VALUE(DISTINCT value)` and `LAST_VALUE(DISTINCT value)` also run in a single
-phase over the same scalar types as their ordinary forms. They retain the arrival order of unique live values and their
+phase over the same scalar types as their ordinary forms, plus ARRAY and intervals on Flink 2.2. They retain the arrival order of unique live values and their
 multiplicities: inserting a duplicate does not move its position, and only the last
 retraction removes it. Reinsertion after complete removal gives it a new position. NULLs
 are ignored, and filtered instances have independent membership. Checkpoints retain both
@@ -479,8 +539,11 @@ order and multiplicities. Floating membership treats all NaN payloads as one val
 distinguishes the two zero signs; the ordered queue preserves the first inserted payload.
 Typed maps retain integer widths, physical DATE/TIME values, exact decimals and inline
 timestamp nanoseconds.
-These DISTINCT forms require zero state retention because
-Flink's separate membership/order maps can expire independently.
+Positive retention keeps the shared DISTINCT membership clock separate from the cached
+selection and, for retracting input, the inner value/order maps. Membership expiry does not
+remove an already selected value. Append-only duplicates do not refresh membership; a new
+filter bit does. Retracting views preserve signed counts when an expired value is retracted.
+The cached scalar, membership and inner maps retain their independent state across restores.
 
 Ordered aggregate state now resides inline in the existing per-aggregate storage, avoiding a
 separate allocation for every group; dynamic strings and retraction queues remain accounted
@@ -516,13 +579,23 @@ both one-row physical batches and a multi-row batch, followed by finish, checkpo
 and watermark callbacks, and verifies that no partial output escapes.
 
 Checkpoints preserve the scalar/count or ordered occurrences. Append-only first/last and
-SINGLE_VALUE support the enclosing group's TTL. Retracting FIRST_VALUE/LAST_VALUE with a
-positive retention, including a STATE_TTL hint, fall back: Flink independently expires its
-value-to-order and order-to-value map entries, which a single group lifetime does not model.
+SINGLE_VALUE support the enclosing group's TTL. Retracting FIRST_VALUE/LAST_VALUE also admit
+positive retention, including STATE_TTL hints. Their cached selection, value-to-order map and
+order-to-value map have separate lifetimes. Expired supporting entries do not recompute the
+cached FIRST/LAST scalar. A successful map write refreshes that entry; reads do not. Removing
+the oldest occurrence refreshes surviving orders for that value and surviving values in its
+arrival bucket, matching the released functions. NULL rows refresh only the group accumulator.
+Optional framed Arrow checkpoint extensions retain both map clocks, order lists and the cached
+selection without changing fresh TTL-off snapshots. Disabling retention after restore keeps
+the cached selection and supporting maps while ignoring their expiry clocks. The processing clock is sampled per native batch,
+as in the existing TTL policy; within-bucket arrival order remains stable.
 These aggregate states use the existing raw keyed snapshot path with both memory and RocksDB
 backends; the direct RocksDB accumulator-row codec does not yet encode ordered occurrences.
-Two-phase FIRST_VALUE/LAST_VALUE plans, physical SINGLE_VALUE with a retained DISTINCT flag,
-two-argument value/order dialects, and other value types retain explicit fallback gates.
+FIRST_VALUE/LAST_VALUE have no merge implementation on the supported released Flink lines:
+requesting TWO_PHASE retains a single-phase aggregate, which runs natively, including DISTINCT.
+Execution contracts verify the selected phase, values, result types and consumed native work.
+Internal physical split FIRST_VALUE/LAST_VALUE plans, physical SINGLE_VALUE with a retained
+DISTINCT flag, two-argument value/order dialects, and other value types retain explicit gates.
 
 `GroupedValueBenchmark` measures append-only FIRST_VALUE/LAST_VALUE with a release native
 build (`-Pbench`, mimalloc), 2 million rows, 64 keys, one-eighth NULL values, parallelism 1,
@@ -539,11 +612,70 @@ The integer case shows a small local gain; the string case is slower. This adds 
 within columnar pipelines and does not establish a general speedup. Retracting state and
 SINGLE_VALUE were validated for correctness but are not measured by this benchmark.
 
+Generic Flink 2.2 FIRST/LAST coverage was measured separately on Linux x86_64, JDK 17,
+release+mimalloc, p=1, memory state, 2 GiB heap, 64 keys, cardinality 1024 and NULL every
+eighth row. Complete jobs retain both transposes, JNI and a rowwise sink, with two warmups
+and three interleaved measured trials. Each trial requires consumed native aggregate work.
+
+| Input/profile | Rows | Stock seconds | Initial native | Final native |
+| --- | ---: | ---: | ---: | ---: |
+| ARRAY append | 1,000,000 | 0.508 | 1.940 | 0.753 |
+| ROW append | 1,000,000 | 0.573 | 5.780 | 1.794 |
+| MAP append | 1,000,000 | 0.867 | 7.043 | 3.081 |
+| BYTES append | 1,000,000 | 0.416 | 0.502 | 0.466 |
+| ARRAY DISTINCT | 1,000,000 | 0.453 | 2.729 | 1.758 |
+| ARRAY retracting | 131,072 | 0.347 | 0.399 | 0.268 |
+
+The matched canonical `d13e9dc4` ARRAY fallback takes 0.471 s (stock 0.484 s).
+The initial profile located allocation-heavy nested equality and scalar extraction in
+the native update loop. Two measured passes skip unused FIRST/NULL inputs, reuse shared
+non-floating values and compare nested children through borrowed arrays. The slower
+results remain enabled as correctness-verified groundwork under the maintainer's bounded
+coverage agreement, without claiming acceleration. Further scalar extraction and nested
+output work is tracked in [issue #443](https://github.com/datafusion-contrib/StreamFusion/issues/443).
+The [raw artifact](../benchmarks/results/generic-first-last-2026-10-21.json) retains every
+warmup/trial, variability, profile counts and library hashes. These are complete-job
+diagnostics; they do not substitute a Java timer for the Rust/Arrow small-function boundary.
+
+The final generic implementation passes 84 released 2.2 phase/type/recovery checks,
+including explicit host rejections for unavailable DISTINCT types. Another 16 immediate
+changelog and 12 immediate recovery checks cover the untimed initial implementation.
+Flink 1.18 passes 72 explicit factory/planning-failure checks; its 12 generic recovery
+cases are unavailable. Typed snapshots restore the Arrow value schema before state.
+
 **Idle-state TTL.** `table.exec.state.ttl` runs natively here (and on the two-phase global merge
 below — the local half is transient and holds no TTL-eligible state). Semantics match Flink
 exactly: every stored value carries its last-**write** wall-clock timestamp (reads never refresh
 it), expiry happens at `last_write + ttl` inclusive, and expired state reads as absent and is
 deleted on read. The `STATE_TTL` hint overrides the job-wide retention on aggregates specifically.
+Mini-batch operators read retained state at the logical bundle flush and use that flush's
+clock for expiry and writes. Input Arrow buffers remain reserved until that merge; receiving
+a partial before expiry does not revive state that has expired by the flush.
+
+### Shared DISTINCT entry retention
+
+Single-phase and local/global scalar COUNT DISTINCT and numeric SUM/AVG DISTINCT retain each membership
+entry independently of the cached aggregate and the group's own idle deadline. Expiring an
+entry forgets membership without undoing the previously accumulated result. Filtered
+aggregates sharing an argument share the entry deadline: a newly set append-only filter bit
+refreshes it, while duplicate-only reads do not. Retracting counters write on every admitted
+update and retain negative counts after an expired value is retracted.
+
+Checkpoints preserve cached COUNT/SUM/AVG values separately from live membership, plus the
+original shared deadlines. With the native RocksDB backend these combinations use native raw
+keyed snapshots, keeping the shared clock together rather than assigning unrelated clocks
+to each aggregate's element table. Fresh zero-retention snapshots keep their previous format.
+An older snapshot without membership clocks seeds each member from the saved group-write
+time, or the restore time when the old snapshot had no TTL timestamp.
+FIRST/LAST use the same shared membership policy while retaining their own inner selections.
+Single-phase DISTINCT LISTAGG uses the same membership clock; explicit-separator calls
+share only with the same two-argument view. Its inner ordered lists retain their own clocks.
+
+Local partials remain transient and have no entry TTL. At the global bundle flush, shared
+filtered views expire together before their deltas fold into cached results. Floating and
+wide-decimal merges retain the released map iteration order and zero-entry behavior.
+Restoring older global snapshots seeds missing entry clocks before the first new bundle
+refreshes the group timestamp. The global view layout is configured before loading partitions.
 
 ## Two-phase / mini-batch
 
@@ -568,7 +700,8 @@ the cast back to a narrow integer or float result — is byte-identical to the s
 
 Insert-only two-phase `MIN`/`MAX` also admit DATE, TIME, BOOLEAN, `TIMESTAMP` and
 `TIMESTAMP_LTZ`. Both halves carry the complete typed value and timestamp components; a partial must retain the input's logical type and precision.
-Two-phase retracting extrema retain the COUNT/AVG/SUM0/exact integer SUM gate described below.
+Retracting two-phase extrema carry signed maps, or scalar partials when Flink proves monotonicity;
+mapped extrema support independent entry retention alongside their cached extreme and map-size counter.
 
 Decimal `SUM`/`MIN`/`MAX`/`AVG` carry through the split too: `SUM`'s partial is the i128 running
 sum as `DECIMAL(38, s)` (a bundle overflow emits NULL and latches the merged `AVG` NULL, skipped
@@ -595,12 +728,15 @@ set travels as a trailing view column — its distinct `(value, count)` entries 
 structs, the Arrow form of Flink's serialized `MapView` partial — and the global folds the entries
 into its per-key distinct state with multiplicities, so a value repeating across bundles counts
 once. Scope: `COUNT(DISTINCT)` over bigint/int/smallint/tinyint/float/double/string/decimal,
-BOOLEAN, DATE, TIME, TIMESTAMP and TIMESTAMP_LTZ; `SUM(DISTINCT)` over bigint/int/smallint/tinyint and DECIMAL
+BOOLEAN, DATE, TIME, TIMESTAMP, TIMESTAMP_LTZ, ARRAY and both interval families; `SUM(DISTINCT)` over bigint/int/smallint/tinyint/float/double and DECIMAL
 with precision up to 38.
 Decimal sum partials must be DECIMAL(38, input-scale), while the distinct view preserves each
 input value's original precision and scale. Boolean and timestamp views retain their Arrow
-value types, including fractional timestamp nanoseconds. The merge folds in set-iteration
-order, so order-sensitive float/double sums stay on the host.
+value types, including fractional timestamp nanoseconds. Floating sums preserve the released
+Java map's iteration order through local insertion, serialized copies and each global logical
+bundle, including shared and independently filtered views. Physical Arrow batch boundaries do
+not change that order. Opposite zero signs remain distinct; NaN payloads share membership
+while transport retains the original key bits.
 DATE membership uses epoch days; TIME views carry internal milliseconds even if Flink resolves
 a lower declared precision. Both timestamp families use the existing millisecond/nanosecond
 component representation, retaining precision 0/3/6/9 and wide/pre-epoch values without a session-zone
@@ -610,21 +746,29 @@ The [release job measurements](../benchmarks/basic-type-coverage.md#temporal-two
 retain both transposes and IPC shuffle: 1.32-1.54x stock at 2M rows/64 keys and 1.07-1.15x
 at 10M rows/1,024 keys. Persistent recovery is verified for correctness; no RocksDB speedup is claimed.
 
-Insert-only `AVG(DISTINCT)` also rides the split for integers and DECIMAL precision up to 38.
-The local keeps two distinct states: a widened sum partial and a BIGINT count partial, while
-its membership view retains the original input value type. Empty/all-NULL bundles emit a
+Insert-only `AVG(DISTINCT)` also rides the split for integers, FLOAT, DOUBLE and DECIMAL precision up to 38.
+The declared partials are a widened sum and a BIGINT count, while the membership view retains
+the original input value type. Floating sums widen to DOUBLE for AVG. Empty/all-NULL bundles emit a
 zero sum and zero count. The global merges membership entries into the same exact average
 state used by single-phase AVG DISTINCT; it does not add the local sums/counts, which would
 count values appearing in several bundles more than once. Decimal sum fields must retain
 precision 38 and the input scale, and the result type must match Flink's AVG type.
+Released shared AVG/COUNT/SUM reductions may use DISTINCT SUM0 plus COUNT; SUM0 retains its
+positive-zero initialization. Aggregates sharing one floating view use one transient membership
+map, then update their independent durable accumulators in the verified merge order.
 
-Insert-only two-phase `SINGLE_VALUE` over the single-phase scalar value types retains a typed
+The [floating partial measurements](../optimizations/aggregate-specialization-fast-paths.md#ordered-floating-distinct-partials)
+separate Rust/Arrow functionality admission from conversion-inclusive complete-job costs.
+
+Two-phase `SINGLE_VALUE` over the single-phase scalar value types, including retracting input,
+retains a typed
 value and an INT count in each local bundle. NULL increments the count. Both local accumulation and global merging
 raise Flink's cardinality exception on a second element; global checkpoints preserve that
 count even when the value is NULL. The global consumes the count partial, rather than
 counting bundles. The declared value partial must match the input type, and its count must
 be INT. Flink may declare a TIME(3) partial for TIME(0) input; both use millisecond storage
-and preserve the input value. Retracting SINGLE_VALUE splits remain on Flink.
+and preserve the input value. Signed local value/count partials merge through the same
+released SINGLE_VALUE rule; deleting and recreating a group preserves NULL and count-zero cases.
 Local execution failures use the same Flink exception mapping as global aggregation, after
 releasing imported Arrow input, so cardinality failures are not reported as memory limits.
 
@@ -640,19 +784,25 @@ same final output as Flink's shared bitmask view, since a filtered distinct is a
 distinct over the filtered row subset.
 
 **A retracting local input** (the aggregate consumes another aggregate's changelog — Nexmark q4's
-shape) is native for `COUNT`, `AVG`, `SUM0` and ordinary integer `SUM`.
+shape) is native for `COUNT`, `AVG`, `SUM0`, numeric `SUM`, scalar `SINGLE_VALUE` and typed `MIN`/`MAX`.
 SUM_RETRACT uses a separate `(sum, BIGINT count)` partial pair; the other admitted layouts are invariant under
 retraction. The local subtracts `-U`/`-D` rows, and the appended (or reused) `count1` `COUNT(*)`
 partial drives per-key liveness in the global (`-D` and state drop when the merged count reaches
-zero, Flink's `RecordCounter` semantics).
+zero at the logical bundle flush, Flink's `RecordCounter` semantics).
 
-Ordinary retracting SUM initially admits TINYINT, SMALLINT, INT and BIGINT with matching declared
-sum partial/result widths and a BIGINT non-null contribution count. Its local sum adjustment
+Ordinary retracting SUM admits TINYINT, SMALLINT, INT, BIGINT, FLOAT, DOUBLE and DECIMAL, with
+matching declared sum partial/result widths (DECIMAL widens to precision 38) and a BIGINT
+non-null contribution count. Its local sum adjustment
 survives a zero-net-count bundle; the global adds the adjustment and updates the non-null count
 separately. A zero non-null count emits NULL, while the separate count1 field controls group
 liveness. Numeric zero is not an empty group. The record counter removes a group only at exactly
-zero, matching Flink even when duplicate retractions make it negative. DECIMAL and floating
-SUM_RETRACT remain on the host until their partial/overflow/order contracts are implemented.
+zero at the logical flush, matching Flink even when duplicate retractions make it negative.
+A temporary zero count inside the bundle retains its arithmetic history; clearing it early
+loses floating cancellation residue and changes SUM/AVG results. Local SUM preserves a nullable
+raw accumulator, including negative zero and a nonzero adjustment at count zero. The global first
+combines each bundle's partial sums and then merges that temporary sum into retained state.
+This two-level reduction preserves decimal reset-after-overflow and floating rounding order.
+A NULL decimal SUM partial is ignored while its count still merges; AVG overflow remains sticky.
 
 AVG's local sum remains an accumulator even when the bundle's net count is zero: replacing `10`
 with `20` emits a sum adjustment of `10` and a count adjustment of `0`. The global merge applies
@@ -667,12 +817,16 @@ for the persistent-state-backend angle on this same raw-keyed-state layout.
 
 Still falling back, specific to the two-phase split: the opt-in `distinct-agg.split.enabled`
 incremental chain (a deliberate non-goal — see [Unsupported operators](unsupported.md)),
-`MIN`/`MAX` with a retained physical `DISTINCT` flag, floating `SUM(DISTINCT)` and
-`AVG(DISTINCT)`, and — under a
-retracting input — any aggregate other than `COUNT`/`AVG`/`SUM0`/ordinary exact integer `SUM`
-(non-integer SUM and MIN/MAX retract variants retain unverified layouts, and a monotonicity-exempt `MIN`/`MAX` ignores
-retractions in ways the native fold would not) plus `DISTINCT` (its view value switches to
-per-filter live counts under retraction).
+`MIN`/`MAX` with a retained physical `DISTINCT` flag, and — under a
+retracting input — aggregates outside `COUNT`/`AVG`/`SUM0`, ordinary numeric `SUM`,
+scalar `SINGLE_VALUE`, and typed `MIN`/`MAX`. Retracting DISTINCT admits scalar COUNT and numeric
+SUM/AVG, including FLOAT/DOUBLE and decimal precision through 38, using ordered shared views.
+
+Staged membership memory accounting includes signed size changes between physical pushes of
+one logical bundle. Removals return released buffer bytes to the reservation; debug and release
+builds retain the same results without unsigned subtraction overflow.
+Decimal-overflow failure parity checks retain the exception type, execution phase and native
+route on both supported JDKs, and check helpful JVM null-dereference text when it is available.
 
 ## Type support
 
@@ -968,21 +1122,19 @@ query back via the [all-or-nothing island](index.md#the-all-or-nothing-island) r
 
 **Single-phase / either two-phase half in common:**
 
-- DISTINCT or retracting LISTAGG with positive state TTL; JSON aggregates with positive state TTL.
-  Released Flink rejects LISTAGG WITHIN GROUP ordering and JSON DISTINCT/object-ordering
+- Released Flink rejects LISTAGG WITHIN GROUP ordering and JSON DISTINCT/object-ordering
   syntax; these are host limitations. JSON_ARRAYAGG ordering clauses preserve the
   released host's arrival-order behavior described above.
 - A UDAF outside the verified synchronous single-phase JVM boundary described above.
   Verified UDAFs default on under the accepted performance exception.
 - `AVG`/`SUM`/`MIN`/`MAX` over a value type outside [Type support](#type-support)'s ✓ set.
-- Two-phase `AVG(DISTINCT)` over FLOAT/DOUBLE and physical SINGLE_VALUE with a retained DISTINCT flag.
+- Physical SINGLE_VALUE with a retained DISTINCT flag.
   (`COUNT(DISTINCT x)` keeps a per-key
   value set; `SUM(DISTINCT x)` adds a running sum folded as values enter/leave it; `MIN`/`MAX
   (DISTINCT)` run as their plain, multiplicity-blind forms.)
 - An approximate aggregate.
 - FIRST_VALUE/LAST_VALUE/SINGLE_VALUE over a value type outside the single-phase list above,
   or with more than one argument.
-- DISTINCT or retracting FIRST_VALUE/LAST_VALUE with positive state TTL.
 - An unsupported grouping-key or value column type.
 
 The released-host string aggregate baseline passes 18 checks on each of Flink 2.2.1 and
@@ -1006,31 +1158,40 @@ input in streaming mode emits no aggregate row. Native string/JSON coverage is d
 
 **Local group aggregate (two-phase local half) only:**
 
-- Any aggregate other than SUM/MIN/MAX/COUNT/AVG/SUM0, insert-only SINGLE_VALUE over the
-  supported single-phase scalar types, or ordinary append LISTAGG over the string pair above.
+- Any aggregate other than SUM/MIN/MAX/COUNT/AVG/SUM0, typed SINGLE_VALUE over the
+  supported single-phase scalar types, ordinary or DISTINCT LISTAGG over the append string pair or
+  retracting list partial with its membership view, or JSON_OBJECTAGG over its map partial.
 - A SUM/MIN/MAX value type outside bigint/int/smallint/tinyint/float/double/decimal (MIN/MAX also admit
   strings, DATE, TIME, BOOLEAN and timestamps), or an AVG value type outside
   bigint/int/smallint/tinyint/float/double/decimal.
 - A `COUNT(DISTINCT)` value type outside bigint/int/smallint/tinyint/float/double/string/decimal/
-  BOOLEAN/DATE/TIME/TIMESTAMP/TIMESTAMP_LTZ, or a `SUM(DISTINCT)` value outside bigint/int/smallint/tinyint/DECIMAL;
+  BOOLEAN/DATE/TIME/TIMESTAMP/TIMESTAMP_LTZ/ARRAY/intervals, or a `SUM(DISTINCT)` value outside bigint/int/smallint/tinyint/FLOAT/DOUBLE/DECIMAL;
   DECIMAL sum partials with a different scale/precision other than 38;
-  `AVG(DISTINCT)` outside integers/DECIMAL or with incorrectly widened partials;
+  `AVG(DISTINCT)` outside integers/FLOAT/DOUBLE/DECIMAL or with incorrectly widened partials;
   `MIN`/`MAX` with a retained physical `DISTINCT` flag (Flink normally removes it).
 - A partial whose declared type differs from what the native side emits — defensive only, not
   reachable from Flink's own planner.
-- A retracting input with any aggregate other than plain COUNT/AVG/SUM0/exact integer SUM.
+- A retracting input outside COUNT/AVG/SUM0/numeric SUM, scalar SINGLE_VALUE, typed MIN/MAX,
+  ordinary/DISTINCT LISTAGG and JSON_OBJECTAGG.
+  DISTINCT COUNT admits the scalar, ARRAY and interval types above; DISTINCT SUM/AVG admits integers,
+  FLOAT/DOUBLE and DECIMAL precision through 38 with the declared partial layout.
 
 **Global group aggregate (two-phase merge) only:**
 
 - Any merge other than SUM/MIN/MAX/COUNT/AVG/SUM0, the typed SINGLE_VALUE split, or
-  ordinary append LISTAGG with its (separator, prefix) string pair.
+  ordinary/DISTINCT LISTAGG with its append (separator, prefix) pair or retracting list partial, or
+  JSON_OBJECTAGG with its map partial.
 - A partial column outside bigint/int/smallint/tinyint/float/double/decimal, except the typed
-  MIN/MAX, SINGLE_VALUE and LISTAGG partials described above.
+  MIN/MAX, SINGLE_VALUE, LISTAGG and JSON_OBJECTAGG partials described above.
 - An AVG whose partial pair isn't `(bigint, bigint)` for an integer average, `(double, bigint)` for
   float/double, or `(decimal(38, s), bigint)` for decimal.
-- A distinct merge outside the local half's `COUNT`/`SUM(DISTINCT)` scope.
-- A retracting merge with any aggregate other than plain COUNT/AVG/SUM0/exact integer SUM (those merge natively, the
-  `count1` partial driving per-key liveness).
+- A distinct merge outside the local half's `COUNT`/`SUM`/`AVG`/`LISTAGG` scope.
+- A retracting merge outside COUNT/AVG/SUM0/numeric SUM, scalar SINGLE_VALUE, typed MIN/MAX,
+  ordinary/DISTINCT LISTAGG and JSON_OBJECTAGG.
+  Scalar DISTINCT COUNT and numeric DISTINCT SUM/AVG use signed membership transitions;
+  floating/wide-decimal arithmetic retains the released shared-view iteration order.
+  Mapped MIN/MAX preserve cached extrema independently of expiring map entries.
+  The `count1` partial drives per-key liveness.
 - An unsupported grouping-key or output column type.
 
 ## Narrow integer validation and timing
@@ -1157,7 +1318,52 @@ BOOLEAN and TIMESTAMP_LTZ(3/9), and SUM DISTINCT over DECIMAL(19,2). Five-row bu
 repeated values across flushes, independently filtered/shared views, all-NULL groups, empty
 input, and global aggregation. Native restore tests checkpoint the merged distinct state,
 then merge duplicate and new values without losing multiplicities or decimal result scale.
-This extends the existing insert-only split; retracting two-phase DISTINCT still falls back.
+Retracting two-phase COUNT DISTINCT also admits these scalar types. SUM/AVG DISTINCT admit
+integer, FLOAT/DOUBLE and DECIMAL precision through 38 inputs. Local views retain negative
+multiplicities instead of dropping a deletion that precedes its insertion in a bundle.
+Global merges fold or retract a value only when its signed count crosses into or out of
+positive membership, and retain negative entries through snapshots. Hidden count1 fields
+precede the native views. A SUM_RETRACT DISTINCT partial also carries Flink's separate
+non-null count, while SUM0 DISTINCT keeps one field. Floating and wide-decimal views preserve
+shared-filter key order through deletion, reinsertion, resize, collision trees and transport.
+Flink's multi-counter global merge retains zero-count keys; the native temporary map does too,
+because removing those positions changes later floating and decimal folds. A single-counter
+merge removes a key at zero. All filtered counters update before deciding local key removal.
+
+The expanded matrix passes 89 checks per released Flink line: seventeen scalar shapes,
+shared and independent filters, NULL predicates, hidden counters, group recreation, twelve
+repeated memory/native-RocksDB recoveries, finite cancellation and 96-key collision traces
+at four bundle sizes. The native suite passes 836 checks (two diagnostics ignored), including
+592 JDK-qualified map mutations. Both native phases must consume rows. Overflow recovery
+cuts align with mini-batches so the test preserves the arithmetic reduction boundaries.
+Released Flink rejects the DECIMAL(38,38) SUM0 initializer; two 1.18 high-scale collision
+profiles instead assert its matching DecimalData null-unboxing failure. The unchanged upstream
+`AggregateITCase.testDistinctWithMultiFilter` passes seven fixture invocations on Flink 2.2 and six on 1.18, all requiring native work.
+
+Release+mimalloc/JDK 17 complete jobs with one million rows, 128 inner/16 outer keys,
+p=1, memory state, 2 GiB heap, 512-row bundles, two warmups and three interleaved trials
+measure the updating MAX-to-DISTINCT-SUM/COUNT/AVG cascade with a filtered DISTINCT SUM:
+
+| Release/type | Stock seconds | Native seconds |
+| --- | ---: | ---: |
+| 2.2.1 BIGINT | 0.607 | 0.390 |
+| 2.2.1 DECIMAL(12,2) | 0.741 | 0.417 |
+| 1.18.1 BIGINT | 0.615 | 0.391 |
+| 1.18.1 DECIMAL(12,2) | 0.732 | 0.428 |
+
+The actual canonical `d13e9dc4` planner fallback takes 0.579/0.702 s for BIGINT/DECIMAL
+(paired stock 0.576/0.700 s), with the affected native aggregate route absent. Candidate
+jobs retain sources, both transposes, JNI, both native stages and rowwise sinks; every
+candidate requires actual native input. The [raw artifact](../benchmarks/results/retracting-distinct-partials-2026-10-21.json)
+retains all warmups, observations, ranges and hashes. These profiles need no optimization passes.
+
+The floating/wide extension also wins all eight one-million-row complete-job profiles on
+both releases, at **1.53–1.99x** stock throughput. These retain the same query, resource limits, warmups, transposes and native-work
+checks as the exact profiles above. The
+[ordered retraction artifact](../benchmarks/results/retracting-ordered-distinct-partials-2026-10-21.json)
+records every observation, actual previous-planner controls, source/DSO hashes and trial ranges.
+No performance optimization passes were needed for these winning profiles.
+
 Two-phase SUM/AVG DISTINCT supports DECIMAL precision 20–38, including the DECIMAL(20,2)
 case in [#231](https://github.com/datafusion-contrib/StreamFusion/issues/231). Decimal overflow
 can reset SUM to NULL, and a later addition restarts it, making map iteration order observable.
@@ -1494,12 +1700,13 @@ Both transposes and the runtime row source/blackhole sink remain measured.
 
 ### Retracting SUM partial validation and release comparison
 
-The four-width SQL matrix checks complete ordered changelogs at logical bundle sizes 1/2/4,
+The six-width SQL matrix checks complete ordered changelogs at logical bundle sizes 1/2/4,
 including mixed SUM/COUNT/AVG/FILTER, NULL keys/values, zero, negative record counts,
 zero-count sum adjustments, deletion/recreation, and signed overflow. A 2,688-row single-key
 case spans multiple Arrow batches with deterministic count-trigger cadence; independent keys
 can alter the global count-trigger cadence when local bundles enumerate keys in a different order.
-DECIMAL/FLOAT/DOUBLE SUM_RETRACT execute through explicit stock fallback. Operator tests cover
+The later numeric-partial completion below adds DECIMAL SUM_RETRACT and exact two-level merging;
+the preceding INT/BIGINT measurements retain their historical library boundary. Operator tests cover
 memory/RocksDB recovery, backend migration, key-group rescaling and TTL refresh/expiry.
 
 `RetractingSumPartialsBenchmark` runs the updating MAX→SUM/COUNT/AVG/FILTER cascade from a
@@ -1558,3 +1765,682 @@ window jobs; grouping, state-backend I/O and perimeter conversions are outside t
 The [default-admission validation](../benchmarks/results/jvm-feature-defaults-2026-10-19.json)
 records the integrated UDAF/nested bridge on both released Flink lines, including explicit
 false fallback. UDF overhead is accepted; no standalone acceleration is claimed.
+
+### Floating retracting SUM partials
+
+FLOAT and DOUBLE SUM now share the local/global retracting path with integer SUM.
+The sum and contribution count remain separate partials. A zero record count inside a
+logical bundle does not erase the running sum: only the completed bundle can remove a
+group. This preserves floating cancellation residues and count-zero sum adjustments.
+Positive-TTL mini-batches read and refresh retained state at the flush clock, including
+the SINGLE_VALUE specialization; pending Arrow input is reserved until that merge.
+
+On JDK 17, release+mimalloc, one million input rows, parallelism 1, memory state and a
+2 GiB heap, the existing MAX-to-SUM/COUNT/AVG/FILTER cascade uses 128 inner keys,
+16 outer keys and 512-row logical bundles. Both native local/global pairs must consume
+rows. Two warmups and three alternating measured trials retain the runtime RowData
+source, both transposes, JNI, state and rowwise blackhole sink.
+
+| Flink / type | Stock median, s | Native median, s | Stock/native |
+| --- | ---: | ---: | ---: |
+| 2.2.1 / FLOAT | 0.528 | 0.374 | 1.41× |
+| 2.2.1 / DOUBLE | 0.493 | 0.286 | 1.72× |
+| 1.18.1 / FLOAT | 0.483 | 0.394 | 1.23× |
+| 1.18.1 / DOUBLE | 0.452 | 0.276 | 1.64× |
+
+The actual previous canonical revision `d13e9dc4` takes stock fallback for these queries:
+paired FLOAT medians are 0.515 s stock / 0.493 s configured StreamFusion, and DOUBLE
+0.489 s / 0.491 s. These separate invocations establish the previous route and measured
+baseline; timings vary between invocations. No optimization pass was needed for these
+winning cases. [Every warmup, trial and DSO hash](../benchmarks/results/floating-retracting-sum-2026-10-20.json)
+is retained. The timed v1 build precedes a SINGLE_VALUE-only TTL dispatch correction;
+validation uses the corrected v2 build. The SUM benchmark has TTL disabled, so that
+correction does not change its execution path. Each released line passes 20 complete
+numeric changelog checks, 22 controlled retention/recovery checks and 26 focused
+SINGLE_VALUE checks. The later decimal-partial completion below extends this historical
+FLOAT/DOUBLE implementation and corrects rounding-sensitive two-level reductions.
+
+
+### Retracting SINGLE_VALUE partials
+
+The local/global value-and-INT-count layout also accepts updating inputs. The existing native
+merge applies Flink's signed count rule, preserves NULL values, removes/recreates keyed groups
+and keeps a keyless global aggregate's empty result. This is planner admission over the existing
+scalar state. Released 1.18.1 and 2.2.1 factories reject binary and collection/ROW SINGLE_VALUE;
+those type roots do not establish missing native coverage. SQL DISTINCT lowering and the
+released SINGLE_VALUE FILTER rejection remain as described above.
+
+Each release passes 36 complete changelog cases across nine scalar families, nullable keys,
+NULL-producing projections and logical bundles of one/three; two interleaved materialized
+relation checks; two keyless empty-result checks; and four memory/RocksDB cases that recover
+twice. Per-key cycles and recovery cuts align both mini-batch stages for raw changelog
+comparisons. Interleaved keys can change the count-trigger cadence through local map order,
+so their deterministic materialized relation is compared separately. Every admitted test
+requires native local and global input consumption.
+
+`RetractingSumPartialsBenchmark -Dsumretract.singleValue=true` selects an updating
+MAX-to-SINGLE_VALUE/COUNT/AVG/filtered-SUM cascade. One million DOUBLE rows, 128 inner and
+128 outer keys, parallelism one, memory state, a 2 GiB heap, 512-row mini-batches, JDK 17,
+release+mimalloc, two warmups and three alternating measurements retain both conversions,
+production JNI/state, the runtime RowData source and rowwise blackhole sink. Metrics require
+both native local/global pairs to consume input.
+
+| Flink | Stock median, s | Native median, s | Stock/native |
+| --- | ---: | ---: | ---: |
+| 2.2.1 | 0.541 | 0.382 | 1.42× |
+| 1.18.1 | 0.541 | 0.367 | 1.47× |
+
+The actual previous canonical `d13e9dc4` takes stock fallback: paired configured/stock medians
+are 0.535/0.536 seconds on 2.2.1. No optimization pass was needed for this winning workload.
+[All trials, configuration, library hashes and validation limits](../benchmarks/results/retracting-single-value-2026-10-21.json)
+are retained; these measurements do not establish a speedup for every scalar type or backend.
+
+### Retracting MIN/MAX partials
+
+Two-phase MIN/MAX now transports each retracting accumulator as one Arrow struct containing
+its selected value, positive-entry count and signed value-to-count map. Negative local counts
+must survive a bundle: a deletion can remove a value that was accumulated by an earlier bundle.
+The global first combines each key's heap partials, then merges that buffer into retained state.
+NULLs are excluded and FILTER applies before the local fold. Cached extrema and map-size counters
+follow the released accumulator independently of the signed map. In particular, a replacement
+scan includes negative entries, matching Flink even when its cached winner has a negative count.
+A monotonicity-exempt scalar extreme can share a partial row with a mapped extreme; its local
+fold ignores retractions exactly as Flink does. This internal accumulator layout does not add
+new SQL STRUCTURED payload support.
+
+The 55 checks per released Flink line cover INT, BIGINT, FLOAT, DOUBLE, DECIMAL, STRING, DATE, TIME,
+TIMESTAMP(9) and BOOLEAN at bundle sizes 1/2/4, preserving complete output changelogs and
+types. Repeated restores cover both memory and native RocksDB state. Another 32 controlled-clock
+operator checks per release cover BIGINT, DOUBLE, DECIMAL and STRING, append/scalar controls,
+mapped retractions, independent entry/group expiry, flush-time expiry and two successive restores.
+The full native suite passes 878 checks (two ignored); suite-agent checks pass 50 (one skip), and
+35 route-audit checks pass.
+
+Positive retention expires map entries independently of the cached extreme and map-size counter.
+An expired entry read behaves as absent; its removal does not rebuild the cached result. Successful
+map writes refresh that entry alone, and a replacement scan removes expired entries before choosing
+a key. Canceled heap partials do not write to retained entries. The cached fields, signed counts
+and original deadlines use native raw keyed snapshots on both backends. Older raw snapshots
+rebuild their previous cached value/count and seed entry deadlines from the saved group write,
+or restore time when no old group timestamp exists. The direct per-element RocksDB codec remains
+in use for ordinary scalar extrema; mapped extrema use the raw keyed representation.
+
+Unchanged released upstream checks pass 21 invocations on 2.2: MIN/MAX retraction-condition and
+DISTINCT-with-retraction fixtures. Flink 1.18 passes twelve decimal MIN/MAX and DISTINCT-with-retraction
+invocations. Admitted split variants require consumed native local and global work. The 1.18 scope
+uses its actual released decimal fixture rather than nonexistent retraction-condition methods;
+its DISTINCT display names are corrected as well. Independent clock semantics are established
+by the focused operator checks above.
+
+The earlier zero-retention million-row updating MAX→MIN/COUNT/AVG/MAX cascade uses 128 inner and 16 outer keys,
+parallelism 1, memory state, 512-row bundles, a 2 GiB Java heap, two warmups and three alternating
+measurements. Both transposes, JNI, state and job completion remain timed. Metrics require two
+native local/global pairs to consume rows. After the shared temporary-sum correction below, DOUBLE medians are 0.554 s stock versus 0.368 s
+native on Flink 2.2.1 (1.51×), and 0.518 s versus 0.379 s on Flink 1.18.1 (1.37×). Actual canonical `d13e9dc4` falls back, with 0.543 s enabled versus 0.512 s stock in its separate run.
+These are complete-job measurements for this cascade, not isolated extrema throughput claims. Raw trials, the actual
+previous fallback and library hashes are retained in
+[the partial-map artifact](../benchmarks/results/retracting-extrema-partials-2026-10-21.json).
+
+The retained implementation has a separate
+[complete-job artifact](../benchmarks/results/mapped-extreme-retention-2026-10-21.json).
+Release+mimalloc/JDK 17 jobs use p=1, 2 GiB heap, one-hour retention, 512-row bundles,
+two warmups and three alternating measured runs. Both native local/global pairs must consume
+input. The numeric outer query computes MIN/COUNT/AVG/MAX; the string query computes
+MIN/COUNT/MAX/COUNT(*). Inner MAX sees ascending values, while inner MIN sees descending
+values, so both pipelines exercise updating results. Every seventh value is NULL.
+
+| Profile; rows, inner/outer keys | Flink 2.2 stock/native median, s | Flink 1.18 stock/native median, s |
+| --- | ---: | ---: |
+| INT MAX→MIN, memory; 1M, 128/16 | 0.549 / 0.374 | 0.521 / 0.371 |
+| DOUBLE MIN→MAX, memory; 1M, 4096/64 | 2.165 / 1.830 | 2.073 / 1.794 |
+| STRING MAX→MIN, memory; 262144, 1024/64 | 0.840 / 0.744 | 0.831 / 0.705 |
+| INT MIN→MAX, RocksDB; 262144, 4096/64 | 4.017 / 1.006 | stock run time-boxed |
+
+All seven completed profiles beat stock; no optimization pass was needed. Actual canonical
+`d13e9dc4` takes planner fallback at 0.484/2.120/0.818/3.350 s on those four 2.2 profiles,
+with paired stock medians 0.508/2.113/0.778/3.158 s. The artifact preserves all trials,
+ranges, source/DSO hashes and consumed-native evidence.
+
+Flink 1.18's stock RocksDB warmup exceeded the 180-second case budget. A smaller matched
+32,768-row/512-inner-key attempt also exhausted its 90-second budget before all three measured
+trials completed. At the second timeout its upstream global aggregate was in `RocksDB.put`
+through TTL value state. Both incomplete attempts and the worker-stack excerpt are retained;
+they contribute no median or RocksDB speedup claim on 1.18.
+
+### Nullable sums and global temporary partials
+
+Retracting local SUM now emits its nullable running sum and signed non-null count separately.
+It retains negative zero and a sum adjustment when the net contribution count is zero. DECIMAL
+widens the partial to precision 38 at the input scale, resets after arithmetic overflow on the next
+non-null accumulate/retract, and ignores a NULL partial during merge while still merging its count.
+AVG preserves its distinct, sticky decimal overflow semantics.
+
+For each logical global mini-batch, SUM/AVG first combine partial sums in temporary per-key
+accumulators, then merge that result into retained state. Folding each incoming partial directly
+into retained state changes the point of decimal overflow and floating rounding. The temporary
+buffers are memory-accounted, flushed before checkpointing, and used by memory and RocksDB state.
+Positive TTL still reads retained state at the logical flush clock.
+
+Each released Flink line passes 26 new checks: four decimal shapes (12/20/38 digits, including
+scale 38) at three bundle sizes; four repeated decimal recoveries; six FLOAT/DOUBLE rounding,
+signed-zero and non-finite fixtures; and four repeated floating recoveries. They compare complete
+changelogs and result types and require both native phases to consume rows. The prior 19 numeric
+changelog and ten direct state/recovery/rescaling/TTL checks also pass on each line. The full
+release+mimalloc native suite passes 825 tests (two ignored), the suite agent passes 50
+(one skip), and 35 route-audit checks pass.
+
+The unchanged upstream `testPrecisionForSumWithRetractAggregationOnDecimal` now requires
+native local/global work in its two-phase fixture and native grouping in its single-phase fixture,
+with the established Flink 1.18 changelog-state fallback retained. Runtime-route scope is updated;
+actual unchanged upstream execution and required CI remain pending the consolidated PR.
+
+The release+mimalloc million-row MAX→SUM/COUNT/AVG/FILTER cascade retains both transposes,
+JNI, temporary/persistent state and rowwise completion. It uses 128 inner/16 outer keys,
+parallelism 1, memory state, 512-row bundles, a 2 GiB heap, two warmups and three alternating trials.
+Consumed-work metrics require two native local/global pairs.
+
+| Type | Flink 2.2 stock/native median, s | Stock/native | Flink 1.18 stock/native median, s | Stock/native |
+| --- | ---: | ---: | ---: | ---: |
+| FLOAT | 0.588 / 0.384 | 1.53× | 0.478 / 0.374 | 1.28× |
+| DOUBLE | 0.510 / 0.280 | 1.82× | 0.459 / 0.287 | 1.60× |
+| DECIMAL(20,3) | 0.704 / 0.432 | 1.63× | 0.631 / 0.339 | 1.86× |
+
+Actual canonical `d13e9dc4` takes decimal fallback: 0.674 s enabled versus 0.660 s stock in its separate run.
+All measured cases win their complete-job comparison; no optimization pass was needed.
+Warmups, trials, variability, exact boundaries and hashes are retained in
+[the numeric-partial artifact](../benchmarks/results/retracting-decimal-partials-2026-10-21.json).
+Higher decimal scales and RocksDB have parity/recovery coverage, without corresponding throughput claims.
+
+### Generic FIRST/LAST values
+
+The native accumulator binds generic value schemas from the input Arrow field and from typed
+checkpoint fields on restore. It retains nested fields, nullability, element representation and
+row kinds through selection and repeated recovery. Constructed complex values can cross a
+projection and exchange into a verified FIRST/LAST consumer; the enclosing aggregate retains
+its representation metadata. Other representation-dependent operator and columnar-sink gates
+remain in place. These are existing ARRAY/MAP/ROW bridge types, not new SQL STRUCTURED support.
+
+The supported release matters: Flink 2.2 uses generic FIRST/LAST factories, while Flink 1.18
+rejects these extra types. The planner also rejects DISTINCT binary, MAP, ROW and MULTISET on
+both lines. The SQL checks preserve those planning failures rather than inventing new dialects.
+Positive-retention ordinary retracting first/last now retain independent value/order maps.
+DISTINCT first/last also admit positive retention, with shared filtered membership kept
+separate from cached selections and inner arrival-order views.
+
+The unchanged upstream Table API `testGroupAggregateWithExpression` now requires consumed
+native grouping in both state-backend fixtures, with Flink 1.18's established changelog-state
+fallback retained. It protects the mixed scalar FIRST/LAST context; dedicated SQL fixtures
+establish the new value types. Actual unchanged upstream runtime validation is reserved for
+consolidated delivery.
+
+
+### Independent FIRST/LAST retention
+
+Controlled-clock operator comparisons against released Flink cover BIGINT/STRING,
+immediate/mini-batch and memory/native-RocksDB state: sixteen cases on each line, including
+two successive restores, independent entry deadlines, stale cached selections, duplicate
+removals, NULL-only group refresh and whole-group expiry. The host fixture separates real
+arrival-clock samples while controlling the TTL provider, so bucket collisions cannot make
+this deterministic deadline test flaky. Native unit checks separately exercise shared-clock
+buckets and refresh of surviving values. Thirteen typed SQL profiles run each immediate and
+requested TWO_PHASE choice with positive retention, FILTER and consumed native work. Flink
+1.18 skips its four unavailable FIRST/LAST factories. FIRST/LAST has no released merge
+implementation, so its requested TWO_PHASE shape remains single phase. The native suite
+passes 839 checks, with two diagnostics ignored.
+
+The [retention measurements](../benchmarks/results/ordered-value-retention-2026-10-21.json)
+retain complete-job trial boundaries, source/DSO hashes, previous-planner controls and the
+aborted large stock warmup diagnostic. Both engines receive identical rows, groups, NULLs,
+changelog and resources; row/Arrow conversions, JNI and the rowwise sink remain timed.
+
+The broader selected suite verifies 272 cases on Flink 2.2; Flink 1.18 passes 212 and skips
+60 explicit released-host capability cases. This includes eighteen new complex retained SQL
+profiles and eight new complex recoveries on 2.2. Actual positive STATE_TTL hints require
+native execution. The unchanged upstream mixed FIRST/LAST/LISTAGG Table API fixture passes
+two backend invocations per release with consumed native aggregate work; its append input
+protects shared integration rather than establishing the new retention semantics alone.
+
+At 131,072 rows, 1,024 groups, cardinality 4,096, one-eighth NULLs, one-hour retention,
+p=1, memory state and 2 GiB heap, two warmups and three alternating measured runs give:
+
+| Type | Flink 2.2 stock/native median, s | Flink 1.18 stock/native median, s |
+| --- | ---: | ---: |
+| BIGINT | 2.042 / 0.165 | 2.039 / 0.176 |
+| STRING | 2.711 / 0.219 | 2.656 / 0.217 |
+| DOUBLE | 2.097 / 0.158 | 2.053 / 0.158 |
+| ARRAY | 2.627 / 0.356 | released factory unavailable |
+
+The actual `d13e9dc4` planner fallback takes 1.975/2.612/2.048/2.701 s for those four
+2.2 profiles (paired stock 1.908/2.675/1.985/2.664 s). These specific native jobs win;
+no optimization passes were needed. An initial million-row/64-group stock warmup was
+terminated after its FIRST_VALUE retraction scan exceeded 80 seconds; it contributes no
+measured trial. Flink samples arrival clock inside the aggregate while native samples once
+per Arrow call, so clock-bucket density influences this retention-specific result. The
+numbers do not establish general FIRST/LAST speedups.
+
+
+### Retracting LISTAGG entry retention
+
+The released host's ListViews expire individual occurrences and pending retractions, while
+successful removal refreshes the complete surviving value list. The native state retains those
+two timestamp sequences alongside its existing versioned string accumulator, keeping fresh
+TTL-off snapshots unchanged. The focused selection passes 51 SQL/operator checks on each
+release: sixteen new default/literal separator, immediate/mini-batch, heap/native-RocksDB and
+two-restore cases, plus the retained append/split controls. Two native tests independently check
+inclusive deadlines, survivor refresh, unmatched retraction expiry and snapshot clocks. The
+full native suite passes 841 tests, with two diagnostics ignored; the suite agent passes 50
+with one skip and the route-scope checks pass 35.
+
+The unchanged upstream `AggregateITCase.testListAggWithRetraction` passes seven invocations
+on Flink 2.2 and six on 1.18 with explicit routing contracts. Single-phase variants require
+consumed native grouping; two-phase variants now require positive local and global work
+with their declared retracting partial layout. The entry-retention behavior is qualified by
+the focused controlled-clock tests.
+[Raw complete-job measurements](../benchmarks/results/retracting-listagg-retention-2026-10-21.json)
+retain warmups, trial ranges, source/DSO hashes and actual previous-planner controls.
+
+Release+mimalloc/JDK 17 complete jobs use p=1, 2 GiB heap, one-hour retention,
+1,024-row transposes, two warmups and three alternating measured trials. The source cycles
+INSERT/INSERT/DELETE per key and supplies NULL every seventh value. Both transposes, JNI,
+string materialization and the rowwise blackhole sink remain timed.
+
+| Rows / keys / string width | Flink 2.2 stock/native median, s | Flink 1.18 stock/native median, s |
+| --- | ---: | ---: |
+| 1,000,000 / 65,536 / 16 bytes | 6.685 / 0.789 | 8.125 / 0.784 |
+| 262,144 / 32,768 / 128 bytes | 1.728 / 0.402 | 1.899 / 0.340 |
+
+The actual canonical `d13e9dc4` fallback takes 6.576/1.561 s on those two 2.2
+profiles (paired stock 6.718/1.583 s). Every candidate requires consumed native work.
+All four profiles win; no slow-case optimization passes or performance opt-ins were needed.
+
+### Shared DISTINCT retention comparison
+
+The single-phase retention checks pass 108 SQL/operator cases on each released Flink line:
+68 typed append/retract/mini-batch combinations, 24 typed cases with two restores on memory
+and native RocksDB, and 16 controlled-clock operator comparisons. Native tests additionally
+pin cached results after entry expiry, disabled retention after restore, legacy snapshot
+migration and timestamp keys spanning the complete millisecond range. The unchanged released
+`AggregateITCase#testDistinctWithMultiFilter` consumes native grouping in all seven 2.2 and
+six 1.18 invocations; split variants also consume the existing native local stage.
+
+The [raw measurement and profile artifact](../benchmarks/results/shared-distinct-retention-2026-10-21.json)
+records one million rows, 64 keys, p=1, a 2 GiB heap, one-hour retention, single-phase
+execution, two warmups and three alternating measured complete jobs. Source, both transposes,
+JNI and the rowwise blackhole sink remain timed.
+
+| Query profile | Flink 2.2 stock/native median, s | Flink 1.18 stock/native median, s |
+| --- | ---: | ---: |
+| BOOLEAN/timestamp COUNT DISTINCT and decimal SUM DISTINCT | 1.425 / 0.846 | 1.406 / 0.837 |
+| FLOAT/DOUBLE SUM and AVG DISTINCT | 4.324 / 0.875 | 4.291 / 0.892 |
+
+Exactly two measured optimization passes reduced the first native profile from 7.773 to
+1.652 to 0.846 s. CPU profiles identified timestamp hash collisions, then temporary Arrow
+scalar reconstruction; direct component hashing and compact `i128` clock keys remove those
+costs. The actual canonical previous Java runtime, with its unchanged production-native
+sources, takes 0.553/0.901 s on the two 2.2 profiles (paired stock 1.425/4.249 s). Its existing
+release DSO uses the system allocator; the candidate uses release+mimalloc. The typed query
+adds independently retained entry state to the previous whole-group lifetime. It still beats
+stock, but this no-expiry workload does not claim an improvement over the old native path.
+The final DSO adds only old-snapshot migration to the measured second-pass update path.
+
+### Global DISTINCT entry retention
+
+Both released Flink lines pass 116 local/global retention checks: 68 typed append/retract
+profiles with one- and four-row bundles, 24 typed jobs with two memory/native-RocksDB restores,
+and 24 controlled-clock operator comparisons, including two successive restores. The latter
+compare operators extracted from actual released plans and separately advance partial arrival
+and global flush clocks. BIGINT, DOUBLE and wide DECIMAL cover exact and ordered merge paths.
+The complete native suite passes 854 tests, with two diagnostics ignored. Native regression
+checks additionally preserve old entry deadlines when the first restored bundle contains only
+NULL arguments. Existing upstream multi-filter DISTINCT contracts remain unchanged and consume
+native grouping in seven released 2.2 and six 1.18 invocations.
+
+The [complete-job artifact](../benchmarks/results/global-distinct-retention-2026-10-21.json)
+records one million rows, 64 keys, p=1, 2 GiB heap, one-hour TTL, 1,024-row mini-batches,
+two warmups and three alternating measured runs. Source, both transposes, JNI and the
+rowwise blackhole sink remain timed. No builds or tests compete with measurements.
+
+| Query profile | Flink 2.2 stock/native median, s | Flink 1.18 stock/native median, s |
+| --- | ---: | ---: |
+| BOOLEAN/timestamp COUNT DISTINCT and DECIMAL(38,2) SUM DISTINCT | 1.222 / 0.992 | 1.149 / 1.003 |
+| FLOAT/DOUBLE SUM and AVG DISTINCT | 3.552 / 1.232 | 3.574 / 1.216 |
+
+The initial typed native job took 1.348 s versus stock 1.199 s. Its CPU profile found
+422 compact-key and 317 scalar-reconstruction samples among 1,257 native group-update
+samples; these inclusive counts overlap. One measured optimization pass reads timestamp
+components from the already-bound view reader and reduces the native job to 0.992 s.
+All four final profiles beat stock, so no second optimization pass was needed.
+
+Actual canonical `d13e9dc4` takes 0.768 s for the already-native typed query and 3.646 s
+for its floating fallback (paired stock 1.150/3.614 s). The earlier native path has only
+whole-group retention and uses a release/system-allocator DSO; the candidate adds entry
+clocks and uses release+mimalloc. This no-expiry workload does not claim an improvement
+over that faster previous typed path. Controlled-clock tests qualify the new semantics.
+
+### Independent DISTINCT FIRST/LAST retention
+
+Positive retention admits DISTINCT FIRST/LAST across the released scalar types and Flink 2.2
+ARRAY/interval types. The shared outer membership follows append bitsets or signed retracting
+counters; it expires independently of the cached selected scalar. Retracting selections also
+keep independent value-to-order and order-to-value deadlines. A newly reintroduced membership
+can therefore fold into an older cached selection, matching released Flink rather than
+reconstructing the answer from the surviving membership set.
+
+Raw keyed checkpoints preserve membership, cached selections and inner ordered views separately.
+They record the append/retract mode so disabling TTL after restore keeps the same accumulator
+semantics. Older zero-retention snapshots migrate their ordered queue before enabling retained
+views. Memory and native RocksDB share this raw representation. FIRST/LAST still have no
+released merge implementation; asking for TWO_PHASE produces the supported single-phase plan.
+
+The broad SQL/operator selection passes 400 checks on Flink 2.2. Flink 1.18 passes 300 with
+100 explicit released-host capability skips. It includes 16 controlled-clock append/retract,
+immediate/mini-batch and memory/RocksDB comparisons, with two successive restores, plus
+60 new typed retention profiles and 30 typed retained recovery profiles. Complex retained
+profiles cover ARRAY, nested ARRAY and intervals where Flink supplies the function, and retain
+its explicit DISTINCT binary/MAP/ROW/MULTISET planning failures. Unchanged released upstream
+mixed FIRST/LAST and multi-filter DISTINCT fixtures consume native grouping on both lines.
+
+The [complete-job artifact](../benchmarks/results/distinct-ordered-retention-2026-10-21.json)
+retains 15 final candidate and nine actual canonical previous-fallback profiles, all warmups,
+measured samples, ranges, source/DSO hashes and CPU profiles. Jobs use release+mimalloc,
+JDK 17, p=1, a 2 GiB heap, one-hour retention and both transposes. Two warmups precede three
+alternating measurements. Retraction profiles use 131,072 rows/1,024 keys and global value
+cardinalities 4,096 or 65,536; append profiles use one million rows/64 keys/cardinality 128.
+The source's key/value correlation yields four or 64 value IDs per retracting key and two
+per append key. Some retracting keys are all-NULL. Controlled-clock tests separately establish
+expiry; the one-hour timed jobs do not expire entries.
+
+Thirteen final profiles beat paired stock. Scalar append/retract profiles win 1.13–2.20x;
+the higher-cardinality profiles win 4.73–7.88x across both releases. ARRAY's two low-cardinality
+profiles remain slower after exactly two measured optimization passes:
+
+| Flink 2.2 ARRAY workload | Stock median, s | Initial native, s | First pass, s | Final native, s |
+| --- | ---: | ---: | ---: | ---: |
+| Retractions, four value IDs/key | 0.304 | 0.971 | 0.380 | 0.352 |
+| Append, two value IDs/key | 0.700 | 3.036 | 1.558 | 1.445 |
+| Retractions, 64 value IDs/key | 2.331 | — | — | 0.493 |
+
+The remaining append ARRAY CPU profile records 660 scalar-extraction samples, 625 retained
+selection samples and 207 output-reconstruction samples among 2,489 native update samples.
+Coverage ships under the accepted bounded groundwork policy, with the remaining array costs
+tracked under [#443](https://github.com/datafusion-contrib/StreamFusion/issues/443). There is
+no performance-only opt-in and no third optimization pass. NaNs, both zero signs, infinities
+and original selected payloads are compared with retention off/on and through two restores.
+
+Canonical previous ARRAY fallback medians are 0.293 s for low-cardinality retractions,
+0.685 s for append, and 1.879 s for higher-cardinality retractions (paired stock
+0.299/0.693/1.863 s). The raw artifact retains every range, including variation in the
+higher-cardinality stock controls. The two slower native ARRAY profiles are also slower
+than those previous fallback controls; their admission is accepted groundwork rather than
+a claim of acceleration.
+
+## Generic DISTINCT local/global views
+
+`COUNT(DISTINCT)` admits ARRAY and both interval families in single-phase and local/global
+plans on Flink 1.18.1 and 2.2.1, including retracting input. The local operator binds its
+view element type from the Arrow input before creating a group, so empty and all-NULL
+bundles retain the declared nested/interval schema. Shared unfiltered and independently
+filtered counts merge signed multiplicities through the existing DISTINCT view.
+Nested Arrow child field names and nullability are not membership values; transport aligns
+those fields before combining values from input batches, partials and restored snapshots.
+Floating ARRAY members use Java boxed equality: NaN payloads share membership while signed
+zeros remain distinct. Original payloads remain in the view.
+
+Representation-preserving collection projections can feed these verified DISTINCT consumers;
+the planner retains the collection representation through the local aggregate and transposes.
+Primitive STRING columns emitted by a collection Calc use their existing UTF-8 bytes at the
+aggregate boundary, with the parent NULL mask applied. The UTF-8 buffers remain shared;
+ARRAY/ROW/MAP payloads retain their nested string caches. Key hashing treats the represented
+STRING and array-element copy carriers as their logical types, so they consume the same
+precision descriptors and fixed slot widths as Flink. This preserves nullable STRING keys,
+scalar string aggregate composition and memory/native RocksDB recovery.
+Other collection boundary restrictions remain in force. Runtime coverage compares RowKinds,
+resolved schemas and consumed native local/global work for ARRAY of INT, FLOAT, DOUBLE,
+STRING, DECIMAL, ROW and ARRAY, plus year-month/day-time intervals. Recovery covers memory
+and native RocksDB state with two successive restores, with retention enabled and disabled.
+
+Released Flink's `AggregateUtil.createDistinctKeyType` rejects single-argument DISTINCT
+BINARY, VARBINARY, MAP, ROW and MULTISET keys on both supported lines. These retain the
+same planning failure rather than being counted as missing native local/global functions.
+Flink 2.2's additional VARIANT root is outside this task's existing type scope.
+
+### Measurements and accepted limits
+
+The small functionality gate compares **131,072 prebuilt Java BinaryRowData rows with the
+same 131,072 rows already in Rust Arrow buffers**, at 64 keys, 128 values per key and
+1,024-row bundles. Preparation, Arrow IPC loading and operator setup are outside timing.
+Production local/global accumulation, partial copying/packing and an identical RowKind/count
+digest are timed in each runtime. Every row count and checksum matches. TTL is disabled in
+this small gate; the separate complete jobs enable one-hour retention and retain all transposes,
+JNI, state, source/sink work and completion. Both use release+mimalloc, JDK17, parallelism one,
+a 2 GiB Java heap, NULL every seventh value, two warmups and three measured trials.
+
+| Small gate, count-only | Flink 2.2 / Rust, s | Flink 1.18 / Rust, s |
+| --- | ---: | ---: |
+| ARRAY INT | 0.04764 / 0.08693 | 0.06005 / 0.09025 |
+| ARRAY DOUBLE | 0.05185 / 0.09554 | 0.05229 / 0.09633 |
+| ARRAY STRING | 0.06292 / 0.10091 | 0.05323 / 0.10077 |
+| INTERVAL MONTH | 0.03129 / 0.01278 | 0.02886 / 0.01365 |
+| INTERVAL DAY | 0.03520 / 0.01277 | 0.03520 / 0.01330 |
+
+All eight interval comparisons, including independently filtered shared counts, beat stock
+by 1.68–2.76x. ARRAY remains slower in all twelve isolated comparisons: this is accepted
+native coverage groundwork after the maintainer's two measured optimization passes, not a
+claim of acceleration. The new paths are enabled under that accepted timebox, without a
+performance opt-in. [Follow-up #446](https://github.com/datafusion-contrib/StreamFusion/issues/446)
+tracks the remaining scalar, view and retained-entry work.
+
+| Flink 2.2 complete job | Initial native, s | First pass, s | Final native / stock, s |
+| --- | ---: | ---: | ---: |
+| ARRAY INT, 1M rows / 64 keys / 128 values | 3.172 | 3.195 | 2.969 / 0.943 |
+| ARRAY DOUBLE, 262144 rows / 256 keys / 128 values | 7.208 | 1.086 | 1.055 / 0.606 |
+| ARRAY STRING, 262144 rows / 256 keys / 32 values | 5.917 | 2.367 | 1.658 / 0.474 |
+| INTERVAL DAY, 1M rows / 1024 keys / 128 values | 1.743 | 1.752 | 1.642 / 3.609 |
+
+Flink 1.18 complete-job native/stock medians are 2.993/1.072, 1.061/0.574,
+1.655/0.499 and 1.560/3.547 s for the same four shapes. Actual canonical `d13e9dc4`
+fallback controls take 0.976/0.612/0.477/3.610 s. These observations preserve the unfavorable
+ARRAY end-to-end results. The
+[artifact](../benchmarks/results/generic-distinct-partials-2026-10-21.json) retains all
+initial, intermediate, final and previous trials, ranges, DSO/source hashes, native CPU
+profiles, planner configurations and digest evidence. The
+[optimization ledger](../optimizations/aggregate-specialization-fast-paths.md#hash-nested-distinct-values-without-copying-arrow-cells)
+explains the two passes.
+
+To reproduce the small gate, build the release `distinct_partials_admission` example, then run
+`FloatingDistinctPartialsAdmissionBenchmark` with `SF_BENCHMARK=true`, Maven's `bench` profile,
+`-Dpartials.types=array_int,array_double,array_string,interval_month,interval_day`,
+`-Dpartials.rows=131072 -Dpartials.keys=64 -Dpartials.cardinality=128 -Dpartials.bundle=1024`,
+`-Dpartials.warmups=2 -Dpartials.runs=3 -Dpartials.export=/tmp/generic-distinct`.
+For each exported type/shape pair, run the Rust example with the matching `.arrow` and `.json`
+files followed by `2 3`; its timer starts after reading Arrow and preparing the operator.
+The Flink 1.18 run adds Maven's `flink-1.18` profile. Complete jobs use
+`DistinctAggregateBenchmark -Ddistinct.generic=ARRAY_DOUBLE -Ddistinct.rows=262144
+-Ddistinct.keys=256 -Ddistinct.cardinality=128 -Ddistinct.retentionMillis=3600000
+-Ddistinct.warmup=2 -Ddistinct.runs=3` with `SF_BENCHMARK=true` and the `bench` profile;
+other shapes use the table's type/rows/keys/cardinality. Criterion's `typed_group_values`
+adds nullable ARRAY INT/DOUBLE/STRING and both interval families at four/256 values,
+with setup outside its Rust timer and independent distinct-count checks before timing.
+
+Final verification passes 886 native tests (two ignored), 130 Criterion fixtures and 236
+SQL/operator checks on each release. The latter include 116 generic COUNT contracts,
+64 controlled expiry/recovery profiles and 56 related FIRST/LAST regressions. The unchanged
+released `testCountDistinctArrayType` consumes native work in all seven Flink 2.2 and six
+Flink 1.18 invocations. Final small gates and complete jobs were repeated after the STRING
+carrier correctness fix; earlier two-pass measurements remain separately identified.
+
+### DISTINCT LISTAGG membership retention
+
+Positive-TTL single-phase and local/global LISTAGG DISTINCT use the shared DISTINCT write policy above.
+Its cached append prefix survives membership expiry; retracting input retains the existing
+independent ordered-value and pending-retraction clocks. One-argument LISTAGG and COUNT
+DISTINCT may share a membership clock. A literal separator is a second DISTINCT argument,
+so its clock is shared only with consumers of that same argument pair.
+
+The SQL and released-operator harnesses cover append/retract input, omitted/literal separators,
+filtered shared views, separate argument views, immediate/mini-batch execution, and two
+successive restores on memory/native RocksDB. The native migration regression restores an
+older snapshot without entry clocks and verifies the new deadlines and cached COUNT separately.
+The unchanged released `AggregateITCase#testListAggWithDistinct` consumes native grouping
+in single-phase and split variants on both lines. Split variants require consumed local
+and global native work; Flink 1.18 changelog-state variants retain their existing backend restriction.
+
+[Raw measurements and execution evidence](../benchmarks/results/listagg-distinct-retention-2026-10-21.json)
+retain the complete-job trials against stock Flink and the actual canonical previous planner
+(`d13e9dc4`), with both row/Arrow transposes, JNI and a rowwise sink. Runs use JDK 17, one task,
+a 2 GiB heap, release+mimalloc, one-hour retention, two warmups and three measured trials.
+Each trial asserts positive native aggregate work; previous-version controls assert fallback.
+The strings contain sixteen recurring labels, NULL every seventh input, and the configured
+16/128-byte widths. No performance optimization passes were needed for these profiles.
+
+Final-library complete-job medians (seconds):
+
+| Released Flink / input | Rows / keys / bytes | Stock | Native |
+| --- | --- | ---: | ---: |
+| 2.2.1 append | 1,000,000 / 65,536 / 16 | 12.676 | 1.168 |
+| 1.18.1 retracting | 262,144 / 32,768 / 128 | 4.033 | 0.485 |
+| 2.2.1 duplicate-heavy append | 1,000,000 / 4,096 / 16 | 5.680 | 0.974 |
+
+These final profiles improve 5.83–10.85x over stock. The artifact also retains the
+initial four release/shape profiles and separately paired previous-version fallback controls.
+
+### JSON_OBJECTAGG map partials
+
+Real local/global plans pass native Arrow map-entry lists between the two aggregate stages.
+A local preserves the released heap MapView's live entries and binary-string hash order;
+transport also preserves rebuilding that map after removals or a NULL/empty-key conversion.
+Only surviving entries reach global duplicate checks. Retractions remove local entries,
+while the global merges the resulting map and uses the separate record-count partial for
+group liveness, matching the released functions rather than inventing signed map entries.
+
+The split SQL harness composes both NULL policies with COUNT, string MIN, and COUNT DISTINCT,
+including DECIMAL/CHAR JSON values, append/updating input, disabled/positive TTL, and two
+memory/native-RocksDB restores. Controlled-clock tests extract both generated released
+operators and both native operators. They delay global flush beyond partial arrival, compare
+exact changelog rows, expire fields independently, and restore twice. Failure tests cover
+local/global duplicates, map-copy iteration order, local duplicate NULLs, and each release's
+NULL/empty transport behavior. Errors at a deferred flush retain their Flink execution type.
+
+Released upstream fixtures combining ARRAY and OBJECT aggregates retain their native
+single-phase contract, because JSON_ARRAYAGG has no merge method. Their unchanged tests
+remain regression witnesses; the dedicated SQL and generated-operator tests require positive
+work in both native phases for real JSON_OBJECTAGG splits.
+
+The initial million-row stock split/TTL warmup was stopped after 102 seconds; a JVM thread
+stack located it in `TtlIncrementalCleanup.runCleanup` while materializing JSON fields at
+the global bundle flush. This is retained as a diagnostic rather than a speedup sample.
+The matched complete-job measurements use 131,072 rows for both engines and the previous
+planner, with both row/Arrow conversions, JNI, state, Arrow exchange and the rowwise sink.
+
+| Released Flink / input | Keys / bytes | Stock median (s) | Native median (s) |
+| --- | --- | ---: | ---: |
+| 2.2.1 append | 65,536 / 16 | 2.345 | 0.350 |
+| 2.2.1 retracting | 32,768 / 128 | 2.798 | 0.444 |
+| 1.18.1 append | 65,536 / 16 | 2.218 | 0.330 |
+| 1.18.1 retracting | 32,768 / 128 | 2.899 | 0.428 |
+
+These profiles improve 6.30–6.78x over stock Flink. The previous canonical planner
+(`d13e9dc4`) falls back, measuring 2.085 s and 2.890 s on the two 2.2.1 shapes.
+Runs use JDK 17, one task, a 2 GiB heap, release+mimalloc, one-hour TTL, 1,024-row
+bundles, two warmups and three measured trials, alternating engine order. Every native
+trial requires consumed local and global work. No slow native gate or optimization
+passes were needed. [Raw trials, source/library hashes and execution evidence](../benchmarks/results/json-object-partials-2026-10-21.json)
+also retain the large stock warmup timebox and its TTL cleanup stack.
+
+
+### Retracting LISTAGG local/global lists
+
+Released retracting LISTAGG has one structured partial containing its value list, unmatched
+retraction list, and optional delimiter. The native local emits an Arrow struct containing
+both ordered lists and a separator. The global first merges temporary partials, including
+cancellation within a single partial, then merges that temporary result into retained state.
+Moving owned strings between lists avoids serializing a host ListView between native stages.
+
+Local groups follow Flink's binary-row HashMap order. That order determines which partials
+land in each global count-triggered bundle; preserving only the final set of groups would
+change later FIFO retractions. FILTER, default/empty/Unicode literal separators, NULL keys,
+CHAR/VARCHAR values, numeric partials and trailing COUNT DISTINCT views retain their declared
+column offsets. The append-only separator/prefix layout remains unchanged.
+
+At global merge, surviving value and pending lists receive the new write time. The released
+explicit-separator function skips an empty incoming partial, while the omitted-separator
+function still rewrites the surviving lists. Temporary cancellation must happen first to
+preserve that distinction. Controlled tests delay global flush beyond partial arrival,
+compare exact RowKinds, expire both lists independently and restore twice on memory/native
+RocksDB. SQL recovery comparisons restore both engines at offsets 24 and 72: checkpoint
+bundle drains can change released retracting LISTAGG order, so a recovering run is compared
+with the same checkpoint cuts rather than an independently bundled uninterrupted run.
+
+DISTINCT LISTAGG local/global membership replay uses the separate shared-view path below.
+
+The focused final selection passes 179 SQL/operator checks on each released Flink line,
+including eight released layout contracts, twenty-two new split SQL checks and eight
+controlled-clock/recovery profiles. The native suite passes 894 tests with two diagnostics
+ignored. The unchanged upstream retracting/distinct LISTAGG tests pass fourteen invocations
+on 2.2.1 and twelve on 1.18.1: ordinary retracting splits now require consumed native local
+and global operators; DISTINCT splits now require both operators as described below.
+
+Complete-job medians include source/sink row conversion, JNI, list state and the Arrow
+exchange. Runs use one task, JDK 17, release+mimalloc, a 2 GiB heap, one-hour TTL,
+1,024-row bundles, two warmups and three measured trials in alternating engine order.
+
+| Released Flink / separator | Rows / keys / bytes | Stock median (s) | Native median (s) |
+| --- | --- | ---: | ---: |
+| 2.2.1 omitted comma | 1,000,000 / 65,536 / 16 | 11.315 | 1.725 |
+| 2.2.1 literal comma | 262,144 / 32,768 / 128 | 2.978 | 0.714 |
+| 1.18.1 omitted comma | 1,000,000 / 65,536 / 16 | 12.597 | 1.685 |
+| 1.18.1 literal comma | 262,144 / 32,768 / 128 | 3.459 | 0.687 |
+
+These profiles improve 4.17–7.47x over stock Flink. Every native trial requires positive
+local and global work. No slow native gate or optimization passes were needed.
+[Raw trials, source/library hashes and unchanged upstream execution evidence](../benchmarks/results/retracting-listagg-partials-2026-10-21.json)
+also include separately paired actual previous-planner fallback controls.
+Reproduce with `StringAggregateBenchmark`, `stringagg.phase=TWO_PHASE`,
+`stringagg.updating=true`, `stringagg.ttl=1 h`, and `stringagg.literalSeparator=false`
+for the omitted separator (the default `true` selects a literal comma).
+
+### DISTINCT LISTAGG local/global membership replay
+
+The local operator carries each shared DISTINCT argument view as ordered string/count entries.
+It preserves released StringData hashing for one argument and BinaryRow hashing for a literal
+separator argument, NULL membership positions, map copies, removals and reinsertion. Separator
+literals travel with the Arrow view schema even when every row is NULL or a consumer's FILTER
+rejects the entire partial; a cached list accumulator cannot supply that argument reliably.
+
+The global first combines transient views in released map order, then replays only positive
+membership crossings against retained state. Append membership uses presence bits; retracting
+membership retains signed counts, including negative pending counts. It does not concatenate
+DISTINCT list partials. Shared filtered consumers retain their independent counters and common
+membership deadline, and an explicit separator keeps its distinct argument view separate from
+one-argument COUNT DISTINCT. Inner retracting lists retain their own entry clocks; successful
+removal refreshes survivors without refreshing entries on duplicate membership updates.
+
+Exact SQL and controlled-clock checks cover both released Flink lines, both input modes,
+default/empty/Unicode separators, shared filters, nullable keys/values, mixed aggregate layouts,
+and two restores through memory and native RocksDB state.
+
+Complete-job measurements use JDK 17, release+mimalloc, one task, a 2 GiB heap, one-hour
+retention and 1,024-row local/global mini-batches. Both perimeter conversions, JNI, state,
+Arrow exchange and the rowwise sink remain inside timing. Each profile runs alone with two
+warmups and three alternating-engine measured trials; both native stages must consume rows.
+
+| Flink | Input; rows / keys / string bytes | Stock seconds | Native seconds | Stock / native |
+| --- | --- | ---: | ---: | ---: |
+| 2.2.1 | Retracting, omitted separator; 1M / 65,536 / 16 | 13.489 | 3.091 | 4.36x |
+| 2.2.1 | Append, literal comma; 262,144 / 32,768 / 128 | 3.985 | 1.371 | 2.91x |
+| 1.18.1 | Retracting, omitted separator; 1M / 65,536 / 16 | 14.359 | 3.063 | 4.69x |
+| 1.18.1 | Append, literal comma; 262,144 / 32,768 / 128 | 3.852 | 1.325 | 2.91x |
+
+The actual previous canonical planner falls back for these split queries. Its medians on 2.2.1
+are 14.071 s for the retracting profile and 4.113 s for the wide append profile, with unchanged
+production source and only the identical benchmark fixture copied. All four candidate profiles
+beat stock without a performance optimization pass. The focused current reports pass 348
+SQL/operator checks per release; the Rust suite passes 897 tests with two diagnostics ignored.
+Unchanged upstream retracting/distinct LISTAGG tests pass fourteen invocations on 2.2.1 and twelve
+on 1.18.1, requiring consumed native local/global work for split variants.
+[Raw trials, source/library hashes, previous-planner controls and execution evidence](../benchmarks/results/distinct-listagg-partials-2026-10-21.json)
+retain the measured variability and exact configurations. Reproduce with `StringAggregateBenchmark`,
+`stringagg.function=LISTAGG`, `stringagg.distinct=true`, `stringagg.phase=TWO_PHASE`,
+`stringagg.ttl=1 h`, and the corresponding rows/keys/width settings. The retracting profile sets
+`stringagg.updating=true` and `stringagg.literalSeparator=false`; the append profile sets those
+properties to `false` and `true` respectively.

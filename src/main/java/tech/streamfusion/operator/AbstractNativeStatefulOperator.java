@@ -329,6 +329,10 @@ public abstract class AbstractNativeStatefulOperator<OUT> extends FlinkStreamOpe
       Native.closeRocksDBSnapshotStore(rocksdbSnapshotStoreHandle);
       rocksdbSnapshotStoreHandle = 0;
     }
+    if (rocksdbSupport != null) {
+      rocksdbSupport.close();
+      rocksdbSupport = null;
+    }
     if (memoryBudget != null) {
       memoryBudget.close();
       memoryBudget = null;

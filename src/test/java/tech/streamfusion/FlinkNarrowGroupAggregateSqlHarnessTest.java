@@ -68,11 +68,8 @@ class FlinkNarrowGroupAggregateSqlHarnessTest {
   }
 
   @Test
-  void retractingPartialLayoutsRetainFallback() throws Exception {
-    NativeParity.assertFallbackReasonContains(
-        () -> environment(2, true),
-        "SELECT k, " + AGGREGATES + " FROM src GROUP BY k",
-        "retracting merge");
+  void retractingPartialLayoutsPreserveTypedResults() throws Exception {
+    assertParity(2, true, "SELECT k, " + AGGREGATES + " FROM src GROUP BY k");
   }
 
   private static TableEnvironment environment(int bundleSize, boolean retracting) {

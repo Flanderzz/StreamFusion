@@ -21,7 +21,7 @@ import tech.streamfusion.planner.NativePlanner;
 class FlinkRetractingSumPartialsSqlHarnessTest {
   @TestFactory
   Stream<DynamicTest> exactSumCountsAndRecordLivenessKeepTheCompleteChangelog() {
-    return Stream.of("TINYINT", "SMALLINT", "INT", "BIGINT")
+    return Stream.of("TINYINT", "SMALLINT", "INT", "BIGINT", "FLOAT", "DOUBLE")
         .flatMap(
             type ->
                 Stream.of(1, 2, 4)
@@ -34,41 +34,6 @@ class FlinkRetractingSumPartialsSqlHarnessTest {
   @Test
   void severalArrowBatchesKeepOrderedRetractions() throws Exception {
     compare("BIGINT", 4, 128);
-  }
-
-  @TestFactory
-  Stream<DynamicTest> unverifiedSumRetractionTypesKeepStockExecution() {
-    return Stream.of("DECIMAL(12,2)", "FLOAT", "DOUBLE")
-        .map(
-            type ->
-                DynamicTest.dynamicTest(
-                    type,
-                    () -> {
-                      try (var metrics = new RecoveryExecutionMetrics()) {
-                        var env = metrics.environment(new Configuration(), 1, 0);
-                        var table = StreamTableEnvironment.create(env);
-                        table.getConfig().set("table.optimizer.agg-phase-strategy", "TWO_PHASE");
-                        table.getConfig().set("table.exec.mini-batch.enabled", "true");
-                        table.getConfig().set("table.exec.mini-batch.allow-latency", "1 h");
-                        table.getConfig().set("table.exec.mini-batch.size", "2");
-                        var rowType = ROW(FIELD("k", INT()), FIELD("v", BIGINT()));
-                        table.createTemporaryView(
-                            "src",
-                            table.fromChangelogStream(
-                                fromData(env, input("BIGINT"), ExternalTypeInfo.<Row>of(rowType)),
-                                Schema.newBuilder().fromRowDataType(rowType).build()));
-                        var scan = NativePlanner.install(table);
-                        var result =
-                            table.executeSql(
-                                "SELECT k, SUM(CAST(v AS " + type + ")) FROM src GROUP BY k");
-                        try (var rows = result.collect()) {
-                          while (rows.hasNext()) rows.next();
-                        }
-                        result.getJobClient().orElseThrow().getJobExecutionResult().get();
-                        assertEquals(0, scan.substitutions(), scan.explainSummary());
-                        assertFalse(scan.fallbackReasons().isEmpty(), scan.explainSummary());
-                      }
-                    }));
   }
 
   private static void compare(String typeName, int bundle, int repeats) throws Exception {
@@ -87,7 +52,11 @@ class FlinkRetractingSumPartialsSqlHarnessTest {
                 ? TINYINT()
                 : typeName.equals("SMALLINT")
                     ? SMALLINT()
-                    : typeName.equals("INT") ? INT() : BIGINT();
+                    : typeName.equals("INT")
+                        ? INT()
+                        : typeName.equals("FLOAT")
+                            ? FLOAT()
+                            : typeName.equals("DOUBLE") ? DOUBLE() : BIGINT();
         var rowType = ROW(FIELD("k", INT()), FIELD("v", valueType));
         var input = new ArrayList<Row>();
         for (int i = 0; i < repeats; i++) {
@@ -196,6 +165,12 @@ class FlinkRetractingSumPartialsSqlHarnessTest {
         break;
       case "INT":
         converted = (int) value;
+        break;
+      case "FLOAT":
+        converted = (float) value;
+        break;
+      case "DOUBLE":
+        converted = (double) value;
         break;
       default:
         converted = value;

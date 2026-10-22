@@ -127,3 +127,43 @@ Both store versioned accumulator snapshots. Flink 1.18 NULL-key serialization fa
 are deferred until materialization; structured errors cross JNI only after the imported
 Arrow batch has been dropped. The cold legacy failure delegates to the released Flink
 aggregate, preserving its wrapped exception without reconstructing JDK-specific messages.
+
+Single-phase retained LISTAGG DISTINCT now uses the shared DISTINCT entry clock alongside
+its existing ordered accumulator. The released generated wrapper writes append membership
+only when a filter bit changes; retracting counters write on each admitted non-NULL update.
+Expiry removes only membership, leaving the cached prefix and inner ListView entries intact.
+One-argument LISTAGG may share a clock with COUNT DISTINCT, while an explicit separator is
+a second DISTINCT argument and separates its view from one-argument consumers. Existing raw
+keyed snapshots retain these clocks and the list's independent deadlines together. Migration
+from a snapshot without clocks seeds each full argument view separately from the saved group
+clock, or the restore time for an old snapshot without a group clock. This reuses
+the established incremental state machinery after consulting Arroyo's incremental aggregator;
+its unordered batch recomputation still cannot preserve LISTAGG's observable arrival order.
+
+JSON_OBJECTAGG local/global plans reuse the incremental group-state structure consulted in
+Arroyo, with Arrow list-of-struct map partials rather than host MapView wrappers. Local maps
+retain heap NULL-key behavior and their released binary-string hash iteration order, including
+resize/removal, so a merged duplicate reports the same offending key. Global merge folds
+only surviving local entries into the retained field map at bundle flush and assigns each
+written field its own TTL clock. The existing binary snapshot format stores the logical JSON
+kind and field clocks, not the transient partial layout. No row conversion is introduced
+between the local, exchange and global. The cold local duplicate-NULL failure delegates to
+the released function, like the existing legacy NULL-key compatibility helpers.
+
+For released 1.18 partials, the MapView's non-null STRING element getter reads a heap
+NULL key as empty; rebuilding the external HashMap then collapses NULL/empty aliases.
+Arrow partial construction reproduces that conversion and copy order. Released 2.2 keeps
+its NULL-key failure. Duplicate NULLs still fail before the local map is transported.
+Aggregate errors arising at a deferred bundle flush use the same typed JNI error dispatcher
+as updates, following Comet's distinction between execution and resource failures; a JSON
+duplicate must retain Flink's exception rather than masquerading as a memory-limit failure.
+
+Retracting LISTAGG now uses the same columnar local/global skeleton for its structured
+value/retraction partial. It preserves the released ordered-list merge instead of Arroyo's
+unordered multiset recomputation. Temporary partials cancel before touching retained lists;
+strings move between owned deques, and only the global merge refreshes surviving entry clocks.
+The explicit-separator empty-partial skip remains distinct from the default-separator rewrite.
+The existing Flink binary-row group-map order is also used for these local groups, because
+its global bundle cuts affect later FIFO retractions and therefore final order after updates.
+Recovering SQL jobs compare equal checkpoint cuts on both engines; the released merge is
+context-dependent under different checkpoint-induced bundle boundaries.

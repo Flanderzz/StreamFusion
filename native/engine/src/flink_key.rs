@@ -11,6 +11,20 @@ use streamfusion_bridge::timestamp::{is_timestamp, TimestampColumn, TimestampVal
 const DEFAULT_SEED: u32 = 42;
 const MAX_INLINE_BYTES: usize = 7;
 
+pub(crate) fn represented_string(data_type: &DataType) -> bool {
+    matches!(data_type, DataType::Struct(fields)
+        if (2..=3).contains(&fields.len())
+            && fields[0].name() == "utf8" && fields[0].data_type() == &DataType::Utf8
+            && fields[0].metadata().get("streamfusion.nested-string").is_some_and(|v| v == "1")
+            && fields[1].name() == "java" && matches!(fields[1].data_type(), DataType::List(_)))
+}
+
+fn represented_element(data_type: &DataType) -> bool {
+    matches!(data_type, DataType::Struct(fields)
+        if fields.len() == 2 && fields[0].name() == "value"
+            && fields[1].metadata().get("streamfusion.array-element").is_some_and(|v| v == "1"))
+}
+
 /// The logical shape of one key field. Arrow supplies the physical type tree; the parallel
 /// precision stream supplies the one detail Arrow loses: Flink timestamp precision.
 struct KeyTypeSchema {
@@ -20,6 +34,12 @@ struct KeyTypeSchema {
 }
 
 fn key_type_schema(data_type: &DataType, precisions: &[i32], cursor: &mut usize) -> KeyTypeSchema {
+    if represented_element(data_type) {
+        let DataType::Struct(fields) = data_type else {
+            unreachable!()
+        };
+        return key_type_schema(fields[0].data_type(), precisions, cursor);
+    }
     let row_kind = match data_type {
         DataType::Struct(fields) => nested_row_kind_index(fields),
         _ => None,
@@ -29,7 +49,7 @@ fn key_type_schema(data_type: &DataType, precisions: &[i32], cursor: &mut usize)
         .expect("missing Flink key type descriptor");
     *cursor += 1;
     let children = match data_type {
-        _ if is_timestamp(data_type) => Vec::new(),
+        _ if is_timestamp(data_type) || represented_string(data_type) => Vec::new(),
         DataType::List(field) | DataType::LargeList(field) => {
             vec![key_type_schema(field.data_type(), precisions, cursor)]
         }
@@ -298,6 +318,12 @@ fn time_millis(array: &ArrayRef, row: usize) -> i32 {
 }
 
 fn array_element_size(data_type: &DataType) -> usize {
+    if represented_element(data_type) {
+        let DataType::Struct(fields) = data_type else {
+            unreachable!()
+        };
+        return array_element_size(fields[0].data_type());
+    }
     match data_type {
         DataType::Boolean | DataType::Int8 => 1,
         DataType::Int16 => 2,
@@ -366,6 +392,14 @@ fn write_array_value(
 ) {
     if array.is_null(row) {
         writer.set_null(pos);
+        return;
+    }
+    if represented_element(array.data_type()) || represented_string(array.data_type()) {
+        let array = array
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .expect("represented key");
+        write_array_value(writer, pos, array.column(0), row, schema);
         return;
     }
     match array.data_type() {
@@ -564,6 +598,14 @@ fn write_value(
 ) {
     if array.is_null(row) {
         writer.set_null(pos);
+        return;
+    }
+    if represented_element(array.data_type()) || represented_string(array.data_type()) {
+        let array = array
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .expect("represented key");
+        write_value(writer, pos, array.column(0), row, schema);
         return;
     }
     match array.data_type() {
@@ -802,6 +844,47 @@ pub(crate) fn binary_row_hash(
     timestamp_precisions: &[i32],
 ) -> i32 {
     BinaryRowBatchEncoder::new(batch, key_columns, timestamp_precisions).hash(row)
+}
+
+pub(crate) fn string_distinct_map_hash(value: Option<&str>, separator: Option<&str>) -> i32 {
+    let hash = if let Some(separator) = separator {
+        let mut writer = BinaryRowWriter::new(2);
+        if let Some(value) = value {
+            writer.write_bytes(0, value.as_bytes());
+        } else {
+            writer.set_null(0);
+        }
+        writer.write_bytes(1, separator.as_bytes());
+        hash_bytes_by_words(writer.row_bytes()) as u32
+    } else {
+        let Some(value) = value else { return 0 };
+        let bytes = value.as_bytes();
+        let mix = |hash: u32, key: u32| {
+            let key = key
+                .wrapping_mul(0xcc9e2d51)
+                .rotate_left(15)
+                .wrapping_mul(0x1b873593);
+            (hash ^ key)
+                .rotate_left(13)
+                .wrapping_mul(5)
+                .wrapping_add(0xe6546b64)
+        };
+        let mut hash = DEFAULT_SEED;
+        let mut words = bytes.chunks_exact(4);
+        for word in &mut words {
+            hash = mix(hash, u32::from_ne_bytes(word.try_into().unwrap()));
+        }
+        for &byte in words.remainder() {
+            hash = mix(hash, (byte as i8 as i32) as u32);
+        }
+        hash ^= bytes.len() as u32;
+        hash ^= hash >> 16;
+        hash = hash.wrapping_mul(0x85ebca6b);
+        hash ^= hash >> 13;
+        hash = hash.wrapping_mul(0xc2b2ae35);
+        hash ^ (hash >> 16)
+    };
+    (hash ^ (hash >> 16)) as i32
 }
 
 /// Flink's `MurmurHashUtils.hashBytesByWords`: BinaryRow byte lengths are always word-aligned.

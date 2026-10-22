@@ -20,6 +20,9 @@ import tech.streamfusion.operator.RowDataArrowConverter;
 final class GroupAggregateMatcher {
   static final int KIND_SUM_ZERO = 22;
   static final int KIND_SUM_ZERO_MERGE = 23;
+  static final int KIND_SUM_ZERO_DISTINCT = 34;
+  static final int KIND_RETRACTING_DECIMAL_SUM = 40;
+  static final int KIND_RAW_SUM_PARTIAL = 41;
   static final int KIND_LISTAGG_APPEND = 24;
   static final int KIND_LISTAGG_RETRACT = 25;
 
@@ -62,7 +65,7 @@ final class GroupAggregateMatcher {
       }
       int kind = aggregateKind(agg, call);
       if (kind < 0 && call.getAggregation().getKind() == org.apache.calcite.sql.SqlKind.SUM0) {
-        return "GROUP BY: SUM0 requires a non-DISTINCT numeric value";
+        return "GROUP BY: SUM0 requires one supported numeric value";
       }
       if (kind < 0) {
         return "GROUP BY: only SUM/MIN/MAX/COUNT/AVG/FIRST_VALUE/LAST_VALUE/SINGLE_VALUE"
@@ -79,15 +82,6 @@ final class GroupAggregateMatcher {
         if (call.getArgList().size() == 2
             && !literalStringColumn(agg.getInput(), call.getArgList().get(1)))
           return "GROUP BY: LISTAGG requires a non-null character literal separator";
-        Long hint = FlinkCompat.singleStateTtl(agg);
-        long retention =
-            hint == null
-                ? org.apache.flink.table.planner.utils.ShortcutUtils.unwrapTableConfig(agg)
-                    .getIdleStateRetention()
-                    .toMillis()
-                : hint;
-        if (retention > 0 && (kind == KIND_LISTAGG_RETRACT || call.isDistinct()))
-          return "GROUP BY: DISTINCT or retracting LISTAGG with state TTL is not yet verified";
         continue;
       }
       if (kind >= 26 && kind <= 31) {
@@ -102,40 +96,25 @@ final class GroupAggregateMatcher {
           if (!isStringType(inputType.getFieldList().get(column).getType().getSqlTypeName()))
             return "GROUP BY: JSON aggregates require serialized character arguments";
         }
-        Long hint = FlinkCompat.singleStateTtl(agg);
-        long retention =
-            hint == null
-                ? org.apache.flink.table.planner.utils.ShortcutUtils.unwrapTableConfig(agg)
-                    .getIdleStateRetention()
-                    .toMillis()
-                : hint;
-        if (retention > 0) return "GROUP BY: JSON aggregate state TTL is not yet verified";
         continue;
       }
       if (call.getArgList().size() > 1) {
         return "GROUP BY: only single-argument aggregates";
       }
       if (kind >= 12 && kind <= 16) {
-        if (kind >= 15 || call.isDistinct()) {
-          Long hint = FlinkCompat.singleStateTtl(agg);
-          long retention =
-              hint == null
-                  ? org.apache.flink.table.planner.utils.ShortcutUtils.unwrapTableConfig(agg)
-                      .getIdleStateRetention()
-                      .toMillis()
-                  : hint;
-          if (retention > 0) {
-            return "GROUP BY: DISTINCT or retracting FIRST_VALUE/LAST_VALUE with TTL require"
-                + " independently expiring value/order maps";
-          }
-        }
         if ((call.isDistinct() && kind == 14) || call.getArgList().size() != 1) {
           return "GROUP BY: ordered values require one argument; SINGLE_VALUE DISTINCT is"
               + " unsupported";
         }
         SqlTypeName valueType =
             inputType.getFieldList().get(call.getArgList().get(0)).getType().getSqlTypeName();
-        if (!orderedValueType(valueType)) {
+        if (!orderedValueType(valueType)
+            && !(kind != 14
+                && tech.streamfusion.compat.FlinkCompat.GENERIC_ORDERED_VALUES
+                && genericOrderedValueType(valueType)
+                && (!call.isDistinct()
+                    || valueType == SqlTypeName.ARRAY
+                    || intervalValueType(valueType)))) {
           return "GROUP BY: FIRST_VALUE/LAST_VALUE/SINGLE_VALUE over an unsupported value type";
         }
         continue;
@@ -217,6 +196,45 @@ final class GroupAggregateMatcher {
     }
   }
 
+  static boolean preservesComplexValues(StreamPhysicalGroupAggregate agg) {
+    if (!matches(agg)) return false;
+    RelDataType input = agg.getInput().getRowType();
+    for (int key : agg.grouping())
+      if (genericOrderedValueType(input.getFieldList().get(key).getType().getSqlTypeName()))
+        return false;
+    for (int i = 0; i < agg.aggCalls().size(); i++) {
+      AggregateCall call = agg.aggCalls().apply(i);
+      if (call.isDistinct()
+          && call.getAggregation().getKind() == org.apache.calcite.sql.SqlKind.COUNT
+          && call.getArgList().size() == 1
+          && input.getFieldList().get(call.getArgList().get(0)).getType().getSqlTypeName()
+              == SqlTypeName.ARRAY) return true;
+      if (tech.streamfusion.compat.FlinkCompat.GENERIC_ORDERED_VALUES
+          && (call.getAggregation().getKind() == org.apache.calcite.sql.SqlKind.FIRST_VALUE
+              || call.getAggregation().getKind() == org.apache.calcite.sql.SqlKind.LAST_VALUE)
+          && call.getArgList().size() == 1
+          && genericOrderedValueType(
+              input.getFieldList().get(call.getArgList().get(0)).getType().getSqlTypeName()))
+        return true;
+    }
+    return false;
+  }
+
+  private static boolean intervalValueType(SqlTypeName type) {
+    return type.getFamily() == org.apache.calcite.sql.type.SqlTypeFamily.INTERVAL_YEAR_MONTH
+        || type.getFamily() == org.apache.calcite.sql.type.SqlTypeFamily.INTERVAL_DAY_TIME;
+  }
+
+  private static boolean genericOrderedValueType(SqlTypeName type) {
+    return type == SqlTypeName.BINARY
+        || type == SqlTypeName.VARBINARY
+        || type == SqlTypeName.ARRAY
+        || type == SqlTypeName.MAP
+        || type == SqlTypeName.ROW
+        || type == SqlTypeName.MULTISET
+        || intervalValueType(type);
+  }
+
   static boolean isIntegerType(SqlTypeName type) {
     switch (type) {
       case TINYINT:
@@ -288,6 +306,13 @@ final class GroupAggregateMatcher {
   static int[] kinds(StreamPhysicalGroupAggregate agg) {
     Seq<AggregateCall> aggCalls = agg.aggCalls();
     int[] kinds = new int[aggCalls.size()];
+    Long hint = FlinkCompat.singleStateTtl(agg);
+    long retention =
+        hint == null
+            ? org.apache.flink.table.planner.utils.ShortcutUtils.unwrapTableConfig(agg)
+                .getIdleStateRetention()
+                .toMillis()
+            : hint;
     for (int i = 0; i < aggCalls.size(); i++) {
       AggregateCall call = aggCalls.apply(i);
       int kind = aggregateKind(agg, call);
@@ -297,6 +322,8 @@ final class GroupAggregateMatcher {
         kind = KIND_SUM_DISTINCT;
       } else if (call.isDistinct() && kind == WindowAggregateMatcher.KIND_AVG) {
         kind = KIND_AVG_DISTINCT;
+      } else if (call.isDistinct() && kind == KIND_SUM_ZERO) {
+        kind = KIND_SUM_ZERO_DISTINCT;
       }
       if (call.isDistinct() && kind == KIND_LISTAGG_APPEND) kind = KIND_LISTAGG_DISTINCT_APPEND;
       if (call.isDistinct() && kind == KIND_LISTAGG_RETRACT) kind = KIND_LISTAGG_DISTINCT_RETRACT;
@@ -314,6 +341,20 @@ final class GroupAggregateMatcher {
                   .getType()
                   .getSqlTypeName())) {
         kind = kind == KIND_MIN ? KIND_MIN_APPEND : KIND_MAX_APPEND;
+      }
+      if (retention > 0
+          && (kind == 7
+              || kind == 9
+              || kind == 17
+              || kind == 18
+              || kind == 19
+              || kind == 20
+              || kind == 34
+              || kind == KIND_LISTAGG_DISTINCT_APPEND
+              || kind == KIND_LISTAGG_DISTINCT_RETRACT)) {
+        kind |= tech.streamfusion.Native.AGGREGATE_DISTINCT_TTL;
+        if (ChangelogPlanUtils.inputInsertOnly(agg))
+          kind |= tech.streamfusion.Native.AGGREGATE_DISTINCT_APPEND;
       }
       kinds[i] = kind;
     }
@@ -365,7 +406,7 @@ final class GroupAggregateMatcher {
     if (call.getAggregation().getKind() != org.apache.calcite.sql.SqlKind.SUM0) {
       return WindowAggregateMatcher.aggregateKind(call.getAggregation().getKind());
     }
-    if (call.getArgList().size() != 1 || call.isDistinct()) return -1;
+    if (call.getArgList().size() != 1) return -1;
     var value = agg.getInput().getRowType().getFieldList().get(call.getArgList().get(0)).getType();
     switch (value.getSqlTypeName()) {
       case FLOAT:
@@ -480,7 +521,15 @@ final class GroupAggregateMatcher {
   }
 
   static int retainedValueTypeCode(RelDataType type) {
+    if (intervalValueType(type.getSqlTypeName())) return 100;
     switch (type.getSqlTypeName()) {
+      case BINARY:
+      case VARBINARY:
+      case ARRAY:
+      case MAP:
+      case ROW:
+      case MULTISET:
+        return 100;
       case TIME:
         return 9;
       case BOOLEAN:

@@ -69,6 +69,49 @@ class FlinkGroupedValueSqlHarnessTest {
   }
 
   @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "TINYINT",
+        "SMALLINT",
+        "INT",
+        "BIGINT",
+        "FLOAT",
+        "DOUBLE",
+        "DECIMAL(20,3)",
+        "STRING",
+        "DATE",
+        "TIME(3)",
+        "BOOLEAN",
+        "TIMESTAMP(9)",
+        "TIMESTAMP_LTZ(3)"
+      })
+  void retainedRetractionsExecuteNativelyAcrossReleasedPhaseChoices(String type) {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireFirstLastType(type);
+    for (boolean mini : new boolean[] {false, true}) {
+      try (var metrics = new RecoveryExecutionMetrics()) {
+        var runs =
+            NativeFailureParity.run(
+                () -> {
+                  var table = environment(type, true, metrics);
+                  table.getConfig().set("table.exec.state.ttl", "1 h");
+                  table.getConfig().set("table.exec.mini-batch.enabled", Boolean.toString(mini));
+                  table.getConfig().set("table.exec.mini-batch.size", "3");
+                  table.getConfig().set("table.exec.mini-batch.allow-latency", "1 h");
+                  table
+                      .getConfig()
+                      .set("table.optimizer.agg-phase-strategy", mini ? "TWO_PHASE" : "ONE_PHASE");
+                  return table;
+                },
+                "SELECT k, FIRST_VALUE(v), LAST_VALUE(v), FIRST_VALUE(v) FILTER (WHERE k = 1),"
+                    + " COUNT(*) FROM src GROUP BY k");
+        runs.assertSuccess(NATIVE);
+        RecoveryExecutionMetrics.assertConsumed(
+            metrics.nativeOperators(), "NativeColumnarGroupAggregate");
+      }
+    }
+  }
+
+  @ParameterizedTest
   @ValueSource(booleans = {false, true})
   void filtersKeepTheirOwnValueState(boolean retract) throws Exception {
     compare(
@@ -120,20 +163,23 @@ class FlinkGroupedValueSqlHarnessTest {
 
   @ParameterizedTest
   @ValueSource(booleans = {false, true})
-  void retractingFirstLastWithIndependentMapTtlFallBack(boolean hint) throws Exception {
+  void retainedFirstLastAndStateTtlHintsExecuteNatively(boolean hint) throws Exception {
     if (hint) tech.streamfusion.compat.FlinkTestCapabilities.requireStateTtlHint();
-    Supplier<TableEnvironment> source =
-        () -> {
-          var table = environment("BIGINT", true);
-          if (!hint) table.getConfig().setIdleStateRetention(java.time.Duration.ofHours(1));
-          return table;
-        };
-    NativeParity.assertFallbackReasonContains(
-        source,
-        "SELECT "
-            + (hint ? "/*+ STATE_TTL('src' = '1h') */ " : "")
-            + "k, FIRST_VALUE(v), LAST_VALUE(v) FROM src GROUP BY k",
-        "independently expiring value/order maps");
+    try (var metrics = new RecoveryExecutionMetrics()) {
+      Supplier<TableEnvironment> source =
+          () -> {
+            var table = environment("BIGINT", true, metrics);
+            if (!hint) table.getConfig().setIdleStateRetention(java.time.Duration.ofHours(1));
+            return table;
+          };
+      compare(
+          source,
+          "SELECT "
+              + (hint ? "/*+ STATE_TTL('src' = '1h') */ " : "")
+              + "k, FIRST_VALUE(v), LAST_VALUE(v) FROM src GROUP BY k");
+      RecoveryExecutionMetrics.assertConsumed(
+          metrics.nativeOperators(), "NativeColumnarGroupAggregate");
+    }
   }
 
   @org.junit.jupiter.api.Test
@@ -186,6 +232,18 @@ class FlinkGroupedValueSqlHarnessTest {
   @org.junit.jupiter.params.provider.MethodSource("distinctRecoveryCases")
   void distinctScalarMembershipRestoresBeforeRemovalAndReinsertion(String backend, String type)
       throws Exception {
+    distinctRecovery(backend, type, 0);
+  }
+
+  @ParameterizedTest
+  @org.junit.jupiter.params.provider.MethodSource("distinctRecoveryCases")
+  void retainedDistinctMembershipAndSelectedValuesSurviveTwoRestores(String backend, String type)
+      throws Exception {
+    distinctRecovery(backend, type, 3_600_000);
+  }
+
+  private static void distinctRecovery(String backend, String type, long retention)
+      throws Exception {
     tech.streamfusion.compat.FlinkTestCapabilities.requireFirstLastType(type);
     List<Row> input = new ArrayList<>();
     for (int id = 0; id < 64; id++) {
@@ -219,6 +277,7 @@ class FlinkGroupedValueSqlHarnessTest {
             .withExecutionMetrics()) {
       java.util.function.UnaryOperator<TableEnvironment> configure =
           table -> {
+            table.getConfig().setIdleStateRetention(java.time.Duration.ofMillis(retention));
             table.getConfig().setLocalTimeZone(ZoneOffset.UTC);
             table.getConfig().set("table.optimizer.agg-phase-strategy", "ONE_PHASE");
             table.getConfig().set("table.exec.mini-batch.enabled", "false");
@@ -273,6 +332,63 @@ class FlinkGroupedValueSqlHarnessTest {
                     .map(type -> org.junit.jupiter.params.provider.Arguments.of(backend, type)));
   }
 
+  static java.util.stream.Stream<org.junit.jupiter.params.provider.Arguments>
+      retainedDistinctCases() {
+    return java.util.stream.Stream.of(
+            "TINYINT",
+            "SMALLINT",
+            "INT",
+            "BIGINT",
+            "FLOAT",
+            "DOUBLE",
+            "DECIMAL(20,3)",
+            "STRING",
+            "CHAR(8)",
+            "DATE",
+            "TIME(0)",
+            "TIME(3)",
+            "BOOLEAN",
+            "TIMESTAMP(9)",
+            "TIMESTAMP_LTZ(3)")
+        .flatMap(
+            type ->
+                java.util.stream.Stream.of(false, true)
+                    .flatMap(
+                        retract ->
+                            java.util.stream.Stream.of(false, true)
+                                .map(
+                                    mini ->
+                                        org.junit.jupiter.params.provider.Arguments.of(
+                                            type, retract, mini))));
+  }
+
+  @ParameterizedTest
+  @org.junit.jupiter.params.provider.MethodSource("retainedDistinctCases")
+  void retainedDistinctSelectionsShareMembershipAcrossReleasedPhaseChoices(
+      String type, boolean retract, boolean mini) {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireFirstLastType(type);
+    try (var metrics = new RecoveryExecutionMetrics()) {
+      var runs =
+          NativeFailureParity.run(
+              () -> {
+                var table = environment(type, retract, metrics);
+                table.getConfig().set("table.exec.state.ttl", "1 h");
+                table.getConfig().set("table.exec.mini-batch.enabled", Boolean.toString(mini));
+                table.getConfig().set("table.exec.mini-batch.size", "3");
+                table.getConfig().set("table.exec.mini-batch.allow-latency", "1 h");
+                table
+                    .getConfig()
+                    .set("table.optimizer.agg-phase-strategy", mini ? "TWO_PHASE" : "ONE_PHASE");
+                return table;
+              },
+              "SELECT k,FIRST_VALUE(DISTINCT v),LAST_VALUE(DISTINCT v),FIRST_VALUE(DISTINCT v)"
+                  + " FILTER(WHERE k=1),COUNT(DISTINCT v),COUNT(*) FROM src GROUP BY k");
+      runs.assertSuccess(NATIVE);
+      RecoveryExecutionMetrics.assertConsumed(
+          metrics.nativeOperators(), "NativeColumnarGroupAggregate");
+    }
+  }
+
   @ParameterizedTest
   @ValueSource(booleans = {false, true})
   void distinctFirstLastBoundedVarcharAndEmptyResults(boolean retract) throws Exception {
@@ -282,14 +398,13 @@ class FlinkGroupedValueSqlHarnessTest {
     compare(
         () -> environment("STRING", retract),
         "SELECT FIRST_VALUE(DISTINCT v), LAST_VALUE(DISTINCT v) FROM src WHERE id < 0");
-    NativeParity.assertFallbackReasonContains(
+    compare(
         () -> {
           var table = environment("STRING", retract);
           table.getConfig().setIdleStateRetention(java.time.Duration.ofHours(1));
           return table;
         },
-        "SELECT k, FIRST_VALUE(DISTINCT v) FROM src GROUP BY k",
-        "independently expiring value/order maps");
+        "SELECT k, FIRST_VALUE(DISTINCT v) FROM src GROUP BY k");
   }
 
   @ParameterizedTest
@@ -453,7 +568,15 @@ class FlinkGroupedValueSqlHarnessTest {
   }
 
   private static TableEnvironment environment(String type, boolean retract) {
-    var env = StreamExecutionEnvironment.getExecutionEnvironment();
+    return environment(type, retract, null);
+  }
+
+  private static TableEnvironment environment(
+      String type, boolean retract, RecoveryExecutionMetrics metrics) {
+    var env =
+        metrics == null
+            ? StreamExecutionEnvironment.getExecutionEnvironment()
+            : metrics.environment(new org.apache.flink.configuration.Configuration(), 1, 0);
     env.setParallelism(1);
     var table = StreamTableEnvironment.create(env);
     table.getConfig().setLocalTimeZone(ZoneOffset.UTC);

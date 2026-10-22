@@ -18,7 +18,7 @@ import tech.streamfusion.operator.RowDataArrowConverter;
  * {@link GroupAggregateMatcher} — so it reuses the same native group-aggregate operator. Its input
  * is the local's {@code [grouping.., partial0..]}; the partials are positional, walked with a
  * per-aggregate offset because AVG spans <em>two</em> partial columns (the widened sum, then the
- * bigint count), retracting integer SUM spans its typed sum and bigint non-null count, and
+ * bigint count), retracting primitive SUM spans its typed sum and bigint non-null count, and
  * SINGLE_VALUE spans a typed value and an INT count. Other aggregates span one.
  *
  * <p>Each merge folds a partial into the running result: SUM/MIN/MAX merge as themselves, a COUNT
@@ -43,8 +43,8 @@ final class GlobalGroupAggregateMatcher {
       return "global group aggregate: an output column type the boundary cannot carry";
     }
     int[] grouping = agg.grouping();
-    // Retracting SUM carries a separate non-null count, like AVG. MIN/MAX retract maps remain
-    // unsupported; every retracting merge derives per-key liveness from the count1 partial.
+    // Retracting SUM carries a separate non-null count, like AVG. MIN/MAX carry their
+    // structured signed maps; every retracting merge derives liveness from count1.
     boolean needRetraction = agg.needRetraction();
     if (needRetraction && agg.localAggInfoList().getIndexOfCountStar() < 0) {
       return "global group aggregate: a retracting merge without a count1 record counter";
@@ -53,45 +53,64 @@ final class GlobalGroupAggregateMatcher {
     for (int i = 0; i < agg.aggCalls().size(); i++) {
       AggregateCall call = agg.aggCalls().apply(i);
       int kind = LocalGroupAggregateMatcher.aggregateKind(call.getAggregation().getKind());
+      if (kind == 42) {
+        if (!LocalGroupAggregateMatcher.supportedJsonObjectCall(call, agg.localAggInputRowType())
+            || offset >= inputType.getFieldCount()
+            || !LocalGroupAggregateMatcher.supportedJsonObjectPartial(
+                inputType.getFieldList().get(offset).getType()))
+          return "global JSON_OBJECTAGG requires a released character MapView partial: "
+              + inputType;
+        offset++;
+        continue;
+      }
       if (kind == GroupAggregateMatcher.KIND_LISTAGG_APPEND) {
-        if (needRetraction
-            || call.isDistinct()
-            || !call.getCollation().getFieldCollations().isEmpty()
+        if (!call.getCollation().getFieldCollations().isEmpty()
             || call.getArgList().isEmpty()
-            || call.getArgList().size() > 2
-            || offset + 1 >= inputType.getFieldCount()
-            || !LocalGroupAggregateMatcher.supportedListAggPartials(
-                inputType.getFieldList().get(offset).getType(),
-                inputType.getFieldList().get(offset + 1).getType()))
-          return "global LISTAGG requires append-only non-DISTINCT string partials";
-        offset += 2;
+            || call.getArgList().size() > 2)
+          return "global LISTAGG requires verified string partials";
+        if (needRetraction) {
+          if (offset >= inputType.getFieldCount()
+              || !LocalGroupAggregateMatcher.supportedRetractingListPartial(
+                  inputType.getFieldList().get(offset).getType(), call.getArgList().size() == 2))
+            return "global LISTAGG requires a released value/retraction list partial";
+          offset++;
+        } else {
+          if (offset + 1 >= inputType.getFieldCount()
+              || !LocalGroupAggregateMatcher.supportedListAggPartials(
+                  inputType.getFieldList().get(offset).getType(),
+                  inputType.getFieldList().get(offset + 1).getType()))
+            return "global LISTAGG requires append-only string partials";
+          offset += 2;
+        }
         continue;
       }
       if (kind < 0 || call.getArgList().size() > 1) {
         return "global group aggregate: only SUM/MIN/MAX/COUNT/AVG/SINGLE_VALUE merges";
       }
       if (needRetraction
-          && (call.isDistinct()
-              || (kind != WindowAggregateMatcher.KIND_COUNT
-                  && kind != WindowAggregateMatcher.KIND_AVG
-                  && kind != GroupAggregateMatcher.KIND_SUM_ZERO
-                  && kind != WindowAggregateMatcher.KIND_SUM))) {
-        return "global group aggregate: a retracting merge admits COUNT, AVG, SUM0 and exact"
-            + " integer SUM only";
+          && (kind != WindowAggregateMatcher.KIND_COUNT
+              && kind != WindowAggregateMatcher.KIND_AVG
+              && kind != GroupAggregateMatcher.KIND_SUM_ZERO
+              && kind != WindowAggregateMatcher.KIND_SUM
+              && kind != 14
+              && kind != WindowAggregateMatcher.KIND_MIN
+              && kind != WindowAggregateMatcher.KIND_MAX)) {
+        return "global group aggregate: a retracting merge admits COUNT, AVG, SUM0 and"
+            + " numeric SUM, scalar SINGLE_VALUE and mapped MIN/MAX";
       }
       // COUNT/SUM/AVG(DISTINCT x): the merge folds the local bundles' (value, count) view entries
       // into
       // the per-key distinct set — the positional partial (the bundle's count/sum) is carried but
       // not consumed, exactly as the host's distinct merge re-accumulates from the view. The value
       // type comes from the ORIGINAL local input (the call's args point into it). Same scope as the
-      // local half: COUNT over the set-carriable types, SUM over exact integer/decimal arithmetic.
+      // local half: COUNT over the set-carriable types, SUM/AVG over admitted numeric values.
       if (call.isDistinct()) {
         if (call.getArgList().size() != 1) {
           return "global group aggregate: a distinct merge must have exactly one argument";
         }
         RelDataType value =
             agg.localAggInputRowType().getFieldList().get(call.getArgList().get(0)).getType();
-        int width = kind == WindowAggregateMatcher.KIND_AVG ? 2 : 1;
+        int width = spanOf(agg, i);
         if (offset + width > inputType.getFieldCount())
           return "global group aggregate: incomplete distinct partials";
         RelDataType partial = inputType.getFieldList().get(offset).getType();
@@ -107,21 +126,31 @@ final class GlobalGroupAggregateMatcher {
                 && partialType == SqlTypeName.BIGINT
                 && LocalGroupAggregateMatcher.supportedDistinctValueType(value.getSqlTypeName());
         boolean sumDistinct =
-            kind == WindowAggregateMatcher.KIND_SUM
-                && LocalGroupAggregateMatcher.supportedDistinctSumPartial(value, partial);
+            (kind == WindowAggregateMatcher.KIND_SUM || kind == GroupAggregateMatcher.KIND_SUM_ZERO)
+                && LocalGroupAggregateMatcher.supportedDistinctSumPartial(value, partial)
+                && (count == null || count.getSqlTypeName() == SqlTypeName.BIGINT);
         RelDataType result = agg.getRowType().getFieldList().get(grouping.length + i).getType();
         boolean averageDistinct =
             kind == WindowAggregateMatcher.KIND_AVG
                 && LocalGroupAggregateMatcher.supportedDistinctAveragePartials(
                     value, partial, count)
-                && (GroupAggregateMatcher.isIntegerType(value.getSqlTypeName())
+                && (value.getSqlTypeName() != SqlTypeName.DECIMAL
                     ? result.getSqlTypeName() == value.getSqlTypeName()
                     : result.getSqlTypeName() == SqlTypeName.DECIMAL
                         && result.getPrecision() == 38
                         && result.getScale() == Math.max(6, value.getScale()));
         if (!countDistinct && !sumDistinct && !averageDistinct) {
           return "global group aggregate: distinct merges are COUNT (over set-carriable value"
-              + " types) and SUM/AVG (over integers or DECIMAL)";
+              + " types) and SUM/AVG (over numeric values with matching widened partials); got "
+              + call
+              + ", value="
+              + value
+              + ", partial="
+              + partial
+              + ", count="
+              + count
+              + ", result="
+              + result;
         }
         continue;
       }
@@ -140,6 +169,20 @@ final class GlobalGroupAggregateMatcher {
         offset += 2;
         continue;
       }
+      if (LocalGroupAggregateMatcher.isRetractingExtreme(call, needRetraction)
+          && offset < inputType.getFieldCount()
+          && inputType.getFieldList().get(offset).getType().isStruct()) {
+        if (call.getArgList().size() != 1
+            || offset >= inputType.getFieldCount()
+            || !LocalGroupAggregateMatcher.supportedExtremePartials(
+                agg.localAggInputRowType().getFieldList().get(call.getArgList().get(0)).getType(),
+                inputType.getFieldList().get(offset).getType()))
+          return "global group aggregate: retracting MIN/MAX requires its value/map-size/map"
+              + " accumulator; got "
+              + inputType;
+        offset++;
+        continue;
+      }
       if (LocalGroupAggregateMatcher.isRetractingSum(call, needRetraction)) {
         if (call.getArgList().size() != 1
             || offset + 1 >= inputType.getFieldCount()
@@ -150,8 +193,8 @@ final class GlobalGroupAggregateMatcher {
             || !org.apache.calcite.sql.type.SqlTypeUtil.equalSansNullability(
                 inputType.getFieldList().get(offset).getType(),
                 agg.getRowType().getFieldList().get(grouping.length + i).getType()))
-          return "global group aggregate: retracting SUM requires matching exact integer sum and"
-              + " BIGINT count partials";
+          return "global group aggregate: retracting SUM requires matching numeric sum"
+              + " and BIGINT count partials";
         offset += 2;
         continue;
       }
@@ -304,8 +347,9 @@ final class GlobalGroupAggregateMatcher {
       columns[i] =
           offset
               + (LocalGroupAggregateMatcher.aggregateKind(
-                          agg.aggCalls().apply(i).getAggregation().getKind())
-                      == GroupAggregateMatcher.KIND_LISTAGG_APPEND
+                              agg.aggCalls().apply(i).getAggregation().getKind())
+                          == GroupAggregateMatcher.KIND_LISTAGG_APPEND
+                      && !agg.needRetraction()
                   ? 1
                   : 0);
       offset += spanOf(agg, i);
@@ -319,9 +363,13 @@ final class GlobalGroupAggregateMatcher {
     int offset = agg.grouping().length;
     for (int i = 0; i < columns.length; i++) {
       if (LocalGroupAggregateMatcher.aggregateKind(
-              agg.aggCalls().apply(i).getAggregation().getKind())
-          == GroupAggregateMatcher.KIND_LISTAGG_APPEND) {
+                  agg.aggCalls().apply(i).getAggregation().getKind())
+              == GroupAggregateMatcher.KIND_LISTAGG_APPEND
+          && !agg.needRetraction()) {
         columns[i] = offset;
+      } else if (LocalGroupAggregateMatcher.isRetractingExtreme(
+          agg.aggCalls().apply(i), agg.needRetraction())) {
+        columns[i] = -1;
       } else
         columns[i] = spanOf(agg, i) == 2 && !agg.aggCalls().apply(i).isDistinct() ? offset + 1 : -1;
       offset += spanOf(agg, i);
@@ -341,14 +389,19 @@ final class GlobalGroupAggregateMatcher {
     int offset = grouping;
     for (int i = 0; i < agg.aggCalls().size(); i++) {
       AggregateCall call = agg.aggCalls().apply(i);
-      if (call.isDistinct()) {
+      if (mappedExtreme(agg, i)) {
+        codes.add(
+            GroupAggregateMatcher.retainedValueTypeCode(
+                agg.localAggInputRowType().getFieldList().get(call.getArgList().get(0)).getType()));
+      } else if (call.isDistinct()) {
         // The distinct set is keyed by the original value (the call's args point into the local's
         // input row), so its code carries that value's own type.
         codes.add(
             GroupAggregateMatcher.retainedValueTypeCode(
                 agg.localAggInputRowType().getFieldList().get(call.getArgList().get(0)).getType()));
       } else if (LocalGroupAggregateMatcher.aggregateKind(call.getAggregation().getKind())
-          == GroupAggregateMatcher.KIND_LISTAGG_APPEND) {
+              == GroupAggregateMatcher.KIND_LISTAGG_APPEND
+          || call.getAggregation().getKind() == org.apache.calcite.sql.SqlKind.JSON_OBJECTAGG) {
         codes.add(3);
       } else if (LocalGroupAggregateMatcher.aggregateKind(call.getAggregation().getKind()) == 14) {
         codes.add(
@@ -392,21 +445,43 @@ final class GlobalGroupAggregateMatcher {
   static int[] kinds(StreamPhysicalGlobalGroupAggregate agg) {
     RelDataType inputType = agg.getInput().getRowType();
     int[] kinds = new int[agg.aggCalls().size()];
+    Long hint = FlinkCompat.singleStateTtl(agg);
+    long retention =
+        hint == null
+            ? org.apache.flink.table.planner.utils.ShortcutUtils.unwrapTableConfig(agg)
+                .getIdleStateRetention()
+                .toMillis()
+            : hint;
     int offset = agg.grouping().length;
     for (int i = 0; i < kinds.length; i++) {
       AggregateCall call = agg.aggCalls().apply(i);
       int kind = LocalGroupAggregateMatcher.aggregateKind(call.getAggregation().getKind());
-      if (call.isDistinct()) {
+      if (kind == GroupAggregateMatcher.KIND_LISTAGG_APPEND && call.isDistinct()) {
+        kinds[i] = agg.needRetraction() ? 33 : 32;
+      } else if (kind == GroupAggregateMatcher.KIND_LISTAGG_APPEND && agg.needRetraction()) {
+        kinds[i] = call.getArgList().size() == 2 ? 47 : 46;
+      } else if (kind == 42) {
+        kinds[i] = LocalGroupAggregateMatcher.jsonObjectKind(call);
+      } else if (call.isDistinct()) {
         kinds[i] =
             kind == WindowAggregateMatcher.KIND_COUNT
                 ? LocalGroupAggregateMatcher.KIND_COUNT_DISTINCT
                 : kind == WindowAggregateMatcher.KIND_AVG
                     ? GroupAggregateMatcher.KIND_AVG_DISTINCT
-                    : LocalGroupAggregateMatcher.KIND_SUM_DISTINCT;
+                    : kind == GroupAggregateMatcher.KIND_SUM_ZERO
+                        ? GroupAggregateMatcher.KIND_SUM_ZERO_DISTINCT
+                        : LocalGroupAggregateMatcher.KIND_SUM_DISTINCT;
       } else {
-        // A MIN/MAX merge is only admitted without retraction (see unsupportedReason), so a
-        // numeric one always runs as the plain running extreme — no retractable multiset.
-        if ((kind == WindowAggregateMatcher.KIND_MIN || kind == WindowAggregateMatcher.KIND_MAX)
+        if (LocalGroupAggregateMatcher.isRetractingSum(call, agg.needRetraction())
+            && inputType.getFieldList().get(offset).getType().getSqlTypeName()
+                == SqlTypeName.DECIMAL) kind = GroupAggregateMatcher.KIND_RETRACTING_DECIMAL_SUM;
+        // A scalar MIN/MAX partial has no signed map: merge it as a running extreme.
+        // A mapped partial retains the retractable multiset.
+        if (mappedExtreme(agg, i)) {
+          kind = kind == WindowAggregateMatcher.KIND_MIN ? 38 : 39;
+        }
+        if (!mappedExtreme(agg, i)
+            && (kind == WindowAggregateMatcher.KIND_MIN || kind == WindowAggregateMatcher.KIND_MAX)
             && GroupAggregateMatcher.runningExtremeType(
                 inputType.getFieldList().get(offset).getType().getSqlTypeName())) {
           kind =
@@ -420,6 +495,10 @@ final class GlobalGroupAggregateMatcher {
                 : kind == GroupAggregateMatcher.KIND_SUM_ZERO
                     ? GroupAggregateMatcher.KIND_SUM_ZERO_MERGE
                     : kind;
+      }
+      if (retention > 0 && call.isDistinct()) {
+        kinds[i] |= tech.streamfusion.Native.AGGREGATE_DISTINCT_TTL;
+        if (!agg.needRetraction()) kinds[i] |= tech.streamfusion.Native.AGGREGATE_DISTINCT_APPEND;
       }
       offset += spanOf(agg, i);
     }
@@ -453,10 +532,16 @@ final class GlobalGroupAggregateMatcher {
     for (int i = 0; i < agg.aggCalls().size(); i++) {
       firstView += spanOf(agg, i);
     }
+    if (agg.localAggInfoList().countStarInserted()) firstView++;
     List<String> seen = new ArrayList<>();
+    int[] primary = valueColumns(agg);
     int[] columns = new int[agg.aggCalls().size()];
     for (int i = 0; i < columns.length; i++) {
       AggregateCall call = agg.aggCalls().apply(i);
+      if (mappedExtreme(agg, i)) {
+        columns[i] = primary[i];
+        continue;
+      }
       if (!call.isDistinct()) {
         columns[i] = -1;
         continue;
@@ -468,6 +553,14 @@ final class GlobalGroupAggregateMatcher {
       columns[i] = firstView + seen.indexOf(key);
     }
     return columns;
+  }
+
+  private static boolean mappedExtreme(StreamPhysicalGlobalGroupAggregate agg, int index) {
+    int offset = agg.grouping().length;
+    for (int i = 0; i < index; i++) offset += spanOf(agg, i);
+    return LocalGroupAggregateMatcher.isRetractingExtreme(
+            agg.aggCalls().apply(index), agg.needRetraction())
+        && agg.getInput().getRowType().getFieldList().get(offset).getType().isStruct();
   }
 
   /** Positional width: two fields for AVG/SINGLE_VALUE/retracting SUM, one otherwise. */

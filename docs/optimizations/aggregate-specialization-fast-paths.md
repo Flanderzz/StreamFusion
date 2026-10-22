@@ -219,9 +219,71 @@ applies. Measured on the generator profile loop: **q16 +17%, q17 +4%, q15 +3%** 
 floor of the Parquet/Kafka tables, gains the most. The cached tuple's own size accounting is covered
 on [Memory accounting designed off the hot path](memory-accounting-off-hot-path.md).
 
+## Ordered floating DISTINCT partials
+
+Two-phase FLOAT/DOUBLE SUM/AVG DISTINCT must reproduce Java map iteration and copy order:
+changing addition order changes cancellation, rounding and sometimes the final result. The
+local view retains that order; global merge collects one logical bundle before folding its
+temporary union. Physical Arrow batches do not define logical bundle boundaries. Shared
+SUM0/COUNT reductions retain independent accumulators behind a shared membership view.
+
+A CPU profile of the first implementation identified boxed `ScalarValue` comparison/hash,
+membership updates and Java-map insertion/resize among the hottest native leaves. FLOAT and
+DOUBLE memberships now use typed bit keys with canonical NaN equality and distinct signed
+zeros. The local stage updates each shared membership view once and omits unused arithmetic
+partials, matching Flink's excluded-accumulator protocol. Global aggregates sharing a view
+also share its temporary union, then fold into their independent durable states. Checkpoints
+retain raw running sums rather than recomputing them in a different order.
+
+The small functionality gate starts Flink in Java with prepared binary RowData and
+StreamFusion in Rust with prepared Arrow batches. Both execute the production local/global
+operators and consume the same output checksum. Input preparation, operator setup, Arrow
+import/export and perimeter JNI are outside timing. MapView copies in Flink, state work,
+allocations and native memory accounting remain inside. Rust reserves 1 GiB for each stage;
+the Flink JVM has a 2 GiB heap. The final SQL projection is outside both operator timers.
+
+On Flink 2.2.1/JDK 17, release+mimalloc, three warmups and seven measured trials, the 18 cases
+cover FLOAT/DOUBLE SUM, AVG and shared AVG/SUM/COUNT at 4,096 rows/64 keys and 131,072 rows
+with one/64 keys. Values have cardinality 1,024, one-seventh NULLs and 1,024-record bundles.
+All output checksums match; median speedups range from 1.10 to 2.72x. The larger 64-key
+cases give median and full measured range in seconds:
+
+| Reduction | Flink | StreamFusion |
+| --- | ---: | ---: |
+| FLOAT SUM | 0.046917 (0.041541–0.071079) | 0.032593 (0.031572–0.033671) |
+| FLOAT AVG | 0.047188 (0.041838–0.056356) | 0.033293 (0.032881–0.035526) |
+| FLOAT shared | 0.045433 (0.039968–0.064080) | 0.038056 (0.036213–0.038799) |
+| DOUBLE SUM | 0.054783 (0.048870–0.076217) | 0.039330 (0.038686–0.042385) |
+| DOUBLE AVG | 0.049702 (0.048855–0.057318) | 0.039526 (0.038590–0.044421) |
+| DOUBLE shared | 0.056809 (0.048772–0.068266) | 0.044612 (0.042138–0.047955) |
+
+Complete-job diagnostics retain both transposes, production JNI/IPC, runtime row sources and
+a rowwise sink. At two million rows/64 keys, two warmups and five alternating measured
+pairs, the first implementation took 3.701 s versus paired stock 1.635 s. Typed membership
+reduced native time to 2.331 s versus stock 1.573 s. Sharing transient views and omitting
+unused local arithmetic reduced it again to 1.923 s (1.874–2.006), versus stock 1.626 s
+(1.555–1.804). The actual preceding StreamFusion revision falls back for this query and
+measured 1.565 s versus its paired stock 1.534 s. The final complete job remains slower
+than stock; the small operator gate establishes admission under its own boundary only.
+
+The final release recheck preserves integer/decimal local partial values and limits omitted
+arithmetic partials to the new floating path. All 18 checksums pass again on each released
+line: 1.09–2.72x stock on Flink 2.2.1 and 1.02–3.13x on Flink 1.18.1. The narrowest margin
+is close to parity and is not a general speedup guarantee. The artifact retains the original
+and final trials separately. Final native unit validation passes 818 tests (two ignored);
+six focused SQL/filter/empty-input/repeated-recovery cases pass on each Flink line.
+
+The [result artifact](../benchmarks/results/floating-distinct-partials-2026-10-20.json)
+retains every trial, exact operator configurations, prepared-input hashes, native binary
+hashes and the initial profile. Reproduce prepared inputs with
+`FloatingDistinctPartialsAdmissionBenchmark` using `partials.rows`, `partials.keys` and
+`partials.export`, then run the release `distinct_partials_admission` example on its Arrow
+and JSON files. Conversion-inclusive jobs use `DistinctAggregateBenchmark` with
+`distinct.floating=true`, `distinct.floatingSum=true` and `distinct.twoPhase=true`.
+
 ## Typed DISTINCT multiplicities
 
-Non-windowed DISTINCT sets specialize BIGINT, INT, SMALLINT, TINYINT, DECIMAL, BOOLEAN,
+Non-windowed DISTINCT sets specialize BIGINT, INT, SMALLINT, TINYINT, FLOAT, DOUBLE, DECIMAL, BOOLEAN,
 TIMESTAMP and STRING keys. Integer maps retain their exact width; decimal maps store unscaled i128 keys with
 precision and scale on the map. STRING probes borrow UTF-8 bytes from the Arrow array in
 single-phase, local and global-merge folds. A duplicate does not allocate an owned string;
@@ -991,3 +1053,107 @@ rows still retain that cache. Hash capacity and owned string bytes enter native 
 accounting. Measuring growth on the already-borrowed aggregate state avoids extra key probes.
 See [OVER](../operators/over.md#string-and-timestamp-distinct-counts) for complete-job comparisons,
 including an unchanged decimal distinct-count control for the memory-accounting change.
+
+### Hash retained timestamp values by their components
+
+A shared DISTINCT TTL view keeps a write timestamp for each logical member. Component
+timestamps must hash their millisecond/nanosecond value: hashing only their Arrow STRUCT type
+puts every timestamp into the same bucket. The generic nested-value fallback remains useful
+for types requiring borrowed Flink equality, but lossless timestamp components already have
+a compact exact hash.
+
+The initial one-million-row, 64-key retained COUNT/COUNT/SUM DISTINCT complete job took
+7.773 s natively versus 1.475 s in Flink 2.2. CPU profiling recorded 12,501 of 15,169 native
+update samples in membership-clock preparation, including 12,202 in boxed equality.
+Hashing timestamp components removes those avoidable collision chains while preserving
+the complete timestamp range and the existing checkpoint representation.
+
+The first measured pass reduced that native job to 1.652 s. Its CPU profile still recorded
+607 scalar-reconstruction samples and 954 clock-lookup samples among 2,944 native update
+samples. A timestamp reader bound once per input batch now supplies an exact `i128` clock
+key, avoiding temporary Arrow STRUCT values and nested equality. Clock snapshots retain that
+full-range carrier; typed aggregate membership and user-visible timestamps keep their types.
+The second and final pass takes 0.846 s versus paired stock 1.425 s. Flink 1.18 measures
+0.837 versus 1.406 s. These are conversion-inclusive complete jobs; the
+[artifact](../benchmarks/results/shared-distinct-retention-2026-10-21.json) retains all trials,
+previous-native controls, DSO/source hashes and inclusive CPU sample counts.
+
+The same reader binding applies to global DISTINCT partial views. Reconstructing an Arrow
+timestamp scalar and compacting it for every view entry accounted for 422 compact-key and
+317 scalar-reconstruction samples among 1,257 native group-update samples, with inclusive
+overlap. Reading components through the view's existing timestamp reader removes these
+temporary objects. One measured pass reduces the million-row, 64-key typed local/global
+job from 1.348 to 0.992 s versus paired stock 1.222 s; Flink 1.18 measures 1.003 versus
+1.149 s. The [global retention artifact](../benchmarks/results/global-distinct-retention-2026-10-21.json)
+retains all samples and actual canonical controls, including the previous faster typed
+whole-group-only retention path. Cached aggregates and checkpoint deadlines are unchanged
+by this optimization.
+
+### Borrowed nested DISTINCT keys and retained output
+
+Retained FIRST/LAST probes membership before and after signed counter updates. The generic
+scalar map now uses the same borrowed boxed equality as the ordered views, avoiding Arrow
+array reconstruction during comparisons. Integer-array keys hash their logical child values
+and NULL positions directly, including sliced arrays. Other nested key types retain their
+existing equality rules. This applies to aggregate state; serialized values keep their logical
+types and original arrival order.
+
+A CPU profile of retained ARRAY FIRST/LAST recorded 915 generic scalar-equality samples
+among 1,743 native update samples. The first measured pass reduces the 131,072-row retracting
+job from 0.971 to 0.380 s and the million-row append job from 3.036 to 1.558 s. These still
+trail paired stock at 0.297 and 0.710 s. The second pass extends the existing cached typed
+output path to retained DISTINCT groups and preserves the unconditional TTL update pairs.
+The STRING profile identified result cloning and scalar output materialization as avoidable
+work; selected cells are now rebuilt only after their aggregate changes.
+
+The second and final pass takes STRING append from 0.820 to 0.621 s versus stock 0.703 s.
+ARRAY improves from 0.971 to 0.352 s for low-cardinality retractions and from 3.036 to
+1.445 s for append input, still slower than stock 0.304/0.700 s. At 64 value IDs per key,
+retracting ARRAY measures 0.493 s versus stock 2.331 s. All 15 final candidate profiles and
+nine canonical previous-fallback controls, including variability and remaining scalar/output
+costs, are retained in the
+[artifact](../benchmarks/results/distinct-ordered-retention-2026-10-21.json). The slower
+array cases remain accepted coverage groundwork under the original goal's two-pass limit;
+[#443](https://github.com/datafusion-contrib/StreamFusion/issues/443) tracks follow-up.
+
+### Hash nested DISTINCT values without copying Arrow cells
+
+Generic DISTINCT membership hashes borrowed ARRAY/ROW/MAP contents, including child NULL
+positions and list lengths. It ignores child field names and schema nullability, which are
+transport metadata rather than values. Nested floating leaves canonicalize NaNs for hashing
+without changing the retained payload; opposite zero signs remain distinct. The existing
+integer-array specialization remains in place. Unknown leaf encodings retain an equality-checked
+type bucket rather than relying on a representation-dependent hash.
+
+The previous generic hash placed every key of one nested type into a single bucket. In the
+262,144-row ARRAY DOUBLE local/global DISTINCT job, 12,700 of 14,242 grouped-aggregation CPU
+samples passed through value equality, with repeated schema comparison and child scans.
+The borrowed hash removes those linear membership searches without allocating normalized
+Arrow copies or changing state serialization. The associated coverage and complete-job
+measurements are recorded on the [GROUP BY page](../operators/group-by.md#generic-distinct-localglobal-views).
+
+The first measured hash pass reduces ARRAY DOUBLE from 7.208 to 1.086 s and ARRAY STRING
+from 5.917 to 2.367 s. ARRAY INT already had a content hash and stays at 3.172/3.195 s.
+A subsequent ARRAY STRING CPU profile records 1,564 samples in nested output construction,
+including 814 in per-cell casts, among 4,629 grouped-aggregation samples. The second pass
+concatenates homogeneous nested scalar schemas before one final column cast; mixed schemas
+retain the pre-concatenation alignment needed for restored or differently named fields.
+Borrowed membership equality also compares logical child types without cloning or casting
+cells to compare transport field names. Primitive result-change equality remains separate.
+
+After the second and final pass, complete-job ARRAY INT/DOUBLE/STRING medians are
+2.969/1.055/1.658 s versus stock 0.943/0.606/0.474 s on Flink 2.2, retaining the one-hour
+entry-TTL work and both transposes. Isolated Rust/Arrow versus Java/RowData measurements
+also remain slower for ARRAY, while interval COUNT DISTINCT wins 1.68–2.76x.
+The accepted ARRAY groundwork and all unfavorable trials are preserved in the
+[artifact](../benchmarks/results/generic-distinct-partials-2026-10-21.json);
+[#446](https://github.com/datafusion-contrib/StreamFusion/issues/446) tracks further work after
+this goal's exhausted two-pass optimization limit. These shared leaves also serve retained
+FIRST/LAST, but those earlier benchmarks have not been rerun or relabeled by this change.
+
+The final correctness checks additionally cover nullable STRING grouping keys and mixed scalar
+string aggregates, with two restores in memory and native RocksDB. Preserved primitive strings
+project their existing UTF-8 child and union the parent's NULL mask, following Comet's
+`GetStructField` projection pattern. Nested payloads retain their original caches; this is a
+physical input correction, not another optimization pass. Logical key descriptors ignore the
+transport-only STRING/copy carriers and keep the logical array-element width.

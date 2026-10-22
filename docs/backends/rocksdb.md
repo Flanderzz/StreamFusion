@@ -67,6 +67,13 @@ minimum alignment. This prevents an oversized configured buffer from allocating
 an entire small slot budget at once and evicting cached reads. The configured
 write-buffer size and total shared memory budget are unchanged.
 
+Each native operator also holds a lease on that pool until its native handles close.
+Flink may close a keyed backend while a canceled task is still initializing or restoring
+its native store. Releasing the backend's slot lease therefore stops new acquisitions but
+does not free a cache or write-buffer manager still used by a native operator. Native
+handles close before their operator lease is released. This preserves the existing memory
+budget and checkpoint formats while preventing recovery from dereferencing a freed pool.
+
 
 Aligned same-range recovery opens a local copy of the checkpoint database. Rescaling reads only the
 key groups assigned to the recovering subtask and writes a new local database. This preserves

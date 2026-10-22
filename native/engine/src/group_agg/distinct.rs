@@ -1,3 +1,4 @@
+use super::ordered_retention::ValueKey;
 use super::*;
 use std::borrow::Borrow;
 use std::hash::Hash;
@@ -16,6 +17,8 @@ pub(super) enum DistinctColumn<'a> {
     I32(&'a Int32Array),
     I16(&'a arrow::array::Int16Array),
     I8(&'a Int8Array),
+    F32(&'a arrow::array::Float32Array),
+    F64(&'a arrow::array::Float64Array),
     Date(&'a arrow::array::Date32Array),
     Time(&'a arrow::array::Time32MillisecondArray),
     Decimal(&'a Decimal128Array),
@@ -32,6 +35,8 @@ impl<'a> DistinctColumn<'a> {
             DataType::Int32 => Self::I32(array.as_any().downcast_ref().unwrap()),
             DataType::Int16 => Self::I16(array.as_any().downcast_ref().unwrap()),
             DataType::Int8 => Self::I8(array.as_any().downcast_ref().unwrap()),
+            DataType::Float32 => Self::F32(array.as_any().downcast_ref().unwrap()),
+            DataType::Float64 => Self::F64(array.as_any().downcast_ref().unwrap()),
             DataType::Date32 => Self::Date(array.as_any().downcast_ref().unwrap()),
             DataType::Time32(arrow::datatypes::TimeUnit::Millisecond) => {
                 Self::Time(array.as_any().downcast_ref().unwrap())
@@ -46,12 +51,7 @@ impl<'a> DistinctColumn<'a> {
         }
     }
 
-    fn change(&self, set: &mut DistinctSet, row: usize, retract: bool, count: i64) -> bool {
-        let change = if retract {
-            Change::Remove
-        } else {
-            Change::Add(count)
-        };
+    fn change(&self, set: &mut DistinctSet, row: usize, change: Change) -> bool {
         macro_rules! primitive {
             ($array:expr, $variant:ident, $scalar:ident) => {{
                 let array = $array;
@@ -70,6 +70,30 @@ impl<'a> DistinctColumn<'a> {
             Self::I32(a) => primitive!(a, I32, Int32),
             Self::I16(a) => primitive!(a, I16, Int16),
             Self::I8(a) => primitive!(a, I8, Int8),
+            Self::F32(a) => {
+                if a.is_null(row) {
+                    return false;
+                }
+                let value = a.value(row);
+                match set {
+                    DistinctSet::F32(map) => {
+                        map.change_owned(crate::flink_float::canonical_f32(value).to_bits(), change)
+                    }
+                    _ => set.change_scalar(&ScalarValue::Float32(Some(value)), change),
+                }
+            }
+            Self::F64(a) => {
+                if a.is_null(row) {
+                    return false;
+                }
+                let value = a.value(row);
+                match set {
+                    DistinctSet::F64(map) => {
+                        map.change_owned(crate::flink_float::canonical_f64(value).to_bits(), change)
+                    }
+                    _ => set.change_scalar(&ScalarValue::Float64(Some(value)), change),
+                }
+            }
             Self::Date(a) => primitive!(a, Date, Date32),
             Self::Time(a) => primitive!(a, Time, Time32Millisecond),
             Self::Boolean(a) => primitive!(a, Boolean, Boolean),
@@ -100,7 +124,17 @@ impl<'a> DistinctColumn<'a> {
                     _ => set.change_scalar(&timestamp_scalar(value), change),
                 }
             }
-            Self::String(a) => !a.is_null(row) && set.change_string(a.value(row), retract, count),
+            Self::String(a) => {
+                if a.is_null(row) {
+                    return false;
+                }
+                match set {
+                    DistinctSet::String(map) => map.change(a.value(row), change),
+                    _ => {
+                        set.change_scalar(&ScalarValue::Utf8(Some(a.value(row).to_owned())), change)
+                    }
+                }
+            }
             Self::Scalar(a) => {
                 !a.is_null(row)
                     && set.change_value(
@@ -111,12 +145,42 @@ impl<'a> DistinctColumn<'a> {
         }
     }
 
+    pub(super) fn merge_delta(
+        &self,
+        state: &mut GroupAggState,
+        row: usize,
+        delta: i64,
+        fold: bool,
+    ) -> bool {
+        let (set, live) = match state {
+            GroupAggState::Distinct { set, live } => (set, live),
+            GroupAggState::DistinctRunning { counts, live, .. } => (counts, live),
+            _ => unreachable!("distinct signed merge"),
+        };
+        let changed = self.change(set, row, Change::Delta(delta));
+        if changed {
+            *live += if delta > 0 { 1 } else { -1 };
+            if fold {
+                if let GroupAggState::DistinctRunning { agg, .. } = state {
+                    if delta > 0 {
+                        agg.fold(self.num(row));
+                    } else {
+                        agg.retract(self.num(row));
+                    }
+                }
+            }
+        }
+        changed
+    }
+
     fn num(&self, row: usize) -> Num {
         match self {
             Self::I64(a) => Num::I64(a.value(row)),
             Self::I32(a) => Num::I32(a.value(row)),
             Self::I16(a) => Num::I16(a.value(row)),
             Self::I8(a) => Num::I8(a.value(row)),
+            Self::F32(a) => Num::F32(a.value(row)),
+            Self::F64(a) => Num::F64(a.value(row)),
             Self::Decimal(a) => Num::I128(a.value(row)),
             Self::Scalar(a) => {
                 distinct_num(&ScalarValue::try_from_array(a, row).expect("distinct numeric value"))
@@ -132,14 +196,8 @@ impl<'a> DistinctColumn<'a> {
         retract: bool,
         count: i64,
     ) -> bool {
-        let (set, live) = match state {
-            GroupAggState::Distinct { set, live } => (set, live),
-            GroupAggState::DistinctRunning { counts, live, .. } => (counts, live),
-            _ => unreachable!("distinct state"),
-        };
-        let changed = self.change(set, row, retract, count);
+        let changed = self.update_membership(state, row, retract, count);
         if changed {
-            *live += if retract { -1 } else { 1 };
             if let GroupAggState::DistinctRunning { agg, .. } = state {
                 if retract {
                     agg.retract(self.num(row));
@@ -147,6 +205,33 @@ impl<'a> DistinctColumn<'a> {
                     agg.fold(self.num(row));
                 }
             }
+        }
+        changed
+    }
+
+    pub(super) fn update_membership(
+        &self,
+        state: &mut GroupAggState,
+        row: usize,
+        retract: bool,
+        count: i64,
+    ) -> bool {
+        let (set, live) = match state {
+            GroupAggState::Distinct { set, live } => (set, live),
+            GroupAggState::DistinctRunning { counts, live, .. } => (counts, live),
+            _ => unreachable!("distinct state"),
+        };
+        let changed = self.change(
+            set,
+            row,
+            if retract {
+                Change::Remove
+            } else {
+                Change::Add(count)
+            },
+        );
+        if changed {
+            *live += if retract { -1 } else { 1 };
         }
         changed
     }
@@ -167,6 +252,18 @@ impl ScalarValues {
             (Self::I32(b), DistinctSet::I32(m)) => append!(b, m),
             (Self::I16(b), DistinctSet::I16(m)) => append!(b, m),
             (Self::I8(b), DistinctSet::I8(m)) => append!(b, m),
+            (Self::F32(builder), DistinctSet::F32(map)) => {
+                for (bits, count) in &map.counts {
+                    builder.append_value(f32::from_bits(*bits));
+                    counts.push(*count);
+                }
+            }
+            (Self::F64(builder), DistinctSet::F64(map)) => {
+                for (bits, count) in &map.counts {
+                    builder.append_value(f64::from_bits(*bits));
+                    counts.push(*count);
+                }
+            }
             (Self::Date(b), DistinctSet::Date(m)) => append!(b, m),
             (Self::Time(b), DistinctSet::Time(m)) => append!(b, m),
             (Self::Decimal(b), DistinctSet::Decimal(m, _, _)) => append!(b, m),
@@ -191,6 +288,7 @@ impl ScalarValues {
 #[derive(Clone, Copy)]
 enum Change {
     Add(i64),
+    Delta(i64),
     Remove,
     Restore(i64),
     Import(i64),
@@ -249,6 +347,18 @@ impl<K: Eq + Hash + Clone> Multiplicities<K> {
             }
         }
         match change {
+            Change::Delta(delta) => {
+                let old = self.counts.get(key).copied().unwrap_or(0);
+                let next = old.wrapping_add(delta);
+                if next == 0 {
+                    self.counts.remove(key);
+                } else if let Some(count) = self.counts.get_mut(key) {
+                    *count = next;
+                } else {
+                    self.counts.insert(key.to_owned(), next);
+                }
+                (old > 0) != (next > 0)
+            }
             Change::Add(n) => {
                 if let Some(count) = self.counts.get_mut(key) {
                     *count += n;
@@ -297,13 +407,15 @@ pub(crate) enum DistinctSet {
     I32(Multiplicities<i32>),
     I16(Multiplicities<i16>),
     I8(Multiplicities<i8>),
+    F32(Multiplicities<u32>),
+    F64(Multiplicities<u64>),
     Date(Multiplicities<i32>),
     Time(Multiplicities<i32>),
     Decimal(Multiplicities<i128>, u8, i8),
     String(Multiplicities<String>),
     Boolean(Multiplicities<bool>),
     Timestamp(Multiplicities<i128>),
-    Scalar(Multiplicities<ScalarValue>),
+    Scalar(Multiplicities<ValueKey>),
 }
 
 macro_rules! each_map {
@@ -313,6 +425,8 @@ macro_rules! each_map {
             DistinctSet::I32($map) => $body,
             DistinctSet::I16($map) => $body,
             DistinctSet::I8($map) => $body,
+            DistinctSet::F32($map) => $body,
+            DistinctSet::F64($map) => $body,
             DistinctSet::Date($map) => $body,
             DistinctSet::Time($map) => $body,
             DistinctSet::Decimal($map, _, _) => $body,
@@ -331,6 +445,8 @@ impl DistinctSet {
             DataType::Int32 => Self::I32(Multiplicities::new()),
             DataType::Int16 => Self::I16(Multiplicities::new()),
             DataType::Int8 => Self::I8(Multiplicities::new()),
+            DataType::Float32 => Self::F32(Multiplicities::new()),
+            DataType::Float64 => Self::F64(Multiplicities::new()),
             DataType::Date32 => Self::Date(Multiplicities::new()),
             DataType::Time32(arrow::datatypes::TimeUnit::Millisecond) => {
                 Self::Time(Multiplicities::new())
@@ -375,13 +491,15 @@ impl DistinctSet {
             Self::I32(m) => m.entries(|v| ScalarValue::Int32(Some(*v))),
             Self::I16(m) => m.entries(|v| ScalarValue::Int16(Some(*v))),
             Self::I8(m) => m.entries(|v| ScalarValue::Int8(Some(*v))),
+            Self::F32(m) => m.entries(|bits| ScalarValue::Float32(Some(f32::from_bits(*bits)))),
+            Self::F64(m) => m.entries(|bits| ScalarValue::Float64(Some(f64::from_bits(*bits)))),
             Self::Date(m) => m.entries(|v| ScalarValue::Date32(Some(*v))),
             Self::Time(m) => m.entries(|v| ScalarValue::Time32Millisecond(Some(*v))),
             Self::Decimal(m, p, s) => m.entries(|v| ScalarValue::Decimal128(Some(*v), *p, *s)),
             Self::String(m) => m.entries(|v| ScalarValue::Utf8(Some(v.clone()))),
             Self::Boolean(m) => m.entries(|v| ScalarValue::Boolean(Some(*v))),
             Self::Timestamp(m) => m.entries(|v| timestamp_scalar(*v)),
-            Self::Scalar(m) => m.entries(Clone::clone),
+            Self::Scalar(m) => m.entries(|value| value.0.clone()),
         }
     }
     #[cfg(feature = "rocksdb-state")]
@@ -391,13 +509,15 @@ impl DistinctSet {
             Self::I32(m) => m.drain(|v| ScalarValue::Int32(Some(*v))),
             Self::I16(m) => m.drain(|v| ScalarValue::Int16(Some(*v))),
             Self::I8(m) => m.drain(|v| ScalarValue::Int8(Some(*v))),
+            Self::F32(m) => m.drain(|bits| ScalarValue::Float32(Some(f32::from_bits(*bits)))),
+            Self::F64(m) => m.drain(|bits| ScalarValue::Float64(Some(f64::from_bits(*bits)))),
             Self::Date(m) => m.drain(|v| ScalarValue::Date32(Some(*v))),
             Self::Time(m) => m.drain(|v| ScalarValue::Time32Millisecond(Some(*v))),
             Self::Decimal(m, p, s) => m.drain(|v| ScalarValue::Decimal128(Some(*v), *p, *s)),
             Self::String(m) => m.drain(|v| ScalarValue::Utf8(Some(v.clone()))),
             Self::Boolean(m) => m.drain(|v| ScalarValue::Boolean(Some(*v))),
             Self::Timestamp(m) => m.drain(|v| timestamp_scalar(*v)),
-            Self::Scalar(m) => m.drain(Clone::clone),
+            Self::Scalar(m) => m.drain(|value| value.0.clone()),
         }
     }
 
@@ -426,16 +546,25 @@ impl DistinctSet {
         }
     }
 
-    pub(super) fn decimal_count(&self, value: &ScalarValue) -> i64 {
-        self.scalar_count(value)
-    }
-
     pub(super) fn scalar_count(&self, value: &ScalarValue) -> i64 {
         match (self, value) {
+            (Self::Timestamp(m), ScalarValue::Decimal128(Some(nanos), 38, 0)) => {
+                m.counts.get(nanos).copied().unwrap_or(0)
+            }
             (Self::I64(m), ScalarValue::Int64(Some(v))) => m.counts.get(v).copied().unwrap_or(0),
             (Self::I32(m), ScalarValue::Int32(Some(v))) => m.counts.get(v).copied().unwrap_or(0),
             (Self::I16(m), ScalarValue::Int16(Some(v))) => m.counts.get(v).copied().unwrap_or(0),
             (Self::I8(m), ScalarValue::Int8(Some(v))) => m.counts.get(v).copied().unwrap_or(0),
+            (Self::F32(m), ScalarValue::Float32(Some(v))) => m
+                .counts
+                .get(&crate::flink_float::canonical_f32(*v).to_bits())
+                .copied()
+                .unwrap_or(0),
+            (Self::F64(m), ScalarValue::Float64(Some(v))) => m
+                .counts
+                .get(&crate::flink_float::canonical_f64(*v).to_bits())
+                .copied()
+                .unwrap_or(0),
             (Self::Date(m), ScalarValue::Date32(Some(v))) => m.counts.get(v).copied().unwrap_or(0),
             (Self::Time(m), ScalarValue::Time32Millisecond(Some(v))) => {
                 m.counts.get(v).copied().unwrap_or(0)
@@ -464,7 +593,7 @@ impl DistinctSet {
             (Self::Scalar(m), value) => {
                 let canonical = crate::flink_float::canonical_scalar(value);
                 m.counts
-                    .get(canonical.as_ref().unwrap_or(value))
+                    .get(&ValueKey(canonical.as_ref().unwrap_or(value).clone()))
                     .copied()
                     .unwrap_or(0)
             }
@@ -477,7 +606,10 @@ impl DistinctSet {
         #[cfg(feature = "rocksdb-state")]
         let journal = if self.journaled() {
             Some(Box::new(
-                self.drain_journal().into_iter().map(|(v, _)| v).collect(),
+                self.drain_journal()
+                    .into_iter()
+                    .map(|(v, _)| ValueKey(v))
+                    .collect(),
             ))
         } else {
             None
@@ -485,17 +617,29 @@ impl DistinctSet {
         #[cfg(not(feature = "rocksdb-state"))]
         let journal = None;
         *self = Self::Scalar(Multiplicities {
-            counts: entries.into_iter().collect(),
+            counts: entries
+                .into_iter()
+                .map(|(value, count)| (ValueKey(value), count))
+                .collect(),
             journal,
         });
     }
 
     fn change_scalar(&mut self, value: &ScalarValue, change: Change) -> bool {
         match (self, value) {
+            (Self::Timestamp(m), ScalarValue::Decimal128(Some(nanos), 38, 0)) => {
+                m.change_owned(*nanos, change)
+            }
             (Self::I64(m), ScalarValue::Int64(Some(v))) => m.change_owned(*v, change),
             (Self::I32(m), ScalarValue::Int32(Some(v))) => m.change_owned(*v, change),
             (Self::I16(m), ScalarValue::Int16(Some(v))) => m.change_owned(*v, change),
             (Self::I8(m), ScalarValue::Int8(Some(v))) => m.change_owned(*v, change),
+            (Self::F32(m), ScalarValue::Float32(Some(v))) => {
+                m.change_owned(crate::flink_float::canonical_f32(*v).to_bits(), change)
+            }
+            (Self::F64(m), ScalarValue::Float64(Some(v))) => {
+                m.change_owned(crate::flink_float::canonical_f64(*v).to_bits(), change)
+            }
             (Self::Date(m), ScalarValue::Date32(Some(v))) => m.change_owned(*v, change),
             (Self::Time(m), ScalarValue::Time32Millisecond(Some(v))) => m.change_owned(*v, change),
             (Self::Decimal(m, p, s), ScalarValue::Decimal128(Some(v), vp, vs))
@@ -516,7 +660,7 @@ impl DistinctSet {
             }
             (Self::Scalar(m), v) => {
                 let canonical = crate::flink_float::canonical_scalar(v);
-                m.change(canonical.as_ref().unwrap_or(v), change)
+                m.change(&ValueKey(canonical.as_ref().unwrap_or(v).clone()), change)
             }
             (set, v) => {
                 set.promote();
@@ -527,7 +671,7 @@ impl DistinctSet {
     fn change_value(&mut self, value: ScalarValue, change: Change) -> bool {
         if let Self::Scalar(map) = self {
             let value = crate::flink_float::canonical_scalar(&value).unwrap_or(value);
-            map.change_owned(value, change)
+            map.change_owned(ValueKey(value), change)
         } else {
             self.change_scalar(&value, change)
         }
@@ -552,6 +696,17 @@ impl DistinctSet {
     pub(super) fn add_scalar_n(&mut self, v: ScalarValue, n: i64) -> bool {
         self.change_value(v, Change::Add(n))
     }
+    pub(super) fn forget_scalar(&mut self, value: &ScalarValue) {
+        let count = self.scalar_count(value);
+        if count != 0 {
+            self.change_scalar(value, Change::Delta(count.wrapping_neg()));
+        }
+    }
+
+    pub(super) fn merge_scalar_delta(&mut self, value: &ScalarValue, delta: i64) -> bool {
+        self.change_scalar(value, Change::Delta(delta))
+    }
+
     pub(crate) fn remove_scalar(&mut self, v: &ScalarValue) -> bool {
         self.change_scalar(v, Change::Remove)
     }
@@ -577,6 +732,78 @@ impl DistinctSet {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nested_membership_hashes_logical_integer_arrays_across_slices_and_restore() {
+        use arrow::datatypes::Int32Type;
+        use std::hash::Hasher;
+        let values: ArrayRef = Arc::new(arrow::array::ListArray::from_iter_primitive::<
+            Int32Type,
+            _,
+            _,
+        >([
+            Some(vec![Some(1), None, Some(2)]),
+            Some(vec![Some(3), None, Some(4)]),
+            Some(vec![Some(1), None, Some(2)]),
+        ]));
+        let first = ScalarValue::try_from_array(&values, 0).unwrap();
+        let other = ScalarValue::try_from_array(&values, 1).unwrap();
+        let sliced = ScalarValue::try_from_array(&values.slice(2, 1), 0).unwrap();
+        let hash = |value: &ScalarValue| {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            ValueKey(value.clone()).hash(&mut hasher);
+            hasher.finish()
+        };
+        assert_eq!(hash(&first), hash(&sliced));
+        assert_ne!(hash(&first), hash(&other));
+        let mut set = DistinctSet::new(values.data_type());
+        assert!(set.add_scalar(first.clone()));
+        assert!(!set.add_scalar(sliced.clone()));
+        assert_eq!(set.scalar_count(&sliced), 2);
+        let mut restored = DistinctSet::new(values.data_type());
+        for (value, count) in set.scalar_entries() {
+            restored.insert_imported(value, count);
+        }
+        assert!(!restored.remove_scalar(&sliced));
+        assert!(restored.remove_scalar(&first));
+        assert!(restored.is_empty());
+    }
+
+    #[test]
+    fn signed_membership_keeps_negative_counts_and_only_crosses_positive_membership() {
+        for value in samples() {
+            let mut set = DistinctSet::new(&value.data_type());
+            for (delta, count, transition) in [
+                (-3, -3, false),
+                (2, -1, false),
+                (2, 1, true),
+                (1, 2, false),
+                (-5, -3, true),
+                (3, 0, false),
+                (1, 1, true),
+                (-1, 0, true),
+            ] {
+                assert_eq!(set.change_scalar(&value, Change::Delta(delta)), transition);
+                assert_eq!(set.scalar_count(&value), count);
+                assert_eq!(set.is_empty(), count == 0);
+            }
+        }
+    }
+
+    #[test]
+    fn imported_negative_membership_does_not_increment_the_retained_count() {
+        for value in samples() {
+            let mut state = GroupAggState::new(7, &value.data_type());
+            state.import_multiset_entry(value.clone(), -2);
+            assert_eq!(state.emit(&DataType::Int64), ScalarValue::Int64(Some(0)));
+            let array = value.to_array().unwrap();
+            let column = DistinctColumn::new(&array);
+            assert!(!column.merge_delta(&mut state, 0, 2, true));
+            assert_eq!(state.emit(&DataType::Int64), ScalarValue::Int64(Some(0)));
+            assert!(column.merge_delta(&mut state, 0, 1, true));
+            assert_eq!(state.emit(&DataType::Int64), ScalarValue::Int64(Some(1)));
+        }
+    }
 
     fn samples() -> Vec<ScalarValue> {
         vec![
@@ -624,10 +851,10 @@ mod tests {
         let column = DistinctColumn::new(&array);
         let mut set = DistinctSet::new(array.data_type());
         for row in 0..values.len() {
-            assert!(column.change(&mut set, row, false, 1));
-            assert!(!column.change(&mut set, row, false, 2));
+            assert!(column.change(&mut set, row, Change::Add(1)));
+            assert!(!column.change(&mut set, row, Change::Add(2)));
         }
-        assert!(!column.change(&mut set, values.len(), false, 1));
+        assert!(!column.change(&mut set, values.len(), Change::Add(1)));
         assert!(matches!(set, DistinctSet::Timestamp(_)));
         let mut restored = DistinctSet::new(array.data_type());
         for (value, count) in set.scalar_entries() {
@@ -646,9 +873,9 @@ mod tests {
         assert_eq!(actual, values);
         assert_eq!(counts, vec![3; values.len()]);
         for row in 0..values.len() {
-            assert!(!column.change(&mut restored, row, true, 1));
-            assert!(!column.change(&mut restored, row, true, 1));
-            assert!(column.change(&mut restored, row, true, 1));
+            assert!(!column.change(&mut restored, row, Change::Remove));
+            assert!(!column.change(&mut restored, row, Change::Remove));
+            assert!(column.change(&mut restored, row, Change::Remove));
         }
         assert!(restored.is_empty());
     }

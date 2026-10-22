@@ -142,14 +142,18 @@ class RuntimeRoutesTest(unittest.TestCase):
 
     def test_conversion_boundaries_require_graph_position(self):
         work = {'NativeCalcOperator': 3}
-        for sink_conversion in ('SinkConversion$6',
-                                'org.apache.flink.table.runtime.operators.sink.OutputConversionOperator'):
-            job = self.chain([self.SOURCE, 'SourceConversion$4', self.CALC, sink_conversion, self.SINK], work)
-            self.assertEqual('native', self.classify({'job': job}))
+        input_conversion = 'org.apache.flink.table.runtime.operators.source.InputConversionOperator'
+        for source_conversion in ('SourceConversion$4', input_conversion):
+            for sink_conversion in ('SinkConversion$6',
+                                    'org.apache.flink.table.runtime.operators.sink.OutputConversionOperator'):
+                job = self.chain([self.SOURCE, source_conversion, self.CALC, sink_conversion, self.SINK], work)
+                self.assertEqual('native', self.classify({'job': job}))
         # The same generated class at the source and inside the computation must not
         # make the interior instance disappear from the host portion of the graph.
         interior = self.chain([self.SOURCE, 'SourceConversion$4', self.CALC,
                                'SourceConversion$4', self.SINK], work)
+        self.assertEqual('mixed', self.classify({'job': interior}))
+        interior = self.chain([self.SOURCE, self.CALC, input_conversion, self.SINK], work)
         self.assertEqual('mixed', self.classify({'job': interior}))
         interior = self.chain([self.SOURCE, 'SinkConversion$6', self.CALC, self.SINK], work)
         self.assertEqual('mixed', self.classify({'job': interior}))

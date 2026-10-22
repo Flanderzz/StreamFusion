@@ -207,10 +207,12 @@ pub(crate) fn rocks_group_supported(
     value_types: &[DataType],
     state_types: &[DataType],
 ) -> bool {
-    !kinds.iter().any(|kind| matches!(kind, 12..=16 | 19..=21))
+    !kinds
+        .iter()
+        .any(|kind| matches!(kind, 12..=16 | 19..=21 | 38 | 39))
         && rocks_row_supported(state_types)
         && kinds.iter().zip(value_types).all(|(&kind, value_type)| {
-            !matches!(kind, 7 | 9 | 17 | 18)
+            !matches!(kind, 7 | 9 | 17 | 18 | 34)
                 || rocks_row_supported(std::slice::from_ref(value_type))
         })
 }

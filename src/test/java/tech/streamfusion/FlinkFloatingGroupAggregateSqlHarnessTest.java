@@ -143,9 +143,8 @@ class FlinkFloatingGroupAggregateSqlHarnessTest {
         "SUM(DISTINCT f)",
         "AVG(DISTINCT f)"
       })
-  void unverifiedDistinctPartialLayoutsKeepFallback(String aggregate) throws Exception {
-    NativeParity.assertFallback(
-        () -> environment(2, false), "SELECT k, " + aggregate + " FROM src GROUP BY k");
+  void distinctPartialLayoutsPreserveFloatingResults(String aggregate) throws Exception {
+    compare(2, false, "SELECT k, " + aggregate + " FROM src GROUP BY k");
   }
 
   @ParameterizedTest
