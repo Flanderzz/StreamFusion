@@ -199,6 +199,28 @@ Regression tests require failure when invalid expressions are reached, rather th
 the same winner among competing failures. They also verify successful filters, NULLs,
 untaken branches, nested inputs and independent binary-backed STRING projections.
 
+## FROM_UNIXTIME literal formats
+
+Integer epoch seconds and constant numeric patterns (`yyyy`, `MM`, `dd`, `HH`, `mm`, `ss`,
+quoted literals) execute in Rust for fixed-offset zones and regional zones with finite
+historical offset tables, including `Asia/Shanghai`. Planning serializes the running JDK's
+`java.util.TimeZone` offsets, so execution needs neither per-row JVM callbacks nor a second
+native time-zone database. This preserves JDK-specific historical behavior, including the
+pre-1900 raw offset, former daylight-saving transitions, the Gregorian calendar cutover,
+BC dates and Java long multiplication overflow.
+JobManagers and TaskManagers must use matching formatter locales and JDK time-zone rules.
+
+Zones with recurring future rules, unverified regional TimeZone implementations, dynamic or
+unsupported patterns, non-Gregorian/default numbering locales and other unverified signatures
+retain the Flink evaluator. Existing
+fixed-zone plans retain their encoded format. In an admitted regional zone, composing the
+formatter with SUBSTR, integer/string CAST, constant nonzero integer division and LPAD
+keeps the date/hour/quarter-hour partition projection entirely native. Output formatting
+reuses one scratch string per batch and reuses the formatted value for consecutive equal
+epoch seconds; it does not change the SQL expression or its substring/cast semantics.
+See [correctness and performance evidence](../benchmarks/native-sync-calc.md) for the
+complete date-partition expression, wide-row parity checks and both timing boundaries.
+
 ## LIKE ESCAPE and SIMILAR TO
 
 LIKE/NOT LIKE with an explicit literal or per-row ESCAPE, and SIMILAR TO/NOT SIMILAR TO,

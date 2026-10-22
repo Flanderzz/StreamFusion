@@ -164,12 +164,9 @@ pub(crate) fn build_expr(
                 Box::new(child),
                 DataType::Int64,
             ));
-            crate::flink_functions::from_unixtime::function(
-                offset.parse().expect("offset"),
-                pattern,
-            )
-            .expect("admitted FROM_UNIXTIME pattern")
-            .call(vec![input])
+            crate::flink_functions::from_unixtime::from_encoded(offset, pattern)
+                .expect("admitted FROM_UNIXTIME pattern")
+                .call(vec![input])
         }
         40 => {
             let children = (0..child_counts[node])

@@ -2242,6 +2242,13 @@ impl WindowRankState {
 /// Serialized Calc plans retain production compilation, scalar adaptation, and materialization.
 pub struct CalcProgram(crate::calc::CalcExpression);
 impl CalcProgram {
+    pub fn with_projections(mut self, roots: Vec<usize>, names: Vec<String>) -> Self {
+        assert_eq!(roots.len(), names.len());
+        self.0.projection_roots = roots;
+        self.0.output_names = names;
+        self
+    }
+
     pub fn new(
         kinds: Vec<i64>,
         payload: Vec<i64>,
