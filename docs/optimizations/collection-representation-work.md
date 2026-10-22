@@ -127,7 +127,7 @@ Validation passes 157 selected checks on Flink 2.2.1 and 143 applicable checks o
 14 version skips, plus eleven release Rust tests and 156 native benchmark fixtures. Coverage includes
 both recovery backends and repeated restores, all RowKinds at the expansion boundary, projection
 reordering/repetition/cardinality, numeric and temporal edge cases, time-zone transitions, and the
-existing 67 expression error-order checks. Host serializer-failure probes use independent clusters
+existing 67 expression failure/conditional-evaluation checks. Host serializer-failure probes use independent clusters
 for each execution so a failed TaskManager cannot strand the following job.
 
 Reproduce a complete-job case with the release native library built first:

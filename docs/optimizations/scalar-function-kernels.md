@@ -305,7 +305,8 @@ paired comparison below adds that missing evidence. The standalone performance r
 Grouped parity tests compare materialized results on NULLs, invalid ELT indexes,
 non-text bytes, zero padding, UTF-8 truncation and multiple input batches. Both
 cases pass on Flink 2.2; the cast case passes on 1.18, where ELT is unavailable and
-its case is explicitly skipped. Existing tests retain rowwise failure-order coverage.
+its case is explicitly skipped. Existing tests retain failure and conditional-evaluation coverage;
+independent competing exceptions need not be reported in stock Flink's order.
 
 [Raw trials](../benchmarks/binary-composition-2026-09-28.csv) include both engines
 and identity controls. Reproduce with the same `ScalarFunctionBenchmark#individualFunctions`

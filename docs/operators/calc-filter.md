@@ -183,30 +183,21 @@ verify the retained file view. These checks establish correctness, not a through
 
 ## Failure order across rows
 
-After the usual expression admission checks, a Calc with multiple potentially failing
-evaluations uses Flink's generated evaluator for its complete filter and projection list.
-Each JVM expression is conservatively treated as potentially failing, including deterministic
-user functions. Native failure sites also count: exact division/remainder with an unproven
-nonzero divisor, strict string-to-integer/boolean casts, invalid random bounds, INSTR indices,
-extreme decimal rounding scales and throwing SQL/JSON policies.
+Calc evaluates independent expressions in column batches. It does not switch the entire
+filter and projection list to JVM evaluation merely because several expressions can fail.
+When several rows or projections would throw, the first reported exception may differ from
+stock Flink. This diagnostic difference is accepted to retain native batch execution.
 
-This keeps an error in a later input row from overtaking an earlier row's projection error.
-For example, with rows `[1, 2]`, `SELECT f(id), g(id)` must report `g(1)` if it fails,
-even when `f(2)` also fails. The same rule applies between filters and projections. The
-generated evaluator preserves predicate-before-projection order, untaken branches, NULLs and
-empty filtered results. It still receives and returns Arrow batches, and retains the existing
-bridge type and string-representation restrictions; a program that cannot be generated safely
-falls back. Unsupported functions and UDF signature/conversion gates are checked before this choice.
-Shared non-deterministic scalar calls use complete-row evaluation directly, as described below.
-In particular, a complete-row evaluator cannot emit the arbitrary binary-backed STRING from
-`FROM_BASE64`. Projecting that string alongside another potentially failing evaluation retains
-fallback (`binary-backed STRING requires a final scalar projection`); a single such projection
-keeps its existing native byte-preserving path.
+Successful values, declared types, NULLs and conditional short-circuiting remain unchanged.
+The condition still selects rows before projections run, and empty/all-filtered batches do
+not evaluate projections. Individual expressions retain their normal native or host-exact
+implementation; a necessary JVM expression no longer pulls unrelated native expressions
+into a whole-Calc callback. Shared stateful or nondeterministic UDFs still retain the
+existing generated schedule because their call order affects values and lifecycle.
 
-This scheduling change prioritizes failure parity, with no throughput improvement claimed.
-Regression tests compare error class/message and execution route against released Flink for
-INT, BIGINT, DECIMAL and STRING results, native casts, nested expressions, and one-row and
-multi-row batches, including errors after earlier complete batches.
+Regression tests require failure when invalid expressions are reached, rather than choosing
+the same winner among competing failures. They also verify successful filters, NULLs,
+untaken branches, nested inputs and independent binary-backed STRING projections.
 
 ## LIKE ESCAPE and SIMILAR TO
 
@@ -221,12 +212,12 @@ batches do not evaluate projections. Existing two-argument LIKE keeps its curren
 Generated scalar expressions and complete-row Calc evaluators bind processing time to the owning
 Calc or Filter task's live `ProcessingTimeService` during operator open. Flink's generated
 `PROCTIME_MATERIALIZE` access therefore works inside CASE/COALESCE selections and predicates,
-including complete-row evaluation selected to preserve filter/projection failure order.
+including complete-row evaluation needed for shared function state or representation contracts.
 Simple TIMESTAMP_LTZ COALESCE selections over input columns, NULLs and processing-time clocks
 with widening precision casts use the existing native CASE path at precisions above three.
 No UDF or other nondeterministic/fallible expression enters this path. More complex expressions
-retain Flink generation and its call-order safeguards; complete-row generation still applies
-when multiple failure sites require it. A lower Calc containing only input references and a lazy
+retain Flink generation where required by their function or representation contract. Multiple
+independent failure sites alone do not require complete-row generation. A lower Calc containing only input references and a lazy
 PROCTIME indicator can fuse into this consumer; filters, other computations and remapped input
 coordinates keep their existing boundaries.
 
@@ -241,7 +232,7 @@ operator tests cover successive clocks, empty/all-filtered batches and INSERT/UP
 row kinds. Independent SQL jobs on both released Flink lines compare types and stable input
 branches, check clock values against each job's execution interval, and require actual native
 consumption across multiple Arrow batches. Precision-6/9 COALESCE and precision-3/6/9 CASE cover native selection and
-complete-row generated execution forced by multiple fallible projections in UTC, Asia/Shanghai and America/Los_Angeles.
+generated scalar execution alongside independent fallible projections in UTC, Asia/Shanghai and America/Los_Angeles.
 
 Released Flink 2.2.1 rejects the direct precision-3 COALESCE form combining a nullable timestamp
 and materialized PROCTIME with a generated argument-nullability mismatch. Its valid CASE form
@@ -1218,6 +1209,13 @@ the cost of one JNI round-trip per cast column rather than per row family. (The 
 already carry a probed native port of the legacy `Double.toString` spelling; moving the
 float-to-string `CAST` onto that port instead of the upcall is a separate, tracked follow-up.)
 
+Host cast executors compile under Flink's cast-rule library loader, restoring the calling
+thread's context loader afterward. Flink's shared Janino expression cache does not include a
+loader key; setting only the cast context's loader still lets Janino retain a per-job loader.
+The scoped compilation loader prevents later jobs' exceptional casts from accessing a
+retired safety-wrapper loader. A two-job regression closes the first loader before exercising
+the cached expression's error path in the second job.
+
 With `table.exec.legacy-cast-behaviour=ENABLED`, the verified basic pairs remain native:
 STRING/CHAR/VARCHAR to DECIMAL; BOOLEAN or DECIMAL to CHAR/VARCHAR; and character to
 character. STRING to DECIMAL uses Flink's complete generated expression, including
@@ -1241,8 +1239,8 @@ uses the JVM inside native Calc whenever the batch cannot use the proven native 
 CHAR to DOUBLE is also admitted by default in legacy mode, including NULL on malformed
 text. Whitespace, padding, exponents, signed zero, NaN/infinity and over/underflow retain the running
 host's parser behavior. The complete mixed DECIMAL ROUND projection remains native, including its
-CHAR(8) sort-key conversion. Mixed projections use the existing whole-row JVM schedule when
-needed for Flink failure order; a runtime DECIMAL-only control verifies ROUND independently.
+CHAR(8) sort-key conversion. Mixed projections keep each expression's selected implementation; a runtime DECIMAL-only control
+verifies ROUND independently.
 VARCHAR-to-floating and CHAR-to-FLOAT legacy casts remain unverified
 and fall back. An unknown cast setting also falls back.
 
@@ -1250,8 +1248,8 @@ Direct legacy CHAR-to-DOUBLE casts parse ordinary ASCII decimal text in native b
 the same correctly-rounded binary64 conversion as Java. Hexadecimal text, numeric suffixes,
 special values, Unicode and malformed input retain the complete released Flink expression for
 the batch, including legacy NULL-on-failure behavior. Composed operands are never mistaken for
-direct reads. Multiple fallible expressions still use the whole-row JVM schedule to preserve
-error order. These paths require no additional setting and preserve
+direct reads. Multiple fallible expressions keep their normal columnar schedule. These paths
+require no additional setting and preserve
 `table.exec.legacy-cast-behaviour`. See the release measurements
 for [floating DECIMAL](../benchmarks/basic-type-coverage.md#legacy-floating-decimal-casts-2026-10-16)
 and [CHAR to DOUBLE](../benchmarks/basic-type-coverage.md#legacy-char-to-double-casts-2026-10-16).
@@ -1602,9 +1600,9 @@ UTF-16BE/LE emit no BOM. Empty strings produce empty bytes in all six charsets.
 On Flink 2.2, other literal charsets fall back. A runtime character expression for the charset runs through
 Flink's generated evaluator in the native Calc's batch JVM bridge. It uses the TaskManager
 JDK's charset implementations and aliases, including non-UTF charsets, without a Rust
-charset-name approximation. The complete Calc filter and projection list are generated together
-to preserve Flink's row and projection evaluation order, including the first charset error when
-several expressions or rows would fail. On Flink 2.2, Calcs using only the six verified literal
+charset-name approximation. Runtime charset kernels are not independently encoded: the complete
+Calc uses the generated program and its binary/string representation checks, including consumers
+of charsets that produce isolated UTF-16 surrogates. On Flink 2.2, Calcs using only the six verified literal
 charsets retain their Rust kernels. NULL arguments return NULL; illegal or unsupported runtime names
 raise Flink's `UnsupportedEncodingException` only when the expression is evaluated. Flink 1.18
 declares direct ENCODE results as BINARY(1); its generated Calc carries the complete bytes as
@@ -1631,7 +1629,7 @@ string-identity fallback; direct final projections and consumers within the Calc
 
 `FlinkDynamicCharsetSqlHarnessTest` checks released Flink 2.2.1 and 1.18.1 with runtime sources:
 standard and extended JDK charsets, aliases, NULLs, malformed sequences, CESU-8 surrogates,
-filtered and empty batches, untaken CASE branches, and invalid-name exception order.
+filtered and empty batches, untaken CASE branches, and invalid-name exceptions.
 
 A local ARM64/JDK 17 diagnostic on Flink 2.2.1 (2026-09-24) used the release native build with
 mimalloc, 2,000,000 rows, 264-byte Unicode text, NULLs every seventh row, and per-row UTF-8,
@@ -2115,7 +2113,7 @@ Existing admitted collection subscripts and Boolean/integer ARRAY_DISTINCT retai
 | ARRAY_INTERSECT | Rust stable intersection for matching nullable BOOLEAN/integer/DECIMAL arrays; distinct matches follow left-side order even when the left array is shorter; NULL is a value, either NULL container returns NULL |
 | ARRAY_SORT | Released DataFusion Rust sort for nullable integer/DECIMAL arrays proven shorter than 32 elements or produced by native ARRAY_DISTINCT, with non-NULL constant Boolean options; unrestricted, runtime-option, sensitive and fallible signatures retain Flink's comparator behavior |
 | ARRAY_JOIN | Rust UTF-8 join for total nullable string arrays and string options, including strict explicit NULL replacement; co-projected sensitive values and unverified consumers remain generated |
-| ELEMENT | Rust extraction for nullable BOOLEAN/integer/DECIMAL arrays; NULL/empty arrays return NULL, a singleton returns its element, longer arrays raise the selected Flink line's exception with the released message; multiple failure sites and sensitive/fallible operands retain row evaluation |
+| ELEMENT | Rust extraction for nullable BOOLEAN/integer/DECIMAL arrays; NULL/empty arrays return NULL, a singleton returns its element, longer arrays raise the selected Flink line's exception with the released message; sensitive/fallible operands retain generated evaluation |
 | MAP_FROM_ARRAYS | Rust construction for nullable basic key/value arrays, preserving duplicate and NULL keys, entry order and strict parent NULLs; mismatched lengths retain Flink's typed exception; other signatures remain generated |
 | MAP_KEYS | Rust shared-key view for total maps with nullable BOOLEAN/integer/DECIMAL keys and values; other signatures retain generated evaluation |
 | MAP_VALUES | Rust shared-value view under the same verified basic-map admission |
@@ -2127,8 +2125,8 @@ Existing admitted collection subscripts and Boolean/integer ARRAY_DISTINCT retai
 | OBJECT_OF | Released named-struct construction for validated metadata and total basic fields; other signatures remain generated |
 | OBJECT_UPDATE | Native field selection only for one unshared inline basic OBJECT_OF in the complete Calc and atomic literal/input-reference values; shared objects and other signatures remain generated |
 
-The generated route evaluates the complete filter and projection together, preserving failure
-order, NULLs, empty filtered batches, function invocation order and released Flink overloads.
+Representation-sensitive programs use the generated route for the complete filter and projection,
+preserving NULLs, empty filtered batches, shared function invocation order and released Flink overloads.
 It retains Arrow batch inputs/outputs and production JNI costs. A NativeCalc containing these
 functions does **not** imply that its scalar work executes in Rust; the function-engine diagnostic
 reports the assignment, including ARRAY/MAP/ROW constructors. Programs with user scalar
@@ -2157,7 +2155,7 @@ dispatches once per batch, scans short lists directly and uses Arrow's integer/d
 for lists of at least 32 elements. Both paths preserve exact integer and unscaled DECIMAL ordering.
 Strings, floating values, temporal elements, nested values, NOT NULL-element arrays and fallible
 operands retain their existing Flink evaluation. BOOLEAN extrema remain a Flink validation error.
-The existing collection switch and whole-Calc representation/error-order safeguards still apply.
+The existing collection switch and whole-Calc representation safeguards still apply.
 Availability still follows the released Flink catalog: Flink 1.18 has ARRAY_MAX but no ARRAY_MIN;
 native registration does not introduce a SQL function missing from the host release.
 
@@ -2168,7 +2166,8 @@ compact/expanded storage rules. BIGINT millisecond epoch conversion and TIMESTAM
 casts also have native kernels in that operand context, with SQL epoch bounds and per-version TIME
 truncation preserved. Non-UTC offsets come from JDK ZoneRules through the batch bridge and are
 cached between transitions, preserving historical and daylight-saving behavior. This total lookup
-does not trigger whole-Calc row evaluation; other JVM calls retain their error-order safeguards.
+does not trigger whole-Calc row evaluation. Independent JVM calls keep their scalar batch bridge;
+shared stateful calls retain their invocation-order safeguards.
 Ordinary projected arrays of verified nullable basic and temporal elements reuse the same
 constructor; floating, NOT NULL-element, character and representation-sensitive projected
 arrays retain generated evaluation.
@@ -2383,7 +2382,7 @@ including runtime INT scales. Independently emitted DOUBLE TRUNCATE uses an exac
 for magnitudes from 1 through 1e9 and scales -6 through 6, outward-rounded bounds must
 prove the same truncated decimal integer before arithmetic replaces decimal conversion.
 Ambiguous boundaries, other values/scales, and row-fused expressions retain Flink's
-implementation. NULLs, failure ordering and declared types are unchanged. FLOAT/DOUBLE
+implementation. NULLs, conditional short-circuiting and declared types are unchanged. FLOAT/DOUBLE
 ROUND retains Flink's BigDecimal-based HALF_UP semantics; every TRUNCATE path preserves
 Flink's decimal rounding-toward-zero result.
 TINYINT/SMALLINT TRUNCATE falls back: released Flink generates an invalid narrowing
@@ -2640,7 +2639,7 @@ type do not use this passthrough.
 The verified INTEGER-indexed binary selector now runs without an opt-in. Explicit
 `streamfusion.experimental.binaryElt=false` restores stock execution, independently of the
 nested-scalar flag. Planner and worker use the same default helper. CI exercises this default
-without forcing the flag. The unverified index overloads and released error-order guards
+without forcing the flag. The unverified index overloads and representation guards
 retain their existing routes.
 
 The small-functionality gate uses Flink's production generated Calc on prebuilt BinaryRowData

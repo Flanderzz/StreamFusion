@@ -115,7 +115,7 @@ class NativePlannerTest {
   }
 
   @Test
-  void reportsNativeMixedAndWholeCalcJvmExecution() {
+  void reportsNativeAndMixedFunctionExecution() {
     TableEnvironment tEnv = TableEnvironment.create(EnvironmentSettings.inStreamingMode());
     PhysicalPlanScan scan = NativePlanner.install(tEnv);
     tEnv.createTemporarySystemFunction("JVM_ONLY", JvmOnlyFunction.class);
@@ -131,13 +131,11 @@ class NativePlannerTest {
     tEnv.explainSql(
         "SELECT JVM_ONLY(c0), JVM_ONLY(CAST(c0 AS BIGINT)) "
             + "FROM (VALUES (3), (4), (5)) AS t(c0)");
-    String wholeJvm = String.join("\n", scan.functionExecutions());
-    assertTrue(wholeJvm.contains("native=[]"), wholeJvm);
-    assertTrue(wholeJvm.contains("jvm=[JVM_ONLY, CAST]"), wholeJvm);
+    String multiple = String.join("\n", scan.functionExecutions());
+    assertTrue(multiple.contains("native=[CAST]"), multiple);
+    assertTrue(multiple.contains("jvm=[JVM_ONLY]"), multiple);
     assertTrue(
-        wholeJvm.contains(
-            "reason=multiple fallible/JVM expressions require Flink's row-major error order"),
-        wholeJvm);
+        multiple.contains("reason=host-exact or scalar-UDF implementation selected"), multiple);
 
     tEnv.explainSql("SELECT CHAR_LENGTH(c0) FROM (VALUES ('a'), ('bb')) AS t(c0)");
     String nativeExecution = String.join("\n", scan.functionExecutions());
@@ -147,7 +145,7 @@ class NativePlannerTest {
   }
 
   @Test
-  void reportsWholeCalcJvmForMultipleIfBranchCoercions() {
+  void multipleIfBranchCoercionsDoNotForceWholeCalcEvaluation() {
     TableEnvironment tEnv = TableEnvironment.create(EnvironmentSettings.inStreamingMode());
     PhysicalPlanScan scan = NativePlanner.install(tEnv);
 
@@ -158,9 +156,19 @@ class NativePlannerTest {
     String execution = String.join("\n", scan.functionExecutions());
     assertTrue(execution.contains("NativeCalc functions: native=[], jvm=[IF]"), execution);
     assertTrue(
-        execution.contains(
-            "reason=multiple fallible/JVM expressions require Flink's row-major error order"),
-        execution);
+        execution.contains("reason=host-exact or scalar-UDF implementation selected"), execution);
+  }
+
+  @Test
+  void multipleStrictNativeCastsDoNotRequireJvmEvaluation() {
+    var table = TableEnvironment.create(EnvironmentSettings.inStreamingMode());
+    table.getConfig().set("table.exec.legacy-cast-behaviour", "disabled");
+    var scan = NativePlanner.install(table);
+    table.executeSql("CREATE TABLE cast_input (a STRING, b STRING) WITH ('connector'='datagen')");
+    table.explainSql("SELECT CAST(a AS INT), CAST(b AS BIGINT) FROM cast_input");
+    String execution = String.join("\n", scan.functionExecutions());
+    assertTrue(execution.contains("native=[CAST], jvm=[]"), execution);
+    assertTrue(scan.fallbackReasons().isEmpty(), scan.explainSummary());
   }
 
   public static class JvmOnlyFunction extends ScalarFunction {

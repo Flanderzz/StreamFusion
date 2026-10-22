@@ -148,7 +148,7 @@ class NativeOperatorDescriptionTest {
 
   @ParameterizedTest
   @ValueSource(booleans = {false, true})
-  void filterAndWholeJvmCalcRetainTheirActualExecutionPlacement(boolean filter) {
+  void filterAndMixedCalcRetainTheirActualExecutionPlacement(boolean filter) {
     var execution = StreamExecutionEnvironment.getExecutionEnvironment();
     var table = StreamTableEnvironment.create(execution);
     PhysicalPlanScan scan = NativePlanner.install(table);
@@ -170,11 +170,10 @@ class NativeOperatorDescriptionTest {
       assertTrue(node.contains("nativeFunctions=[CHAR_LENGTH]"), node);
       assertTrue(node.contains("jvmFunctions=[]"), node);
     } else {
-      assertTrue(node.contains("nativeFunctions=[]"), node);
-      assertTrue(node.contains("jvmFunctions=[JVM_ONLY, CAST]"), node);
+      assertTrue(node.contains("nativeFunctions=[CAST]"), node);
+      assertTrue(node.contains("jvmFunctions=[JVM_ONLY]"), node);
       assertTrue(
-          scan.explainSummary()
-              .contains("multiple fallible/JVM expressions require Flink's row-major error order"),
+          scan.explainSummary().contains("reason=host-exact or scalar-UDF implementation selected"),
           scan.explainSummary());
     }
   }

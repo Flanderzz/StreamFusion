@@ -162,7 +162,8 @@ nodes keep `select` and `where`. Native source/sink transformation names use `Na
 and `NativeSink(...)`, including those details. Intermediate serialization/routing stages keep
 their existing names. Calc/filter names also include `nativeFunctions` and `jvmFunctions`, even when
 `table.exec.simplify-operator-name-enabled` is enabled. These lists describe the final expression
-encoding, including a whole-Calc JVM evaluator when required for Flink's error order. A surrounding
+encoding, including a whole-Calc JVM evaluator when required for shared function state or
+representation contracts. Independent competing exceptions do not require that evaluator. A surrounding
 `NativeCalc` node alone does not prove that every scalar function runs in Rust. Detailed JVM
 selection reasons remain available in the diagnostic log and `NativePlanner.explain(...)` summary.
 

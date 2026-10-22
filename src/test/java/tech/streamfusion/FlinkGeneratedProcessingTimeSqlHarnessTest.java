@@ -124,16 +124,6 @@ class FlinkGeneratedProcessingTimeSqlHarnessTest {
           assertEquals(1, observations.size(), "clock marker should fuse into its consumer");
           for (var observation : observations)
             assertEquals((long) count, observation.get("recordsIn"));
-          if (forceGenerated)
-            assertTrue(
-                scan.functionExecutions().stream()
-                    .anyMatch(
-                        execution ->
-                            execution.contains(
-                                    "reason=multiple fallible/JVM expressions require Flink's"
-                                        + " row-major error order")
-                                && execution.contains("PROCTIME_MATERIALIZE")),
-                scan.explainSummary());
           if (!forceGenerated && precision > 3) {
             assertTrue(
                 scan.functionExecutions().stream()

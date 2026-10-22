@@ -189,6 +189,18 @@ final class NativeFailureParity {
       assertEquals(nativeRoute, nativeRun.route(), this::toString);
     }
 
+    void assertCompetingFailures(
+        java.util.function.Predicate<Throwable> expected, Phase phase, Route nativeRoute) {
+      for (Outcome outcome : List.of(host, nativeRun)) {
+        assertNotNull(outcome.failure(), outcome.toString());
+        assertTrue(
+            expected.test(outcome.rootCause()),
+            () -> outcome + "\n" + org.apache.flink.util.ExceptionUtils.stringifyException(outcome.failure()));
+        assertEquals(phase, outcome.phase(), outcome.toString());
+      }
+      assertEquals(nativeRoute, nativeRun.route(), this::toString);
+    }
+
     void assertNullDereferenceFailure(String operation, Phase phase, Route nativeRoute) {
       assertFailure(NullPointerException.class, phase, nativeRoute);
       for (Outcome outcome : List.of(host, nativeRun)) {
@@ -235,6 +247,13 @@ final class NativeFailureParity {
     public String toString() {
       return "Comparison[host=" + host + ", nativeRun=" + nativeRun + "]";
     }
+  }
+
+  static boolean isDivisionByZero(Throwable cause) {
+    return (cause instanceof ArithmeticException || cause instanceof NativeException)
+        && String.valueOf(cause.getMessage())
+            .toLowerCase(java.util.Locale.ROOT)
+            .contains("by zero");
   }
 
   static Comparison run(Supplier<TableEnvironment> environment, String sql) {

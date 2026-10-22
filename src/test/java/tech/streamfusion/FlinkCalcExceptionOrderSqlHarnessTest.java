@@ -54,9 +54,9 @@ class FlinkCalcExceptionOrderSqlHarnessTest {
 
   @ParameterizedTest
   @MethodSource("failureCases")
-  void independentExpressionsKeepTheFirstFailingRow(int count, String sql) {
+  void independentExpressionsStillFailWithoutRequiringTheSameFirstError(int count, String sql) {
     NativeFailureParity.run(() -> environment(count), sql)
-        .assertFailure(IllegalArgumentException.class, "g-row-1", ROW_EVALUATION, NATIVE);
+        .assertFailure(IllegalArgumentException.class, ROW_EVALUATION, NATIVE);
   }
 
   @ParameterizedTest
@@ -71,9 +71,14 @@ class FlinkCalcExceptionOrderSqlHarnessTest {
         "SELECT CAST(CASE WHEN id = 2 THEN '1.2.3' ELSE '1' END AS DECIMAL(10,2)), g(id) FROM src",
         "SELECT g(id) FROM src WHERE 10 / (2 - id) > 0"
       })
-  void nativeFailureSitesCannotOvertakeAnEarlierUdfFailure(String sql) {
+  void competingNativeAndUdfFailuresStillFail(String sql) {
     NativeFailureParity.run(() -> environment(3), sql)
-        .assertFailure(IllegalArgumentException.class, "g-row-1", ROW_EVALUATION, NATIVE);
+        .assertCompetingFailures(
+            cause ->
+                cause instanceof IllegalArgumentException
+                    || NativeFailureParity.isDivisionByZero(cause),
+            ROW_EVALUATION,
+            NATIVE);
   }
 
   @ParameterizedTest
@@ -83,18 +88,18 @@ class FlinkCalcExceptionOrderSqlHarnessTest {
         "SELECT CAST(a AS BIGINT), CAST(b AS BIGINT) FROM src",
         "SELECT CAST(b AS INT) FROM src WHERE CAST(a AS INT) > 0"
       })
-  void nativeCastsKeepTheFirstFailingRow(String sql) {
+  void competingNativeCastsStillReportAnInvalidInput(String sql) {
     NativeFailureParity.run(
             () ->
                 BuiltinFunctionParity.environment(
                     ROW(FIELD("a", STRING()), FIELD("b", STRING())),
                     List.of(Row.of("1", "bad-first-row"), Row.of("bad-second-row", "1"))),
             sql)
-        .assertFailure(NumberFormatException.class, "bad-first-row", ROW_EVALUATION, NATIVE);
+        .assertFailure(NumberFormatException.class, "bad-", ROW_EVALUATION, NATIVE);
   }
 
   @Test
-  void rowOrderedExpressionsKeepTheCompleteNestedInputSchema() {
+  void independentExpressionsKeepTheCompleteNestedInputSchema() {
     NativeFailureParity.run(
             () ->
                 BuiltinFunctionParity.environment(
@@ -112,7 +117,7 @@ class FlinkCalcExceptionOrderSqlHarnessTest {
   }
 
   @Test
-  void binaryBackedStringsKeepFailureOrderThroughFallback() {
+  void independentBinaryBackedStringsDoNotNeedWholeCalcFallback() {
     var comparison =
         NativeFailureParity.run(
             () ->
@@ -121,15 +126,7 @@ class FlinkCalcExceptionOrderSqlHarnessTest {
                     List.of(Row.of("YQ==", "!!"), Row.of("$$", "YQ=="))),
             "SELECT FROM_BASE64(a), FROM_BASE64(b) FROM src");
     comparison.assertFailure(
-        IllegalArgumentException.class,
-        "Illegal base64 character 21",
-        ROW_EVALUATION,
-        NativeFailureParity.Route.FALLBACK);
-    org.junit.jupiter.api.Assertions.assertTrue(
-        comparison.nativeRun().fallbackReasons().stream()
-            .anyMatch(
-                reason ->
-                    reason.contains("binary-backed STRING requires a final scalar projection")));
+        IllegalArgumentException.class, "Illegal base64 character", ROW_EVALUATION, NATIVE);
   }
 
   @ParameterizedTest

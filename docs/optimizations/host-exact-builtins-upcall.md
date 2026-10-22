@@ -601,7 +601,7 @@ Independently emitted DOUBLE TRUNCATE calls use the existing scalar bridge with 
 bounded arithmetic shortcut. The shortcut preserves the released Flink 1.18/2.2
 contract: `BigDecimal.valueOf(value)`, conversion to DECIMAL(38,18), truncation toward
 zero at the requested scale, then conversion back to DOUBLE. FLOAT, integral and
-DECIMAL overloads, and expressions fused for rowwise failure ordering, retain their
+DECIMAL overloads and expressions fused for conditional short-circuiting retain their
 existing evaluators. No JVM/Arrow ownership or JNI protocol changes are required.
 
 The fast domain is `1 <= abs(value) <= 1e9` and `-6 <= scale <= 6`. At these magnitudes,
