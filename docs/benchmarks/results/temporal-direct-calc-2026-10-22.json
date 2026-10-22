@@ -2,7 +2,6 @@
   "purpose": "Temporal scalar UDF conversion optimization (#389), including mixed basic columns. Complete jobs retain runtime row input, both row/Arrow transposes, production IPC/JNI/state costs and rowwise blackhole output.",
   "environment": {
     "baseline_revision": "47bbc8b080e8cece29540e2f739ddbfdc6bc7111",
-    "candidate_revision": "db6def47288f47ead9c3f755cc608cb45e6a00e2",
     "native_sha256": "cb4f2a344b0e4cc9c548b32caae3c67696dc715bba2be592ee08f4fc7c5d4dbb",
     "java": "openjdk version \"17.0.20.1\" 2026-08-18\nOpenJDK Runtime Environment (build 17.0.20.1+1-1-22.04-Ubuntu)\nOpenJDK 64-Bit Server VM (build 17.0.20.1+1-1-22.04-Ubuntu, mixed mode, sharing)\n",
     "architecture": "x86_64",
@@ -10,7 +9,9 @@
     "production_source_sha256": {
       "src/main/java/tech/streamfusion/operator/NativeUdf.java": "47c345d404bfb73464135079e576a5872f65e301922164b711218a8fd6f163a5",
       "src/main/java/tech/streamfusion/operator/NativeCalcOperator.java": "98cc01b6ac596e5e08034254c4607e2ef3e5550272966b6496d7f0c068a31c21"
-    }
+    },
+    "measurement_checkout_head": "db6def47288f47ead9c3f755cc608cb45e6a00e2",
+    "measurement_source_state": "Mixed-input changes were in the working tree above measurement_checkout_head. production_source_sha256 identifies the measured production files; these hashes match the shipping source."
   },
   "configuration": {
     "rows": 2000000,
