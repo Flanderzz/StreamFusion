@@ -93,7 +93,8 @@ final class RexExpression {
   // Payload bit 0 marks compact timestamp keys; bit 1 preserves logical MAP over List storage.
   private static final int KIND_ITEM = 19;
 
-  // Decimal `/` and `%`: payload packs the declared result's precision*100 + scale; two children
+  // Decimal arithmetic: low 16 payload bits pack result precision*100 + scale;
+  // bit 16 retains Flink 1.18's implicit integer conversions. Two children
   // (the
   // operands). A fused native kernel reproduces Flink's 38-significant-digit quotient + rescale.
   private static final int KIND_DECIMAL_DIVIDE = 20;
@@ -1885,7 +1886,15 @@ final class RexExpression {
         default:
           throw new IllegalStateException("not decimal arithmetic: " + call.getKind());
       }
-      add(kind, precision * 100 + scale, 2);
+      // Flink 1.18 casts integer operands inside the arithmetic null guard. Such
+      // an implicit cast may overflow even when the mathematical result fits.
+      int legacyIntegerCast =
+          tech.streamfusion.compat.FlinkCompat.DECIMAL_ARITHMETIC_CASTS_INTEGERS_TO_RESULT
+                  && call.getOperands().stream()
+                      .anyMatch(operand -> SqlTypeFamily.INTEGER.contains(operand.getType()))
+              ? 1 << 16
+              : 0;
+      add(kind, legacyIntegerCast | (precision * 100 + scale), 2);
       for (RexNode operand : call.getOperands()) {
         if (!emit(operand)) {
           return false;

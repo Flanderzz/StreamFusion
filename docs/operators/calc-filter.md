@@ -1297,6 +1297,15 @@ measurements and their limits are recorded in
 
 ## Decimal arithmetic
 
+Mixed DECIMAL/integer arithmetic retains the selected Flink release's implicit conversions
+inside the native kernels. Flink 1.18 first converts each non-DECIMAL operand to the result's
+precision and scale; an overflowing implicit conversion raises its `NullPointerException`.
+For example, `DECIMAL(38,37) / BIGINT` fails when the divisor is 10, although the quotient
+could fit. This also applies to AVG's final sum/count projection. Flink 2.2 converts integers
+at their own precision and scale and permits that division. Both paths preserve original
+operand NULL guards, unselected branches and empty batches. Ordinary result overflow still
+returns NULL. No JVM callback or configuration switch is required for these conversions.
+
 ### Exact unary and integral functions
 
 Integer and DECIMAL unary minus, ABS and SIGN execute Flink's generated expression code through

@@ -31,6 +31,13 @@ impl FlinkException {
         }
     }
 
+    pub fn null_pointer(message: String) -> Self {
+        Self {
+            class: "java/lang/NullPointerException",
+            message,
+        }
+    }
+
     pub fn java_runtime(message: String) -> Self {
         Self {
             class: "java/lang/RuntimeException",

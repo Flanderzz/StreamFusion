@@ -337,11 +337,12 @@ pub(crate) fn build_expr(
                 None,
             )
         }
-        // Decimal arithmetic carries Flink's declared result precision*100 + scale. The fused
-        // kernels rescale before checking overflow; division additionally rounds to 38 digits.
+        // Low 16 bits carry result precision*100 + scale; bit 16 retains Flink 1.18's
+        // implicit integer casts. Kernels rescale before the final overflow check.
         20 | 21 | 26..=28 => {
-            let precision = (arg / 100) as u8;
-            let scale = (arg % 100) as i8;
+            let legacy_integer_cast = arg & (1 << 16) != 0;
+            let precision = ((arg & 0xffff) / 100) as u8;
+            let scale = ((arg & 0xffff) % 100) as i8;
             let left = build_expr(
                 schema,
                 kinds,
@@ -365,24 +366,22 @@ pub(crate) fn build_expr(
             use crate::flink_functions::decimal::{DecimalBinary, DecimalOp};
             use datafusion::logical_expr::ScalarUDF;
             let function = match kinds[node] {
-                26 => {
-                    ScalarUDF::new_from_impl(DecimalBinary::new(DecimalOp::Add, precision, scale))
-                }
-                27 => ScalarUDF::new_from_impl(DecimalBinary::new(
-                    DecimalOp::Subtract,
-                    precision,
-                    scale,
-                )),
-                28 => ScalarUDF::new_from_impl(DecimalBinary::new(
-                    DecimalOp::Multiply,
-                    precision,
-                    scale,
-                )),
-                _ => ScalarUDF::new_from_impl(DecimalDivide::new(
-                    precision,
-                    scale,
-                    kinds[node] == 21,
-                )),
+                26 => ScalarUDF::new_from_impl(
+                    DecimalBinary::new(DecimalOp::Add, precision, scale)
+                        .with_legacy_integer_cast(legacy_integer_cast),
+                ),
+                27 => ScalarUDF::new_from_impl(
+                    DecimalBinary::new(DecimalOp::Subtract, precision, scale)
+                        .with_legacy_integer_cast(legacy_integer_cast),
+                ),
+                28 => ScalarUDF::new_from_impl(
+                    DecimalBinary::new(DecimalOp::Multiply, precision, scale)
+                        .with_legacy_integer_cast(legacy_integer_cast),
+                ),
+                _ => ScalarUDF::new_from_impl(
+                    DecimalDivide::new(precision, scale, kinds[node] == 21)
+                        .with_legacy_integer_cast(legacy_integer_cast),
+                ),
             };
             function.call(vec![left, right])
         }
@@ -1210,6 +1209,7 @@ pub(crate) struct DecimalDivide {
     precision: u8,
     scale: i8,
     modulo: bool,
+    legacy_integer_cast: bool,
     signature: datafusion::logical_expr::Signature,
 }
 
@@ -1219,10 +1219,16 @@ impl DecimalDivide {
             precision,
             scale,
             modulo,
+            legacy_integer_cast: false,
             signature: datafusion::logical_expr::Signature::variadic_any(
                 datafusion::logical_expr::Volatility::Immutable,
             ),
         }
+    }
+
+    fn with_legacy_integer_cast(mut self, enabled: bool) -> Self {
+        self.legacy_integer_cast = enabled;
+        self
     }
 }
 
@@ -1489,6 +1495,15 @@ impl datafusion::logical_expr::ScalarUDFImpl for DecimalDivide {
         use num_bigint::BigInt;
         let arrays = ColumnarValue::values_to_arrays(&args.args)?;
         let (left, right) = (&arrays[0], &arrays[1]);
+        use crate::flink_functions::decimal::{check_legacy_integer_cast, legacy_integer_limit};
+        let limits = [left, right].map(|input| {
+            legacy_integer_limit(
+                self.legacy_integer_cast,
+                input.data_type(),
+                self.precision,
+                self.scale,
+            )
+        });
         let mut out = Vec::with_capacity(left.len());
         for row in 0..left.len() {
             let (Some((a, s1)), Some((b, s2))) =
@@ -1497,6 +1512,8 @@ impl datafusion::logical_expr::ScalarUDFImpl for DecimalDivide {
                 out.push(None);
                 continue;
             };
+            check_legacy_integer_cast(a, limits[0])?;
+            check_legacy_integer_cast(b, limits[1])?;
             if b == 0 {
                 return Err(datafusion::error::DataFusionError::Execution(
                     "Division by zero".to_string(),
