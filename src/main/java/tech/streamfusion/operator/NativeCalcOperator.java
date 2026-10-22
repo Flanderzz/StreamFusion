@@ -94,7 +94,8 @@ public class NativeCalcOperator extends FlinkStreamOperator<ArrowBatch>
       int id = udfBinding.rowCalcId();
       if (NativeUdf.canEvaluatePrimitiveRowCalc(id)) directPrimitiveCalc = id;
     }
-    if (Boolean.getBoolean("streamfusion.experimental.directTemporalCalc")
+    if (Boolean.parseBoolean(
+            System.getProperty("streamfusion.experimental.directTemporalCalc", "true"))
         && directColumns != null) {
       int id = udfBinding.rowCalcId();
       if (NativeUdf.canEvaluateTemporalRowCalc(id)) directRowCalc = id;

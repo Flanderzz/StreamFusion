@@ -612,7 +612,7 @@ DST-adjacent values, all four precisions, NULL/empty/fully filtered input, selec
 shared call-site order, lifecycle and grouping consumers. Native Calc input/output counters are
 asserted. Direct C Data tests cover sliced nullable timestamp vectors and output ownership after
 input release. See the [measured limits](#temporal-scalar-conversion)
-and the remaining [performance work](https://github.com/datafusion-contrib/StreamFusion/issues/389).
+and the [current conversion measurements](../optimizations/udf-columnar-upcall.md#complete-temporal-calc-batches).
 
 #### Temporal scalar conversion
 
@@ -643,28 +643,33 @@ writes, inline Calc evaluation inside that loop and bulk timestamp component val
 performance admission. A direct typed-output kernel likewise passed correctness checks but
 still lost to stock, including a variant that writes timestamp components directly. None is retained. See the
 [rejected experiments](https://github.com/datafusion-contrib/StreamFusion/blob/main/.claude/wontdos/364-temporal-row-output-shortcuts.md).
-Further performance work remains tracked in [#389](https://github.com/datafusion-contrib/StreamFusion/issues/389),
-including further measured conversion work and complete-job measurements inside surrounding
-native operators; correctness-verified UDF admission no longer requires a speedup.
+The [current direct-batch comparisons](../optimizations/udf-columnar-upcall.md#complete-temporal-calc-batches)
+cover both released Flink lines, cardinalities eight/16,384, ordinary ID columns and a surrounding
+native GROUP BY. Standalone projections take 11.2–31.0% less time than the preceding callback;
+grouped jobs show no consistent gain. Stock Flink remains faster for identity and epoch, while
+the text fixtures beat stock. Correctness-verified UDF admission does not require a speedup.
 
-An experimental direct Java Arrow-batch path removes the Rust round trip when the entire Calc
-is already generated JVM code and every argument is a timestamp input column. It requires
-`-Dstreamfusion.experimental.directTemporalCalc=true` in addition to the normally enabled temporal
-UDF option. Changelog-tagged input and other argument expressions retain the existing callback.
+A direct Java Arrow-batch path removes the Rust round trip when the entire Calc
+is already generated JVM code and its input columns contain timestamps, optionally alongside
+BOOLEAN, TINYINT, SMALLINT, INT, BIGINT, FLOAT or DOUBLE columns. This path now
+defaults on under the accepted UDF performance exception. Changelog-tagged input, other argument
+expressions, and results requiring representation metadata retain the existing callback.
 The task-local function binding carries the verified input-column mapping; runtime code does
 not decode the expression ABI. Predicate evaluation, function lifecycle and row-major call
 order use the same released Flink evaluator.
 
-`-Dstreamfusion.experimental.temporalAliases=true` additionally defers timestamp output writes
+Timestamp output sharing additionally defers writes
 for unconditional, timestamp-only projections of matching width. Every function still runs.
 A byte-equal result column retains the input buffers; the first changed value materializes its
 unchanged prefix and all subsequent values. Preinitialized Arrow fields preserve timestamp
-component metadata through transfers. Other result shapes use the ordinary flat Arrow writer.
-Both experimental switches default off. [PR #368](https://github.com/datafusion-contrib/StreamFusion/pull/368)
-merged the temporal UDF semantic support, which now defaults on under the accepted UDF exception;
-these two execution experiments remain disabled by default.
+component metadata through transfers. Sharing also requires a common allocator root; inputs
+from another root use owned copies. Other result shapes use the ordinary flat Arrow writer.
+The existing system properties `streamfusion.experimental.directTemporalCalc` and
+`streamfusion.experimental.temporalAliases` both default to true. Explicit false selects the
+previous callback or disables output sharing, respectively; neither changes verified type coverage.
+`streamfusion.calc.temporalUdf.enabled=false` remains the stock-Flink control.
 
-In an unprofiled 2M-row repeat with the configuration above, direct batches plus timestamp
+In a historical unprofiled 2M-row repeat with the configuration above, direct batches plus timestamp
 aliasing measured identity **0.651 s versus stock 0.645 s**, text **0.830 versus 0.969 s**, and
 epoch conversion **0.536 versus 0.570 s**. The identity result still misses performance admission;
 these separate JVMs also do not establish an improvement against the previous correct fallback.
@@ -673,7 +678,7 @@ covers both Java and symbolized Rust frames with async-profiler 4.0, a 2 ms soft
 and DWARF native unwinding. It identifies Arrow FFI/ownership work in the old Rust path and
 extra Java TimestampData allocation at callback input and row exit in the improved path.
 Profiled job durations are excluded from acceleration claims. See the
-[optimization and profiling details](../optimizations/udf-columnar-upcall.md#experimental-complete-temporal-calc-batches).
+[optimization and profiling details](../optimizations/udf-columnar-upcall.md#complete-temporal-calc-batches).
 
 Two further profile-guided timestamp reuse experiments were rejected. A bounded value cache
 reduced sampled timestamp accessor allocations to about 15.7 MB, and local Arrow-batch value
@@ -706,8 +711,12 @@ timestamp getters, temporal converters and identity functions. Surrounding bridg
 remain separate compiled methods. Those decisions alone do not establish an optimization: the
 inline batch experiment still loses in complete jobs.
 
-The focused temporal, shared/binary, lifecycle and decimal-consumer suites pass **90 checks on
-each of Flink 2.2.1 and 1.18.1**. Reproduce the benchmark with:
+JNI-checked release qualification passes **163 focused checks on each of Flink 2.2.1 and
+1.18.1**. This includes direct temporal evaluation at all four precisions in UTC,
+America/Los_Angeles and Asia/Shanghai, shared call order, selected failures, mutable-result
+changes, retained output, both allocator-root cases, key groups and alternating insert/changelog
+batches. Both the previous-callback and copy-only execution controls also pass.
+Reproduce the benchmark with:
 
 ```sh
 SF_BENCHMARK=true mvn test -Pbench -pl streamfusion-runtime -am \
@@ -719,6 +728,12 @@ SF_BENCHMARK=true mvn test -Pbench -pl streamfusion-runtime -am \
 `-Dtemporal.cardinality=16384` selects a precomputed runtime corpus with distinct seconds and
 precision-aligned fractional nanoseconds, every eighth value NULL. The default cardinality of
 eight retains the full-range calendar, negative-epoch and timezone boundary corpus above.
+
+The benchmark rotates stock Flink, the preceding production JNI callback, current direct batches
+and explicit stock fallback in each trial. `-Dtemporal.cases=pipeline` measures timestamp UDFs
+feeding native GROUP BY and asserts work in both operators. `-Dtemporal.engines=FLINK,NATIVE`
+selects only the stock/current pair. `-Dtemporal.cases=mixed` keeps an ordinary ID column beside
+the timestamp results. Every complete native job retains both transposes.
 
 Use `-Dtemporal.cases=perimeter,identity -Dtemporal.rows=5000000` for the matching control.
 For JFR, compile first and run `mvn surefire:test@default-test` with the same profile and test

@@ -211,15 +211,82 @@ in the raw data, and no conversion cost is subtracted from expression timings. U
 build/test processes. The attempted 20M runs overlapped other builds and were discarded;
 these results make no claim for that size or for other expression shapes.
 
-## Experimental complete temporal Calc batches
+## Complete temporal Calc batches
 
-The opt-in temporal UDF draft can invoke a complete generated Calc directly against borrowed
-Arrow input columns and return flat Arrow output columns. This avoids exporting Java Arrow
+Released Flink 2.2.1 and 1.18.1/JDK 17, release+mimalloc, 2M runtime rows, precision 9/UTC,
+parallelism one, 2 GiB heap and 1,024-row batches. Each fixture rotates stock Flink, the actual
+preceding native callback, current direct batches and explicit fallback in one JVM, with two
+warmups and five measured trials per route. Both row/Arrow transposes, production IPC, intrinsic
+JNI/state work and the rowwise blackhole sink remain measured. No conversion cost is subtracted.
+
+The 16 standalone identity/mixed/text/epoch fixtures take **11.2–31.0% less time than the preceding
+callback**. Mixed ordinary-ID/timestamp projections improve **20.5–23.3%**. Identity and epoch
+remain slower than stock Flink; the text fixtures beat stock. Correct coverage remains enabled
+under the accepted UDF exception, without a claim of universal acceleration.
+
+| Flink | Cardinality | Projection | Stock, s | Previous callback, s | Direct, s | Fallback/control, s | Less time vs previous |
+| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 2.2.1 | 8 | identity | 0.626486 | 0.876332 | 0.655840 | 0.621821 | 25.2% |
+| 2.2.1 | 8 | mixed | 0.784143 | 1.061744 | 0.835392 | 0.792814 | 21.3% |
+| 2.2.1 | 8 | text | 0.984974 | 0.999364 | 0.870664 | 0.987015 | 12.9% |
+| 2.2.1 | 8 | epoch | 0.482180 | 0.610077 | 0.509908 | 0.479378 | 16.4% |
+| 2.2.1 | 8 | pipeline | 0.821139 | 0.931297 | 0.931894 | 0.835589 | -0.1% |
+| 2.2.1 | 8 | perimeter | 0.548423 | 0.609138 | 0.603545 | 0.608395 | 0.9% |
+| 2.2.1 | 16,384 | identity | 0.601491 | 0.889786 | 0.728874 | 0.638969 | 18.1% |
+| 2.2.1 | 16,384 | mixed | 0.747300 | 1.116912 | 0.885804 | 0.726614 | 20.7% |
+| 2.2.1 | 16,384 | text | 0.912428 | 0.944967 | 0.829954 | 0.907935 | 12.2% |
+| 2.2.1 | 16,384 | epoch | 0.489568 | 0.633479 | 0.519975 | 0.488483 | 17.9% |
+| 2.2.1 | 16,384 | pipeline | 0.890517 | 1.148790 | 1.125059 | 0.893769 | 2.1% |
+| 2.2.1 | 16,384 | perimeter | 0.563010 | 0.624952 | 0.620714 | 0.629874 | 0.7% |
+| 1.18.1 | 8 | identity | 0.615707 | 0.916241 | 0.678095 | 0.608433 | 26.0% |
+| 1.18.1 | 8 | mixed | 0.706688 | 1.001359 | 0.768459 | 0.712445 | 23.3% |
+| 1.18.1 | 8 | text | 1.012707 | 1.075385 | 0.923865 | 1.004198 | 14.1% |
+| 1.18.1 | 8 | epoch | 0.517560 | 0.668971 | 0.555390 | 0.516121 | 17.0% |
+| 1.18.1 | 8 | pipeline | 0.849500 | 0.977936 | 0.976542 | 0.830228 | 0.1% |
+| 1.18.1 | 8 | perimeter | 0.546435 | 0.647929 | 0.645330 | 0.656894 | 0.4% |
+| 1.18.1 | 16,384 | identity | 0.610417 | 0.980038 | 0.676501 | 0.613570 | 31.0% |
+| 1.18.1 | 16,384 | mixed | 0.734832 | 1.094801 | 0.870739 | 0.743405 | 20.5% |
+| 1.18.1 | 16,384 | text | 0.965445 | 0.981860 | 0.871530 | 0.962128 | 11.2% |
+| 1.18.1 | 16,384 | epoch | 0.513625 | 0.645747 | 0.543074 | 0.514911 | 15.9% |
+| 1.18.1 | 16,384 | pipeline | 0.798026 | 1.045632 | 1.103815 | 0.877072 | -5.6% |
+| 1.18.1 | 16,384 | perimeter | 0.513575 | 0.544080 | 0.553816 | 0.550550 | -1.8% |
+
+`identity` projects TIMESTAMP/LTZ UDF results; `mixed` retains an ordinary ID beside them;
+`text` formats TIMESTAMP and `epoch` returns LTZ milliseconds. `pipeline` feeds the timestamp
+UDF into native GROUP BY/COUNT and asserts work in both operators. `perimeter` projects the
+same source timestamp columns without UDFs. Its false-option route remains native because it
+contains no temporal UDF; the other false-option routes assert whole-query stock fallback.
+
+Grouped jobs show **no consistent throughput improvement**. The Flink 1.18/high-cardinality
+median is 5.6% higher than the preceding callback, and its trial ranges overlap
+(previous 1.037–1.116 s, current 1.029–1.157 s). All four grouped comparisons have overlapping
+ranges. Retain this unfavorable observation; the standalone conversion win does not establish
+a pipeline speedup. The source-matched perimeter controls also do not establish an improvement.
+
+These are complete-job observations on a shared 16-logical-CPU host, not an isolated-machine
+claim. One-second samples record other Java/Doris activity, memory and load. Retained final
+fixtures have no observed external compiler processes or outside-process churn and less than
+two outside logical CPUs per sample. This does not remove startup/JIT variation, and small
+differences remain inconclusive. Every warmup and measured trial, earlier prototype, rejected
+overlap attempt, min/max range, route counter and exact command is retained in the
+[result manifest](../benchmarks/results/temporal-direct-calc-2026-10-22.json),
+[raw trials](../benchmarks/results/temporal-direct-calc-2026-10-22-trials.csv) and
+[compressed host observations](../benchmarks/results/temporal-direct-calc-2026-10-22-host.json.gz).
+Each retained current route consumes all 2M input rows directly; both identity columns share
+timestamp buffers after every UDF invocation. The preceding route uses the actual JNI callback,
+not a synthetic reflective wrapper.
+
+Temporal UDF execution invokes a complete generated Calc directly against borrowed
+Arrow input columns and returns flat Arrow output columns. This avoids exporting Java Arrow
 buffers to Rust merely to import them back into the same JVM for the whole Calc, then performing
 the reverse handoff for the result. The verified input mapping travels with the serialized,
 task-local UDF binding. Changelog-tagged batches and other argument shapes retain the established
-native callback. This is columnar Java execution inside an island, not Rust UDF computation.
-The [coverage page](../operators/calc-filter.md) lists the default-off experimental switches.
+native callback. Timestamp inputs can be mixed with the already-verified basic numeric/BOOLEAN
+columns, retaining their task-local input mapping. This is columnar Java execution inside an
+island, not Rust UDF computation.
+Result schemas requiring representation metadata retain the callback. The
+[coverage page](../operators/calc-filter.md#temporal-scalar-conversion) describes the verified
+boundary and the existing system-property controls, which now default to true.
 
 For unconditional timestamp-only output with matching width, exact per-row value comparison
 permits sharing an unchanged input column. Functions always execute in the original order;
@@ -240,9 +307,9 @@ and blackhole sink, and both transposes:
 The counters verify 14M rows consumed directly per case and 28M timestamp values sharing buffers
 in identity, including warmups. Text and epoch improve against their paired controls; identity
 remains about 1% slower. Cross-JVM control drift and the missing final repeat against the previous
-correct fallback prevent broader admission. The two experiments stay off by default; temporal
-UDF coverage itself defaults on under the accepted UDF performance exception. The semantic support shipped in [PR #368](https://github.com/datafusion-contrib/StreamFusion/pull/368);
-[issue #389](https://github.com/datafusion-contrib/StreamFusion/issues/389) tracks the remaining default-performance work.
+correct fallback limited that historical experiment. Direct execution and output sharing now
+default on under the accepted UDF performance exception. The semantic support shipped in [PR #368](https://github.com/datafusion-contrib/StreamFusion/pull/368);
+[issue #389](https://github.com/datafusion-contrib/StreamFusion/issues/389) delivers the default direct path and the comparisons above; conversion and perimeter costs remain measured limits.
 
 ### Java and Rust profiling evidence
 

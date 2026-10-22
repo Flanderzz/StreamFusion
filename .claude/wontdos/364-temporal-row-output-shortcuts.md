@@ -91,6 +91,8 @@ component validity, or generating direct typed output have not established
 whole-job acceleration. Further
 experiments must address measured conversion or state-layout costs while preserving Flink's
 predicate, shared-call and mutable-result ordering, then compare the complete query with
-stock and the previous fallback. The opt-in semantic path
-keeps stock execution as the default pending performance admission or explicit maintainer
-agreement; #364 remains its tracking issue.
+stock and the previous fallback. These rejected shortcuts remain historical evidence.
+Temporal UDF coverage subsequently shipped default-enabled under the maintainer's accepted
+UDF performance exception. The separate direct batch and timestamp-output-sharing paths now
+also default on; their current contracts and measurements live in
+[the coverage documentation](../../docs/operators/calc-filter.md#temporal-scalar-conversion).
