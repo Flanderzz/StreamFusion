@@ -3336,7 +3336,6 @@ final class RexExpression {
     SqlTypeName source = sourceType.getSqlTypeName();
     SqlTypeName targetType = resultType.getSqlTypeName();
     if (NativeConfig.collectionExpressionsEnabled()
-        && !tryCast
         && source == SqlTypeName.ARRAY
         && targetType == SqlTypeName.ARRAY
         && nativeExactArrayCast(sourceType, resultType)) {

@@ -2137,7 +2137,7 @@ Existing admitted collection subscripts and Boolean/integer ARRAY_DISTINCT retai
 
 | Functions | Execution inside NativeCalc |
 | --- | --- |
-| ARRAY CAST | Rust recursive child-buffer conversion for nullable signed-integer/DECIMAL elements, including nested arrays; fallible arguments and other standalone signatures retain Flink evaluation |
+| ARRAY CAST / TRY_CAST | Rust recursive child-buffer conversion for nullable signed-integer/DECIMAL elements, including nested arrays; fallible arguments and other standalone signatures retain Flink evaluation |
 | ARRAY_REVERSE, ARRAY_SLICE | Rust kernels for nullable primitive elements; generated Flink program for STRING/ROW/MAP-bearing or NOT NULL-element arrays and consumers requiring Java value semantics |
 | CARDINALITY on ARRAY/MAP | Rust outer-offset count, returning INT; NULL container produces NULL |
 | ARRAY_CONTAINS, ARRAY_POSITION | Rust scans for matching BOOLEAN, integer and DECIMAL element/needle types with nullable elements; other signatures, representation-sensitive consumers and fallible arguments use the generated Flink program. Non-NULL literal or nonnullable CONTAINS needles retain Flink evaluation; DECIMAL arrays with such needles require whole-Calc fallback |
@@ -2272,9 +2272,9 @@ standalone acceleration.
 [Issue #234](https://github.com/datafusion-contrib/StreamFusion/issues/234) tracks remaining
 collection aggregates, cast signatures and representation boundaries outside this extension.
 
-### Exact numeric ARRAY CAST
+### Exact numeric ARRAY CAST and TRY_CAST
 
-Standalone CAST between arrays of TINYINT, SMALLINT, INT, BIGINT and DECIMAL now evaluates
+Standalone CAST and TRY_CAST between arrays of TINYINT, SMALLINT, INT, BIGINT and DECIMAL evaluate
 in Rust. Every array level must have nullable elements, with matching nesting depth. This uses
 the existing default-enabled collection option; no additional switch is required. STRING,
 floating, temporal, NOT NULL-element and MAP casts outside an already-admitted generated program
@@ -2290,11 +2290,17 @@ the complete shared child buffer.
 
 Arguments that can fail per row retain Flink evaluation. The numeric cast itself is total;
 it must not introduce eager evaluation of an unselected or filtered input expression.
-Standalone numeric TRY_CAST and string-array conversion are not included in this CAST admission.
-The released upstream ARRAY<BIGINT> cast fixtures preserve their original assertions but still
-fall back because their input wrapper is an ARRAY-returning scalar UDF. Dedicated runtime-source
-regressions independently require consumed NativeCalc input and an empty JVM-function diagnostic
-on both Flink 1.18.1 and 2.2.1. Upstream fixture fallback is not counted as native CAST evidence.
+TRY_CAST uses the same total numeric conversion, including overflow-to-NULL DECIMAL elements;
+it does not catch errors raised while evaluating its input. String-array TRY_CAST retains
+Flink evaluation: an invalid string element makes the complete result array NULL rather
+than replacing only that element. STRING and other unverified array conversions are not
+included in this numeric admission.
+The released upstream ARRAY<BIGINT> cast fixtures preserve their original assertions. The two
+Flink 1.18.1 invocations consume native Calc input with `jvmFunctions=[]`; their input is an
+inline array constructor. The three Flink 2.2.1 invocations still fall back because their input
+wrapper is an ARRAY-returning scalar UDF. Dedicated runtime-source regressions independently
+require consumed NativeCalc input and an empty JVM-function diagnostic on both releases.
+Upstream fixture fallback is not counted as native CAST evidence.
 
 The [release-mode functionality measurements](../benchmarks/scalar-functions.md#exact-numeric-array-casts)
 compare the same prepared data with stock Flink and the previous StreamFusion fallback.

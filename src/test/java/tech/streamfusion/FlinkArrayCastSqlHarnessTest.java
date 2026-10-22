@@ -14,6 +14,7 @@ import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.apache.flink.table.runtime.typeutils.ExternalTypeInfo;
 import org.apache.flink.types.Row;
 import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -103,6 +104,56 @@ class FlinkArrayCastSqlHarnessTest {
     } else {
       runs.assertSuccess(NativeFailureParity.Route.NATIVE);
       if (filter.contains("<0")) assertEquals(List.of(), runs.nativeRun().rows());
+    }
+  }
+
+  @Nested
+  class TryCasts {
+    @ParameterizedTest
+    @MethodSource("tech.streamfusion.FlinkArrayCastSqlHarnessTest#exactCasts")
+    void exactNumericTryCastsUseRust(String column, String target) {
+      for (boolean legacy : new boolean[] {false, true}) {
+        assertNative(legacy, "SELECT id,TRY_CAST(" + column + " AS " + target + ") FROM src");
+      }
+    }
+
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+          "SELECT TRY_CAST(a AS ARRAY<BIGINT>) FROM src WHERE id<0",
+          "SELECT TRY_CAST(a AS ARRAY<DECIMAL(3,1)>) FROM src WHERE id=2",
+          "SELECT ARRAY_REVERSE(TRY_CAST(a AS ARRAY<BIGINT>)) FROM src",
+          "SELECT TRY_CAST(CAST(NULL AS ARRAY<INT>) AS ARRAY<BIGINT>) FROM src"
+        })
+    void filteredAndScalarTryCastsRetainNullContainers(String sql) {
+      assertNative(false, sql);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void invalidStringElementNullsTheWholeArray(boolean legacy) {
+      var runs =
+          NativeFailureParity.run(
+              () -> environment(legacy), "SELECT id,TRY_CAST(t AS ARRAY<INT>) FROM src");
+      runs.assertSuccess(NativeFailureParity.Route.FALLBACK);
+      assertTrue(runs.host().rows().contains(java.util.Arrays.asList("+I", 0, null)), runs.toString());
+      assertEquals(runs.host().resultTypes(), runs.nativeRun().resultTypes());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", " WHERE id>0", " WHERE id<0"})
+    void tryCastDoesNotCatchInputEvaluationErrors(String filter) {
+      var runs =
+          NativeFailureParity.run(
+              () -> environment(false),
+              "SELECT TRY_CAST(ARRAY[10/id] AS ARRAY<BIGINT>) FROM src" + filter);
+      if (filter.isEmpty()) {
+        runs.assertFailure(
+            ArithmeticException.class, runs.host().phase(), NativeFailureParity.Route.NATIVE);
+      } else {
+        runs.assertSuccess(NativeFailureParity.Route.NATIVE);
+        if (filter.contains("<0")) assertEquals(List.of(), runs.nativeRun().rows());
+      }
     }
   }
 

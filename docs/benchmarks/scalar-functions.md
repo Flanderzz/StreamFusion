@@ -1767,3 +1767,5 @@ target/release/examples/array_cast /tmp/array-cast.arrow 5 9
 The native example uses the production Calc decoder and cast, times inside Rust and verifies
 the same output digest. Ordinary SQL regressions separately establish released-Flink result
 and type parity and positive consumed native work on both supported Flink lines.
+Numeric ARRAY TRY_CAST invokes the identical total conversion kernel; these measurements use
+CAST SQL and do not claim a separate TRY_CAST measurement.
