@@ -1,5 +1,7 @@
 use super::json_path::{with_reader, Path, Value};
-use arrow::array::{Array, ArrayRef, BooleanBuilder, Float64Builder, Int32Builder, StringBuilder};
+use arrow::array::{
+    Array, ArrayRef, BooleanBuilder, Float64Builder, Int32Builder, StringBuilder, StructArray,
+};
 use arrow::datatypes::DataType;
 use datafusion::common::{cast::as_string_array, exec_err, Result, ScalarValue};
 use datafusion::logical_expr::{
@@ -33,18 +35,31 @@ pub(super) fn function() -> ScalarUDF {
 pub(super) fn typed_function(return_type: ReturnType) -> ScalarUDF {
     ScalarUDF::new_from_impl(JsonValue {
         return_type,
+        java_input: false,
         signature: Signature::exact(vec![DataType::Utf8; 7], Volatility::Immutable),
+    })
+}
+
+pub(super) fn java_input_function() -> ScalarUDF {
+    ScalarUDF::new_from_impl(JsonValue {
+        return_type: ReturnType::Varchar,
+        java_input: true,
+        signature: Signature::any(7, Volatility::Immutable),
     })
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct JsonValue {
     return_type: ReturnType,
+    java_input: bool,
     signature: Signature,
 }
 
 impl ScalarUDFImpl for JsonValue {
     fn name(&self) -> &str {
+        if self.java_input {
+            return "flink_json_value_java_input";
+        }
         match self.return_type {
             ReturnType::Varchar => "flink_json_value",
             ReturnType::Boolean => "flink_json_value_boolean",
@@ -77,16 +92,32 @@ impl ScalarUDFImpl for JsonValue {
         let error = Behavior::new(error, error_default, self.return_type)?;
         let scalar = matches!(input, ColumnarValue::Scalar(_));
         let input = input.to_array(if scalar { 1 } else { args.number_rows })?;
-        let input = as_string_array(&input)?;
+        let represented = input.as_any().downcast_ref::<StructArray>();
+        let caches = represented
+            .map(|input| streamfusion_bridge::JavaStringCacheColumn::new(input.column(1)));
+        let input = as_string_array(represented.map(|input| input.column(0)).unwrap_or(&input))?;
         let mut output = Output::new(self.return_type, input.len());
         with_reader(|reader| {
             let legacy = reader.legacy_semantics();
-            for document in input.iter() {
+            for (row, document) in input.iter().enumerate() {
+                if represented.is_some_and(|input| input.is_null(row)) {
+                    output.append(Value::Null, legacy)?;
+                    continue;
+                }
                 let Some(document) = document else {
                     output.append(Value::Null, legacy)?;
                     continue;
                 };
-                let value = match reader.read(&path, document) {
+                let original = caches
+                    .as_ref()
+                    .and_then(|cache| cache.value(row))
+                    .filter(|units| !units.iter().copied().eq(document.encode_utf16()))
+                    .map(escaped_document);
+                let parsed = match original.as_ref() {
+                    Some(original) => reader.read_escaped(&path, &original.text, &original.escapes),
+                    None => reader.read(&path, document),
+                };
+                let value = match parsed {
                     Ok(Value::Missing | Value::Null) => empty.apply("EMPTY")?,
                     Ok(Value::Container) if path.lax => empty.apply("EMPTY")?,
                     Ok(Value::Container) | Err(()) => error.apply("ERROR")?,
@@ -199,6 +230,40 @@ impl Output {
             Self::Integer(mut output) => Arc::new(output.finish()),
             Self::Double(mut output) => Arc::new(output.finish()),
         }
+    }
+}
+
+struct EscapedDocument {
+    text: String,
+    escapes: Vec<usize>,
+}
+
+fn escaped_document(units: &[u16]) -> EscapedDocument {
+    use std::fmt::Write;
+    let mut output = String::new();
+    let mut escapes = Vec::new();
+    let mut escaped = false;
+    for unit in char::decode_utf16(units.iter().copied()) {
+        match unit {
+            Ok(ch) => {
+                output.push(ch);
+                escaped = ch == '\\' && !escaped;
+            }
+            Err(unit) => {
+                if escaped {
+                    // An escape followed by a raw surrogate is invalid JSON, unlike \\uXXXX.
+                    output.push('q');
+                } else {
+                    escapes.push(output.len());
+                    write!(output, "\\u{:04x}", unit.unpaired_surrogate()).unwrap();
+                }
+                escaped = false;
+            }
+        }
+    }
+    EscapedDocument {
+        text: output,
+        escapes,
     }
 }
 

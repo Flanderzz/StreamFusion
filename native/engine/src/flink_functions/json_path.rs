@@ -147,8 +147,19 @@ impl<'a> Path<'a> {
         buffer_size: usize,
         legacy: bool,
     ) -> Result<(Value<'s>, bool), ()> {
+        self.parse_escaped_with_profile(input, buffer_size, legacy, &[])
+    }
+
+    fn parse_escaped_with_profile<'s>(
+        &self,
+        input: &'s str,
+        buffer_size: usize,
+        legacy: bool,
+        surrogate_escapes: &'s [usize],
+    ) -> Result<(Value<'s>, bool), ()> {
         let mut parser = Parser {
             input,
+            surrogate_escapes,
             pos: 0,
             identifier: self.identifier,
             legacy_decimal_exponent: self.legacy_decimal_exponent,
@@ -223,6 +234,7 @@ impl Value<'_> {
 #[derive(Clone)]
 struct Parser<'a> {
     input: &'a str,
+    surrogate_escapes: &'a [usize],
     pos: usize,
     identifier: &'static regex::Regex,
     legacy_decimal_exponent: bool,
@@ -501,12 +513,19 @@ impl<'a> Parser<'a> {
         // It is entered for a leading zero, EOF, or a number crossing the actual input buffer.
         let number = self.input[start..self.pos].trim_start_matches('-');
         let slow = number.starts_with('0') || self.pos == self.input.len() || {
-            let units = self.input.encode_utf16().count();
+            let units = self.units_before(self.input.len());
             units > 32768
-                && self.input[..start].encode_utf16().count() / self.buffer_size
-                    != self.input[..self.pos].encode_utf16().count() / self.buffer_size
+                && self.units_before(start) / self.buffer_size
+                    != self.units_before(self.pos) / self.buffer_size
         };
         slow && digits - usize::from(fraction == 0) - usize::from(exponent == 0) <= 1000
+    }
+
+    fn units_before(&self, position: usize) -> usize {
+        self.input[..position].encode_utf16().count()
+            - 5 * self
+                .surrogate_escapes
+                .partition_point(|offset| *offset < position)
     }
 
     fn digits(&mut self) -> usize {
@@ -547,7 +566,7 @@ fn unescape(raw: &str) -> Cow<'_, str> {
     )
 }
 
-fn unescape_utf16(raw: &str) -> Vec<u16> {
+pub(super) fn unescape_utf16(raw: &str) -> Vec<u16> {
     let mut units = Vec::with_capacity(raw.len());
     let mut chars = raw.chars();
     while let Some(ch) = chars.next() {

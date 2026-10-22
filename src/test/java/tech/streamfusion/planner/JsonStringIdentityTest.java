@@ -8,6 +8,7 @@ import org.apache.calcite.jdbc.JavaTypeFactoryImpl;
 import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.plan.volcano.VolcanoPlanner;
 import org.apache.calcite.rel.logical.LogicalValues;
+import org.apache.calcite.rel.logical.LogicalUnion;
 import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.rex.RexProgramBuilder;
 import org.apache.calcite.sql.type.SqlTypeName;
@@ -17,6 +18,20 @@ import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalC
 import org.junit.jupiter.api.Test;
 
 class JsonStringIdentityTest {
+  @Test
+  void jsonDocumentTransposesCannotReuseGeneralStringRepresentation() {
+    var types = new JavaTypeFactoryImpl();
+    var cluster = RelOptCluster.create(new VolcanoPlanner(), new RexBuilder(types));
+    var rowType = types.builder().add("s", types.createSqlType(SqlTypeName.VARCHAR)).build();
+    var input = LogicalValues.createEmpty(cluster, rowType);
+    var general = new StreamPhysicalRowDataToArrow(cluster,
+        cluster.traitSetOf(FlinkConventions.STREAM_PHYSICAL()), input, false, null, true);
+    var json = general.withJsonDocuments();
+    assertFalse(general.getDigest().contains("jsonDocuments=true"));
+    assertTrue(json.getDigest().contains("jsonDocuments=true"));
+    assertTrue(json.copy(json.getTraitSet(), List.of(input)).getDigest().contains("jsonDocuments=true"));
+  }
+
   @Test
   void formattedCharactersKeepTheirUtf16IdentityForConsumers() {
     var types = new JavaTypeFactoryImpl();
@@ -61,6 +76,13 @@ class JsonStringIdentityTest {
         new StreamPhysicalCalc(
             cluster, calc.getTraitSet(), calc, passthrough.getProgram(), calc.getRowType());
     assertTrue(JsonStringIdentity.crossesOperatorBoundary(outer, true));
+
+    var union = LogicalUnion.create(List.of(calc, calc), true);
+    assertFalse(JsonStringIdentity.crossesOperatorBoundary(union, true));
+    assertTrue(JsonStringIdentity.finalUnionJsonInputs(union, true).contains(calc));
+    assertTrue(JsonStringIdentity.crossesOperatorBoundary(union, false));
+    assertTrue(JsonStringIdentity.crossesOperatorBoundary(
+        LogicalUnion.create(List.of(calc, calc), false), true));
   }
 
   @Test

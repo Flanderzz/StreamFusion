@@ -2027,8 +2027,15 @@ an unpaired surrogate remains distinct from a literal `?`. Constant-folded JSON 
 unpaired surrogates receive the same treatment. These expressions run inside columnar Calc/filter,
 but their fused scalar computation runs on the JVM. Only the final result enters Arrow.
 
-Direct JSON string projections retain the Rust kernel. A Calc projecting a JSON-derived STRING
-(including nested character fields) into another operator makes the whole query fall back, with
+Direct JSON string projections retain the Rust kernel. Direct character JSON_VALUE projections
+with a column input may also feed final UNION ALL forwarding into a row sink. Native parsing
+retains the original input Java cache, including raw surrogate member names, then produces
+ordinary UTF-8 to match Flink's serialized fan-in edge. A sink-side UTF-16 capture verifies this
+boundary separately from result collection. See [Union](union.md#final-json_value-projections)
+for the verified scope and representation restrictions.
+
+Other Calcs projecting a JSON-derived STRING (including nested character fields) into another
+operator make the whole query fall back, with
 the reason `JSON string identity requires a final projection or a fused scalar consumer`. This
 includes grouping, DISTINCT, joins and sorting on those results, and intermediate optimizer blocks
 whose output is not final. The gate is conservative even when a particular document contains no

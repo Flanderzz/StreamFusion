@@ -17,6 +17,7 @@ final class PlanContext {
 
   private final PhysicalPlanScan scan;
   private final Set<String> repeatedSources;
+  private final Set<RelNode> javaJsonInputs;
   private final Map<RelNode, RelNode> originals = new IdentityHashMap<>();
 
   private final Map<RelNode, Map<Substitution<?>, String>> probeFailures = new IdentityHashMap<>();
@@ -31,8 +32,17 @@ final class PlanContext {
   }
 
   PlanContext(PhysicalPlanScan scan, Set<String> repeatedSources) {
+    this(scan, repeatedSources, Set.of());
+  }
+
+  PlanContext(PhysicalPlanScan scan, Set<String> repeatedSources, Set<RelNode> javaJsonInputs) {
     this.scan = scan;
     this.repeatedSources = repeatedSources;
+    this.javaJsonInputs = javaJsonInputs;
+  }
+
+  boolean requiresJavaJsonInput(RelNode node) {
+    return javaJsonInputs.contains(originalNode(node));
   }
 
   void rememberOriginal(RelNode rewritten, RelNode original) {

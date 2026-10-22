@@ -375,3 +375,23 @@ to exhaust its heap and is retained only as a diagnostic. The
 [raw artifact](../benchmarks/results/jvm-table-functions-2026-10-15.json) records both fixtures.
 Verified basic JVM table functions are admitted by default after wider STRING and numeric release
 comparisons also beat stock and actual preceding code on both released Flink lines.
+
+## Parse-only JSON document caches
+
+A final JSON_VALUE/UNION row-sink pipeline can consume original Java documents through the existing
+represented-string carrier. Copying every document into both UTF-8 and UTF-16 arrays is unnecessary
+when parsing would observe the same characters. An internal Arrow field marker restricts cache
+omission to these parse-only inputs; general string/collection values retain their representation.
+
+Valid lazy Java strings omit their cache without materializing their binary section. This retains
+the entry writer's JDK UTF-8 encoder and bounded repeated-value encoding cache. Materialized ASCII
+strings omit the cache only after comparing their existing bytes. Malformed UTF-16, non-ASCII
+materialized values and mismatched cached/byte strings retain the original cache. The parser prefers
+that cache whenever its code units differ from the byte document. It retains original character
+positions when synthetically escaping raw surrogates for parsing.
+
+The initial full-copy implementation regressed against stock Flink on short/wide ASCII. After cache
+omission, the [release complete-job measurements](../benchmarks/scalar-functions.md#final-json_value-and-union-all-2026-10-22)
+reduce time by 21.4%-38.8% across five two-million-row string fixtures on released Flink 2.2.1/JDK 11,
+retaining both perimeter conversions and IPC. This is not permission to omit caches from general
+string expressions or to normalize intermediate JSON-derived keys.

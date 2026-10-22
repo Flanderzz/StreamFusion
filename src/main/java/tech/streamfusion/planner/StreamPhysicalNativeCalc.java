@@ -137,6 +137,12 @@ public class StreamPhysicalNativeCalc extends StreamPhysicalNativeSingleRel
     return preserveCollections;
   }
 
+  boolean usesJavaJsonInput() {
+    for (int i = 0; i < kinds.length; i++)
+      if (kinds[i] == 6 && payload[i] == 202) return true;
+    return false;
+  }
+
   @Override
   public RelWriter explainTerms(RelWriter writer) {
     return super.explainTerms(writer)

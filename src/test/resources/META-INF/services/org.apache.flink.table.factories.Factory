@@ -6,3 +6,4 @@ tech.streamfusion.ChangelogParquetTableFactory
 tech.streamfusion.PrunedTransposeBenchmark$Factory
 tech.streamfusion.RecoveryResultTableFactory
 tech.streamfusion.FlinkCollectionRepresentationSqlHarnessTest$Factory
+tech.streamfusion.Utf16ResultTableFactory

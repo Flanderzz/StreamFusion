@@ -1,6 +1,11 @@
 package tech.streamfusion.planner;
 
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.stream.Collectors;
+import org.apache.arrow.vector.types.pojo.Field;
+import org.apache.arrow.vector.types.pojo.FieldType;
+import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.flink.api.dag.Transformation;
 import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.table.data.RowData;
@@ -13,6 +18,8 @@ import org.apache.flink.table.planner.plan.nodes.exec.SingleTransformationTransl
 import org.apache.flink.table.planner.plan.nodes.exec.stream.StreamExecNode;
 import org.apache.flink.table.planner.plan.nodes.exec.utils.ExecNodeUtil;
 import org.apache.flink.table.types.logical.RowType;
+import tech.streamfusion.arrow.ArrowConversion;
+import tech.streamfusion.arrow.NestedRepresentation;
 import tech.streamfusion.operator.ArrowBatch;
 import tech.streamfusion.operator.ArrowBatchTypeInformation;
 import tech.streamfusion.operator.RowDataToArrowOperator;
@@ -69,6 +76,13 @@ public class RowDataToArrowExecNode extends ExecNodeBase<ArrowBatch>
       RowType sourceType,
       boolean preserveCollections,
       int preferredBatchRows) {
+    this(tableConfig, inputProperty, rowType, description, carryRowKind, sourceType,
+        preserveCollections, preferredBatchRows, false);
+  }
+
+  RowDataToArrowExecNode(ReadableConfig tableConfig, InputProperty inputProperty, RowType rowType,
+      String description, boolean carryRowKind, RowType sourceType, boolean preserveCollections,
+      int preferredBatchRows, boolean jsonDocuments) {
     super(
         ExecNodeContext.newNodeId(),
         new ExecNodeContext("stream-exec-row-to-arrow_1"),
@@ -80,9 +94,21 @@ public class RowDataToArrowExecNode extends ExecNodeBase<ArrowBatch>
     this.rowType = rowType;
     this.carryRowKind = carryRowKind;
     this.sourceType = sourceType;
-    this.arrowSchema =
-        tech.streamfusion.arrow.ArrowConversion.toArrowInputSchema(rowType, preserveCollections)
-            .serializeAsMessage();
+    var schema = ArrowConversion.toArrowInputSchema(rowType, preserveCollections);
+    if (jsonDocuments) {
+      var fields = schema.getFields().stream()
+          .map(field -> {
+            if (!NestedRepresentation.isString(field)) return field;
+            var metadata = new HashMap<>(field.getMetadata());
+            metadata.put(NestedRepresentation.JSON_DOCUMENT, "1");
+            return new Field(field.getName(),
+                new FieldType(field.isNullable(), field.getType(), field.getDictionary(), metadata),
+                field.getChildren());
+          })
+          .collect(Collectors.toList());
+      schema = new Schema(fields, schema.getCustomMetadata());
+    }
+    this.arrowSchema = schema.serializeAsMessage();
   }
 
   @Override

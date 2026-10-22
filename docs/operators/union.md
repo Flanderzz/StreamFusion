@@ -1,6 +1,6 @@
 # Union
 
-**Status:** native, with one gap.
+**Status:** native, with boundary restrictions.
 
 `UNION ALL` substitutes to a native `Union` operator that simply concatenates its inputs' Arrow
 batches — no state, no key. It admits any row type the columnar boundary can carry.
@@ -11,6 +11,31 @@ native code aligns logical columns by position and sidecars by identity: missing
 become INSERT, while missing string caches remain absent values. UPDATE_BEFORE, UPDATE_AFTER
 and DELETE tags are preserved. Logical arity/type mismatches fail before Arrow concatenation.
 No row conversion is added inside the island.
+
+## Final JSON_VALUE projections
+
+Direct character JSON_VALUE projections can feed a final UNION ALL and row sink when the JSON
+argument is an input column and the existing native path/default-policy rules admit the call.
+Multiple JSON_VALUE outputs, nested unions and ordinary STRING branches are covered. A producing
+JSON Calc may also project non-character values that do not consume character inputs, or typed
+NULLs. Other character outputs, additional consumers of character inputs in its projections or
+filter, and JVM function callbacks remain outside this admission.
+
+The JSON input retains original Java UTF-16 until native parsing finishes. The output is ordinary
+UTF-8, matching Flink's row serialization on the fan-in edge. In the released-Flink SQL tests,
+an isolated surrogate becomes `?` before the row sink observes it; preserving that surrogate
+through Arrow IPC would change the sink's observed value. The tests capture code units inside
+a row sink, before result collection can hide a mismatch. Fused scalar consumers still retain
+original UTF-16 inside their generated expression as described in [Calc](calc-filter.md#json_value).
+
+At the entry transpose, a parse-only document marker allows redundant caches to be omitted:
+valid lazy Java strings encode losslessly, and materialized ASCII strings must match their bytes
+exactly. Malformed UTF-16 and mismatched caches retain their original units. This marker is internal,
+is distinct in the planner's reuse digest, and does not change general string or collection handling.
+
+A non-final optimizer block, a consumer above the union, JSON_QUERY, composed character
+results, or a native columnar sink retains the identity fallback. This is a narrow final-output
+admission, not general JSON STRING support for grouping, joining or sorting.
 
 ## Fallback
 
