@@ -31,8 +31,8 @@ pub(crate) mod split_index;
 pub(crate) mod substring;
 pub(crate) mod to_date;
 
-mod array_concat;
 pub(crate) mod array_cast;
+mod array_concat;
 mod array_constructor;
 mod array_distinct;
 mod array_edit;

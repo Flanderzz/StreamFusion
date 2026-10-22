@@ -220,7 +220,14 @@ pub(crate) fn build_expr(
         43 => {
             let target = encoded_field_type(strings[arg].as_deref().expect("ARRAY cast schema"));
             let child = build_expr(
-                schema, kinds, payload, child_counts, longs, doubles, strings, cursor,
+                schema,
+                kinds,
+                payload,
+                child_counts,
+                longs,
+                doubles,
+                strings,
+                cursor,
             );
             crate::flink_functions::array_cast::function(target).call(vec![child])
         }
