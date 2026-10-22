@@ -55,27 +55,38 @@ class FlinkTemporalUdfSqlHarnessTest {
   }
 
   @ParameterizedTest
-  @ValueSource(ints = {0, 3, 6, 9})
-  void temporalOnlyColumnsKeepOwnershipAndLateChanges(int precision) throws Exception {
+  @CsvSource({
+    "0,UTC", "3,UTC", "6,UTC", "9,UTC",
+    "0,America/Los_Angeles", "3,America/Los_Angeles", "6,America/Los_Angeles",
+        "9,America/Los_Angeles",
+    "0,Asia/Shanghai", "3,Asia/Shanghai", "6,Asia/Shanghai", "9,Asia/Shanghai"
+  })
+  void temporalOnlyColumnsKeepOwnershipAndLateChanges(int precision, String zone) throws Exception {
     for (String sql :
         new String[] {
           "SELECT ts_identity(t), ltz_identity(z) FROM src",
           "SELECT ts_text(t) FROM src",
           "SELECT ltz_epoch(z) FROM src",
           "SELECT ts_identity(t) FROM src WHERE t IS NOT NULL",
+          "SELECT temporal_throw(t) FROM src "
+              + "WHERE t IS NULL OR t < TIMESTAMP '0100-01-01 00:00:00'",
           "SELECT ts_change(t) FROM src"
         }) {
       try (var metrics = new RecoveryExecutionMetrics()) {
         NativeParity.assertParity(
             () -> {
-              var table = environment(precision, "America/Los_Angeles", 1031, metrics);
+              var table = environment(precision, zone, 1031, metrics);
               table.createTemporarySystemFunction("ts_change", new ChangingTimestamp(precision));
               return table;
             },
             sql);
-        if (Boolean.getBoolean("streamfusion.experimental.directTemporalCalc"))
+        if (Boolean.parseBoolean(
+            System.getProperty("streamfusion.experimental.directTemporalCalc", "true")))
           assertTrue(metrics.counterValue("directTemporalRows") > 0, sql);
-        if (Boolean.getBoolean("streamfusion.experimental.temporalAliases")
+        if (Boolean.parseBoolean(
+                System.getProperty("streamfusion.experimental.directTemporalCalc", "true"))
+            && Boolean.parseBoolean(
+                System.getProperty("streamfusion.experimental.temporalAliases", "true"))
             && sql.contains("ltz_identity"))
           assertTrue(metrics.counterValue("directTemporalAliasedValues") > 0, sql);
       }
@@ -177,6 +188,19 @@ class FlinkTemporalUdfSqlHarnessTest {
     NativeParity.assertOrderedKindedParity(
         () -> environment(9, "UTC", 1031, null),
         "SELECT id, ts_tick(t), ts_tick(t) FROM src WHERE ts_tick(t) IS NOT NULL");
+  }
+
+  @Test
+  void directTemporalCallSitesPreserveSharedOrderAndLifecycle() throws Exception {
+    try (var metrics = new RecoveryExecutionMetrics()) {
+      NativeParity.assertOrderedKindedParity(
+          () -> environment(9, "UTC", 1031, metrics),
+          "SELECT ts_tick(t), ts_tick(t) FROM src WHERE ts_tick(t) IS NOT NULL");
+      if (Boolean.parseBoolean(
+          System.getProperty("streamfusion.experimental.directTemporalCalc", "true")))
+        assertTrue(metrics.counterValue("directTemporalRows") > 0);
+      RecoveryExecutionMetrics.assertConsumed(metrics.nativeOperators(), "NativeCalc");
+    }
   }
 
   @Test

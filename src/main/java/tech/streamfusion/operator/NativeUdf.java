@@ -571,8 +571,19 @@ public final class NativeUdf {
     return udf != null
         && udf.generated != null
         && udf.returnType == TYPE_ROW
+        && hasFlatRowResult(udf)
         && udf.argTypes.length > 0
         && Arrays.stream(udf.argTypes).allMatch(type -> type == TYPE_TIMESTAMP_DATA);
+  }
+
+  private static boolean hasFlatRowResult(Registered udf) {
+    return udf.rowSchema
+        .getFields()
+        .get(0)
+        .getChildren()
+        .equals(
+            tech.streamfusion.arrow.ArrowConversion.toArrowSchema(udf.generated.rowResultType())
+                .getFields());
   }
 
   static boolean canEvaluatePrimitiveRowCalc(int id) {
@@ -581,13 +592,7 @@ public final class NativeUdf {
         || udf.generated == null
         || udf.returnType != TYPE_ROW
         || udf.generated.rowResultType().getFieldCount() == 0) return false;
-    if (!udf.rowSchema
-        .getFields()
-        .get(0)
-        .getChildren()
-        .equals(
-            tech.streamfusion.arrow.ArrowConversion.toArrowSchema(udf.generated.rowResultType())
-                .getFields())) return false;
+    if (!hasFlatRowResult(udf)) return false;
     for (int type : udf.argTypes) {
       if (type != TYPE_INT
           && type != TYPE_LONG
@@ -629,7 +634,8 @@ public final class NativeUdf {
             arguments,
             org.apache.flink.table.types.logical.RowType.of(udf.generated.argumentTypes()));
     var type = udf.generated.rowResultType();
-    if (Boolean.getBoolean("streamfusion.experimental.temporalAliases")
+    if (Boolean.parseBoolean(
+            System.getProperty("streamfusion.experimental.temporalAliases", "true"))
         && !udf.generated.hasRowFilter()
         && type.getFieldCount() == columns.length
         && type.getChildren().stream()
@@ -644,7 +650,8 @@ public final class NativeUdf {
         && inputs.stream()
             .allMatch(
                 v ->
-                    tech.streamfusion.arrow.TimestampAccessor.isComponentTimestamp(v.getField()))) {
+                    tech.streamfusion.arrow.TimestampAccessor.isComponentTimestamp(v.getField())
+                        && v.getAllocator().getRoot() == NativeAllocator.SHARED.getRoot())) {
       return evaluateAliasedTimestamps(udf, inputs, reader, type, in.getRowCount());
     }
     var out =

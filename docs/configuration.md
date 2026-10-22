@@ -40,6 +40,14 @@ serialized operator configuration rather than process-global state before a stab
   Explicit `false` forces those UDFs to stock. Correctness/type/lifecycle gates remain in force;
   slower UDF execution alone does not block coverage. See
   [temporal UDF coverage](operators/calc-filter.md#temporal-scalar-functions).
+- **`streamfusion.experimental.directTemporalCalc`** (system property, default true) — evaluate
+  complete JVM Calcs with timestamp-only input columns directly on Arrow batches. Explicit false
+  restores the previous JNI callback; changelog input and represented output schemas always use
+  that callback. This does not change temporal UDF type coverage.
+- **`streamfusion.experimental.temporalAliases`** (system property, default true) — share
+  unchanged timestamp output buffers for unconditional, timestamp-only direct projections of
+  matching width and a common allocator root. Every function still executes. Explicit false uses
+  ordinary output writers.
 - **`streamfusion.experimental.collectionExpressions`** (default true) — enable the
   collection kernels and generated collection/constructor programs described in
   [Calc/filter coverage](operators/calc-filter.md#collection-expressions). The planner serializes

@@ -1,0 +1,612 @@
+{
+  "scope": "Initial complete-job identity/perimeter measurements; full two-line/cardinality matrix is still being collected. Other fixtures in this attempt overlapped unrelated tests and are excluded from claims.",
+  "baseline_revision": "47bbc8b080e8cece29540e2f739ddbfdc6bc7111",
+  "native_sha256": "cb4f2a344b0e4cc9c548b32caae3c67696dc715bba2be592ee08f4fc7c5d4dbb",
+  "environment": {
+    "flink": "2.2.1",
+    "jdk": "17.0.20.1",
+    "native": "release + mimalloc",
+    "rows": 2000000,
+    "cardinality": 8,
+    "precision": 9,
+    "zone": "UTC",
+    "parallelism": 1,
+    "heap": "2 GiB",
+    "batch_rows": 1024,
+    "warmup": 2,
+    "runs": 5,
+    "boundaries": "Runtime row source, both row/Arrow transposes, production JNI/state, rowwise blackhole sink"
+  },
+  "command": [
+    "mvn",
+    "-B",
+    "-ntp",
+    "-pl",
+    "streamfusion-runtime",
+    "-Pbench",
+    "surefire:test@default-test",
+    "-Dtest=TemporalUdfBenchmark",
+    "-Dtemporal.rows=2000000",
+    "-Dtemporal.cases=perimeter,identity,text,epoch,pipeline",
+    "-Dtemporal.warmup=2",
+    "-Dtemporal.runs=5",
+    "-Dtemporal.cardinality=8",
+    "-Dsf.extraJvmArgs=-Xmx2g"
+  ],
+  "trials": [
+    {
+      "case": "perimeter",
+      "engine": "FLINK",
+      "trial": 0,
+      "warmup": true,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634633830,
+      "seconds": 1.201204
+    },
+    {
+      "case": "perimeter",
+      "engine": "PREVIOUS",
+      "trial": 0,
+      "warmup": true,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634635417,
+      "seconds": 1.033976
+    },
+    {
+      "case": "perimeter",
+      "engine": "NATIVE",
+      "trial": 0,
+      "warmup": true,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634636561,
+      "seconds": 0.68583
+    },
+    {
+      "case": "perimeter",
+      "engine": "FALLBACK",
+      "trial": 0,
+      "warmup": true,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634637351,
+      "seconds": 0.741663
+    },
+    {
+      "case": "perimeter",
+      "engine": "PREVIOUS",
+      "trial": 1,
+      "warmup": true,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634638198,
+      "seconds": 0.637326
+    },
+    {
+      "case": "perimeter",
+      "engine": "NATIVE",
+      "trial": 1,
+      "warmup": true,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634638921,
+      "seconds": 0.646193
+    },
+    {
+      "case": "perimeter",
+      "engine": "FALLBACK",
+      "trial": 1,
+      "warmup": true,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634639672,
+      "seconds": 0.646218
+    },
+    {
+      "case": "perimeter",
+      "engine": "FLINK",
+      "trial": 1,
+      "warmup": true,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634640412,
+      "seconds": 0.590267
+    },
+    {
+      "case": "perimeter",
+      "engine": "NATIVE",
+      "trial": 2,
+      "warmup": false,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634641093,
+      "seconds": 0.638886
+    },
+    {
+      "case": "perimeter",
+      "engine": "FALLBACK",
+      "trial": 2,
+      "warmup": false,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634641816,
+      "seconds": 0.659447
+    },
+    {
+      "case": "perimeter",
+      "engine": "FLINK",
+      "trial": 2,
+      "warmup": false,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634642554,
+      "seconds": 0.584962
+    },
+    {
+      "case": "perimeter",
+      "engine": "PREVIOUS",
+      "trial": 2,
+      "warmup": false,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634643212,
+      "seconds": 0.652244
+    },
+    {
+      "case": "perimeter",
+      "engine": "FALLBACK",
+      "trial": 3,
+      "warmup": false,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634643942,
+      "seconds": 0.650524
+    },
+    {
+      "case": "perimeter",
+      "engine": "FLINK",
+      "trial": 3,
+      "warmup": false,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634644663,
+      "seconds": 0.582064
+    },
+    {
+      "case": "perimeter",
+      "engine": "PREVIOUS",
+      "trial": 3,
+      "warmup": false,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634645327,
+      "seconds": 0.64492
+    },
+    {
+      "case": "perimeter",
+      "engine": "NATIVE",
+      "trial": 3,
+      "warmup": false,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634646045,
+      "seconds": 0.640219
+    },
+    {
+      "case": "perimeter",
+      "engine": "FLINK",
+      "trial": 4,
+      "warmup": false,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634646751,
+      "seconds": 0.576688
+    },
+    {
+      "case": "perimeter",
+      "engine": "PREVIOUS",
+      "trial": 4,
+      "warmup": false,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634647404,
+      "seconds": 0.645583
+    },
+    {
+      "case": "perimeter",
+      "engine": "NATIVE",
+      "trial": 4,
+      "warmup": false,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634648120,
+      "seconds": 0.638866
+    },
+    {
+      "case": "perimeter",
+      "engine": "FALLBACK",
+      "trial": 4,
+      "warmup": false,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634648830,
+      "seconds": 0.651261
+    },
+    {
+      "case": "perimeter",
+      "engine": "PREVIOUS",
+      "trial": 5,
+      "warmup": false,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634649547,
+      "seconds": 0.651605
+    },
+    {
+      "case": "perimeter",
+      "engine": "NATIVE",
+      "trial": 5,
+      "warmup": false,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634650275,
+      "seconds": 0.638435
+    },
+    {
+      "case": "perimeter",
+      "engine": "FALLBACK",
+      "trial": 5,
+      "warmup": false,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634650984,
+      "seconds": 0.640912
+    },
+    {
+      "case": "perimeter",
+      "engine": "FLINK",
+      "trial": 5,
+      "warmup": false,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634651698,
+      "seconds": 0.57104
+    },
+    {
+      "case": "perimeter",
+      "engine": "NATIVE",
+      "trial": 6,
+      "warmup": false,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634652340,
+      "seconds": 0.659835
+    },
+    {
+      "case": "perimeter",
+      "engine": "FALLBACK",
+      "trial": 6,
+      "warmup": false,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634653066,
+      "seconds": 0.657807
+    },
+    {
+      "case": "perimeter",
+      "engine": "FLINK",
+      "trial": 6,
+      "warmup": false,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634653786,
+      "seconds": 0.588824
+    },
+    {
+      "case": "perimeter",
+      "engine": "PREVIOUS",
+      "trial": 6,
+      "warmup": false,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634654442,
+      "seconds": 0.655097
+    },
+    {
+      "case": "identity",
+      "engine": "FLINK",
+      "trial": 0,
+      "warmup": true,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634655280,
+      "seconds": 0.694503
+    },
+    {
+      "case": "identity",
+      "engine": "PREVIOUS",
+      "trial": 0,
+      "warmup": true,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634656079,
+      "seconds": 1.02863
+    },
+    {
+      "case": "identity",
+      "engine": "NATIVE",
+      "trial": 0,
+      "warmup": true,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634657180,
+      "seconds": 0.733043
+    },
+    {
+      "case": "identity",
+      "engine": "FALLBACK",
+      "trial": 0,
+      "warmup": true,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634657980,
+      "seconds": 0.630414
+    },
+    {
+      "case": "identity",
+      "engine": "PREVIOUS",
+      "trial": 1,
+      "warmup": true,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634658693,
+      "seconds": 0.911892
+    },
+    {
+      "case": "identity",
+      "engine": "NATIVE",
+      "trial": 1,
+      "warmup": true,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634659673,
+      "seconds": 0.684487
+    },
+    {
+      "case": "identity",
+      "engine": "FALLBACK",
+      "trial": 1,
+      "warmup": true,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634660425,
+      "seconds": 0.619764
+    },
+    {
+      "case": "identity",
+      "engine": "FLINK",
+      "trial": 1,
+      "warmup": true,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634661115,
+      "seconds": 0.620773
+    },
+    {
+      "case": "identity",
+      "engine": "NATIVE",
+      "trial": 2,
+      "warmup": false,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634661808,
+      "seconds": 0.674493
+    },
+    {
+      "case": "identity",
+      "engine": "FALLBACK",
+      "trial": 2,
+      "warmup": false,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634662544,
+      "seconds": 0.63826
+    },
+    {
+      "case": "identity",
+      "engine": "FLINK",
+      "trial": 2,
+      "warmup": false,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634663253,
+      "seconds": 0.628252
+    },
+    {
+      "case": "identity",
+      "engine": "PREVIOUS",
+      "trial": 2,
+      "warmup": false,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634663953,
+      "seconds": 0.914912
+    },
+    {
+      "case": "identity",
+      "engine": "FALLBACK",
+      "trial": 3,
+      "warmup": false,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634664936,
+      "seconds": 0.633067
+    },
+    {
+      "case": "identity",
+      "engine": "FLINK",
+      "trial": 3,
+      "warmup": false,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634665647,
+      "seconds": 0.613625
+    },
+    {
+      "case": "identity",
+      "engine": "PREVIOUS",
+      "trial": 3,
+      "warmup": false,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634666339,
+      "seconds": 0.89767
+    },
+    {
+      "case": "identity",
+      "engine": "NATIVE",
+      "trial": 3,
+      "warmup": false,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634667308,
+      "seconds": 0.675887
+    },
+    {
+      "case": "identity",
+      "engine": "FLINK",
+      "trial": 4,
+      "warmup": false,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634668043,
+      "seconds": 0.638126
+    },
+    {
+      "case": "identity",
+      "engine": "PREVIOUS",
+      "trial": 4,
+      "warmup": false,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634668748,
+      "seconds": 0.896986
+    },
+    {
+      "case": "identity",
+      "engine": "NATIVE",
+      "trial": 4,
+      "warmup": false,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634669711,
+      "seconds": 0.684499
+    },
+    {
+      "case": "identity",
+      "engine": "FALLBACK",
+      "trial": 4,
+      "warmup": false,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634670460,
+      "seconds": 0.647552
+    },
+    {
+      "case": "identity",
+      "engine": "PREVIOUS",
+      "trial": 5,
+      "warmup": false,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634671174,
+      "seconds": 0.891465
+    },
+    {
+      "case": "identity",
+      "engine": "NATIVE",
+      "trial": 5,
+      "warmup": false,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634672135,
+      "seconds": 0.679348
+    },
+    {
+      "case": "identity",
+      "engine": "FALLBACK",
+      "trial": 5,
+      "warmup": false,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634672877,
+      "seconds": 0.660523
+    },
+    {
+      "case": "identity",
+      "engine": "FLINK",
+      "trial": 5,
+      "warmup": false,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634673605,
+      "seconds": 0.682761
+    },
+    {
+      "case": "identity",
+      "engine": "NATIVE",
+      "trial": 6,
+      "warmup": false,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634674353,
+      "seconds": 0.738521
+    },
+    {
+      "case": "identity",
+      "engine": "FALLBACK",
+      "trial": 6,
+      "warmup": false,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634675165,
+      "seconds": 0.674845
+    },
+    {
+      "case": "identity",
+      "engine": "FLINK",
+      "trial": 6,
+      "warmup": false,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634675911,
+      "seconds": 0.686723
+    },
+    {
+      "case": "identity",
+      "engine": "PREVIOUS",
+      "trial": 6,
+      "warmup": false,
+      "rows": 2000000,
+      "precision": 9,
+      "start_ms": 1792634676671,
+      "seconds": 1.033259
+    }
+  ],
+  "medians": {
+    "identity": {
+      "FLINK": 0.638126,
+      "PREVIOUS": 0.89767,
+      "NATIVE": 0.679348,
+      "FALLBACK": 0.647552
+    },
+    "perimeter": {
+      "FLINK": 0.582064,
+      "PREVIOUS": 0.651605,
+      "NATIVE": 0.638886,
+      "FALLBACK": 0.651261
+    }
+  }
+}

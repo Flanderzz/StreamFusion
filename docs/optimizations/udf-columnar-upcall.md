@@ -211,15 +211,33 @@ in the raw data, and no conversion cost is subtracted from expression timings. U
 build/test processes. The attempted 20M runs overlapped other builds and were discarded;
 these results make no claim for that size or for other expression shapes.
 
-## Experimental complete temporal Calc batches
+## Complete temporal Calc batches
 
-The opt-in temporal UDF draft can invoke a complete generated Calc directly against borrowed
-Arrow input columns and return flat Arrow output columns. This avoids exporting Java Arrow
+For a complete-job identity diagnostic on Flink 2.2.1/JDK 17, release+mimalloc, 2M runtime
+rows, cardinality eight, precision 9/UTC, parallelism one, 2 GiB heap and 1,024-row batches,
+two warmups and five rotating measured trials retain both transposes and the rowwise sink:
+
+| Projection | Stock Flink, s | Previous callback, s | Direct batches, s | Explicit fallback, s |
+| --- | ---: | ---: | ---: | ---: |
+| TIMESTAMP/LTZ identity | 0.638126 | 0.897670 | 0.679348 | 0.647552 |
+| Source-matched perimeter | 0.582064 | 0.651605 | 0.638886 | 0.651261 |
+
+Identity takes 24.3% less time than the preceding callback and remains 6.5% slower than
+stock Flink. This is a conversion improvement under the accepted UDF exception, not universal
+acceleration. Native execution and timestamp buffer sharing are asserted. These complete fixtures
+have no observed overlapping builds/tests; later fixtures in that attempt overlapped unrelated
+tests and are excluded from claims. [Raw warmups and measured trials](../benchmarks/results/temporal-direct-calc-2026-10-22.json)
+retain these measurements and their reproduction command.
+
+Temporal UDF execution invokes a complete generated Calc directly against borrowed
+Arrow input columns and returns flat Arrow output columns. This avoids exporting Java Arrow
 buffers to Rust merely to import them back into the same JVM for the whole Calc, then performing
 the reverse handoff for the result. The verified input mapping travels with the serialized,
 task-local UDF binding. Changelog-tagged batches and other argument shapes retain the established
 native callback. This is columnar Java execution inside an island, not Rust UDF computation.
-The [coverage page](../operators/calc-filter.md) lists the default-off experimental switches.
+Result schemas requiring representation metadata retain the callback. The
+[coverage page](../operators/calc-filter.md#temporal-scalar-conversion) describes the verified
+boundary and the existing system-property controls, which now default to true.
 
 For unconditional timestamp-only output with matching width, exact per-row value comparison
 permits sharing an unchanged input column. Functions always execute in the original order;
@@ -240,8 +258,8 @@ and blackhole sink, and both transposes:
 The counters verify 14M rows consumed directly per case and 28M timestamp values sharing buffers
 in identity, including warmups. Text and epoch improve against their paired controls; identity
 remains about 1% slower. Cross-JVM control drift and the missing final repeat against the previous
-correct fallback prevent broader admission. The two experiments stay off by default; temporal
-UDF coverage itself defaults on under the accepted UDF performance exception. The semantic support shipped in [PR #368](https://github.com/datafusion-contrib/StreamFusion/pull/368);
+correct fallback limited that historical experiment. Direct execution and output sharing now
+default on under the accepted UDF performance exception. The semantic support shipped in [PR #368](https://github.com/datafusion-contrib/StreamFusion/pull/368);
 [issue #389](https://github.com/datafusion-contrib/StreamFusion/issues/389) tracks the remaining default-performance work.
 
 ### Java and Rust profiling evidence
