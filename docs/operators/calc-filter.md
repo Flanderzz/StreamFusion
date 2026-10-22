@@ -208,6 +208,9 @@ historical offset tables, including `Asia/Shanghai`. Planning serializes the run
 native time-zone database. This preserves JDK-specific historical behavior, including the
 pre-1900 raw offset, former daylight-saving transitions, the Gregorian calendar cutover,
 BC dates and Java long multiplication overflow.
+The finite table also includes the running JDK's final synthetic raw-offset boundary.
+Its date is discovered using `TimeZone.getOffset`, covering both the older 2037 and
+newer 2100 boundaries (including `Africa/Windhoek`) without reflective module access.
 JobManagers and TaskManagers must use matching formatter locales and JDK time-zone rules.
 
 Zones with recurring future rules, unverified regional TimeZone implementations, dynamic or

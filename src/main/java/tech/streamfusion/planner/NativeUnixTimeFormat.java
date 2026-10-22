@@ -50,7 +50,7 @@ final class NativeUnixTimeFormat {
       return null;
     var boundaries = new TreeSet<Long>();
     // java.util.TimeZone starts its historical table at 1900, uses the final raw offset
-    // before that, and may append a final standard-time entry in 2037. ZoneRules alone
+    // before that, and may append a final standard-time entry after finite history. ZoneRules alone
     // would use local mean time before 1900 and produce different Flink results.
     boundaries.add(JDK_HISTORY_START);
     boundaries.add(JDK_FINAL_STANDARD_YEAR - zone.getRawOffset());
@@ -58,6 +58,19 @@ final class NativeUnixTimeFormat {
       long millis = transition.getInstant().toEpochMilli();
       if (millis > JDK_HISTORY_END) return null;
       if (millis >= JDK_HISTORY_START) boundaries.add(millis);
+    }
+    // ZoneInfo appends a raw-offset boundary after finite history. Its year varies
+    // by JDK (2037 or 2100); locate it through the public API instead of assuming a year.
+    long last = boundaries.last();
+    int lastOffset = zone.getOffset(last);
+    if (lastOffset != zone.getOffset(Long.MAX_VALUE)) {
+      long end = Long.MAX_VALUE;
+      while (end - last > 1) {
+        long middle = last + (end - last) / 2;
+        if (zone.getOffset(middle) == lastOffset) last = middle;
+        else end = middle;
+      }
+      boundaries.add(end);
     }
     int offset = zone.getOffset(Long.MIN_VALUE);
     var encoded = new StringBuilder().append(offset);

@@ -73,7 +73,14 @@ class NativeUnixTimeFormatTest {
               -2208988800000L,
               0L,
               2114380800000L,
-              2145916800000L));
+              2145916800000L,
+              4102444800000L));
+      for (int i = 1; i < entries.length; i++) {
+        long millis = Long.parseLong(entries[i].split(":")[0]);
+        instants.add(millis - 1);
+        instants.add(millis);
+        instants.add(millis + 1);
+      }
       for (var transition : ZoneId.of(zoneId).getRules().getTransitions()) {
         long millis = transition.getInstant().toEpochMilli();
         instants.add(millis - 1);

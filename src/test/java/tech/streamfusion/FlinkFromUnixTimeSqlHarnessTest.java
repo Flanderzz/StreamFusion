@@ -34,7 +34,15 @@ class FlinkFromUnixTimeSqlHarnessTest {
     1730613599L,
     1730613600L,
     Integer.MIN_VALUE,
-    Integer.MAX_VALUE
+    Integer.MAX_VALUE,
+    2114380800L - 7200 - 1,
+    2114380800L - 7200,
+    2114380800L - 3600,
+    4102444800L - 7200 - 1,
+    4102444800L - 7200,
+    4102444800L - 3600 - 1,
+    4102444800L - 3600,
+    4102444800L
   };
 
   @ParameterizedTest
@@ -47,6 +55,7 @@ class FlinkFromUnixTimeSqlHarnessTest {
         "Etc/GMT+8",
         "Asia/Shanghai",
         "Asia/Kolkata",
+        "Africa/Windhoek",
         "Pacific/Apia",
         "America/New_York",
         "Europe/Paris"
