@@ -31,10 +31,15 @@ class FlinkElementSqlHarnessTest {
   }
 
   @Test
-  void multipleFailureSitesKeepFlinkRowEvaluationOrder() {
+  void competingFailureSitesStillReportAnExpectedExpressionError() {
     var runs=NativeFailureParity.run(()->FlinkArrayEditSqlHarnessTest.environment("INT"),
         "SELECT 1/(id-1),ELEMENT(a) FROM src");
     assertNotNull(runs.host().failure());
-    runs.assertFailure(runs.host().rootCause().getClass(),runs.host().phase(),NativeFailureParity.Route.NATIVE);
+    runs.assertCompetingFailures(
+        cause ->
+            NativeFailureParity.isDivisionByZero(cause)
+                || String.valueOf(cause.getMessage()).contains("Array has more than one element."),
+        NativeFailureParity.Phase.ROW_EVALUATION,
+        NativeFailureParity.Route.NATIVE);
   }
 }

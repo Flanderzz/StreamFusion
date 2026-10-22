@@ -1,6 +1,6 @@
-//! Constant numeric SimpleDateFormat patterns in fixed-offset zones.
+//! Constant numeric SimpleDateFormat patterns with JDK-provided finite offset histories.
 
-use arrow::array::{ArrayRef, Int64Array, StringArray};
+use arrow::array::{ArrayRef, Int64Array, StringBuilder};
 use arrow::datatypes::DataType;
 use datafusion::common::{exec_err, Result};
 use datafusion::logical_expr::{
@@ -10,8 +10,40 @@ use std::fmt::Write;
 use std::sync::Arc;
 
 pub(crate) fn function(offset_millis: i64, pattern: &str) -> Result<ScalarUDF> {
+    with_offsets(offset_millis, vec![], pattern)
+}
+
+pub(crate) fn from_encoded(encoded: &str, pattern: &str) -> Result<ScalarUDF> {
+    let mut parts = encoded.split(',');
+    let invalid = || datafusion::common::DataFusionError::Plan("invalid time-zone offsets".into());
+    let initial = parts
+        .next()
+        .ok_or_else(invalid)?
+        .parse()
+        .map_err(|_| invalid())?;
+    let transitions = parts
+        .map(|part| {
+            let (millis, offset) = part.split_once(':').ok_or_else(invalid)?;
+            Ok((
+                millis.parse().map_err(|_| invalid())?,
+                offset.parse().map_err(|_| invalid())?,
+            ))
+        })
+        .collect::<Result<Vec<(i64, i64)>>>()?;
+    if transitions.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
+        return Err(invalid());
+    }
+    with_offsets(initial, transitions, pattern)
+}
+
+fn with_offsets(
+    offset_millis: i64,
+    transitions: Vec<(i64, i64)>,
+    pattern: &str,
+) -> Result<ScalarUDF> {
     Ok(ScalarUDF::new_from_impl(FromUnixTime {
         offset_millis,
+        transitions,
         tokens: compile(pattern)?,
         signature: Signature::exact(vec![DataType::Int64], Volatility::Immutable),
     }))
@@ -66,19 +98,35 @@ fn compile(pattern: &str) -> Result<Vec<Token>> {
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct FromUnixTime {
     offset_millis: i64,
+    transitions: Vec<(i64, i64)>,
     tokens: Vec<Token>,
     signature: Signature,
 }
 
 impl FromUnixTime {
+    #[cfg(test)]
     fn format(&self, seconds: i64) -> String {
+        let mut output = String::with_capacity(32);
+        self.format_into(seconds, &mut output);
+        output
+    }
+
+    fn format_into(&self, seconds: i64, output: &mut String) {
         // Flink multiplies seconds with Java long overflow. GregorianCalendar then adds the
         // zone offset without overflowing the millisecond range at either endpoint.
-        let local = i128::from(seconds.wrapping_mul(1000)) + i128::from(self.offset_millis);
+        let millis = seconds.wrapping_mul(1000);
+        let index = self
+            .transitions
+            .partition_point(|(start, _)| *start <= millis);
+        let offset = if index == 0 {
+            self.offset_millis
+        } else {
+            self.transitions[index - 1].1
+        };
+        let local = i128::from(millis) + i128::from(offset);
         let days = local.div_euclid(86_400_000) as i64;
         let time = local.rem_euclid(86_400_000) as i64;
         let (year, month, day) = calendar_date(days);
-        let mut output = String::with_capacity(32);
         for token in &self.tokens {
             match token {
                 Token::Literal(text) => output.push_str(text),
@@ -98,11 +146,10 @@ impl FromUnixTime {
                         's' => time / 1000 % 60,
                         _ => unreachable!("compiled numeric field"),
                     };
-                    write!(&mut output, "{value:0width$}").unwrap();
+                    write!(output, "{value:0width$}").unwrap();
                 }
             }
         }
-        output
     }
 }
 
@@ -149,12 +196,23 @@ impl ScalarUDFImpl for FromUnixTime {
                             "FROM_UNIXTIME requires integer seconds".into(),
                         )
                     })?;
-                Ok(Arc::new(
-                    input
-                        .iter()
-                        .map(|value| value.map(|value| self.format(value)))
-                        .collect::<StringArray>(),
-                ) as ArrayRef)
+                let mut output = StringBuilder::with_capacity(input.len(), input.len() * 20);
+                let mut formatted = String::with_capacity(32);
+                let mut previous = None;
+                for value in input.iter() {
+                    match value {
+                        None => output.append_null(),
+                        Some(value) => {
+                            if previous != Some(value) {
+                                formatted.clear();
+                                self.format_into(value, &mut formatted);
+                                previous = Some(value);
+                            }
+                            output.append_value(&formatted);
+                        }
+                    }
+                }
+                Ok(Arc::new(output.finish()) as ArrayRef)
             },
             vec![],
         )(&args.args)
@@ -164,6 +222,7 @@ impl ScalarUDFImpl for FromUnixTime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow::array::StringArray;
     use arrow::datatypes::Field;
     use datafusion::common::{config::ConfigOptions, ScalarValue};
 
@@ -210,6 +269,7 @@ mod tests {
     fn calendar_cutover_bce_and_wrapping_match_java() {
         let formatter = FromUnixTime {
             offset_millis: 0,
+            transitions: vec![],
             tokens: compile("yyyy-MM-dd HH:mm:ss").unwrap(),
             signature: Signature::exact(vec![DataType::Int64], Volatility::Immutable),
         };
@@ -236,9 +296,34 @@ mod tests {
         }
         let formatter = FromUnixTime {
             offset_millis: 19_800_000,
+            transitions: vec![],
             tokens: compile("yyyyMMddHHmm 'o''clock' 😀").unwrap(),
             signature: Signature::exact(vec![DataType::Int64], Volatility::Immutable),
         };
         assert_eq!(formatter.format(0), "197001010530 o'clock 😀");
+    }
+
+    #[test]
+    fn encoded_offsets_are_selected_after_wrapping_seconds_to_milliseconds() {
+        let formatter = FromUnixTime {
+            offset_millis: 28_800_000,
+            transitions: vec![(0, 32_400_000), (3_600_000, 28_800_000)],
+            tokens: compile("yyyy-MM-dd HH:mm:ss").unwrap(),
+            signature: Signature::exact(vec![DataType::Int64], Volatility::Immutable),
+        };
+        for (seconds, expected) in [
+            (-1, "1970-01-01 07:59:59"),
+            (0, "1970-01-01 09:00:00"),
+            (3599, "1970-01-01 09:59:59"),
+            (3600, "1970-01-01 09:00:00"),
+            (i64::MIN, "1970-01-01 09:00:00"),
+            (i64::MAX, "1970-01-01 07:59:59"),
+        ] {
+            assert_eq!(formatter.format(seconds), expected);
+        }
+        assert!(from_encoded("28800000,0:32400000,3600000:28800000", "yyyyMMddHHmm").is_ok());
+        for invalid in ["", "bad", "0,bad", "0,2:0,1:0", "0,1:0,1:0"] {
+            assert!(from_encoded(invalid, "yyyyMMddHHmm").is_err());
+        }
     }
 }

@@ -2,7 +2,10 @@ package tech.streamfusion.planner;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.math.BigDecimal;
 import java.util.List;
@@ -92,5 +95,32 @@ class HostCastFunctionTest {
     assertNull(castChar.eval(null));
     var castDecimalText = new HostCastFunction(new DecimalType(7, 2), string, true);
     assertEquals("1.25", castDecimalText.eval(new BigDecimal("1.25")));
+  }
+
+  @Test
+  void cachedCastExceptionsSurviveClosingTheFirstJobClassLoader() throws Exception {
+    var thread = Thread.currentThread();
+    var previous = thread.getContextClassLoader();
+    var decimal = new DecimalType(27, 7);
+    try {
+      for (int job = 0; job < 2; job++) {
+        try (var loader =
+            org.apache.flink.util.FlinkUserCodeClassLoaders.parentFirst(
+                new java.net.URL[0], getClass().getClassLoader(), ignored -> {}, true)) {
+          thread.setContextClassLoader(loader);
+          var cast = new HostCastFunction(new FloatType(), decimal);
+          cast.open(null);
+          assertSame(loader, thread.getContextClassLoader());
+          assertEquals(new BigDecimal("1.2500000"), cast.eval(1.25f));
+          if (job == 1) {
+            Throwable failure = assertThrows(Exception.class, () -> cast.eval(Float.NaN));
+            while (failure.getCause() != null) failure = failure.getCause();
+            assertInstanceOf(NumberFormatException.class, failure);
+          }
+        }
+      }
+    } finally {
+      thread.setContextClassLoader(previous);
+    }
   }
 }

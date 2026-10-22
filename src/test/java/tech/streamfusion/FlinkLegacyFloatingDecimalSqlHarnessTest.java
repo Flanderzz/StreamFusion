@@ -76,15 +76,17 @@ class FlinkLegacyFloatingDecimalSqlHarnessTest {
 
   @ParameterizedTest
   @ValueSource(booleans = {false, true})
-  void multipleFailuresKeepTheHostsRowOrder(boolean legacy) {
-    NativeFailureParity.run(() -> environment(legacy, true),
-        "SELECT 1/id, CAST(f AS DECIMAL(10,1)) FROM src")
-        .assertFailure(ArithmeticException.class, NativeFailureParity.Phase.ROW_EVALUATION,
-            NativeFailureParity.Route.NATIVE);
-    NativeFailureParity.run(() -> environment(legacy, true),
-        "SELECT CAST(f AS DECIMAL(10,1)), 1/id FROM src")
-        .assertFailure(NumberFormatException.class, NativeFailureParity.Phase.ROW_EVALUATION,
-            NativeFailureParity.Route.NATIVE);
+  void competingFailuresDoNotRequireWholeCalcJvmEvaluation(boolean legacy) {
+    for (String projection :
+        List.of("1/id, CAST(f AS DECIMAL(10,1))", "CAST(f AS DECIMAL(10,1)), 1/id")) {
+      NativeFailureParity.run(() -> environment(legacy, true), "SELECT " + projection + " FROM src")
+          .assertCompetingFailures(
+              cause ->
+                  cause instanceof NumberFormatException
+                      || NativeFailureParity.isDivisionByZero(cause),
+              NativeFailureParity.Phase.ROW_EVALUATION,
+              NativeFailureParity.Route.NATIVE);
+    }
   }
 
   @ParameterizedTest

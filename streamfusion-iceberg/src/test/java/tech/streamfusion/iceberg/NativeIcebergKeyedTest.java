@@ -20,13 +20,17 @@ import org.apache.flink.streaming.api.checkpoint.CheckpointedFunction;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.source.legacy.SourceFunction;
 import org.apache.flink.types.RowKind;
+import org.apache.iceberg.DataFiles;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
+import org.apache.iceberg.SnapshotSummary;
+import org.apache.iceberg.Table;
 import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.data.IcebergGenerics;
 import org.apache.iceberg.flink.TableLoader;
 import org.apache.iceberg.hadoop.HadoopTables;
 import org.apache.iceberg.types.Types;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -36,6 +40,8 @@ import tech.streamfusion.operator.NativeAllocator;
 import tech.streamfusion.operator.RowDataArrowConverter;
 
 class NativeIcebergKeyedTest {
+  private static final int INITIAL_ROWS = 3;
+
   @TempDir(cleanup = org.junit.jupiter.api.io.CleanupMode.ON_SUCCESS)
   Path temp;
 
@@ -44,9 +50,43 @@ class NativeIcebergKeyedTest {
   private static final java.util.Queue<String> EVENTS =
       new java.util.concurrent.ConcurrentLinkedQueue<>();
 
-  @org.junit.jupiter.api.RepeatedTest(10)
-  void unalignedRecoveryKeepsUpdatesUnderRepeatedCheckpointRaces() throws Exception {
-    hostDeletesAndRecoveryPreserveNativeDataPositions(true, true, "hash", true, 2);
+  @org.junit.jupiter.api.RepeatedTest(20)
+  void unalignedRecoveryKeepsUpdatesUnderRepeatedCheckpointRaces(
+      org.junit.jupiter.api.RepetitionInfo repetition) throws Exception {
+    hostDeletesAndRecoveryPreserveNativeDataPositions(
+        repetition.getCurrentRepetition() % 2 == 0, true, "hash", true, 2);
+  }
+
+  @Test
+  void partialInitialSnapshotDoesNotReleaseUpdates() {
+    var table =
+        new HadoopTables(new org.apache.hadoop.conf.Configuration())
+            .create(
+                new Schema(Types.NestedField.required(1, "id", Types.IntegerType.get())),
+                PartitionSpec.unpartitioned(),
+                Map.of(TableProperties.FORMAT_VERSION, "2"),
+                temp.resolve("partial").toUri().toString());
+    assertFalse(initialRowsCommitted(table));
+    for (int row = 0; row < INITIAL_ROWS; row++) {
+      table
+          .newAppend()
+          .appendFile(
+              DataFiles.builder(table.spec())
+                  .withPath(temp.resolve("initial-" + row + ".parquet").toString())
+                  .withFileSizeInBytes(1)
+                  .withRecordCount(1)
+                  .build())
+          .commit();
+      assertNotNull(table.currentSnapshot());
+      assertEquals(row + 1 == INITIAL_ROWS, initialRowsCommitted(table));
+    }
+  }
+
+  private static boolean initialRowsCommitted(Table table) {
+    var snapshot = table.currentSnapshot();
+    return snapshot != null
+        && Integer.toString(INITIAL_ROWS)
+            .equals(snapshot.summary().get(SnapshotSummary.TOTAL_RECORDS_PROP));
   }
 
   @ParameterizedTest
@@ -248,7 +288,8 @@ class NativeIcebergKeyedTest {
       if (!running) return;
       if (next < 2) {
         var initial = new HadoopTables(new org.apache.hadoop.conf.Configuration()).load(location);
-        while (running && initial.currentSnapshot() == null) {
+        // Unaligned checkpoints can commit one writer while other initial rows remain in flight.
+        while (running && !initialRowsCommitted(initial)) {
           if (System.nanoTime() > deadline)
             throw new IllegalStateException("initial checkpoint commit timed out");
           Thread.sleep(5);

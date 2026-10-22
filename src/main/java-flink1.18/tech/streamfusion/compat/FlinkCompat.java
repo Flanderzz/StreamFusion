@@ -14,6 +14,8 @@ public final class FlinkCompat {
 
   public static final boolean ORDERED_MAP_CONSTRUCTORS = false;
 
+  public static final boolean DECIMAL_ARITHMETIC_CASTS_INTEGERS_TO_RESULT = true;
+
   public static final boolean TABLE_RUNTIME_ELEMENT_EXCEPTION = false;
   public static final boolean GENERIC_ORDERED_VALUES = false;
 

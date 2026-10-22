@@ -202,6 +202,7 @@ pub(crate) struct DecimalBinary {
     op: DecimalOp,
     precision: u8,
     scale: i8,
+    legacy_integer_cast: bool,
     signature: Signature,
 }
 
@@ -211,8 +212,14 @@ impl DecimalBinary {
             op,
             precision,
             scale,
+            legacy_integer_cast: false,
             signature: Signature::any(2, Volatility::Immutable),
         }
+    }
+
+    pub(crate) fn with_legacy_integer_cast(mut self, enabled: bool) -> Self {
+        self.legacy_integer_cast = enabled;
+        self
     }
 }
 
@@ -248,23 +255,65 @@ impl ScalarUDFImpl for DecimalBinary {
             source_scale(&right.data_type())?,
         )?;
         let inputs = (DecimalInput::new(left)?, DecimalInput::new(right)?);
-        let evaluate = |row| prepared.evaluate(inputs.0.value(row)?, inputs.1.value(row)?);
+        let limits = [left, right].map(|input| {
+            legacy_integer_limit(
+                self.legacy_integer_cast,
+                &input.data_type(),
+                self.precision,
+                self.scale,
+            )
+        });
+        let evaluate = |row| {
+            let (Some(a), Some(b)) = (inputs.0.value(row), inputs.1.value(row)) else {
+                return Ok(None);
+            };
+            check_legacy_integer_cast(a, limits[0])?;
+            check_legacy_integer_cast(b, limits[1])?;
+            Ok(prepared.evaluate(a, b))
+        };
         if matches!(
             (left, right),
             (ColumnarValue::Scalar(_), ColumnarValue::Scalar(_))
         ) {
             return Ok(ColumnarValue::Scalar(ScalarValue::Decimal128(
-                evaluate(0),
+                evaluate(0)?,
                 self.precision,
                 self.scale,
             )));
         }
         let output = (0..args.number_rows)
             .map(evaluate)
-            .collect::<Decimal128Array>()
+            .collect::<Result<Decimal128Array>>()?
             .with_precision_and_scale(self.precision, self.scale)?;
         Ok(ColumnarValue::Array(Arc::new(output)))
     }
+}
+
+// The implicit conversion is exact whenever it fits, so the kernels can retain
+// their original integer operands. Check overflow only after both SQL NULL guards.
+pub(crate) fn legacy_integer_limit(
+    enabled: bool,
+    source: &DataType,
+    precision: u8,
+    scale: i8,
+) -> Option<u128> {
+    (enabled
+        && matches!(
+            source,
+            DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64
+        ))
+    .then(|| 10_u128.pow((precision as i8 - scale) as u32))
+}
+
+pub(crate) fn check_legacy_integer_cast(value: i128, limit: Option<u128>) -> Result<()> {
+    if limit.is_some_and(|limit| value.unsigned_abs() >= limit) {
+        return Err(datafusion::common::DataFusionError::External(Box::new(
+            streamfusion_bridge::FlinkException::null_pointer(
+                "Cannot invoke DecimalData.toBigDecimal() because an implicit decimal arithmetic conversion overflowed".into(),
+            ),
+        )));
+    }
+    Ok(())
 }
 
 struct PreparedBinary {
@@ -397,6 +446,46 @@ mod tests {
     use super::*;
     use arrow::datatypes::Field;
     use datafusion::common::config::ConfigOptions;
+
+    #[test]
+    fn legacy_integer_conversion_overflow_is_checked_after_both_null_guards() {
+        for op in [DecimalOp::Add, DecimalOp::Subtract, DecimalOp::Multiply] {
+            let function = DecimalBinary::new(op, 38, 37).with_legacy_integer_cast(true);
+            for integer_first in [false, true] {
+                let integer =
+                    ColumnarValue::Array(Arc::new(Int64Array::from(vec![Some(10), None, Some(9)])));
+                let decimal = ColumnarValue::Array(Arc::new(
+                    Decimal128Array::from(vec![None, Some(1), Some(1)])
+                        .with_precision_and_scale(38, 37)
+                        .unwrap(),
+                ));
+                let args = if integer_first {
+                    vec![integer, decimal]
+                } else {
+                    vec![decimal, integer]
+                };
+                let ColumnarValue::Array(output) = invoke(&function, args, 3).unwrap() else {
+                    panic!("expected array")
+                };
+                assert!(output.is_null(0));
+                assert!(output.is_null(1));
+                assert!(!output.is_null(2));
+                for value in [-10, 10] {
+                    let integer = ColumnarValue::Scalar(ScalarValue::Int64(Some(value)));
+                    let decimal = ColumnarValue::Scalar(ScalarValue::Decimal128(Some(1), 38, 37));
+                    let args = if integer_first {
+                        vec![integer, decimal]
+                    } else {
+                        vec![decimal, integer]
+                    };
+                    let error = invoke(&function, args, 1).unwrap_err();
+                    assert!(std::error::Error::source(&error)
+                        .unwrap()
+                        .is::<streamfusion_bridge::FlinkException>());
+                }
+            }
+        }
+    }
 
     fn invoke(
         function: &dyn ScalarUDFImpl,

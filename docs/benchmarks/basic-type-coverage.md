@@ -54,8 +54,9 @@ Direct unary casts use a proven native batch kernel when adjacent binary values 
 all possible host decimal renderings to the same HALF_UP result. Scale above 18, scaled
 magnitude at least 2^52, ambiguous rounding and non-finite values retain the released
 Flink expression for the complete batch. The source FLOAT first widens to DOUBLE, as in
-Flink. Composed operands retain generated evaluation; multiple fallible expressions
-retain the existing whole-row JVM schedule for error order.
+Flink. Composed operands retain generated evaluation. These historical measurements used
+whole-row JVM evaluation for competing failures; current Calc keeps independent expressions
+on their normal columnar paths instead.
 
 The same M4 Pro/Flink 2.2.1/JDK 17 release setup measures two million runtime rows with
 NULL every seven rows, two warmups and five alternating complete jobs per engine.

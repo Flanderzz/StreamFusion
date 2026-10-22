@@ -124,7 +124,12 @@ Java constructs the final data files and commits. Delete encoders remain Java-ow
 For format-v3 sinks, Java also assigns inherited row IDs, records snapshot lineage,
 and writes Puffin deletion vectors; the native boundary still covers data files only.
 Tests verify snapshot/file row IDs, vector blob references/offsets/lengths, and stock
-readback after updates and restarts. Live format upgrades, variant/geometry/geography,
+readback after updates and restarts. The phased keyed recovery fixture waits until all
+initial rows are committed before sending updates: an unaligned checkpoint can produce
+a partial initial snapshot while another writer's rows remain in channel state. This
+keeps cross-checkpoint equality deletes and same-writer position deletes deterministic;
+both delete kinds, exact readback and native-handle cleanup remain asserted.
+Live format upgrades, variant/geometry/geography,
 and nanosecond schemas retain their existing exclusions. Native v3 source admission
 remains stock because crate 0.10.1 does not read deletion vectors.
 

@@ -93,7 +93,8 @@ final class RexExpression {
   // Payload bit 0 marks compact timestamp keys; bit 1 preserves logical MAP over List storage.
   private static final int KIND_ITEM = 19;
 
-  // Decimal `/` and `%`: payload packs the declared result's precision*100 + scale; two children
+  // Decimal arithmetic: low 16 payload bits pack result precision*100 + scale;
+  // bit 16 retains Flink 1.18's implicit integer conversions. Two children
   // (the
   // operands). A fused native kernel reproduces Flink's 38-significant-digit quotient + rescale.
   private static final int KIND_DECIMAL_DIVIDE = 20;
@@ -185,7 +186,6 @@ final class RexExpression {
   private int binaryUdfCalls;
   private boolean rowFusion;
   private boolean unnestOperand;
-  private final Set<Integer> nonthrowingJvmRoots = new java.util.HashSet<>();
   private boolean preserveCollections;
   private boolean javaStringInputs;
   private String jvmExecutionReason;
@@ -468,18 +468,14 @@ final class RexExpression {
     boolean metadataTypeMismatch = false;
     boolean representation = CollectionValueIdentity.requiresGeneratedEvaluation(calc.getProgram());
     if (supported && !encoder.rowFusion) {
-      boolean requiresRowOrder = encoder.requiresCalcRowOrder(calc.getProgram());
       boolean requiresFixedBinary = encoder.requiresFixedBinaryRow(calc.getProgram());
-      if (requiresRowOrder || requiresFixedBinary) {
+      if (requiresFixedBinary) {
         // Preserve native admission before selecting a different evaluation schedule. A fresh
         // encoder must not retain descriptors or pools from the column-at-a-time attempt.
         // Fixed BINARY results use the row's declared schema rather than a variable binary UDF
         // result.
         encoder = forCalc(calc);
-        encoder.jvmExecutionReason =
-            requiresRowOrder
-                ? "multiple fallible/JVM expressions require Flink's row-major error order"
-                : "fixed BINARY results require whole-Calc JVM evaluation";
+        encoder.jvmExecutionReason = "fixed BINARY results require whole-Calc JVM evaluation";
         supported = encoder.emitRowCalc(calc);
       }
     }
@@ -560,33 +556,6 @@ final class RexExpression {
       return true;
     }
     return false;
-  }
-
-  private boolean requiresCalcRowOrder(RexProgram program) {
-    // Count JVM evaluators except the total JDK offset lookup, and native failure sites:
-    // a later-row failure must not overtake an earlier projection.
-    long[] failures = {
-      java.util.stream.IntStream.range(0, kinds.size())
-          .filter(
-              index ->
-                  isJvmKind(kinds.get(index))
-                      && kinds.get(index) != KIND_ROW_UDF
-                      && !nonthrowingJvmRoots.contains(index))
-          .count()
-    };
-    var visitor =
-        new org.apache.calcite.rex.RexVisitorImpl<Void>(true) {
-          @Override
-          public Void visitCall(RexCall call) {
-            if (mayFailOnRow(call)) failures[0]++;
-            return super.visitCall(call);
-          }
-        };
-    if (program.getCondition() != null)
-      program.expandLocalRef(program.getCondition()).accept(visitor);
-    for (RexLocalRef project : program.getProjectList())
-      program.expandLocalRef(project).accept(visitor);
-    return failures[0] > 1;
   }
 
   private static RexExpression forCalc(Calc calc) {
@@ -726,8 +695,8 @@ final class RexExpression {
   }
 
   private static boolean containsRuntimeCharset(RexProgram program) {
-    // Charset resolution can fail per row. Evaluate the filter and projections together so a
-    // later row's invalid name cannot overtake the first failing expression in Flink's order.
+    // The charset kernel only admits literal names. Runtime names need generated JDK
+    // resolution and the complete program's binary/string representation checks.
     return program.getCondition() != null
             && containsRuntimeCharset(program.expandLocalRef(program.getCondition()))
         || program.getProjectList().stream()
@@ -1917,7 +1886,15 @@ final class RexExpression {
         default:
           throw new IllegalStateException("not decimal arithmetic: " + call.getKind());
       }
-      add(kind, precision * 100 + scale, 2);
+      // Flink 1.18 casts integer operands inside the arithmetic null guard. Such
+      // an implicit cast may overflow even when the mathematical result fits.
+      int legacyIntegerCast =
+          tech.streamfusion.compat.FlinkCompat.DECIMAL_ARITHMETIC_CASTS_INTEGERS_TO_RESULT
+                  && call.getOperands().stream()
+                      .anyMatch(operand -> SqlTypeFamily.INTEGER.contains(operand.getType()))
+              ? 1 << 16
+              : 0;
+      add(kind, legacyIntegerCast | (precision * 100 + scale), 2);
       for (RexNode operand : call.getOperands()) {
         if (!emit(operand)) {
           return false;
@@ -3717,9 +3694,6 @@ final class RexExpression {
                 eval,
                 new int[] {tech.streamfusion.operator.NativeUdf.TYPE_LONG},
                 tech.streamfusion.operator.NativeUdf.TYPE_INT));
-    // ZoneRules is total for the complete millisecond timestamp domain; unlike arbitrary
-    // JVM functions this lookup cannot introduce a competing row-evaluation failure.
-    nonthrowingJvmRoots.add(kinds.size());
     add(KIND_UDF, longs.size(), 1);
     longs.add((long) index);
     longs.add((long) tech.streamfusion.operator.NativeUdf.TYPE_INT);

@@ -26,10 +26,13 @@ remain admitted. See [current Calc coverage](../operators/calc-filter.md).
 
 ## FROM_UNIXTIME
 
-Literal numeric patterns in fixed-offset zones compile to Rust formatting tokens once per
-expression. This removes the scalar JVM callback and its Arrow export/import from the
+Literal numeric patterns in fixed-offset and finite-history regional zones compile to Rust
+formatting tokens once per expression. Regional offsets come from the running JDK's
+TimeZone at planning time, including its pre-1900 behavior; native execution does not
+consult a separate tzdb. A batch reuses formatting scratch space and avoids repeating
+calendar/number formatting for consecutive equal epoch seconds. This removes the scalar JVM callback and its Arrow export/import from the
 formatting path. Integer calendar arithmetic preserves Java's historical calendar cutover
-and overflow range; unsupported formats and transition zones keep the Flink evaluator.
+and overflow range; unsupported formats and zones with recurring future rules keep the Flink evaluator.
 
 For the same two-million-row queries with both transposes, two warmups and five measured
 runs, switching from the previous JVM bridge to native formatting reduced the default-format
@@ -37,6 +40,13 @@ median from 1.696912s to 1.003518s (1.691x), and `yyyyMMddHHmm` from 1.543752s t
 (1.610x). The identity control remained 0.655586s versus 0.651136s. These sequential native-only
 comparisons are separate from the interleaved Flink/native measurements on the
 [scalar benchmark page](../benchmarks/scalar-functions.md).
+
+The [composite date-partition benchmark](../benchmarks/native-sync-calc.md) additionally
+checks finite-history regional formatting and 107 passthrough columns on Flink 1.18.1 and
+2.2.1. Including the production Calc's JNI and Arrow handoff, its varying-timestamp operator
+median is 5.48x and 7.48x faster than stock respectively, and about 19.6x faster than the
+previous whole-Calc JVM path. These are prepared columnar operator measurements, not remote
+connector or complete-job throughput.
 
 ## LOCATE
 
@@ -305,7 +315,8 @@ paired comparison below adds that missing evidence. The standalone performance r
 Grouped parity tests compare materialized results on NULLs, invalid ELT indexes,
 non-text bytes, zero padding, UTF-8 truncation and multiple input batches. Both
 cases pass on Flink 2.2; the cast case passes on 1.18, where ELT is unavailable and
-its case is explicitly skipped. Existing tests retain rowwise failure-order coverage.
+its case is explicitly skipped. Existing tests retain failure and conditional-evaluation coverage;
+independent competing exceptions need not be reported in stock Flink's order.
 
 [Raw trials](../benchmarks/binary-composition-2026-09-28.csv) include both engines
 and identity controls. Reproduce with the same `ScalarFunctionBenchmark#individualFunctions`

@@ -15,6 +15,11 @@ We are aiming for IDENTICAL results in stream processing jobs to flink. To start
 oriented streaming sources pop up more and more (see Fluss, for example, or open table CDC), being able to run jobs
 at massive throughput becomes more important.
 
+Independent failures across rows or projections need not be reported in Flink's exact order.
+Do not select whole-Calc JVM evaluation merely to preserve which competing exception is reported
+first. Preserve successful values, NULLs, conditional short-circuiting, empty-batch behavior and
+shared stateful function semantics.
+
 The one place identical results are impossible is an inherently non-deterministic function — `PROCTIME()` /
 processing time, `NOW()`/`CURRENT_TIMESTAMP`, random, and the like. Flink's own output for these is non-deterministic
 (it depends on wall-clock and execution timing), so byte-for-byte parity is not even well-defined. For these we use

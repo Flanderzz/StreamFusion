@@ -74,7 +74,7 @@ class FlinkTimestampLtzIfSqlHarnessTest {
     NativeFailureParity.run(
             () -> environment(3, "UTC"),
             "SELECT IF(n = 0, TO_TIMESTAMP_LTZ(1000 / n, 3), b) FROM src")
-        .assertFailure(ArithmeticException.class, "zero",
+        .assertCompetingFailures(NativeFailureParity::isDivisionByZero,
             NativeFailureParity.Phase.ROW_EVALUATION, NativeFailureParity.Route.NATIVE);
   }
 

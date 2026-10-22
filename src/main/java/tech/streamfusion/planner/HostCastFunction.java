@@ -49,11 +49,7 @@ public final class HostCastFunction extends ScalarFunction {
 
   @Override
   public void open(FunctionContext context) {
-    // The task context loader is Flink's per-job safety wrapper. A generated Janino executor can
-    // lazily inflate a reflective accessor after that wrapper has been closed when test/job class
-    // loaders are recycled. The cast implementation only references Flink and StreamFusion classes,
-    // so anchor it to this function's defining loader, whose lifetime matches the function class.
-    initializeExecutor(ClassLoader.getSystemClassLoader());
+    initializeExecutor();
   }
 
   @SuppressWarnings("unchecked")
@@ -62,35 +58,40 @@ public final class HostCastFunction extends ScalarFunction {
       return null;
     }
     if (executor == null) {
-      initializeExecutor(ClassLoader.getSystemClassLoader());
+      initializeExecutor();
     }
     return fromInternal(executor.cast(toInternal(value)));
   }
 
   @SuppressWarnings("unchecked")
-  private void initializeExecutor(ClassLoader classLoader) {
+  private void initializeExecutor() {
     if (executor == null) {
-      if (classLoader == null) {
-        classLoader = ClassLoader.getSystemClassLoader();
-      }
-      // The admitted casts (number↔string, string length) never consult the zone; UTC is a
-      // placeholder.
-      executor =
-          (CastExecutor<Object, Object>)
-              CastRuleProvider.create(
-                  tech.streamfusion.compat.FlinkCompat.castContext(classLoader, legacyBehaviour),
-                  inputType,
-                  targetType);
-      if (executor == null) {
-        throw new IllegalStateException(
-            "no cast rule for " + inputType + " -> " + targetType);
-      }
-      // java.lang.reflect switches from its native accessor to a generated accessor after a small
-      // invocation threshold. Force that transition while Flink's job classloader is open; otherwise
-      // a long-running native batch can cross the threshold after the safety wrapper was retired.
-      Object sample = warmupValue(inputType);
-      for (int i = 0; i < WARMUP_INVOCATIONS; i++) {
-        executor.cast(sample);
+      var thread = Thread.currentThread();
+      var previous = thread.getContextClassLoader();
+      var classLoader = CastRuleProvider.class.getClassLoader();
+      // Flink caches Janino expressions without a loader key. Janino inherits the thread's
+      // context loader, so the cast context alone cannot prevent retaining a retired job loader.
+      thread.setContextClassLoader(classLoader);
+      try {
+        // The admitted casts (number↔string, string length) never consult the zone; UTC is a
+        // placeholder.
+        executor =
+            (CastExecutor<Object, Object>)
+                CastRuleProvider.create(
+                    tech.streamfusion.compat.FlinkCompat.castContext(classLoader, legacyBehaviour),
+                    inputType,
+                    targetType);
+        if (executor == null) {
+          throw new IllegalStateException("no cast rule for " + inputType + " -> " + targetType);
+        }
+        // Prime generated reflective accessors before the first native batch. These casts only
+        // reference library types; no user function runs under the library loader.
+        Object sample = warmupValue(inputType);
+        for (int i = 0; i < WARMUP_INVOCATIONS; i++) {
+          executor.cast(sample);
+        }
+      } finally {
+        thread.setContextClassLoader(previous);
       }
     }
   }
