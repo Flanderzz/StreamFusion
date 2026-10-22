@@ -822,6 +822,12 @@ retracting input — aggregates outside `COUNT`/`AVG`/`SUM0`, ordinary numeric `
 scalar `SINGLE_VALUE`, and typed `MIN`/`MAX`. Retracting DISTINCT admits scalar COUNT and numeric
 SUM/AVG, including FLOAT/DOUBLE and decimal precision through 38, using ordered shared views.
 
+Staged membership memory accounting includes signed size changes between physical pushes of
+one logical bundle. Removals return released buffer bytes to the reservation; debug and release
+builds retain the same results without unsigned subtraction overflow.
+Decimal-overflow failure parity checks retain the exception type, execution phase and native
+route on both supported JDKs, and check helpful JVM null-dereference text when it is available.
+
 ## Type support
 
 The matcher only accelerates `(aggregate, value-type)` pairs where DataFusion's native arithmetic

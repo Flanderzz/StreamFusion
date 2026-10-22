@@ -36,13 +36,9 @@ class FlinkTemporalDistinctSqlHarnessTest {
   }
 
   @org.junit.jupiter.api.Test
-  void unverifiedDistinctTypesNameTheValueInTheDiagnostic() {
-    var table = input("DATE", "UTC");
-    var scan = tech.streamfusion.planner.NativePlanner.install(table);
-    table.explainSql("SELECT COUNT(DISTINCT ARRAY[k]) FROM src");
-    assertTrue(scan.fallbackReasons().stream()
-        .anyMatch(reason -> reason.contains("COUNT(DISTINCT) value type") && reason.contains("ARRAY")),
-        () -> scan.fallbackReasons().toString());
+  void nestedDistinctKeysRetainNativeMembership() {
+    compare(NativeFailureParity.run(
+        () -> input("DATE", "UTC"), "SELECT COUNT(DISTINCT ARRAY[k]) FROM src"));
   }
 
   @ParameterizedTest

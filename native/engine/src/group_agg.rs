@@ -2517,7 +2517,9 @@ impl<S: KeyedStateStore<GroupKeyState>> GroupAggregator<S> {
                     }
                     buffer.merge_entry(&ScalarValue::try_from_array(values, entry)?, &deltas);
                 }
-                staged_delta += buffer.bytes() - std::mem::size_of::<NumericViewBuffer>() - before;
+                mapped_delta += (buffer.bytes() - std::mem::size_of::<NumericViewBuffer>())
+                    as isize
+                    - before as isize;
             }
             for i in 0..num_agg {
                 if !sum_merges[i]

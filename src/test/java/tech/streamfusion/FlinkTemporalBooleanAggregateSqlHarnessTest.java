@@ -88,17 +88,16 @@ class FlinkTemporalBooleanAggregateSqlHarnessTest {
 
   @ParameterizedTest
   @ValueSource(strings = {"t", "b"})
-  void retractingValueMapTtlStillFallsBack(String column) throws Exception {
+  void retractingValueMapTtlPreservesOrderedResults(String column) throws Exception {
     tech.streamfusion.compat.FlinkTestCapabilities.requireFirstLastType(
         column.equals("t") ? "TIME(3)" : "BOOLEAN");
-    NativeParity.assertFallbackReasonContains(
+    NativeParity.assertOrderedKindedParity(
         () -> {
           var table = environment(true);
           table.getConfig().setIdleStateRetention(java.time.Duration.ofHours(1));
           return table;
         },
-        "SELECT k, FIRST_VALUE(" + column + "), LAST_VALUE(" + column + ") FROM src GROUP BY k",
-        "independently expiring value/order maps");
+        "SELECT k, FIRST_VALUE(" + column + "), LAST_VALUE(" + column + ") FROM src GROUP BY k");
   }
 
   @ParameterizedTest

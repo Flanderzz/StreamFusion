@@ -97,8 +97,7 @@ class FlinkRetractingDistinctPartialsSqlHarnessTest {
               },
               explicitCount ? query(type, "src") : query(type, "src").replace(", COUNT(*)", ""));
       if (hostOverflowFailure) {
-        runs.assertFailure(
-            NullPointerException.class,
+        runs.assertNullDereferenceFailure(
             "toBigDecimal",
             NativeFailureParity.Phase.ROW_EVALUATION,
             NativeFailureParity.Route.NATIVE);
