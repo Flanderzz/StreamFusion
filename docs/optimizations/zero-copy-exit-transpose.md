@@ -77,6 +77,33 @@ unpaired surrogates with caches, all RowKinds, buffer growth and retained rows a
 closure. Both released-line reactor test compilations pass.
 
 
+## Synchronous copies of cache-free scalar strings
+
+Scalar CHAR/VARCHAR outputs borrow their canonical Arrow bytes during the synchronous
+ownership copy when all fields meet the simple scalar-output gate and the batch has
+neither top-level Java UTF-16 caches nor nested representation metadata. The ordinary
+Flink copy creates an owned generic row before the batch closes; with object reuse enabled,
+the transpose supplies that copy itself. It avoids an intermediate UTF-8 byte array while
+retaining generic row rendering for legacy `toAppendStream(..., RowData.class)` consumers.
+
+Cached or represented strings retain their existing reader path. Eligibility is checked per
+batch, so alternating ordinary, cached, NULL and empty-string batches keep their original
+values. Eight ownership cases cover both object-reuse settings, all row kinds, isolated
+surrogates with caches, large payloads, generic rendering and retained rows after batch closure.
+This default path is narrower than the general experimental borrowed-view exit above.
+
+A prototype packed these strings into binary rows. Although typed values and ownership checks
+passed, unchanged Flink 1.18 Kafka fixtures exposed an observable legacy conversion difference:
+`RowData.toString()` returned a binary-row identity rather than generic field values. That
+prototype was removed. The [full comparison](../benchmarks/collections-392-2026-10-22.md)
+retains its measurements separately from the final generic-row string exit.
+
+Final two-million-row TYPEOF native medians are 0.617 s versus prior 0.623 and paired
+stock 0.753 on 2.2, and 0.587 versus prior 0.630 and stock 0.651 on 1.18. Ranges overlap,
+so this does not establish an isolated metadata throughput win. Matching profiles reduce
+sampled Java allocations in the exit from 1.674 to 1.034 GB on 2.2 and 1.672 to 0.971 GB
+on 1.18 (38–42%). These inclusive estimates are not copied bytes; profiled times are excluded.
+
 ## Generated projection for primitive and binary outputs
 
 A boolean-cast CPU profile attributed about 15% of native samples to the exit transpose and

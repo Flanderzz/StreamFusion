@@ -1,0 +1,321 @@
+{
+  "profiler": "async-profiler4.6; CPU1ms,allocation1MiB; converter4.6. Full JVM includes startup, planning, warmups and stock/native jobs. Scopes inclusive and overlapping; not copied bytes, peak memory or invocation counts. Profiled timings excluded from unprofiled elapsed-time comparisons.",
+  "scope_substrings": {
+    "whole_process": [],
+    "native_calc_inclusive": [
+      "tech/streamfusion/operator/NativeCalcOperator.processElement"
+    ],
+    "row_to_arrow_inclusive": [
+      "tech/streamfusion/operator/RowDataToArrowOperator.processElement"
+    ],
+    "exit_inclusive": [
+      "tech/streamfusion/operator/ArrowToRowDataOperator.processElement"
+    ],
+    "generated_collection_evaluation": [
+      "tech/streamfusion/planner/FlinkExpressionFunction.evalRow"
+    ],
+    "jvm_expression_upcall": [
+      "tech/streamfusion/operator/NativeUdf.invokeUdf"
+    ],
+    "direct_row_calc": [
+      "tech/streamfusion/operator/NativeUdf.evaluateRowCalc"
+    ],
+    "nested_string_writer": [
+      "tech/streamfusion/arrow/writers/NestedStringWriter"
+    ],
+    "utf16_writer": [
+      "tech/streamfusion/arrow/Utf16Cache$Writer"
+    ],
+    "native_jni_calc": [
+      "tech/streamfusion/operator/NativeCalcOperator.processElement",
+      "tech/streamfusion/Native.calcExpression"
+    ],
+    "calc_cdata_export": [
+      "tech/streamfusion/operator/NativeCalcOperator.processElement",
+      "org/apache/arrow/c/Data.exportVectorSchemaRoot"
+    ],
+    "calc_cdata_import": [
+      "tech/streamfusion/operator/NativeCalcOperator.processElement",
+      "org/apache/arrow/c/Data.importVectorSchemaRoot"
+    ],
+    "bigint_writer": [
+      "tech/streamfusion/arrow/writers/BigIntWriter"
+    ],
+    "exit_row_serializer": [
+      "tech/streamfusion/operator/ArrowToRowDataOperator.processElement",
+      "org/apache/flink/table/runtime/typeutils/RowDataSerializer"
+    ],
+    "exit_array_serializer": [
+      "tech/streamfusion/operator/ArrowToRowDataOperator.processElement",
+      "org/apache/flink/table/runtime/typeutils/ArrayDataSerializer"
+    ],
+    "exit_string_serializer": [
+      "tech/streamfusion/operator/ArrowToRowDataOperator.processElement",
+      "org/apache/flink/table/runtime/typeutils/StringDataSerializer"
+    ],
+    "nested_row_getter": [
+      "tech/streamfusion/arrow/vectors/ArrowRowColumnVector.getRow"
+    ],
+    "exit_owned_string_bytes": [
+      "tech/streamfusion/operator/ArrowToRowDataOperator.processElement",
+      "tech/streamfusion/arrow/vectors/ArrowVarCharColumnVector.getBytes"
+    ],
+    "exit_borrowed_string_value": [
+      "tech/streamfusion/operator/ArrowToRowDataOperator.processElement",
+      "tech/streamfusion/arrow/BorrowedStringValues.value"
+    ],
+    "string_getter": [
+      "tech/streamfusion/arrow/StringCacheRowData.getString"
+    ]
+  },
+  "records": [
+    {
+      "line": "1.18",
+      "cohort": "candidate",
+      "case": "typeof",
+      "jfr_sha256": "5ee09196649fcc2d2f3882cadc5b986969b6a0b849fdb071c9e846e77dcc6ea3",
+      "cpu": {
+        "unit": "CPU samples",
+        "scopes": {
+          "whole_process": 21998,
+          "native_calc_inclusive": 804,
+          "row_to_arrow_inclusive": 876,
+          "exit_inclusive": 522,
+          "generated_collection_evaluation": 0,
+          "jvm_expression_upcall": 0,
+          "direct_row_calc": 0,
+          "nested_string_writer": 0,
+          "utf16_writer": 0,
+          "native_jni_calc": 39,
+          "calc_cdata_export": 52,
+          "calc_cdata_import": 169,
+          "bigint_writer": 0,
+          "exit_row_serializer": 412,
+          "exit_array_serializer": 0,
+          "exit_string_serializer": 93,
+          "nested_row_getter": 0,
+          "exit_owned_string_bytes": 0,
+          "exit_borrowed_string_value": 19,
+          "string_getter": 34
+        },
+        "collapsed": "1.18-profile-candidate-typeof-7808.cpu.gz",
+        "sha256": "7d5a84a72eb44c25ce3b580868175baf98989996baa1cbe1291fd584712d1199"
+      },
+      "allocation": {
+        "unit": "estimated Java allocated bytes",
+        "scopes": {
+          "whole_process": 6013085584,
+          "native_calc_inclusive": 1023410176,
+          "row_to_arrow_inclusive": 1023410176,
+          "exit_inclusive": 970981376,
+          "generated_collection_evaluation": 0,
+          "jvm_expression_upcall": 0,
+          "direct_row_calc": 0,
+          "nested_string_writer": 0,
+          "utf16_writer": 0,
+          "native_jni_calc": 0,
+          "calc_cdata_export": 11534336,
+          "calc_cdata_import": 35651584,
+          "bigint_writer": 0,
+          "exit_row_serializer": 833617920,
+          "exit_array_serializer": 0,
+          "exit_string_serializer": 650117120,
+          "nested_row_getter": 0,
+          "exit_owned_string_bytes": 0,
+          "exit_borrowed_string_value": 0,
+          "string_getter": 0
+        },
+        "collapsed": "1.18-profile-candidate-typeof-7808.allocation.gz",
+        "sha256": "28050a698c82b19b052fb2d1eccc328d526835b01c65b89adc7048071b31b860"
+      },
+      "stage": "generic-string-exit",
+      "primary": true
+    },
+    {
+      "line": "1.18",
+      "cohort": "previous",
+      "case": "typeof",
+      "jfr_sha256": "928f207b0428f1385e5ce560f576fdfb642dcf6b04dc9cf436244e73a27e0c9d",
+      "cpu": {
+        "unit": "CPU samples",
+        "scopes": {
+          "whole_process": 22445,
+          "native_calc_inclusive": 909,
+          "row_to_arrow_inclusive": 1003,
+          "exit_inclusive": 632,
+          "generated_collection_evaluation": 0,
+          "jvm_expression_upcall": 0,
+          "direct_row_calc": 0,
+          "nested_string_writer": 0,
+          "utf16_writer": 0,
+          "native_jni_calc": 38,
+          "calc_cdata_export": 68,
+          "calc_cdata_import": 136,
+          "bigint_writer": 0,
+          "exit_row_serializer": 536,
+          "exit_array_serializer": 0,
+          "exit_string_serializer": 125,
+          "nested_row_getter": 0,
+          "exit_owned_string_bytes": 67,
+          "exit_borrowed_string_value": 0,
+          "string_getter": 0
+        },
+        "collapsed": "1.18-profile-previous-typeof-7371.cpu.gz",
+        "sha256": "74b8ce1754890cc146c5dd027cc349e6ce17a66f67ed4541d92a219005b12146"
+      },
+      "allocation": {
+        "unit": "estimated Java allocated bytes",
+        "scopes": {
+          "whole_process": 6671839464,
+          "native_calc_inclusive": 1755316224,
+          "row_to_arrow_inclusive": 1755316224,
+          "exit_inclusive": 1672478720,
+          "generated_collection_evaluation": 0,
+          "jvm_expression_upcall": 0,
+          "direct_row_calc": 0,
+          "nested_string_writer": 0,
+          "utf16_writer": 0,
+          "native_jni_calc": 1048576,
+          "calc_cdata_export": 14680064,
+          "calc_cdata_import": 63963136,
+          "bigint_writer": 0,
+          "exit_row_serializer": 1542455296,
+          "exit_array_serializer": 0,
+          "exit_string_serializer": 679477248,
+          "nested_row_getter": 0,
+          "exit_owned_string_bytes": 88080384,
+          "exit_borrowed_string_value": 0,
+          "string_getter": 0
+        },
+        "collapsed": "1.18-profile-previous-typeof-7371.allocation.gz",
+        "sha256": "a062953582b5c2545fec2e3941c69e8559f8f4095819e5a1b9a2fc3b9ea2175f"
+      },
+      "stage": "generic-string-exit",
+      "primary": true
+    },
+    {
+      "line": "2.2",
+      "cohort": "candidate",
+      "case": "typeof",
+      "jfr_sha256": "b9e3a6e8291f54f6e9d7942d94a2b0424e28fc910240516b5a2c0e473d75550d",
+      "cpu": {
+        "unit": "CPU samples",
+        "scopes": {
+          "whole_process": 25227,
+          "native_calc_inclusive": 901,
+          "row_to_arrow_inclusive": 974,
+          "exit_inclusive": 543,
+          "generated_collection_evaluation": 0,
+          "jvm_expression_upcall": 0,
+          "direct_row_calc": 0,
+          "nested_string_writer": 0,
+          "utf16_writer": 0,
+          "native_jni_calc": 63,
+          "calc_cdata_export": 64,
+          "calc_cdata_import": 199,
+          "bigint_writer": 0,
+          "exit_row_serializer": 434,
+          "exit_array_serializer": 0,
+          "exit_string_serializer": 91,
+          "nested_row_getter": 0,
+          "exit_owned_string_bytes": 0,
+          "exit_borrowed_string_value": 10,
+          "string_getter": 16
+        },
+        "collapsed": "2.2-profile-candidate-typeof-7960.cpu.gz",
+        "sha256": "1788200d49490c3b7e8b650cc4fc037a53dd88a1653be67101753088fd678ab1"
+      },
+      "allocation": {
+        "unit": "estimated Java allocated bytes",
+        "scopes": {
+          "whole_process": 6255867216,
+          "native_calc_inclusive": 1086324736,
+          "row_to_arrow_inclusive": 1092616192,
+          "exit_inclusive": 1033895936,
+          "generated_collection_evaluation": 0,
+          "jvm_expression_upcall": 0,
+          "direct_row_calc": 0,
+          "nested_string_writer": 0,
+          "utf16_writer": 0,
+          "native_jni_calc": 0,
+          "calc_cdata_export": 13631488,
+          "calc_cdata_import": 36700160,
+          "bigint_writer": 0,
+          "exit_row_serializer": 894435328,
+          "exit_array_serializer": 0,
+          "exit_string_serializer": 706740224,
+          "nested_row_getter": 0,
+          "exit_owned_string_bytes": 0,
+          "exit_borrowed_string_value": 0,
+          "string_getter": 0
+        },
+        "collapsed": "2.2-profile-candidate-typeof-7960.allocation.gz",
+        "sha256": "0905f1f0e31699e832438429a4cd0023864f257e3542bde5713a2243bb2dcea2"
+      },
+      "stage": "generic-string-exit",
+      "primary": true
+    },
+    {
+      "line": "2.2",
+      "cohort": "previous",
+      "case": "typeof",
+      "jfr_sha256": "1017779100564f1517a0884f14f1b90cf20960eda5b51a44b473a9ba2b162d1a",
+      "cpu": {
+        "unit": "CPU samples",
+        "scopes": {
+          "whole_process": 25163,
+          "native_calc_inclusive": 904,
+          "row_to_arrow_inclusive": 997,
+          "exit_inclusive": 561,
+          "generated_collection_evaluation": 0,
+          "jvm_expression_upcall": 0,
+          "direct_row_calc": 0,
+          "nested_string_writer": 0,
+          "utf16_writer": 0,
+          "native_jni_calc": 53,
+          "calc_cdata_export": 68,
+          "calc_cdata_import": 194,
+          "bigint_writer": 0,
+          "exit_row_serializer": 469,
+          "exit_array_serializer": 0,
+          "exit_string_serializer": 95,
+          "nested_row_getter": 0,
+          "exit_owned_string_bytes": 81,
+          "exit_borrowed_string_value": 0,
+          "string_getter": 0
+        },
+        "collapsed": "2.2-profile-previous-typeof-7515.cpu.gz",
+        "sha256": "2bcd1fcf83fab7a1cabc599e99a31c2085fdf67fc6c55a4f5227f5731c1cb38d"
+      },
+      "allocation": {
+        "unit": "estimated Java allocated bytes",
+        "scopes": {
+          "whole_process": 6965755648,
+          "native_calc_inclusive": 1728053248,
+          "row_to_arrow_inclusive": 1730150400,
+          "exit_inclusive": 1673527296,
+          "generated_collection_evaluation": 0,
+          "jvm_expression_upcall": 0,
+          "direct_row_calc": 0,
+          "nested_string_writer": 0,
+          "utf16_writer": 0,
+          "native_jni_calc": 0,
+          "calc_cdata_export": 10485760,
+          "calc_cdata_import": 37748736,
+          "bigint_writer": 0,
+          "exit_row_serializer": 1543503872,
+          "exit_array_serializer": 0,
+          "exit_string_serializer": 697303040,
+          "nested_row_getter": 0,
+          "exit_owned_string_bytes": 80740352,
+          "exit_borrowed_string_value": 0,
+          "string_getter": 0
+        },
+        "collapsed": "2.2-profile-previous-typeof-7515.allocation.gz",
+        "sha256": "909fb07852eafddbd8ccd9d1d2dbec2a3c8a276c3442c959eca6a581404e6c60"
+      },
+      "stage": "generic-string-exit",
+      "primary": true
+    }
+  ]
+}

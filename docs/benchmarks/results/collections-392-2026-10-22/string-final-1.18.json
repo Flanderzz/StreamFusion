@@ -1,0 +1,212 @@
+{
+  "environment": {
+    "line": "1.18",
+    "baseline": "d951a83808425f9e7df7c0f6fc3fdb082443885f",
+    "candidate": "f7867f5568509d6fb1656b4f75b2f8a3b348533f",
+    "cpu": "AMD EPYC 9V74 80-Core Processor",
+    "platform": "Linux-6.17.0-1022-azure-x86_64-with-glibc2.39",
+    "java": "openjdk version \"17.0.20.1\" 2026-08-18\nOpenJDK Runtime Environment Temurin-17.0.20.1+1 (build 17.0.20.1+1)\nOpenJDK 64-Bit Server VM Temurin-17.0.20.1+1 (build 17.0.20.1+1, mixed mode, sharing)\n",
+    "native_sha256": "3065d4328ac773790a75beac04e35aab49291abb1206b10250a09fbf5e7393a2",
+    "native_features": "release, no-default-features, mimalloc",
+    "heap": "2 GiB",
+    "parallelism": 1,
+    "warmup": 2,
+    "runs": 5,
+    "rows": 2000000,
+    "method": "Fresh JVM per expression/cohort; alternating stock/native pairs; MiniCluster construction and explain outside timing; production sources, transposes, JNI, deployment and row sink inside."
+  },
+  "records": [
+    {
+      "cohort": "previous",
+      "case": "join",
+      "expression": "ARRAY_JOIN(arr,'|','?')",
+      "map_source": false,
+      "type": "STRING",
+      "width": 8,
+      "stock_trials": [
+        2.59096885,
+        2.675401421,
+        2.622975754,
+        2.813086792,
+        2.657608548
+      ],
+      "native_trials": [
+        2.553401617,
+        2.459450414,
+        2.465838763,
+        2.464284793,
+        2.433490044
+      ],
+      "route_evidence": [
+        "[collection-engine] [NativeCalc functions: native=[ARRAY_JOIN], jvm=[]]",
+        "[collection-route] [{attempt=0, jobId=a3dc74555c07478aa438e1fa354ebcd9, recordsIn=2000000, operator=NativeCalc(select=[ARRAY_JOIN(arr, '|', '?') AS v, true AS anchor], nativeFuncti, recordsOut=2000000, subtask=0}]",
+        "[collection-route] [{attempt=0, jobId=177d72f93998efac226dbe487d0349e8, recordsIn=2000000, operator=NativeCalc(select=[ARRAY_JOIN(arr, '|', '?') AS v, true AS anchor], nativeFuncti, recordsOut=2000000, subtask=0}]",
+        "[collection-route] [{attempt=0, jobId=77692b67c97b35a485700233ea75c3df, recordsIn=2000000, operator=NativeCalc(select=[ARRAY_JOIN(arr, '|', '?') AS v, true AS anchor], nativeFuncti, recordsOut=2000000, subtask=0}]",
+        "[collection-route] [{attempt=0, jobId=248ca2523202a32b4f8e6c21c81bc006, recordsIn=2000000, operator=NativeCalc(select=[ARRAY_JOIN(arr, '|', '?') AS v, true AS anchor], nativeFuncti, recordsOut=2000000, subtask=0}]",
+        "[collection-route] [{attempt=0, jobId=8a3760dd61e994431261caad2410294d, recordsIn=2000000, operator=NativeCalc(select=[ARRAY_JOIN(arr, '|', '?') AS v, true AS anchor], nativeFuncti, recordsOut=2000000, subtask=0}]",
+        "[collection-route] [{attempt=0, jobId=eb53ce9e3a29d75a22b5601ba20ad9c6, recordsIn=2000000, operator=NativeCalc(select=[ARRAY_JOIN(arr, '|', '?') AS v, true AS anchor], nativeFuncti, recordsOut=2000000, subtask=0}]",
+        "[collection-route] [{attempt=0, jobId=be3a167ac1c3d590c0cbc66c6a1b4f8b, recordsIn=2000000, operator=NativeCalc(select=[ARRAY_JOIN(arr, '|', '?') AS v, true AS anchor], nativeFuncti, recordsOut=2000000, subtask=0}]"
+      ],
+      "all_trials": [
+        "[collection-trial] engine=flink trial=0 warmup=true rows=2000000 seconds=3.525032411",
+        "[collection-trial] engine=native trial=0 warmup=true rows=2000000 seconds=2.924583181",
+        "[collection-trial] engine=native trial=1 warmup=true rows=2000000 seconds=2.617196050",
+        "[collection-trial] engine=flink trial=1 warmup=true rows=2000000 seconds=2.644362029",
+        "[collection-trial] engine=flink trial=2 warmup=false rows=2000000 seconds=2.590968850",
+        "[collection-trial] engine=native trial=2 warmup=false rows=2000000 seconds=2.553401617",
+        "[collection-trial] engine=native trial=3 warmup=false rows=2000000 seconds=2.459450414",
+        "[collection-trial] engine=flink trial=3 warmup=false rows=2000000 seconds=2.675401421",
+        "[collection-trial] engine=flink trial=4 warmup=false rows=2000000 seconds=2.622975754",
+        "[collection-trial] engine=native trial=4 warmup=false rows=2000000 seconds=2.465838763",
+        "[collection-trial] engine=native trial=5 warmup=false rows=2000000 seconds=2.464284793",
+        "[collection-trial] engine=flink trial=5 warmup=false rows=2000000 seconds=2.813086792",
+        "[collection-trial] engine=flink trial=6 warmup=false rows=2000000 seconds=2.657608548",
+        "[collection-trial] engine=native trial=6 warmup=false rows=2000000 seconds=2.433490044"
+      ]
+    },
+    {
+      "cohort": "previous",
+      "case": "typeof",
+      "expression": "TYPEOF(idx)",
+      "map_source": false,
+      "type": "BIGINT",
+      "width": 8,
+      "stock_trials": [
+        0.65020861,
+        0.868747307,
+        0.638271693,
+        0.654994086,
+        0.663096056
+      ],
+      "native_trials": [
+        0.710763788,
+        0.648315046,
+        0.629620196,
+        0.570235977,
+        0.603782384
+      ],
+      "route_evidence": [
+        "[collection-engine] [NativeCalc functions: native=[TYPEOF], jvm=[]]",
+        "[collection-route] [{recordsOut=2000000, subtask=0, attempt=0, jobId=e04ac8c5982d25dcd81f568320edd663, recordsIn=2000000, operator=NativeCalc(select=[TYPEOF(idx) AS v, true AS anchor], nativeFunctions=[TYPEOF], }]",
+        "[collection-route] [{recordsOut=2000000, subtask=0, attempt=0, jobId=f2efa053924874b8583ded208d4b2f63, recordsIn=2000000, operator=NativeCalc(select=[TYPEOF(idx) AS v, true AS anchor], nativeFunctions=[TYPEOF], }]",
+        "[collection-route] [{recordsOut=2000000, subtask=0, attempt=0, jobId=7ff2d7743eb6ff5f4603f9a902bd09de, recordsIn=2000000, operator=NativeCalc(select=[TYPEOF(idx) AS v, true AS anchor], nativeFunctions=[TYPEOF], }]",
+        "[collection-route] [{recordsOut=2000000, subtask=0, attempt=0, jobId=29fab05cfc5dc2c9de8f2eb688183429, recordsIn=2000000, operator=NativeCalc(select=[TYPEOF(idx) AS v, true AS anchor], nativeFunctions=[TYPEOF], }]",
+        "[collection-route] [{recordsOut=2000000, subtask=0, attempt=0, jobId=ce14b47b0dd45926251bacf2e6a47caf, recordsIn=2000000, operator=NativeCalc(select=[TYPEOF(idx) AS v, true AS anchor], nativeFunctions=[TYPEOF], }]",
+        "[collection-route] [{recordsOut=2000000, subtask=0, attempt=0, jobId=06b0691112913207a8644012c2e29c40, recordsIn=2000000, operator=NativeCalc(select=[TYPEOF(idx) AS v, true AS anchor], nativeFunctions=[TYPEOF], }]",
+        "[collection-route] [{recordsOut=2000000, subtask=0, attempt=0, jobId=edb460a0af4d3858e51292694ee1dc3e, recordsIn=2000000, operator=NativeCalc(select=[TYPEOF(idx) AS v, true AS anchor], nativeFunctions=[TYPEOF], }]"
+      ],
+      "all_trials": [
+        "[collection-trial] engine=flink trial=0 warmup=true rows=2000000 seconds=1.260547381",
+        "[collection-trial] engine=native trial=0 warmup=true rows=2000000 seconds=0.976793447",
+        "[collection-trial] engine=native trial=1 warmup=true rows=2000000 seconds=0.804213504",
+        "[collection-trial] engine=flink trial=1 warmup=true rows=2000000 seconds=0.648954640",
+        "[collection-trial] engine=flink trial=2 warmup=false rows=2000000 seconds=0.650208610",
+        "[collection-trial] engine=native trial=2 warmup=false rows=2000000 seconds=0.710763788",
+        "[collection-trial] engine=native trial=3 warmup=false rows=2000000 seconds=0.648315046",
+        "[collection-trial] engine=flink trial=3 warmup=false rows=2000000 seconds=0.868747307",
+        "[collection-trial] engine=flink trial=4 warmup=false rows=2000000 seconds=0.638271693",
+        "[collection-trial] engine=native trial=4 warmup=false rows=2000000 seconds=0.629620196",
+        "[collection-trial] engine=native trial=5 warmup=false rows=2000000 seconds=0.570235977",
+        "[collection-trial] engine=flink trial=5 warmup=false rows=2000000 seconds=0.654994086",
+        "[collection-trial] engine=flink trial=6 warmup=false rows=2000000 seconds=0.663096056",
+        "[collection-trial] engine=native trial=6 warmup=false rows=2000000 seconds=0.603782384"
+      ]
+    },
+    {
+      "cohort": "candidate",
+      "case": "join",
+      "expression": "ARRAY_JOIN(arr,'|','?')",
+      "map_source": false,
+      "type": "STRING",
+      "width": 8,
+      "stock_trials": [
+        2.752670875,
+        2.718532441,
+        2.751352637,
+        2.715937268,
+        2.69616285
+      ],
+      "native_trials": [
+        2.455861245,
+        2.422210372,
+        2.493551431,
+        2.360143376,
+        2.346466149
+      ],
+      "route_evidence": [
+        "[collection-engine] [NativeCalc functions: native=[ARRAY_JOIN], jvm=[]]",
+        "[collection-route] [{operator=NativeCalc(select=[ARRAY_JOIN(arr, '|', '?') AS v, true AS anchor], nativeFuncti, recordsIn=2000000, jobId=344ee3cdca01c001aef2843319463c1f, attempt=0, subtask=0, recordsOut=2000000}]",
+        "[collection-route] [{operator=NativeCalc(select=[ARRAY_JOIN(arr, '|', '?') AS v, true AS anchor], nativeFuncti, recordsIn=2000000, jobId=fea54c4f465b5dfc613ab84eb0b6147f, attempt=0, subtask=0, recordsOut=2000000}]",
+        "[collection-route] [{operator=NativeCalc(select=[ARRAY_JOIN(arr, '|', '?') AS v, true AS anchor], nativeFuncti, recordsIn=2000000, jobId=eab21e3a73686e57d76f0b8e5bef4f1e, attempt=0, subtask=0, recordsOut=2000000}]",
+        "[collection-route] [{operator=NativeCalc(select=[ARRAY_JOIN(arr, '|', '?') AS v, true AS anchor], nativeFuncti, recordsIn=2000000, jobId=83d25ced081e08cef6cb8a6e14160227, attempt=0, subtask=0, recordsOut=2000000}]",
+        "[collection-route] [{operator=NativeCalc(select=[ARRAY_JOIN(arr, '|', '?') AS v, true AS anchor], nativeFuncti, recordsIn=2000000, jobId=8044215b764e715d4b48fd009ebeecbc, attempt=0, subtask=0, recordsOut=2000000}]",
+        "[collection-route] [{operator=NativeCalc(select=[ARRAY_JOIN(arr, '|', '?') AS v, true AS anchor], nativeFuncti, recordsIn=2000000, jobId=69d4f469e0f0bc30604b69df3bbd1620, attempt=0, subtask=0, recordsOut=2000000}]",
+        "[collection-route] [{operator=NativeCalc(select=[ARRAY_JOIN(arr, '|', '?') AS v, true AS anchor], nativeFuncti, recordsIn=2000000, jobId=88ed975a62842c18ba93b2f2c50c0341, attempt=0, subtask=0, recordsOut=2000000}]"
+      ],
+      "all_trials": [
+        "[collection-trial] engine=flink trial=0 warmup=true rows=2000000 seconds=3.607034533",
+        "[collection-trial] engine=native trial=0 warmup=true rows=2000000 seconds=2.940715186",
+        "[collection-trial] engine=native trial=1 warmup=true rows=2000000 seconds=2.713677589",
+        "[collection-trial] engine=flink trial=1 warmup=true rows=2000000 seconds=2.820543125",
+        "[collection-trial] engine=flink trial=2 warmup=false rows=2000000 seconds=2.752670875",
+        "[collection-trial] engine=native trial=2 warmup=false rows=2000000 seconds=2.455861245",
+        "[collection-trial] engine=native trial=3 warmup=false rows=2000000 seconds=2.422210372",
+        "[collection-trial] engine=flink trial=3 warmup=false rows=2000000 seconds=2.718532441",
+        "[collection-trial] engine=flink trial=4 warmup=false rows=2000000 seconds=2.751352637",
+        "[collection-trial] engine=native trial=4 warmup=false rows=2000000 seconds=2.493551431",
+        "[collection-trial] engine=native trial=5 warmup=false rows=2000000 seconds=2.360143376",
+        "[collection-trial] engine=flink trial=5 warmup=false rows=2000000 seconds=2.715937268",
+        "[collection-trial] engine=flink trial=6 warmup=false rows=2000000 seconds=2.696162850",
+        "[collection-trial] engine=native trial=6 warmup=false rows=2000000 seconds=2.346466149"
+      ]
+    },
+    {
+      "cohort": "candidate",
+      "case": "typeof",
+      "expression": "TYPEOF(idx)",
+      "map_source": false,
+      "type": "BIGINT",
+      "width": 8,
+      "stock_trials": [
+        0.650558942,
+        0.853240552,
+        0.617221104,
+        0.714570099,
+        0.648144684
+      ],
+      "native_trials": [
+        0.604011417,
+        0.673107386,
+        0.58695231,
+        0.585587935,
+        0.555015238
+      ],
+      "route_evidence": [
+        "[collection-engine] [NativeCalc functions: native=[TYPEOF], jvm=[]]",
+        "[collection-route] [{recordsIn=2000000, operator=NativeCalc(select=[TYPEOF(idx) AS v, true AS anchor], nativeFunctions=[TYPEOF], , recordsOut=2000000, subtask=0, attempt=0, jobId=a2d22ec4feead3472802dacb043af5c0}]",
+        "[collection-route] [{recordsIn=2000000, operator=NativeCalc(select=[TYPEOF(idx) AS v, true AS anchor], nativeFunctions=[TYPEOF], , recordsOut=2000000, subtask=0, attempt=0, jobId=8fd23bcd0e8de39e3d2e99713f14732b}]",
+        "[collection-route] [{recordsIn=2000000, operator=NativeCalc(select=[TYPEOF(idx) AS v, true AS anchor], nativeFunctions=[TYPEOF], , recordsOut=2000000, subtask=0, attempt=0, jobId=f5f9966a3fd46c68397f50738170d9e3}]",
+        "[collection-route] [{recordsIn=2000000, operator=NativeCalc(select=[TYPEOF(idx) AS v, true AS anchor], nativeFunctions=[TYPEOF], , recordsOut=2000000, subtask=0, attempt=0, jobId=48308d472c4faad393d4c46bbee5879f}]",
+        "[collection-route] [{recordsIn=2000000, operator=NativeCalc(select=[TYPEOF(idx) AS v, true AS anchor], nativeFunctions=[TYPEOF], , recordsOut=2000000, subtask=0, attempt=0, jobId=46c469d95b644e857fded6349862836d}]",
+        "[collection-route] [{recordsIn=2000000, operator=NativeCalc(select=[TYPEOF(idx) AS v, true AS anchor], nativeFunctions=[TYPEOF], , recordsOut=2000000, subtask=0, attempt=0, jobId=48becf63a6e027d649f100ea4607379c}]",
+        "[collection-route] [{recordsIn=2000000, operator=NativeCalc(select=[TYPEOF(idx) AS v, true AS anchor], nativeFunctions=[TYPEOF], , recordsOut=2000000, subtask=0, attempt=0, jobId=bca6e1f82f1724652b05d335aaddce68}]"
+      ],
+      "all_trials": [
+        "[collection-trial] engine=flink trial=0 warmup=true rows=2000000 seconds=1.295508285",
+        "[collection-trial] engine=native trial=0 warmup=true rows=2000000 seconds=0.994722741",
+        "[collection-trial] engine=native trial=1 warmup=true rows=2000000 seconds=0.659845293",
+        "[collection-trial] engine=flink trial=1 warmup=true rows=2000000 seconds=0.651470391",
+        "[collection-trial] engine=flink trial=2 warmup=false rows=2000000 seconds=0.650558942",
+        "[collection-trial] engine=native trial=2 warmup=false rows=2000000 seconds=0.604011417",
+        "[collection-trial] engine=native trial=3 warmup=false rows=2000000 seconds=0.673107386",
+        "[collection-trial] engine=flink trial=3 warmup=false rows=2000000 seconds=0.853240552",
+        "[collection-trial] engine=flink trial=4 warmup=false rows=2000000 seconds=0.617221104",
+        "[collection-trial] engine=native trial=4 warmup=false rows=2000000 seconds=0.586952310",
+        "[collection-trial] engine=native trial=5 warmup=false rows=2000000 seconds=0.585587935",
+        "[collection-trial] engine=flink trial=5 warmup=false rows=2000000 seconds=0.714570099",
+        "[collection-trial] engine=flink trial=6 warmup=false rows=2000000 seconds=0.648144684",
+        "[collection-trial] engine=native trial=6 warmup=false rows=2000000 seconds=0.555015238"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,265 @@
+{
+  "production_revision": "8a490951 plus generic string exit from f7867f55",
+  "suites": [
+    {
+      "line": "2.2",
+      "totals": {
+        "tests": 345,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "classes": [
+        {
+          "name": "tech.streamfusion.FlinkMapProjectionSqlHarnessTest",
+          "tests": "45",
+          "failures": "0",
+          "errors": "0",
+          "skipped": "0"
+        },
+        {
+          "name": "tech.streamfusion.FlinkCollectionRepresentationSqlHarnessTest",
+          "tests": "39",
+          "failures": "0",
+          "errors": "0",
+          "skipped": "0"
+        },
+        {
+          "name": "tech.streamfusion.FlinkGeneratedCollectionSqlHarnessTest",
+          "tests": "84",
+          "failures": "0",
+          "errors": "0",
+          "skipped": "0"
+        },
+        {
+          "name": "tech.streamfusion.FlinkMetadataFunctionsSqlHarnessTest",
+          "tests": "27",
+          "failures": "0",
+          "errors": "0",
+          "skipped": "0"
+        },
+        {
+          "name": "tech.streamfusion.FlinkArrayJoinSqlHarnessTest",
+          "tests": "4",
+          "failures": "0",
+          "errors": "0",
+          "skipped": "0"
+        },
+        {
+          "name": "tech.streamfusion.FlinkCollectionStringBuiltinsSqlHarnessTest",
+          "tests": "6",
+          "failures": "0",
+          "errors": "0",
+          "skipped": "0"
+        },
+        {
+          "name": "tech.streamfusion.FlinkObjectFunctionsSqlHarnessTest",
+          "tests": "6",
+          "failures": "0",
+          "errors": "0",
+          "skipped": "0"
+        },
+        {
+          "name": "tech.streamfusion.FlinkNestedScalarSqlHarnessTest",
+          "tests": "30",
+          "failures": "0",
+          "errors": "0",
+          "skipped": "0"
+        },
+        {
+          "name": "tech.streamfusion.FlinkMapScalarUdfSqlHarnessTest",
+          "tests": "58",
+          "failures": "0",
+          "errors": "0",
+          "skipped": "0"
+        },
+        {
+          "name": "tech.streamfusion.operator.CollectionExitOwnershipTest",
+          "tests": "6",
+          "failures": "0",
+          "errors": "0",
+          "skipped": "0"
+        },
+        {
+          "name": "tech.streamfusion.arrow.OwnedScalarRowTest",
+          "tests": "1",
+          "failures": "0",
+          "errors": "0",
+          "skipped": "0"
+        },
+        {
+          "name": "tech.streamfusion.operator.StringExitOwnershipTest",
+          "tests": "8",
+          "failures": "0",
+          "errors": "0",
+          "skipped": "0"
+        },
+        {
+          "name": "tech.streamfusion.arrow.BinaryRowPayloadTest",
+          "tests": "4",
+          "failures": "0",
+          "errors": "0",
+          "skipped": "0"
+        },
+        {
+          "name": "tech.streamfusion.operator.TransposeOperatorsTest",
+          "tests": "15",
+          "failures": "0",
+          "errors": "0",
+          "skipped": "0"
+        },
+        {
+          "name": "tech.streamfusion.planner.GeneratedExpressionRuntimeIsolationTest",
+          "tests": "6",
+          "failures": "0",
+          "errors": "0",
+          "skipped": "0"
+        },
+        {
+          "name": "tech.streamfusion.FlinkCollectionSinkPlanningTest",
+          "tests": "6",
+          "failures": "0",
+          "errors": "0",
+          "skipped": "0"
+        }
+      ]
+    },
+    {
+      "line": "1.18",
+      "totals": {
+        "tests": 345,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 37
+      },
+      "classes": [
+        {
+          "name": "tech.streamfusion.FlinkMapProjectionSqlHarnessTest",
+          "tests": "45",
+          "failures": "0",
+          "errors": "0",
+          "skipped": "1"
+        },
+        {
+          "name": "tech.streamfusion.FlinkCollectionRepresentationSqlHarnessTest",
+          "tests": "39",
+          "failures": "0",
+          "errors": "0",
+          "skipped": "11"
+        },
+        {
+          "name": "tech.streamfusion.FlinkGeneratedCollectionSqlHarnessTest",
+          "tests": "84",
+          "failures": "0",
+          "errors": "0",
+          "skipped": "15"
+        },
+        {
+          "name": "tech.streamfusion.FlinkMetadataFunctionsSqlHarnessTest",
+          "tests": "27",
+          "failures": "0",
+          "errors": "0",
+          "skipped": "1"
+        },
+        {
+          "name": "tech.streamfusion.FlinkArrayJoinSqlHarnessTest",
+          "tests": "4",
+          "failures": "0",
+          "errors": "0",
+          "skipped": "0"
+        },
+        {
+          "name": "tech.streamfusion.FlinkCollectionStringBuiltinsSqlHarnessTest",
+          "tests": "6",
+          "failures": "0",
+          "errors": "0",
+          "skipped": "2"
+        },
+        {
+          "name": "tech.streamfusion.FlinkObjectFunctionsSqlHarnessTest",
+          "tests": "6",
+          "failures": "0",
+          "errors": "0",
+          "skipped": "6"
+        },
+        {
+          "name": "tech.streamfusion.FlinkNestedScalarSqlHarnessTest",
+          "tests": "30",
+          "failures": "0",
+          "errors": "0",
+          "skipped": "1"
+        },
+        {
+          "name": "tech.streamfusion.FlinkMapScalarUdfSqlHarnessTest",
+          "tests": "58",
+          "failures": "0",
+          "errors": "0",
+          "skipped": "0"
+        },
+        {
+          "name": "tech.streamfusion.operator.CollectionExitOwnershipTest",
+          "tests": "6",
+          "failures": "0",
+          "errors": "0",
+          "skipped": "0"
+        },
+        {
+          "name": "tech.streamfusion.arrow.OwnedScalarRowTest",
+          "tests": "1",
+          "failures": "0",
+          "errors": "0",
+          "skipped": "0"
+        },
+        {
+          "name": "tech.streamfusion.operator.StringExitOwnershipTest",
+          "tests": "8",
+          "failures": "0",
+          "errors": "0",
+          "skipped": "0"
+        },
+        {
+          "name": "tech.streamfusion.arrow.BinaryRowPayloadTest",
+          "tests": "4",
+          "failures": "0",
+          "errors": "0",
+          "skipped": "0"
+        },
+        {
+          "name": "tech.streamfusion.operator.TransposeOperatorsTest",
+          "tests": "15",
+          "failures": "0",
+          "errors": "0",
+          "skipped": "0"
+        },
+        {
+          "name": "tech.streamfusion.planner.GeneratedExpressionRuntimeIsolationTest",
+          "tests": "6",
+          "failures": "0",
+          "errors": "0",
+          "skipped": "0"
+        },
+        {
+          "name": "tech.streamfusion.FlinkCollectionSinkPlanningTest",
+          "tests": "6",
+          "failures": "0",
+          "errors": "0",
+          "skipped": "0"
+        }
+      ]
+    }
+  ],
+  "additional_diagnostic_validation": "Generated MAP and Rust MAP_VALUES route assertions pass on 16-row jobs on each line. Their durations are excluded from performance evidence.",
+  "string_exit_test_sha256": "ff10425d5bf285b6e773c54c29faf0da0ed33f028a48be5fa0571892d9fceab9",
+  "initial_ci_failure": {
+    "job": "https://github.com/datafusion-contrib/StreamFusion/actions/runs/39777496294/job/119823292925",
+    "test": "NativeIcebergKeyedTest.hostDeletesAndRecoveryPreserveNativeDataPositions[false,true,hash,true,2]",
+    "assertion": "Final table rows passed; expected equality+position delete file kinds, observed only position deletes.",
+    "scope": "Direct Arrow INT/INT/TinyInt RowKind input, outside changed paths. Assertion retained; final-head CI must pass."
+  },
+  "string_compatibility_failure": {
+    "revision": "8a490951",
+    "job": "https://github.com/datafusion-contrib/StreamFusion/actions/runs/39785311054/job/119864114296",
+    "assertion": "Unchanged Kafka legacy RowData consumers expected generic field rendering and received BinaryRowData identities.",
+    "fix": "Retain generic rows; borrow bytes only during synchronous ownership copies. Added generic rendering assertion to existing ownership cases; upstream sources and assertions unchanged."
+  }
+}

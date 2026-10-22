@@ -64,9 +64,8 @@ class DynamicCollectionBenchmark {
       if (!EXPECT_NATIVE && plan.contains("NativeCalc")) {
         throw new IllegalStateException("Expected fallback control: " + plan);
       }
-      String rustFunction = System.getProperty("collection.rustFunction");
-      assertRustFunction(planning);
-      if (rustFunction != null) System.out.println("[collection-engine] " + planning.functionExecutions());
+      assertFunctionExecution(planning);
+      System.out.println("[collection-engine] " + planning.functionExecutions());
       String fallbackReason = System.getProperty("collection.fallbackReason");
       if (!EXPECT_NATIVE && fallbackReason != null && !plan.contains(fallbackReason)) {
         throw new IllegalStateException("Unexpected fallback reason: " + plan);
@@ -77,6 +76,9 @@ class DynamicCollectionBenchmark {
         for (int turn = 0; turn < 2; turn++) {
           int engine = (trial + turn) % 2;
           double elapsed = run(map, expression, engine == 1);
+          System.out.printf(Locale.ROOT,
+              "[collection-trial] engine=%s trial=%d warmup=%s rows=%d seconds=%.9f%n",
+              engine == 1 ? "native" : "flink", trial, trial < WARMUP, ROWS, elapsed);
           if (trial >= WARMUP) {
             seconds[engine][trial - WARMUP] = elapsed;
           }
@@ -111,27 +113,49 @@ class DynamicCollectionBenchmark {
   }
 
   private static double run(boolean map, String expression, boolean nativeRun) throws Exception {
-    TableEnvironment table = environment(map);
-    String sql = prepare(table, expression);
-    PhysicalPlanScan scan = nativeRun ? NativePlanner.install(table) : null;
-    long start = System.nanoTime();
-    table.executeSql(sql).await();
-    double seconds = (System.nanoTime() - start) / 1e9;
-    if (nativeRun && (scan.substitutions() > 0) != EXPECT_NATIVE) {
-      throw new IllegalStateException("Unexpected route: " + scan.explainSummary());
+    try (var metrics = new RecoveryExecutionMetrics()) {
+      TableEnvironment table = environment(map,
+          metrics.environment(new org.apache.flink.configuration.Configuration(), 1, 0));
+      String sql = prepare(table, expression);
+      PhysicalPlanScan scan = nativeRun ? NativePlanner.install(table) : null;
+      long start = System.nanoTime();
+      table.executeSql(sql).await();
+      double seconds = (System.nanoTime() - start) / 1e9;
+      if (nativeRun && (scan.substitutions() > 0) != EXPECT_NATIVE) {
+        throw new IllegalStateException("Unexpected route: " + scan.explainSummary());
+      }
+      if (nativeRun) {
+        assertFunctionExecution(scan);
+        if (EXPECT_NATIVE) {
+          var observations = metrics.nativeOperators();
+          RecoveryExecutionMetrics.assertConsumed(observations, "NativeCalc");
+          System.out.println("[collection-route] " + observations);
+        }
+      }
+      return seconds;
     }
-    if (nativeRun) assertRustFunction(scan);
-    return seconds;
   }
 
-  private static void assertRustFunction(PhysicalPlanScan scan) {
-    String function = System.getProperty("collection.rustFunction");
-    if (function != null
-        && scan.functionExecutions().stream().noneMatch(execution ->
-            execution.contains("native=[") && execution.contains(function)
-                && execution.contains("jvm=[]"))) {
+  private static void assertFunctionExecution(PhysicalPlanScan scan) {
+    String rustFunction = System.getProperty("collection.rustFunction");
+    String generatedFunction = System.getProperty("collection.generatedFunction");
+    if (rustFunction != null && scan.functionExecutions().stream().noneMatch(execution ->
+        listsFunction(execution, "native", rustFunction) && execution.contains("jvm=[]"))) {
       throw new IllegalStateException("Expected Rust function execution: " + scan.functionExecutions());
     }
+    if (generatedFunction != null && scan.functionExecutions().stream().noneMatch(execution ->
+        listsFunction(execution, "jvm", generatedFunction))) {
+      throw new IllegalStateException("Expected generated function execution: " + scan.functionExecutions());
+    }
+  }
+
+  private static boolean listsFunction(String execution, String engine, String function) {
+    int start = execution.indexOf(engine + "=[");
+    if (start < 0) return false;
+    start += engine.length() + 2;
+    int end = execution.indexOf(']', start);
+    return end >= 0 && Arrays.stream(execution.substring(start, end).split(","))
+        .map(String::trim).anyMatch(function::equals);
   }
 
   private static double median(double[] values) {
@@ -212,7 +236,10 @@ class DynamicCollectionBenchmark {
   }
 
   private static TableEnvironment environment(boolean map) {
-    StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+    return environment(map, StreamExecutionEnvironment.getExecutionEnvironment());
+  }
+
+  private static TableEnvironment environment(boolean map, StreamExecutionEnvironment env) {
     env.setParallelism(1);
     StreamTableEnvironment table = StreamTableEnvironment.create(env);
     if (map) {

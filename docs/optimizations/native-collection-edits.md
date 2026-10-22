@@ -11,8 +11,8 @@ Sliced offsets and DECIMAL precision/scale remain intact.
 Flink's getter, string representation, NOT NULL-element and failing-expression
 restrictions remain enforced by the planner. This replaces evaluation inside the
 existing extension; its configuration is unchanged. Standalone conversion costs
-and the accepted regressions remain tracked by
-[issue #392](https://github.com/datafusion-contrib/StreamFusion/issues/392).
+and the accepted regressions are recorded below; subsequent boundary improvements are
+measured in the [collection representation ledger](collection-representation-work.md).
 
 The `array_edits` Criterion suite invokes the production compiled Calc with
 independently constructed expected arrays, sliced inputs, empty batches, short
@@ -174,7 +174,7 @@ Query: `ARRAY_PREPEND(arr,CAST(idx AS BIGINT))`, 1,000,000 rows, BIGINT, width 6
 | candidate stock | 0.580153 | 0.567207-0.587232 |
 | candidate streamfusion | 0.603231 | 0.594722-0.607353 |
 
-Elapsed time changes by -41.46% versus the prior evaluator and +3.98% versus paired stock Flink. The remaining stock regression is retained under #392; native coverage is not a universal standalone speedup.
+Elapsed time changes by -41.46% versus the prior evaluator and +3.98% versus paired stock Flink. The stock regression remains part of this historical result; native coverage is not a universal standalone speedup.
 
 [All 20 trials](../benchmarks/collection-array-prepend-2026-10-20.csv), [fixture/checksums](../benchmarks/collection-array-prepend-2026-10-20.json) and [90 allocation probes](../benchmarks/collection-array-prepend-allocations-2026-10-20.csv) retain the evidence. Six per-function SQL tests pass across Boolean, integer widths and exact wide DECIMAL; all nine registry profiles and the independent compiled-Calc fixtures pass.
 
@@ -279,7 +279,7 @@ Query: `ELEMENT(ARRAY_SLICE(arr,1,1))`, 2,000,000 rows, BIGINT, width 8. Method 
 | candidate stock | 0.333849 | 0.332103-0.443378 |
 | candidate streamfusion | 0.359720 | 0.351583-0.379171 |
 
-Elapsed time changes by -26.79% versus the prior evaluator and +7.75% versus paired stock Flink. The remaining stock regression is retained under #392 and the accepted optional extension; default admission is unchanged.
+Elapsed time changes by -26.79% versus the prior evaluator and +7.75% versus paired stock Flink. The stock regression remains part of this historical result and the accepted extension; default admission is unchanged.
 
 [All 20 trials](../benchmarks/collection-element-2026-10-20.csv), [fixture/checksums](../benchmarks/collection-element-2026-10-20.json) and [9 allocation probes](../benchmarks/collection-element-allocations-2026-10-20.csv) retain the evidence. Eight released SQL tests cover empty/singleton/NULL arrays, typed failure, all-filtered batches and competing row errors.
 
@@ -294,7 +294,7 @@ Query: `ARRAY[idx,idx+1]`, 2,000,000 rows, INT, width 8. Method and resources ma
 | candidate stock | 0.497458 | 0.476757-0.525365 |
 | candidate streamfusion | 0.588684 | 0.574635-0.593293 |
 
-Elapsed time changes by -5.81% versus the prior evaluator and +18.34% versus paired stock Flink. The remaining stock regression is retained under #392 and the accepted optional extension; default admission is unchanged.
+Elapsed time changes by -5.81% versus the prior evaluator and +18.34% versus paired stock Flink. The stock regression remains part of this historical result and the accepted extension; default admission is unchanged.
 
 [All 20 trials](../benchmarks/collection-array-2026-10-20.csv), [fixture/checksums](../benchmarks/collection-array-2026-10-20.json) and [18 allocation probes](../benchmarks/collection-array-allocations-2026-10-20.csv) retain the evidence. Thirteen released SQL tests cover exact DECIMAL, typed NULLs and pre-epoch temporal values at precision 3 and 9.
 
@@ -324,7 +324,7 @@ Query: `MAP_KEYS(MAP_FROM_ARRAYS(arr,arr))`, 2,000,000 rows, BIGINT, width 8. Me
 | candidate stock | 0.396228 | 0.389792-0.419411 |
 | candidate streamfusion | 0.425222 | 0.422905-0.434925 |
 
-Elapsed time changes by -37.26% versus the prior evaluator and +7.32% versus paired stock Flink. The remaining stock regression is retained under #392 and the accepted optional extension; default admission is unchanged.
+Elapsed time changes by -37.26% versus the prior evaluator and +7.32% versus paired stock Flink. The stock regression remains part of this historical result and the accepted extension; default admission is unchanged.
 
 [All 20 trials](../benchmarks/collection-map-keys-2026-10-20.csv), [fixture/checksums](../benchmarks/collection-map-keys-2026-10-20.json) and [9 allocation probes](../benchmarks/collection-map-keys-allocations-2026-10-20.csv) retain the evidence. Six released SQL tests cover direct and composed Boolean, integer-width and exact DECIMAL maps; NULL keys, entry order and filtered batches are preserved.
 
@@ -339,7 +339,7 @@ Query: `MAP_VALUES(MAP_FROM_ARRAYS(arr,arr))`, 2,000,000 rows, BIGINT, width 8. 
 | candidate stock | 0.367639 | 0.355607-0.380343 |
 | candidate streamfusion | 0.410347 | 0.407060-0.416887 |
 
-Elapsed time changes by -38.90% versus the prior evaluator and +11.62% versus paired stock Flink. The remaining stock regression is retained under #392 and the accepted optional extension; default admission is unchanged.
+Elapsed time changes by -38.90% versus the prior evaluator and +11.62% versus paired stock Flink. The stock regression remains part of this historical result and the accepted extension; default admission is unchanged.
 
 [All 20 trials](../benchmarks/collection-map-values-2026-10-20.csv), [fixture/checksums](../benchmarks/collection-map-values-2026-10-20.json) and [9 allocation probes](../benchmarks/collection-map-values-allocations-2026-10-20.csv) retain the evidence. Six released SQL tests cover direct and composed basic maps with independent NULL values and filtered batches.
 
@@ -384,7 +384,7 @@ Query: `MAP[idx,idx+1]`, 2,000,000 rows, INT, width 8. Method and resources matc
 | candidate stock | 0.477376 | 0.468256-0.485551 |
 | candidate streamfusion | 0.593470 | 0.582599-0.596819 |
 
-Elapsed time changes by -15.13% versus the prior evaluator and +24.32% versus paired stock Flink. The remaining stock regression is retained under #392 and the accepted optional extension; default admission is unchanged.
+Elapsed time changes by -15.13% versus the prior evaluator and +24.32% versus paired stock Flink. The stock regression remains part of this historical result and the accepted extension; default admission is unchanged.
 
 [All 20 trials](../benchmarks/collection-map-2026-10-20.csv), [fixture/checksums](../benchmarks/collection-map-2026-10-20.json) and [9 allocation probes](../benchmarks/collection-map-allocations-2026-10-20.csv) retain the evidence. Nine released SQL tests cover basic type widths and repeated-key expression fallback, including discarded fallible values.
 
@@ -407,7 +407,7 @@ Query: `ROW(idx,idx+1)`, 2,000,000 rows, INT, width 8. Method and resources matc
 | candidate stock | 0.478091 | 0.467846-0.482988 |
 | candidate streamfusion | 0.584552 | 0.577802-0.608428 |
 
-Elapsed time changes by -23.85% versus the prior evaluator and +22.27% versus paired stock Flink. The remaining stock regression is retained under #392 and the accepted optional extension; default admission is unchanged.
+Elapsed time changes by -23.85% versus the prior evaluator and +22.27% versus paired stock Flink. The stock regression remains part of this historical result and the accepted extension; default admission is unchanged.
 
 [All 20 trials](../benchmarks/collection-row-2026-10-20.csv), [fixture/checksums](../benchmarks/collection-row-2026-10-20.json) and [9 allocation probes](../benchmarks/collection-row-allocations-2026-10-20.csv) retain the evidence. Six released SQL tests cover basic types, NULL fields, field access and filtered batches.
 
@@ -452,7 +452,7 @@ Query: `ARRAY_JOIN(arr,'|','NULL')`, 1,000,000 rows, STRING, width 8. Method and
 | candidate stock | 1.733543 | 1.726776-1.795149 |
 | candidate streamfusion | 1.883071 | 1.868195-1.892549 |
 
-Elapsed time changes by -32.87% versus the prior evaluator and +8.63% versus paired stock Flink. The remaining stock regression is retained under #392 and the accepted optional extension; default admission is unchanged.
+Elapsed time changes by -32.87% versus the prior evaluator and +8.63% versus paired stock Flink. The stock regression remains part of this historical result and the accepted extension; default admission is unchanged.
 
 [All 20 trials](../benchmarks/collection-array-join-2026-10-20.csv), [fixture/checksums](../benchmarks/collection-array-join-2026-10-20.json) and [9 allocation probes](../benchmarks/collection-array-join-allocations-2026-10-20.csv) retain the evidence. Four released SQL tests cover runtime separators/replacements, isolated UTF-16 source surrogates, NULLs, filters and sensitive co-projections.
 

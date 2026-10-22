@@ -100,11 +100,13 @@ input index. Inline object update projects its integer field so the sink has an 
 
 The ten-million-row cases show that reverse and row construction still lose beyond the shorter
 runs. The 1.03x map-cardinality observation is small relative to control drift and does not establish
-performance admission. All other standalone collection/constructor cases are slower than stock.
-[Issue #392](https://github.com/datafusion-contrib/StreamFusion/issues/392) tracks performance improvements.
+performance admission. All other standalone collection/constructor cases in this October 17
+cohort are slower than stock. The [October 22 comparison](collections-392-2026-10-22.md)
+records the subsequent standalone improvement pass for #392.
 The maintainer explicitly accepted merging these slower paths enabled by default on 2026-10-17.
 Both switches can be set false to restore host execution for these extensions. The [conversion optimization](../optimizations/collection-representation-work.md)
-removes measured overhead but does not make these workloads faster than Flink.
+records both the initial overhead reduction and the subsequent measured improvements;
+several standalone cases still lose to Flink.
 
 The CSV labels `candidate`, `previous` and `candidate_initial` distinguish final code, previous
 production fallback and the five cases rerun after optimization. Profiled runs are excluded.
@@ -130,6 +132,14 @@ for join, and the row counts/widths stated above. Other source cases use `collec
 
 
 Reproduce an individual collection case after building the release library:
+
+The current harness retains operator metrics and requires consumed native Calc input for admitted
+runs. It constructs a metrics-enabled MiniCluster before timing each job. Execution-time planning,
+deployment, runtime row sources, both row/Arrow transposes, production JNI and the rowwise sink remain
+inside timing; cluster construction, preliminary schema/explain checks and teardown are outside.
+The October 17 tables above used the earlier harness and are historical observations. Compare fresh
+stock and preceding/current StreamFusion cohorts using the same harness rather than subtracting
+absolute times across those methods. Per-trial logs retain warmups and native execution counters.
 
 ```bash
 SF_BENCHMARK=true mvn -Pbench -pl :streamfusion-runtime -am test \

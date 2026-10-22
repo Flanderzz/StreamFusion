@@ -1,0 +1,35 @@
+{
+  "baseline": "d951a83808425f9e7df7c0f6fc3fdb082443885f",
+  "implementation": "3c47a89d94e9e7d6489b72bc7e8ae12a998537b6",
+  "production_changes_after_implementation": "String binary packing was removed after unchanged legacy Kafka fixtures exposed different RowData.toString rendering. Final strings borrow bytes only during generic-row ownership copies. Collection/BIGINT paths are unchanged.",
+  "initial_run": "https://github.com/datafusion-contrib/StreamFusion/actions/runs/39776490364",
+  "followup_run": "https://github.com/datafusion-contrib/StreamFusion/actions/runs/39780281741",
+  "initial_workflow": "e6eaa0f1817439ba9bd8f2afc1d3557008806ff7",
+  "followup_workflow": "fa4f40c024d6b0c7af4bfce6bb8847ca7c654d2d",
+  "selection": "Initial completed non-string pairs and the follow-up MAP control remain primary. Final string pairs at f786 replace JOIN/TYPEOF binary-packing prototypes. Every completed prototype, interrupted control and clean local replication remains retained, independently of performance.",
+  "initial_artifact_ids": {
+    "2.2": 12426551197,
+    "1.18": 12426660525
+  },
+  "followup_artifact_ids": {
+    "2.2": 12427457611,
+    "1.18": 12428221237
+  },
+  "measured_jobs": {
+    "primary_measured": 420,
+    "primary_warmup": 168,
+    "initial_unpaired_retained": 84,
+    "rejected_string_packing_retained": 112,
+    "local_string_replication": 112,
+    "all_profile_jobs": 80
+  },
+  "integration_base": "717b8d94f8de48643f2204d3cf1e30a1283d2672",
+  "integration_note": "Performance cohorts are frozen at the recorded implementation. Rebase brings separate upstream synchronization/date work and the Iceberg fixture fix; collection and exit routines from this implementation remain unchanged. Native-source equality applies within the measured d951/3c47 comparison, not across the later integration baseline.",
+  "production_diff_sha256": "1c1c232b2e13ab83ba79651b437b76dba123c112a0a9b5a61740f92f701c240f",
+  "final_string_run": "https://github.com/datafusion-contrib/StreamFusion/actions/runs/39800922765",
+  "final_string_revision": "f7867f5568509d6fb1656b4f75b2f8a3b348533f",
+  "final_string_artifact_ids": {
+    "2.2": 12435974311,
+    "1.18": 12436158408
+  }
+}
