@@ -459,10 +459,10 @@ final class RexExpression {
         && (calc.getProgram().getCondition() != null
             || calc.getProgram().getProjectList().stream()
                 .anyMatch(ref -> !(calc.getProgram().expandLocalRef(ref) instanceof RexInputRef)))
-        && (containsRowExpression(calc.getProgram()) || usesMapScalarUdf(calc.getProgram()))) {
+        && (containsRowExpression(calc.getProgram()) || usesCollectionScalarUdf(calc.getProgram()))) {
       encoder.jvmExecutionReason =
-          usesMapScalarUdf(calc.getProgram())
-              ? "MAP UDF signatures require Flink's whole-Calc evaluation"
+          usesCollectionScalarUdf(calc.getProgram())
+              ? "collection UDF signatures require Flink's whole-Calc evaluation"
               : "ROW metadata requires Flink's whole-Calc evaluation";
       return new CalcEncoding(encoder, encoder.emitRowCalc(calc));
     }
@@ -980,24 +980,60 @@ final class RexExpression {
     return usesCollectionFunctions(program);
   }
 
-  static boolean usesMapScalarUdf(RexProgram program) {
+  static boolean usesCollectionScalarUdf(RexProgram program) {
     if (!tech.streamfusion.arrow.ArrowConversion.nestedScalarUdfsEnabled()) return false;
     return program.getCondition() != null
-            && containsMapScalarUdf(program.expandLocalRef(program.getCondition()))
+            && containsCollectionScalarUdf(program.expandLocalRef(program.getCondition()))
         || program.getProjectList().stream()
-            .anyMatch(ref -> containsMapScalarUdf(program.expandLocalRef(ref)));
+            .anyMatch(ref -> containsCollectionScalarUdf(program.expandLocalRef(ref)));
   }
 
-  private static boolean containsMapScalarUdf(RexNode node) {
+  private static boolean containsCollectionScalarUdf(RexNode node) {
     if (node instanceof RexFieldAccess)
-      return containsMapScalarUdf(((RexFieldAccess) node).getReferenceExpr());
+      return containsCollectionScalarUdf(((RexFieldAccess) node).getReferenceExpr());
     if (!(node instanceof RexCall)) return false;
     var call = (RexCall) node;
     return tech.streamfusion.compat.FlinkCompat.scalarFunction(call.getOperator()) != null
-            && (call.getType().getSqlTypeName() == SqlTypeName.MAP
+            && (isCollectionUdfType(call.getType())
                 || call.getOperands().stream()
-                    .anyMatch(arg -> arg.getType().getSqlTypeName() == SqlTypeName.MAP))
-        || call.getOperands().stream().anyMatch(RexExpression::containsMapScalarUdf);
+                    .anyMatch(arg -> isCollectionUdfType(arg.getType())))
+        || call.getOperands().stream().anyMatch(RexExpression::containsCollectionScalarUdf);
+  }
+
+  private static boolean isCollectionUdfType(RelDataType type) {
+    return type.getSqlTypeName() == SqlTypeName.MAP
+        || type.getSqlTypeName() == SqlTypeName.ARRAY;
+  }
+
+  private static boolean isNestedUdfType(RelDataType type) {
+    return type.getSqlTypeName() == SqlTypeName.ROW || isCollectionUdfType(type);
+  }
+
+  private static boolean scalarArrayTypeSupported(RelDataType type) {
+    if (type.getSqlTypeName() != SqlTypeName.ARRAY) return true;
+    var element = type.getComponentType();
+    switch (element.getSqlTypeName()) {
+      case ARRAY:
+        return scalarArrayTypeSupported(element);
+      case BOOLEAN:
+      case TINYINT:
+      case SMALLINT:
+      case INTEGER:
+      case BIGINT:
+      case FLOAT:
+      case DOUBLE:
+      case DECIMAL:
+      case CHAR:
+      case VARCHAR:
+      case VARBINARY:
+      case DATE:
+      case TIME:
+      case TIMESTAMP:
+      case TIMESTAMP_WITH_LOCAL_TIME_ZONE:
+        return true;
+      default:
+        return false;
+    }
   }
 
   static boolean usesCollectionFunctions(RexProgram program) {
@@ -1034,7 +1070,7 @@ final class RexExpression {
     rowFusion = true;
     RexProgram program = calc.getProgram();
     preserveCollections =
-        (usesCollectionFunctions(program) || usesMapScalarUdf(program))
+        (usesCollectionFunctions(program) || usesCollectionScalarUdf(program))
             && program.getExprList().stream()
                 .anyMatch(expression -> CollectionValueIdentity.sensitive(expression.getType()));
     List<RexNode> arguments = new ArrayList<>();
@@ -4590,18 +4626,17 @@ final class RexExpression {
       return rejectUdfMethod("UDF specialization requires Flink's code-generation context");
     }
     SqlTypeName resultType = call.getType().getSqlTypeName();
+    if (!scalarArrayTypeSupported(call.getType())
+        || call.getOperands().stream().anyMatch(arg -> !scalarArrayTypeSupported(arg.getType())))
+      return rejectUdfMethod("ARRAY UDF elements require verified basic Java conversions");
     if (!rowFusion && resultType == SqlTypeName.VARBINARY && ++binaryUdfCalls > 1) {
       return rejectUdfMethod("multiple binary UDF calls may share mutable result buffers");
     }
     boolean nested = rowFusion && tech.streamfusion.arrow.ArrowConversion.nestedScalarUdfsEnabled();
     boolean nestedBoundary =
-        resultType == SqlTypeName.ROW
-            || resultType == SqlTypeName.MAP
+        isNestedUdfType(call.getType())
             || call.getOperands().stream()
-                .anyMatch(
-                    arg ->
-                        arg.getType().getSqlTypeName() == SqlTypeName.ROW
-                            || arg.getType().getSqlTypeName() == SqlTypeName.MAP);
+                .anyMatch(arg -> isNestedUdfType(arg.getType()));
     if (nested && nestedBoundary) {
       try {
         if (scalar
@@ -4616,7 +4651,7 @@ final class RexExpression {
       }
     }
     int returnCode =
-        nested && (resultType == SqlTypeName.ROW || resultType == SqlTypeName.MAP)
+        nested && isNestedUdfType(call.getType())
             ? rowCalcTypeCode(call.getType(), preserveCollections)
             : udfTypeCode(call.getType());
     if (returnCode < 0 && !(rowFusion && isTemporalUdfType(call.getType()))) {
@@ -4625,9 +4660,7 @@ final class RexExpression {
     List<RexNode> args = call.getOperands();
     for (RexNode argument : args) {
       int argumentCode =
-          nested
-                  && (argument.getType().getSqlTypeName() == SqlTypeName.ROW
-                      || argument.getType().getSqlTypeName() == SqlTypeName.MAP)
+          nested && isNestedUdfType(argument.getType())
               ? rowCalcTypeCode(argument.getType(), preserveCollections)
               : udfTypeCode(argument.getType());
       if (argumentCode < 0 && !(rowFusion && isTemporalUdfType(argument.getType()))) {
@@ -4655,7 +4688,9 @@ final class RexExpression {
           return rejectUdfMethod("MAP UDF arguments require the external Java Map conversion");
       }
     }
-    if ((resultType == SqlTypeName.MAP
+    if ((resultType == SqlTypeName.ARRAY
+            && eval.getReturnType() != defaultExternalClass(call.getType()))
+        || (resultType == SqlTypeName.MAP
             && !java.util.Map.class.isAssignableFrom(eval.getReturnType()))
         || (resultType == SqlTypeName.DECIMAL && eval.getReturnType() != BigDecimal.class)
         || (resultType == SqlTypeName.VARBINARY && eval.getReturnType() != byte[].class)
@@ -4940,7 +4975,7 @@ final class RexExpression {
       for (int i = 0; i < args.size(); i++) {
         Class<?> parameter =
             i < fixedArity ? parameters[i] : parameters[parameters.length - 1].getComponentType();
-        int argumentScore = udfParameterScore(parameter, args.get(i).getType().getSqlTypeName());
+        int argumentScore = udfParameterScore(parameter, args.get(i).getType());
         if (argumentScore < 0) {
           compatible = false;
           break;
@@ -4960,7 +4995,13 @@ final class RexExpression {
     return match;
   }
 
-  private static int udfParameterScore(Class<?> parameter, SqlTypeName type) {
+  private static Class<?> defaultExternalClass(RelDataType type) {
+    return org.apache.flink.table.types.utils.TypeConversions.fromLogicalToDataType(
+            org.apache.flink.table.planner.calcite.FlinkTypeFactory.toLogicalType(type))
+        .getConversionClass();
+  }
+
+  private static int udfParameterScore(Class<?> parameter, RelDataType type) {
     if (parameter.isPrimitive()) {
       if (parameter == int.class) parameter = Integer.class;
       else if (parameter == long.class) parameter = Long.class;
@@ -4971,7 +5012,9 @@ final class RexExpression {
       else if (parameter == boolean.class) parameter = Boolean.class;
     }
     Class<?> argument;
-    switch (type) {
+    switch (type.getSqlTypeName()) {
+      case ARRAY:
+        return parameter == defaultExternalClass(type) ? 2 : -1;
       case CHAR:
       case VARCHAR:
         argument = String.class;

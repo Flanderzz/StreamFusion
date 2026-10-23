@@ -15,6 +15,15 @@ import tech.streamfusion.planner.NativePlanner;
 @EnabledIfEnvironmentVariable(named = "SF_BENCHMARK", matches = "true")
 class UdfTypeBoundaryBenchmark {
   @Test
+  void arrayCompleteJobs() throws Exception {
+    for (String type : System.getProperty("boundary.arrays", "int,decimal").split(","))
+      run(
+          "ARRAY_" + type,
+          (rows, metrics) -> FlinkArrayScalarUdfSqlHarnessTest.environment(type, rows, metrics),
+          "SELECT id,array_identity(p),CARDINALITY(array_identity(p)) FROM src");
+  }
+
+  @Test
   void dateAndTimeCompleteJobs() throws Exception {
     for (String type : System.getProperty("boundary.temporal", "DATE,TIME").split(","))
       run(

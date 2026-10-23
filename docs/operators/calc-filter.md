@@ -475,8 +475,8 @@ Java `ScalarFunction` calls use the existing columnar JVM bridge: Arrow argument
 the function once per batch and an Arrow result column returns to the native island. Supported
 external Java types are `String`, boxed/primitive numeric and boolean values, `BigDecimal` for
 `DECIMAL(p,s)`, and `byte[]` for `VARBINARY`/`BYTES`. Overload resolution must be unambiguous.
-External Java `Row` and `Map` signatures use the default-enabled generated paths described
-below. Fixed-size `BINARY`, root ARRAY/MULTISET, and alternate Java
+External Java `Row`, `Map` and verified Java-array signatures use the default-enabled generated paths described
+below. Fixed-size `BINARY`, root MULTISET, and alternate Java
 conversion classes outside the verified mappings retain fallback. TIMESTAMP/TIMESTAMP_LTZ
 and DATE/TIME signatures have the default-enabled generated path described below.
 
@@ -2782,6 +2782,45 @@ Retained MAP/MULTISET output reaching an unverified native Arrow sink uses the e
 route. Direct external Java MAP scalar callbacks use the verified generated path below;
 retained-row carriage alone does not expand callback conversion coverage.
 
+
+### Java ARRAY scalar signatures
+
+The default-enabled `streamfusion.experimental.nestedScalarUdfs` option admits top-level
+external Java ARRAY scalar arguments and results with basic element types and recursively
+nested ARRAYs. The resolved external class must be the released default (for example
+`Integer[]`, `Long[]`, `String[]`, `BigDecimal[]` or `Integer[][]`). Primitive Java arrays,
+custom inference/conversion classes, fixed BINARY leaves and ARRAYs containing ROW/MAP/MULTISET
+retain fallback. Their independent nested ROW/MAP coverage is unchanged.
+
+On released Flink 1.18.1, CASE selecting a `byte[][]` ARRAY-of-BYTES UDF result or the input
+array fails in the host's generated Java allocation (`'{' expected instead of '['`). The
+suite asserts that same host failure and generation fallback, rather than skipping it or
+claiming CASE coverage on that line. Single/nested calls, CARDINALITY and filters retain
+positive NativeCalc work on both lines; the CASE fixture also executes natively on Flink 2.2.1.
+
+The complete Calc uses the existing generated Arrow batch callback. Flink's copy of a nullable
+columnar array can have an `Object[]` backing even when the user method expects `Integer[]`.
+The converter restores the typed internal backing, recursively for ARRAY elements, before
+invoking the released external converter. It retains NULL versus empty arrays, NULL elements,
+Java string code units, owned retained arguments and the released result conversion. It does
+not replace array evaluation with Rust user-function execution.
+
+Runtime tests cover BOOLEAN, TINYINT, SMALLINT, INT, BIGINT, FLOAT/DOUBLE, DECIMAL(38,18), STRING,
+DATE, TIME(0), TIMESTAMP(9), TIMESTAMP_LTZ(9), BYTES and nested INT arrays. Consumers include
+CARDINALITY, nested UDFs, CASE and filters. Reused mutable outputs, shared state/lifecycle, retained inputs after batch release,
+empty/all-filtered input, failures and heap/RocksDB recovery are verified against stock Flink.
+Each populated admitted query requires consumed NativeCalc work; existing collection
+representation guards continue to restrict unverified state/exchange consumers. Scalar
+results from ARRAY arguments can compose with native scalar operators.
+
+The release `UdfTypeBoundaryBenchmark` diagnostic uses Apple M4 Pro, Flink 2.2.1/JDK 11,
+262,144 rows, 1,024-row batches, parallelism one, both transposes and a blackhole row sink.
+After two warmups, five alternating pairs yield INT-array medians of 0.080996s stock
+(0.074598-0.093563s) and 0.139827s native (0.128676-0.145702s). DECIMAL-array medians
+are 0.241181s stock (0.227901-0.247675s) and 0.361928s native (0.358151-0.383200s).
+The prior route was stock fallback. These short jobs include startup; they document conversion
+costs under the accepted UDF exception and make no sustained-acceleration claim. Reproduce
+with `-Pbench`, `SF_BENCHMARK=true` and `-Dtest=UdfTypeBoundaryBenchmark#arrayCompleteJobs`.
 
 ### Java MAP scalar signatures
 

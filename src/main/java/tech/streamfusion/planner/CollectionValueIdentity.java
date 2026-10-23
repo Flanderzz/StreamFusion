@@ -189,7 +189,7 @@ final class CollectionValueIdentity {
                     parent))) {
       var program = ((Calc) node).getProgram();
       if ((RexExpression.usesCollectionFunctions(program)
-              || RexExpression.usesMapScalarUdf(program))
+              || RexExpression.usesCollectionScalarUdf(program))
           && program.getProjectList().stream().anyMatch(ref -> sensitive(ref.getType())))
         return true;
     }
