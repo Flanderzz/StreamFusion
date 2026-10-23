@@ -112,6 +112,7 @@ class SharedBuildTest(unittest.TestCase):
                               "--name", "build", "--dir"], command[:-1])
             directory = Path(command[-1])
             self.assertEqual(str(directory), kwargs["env"]["TMPDIR"])
+            self.assertEqual(shared_build.DOWNLOAD_TIMEOUT_SECONDS, kwargs["timeout"])
             self.assertEqual([], list(directory.iterdir()))
             directories.append(directory)
             candidate = directory / original.name
@@ -134,7 +135,7 @@ class SharedBuildTest(unittest.TestCase):
             # A killed gh process cannot run its deferred ZIP-file cleanup.
             temporary_zip = Path(kwargs["env"]["TMPDIR"]) / "gh-artifact.partial.zip"
             temporary_zip.write_bytes(b"partial artifact")
-            raise subprocess.TimeoutExpired("gh", 600)
+            raise subprocess.TimeoutExpired("gh", shared_build.DOWNLOAD_TIMEOUT_SECONDS)
 
         with patch.object(shared_build.subprocess, "run", side_effect=timeout) as run, \
                 patch.object(shared_build.time, "sleep") as sleep:

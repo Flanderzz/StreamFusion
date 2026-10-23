@@ -12,7 +12,7 @@ import time
 
 
 DOWNLOAD_DELAYS = (5, 15)
-DOWNLOAD_TIMEOUT_SECONDS = 600
+DOWNLOAD_TIMEOUT_SECONDS = 1800
 
 
 def checksum_path(archive):
@@ -48,6 +48,8 @@ def download(archive, artifact, run_id, github_repository):
     archive = archive.resolve()
     archive.parent.mkdir(parents=True, exist_ok=True)
     for attempt in range(len(DOWNLOAD_DELAYS) + 1):
+        print(f"Downloading shared build (attempt {attempt + 1}/{len(DOWNLOAD_DELAYS) + 1}, "
+              f"timeout {DOWNLOAD_TIMEOUT_SECONDS} seconds)", flush=True)
         try:
             with tempfile.TemporaryDirectory(prefix="shared-build-", dir=archive.parent) as directory:
                 subprocess.run(
