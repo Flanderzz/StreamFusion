@@ -20,7 +20,8 @@ def resolve(options):
     settings = str(ROOT / "dev/flink-suite/settings.xml")
     command = [options.maven, "-B", "-ntp", "-U", "-s", settings, "-gs", settings]
     if options.artifact:
-        # Surefire resolves its provider outside the host's dependency management.
+        # Build plugins and test providers can resolve original artifact graphs outside
+        # the host project's dependency management.
         command.extend(["-f", str(ARTIFACT_POM)])
     elif options.profile:
         command.append("-P" + options.profile)
@@ -68,7 +69,7 @@ def main():
     parser.add_argument("--repository", type=Path)
     parser.add_argument("--maven", default="mvn")
     parser.add_argument("--artifact", action="append", default=[],
-                        help="Resolve a runtime artifact's original transitive graph in an independent POM")
+                        help="Resolve an artifact's original transitive graph in an independent POM")
     return resolve(parser.parse_args())
 
 

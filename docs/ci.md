@@ -10,6 +10,12 @@ push or PR update targets the same ref. The latest main commit includes the earl
 and receives the complete checks, without waiting behind tests for superseded main commits.
 Release publishing retains its non-canceling concurrency policy.
 
+Documentation changes run `mkdocs build --strict` on pull requests as well as `main`, so broken
+links and navigation fail before merging. PR runs have read-only repository permissions and
+do not upload or deploy a Pages artifact. Only non-PR runs on `main` deploy, with Pages/OIDC
+permissions confined to the deployment job. PR updates cancel their own obsolete docs checks;
+main deployments remain serialized.
+
 The ordinary CI and upstream Flink aggregate gates run after successful or failed jobs,
 but skip canceled workflows (`always() && !cancelled()`). An unconditional `always()`
 gate can wait for another runner after the obsolete test jobs have been canceled,
@@ -160,6 +166,13 @@ regression also restores the default memory budget after a failing class changes
 preserving later operator-harness defaults.
 
 ## Fluss SQL fixture lifetime
+
+The released Fluss/ZooKeeper containers allow at most three startup attempts before tests
+begin. Docker can race other services for an ephemeral host port; each Testcontainers attempt
+creates a new container and port mapping. Persistent startup failures remain blocking, and
+test methods are never retried. A failed cluster startup closes every container and its network;
+cleanup failures are suppressed on the original startup error. Normal close also attempts every
+resource even if an earlier close fails.
 
 Each Fluss SQL test invocation keeps one stock and one native table environment for its
 DDL, reads and inserts. `@AfterEach` attempts to close both catalogs and clears the cache,

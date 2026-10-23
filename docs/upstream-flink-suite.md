@@ -693,6 +693,18 @@ post-merge Flink 2.2 runtime shard failed during that redundant download, before
 tests started; its PR checks had succeeded. Test failures remain blocking and are never retried
 or replaced by cached results.
 
+Preparation verifies the compressed shared archive with `zstd --test` and publishes a SHA-256
+sidecar. Consumers use `gh run download` with the current workflow run ID and exact artifact
+name, checking that digest before accepting the transfer. A failed, missing or truncated
+download gets at most three attempts, with 5- and 15-second waits and a thirty-minute limit per
+attempt. The archive can exceed 2.5 GiB; an earlier ten-minute transfer budget repeatedly
+expired on a hosted runner before tests started. Every attempt uses a fresh temporary directory, including `gh`'s temporary ZIP
+storage, so a killed download cannot leak large partial archives between attempts. A partial
+transfer never becomes an accepted build. Restore checks the digest again, extracts into a temporary directory,
+validates build identity and relocated classpath inputs, then publishes the suite directory.
+Extraction or identity errors fail the job without leaving a partially restored suite.
+Only downloads retry; compilation, restore validation and tests retain their failure behavior.
+
 The preparation job also caches the compiled, clean Flink checkout using an exact key containing
 the released Flink version, actual JDK version, runner platform/architecture, and build script/settings/workflow
 hash. Maven still runs the same build commands to validate and install its outputs; this is incremental
@@ -782,6 +794,14 @@ real test invocation and a successful result before publishing the shared build.
 check uses no injection agent, contributes no native-coverage evidence, and its reports are
 excluded from the shared artifact. Update these pins when upgrading the corresponding
 upstream Surefire or JUnit version.
+
+The same setup stage resolves the original `httpclient:4.4.1` dependency graph required by
+Paimon 2.0's released Hive dependencies. Its remote-resource license plugin reads those
+original descriptors outside the host's dependency management: a CI consumer failed before
+tests when Maven Central returned HTTP 502 for `httpcomponents-client:4.4.1`. Preparing this
+graph with bounded retries before packing keeps that download out of connector compilation.
+This populates the isolated repository without changing Paimon's resolved runtime versions
+or retrying its build or tests. Update this setup pin with the released Hive dependency graph.
 
 The preparation regression test uses a fresh repository for each pinned Surefire/JUnit
 combination, with a host JUnit BOM and both Jupiter and Vintage tests. Its negative controls
