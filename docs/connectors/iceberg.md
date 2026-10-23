@@ -125,10 +125,15 @@ For format-v3 sinks, Java also assigns inherited row IDs, records snapshot linea
 and writes Puffin deletion vectors; the native boundary still covers data files only.
 Tests verify snapshot/file row IDs, vector blob references/offsets/lengths, and stock
 readback after updates and restarts. The phased keyed recovery fixture waits until all
-initial rows are committed before sending updates: an unaligned checkpoint can produce
-a partial initial snapshot while another writer's rows remain in channel state. This
-keeps cross-checkpoint equality deletes and same-writer position deletes deterministic;
-both delete kinds, exact readback and native-handle cleanup remain asserted.
+initial rows are committed, then waits for a completed checkpoint taken after that
+observation before sending updates. An unaligned checkpoint can produce a partial initial
+snapshot while another writer's rows remain in channel state; even when all rows become
+committed, an earlier recovery checkpoint may still retain those records. The later boundary
+separates cross-checkpoint equality deletes from same-writer position deletes. Both delete
+kinds, exact readback without duplicate keys and native-handle cleanup remain asserted.
+Duplicate-row, final-value and delete-kind failures include source checkpoint events and table
+snapshot summaries. The keyed recovery stress selection alternates both upsert modes for
+20 repetitions by default; increase it locally with `-Dsf.iceberg.recovery.repetitions=100`.
 Live format upgrades, variant/geometry/geography,
 and nanosecond schemas retain their existing exclusions. Native v3 source admission
 remains stock because crate 0.10.1 does not read deletion vectors.

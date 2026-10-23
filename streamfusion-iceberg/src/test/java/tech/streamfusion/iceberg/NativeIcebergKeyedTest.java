@@ -50,11 +50,15 @@ class NativeIcebergKeyedTest {
   private static final java.util.Queue<String> EVENTS =
       new java.util.concurrent.ConcurrentLinkedQueue<>();
 
-  @org.junit.jupiter.api.RepeatedTest(20)
-  void unalignedRecoveryKeepsUpdatesUnderRepeatedCheckpointRaces(
-      org.junit.jupiter.api.RepetitionInfo repetition) throws Exception {
-    hostDeletesAndRecoveryPreserveNativeDataPositions(
-        repetition.getCurrentRepetition() % 2 == 0, true, "hash", true, 2);
+  @ParameterizedTest(name = "unaligned recovery repetition={0}")
+  @org.junit.jupiter.params.provider.MethodSource("recoveryRepetitions")
+  void unalignedRecoveryKeepsUpdatesUnderRepeatedCheckpointRaces(int repetition) throws Exception {
+    hostDeletesAndRecoveryPreserveNativeDataPositions(repetition % 2 == 0, true, "hash", true, 2);
+  }
+
+  static java.util.stream.IntStream recoveryRepetitions() {
+    return java.util.stream.IntStream.rangeClosed(
+        1, Integer.getInteger("sf.iceberg.recovery.repetitions", 20));
   }
 
   @Test
@@ -87,6 +91,47 @@ class NativeIcebergKeyedTest {
     return snapshot != null
         && Integer.toString(INITIAL_ROWS)
             .equals(snapshot.summary().get(SnapshotSummary.TOTAL_RECORDS_PROP));
+  }
+
+  @Test
+  void recoveryBoundaryRequiresCompletionOfACheckpointTakenAfterCommit() throws Exception {
+    var source = new PhasedSource(false, "unused");
+    source.snapshots = new ConcurrentHashMap<>();
+    source.snapshots.put(10L, 1);
+    source.latestCompletedId = 9;
+    var executor = java.util.concurrent.Executors.newSingleThreadExecutor();
+    try {
+      var waiting =
+          executor.submit(
+              () -> {
+                source.awaitRecoveryBoundary(10, System.nanoTime() + 5_000_000_000L);
+                return null;
+              });
+      source.notifyCheckpointComplete(10);
+      assertThrows(
+          java.util.concurrent.TimeoutException.class,
+          () -> waiting.get(100, java.util.concurrent.TimeUnit.MILLISECONDS));
+      source.snapshots.put(11L, 1);
+      assertThrows(
+          java.util.concurrent.TimeoutException.class,
+          () -> waiting.get(100, java.util.concurrent.TimeUnit.MILLISECONDS));
+      source.notifyCheckpointComplete(11);
+      waiting.get(5, java.util.concurrent.TimeUnit.SECONDS);
+    } finally {
+      source.cancel();
+      executor.shutdownNow();
+      assertTrue(executor.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS));
+    }
+  }
+
+  @Test
+  void missingRecoveryBoundaryFailsWithSourceEvents() {
+    var source = new PhasedSource(false, "unused");
+    source.latestCompletedId = 10;
+    var failure =
+        assertThrows(
+            IllegalStateException.class, () -> source.awaitRecoveryBoundary(10, System.nanoTime()));
+    assertTrue(failure.getMessage().contains("committed recovery boundary timed out"));
   }
 
   @ParameterizedTest
@@ -173,21 +218,12 @@ class NativeIcebergKeyedTest {
     var actual = new java.util.TreeMap<Integer, Integer>();
     try (var rows = IcebergGenerics.read(table).build()) {
       for (var row : rows) {
-        assertNull(actual.put((Integer) row.getField("id"), (Integer) row.getField("value")));
+        assertNull(
+            actual.put((Integer) row.getField("id"), (Integer) row.getField("value")),
+            () -> "Duplicate row " + row + "; " + recoveryDiagnostics(table));
       }
     }
-    assertEquals(
-        Map.of(1, 11, 3, 30, 5, 50),
-        actual,
-        () ->
-            "Source events="
-                + EVENTS
-                + "; table="
-                + location
-                + "; snapshots="
-                + java.util.stream.StreamSupport.stream(table.snapshots().spliterator(), false)
-                    .map(snapshot -> snapshot.snapshotId() + ":" + snapshot.summary())
-                    .toList());
+    assertEquals(Map.of(1, 11, 3, 30, 5, 50), actual, () -> recoveryDiagnostics(table));
     assertTrue(
         java.util.stream.StreamSupport.stream(table.snapshots().spliterator(), false).count() >= 2);
     var deleteKinds = java.util.EnumSet.noneOf(org.apache.iceberg.FileContent.class);
@@ -221,7 +257,8 @@ class NativeIcebergKeyedTest {
         java.util.Set.of(
             org.apache.iceberg.FileContent.EQUALITY_DELETES,
             org.apache.iceberg.FileContent.POSITION_DELETES),
-        deleteKinds);
+        deleteKinds,
+        () -> recoveryDiagnostics(table));
     if (formatVersion == 3) {
       try (var tasks = table.newScan().planFiles()) {
         for (var task : tasks) assertNotNull(task.file().firstRowId());
@@ -230,6 +267,17 @@ class NativeIcebergKeyedTest {
     assertEquals(fail, FAILED.get());
     assertEquals(fail, RESTORED.get());
     assertEquals("", NativeIceberg.liveNativeHandles());
+  }
+
+  private static String recoveryDiagnostics(Table table) {
+    return "Source events="
+        + EVENTS
+        + "; table="
+        + table.location()
+        + "; snapshots="
+        + java.util.stream.StreamSupport.stream(table.snapshots().spliterator(), false)
+            .map(snapshot -> snapshot.snapshotId() + ":" + snapshot.summary())
+            .toList();
   }
 
   private static ArrowBatch batch(int phase) {
@@ -264,6 +312,8 @@ class NativeIcebergKeyedTest {
     private int next;
     private transient ListState<Integer> state;
     private transient Map<Long, Integer> snapshots;
+    private transient volatile long latestSnapshotId;
+    private transient volatile long latestCompletedId;
 
     private final String location;
 
@@ -296,6 +346,13 @@ class NativeIcebergKeyedTest {
           initial.refresh();
         }
         if (!running) return;
+        // A committed snapshot may belong to a checkpoint that still retained initial channel
+        // records. Recover from a later checkpoint taken after those records were committed.
+        long committedAfter = latestSnapshotId;
+        EVENTS.add("initial rows committed after snapshot " + committedAfter);
+        awaitRecoveryBoundary(committedAfter, deadline);
+        if (!running) return;
+        EVENTS.add("recovery boundary " + latestCompletedId);
         synchronized (context.getCheckpointLock()) {
           EVENTS.add("emit updates");
           context.collect(batch(1));
@@ -311,6 +368,15 @@ class NativeIcebergKeyedTest {
       }
     }
 
+    private void awaitRecoveryBoundary(long committedAfter, long deadline)
+        throws InterruptedException {
+      while (running && latestCompletedId <= committedAfter) {
+        if (System.nanoTime() > deadline)
+          throw new IllegalStateException("committed recovery boundary timed out; " + EVENTS);
+        Thread.sleep(5);
+      }
+    }
+
     @Override
     public void cancel() {
       running = false;
@@ -320,6 +386,7 @@ class NativeIcebergKeyedTest {
     public void snapshotState(FunctionSnapshotContext context) throws Exception {
       state.update(List.of(next));
       snapshots.put(context.getCheckpointId(), next);
+      latestSnapshotId = context.getCheckpointId();
       EVENTS.add("snapshot " + context.getCheckpointId() + "=" + next);
     }
 
@@ -330,6 +397,8 @@ class NativeIcebergKeyedTest {
               .getOperatorStateStore()
               .getListState(new ListStateDescriptor<>("iceberg-arrow-source-phase", Integer.class));
       snapshots = new ConcurrentHashMap<>();
+      latestSnapshotId = -1;
+      latestCompletedId = -1;
       if (context.isRestored()) {
         for (int phase : state.get()) next = phase;
         completed = next;
@@ -342,6 +411,7 @@ class NativeIcebergKeyedTest {
     public void notifyCheckpointComplete(long checkpointId) {
       EVENTS.add("complete " + checkpointId + "=" + snapshots.getOrDefault(checkpointId, 0));
       completed = Math.max(completed, snapshots.getOrDefault(checkpointId, 0));
+      latestCompletedId = checkpointId;
       snapshots.keySet().removeIf(id -> id <= checkpointId);
     }
   }
