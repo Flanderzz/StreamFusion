@@ -111,6 +111,7 @@ class SharedBuildTest(unittest.TestCase):
             self.assertEqual(["gh", "run", "download", "123", "--repo", "owner/repo",
                               "--name", "build", "--dir"], command[:-1])
             directory = Path(command[-1])
+            self.assertEqual(str(directory), kwargs["env"]["TMPDIR"])
             self.assertEqual([], list(directory.iterdir()))
             directories.append(directory)
             candidate = directory / original.name
@@ -128,7 +129,14 @@ class SharedBuildTest(unittest.TestCase):
     def test_download_failure_is_bounded_and_preserves_previous_archive(self):
         archive = self.pack()
         original = archive.read_bytes()
-        with patch.object(shared_build.subprocess, "run", side_effect=subprocess.TimeoutExpired("gh", 600)) as run, \
+
+        def timeout(command, **kwargs):
+            # A killed gh process cannot run its deferred ZIP-file cleanup.
+            temporary_zip = Path(kwargs["env"]["TMPDIR"]) / "gh-artifact.partial.zip"
+            temporary_zip.write_bytes(b"partial artifact")
+            raise subprocess.TimeoutExpired("gh", 600)
+
+        with patch.object(shared_build.subprocess, "run", side_effect=timeout) as run, \
                 patch.object(shared_build.time, "sleep") as sleep:
             with self.assertRaises(subprocess.TimeoutExpired):
                 shared_build.download(archive, "build", "123", "owner/repo")

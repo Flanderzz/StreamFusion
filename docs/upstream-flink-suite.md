@@ -697,8 +697,9 @@ Preparation verifies the compressed shared archive with `zstd --test` and publis
 sidecar. Consumers use `gh run download` with the current workflow run ID and exact artifact
 name, checking that digest before accepting the transfer. A failed, missing or truncated
 download gets at most three attempts, with 5- and 15-second waits and a ten-minute limit per
-attempt. Every attempt uses a fresh temporary directory; a partial transfer never becomes
-an accepted build. Restore checks the digest again, extracts into a temporary directory,
+attempt. Every attempt uses a fresh temporary directory, including `gh`'s temporary ZIP
+storage, so a killed download cannot leak large partial archives between attempts. A partial
+transfer never becomes an accepted build. Restore checks the digest again, extracts into a temporary directory,
 validates build identity and relocated classpath inputs, then publishes the suite directory.
 Extraction or identity errors fail the job without leaving a partially restored suite.
 Only downloads retry; compilation, restore validation and tests retain their failure behavior.

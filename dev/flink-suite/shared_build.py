@@ -54,6 +54,7 @@ def download(archive, artifact, run_id, github_repository):
                     ["gh", "run", "download", run_id, "--repo", github_repository,
                      "--name", artifact, "--dir", directory],
                     check=True, timeout=DOWNLOAD_TIMEOUT_SECONDS,
+                    env={**os.environ, "TMPDIR": directory},
                 )
                 candidate = Path(directory) / archive.name
                 verify_archive(candidate)
