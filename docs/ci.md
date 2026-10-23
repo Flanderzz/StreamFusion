@@ -10,6 +10,12 @@ push or PR update targets the same ref. The latest main commit includes the earl
 and receives the complete checks, without waiting behind tests for superseded main commits.
 Release publishing retains its non-canceling concurrency policy.
 
+Documentation changes run `mkdocs build --strict` on pull requests as well as `main`, so broken
+links and navigation fail before merging. PR runs have read-only repository permissions and
+do not upload or deploy a Pages artifact. Only non-PR runs on `main` deploy, with Pages/OIDC
+permissions confined to the deployment job. PR updates cancel their own obsolete docs checks;
+main deployments remain serialized.
+
 The ordinary CI and upstream Flink aggregate gates run after successful or failed jobs,
 but skip canceled workflows (`always() && !cancelled()`). An unconditional `always()`
 gate can wait for another runner after the obsolete test jobs have been canceled,
