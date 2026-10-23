@@ -40,6 +40,7 @@ final class TableFunctionMatcher {
     if (type.getSqlTypeName().getFamily() == SqlTypeFamily.INTERVAL_DAY_TIME
         || type.getSqlTypeName().getFamily() == SqlTypeFamily.INTERVAL_YEAR_MONTH) return true;
     switch (type.getSqlTypeName()) {
+      case CHAR:
       case VARCHAR:
       case FLOAT:
       case DOUBLE:
@@ -62,7 +63,7 @@ final class TableFunctionMatcher {
   }
 
   static String unsupportedReason(StreamPhysicalCorrelate node) {
-    return "correlate: only non-specialized JVM table functions with INNER/LEFT and VARCHAR,"
+    return "correlate: only non-specialized JVM table functions with INNER/LEFT and CHAR/VARCHAR,"
                + " numeric, boolean, VARBINARY, interval or temporal input, output and argument"
                + " types are verified";
   }

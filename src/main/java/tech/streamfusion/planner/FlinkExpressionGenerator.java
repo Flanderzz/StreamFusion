@@ -541,6 +541,8 @@ final class FlinkExpressionGenerator {
     private final java.util.Map<String, String> functions = new java.util.HashMap<>();
     private final java.util.Map<String, ScalarFunction> functionInstances =
         new java.util.LinkedHashMap<>();
+    private final java.util.Map<org.apache.flink.table.types.DataType, String> arrayConverters =
+        new java.util.HashMap<>();
 
     Context(ReadableConfig config, ClassLoader classLoader) {
       super(config, classLoader);
@@ -569,6 +571,25 @@ final class FlinkExpressionGenerator {
     @Override
     public String addReusableConverter(
         org.apache.flink.table.types.DataType type, String classLoaderTerm) {
+      if (type.getLogicalType().is(LogicalTypeRoot.ARRAY) && type.getConversionClass().isArray()) {
+        return arrayConverters.computeIfAbsent(
+            type,
+            ignored -> {
+              String term =
+                  addReusableObject(
+                      new ScalarArrayConverter(type),
+                      "arrayConverter",
+                      ScalarArrayConverter.class.getCanonicalName());
+              addReusableOpenStatement(
+                  term
+                      + ".open("
+                      + (classLoaderTerm == null
+                          ? "context.getUserCodeClassLoader()"
+                          : classLoaderTerm)
+                      + ");");
+              return term;
+            });
+      }
       return super.addReusableConverter(
           type, classLoaderTerm == null ? "context.getUserCodeClassLoader()" : classLoaderTerm);
     }

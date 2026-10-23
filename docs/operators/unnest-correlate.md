@@ -136,7 +136,7 @@ Arrow island; these results do not imply every scalar expression runs in Rust.
 ## JVM table functions
 
 Synchronous JVM `TableFunction` definitions carried by Flink's bridging SQL function support
-INNER/LEFT application with top-level STRING/VARCHAR, BOOLEAN, TINYINT, SMALLINT, INT, BIGINT,
+INNER/LEFT application with top-level CHAR, STRING/VARCHAR, BOOLEAN, TINYINT, SMALLINT, INT, BIGINT,
 DECIMAL, FLOAT/DOUBLE, VARBINARY, DATE, TIME, TIMESTAMP, TIMESTAMP_LTZ and
 day-time/year-month interval input, output and argument types.
 These types are admitted by default under the accepted UDF performance exception, without
@@ -155,6 +155,21 @@ transpose row limit and carry all four RowKinds. No function invocation crosses 
 native operators retain their existing boundaries. A pure column projection is fused into the
 output writer, including repeated or empty projections, so discarded correlate columns never
 enter an intermediate Arrow batch.
+
+CHAR uses the same string transport as VARCHAR and the released correlate generator's
+declared CHAR type. SQL casts retain Flink's padding and truncation; the bridge does not
+normalize a function's returned strings. Typed runtime tests cover CHAR(1)/CHAR(4), empty
+strings, trailing spaces, over-width values, NULL, INNER/LEFT fanout, repeated output reuse,
+and heap/RocksDB recovery. Java table-function execution remains subject to the accepted
+UDF performance exception; admission does not claim a throughput improvement.
+
+A release complete-job check on Apple Silicon/JDK 11 with Flink 2.2.1, parallelism one,
+262,144 runtime rows, 1,024-row batches, both transposes and a blackhole row sink measured
+CHAR(4) fanout at 0.124551s stock (0.118949-0.133813s) and 0.177585s native
+(0.167164-0.184397s), medians of five alternating pairs after two warmups. These short jobs
+include startup and are a callback-cost diagnostic, not a sustained-throughput claim.
+Before admission the same query used the stock fallback. Reproduce with `TypedTableFunctionBenchmark`,
+`-Pbench`, `tablefunc.types=CHAR(4)`, `tablefunc.cases=project` and `tablefunc.rows=262144`.
 
 The exact and temporal types use the same released correlate generator and existing Arrow
 readers/writers; their user function still executes on the JVM. TIMESTAMP and TIMESTAMP_LTZ
