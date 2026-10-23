@@ -474,7 +474,8 @@ if [[ "${SUITE_MODE}" == "prepare" ]]; then
         --maven "${FLINK_ROOT}/mvnw" \
         --repository "${SUITE_MAVEN_REPO}" \
         --artifact "org.apache.maven.surefire:surefire-junit-platform:${test_runtime_surefire_version}" \
-        --artifact "org.junit.platform:junit-platform-launcher:${test_runtime_platform_version}"
+        --artifact "org.junit.platform:junit-platform-launcher:${test_runtime_platform_version}" \
+        --artifact "org.apache.httpcomponents:httpclient:4.4.1"
   ) || exit $?
   echo "Verifying the prepared upstream test runtime without downloads..."
   flink_mvn ${FLINK_TARGET_PROFILE:+-P${FLINK_TARGET_PROFILE}} -B -ntp -o -s "${MAVEN_SETTINGS}" \

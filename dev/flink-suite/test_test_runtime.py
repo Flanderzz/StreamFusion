@@ -79,9 +79,15 @@ class TestRuntimePreparationTest(unittest.TestCase):
                          "--maven", "mvn", "--repository", str(repository),
                          "--artifact", f"org.apache.maven.surefire:surefire-junit-platform:{surefire}",
                          "--artifact", "org.junit.platform:junit-platform-launcher:" +
-                         ("1.11.4" if line == "2.2" else "1.9.1")])
+                         ("1.11.4" if line == "2.2" else "1.9.1"),
+                         "--artifact", "org.apache.httpcomponents:httpclient:4.4.1"])
                     self.assertTrue((repository / f"org/opentest4j/opentest4j/{original_opentest}"
                                      / f"opentest4j-{original_opentest}.jar").exists())
+                    self.assertTrue((repository / "org/apache/httpcomponents/httpcomponents-client/4.4.1"
+                                     / "httpcomponents-client-4.4.1.pom").is_file())
+                    run(base + ["-o", "org.apache.maven.plugins:maven-dependency-plugin:3.11.0:get",
+                                "-Dartifact=org.apache.httpcomponents:httpclient:4.4.1",
+                                "-Dtransitive=true"])
                     run(base + ["-o", "surefire:test@integration-tests"])
                     reports = list((root / "target/surefire-reports").glob("TEST-*.xml"))
                     self.assertEqual(2, len(reports))
@@ -142,7 +148,8 @@ class TestRuntimePreparationTest(unittest.TestCase):
                         self.assertEqual(["org.apache.maven.surefire:surefire-junit-platform:" +
                                           ("3.0.0-M5" if line == "1.18" else "3.2.2"),
                                           "org.junit.platform:junit-platform-launcher:" +
-                                          ("1.9.1" if line == "1.18" else "1.11.4")], artifacts)
+                                          ("1.9.1" if line == "1.18" else "1.11.4"),
+                                          "org.apache.httpcomponents:httpclient:4.4.1"], artifacts)
                         self.assertEqual(1 if status or probe_status else 2, len(invocations))
                         self.assertEqual(not (status or probe_status), "build is ready" in result.stdout)
                         if status:

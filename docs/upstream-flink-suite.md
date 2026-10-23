@@ -794,6 +794,14 @@ check uses no injection agent, contributes no native-coverage evidence, and its 
 excluded from the shared artifact. Update these pins when upgrading the corresponding
 upstream Surefire or JUnit version.
 
+The same setup stage resolves the original `httpclient:4.4.1` dependency graph required by
+Paimon 2.0's released Hive dependencies. Its remote-resource license plugin reads those
+original descriptors outside the host's dependency management: a CI consumer failed before
+tests when Maven Central returned HTTP 502 for `httpcomponents-client:4.4.1`. Preparing this
+graph with bounded retries before packing keeps that download out of connector compilation.
+This populates the isolated repository without changing Paimon's resolved runtime versions
+or retrying its build or tests. Update this setup pin with the released Hive dependency graph.
+
 The preparation regression test uses a fresh repository for each pinned Surefire/JUnit
 combination, with a host JUnit BOM and both Jupiter and Vintage tests. Its negative controls
 reproduce a wrong 1.18 provider pin and deliberately remove the original 2.2 OpenTest4J
