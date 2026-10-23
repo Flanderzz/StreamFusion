@@ -689,13 +689,15 @@ final class RexExpression {
     if (!(node instanceof RexCall)) return false;
     RexCall call = (RexCall) node;
     return tech.streamfusion.compat.FlinkCompat.scalarFunction(call.getOperator()) != null
-            && (isTimestampType(call.getType())
-                || call.getOperands().stream().anyMatch(arg -> isTimestampType(arg.getType())))
+            && (isTemporalUdfType(call.getType())
+                || call.getOperands().stream().anyMatch(arg -> isTemporalUdfType(arg.getType())))
         || call.getOperands().stream().anyMatch(RexExpression::containsTemporalUdf);
   }
 
-  private static boolean isTimestampType(RelDataType type) {
-    return type.getSqlTypeName() == SqlTypeName.TIMESTAMP
+  private static boolean isTemporalUdfType(RelDataType type) {
+    return type.getSqlTypeName() == SqlTypeName.DATE
+        || type.getSqlTypeName() == SqlTypeName.TIME
+        || type.getSqlTypeName() == SqlTypeName.TIMESTAMP
         || type.getSqlTypeName() == SqlTypeName.TIMESTAMP_WITH_LOCAL_TIME_ZONE;
   }
 
@@ -4617,7 +4619,7 @@ final class RexExpression {
         nested && (resultType == SqlTypeName.ROW || resultType == SqlTypeName.MAP)
             ? rowCalcTypeCode(call.getType(), preserveCollections)
             : udfTypeCode(call.getType());
-    if (returnCode < 0 && !(rowFusion && isTimestampType(call.getType()))) {
+    if (returnCode < 0 && !(rowFusion && isTemporalUdfType(call.getType()))) {
       return rejectUdfMethod("UDF return type not native: " + call.getType().getSqlTypeName());
     }
     List<RexNode> args = call.getOperands();
@@ -4628,7 +4630,7 @@ final class RexExpression {
                       || argument.getType().getSqlTypeName() == SqlTypeName.MAP)
               ? rowCalcTypeCode(argument.getType(), preserveCollections)
               : udfTypeCode(argument.getType());
-      if (argumentCode < 0 && !(rowFusion && isTimestampType(argument.getType()))) {
+      if (argumentCode < 0 && !(rowFusion && isTemporalUdfType(argument.getType()))) {
         return rejectUdfMethod(
             "UDF argument type not native: " + argument.getType().getSqlTypeName());
       }
@@ -4659,6 +4661,10 @@ final class RexExpression {
         || (resultType == SqlTypeName.VARBINARY && eval.getReturnType() != byte[].class)
         || (resultType == SqlTypeName.ROW
             && eval.getReturnType() != org.apache.flink.types.Row.class)
+        || (resultType == SqlTypeName.DATE
+            && eval.getReturnType() != java.time.LocalDate.class)
+        || (resultType == SqlTypeName.TIME
+            && eval.getReturnType() != java.time.LocalTime.class)
         || (resultType == SqlTypeName.TIMESTAMP
             && eval.getReturnType() != java.time.LocalDateTime.class)
         || (resultType == SqlTypeName.TIMESTAMP_WITH_LOCAL_TIME_ZONE
@@ -5004,6 +5010,10 @@ final class RexExpression {
       case MAP:
         argument = java.util.Map.class;
         break;
+      case DATE:
+        return parameter == java.time.LocalDate.class ? 2 : -1;
+      case TIME:
+        return parameter == java.time.LocalTime.class ? 2 : -1;
       case TIMESTAMP:
         return parameter == java.time.LocalDateTime.class ? 2 : -1;
       case TIMESTAMP_WITH_LOCAL_TIME_ZONE:

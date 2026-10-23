@@ -476,9 +476,9 @@ the function once per batch and an Arrow result column returns to the native isl
 external Java types are `String`, boxed/primitive numeric and boolean values, `BigDecimal` for
 `DECIMAL(p,s)`, and `byte[]` for `VARBINARY`/`BYTES`. Overload resolution must be unambiguous.
 External Java `Row` and `Map` signatures use the default-enabled generated paths described
-below. Fixed-size `BINARY`, root ARRAY/MULTISET, DATE/TIME UDF signatures, and alternate Java
+below. Fixed-size `BINARY`, root ARRAY/MULTISET, and alternate Java
 conversion classes outside the verified mappings retain fallback. TIMESTAMP/TIMESTAMP_LTZ
-signatures have the default-enabled generated path described below.
+and DATE/TIME signatures have the default-enabled generated path described below.
 
 Non-folded zero-argument scalar UDF calls retain Flink because the generic JVM bridge signature
 does not admit them. Flink can constant-fold deterministic calls before native planning. The
@@ -613,12 +613,31 @@ whose performance must be measured for the complete query.
 ### Temporal scalar functions
 
 `streamfusion.calc.temporalUdf.enabled=true` admits verified scalar signatures using
-`LocalDateTime` for TIMESTAMP and `Instant` for TIMESTAMP_LTZ arguments/results. Precision
+`LocalDate` for DATE, `LocalTime` for TIME, `LocalDateTime` for TIMESTAMP and `Instant`
+for TIMESTAMP_LTZ arguments/results. Precision
 0/3/6/9 is preserved through the existing full-range millisecond/nanosecond Arrow representation.
 The complete Calc uses Flink's generated code and released external/internal converters, including
 its predicate and sibling projections. This retains calendar fields for TIMESTAMP, absolute time
 for LTZ, declared result types, NULL callbacks, shared function order and one task lifecycle.
 Results remain Arrow columns for downstream native operators, including GROUP BY.
+
+DATE/TIME use the released epoch-day/millisecond-of-day converters, including negative dates,
+leap dates, midnight, end of day, NULL containers and nullable results. SQL TIME signatures
+must match the released planner's TIME(0) normalization; native admission does not make an
+inferred TIME(9) or explicitly incompatible TIME(3) signature executable. Runtime millisecond
+values are preserved. Alternate `java.sql.Date`/`java.sql.Time` conversion classes retain fallback.
+Runtime tests compare types and values across batches, lazy/filtered calls, shared state and
+heap/RocksDB recovery, and require NativeCalc to consume input. These Java functions retain
+the accepted UDF performance exception; this coverage does not claim a speedup.
+
+The `UdfTypeBoundaryBenchmark` release diagnostic (Apple M4 Pro, Flink 2.2.1/JDK 11,
+parallelism one, 262,144 rows, 1,024-row batches, both transposes and blackhole row sink)
+uses two warmups and five alternating stock/native pairs. DATE job medians are 0.092154s
+stock (0.079492-0.101028s) and 0.132566s native (0.127392-0.137835s); TIME job medians
+are 0.095451s stock (0.089436-0.097501s) and 0.143299s native (0.126271-0.148375s).
+The previous behavior used stock fallback. These short complete-job timings include startup
+and establish callback costs, not sustained acceleration. Run with `-Pbench` and
+`SF_BENCHMARK=true`; input counts and repetitions use the `boundary.*` test properties.
 
 The option now defaults to **true** under the accepted UDF performance exception.
 Explicit `false` reports `temporal scalar UDF execution is explicitly disabled`. Builtin temporal
@@ -2778,8 +2797,9 @@ BOOLEAN/DECIMAL, FLOAT/DOUBLE, DATE/TIME, DECIMAL/TIMESTAMP, interval and ROW-ke
 containers, keys and values, empty maps, signed zero, NaN/infinity, precision-38 decimals,
 pre-epoch nanoseconds and nested RowKinds are covered. These are resolved Flink signatures:
 nested TIME resolves to TIME(0), and the interval fixture uses INTERVAL MONTH/SECOND(3).
-Runtime millisecond TIME values are preserved. This does not admit root DATE/TIME UDF signatures,
-fixed BINARY map leaves, arbitrary Java conversion classes or custom type inference.
+Runtime millisecond TIME values are preserved. Root DATE/TIME UDF signatures use the temporal
+path. Fixed BINARY map leaves, arbitrary Java conversion classes and custom type inference
+retain their separate gates.
 
 Scalar results from MAP arguments can feed native aggregation. MAP results can compose with
 lookup, CARDINALITY, CASE, predicates and a final row sink, including callbacks lifted above
