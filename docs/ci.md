@@ -167,6 +167,13 @@ preserving later operator-harness defaults.
 
 ## Fluss SQL fixture lifetime
 
+The released Fluss/ZooKeeper containers allow at most three startup attempts before tests
+begin. Docker can race other services for an ephemeral host port; each Testcontainers attempt
+creates a new container and port mapping. Persistent startup failures remain blocking, and
+test methods are never retried. A failed cluster startup closes every container and its network;
+cleanup failures are suppressed on the original startup error. Normal close also attempts every
+resource even if an earlier close fails.
+
 Each Fluss SQL test invocation keeps one stock and one native table environment for its
 DDL, reads and inserts. `@AfterEach` attempts to close both catalogs and clears the cache,
 including when the test fails. Parameterized invocations receive fresh environments.

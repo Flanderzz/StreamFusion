@@ -28,18 +28,28 @@ public final class FlussTestCluster implements AutoCloseable {
             .withNetwork(network)
             .withNetworkAliases("zk")
             .withExposedPorts(2181)
+            .withStartupAttempts(3)
             .waitingFor(Wait.forListeningPort());
     coordinator = new Broker("coordinator", "coordinatorServer");
     tablet = new Broker("tablet", "tabletServer");
   }
 
   public void start() {
-    zookeeper.start();
-    coordinator.start();
-    tablet.start();
-    Wait.forLogMessage(".*New tablet server callback for tablet server.*\\n", 1)
-        .withStartupTimeout(Duration.ofMinutes(2))
-        .waitUntilReady(coordinator);
+    try {
+      zookeeper.start();
+      coordinator.start();
+      tablet.start();
+      Wait.forLogMessage(".*New tablet server callback for tablet server.*\\n", 1)
+          .withStartupTimeout(Duration.ofMinutes(2))
+          .waitUntilReady(coordinator);
+    } catch (RuntimeException | Error failure) {
+      try {
+        close();
+      } catch (RuntimeException | Error cleanup) {
+        failure.addSuppressed(cleanup);
+      }
+      throw failure;
+    }
   }
 
   String logs() {
@@ -77,6 +87,7 @@ public final class FlussTestCluster implements AutoCloseable {
       this.role = role;
       withNetwork(network).withNetworkAliases(alias);
       withExposedPorts(9124);
+      withStartupAttempts(3);
       withCreateContainerCmdModifier(command -> command.withEntrypoint("/bin/sh"));
       withCommand(
           "-c",
@@ -122,9 +133,9 @@ public final class FlussTestCluster implements AutoCloseable {
 
   @Override
   public void close() {
-    tablet.close();
-    coordinator.close();
-    zookeeper.close();
-    network.close();
+    try (network;
+        zookeeper;
+        coordinator;
+        tablet) {}
   }
 }
