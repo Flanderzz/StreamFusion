@@ -7,6 +7,53 @@ they do not claim acceleration. [GROUP BY](../operators/group-by.md#jvm-aggregat
 describes coverage and remaining contracts. The [results artifact](results/jvm-aggregates-investigation-2026-10-15.json)
 retains all local comparisons and profiles, including regressions and runs with external activity.
 
+## Scalar types, DISTINCT/FILTER and idle retention (2026-10-23)
+
+The expanded JVM function boundary retains released Flink conversion and generated aggregate
+handlers. Its coverage includes scalar exact/temporal types, fixed BINARY table functions,
+DISTINCT/FILTER and managed-state TTL; [GROUP BY](../operators/group-by.md#jvm-aggregate-investigation)
+and [Correlate](../operators/unnest-correlate.md#jvm-table-functions) describe the exact gates.
+These are coverage changes under the accepted UDF performance exception, not acceleration claims.
+
+Local release/mimalloc measurements use Flink 2.2.1, OpenJDK 17.0.20.1, an Intel i7-12650H
+under Linux/WSL2, 262,144 runtime-source rows, parallelism one and 1,024-row batches.
+Two warmups precede five alternating stock/native pairs. Both engines receive matching preflight;
+`executeSql(INSERT).await` retains startup, callbacks, keyed state, exchange and both transposes
+into a blackhole row sink. Input and output values/types are checked separately by the parity,
+recovery and rescale suites. Aggregate value cases use 64 INT keys; the wide DECIMAL key case
+uses eight nullable keys. BINARY(4) fixtures deliberately include actual byte lengths through
+4,097. Previous main `1bd9daa8` uses verified whole-query stock fallback for all five shapes.
+
+Seconds below are **median (minimum–maximum)**. The stock column comes from the candidate
+process; the [raw artifact](results/jvm-function-contracts-2026-10-23.json) also retains the prior
+process's independent stock controls. Short-job ranges show JIT/startup drift and sometimes overlap;
+these trials do not isolate a sustained or causal throughput improvement. The newly admitted
+paths are slower in these controls, and no unfavorable sample is discarded.
+
+| Shape | Stock Flink | Previous main, native enabled → fallback | New native boundary |
+| --- | ---: | ---: | ---: |
+| Table function BINARY(4) | 0.101383 (0.095388–0.171532) | 0.149609 (0.087095–0.162110) | 0.274211 (0.243455–0.292826) |
+| Aggregate value DECIMAL(38,18) | 0.191930 (0.180003–0.202799) | 0.190752 (0.173449–0.192808) | 0.216691 (0.212261–0.229911) |
+| Aggregate value TIMESTAMP(9) | 0.198602 (0.188789–0.209463) | 0.186867 (0.178792–0.205726) | 0.210780 (0.205408–0.230914) |
+| Aggregate value BINARY(4) | 0.340695 (0.320128–0.354613) | 0.314970 (0.309735–0.333221) | 0.455705 (0.436433–0.477555) |
+| Aggregate key DECIMAL(38,18) | 0.206675 (0.186250–0.322137) | 0.240331 (0.195864–0.248452) | 0.226314 (0.214406–0.297665) |
+
+Reproduce after compiling a release build with `-Pbench`:
+
+```bash
+SF_BENCHMARK=true mvn -Pbench -pl streamfusion-runtime \
+  -Dtest=JvmFunctionContractsBenchmark -Dboundary.rows=262144 \
+  -Dboundary.warmups=2 -Dboundary.runs=5 surefire:test@default-test
+SF_BENCHMARK=true mvn -Pbench -pl streamfusion-runtime \
+  -Dtest=TypedTableFunctionBenchmark '-Dtablefunc.types=BINARY(4)' \
+  -Dtablefunc.cases=project -Dtablefunc.rows=262144 \
+  -Dtablefunc.warmup=2 -Dtablefunc.runs=5 surefire:test@default-test
+```
+
+For prior-main controls, compile the unchanged benchmark fixtures against `1bd9daa8`, set
+`boundary.expectNative=false` and `tablefunc.expectNative=false`, and verify the asserted fallback.
+Correctness coverage also runs on Flink 1.18.1; these local timings are specifically Flink 2.2.1.
+
 ## Isolated measurement
 
 Shared-workspace builds repeatedly overlapped local trials. The JVM aggregate diagnostics
@@ -375,3 +422,31 @@ JDK11 jobs continue checking released compatibility and bytecode.
 17-case2.2 collection-source API recheck. These use the pinned prior nested-candidate
 release payload; required CI rebuilds current production native code before its own
 opt-in selection. No local test duration is treated as throughput evidence.
+
+### Released legacy-wrapper coverage (2026-10-23)
+
+The exact legacy Table API wrapper now reaches the same managed-state function boundary as
+bridging definitions. Four focused cases on each Flink line cover mixed DISTINCT/non-DISTINCT
+use, FILTER, nullable arguments, lifecycle and POJO accumulators. Repeated recovery covers
+both memory/native RocksDB and zero/positive retention, with two forced restores per scenario.
+Custom wrapper subclasses, Python and specialized functions remain excluded.
+
+One release complete-job diagnostic uses 262,144 runtime rows, 64 INT keys, nullable BIGINT
+values and INT weights, mixed DISTINCT/non-DISTINCT legacy weighted average plus COUNT,
+parallelism one, 1,024-row batches, a 2 GiB heap and both transposes with a blackhole row sink.
+On Intel i7-12650H/Linux WSL2, JDK 17.0.20.1/Flink 2.2.1, after two warmups and five alternating
+pairs, stock measures 0.281323 s (0.271881–0.332792), previous canonical fallback
+0.284807 s (0.200943–0.297426) and the new native boundary 0.306032 s
+(0.283084–0.383554). The previous process's own stock control is 0.285709 s
+(0.204406–0.317088). No concurrent local build/test/timing runs; both engines receive untimed
+EXPLAIN and planning/submission remain timed. These short jobs do not establish sustained
+throughput or acceleration. The accepted UDF exception admits correctness coverage with this
+measured cost; planner recognition reuses the existing runtime rather than an optimization pass.
+
+[All legacy-wrapper trials and source hashes](results/legacy-jvm-aggregates-2026-10-23.json)
+retain the independent prior controls and positive native/fallback assertions. Reproduce with
+`SF_BENCHMARK=true mvn -pl streamfusion-runtime -Pbench
+'-Dtest=JvmFunctionContractsBenchmark#legacyPojoAccumulatorsRetainDistinctStateAndBothTransposes'
+-Dboundary.rows=262144 -Dboundary.warmups=2 -Dboundary.runs=5
+-Dstreamfusion.exchange.zeroCopyLocal=false test`. Previous production copies only the test
+fixtures and sets `-Dboundary.expectNative=false`.

@@ -17,10 +17,30 @@ rows and closed input batches.
 The generated correlate evaluator is private to the columnar operator. It is stateless from
 Flink's checkpoint perspective; source offsets and downstream operators retain their existing
 checkpoint contracts. The implementation verifies repeated recovery with grouped state rather than
-introducing an independent function-state codec. Stateful JVM aggregate functions require a
-separate design and remain tracked in [#237](https://github.com/datafusion-contrib/StreamFusion/issues/237).
+introducing an independent function-state codec. Stateful JVM aggregates use the separate
+[managed-state boundary](48-jvm-aggregate-managed-state.md); their remaining contracts stay
+tracked in [#237](https://github.com/datafusion-contrib/StreamFusion/issues/237).
 
 Mixed Java/Rust CPU profiles identified a redundant projection and writes of discarded input
 columns after correlate expansion. Pure column projections are fused into the output writer;
 function calls, predicate evaluation and collector order are unchanged. General expressions and
 filters remain separate operators. No new Rust kernel or JNI protocol is introduced.
+
+ARRAY/MAP/ROW table-function signatures reuse the representation-preserving boundary already
+used by generated UNNEST and scalar UDFs. This keeps NULL map keys, nested string contents,
+row kinds and released container-copy behavior within an Arrow island. Both function types
+share the nullable typed-array converter adapter, while each generated context supplies its
+own released classloader expression. Released type inference must select default external
+Java conversions recursively; internal or alternate container conversion classes retain
+fallback. Sensitive outputs may only flow through verified preserving consumers or the final
+row boundary. These restrictions avoid inventing a second nested-value or ownership protocol.
+
+A plain type-preserving projection at a row source folds into the existing preserving
+entry transpose before table application. Metadata-only AS aliases and reordered unique
+columns retain original source names for the owned entry copy; the released correlate reads
+ordinals and retains its declared output aliases. The fold is limited to boolean/signed-integer
+fields and ROWs recursively containing them; other container copy representations remain
+unverified. This avoids passing nested ROW arguments through
+an unverified native Calc merely to discard unused source columns. Computed/filtered/duplicated
+projections and columnar sources retain their existing representation guards; no duplicate
+projection evaluator or conversion ABI is added.

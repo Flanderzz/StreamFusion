@@ -25,6 +25,22 @@ against each released Flink line; the upstream fixtures alone do not establish f
 The unchanged released `testDistinctWithMultiFilter` fixture has also been executed locally
 against this ordered-retraction extension: seven invocations pass on Flink 2.2 and six on 1.18, all with positive native work.
 
+The unchanged Table API `CorrelateITCase.testRowType` requires consumed native table-function
+work on both released lines. Its nested external Row argument, collector output and original
+result assertions remain upstream's. Runtime-route scopes include both HEAP and ROCKSDB
+invocations so an unrelated native node or a silent fallback cannot satisfy the witness.
+The DISTINCT JVM aggregate/DataView methods `testDistinctUDAGG` and
+`testDistinctUDAGGMixedWithNonDistinctUsage` likewise require the JVM aggregate operator and both
+backend routes, retaining upstream's positive idle retention and failure/recovery fixtures.
+Flink 1.18's randomized changelog-state setting retains its established full-fallback contract;
+the exact observed variant selects native work or that explicit fallback reason. Both JVM
+operators are also listed in the runtime-route classifier, which still requires matching
+nonempty work from successful jobs.
+The agent records the JVM aggregate and table-function operators after successful Arrow-batch
+consumption, using the same consumed-row recorder as the other columnar operators.
+Focused SQL additionally covers container fanout, ownership, failures and repeated recovery;
+the single upstream method does not establish every nested signature by itself.
+
 ## Runner and suite selection
 
 StreamFusion can run Flink's own table planner runtime integration tests with native acceleration
@@ -156,6 +172,17 @@ leader-not-available responses with a 30-second retry budget and five-second API
 timeouts. Authorization and other failures remain fatal. This changes fixture
 synchronization only; sink execution, SQL, and result assertions stay upstream's,
 and failed tests are not rerun.
+
+The Flink 2.2 `CommonExecSinkITCase` bounded source fixture waits for its already scheduled
+`NoMoreSplits` notification before emitting data or ending input. Its released split holder
+otherwise emits immediately: a NOT NULL task failure can race that notification, and the
+result reports a secondary lost-operator-event failure instead of the real sink error.
+The test agent gates this exact fixture reader's availability and polling until its original
+notification handler runs; closing a reader releases any pending availability. The original
+reader still supplies every row, conversion, end signal and exception. Rows, SQL, production
+sink enforcement and upstream assertions remain unchanged, and failed tests are not retried.
+Focused bytecode tests cover split/empty readers, independent readers, closure, and propagation
+of the original sink exception after readiness.
 
 The 1.18 execution contract resource names methods verified in that release's unchanged source.
 It retains scalar, aggregate, rank, distinct-window and lookup witnesses; it excludes the

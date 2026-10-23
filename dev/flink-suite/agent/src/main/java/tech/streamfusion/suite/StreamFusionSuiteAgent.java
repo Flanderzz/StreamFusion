@@ -103,6 +103,10 @@ public final class StreamFusionSuiteAgent {
         .transform(
             (builder, type, classLoader, module, protectionDomain) ->
                 builder.visit(Advice.to(RecordGeneratedPipeline.class).on(named("generate"))))
+        .type(named("org.apache.flink.table.planner.plan.nodes.exec.common.CommonExecSinkITCase$TestSource$1$1"))
+        .transform((builder,type,classLoader,module,protectionDomain) ->
+            System.getProperty("streamfusion.flink-suite.flink-line","2.2").equals("2.2")
+                ? CommonSinkSourceReadiness.instrument(builder) : builder)
         .type(named("org.apache.flink.runtime.jobmaster.JobResult"))
         .transform(
             (builder, type, classLoader, module, protectionDomain) ->
@@ -170,6 +174,8 @@ public final class StreamFusionSuiteAgent {
                 "tech.streamfusion.operator.NativeLookupJoinOperator",
                 "tech.streamfusion.operator.NativeAsyncLookupJoinOperator",
                 "tech.streamfusion.operator.NativeFilterOperator",
+                "tech.streamfusion.operator.NativeColumnarJvmGroupOperator",
+                "tech.streamfusion.operator.NativeColumnarTableFunctionOperator",
                 "tech.streamfusion.operator.NativeColumnarGroupAggregateOperator",
                 "tech.streamfusion.operator.NativeColumnarLocalGroupAggregateOperator",
                 "tech.streamfusion.operator.NativeColumnarUpdatingJoinOperator",
