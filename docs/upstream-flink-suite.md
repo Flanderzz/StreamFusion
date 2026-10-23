@@ -693,6 +693,16 @@ post-merge Flink 2.2 runtime shard failed during that redundant download, before
 tests started; its PR checks had succeeded. Test failures remain blocking and are never retried
 or replaced by cached results.
 
+Preparation verifies the compressed shared archive with `zstd --test` and publishes a SHA-256
+sidecar. Consumers use `gh run download` with the current workflow run ID and exact artifact
+name, checking that digest before accepting the transfer. A failed, missing or truncated
+download gets at most three attempts, with 5- and 15-second waits and a ten-minute limit per
+attempt. Every attempt uses a fresh temporary directory; a partial transfer never becomes
+an accepted build. Restore checks the digest again, extracts into a temporary directory,
+validates build identity and relocated classpath inputs, then publishes the suite directory.
+Extraction or identity errors fail the job without leaving a partially restored suite.
+Only downloads retry; compilation, restore validation and tests retain their failure behavior.
+
 The preparation job also caches the compiled, clean Flink checkout using an exact key containing
 the released Flink version, actual JDK version, runner platform/architecture, and build script/settings/workflow
 hash. Maven still runs the same build commands to validate and install its outputs; this is incremental

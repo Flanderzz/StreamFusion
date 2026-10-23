@@ -18,6 +18,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   prepare:
@@ -80,7 +81,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: upstream-build-${{ inputs.line }}-${{ github.sha }}
-          path: upstream-build.tar.zst
+          path: |
+            upstream-build.tar.zst
+            upstream-build.tar.zst.sha256
           compression-level: 0
           if-no-files-found: error
           retention-days: 1
@@ -125,15 +128,19 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-      - uses: actions/download-artifact@v5
-        with:
-          name: upstream-build-${{ matrix.line }}-${{ github.sha }}
+      - name: Download and verify the shared build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_ARTIFACT: upstream-build-${{ matrix.line }}-${{ github.sha }}
+        run: >-
+          python3 dev/flink-suite/shared_build.py download
+          --archive upstream-build.tar.zst --artifact "$BUILD_ARTIFACT"
       - name: Restore the shared build
         run: |
           python3 dev/flink-suite/shared_build.py restore \
             --root ".flink-suite/${{ matrix.line }}" --version "${{ matrix.version }}" \
             --archive upstream-build.tar.zst
-          rm upstream-build.tar.zst
+          rm upstream-build.tar.zst upstream-build.tar.zst.sha256
       - name: Verify prepared Maven starts without downloading
         run: |
           export MAVEN_USER_HOME="$PWD/.flink-suite/${{ matrix.line }}/maven-wrapper"

@@ -20,6 +20,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: upstream-flink-suite-${{ github.ref }}-${{ inputs.sql_inventory && inputs.inventory_scope || 'tests' }}
