@@ -15,6 +15,8 @@ import java.util.List;
 import java.util.stream.Stream;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.table.annotation.DataTypeHint;
+import org.apache.flink.table.annotation.FunctionHint;
 import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.api.Schema;
 import org.apache.flink.table.api.TableEnvironment;
@@ -40,6 +42,8 @@ class FlinkTypedTableFunctionSqlHarnessTest {
     var cases = new ArrayList<Arguments>();
     for (String type :
         List.of(
+            "CHAR(1)",
+            "CHAR(4)",
             "BOOLEAN",
             "TINYINT",
             "SMALLINT",
@@ -87,6 +91,7 @@ class FlinkTypedTableFunctionSqlHarnessTest {
   @ParameterizedTest
   @ValueSource(
       strings = {
+        "CHAR(4)",
         "BOOLEAN",
         "TINYINT",
         "SMALLINT",
@@ -204,6 +209,35 @@ class FlinkTypedTableFunctionSqlHarnessTest {
     }
   }
 
+  @Test
+  void annotatedCharArgumentsRetainCastWidthsAndLeftPadding() {
+    for (String join :
+        List.of(
+            ", LATERAL TABLE(character_rows(CAST(s.v AS CHAR(4)))) AS t(v)",
+            " LEFT JOIN LATERAL TABLE(character_rows(CAST(s.v AS CHAR(4)))) AS t(v) ON TRUE")) {
+      try (var metrics = new RecoveryExecutionMetrics()) {
+        var comparison =
+            NativeFailureParity.run(
+                () -> {
+                  var table = environment("CHAR(4)", "UTC", 1031, metrics);
+                  table.createTemporarySystemFunction("character_rows", new CharacterRows());
+                  return table;
+                },
+                "SELECT s.id, s.v, t.v, CHAR_LENGTH(t.v) FROM src s" + join);
+        comparison.assertSuccess(NativeFailureParity.Route.NATIVE);
+        assertEquals(comparison.host().resultTypes(), comparison.nativeRun().resultTypes());
+        RecoveryExecutionMetrics.assertConsumed(metrics.nativeOperators(), "NativeTableFunction");
+      }
+    }
+  }
+
+  @FunctionHint(input = @DataTypeHint("CHAR(4)"), output = @DataTypeHint("CHAR(4)"))
+  public static class CharacterRows extends TableFunction<String> {
+    public void eval(String value) {
+      if (value != null) collect(value);
+    }
+  }
+
   static StreamTableEnvironment environment(
       String name, String zone, int rows, RecoveryExecutionMetrics metrics) {
     var env =
@@ -239,6 +273,8 @@ class FlinkTypedTableFunctionSqlHarnessTest {
   }
 
   static DataType valueType(String name) {
+    if (name.startsWith("CHAR("))
+      return DataTypes.CHAR(Integer.parseInt(name.substring(5, name.length() - 1)));
     if (name.startsWith("TIMESTAMP_LTZ("))
       return DataTypes.TIMESTAMP_LTZ(Integer.parseInt(name.substring(14, name.length() - 1)));
     if (name.startsWith("TIMESTAMP("))
@@ -276,6 +312,8 @@ class FlinkTypedTableFunctionSqlHarnessTest {
   static Object value(String name, int index) {
     int slot = index % 8;
     if (slot == 7) return null;
+    if (name.startsWith("CHAR("))
+      return new String[] {"", "a", "a ", "abcd", "abcde", "  ", "z"}[slot];
     switch (name) {
       case "FLOAT":
         return new float[] {
