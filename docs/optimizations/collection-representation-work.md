@@ -367,7 +367,7 @@ nullable BINARY(n) values when the default length-delimited transport is enabled
 shares the selected binary child, offsets and parent validity; no new Rust formatter or map
 representation is introduced. A value-only Calc without a condition or sensitive co-projection
 also reuses the existing key-cache omission. Other consumers retain generated evaluation, and
-fixed BINARY keys/NOT NULL values remain guarded.
+NOT NULL fixed BINARY keys/values remain guarded; nullable binary keys also use the view described below.
 
 At 500,000 runtime-source rows, widths4/256, the release complete-job median falls from
 0.581776/0.685394 seconds through generated evaluation to 0.366429/0.448989 seconds through the
@@ -380,3 +380,24 @@ Six Rust smoke fixtures assert child `Arc` identity, sliced offsets, NULL/empty 
 values at 16/1024 rows and 0/4/256-byte values. The untimed System-allocation probe reports 104
 requests/6,481 bytes and zero new Arrow output-buffer bytes per fixture, including first schema
 binding. Buffer sharing and allocation requests do not measure copied bytes or end-to-end speedup.
+
+## Fixed BINARY map-key views
+
+Direct final MAP_KEYS on an input-reference map with nullable BINARY(n) keys and nullable basic
+values reuses the existing Rust child view when length-delimited transport is enabled. The
+kernel shares the binary key child, offsets and parent validity; nested consumers retain the
+released Flink evaluator. No new Rust map representation is introduced. NOT NULL fixed BINARY
+keys/values and unverified state/writer boundaries retain fallback.
+
+At 500,000 runtime-source rows and key widths4/256, release complete-job native medians fall
+from 0.383493/0.490600 seconds through generated evaluation to 0.253453/0.304727 seconds through
+the Rust view, a 33.9–37.9% reduction. Paired stock medians are 0.243699/0.274349 seconds; final
+native jobs remain slower, and the wide-key native range includes a slower trial. Timings
+retain planning, submission, source/sink and both transposes.
+[All trials and reproduction](../benchmarks/scalar-functions.md#fixed-binary-map-keys) include
+previous fallback, controls, ranges and the completed two-pass optimization limit.
+
+Six Rust smokes assert key-child Arc identity, sliced offsets, duplicate key contents, NULL values and NULL/empty parents
+at 16/1024 rows and 0/4/256-byte keys. The untimed System-allocation probe reports 104 requests
+for 6,475 bytes and zero new Arrow output-buffer bytes per fixture, including first schema
+binding. These counters do not measure copied bytes or end-to-end speedup.

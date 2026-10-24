@@ -62,6 +62,7 @@ final class TextTimeBenchmarkInputs {
         return "a";
       case "tt_json_map":
       case "tt_fixed_binary_map":
+      case "tt_fixed_binary_keys":
         return "m";
       case "tt_timestamp":
       case "tt_timestamp_ltz":
@@ -101,6 +102,8 @@ final class TextTimeBenchmarkInputs {
         return "MAP<STRING NOT NULL, STRING>";
       case "tt_fixed_binary_map":
         return "MAP<STRING NOT NULL,BINARY(" + fixedBinaryWidth() + ")>";
+      case "tt_fixed_binary_keys":
+        return "MAP<BINARY(" + fixedBinaryWidth() + "),INT>";
       case "tt_timestamp":
         return "TIMESTAMP(9)";
       case "tt_timestamp_ltz":
@@ -131,6 +134,24 @@ final class TextTimeBenchmarkInputs {
               charsets[(int) (i % charsets.length)]))
           .returns(Types.ROW_NAMED(new String[] {"s", "b", "c"},
               Types.STRING, Types.PRIMITIVE_ARRAY(Types.BYTE), Types.STRING)));
+    } else if (input.equals("tt_fixed_binary_keys")) {
+      int width = fixedBinaryWidth();
+      byte[][] keys = {new byte[width], new byte[width]};
+      for (int i = 0; i < width; i++) {
+        keys[0][i] = (byte) (i * 17);
+        keys[1][i] = (byte) (255 - i * 17);
+      }
+      var type = (org.apache.flink.table.types.logical.RowType) DataTypes.ROW(
+          DataTypes.FIELD("m", DataTypes.MAP(DataTypes.BINARY(width), DataTypes.INT()))).getLogicalType();
+      tables.createTemporaryView("inputs", env.fromSequence(0, rows - 1)
+          .map(i -> {
+            var map = new java.util.LinkedHashMap<Object, Object>();
+            map.put(keys[0], 1);
+            map.put(keys[1], null);
+            map.put(null, -1);
+            return (org.apache.flink.table.data.RowData) org.apache.flink.table.data.GenericRowData.of(
+                isNull(i, nullEvery) ? null : new org.apache.flink.table.data.GenericMapData(map));
+          }).returns(org.apache.flink.table.runtime.typeutils.InternalTypeInfo.of(type)));
     } else if (input.equals("tt_fixed_binary_map")) {
       int width = fixedBinaryWidth();
       byte[][] values = {new byte[width], new byte[width]};

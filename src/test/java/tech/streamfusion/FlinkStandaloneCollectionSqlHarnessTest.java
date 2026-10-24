@@ -136,14 +136,14 @@ class FlinkStandaloneCollectionSqlHarnessTest {
   }
 
   @Test
-  void fixedBinaryMapLeavesStillFallBackForCharacterCasts() {
+  void notNullBinaryMapKeysRetainFallbackForCharacterCasts() {
     var entries = new LinkedHashMap<byte[], byte[]>();
     entries.put(new byte[] {0, -1}, new byte[] {1, 2});
     var runs =
         NativeFailureParity.run(
             () ->
                 environment(
-                    ROW(FIELD("m", MAP(BINARY(2), BINARY(2)))),
+                    ROW(FIELD("m", MAP(BINARY(2).notNull(), BINARY(2)))),
                     List.of(Row.of(entries), Row.of((Object) null))),
             "SELECT CAST(m AS STRING),TRY_CAST(m AS CHAR(16)) FROM src");
     runs.assertSuccess(NativeFailureParity.Route.FALLBACK);
@@ -307,6 +307,98 @@ class FlinkStandaloneCollectionSqlHarnessTest {
                           && execution.contains("jvm=[]")),
           scan.functionExecutions().toString());
       assertEquivalent(run(() -> binaryMaps(false), sql));
+    }
+  }
+
+  private static TableEnvironment binaryKeys(
+      boolean legacy, boolean notNull, boolean binaryValues) {
+    var env = METRICS.environment(new Configuration(), 1, 0);
+    env.getConfig().enableObjectReuse();
+    var table = StreamTableEnvironment.create(env);
+    table.getConfig().set("streamfusion.transpose.batchRows", "3");
+    table.getConfig().set("table.exec.legacy-cast-behaviour", legacy ? "ENABLED" : "DISABLED");
+    table.executeSql(
+        "CREATE TABLE src (id BIGINT,t ARRAY<STRING>,r ARRAY<ROW<n INT>>,"
+            + "nn ARRAY<INT NOT NULL>,m MAP<BINARY(4)"
+            + (notNull ? " NOT NULL" : "")
+            + ","
+            + (binaryValues ? "BINARY(4)" : "INT")
+            + ">)"
+            + " WITH ('connector'='collection-representation','changelog'='true')");
+    return table;
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "SELECT id,m,MAP_KEYS(m),MAP_VALUES(m) FROM src",
+        "SELECT id,CAST(m AS STRING),TRY_CAST(m AS CHAR(8)),CAST(m AS VARCHAR(2)) FROM src",
+        "SELECT id,CAST(m AS MAP<BINARY(2),BIGINT>),TRY_CAST(m AS MAP<BINARY(8),STRING>) FROM src",
+        "SELECT id,CAST(m AS MAP<STRING,STRING>) FROM src",
+        "SELECT id,MAP_ENTRIES(m),MAP_UNION(m,m) FROM src",
+        "SELECT id,CASE WHEN id=0 THEN CAST(NULL AS ARRAY<BINARY(4)>) ELSE MAP_KEYS(m) END FROM"
+            + " src",
+        "SELECT id,ARRAY_DISTINCT(MAP_KEYS(m)),ARRAY_REVERSE(MAP_KEYS(m)) FROM src WHERE"
+            + " MOD(id,3)=0",
+        "SELECT MAP_KEYS(m) FROM src WHERE id<0"
+      })
+  void nullableBinaryKeysPreserveReleasedBytesCastsAndChangelog(String sql) {
+    for (String function : List.of("MAP_ENTRIES", "MAP_UNION", "ARRAY_DISTINCT", "ARRAY_REVERSE"))
+      if (sql.contains(function + "("))
+        tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction(function);
+    for (boolean legacy : new boolean[] {false, true}) {
+      var runs = run(() -> binaryKeys(legacy, false, false), sql);
+      if (sql.contains("CASE WHEN")
+          && org.apache.flink.runtime.util.EnvironmentInformation.getVersion().startsWith("1.18")) {
+        runs.assertFailure(
+            org.codehaus.commons.compiler.CompileException.class,
+            "'{' expected instead of '['",
+            NativeFailureParity.Phase.INITIALIZATION,
+            NativeFailureParity.Route.FALLBACK);
+      } else assertEquivalent(runs);
+    }
+  }
+
+  @Test
+  void binaryKeysComposeWithBinaryValuesAndKeepNotNullGuard() {
+    assertEquivalent(
+        run(
+            () -> binaryKeys(false, false, true),
+            "SELECT id,m,MAP_KEYS(m),MAP_VALUES(m),CAST(m AS STRING) FROM src"));
+    NativeFailureParity.run(
+            () -> binaryKeys(false, true, false),
+            "SELECT id,m,MAP_KEYS(m),CAST(m AS STRING) FROM src")
+        .assertSuccess(NativeFailureParity.Route.FALLBACK);
+  }
+
+  @Test
+  void keyCastsPreserveAliasedBinaryInputSemantics() {
+    assertEquivalent(
+        run(
+            () -> binaryKeys(false, false, true),
+            "SELECT CAST(MAP_FROM_ARRAYS(MAP_VALUES(m),ARRAY[id,id+1,id+2]) AS"
+                + " MAP<BINARY(4),STRING>) FROM src WHERE id=4"));
+  }
+
+  @Test
+  void directBinaryMapKeysUseSharedRustView() {
+    for (String sql :
+        List.of(
+            "SELECT id,MAP_KEYS(m) FROM src",
+            "SELECT id,MAP_KEYS(m) FROM src WHERE MOD(id,3)=0",
+            "SELECT MAP_KEYS(m) FROM src WHERE id<0")) {
+      var table = binaryKeys(false, false, false);
+      var scan = NativePlanner.install(table);
+      table.explainSql(sql);
+      assertTrue(
+          scan.functionExecutions().stream()
+              .anyMatch(
+                  execution ->
+                      execution.contains("native=[")
+                          && execution.contains("MAP_KEYS")
+                          && execution.contains("jvm=[]")),
+          scan.functionExecutions().toString());
+      assertEquivalent(run(() -> binaryKeys(false, false, false), sql));
     }
   }
 

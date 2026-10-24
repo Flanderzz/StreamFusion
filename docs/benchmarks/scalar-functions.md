@@ -1893,7 +1893,7 @@ For each of ARRAY_FORMAT_STRING and MAP_FORMAT_STRING, select `#profileFunction`
 `SF_PROFILE_SCALAR=true`, `-Dscalar.warmup=1 -Dscalar.seconds=8` and
 `-Dprofile.asprof=/path/to/asprof -Dprofile.outputDir=/path/to/output`. Runtime parity on both
 supported Flink lines independently requires consumed NativeCalc input, including bounded UTF-16
-results, legacy formatting and all four changelog kinds. Fixed BINARY MAP leaves and unverified
+results, legacy formatting and all four changelog kinds. NOT NULL fixed BINARY MAP leaves and unverified
 state/native-writer boundaries retain fallback.
 
 
@@ -1901,8 +1901,9 @@ state/native-writer boundaries retain fallback.
 
 Nullable BINARY(n) map values now enter the existing generated collection evaluator. A direct
 final MAP_VALUES of an input-reference map with VARCHAR keys reuses the Rust shared-child view;
-other consumers retain Flink evaluation. Fixed BINARY keys and NOT NULL fixed BINARY values
-remain guarded. The latter has an observed NULL-formatting difference on released Flink 1.18.
+other consumers retain Flink evaluation. NOT NULL fixed BINARY keys and values remain guarded;
+nullable fixed BINARY keys are covered below. NOT NULL values have an observed NULL-formatting
+difference on released Flink 1.18.
 
 Release/mimalloc measurements on 2026-10-24 use Flink 2.2.1, OpenJDK 17.0.20.1 and Linux
 x86-64/WSL2 on an Intel Core i7-12650H. Each job has 500,000 runtime-source rows, parallelism 1,
@@ -1965,3 +1966,74 @@ fixture sources and adds `-Dscalar.native.expected=false`. For CPU captures, sel
 `-Dscalar.warmup=1 -Dscalar.seconds=8 -Dprofile.asprof=/path/to/asprof`.
 Rust fixtures run with `cargo bench -p streamfusion --bench collection_expressions --features mimalloc
 --locked -j2 -- binary_map_values --test` from `native/`.
+
+## Fixed BINARY map keys
+
+Nullable BINARY(n) map keys use the existing length-delimited generated collection bridge.
+A direct final MAP_KEYS of an input-reference map with nullable basic values reuses the Rust
+shared-child view; other consumers retain generated Flink evaluation. NOT NULL fixed BINARY
+keys and values, external STRUCTURED inputs and unverified state/native-writer boundaries
+remain guarded. Released Flink 1.18 cannot initialize CASE returning BINARY arrays; tests retain
+its exact compiler failure and planning fallback for that form.
+
+Release/mimalloc measurements on 2026-10-24 use Flink 2.2.1, OpenJDK 17.0.20.1 and Linux
+x86-64/WSL2 on an Intel Core i7-12650H. Each job has 500,000 runtime-source rows, parallelism 1,
+an 8 GiB test heap, two warmups and three alternating trials per engine. The ordered internal
+RowData source supplies three-entry maps: two binary keys of width4/256 and a NULL key, with
+INT values 1/NULL/-1. Every eighth parent is NULL. Public InternalTypeInfo registration avoids
+an external byte-array-key conversion that could reorder entries by object identity.
+Timing includes planning, submission, both row/Arrow transposes and a blackhole row sink;
+cluster setup and initial explain are outside timing. No other tests, benchmarks or native
+compilation run concurrently with these measurements.
+
+Previous main `dbb9cffd` uses identical benchmark/input code and the same release native DSO
+in a separate JVM. New expressions must fall back there, while source-matched identity controls
+still require NativeCalc. The initial generated route precedes the bounded optimization;
+MAP-to-STRING remains generated throughout. [All trials and diagnostics](results/fixed-binary-map-keys-2026-10-24.json)
+retain both stock controls, identity controls, allocation probes and CPU profile summaries.
+
+Median seconds (minimum–maximum), retaining complete-job startup costs:
+
+| Expression / bytes per key | Paired stock, final run | Previous fallback | Initial generated route | Final native route |
+| --- | ---: | ---: | ---: | ---: |
+| MAP_KEYS / 4 | 0.243699 (0.234586–0.247416) | 0.224914 (0.224026–0.225689) | 0.383493 (0.378825–0.386779) | 0.253453 (0.252776–0.257386) |
+| MAP → STRING / 4 | 0.340207 (0.336850–0.350045) | 0.339059 (0.338770–0.354235) | 0.487764 (0.482822–0.492686) | 0.482662 (0.478601–0.498011) |
+| MAP_KEYS / 256 | 0.274349 (0.263257–0.276442) | 0.275038 (0.265149–0.280884) | 0.490600 (0.485984–0.510844) | 0.304727 (0.298132–0.439454) |
+| MAP → STRING / 256 | 0.982406 (0.978934–0.987015) | 0.968631 (0.958710–0.969560) | 1.081767 (1.076390–1.102349) | 1.070686 (1.040013–1.078272) |
+
+The Rust view reduces MAP_KEYS native medians by 33.9–37.9% versus generated evaluation.
+All final standalone cases remain slower than paired stock and previous fallback under the
+accepted collection-extension tradeoff. The wide-key native range also contains a slower trial.
+These short complete jobs do not establish sustained throughput or standalone acceleration.
+
+Optimization stopped after two passes. The first eight-second CPU capture of generated
+MAP_KEYS has 14,036 samples, including 2,494 inclusive callback samples, 1,038 in generated
+evaluation and 822 in array writing. Reusing the existing Rust view avoids that callback for
+the verified projection. The second eight-second capture, for MAP-to-STRING at 256 bytes,
+has 11,930 samples, including 4,263 in the callback, 2,907 in generated evaluation and 898 in
+represented-string writing. Inclusive counts overlap and include planning and compilation;
+they do not measure allocations or copied bytes. Formatting, map serialization and both
+perimeter conversions remain costs for [#392](https://github.com/datafusion-contrib/StreamFusion/issues/392).
+
+Six release Criterion smokes assert shared key-child identity, offsets and parent validity on
+sliced maps at 16/1024 rows and 0/4/256-byte keys with duplicate key contents, NULL values and NULL/empty parents.
+The untimed System-allocation probe reports 104 allocation requests for 6,475 bytes per case
+and zero newly owned Arrow output-buffer bytes, including first schema binding. Buffer sharing
+and allocation requests do not measure copied bytes or end-to-end speedup.
+
+Reproduce each width with a released native build:
+
+```sh
+SF_BENCHMARK=true mvn -pl streamfusion-runtime test -Pbench \
+  '-Dtest=ScalarFunctionBenchmark#individualFunctions' -Dsf.testForks=1 \
+  -Dscalar.functions=FIXED_BINARY_MAP_KEYS,BINARY_KEY_MAP_STRING \
+  -Dscalar.rows=500000 -Dscalar.binary.width=256 -Dscalar.nullEvery=8 \
+  -Dscalar.warmup=2 -Dscalar.runs=3
+```
+
+Also run with `-Dscalar.binary.width=4`. The previous checkout copies the same benchmark/input
+sources and adds `-Dscalar.native.expected=false`. For the two CPU captures, select
+`#profileFunction`, set `SF_PROFILE_SCALAR=true`, choose one function, and use
+`-Dscalar.warmup=1 -Dscalar.seconds=8 -Dprofile.asprof=/path/to/asprof`.
+From `native/`, run `cargo bench -p streamfusion --bench collection_expressions --features mimalloc
+--locked -j2 -- binary_map_keys --test` for the Rust fixtures.

@@ -2174,7 +2174,7 @@ Existing admitted collection subscripts and Boolean/integer ARRAY_DISTINCT retai
 | ARRAY_JOIN | Rust UTF-8 join for total nullable string arrays and string options, including strict explicit NULL replacement; co-projected sensitive values and unverified consumers remain generated |
 | ELEMENT | Rust extraction for nullable BOOLEAN/integer/DECIMAL arrays; NULL/empty arrays return NULL, a singleton returns its element, longer arrays raise the selected Flink line's exception with the released message; sensitive/fallible operands retain generated evaluation |
 | MAP_FROM_ARRAYS | Rust construction for nullable basic key/value arrays, preserving duplicate and NULL keys, entry order and strict parent NULLs; mismatched lengths retain Flink's typed exception; other signatures remain generated |
-| MAP_KEYS | Rust shared-key view for total maps with nullable BOOLEAN/integer/DECIMAL keys and values; a direct final projection of an input-reference MAP with STRING/VARCHAR keys and nullable basic values also shares the represented key buffers; other signatures retain generated evaluation |
+| MAP_KEYS | Rust shared-key view for total maps with nullable BOOLEAN/integer/DECIMAL keys and values; a direct final projection of an input-reference MAP with STRING/VARCHAR keys and nullable basic values also shares the represented key buffers; direct final input-reference maps with nullable BINARY keys and nullable basic values share their binary key child through the length-delimited transport; other signatures retain generated evaluation |
 | MAP_VALUES | Rust shared-value view under the same verified map-projection admission; a value-only Calc with no condition or sensitive co-projection need not preserve the unused keys' Java caches. Direct VARCHAR-key projections also admit nullable BINARY values through the length-delimited transport |
 | MAP_ENTRIES | Rust shared entry-row list for verified basic maps and the direct STRING/VARCHAR-key input projections above; fresh entry rows have INSERT kind, while representation-sensitive row consumers remain generated |
 | MAP_UNION | Rust stable typed membership/gather for total matching nullable basic maps, preserving right ordering/duplicates and Flink NULL-key behavior |
@@ -2234,7 +2234,7 @@ arrays retain generated evaluation.
 Primitive bridge types and recursively supported ARRAY/MAP/ROW values are admitted, including
 nullable typed map keys, decimal and timestamp values. Generated ARRAY/ROW containers and nullable MAP
 values support fixed BINARY leaves through the length-delimited transport described above;
-fixed BINARY MAP keys, NOT NULL fixed BINARY MAP values and unpaired UTF-16 field names remain excluded. STRUCTURED results from inline OBJECT_OF/OBJECT_UPDATE are supported;
+NOT NULL fixed BINARY MAP keys/values and unpaired UTF-16 field names remain excluded. STRUCTURED results from inline OBJECT_OF/OBJECT_UPDATE are supported;
 external STRUCTURED inputs retain fallback. Unsupported host signatures or generated programs
 fall back during planning.
 
@@ -2257,6 +2257,23 @@ The length-delimited transport is also required for the Rust view so actual widt
 [Release complete-job measurements](../benchmarks/scalar-functions.md#fixed-binary-map-values)
 compare the Rust view, generated evaluator, stock Flink and previous fallback under the accepted
 collection-extension tradeoff.
+
+Nullable BINARY(n) MAP keys also use the same length-delimited generated bridge. Runtime-source
+regressions verify NULL/empty maps, duplicate binary contents, actual widths outside the declaration,
+map casts, direct formatting, entry/array consumers, shared binary inputs and all input changelog kinds.
+Tests use ordered internal source entries because external byte-array keys have identity hashes.
+Both CAST and TRY_CAST keep released key/value conversion behavior; returned maps retain their
+logical entries even when a narrowing cast produces equal key bytes. Flink's generated map casts
+use Java HashMap, so binary-key cast iteration can depend on object identity; it is not an ordered-map
+contract. Direct input-map formatting is compared in its original entry order. NOT NULL binary keys
+and values retain fallback, as do external STRUCTURED inputs and unverified representation boundaries.
+On released 1.18, CASE returning a binary array can fail in Flink's own compiler; the explicit
+failure/fallback contract remains. No absent catalog function is introduced on either line.
+A direct final MAP_KEYS projection of an input-reference map with nullable BINARY keys and nullable
+BOOLEAN/integer/DECIMAL values uses the existing Rust shared-child view. Other key consumers retain
+generated evaluation. The default length-delimited transport must remain enabled for actual widths.
+[Release comparisons](../benchmarks/scalar-functions.md#fixed-binary-map-keys) record costs and the
+bounded optimization investigation.
 
 Nested strings carry their UTF-8 bytes and optional original Java UTF-16 cache. Nested ROW values
 carry a marked change-kind child outside their SQL ordinals. These preserve supplementary/BMP
@@ -2324,7 +2341,7 @@ standalone ARRAY-to-ARRAY, MAP-to-MAP and ROW-to-ROW casts now enter the same ge
 program used when a collection constructor or function is present. STRING, floating, temporal
 and NOT NULL-element conversions keep Flink's conversion rules and resolved types. The bridge's
 type gates and the representation-boundary restrictions above still apply; this does not admit
-external STRUCTURED inputs, fixed BINARY MAP keys or NOT NULL fixed BINARY MAP values.
+external STRUCTURED inputs or NOT NULL fixed BINARY MAP keys/values.
 The existing DECIMAL-to-FLOAT/DOUBLE ARRAY CAST also retains its Rust path.
 
 The conversion follows the recursive list structure used by Comet, preserving NULL containers,
@@ -2365,7 +2382,7 @@ halves; the represented string result preserves those Java units. CAST and TRY_C
 containers, filtered/CASE short-circuiting and errors from evaluating their input. Runtime tests
 require consumed NativeCalc input on both supported releases, including all four outer changelog
 kinds and generic/binary collection representations. Unverified state, exchange and native-writer
-boundaries, fixed BINARY MAP keys/NOT NULL values and external STRUCTURED inputs still fall back.
+boundaries, NOT NULL fixed BINARY MAP keys/values and external STRUCTURED inputs still fall back.
 These casts share the accepted collection-extension performance tradeoff; see the
 [conversion-inclusive character-cast measurements](../benchmarks/scalar-functions.md#collection-character-casts).
 
@@ -2892,7 +2909,7 @@ containers, keys and values, empty maps, signed zero, NaN/infinity, precision-38
 pre-epoch nanoseconds and nested RowKinds are covered. These are resolved Flink signatures:
 nested TIME resolves to TIME(0), and the interval fixture uses INTERVAL MONTH/SECOND(3).
 Runtime millisecond TIME values are preserved. Root DATE/TIME UDF signatures use the temporal
-path. Fixed BINARY map leaves, arbitrary Java conversion classes and custom type inference
+path. NOT NULL fixed BINARY map leaves, arbitrary Java conversion classes and custom type inference
 retain their separate gates.
 
 Scalar results from MAP arguments can feed native aggregation. MAP results can compose with

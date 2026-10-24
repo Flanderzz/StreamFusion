@@ -256,6 +256,12 @@ public class FlinkCollectionRepresentationSqlHarnessTest {
             ProviderContext context, StreamExecutionEnvironment env) {
           var rowElement = type.getTypeAt(2).getChildren().get(0);
           boolean kinds = changelog;
+          boolean binaryKeys =
+              type.getTypeAt(4).getChildren().get(0).getTypeRoot()
+                  == org.apache.flink.table.types.logical.LogicalTypeRoot.BINARY;
+          boolean integerValues =
+              type.getTypeAt(4).getChildren().get(1).getTypeRoot()
+                  == org.apache.flink.table.types.logical.LogicalTypeRoot.INTEGER;
           boolean binaryValues =
               type.getTypeAt(4).getChildren().get(1).getTypeRoot()
                   == org.apache.flink.table.types.logical.LogicalTypeRoot.BINARY;
@@ -269,13 +275,22 @@ public class FlinkCollectionRepresentationSqlHarnessTest {
                     // External byte[] map keys have identity hashes. Use ordered internal input
                     // so separate source executions cannot change map iteration order.
                     var entries = new java.util.LinkedHashMap<Object, Object>();
+                    byte[] binaryPayload =
+                        java.util.Arrays.copyOf(new byte[] {0, -1, 3, -128}, (int) (id % 7));
                     entries.put(
-                        new byte[] {0, -1, 3},
-                        binaryValues
-                            ? java.util.Arrays.copyOf(new byte[] {0, -1, 3, -128}, (int) (id % 7))
-                            : new GenericArrayData(new Integer[] {1, null, 3}));
+                        binaryKeys
+                            ? java.util.Arrays.copyOf(
+                                new byte[] {0, -1, 3, -128}, id == 12 ? 4097 : (int) (id % 7))
+                            : new byte[] {0, -1, 3},
+                        integerValues
+                            ? (int) (long) id
+                            : binaryValues
+                                ? binaryPayload
+                                : new GenericArrayData(new Integer[] {1, null, 3}));
+                    if (binaryKeys || binaryValues)
+                      entries.put(new byte[] {0, -1, 3, -128}, integerValues ? -1 : binaryPayload);
                     entries.put(null, null);
-                    if (binaryValues && id % 8 == 6) entries.clear();
+                    if ((binaryKeys || binaryValues) && id % 8 == 6) entries.clear();
                     var row =
                         GenericRowData.of(
                             id,
@@ -301,7 +316,7 @@ public class FlinkCollectionRepresentationSqlHarnessTest {
                                 org.apache.flink.table.api.DataTypes.INT()
                                     .notNull()
                                     .getLogicalType()),
-                            binaryValues && id % 8 == 7
+                            (binaryKeys || binaryValues) && id % 8 == 7
                                 ? null
                                 : new org.apache.flink.table.data.GenericMapData(entries));
                     if (kinds)

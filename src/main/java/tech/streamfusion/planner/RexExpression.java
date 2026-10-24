@@ -824,7 +824,10 @@ final class RexExpression {
             SqlTypeFamily.CHARACTER.contains(type.getKeyType())
                     && SqlTypeFamily.CHARACTER.contains(type.getValueType())
                 || (preserveCollections || !type.getKeyType().isNullable())
-                    && type.getKeyType().getSqlTypeName() != SqlTypeName.BINARY
+                    && (type.getKeyType().getSqlTypeName() != SqlTypeName.BINARY
+                        || preserveCollections
+                            && type.getKeyType().isNullable()
+                            && tech.streamfusion.arrow.ArrowConversion.nestedScalarUdfsEnabled())
                     && (type.getValueType().getSqlTypeName() != SqlTypeName.BINARY
                         || preserveCollections
                             && type.getValueType().isNullable()
@@ -915,7 +918,7 @@ final class RexExpression {
                     call, org.apache.flink.table.functions.BuiltInFunctionDefinitions.MAP_ENTRIES)
                 && call.getOperands().size() == 1
                 && (nativeBasicMap(call.getOperands().get(0).getType())
-                    || nativeStringKeyMapProjection(call)));
+                    || nativeInputMapProjection(call)));
   }
 
   private static boolean nativeBasicRow(RexCall call) {
@@ -1618,22 +1621,25 @@ final class RexExpression {
                 .contains(t.getSqlTypeName()));
   }
 
-  static boolean nativeStringKeyMapProjection(RexCall call) {
+  static boolean nativeInputMapProjection(RexCall call) {
     if (tech.streamfusion.compat.FlinkCompat.scalarFunction(call.getOperator()) != null
         || !java.util.Set.of("MAP_KEYS", "MAP_VALUES", "MAP_ENTRIES")
             .contains(call.getOperator().getName())
         || call.getOperands().size() != 1
         || !(call.getOperands().get(0) instanceof RexInputRef)) return false;
     var type = call.getOperands().get(0).getType();
-    return type.getSqlTypeName() == SqlTypeName.MAP
-        && type.getKeyType().getSqlTypeName() == SqlTypeName.VARCHAR
-        && type.getValueType().isNullable()
-        && (java.util.Set.of(SqlTypeName.BOOLEAN, SqlTypeName.TINYINT, SqlTypeName.SMALLINT,
-                SqlTypeName.INTEGER, SqlTypeName.BIGINT, SqlTypeName.DECIMAL)
-                .contains(type.getValueType().getSqlTypeName())
-            || "MAP_VALUES".equals(call.getOperator().getName())
-                && type.getValueType().getSqlTypeName() == SqlTypeName.BINARY
-                && tech.streamfusion.arrow.ArrowConversion.nestedScalarUdfsEnabled());
+    if (type.getSqlTypeName() != SqlTypeName.MAP || !type.getValueType().isNullable())
+      return false;
+    boolean basicValue = java.util.Set.of(SqlTypeName.BOOLEAN, SqlTypeName.TINYINT,
+        SqlTypeName.SMALLINT, SqlTypeName.INTEGER, SqlTypeName.BIGINT, SqlTypeName.DECIMAL)
+        .contains(type.getValueType().getSqlTypeName());
+    boolean binaryTransport = tech.streamfusion.arrow.ArrowConversion.nestedScalarUdfsEnabled();
+    return type.getKeyType().getSqlTypeName() == SqlTypeName.VARCHAR
+            && (basicValue || "MAP_VALUES".equals(call.getOperator().getName())
+                && type.getValueType().getSqlTypeName() == SqlTypeName.BINARY && binaryTransport)
+        || type.getKeyType().getSqlTypeName() == SqlTypeName.BINARY
+            && type.getKeyType().isNullable() && basicValue && binaryTransport
+            && "MAP_KEYS".equals(call.getOperator().getName());
   }
 
   private static boolean readsOnlyMapValues(RexNode projection) {
@@ -1641,7 +1647,7 @@ final class RexExpression {
             && !CollectionValueIdentity.sensitive(projection.getType())
         || projection instanceof RexCall
             && ((RexCall) projection).getOperator().getName().equals("MAP_VALUES")
-            && nativeStringKeyMapProjection((RexCall) projection);
+            && nativeInputMapProjection((RexCall) projection);
   }
 
   private boolean uniqueObjectConstruction;
@@ -2248,7 +2254,7 @@ final class RexExpression {
     }
     if (NativeConfig.collectionExpressionsEnabled() && ("MAP_KEYS".equals(functionName) || "MAP_VALUES".equals(functionName) || "MAP_ENTRIES".equals(functionName))) {
       var args=call.getOperands();
-      boolean represented = call == projectionRoot && nativeStringKeyMapProjection(call);
+      boolean represented = call == projectionRoot && nativeInputMapProjection(call);
       if (args.size()!=1 || (!nativeBasicMap(args.get(0).getType()) && !represented)
           || requiresRowShortCircuit(args.get(0)))
         return reject(functionName + " uses Flink evaluation outside total nullable basic maps");

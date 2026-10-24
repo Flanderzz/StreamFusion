@@ -1,0 +1,470 @@
+{
+  "date": "2026-10-24",
+  "previous_revision": "dbb9cffdd5577eefa1a3edb7fe973bac97f5a571",
+  "hardware": {
+    "cpu": "Intel Core i7-12650H",
+    "os": "Linux x86-64 / WSL2",
+    "jdk": "OpenJDK 17.0.20.1"
+  },
+  "native": {
+    "profile": "release",
+    "features": [
+      "mimalloc",
+      "rocksdb-state"
+    ],
+    "sha256": "b574491f08427c8b128107d6286cb403421a0bafbdba7a0e5cdd8fea30562d16",
+    "production_rust_changes": false,
+    "note": "Same native DSO for stock/prior/generated/final comparisons; final runs explicitly freeze the original library. New Rust code is benchmark coverage only."
+  },
+  "configuration": {
+    "flink": "2.2.1",
+    "parallelism": 1,
+    "rows": 500000,
+    "map_entries": 3,
+    "binary_widths": [
+      4,
+      256
+    ],
+    "null_container_every": 8,
+    "null_value_key": "second binary key",
+    "keys": [
+      "binary i*17",
+      "binary 255-i*17",
+      "NULL"
+    ],
+    "key_type": "nullable BINARY(n)",
+    "value_type": "nullable INT",
+    "binary_payload_patterns": [
+      "i*17 modulo256",
+      "255-i*17 modulo256"
+    ],
+    "warmups_per_engine": 2,
+    "measured_trials_per_engine": 3,
+    "test_heap_gib": 8,
+    "boundary": "planning, submission and complete runtime-row-source jobs, including both row/Arrow transposes and blackhole row sink; cluster setup and initial explain excluded",
+    "schedule": "separate JVMs per phase/width, alternating stock/native in each; no concurrent tests, benchmarks or native compilation during timing",
+    "metadata_note": "CSV payload_bytes=264 and unicode=false are unused text-fixture defaults; binary widths4/256 select key payloads.",
+    "input": "ordered internal GenericMapData on runtime RowData source; public InternalTypeInfo view avoids external byte-array identity-hash iteration"
+  },
+  "trials": [
+    {
+      "phase": "previous",
+      "binary_width": 4,
+      "function": "BASELINE_tt_fixed_binary_keys",
+      "flink_seconds": [
+        0.318008,
+        0.235047,
+        0.225033
+      ],
+      "native_seconds": [
+        0.321309,
+        0.29091,
+        0.38192
+      ]
+    },
+    {
+      "phase": "previous",
+      "binary_width": 4,
+      "function": "BINARY_KEY_MAP_STRING",
+      "flink_seconds": [
+        0.337983,
+        0.34296,
+        0.343663
+      ],
+      "native_seconds": [
+        0.339059,
+        0.354235,
+        0.33877
+      ]
+    },
+    {
+      "phase": "previous",
+      "binary_width": 4,
+      "function": "FIXED_BINARY_MAP_KEYS",
+      "flink_seconds": [
+        0.221564,
+        0.2256,
+        0.235141
+      ],
+      "native_seconds": [
+        0.224914,
+        0.224026,
+        0.225689
+      ]
+    },
+    {
+      "phase": "previous",
+      "binary_width": 256,
+      "function": "BASELINE_tt_fixed_binary_keys",
+      "flink_seconds": [
+        0.280626,
+        0.291501,
+        0.365028
+      ],
+      "native_seconds": [
+        0.368352,
+        0.331449,
+        0.332093
+      ]
+    },
+    {
+      "phase": "previous",
+      "binary_width": 256,
+      "function": "BINARY_KEY_MAP_STRING",
+      "flink_seconds": [
+        0.966099,
+        0.971459,
+        0.947902
+      ],
+      "native_seconds": [
+        0.95871,
+        0.968631,
+        0.96956
+      ]
+    },
+    {
+      "phase": "previous",
+      "binary_width": 256,
+      "function": "FIXED_BINARY_MAP_KEYS",
+      "flink_seconds": [
+        0.279855,
+        0.283209,
+        0.286216
+      ],
+      "native_seconds": [
+        0.275038,
+        0.280884,
+        0.265149
+      ]
+    },
+    {
+      "phase": "generated",
+      "binary_width": 4,
+      "function": "BASELINE_tt_fixed_binary_keys",
+      "flink_seconds": [
+        0.236225,
+        0.236539,
+        0.222376
+      ],
+      "native_seconds": [
+        0.299208,
+        0.351565,
+        0.278386
+      ]
+    },
+    {
+      "phase": "generated",
+      "binary_width": 4,
+      "function": "BINARY_KEY_MAP_STRING",
+      "flink_seconds": [
+        0.340204,
+        0.345711,
+        0.347968
+      ],
+      "native_seconds": [
+        0.487764,
+        0.492686,
+        0.482822
+      ]
+    },
+    {
+      "phase": "generated",
+      "binary_width": 4,
+      "function": "FIXED_BINARY_MAP_KEYS",
+      "flink_seconds": [
+        0.245355,
+        0.23663,
+        0.241759
+      ],
+      "native_seconds": [
+        0.383493,
+        0.386779,
+        0.378825
+      ]
+    },
+    {
+      "phase": "generated",
+      "binary_width": 256,
+      "function": "BASELINE_tt_fixed_binary_keys",
+      "flink_seconds": [
+        0.276525,
+        0.291776,
+        0.399934
+      ],
+      "native_seconds": [
+        0.364104,
+        0.354871,
+        0.349161
+      ]
+    },
+    {
+      "phase": "generated",
+      "binary_width": 256,
+      "function": "BINARY_KEY_MAP_STRING",
+      "flink_seconds": [
+        0.967162,
+        0.978838,
+        0.973374
+      ],
+      "native_seconds": [
+        1.102349,
+        1.07639,
+        1.081767
+      ]
+    },
+    {
+      "phase": "generated",
+      "binary_width": 256,
+      "function": "FIXED_BINARY_MAP_KEYS",
+      "flink_seconds": [
+        0.277845,
+        0.277561,
+        0.293775
+      ],
+      "native_seconds": [
+        0.510844,
+        0.485984,
+        0.4906
+      ]
+    },
+    {
+      "phase": "final",
+      "binary_width": 4,
+      "function": "BASELINE_tt_fixed_binary_keys",
+      "flink_seconds": [
+        0.238759,
+        0.225154,
+        0.224456
+      ],
+      "native_seconds": [
+        0.364222,
+        0.297195,
+        0.275709
+      ]
+    },
+    {
+      "phase": "final",
+      "binary_width": 4,
+      "function": "BINARY_KEY_MAP_STRING",
+      "flink_seconds": [
+        0.350045,
+        0.340207,
+        0.33685
+      ],
+      "native_seconds": [
+        0.498011,
+        0.478601,
+        0.482662
+      ]
+    },
+    {
+      "phase": "final",
+      "binary_width": 4,
+      "function": "FIXED_BINARY_MAP_KEYS",
+      "flink_seconds": [
+        0.243699,
+        0.247416,
+        0.234586
+      ],
+      "native_seconds": [
+        0.257386,
+        0.253453,
+        0.252776
+      ]
+    },
+    {
+      "phase": "final",
+      "binary_width": 256,
+      "function": "BASELINE_tt_fixed_binary_keys",
+      "flink_seconds": [
+        0.3994,
+        0.281593,
+        0.27025
+      ],
+      "native_seconds": [
+        0.348645,
+        0.331847,
+        0.329628
+      ]
+    },
+    {
+      "phase": "final",
+      "binary_width": 256,
+      "function": "BINARY_KEY_MAP_STRING",
+      "flink_seconds": [
+        0.987015,
+        0.982406,
+        0.978934
+      ],
+      "native_seconds": [
+        1.070686,
+        1.078272,
+        1.040013
+      ]
+    },
+    {
+      "phase": "final",
+      "binary_width": 256,
+      "function": "FIXED_BINARY_MAP_KEYS",
+      "flink_seconds": [
+        0.276442,
+        0.274349,
+        0.263257
+      ],
+      "native_seconds": [
+        0.439454,
+        0.304727,
+        0.298132
+      ]
+    }
+  ],
+  "cpu_profiles": {
+    "profiler": "async-profiler4.6",
+    "event": "cpu",
+    "interval": "1ms",
+    "seconds_per_capture": 8,
+    "passes": 2,
+    "limitations": "all JVM threads including planning and compilation; inclusive counts overlap, not allocations or copied bytes",
+    "captures": {
+      "binary_key_map_string-native": {
+        "total_samples": 11930,
+        "inclusive_method_samples": {
+          "NativeUdf.invokeUdf": 4263,
+          "FlinkExpressionFunction.evalRow": 2907,
+          "MapWriter.doWrite": 316,
+          "ArrayWriter.doWrite": 0,
+          "NestedStringWriter.doWrite": 898,
+          "BinaryStringData.ensureMaterialized": 0
+        },
+        "top_self_samples": {
+          "java/lang/String.isMalformed3_[i]": 1157,
+          "jlong_disjoint_arraycopy": 759,
+          "jshort_disjoint_arraycopy": 458,
+          "java/lang/String.decodeUTF8_UTF16_[j]": 422,
+          "jdk/internal/misc/Unsafe.checkOffset_[i]": 218,
+          "_raw_spin_unlock_irqrestore_[k]": 213,
+          "org/apache/arrow/vector/VarCharVector.get_[i]": 213,
+          "org/apache/flink/table/runtime/typeutils/MapDataSerializer.toBinaryMap_[j]": 205,
+          "org/apache/flink/table/data/binary/BinarySegmentUtils.copyToBytes_[i]": 175,
+          "jint_disjoint_arraycopy": 168
+        }
+      },
+      "fixed_binary_map_keys-native": {
+        "total_samples": 14036,
+        "inclusive_method_samples": {
+          "NativeUdf.invokeUdf": 2494,
+          "FlinkExpressionFunction.evalRow": 1038,
+          "MapWriter.doWrite": 686,
+          "ArrayWriter.doWrite": 822,
+          "NestedStringWriter.doWrite": 0,
+          "BinaryStringData.ensureMaterialized": 0
+        },
+        "top_self_samples": {
+          "jlong_disjoint_arraycopy": 699,
+          "org/apache/arrow/vector/BaseVariableWidthVector.fillHoles_[i]": 376,
+          "jdk/internal/misc/Unsafe.checkOffset_[i]": 356,
+          "jint_disjoint_arraycopy": 337,
+          "_raw_spin_unlock_irqrestore_[k]": 326,
+          "org/apache/flink/table/data/binary/BinarySection.pointTo_[j]": 284,
+          "IndexSetIterator::advance_and_next": 242,
+          "tech/streamfusion/arrow/writers/ArrowFieldWriter.write_[i]": 195,
+          "/usr/lib/x86_64-linux-gnu/libc.so.6": 190,
+          "org/apache/flink/table/runtime/typeutils/MapDataSerializer.toBinaryMap_[j]": 188
+        }
+      }
+    }
+  },
+  "native_smoke": {
+    "command": "cargo bench -p streamfusion --bench collection_expressions --features mimalloc --locked -j2 -- binary_map_keys --test",
+    "cases": 6,
+    "allocator": "System counting allocator in the benchmark executable",
+    "boundary": "prepared sliced Arrow maps and Calc setup outside timed iterations; production Rust Calc projection; untimed probe includes first schema binding",
+    "assertions": [
+      "parent NULLs",
+      "empty parents",
+      "duplicate key contents",
+      "NULL values",
+      "nonzero child-offset slices",
+      "key-child Arc identity",
+      "offsets and validity"
+    ],
+    "probes": [
+      {
+        "case": "binary_map_keys/rows=16/bytes=0/sliced-null-empty",
+        "allocation_requests": 104,
+        "requested_bytes": 6475,
+        "shared_output_arrow_buffer_bytes": 171,
+        "new_output_arrow_buffer_bytes": 0
+      },
+      {
+        "case": "binary_map_keys/rows=16/bytes=4/sliced-null-empty",
+        "allocation_requests": 104,
+        "requested_bytes": 6475,
+        "shared_output_arrow_buffer_bytes": 267,
+        "new_output_arrow_buffer_bytes": 0
+      },
+      {
+        "case": "binary_map_keys/rows=16/bytes=256/sliced-null-empty",
+        "allocation_requests": 104,
+        "requested_bytes": 6475,
+        "shared_output_arrow_buffer_bytes": 6315,
+        "new_output_arrow_buffer_bytes": 0
+      },
+      {
+        "case": "binary_map_keys/rows=1024/bytes=0/sliced-null-empty",
+        "allocation_requests": 104,
+        "requested_bytes": 6475,
+        "shared_output_arrow_buffer_bytes": 9857,
+        "new_output_arrow_buffer_bytes": 0
+      },
+      {
+        "case": "binary_map_keys/rows=1024/bytes=4/sliced-null-empty",
+        "allocation_requests": 104,
+        "requested_bytes": 6475,
+        "shared_output_arrow_buffer_bytes": 15481,
+        "new_output_arrow_buffer_bytes": 0
+      },
+      {
+        "case": "binary_map_keys/rows=1024/bytes=256/sliced-null-empty",
+        "allocation_requests": 104,
+        "requested_bytes": 6475,
+        "shared_output_arrow_buffer_bytes": 369793,
+        "new_output_arrow_buffer_bytes": 0
+      }
+    ]
+  },
+  "scope": {
+    "admitted": "Nullable fixed BINARY map keys through existing length-delimited generated collection bridge. Direct final MAP_KEYS of an input-reference map with nullable basic values reuses existing Rust child-buffer view.",
+    "retained_fallback": [
+      "NOT NULL fixed BINARY map keys and values",
+      "external STRUCTURED inputs",
+      "unverified represented state/exchange/native-writer boundaries",
+      "disabled length-delimited transport"
+    ],
+    "host_limitation": "Flink1.18 CASE returning BINARY arrays fails in released generated-code initialization; explicit stock failure parity and fallback retained."
+  },
+  "conclusion": "Existing Rust map-key view reduces native complete-job medians 33.9\u201337.9% versus generated evaluation. Final jobs remain slower than paired stock and previous fallback; accepted collection tradeoff, no acceleration claim. Two profiling/optimization passes completed; further work #392.",
+  "validation": {
+    "native_rust_smokes": 6,
+    "coverage": [
+      "runtime sources and consumed NativeCalc",
+      "direct MAP_KEYS diagnostic native with jvm=[]",
+      "NULL/empty and actual0\u20134097-byte keys",
+      "legacy casts and declared types",
+      "aliased byte-array input to map-key cast",
+      "binary key/value composition",
+      "all four input changelog kinds",
+      "filter/CASE/empty batches",
+      "NOT NULL key/value fallback",
+      "released1.18 CASE initialization failure contract"
+    ],
+    "flink2.2.1": {
+      "passed": 276,
+      "skipped": 0
+    },
+    "flink1.18.1": {
+      "passed": 248,
+      "skipped": 28
+    }
+  }
+}
