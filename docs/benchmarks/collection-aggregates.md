@@ -3,7 +3,8 @@
 ## Integer COLLECT
 
 COLLECT(INT/BIGINT) reuses the released Flink handler and managed MapViews inside the existing
-columnar JVM grouped operator. Scalar inputs and non-character output fields are required;
+columnar JVM grouped operator. Scalar inputs and non-character aggregate result fields are required; character grouping keys
+are covered below.
 other COLLECT types remain on fallback; integer ARRAY_AGG is covered below. Results require a verified preserving Calc
 or final row sink. [Coverage](../operators/group-by.md#integer-collect) gives the exact gates.
 
@@ -67,7 +68,8 @@ and restores its properties afterward. Profiled timings do not enter the trial t
 ## Integer ARRAY_AGG
 
 On Flink 2.2.1, ARRAY_AGG(INT/BIGINT) uses the same generated JVM grouped runtime with released
-RAW LinkedList accumulators. Scalar inputs and non-character output fields are required.
+RAW LinkedList accumulators. Scalar inputs and non-character aggregate result fields are required; character grouping keys
+are covered below.
 Flink 1.18.1 has no released ARRAY_AGG catalog entry and is explicitly N/A. Native work, resolved
 types, arrival order, NULL treatment, DISTINCT/FILTER, retractions and repeated heap/RocksDB
 recovery are verified. Nullable primitive arrays additionally feed native Top-N/UNNEST;
@@ -128,3 +130,53 @@ set `-Djvmagg.expectNative=false`. For CPU captures set `SF_PROFILE_JVM_AGG=true
 `#profileArrayAgg`, use one case at a time, and pass `-Djvmagg.seconds=8 -Dprofile.asprof=/path/to/asprof`.
 The two captures choose `array_agg`/64 groups and `array_agg_int`/4096 groups. Profile timings
 remain separate from the unprofiled trial table.
+
+## Character grouping keys
+
+Integer COLLECT and, on released Flink 2.2, integer ARRAY_AGG now admit STRING/VARCHAR and
+CHAR grouping keys through the existing serialized-key boundary. Character aggregate results
+and unverified collection consumers retain fallback. [Coverage](../operators/group-by.md#character-grouping-keys)
+records the runtime parity, Unicode/collision, parallel and repeated-recovery checks. The broad
+regression matrix passes 233 checks on Flink 2.2.1 and 192 with 41 version skips on 1.18.1.
+
+The same release library, host and complete-job boundary above are retained. COLLECT uses
+200,000 rows and ARRAY_AGG 50,000; both use BIGINT values with the same eight-value domain and
+every-eighth-value NULL. STRING keys have 16 prefix characters at 64 groups and 264 at 4096,
+starting with `é`, padded with `x`, then decimal key digits. Each engine has two warmups and
+three alternating trials per fresh JVM, parallelism one, an 8 GiB heap and no accumulator cache.
+Previous candidate `1296aa62` uses identical benchmark source and verified stock fallback;
+current jobs require consumed NativeJvmGroup work. Retained revision `435a8922` differs from
+the measured prior candidate only in diagnostic parser code/tests and benchmark documentation;
+its production and benchmark Java/native code is identical. No local tests/builds overlap timings.
+
+Median seconds (minimum–maximum), including planning, source/sink, keyed state and both transposes:
+
+| Shape | Groups | Paired stock | Previous fallback | Native route |
+| --- | ---: | ---: | ---: | ---: |
+| COLLECT | 64 | 0.418451 (0.343207–0.439635) | 0.470467 (0.332164–0.592387) | 0.442228 (0.369217–0.507034) |
+| COLLECT | 4096 | 0.697764 (0.557432–0.710529) | 0.530568 (0.529844–0.619316) | 0.675497 (0.658833–0.731337) |
+| ARRAY_AGG | 64 | 0.617899 (0.531926–0.694289) | 0.620905 (0.534293–0.760524) | 0.807764 (0.652013–0.808651) |
+| ARRAY_AGG | 4096 | 0.210483 (0.130218–0.237499) | 0.194822 (0.190731–0.233336) | 0.261850 (0.240825–0.297522) |
+
+These short jobs show substantial startup/JIT variability. Native results do not establish
+acceleration; slower results remain visible under the accepted collection tradeoff. The
+[artifact](results/collection-string-keys-2026-10-24.json) retains all trials, including each
+previous JVM's paired stock controls and exact configuration.
+
+Optimization closes after two captures using the same eight-second native-only profiling
+protocol above. COLLECT at 4096 wide-string groups has 17,078 samples: 4,045 inclusive in
+released group processing, 962 in result snapshots and 903 in output append. String-key hashing
+and equality account for 1,253 and 659 self samples respectively. ARRAY_AGG at 64 groups has
+16,893 samples: 6,023 inclusive in group processing, 3,981 in result snapshots and 1,495 in append;
+LinkedList.toArray accounts for 3,925 self samples. Counts overlap and cover all JVM threads,
+planning and compilation; they do not count allocations or copied bytes. No safe small shortcut
+was identified within the two passes. Managed-state key work, growing result snapshots and
+startup remain follow-up work in [#239](https://github.com/datafusion-contrib/StreamFusion/issues/239).
+The grouped operator, key/state codecs and JNI ownership protocol are unchanged.
+
+For reproduction, use the COLLECT/ARRAY_AGG commands above with `-Djvmagg.keyType=string`,
+`-Djvmagg.keyPrefixChars=16 -Djvmagg.keys=64`, then prefix 264/keys 4096. Keep 200000 COLLECT
+rows and 50000 ARRAY_AGG rows, `values=8`, two warmups and three trials. Compare the same
+benchmark source against `1296aa62` with `expectNative=false`; current requires `true`.
+For profiles select `#profileCollect` at 4096 keys or `#profileArrayAgg` at 64 keys with the same
+STRING inputs, `SF_PROFILE_JVM_AGG=true` and `jvmagg.seconds=8`.

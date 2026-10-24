@@ -72,6 +72,7 @@ final class JvmGroupAggregateMatcher {
         return false;
       if (integerCollectionAggregate(node, call)
           && node.getRowType().getFieldList().stream()
+              .skip(node.grouping().length)
               .anyMatch(field -> JsonStringIdentity.containsCharacter(field.getType())))
         return false;
       if (call.isApproximate() || !call.getCollation().getFieldCollations().isEmpty()) return false;
@@ -90,8 +91,8 @@ final class JvmGroupAggregateMatcher {
 
   static String unsupportedReason(StreamPhysicalGroupAggregate node) {
     return "GROUP BY: JVM aggregates require verified scalar fields or integer COLLECT/ARRAY_AGG"
-               + " with non-character results and synchronous single-phase execution without"
-               + " mini-batching, specialization, approximate or ordered calls";
+        + " with non-character aggregate results and synchronous single-phase execution without"
+        + " mini-batching, specialization, approximate or ordered calls";
   }
 
   static RelNode substitute(StreamPhysicalGroupAggregate node, PlanContext context) {

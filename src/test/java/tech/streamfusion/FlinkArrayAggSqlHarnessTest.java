@@ -66,7 +66,7 @@ class FlinkArrayAggSqlHarnessTest {
         .assertSuccess(NativeFailureParity.Route.FALLBACK);
     NativeFailureParity.run(
             FlinkArrayAggSqlHarnessTest::environment,
-            "SELECT CAST(k AS STRING),ARRAY_AGG(v) FROM src GROUP BY CAST(k AS STRING)")
+            "SELECT k,ARRAY_AGG(v),MIN(CAST(v AS STRING)) FROM src GROUP BY k")
         .assertSuccess(NativeFailureParity.Route.FALLBACK);
     String property = "streamfusion.experimental.jvmGroupAggregates";
     String previous = System.getProperty(property);
@@ -195,6 +195,7 @@ class FlinkArrayAggSqlHarnessTest {
   @ValueSource(
       strings = {
         "SELECT k,ARRAY_AGG(v),COUNT(*) FROM src GROUP BY k",
+        "SELECT CAST(k AS STRING),ARRAY_AGG(v) FROM src GROUP BY CAST(k AS STRING)",
         "SELECT k,ARRAY_AGG(v) IGNORE NULLS,ARRAY_AGG(v) RESPECT NULLS FROM src GROUP BY k",
         "SELECT ARRAY_AGG(v),COUNT(*) FROM src",
         "SELECT ARRAY_AGG(v) IGNORE NULLS FROM src WHERE v IS NULL",

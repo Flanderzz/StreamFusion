@@ -66,7 +66,7 @@ class FlinkCollectSqlHarnessTest {
         .assertSuccess(NativeFailureParity.Route.FALLBACK);
     NativeFailureParity.run(
             FlinkCollectSqlHarnessTest::environment,
-            "SELECT CAST(k AS STRING),COLLECT(v) FROM src GROUP BY CAST(k AS STRING)")
+            "SELECT k,COLLECT(v),MIN(CAST(v AS STRING)) FROM src GROUP BY k")
         .assertSuccess(NativeFailureParity.Route.FALLBACK);
     String property = "streamfusion.experimental.jvmGroupAggregates";
     String previous = System.getProperty(property);
@@ -148,6 +148,7 @@ class FlinkCollectSqlHarnessTest {
   @ValueSource(
       strings = {
         "SELECT k,COLLECT(v),COUNT(*) FROM src GROUP BY k",
+        "SELECT CAST(k AS STRING),COLLECT(v) FROM src GROUP BY CAST(k AS STRING)",
         "SELECT COLLECT(v),COUNT(*) FROM src",
         "SELECT k,COLLECT(DISTINCT v),COLLECT(v) FILTER (WHERE v>0) FROM src GROUP BY k",
         "SELECT k,COLLECT(CAST(v AS INT)) FROM src GROUP BY k",
