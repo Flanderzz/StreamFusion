@@ -190,6 +190,11 @@ public class FlinkCollectionRepresentationSqlHarnessTest {
             .booleanType()
             .defaultValue(false);
 
+    private static final ConfigOption<Boolean> BINARY_MAPS =
+        org.apache.flink.configuration.ConfigOptions.key("binary-maps")
+            .booleanType()
+            .defaultValue(false);
+
     @Override
     public String factoryIdentifier() {
       return "collection-representation";
@@ -202,7 +207,7 @@ public class FlinkCollectionRepresentationSqlHarnessTest {
 
     @Override
     public Set<ConfigOption<?>> optionalOptions() {
-      return Set.of(CHANGELOG);
+      return Set.of(CHANGELOG, BINARY_MAPS);
     }
 
     @Override
@@ -215,17 +220,21 @@ public class FlinkCollectionRepresentationSqlHarnessTest {
                   .toPhysicalRowDataType()
                   .getLogicalType(),
           Boolean.parseBoolean(
-              context.getCatalogTable().getOptions().getOrDefault("changelog", "false")));
+              context.getCatalogTable().getOptions().getOrDefault("changelog", "false")),
+          Boolean.parseBoolean(
+              context.getCatalogTable().getOptions().getOrDefault("binary-maps", "false")));
     }
   }
 
   private static final class GenericContainers implements ScanTableSource {
     private final RowType type;
     private final boolean changelog;
+    private final boolean binaryMaps;
 
-    private GenericContainers(RowType type, boolean changelog) {
+    private GenericContainers(RowType type, boolean changelog, boolean binaryMaps) {
       this.type = type;
       this.changelog = changelog;
+      this.binaryMaps = binaryMaps;
     }
 
     @Override
@@ -235,7 +244,7 @@ public class FlinkCollectionRepresentationSqlHarnessTest {
 
     @Override
     public DynamicTableSource copy() {
-      return new GenericContainers(type, changelog);
+      return new GenericContainers(type, changelog, binaryMaps);
     }
 
     @Override
@@ -269,6 +278,12 @@ public class FlinkCollectionRepresentationSqlHarnessTest {
               !multiset
                   && type.getTypeAt(4).getChildren().get(1).getTypeRoot()
                       == org.apache.flink.table.types.logical.LogicalTypeRoot.BINARY;
+          var keyType = type.getTypeAt(4).getChildren().get(0);
+          var valueType =
+              multiset
+                  ? org.apache.flink.table.api.DataTypes.INT().notNull().getLogicalType()
+                  : type.getTypeAt(4).getChildren().get(1);
+          boolean binary = binaryMaps;
           return env.fromSequence(0, 15)
               .map(
                   id -> {
@@ -295,6 +310,16 @@ public class FlinkCollectionRepresentationSqlHarnessTest {
                       entries.put(new byte[] {0, -1, 3, -128}, integerValues ? -1 : binaryPayload);
                     entries.put(null, multiset ? 3 : null);
                     if ((binaryKeys || binaryValues) && id % 8 == 6) entries.clear();
+                    org.apache.flink.table.data.MapData map =
+                        (binaryKeys || binaryValues) && id % 8 == 7
+                            ? null
+                            : new org.apache.flink.table.data.GenericMapData(entries);
+                    if (binary && map != null)
+                      map =
+                          new org.apache.flink.table.runtime.typeutils.MapDataSerializer(
+                                  keyType, valueType)
+                              .toBinaryMap(map)
+                              .copy();
                     var row =
                         GenericRowData.of(
                             id,
@@ -320,9 +345,7 @@ public class FlinkCollectionRepresentationSqlHarnessTest {
                                 org.apache.flink.table.api.DataTypes.INT()
                                     .notNull()
                                     .getLogicalType()),
-                            (binaryKeys || binaryValues) && id % 8 == 7
-                                ? null
-                                : new org.apache.flink.table.data.GenericMapData(entries));
+                            map);
                     if (kinds)
                       row.setRowKind(org.apache.flink.types.RowKind.values()[(int) (id % 4)]);
                     return (RowData) row;

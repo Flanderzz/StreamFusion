@@ -136,7 +136,7 @@ class FlinkStandaloneCollectionSqlHarnessTest {
   }
 
   @Test
-  void notNullBinaryMapKeysRetainFallbackForCharacterCasts() {
+  void notNullBinaryMapKeysKeepTheVerifiedReleaseRoute() {
     var entries = new LinkedHashMap<byte[], byte[]>();
     entries.put(new byte[] {0, -1}, new byte[] {1, 2});
     var runs =
@@ -146,7 +146,10 @@ class FlinkStandaloneCollectionSqlHarnessTest {
                     ROW(FIELD("m", MAP(BINARY(2).notNull(), BINARY(2)))),
                     List.of(Row.of(entries), Row.of((Object) null))),
             "SELECT CAST(m AS STRING),TRY_CAST(m AS CHAR(16)) FROM src");
-    runs.assertSuccess(NativeFailureParity.Route.FALLBACK);
+    runs.assertSuccess(
+        org.apache.flink.runtime.util.EnvironmentInformation.getVersion().startsWith("2.2.")
+            ? NativeFailureParity.Route.NATIVE
+            : NativeFailureParity.Route.FALLBACK);
   }
 
   @ParameterizedTest
@@ -163,7 +166,8 @@ class FlinkStandaloneCollectionSqlHarnessTest {
             + " FROM src"
       })
   void fixedBinaryMapValuesKeepActualLengthsAndReleasedCasts(String sql) {
-    for (String function : List.of("MAP_ENTRIES", "MAP_UNION", "ARRAY_REVERSE"))
+    for (String function :
+        List.of("MAP_ENTRIES", "MAP_UNION", "ARRAY_REVERSE", "ARRAY_DISTINCT", "ARRAY_SLICE"))
       if (sql.contains(function + "("))
         tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction(function);
     for (boolean legacy : new boolean[] {false, true}) {
@@ -283,7 +287,8 @@ class FlinkStandaloneCollectionSqlHarnessTest {
           return table;
         };
     String sql = "SELECT id,m,MAP_VALUES(m),CAST(m AS STRING) FROM src";
-    if (notNull)
+    if (notNull
+        && !org.apache.flink.runtime.util.EnvironmentInformation.getVersion().startsWith("2.2."))
       NativeFailureParity.run(factory, sql).assertSuccess(NativeFailureParity.Route.FALLBACK);
     else assertEquivalent(run(factory, sql));
   }
@@ -360,7 +365,7 @@ class FlinkStandaloneCollectionSqlHarnessTest {
   }
 
   @Test
-  void binaryKeysComposeWithBinaryValuesAndKeepNotNullGuard() {
+  void binaryKeysComposeWithBinaryValuesAndKeepVersionedNotNullRoutes() {
     assertEquivalent(
         run(
             () -> binaryKeys(false, false, true),
@@ -368,7 +373,10 @@ class FlinkStandaloneCollectionSqlHarnessTest {
     NativeFailureParity.run(
             () -> binaryKeys(false, true, false),
             "SELECT id,m,MAP_KEYS(m),CAST(m AS STRING) FROM src")
-        .assertSuccess(NativeFailureParity.Route.FALLBACK);
+        .assertSuccess(
+            org.apache.flink.runtime.util.EnvironmentInformation.getVersion().startsWith("2.2.")
+                ? NativeFailureParity.Route.NATIVE
+                : NativeFailureParity.Route.FALLBACK);
   }
 
   @Test
@@ -399,6 +407,138 @@ class FlinkStandaloneCollectionSqlHarnessTest {
                           && execution.contains("jvm=[]")),
           scan.functionExecutions().toString());
       assertEquivalent(run(() -> binaryKeys(false, false, false), sql));
+    }
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "SELECT id,m,MAP_KEYS(m),MAP_VALUES(m),CAST(m AS STRING) FROM src",
+        "SELECT id,CAST(m AS MAP<BINARY(2),BINARY(8)>),TRY_CAST(m AS MAP<VARBINARY(8),STRING>) FROM"
+            + " src",
+        "SELECT id,CAST(m AS STRING),TRY_CAST(m AS CHAR(24)),CAST(m AS VARCHAR(2)) FROM src",
+        "SELECT id,MAP_ENTRIES(m),MAP_UNION(m,m) FROM src",
+        "SELECT id,ARRAY_REVERSE(MAP_VALUES(m)) FROM src WHERE MOD(id,3)=0",
+        "SELECT id,ARRAY_DISTINCT(MAP_KEYS(m)),ARRAY_SLICE(MAP_VALUES(m),2,-1) FROM src",
+        "SELECT id,CASE WHEN id=0 THEN CAST(NULL AS MAP<BINARY(4),BINARY(4)>) ELSE m END FROM src",
+        "SELECT MAP_VALUES(m) FROM src WHERE id<0"
+      })
+  void notNullBinaryMapLeavesRetainReleasedValuesAndConsumers(String sql) {
+    for (String function : List.of("MAP_ENTRIES", "MAP_UNION", "ARRAY_REVERSE"))
+      if (sql.contains(function + "("))
+        tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction(function);
+    for (boolean legacy : new boolean[] {false, true})
+      for (int nullable = 0; nullable < 3; nullable++)
+        for (boolean binary : new boolean[] {false, true}) {
+          boolean keyNotNull = nullable != 0;
+          boolean valueNotNull = nullable != 1;
+          Supplier<TableEnvironment> factory =
+              () -> notNullBinaryMaps(legacy, keyNotNull, valueNotNull, binary);
+          if (org.apache.flink.runtime.util.EnvironmentInformation.getVersion().startsWith("2.2."))
+            assertEquivalent(run(factory, sql));
+          else
+            NativeFailureParity.run(factory, sql).assertSuccess(NativeFailureParity.Route.FALLBACK);
+        }
+  }
+
+  @Test
+  void notNullBinaryMapLeavesKeepExistingStateAndOptionGuards() {
+    if (org.apache.flink.runtime.util.EnvironmentInformation.getVersion().startsWith("2.2.")) {
+      var table = notNullBinaryMaps(false, true, true, false);
+      var scan = NativePlanner.install(table);
+      table.explainSql("SELECT COUNT(*) FROM src GROUP BY CAST(m AS MAP<BINARY(8),BINARY(8)>)");
+      assertEquals(0, scan.substitutions(), scan::explainSummary);
+      assertTrue(
+          scan.fallbackReasons().stream()
+              .anyMatch(
+                  reason ->
+                      reason.contains(
+                          "collection value representation requires a final projection")),
+          scan::explainSummary);
+    }
+    for (String property :
+        List.of(
+            "streamfusion.experimental.collectionExpressions",
+            "streamfusion.experimental.nestedScalarUdfs")) {
+      String previous = System.getProperty(property);
+      try {
+        System.setProperty(property, "false");
+        String sql = "SELECT MAP_KEYS(m),MAP_VALUES(m),CAST(m AS STRING) FROM src";
+        var table = notNullBinaryMaps(false, true, true, false);
+        var scan = NativePlanner.install(table);
+        table.explainSql(sql);
+        assertTrue(
+            scan.functionExecutions().stream()
+                .noneMatch(call -> call.contains("MAP_KEYS") || call.contains("MAP_VALUES")),
+            scan::explainSummary);
+        var runs = NativeFailureParity.run(() -> notNullBinaryMaps(false, true, true, false), sql);
+        runs.assertSuccess(runs.nativeRun().route());
+      } finally {
+        if (previous == null) System.clearProperty(property);
+        else System.setProperty(property, previous);
+      }
+    }
+  }
+
+  private static TableEnvironment notNullBinaryMaps(
+      boolean legacy, boolean keyNotNull, boolean valueNotNull, boolean binary) {
+    var env = METRICS.environment(new Configuration(), 1, 0);
+    env.getConfig().enableObjectReuse();
+    var table = StreamTableEnvironment.create(env);
+    table.getConfig().set("streamfusion.transpose.batchRows", "3");
+    table.getConfig().set("table.exec.legacy-cast-behaviour", legacy ? "ENABLED" : "DISABLED");
+    table.executeSql(
+        "CREATE TABLE src (id BIGINT,t ARRAY<STRING>,r ARRAY<ROW<n INT>>,nn ARRAY<INT NOT NULL>,m"
+            + " MAP<BINARY(4)"
+            + (keyNotNull ? " NOT NULL" : "")
+            + ",BINARY(4)"
+            + (valueNotNull ? " NOT NULL" : "")
+            + ">) WITH ('connector'='collection-representation','changelog'='true','binary-maps'='"
+            + binary
+            + "')");
+    return table;
+  }
+
+  @org.apache.flink.table.annotation.FunctionHint(
+      input =
+          @org.apache.flink.table.annotation.DataTypeHint(
+              "MAP<BINARY(4) NOT NULL,BINARY(4) NOT NULL>"),
+      output =
+          @org.apache.flink.table.annotation.DataTypeHint(
+              "MAP<BINARY(4) NOT NULL,BINARY(4) NOT NULL>"))
+  public static class RetainedNotNullBinaryMap
+      extends org.apache.flink.table.functions.ScalarFunction {
+    private transient java.util.Map<byte[], byte[]> previous;
+
+    public java.util.Map<byte[], byte[]> eval(java.util.Map<byte[], byte[]> input) {
+      var result = previous;
+      previous = input;
+      return result;
+    }
+
+    @Override
+    public boolean isDeterministic() {
+      return false;
+    }
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "SELECT id,retained_nn(m) FROM src",
+        "SELECT id,retained_nn(m),retained_nn(m) FROM src"
+      })
+  void notNullBinaryMapCallbacksRetainOwnedInputsAndSharedState(String sql) {
+    for (boolean binary : new boolean[] {false, true}) {
+      Supplier<TableEnvironment> factory =
+          () -> {
+            var table = notNullBinaryMaps(false, true, true, binary);
+            table.createTemporarySystemFunction("retained_nn", RetainedNotNullBinaryMap.class);
+            return table;
+          };
+      if (org.apache.flink.runtime.util.EnvironmentInformation.getVersion().startsWith("2.2."))
+        assertEquivalent(run(factory, sql));
+      else NativeFailureParity.run(factory, sql).assertSuccess(NativeFailureParity.Route.FALLBACK);
     }
   }
 

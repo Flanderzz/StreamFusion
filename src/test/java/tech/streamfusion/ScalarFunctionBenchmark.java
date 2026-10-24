@@ -310,6 +310,26 @@ class ScalarFunctionBenchmark {
               "ARRAY<BINARY(" + TextTimeBenchmarkInputs.fixedBinaryWidth() + ")>"),
           new Query("BINARY_KEY_MAP_STRING", "tt_fixed_binary_keys", "CAST(m AS STRING)", "STRING"),
           new Query(
+              "NOT_NULL_BINARY_MAP_VALUES",
+              "tt_not_null_binary_map",
+              "MAP_VALUES(m)",
+              "ARRAY<BINARY(" + TextTimeBenchmarkInputs.fixedBinaryWidth() + ") NOT NULL>"),
+          new Query(
+              "NOT_NULL_BINARY_MAP_STRING",
+              "tt_not_null_binary_map",
+              "CAST(m AS STRING)",
+              "STRING"),
+          new Query(
+              "NOT_NULL_BINARY_MAP_KEYS",
+              "tt_not_null_binary_keys",
+              "MAP_KEYS(m)",
+              "ARRAY<BINARY(" + TextTimeBenchmarkInputs.fixedBinaryWidth() + ") NOT NULL>"),
+          new Query(
+              "NOT_NULL_BINARY_KEYS_STRING",
+              "tt_not_null_binary_keys",
+              "CAST(m AS STRING)",
+              "STRING"),
+          new Query(
               "BINARY_MULTISET_CAST",
               "tt_binary_multiset",
               "CAST(m AS MULTISET<VARBINARY(" + TextTimeBenchmarkInputs.fixedBinaryWidth() + ")>)",
@@ -810,7 +830,9 @@ class ScalarFunctionBenchmark {
                     (query.input().equals("tt_fixed_bytes")
                             || query.input().equals("tt_fixed_binary_map")
                             || query.input().equals("tt_fixed_binary_keys")
-                            || query.input().equals("tt_binary_multiset"))
+                            || query.input().equals("tt_binary_multiset")
+                            || query.input().equals("tt_not_null_binary_map")
+                            || query.input().equals("tt_not_null_binary_keys"))
                         ? TextTimeBenchmarkInputs.fixedBinaryWidth()
                         : 0,
                     (query.input().equals("tt_multiset")
@@ -975,7 +997,10 @@ class ScalarFunctionBenchmark {
 
   private static double run(Query query, boolean useNative) throws Exception {
     try (var metrics =
-        query.input().equals("tt_binary_multiset") ? new RecoveryExecutionMetrics() : null) {
+        java.util.Set.of("tt_binary_multiset", "tt_not_null_binary_map", "tt_not_null_binary_keys")
+                .contains(query.input())
+            ? new RecoveryExecutionMetrics()
+            : null) {
       TableEnvironment tables = environment(query.input(), metrics);
       if (!query.groupBy().isEmpty()) {
         tables.getConfig().set("table.exec.mini-batch.enabled", "true");

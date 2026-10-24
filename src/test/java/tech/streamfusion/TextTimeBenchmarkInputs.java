@@ -61,6 +61,8 @@ final class TextTimeBenchmarkInputs {
       case "tt_json_array":
         return "a";
       case "tt_json_map":
+      case "tt_not_null_binary_map":
+      case "tt_not_null_binary_keys":
       case "tt_fixed_binary_map":
       case "tt_fixed_binary_keys":
       case "tt_binary_multiset":
@@ -109,6 +111,10 @@ final class TextTimeBenchmarkInputs {
         return "ARRAY<STRING>";
       case "tt_json_map":
         return "MAP<STRING NOT NULL, STRING>";
+      case "tt_not_null_binary_map":
+        return "MAP<STRING NOT NULL,BINARY(" + fixedBinaryWidth() + ") NOT NULL>";
+      case "tt_not_null_binary_keys":
+        return "MAP<BINARY(" + fixedBinaryWidth() + ") NOT NULL,INT>";
       case "tt_fixed_binary_map":
         return "MAP<STRING NOT NULL,BINARY(" + fixedBinaryWidth() + ")>";
       case "tt_fixed_binary_keys":
@@ -188,29 +194,39 @@ final class TextTimeBenchmarkInputs {
           .map(i -> (org.apache.flink.table.data.RowData) org.apache.flink.table.data.GenericRowData.of(
               isNull(i, nullEvery) ? null : new org.apache.flink.table.data.GenericMapData(values)))
           .returns(org.apache.flink.table.runtime.typeutils.InternalTypeInfo.of(type)));
-    } else if (input.equals("tt_fixed_binary_keys")) {
+    } else if (input.equals("tt_fixed_binary_keys") || input.equals("tt_not_null_binary_keys")) {
       int width = fixedBinaryWidth();
-      byte[][] keys = {new byte[width], new byte[width]};
+      boolean notNull = input.equals("tt_not_null_binary_keys");
+      byte[][] keys = new byte[notNull ? 3 : 2][width];
       for (int i = 0; i < width; i++) {
         keys[0][i] = (byte) (i * 17);
         keys[1][i] = (byte) (255 - i * 17);
+        if (notNull) keys[2][i] = (byte) (i * 31 + 128);
       }
+      var keyType = notNull ? DataTypes.BINARY(width).notNull() : DataTypes.BINARY(width);
       var type =
           (org.apache.flink.table.types.logical.RowType)
-              DataTypes.ROW(
-                      DataTypes.FIELD("m", DataTypes.MAP(DataTypes.BINARY(width), DataTypes.INT())))
+              DataTypes.ROW(DataTypes.FIELD("m", DataTypes.MAP(keyType, DataTypes.INT())))
                   .getLogicalType();
-      tables.createTemporaryView("inputs", env.fromSequence(0, rows - 1)
-          .map(i -> {
-            var map = new java.util.LinkedHashMap<Object, Object>();
-            map.put(keys[0], 1);
-            map.put(keys[1], null);
-            map.put(null, -1);
-            return (org.apache.flink.table.data.RowData) org.apache.flink.table.data.GenericRowData.of(
-                isNull(i, nullEvery) ? null : new org.apache.flink.table.data.GenericMapData(map));
-          }).returns(org.apache.flink.table.runtime.typeutils.InternalTypeInfo.of(type)));
-    } else if (input.equals("tt_fixed_binary_map")) {
+      tables.createTemporaryView(
+          "inputs",
+          env.fromSequence(0, rows - 1)
+              .map(
+                  i -> {
+                    var map = new java.util.LinkedHashMap<Object, Object>();
+                    map.put(keys[0], 1);
+                    map.put(keys[1], null);
+                    map.put(notNull ? keys[2] : null, -1);
+                    return (org.apache.flink.table.data.RowData)
+                        org.apache.flink.table.data.GenericRowData.of(
+                            isNull(i, nullEvery)
+                                ? null
+                                : new org.apache.flink.table.data.GenericMapData(map));
+                  })
+              .returns(org.apache.flink.table.runtime.typeutils.InternalTypeInfo.of(type)));
+    } else if (input.equals("tt_fixed_binary_map") || input.equals("tt_not_null_binary_map")) {
       int width = fixedBinaryWidth();
+      boolean notNull = input.equals("tt_not_null_binary_map");
       byte[][] values = {new byte[width], new byte[width]};
       for (int i = 0; i < width; i++) {
         values[0][i] = (byte) (i * 17);
@@ -223,7 +239,7 @@ final class TextTimeBenchmarkInputs {
                   i -> {
                     var map = new java.util.LinkedHashMap<String, byte[]>();
                     map.put("first", values[(int) (i % 2)]);
-                    map.put("absent", null);
+                    map.put("absent", notNull ? values[0] : null);
                     map.put("last", values[(int) ((i + 1) % 2)]);
                     return Row.of((Object) (isNull(i, nullEvery) ? null : map));
                   })
@@ -232,7 +248,11 @@ final class TextTimeBenchmarkInputs {
                       new String[] {"m"},
                       Types.MAP(Types.STRING, Types.PRIMITIVE_ARRAY(Types.BYTE)))),
           Schema.newBuilder()
-              .column("m", DataTypes.MAP(DataTypes.STRING().notNull(), DataTypes.BINARY(width)))
+              .column(
+                  "m",
+                  DataTypes.MAP(
+                      DataTypes.STRING().notNull(),
+                      notNull ? DataTypes.BINARY(width).notNull() : DataTypes.BINARY(width)))
               .build());
     } else if (input.equals("tt_json_map")) {
       tables.createTemporaryView(

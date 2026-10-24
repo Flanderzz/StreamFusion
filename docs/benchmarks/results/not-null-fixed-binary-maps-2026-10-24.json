@@ -1,0 +1,572 @@
+{
+  "date": "2026-10-24",
+  "previous_revision": "25fe176ab7f7fb78d5d282fb19715ca66730cadf",
+  "previous_revision_note": "Binary multiset candidate before NOT NULL map admission; benchmark/input sources copied exactly. Current parent ea5656aa adds only an agent unit-fixture fix and upstream-suite documentation; production and benchmark code match25fe.",
+  "benchmark_source_sha256": {
+    "src/test/java/tech/streamfusion/ScalarFunctionBenchmark.java": "414b55cbc597f7eb3a400d300420bbd4f8d746d28effb2769e43ff5ed8e1d22d",
+    "src/test/java/tech/streamfusion/TextTimeBenchmarkInputs.java": "33cce805e61c0764d3eb69694b06fe88c8f3388819ca1dd4b348c4de7db574c2"
+  },
+  "hardware": {
+    "cpu": "Intel Core i7-12650H",
+    "os": "Linux x86-64 / WSL2",
+    "jdk": "OpenJDK17.0.20.1"
+  },
+  "native": {
+    "profile": "release",
+    "features": [
+      "mimalloc",
+      "rocksdb-state"
+    ],
+    "sha256": "b574491f08427c8b128107d6286cb403421a0bafbdba7a0e5cdd8fea30562d16",
+    "production_rust_changes": false,
+    "note": "Same frozen release DSO for all phases; existing generated evaluator and Arrow map transport."
+  },
+  "configuration": {
+    "flink": "2.2.1",
+    "rows": 500000,
+    "binary_widths": [
+      4,
+      256
+    ],
+    "source": "Two three-entry MAP fixtures: ASCII STRING keys with three non-null binary values, or three non-null binary keys with INT values1/NULL/-1. Every eighth parent isNULL. Actual binary widths match declared widths for performance; correctness also tests NULLs and widths outside declarations.",
+    "expressions": [
+      "MAP_VALUES(m) for MAP<STRING NOT NULL,BINARY(n) NOT NULL>",
+      "MAP_KEYS(m) for MAP<BINARY(n) NOT NULL,INT>",
+      "CAST(m AS STRING) for each map"
+    ],
+    "identity_control": "Same-source m plus TRUE anchor, native on current and prior, retained without subtraction.",
+    "parallelism": 1,
+    "test_heap_gib": 8,
+    "warmups_per_engine": 2,
+    "trials_per_engine": 3,
+    "boundary": "Complete job: planning/submission, source, evaluator, both row/Arrow transposes and blackhole row sink. Fresh per-job metrics-cluster/schema setup and plan assertions outside timing.",
+    "native_proof": "Every admitted measured job requires consumed NativeCalc and both transpose counters; stock/priorfallback requires no native operators. Assertions after clock.",
+    "schedule": "Alternating engine order, separate width/cohort JVMs, all local Java/Cargo work quiet before measurements, process sampling every2s.",
+    "unused_generic_payload_bytes": 264
+  },
+  "trials": [
+    {
+      "phase": "current",
+      "function": "BASELINE_tt_not_null_binary_map",
+      "rows": 500000,
+      "binary_width": 4,
+      "stock_seconds": [
+        0.383644398,
+        0.298879626,
+        0.289880735
+      ],
+      "native_seconds": [
+        0.441311659,
+        0.440991644,
+        0.425408975
+      ],
+      "route": "consumed NativeCalc and both transposes"
+    },
+    {
+      "phase": "current",
+      "function": "BASELINE_tt_not_null_binary_keys",
+      "rows": 500000,
+      "binary_width": 4,
+      "stock_seconds": [
+        0.23449352,
+        0.239395149,
+        0.234919195
+      ],
+      "native_seconds": [
+        0.310534852,
+        0.302725867,
+        0.309850166
+      ],
+      "route": "consumed NativeCalc and both transposes"
+    },
+    {
+      "phase": "current",
+      "function": "NOT_NULL_BINARY_MAP_VALUES",
+      "rows": 500000,
+      "binary_width": 4,
+      "stock_seconds": [
+        0.307175666,
+        0.288900088,
+        0.295369812
+      ],
+      "native_seconds": [
+        0.619322192,
+        0.622485865,
+        0.620182701
+      ],
+      "route": "consumed NativeCalc and both transposes"
+    },
+    {
+      "phase": "current",
+      "function": "NOT_NULL_BINARY_MAP_STRING",
+      "rows": 500000,
+      "binary_width": 4,
+      "stock_seconds": [
+        0.45530849,
+        0.476523999,
+        0.458550894
+      ],
+      "native_seconds": [
+        0.796102184,
+        0.801215989,
+        0.796819422
+      ],
+      "route": "consumed NativeCalc and both transposes"
+    },
+    {
+      "phase": "current",
+      "function": "NOT_NULL_BINARY_MAP_KEYS",
+      "rows": 500000,
+      "binary_width": 4,
+      "stock_seconds": [
+        0.262033038,
+        0.253209127,
+        0.254220024
+      ],
+      "native_seconds": [
+        0.46298365,
+        0.464247341,
+        0.463470283
+      ],
+      "route": "consumed NativeCalc and both transposes"
+    },
+    {
+      "phase": "current",
+      "function": "NOT_NULL_BINARY_KEYS_STRING",
+      "rows": 500000,
+      "binary_width": 4,
+      "stock_seconds": [
+        0.413330054,
+        0.397255597,
+        0.402372788
+      ],
+      "native_seconds": [
+        0.572501218,
+        0.57052058,
+        0.569916874
+      ],
+      "route": "consumed NativeCalc and both transposes"
+    },
+    {
+      "phase": "current",
+      "function": "BASELINE_tt_not_null_binary_map",
+      "rows": 500000,
+      "binary_width": 256,
+      "stock_seconds": [
+        0.380124049,
+        0.387327834,
+        0.37994491
+      ],
+      "native_seconds": [
+        0.716505168,
+        0.548104406,
+        0.53316716
+      ],
+      "route": "consumed NativeCalc and both transposes"
+    },
+    {
+      "phase": "current",
+      "function": "BASELINE_tt_not_null_binary_keys",
+      "rows": 500000,
+      "binary_width": 256,
+      "stock_seconds": [
+        0.323823232,
+        0.306720409,
+        0.313982
+      ],
+      "native_seconds": [
+        0.396621236,
+        0.394002976,
+        0.382232708
+      ],
+      "route": "consumed NativeCalc and both transposes"
+    },
+    {
+      "phase": "current",
+      "function": "NOT_NULL_BINARY_MAP_VALUES",
+      "rows": 500000,
+      "binary_width": 256,
+      "stock_seconds": [
+        0.375123088,
+        0.382388752,
+        0.38125572
+      ],
+      "native_seconds": [
+        0.836081255,
+        0.846613774,
+        0.851432453
+      ],
+      "route": "consumed NativeCalc and both transposes"
+    },
+    {
+      "phase": "current",
+      "function": "NOT_NULL_BINARY_MAP_STRING",
+      "rows": 500000,
+      "binary_width": 256,
+      "stock_seconds": [
+        1.480178674,
+        1.501203012,
+        1.484236873
+      ],
+      "native_seconds": [
+        3.047926434,
+        3.074438566,
+        3.095101194
+      ],
+      "route": "consumed NativeCalc and both transposes"
+    },
+    {
+      "phase": "current",
+      "function": "NOT_NULL_BINARY_MAP_KEYS",
+      "rows": 500000,
+      "binary_width": 256,
+      "stock_seconds": [
+        0.339937808,
+        0.319906374,
+        0.318648914
+      ],
+      "native_seconds": [
+        0.675673931,
+        0.658896731,
+        0.679109159
+      ],
+      "route": "consumed NativeCalc and both transposes"
+    },
+    {
+      "phase": "current",
+      "function": "NOT_NULL_BINARY_KEYS_STRING",
+      "rows": 500000,
+      "binary_width": 256,
+      "stock_seconds": [
+        1.383291522,
+        1.385634317,
+        1.3350806
+      ],
+      "native_seconds": [
+        2.4196193,
+        2.434042019,
+        2.377253307
+      ],
+      "route": "consumed NativeCalc and both transposes"
+    },
+    {
+      "phase": "previous",
+      "function": "BASELINE_tt_not_null_binary_map",
+      "rows": 500000,
+      "binary_width": 4,
+      "stock_seconds": [
+        0.388983889,
+        0.307392201,
+        0.297984816
+      ],
+      "native_seconds": [
+        0.443221667,
+        0.434430758,
+        0.506547981
+      ],
+      "route": "consumed NativeCalc and both transposes"
+    },
+    {
+      "phase": "previous",
+      "function": "BASELINE_tt_not_null_binary_keys",
+      "rows": 500000,
+      "binary_width": 4,
+      "stock_seconds": [
+        0.236725317,
+        0.240785245,
+        0.244538434
+      ],
+      "native_seconds": [
+        0.307030509,
+        0.311631506,
+        0.307183273
+      ],
+      "route": "consumed NativeCalc and both transposes"
+    },
+    {
+      "phase": "previous",
+      "function": "NOT_NULL_BINARY_MAP_VALUES",
+      "rows": 500000,
+      "binary_width": 4,
+      "stock_seconds": [
+        0.297812604,
+        0.307773385,
+        0.299102263
+      ],
+      "native_seconds": [
+        0.301189443,
+        0.289556316,
+        0.30260131
+      ],
+      "route": "stock fallback, no native work"
+    },
+    {
+      "phase": "previous",
+      "function": "NOT_NULL_BINARY_MAP_STRING",
+      "rows": 500000,
+      "binary_width": 4,
+      "stock_seconds": [
+        0.450044956,
+        0.451429614,
+        0.447791674
+      ],
+      "native_seconds": [
+        0.442780662,
+        0.454731427,
+        0.461343716
+      ],
+      "route": "stock fallback, no native work"
+    },
+    {
+      "phase": "previous",
+      "function": "NOT_NULL_BINARY_MAP_KEYS",
+      "rows": 500000,
+      "binary_width": 4,
+      "stock_seconds": [
+        0.243261816,
+        0.267479187,
+        0.258507848
+      ],
+      "native_seconds": [
+        0.245612035,
+        0.242558116,
+        0.24089104
+      ],
+      "route": "stock fallback, no native work"
+    },
+    {
+      "phase": "previous",
+      "function": "NOT_NULL_BINARY_KEYS_STRING",
+      "rows": 500000,
+      "binary_width": 4,
+      "stock_seconds": [
+        0.379395136,
+        0.381170247,
+        0.427188575
+      ],
+      "native_seconds": [
+        0.380785115,
+        0.383944839,
+        0.3823958
+      ],
+      "route": "stock fallback, no native work"
+    },
+    {
+      "phase": "previous",
+      "function": "BASELINE_tt_not_null_binary_map",
+      "rows": 500000,
+      "binary_width": 256,
+      "stock_seconds": [
+        0.391877507,
+        0.383605527,
+        0.371279459
+      ],
+      "native_seconds": [
+        0.527880908,
+        0.54752465,
+        0.53422485
+      ],
+      "route": "consumed NativeCalc and both transposes"
+    },
+    {
+      "phase": "previous",
+      "function": "BASELINE_tt_not_null_binary_keys",
+      "rows": 500000,
+      "binary_width": 256,
+      "stock_seconds": [
+        0.327183259,
+        0.308288834,
+        0.322685635
+      ],
+      "native_seconds": [
+        0.381145899,
+        0.404433366,
+        0.414627699
+      ],
+      "route": "consumed NativeCalc and both transposes"
+    },
+    {
+      "phase": "previous",
+      "function": "NOT_NULL_BINARY_MAP_VALUES",
+      "rows": 500000,
+      "binary_width": 256,
+      "stock_seconds": [
+        0.446555014,
+        0.371609124,
+        0.372701134
+      ],
+      "native_seconds": [
+        0.377312452,
+        0.388174004,
+        0.379786815
+      ],
+      "route": "stock fallback, no native work"
+    },
+    {
+      "phase": "previous",
+      "function": "NOT_NULL_BINARY_MAP_STRING",
+      "rows": 500000,
+      "binary_width": 256,
+      "stock_seconds": [
+        1.478947348,
+        1.473322433,
+        1.472542005
+      ],
+      "native_seconds": [
+        1.486185636,
+        1.449249626,
+        1.464445471
+      ],
+      "route": "stock fallback, no native work"
+    },
+    {
+      "phase": "previous",
+      "function": "NOT_NULL_BINARY_MAP_KEYS",
+      "rows": 500000,
+      "binary_width": 256,
+      "stock_seconds": [
+        0.32340626,
+        0.330763852,
+        0.323211436
+      ],
+      "native_seconds": [
+        0.321605565,
+        0.3103054,
+        0.305980986
+      ],
+      "route": "stock fallback, no native work"
+    },
+    {
+      "phase": "previous",
+      "function": "NOT_NULL_BINARY_KEYS_STRING",
+      "rows": 500000,
+      "binary_width": 256,
+      "stock_seconds": [
+        1.371644712,
+        1.369769567,
+        1.395543971
+      ],
+      "native_seconds": [
+        1.394037331,
+        1.372284406,
+        1.379092909
+      ],
+      "route": "stock fallback, no native work"
+    }
+  ],
+  "cpu_profiles": {
+    "passes": 2,
+    "closed": true,
+    "profiler": "async-profiler4.6",
+    "event": "cpu",
+    "interval": "1ms",
+    "target_seconds_per_capture": 8,
+    "rows": 500000,
+    "binary_width": 256,
+    "warmups": 1,
+    "boundary": "Native-only capture after one unprofiled native job; includes fresh-cluster setup,planning,compilation and all JVM threads,stops after currentjob. Profiled times are not part of comparison trials.",
+    "captures": {
+      "not_null_binary_map_values-native": {
+        "total_samples": 13987,
+        "inclusive_method_samples": {
+          "NativeUdf.invokeUdf": 2494,
+          "FlinkExpressionFunction.evalRow": 1120,
+          "MapWriter.doWrite": 905,
+          "ArrayWriter.doWrite": 789,
+          "NestedStringWriter.doWrite": 267,
+          "MapDataSerializer.toBinaryMap": 1033,
+          "ArrayDataSerializer.toBinaryArray": 350,
+          "ArrowFieldWriter.write": 1778
+        },
+        "top_self_samples": {
+          "jlong_disjoint_arraycopy": 1059,
+          "org/apache/arrow/vector/BaseVariableWidthVector.handleSafe_[i]": 487,
+          "jdk/internal/misc/Unsafe.checkOffset_[i]": 358,
+          "_raw_spin_unlock_irqrestore_[k]": 333,
+          "jint_disjoint_arraycopy": 321,
+          "org/apache/flink/table/data/binary/BinarySection.pointTo_[j]": 242,
+          "tech/streamfusion/arrow/writers/ArrowFieldWriter.write_[i]": 216,
+          "IndexSetIterator::advance_and_next": 206,
+          "/usr/lib/x86_64-linux-gnu/libc.so.6": 184,
+          "itable stub": 163
+        }
+      },
+      "not_null_binary_keys_string-native": {
+        "total_samples": 14113,
+        "inclusive_method_samples": {
+          "NativeUdf.invokeUdf": 6115,
+          "FlinkExpressionFunction.evalRow": 2426,
+          "MapWriter.doWrite": 804,
+          "ArrayWriter.doWrite": 0,
+          "NestedStringWriter.doWrite": 3329,
+          "MapDataSerializer.toBinaryMap": 548,
+          "ArrayDataSerializer.toBinaryArray": 0,
+          "ArrowFieldWriter.write": 4200
+        },
+        "top_self_samples": {
+          "java/lang/String.malformed4_[i]": 1087,
+          "do_user_addr_fault_[k]": 993,
+          "jlong_disjoint_arraycopy": 669,
+          "jint_disjoint_arraycopy": 575,
+          "_raw_spin_unlock_irqrestore_[k]": 428,
+          "java/lang/String.decodeUTF8_UTF16_[j]": 386,
+          "jshort_disjoint_arraycopy": 376,
+          "__pte_offset_map_lock_[k]": 268,
+          "Copy::fill_to_memory_atomic": 219,
+          "clear_page_erms_[k]": 205
+        }
+      }
+    },
+    "limitations": "Inclusive sample counts overlap; they are not allocation or copied-byte counts and do not causally isolate the whole slowdown against stock."
+  },
+  "process_sampling": {
+    "seconds": 2,
+    "reports": {
+      "matrix": {
+        "raw_observations": 2,
+        "external_workloads": 0,
+        "classification": "Own Maven startup shells classified by unique cohort CSV/profile-output arguments and timestamps within0.1s of phase launch, before JVM replacement. Raw observations retained in local load reports.",
+        "phase_exit_codes": [
+          0,
+          0
+        ]
+      },
+      "profiles": {
+        "raw_observations": 1,
+        "external_workloads": 0,
+        "classification": "Own Maven startup shells classified by unique cohort CSV/profile-output arguments and timestamps within0.1s of phase launch, before JVM replacement. Raw observations retained in local load reports.",
+        "phase_exit_codes": [
+          0
+        ]
+      }
+    }
+  },
+  "scope": {
+    "admitted": "Flink2.2 NOT NULL fixed BINARY MAP keys,values or both, through existing generated bridge. MULTISET release capability renamed and reused without changing behavior.",
+    "fallback": [
+      "Flink1.18 NOT NULL fixed BINARY map leaves: observed unchecked NULL getter/formatting difference",
+      "Disabled collection/length-delimited options keep these functions on Flink; unrelated native projections may remain",
+      "External STRUCTURED and unverified represented state/exchange/ordering/native-writer boundaries;#437 updating retained payloads deferred"
+    ],
+    "representation": "GenericMapData and released BinaryMapData parity includes real NULLs despite NOT NULL hints; no new transport/schema/state protocol."
+  },
+  "validation": {
+    "flink2.2.1": {
+      "passed": 246,
+      "skipped": 0
+    },
+    "flink1.18.1": {
+      "passed": 201,
+      "skipped": 45
+    },
+    "note": "Eight-class broad matrix plus final80-case standalone reruns after test-only route-guard corrections; other166 checks unchanged. Benchmark smokes excluded.",
+    "coverage": [
+      "Either or both BINARY map leaves NOT NULL; Generic/BinaryMapData; NULL/empty containers and true NULL leaves despite hints",
+      "Actual widths0\u20136 and4097 despiteBINARY4, casts and bounded character output, legacy/current behavior",
+      "All4inputRowKinds,objectreuse,batchRows3,emptyfiltered,CASE,MAP/ARRAY consumers",
+      "Retained Java Map callbacks and shared state across closed batches; consumed nativework2.2 and explicit1.18fallback",
+      "Disabled collection/length-delimited options and represented group-boundary fallback"
+    ]
+  },
+  "conclusion": "All eight new native medians exceed paired stock and prior fallback. Keep unfavorable complete-job results under the accepted collection tradeoff without an acceleration claim. Exactly two CPU profiles close the bounded investigation: generated callback conversion, binary map/array serialization and represented string encoding remain visible costs. No safe small shortcut preserving released NULL/representation behavior was identified; further performance stays in#392."
+}

@@ -131,3 +131,11 @@ Nullable elements are verified on both lines; NOT NULL elements remain guarded o
 where unchecked NULL byte getters differ from original-container NULL formatting. Flink 2.2
 retains its verified NOT NULL route. No map representation tag, native state or snapshot
 serializer is added, and unverified represented consumers keep their existing restrictions.
+
+Flink 2.2 NOT NULL fixed-BINARY MAP keys and values reuse that same release capability and
+length-delimited generated transport. Released-Flink parity covers GenericMapData and
+BinaryMapData, including real NULL slots beneath NOT NULL hints and retained Java callbacks
+across batch release. Flink 1.18 keeps its existing guard; no schema marker or unchecked-getter
+normalization is introduced. Representation-sensitive downstream consumers retain their
+existing admission gates. The release comparisons and two-pass investigation are recorded in
+[the benchmark ledger](../docs/benchmarks/scalar-functions.md#not-null-fixed-binary-map-leaves).

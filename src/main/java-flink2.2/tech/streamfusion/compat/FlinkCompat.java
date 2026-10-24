@@ -8,7 +8,7 @@ import org.apache.flink.table.planner.plan.logical.WindowSpec;
 
 /** Planner constructs selected at build time for the target Flink line. */
 public final class FlinkCompat {
-  public static boolean supportsNotNullBinaryMultisetElements() {
+  public static boolean supportsNotNullBinaryMapLeaves() {
     return true;
   }
 

@@ -2236,7 +2236,8 @@ arrays retain generated evaluation.
 Primitive bridge types and recursively supported ARRAY/MAP/ROW values are admitted, including
 nullable typed map keys, decimal and timestamp values. Generated ARRAY/ROW containers and nullable MAP
 values support fixed BINARY leaves through the length-delimited transport described above;
-NOT NULL fixed BINARY MAP keys/values and unpaired UTF-16 field names remain excluded. STRUCTURED results from inline OBJECT_OF/OBJECT_UPDATE are supported;
+NOT NULL fixed BINARY MAP keys/values are verified on Flink 2.2 and remain excluded on 1.18;
+unpaired UTF-16 field names remain excluded. STRUCTURED results from inline OBJECT_OF/OBJECT_UPDATE are supported;
 external STRUCTURED inputs retain fallback. Unsupported host signatures or generated programs
 fall back during planning.
 
@@ -2244,7 +2245,8 @@ Generated collection evaluation admits nullable MAP values declared BINARY(n) wh
 byte lengths, including lengths outside the declaration. In generated evaluation, MAP_VALUES,
 MAP_ENTRIES, MAP_UNION, map casts and character formatting use released Flink; casts keep its padding,
 truncation and legacy rules. Nested scalar callbacks use the same verified map conversion.
-NOT NULL fixed BINARY MAP values remain on stock Flink: released 1.18 can distinguish a NULL
+NOT NULL fixed BINARY MAP values use the generated route on Flink 2.2 and remain on stock Flink
+on 1.18: released 1.18 can distinguish a NULL
 slot from the empty bytes returned by an unchecked getter while formatting the same input.
 This support requires `streamfusion.experimental.nestedScalarUdfs=true` (the default) so the Arrow
 boundary uses length-delimited bytes. Disabling collection expressions or that transport retains
@@ -2268,7 +2270,8 @@ Both CAST and TRY_CAST keep released key/value conversion behavior; returned map
 logical entries even when a narrowing cast produces equal key bytes. Flink's generated map casts
 use Java HashMap, so binary-key cast iteration can depend on object identity; it is not an ordered-map
 contract. Direct input-map formatting is compared in its original entry order. NOT NULL binary keys
-and values retain fallback, as do external STRUCTURED inputs and unverified representation boundaries.
+and values use the verified generated route on Flink 2.2, described below; on 1.18 they retain
+fallback. External STRUCTURED inputs and unverified representation boundaries retain fallback.
 On released 1.18, CASE returning a binary array can fail in Flink's own compiler; the explicit
 failure/fallback contract remains. No absent catalog function is introduced on either line.
 A direct final MAP_KEYS projection of an input-reference map with nullable BINARY keys and nullable
@@ -2343,7 +2346,7 @@ standalone ARRAY-to-ARRAY, MAP-to-MAP, MULTISET-to-MULTISET and ROW-to-ROW casts
 program used when a collection constructor or function is present. STRING, floating, temporal
 and NOT NULL-element conversions keep Flink's conversion rules and resolved types. The bridge's
 type gates and the representation-boundary restrictions above still apply; this does not admit
-external STRUCTURED inputs or NOT NULL fixed BINARY MAP keys/values. Direct BINARY MULTISET
+external STRUCTURED inputs or Flink 1.18 NOT NULL fixed BINARY MAP keys/values. Direct BINARY MULTISET
 elements use the verified boundary below; NOT NULL elements remain guarded on Flink 1.18.
 The existing DECIMAL-to-FLOAT/DOUBLE ARRAY CAST also retains its Rust path.
 
@@ -2405,7 +2408,7 @@ halves; the represented string result preserves those Java units. CAST and TRY_C
 containers, filtered/CASE short-circuiting and errors from evaluating their input. Runtime tests
 require consumed NativeCalc input on both supported releases, including all four outer changelog
 kinds and generic/binary collection representations. Unverified state, exchange and native-writer
-boundaries, NOT NULL fixed BINARY MAP keys/values and external STRUCTURED inputs still fall back.
+boundaries, Flink 1.18 NOT NULL fixed BINARY MAP keys/values and external STRUCTURED inputs still fall back.
 These casts share the accepted collection-extension performance tradeoff; see the
 [conversion-inclusive character-cast measurements](../benchmarks/scalar-functions.md#collection-character-casts).
 
@@ -2946,6 +2949,32 @@ restrictions. This does not enable updating retained MULTISET payloads deferred 
 [Release comparisons and bounded profiles](../benchmarks/scalar-functions.md#fixed-binary-multiset-elements)
 retain conversion and source/sink costs without a standalone acceleration claim.
 
+### NOT NULL fixed BINARY map leaves
+
+Flink 2.2 admits MAP keys and values declared BINARY(n) NOT NULL through the existing
+length-delimited generated evaluator. Either or both leaves may be NOT NULL. MAP_KEYS,
+MAP_VALUES, MAP_ENTRIES, MAP_UNION, CAST/TRY_CAST, character formatting and composed array
+consumers keep released Flink evaluation. This does not widen the Rust shared-child view's
+nullable-element whitelist. Flink 1.18 retains planning-time fallback: its unchecked NULL
+binary getters can expose empty bytes where the original map preserves NULL formatting.
+The same release capability already governs NOT NULL binary MULTISET elements.
+
+Runtime-source regressions exercise both GenericMapData and released-serializer BinaryMapData,
+NULL/empty parents, actual NULL leaves despite declared NOT NULL hints, lengths zero through
+six and 4097 despite BINARY(4), all four changelog kinds, legacy/current casts, CHAR/VARCHAR
+bounds, CASE and empty filtered batches. Each populated admitted query requires consumed
+NativeCalc work. Retained Java Map callbacks preserve owned inputs and shared function state
+across closed batches for both source representations. The callbacks also retain verified
+stock behavior on 1.18; they do not add a new conversion protocol.
+
+The default collection and nested-scalar length-delimited options must remain enabled for the
+new collection functions. Disabling either retains Flink evaluation of those functions; unrelated
+native projections can still execute. Existing final-projection/fused-consumer restrictions and
+unverified state, exchange, ordering and native-writer guards remain. No retained-payload support
+is added for [#437](https://github.com/datafusion-contrib/StreamFusion/issues/437).
+[Release comparisons and two bounded profiles](../benchmarks/scalar-functions.md#not-null-fixed-binary-map-leaves)
+document complete-job costs under the accepted collection tradeoff.
+
 ### Java MAP scalar signatures
 
 The default-enabled `streamfusion.experimental.nestedScalarUdfs` option also admits synchronous
@@ -2961,8 +2990,8 @@ containers, keys and values, empty maps, signed zero, NaN/infinity, precision-38
 pre-epoch nanoseconds and nested RowKinds are covered. These are resolved Flink signatures:
 nested TIME resolves to TIME(0), and the interval fixture uses INTERVAL MONTH/SECOND(3).
 Runtime millisecond TIME values are preserved. Root DATE/TIME UDF signatures use the temporal
-path. NOT NULL fixed BINARY map leaves, arbitrary Java conversion classes and custom type inference
-retain their separate gates.
+path. NOT NULL fixed BINARY map leaves use the verified generated boundary on Flink 2.2 and retain
+fallback on 1.18. Arbitrary Java conversion classes and custom type inference retain their separate gates.
 
 Scalar results from MAP arguments can feed native aggregation. MAP results can compose with
 lookup, CARDINALITY, CASE, predicates and a final row sink, including callbacks lifted above

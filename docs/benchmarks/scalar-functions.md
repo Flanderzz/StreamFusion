@@ -1893,8 +1893,9 @@ For each of ARRAY_FORMAT_STRING and MAP_FORMAT_STRING, select `#profileFunction`
 `SF_PROFILE_SCALAR=true`, `-Dscalar.warmup=1 -Dscalar.seconds=8` and
 `-Dprofile.asprof=/path/to/asprof -Dprofile.outputDir=/path/to/output`. Runtime parity on both
 supported Flink lines independently requires consumed NativeCalc input, including bounded UTF-16
-results, legacy formatting and all four changelog kinds. NOT NULL fixed BINARY MAP leaves and unverified
-state/native-writer boundaries retain fallback. Fixed-BINARY MULTISET elements use the
+results, legacy formatting and all four changelog kinds. NOT NULL fixed BINARY MAP leaves remain
+guarded on 1.18; the [2.2 admission](#not-null-fixed-binary-map-leaves) has separate measurements.
+Unverified state/native-writer boundaries retain fallback. Fixed-BINARY MULTISET elements use the
 [separate verified boundary](#fixed-binary-multiset-elements).
 
 
@@ -1902,9 +1903,10 @@ state/native-writer boundaries retain fallback. Fixed-BINARY MULTISET elements u
 
 Nullable BINARY(n) map values now enter the existing generated collection evaluator. A direct
 final MAP_VALUES of an input-reference map with VARCHAR keys reuses the Rust shared-child view;
-other consumers retain Flink evaluation. NOT NULL fixed BINARY keys and values remain guarded;
-nullable fixed BINARY keys are covered below. NOT NULL values have an observed NULL-formatting
-difference on released Flink 1.18.
+other consumers retain Flink evaluation. NOT NULL fixed BINARY keys and values remain guarded on
+1.18; the [2.2 admission](#not-null-fixed-binary-map-leaves) has separate measurements. Nullable
+fixed BINARY keys are covered below. NOT NULL values have an observed NULL-formatting difference
+on released Flink 1.18.
 
 Release/mimalloc measurements on 2026-10-24 use Flink 2.2.1, OpenJDK 17.0.20.1 and Linux
 x86-64/WSL2 on an Intel Core i7-12650H. Each job has 500,000 runtime-source rows, parallelism 1,
@@ -1973,8 +1975,8 @@ Rust fixtures run with `cargo bench -p streamfusion --bench collection_expressio
 Nullable BINARY(n) map keys use the existing length-delimited generated collection bridge.
 A direct final MAP_KEYS of an input-reference map with nullable basic values reuses the Rust
 shared-child view; other consumers retain generated Flink evaluation. NOT NULL fixed BINARY
-keys and values, external STRUCTURED inputs and unverified state/native-writer boundaries
-remain guarded. Released Flink 1.18 cannot initialize CASE returning BINARY arrays; tests retain
+keys and values remain guarded on 1.18; see the [2.2 measurements](#not-null-fixed-binary-map-leaves).
+External STRUCTURED inputs and unverified state/native-writer boundaries remain guarded. Released Flink 1.18 cannot initialize CASE returning BINARY arrays; tests retain
 its exact compiler failure and planning fallback for that form.
 
 Release/mimalloc measurements on 2026-10-24 use Flink 2.2.1, OpenJDK 17.0.20.1 and Linux
@@ -2177,3 +2179,74 @@ sources and adds `-Dscalar.native.expected=false`. For each of the two profiles,
 `#profileFunction`, set `SF_BENCHMARK=true SF_PROFILE_SCALAR=true`, choose one function,
 and retain the wide shape with `-Dscalar.warmup=1 -Dscalar.seconds=8` plus an async-profiler
 path through `profile.asprof`. Profiled timings do not enter the comparison table.
+
+## NOT NULL fixed BINARY map leaves
+
+On Flink 2.2, fixed BINARY(n) NOT NULL map keys and values now enter the existing generated
+collection evaluator. The Rust MAP_KEYS/MAP_VALUES child-view whitelist is unchanged: these
+new NOT NULL-element projections retain generated evaluation. Flink 1.18 keeps its fallback
+because unchecked NULL getters can change released map formatting. No native operation,
+transport schema, state serializer or ownership protocol changes.
+
+Release/mimalloc measurements on 2026-10-24 use Flink 2.2.1, OpenJDK 17.0.20.1 and Linux
+x86-64/WSL2 on an Intel Core i7-12650H. Every job has 500,000 rows, parallelism one, an 8 GiB
+heap, two warmups and three alternating trials per engine. Widths are four and 256 bytes.
+The MAP_VALUES fixture has three ASCII STRING keys and three non-null binary values;
+the MAP_KEYS fixture has three non-null binary keys with INT values 1/NULL/-1. Every eighth
+parent is NULL. Performance inputs respect declared widths and nullability; separate correctness
+checks include real NULL leaves and out-of-declaration lengths in both generic and binary maps.
+
+Previous candidate `25fe176a` uses identical benchmark/input sources and the same frozen release
+DSO. The current parent's later merge adds only a unit-test fixture repair and suite documentation;
+production and measured benchmark sources are unchanged. Each admitted measured job requires
+consumed NativeCalc and both row/Arrow transpose counters. Stock and previous-fallback jobs
+require no native operators. Same-source identity controls still consume native work on both
+checkouts and are retained without subtraction. Timing includes planning/submission, processing,
+all intrinsic conversions and the blackhole row sink. Fresh per-job metrics-cluster/schema setup
+and plan assertions are outside timing. No other local Java/Cargo work overlaps measurements.
+[All trials, both stock controls, identities and profiles](results/not-null-fixed-binary-maps-2026-10-24.json)
+retain the unfavorable results.
+
+Median seconds (minimum–maximum), including complete-job startup:
+
+| Expression / bytes per leaf | Paired stock | Previous fallback | Generated native route |
+| --- | ---: | ---: | ---: |
+| NOT_NULL_BINARY_MAP_VALUES / 4 | 0.295370 (0.288900–0.307176) | 0.301189 (0.289556–0.302601) | 0.620183 (0.619322–0.622486) |
+| NOT_NULL_BINARY_MAP_STRING / 4 | 0.458551 (0.455308–0.476524) | 0.454731 (0.442781–0.461344) | 0.796819 (0.796102–0.801216) |
+| NOT_NULL_BINARY_MAP_KEYS / 4 | 0.254220 (0.253209–0.262033) | 0.242558 (0.240891–0.245612) | 0.463470 (0.462984–0.464247) |
+| NOT_NULL_BINARY_KEYS_STRING / 4 | 0.402373 (0.397256–0.413330) | 0.382396 (0.380785–0.383945) | 0.570521 (0.569917–0.572501) |
+| NOT_NULL_BINARY_MAP_VALUES / 256 | 0.381256 (0.375123–0.382389) | 0.379787 (0.377312–0.388174) | 0.846614 (0.836081–0.851432) |
+| NOT_NULL_BINARY_MAP_STRING / 256 | 1.484237 (1.480179–1.501203) | 1.464445 (1.449250–1.486186) | 3.074439 (3.047926–3.095101) |
+| NOT_NULL_BINARY_MAP_KEYS / 256 | 0.319906 (0.318649–0.339938) | 0.310305 (0.305981–0.321606) | 0.675674 (0.658897–0.679109) |
+| NOT_NULL_BINARY_KEYS_STRING / 256 | 1.383292 (1.335081–1.385634) | 1.379093 (1.372284–1.394037) | 2.419619 (2.377253–2.434042) |
+
+Optimization stopped after exactly two eight-second CPU captures at 256-byte width. MAP_VALUES
+has 13,987 samples across all JVM threads, including 2,494 inclusive callback samples, 1,120
+in generated row evaluation, 1,033 in map serialization and 350 in array serialization.
+Binary-key map formatting has 14,113 samples, including 6,115 in the callback, 2,426 in generated
+evaluation and 3,329 in represented-string writing. Both retain copying/materialization and
+perimeter costs. Counts overlap and include fresh-cluster setup, planning and compilation;
+they are not allocation or copied-byte measurements and do not isolate the whole slowdown.
+No safe small shortcut preserving released NULL and representation behavior was identified
+inside the timebox. No further profiling was performed for this increment.
+
+Every new native median exceeds paired stock and previous fallback. These short complete jobs
+ship under the accepted collection-coverage tradeoff and do not establish standalone acceleration
+or sustained throughput. Further performance work stays in
+[#392](https://github.com/datafusion-contrib/StreamFusion/issues/392).
+
+Reproduce each width with a released native build:
+
+```sh
+SF_BENCHMARK=true mvn -pl streamfusion-runtime test -Pbench \
+  '-Dtest=ScalarFunctionBenchmark#individualFunctions' -Dsf.testForks=1 \
+  -Dscalar.functions=NOT_NULL_BINARY_MAP_VALUES,NOT_NULL_BINARY_MAP_STRING,NOT_NULL_BINARY_MAP_KEYS,NOT_NULL_BINARY_KEYS_STRING \
+  -Dscalar.rows=500000 -Dscalar.binary.width=256 -Dscalar.nullEvery=8 \
+  -Dscalar.warmup=2 -Dscalar.runs=3
+```
+
+Also run with `-Dscalar.binary.width=4`. The previous checkout copies both benchmark/input
+sources and adds `-Dscalar.native.expected=false`. For each of NOT_NULL_BINARY_MAP_VALUES and
+NOT_NULL_BINARY_KEYS_STRING, select `#profileFunction`, set `SF_PROFILE_SCALAR=true`, and use
+`-Dscalar.native=true -Dscalar.warmup=1 -Dscalar.seconds=8`, with
+`-Dprofile.asprof=/path/to/asprof -Dprofile.outputDir=/path/to/output`.
