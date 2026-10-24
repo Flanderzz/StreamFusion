@@ -67,7 +67,7 @@ final class CollectionValueIdentity {
     return RexExpression.nativeArrayJoin(call)
         || RexExpression.nativeObjectUpdate(call)
         || RexExpression.nativeObjectOf(call)
-        || RexExpression.nativeStringKeyMapProjection(call)
+        || RexExpression.nativeInputMapProjection(call)
         || call.getOperator().getName().equals("CARDINALITY")
         || tech.streamfusion.compat.FlinkCompat.scalarFunction(call.getOperator()) == null
             && java.util.Set.of("MAP_KEYS", "MAP_VALUES", "MAP_ENTRIES", "MAP_UNION")
@@ -101,7 +101,7 @@ final class CollectionValueIdentity {
       return readsSensitiveInput(((RexFieldAccess) node).getReferenceExpr());
     if (!(node instanceof RexCall)) return false;
     var call = (RexCall) node;
-    if (RexExpression.nativeStringKeyMapProjection(call))
+    if (RexExpression.nativeInputMapProjection(call))
       return call.getOperands().stream().anyMatch(CollectionValueIdentity::readsSensitiveInput);
     return !verifiedConsumer(call)
         && call.getOperands().stream().anyMatch(CollectionValueIdentity::readsSensitiveInput);

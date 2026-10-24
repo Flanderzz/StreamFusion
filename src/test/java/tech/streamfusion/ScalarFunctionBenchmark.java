@@ -298,6 +298,9 @@ class ScalarFunctionBenchmark {
           new Query("FIXED_BINARY_MAP_VALUES", "tt_fixed_binary_map", "MAP_VALUES(m)",
               "ARRAY<BINARY(" + TextTimeBenchmarkInputs.fixedBinaryWidth() + ")>"),
           new Query("FIXED_BINARY_MAP_STRING", "tt_fixed_binary_map", "CAST(m AS STRING)", "STRING"),
+          new Query("FIXED_BINARY_MAP_KEYS", "tt_fixed_binary_keys", "MAP_KEYS(m)",
+              "ARRAY<BINARY(" + TextTimeBenchmarkInputs.fixedBinaryWidth() + ")>"),
+          new Query("BINARY_KEY_MAP_STRING", "tt_fixed_binary_keys", "CAST(m AS STRING)", "STRING"),
           new Query("TAN_EXACT", "numbers", "TAN(CAST(n AS DOUBLE))", "DOUBLE"),
           new Query(
               "TAN_GROUPED_SUM",
@@ -787,7 +790,7 @@ class ScalarFunctionBenchmark {
                     engine == 1 ? "native" : "flink",
                     trial - WARMUP,
                     seconds,
-                    (query.input().equals("tt_fixed_bytes") || query.input().equals("tt_fixed_binary_map"))
+                    (query.input().equals("tt_fixed_bytes") || query.input().equals("tt_fixed_binary_map") || query.input().equals("tt_fixed_binary_keys"))
                         ? TextTimeBenchmarkInputs.fixedBinaryWidth()
                         : 0));
           }

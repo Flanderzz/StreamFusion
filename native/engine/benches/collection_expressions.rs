@@ -493,31 +493,63 @@ fn temporal_operands(c: &mut Criterion) {
 }
 
 fn binary_map_values(c: &mut Criterion) {
-    let mut group = c.benchmark_group("binary_map_values");
+    binary_map_view(c, 1);
+}
+
+fn binary_map_keys(c: &mut Criterion) {
+    binary_map_view(c, 0);
+}
+
+fn binary_map_view(c: &mut Criterion, index: usize) {
+    let name = if index == 0 {
+        "binary_map_keys"
+    } else {
+        "binary_map_values"
+    };
+    let mut group = c.benchmark_group(name);
     for rows in [16, 1024] {
         for bytes in [0, 4, 256] {
-            let mut maps = MapBuilder::new(
-                None,
-                StringBuilder::new(),
-                arrow::array::BinaryBuilder::new(),
-            );
             let payload = vec![0x80; bytes];
-            for row in 1..=rows + 1 {
-                let valid = row % 7 != 0;
-                if valid && row % 5 != 0 {
-                    maps.keys().append_value("first");
-                    maps.values().append_value(&payload);
-                    maps.keys().append_value("absent");
-                    maps.values().append_null();
-                    maps.keys().append_value("last");
-                    maps.values().append_value(&payload);
+            let input = if index == 0 {
+                let mut maps = MapBuilder::new(
+                    None,
+                    arrow::array::BinaryBuilder::new(),
+                    Int32Builder::new(),
+                );
+                for row in 1..=rows + 1 {
+                    let valid = row % 7 != 0;
+                    if valid && row % 5 != 0 {
+                        maps.keys().append_value(&payload);
+                        maps.values().append_value(1);
+                        maps.keys().append_value(&payload);
+                        maps.values().append_null();
+                    }
+                    maps.append(valid).unwrap();
                 }
-                maps.append(valid).unwrap();
-            }
-            let input = maps.finish().slice(1, rows);
+                maps.finish().slice(1, rows)
+            } else {
+                let mut maps = MapBuilder::new(
+                    None,
+                    StringBuilder::new(),
+                    arrow::array::BinaryBuilder::new(),
+                );
+                for row in 1..=rows + 1 {
+                    let valid = row % 7 != 0;
+                    if valid && row % 5 != 0 {
+                        maps.keys().append_value("first");
+                        maps.values().append_value(&payload);
+                        maps.keys().append_value("absent");
+                        maps.values().append_null();
+                        maps.keys().append_value("last");
+                        maps.values().append_value(&payload);
+                    }
+                    maps.append(valid).unwrap();
+                }
+                maps.finish().slice(1, rows)
+            };
             let batch =
                 RecordBatch::try_from_iter([("m", Arc::new(input.clone()) as ArrayRef)]).unwrap();
-            let mut calc = plan_for(193);
+            let mut calc = plan_for(if index == 0 { 192 } else { 193 });
             let (output, allocations) = measure(|| calc.run(batch.clone()));
             let values = output
                 .column(0)
@@ -526,9 +558,14 @@ fn binary_map_values(c: &mut Criterion) {
                 .unwrap();
             assert_eq!(values.offsets(), input.offsets());
             assert_eq!(values.nulls(), input.nulls());
-            assert!(Arc::ptr_eq(values.values(), input.entries().column(1)));
+            assert!(Arc::ptr_eq(values.values(), input.entries().column(index)));
             let label = format!("rows={rows}/bytes={bytes}/sliced-null-empty");
-            report(&label, batch.columns(), output.columns(), allocations);
+            report(
+                &format!("{name}/{label}"),
+                batch.columns(),
+                output.columns(),
+                allocations,
+            );
             group.throughput(Throughput::Elements(rows as u64));
             group.bench_function(BenchmarkId::from_parameter(label), |b| {
                 b.iter(|| std::hint::black_box(calc.run(batch.clone())))
@@ -543,6 +580,7 @@ criterion_group!(
     run,
     constructors,
     temporal_operands,
-    binary_map_values
+    binary_map_values,
+    binary_map_keys
 );
 criterion_main!(benches);
