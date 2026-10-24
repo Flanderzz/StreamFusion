@@ -277,6 +277,7 @@ class NativeExecutionTest {
     class Fixture {
       private final FakeMiniBatchMode miniBatch = new FakeMiniBatchMode(false);
       private final boolean enableAsyncState = false;
+      private final FakeScalaEnvironment env = new FakeScalaEnvironment(false);
     }
     String test =
         "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testUnboundedGroupByCollect";
