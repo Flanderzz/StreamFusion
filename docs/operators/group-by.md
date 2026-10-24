@@ -555,7 +555,6 @@ separate allocation for every group; dynamic strings and retraction queues remai
 against the task memory budget. Checkpoint representation and aggregate semantics are unchanged.
 
 
-
 An immediate, single-phase group with one unfiltered SINGLE_VALUE emits directly from its accumulator
 without a duplicate cached result or temporary tuple vector. A later touch reconstructs
 the preceding result from that accumulator. Filtered and mixed aggregates retain their cache;
@@ -1183,7 +1182,7 @@ query back via the [all-or-nothing island](index.md#the-all-or-nothing-island) r
   (`COUNT(DISTINCT x)` keeps a per-key
   value set; `SUM(DISTINCT x)` adds a running sum folded as values enter/leave it; `MIN`/`MAX
   (DISTINCT)` run as their plain, multiplicity-blind forms.)
-- COLLECT/ARRAY_AGG outside their verified single-phase INT/BIGINT, scalar-input, non-character-output boundary; ARRAY_AGG on Flink 1.18.
+- COLLECT/ARRAY_AGG with unverified element types, non-scalar inputs or character aggregate results; ARRAY_AGG on Flink 1.18.
 - An approximate aggregate.
 - FIRST_VALUE/LAST_VALUE/SINGLE_VALUE over a value type outside the single-phase list above,
   or with more than one argument.
@@ -1852,7 +1851,6 @@ numeric changelog checks, 22 controlled retention/recovery checks and 26 focused
 SINGLE_VALUE checks. The later decimal-partial completion below extends this historical
 FLOAT/DOUBLE implementation and corrects rounding-sensitive two-level reductions.
 
-
 ### Retracting SINGLE_VALUE partials
 
 The local/global value-and-INT-count layout also accepts updating inputs. The existing native
@@ -2025,7 +2023,6 @@ fallback retained. It protects the mixed scalar FIRST/LAST context; dedicated SQ
 establish the new value types. Actual unchanged upstream runtime validation is reserved for
 consolidated delivery.
 
-
 ### Independent FIRST/LAST retention
 
 Controlled-clock operator comparisons against released Flink cover BIGINT/STRING,
@@ -2069,7 +2066,6 @@ terminated after its FIRST_VALUE retraction scan exceeded 80 seconds; it contrib
 measured trial. Flink samples arrival clock inside the aggregate while native samples once
 per Arrow call, so clock-bucket density influences this retention-specific result. The
 numbers do not establish general FIRST/LAST speedups.
-
 
 ### Retracting LISTAGG entry retention
 
@@ -2399,7 +2395,6 @@ trial requires consumed local and global work. No slow native gate or optimizati
 passes were needed. [Raw trials, source/library hashes and execution evidence](../benchmarks/results/json-object-partials-2026-10-21.json)
 also retain the large stock warmup timebox and its TTL cleanup stack.
 
-
 ### Retracting LISTAGG local/global lists
 
 Released retracting LISTAGG has one structured partial containing its value list, unmatched
@@ -2497,13 +2492,13 @@ retain the measured variability and exact configurations. Reproduce with `String
 `stringagg.updating=true` and `stringagg.literalSeparator=false`; the append profile sets those
 properties to `false` and `true` respectively.
 
-
 ## Integer COLLECT
 
 COLLECT over INT/BIGINT uses the existing columnar JVM aggregate runtime with released Flink
-handlers and managed MapViews. Input fields remain scalar, and the initial output row cannot
-contain character fields, including grouping keys or scalar co-aggregates. Other COLLECT
-value types and nested results retain fallback. Integer ARRAY_AGG additionally runs onFlink 2.2;
+handlers and managed MapViews. Input fields remain scalar, and aggregate result fields cannot
+contain character values. STRING/VARCHAR and CHAR grouping keys use the verified serialized-key
+boundary [described below](#character-grouping-keys). Other COLLECT
+value types and nested results retain fallback. Integer ARRAY_AGG additionally runs on Flink 2.2;
 it is absent from released Flink 1.18.1. No new native multiset accumulator or state serializer is introduced.
 
 NULL values do not contribute; repeated values keep their multiplicities. Retractions retain
@@ -2524,13 +2519,13 @@ in [#437](https://github.com/datafusion-contrib/StreamFusion/issues/437).
 keyed state, sink and both row/Arrow transposes, including startup and all trial ranges.
 The optimization investigation is limited to two profiling/optimization passes per increment.
 
-
 ## Integer ARRAY_AGG
 
 On released Flink 2.2.1, ARRAY_AGG over INT/BIGINT uses the same single-phase columnar JVM
 runtime. Only the exact builtin operator is recognized; user-defined functions with that name
-retain their existing signature gates. Scalar inputs and non-character output fields are
-required. Other element types and nested collection results retain fallback. ARRAY_AGG is
+retain their existing signature gates. Scalar inputs and non-character aggregate result fields
+are required. Character grouping keys use the verified serialized-key boundary below. Other
+element types and nested collection results retain fallback. ARRAY_AGG is
 explicitly N/A on released Flink 1.18.1. Mini-batch, async-state, approximate, ordered and specialized forms keep their
 existing restrictions.
 
@@ -2550,3 +2545,24 @@ payload support deferred in [#437](https://github.com/datafusion-contrib/StreamF
 [Release comparisons](../benchmarks/collection-aggregates.md#integer-array_agg) retain array
 materialization, managed state, both perimeter conversions and source/sink costs. Optimization
 stops after two profiling/optimization passes; slower results use the accepted collection tradeoff.
+
+## Character grouping keys
+
+Integer COLLECT and, on Flink 2.2, integer ARRAY_AGG admit STRING/VARCHAR and CHAR grouping keys.
+The character-field check applies to aggregate results rather than serialized grouping fields;
+character aggregate values/co-results and richer nested results retain fallback. Existing
+synchronous/single-phase and representation-consumer guards still apply.
+
+Grouping uses the released BinaryRow key projection and managed state. Key serialization fixes
+the observed bytes before grouped output, so the boundary retains Flink's canonical string view
+rather than carrying a pre-group Java cache into the result. Runtime checks cover NULL/empty
+keys, wide Unicode, embedded NUL, unpaired UTF-16 units and known string-hash collisions, plus
+CHAR casts, retractions/reinsertion, DISTINCT and per-key ordered histories. Parallelism 1/3 and
+two nonempty-prefix restores on heap/native RocksDB require consumed NativeJvmGroup work.
+Fused CHAR_LENGTH and collection-to-STRING consumers additionally require consumed NativeCalc.
+ARRAY_AGG remains explicitly N/A on 1.18.1.
+
+[Release comparisons](../benchmarks/collection-aggregates.md#character-grouping-keys) retain
+string construction, key/state work, source/sink and both transposes. Each increment stops
+optimization after two profiling/optimization passes. Updating MAP/MULTISET payload support
+in [#437](https://github.com/datafusion-contrib/StreamFusion/issues/437) stays deferred.

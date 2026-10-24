@@ -1,0 +1,392 @@
+{
+  "date": "2026-10-24",
+  "hardware": {
+    "cpu": "Intel Core i7-12650H",
+    "os": "Linux x86-64 / WSL2",
+    "jdk": "OpenJDK17.0.20.1"
+  },
+  "native": {
+    "profile": "release",
+    "features": [
+      "mimalloc",
+      "rocksdb-state"
+    ],
+    "sha256": "b574491f08427c8b128107d6286cb403421a0bafbdba7a0e5cdd8fea30562d16",
+    "production_rust_changes": false,
+    "operator_note": "Existing columnar Java/JVM grouped runtime, released Flink handler and RAW LinkedList accumulators; DISTINCT uses managed DataViews. Production changes are planner/version admission and existing output-boundary classification."
+  },
+  "previous_revision": "1296aa62",
+  "previous_revision_note": "Integer ARRAY_AGG candidate before the character grouping gate. Identical benchmark source and the frozen native library are used for both phases. Subsequent parser-only repair does not change execution. The retained ARRAY_AGG revision435a8922 has identical production/benchmark Java and native code; its only differences are parser code/tests and benchmark documentation.",
+  "configuration": {
+    "flink": "2.2.1",
+    "rows": {
+      "collect": 200000,
+      "array_agg": 50000
+    },
+    "parallelism": 1,
+    "key_type": "STRING",
+    "value_type": "BIGINT",
+    "groups": [
+      64,
+      4096
+    ],
+    "distinct_values_per_non_null_group": 8,
+    "key": "\u00e9 followed by x padding to prefix length, then decimal row-modulo-groups digits",
+    "value": "(row/groups) modulo8; NULL when row modulo8=7",
+    "null_note": "Every eighth input value isNULL; key7mod8groups contain onlyNULL elements under defaultRESPECTNULLS.",
+    "warmups_per_engine": 2,
+    "trials_per_engine": 3,
+    "test_heap_gib": 8,
+    "jvm_accumulator_cache_entries": 0,
+    "boundary": "planning, submission, runtime Row source, keyed state, both row/Arrow transposes and blackhole row sink; cluster setup and initial explain excluded",
+    "schedule": "alternating stock/native per JVM; separate JVMs per cardinality and phase; no concurrent tests, builds or benchmarks during measurements",
+    "array_length_note": "Respect-NULLs ARRAY_AGG grows to781/782 elements at64 groups and12/13 at4096 groups; COLLECT counts a bounded8-value domain.",
+    "key_prefix_chars": {
+      "64_groups": 16,
+      "4096_groups": 264
+    }
+  },
+  "trials": [
+    {
+      "phase": "previous",
+      "shape": "collect",
+      "key_type": "string",
+      "key_prefix_chars": 16,
+      "rows": 200000,
+      "keys": 64,
+      "values": 8,
+      "stock_seconds": [
+        0.52449637,
+        0.485319055,
+        0.469201589
+      ],
+      "native_seconds": [
+        0.470467367,
+        0.592386922,
+        0.332164089
+      ],
+      "stock_median_seconds": 0.485319055,
+      "native_median_seconds": 0.470467367,
+      "stock_range_seconds": [
+        0.469201589,
+        0.52449637
+      ],
+      "native_range_seconds": [
+        0.332164089,
+        0.592386922
+      ],
+      "stock_over_native": 1.0315679450727981,
+      "admitted": false,
+      "route": "stock fallback"
+    },
+    {
+      "phase": "previous",
+      "shape": "collect",
+      "key_type": "string",
+      "key_prefix_chars": 264,
+      "rows": 200000,
+      "keys": 4096,
+      "values": 8,
+      "stock_seconds": [
+        0.656466807,
+        0.603913084,
+        0.533476232
+      ],
+      "native_seconds": [
+        0.619315854,
+        0.530568275,
+        0.529843972
+      ],
+      "stock_median_seconds": 0.603913084,
+      "native_median_seconds": 0.530568275,
+      "stock_range_seconds": [
+        0.533476232,
+        0.656466807
+      ],
+      "native_range_seconds": [
+        0.529843972,
+        0.619315854
+      ],
+      "stock_over_native": 1.1382382107184978,
+      "admitted": false,
+      "route": "stock fallback"
+    },
+    {
+      "phase": "previous",
+      "shape": "array_agg",
+      "key_type": "string",
+      "key_prefix_chars": 16,
+      "rows": 50000,
+      "keys": 64,
+      "values": 8,
+      "stock_seconds": [
+        0.678159419,
+        0.645646006,
+        0.549260044
+      ],
+      "native_seconds": [
+        0.760524386,
+        0.534292788,
+        0.620904759
+      ],
+      "stock_median_seconds": 0.645646006,
+      "native_median_seconds": 0.620904759,
+      "stock_range_seconds": [
+        0.549260044,
+        0.678159419
+      ],
+      "native_range_seconds": [
+        0.534292788,
+        0.760524386
+      ],
+      "stock_over_native": 1.0398470886901352,
+      "admitted": false,
+      "route": "stock fallback"
+    },
+    {
+      "phase": "previous",
+      "shape": "array_agg",
+      "key_type": "string",
+      "key_prefix_chars": 264,
+      "rows": 50000,
+      "keys": 4096,
+      "values": 8,
+      "stock_seconds": [
+        0.23557827,
+        0.226523479,
+        0.12942629
+      ],
+      "native_seconds": [
+        0.233335885,
+        0.194822356,
+        0.190731282
+      ],
+      "stock_median_seconds": 0.226523479,
+      "native_median_seconds": 0.194822356,
+      "stock_range_seconds": [
+        0.12942629,
+        0.23557827
+      ],
+      "native_range_seconds": [
+        0.190731282,
+        0.233335885
+      ],
+      "stock_over_native": 1.1627180968902768,
+      "admitted": false,
+      "route": "stock fallback"
+    },
+    {
+      "phase": "current",
+      "shape": "collect",
+      "key_type": "string",
+      "key_prefix_chars": 16,
+      "rows": 200000,
+      "keys": 64,
+      "values": 8,
+      "stock_seconds": [
+        0.439635351,
+        0.418451046,
+        0.343207145
+      ],
+      "native_seconds": [
+        0.507033974,
+        0.442227565,
+        0.369216766
+      ],
+      "stock_median_seconds": 0.418451046,
+      "native_median_seconds": 0.442227565,
+      "stock_range_seconds": [
+        0.343207145,
+        0.439635351
+      ],
+      "native_range_seconds": [
+        0.369216766,
+        0.507033974
+      ],
+      "stock_over_native": 0.946234651835871,
+      "admitted": true,
+      "route": "consumed NativeJvmGroup"
+    },
+    {
+      "phase": "current",
+      "shape": "collect",
+      "key_type": "string",
+      "key_prefix_chars": 264,
+      "rows": 200000,
+      "keys": 4096,
+      "values": 8,
+      "stock_seconds": [
+        0.697764171,
+        0.557431795,
+        0.710528865
+      ],
+      "native_seconds": [
+        0.675497121,
+        0.731337167,
+        0.658833273
+      ],
+      "stock_median_seconds": 0.697764171,
+      "native_median_seconds": 0.675497121,
+      "stock_range_seconds": [
+        0.557431795,
+        0.710528865
+      ],
+      "native_range_seconds": [
+        0.658833273,
+        0.731337167
+      ],
+      "stock_over_native": 1.0329639450824541,
+      "admitted": true,
+      "route": "consumed NativeJvmGroup"
+    },
+    {
+      "phase": "current",
+      "shape": "array_agg",
+      "key_type": "string",
+      "key_prefix_chars": 16,
+      "rows": 50000,
+      "keys": 64,
+      "values": 8,
+      "stock_seconds": [
+        0.617898857,
+        0.694288559,
+        0.531926087
+      ],
+      "native_seconds": [
+        0.807763683,
+        0.652013354,
+        0.808651445
+      ],
+      "stock_median_seconds": 0.617898857,
+      "native_median_seconds": 0.807763683,
+      "stock_range_seconds": [
+        0.531926087,
+        0.694288559
+      ],
+      "native_range_seconds": [
+        0.652013354,
+        0.808651445
+      ],
+      "stock_over_native": 0.7649500342787756,
+      "admitted": true,
+      "route": "consumed NativeJvmGroup"
+    },
+    {
+      "phase": "current",
+      "shape": "array_agg",
+      "key_type": "string",
+      "key_prefix_chars": 264,
+      "rows": 50000,
+      "keys": 4096,
+      "values": 8,
+      "stock_seconds": [
+        0.237498539,
+        0.210483265,
+        0.130217739
+      ],
+      "native_seconds": [
+        0.297521933,
+        0.240824776,
+        0.261850258
+      ],
+      "stock_median_seconds": 0.210483265,
+      "native_median_seconds": 0.261850258,
+      "stock_range_seconds": [
+        0.130217739,
+        0.237498539
+      ],
+      "native_range_seconds": [
+        0.240824776,
+        0.297521933
+      ],
+      "stock_over_native": 0.8038306572911607,
+      "admitted": true,
+      "route": "consumed NativeJvmGroup"
+    }
+  ],
+  "cpu_profiles": {
+    "passes": 2,
+    "closed": true,
+    "event": "cpu",
+    "interval": "1ms",
+    "target_seconds_per_capture": 8,
+    "profiler": "async-profiler4.6",
+    "boundary": "one unprofiled native-only complete-job warmup; profile native-only jobs until the8second target completes, including planning/compilation/allJVMthreads; stop after currentjob",
+    "captures": {
+      "array_agg-keys64-native": {
+        "total_samples": 16893,
+        "inclusive_method_samples": {
+          "NativeColumnarJvmGroupOperator.ingest": 6125,
+          "NativeColumnarJvmGroupOperator.append": 1495,
+          "GroupAggFunction.processElement": 6023,
+          "CollectAggFunction.getValue": 0,
+          "ArrayAggFunction.getValue": 3981,
+          "MapWriter.doWrite": 0,
+          "ArrayWriter.doWrite": 691,
+          "LinkedList.toArray": 3976
+        },
+        "top_self_samples": {
+          "java/util/LinkedList.toArray_[i]": 3925,
+          "_raw_spin_unlock_irqrestore_[k]": 665,
+          "java/lang/Long.valueOf_[i]": 640,
+          "org/apache/flink/table/data/GenericRowData.<init>_[i]": 350,
+          "IndexSetIterator::advance_and_next": 253,
+          "clear_page_erms_[k]": 222,
+          "PhaseChaitin::Split": 210,
+          "jlong_disjoint_arraycopy": 191,
+          "/usr/lib/x86_64-linux-gnu/libc.so.6": 185,
+          "Copy::fill_to_memory_atomic": 176
+        }
+      },
+      "collect-keys4096-native": {
+        "total_samples": 17078,
+        "inclusive_method_samples": {
+          "NativeColumnarJvmGroupOperator.ingest": 4499,
+          "NativeColumnarJvmGroupOperator.append": 903,
+          "GroupAggFunction.processElement": 4045,
+          "CollectAggFunction.getValue": 962,
+          "ArrayAggFunction.getValue": 0,
+          "MapWriter.doWrite": 202,
+          "ArrayWriter.doWrite": 0,
+          "LinkedList.toArray": 0
+        },
+        "top_self_samples": {
+          "org/apache/flink/table/data/binary/MurmurHashUtils.hashBytesByInt_[i]": 1253,
+          "_raw_spin_unlock_irqrestore_[k]": 673,
+          "org/apache/flink/core/memory/MemorySegment.equalTo_[i]": 659,
+          "java/util/HashMap.putVal_[i]": 368,
+          "IndexSetIterator::advance_and_next": 303,
+          "/usr/lib/x86_64-linux-gnu/libc.so.6": 275,
+          "java/lang/String.encodeUTF8_[i]": 259,
+          "clear_page_erms_[k]": 256,
+          "PhaseChaitin::Split": 249,
+          "G1ParScanThreadState::trim_queue_to_threshold": 204
+        }
+      }
+    },
+    "limitations": "inclusive counts overlap; not allocation counts/copied bytes, and profiled times do not enter trial tables"
+  },
+  "scope": {
+    "admitted": "INT/BIGINT COLLECT and released2.2 ARRAY_AGG with STRING/VARCHAR or CHAR grouping keys; scalar inputs, non-character aggregate results and existing verified collection consumers.",
+    "retained_fallback": [
+      "character aggregate values or co-results",
+      "richer collection elements and non-scalar inputs",
+      "unverified represented state or writer boundaries",
+      "updating MAP/MULTISET retained payload extension#437"
+    ],
+    "not_applicable": "ARRAY_AGG absent on1.18.1."
+  },
+  "conclusion": "Native timings are variable and do not establish acceleration. COLLECT wide-key hashing/equality and managed-state snapshots remain visible; ARRAY_AGG repeatedly snapshots its growing released LinkedList accumulator. Two profiling passes are closed with no safe small shortcut. Existing accepted collection tradeoff; future optimization in#239.",
+  "validation": {
+    "note": "Final broad matrix recorded in PR and coverage docs; native work, per-key ordered changelogs, Unicode canonicalization, parallelism1/3, repeated heap/RocksDB recovery and memory release are asserted.",
+    "flink2.2.1": {
+      "passed": 233,
+      "skipped": 0
+    },
+    "flink1.18.1": {
+      "passed": 192,
+      "skipped": 41
+    }
+  },
+  "equivalent_retained_previous_revision": "435a8922"
+}
