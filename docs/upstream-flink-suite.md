@@ -50,6 +50,18 @@ configuration and source recovery. The suite agent reads the pinned mini-batch m
 boolean through a `miniBatch=true|false` selector; its display string contains an equals sign
 and is not used as a selector value. No upstream test or setting is changed to force a route.
 
+The agent self-tests select their contract resource once per JVM. With JDK 17, run separate
+Maven invocations from the repository root for each supported resource, including native
+state on 1.18. Mock fixtures must supply the selectors used by both releases; the COLLECT
+witness includes the 1.18 environment selector as well as 2.2 async-state selection.
+
+```sh
+mvn -f dev/flink-suite/agent/pom.xml test -Dstreamfusion.flink-suite.flink-line=2.2
+mvn -f dev/flink-suite/agent/pom.xml test -Dstreamfusion.flink-suite.flink-line=1.18
+mvn -f dev/flink-suite/agent/pom.xml test -Dstreamfusion.flink-suite.flink-line=1.18 \
+  -Dstreamfusion.flink-suite.native-rocksdb=true
+```
+
 Focused SQL additionally covers container fanout, ownership, failures and repeated recovery;
 the single upstream method does not establish every nested signature by itself.
 
