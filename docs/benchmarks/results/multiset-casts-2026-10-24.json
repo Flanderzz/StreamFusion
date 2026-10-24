@@ -1,7 +1,7 @@
 {
   "date": "2026-10-24",
   "previous_revision": "d48fba98",
-  "previous_revision_note": "Measured previous code is the PR476 candidate tree; after its squash merge this is the same collection code on canonical main. This increment is prepared separately and merges after476.",
+  "previous_revision_note": "Measured previous code is the PR476 candidate tree atd48fba98; this exact commit is retained by the canonical merge. This increment is prepared separately and merges after476.",
   "hardware": {
     "cpu": "Intel Core i7-12650H",
     "os": "Linux x86-64 / WSL2",
