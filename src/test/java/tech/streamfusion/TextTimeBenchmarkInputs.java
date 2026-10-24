@@ -63,6 +63,7 @@ final class TextTimeBenchmarkInputs {
       case "tt_json_map":
       case "tt_fixed_binary_map":
       case "tt_fixed_binary_keys":
+      case "tt_multiset":
         return "m";
       case "tt_timestamp":
       case "tt_timestamp_ltz":
@@ -70,6 +71,12 @@ final class TextTimeBenchmarkInputs {
       default:
         return "s";
     }
+  }
+
+  static int multisetEntries() {
+    int entries = Integer.getInteger("scalar.multiset.entries", 4);
+    if (entries < 2) throw new IllegalArgumentException("scalar.multiset.entries must be at least 2");
+    return entries;
   }
 
   static String baselineType(String input) {
@@ -104,6 +111,8 @@ final class TextTimeBenchmarkInputs {
         return "MAP<STRING NOT NULL,BINARY(" + fixedBinaryWidth() + ")>";
       case "tt_fixed_binary_keys":
         return "MAP<BINARY(" + fixedBinaryWidth() + "),INT>";
+      case "tt_multiset":
+        return "MULTISET<INT>";
       case "tt_timestamp":
         return "TIMESTAMP(9)";
       case "tt_timestamp_ltz":
@@ -134,6 +143,17 @@ final class TextTimeBenchmarkInputs {
               charsets[(int) (i % charsets.length)]))
           .returns(Types.ROW_NAMED(new String[] {"s", "b", "c"},
               Types.STRING, Types.PRIMITIVE_ARRAY(Types.BYTE), Types.STRING)));
+    } else if (input.equals("tt_multiset")) {
+      int entries = multisetEntries();
+      var values = new java.util.LinkedHashMap<Object, Object>();
+      for (int i = 0; i < entries - 1; i++) values.put(i * 257, i % 3 + 1);
+      values.put(null, 3);
+      var type = (org.apache.flink.table.types.logical.RowType) DataTypes.ROW(
+          DataTypes.FIELD("m", DataTypes.MULTISET(DataTypes.INT()))).getLogicalType();
+      tables.createTemporaryView("inputs", env.fromSequence(0, rows - 1)
+          .map(i -> (org.apache.flink.table.data.RowData) org.apache.flink.table.data.GenericRowData.of(
+              isNull(i, nullEvery) ? null : new org.apache.flink.table.data.GenericMapData(values)))
+          .returns(org.apache.flink.table.runtime.typeutils.InternalTypeInfo.of(type)));
     } else if (input.equals("tt_fixed_binary_keys")) {
       int width = fixedBinaryWidth();
       byte[][] keys = {new byte[width], new byte[width]};

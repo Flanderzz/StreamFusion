@@ -301,6 +301,8 @@ class ScalarFunctionBenchmark {
           new Query("FIXED_BINARY_MAP_KEYS", "tt_fixed_binary_keys", "MAP_KEYS(m)",
               "ARRAY<BINARY(" + TextTimeBenchmarkInputs.fixedBinaryWidth() + ")>"),
           new Query("BINARY_KEY_MAP_STRING", "tt_fixed_binary_keys", "CAST(m AS STRING)", "STRING"),
+          new Query("MULTISET_CAST", "tt_multiset", "CAST(m AS MULTISET<BIGINT>)", "MULTISET<BIGINT>"),
+          new Query("MULTISET_FORMAT_STRING", "tt_multiset", "CAST(m AS STRING)", "STRING"),
           new Query("TAN_EXACT", "numbers", "TAN(CAST(n AS DOUBLE))", "DOUBLE"),
           new Query(
               "TAN_GROUPED_SUM",
@@ -757,7 +759,7 @@ class ScalarFunctionBenchmark {
     List<String> csv =
         new ArrayList<>(
             List.of(
-                "function,input,output_type,payload_bytes,json_fields,unicode,null_every,scale_null_every,rows,engine,trial,seconds,binary_width"));
+                "function,input,output_type,payload_bytes,json_fields,unicode,null_every,scale_null_every,rows,engine,trial,seconds,binary_width,multiset_entries"));
     Path output = Path.of(System.getProperty("scalar.output", "target/scalar-functions.csv"));
     if (output.getParent() != null && !Files.isDirectory(output.getParent())) {
       Files.createDirectories(output.getParent());
@@ -777,7 +779,7 @@ class ScalarFunctionBenchmark {
             csv.add(
                 String.format(
                     Locale.ROOT,
-                    "%s,%s,\"%s\",%d,%d,%s,%d,%d,%d,%s,%d,%.6f,%d",
+                    "%s,%s,\"%s\",%d,%d,%s,%d,%d,%d,%s,%d,%.6f,%d,%d",
                     query.name(),
                     query.input(),
                     query.outputType(),
@@ -792,7 +794,8 @@ class ScalarFunctionBenchmark {
                     seconds,
                     (query.input().equals("tt_fixed_bytes") || query.input().equals("tt_fixed_binary_map") || query.input().equals("tt_fixed_binary_keys"))
                         ? TextTimeBenchmarkInputs.fixedBinaryWidth()
-                        : 0));
+                        : 0,
+                    query.input().equals("tt_multiset") ? TextTimeBenchmarkInputs.multisetEntries() : 0));
           }
         }
       }

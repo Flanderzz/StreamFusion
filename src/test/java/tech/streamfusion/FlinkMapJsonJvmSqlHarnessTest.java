@@ -55,9 +55,12 @@ class FlinkMapJsonJvmSqlHarnessTest {
   @ParameterizedTest
   @ValueSource(
       strings = {"JSON_STRING(ms)", "ROW(ms), JSON_QUERY(s, '$')", "ARRAY[ms], JSON_QUERY(s, '$')"})
-  void nullableMultisetElementsStayOnFlink(String projection) throws Exception {
-    NativeParity.assertFallbackReasonContains(
-        () -> environment(false, true), "SELECT " + projection + " FROM inputs", "row-fused UDF");
+  void nullableMultisetsRequireTheCollectionPreservingProgram(String projection) throws Exception {
+    String sql = "SELECT " + projection + " FROM inputs";
+    if (projection.equals("JSON_STRING(ms)"))
+      NativeParity.assertFallbackReasonContains(
+          () -> environment(false, true), sql, "row-fused UDF");
+    else BuiltinFunctionParity.assertParity(() -> environment(false, true), sql);
   }
 
   @Test
