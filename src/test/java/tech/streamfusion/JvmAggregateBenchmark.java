@@ -32,11 +32,15 @@ class JvmAggregateBenchmark {
     for (String shape : System.getProperty("jvmagg.cases", "udaf,builtin").split(",")) {
       boolean udf = shape.equals("udaf");
       boolean collect = shape.equals("collect");
-      boolean jvm = udf || collect;
+      boolean arrayAgg = java.util.Set.of("array_agg", "array_agg_int").contains(shape);
+      boolean jvm = udf || collect || arrayAgg;
+      String argument = shape.equals("array_agg_int") ? "CAST(v AS INT)" : "v";
       String sql =
           "SELECT k, "
-              + (udf ? "test_aggregate" : collect ? "COLLECT" : "SUM")
-              + "(v) FROM src GROUP BY k";
+              + (udf ? "test_aggregate" : collect ? "COLLECT" : arrayAgg ? "ARRAY_AGG" : "SUM")
+              + "("
+              + argument
+              + ") FROM src GROUP BY k";
       double[][] elapsed = new double[2][runs];
       for (int trial = 0; trial < warmups + runs; trial++) {
         for (int order = 0; order < 2; order++) {
@@ -169,7 +173,21 @@ class JvmAggregateBenchmark {
   @Test
   @EnabledIfEnvironmentVariable(named = "SF_PROFILE_JVM_AGG", matches = "true")
   void profileCollect() throws Exception {
-    String[] properties = {"jvmagg.engine", "jvmagg.warmup", "jvmagg.runs"};
+    profileCollection("collect");
+  }
+
+  @Test
+  @EnabledIfEnvironmentVariable(named = "SF_PROFILE_JVM_AGG", matches = "true")
+  void profileArrayAgg() throws Exception {
+    String shape = System.getProperty("jvmagg.cases", "array_agg");
+    assertTrue(
+        java.util.Set.of("array_agg", "array_agg_int").contains(shape),
+        "profileArrayAgg requires one array_agg or array_agg_int case");
+    profileCollection(shape);
+  }
+
+  private void profileCollection(String shape) throws Exception {
+    String[] properties = {"jvmagg.engine", "jvmagg.warmup", "jvmagg.runs", "jvmagg.cases"};
     String[] previous = Arrays.stream(properties).map(System::getProperty).toArray(String[]::new);
     String profiler = System.getProperty("profile.asprof", "asprof");
     String pid = Long.toString(ProcessHandle.current().pid());
@@ -178,13 +196,14 @@ class JvmAggregateBenchmark {
     java.nio.file.Files.createDirectories(directory);
     var recording =
         directory
-            .resolve("collect-keys" + Integer.getInteger("jvmagg.keys", 64) + "-native.jfr")
+            .resolve(shape + "-keys" + Integer.getInteger("jvmagg.keys", 64) + "-native.jfr")
             .toAbsolutePath();
     boolean started = false;
     try {
       System.setProperty(properties[0], "native");
       System.setProperty(properties[1], "0");
       System.setProperty(properties[2], "1");
+      System.setProperty(properties[3], shape);
       completeJobsRetainKeyedStateAndBothTransposes();
       profileCommand(profiler, "start", "-e", "cpu", "-i", "1ms", "-f", recording.toString(), pid);
       started = true;
