@@ -1,0 +1,387 @@
+{
+  "date": "2026-10-24",
+  "previous_revision": "7391128b3393244b0f10fde7452cab9c0de13b71",
+  "previous_revision_note": "BOOLEAN candidate before direct binary multiset admission; identical benchmark and input sources copied to prior checkout.",
+  "benchmark_source_sha256": {
+    "src/test/java/tech/streamfusion/ScalarFunctionBenchmark.java": "8e934291d62fa573951431a6f0be5039ea34b10537d9ac38c2b8c4dab129c2dc",
+    "src/test/java/tech/streamfusion/TextTimeBenchmarkInputs.java": "39039a811dba62d631a1f9d1824cc2e54ce17ad32fea5b8092e454f388ac887c"
+  },
+  "hardware": {
+    "cpu": "Intel Core i7-12650H",
+    "os": "Linux x86-64 / WSL2",
+    "jdk": "OpenJDK17.0.20.1"
+  },
+  "native": {
+    "profile": "release",
+    "features": [
+      "mimalloc",
+      "rocksdb-state"
+    ],
+    "sha256": "b574491f08427c8b128107d6286cb403421a0bafbdba7a0e5cdd8fea30562d16",
+    "production_rust_changes": false,
+    "note": "Same frozen DSO for all phases; this admission reuses the generated evaluator and existing Arrow map transport."
+  },
+  "configuration": {
+    "flink": "2.2.1",
+    "cohorts": [
+      {
+        "rows": 500000,
+        "binary_width": 4,
+        "multiset_entries": 4
+      },
+      {
+        "rows": 200000,
+        "binary_width": 256,
+        "multiset_entries": 16
+      }
+    ],
+    "source": "Runtime internal RowData carrying an ordered GenericMapData; entries-1 fixed-width binary keys have counts i%3+1, plus a NULL key with count3. Every eighth parent isNULL.",
+    "cast": "MULTISET<BINARY(width)> to MULTISET<VARBINARY(width)>",
+    "format": "CAST(m AS STRING)",
+    "identity_control": "Same-source m plus TRUE anchor, native on current and previous checkouts; retained without subtraction.",
+    "parallelism": 1,
+    "test_heap_gib": 8,
+    "warmups_per_engine": 2,
+    "trials_per_engine": 3,
+    "boundary": "planning/submission,source,key conversion,output consumption,both row/Arrow transposes and blackhole row sink. Fresh per-job metrics-cluster/schema setup and plan assertions are outside timing.",
+    "native_proof": "Each admitted measured job requires positive NativeCalc,RowDataToArrow and ArrowToRowData consumed counters. Stock/priorfallback jobs require no native operators. Assertions run after the clock.",
+    "schedule": "Alternating engine order, separate cohort JVMs, no overlapping external Java/Cargo workloads observed during sampling.",
+    "unused_generic_payload_bytes": 264,
+    "final_code_equivalence": "Measurements precede a final direct-native CASE rejection for disabled options. Measured CAST/STRING queries contain no CASE; benchmark sources,native DSO and applicable generated routes are unchanged."
+  },
+  "trials": [
+    {
+      "phase": "current",
+      "function": "BASELINE_tt_binary_multiset",
+      "rows": 500000,
+      "binary_width": 4,
+      "multiset_entries": 4,
+      "stock_seconds": [
+        0.293630094,
+        0.28130011,
+        0.211495997
+      ],
+      "native_seconds": [
+        0.299913428,
+        0.286604755,
+        0.275975062
+      ],
+      "route": "consumed NativeCalc and both transposes"
+    },
+    {
+      "phase": "current",
+      "function": "BINARY_MULTISET_CAST",
+      "rows": 500000,
+      "binary_width": 4,
+      "multiset_entries": 4,
+      "stock_seconds": [
+        0.204312117,
+        0.309692383,
+        0.211763041
+      ],
+      "native_seconds": [
+        0.412185876,
+        0.422545336,
+        0.430073297
+      ],
+      "route": "consumed NativeCalc and both transposes"
+    },
+    {
+      "phase": "current",
+      "function": "BINARY_MULTISET_STRING",
+      "rows": 500000,
+      "binary_width": 4,
+      "multiset_entries": 4,
+      "stock_seconds": [
+        0.337583128,
+        0.347191627,
+        0.331511444
+      ],
+      "native_seconds": [
+        0.500197606,
+        0.490560615,
+        0.481319283
+      ],
+      "route": "consumed NativeCalc and both transposes"
+    },
+    {
+      "phase": "current",
+      "function": "BASELINE_tt_binary_multiset",
+      "rows": 200000,
+      "binary_width": 256,
+      "multiset_entries": 16,
+      "stock_seconds": [
+        0.493209756,
+        0.38502431,
+        0.38313591
+      ],
+      "native_seconds": [
+        0.556050512,
+        0.83103026,
+        0.490368006
+      ],
+      "route": "consumed NativeCalc and both transposes"
+    },
+    {
+      "phase": "current",
+      "function": "BINARY_MULTISET_CAST",
+      "rows": 200000,
+      "binary_width": 256,
+      "multiset_entries": 16,
+      "stock_seconds": [
+        0.382414337,
+        0.37981548,
+        0.387833229
+      ],
+      "native_seconds": [
+        1.460521193,
+        1.444517951,
+        1.474351526
+      ],
+      "route": "consumed NativeCalc and both transposes"
+    },
+    {
+      "phase": "current",
+      "function": "BINARY_MULTISET_STRING",
+      "rows": 200000,
+      "binary_width": 256,
+      "multiset_entries": 16,
+      "stock_seconds": [
+        2.512199843,
+        2.538575288,
+        2.529796214
+      ],
+      "native_seconds": [
+        4.928000547,
+        5.198685066,
+        4.909213891
+      ],
+      "route": "consumed NativeCalc and both transposes"
+    },
+    {
+      "phase": "previous",
+      "function": "BASELINE_tt_binary_multiset",
+      "rows": 500000,
+      "binary_width": 4,
+      "multiset_entries": 4,
+      "stock_seconds": [
+        0.257605053,
+        0.216295578,
+        0.212291184
+      ],
+      "native_seconds": [
+        0.332066976,
+        0.284486527,
+        0.320097304
+      ],
+      "route": "consumed NativeCalc and both transposes"
+    },
+    {
+      "phase": "previous",
+      "function": "BINARY_MULTISET_CAST",
+      "rows": 500000,
+      "binary_width": 4,
+      "multiset_entries": 4,
+      "stock_seconds": [
+        0.216779752,
+        0.217277398,
+        0.21319743
+      ],
+      "native_seconds": [
+        0.211794386,
+        0.205085458,
+        0.200423209
+      ],
+      "route": "stock fallback, no native work"
+    },
+    {
+      "phase": "previous",
+      "function": "BINARY_MULTISET_STRING",
+      "rows": 500000,
+      "binary_width": 4,
+      "multiset_entries": 4,
+      "stock_seconds": [
+        0.333431866,
+        0.331072067,
+        0.335909584
+      ],
+      "native_seconds": [
+        0.377966698,
+        0.357176955,
+        0.339805131
+      ],
+      "route": "stock fallback, no native work"
+    },
+    {
+      "phase": "previous",
+      "function": "BASELINE_tt_binary_multiset",
+      "rows": 200000,
+      "binary_width": 256,
+      "multiset_entries": 16,
+      "stock_seconds": [
+        0.388793929,
+        0.383810261,
+        0.379216827
+      ],
+      "native_seconds": [
+        0.525394864,
+        0.50638637,
+        0.517746896
+      ],
+      "route": "consumed NativeCalc and both transposes"
+    },
+    {
+      "phase": "previous",
+      "function": "BINARY_MULTISET_CAST",
+      "rows": 200000,
+      "binary_width": 256,
+      "multiset_entries": 16,
+      "stock_seconds": [
+        0.381398894,
+        0.381876613,
+        0.381153394
+      ],
+      "native_seconds": [
+        0.379240706,
+        0.386448545,
+        0.377374629
+      ],
+      "route": "stock fallback, no native work"
+    },
+    {
+      "phase": "previous",
+      "function": "BINARY_MULTISET_STRING",
+      "rows": 200000,
+      "binary_width": 256,
+      "multiset_entries": 16,
+      "stock_seconds": [
+        2.79287313,
+        2.751815062,
+        2.765923886
+      ],
+      "native_seconds": [
+        2.785374961,
+        2.769300599,
+        2.761989944
+      ],
+      "route": "stock fallback, no native work"
+    }
+  ],
+  "cpu_profiles": {
+    "passes": 2,
+    "closed": true,
+    "profiler": "async-profiler4.6",
+    "event": "cpu",
+    "interval": "1ms",
+    "target_seconds_per_capture": 8,
+    "rows": 200000,
+    "binary_width": 256,
+    "multiset_entries": 16,
+    "warmups": 1,
+    "boundary": "Native-only capture after one unprofiled native job; includes fresh-cluster setup,planning,compilation and all JVM threads,stops after currentjob. Profiled times are not part of comparison trials.",
+    "captures": {
+      "binary_multiset_cast-native": {
+        "total_samples": 11711,
+        "inclusive_method_samples": {
+          "NativeUdf.invokeUdf": 2929,
+          "FlinkExpressionFunction.evalRow": 822,
+          "MapWriter.doWrite": 3957,
+          "NestedStringWriter.doWrite": 0,
+          "MapDataSerializer.toBinaryMap": 2088,
+          "ArrayDataSerializer.toBinaryArray": 0,
+          "ArrowFieldWriter.write": 3982
+        },
+        "top_self_samples": {
+          "jlong_disjoint_arraycopy": 1152,
+          "do_user_addr_fault_[k]": 865,
+          "jint_disjoint_arraycopy": 618,
+          "_raw_spin_unlock_irqrestore_[k]": 418,
+          "org/apache/flink/table/runtime/typeutils/MapDataSerializer.toBinaryMap_[j]": 405,
+          "jdk/internal/misc/Unsafe.checkOffset_[i]": 360,
+          "org/apache/arrow/vector/BaseVariableWidthVector.fillHoles_[i]": 356,
+          "__pte_offset_map_lock_[k]": 240,
+          "memcg1_commit_charge_[k]": 191,
+          "clear_page_erms_[k]": 133
+        }
+      },
+      "binary_multiset_string-native": {
+        "total_samples": 13087,
+        "inclusive_method_samples": {
+          "NativeUdf.invokeUdf": 7623,
+          "FlinkExpressionFunction.evalRow": 2563,
+          "MapWriter.doWrite": 895,
+          "NestedStringWriter.doWrite": 4830,
+          "MapDataSerializer.toBinaryMap": 480,
+          "ArrayDataSerializer.toBinaryArray": 0,
+          "ArrowFieldWriter.write": 5759
+        },
+        "top_self_samples": {
+          "java/lang/String.encodeUTF8_UTF16_[j]": 1595,
+          "jlong_disjoint_arraycopy": 1229,
+          "do_user_addr_fault_[k]": 1003,
+          "java/lang/String.malformed4_[i]": 972,
+          "java/lang/String.decodeUTF8_UTF16_[j]": 527,
+          "jint_disjoint_arraycopy": 524,
+          "_raw_spin_unlock_irqrestore_[k]": 379,
+          "org/apache/arrow/vector/VarCharVector.get_[i]": 279,
+          "memcg1_commit_charge_[k]": 266,
+          "__pte_offset_map_lock_[k]": 258
+        }
+      }
+    },
+    "limitations": "Inclusive sample counts overlap; they are not allocation or copied-byte counts and do not causally isolate the whole slowdown against stock."
+  },
+  "process_sampling": {
+    "seconds": 2,
+    "reports": {
+      "matrix": {
+        "raw_observations": 2,
+        "external_workloads": 0,
+        "classification": "Own Maven launch shells identified by unique cohort CSV/profile-output arguments, sampled within0.1s of the corresponding phase launch before JVM replacement.",
+        "phase_exit_codes": [
+          0,
+          0
+        ]
+      },
+      "profiles": {
+        "raw_observations": 1,
+        "external_workloads": 0,
+        "classification": "Own Maven launch shells identified by unique cohort CSV/profile-output arguments, sampled within0.1s of the corresponding phase launch before JVM replacement.",
+        "phase_exit_codes": [
+          0
+        ]
+      }
+    }
+  },
+  "scope": {
+    "admitted": "Direct nullable fixed-BINARY MULTISET elements through generated casts/formatting on both lines; NOTNULL elements additionally on2.2. Fixed-binary MULTISET CASE uses released generated evaluation to preserve implicit casts.",
+    "fallback": [
+      "NOTNULLbinaryMULTISET elements on1.18:uncheckedNULLgetter/formatting difference",
+      "Existing NOTNULLfixedBINARYMAP key/value guards",
+      "Disabled length-delimited/collection options",
+      "Unverifiedrepresentedstate/exchange/native-writer boundaries and#437 updatingretainedMULTISET payloads"
+    ],
+    "determinism": "Direct format checks use ordered internal inputs. Released casts allocating byte-array HashMap keys have identity-dependent iteration; map contents/types are compared without promising a deterministic formatted iteration order."
+  },
+  "validation": {
+    "flink2.2.1": {
+      "passed": 235,
+      "skipped": 0
+    },
+    "flink1.18.1": {
+      "passed": 191,
+      "skipped": 44
+    },
+    "note": "Eight-class broad matrix plus final24-case multiset reruns after CASE routing, disabled-option rejection and deterministic-control corrections; remaining211 cases unchanged. Expected native routes are pinned independently to released versions. Benchmark smokes are excluded from correctness totals.",
+    "coverage": [
+      "ordered internal GenericMapData sources with BINARY(4),actual lengths0\u20136 and4097",
+      "NULL/empty containers and elements,zero/negative counts and cast collisions",
+      "nullable elements both lines and NOTNULL2.2;explicitNOTNULL1.18 fallback",
+      "all four input changelog kinds,object reuse,batchRows3,filtered/empty inputs",
+      "current/legacy CAST/TRY_CAST,CHAR/VARCHAR bounds,CASE implicit binary padding,nested ARRAY/ROW outputs",
+      "CAST/TRY_CAST input arithmetic failure and conditional short circuit",
+      "consumed native Calc,disabledcollection/length-delimited switches and unverifiedstate fallback"
+    ]
+  },
+  "conclusion": "All four native medians exceed paired stock and prior fallback. Keep unfavorable complete-job results under the accepted collection tradeoff,without an acceleration claim. Two profiles close the bounded investigation: map serialization/writing,Java callback conversion and represented string encoding remain costs. No safe small shortcut preserving released key conversions and representation was identified; further performance is tracked in#392."
+}

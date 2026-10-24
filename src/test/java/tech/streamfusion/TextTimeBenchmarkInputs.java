@@ -63,6 +63,7 @@ final class TextTimeBenchmarkInputs {
       case "tt_json_map":
       case "tt_fixed_binary_map":
       case "tt_fixed_binary_keys":
+      case "tt_binary_multiset":
       case "tt_multiset":
         return "m";
       case "tt_timestamp":
@@ -75,7 +76,8 @@ final class TextTimeBenchmarkInputs {
 
   static int multisetEntries() {
     int entries = Integer.getInteger("scalar.multiset.entries", 4);
-    if (entries < 2) throw new IllegalArgumentException("scalar.multiset.entries must be at least 2");
+    if (entries < 2)
+      throw new IllegalArgumentException("scalar.multiset.entries must be at least 2");
     return entries;
   }
 
@@ -111,6 +113,8 @@ final class TextTimeBenchmarkInputs {
         return "MAP<STRING NOT NULL,BINARY(" + fixedBinaryWidth() + ")>";
       case "tt_fixed_binary_keys":
         return "MAP<BINARY(" + fixedBinaryWidth() + "),INT>";
+      case "tt_binary_multiset":
+        return "MULTISET<BINARY(" + fixedBinaryWidth() + ")>";
       case "tt_multiset":
         return "MULTISET<INT>";
       case "tt_timestamp":
@@ -124,7 +128,22 @@ final class TextTimeBenchmarkInputs {
 
   static TableEnvironment environment(
       String input, long rows, int bytes, boolean unicode, int nullEvery) {
-    StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+    return environment(
+        input,
+        rows,
+        bytes,
+        unicode,
+        nullEvery,
+        StreamExecutionEnvironment.getExecutionEnvironment());
+  }
+
+  static TableEnvironment environment(
+      String input,
+      long rows,
+      int bytes,
+      boolean unicode,
+      int nullEvery,
+      StreamExecutionEnvironment env) {
     env.setParallelism(1);
     StreamTableEnvironment tables = StreamTableEnvironment.create(env);
     String[] text = {
@@ -143,13 +162,28 @@ final class TextTimeBenchmarkInputs {
               charsets[(int) (i % charsets.length)]))
           .returns(Types.ROW_NAMED(new String[] {"s", "b", "c"},
               Types.STRING, Types.PRIMITIVE_ARRAY(Types.BYTE), Types.STRING)));
-    } else if (input.equals("tt_multiset")) {
+    } else if (input.equals("tt_multiset") || input.equals("tt_binary_multiset")) {
       int entries = multisetEntries();
+      boolean binary = input.equals("tt_binary_multiset");
       var values = new java.util.LinkedHashMap<Object, Object>();
-      for (int i = 0; i < entries - 1; i++) values.put(i * 257, i % 3 + 1);
+      for (int i = 0; i < entries - 1; i++) {
+        Object key = i * 257;
+        if (binary) {
+          byte[] payload = new byte[fixedBinaryWidth()];
+          for (int j = 0; j < payload.length; j++) payload[j] = (byte) (i * 29 + j * 17);
+          key = payload;
+        }
+        values.put(key, i % 3 + 1);
+      }
       values.put(null, 3);
-      var type = (org.apache.flink.table.types.logical.RowType) DataTypes.ROW(
-          DataTypes.FIELD("m", DataTypes.MULTISET(DataTypes.INT()))).getLogicalType();
+      var type =
+          (org.apache.flink.table.types.logical.RowType)
+              DataTypes.ROW(
+                      DataTypes.FIELD(
+                          "m",
+                          DataTypes.MULTISET(
+                              binary ? DataTypes.BINARY(fixedBinaryWidth()) : DataTypes.INT())))
+                  .getLogicalType();
       tables.createTemporaryView("inputs", env.fromSequence(0, rows - 1)
           .map(i -> (org.apache.flink.table.data.RowData) org.apache.flink.table.data.GenericRowData.of(
               isNull(i, nullEvery) ? null : new org.apache.flink.table.data.GenericMapData(values)))
@@ -161,8 +195,11 @@ final class TextTimeBenchmarkInputs {
         keys[0][i] = (byte) (i * 17);
         keys[1][i] = (byte) (255 - i * 17);
       }
-      var type = (org.apache.flink.table.types.logical.RowType) DataTypes.ROW(
-          DataTypes.FIELD("m", DataTypes.MAP(DataTypes.BINARY(width), DataTypes.INT()))).getLogicalType();
+      var type =
+          (org.apache.flink.table.types.logical.RowType)
+              DataTypes.ROW(
+                      DataTypes.FIELD("m", DataTypes.MAP(DataTypes.BINARY(width), DataTypes.INT())))
+                  .getLogicalType();
       tables.createTemporaryView("inputs", env.fromSequence(0, rows - 1)
           .map(i -> {
             var map = new java.util.LinkedHashMap<Object, Object>();
@@ -179,26 +216,45 @@ final class TextTimeBenchmarkInputs {
         values[0][i] = (byte) (i * 17);
         values[1][i] = (byte) (255 - i * 17);
       }
-      tables.createTemporaryView("inputs", env.fromSequence(0, rows - 1)
-          .map(i -> {
-            var map = new java.util.LinkedHashMap<String, byte[]>();
-            map.put("first", values[(int) (i % 2)]);
-            map.put("absent", null);
-            map.put("last", values[(int) ((i + 1) % 2)]);
-            return Row.of((Object) (isNull(i, nullEvery) ? null : map));
-          }).returns(Types.ROW_NAMED(new String[] {"m"},
-              Types.MAP(Types.STRING, Types.PRIMITIVE_ARRAY(Types.BYTE)))),
-          Schema.newBuilder().column("m", DataTypes.MAP(DataTypes.STRING().notNull(), DataTypes.BINARY(width))).build());
+      tables.createTemporaryView(
+          "inputs",
+          env.fromSequence(0, rows - 1)
+              .map(
+                  i -> {
+                    var map = new java.util.LinkedHashMap<String, byte[]>();
+                    map.put("first", values[(int) (i % 2)]);
+                    map.put("absent", null);
+                    map.put("last", values[(int) ((i + 1) % 2)]);
+                    return Row.of((Object) (isNull(i, nullEvery) ? null : map));
+                  })
+              .returns(
+                  Types.ROW_NAMED(
+                      new String[] {"m"},
+                      Types.MAP(Types.STRING, Types.PRIMITIVE_ARRAY(Types.BYTE)))),
+          Schema.newBuilder()
+              .column("m", DataTypes.MAP(DataTypes.STRING().notNull(), DataTypes.BINARY(width)))
+              .build());
     } else if (input.equals("tt_json_map")) {
-      tables.createTemporaryView("inputs", env.fromSequence(0, rows - 1)
-          .map(i -> {
-            java.util.Map<String, String> map = new java.util.LinkedHashMap<>();
-            map.put("first", text[(int) (i % 2)]); map.put("absent", null); map.put("last", "tail");
-            return Row.of(isNull(i, nullEvery) ? null : map, "{\"items\":[1,2,3]}");
-          }).returns(Types.ROW_NAMED(new String[] {"m", "s"},
-              Types.MAP(Types.STRING, Types.STRING), Types.STRING)),
-          Schema.newBuilder().column("m", DataTypes.MAP(DataTypes.STRING().notNull(), DataTypes.STRING()))
-              .column("s", DataTypes.STRING()).build());
+      tables.createTemporaryView(
+          "inputs",
+          env.fromSequence(0, rows - 1)
+              .map(
+                  i -> {
+                    java.util.Map<String, String> map = new java.util.LinkedHashMap<>();
+                    map.put("first", text[(int) (i % 2)]);
+                    map.put("absent", null);
+                    map.put("last", "tail");
+                    return Row.of(isNull(i, nullEvery) ? null : map, "{\"items\":[1,2,3]}");
+                  })
+              .returns(
+                  Types.ROW_NAMED(
+                      new String[] {"m", "s"},
+                      Types.MAP(Types.STRING, Types.STRING),
+                      Types.STRING)),
+          Schema.newBuilder()
+              .column("m", DataTypes.MAP(DataTypes.STRING().notNull(), DataTypes.STRING()))
+              .column("s", DataTypes.STRING())
+              .build());
     } else if (input.equals("tt_json_array")) {
       tables.createTemporaryView(
           "inputs",

@@ -118,11 +118,16 @@ class FlinkMultisetCastSqlHarnessTest {
 
   private static NativeFailureParity.Comparison assertEquivalent(
       boolean legacy, boolean changelog, String sql) {
+    return assertEquivalent(() -> environment(legacy, changelog), sql);
+  }
+
+  private static NativeFailureParity.Comparison assertEquivalent(
+      java.util.function.Supplier<TableEnvironment> factory, String sql) {
     var previous =
         METRICS.nativeOperators().stream()
             .map(row -> row.get("jobId"))
             .collect(java.util.stream.Collectors.toSet());
-    var runs = NativeFailureParity.run(() -> environment(legacy, changelog), sql);
+    var runs = NativeFailureParity.run(factory, sql);
     if (!sql.equals("SELECT id,CAST(t AS MULTISET<INT>) FROM src"))
       assertNull(runs.host().failure(), runs::toString);
     if (runs.host().failure() == null) {
@@ -165,28 +170,91 @@ class FlinkMultisetCastSqlHarnessTest {
     assertTrue(runs.host().rows().contains(java.util.Arrays.asList("+I", 0, null)), runs::toString);
   }
 
+  private static TableEnvironment binaryEnvironment(
+      boolean legacy, boolean nullable, boolean changelog) {
+    var env = METRICS.environment(new Configuration(), 1, 0);
+    env.getConfig().enableObjectReuse();
+    var table = StreamTableEnvironment.create(env);
+    table.getConfig().set("streamfusion.transpose.batchRows", "3");
+    table.getConfig().set("table.exec.legacy-cast-behaviour", legacy ? "ENABLED" : "DISABLED");
+    table.executeSql(
+        "CREATE TABLE src (id BIGINT,t ARRAY<STRING>,r ARRAY<ROW<n INT>>,"
+            + "nn ARRAY<INT NOT NULL>,m MULTISET<BINARY(4)"
+            + (nullable ? "" : " NOT NULL")
+            + ">) WITH ('connector'='collection-representation','changelog'='"
+            + changelog
+            + "')");
+    return table;
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "SELECT id,m,CAST(m AS STRING),TRY_CAST(m AS CHAR(24)),CAST(m AS VARCHAR(2)) FROM src",
+        "SELECT id,CAST(m AS MULTISET<BINARY(2)>),TRY_CAST(m AS MULTISET<BINARY(8)>) FROM src",
+        "SELECT id,CAST(m AS MULTISET<VARBINARY(8)>),TRY_CAST(m AS MULTISET<STRING>) FROM src",
+        "SELECT id,CASE WHEN id=0 THEN CAST(NULL AS MULTISET<BINARY(4)>) ELSE m END FROM src",
+        "SELECT id,ROW(m),ARRAY[m],JSON_QUERY(CAST(id AS STRING),'$') FROM src",
+        "SELECT id,CAST(m AS STRING) FROM src WHERE MOD(id,3)=0",
+        "SELECT CAST(m AS MULTISET<STRING>) FROM src WHERE id<0"
+      })
+  void binaryElementsRetainActualLengthsCountsAndReleasedCasts(String sql) {
+    for (boolean legacy : new boolean[] {false, true})
+      for (boolean nullable : new boolean[] {false, true}) {
+        if (nullable
+            || org.apache.flink.runtime.util.EnvironmentInformation.getVersion().startsWith("2.2."))
+          assertEquivalent(() -> binaryEnvironment(legacy, nullable, true), sql);
+        else
+          NativeFailureParity.run(() -> binaryEnvironment(legacy, nullable, true), sql)
+              .assertSuccess(NativeFailureParity.Route.FALLBACK);
+      }
+  }
+
   @Test
-  void fixedBinaryMultisetElementsRetainFallback() {
-    for (boolean nullable : new boolean[] {false, true}) {
-      var runs =
+  void binaryMultisetCastsRetainInputErrorsAndShortCircuiting() {
+    for (String cast : List.of("CAST", "TRY_CAST")) {
+      String expression =
+          cast
+              + "(CASE WHEN 10/id>0 THEN m ELSE CAST(NULL AS MULTISET<BINARY(4)>) END AS"
+              + " MULTISET<VARBINARY(8)>)";
+      var failure =
           NativeFailureParity.run(
-              () -> {
-                var env = METRICS.environment(new Configuration(), 1, 0);
-                var table = StreamTableEnvironment.create(env);
-                var type = ROW(FIELD("m", MULTISET(nullable ? BINARY(4) : BINARY(4).notNull())));
-                var values = new LinkedHashMap<byte[], Integer>();
-                values.put(new byte[] {0, -1, 3}, 2);
-                table.createTemporaryView(
-                    "src",
-                    fromData(
-                        env,
-                        List.of(Row.of(values), Row.of((Object) null)),
-                        ExternalTypeInfo.<Row>of(type)),
-                    Schema.newBuilder().fromRowDataType(type).build());
-                return table;
-              },
-              "SELECT CAST(m AS STRING),TRY_CAST(m AS MULTISET<STRING>) FROM src");
-      runs.assertSuccess(NativeFailureParity.Route.FALLBACK);
+              () -> binaryEnvironment(false, true, false), "SELECT " + expression + " FROM src");
+      failure.assertFailure(
+          ArithmeticException.class, failure.host().phase(), NativeFailureParity.Route.NATIVE);
+      assertEquivalent(
+          () -> binaryEnvironment(false, true, false),
+          "SELECT id,CASE WHEN id=0 THEN CAST(NULL AS MULTISET<VARBINARY(8)>) ELSE "
+              + expression
+              + " END FROM src");
+    }
+  }
+
+  @Test
+  void binaryMultisetRetainsLengthDelimitedAndRepresentationGuards() throws Exception {
+    NativeParity.assertFallbackReasonContains(
+        () -> binaryEnvironment(false, true, false),
+        "SELECT CAST(m AS MULTISET<STRING>),COUNT(*) FROM src GROUP BY CAST(m AS MULTISET<STRING>)",
+        "collection value representation requires a final projection");
+    for (String property :
+        List.of(
+            "streamfusion.experimental.collectionExpressions",
+            "streamfusion.experimental.nestedScalarUdfs")) {
+      String previous = System.getProperty(property);
+      try {
+        System.setProperty(property, "false");
+        for (String sql :
+            List.of(
+                "SELECT CAST(m AS STRING),TRY_CAST(m AS MULTISET<BINARY(8)>) FROM src",
+                "SELECT id,CASE WHEN id=0 THEN CAST(NULL AS MULTISET<BINARY(4)>) ELSE m END FROM"
+                    + " src")) {
+          NativeFailureParity.run(() -> binaryEnvironment(false, true, false), sql)
+              .assertSuccess(NativeFailureParity.Route.FALLBACK);
+        }
+      } finally {
+        if (previous == null) System.clearProperty(property);
+        else System.setProperty(property, previous);
+      }
     }
   }
 

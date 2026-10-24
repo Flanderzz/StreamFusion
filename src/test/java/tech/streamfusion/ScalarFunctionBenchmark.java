@@ -293,15 +293,30 @@ class ScalarFunctionBenchmark {
               "CAST(a AS ARRAY<STRING>)",
               "ARRAY<STRING>"),
           new Query("ARRAY_FORMAT_STRING", "tt_decimal_array", "CAST(a AS STRING)", "STRING"),
-          new Query("TEXT_ARRAY_FORMAT_CHAR", "tt_json_array", "TRY_CAST(a AS CHAR(32))", "CHAR(32)"),
+          new Query(
+              "TEXT_ARRAY_FORMAT_CHAR", "tt_json_array", "TRY_CAST(a AS CHAR(32))", "CHAR(32)"),
           new Query("MAP_FORMAT_STRING", "tt_json_map", "CAST(m AS STRING)", "STRING"),
-          new Query("FIXED_BINARY_MAP_VALUES", "tt_fixed_binary_map", "MAP_VALUES(m)",
+          new Query(
+              "FIXED_BINARY_MAP_VALUES",
+              "tt_fixed_binary_map",
+              "MAP_VALUES(m)",
               "ARRAY<BINARY(" + TextTimeBenchmarkInputs.fixedBinaryWidth() + ")>"),
-          new Query("FIXED_BINARY_MAP_STRING", "tt_fixed_binary_map", "CAST(m AS STRING)", "STRING"),
-          new Query("FIXED_BINARY_MAP_KEYS", "tt_fixed_binary_keys", "MAP_KEYS(m)",
+          new Query(
+              "FIXED_BINARY_MAP_STRING", "tt_fixed_binary_map", "CAST(m AS STRING)", "STRING"),
+          new Query(
+              "FIXED_BINARY_MAP_KEYS",
+              "tt_fixed_binary_keys",
+              "MAP_KEYS(m)",
               "ARRAY<BINARY(" + TextTimeBenchmarkInputs.fixedBinaryWidth() + ")>"),
           new Query("BINARY_KEY_MAP_STRING", "tt_fixed_binary_keys", "CAST(m AS STRING)", "STRING"),
-          new Query("MULTISET_CAST", "tt_multiset", "CAST(m AS MULTISET<BIGINT>)", "MULTISET<BIGINT>"),
+          new Query(
+              "BINARY_MULTISET_CAST",
+              "tt_binary_multiset",
+              "CAST(m AS MULTISET<VARBINARY(" + TextTimeBenchmarkInputs.fixedBinaryWidth() + ")>)",
+              "MULTISET<VARBINARY(" + TextTimeBenchmarkInputs.fixedBinaryWidth() + ")>"),
+          new Query("BINARY_MULTISET_STRING", "tt_binary_multiset", "CAST(m AS STRING)", "STRING"),
+          new Query(
+              "MULTISET_CAST", "tt_multiset", "CAST(m AS MULTISET<BIGINT>)", "MULTISET<BIGINT>"),
           new Query("MULTISET_FORMAT_STRING", "tt_multiset", "CAST(m AS STRING)", "STRING"),
           new Query("TAN_EXACT", "numbers", "TAN(CAST(n AS DOUBLE))", "DOUBLE"),
           new Query(
@@ -792,10 +807,16 @@ class ScalarFunctionBenchmark {
                     engine == 1 ? "native" : "flink",
                     trial - WARMUP,
                     seconds,
-                    (query.input().equals("tt_fixed_bytes") || query.input().equals("tt_fixed_binary_map") || query.input().equals("tt_fixed_binary_keys"))
+                    (query.input().equals("tt_fixed_bytes")
+                            || query.input().equals("tt_fixed_binary_map")
+                            || query.input().equals("tt_fixed_binary_keys")
+                            || query.input().equals("tt_binary_multiset"))
                         ? TextTimeBenchmarkInputs.fixedBinaryWidth()
                         : 0,
-                    query.input().equals("tt_multiset") ? TextTimeBenchmarkInputs.multisetEntries() : 0));
+                    (query.input().equals("tt_multiset")
+                            || query.input().equals("tt_binary_multiset"))
+                        ? TextTimeBenchmarkInputs.multisetEntries()
+                        : 0));
           }
         }
       }
@@ -953,27 +974,54 @@ class ScalarFunctionBenchmark {
   }
 
   private static double run(Query query, boolean useNative) throws Exception {
-    TableEnvironment tables = environment(query.input());
-    if (!query.groupBy().isEmpty()) {
-      tables.getConfig().set("table.exec.mini-batch.enabled", "true");
-      tables.getConfig().set("table.exec.mini-batch.allow-latency", "5 s");
-      tables.getConfig().set("table.exec.mini-batch.size", "1024");
+    try (var metrics =
+        query.input().equals("tt_binary_multiset") ? new RecoveryExecutionMetrics() : null) {
+      TableEnvironment tables = environment(query.input(), metrics);
+      if (!query.groupBy().isEmpty()) {
+        tables.getConfig().set("table.exec.mini-batch.enabled", "true");
+        tables.getConfig().set("table.exec.mini-batch.allow-latency", "5 s");
+        tables.getConfig().set("table.exec.mini-batch.size", "1024");
+      }
+      tables.executeSql(query.ddl());
+      PhysicalPlanScan scan = useNative ? NativePlanner.install(tables) : null;
+      long start = System.nanoTime();
+      var result = tables.executeSql(query.sql());
+      result.await();
+      double seconds = (System.nanoTime() - start) / 1e9;
+      if (useNative && (scan.substitutions() > 0) != expectsNative(query)) {
+        throw new IllegalStateException(
+            query.name() + " unexpected route: " + scan.explainSummary());
+      }
+      if (metrics != null) {
+        if (useNative && expectsNative(query)) {
+          String jobId = result.getJobClient().orElseThrow().getJobID().toString();
+          for (String operator : List.of("NativeCalc(", "RowDataToArrow", "ArrowToRowData"))
+            if (metrics.recordsIn(jobId, operator) <= 0)
+              throw new IllegalStateException(
+                  query.name() + " has no consumed " + operator + " work");
+        } else if (!metrics.nativeOperators().isEmpty())
+          throw new IllegalStateException(query.name() + " unexpectedly executed native work");
+      }
+      return seconds;
     }
-    tables.executeSql(query.ddl());
-    PhysicalPlanScan scan = useNative ? NativePlanner.install(tables) : null;
-    long start = System.nanoTime();
-    tables.executeSql(query.sql()).await();
-    double seconds = (System.nanoTime() - start) / 1e9;
-    if (useNative && (scan.substitutions() > 0) != expectsNative(query)) {
-      throw new IllegalStateException(query.name() + " unexpected route: " + scan.explainSummary());
-    }
-    return seconds;
   }
 
   private static TableEnvironment environment(String input) {
+    return environment(input, null);
+  }
+
+  private static TableEnvironment environment(String input, RecoveryExecutionMetrics metrics) {
     if (input.startsWith("tt_")) {
       TableEnvironment tables =
-          TextTimeBenchmarkInputs.environment(input, ROWS, BYTES, UNICODE, NULL_EVERY);
+          metrics == null
+              ? TextTimeBenchmarkInputs.environment(input, ROWS, BYTES, UNICODE, NULL_EVERY)
+              : TextTimeBenchmarkInputs.environment(
+                  input,
+                  ROWS,
+                  BYTES,
+                  UNICODE,
+                  NULL_EVERY,
+                  metrics.environment(new org.apache.flink.configuration.Configuration(), 1, 0));
       tables.createTemporarySystemFunction("decimal_identity", DecimalIdentity.class);
       tables.createTemporarySystemFunction(
           "decimal_from_text", FlinkUdfExactTypesSqlHarnessTest.DecimalFromText.class);
