@@ -1,0 +1,292 @@
+{
+  "date": "2026-10-24",
+  "hardware": {
+    "cpu": "Intel Core i7-12650H",
+    "os": "Linux x86-64 / WSL2",
+    "jdk": "OpenJDK17.0.20.1"
+  },
+  "native": {
+    "profile": "release",
+    "features": [
+      "mimalloc",
+      "rocksdb-state"
+    ],
+    "sha256": "b574491f08427c8b128107d6286cb403421a0bafbdba7a0e5cdd8fea30562d16",
+    "production_rust_changes": false,
+    "operator_note": "Existing columnar JVM group, released MapView COLLECT or RAW LinkedList ARRAY_AGG; only BOOLEAN planner admission changes."
+  },
+  "previous_revision": "e3fd2423f7ac2d7f9323e6f074801c1b64707512",
+  "previous_revision_note": "Complete legacy-consumer candidate before BOOLEAN admission; identical benchmark source copied to comparison checkout.",
+  "benchmark_source_sha256": "072ff123e7c0dca27c33af5e9d2e40acca5dbba4b915055af1126c5e354b8861",
+  "configuration": {
+    "flink": "2.2.1",
+    "rows": {
+      "collect": 200000,
+      "array_agg": 50000
+    },
+    "parallelism": 1,
+    "key_type": "INT",
+    "groups": [
+      64,
+      4096
+    ],
+    "distinct_values_per_non_null_group": 2,
+    "key": "row modulo groups",
+    "value": "nullable BIGINT (row/groups) modulo8, projected to BOOLEAN by v>3",
+    "null_note": "Every eighth source row is NULL, retained by the BOOLEAN comparison; key7mod8 groups are all NULL.",
+    "warmups_per_engine": 2,
+    "trials_per_engine": 3,
+    "test_heap_gib": 8,
+    "jvm_accumulator_cache_entries": 0,
+    "key_prefix_note": "Default16 prefix chars unused forINTkeys.",
+    "boundary": "planning, submission, runtime Row source, keyed state, both row/Arrow transposes and blackhole row sink; cluster setup and initial explain excluded",
+    "schedule": "Alternating engines per JVM, separate cohort JVMs, no overlapping tests/builds/benchmarks during measurements.",
+    "value_types": [
+      "BOOLEAN via (v>3)"
+    ],
+    "array_length_note": "The8-value domain does not cap array length: ARRAY_AGG grows to781/782 elements at64 groups and12/13 at4096 groups.",
+    "source_value_type": "BIGINT",
+    "input_domain_before_boolean_projection": 8
+  },
+  "trials": [
+    {
+      "phase": "current",
+      "shape": "collect_boolean",
+      "groups": 64,
+      "stock_seconds": [
+        0.338287011,
+        0.326653183,
+        0.319330016
+      ],
+      "native_seconds": [
+        0.430312415,
+        0.351089922,
+        0.393279894
+      ],
+      "route": "consumed columnar JVM group and both transposes"
+    },
+    {
+      "phase": "current",
+      "shape": "collect_boolean",
+      "groups": 4096,
+      "stock_seconds": [
+        0.345624512,
+        0.410258287,
+        0.338376378
+      ],
+      "native_seconds": [
+        0.395570739,
+        0.368658588,
+        0.366698427
+      ],
+      "route": "consumed columnar JVM group and both transposes"
+    },
+    {
+      "phase": "current",
+      "shape": "array_agg_boolean",
+      "groups": 64,
+      "stock_seconds": [
+        0.859359007,
+        0.756526811,
+        0.667152621
+      ],
+      "native_seconds": [
+        0.894878568,
+        0.849645525,
+        0.771984236
+      ],
+      "route": "consumed columnar JVM group and both transposes"
+    },
+    {
+      "phase": "current",
+      "shape": "array_agg_boolean",
+      "groups": 4096,
+      "stock_seconds": [
+        0.185224267,
+        0.187236704,
+        0.190696389
+      ],
+      "native_seconds": [
+        0.215861552,
+        0.228774539,
+        0.172184837
+      ],
+      "route": "consumed columnar JVM group and both transposes"
+    },
+    {
+      "phase": "previous",
+      "shape": "collect_boolean",
+      "groups": 64,
+      "stock_seconds": [
+        0.32870418,
+        0.328351371,
+        0.243761915
+      ],
+      "native_seconds": [
+        0.363583762,
+        0.304674794,
+        0.405923304
+      ],
+      "route": "stock fallback, no native work"
+    },
+    {
+      "phase": "previous",
+      "shape": "collect_boolean",
+      "groups": 4096,
+      "stock_seconds": [
+        0.400209143,
+        0.336346912,
+        0.326764734
+      ],
+      "native_seconds": [
+        0.356046023,
+        0.364926736,
+        0.349710981
+      ],
+      "route": "stock fallback, no native work"
+    },
+    {
+      "phase": "previous",
+      "shape": "array_agg_boolean",
+      "groups": 64,
+      "stock_seconds": [
+        0.635590634,
+        0.644932086,
+        0.820167362
+      ],
+      "native_seconds": [
+        0.660542359,
+        0.720487083,
+        0.656397973
+      ],
+      "route": "stock fallback, no native work"
+    },
+    {
+      "phase": "previous",
+      "shape": "array_agg_boolean",
+      "groups": 4096,
+      "stock_seconds": [
+        0.194107623,
+        0.185580125,
+        0.16725244
+      ],
+      "native_seconds": [
+        0.208226737,
+        0.207687794,
+        0.212280673
+      ],
+      "route": "stock fallback, no native work"
+    }
+  ],
+  "cpu_profiles": {
+    "passes": 2,
+    "closed": true,
+    "event": "cpu",
+    "interval": "1ms",
+    "target_seconds_per_capture": 8,
+    "profiler": "async-profiler4.6",
+    "boundary": "one unprofiled native-only complete-job warmup; profile native-only jobs until the8second target completes, including planning/compilation/allJVMthreads; stop after currentjob",
+    "captures": {
+      "collect_boolean-keys4096-native": {
+        "total_samples": 22403,
+        "inclusive_method_samples": {
+          "NativeColumnarJvmGroupOperator.ingest": 3408,
+          "NativeColumnarJvmGroupOperator.append": 822,
+          "GroupAggFunction.processElement": 3109,
+          "CollectAggFunction.getValue": 595,
+          "ArrayAggFunction.getValue": 0,
+          "MapWriter.doWrite": 165,
+          "ArrayWriter.doWrite": 0,
+          "ArrayDataSerializer.copy": 0,
+          "LinkedList.toArray": 0
+        },
+        "top_self_samples": {
+          "_raw_spin_unlock_irqrestore_[k]": 1184,
+          "IndexSetIterator::advance_and_next": 477,
+          "org/apache/flink/runtime/state/heap/CopyOnWriteStateMap.get_[i]": 400,
+          "PhaseChaitin::Split": 349,
+          "/usr/lib/x86_64-linux-gnu/libc.so.6": 320,
+          "PhaseChaitin::gather_lrg_masks": 319,
+          "org/apache/flink/core/memory/MemorySegment.equalTo_[i]": 316,
+          "org/apache/flink/table/data/binary/MurmurHashUtils.hashBytesByInt_[i]": 293,
+          "PhaseChaitin::interfere_with_live": 287,
+          "PhaseLive::compute": 233
+        }
+      },
+      "array_agg_boolean-keys64-native": {
+        "total_samples": 14669,
+        "inclusive_method_samples": {
+          "NativeColumnarJvmGroupOperator.ingest": 5348,
+          "NativeColumnarJvmGroupOperator.append": 1062,
+          "GroupAggFunction.processElement": 5274,
+          "CollectAggFunction.getValue": 0,
+          "ArrayAggFunction.getValue": 3666,
+          "MapWriter.doWrite": 0,
+          "ArrayWriter.doWrite": 487,
+          "ArrayDataSerializer.copy": 485,
+          "LinkedList.toArray": 3658
+        },
+        "top_self_samples": {
+          "java/util/LinkedList.toArray_[i]": 3631,
+          "_raw_spin_unlock_irqrestore_[k]": 540,
+          "org/apache/flink/table/data/columnar/ColumnarArrayData.isNullAt_[i]": 479,
+          "org/apache/flink/table/data/GenericRowData.<init>_[i]": 350,
+          "org/apache/arrow/vector/BaseFixedWidthVector.handleSafe_[i]": 337,
+          "IndexSetIterator::advance_and_next": 221,
+          "/usr/lib/x86_64-linux-gnu/libc.so.6": 189,
+          "PhaseChaitin::Split": 156,
+          "tech/streamfusion/arrow/writers/ArrayWriter.doWrite_[j]": 136,
+          "PhaseChaitin::gather_lrg_masks": 135
+        }
+      }
+    },
+    "limitations": "inclusive counts overlap; not allocation counts/copied bytes, and profiled times do not enter trial tables"
+  },
+  "process_observations": {
+    "sampling_seconds": 2,
+    "external_during_trials": 0,
+    "external_during_profiles": 0,
+    "raw_matrix_observations": 1,
+    "classification": "Own prior-cohort Maven startup shell, sampled before its first warmup; no external workload.",
+    "startup_observed_epoch_seconds": 1792867279.451501,
+    "first_warmup_epoch_seconds": 1792867285.928,
+    "raw_profile_observations": 1,
+    "profile_classification": "Own profiling Maven startup shell before its unprofiled warmup/job and before profiler start.",
+    "profile_startup_observed_epoch_seconds": 1792867379.0796971,
+    "profile_first_job_epoch_seconds": 1792867384.855
+  },
+  "scope": {
+    "admitted": "Builtin COLLECT(BOOLEAN) on both lines and ARRAY_AGG(BOOLEAN) on released2.2, through existing scalar-input/non-character-result/consumer gates.",
+    "retained_fallback": [
+      "Other unverified collection element types",
+      "Character aggregate values or co-results",
+      "Non-scalar aggregate inputs or unverified represented consumers",
+      "Updating MAP/MULTISET retained payloads in#437"
+    ],
+    "not_applicable": "ARRAY_AGG absent from released1.18.1."
+  },
+  "validation": {
+    "flink2.2.1": {
+      "passed": 279,
+      "skipped": 0
+    },
+    "flink1.18.1": {
+      "passed": 214,
+      "skipped": 65
+    },
+    "agent": {
+      "passed": 56,
+      "skipped": 1
+    },
+    "coverage": [
+      "direct typed BOOLEAN runtime sources, true/false, NULL/all-NULL, duplicates",
+      "DISTINCT/FILTER, valid NOT NULL COALESCE outputs, empty grouped/global results",
+      "ordered per-key changelogs, ARRAY RESPECT/IGNORE NULLS",
+      "consumed JVM producer and native Top-N/UNNEST consumers",
+      "two nonempty heap/native RocksDB restores, unmatched retract before insertion and memory release",
+      "legacy external retract rows, canonical character keys and parallelism1/3",
+      "existing integer/character-key aggregates, UDAFs, MULTISET casts, UNNEST and producer/sink guards"
+    ]
+  },
+  "conclusion": "Native medians exceed paired stock in all four shapes. Trials retain startup costs and variability; no sustained acceleration claim. Exactly two CPU captures complete, with no safe small runtime change identified within the bounded investigation. Managed state, snapshots, output and compilation remain follow-ups in#239 under the accepted collection tradeoff."
+}

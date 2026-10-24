@@ -64,16 +64,18 @@ class FlinkCollectionLegacyConsumerSqlHarnessTest {
     "COLLECT,SMALLINT",
     "COLLECT,INT",
     "COLLECT,BIGINT",
+    "COLLECT,BOOLEAN",
     "ARRAY_AGG,TINYINT",
     "ARRAY_AGG,SMALLINT",
     "ARRAY_AGG,INT",
-    "ARRAY_AGG,BIGINT"
+    "ARRAY_AGG,BIGINT",
+    "ARRAY_AGG,BOOLEAN"
   })
   void legacyExternalRowsKeepOrderedChangesAndValues(String function, String type)
       throws Exception {
     tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction(function);
     for (int parallelism : new int[] {1, 3}) {
-      String value = "CAST(v AS " + type + ")";
+      String value = type.equals("BOOLEAN") ? "(v>0)" : "CAST(v AS " + type + ")";
       String sql =
           "SELECT k,"
               + function
@@ -87,7 +89,9 @@ class FlinkCollectionLegacyConsumerSqlHarnessTest {
               + function
               + "(COALESCE("
               + value
-              + ",CAST(0 AS "
+              + ",CAST("
+              + (type.equals("BOOLEAN") ? "FALSE" : "0")
+              + " AS "
               + type
               + "))),COUNT(*) FROM src GROUP BY k";
       assertEquals(

@@ -17,7 +17,7 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
-class FlinkSmallIntegerCollectionSqlHarnessTest {
+class FlinkPrimitiveCollectionSqlHarnessTest {
   private static final RecoveryExecutionMetrics METRICS = new RecoveryExecutionMetrics();
 
   @AfterAll
@@ -28,20 +28,28 @@ class FlinkSmallIntegerCollectionSqlHarnessTest {
   private static Schema schema(String type) {
     return Schema.newBuilder()
         .column("k", DataTypes.INT())
-        .column("v", type.equals("TINYINT") ? DataTypes.TINYINT() : DataTypes.SMALLINT())
+        .column(
+            "v",
+            type.equals("BOOLEAN")
+                ? DataTypes.BOOLEAN()
+                : type.equals("TINYINT") ? DataTypes.TINYINT() : DataTypes.SMALLINT())
         .build();
   }
 
   private static TypeInformation<Row> rowType(String type) {
     return Types.ROW_NAMED(
-        new String[] {"k", "v"}, Types.INT, type.equals("TINYINT") ? Types.BYTE : Types.SHORT);
+        new String[] {"k", "v"},
+        Types.INT,
+        type.equals("BOOLEAN") ? Types.BOOLEAN : type.equals("TINYINT") ? Types.BYTE : Types.SHORT);
   }
 
   private static Row row(String type, RowKind kind, Integer key, Integer value) {
     Object typed =
         value == null
             ? null
-            : type.equals("TINYINT") ? (Object) value.byteValue() : value.shortValue();
+            : type.equals("BOOLEAN")
+                ? (Object) (value > 0)
+                : type.equals("TINYINT") ? (Object) value.byteValue() : value.shortValue();
     return Row.ofKind(kind, key, typed);
   }
 
@@ -71,8 +79,15 @@ class FlinkSmallIntegerCollectionSqlHarnessTest {
   }
 
   @ParameterizedTest
-  @CsvSource({"COLLECT,TINYINT", "COLLECT,SMALLINT", "ARRAY_AGG,TINYINT", "ARRAY_AGG,SMALLINT"})
-  void exactNarrowTypesRetainExtremesNullsAndChangelog(String function, String type) {
+  @CsvSource({
+    "COLLECT,TINYINT",
+    "COLLECT,SMALLINT",
+    "ARRAY_AGG,TINYINT",
+    "ARRAY_AGG,SMALLINT",
+    "COLLECT,BOOLEAN",
+    "ARRAY_AGG,BOOLEAN"
+  })
+  void primitiveElementsRetainValuesNullsAndChangelog(String function, String type) {
     tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction(function);
     check(
         type,
@@ -82,7 +97,9 @@ class FlinkSmallIntegerCollectionSqlHarnessTest {
             + function
             + "(DISTINCT v),"
             + function
-            + "(v) FILTER (WHERE v>0),COUNT(*) FROM src GROUP BY k",
+            + "(v) FILTER (WHERE "
+            + (type.equals("BOOLEAN") ? "v" : "v>0")
+            + "),COUNT(*) FROM src GROUP BY k",
         "NativeJvmGroup");
     check(
         type,
@@ -90,7 +107,9 @@ class FlinkSmallIntegerCollectionSqlHarnessTest {
             + function
             + "(v) AS STRING),"
             + function
-            + "(COALESCE(v,CAST(0 AS "
+            + "(COALESCE(v,CAST("
+            + (type.equals("BOOLEAN") ? "FALSE" : "0")
+            + " AS "
             + type
             + "))) FROM src GROUP BY k",
         "NativeJvmGroup");
@@ -102,7 +121,14 @@ class FlinkSmallIntegerCollectionSqlHarnessTest {
   }
 
   @ParameterizedTest
-  @CsvSource({"COLLECT,TINYINT", "COLLECT,SMALLINT", "ARRAY_AGG,TINYINT", "ARRAY_AGG,SMALLINT"})
+  @CsvSource({
+    "COLLECT,TINYINT",
+    "COLLECT,SMALLINT",
+    "ARRAY_AGG,TINYINT",
+    "ARRAY_AGG,SMALLINT",
+    "COLLECT,BOOLEAN",
+    "ARRAY_AGG,BOOLEAN"
+  })
   void emptyGlobalAndGroupedResultsRetainResolvedTypes(String function, String type) {
     tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction(function);
     check(type, "SELECT " + function + "(v),COUNT(*) FROM src WHERE k<0", "NativeFilter");
@@ -110,7 +136,7 @@ class FlinkSmallIntegerCollectionSqlHarnessTest {
   }
 
   @ParameterizedTest
-  @org.junit.jupiter.params.provider.ValueSource(strings = {"TINYINT", "SMALLINT"})
+  @org.junit.jupiter.params.provider.ValueSource(strings = {"TINYINT", "SMALLINT", "BOOLEAN"})
   void nullablePrimitiveArraysRetainVerifiedRankAndUnnestConsumers(String type) {
     tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction("ARRAY_AGG");
     check(
@@ -128,7 +154,7 @@ class FlinkSmallIntegerCollectionSqlHarnessTest {
   }
 
   @ParameterizedTest
-  @org.junit.jupiter.params.provider.ValueSource(strings = {"TINYINT", "SMALLINT"})
+  @org.junit.jupiter.params.provider.ValueSource(strings = {"TINYINT", "SMALLINT", "BOOLEAN"})
   void updatingMultisetPayloadExtensionRemainsDeferred(String type) {
     NativeFailureParity.run(
             () -> environment(type),
@@ -159,18 +185,22 @@ class FlinkSmallIntegerCollectionSqlHarnessTest {
     "COLLECT,SMALLINT,hashmap",
     "ARRAY_AGG,TINYINT,hashmap",
     "ARRAY_AGG,SMALLINT,hashmap",
+    "COLLECT,BOOLEAN,hashmap",
+    "ARRAY_AGG,BOOLEAN,hashmap",
     "COLLECT,TINYINT,tech.streamfusion.state.RocksDBNativeStateBackendFactory",
     "COLLECT,SMALLINT,tech.streamfusion.state.RocksDBNativeStateBackendFactory",
     "ARRAY_AGG,TINYINT,tech.streamfusion.state.RocksDBNativeStateBackendFactory",
-    "ARRAY_AGG,SMALLINT,tech.streamfusion.state.RocksDBNativeStateBackendFactory"
+    "ARRAY_AGG,SMALLINT,tech.streamfusion.state.RocksDBNativeStateBackendFactory",
+    "COLLECT,BOOLEAN,tech.streamfusion.state.RocksDBNativeStateBackendFactory",
+    "ARRAY_AGG,BOOLEAN,tech.streamfusion.state.RocksDBNativeStateBackendFactory"
   })
-  void narrowValuesRestoreAcrossTwoNonemptyPrefixes(String function, String type, String backend)
+  void primitiveValuesRestoreAcrossTwoNonemptyPrefixes(String function, String type, String backend)
       throws Exception {
     tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction(function);
     var rows = new ArrayList<Row>();
     for (int i = 0; i < 48; i++)
       rows.add(row(type, RowKind.INSERT, i % 3, i % 5 == 0 ? null : i % 7));
-    rows.add(17, row(type, RowKind.DELETE, 0, 99));
+    rows.add(type.equals("BOOLEAN") ? 0 : 17, row(type, RowKind.DELETE, 0, 99));
     for (int i = 0; i < 48; i++)
       rows.add(row(type, RowKind.DELETE, i % 3, i % 5 == 0 ? null : i % 7));
     rows.add(70, row(type, RowKind.INSERT, 0, 99));
@@ -192,7 +222,7 @@ class FlinkSmallIntegerCollectionSqlHarnessTest {
       assertEquals(perKey(runs.host().rows()), perKey(runs.nativeRun().rows()));
       recovery.verifyRepeatedRecovery();
       RecoveryExecutionMetrics.assertConsumed(recovery.nativeExecution(), "NativeJvmGroup");
-      SharedFlinkCluster.assertNativeMemoryReleased("small-integer-collection-recovery");
+      SharedFlinkCluster.assertNativeMemoryReleased("primitive-collection-recovery");
     }
   }
 

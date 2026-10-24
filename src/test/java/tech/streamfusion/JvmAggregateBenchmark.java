@@ -39,11 +39,13 @@ class JvmAggregateBenchmark {
       String argument =
           collectionShape.equals("array_agg_not_null")
               ? "COALESCE(v,CAST(0 AS BIGINT))"
-              : collectionShape.endsWith("_tinyint")
-                  ? "CAST(v AS TINYINT)"
-                  : collectionShape.endsWith("_smallint")
-                      ? "CAST(v AS SMALLINT)"
-                      : collectionShape.equals("array_agg_int") ? "CAST(v AS INT)" : "v";
+              : collectionShape.endsWith("_boolean")
+                  ? "(v>3)"
+                  : collectionShape.endsWith("_tinyint")
+                      ? "CAST(v AS TINYINT)"
+                      : collectionShape.endsWith("_smallint")
+                          ? "CAST(v AS SMALLINT)"
+                          : collectionShape.equals("array_agg_int") ? "CAST(v AS INT)" : "v";
       if (legacy && !collect && !arrayAgg)
         throw new IllegalArgumentException("Legacy collection case required: " + shape);
       String sql =
@@ -220,7 +222,7 @@ class JvmAggregateBenchmark {
   }
 
   private static boolean collectCase(String shape) {
-    return java.util.Set.of("collect", "collect_tinyint", "collect_smallint")
+    return java.util.Set.of("collect", "collect_tinyint", "collect_smallint", "collect_boolean")
         .contains(collectionShape(shape));
   }
 
@@ -230,6 +232,7 @@ class JvmAggregateBenchmark {
             "array_agg_int",
             "array_agg_tinyint",
             "array_agg_smallint",
+            "array_agg_boolean",
             "array_agg_not_null")
         .contains(collectionShape(shape));
   }

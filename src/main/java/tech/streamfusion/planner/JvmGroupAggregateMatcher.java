@@ -28,7 +28,7 @@ final class JvmGroupAggregateMatcher {
     return false;
   }
 
-  private static boolean integerCollectionAggregate(
+  private static boolean verifiedCollectionAggregate(
       StreamPhysicalGroupAggregate node, org.apache.calcite.rel.core.AggregateCall call) {
     boolean collect =
         call.getAggregation()
@@ -37,6 +37,7 @@ final class JvmGroupAggregateMatcher {
         || call.getArgList().size() != 1) return false;
     var value = node.getInput().getRowType().getFieldList().get(call.getArgList().get(0)).getType();
     return java.util.Set.of(
+                org.apache.calcite.sql.type.SqlTypeName.BOOLEAN,
                 org.apache.calcite.sql.type.SqlTypeName.TINYINT,
                 org.apache.calcite.sql.type.SqlTypeName.SMALLINT,
                 org.apache.calcite.sql.type.SqlTypeName.INTEGER,
@@ -70,9 +71,9 @@ final class JvmGroupAggregateMatcher {
     if (!JvmFunctionTypes.scalarRow(node.getInput().getRowType())) return false;
     for (int i = 0; i < node.aggCalls().size(); i++) {
       var call = node.aggCalls().apply(i);
-      if (!JvmFunctionTypes.scalar(call.getType()) && !integerCollectionAggregate(node, call))
+      if (!JvmFunctionTypes.scalar(call.getType()) && !verifiedCollectionAggregate(node, call))
         return false;
-      if (integerCollectionAggregate(node, call)
+      if (verifiedCollectionAggregate(node, call)
           && node.getRowType().getFieldList().stream()
               .skip(node.grouping().length)
               .anyMatch(field -> JsonStringIdentity.containsCharacter(field.getType())))
@@ -92,7 +93,7 @@ final class JvmGroupAggregateMatcher {
   }
 
   static String unsupportedReason(StreamPhysicalGroupAggregate node) {
-    return "GROUP BY: JVM aggregates require verified scalar fields or integer COLLECT/ARRAY_AGG"
+    return "GROUP BY: JVM aggregates require verified scalar fields or verified COLLECT/ARRAY_AGG"
         + " with non-character aggregate results and synchronous single-phase execution without"
         + " mini-batching, specialization, approximate or ordered calls";
   }

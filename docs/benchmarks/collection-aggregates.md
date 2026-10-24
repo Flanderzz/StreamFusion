@@ -313,3 +313,60 @@ profiles set `SF_BENCHMARK=true SF_PROFILE_JVM_AGG=true`, use `#profileCollect` 
 `-Djvmagg.cases=legacy_array_agg_not_null -Djvmagg.keys=64`. Keep the same row/domain/library settings and
 `jvmagg.seconds=8`, passing an async-profiler path with `profile.asprof`. Profiled timings
 do not enter the comparison table.
+
+## BOOLEAN elements
+
+BOOLEAN collection elements use the existing released handlers, managed state and Arrow
+batch boundaries. [Coverage](../operators/group-by.md#boolean-collection-elements) retains
+the exact gates. The broad local matrix passes 279 checks on Flink 2.2.1 and 214 with 65
+version skips on 1.18.1; agent checks pass 56 with one skip. ARRAY_AGG is absent on 1.18.
+
+These release/mimalloc comparisons retain the host/library and complete-job boundary above.
+INT keys use 64/4096 groups, parallelism one, an 8 GiB heap and no accumulator cache.
+COLLECT uses 200,000 rows and ARRAY_AGG 50,000. Runtime BIGINT values cycle through eight
+values per key and become BOOLEAN through `(v>3)`, retaining NULL every eighth row.
+Non-NULL groups have two possible BOOLEAN values; key7mod8 groups contain only NULLs.
+Array lengths still grow to 781/782 or 12/13 elements. Planning, submission, generated
+comparison, keyed state, output, source/sink and both row/Arrow conversions remain timed.
+Two warmups precede three alternating trials per engine, in fresh cohort JVMs.
+
+Prior candidate `e3fd2423` uses identical benchmark source and the same DSO. Its BOOLEAN
+queries require no native work; current jobs require consumed JVM-group work and both
+transposes. A two-second sampler observes no overlapping external Java/Cargo workload.
+The matrix and profile samplers each see one own Maven startup shell before its first
+warmup/job; both are classified in the [retained evidence](results/boolean-collections-2026-10-24.json),
+alongside every trial, separate prior stock controls, configuration and profile counts.
+
+Median seconds (minimum–maximum):
+
+| Shape | Groups | Paired stock | Previous fallback | Native route |
+| --- | ---: | ---: | ---: | ---: |
+| COLLECT | 64 | 0.326653 (0.319330–0.338287) | 0.363584 (0.304675–0.405923) | 0.393280 (0.351090–0.430312) |
+| COLLECT | 4096 | 0.345625 (0.338376–0.410258) | 0.356046 (0.349711–0.364927) | 0.368659 (0.366698–0.395571) |
+| ARRAY_AGG | 64 | 0.756527 (0.667153–0.859359) | 0.660542 (0.656398–0.720487) | 0.849646 (0.771984–0.894879) |
+| ARRAY_AGG | 4096 | 0.187237 (0.185224–0.190696) | 0.208227 (0.207688–0.212281) | 0.215862 (0.172185–0.228775) |
+
+All four native medians exceed paired stock; previous-fallback comparisons vary and ranges
+overlap. Short jobs and startup costs do not establish sustained throughput. These measured
+costs ship under the accepted collection tradeoff, without an acceleration claim.
+
+Optimization closes after exactly two eight-second target CPU captures, each after an
+unprofiled native-only job. BOOLEAN COLLECT at 4096 groups has 22,403 samples: 3,109
+inclusive in group processing, 595 in result snapshots and 822 in append. BOOLEAN ARRAY_AGG
+at 64 groups has 14,669 samples: 5,274 inclusive in group processing, 3,666 in snapshots and
+1,062 in append; LinkedList.toArray contributes 3,631 self samples. State/key operations,
+growing list snapshots, output and compilation remain visible costs. Inclusive counts
+overlap and include all JVM threads, planning and compilation; they are not allocation
+or copied-byte counts and do not causally isolate the regression against stock. No safe
+small shortcut was identified inside the two passes. Further optimization remains in
+[#239](https://github.com/datafusion-contrib/StreamFusion/issues/239).
+
+Reproduce using the complete-job command above with `jvmagg.cases=collect_boolean`,
+`rows=200000`, then `array_agg_boolean`, `rows=50000`, each at `keys=64` and `4096`.
+Keep `values=8`, two warmups, three trials, `expectCache=false` and `expectNative=true`;
+the prior checkout copies the same benchmark source and requires `expectNative=false`.
+For the two captures set `SF_BENCHMARK=true SF_PROFILE_JVM_AGG=true`, select
+`#profileCollect` with `cases=collect_boolean`, `keys=4096`, then `#profileArrayAgg` with
+`cases=array_agg_boolean`, `keys=64`. Retain the same rows/domain/library and pass
+`jvmagg.seconds=8` plus an async-profiler executable through `profile.asprof`. Profiled
+timings do not enter the comparison table.
