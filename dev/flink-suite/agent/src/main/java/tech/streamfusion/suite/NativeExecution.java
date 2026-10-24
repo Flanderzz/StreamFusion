@@ -110,7 +110,11 @@ public final class NativeExecution {
     for (String condition : selector.split("&")) {
       String[] parts = condition.split("=", 2);
       Object value =
-          parts[0].equals("changelog") ? changelogEnabled(fixture) : field(fixture, parts[0]);
+          switch (parts[0]) {
+            case "changelog" -> changelogEnabled(fixture);
+            case "miniBatch" -> miniBatchEnabled(fixture);
+            default -> field(fixture, parts[0]);
+          };
       if (!String.valueOf(value).equals(parts[1])) return false;
     }
     return true;
@@ -143,6 +147,15 @@ public final class NativeExecution {
           .equals("TRUE");
     } catch (ReflectiveOperationException e) {
       throw new AssertionError("Cannot read pinned upstream changelog configuration", e);
+    }
+  }
+
+  private static boolean miniBatchEnabled(Object fixture) {
+    try {
+      Object mode = field(fixture, "miniBatch");
+      return (Boolean) mode.getClass().getMethod("on").invoke(mode);
+    } catch (ReflectiveOperationException e) {
+      throw new AssertionError("Cannot read pinned upstream mini-batch configuration", e);
     }
   }
 

@@ -237,3 +237,79 @@ The two captures select `#profileCollect` with
 `-Djvmagg.cases=collect_smallint -Djvmagg.keys=4096`, and `#profileArrayAgg` with
 `-Djvmagg.cases=array_agg_tinyint -Djvmagg.keys=64`. Keep `SF_PROFILE_JVM_AGG=true`,
 `jvmagg.seconds=8` and an async-profiler path as above.
+
+## Legacy row consumers
+
+Flink 2.2 legacy row exits now admit direct verified integer collection groups through the
+prepared-sink metadata boundary. [Coverage](../operators/group-by.md#legacy-row-consumers)
+retains the exact gates; this adds no native connector or new state/ownership protocol. The
+local broad matrix passes 267 checks on 2.2.1 and 208 with 59 version skips on 1.18.1. Agent
+checks pass 56 with one skip, plus six scope and 25 summary checks. The unchanged upstream
+COLLECT fixture passes seven/six cases with explicit contracts: two native backend variants
+on each line consume 21 JVM-group rows, and all other variants keep their expected fallback.
+
+These release/mimalloc measurements retain the host/library above, INT keys at 64/4096 groups,
+parallelism one, an 8 GiB heap and no accumulator cache. COLLECT uses 200,000 runtime rows;
+NOT NULL BIGINT ARRAY_AGG uses 50,000 and `COALESCE(v,CAST(0 AS BIGINT))`. Values cycle
+through an eight-value per-key domain, with every eighth source value NULL. COLLECT ignores
+NULL elements; ARRAY replaces them with zero. Arrays still grow to 781/782 or 12/13 elements.
+Two warmups precede three alternating trials per engine in each fresh cohort JVM.
+
+The timed legacy path calls `toRetractStream(query,Row.class).executeAndCollect()` and drains
+every external insert/retract record. Planning/legacy translation, submission, state, both
+row/Arrow transposes, external conversion and client collect transport remain inside timing;
+cluster boot/schema setup stay outside. These results specifically describe the external
+client consumer, not every possible legacy sink. Candidate jobs require consumed JVM-group
+work and both transposes. Prior candidate `1ed09143`, using identical benchmark source and
+the same native DSO, must have no native work for these guard-sensitive cases. Nullable
+primitive arrays are not used as a fallback control; the ARRAY case has NOT NULL elements.
+
+A two-second process sampler observed no overlapping external Java/Cargo workloads during
+trials or profiles. Two raw matrix observations were its own Maven startup shells before
+any warmup/timing. [All trials, configuration and profile counts](results/legacy-collection-consumers-2026-10-24.json)
+also retain the prior JVMs' independent stock controls and source checksum.
+
+Median seconds (minimum–maximum):
+
+| Shape | Groups | Paired stock | Previous fallback | Native route |
+| --- | ---: | ---: | ---: | ---: |
+| COLLECT | 64 | 1.376737 (1.367508–1.413311) | 1.378298 (1.375485–1.384469) | 1.347112 (1.333860–1.347182) |
+| COLLECT | 4096 | 1.260053 (1.243484–1.363648) | 1.359904 (1.346665–1.366877) | 1.243732 (1.210967–1.307879) |
+| ARRAY_AGG NOT NULL | 64 | 2.103232 (2.099214–2.204880) | 2.189479 (2.183062–2.201101) | 2.619672 (2.444055–3.043646) |
+| ARRAY_AGG NOT NULL | 4096 | 0.549519 (0.537020–0.573537) | 0.554805 (0.553129–0.591117) | 0.554460 (0.552484–0.556155) |
+
+COLLECT medians improve these paired controls, while larger-cardinality ranges overlap and
+separate-process controls drift. Growing arrays at 64 groups are slower; at 4096, medians
+are close and ranges overlap. These short jobs do not establish sustained acceleration.
+All unfavorable trials remain visible under the accepted collection tradeoff.
+
+Optimization closes after two eight-second target CPU captures with the native-only warmup
+protocol above. COLLECT at 4096 groups has 21,768 samples: 4,012 inclusive in group processing,
+389 in result snapshots, 2,702 in append and 2,184 in client collection. Map serialization has
+775 self samples and ByteArrayInputStream.read 1,537. ARRAY at 64 groups has 24,805 samples:
+7,990 inclusive in group processing, 733 in result snapshots, 7,030 in append and 5,666 in client
+collection. DataOutputStream.writeLong has 5,433 self samples, readUnsignedByte 2,714 and
+ByteArrayInputStream.read 2,406; LinkedList.toArray has 731. Inclusive counts overlap, and
+append includes chained downstream work. These are CPU samples, not allocation/copied-byte
+counts. Serialization/client materialization dominates much of this exit; state snapshots
+and Arrow output remain costs too. No safe small change inside the planner/runtime was
+identified within the two passes. Further performance remains in
+[#239](https://github.com/datafusion-contrib/StreamFusion/issues/239).
+
+Reproduce after a release build:
+
+```sh
+SF_BENCHMARK=true mvn -pl streamfusion-runtime test -Pbench \
+  '-Dtest=JvmAggregateBenchmark#completeJobsRetainKeyedStateAndBothTransposes' \
+  -Dsf.testForks=1 -Djvmagg.cases=legacy_collect -Djvmagg.rows=200000 \
+  -Djvmagg.keys=64 -Djvmagg.values=8 -Djvmagg.warmup=2 -Djvmagg.runs=3 \
+  -Djvmagg.expectNative=true -Djvmagg.expectCache=false
+```
+
+Also run keys 4096, then `cases=legacy_array_agg_not_null` with 50000 rows at both cardinalities.
+The prior checkout copies the same benchmark source and sets `expectNative=false`. For the two
+profiles set `SF_BENCHMARK=true SF_PROFILE_JVM_AGG=true`, use `#profileCollect` with
+`-Djvmagg.cases=legacy_collect -Djvmagg.keys=4096`, then `#profileArrayAgg` with
+`-Djvmagg.cases=legacy_array_agg_not_null -Djvmagg.keys=64`. Keep the same row/domain/library settings and
+`jvmagg.seconds=8`, passing an async-profiler path with `profile.asprof`. Profiled timings
+do not enter the comparison table.

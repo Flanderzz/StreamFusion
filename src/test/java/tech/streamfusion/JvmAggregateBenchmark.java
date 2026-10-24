@@ -30,16 +30,22 @@ class JvmAggregateBenchmark {
     boolean expectedCache = Boolean.parseBoolean(System.getProperty("jvmagg.expectCache", "true"));
     boolean expectedUdf = Boolean.parseBoolean(System.getProperty("jvmagg.expectNative", "false"));
     for (String shape : System.getProperty("jvmagg.cases", "udaf,builtin").split(",")) {
+      boolean legacy = shape.startsWith("legacy_");
+      String collectionShape = collectionShape(shape);
       boolean udf = shape.equals("udaf");
       boolean collect = collectCase(shape);
       boolean arrayAgg = arrayAggCase(shape);
       boolean jvm = udf || collect || arrayAgg;
       String argument =
-          shape.endsWith("_tinyint")
-              ? "CAST(v AS TINYINT)"
-              : shape.endsWith("_smallint")
-                  ? "CAST(v AS SMALLINT)"
-                  : shape.equals("array_agg_int") ? "CAST(v AS INT)" : "v";
+          collectionShape.equals("array_agg_not_null")
+              ? "COALESCE(v,CAST(0 AS BIGINT))"
+              : collectionShape.endsWith("_tinyint")
+                  ? "CAST(v AS TINYINT)"
+                  : collectionShape.endsWith("_smallint")
+                      ? "CAST(v AS SMALLINT)"
+                      : collectionShape.equals("array_agg_int") ? "CAST(v AS INT)" : "v";
+      if (legacy && !collect && !arrayAgg)
+        throw new IllegalArgumentException("Legacy collection case required: " + shape);
       String sql =
           "SELECT k, "
               + (udf ? "test_aggregate" : collect ? "COLLECT" : arrayAgg ? "ARRAY_AGG" : "SUM")
@@ -85,19 +91,20 @@ class JvmAggregateBenchmark {
             }
             table.createTemporaryView("src", source);
             table.createTemporarySystemFunction("test_aggregate", new PortableSqlFixtures.Sum());
-            table.createTemporaryTable(
-                "sink",
-                TableDescriptor.forConnector("blackhole")
-                    .schema(
-                        Schema.newBuilder()
-                            .fromRowDataType(
-                                table.sqlQuery(sql).getResolvedSchema().toPhysicalRowDataType())
-                            .build())
-                    .build());
+            if (!legacy)
+              table.createTemporaryTable(
+                  "sink",
+                  TableDescriptor.forConnector("blackhole")
+                      .schema(
+                          Schema.newBuilder()
+                              .fromRowDataType(
+                                  table.sqlQuery(sql).getResolvedSchema().toPhysicalRowDataType())
+                              .build())
+                      .build());
             String insert = "INSERT INTO sink " + sql;
             var scan = engine == 1 ? NativePlanner.install(table) : null;
-            String plan = table.explainSql(insert);
-            if (engine == 1) {
+            String plan = legacy ? "" : table.explainSql(insert);
+            if (!legacy && engine == 1) {
               if (!jvm || expectedUdf) {
                 assertTrue(
                     plan.contains(jvm ? "NativeJvmGroup" : "NativeColumnarGroupAggregate")
@@ -105,15 +112,25 @@ class JvmAggregateBenchmark {
                         && plan.contains("ArrowToRowData"),
                     plan);
               } else assertEquals(0, scan.substitutions(), plan);
-            } else {
+            } else if (!legacy) {
               assertFalse(
                   plan.contains("NativeJvmGroup") || plan.contains("NativeColumnarGroupAggregate"),
                   plan);
             }
             long startMillis = System.currentTimeMillis();
             long start = System.nanoTime();
-            table.executeSql(insert).await();
+            long legacyRows = 0;
+            if (legacy) {
+              try (var output =
+                  table.toRetractStream(table.sqlQuery(sql), Row.class).executeAndCollect()) {
+                while (output.hasNext()) {
+                  output.next();
+                  legacyRows++;
+                }
+              }
+            } else table.executeSql(insert).await();
             double seconds = (System.nanoTime() - start) / 1e9;
+            if (legacy) assertTrue(legacyRows > 0, "legacy row consumer received no output");
             System.out.printf(
                 Locale.ROOT,
                 "[jvm-aggregate-trial] shape=%s key_type=%s engine=%s trial=%d warmup=%s rows=%d"
@@ -151,10 +168,21 @@ class JvmAggregateBenchmark {
               assertTrue(
                   metrics.nativeOperators().isEmpty(),
                   "fallback control executed native operators");
-            if (engine == 1 && (!jvm || expectedUdf))
+            if (engine == 1 && (!jvm || expectedUdf)) {
               RecoveryExecutionMetrics.assertConsumed(
                   metrics.nativeOperators(),
                   jvm ? "NativeJvmGroup" : "NativeColumnarGroupAggregate");
+              if (legacy) {
+                var jobs =
+                    metrics.nativeOperators().stream()
+                        .map(row -> row.get("jobId").toString())
+                        .collect(java.util.stream.Collectors.toSet());
+                for (String boundary : new String[] {"RowDataToArrow", "ArrowToRowData"})
+                  assertTrue(
+                      jobs.stream().mapToLong(job -> metrics.recordsIn(job, boundary)).sum() > 0,
+                      "legacy job did not consume " + boundary);
+              }
+            }
           }
         }
       }
@@ -192,12 +220,22 @@ class JvmAggregateBenchmark {
   }
 
   private static boolean collectCase(String shape) {
-    return java.util.Set.of("collect", "collect_tinyint", "collect_smallint").contains(shape);
+    return java.util.Set.of("collect", "collect_tinyint", "collect_smallint")
+        .contains(collectionShape(shape));
   }
 
   private static boolean arrayAggCase(String shape) {
-    return java.util.Set.of("array_agg", "array_agg_int", "array_agg_tinyint", "array_agg_smallint")
-        .contains(shape);
+    return java.util.Set.of(
+            "array_agg",
+            "array_agg_int",
+            "array_agg_tinyint",
+            "array_agg_smallint",
+            "array_agg_not_null")
+        .contains(collectionShape(shape));
+  }
+
+  private static String collectionShape(String shape) {
+    return shape.startsWith("legacy_") ? shape.substring("legacy_".length()) : shape;
   }
 
   private void profileCollection(String shape) throws Exception {

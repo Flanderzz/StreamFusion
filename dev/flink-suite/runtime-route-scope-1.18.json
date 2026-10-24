@@ -769,6 +769,48 @@
         "changelog=false": "native",
         "changelog=true": "full_fallback"
       }
+    },
+    {
+      "test": "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testUnboundedGroupByCollect",
+      "display_name": "testUnboundedGroupByCollect[LocalGlobal=OFF, MiniBatch=OFF, StateBackend=HEAP]",
+      "count": 1,
+      "route_by_contract_variant": {
+        "miniBatch=false&changelog=false": "native",
+        "miniBatch=false&changelog=true": "full_fallback"
+      }
+    },
+    {
+      "test": "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testUnboundedGroupByCollect",
+      "display_name": "testUnboundedGroupByCollect[LocalGlobal=OFF, MiniBatch=ON, StateBackend=HEAP]",
+      "count": 1,
+      "route": "full_fallback"
+    },
+    {
+      "test": "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testUnboundedGroupByCollect",
+      "display_name": "testUnboundedGroupByCollect[LocalGlobal=ON, MiniBatch=ON, StateBackend=HEAP]",
+      "count": 1,
+      "route": "full_fallback"
+    },
+    {
+      "test": "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testUnboundedGroupByCollect",
+      "display_name": "testUnboundedGroupByCollect[LocalGlobal=OFF, MiniBatch=OFF, StateBackend=ROCKSDB]",
+      "count": 1,
+      "route_by_contract_variant": {
+        "miniBatch=false&changelog=false": "native",
+        "miniBatch=false&changelog=true": "full_fallback"
+      }
+    },
+    {
+      "test": "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testUnboundedGroupByCollect",
+      "display_name": "testUnboundedGroupByCollect[LocalGlobal=OFF, MiniBatch=ON, StateBackend=ROCKSDB]",
+      "count": 1,
+      "route": "full_fallback"
+    },
+    {
+      "test": "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testUnboundedGroupByCollect",
+      "display_name": "testUnboundedGroupByCollect[LocalGlobal=ON, MiniBatch=ON, StateBackend=ROCKSDB]",
+      "count": 1,
+      "route": "full_fallback"
     }
   ]
 }

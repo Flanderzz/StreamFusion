@@ -38,6 +38,18 @@ operators are also listed in the runtime-route classifier, which still requires 
 nonempty work from successful jobs.
 The agent records the JVM aggregate and table-function operators after successful Arrow-batch
 consumption, using the same consumed-row recorder as the other columnar operators.
+
+The unchanged SQL `AggregateITCase.testUnboundedGroupByCollect` now has explicit contracts
+and route scopes for all seven 2.2 and six 1.18 variants. Synchronous HEAP/ROCKSDB variants
+require consumed input in the JVM group itself, not merely a Calc; the local runs observe 21
+rows each. The local candidate run
+matches two native/five fallback cases on 2.2 and two native/four fallback cases on 1.18.
+Mini-batch/local-global and async-state variants retain exact fallback reasons; 1.18 additionally
+follows the fixture's observed changelog-state setting. These runs preserve the original fixture
+configuration and source recovery. The suite agent reads the pinned mini-batch mode's `on()`
+boolean through a `miniBatch=true|false` selector; its display string contains an equals sign
+and is not used as a selector value. No upstream test or setting is changed to force a route.
+
 Focused SQL additionally covers container fanout, ownership, failures and repeated recovery;
 the single upstream method does not establish every nested signature by itself.
 
@@ -426,7 +438,7 @@ fixtures require `native` for `changelog=false` and `full_fallback` for `changel
 exact witness is independently checked against the existing execution contract. No upstream test
 configuration is changed to force a preferred route.
 
-The bundled `runtime-route-scope-2.2.json` and `runtime-route-scope-1.18.json` require 16 and 15
+The bundled `runtime-route-scope-2.2.json` and `runtime-route-scope-1.18.json` require 115 and 95
 verified runtime variants respectively. Run them with:
 
 ```sh
@@ -434,7 +446,7 @@ FLINK_VERSION=2.2.1 FLINK_SUITE_RUNTIME_AUDIT=true bin/flink-suite.sh runtime
 FLINK_VERSION=1.18.1 FLINK_SUITE_RUNTIME_AUDIT=true bin/flink-suite.sh runtime
 ```
 
-The option selects the eight upstream methods, enables fresh SQL inventory collection/reporting,
+The option selects the scope's upstream methods (25 on 2.2 and 24 on 1.18), enables fresh SQL inventory collection/reporting,
 and applies the appropriate scope automatically. Add `FLINK_SUITE_REUSE_BUILD=true` after a
 compatible suite build. A custom `FLINK_SUITE_TEST` selection must still satisfy every required
 variant; omitted variants fail. The audit option requires the runtime suite and cannot be combined
@@ -443,8 +455,8 @@ under the suite workspace. CI runs the audit before the first runtime shard on e
 line, reusing that worker's restored build. It uploads audit evidence before the full shard can
 replace reports. Audit failure fails the worker and the final upstream gate; no extra runners or
 shared-build downloads are added.
-The bundled Flink 2.2.1 command passes 18 cases with all 16 requirements matched; the Flink
-1.18.1 command passes 17 cases with all 15 requirements matched. Both retain two unclassified early returns.
+Each audit must match every listed requirement; missing, duplicate or unclassified required
+variants fail. The execution audit retains the exact matched count and any unrequired early returns.
 The batch `TableSinkITCase#testCollectSinkConfiguration` fixture establishes the host-failure
 route while its expected exception remains a passing upstream test.
 

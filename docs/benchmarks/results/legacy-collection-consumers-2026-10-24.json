@@ -1,0 +1,330 @@
+{
+  "date": "2026-10-24",
+  "hardware": {
+    "cpu": "Intel Core i7-12650H",
+    "os": "Linux x86-64 / WSL2",
+    "jdk": "OpenJDK17.0.20.1"
+  },
+  "native": {
+    "profile": "release",
+    "features": [
+      "mimalloc",
+      "rocksdb-state"
+    ],
+    "sha256": "b574491f08427c8b128107d6286cb403421a0bafbdba7a0e5cdd8fea30562d16",
+    "production_rust_changes": false,
+    "operator_note": "Existing columnar JVM group and released managed state. Only2.2legacy sink preparation/admission changes; no production Rust or ownership protocol changes."
+  },
+  "previous_revision": "1ed09143",
+  "previous_revision_note": "Narrow integer collection candidate before the2.2legacy consumer adapter; identical benchmark source is copied into that checkout.",
+  "benchmark_source_sha256": "676b843d8bf06b6f48c083213f24beb9f52b349b76c843f7fcfc761cccd6ed90",
+  "configuration": {
+    "flink": "2.2.1",
+    "rows": {
+      "legacy_collect": 200000,
+      "legacy_array_agg_not_null": 50000
+    },
+    "parallelism": 1,
+    "key_type": "INT",
+    "groups": [
+      64,
+      4096
+    ],
+    "distinct_values_per_non_null_group": 8,
+    "key": "row modulo groups",
+    "value": "(row/groups) modulo8; NULL when row modulo8=7",
+    "null_note": "Every eighth source value isNULL. COLLECT ignoresNULL elements; ARRAY replaces them with0 viaCOALESCE, retaining aNOTNULL component type. Keys7mod8areallNULL source groups.",
+    "warmups_per_engine": 2,
+    "trials_per_engine": 3,
+    "test_heap_gib": 8,
+    "jvm_accumulator_cache_entries": 0,
+    "key_prefix_note": "Default16 prefix chars unused forINTkeys.",
+    "boundary": "Planning/legacy translation, submission, runtime row source, managed state, both row/Arrow transposes, released external-row conversion, collect transport and client iterator draining; cluster boot/schema setup excluded",
+    "schedule": "alternating stock/native per JVM; separate JVMs per cardinality and phase; no concurrent tests, builds or benchmarks during measurements",
+    "value_types": [
+      "BIGINT COLLECT(v)",
+      "BIGINT NOT NULL ARRAY_AGG(COALESCE(v,CAST(0 AS BIGINT)))"
+    ],
+    "array_length_note": "Arrays grow to781/782elements at64groups and12/13at4096; the8-value input domain doesnot cap length.",
+    "source_value_type": "BIGINT",
+    "consumer": "toRetractStream(query,Row.class).executeAndCollect(); all external insert/retract records drained inside timing"
+  },
+  "trials": [
+    {
+      "phase": "previous",
+      "shape": "legacy_collect",
+      "groups": 64,
+      "stock_seconds": [
+        1.3938062,
+        1.381955024,
+        1.374083853
+      ],
+      "native_seconds": [
+        1.378298126,
+        1.384468674,
+        1.375485429
+      ],
+      "route": "stock fallback, asserted no native work"
+    },
+    {
+      "phase": "previous",
+      "shape": "legacy_collect",
+      "groups": 4096,
+      "stock_seconds": [
+        1.376992998,
+        1.366609521,
+        1.336918337
+      ],
+      "native_seconds": [
+        1.366876576,
+        1.359903691,
+        1.346664858
+      ],
+      "route": "stock fallback, asserted no native work"
+    },
+    {
+      "phase": "previous",
+      "shape": "legacy_array_agg_not_null",
+      "groups": 64,
+      "stock_seconds": [
+        2.211109535,
+        2.205891368,
+        2.210781962
+      ],
+      "native_seconds": [
+        2.183062483,
+        2.201101186,
+        2.189478518
+      ],
+      "route": "stock fallback, asserted no native work"
+    },
+    {
+      "phase": "previous",
+      "shape": "legacy_array_agg_not_null",
+      "groups": 4096,
+      "stock_seconds": [
+        0.558263568,
+        0.542521941,
+        0.537402362
+      ],
+      "native_seconds": [
+        0.59111651,
+        0.554804816,
+        0.553129004
+      ],
+      "route": "stock fallback, asserted no native work"
+    },
+    {
+      "phase": "current",
+      "shape": "legacy_collect",
+      "groups": 64,
+      "stock_seconds": [
+        1.413310861,
+        1.367508351,
+        1.376736703
+      ],
+      "native_seconds": [
+        1.347111778,
+        1.347181974,
+        1.333859874
+      ],
+      "route": "consumed NativeJvmGroup and both transposes"
+    },
+    {
+      "phase": "current",
+      "shape": "legacy_collect",
+      "groups": 4096,
+      "stock_seconds": [
+        1.363647981,
+        1.260053248,
+        1.243484111
+      ],
+      "native_seconds": [
+        1.307878934,
+        1.243732133,
+        1.210967246
+      ],
+      "route": "consumed NativeJvmGroup and both transposes"
+    },
+    {
+      "phase": "current",
+      "shape": "legacy_array_agg_not_null",
+      "groups": 64,
+      "stock_seconds": [
+        2.103231919,
+        2.204880277,
+        2.099213718
+      ],
+      "native_seconds": [
+        2.444054633,
+        2.619671729,
+        3.043646128
+      ],
+      "route": "consumed NativeJvmGroup and both transposes"
+    },
+    {
+      "phase": "current",
+      "shape": "legacy_array_agg_not_null",
+      "groups": 4096,
+      "stock_seconds": [
+        0.573536895,
+        0.549518939,
+        0.537020267
+      ],
+      "native_seconds": [
+        0.552483515,
+        0.554459808,
+        0.556154858
+      ],
+      "route": "consumed NativeJvmGroup and both transposes"
+    }
+  ],
+  "cpu_profiles": {
+    "passes": 2,
+    "closed": true,
+    "event": "cpu",
+    "interval": "1ms",
+    "target_seconds_per_capture": 8,
+    "profiler": "async-profiler4.6",
+    "boundary": "One unprofiled native-only complete-job warmup; capture repeated native-only complete jobs until8secondtarget, stopaftercurrentjob. Includesplanning,compilation,collecttransport/client andallJVMthreads. Profiledtimesexcludedfromtrialtable.",
+    "captures": {
+      "legacy_array_agg_not_null-keys64-native": {
+        "total_samples": 24805,
+        "inclusive_method_samples": {
+          "NativeColumnarJvmGroupOperator.ingest": 8102,
+          "NativeColumnarJvmGroupOperator.append": 7030,
+          "GroupAggFunction.processElement": 7990,
+          "CollectAggFunction.getValue": 0,
+          "ArrayAggFunction.getValue": 733,
+          "MapWriter.doWrite": 0,
+          "ArrayWriter.doWrite": 508,
+          "LinkedList.toArray": 734,
+          "CollectResultIterator": 5666,
+          "ArrayDataSerializer.copy": 165
+        },
+        "top_self_samples": {
+          "java/io/DataOutputStream.writeLong_[i]": 5433,
+          "java/io/DataInputStream.readUnsignedByte_[i]": 2714,
+          "java/io/ByteArrayInputStream.read_[j]": 2406,
+          "java/util/LinkedList.toArray_[i]": 731,
+          "_raw_spin_unlock_irqrestore_[k]": 679,
+          "java/util/Arrays.setAll_[j]": 416,
+          "jbyte_disjoint_arraycopy": 281,
+          "IndexSetIterator::advance_and_next": 272,
+          "jlong_disjoint_arraycopy": 216,
+          "/usr/lib/x86_64-linux-gnu/libc.so.6": 193
+        }
+      },
+      "legacy_collect-keys4096-native": {
+        "total_samples": 21768,
+        "inclusive_method_samples": {
+          "NativeColumnarJvmGroupOperator.ingest": 4116,
+          "NativeColumnarJvmGroupOperator.append": 2702,
+          "GroupAggFunction.processElement": 4012,
+          "CollectAggFunction.getValue": 389,
+          "ArrayAggFunction.getValue": 0,
+          "MapWriter.doWrite": 296,
+          "ArrayWriter.doWrite": 0,
+          "LinkedList.toArray": 0,
+          "CollectResultIterator": 2184,
+          "ArrayDataSerializer.copy": 0
+        },
+        "top_self_samples": {
+          "java/io/ByteArrayInputStream.read_[j]": 1537,
+          "org/apache/flink/api/common/typeutils/base/MapSerializer.serialize_[i]": 775,
+          "_raw_spin_unlock_irqrestore_[k]": 551,
+          "do_syscall_64_[k]": 418,
+          "java/util/HashMap.putVal_[i]": 392,
+          "org/apache/flink/core/memory/MemorySegment.equalTo_[i]": 360,
+          "read": 353,
+          "G1ParScanThreadState::trim_queue_to_threshold": 350,
+          "java/io/DataInputStream.readInt_[i]": 342,
+          "IndexSetIterator::advance_and_next": 280
+        }
+      }
+    },
+    "limitations": "Inclusive counts overlap; append includes chained downstream work. Counts are not allocation counts or copied bytes."
+  },
+  "load_monitor": {
+    "interval_seconds": 2,
+    "external_workloads_observed_during_trials": 0,
+    "external_workloads_observed_during_profiles": 0,
+    "raw_matrix_observations": 2,
+    "observation_note": "Both raw observations are this matrix ownMaven shell startup commands atphase launch, before firstwarmup/timing. Commands matched the matrix case/library/expectedroute settings. They are not concurrent foreign workloads.",
+    "matrix_start_epoch_seconds": 1792864406.668328,
+    "matrix_end_epoch_seconds": 1792864597.1962235,
+    "phase_intervals": [
+      {
+        "phase": "current",
+        "start_epoch_seconds": 1792864426.7359614,
+        "end_epoch_seconds": 1792864512.9709573,
+        "exit_code": 0
+      },
+      {
+        "phase": "previous",
+        "start_epoch_seconds": 1792864512.9709716,
+        "end_epoch_seconds": 1792864597.1962173,
+        "exit_code": 0
+      }
+    ]
+  },
+  "validation": {
+    "flink2.2.1": {
+      "passed": 267,
+      "skipped": 0
+    },
+    "flink1.18.1": {
+      "passed": 208,
+      "skipped": 59
+    },
+    "agent": {
+      "passed": 56,
+      "skipped": 1
+    },
+    "scope_unit_tests": 6,
+    "summary_unit_tests": 25,
+    "upstream": {
+      "method": "AggregateITCase#testUnboundedGroupByCollect",
+      "flink2.2.1": {
+        "passed": 7,
+        "native": 2,
+        "fallback": 5
+      },
+      "flink1.18.1": {
+        "passed": 6,
+        "native": 2,
+        "fallback": 4
+      },
+      "scope_requirements": {
+        "2.2": 115,
+        "1.18": 95
+      },
+      "note": "Originalsource, assertions andfixtureconfiguration unchanged; bothnewscope subsets validate.1.18changelogfalse observed inlocalnativecases;conditionaltruefallbackretained incontracts.",
+      "provenance": "Releasedupstream compiledbuild fromcanonicalCI virtualrevisionf7d71d1249a53846ec3ee293fb9e85218951ff07, replacedonlyStreamFusioncorewithproperlypackagedcandidateandnewagent. CIdebugnative libraryrequiresGLIBC2.38 unavailablelocally;correctnessusesverifiedlocalrelease/mimalloc/rocksdb librarywithidenticalproductionRust (onlybenchchanges sincefrozen source),developmentstampmodeenabled.",
+      "observed_native_work_per_synchronous_backend_variant": {
+        "NativeCalcOperator": 21,
+        "NativeColumnarJvmGroupOperator": 21
+      }
+    },
+    "coverage": [
+      "four integer widths and direct verified collection-group input",
+      "ordered external insert/retract rows, NULLs, DISTINCT andNOTNULL COALESCE elements",
+      "NULLarray containers withIGNORENULLS, emptyglobal anddisabledruntime",
+      "canonicalcharacter groupingkeys andparallelism1/3",
+      "consumedgroup/nativecalc/transposes andmemoryrelease",
+      "existing collection/typedJVMaggregate/cast/UNNEST/producer/sink regressions"
+    ]
+  },
+  "scope": {
+    "admitted": "2.2legacy row sinks with direct input accepted by existingintegerCOLLECT/ARRAY_AGG groupgate; capturehostproven keys andneedRetraction beforeArrow rewrite.1.18keeps its existingpreparedlegacy path.",
+    "retained_fallback": [
+      "finalCalc orotherunverified sensitiveproducer/consumer chains",
+      "unverifiedelementtypes ornon-scalar aggregateinputs",
+      "character aggregate results",
+      "mini-batch/local-global/async-state and1.18changelog-state exclusions",
+      "updating MAP/MULTISET retained payloads in#437"
+    ],
+    "not_applicable": "ARRAY_AGG absent onreleased1.18.1."
+  },
+  "conclusion": "COLLECT medians are lower than pairedstock/prior fallback; process controls drift and wide-group ranges overlap, so no sustainedacceleration claim. Growing NOTNULL ARRAY at64groups is slower thanstock/prior;4096group medians areclose. TwoCPUcaptures identifyserialization/clientcollection asmajor costs, with remaining state/snapshots/output work. No safe small change identified within the boundedpasses. Accepted collectiontradeoff; furtherperformance in#239."
+}

@@ -104,7 +104,8 @@ class NativeExecutionTest {
   @ValueSource(booleans = {false, true})
   void splitDistinctCannotBeProvenByCalcOrSinglePhaseWork(boolean calcOnly) {
     NativeExecution.Scope scope = NativeExecution.begin(WINDOW, new WindowFixture(true));
-    Object operator = calcOnly ? new NativeCalcOperator() : new NativeColumnarWindowAggregateOperator();
+    Object operator =
+        calcOnly ? new NativeCalcOperator() : new NativeColumnarWindowAggregateOperator();
     NativeExecution.opened(operator);
     NativeExecution.completed(operator, 5);
     assertThrows(AssertionError.class, () -> NativeExecution.finish(scope));
@@ -239,6 +240,58 @@ class NativeExecutionTest {
     }
   }
 
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  void selectorsReadThePinnedMiniBatchModeInsteadOfItsDisplayName(boolean enabled) {
+    class Fixture {
+      private final FakeMiniBatchMode miniBatch = new FakeMiniBatchMode(enabled);
+      private final boolean enableAsyncState = false;
+    }
+    var fixture = new Fixture();
+    assertTrue(
+        NativeExecution.matches("miniBatch=" + enabled + "&enableAsyncState=false", fixture));
+    assertFalse(NativeExecution.matches("miniBatch=" + !enabled, fixture));
+    assertThrows(
+        AssertionError.class, () -> NativeExecution.matches("miniBatch=true", new Object()));
+  }
+
+  public static final class FakeMiniBatchMode {
+    private final boolean enabled;
+
+    FakeMiniBatchMode(boolean enabled) {
+      this.enabled = enabled;
+    }
+
+    public boolean on() {
+      return enabled;
+    }
+
+    @Override
+    public String toString() {
+      return "MiniBatch=" + (enabled ? "ON" : "OFF");
+    }
+  }
+
+  @Test
+  void collectRequiresItsOwnConsumedGroupWork() {
+    class Fixture {
+      private final FakeMiniBatchMode miniBatch = new FakeMiniBatchMode(false);
+      private final boolean enableAsyncState = false;
+    }
+    String test =
+        "org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testUnboundedGroupByCollect";
+    var first = NativeExecution.begin(test, new Fixture());
+    Object calc = new NativeCalcOperator();
+    NativeExecution.opened(calc);
+    NativeExecution.completed(calc, 21);
+    assertThrows(AssertionError.class, () -> NativeExecution.finish(first));
+    var second = NativeExecution.begin(test, new Fixture());
+    Object group = new NativeColumnarJvmGroupOperator();
+    NativeExecution.opened(group);
+    NativeExecution.completed(group, 21);
+    NativeExecution.finish(second);
+  }
+
   public static final class FakeJavaEnvironment {
     private final boolean enabled;
 
@@ -254,6 +307,8 @@ class NativeExecutionTest {
   private static class NativeCalcOperator {}
 
   private static class NativeColumnarGroupAggregateOperator {}
+
+  private static class NativeColumnarJvmGroupOperator {}
 
   private static class NativeColumnarTopNOperator {}
 
