@@ -28,6 +28,7 @@ final class CollectionValueIdentity {
     return type.getSqlTypeName() == SqlTypeName.ROW
         || type.getSqlTypeName() == SqlTypeName.STRUCTURED
         || type.getSqlTypeName() == SqlTypeName.MAP
+        || type.getSqlTypeName() == SqlTypeName.MULTISET
         || type.getSqlTypeName() == SqlTypeName.ARRAY && !type.getComponentType().isNullable()
         || type.getComponentType() != null && requiresCopySemantics(type.getComponentType())
         || type.getKeyType() != null && requiresCopySemantics(type.getKeyType())

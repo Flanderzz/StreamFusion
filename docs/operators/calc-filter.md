@@ -1747,7 +1747,9 @@ keys and MULTISET elements must be declared non-null; nullable forms retain fall
 including inside ARRAY/ROW. Nested fixed BINARY leaves retain their existing restriction.
 Programs containing admitted collection functions or runtime constructors can instead use the
 broader [generated collection route](#collection-expressions), including `ROW(m)` with a typed MAP.
-Its representation and boundary gates apply to the complete program.
+Its representation and boundary gates apply to the complete program. These collection-preserving
+programs also admit nullable MULTISET elements inside ROW/ARRAY constructors; standalone
+JSON_STRING retains the non-null-element gate above.
 Constructing containers internally is allowed when the resulting boundary types are
 admitted. Unsupported host code generation
 and UDF signatures retain explicit fallback. Flink 2.2.1 rejects dynamic JSON_EXISTS paths;
@@ -2337,12 +2339,28 @@ collection aggregates, cast signatures and representation boundaries outside thi
 Standalone CAST and TRY_CAST between arrays of TINYINT, SMALLINT, INT, BIGINT and DECIMAL evaluate
 in Rust. Every array level must have nullable elements, with matching nesting depth. This uses
 the existing default-enabled collection option; no additional switch is required. Other verified
-standalone ARRAY-to-ARRAY, MAP-to-MAP and ROW-to-ROW casts now enter the same generated Flink
+standalone ARRAY-to-ARRAY, MAP-to-MAP, MULTISET-to-MULTISET and ROW-to-ROW casts now enter the same generated Flink
 program used when a collection constructor or function is present. STRING, floating, temporal
 and NOT NULL-element conversions keep Flink's conversion rules and resolved types. The bridge's
 type gates and the representation-boundary restrictions above still apply; this does not admit
-external STRUCTURED inputs or NOT NULL fixed BINARY MAP keys/values.
+external STRUCTURED inputs, direct fixed BINARY MULTISET elements or NOT NULL fixed BINARY MAP keys/values.
 The existing DECIMAL-to-FLOAT/DOUBLE ARRAY CAST also retains its Rust path.
+
+MULTISET casts reuse Flink's generated map-shaped evaluator and the existing Arrow
+`MAP<element,INT NOT NULL>` transport. Nullable elements and containers, multiplicities, empty
+multisets, narrowing collisions, nested ROW/ARRAY elements and DECIMAL conversion retain the
+released rules, including legacy formatting and whole-container TRY_CAST failures. Counts are
+carried without recomputing, merging or expanding them. Flink's generated cast keeps its map construction and collision semantics; no new multiset
+aggregation implementation is implied.
+Runtime sources require consumed NativeCalc work on both supported releases, including all
+four input changelog kinds, filtered/CASE paths and empty batches. Direct BINARY elements
+remain guarded. MULTISET outputs use the same final row-sink/fused-consumer restriction as
+MAP outputs; unverified state, exchange, ordering and native-writer boundaries still fall back.
+The updating MAP/MULTISET payload extension in
+[#437](https://github.com/datafusion-contrib/StreamFusion/issues/437) remains deferred.
+[Release comparisons](../benchmarks/scalar-functions.md#multiset-casts) document the accepted
+collection tradeoff and the two-pass optimization limit. COLLECT and ARRAY_AGG remain separate
+[aggregate coverage](group-by.md).
 
 The conversion follows the recursive list structure used by Comet, preserving NULL containers,
 NULL elements and the resolved target schema. Integer widening uses Arrow; integer narrowing
@@ -2374,7 +2392,7 @@ The new generated standalone casts and SPLIT signatures have separate
 
 ### Collection casts to character types
 
-Standalone ARRAY/MAP casts to STRING, VARCHAR and CHAR also select this generated program;
+Standalone ARRAY/MAP/MULTISET casts to STRING, VARCHAR and CHAR also select this generated program;
 ROW-to-character casts retain their existing whole-Calc route. Flink supplies brackets, map entry
 order, nested formatting, NULL spellings, CHAR padding and VARCHAR truncation for the selected
 legacy-cast setting. Bounded casts count Java UTF-16 units, including truncation between surrogate

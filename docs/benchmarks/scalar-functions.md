@@ -2037,3 +2037,67 @@ sources and adds `-Dscalar.native.expected=false`. For the two CPU captures, sel
 `-Dscalar.warmup=1 -Dscalar.seconds=8 -Dprofile.asprof=/path/to/asprof`.
 From `native/`, run `cargo bench -p streamfusion --bench collection_expressions --features mimalloc
 --locked -j2 -- binary_map_keys --test` for the Rust fixtures.
+
+## MULTISET casts
+
+Standalone MULTISET-to-MULTISET and MULTISET-to-STRING/VARCHAR/CHAR CAST and TRY_CAST use the
+existing generated collection evaluator and map-shaped Arrow transport. Nullable elements,
+counts, nested ROW/ARRAY elements, DECIMAL conversion, legacy formatting and whole-container
+TRY_CAST failures retain released Flink semantics. Direct fixed BINARY elements, external
+STRUCTURED inputs and unverified representation boundaries retain fallback. COLLECT and
+ARRAY_AGG are separate remaining coverage; updating retained MAP/MULTISET payload work in
+[#437](https://github.com/datafusion-contrib/StreamFusion/issues/437) stays deferred.
+
+Release/mimalloc measurements on 2026-10-24 use Flink 2.2.1, OpenJDK 17.0.20.1 and Linux
+x86-64/WSL2 on an Intel Core i7-12650H. Each complete job has 250,000 runtime-source rows,
+parallelism 1, an 8 GiB test heap, two warmups and three alternating trials per engine. Inputs
+have 4/32 entries: INT keys `i*257` with counts `i%3+1`, followed by a NULL key with count 3.
+Every eighth parent is NULL. An ordered internal GenericMapData source shares the prepared,
+immutable key/count map across its rows and registers it using public InternalTypeInfo.
+
+Timing includes planning, submission, source, both row/Arrow transposes and a blackhole row sink;
+cluster setup and initial explain are outside timing. Measurements run without concurrent tests,
+native compilation or other benchmarks. The previous-code checkout is the PR #476 tree measured
+at `d48fba98`, with identical benchmark/input code and the same native DSO. Both new expressions
+must fall back there; source-matched identity controls still require a native plan.
+The [full trial summary](results/multiset-casts-2026-10-24.json) retains both stock controls,
+identity controls and CPU diagnostics. CSV `multiset_entries` records the selected cardinality;
+text-fixture defaults such as `payload_bytes=264` are unused for this input.
+
+Median seconds (minimum–maximum), retaining complete-job startup costs:
+
+| Expression / entries | Paired stock | Previous fallback | Final native route |
+| --- | ---: | ---: | ---: |
+| INT → BIGINT elements / 4 | 0.185376 (0.182766–0.187421) | 0.191836 (0.188395–0.199897) | 0.253451 (0.246239–0.261849) |
+| MULTISET → STRING / 4 | 0.226101 (0.219468–0.252986) | 0.224224 (0.216410–0.229614) | 0.287859 (0.286316–0.290994) |
+| INT → BIGINT elements / 32 | 0.466856 (0.462920–0.470641) | 0.456071 (0.454004–0.466342) | 0.756280 (0.752158–0.756718) |
+| MULTISET → STRING / 32 | 0.491673 (0.479175–0.542994) | 0.493186 (0.480225–0.510621) | 0.718291 (0.713210–0.727207) |
+
+All final native cases are slower than stock and previous fallback under the accepted collection
+tradeoff. These short complete jobs do not establish sustained throughput or standalone acceleration.
+No new performance-only opt-in is added.
+
+Optimization stops after two profiling/optimization passes. The eight-second numeric-cast CPU
+capture has 12,872 samples, including 3,793 inclusive callback samples, 2,209 in generated evaluation,
+2,812 in map serialization and 2,277 in Arrow map writing. The second eight-second capture, for
+formatting, has 15,115 samples, including 4,007 in the callback, 3,303 in generated evaluation, 1,907
+in map serialization and 908 in Arrow map writing. Inclusive counts overlap and include planning
+and compilation; they do not measure allocation counts or copied bytes. No safe small shortcut
+was identified that preserves released cast/copy semantics. Further serialization, formatting
+and conversion work stays in [#392](https://github.com/datafusion-contrib/StreamFusion/issues/392).
+No production Rust kernel or JNI ownership protocol changes in this increment.
+
+Reproduce both cardinalities with a release native build:
+
+```sh
+SF_BENCHMARK=true mvn -pl streamfusion-runtime test -Pbench \
+  '-Dtest=ScalarFunctionBenchmark#individualFunctions' -Dsf.testForks=1 \
+  -Dscalar.functions=MULTISET_CAST,MULTISET_FORMAT_STRING \
+  -Dscalar.rows=250000 -Dscalar.multiset.entries=32 -Dscalar.nullEvery=8 \
+  -Dscalar.warmup=2 -Dscalar.runs=3
+```
+
+Also run with `-Dscalar.multiset.entries=4`. The previous checkout copies the same benchmark
+and input sources and adds `-Dscalar.native.expected=false`. For each of the two CPU captures,
+select `#profileFunction`, set `SF_PROFILE_SCALAR=true`, choose one function, and use
+`-Dscalar.warmup=1 -Dscalar.seconds=8 -Dprofile.asprof=/path/to/asprof`.

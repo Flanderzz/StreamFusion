@@ -837,7 +837,7 @@ final class RexExpression {
         break;
       case MULTISET:
         nested =
-            !type.getComponentType().isNullable()
+            (preserveCollections || !type.getComponentType().isNullable())
                 && type.getComponentType().getSqlTypeName() != SqlTypeName.BINARY
                 && rowCalcTypeCode(type.getComponentType(), preserveCollections) >= 0;
         break;
@@ -1066,7 +1066,8 @@ final class RexExpression {
                 == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.TRY_CAST)
         && call.getOperands().size() == 1) {
       var source = call.getOperands().get(0).getType().getSqlTypeName();
-      return Set.of(SqlTypeName.ARRAY, SqlTypeName.MAP, SqlTypeName.ROW).contains(source)
+      return Set.of(SqlTypeName.ARRAY, SqlTypeName.MAP, SqlTypeName.MULTISET, SqlTypeName.ROW)
+              .contains(source)
           && (source == call.getType().getSqlTypeName() || isCharacter(call));
     }
     if (!"SPLIT".equals(call.getOperator().getName())
