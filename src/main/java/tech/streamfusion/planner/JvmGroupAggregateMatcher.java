@@ -21,23 +21,29 @@ final class JvmGroupAggregateMatcher {
       var call = node.aggCalls().apply(i);
       if (userFunction(call.getAggregation()) != null
           || call.getAggregation()
-              == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.COLLECT)
+              == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.COLLECT
+          || tech.streamfusion.compat.FlinkCompat.isBuiltinArrayAgg(call.getAggregation()))
         return true;
     }
     return false;
   }
 
-  private static boolean integerCollect(
+  private static boolean integerCollectionAggregate(
       StreamPhysicalGroupAggregate node, org.apache.calcite.rel.core.AggregateCall call) {
-    if (call.getAggregation()
-            != org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.COLLECT
+    boolean collect =
+        call.getAggregation()
+            == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.COLLECT;
+    if ((!collect && !tech.streamfusion.compat.FlinkCompat.isBuiltinArrayAgg(call.getAggregation()))
         || call.getArgList().size() != 1) return false;
     var value = node.getInput().getRowType().getFieldList().get(call.getArgList().get(0)).getType();
     return java.util.Set.of(
                 org.apache.calcite.sql.type.SqlTypeName.INTEGER,
                 org.apache.calcite.sql.type.SqlTypeName.BIGINT)
             .contains(value.getSqlTypeName())
-        && call.getType().getSqlTypeName() == org.apache.calcite.sql.type.SqlTypeName.MULTISET
+        && call.getType().getSqlTypeName()
+            == (collect
+                ? org.apache.calcite.sql.type.SqlTypeName.MULTISET
+                : org.apache.calcite.sql.type.SqlTypeName.ARRAY)
         && call.getType().getComponentType().getSqlTypeName() == value.getSqlTypeName();
   }
 
@@ -62,8 +68,9 @@ final class JvmGroupAggregateMatcher {
     if (!JvmFunctionTypes.scalarRow(node.getInput().getRowType())) return false;
     for (int i = 0; i < node.aggCalls().size(); i++) {
       var call = node.aggCalls().apply(i);
-      if (!JvmFunctionTypes.scalar(call.getType()) && !integerCollect(node, call)) return false;
-      if (integerCollect(node, call)
+      if (!JvmFunctionTypes.scalar(call.getType()) && !integerCollectionAggregate(node, call))
+        return false;
+      if (integerCollectionAggregate(node, call)
           && node.getRowType().getFieldList().stream()
               .anyMatch(field -> JsonStringIdentity.containsCharacter(field.getType())))
         return false;
@@ -82,8 +89,8 @@ final class JvmGroupAggregateMatcher {
   }
 
   static String unsupportedReason(StreamPhysicalGroupAggregate node) {
-    return "GROUP BY: JVM aggregates require verified scalar fields or integer COLLECT with"
-               + " non-character results and synchronous single-phase execution without"
+    return "GROUP BY: JVM aggregates require verified scalar fields or integer COLLECT/ARRAY_AGG"
+               + " with non-character results and synchronous single-phase execution without"
                + " mini-batching, specialization, approximate or ordered calls";
   }
 

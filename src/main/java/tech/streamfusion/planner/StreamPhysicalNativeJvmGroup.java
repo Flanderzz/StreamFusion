@@ -51,8 +51,10 @@ public final class StreamPhysicalNativeJvmGroup extends StreamPhysicalNativeSing
     return getRowType().getFieldList().stream()
         .anyMatch(
             field ->
-                field.getType().getSqlTypeName()
-                    == org.apache.calcite.sql.type.SqlTypeName.MULTISET);
+                java.util.Set.of(
+                        org.apache.calcite.sql.type.SqlTypeName.MULTISET,
+                        org.apache.calcite.sql.type.SqlTypeName.ARRAY)
+                    .contains(field.getType().getSqlTypeName()));
   }
 
   @Override
