@@ -56,6 +56,9 @@ SF_BENCHMARK=true mvn -pl streamfusion-runtime test -Pbench \
 Also run with `-Djvmagg.keys=4096`. The previous checkout copies the same benchmark source and
 sets `-Djvmagg.expectNative=false`. The optional `jvmagg.values` bounds the per-key input domain;
 zero retains the existing monotonically increasing fixture used by the other aggregate cases.
+The diagnostic result parser records this domain size and accepts older summaries without
+`values`, treating them as the original unbounded domain (`0`). Trial-count, positivity and
+reported-median checks apply to both formats.
 For each CPU capture, set `SF_PROFILE_JVM_AGG=true`, select `#profileCollect`, keep the same
 case/input/route settings and pass `-Djvmagg.seconds=8 -Dprofile.asprof=/path/to/asprof`.
 `jvmagg.engine=flink|native|both` selects a timing engine; profile mode temporarily selects native
