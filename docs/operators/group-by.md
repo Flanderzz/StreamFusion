@@ -2585,3 +2585,31 @@ from nonempty prefixes and release native memory. Updating MULTISET rank payload
 [Release comparisons](../benchmarks/collection-aggregates.md#small-integer-elements) retain
 full state, conversions and source/sink costs. Each increment allows at most two profiling
 passes; slower results use the accepted collection tradeoff without an acceleration claim.
+
+## Legacy row consumers
+
+Verified integer COLLECT and Flink 2.2 ARRAY_AGG results can leave a direct single-phase
+group through a legacy row sink, including the Java `toRetractStream` API. The 2.2 adapter
+qualifies only direct groups accepted by the existing scalar-input, integer-element and
+non-character aggregate-result gates. A final Calc, unverified represented consumer or
+unsupported aggregate shape keeps its existing fallback. Flink 1.18 retains its prepared
+legacy sink path; ARRAY_AGG remains N/A there.
+
+The adapter captures Flink's host-proven upsert keys and retraction requirement before
+replacing the input with an Arrow island. The original released sink/converters still
+consume RowData at the exit. This preserves host metadata rather than asking Flink to derive
+it again from native physical nodes. No native connector, state codec or ownership protocol
+is added. Updating MAP/MULTISET payloads in [#437](https://github.com/datafusion-contrib/StreamFusion/issues/437)
+remain deferred.
+
+Runtime-source checks cover ordered external insert/retract rows, all four integer widths,
+NULLs and NULL array containers, DISTINCT, NOT NULL arrays via COALESCE, canonical string
+keys, parallelism 1/3, empty global inputs, disabled runtime fallback and memory release.
+The unchanged upstream `AggregateITCase.testUnboundedGroupByCollect` additionally preserves
+its original values, source recovery and HEAP/ROCKSDB variants on both releases. Synchronous
+variants require consumed JVM-group work; the local runs observe 21 rows each. Mini-batch/local-global, async-state and
+Flink 1.18 changelog-state exclusions retain exact fallback contracts.
+
+[Upstream execution evidence](../upstream-flink-suite.md) gives the per-variant rules.
+[Complete-job comparisons](../benchmarks/collection-aggregates.md#legacy-row-consumers) retain
+external row conversion/collection, state and both transposes, with at most two profiling passes.

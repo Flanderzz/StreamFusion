@@ -99,3 +99,8 @@ org.apache.flink.table.planner.runtime.stream.table.AggregateITCase#testDistinct
 
 # Released nested-ROW table-function arguments retain their declared converters and native work.
 org.apache.flink.table.planner.runtime.stream.table.CorrelateITCase#testRowType	*	NativeColumnarTableFunctionOperator
+
+org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testUnboundedGroupByCollect	miniBatch=false&changelog=false	NativeColumnarJvmGroupOperator
+org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testUnboundedGroupByCollect	miniBatch=false&changelog=true	!state backend: Flink 1.18 changelog state is not verified for native keyed state
+org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testUnboundedGroupByCollect	miniBatch=true&aggMode=OFF	!GROUP BY: JVM aggregates require verified scalar fields or integer COLLECT/ARRAY_AGG with non-character aggregate results and synchronous single-phase execution without mini-batching, specialization, approximate or ordered calls
+org.apache.flink.table.planner.runtime.stream.sql.AggregateITCase#testUnboundedGroupByCollect	miniBatch=true&aggMode=ON	!local group aggregate: needs SUM/MIN/MAX/COUNT over integer/float/double/decimal values with no widening of the partial, MIN/MAX over string/date/time/boolean/timestamp, AVG over any AvgAggFunction numeric, or SINGLE_VALUE over supported scalar values, and bigint/int/string/boolean/date/timestamp/decimal grouping keys

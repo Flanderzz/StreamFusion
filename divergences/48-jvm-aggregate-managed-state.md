@@ -68,3 +68,10 @@ Their output is the canonical serialized key, rather than a pre-group Java strin
 collection gate therefore checks character aggregate results separately from grouping fields.
 Runtime Unicode/cache/collision, parallel and repeated-recovery evidence qualifies that narrow
 extension without changing key codecs, managed-state ownership or the grouped operator.
+
+The Flink 2.2 legacy consumer adapter follows the existing 1.18 prepared-sink pattern for
+verified direct integer collection groups. It captures host-proven keys and retraction
+metadata before replacing the input, then retains the released row sink and converters.
+The unchanged upstream COLLECT fixture qualifies both backend routes with consumed JVM
+group rows and explicit exclusions. This changes the exit admission/metadata boundary,
+not the grouped operator, state layout or Arrow/JNI ownership protocol.

@@ -12,7 +12,7 @@ to Flink entirely, per the [all-or-nothing island rule](index.md#the-all-or-noth
 | `GroupTableAggregate` | `TableAggregateFunction` | No native path. |
 | `Values` | Constant relations | No native path. (A non-temporal `Sort` is parity, not a gap — Flink itself rejects it in streaming.) |
 | `DeltaJoin` | A join Flink rewrites into a delta join under `table.optimizer.delta-join.strategy` | No native path. A block containing a delta join is not rejected by the `FORCE` guard, but ordinary admission and island checks still apply; `DeltaJoin` remains unsupported. Under `FORCE`, a block containing an ordinary join and *no* delta join is left unchanged so Flink can perform its statement-wide validation — see [Global switches](index.md#global-switches). |
-| `LegacyTableSourceScan`, `LegacySink` | Legacy (pre-`DynamicTableSource`/`Sink`) connectors | No native path. |
+| `LegacyTableSourceScan`, `LegacySink` | Legacy (pre-`DynamicTableSource`/`Sink`) connectors | The connectors stay on Flink. Verified direct integer collection groups may feed a legacy row sink through a transpose; see [Legacy row consumers](group-by.md#legacy-row-consumers). Other unverified legacy boundaries retain fallback. |
 | `Python*` (`PythonCalc`, `PythonCorrelate`, `PythonGroupAggregate`, `PythonOverAggregate`, …) | PyFlink UDFs | No native path — a Python UDF can't run inside a native island. |
 
 Pattern matching, including `MATCH_ROWTIME` and `MATCH_PROCTIME`, is tracked in
