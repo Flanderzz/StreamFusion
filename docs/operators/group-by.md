@@ -835,7 +835,7 @@ route on both supported JDKs, and check helpful JVM null-dereference text when i
 ## Type support
 
 The separate [integer COLLECT](#integer-collect) and [integer ARRAY_AGG](#integer-array_agg) routes
-admit INT/BIGINT through released JVM handlers. The table below describes the arithmetic native accumulators.
+admit TINYINT/SMALLINT/INT/BIGINT through released JVM handlers. The table below describes the arithmetic native accumulators.
 
 The matcher only accelerates `(aggregate, value-type)` pairs where DataFusion's native arithmetic
 agrees byte-for-byte with Flink's — this table is that guardrail; anything marked ✗ falls back.
@@ -2494,7 +2494,7 @@ properties to `false` and `true` respectively.
 
 ## Integer COLLECT
 
-COLLECT over INT/BIGINT uses the existing columnar JVM aggregate runtime with released Flink
+COLLECT over TINYINT/SMALLINT/INT/BIGINT uses the existing columnar JVM aggregate runtime with released Flink
 handlers and managed MapViews. Input fields remain scalar, and aggregate result fields cannot
 contain character values. STRING/VARCHAR and CHAR grouping keys use the verified serialized-key
 boundary [described below](#character-grouping-keys). Other COLLECT
@@ -2521,7 +2521,7 @@ The optimization investigation is limited to two profiling/optimization passes p
 
 ## Integer ARRAY_AGG
 
-On released Flink 2.2.1, ARRAY_AGG over INT/BIGINT uses the same single-phase columnar JVM
+On released Flink 2.2.1, ARRAY_AGG over TINYINT/SMALLINT/INT/BIGINT uses the same single-phase columnar JVM
 runtime. Only the exact builtin operator is recognized; user-defined functions with that name
 retain their existing signature gates. Scalar inputs and non-character aggregate result fields
 are required. Character grouping keys use the verified serialized-key boundary below. Other
@@ -2566,3 +2566,22 @@ ARRAY_AGG remains explicitly N/A on 1.18.1.
 string construction, key/state work, source/sink and both transposes. Each increment stops
 optimization after two profiling/optimization passes. Updating MAP/MULTISET payload support
 in [#437](https://github.com/datafusion-contrib/StreamFusion/issues/437) stays deferred.
+
+## Small integer collection elements
+
+TINYINT and SMALLINT join INT/BIGINT in the verified COLLECT and Flink 2.2 ARRAY_AGG
+boundary. Released handlers retain typed byte/short values, managed state and existing
+Arrow batch input/output; no accumulator, key codec or ownership protocol is added. All
+scalar-input, non-character aggregate-result and representation-consumer gates above remain.
+ARRAY_AGG stays explicitly N/A on released Flink 1.18.1.
+
+Direct typed runtime sources verify both signed limits, duplicates, NULL/all-NULL groups,
+DISTINCT/FILTER, ordered update/retract histories, empty grouped/global inputs, formatting and
+valid NOT NULL elements via COALESCE. ARRAY_AGG additionally verifies RESPECT/IGNORE NULLS
+and consumed producer plus native Top-N/UNNEST work. Heap and native RocksDB restore twice
+from nonempty prefixes and release native memory. Updating MULTISET rank payloads keep the
+[#437](https://github.com/datafusion-contrib/StreamFusion/issues/437) fallback.
+
+[Release comparisons](../benchmarks/collection-aggregates.md#small-integer-elements) retain
+full state, conversions and source/sink costs. Each increment allows at most two profiling
+passes; slower results use the accepted collection tradeoff without an acceleration claim.

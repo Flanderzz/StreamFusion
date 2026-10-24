@@ -31,10 +31,15 @@ class JvmAggregateBenchmark {
     boolean expectedUdf = Boolean.parseBoolean(System.getProperty("jvmagg.expectNative", "false"));
     for (String shape : System.getProperty("jvmagg.cases", "udaf,builtin").split(",")) {
       boolean udf = shape.equals("udaf");
-      boolean collect = shape.equals("collect");
-      boolean arrayAgg = java.util.Set.of("array_agg", "array_agg_int").contains(shape);
+      boolean collect = collectCase(shape);
+      boolean arrayAgg = arrayAggCase(shape);
       boolean jvm = udf || collect || arrayAgg;
-      String argument = shape.equals("array_agg_int") ? "CAST(v AS INT)" : "v";
+      String argument =
+          shape.endsWith("_tinyint")
+              ? "CAST(v AS TINYINT)"
+              : shape.endsWith("_smallint")
+                  ? "CAST(v AS SMALLINT)"
+                  : shape.equals("array_agg_int") ? "CAST(v AS INT)" : "v";
       String sql =
           "SELECT k, "
               + (udf ? "test_aggregate" : collect ? "COLLECT" : arrayAgg ? "ARRAY_AGG" : "SUM")
@@ -173,17 +178,26 @@ class JvmAggregateBenchmark {
   @Test
   @EnabledIfEnvironmentVariable(named = "SF_PROFILE_JVM_AGG", matches = "true")
   void profileCollect() throws Exception {
-    profileCollection("collect");
+    String shape = System.getProperty("jvmagg.cases", "collect");
+    assertTrue(collectCase(shape), "profileCollect requires one verified collect case");
+    profileCollection(shape);
   }
 
   @Test
   @EnabledIfEnvironmentVariable(named = "SF_PROFILE_JVM_AGG", matches = "true")
   void profileArrayAgg() throws Exception {
     String shape = System.getProperty("jvmagg.cases", "array_agg");
-    assertTrue(
-        java.util.Set.of("array_agg", "array_agg_int").contains(shape),
-        "profileArrayAgg requires one array_agg or array_agg_int case");
+    assertTrue(arrayAggCase(shape), "profileArrayAgg requires one verified array_agg case");
     profileCollection(shape);
+  }
+
+  private static boolean collectCase(String shape) {
+    return java.util.Set.of("collect", "collect_tinyint", "collect_smallint").contains(shape);
+  }
+
+  private static boolean arrayAggCase(String shape) {
+    return java.util.Set.of("array_agg", "array_agg_int", "array_agg_tinyint", "array_agg_smallint")
+        .contains(shape);
   }
 
   private void profileCollection(String shape) throws Exception {

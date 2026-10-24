@@ -51,7 +51,7 @@ Integer COLLECT reuses this same released handler/managed MapView boundary. Arro
 aggregate planner and vector-collecting UDAF adapter were consulted before the extension.
 Flink's COLLECT exposes incremental multiplicities, retractions and managed DataView state;
 retaining its handler avoids introducing a second multiset accumulator or checkpoint codec.
-The first admission covers only INT/BIGINT elements with scalar inputs and non-character
+The verified boundary covers TINYINT/SMALLINT/INT/BIGINT elements with scalar inputs and non-character
 aggregate result fields. Collection results require a verified preserving Calc or final row sink;
 other value types and unverified state/writer boundaries retain fallback.
 This builtin coverage uses the maintainer's bounded collection-performance tradeoff, with

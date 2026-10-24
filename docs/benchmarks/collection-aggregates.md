@@ -3,9 +3,9 @@
 ## Integer COLLECT
 
 COLLECT(INT/BIGINT) reuses the released Flink handler and managed MapViews inside the existing
-columnar JVM grouped operator. Scalar inputs and non-character aggregate result fields are required; character grouping keys
-are covered below.
-other COLLECT types remain on fallback; integer ARRAY_AGG is covered below. Results require a verified preserving Calc
+columnar JVM grouped operator. Scalar inputs and non-character aggregate result fields are
+required; character grouping keys and the TINYINT/SMALLINT extension are covered below. Other
+COLLECT types retain fallback. Results require a verified preserving Calc
 or final row sink. [Coverage](../operators/group-by.md#integer-collect) gives the exact gates.
 
 Release/mimalloc measurements on 2026-10-24 use Flink 2.2.1, OpenJDK 17.0.20.1 and Linux
@@ -180,3 +180,60 @@ rows and 50000 ARRAY_AGG rows, `values=8`, two warmups and three trials. Compare
 benchmark source against `1296aa62` with `expectNative=false`; current requires `true`.
 For profiles select `#profileCollect` at 4096 keys or `#profileArrayAgg` at 64 keys with the same
 STRING inputs, `SF_PROFILE_JVM_AGG=true` and `jvmagg.seconds=8`.
+
+## Small integer elements
+
+TINYINT/SMALLINT COLLECT and Flink 2.2 ARRAY_AGG reuse the same released handlers, state
+and columnar grouped operator. [Coverage](../operators/group-by.md#small-integer-collection-elements)
+records typed-source limits, NULLs, changelog histories, consumer work and repeated recovery.
+The broad matrix passes 253 checks on Flink 2.2.1 and 202 with 51 version skips on 1.18.1.
+
+The release library, host and complete-job boundary above are retained. COLLECT uses 200,000
+rows and ARRAY_AGG 50,000; INT keys have 64/4096 groups. Runtime BIGINT values cycle through
+eight values per group, with every eighth value NULL, then pass through a TINYINT/SMALLINT CAST
+before grouping on both engines. Both perimeter transposes, the native Calc cast, managed
+state, source/sink and planning/submission remain in the native timing. Arrays still grow to
+781/782 or 12/13 elements; the eight-value domain does not cap their length. Parallelism is one,
+heap 8 GiB, accumulator cache 0, with two warmups and three alternating trials per engine.
+No local tests/builds/other benchmarks overlap measurements.
+
+Prior candidate `083ee5cf` uses identical benchmark source and the same frozen native DSO,
+with verified whole-query stock fallback. Candidate runs require consumed NativeJvmGroup work.
+The [artifact](results/small-integer-collections-2026-10-24.json) retains all trials, including
+paired stock controls for each prior JVM, configuration and benchmark-source checksum.
+
+Median seconds (minimum–maximum):
+
+| Shape | Element | Groups | Paired stock | Previous fallback | Native route |
+| --- | --- | ---: | ---: | ---: | ---: |
+| COLLECT | TINYINT | 64 | 0.384040 (0.377551–0.426808) | 0.409516 (0.378629–0.477743) | 0.450483 (0.395221–0.462711) |
+| COLLECT | SMALLINT | 64 | 0.334492 (0.303697–0.373923) | 0.308490 (0.304946–0.390241) | 0.316711 (0.316301–0.317838) |
+| COLLECT | TINYINT | 4096 | 0.419148 (0.395668–0.439195) | 0.473465 (0.460230–0.479073) | 0.444146 (0.427199–0.493480) |
+| COLLECT | SMALLINT | 4096 | 0.359677 (0.332119–0.360388) | 0.353041 (0.351100–0.427021) | 0.369802 (0.351690–0.467924) |
+| ARRAY_AGG | TINYINT | 64 | 0.607137 (0.556293–0.666531) | 0.643704 (0.602796–0.664181) | 0.722009 (0.658594–0.729609) |
+| ARRAY_AGG | SMALLINT | 64 | 0.685984 (0.533384–0.710872) | 0.566705 (0.546968–0.574309) | 0.725947 (0.638138–0.746778) |
+| ARRAY_AGG | TINYINT | 4096 | 0.188956 (0.185946–0.216100) | 0.194958 (0.167390–0.200184) | 0.192006 (0.182821–0.213037) |
+| ARRAY_AGG | SMALLINT | 4096 | 0.097794 (0.095426–0.193721) | 0.091185 (0.091072–0.178126) | 0.100762 (0.091968–0.173542) |
+
+Most native medians exceed paired stock. Comparisons with prior fallback vary, and overlapping
+ranges/startup costs prevent a sustained acceleration claim. These costs ship under the
+accepted collection tradeoff; unfavorable results remain in the table.
+
+Optimization stops after two eight-second target CPU captures using the native-only protocol
+above. SMALLINT COLLECT at 4096 groups has 19,872 samples: 3,855 inclusive in released group
+processing, 876 in result snapshots, 1,017 in output append and 356 in Arrow map writing.
+TINYINT ARRAY_AGG at 64 groups has 15,295 samples: 5,153 inclusive in group processing, 3,441
+in result snapshots, 1,121 in append and 483 in array writing; LinkedList.toArray contributes
+3,408 self samples. These overlapping counts cover all JVM threads, planning and compilation;
+they are not allocation or copied-byte counts. No safe small shortcut was identified.
+Managed state, growing result snapshots, output work and startup remain performance follow-ups
+in [#239](https://github.com/datafusion-contrib/StreamFusion/issues/239).
+
+For reproduction, select `jvmagg.cases=collect_tinyint,collect_smallint` with `rows=200000`,
+then `array_agg_tinyint,array_agg_smallint` with `rows=50000`; run each at `keys=64` and `4096`.
+Keep `values=8`, two warmups, three trials and all other commands/settings above. Compare the
+same benchmark source against `083ee5cf` with `expectNative=false`; current requires `true`.
+The two captures select `#profileCollect` with
+`-Djvmagg.cases=collect_smallint -Djvmagg.keys=4096`, and `#profileArrayAgg` with
+`-Djvmagg.cases=array_agg_tinyint -Djvmagg.keys=64`. Keep `SF_PROFILE_JVM_AGG=true`,
+`jvmagg.seconds=8` and an async-profiler path as above.
