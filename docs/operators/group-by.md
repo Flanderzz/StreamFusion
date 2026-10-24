@@ -2494,11 +2494,11 @@ properties to `false` and `true` respectively.
 
 ## Integer COLLECT
 
-COLLECT over TINYINT/SMALLINT/INT/BIGINT uses the existing columnar JVM aggregate runtime with released Flink
+COLLECT over TINYINT/SMALLINT/INT/BIGINT and BOOLEAN uses the existing columnar JVM aggregate runtime with released Flink
 handlers and managed MapViews. Input fields remain scalar, and aggregate result fields cannot
 contain character values. STRING/VARCHAR and CHAR grouping keys use the verified serialized-key
 boundary [described below](#character-grouping-keys). Other COLLECT
-value types and nested results retain fallback. Integer ARRAY_AGG additionally runs on Flink 2.2;
+value types and nested results retain fallback. ARRAY_AGG over the same types additionally runs on Flink 2.2;
 it is absent from released Flink 1.18.1. No new native multiset accumulator or state serializer is introduced.
 
 NULL values do not contribute; repeated values keep their multiplicities. Retractions retain
@@ -2521,7 +2521,7 @@ The optimization investigation is limited to two profiling/optimization passes p
 
 ## Integer ARRAY_AGG
 
-On released Flink 2.2.1, ARRAY_AGG over TINYINT/SMALLINT/INT/BIGINT uses the same single-phase columnar JVM
+On released Flink 2.2.1, ARRAY_AGG over TINYINT/SMALLINT/INT/BIGINT and BOOLEAN uses the same single-phase columnar JVM
 runtime. Only the exact builtin operator is recognized; user-defined functions with that name
 retain their existing signature gates. Scalar inputs and non-character aggregate result fields
 are required. Character grouping keys use the verified serialized-key boundary below. Other
@@ -2548,7 +2548,7 @@ stops after two profiling/optimization passes; slower results use the accepted c
 
 ## Character grouping keys
 
-Integer COLLECT and, on Flink 2.2, integer ARRAY_AGG admit STRING/VARCHAR and CHAR grouping keys.
+Verified COLLECT and, on Flink 2.2, ARRAY_AGG admit STRING/VARCHAR and CHAR grouping keys.
 The character-field check applies to aggregate results rather than serialized grouping fields;
 character aggregate values/co-results and richer nested results retain fallback. Existing
 synchronous/single-phase and representation-consumer guards still apply.
@@ -2588,9 +2588,9 @@ passes; slower results use the accepted collection tradeoff without an accelerat
 
 ## Legacy row consumers
 
-Verified integer COLLECT and Flink 2.2 ARRAY_AGG results can leave a direct single-phase
+Verified integer/BOOLEAN COLLECT and Flink 2.2 ARRAY_AGG results can leave a direct single-phase
 group through a legacy row sink, including the Java `toRetractStream` API. The 2.2 adapter
-qualifies only direct groups accepted by the existing scalar-input, integer-element and
+qualifies only direct groups accepted by the existing scalar-input, verified-element and
 non-character aggregate-result gates. A final Calc, unverified represented consumer or
 unsupported aggregate shape keeps its existing fallback. Flink 1.18 retains its prepared
 legacy sink path; ARRAY_AGG remains N/A there.
@@ -2602,7 +2602,7 @@ it again from native physical nodes. No native connector, state codec or ownersh
 is added. Updating MAP/MULTISET payloads in [#437](https://github.com/datafusion-contrib/StreamFusion/issues/437)
 remain deferred.
 
-Runtime-source checks cover ordered external insert/retract rows, all four integer widths,
+Runtime-source checks cover ordered external insert/retract rows, all four integer widths and BOOLEAN,
 NULLs and NULL array containers, DISTINCT, NOT NULL arrays via COALESCE, canonical string
 keys, parallelism 1/3, empty global inputs, disabled runtime fallback and memory release.
 The unchanged upstream `AggregateITCase.testUnboundedGroupByCollect` additionally preserves
@@ -2613,3 +2613,24 @@ Flink 1.18 changelog-state exclusions retain exact fallback contracts.
 [Upstream execution evidence](../upstream-flink-suite.md) gives the per-variant rules.
 [Complete-job comparisons](../benchmarks/collection-aggregates.md#legacy-row-consumers) retain
 external row conversion/collection, state and both transposes, with at most two profiling passes.
+
+## BOOLEAN collection elements
+
+BOOLEAN joins the verified integer elements for COLLECT on both supported releases and
+ARRAY_AGG on Flink 2.2. The existing released handlers retain true/false values, NULLs,
+multiplicities and array arrival order; there is no new accumulator, serializer or JNI
+protocol. Scalar inputs, non-character aggregate results and the existing represented
+consumer gates still apply. ARRAY_AGG remains N/A on Flink 1.18.
+
+Direct BOOLEAN sources exercise duplicates, all-NULL groups, DISTINCT/FILTER, NOT NULL
+elements via COALESCE, ordered updates/retractions and empty grouped/global results.
+ARRAY_AGG covers RESPECT/IGNORE NULLS and consumed native Top-N/UNNEST work. Heap and native
+RocksDB restore twice across nonempty prefixes, including an unmatched retraction before
+its corresponding insertion. Legacy external retract rows cover BOOLEAN co-results,
+canonical character keys and parallelism 1/3. Updating MULTISET rank payloads retain the
+[#437](https://github.com/datafusion-contrib/StreamFusion/issues/437) fallback.
+
+[Release comparisons](../benchmarks/collection-aggregates.md#boolean-elements) include
+source, keyed state, output consumption and both conversions. Optimization is limited to
+two profiling passes per increment; timings establish measured costs, not an automatic
+acceleration claim.
