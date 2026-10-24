@@ -1,0 +1,404 @@
+{
+  "date": "2026-10-24",
+  "hardware": {
+    "cpu": "Intel Core i7-12650H",
+    "os": "Linux x86-64 / WSL2",
+    "jdk": "OpenJDK17.0.20.1"
+  },
+  "native": {
+    "profile": "release",
+    "features": [
+      "mimalloc",
+      "rocksdb-state"
+    ],
+    "sha256": "b574491f08427c8b128107d6286cb403421a0bafbdba7a0e5cdd8fea30562d16",
+    "production_rust_changes": false,
+    "operator_note": "Existing columnar JVM group with released COLLECT MapViews or ARRAY_AGG RAW LinkedList accumulators; only narrow integer admission changes."
+  },
+  "previous_revision": "083ee5cf",
+  "previous_revision_note": "Character-key candidate before narrow integer admission; identical benchmark source copied into prior checkout.",
+  "benchmark_source_sha256": "3e67819f9ad3f7ac655800ef5fac1dd0d7ad7be39b09f5b81e92d0b9538fcbe1",
+  "configuration": {
+    "flink": "2.2.1",
+    "rows": {
+      "collect": 200000,
+      "array_agg": 50000
+    },
+    "parallelism": 1,
+    "key_type": "INT",
+    "groups": [
+      64,
+      4096
+    ],
+    "distinct_values_per_non_null_group": 8,
+    "key": "row modulo groups",
+    "value": "(row/groups) modulo8; NULL when row modulo8=7",
+    "null_note": "Every eighth input value isNULL; key7mod8groups contain onlyNULL elements under defaultRESPECTNULLS.",
+    "warmups_per_engine": 2,
+    "trials_per_engine": 3,
+    "test_heap_gib": 8,
+    "jvm_accumulator_cache_entries": 0,
+    "key_prefix_note": "Default16 prefix chars unused forINTkeys.",
+    "boundary": "planning, submission, runtime Row source, keyed state, both row/Arrow transposes and blackhole row sink; cluster setup and initial explain excluded",
+    "schedule": "alternating stock/native per JVM; separate JVMs per cardinality and phase; no concurrent tests, builds or benchmarks during measurements",
+    "value_types": [
+      "TINYINT via CAST(v AS TINYINT)",
+      "SMALLINT via CAST(v AS SMALLINT)"
+    ],
+    "array_length_note": "The8-value domain does not cap array length: ARRAY_AGG grows to781/782 elements at64 groups and12/13 at4096 groups.",
+    "source_value_type": "BIGINT"
+  },
+  "trials": [
+    {
+      "phase": "previous",
+      "shape": "collect_tinyint",
+      "groups": 64,
+      "stock_seconds": [
+        0.405148034,
+        0.397697038,
+        0.376843807
+      ],
+      "native_seconds": [
+        0.378628946,
+        0.477743227,
+        0.409515733
+      ],
+      "route": "stock fallback"
+    },
+    {
+      "phase": "previous",
+      "shape": "collect_smallint",
+      "groups": 64,
+      "stock_seconds": [
+        0.306992042,
+        0.317460869,
+        0.305180815
+      ],
+      "native_seconds": [
+        0.390241242,
+        0.304946497,
+        0.308490411
+      ],
+      "route": "stock fallback"
+    },
+    {
+      "phase": "previous",
+      "shape": "collect_tinyint",
+      "groups": 4096,
+      "stock_seconds": [
+        0.421993233,
+        0.534294402,
+        0.418189167
+      ],
+      "native_seconds": [
+        0.460230122,
+        0.473465345,
+        0.479072739
+      ],
+      "route": "stock fallback"
+    },
+    {
+      "phase": "previous",
+      "shape": "collect_smallint",
+      "groups": 4096,
+      "stock_seconds": [
+        0.358079686,
+        0.342139279,
+        0.332219735
+      ],
+      "native_seconds": [
+        0.427020669,
+        0.353041155,
+        0.351100174
+      ],
+      "route": "stock fallback"
+    },
+    {
+      "phase": "previous",
+      "shape": "array_agg_tinyint",
+      "groups": 64,
+      "stock_seconds": [
+        0.738645582,
+        0.587040517,
+        0.588082098
+      ],
+      "native_seconds": [
+        0.664180735,
+        0.602795549,
+        0.643704399
+      ],
+      "route": "stock fallback"
+    },
+    {
+      "phase": "previous",
+      "shape": "array_agg_smallint",
+      "groups": 64,
+      "stock_seconds": [
+        0.634633708,
+        0.507226931,
+        0.525547225
+      ],
+      "native_seconds": [
+        0.574309354,
+        0.56670482,
+        0.546967684
+      ],
+      "route": "stock fallback"
+    },
+    {
+      "phase": "previous",
+      "shape": "array_agg_tinyint",
+      "groups": 4096,
+      "stock_seconds": [
+        0.19421834,
+        0.174585326,
+        0.168302893
+      ],
+      "native_seconds": [
+        0.200184085,
+        0.167389707,
+        0.194958336
+      ],
+      "route": "stock fallback"
+    },
+    {
+      "phase": "previous",
+      "shape": "array_agg_smallint",
+      "groups": 4096,
+      "stock_seconds": [
+        0.157025261,
+        0.088241242,
+        0.115530663
+      ],
+      "native_seconds": [
+        0.178126281,
+        0.091185376,
+        0.091072163
+      ],
+      "route": "stock fallback"
+    },
+    {
+      "phase": "current",
+      "shape": "collect_tinyint",
+      "groups": 64,
+      "stock_seconds": [
+        0.426807896,
+        0.384039717,
+        0.377551397
+      ],
+      "native_seconds": [
+        0.450482562,
+        0.395221147,
+        0.46271086
+      ],
+      "route": "consumed NativeJvmGroup"
+    },
+    {
+      "phase": "current",
+      "shape": "collect_smallint",
+      "groups": 64,
+      "stock_seconds": [
+        0.373922543,
+        0.303697464,
+        0.334492077
+      ],
+      "native_seconds": [
+        0.317837811,
+        0.31671062,
+        0.316301025
+      ],
+      "route": "consumed NativeJvmGroup"
+    },
+    {
+      "phase": "current",
+      "shape": "collect_tinyint",
+      "groups": 4096,
+      "stock_seconds": [
+        0.439195204,
+        0.419148068,
+        0.395667914
+      ],
+      "native_seconds": [
+        0.493479623,
+        0.444146074,
+        0.427199372
+      ],
+      "route": "consumed NativeJvmGroup"
+    },
+    {
+      "phase": "current",
+      "shape": "collect_smallint",
+      "groups": 4096,
+      "stock_seconds": [
+        0.359676924,
+        0.360388449,
+        0.3321192
+      ],
+      "native_seconds": [
+        0.351689733,
+        0.467923833,
+        0.369802315
+      ],
+      "route": "consumed NativeJvmGroup"
+    },
+    {
+      "phase": "current",
+      "shape": "array_agg_tinyint",
+      "groups": 64,
+      "stock_seconds": [
+        0.556293269,
+        0.60713664,
+        0.666530979
+      ],
+      "native_seconds": [
+        0.722008916,
+        0.729608573,
+        0.658593635
+      ],
+      "route": "consumed NativeJvmGroup"
+    },
+    {
+      "phase": "current",
+      "shape": "array_agg_smallint",
+      "groups": 64,
+      "stock_seconds": [
+        0.710872231,
+        0.533383578,
+        0.68598416
+      ],
+      "native_seconds": [
+        0.746777801,
+        0.638138022,
+        0.725946659
+      ],
+      "route": "consumed NativeJvmGroup"
+    },
+    {
+      "phase": "current",
+      "shape": "array_agg_tinyint",
+      "groups": 4096,
+      "stock_seconds": [
+        0.216099976,
+        0.185945878,
+        0.188955993
+      ],
+      "native_seconds": [
+        0.213036773,
+        0.192006361,
+        0.182820736
+      ],
+      "route": "consumed NativeJvmGroup"
+    },
+    {
+      "phase": "current",
+      "shape": "array_agg_smallint",
+      "groups": 4096,
+      "stock_seconds": [
+        0.193721069,
+        0.097794488,
+        0.095425819
+      ],
+      "native_seconds": [
+        0.173542139,
+        0.100761807,
+        0.091968248
+      ],
+      "route": "consumed NativeJvmGroup"
+    }
+  ],
+  "cpu_profiles": {
+    "passes": 2,
+    "closed": true,
+    "event": "cpu",
+    "interval": "1ms",
+    "target_seconds_per_capture": 8,
+    "profiler": "async-profiler4.6",
+    "boundary": "one unprofiled native-only complete-job warmup; profile native-only jobs until the8second target completes, including planning/compilation/allJVMthreads; stop after currentjob",
+    "captures": {
+      "array_agg_tinyint-keys64-native": {
+        "total_samples": 15295,
+        "inclusive_method_samples": {
+          "NativeColumnarJvmGroupOperator.ingest": 5220,
+          "NativeColumnarJvmGroupOperator.append": 1121,
+          "GroupAggFunction.processElement": 5153,
+          "CollectAggFunction.getValue": 0,
+          "ArrayAggFunction.getValue": 3441,
+          "MapWriter.doWrite": 0,
+          "ArrayWriter.doWrite": 483,
+          "ArrayDataSerializer.copy": 526,
+          "LinkedList.toArray": 3435
+        },
+        "top_self_samples": {
+          "java/util/LinkedList.toArray_[i]": 3408,
+          "_raw_spin_unlock_irqrestore_[k]": 614,
+          "org/apache/flink/table/data/columnar/ColumnarArrayData.isNullAt_[i]": 524,
+          "org/apache/flink/table/data/GenericRowData.<init>_[i]": 413,
+          "IndexSetIterator::advance_and_next": 289,
+          "tech/streamfusion/arrow/writers/ArrayWriter.doWrite_[j]": 236,
+          "org/apache/arrow/vector/BaseFixedWidthVector.handleSafe_[i]": 194,
+          "PhaseChaitin::Split": 182,
+          "/usr/lib/x86_64-linux-gnu/libc.so.6": 176,
+          "PhaseChaitin::gather_lrg_masks": 132
+        }
+      },
+      "collect_smallint-keys4096-native": {
+        "total_samples": 19872,
+        "inclusive_method_samples": {
+          "NativeColumnarJvmGroupOperator.ingest": 4132,
+          "NativeColumnarJvmGroupOperator.append": 1017,
+          "GroupAggFunction.processElement": 3855,
+          "CollectAggFunction.getValue": 876,
+          "ArrayAggFunction.getValue": 0,
+          "MapWriter.doWrite": 356,
+          "ArrayWriter.doWrite": 0,
+          "ArrayDataSerializer.copy": 0,
+          "LinkedList.toArray": 0
+        },
+        "top_self_samples": {
+          "_raw_spin_unlock_irqrestore_[k]": 929,
+          "IndexSetIterator::advance_and_next": 395,
+          "org/apache/flink/runtime/state/heap/CopyOnWriteStateMap.get_[i]": 368,
+          "java/util/HashMap.put_[i]": 310,
+          "PhaseChaitin::Split": 308,
+          "org/apache/flink/core/memory/MemorySegment.equalTo_[i]": 265,
+          "PhaseChaitin::gather_lrg_masks": 254,
+          "/usr/lib/x86_64-linux-gnu/libc.so.6": 245,
+          "java/util/HashMap.putVal_[j]": 245,
+          "org/apache/flink/table/data/binary/MurmurHashUtils.hashBytesByInt_[i]": 244
+        }
+      }
+    },
+    "limitations": "inclusive counts overlap; not allocation counts/copied bytes, and profiled times do not enter trial tables"
+  },
+  "scope": {
+    "admitted": "Exact builtin COLLECT overTINYINT/SMALLINT onbothlines and ARRAY_AGG overthose types onreleased2.2; same scalar-input, non-character aggregate-result and consumer gates.",
+    "retained_fallback": [
+      "Other unverified collection element types",
+      "Character aggregate values or co-results",
+      "Non-scalar aggregate inputs or unverified represented consumers",
+      "Updating MAP/MULTISET retained payloads in#437"
+    ],
+    "not_applicable": "ARRAY_AGG absent fromreleased1.18.1."
+  },
+  "validation": {
+    "flink2.2.1": {
+      "passed": 253,
+      "skipped": 0
+    },
+    "flink1.18.1": {
+      "passed": 202,
+      "skipped": 51
+    },
+    "coverage": [
+      "direct BYTE/SHORT runtime sources, both signed limits and NULLs",
+      "duplicates, DISTINCT/FILTER, ordered changelog histories and schemas",
+      "empty grouped/global and allNULL results",
+      "formatting and validNOTNULL COALESCE outputs",
+      "ARRAY RESPECT/IGNORENULLS andconsumed TopN/UNNEST",
+      "two nonempty heap/nativeRocksDB restores and memory release",
+      "deferred#437MULTISET rank fallback",
+      "existing integer/character-key aggregates, scalarUDAF, MULTISETcast, generatedUNNEST andproducer/sink guards"
+    ]
+  },
+  "conclusion": "Most native medians exceed stock; relative prior results vary. Short jobs and overlapping ranges do not establish sustained acceleration. Two profiling passes closed: managed-state/result snapshots, linked-list materialization, output writing and startup/compilation remain. No safe small shortcut found; accepted bounded collection tradeoff, further performance in#239."
+}

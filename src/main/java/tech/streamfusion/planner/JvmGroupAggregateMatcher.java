@@ -37,6 +37,8 @@ final class JvmGroupAggregateMatcher {
         || call.getArgList().size() != 1) return false;
     var value = node.getInput().getRowType().getFieldList().get(call.getArgList().get(0)).getType();
     return java.util.Set.of(
+                org.apache.calcite.sql.type.SqlTypeName.TINYINT,
+                org.apache.calcite.sql.type.SqlTypeName.SMALLINT,
                 org.apache.calcite.sql.type.SqlTypeName.INTEGER,
                 org.apache.calcite.sql.type.SqlTypeName.BIGINT)
             .contains(value.getSqlTypeName())
