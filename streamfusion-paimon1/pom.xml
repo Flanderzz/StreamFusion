@@ -206,6 +206,7 @@
                                         <include>**/PaimonOperatorDescriptionTest.java</include>
                                         <include>**/PaimonSplitWatermarksTest.java</include>
                                         <include>**/PaimonFetcherLifecycleTest.java</include>
+                                        <include>**/PaimonTimestampSqlTest.java</include>
                                     </includes>
                                 </resource>
                                 <resource>

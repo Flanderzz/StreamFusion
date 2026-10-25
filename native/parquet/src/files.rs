@@ -288,9 +288,10 @@ fn int96_field(field: &Field) -> Field {
         .with_metadata(metadata)
 }
 
-/// The type a written column takes on: timestamps land in INT64 at the configured unit (or the
-/// field's own [`TIMESTAMP_UNIT_META_KEY`]) while retaining whether they represent an instant
-/// (Arrow timezone set, Parquet adjusted-to-UTC) or a local timestamp. TIME narrows to millisecond
+/// The type a written column takes on: timestamps land in INT96 when marked per field, otherwise
+/// INT64 at the configured unit (or the field's own [`TIMESTAMP_UNIT_META_KEY`]), retaining
+/// whether they represent an instant (Arrow timezone set, Parquet adjusted-to-UTC) or a local
+/// timestamp. TIME narrows to millisecond
 /// INT32. Fixed-size binary uses BYTE_ARRAY, as both host converters require. Field
 /// metadata is preserved so nested field ids and units survive into the descriptor.
 fn write_field(
@@ -302,6 +303,13 @@ fn write_field(
     let nested = |field: &Arc<Field>| Arc::new(write_field(field, timestamp_unit, shape));
     let data_type = match source.data_type() {
         data_type if streamfusion_bridge::timestamp::is_timestamp(data_type) => {
+            if source
+                .metadata()
+                .get(INT96_META_KEY)
+                .is_some_and(|v| v == "true")
+            {
+                return source.clone().with_data_type(DataType::FixedSizeBinary(12));
+            }
             let unit = source
                 .metadata()
                 .get(TIMESTAMP_UNIT_META_KEY)
@@ -1317,6 +1325,73 @@ mod parquet_encoder_tests {
             file.extend_from_slice(&chunk[..n]);
         }
         file
+    }
+
+    #[test]
+    fn paimon_selects_int96_per_timestamp_leaf() {
+        use arrow::array::{StructArray, TimestampMicrosecondArray, TimestampNanosecondArray};
+        use arrow::datatypes::TimeUnit;
+        let nanos: ArrayRef = Arc::new(TimestampNanosecondArray::from(vec![
+            Some(-1),
+            None,
+            Some(123),
+        ]));
+        let nested = Field::new("ts9", nanos.data_type().clone(), true).with_metadata(
+            [
+                (INT96_META_KEY.into(), "true".into()),
+                ("PARQUET:field_id".into(), "7".into()),
+            ]
+            .into(),
+        );
+        let row: ArrayRef = Arc::new(StructArray::new(
+            vec![Arc::new(nested)].into(),
+            vec![nanos],
+            None,
+        ));
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "ts6",
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                true,
+            ),
+            Field::new("row", row.data_type().clone(), true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMicrosecondArray::from(vec![
+                    Some(-1),
+                    None,
+                    Some(123),
+                ])),
+                row,
+            ],
+        )
+        .unwrap();
+        let (batches, metadata) = read_back(encode(
+            schema,
+            &[],
+            &[("schema.shape", "paimon")],
+            &[batch.clone()],
+        ));
+        let descriptor = metadata.file_metadata().schema_descr();
+        assert_eq!(descriptor.column(0).physical_type(), PhysicalType::INT64);
+        assert_eq!(descriptor.column(1).physical_type(), PhysicalType::INT96);
+        assert_eq!(descriptor.column(1).self_type().get_basic_info().id(), 7);
+        assert_eq!(batches[0].column(0), batch.column(0));
+        let nested_values = |batch: &RecordBatch| {
+            batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<StructArray>()
+                .unwrap()
+                .column(0)
+                .clone()
+        };
+        assert_eq!(
+            nested_values(&batches[0]).as_ref(),
+            nested_values(&batch).as_ref()
+        );
     }
 
     #[test]

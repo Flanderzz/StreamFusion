@@ -1499,7 +1499,6 @@ class PaimonSinkParityTest {
             "(id BIGINT, v INT)",
             "'bucket' = '-1', 'row-tracking.enabled' = 'true'",
             "row tracking"),
-        Arguments.of("(id BIGINT, v TIMESTAMP(9))", "'bucket' = '-1'", "INT96"),
         Arguments.of(
             "(id BIGINT, v INT)",
             "'bucket' = '-1', 'file.format' = 'parquet', 'parquet.bloom.filter.enabled' = 'true'",
@@ -1613,9 +1612,6 @@ class PaimonSinkParityTest {
     }
     if (schema.contains("k DOUBLE")) {
       return "CAST(v AS DOUBLE) AS k";
-    }
-    if (schema.contains("TIMESTAMP(9)")) {
-      return "CAST(TO_TIMESTAMP_LTZ(id, 3) AS TIMESTAMP(9)) AS v";
     }
     return schema.contains("pt STRING") ? "v, pt" : "v";
   }

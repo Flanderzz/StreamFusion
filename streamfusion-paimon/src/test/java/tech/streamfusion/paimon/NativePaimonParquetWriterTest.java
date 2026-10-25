@@ -249,13 +249,13 @@ class NativePaimonParquetWriterTest {
   @Test
   void unsupportedTypesKeepTheStockWriterFactory() {
     FileFormat format = FileFormat.fromIdentifier("parquet", new Options());
-    RowType int96 =
+    RowType unsupported =
         RowType.of(
-            new org.apache.paimon.types.DataType[] {org.apache.paimon.types.DataTypes.TIMESTAMP(9)},
-            new String[] {"ts9"});
-    assertFalse(format.createWriterFactory(int96) instanceof NativePaimonParquetWriterFactory);
+            new org.apache.paimon.types.DataType[] {org.apache.paimon.types.DataTypes.TIME()},
+            new String[] {"time"});
+    assertFalse(format.createWriterFactory(unsupported) instanceof NativePaimonParquetWriterFactory);
     assertTrue(
-        ((NativePaimonParquetFormat) format).nativeWriterFallbackReason(int96).contains("INT96"));
+        ((NativePaimonParquetFormat) format).nativeWriterFallbackReason(unsupported).contains("TIME"));
     assertEquals(
         null,
         ((NativePaimonParquetFormat) format)

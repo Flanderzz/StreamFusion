@@ -63,7 +63,7 @@ public final class NativePaimonOrcFormat extends FileFormat implements NativePai
 
   public String nativeWriterFallbackReason(RowType type, String compression) {
     if (!PaimonCodecs.available("orc")) return "streamfusion-orc is not installed";
-    String reason = PaimonArrowFields.unsupportedTypeReason(type);
+    String reason = PaimonArrowFields.unsupportedWriterTypeReason(type);
     if (reason != null) return reason;
     reason =
         OrcWriterSettings.timestampFallback(
