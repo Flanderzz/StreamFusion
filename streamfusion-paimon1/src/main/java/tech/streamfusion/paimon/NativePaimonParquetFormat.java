@@ -66,7 +66,7 @@ public final class NativePaimonParquetFormat extends FileFormat implements Nativ
   @Nullable
   public String nativeWriterFallbackReason(RowType type, String compression) {
     if (!PaimonCodecs.available("parquet")) return "streamfusion-parquet is not installed";
-    String unsupportedType = PaimonArrowFields.unsupportedTypeReason(type);
+    String unsupportedType = PaimonArrowFields.unsupportedWriterTypeReason(type);
     if (unsupportedType != null) {
       return unsupportedType;
     }
@@ -77,7 +77,7 @@ public final class NativePaimonParquetFormat extends FileFormat implements Nativ
   public FormatWriterFactory createWriterFactory(RowType type) {
     FormatWriterFactory stock = delegate.createWriterFactory(type);
     if (!(stock instanceof ParquetWriterFactory)
-        || PaimonArrowFields.unsupportedTypeReason(type) != null) {
+        || PaimonArrowFields.unsupportedWriterTypeReason(type) != null) {
       return stock;
     }
     return new NativePaimonParquetWriterFactory(type, parquetOptions, stock);

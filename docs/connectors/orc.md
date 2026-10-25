@@ -77,8 +77,9 @@ The previous C++ restriction coupling ZSTD strategy with levels 1/3 no longer ap
 Scalar booleans, integers, floating point, decimals through precision 38, strings, binary, dates
 and timestamps, plus recursive arrays, maps and rows, use the host's ORC type converter.
 CHAR/VARCHAR lengths and Paimon field IDs are preserved. Null parent structs and null lists with
-retained child spans are supported. Paimon's type and snapshot-key gates are shared with Parquet,
-including the precision-6 timestamp limit and Java fallback for floating-point snapshot keys.
+retained child spans are supported. Paimon writers support timestamps through precision 9.
+Native source and snapshot-key gates remain shared with Parquet, including the precision-6
+timestamp limit and Java fallback for floating-point snapshot keys.
 Filesystem ORC retains the released Flink converter's narrower type support.
 
 Arrow timestamp paths require a UTC JVM timezone (`-Duser.timezone=UTC`); other JVM zones retain

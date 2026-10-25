@@ -33,7 +33,7 @@ import tech.streamfusion.arrow.TimestampAccessor;
 final class PaimonArrowFields {
   static final String FIELD_ID_KEY = "PARQUET:field_id";
   static final String TIMESTAMP_UNIT_KEY = "streamfusion:timestamp_unit";
-  private static final int MAX_NATIVE_TIMESTAMP_PRECISION = 6;
+  static final String INT96_KEY = "streamfusion:parquet_int96";
 
   private PaimonArrowFields() {}
 
@@ -67,7 +67,13 @@ final class PaimonArrowFields {
     metadata.put(FIELD_ID_KEY, Integer.toString(fieldId));
     Integer precision = timestampPrecision(type);
     if (precision != null) {
-      metadata.put(TIMESTAMP_UNIT_KEY, precision <= 3 ? "millis" : "micros");
+      if (precision > 6) {
+        metadata.put(INT96_KEY, "true");
+        metadata.remove(TIMESTAMP_UNIT_KEY);
+      } else {
+        metadata.put(TIMESTAMP_UNIT_KEY, precision <= 3 ? "millis" : "micros");
+        metadata.remove(INT96_KEY);
+      }
     }
     List<Field> children = arrow.getChildren();
     switch (type.getTypeRoot()) {
@@ -155,11 +161,21 @@ final class PaimonArrowFields {
     return null;
   }
 
-  /** Why the native encoder cannot write this row type, or null when every column is supported. */
+  /** Reader admission remains independent of the file writer's timestamp encoding coverage. */
   @Nullable
   static String unsupportedTypeReason(RowType type) {
+    return unsupportedTypeReason(type, 6);
+  }
+
+  @Nullable
+  static String unsupportedWriterTypeReason(RowType type) {
+    return unsupportedTypeReason(type, 9);
+  }
+
+  @Nullable
+  private static String unsupportedTypeReason(RowType type, int maxTimestampPrecision) {
     for (DataField field : type.getFields()) {
-      String reason = unsupportedTypeReason(field.type());
+      String reason = unsupportedTypeReason(field.type(), maxTimestampPrecision);
       if (reason != null) {
         return "Paimon column " + field.name() + ": " + reason;
       }
@@ -168,13 +184,15 @@ final class PaimonArrowFields {
   }
 
   @Nullable
-  private static String unsupportedTypeReason(DataType type) {
+  private static String unsupportedTypeReason(DataType type, int maxTimestampPrecision) {
     Integer precision = timestampPrecision(type);
     if (precision != null) {
-      return precision > MAX_NATIVE_TIMESTAMP_PRECISION
+      return precision > maxTimestampPrecision
           ? "timestamp precision "
               + precision
-              + " exceeds the native Paimon limit of 6 (Parquet uses INT96)"
+              + " exceeds the native Paimon limit of "
+              + maxTimestampPrecision
+              + " (Parquet uses INT96)"
           : null;
     }
     DataTypeRoot root = type.getTypeRoot();
@@ -194,17 +212,19 @@ final class PaimonArrowFields {
       case DATE:
         return null;
       case ARRAY:
-        return unsupportedTypeReason(((ArrayType) type).getElementType());
+        return unsupportedTypeReason(((ArrayType) type).getElementType(), maxTimestampPrecision);
       case MAP:
         {
           {
             MapType map = (MapType) type;
-            String key = unsupportedTypeReason(map.getKeyType());
-            return key != null ? key : unsupportedTypeReason(map.getValueType());
+            String key = unsupportedTypeReason(map.getKeyType(), maxTimestampPrecision);
+            return key != null
+                ? key
+                : unsupportedTypeReason(map.getValueType(), maxTimestampPrecision);
           }
         }
       case ROW:
-        return unsupportedTypeReason((RowType) type);
+        return unsupportedTypeReason((RowType) type, maxTimestampPrecision);
       default:
         return "type " + type + " is not verified by the native writer";
     }

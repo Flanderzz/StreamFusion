@@ -14,9 +14,13 @@ staging retains every accepted change for Paimon's separate compactor.
 Both file formats share the same Java lifecycle, native routing and merge paths. ORC's physical
 encoding options and UTC timestamp restrictions are detailed on the [ORC page](orc.md).
 
-Timestamp bundles use lossless millisecond/fraction columns, including years 0001–9999. Parquet
-unit selection still follows each Paimon field's precision, and ORC retains the stock writer's
-historical calendar and LTZ rules. Existing format/precision admission limits remain in force.
+Timestamp bundles use lossless millisecond/fraction columns, including years 0001–9999. Sink
+writers support `TIMESTAMP` and `TIMESTAMP_LTZ` through precision 9, including nested values.
+Parquet follows released Paimon's per-field encoding: INT64 milliseconds for precision 0–3,
+INT64 microseconds for 4–6, and INT96 for 7–9. Mixed-precision schemas retain each field's
+physical type and field ID. ORC preserves the nanosecond remainder and the stock writer's
+historical calendar and LTZ rules; its existing UTC-JVM requirement still applies.
+Native source and snapshot-reader admission remains limited to precision 6.
 
 ## Streaming source
 
@@ -325,8 +329,9 @@ streamfusion-paimon -am test -Ppaimon,bench -Dtest=PaimonConsumerBenchmark
 
 ### Source admission and fallbacks
 
-Only streaming data-table reads enter this path. It uses the sink's supported value types below
-(including nested values and timestamps up to precision 6). These configurations retain the stock
+Only streaming data-table reads enter this path. It uses the sink's supported value types below,
+except that timestamps remain limited to precision 6, including inside nested values.
+These configurations retain the stock
 source at planning time:
 
 - Primary-key tables without a changelog producer, table/changelog formats without an installed native Parquet or ORC module, thin data
@@ -498,7 +503,7 @@ Supported:
   `file.compression.zstd-level`), `file.block-size`, and the `parquet.*` writer keys the stock
   writer honours: page and dictionary-page size, dictionary encoding, writer version.
 - Column types `BOOLEAN`, `TINYINT`..`BIGINT`, `FLOAT`, `DOUBLE`, `DECIMAL`, `CHAR`/`VARCHAR`,
-  `BINARY`/`VARBINARY`, `DATE`, `TIMESTAMP`/`TIMESTAMP_LTZ` up to precision 6, and `ARRAY`, `MAP`,
+  `BINARY`/`VARBINARY`, `DATE`, `TIMESTAMP`/`TIMESTAMP_LTZ` up to precision 9, and `ARRAY`, `MAP`,
   `ROW` of those, recursively, with Paimon's field ids on every column.
 - Hint options (`/*+ OPTIONS(...) */`) and the `paimon.<catalog>.<db>.<table>.<option>` dynamic
   options from the job configuration, resolved the way Paimon's own factory resolves them.
@@ -777,6 +782,48 @@ the collector described above. `PaimonValueTypesTest` checks 40 scalar edge-valu
 both formats, including native snapshot reads, NaN/infinities, signed zero, integer extremes,
 precision-38 decimals, Unicode, binary and dates.
 
+`PaimonTimestampPrecisionTest` compares mixed precision 0/3/6/7/8/9, local and instant timestamps,
+nested rows/arrays/maps, NULLs, pre-epoch fractions and years 0001/9999 against released Paimon.
+It checks committed native file markers, schemas/field IDs, manifest statistics, repeated keys,
+nanosecond key/sequence differences, all four merge engines, writer restart and stock compaction
+of native files. Both ORC LTZ representations are covered. `PaimonTimestampSqlTest` runs
+partitioned append and primary-key SQL inserts on both supported Flink/Paimon lines, verifies
+actual native-written files and reads them with the released Paimon reader. These sink tests
+do not broaden native high-precision source coverage.
+
+The released Paimon 1.0 Parquet reader rejects negative sub-millisecond remainders in pre-epoch
+INT96 values, including files its own writer produces. The native sink preserves those exact
+bytes and the released read failure; it does not normalize the file to repair that upstream
+behavior. `LegacyPaimonInt96Test` checks precision 7/8/9 and LTZ bytes against the stock writer
+and asserts the same reader exception. Exact successful pre-epoch fractional readback is verified
+on Paimon 2.0 and on ORC; the shared 1.0/2.0 Parquet SQL success test uses whole-millisecond
+fractions before 1970 and nanosecond fractions from 1970 onward.
+
+#### High-precision sink measurements
+
+`PaimonTimestampBenchmark` compares the released Paimon primary-key sink with the new sink path.
+Before this support, these types fell back to the released sink, so stock is also the previous
+StreamFusion baseline. Timing includes row routing, RowData-to-Arrow conversion, JNI, merge,
+Parquet/ORC encoding and snapshot commit. Table/writer setup, prepared logical input and readback
+are outside timing; this is a sink-boundary measurement, not a complete SQL job benchmark.
+Every native sample verifies committed file markers and exact released-reader parity.
+
+Measured on 2026-10-25 on an Apple M4 Pro (24 GiB RAM), release/mimalloc, Flink 2.2.1,
+Paimon 2.0.0, JDK 17 (`-Xmx2g`), one writer, two buckets, 16,384 integer keys,
+three nullable timestamps (`TIMESTAMP(7)`, `TIMESTAMP(9)`, `TIMESTAMP_LTZ(8)`), batch size 4,096,
+two warmup pairs and five alternating measurement pairs per configuration:
+
+| Format | Input Rows | Stock Median [Min, Max], s | Native Median [Min, Max], s | Speedup |
+|---|---:|---:|---:|---:|
+| Parquet | 32,768 | 0.034769 [0.031525, 0.046823] | 0.020919 [0.018542, 0.025237] | 1.66x |
+| ORC | 32,768 | 0.031016 [0.029984, 0.032741] | 0.019716 [0.018809, 0.022578] | 1.57x |
+| Parquet | 131,072 | 0.063403 [0.061267, 0.078037] | 0.039551 [0.039228, 0.041066] | 1.60x |
+| ORC | 131,072 | 0.061619 [0.060829, 0.063555] | 0.038189 [0.037654, 0.039106] | 1.61x |
+
+Reproduce with `SF_PAIMON_TIMESTAMP_BENCHMARK=true mvn -Ppaimon,bench -pl streamfusion-paimon
+-am test -Dtest=PaimonTimestampBenchmark -Dsurefire.failIfNoSpecifiedTests=false
+-Dsf.extraJvmArgs=-Xmx2g`. `timestamp.warmup` and `timestamp.samples` control repetitions.
+
 The regular CI Paimon job runs SQL parity for dynamic and postpone buckets, including reopened
 jobs, assigner/writer rescaling, and Paimon's SQL compaction of native postpone files. A recovery
 harness discards an uncommitted dynamic checkpoint, restores the assigner state, replays the
@@ -917,8 +964,7 @@ Each of these declines at planning time with a reason visible in `NativePlanner.
   valid-prefix behavior, and rejects null values without changing primary-key or changelog
   admission. Non-null batches pass unchanged without materializing rows, taking a consumer share,
   or copying their buffers. Other constraints and connector recovery/commit behavior are unchanged.
-- `TIMESTAMP` precision above 6 (Paimon writes INT96 there), `VARIANT`, vector, and geospatial
-  types.
+- `TIME`, `VARIANT`, vector, and geospatial types.
 - `parquet.*` keys the native writer cannot honour: bloom filters, page validation, custom
   padding, page row-count limits, statistics/column-index truncation, page-size row checks,
   multithreaded zstd, and any per-column (`parquet.*#column`) or unrecognised writer key.
