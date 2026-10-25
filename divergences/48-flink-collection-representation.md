@@ -122,3 +122,12 @@ ownership copy; cached or represented strings keep their existing reader. Packin
 outputs into binary rows changes legacy debug rendering, even though typed getters agree,
 and is therefore excluded. The [string exit ledger](../docs/optimizations/zero-copy-exit-transpose.md#synchronous-copies-of-cache-free-scalar-strings)
 records the retained boundary and its compatibility regression coverage.
+
+Direct fixed-BINARY MULTISET elements reuse the existing map-shaped generated boundary,
+with counts carried as INT NOT NULL. Actual binary lengths remain length-delimited rather
+than padded by transport. Released evaluation owns explicit and implicit casts: fixed-binary
+MULTISET CASE enters the generated program to preserve branch conversions observed on 1.18.
+Nullable elements are verified on both lines; NOT NULL elements remain guarded on 1.18,
+where unchecked NULL byte getters differ from original-container NULL formatting. Flink 2.2
+retains its verified NOT NULL route. No map representation tag, native state or snapshot
+serializer is added, and unverified represented consumers keep their existing restrictions.

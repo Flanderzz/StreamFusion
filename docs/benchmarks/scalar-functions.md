@@ -1894,7 +1894,8 @@ For each of ARRAY_FORMAT_STRING and MAP_FORMAT_STRING, select `#profileFunction`
 `-Dprofile.asprof=/path/to/asprof -Dprofile.outputDir=/path/to/output`. Runtime parity on both
 supported Flink lines independently requires consumed NativeCalc input, including bounded UTF-16
 results, legacy formatting and all four changelog kinds. NOT NULL fixed BINARY MAP leaves and unverified
-state/native-writer boundaries retain fallback.
+state/native-writer boundaries retain fallback. Fixed-BINARY MULTISET elements use the
+[separate verified boundary](#fixed-binary-multiset-elements).
 
 
 ## Fixed BINARY map values
@@ -2101,3 +2102,78 @@ Also run with `-Dscalar.multiset.entries=4`. The previous checkout copies the sa
 and input sources and adds `-Dscalar.native.expected=false`. For each of the two CPU captures,
 select `#profileFunction`, set `SF_PROFILE_SCALAR=true`, choose one function, and use
 `-Dscalar.warmup=1 -Dscalar.seconds=8 -Dprofile.asprof=/path/to/asprof`.
+
+## Fixed BINARY MULTISET elements
+
+The [verified generated boundary](../operators/calc-filter.md#fixed-binary-multiset-elements)
+admits nullable fixed-BINARY elements on both released lines and NOT NULL elements on 2.2.
+Flink 1.18 NOT NULL elements retain the observed unchecked-NULL getter/formatting fallback.
+Fixed-binary MULTISET CASE retains released implicit branch casts, including 1.18 padding.
+No state, ownership or Rust operation changes. The local matrix passes 235 checks on 2.2.1
+and 191 with 44 version skips on 1.18.1. This combines the broad eight-class matrix and final
+24-case multiset reruns after CASE routing and deterministic-control corrections; the other
+211 checks are unchanged. Benchmark smokes are excluded from correctness totals.
+
+Release/mimalloc measurements on the Intel Core i7-12650H Linux x86-64/WSL2 host use
+Flink 2.2.1, OpenJDK 17.0.20.1, parallelism one and an 8 GiB heap. Runtime internal RowData
+contains an ordered four-entry multiset with 4-byte keys at 500,000 rows, then 16 entries
+with 256-byte keys at 200,000 rows. Each has one NULL key with count 3; other key counts cycle
+through 1/2/3. Every eighth parent is NULL. CAST changes BINARY(width) elements to
+VARBINARY(width); the second query formats the original multiset as STRING.
+
+Timing includes planning, submission, runtime source, key conversions, output, both
+row/Arrow transposes and the blackhole row sink. Fresh per-job metrics-cluster/schema setup
+and plan assertions are outside timing. Each admitted job requires positive consumed Calc
+and both transpose counters; stock/prior-fallback jobs require no native operators. Two
+warmups precede three alternating trials per engine in each separate cohort JVM. Prior
+candidate 7391128b uses identical benchmark/input sources and the same frozen release DSO.
+Source-matched identity controls remain native on both checkouts and are retained without
+subtraction. Their variability and all independent prior stock controls remain in the
+[full evidence](results/fixed-binary-multisets-2026-10-24.json).
+
+A two-second sampler observed no overlapping external Java/Cargo workloads. Two matrix
+observations and one profile observation are own Maven launch shells, identified by their
+unique CSV/profile-output arguments within 0.1 seconds of phase launch before JVM replacement.
+The committed summary retains those classifications; raw local reports retain every observation.
+
+Median seconds (minimum–maximum):
+
+| Expression | Bytes per key / entries | Paired stock | Previous fallback | Native route |
+| --- | ---: | ---: | ---: | ---: |
+| CAST | 4/4 | 0.211763 (0.204312–0.309692) | 0.205085 (0.200423–0.211794) | 0.422545 (0.412186–0.430073) |
+| STRING | 4/4 | 0.337583 (0.331511–0.347192) | 0.357177 (0.339805–0.377967) | 0.490561 (0.481319–0.500198) |
+| CAST | 256/16 | 0.382414 (0.379815–0.387833) | 0.379241 (0.377375–0.386449) | 1.460521 (1.444518–1.474352) |
+| STRING | 256/16 | 2.529796 (2.512200–2.538575) | 2.769301 (2.761990–2.785375) | 4.928001 (4.909214–5.198685) |
+
+All four native medians exceed both paired stock and prior fallback. These complete-job
+costs ship under the accepted collection tradeoff; they establish no acceleration claim.
+The shorter jobs retain startup and trial variation rather than implying sustained throughput.
+
+The bounded investigation closes after two eight-second target CPU captures, after one
+unprofiled native job each. Both use 200,000 rows, 256-byte keys and 16 entries. CAST has 11,711
+samples: 2,929 inclusive in the callback, 822 in generated evaluation, 3,957 in Arrow map
+writing and 2,088 in map serialization. STRING has 13,087 samples: 7,623 in the callback,
+2,563 in evaluation,895 in map writing and 4,830 in represented-string writing. UTF16-to-UTF8
+encoding contributes 1,595 self samples, with 527 in UTF8-to-UTF16 decoding. Counts overlap
+and include fresh-cluster setup, planning, compilation and all JVM threads. They are not
+allocation or copied-byte counts, nor a causal isolation of the entire slowdown against stock.
+Map serialization/writing, callback conversions and represented string encoding remain costs.
+No safe small shortcut preserving released key conversion and representation was found in
+the two passes; further optimization belongs to
+[#392](https://github.com/datafusion-contrib/StreamFusion/issues/392).
+
+Reproduce the small shape after a release build:
+
+```sh
+SF_BENCHMARK=true mvn -pl streamfusion-runtime test -Pbench \
+  '-Dtest=ScalarFunctionBenchmark#individualFunctions' -Dsf.testForks=1 \
+  -Dscalar.functions=BINARY_MULTISET_CAST,BINARY_MULTISET_STRING \
+  -Dscalar.rows=500000 -Dscalar.binary.width=4 -Dscalar.multiset.entries=4 \
+  -Dscalar.nullEvery=8 -Dscalar.warmup=2 -Dscalar.runs=3
+```
+
+Also run rows 200000, width 256, entries 16. The prior checkout copies the same benchmark/input
+sources and adds `-Dscalar.native.expected=false`. For each of the two profiles, select
+`#profileFunction`, set `SF_BENCHMARK=true SF_PROFILE_SCALAR=true`, choose one function,
+and retain the wide shape with `-Dscalar.warmup=1 -Dscalar.seconds=8` plus an async-profiler
+path through `profile.asprof`. Profiled timings do not enter the comparison table.

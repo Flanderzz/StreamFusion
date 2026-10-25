@@ -2343,7 +2343,8 @@ standalone ARRAY-to-ARRAY, MAP-to-MAP, MULTISET-to-MULTISET and ROW-to-ROW casts
 program used when a collection constructor or function is present. STRING, floating, temporal
 and NOT NULL-element conversions keep Flink's conversion rules and resolved types. The bridge's
 type gates and the representation-boundary restrictions above still apply; this does not admit
-external STRUCTURED inputs, direct fixed BINARY MULTISET elements or NOT NULL fixed BINARY MAP keys/values.
+external STRUCTURED inputs or NOT NULL fixed BINARY MAP keys/values. Direct BINARY MULTISET
+elements use the verified boundary below; NOT NULL elements remain guarded on Flink 1.18.
 The existing DECIMAL-to-FLOAT/DOUBLE ARRAY CAST also retains its Rust path.
 
 MULTISET casts reuse Flink's generated map-shaped evaluator and the existing Arrow
@@ -2354,7 +2355,7 @@ carried without recomputing, merging or expanding them. Flink's generated cast k
 aggregation implementation is implied.
 Runtime sources require consumed NativeCalc work on both supported releases, including all
 four input changelog kinds, filtered/CASE paths and empty batches. Direct BINARY elements
-remain guarded. MULTISET outputs use the same final row-sink/fused-consumer restriction as
+use the length-delimited generated boundary below. MULTISET outputs use the same final row-sink/fused-consumer restriction as
 MAP outputs; unverified state, exchange, ordering and native-writer boundaries still fall back.
 A verified integer COLLECT producer can feed this preserving Calc through its existing map-shaped
 output; character aggregate results and other unverified aggregate representations retain fallback.
@@ -2915,6 +2916,35 @@ are 0.241181s stock (0.227901-0.247675s) and 0.361928s native (0.358151-0.383200
 The prior route was stock fallback. These short jobs include startup; they document conversion
 costs under the accepted UDF exception and make no sustained-acceleration claim. Reproduce
 with `-Pbench`, `SF_BENCHMARK=true` and `-Dtest=UdfTypeBoundaryBenchmark#arrayCompleteJobs`.
+
+### Fixed BINARY MULTISET elements
+
+CAST/TRY_CAST and character formatting admit direct BINARY(n) MULTISET elements through the
+existing generated Flink evaluator and Arrow MAP<element,INT NOT NULL> transport. Nullable
+elements run on both released lines; NOT NULL elements run on 2.2. Flink 1.18 NOT NULL
+binary elements retain fallback because unchecked NULL getters can expose empty bytes where
+its original container preserves NULL spelling. Declared SQL widths remain unchanged, while
+transport retains actual byte lengths. The existing nested-scalar length-delimited option
+must remain enabled. No accumulator, state codec or ownership protocol is added.
+
+Fixed-binary MULTISET CASE expressions also use released generated evaluation: selected
+branches retain Flink's implicit binary casts, including padding observed on 1.18. Direct
+native selection would skip that transformation. Disabled collection/length-delimited options
+keep this CASE on stock Flink; direct native selection is rejected. This does not change ordinary scalar CASE.
+Runtime internal sources verify NULL/empty parents and elements, lengths0–6 and4097 despite
+BINARY(4), zero/negative multiplicities, colliding cast keys, all four changelog kinds,
+legacy/current cast rules, CHAR/VARCHAR bounds, filtered/empty batches, CASE and nested
+ARRAY/ROW consumers. CAST and TRY_CAST preserve input arithmetic failures and conditional
+short-circuiting. Formatting checks use ordered internal inputs; casts that allocate new
+byte-array map keys can have identity-dependent HashMap iteration, so their map results are
+compared as maps rather than claiming a deterministic formatted order. Native checks require consumed Calc work; 1.18 NOT NULL forms and disabled
+length-delimited/collection options require fallback.
+
+Unverified state, exchange and native-writer boundaries retain the represented-collection
+restrictions. This does not enable updating retained MULTISET payloads deferred in
+[#437](https://github.com/datafusion-contrib/StreamFusion/issues/437).
+[Release comparisons and bounded profiles](../benchmarks/scalar-functions.md#fixed-binary-multiset-elements)
+retain conversion and source/sink costs without a standalone acceleration claim.
 
 ### Java MAP scalar signatures
 

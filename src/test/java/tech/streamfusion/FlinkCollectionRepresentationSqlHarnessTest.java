@@ -259,12 +259,16 @@ public class FlinkCollectionRepresentationSqlHarnessTest {
           boolean binaryKeys =
               type.getTypeAt(4).getChildren().get(0).getTypeRoot()
                   == org.apache.flink.table.types.logical.LogicalTypeRoot.BINARY;
+          boolean multiset =
+              type.getTypeAt(4) instanceof org.apache.flink.table.types.logical.MultisetType;
           boolean integerValues =
-              type.getTypeAt(4).getChildren().get(1).getTypeRoot()
-                  == org.apache.flink.table.types.logical.LogicalTypeRoot.INTEGER;
+              multiset
+                  || type.getTypeAt(4).getChildren().get(1).getTypeRoot()
+                      == org.apache.flink.table.types.logical.LogicalTypeRoot.INTEGER;
           boolean binaryValues =
-              type.getTypeAt(4).getChildren().get(1).getTypeRoot()
-                  == org.apache.flink.table.types.logical.LogicalTypeRoot.BINARY;
+              !multiset
+                  && type.getTypeAt(4).getChildren().get(1).getTypeRoot()
+                      == org.apache.flink.table.types.logical.LogicalTypeRoot.BINARY;
           return env.fromSequence(0, 15)
               .map(
                   id -> {
@@ -289,7 +293,7 @@ public class FlinkCollectionRepresentationSqlHarnessTest {
                                 : new GenericArrayData(new Integer[] {1, null, 3}));
                     if (binaryKeys || binaryValues)
                       entries.put(new byte[] {0, -1, 3, -128}, integerValues ? -1 : binaryPayload);
-                    entries.put(null, null);
+                    entries.put(null, multiset ? 3 : null);
                     if ((binaryKeys || binaryValues) && id % 8 == 6) entries.clear();
                     var row =
                         GenericRowData.of(

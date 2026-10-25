@@ -838,7 +838,12 @@ final class RexExpression {
       case MULTISET:
         nested =
             (preserveCollections || !type.getComponentType().isNullable())
-                && type.getComponentType().getSqlTypeName() != SqlTypeName.BINARY
+                && (type.getComponentType().getSqlTypeName() != SqlTypeName.BINARY
+                    || preserveCollections
+                        && tech.streamfusion.arrow.ArrowConversion.nestedScalarUdfsEnabled()
+                        && (type.getComponentType().isNullable()
+                            || tech.streamfusion.compat.FlinkCompat
+                                .supportsNotNullBinaryMultisetElements()))
                 && rowCalcTypeCode(type.getComponentType(), preserveCollections) >= 0;
         break;
       case STRUCTURED:
@@ -1060,7 +1065,14 @@ final class RexExpression {
         || call.getOperands().stream().anyMatch(RexExpression::containsGeneratedCollectionFunction);
   }
 
+  private static boolean directBinaryMultisetCase(RexCall call) {
+    return call.getKind() == SqlKind.CASE
+        && call.getType().getSqlTypeName() == SqlTypeName.MULTISET
+        && call.getType().getComponentType().getSqlTypeName() == SqlTypeName.BINARY;
+  }
+
   private static boolean standaloneCollectionExpression(RexCall call) {
+    if (directBinaryMultisetCase(call)) return true;
     if ((call.getKind() == SqlKind.CAST
             || call.getOperator()
                 == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.TRY_CAST)
@@ -2598,6 +2610,8 @@ final class RexExpression {
         }
         return true;
       case CASE:
+        if (directBinaryMultisetCase(call))
+          return reject("fixed BINARY MULTISET CASE requires generated Flink branch casts");
         // Searched CASE: operands are [when1, then1, …, else] — kept n-ary, the native side pairs
         // them back into when/then branches with a trailing else.
         if (operands.isEmpty()) {
