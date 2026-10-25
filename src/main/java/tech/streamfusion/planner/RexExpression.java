@@ -826,11 +826,15 @@ final class RexExpression {
                 || (preserveCollections || !type.getKeyType().isNullable())
                     && (type.getKeyType().getSqlTypeName() != SqlTypeName.BINARY
                         || preserveCollections
-                            && type.getKeyType().isNullable()
+                            && (type.getKeyType().isNullable()
+                                || tech.streamfusion.compat.FlinkCompat
+                                    .supportsNotNullBinaryMapLeaves())
                             && tech.streamfusion.arrow.ArrowConversion.nestedScalarUdfsEnabled())
                     && (type.getValueType().getSqlTypeName() != SqlTypeName.BINARY
                         || preserveCollections
-                            && type.getValueType().isNullable()
+                            && (type.getValueType().isNullable()
+                                || tech.streamfusion.compat.FlinkCompat
+                                    .supportsNotNullBinaryMapLeaves())
                             && tech.streamfusion.arrow.ArrowConversion.nestedScalarUdfsEnabled())
                     && rowCalcTypeCode(type.getKeyType(), preserveCollections) >= 0
                     && rowCalcTypeCode(type.getValueType(), preserveCollections) >= 0;
@@ -843,7 +847,7 @@ final class RexExpression {
                         && tech.streamfusion.arrow.ArrowConversion.nestedScalarUdfsEnabled()
                         && (type.getComponentType().isNullable()
                             || tech.streamfusion.compat.FlinkCompat
-                                .supportsNotNullBinaryMultisetElements()))
+                                .supportsNotNullBinaryMapLeaves()))
                 && rowCalcTypeCode(type.getComponentType(), preserveCollections) >= 0;
         break;
       case STRUCTURED:
