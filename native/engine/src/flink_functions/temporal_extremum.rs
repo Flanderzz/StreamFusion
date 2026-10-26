@@ -32,10 +32,11 @@ impl ScalarUDFImpl for TemporalExtremum {
         &self.signature
     }
     fn return_type(&self, types: &[DataType]) -> Result<DataType> {
-        if types.len() < 2 || types.iter().any(|ty| ty != &types[0]) {
+        let timestamps = types.iter().all(is_timestamp);
+        if types.len() < 2 || !timestamps && types.iter().any(|ty| ty != &types[0]) {
             return exec_err!("Temporal extrema require matching physical types");
         }
-        Ok(if is_timestamp(&types[0]) {
+        Ok(if timestamps {
             timestamp_type()
         } else {
             types[0].clone()
@@ -100,5 +101,57 @@ impl ScalarUDFImpl for TemporalExtremum {
             },
             vec![],
         )(&args.args)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::array::TimestampMillisecondArray;
+    use arrow::datatypes::Field;
+    use datafusion::common::config::ConfigOptions;
+    use streamfusion_bridge::timestamp::TimestampValue;
+
+    #[test]
+    fn equal_logical_timestamps_can_have_compact_and_component_storage() {
+        let columns = vec![
+            Arc::new(timestamp_array([
+                Some(TimestampValue::new(1, 1).unwrap()),
+                Some(TimestampValue::from_millis(-1)),
+                None,
+            ])) as ArrayRef,
+            Arc::new(TimestampMillisecondArray::from(vec![
+                Some(1),
+                Some(2),
+                Some(3),
+            ])) as ArrayRef,
+        ];
+        let udf = function(2, true);
+        let result_type = udf
+            .return_type(
+                &columns
+                    .iter()
+                    .map(|a| a.data_type().clone())
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        let output = udf
+            .invoke_with_args(ScalarFunctionArgs {
+                args: columns.iter().cloned().map(ColumnarValue::Array).collect(),
+                arg_fields: columns
+                    .iter()
+                    .map(|a| Arc::new(Field::new("arg", a.data_type().clone(), true)))
+                    .collect(),
+                number_rows: 3,
+                return_field: Arc::new(Field::new("result", result_type, true)),
+                config_options: Arc::new(ConfigOptions::new()),
+            })
+            .unwrap()
+            .into_array(3)
+            .unwrap();
+        let values = TimestampColumn::try_new(output.as_ref()).unwrap();
+        assert_eq!(values.value(0).unwrap(), TimestampValue::new(1, 1).unwrap());
+        assert_eq!(values.value(1).unwrap(), TimestampValue::from_millis(2));
+        assert!(values.is_null(2));
     }
 }

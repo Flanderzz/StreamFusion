@@ -108,6 +108,9 @@ LTZ extraction and rounding, mixed temporal coercions and OVERLAPS. A native out
 kernel does not establish that a generated child also ran in Rust. Native execution tests
 inspect complete expression assignments, including rowtime-materialization children.
 
+Matching logical timestamp extrema accept both compact millisecond arrays and full
+millisecond/nanosecond component arrays, including mixtures produced by collection expressions.
+
 [Prepared native calendar measurements](../benchmarks/native-certified-scalars.md) include
 YEAR(DATE), MONTH rounding, timestamp month arithmetic and matching-timestamp extrema.
 They exclude perimeter transposes; the separate whole-job results retain those costs.
