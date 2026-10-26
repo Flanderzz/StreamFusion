@@ -2531,7 +2531,16 @@ Same input and boundary rules as LPAD, with padding appended on the right. Dynam
 
 ### SPLIT_INDEX
 
-Character separators and TINYINT/SMALLINT/INTEGER indices may be dynamic. Indices are zero-based; negative/out-of-range indices, empty input, or any NULL produce NULL. Whole separators preserve empty tokens. An empty separator uses Java Character.isWhitespace, including tabs and line separators but excluding non-breaking spaces. Numeric separator overloads use Flink-generated code and interpret the integer as a character code. BIGINT indices with character separators fall back.
+Character separators and TINYINT/SMALLINT/INTEGER indices may be dynamic. Indices are zero-based; negative/out-of-range indices, empty input, or any NULL produce NULL. Whole separators preserve empty tokens. An empty separator uses Java Character.isWhitespace, including tabs and line separators but excluding non-breaking spaces. BIGINT indices with character separators fall back.
+
+The resolved `(STRING, INT, INT)` overload has a cache-aware Rust path for direct
+input/literal arguments. The integer delimiter denotes one character in 1..255;
+other values return NULL. It scans only to the requested field, preserving empty
+tokens, and supports non-ASCII UTF-8 and equivalent original Java UTF-16 caches.
+A non-equivalent original cache (for example an isolated surrogate encoded as
+`?`), computed operands and unverified resolved widths retain the exact Flink
+evaluator. This uses the existing per-batch certificate without a new switch.
+See the [release measurements](../benchmarks/scalar-functions.md#integer-delimiter-split-index).
 
 Generated scalar helpers keep operand computations within the same Flink evaluator, retaining
 intermediate StringData representation. For a computed empty trim set, Flink 2.2.1 can throw

@@ -22,6 +22,12 @@ pub(crate) fn evaluate(
         };
         return super::sha2_runtime::evaluate([source, bits]);
     }
+    if operation == 11 {
+        let [input, separator, index] = arrays else {
+            return None;
+        };
+        return super::split_index::integer_separator([input, separator, index], caches);
+    }
     for (index, input) in arrays.iter().enumerate() {
         if let Some(strings) = input.as_any().downcast_ref::<StringArray>() {
             let cache = caches

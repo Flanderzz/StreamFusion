@@ -4427,6 +4427,13 @@ final class RexExpression {
                 && call.getOperands().get(1).getType().getSqlTypeName() == SqlTypeName.INTEGER
             ? 12
             : 0;
+      case "SPLIT_INDEX":
+        return call.getOperands().size() == 3
+                && isCharacter(call.getOperands().get(0))
+                && call.getOperands().get(1).getType().getSqlTypeName() == SqlTypeName.INTEGER
+                && call.getOperands().get(2).getType().getSqlTypeName() == SqlTypeName.INTEGER
+            ? 11
+            : 0;
       default:
         return 0;
     }

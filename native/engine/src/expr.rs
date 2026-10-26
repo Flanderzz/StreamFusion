@@ -333,8 +333,11 @@ pub(crate) fn build_expr(
             function.numeric_cast = kinds[node] == 42;
             if kinds[node] == 44 {
                 function.certified_builtin = Some((longs[arg + 2], count));
-                // SHA2 hashes the existing bytes, so Java's decoded string cache is irrelevant.
-                let cache_count = if longs[arg + 2] == 12 { 0 } else { count };
+                let cache_count = match longs[arg + 2] {
+                    11 => 1, // Integer SPLIT_INDEX needs only the source string cache.
+                    12 => 0, // SHA2 hashes bytes without consulting decoded string caches.
+                    _ => count,
+                };
                 for index in 0..cache_count {
                     let cache = if let datafusion::logical_expr::Expr::Column(column) =
                         &children[index]
@@ -2192,6 +2195,22 @@ impl datafusion::logical_expr::ScalarUDFImpl for JvmUdf {
                 }
             }
         }
+        if let Some((11, count)) = self.certified_builtin {
+            if let [ColumnarValue::Array(source), ColumnarValue::Array(delimiter), ColumnarValue::Array(index)] =
+                &args.args[..count]
+            {
+                let caches = match &args.args[count] {
+                    ColumnarValue::Array(cache) => std::slice::from_ref(cache),
+                    _ => &[],
+                };
+                if let Some(output) = crate::flink_functions::split_index::integer_separator(
+                    [source, delimiter, index],
+                    caches,
+                ) {
+                    return Ok(ColumnarValue::Array(output));
+                }
+            }
+        }
         if let Some((operation @ 20..=28, count)) = self.certified_builtin {
             if let Some(output) = crate::flink_functions::string_fusion::evaluate(
                 operation,
@@ -2212,7 +2231,7 @@ impl datafusion::logical_expr::ScalarUDFImpl for JvmUdf {
         };
         let mut string_caches = Vec::new();
         if let Some((operation, count)) = self.certified_builtin {
-            if (1..=10).contains(&operation) || operation == 12 {
+            if (1..=12).contains(&operation) {
                 if let Some(output) = crate::flink_functions::certified::evaluate(
                     operation,
                     &arrays[..count],
@@ -2584,6 +2603,64 @@ mod certified_builtin_tests {
             }
             assert_eq!(calc.evaluate(input.slice(0, 0)).num_rows(), 0);
         }
+    }
+
+    #[test]
+    fn compiled_integer_split_index_does_not_call_the_jvm() {
+        use arrow::array::Int32Array;
+        use streamfusion_bridge::string_cache::{string_cache_array, string_cache_field};
+
+        let sources: Vec<_> = (1..=255)
+            .map(|delimiter| {
+                format!(
+                    "\u{1f600}{}\u{4e2d}{}",
+                    char::from(delimiter),
+                    char::from(delimiter)
+                )
+            })
+            .collect();
+        let units: Vec<_> = sources
+            .iter()
+            .map(|s| s.encode_utf16().collect::<Vec<_>>())
+            .collect();
+        let strings = Arc::new(StringArray::from(sources)) as ArrayRef;
+        let cache = string_cache_array(units.iter().map(|units| Some(units.as_slice())));
+        let input = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("s", DataType::Utf8, false),
+                Field::new("delimiter", DataType::Int32, false),
+                Field::new("index", DataType::Int32, false),
+                string_cache_field(0, cache.data_type().clone()),
+            ])),
+            vec![
+                strings,
+                Arc::new(Int32Array::from_iter_values(1..=255)),
+                Arc::new(Int32Array::from(vec![1; 255])),
+                cache,
+            ],
+        )
+        .unwrap()
+        .slice(1, 254);
+        let mut calc = CalcExpression {
+            kinds: vec![44, 0, 0, 0],
+            payload: vec![0, 0, 1, 2],
+            child_counts: vec![3, 0, 0, 0],
+            longs: vec![-1, 0, 11],
+            doubles: vec![],
+            strings: vec![],
+            projection_roots: vec![0],
+            condition_root: -1,
+            output_names: vec!["v".into()],
+            compiled: None,
+        };
+        for _ in 0..2 {
+            let result = calc.evaluate(input.clone());
+            assert_eq!(
+                result.column(0).as_ref(),
+                &StringArray::from(vec!["\u{4e2d}"; 254])
+            );
+        }
+        assert_eq!(calc.evaluate(input.slice(0, 0)).num_rows(), 0);
     }
 
     #[test]
