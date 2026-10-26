@@ -89,7 +89,7 @@ fn main() {
     let growth: usize = args.get(10).map_or(0, |s| s.parse().unwrap());
     let matching = args.get(11).is_some_and(|s| s == "true");
     assert!((20..=28).contains(&operation));
-    assert!(growth == 0 || matches!(operation, 20 | 21 | 23 | 24));
+    assert!(growth == 0 || (operation - 20) % 3 != 2);
     let classpath = format!(
         "-Djava.class.path={}",
         std::env::var("SF_NATIVE_BENCH_CLASSPATH").unwrap()
@@ -121,6 +121,11 @@ fn main() {
         (true, "cjk") => "\u{4e2d}",
         (true, "emoji") => "\u{1f600}",
         _ => "X",
+    };
+    let pad = if growth > 0 && operation >= 26 {
+        format!("{pad}?")
+    } else {
+        pad.into()
     };
     let pad_units: Vec<_> = pad.encode_utf16().collect();
     assert!(!matching || growth.is_multiple_of(pad_units.len()));
@@ -170,7 +175,7 @@ fn main() {
                 numbers.iter().map(|n| *n as i32),
             ))
         },
-        Arc::new(StringArray::from(vec![pad; batch_rows])),
+        Arc::new(StringArray::from(vec![pad.as_str(); batch_rows])),
     ];
     let mut fields = vec![
         Field::new("s", DataType::Utf8, true),

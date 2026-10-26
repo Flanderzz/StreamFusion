@@ -134,6 +134,7 @@ public final class StringFusionBenchmarkFunctions {
         growth > 0 && corpus.equals("cjk")
             ? "\u4e2d"
             : growth > 0 && corpus.equals("emoji") ? "\ud83d\ude00" : "X";
+    if (growth > 0 && operation >= 26) pad += "?";
     rows = new RowData[count];
     boolean overlay = (operation - 20) % 3 == 2;
     for (int i = 0; i < count; i++) {

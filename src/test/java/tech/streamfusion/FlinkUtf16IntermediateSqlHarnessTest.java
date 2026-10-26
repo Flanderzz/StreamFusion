@@ -38,6 +38,17 @@ class FlinkUtf16IntermediateSqlHarnessTest {
 
   @ParameterizedTest
   @ValueSource(strings = {"LPAD", "RPAD"})
+  void growingPaddingReplacementPreservesUtf16BeforeFinalEncoding(String function) throws Exception {
+    NativeParity.assertParity(
+        () -> TextTimeFunctionTestInputs.textRows("a?", "abc?", "", null),
+        "SELECT id, REPLACE(" + function + "(s, 15, 'x?'), '?', 'Z') FROM inputs");
+    NativeParity.assertParity(
+        TextTimeFunctionTestInputs::parameters,
+        "SELECT id, REPLACE(" + function + "(s, n, p), '?', 'Z') FROM inputs");
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"LPAD", "RPAD"})
   void growingPaddingComparisonsPreserveRepeatedAndSplitUtf16Units(String function)
       throws Exception {
     String value = function + "(s, n, p)";

@@ -7,6 +7,7 @@ import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.api.Schema;
+import org.apache.flink.table.api.TableDescriptor;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.apache.flink.types.Row;
 import org.junit.jupiter.api.Test;
@@ -51,8 +52,17 @@ class StringFusionPipelineBenchmark {
                 .column("s", DataTypes.STRING())
                 .column("n", DataTypes.INT())
                 .build());
-        tables.executeSql("CREATE TABLE output_rows(v BOOLEAN) WITH ('connector'='blackhole')");
         String query = "SELECT " + expression + " FROM inputs";
+        tables.createTemporaryTable(
+            "output_rows",
+            TableDescriptor.forConnector("blackhole")
+                .schema(
+                    Schema.newBuilder()
+                        .column(
+                            "v",
+                            tables.sqlQuery(query).getResolvedSchema().getColumnDataTypes().get(0))
+                        .build())
+                .build());
         String statement = "INSERT INTO output_rows " + query;
         String plan =
             nativeRun ? NativePlanner.explain(tables, statement) : tables.explainSql(statement);

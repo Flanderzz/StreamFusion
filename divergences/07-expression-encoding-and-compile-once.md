@@ -373,7 +373,10 @@ discipline, not its Spark code-point semantics. Released Flink counts UTF-16 uni
 original Java cache remains authoritative. Growing equality/inequality compares a literal's
 UTF-16 padding period and unchanged source without materializing a repeated padding buffer;
 Comet's standalone padding kernel materializes such a buffer because it returns strings.
-Growth under REPLACE, dynamic consumers and unmeasured replacement contexts retain the
+Growing single-ASCII-character REPLACE maps one period and copies it in growing chunks
+directly into the final Arrow buffer, then handles the partial period with the existing
+UTF-16 spans. This avoids a separate repeated padding buffer while preserving Flink's
+split-surrogate semantics. Dynamic consumers and unmeasured replacement contexts retain the
 generated Flink evaluator; no inter-operator string format is
 introduced. See the [Calc coverage](../docs/operators/calc-filter.md#lpad).
 

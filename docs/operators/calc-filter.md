@@ -2506,7 +2506,9 @@ against a string literal and REPLACE with single-character ASCII search/replacem
 have a [conditional Rust fusion path](../optimizations/native-string-fusion.md). This path
 requires direct input/literal producer arguments (or lossless integer widening). Equality
 also handles growth by comparing the literal's UTF-16 length and repeating padding period
-without constructing the padded string; REPLACE growth retains the exact Flink evaluator. Equality supports
+without constructing the padded string. Growing REPLACE maps one whole padding period,
+copies repetitions directly into the final Arrow buffer and consumes the partial UTF-16
+period without encoding split surrogates early. Equality supports
 original Unicode Java caches; REPLACE retains Flink for non-ASCII caches or producer literals. Dynamic consumers,
 other replacements, LIKE, and surrounding CASE expressions retain generated Flink evaluation
 through the batch JVM bridge. Both paths preserve isolated surrogates. For example, padding a supplementary
