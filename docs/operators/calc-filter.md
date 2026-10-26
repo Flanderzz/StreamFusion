@@ -1638,7 +1638,14 @@ Character strings use Java form encoding: space becomes `+`, ASCII alphanumerics
 
 ### OVERLAY
 
-Character strings and integer positions, widened to BIGINT without losing bits. Preserves Java UTF-16 positions, length narrowing/overflow, and substring errors. Non-positive or beyond-end starts return the source; zero/negative lengths omit the suffix. Split surrogate pairs encode as `?`, like Flink. Any NULL argument returns NULL.
+Character strings and integer positions, widened to BIGINT without losing bits. Preserves Java UTF-16 positions, length narrowing/overflow, and substring errors. Non-positive or beyond-end starts return the source; zero/negative lengths omit the suffix. Any NULL argument returns NULL.
+
+A standalone final projection keeps the native kernel: split surrogate pairs encode as `?`
+at final output, matching Flink. Scalar consumers such as equality, CASE, filters, LIKE and
+REPLACE fuse with OVERLAY in a released-Flink generated expression through the batch JVM
+bridge, so they see the original isolated UTF-16 unit before encoding. Sensitive character
+results crossing another relational operator retain the shared STRING identity fallback;
+[issue #519](https://github.com/datafusion-contrib/StreamFusion/issues/519) tracks that boundary.
 
 ### PARSE_URL
 
@@ -2489,6 +2496,15 @@ Character input with a dynamic TINYINT, SMALLINT, or INT count. Non-positive cou
 
 STRING, dynamic INT-width length, and literal or dynamic STRING padding. NULL, negative length, or empty padding returns NULL; zero length otherwise returns empty. Flink 2.2.1 counts UTF-16 units, including truncation through surrogate pairs.
 
+Standalone final LPAD/RPAD projections retain their native kernels. Consumers fuse with padding
+inside a Flink-generated scalar expression through the batch JVM bridge, preserving isolated
+surrogates produced by truncating the input or padding. For example, padding a supplementary
+character to one UTF-16 unit does not equal the literal `?`, even though both encode to `?`
+at final output. The original input string caches are retained; NULL and all-filtered empty
+batches preserve Flink behavior. A padding result crossing an intermediate relational operator
+retains the shared STRING identity fallback until that boundary can carry the exact value
+([issue #519](https://github.com/datafusion-contrib/StreamFusion/issues/519)).
+
 ### RPAD
 
 Same input and boundary rules as LPAD, with padding appended on the right. Dynamic lengths and padding are admitted, with Flink 2.2.1 UTF-16 counting.
@@ -2553,9 +2569,15 @@ patterns within a batch. Non-ASCII batches and mismatching original UTF-16 cache
 REGEXP_EXTRACT_ALL and STR_TO_MAP remain generated collection expressions; see
 [issue #495](https://github.com/datafusion-contrib/StreamFusion/issues/495).
 
-**Default compatibility path.** `UPPER`/`LOWER` and uncertified `REGEXP_EXTRACT` calls use a columnar JVM upcall to Flink's own string routines — `BinaryStringData` case folding and
-`SqlFunctionUtils.regexpExtract` — so the result is byte-identical to the host, and the rest of the
-containing expression still evaluates natively around the upcalled function.
+**Default compatibility path.** `UPPER`/`LOWER` use Flink-generated scalar expressions through
+the columnar JVM bridge. Original Java UTF-16 caches are passed beside the UTF-8 arguments;
+an absent cache remains a binary-only string. This distinction matters even for ASCII:
+under a Turkish or Azerbaijani runtime JVM locale, Java-backed `LOWER('I')` produces dotless i,
+while Flink's cold binary ASCII path produces ordinary i. Dependent consumers remain in the
+same generated scalar expression. Other projections and the Calc operator remain columnar;
+this is a correctness path, not a pure-Rust case-conversion acceleration. See
+[issue #494](https://github.com/datafusion-contrib/StreamFusion/issues/494) for remaining native
+Unicode coverage. Uncertified `REGEXP_EXTRACT` retains its JVM regex evaluator.
 
 Each of these also has a faster **pure-Rust** alternative — Rust's own case folding, and the `regex`
 crate — that is **opt-in** under

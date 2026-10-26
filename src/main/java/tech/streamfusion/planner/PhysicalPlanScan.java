@@ -832,11 +832,18 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
 
   /** Inserts transpose rels at every columnar↔rowwise edge of the (already substituted) tree. */
   private RelNode insertTransitions(RelNode node) {
-    return insertTransitions(node, false, 1024);
+    return insertTransitions(node, false, 1024, false);
   }
 
   private RelNode insertTransitions(
-      RelNode node, boolean preserveCollections, int inheritedBatchRows) {
+      RelNode node, boolean preserveCollections, int inheritedBatchRows, boolean inheritedStringCaches) {
+    boolean stringCaches =
+        node instanceof StreamPhysicalNativeCalc
+                && ((StreamPhysicalNativeCalc) node).requiresOriginalStringInputs()
+            || inheritedStringCaches
+                && (node instanceof StreamPhysicalNativeMiniBatchAssigner
+                    || node instanceof StreamPhysicalNativeDropUpdateBefore
+                    || node instanceof StreamPhysicalNativeWatermarkAssigner);
     int preferredBatchRows =
         node instanceof StreamPhysicalNativeOverAggregate
             ? Math.max(
@@ -863,11 +870,12 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
     List<RelNode> inputs = new ArrayList<>(node.getInputs().size());
     boolean changed = false;
     for (RelNode input : node.getInputs()) {
-      RelNode transitioned = insertTransitions(input, preserve, preferredBatchRows);
+      RelNode transitioned = insertTransitions(input, preserve, preferredBatchRows, stringCaches);
       RelNode adapted = adapt(node, transitioned, preserve);
       if (adapted instanceof StreamPhysicalRowDataToArrow) {
         adapted =
             ((StreamPhysicalRowDataToArrow) adapted).withPreferredBatchRows(preferredBatchRows);
+        if (stringCaches) adapted = ((StreamPhysicalRowDataToArrow) adapted).withStringCaches();
         if (node instanceof StreamPhysicalNativeCalc
             && ((StreamPhysicalNativeCalc) node).usesJavaJsonInput())
           adapted = ((StreamPhysicalRowDataToArrow) adapted).withJsonDocuments();
@@ -878,6 +886,7 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
     RelNode result = changed ? node.copy(node.getTraitSet(), inputs) : node;
     if (result instanceof StreamPhysicalRowDataToArrow) {
       result = ((StreamPhysicalRowDataToArrow) result).withPreferredBatchRows(inheritedBatchRows);
+      if (inheritedStringCaches) result = ((StreamPhysicalRowDataToArrow) result).withStringCaches();
     }
     return result;
   }

@@ -37,6 +37,7 @@ public class RowDataToArrowExecNode extends ExecNodeBase<ArrowBatch>
   private final boolean carryRowKind;
   private final RowType sourceType;
   private final byte[] arrowSchema;
+  private final boolean preserveStringCaches;
 
   public RowDataToArrowExecNode(
       ReadableConfig tableConfig,
@@ -77,12 +78,12 @@ public class RowDataToArrowExecNode extends ExecNodeBase<ArrowBatch>
       boolean preserveCollections,
       int preferredBatchRows) {
     this(tableConfig, inputProperty, rowType, description, carryRowKind, sourceType,
-        preserveCollections, preferredBatchRows, false);
+        preserveCollections, preferredBatchRows, false, false);
   }
 
   RowDataToArrowExecNode(ReadableConfig tableConfig, InputProperty inputProperty, RowType rowType,
       String description, boolean carryRowKind, RowType sourceType, boolean preserveCollections,
-      int preferredBatchRows, boolean jsonDocuments) {
+      int preferredBatchRows, boolean jsonDocuments, boolean preserveStringCaches) {
     super(
         ExecNodeContext.newNodeId(),
         new ExecNodeContext("stream-exec-row-to-arrow_1"),
@@ -94,6 +95,7 @@ public class RowDataToArrowExecNode extends ExecNodeBase<ArrowBatch>
     this.rowType = rowType;
     this.carryRowKind = carryRowKind;
     this.sourceType = sourceType;
+    this.preserveStringCaches = preserveStringCaches;
     var schema = ArrowConversion.toArrowInputSchema(rowType, preserveCollections);
     if (jsonDocuments) {
       var fields = schema.getFields().stream()
@@ -121,7 +123,7 @@ public class RowDataToArrowExecNode extends ExecNodeBase<ArrowBatch>
         SynchronousArrowInput.forTranspose(input, sourceType == null ? rowType : sourceType),
         createTransformationMeta(TRANSFORMATION, config),
         new RowDataToArrowOperator(
-            rowType, batchRows, carryRowKind, sourceType, false, arrowSchema),
+            rowType, batchRows, carryRowKind, sourceType, preserveStringCaches, arrowSchema),
         ArrowBatchTypeInformation.INSTANCE,
         input.getParallelism(),
         false);

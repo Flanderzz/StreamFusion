@@ -2191,13 +2191,15 @@ impl datafusion::logical_expr::ScalarUDFImpl for JvmUdf {
         };
         let mut string_caches = Vec::new();
         if let Some((operation, count)) = self.certified_builtin {
-            if let Some(output) = crate::flink_functions::certified::evaluate(
-                operation,
-                &arrays[..count],
-                &arrays[count..],
-                &self.return_type,
-            ) {
-                return Ok(ColumnarValue::Array(output));
+            if operation != 0 {
+                if let Some(output) = crate::flink_functions::certified::evaluate(
+                    operation,
+                    &arrays[..count],
+                    &arrays[count..],
+                    &self.return_type,
+                ) {
+                    return Ok(ColumnarValue::Array(output));
+                }
             }
             for (index, cache) in arrays[count..].iter().enumerate() {
                 if cache.data_type() != &DataType::Null {

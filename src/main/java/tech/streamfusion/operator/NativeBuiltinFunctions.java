@@ -39,12 +39,14 @@ public final class NativeBuiltinFunctions {
   // JDK's intrinsified String fold it was meant to avoid. For ASCII the mapping below is exactly
   // Character.toLowerCase/UpperCase (A-Z ± 32, everything else unchanged), and the first
   // non-ASCII byte delegates to Flink's own method — where its fast path also bails — so the
-  // result is byte-identical to the host on every input. An unchanged string returns as-is.
+  // Java-cached inputs must take Flink's locale-sensitive path even when the bytes are ASCII.
+  // An unchanged binary-only string returns as-is.
 
   public static BinaryStringData lower(BinaryStringData s) {
     if (s == null) {
       return null;
     }
+    if (s.getJavaObject() != null) return (BinaryStringData) s.toLowerCase();
     byte[] bytes = s.toBytes();
     byte[] folded = null;
     for (int i = 0; i < bytes.length; i++) {
@@ -66,6 +68,7 @@ public final class NativeBuiltinFunctions {
     if (s == null) {
       return null;
     }
+    if (s.getJavaObject() != null) return (BinaryStringData) s.toUpperCase();
     byte[] bytes = s.toBytes();
     byte[] folded = null;
     for (int i = 0; i < bytes.length; i++) {

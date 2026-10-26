@@ -245,14 +245,15 @@ strict NULL propagation applied to `CONCAT` below.
 - **`BTRIM`:** Both default and literal character-set trimming delegate to DataFusion's btrim kernel; no duplicate space-only kernel is maintained. See the Calc page for admission, semantics, and individual measurements.
 - **`ELT`:** A scalar index returns the selected array with its buffers/NULL mask intact. Longer dynamic outputs are sized before writing; short strings keep a single writing pass to avoid a selection vector larger than their payload. Comet uses host codegen. The narrower Flink INTEGER gate avoids admitting other boxed index types that Flink rejects. See the Calc page for admission, semantics, and individual measurements.
 - **`URL_ENCODE`:** A Rust column kernel emits JDK-compatible form encoding into an Arrow string builder without a JVM callback. See the Calc page for admission, semantics, and individual measurements.
-- **`OVERLAY`:** Copies intact UTF-8 prefix/replacement/suffix slices when UTF-16 cuts align with codepoints; ASCII needs no UTF-16 conversion. Cuts inside surrogate pairs retain full UTF-16 reconstruction, recombined pairs, and Java's encoding of lone surrogates. Comet uses host codegen. Flink's verified UTF-16 boundaries require preserving Java narrowing, overflow, substring errors, and split surrogates. See the Calc page for admission, semantics, and individual measurements.
+- **`OVERLAY`:** Standalone final projections copy intact UTF-8 slices when UTF-16 cuts align with codepoints; split pairs use Java's final replacement encoding. Dependent scalar consumers fuse with the released-Flink evaluator before that encoding, because an isolated surrogate remains distinct from `?`. Sensitive results crossing another relational operator retain fallback. Comet uses host codegen. See the Calc page for current admission and historical measurements.
 - **`URL_DECODE`:** A Rust column kernel mirrors the JDK's escape parser and UTF-8 replacement grouping instead of substituting Rust from_utf8_lossy. Flink SQL parity enumerates roughly 100,000 byte/Unicode-digit boundary probes. Rust from_utf8_lossy does not preserve Java replacement grouping. The planner chooses pre-JDK-25 Integer.parseInt escape rules or JDK 25+ ASCII-only HexFormat rules; PARSE_URL remains unadmitted. See the Calc page for admission, semantics, and individual measurements.
-- **`UPPER`/`LOWER` fall back by default** (opt-in via the flag above; asserted by a test). Native (Rust) case
-  folding is locale-independent Unicode, but the JVM's `String.toUpperCase()/toLowerCase()` is
-  locale-sensitive (e.g. Turkish dotless-i), so non-ASCII results can silently differ. DataFusion
-  Comet reached the same conclusion — it routes case conversion through the JVM by default and only
-  uses the native path under an opt-in flag. We do the same: fall back by default, native under the
-  `allowIncompatible` flag, rather than ship a silent non-ASCII divergence.
+- **`UPPER`/`LOWER` use the JVM inside native Calc by default.** The generated expression receives
+  original UTF-16 cache sidecars; no cache means binary-only input. Even ASCII differs under
+  Turkish locale: Java-backed strings use locale-sensitive String conversion while cold binary
+  strings use Flink's character fast path. Dependent consumers share the generated expression.
+  Comet also defaults case conversion to JVM evaluation, but its Spark UTF8String contract does
+  not establish Flink representation parity. The existing `allowIncompatible` flag selects
+  Rust's Unicode conversion explicitly; it is not the default correctness path.
 - **Remaining transcendental math falls back by default** (opt-in via the flag above):
   `EXP`/`LN`/`LOG10`/`SIN`/`COS`/`TAN`/`ASIN`/`ACOS`/`ATAN`. These are not IEEE-correctly-rounded, so
   the JVM's `java.lang.Math` (Flink) and DataFusion's Rust libm differ at the last ULP — verified:
@@ -365,7 +366,12 @@ Locates the suffix by traversing character boundaries from the end, without an i
 
 ### LPAD
 
-Copies borrowed UTF-8 prefixes and whole padding spans, following Comet's padding structure. A prefix counter measures Flink 2.2.1 UTF-16 units; a cut through a surrogate pair appends the JDK `?` replacement. Intact spans write directly into the Arrow output builder, without a per-row scratch string or whole-row UTF-16 buffers. Newer Flink source counts code points and cannot be substituted for the released runtime.
+Standalone final projections copy borrowed UTF-8 prefixes and whole padding spans, following
+Comet's padding structure. A prefix counter measures released Flink UTF-16 units; a cut through
+a surrogate pair appends the JDK `?` replacement only at the final observation boundary.
+Consumers fuse with padding in a released-Flink generated expression, retaining the isolated
+unit before comparison or replacement. Sensitive intermediate operator boundaries retain
+fallback. Newer Flink source counts code points and cannot replace the released contract.
 
 ### RPAD
 
