@@ -1743,7 +1743,8 @@ final class RexExpression {
         .anyMatch(
             operand ->
                 containsDecimalUdf(operand)
-                    || JsonStringIdentity.containsSensitiveString(operand))) {
+                    || JsonStringIdentity.containsSensitiveString(operand)
+                    || containsExactStringCase(operand))) {
       return emitHostExpression(call, true);
     }
     if (tech.streamfusion.compat.FlinkCompat.scalarFunction(call.getOperator()) != null) {
@@ -4292,6 +4293,17 @@ final class RexExpression {
       types.add(new org.apache.flink.table.types.logical.IntType());
       codes.add(tech.streamfusion.operator.NativeUdf.TYPE_INT);
     }
+    boolean originalStrings =
+        fuseConsumers
+            && (containsExactStringCase(call) || JsonStringIdentity.containsSensitiveString(call))
+            && codes.contains(tech.streamfusion.operator.NativeUdf.TYPE_STRING);
+    if (originalStrings) {
+      codes.replaceAll(
+          code ->
+              code == tech.streamfusion.operator.NativeUdf.TYPE_STRING
+                  ? tech.streamfusion.operator.NativeUdf.TYPE_INTERNAL
+                  : code);
+    }
     FlinkExpressionFunction function;
     Method eval;
     try {
@@ -4327,7 +4339,11 @@ final class RexExpression {
             && isLegacyNumericCast(
                 ((RexCall) expression).getOperands().get(0).getType(), call.getType());
     add(
-        decimalRound != null ? KIND_DECIMAL_ROUND_TEXT : numericCast ? KIND_NUMERIC_CAST : KIND_UDF,
+        decimalRound != null
+            ? KIND_DECIMAL_ROUND_TEXT
+            : numericCast
+                ? KIND_NUMERIC_CAST
+                : originalStrings ? KIND_CERTIFIED_BUILTIN : KIND_UDF,
         longs.size(),
         Math.max(1, arguments.size()));
     longs.add((long) localIndex);
@@ -4338,6 +4354,9 @@ final class RexExpression {
                   == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.TRUNCATE
               ? 1L
               : 0L);
+    } else if (!numericCast && originalStrings) {
+      // Operation zero retains the exact evaluator and original string caches without a Rust shortcut.
+      longs.add(0L);
     }
     if (arguments.isEmpty()) {
       add(KIND_LIT_INT, longs.size(), 0);
@@ -5509,13 +5528,7 @@ final class RexExpression {
     String name = call.getOperator().getName();
     if (!NativeConfig.allowsIncompatible(name)) {
       // Exact numeric calls are handled by the generated-expression path before this point.
-      // Case folding uses the host's BinaryStringData implementation.
-      if (op == 50) {
-        return emitStringCaseJvm(call, "upper");
-      }
-      if (op == 51) {
-        return emitStringCaseJvm(call, "lower");
-      }
+      if (op == 50 || op == 51) return emitHostExpression(call, true);
       return reject(incompatibleReason(name));
     }
     if (call.getOperands().size() != 1) {
@@ -5525,38 +5538,13 @@ final class RexExpression {
     return emit(call.getOperands().get(0));
   }
 
-  /**
-   * Emits {@code UPPER}/{@code LOWER} as a JVM-upcall node (op {@link #KIND_UDF}) backed by {@link
-   * tech.streamfusion.operator.NativeBuiltinFunctions}, which calls Flink's own {@code
-   * BinaryStringData} case folding — byte-identical to the host, with the rest of the expression
-   * still native. The argument must be string-typed.
-   */
-  private boolean emitStringCaseJvm(RexCall call, String method) {
-    List<RexNode> args = call.getOperands();
-    if (args.size() != 1) {
-      return reject(method + " requires one argument");
-    }
-    if (udfTypeCode(args.get(0).getType().getSqlTypeName())
-        != tech.streamfusion.operator.NativeUdf.TYPE_STRING) {
-      return reject(method + " requires a string argument");
-    }
-    Method impl;
-    try {
-      impl =
-          tech.streamfusion.operator.NativeBuiltinFunctions.class.getMethod(
-              method, org.apache.flink.table.data.binary.BinaryStringData.class);
-    } catch (ReflectiveOperationException e) {
-      return reject(method + " host implementation unavailable: " + e.getMessage());
-    }
-    int returnCode = tech.streamfusion.operator.NativeUdf.TYPE_STRING;
-    int localIndex =
-        addUdf(
-            tech.streamfusion.operator.NativeUdf.Descriptor.forBuiltin(
-                impl, new int[] {tech.streamfusion.operator.NativeUdf.TYPE_STRING}, returnCode));
-    add(KIND_UDF, longs.size(), 1);
-    longs.add((long) localIndex);
-    longs.add((long) returnCode);
-    return emit(args.get(0));
+  private static boolean containsExactStringCase(RexNode node) {
+    if (!(node instanceof RexCall)) return false;
+    RexCall call = (RexCall) node;
+    String name = call.getOperator().getName();
+    return ((name.equalsIgnoreCase("UPPER") || name.equalsIgnoreCase("LOWER"))
+            && !NativeConfig.allowsIncompatible(name))
+        || call.getOperands().stream().anyMatch(RexExpression::containsExactStringCase);
   }
 
   private static boolean needsExactPower(RexCall call) {

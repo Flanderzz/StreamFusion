@@ -143,6 +143,11 @@ public class StreamPhysicalNativeCalc extends StreamPhysicalNativeSingleRel
     return false;
   }
 
+  boolean requiresOriginalStringInputs() {
+    for (int kind : kinds) if (kind == 44) return true;
+    return false;
+  }
+
   @Override
   public RelWriter explainTerms(RelWriter writer) {
     return super.explainTerms(writer)

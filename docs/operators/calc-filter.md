@@ -2553,9 +2553,15 @@ patterns within a batch. Non-ASCII batches and mismatching original UTF-16 cache
 REGEXP_EXTRACT_ALL and STR_TO_MAP remain generated collection expressions; see
 [issue #495](https://github.com/datafusion-contrib/StreamFusion/issues/495).
 
-**Default compatibility path.** `UPPER`/`LOWER` and uncertified `REGEXP_EXTRACT` calls use a columnar JVM upcall to Flink's own string routines — `BinaryStringData` case folding and
-`SqlFunctionUtils.regexpExtract` — so the result is byte-identical to the host, and the rest of the
-containing expression still evaluates natively around the upcalled function.
+**Default compatibility path.** `UPPER`/`LOWER` use Flink-generated scalar expressions through
+the columnar JVM bridge. Original Java UTF-16 caches are passed beside the UTF-8 arguments;
+an absent cache remains a binary-only string. This distinction matters even for ASCII:
+under a Turkish or Azerbaijani runtime JVM locale, Java-backed `LOWER('I')` produces dotless i,
+while Flink's cold binary ASCII path produces ordinary i. Dependent consumers remain in the
+same generated scalar expression. Other projections and the Calc operator remain columnar;
+this is a correctness path, not a pure-Rust case-conversion acceleration. See
+[issue #494](https://github.com/datafusion-contrib/StreamFusion/issues/494) for remaining native
+Unicode coverage. Uncertified `REGEXP_EXTRACT` retains its JVM regex evaluator.
 
 Each of these also has a faster **pure-Rust** alternative — Rust's own case folding, and the `regex`
 crate — that is **opt-in** under

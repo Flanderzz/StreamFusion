@@ -2,6 +2,9 @@ package tech.streamfusion;
 
 import static tech.streamfusion.compat.FlinkTestSources.fromData;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Locale;
 import java.util.function.Supplier;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.datastream.DataStream;
@@ -12,12 +15,13 @@ import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.apache.flink.types.Row;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 /**
- * {@code UPPER}/{@code LOWER} run natively and byte-identically to Flink by default (no {@code
- * allowIncompatible}): they route to the host's own {@code BinaryStringData} case folding via a JVM
- * upcall, so even non-ASCII inputs — where Rust's Unicode default case mapping would diverge from
- * Flink's — match exactly.
+ * Default case conversion uses released Flink expressions inside columnar Calc, retaining both
+ * Java-backed and binary-only string behavior under the task JVM's locale.
  */
 class FlinkStringCaseSqlHarnessTest {
 
@@ -26,6 +30,41 @@ class FlinkStringCaseSqlHarnessTest {
     NativeParity.assertParity(
         environment(),
         "SELECT s, LOWER(s) AS lo, UPPER(s) AS up, LOWER(s) = 'apple' AS is_apple FROM t");
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"tr-TR", "az-AZ", "lt-LT"})
+  void caseConversionRetainsTheRuntimeLocaleAndItsConsumers(String language) throws Exception {
+    Locale previous = Locale.getDefault();
+    try {
+      Locale.setDefault(Locale.forLanguageTag(language));
+      NativeParity.assertParity(
+          () -> TextTimeFunctionTestInputs.textRows("I", "i", "I\u0301", "\u0130", "", null),
+          "SELECT id, LOWER(s), UPPER(s), LOWER(s) = 'i', UPPER(s) = 'I', "
+              + "REPLACE(LOWER(s), 'i', 'x') FROM inputs");
+    } finally {
+      Locale.setDefault(previous);
+    }
+  }
+
+  @Test
+  void binarySourceDoesNotAcquireAJavaCacheDuringTheUpcall(@TempDir Path directory) throws Exception {
+    Files.writeString(directory.resolve("input.csv"), "I\ni\n");
+    Locale previous = Locale.getDefault();
+    try {
+      Locale.setDefault(Locale.forLanguageTag("tr-TR"));
+      NativeParity.assertParity(
+          () -> {
+            TableEnvironment tables = environment().get();
+            tables.executeSql(
+                "CREATE TEMPORARY TABLE cold (s STRING) WITH ('connector' = 'filesystem', "
+                    + "'path' = '" + directory.toUri() + "', 'format' = 'csv')");
+            return tables;
+          },
+          "SELECT LOWER(s), UPPER(s), LOWER(s) = 'i' FROM cold");
+    } finally {
+      Locale.setDefault(previous);
+    }
   }
 
   private static Supplier<TableEnvironment> environment() {
