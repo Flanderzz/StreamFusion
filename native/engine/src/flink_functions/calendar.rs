@@ -1,5 +1,5 @@
 use arrow::array::ArrayRef;
-use arrow::datatypes::{DataType, Date32Type, Int64Type};
+use arrow::datatypes::{DataType, Date32Type, Int64Type, Time32MillisecondType, TimeUnit};
 use datafusion::common::{cast::as_primitive_array, exec_err, Result};
 use datafusion::logical_expr::{
     ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
@@ -8,6 +8,12 @@ use std::sync::Arc;
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub(crate) enum Field {
+    Year,
+    Month,
+    Day,
+    Hour,
+    Minute,
+    Second,
     Quarter,
     Week,
     DayOfYear,
@@ -17,6 +23,7 @@ pub(crate) enum Field {
 pub(crate) fn function(field: Field) -> ScalarUDF {
     ScalarUDF::new_from_impl(CalendarField {
         field,
+        offsets: None,
         signature: Signature::any(1, Volatility::Immutable),
     })
 }
@@ -24,12 +31,43 @@ pub(crate) fn function(field: Field) -> ScalarUDF {
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct CalendarField {
     field: Field,
+    offsets: Option<(i64, Vec<(i64, i64)>)>,
     signature: Signature,
+}
+
+pub(crate) fn zoned(encoded: &str) -> Result<ScalarUDF> {
+    let (unit, history) = encoded.split_once('|').ok_or_else(|| {
+        datafusion::common::DataFusionError::Plan("Invalid calendar zone history".into())
+    })?;
+    let field = match unit {
+        "YEAR" => Field::Year,
+        "MONTH" => Field::Month,
+        "DAY" => Field::Day,
+        "HOUR" => Field::Hour,
+        "MINUTE" => Field::Minute,
+        "SECOND" => Field::Second,
+        "QUARTER" => Field::Quarter,
+        "WEEK" => Field::Week,
+        "DOY" => Field::DayOfYear,
+        "DOW" => Field::DayOfWeek,
+        _ => return exec_err!("Unsupported calendar unit {unit}"),
+    };
+    Ok(ScalarUDF::new_from_impl(CalendarField {
+        field,
+        offsets: Some(super::from_unixtime::decode_offsets(history)?),
+        signature: Signature::any(1, Volatility::Immutable),
+    }))
 }
 
 impl ScalarUDFImpl for CalendarField {
     fn name(&self) -> &str {
         match self.field {
+            Field::Year => "flink_year",
+            Field::Month => "flink_month",
+            Field::Day => "flink_day",
+            Field::Hour => "flink_hour",
+            Field::Minute => "flink_minute",
+            Field::Second => "flink_second",
             Field::Quarter => "flink_quarter",
             Field::Week => "flink_week",
             Field::DayOfYear => "flink_dayofyear",
@@ -43,6 +81,7 @@ impl ScalarUDFImpl for CalendarField {
         match types {
             [data_type]
                 if *data_type == DataType::Date32
+                    || *data_type == DataType::Time32(TimeUnit::Millisecond)
                     || streamfusion_bridge::timestamp::is_timestamp(data_type) =>
             {
                 Ok(DataType::Int64)
@@ -60,8 +99,20 @@ impl ScalarUDFImpl for CalendarField {
                     // Flink divides epoch milliseconds towards zero when extracting calendar fields.
                     // A timestamp just before 1970-01-01 therefore uses that day's calendar fields.
                     super::map_timestamp_millis(input, |value| {
-                        i64::from(extract((value / 86_400_000) as i32, self.field))
+                        let offset = self.offsets.as_ref().map_or(0, |(initial, transitions)| {
+                            let index = transitions.partition_point(|(millis, _)| *millis <= value);
+                            if index == 0 {
+                                *initial
+                            } else {
+                                transitions[index - 1].1
+                            }
+                        });
+                        extract_millis(value.wrapping_add(offset), self.field)
                     })?
+                } else if input.data_type() == &DataType::Time32(TimeUnit::Millisecond) {
+                    as_primitive_array::<Time32MillisecondType>(input)?.unary::<_, Int64Type>(
+                        |millis| extract_millis(i64::from(millis), self.field),
+                    )
                 } else {
                     as_primitive_array::<Date32Type>(input)?
                         .unary::<_, Int64Type>(|days| i64::from(extract(days, self.field)))
@@ -78,6 +129,10 @@ impl ScalarUDFImpl for CalendarField {
 fn extract(days: i32, field: Field) -> i32 {
     let julian = days.wrapping_add(2_440_588);
     match field {
+        Field::Year => calendar_date(julian).0,
+        Field::Month => calendar_date(julian).1,
+        Field::Day => calendar_date(julian).2,
+        Field::Hour | Field::Minute | Field::Second => 0,
         Field::DayOfWeek => julian.wrapping_add(1).rem_euclid(7) + 1,
         Field::Quarter => (calendar_date(julian).1 + 2) / 3,
         Field::Week => {
@@ -88,6 +143,52 @@ fn extract(days: i32, field: Field) -> i32 {
             .wrapping_sub(january_first(calendar_date(julian).0))
             .wrapping_add(1),
     }
+}
+
+fn extract_millis(millis: i64, field: Field) -> i64 {
+    match field {
+        // DateTimeUtils uses signed remainder, including timestamps before the epoch.
+        Field::Hour => (millis % 86_400_000) / 3_600_000,
+        Field::Minute => (millis % 3_600_000) / 60_000,
+        Field::Second => (millis % 60_000) / 1_000,
+        _ => i64::from(extract((millis / 86_400_000) as i32, field)),
+    }
+}
+
+pub(super) fn round_date(days: i32, year_unit: bool, ceiling: bool) -> i32 {
+    let julian = days.wrapping_add(2_440_588);
+    let (b, c) = if julian > 2_299_160 {
+        let a = julian.wrapping_add(32_044);
+        let b = a.wrapping_mul(4).wrapping_add(3) / 146_097;
+        (b, a.wrapping_sub(b.wrapping_mul(146_097) / 4))
+    } else {
+        (0, julian.wrapping_add(32_082))
+    };
+    let d = c.wrapping_mul(4).wrapping_add(3) / 1461;
+    let e = c.wrapping_sub(1461_i32.wrapping_mul(d) / 4);
+    let m = e.wrapping_mul(5).wrapping_add(2) / 153;
+    let day = e
+        .wrapping_sub(m.wrapping_mul(153).wrapping_add(2) / 5)
+        .wrapping_add(1);
+    let mut month = m.wrapping_add(3).wrapping_sub(12_i32.wrapping_mul(m / 10));
+    let mut year = b
+        .wrapping_mul(100)
+        .wrapping_add(d)
+        .wrapping_sub(4800)
+        .wrapping_add(m / 10);
+    if year_unit {
+        if ceiling && (month > 1 || day > 1) {
+            year = year.wrapping_add(1);
+        }
+        month = 1;
+    } else if ceiling && day > 1 {
+        month = month.wrapping_add(1);
+    }
+    let a = (14 - i64::from(month)) / 12;
+    let y = i64::from(year) + 4800 - a;
+    let m = i64::from(month) + 12 * a - 3;
+    let julian = (1 + (153 * m + 2) / 5 + 365 * y + y / 4 - y / 100 + y / 400 - 32045) as i32;
+    julian.wrapping_sub(2_440_588)
 }
 
 fn calendar_date(julian: i32) -> (i32, i32, i32) {
@@ -194,6 +295,21 @@ mod tests {
             let output = output.as_any().downcast_ref::<Int64Array>().unwrap();
             assert_eq!(output.value(0), expected);
             assert!(output.is_null(1));
+        }
+    }
+
+    #[test]
+    fn extraction_uses_flink_signed_arithmetic_and_full_date_range() {
+        for (field, expected) in [(Field::Year, 1970), (Field::Month, 1), (Field::Day, 1)] {
+            assert_eq!(extract_millis(-1, field), expected);
+        }
+        assert_eq!(extract_millis(-3_661_999, Field::Hour), -1);
+        assert_eq!(extract_millis(-3_661_999, Field::Minute), -1);
+        assert_eq!(extract_millis(-3_661_999, Field::Second), -1);
+        for days in [i32::MIN, i32::MAX, -719162, 2932896] {
+            for field in [Field::Year, Field::Month, Field::Day] {
+                let _ = extract(days, field);
+            }
         }
     }
 }

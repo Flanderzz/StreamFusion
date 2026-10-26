@@ -1,5 +1,6 @@
 package tech.streamfusion.planner;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -16,6 +17,41 @@ import org.apache.calcite.sql.type.SqlTypeName;
 import org.junit.jupiter.api.Test;
 
 class RexExpressionScalarAdmissionTest {
+  @Test
+  void explicitRegexOptInRetainsTheDirectNativeOpcode() {
+    String property = "streamfusion.expression.REGEXP_EXTRACT.allowIncompatible";
+    String previous = System.getProperty(property);
+    try {
+      System.setProperty(property, "true");
+      var types = new JavaTypeFactoryImpl();
+      var rex = new RexBuilder(types);
+      var function =
+          new SqlFunction(
+              "REGEXP_EXTRACT",
+              SqlKind.OTHER_FUNCTION,
+              null,
+              null,
+              null,
+              SqlFunctionCategory.STRING);
+      var call =
+          rex.makeCall(
+              types.createSqlType(SqlTypeName.VARCHAR),
+              function,
+              List.of(
+                  rex.makeInputRef(types.createSqlType(SqlTypeName.VARCHAR), 0),
+                  rex.makeLiteral("a+"),
+                  rex.makeExactLiteral(
+                      java.math.BigDecimal.ZERO, types.createSqlType(SqlTypeName.INTEGER))));
+      var encoded = RexExpression.encodeProjections(List.of(call), List.of("match"));
+      assertNotNull(encoded);
+      assertEquals(6, encoded.kinds()[0]);
+      assertEquals(88, encoded.payload()[0]);
+    } finally {
+      if (previous == null) System.clearProperty(property);
+      else System.setProperty(property, previous);
+    }
+  }
+
   @Test
   void jsonOptionSymbolsRemainValidNonTemporalArguments() {
     var types = new JavaTypeFactoryImpl();

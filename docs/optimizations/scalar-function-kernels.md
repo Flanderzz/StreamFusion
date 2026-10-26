@@ -24,6 +24,33 @@ experiments; they do not imply that the direct STRING kernel is enabled. Boolean
 ARRAY_DISTINCT, fixed binary casts, and the scale-dependent exact DOUBLE TRUNCATE helper
 remain admitted. See [current Calc coverage](../operators/calc-filter.md).
 
+## Certified string builtins
+
+A verified ASCII batch runs regex, LIKE ESCAPE and SIMILAR matching in Rust. Its original
+Java UTF-16 caches must agree with the Arrow bytes. An unverified batch keeps the released
+Flink evaluator and its source caches; this avoids guessing Java regex or Formatter semantics.
+Regex patterns compile once per distinct pattern in the batch. Java's empty-match progression
+is explicit rather than delegated to Rust's non-overlapping iterator.
+
+LIKE tokenizes SQL wildcards once per pattern. Exact/prefix/suffix/contains forms use byte
+comparisons or memmem search; remaining forms use a wildcard matcher. The initial generic
+regex implementation lost to stock on its prepared-input fixture, so it was replaced before
+admission. The final 64/264-byte measurements are 2.11x/2.32x stock, while the full-job diagnostic
+retains both transposes and startup. Exhaustive short-string/control-character tests check
+specializations against the independent SQL-to-regex translation.
+
+PARSE_URL reuses the parsed component for consecutive equal URL/part pairs. Query keys still
+select separately per row, raw bytes are never normalized, and other pairs replace the cached
+borrow immediately. The short repeated-URL fixture was initially tied with stock. Reuse raises
+its final ratio to 2.65x; 1,024 distinct short URLs retain a 1.55x ratio without that reuse.
+
+PRINTF builds verified integer/text formats directly in an Arrow string result, preserving
+Locale.US case/sign/padding rules and released DecimalData behavior. Unverified conversions
+retain Formatter. Its prepared BIGINT fixture is about 3.95x stock.
+
+See [configuration, all trials and remaining boundaries](../benchmarks/native-certified-scalars.md).
+These are bounded input measurements; they do not establish a gain for every native signature.
+
 ## FROM_UNIXTIME
 
 Literal numeric patterns in fixed-offset and finite-history regional zones compile to Rust

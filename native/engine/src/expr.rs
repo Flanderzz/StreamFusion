@@ -284,9 +284,23 @@ pub(crate) fn build_expr(
             }
             build_typed_call(schema, op, args)
         }
+        45 => crate::flink_functions::calendar::zoned(
+            strings[arg].as_deref().expect("calendar zone history"),
+        )
+        .expect("verified calendar zone history")
+        .call(vec![build_expr(
+            schema,
+            kinds,
+            payload,
+            child_counts,
+            longs,
+            doubles,
+            strings,
+            cursor,
+        )]),
         // A JVM UDF node: `arg` indexes the long pool at [udf id, return-type code]; the children are the
         // argument expressions. Builds a JvmUdf scalar function that upcalls the JVM per batch.
-        17 | 38 | 41 | 42 => {
+        17 | 38 | 41 | 42 | 44 => {
             let id = longs[arg] as i32;
             let row_result = kinds[node] == 38;
             let return_type = if row_result {
@@ -317,6 +331,30 @@ pub(crate) fn build_expr(
                 function.decimal_round_text = Some(longs[arg + 2] != 0);
             }
             function.numeric_cast = kinds[node] == 42;
+            if kinds[node] == 44 {
+                function.certified_builtin = Some((longs[arg + 2], count));
+                for index in 0..count {
+                    let cache = if let datafusion::logical_expr::Expr::Column(column) =
+                        &children[index]
+                    {
+                        let position = schema.index_of(&column.name).ok();
+                        position.and_then(|position| {
+                            schema.fields().iter().enumerate().find_map(|(i, field)| {
+                                (streamfusion_bridge::string_cache::is_string_cache_field(field)
+                                    && field
+                                        .metadata()
+                                        .get("streamfusion.java_string_cache.input")
+                                        .and_then(|value| value.parse::<usize>().ok())
+                                        == Some(position))
+                                .then(|| datafusion::prelude::col(schema.field(i).name()))
+                            })
+                        })
+                    } else {
+                        None
+                    };
+                    children.push(cache.unwrap_or_else(|| logical_lit(ScalarValue::Null)));
+                }
+            }
             datafusion::logical_expr::ScalarUDF::new_from_impl(function).call(children)
         }
         // Preserve the legacy literal encoding used by native timestamp arithmetic. The generated
@@ -2105,6 +2143,7 @@ pub(crate) struct JvmUdf {
     row_result: bool,
     decimal_round_text: Option<bool>,
     numeric_cast: bool,
+    certified_builtin: Option<(i64, usize)>,
 }
 
 impl JvmUdf {
@@ -2115,6 +2154,7 @@ impl JvmUdf {
             row_result,
             decimal_round_text: None,
             numeric_cast: false,
+            certified_builtin: None,
             signature: datafusion::logical_expr::Signature::variadic_any(if row_result {
                 datafusion::logical_expr::Volatility::Volatile
             } else {
@@ -2141,7 +2181,7 @@ impl datafusion::logical_expr::ScalarUDFImpl for JvmUdf {
         use datafusion::common::DataFusionError;
         use datafusion::logical_expr::ColumnarValue;
         let exec = |e: String| DataFusionError::Execution(e);
-        let arrays = if self.row_result {
+        let mut arrays = if self.row_result {
             args.args
                 .into_iter()
                 .map(|value| value.into_array(args.number_rows))
@@ -2149,6 +2189,23 @@ impl datafusion::logical_expr::ScalarUDFImpl for JvmUdf {
         } else {
             ColumnarValue::values_to_arrays(&args.args)?
         };
+        let mut string_caches = Vec::new();
+        if let Some((operation, count)) = self.certified_builtin {
+            if let Some(output) = crate::flink_functions::certified::evaluate(
+                operation,
+                &arrays[..count],
+                &arrays[count..],
+                &self.return_type,
+            ) {
+                return Ok(ColumnarValue::Array(output));
+            }
+            for (index, cache) in arrays[count..].iter().enumerate() {
+                if cache.data_type() != &DataType::Null {
+                    string_caches.push((index, cache.clone()));
+                }
+            }
+            arrays.truncate(count);
+        }
         if let Some(truncate) = self.decimal_round_text {
             if let Some(output) =
                 crate::flink_functions::decimal_round_text::evaluate(&arrays, truncate)
@@ -2164,11 +2221,18 @@ impl datafusion::logical_expr::ScalarUDFImpl for JvmUdf {
             }
         }
         // Pack the argument columns into one batch (arg0..argN-1) to hand across the boundary at once.
-        let fields: Vec<Field> = arrays
+        let mut fields: Vec<Field> = arrays
             .iter()
             .enumerate()
             .map(|(i, a)| Field::new(format!("arg{i}"), a.data_type().clone(), true))
             .collect();
+        for (index, cache) in string_caches {
+            fields.push(streamfusion_bridge::string_cache::string_cache_field(
+                index,
+                cache.data_type().clone(),
+            ));
+            arrays.push(cache);
+        }
         let batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays)
             .map_err(|e| exec(e.to_string()))?;
         let rows = batch.num_rows();
@@ -2242,12 +2306,23 @@ fn indexed_schema(schema: &SchemaRef) -> SchemaRef {
             .iter()
             .enumerate()
             .map(|(index, field)| {
+                let mut metadata = field.metadata().clone();
+                if streamfusion_bridge::string_cache::is_string_cache_field(field) {
+                    if let Some(input) =
+                        streamfusion_bridge::string_cache::string_cache_index(field.name())
+                    {
+                        metadata.insert(
+                            "streamfusion.java_string_cache.input".into(),
+                            input.to_string(),
+                        );
+                    }
+                }
                 Field::new(
                     format!("__streamfusion_input_{index}"),
                     field.data_type().clone(),
                     field.is_nullable(),
                 )
-                .with_metadata(field.metadata().clone())
+                .with_metadata(metadata)
             })
             .collect::<Vec<_>>(),
     ))
@@ -2333,6 +2408,80 @@ pub(crate) fn infer_expr_type(
         root,
     )?
     .data_type(&indexed_schema(schema))
+}
+
+#[cfg(test)]
+mod certified_builtin_tests {
+    use super::*;
+    use crate::calc::CalcExpression;
+
+    #[test]
+    fn compiled_batches_execute_certified_kernels_without_a_jvm() {
+        let schema = Arc::new(Schema::new(vec![Field::new("s", DataType::Utf8, true)]));
+        for (operation, code, constant, expected) in [
+            (3, 0, "[0-9]+", "123"),
+            (6, 0, "[0-9]+", "123"),
+            (9, 0, "PATH", "/abc123"),
+            (10, 0, "123", "n=123"),
+        ] {
+            let source = match operation {
+                9 => "http://host/abc123",
+                10 => "n=%s",
+                _ => "abc123",
+            };
+            let input = RecordBatch::try_new(
+                schema.clone(),
+                vec![Arc::new(StringArray::from(vec![Some(source), None]))],
+            )
+            .unwrap();
+            let mut calc = CalcExpression {
+                kinds: vec![44, 0, 3],
+                payload: vec![0, 0, 0],
+                child_counts: vec![2, 0, 0],
+                longs: vec![999, code, operation],
+                doubles: vec![],
+                strings: vec![Some(constant.into())],
+                projection_roots: vec![0],
+                condition_root: -1,
+                output_names: vec!["v".into()],
+                compiled: None,
+            };
+            let result = calc.evaluate(input);
+            assert_eq!(
+                result.column(0).as_ref(),
+                &StringArray::from(vec![Some(expected), None])
+            );
+        }
+    }
+
+    #[test]
+    fn string_cache_certificate_survives_positional_schema_names() {
+        let cache = streamfusion_bridge::string_cache::string_cache_array([Some(&[65_u16][..])]);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("s", DataType::Utf8, false),
+            streamfusion_bridge::string_cache::string_cache_field(0, cache.data_type().clone()),
+        ]));
+        let input =
+            RecordBatch::try_new(schema, vec![Arc::new(StringArray::from(vec!["A"])), cache])
+                .unwrap();
+        let mut calc = CalcExpression {
+            kinds: vec![44, 0, 3],
+            payload: vec![0, 0, 0],
+            child_counts: vec![2, 0, 0],
+            longs: vec![999, 4, 1],
+            doubles: vec![],
+            strings: vec![Some(".".into())],
+            projection_roots: vec![0],
+            condition_root: -1,
+            output_names: vec!["v".into()],
+            compiled: None,
+        };
+        let result = calc.evaluate(input);
+        assert_eq!(
+            result.column(0).as_ref(),
+            &arrow::array::BooleanArray::from(vec![true])
+        );
+    }
 }
 
 #[cfg(test)]

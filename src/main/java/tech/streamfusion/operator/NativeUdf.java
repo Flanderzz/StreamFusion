@@ -479,6 +479,7 @@ public final class NativeUdf {
         tech.streamfusion.arrow.ArrowReader generatedReader =
             udf.generated == null
                     || Arrays.stream(udf.argTypes).anyMatch(type -> type == TYPE_STRING)
+                        && tech.streamfusion.arrow.StringCacheColumns.readers(in, arity) == null
                 ? null
                 : tech.streamfusion.arrow.ArrowConversion.createArrowReader(
                     in,

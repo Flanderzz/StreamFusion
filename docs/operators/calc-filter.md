@@ -228,11 +228,26 @@ complete date-partition expression, wide-row parity checks and both timing bound
 
 ## LIKE ESCAPE and SIMILAR TO
 
-LIKE/NOT LIKE with an explicit literal or per-row ESCAPE, and SIMILAR TO/NOT SIMILAR TO,
-run Flink's generated SQL-pattern evaluator through the batch JVM bridge. Pattern grammar,
-Unicode, NULLs and invalid-escape failures are Flink's own. AND/OR consumers fuse with these
-expressions so invalid patterns are not evaluated on rows that Flink short-circuits; filtered-out
-batches do not evaluate projections. Existing two-argument LIKE keeps its current native path.
+Direct input/literal LIKE ESCAPE and SIMILAR TO calls have a certified Rust batch path.
+The certificate requires ASCII inputs whose original Java UTF-16 cache agrees with the
+Arrow bytes. LIKE admits valid one-character ESCAPE values; SIMILAR admits ordinary literals,
+`%`, `_`, `.`, anchors, grouping, alternation and simple quantifiers. Character classes,
+POSIX names, counted/adjacent quantifiers, special Java groups and special SIMILAR escape characters
+(`[]()|^-+*_%?{}:.$` and backslash) retain Flink evaluation. `%` includes
+newlines, whereas `_` and `.` follow Java's line-terminator exclusions.
+
+An uncertified batch runs the retained Flink evaluator, including its invalid-pattern failures.
+Original UTF-16 sidecars travel with those arguments. AND/OR consumers remain fused so
+short-circuited rows do not evaluate invalid patterns. Empty filtered batches do not evaluate
+projections. Existing two-argument LIKE admission is unchanged.
+
+The retained evaluator preserves original literal operands and Flink's constant-pattern
+specializations, including its distinct constant versus dynamic empty-ESCAPE behavior.
+Released Flink 2.2 accepts the verified literal empty-escape forms; 1.18 rejects them during
+planning. The regression compares independent executions and checks that same 1.18 rejection.
+
+[Prepared kernel and complete-job measurements](../benchmarks/native-certified-scalars.md)
+retain the stock and previous-implementation controls and their timing limits.
 
 ## Generated processing time
 
@@ -1627,19 +1642,30 @@ Character strings and integer positions, widened to BIGINT without losing bits. 
 
 ### PARSE_URL
 
-The two- and three-argument overloads use Flink's generated evaluator through the batch JVM
-bridge, including runtime URL parts and query keys. Java URL component spelling, raw percent
-escapes, duplicate query keys, absent components and NULL/invalid-input behavior remain Flink's.
-No Rust URL normalization or query decoding is substituted.
+Direct input/literal calls use a certified Rust path for ASCII hierarchical `http://`
+and `https://` URLs with a nonempty ordinary host, optional user info and numeric port.
+Raw case, dot segments, percent escapes, `+`, absent/empty components and the first literal
+query-key occurrence are preserved. Components and query keys can vary per row. Keys containing
+`&`, IPv6, other protocols, whitespace, unusual authorities and non-ASCII batches retain Java URL
+parsing. No URL normalization or query decoding is substituted. Composed generated consumers
+retain their existing exact route.
 
 ### PRINTF
 
-PRINTF uses Flink's generated formatter through the batch JVM bridge for supported scalar
-arguments, including STRING, integral and DECIMAL values and per-row formats. Argument indices,
-width, precision, locale, NULLs and invalid-format results follow the selected Flink runtime.
-Because character formatting can produce isolated UTF-16 surrogates, consumers fuse with PRINTF
-before Arrow conversion; a sensitive string crossing another operator retains the existing
-representation-protection fallback. Direct final projections are supported.
+Direct input/literal calls have a certified Rust path for ASCII formats and arguments:
+STRING/integer/DECIMAL `%s`, signed integer `%d`, two's-complement `%x`/`%X`/`%o`, ASCII integer
+`%c`/`%C` over TINYINT/SMALLINT/INT, `%%`, argument indices/reuse, width, string precision,
+alignment and sign/zero padding. BIGINT character conversions retain the formatter, which
+rejects non-NULL Long arguments.
+DECIMAL string conversion preserves scale and Java scientific notation. The released SQL
+evaluator passes internal `DecimalData`, so DECIMAL `%f` retains Flink's NULL result rather
+than introducing BigDecimal formatting. Non-ASCII, temporal/hash/floating formats and unverified
+flags retain Flink's Locale.US formatter; invalid formats still return NULL.
+
+Certificates apply to complete batches. Retained evaluator descriptors indicate that a call
+**may** use Java, not that a certified batch performed an upcall. String consumers still fuse
+with PRINTF because character formatting can produce isolated UTF-16 surrogates. A sensitive
+string crossing another operator retains the existing representation-protection fallback.
 
 ### URL_DECODE
 
@@ -2487,8 +2513,8 @@ this test-only setting empty and retains normal JVM exception optimization.
 ### Temporal parsing, extraction and rounding
 
 `TO_DATE`, `TO_TIMESTAMP`, all `TO_TIMESTAMP_LTZ` overloads, calendar fields, and temporal
-`FLOOR`/`CEIL` now have expression implementations. Formatted parsing and LTZ calendar fields use
-Flink's own generated code. Timestamp results retain the complete millisecond/fraction pair and run
+`FLOOR`/`CEIL` now have expression implementations. Formatted parsing and recurring-DST LTZ
+calendar fields use Flink's own generated code. Timestamp results retain the complete millisecond/fraction pair and run
 by default. See the complete [temporal function inventory](temporal-functions.md).
 
 ### LTRIM
@@ -2517,10 +2543,17 @@ REGEXP, REGEXP_REPLACE, REGEXP_COUNT, REGEXP_INSTR and REGEXP_SUBSTR use Flink-g
 expressions through the batch JVM bridge for literal and per-row patterns. Java lookaround,
 backreferences, UTF-16 positions, empty matches, literal replacement strings, invalid-pattern
 behavior and resolved INT/BOOLEAN/STRING types are retained. AND/OR consumers fuse with these
-calls to preserve Flink evaluation order. These functions do not use Rust's regex engine.
+calls to preserve Flink evaluation order. Direct input/literal calls also have a certified Rust batch path, including REGEXP_EXTRACT.
+It accepts ASCII text/patterns, ordinary literals, dot, simple classes, grouping/alternation,
+`*`/`+`, and verified ASCII escapes. Anchors, lookaround, backreferences, Unicode properties,
+counted/lazy/possessive quantifiers, repeated capture groups and uncertain class syntax retain
+Java. Empty matches advance like Matcher.find, including the empty match following a nonempty
+one; replacement text is literal, not a capture expansion. Compilation is shared by equal
+patterns within a batch. Non-ASCII batches and mismatching original UTF-16 caches retain Java.
+REGEXP_EXTRACT_ALL and STR_TO_MAP remain generated collection expressions; see
+[issue #495](https://github.com/datafusion-contrib/StreamFusion/issues/495).
 
-**Native by default — not a fallback.** `UPPER`/`LOWER` and `REGEXP_EXTRACT` run natively by default
-via a columnar JVM upcall to Flink's own string routines — `BinaryStringData` case folding and
+**Default compatibility path.** `UPPER`/`LOWER` and uncertified `REGEXP_EXTRACT` calls use a columnar JVM upcall to Flink's own string routines — `BinaryStringData` case folding and
 `SqlFunctionUtils.regexpExtract` — so the result is byte-identical to the host, and the rest of the
 containing expression still evaluates natively around the upcalled function.
 
@@ -2531,6 +2564,9 @@ crate — that is **opt-in** under
 the JVM behavior on non-ASCII case folding and on advanced regex features (backreferences,
 lookaround, some Unicode character classes) — real correctness differences, not just a performance
 trade-off, which is why parity comes first by default.
+
+An explicit REGEXP_EXTRACT incompatible opt-in keeps its existing direct native opcode and
+literal/index admission rules; the exact batch certificate applies to the default route.
 
 Neither path falls back to the host for a supported argument type. What *does* fall back: a
 non-string argument, or — specifically on the pure-native (opt-in) `REGEXP_EXTRACT` — a non-literal
@@ -2639,6 +2675,10 @@ See [Configuration](../configuration.md) for the full `allowIncompatible` flag s
 throughout this page.
 
 ## Generated helper performance
+
+The table below is historical. Direct certified regex, LIKE ESCAPE, PARSE_URL and PRINTF
+subsets now avoid Java; see the [2026-10-26 comparison](../benchmarks/native-certified-scalars.md)
+for current measurements and remaining evaluator routes.
 
 The generated functions above extend the expressions that can stay inside a columnar island.
 They are correctness/coverage work, not standalone scalar speedups: Flink still evaluates each

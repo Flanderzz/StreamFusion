@@ -10,6 +10,12 @@ pub fn flink_scalar_function(op: i64, arity: usize) -> datafusion::logical_expr:
     crate::flink_functions::function(op, arity).expect("registered scalar benchmark")
 }
 
+/// Production builtin certificate, with no perimeter JNI/import in the caller's timer.
+pub fn certified_builtin(operation: i64, arrays: &[ArrayRef], target: &DataType) -> ArrayRef {
+    crate::flink_functions::certified::evaluate(operation, arrays, &[], target)
+        .expect("benchmark batch must execute without a JVM callback")
+}
+
 /// Binary ELT adaptation and allocation, through the same production UDF used by Calc.
 pub fn binary_elt_function(arity: usize, width: i32) -> datafusion::logical_expr::ScalarUDF {
     crate::flink_functions::binary_elt::function(arity, width)

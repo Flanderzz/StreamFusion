@@ -12,6 +12,8 @@ use std::sync::Arc;
 pub(crate) mod binary_cast;
 pub(crate) mod binary_elt;
 pub(crate) mod calendar;
+mod calendar_round;
+pub(crate) mod certified;
 pub(crate) mod clock;
 pub(crate) mod decimal;
 pub(crate) mod decimal_float;
@@ -72,6 +74,8 @@ pub(crate) mod numeric_cast;
 mod scalar;
 mod sign;
 mod string_to_boolean;
+mod temporal_arithmetic;
+mod temporal_extremum;
 mod temporal_round;
 mod timestamp_millis;
 mod type_of;
@@ -253,6 +257,20 @@ pub(crate) fn function(op: i64, arity: usize) -> Option<ScalarUDF> {
         200 => array_join::function(arity),
         201 => element::function(true),
         202 => json_value::java_input_function(),
+        203 => calendar::function(calendar::Field::Year),
+        204 => calendar::function(calendar::Field::Month),
+        205 => calendar::function(calendar::Field::Day),
+        206 => calendar::function(calendar::Field::Hour),
+        207 => calendar::function(calendar::Field::Minute),
+        208 => calendar::function(calendar::Field::Second),
+        209 => calendar_round::function(),
+        210 => temporal_arithmetic::function(temporal_arithmetic::Operation::TimestampMillis),
+        211 => temporal_arithmetic::function(temporal_arithmetic::Operation::DateMillis),
+        212 => temporal_arithmetic::function(temporal_arithmetic::Operation::TimeMillis),
+        213 => temporal_arithmetic::function(temporal_arithmetic::Operation::DateMonths),
+        214 => temporal_arithmetic::function(temporal_arithmetic::Operation::TimestampMonths),
+        215 => temporal_extremum::function(arity, true),
+        216 => temporal_extremum::function(arity, false),
         _ => return None,
     })
 }
