@@ -1642,10 +1642,13 @@ Character strings and integer positions, widened to BIGINT without losing bits. 
 
 ### PARSE_URL
 
-The two- and three-argument overloads use Flink's generated evaluator through the batch JVM
-bridge, including runtime URL parts and query keys. Java URL component spelling, raw percent
-escapes, duplicate query keys, absent components and NULL/invalid-input behavior remain Flink's.
-No Rust URL normalization or query decoding is substituted.
+Direct input/literal calls use a certified Rust path for ASCII hierarchical `http://`
+and `https://` URLs with a nonempty ordinary host, optional user info and numeric port.
+Raw case, dot segments, percent escapes, `+`, absent/empty components and the first literal
+query-key occurrence are preserved. Components and query keys can vary per row. Keys containing
+`&`, IPv6, other protocols, whitespace, unusual authorities and non-ASCII batches retain Java URL
+parsing. No URL normalization or query decoding is substituted. Composed generated consumers
+retain their existing exact route.
 
 ### PRINTF
 

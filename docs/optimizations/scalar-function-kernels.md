@@ -39,6 +39,11 @@ admission. The final 64/264-byte measurements are 2.11x/2.32x stock, while the f
 retains both transposes and startup. Exhaustive short-string/control-character tests check
 specializations against the independent SQL-to-regex translation.
 
+PARSE_URL reuses the parsed component for consecutive equal URL/part pairs. Query keys still
+select separately per row, raw bytes are never normalized, and other pairs replace the cached
+borrow immediately. The short repeated-URL fixture was initially tied with stock. Reuse raises
+its final ratio to 2.65x; 1,024 distinct short URLs retain a 1.55x ratio without that reuse.
+
 ## FROM_UNIXTIME
 
 Literal numeric patterns in fixed-offset and finite-history regional zones compile to Rust

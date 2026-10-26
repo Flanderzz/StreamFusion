@@ -40,6 +40,20 @@ class FlinkCertifiedBuiltinSqlHarnessTest {
             + " src");
   }
 
+  @Test
+  void rawUrlPartsAndLiteralQueryKeysMatchJavaUrl() throws Exception {
+    BuiltinFunctionParity.assertParity(
+        () ->
+            BuiltinFunctionParity.environment(
+                ROW(FIELD("s", STRING()), FIELD("p", STRING()), FIELD("k", STRING())),
+                Arrays.asList(
+                    Row.of("http://user:pw@EXAMPLE.com:80/a/../b?a=b=c&a.b=x+y", "QUERY", "a=b"),
+                    Row.of("https://host?", "PATH", "a.b"),
+                    Row.of("http://[::1]/x", "HOST", "x"),
+                    Row.of("not a URL", "HOST", "x"),
+                    Row.of(null, null, null))),
+        "SELECT PARSE_URL(s,p), PARSE_URL(s,'FILE'), PARSE_URL(s,'QUERY',k) FROM src");
+  }
 
 
 

@@ -7,6 +7,7 @@ use std::sync::Arc;
 use streamfusion_bridge::string_cache::JavaStringCacheColumn;
 
 mod patterns;
+mod url;
 
 pub(crate) fn evaluate(
     operation: i64,
@@ -35,6 +36,7 @@ pub(crate) fn evaluate(
     }
     match operation {
         1..=8 => patterns::evaluate(operation, arrays, target),
+        9 => url::evaluate(arrays),
         _ => None,
     }
 }

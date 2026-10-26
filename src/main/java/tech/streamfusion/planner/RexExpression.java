@@ -4280,6 +4280,8 @@ final class RexExpression {
         return 5;
       case "REGEXP_SUBSTR":
         return 6;
+      case "PARSE_URL":
+        return 9;
       default:
         return 0;
     }

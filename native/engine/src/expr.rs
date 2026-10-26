@@ -2407,8 +2407,10 @@ mod certified_builtin_tests {
         for (operation, code, constant, expected) in [
             (3, 0, "[0-9]+", "123"),
             (6, 0, "[0-9]+", "123"),
+            (9, 0, "PATH", "/abc123"),
         ] {
             let source = match operation {
+                9 => "http://host/abc123",
                 _ => "abc123",
             };
             let input = RecordBatch::try_new(
