@@ -93,8 +93,19 @@ class FlinkCertifiedBuiltinSqlHarnessTest {
                     Row.of("x", "..", "."),
                     Row.of(".", "..", "."),
                     Row.of("", "$$", "$"),
-                    Row.of("$", "$$", "$"))),
+                    Row.of("$", "$$", "$"),
+                    Row.of("aa", "a++a", "!"))),
         "SELECT s SIMILAR TO p ESCAPE e FROM src");
+  }
+
+  @Test
+  void literalLikeEscapeRetainsFlinkCodeGenerationSpecialization() throws Exception {
+    BuiltinFunctionParity.assertParity(
+        () ->
+            BuiltinFunctionParity.environment(
+                ROW(FIELD("s", STRING())),
+                Arrays.asList(Row.of("abc"), Row.of("abcd"), Row.of((Object) null))),
+        "SELECT s LIKE 'abc' ESCAPE '', s LIKE 'ab%' ESCAPE '', s LIKE 'a!_b' ESCAPE '!' FROM src");
   }
 
   private TableEnvironment patterns() {

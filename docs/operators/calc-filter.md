@@ -232,7 +232,7 @@ Direct input/literal LIKE ESCAPE and SIMILAR TO calls have a certified Rust batc
 The certificate requires ASCII inputs whose original Java UTF-16 cache agrees with the
 Arrow bytes. LIKE admits valid one-character ESCAPE values; SIMILAR admits ordinary literals,
 `%`, `_`, `.`, anchors, grouping, alternation and simple quantifiers. Character classes,
-POSIX names, counted quantifiers, special Java groups and special SIMILAR escape characters
+POSIX names, counted/adjacent quantifiers, special Java groups and special SIMILAR escape characters
 (`[]()|^-+*_%?{}:.$` and backslash) retain Flink evaluation. `%` includes
 newlines, whereas `_` and `.` follow Java's line-terminator exclusions.
 
@@ -240,6 +240,9 @@ An uncertified batch runs the retained Flink evaluator, including its invalid-pa
 Original UTF-16 sidecars travel with those arguments. AND/OR consumers remain fused so
 short-circuited rows do not evaluate invalid patterns. Empty filtered batches do not evaluate
 projections. Existing two-argument LIKE admission is unchanged.
+
+The retained evaluator preserves original literal operands and Flink's constant-pattern
+specializations, including its distinct constant versus dynamic empty-ESCAPE behavior.
 
 [Prepared kernel and complete-job measurements](../benchmarks/native-certified-scalars.md)
 retain the stock and previous-implementation controls and their timing limits.
@@ -2559,6 +2562,9 @@ crate — that is **opt-in** under
 the JVM behavior on non-ASCII case folding and on advanced regex features (backreferences,
 lookaround, some Unicode character classes) — real correctness differences, not just a performance
 trade-off, which is why parity comes first by default.
+
+An explicit REGEXP_EXTRACT incompatible opt-in keeps its existing direct native opcode and
+literal/index admission rules; the exact batch certificate applies to the default route.
 
 Neither path falls back to the host for a supported argument type. What *does* fall back: a
 non-string argument, or — specifically on the pure-native (opt-in) `REGEXP_EXTRACT` — a non-literal

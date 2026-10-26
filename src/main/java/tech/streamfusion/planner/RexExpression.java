@@ -4381,7 +4381,7 @@ final class RexExpression {
       case "REGEXP_REPLACE":
         return 2;
       case "REGEXP_EXTRACT":
-        return 3;
+        return NativeConfig.allowsIncompatible("REGEXP_EXTRACT") ? 0 : 3;
       case "REGEXP_COUNT":
         return 4;
       case "REGEXP_INSTR":
@@ -4406,7 +4406,8 @@ final class RexExpression {
       RexNode operand = operands.get(i);
       codes[i] = hostCastTypeCode(operand.getType());
       if (codes[i] < 0) return emitHostExpression(call, false);
-      references.add(new RexInputRef(i, operand.getType()));
+      references.add(
+          operand instanceof RexLiteral ? operand : new RexInputRef(i, operand.getType()));
       types.add(
           org.apache.flink.table.planner.calcite.FlinkTypeFactory.toLogicalType(operand.getType()));
     }

@@ -253,7 +253,13 @@ fn sql_pattern(pattern: &str, escape: Option<&str>, similar: bool) -> Option<Str
         None => None,
     };
     let mut result = String::from("\\A(?:");
-    if similar && pattern.contains("(?") {
+    if similar
+        && (pattern.contains("(?")
+            || pattern
+                .as_bytes()
+                .windows(2)
+                .any(|pair| pair.iter().all(|byte| b"*+?".contains(byte))))
+    {
         return None;
     }
     let mut bytes = pattern.bytes();
@@ -374,5 +380,8 @@ mod tests {
             assert!(sql_pattern(&escape.repeat(2), Some(escape), true).is_none());
         }
         assert!(sql_pattern("a!_b", Some("!"), true).is_some());
+        for pattern in ["a++a", "a*+a", "a?+a", "a**", "a+?a"] {
+            assert!(sql_pattern(pattern, None, true).is_none());
+        }
     }
 }
