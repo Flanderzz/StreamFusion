@@ -234,6 +234,21 @@ Unicode, NULLs and invalid-escape failures are Flink's own. AND/OR consumers fus
 expressions so invalid patterns are not evaluated on rows that Flink short-circuits; filtered-out
 batches do not evaluate projections. Existing two-argument LIKE keeps its current native path.
 
+## LIKE ESCAPE and SIMILAR TO
+
+Direct input/literal LIKE ESCAPE and SIMILAR TO calls have a certified Rust batch path.
+The certificate requires ASCII inputs whose original Java UTF-16 cache agrees with the
+Arrow bytes. LIKE admits valid one-character ESCAPE values; SIMILAR admits ordinary literals,
+`%`, `_`, `.`, anchors, grouping, alternation and simple quantifiers. Character classes,
+POSIX names, counted quantifiers, special Java groups and special SIMILAR escape characters
+(`[]()|^-+*_%?{}:.$` and backslash) retain Flink evaluation. `%` includes
+newlines, whereas `_` and `.` follow Java's line-terminator exclusions.
+
+An uncertified batch runs the retained Flink evaluator, including its invalid-pattern failures.
+Original UTF-16 sidecars travel with those arguments. AND/OR consumers remain fused so
+short-circuited rows do not evaluate invalid patterns. Empty filtered batches do not evaluate
+projections. Existing two-argument LIKE admission is unchanged.
+
 ## Generated processing time
 
 Generated scalar expressions and complete-row Calc evaluators bind processing time to the owning
@@ -2517,10 +2532,17 @@ REGEXP, REGEXP_REPLACE, REGEXP_COUNT, REGEXP_INSTR and REGEXP_SUBSTR use Flink-g
 expressions through the batch JVM bridge for literal and per-row patterns. Java lookaround,
 backreferences, UTF-16 positions, empty matches, literal replacement strings, invalid-pattern
 behavior and resolved INT/BOOLEAN/STRING types are retained. AND/OR consumers fuse with these
-calls to preserve Flink evaluation order. These functions do not use Rust's regex engine.
+calls to preserve Flink evaluation order. Direct input/literal calls also have a certified Rust batch path, including REGEXP_EXTRACT.
+It accepts ASCII text/patterns, ordinary literals, dot, simple classes, grouping/alternation,
+`*`/`+`, and verified ASCII escapes. Anchors, lookaround, backreferences, Unicode properties,
+counted/lazy/possessive quantifiers, repeated capture groups and uncertain class syntax retain
+Java. Empty matches advance like Matcher.find, including the empty match following a nonempty
+one; replacement text is literal, not a capture expansion. Compilation is shared by equal
+patterns within a batch. Non-ASCII batches and mismatching original UTF-16 caches retain Java.
+REGEXP_EXTRACT_ALL and STR_TO_MAP remain generated collection expressions; see
+[issue #495](https://github.com/datafusion-contrib/StreamFusion/issues/495).
 
-**Native by default — not a fallback.** `UPPER`/`LOWER` and `REGEXP_EXTRACT` run natively by default
-via a columnar JVM upcall to Flink's own string routines — `BinaryStringData` case folding and
+**Default compatibility path.** `UPPER`/`LOWER` and uncertified `REGEXP_EXTRACT` calls use a columnar JVM upcall to Flink's own string routines — `BinaryStringData` case folding and
 `SqlFunctionUtils.regexpExtract` — so the result is byte-identical to the host, and the rest of the
 containing expression still evaluates natively around the upcalled function.
 

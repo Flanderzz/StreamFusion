@@ -12,6 +12,7 @@ use std::sync::Arc;
 pub(crate) mod binary_cast;
 pub(crate) mod binary_elt;
 pub(crate) mod calendar;
+pub(crate) mod certified;
 pub(crate) mod clock;
 pub(crate) mod decimal;
 pub(crate) mod decimal_float;

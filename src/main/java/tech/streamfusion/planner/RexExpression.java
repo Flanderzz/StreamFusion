@@ -84,6 +84,7 @@ final class RexExpression {
   // Proven numeric cast batches avoid an upcall; exceptional batches retain Flink's evaluator.
   private static final int KIND_NUMERIC_CAST = 42;
   private static final int KIND_ARRAY_CAST = 43;
+  private static final int KIND_CERTIFIED_BUILTIN = 44;
   // A narrowing cast to an integer type: payload is the target integer type code (CAST_TINYINT..
   // CAST_BIGINT), one child. Built natively as a wrapping/saturating kernel matching Flink's
   // primitive
@@ -1954,6 +1955,8 @@ final class RexExpression {
       }
     }
     if (isExactDoubleTruncate(call)) return emitExactDoubleTruncate(call);
+    int certifiedBuiltin = certifiedBuiltin(call);
+    if (certifiedBuiltin != 0) return emitCertifiedBuiltin(call, certifiedBuiltin);
     if (unnestOperand && isEpochMillisTimestamp(call)) {
       add(KIND_CALL, 173, 1);
       return emit(call.getOperands().get(0));
@@ -4244,7 +4247,86 @@ final class RexExpression {
     return kind == KIND_UDF
         || kind == KIND_ROW_UDF
         || kind == KIND_DECIMAL_ROUND_TEXT
-        || kind == KIND_NUMERIC_CAST;
+        || kind == KIND_NUMERIC_CAST
+        || kind == KIND_CERTIFIED_BUILTIN;
+  }
+
+  private static int certifiedBuiltin(RexCall call) {
+    if (call.getOperands().stream()
+        .anyMatch(arg -> !(arg instanceof RexInputRef) && !(arg instanceof RexLiteral))) return 0;
+    if (call.getOperands().stream()
+        .filter(RexLiteral.class::isInstance)
+        .map(RexLiteral.class::cast)
+        .filter(RexExpression::isCharacter)
+        .anyMatch(
+            literal ->
+                !literal.isNull()
+                    && literal
+                        .getValueAs(String.class)
+                        .chars()
+                        .anyMatch(c -> c >= 0xd800 && c <= 0xdfff))) return 0;
+    if (call.getKind() == SqlKind.LIKE && call.getOperands().size() == 3) return 7;
+    if (call.getKind() == SqlKind.SIMILAR) return 8;
+    switch (call.getOperator().getName().toUpperCase(Locale.ROOT)) {
+      case "REGEXP":
+        return 1;
+      case "REGEXP_REPLACE":
+        return 2;
+      case "REGEXP_EXTRACT":
+        return 3;
+      case "REGEXP_COUNT":
+        return 4;
+      case "REGEXP_INSTR":
+        return 5;
+      case "REGEXP_SUBSTR":
+        return 6;
+      default:
+        return 0;
+    }
+  }
+
+  private boolean emitCertifiedBuiltin(RexCall call, int operation) {
+    List<RexNode> operands = call.getOperands();
+    List<RexNode> references = new ArrayList<>();
+    List<org.apache.flink.table.types.logical.LogicalType> types = new ArrayList<>();
+    int[] codes = new int[operands.size()];
+    for (int i = 0; i < operands.size(); i++) {
+      RexNode operand = operands.get(i);
+      codes[i] = hostCastTypeCode(operand.getType());
+      if (codes[i] < 0) return emitHostExpression(call, false);
+      references.add(new RexInputRef(i, operand.getType()));
+      types.add(
+          org.apache.flink.table.planner.calcite.FlinkTypeFactory.toLogicalType(operand.getType()));
+    }
+    int returnCode = hostCastTypeCode(call.getType());
+    if (returnCode < 0) return emitHostExpression(call, false);
+    int index;
+    try {
+      var function =
+          FlinkExpressionGenerator.generate(
+              call.clone(call.getType(), references),
+              types.toArray(org.apache.flink.table.types.logical.LogicalType[]::new),
+              temporalConfig,
+              expressionClassLoader,
+              false);
+      for (var dependency : function.functions()) if (!claimUdfEvaluation(dependency)) return false;
+      index =
+          addUdf(
+              tech.streamfusion.operator.NativeUdf.Descriptor.forFunction(
+                  function,
+                  FlinkExpressionFunction.class.getMethod("eval", Object[].class),
+                  codes,
+                  returnCode));
+    } catch (Exception e) {
+      return reject("certified builtin evaluator unavailable: " + e.getMessage());
+    }
+    jvmFunctionCalls.add(call.getOperator().getName());
+    add(KIND_CERTIFIED_BUILTIN, longs.size(), operands.size());
+    longs.add((long) index);
+    longs.add((long) returnCode);
+    longs.add((long) operation);
+    for (RexNode operand : operands) if (!emit(operand)) return false;
+    return true;
   }
 
   private RexNode hostExpressionArguments(
