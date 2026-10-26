@@ -19,6 +19,9 @@ Measured core native SHA-256 values:
 - Candidate: `a40912af75baec05c783b6a13e78f19dcd3d4e0431bbae9701682aefab62e816`.
 - Previous: `9a06340bb48001f5351019639fa3b2bda5230f6138b931a56f61cf246c916c9c`.
 
+The final conservative adjacent-quantifier and explicit-opt-in admission guards do not
+change the timed fixtures; the listed hashes identify the measured binaries.
+
 ## Prepared-input functionality gate
 
 Each engine processes 131,072 logical rows from prepared, 1,024-row batches. Java starts
@@ -85,8 +88,9 @@ change with text width or URL cardinality.
 Unchanged ScalarFunctionBenchmark queries use 500,000 rows, 264-byte text, row sources,
 blackhole sinks, both row/Arrow transposes, two warmups and five measurements.
 Stock and candidate alternate execution order; the previous native implementation runs
-in a separate process afterwards. The direct launcher retains MiniCluster startup for each
-job, so 0.5-0.9 second totals are startup dominated. Do not interpret their ratios as sustained
+in a separate process. The final candidate is measured again after the literal-preservation
+fix; the prior candidate cohort remains in the CSV as `candidate-initial`. The direct launcher
+retains MiniCluster startup for each job, so 0.5-0.9 second totals are startup dominated. Do not interpret their ratios as sustained
 connector throughput. Different baseline controls and unpaired previous runs expose that noise.
 Native queries require Calc admission. Previous calls use generated Flink evaluators; candidate
 queries exercise the certified direct-argument path. PARSE_URL's existing whole-job fixture has
@@ -94,13 +98,13 @@ composed arguments and is excluded from this direct-kernel comparison.
 
 | Query | Stock seconds, median [min, max] | Previous seconds, median [min, max] | Candidate seconds, median [min, max] | Stock/candidate | Previous/candidate |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| BASELINE_text | 0.707708 [0.671110, 0.728996] | 0.633683 [0.591771, 0.737010] | 0.609507 [0.593684, 0.652588] | 1.16x | 1.04x |
-| BASELINE_bigint | 0.570134 [0.557500, 0.824805] | 0.558285 [0.531343, 0.573337] | 0.560756 [0.518742, 0.574522] | 1.02x | 1.00x |
-| LIKE_ESCAPE | 0.715890 [0.673030, 0.797034] | 0.629001 [0.624963, 0.640462] | 0.590582 [0.572885, 0.648843] | 1.21x | 1.07x |
-| REGEXP_COUNT | 0.869100 [0.858250, 0.899667] | 0.845544 [0.801341, 0.905506] | 0.736471 [0.717949, 0.888776] | 1.18x | 1.15x |
-| PRINTF_BIGINT | 0.783671 [0.726685, 0.810342] | 0.739471 [0.713115, 0.820411] | 0.590059 [0.552479, 0.822823] | 1.33x | 1.25x |
+| BASELINE_text | 0.705984 [0.653460, 0.785628] | 0.633683 [0.591771, 0.737010] | 0.587238 [0.563707, 0.709867] | 1.20x | 1.08x |
+| BASELINE_bigint | 0.595722 [0.520273, 0.655548] | 0.558285 [0.531343, 0.573337] | 0.533327 [0.513158, 0.609196] | 1.12x | 1.05x |
+| LIKE_ESCAPE | 0.687375 [0.668256, 0.710018] | 0.629001 [0.624963, 0.640462] | 0.598691 [0.568063, 0.627375] | 1.15x | 1.05x |
+| REGEXP_COUNT | 0.856501 [0.827406, 0.974591] | 0.845544 [0.801341, 0.905506] | 0.730746 [0.712806, 0.788309] | 1.17x | 1.16x |
+| PRINTF_BIGINT | 0.719760 [0.713980, 0.756501] | 0.739471 [0.713115, 0.820411] | 0.593362 [0.535207, 0.641056] | 1.21x | 1.25x |
 
-Full observations: [jobs.csv](certified-scalars-2026-10-26/jobs.csv). Reproduce each revision with:
+All 125 observations: [jobs.csv](certified-scalars-2026-10-26/jobs.csv). Reproduce each revision with:
 
 ```sh
 SF_BENCHMARK=true mvn -pl streamfusion-runtime -am test -Pbench \
@@ -111,10 +115,10 @@ SF_BENCHMARK=true mvn -pl streamfusion-runtime -am test -Pbench \
 
 ## Correctness and execution evidence
 
-- 790 Rust core tests pass without default features. Compiled certificates run with no JVM
+- 791 Rust core tests pass without default features. Compiled certificates run with no JVM
   captured, including source-cache validation; an unexpected callback fails those tests.
-- Another 33 planner, operator-description and UDF-bridge checks pass on both lines.
-- Focused SQL suites: 46 pass on Flink 2.2.1/JDK 17; 32 pass and 14 expected capability skips
+- Another 34 planner, operator-description and UDF-bridge checks pass on both lines.
+- Focused SQL suites: 47 pass on Flink 2.2.1/JDK 17; 33 pass and 14 expected capability skips
   on Flink 1.18.1/JDK 11. Runtime sources prevent constant folding.
 - Unchanged released upstream SQL invocations: 225 pass on 2.2.1, 140 pass on 1.18.1.
   Positive consumed Calc work appears in 127 and 131 respectively. Some fixtures contain
