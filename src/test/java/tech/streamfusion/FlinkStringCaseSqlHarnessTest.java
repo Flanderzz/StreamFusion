@@ -61,7 +61,21 @@ class FlinkStringCaseSqlHarnessTest {
                     + "'path' = '" + directory.toUri() + "', 'format' = 'csv')");
             return tables;
           },
-          "SELECT LOWER(s), UPPER(s), LOWER(s) = 'i' FROM cold");
+          "SELECT REPLACE(s, 'X', 'Y'), LOWER(s), UPPER(s), LOWER(s) = 'i' FROM cold");
+    } finally {
+      Locale.setDefault(previous);
+    }
+  }
+
+  @Test
+  void caseConversionAfterANonMergeableProjectionRetainsSourceRepresentation() throws Exception {
+    Locale previous = Locale.getDefault();
+    try {
+      Locale.setDefault(Locale.forLanguageTag("tr-TR"));
+      NativeParity.assertParity(
+          () -> TextTimeFunctionTestInputs.textRows("I", "i", "", null),
+          "SELECT LOWER(s), UPPER(s), r >= 0 AND r <= 1 "
+              + "FROM (SELECT s, RAND() AS r FROM inputs)");
     } finally {
       Locale.setDefault(previous);
     }
