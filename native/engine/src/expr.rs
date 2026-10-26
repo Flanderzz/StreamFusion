@@ -333,7 +333,9 @@ pub(crate) fn build_expr(
             function.numeric_cast = kinds[node] == 42;
             if kinds[node] == 44 {
                 function.certified_builtin = Some((longs[arg + 2], count));
-                for index in 0..count {
+                // SHA2 hashes the existing bytes, so Java's decoded string cache is irrelevant.
+                let cache_count = if longs[arg + 2] == 12 { 0 } else { count };
+                for index in 0..cache_count {
                     let cache = if let datafusion::logical_expr::Expr::Column(column) =
                         &children[index]
                     {
@@ -1026,7 +1028,7 @@ fn hash_utf8<D: sha2::Digest>(
     }
 }
 
-fn append_digest_hex<D: sha2::Digest>(value: &str, output: &mut Vec<u8>) {
+pub(crate) fn append_digest_hex<D: sha2::Digest>(value: &str, output: &mut Vec<u8>) {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     for byte in D::digest(value.as_bytes()) {
         output.push(HEX[(byte >> 4) as usize]);
@@ -2181,6 +2183,15 @@ impl datafusion::logical_expr::ScalarUDFImpl for JvmUdf {
         use datafusion::common::DataFusionError;
         use datafusion::logical_expr::ColumnarValue;
         let exec = |e: String| DataFusionError::Execution(e);
+        if let Some((12, count)) = self.certified_builtin {
+            if let [ColumnarValue::Array(source), ColumnarValue::Array(bits)] = &args.args[..count]
+            {
+                if let Some(output) = crate::flink_functions::sha2_runtime::evaluate([source, bits])
+                {
+                    return Ok(ColumnarValue::Array(output));
+                }
+            }
+        }
         if let Some((operation @ 20..=28, count)) = self.certified_builtin {
             if let Some(output) = crate::flink_functions::string_fusion::evaluate(
                 operation,
@@ -2201,7 +2212,7 @@ impl datafusion::logical_expr::ScalarUDFImpl for JvmUdf {
         };
         let mut string_caches = Vec::new();
         if let Some((operation, count)) = self.certified_builtin {
-            if (1..=10).contains(&operation) {
+            if (1..=10).contains(&operation) || operation == 12 {
                 if let Some(output) = crate::flink_functions::certified::evaluate(
                     operation,
                     &arrays[..count],

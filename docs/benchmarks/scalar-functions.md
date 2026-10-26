@@ -849,6 +849,105 @@ upcall are covered by semantic tests rather than these timing cases.
 | `DAYOFWEEK` | TIMESTAMP(9), non-null | 0.364 | 0.420 | 0.87x |
 | `DAYOFWEEK` | TIMESTAMP(9), NULL/8 | 0.382 | 0.444 | 0.86x |
 
+## Runtime SHA2 Widths
+
+`SHA2(s, bits)` with direct STRING/INT operands uses the same RustCrypto digest and
+lowercase hex writer as fixed SHA-2 functions. A batch verifies non-NULL widths and
+reserves exactly the output space for its 224/256/384/512 digests. NULL inputs or widths
+produce NULL. An invalid runtime width retains released Flink evaluation and the JDK's
+`NoSuchAlgorithmException`; computed arguments keep the exact scalar evaluator. No
+configuration switch is introduced. Literal NULL widths are admitted, while existing
+valid literal fixed kernels and invalid/oversized literal fallback remain unchanged.
+
+The measurements use canonical main `ffafa92b`, Rust 1.94.0 release with
+`--no-default-features`, Apple M4 Pro / 24 GiB, JDK 17, and released Flink 2.2.1/1.18.1.
+Each engine/profile starts a fresh JVM (256 MiB initial / 512 MiB maximum heap), with
+8 warmup and 9 measured trials of 131,072 rows. Profiles vary ASCII/CJK/emoji payloads,
+32/264-byte budgets, 16/1,024/16,384-row batches, and cold/cached Java strings. Logical
+values, widths and NULLs match: 16 keys, four rotating valid widths, source NULL every
+7th row, width NULL every 11th row. Input preparation is outside timing. Engines run
+sequentially without concurrent builds/tests/benchmarks.
+
+The portable `runtime_sha2` example runs the production compiled Calc with a timer
+inside Rust, on prepared Arrow RecordBatch inputs, including allocation and checksum
+consumption. Stock uses unchanged released generated Flink on prepared RowData with a
+Java-side timer. Initial/final JNI and perimeter transposes are excluded from this
+small-functionality gate; the previous native production binary retains its intrinsic
+JVM callback, Arrow export/import and allocations. The same example is linked against
+the unchanged baseline Rust library for that control. Before timing, the candidate's
+full output array must equal the generated reference; an invalid candidate evaluator
+ID makes accidental JVM computation fail. Cached controls affect Java's input handling;
+the native digest deliberately reads bytes, just like Flink's BinaryStringData hash.
+
+[Every raw trial, median/range and library hash](results/runtime-sha2-2026-10-27.json)
+is retained with the complete-pipeline diagnostic. These profiles establish bounded
+gains for the tested direct signature, not arbitrary computed inputs or invalid-width
+batches that retain the host evaluator.
+
+Values are medians with `[minimum, maximum]` over nine measured trials:
+
+| Flink | Corpus / payload budget | Java cache | Batch rows | Stock ns/row | Previous ns/row | Native ns/row | Stock/native |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 2.2.1 | ascii / 32 | cold | 1024 | 289.83 [281.41, 306.13] | 358.60 [353.95, 380.94] | 84.68 [80.02, 84.82] | 3.42x |
+| 2.2.1 | ascii / 264 | cold | 1024 | 738.92 [723.19, 816.93] | 868.92 [860.50, 912.52] | 171.39 [161.22, 177.45] | 4.31x |
+| 2.2.1 | ascii / 264 | present | 1024 | 736.94 [731.62, 754.16] | 894.84 [855.14, 909.22] | 163.84 [161.54, 175.59] | 4.50x |
+| 2.2.1 | cjk / 264 | cold | 1024 | 733.77 [727.37, 760.30] | 1016.30 [1003.85, 1054.98] | 159.97 [158.49, 163.85] | 4.59x |
+| 2.2.1 | cjk / 264 | present | 1024 | 735.07 [730.10, 752.61] | 1004.26 [997.17, 1012.32] | 165.00 [162.68, 172.09] | 4.45x |
+| 2.2.1 | emoji / 264 | cold | 1024 | 766.42 [755.58, 774.53] | 1006.83 [991.28, 1023.74] | 169.85 [165.28, 174.57] | 4.51x |
+| 2.2.1 | emoji / 264 | present | 1024 | 749.81 [729.67, 776.85] | 996.59 [980.35, 1025.20] | 168.10 [162.06, 171.72] | 4.46x |
+| 2.2.1 | ascii / 32 | present | 16 | 262.83 [253.98, 276.40] | 935.46 [921.22, 949.36] | 104.86 [102.90, 106.35] | 2.51x |
+| 2.2.1 | ascii / 264 | present | 16384 | 783.93 [768.11, 813.64] | 850.41 [834.82, 860.69] | 178.13 [172.19, 181.99] | 4.40x |
+| 1.18.1 | ascii / 32 | cold | 1024 | 285.25 [276.26, 298.58] | 357.37 [350.15, 371.73] | 87.18 [81.01, 89.61] | 3.27x |
+| 1.18.1 | ascii / 264 | cold | 1024 | 728.05 [722.41, 746.24] | 881.23 [859.99, 901.85] | 172.42 [170.22, 174.59] | 4.22x |
+| 1.18.1 | ascii / 264 | present | 1024 | 756.71 [741.79, 772.90] | 869.09 [864.30, 911.75] | 176.14 [168.87, 182.15] | 4.30x |
+| 1.18.1 | cjk / 264 | cold | 1024 | 729.19 [723.14, 756.06] | 1006.41 [998.65, 1026.25] | 161.39 [158.80, 167.09] | 4.52x |
+| 1.18.1 | cjk / 264 | present | 1024 | 748.85 [730.16, 770.20] | 1027.83 [1023.35, 1041.85] | 172.24 [158.60, 177.12] | 4.35x |
+| 1.18.1 | emoji / 264 | cold | 1024 | 770.58 [748.36, 787.40] | 1000.87 [984.90, 1032.93] | 159.48 [155.76, 163.07] | 4.83x |
+| 1.18.1 | emoji / 264 | present | 1024 | 775.41 [742.13, 801.22] | 998.94 [984.40, 1026.74] | 162.12 [159.17, 163.42] | 4.78x |
+| 1.18.1 | ascii / 32 | present | 16 | 272.49 [260.93, 282.38] | 954.04 [928.45, 1049.92] | 106.83 [104.47, 107.95] | 2.55x |
+| 1.18.1 | ascii / 264 | present | 16384 | 824.35 [781.61, 879.61] | 867.03 [858.87, 876.18] | 173.55 [166.10, 285.19] | 4.75x |
+
+Across these profiles the candidate runs 2.51-4.83x stock and 4.10-8.93x the preceding
+native implementation. The raw artifact also retains the earlier borrowed-internal
+control separately; final comparisons use the actual baseline TYPE_STRING descriptor.
+
+Reproduce after compiling test classes/dependencies for the selected released profile:
+
+```sh
+cargo build --manifest-path native/Cargo.toml --release --no-default-features \
+  -p streamfusion --example runtime_sha2
+# Set SF_NATIVE_BENCH_CLASSPATH to test classes, core classes and test dependencies.
+export SF_NATIVE_LIB_DIR="$PWD/native/target/release"
+# Keep the matching release libstreamfusion DSO here for intrinsic JVM callbacks.
+native/target/release/examples/runtime_sha2 ascii 264 true 1024 128 native 8 9
+native/target/release/examples/runtime_sha2 ascii 264 true 1024 128 flink 8 9
+```
+
+Compile the same example against main `ffafa92b` and its unchanged production native
+library to run the previous behavior, selecting `baseline` and the matching DSO. The
+new `RuntimeSha2BenchmarkFunctions` test helper is required on its test classpath.
+
+`RuntimeSha2PipelineBenchmark` separately retains a row source, both production
+RowData/Arrow transposes and a blackhole row sink. Its plan asserts both transposes,
+and runtime counters require consumed native Calc rows. It uses 2M rows, parallelism 1,
+a 264-byte ASCII payload, four rotating digest widths, the same NULL frequencies, 2 GiB
+heap, two warmups and five measured jobs per engine in fresh JVMs. The job timer includes
+planning/submission and startup after environment creation; it is a startup-inclusive
+fixture rather than sustained throughput. The component and SQL tests establish value
+equality separately; the blackhole sink alone is insufficient. Reproduce with
+`SF_BENCHMARK=true mvn test -Pbench -Dtest=RuntimeSha2PipelineBenchmark` and
+`-Dsha2.pipeline.engine=stock` or `native`, building each baseline in a separate checkout.
+
+| Engine | Job median (s) | Minimum-maximum (s) |
+| --- | ---: | ---: |
+| stock | 2.301219 | 2.288133-2.320313 |
+| previous | 2.483776 | 2.445620-2.545634 |
+| native | 1.046509 | 1.017852-1.065204 |
+
+The candidate is 2.20x stock and 2.37x previous native in this
+startup-inclusive fixture. It does not establish arbitrary connector or steady-state
+throughput.
+
 ## LTRIM
 
 `LTRIM_LITERAL_SET`: `LTRIM(s, ' |ab')`

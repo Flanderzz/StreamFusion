@@ -816,11 +816,16 @@ These functions run entirely in Rust by default, in projections, predicates, and
 | `MD5(s)` | Lowercase hexadecimal MD5 of the string's UTF-8 bytes; NULL input produces NULL. |
 | `SHA1(s)` | Lowercase hexadecimal SHA-1 of the character string's UTF-8 bytes; NULL input produces NULL. |
 | `SHA224(s)`, `SHA256(s)`, `SHA384(s)`, `SHA512(s)` | Lowercase hexadecimal SHA-2 of the UTF-8 bytes; NULL input produces NULL. |
-| `SHA2(s, bit_length)` | The two-argument form with a literal bit length of 224, 256, 384, or 512; equivalent to the corresponding fixed-width function. |
+| `SHA2(s, bit_length)` | Literal 224/256/384/512 retains the fixed-width kernel. Direct STRING/INT inputs or literals also use a verified runtime-width kernel; a NULL argument returns NULL. |
 
-A dynamic `SHA2` bit length uses Flink-generated code through the batch JVM bridge, preserving
-NULLs and the released host's unsupported-algorithm failure. Literal values are checked exactly,
-including `BIGINT`, without truncating to 32 bits; unsupported or NULL literal widths fall back.
+A direct runtime INT width dispatches 224/256/384/512 to the existing RustCrypto digests.
+`CAST(NULL AS INT)` is admitted and produces NULL without discarding evaluation of the
+source expression. Non-NULL invalid runtime widths retain the released Flink evaluator and
+JDK unsupported-algorithm exception. Computed arguments and other resolved runtime widths
+retain generated evaluation; there is no new switch. Hashing reads the original UTF-8 bytes,
+as Flink's BinaryStringData hash does, so a decoded Java string cache does not change the
+digest. Literal values are checked exactly, including `BIGINT`, without truncating to 32 bits;
+unsupported non-NULL literal widths retain their existing fallback.
 For example, `SHA2(s, CAST(4294967520 AS BIGINT))` falls back and retains Flink's unsupported-algorithm
 failure instead of being treated as SHA-224. Flink 2.2 does not expose hash
 overloads with an explicit character set. Binary/collection concatenation is outside this
@@ -833,7 +838,9 @@ payload. `CONCAT_WS` delegates to DataFusion. Hashes use the released RustCrypto
 DataFusion and Comet, writing lowercase hex directly into presized UTF-8 Arrow buffers without intermediate
 binary or string-view columns or per-row heap allocations. See [string copy reduction](../optimizations/string-copy-reduction.md).
 SQL parity tests cover NULLs, empty strings, embedded zero bytes, Unicode, long inputs, nested
-calls, filters, valid BIGINT widths, and dynamic or oversized bit-length fallback.
+calls, filters, valid BIGINT widths, runtime/NULL widths, conditional and empty-batch behavior,
+and oversized bit-length fallback. The runtime kernel has a compiled-Calc no-callback witness;
+see [release measurements](../benchmarks/scalar-functions.md#runtime-sha2-widths).
 
 The corresponding throughput diagnostics compare stock Flink against native execution with a
 rowwise generated source, both row/Arrow transposes, and a blackhole sink. They assert those native
