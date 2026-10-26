@@ -142,11 +142,6 @@ mod tests {
             evaluate(20, &args, &[], 2).unwrap().as_ref(),
             &BooleanArray::from(vec![None, Some(true)])
         );
-        let args = [string("a"), number(2), string("x"), string("a")];
-        assert!(
-            evaluate(20, &args, &[], 1).is_none(),
-            "growth retains exact evaluation"
-        );
         let args = [
             string("abc"),
             string("x"),
@@ -166,9 +161,200 @@ mod tests {
         ];
         assert_eq!(evaluate(20, &args, &[], 0).unwrap().len(), 0);
     }
+
+    #[test]
+    fn growing_padding_compares_repeated_utf16_units_without_encoding() {
+        for cached in [false, true] {
+            for (source, pattern, length, left, right) in [
+                ("a", "xy", 6, "xyxyxa", "axyxyx"),
+                ("a", "xyabc", 4, "xyaa", "axya"),
+                ("", "xy", 3, "xyx", "xyx"),
+                (
+                    "\u{1f600}",
+                    "\u{4e2d}",
+                    4,
+                    "\u{4e2d}\u{4e2d}\u{1f600}",
+                    "\u{1f600}\u{4e2d}\u{4e2d}",
+                ),
+                ("a", "\u{1f600}", 4, "\u{1f600}?a", "a\u{1f600}?"),
+            ] {
+                let sources =
+                    ColumnarValue::Array(Arc::new(StringArray::from(vec![Some(source), None])));
+                let patterns = ColumnarValue::Array(Arc::new(StringArray::from(vec![pattern; 2])));
+                let source_units: Vec<_> = source.encode_utf16().collect();
+                let pattern_units: Vec<_> = pattern.encode_utf16().collect();
+                let caches = if cached {
+                    vec![
+                        ColumnarValue::Array(string_cache_array([
+                            Some(source_units.as_slice()),
+                            None,
+                        ])),
+                        ColumnarValue::Scalar(ScalarValue::Null),
+                        ColumnarValue::Array(string_cache_array(
+                            [Some(pattern_units.as_slice()); 2],
+                        )),
+                    ]
+                } else {
+                    vec![]
+                };
+                for (kind, target) in [(0, left), (1, right)] {
+                    let split_pair = source == "a" && pattern == "\u{1f600}";
+                    for unequal in [false, true] {
+                        let args = [
+                            sources.clone(),
+                            number(length),
+                            patterns.clone(),
+                            string(target),
+                        ];
+                        let result =
+                            evaluate(20 + kind + i64::from(unequal) * 3, &args, &caches, 2)
+                                .unwrap();
+                        assert_eq!(
+                            result.as_ref(),
+                            &BooleanArray::from(vec![Some(!split_pair ^ unequal), None])
+                        );
+                    }
+                }
+            }
+        }
+        // A surrogate at the end of a repeated pad can join the original cached source.
+        for (kind, source, pattern) in [(0, 0xde00, 0xd83d), (1, 0xd83d, 0xde00)] {
+            let args = [
+                ColumnarValue::Array(Arc::new(StringArray::from(vec!["?"]))),
+                number(2),
+                ColumnarValue::Array(Arc::new(StringArray::from(vec!["?"]))),
+                string("\u{1f600}"),
+            ];
+            let caches = [
+                ColumnarValue::Array(string_cache_array([Some(&[source][..])])),
+                ColumnarValue::Scalar(ScalarValue::Null),
+                ColumnarValue::Array(string_cache_array([Some(&[pattern][..])])),
+            ];
+            assert_eq!(
+                evaluate(20 + kind, &args, &caches, 1).unwrap().as_ref(),
+                &BooleanArray::from(vec![true])
+            );
+        }
+        let args = [
+            string("a"),
+            number(i64::from(i32::MAX)),
+            string("xy"),
+            string("a"),
+        ];
+        assert_eq!(
+            evaluate(20, &args, &[], 1).unwrap().as_ref(),
+            &BooleanArray::from(vec![false])
+        );
+        for (target, expected) in [
+            ("xyxyxa", true),
+            ("xyxxya", false),
+            ("xyxyya", false),
+            ("zyxyxa", false),
+            ("xyxyxb", false),
+        ] {
+            let args = [string("a"), number(6), string("xy"), string(target)];
+            assert_eq!(
+                evaluate(20, &args, &[], 1).unwrap().as_ref(),
+                &BooleanArray::from(vec![expected])
+            );
+        }
+    }
+
+    #[test]
+    fn growing_padding_replacement_copies_full_periods_and_preserves_split_surrogates() {
+        for (source, pattern, length, left, right) in [
+            ("a?", "xy?", 9, "xyZxyZxaZ", "aZxyZxyZx"),
+            ("a?", "xy?", 3, "xaZ", "aZx"),
+            ("", "?", 9, "ZZZZZZZZZ", "ZZZZZZZZZ"),
+            (
+                "a?",
+                "\u{1f600}?",
+                7,
+                "\u{1f600}Z\u{1f600}aZ",
+                "aZ\u{1f600}Z\u{1f600}",
+            ),
+            ("a?", "\u{1f600}?", 6, "\u{1f600}Z?aZ", "aZ\u{1f600}Z?"),
+            (
+                "\u{1f600}?",
+                "\u{4e2d}?",
+                6,
+                "\u{4e2d}Z\u{4e2d}\u{1f600}Z",
+                "\u{1f600}Z\u{4e2d}Z\u{4e2d}",
+            ),
+        ] {
+            for cached in [false, true] {
+                let caches = if cached {
+                    let sources: Vec<_> = source.encode_utf16().collect();
+                    let patterns: Vec<_> = pattern.encode_utf16().collect();
+                    vec![
+                        ColumnarValue::Array(string_cache_array([Some(sources.as_slice()), None])),
+                        ColumnarValue::Scalar(ScalarValue::Null),
+                        ColumnarValue::Array(string_cache_array([Some(patterns.as_slice()); 2])),
+                    ]
+                } else {
+                    vec![]
+                };
+                let args = [
+                    ColumnarValue::Array(Arc::new(StringArray::from(vec![Some(source), None]))),
+                    number(length),
+                    ColumnarValue::Array(Arc::new(StringArray::from(vec![pattern; 2]))),
+                    string("?"),
+                    string("Z"),
+                ];
+                for (operation, expected) in [(26, left), (27, right)] {
+                    let result = evaluate(operation, &args, &caches, 2);
+                    if cached && (!source.is_ascii() || !pattern.is_ascii()) {
+                        assert!(
+                            result.is_none(),
+                            "Unicode caches retain their exact evaluator"
+                        );
+                    } else {
+                        let result = result.unwrap();
+                        assert_eq!(
+                            result.as_ref(),
+                            &StringArray::from(vec![Some(expected), None])
+                        );
+                        result.to_data().validate_full().unwrap();
+                    }
+                }
+            }
+        }
+        let args = [
+            string(""),
+            number(i64::from(i32::MAX)),
+            string("\u{4e2d}"),
+            string("?"),
+            string("Z"),
+        ];
+        assert!(
+            evaluate(26, &args, &[], 1).is_none(),
+            "Arrow offset overflow retains exact evaluation before allocating"
+        );
+    }
 }
 
 impl<'a> Span<'a> {
+    fn byte_capacity(self) -> usize {
+        match self {
+            Self::Utf8(s) => s.len(),
+            Self::Utf16(s) => s.len(), // Replacement admits only ASCII Java caches.
+            Self::Unit(_) => 4,
+        }
+    }
+
+    fn starts_with_units(self, units: &[u16]) -> bool {
+        match self {
+            Self::Utf8(s) if s.is_ascii() => s
+                .bytes()
+                .map(u16::from)
+                .take(units.len())
+                .eq(units.iter().copied()),
+            Self::Utf8(s) => s.encode_utf16().take(units.len()).eq(units.iter().copied()),
+            Self::Utf16(s) => s.starts_with(units),
+            Self::Unit(unit) => units.is_empty() || units == [unit],
+        }
+    }
+
     fn len(self) -> usize {
         match self {
             Self::Utf8(s) if s.is_ascii() => s.len(),
@@ -216,6 +402,30 @@ impl<'a> Span<'a> {
             Self::Unit(_) => ([self, empty], [empty, empty]),
         }
     }
+}
+
+fn growing_padding_equals(
+    source: Span<'_>,
+    pattern: Span<'_>,
+    source_length: usize,
+    length: usize,
+    target: &[u16],
+    left: bool,
+) -> bool {
+    if length != target.len() {
+        return false;
+    }
+    let (padding, original) = if left {
+        target.split_at(length - source_length)
+    } else {
+        let (original, padding) = target.split_at(source_length);
+        (padding, original)
+    };
+    let period = pattern.len();
+    // One matching period plus equal shifted slices proves all repetitions, including a partial last one.
+    source.starts_with_units(original)
+        && pattern.starts_with_units(&padding[..padding.len().min(period)])
+        && (padding.len() <= period || padding[period..] == padding[..padding.len() - period])
 }
 
 struct Text<'a>([Span<'a>; 5]);
@@ -350,7 +560,7 @@ impl<'a> Integers<'a> {
     }
 }
 
-/// None retains the exact evaluator, including growth and overflowing overlay indexes.
+/// None retains the exact evaluator, including unverified caches and overflowing overlay indexes.
 pub(crate) fn evaluate(
     operation: i64,
     args: &[ColumnarValue],
@@ -413,8 +623,30 @@ pub(crate) fn evaluate(
                     None
                 } else {
                     let length = usize::try_from(number).ok()?;
-                    if length > source.len() {
-                        return None;
+                    let source_length = source.len();
+                    if length > source_length {
+                        if consumer == 2 {
+                            output.padding_replace(
+                                source,
+                                pattern,
+                                length - source_length,
+                                producer == 0,
+                                old?.as_bytes()[0],
+                                replacement?.as_bytes()[0],
+                            )?;
+                            continue;
+                        }
+                        booleans.append_option(old.map(|_| {
+                            growing_padding_equals(
+                                source,
+                                pattern,
+                                source_length,
+                                length,
+                                &target_units,
+                                producer == 0,
+                            ) ^ (consumer == 1)
+                        }));
+                        continue;
                     }
                     let prefix = source.split(length).0;
                     Some(Text([
@@ -527,42 +759,89 @@ impl Output {
         }
     }
     fn replace(&mut self, text: &Text, old: u8, new: u8) -> Option<()> {
-        let limit = text.0.iter().try_fold(self.bytes.len(), |size, span| {
-            size.checked_add(match span {
-                Span::Utf8(s) => s.len(),
-                Span::Utf16(s) => s.len(),
-                Span::Unit(_) => 4,
-            })
-        })?;
-        if limit > i32::MAX as usize {
+        let capacity = text
+            .0
+            .iter()
+            .try_fold(0usize, |size, span| size.checked_add(span.byte_capacity()))?;
+        self.reserve(capacity)?;
+        for span in text.0 {
+            self.append_span(span, old, new);
+        }
+        self.finish_row()
+    }
+    fn reserve(&mut self, additional: usize) -> Option<()> {
+        if self.bytes.len().checked_add(additional)? > i32::MAX as usize {
             return None;
         }
-        self.bytes.reserve(limit - self.bytes.len());
-        for span in text.0 {
-            match span {
-                Span::Utf8(s) => {
-                    if !s.is_empty() {
-                        self.flush_high();
-                    }
-                    self.bytes
-                        .extend(s.bytes().map(|byte| if byte == old { new } else { byte }));
+        self.bytes.reserve(additional);
+        Some(())
+    }
+    #[inline(always)]
+    fn append_span(&mut self, span: Span<'_>, old: u8, new: u8) {
+        match span {
+            Span::Utf8(s) => {
+                if !s.is_empty() {
+                    self.flush_high();
                 }
-                Span::Utf16(units) => {
-                    debug_assert!(units.iter().all(|unit| *unit < 128));
-                    if !units.is_empty() {
-                        self.flush_high();
-                    }
-                    self.bytes.extend(units.iter().map(|&unit| {
-                        if unit == u16::from(old) {
-                            new
-                        } else {
-                            unit as u8
-                        }
-                    }));
+                self.bytes
+                    .extend(s.bytes().map(|byte| if byte == old { new } else { byte }));
+            }
+            Span::Utf16(units) => {
+                debug_assert!(units.iter().all(|unit| *unit < 128));
+                if !units.is_empty() {
+                    self.flush_high();
                 }
-                Span::Unit(unit) => self.unit(unit),
+                self.bytes.extend(units.iter().map(|&unit| {
+                    if unit == u16::from(old) {
+                        new
+                    } else {
+                        unit as u8
+                    }
+                }));
+            }
+            Span::Unit(unit) => self.unit(unit),
+        }
+    }
+    fn padding_replace(
+        &mut self,
+        source: Span<'_>,
+        pattern: Span<'_>,
+        units: usize,
+        left: bool,
+        old: u8,
+        new: u8,
+    ) -> Option<()> {
+        let period = pattern.len();
+        let repeats = units / period;
+        let tail = pattern.split(units % period).0;
+        let repeated_bytes = pattern.byte_capacity().checked_mul(repeats)?;
+        let capacity = tail.iter().try_fold(
+            source.byte_capacity().checked_add(repeated_bytes)?,
+            |size, span| size.checked_add(span.byte_capacity()),
+        )?;
+        self.reserve(capacity)?;
+        if !left {
+            self.append_span(source, old, new);
+        }
+        if repeats != 0 {
+            let start = self.bytes.len();
+            self.append_span(pattern, old, new);
+            // Map one whole period, then copy it in growing chunks into the final buffer.
+            while self.bytes.len() - start < repeated_bytes {
+                let copied = self.bytes.len() - start;
+                let count = copied.min(repeated_bytes - copied);
+                self.bytes.extend_from_within(start..start + count);
             }
         }
+        for span in tail {
+            self.append_span(span, old, new);
+        }
+        if left {
+            self.append_span(source, old, new);
+        }
+        self.finish_row()
+    }
+    fn finish_row(&mut self) -> Option<()> {
         self.flush_high();
         self.offsets.push(i32::try_from(self.bytes.len()).ok()?);
         self.nulls.append_non_null();

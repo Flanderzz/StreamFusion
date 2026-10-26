@@ -34,6 +34,20 @@ ASCII mapping uses bulk byte loops. Scalar operands remain scalar instead of
 being expanded into repeated Arrow arrays; non-ASCII producer literals prepare
 their UTF-16 units once per batch.
 
+Growing LPAD/RPAD equality first compares the requested UTF-16 length with the
+literal's length. If they match, it compares the unchanged source and one period
+of padding. Comparing the remaining literal slice with itself shifted by that
+period proves all repetitions, including a partial final period. These are bulk
+UTF-16 slice comparisons; the repeated padding and complete padded string are
+never allocated. A split surrogate remains a unit throughout the comparison.
+
+Growing LPAD/RPAD under single-ASCII-character REPLACE maps one complete padding
+period, then copies it in growing chunks directly into the final Arrow value
+buffer. It handles the partial last period with UTF-16 spans and encodes an
+isolated surrogate only after replacement finishes. Output capacity is checked
+before copying. This avoids both the intermediate padded string and a separate
+repeated padding buffer; the final STRING output still has to be written.
+
 This follows Comet's scalar-operand and buffer-reuse discipline, including its
 `static_invoke/char_varchar_utils/read_side_padding.rs` implementation. It uses
 released Flink's UTF-16 semantics rather than Spark's code-point rules. No new
@@ -49,9 +63,10 @@ The planner recognizes these direct consumers:
 | `REPLACE(producer, old, new)` | `old` and `new` are each exactly one ASCII character; producer inputs have no non-ASCII original Java cache or non-ASCII string literal |
 
 Producer arguments must be direct inputs, valid literals, or lossless integer
-widenings of direct inputs. LPAD/RPAD admit truncation and unchanged length,
-including their NULL, negative-length and empty-padding behavior. Growth retains
-the exact evaluator. OVERLAY admits three or four arguments, preserving UTF-16
+widenings of direct inputs. LPAD/RPAD consumers admit truncation, unchanged
+length and growth, including their NULL, negative-length and empty-padding
+behavior under the cache/literal conditions above. OVERLAY
+admits three or four arguments, preserving UTF-16
 positions and Flink's integer narrowing; overflowing substring cases retain the
 exact evaluator and its exception.
 
@@ -72,17 +87,22 @@ the remaining fusion and performance work, including cached Unicode REPLACE.
 
 ## Correctness evidence
 
-- Release Rust core suite: 797 tests passed. Compiled Calc tests deliberately use
+- Release Rust core suite: 801 tests passed. Compiled Calc tests deliberately use
   an invalid evaluator ID for all nine admitted combinations, so an accidental
   JVM callback fails the test. They include cached and binary-only inputs, sliced
-  batches, repeated batches, NULLs and empty batches.
-- Focused SQL/planner suites: 49 passed on Flink 2.2.1/JDK 17; 46 passed and three
-  existing capability skips on Flink 1.18.1/JDK 11. SQL tests require native work
+  batches, repeated batches, NULLs and empty batches. A separate invalid-ID test
+  requires native growing comparisons, including positive matches and inequality.
+  Growing replacement tests also require no callback and cover full/partial
+  periods, mixed growing/truncating rows and split supplementary characters.
+- Focused SQL/planner suites: 53 passed on Flink 2.2.1/JDK 17; 50 passed and three
+  existing capability assumptions aborted on Flink 1.18.1/JDK 11. SQL tests require native work
   as well as matching values, including positive/negative equality filters.
-- A local production-Calc differential check compared 35,909 admitted fixtures
-  per release against unchanged generated Flink expressions. All matched; 2,120
-  raw fixtures per release explicitly retained exact evaluation. Those retained
-  fixtures are not counted as pure-Rust successes.
+- A local production-Calc differential check compared 61,617 admitted checks
+  per release, including growing equality/replacement and positive output
+  literals, against released Flink results. All matched. The 64 raw exception
+  fixtures and unadmitted replacements remain outside this native-success
+  count. Original Java caches include isolated units that can rejoin across the
+  padding/source boundary.
 - Unchanged released Flink `testLPad`, `testRPad` and `testOverlay` tests passed on
   both lines. These establish the reference semantics; the invalid-ID compiled
   tests independently establish the absence of callbacks.
@@ -143,7 +163,7 @@ of issue #521.
 ### Complete bounded job
 
 The optional `StringFusionPipelineBenchmark` runs two million deterministic rows,
-parallelism one, `LPAD(s,n,'X') = 'a?'`, nominal 264-byte ASCII, NULL every seventh
+parallelism one, `LPAD(s,n,'X') = 'a?'`, lengths one through three, nominal 264-byte ASCII, NULL every seventh
 row and a blackhole row sink. Both RowData-to-Arrow and Arrow-to-RowData remain in
 the native INSERT plan and timer. Separate SQL tests establish output parity;
 blackhole timings alone do not compare output values.
@@ -165,6 +185,143 @@ interleaved runs with a larger 8 GiB heap measured 0.509 seconds for Flink versu
 warmup and execution order materially affect short-job results. The controlled
 three-way comparison above uses identical resources and fresh JVMs throughout.
 
+### Growing padding comparisons
+
+Growth comparisons use the same component boundaries, released Flink versions,
+JDK 17, hardware and heap sizes, with eight warmups and nine measured trials of
+131,072 rows per engine/profile. The previous control links the same benchmark
+driver against the preceding production library, including its real certified
+dispatch and JVM evaluation for growing padding. All inputs match, including
+dummy length values on NULL source rows. The candidate uses an invalid evaluator
+ID and checks the result against the generated evaluator before timing.
+
+The 28 profiles cover both releases, LPAD equality/RPAD equality and inequality,
+ASCII/CJK/supplementary sources and padding, original Java caches/binary-only
+inputs, 16/1,024/16,384-row batches, and mixed/all-matching distributions. Mixed
+inputs have cardinality 16 and vary the requested length by zero to two units;
+all-matching inputs have cardinality one and a constant length. Both retain NULL
+every seventh row. CJK growth uses U+4E2D padding and supplementary growth uses
+U+1F600 padding; ASCII uses `X`.
+
+An initial per-period scan took 188 ns/row for cached 32-byte ASCII with all
+non-NULL rows matching and 64 added units. Comparing shifted literal slices
+instead reduces that profile to 24 ns/row. This avoids rescanning each padding
+repetition, rather than relying on early mismatches for its benefit.
+
+Selected final results, median [minimum-maximum] ns/row; 1,024-row batches unless
+specified. The [complete 28-profile summary](../benchmarks/native-string-padding-growth-20261026.csv)
+retains both releases and every measured range.
+
+| Flink | Growth profile | Stock | Previous StreamFusion | Native |
+|---|---|---:|---:|---:|
+| 2.2.1 | LPAD, ASCII 32 bytes, cold, mixed, +64 units | 167.24 [151.50-170.53] | 215.64 [210.93-218.02] | 18.75 [18.25-19.10] |
+| 2.2.1 | LPAD, ASCII 32 bytes, cached, all matching, +64 | 142.58 [126.28-176.71] | 219.00 [211.75-234.74] | 23.76 [23.49-25.96] |
+| 2.2.1 | RPAD, ASCII 264 bytes, cold, all matching, +16 | 170.07 [167.77-183.90] | 227.41 [223.26-237.69] | 128.75 [126.00-130.11] |
+| 2.2.1 | LPAD, CJK 264 bytes, cached, all matching, +16 | 112.61 [107.01-127.31] | 216.51 [212.15-221.08] | 25.05 [24.04-27.62] |
+| 2.2.1 | RPAD inequality, supplementary 264 bytes, cached, all matching, +4 | 107.88 [95.75-167.97] | 202.97 [197.94-235.93] | 24.29 [24.15-24.82] |
+| 2.2.1 | LPAD, ASCII 32 bytes, cached, all matching, +64, **16 rows** | 113.77 [104.05-122.51] | 1363.80 [1357.92-1380.78] | 96.73 [94.13-97.97] |
+| 1.18.1 | LPAD, CJK 264 bytes, cold, all matching, +16 | 243.83 [239.44-268.87] | 303.06 [301.95-314.62] | 216.26 [206.84-228.87] |
+| 1.18.1 | RPAD inequality, supplementary 264 bytes, cached, all matching, +4 | 93.44 [85.23-111.73] | 227.52 [203.69-233.12] | 24.91 [24.53-26.53] |
+
+All 28 sampled profiles improve over stock (1.13-9.01x) and previous StreamFusion
+(1.40-14.74x). The smaller margins on binary-only Unicode reflect UTF-16 counting
+and comparison work; the 16-row profile still pays fixed compiled-Calc setup.
+These measurements do not establish a win for every growth length or batch size.
+The earlier unfavorable truncation/REPLACE diagnostics remain applicable to their
+separate contexts.
+
+The complete bounded growth job uses the same two million rows, parallelism one,
+both transposes and blackhole row sink, with requested lengths 280-282 and an
+LPAD comparison against the 280-unit literal for source value zero. Independent
+fresh JVMs use the same 2 GiB maximum heap, two warmups and five measured trials:
+
+| Engine | Median seconds | Minimum-maximum seconds |
+|---|---:|---:|
+| Stock Flink | 0.825 | 0.815-0.860 |
+| Previous StreamFusion | 0.925 | 0.909-1.072 |
+| Native growth comparison | 0.552 | 0.543-0.560 |
+
+Elapsed time decreases 33% versus stock and 40% versus previous in this bounded
+job. The same startup/planning and blackhole-output limitations described above
+apply. Runtime comparison targets and inter-operator STRING
+transport remain unmodified and tracked in
+[issue #521](https://github.com/datafusion-contrib/StreamFusion/issues/521) and
+[issue #519](https://github.com/datafusion-contrib/StreamFusion/issues/519).
+
+### Growing padding under REPLACE
+
+The next comparison measures `REPLACE(LPAD/RPAD(s,n,p), '?', 'Z')` with growing
+lengths. It uses the same component boundaries and Apple M4 Pro/24 GiB hardware,
+JDK 17 for each released Flink line, fresh JVMs, 256/512 MiB initial/maximum heap,
+eight warmups and nine measured trials of 131,072 rows per profile/engine. The
+previous control links the same benchmark driver against production revision
+`99a13b5b`, including its certified dispatch and retained JVM growth evaluator.
+The candidate uses an invalid evaluator ID and compares complete output arrays
+against the generated evaluator before timing.
+
+Sixteen profiles cover both releases, LPAD/RPAD, nominal 32/264-byte inputs,
+ASCII/CJK/supplementary sources and padding, cached ASCII and binary-only inputs,
+16/1,024/16,384-row batches, cardinality 16 and NULL every seventh row. Requested
+growth varies by zero to two additional units. Padding is `X?`, U+4E2D followed
+by `?`, or U+1F600 followed by `?`, so replacement visits the padding as well as
+the source. Original non-ASCII Java caches remain outside admission.
+
+Selected medians [minimum-maximum] ns/row, 1,024-row batches unless specified.
+The [complete 16-profile summary](../benchmarks/native-padding-replace-growth-20261026.csv)
+retains all measured ranges.
+
+| Flink | Growth replacement profile | Stock | Previous StreamFusion | Native |
+|---|---|---:|---:|---:|
+| 2.2.1 | LPAD, ASCII 32 bytes, cold, +64 units | 203.69 [189.49-206.67] | 265.21 [258.80-286.29] | 50.16 [49.46-52.94] |
+| 2.2.1 | RPAD, ASCII 264 bytes, cold, +16 units | 279.45 [276.17-288.93] | 355.65 [341.68-366.44] | 53.96 [51.04-54.87] |
+| 2.2.1 | RPAD, ASCII 264 bytes, cached, +16 units | 237.43 [233.85-241.93] | 353.13 [348.28-378.58] | 109.54 [108.91-112.72] |
+| 2.2.1 | LPAD, CJK 264 bytes, cold, +16 units | 377.32 [371.91-388.84] | 459.91 [451.81-470.93] | 217.87 [215.02-223.24] |
+| 2.2.1 | RPAD, supplementary 264 bytes, cold, +4 units | 388.50 [380.83-397.39] | 465.12 [462.85-491.24] | 182.34 [179.99-185.31] |
+| 2.2.1 | LPAD, ASCII 32 bytes, cached, +64 units, **16 rows** | 152.67 [145.05-157.60] | 1548.11 [1527.01-1623.21] | 143.55 [137.57-149.78] |
+| 1.18.1 | LPAD, CJK 264 bytes, cold, +16 | 360.58 [358.83-363.48] | 446.01 [439.97-461.95] | 217.78 [213.57-224.67] |
+| 1.18.1 | RPAD, supplementary 264 bytes, cold, +4 | 379.23 [375.21-392.51] | 468.21 [452.55-479.91] | 184.76 [181.90-185.70] |
+
+Median ratios are 1.06-5.66x versus stock and 2.05-10.86x versus the previous
+production path. The 16-row Flink 2.2 profile improves only 6%, with overlapping
+sample ranges, so it does not demonstrate a substantial small-batch gain. The
+cached ASCII source still pays UTF-16-to-byte mapping, and binary-only Unicode
+still pays UTF-16 counting. No universal speedup is claimed.
+
+A separate Flink 2.2.1/JDK 17 bounded job uses two million rows, parallelism one,
+lengths 280-282 and `REPLACE(LPAD(s,n,'X?'), '?', 'Z')`. Both RowData/Arrow
+transposes and the blackhole row sink remain in the plan and timer. Its sink
+type is derived from the query, so the final STRING is written through the same
+row boundary rather than reduced to a BOOLEAN or checksum inside the query.
+Fresh JVMs use identical 2 GiB maximum heaps, two warmups and five measured
+trials:
+
+| Engine | Median seconds | Minimum-maximum seconds |
+|---|---:|---:|
+| Stock Flink | 1.370 | 1.363-1.396 |
+| Previous StreamFusion | 1.490 | 1.476-1.530 |
+| Native growth replacement | 0.792 | 0.758-0.836 |
+
+Elapsed time decreases 42% versus stock and 47% versus previous for this short
+bounded workload, including startup/planning. This does not measure sustained
+connector throughput. Separate parity tests verify values; blackhole timings
+alone do not. Dynamic replacement operands, non-ASCII original caches and the
+other contexts linked above remain on their existing paths.
+
+A regression check of existing truncating LPAD/OVERLAY replacement profiles found
+that outlining the shared writer introduced several percent overhead. The final
+writer is inlined. Six repeated control profiles across both releases have
+median changes from 4.1% lower to 2.7% higher than the preceding production
+revision, with overlapping ranges for each pair. They remain faster than stock;
+no improvement is claimed for these unchanged contexts. The
+[complete control summary](../benchmarks/native-padding-replace-controls-20261026.csv)
+retains their measurements. For Flink 2.2.1, ns/row:
+
+| Existing profile, 1,024 rows | Stock | Previous StreamFusion | Current |
+|---|---:|---:|---:|
+| LPAD, ASCII, cold | 218.44 [214.16-233.85] | 48.12 [45.92-50.83] | 48.40 [44.52-49.81] |
+| LPAD, ASCII, cached | 161.73 [154.25-179.81] | 101.96 [99.35-142.76] | 98.05 [94.63-101.43] |
+| OVERLAY, supplementary, cold | 385.86 [383.32-393.65] | 174.10 [170.17-182.57] | 178.74 [174.55-184.61] |
+
 ## Reproduce
 
 From the repository root, using JDK 17 and the pinned Rust toolchain:
@@ -180,6 +337,12 @@ export SF_NATIVE_LIB_DIR="$PWD/native/target/release"
 native/target/release/examples/string_fusion 20 ascii 264 false 1024 64 7 9 flink
 native/target/release/examples/string_fusion 20 ascii 264 false 1024 64 7 9 previous
 native/target/release/examples/string_fusion 20 ascii 264 false 1024 64 7 9 native
+# Growing, all-matching cached inputs; one process per engine:
+native/target/release/examples/string_fusion 20 ascii 32 true 1024 128 8 9 flink 64 true
+native/target/release/examples/string_fusion 20 ascii 32 true 1024 128 8 9 native 64 true
+# Growing replacement, binary-only supplementary input and padding:
+native/target/release/examples/string_fusion 27 emoji 264 false 1024 128 8 9 flink 4
+native/target/release/examples/string_fusion 27 emoji 264 false 1024 128 8 9 native 4
 ```
 
 Each command starts a fresh JVM. Operation codes 20/21/22 are LPAD/RPAD/OVERLAY
@@ -187,12 +350,27 @@ equality; 23/24/25 are inequality; 26/27/28 are single-ASCII-character REPLACE.
 The remaining arguments select corpus (`ascii`, `cjk`, `emoji`), nominal width,
 original Java cache, batch rows, loops, warmups, measured trials and engine.
 CSV records contain operation, corpus, width, cache, batch rows, total timed rows,
-trial, warmup flag, actual engine, total nanoseconds and consumed checksum.
+trial, warmup flag, actual engine, total nanoseconds, consumed checksum, growth
+units and all-matching flag. Two optional final arguments select padding growth
+units (default zero, restricted to LPAD/RPAD consumers) and an all-matching
+distribution (default false). All-matching inputs have cardinality one and a
+constant requested length; NULL every seventh row remains unchanged.
+Growing REPLACE uses `X?`, U+4E2D followed by `?`, or U+1F600 followed by `?`
+padding so that replacement occurs in the padding as well as the source.
 `retained` explicitly means that the candidate called its exact evaluator.
+`previous` measures the exact generated evaluator control. A separate comparison
+binary linked against the preceding production revision uses `baseline` to time
+that revision's certified expression dispatch, including its retained evaluator;
+running `baseline` against the current library is not a previous-version result.
 
 Run the optional full job separately with `SF_BENCHMARK=true`, the `bench` Maven
 profile and `-Dtest=StringFusionPipelineBenchmark`. The `fusion.pipeline.rows`,
-`fusion.pipeline.warmups`, `fusion.pipeline.runs`, `fusion.pipeline.expression`
-and `fusion.pipeline.engines=stock|native|both` properties select the workload.
+`fusion.pipeline.warmups`, `fusion.pipeline.runs`, `fusion.pipeline.expression`,
+`fusion.pipeline.minLength` (default one) and
+`fusion.pipeline.engines=stock|native|both` properties select the workload.
 Use identical heap and JVM settings for before/after comparisons, and a separate
 worktree at the parent revision for the previous production encoder.
+For the complete growing replacement job, select
+`-Dfusion.pipeline.minLength=280` and
+`-Dfusion.pipeline.expression="REPLACE(LPAD(s,n,'X?'), '?', 'Z')"`.
+The blackhole sink derives its column type from the selected expression.

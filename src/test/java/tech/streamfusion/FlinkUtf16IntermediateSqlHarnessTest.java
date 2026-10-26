@@ -37,6 +37,44 @@ class FlinkUtf16IntermediateSqlHarnessTest {
   }
 
   @ParameterizedTest
+  @ValueSource(strings = {"LPAD", "RPAD"})
+  void growingPaddingReplacementPreservesUtf16BeforeFinalEncoding(String function) throws Exception {
+    NativeParity.assertParity(
+        () -> TextTimeFunctionTestInputs.textRows("a?", "abc?", "", null),
+        "SELECT id, REPLACE(" + function + "(s, 15, 'x?'), '?', 'Z') FROM inputs");
+    NativeParity.assertParity(
+        TextTimeFunctionTestInputs::parameters,
+        "SELECT id, REPLACE(" + function + "(s, n, p), '?', 'Z') FROM inputs");
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"LPAD", "RPAD"})
+  void growingPaddingComparisonsPreserveRepeatedAndSplitUtf16Units(String function)
+      throws Exception {
+    String value = function + "(s, n, p)";
+    NativeParity.assertParity(
+        TextTimeFunctionTestInputs::parameters,
+        "SELECT id, "
+            + value
+            + " = 'xyxyabc', 'abcxyxy' = "
+            + value
+            + ", "
+            + value
+            + " <> 'xyxyabc', "
+            + value
+            + " = '\ud83d\ude00', "
+            + value
+            + " = '\ud83d\ude00?abc' FROM inputs");
+    NativeParity.assertParity(
+        TextTimeFunctionTestInputs::parameters,
+        "SELECT id FROM inputs WHERE "
+            + value
+            + " = '"
+            + (function.equals("LPAD") ? "xyxyabc" : "abcxyxy")
+            + "'");
+  }
+
+  @ParameterizedTest
   @ValueSource(strings = {"LPAD(s, 1, 'x')", "RPAD(s, 1, 'x')", "OVERLAY(s PLACING 'X' FROM 1 FOR 1)"})
   void filtersObserveTheIntermediateBeforeEncoding(String value) throws Exception {
     NativeParity.assertParity(

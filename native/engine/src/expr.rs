@@ -2428,6 +2428,154 @@ mod certified_builtin_tests {
     use crate::calc::CalcExpression;
 
     #[test]
+    fn compiled_growing_padding_replacements_do_not_call_the_jvm() {
+        use streamfusion_bridge::string_cache::{string_cache_array, string_cache_field};
+
+        let input = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("s", DataType::Utf8, true),
+                Field::new("n", DataType::Int64, false),
+                Field::new("p", DataType::Utf8, false),
+            ])),
+            vec![
+                Arc::new(StringArray::from(vec![
+                    Some("skip"),
+                    Some("a?"),
+                    Some("a?"),
+                    None,
+                    Some("\u{1f600}"),
+                ])),
+                Arc::new(arrow::array::Int64Array::from(vec![0, 8, 1, 4, 3])),
+                Arc::new(StringArray::from(vec!["", "x?", "x?", "y", "\u{1f600}"])),
+            ],
+        )
+        .unwrap()
+        .slice(1, 4);
+        for cached in [false, true] {
+            let input = if cached {
+                let mut fields = input.schema().fields().to_vec();
+                let mut columns = input.columns().to_vec();
+                for (index, values) in [
+                    (
+                        0,
+                        vec![Some(&[97, 63][..]), Some(&[97, 63][..]), None, None],
+                    ),
+                    (
+                        2,
+                        vec![
+                            Some(&[120, 63][..]),
+                            Some(&[120, 63][..]),
+                            Some(&[121][..]),
+                            None,
+                        ],
+                    ),
+                ] {
+                    let cache = string_cache_array(values);
+                    fields.push(Arc::new(string_cache_field(
+                        index,
+                        cache.data_type().clone(),
+                    )));
+                    columns.push(cache);
+                }
+                RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap()
+            } else {
+                input.clone()
+            };
+            for operation in [26, 27] {
+                let mut calc = CalcExpression {
+                    kinds: vec![44, 0, 0, 0, 3, 3],
+                    payload: vec![0, 0, 1, 2, 0, 1],
+                    child_counts: vec![5, 0, 0, 0, 0, 0],
+                    longs: vec![999, 0, operation],
+                    doubles: vec![],
+                    strings: vec![Some("?".into()), Some("Z".into())],
+                    projection_roots: vec![0],
+                    condition_root: -1,
+                    output_names: vec!["v".into()],
+                    compiled: None,
+                };
+                for _ in 0..2 {
+                    let result = calc.evaluate(input.clone());
+                    assert_eq!(
+                        result.column(0).as_ref(),
+                        &StringArray::from(vec![
+                            Some(if operation == 26 {
+                                "xZxZxZaZ"
+                            } else {
+                                "aZxZxZxZ"
+                            }),
+                            Some("a"),
+                            None,
+                            Some(if operation == 26 {
+                                "?\u{1f600}"
+                            } else {
+                                "\u{1f600}?"
+                            }),
+                        ])
+                    );
+                }
+                assert_eq!(calc.evaluate(input.slice(0, 0)).num_rows(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn compiled_growing_padding_comparisons_do_not_call_the_jvm() {
+        for operation in [20, 21, 23, 24] {
+            let input = RecordBatch::try_new(
+                Arc::new(Schema::new(vec![
+                    Field::new("s", DataType::Utf8, true),
+                    Field::new("n", DataType::Int64, false),
+                    Field::new("p", DataType::Utf8, false),
+                ])),
+                vec![
+                    Arc::new(StringArray::from(vec![
+                        Some("skip"),
+                        Some("a"),
+                        Some("a"),
+                        None,
+                    ])),
+                    Arc::new(arrow::array::Int64Array::from(vec![5, 5, 6, 5])),
+                    Arc::new(StringArray::from(vec!["x", "xy", "xy", "xy"])),
+                ],
+            )
+            .unwrap()
+            .slice(1, 3);
+            let mut calc = CalcExpression {
+                kinds: vec![44, 0, 0, 0, 3],
+                payload: vec![0, 0, 1, 2, 0],
+                child_counts: vec![4, 0, 0, 0, 0],
+                longs: vec![999, 4, operation],
+                doubles: vec![],
+                strings: vec![Some(
+                    if (operation - 20) % 3 == 0 {
+                        "xyxya"
+                    } else {
+                        "axyxy"
+                    }
+                    .into(),
+                )],
+                projection_roots: vec![0],
+                condition_root: -1,
+                output_names: vec!["v".into()],
+                compiled: None,
+            };
+            for _ in 0..2 {
+                let result = calc.evaluate(input.clone());
+                assert_eq!(
+                    result.column(0).as_ref(),
+                    &arrow::array::BooleanArray::from(vec![
+                        Some(operation < 23),
+                        Some(operation >= 23),
+                        None
+                    ])
+                );
+            }
+            assert_eq!(calc.evaluate(input.slice(0, 0)).num_rows(), 0);
+        }
+    }
+
+    #[test]
     fn compiled_string_consumers_keep_utf16_without_a_jvm() {
         use streamfusion_bridge::string_cache::{string_cache_array, string_cache_field};
         for cached in [false, true] {

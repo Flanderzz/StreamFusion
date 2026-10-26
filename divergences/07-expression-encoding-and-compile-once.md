@@ -370,8 +370,14 @@ Simple literal comparisons and verified ASCII REPLACE consumers can now fuse wit
 in Rust. A fixed set of borrowed UTF-8/UTF-16 spans represents truncation and overlay without
 encoding isolated surrogates early. This borrows Comet's buffer reuse and scalar-literal
 discipline, not its Spark code-point semantics. Released Flink counts UTF-16 units, and its
-original Java cache remains authoritative. Padding growth, dynamic consumers and unmeasured
-replacement contexts retain the generated Flink evaluator; no inter-operator string format is
+original Java cache remains authoritative. Growing equality/inequality compares a literal's
+UTF-16 padding period and unchanged source without materializing a repeated padding buffer;
+Comet's standalone padding kernel materializes such a buffer because it returns strings.
+Growing single-ASCII-character REPLACE maps one period and copies it in growing chunks
+directly into the final Arrow buffer, then handles the partial period with the existing
+UTF-16 spans. This avoids a separate repeated padding buffer while preserving Flink's
+split-surrogate semantics. Dynamic consumers and unmeasured replacement contexts retain the
+generated Flink evaluator; no inter-operator string format is
 introduced. See the [Calc coverage](../docs/operators/calc-filter.md#lpad).
 
 Standalone final projections copy borrowed UTF-8 prefixes and whole padding spans, following
