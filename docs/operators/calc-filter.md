@@ -243,6 +243,8 @@ projections. Existing two-argument LIKE admission is unchanged.
 
 The retained evaluator preserves original literal operands and Flink's constant-pattern
 specializations, including its distinct constant versus dynamic empty-ESCAPE behavior.
+Released Flink 2.2 accepts the verified literal empty-escape forms; 1.18 rejects them during
+planning. The regression compares independent executions and checks that same 1.18 rejection.
 
 [Prepared kernel and complete-job measurements](../benchmarks/native-certified-scalars.md)
 retain the stock and previous-implementation controls and their timing limits.

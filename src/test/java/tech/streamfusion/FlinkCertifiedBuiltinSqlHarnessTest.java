@@ -100,12 +100,26 @@ class FlinkCertifiedBuiltinSqlHarnessTest {
 
   @Test
   void literalLikeEscapeRetainsFlinkCodeGenerationSpecialization() throws Exception {
-    BuiltinFunctionParity.assertParity(
-        () ->
-            BuiltinFunctionParity.environment(
-                ROW(FIELD("s", STRING())),
-                Arrays.asList(Row.of("abc"), Row.of("abcd"), Row.of((Object) null))),
-        "SELECT s LIKE 'abc' ESCAPE '', s LIKE 'ab%' ESCAPE '', s LIKE 'a!_b' ESCAPE '!' FROM src");
+    var comparison =
+        NativeFailureParity.run(
+            () ->
+                BuiltinFunctionParity.environment(
+                    ROW(FIELD("s", STRING())),
+                    Arrays.asList(Row.of("abc"), Row.of("abcd"), Row.of((Object) null))),
+            "SELECT s LIKE 'abc' ESCAPE '', s LIKE 'ab%' ESCAPE '', s LIKE 'a!_b' ESCAPE '!' FROM"
+                + " src");
+    if (comparison.host().failure() == null) {
+      comparison.assertSuccess(NativeFailureParity.Route.NATIVE);
+    } else {
+      org.junit.jupiter.api.Assertions.assertEquals(
+          "Invalid escape character ''", comparison.host().rootCause().getMessage());
+      org.junit.jupiter.api.Assertions.assertNotNull(comparison.nativeRun().failure());
+      org.junit.jupiter.api.Assertions.assertEquals(
+          comparison.host().rootCause().getClass(), comparison.nativeRun().rootCause().getClass());
+      org.junit.jupiter.api.Assertions.assertEquals(
+          comparison.host().rootCause().getMessage(),
+          comparison.nativeRun().rootCause().getMessage());
+    }
   }
 
   private TableEnvironment patterns() {
