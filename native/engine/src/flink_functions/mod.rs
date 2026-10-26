@@ -73,6 +73,7 @@ pub(crate) mod numeric;
 pub(crate) mod numeric_cast;
 mod scalar;
 mod sign;
+pub(crate) mod string_fusion;
 mod string_to_boolean;
 mod temporal_arithmetic;
 mod temporal_extremum;

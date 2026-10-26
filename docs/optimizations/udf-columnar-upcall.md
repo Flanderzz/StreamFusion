@@ -53,6 +53,10 @@ and `Method.invoke` on every row. The borrowed view remains inside the imported 
 each result is written before advancing to the next row. Generic user functions retain their
 resolved reflective call path and typed column materialization. Arrow conversion and the
 once-per-batch JNI boundary remain in the measured path.
+Verified [padding/overlay consumers](native-string-fusion.md) instead execute entirely in Rust
+when their batch meets the native conditions. They retain this generated evaluator for the
+remaining batches. The planner's `jvmFunctions` list describes the retained execution option;
+it does not count actual callbacks.
 Failures retain the original cause through the existing native exception handover, including checked
 exceptions and `Error`s. Open/close and classloader ownership are unchanged.
 

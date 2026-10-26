@@ -14,8 +14,18 @@ class FlinkUtf16IntermediateSqlHarnessTest {
     NativeParity.assertParity(
         () -> inputs(2051),
         "SELECT id, " + value + " = '?', " + value + " = 'X?', "
+            + "'?' = " + value + ", " + value + " <> '?', '?' <> " + value + ", "
             + value + " LIKE '%?%', REPLACE(" + value + ", '?', 'Z'), "
             + "CASE WHEN " + value + " = '?' THEN 1 ELSE 0 END FROM inputs");
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"LPAD(s, 1, 'x')", "RPAD(s, 1, 'x')", "OVERLAY(s PLACING '' FROM 2)"})
+  void fusedEqualityFiltersKeepPositiveMatchesAndNulls(String value) throws Exception {
+    NativeParity.assertParity(
+        () -> inputs(2051), "SELECT id FROM inputs WHERE '?' = " + value);
+    NativeParity.assertParity(
+        () -> inputs(2051), "SELECT id FROM inputs WHERE " + value + " <> '?'");
   }
 
   @ParameterizedTest

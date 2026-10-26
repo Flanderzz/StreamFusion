@@ -1641,9 +1641,14 @@ Character strings use Java form encoding: space becomes `+`, ASCII alphanumerics
 Character strings and integer positions, widened to BIGINT without losing bits. Preserves Java UTF-16 positions, length narrowing/overflow, and substring errors. Non-positive or beyond-end starts return the source; zero/negative lengths omit the suffix. Any NULL argument returns NULL.
 
 A standalone final projection keeps the native kernel: split surrogate pairs encode as `?`
-at final output, matching Flink. Scalar consumers such as equality, CASE, filters, LIKE and
-REPLACE fuse with OVERLAY in a released-Flink generated expression through the batch JVM
-bridge, so they see the original isolated UTF-16 unit before encoding. Sensitive character
+at final output, matching Flink. Direct equality/inequality against a string literal and
+REPLACE with single-character ASCII search/replacement literals have a
+[conditional Rust fusion path](../optimizations/native-string-fusion.md). Producer arguments
+must be direct inputs, literals or losslessly widened integer inputs. The Rust path retains
+UTF-16 cuts until after the consumer; overflowing indexes retain the exact Flink evaluator.
+REPLACE also retains that evaluator for non-ASCII original Java caches or producer literals. Other consumers,
+including LIKE and surrounding CASE expressions, fuse through the batch JVM bridge.
+Sensitive character
 results crossing another relational operator retain the shared STRING identity fallback;
 [issue #519](https://github.com/datafusion-contrib/StreamFusion/issues/519) tracks that boundary.
 
@@ -2496,9 +2501,14 @@ Character input with a dynamic TINYINT, SMALLINT, or INT count. Non-positive cou
 
 STRING, dynamic INT-width length, and literal or dynamic STRING padding. NULL, negative length, or empty padding returns NULL; zero length otherwise returns empty. Flink 2.2.1 counts UTF-16 units, including truncation through surrogate pairs.
 
-Standalone final LPAD/RPAD projections retain their native kernels. Consumers fuse with padding
-inside a Flink-generated scalar expression through the batch JVM bridge, preserving isolated
-surrogates produced by truncating the input or padding. For example, padding a supplementary
+Standalone final LPAD/RPAD projections retain their native kernels. Direct equality/inequality
+against a string literal and REPLACE with single-character ASCII search/replacement literals
+have a [conditional Rust fusion path](../optimizations/native-string-fusion.md). This path
+requires direct input/literal producer arguments (or lossless integer widening) and truncation
+or unchanged length; padding growth retains the exact Flink evaluator. Equality supports
+original Unicode Java caches; REPLACE retains Flink for non-ASCII caches or producer literals. Dynamic consumers,
+other replacements, LIKE, and surrounding CASE expressions retain generated Flink evaluation
+through the batch JVM bridge. Both paths preserve isolated surrogates. For example, padding a supplementary
 character to one UTF-16 unit does not equal the literal `?`, even though both encode to `?`
 at final output. The original input string caches are retained; NULL and all-filtered empty
 batches preserve Flink behavior. A padding result crossing an intermediate relational operator

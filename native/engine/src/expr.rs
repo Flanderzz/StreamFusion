@@ -2181,6 +2181,16 @@ impl datafusion::logical_expr::ScalarUDFImpl for JvmUdf {
         use datafusion::common::DataFusionError;
         use datafusion::logical_expr::ColumnarValue;
         let exec = |e: String| DataFusionError::Execution(e);
+        if let Some((operation @ 20..=28, count)) = self.certified_builtin {
+            if let Some(output) = crate::flink_functions::string_fusion::evaluate(
+                operation,
+                &args.args[..count],
+                &args.args[count..],
+                args.number_rows,
+            ) {
+                return Ok(ColumnarValue::Array(output));
+            }
+        }
         let mut arrays = if self.row_result {
             args.args
                 .into_iter()
@@ -2191,7 +2201,7 @@ impl datafusion::logical_expr::ScalarUDFImpl for JvmUdf {
         };
         let mut string_caches = Vec::new();
         if let Some((operation, count)) = self.certified_builtin {
-            if operation != 0 {
+            if (1..=10).contains(&operation) {
                 if let Some(output) = crate::flink_functions::certified::evaluate(
                     operation,
                     &arrays[..count],
@@ -2416,6 +2426,108 @@ pub(crate) fn infer_expr_type(
 mod certified_builtin_tests {
     use super::*;
     use crate::calc::CalcExpression;
+
+    #[test]
+    fn compiled_string_consumers_keep_utf16_without_a_jvm() {
+        use streamfusion_bridge::string_cache::{string_cache_array, string_cache_field};
+        for cached in [false, true] {
+            for operation in 20..=28 {
+                let producer = (operation - 20) % 3;
+                let replace = operation >= 26;
+                let mut fields = vec![Field::new("s", DataType::Utf8, true)];
+                let mut columns: Vec<ArrayRef> = vec![Arc::new(StringArray::from(vec![
+                    Some("unused"),
+                    Some(if cached && replace { "a" } else { "\u{1f600}" }),
+                    Some("?"),
+                    None,
+                ]))];
+                if cached {
+                    let cache = string_cache_array([
+                        Some(&[117_u16][..]),
+                        Some(if replace {
+                            &[97][..]
+                        } else {
+                            &[0xd83d, 0xde00][..]
+                        }),
+                        Some(&[63][..]),
+                        None,
+                    ]);
+                    fields.push(string_cache_field(0, cache.data_type().clone()));
+                    columns.push(cache);
+                }
+                let input = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
+                    .unwrap()
+                    .slice(1, 3);
+                let mut kinds = vec![44, 0];
+                let mut payload = vec![0, 0];
+                let mut children = vec![if replace { 5 } else { 4 }, 0];
+                let longs = vec![
+                    999,
+                    if replace { 0 } else { 4 },
+                    operation,
+                    if producer == 2 { 2 } else { 1 },
+                ];
+                let strings = vec![
+                    Some(if producer == 2 { "" } else { "x" }.into()),
+                    Some("?".into()),
+                    Some("Z".into()),
+                ];
+                for (kind, argument) in if producer == 2 {
+                    [(3, 0), (1, 3)]
+                } else {
+                    [(1, 3), (3, 0)]
+                } {
+                    kinds.push(kind);
+                    payload.push(argument);
+                    children.push(0);
+                }
+                kinds.push(3);
+                payload.push(1);
+                children.push(0);
+                if replace {
+                    kinds.push(3);
+                    payload.push(2);
+                    children.push(0);
+                }
+                let mut calc = CalcExpression {
+                    kinds,
+                    payload,
+                    child_counts: children,
+                    longs,
+                    doubles: vec![],
+                    strings,
+                    projection_roots: vec![0],
+                    condition_root: -1,
+                    output_names: vec!["v".into()],
+                    compiled: None,
+                };
+                for _ in 0..2 {
+                    let result = calc.evaluate(input.clone());
+                    if replace {
+                        assert_eq!(
+                            result.column(0).as_ref(),
+                            &StringArray::from(vec![
+                                Some(if cached { "a" } else { "?" }),
+                                Some("Z"),
+                                None
+                            ])
+                        );
+                    } else {
+                        let unequal = operation >= 23;
+                        assert_eq!(
+                            result.column(0).as_ref(),
+                            &arrow::array::BooleanArray::from(vec![
+                                Some(unequal),
+                                Some(!unequal),
+                                None
+                            ])
+                        );
+                    }
+                }
+                assert_eq!(calc.evaluate(input.slice(0, 0)).num_rows(), 0);
+            }
+        }
+    }
 
     #[test]
     fn compiled_batches_execute_certified_kernels_without_a_jvm() {

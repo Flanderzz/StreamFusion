@@ -245,7 +245,7 @@ strict NULL propagation applied to `CONCAT` below.
 - **`BTRIM`:** Both default and literal character-set trimming delegate to DataFusion's btrim kernel; no duplicate space-only kernel is maintained. See the Calc page for admission, semantics, and individual measurements.
 - **`ELT`:** A scalar index returns the selected array with its buffers/NULL mask intact. Longer dynamic outputs are sized before writing; short strings keep a single writing pass to avoid a selection vector larger than their payload. Comet uses host codegen. The narrower Flink INTEGER gate avoids admitting other boxed index types that Flink rejects. See the Calc page for admission, semantics, and individual measurements.
 - **`URL_ENCODE`:** A Rust column kernel emits JDK-compatible form encoding into an Arrow string builder without a JVM callback. See the Calc page for admission, semantics, and individual measurements.
-- **`OVERLAY`:** Standalone final projections copy intact UTF-8 slices when UTF-16 cuts align with codepoints; split pairs use Java's final replacement encoding. Dependent scalar consumers fuse with the released-Flink evaluator before that encoding, because an isolated surrogate remains distinct from `?`. Sensitive results crossing another relational operator retain fallback. Comet uses host codegen. See the Calc page for current admission and historical measurements.
+- **`OVERLAY`:** Standalone final projections copy intact UTF-8 slices when UTF-16 cuts align with codepoints; split pairs use Java's final replacement encoding. Verified equality/inequality and single-ASCII-character REPLACE consumers fuse in Rust, retaining UTF-8 spans, original Java UTF-16 slices and split surrogate units until the consumer finishes. Remaining batches and consumers retain the released-Flink evaluator. Sensitive results crossing another relational operator retain fallback. Comet uses host codegen. See [native string fusion](../docs/optimizations/native-string-fusion.md) for admission and measurements.
 - **`URL_DECODE`:** A Rust column kernel mirrors the JDK's escape parser and UTF-8 replacement grouping instead of substituting Rust from_utf8_lossy. Flink SQL parity enumerates roughly 100,000 byte/Unicode-digit boundary probes. Rust from_utf8_lossy does not preserve Java replacement grouping. The planner chooses pre-JDK-25 Integer.parseInt escape rules or JDK 25+ ASCII-only HexFormat rules; PARSE_URL remains unadmitted. See the Calc page for admission, semantics, and individual measurements.
 - **`UPPER`/`LOWER` use the JVM inside native Calc by default.** The generated expression receives
   original UTF-16 cache sidecars; no cache means binary-only input. Even ASCII differs under
@@ -365,6 +365,14 @@ Copies a borrowed prefix into the Arrow output and avoids DataFusion's different
 Locates the suffix by traversing character boundaries from the end, without an initial full-string character count.
 
 ### LPAD
+
+Simple literal comparisons and verified ASCII REPLACE consumers can now fuse with LPAD/RPAD
+in Rust. A fixed set of borrowed UTF-8/UTF-16 spans represents truncation and overlay without
+encoding isolated surrogates early. This borrows Comet's buffer reuse and scalar-literal
+discipline, not its Spark code-point semantics. Released Flink counts UTF-16 units, and its
+original Java cache remains authoritative. Padding growth, dynamic consumers and unmeasured
+replacement contexts retain the generated Flink evaluator; no inter-operator string format is
+introduced. See the [Calc coverage](../docs/operators/calc-filter.md#lpad).
 
 Standalone final projections copy borrowed UTF-8 prefixes and whole padding spans, following
 Comet's padding structure. A prefix counter measures released Flink UTF-16 units; a cut through

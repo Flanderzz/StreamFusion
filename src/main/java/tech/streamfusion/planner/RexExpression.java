@@ -4261,6 +4261,14 @@ final class RexExpression {
   }
 
   private boolean emitHostExpression(RexCall call, boolean fuseConsumers) {
+    return emitHostExpression(call, fuseConsumers, true);
+  }
+
+  private boolean emitHostExpression(RexCall call, boolean fuseConsumers, boolean tryFusion) {
+    NativeStringFusion fusion = tryFusion ? NativeStringFusion.match(call) : null;
+    if (fusion != null) {
+      return emitCertifiedBuiltin(call, fusion.operation, fusion);
+    }
     fuseConsumers |= needsExactScalarFunction(call);
     if (!validateHostStringInputs(call)) return false;
     if (fuseConsumers && !validateGeneratedExpression(call)) return false;
@@ -4417,26 +4425,33 @@ final class RexExpression {
   }
 
   private boolean emitCertifiedBuiltin(RexCall call, int operation) {
-    List<RexNode> operands = call.getOperands();
+    return emitCertifiedBuiltin(call, operation, null);
+  }
+
+  private boolean emitCertifiedBuiltin(RexCall call, int operation, NativeStringFusion fusion) {
+    List<RexNode> operands = fusion == null ? call.getOperands() : fusion.operands;
     List<RexNode> references = new ArrayList<>();
     List<org.apache.flink.table.types.logical.LogicalType> types = new ArrayList<>();
     int[] codes = new int[operands.size()];
     for (int i = 0; i < operands.size(); i++) {
       RexNode operand = operands.get(i);
       codes[i] = hostCastTypeCode(operand.getType());
-      if (codes[i] < 0) return emitHostExpression(call, false);
+      if (codes[i] < 0) return emitHostExpression(call, fusion != null, false);
+      if (fusion != null && codes[i] == tech.streamfusion.operator.NativeUdf.TYPE_STRING) {
+        codes[i] = tech.streamfusion.operator.NativeUdf.TYPE_INTERNAL;
+      }
       references.add(
           operand instanceof RexLiteral ? operand : new RexInputRef(i, operand.getType()));
       types.add(
           org.apache.flink.table.planner.calcite.FlinkTypeFactory.toLogicalType(operand.getType()));
     }
     int returnCode = hostCastTypeCode(call.getType());
-    if (returnCode < 0) return emitHostExpression(call, false);
+    if (returnCode < 0) return emitHostExpression(call, fusion != null, false);
     int index;
     try {
       var function =
           FlinkExpressionGenerator.generate(
-              call.clone(call.getType(), references),
+              fusion == null ? call.clone(call.getType(), references) : fusion.expression(references),
               types.toArray(org.apache.flink.table.types.logical.LogicalType[]::new),
               temporalConfig,
               expressionClassLoader,
