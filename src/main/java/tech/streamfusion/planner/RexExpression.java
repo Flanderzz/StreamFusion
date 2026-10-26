@@ -4282,6 +4282,8 @@ final class RexExpression {
         return 6;
       case "PARSE_URL":
         return 9;
+      case "PRINTF":
+        return 10;
       default:
         return 0;
     }

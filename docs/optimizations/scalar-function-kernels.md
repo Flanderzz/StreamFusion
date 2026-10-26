@@ -44,6 +44,10 @@ select separately per row, raw bytes are never normalized, and other pairs repla
 borrow immediately. The short repeated-URL fixture was initially tied with stock. Reuse raises
 its final ratio to 2.65x; 1,024 distinct short URLs retain a 1.55x ratio without that reuse.
 
+PRINTF builds verified integer/text formats directly in an Arrow string result, preserving
+Locale.US case/sign/padding rules and released DecimalData behavior. Unverified conversions
+retain Formatter. Its prepared BIGINT fixture is about 3.95x stock.
+
 ## FROM_UNIXTIME
 
 Literal numeric patterns in fixed-offset and finite-history regional zones compile to Rust

@@ -2,6 +2,7 @@ package tech.streamfusion;
 
 import static org.apache.flink.table.api.DataTypes.*;
 
+import java.math.BigDecimal;
 import java.util.Arrays;
 import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.types.Row;
@@ -55,7 +56,32 @@ class FlinkCertifiedBuiltinSqlHarnessTest {
         "SELECT PARSE_URL(s,p), PARSE_URL(s,'FILE'), PARSE_URL(s,'QUERY',k) FROM src");
   }
 
+  @Test
+  void printfDecimalFormattingWidthIndicesAndNullsMatchFormatter() throws Exception {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction("PRINTF");
+    BuiltinFunctionParity.assertParity(
+        () ->
+            BuiltinFunctionParity.environment(
+                ROW(FIELD("n", BIGINT()), FIELD("d", DECIMAL(20, 3)), FIELD("s", STRING())),
+                Arrays.asList(
+                    Row.of(42L, new BigDecimal("12.345"), "text"),
+                    Row.of(Long.MIN_VALUE, new BigDecimal("-0.001"), "a"),
+                    Row.of(null, null, null))),
+        "SELECT PRINTF('%1$+020d|%2$.2f|%3$-8.3s',n,d,s), PRINTF('%x',n), "
+            + "PRINTF('%s',d), PRINTF('%+08.2f',d), PRINTF('%+s',s) FROM src");
+  }
 
+  @Test
+  void printfUppercaseCharacterAndNullLiteralMatchFormatter() throws Exception {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction("PRINTF");
+    BuiltinFunctionParity.assertParity(
+        () ->
+            BuiltinFunctionParity.environment(
+                ROW(FIELD("i", INT())),
+                Arrays.asList(Row.of(97), Row.of(122), Row.of((Object) null))),
+        "SELECT PRINTF('%c|%C',i,i), PRINTF('%c',CAST(i AS BIGINT)), "
+            + "PRINTF('%.2147483648s',i) FROM src");
+  }
 
   @Test
   void similarDoubledRegexEscapeRetainsFlinkTranslation() throws Exception {

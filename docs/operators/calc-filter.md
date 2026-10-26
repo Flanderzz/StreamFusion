@@ -1652,12 +1652,20 @@ retain their existing exact route.
 
 ### PRINTF
 
-PRINTF uses Flink's generated formatter through the batch JVM bridge for supported scalar
-arguments, including STRING, integral and DECIMAL values and per-row formats. Argument indices,
-width, precision, locale, NULLs and invalid-format results follow the selected Flink runtime.
-Because character formatting can produce isolated UTF-16 surrogates, consumers fuse with PRINTF
-before Arrow conversion; a sensitive string crossing another operator retains the existing
-representation-protection fallback. Direct final projections are supported.
+Direct input/literal calls have a certified Rust path for ASCII formats and arguments:
+STRING/integer/DECIMAL `%s`, signed integer `%d`, two's-complement `%x`/`%X`/`%o`, ASCII integer
+`%c`/`%C` over TINYINT/SMALLINT/INT, `%%`, argument indices/reuse, width, string precision,
+alignment and sign/zero padding. BIGINT character conversions retain the formatter, which
+rejects non-NULL Long arguments.
+DECIMAL string conversion preserves scale and Java scientific notation. The released SQL
+evaluator passes internal `DecimalData`, so DECIMAL `%f` retains Flink's NULL result rather
+than introducing BigDecimal formatting. Non-ASCII, temporal/hash/floating formats and unverified
+flags retain Flink's Locale.US formatter; invalid formats still return NULL.
+
+Certificates apply to complete batches. Retained evaluator descriptors indicate that a call
+**may** use Java, not that a certified batch performed an upcall. String consumers still fuse
+with PRINTF because character formatting can produce isolated UTF-16 surrogates. A sensitive
+string crossing another operator retains the existing representation-protection fallback.
 
 ### URL_DECODE
 
