@@ -829,7 +829,9 @@ output bytes with a Java timer. Initial/final JNI entry, C Data import/export an
 perimeter transposes are outside this small-functionality boundary. The previous
 production Calc retains its intrinsic JVM callback, Arrow round trip and allocation
 inside timing. It is a separate binary linked to the unchanged main implementation,
-using the same driver and Java reference. Before timing, the candidate's full output
+using the same driver and Java reference, with the TYPE_STRING descriptor emitted
+by the baseline planner. The earlier TYPE_INTERNAL control remains a separate diagnostic;
+only the corrected descriptor is used for final previous-native comparisons. Before timing, the candidate's full output
 array must equal that reference; its evaluator ID is invalid so a scalar JVM callback
 fails the check. Cold controls use BinaryRowData/Arrow bytes, while cached controls
 retain GenericRowData's Java strings and matching Arrow UTF-16 sidecars. Input setup
@@ -845,30 +847,30 @@ Values are medians with `[minimum, maximum]` over nine trials:
 
 | Flink | Corpus / payload | Java cache | Batch rows | Indices | Stock ns/row | Previous ns/row | Native ns/row | Stock/native |
 | --- | --- | --- | ---: | --- | ---: | ---: | ---: | ---: |
-| 2.2.1 | ascii / 32 | cold | 1024 | 1 | 103.43 [91.64, 108.57] | 180.18 [167.99, 182.86] | 13.24 [12.89, 14.37] | 7.81x |
-| 2.2.1 | ascii / 264 | cold | 1024 | 1 | 340.09 [329.18, 349.19] | 394.18 [387.46, 447.39] | 17.78 [17.05, 18.98] | 19.13x |
-| 2.2.1 | ascii / 264 | present | 1024 | 1 | 233.54 [222.75, 236.77] | 399.89 [388.49, 469.95] | 67.51 [65.10, 71.47] | 3.46x |
-| 2.2.1 | cjk / 264 | cold | 1024 | 1 | 286.61 [280.41, 324.78] | 347.26 [341.53, 385.89] | 17.64 [17.09, 18.69] | 16.25x |
-| 2.2.1 | cjk / 264 | present | 1024 | 1 | 190.08 [177.75, 192.98] | 358.61 [353.23, 378.38] | 112.34 [109.08, 117.04] | 1.69x |
-| 2.2.1 | emoji / 264 | cold | 1024 | 1 | 313.08 [303.38, 352.37] | 357.50 [345.55, 381.75] | 17.64 [17.14, 18.14] | 17.75x |
-| 2.2.1 | emoji / 264 | present | 1024 | 1 | 210.15 [198.55, 225.26] | 346.76 [342.79, 369.34] | 106.09 [105.58, 108.88] | 1.98x |
-| 2.2.1 | ascii / 32 | present | 16 | 1 | 74.34 [72.21, 84.90] | 821.23 [813.52, 848.56] | 69.33 [66.46, 79.41] | 1.07x |
-| 2.2.1 | ascii / 264 | present | 16384 | 1 | 245.38 [238.63, 275.09] | 396.14 [387.98, 413.04] | 67.99 [66.51, 69.83] | 3.61x |
-| 2.2.1 | ascii / 264 | present | 1024 | mixed | 194.79 [192.34, 206.07] | 362.68 [357.01, 482.40] | 61.86 [60.93, 66.82] | 3.15x |
-| 1.18.1 | ascii / 32 | cold | 1024 | 1 | 125.80 [114.01, 130.97] | 181.17 [173.88, 217.00] | 14.33 [13.18, 15.09] | 8.78x |
-| 1.18.1 | ascii / 264 | cold | 1024 | 1 | 333.38 [319.49, 391.33] | 400.25 [396.37, 477.95] | 18.03 [17.94, 18.26] | 18.49x |
-| 1.18.1 | ascii / 264 | present | 1024 | 1 | 225.03 [213.01, 236.39] | 397.41 [388.55, 633.86] | 75.49 [69.36, 78.42] | 2.98x |
-| 1.18.1 | cjk / 264 | cold | 1024 | 1 | 290.07 [280.27, 313.48] | 347.45 [338.25, 368.08] | 17.68 [17.46, 17.86] | 16.41x |
-| 1.18.1 | cjk / 264 | present | 1024 | 1 | 196.86 [187.04, 198.18] | 353.19 [340.15, 382.33] | 114.09 [111.68, 114.76] | 1.73x |
-| 1.18.1 | emoji / 264 | cold | 1024 | 1 | 285.90 [284.23, 306.30] | 317.12 [313.38, 333.56] | 18.45 [18.28, 18.71] | 15.50x |
-| 1.18.1 | emoji / 264 | present | 1024 | 1 | 220.33 [209.49, 250.26] | 345.88 [334.64, 372.47] | 107.95 [106.14, 109.60] | 2.04x |
-| 1.18.1 | ascii / 32 | present | 16 | 1 | 74.04 [72.83, 85.23] | 833.41 [822.73, 843.56] | 74.04 [72.34, 75.01] | 1.00x |
-| 1.18.1 | ascii / 264 | present | 16384 | 1 | 251.62 [238.71, 257.85] | 393.02 [381.17, 415.28] | 71.73 [70.45, 72.34] | 3.51x |
-| 1.18.1 | ascii / 264 | present | 1024 | mixed | 183.08 [168.34, 191.90] | 351.76 [345.70, 361.75] | 64.10 [60.96, 70.52] | 2.86x |
+| 2.2.1 | ascii / 32 | cold | 1024 | 1 | 103.43 [91.64, 108.57] | 187.09 [177.73, 193.31] | 13.24 [12.89, 14.37] | 7.81x |
+| 2.2.1 | ascii / 264 | cold | 1024 | 1 | 340.09 [329.18, 349.19] | 479.08 [471.51, 490.86] | 17.78 [17.05, 18.98] | 19.13x |
+| 2.2.1 | ascii / 264 | present | 1024 | 1 | 233.54 [222.75, 236.77] | 472.54 [462.24, 486.21] | 67.51 [65.10, 71.47] | 3.46x |
+| 2.2.1 | cjk / 264 | cold | 1024 | 1 | 286.61 [280.41, 324.78] | 523.59 [513.30, 532.26] | 17.64 [17.09, 18.69] | 16.25x |
+| 2.2.1 | cjk / 264 | present | 1024 | 1 | 190.08 [177.75, 192.98] | 506.43 [501.88, 527.52] | 112.34 [109.08, 117.04] | 1.69x |
+| 2.2.1 | emoji / 264 | cold | 1024 | 1 | 313.08 [303.38, 352.37] | 583.21 [576.63, 598.73] | 17.64 [17.14, 18.14] | 17.75x |
+| 2.2.1 | emoji / 264 | present | 1024 | 1 | 210.15 [198.55, 225.26] | 534.78 [528.17, 554.40] | 106.09 [105.58, 108.88] | 1.98x |
+| 2.2.1 | ascii / 32 | present | 16 | 1 | 74.34 [72.21, 84.90] | 856.15 [841.49, 866.31] | 69.33 [66.46, 79.41] | 1.07x |
+| 2.2.1 | ascii / 264 | present | 16384 | 1 | 245.38 [238.63, 275.09] | 457.36 [440.51, 476.26] | 67.99 [66.51, 69.83] | 3.61x |
+| 2.2.1 | ascii / 264 | present | 1024 | mixed | 194.79 [192.34, 206.07] | 416.41 [405.55, 466.88] | 61.86 [60.93, 66.82] | 3.15x |
+| 1.18.1 | ascii / 32 | cold | 1024 | 1 | 125.80 [114.01, 130.97] | 190.10 [176.04, 233.20] | 14.33 [13.18, 15.09] | 8.78x |
+| 1.18.1 | ascii / 264 | cold | 1024 | 1 | 333.38 [319.49, 391.33] | 461.74 [454.26, 472.27] | 18.03 [17.94, 18.26] | 18.49x |
+| 1.18.1 | ascii / 264 | present | 1024 | 1 | 225.03 [213.01, 236.39] | 453.75 [447.83, 471.43] | 75.49 [69.36, 78.42] | 2.98x |
+| 1.18.1 | cjk / 264 | cold | 1024 | 1 | 290.07 [280.27, 313.48] | 496.14 [489.07, 501.57] | 17.68 [17.46, 17.86] | 16.41x |
+| 1.18.1 | cjk / 264 | present | 1024 | 1 | 196.86 [187.04, 198.18] | 495.58 [487.61, 505.17] | 114.09 [111.68, 114.76] | 1.73x |
+| 1.18.1 | emoji / 264 | cold | 1024 | 1 | 285.90 [284.23, 306.30] | 530.87 [526.82, 535.19] | 18.45 [18.28, 18.71] | 15.50x |
+| 1.18.1 | emoji / 264 | present | 1024 | 1 | 220.33 [209.49, 250.26] | 548.73 [542.43, 554.88] | 107.95 [106.14, 109.60] | 2.04x |
+| 1.18.1 | ascii / 32 | present | 16 | 1 | 74.04 [72.83, 85.23] | 842.07 [835.36, 884.99] | 74.04 [72.34, 75.01] | 1.00x |
+| 1.18.1 | ascii / 264 | present | 16384 | 1 | 251.62 [238.71, 257.85] | 449.26 [434.94, 463.80] | 71.73 [70.45, 72.34] | 3.51x |
+| 1.18.1 | ascii / 264 | present | 1024 | mixed | 183.08 [168.34, 191.90] | 405.80 [401.71, 417.17] | 64.10 [60.96, 70.52] | 2.86x |
 
 The 16-row 1.18 control is tied with stock within observed variability (74.04 versus
 74.04 ns/row); it does not establish a small-batch speedup. The regular-batch profiles
-are 1.69-19.13x stock and at least 3.10x the preceding native callback path.
+are 1.69-19.13x stock and at least 4.34x the preceding native callback path.
 
 Reproduce the component candidate and stock controls after compiling test classes with
 the selected released Flink profile:

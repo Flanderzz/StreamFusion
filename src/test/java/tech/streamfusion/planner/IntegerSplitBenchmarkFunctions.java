@@ -64,7 +64,7 @@ public final class IntegerSplitBenchmarkFunctions {
     return NativeUdf.register(
         function(),
         FlinkExpressionFunction.class.getMethod("eval", Object[].class),
-        new int[] {NativeUdf.TYPE_INTERNAL, NativeUdf.TYPE_INT, NativeUdf.TYPE_INT},
+        new int[] {NativeUdf.TYPE_STRING, NativeUdf.TYPE_INT, NativeUdf.TYPE_INT},
         NativeUdf.TYPE_STRING);
   }
 
