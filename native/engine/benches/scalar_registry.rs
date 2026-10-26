@@ -169,7 +169,7 @@ fn fixtures(rows: usize, nulls: bool, unicode: bool) -> Vec<(i64, Vec<ColumnarVa
         (133, vec![dates.clone()]),
         (134, vec![dates.clone()]),
         (135, vec![dates.clone()]),
-        (136, vec![dates]),
+        (136, vec![dates.clone()]),
         (139, vec![string(&text)]),
         (140, vec![string(&text)]),
         (
@@ -218,7 +218,7 @@ fn fixtures(rows: usize, nulls: bool, unicode: bool) -> Vec<(i64, Vec<ColumnarVa
         (174, vec![times.clone()]),
         (175, vec![times.clone(), int(1000)]),
         (176, vec![times.clone(), offsets.clone()]),
-        (177, vec![times, offsets, int(1000)]),
+        (177, vec![times.clone(), offsets, int(1000)]),
         (178, vec![lists.clone(), long(1)]),
         (179, vec![lists.clone(), long(1)]),
         (180, vec![lists.clone()]),
@@ -259,6 +259,32 @@ fn fixtures(rows: usize, nulls: bool, unicode: bool) -> Vec<(i64, Vec<ColumnarVa
         ),
         (200, vec![string_lists, string("|"), string("NULL")]),
     ];
+    for op in 203..=208 {
+        cases.push((op, vec![dates.clone()]));
+    }
+    let boolean = |value| ColumnarValue::Scalar(ScalarValue::Boolean(Some(value)));
+    cases.extend([
+        (209, vec![times.clone(), boolean(false), boolean(false)]),
+        (210, vec![times.clone(), long(86_400_000), boolean(false)]),
+        (211, vec![dates.clone(), long(86_400_000), boolean(false)]),
+        (
+            212,
+            vec![
+                array(
+                    arrow::array::Time32MillisecondArray::from_iter(
+                        (0..rows + 1).map(|i| valid(i).then_some((i % 86_400) as i32 * 1000)),
+                    ),
+                    rows,
+                ),
+                long(3_600_000),
+                boolean(true),
+            ],
+        ),
+        (213, vec![dates, int(1), boolean(false)]),
+        (214, vec![times.clone(), int(1), boolean(false)]),
+        (215, vec![times.clone(), times.clone()]),
+        (216, vec![times.clone(), times]),
+    ]);
     for op in [144, 145, 146, 147] {
         cases.push((op, vec![string("{\"a\":1}"), literal("13.0")]));
     }

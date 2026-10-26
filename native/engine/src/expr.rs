@@ -284,6 +284,20 @@ pub(crate) fn build_expr(
             }
             build_typed_call(schema, op, args)
         }
+        45 => crate::flink_functions::calendar::zoned(
+            strings[arg].as_deref().expect("calendar zone history"),
+        )
+        .expect("verified calendar zone history")
+        .call(vec![build_expr(
+            schema,
+            kinds,
+            payload,
+            child_counts,
+            longs,
+            doubles,
+            strings,
+            cursor,
+        )]),
         // A JVM UDF node: `arg` indexes the long pool at [udf id, return-type code]; the children are the
         // argument expressions. Builds a JvmUdf scalar function that upcalls the JVM per batch.
         17 | 38 | 41 | 42 | 44 => {

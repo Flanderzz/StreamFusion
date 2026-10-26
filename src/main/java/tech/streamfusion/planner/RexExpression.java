@@ -85,6 +85,7 @@ final class RexExpression {
   private static final int KIND_NUMERIC_CAST = 42;
   private static final int KIND_ARRAY_CAST = 43;
   private static final int KIND_CERTIFIED_BUILTIN = 44;
+  private static final int KIND_ZONED_EXTRACT = 45;
   // A narrowing cast to an integer type: payload is the target integer type code (CAST_TINYINT..
   // CAST_BIGINT), one child. Built natively as a wrapping/saturating kernel matching Flink's
   // primitive
@@ -1943,6 +1944,18 @@ final class RexExpression {
       strings.add(unixTimeFormat);
       return emit(call.getOperands().get(0));
     }
+    if (isNativeCalendarRound(call)) {
+      add(KIND_CALL, 209, 3);
+      if (!emit(call.getOperands().get(0))) return false;
+      add(KIND_LIT_BOOL, longs.size(), 0);
+      longs.add(
+          "YEAR".equals(String.valueOf(((RexLiteral) call.getOperands().get(1)).getValue()))
+              ? 1L
+              : 0L);
+      add(KIND_LIT_BOOL, longs.size(), 0);
+      longs.add(call.getKind() == SqlKind.FLOOR ? 0L : 1L);
+      return true;
+    }
     if ("ELT".equals(call.getOperator().getName())
         && SqlTypeFamily.BINARY.contains(call.getType())) {
       if (!tech.streamfusion.arrow.ArrowConversion.binaryEltEnabled())
@@ -1955,6 +1968,23 @@ final class RexExpression {
       }
     }
     if (isExactDoubleTruncate(call)) return emitExactDoubleTruncate(call);
+    if (nativeTemporalExtremum(call))
+      return emitBuiltinCall(
+          call, "GREATEST".equalsIgnoreCase(call.getOperator().getName()) ? 215 : 216);
+    String zonedExtract = nativeZonedExtract(call);
+    if (zonedExtract != null) {
+      add(KIND_ZONED_EXTRACT, strings.size(), 1);
+      strings.add(zonedExtract);
+      return emit(call.getOperands().get(1));
+    }
+    int intervalArithmetic = nativeIntervalArithmetic(call);
+    if (intervalArithmetic != 0) {
+      add(KIND_CALL, intervalArithmetic, 3);
+      for (RexNode operand : call.getOperands()) if (!emit(operand)) return false;
+      add(KIND_LIT_BOOL, longs.size(), 0);
+      longs.add(call.getKind() == SqlKind.MINUS ? 1L : 0L);
+      return true;
+    }
     int certifiedBuiltin = certifiedBuiltin(call);
     if (certifiedBuiltin != 0) return emitCertifiedBuiltin(call, certifiedBuiltin);
     if (unnestOperand && isEpochMillisTimestamp(call)) {
@@ -3776,11 +3806,19 @@ final class RexExpression {
       }
       Object childCandidate;
       if ((childCandidate = call.getOperands().get(1)) instanceof RexCall
+          && !isTimestampIdentityCast((RexCall) childCandidate)
+          && ((RexCall) childCandidate).getKind() != SqlKind.REINTERPRET
           && needsTemporalFunction(((RexCall) childCandidate))) {
         return true;
       }
-      return !(java.util.Set.of("QUARTER", "WEEK", "DOY", "DOW").contains(unit)
-          && (source == SqlTypeName.DATE || source == SqlTypeName.TIMESTAMP));
+      return !(java.util.Set.of(
+                  "YEAR", "MONTH", "DAY", "QUARTER", "WEEK", "DOY", "DOW", "HOUR", "MINUTE",
+                  "SECOND")
+              .contains(unit)
+          && (source == SqlTypeName.DATE
+              || source == SqlTypeName.TIMESTAMP
+              || source == SqlTypeName.TIME
+                  && java.util.Set.of("HOUR", "MINUTE", "SECOND").contains(unit)));
     }
     if (("FLOOR".equals(name) || "CEIL".equals(name) || "CEILING".equals(name))
         && call.getOperands().size() == 2) {
@@ -3810,6 +3848,76 @@ final class RexExpression {
       default:
         return "DATETIME_PLUS".equals(name) || "-".equals(name) && temporalOperand;
     }
+  }
+
+  private static boolean nativeTemporalExtremum(RexCall call) {
+    String name = call.getOperator().getName();
+    SqlTypeName result = call.getType().getSqlTypeName();
+    return ("GREATEST".equalsIgnoreCase(name) || "LEAST".equalsIgnoreCase(name))
+        && java.util.Set.of(
+                SqlTypeName.DATE,
+                SqlTypeName.TIME,
+                SqlTypeName.TIMESTAMP,
+                SqlTypeName.TIMESTAMP_WITH_LOCAL_TIME_ZONE)
+            .contains(result)
+        && call.getOperands().size() >= 2
+        && call.getOperands().stream()
+            .allMatch(
+                operand ->
+                    org.apache.calcite.sql.type.SqlTypeUtil.equalSansNullability(
+                        operand.getType(), call.getType()));
+  }
+
+  private String nativeZonedExtract(RexCall call) {
+    if (call.getKind() != SqlKind.EXTRACT
+        || call.getOperands().size() != 2
+        || !(call.getOperands().get(0) instanceof RexLiteral)
+        || call.getOperands().get(1).getType().getSqlTypeName()
+            != SqlTypeName.TIMESTAMP_WITH_LOCAL_TIME_ZONE) return null;
+    String unit = String.valueOf(((RexLiteral) call.getOperands().get(0)).getValue());
+    if (!java.util.Set.of(
+            "YEAR", "MONTH", "DAY", "HOUR", "MINUTE", "SECOND", "QUARTER", "WEEK", "DOY", "DOW")
+        .contains(unit)) return null;
+    String history = NativeUnixTimeFormat.encode("yyyy", sessionZoneId);
+    return history == null ? null : unit + "|" + history.substring(0, history.indexOf('|'));
+  }
+
+  private static int nativeIntervalArithmetic(RexCall call) {
+    if (call.getOperands().size() != 2
+        || !(call.getKind() == SqlKind.PLUS
+            || call.getKind() == SqlKind.MINUS
+            || "DATETIME_PLUS".equals(call.getOperator().getName()))) return 0;
+    SqlTypeName input = call.getOperands().get(0).getType().getSqlTypeName();
+    RelDataType interval = call.getOperands().get(1).getType();
+    boolean months = interval.getSqlTypeName().getFamily() == SqlTypeFamily.INTERVAL_YEAR_MONTH;
+    if (!months && interval.getSqlTypeName().getFamily() != SqlTypeFamily.INTERVAL_DAY_TIME)
+      return 0;
+    if (input == SqlTypeName.TIMESTAMP || input == SqlTypeName.TIMESTAMP_WITH_LOCAL_TIME_ZONE)
+      return months ? 214 : 210;
+    if (input == SqlTypeName.DATE) {
+      if (months) return 213;
+      if (call.getType().getSqlTypeName() == SqlTypeName.TIMESTAMP) return 210;
+      if (!(call.getOperands().get(1) instanceof RexLiteral)) return 0;
+      BigDecimal value = ((RexLiteral) call.getOperands().get(1)).getValueAs(BigDecimal.class);
+      if (value == null
+          || value
+                  .abs()
+                  .compareTo(
+                      BigDecimal.valueOf(Integer.MAX_VALUE).multiply(BigDecimal.valueOf(86400000)))
+              > 0) return 0;
+      return 211;
+    }
+    return input == SqlTypeName.TIME && !months ? 212 : 0;
+  }
+
+  private static boolean isNativeCalendarRound(RexCall call) {
+    if (call.getKind() != SqlKind.FLOOR && call.getKind() != SqlKind.CEIL) return false;
+    if (call.getOperands().size() != 2 || !(call.getOperands().get(1) instanceof RexLiteral))
+      return false;
+    SqlTypeName input = call.getOperands().get(0).getType().getSqlTypeName();
+    return (input == SqlTypeName.DATE || input == SqlTypeName.TIMESTAMP)
+        && java.util.Set.of("MONTH", "YEAR")
+            .contains(String.valueOf(((RexLiteral) call.getOperands().get(1)).getValue()));
   }
 
   private static boolean isEpochMillisTimestamp(RexCall call) {
@@ -4989,6 +5097,24 @@ final class RexExpression {
     String calendarUnit = String.valueOf(((RexLiteral) operands.get(0)).getValue());
     int calendarOp;
     switch (calendarUnit) {
+      case "YEAR":
+        calendarOp = 203;
+        break;
+      case "MONTH":
+        calendarOp = 204;
+        break;
+      case "DAY":
+        calendarOp = 205;
+        break;
+      case "HOUR":
+        calendarOp = 206;
+        break;
+      case "MINUTE":
+        calendarOp = 207;
+        break;
+      case "SECOND":
+        calendarOp = 208;
+        break;
       case "QUARTER":
         calendarOp = 133;
         break;
@@ -5006,7 +5132,9 @@ final class RexExpression {
         break;
     }
     if (calendarOp >= 0
-        && (sourceType == SqlTypeName.DATE || sourceType == SqlTypeName.TIMESTAMP)) {
+        && (sourceType == SqlTypeName.DATE
+            || sourceType == SqlTypeName.TIMESTAMP
+            || sourceType == SqlTypeName.TIME)) {
       add(KIND_CALL, calendarOp, 1);
       return emit(source);
     }

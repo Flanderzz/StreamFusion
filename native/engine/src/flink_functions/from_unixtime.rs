@@ -14,6 +14,11 @@ pub(crate) fn function(offset_millis: i64, pattern: &str) -> Result<ScalarUDF> {
 }
 
 pub(crate) fn from_encoded(encoded: &str, pattern: &str) -> Result<ScalarUDF> {
+    let (initial, transitions) = decode_offsets(encoded)?;
+    with_offsets(initial, transitions, pattern)
+}
+
+pub(super) fn decode_offsets(encoded: &str) -> Result<(i64, Vec<(i64, i64)>)> {
     let mut parts = encoded.split(',');
     let invalid = || datafusion::common::DataFusionError::Plan("invalid time-zone offsets".into());
     let initial = parts
@@ -33,7 +38,7 @@ pub(crate) fn from_encoded(encoded: &str, pattern: &str) -> Result<ScalarUDF> {
     if transitions.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
         return Err(invalid());
     }
-    with_offsets(initial, transitions, pattern)
+    Ok((initial, transitions))
 }
 
 fn with_offsets(

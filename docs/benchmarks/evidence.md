@@ -41,6 +41,9 @@ hosts, connectors, backends, exact SQL and explicitly labelled expression varian
 
 ## Component measurements and diagnostics
 
+[Certified scalar functions](native-certified-scalars.md) retains prepared Java/RowData versus
+Rust/Arrow measurements, whole-job previous/stock controls, all trials and execution limits.
+
 [Rust feature admission, 2026-10-19](rust-feature-admission-2026-10-19.md) starts the clock
 inside Rust on prepared Arrow and compares matching stock Flink Java/RowData execution.
 The [earlier Java-wrapper audit](feature-admission-2026-10-19.md) retains its five-switch

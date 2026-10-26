@@ -48,6 +48,9 @@ PRINTF builds verified integer/text formats directly in an Arrow string result, 
 Locale.US case/sign/padding rules and released DecimalData behavior. Unverified conversions
 retain Formatter. Its prepared BIGINT fixture is about 3.95x stock.
 
+See [configuration, all trials and remaining boundaries](../benchmarks/native-certified-scalars.md).
+These are bounded input measurements; they do not establish a gain for every native signature.
+
 ## FROM_UNIXTIME
 
 Literal numeric patterns in fixed-offset and finite-history regional zones compile to Rust

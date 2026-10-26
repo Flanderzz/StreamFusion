@@ -228,14 +228,6 @@ complete date-partition expression, wide-row parity checks and both timing bound
 
 ## LIKE ESCAPE and SIMILAR TO
 
-LIKE/NOT LIKE with an explicit literal or per-row ESCAPE, and SIMILAR TO/NOT SIMILAR TO,
-run Flink's generated SQL-pattern evaluator through the batch JVM bridge. Pattern grammar,
-Unicode, NULLs and invalid-escape failures are Flink's own. AND/OR consumers fuse with these
-expressions so invalid patterns are not evaluated on rows that Flink short-circuits; filtered-out
-batches do not evaluate projections. Existing two-argument LIKE keeps its current native path.
-
-## LIKE ESCAPE and SIMILAR TO
-
 Direct input/literal LIKE ESCAPE and SIMILAR TO calls have a certified Rust batch path.
 The certificate requires ASCII inputs whose original Java UTF-16 cache agrees with the
 Arrow bytes. LIKE admits valid one-character ESCAPE values; SIMILAR admits ordinary literals,
@@ -248,6 +240,9 @@ An uncertified batch runs the retained Flink evaluator, including its invalid-pa
 Original UTF-16 sidecars travel with those arguments. AND/OR consumers remain fused so
 short-circuited rows do not evaluate invalid patterns. Empty filtered batches do not evaluate
 projections. Existing two-argument LIKE admission is unchanged.
+
+[Prepared kernel and complete-job measurements](../benchmarks/native-certified-scalars.md)
+retain the stock and previous-implementation controls and their timing limits.
 
 ## Generated processing time
 
@@ -2513,8 +2508,8 @@ this test-only setting empty and retains normal JVM exception optimization.
 ### Temporal parsing, extraction and rounding
 
 `TO_DATE`, `TO_TIMESTAMP`, all `TO_TIMESTAMP_LTZ` overloads, calendar fields, and temporal
-`FLOOR`/`CEIL` now have expression implementations. Formatted parsing and LTZ calendar fields use
-Flink's own generated code. Timestamp results retain the complete millisecond/fraction pair and run
+`FLOOR`/`CEIL` now have expression implementations. Formatted parsing and recurring-DST LTZ
+calendar fields use Flink's own generated code. Timestamp results retain the complete millisecond/fraction pair and run
 by default. See the complete [temporal function inventory](temporal-functions.md).
 
 ### LTRIM
@@ -2672,6 +2667,10 @@ See [Configuration](../configuration.md) for the full `allowIncompatible` flag s
 throughout this page.
 
 ## Generated helper performance
+
+The table below is historical. Direct certified regex, LIKE ESCAPE, PARSE_URL and PRINTF
+subsets now avoid Java; see the [2026-10-26 comparison](../benchmarks/native-certified-scalars.md)
+for current measurements and remaining evaluator routes.
 
 The generated functions above extend the expressions that can stay inside a columnar island.
 They are correctness/coverage work, not standalone scalar speedups: Flink still evaluates each
