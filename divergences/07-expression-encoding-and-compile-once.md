@@ -282,7 +282,11 @@ strict NULL propagation applied to `CONCAT` below.
   intermediate binary columns, per-row hex strings, and MD5's string-view-to-UTF-8 copy. The digest
   algorithms are unchanged; the deviation is allocation and output construction, measured in
   `docs/optimizations/string-copy-reduction.md`. `SHA2` literal widths are compared exactly, without
-  narrowing BIGINT values. Exact admission and remaining gaps live in `docs/operators/calc-filter.md`.
+  narrowing BIGINT values. Direct runtime INT widths reuse those digest/hex helpers after a
+  batch width check; NULL returns NULL, while invalid runtime widths keep the released
+  evaluator and its JDK exception. Flink hashes BinaryStringData bytes rather than its decoded
+  Java cache, so this certificate intentionally reads only the bytes. Exact admission and
+  remaining gaps live in `docs/operators/calc-filter.md`.
 - **`CAST`:** widening numeric (`integer→wider int`, `integer→float/double`, `float→double`) is a plain
   Arrow cast — lossless/IEEE-identical. **Narrowing to an integer type** (a wider int, or a float/double,
   → `TINYINT`/`SMALLINT`/`INTEGER`/`BIGINT`) is *not* a plain Arrow cast — arrow's kernel errors on

@@ -4046,7 +4046,9 @@ final class RexExpression {
       case "IS_ALPHA":
         return true;
       case "SHA2":
-        return call.getOperands().size() == 2 && !(call.getOperands().get(1) instanceof RexLiteral);
+        return call.getOperands().size() == 2
+            && (!(call.getOperands().get(1) instanceof RexLiteral)
+                || ((RexLiteral) call.getOperands().get(1)).isNull());
       case "SPLIT_INDEX":
         return call.getOperands().size() == 3
             && SqlTypeFamily.INTEGER.contains(call.getOperands().get(1).getType());
@@ -4419,6 +4421,12 @@ final class RexExpression {
         return 9;
       case "PRINTF":
         return 10;
+      case "SHA2":
+        return call.getOperands().size() == 2
+                && isCharacter(call.getOperands().get(0))
+                && call.getOperands().get(1).getType().getSqlTypeName() == SqlTypeName.INTEGER
+            ? 12
+            : 0;
       default:
         return 0;
     }

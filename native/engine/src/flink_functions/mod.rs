@@ -72,6 +72,7 @@ mod map_union;
 pub(crate) mod numeric;
 pub(crate) mod numeric_cast;
 mod scalar;
+pub(crate) mod sha2_runtime;
 mod sign;
 pub(crate) mod string_fusion;
 mod string_to_boolean;

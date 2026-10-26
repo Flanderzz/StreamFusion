@@ -16,6 +16,12 @@ pub(crate) fn evaluate(
     caches: &[ArrayRef],
     target: &DataType,
 ) -> Option<ArrayRef> {
+    if operation == 12 {
+        let [source, bits] = arrays else {
+            return None;
+        };
+        return super::sha2_runtime::evaluate([source, bits]);
+    }
     for (index, input) in arrays.iter().enumerate() {
         if let Some(strings) = input.as_any().downcast_ref::<StringArray>() {
             let cache = caches
