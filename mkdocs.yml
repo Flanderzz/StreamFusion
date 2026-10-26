@@ -187,6 +187,7 @@ nav:
       - Asynchronous Top-N memory checkpoints: optimizations/async-topn-memory-checkpoints.md
       - Sub-plan reuse digest barriers: optimizations/subplan-reuse-digest-barriers.md
       - UDFs via columnar upcall: optimizations/udf-columnar-upcall.md
+      - Native string fusion: optimizations/native-string-fusion.md
       - Host-exact builtins via upcall: optimizations/host-exact-builtins-upcall.md
       - Regex pattern cache: optimizations/regexp-pattern-cache.md
       - Lookup joins kept in the island: optimizations/lookup-join-in-island.md
