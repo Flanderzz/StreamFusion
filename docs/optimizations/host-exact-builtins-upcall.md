@@ -70,11 +70,28 @@ per-row result adaptation. It does not change the native operator boundary or JN
 
 The matcher extracts only direct inputs/literals, lossless widening and nested admitted
 negation. Other producers stay in one generated expression so extracting their negation does
-not expose a different arithmetic overflow or division failure. DECIMAL remains generated.
+not expose a different arithmetic overflow or division failure. Verified DECIMAL producers
+use the separate exact path below; other DECIMAL producers remain generated.
 The [release controls](../benchmarks/scalar-functions.md#integral-unary-minus) compare stock,
 previous callback and candidate at equal prepared-input boundaries and separately measure the
 complete job. Small batches still pay generic Calc setup/materialization costs; native coverage
 does not imply a standalone speedup.
+
+## DECIMAL unary minus without a JVM evaluator
+
+Arrow's numeric negation kernel already preserves DECIMAL precision, scale and sliced
+validity, following the decimal branch of Comet's negative expression. The verified Flink
+domain (precision at most 38) fits both signs in i128, so it needs no floating conversion,
+rounding or BigDecimal allocation. Direct scalar dispatch also retains the decimal type
+without broadcasting a literal to an array.
+
+The planner shares the bounded decimal producer matcher with ABS, while admitting only
+same-function nesting for each operation. Direct columns/literals and precision widening
+at the same scale are verified; arithmetic, rescaling, narrowing and mixed unary producers
+keep one generated expression. Existing decimal-rounding metadata guards run first.
+This extends an existing expression kernel and introduces no opcode or configuration switch.
+The [release controls](../benchmarks/scalar-functions.md#decimal-unary-minus) retain both
+stock and preceding-callback measurements and the separate complete row-source job.
 
 ## Canonical timestamp TRY_CAST
 

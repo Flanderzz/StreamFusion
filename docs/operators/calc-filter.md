@@ -1455,7 +1455,16 @@ value-dependent FLOOR/CEIL and runtime-scale rounding guards still apply before 
 The [DECIMAL ABS measurements](../benchmarks/scalar-functions.md#decimal-abs) compare
 stock, previous callback and native execution at prepared and complete-job boundaries.
 
-DECIMAL unary minus and SIGN execute Flink's generated expression code through
+DECIMAL unary minus uses the same verified producer scope as decimal ABS: direct
+inputs/literals, recursive same-scale precision widening and nested admitted negation.
+It uses Arrow's decimal numeric negation for arrays and direct i128 scalar dispatch,
+retaining precision, scale and NULL without a JVM evaluator. All legal DECIMAL extrema
+have a representable negation. Arithmetic, rescaling, narrowing, mixed ABS/negation
+chains and other producers retain their whole generated expression; existing rounding
+metadata guards remain unchanged. See the
+[DECIMAL unary-minus controls](../benchmarks/scalar-functions.md#decimal-unary-minus).
+
+DECIMAL SIGN executes Flink's generated expression code through
 the existing batch JVM bridge. Unverified integer rounding producers and explicit-scale
 INT/BIGINT TRUNCATE use the same path, including per-row TRUNCATE positions. TINYINT/SMALLINT TRUNCATE
 retains the host compilation
@@ -1463,6 +1472,13 @@ failure described under exact floating math below. This retains resolved widths,
 and Java overflow behavior. Adjacent supported
 host expressions fuse before crossing the Arrow boundary. These are host-evaluated functions
 inside a columnar native Calc, not pure-Rust kernels.
+
+Known correctness gap [#536](https://github.com/datafusion-contrib/StreamFusion/issues/536):
+STRING CAST of compact `DECIMAL(p,p)` SIGN can revalidate its intermediate precision and
+turn a nonzero sign into NULL. Confirmed endpoints are DECIMAL(1,1) and DECIMAL(18,18)
+on both released Flink lines. Direct SIGN agrees in those probes; noncompact
+DECIMAL(19,19)/(38,38) retain released Flink's NULL sign results for nonzero values.
+This representation-sensitive consumer boundary remains separate from JVM-free unary work.
 
 DECIMAL FLOOR/CEIL/CEILING run inside verified scalar consumers using one fused generated
 expression, so the intermediate decimal does not cross Arrow before its consumer executes.

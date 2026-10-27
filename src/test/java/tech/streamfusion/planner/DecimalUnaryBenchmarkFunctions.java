@@ -42,7 +42,20 @@ public final class DecimalUnaryBenchmarkFunctions {
             + ","
             + scale
             + ")) WITH ('connector'='datagen')");
-    var query = ((TableImpl) table.sqlQuery("SELECT ABS(v) FROM inputs")).getQueryOperation();
+    String function = System.getProperty("sf.decimal.unary.function", "ABS");
+    String expression;
+    switch (function) {
+      case "ABS":
+        expression = "ABS(v)";
+        break;
+      case "NEGATE":
+        expression = "-v";
+        break;
+      default:
+        throw new IllegalArgumentException(function);
+    }
+    var query =
+        ((TableImpl) table.sqlQuery("SELECT " + expression + " FROM inputs")).getQueryOperation();
     return (Project) ((PlannerQueryOperation) query).getCalciteTree();
   }
 
@@ -85,7 +98,8 @@ public final class DecimalUnaryBenchmarkFunctions {
     var encoded = RexExpression.encodeProjections(project.getProjects(), java.util.List.of("v"));
     if (encoded == null
         || encoded.kinds()[0] != 6
-        || encoded.payload()[0] != 218
+        || encoded.payload()[0]
+            != (System.getProperty("sf.decimal.unary.function", "ABS").equals("NEGATE") ? 219 : 218)
         || !encoded.jvmFunctionCalls().isEmpty()) {
       throw new IllegalStateException("The candidate must use the exact decimal unary kernel");
     }

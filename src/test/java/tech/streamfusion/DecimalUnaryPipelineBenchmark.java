@@ -12,9 +12,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import tech.streamfusion.planner.NativePlanner;
 
-/**
- * Standalone exact decimal ABS with the row source, both transposes and the rowwise blackhole sink.
- */
+/** Standalone exact decimal unary work with the row source, both transposes and a rowwise sink. */
 @EnabledIfEnvironmentVariable(named = "SF_BENCHMARK", matches = "true")
 class DecimalUnaryPipelineBenchmark {
   @Test
@@ -24,8 +22,9 @@ class DecimalUnaryPipelineBenchmark {
     int runs = Integer.getInteger("decimal.unary.pipeline.runs", 5);
     String engine = System.getProperty("decimal.unary.pipeline.engine", "native");
     boolean nativeRun = !engine.equals("flink");
-    String function = "ABS";
-    String routeName = "ABS";
+    String function = System.getProperty("decimal.unary.pipeline.function", "ABS");
+    assertTrue(java.util.List.of("ABS", "NEGATE").contains(function));
+    String routeName = function.equals("NEGATE") ? "-" : function;
     int precision = Integer.getInteger("decimal.unary.pipeline.precision", 18);
     int scale = Integer.getInteger("decimal.unary.pipeline.scale", 3);
     String type = "DECIMAL(" + precision + "," + scale + ")";
@@ -52,7 +51,8 @@ class DecimalUnaryPipelineBenchmark {
             source,
             Schema.newBuilder().column("v", DataTypes.DECIMAL(precision, scale)).build());
         table.executeSql("CREATE TABLE output_rows(v " + type + ") WITH ('connector'='blackhole')");
-        String sql = "INSERT INTO output_rows SELECT " + function + "(v) FROM inputs";
+        String expression = function.equals("NEGATE") ? "-v" : "ABS(v)";
+        String sql = "INSERT INTO output_rows SELECT " + expression + " FROM inputs";
         if (nativeRun) {
           var scan = NativePlanner.install(table);
           table.explainSql(sql);

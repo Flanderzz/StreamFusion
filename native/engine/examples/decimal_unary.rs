@@ -34,6 +34,9 @@ fn checksum(batch: &RecordBatch) -> i64 {
 
 fn main() {
     let args: Vec<_> = std::env::args().collect();
+    let function = std::env::var("SF_DECIMAL_UNARY_FUNCTION").unwrap_or_else(|_| "ABS".into());
+    assert!(matches!(function.as_str(), "ABS" | "NEGATE"));
+    let function_option = format!("-Dsf.decimal.unary.function={function}");
     let precision: u8 = args.get(1).map_or(18, |s| s.parse().unwrap());
     let scale: i8 = args.get(2).map_or(3, |s| s.parse().unwrap());
     let nullable = args.get(3).is_some_and(|s| s == "true");
@@ -55,6 +58,7 @@ fn main() {
         .version(jni::JNIVersion::V8)
         .option(&cp)
         .option(&lib)
+        .option(&function_option)
         .option("-Xmx1g")
         .option("-Dstreamfusion.native.development=true")
         .option("--add-opens=java.base/java.nio=ALL-UNNAMED")
@@ -140,7 +144,14 @@ fn main() {
         vec![],
         vec![Some(schema)],
     );
-    let mut native = CalcProgram::new(vec![6, 0], vec![218, 0], vec![1, 0], vec![], vec![], vec![]);
+    let mut native = CalcProgram::new(
+        vec![6, 0],
+        vec![if function == "NEGATE" { 219 } else { 218 }, 0],
+        vec![1, 0],
+        vec![],
+        vec![],
+        vec![],
+    );
     let expected = previous.run(batch.clone());
     let actual = native.run(batch.clone());
     assert_eq!(actual.schema(), expected.schema());
@@ -185,7 +196,7 @@ fn main() {
                 (start.elapsed().as_nanos(), black_box(sum))
             };
             assert_eq!(digest, expected);
-            println!("decimal_unary,ABS,{precision},{scale},{nullable},{binary},{rows},{},{trial},{},{},{nanos},{digest}",
+            println!("decimal_unary,{function},{precision},{scale},{nullable},{binary},{rows},{},{trial},{},{},{nanos},{digest}",
                 rows*loops,trial<warmups,engine_name);
         }
     }
