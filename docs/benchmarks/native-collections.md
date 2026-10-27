@@ -135,3 +135,9 @@ For the previous revision use `collection.generatedFunction` in place of
 `collection.rustFunction`. The provenance artifact records every expression, property and
 command, including the three fixture switches. Change only those matched inputs to reproduce
 another profile.
+
+The native Criterion `scalar_registry` catalog also covers the registered collection
+kernels and represented STRING/container-cast profiles. See the [fixture inventory
+and Rust timing boundary](native-criterion.md#represented-collection-registry-fixtures).
+Its release-mode smoke checks validate benchmark execution and output shapes; they
+do not add new performance measurements or change the measured revisions above.
