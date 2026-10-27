@@ -183,6 +183,80 @@ class CdcDecodeParityTest {
   }
 
   /**
+   * Maxwell/Canal with ROW, ARRAY, MAP and MULTISET columns. {@code findValue} searches the whole
+   * {@code old} subtree, so a top-level column whose name also appears as a nested key — a ROW
+   * field, an element row's field, a MAP key or a MULTISET element — counts as present and keeps
+   * the UPDATE_BEFORE null instead of copying the post-image.
+   */
+  @Test
+  void maxwellNestedColumnsMatchFlink() throws Exception {
+    DecodeParityHarness harness = new DecodeParityHarness(NESTED_ROW_TYPE, true);
+    String data =
+        "{\"id\":1,\"name\":\"a2\",\"info\":{\"name\":\"n2\",\"score\":2.5},"
+            + "\"tags\":[\"t2\"],\"attrs\":{\"k\":2},\"bag\":{\"b\":2},"
+            + "\"items\":[{\"id\":9,\"name\":\"i2\"}]}";
+    String[] scenarios = {
+      "{\"data\":" + data + ",\"type\":\"insert\"}",
+      "{\"data\":" + data + ",\"type\":\"delete\"}",
+      // Only a nested ROW field changed: `name` is found inside old.info, so the top-level name
+      // stays NULL in UPDATE_BEFORE while id and the other columns copy from data.
+      "{\"data\":" + data + ",\"old\":{\"info\":{\"name\":\"n1\",\"score\":1.5}},\"type\":\"update\"}",
+      // A partial nested ROW is the pre-image ROW as written — sub-fields are not merged.
+      "{\"data\":" + data + ",\"old\":{\"info\":{\"score\":1.5}},\"type\":\"update\"}",
+      "{\"data\":" + data + ",\"old\":{\"name\":\"a1\"},\"type\":\"update\"}",
+      // MAP keys and MULTISET elements are object keys, so they count as present names.
+      "{\"data\":" + data + ",\"old\":{\"attrs\":{\"id\":7}},\"type\":\"update\"}",
+      "{\"data\":" + data + ",\"old\":{\"bag\":{\"name\":3}},\"type\":\"update\"}",
+      // An element row's fields inside an ARRAY are searched too.
+      "{\"data\":" + data + ",\"old\":{\"items\":[{\"id\":8,\"name\":\"i1\"}]},\"type\":\"update\"}",
+      // Explicit nested nulls are present and kept.
+      "{\"data\":" + data + ",\"old\":{\"info\":null,\"tags\":null,\"items\":null},\"type\":\"update\"}",
+      // A duplicate key collapses to its last value, discarding names only the first one held.
+      "{\"data\":" + data + ",\"old\":{\"info\":{\"name\":\"n1\"},\"info\":{\"score\":1.5}},"
+          + "\"type\":\"update\"}",
+      "{\"data\":" + data + ",\"old\":{\"tags\":[\"t1\",null],\"attrs\":{\"k\":1,\"j\":null}},"
+          + "\"type\":\"update\"}",
+      // A nested value of the wrong shape is a per-field conversion failure.
+      "{\"data\":" + data + ",\"old\":{\"info\":\"oops\"},\"type\":\"update\"}",
+      "{\"data\":{\"id\":1,\"info\":[1,2]},\"type\":\"insert\"}",
+    };
+    for (String scenario : scenarios) {
+      assertParity(harness, NESTED_ROW_TYPE, MAXWELL, scenario, false);
+      assertParity(harness, NESTED_ROW_TYPE, MAXWELL, scenario, true);
+    }
+  }
+
+  @Test
+  void canalNestedColumnsMatchFlink() throws Exception {
+    DecodeParityHarness harness = new DecodeParityHarness(NESTED_ROW_TYPE, true);
+    String first =
+        "{\"id\":1,\"name\":\"a2\",\"info\":{\"name\":\"n2\",\"score\":2.5},"
+            + "\"tags\":[\"t2\"],\"attrs\":{\"k\":2},\"bag\":{\"b\":2},\"items\":[]}";
+    String second =
+        "{\"id\":2,\"name\":\"b2\",\"info\":null,\"tags\":[],\"attrs\":{},\"bag\":null,"
+            + "\"items\":[{\"id\":9,\"name\":\"i2\"}]}";
+    String data = "[" + first + "," + second + "]";
+    String[] scenarios = {
+      "{\"data\":" + data + ",\"type\":\"INSERT\"}",
+      "{\"data\":" + data + ",\"type\":\"DELETE\"}",
+      // Presence spans the whole old array: element 1's nested `name` keeps element 0's top-level
+      // name NULL too.
+      "{\"data\":" + data + ",\"old\":[{\"tags\":[\"t1\"]},{\"items\":[{\"name\":\"i1\"}]}],"
+          + "\"type\":\"UPDATE\"}",
+      "{\"data\":" + data + ",\"old\":[{\"info\":{\"score\":1.5}},{\"attrs\":{\"id\":1}}],"
+          + "\"type\":\"UPDATE\"}",
+      "{\"data\":" + data + ",\"old\":[{\"bag\":{\"info\":1}},{\"name\":null}],\"type\":\"UPDATE\"}",
+      "{\"data\":" + data + ",\"old\":[{\"info\":{\"name\":\"x\"},\"info\":{\"score\":1}},{}],"
+          + "\"type\":\"UPDATE\"}",
+      "{\"data\":" + data + ",\"old\":[{\"info\":\"oops\"},{}],\"type\":\"UPDATE\"}",
+    };
+    for (String scenario : scenarios) {
+      assertParity(harness, NESTED_ROW_TYPE, CANAL, scenario, false);
+      assertParity(harness, NESTED_ROW_TYPE, CANAL, scenario, true);
+    }
+  }
+
+  /**
    * The CDC dialects convert through Flink's tree deserializer, whose MAP and MULTISET values also
    * fill a {@code java.util.HashMap}: entries iterate in its bucket order through resizes and tree
    * bins, here forced by fourteen keys sharing a bucket of a 64-slot table.
@@ -214,10 +288,37 @@ class CdcDecodeParityTest {
     }
   }
 
+  /** Presence is per column, so the schema width is not capped at the old 128-bit mask. */
+  @Test
+  void maxwellAndCanalSchemasWiderThan128Columns() throws Exception {
+    int width = 200;
+    LogicalType[] types = new LogicalType[width];
+    String[] names = new String[width];
+    StringBuilder data = new StringBuilder("{");
+    for (int i = 0; i < width; i++) {
+      types[i] = new BigIntType();
+      names[i] = "c" + i;
+      data.append(i == 0 ? "" : ",").append("\"c").append(i).append("\":").append(i);
+    }
+    data.append('}');
+    RowType wide = RowType.of(types, names);
+    DecodeParityHarness harness = new DecodeParityHarness(wide, true);
+    String maxwellUpdate =
+        "{\"data\":" + data + ",\"old\":{\"c0\":-1,\"c127\":null,\"c128\":-128,"
+            + "\"nested\":{\"c199\":1}},\"type\":\"update\"}";
+    String canalUpdate =
+        "{\"data\":[" + data + "," + data + "],\"old\":[{\"c64\":-64},{\"c150\":null,"
+            + "\"deep\":[{\"c190\":1}]}],\"type\":\"UPDATE\"}";
+    for (boolean skipErrors : new boolean[] {false, true}) {
+      assertParity(harness, wide, MAXWELL, maxwellUpdate, skipErrors);
+      assertParity(harness, wide, MAXWELL, "{\"data\":" + data + ",\"type\":\"insert\"}", skipErrors);
+      assertParity(harness, wide, CANAL, canalUpdate, skipErrors);
+    }
+  }
+
   @Test
   void debeziumNestedRowMatchesFlink() throws Exception {
-    // Debezium/OGG route for nested schemas (unlike Maxwell/Canal, gated flat): the envelope's
-    // images decode through the same nested appenders as plain JSON, RowKinds included.
+    // Nested images decode through the same appenders as plain JSON, RowKinds included.
     RowType nested =
         RowType.of(
             new LogicalType[] {

@@ -106,8 +106,9 @@ pub(crate) struct CdcJsonDecoder {
     output: SchemaRef,
     /// Number of physical columns (envelope/output arity excludes op and `$row_kind$`).
     arity: usize,
-    /// Physical column names, for the `old`-key presence scan of the `DataOld` dialects.
-    field_names: Vec<String>,
+    /// Physical column positions by name, for the `old`-key presence scan of the `DataOld`
+    /// dialects.
+    field_positions: HashMap<String, usize>,
     dialect: CdcDialect,
     /// Flink's `ignore-parse-errors`, handled here (not by a generic wrapper) because the CDC skip
     /// has three granularities at once: a structurally bad message drops whole, a bad value inside
@@ -149,12 +150,6 @@ impl CdcJsonDecoder {
         let mut output_fields: Vec<FieldRef> = nullable.iter().cloned().collect();
         output_fields.push(Arc::new(Field::new(ROW_KIND_COLUMN, DataType::Int8, false)));
         let output = Arc::new(Schema::new(output_fields));
-        if spec.shape == CdcShape::DataOld {
-            assert!(
-                nullable.len() <= 128,
-                "the old-key presence bitmask carries up to 128 columns"
-            );
-        }
         // A CDC envelope never fans a top-level array out the way the plain `json` format does:
         // Maxwell/Canal hand the root to the tree converter (any array is corrupt), while
         // Debezium/OGG decode through Flink's deprecated one-row entry, which unwraps an array
@@ -179,7 +174,12 @@ impl CdcJsonDecoder {
             ),
             output,
             arity: nullable.len(),
-            field_names: physical.fields().iter().map(|f| f.name().clone()).collect(),
+            field_positions: physical
+                .fields()
+                .iter()
+                .enumerate()
+                .map(|(position, f)| (f.name().clone(), position))
+                .collect(),
             dialect,
             skip_errors,
         }
@@ -188,12 +188,10 @@ impl CdcJsonDecoder {
     /// Emits one envelope row's — one message's — output rows. Any failure in here is the
     /// message's own corruption (unknown op, null image, uneven Canal arrays), which fails the job
     /// in default mode and is caught per message in skip mode, keeping the rows already emitted.
-    #[allow(clippy::too_many_arguments)]
     fn emit_message(
         &self,
         row: usize,
         spec: &CdcSpec,
-        presence: &[u128],
         envelope: &RecordBatch,
         before: &StructArray,
         after: &StructArray,
@@ -217,7 +215,6 @@ impl CdcJsonDecoder {
             // Flink throws on an unrecognized op by default; we fail too (never drop it silently).
             CdcOp::Unknown => panic!("unknown CDC operation \"{op}\""),
         };
-        let mask = presence.get(row).copied().unwrap_or(0);
         if spec.arrays {
             let after_list = envelope
                 .column(1)
@@ -258,14 +255,14 @@ impl CdcJsonDecoder {
                     before_idx,
                     after_off + i,
                     spec.shape,
-                    mask,
+                    row,
                     before,
                     after,
                     out_rows,
                 );
             }
         } else {
-            cdc_emit(&action, row, row, spec.shape, mask, before, after, out_rows);
+            cdc_emit(&action, row, row, spec.shape, row, before, after, out_rows);
         }
     }
 
@@ -309,11 +306,10 @@ impl CdcJsonDecoder {
     /// descent). The envelope's `old` is the LAST top-level occurrence, matching the Jackson tree
     /// `root.get` reads. A message without a usable `old` contributes an empty mask (only updates
     /// read it, and a null `old` on an update already failed in `cdc_emit`).
-    fn old_key_presence(&self, bodies: &RecordBatch) -> Vec<u128> {
-        use simd_json::prelude::*;
+    fn old_key_presence(&self, bodies: &RecordBatch) -> OldKeyPresence {
         let spec = self.dialect.spec();
         let column = bodies.column(0);
-        let mut masks = Vec::with_capacity(bodies.num_rows());
+        let mut presence = OldKeyPresence::new(self.arity);
         let mut scratch: Vec<u8> = Vec::new();
         let mut buffers = simd_json::Buffers::default();
         for row in 0..bodies.num_rows() {
@@ -329,7 +325,7 @@ impl CdcJsonDecoder {
                 if self.skip_errors {
                     continue; // the lenient envelope decode dropped this message too
                 }
-                masks.push(0); // the strict envelope decode fails this body first
+                presence.push_message(); // the strict envelope decode fails this body first
                 continue;
             };
             let root = tape.as_value();
@@ -345,35 +341,41 @@ impl CdcJsonDecoder {
                         .last()
                 })
                 .map(|(_, value)| value);
-            let mut mask = 0u128;
+            let bits = presence.push_message();
             if let Some(value) = old {
-                self.find_value_mask(value, &mut mask);
+                self.find_value_presence(value, bits);
             }
-            masks.push(mask);
         }
-        masks
+        presence
     }
 
-    /// Jackson `findValue` presence over a tape subtree: sets bit `i` when physical field `i`'s
-    /// name appears as an object key anywhere under `value`. A duplicate key within an object
-    /// collapses to its LAST occurrence first (Jackson's tree build overwrites the earlier value,
-    /// so names reachable only through a discarded subtree are not found).
-    fn find_value_mask(&self, value: simd_json::tape::Value<'_, '_>, mask: &mut u128) {
-        use simd_json::prelude::*;
+    /// Jackson `findValue` presence over a tape subtree: marks physical field `i` when its name
+    /// appears as an object key anywhere under `value`. A duplicate key within an object collapses
+    /// to its LAST occurrence first (Jackson's tree build overwrites the earlier value, so names
+    /// reachable only through a discarded subtree are not found).
+    fn find_value_presence(&self, value: simd_json::tape::Value<'_, '_>, bits: &mut [u64]) {
         if let Some(object) = value.as_object() {
             let entries: Vec<(&str, simd_json::tape::Value<'_, '_>)> = object.iter().collect();
-            for (i, (key, child)) in entries.iter().enumerate() {
-                if entries[i + 1..].iter().any(|(later, _)| later == key) {
+            let mut seen: HashSet<&str> = HashSet::default();
+            for (position, (key, child)) in entries[..].iter().enumerate().rev() {
+                let repeated = if entries.len() <= 8 {
+                    entries[position + 1..]
+                        .iter()
+                        .any(|(later, _)| later == key)
+                } else {
+                    !seen.insert(key)
+                };
+                if repeated {
                     continue;
                 }
-                if let Some(field) = self.field_names.iter().position(|name| name == key) {
-                    *mask |= 1 << field;
+                if let Some(&field) = self.field_positions.get(*key) {
+                    mark_present(bits, field);
                 }
-                self.find_value_mask(*child, mask);
+                self.find_value_presence(*child, bits);
             }
         } else if let Some(array) = value.as_array() {
             for element in &array {
-                self.find_value_mask(element, mask);
+                self.find_value_presence(element, bits);
             }
         }
     }
@@ -423,15 +425,15 @@ impl CdcJsonDecoder {
         // The DataOld dialects need per-message key presence in `old` (Flink's findValue rule);
         // the scan mirrors the envelope decode's skip conditions, asserted here.
         let presence = if spec.shape == CdcShape::DataOld {
-            let masks = self.old_key_presence(bodies);
+            let presence = self.old_key_presence(bodies);
             assert_eq!(
-                masks.len(),
+                presence.messages(),
                 envelope.num_rows(),
                 "old-key presence misaligned"
             );
-            masks
+            presence
         } else {
-            Vec::new()
+            OldKeyPresence::new(0)
         };
 
         // Per output row: its RowKind byte (0 +I, 1 -U, 2 +U, 3 -D — `RowKind.toByteValue()`), and the
@@ -447,37 +449,26 @@ impl CdcJsonDecoder {
                 use std::panic::{catch_unwind, AssertUnwindSafe};
                 let _ = silence_expected_decode_panics(|| {
                     catch_unwind(AssertUnwindSafe(|| {
-                        self.emit_message(
-                            row,
-                            &spec,
-                            &presence,
-                            &envelope,
-                            before,
-                            after,
-                            &mut out_rows,
-                        )
+                        self.emit_message(row, &spec, &envelope, before, after, &mut out_rows)
                     }))
                 });
             } else {
-                self.emit_message(
-                    row,
-                    &spec,
-                    &presence,
-                    &envelope,
-                    before,
-                    after,
-                    &mut out_rows,
-                );
+                self.emit_message(row, &spec, &envelope, before, after, &mut out_rows);
             }
         }
 
-        gather_cdc_batch(&out_rows, before, after, self.arity, &self.output)
+        gather_cdc_batch(
+            &out_rows,
+            before,
+            after,
+            self.arity,
+            &self.output,
+            &presence,
+        )
     }
 }
 
-/// Builds the fanned-out changelog batch: each physical column gathered from the pre/post-image
-/// struct children per output row, plus the trailing `$row_kind$` bytes. The source is the same
-/// across columns except for `Coalesce`, which picks per field by the key's presence in the/// Builds a binary input column over a contiguous values region. `copy_values` is used for keyed
+/// Builds a binary input column over a contiguous values region. `copy_values` is used for keyed
 /// raw columns because a raw decode may legally pass those buffers through to the exported output;
 /// JSON bodies are consumed synchronously into fresh Arrow builders and can borrow the JVM slab.
 fn contiguous_binary_array(

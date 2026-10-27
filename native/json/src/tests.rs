@@ -407,6 +407,47 @@ fn cdc_maxwell_keeps_explicit_null_in_old() {
     assert_eq!(id.values(), &[1, 1]); // absent from `old` → unchanged → copied from `data`
 }
 
+// Presence is a per-message bitset sized to the schema, so columns beyond the old 128-bit mask
+// coalesce like any other: present keys (explicit nulls included, and names found nested) keep
+// the pre-image, absent ones copy `data`.
+#[test]
+fn cdc_maxwell_presence_covers_schemas_wider_than_128_columns() {
+    use arrow::array::Array;
+    let width = 200;
+    let schema: SchemaRef = Arc::new(Schema::new(
+        (0..width)
+            .map(|i| Field::new(format!("c{i}"), DataType::Int64, true))
+            .collect::<Vec<_>>(),
+    ));
+    let data = (0..width)
+        .map(|i| format!("\"c{i}\":{i}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let update = format!(
+        r#"{{"data":{{{data}}},"old":{{"c3":-3,"c129":null,"c150":-150,"deep":[{{"c199":0}}]}},"type":"update"}}"#
+    );
+    let body = bodies(vec![Some(update.as_bytes())]);
+
+    let out = new_decoder(FORMAT_MAXWELL_JSON, schema, "", "", 0, false, "").decode(&body);
+
+    assert_eq!(out.num_rows(), 2);
+    let before = |column: usize| {
+        let values = out
+            .column(column)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        values.is_valid(0).then(|| values.value(0))
+    };
+    assert_eq!(before(3), Some(-3));
+    assert_eq!(before(4), Some(4));
+    assert_eq!(before(128), Some(128));
+    assert_eq!(before(129), None);
+    assert_eq!(before(150), Some(-150));
+    assert_eq!(before(198), Some(198));
+    assert_eq!(before(199), None);
+}
+
 // Flink's findValue is a RECURSIVE depth-first search: a physical field name buried inside a
 // nested container under `old` counts as present, and since the top-level decode of `old` saw
 // nothing there, UPDATE_BEFORE keeps the null — it must NOT copy the post-image value.
