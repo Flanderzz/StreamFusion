@@ -114,7 +114,7 @@ class FlinkCollectionAggregateStringKeySqlHarnessTest {
         METRICS.nativeOperators().stream()
             .filter(row -> !previous.contains(row.get("jobId")))
             .collect(java.util.stream.Collectors.toList()),
-        "NativeJvmGroup");
+        "NativeColumnarGroupAggregate");
   }
 
   @ParameterizedTest
@@ -149,7 +149,8 @@ class FlinkCollectionAggregateStringKeySqlHarnessTest {
       runs.assertSuccess(NativeFailureParity.Route.NATIVE);
       assertEquals(perKey(runs.host().rows()), perKey(runs.nativeRun().rows()));
       recovery.verifyRepeatedRecovery();
-      RecoveryExecutionMetrics.assertConsumed(recovery.nativeExecution(), "NativeJvmGroup");
+      RecoveryExecutionMetrics.assertConsumed(
+          recovery.nativeExecution(), "NativeColumnarGroupAggregate");
       SharedFlinkCluster.assertNativeMemoryReleased("collection-string-key-recovery");
     }
   }
@@ -172,7 +173,7 @@ class FlinkCollectionAggregateStringKeySqlHarnessTest {
         METRICS.nativeOperators().stream()
             .filter(row -> !previous.contains(row.get("jobId")))
             .collect(java.util.stream.Collectors.toList());
-    RecoveryExecutionMetrics.assertConsumed(work, "NativeJvmGroup");
+    RecoveryExecutionMetrics.assertConsumed(work, "NativeColumnarGroupAggregate");
     RecoveryExecutionMetrics.assertConsumed(work, "NativeCalc");
   }
 

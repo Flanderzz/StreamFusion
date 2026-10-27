@@ -86,3 +86,5 @@ insertion ourselves since Flink has no columnar framework of its own. See
 [08](08-columnar-flow-transitions.md) for the mechanism.
 
 - [47 — Complete JVM Calc without a native round trip](47-complete-jvm-calc-without-native-roundtrip.md) — experimental temporal Arrow batches avoid redundant FFI while retaining Flink evaluation and columnar boundaries.
+
+- [61 — Flink collection aggregate state](61-flink-collection-aggregate-state.md) — signed multiset counts, ordered retractions and shared DISTINCT retention in the native keyed aggregate.

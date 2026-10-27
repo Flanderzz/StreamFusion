@@ -257,7 +257,9 @@ final class CollectionValueIdentity {
   }
 
   private static boolean preservingCollectionProducer(RelNode node) {
-    return node instanceof StreamPhysicalNativeGeneratedUnnest
+    return node instanceof StreamPhysicalNativeColumnarGroupAggregate
+            && ((StreamPhysicalNativeColumnarGroupAggregate) node).hasCollectionResults()
+        || node instanceof StreamPhysicalNativeGeneratedUnnest
         || node instanceof StreamPhysicalNativeJvmGroup
             && ((StreamPhysicalNativeJvmGroup) node).hasCollectionResults()
         || node instanceof StreamPhysicalNativeTableFunction
