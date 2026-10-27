@@ -2458,3 +2458,197 @@ sources and adds `-Dscalar.native.expected=false`. For each of NOT_NULL_BINARY_M
 NOT_NULL_BINARY_KEYS_STRING, select `#profileFunction`, set `SF_PROFILE_SCALAR=true`, and use
 `-Dscalar.native=true -Dscalar.warmup=1 -Dscalar.seconds=8`, with
 `-Dprofile.asprof=/path/to/asprof -Dprofile.outputDir=/path/to/output`.
+
+## Runtime ARRAY_SORT options (2026-10-27)
+
+The runtime Boolean-option subset now executes in Rust for nullable integer and
+DECIMAL arrays already proven shorter than 32 elements or produced by native
+ARRAY_DISTINCT. Constant non-NULL options keep the existing DataFusion sort.
+Unrestricted long duplicate arrays, representation-sensitive types and fallible
+operands retain generated Flink evaluation. ARRAY_SORT is absent from 1.18.1.
+This is one increment of [#505](https://github.com/datafusion-contrib/StreamFusion/issues/505).
+
+The small-function comparison uses Flink 2.2.1, HotSpot 17.0.12, Rust 1.94.0
+release/mimalloc without RocksDB, macOS 26.5 arm64, an Apple M4 Pro with 14 logical
+cores and 24 GiB RAM. The JVM heap is 1 GiB; execution is serial, without CPU
+pinning. No task builds or other tests overlap measurements; desktop activity is
+uncontrolled. Baseline `eca8f717` precedes this change. The subsequently merged
+integer SPLIT_INDEX increment does not change the measured ARRAY_SORT paths.
+
+Every engine evaluates the same query and logical inputs:
+
+```sql
+SELECT ARRAY_SORT(ARRAY_SLICE(a,1,31),ascending_order,null_first) FROM inputs
+```
+
+Stock starts on prepared GenericRowData or BinaryRowData in Java. Previous
+StreamFusion and the candidate start on prepared Arrow RecordBatch input in
+Rust. Setup and initial expression compilation are outside timers. Stock times
+released generated evaluation and complete typed-array consumption. Both native
+timers run inside Rust around production compiled Calc evaluation and equivalent
+typed Arrow consumption. Previous StreamFusion retains its whole-Calc kind-38
+JVM callback, including the callback's Arrow import/export and conversions.
+The candidate uses the production ARRAY_SLICE and typed ARRAY_SORT kernels,
+without a JVM callback. Initial native entry, final output export and perimeter
+row/Arrow transposes are outside this small-function boundary only.
+
+Arrays contain repeated exact values; BIGINT values exceed 2^53 and decimals are
+DECIMAL(38,9). Nullable profiles include NULL parents, elements and independently
+NULL option flags. Ascending and NULL-order flags vary by row. Output schema and
+complete arrays match the previous generated evaluator before timing; every
+stock/previous/native trial also checks matching consumed-value checksums.
+Each profile uses eight warmups and nine measured trials, rotating engine order
+per trial. Batches of 1,024 rows run 32 iterations; batches of 16 run 1,024.
+
+Median nanoseconds per row (minimum-maximum); the binary/generic column describes
+stock's prepared input, and every StreamFusion input is already Arrow:
+
+| Type / width / batch rows / stock input / NULL profile | Stock Flink | Previous StreamFusion | Rust runtime options | Stock/native |
+| --- | ---: | ---: | ---: | ---: |
+| INT / 8 / 1024 / generic / nullable | 92.65 (90.81-143.65) | 247.91 (240.87-320.22) | 30.79 (29.15-33.61) | 3.01x |
+| INT / 31 / 1024 / generic / nullable | 469.91 (457.15-476.93) | 781.34 (735.84-813.48) | 93.28 (90.74-98.95) | 5.04x |
+| BIGINT / 8 / 1024 / binary / nullable | 139.24 (126.27-270.01) | 276.10 (255.95-325.14) | 32.58 (29.15-35.66) | 4.27x |
+| BIGINT / 31 / 1024 / binary / non-null | 817.17 (799.83-858.47) | 1178.60 (1113.14-1253.36) | 82.44 (76.79-92.76) | 9.91x |
+| DECIMAL / 8 / 1024 / binary / nullable | 254.94 (243.62-312.33) | 640.27 (609.27-668.54) | 33.67 (32.30-37.39) | 7.57x |
+| DECIMAL / 31 / 1024 / generic / non-null | 1180.24 (1163.51-1233.21) | 2983.79 (2839.01-3053.41) | 127.77 (124.37-133.96) | 9.24x |
+| INT / 8 / 16 / binary / nullable | 125.21 (121.63-133.57) | 1647.62 (1455.35-1853.17) | 93.03 (84.16-102.95) | 1.35x |
+| DECIMAL / 31 / 16 / generic / nullable | 633.60 (624.04-659.60) | 3119.82 (3051.92-3340.86) | 160.04 (152.57-165.47) | 3.96x |
+
+All eight measured medians improve on stock and previous StreamFusion. The
+previous/native ratios range from 8.05x to 23.35x. These measurements establish
+the applicable small-function gate; they do not measure complete-job throughput.
+[All 408 trials, configuration and fingerprints](results/runtime-array-sort-2026-10-27.json)
+retain warmups, ranges and the slower observations.
+
+A separate conversion-inclusive diagnostic uses 500,000 nullable INT rows of
+width eight, parallelism one, a 2 GiB heap, one warmup and three measured trials
+in a fresh JVM per engine. It retains a row source, both row/Arrow transposes and
+a blackhole row sink. Native plans require consumed NativeCalc work; the
+candidate must have no bound JVM expression, while the previous planner must
+retain its generated evaluator. Planning/submission and execution are timed;
+MiniCluster/environment construction and EXPLAIN checks are outside timing.
+The same release library and fixture run stock, previous, then candidate.
+
+| Complete job | Median seconds | Minimum-maximum |
+| --- | ---: | ---: |
+| Stock Flink | 0.224650 | 0.219570-0.225222 |
+| Previous StreamFusion | 0.277142 | 0.274509-0.286544 |
+| Rust runtime options | 0.197072 | 0.193343-0.204127 |
+
+The candidate takes 12.3% less time than stock and 28.9% less than previous in
+this short job. This single profile does not establish sustained performance
+for every width/type, nor remove general row/Arrow perimeter costs.
+
+The 27 focused Flink 2.2 SQL tests pass, including positive consumed native-work
+checks for all five admitted element types, independent nullable flags, a
+66-element distinct array, filtering, empty input and lazy failing branches.
+The unchanged released ARRAY_SORT specification also passes all 56 invocations
+under stock and the injected native planner. Its 54 executing queries retain
+their expected custom-type-inference fallback, with zero native-work credit;
+the other two are validation cases. Native sort evidence comes from the focused
+SQL contracts and the compiled-Calc test that runs without a JVM. On 1.18,
+ARRAY_SORT is N/A; shared array search/distinct regressions pass on both lines.
+
+After normal Java test compilation, construct a test classpath containing
+`streamfusion-runtime/target/test-classes`, its production classes and released
+dependencies, and supply it as `SF_NATIVE_BENCH_CLASSPATH`. Set
+`SF_NATIVE_LIB_DIR` to the matching release library directory and select JDK 17
+with `JAVA_HOME`. Run one small profile from the repository root:
+
+```sh
+cargo +1.94.0 run --manifest-path native/Cargo.toml --release --no-default-features \
+  -p streamfusion --example runtime_array_sort -- int 8 true false 1024 32 8 9
+```
+
+Arguments are element (`int`, `bigint`, `decimal`), width, nullable, binary stock
+input, batch rows, iterations, warmups and measured trials. The complete-job
+diagnostic is optional and excluded from ordinary test runs:
+
+```sh
+SF_BENCHMARK=true mvn -pl streamfusion-runtime test -Pbench \
+  -Dtest=RuntimeArraySortPipelineBenchmark -Dsf.testForks=1 \
+  -Darray-sort.pipeline.engine=native -Darray-sort.pipeline.rows=500000 \
+  -Darray-sort.pipeline.warmups=1 -Darray-sort.pipeline.runs=3
+```
+
+Use `engine=flink` for stock. For `engine=previous`, compile the same fixture
+against the preceding planner and require its bound generated ARRAY_SORT route;
+the candidate planner deliberately fails that previous-route assertion.
+
+## Integral SIGN
+
+Measured on 2026-10-27, canonical baseline `7a6a790e`, Apple M4 Pro (14 logical CPUs),
+macOS aarch64, Flink 2.2.1, JDK 17.0.12, Rust 1.94.0 release with default features disabled
+and the system allocator. This replaces generated computation in an already-admitted Calc;
+it adds no operator, type admission or configuration switch.
+
+`integral_sign` prepares equal integer values, minima and NULLs outside timing. Stock Flink
+uses its released generated expression over prebuilt GenericRowData or BinaryRowData in Java.
+The previous and candidate controls use production native Calc over prebuilt Arrow batches;
+the previous generated JVM callback, its conversions and dispatch remain inside the Rust timer.
+The candidate uses the typed SIGN kernel. Every output value participates in a checksum,
+with full Arrow output/schema equality checked before timing. JNI entry/input import, final
+export and perimeter row transposes are outside this prepared-input timer.
+
+Both logical schemas are nullable; the nullable flag controls actual data (every seventh row
+is NULL when true, none when false). Each case has 16 warmups and 11 measured trials, 131,072 rows per trial, rotating the three
+engine orders. Values are ns/row, median [min, max]; speedups divide stock/previous by candidate.
+
+| Type, input NULLs, stock row format, batch rows | Stock | Previous callback | Candidate | vs stock | vs previous |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| BIGINT, no NULLs, binary, 1024 | 6.426 [6.258, 6.815] | 42.782 [41.370, 44.467] | 0.620 [0.578, 0.699] | 10.37x | 69.05x |
+| BIGINT, with NULLs, generic, 1024 | 4.819 [4.381, 5.007] | 43.542 [41.267, 59.324] | 1.222 [1.035, 1.296] | 3.94x | 35.62x |
+| BIGINT, with NULLs, binary, 16 | 6.275 [6.061, 7.140] | 773.391 [755.702, 841.681] | 22.712 [21.311, 26.172] | 0.28x | 34.05x |
+| INT, no NULLs, binary, 1024 | 6.701 [6.256, 6.776] | 42.707 [41.813, 44.414] | 0.536 [0.512, 0.636] | 12.50x | 79.68x |
+| INT, with NULLs, generic, 1024 | 4.554 [4.367, 4.623] | 42.878 [41.013, 55.608] | 1.428 [1.335, 1.481] | 3.19x | 30.03x |
+| INT, with NULLs, binary, 16 | 5.650 [5.397, 5.821] | 749.547 [740.193, 768.904] | 22.887 [22.644, 23.201] | 0.25x | 32.75x |
+
+At 1,024 rows the candidate wins these prepared-input controls. At 16 rows it remains slower
+than stock despite removing most of the preceding callback cost. A separate native-only
+five-second sample identifies generic DataFusion argument/field setup and destruction,
+allocation, batch construction and consumption as remaining small-batch costs. Inclusive
+frames overlap; they are not independent percentages or a universal causal estimate.
+The implementation bypasses the generic scalar adapter for integer arrays/scalars. A production
+Calc allocation probe still requests 20 allocations / 1,255 bytes for a nullable 16-row INT
+batch and 20 / 5,287 bytes for 1,024 rows: result values are new, validity is shared.
+Further Calc batching/argument overhead remains part of [#491](https://github.com/datafusion-contrib/StreamFusion/issues/491).
+
+A separate complete INT job retains the bounded 1M-row Flink source, both transposes and
+rowwise blackhole sink, with parallelism one, two warmups and five measured jobs in separate
+sequential JVMs for stock, previous and candidate. The native plan contains both boundary
+transposes and consumed NativeCalc work is required. Elapsed seconds are median [min, max]:
+
+| Stock | Previous callback | Candidate |
+| ---: | ---: | ---: |
+| 0.129245 [0.119284, 0.135270] | 0.168748 [0.159775, 0.187790] | 0.144245 [0.134325, 0.155320] |
+
+The complete candidate job improves the preceding implementation but still loses to stock.
+These short local jobs include submission/JIT/startup effects; they do not establish a
+sustained end-to-end acceleration. Do not infer a standalone win from the prepared-input
+results. Full measured trials, configuration and allocation observations are retained in the
+[raw result record](results/integral-sign-2026-10-27.json).
+
+The example is `native/engine/examples/integral_sign.rs`; the stock/previous helper is
+`IntegralSignBenchmarkFunctions` and the full job is `IntegralSignPipelineBenchmark`. Build
+the Java test classes, prepare their dependency classpath and set `JAVA_HOME`,
+`SF_NATIVE_BENCH_CLASSPATH` and `SF_NATIVE_LIB_DIR` to the release library directory. Then run:
+
+```sh
+cargo build --manifest-path native/Cargo.toml -p streamfusion --release \
+  --no-default-features --lib --example integral_sign
+native/target/release/examples/integral_sign INT true false 1024 128 16 11
+```
+
+The arguments are type (INT/BIGINT), with NULLs, stock BinaryRowData, rows/batch, loops, warmups
+and trials. `SF_NATIVE_BENCH_ENGINE=native` optionally isolates the candidate for profiling.
+The full job is opt-in with `SF_BENCHMARK=true` and the `bench` Maven profile; use
+`-Dtest=IntegralSignPipelineBenchmark -Dsign.pipeline.engine=flink` or `native`. Run the same
+benchmark class with the baseline planner/native library for the preceding implementation.
+
+Correctness checks pass on Flink 2.2.1 and 1.18.1 with JDK 11 and 17: 12 focused SQL cases
+and three existing numeric/floating cases per combination. The focused runtime witnesses
+consume 5,003 rows for direct INT/BIGINT and explicitly widened narrow inputs, with no JVM
+evaluator. Released unchanged `ScalarFunctionsTest.testSign` passes on both lines; it tests
+generated expressions and is oracle evidence, while the focused runtime witnesses establish
+executed native work. The release Rust core suite passes 813 tests with default features
+disabled. Full JVM/upstream suites are left to CI.

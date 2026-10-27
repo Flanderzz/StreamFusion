@@ -107,13 +107,25 @@ comparator is verified safe: fewer than 32 elements, or a native ARRAY_DISTINCT
 result. Literal Boolean options map explicitly to ASC/DESC and NULLS FIRST/LAST;
 the two-argument Flink form puts NULL first exactly when ascending is true.
 
+Runtime Boolean options use a typed Rust kernel over the same verified arrays.
+Following DataFusion's and Comet's primitive-array sorting structure, it copies
+the visible child span once, compacts each row's non-NULL elements into that
+buffer, and sorts the resulting slices in place. Direction and NULL placement
+are read independently per row; the two-argument form reuses the direction flag.
+A NULL array or either NULL flag produces a NULL array. List slicing, decimal
+precision/scale and child-field metadata are preserved. No JVM callback or
+per-row result array is needed. Non-NULL constant options retain the existing
+DataFusion path; no configuration switch is added.
+
 Unrestricted arrays retain generated Flink evaluation. Flink's comparator returns
 -1 on equal non-NULL values; long duplicate-bearing arrays can therefore throw
 `IllegalArgumentException: Comparison method violates its general contract!` in
 Java TimSort. Substituting a total-order Arrow sort would change that observable
-behavior. A 64-element runtime SQL reproducer protects this failure path. Runtime
-and nullable options, strings, nested types and fallible operands also retain
-Flink evaluation. This is deliberately partial native admission.
+behavior. A 64-element runtime SQL reproducer protects this failure path. Strings,
+nested types, NOT NULL element declarations and fallible operands also retain
+Flink evaluation. This is deliberately partial native admission, and ARRAY_SORT
+is absent from Flink 1.18.1. The runtime-option measurements are recorded on the
+[scalar benchmark page](../benchmarks/scalar-functions.md#runtime-array_sort-options-2026-10-27).
 
 ## Extracting a singleton
 

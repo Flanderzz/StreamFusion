@@ -2346,17 +2346,31 @@ final class RexExpression {
     }
     if (NativeConfig.collectionExpressionsEnabled() && "ARRAY_SORT".equals(functionName)) {
       var args = call.getOperands();
-      if (args.isEmpty() || args.size() > 3 || !nativeBasicArray(args.get(0).getType())
+      if (args.isEmpty()
+          || args.size() > 3
+          || !nativeBasicArray(args.get(0).getType())
           || args.get(0).getType().getComponentType().getSqlTypeName() == SqlTypeName.BOOLEAN
-          || !verifiedSortInput(args.get(0)) || requiresRowShortCircuit(args.get(0))
-          || args.stream().skip(1).anyMatch(arg -> !(arg instanceof RexLiteral)
-              || ((RexLiteral) arg).isNull() || arg.getType().getSqlTypeName() != SqlTypeName.BOOLEAN)) {
-        return reject("ARRAY_SORT retains Flink's comparator behavior outside verified short or distinct arrays and constant options");
+          || !verifiedSortInput(args.get(0))
+          || args.stream().anyMatch(this::requiresRowShortCircuit)
+          || args.stream()
+              .skip(1)
+              .anyMatch(arg -> arg.getType().getSqlTypeName() != SqlTypeName.BOOLEAN)) {
+        return reject(
+            "ARRAY_SORT retains Flink's comparator behavior outside verified short or distinct"
+                + " arrays and total Boolean options");
       }
-      boolean ascending = args.size() < 2 || Boolean.TRUE.equals(((RexLiteral) args.get(1)).getValueAs(Boolean.class));
-      boolean nullFirst = args.size() < 3 ? ascending
-          : Boolean.TRUE.equals(((RexLiteral) args.get(2)).getValueAs(Boolean.class));
-      add(KIND_CALL,189,3);
+      if (args.stream()
+          .skip(1)
+          .anyMatch(arg -> !(arg instanceof RexLiteral) || ((RexLiteral) arg).isNull()))
+        return emitBuiltinCall(call, 217);
+      boolean ascending =
+          args.size() < 2
+              || Boolean.TRUE.equals(((RexLiteral) args.get(1)).getValueAs(Boolean.class));
+      boolean nullFirst =
+          args.size() < 3
+              ? ascending
+              : Boolean.TRUE.equals(((RexLiteral) args.get(2)).getValueAs(Boolean.class));
+      add(KIND_CALL, 189, 3);
       if (!emit(args.get(0))) return false;
       emitStringLiteral(ascending ? "ASC" : "DESC");
       return emitStringLiteral(nullFirst ? "NULLS FIRST" : "NULLS LAST");
@@ -2551,6 +2565,7 @@ final class RexExpression {
       return emitFloatUnary(call, 64);
     }
     if ("SIGN".equals(functionName)) {
+      if (nativeIntegralSign(call)) return emitBuiltinCall(call, 65);
       return emitFloatUnary(call, 65);
     }
     if ("REPEAT".equals(functionName)) {
@@ -3986,8 +4001,9 @@ final class RexExpression {
     if (call.getKind() == SqlKind.MINUS_PREFIX) return exact;
     switch (call.getOperator().getName().toUpperCase(Locale.ROOT)) {
       case "ABS":
-      case "SIGN":
         return exact;
+      case "SIGN":
+        return exact && !nativeIntegralSign(call);
       case "FLOOR":
       case "CEIL":
       case "CEILING":
@@ -4069,6 +4085,31 @@ final class RexExpression {
       default:
         return false;
     }
+  }
+
+  private static boolean nativeIntegralSign(RexCall call) {
+    return call.getOperator()
+            == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.SIGN
+        && call.getOperands().size() == 1
+        && java.util.Set.of(SqlTypeName.INTEGER, SqlTypeName.BIGINT)
+            .contains(call.getOperands().get(0).getType().getSqlTypeName())
+        && call.getType().getSqlTypeName() == call.getOperands().get(0).getType().getSqlTypeName()
+        && nativeIntegralSignOperand(call.getOperands().get(0));
+  }
+
+  private static boolean nativeIntegralSignOperand(RexNode node) {
+    if (node instanceof RexInputRef || node instanceof RexLiteral) return true;
+    if (!(node instanceof RexCall)) return false;
+    RexCall call = (RexCall) node;
+    if (nativeIntegralSign(call)) return true;
+    return call.getKind() == SqlKind.CAST
+        && call.getOperands().size() == 1
+        && SqlTypeFamily.INTEGER.contains(call.getType())
+        && wideningTargetCode(
+                call.getOperands().get(0).getType().getSqlTypeName(),
+                call.getType().getSqlTypeName())
+            >= 0
+        && nativeIntegralSignOperand(call.getOperands().get(0));
   }
 
   private static boolean containsMetadataDependentDecimalRounding(RexNode node) {

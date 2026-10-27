@@ -1028,6 +1028,18 @@ operators because zero divisors produce IEEE infinity/NaN instead of an exceptio
 
 ## SIGN
 
+INT/BIGINT SIGN returns `-1`, `0` or `1` in the input's resolved integer width, including
+at INT_MIN and BIGINT_MIN. Direct inputs, typed literals, recursive lossless integer widening
+and nested admitted SIGN calls use Arrow unary kernels without JVM computation. Input values
+remain owned by the input; result values are allocated and sliced validity is shared. Explicit
+TINYINT/SMALLINT-to-INT/BIGINT widening is covered. Direct TINYINT/SMALLINT SIGN retains
+released Flink's generated-code compilation failure (the numeric result cannot be assigned to `byte/short`).
+Arithmetic, narrowing casts and other unverified producers retain the complete generated SIGN
+program so overflow, NULLs, lazy branches and selected failures do not change. DECIMAL SIGN
+also retains generated execution; decimal representation guards remain in force.
+This replaces computation inside an already-admitted native Calc without adding a switch.
+See the [release measurements and limits](../benchmarks/scalar-functions.md#integral-sign).
+
 FLOAT/DOUBLE SIGN returns the input for signed zero and NaN, and `-1` or `1` for
 nonzero values, including infinities. NULL remains NULL. The result keeps the input's
 floating width; dividing by `SIGN(-0.0)` therefore retains negative infinity.
@@ -1352,7 +1364,7 @@ returns NULL. No JVM callback or configuration switch is required for these conv
 
 ### Exact unary and integral functions
 
-Integer and DECIMAL unary minus, ABS and SIGN execute Flink's generated expression code through
+Integer and DECIMAL unary minus and ABS, and DECIMAL SIGN, execute Flink's generated expression code through
 the existing batch JVM bridge. Integral FLOOR/CEIL and INT/BIGINT TRUNCATE use the same path,
 including per-row TRUNCATE positions. TINYINT/SMALLINT TRUNCATE retains the host compilation
 failure described under exact floating math below. This retains resolved widths, decimal precision/scale, NULL handling,
@@ -2217,7 +2229,7 @@ Existing admitted collection subscripts and Boolean/integer ARRAY_DISTINCT retai
 | ARRAY_UNION | Released DataFusion Rust kernel for matching nullable BOOLEAN/integer/DECIMAL arrays; first-occurrence order and one NULL element retained; either NULL container returns NULL |
 | ARRAY_EXCEPT | Rust stable set difference for matching nullable BOOLEAN/integer/DECIMAL arrays, retaining the first left-side occurrence of each value absent on the right, with NULL treated as a value; either NULL array returns NULL |
 | ARRAY_INTERSECT | Rust stable intersection for matching nullable BOOLEAN/integer/DECIMAL arrays; distinct matches follow left-side order even when the left array is shorter; NULL is a value, either NULL container returns NULL |
-| ARRAY_SORT | Released DataFusion Rust sort for nullable integer/DECIMAL arrays proven shorter than 32 elements or produced by native ARRAY_DISTINCT, with non-NULL constant Boolean options; unrestricted, runtime-option, sensitive and fallible signatures retain Flink's comparator behavior |
+| ARRAY_SORT | Rust sort for nullable integer/DECIMAL arrays proven shorter than 32 elements or produced by native ARRAY_DISTINCT: non-NULL constant Boolean options use released DataFusion; runtime/NULL Boolean options use a typed batch kernel. NULL array or option returns NULL; the two-argument form defaults NULL placement to the ascending flag. Unrestricted, sensitive and fallible signatures retain Flink evaluation |
 | ARRAY_JOIN | Rust UTF-8 join for total nullable string arrays and string options, including strict explicit NULL replacement; co-projected sensitive values and unverified consumers remain generated |
 | ELEMENT | Rust extraction for nullable BOOLEAN/integer/DECIMAL arrays; NULL/empty arrays return NULL, a singleton returns its element, longer arrays raise the selected Flink line's exception with the released message; sensitive/fallible operands retain generated evaluation |
 | MAP_FROM_ARRAYS | Rust construction for nullable basic key/value arrays, preserving duplicate and NULL keys, entry order and strict parent NULLs; mismatched lengths retain Flink's typed exception; other signatures remain generated |
