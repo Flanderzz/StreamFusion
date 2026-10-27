@@ -68,6 +68,10 @@ Presence is tracked per column, so the schema width is not limited. This reconst
 parity-pinned against Flink (`CdcDecodeParityTest`), for flat, nested and wider-than-128-column
 schemas.
 
+On ten million Maxwell messages with nested columns, a mini-batch aggregate ran 1.30× faster than
+the previous route (Flink's decode feeding native operators) and 2.49× faster than stock Flink; on
+Canal, 1.36× and 2.72×. See the [benchmark archive](../../benchmarks/kafka-nested-cdc-20261027/README.md).
+
 `ignore-parse-errors` is native across all four dialects, with Flink's exact granularity: a
 structurally malformed message drops whole, a bad value inside an image nulls just that one field,
 and a failure partway through a fan-out (a JSON array carrying multiple logical records) keeps the
