@@ -75,8 +75,8 @@ because Flink constructs and runs the source. The native source wrapper admits u
 property translation gate exists.
 
 JSON, bare Avro, Avro Confluent, and Protobuf can push a physical-column projection into native
-decode. CSV and raw decode their complete positional record. A keyed table currently also decodes
-the full value record.
+decode. CSV and raw decode their complete positional record. A [keyed table](#keyed-tables)
+currently also decodes the full key and value records.
 
 ### Connector metadata
 
@@ -114,6 +114,37 @@ aggregate ran 1.68× faster than the previous route (Flink's decode feeding nati
 1.93× faster than stock Flink. See the
 [benchmark archive](../benchmarks/kafka-metadata-20261027/README.md).
 
+### Keyed tables
+
+A table with a `key.format` decodes its record keys natively beside the values, reproducing
+Flink's key/value merge: the key format decodes the `key.fields` in their declared order, under
+the names it reads once `key.fields-prefix` is dropped, with its own `key.<format>.*` options and
+`ignore-parse-errors` mode; both `value.fields-include` modes apply, and under `ALL` the value's
+copy of a key field wins. Each record emits every value row paired with every key row,
+value-major, so a JSON array on either side fans out and a key that yields no row — a null key
+for every key format except `raw`, whose null key is one NULL row, or a bad key the key format
+skips — emits nothing for that record, while its value is still decoded (and fails) as Flink's
+is.
+
+The key decodes in the value format's native library, so the key format must be `raw`, which
+every library carries, or the value's own format. Natively decoded pairs:
+
+| Value format | Key formats |
+| --- | --- |
+| JSON | `raw`, `json` |
+| CSV | `raw`, `csv` |
+| raw | `raw` |
+
+Staying on Flink: any other pair (a JSON key over a CSV value), keys over Avro, Avro Confluent or
+Protobuf values, a keyed table that reads connector metadata, a repeated `key.fields` entry, `ALL`
+with a key prefix (Flink's own rejection), a key option the key format's native decode doesn't
+reproduce (as its format page lists), and `key.format` with a CDC value format. On Flink 2.2 a JSON key with
+`key.json.ignore-parse-errors` stays on Flink too: for a key object it skips, Flink's JSON format
+collects a null key row, which the key/value merge then dereferences, failing or dropping the
+record depending on the value format's own skip mode. Flink 1.18 drops that null, and its record
+with it, as the native decode does. `KeyedDecodeParityTest` pins the composition against Flink's
+own record deserializer on both lines.
+
 ### Source admission and fallbacks
 
 - Connector metadata decodes natively (above). A value format's own metadata (a CDC format's
@@ -135,9 +166,8 @@ aggregate ran 1.68× faster than the previous route (Flink's decode feeding nati
   The source serializes the shared native expression plan and creates one evaluator per split
   reader. Projection remapping and source sharing retain the expression's typed literals and
   column references; native handles remain local to the reader and are closed with it.
-- Keyed native decoding currently requires a single raw key field over a supported insert-only
-  value format. Other key formats/shapes stay on Flink.
-- CDC values combined with `key.format` stay on Flink.
+- [Keyed tables](#keyed-tables) decode natively when the key format is `raw` or the value's own
+  format; the shapes listed there stay on Flink.
 - Unsupported format options or logical types stay on Flink as documented by the format page.
 
 ## Sink: native encode, Flink production

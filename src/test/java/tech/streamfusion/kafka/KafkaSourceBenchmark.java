@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -95,6 +96,8 @@ class KafkaSourceBenchmark {
     register(new CanalTables("canal-all-ten-tables", 10, "t\\d"));
     register(new CanalTables("canal-sharded-tables", 1_000_000, "t\\d*0"));
     register(new JsonMetadata());
+    register(new JsonKeyed());
+    register(new RawKeyed());
   }
 
   private static void register(Workload workload) {
@@ -562,6 +565,82 @@ class KafkaSourceBenchmark {
               new RecordHeader("source", "orders".getBytes(StandardCharsets.UTF_8)),
               new RecordHeader(
                   "tenant", ("t" + (index % 64)).getBytes(StandardCharsets.UTF_8))));
+    }
+  }
+
+  /**
+   * JSON values keyed by a JSON tenant/id pair under a key prefix: the query aggregates both key
+   * fields with the value's.
+   */
+  private static final class JsonKeyed implements Workload {
+    @Override
+    public String id() {
+      return "json-keyed";
+    }
+
+    @Override
+    public String ddl(String brokers, String topic) {
+      return "CREATE TABLE cdc (k_tenant STRING, name STRING, k_id BIGINT, amount BIGINT)"
+          + bounded(
+              brokers,
+              topic,
+              "json",
+              ", 'key.format' = 'json', 'key.fields' = 'k_tenant;k_id',"
+                  + " 'key.fields-prefix' = 'k_', 'value.fields-include' = 'EXCEPT_KEY'");
+    }
+
+    @Override
+    public String query() {
+      return "SELECT k_tenant, COUNT(*) AS records, SUM(amount) AS amount, MAX(k_id) AS last_id,"
+          + " COUNT(name) AS named FROM cdc GROUP BY k_tenant";
+    }
+
+    @Override
+    public ProducerRecord<byte[], byte[]> record(String topic, long index, long records) {
+      String key = "{\"tenant\":\"t" + (index % 64) + "\",\"id\":" + index + "}";
+      String value = "{\"name\":\"n" + index + "\",\"amount\":" + (index % 1000) + "}";
+      return new ProducerRecord<>(
+          topic,
+          (int) (index % PARTITIONS),
+          key.getBytes(StandardCharsets.UTF_8),
+          value.getBytes(StandardCharsets.UTF_8));
+    }
+  }
+
+  /** JSON values keyed by a raw BIGINT, the shape the first keyed native decode admitted. */
+  private static final class RawKeyed implements Workload {
+    @Override
+    public String id() {
+      return "raw-keyed";
+    }
+
+    @Override
+    public String ddl(String brokers, String topic) {
+      return "CREATE TABLE cdc (k BIGINT, tenant STRING, name STRING, amount BIGINT)"
+          + bounded(
+              brokers,
+              topic,
+              "json",
+              ", 'key.format' = 'raw', 'key.fields' = 'k',"
+                  + " 'value.fields-include' = 'EXCEPT_KEY'");
+    }
+
+    @Override
+    public String query() {
+      return "SELECT tenant, COUNT(*) AS records, SUM(amount) AS amount, MAX(k) AS last_key,"
+          + " COUNT(name) AS named FROM cdc GROUP BY tenant";
+    }
+
+    @Override
+    public ProducerRecord<byte[], byte[]> record(String topic, long index, long records) {
+      String value =
+          "{\"tenant\":\"t" + (index % 64) + "\",\"name\":\"n" + index + "\",\"amount\":"
+              + (index % 1000) + "}";
+      return new ProducerRecord<>(
+          topic,
+          (int) (index % PARTITIONS),
+          ByteBuffer.allocate(8).putLong(index).array(),
+          value.getBytes(StandardCharsets.UTF_8));
     }
   }
 }

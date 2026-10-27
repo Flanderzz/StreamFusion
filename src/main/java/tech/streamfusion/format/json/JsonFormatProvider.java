@@ -1,5 +1,6 @@
 package tech.streamfusion.format.json;
 
+import tech.streamfusion.compat.JsonRuntimeCompat;
 import tech.streamfusion.format.FormatCodes;
 import tech.streamfusion.format.NativeFormatContext;
 import tech.streamfusion.format.NativeFormatOptions;
@@ -87,6 +88,20 @@ public final class JsonFormatProvider implements NativeFormatProvider {
   public boolean supports(NativeFormatContext context) {
     return NativeFormatOptions.encode(context.options()) != null
         && decodableColumns(context.outputType());
+  }
+
+  /**
+   * A key that skips parse errors stays on Flink where Flink's collector path hands the Kafka
+   * key/value merge a null key row for a structurally bad key object: the merge dereferences it,
+   * so the record fails or drops depending on the value format's own skip mode, and a key array
+   * keeps the pairs emitted before its bad element.
+   */
+  @Override
+  public String keyDecoderOptions(NativeFormatContext context) {
+    if (context.ignoreParseErrors() && JsonRuntimeCompat.COLLECTS_SKIPPED_OBJECTS_AS_NULL) {
+      return null;
+    }
+    return NativeFormatProvider.super.keyDecoderOptions(context);
   }
 
   @Override

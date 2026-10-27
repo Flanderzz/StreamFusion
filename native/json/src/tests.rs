@@ -136,7 +136,7 @@ fn keyed_decode_composes_raw_keys_with_the_value_rows() {
         "",
         0,
         true,
-        "keyed.key-position=0\nkeyed.value-positions=1,2\n",
+        "keyed.key-format=3\nkeyed.key-positions=0\nkeyed.value-positions=1,2\n",
     );
     let out = decoder.decode(&records);
 
@@ -152,6 +152,190 @@ fn keyed_decode_composes_raw_keys_with_the_value_rows() {
         .downcast_ref::<StringArray>()
         .unwrap();
     assert_eq!(names.value(3), "d");
+}
+
+fn keyed_records(keys: Vec<Option<&[u8]>>, bodies: Vec<Option<&[u8]>>) -> RecordBatch {
+    let keys: ArrayRef = Arc::new(BinaryArray::from(keys));
+    let bodies: ArrayRef = Arc::new(BinaryArray::from(bodies));
+    RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("key", DataType::Binary, true),
+            Field::new("body", DataType::Binary, true),
+        ])),
+        vec![keys, bodies],
+    )
+    .unwrap()
+}
+
+// A JSON key decodes under the names the key format reads — `key.fields-prefix` dropped — into
+// its physical positions in `key.fields` order, beside the value's fields.
+#[test]
+fn keyed_json_key_fills_its_fields_without_the_prefix() {
+    let physical: SchemaRef = Arc::new(Schema::new(vec![
+        Field::new("name", DataType::Utf8, true),
+        Field::new("k_id", DataType::Int64, true),
+        Field::new("k_tenant", DataType::Utf8, true),
+    ]));
+    let records = keyed_records(
+        vec![Some(br#"{"tenant":"t1","id":7}"#.as_slice())],
+        vec![Some(br#"{"name":"a"}"#.as_slice())],
+    );
+
+    let out = new_decoder(
+        FORMAT_JSON,
+        physical,
+        "",
+        "",
+        0,
+        false,
+        "keyed.key-format=0\nkeyed.key-positions=2,1\nkeyed.value-positions=0\nkeyed.key-prefix=k_\n",
+    )
+    .decode(&records);
+
+    assert_eq!(out.num_rows(), 1);
+    let names = out
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(names.value(0), "a");
+    assert_eq!(values(&out, 1), vec![7]);
+    let tenants = out
+        .column(2)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(tenants.value(0), "t1");
+}
+
+// Flink pairs every value row of a record with every key row, value-major: a top-level JSON array
+// fans out on either side.
+#[test]
+fn keyed_json_rows_pair_value_major_within_each_record() {
+    let physical: SchemaRef = Arc::new(Schema::new(vec![
+        Field::new("k", DataType::Int64, true),
+        Field::new("v", DataType::Utf8, true),
+    ]));
+    let records = keyed_records(
+        vec![
+            Some(br#"[{"k":1},{"k":2}]"#.as_slice()),
+            Some(br#"{"k":3}"#.as_slice()),
+        ],
+        vec![
+            Some(br#"[{"v":"a"},{"v":"b"}]"#.as_slice()),
+            Some(br#"{"v":"c"}"#.as_slice()),
+        ],
+    );
+
+    let out = new_decoder(
+        FORMAT_JSON,
+        physical,
+        "",
+        "",
+        0,
+        false,
+        "keyed.key-format=0\nkeyed.key-positions=0\nkeyed.value-positions=1\n",
+    )
+    .decode(&records);
+
+    assert_eq!(values(&out, 0), vec![1, 2, 1, 2, 3]);
+    let v = out
+        .column(1)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(
+        (0..5).map(|i| v.value(i)).collect::<Vec<_>>(),
+        vec!["a", "a", "b", "b", "c"]
+    );
+}
+
+// A record whose key yields no row emits nothing: a null JSON key, or a bad key the key format's
+// ignore-parse-errors skips. The value still decodes, unlike the record's output.
+#[test]
+fn keyed_record_without_a_key_row_emits_nothing() {
+    let physical: SchemaRef = Arc::new(Schema::new(vec![
+        Field::new("k", DataType::Int64, true),
+        Field::new("v", DataType::Utf8, true),
+    ]));
+    let records = keyed_records(
+        vec![
+            None,
+            Some(b"not json".as_slice()),
+            Some(br#"{"k":3}"#.as_slice()),
+        ],
+        vec![
+            Some(br#"{"v":"a"}"#.as_slice()),
+            Some(br#"{"v":"b"}"#.as_slice()),
+            Some(br#"{"v":"c"}"#.as_slice()),
+        ],
+    );
+
+    let out = new_decoder(
+        FORMAT_JSON,
+        physical,
+        "",
+        "",
+        0,
+        false,
+        "keyed.key-format=0\nkeyed.key-positions=0\nkeyed.value-positions=1\nkeyed.key-skip-errors=true\n",
+    )
+    .decode(&records);
+
+    assert_eq!(values(&out, 0), vec![3]);
+    let v = out
+        .column(1)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(v.value(0), "c");
+}
+
+#[test]
+#[should_panic]
+fn keyed_bad_value_fails_even_when_its_key_yields_no_row() {
+    let physical: SchemaRef = Arc::new(Schema::new(vec![
+        Field::new("k", DataType::Int64, true),
+        Field::new("v", DataType::Utf8, true),
+    ]));
+    let records = keyed_records(vec![None], vec![Some(b"not json".as_slice())]);
+
+    new_decoder(
+        FORMAT_JSON,
+        physical,
+        "",
+        "",
+        0,
+        false,
+        "keyed.key-format=0\nkeyed.key-positions=0\nkeyed.value-positions=1\n",
+    )
+    .decode(&records);
+}
+
+// Under value.fields-include = ALL the value decodes the key field too, and its copy wins.
+#[test]
+fn keyed_value_copy_of_a_key_field_wins_under_all() {
+    let physical: SchemaRef = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, true),
+        Field::new("name", DataType::Utf8, true),
+    ]));
+    let records = keyed_records(
+        vec![Some(br#"{"id":1}"#.as_slice())],
+        vec![Some(br#"{"id":99,"name":"a"}"#.as_slice())],
+    );
+
+    let out = new_decoder(
+        FORMAT_JSON,
+        physical,
+        "",
+        "",
+        0,
+        false,
+        "keyed.key-format=0\nkeyed.key-positions=0\nkeyed.value-positions=0,1\n",
+    )
+    .decode(&records);
+
+    assert_eq!(values(&out, 0), vec![99]);
 }
 
 // Debezium JSON (format 6): the `{before, after, op}` envelope fans out to a columnar changelog —

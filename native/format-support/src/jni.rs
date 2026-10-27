@@ -92,9 +92,10 @@ fn create_value_decoder(
 ) -> MessageDecoder {
     let options = parse_format_options(format_options);
     if let Some(keyed) = options.keyed.clone() {
-        // A keyed table: build the value decoder against the physical schema projected to the
-        // value positions (the keyed option lines stripped so the recursion is plain), and the
-        // raw key decoder against the key column; the wrapper owns per-record composition.
+        // A keyed table: the value decoder sees the physical schema projected to the value
+        // positions (the keyed option lines stripped so the recursion is plain), the key decoder
+        // the key fields under the names the key format reads, and the wrapper owns the per-record
+        // composition. The key format is raw or the value's own, so this library decodes both.
         let value_options: String = format_options
             .lines()
             .filter(|line| !line.is_empty() && !line.starts_with("keyed."))
@@ -117,14 +118,43 @@ fn create_value_decoder(
             skip_errors,
             &value_options,
         ));
-        let key_schema: SchemaRef = Arc::new(Schema::new(vec![output_schema
-            .field(keyed.key_position)
-            .clone()]));
+        let key_schema: SchemaRef = Arc::new(Schema::new(
+            keyed
+                .key_positions
+                .iter()
+                .map(|position| {
+                    let field = output_schema.field(*position);
+                    let name = field
+                        .name()
+                        .strip_prefix(keyed.key_prefix.as_str())
+                        .expect("a key field carries the key prefix");
+                    field.as_ref().clone().with_name(name)
+                })
+                .collect::<Vec<_>>(),
+        ));
+        let key_options = parse_format_options(&keyed.key_options);
+        let key = Box::new(if keyed.key_format == FORMAT_RAW {
+            MessageDecoder {
+                decoder: Box::new(RawDecoder::new(key_schema, key_options.raw_little_endian)),
+                skip_errors: false,
+            }
+        } else {
+            create_message_decoder(
+                factory,
+                keyed.key_format,
+                key_schema,
+                "",
+                "",
+                0,
+                keyed.key_skip_errors,
+                &keyed.key_options,
+            )
+        });
         return MessageDecoder {
             decoder: Box::new(KeyedDecoder {
                 value,
-                key: RawDecoder::new(key_schema, keyed.key_little_endian),
-                key_position: keyed.key_position,
+                key,
+                key_positions: keyed.key_positions,
                 value_positions: keyed.value_positions,
                 output: output_schema,
             }),

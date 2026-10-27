@@ -1,6 +1,7 @@
 package tech.streamfusion;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -10,6 +11,9 @@ import java.util.function.Supplier;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
+import org.apache.kafka.clients.admin.AdminClient;
+import org.apache.kafka.clients.admin.AdminClientConfig;
+import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
@@ -19,14 +23,16 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.testcontainers.containers.KafkaContainer;
 import org.testcontainers.utility.DockerImageName;
+import tech.streamfusion.planner.NativePlanner;
 
 /**
- * End-to-end referee for keyed Kafka tables: a {@code key.format = 'raw'} table runs the same
- * bounded read under the native planner and under stock Flink (whose factory assembles the real
- * {@code DynamicKafkaDeserializationSchema} key/value merge), every row must match — the key
- * column filled from the record key, NULL Kafka keys kept as NULL key columns, and both
- * {@code value.fields-include} modes — and the native source's own decode counter must account for
- * every record it read; a plan that merely substituted some operator would not. Opt-in via
+ * End-to-end referee for keyed Kafka tables: each table runs the same bounded read under the native
+ * planner and under stock Flink (whose factory assembles the real key/value merge), every row must
+ * match, and the native source's own decode counter must account for every record it read — a
+ * plan that merely substituted some operator would not. Covers raw, JSON and CSV keys, both
+ * {@code value.fields-include} modes, multi-field keys with a prefix across partitions, and records
+ * whose key yields no row. The record-level contract
+ * is pinned against Flink's own deserializer by {@code KeyedDecodeParityTest}. Opt-in via
  * {@code SF_BENCHMARK=true} (Docker).
  */
 @Tag("streamfusion-kafka")
@@ -73,6 +79,74 @@ class NativeKeyedDecodeSqlHarnessTest {
       NativeParity.assertParity(all, "SELECT k, id, name FROM t");
 
       assertEquals(1000, metrics.counterValue("nativeKafkaDecodeRecords"));
+    }
+  }
+
+  @Test
+  void jsonAndCsvKeysMatchFlink() throws Exception {
+    try (KafkaContainer kafka =
+            new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.6.1"));
+        RecoveryExecutionMetrics metrics = new RecoveryExecutionMetrics()) {
+      kafka.start();
+      String brokers = kafka.getBootstrapServers();
+      Properties admin = new Properties();
+      admin.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, brokers);
+      try (AdminClient client = AdminClient.create(admin)) {
+        client
+            .createTopics(
+                List.of(new NewTopic("keyed-json", 2, (short) 1), new NewTopic("keyed-csv", 2, (short) 1)))
+            .all()
+            .get();
+      }
+      List<ProducerRecord<byte[], byte[]>> records = new ArrayList<>();
+      for (int i = 0; i < 400; i++) {
+        // A null key yields no JSON key row, so its record emits nothing; a key or value without
+        // a field leaves it NULL.
+        String key =
+            i % 11 == 0
+                ? null
+                : i % 13 == 0
+                    ? String.format("{\"id\": %d}", i)
+                    : String.format("{\"region\": \"r%d\", \"id\": %d}", i % 5, i);
+        String value =
+            i % 17 == 0 ? "{\"name\": null}" : String.format("{\"name\": \"row-%d\"}", i);
+        records.add(
+            new ProducerRecord<>(
+                "keyed-json", i % 2, (long) i * 10, key == null ? null : bytes(key), bytes(value)));
+        String csvKey = i % 11 == 0 ? null : String.format("%d|r%d", i, i % 5);
+        records.add(
+            new ProducerRecord<>(
+                "keyed-csv",
+                i % 2,
+                csvKey == null ? null : bytes(csvKey),
+                bytes(String.format("row-%d,%d", i, i * 3))));
+      }
+      produce(brokers, records);
+      Supplier<TableEnvironment> json =
+          environment(
+              metrics,
+              "CREATE TABLE t (k_region STRING, name STRING, k_id BIGINT) WITH ("
+                  + source(brokers, "keyed-json")
+                  + " 'key.format' = 'json', 'key.fields' = 'k_id;k_region',"
+                  + " 'key.fields-prefix' = 'k_',"
+                  + " 'value.format' = 'json', 'value.fields-include' = 'EXCEPT_KEY')");
+      Supplier<TableEnvironment> csv =
+          environment(
+              metrics,
+              "CREATE TABLE t (id BIGINT, region STRING, name STRING, amount BIGINT) WITH ("
+                  + source(brokers, "keyed-csv")
+                  + " 'key.format' = 'csv', 'key.fields' = 'id;region',"
+                  + " 'key.csv.field-delimiter' = '|',"
+                  + " 'value.format' = 'csv', 'value.fields-include' = 'EXCEPT_KEY')");
+      String jsonQuery = "SELECT k_region, name, k_id FROM t";
+
+      String plan = NativePlanner.explain(json.get(), jsonQuery);
+      NativeParity.assertParity(json, jsonQuery);
+      NativeParity.assertParity(csv, "SELECT id, region, name, amount FROM t");
+
+      assertTrue(
+          plan.contains("NativeKafkaDecode") && plan.contains("keyFormat=[json]"), plan);
+      assertEquals(800, metrics.counterValue("nativeKafkaDecodeRecords"));
     }
   }
 

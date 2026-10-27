@@ -36,15 +36,19 @@ pub struct FormatOptions {
     pub metadata: Vec<(usize, KafkaMetadata)>,
 }
 
-/// A keyed table's decode composition (Flink's `key.format` on the source side): which physical
-/// position the raw-decoded Kafka key fills, which positions the value decode fills (its row type
-/// is the physical schema projected to them), and the key's `key.raw.endianness`. Rides the same
-/// option lines as the format options so the connector needs no new JNI surface.
+/// A keyed table's decode composition (Flink's `key.format` on the source side): the key format,
+/// which physical positions its fields fill (in `key.fields` order), which positions the value
+/// decode fills (its row type is the physical schema projected to them), the `key.fields-prefix`
+/// the key format's field names drop, and the key format's own option lines and skip mode. Rides
+/// the same option lines as the format options so the connector needs no new JNI surface.
 #[derive(Clone)]
 pub struct KeyedSpec {
-    pub key_position: usize,
+    pub key_format: i32,
+    pub key_positions: Vec<usize>,
     pub value_positions: Vec<usize>,
-    pub key_little_endian: bool,
+    pub key_prefix: String,
+    pub key_skip_errors: bool,
+    pub key_options: String,
 }
 
 pub fn parse_format_options(encoded: &str) -> FormatOptions {
@@ -52,9 +56,12 @@ pub fn parse_format_options(encoded: &str) -> FormatOptions {
     let mut timestamp_mode = flink_text::TimestampMode::default();
     let mut raw_little_endian = false;
     let mut json_reject_array_roots = false;
-    let mut keyed_key_position = None;
+    let mut keyed_key_format = None;
+    let mut keyed_key_positions = None;
     let mut keyed_value_positions = None;
-    let mut keyed_key_little_endian = false;
+    let mut keyed_key_prefix = String::new();
+    let mut keyed_key_skip_errors = false;
+    let mut keyed_key_options = String::new();
     let mut metadata = Vec::new();
     for line in encoded.lines().filter(|l| !l.is_empty()) {
         let (key, value) = line
@@ -85,25 +92,15 @@ pub fn parse_format_options(encoded: &str) -> FormatOptions {
                     other => panic!("unknown raw.endianness {other}"),
                 }
             }
-            "keyed.key-position" => {
-                keyed_key_position = Some(value.parse::<usize>().expect("keyed.key-position"))
+            "keyed.key-format" => {
+                keyed_key_format = Some(value.parse::<i32>().expect("keyed.key-format"))
             }
-            "keyed.value-positions" => {
-                keyed_value_positions = Some(if value.is_empty() {
-                    Vec::new()
-                } else {
-                    value
-                        .split(',')
-                        .map(|position| position.parse::<usize>().expect("keyed.value-positions"))
-                        .collect()
-                })
-            }
-            "keyed.key-endianness" => {
-                keyed_key_little_endian = match value {
-                    "little-endian" => true,
-                    "big-endian" => false,
-                    other => panic!("unknown keyed.key-endianness {other}"),
-                }
+            "keyed.key-positions" => keyed_key_positions = Some(positions(value)),
+            "keyed.value-positions" => keyed_value_positions = Some(positions(value)),
+            "keyed.key-prefix" => keyed_key_prefix = value.to_string(),
+            "keyed.key-skip-errors" => keyed_key_skip_errors = value == "true",
+            key if key.starts_with("keyed.key.") => {
+                keyed_key_options.push_str(&format!("{}={value}\n", &key["keyed.key.".len()..]))
             }
             "metadata.columns" => {
                 metadata = value
@@ -122,10 +119,13 @@ pub fn parse_format_options(encoded: &str) -> FormatOptions {
             other => panic!("unknown format option {other}"),
         }
     }
-    let keyed = keyed_key_position.map(|key_position| KeyedSpec {
-        key_position,
+    let keyed = keyed_key_format.map(|key_format| KeyedSpec {
+        key_format,
+        key_positions: keyed_key_positions.expect("keyed decode carries no key positions"),
         value_positions: keyed_value_positions.expect("keyed decode carries no value positions"),
-        key_little_endian: keyed_key_little_endian,
+        key_prefix: keyed_key_prefix,
+        key_skip_errors: keyed_key_skip_errors,
+        key_options: keyed_key_options,
     });
     FormatOptions {
         csv,
@@ -135,4 +135,14 @@ pub fn parse_format_options(encoded: &str) -> FormatOptions {
         keyed,
         metadata,
     }
+}
+
+fn positions(value: &str) -> Vec<usize> {
+    if value.is_empty() {
+        return Vec::new();
+    }
+    value
+        .split(',')
+        .map(|position| position.parse::<usize>().expect("keyed position"))
+        .collect()
 }

@@ -177,6 +177,18 @@ class KafkaDecodeRoutingTest {
   }
 
   @Test
+  void keyedCdcTableKeepsTheScanOnFlink() {
+    StreamTableEnvironment tEnv = env();
+    tEnv.executeSql(
+        table("k STRING, id BIGINT", "canal-json")
+            .replace(
+                "'format' = 'canal-json')",
+                "'key.format' = 'raw', 'key.fields' = 'k', 'value.format' = 'canal-json',"
+                    + " 'value.fields-include' = 'EXCEPT_KEY')"));
+    assertStaysOnFlink(tEnv, "SELECT k, id FROM t");
+  }
+
+  @Test
   void metadataRowtimeKeepsItsWatermarkNatively() {
     StreamTableEnvironment tEnv = env();
     tEnv.executeSql(
@@ -480,13 +492,81 @@ class KafkaDecodeRoutingTest {
   }
 
   @Test
-  void keyedShapesOutsideTheIncrementStayOnFlink() {
-    // A non-raw key format needs the alignment machinery (a JSON key can drop the whole record).
+  void jsonKeyedTableRoutesToTheDecodePath() {
+    StreamTableEnvironment tEnv = env();
+    tEnv.executeSql(
+        keyedTable(
+            "k_region STRING, id BIGINT, k_id BIGINT",
+            "'key.format' = 'json', 'key.fields' = 'k_id;k_region', 'key.fields-prefix' = 'k_',"
+                + " 'value.fields-include' = 'EXCEPT_KEY'"));
+    String plan = NativePlanner.explain(tEnv, "SELECT k_region, id, k_id FROM t");
+    assertTrue(plan.contains("NativeKafkaDecode") && plan.contains("keyFormat=[json]"), plan);
+  }
+
+  @Test
+  void aSkippingJsonKeyStaysOnFlinkWhereFlinkCollectsNullKeyRows() {
     StreamTableEnvironment tEnv = env();
     tEnv.executeSql(
         keyedTable(
             "k BIGINT, id BIGINT",
-            "'key.format' = 'json', 'key.fields' = 'k', 'value.fields-include' = 'EXCEPT_KEY'"));
+            "'key.format' = 'json', 'key.fields' = 'k', 'key.json.ignore-parse-errors' = 'true',"
+                + " 'value.fields-include' = 'EXCEPT_KEY'"));
+    String plan = NativePlanner.explain(tEnv, "SELECT k, id FROM t");
+    assertEquals(
+        !tech.streamfusion.compat.JsonRuntimeCompat.COLLECTS_SKIPPED_OBJECTS_AS_NULL,
+        plan.contains("NativeKafkaDecode"),
+        plan);
+  }
+
+  @Test
+  void csvKeyedTableRoutesToTheDecodePath() {
+    StreamTableEnvironment tEnv = env();
+    tEnv.executeSql(
+        "CREATE TABLE t (k STRING, id BIGINT) WITH ("
+            + " 'connector' = 'kafka', 'topic' = 't',"
+            + " 'properties.bootstrap.servers' = 'localhost:9092',"
+            + " 'scan.startup.mode' = 'earliest-offset', 'value.format' = 'csv',"
+            + " 'key.format' = 'csv', 'key.fields' = 'k', 'value.fields-include' = 'EXCEPT_KEY')");
+    String plan = NativePlanner.explain(tEnv, "SELECT k, id FROM t");
+    assertTrue(plan.contains("NativeKafkaDecode") && plan.contains("keyFormat=[csv]"), plan);
+  }
+
+  @Test
+  void keysAnotherNativeLibraryDecodesStayOnFlink() {
+    // The key decodes in the value format's library: a JSON key over an Avro Confluent value, or a
+    // bare Avro key over a registry value, stays on Flink until keys compose across formats.
+    StreamTableEnvironment jsonKey = env();
+    jsonKey.executeSql(
+        "CREATE TABLE t (k BIGINT, name STRING) WITH ("
+            + " 'connector' = 'kafka', 'topic' = 't',"
+            + " 'properties.bootstrap.servers' = 'localhost:9092',"
+            + " 'scan.startup.mode' = 'earliest-offset', 'key.format' = 'json', 'key.fields' = 'k',"
+            + " 'value.format' = 'avro-confluent',"
+            + " 'value.avro-confluent.url' = 'http://localhost:8081',"
+            + " 'value.fields-include' = 'EXCEPT_KEY')");
+    StreamTableEnvironment mixedAvro = env();
+    mixedAvro.executeSql(
+        "CREATE TABLE t (k BIGINT, name STRING) WITH ("
+            + " 'connector' = 'kafka', 'topic' = 't',"
+            + " 'properties.bootstrap.servers' = 'localhost:9092',"
+            + " 'scan.startup.mode' = 'earliest-offset', 'key.format' = 'avro', 'key.fields' = 'k',"
+            + " 'value.format' = 'avro-confluent',"
+            + " 'value.avro-confluent.url' = 'http://localhost:8081',"
+            + " 'value.fields-include' = 'EXCEPT_KEY')");
+
+    assertStaysOnFlink(jsonKey, "SELECT k, name FROM t");
+    assertStaysOnFlink(mixedAvro, "SELECT k, name FROM t");
+  }
+
+  @Test
+  void keyedShapesOutsideTheIncrementStayOnFlink() {
+    // The value format's native library decodes the key too, so a key format it doesn't carry
+    // stays on Flink.
+    StreamTableEnvironment tEnv = env();
+    tEnv.executeSql(
+        keyedTable(
+            "k BIGINT, id BIGINT",
+            "'key.format' = 'csv', 'key.fields' = 'k', 'value.fields-include' = 'EXCEPT_KEY'"));
     assertStaysOnFlink(tEnv, "SELECT k, id FROM t");
     // A non-UTF-8 key charset decodes through Java's charset machinery — stays on Flink, like the
     // value-side raw gate.
