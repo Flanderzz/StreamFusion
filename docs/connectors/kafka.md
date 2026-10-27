@@ -72,7 +72,10 @@ All Flink Kafka startup modes, consumer properties, authentication schemes, inte
 partition discovery, group-offset behavior, and checkpoint offset commits remain available
 because Flink constructs and runs the source. The native source wrapper admits unbounded input and
 `scan.bounded.mode = 'latest-offset'`; other bounded modes use Flink's stock source path. No Kafka
-property translation gate exists.
+property translation gate exists. Because the split state stays Flink's, a native decode recovers
+as the stock source does: the end-to-end tests fail a keyed table reading `partition` and `offset`
+over mid-stream and restore its savepoint at another parallelism, and every record must reach an
+exactly-once sink once, at its own offset.
 
 JSON, bare Avro, Avro Confluent, and Protobuf can push a physical-column projection into native
 decode. CSV and raw decode their complete positional record. A [keyed table](#keyed-tables)
