@@ -494,3 +494,17 @@ ENCODE/DECODE keep the charset scalar, matching Comet's scalar-parameter approac
 old to_hex/uppercase array pipeline. LPAD/RPAD write directly to Arrow builders rather than materializing intermediate arrays or
 copying a per-row scratch string. The shared codepoint reverse scan serves SUBSTRING and RIGHT;
 LOCATE reuses memmem for both scalar and column needles.
+
+## Runtime ARRAY_SORT options
+
+DataFusion and Comet provide the primitive-array pattern: copy a flat values span
+once and sort its per-row slices in place. StreamFusion follows that structure
+for runtime Boolean options, with Flink's row-specific direction, independent
+NULL placement and NULL-option result. It does not adopt Spark's comparator
+semantics or DataFusion's requirement that direction be scalar.
+
+Flink's comparator returns a nonzero result for equal non-NULL elements. Java
+TimSort can reject some long duplicate arrays, so the planner keeps its existing
+shorter-than-32 or native-ARRAY_DISTINCT proof before admitting either Rust path.
+Unrestricted arrays and fallible options keep generated Flink evaluation. This
+preserves released behavior without a new JVM callback or representation format.

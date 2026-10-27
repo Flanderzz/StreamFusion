@@ -46,6 +46,7 @@ mod array_remove;
 mod array_search;
 mod array_set;
 mod array_slice;
+mod array_sort;
 mod ascii;
 mod binary_strings;
 mod cardinality;
@@ -273,6 +274,7 @@ pub(crate) fn function(op: i64, arity: usize) -> Option<ScalarUDF> {
         214 => temporal_arithmetic::function(temporal_arithmetic::Operation::TimestampMonths),
         215 => temporal_extremum::function(arity, true),
         216 => temporal_extremum::function(arity, false),
+        217 => array_sort::function(arity),
         _ => return None,
     })
 }
