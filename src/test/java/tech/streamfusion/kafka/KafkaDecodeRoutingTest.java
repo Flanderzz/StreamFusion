@@ -3,6 +3,8 @@ package tech.streamfusion.kafka;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.Arrays;
+import java.util.regex.PatternSyntaxException;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.api.EnvironmentSettings;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
@@ -158,6 +160,44 @@ class KafkaDecodeRoutingTest {
     StreamTableEnvironment tEnv = env();
     tEnv.executeSql(table("id BIGINT, info ROW<name STRING, bin BINARY(4)>", "canal-json"));
     assertStaysOnFlink(tEnv, "SELECT * FROM t");
+  }
+
+  @Test
+  void canalIncludeFiltersRoute() {
+    StreamTableEnvironment tEnv = env();
+    tEnv.executeSql(
+        table("id BIGINT, name STRING", "canal-json")
+            .replace(
+                "'canal-json')",
+                "'canal-json', 'canal-json.database.include' = 'shop',"
+                    + " 'canal-json.table.include' = 'order_\\d+|users')"));
+    String plan = NativePlanner.explain(tEnv, "SELECT id, name FROM t");
+    assertTrue(
+        plan.contains("NativeKafkaDecode"),
+        "a Canal table with include filters should decode natively:\n" + plan);
+  }
+
+  @Test
+  void invalidCanalIncludePatternFailsWithFlinksOwnError() {
+    // Flink compiles the pattern when it builds the scan's deserializer and fails planning, so the
+    // native path must leave the scan to Flink rather than replace that failure with its own.
+    StreamTableEnvironment tEnv = env();
+    tEnv.executeSql(
+        table("id BIGINT, name STRING", "canal-json")
+            .replace("'canal-json')", "'canal-json', 'canal-json.table.include' = 'orders[')"));
+    PatternSyntaxException error =
+        assertThrows(
+            PatternSyntaxException.class,
+            () -> NativePlanner.explain(tEnv, "SELECT id, name FROM t"));
+    assertTrue(
+        Arrays.stream(error.getStackTrace())
+            .anyMatch(
+                frame ->
+                    frame
+                        .getClassName()
+                        .equals(
+                            "org.apache.flink.formats.json.canal.CanalJsonDeserializationSchema")),
+        "the pattern error should come from Flink's own Canal deserializer");
   }
 
   @Test

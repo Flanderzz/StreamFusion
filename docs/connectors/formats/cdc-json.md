@@ -77,6 +77,35 @@ structurally malformed message drops whole, a bad value inside an image nulls ju
 and a failure partway through a fan-out (a JSON array carrying multiple logical records) keeps the
 rows already emitted before the failure.
 
+Canal's `canal-json.database.include` and `canal-json.table.include` filters are native. Flink
+reads each message's top-level `database` and `table` values as Jackson text and drops the
+message unless a value fully matches its Java regular expression. The database check runs first,
+and both run before row conversion, so a dropped message is never corrupt for a bad image. The
+native decoder validates each message and reads the same values. It caches up to 4,096 verdicts
+per filter, and sends a batch's undecided values to the JVM in one call, so neither a steady set
+of tables nor many sharded table names costs a JVM call per message. The JVM decides with the
+pattern Flink compiles and Flink's Jackson settings, so the same edge cases apply:
+
+- a string value is matched as written; a JSON `null` is matched as the text `null`; an object or
+  array is matched as the empty string;
+- a number is matched as Jackson spells it, including the `BigDecimal` spelling Flink switches to
+  when the schema has a `DECIMAL` anywhere;
+- a duplicated top-level key uses its last value;
+- a missing `database`/`table` key or a non-object message fails the way Flink's
+  `NullPointerException` does — the job fails, or the message is skipped under
+  `ignore-parse-errors`.
+
+Messages the filter keeps decode as above. TiCDC's watermark events (`TIDB_WATERMARK`) carry an
+empty database and table, and its DDL events (`QUERY`) carry their database and, for table-level
+DDL, their table. A filter drops whichever of them it rejects, exactly as Flink does; one that
+passes with a `type` Flink doesn't decode is a corrupt message in both.
+
+On ten million Canal messages spread over ten tables, a filtered table's mini-batch aggregate ran
+1.47× faster than the previous route (Flink's decode feeding native operators) when it admitted
+one table and 1.15× when it admitted all ten. On ten million messages over a million sharded table
+names, where the verdict cache stays cold, it ran 1.26× faster. Against stock Flink: 1.55×, 1.35×
+and 1.31×. See the [benchmark archive](../../benchmarks/kafka-canal-include-20261027/README.md).
+
 `debezium-avro-confluent` also decodes natively — see [Avro Confluent](avro-confluent.md) for its
 registry, schema-evolution, and type-coverage details, which layer the Debezium envelope onto the
 same machinery as the plain `avro-confluent` source.
@@ -85,5 +114,5 @@ Fallbacks on read:
 
 - the `schema-include` envelope wrapper;
 - metadata/computed columns;
-- Canal's `database.include`/`table.include` regex filters — Flink honors them at deserialization
-  time, but the native decoder doesn't implement the filter, so a table using either falls back.
+- a Canal include pattern Java can't compile — the scan stays on Flink, whose planner fails with
+  its own pattern error.

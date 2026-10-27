@@ -13,6 +13,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Properties;
 import java.util.regex.Pattern;
+import java.util.regex.PatternSyntaxException;
 import org.apache.calcite.rel.RelNode;
 import org.apache.flink.connector.kafka.source.KafkaSource;
 import org.apache.flink.connector.kafka.source.KafkaSourceBuilder;
@@ -146,13 +147,15 @@ final class KafkaTables {
    * Flink. Every dialect routes for any converter-supported schema, nested columns and any width
    * included: Debezium/OGG carry full pre/post images, and the Maxwell/Canal UPDATE_BEFORE follows
    * Flink's recursive findValue key-presence rule, reproduced by a native per-message key scan of
-   * the raw {@code old}. {@code ignore-parse-errors} is supported both ways — the
+   * the raw {@code old}. Canal's database/table include filters route whenever their patterns
+   * compile; the JVM decides each distinct value with Flink's own regex and number semantics.
+   * {@code ignore-parse-errors} is supported both ways — the
    * native decoder skips an undecodable message per Flink's catch-everything-per-message semantics.
    * {@code debezium-avro-confluent} (the same envelope with registry-Avro bodies) routes under its
    * provider's registry-option and avro-type gates; it defines no error-skip or schema-include
    * options, so those clauses never engage for it.
    * Still falling back: a {@code schema-include} wrapper, metadata/computed columns the value decode
-   * doesn't produce, and Canal's database/table include regexes. */
+   * doesn't produce, and an include pattern Java rejects. */
   static boolean isCdcDecode(RelNode node) {
     if (!(node instanceof StreamPhysicalTableSourceScan)) {
       return false;
@@ -179,10 +182,8 @@ final class KafkaTables {
     if (!FormatCodes.isCdc(code)) {
       return false;
     }
-    if (code == FormatCodes.CANAL_JSON
-        && (NativeFormatOptions.option(options, "database.include") != null
-            || NativeFormatOptions.option(options, "table.include") != null)) {
-      return false; // Java regex filters the native decode doesn't run
+    if (code == FormatCodes.CANAL_JSON && !canalIncludePatternsCompile(options)) {
+      return false;
     }
     if ("true".equalsIgnoreCase(NativeFormatOptions.option(options, "schema-include"))) {
       return false; // the {schema, payload} envelope wrapper isn't handled
@@ -191,6 +192,25 @@ final class KafkaTables {
       return false; // an unreproducible format option
     }
     return FilesystemTables.allPhysicalColumns(scan); // metadata/computed columns aren't decoded natively
+  }
+
+  /**
+   * Whether Canal's include patterns compile. Flink compiles them when it builds the scan's
+   * deserializer and fails planning with its own error, so an invalid pattern keeps the scan there.
+   */
+  static boolean canalIncludePatternsCompile(Map<String, String> options) {
+    for (String option : new String[] {"database.include", "table.include"}) {
+      String pattern = NativeFormatOptions.option(options, option);
+      if (pattern == null) {
+        continue;
+      }
+      try {
+        Pattern.compile(pattern);
+      } catch (PatternSyntaxException e) {
+        return false;
+      }
+    }
+    return true;
   }
 
   /** Finds an installed format SPI provider without making this connector artifact depend on a format JAR. */
