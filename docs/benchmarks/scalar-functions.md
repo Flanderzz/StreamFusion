@@ -3030,3 +3030,68 @@ the previous control requires the preceding encoder first on the classpath. Runt
 parity/route tests cover all four integer widths on both supported Flink lines and JDK
 11/17, including NULLs, signed minima, nested/widened calls and failing unselected
 branches. The unchanged released `testRound` fixtures pass on both lines.
+
+## Single-argument integer TRUNCATE
+
+Measured on 2026-10-27 against canonical main `d98dc2f2`, using the same machine, release
+configuration, timing boundaries, NULL patterns and output checks as
+[single-argument integer ROUND](#single-argument-integer-round). Both Flink 1.18.1 and
+2.2.1 are measured independently. INT and BIGINT single-argument TRUNCATE reuse the
+verified operand instead of invoking Flink's DECIMAL(38,18) intermediate. This is exact
+at the default zero scale, including signed minima and large BIGINTs. Explicit scales,
+unverified producers, DECIMAL/floating contracts and direct TINYINT/SMALLINT compilation
+failures retain their preceding paths.
+
+Stock runs the released generated expression on equal prepared RowData; previous and
+candidate run production Calc on prepared Arrow inside Rust. Intrinsic callback and
+conversion costs stay timed; setup/import/export and perimeter transposes are excluded.
+Every output contributes to a checksum, with full schema/Arrow equality checked before
+timing. Sixteen warmups and eleven measured 131,072-row trials rotate engine order.
+All input schemas are nullable; actual NULL values occur every seventh row when enabled.
+Values are median [min, max] ns/row.
+
+| Flink, type, NULL values, stock format, batch rows | Stock ns/row | Previous ns/row | Native ns/row | vs stock | vs previous |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1.18.1, BIGINT, false, binary, 1024 | 114.692 [108.152, 121.879] | 163.985 [155.083, 185.194] | 0.357 [0.305, 0.395] | 321.56x | 459.76x |
+| 1.18.1, BIGINT, true, generic, 1024 | 94.695 [88.018, 99.201] | 152.532 [148.545, 156.392] | 0.719 [0.698, 0.833] | 131.75x | 212.22x |
+| 1.18.1, BIGINT, true, binary, 16 | 102.172 [94.620, 103.305] | 851.419 [832.244, 868.287] | 14.344 [13.178, 14.791] | 7.12x | 59.36x |
+| 1.18.1, INT, false, binary, 1024 | 50.861 [48.534, 54.994] | 100.856 [94.868, 109.976] | 0.345 [0.308, 0.409] | 147.60x | 292.68x |
+| 1.18.1, INT, true, generic, 1024 | 46.233 [44.280, 49.321] | 91.235 [87.666, 102.056] | 0.720 [0.684, 0.777] | 64.21x | 126.71x |
+| 1.18.1, INT, true, binary, 16 | 42.947 [40.513, 45.516] | 811.769 [806.045, 815.572] | 14.427 [13.648, 14.712] | 2.98x | 56.27x |
+| 2.2.1, BIGINT, false, binary, 1024 | 112.933 [103.880, 117.159] | 167.469 [157.077, 173.877] | 0.357 [0.310, 0.408] | 316.07x | 468.70x |
+| 2.2.1, BIGINT, true, generic, 1024 | 99.859 [94.567, 104.457] | 147.552 [141.161, 153.150] | 0.703 [0.610, 0.746] | 142.01x | 209.84x |
+| 2.2.1, BIGINT, true, binary, 16 | 98.121 [88.774, 101.313] | 839.763 [827.729, 851.937] | 15.164 [14.409, 16.540] | 6.47x | 55.38x |
+| 2.2.1, INT, false, binary, 1024 | 64.964 [59.286, 73.217] | 95.684 [94.034, 98.344] | 0.318 [0.294, 0.347] | 204.56x | 301.30x |
+| 2.2.1, INT, true, generic, 1024 | 45.872 [44.496, 53.871] | 91.028 [85.339, 94.128] | 0.700 [0.622, 0.741] | 65.53x | 130.04x |
+| 2.2.1, INT, true, binary, 16 | 55.065 [51.269, 60.222] | 834.556 [821.474, 875.742] | 14.462 [13.581, 15.038] | 3.81x | 57.70x |
+
+All sampled cases beat stock and the previous callback. The 1,024-row cases improve
+64.21-321.56x over stock and 126.71-468.70x over previous StreamFusion. Sixteen-row
+controls improve 2.98-7.12x over stock and 55.38-59.36x over previous StreamFusion.
+The native path remains a shared-operand Calc, requesting 13 allocations / 606 bytes
+per batch with no new output values/validity buffers. Flink's decimal conversion and
+rounding work account for the difference from FLOOR/CEIL/ROUND controls; these batch
+ratios must not be applied to complete jobs.
+
+A separate Flink 2.2.1 complete job retains a bounded 1M-row INT source, both transposes,
+parallelism one and a rowwise blackhole sink. Positive consumed NativeCalc work and the
+expected previous/candidate JVM route are required. Previous uses the canonical main
+encoder. Each engine runs in a separate sequential JVM with two warmups and five
+measured jobs. Seconds are median [min, max]:
+
+| Stock | Previous callback | Candidate |
+| ---: | ---: | ---: |
+| 0.188721 [0.185241, 0.200471] | 0.261994 [0.256899, 0.264275] | 0.132958 [0.129006, 0.147995] |
+
+The measured candidate reduces elapsed time by about 29.5% versus stock and 49.3% versus
+the preceding implementation in this workload. Startup, submission and JIT remain
+included; this is not proof of sustained acceleration for arbitrary inputs or jobs.
+The [raw result record](results/integral-truncate-2026-10-27.json) retains every trial,
+checksum, allocation observation and benchmark configuration.
+
+Use the shared release example with `SF_INTEGRAL_ROUNDING_FUNCTION=TRUNCATE` and INT or
+BIGINT. Complete-job controls select `-Drounding.pipeline.function=TRUNCATE`; the prior
+encoder must be first on the classpath for the previous control. Runtime parity and
+consumed-work witnesses cover both types on Flink 1.18.1/2.2.1 and JDK 11/17. Explicit
+widening of TINYINT/SMALLINT is verified, while direct calls retain stock compilation
+failures. Unchanged released `testTruncate` fixtures pass on both lines.

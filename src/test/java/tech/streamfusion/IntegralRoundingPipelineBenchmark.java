@@ -25,7 +25,8 @@ class IntegralRoundingPipelineBenchmark {
     String engine = System.getProperty("rounding.pipeline.engine", "native");
     boolean nativeRun = !engine.equals("flink");
     String function = System.getProperty("rounding.pipeline.function", "FLOOR");
-    assertTrue(java.util.List.of("FLOOR", "CEIL", "CEILING", "ROUND").contains(function));
+    assertTrue(
+        java.util.List.of("FLOOR", "CEIL", "CEILING", "ROUND", "TRUNCATE").contains(function));
     String routeName = function.equals("CEILING") ? "CEIL" : function;
     for (int trial = 0; trial < warmups + runs; trial++) {
       try (var metrics = new RecoveryExecutionMetrics()) {

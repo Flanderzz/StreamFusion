@@ -13,7 +13,7 @@ import org.junit.jupiter.api.Test;
 
 class IntegralRoundEncodingTest {
   @Test
-  void integerFloorReusesItsOperandWithoutAFunctionOrJvmBinding() {
+  void integerRoundReusesItsOperandWithoutAFunctionOrJvmBinding() {
     var types = new JavaTypeFactoryImpl();
     var rex = new RexBuilder(types);
     for (var name :

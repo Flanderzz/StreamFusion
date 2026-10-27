@@ -1365,8 +1365,8 @@ returns NULL. No JVM callback or configuration switch is required for these conv
 ### Integer FLOOR / CEIL / CEILING
 
 Single-argument FLOOR, CEIL and CEILING over TINYINT, SMALLINT, INT and BIGINT preserve the input
-value, resolved width and NULL. Verified direct inputs, typed literals, nested combinations
-of these rounding functions and recursive lossless integer widening reuse the operand's
+value, resolved width and NULL. Verified direct inputs, typed literals, nested admitted
+integer rounding and recursive lossless integer widening reuse the operand's
 native expression without a JVM evaluator or
 floating-point conversion. This preserves signed minima and BIGINT values above 2^53.
 Arithmetic, narrowing and other unverified producers retain the enclosing generated rounding
@@ -1383,7 +1383,7 @@ and [Integer CEIL / CEILING](../benchmarks/scalar-functions.md#integer-ceil-ceil
 
 `ROUND(value)` over TINYINT, SMALLINT, INT and BIGINT also returns the integer unchanged.
 Verified direct inputs, typed literals, recursive lossless widening and nested admitted
-FLOOR/CEIL/ROUND reuse the native operand expression without a JVM evaluator, a floating
+integer rounding reuse the native operand expression without a JVM evaluator, a floating
 conversion or a new values buffer. Signed minima, exact BIGINTs, NULLs and resolved widths
 are preserved. Arithmetic, narrowing and other unverified producers retain their complete
 generated rounding program. Every explicit scale, including zero, retains the existing
@@ -1391,6 +1391,20 @@ generated path: negative positions can overflow and wrap, and extreme positions 
 inside released Flink's decimal rounding. DECIMAL and floating ROUND are unchanged.
 [Release measurements](../benchmarks/scalar-functions.md#single-argument-integer-round)
 retain the slower small-batch and complete-job controls as well as the bulk-batch gains.
+
+### Single-argument integer TRUNCATE
+
+`TRUNCATE(value)` over INT and BIGINT preserves the integer, its resolved width and NULL.
+Verified direct inputs, typed literals, recursive lossless widening and nested admitted
+integer rounding reuse the native operand expression without a JVM evaluator or a new
+values buffer. This removes released Flink's DECIMAL(38,18) intermediate only when the
+default zero scale provably leaves every input unchanged, including signed minima and
+exact BIGINTs above 2^53. Explicit scales and unverified producers retain the complete
+generated program, including its overflow and exception behavior. DECIMAL and floating
+TRUNCATE retain their separate paths. TINYINT/SMALLINT TRUNCATE still preserves released
+Flink's generated-compilation failure; explicitly widening them to INT/BIGINT is supported.
+[Release measurements](../benchmarks/scalar-functions.md#single-argument-integer-truncate)
+compare stock, the previous JVM route and candidate at both batch and complete-job boundaries.
 
 ### Exact unary and integral functions
 
@@ -1420,8 +1434,8 @@ compare prepared inputs with stock and the previous callback, and separately rep
 complete row-source job with both transposes.
 
 DECIMAL unary minus, ABS and SIGN execute Flink's generated expression code through
-the existing batch JVM bridge. Unverified integer FLOOR/CEIL/CEILING producers and INT/BIGINT
-TRUNCATE use the same path, including per-row TRUNCATE positions. TINYINT/SMALLINT TRUNCATE
+the existing batch JVM bridge. Unverified integer rounding producers and explicit-scale
+INT/BIGINT TRUNCATE use the same path, including per-row TRUNCATE positions. TINYINT/SMALLINT TRUNCATE
 retains the host compilation
 failure described under exact floating math below. This retains resolved widths, decimal precision/scale, NULL handling,
 and Java overflow behavior. Adjacent supported
@@ -1508,7 +1522,8 @@ resolved precision/scale and NULL behavior; a position at or above the source sc
 the input value. Positions below -38 use Flink's generated expression through the columnar
 callback, including its extreme-scale errors. They retain the same AND/OR short-circuit
 restriction as ROUND. Runtime INT scales use the generated scalar-consumer path above. A standalone STRING cast of ROUND/TRUNCATE on direct decimal and INT columns uses native batch rounding and formatting, with released-function fallback for batches containing extreme negative positions. Other compositions retain generated evaluation. The direct STRING consumer measurements above include the full native island.
-Integer TRUNCATE inputs use the generated path described under exact numeric functions;
+Integer TRUNCATE inputs outside the verified single-argument INT/BIGINT path use the
+generated path described under exact numeric functions;
 floating-point inputs use the exact generated path below. SQL tests cover
 precision 38, multiple batches, filters, CASE, COALESCE and aggregate consumers, including
 projections that combine and nest truncation with DECIMAL-to-FLOAT/DOUBLE casts.
@@ -2722,8 +2737,9 @@ overloads, including integer and DECIMAL operands, use the selected released Fli
 own conversions and math functions. This preserves deterministic last-bit results, signed
 zero, NaN, infinities, domain results and NULL behavior.
 
-Non-DECIMAL ROUND, except the verified single-argument integer path above, and
-INT/BIGINT/FLOAT TRUNCATE use the same generated path, including runtime INT scales.
+Non-DECIMAL ROUND and INT/BIGINT TRUNCATE use generated evaluation outside the verified
+single-argument integer paths above. FLOAT TRUNCATE also uses generated evaluation,
+including runtime INT scales.
 Independently emitted DOUBLE TRUNCATE uses an exact
 [bounded shortcut](../optimizations/host-exact-builtins-upcall.md#bounded-double-truncate):
 for magnitudes from 1 through 1e9 and scales -6 through 6, outward-rounded bounds must

@@ -4044,8 +4044,9 @@ final class RexExpression {
       case "CEILING":
         return integral && call.getOperands().size() == 1 && !nativeIntegralRounding(call);
       case "TRUNCATE":
-        return integral
-            || SqlTypeFamily.APPROXIMATE_NUMERIC.contains(call.getOperands().get(0).getType());
+        return (integral
+                || SqlTypeFamily.APPROXIMATE_NUMERIC.contains(call.getOperands().get(0).getType()))
+            && !nativeIntegralRounding(call);
       case "ROUND":
         return input != SqlTypeName.DECIMAL
             && SqlTypeFamily.NUMERIC.contains(call.getOperands().get(0).getType())
@@ -4129,10 +4130,16 @@ final class RexExpression {
             || call.getOperator()
                 == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.CEIL
             || call.getOperator()
-                == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.ROUND)
+                == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.ROUND
+            || call.getOperator()
+                == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.TRUNCATE)
         && call.getOperands().size() == 1
         && SqlTypeFamily.INTEGER.contains(call.getOperands().get(0).getType())
         && call.getType().getSqlTypeName() == call.getOperands().get(0).getType().getSqlTypeName()
+        && (call.getOperator()
+                != org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.TRUNCATE
+            || call.getType().getSqlTypeName() == SqlTypeName.INTEGER
+            || call.getType().getSqlTypeName() == SqlTypeName.BIGINT)
         && nativeIntegralRoundingOperand(call.getOperands().get(0));
   }
 

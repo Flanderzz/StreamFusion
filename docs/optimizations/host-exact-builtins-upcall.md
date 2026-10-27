@@ -747,3 +747,16 @@ to stock. The complete 1M-row stock/previous/native medians are
 0.138810/0.162969/0.141323 seconds with both transposes; no standalone stock speedup is
 claimed. The [full ROUND results](../benchmarks/scalar-functions.md#single-argument-integer-round)
 retain all measured variability and common Calc/perimeter limits.
+
+
+Single-argument INT/BIGINT TRUNCATE also reuses the verified operand. At its default
+zero scale, released Flink's DECIMAL(38,18) conversion/truncation returns the same integer
+for every admitted value. Skipping that work preserves NULLs, widths and signed minima.
+TINYINT/SMALLINT keep stock's compilation failure unless explicitly widened. Explicit
+scales and unverified producers keep generated evaluation; DECIMAL and floating paths
+are unchanged. On both released lines, 1,024-row prepared controls improve 64.21-321.56x
+over stock and 126.71-468.70x over the preceding callback; 16-row controls also win.
+The 1M-row stock/previous/native medians are 0.188721/0.261994/0.132958 seconds with
+both transposes. These measurements apply to the recorded workload, not every job.
+[Full TRUNCATE measurements](../benchmarks/scalar-functions.md#single-argument-integer-truncate)
+retain variability, consumed-work checks and complete-job boundaries.
