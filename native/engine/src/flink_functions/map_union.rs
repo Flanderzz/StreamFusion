@@ -41,7 +41,7 @@ impl ScalarUDFImpl for MapUnion {
         ))
     }
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
-        datafusion::functions::utils::make_scalar_function(union, vec![])(&args.args)
+        super::map_arrays::invoke(&args.args, union)
     }
 }
 fn union(args: &[ArrayRef]) -> Result<ArrayRef> {
@@ -63,6 +63,9 @@ fn union(args: &[ArrayRef]) -> Result<ArrayRef> {
 fn pair(left: &ArrayRef, right: &ArrayRef) -> Result<ArrayRef> {
     let (l, _, _) = super::map_projection::parts(left)?;
     let (r, _, _) = super::map_projection::parts(right)?;
+    if crate::flink_key::represented_string(l.column(0).data_type()) {
+        return string_pair(left, right);
+    }
     macro_rules! primitive {
         ($ty:ty) => {{
             let lk = l
@@ -99,6 +102,83 @@ fn pair(left: &ArrayRef, right: &ArrayRef) -> Result<ArrayRef> {
             exec_err!("MAP_UNION requires verified basic keys")
         }
     }
+}
+
+fn string_pair(left: &ArrayRef, right: &ArrayRef) -> Result<ArrayRef> {
+    use arrow::array::ListArray;
+    use arrow::datatypes::Field;
+    use std::sync::Arc;
+    let (l, lo, ln) = super::map_projection::parts(left)?;
+    let (r, ro, rn) = super::map_projection::parts(right)?;
+    let strings = [
+        super::collection_string::Strings::new(l.column(0))?,
+        super::collection_string::Strings::new(r.column(0))?,
+    ];
+    let kd = [l.column(0).to_data(), r.column(0).to_data()];
+    let vd = [l.column(1).to_data(), r.column(1).to_data()];
+    let mut keys = MutableArrayData::new(kd.iter().collect(), false, l.len() + r.len());
+    let mut values = MutableArrayData::new(vd.iter().collect(), false, l.len() + r.len());
+    let validity = NullBuffer::union(ln, rn);
+    let mut seen = Vec::<(usize, usize)>::new();
+    let mut offsets = vec![0];
+    for row in 0..left.len() {
+        if validity.as_ref().is_none_or(|n| n.is_valid(row)) {
+            let lr = lo[row] as usize..lo[row + 1] as usize;
+            let rr = ro[row] as usize..ro[row + 1] as usize;
+            if rr.is_empty() {
+                keys.extend(0, lr.start, lr.end);
+                values.extend(0, lr.start, lr.end);
+            } else {
+                seen.clear();
+                let mut right_null = false;
+                for index in rr.clone() {
+                    right_null |= strings[1].is_null(index);
+                    seen.push((1, index));
+                }
+                keys.extend(1, rr.start, rr.end);
+                values.extend(1, rr.start, rr.end);
+                for index in lr {
+                    let retain = if strings[0].is_null(index) {
+                        !right_null
+                    } else {
+                        !seen
+                            .iter()
+                            .any(|&(side, other)| strings[0].equal(index, &strings[side], other))
+                    };
+                    if retain {
+                        keys.extend(0, index, index + 1);
+                        values.extend(0, index, index + 1);
+                        seen.push((0, index));
+                    }
+                }
+            }
+        }
+        offsets.push(i32::try_from(keys.len()).map_err(|_| {
+            datafusion::common::DataFusionError::Execution("MAP_UNION exceeds Arrow offsets".into())
+        })?);
+    }
+    let offsets = OffsetBuffer::new(offsets.into());
+    let generic = |values: ArrayRef| -> Result<ArrayRef> {
+        let array = ListArray::try_new(
+            Arc::new(Field::new("item", values.data_type().clone(), true)),
+            offsets.clone(),
+            values,
+            validity.clone(),
+        )?;
+        let array = super::array_copy::generic_elements(&array, |row| ro[row + 1] > ro[row])?;
+        Ok(array
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap()
+            .values()
+            .clone())
+    };
+    super::map_arrays::build(
+        generic(make_array(keys.freeze()))?,
+        generic(make_array(values.freeze()))?,
+        offsets,
+        validity,
+    )
 }
 fn select(
     left: &ArrayRef,

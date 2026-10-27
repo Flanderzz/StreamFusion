@@ -28,8 +28,8 @@ public final class NestedStringColumnVector implements BytesColumnVector {
 
   public StringData getString(int index) {
     var binary = BinaryStringData.fromBytes(utf8.get(index));
-    var restored = StringCacheColumns.read(cache, index, binary);
-    return restored == null ? binary : restored;
+    if (!cache.isNull(index)) binary.setJavaObject(Utf16Cache.read(cache, index));
+    return binary;
   }
 
   @Override

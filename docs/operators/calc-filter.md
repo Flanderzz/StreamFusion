@@ -2288,34 +2288,37 @@ Existing admitted collection subscripts and Boolean/integer ARRAY_DISTINCT retai
 
 | Functions | Execution inside NativeCalc |
 | --- | --- |
-| Collection CAST / TRY_CAST | Rust recursive child-buffer conversion for nullable signed-integer/DECIMAL ARRAY elements, including nested arrays, and the existing DECIMAL-to-floating ARRAY CAST; other verified ARRAY-to-ARRAY, MAP-to-MAP, ROW-to-ROW and ARRAY/MAP/ROW-to-character casts use the generated Flink program. A CAST that only changes nullability and that Flink itself runs as the identity, such as the one Flink 2.2 places over a `NOT NULL` connector metadata map, passes the column through like a column reference. Flink 1.18 rebuilds a map even for that cast, which reorders entries not already in `HashMap` order, so there it keeps the generated program |
-| SPLIT with dynamic or empty separator | Generated Flink program, preserving literal whole separators, NULLs and UTF-16 unit splitting for an empty separator; the existing non-empty literal separator retains its ordinary Rust path |
-| ARRAY_REVERSE, ARRAY_SLICE | Rust kernels for nullable primitive elements; generated Flink program for STRING/ROW/MAP-bearing or NOT NULL-element arrays and consumers requiring Java value semantics |
+| Collection CAST / TRY_CAST | Rust recursive conversion for nullable signed-integer/DECIMAL ARRAY elements, STRING-to-integer arrays, numeric-to-BOOLEAN arrays, integer-key MULTISET conversions, and nullable STRING/integer-key MAPs with numeric values. Numeric/BOOLEAN/DECIMAL arrays format to STRING/CHAR/VARCHAR in Rust. Other verified container conversions retain generated Flink evaluation; see the bounds below. A CAST that only changes nullability and that Flink itself runs as the identity, such as the one Flink 2.2 places over a `NOT NULL` connector metadata map, passes the column through like a column reference. Flink 1.18 rebuilds a map even for that cast, which reorders entries not already in `HashMap` order, so there it keeps the generated program |
+| SPLIT with dynamic, empty or NULL separator | Rust represented-STRING kernel; literal whole separators, strict NULLs and Java UTF-16 unit splitting for an empty separator. The existing non-empty literal separator retains its ordinary Rust path |
+| ARRAY_REVERSE, ARRAY_SLICE | Rust kernels for nullable elements, including represented STRING/ROW/MAP-bearing values. Reverse retains the original array category for zero/singleton arrays; slice retains it for a complete range. Copied ranges preserve string caches and nested RowKinds while recording their new generic containing array. NOT NULL elements, fixed BINARY and unverified consumers retain generated evaluation |
 | CARDINALITY on ARRAY/MAP | Rust outer-offset count, returning INT; NULL container produces NULL |
-| ARRAY_CONTAINS, ARRAY_POSITION | Rust scans for matching BOOLEAN, integer and DECIMAL element/needle types with nullable elements; other signatures, representation-sensitive consumers and fallible arguments use the generated Flink program. Non-NULL literal or nonnullable CONTAINS needles retain Flink evaluation; DECIMAL arrays with such needles require whole-Calc fallback |
-| ARRAY_MIN, ARRAY_MAX | Released DataFusion Rust kernels for nullable integer and DECIMAL elements; other types, NOT NULL elements, representation-sensitive consumers and fallible arguments retain Flink's generated program |
-| ARRAY_APPEND, ARRAY_PREPEND | Rust offset-based copying for nullable BOOLEAN/integer/DECIMAL arrays and a matching element, including a NULL element; sensitive representations and fallible arguments retain Flink evaluation |
-| ARRAY_REMOVE | Rust stable selection for matching nullable BOOLEAN/integer/DECIMAL arrays; removes every matching element, including NULL when the needle is NULL; other signatures retain Flink evaluation |
-| ARRAY_CONCAT | Rust concatenation for matching nullable BOOLEAN/integer/DECIMAL arrays; any NULL operand returns NULL; other signatures retain Flink evaluation |
-| ARRAY_UNION | Released DataFusion Rust kernel for matching nullable BOOLEAN/integer/DECIMAL arrays; first-occurrence order and one NULL element retained; either NULL container returns NULL |
-| ARRAY_EXCEPT | Rust stable set difference for matching nullable BOOLEAN/integer/DECIMAL arrays, retaining the first left-side occurrence of each value absent on the right, with NULL treated as a value; either NULL array returns NULL |
-| ARRAY_INTERSECT | Rust stable intersection for matching nullable BOOLEAN/integer/DECIMAL arrays; distinct matches follow left-side order even when the left array is shorter; NULL is a value, either NULL container returns NULL |
-| ARRAY_SORT | Rust sort for nullable integer/DECIMAL arrays proven shorter than 32 elements or produced by native ARRAY_DISTINCT: non-NULL constant Boolean options use released DataFusion; runtime/NULL Boolean options use a typed batch kernel. NULL array or option returns NULL; the two-argument form defaults NULL placement to the ascending flag. Unrestricted, sensitive and fallible signatures retain Flink evaluation |
+| ARRAY_CONTAINS, ARRAY_POSITION | Rust scans for matching BOOLEAN/integer/DECIMAL or represented STRING element/needle types with nullable elements. STRING comparisons use original UTF-16 only when both operands have Java caches, otherwise their encoded bytes. Non-NULL literal or nonnullable CONTAINS needles retain Flink evaluation; DECIMAL arrays with such needles require whole-Calc fallback. Unverified consumers and fallible arguments retain generated evaluation |
+| ARRAY_MIN, ARRAY_MAX | Released DataFusion Rust kernels for nullable integer/DECIMAL elements; native represented-STRING reductions preserve Flink's cache-dependent ordering and first retained value. Other types, NOT NULL elements, unverified consumers and fallible arguments retain the generated program |
+| ARRAY_APPEND, ARRAY_PREPEND | Rust offset-based copying for nullable BOOLEAN/integer/DECIMAL and represented STRING arrays with a matching element, including NULL. Original UTF-16 caches survive in copied STRING elements; fallible arguments and unverified consumers retain generated evaluation |
+| ARRAY_REMOVE | Rust stable selection for matching nullable BOOLEAN/integer/DECIMAL and represented STRING arrays; removes every matching element, including NULL when the needle is NULL. STRING equality preserves original Java-cache identity; other signatures retain generated evaluation |
+| ARRAY_CONCAT | Rust concatenation for matching nullable BOOLEAN/integer/DECIMAL and represented STRING arrays; any NULL operand returns NULL. Copied STRING elements retain their original caches; other signatures retain generated evaluation |
+| ARRAY_UNION | Released DataFusion Rust kernel for matching nullable BOOLEAN/integer/DECIMAL arrays; a native represented-STRING kernel preserves cache-sensitive equality. Both retain first-occurrence order and one NULL element; either NULL container returns NULL |
+| ARRAY_EXCEPT | Rust stable set difference for matching nullable BOOLEAN/integer/DECIMAL and represented STRING arrays, retaining the first left-side occurrence of each value absent on the right, with NULL treated as a value; either NULL array returns NULL |
+| ARRAY_INTERSECT | Rust stable intersection for matching nullable BOOLEAN/integer/DECIMAL and represented STRING arrays; distinct matches follow left-side order even when the left array is shorter. STRING equality retains Java caches; NULL is a value and either NULL container returns NULL |
+| ARRAY_SORT | Proven short/distinct nullable integer/DECIMAL arrays retain released DataFusion for non-NULL constant flags and the typed batch kernel for runtime/NULL flags. Other integer/DECIMAL and represented STRING arrays use native TimSort at any length, including runtime/NULL Boolean flags. Preserves the released comparator, stable identities and invalid-comparator exception; other types, fallible operands and unverified consumers remain generated |
 | ARRAY_JOIN | Rust UTF-8 join for total nullable string arrays and string options, including strict explicit NULL replacement; co-projected sensitive values and unverified consumers remain generated |
-| ELEMENT | Rust extraction for nullable BOOLEAN/integer/DECIMAL arrays; NULL/empty arrays return NULL, a singleton returns its element, longer arrays raise the selected Flink line's exception with the released message; sensitive/fallible operands retain generated evaluation |
-| MAP_FROM_ARRAYS | Rust construction for nullable basic key/value arrays, preserving duplicate and NULL keys, entry order and strict parent NULLs; mismatched lengths retain Flink's typed exception; other signatures remain generated |
-| MAP_KEYS | Rust shared-key view for total maps with nullable BOOLEAN/integer/DECIMAL keys and values; a direct final projection of an input-reference MAP with STRING/VARCHAR keys and nullable basic values also shares the represented key buffers; direct final input-reference maps with nullable BINARY keys and nullable basic values share their binary key child through the length-delimited transport; other signatures retain generated evaluation |
+| ELEMENT | Rust extraction for nullable BOOLEAN/integer/DECIMAL and represented STRING arrays; NULL/empty arrays return NULL, a singleton retains its exact element representation, longer arrays raise the selected Flink line's exception with the released message. Fallible operands and unverified consumers retain generated evaluation |
+| MAP_FROM_ARRAYS | Rust construction for nullable BOOLEAN/integer/DECIMAL and represented STRING key/value arrays, preserving duplicate and NULL keys, entry order and strict parent NULLs; mismatched lengths retain Flink's typed exception; other signatures remain generated |
+| MAP_KEYS | Rust shared-key view for total maps with nullable BOOLEAN/integer/DECIMAL keys and values. A final direct input-reference projection additionally admits verified nullable keys/values containing STRING, temporal or nested ARRAY/MAP/ROW values, retaining their represented children. Existing nullable BINARY-key/basic-value projections retain length-delimited transport. NOT NULL primitive key arrays and unverified representations retain generated evaluation |
 | MAP_VALUES | Rust shared-value view under the same verified map-projection admission; a value-only Calc with no condition or sensitive co-projection need not preserve the unused keys' Java caches. Direct VARCHAR-key projections also admit nullable BINARY values through the length-delimited transport |
-| MAP_ENTRIES | Rust shared entry-row list for verified basic maps and the direct STRING/VARCHAR-key input projections above; fresh entry rows have INSERT kind, while representation-sensitive row consumers remain generated |
-| MAP_UNION | Rust stable typed membership/gather for total matching nullable basic maps, preserving right ordering/duplicates and Flink NULL-key behavior |
-| Runtime ARRAY[...] | Rust construction for matching nullable BOOLEAN/integer/DECIMAL/DATE/TIME/TIMESTAMP/LTZ elements and total arguments; other projected signatures retain the generated program; UNNEST retains its existing wider scalar-specific admission |
-| Runtime MAP[...] | Rust construction for total nullable basic keys/values and distinct literal/input-reference key expressions; repeated/generated keys and fallible arguments remain generated; Flink 1.18 multi-entry constructors retain generated grouping order |
-| Runtime ROW(...) | Released DataFusion named-struct construction for total BOOLEAN/integer/DECIMAL fields; other fields and representation-sensitive consumers remain generated |
-| OBJECT_OF | Released named-struct construction for validated metadata and total basic fields; other signatures remain generated |
-| OBJECT_UPDATE | Native field selection only for one unshared inline basic OBJECT_OF in the complete Calc and atomic literal/input-reference values; shared objects and other signatures remain generated |
+| MAP_ENTRIES | Rust shared entry-row list under the verified MAP_KEYS/MAP_VALUES input-projection admission, including nullable nested key/value types. Fresh entry rows have INSERT kind; nested values retain their own RowKinds and string caches. Unverified consumers retain generated evaluation |
+| MAP_UNION | Rust stable gather for total nullable basic maps or nullable STRING keys with basic/STRING values, preserving right duplicates, left-only NULL rules and empty-right identity; other signatures remain generated |
+| Runtime ARRAY[...] | Rust construction for matching nullable BOOLEAN/integer/DECIMAL/DATE/TIME/TIMESTAMP/LTZ elements and total arguments. STRING arrays additionally admit literal/input-reference elements, retaining literal UTF-16 units (including isolated surrogates) and original input caches. Other projected signatures retain the generated program; UNNEST retains its existing wider scalar admission |
+| Runtime MAP[...] | Rust construction for total nullable basic pairs and STRING/one-level ROW-bearing pairs with distinct literal/input key expressions. Preserves binary STRING/ROW identity; 1.18 represented constructors use input order for its nondeterministic grouping. Repeated/fallible key expressions and unverified types remain generated |
+| Runtime ROW(...) | Rust construction for total BOOLEAN/integer/DECIMAL/STRING fields, preserving binary ROW semantics; other fields and unverified consumers remain generated |
+| OBJECT_OF | Rust construction for validated metadata and total basic/STRING fields, preserving generic object STRING caches; other signatures remain generated |
+| OBJECT_UPDATE | Native field selection for one unshared inline basic/STRING OBJECT_OF in the complete Calc and atomic literal/input values; shared objects and other signatures remain generated |
 
-Representation-sensitive programs use the generated route for the complete filter and projection,
-preserving NULLs, empty filtered batches, shared function invocation order and released Flink overloads.
+Representation-sensitive operations outside the verified native kernels use the generated route
+for the complete filter and projection, preserving NULLs, empty filtered batches, shared function
+invocation order and released Flink overloads. Native STRING collection kernels retain the marked
+UTF-8/optional UTF-16 representation; they do not normalize isolated surrogates before comparisons.
+The existing final-row-sink and unverified-producer/state/consumer guards remain in force.
 It retains Arrow batch inputs/outputs and production JNI costs. A NativeCalc containing these
 functions does **not** imply that its scalar work executes in Rust; the function-engine diagnostic
 reports the assignment, including ARRAY/MAP/ROW constructors. Programs with user scalar
@@ -2478,7 +2481,8 @@ external STRUCTURED inputs or Flink 1.18 NOT NULL fixed BINARY MAP keys/values. 
 elements use the verified boundary below; NOT NULL elements remain guarded on Flink 1.18.
 The existing DECIMAL-to-FLOAT/DOUBLE ARRAY CAST also retains its Rust path.
 
-MULTISET casts reuse Flink's generated map-shaped evaluator and the existing Arrow
+Signed-integer MULTISET element casts execute in Rust using the released default HashMap
+iteration schedule. Other MULTISET casts retain Flink's generated map-shaped evaluator and the existing Arrow
 `MAP<element,INT NOT NULL>` transport. Nullable elements and containers, multiplicities, empty
 multisets, narrowing collisions, nested ROW/ARRAY elements and DECIMAL conversion retain the
 released rules, including legacy formatting and whole-container TRY_CAST failures. Counts are
@@ -2509,11 +2513,12 @@ the complete shared child buffer.
 Arguments that can fail per row retain Flink evaluation. The numeric cast itself is total;
 it must not introduce eager evaluation of an unselected or filtered input expression.
 Numeric TRY_CAST uses the same total numeric conversion, including overflow-to-NULL DECIMAL elements;
-it does not catch errors raised while evaluating its input. String-array TRY_CAST retains
-generated Flink evaluation: an invalid string element makes the complete result array NULL rather
-than replacing only that element. The complete Calc retains filter/CASE short-circuiting and
-input evaluation errors, including with legacy cast behavior enabled. STRING and other generated
-conversions are not included in the Rust numeric admission.
+it does not catch errors raised while evaluating its input. STRING-to-integer ARRAY casts also execute in Rust. TRY_CAST and legacy CAST make the complete
+outer result array NULL when any visible element fails, including within nested arrays; strict
+CAST preserves the scalar conversion exception. Hidden children under NULL containers are never
+converted. Numeric-to-BOOLEAN elements compare against zero. The complete Calc retains filter/CASE short-circuiting and
+input evaluation errors, including with legacy cast behavior enabled. Other element conversions retain the verified generated path. Nonnullable elements and fallible
+input expressions retain their existing guards.
 The released upstream ARRAY<BIGINT> cast fixtures preserve their original assertions. The two
 Flink 1.18.1 invocations consume native Calc input with `jvmFunctions=[]`; their input is an
 inline array constructor. The three Flink 2.2.1 invocations still fall back because their input
@@ -2528,8 +2533,8 @@ The new generated standalone casts and SPLIT signatures have separate
 
 ### Collection casts to character types
 
-Standalone ARRAY/MAP/MULTISET casts to STRING, VARCHAR and CHAR also select this generated program;
-ROW-to-character casts retain their existing whole-Calc route. Flink supplies brackets, map entry
+Nullable integer/DECIMAL/BOOLEAN ARRAY elements, including nested arrays, format to STRING, VARCHAR
+and CHAR in Rust. Other ARRAY, MAP, MULTISET and ROW character casts retain the generated program. Flink supplies brackets, map entry
 order, nested formatting, NULL spellings, CHAR padding and VARCHAR truncation for the selected
 legacy-cast setting. Bounded casts count Java UTF-16 units, including truncation between surrogate
 halves; the represented string result preserves those Java units. CAST and TRY_CAST retain NULL
@@ -2544,19 +2549,24 @@ These casts share the accepted collection-extension performance tradeoff; see th
 
 Boolean and integer (`TINYINT`, `SMALLINT`, `INT`, `BIGINT`) arrays use typed kernels following
 DataFusion's ordered membership and batch-gather structure. Boolean membership uses two bits;
-integer and string arrays of at most eight elements use a bounded stack search with a
-collision-checked fingerprint, and larger arrays use a reusable hash set. The first occurrence of each value is retained,
+integer arrays of at most eight elements use a bounded stack search with a
+collision-checked fingerprint, and larger integer arrays use a reusable hash set. The first occurrence of each value is retained,
 including one NULL element. NULL containers remain NULL and empty arrays remain
 empty. The result preserves the element width, field metadata, and nullability. Boolean equality
 compares values; string equality compares UTF-8 bytes without trimming or Unicode normalization.
-VARCHAR/STRING, CHAR, floating, decimal, temporal, binary, and nested element types use the
-generated collection route above for verified bridge types; other signatures retain planning fallback.
+Nullable VARCHAR/STRING and CHAR arrays now use the represented STRING kernel. It compares
+original UTF-16 units when both values have Java caches and encoded bytes otherwise, preserving
+isolated-surrogate identity. A retained-candidate scan preserves this potentially nontransitive equality. Stable first-occurrence selection retains the entire original value;
+copy-category metadata records the generic result array. Floating, decimal, temporal, binary and
+nested element types retain the generated route for verified bridges.
 Runtime SQL parity checks pass against released Flink 2.2.1.
 [Whole-job measurements](../benchmarks/scalar-functions.md#integer-array_distinct-2026-09-28)
 show large-array gains and small-array sensitivity to run-to-run variation. With
 [synchronous entry borrowing](../optimizations/projection-pruning-transpose.md#borrowing-at-the-synchronous-consumer),
 the nullable width-eight Boolean diagnostic also beats stock and previous production in two
-ten-million-row candidate runs; STRING performance admission remains unresolved, so its tested native kernel is not enabled by the planner.
+ten-million-row candidate runs. The earlier UTF-8-only STRING prototype remains disabled;
+represented STRING execution is a separate implementation under the maintainer's two-pass
+optimization agreement for [#505](https://github.com/datafusion-contrib/StreamFusion/issues/505).
 
 ### SPLIT
 
@@ -2564,13 +2574,17 @@ Character input and a literal non-empty separator use the Rust kernel. The separ
 text, including regex metacharacters. NULL input returns NULL, empty input returns an empty array,
 and leading/repeated/trailing separators retain empty tokens.
 
-Dynamic and empty separators use the default-enabled generated collection route. NULL input or
+Dynamic, empty and NULL separators use the default-enabled represented native kernel. NULL input or
 separator returns NULL. An empty separator splits Java UTF-16 units, including the two surrogate
 halves of a supplementary character. The represented collection output retains those units
 and their Java string caches through fused consumers and the final row projection. Unverified
 stateful, ordering, exchange and native-writer boundaries retain planning fallback. Disabling
 `streamfusion.experimental.collectionExpressions` retains fallback for these new signatures and
 does not disable the existing non-empty literal Rust path.
+An empty separator can also populate a source StringData object's Java cache. A Calc that combines
+such materialization with cache-sensitive comparisons of original character-bearing inputs stays
+on the generated route, preserving aliases and evaluation order. Comparisons of the newly
+produced SPLIT array alone, such as ARRAY_DISTINCT(SPLIT(s,'')), remain native.
 SPLIT is absent from the released Flink 1.18.1 catalog, so this SQL coverage is N/A on that line.
 Temporary user functions named SPLIT keep their own signatures and the ordinary UDF admission
 rules; builtin separator checks do not apply to them.
@@ -2928,8 +2942,8 @@ The recovered release revision passes the complete 54-check selected suite on Fl
 with four unavailable-ELT checks skipped, and the corresponding Flink 2.2.1 checks pass.
 Eleven DOUBLE TRUNCATE runtime checks and nine Boolean/string ARRAY_DISTINCT checks pass on
 both released lines. These are historical correctness results. Binary ELT now uses the
-Rust-side functionality gate described below. STRING ARRAY_DISTINCT uses the verified
-generated collection route described above; fixed binary casts, Boolean ARRAY_DISTINCT,
+Rust-side functionality gate described below. STRING ARRAY_DISTINCT subsequently gained the
+represented native kernel described above; fixed binary casts, Boolean ARRAY_DISTINCT,
 and the bounded DOUBLE TRUNCATE helper remain admitted.
 
 
@@ -3187,9 +3201,8 @@ definition with Flink's bridging SQL function, preserving runtime implementation
 
 Within the collection extension, MAP_KEYS evaluates in Rust for total MAP operands
 whose keys and values are nullable BOOLEAN, integer or DECIMAL. Parent NULLs,
-NULL keys, duplicates and entry order survive as a shared Arrow list view. Other
-signatures retain generated Flink evaluation, including representation-sensitive
-nested/string values and fallible arguments. This does not change default
+NULL keys, duplicates and entry order survive as a shared Arrow list view. Direct input maps additionally admit nullable verified nested/string key and value types. Other
+signatures and fallible arguments retain generated Flink evaluation. This does not change default
 collection admission or the standalone conversion limitations recorded in the
 [collection representation ledger](../optimizations/collection-representation-work.md).
 
@@ -3206,10 +3219,11 @@ as a list of nullable key/value rows, preserving order and parent NULLs. Consume
 that inspect row representation or RowKind retain generated evaluation. A direct
 projection creates fresh INSERT-kind entry rows, so it does not require the
 whole-Calc ROW metadata callback. This exception applies only to the verified
-basic maps and direct string-key input projections; nested ROW maps and ROW-valued
-consumers keep that callback.
+basic maps, verified nullable nested input maps and native one-level ROW-bearing MAP
+constructors. Unverified ROW-valued consumers keep the generated callback.
 
-MAP_UNION folds verified total basic maps left to right, propagating any NULL
+MAP_UNION folds verified total basic maps and nullable STRING-key maps with basic/STRING values
+left to right, propagating any NULL
 parent. Each nonempty right map emits all its entries first; unmatched non-NULL
 left keys are deduplicated, while all left NULL-key entries survive when the
 right map has no NULL key. An empty right map leaves the left duplicates intact.
@@ -3222,25 +3236,41 @@ or input-reference expressions. Runtime equal keys remain separate entries;
 repeated/generated key expressions retain Flink evaluation because its constructor
 deduplicates generated expressions rather than runtime key values. Fallible
 operands also remain generated, including discarded value-expression cases.
-Flink 1.18 groups generated key expressions through an unordered map rather than
-the ordered grouping used by 2.2. Its multi-entry MAP constructors retain complete
-Flink generation so later lookups and array-valued consumers do not assume an
-unverified construction order. Verified single-entry constructors remain native;
-the existing narrow-integer compilation restrictions still apply.
+STRING-bearing constructors and one-level ROW keys/values also run natively. Their STRING fields
+become cold binary strings, and nested rows retain the binary category and RowKind required by
+Flink's BinaryMapData construction. Flink 1.18's generated-expression grouping order varies
+between independently compiled identical queries. Represented constructors use input order on
+that line; deterministic 2.2 construction preserves input order exactly. The older primitive-only
+multi-entry 1.18 constructor path retains generation. Repeated key expressions, fallible operands
+and released narrow-integer compilation failures retain their existing guards.
 
-ROW constructors with total BOOLEAN/integer/DECIMAL fields reuse DataFusion's
+Constant MAP constructors, MAP_FROM_ARRAYS, MAP_UNION and MAP casts retain the complete
+nullable-key entry-list field when returned as a scalar. This includes its physical MAP
+marker and resolved decimal precision/scale; broadcasting a constant must not turn the
+carrier into an ordinary ARRAY of rows. The unchanged upstream mixed-precision decimal MAP
+case and focused constant/runtime-source regressions exercise this boundary.
+
+The UPDATE_BEFORE row filter retains the exact input Arrow fields after filtering. Arrow
+Java may rename list children during C Data import; restoring the original schema over the
+owned result vectors keeps UTF-16 carriers compatible with native literals and constructors.
+
+Basic MAP_ENTRIES projections keep their existing native fresh-row route, including
+MAP_FROM_ARRAYS with the same array on both sides. Existing fallible-operand guards remain.
+
+ROW constructors with total BOOLEAN/integer/DECIMAL and STRING fields reuse DataFusion's
 released named-struct builder, sharing field arrays. Fields retain their SQL
 names and nullable values; the constructed row itself is present with INSERT
-row kind. These fresh basic rows and their scalar field projections bypass the
+row kind. STRING fields lose their Java caches, matching binary ROW construction. These fresh basic rows and their scalar field projections bypass the
 whole-Calc ROW metadata callback. Other fields and representation-dependent row
 consumers remain generated; nested ROW arguments still trigger metadata handling.
 
 OBJECT_OF with validated class/field metadata and total basic fields reuses the
 released named-struct builder. Runtime values and field order match Flink's fresh
 GenericRowData construction; metadata validation still belongs to Flink planning.
-String/nested/temporal fields and fallible operands retain generated evaluation.
+STRING fields also run natively and preserve their Java caches in the fresh generic object.
+Nested/temporal fields and fallible operands retain generated evaluation.
 
-OBJECT_UPDATE admits only one unshared inline basic OBJECT_OF construction in the
+OBJECT_UPDATE admits only one unshared inline basic/STRING OBJECT_OF construction in the
 complete Calc, with literal/input-reference field values and literal field names.
 It folds the field choices into the released named-struct builder. Flink still
 validates field names and rejects repeated update names during planning. Shared objects, runtime structured inputs,
@@ -3293,3 +3323,34 @@ row representation, RowKind, or nested copy semantics.
 Unary MAP_UNION accepts an ordinary map or the nullable-key map-list carrier and
 returns the verified carrier by sharing entry children, offsets and validity.
 This preserves the declared native type as well as Flink's unchanged contents.
+
+### Native container cast bounds
+
+The [remaining collection measurements](../benchmarks/native-collections.md) compare stock
+Flink, the previous evaluator and these native kernels with both row/Arrow transposes. Slower
+cases ship under the maintainer's explicit two-pass agreement for #505; native execution does
+not imply a complete-job speedup.
+
+MAP casts admit nullable STRING keys whose character type is unchanged, or signed-integer keys
+cast to another signed-integer type, with nullable numeric or numeric-to-BOOLEAN values. STRING
+values cast to signed integers and nested nullable numeric ARRAY values use the same child
+conversion. New maps use Flink's Java HashMap iteration schedule: the first equal key object
+survives, the last value wins, and target integer keys are rehashed after conversion. Generated MAP input-field access takes a binary serializer snapshot before a call. Native
+MAP-reference operands reproduce its cold nested strings and binary row/array categories using
+owned Arrow views. Computed MAP operands retain their original caches through identity key casts. Integer MULTISET element casts use the same schedule
+and retain INT occurrence counts. Nonnullable element/key/value constraints, richer casts and
+representation-sensitive mixed consumers retain their verified generated path.
+
+
+A MAP_FROM_ARRAYS call with different operands remains a potential length-error site. Placing
+it inside CAST and MAP_KEYS, for example, retains the complete generated Calc under the existing
+fallible-operand guard. The direct MAP_FROM_ARRAYS kernel still runs in Rust and preserves its
+released length exception. A NativeCalc for that composed query is explicitly mixed execution.
+
+
+Function-engine diagnostics include TRY_CAST explicitly, alongside CAST. Both native and
+JVM-backed TRY_CAST calls therefore name their actual route; an empty function-name list
+cannot serve as evidence that a runtime TRY_CAST kernel executed. The collection tests require
+the named root function plus an empty JVM list and consumed native Calc input. Runtime STRING
+ELEMENT checks use source arrays, including cardinality failures, rather than relying only on
+a singleton constructor expression.

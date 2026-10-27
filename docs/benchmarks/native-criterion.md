@@ -2771,22 +2771,26 @@ or input-reference expressions. Runtime equal keys remain separate entries;
 repeated/generated key expressions retain Flink evaluation because its constructor
 deduplicates generated expressions rather than runtime key values. Fallible
 operands also remain generated, including discarded value-expression cases.
-On Flink 1.18, multi-entry constructors also retain generated evaluation because
-the released constructor uses unordered generated-expression grouping. The Rust
-fixtures exercise the kernel, not permission to bypass this SQL admission rule;
-see [the constructor contract](../operators/calc-filter.md#collection-expressions).
+The represented constructor path also covers admitted STRING/ROW fields.
+Flink 1.18 uses unordered generated-expression grouping for multi-entry maps;
+its native represented path uses the documented input order where the host order is
+inherently nondeterministic. Duplicate generated expressions and fallible operands
+retain their existing guards. The Rust fixtures exercise the kernel, not permission
+to bypass SQL admission; see [the constructor contract](../operators/calc-filter.md#collection-expressions).
 
-ROW constructors with total BOOLEAN/integer/DECIMAL fields reuse DataFusion's
-released named-struct builder, sharing field arrays. Fields retain their SQL
-names and nullable values; the constructed row itself is present with INSERT
-row kind. Other fields and representation-dependent row consumers remain generated.
+ROW constructors with admitted total fields use DataFusion's released named-struct
+builder. The represented STRING path preserves the binary-row cache-copy boundary
+and INSERT row kind; OBJECT construction preserves its generic-row cache behavior.
+Fields retain their SQL names and nullable values. Unverified fields and consumers
+retain the guards documented on the Calc coverage page.
 
 OBJECT_OF with validated class/field metadata and total basic fields reuses the
 released named-struct builder. Runtime values and field order match Flink's fresh
 GenericRowData construction; metadata validation still belongs to Flink planning.
-String/nested/temporal fields and fallible operands retain generated evaluation.
+The represented STRING path is also covered; nested/temporal fields and fallible
+operands retain generated evaluation.
 
-OBJECT_UPDATE admits only one unshared inline basic OBJECT_OF construction in the
+OBJECT_UPDATE admits only one unshared inline admitted OBJECT_OF construction in the
 complete Calc, with literal/input-reference field values and literal field names.
 It folds the field choices into the released named-struct builder. Flink still
 validates field names and rejects repeated update names during planning. Shared objects, runtime structured inputs,
@@ -2807,3 +2811,42 @@ direct substitute for this Flink kernel.
 The scalar registry also exercises ELEMENT's Flink 1.18 exception variant (opcode 201); its successful extraction kernel is shared with the 2.2 variant.
 
 The scalar registry's `op=195/unary` profiles cover ordinary sliced nullable maps normalized to the MAP_UNION return carrier.
+
+### Represented collection registry fixtures
+
+`scalar_registry` covers every registered scalar opcode, including 217–229. Its
+catalog equality assertion detects a registered kernel without a fixture. The new
+represented profiles call the production UDFs for STRING array edits, membership,
+set operations, slicing/reversal, extrema and runtime-flag TimSort; MAP constructors,
+MAP_FROM_ARRAYS, MAP_UNION and nested projections; binary ROW/generic OBJECT
+construction; runtime, empty and NULL SPLIT separators; and the container-cast
+implementation used by Calc. Existing short numeric-sort fixtures remain.
+
+Inputs are prepared outside timing: 16/1,024/16,384 rows, sliced arrays, NULL and
+empty parents, NULL children, Unicode/NUL STRING payloads, warm UTF-16 caches,
+width 8 with cardinality 4 and width 64 with cardinality 64, and nullable runtime
+sort flags. Cast fixtures cover ARRAY-to-STRING, ARRAY-to-BOOLEAN, STRING-array
+CAST parsing, whole-container TRY_CAST failure for invalid STRING elements, MAP
+value widening, and MULTISET key widening. Registered UTF-16 literal decoding and
+MAP input snapshots are also exercised. The registry checks output cardinality
+and resolved Arrow types, plus independent whole-container failure and element-wise
+Boolean conversion expectations;
+independent SQL/JDK parity suites prove values, cache behavior and failures.
+
+The timed boundary is the production UDF invocation, scalar adaptation and output
+allocation in Rust on prebuilt Arrow inputs. Setup and untimed allocation probes
+are excluded. Allocation reports count requests and Arrow buffer sharing, not
+copied bytes. `--smoke` validates fixtures without generating timing claims:
+
+```sh
+python3 bin/bench-native.py --bench scalar_registry --smoke
+```
+
+These fixtures complement the [stock/previous/candidate complete-job report](native-collections.md).
+They do not replace its production conversion boundaries or constitute another
+profiling/optimization pass. The report retains its exact historical measured
+revisions and slower-case follow-up.
+
+Release smoke validation for this extension passed all 1,752 catalog fixtures,
+including 384 represented collection/cast profiles. This is fixture-validation
+evidence and supplies no timing or speedup result.

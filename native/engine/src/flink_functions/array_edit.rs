@@ -80,7 +80,7 @@ fn edit(args: &[ArrayRef], prepend: bool) -> Result<ArrayRef> {
             datafusion::common::DataFusionError::Execution("ARRAY exceeds Arrow offsets".into())
         })?);
     }
-    Ok(Arc::new(ListArray::new(
+    let result = ListArray::new(
         Arc::new(arrow::datatypes::Field::new_list_field(
             array.value_type(),
             true,
@@ -88,7 +88,8 @@ fn edit(args: &[ArrayRef], prepend: bool) -> Result<ArrayRef> {
         OffsetBuffer::new(offsets.into()),
         make_array(values.freeze()),
         array.nulls().cloned(),
-    )))
+    );
+    super::array_copy::generic_elements(&result, |_| true)
 }
 
 #[cfg(test)]
