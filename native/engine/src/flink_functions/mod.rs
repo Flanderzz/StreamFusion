@@ -60,6 +60,7 @@ mod instr;
 pub(crate) mod integer_divide;
 pub(crate) mod integer_string;
 mod is_json;
+mod java_timsort;
 mod json_exists;
 mod json_object;
 mod json_path;
