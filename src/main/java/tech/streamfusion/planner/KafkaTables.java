@@ -123,9 +123,6 @@ final class KafkaTables {
     if (metadata == null) {
       return false;
     }
-    if (!metadata.isEmpty() && options.containsKey("key.format")) {
-      return false; // the keyed composition doesn't carry metadata yet
-    }
     // A keyed table: the key/value composition must resolve (see KeyedDecodeSpec), and the value
     // format's gate then runs against the VALUE row type — the physical schema minus the key
     // columns under EXCEPT_KEY.

@@ -165,7 +165,7 @@ class KafkaDecodeRoutingTest {
   }
 
   @Test
-  void keyedTableWithMetadataKeepsTheScanOnFlink() {
+  void keyedTableWithMetadataRoutes() {
     StreamTableEnvironment tEnv = env();
     tEnv.executeSql(
         table("k STRING, id BIGINT, off BIGINT METADATA FROM 'offset'", "json")
@@ -173,7 +173,12 @@ class KafkaDecodeRoutingTest {
                 "'format' = 'json')",
                 "'key.format' = 'raw', 'key.fields' = 'k', 'value.format' = 'json',"
                     + " 'value.fields-include' = 'EXCEPT_KEY')"));
-    assertStaysOnFlink(tEnv, "SELECT k, id, off FROM t");
+    String plan = NativePlanner.explain(tEnv, "SELECT k, id, off FROM t");
+    assertTrue(
+        plan.contains("NativeKafkaDecode")
+            && plan.contains("keyFormat=[raw]")
+            && plan.contains("metadata=[{off=offset}]"),
+        plan);
   }
 
   @Test

@@ -184,26 +184,37 @@ final class NativeKafkaBatchDecoder implements AutoCloseable {
   private static final int LAYOUT_HEADER_COUNTS = 7;
   private static final int LAYOUT_HEADERS = 8;
   private static final int LAYOUT_HEADERS_LEN = 9;
-  private static final int LAYOUT_LEN = 10;
+  private static final int LAYOUT_KEYS = 10;
+  private static final int LAYOUT_KEYS_LEN = 11;
+  private static final int LAYOUT_KEY_LENGTHS = 12;
+  private static final int LAYOUT_LEN = 13;
   /** The leader epoch written for a record that carries none. */
   private static final long ABSENT_LEADER_EPOCH = Long.MIN_VALUE;
 
   /**
-   * Decodes a table that reads connector metadata: the values and each requested per-record
-   * column go into the decode slab in one pass (eight-byte columns first, so every region stays
-   * aligned), and the native decode gathers the metadata through the rows each record produced.
-   * Header keys are re-encoded from Kafka's decoded strings exactly as Flink's
+   * Decodes a table that reads connector metadata: the values (and a keyed table's keys) and each
+   * requested per-record column go into the decode slab in one pass (eight-byte columns first, so
+   * every region stays aligned), and the native decode gathers the metadata through the rows each
+   * record produced. Header keys are re-encoded from Kafka's decoded strings exactly as Flink's
    * {@code StringData.fromString} does.
    */
   private NativeSourceRecord decodeRecords(List<ConsumerRecord<byte[], byte[]>> records)
       throws Exception {
     int count = records.size();
     byte[][] values = new byte[count][];
+    byte[][] keys = keyed ? new byte[count][] : null;
     long valueBytes = 0;
+    long keyBytes = 0;
     for (int i = 0; i < count; i++) {
       values[i] = records.get(i).value();
       if (values[i] != null) {
         valueBytes += values[i].length;
+      }
+      if (keyed) {
+        keys[i] = records.get(i).key();
+        if (keys[i] != null) {
+          keyBytes += keys[i].length;
+        }
       }
     }
     decoder.beforeDecode(values, count);
@@ -239,6 +250,10 @@ final class NativeKafkaBatchDecoder implements AutoCloseable {
     }
     layout[LAYOUT_VALUE_LENGTHS] = at;
     at += 4L * count;
+    if (keyed) {
+      layout[LAYOUT_KEY_LENGTHS] = at;
+      at += 4L * count;
+    }
     if (readsHeaders) {
       layout[LAYOUT_HEADER_COUNTS] = at;
       at += 4L * count;
@@ -252,11 +267,17 @@ final class NativeKafkaBatchDecoder implements AutoCloseable {
       layout[LAYOUT_HEADERS_LEN] = headerBytes;
       at += headerBytes;
     }
+    if (keyed) {
+      layout[LAYOUT_KEYS] = at;
+      layout[LAYOUT_KEYS_LEN] = keyBytes;
+      at += keyBytes;
+    }
     layout[LAYOUT_VALUES] = at;
     layout[LAYOUT_VALUES_LEN] = valueBytes;
     at += valueBytes;
     ensureDecodeSlab(at);
     long valueAt = layout[LAYOUT_VALUES];
+    long keyAt = layout[LAYOUT_KEYS];
     for (int i = 0; i < count; i++) {
       ConsumerRecord<byte[], byte[]> record = records.get(i);
       if (readsOffsets) {
@@ -281,6 +302,14 @@ final class NativeKafkaBatchDecoder implements AutoCloseable {
       if (value != null) {
         decodeSlab.setBytes(valueAt, value);
         valueAt += value.length;
+      }
+      if (keyed) {
+        byte[] key = keys[i];
+        decodeSlab.setInt(layout[LAYOUT_KEY_LENGTHS] + 4L * i, key == null ? -1 : key.length);
+        if (key != null) {
+          decodeSlab.setBytes(keyAt, key);
+          keyAt += key.length;
+        }
       }
     }
     if (readsHeaders) {

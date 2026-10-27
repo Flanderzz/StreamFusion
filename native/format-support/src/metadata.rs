@@ -141,8 +141,8 @@ impl MetadataDecoder {
         }
     }
 
-    pub fn decode_records(&self, bodies: &RecordBatch, metadata: &RecordMetadata) -> RecordBatch {
-        let (values, sources) = self.value.decode_traced(bodies);
+    pub fn decode_records(&self, records: &RecordBatch, metadata: &RecordMetadata) -> RecordBatch {
+        let (values, sources) = self.value.decode_traced(records);
         let rows = values.num_rows();
         let mut columns: Vec<Option<ArrayRef>> = vec![None; self.output.fields().len()];
         for (index, &position) in self.value_positions.iter().enumerate() {
@@ -350,7 +350,11 @@ pub const LAYOUT_TIMESTAMP_TYPES: usize = 6;
 pub const LAYOUT_HEADER_COUNTS: usize = 7;
 pub const LAYOUT_HEADERS: usize = 8;
 pub const LAYOUT_HEADERS_LEN: usize = 9;
-pub const LAYOUT_LEN: usize = 10;
+/// A keyed table's keys, laid out like the values; absent (-1) for an unkeyed table.
+pub const LAYOUT_KEYS: usize = 10;
+pub const LAYOUT_KEYS_LEN: usize = 11;
+pub const LAYOUT_KEY_LENGTHS: usize = 12;
+pub const LAYOUT_LEN: usize = 13;
 
 /// One Kafka split batch in the JVM's direct buffer, borrowed for the duration of a decode call.
 pub struct RecordSlab<'a> {
@@ -401,27 +405,43 @@ impl<'a> RecordSlab<'a> {
         unsafe { std::slice::from_raw_parts(region.as_ptr() as *const T, len) }
     }
 
-    /// The batch's values as a one-column binary batch, copied out of the JVM's buffer when
-    /// `copy` (a decode that may pass input bytes through to its output).
-    pub fn bodies(&self, copy: bool) -> RecordBatch {
-        let lengths: &[i32] = self.region(LAYOUT_VALUE_LENGTHS, self.count);
-        let start = self.layout[LAYOUT_VALUES] as usize;
-        let len = self.layout[LAYOUT_VALUES_LEN] as usize;
+    /// The batch's decode input: its values as a one-column binary batch, or a keyed table's
+    /// `[key, body]` pair. Values are copied out of the JVM's buffer when `copy` (a decode that may
+    /// pass input bytes through to its output); keys always are, since a raw key decode does.
+    pub fn records(&self, copy: bool) -> RecordBatch {
+        let bodies =
+            Arc::new(self.binary(LAYOUT_VALUES, LAYOUT_VALUES_LEN, LAYOUT_VALUE_LENGTHS, copy));
+        if self.layout[LAYOUT_KEYS] < 0 {
+            return RecordBatch::try_new(
+                Arc::new(Schema::new(vec![Field::new(
+                    "body",
+                    DataType::Binary,
+                    true,
+                )])),
+                vec![bodies],
+            )
+            .expect("build Kafka value batch");
+        }
+        let keys = Arc::new(self.binary(LAYOUT_KEYS, LAYOUT_KEYS_LEN, LAYOUT_KEY_LENGTHS, true));
+        RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("key", DataType::Binary, true),
+                Field::new("body", DataType::Binary, true),
+            ])),
+            vec![keys, bodies],
+        )
+        .expect("build Kafka key and value batch")
+    }
+
+    fn binary(&self, bytes: usize, bytes_len: usize, lengths: usize, copy: bool) -> BinaryArray {
+        let lengths: &[i32] = self.region(lengths, self.count);
+        let start = self.layout[bytes] as usize;
+        let len = self.layout[bytes_len] as usize;
         assert!(
             start + len <= self.bytes.len(),
-            "Kafka value region exceeds the buffer"
+            "Kafka record region exceeds the buffer"
         );
-        let bodies =
-            contiguous_binary_array(self.address + start, len, lengths.iter().copied(), copy);
-        RecordBatch::try_new(
-            Arc::new(Schema::new(vec![Field::new(
-                "body",
-                DataType::Binary,
-                true,
-            )])),
-            vec![Arc::new(bodies)],
-        )
-        .expect("build Kafka value batch")
+        contiguous_binary_array(self.address + start, len, lengths.iter().copied(), copy)
     }
 
     pub fn metadata(&self, topic: &'a str, partition: i32) -> RecordMetadata<'a> {

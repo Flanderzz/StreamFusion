@@ -2363,6 +2363,63 @@ fn metadata_columns_follow_each_rows_record() {
     assert_eq!(partition.values().to_vec(), vec![7, 7, 7]);
 }
 
+// A keyed table's metadata follows the composed rows: a record's key and value rows pair up and
+// every pair repeats the record's metadata, and a record whose key yields no row contributes none.
+#[test]
+fn metadata_follows_the_keyed_composition() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("k", DataType::Int64, true),
+        Field::new("v", DataType::Utf8, true),
+        Field::new("off", DataType::Int64, false),
+    ]));
+    let decoder = new_decoder(
+        FORMAT_JSON,
+        schema,
+        "",
+        "",
+        0,
+        false,
+        "metadata.columns=2:offset\n\
+         keyed.key-format=0\nkeyed.key-positions=0\nkeyed.value-positions=1\n",
+    );
+    let records = keyed_records(
+        vec![
+            Some(br#"[{"k":1},{"k":2}]"#.as_slice()),
+            None,
+            Some(br#"{"k":3}"#.as_slice()),
+        ],
+        vec![
+            Some(br#"{"v":"a"}"#.as_slice()),
+            Some(br#"{"v":"b"}"#.as_slice()),
+            Some(br#"[{"v":"c"},{"v":"d"}]"#.as_slice()),
+        ],
+    );
+    let offsets = [10_i64, 11, 12];
+    let metadata = RecordMetadata {
+        topic: "orders",
+        partition: 0,
+        offsets: &offsets,
+        timestamps: &[],
+        timestamp_types: &[],
+        leader_epochs: &[],
+        headers: RecordHeaders::new(&[], &[]),
+    };
+
+    let out = decoder.decode_records(&records, &metadata);
+
+    assert_eq!(values(&out, 0), vec![1, 2, 3, 3]);
+    let v = out
+        .column(1)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(
+        (0..4).map(|i| v.value(i)).collect::<Vec<_>>(),
+        vec!["a", "a", "c", "d"]
+    );
+    assert_eq!(values(&out, 2), vec![10, 10, 12, 12]);
+}
+
 // Headers become Flink's `HashMap<StringData, byte[]>`: a repeated key keeps its first position and
 // takes its last value, a null value stays null, and entries iterate in the map's order.
 #[test]

@@ -30,8 +30,8 @@ import tech.streamfusion.planner.NativePlanner;
  * planner and under stock Flink (whose factory assembles the real key/value merge), every row must
  * match, and the native source's own decode counter must account for every record it read — a
  * plan that merely substituted some operator would not. Covers raw, JSON and CSV keys, both
- * {@code value.fields-include} modes, multi-field keys with a prefix across partitions, and records
- * whose key yields no row. The record-level contract
+ * {@code value.fields-include} modes, multi-field keys with a prefix, records whose key yields no
+ * row, and a keyed table reading connector metadata across partitions. The record-level contract
  * is pinned against Flink's own deserializer by {@code KeyedDecodeParityTest}. Opt-in via
  * {@code SF_BENCHMARK=true} (Docker).
  */
@@ -83,7 +83,7 @@ class NativeKeyedDecodeSqlHarnessTest {
   }
 
   @Test
-  void jsonAndCsvKeysMatchFlink() throws Exception {
+  void jsonAndCsvKeysMatchFlinkWithConnectorMetadata() throws Exception {
     try (KafkaContainer kafka =
             new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.6.1"));
         RecoveryExecutionMetrics metrics = new RecoveryExecutionMetrics()) {
@@ -125,7 +125,9 @@ class NativeKeyedDecodeSqlHarnessTest {
       Supplier<TableEnvironment> json =
           environment(
               metrics,
-              "CREATE TABLE t (k_region STRING, name STRING, k_id BIGINT) WITH ("
+              "CREATE TABLE t (k_region STRING, name STRING, k_id BIGINT,"
+                  + " part INT METADATA FROM 'partition', off BIGINT METADATA FROM 'offset',"
+                  + " ts TIMESTAMP_LTZ(3) METADATA FROM 'timestamp') WITH ("
                   + source(brokers, "keyed-json")
                   + " 'key.format' = 'json', 'key.fields' = 'k_id;k_region',"
                   + " 'key.fields-prefix' = 'k_',"
@@ -138,7 +140,7 @@ class NativeKeyedDecodeSqlHarnessTest {
                   + " 'key.format' = 'csv', 'key.fields' = 'id;region',"
                   + " 'key.csv.field-delimiter' = '|',"
                   + " 'value.format' = 'csv', 'value.fields-include' = 'EXCEPT_KEY')");
-      String jsonQuery = "SELECT k_region, name, k_id FROM t";
+      String jsonQuery = "SELECT k_region, name, k_id, part, off, ts FROM t";
 
       String plan = NativePlanner.explain(json.get(), jsonQuery);
       NativeParity.assertParity(json, jsonQuery);

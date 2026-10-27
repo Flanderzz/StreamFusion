@@ -310,8 +310,8 @@ pub fn decode_records_into<'local>(
         let length = usize::try_from(slab_length).expect("negative Kafka record buffer length");
         let decoder = unsafe { &*(handle as *mut MessageDecoder) };
         let slab = unsafe { RecordSlab::new(slab_address as usize, length, regions, count) };
-        let bodies = slab.bodies(decoder.output_may_alias_input());
-        let batch = decoder.decode_records(&bodies, &slab.metadata(&topic, partition));
+        let input = slab.records(decoder.output_may_alias_input());
+        let batch = decoder.decode_records(&input, &slab.metadata(&topic, partition));
         export_record_batch(batch, out_array_address, out_schema_address);
     }));
     match decoded {

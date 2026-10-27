@@ -80,9 +80,9 @@ currently also decodes the full key and value records.
 
 ### Connector metadata
 
-Every metadata key of Flink's Kafka connector decodes natively over JSON, CSV and raw values and
-the CDC JSON dialects: `topic`, `partition`, `headers`, `leader-epoch`, `offset`, `timestamp` and
-`timestamp-type`. Each decoder reports which record every row came from, and the record's
+Every metadata key of Flink's Kafka connector decodes natively over JSON, CSV and raw values, the
+CDC JSON dialects, and [keyed tables](#keyed-tables): `topic`, `partition`, `headers`,
+`leader-epoch`, `offset`, `timestamp` and `timestamp-type`. Each decoder reports which record every row came from, and the record's
 metadata is gathered through that, so a record that fans out into several rows (a Canal data list,
 a JSON array, an update's before and after images) repeats its metadata, and a record that yields
 no row (a tombstone, a filtered or skipped message) contributes none. The split reader writes the
@@ -124,7 +124,8 @@ copy of a key field wins. Each record emits every value row paired with every ke
 value-major, so a JSON array on either side fans out and a key that yields no row — a null key
 for every key format except `raw`, whose null key is one NULL row, or a bad key the key format
 skips — emits nothing for that record, while its value is still decoded (and fails) as Flink's
-is.
+is. The decoders report which record every row came from, so a keyed table's
+[connector metadata](#connector-metadata) follows its rows the same way.
 
 The key decodes in the value format's native library, so the key format must be `raw`, which
 every library carries, or the value's own format. Natively decoded pairs:
@@ -136,9 +137,9 @@ every library carries, or the value's own format. Natively decoded pairs:
 | raw | `raw` |
 
 Staying on Flink: any other pair (a JSON key over a CSV value), keys over Avro, Avro Confluent or
-Protobuf values, a keyed table that reads connector metadata, a repeated `key.fields` entry, `ALL`
-with a key prefix (Flink's own rejection), a key option the key format's native decode doesn't
-reproduce (as its format page lists), and `key.format` with a CDC value format. On Flink 2.2 a JSON key with
+Protobuf values, a repeated `key.fields` entry, `ALL` with a key prefix (Flink's own rejection), a
+key option the key format's native decode doesn't reproduce (as its format page lists), and
+`key.format` with a CDC value format. On Flink 2.2 a JSON key with
 `key.json.ignore-parse-errors` stays on Flink too: for a key object it skips, Flink's JSON format
 collects a null key row, which the key/value merge then dereferences, failing or dropping the
 record depending on the value format's own skip mode. Flink 1.18 drops that null, and its record
@@ -148,9 +149,9 @@ own record deserializer on both lines.
 ### Source admission and fallbacks
 
 - Connector metadata decodes natively (above). A value format's own metadata (a CDC format's
-  `value.*` keys, such as Canal's `value.database`), a keyed table that reads metadata, a table
-  whose columns are all metadata, and connector metadata over Avro, Avro Confluent, Debezium Avro
-  Confluent or Protobuf values (whose native decoders don't compose it yet) stay on Flink.
+  `value.*` keys, such as Canal's `value.database`), a table whose columns are all metadata, and
+  connector metadata over Avro, Avro Confluent, Debezium Avro Confluent or Protobuf values (whose
+  native decoders don't compose it yet) stay on Flink.
 - A `TIMESTAMP(3)` metadata rowtime reads the record timestamp through the session time zone and
   stays on Flink; declare it `TIMESTAMP_LTZ(3)` to keep the watermark native.
 - A source bounded by anything other than `latest-offset` stays on Flink's stock source path.

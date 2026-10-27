@@ -104,12 +104,13 @@ impl MessageDecoder {
     pub fn output_may_alias_input(&self) -> bool {
         self.decoder.output_may_alias_input()
     }
-    /// Decodes whole Kafka records: the bodies with their records' connector metadata.
-    pub fn decode_records(&self, bodies: &RecordBatch, metadata: &RecordMetadata) -> RecordBatch {
+    /// Decodes whole Kafka records: the bodies (a keyed table's keys too) with their records'
+    /// connector metadata.
+    pub fn decode_records(&self, records: &RecordBatch, metadata: &RecordMetadata) -> RecordBatch {
         self.decoder
             .metadata_decoder()
             .expect("this table's decode reads no Kafka metadata")
-            .decode_records(bodies, metadata)
+            .decode_records(records, metadata)
     }
     pub fn decode(&self, body: &RecordBatch) -> RecordBatch {
         self.decode_traced(body).0
@@ -194,5 +195,9 @@ pub fn silence_expected_decode_panics<R>(work: impl FnOnce() -> R) -> R {
 impl Decoder for KeyedDecoder {
     fn decode_traced(&self, body: &RecordBatch) -> (RecordBatch, Sources) {
         self.decode_traced(body)
+    }
+    /// A slab batch's keys are always copied, so only its values can alias the JVM's buffer.
+    fn output_may_alias_input(&self) -> bool {
+        self.value.output_may_alias_input()
     }
 }
