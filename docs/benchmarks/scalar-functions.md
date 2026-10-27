@@ -2729,3 +2729,92 @@ and `true true 16 8192 16 11`. The complete-job diagnostic is
 -Dtest=IntegralAbsPipelineBenchmark -Dabs.pipeline.engine=native`; use `flink` for stock.
 For the previous complete-job control, use the parent planner and matching native library
 with the same benchmark class and inputs.
+
+## Integral unary minus
+
+Measured on 2026-10-27, canonical baseline `7a6a790e`, Apple M4 Pro (14 logical CPUs),
+macOS aarch64, Flink 2.2.1, JDK 17.0.12, Rust 1.94.0 release with default features disabled
+and the system allocator. This removes generated computation from an already-admitted Calc;
+it introduces no operator/type admission or configuration switch.
+
+The `integral_negate` example prepares identical integer widths, values, minima and NULLs.
+Stock executes the released generated expression over prebuilt GenericRowData or BinaryRowData
+with a Java timer. Previous/candidate execute production Calc over prebuilt Arrow RecordBatch
+with timers inside Rust. The preceding intrinsic JVM callback and its conversions remain in
+timing. The candidate uses DataFusion's physical negative expression for the input column.
+Full output/schema equality is checked before measurement; every output participates in the
+checksum. Setup, JNI entry/input import, final export and perimeter transposes are outside this
+prepared-input timer. Both schemas are nullable; the NULL flag controls actual data (every
+seventh row is NULL when true, none when false).
+
+Each case has 16 warmups, 11 measured trials and 131,072 rows per trial. The three engine orders
+rotate each trial. Values are ns/row, median [min, max]; speedups divide stock/previous by candidate.
+
+| Type, input NULLs, stock row format, batch rows | Stock | Previous callback | Candidate | vs stock | vs previous |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| BIGINT, no NULLs, binary, 1024 | 6.568 [6.366, 6.880] | 43.653 [41.321, 46.587] | 0.503 [0.476, 0.535] | 13.07x | 86.86x |
+| BIGINT, with NULLs, generic, 1024 | 4.648 [4.501, 4.868] | 42.628 [40.340, 55.610] | 0.840 [0.809, 0.865] | 5.53x | 50.75x |
+| BIGINT, with NULLs, binary, 16 | 5.954 [5.890, 6.078] | 755.616 [750.959, 773.752] | 18.546 [18.170, 18.993] | 0.32x | 40.74x |
+| INT, no NULLs, binary, 1024 | 6.356 [6.096, 6.550] | 41.874 [41.222, 55.153] | 0.456 [0.432, 0.490] | 13.94x | 91.86x |
+| INT, with NULLs, generic, 1024 | 4.529 [4.438, 4.743] | 40.935 [39.514, 55.468] | 0.828 [0.788, 0.874] | 5.47x | 49.45x |
+| INT, with NULLs, binary, 16 | 5.523 [5.186, 5.776] | 741.295 [730.931, 763.478] | 16.898 [16.172, 17.647] | 0.33x | 43.87x |
+| SMALLINT, no NULLs, binary, 1024 | 6.682 [6.150, 6.839] | 39.565 [38.405, 41.207] | 0.413 [0.395, 0.436] | 16.19x | 95.89x |
+| SMALLINT, with NULLs, generic, 1024 | 4.593 [4.550, 4.630] | 40.504 [40.053, 60.173] | 0.818 [0.797, 0.836] | 5.62x | 49.52x |
+| SMALLINT, with NULLs, binary, 16 | 5.770 [5.651, 5.978] | 771.427 [760.795, 786.748] | 18.223 [17.536, 18.751] | 0.32x | 42.33x |
+| TINYINT, no NULLs, binary, 1024 | 6.705 [6.390, 6.922] | 41.736 [40.644, 44.806] | 0.437 [0.421, 0.447] | 15.33x | 95.41x |
+| TINYINT, with NULLs, generic, 1024 | 4.732 [4.596, 5.028] | 41.661 [40.280, 60.471] | 0.813 [0.783, 0.882] | 5.82x | 51.27x |
+| TINYINT, with NULLs, binary, 16 | 5.821 [5.596, 5.913] | 755.487 [747.510, 766.201] | 17.883 [17.567, 18.380] | 0.33x | 42.25x |
+
+The 1,024-row prepared-input cases beat stock; the 16-row cases still lose to stock despite
+removing most of the preceding callback cost. A five-second native-only CPU sample exposed
+scalar-function argument/field cloning, dispatch and destruction in the initial adapter. The
+final planner reuses DataFusion's physical negative expression for verified input-reference
+chains and reserves the wrapping adapter for literal-rooted chains. A nullable 16-row INT
+allocation probe falls from 20 requests / 1,255 bytes to 16 / 838 bytes. Output values are new
+and validity is shared. These are allocation traffic counts, not peak memory or copied bytes.
+The remaining profile includes Calc batch/schema construction, allocation, Arrow numeric output
+and checksum consumption; inclusive stacks overlap. Generic small-batch costs remain part of
+[#491](https://github.com/datafusion-contrib/StreamFusion/issues/491).
+
+A separate complete 1M-row INT job retains the bounded Flink row source, both transposes and
+rowwise blackhole sink. Parallelism is one, with two warmups and five measured jobs per engine
+in separate sequential stock/previous/candidate JVMs. Native plans require both boundary
+transposes and consumed NativeCalc work. Elapsed seconds are median [min, max]:
+
+| Stock | Previous callback | Candidate |
+| ---: | ---: | ---: |
+| 0.128052 [0.119442, 0.132488] | 0.162798 [0.161175, 0.181275] | 0.146477 [0.134687, 0.153037] |
+
+The complete candidate job improves the preceding implementation but still loses to stock.
+These short jobs include submission, JIT and startup costs; the results do not demonstrate
+sustained standalone acceleration. The prepared-input win does not remove the row/Arrow
+perimeter cost. Full repeated measurements, configuration and allocation observations are in
+the [raw result record](results/integral-negate-2026-10-27.json).
+
+The example is `native/engine/examples/integral_negate.rs`, with Java helper
+`IntegralNegateBenchmarkFunctions` and opt-in complete-job fixture `IntegralNegatePipelineBenchmark`.
+Build Java test classes and their dependency classpath, set `JAVA_HOME`,
+`SF_NATIVE_BENCH_CLASSPATH` and `SF_NATIVE_LIB_DIR` to the matching release library directory:
+
+```sh
+cargo build --manifest-path native/Cargo.toml -p streamfusion --release \
+  --no-default-features --lib --example integral_negate
+native/target/release/examples/integral_negate INT true false 1024 128 16 11
+```
+
+Arguments are integer type (TINYINT/SMALLINT/INT/BIGINT), with NULLs, stock BinaryRowData,
+rows/batch, loops, warmups and measured trials. `SF_NATIVE_BENCH_ENGINE=native` isolates the
+candidate for profiling. The complete job uses `SF_BENCHMARK=true`, Maven `-Pbench`,
+`-Dtest=IntegralNegatePipelineBenchmark` and `-Dnegate.pipeline.engine=flink` or `native`.
+Run the same fixture against the baseline planner/native library for the preceding control.
+
+Validation passes on Flink 2.2.1/1.18.1 with JDK 11/17: 14 focused SQL cases, one encoding
+case and two existing numeric cases per combination. Runtime witnesses consume 5,003 rows
+per integer width with a recorded native minus route, no JVM evaluator and no fallback.
+Minima, widths, NULLs, filtering, empty batches, lossless widening, generated producer guards
+and selected/unselected failure behavior are covered. Unchanged released
+`ScalarOperatorsTest.testUnaryPlusMinus` passes on both lines; it exercises generated
+expressions and supplies oracle evidence, while the focused witnesses establish executed
+native work. All 814 release Rust core tests pass without default features, including a
+compiled-Calc literal-minimum test that runs without a JVM. Full JVM/upstream suites are left
+to CI.

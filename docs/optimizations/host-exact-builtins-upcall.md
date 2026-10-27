@@ -43,6 +43,24 @@ is measured separately.
 See [the temporal contract](../operators/temporal-functions.md) and
 [release measurements](../benchmarks/scalar-functions.md#temporal-coverage-diagnostic-2026-09-15).
 
+## Verified integer negation without an upcall
+
+Unary minus over verified integer producers now avoids the generated JVM evaluator. Arrow's
+wrapping numeric kernel produces a new values buffer while sharing validity. Input-reference
+chains reuse DataFusion's physical negative expression, avoiding scalar-function argument
+cloning/allocation and dispatch. Literal-rooted chains use direct wrapping scalar dispatch
+without broadcasting a literal to an array.
+This matches Flink for all four signed widths and removes the intrinsic JVM callback and its
+per-row result adaptation. It does not change the native operator boundary or JNI ownership.
+
+The matcher extracts only direct inputs/literals, lossless widening and nested admitted
+negation. Other producers stay in one generated expression so extracting their negation does
+not expose a different arithmetic overflow or division failure. DECIMAL remains generated.
+The [release controls](../benchmarks/scalar-functions.md#integral-unary-minus) compare stock,
+previous callback and candidate at equal prepared-input boundaries and separately measure the
+complete job. Small batches still pay generic Calc setup/materialization costs; native coverage
+does not imply a standalone speedup.
+
 ## Canonical timestamp TRY_CAST
 
 Profiles identify general temporal parsing and repeated timestamp-vector lookup as avoidable

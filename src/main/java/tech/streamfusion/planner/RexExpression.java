@@ -1291,6 +1291,7 @@ final class RexExpression {
   private static boolean isFunction(RexCall call) {
     SqlSyntax syntax = call.getOperator().getSyntax();
     return call.getKind() == SqlKind.CAST
+        || call.getKind() == SqlKind.MINUS_PREFIX
         || call.getKind() == SqlKind.ARRAY_VALUE_CONSTRUCTOR
         || call.getKind() == SqlKind.MAP_VALUE_CONSTRUCTOR
         || call.getKind() == SqlKind.ROW
@@ -1997,6 +1998,12 @@ final class RexExpression {
       return emitHostExpression(call, false);
     }
     if (call.getKind() == SqlKind.MINUS_PREFIX) {
+      if (nativeIntegralNegate(call)) {
+        // The admitted unary chain has one leaf; input references guarantee array evaluation.
+        RexNode leaf = call.getOperands().get(0);
+        while (leaf instanceof RexCall) leaf = ((RexCall) leaf).getOperands().get(0);
+        return emitBuiltinCall(call, leaf instanceof RexInputRef ? 5 : 219);
+      }
       return emitFloatUnary(call, 5);
     }
     if (call.getKind() == SqlKind.CAST
@@ -3981,6 +3988,30 @@ final class RexExpression {
     return emit(timestamp);
   }
 
+  private static boolean nativeIntegralNegate(RexCall call) {
+    return call.getOperator()
+            == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.UNARY_MINUS
+        && call.getOperands().size() == 1
+        && SqlTypeFamily.INTEGER.contains(call.getOperands().get(0).getType())
+        && call.getType().getSqlTypeName() == call.getOperands().get(0).getType().getSqlTypeName()
+        && nativeIntegralNegateOperand(call.getOperands().get(0));
+  }
+
+  private static boolean nativeIntegralNegateOperand(RexNode node) {
+    if (node instanceof RexInputRef || node instanceof RexLiteral) return true;
+    if (!(node instanceof RexCall)) return false;
+    RexCall call = (RexCall) node;
+    if (nativeIntegralNegate(call)) return true;
+    return call.getKind() == SqlKind.CAST
+        && call.getOperands().size() == 1
+        && SqlTypeFamily.INTEGER.contains(call.getType())
+        && wideningTargetCode(
+                call.getOperands().get(0).getType().getSqlTypeName(),
+                call.getType().getSqlTypeName())
+            >= 0
+        && nativeIntegralNegateOperand(call.getOperands().get(0));
+  }
+
   private static boolean needsExactScalarFunction(RexCall call) {
     if (call.getKind() == SqlKind.LIKE && call.getOperands().size() == 3
         || call.getKind() == SqlKind.SIMILAR) return true;
@@ -3999,7 +4030,7 @@ final class RexExpression {
         break;
     }
     boolean exact = integral || input == SqlTypeName.DECIMAL;
-    if (call.getKind() == SqlKind.MINUS_PREFIX) return exact;
+    if (call.getKind() == SqlKind.MINUS_PREFIX) return exact && !nativeIntegralNegate(call);
     switch (call.getOperator().getName().toUpperCase(Locale.ROOT)) {
       case "ABS":
         return exact && !nativeIntegralAbs(call);

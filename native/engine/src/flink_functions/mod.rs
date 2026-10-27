@@ -71,6 +71,7 @@ mod map_constructor;
 pub(crate) mod map_lookup;
 mod map_projection;
 mod map_union;
+mod negate;
 pub(crate) mod numeric;
 pub(crate) mod numeric_cast;
 mod scalar;
@@ -277,6 +278,7 @@ pub(crate) fn function(op: i64, arity: usize) -> Option<ScalarUDF> {
         216 => temporal_extremum::function(arity, false),
         217 => array_sort::function(arity),
         218 => abs::function(),
+        219 => negate::function(),
         _ => return None,
     })
 }

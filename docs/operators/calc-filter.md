@@ -1375,8 +1375,22 @@ Flink evaluation so their overflow, NULL and failure behavior does not change. T
 computation inside an already-admitted Calc and introduces no configuration switch.
 See the [release controls and small-batch limits](../benchmarks/scalar-functions.md#integral-abs).
 
-Integer unary minus, and DECIMAL unary minus, ABS and SIGN, execute Flink's generated
-expression code through the existing batch JVM bridge. Integral FLOOR/CEIL and INT/BIGINT TRUNCATE use the same path,
+Integer unary minus on direct TINYINT/SMALLINT/INT/BIGINT inputs, typed literals, lossless
+integer widening and nested admitted negation executes a Rust Arrow kernel without a JVM
+evaluator. It retains the resolved width and wraps each signed minimum to itself, including
+scalar literals: verified input-reference chains reuse DataFusion's physical negative
+expression, while literal-rooted chains use wrapping scalar dispatch. DataFusion 54's ordinary
+negative expression checks scalar overflow, so it cannot represent both contracts alone.
+NULLs, sliced validity and ownership
+are preserved. The function route diagnostic includes unary minus; runtime witnesses require
+its native route and consumed batches, rather than interpreting an empty function list as
+evidence. Arithmetic, narrowing and other unverified producers retain generated evaluation
+with their enclosing negation. [Release measurements](../benchmarks/scalar-functions.md#integral-unary-minus)
+compare prepared inputs with stock and the previous callback, and separately report the
+complete row-source job with both transposes.
+
+DECIMAL unary minus, ABS and SIGN execute Flink's generated expression code through
+the existing batch JVM bridge. Integral FLOOR/CEIL and INT/BIGINT TRUNCATE use the same path,
 including per-row TRUNCATE positions. TINYINT/SMALLINT TRUNCATE retains the host compilation
 failure described under exact floating math below. This retains resolved widths, decimal precision/scale, NULL handling,
 and Java overflow behavior. Adjacent supported
