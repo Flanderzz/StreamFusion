@@ -399,6 +399,13 @@ Reuses the same UTF-16 prefix accounting and UTF-8 span-copying kernel, placing 
 
 Scans only as far as the requested token, retaining empty tokens, instead of constructing the complete split array. An empty separator uses the exact Java Character.isWhitespace set, not Rust is_whitespace or ASCII space alone.
 
+The integer delimiter overload uses released Flink's 1..255 character contract,
+with NULL for invalid delimiters or indices. It uses the same bounded token scan
+over UTF-8 after verifying any original Java UTF-16 cache agrees. Other batches
+retain the existing generated evaluator. Comet's literal split kernel similarly
+borrows UTF-8 slices, but its empty-input/delimiter behavior and Spark code-point
+rules are not substituted for Flink's integer overload.
+
 ### TO_DATE
 
 A native parser mirrors DateTimeUtils.parseDate rather than the stricter Arrow ISO parser. Calendar validation includes year 0 through 9999 and leap-year rules.

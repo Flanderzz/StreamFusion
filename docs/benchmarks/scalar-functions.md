@@ -804,6 +804,115 @@ upcall are covered by semantic tests rather than these timing cases.
 | `SPLIT_INDEX_DYNAMIC` | ASCII, 264-byte budget | 2.099 | 1.065 | 1.97x |
 | `SPLIT_INDEX_DYNAMIC` | Unicode, 264-byte budget, NULL/8 | 2.029 | 1.121 | 1.81x |
 
+### Integer-Delimiter Split Index
+
+The integer overload has a separate released-Flink contract and measurement. The direct
+`SPLIT_INDEX(s, delimiter, idx)` query uses a character code in 1..255 rather than the
+decimal rendering of an integer. Verified UTF-8 inputs and equivalent original Java
+UTF-16 caches use the [bounded native scan](../optimizations/scalar-function-kernels.md#integer-delimiter-split-index).
+Computed operands and non-equivalent original caches retain released Flink evaluation.
+
+Measured on 2026-10-26 on Apple M4 Pro / 24 GiB, JDK 17, released Flink 2.2.1 and 1.18.1,
+Rust 1.94.0 release with `--no-default-features`, against canonical main `ffafa92b`.
+Each engine/profile starts a fresh JVM with a 256 MiB initial and 512 MiB maximum heap,
+eight warmup trials and nine measured trials, processing 131,072 rows per trial. No
+other build, test or benchmark runs concurrently. Profiles vary batch rows (16, 1,024,
+16,384), payload budget (32/264 UTF-8 bytes), ASCII/CJK/emoji, original Java cache state,
+and fixed/mixed field indices. Strings have cardinality 16; delimiters rotate comma,
+pipe and U+00E9. Source, delimiter and index are NULL every 7th, 11th and 13th row.
+Mixed indices include negative/out-of-range fields and invalid delimiter 256.
+
+The portable `integer_split` release example measures the production compiled Calc,
+output allocation and checksum consumption with a timer inside Rust. Stock Flink uses
+its unchanged released generated expression on prepared RowData and consumes the same
+output bytes with a Java timer. Initial/final JNI entry, C Data import/export and
+perimeter transposes are outside this small-functionality boundary. The previous
+production Calc retains its intrinsic JVM callback, Arrow round trip and allocation
+inside timing. It is a separate binary linked to the unchanged main implementation,
+using the same driver and Java reference, with the TYPE_STRING descriptor emitted
+by the baseline planner. The earlier TYPE_INTERNAL control remains a separate diagnostic;
+only the corrected descriptor is used for final previous-native comparisons. Before timing, the candidate's full output
+array must equal that reference; its evaluator ID is invalid so a scalar JVM callback
+fails the check. Cold controls use BinaryRowData/Arrow bytes, while cached controls
+retain GenericRowData's Java strings and matching Arrow UTF-16 sidecars. Input setup
+is outside all timers.
+
+The [raw measurements](results/integer-split-index-2026-10-26.json) retain every measured
+trial, medians, ranges, baseline library hashes, and earlier adaptation diagnostics.
+The initial 16-row implementation was slower than stock; removing generic argument
+adaptation, borrowing array arguments, passing only the source sidecar, reducing ASCII
+cache comparisons and using a bounded byte search removed that measured regression.
+
+Values are medians with `[minimum, maximum]` over nine trials:
+
+| Flink | Corpus / payload | Java cache | Batch rows | Indices | Stock ns/row | Previous ns/row | Native ns/row | Stock/native |
+| --- | --- | --- | ---: | --- | ---: | ---: | ---: | ---: |
+| 2.2.1 | ascii / 32 | cold | 1024 | 1 | 103.43 [91.64, 108.57] | 187.09 [177.73, 193.31] | 13.24 [12.89, 14.37] | 7.81x |
+| 2.2.1 | ascii / 264 | cold | 1024 | 1 | 340.09 [329.18, 349.19] | 479.08 [471.51, 490.86] | 17.78 [17.05, 18.98] | 19.13x |
+| 2.2.1 | ascii / 264 | present | 1024 | 1 | 233.54 [222.75, 236.77] | 472.54 [462.24, 486.21] | 67.51 [65.10, 71.47] | 3.46x |
+| 2.2.1 | cjk / 264 | cold | 1024 | 1 | 286.61 [280.41, 324.78] | 523.59 [513.30, 532.26] | 17.64 [17.09, 18.69] | 16.25x |
+| 2.2.1 | cjk / 264 | present | 1024 | 1 | 190.08 [177.75, 192.98] | 506.43 [501.88, 527.52] | 112.34 [109.08, 117.04] | 1.69x |
+| 2.2.1 | emoji / 264 | cold | 1024 | 1 | 313.08 [303.38, 352.37] | 583.21 [576.63, 598.73] | 17.64 [17.14, 18.14] | 17.75x |
+| 2.2.1 | emoji / 264 | present | 1024 | 1 | 210.15 [198.55, 225.26] | 534.78 [528.17, 554.40] | 106.09 [105.58, 108.88] | 1.98x |
+| 2.2.1 | ascii / 32 | present | 16 | 1 | 74.34 [72.21, 84.90] | 856.15 [841.49, 866.31] | 69.33 [66.46, 79.41] | 1.07x |
+| 2.2.1 | ascii / 264 | present | 16384 | 1 | 245.38 [238.63, 275.09] | 457.36 [440.51, 476.26] | 67.99 [66.51, 69.83] | 3.61x |
+| 2.2.1 | ascii / 264 | present | 1024 | mixed | 194.79 [192.34, 206.07] | 416.41 [405.55, 466.88] | 61.86 [60.93, 66.82] | 3.15x |
+| 1.18.1 | ascii / 32 | cold | 1024 | 1 | 125.80 [114.01, 130.97] | 190.10 [176.04, 233.20] | 14.33 [13.18, 15.09] | 8.78x |
+| 1.18.1 | ascii / 264 | cold | 1024 | 1 | 333.38 [319.49, 391.33] | 461.74 [454.26, 472.27] | 18.03 [17.94, 18.26] | 18.49x |
+| 1.18.1 | ascii / 264 | present | 1024 | 1 | 225.03 [213.01, 236.39] | 453.75 [447.83, 471.43] | 75.49 [69.36, 78.42] | 2.98x |
+| 1.18.1 | cjk / 264 | cold | 1024 | 1 | 290.07 [280.27, 313.48] | 496.14 [489.07, 501.57] | 17.68 [17.46, 17.86] | 16.41x |
+| 1.18.1 | cjk / 264 | present | 1024 | 1 | 196.86 [187.04, 198.18] | 495.58 [487.61, 505.17] | 114.09 [111.68, 114.76] | 1.73x |
+| 1.18.1 | emoji / 264 | cold | 1024 | 1 | 285.90 [284.23, 306.30] | 530.87 [526.82, 535.19] | 18.45 [18.28, 18.71] | 15.50x |
+| 1.18.1 | emoji / 264 | present | 1024 | 1 | 220.33 [209.49, 250.26] | 548.73 [542.43, 554.88] | 107.95 [106.14, 109.60] | 2.04x |
+| 1.18.1 | ascii / 32 | present | 16 | 1 | 74.04 [72.83, 85.23] | 842.07 [835.36, 884.99] | 74.04 [72.34, 75.01] | 1.00x |
+| 1.18.1 | ascii / 264 | present | 16384 | 1 | 251.62 [238.71, 257.85] | 449.26 [434.94, 463.80] | 71.73 [70.45, 72.34] | 3.51x |
+| 1.18.1 | ascii / 264 | present | 1024 | mixed | 183.08 [168.34, 191.90] | 405.80 [401.71, 417.17] | 64.10 [60.96, 70.52] | 2.86x |
+
+The 16-row 1.18 control is tied with stock within observed variability (74.04 versus
+74.04 ns/row); it does not establish a small-batch speedup. The regular-batch profiles
+are 1.69-19.13x stock and at least 4.34x the preceding native callback path.
+
+Reproduce the component candidate and stock controls after compiling test classes with
+the selected released Flink profile:
+
+```sh
+cargo build --manifest-path native/Cargo.toml --release --no-default-features \
+  -p streamfusion --example integer_split
+# Set SF_NATIVE_BENCH_CLASSPATH to target/test-classes, target/classes and test dependencies.
+export SF_NATIVE_LIB_DIR="$PWD/native/target/release"
+# This directory must contain the matching release libstreamfusion DSO for JVM callbacks.
+native/target/release/examples/integer_split ascii 264 true 1024 128 false native 8 9
+native/target/release/examples/integer_split ascii 264 true 1024 128 false flink 8 9
+```
+
+For the previous implementation, compile the same example against main `ffafa92b`,
+using its unchanged production Rust library and matching native DSO, and select
+`baseline` rather than `native`. `IntegerSplitBenchmarkFunctions` must be on its test
+classpath. This is a native-baseline ablation, not a Java helper pretending to be the
+old native implementation.
+
+The separate `IntegerSplitPipelineBenchmark` diagnostic retains a row source, both
+production transposes and a blackhole row sink. It processes 2,000,000 rows, parallelism
+1, a 264-byte ASCII payload, three delimiters and NULL every 7th row, with 2 GiB heap,
+two warmups and five measured jobs per engine in fresh JVMs. Plan assertions require
+both transposes, and runtime metrics require consumed native Calc rows. Its job timer
+includes query planning/submission and startup after environment setup, so it is not
+a sustained-throughput measurement. Output equality is established separately by the
+runtime-source SQL tests and component array comparison; a blackhole sink alone cannot
+establish equality. Run it with `SF_BENCHMARK=true mvn test -Pbench
+-Dtest=IntegerSplitPipelineBenchmark`, selecting `-Dsplit.pipeline.engine=stock` or
+`native` and building each production baseline in its own checkout.
+
+| Engine | Job median (s) | Minimum-maximum (s) |
+| --- | ---: | ---: |
+| stock | 1.828223 | 1.795710-1.863590 |
+| previous | 2.460203 | 2.427904-2.485643 |
+| native | 0.951705 | 0.942732-0.966414 |
+
+The candidate is 1.92x stock and 2.59x the preceding native pipeline in this
+startup-inclusive fixture. This result applies to this final STRING-output query;
+it does not establish arbitrary connector or steady-state throughput.
+
 ## TO_DATE
 
 `TO_DATE`: `TO_DATE(s)`
