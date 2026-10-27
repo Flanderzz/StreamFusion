@@ -2346,17 +2346,31 @@ final class RexExpression {
     }
     if (NativeConfig.collectionExpressionsEnabled() && "ARRAY_SORT".equals(functionName)) {
       var args = call.getOperands();
-      if (args.isEmpty() || args.size() > 3 || !nativeBasicArray(args.get(0).getType())
+      if (args.isEmpty()
+          || args.size() > 3
+          || !nativeBasicArray(args.get(0).getType())
           || args.get(0).getType().getComponentType().getSqlTypeName() == SqlTypeName.BOOLEAN
-          || !verifiedSortInput(args.get(0)) || requiresRowShortCircuit(args.get(0))
-          || args.stream().skip(1).anyMatch(arg -> !(arg instanceof RexLiteral)
-              || ((RexLiteral) arg).isNull() || arg.getType().getSqlTypeName() != SqlTypeName.BOOLEAN)) {
-        return reject("ARRAY_SORT retains Flink's comparator behavior outside verified short or distinct arrays and constant options");
+          || !verifiedSortInput(args.get(0))
+          || args.stream().anyMatch(this::requiresRowShortCircuit)
+          || args.stream()
+              .skip(1)
+              .anyMatch(arg -> arg.getType().getSqlTypeName() != SqlTypeName.BOOLEAN)) {
+        return reject(
+            "ARRAY_SORT retains Flink's comparator behavior outside verified short or distinct"
+                + " arrays and total Boolean options");
       }
-      boolean ascending = args.size() < 2 || Boolean.TRUE.equals(((RexLiteral) args.get(1)).getValueAs(Boolean.class));
-      boolean nullFirst = args.size() < 3 ? ascending
-          : Boolean.TRUE.equals(((RexLiteral) args.get(2)).getValueAs(Boolean.class));
-      add(KIND_CALL,189,3);
+      if (args.stream()
+          .skip(1)
+          .anyMatch(arg -> !(arg instanceof RexLiteral) || ((RexLiteral) arg).isNull()))
+        return emitBuiltinCall(call, 217);
+      boolean ascending =
+          args.size() < 2
+              || Boolean.TRUE.equals(((RexLiteral) args.get(1)).getValueAs(Boolean.class));
+      boolean nullFirst =
+          args.size() < 3
+              ? ascending
+              : Boolean.TRUE.equals(((RexLiteral) args.get(2)).getValueAs(Boolean.class));
+      add(KIND_CALL, 189, 3);
       if (!emit(args.get(0))) return false;
       emitStringLiteral(ascending ? "ASC" : "DESC");
       return emitStringLiteral(nullFirst ? "NULLS FIRST" : "NULLS LAST");
