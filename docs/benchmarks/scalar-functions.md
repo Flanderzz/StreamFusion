@@ -2574,3 +2574,81 @@ SF_BENCHMARK=true mvn -pl streamfusion-runtime test -Pbench \
 Use `engine=flink` for stock. For `engine=previous`, compile the same fixture
 against the preceding planner and require its bound generated ARRAY_SORT route;
 the candidate planner deliberately fails that previous-route assertion.
+
+## Integral SIGN
+
+Measured on 2026-10-27, canonical baseline `7a6a790e`, Apple M4 Pro (14 logical CPUs),
+macOS aarch64, Flink 2.2.1, JDK 17.0.12, Rust 1.94.0 release with default features disabled
+and the system allocator. This replaces generated computation in an already-admitted Calc;
+it adds no operator, type admission or configuration switch.
+
+`integral_sign` prepares equal integer values, minima and NULLs outside timing. Stock Flink
+uses its released generated expression over prebuilt GenericRowData or BinaryRowData in Java.
+The previous and candidate controls use production native Calc over prebuilt Arrow batches;
+the previous generated JVM callback, its conversions and dispatch remain inside the Rust timer.
+The candidate uses the typed SIGN kernel. Every output value participates in a checksum,
+with full Arrow output/schema equality checked before timing. JNI entry/input import, final
+export and perimeter row transposes are outside this prepared-input timer.
+
+Both logical schemas are nullable; the nullable flag controls actual data (every seventh row
+is NULL when true, none when false). Each case has 16 warmups and 11 measured trials, 131,072 rows per trial, rotating the three
+engine orders. Values are ns/row, median [min, max]; speedups divide stock/previous by candidate.
+
+| Type, input NULLs, stock row format, batch rows | Stock | Previous callback | Candidate | vs stock | vs previous |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| BIGINT, no NULLs, binary, 1024 | 6.426 [6.258, 6.815] | 42.782 [41.370, 44.467] | 0.620 [0.578, 0.699] | 10.37x | 69.05x |
+| BIGINT, with NULLs, generic, 1024 | 4.819 [4.381, 5.007] | 43.542 [41.267, 59.324] | 1.222 [1.035, 1.296] | 3.94x | 35.62x |
+| BIGINT, with NULLs, binary, 16 | 6.275 [6.061, 7.140] | 773.391 [755.702, 841.681] | 22.712 [21.311, 26.172] | 0.28x | 34.05x |
+| INT, no NULLs, binary, 1024 | 6.701 [6.256, 6.776] | 42.707 [41.813, 44.414] | 0.536 [0.512, 0.636] | 12.50x | 79.68x |
+| INT, with NULLs, generic, 1024 | 4.554 [4.367, 4.623] | 42.878 [41.013, 55.608] | 1.428 [1.335, 1.481] | 3.19x | 30.03x |
+| INT, with NULLs, binary, 16 | 5.650 [5.397, 5.821] | 749.547 [740.193, 768.904] | 22.887 [22.644, 23.201] | 0.25x | 32.75x |
+
+At 1,024 rows the candidate wins these prepared-input controls. At 16 rows it remains slower
+than stock despite removing most of the preceding callback cost. A separate native-only
+five-second sample identifies generic DataFusion argument/field setup and destruction,
+allocation, batch construction and consumption as remaining small-batch costs. Inclusive
+frames overlap; they are not independent percentages or a universal causal estimate.
+The implementation bypasses the generic scalar adapter for integer arrays/scalars. A production
+Calc allocation probe still requests 20 allocations / 1,255 bytes for a nullable 16-row INT
+batch and 20 / 5,287 bytes for 1,024 rows: result values are new, validity is shared.
+Further Calc batching/argument overhead remains part of [#491](https://github.com/datafusion-contrib/StreamFusion/issues/491).
+
+A separate complete INT job retains the bounded 1M-row Flink source, both transposes and
+rowwise blackhole sink, with parallelism one, two warmups and five measured jobs in separate
+sequential JVMs for stock, previous and candidate. The native plan contains both boundary
+transposes and consumed NativeCalc work is required. Elapsed seconds are median [min, max]:
+
+| Stock | Previous callback | Candidate |
+| ---: | ---: | ---: |
+| 0.129245 [0.119284, 0.135270] | 0.168748 [0.159775, 0.187790] | 0.144245 [0.134325, 0.155320] |
+
+The complete candidate job improves the preceding implementation but still loses to stock.
+These short local jobs include submission/JIT/startup effects; they do not establish a
+sustained end-to-end acceleration. Do not infer a standalone win from the prepared-input
+results. Full measured trials, configuration and allocation observations are retained in the
+[raw result record](results/integral-sign-2026-10-27.json).
+
+The example is `native/engine/examples/integral_sign.rs`; the stock/previous helper is
+`IntegralSignBenchmarkFunctions` and the full job is `IntegralSignPipelineBenchmark`. Build
+the Java test classes, prepare their dependency classpath and set `JAVA_HOME`,
+`SF_NATIVE_BENCH_CLASSPATH` and `SF_NATIVE_LIB_DIR` to the release library directory. Then run:
+
+```sh
+cargo build --manifest-path native/Cargo.toml -p streamfusion --release \
+  --no-default-features --lib --example integral_sign
+native/target/release/examples/integral_sign INT true false 1024 128 16 11
+```
+
+The arguments are type (INT/BIGINT), with NULLs, stock BinaryRowData, rows/batch, loops, warmups
+and trials. `SF_NATIVE_BENCH_ENGINE=native` optionally isolates the candidate for profiling.
+The full job is opt-in with `SF_BENCHMARK=true` and the `bench` Maven profile; use
+`-Dtest=IntegralSignPipelineBenchmark -Dsign.pipeline.engine=flink` or `native`. Run the same
+benchmark class with the baseline planner/native library for the preceding implementation.
+
+Correctness checks pass on Flink 2.2.1 and 1.18.1 with JDK 11 and 17: 12 focused SQL cases
+and three existing numeric/floating cases per combination. The focused runtime witnesses
+consume 5,003 rows for direct INT/BIGINT and explicitly widened narrow inputs, with no JVM
+evaluator. Released unchanged `ScalarFunctionsTest.testSign` passes on both lines; it tests
+generated expressions and is oracle evidence, while the focused runtime witnesses establish
+executed native work. The release Rust core suite passes 813 tests with default features
+disabled. Full JVM/upstream suites are left to CI.

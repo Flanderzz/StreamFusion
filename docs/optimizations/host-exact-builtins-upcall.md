@@ -647,3 +647,23 @@ not a general speedup for all magnitudes, scales or floating math.
 implementation, both engines and unfavorable controls. Reproduce with the existing
 `ScalarFunctionBenchmark#individualFunctions` release command above and
 `-Dscalar.functions=FLOAT_TRUNCATE_EXACT`; the historical benchmark name uses DOUBLE input.
+
+
+## Verified integral SIGN replacement
+
+INT/BIGINT SIGN over verified direct, literal, widening and nested SIGN producers uses a typed
+Arrow unary kernel. Scalar integers dispatch directly; array evaluation avoids the generic
+scalar adapter's temporary argument vectors. The array kernel allocates values and shares
+validity, including sliced null bitmaps. This removes generated per-row callbacks within the
+existing native Calc. It changes neither JNI ownership nor island admission and adds no switch.
+
+The structure follows DataFusion's scalar/array dispatch and Comet's typed unary SIGN kernel;
+Arroyo registers DataFusion's default scalar functions. Those implementations expose floating
+signum, so integer return types and signed minima follow released Flink's Integer/Long.signum
+rather than a floating coercion. Existing FLOAT/DOUBLE signed-zero and NaN handling is retained.
+Direct narrow-integer SIGN keeps Flink's compilation failure. Unverified producers keep their
+generated SIGN program instead of exposing different arithmetic/overflow behavior by moving
+just the outer call into Rust. DECIMAL SIGN remains generated.
+
+Release stock/previous/native controls, allocation diagnostics and complete-job limits are
+reported in [Integral SIGN](../benchmarks/scalar-functions.md#integral-sign).
