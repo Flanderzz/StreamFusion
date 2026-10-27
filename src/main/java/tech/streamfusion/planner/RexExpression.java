@@ -2556,6 +2556,7 @@ final class RexExpression {
       return emitDateFormat(call.getOperands());
     }
     if ("ABS".equals(functionName)) {
+      if (nativeIntegralAbs(call)) return emitBuiltinCall(call, 218);
       return emitFloatUnary(call, 62);
     }
     if ("FLOOR".equals(functionName)) {
@@ -4001,7 +4002,7 @@ final class RexExpression {
     if (call.getKind() == SqlKind.MINUS_PREFIX) return exact;
     switch (call.getOperator().getName().toUpperCase(Locale.ROOT)) {
       case "ABS":
-        return exact;
+        return exact && !nativeIntegralAbs(call);
       case "SIGN":
         return exact && !nativeIntegralSign(call);
       case "FLOOR":
@@ -4110,6 +4111,31 @@ final class RexExpression {
                 call.getType().getSqlTypeName())
             >= 0
         && nativeIntegralSignOperand(call.getOperands().get(0));
+  }
+
+  private static boolean nativeIntegralAbs(RexCall call) {
+    return call.getOperator()
+            == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.ABS
+        && call.getOperands().size() == 1
+        && SqlTypeFamily.INTEGER.contains(call.getOperands().get(0).getType())
+        && call.getType().getSqlTypeName()
+            == call.getOperands().get(0).getType().getSqlTypeName()
+        && nativeIntegralAbsOperand(call.getOperands().get(0));
+  }
+
+  private static boolean nativeIntegralAbsOperand(RexNode node) {
+    if (node instanceof RexInputRef || node instanceof RexLiteral) return true;
+    if (!(node instanceof RexCall)) return false;
+    RexCall call = (RexCall) node;
+    if (nativeIntegralAbs(call)) return true;
+    return call.getKind() == SqlKind.CAST
+        && call.getOperands().size() == 1
+        && SqlTypeFamily.INTEGER.contains(call.getType())
+        && wideningTargetCode(
+                call.getOperands().get(0).getType().getSqlTypeName(),
+                call.getType().getSqlTypeName())
+            >= 0
+        && nativeIntegralAbsOperand(call.getOperands().get(0));
   }
 
   private static boolean containsMetadataDependentDecimalRounding(RexNode node) {
