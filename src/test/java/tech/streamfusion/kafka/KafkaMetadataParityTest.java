@@ -2,7 +2,11 @@ package tech.streamfusion.kafka;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
+import com.sun.net.httpserver.HttpServer;
+import java.io.ByteArrayOutputStream;
 import java.lang.reflect.Field;
+import java.net.InetSocketAddress;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -11,10 +15,18 @@ import java.util.Optional;
 import java.util.function.BiFunction;
 import java.util.function.Function;
 import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.avro.Schema;
+import org.apache.avro.SchemaBuilder;
+import org.apache.avro.generic.GenericData;
+import org.apache.avro.generic.GenericDatumWriter;
+import org.apache.avro.generic.GenericRecord;
+import org.apache.avro.io.BinaryEncoder;
+import org.apache.avro.io.EncoderFactory;
 import org.apache.flink.api.common.serialization.DeserializationSchema;
 import org.apache.flink.api.connector.source.Source;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.connector.kafka.source.KafkaSource;
+import org.apache.flink.formats.avro.typeutils.AvroSchemaConverter;
 import org.apache.flink.connector.kafka.source.reader.deserializer.KafkaRecordDeserializationSchema;
 import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.metrics.groups.UnregisteredMetricsGroup;
@@ -50,6 +62,8 @@ import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import tech.streamfusion.format.NativeFormatContext;
 import tech.streamfusion.format.NativeFormatOptions;
+import tech.streamfusion.format.avro.AvroFormatProvider;
+import tech.streamfusion.format.avroconfluent.AvroConfluentFormatProvider;
 import tech.streamfusion.format.json.CanalJsonFormatProvider;
 import tech.streamfusion.format.json.JsonFormatProvider;
 import tech.streamfusion.operator.RowDataArrowConverter;
@@ -242,6 +256,422 @@ class KafkaMetadataParityTest {
 
     assertEquals(3, expected.size(), "Flink emits a row per message, none for the tombstone");
     assertEquals(expected, actual);
+  }
+
+  @Test
+  void bareAvroValuesCarryEachRecordsMetadata() throws Exception {
+    List<String> keys = List.of("offset", "timestamp", "headers");
+    StreamTableEnvironment tEnv =
+        StreamTableEnvironment.create(StreamExecutionEnvironment.getExecutionEnvironment());
+    tEnv.executeSql(
+        "CREATE TABLE t (id BIGINT, name STRING, off BIGINT METADATA FROM 'offset',"
+            + " ts TIMESTAMP_LTZ(3) METADATA FROM 'timestamp',"
+            + " hdrs MAP<STRING, BYTES> METADATA FROM 'headers') WITH ('connector' = 'kafka',"
+            + " 'topic' = 'orders', 'properties.bootstrap.servers' = 'localhost:9092',"
+            + " 'scan.startup.mode' = 'earliest-offset', 'format' = 'avro')");
+    ObjectIdentifier identifier = ObjectIdentifier.of("default_catalog", "default_database", "t");
+    ResolvedCatalogTable table =
+        (ResolvedCatalogTable)
+            ((TableEnvironmentImpl) tEnv)
+                .getCatalogManager()
+                .getTable(identifier)
+                .orElseThrow()
+                .getResolvedTable();
+    DynamicTableSource source =
+        FactoryUtil.createDynamicTableSource(
+            null,
+            identifier,
+            table,
+            Map.of(),
+            new Configuration(),
+            Thread.currentThread().getContextClassLoader(),
+            false);
+    Map<String, DataType> readable = ((SupportsReadingMetadata) source).listReadableMetadata();
+    DataType produced =
+        DataTypes.ROW(
+                DataTypes.FIELD("id", DataTypes.BIGINT()),
+                DataTypes.FIELD("name", DataTypes.STRING()),
+                DataTypes.FIELD("offset", readable.get("offset")),
+                DataTypes.FIELD("timestamp", readable.get("timestamp")),
+                DataTypes.FIELD("headers", readable.get("headers")))
+            .notNull();
+    ((SupportsReadingMetadata) source).applyReadableMetadata(keys, produced);
+    DataStream<?> stream =
+        ((DataStreamScanProvider)
+                ((ScanTableSource) source)
+                    .getScanRuntimeProvider(ScanRuntimeProviderContext.INSTANCE))
+            .produceDataStream(
+                name -> Optional.empty(), StreamExecutionEnvironment.getExecutionEnvironment());
+    Source<?, ?, ?> kafkaSource =
+        ((SourceTransformation<?, ?, ?>) stream.getTransformation()).getSource();
+    Field schemaField = KafkaSource.class.getDeclaredField("deserializationSchema");
+    schemaField.setAccessible(true);
+    @SuppressWarnings("unchecked")
+    KafkaRecordDeserializationSchema<RowData> flink =
+        (KafkaRecordDeserializationSchema<RowData>) schemaField.get(kafkaSource);
+    flink.open(
+        new DeserializationSchema.InitializationContext() {
+          @Override
+          public MetricGroup getMetricGroup() {
+            return new UnregisteredMetricsGroup();
+          }
+
+          @Override
+          public UserCodeClassLoader getUserCodeClassLoader() {
+            return SimpleUserCodeClassLoader.create(
+                Thread.currentThread().getContextClassLoader());
+          }
+        });
+    RowType rowType = (RowType) produced.getLogicalType();
+    RowType valueType =
+        RowType.of(
+            new org.apache.flink.table.types.logical.LogicalType[] {
+              rowType.getTypeAt(0), rowType.getTypeAt(1)
+            },
+            new String[] {"id", "name"});
+    // Bare Avro values are written with the schema Flink derives from the value fields.
+    Schema schema = AvroSchemaConverter.convertToSchema(valueType.copy(false));
+    Function<GenericRecord, byte[]> datum =
+        record -> {
+          try {
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            BinaryEncoder encoder = EncoderFactory.get().directBinaryEncoder(out, null);
+            new GenericDatumWriter<GenericRecord>(record.getSchema()).write(record, encoder);
+            encoder.flush();
+            return out.toByteArray();
+          } catch (java.io.IOException e) {
+            throw new java.io.UncheckedIOException(e);
+          }
+        };
+    GenericRecord first = new GenericData.Record(schema);
+    first.put("id", 1L);
+    first.put("name", "a");
+    GenericRecord second = new GenericData.Record(schema);
+    second.put("id", 2L);
+    second.put("name", null);
+    BiFunction<String, String, Header> header =
+        (key, value) ->
+            new RecordHeader(key, value == null ? null : value.getBytes(StandardCharsets.UTF_8));
+    List<ConsumerRecord<byte[], byte[]>> records =
+        List.of(
+            new ConsumerRecord<>(
+                "orders", 1, 30L, 1_000L, TimestampType.CREATE_TIME, -1, -1, null,
+                datum.apply(first),
+                new RecordHeaders(
+                    List.of(header.apply("trace", "t1"), header.apply("trace", "t2"))),
+                Optional.of(2)),
+            new ConsumerRecord<>(
+                "orders", 1, 31L, 2_000L, TimestampType.CREATE_TIME, -1, -1, null, null,
+                new RecordHeaders(List.of(header.apply("dropped", "x"))), Optional.of(2)),
+            new ConsumerRecord<>(
+                "orders", 1, 32L, 3_000L, TimestampType.LOG_APPEND_TIME, -1, -1, null,
+                datum.apply(second),
+                new RecordHeaders(List.of(header.apply("tenant", null))),
+                Optional.empty()));
+
+    List<RowData> flinkRows = new ArrayList<>();
+    Collector<RowData> collector =
+        new Collector<>() {
+          @Override
+          public void collect(RowData row) {
+            flinkRows.add(row);
+          }
+
+          @Override
+          public void close() {}
+        };
+    for (ConsumerRecord<byte[], byte[]> record : records) {
+      flink.deserialize(record, collector);
+    }
+    Function<RowData, List<Object>> render =
+        row -> {
+          List<Object> values = new ArrayList<>();
+          for (int i = 0; i < rowType.getFieldCount(); i++) {
+            Object value = RowData.createFieldGetter(rowType.getTypeAt(i), i).getFieldOrNull(row);
+            if (value instanceof MapData) {
+              MapData map = (MapData) value;
+              List<String> entries = new ArrayList<>();
+              for (int entry = 0; entry < map.size(); entry++) {
+                ArrayData mapValues = map.valueArray();
+                entries.add(
+                    map.keyArray().getString(entry)
+                        + "="
+                        + (mapValues.isNullAt(entry)
+                            ? "null"
+                            : StringUtils.byteToHexString(mapValues.getBinary(entry))));
+              }
+              values.add(entries);
+            } else {
+              values.add(value == null ? null : value.toString());
+            }
+          }
+          return values;
+        };
+    List<List<Object>> expected = new ArrayList<>();
+    for (RowData row : flinkRows) {
+      expected.add(render.apply(row));
+    }
+    List<List<Object>> actual = new ArrayList<>();
+    try (NativeKafkaBatchDecoder nativeDecoder =
+            new NativeKafkaBatchDecoder(
+                rowType,
+                new AvroFormatProvider()
+                    .createDecoder(
+                        new NativeFormatContext(
+                            valueType,
+                            valueType,
+                            Map.of(
+                                "connector", "kafka",
+                                "format", "avro",
+                                NativeFormatOptions.METADATA_COLUMNS,
+                                    "2:offset,3:timestamp,4:headers"),
+                            false)),
+                false,
+                keys,
+                -1,
+                null);
+        VectorSchemaRoot root = nativeDecoder.decode(records).batch().root()) {
+      for (RowData row : RowDataArrowConverter.read(root, rowType)) {
+        actual.add(render.apply(row));
+      }
+    }
+
+    assertEquals(2, expected.size(), "Flink emits a row per message, none for the tombstone");
+    assertEquals(expected, actual);
+  }
+
+  @Test
+  void confluentAvroValuesCarryEachRecordsMetadataAcrossWriterSchemas() throws Exception {
+    Schema orderV1 =
+        SchemaBuilder.record("Order")
+            .namespace("com.example")
+            .fields()
+            .requiredLong("id")
+            .requiredString("name")
+            .requiredString("extra")
+            .endRecord();
+    Schema orderV2 =
+        SchemaBuilder.record("OrderV2")
+            .namespace("com.example")
+            .fields()
+            .requiredString("name")
+            .requiredLong("id")
+            .endRecord();
+    Map<Integer, Schema> schemas = Map.of(41, orderV1, 42, orderV2);
+    HttpServer registry = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+    registry.createContext(
+        "/schemas/ids/",
+        exchange -> {
+          Schema schema =
+              schemas.get(
+                  Integer.parseInt(
+                      exchange.getRequestURI().getPath().substring("/schemas/ids/".length())));
+          if (schema == null) {
+            exchange.sendResponseHeaders(404, -1);
+            exchange.close();
+            return;
+          }
+          String quoted = schema.toString().replace("\\", "\\\\").replace("\"", "\\\"");
+          byte[] body = ("{\"schema\":\"" + quoted + "\"}").getBytes(StandardCharsets.UTF_8);
+          exchange.getResponseHeaders().set("Content-Type", "application/vnd.schemaregistry.v1+json");
+          exchange.sendResponseHeaders(200, body.length);
+          exchange.getResponseBody().write(body);
+          exchange.close();
+        });
+    registry.start();
+    try {
+      String url = "http://localhost:" + registry.getAddress().getPort();
+      List<String> keys = List.of("partition", "offset", "timestamp", "headers");
+      StreamTableEnvironment tEnv =
+          StreamTableEnvironment.create(StreamExecutionEnvironment.getExecutionEnvironment());
+      tEnv.executeSql(
+          "CREATE TABLE t (id BIGINT, name STRING, part INT METADATA FROM 'partition',"
+              + " off BIGINT METADATA FROM 'offset', ts TIMESTAMP_LTZ(3) METADATA FROM 'timestamp',"
+              + " hdrs MAP<STRING, BYTES> METADATA FROM 'headers') WITH ('connector' = 'kafka',"
+              + " 'topic' = 'orders', 'properties.bootstrap.servers' = 'localhost:9092',"
+              + " 'scan.startup.mode' = 'earliest-offset', 'format' = 'avro-confluent',"
+              + " 'avro-confluent.url' = '" + url + "')");
+      ObjectIdentifier identifier =
+          ObjectIdentifier.of("default_catalog", "default_database", "t");
+      ResolvedCatalogTable table =
+          (ResolvedCatalogTable)
+              ((TableEnvironmentImpl) tEnv)
+                  .getCatalogManager()
+                  .getTable(identifier)
+                  .orElseThrow()
+                  .getResolvedTable();
+      DynamicTableSource source =
+          FactoryUtil.createDynamicTableSource(
+              null,
+              identifier,
+              table,
+              Map.of(),
+              new Configuration(),
+              Thread.currentThread().getContextClassLoader(),
+              false);
+      Map<String, DataType> readable = ((SupportsReadingMetadata) source).listReadableMetadata();
+      DataType produced =
+          DataTypes.ROW(
+                  DataTypes.FIELD("id", DataTypes.BIGINT()),
+                  DataTypes.FIELD("name", DataTypes.STRING()),
+                  DataTypes.FIELD("partition", readable.get("partition")),
+                  DataTypes.FIELD("offset", readable.get("offset")),
+                  DataTypes.FIELD("timestamp", readable.get("timestamp")),
+                  DataTypes.FIELD("headers", readable.get("headers")))
+              .notNull();
+      ((SupportsReadingMetadata) source).applyReadableMetadata(keys, produced);
+      DataStream<?> stream =
+          ((DataStreamScanProvider)
+                  ((ScanTableSource) source)
+                      .getScanRuntimeProvider(ScanRuntimeProviderContext.INSTANCE))
+              .produceDataStream(
+                  name -> Optional.empty(), StreamExecutionEnvironment.getExecutionEnvironment());
+      Source<?, ?, ?> kafkaSource =
+          ((SourceTransformation<?, ?, ?>) stream.getTransformation()).getSource();
+      Field schemaField = KafkaSource.class.getDeclaredField("deserializationSchema");
+      schemaField.setAccessible(true);
+      @SuppressWarnings("unchecked")
+      KafkaRecordDeserializationSchema<RowData> flink =
+          (KafkaRecordDeserializationSchema<RowData>) schemaField.get(kafkaSource);
+      flink.open(
+          new DeserializationSchema.InitializationContext() {
+            @Override
+            public MetricGroup getMetricGroup() {
+              return new UnregisteredMetricsGroup();
+            }
+
+            @Override
+            public UserCodeClassLoader getUserCodeClassLoader() {
+              return SimpleUserCodeClassLoader.create(
+                  Thread.currentThread().getContextClassLoader());
+            }
+          });
+      RowType rowType = (RowType) produced.getLogicalType();
+      RowType valueType =
+          RowType.of(
+              new org.apache.flink.table.types.logical.LogicalType[] {
+                rowType.getTypeAt(0), rowType.getTypeAt(1)
+              },
+              new String[] {"id", "name"});
+      BiFunction<Integer, GenericRecord, byte[]> framed =
+          (id, record) -> {
+            try {
+              ByteArrayOutputStream out = new ByteArrayOutputStream();
+              out.write(0);
+              out.write(ByteBuffer.allocate(4).putInt(id).array());
+              BinaryEncoder encoder = EncoderFactory.get().directBinaryEncoder(out, null);
+              new GenericDatumWriter<GenericRecord>(record.getSchema()).write(record, encoder);
+              encoder.flush();
+              return out.toByteArray();
+            } catch (java.io.IOException e) {
+              throw new java.io.UncheckedIOException(e);
+            }
+          };
+      GenericRecord first = new GenericData.Record(orderV1);
+      first.put("id", 1L);
+      first.put("name", "a");
+      first.put("extra", "x");
+      GenericRecord second = new GenericData.Record(orderV2);
+      second.put("name", "b");
+      second.put("id", 2L);
+      GenericRecord third = new GenericData.Record(orderV1);
+      third.put("id", 3L);
+      third.put("name", "c");
+      third.put("extra", "y");
+      BiFunction<String, String, Header> header =
+          (key, value) ->
+              new RecordHeader(key, value == null ? null : value.getBytes(StandardCharsets.UTF_8));
+      List<ConsumerRecord<byte[], byte[]>> records =
+          List.of(
+              new ConsumerRecord<>(
+                  "orders", 2, 40L, 1_000L, TimestampType.CREATE_TIME, -1, -1, null,
+                  framed.apply(41, first),
+                  new RecordHeaders(List.of(header.apply("trace", "t1"))), Optional.of(4)),
+              new ConsumerRecord<>(
+                  "orders", 2, 41L, 2_000L, TimestampType.CREATE_TIME, -1, -1, null,
+                  framed.apply(42, second), new RecordHeaders(), Optional.of(4)),
+              new ConsumerRecord<>(
+                  "orders", 2, 42L, 3_000L, TimestampType.CREATE_TIME, -1, -1, null, null,
+                  new RecordHeaders(List.of(header.apply("dropped", "x"))), Optional.of(4)),
+              new ConsumerRecord<>(
+                  "orders", 2, 43L, 4_000L, TimestampType.CREATE_TIME, -1, -1, null,
+                  framed.apply(41, third),
+                  new RecordHeaders(List.of(header.apply("tenant", null))), Optional.of(5)));
+
+      List<RowData> flinkRows = new ArrayList<>();
+      Collector<RowData> collector =
+          new Collector<>() {
+            @Override
+            public void collect(RowData row) {
+              flinkRows.add(row);
+            }
+
+            @Override
+            public void close() {}
+          };
+      for (ConsumerRecord<byte[], byte[]> record : records) {
+        flink.deserialize(record, collector);
+      }
+      Function<RowData, List<Object>> render =
+          row -> {
+            List<Object> values = new ArrayList<>();
+            for (int i = 0; i < rowType.getFieldCount(); i++) {
+              Object value =
+                  RowData.createFieldGetter(rowType.getTypeAt(i), i).getFieldOrNull(row);
+              if (value instanceof MapData) {
+                MapData map = (MapData) value;
+                List<String> entries = new ArrayList<>();
+                for (int entry = 0; entry < map.size(); entry++) {
+                  ArrayData mapValues = map.valueArray();
+                  entries.add(
+                      map.keyArray().getString(entry)
+                          + "="
+                          + (mapValues.isNullAt(entry)
+                              ? "null"
+                              : StringUtils.byteToHexString(mapValues.getBinary(entry))));
+                }
+                values.add(entries);
+              } else {
+                values.add(value == null ? null : value.toString());
+              }
+            }
+            return values;
+          };
+      List<List<Object>> expected = new ArrayList<>();
+      for (RowData row : flinkRows) {
+        expected.add(render.apply(row));
+      }
+      List<List<Object>> actual = new ArrayList<>();
+      try (NativeKafkaBatchDecoder nativeDecoder =
+              new NativeKafkaBatchDecoder(
+                  rowType,
+                  new AvroConfluentFormatProvider()
+                      .createDecoder(
+                          new NativeFormatContext(
+                              valueType,
+                              valueType,
+                              Map.of(
+                                  "connector", "kafka",
+                                  "format", "avro-confluent",
+                                  "avro-confluent.url", url,
+                                  NativeFormatOptions.METADATA_COLUMNS,
+                                      "2:partition,3:offset,4:timestamp,5:headers"),
+                              false)),
+                  false,
+                  keys,
+                  -1,
+                  null);
+          VectorSchemaRoot root = nativeDecoder.decode(records).batch().root()) {
+        for (RowData row : RowDataArrowConverter.read(root, rowType)) {
+          actual.add(render.apply(row));
+        }
+      }
+
+      assertEquals(3, expected.size(), "Flink emits a row per message, none for the tombstone");
+      assertEquals(expected, actual);
+    } finally {
+      registry.stop(0);
+    }
   }
 
   @Test

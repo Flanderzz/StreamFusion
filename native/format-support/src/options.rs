@@ -24,13 +24,19 @@ impl Default for CsvOptions {
 
 /// The decode-relevant format options the JVM plumbs through as `key=value` lines (one per line,
 /// split on the first `=`): the table's `csv.*` Jackson knobs, the JSON family's
-/// `timestamp-format.standard`, and `raw.endianness`. Only options the planner has vetted reach
-/// here — anything unsupported already fell back — so an unknown key is a wiring bug, not user input.
+/// `timestamp-format.standard`, `raw.endianness`, and a keyed table's Avro key schemas. Only
+/// options the planner has vetted reach here — anything unsupported already fell back — so an
+/// unknown key is a wiring bug, not user input.
 pub struct FormatOptions {
     pub csv: CsvOptions,
     pub timestamp_mode: flink_text::TimestampMode,
     pub json_reject_array_roots: bool,
     pub raw_little_endian: bool,
+    /// An Avro key decoder's writer schema (a bare `avro` key, derived from the key's row type) and
+    /// reader schema (an `avro-confluent` key, whose writer schemas come from the registry). A
+    /// value decoder receives its schemas as call arguments instead.
+    pub avro_writer_schema: String,
+    pub avro_reader_schema: String,
     pub keyed: Option<KeyedSpec>,
     /// The Kafka connector metadata columns the decode fills: each output position and its key.
     pub metadata: Vec<(usize, KafkaMetadata)>,
@@ -56,6 +62,8 @@ pub fn parse_format_options(encoded: &str) -> FormatOptions {
     let mut timestamp_mode = flink_text::TimestampMode::default();
     let mut raw_little_endian = false;
     let mut json_reject_array_roots = false;
+    let mut avro_writer_schema = String::new();
+    let mut avro_reader_schema = String::new();
     let mut keyed_key_format = None;
     let mut keyed_key_positions = None;
     let mut keyed_value_positions = None;
@@ -92,6 +100,8 @@ pub fn parse_format_options(encoded: &str) -> FormatOptions {
                     other => panic!("unknown raw.endianness {other}"),
                 }
             }
+            "avro.writer-schema" => avro_writer_schema = value.to_string(),
+            "avro.reader-schema" => avro_reader_schema = value.to_string(),
             "keyed.key-format" => {
                 keyed_key_format = Some(value.parse::<i32>().expect("keyed.key-format"))
             }
@@ -132,6 +142,8 @@ pub fn parse_format_options(encoded: &str) -> FormatOptions {
         timestamp_mode,
         json_reject_array_roots,
         raw_little_endian,
+        avro_writer_schema,
+        avro_reader_schema,
         keyed,
         metadata,
     }

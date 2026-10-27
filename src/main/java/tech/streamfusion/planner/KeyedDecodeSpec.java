@@ -32,7 +32,7 @@ import tech.streamfusion.format.NativeFormatProviders;
  * renders the lines its native key decoder is built from. Anything else resolves to null — the
  * planner's fallback gate: a key format another library decodes, an unresolvable or repeated field,
  * {@code ALL} with a non-empty prefix (Flink's own rejection), a key option the native decode can't
- * reproduce, or a value format outside JSON, CSV and raw.
+ * reproduce, or a value format outside JSON, CSV, raw, Avro and Avro Confluent.
  */
 public final class KeyedDecodeSpec {
   private final Map<String, String> optionsWithMarkers;
@@ -60,7 +60,11 @@ public final class KeyedDecodeSpec {
     }
     String valueFormat = NativeFormatProviders.formatIdentifier(options);
     int valueCode = FormatCodes.forIdentifier(valueFormat);
-    if (valueCode != FormatCodes.JSON && valueCode != FormatCodes.CSV && valueCode != FormatCodes.RAW) {
+    if (valueCode != FormatCodes.JSON
+        && valueCode != FormatCodes.CSV
+        && valueCode != FormatCodes.RAW
+        && valueCode != FormatCodes.AVRO
+        && valueCode != FormatCodes.AVRO_CONFLUENT) {
       return null;
     }
     if (!"raw".equals(keyFormat) && !keyFormat.equals(valueFormat)) {

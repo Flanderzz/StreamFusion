@@ -96,10 +96,32 @@ class KafkaDecodeRoutingTest {
 
   @Test
   void metadataOverAFormatThatDoesNotComposeItKeepsTheScanOnFlink() {
-    // Each native format declares whether its decoder composes Kafka metadata; Avro's doesn't.
+    // Each native format declares whether its decoder composes Kafka metadata; the Debezium Avro
+    // envelope's doesn't.
+    StreamTableEnvironment tEnv = env();
+    tEnv.executeSql(
+        table("id BIGINT, name STRING, off BIGINT METADATA FROM 'offset'", "debezium-avro-confluent")
+            .replace(
+                "'debezium-avro-confluent')",
+                "'debezium-avro-confluent',"
+                    + " 'debezium-avro-confluent.url' = 'http://localhost:8081')"));
+    assertStaysOnFlink(tEnv, "SELECT id, name, off FROM t");
+  }
+
+  @Test
+  void metadataRoutesOverAvroValues() {
     StreamTableEnvironment tEnv = env();
     tEnv.executeSql(table("id BIGINT, name STRING, off BIGINT METADATA FROM 'offset'", "avro"));
-    assertStaysOnFlink(tEnv, "SELECT id, name, off FROM t");
+    tEnv.executeSql(
+        table("id BIGINT, name STRING, off BIGINT METADATA FROM 'offset'", "avro-confluent")
+            .replace("CREATE TABLE t ", "CREATE TABLE c ")
+            .replace(
+                "'avro-confluent')",
+                "'avro-confluent', 'avro-confluent.url' = 'http://localhost:8081')"));
+    String plan = NativePlanner.explain(tEnv, "SELECT id, name, off FROM t");
+    String confluent = NativePlanner.explain(tEnv, "SELECT id, name, off FROM c");
+    assertTrue(plan.contains("NativeKafkaDecode"), plan);
+    assertTrue(confluent.contains("NativeKafkaDecode"), confluent);
   }
 
   @Test
@@ -534,6 +556,48 @@ class KafkaDecodeRoutingTest {
             + " 'key.format' = 'csv', 'key.fields' = 'k', 'value.fields-include' = 'EXCEPT_KEY')");
     String plan = NativePlanner.explain(tEnv, "SELECT k, id FROM t");
     assertTrue(plan.contains("NativeKafkaDecode") && plan.contains("keyFormat=[csv]"), plan);
+  }
+
+  @Test
+  void avroKeyedTablesRouteToTheDecodePath() {
+    StreamTableEnvironment confluent = env();
+    confluent.executeSql(
+        "CREATE TABLE t (k_id BIGINT, k_region STRING, name STRING) WITH ("
+            + " 'connector' = 'kafka', 'topic' = 't',"
+            + " 'properties.bootstrap.servers' = 'localhost:9092',"
+            + " 'scan.startup.mode' = 'earliest-offset',"
+            + " 'key.format' = 'avro-confluent', 'key.avro-confluent.url' = 'http://localhost:8081',"
+            + " 'key.fields' = 'k_id;k_region', 'key.fields-prefix' = 'k_',"
+            + " 'value.format' = 'avro-confluent',"
+            + " 'value.avro-confluent.url' = 'http://localhost:8081',"
+            + " 'value.fields-include' = 'EXCEPT_KEY')");
+    StreamTableEnvironment rawKey = env();
+    rawKey.executeSql(
+        "CREATE TABLE t (k STRING, name STRING) WITH ("
+            + " 'connector' = 'kafka', 'topic' = 't',"
+            + " 'properties.bootstrap.servers' = 'localhost:9092',"
+            + " 'scan.startup.mode' = 'earliest-offset', 'key.format' = 'raw', 'key.fields' = 'k',"
+            + " 'value.format' = 'avro-confluent',"
+            + " 'value.avro-confluent.url' = 'http://localhost:8081',"
+            + " 'value.fields-include' = 'EXCEPT_KEY')");
+    StreamTableEnvironment bare = env();
+    bare.executeSql(
+        "CREATE TABLE t (k BIGINT, name STRING) WITH ("
+            + " 'connector' = 'kafka', 'topic' = 't',"
+            + " 'properties.bootstrap.servers' = 'localhost:9092',"
+            + " 'scan.startup.mode' = 'earliest-offset', 'key.format' = 'avro', 'key.fields' = 'k',"
+            + " 'value.format' = 'avro', 'value.fields-include' = 'EXCEPT_KEY')");
+
+    String confluentPlan = NativePlanner.explain(confluent, "SELECT k_id, k_region, name FROM t");
+    String rawKeyPlan = NativePlanner.explain(rawKey, "SELECT k, name FROM t");
+    String barePlan = NativePlanner.explain(bare, "SELECT k, name FROM t");
+
+    assertTrue(
+        confluentPlan.contains("NativeKafkaDecode")
+            && confluentPlan.contains("keyFormat=[avro-confluent]"),
+        confluentPlan);
+    assertTrue(rawKeyPlan.contains("NativeKafkaDecode"), rawKeyPlan);
+    assertTrue(barePlan.contains("NativeKafkaDecode") && barePlan.contains("keyFormat=[avro]"), barePlan);
   }
 
   @Test

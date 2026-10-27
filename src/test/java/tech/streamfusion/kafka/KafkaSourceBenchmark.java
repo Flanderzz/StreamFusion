@@ -4,6 +4,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.sun.net.httpserver.HttpServer;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -19,6 +24,13 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Properties;
 import java.util.TreeMap;
+import org.apache.avro.Schema;
+import org.apache.avro.SchemaBuilder;
+import org.apache.avro.generic.GenericData;
+import org.apache.avro.generic.GenericDatumWriter;
+import org.apache.avro.generic.GenericRecord;
+import org.apache.avro.io.BinaryEncoder;
+import org.apache.avro.io.EncoderFactory;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.api.EnvironmentSettings;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
@@ -98,6 +110,7 @@ class KafkaSourceBenchmark {
     register(new JsonMetadata());
     register(new JsonKeyed());
     register(new RawKeyed());
+    register(new AvroConfluentKeyed());
   }
 
   private static void register(Workload workload) {
@@ -196,6 +209,8 @@ class KafkaSourceBenchmark {
           deleteTopic(brokers, topic);
         }
       }
+    } finally {
+      AvroConfluentKeyed.stopRegistry();
     }
   }
 
@@ -641,6 +656,133 @@ class KafkaSourceBenchmark {
           (int) (index % PARTITIONS),
           ByteBuffer.allocate(8).putLong(index).array(),
           value.getBytes(StandardCharsets.UTF_8));
+    }
+  }
+
+  /**
+   * Confluent-framed Avro keys and values under producer record names, resolved through a local
+   * registry that serves the one read endpoint both engines use ({@code GET /schemas/ids/<id>}).
+   */
+  private static final class AvroConfluentKeyed implements Workload {
+    private static final Schema KEY =
+        SchemaBuilder.record("OrderKey")
+            .namespace("com.example")
+            .fields()
+            .requiredString("tenant")
+            .requiredLong("id")
+            .endRecord();
+    private static final Schema VALUE =
+        SchemaBuilder.record("Order")
+            .namespace("com.example")
+            .fields()
+            .requiredString("name")
+            .requiredLong("amount")
+            .endRecord();
+    private static final int KEY_ID = 101;
+    private static final int VALUE_ID = 102;
+    private static HttpServer registry;
+
+    private final GenericDatumWriter<GenericRecord> keyWriter = new GenericDatumWriter<>(KEY);
+    private final GenericDatumWriter<GenericRecord> valueWriter = new GenericDatumWriter<>(VALUE);
+    private BinaryEncoder encoder;
+
+    @Override
+    public String id() {
+      return "avro-confluent-keyed";
+    }
+
+    @Override
+    public String ddl(String brokers, String topic) {
+      String url = registryUrl();
+      return "CREATE TABLE cdc (k_tenant STRING, name STRING, k_id BIGINT, amount BIGINT)"
+          + " WITH ('connector' = 'kafka', 'topic' = '"
+          + topic
+          + "', 'properties.bootstrap.servers' = '"
+          + brokers
+          + "', 'properties.max.poll.records' = '8192', 'scan.startup.mode' = 'earliest-offset',"
+          + " 'scan.bounded.mode' = 'latest-offset',"
+          + " 'key.format' = 'avro-confluent', 'key.avro-confluent.url' = '"
+          + url
+          + "', 'key.fields' = 'k_tenant;k_id', 'key.fields-prefix' = 'k_',"
+          + " 'value.format' = 'avro-confluent', 'value.avro-confluent.url' = '"
+          + url
+          + "', 'value.fields-include' = 'EXCEPT_KEY')";
+    }
+
+    @Override
+    public String query() {
+      return "SELECT k_tenant, COUNT(*) AS records, SUM(amount) AS amount, MAX(k_id) AS last_id,"
+          + " COUNT(name) AS named FROM cdc GROUP BY k_tenant";
+    }
+
+    @Override
+    public ProducerRecord<byte[], byte[]> record(String topic, long index, long records) {
+      GenericRecord key = new GenericData.Record(KEY);
+      key.put("tenant", "t" + (index % 64));
+      key.put("id", index);
+      GenericRecord value = new GenericData.Record(VALUE);
+      value.put("name", "n" + index);
+      value.put("amount", index % 1000);
+      return new ProducerRecord<>(
+          topic,
+          (int) (index % PARTITIONS),
+          framed(KEY_ID, keyWriter, key),
+          framed(VALUE_ID, valueWriter, value));
+    }
+
+    private byte[] framed(int id, GenericDatumWriter<GenericRecord> writer, GenericRecord record) {
+      ByteArrayOutputStream out = new ByteArrayOutputStream();
+      out.write(0);
+      out.writeBytes(ByteBuffer.allocate(4).putInt(id).array());
+      encoder = EncoderFactory.get().binaryEncoder(out, encoder);
+      try {
+        writer.write(record, encoder);
+        encoder.flush();
+      } catch (IOException e) {
+        throw new UncheckedIOException(e);
+      }
+      return out.toByteArray();
+    }
+
+    private static synchronized String registryUrl() {
+      if (registry == null) {
+        try {
+          registry = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+        } catch (IOException e) {
+          throw new UncheckedIOException(e);
+        }
+        Map<Integer, Schema> schemas = Map.of(KEY_ID, KEY, VALUE_ID, VALUE);
+        registry.createContext(
+            "/schemas/ids/",
+            exchange -> {
+              Schema schema =
+                  schemas.get(
+                      Integer.parseInt(
+                          exchange.getRequestURI().getPath().substring("/schemas/ids/".length())));
+              if (schema == null) {
+                exchange.sendResponseHeaders(404, -1);
+                exchange.close();
+                return;
+              }
+              String quoted = schema.toString().replace("\\", "\\\\").replace("\"", "\\\"");
+              byte[] body = ("{\"schema\":\"" + quoted + "\"}").getBytes(StandardCharsets.UTF_8);
+              exchange
+                  .getResponseHeaders()
+                  .set("Content-Type", "application/vnd.schemaregistry.v1+json");
+              exchange.sendResponseHeaders(200, body.length);
+              exchange.getResponseBody().write(body);
+              exchange.close();
+            });
+        registry.start();
+      }
+      return "http://localhost:" + registry.getAddress().getPort();
+    }
+
+    static synchronized void stopRegistry() {
+      if (registry != null) {
+        registry.stop(0);
+        registry = null;
+      }
     }
   }
 }

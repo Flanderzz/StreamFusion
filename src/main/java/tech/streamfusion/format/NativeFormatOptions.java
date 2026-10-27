@@ -80,6 +80,16 @@ public final class NativeFormatOptions {
     return keyed.toString();
   }
 
+  /** One of a keyed table's key option lines ({@link #KEYED_KEY_OPTIONS}), or null when absent. */
+  public static String keyedKeyOption(Map<String, String> options, String key) {
+    for (String line : options.getOrDefault(KEYED_KEY_OPTIONS, "").split("\n")) {
+      if (line.startsWith(key + "=")) {
+        return line.substring(key.length() + 1);
+      }
+    }
+    return null;
+  }
+
   private static String encodeFormat(Map<String, String> options) {
     String format = NativeFormatProviders.formatIdentifier(options);
     if ("raw".equals(format)) {

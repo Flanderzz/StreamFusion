@@ -289,6 +289,12 @@ impl Decoder for MetadataDecoder {
     fn metadata_decoder(&self) -> Option<&MetadataDecoder> {
         Some(self)
     }
+    fn register_writer_schema(&mut self, id: u32, schema: &str) {
+        self.value.register_writer_schema(id, schema);
+    }
+    fn register_key_writer_schema(&mut self, id: u32, schema: &str) {
+        self.value.register_key_writer_schema(id, schema);
+    }
 }
 
 /// Builds a binary input column over a contiguous values region. `copy_values` is used for keyed

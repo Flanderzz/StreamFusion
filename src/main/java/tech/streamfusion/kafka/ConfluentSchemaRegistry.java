@@ -96,6 +96,15 @@ public class ConfluentSchemaRegistry implements Serializable {
   }
 
   /**
+   * {@link #fromOptions} for a keyed table's key format, whose registry options carry Flink's
+   * {@code key.<format>.} prefix.
+   */
+  public static ConfluentSchemaRegistry fromKeyOptions(Map<String, String> options) {
+    String prefix = "key." + options.get("key.format") + ".";
+    return from(options.get(prefix + "url"), key -> options.get(prefix + key));
+  }
+
+  /**
    * Builds the registry accessor from one format instance's prefix-stripped options (the sink
    * seam's spelling — a key format has no table-level prefix to resolve), with the same
    * untranslated-option gate as {@link #fromOptions}. The registry options with fallback keys

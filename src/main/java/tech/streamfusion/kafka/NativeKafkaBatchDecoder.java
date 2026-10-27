@@ -105,6 +105,9 @@ final class NativeKafkaBatchDecoder implements AutoCloseable {
         keys.setValueCount(count);
       }
       decoder.beforeDecode(body, count);
+      if (keys != null) {
+        decoder.beforeDecodeKeys(keys, count);
+      }
       try (VectorSchemaRoot input =
               new VectorSchemaRoot(keys == null ? List.of(body) : List.of(keys, body));
           ArrowArray inArray = ArrowArray.allocateNew(allocator);
@@ -218,6 +221,9 @@ final class NativeKafkaBatchDecoder implements AutoCloseable {
       }
     }
     decoder.beforeDecode(values, count);
+    if (keyed) {
+      decoder.beforeDecodeKeys(keys, count);
+    }
     int[] headerCounts = readsHeaders ? new int[count] : null;
     List<byte[]> headerParts = readsHeaders ? new ArrayList<>() : null;
     long headerBytes = 0;

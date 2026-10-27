@@ -178,6 +178,8 @@ impl AvroCdcDecoder {
     }
 }
 
+/// `formatOptions` carries the table's option lines: connector metadata columns and a keyed
+/// table's key composition.
 #[no_mangle]
 pub extern "system" fn Java_tech_streamfusion_format_avro_NativeAvroFormat_createDecoder<'local>(
     env: JNIEnv<'local>,
@@ -187,8 +189,8 @@ pub extern "system" fn Java_tech_streamfusion_format_avro_NativeAvroFormat_creat
     reader_schema: JString<'local>,
     schema_array_address: jlong,
     schema_address: jlong,
+    format_options: JString<'local>,
 ) -> jlong {
-    let empty_options = env.new_string("").expect("empty format options");
     create_decoder(
         build_decoder,
         env,
@@ -204,7 +206,7 @@ pub extern "system" fn Java_tech_streamfusion_format_avro_NativeAvroFormat_creat
         reader_schema,
         0,
         0,
-        empty_options,
+        format_options,
     )
 }
 
@@ -217,9 +219,9 @@ pub extern "system" fn Java_tech_streamfusion_format_avro_NativeAvroFormat_creat
     reader_schema: JString<'local>,
     schema_array_address: jlong,
     schema_address: jlong,
+    format_options: JString<'local>,
 ) -> jlong {
     let empty_writer = env.new_string("").expect("empty writer schema");
-    let empty_options = env.new_string("").expect("empty format options");
     create_decoder(
         build_decoder,
         env,
@@ -231,7 +233,7 @@ pub extern "system" fn Java_tech_streamfusion_format_avro_NativeAvroFormat_creat
         reader_schema,
         0,
         0,
-        empty_options,
+        format_options,
     )
 }
 
@@ -246,4 +248,17 @@ pub extern "system" fn Java_tech_streamfusion_format_avro_NativeAvroFormat_regis
     schema: JString<'local>,
 ) {
     register_avro_schema(env, class, handle, schema_id, schema)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_tech_streamfusion_format_avro_NativeAvroFormat_registerKeyWriterSchema<
+    'local,
+>(
+    env: JNIEnv<'local>,
+    class: JClass<'local>,
+    handle: jlong,
+    schema_id: jint,
+    schema: JString<'local>,
+) {
+    register_avro_key_schema(env, class, handle, schema_id, schema)
 }

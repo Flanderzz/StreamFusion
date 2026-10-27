@@ -95,7 +95,8 @@ fn create_value_decoder(
         // A keyed table: the value decoder sees the physical schema projected to the value
         // positions (the keyed option lines stripped so the recursion is plain), the key decoder
         // the key fields under the names the key format reads, and the wrapper owns the per-record
-        // composition. The key format is raw or the value's own, so this library decodes both.
+        // composition. The key format is raw or the value's own, so this library decodes both; an
+        // Avro key's schemas ride its option lines.
         let value_options: String = format_options
             .lines()
             .filter(|line| !line.is_empty() && !line.starts_with("keyed."))
@@ -143,8 +144,8 @@ fn create_value_decoder(
                 factory,
                 keyed.key_format,
                 key_schema,
-                "",
-                "",
+                &key_options.avro_writer_schema,
+                &key_options.avro_reader_schema,
                 0,
                 keyed.key_skip_errors,
                 &keyed.key_options,
@@ -243,6 +244,25 @@ pub fn register_avro_schema<'local>(
             .expect("failed to read avro schema")
             .into();
         decoder.register_writer_schema(schema_id as u32, &schema);
+    })
+}
+
+/// [`register_avro_schema`] for a keyed table's Confluent-Avro key, whose writer schemas the JVM
+/// fetches through the key format's own registry options.
+pub fn register_avro_key_schema<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    schema_id: jint,
+    schema: JString<'local>,
+) {
+    crate::bridge::jni_guard(env, move |env| {
+        let decoder = unsafe { &mut *(handle as *mut MessageDecoder) };
+        let schema: String = env
+            .get_string(&schema)
+            .expect("failed to read avro schema")
+            .into();
+        decoder.register_key_writer_schema(schema_id as u32, &schema);
     })
 }
 

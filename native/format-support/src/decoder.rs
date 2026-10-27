@@ -81,6 +81,10 @@ pub trait Decoder {
     fn register_writer_schema(&mut self, _id: u32, _schema: &str) {
         panic!("registerAvroSchema on a non-Confluent-Avro decoder")
     }
+    /// Registers a writer schema with a keyed table's Confluent-Avro key decoder.
+    fn register_key_writer_schema(&mut self, _id: u32, _schema: &str) {
+        panic!("registerKeyWriterSchema on a decoder without a Confluent-Avro key")
+    }
     /// Whether a decoded batch may share buffers with the input bodies (a pass-through decode),
     /// so input borrowed from the JVM must be copied first.
     fn output_may_alias_input(&self) -> bool {
@@ -100,6 +104,9 @@ pub struct MessageDecoder {
 impl MessageDecoder {
     pub fn register_writer_schema(&mut self, id: u32, schema: &str) {
         self.decoder.register_writer_schema(id, schema);
+    }
+    pub fn register_key_writer_schema(&mut self, id: u32, schema: &str) {
+        self.decoder.register_key_writer_schema(id, schema);
     }
     pub fn output_may_alias_input(&self) -> bool {
         self.decoder.output_may_alias_input()
@@ -199,5 +206,11 @@ impl Decoder for KeyedDecoder {
     /// A slab batch's keys are always copied, so only its values can alias the JVM's buffer.
     fn output_may_alias_input(&self) -> bool {
         self.value.output_may_alias_input()
+    }
+    fn register_writer_schema(&mut self, id: u32, schema: &str) {
+        self.value.register_writer_schema(id, schema);
+    }
+    fn register_key_writer_schema(&mut self, id: u32, schema: &str) {
+        self.key.register_writer_schema(id, schema);
     }
 }
